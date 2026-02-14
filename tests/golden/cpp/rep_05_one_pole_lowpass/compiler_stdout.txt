@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_05_one_pole_lowpass.dsp
+bytes=53
+lines=2
+fnv1a64=3ccfc1c5c946b904

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_10_two_in_two_out_ui.dsp
+bytes=126
+lines=3
+fnv1a64=d877f03542cab66d

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_08_branch_and_sum.dsp
+bytes=47
+lines=1
+fnv1a64=866d94dcfd72fc26
