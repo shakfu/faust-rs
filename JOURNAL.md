@@ -28,3 +28,11 @@
   - `golden-check-cpp` (strict C++ parity target),
   - separate storage under `tests/golden/rust/` and `tests/golden/cpp/`.
 - Refreshed C++ goldens with local `faust` and corrected invalid corpus case `rep_03_stereo_mix.dsp`.
+- Consolidated all backend scaffolds into the `codegen` crate under `crates/codegen/src/backends/<backend>/mod.rs` (one folder per backend).
+- Removed standalone workspace members `crates/backend-*` and updated the workspace manifest accordingly.
+- Updated `codegen` public surface to expose `codegen::backends::*`.
+- Aligned porting documentation with the new backend layout:
+  - `porting/faust-rust-porting-plan-en.md`
+  - `porting/phases/phase-6-fir-backends-en.md`
+  - `porting/phases/phase-7-backends-supp-en.md`
+  - `porting/phases/phase-9-integration-en.md`

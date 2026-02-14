@@ -1,6 +1,6 @@
 # Phase 6 — FIR & Main Backends (C, C++)
 
-> **Crates**: `fir`, `codegen`, `backend-c`, `backend-cpp`
+> **Crates**: `fir`, `codegen` (including `codegen::backends::c` and `codegen::backends::cpp`)
 > **Estimate**: 45–65 person days
 > **Prerequisites**: Phases 1–5
 
@@ -300,7 +300,7 @@ pub trait TypeManager {
 }
 ```
 
-### 2.4 backend-c
+### 2.4 codegen::backends::c
 
 ```rust
 pub struct CTypeManager;
@@ -321,7 +321,7 @@ pub fn generate_c(
 ) -> io::Result<()>;
 ```
 
-### 2.5 backend-cpp
+### 2.5 codegen::backends::cpp
 
 ```rust
 pub struct CppTypeManager;
@@ -430,8 +430,8 @@ Recommended rollout:
 ```
 fir         → errors  (pure FIR types, no dependency on signals)
 codegen     → fir, errors, utils
-backend-c   → codegen, fir
-backend-cpp → codegen, fir
+codegen::backends::c   → codegen, fir
+codegen::backends::cpp → codegen, fir
 ```
 
 **Important**: `fir` does NOT depend on `tlib` nor `signals`. It is an independent intermediate representation. The signal→FIR translation is in `transform` (Phase 5).

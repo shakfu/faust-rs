@@ -69,22 +69,22 @@ The structure below comes from the project's `CMakeLists.txt` (`build/CMakeLists
 | `compiler/parallelize/` | Parallel code generation (OpenMP, work-stealing) | `transform` (integrated) |
 | `compiler/generator/` | Common code generation infrastructure, code containers | `codegen` |
 | `compiler/generator/fir/` | Faust Intermediate Representation: instructions, types, visitors | `fir` |
-| `compiler/generator/c/` | Backend C | `backend-c` |
-| `compiler/generator/cpp/` | C++ Backend | `backend-cpp` |
-| `compiler/generator/rust/` | Rust backend (Rust code generation) | `backend-rust` |
-| `compiler/generator/interpreter/` | Backend interpreter | `backend-interp` |
-| `compiler/generator/llvm/` | Backend LLVM IR | `backend-llvm` |
-| `compiler/generator/wasm/` | WebAssembly Backend (WAST/WASM) | `backend-wasm` |
-| `compiler/generator/cmajor/` | Cmajor Backend | `backend-cmajor` |
-| `compiler/generator/codebox/` | Backend Codebox (Max/RNBO) | `backend-codebox` |
-| `compiler/generator/csharp/` | C# backend | `backend-csharp` |
-| `compiler/generator/dlang/` | Backend D | `backend-dlang` |
-| `compiler/generator/julia/` | Backend Julia | `backend-julia` |
-| `compiler/generator/java/` | Java Backend (**no longer needed / out of scope**) | `backend-java` |
-| `compiler/generator/jsfx/` | JSFX Backend | `backend-jsfx` |
-| `compiler/generator/jax/` | JAX Backend | `backend-jax` |
-| `compiler/generator/vhdl/` | VHDL Backend | `backend-vhdl` |
-| `compiler/generator/sdf3/` | SDF3 backend | `backend-sdf3` |
+| `compiler/generator/c/` | Backend C | `codegen::backends::c` |
+| `compiler/generator/cpp/` | C++ Backend | `codegen::backends::cpp` |
+| `compiler/generator/rust/` | Rust backend (Rust code generation) | `codegen::backends::rust` |
+| `compiler/generator/interpreter/` | Backend interpreter | `codegen::backends::interp` |
+| `compiler/generator/llvm/` | Backend LLVM IR | `codegen::backends::llvm` |
+| `compiler/generator/wasm/` | WebAssembly Backend (WAST/WASM) | `codegen::backends::wasm` |
+| `compiler/generator/cmajor/` | Cmajor Backend | `codegen::backends::cmajor` |
+| `compiler/generator/codebox/` | Backend Codebox (Max/RNBO) | `codegen::backends::codebox` |
+| `compiler/generator/csharp/` | C# backend | `codegen::backends::csharp` |
+| `compiler/generator/dlang/` | Backend D | `codegen::backends::dlang` |
+| `compiler/generator/julia/` | Backend Julia | `codegen::backends::julia` |
+| `compiler/generator/java/` | Java Backend (**no longer needed / out of scope**) | `N/A (excluded)` |
+| `compiler/generator/jsfx/` | JSFX Backend | `codegen::backends::jsfx` |
+| `compiler/generator/jax/` | JAX Backend | `codegen::backends::jax` |
+| `compiler/generator/vhdl/` | VHDL Backend | `codegen::backends::vhdl` |
+| `compiler/generator/sdf3/` | SDF3 backend | `codegen::backends::sdf3` |
 | `compiler/draw/` | Generating SVG diagrams (block diagrams) | `draw` |
 | `compiler/draw/schema/` | Visual diagrams of block diagrams | `draw` (integrated) |
 | `compiler/draw/device/` | Abstract drawing devices (SVG, PS) | `draw` (integrated) |
@@ -171,22 +171,8 @@ faust-rs/                          # Cargo workspace root
 │   ├── normalize/           # Signal normalization (depends on signals, algebra)
 │   ├── transform/           # Scheduling, vectorization (depends on signals, graph)
 │   ├── fir/                 # FIR: instructions, types, visitors
-│   ├── codegen/             # Shared generation infrastructure (depends on fir, signals, transform)
-│   ├── backend-c/           # C backend (depends on codegen)
-│   ├── backend-cpp/         # C++ backend (depends on codegen)
-│   ├── backend-rust/        # Rust backend (depends on codegen)
-│   ├── backend-wasm/        # WASM backend (depends on codegen)
-│   ├── backend-interp/      # Interpreter backend (depends on codegen, fir)
-│   ├── backend-llvm/        # LLVM backend (depends on codegen, llvm-sys)
-│   ├── backend-cmajor/      # Backend Cmajor
-│   ├── backend-codebox/     # Backend Codebox/RNBO
-│   ├── backend-jax/         # Backend JAX
-│   ├── backend-julia/       # Backend Julia
-│   ├── backend-jsfx/        # Backend JSFX
-│   ├── backend-csharp/      # Backend C#
-│   ├── backend-dlang/       # Backend D
-│   ├── backend-vhdl/        # Backend VHDL
-│   ├── backend-sdf3/        # Backend SDF3
+│   ├── codegen/             # Generation infrastructure + backends
+│   │   └── src/backends/    # c/, cpp/, rust/, wasm/, interp/, llvm/, ...
 │   ├── draw/                # SVG diagram generation
 │   ├── doc/                 # Mathematical documenter
 │   ├── utils/               # Shared utilities
@@ -224,7 +210,7 @@ tlib ─────────────────────────
     │            codegen                            │
     │               │  │  │  │                            │
     │               ▼  ▼  ▼  ▼                            │
-    │          backend-c  backend-cpp  backend-wasm  ...  │
+    │      codegen::backends::{c, cpp, wasm, ...}        │
     │                                                     │
     └──→ errors, utils (cross-cutting) ────────┘
 
@@ -392,8 +378,8 @@ fn apply_rules(sig: &Signal, rules: &[Box<dyn SignalRewriter>]) -> Signal {
 |-------|-------|-------------|---------------------|
 | 6.1 | **`fir`** | Faust Intermediate Representation. Instructions (declarations, loops, conditions, operations), FIR types, visitors/FIR transformers. It is the pivot between the world of signals and the world of code generation. | Tests: dump FIR vs reference (-lang fir) |
 | 6.2 | **`codegen`** | Common infrastructure: code containers, management of declarations, variables, buffers, DSP structures. Translation of signals → FIR (the heart of the compilation). | Integration testing |
-| 6.3 | **`backend-c`** | First backend: generation of C code. Used to validate the entire end-to-end chain. | Comparison of C output with the reference C++ compiler |
-| 6.4 | **`backend-cpp`** | C++ backend (`-lang cpp`): very similar to the C backend, useful for C/C++ parity checks. | Idem |
+| 6.3 | **`codegen::backends::c`** | First backend: generation of C code. Used to validate the entire end-to-end chain. | Comparison of C output with the reference C++ compiler |
+| 6.4 | **`codegen::backends::cpp`** | C++ backend (`-lang cpp`): very similar to the C backend, useful for C/C++ parity checks. | Idem |
 
 **Audit correction (important)**: on the current branch, the end-to-end compile path for major backends is still centered on `InstructionsCompiler`/`DAGInstructionsCompiler` through `libcode.cpp`. The Rust MVP should therefore port this effective path first. `signalFIRCompiler` should be treated as a secondary/experimental path until explicitly promoted in upstream C++.
 
@@ -467,14 +453,14 @@ fn apply_rules(sig: &Signal, rules: &[Box<dyn SignalRewriter>]) -> Signal {
 The additional backends are relatively independent of each other and only depend on `codegen` and `fir`. They can be worn in parallel.
 
 **Priority 1** (essential):
-- `backend-wasm`: WebAssembly
-- `backend-interp`: Interpreter
-- `backend-llvm`: LLVM IR (requires `llvm-sys` or `inkwell`)
+- `codegen::backends::wasm`: WebAssembly
+- `codegen::backends::interp`: Interpreter
+- `codegen::backends::llvm`: LLVM IR (requires `llvm-sys` or `inkwell`)
 
 **Priority 2** (important):
-- `backend-rust`: Rust backend (Rust code generated by Faust)
-- `backend-cmajor`
-- `backend-codebox`
+- `codegen::backends::rust`: Rust backend (Rust code generated by Faust)
+- `codegen::backends::cmajor`
+- `codegen::backends::codebox`
 
 **Priority 3** (to be worn next):
 - All other backends (Julia, C#, D, JSFX, JAX, VHDL, SDF3)
@@ -559,11 +545,11 @@ As with the current CMake machinery, but more properly via Cargo's **feature fla
 # compiler/Cargo.toml
 [features]
 default = ["backend-c", "backend-cpp", "backend-wasm"]
-backend-c = ["backend-c"]
-backend-cpp = ["backend-cpp"]
-backend-wasm = ["backend-wasm"]
-backend-llvm = ["backend-llvm"]
-backend-interp = ["backend-interp"]
+backend-c = ["codegen/backend-c"]
+backend-cpp = ["codegen/backend-cpp"]
+backend-wasm = ["codegen/backend-wasm"]
+backend-llvm = ["codegen/backend-llvm"]
+backend-interp = ["codegen/backend-interp"]
 backend-all = ["backend-c", "backend-cpp", "backend-wasm", "backend-llvm", "backend-interp",
                "backend-rust", "backend-cmajor", ...]
 ```
@@ -779,7 +765,7 @@ pub fn propagate(
     session: &mut CompileSession,
 ) -> Vec<TreeId> { ... }
 
-// backend-c: depends only on FIR and config
+// codegen::backends::c: depends only on FIR and config
 pub fn generate_c(
     fir: &FirProgram,
     config: &CompilerConfig,

@@ -1,6 +1,6 @@
 # Phase 7 — Additional Backends
 
-> **Crates**: `backend-wasm`, `backend-interp`, `backend-llvm`, `backend-rust`, `backend-*`
+> **Crates**: `codegen` (backend modules under `codegen::backends::*`)
 > **Estimate**: 53–64 person days (total, highly parallelizable)
 > **Prerequisites**: Phase 6 (`fir`, `codegen`)
 
@@ -49,7 +49,7 @@
 Each text backend follows the same pattern:
 
 ```rust
-// backend-<lang>/src/lib.rs
+// codegen/src/backends/<lang>/mod.rs
 
 pub struct <Lang>TypeManager;
 impl TypeManager for <Lang>TypeManager { /* ... */ }
@@ -72,26 +72,26 @@ pub fn generate(
 ) -> io::Result<()>;
 ```
 
-Each backend is a separate crate with feature flag in the main crate:
+Backends live in `codegen` and are toggled through `codegen` feature flags re-exported by the main crate:
 
 ```toml
 # compiler/Cargo.toml
 [features]
 default = ["backend-c", "backend-cpp", "backend-wasm"]
-backend-c      = ["backend-c"]
-backend-cpp    = ["backend-cpp"]
-backend-rust   = ["backend-rust"]
-backend-wasm   = ["backend-wasm"]
-backend-interp = ["backend-interp"]
-backend-llvm   = ["backend-llvm"]
-backend-julia  = ["backend-julia"]
-backend-csharp = ["backend-csharp"]
-backend-cmajor = ["backend-cmajor"]
-backend-jsfx   = ["backend-jsfx"]
-backend-jax    = ["backend-jax"]
-backend-dlang  = ["backend-dlang"]
-backend-codebox= ["backend-codebox"]
-backend-vhdl   = ["backend-vhdl"]
+backend-c      = ["codegen/backend-c"]
+backend-cpp    = ["codegen/backend-cpp"]
+backend-rust   = ["codegen/backend-rust"]
+backend-wasm   = ["codegen/backend-wasm"]
+backend-interp = ["codegen/backend-interp"]
+backend-llvm   = ["codegen/backend-llvm"]
+backend-julia  = ["codegen/backend-julia"]
+backend-csharp = ["codegen/backend-csharp"]
+backend-cmajor = ["codegen/backend-cmajor"]
+backend-jsfx   = ["codegen/backend-jsfx"]
+backend-jax    = ["codegen/backend-jax"]
+backend-dlang  = ["codegen/backend-dlang"]
+backend-codebox= ["codegen/backend-codebox"]
+backend-vhdl   = ["codegen/backend-vhdl"]
 all-backends   = ["backend-c", "backend-cpp", "backend-rust", "backend-wasm", ...]
 ```
 
@@ -190,7 +190,7 @@ C++ also includes an FBC→native machine compiler (via LLVM or MIR). In Rust, J
 
 ```rust
 /// LLVM backend (feature-gated, requires llvm-sys)
-#[cfg(feature = "backend-llvm")]
+#[cfg(feature = "codegen/backend-llvm")]
 pub mod llvm {
     use inkwell::*;  // or llvm-sys
 
@@ -261,18 +261,18 @@ Simple text backends are **highly parallelizable**: one person per backend, each
 ## 4. Dependencies
 
 ```
-backend-rust    → codegen, fir
-backend-julia   → codegen, fir
-backend-csharp  → codegen, fir
-backend-dlang   → codegen, fir
-backend-cmajor  → codegen, fir
-backend-codebox → codegen, fir
-backend-jsfx    → codegen, fir
-backend-jax     → codegen, fir
-backend-vhdl    → codegen, fir
-backend-wasm    → codegen, fir
-backend-interp  → codegen, fir
-backend-llvm    → codegen, fir, inkwell (or llvm-sys)
+codegen::backends::rust    → codegen, fir
+codegen::backends::julia   → codegen, fir
+codegen::backends::csharp  → codegen, fir
+codegen::backends::dlang   → codegen, fir
+codegen::backends::cmajor  → codegen, fir
+codegen::backends::codebox → codegen, fir
+codegen::backends::jsfx    → codegen, fir
+codegen::backends::jax     → codegen, fir
+codegen::backends::vhdl    → codegen, fir
+codegen::backends::wasm    → codegen, fir
+codegen::backends::interp  → codegen, fir
+codegen::backends::llvm    → codegen, fir, inkwell (or llvm-sys)
 ```
 
 External dependencies:

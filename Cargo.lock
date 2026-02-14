@@ -7,66 +7,6 @@ name = "algebra"
 version = "0.1.0"
 
 [[package]]
-name = "backend-c"
-version = "0.1.0"
-
-[[package]]
-name = "backend-cmajor"
-version = "0.1.0"
-
-[[package]]
-name = "backend-codebox"
-version = "0.1.0"
-
-[[package]]
-name = "backend-cpp"
-version = "0.1.0"
-
-[[package]]
-name = "backend-csharp"
-version = "0.1.0"
-
-[[package]]
-name = "backend-dlang"
-version = "0.1.0"
-
-[[package]]
-name = "backend-interp"
-version = "0.1.0"
-
-[[package]]
-name = "backend-jax"
-version = "0.1.0"
-
-[[package]]
-name = "backend-jsfx"
-version = "0.1.0"
-
-[[package]]
-name = "backend-julia"
-version = "0.1.0"
-
-[[package]]
-name = "backend-llvm"
-version = "0.1.0"
-
-[[package]]
-name = "backend-rust"
-version = "0.1.0"
-
-[[package]]
-name = "backend-sdf3"
-version = "0.1.0"
-
-[[package]]
-name = "backend-vhdl"
-version = "0.1.0"
-
-[[package]]
-name = "backend-wasm"
-version = "0.1.0"
-
-[[package]]
 name = "boxes"
 version = "0.1.0"
 

@@ -1,4 +1,6 @@
-#![doc = "Scaffold crate for codegen in the faust-rs workspace."]
+#![doc = "Code generation crate for the faust-rs workspace."]
+
+pub mod backends;
 
 pub const CRATE_NAME: &str = "codegen";
 
