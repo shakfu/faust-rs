@@ -1,0 +1,51 @@
+[workspace]
+members = [
+  "crates/tlib",
+  "crates/errors",
+  "crates/interval",
+  "crates/algebra",
+  "crates/graph",
+  "crates/boxes",
+  "crates/parser",
+  "crates/signals",
+  "crates/eval",
+  "crates/propagate",
+  "crates/normalize",
+  "crates/transform",
+  "crates/fir",
+  "crates/codegen",
+  "crates/backend-c",
+  "crates/backend-cpp",
+  "crates/backend-rust",
+  "crates/backend-wasm",
+  "crates/backend-interp",
+  "crates/backend-llvm",
+  "crates/backend-cmajor",
+  "crates/backend-codebox",
+  "crates/backend-jax",
+  "crates/backend-julia",
+  "crates/backend-jsfx",
+  "crates/backend-csharp",
+  "crates/backend-dlang",
+  "crates/backend-vhdl",
+  "crates/backend-sdf3",
+  "crates/draw",
+  "crates/doc",
+  "crates/utils",
+  "crates/compiler",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "Apache-2.0"
+authors = ["faust-rs contributors"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_attributes = "warn"
+unused_lifetimes = "warn"
+
+[workspace.lints.clippy]
+all = "warn"

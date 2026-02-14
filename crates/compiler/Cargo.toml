@@ -1,0 +1,18 @@
+[package]
+name = "compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+errors = { path = "../errors" }
+parser = { path = "../parser" }
+codegen = { path = "../codegen" }
+
+[[bin]]
+name = "faust-rs"
+path = "src/main.rs"
+
+[lints]
+workspace = true

@@ -1,6 +1,8 @@
 # faust-rs
 
-Documentation workspace for the Faust-to-Rust porting effort.
+Rust workspace for the Faust compiler port.
+
+[![CI](https://github.com/sletz/faust-rs/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sletz/faust-rs/actions/workflows/ci.yml)
 
 ## Repository contents
 
@@ -18,6 +20,28 @@ Documentation workspace for the Faust-to-Rust porting effort.
 3. `porting/phases/phase-0-validation-en.md`
 4. Remaining files in `porting/phases/` in numeric order
 
-## Scope
+## How to compile
 
-This repository currently focuses on planning and analysis documents for the Rust port. Add implementation code and build instructions in this README as the codebase grows.
+Compile all crates in debug mode:
+
+```bash
+cargo build --workspace
+```
+
+Compile all crates in release mode:
+
+```bash
+cargo build --workspace --release
+```
+
+Compile only the compiler binary crate:
+
+```bash
+cargo build -p compiler
+```
+
+Run the scaffold CLI binary:
+
+```bash
+cargo run -p compiler
+```
