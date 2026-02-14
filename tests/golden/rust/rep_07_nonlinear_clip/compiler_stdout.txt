@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_07_nonlinear_clip.dsp
+bytes=59
+lines=2
+fnv1a64=8db71b87171a2f52

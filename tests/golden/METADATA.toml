@@ -13,4 +13,5 @@ normalization = [
 [commands]
 generate_cpp = "cargo run -p xtask -- golden-gen-cpp -- <cpp-faust-extra-args>"
 generate_rust = "cargo run -p xtask -- golden-gen-rust"
-check = "cargo run -p xtask -- golden-check"
+check_rust = "cargo run -p xtask -- golden-check"
+check_cpp = "cargo run -p xtask -- golden-check-cpp"

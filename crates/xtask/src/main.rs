@@ -7,10 +7,13 @@ use std::process::Command;
 const USAGE: &str = "\
 Usage:
   cargo run -p xtask -- golden-check
+  cargo run -p xtask -- golden-check-cpp
   cargo run -p xtask -- golden-gen-rust
   cargo run -p xtask -- golden-gen-cpp [-- <extra args passed to FAUST_CPP_BIN>]
 \nEnvironment for golden-gen-cpp:
   FAUST_CPP_BIN   Path to reference C++ faust binary
+\nEnvironment for golden-check:
+  GOLDEN_REF      rust (default) or cpp
 ";
 
 fn main() {
@@ -28,7 +31,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     match command.as_str() {
-        "golden-check" => golden_check()?,
+        "golden-check" => golden_check(None)?,
+        "golden-check-cpp" => golden_check(Some(GoldenRef::Cpp))?,
         "golden-gen-rust" => golden_gen_rust()?,
         "golden-gen-cpp" => {
             let mut passthrough: Vec<OsString> = Vec::new();
@@ -85,9 +89,25 @@ fn case_name(path: &Path) -> Result<String, io::Error> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid corpus filename"))
 }
 
-fn golden_file(case: &str) -> PathBuf {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GoldenRef {
+    Rust,
+    Cpp,
+}
+
+impl GoldenRef {
+    fn as_dir_name(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Cpp => "cpp",
+        }
+    }
+}
+
+fn golden_file_for_ref(case: &str, golden_ref: GoldenRef) -> PathBuf {
     workspace_root()
-        .join("tests/golden/cpp")
+        .join("tests/golden")
+        .join(golden_ref.as_dir_name())
         .join(case)
         .join("compiler_stdout.txt")
 }
@@ -121,7 +141,7 @@ fn golden_gen_rust() -> Result<(), Box<dyn std::error::Error>> {
     let files = corpus_files()?;
     for file in files {
         let case = case_name(&file)?;
-        let output = golden_file(&case);
+        let output = golden_file_for_ref(&case, GoldenRef::Rust);
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -143,7 +163,7 @@ fn golden_gen_cpp(extra_args: &[OsString]) -> Result<(), Box<dyn std::error::Err
     let files = corpus_files()?;
     for file in files {
         let case = case_name(&file)?;
-        let output = golden_file(&case);
+        let output = golden_file_for_ref(&case, GoldenRef::Cpp);
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -172,13 +192,32 @@ fn golden_gen_cpp(extra_args: &[OsString]) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-fn golden_check() -> Result<(), Box<dyn std::error::Error>> {
+fn golden_ref_from_env() -> Result<GoldenRef, Box<dyn std::error::Error>> {
+    let Some(raw) = std::env::var_os("GOLDEN_REF") else {
+        return Ok(GoldenRef::Rust);
+    };
+    let value = raw
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid GOLDEN_REF value"))?;
+    match value {
+        "rust" => Ok(GoldenRef::Rust),
+        "cpp" => Ok(GoldenRef::Cpp),
+        _ => Err(format!("invalid GOLDEN_REF={value}; expected rust or cpp").into()),
+    }
+}
+
+fn golden_check(forced: Option<GoldenRef>) -> Result<(), Box<dyn std::error::Error>> {
+    let golden_ref = match forced {
+        Some(value) => value,
+        None => golden_ref_from_env()?,
+    };
+
     let files = corpus_files()?;
     let mut failures = 0usize;
 
     for file in files {
         let case = case_name(&file)?;
-        let expected_path = golden_file(&case);
+        let expected_path = golden_file_for_ref(&case, golden_ref);
         let expected = fs::read_to_string(&expected_path).map_err(|err| {
             io::Error::new(
                 err.kind(),

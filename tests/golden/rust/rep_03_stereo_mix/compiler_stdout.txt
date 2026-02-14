@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_03_stereo_mix.dsp
+bytes=47
+lines=1
+fnv1a64=66d1c6d7d9124396

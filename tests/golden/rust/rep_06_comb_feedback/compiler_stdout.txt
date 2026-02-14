@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_06_comb_feedback.dsp
+bytes=38
+lines=1
+fnv1a64=b4c9cbcccaca5501

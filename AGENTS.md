@@ -82,10 +82,13 @@ When touching one of these areas, add focused tests/benchmarks in the same PR.
 ## 9. Golden Output Workflow
 
 - Golden corpus inputs live in `tests/corpus/`.
-- Golden reference outputs live in `tests/golden/cpp/`.
+- Golden reference outputs live in:
+  - `tests/golden/rust/` (CI default gate)
+  - `tests/golden/cpp/` (long-run parity target)
 - Metadata and reference pinning live in `tests/golden/METADATA.toml`.
 - Use:
-  - `cargo run -p xtask -- golden-check` to validate parity against stored golden outputs.
+  - `cargo run -p xtask -- golden-check` to validate against Rust reference snapshots.
+  - `cargo run -p xtask -- golden-check-cpp` to validate against C++ reference snapshots.
   - `cargo run -p xtask -- golden-gen-rust` only for local bootstrap/scaffold updates.
   - `FAUST_CPP_BIN=/path/to/faust cargo run -p xtask -- golden-gen-cpp` for true C++ reference refresh.
 - Any golden refresh must be documented in `JOURNAL.md` and mention reference commit/flags in PR description.

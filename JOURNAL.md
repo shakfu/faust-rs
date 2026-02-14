@@ -23,3 +23,8 @@
 - Added CI golden validation step (`cargo run -p xtask -- golden-check`).
 - Updated `README.md` and `AGENTS.md` with golden workflow documentation.
 - Fixed cross-platform golden stability by normalizing source newlines before snapshot hashing/counting; added `.gitattributes` and a unit test to prevent LF/CRLF divergence.
+- Added dual golden-reference mode in `xtask`:
+  - `golden-check` (default Rust reference, used by CI),
+  - `golden-check-cpp` (strict C++ parity target),
+  - separate storage under `tests/golden/rust/` and `tests/golden/cpp/`.
+- Refreshed C++ goldens with local `faust` and corrected invalid corpus case `rep_03_stereo_mix.dsp`.

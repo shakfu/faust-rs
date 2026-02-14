@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_09_ui_slider.dsp
+bytes=59
+lines=2
+fnv1a64=9a97f8644b3b353b

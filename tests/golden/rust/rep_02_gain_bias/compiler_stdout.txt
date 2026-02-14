@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_02_gain_bias.dsp
+bytes=25
+lines=1
+fnv1a64=52be6f65da4fcf66

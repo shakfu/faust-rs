@@ -51,7 +51,8 @@ cargo run -p compiler
 Corpus and golden layout:
 
 - `tests/corpus/*.dsp`: input DSP corpus
-- `tests/golden/cpp/<case>/compiler_stdout.txt`: expected reference output per case
+- `tests/golden/rust/<case>/compiler_stdout.txt`: current Rust scaffold reference used by CI
+- `tests/golden/cpp/<case>/compiler_stdout.txt`: C++ Faust reference outputs (parity target)
 - `tests/golden/METADATA.toml`: pinned reference metadata and command policy
 
 Commands:
@@ -60,6 +61,9 @@ Commands:
 # Check Rust output against stored golden references
 cargo run -p xtask -- golden-check
 
+# Check Rust output against C++ reference goldens (expected to fail until parity)
+cargo run -p xtask -- golden-check-cpp
+
 # Bootstrap/update golden files from current Rust scaffold output
 cargo run -p xtask -- golden-gen-rust
 
@@ -67,4 +71,4 @@ cargo run -p xtask -- golden-gen-rust
 FAUST_CPP_BIN=/path/to/faust cargo run -p xtask -- golden-gen-cpp -- <extra-args>
 ```
 
-Note: CI runs `cargo run -p xtask -- golden-check` on every platform.
+Note: CI runs `cargo run -p xtask -- golden-check` (Rust reference mode) on every platform.
