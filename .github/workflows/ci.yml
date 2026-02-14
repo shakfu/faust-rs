@@ -57,3 +57,6 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --all-targets
+
+      - name: Golden output check
+        run: cargo run -p xtask -- golden-check

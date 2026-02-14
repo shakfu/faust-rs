@@ -12,3 +12,13 @@
 - Added a GitHub Actions CI badge in `README.md` for visual build status feedback.
 - Added `AGENTS.md` at repository root with contribution and coding-agent guidelines (workspace rules, CI gates, porting discipline, and documentation hygiene).
 - Enriched `AGENTS.md` with key constraints from `porting/` documents: frozen scope exclusions, Phase 0 validation gate, critical risk checklist, canonical pipeline target, and recursion/RouteIR coexistence guidance.
+- Added a `xtask` crate implementing golden workflow commands:
+  - `golden-check`
+  - `golden-gen-rust`
+  - `golden-gen-cpp` (using `FAUST_CPP_BIN`)
+- Added initial corpus/golden scaffolding:
+  - `tests/corpus/pass_through.dsp`
+  - `tests/golden/cpp/pass_through/compiler_stdout.txt`
+  - `tests/golden/METADATA.toml` with pinned C++ baseline metadata.
+- Added CI golden validation step (`cargo run -p xtask -- golden-check`).
+- Updated `README.md` and `AGENTS.md` with golden workflow documentation.

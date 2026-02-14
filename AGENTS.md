@@ -34,6 +34,7 @@ Guidelines for contributors and coding agents working on `faust-rs`.
 
 - CI runs on Linux, macOS, and Windows.
 - CI stages include `cargo check`, formatting, clippy, and tests.
+- CI also runs golden parity guardrails via `cargo run -p xtask -- golden-check`.
 - A change is not considered ready unless CI is green.
 
 ## 5. Porting Discipline
@@ -78,7 +79,18 @@ From `porting/faust-rust-points-critiques-en.md`, keep these risks visible when 
 
 When touching one of these areas, add focused tests/benchmarks in the same PR.
 
-## 9. Recursion and RouteIR Guidance
+## 9. Golden Output Workflow
+
+- Golden corpus inputs live in `tests/corpus/`.
+- Golden reference outputs live in `tests/golden/cpp/`.
+- Metadata and reference pinning live in `tests/golden/METADATA.toml`.
+- Use:
+  - `cargo run -p xtask -- golden-check` to validate parity against stored golden outputs.
+  - `cargo run -p xtask -- golden-gen-rust` only for local bootstrap/scaffold updates.
+  - `FAUST_CPP_BIN=/path/to/faust cargo run -p xtask -- golden-gen-cpp` for true C++ reference refresh.
+- Any golden refresh must be documented in `JOURNAL.md` and mention reference commit/flags in PR description.
+
+## 10. Recursion and RouteIR Guidance
 
 From `porting/faust-rust-recursion-model-note-en.md`:
 
@@ -90,7 +102,7 @@ From `porting/faust-rust-recursion-model-note-en.md`:
   - deterministic ordering,
   - semantic parity against legacy output.
 
-## 10. Commit and Documentation Hygiene
+## 11. Commit and Documentation Hygiene
 
 - Make small, coherent commits.
 - Update `README.md` when user-facing build/run instructions change.

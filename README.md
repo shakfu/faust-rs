@@ -45,3 +45,26 @@ Run the scaffold CLI binary:
 ```bash
 cargo run -p compiler
 ```
+
+## C++ golden outputs
+
+Corpus and golden layout:
+
+- `tests/corpus/*.dsp`: input DSP corpus
+- `tests/golden/cpp/<case>/compiler_stdout.txt`: expected reference output per case
+- `tests/golden/METADATA.toml`: pinned reference metadata and command policy
+
+Commands:
+
+```bash
+# Check Rust output against stored golden references
+cargo run -p xtask -- golden-check
+
+# Bootstrap/update golden files from current Rust scaffold output
+cargo run -p xtask -- golden-gen-rust
+
+# Update golden files from C++ Faust reference binary
+FAUST_CPP_BIN=/path/to/faust cargo run -p xtask -- golden-gen-cpp -- <extra-args>
+```
+
+Note: CI runs `cargo run -p xtask -- golden-check` on every platform.

@@ -33,6 +33,7 @@ members = [
   "crates/doc",
   "crates/utils",
   "crates/compiler",
+  "crates/xtask",
 ]
 resolver = "2"
 
