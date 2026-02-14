@@ -24,9 +24,10 @@ impl Default for Compiler {
 
 #[must_use]
 pub fn golden_snapshot(source_name: &str, source: &str) -> String {
-    let line_count = source.lines().count();
-    let byte_count = source.len();
-    let hash = fnv1a64(source.as_bytes());
+    let normalized_source = normalize_newlines(source);
+    let line_count = normalized_source.lines().count();
+    let byte_count = normalized_source.len();
+    let hash = fnv1a64(normalized_source.as_bytes());
 
     format!(
         "faust-rs-golden-v1\nsource={source_name}\nbytes={byte_count}\nlines={line_count}\nfnv1a64={hash:016x}\n"
@@ -48,4 +49,23 @@ fn fnv1a64(input: &[u8]) -> u64 {
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
+}
+
+fn normalize_newlines(input: &str) -> String {
+    input.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::golden_snapshot;
+
+    #[test]
+    fn golden_snapshot_is_stable_for_lf_vs_crlf() {
+        let lf = "process = _;\n";
+        let crlf = "process = _;\r\n";
+        assert_eq!(
+            golden_snapshot("pass_through.dsp", lf),
+            golden_snapshot("pass_through.dsp", crlf)
+        );
+    }
 }

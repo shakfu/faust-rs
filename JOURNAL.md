@@ -22,3 +22,4 @@
   - `tests/golden/METADATA.toml` with pinned C++ baseline metadata.
 - Added CI golden validation step (`cargo run -p xtask -- golden-check`).
 - Updated `README.md` and `AGENTS.md` with golden workflow documentation.
+- Fixed cross-platform golden stability by normalizing source newlines before snapshot hashing/counting; added `.gitattributes` and a unit test to prevent LF/CRLF divergence.
