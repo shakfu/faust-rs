@@ -1,5 +1,0 @@
-faust-rs-golden-v1
-source=pass_through.dsp
-bytes=13
-lines=1
-fnv1a64=a519f0ad821b035d
