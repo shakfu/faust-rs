@@ -16,6 +16,7 @@
 //!   `box_with_local_def`, `box_environment`, `box_component`, `box_library`,
 //!   `box_waveform`, `box_route`,
 //!   `ffunction`, `box_ffun`, `box_fconst`, `box_fvar`,
+//!   `box_case`, `box_pattern_var`,
 //!   `box_button`, `box_checkbox`, `box_vslider`, `box_hslider`,
 //!   `box_num_entry`, `box_vbargraph`, `box_hbargraph`
 //! - `adapted`: `box_with_rec_def` (see function-level note)
@@ -80,6 +81,8 @@ const FFUN_TAG: &str = "FFUN";
 const BOX_FFUN_TAG: &str = "BOXFFUN";
 const BOX_FCONST_TAG: &str = "BOXFCONST";
 const BOX_FVAR_TAG: &str = "BOXFVAR";
+const BOX_CASE_TAG: &str = "BOXCASE";
+const BOX_PATTERN_VAR_TAG: &str = "BOXPATVAR";
 const BOX_BUTTON_TAG: &str = "BOXBUTTON";
 const BOX_CHECKBOX_TAG: &str = "BOXCHECKBOX";
 const BOX_VSLIDER_TAG: &str = "BOXVSLIDER";
@@ -595,6 +598,30 @@ pub fn box_fvar(arena: &mut TreeArena, ty: BoxId, name: BoxId, file: BoxId) -> B
 #[must_use]
 pub fn is_box_fvar(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
     match_ternary(arena, b, BOX_FVAR_TAG)
+}
+
+/// Equivalent to C++ `boxCase`.
+#[must_use]
+pub fn box_case(arena: &mut TreeArena, rules: BoxId) -> BoxId {
+    intern_tag(arena, BOX_CASE_TAG, &[rules])
+}
+
+/// Returns `rules` when `b` is `box_case`.
+#[must_use]
+pub fn is_box_case(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
+    match_unary(arena, b, BOX_CASE_TAG)
+}
+
+/// Equivalent to C++ `boxPatternVar`.
+#[must_use]
+pub fn box_pattern_var(arena: &mut TreeArena, ident: BoxId) -> BoxId {
+    intern_tag(arena, BOX_PATTERN_VAR_TAG, &[ident])
+}
+
+/// Returns wrapped identifier when `b` is `box_pattern_var`.
+#[must_use]
+pub fn is_box_pattern_var(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
+    match_unary(arena, b, BOX_PATTERN_VAR_TAG)
 }
 
 /// Equivalent to C++ `boxButton`.

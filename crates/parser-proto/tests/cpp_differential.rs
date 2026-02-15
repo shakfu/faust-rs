@@ -213,6 +213,16 @@ fn load_cases() -> Result<Vec<Case>, String> {
         source: "process = ffunction(float sinhf|sinh|sinhl(float), <math.h>, \"\");\n".to_owned(),
         expect_valid: true,
     });
+    cases.push(Case {
+        name: "case_single_rule".to_owned(),
+        source: "process = case { (x) => x; };\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "case_arity_mismatch".to_owned(),
+        source: "process = case { (x) => x; (x, y) => x; };\n".to_owned(),
+        expect_valid: false,
+    });
 
     Ok(cases)
 }

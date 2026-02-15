@@ -979,3 +979,45 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline --no-fail-fast`
+
+### Gate B remaining step 3 (grammar parity progress: `CASE` / `rulelist`)
+
+- Extended `boxes` API (`crates/boxes/src/lib.rs`) with pattern-matching nodes:
+  - `box_case` / `is_box_case`
+  - `box_pattern_var` / `is_box_pattern_var`
+- Extended parser grammar (`crates/parser-proto/src/grammar/faustparser.y`) with:
+  - `CASE { rulelist }` primitive form,
+  - `rulelist` and `rule` productions:
+    - `rule: (arglist) => expression;`
+- Added parser-side C++-aligned rule checks and pattern preparation in `ParseState` (`crates/parser-proto/src/lib.rs`):
+  - `box_case_checked(...)`:
+    - rejects empty case rule list,
+    - checks arity consistency across all rules,
+    - records parser diagnostics on mismatch,
+    - returns `nil` on invalid case shape (recovery path).
+  - recursive `prepare_pattern(...)` pass on rule lhs:
+    - converts `BOXIDENT` to `BOXPATVAR`,
+    - preserves `BOXAPPL` function-ident head behavior (`x(e)` keeps `x`, maps args),
+    - recursively maps lhs pattern trees/lists before wrapping in `BOXCASE`.
+- Added/extended tests:
+  - `crates/parser-proto/tests/parser_slice8_case.rs`
+    - valid case parsing + presence of `BOXPATVAR` in prepared lhs,
+    - malformed arity mismatch diagnostic path.
+  - `crates/boxes/tests/core_api.rs`
+    - case/pattern-var constructor roundtrip.
+
+### Gate B remaining step 8 (differential suite expansion: `CASE` forms)
+
+- Extended differential harness (`crates/parser-proto/tests/cpp_differential.rs`) with:
+  - `case_single_rule` (valid)
+  - `case_arity_mismatch` (malformed)
+- Differential run (C++ source-of-truth root `/Users/letz/Developpements/RUST/faust`, commit `8eebea429`, binary `/usr/local/bin/faust`) passed:
+  - valid case classified `Rust=Ok`, `C++=Ok`,
+  - mismatched-arity case classified invalid on both sides (`Rust=Recovered`, `C++=ParseError`).
+- Validation:
+  - `cargo test -p boxes --offline --no-fail-fast`
+  - `cargo test -p parser-proto --test parser_slice8_case --offline --no-fail-fast`
+  - `cargo test -p parser-proto --test cpp_differential --offline -- --nocapture`
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline --no-fail-fast`

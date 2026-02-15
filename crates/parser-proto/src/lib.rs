@@ -216,6 +216,135 @@ impl ParseState {
         boxes::box_ffun(&mut self.arena, ff)
     }
 
+    /// Builds one `boxCase` after C++-style rule checks and pattern preparation.
+    ///
+    /// Checks:
+    /// - non-empty rule list,
+    /// - identical arity for all rules.
+    ///
+    /// Pattern preparation mirrors C++ `prepareRule(s)` behavior:
+    /// only the left-hand side list is transformed recursively.
+    #[must_use]
+    pub fn box_case_checked(&mut self, rules: TreeId) -> TreeId {
+        if self.arena.is_nil(rules) {
+            self.ctx.error("a case expression can't be empty");
+            return self.nil();
+        }
+
+        let Some(expected_arity) = self.case_rules_arity_reference(rules) else {
+            self.ctx.error("invalid case rule list shape");
+            return self.nil();
+        };
+
+        let mut mapped = Vec::new();
+        let mut cursor = rules;
+        while !self.arena.is_nil(cursor) {
+            let Some(rule) = self.arena.hd(cursor) else {
+                self.ctx.error("invalid case rule list cell");
+                return self.nil();
+            };
+            let Some((lhs, rhs)) = self.pair_cell(rule) else {
+                self.ctx.error("invalid case rule shape");
+                return self.nil();
+            };
+            let Some(arity) = self.list_len(lhs) else {
+                self.ctx.error("invalid case rule lhs list");
+                return self.nil();
+            };
+            if arity != expected_arity {
+                self.ctx
+                    .error("inconsistent number of parameters in pattern-matching rule");
+                return self.nil();
+            }
+            let lhs_prepared = self.prepare_pattern(lhs);
+            mapped.push(self.cons(lhs_prepared, rhs));
+            cursor = self.arena.tl(cursor).unwrap_or_else(|| self.nil());
+        }
+
+        let mut mapped_rules = self.nil();
+        for rule in mapped.iter().rev() {
+            mapped_rules = self.cons(*rule, mapped_rules);
+        }
+        boxes::box_case(&mut self.arena, mapped_rules)
+    }
+
+    fn case_rules_arity_reference(&self, rules: TreeId) -> Option<usize> {
+        let first_rule = self.arena.hd(rules)?;
+        let (lhs, _rhs) = self.pair_cell(first_rule)?;
+        self.list_len(lhs)
+    }
+
+    fn pair_cell(&self, pair: TreeId) -> Option<(TreeId, TreeId)> {
+        let head = self.arena.hd(pair)?;
+        let tail = self.arena.tl(pair)?;
+        Some((head, tail))
+    }
+
+    fn list_len(&self, mut list: TreeId) -> Option<usize> {
+        let mut n = 0usize;
+        while !self.arena.is_nil(list) {
+            let _head = self.arena.hd(list)?;
+            list = self.arena.tl(list)?;
+            n = n.saturating_add(1);
+        }
+        Some(n)
+    }
+
+    fn map_list_with(
+        &mut self,
+        mut list: TreeId,
+        mut f: impl FnMut(&mut Self, TreeId) -> TreeId,
+    ) -> TreeId {
+        let mut items = Vec::new();
+        while !self.arena.is_nil(list) {
+            let Some(head) = self.arena.hd(list) else {
+                break;
+            };
+            items.push(f(self, head));
+            list = self.arena.tl(list).unwrap_or_else(|| self.nil());
+        }
+        let mut out = self.nil();
+        for item in items.iter().rev() {
+            out = self.cons(*item, out);
+        }
+        out
+    }
+
+    fn prepare_pattern(&mut self, node: TreeId) -> TreeId {
+        match self.arena.kind(node) {
+            Some(NodeKind::Tag(tag)) if tag.as_ref() == "BOXIDENT" => {
+                boxes::box_pattern_var(&mut self.arena, node)
+            }
+            Some(NodeKind::Tag(tag)) if tag.as_ref() == "BOXAPPL" => {
+                let Some(children) = self.arena.children(node) else {
+                    return node;
+                };
+                if children.len() != 2 {
+                    return node;
+                }
+                let fun = children[0];
+                let args = children[1];
+                let mapped_args = self.map_list_with(args, |s, id| s.prepare_pattern(id));
+                let mapped_fun = match self.arena.kind(fun) {
+                    Some(NodeKind::Tag(fun_tag)) if fun_tag.as_ref() == "BOXIDENT" => fun,
+                    _ => self.prepare_pattern(fun),
+                };
+                boxes::box_appl(&mut self.arena, mapped_fun, mapped_args)
+            }
+            Some(NodeKind::Tag(tag)) => {
+                let tag_name = tag.clone();
+                let children = self.arena.children(node).unwrap_or(&[]).to_vec();
+                let mut mapped = Vec::with_capacity(children.len());
+                for child in children {
+                    mapped.push(self.prepare_pattern(child));
+                }
+                self.arena.intern(NodeKind::Tag(tag_name), &mapped)
+            }
+            Some(NodeKind::Cons) => self.map_list_with(node, |s, id| s.prepare_pattern(id)),
+            _ => node,
+        }
+    }
+
     /// Parses one integer literal token to `boxInt`.
     #[must_use]
     pub fn int_from_token<'lexer, 'input: 'lexer>(

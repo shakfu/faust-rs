@@ -571,6 +571,9 @@ Primitive -> tlib::TreeId:
     | FVARIABLE LPAR Type Name PAR FString RPAR {
           crate::with_state(state, |state| boxes::box_fvar(&mut state.arena, $3, $4, $6))
       }
+    | CASE LBRAQ RuleList RBRAQ {
+          crate::with_state(state, |state| state.box_case_checked($3))
+      }
     | COMPONENT LPAR UQString RPAR {
           crate::with_state(state, |state| boxes::box_component(&mut state.arena, $3))
       }
@@ -748,6 +751,24 @@ FString -> tlib::TreeId:
 RawString -> tlib::TreeId:
       STRING {
           crate::with_state(state, |state| state.raw_symbol_from_token($lexer, $1))
+      }
+    ;
+
+RuleList -> tlib::TreeId:
+      Rule {
+          crate::with_state(state, |state| {
+              let nil = state.nil();
+              state.cons($1, nil)
+          })
+      }
+    | RuleList Rule {
+          crate::with_state(state, |state| state.cons($2, $1))
+      }
+    ;
+
+Rule -> tlib::TreeId:
+      LPAR ArgList RPAR ARROW Expression ENDDEF {
+          crate::with_state(state, |state| state.cons($2, $5))
       }
     ;
 

@@ -1,16 +1,17 @@
 use boxes::{
-    box_access, box_add, box_appl, box_button, box_checkbox, box_component, box_cut, box_delay1,
-    box_environment, box_fconst, box_ffun, box_fvar, box_hbargraph, box_hslider, box_ident,
-    box_ident_name, box_int, box_ipar, box_iprod, box_iseq, box_isum, box_library, box_max,
-    box_merge, box_min, box_mul, box_num_entry, box_par, box_real, box_rec, box_route, box_seq,
-    box_split, box_vbargraph, box_vslider, box_waveform, box_wire, box_with_local_def,
-    box_with_rec_def, dump_box, ffunction, is_box_access, is_box_add, is_box_appl, is_box_button,
-    is_box_checkbox, is_box_component, is_box_cut, is_box_delay1, is_box_environment,
-    is_box_fconst, is_box_ffun, is_box_fvar, is_box_hbargraph, is_box_hslider, is_box_int,
-    is_box_ipar, is_box_iprod, is_box_iseq, is_box_isum, is_box_library, is_box_max, is_box_merge,
-    is_box_min, is_box_mul, is_box_num_entry, is_box_par, is_box_real, is_box_rec, is_box_route,
-    is_box_seq, is_box_split, is_box_vbargraph, is_box_vslider, is_box_waveform, is_box_wire,
-    is_box_with_local_def, is_box_with_rec_def, is_ffunction,
+    box_access, box_add, box_appl, box_button, box_case, box_checkbox, box_component, box_cut,
+    box_delay1, box_environment, box_fconst, box_ffun, box_fvar, box_hbargraph, box_hslider,
+    box_ident, box_ident_name, box_int, box_ipar, box_iprod, box_iseq, box_isum, box_library,
+    box_max, box_merge, box_min, box_mul, box_num_entry, box_par, box_pattern_var, box_real,
+    box_rec, box_route, box_seq, box_split, box_vbargraph, box_vslider, box_waveform, box_wire,
+    box_with_local_def, box_with_rec_def, dump_box, ffunction, is_box_access, is_box_add,
+    is_box_appl, is_box_button, is_box_case, is_box_checkbox, is_box_component, is_box_cut,
+    is_box_delay1, is_box_environment, is_box_fconst, is_box_ffun, is_box_fvar, is_box_hbargraph,
+    is_box_hslider, is_box_int, is_box_ipar, is_box_iprod, is_box_iseq, is_box_isum,
+    is_box_library, is_box_max, is_box_merge, is_box_min, is_box_mul, is_box_num_entry, is_box_par,
+    is_box_pattern_var, is_box_real, is_box_rec, is_box_route, is_box_seq, is_box_split,
+    is_box_vbargraph, is_box_vslider, is_box_waveform, is_box_wire, is_box_with_local_def,
+    is_box_with_rec_def, is_ffunction,
 };
 use tlib::TreeArena;
 
@@ -235,6 +236,21 @@ fn foreign_function_boxes_roundtrip() {
         Some((ty0_const, cname, incfile))
     );
     assert!(is_box_fvar(&arena, fvar).is_some());
+}
+
+#[test]
+fn case_and_pattern_var_boxes_roundtrip() {
+    let mut arena = TreeArena::new();
+    let ident = box_ident(&mut arena, "x");
+    let pvar = box_pattern_var(&mut arena, ident);
+    assert_eq!(is_box_pattern_var(&arena, pvar), Some(ident));
+
+    let lhs = arena.cons(pvar, arena.nil());
+    let rhs = box_wire(&mut arena);
+    let rule = arena.cons(lhs, rhs);
+    let rules = arena.cons(rule, arena.nil());
+    let case_expr = box_case(&mut arena, rules);
+    assert_eq!(is_box_case(&arena, case_expr), Some(rules));
 }
 
 #[test]
