@@ -196,3 +196,14 @@ Execution plan (Phase 0 prototype, revised):
 - Expand grammar/action coverage toward full Faust grammar.
 - Add parser regression tests to CI (corpus-based).
 - Update `porting/phases/phase-0-validation-en.md` + `JOURNAL.md` with final decisions and residual gaps.
+
+### Gate 0 progress update (`gGlobal` decomposition)
+
+- Added critical-flow decomposition deliverables in:
+  - `porting/phases/phase-0-gglobal-decomposition-map-en.md`
+- Document includes:
+  - field-to-context mapping table (target Rust contexts and owning crates),
+  - unresolved coupling list for active flow,
+  - first crate-boundary contract draft (`compiler`/`tlib`/`boxes`/`parser`/`codegen`/`errors`).
+- Linked the decomposition deliverable into the Phase 0 validation checklist in:
+  - `porting/phases/phase-0-validation-en.md`

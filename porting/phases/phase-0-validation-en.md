@@ -80,6 +80,7 @@ Primary goals:
 
 - `phase-0-validation-en.md` updated with:
   - confirmed pipeline map
+  - `gGlobal` decomposition map for critical flow (`phase-0-gglobal-decomposition-map-en.md`)
   - scope decisions
   - capability matrix draft
   - API lifecycle contract
@@ -118,6 +119,7 @@ No-Go:
 - [ ] Java backend excluded from target scope
 - [ ] `-lang ocpp` excluded from target scope
 - [ ] Capability matrix model defined for CLI/backend validation
+- [ ] `gGlobal` decomposition map drafted and reviewed for touched flows
 - [ ] API lifecycle unified across entry points
 - [ ] No fixed-size temporary argument staging in target design
 - [ ] Deterministic per-request orchestration state model documented
