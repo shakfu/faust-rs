@@ -259,3 +259,15 @@ Execution plan (Phase 0 prototype, revised):
   - `arena_nodes=600002`
 - Linked the report in `porting/phases/phase-0-validation-en.md`.
 - Gate A marked as conditional pending C++ baseline ratio table (`<= 2x` target).
+
+### Gate A step 6 (`tlib-core` C++ baseline + ratio table)
+
+- Added reproducible C++ benchmark harness:
+  - `porting/tools/treearena_cpp_bench.cpp`
+- Harness intentionally links directly against current C++ tlib sources from:
+  - `/Users/letz/Developpements/RUST/faust/compiler/tlib`
+- Updated benchmark report with Rust (`--release`) vs C++ (`-O3`) numbers and ratio table:
+  - `porting/phases/phase-0-treearena-benchmark-report-en.md`
+- Recorded Gate A decision as **Conditional Go**:
+  - create/lookup/traversal/property-set are within threshold or faster than C++,
+  - `property_get` remains a hotspot (`12.126x`) and must be addressed before final Gate A closure.
