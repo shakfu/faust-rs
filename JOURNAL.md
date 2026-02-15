@@ -468,3 +468,25 @@ Execution plan (Phase 0 prototype, revised):
   - `porting/faust-rust-porting-plan-en.md`
   - `porting/phases/phase-0-validation-en.md`
   - `porting/phases/phase-9-integration-en.md`
+
+### Gate A.5 step 1 (`boxes` minimal parser-driven subset, no stubs)
+
+- Replaced `crates/boxes` scaffold with a real Tree-backed API subset intended for parser semantic actions.
+- Added `tlib` dependency to `crates/boxes/Cargo.toml`.
+- Implemented tagged `BoxId` constructors/predicates in `crates/boxes/src/lib.rs`:
+  - identifiers/numerics: `box_ident`, `box_ident_name`, `box_int`, `box_real`, `is_box_int`, `is_box_real`,
+  - composition: `box_seq`, `box_par`, `box_rec`, `box_split`, `box_merge` + `is_*`,
+  - primitives/environment: `box_wire`, `box_cut`, `box_environment` + `is_*`,
+  - iterative/local-rec subset: `box_ipar`, `box_with_local_def`, `box_with_rec_def` + `is_*`,
+  - UI subset: `box_hslider` + `is_box_hslider` with preserved C++ `list4(cur,min,max,step)` payload layout.
+- Added explicit Rustdoc provenance and API mapping status (`1:1` vs `adapted`) for this first subset:
+  - C++ sources of truth: `compiler/boxes/boxes.hh`, `compiler/boxes/boxes.cpp`.
+- Added dedicated crate tests in `crates/boxes/tests/core_api.rs` covering:
+  - structural roundtrip for constructors/predicates,
+  - hash-consing stability for primitives,
+  - `box_hslider` list payload ordering,
+  - local/recursive def node preservation.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p boxes --all-targets`
+  - `cargo test -p tlib --all-targets`

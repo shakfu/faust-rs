@@ -94,6 +94,12 @@ impl ChildList {
         }
     }
 
+    /// Returns `true` when this list contains no children.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
     /// Returns child at `index` if present.
     #[must_use]
     pub fn get(&self, index: usize) -> Option<TreeId> {
