@@ -302,3 +302,16 @@ Execution plan (Phase 0 prototype, revised):
   - Rust: `create_ms=84.593`, `lookup_ms=67.887`, `traversal_ms=55.365`, `property_set_ms=2.708`, `property_get_ms=1.631`
   - C++: `create_ms=69.058`, `lookup_ms=66.816`, `traversal_ms=77.092`, `property_set_ms=38.055`, `property_get_ms=1.515`
   - Ratios: `create=1.225x`, `lookup=1.016x`, `traversal=0.718x`, `property_set=0.071x`, `property_get=1.076x`
+
+### Gate A step 9 (`tlib-core` arity-specialized interning maps)
+
+- Refactored `TreeArena::intern` in `crates/tlib/src/arena.rs` to avoid generic key allocations for common arities:
+  - `interner0`: `NodeKind` keys (arity 0),
+  - `interner1`: `(NodeKind, TreeId)` keys (arity 1),
+  - `interner2`: `(NodeKind, TreeId, TreeId)` keys (arity 2),
+  - `interner_n`: fallback `NodeKey` (`Vec<TreeId>`) for arity `>= 3`.
+- Goal: remove transient `Vec` allocation and key construction overhead on parser-hot paths (`int`, `cons`, binary tags).
+- Re-measured (`n=200000`, warm run):
+  - Rust: `create_ms=58.701`, `lookup_ms=45.905`, `traversal_ms=33.444`, `property_set_ms=2.469`, `property_get_ms=1.829`
+  - C++: `create_ms=78.483`, `lookup_ms=60.262`, `traversal_ms=77.944`, `property_set_ms=35.679`, `property_get_ms=1.436`
+  - Ratios: `create=0.748x`, `lookup=0.762x`, `traversal=0.429x`, `property_set=0.069x`, `property_get=1.274x`

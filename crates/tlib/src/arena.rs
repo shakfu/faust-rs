@@ -37,7 +37,10 @@ struct NodeKey {
 #[derive(Debug)]
 pub struct TreeArena {
     nodes: Vec<TreeNode>,
-    interner: HashMap<NodeKey, TreeId>,
+    interner0: HashMap<NodeKind, TreeId>,
+    interner1: HashMap<(NodeKind, TreeId), TreeId>,
+    interner2: HashMap<(NodeKind, TreeId, TreeId), TreeId>,
+    interner_n: HashMap<NodeKey, TreeId>,
     nil: TreeId,
 }
 
@@ -52,7 +55,10 @@ impl TreeArena {
     pub fn new() -> Self {
         let mut arena = Self {
             nodes: Vec::new(),
-            interner: HashMap::new(),
+            interner0: HashMap::new(),
+            interner1: HashMap::new(),
+            interner2: HashMap::new(),
+            interner_n: HashMap::new(),
             nil: TreeId(0),
         };
         let nil = arena.intern(NodeKind::Nil, &[]);
@@ -67,20 +73,62 @@ impl TreeArena {
 
     #[must_use]
     pub fn intern(&mut self, kind: NodeKind, children: &[TreeId]) -> TreeId {
-        let key = NodeKey {
-            kind,
-            children: children.to_vec(),
-        };
-        if let Some(id) = self.interner.get(&key) {
-            return *id;
+        match children {
+            [] => {
+                if let Some(id) = self.interner0.get(&kind) {
+                    return *id;
+                }
+                let id = TreeId(self.nodes.len() as u32);
+                self.nodes.push(TreeNode {
+                    kind: kind.clone(),
+                    children: Vec::new(),
+                });
+                self.interner0.insert(kind, id);
+                id
+            }
+            [a] => {
+                let key = (kind, *a);
+                if let Some(id) = self.interner1.get(&key) {
+                    return *id;
+                }
+                let id = TreeId(self.nodes.len() as u32);
+                self.nodes.push(TreeNode {
+                    kind: key.0.clone(),
+                    children: vec![*a],
+                });
+                self.interner1.insert(key, id);
+                id
+            }
+            [a, b] => {
+                let key = (kind, *a, *b);
+                if let Some(id) = self.interner2.get(&key) {
+                    return *id;
+                }
+                let id = TreeId(self.nodes.len() as u32);
+                self.nodes.push(TreeNode {
+                    kind: key.0.clone(),
+                    children: vec![*a, *b],
+                });
+                self.interner2.insert(key, id);
+                id
+            }
+            _ => {
+                let key = NodeKey {
+                    kind,
+                    children: children.to_vec(),
+                };
+                if let Some(id) = self.interner_n.get(&key) {
+                    return *id;
+                }
+                let id = TreeId(self.nodes.len() as u32);
+                self.nodes.push(TreeNode {
+                    kind: key.kind.clone(),
+                    children: key.children.clone(),
+                });
+                self.interner_n.insert(key, id);
+                id
+            }
         }
-        let id = TreeId(self.nodes.len() as u32);
-        self.nodes.push(TreeNode {
-            kind: key.kind.clone(),
-            children: key.children.clone(),
-        });
-        self.interner.insert(key, id);
-        id
     }
 
     #[must_use]
