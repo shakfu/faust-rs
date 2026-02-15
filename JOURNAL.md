@@ -822,3 +822,17 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo test -p parser-proto --offline --no-fail-fast`
   - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`
+
+### Gate B remaining step 8 (differential suite expansion: `declare` cases)
+
+- Extended Rust vs C++ differential harness in:
+  - `crates/parser-proto/tests/cpp_differential.rs`
+- Added new cases:
+  - `declare_metadata` (valid),
+  - `declare_definition_metadata` (valid),
+  - `malformed_declare_missing_value` (invalid/recovery class).
+- Differential run (source of truth C++ root `/Users/letz/Developpements/RUST/faust`, commit `8eebea429`, binary `/usr/local/bin/faust`) shows no class mismatches on the expanded set.
+- Validation:
+  - `cargo test -p parser-proto --test cpp_differential --offline -- --nocapture`
+  - `cargo test -p parser-proto --offline --no-fail-fast`
+  - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`

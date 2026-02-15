@@ -155,6 +155,21 @@ fn load_cases() -> Result<Vec<Case>, String> {
         source: "process = hslider(\"g\", 0.5, 0.0, 1.0, 0.01;\n".to_owned(),
         expect_valid: false,
     });
+    cases.push(Case {
+        name: "declare_metadata".to_owned(),
+        source: "declare author \"letz\";\nprocess = _;\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "declare_definition_metadata".to_owned(),
+        source: "declare proc category \"ui\";\nprocess = _;\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "malformed_declare_missing_value".to_owned(),
+        source: "declare author ;\nprocess = _;\n".to_owned(),
+        expect_valid: false,
+    });
 
     Ok(cases)
 }
