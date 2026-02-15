@@ -559,3 +559,26 @@ Execution plan (Phase 0 prototype, revised):
 - Quality-gate execution note:
   - online `cargo clippy` / `cargo test` could not run because crates.io DNS resolution failed in this environment (`Could not resolve host: index.crates.io`);
   - equivalent offline validation was executed and passed.
+
+### Gate B step 2 (`faustlexer.l` -> `lrlex` prototype subset + position bridge)
+
+- Extended `crates/parser-proto/src/grammar/faustlexer.l` with a first C++-aligned subset:
+  - numerics: `INT`, `FLOAT` forms (`42`, `42f`, `3.14`, `.5`, `1e-3`, etc.),
+  - identifiers/strings: `IDENT`, `STRING`, `FSTRING`,
+  - operator/layout tokens used by parser slices (`SEQ/PAR/SPLIT/MIX/REC`, comparisons, shifts, `LAPPLY`, `ARROW`),
+  - keywords/primitives/UI iterators (`with`, `letrec`, `par`, `seq`, `sum`, `prod`, widgets, etc.),
+  - comment and whitespace skipping (`//...`, `/*...*/`, blanks/newlines).
+- Updated `crates/parser-proto/src/grammar/faustparser.y` token declarations and added `TokenCatalog` catch-all rule so lexer token map stays fully linked during this bootstrap phase.
+- Added lexer utilities in `crates/parser-proto/src/lib.rs`:
+  - `lex_tokens(input) -> Vec<LexedToken>` with stable token names/text/spans/line-column,
+  - `set_use_prop_from_token(...)` to bridge lexer source positions into `ParserCtx` use-site properties.
+- Added dedicated lexer tests in `crates/parser-proto/tests/lexer_tokens.rs`:
+  - keyword-vs-identifier priority,
+  - operator priority ordering (`<:`, `<=`, `<`, `:>`, `+>`, `->`, `=>`, `>>`, `>`),
+  - numeric and string token class coverage,
+  - comment/whitespace skipping,
+  - position bridge from lexed token to `ParserCtx::set_use_prop`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline`
