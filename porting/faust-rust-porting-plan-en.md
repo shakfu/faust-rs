@@ -41,6 +41,8 @@ The objective of the port is to reproduce this pipeline in idiomatic Rust, takin
 - Export naturally to WebAssembly (target `wasm32-unknown-unknown`)
 - Offer intermediate APIs (boxes, signals) that can be properly exported in C, C++ and WASM
 - **Allow parallel compilation** of multiple `.dsp` files and simultaneous generation to multiple backends
+- Prefer real end-to-end integrations over temporary stubs; if a stub is unavoidable, it must be explicitly time-boxed, tracked, and removed within the same phase gate.
+- Require explicit deliverables and pass criteria for each phase/prototype before implementation starts.
 
 Related design note (recursion representation and RouteIR coexistence):
 - `faust-rust-recursion-model-note-en.md`
@@ -237,8 +239,10 @@ Before implementation, run a focused validation sprint on the current C++ branch
 - `gGlobal` decomposition map (especially `global.hh`, `libcode.cpp`, `instructions_compiler.cpp`)
 - Differential harness (C++ vs Rust outputs on a representative DSP corpus)
 - API surface inventory of `box_signal_api.cpp` exports (full prioritization deferred to Phase 1 scope planning)
+- Stub-minimization policy for prototypes (real crate APIs first, no parser-local placeholder layers unless explicitly justified and short-lived)
 
 This phase is mandatory to avoid locking into incorrect assumptions early (especially around pipeline choice and API scope).
+Each validation/prototype task in this phase must have explicit deliverables and pass criteria before execution.
 
 Detailed checklist and Go/No-Go criteria: `phases/phase-0-validation-en.md`.
 

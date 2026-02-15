@@ -36,3 +36,163 @@
   - `porting/phases/phase-6-fir-backends-en.md`
   - `porting/phases/phase-7-backends-supp-en.md`
   - `porting/phases/phase-9-integration-en.md`
+
+## 2026-02-15
+
+### Parser migration prototype plan (`faustparser.y`/`faustlexer.l` -> `lrpar`/`lrlex`) — reworked (Global-first, then Tree-first)
+
+Decision: before parser migration, prioritize a `gGlobal` decomposition plan (`global.hh/.cpp`) to define crate boundaries and ownership. Parser and `TreeArena` work follows this map.
+Principle: avoid temporary stubs whenever possible; prototype gates should be exercised with real APIs and real data paths.
+
+Source of truth (C++):
+
+- Global state:
+  - `/Users/letz/Developpements/RUST/faust/compiler/global.hh`
+  - `/Users/letz/Developpements/RUST/faust/compiler/global.cpp`
+- Parser/lexer:
+  - `/Users/letz/Developpements/RUST/faust/compiler/parser/faustparser.y`
+  - `/Users/letz/Developpements/RUST/faust/compiler/parser/faustlexer.l`
+- Tree/list/property core used by parser actions:
+  - `/Users/letz/Developpements/RUST/faust/compiler/tlib/tree.hh`
+  - `/Users/letz/Developpements/RUST/faust/compiler/tlib/tree.cpp`
+  - `/Users/letz/Developpements/RUST/faust/compiler/tlib/list.hh`
+  - `/Users/letz/Developpements/RUST/faust/compiler/tlib/list.cpp`
+  - `/Users/letz/Developpements/RUST/faust/compiler/tlib/node.hh`
+  - `/Users/letz/Developpements/RUST/faust/compiler/tlib/property.hh`
+  - `/Users/letz/Developpements/RUST/faust/compiler/tlib/symbol.hh`
+
+Execution plan (Phase 0 prototype, revised):
+
+0. Gate 0: `gGlobal` decomposition map (mandatory first step).
+
+- Inventory `gGlobal` fields and classify by responsibility: parser, eval/pattern, propagate, normalize/type, transform, fir/codegen, orchestration/API.
+- Trace read/write usage in critical files (`faustparser.y`, `faustlexer.l`, `libcode.cpp`, `instructions_compiler*.cpp`, `dag_instructions_compiler.cpp`).
+- Produce a target Rust context matrix:
+  - `ParserCtx`, `EvalCtx`, `CompileSession`, `CodegenCtx`, API/session handles.
+- Define ownership/lifecycle rules per context (creator, mutability, teardown point).
+- Deliverables:
+  - field-to-context mapping table,
+  - unresolved coupling list,
+  - first crate-boundary contract draft.
+- Gate 0 pass criterion: every dependency currently using `gGlobal` in touched flows is mapped to an explicit target context (`ParserCtx`, `EvalCtx`, `CompileSession`, `CodegenCtx`, API/session handle) or to an explicit deferred dependency with owner/date.
+
+1. Gate definitions after `gGlobal` mapping.
+
+- Gate A (`TreeArena/tlib-core`) validates data model and performance for parser-required Tree semantics.
+- Gate A.5 (`boxes` parser-driven subset) validates that parser semantic actions can target stable `boxes` constructors without temporary stubs.
+- Gate B (`lrlex/lrpar`) validates grammar/lexer viability with real Tree-backed semantic actions.
+
+2. Build `tlib-core` prototype (parser-driven subset).
+
+- Implement minimal API needed by parser actions:
+  - `TreeId` interned node handle,
+  - `nil`,
+  - `tree(node[, children...])`,
+  - `cons`, `hd`, `tl`, `is_nil`, `is_list`,
+  - symbol/string/int/float node constructors,
+  - property store keyed by node id.
+- Keep scope tight: only primitives required by Gate A.5 and Gate B.
+
+3. Build C++ compatibility matrix for `tlib-core`.
+
+- For each parser-used primitive, document:
+  - C++ contract,
+  - Rust equivalent signature,
+  - ordering/interning/property behavior.
+- Explicitly track semantic traps:
+  - list order from repeated `cons`,
+  - structural identity through hash-consing,
+  - parser-local vs cross-pass property scope.
+
+4. Run TreeArena micro-benchmarks vs C++ baseline.
+
+- Benchmarks:
+  - high-volume intern create,
+  - repeated lookup on existing nodes,
+  - deep traversal,
+  - property set/get stress.
+- Deliverable: benchmark report and Gate A decision (go/conditional/no-go with mitigation).
+- Quantitative targets for Gate A:
+  - no correctness drift on interning identity tests (exact match),
+  - creation/lookup/traversal/property benchmarks <= 2x C++ baseline on identical workloads,
+  - memory growth profile documented and bounded for the benchmark corpus.
+
+5. Gate A.5: build a `boxes` minimal layer immediately after `tlib-core`.
+
+- Implement the parser-driven subset first:
+  - structural composition (`boxSeq`, `boxPar`, `boxSplit`, `boxMerge`, `boxRec`),
+  - core primitives and identifiers (`boxWire`, `boxCut`, numeric boxes, `boxIdent`),
+  - local definitions and environments (`boxWithLocalDef`, `boxWithRecDef`, `boxEnvironment`),
+  - iterative constructors required by parser corpus (`boxIPar`, and if needed by selected corpus: `boxISeq`, `boxISum`, `boxIProd`),
+  - basic UI primitives used in prototype corpus (`boxHSlider` and related basic widgets).
+- Ensure signatures are stable and directly consumable by parser actions.
+- Add dedicated `boxes` unit tests (independent from parser) and one deterministic structural dump helper for future parser differential checks.
+- Deliverable: Gate A.5 decision proving parser can target real `boxes` APIs without parser-local placeholders.
+
+6. Freeze parser context model from Gate 0 outputs.
+
+- Define `ParserCtx` fields and APIs:
+  - source location/diagnostics,
+  - temporary waveform accumulator (`WAVEFORM`),
+  - parse result root,
+  - parser-local counters and property hooks (`setDefProp`/`setUseProp` equivalents).
+- Exclude non-parser state not required by parser semantics.
+
+7. Create `crates/parser-proto` (isolated from production parser crate).
+
+- Add `lrlex`, `lrpar`, `cfgrammar`, and local deps (`tlib`, `boxes` as needed).
+- Add `build.rs` generation.
+- Keep `crates/parser` unchanged until Gate B decision.
+
+8. Port lexer (`faustlexer.l` -> `lrlex`) with parity tests.
+
+- Preserve tokenization priority and operator distinctions (`:`, `,`, `<:`, `:>`, `+>`, `~`, `@`, `'`, `->`, `=>`, etc.).
+- Recreate lexer states for comment/doc/listing.
+- Add tests for numbers, identifiers/keywords, strings/fstrings/doc tokens.
+
+9. Port grammar (`faustparser.y` -> `lrpar`) incrementally.
+
+- Slice 1: program/statement/definition/recovery (`error ENDDEF`).
+- Slice 2: expression/infix/argument core with C++ precedence.
+- Slice 3: subset of primitives needed by prototype corpus (UI/iter; imports kept as optional post-Gate-B integration check).
+- Track conflicts after each slice and keep a conflict log.
+
+10. Port semantic actions with Tree parity.
+
+- Implement actions against `tlib-core` + `ParserCtx`.
+- Preserve C++ list/order behavior first; avoid normalization until parity tests are stable.
+- Route expression/primitive constructions through Gate A.5 `boxes` APIs (no parser-only construction layer).
+- Keep side effects explicit and confined to `ParserCtx`.
+
+11. Differential parser validation against C++.
+
+- Prototype corpus:
+  - `process = _;`
+  - `process = + ~ _;`
+  - `process = hslider("freq", 440, 20, 20000, 1);`
+  - `process = _ <: _, _;`
+  - `process = par(i, 4, _);`
+- Secondary corpus: parse-only pass on `tests/corpus/rep_*.dsp`.
+- Optional post-Gate-B integration check (separate from parser viability gate): `import("stdfaust.lib"); process = os.osc(440);` with pinned library path/environment.
+- Compare:
+  - parse success/failure class,
+  - recovery behavior after malformed statements,
+  - structural tree dump stability (shape/labels, not pointer addresses).
+
+12. Gate B decision (`lrlex/lrpar` viability).
+
+- Go: Gate A + Gate A.5 accepted, parser subset runs with real Tree/boxes semantics, core conflicts bounded/resolved.
+- Conditional Go: small isolated grammar gaps with explicit mitigation and estimate.
+- No-Go: precedence/conflict behavior diverges on core expression grammar.
+- Quantitative targets for Gate B:
+  - prototype corpus parse pass: 100%,
+  - secondary corpus parse pass: >=95% (remaining failures triaged and categorized),
+  - unresolved grammar conflicts in core expression path: 0,
+  - malformed-input recovery tests (`error ENDDEF` class): pass on all defined recovery fixtures.
+
+13. Post-Go integration path.
+
+- Merge validated subset into `crates/tlib` and `crates/parser`.
+- Expand grammar/action coverage toward full Faust grammar.
+- Add parser regression tests to CI (corpus-based).
+- Update `porting/phases/phase-0-validation-en.md` + `JOURNAL.md` with final decisions and residual gaps.

@@ -15,6 +15,8 @@ Primary goals:
 - Freeze migration scope (included and excluded backends/modes).
 - Validate API lifecycle model and integration constraints.
 - Lock differential testing baseline and acceptance thresholds.
+- Enforce stub minimization in validation prototypes.
+- Require explicit deliverables and pass criteria per validation task before execution.
 - Surface blockers early with explicit go/no-go criteria.
 
 ---
@@ -63,6 +65,15 @@ Primary goals:
 - Compare against equivalent C++ `CTree` benchmark on the same workload profile.
 - Record thresholds and optimization levers (hash function choice, pre-allocation, map implementation).
 
+### 2.9 Stub minimization discipline
+- Prototype through real crate APIs and real data paths whenever feasible.
+- Avoid parser-local or pass-local placeholder layers that duplicate target crate responsibilities.
+- If a stub is unavoidable, document:
+  - technical reason,
+  - explicit owner,
+  - removal milestone within the same phase gate.
+- Add a "stub debt" tracker entry to prevent carry-over into subsequent phases.
+
 ---
 
 ## 3. Deliverables
@@ -88,6 +99,7 @@ Go:
 - Capability matrix approach is defined and testable.
 - Differential baseline corpus and procedure are ready.
 - TreeArena hash-consing performance is validated against agreed thresholds.
+- No untracked stubs remain in Phase 0 prototypes.
 
 No-Go:
 - Pipeline ownership is ambiguous between competing compile paths.
@@ -95,6 +107,7 @@ No-Go:
 - API lifecycle remains divergent with no agreed target contract.
 - Differential baseline cannot be reproduced reliably.
 - TreeArena performance is outside agreed limits with no credible mitigation path.
+- Stub-dependent prototypes hide target architecture boundaries or carry unowned stub debt.
 
 ---
 
@@ -112,4 +125,5 @@ No-Go:
 - [ ] Recursion/stack strategy documented
 - [ ] Differential corpus and acceptance rules finalized
 - [ ] TreeArena hash-consing benchmarks completed and reviewed
+- [ ] Stub debt tracker reviewed (no unowned/unplanned carry-over)
 - [ ] Final Go/No-Go decision recorded

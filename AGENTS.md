@@ -7,7 +7,7 @@ Guidelines for contributors and coding agents working on `faust-rs`.
 - Port the Faust compiler from C++ to Rust.
 - Keep semantic parity with the C++ compiler as the default objective.
 - Prefer explicit, testable behavior over speculative refactors.
-- C++ reference branch used for baseline analysis: `master-dev-ocpp-od-fir-2-FIR19` (`8eebea429`).
+- C++ reference branch used for baseline analysis: `master-dev-ocpp-od-fir-2-FIR19` (`8eebea429`) in /Users/letz/Developpements/RUST/faust folder.
 
 ## 2. Workspace Rules
 
@@ -41,6 +41,8 @@ Guidelines for contributors and coding agents working on `faust-rs`.
 
 - Use the `porting/` documents as source of truth for scope and phases.
 - Preserve behavior first, optimize later.
+- Prefer real end-to-end integrations over temporary stubs; if a stub is unavoidable, it must be explicitly justified, owner-assigned, time-boxed, and removed within the same phase gate.
+- Define explicit deliverables and pass criteria for each phase/prototype before implementation; do not start deep work on tasks with implicit success conditions.
 - For critical compiler behavior, prefer differential tests against C++ reference outputs.
 - Document known gaps and temporary scaffolding in `JOURNAL.md`.
 - Follow the canonical pipeline described in the plan:
