@@ -9,7 +9,8 @@
 //! # Scope in this step
 //! - Provides `ParserCtx` for parser-local state and property hooks.
 //! - Ports a first lexer subset from C++ `faustlexer.l` with token-priority tests.
-//! - Builds a minimal compile-time lexer/parser pair to validate the `lrlex/lrpar` toolchain.
+//! - Implements parser Slice 1 (`program/statement/definition/error ENDDEF`) with real actions.
+//! - Routes expression constructors through `boxes` over `tlib::TreeArena`.
 //! - Keeps production `crates/parser` untouched until Gate B decision.
 
 use cfgrammar::Span;
@@ -17,11 +18,160 @@ use lrlex::lrlex_mod;
 use lrlex::{DefaultLexerTypes, LRNonStreamingLexerDef};
 use lrpar::lrpar_mod;
 use lrpar::{LexError, Lexeme, Lexer, NonStreamingLexer};
-use tlib::TreeId;
+use std::cell::RefCell;
+use tlib::{TreeArena, TreeId};
 
 pub mod context;
 
 pub use context::{DiagnosticSeverity, ParserCtx, ParserDiagnostic, SourceLocation};
+
+/// Parser state shared with grammar actions via `%parse-param`.
+#[derive(Debug)]
+pub struct ParseState {
+    pub arena: TreeArena,
+    pub ctx: ParserCtx,
+    source_file: Box<str>,
+}
+
+impl ParseState {
+    /// Creates parser state bound to one source file name/path.
+    #[must_use]
+    pub fn new(source_file: &str) -> Self {
+        Self {
+            arena: TreeArena::new(),
+            ctx: ParserCtx::new(),
+            source_file: source_file.into(),
+        }
+    }
+
+    /// Equivalent to parser-level `nil` list root in C++ actions.
+    #[must_use]
+    pub fn nil(&mut self) -> TreeId {
+        self.arena.nil()
+    }
+
+    /// Equivalent to C++ `cons(head, tail)` in parser actions.
+    #[must_use]
+    pub fn cons(&mut self, head: TreeId, tail: TreeId) -> TreeId {
+        self.arena.cons(head, tail)
+    }
+
+    /// Prototype equivalent to C++ `formatDefinitions`.
+    ///
+    /// In Slice 1 we keep definition order as parser-built cons-list for deterministic checks.
+    #[must_use]
+    pub fn format_definitions(&mut self, defs: TreeId) -> TreeId {
+        defs
+    }
+
+    /// Prepends non-`nil` statement in parser list order.
+    #[must_use]
+    pub fn prepend_statement(&mut self, list: TreeId, stmt: TreeId) -> TreeId {
+        if self.arena.is_nil(stmt) {
+            list
+        } else {
+            self.arena.cons(stmt, list)
+        }
+    }
+
+    /// Builds one definition node shape compatible with C++ parser (`cons(name, cons(args, expr))`).
+    #[must_use]
+    pub fn make_definition(&mut self, name: TreeId, args: TreeId, expr: TreeId) -> TreeId {
+        let pair = self.arena.cons(args, expr);
+        self.arena.cons(name, pair)
+    }
+
+    /// Marks one recovered statement and returns `nil` placeholder.
+    #[must_use]
+    pub fn recovery_statement(&mut self, message: &str) -> TreeId {
+        self.ctx.note_recovery();
+        self.ctx.error(message);
+        self.arena.nil()
+    }
+
+    /// Sets definition property at current cursor position.
+    pub fn mark_def_at_cursor(&mut self, sym: TreeId) {
+        self.ctx.set_def_prop_at_cursor(sym);
+    }
+
+    /// Builds `boxIdent` from a token and optionally marks use property.
+    #[must_use]
+    pub fn ident_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+        mark_use: bool,
+    ) -> TreeId {
+        let span = token_span(&tok);
+        self.update_cursor_from_span(lexer, span);
+        let ident = boxes::box_ident(&mut self.arena, lexer.span_str(span));
+        if mark_use {
+            self.ctx.set_use_prop_at_cursor(ident);
+        }
+        ident
+    }
+
+    /// Parses one integer literal token to `boxInt`.
+    #[must_use]
+    pub fn int_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+    ) -> TreeId {
+        let span = token_span(&tok);
+        self.update_cursor_from_span(lexer, span);
+        let raw = lexer.span_str(span);
+        match raw.parse::<i64>() {
+            Ok(value) => boxes::box_int(&mut self.arena, value),
+            Err(_) => {
+                self.ctx.error("invalid INT literal");
+                boxes::box_int(&mut self.arena, 0)
+            }
+        }
+    }
+
+    /// Parses one float literal token to `boxReal`.
+    #[must_use]
+    pub fn float_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+    ) -> TreeId {
+        let span = token_span(&tok);
+        self.update_cursor_from_span(lexer, span);
+        let raw = lexer.span_str(span);
+        let normalized = raw.strip_suffix('f').unwrap_or(raw);
+        match normalized.parse::<f64>() {
+            Ok(value) => boxes::box_real(&mut self.arena, value),
+            Err(_) => {
+                self.ctx.error("invalid FLOAT literal");
+                boxes::box_real(&mut self.arena, 0.0)
+            }
+        }
+    }
+
+    fn update_cursor_from_span<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        span: Span,
+    ) {
+        let ((line, _), _) = lexer.line_col(span);
+        let line = u32::try_from(line).unwrap_or(u32::MAX);
+        self.ctx.set_cursor(&self.source_file, line);
+    }
+}
+
+fn token_span(tok: &Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>) -> Span {
+    match tok {
+        Ok(lexeme) | Err(lexeme) => lexeme.span(),
+    }
+}
+
+/// Executes one mutable operation against parser state passed through `%parse-param`.
+pub fn with_state<T>(state: &RefCell<ParseState>, f: impl FnOnce(&mut ParseState) -> T) -> T {
+    let mut state = state.borrow_mut();
+    f(&mut state)
+}
 
 lrlex_mod!("grammar/faustlexer.l");
 lrpar_mod!("grammar/faustparser.y");
@@ -34,6 +184,14 @@ pub struct LexedToken {
     pub span: Span,
     pub start_line: u32,
     pub start_col: u32,
+}
+
+/// Parse output containing parser state for structural checks.
+#[derive(Debug)]
+pub struct ParseOutput {
+    pub root: Option<TreeId>,
+    pub errors: Vec<String>,
+    pub state: ParseState,
 }
 
 /// Returns the generated lexer definition for the Faust parser prototype.
@@ -63,15 +221,34 @@ pub fn lex_tokens(input: &str) -> Result<Vec<LexedToken>, String> {
     Ok(out)
 }
 
-/// Parses the minimal prototype sentence `process = _;`.
-///
-/// This validates that `build.rs` generated lexer/parser artifacts are usable at runtime.
+/// Parses one input with Slice-1 grammar and returns parser state.
 #[must_use]
-pub fn parse_minimal(input: &str) -> bool {
+pub fn parse_program(input: &str, source_file: &str) -> ParseOutput {
     let lexerdef = lexerdef();
     let lexer = lexerdef.lexer(input);
-    let (result, errors) = faustparser_y::parse(&lexer);
-    result.is_some() && errors.is_empty()
+    let state = RefCell::new(ParseState::new(source_file));
+    let (root, errors) = faustparser_y::parse(&lexer, &state);
+    let mut state = state.into_inner();
+
+    let mut rendered_errors = Vec::with_capacity(errors.len());
+    for err in errors {
+        let message = err.pp(&lexer, &faustparser_y::token_epp).to_string();
+        state.ctx.error(&message);
+        rendered_errors.push(message);
+    }
+
+    ParseOutput {
+        root,
+        errors: rendered_errors,
+        state,
+    }
+}
+
+/// Parses the minimal prototype sentence `process = _;`.
+#[must_use]
+pub fn parse_minimal(input: &str) -> bool {
+    let output = parse_program(input, "<memory>");
+    output.root.is_some() && output.errors.is_empty()
 }
 
 /// Updates parser cursor from one lexed token, then tags `sym` as use-site at that location.

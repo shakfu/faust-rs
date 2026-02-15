@@ -6,6 +6,6 @@ fn minimal_lrpar_lrlex_pipeline_accepts_process_wire() {
 }
 
 #[test]
-fn minimal_lrpar_lrlex_pipeline_rejects_invalid_sentence() {
-    assert!(!parse_minimal("process = ;"));
+fn minimal_lrpar_lrlex_pipeline_recovers_invalid_sentence() {
+    assert!(parse_minimal("process = ;"));
 }

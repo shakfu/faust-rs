@@ -1,4 +1,11 @@
 %start Program
+%parse-param state: &std::cell::RefCell<crate::ParseState>
+
+%right SPLIT MIX
+%right SEQ
+%right PAR
+%left REC
+
 %token PROCESS
 %token INT FLOAT IDENT STRING FSTRING EXTRA
 %token SEQ PAR SPLIT MIX REC
@@ -25,127 +32,124 @@
 %token LAMBDA
 %token FFUNCTION FCONSTANT FVARIABLE
 %%
-Program -> bool:
-      PROCESS DEF WIRE ENDDEF { true }
-    | TokenCatalog { false }
+Program -> tlib::TreeId:
+      StmtList {
+          crate::with_state(state, |state| {
+              let root = state.format_definitions($1);
+              state.ctx.set_parse_result(root);
+              root
+          })
+      }
     ;
 
-TokenCatalog -> bool:
-      INT { false }
-    | FLOAT { false }
-    | IDENT { false }
-    | STRING { false }
-    | FSTRING { false }
-    | EXTRA { false }
-    | SEQ { false }
-    | PAR { false }
-    | SPLIT { false }
-    | MIX { false }
-    | REC { false }
-    | ADD { false }
-    | SUB { false }
-    | MUL { false }
-    | DIV { false }
-    | MOD { false }
-    | FDELAY { false }
-    | DELAY1 { false }
-    | AND { false }
-    | OR { false }
-    | XOR { false }
-    | LSH { false }
-    | RSH { false }
-    | LT { false }
-    | LE { false }
-    | GT { false }
-    | GE { false }
-    | EQ { false }
-    | NE { false }
-    | CUT { false }
-    | LPAR { false }
-    | RPAR { false }
-    | LBRAQ { false }
-    | RBRAQ { false }
-    | LCROC { false }
-    | RCROC { false }
-    | DOT { false }
-    | WITH { false }
-    | LETREC { false }
-    | WHERE { false }
-    | MEM { false }
-    | PREFIX { false }
-    | INTCAST { false }
-    | FLOATCAST { false }
-    | NOTYPECAST { false }
-    | RDTBL { false }
-    | RWTBL { false }
-    | SELECT2 { false }
-    | SELECT3 { false }
-    | BUTTON { false }
-    | CHECKBOX { false }
-    | VSLIDER { false }
-    | HSLIDER { false }
-    | NENTRY { false }
-    | VGROUP { false }
-    | HGROUP { false }
-    | TGROUP { false }
-    | VBARGRAPH { false }
-    | HBARGRAPH { false }
-    | SOUNDFILE { false }
-    | ATTACH { false }
-    | MODULATE { false }
-    | ACOS { false }
-    | ASIN { false }
-    | ATAN { false }
-    | ATAN2 { false }
-    | COS { false }
-    | SIN { false }
-    | TAN { false }
-    | EXP { false }
-    | LOG { false }
-    | LOG10 { false }
-    | POWOP { false }
-    | POWFUN { false }
-    | SQRT { false }
-    | ABS { false }
-    | MIN { false }
-    | MAX { false }
-    | FMOD { false }
-    | REMAINDER { false }
-    | FLOOR { false }
-    | CEIL { false }
-    | RINT { false }
-    | ROUND { false }
-    | IPAR { false }
-    | ISEQ { false }
-    | ISUM { false }
-    | IPROD { false }
-    | INPUTS { false }
-    | OUTPUTS { false }
-    | ONDEMAND { false }
-    | UPSAMPLING { false }
-    | DOWNSAMPLING { false }
-    | IMPORT { false }
-    | COMPONENT { false }
-    | LIBRARY { false }
-    | ENVIRONMENT { false }
-    | WAVEFORM { false }
-    | ROUTE { false }
-    | ENABLE { false }
-    | CONTROL { false }
-    | DECLARE { false }
-    | CASE { false }
-    | ARROW { false }
-    | LAPPLY { false }
-    | ASSERTBOUNDS { false }
-    | LOWEST { false }
-    | HIGHEST { false }
-    | FLOATMODE { false }
-    | DOUBLEMODE { false }
-    | QUADMODE { false }
-    | FIXEDPOINTMODE { false }
-    | LAMBDA { false }
-    | FFUNCTION { false }
-    | FCONSTANT { false }
-    | FVARIABLE { false }
+StmtList -> tlib::TreeId:
+      %empty {
+          crate::with_state(state, |state| state.nil())
+      }
+    | StmtList Statement {
+          crate::with_state(state, |state| state.prepend_statement($1, $2))
+      }
+    ;
+
+Statement -> tlib::TreeId:
+      Definition { $1 }
+    ;
+
+Definition -> tlib::TreeId:
+      DefName DEF Expression ENDDEF {
+          crate::with_state(state, |state| {
+              state.mark_def_at_cursor($1);
+              let nil = state.nil();
+              state.make_definition($1, nil, $3)
+          })
+      }
+    | DefName LPAR ArgList RPAR DEF Expression ENDDEF {
+          crate::with_state(state, |state| {
+              state.mark_def_at_cursor($1);
+              state.make_definition($1, $3, $6)
+          })
+      }
+    | DefName DEF ENDDEF {
+          crate::with_state(state, |state| {
+              state.recovery_statement("syntax error: empty definition body before ';'")
+          })
+      }
+    | DefName DEF EXTRA ENDDEF {
+          crate::with_state(state, |state| {
+              state.recovery_statement("syntax error: invalid definition token before ';'")
+          })
+      }
+    ;
+
+    DefName -> tlib::TreeId:
+      IDENT {
+          crate::with_state(state, |state| state.ident_from_token($lexer, $1, true))
+      }
+    | PROCESS {
+          crate::with_state(state, |state| state.ident_from_token($lexer, $1, true))
+      }
+    ;
+
+ArgList -> tlib::TreeId:
+      IdentExpr {
+          crate::with_state(state, |state| {
+              let nil = state.nil();
+              state.cons($1, nil)
+          })
+      }
+    | ArgList PAR IdentExpr {
+          crate::with_state(state, |state| state.cons($3, $1))
+      }
+    ;
+
+Expression -> tlib::TreeId:
+      Expression PAR Expression {
+          crate::with_state(state, |state| boxes::box_par(&mut state.arena, $1, $3))
+      }
+    | Expression SEQ Expression {
+          crate::with_state(state, |state| boxes::box_seq(&mut state.arena, $1, $3))
+      }
+    | Expression SPLIT Expression {
+          crate::with_state(state, |state| boxes::box_split(&mut state.arena, $1, $3))
+      }
+    | Expression MIX Expression {
+          crate::with_state(state, |state| boxes::box_merge(&mut state.arena, $1, $3))
+      }
+    | Expression REC Expression {
+          crate::with_state(state, |state| boxes::box_rec(&mut state.arena, $1, $3))
+      }
+    | Atom { $1 }
+    ;
+
+Atom -> tlib::TreeId:
+      WIRE {
+          crate::with_state(state, |state| boxes::box_wire(&mut state.arena))
+      }
+    | CUT {
+          crate::with_state(state, |state| boxes::box_cut(&mut state.arena))
+      }
+    | INT {
+          crate::with_state(state, |state| state.int_from_token($lexer, $1))
+      }
+    | FLOAT {
+          crate::with_state(state, |state| state.float_from_token($lexer, $1))
+      }
+    | IdentExpr { $1 }
+    | LPAR Expression RPAR { $2 }
+    | IPAR LPAR IdentExpr PAR INT PAR Expression RPAR {
+          crate::with_state(state, |state| {
+              let count = state.int_from_token($lexer, $5);
+              boxes::box_ipar(&mut state.arena, $3, count, $7)
+          })
+      }
+    ;
+
+IdentExpr -> tlib::TreeId:
+      IDENT {
+          crate::with_state(state, |state| state.ident_from_token($lexer, $1, true))
+      }
+    | PROCESS {
+          crate::with_state(state, |state| state.ident_from_token($lexer, $1, true))
+      }
     ;
 %%

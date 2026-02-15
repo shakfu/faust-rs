@@ -582,3 +582,43 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline`
+
+### Gate B step 3 (Slice 1 parser/actions: `program/statement/definition/recovery`)
+
+- Implemented Slice 1 grammar in `crates/parser-proto/src/grammar/faustparser.y`:
+  - `Program -> StmtList`,
+  - `StmtList` cons-list accumulation,
+  - `Definition` forms:
+    - `defname = expression;`
+    - `defname(arglist) = expression;`
+    - recovery forms for malformed definitions before `;`.
+  - Note: bison-style `error` symbol is not used directly in `lrpar`; Slice 1 recovery is encoded with explicit malformed-definition alternatives ending on `ENDDEF`.
+  - expression subset wired to `boxes` APIs:
+    - `seq/par/split/mix/rec`,
+    - atoms: wire/cut/int/float/ident/parentheses,
+    - iterative prototype form: `par(i, 4, expr)`.
+- Added `%parse-param` parser state integration through `RefCell<ParseState>`:
+  - introduced `ParseState` + `with_state(...)` helper in `crates/parser-proto/src/lib.rs`,
+  - grammar actions now mutate real `TreeArena` + `ParserCtx` (no stubs).
+- Added parser runtime API and state return path:
+  - `parse_program(input, source_file) -> ParseOutput`,
+  - keeps parse root, diagnostics/errors, arena, and parser context for structural checks.
+- Source-location / property hooks wired in semantic actions:
+  - `setDefProp` equivalent on definition names,
+  - `setUseProp` equivalent on identifier uses.
+- Added Slice 1 dedicated tests in `crates/parser-proto/tests/parser_slice1.rs`:
+  - nominal `process = _;`,
+  - malformed definition recovery ending at `;`,
+  - iterative `par(i, 4, _)`,
+  - identifier use-property tracking.
+- Updated smoke behavior in `crates/parser-proto/tests/parser_smoke.rs`:
+  - invalid minimal sentence now covered as recovered parse (Slice 1 recovery semantics).
+- Build-generation adjustment for prototype stage:
+  - `crates/parser-proto/build.rs` now uses:
+    - `.warnings_are_errors(false)`
+    - `.show_warnings(false)`
+  - rationale: keep full lexer token set declared while Slice 1 grammar intentionally uses only a subset.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline`
