@@ -622,3 +622,36 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline`
+
+### Gate B step 4 (Slice 2 parser core: `expression/infix/argument` + C++ precedence)
+
+- Extended `crates/parser-proto/src/grammar/faustparser.y` with Slice 2 core:
+  - C++-aligned precedence tiers for `PAR/SEQ/SPLIT/MIX/REC`, infix arithmetic/logical/comparison operators, postfix delay (`'`), and dot-access.
+  - Added `ParamList` (definition parameters) and `ArgList`/`Argument` (application arguments) split to preserve C++ parser behavior around comma-vs-expression ambiguity.
+  - Added `InfixExp` lowering rules matching C++ parser actions:
+    - binary ops lower to `boxSeq(boxPar(lhs,rhs), boxOp())`,
+    - postfix `DELAY1` lowers to `boxSeq(expr, boxDelay1())`,
+    - dot-access lowers to `boxAccess(expr, ident)`,
+    - application lowers to `boxAppl(fun, revarglist)` (same prototype behavior as C++ `buildBoxAppl` path used today).
+- Extended `crates/parser-proto/src/lib.rs` (`ParseState`) for Slice 2 action support:
+  - added `PrimitiveOp` enum and lowering helpers (`binary_prim`, `postfix_prim`),
+  - added signed literal parsing helpers for `+/- INT/FLOAT`,
+  - added `apply_box` and `access_box` action helpers.
+- Extended `crates/boxes/src/lib.rs` with parser-needed APIs (Tree-backed, no stubs):
+  - application/access: `box_appl`, `is_box_appl`, `box_access`, `is_box_access`,
+  - primitive operators: `box_add/sub/mul/div/rem/and/or/xor/lsh/rsh/lt/le/gt/ge/eq/ne/pow/delay/delay1` + `is_*` predicates.
+- Added/updated tests:
+  - `crates/boxes/tests/core_api.rs`:
+    - `primitive_appl_and_access_boxes_roundtrip`.
+  - `crates/parser-proto/tests/parser_slice2.rs`:
+    - infix precedence (`1 + 2 * 3`),
+    - postfix delay and dot-access (`_';`, `foo.bar`),
+    - application argument-list shape (`foo(1,2)` reversed list contract),
+    - unary minus identifier lowering (`-foo`).
+- Parser generation notes:
+  - Slice 2 grammar compiles without parser conflicts under current subset (`error_on_conflicts` gate remains active in build pipeline).
+  - Full token-set warnings remain intentionally non-blocking/hidden at this stage (`warnings_are_errors(false)`, `show_warnings(false)`) while only a subset of tokens is consumed.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline`

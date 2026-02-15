@@ -25,6 +25,30 @@ pub mod context;
 
 pub use context::{DiagnosticSeverity, ParserCtx, ParserDiagnostic, SourceLocation};
 
+/// Primitive operator subset used by parser Slice 2.
+#[derive(Clone, Copy, Debug)]
+pub enum PrimitiveOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    And,
+    Or,
+    Xor,
+    Lsh,
+    Rsh,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
+    Pow,
+    Delay,
+    Delay1,
+}
+
 /// Parser state shared with grammar actions via `%parse-param`.
 #[derive(Debug)]
 pub struct ParseState {
@@ -147,6 +171,98 @@ impl ParseState {
                 self.ctx.error("invalid FLOAT literal");
                 boxes::box_real(&mut self.arena, 0.0)
             }
+        }
+    }
+
+    /// Parses one signed integer literal token to `boxInt`.
+    #[must_use]
+    pub fn signed_int_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+        sign: i64,
+    ) -> TreeId {
+        let span = token_span(&tok);
+        self.update_cursor_from_span(lexer, span);
+        let raw = lexer.span_str(span);
+        match raw.parse::<i64>() {
+            Ok(value) => boxes::box_int(&mut self.arena, value.saturating_mul(sign)),
+            Err(_) => {
+                self.ctx.error("invalid signed INT literal");
+                boxes::box_int(&mut self.arena, 0)
+            }
+        }
+    }
+
+    /// Parses one signed float literal token to `boxReal`.
+    #[must_use]
+    pub fn signed_float_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+        sign: f64,
+    ) -> TreeId {
+        let span = token_span(&tok);
+        self.update_cursor_from_span(lexer, span);
+        let raw = lexer.span_str(span);
+        let normalized = raw.strip_suffix('f').unwrap_or(raw);
+        match normalized.parse::<f64>() {
+            Ok(value) => boxes::box_real(&mut self.arena, value * sign),
+            Err(_) => {
+                self.ctx.error("invalid signed FLOAT literal");
+                boxes::box_real(&mut self.arena, 0.0)
+            }
+        }
+    }
+
+    /// Encodes C++ infix primitive lowering: `a op b` -> `boxSeq(boxPar(a,b), boxOp())`.
+    #[must_use]
+    pub fn binary_prim(&mut self, left: TreeId, right: TreeId, op: PrimitiveOp) -> TreeId {
+        let pair = boxes::box_par(&mut self.arena, left, right);
+        let prim = self.prim_box(op);
+        boxes::box_seq(&mut self.arena, pair, prim)
+    }
+
+    /// Encodes postfix primitive lowering: `a op` -> `boxSeq(a, boxOp())`.
+    #[must_use]
+    pub fn postfix_prim(&mut self, expr: TreeId, op: PrimitiveOp) -> TreeId {
+        let prim = self.prim_box(op);
+        boxes::box_seq(&mut self.arena, expr, prim)
+    }
+
+    /// Equivalent to C++ `buildBoxAppl` prototype behavior (`boxAppl(fun, revarglist)`).
+    #[must_use]
+    pub fn apply_box(&mut self, fun: TreeId, rev_arg_list: TreeId) -> TreeId {
+        boxes::box_appl(&mut self.arena, fun, rev_arg_list)
+    }
+
+    /// Equivalent to C++ `boxAccess`.
+    #[must_use]
+    pub fn access_box(&mut self, expr: TreeId, ident: TreeId) -> TreeId {
+        boxes::box_access(&mut self.arena, expr, ident)
+    }
+
+    fn prim_box(&mut self, op: PrimitiveOp) -> TreeId {
+        match op {
+            PrimitiveOp::Add => boxes::box_add(&mut self.arena),
+            PrimitiveOp::Sub => boxes::box_sub(&mut self.arena),
+            PrimitiveOp::Mul => boxes::box_mul(&mut self.arena),
+            PrimitiveOp::Div => boxes::box_div(&mut self.arena),
+            PrimitiveOp::Rem => boxes::box_rem(&mut self.arena),
+            PrimitiveOp::And => boxes::box_and(&mut self.arena),
+            PrimitiveOp::Or => boxes::box_or(&mut self.arena),
+            PrimitiveOp::Xor => boxes::box_xor(&mut self.arena),
+            PrimitiveOp::Lsh => boxes::box_lsh(&mut self.arena),
+            PrimitiveOp::Rsh => boxes::box_rsh(&mut self.arena),
+            PrimitiveOp::Lt => boxes::box_lt(&mut self.arena),
+            PrimitiveOp::Le => boxes::box_le(&mut self.arena),
+            PrimitiveOp::Gt => boxes::box_gt(&mut self.arena),
+            PrimitiveOp::Ge => boxes::box_ge(&mut self.arena),
+            PrimitiveOp::Eq => boxes::box_eq(&mut self.arena),
+            PrimitiveOp::Ne => boxes::box_ne(&mut self.arena),
+            PrimitiveOp::Pow => boxes::box_pow(&mut self.arena),
+            PrimitiveOp::Delay => boxes::box_delay(&mut self.arena),
+            PrimitiveOp::Delay1 => boxes::box_delay1(&mut self.arena),
         }
     }
 

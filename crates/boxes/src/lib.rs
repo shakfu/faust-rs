@@ -7,6 +7,11 @@
 //! # Public API mapping status
 //! - `1:1`: `box_ident`, `box_int`, `box_real`, `box_wire`, `box_cut`,
 //!   `box_seq`, `box_par`, `box_rec`, `box_split`, `box_merge`,
+//!   `box_appl`, `box_access`,
+//!   `box_add`, `box_sub`, `box_mul`, `box_div`, `box_rem`,
+//!   `box_and`, `box_or`, `box_xor`, `box_lsh`, `box_rsh`,
+//!   `box_lt`, `box_le`, `box_gt`, `box_ge`, `box_eq`, `box_ne`,
+//!   `box_pow`, `box_delay`, `box_delay1`,
 //!   `box_ipar`, `box_iseq`, `box_isum`, `box_iprod`,
 //!   `box_with_local_def`, `box_environment`,
 //!   `box_button`, `box_checkbox`, `box_vslider`, `box_hslider`,
@@ -35,6 +40,27 @@ const BOX_PAR_TAG: &str = "BOXPAR";
 const BOX_REC_TAG: &str = "BOXREC";
 const BOX_SPLIT_TAG: &str = "BOXSPLIT";
 const BOX_MERGE_TAG: &str = "BOXMERGE";
+const BOX_APPL_TAG: &str = "BOXAPPL";
+const BOX_ACCESS_TAG: &str = "BOXACCESS";
+const BOX_ADD_TAG: &str = "BOXADD";
+const BOX_SUB_TAG: &str = "BOXSUB";
+const BOX_MUL_TAG: &str = "BOXMUL";
+const BOX_DIV_TAG: &str = "BOXDIV";
+const BOX_REM_TAG: &str = "BOXREM";
+const BOX_AND_TAG: &str = "BOXAND";
+const BOX_OR_TAG: &str = "BOXOR";
+const BOX_XOR_TAG: &str = "BOXXOR";
+const BOX_LSH_TAG: &str = "BOXLSH";
+const BOX_RSH_TAG: &str = "BOXRSH";
+const BOX_LT_TAG: &str = "BOXLT";
+const BOX_LE_TAG: &str = "BOXLE";
+const BOX_GT_TAG: &str = "BOXGT";
+const BOX_GE_TAG: &str = "BOXGE";
+const BOX_EQ_TAG: &str = "BOXEQ";
+const BOX_NE_TAG: &str = "BOXNE";
+const BOX_POW_TAG: &str = "BOXPOW";
+const BOX_DELAY_TAG: &str = "BOXDELAY";
+const BOX_DELAY1_TAG: &str = "BOXDELAY1";
 const BOX_IPAR_TAG: &str = "BOXIPAR";
 const BOX_ISEQ_TAG: &str = "BOXISEQ";
 const BOX_ISUM_TAG: &str = "BOXISUM";
@@ -153,6 +179,30 @@ pub fn box_merge(arena: &mut TreeArena, left: BoxId, right: BoxId) -> BoxId {
     intern_tag(arena, BOX_MERGE_TAG, &[left, right])
 }
 
+/// Equivalent to C++ `boxAppl`.
+#[must_use]
+pub fn box_appl(arena: &mut TreeArena, fun: BoxId, arglist: BoxId) -> BoxId {
+    intern_tag(arena, BOX_APPL_TAG, &[fun, arglist])
+}
+
+/// Returns `(fun, arglist)` when `b` is `box_appl`.
+#[must_use]
+pub fn is_box_appl(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
+    match_binary(arena, b, BOX_APPL_TAG)
+}
+
+/// Equivalent to C++ `boxAccess`.
+#[must_use]
+pub fn box_access(arena: &mut TreeArena, expr: BoxId, ident: BoxId) -> BoxId {
+    intern_tag(arena, BOX_ACCESS_TAG, &[expr, ident])
+}
+
+/// Returns `(expr, ident)` when `b` is `box_access`.
+#[must_use]
+pub fn is_box_access(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
+    match_binary(arena, b, BOX_ACCESS_TAG)
+}
+
 /// Returns `(left, right)` when `b` is `box_seq`.
 #[must_use]
 pub fn is_box_seq(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
@@ -182,6 +232,149 @@ pub fn is_box_split(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
 pub fn is_box_merge(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
     match_binary(arena, b, BOX_MERGE_TAG)
 }
+
+/// Equivalent to C++ `boxAdd`.
+#[must_use]
+pub fn box_add(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_ADD_TAG, &[])
+}
+
+/// Equivalent to C++ `boxSub`.
+#[must_use]
+pub fn box_sub(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_SUB_TAG, &[])
+}
+
+/// Equivalent to C++ `boxMul`.
+#[must_use]
+pub fn box_mul(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_MUL_TAG, &[])
+}
+
+/// Equivalent to C++ `boxDiv`.
+#[must_use]
+pub fn box_div(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_DIV_TAG, &[])
+}
+
+/// Equivalent to C++ `boxRem`.
+#[must_use]
+pub fn box_rem(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_REM_TAG, &[])
+}
+
+/// Equivalent to C++ `boxAND`.
+#[must_use]
+pub fn box_and(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_AND_TAG, &[])
+}
+
+/// Equivalent to C++ `boxOR`.
+#[must_use]
+pub fn box_or(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_OR_TAG, &[])
+}
+
+/// Equivalent to C++ `boxXOR`.
+#[must_use]
+pub fn box_xor(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_XOR_TAG, &[])
+}
+
+/// Equivalent to C++ `boxLeftShift`.
+#[must_use]
+pub fn box_lsh(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_LSH_TAG, &[])
+}
+
+/// Equivalent to C++ `boxARightShift`.
+#[must_use]
+pub fn box_rsh(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_RSH_TAG, &[])
+}
+
+/// Equivalent to C++ `boxLT`.
+#[must_use]
+pub fn box_lt(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_LT_TAG, &[])
+}
+
+/// Equivalent to C++ `boxLE`.
+#[must_use]
+pub fn box_le(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_LE_TAG, &[])
+}
+
+/// Equivalent to C++ `boxGT`.
+#[must_use]
+pub fn box_gt(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_GT_TAG, &[])
+}
+
+/// Equivalent to C++ `boxGE`.
+#[must_use]
+pub fn box_ge(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_GE_TAG, &[])
+}
+
+/// Equivalent to C++ `boxEQ`.
+#[must_use]
+pub fn box_eq(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_EQ_TAG, &[])
+}
+
+/// Equivalent to C++ `boxNE`.
+#[must_use]
+pub fn box_ne(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_NE_TAG, &[])
+}
+
+/// Equivalent to C++ `boxPow`.
+#[must_use]
+pub fn box_pow(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_POW_TAG, &[])
+}
+
+/// Equivalent to C++ `boxDelay`.
+#[must_use]
+pub fn box_delay(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_DELAY_TAG, &[])
+}
+
+/// Equivalent to C++ `boxDelay1`.
+#[must_use]
+pub fn box_delay1(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_DELAY1_TAG, &[])
+}
+
+macro_rules! define_is_prim {
+    ($fn_name:ident, $tag:ident) => {
+        #[must_use]
+        pub fn $fn_name(arena: &TreeArena, b: BoxId) -> bool {
+            match_tag_arity(arena, b, $tag, 0).is_some()
+        }
+    };
+}
+
+define_is_prim!(is_box_add, BOX_ADD_TAG);
+define_is_prim!(is_box_sub, BOX_SUB_TAG);
+define_is_prim!(is_box_mul, BOX_MUL_TAG);
+define_is_prim!(is_box_div, BOX_DIV_TAG);
+define_is_prim!(is_box_rem, BOX_REM_TAG);
+define_is_prim!(is_box_and, BOX_AND_TAG);
+define_is_prim!(is_box_or, BOX_OR_TAG);
+define_is_prim!(is_box_xor, BOX_XOR_TAG);
+define_is_prim!(is_box_lsh, BOX_LSH_TAG);
+define_is_prim!(is_box_rsh, BOX_RSH_TAG);
+define_is_prim!(is_box_lt, BOX_LT_TAG);
+define_is_prim!(is_box_le, BOX_LE_TAG);
+define_is_prim!(is_box_gt, BOX_GT_TAG);
+define_is_prim!(is_box_ge, BOX_GE_TAG);
+define_is_prim!(is_box_eq, BOX_EQ_TAG);
+define_is_prim!(is_box_ne, BOX_NE_TAG);
+define_is_prim!(is_box_pow, BOX_POW_TAG);
+define_is_prim!(is_box_delay, BOX_DELAY_TAG);
+define_is_prim!(is_box_delay1, BOX_DELAY1_TAG);
 
 /// Equivalent to C++ `boxIPar`.
 #[must_use]

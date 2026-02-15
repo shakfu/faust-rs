@@ -1,10 +1,20 @@
 %start Program
 %parse-param state: &std::cell::RefCell<crate::ParseState>
 
+%left WITH
+%left LETREC
 %right SPLIT MIX
 %right SEQ
 %right PAR
 %left REC
+%left LT LE EQ GT GE NE
+%left ADD SUB OR
+%left MUL DIV MOD AND XOR LSH RSH
+%left POWOP
+%left FDELAY
+%left DELAY1
+%left DOT
+%left LPAR
 
 %token PROCESS
 %token INT FLOAT IDENT STRING FSTRING EXTRA
@@ -63,7 +73,7 @@ Definition -> tlib::TreeId:
               state.make_definition($1, nil, $3)
           })
       }
-    | DefName LPAR ArgList RPAR DEF Expression ENDDEF {
+    | DefName LPAR ParamList RPAR DEF Expression ENDDEF {
           crate::with_state(state, |state| {
               state.mark_def_at_cursor($1);
               state.make_definition($1, $3, $6)
@@ -81,7 +91,7 @@ Definition -> tlib::TreeId:
       }
     ;
 
-    DefName -> tlib::TreeId:
+DefName -> tlib::TreeId:
       IDENT {
           crate::with_state(state, |state| state.ident_from_token($lexer, $1, true))
       }
@@ -90,16 +100,44 @@ Definition -> tlib::TreeId:
       }
     ;
 
-ArgList -> tlib::TreeId:
+ParamList -> tlib::TreeId:
       IdentExpr {
           crate::with_state(state, |state| {
               let nil = state.nil();
               state.cons($1, nil)
           })
       }
-    | ArgList PAR IdentExpr {
+    | ParamList PAR IdentExpr {
           crate::with_state(state, |state| state.cons($3, $1))
       }
+    ;
+
+ArgList -> tlib::TreeId:
+      Argument {
+          crate::with_state(state, |state| {
+              let nil = state.nil();
+              state.cons($1, nil)
+          })
+      }
+    | ArgList PAR Argument {
+          crate::with_state(state, |state| state.cons($3, $1))
+      }
+    ;
+
+Argument -> tlib::TreeId:
+      Argument SEQ Argument {
+          crate::with_state(state, |state| boxes::box_seq(&mut state.arena, $1, $3))
+      }
+    | Argument SPLIT Argument {
+          crate::with_state(state, |state| boxes::box_split(&mut state.arena, $1, $3))
+      }
+    | Argument MIX Argument {
+          crate::with_state(state, |state| boxes::box_merge(&mut state.arena, $1, $3))
+      }
+    | Argument REC Argument {
+          crate::with_state(state, |state| boxes::box_rec(&mut state.arena, $1, $3))
+      }
+    | InfixExp { $1 }
     ;
 
 Expression -> tlib::TreeId:
@@ -118,29 +156,111 @@ Expression -> tlib::TreeId:
     | Expression REC Expression {
           crate::with_state(state, |state| boxes::box_rec(&mut state.arena, $1, $3))
       }
-    | Atom { $1 }
+    | InfixExp { $1 }
     ;
 
-Atom -> tlib::TreeId:
-      WIRE {
-          crate::with_state(state, |state| boxes::box_wire(&mut state.arena))
+InfixExp -> tlib::TreeId:
+      InfixExp ADD InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Add))
       }
-    | CUT {
-          crate::with_state(state, |state| boxes::box_cut(&mut state.arena))
+    | InfixExp SUB InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Sub))
       }
-    | INT {
+    | InfixExp MUL InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Mul))
+      }
+    | InfixExp DIV InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Div))
+      }
+    | InfixExp MOD InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Rem))
+      }
+    | InfixExp POWOP InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Pow))
+      }
+    | InfixExp FDELAY InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Delay))
+      }
+    | InfixExp DELAY1 {
+          crate::with_state(state, |state| state.postfix_prim($1, crate::PrimitiveOp::Delay1))
+      }
+    | InfixExp DOT IdentExpr {
+          crate::with_state(state, |state| state.access_box($1, $3))
+      }
+    | InfixExp AND InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::And))
+      }
+    | InfixExp OR InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Or))
+      }
+    | InfixExp XOR InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Xor))
+      }
+    | InfixExp LSH InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Lsh))
+      }
+    | InfixExp RSH InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Rsh))
+      }
+    | InfixExp LT InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Lt))
+      }
+    | InfixExp LE InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Le))
+      }
+    | InfixExp GT InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Gt))
+      }
+    | InfixExp GE InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Ge))
+      }
+    | InfixExp EQ InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Eq))
+      }
+    | InfixExp NE InfixExp {
+          crate::with_state(state, |state| state.binary_prim($1, $3, crate::PrimitiveOp::Ne))
+      }
+    | InfixExp LPAR ArgList RPAR {
+          crate::with_state(state, |state| state.apply_box($1, $3))
+      }
+    | Primitive { $1 }
+    ;
+
+Primitive -> tlib::TreeId:
+      INT {
           crate::with_state(state, |state| state.int_from_token($lexer, $1))
       }
     | FLOAT {
           crate::with_state(state, |state| state.float_from_token($lexer, $1))
       }
+    | ADD INT {
+          crate::with_state(state, |state| state.signed_int_from_token($lexer, $2, 1))
+      }
+    | ADD FLOAT {
+          crate::with_state(state, |state| state.signed_float_from_token($lexer, $2, 1.0))
+      }
+    | SUB INT {
+          crate::with_state(state, |state| state.signed_int_from_token($lexer, $2, -1))
+      }
+    | SUB FLOAT {
+          crate::with_state(state, |state| state.signed_float_from_token($lexer, $2, -1.0))
+      }
+    | WIRE {
+          crate::with_state(state, |state| boxes::box_wire(&mut state.arena))
+      }
+    | CUT {
+          crate::with_state(state, |state| boxes::box_cut(&mut state.arena))
+      }
     | IdentExpr { $1 }
-    | LPAR Expression RPAR { $2 }
-    | IPAR LPAR IdentExpr PAR INT PAR Expression RPAR {
+    | SUB IdentExpr {
           crate::with_state(state, |state| {
-              let count = state.int_from_token($lexer, $5);
-              boxes::box_ipar(&mut state.arena, $3, count, $7)
+              let zero = boxes::box_int(&mut state.arena, 0);
+              state.binary_prim(zero, $2, crate::PrimitiveOp::Sub)
           })
+      }
+    | LPAR Expression RPAR { $2 }
+    | IPAR LPAR IdentExpr PAR Argument PAR Expression RPAR {
+          crate::with_state(state, |state| boxes::box_ipar(&mut state.arena, $3, $5, $7))
       }
     ;
 
