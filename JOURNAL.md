@@ -729,3 +729,23 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline`
+
+### Gate B step 7 (Go/No-Go decision: `lrlex/lrpar` parser-proto viability)
+
+- Evaluated Gate B against the acceptance criteria defined in the plan:
+  - Gate A status (`tlib-core`): **Go**.
+  - Gate A.5 status (`boxes` parser subset): **Go**.
+  - prototype/secondary corpus parse pass:
+    - `tests/corpus/rep_01` ... `rep_10`: `10/10` (`100%`) accepted by Rust parser-proto.
+  - unresolved grammar conflicts in core expression path:
+    - `0` (current Slice 1/2/3 grammar compiles under `error_on_conflicts`).
+  - malformed-input recovery fixtures:
+    - `2/2` pass (`Recovered` on Rust, parse error class on C++).
+- Decision for Gate B:
+  - **Go** for parser migration prototype viability (`faustparser.y`/`faustlexer.l` -> `lrpar`/`lrlex`) on the validated Slice 1/2/3 scope.
+- Non-blocking residual scope (explicitly out of this gate):
+  - full grammar coverage beyond Slice 3 (imports, pattern matching, route, signatures, metadata full matrix),
+  - stdlib-wide and large-corpus parse coverage,
+  - structural tree-shape differential beyond parse/recovery class checks.
+- Consequence:
+  - proceed from prototype gate validation to incremental integration path (parser coverage expansion + eventual merge plan from `parser-proto` into production `parser` when target slices are stabilized).
