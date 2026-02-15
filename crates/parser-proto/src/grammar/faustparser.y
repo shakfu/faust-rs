@@ -259,7 +259,6 @@ LexProbeToken -> u8:
     | FCONSTANT { 0 }
     | FFUNCTION { 0 }
     | FIXEDPOINTMODE { 0 }
-    | FLOATCAST { 0 }
     | FLOATMODE { 0 }
     | FLOOR { 0 }
     | FMOD { 0 }
@@ -267,7 +266,6 @@ LexProbeToken -> u8:
     | HGROUP { 0 }
     | IMPORT { 0 }
     | INPUTS { 0 }
-    | INTCAST { 0 }
     | LAMBDA { 0 }
     | LBRAQ { 0 }
     | LCROC { 0 }
@@ -492,6 +490,12 @@ Primitive -> tlib::TreeId:
       }
     | PREFIX {
           crate::with_state(state, |state| boxes::box_prefix(&mut state.arena))
+      }
+    | INTCAST {
+          crate::with_state(state, |state| boxes::box_int_cast(&mut state.arena))
+      }
+    | FLOATCAST {
+          crate::with_state(state, |state| boxes::box_float_cast(&mut state.arena))
       }
     | ADD {
           crate::with_state(state, |state| boxes::box_add(&mut state.arena))

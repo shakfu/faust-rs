@@ -240,6 +240,16 @@ fn load_cases() -> Result<Vec<Case>, String> {
         expect_valid: true,
     });
     cases.push(Case {
+        name: "int_cast_primitive".to_owned(),
+        source: "process = _ : int;\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "float_cast_primitive".to_owned(),
+        source: "process = _ : float;\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
         name: "prefix_primitive".to_owned(),
         source: "process = 0, _ : prefix;\n".to_owned(),
         expect_valid: true,

@@ -1123,3 +1123,31 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline --no-fail-fast`
+
+### Gate B remaining step 3 (grammar parity progress: parser-level cast primitives `int`/`float`)
+
+- Reintroduced parser-level cast primitives in `Primitive`:
+  - `INTCAST` -> `boxes::box_int_cast(...)`
+  - `FLOATCAST` -> `boxes::box_float_cast(...)`
+  - file: `crates/parser-proto/src/grammar/faustparser.y`
+- Kept foreign-signature type parsing unchanged (`Type`/`ArgType`), but resolved strict parser conflicts by removing now-supported cast tokens from `LexProbeToken` recovery alternatives:
+  - removed `INTCAST` and `FLOATCAST` from `LexProbeToken`.
+- Result:
+  - strict parser generation remains conflict-free under Gate B strict settings (`0` unresolved shift/reduce or reduce/reduce conflicts).
+- Extended tests:
+  - `crates/parser-proto/tests/parser_slice10_primitives.rs`
+    - primitive matrix now includes `int` and `float` cast tokens in parsed expression coverage.
+
+### Gate B remaining step 8 (differential suite expansion: cast primitive cases)
+
+- Extended differential harness (`crates/parser-proto/tests/cpp_differential.rs`) with:
+  - `int_cast_primitive`: `process = _ : int;`
+  - `float_cast_primitive`: `process = _ : float;`
+- Differential run (C++ source-of-truth root `/Users/letz/Developpements/RUST/faust`, commit `8eebea429`, binary `/usr/local/bin/faust`) passed:
+  - both new cast cases classify as valid on Rust and C++ (`Ok/Ok`).
+- Validation:
+  - `cargo test -p parser-proto --test parser_slice10_primitives --offline --no-fail-fast`
+  - `cargo test -p parser-proto --test cpp_differential --offline -- --nocapture`
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline --no-fail-fast`

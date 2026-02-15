@@ -1,7 +1,7 @@
 use boxes::{
-    is_box_assert_bounds, is_box_attach, is_box_control, is_box_enable, is_box_highest,
-    is_box_lowest, is_box_pow, is_box_prefix, is_box_read_only_table, is_box_select2,
-    is_box_select3, is_box_write_read_table,
+    is_box_assert_bounds, is_box_attach, is_box_control, is_box_enable, is_box_float_cast,
+    is_box_highest, is_box_int_cast, is_box_lowest, is_box_pow, is_box_prefix,
+    is_box_read_only_table, is_box_select2, is_box_select3, is_box_write_read_table,
 };
 use parser_proto::parse_program;
 use tlib::{TreeArena, TreeId};
@@ -32,7 +32,7 @@ fn flatten_top_par(arena: &TreeArena, expr: TreeId, out: &mut Vec<TreeId>) {
 fn supports_extended_primitive_tokens() {
     let src = concat!(
         "process = ",
-        "pow, prefix, rdtable, rwtable, select2, select3, ",
+        "pow, prefix, int, float, rdtable, rwtable, select2, select3, ",
         "assertbounds, lowest, highest, attach, enable, control;",
     );
     let output = parse_program(src, "slice10_primitives.dsp");
@@ -47,18 +47,20 @@ fn supports_extended_primitive_tokens() {
     let expr = definition_expr(&output.state.arena, def);
     let mut elems = Vec::new();
     flatten_top_par(&output.state.arena, expr, &mut elems);
-    assert_eq!(elems.len(), 12);
+    assert_eq!(elems.len(), 14);
 
     assert!(is_box_pow(&output.state.arena, elems[0]));
     assert!(is_box_prefix(&output.state.arena, elems[1]));
-    assert!(is_box_read_only_table(&output.state.arena, elems[2]));
-    assert!(is_box_write_read_table(&output.state.arena, elems[3]));
-    assert!(is_box_select2(&output.state.arena, elems[4]));
-    assert!(is_box_select3(&output.state.arena, elems[5]));
-    assert!(is_box_assert_bounds(&output.state.arena, elems[6]));
-    assert!(is_box_lowest(&output.state.arena, elems[7]));
-    assert!(is_box_highest(&output.state.arena, elems[8]));
-    assert!(is_box_attach(&output.state.arena, elems[9]));
-    assert!(is_box_enable(&output.state.arena, elems[10]));
-    assert!(is_box_control(&output.state.arena, elems[11]));
+    assert!(is_box_int_cast(&output.state.arena, elems[2]));
+    assert!(is_box_float_cast(&output.state.arena, elems[3]));
+    assert!(is_box_read_only_table(&output.state.arena, elems[4]));
+    assert!(is_box_write_read_table(&output.state.arena, elems[5]));
+    assert!(is_box_select2(&output.state.arena, elems[6]));
+    assert!(is_box_select3(&output.state.arena, elems[7]));
+    assert!(is_box_assert_bounds(&output.state.arena, elems[8]));
+    assert!(is_box_lowest(&output.state.arena, elems[9]));
+    assert!(is_box_highest(&output.state.arena, elems[10]));
+    assert!(is_box_attach(&output.state.arena, elems[11]));
+    assert!(is_box_enable(&output.state.arena, elems[12]));
+    assert!(is_box_control(&output.state.arena, elems[13]));
 }
