@@ -338,6 +338,30 @@ ParamList -> tlib::TreeId:
       }
     ;
 
+ModEntry -> tlib::TreeId:
+      UQString {
+          crate::with_state(state, |state| {
+              let nil = state.nil();
+              state.cons($1, nil)
+          })
+      }
+    | UQString SEQ Argument {
+          crate::with_state(state, |state| state.cons($1, $3))
+      }
+    ;
+
+ModList -> tlib::TreeId:
+      ModEntry {
+          crate::with_state(state, |state| {
+              let nil = state.nil();
+              state.cons($1, nil)
+          })
+      }
+    | ModList PAR ModEntry {
+          crate::with_state(state, |state| state.cons($3, $1))
+      }
+    ;
+
 ArgList -> tlib::TreeId:
       Argument {
           crate::with_state(state, |state| {
@@ -698,6 +722,9 @@ Primitive -> tlib::TreeId:
       }
     | LAMBDA LPAR ParamList RPAR DOT LPAR Expression RPAR {
           crate::with_state(state, |state| state.box_lambda($3, $7))
+      }
+    | LCROC ModList LAPPLY Expression RCROC {
+          crate::with_state(state, |state| state.build_box_modulation($2, $4))
       }
     | IdentExpr { $1 }
     | SUB IdentExpr {

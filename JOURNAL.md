@@ -1449,3 +1449,27 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p parser-proto --offline --no-fail-fast`
   - `cargo run -p xtask --offline -- parser-parity-report`
   - `cargo fmt --all`
+
+### Parity closure step 2 (`modentry`/`modlist` + bracket modulation form)
+
+- Ported C++ modulation grammar rules from source of truth:
+  - `/Users/letz/Developpements/RUST/faust/compiler/parser/faustparser.y`
+  - `modentry`, `modlist`, and `LCROC modlist LAPPLY expression RCROC`.
+- Added equivalent Rust grammar coverage:
+  - `crates/parser-proto/src/grammar/faustparser.y`
+  - new nonterminals `ModEntry` and `ModList`
+  - primitive form `[modlist -> expression]`.
+- Added parser semantic actions matching C++ `boxModulation` and `buildBoxModulation` behavior:
+  - `crates/parser-proto/src/lib.rs`
+  - `ParseState::{box_modulation,build_box_modulation}`.
+- Added focused parser tests:
+  - `crates/parser-proto/tests/parser_slice12_modulation.rs`
+  - verifies bracket modulation acceptance and nested-entry order parity (`a` outer, then `b`).
+- Updated parity report baseline:
+  - `porting/phases/phase-3-parser-parity-report-en.md`
+  - unresolved nonterminals reduced from `2` to `0`.
+- Validation:
+  - `cargo test -p parser-proto --test parser_slice12_modulation --offline --no-fail-fast`
+  - `cargo test -p parser-proto --offline --no-fail-fast`
+  - `cargo run -p xtask --offline -- parser-parity-report`
+  - `cargo fmt --all`

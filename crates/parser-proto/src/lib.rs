@@ -288,6 +288,29 @@ impl ParseState {
         boxes::build_box_abstr(&mut self.arena, params, body)
     }
 
+    /// Equivalent to C++ `boxModulation(x, y)`.
+    #[must_use]
+    pub fn box_modulation(&mut self, x: TreeId, y: TreeId) -> TreeId {
+        self.arena
+            .intern(NodeKind::Tag("BOXMODULATION".into()), &[x, y])
+    }
+
+    /// Equivalent to C++ `buildBoxModulation(largs, body)`.
+    #[must_use]
+    pub fn build_box_modulation(&mut self, largs: TreeId, body: TreeId) -> TreeId {
+        if self.arena.is_nil(largs) {
+            return body;
+        }
+        let Some(head) = self.arena.hd(largs) else {
+            return body;
+        };
+        let Some(tail) = self.arena.tl(largs) else {
+            return body;
+        };
+        let nested = self.box_modulation(head, body);
+        self.build_box_modulation(tail, nested)
+    }
+
     fn case_rules_arity_reference(&self, rules: TreeId) -> Option<usize> {
         let first_rule = self.arena.hd(rules)?;
         let (lhs, _rhs) = self.pair_cell(first_rule)?;
