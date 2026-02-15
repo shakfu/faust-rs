@@ -698,3 +698,34 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline`
+
+### Gate B step 6 (Rust vs C++ differential validation: parse/recovery classes)
+
+- Added dedicated differential harness:
+  - `crates/parser-proto/tests/cpp_differential.rs`
+- Harness compares Rust `parser-proto` and C++ `faust` on:
+  - `tests/corpus/rep_01_passthrough.dsp` ... `rep_10_two_in_two_out_ui.dsp`
+  - malformed fixtures:
+    - `malformed_empty_rhs`: `process = ;`
+    - `malformed_missing_rpar`: `process = hslider("g", 0.5, 0.0, 1.0, 0.01;`
+- Classification used:
+  - Rust: `Ok` / `Recovered` / `Error` (from parse root + `ParserCtx` error/recovery counters),
+  - C++: `Ok` / `ParseError` / `OtherError` (process status + diagnostics text).
+- C++ reference used for this run:
+  - source-of-truth root: `/Users/letz/Developpements/RUST/faust`
+  - source commit: `8eebea429`
+  - executable used by harness: `/usr/local/bin/faust`
+- Observed results (all matched expectations):
+  - valid corpus cases (`rep_01..rep_10`): `Rust=Ok`, `C++=Ok`
+  - malformed fixtures:
+    - `malformed_empty_rhs`: `Rust=Recovered` (recovery path triggered), `C++=ParseError`
+    - `malformed_missing_rpar`: `Rust=Recovered` (parser error path), `C++=ParseError`
+- Differential status for Step 6:
+  - parse class parity on valid corpus: pass
+  - malformed-input detection parity: pass
+  - no class mismatches in current Slice 3 scope.
+- Validation:
+  - `cargo test -p parser-proto --test cpp_differential --offline -- --nocapture`
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline`
