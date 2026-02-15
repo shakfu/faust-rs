@@ -181,6 +181,8 @@ pub fn fetch_url(url: &str) -> Result<String, FaustError>;
 ```
 
 External dependency: `ureq` or `reqwest` (optional feature).
+Lifecycle/status tracking is documented in:
+- `phases/phase-3-parser-adjacent-modules-status-en.md`.
 
 ### 3.4 Coating (coating.hh/.cpp)
 
@@ -197,6 +199,8 @@ impl Enrobage {
     pub fn find_insertion_points(&self) -> Vec<InsertionPoint>;
 }
 ```
+Lifecycle/status tracking is documented in:
+- `phases/phase-3-parser-adjacent-modules-status-en.md`.
 
 ### 3.5 Public parser API
 
@@ -364,6 +368,7 @@ Remaining steps to reach full parser completion:
 
 7. Port optional parser-adjacent modules (`SourceFetcher`, `Enrobage`) per scope decisions.
 - Deliverable: feature-gated implementations and tests (or explicit deferred status in mapping docs).
+- Mapping artifact path: `phases/phase-3-parser-adjacent-modules-status-en.md`.
 - Pass criterion: lifecycle/API status is explicit (`1:1` / `adapted` / `deferred`) and validated.
 
 8. Expand differential validation scope.

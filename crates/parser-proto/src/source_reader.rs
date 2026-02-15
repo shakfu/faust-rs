@@ -8,6 +8,9 @@
 //! - Search-path based import resolution.
 //! - Recursive import expansion with cycle detection.
 //! - Read cache and used-file tracking for deterministic parser runs.
+//! - Local-file import policy in Gate B prototype:
+//!   - URL/network fetch is intentionally out-of-scope in `parser-proto` and tracked as deferred
+//!     in Phase 3 porting docs (no temporary network stub in this crate).
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;

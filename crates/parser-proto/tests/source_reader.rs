@@ -79,3 +79,29 @@ fn detects_import_cycles() {
 
     fs::remove_dir_all(root).expect("temp root should be removable");
 }
+
+#[test]
+fn url_imports_are_unresolved_in_parser_proto_scope() {
+    let root = make_temp_root("url_import");
+    let main = root.join("main.dsp");
+
+    fs::write(
+        &main,
+        "import(\"https://example.com/stdfaust.lib\");\nprocess = _;\n",
+    )
+    .expect("main should be written");
+
+    let mut reader = SourceReader::new(vec![root.clone()]);
+    let err = reader
+        .read_file(&main)
+        .expect_err("URL import should remain unresolved in parser-proto scope");
+
+    match err {
+        SourceReaderError::UnresolvedImport { name, .. } => {
+            assert_eq!(name.as_ref(), "https://example.com/stdfaust.lib");
+        }
+        other => panic!("expected UnresolvedImport, got {other}"),
+    }
+
+    fs::remove_dir_all(root).expect("temp root should be removable");
+}

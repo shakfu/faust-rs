@@ -1198,3 +1198,26 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`
   - `cargo test -p parser-proto --offline --no-fail-fast`
+
+### Gate B remaining step 7 (optional parser-adjacent modules status: `SourceFetcher` / `Enrobage`)
+
+- Added explicit lifecycle/API status artifact:
+  - `porting/phases/phase-3-parser-adjacent-modules-status-en.md`
+  - status is now explicit for both modules with rationale, owner, milestone, and validation:
+    - `sourcefetcher`: `deferred` to Phase 9 integration (feature-policy + reproducibility constraints),
+    - `enrobage`: `deferred` to Phase 9 integration with crate-boundary adaptation toward `compiler`/`codegen`/`doc` orchestration (not parser-core).
+- Linked this artifact in parser phase plan:
+  - `porting/phases/phase-3-parser-en.md`:
+    - sections `3.3` and `3.4`,
+    - remaining step `7` mapping artifact path.
+- Locked current prototype behavior in tests (no hidden network stub):
+  - `crates/parser-proto/tests/source_reader.rs`:
+    - added `url_imports_are_unresolved_in_parser_proto_scope`,
+    - asserts URL imports are reported as `UnresolvedImport` in current Phase 3 scope.
+- Added explicit scope provenance in `SourceReader` Rustdoc:
+  - `crates/parser-proto/src/source_reader.rs`.
+- Validation:
+  - `cargo test -p parser-proto --test source_reader --offline --no-fail-fast`
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline --no-fail-fast`
