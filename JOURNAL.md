@@ -245,3 +245,17 @@ Execution plan (Phase 0 prototype, revised):
 - Usage:
   - `cargo run -p tlib --bin treearena_bench -- <n>`
   - default `n=200000`.
+
+### Gate A step 5 (`tlib-core` benchmark report deliverable)
+
+- Added initial Gate A benchmark report:
+  - `porting/phases/phase-0-treearena-benchmark-report-en.md`
+- Recorded reproducible Rust measurements for `n=200000`:
+  - `create_ms=674.245`
+  - `lookup_ms=331.478`
+  - `traversal_ms=376.075`
+  - `property_set_ms=149.930`
+  - `property_get_ms=85.656`
+  - `arena_nodes=600002`
+- Linked the report in `porting/phases/phase-0-validation-en.md`.
+- Gate A marked as conditional pending C++ baseline ratio table (`<= 2x` target).

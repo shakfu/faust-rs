@@ -85,7 +85,7 @@ Primary goals:
   - capability matrix draft
   - API lifecycle contract
   - baseline differential protocol
-  - TreeArena performance report (results, thresholds, decision)
+  - TreeArena performance report (results, thresholds, decision) (`phase-0-treearena-benchmark-report-en.md`)
 - Go/No-Go decision with explicit blockers list.
 - If blockers exist: mitigation plan with owner and target phase.
 
