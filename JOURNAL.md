@@ -391,3 +391,43 @@ Execution plan (Phase 0 prototype, revised):
 - Conclusion:
   - pre-allocation gives clear wins on `create`, `traversal`, and property passes,
   - slight `lookup` regression (~3.3%) remains on this protocol, so keep pre-allocation as opt-in API for now (not default path).
+
+### Gate A step 15 (`tlib` coverage status checkpoint)
+
+- Recorded current validation status for `tlib` only (not full compiler parity).
+- Considered as covered in current `tlib` scope:
+  - hash-consing identity reuse (`intern` structural sharing),
+  - list primitives (`cons`/`hd`/`tl`, `is_nil`, `is_list`),
+  - property API semantics (string and interned-key paths, clear/remove behavior),
+  - Rust vs C++ micro-benchmark parity envelope and optimization history.
+- Identified remaining gaps before calling `tlib` validation "exhaustive":
+  - broader `NodeKind` semantic matrix (`float`, `string_lit`, mixed symbol/tag edge cases),
+  - explicit coverage for arity `>=3` interning fallback paths under high cardinality,
+  - adversarial hash/collision-style stress cases,
+  - determinism checks (stable structure/IDs across repeated builds for identical construction order),
+  - memory growth and peak-allocation tracking alongside timing metrics,
+  - reserve/pre-allocation invariants on very large, sparse `TreeId` distributions.
+- Decision:
+  - current `tlib` validation level is sufficient for Phase 0 Go,
+  - not yet marked as "exhaustive"; above gap list remains the backlog for hardening.
+
+### Gate A step 16 (process rule sync: unit tests during porting)
+
+- Updated `AGENTS.md` to make the testing rule explicit:
+  - each porting change must add/update unit tests in touched crate(s),
+  - if immediate tests are not possible, the exception must be documented in `JOURNAL.md` with owner and follow-up plan.
+- Purpose:
+  - align `AGENTS.md` wording with the existing rule already present in `porting/faust-rust-porting-plan-en.md`.
+
+### Gate A step 17 (process rule sync: source provenance in Rustdoc)
+
+- Added an explicit documentation rule in `AGENTS.md`:
+  - migrated code must carry source-provenance in Rustdoc (`///`/`//!`) with C++ source references and parity-relevant invariants/behavior notes.
+- Updated `porting/faust-rust-porting-plan-en.md`:
+  - elevated source-provenance Rustdoc to a global migration objective,
+  - clarified expected Rustdoc provenance content during porting (`source path + invariants`).
+- Updated `porting/phases/phase-0-validation-en.md`:
+  - added a dedicated "source-provenance documentation discipline" validation item,
+  - added corresponding deliverable, go/no-go criteria, and exit-checklist entry.
+- Updated `porting/faust-rust-points-critiques-en.md`:
+  - added source-provenance Rustdoc requirement in the top-level prototype execution rules.

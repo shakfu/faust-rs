@@ -5,6 +5,7 @@
 > **Principle**: Each critical point has a **minimal prototype** that can be completed in 0.5–2 days. If a prototype fails, we know the problem before having invested months.
 > **Implementation rule**: Prefer prototypes wired to real crate APIs and real data paths; avoid temporary stubs unless explicitly justified, owner-assigned, and scheduled for removal in the same phase gate.
 > **Execution rule**: Every prototype must define explicit deliverables and pass criteria up front.
+> **Documentation rule**: As code is ported, record C++ source provenance and parity-critical invariants directly in Rustdoc (`///`/`//!`).
 
 ---
 

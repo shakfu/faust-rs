@@ -16,6 +16,7 @@ Primary goals:
 - Validate API lifecycle model and integration constraints.
 - Lock differential testing baseline and acceptance thresholds.
 - Enforce stub minimization in validation prototypes.
+- Define and enforce source-provenance documentation in Rustdoc format during porting.
 - Require explicit deliverables and pass criteria per validation task before execution.
 - Surface blockers early with explicit go/no-go criteria.
 
@@ -74,6 +75,13 @@ Primary goals:
   - removal milestone within the same phase gate.
 - Add a "stub debt" tracker entry to prevent carry-over into subsequent phases.
 
+### 2.10 Source-provenance documentation discipline
+- Define a Rustdoc convention for migrated code (`///` / `//!`) with:
+  - source C++ file/function reference,
+  - parity-sensitive invariants and behavior notes.
+- Apply the convention in all Phase 0 prototypes touching core migration risks.
+- Record exceptions in `JOURNAL.md` when provenance cannot be attached immediately (owner + follow-up milestone).
+
 ---
 
 ## 3. Deliverables
@@ -85,6 +93,7 @@ Primary goals:
   - capability matrix draft
   - API lifecycle contract
   - baseline differential protocol
+  - Rustdoc source-provenance convention for migrated modules
   - TreeArena performance report (results, thresholds, decision) (`phase-0-treearena-benchmark-report-en.md`)
 - Go/No-Go decision with explicit blockers list.
 - If blockers exist: mitigation plan with owner and target phase.
@@ -99,6 +108,7 @@ Go:
 - API lifecycle model is unified and accepted.
 - Capability matrix approach is defined and testable.
 - Differential baseline corpus and procedure are ready.
+- Rustdoc source-provenance convention is defined and applied on touched prototypes.
 - TreeArena hash-consing performance is validated against agreed thresholds.
 - No untracked stubs remain in Phase 0 prototypes.
 
@@ -107,6 +117,7 @@ No-Go:
 - Scope is not frozen or remains contradictory across docs.
 - API lifecycle remains divergent with no agreed target contract.
 - Differential baseline cannot be reproduced reliably.
+- Source-provenance remains implicit (no Rustdoc convention and no tracked exceptions).
 - TreeArena performance is outside agreed limits with no credible mitigation path.
 - Stub-dependent prototypes hide target architecture boundaries or carry unowned stub debt.
 
@@ -126,6 +137,7 @@ No-Go:
 - [ ] Typed output sink model documented
 - [ ] Recursion/stack strategy documented
 - [ ] Differential corpus and acceptance rules finalized
+- [ ] Rustdoc source-provenance convention defined and applied on touched prototypes
 - [ ] TreeArena hash-consing benchmarks completed and reviewed
 - [ ] Stub debt tracker reviewed (no unowned/unplanned carry-over)
 - [ ] Final Go/No-Go decision recorded

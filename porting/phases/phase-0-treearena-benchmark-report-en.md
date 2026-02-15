@@ -137,3 +137,26 @@ Median results:
 Decision:
 - Keep explicit pre-allocation as an opt-in API.
 - Do not force it as default benchmark/compiler path yet due small `lookup` regression on this protocol.
+
+## 7. `tlib`-only coverage status (checkpoint)
+
+Scope note:
+- This checkpoint applies only to `tlib` prototype validation, not full compiler pipeline parity.
+
+Covered now:
+- structural hash-consing behavior on parser-like workloads,
+- list behavior (`cons`/`hd`/`tl`) and nil/list predicates,
+- property semantics on both string-key and interned-key APIs,
+- Rust/C++ comparative micro-benchmarking with reproducible harnesses.
+
+Not yet exhaustive:
+- full `NodeKind` edge-case matrix (`float`, string-literal, mixed symbol/tag corner cases),
+- dedicated stress for arity `>=3` (`interner_n`) under large/high-entropy workloads,
+- collision/adversarial hashing scenarios,
+- explicit determinism tests for repeated identical construction sequences,
+- memory-usage and peak-allocation comparison (not only time metrics),
+- sparse-distribution reserve/pre-allocation behavior at larger scales.
+
+Checkpoint decision:
+- validation level is sufficient for Phase 0 Go in current plan,
+- keep the above list as mandatory hardening backlog before declaring `tlib` validation exhaustive.

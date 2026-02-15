@@ -43,6 +43,7 @@ The objective of the port is to reproduce this pipeline in idiomatic Rust, takin
 - **Allow parallel compilation** of multiple `.dsp` files and simultaneous generation to multiple backends
 - Prefer real end-to-end integrations over temporary stubs; if a stub is unavoidable, it must be explicitly time-boxed, tracked, and removed within the same phase gate.
 - Require explicit deliverables and pass criteria for each phase/prototype before implementation starts.
+- Document migrated source provenance continuously in Rustdoc format (`///`/`//!`) with C++ source references and parity-relevant invariants.
 
 Related design note (recursion representation and RouteIR coexistence):
 - `faust-rust-recursion-model-note-en.md`
@@ -924,6 +925,9 @@ For **each phase** of the porting, the following procedure must be followed:
    - Each `pub fn` has a comment `///` with examples
    - Each `pub struct` and `pub enum` is documented
    - Modules have an introductory comment `//!`
+   - Ported logic includes a short provenance block in Rustdoc, for example:
+     - source C++ file/function path(s),
+     - parity-sensitive invariants and behavior notes kept during migration.
 2. **Write unit tests** alongside the code
 3. **Enrich the logbook** (`JOURNAL.md`) with:
    - Date and description of what was done
