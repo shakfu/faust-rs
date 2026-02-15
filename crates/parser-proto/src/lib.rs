@@ -706,6 +706,13 @@ pub fn parse_program(input: &str, source_file: &str) -> ParseOutput {
 
     let mut rendered_errors = Vec::with_capacity(errors.len());
     for err in errors {
+        let span = match &err {
+            lrpar::LexParseError::LexError(e) => e.span(),
+            lrpar::LexParseError::ParseError(e) => e.lexeme().span(),
+        };
+        let ((line, _col), _) = lexer.line_col(span);
+        let line = u32::try_from(line).unwrap_or(u32::MAX);
+        state.ctx.set_cursor(source_file, line);
         let message = err.pp(&lexer, &faustparser_y::token_epp).to_string();
         state.ctx.error(&message);
         rendered_errors.push(message);

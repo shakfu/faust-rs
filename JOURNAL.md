@@ -1151,3 +1151,25 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline --no-fail-fast`
+
+### Gate B remaining step 5 (malformed diagnostics/recovery parity envelope)
+
+- Added dedicated malformed diagnostics suite:
+  - `crates/parser-proto/tests/parser_diagnostics.rs`
+  - validates, for malformed fixtures:
+    - Rust parse class is not `Ok`,
+    - parser error/recovery path is reached,
+    - parser diagnostic location is present and tied to expected source file + line.
+- Added optional C++ envelope cross-check in the same suite:
+  - compares malformed class only (`not Ok` on both sides),
+  - using C++ source-of-truth binary (`FAUST_CPP_BIN` or `/usr/local/bin/faust`).
+- Fixed one diagnostics location parity gap in parser runtime:
+  - `crates/parser-proto/src/lib.rs` (`parse_program`):
+    - when recording `lrpar` errors into `ParserCtx`, cursor is now updated from the failing lexeme span before emitting the diagnostic.
+  - impact:
+    - malformed `declare` and other `lrpar`-driven errors now carry the correct file/line in `ParserCtx` diagnostics instead of fallback cursor state.
+- Validation:
+  - `cargo test -p parser-proto --test parser_diagnostics --offline --no-fail-fast`
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline --no-fail-fast`
