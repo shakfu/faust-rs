@@ -562,6 +562,15 @@ Primitive -> tlib::TreeId:
     | MAX {
           crate::with_state(state, |state| boxes::box_max(&mut state.arena))
       }
+    | FFUNCTION LPAR Signature PAR FString PAR RawString RPAR {
+          crate::with_state(state, |state| state.box_foreign_function($3, $5, $7))
+      }
+    | FCONSTANT LPAR Type Name PAR FString RPAR {
+          crate::with_state(state, |state| boxes::box_fconst(&mut state.arena, $3, $4, $6))
+      }
+    | FVARIABLE LPAR Type Name PAR FString RPAR {
+          crate::with_state(state, |state| boxes::box_fvar(&mut state.arena, $3, $4, $6))
+      }
     | COMPONENT LPAR UQString RPAR {
           crate::with_state(state, |state| boxes::box_component(&mut state.arena, $3))
       }
@@ -625,6 +634,121 @@ Primitive -> tlib::TreeId:
           })
       }
     | LPAR Expression RPAR { $2 }
+    ;
+
+Signature -> tlib::TreeId:
+      Type FunName LPAR TypeList RPAR {
+          crate::with_state(state, |state| {
+              let names = state.foreign_name_slots($2, None, None, None);
+              state.foreign_signature($1, names, $4)
+          })
+      }
+    | Type FunName OR FunName LPAR TypeList RPAR {
+          crate::with_state(state, |state| {
+              let names = state.foreign_name_slots($2, Some($4), None, None);
+              state.foreign_signature($1, names, $6)
+          })
+      }
+    | Type FunName OR FunName OR FunName LPAR TypeList RPAR {
+          crate::with_state(state, |state| {
+              let names = state.foreign_name_slots($2, Some($4), Some($6), None);
+              state.foreign_signature($1, names, $8)
+          })
+      }
+    | Type FunName OR FunName OR FunName OR FunName LPAR TypeList RPAR {
+          crate::with_state(state, |state| {
+              let names = state.foreign_name_slots($2, Some($4), Some($6), Some($8));
+              state.foreign_signature($1, names, $10)
+          })
+      }
+    | Type FunName LPAR RPAR {
+          crate::with_state(state, |state| {
+              let names = state.foreign_name_slots($2, None, None, None);
+              let nil = state.nil();
+              state.foreign_signature($1, names, nil)
+          })
+      }
+    | Type FunName OR FunName LPAR RPAR {
+          crate::with_state(state, |state| {
+              let names = state.foreign_name_slots($2, Some($4), None, None);
+              let nil = state.nil();
+              state.foreign_signature($1, names, nil)
+          })
+      }
+    | Type FunName OR FunName OR FunName LPAR RPAR {
+          crate::with_state(state, |state| {
+              let names = state.foreign_name_slots($2, Some($4), Some($6), None);
+              let nil = state.nil();
+              state.foreign_signature($1, names, nil)
+          })
+      }
+    | Type FunName OR FunName OR FunName OR FunName LPAR RPAR {
+          crate::with_state(state, |state| {
+              let names = state.foreign_name_slots($2, Some($4), Some($6), Some($8));
+              let nil = state.nil();
+              state.foreign_signature($1, names, nil)
+          })
+      }
+    ;
+
+TypeList -> tlib::TreeId:
+      ArgType {
+          crate::with_state(state, |state| {
+              let nil = state.nil();
+              state.cons($1, nil)
+          })
+      }
+    | TypeList PAR ArgType {
+          crate::with_state(state, |state| state.cons($3, $1))
+      }
+    ;
+
+Type -> tlib::TreeId:
+      INTCAST {
+          crate::with_state(state, |state| state.foreign_type_code(0))
+      }
+    | FLOATCAST {
+          crate::with_state(state, |state| state.foreign_type_code(1))
+      }
+    ;
+
+ArgType -> tlib::TreeId:
+      INTCAST {
+          crate::with_state(state, |state| state.foreign_type_code(0))
+      }
+    | FLOATCAST {
+          crate::with_state(state, |state| state.foreign_type_code(1))
+      }
+    | NOTYPECAST {
+          crate::with_state(state, |state| state.foreign_type_code(2))
+      }
+    ;
+
+FunName -> tlib::TreeId:
+      IDENT {
+          crate::with_state(state, |state| state.symbol_from_token($lexer, $1, false))
+      }
+    ;
+
+Name -> tlib::TreeId:
+      IDENT {
+          crate::with_state(state, |state| state.symbol_from_token($lexer, $1, true))
+      }
+    ;
+
+FString -> tlib::TreeId:
+      STRING {
+          crate::with_state(state, |state| state.raw_symbol_from_token($lexer, $1))
+      }
+    | FSTRING {
+          crate::with_state(state, |state| state.raw_symbol_from_token($lexer, $1))
+      }
+    ;
+
+RawString -> tlib::TreeId:
+      STRING {
+          crate::with_state(state, |state| state.raw_symbol_from_token($lexer, $1))
+      }
     ;
 
 ValList -> u8:

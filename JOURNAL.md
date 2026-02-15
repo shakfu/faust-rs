@@ -941,3 +941,41 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline --no-fail-fast`
   - `cargo test -p parser-proto --test cpp_differential --offline -- --nocapture`
+
+### Gate B remaining step 3 (grammar parity progress: foreign forms `ffunction/fconstant/fvariable`)
+
+- Extended `boxes` foreign API surface in `crates/boxes/src/lib.rs` (C++ aligned):
+  - `ffunction(signature, incfile, libfile)` + `is_ffunction`
+  - `box_ffun` + `is_box_ffun`
+  - `box_fconst` + `is_box_fconst`
+  - `box_fvar` + `is_box_fvar`
+- Extended parser semantic helpers in `crates/parser-proto/src/lib.rs`:
+  - raw symbol extraction for `STRING`/`FSTRING` foreign payloads,
+  - foreign type-code builders (`int=0`, `float=1`, `any=2`),
+  - C++-shaped signature building:
+    - 4-slot function-name list (`float/double/quad/fixed` dispatch slots),
+    - `cons(ret_type, cons(names4, arg_types))` layout,
+  - `box_foreign_function(...)` bridge (`ffunction` -> `boxFFun`).
+- Extended parser grammar (`crates/parser-proto/src/grammar/faustparser.y`) with foreign families:
+  - `ffunction(type fun(|fun){0..3} (typelist?), fstring, string)`
+  - `fconstant(type name, fstring)`
+  - `fvariable(type name, fstring)`
+  - plus `type`, `argtype`, `typelist`, `fun`, `name`, `fstring`, `string` support rules.
+- Added/extended tests:
+  - `crates/parser-proto/tests/parser_slice7_foreign.rs`
+    - validates `ffunction` signature structure and `fconstant/fvariable` node forms.
+  - `crates/boxes/tests/core_api.rs`
+    - foreign box constructor/predicate roundtrip coverage.
+
+### Gate B remaining step 8 (differential suite expansion: foreign forms)
+
+- Extended differential harness (`crates/parser-proto/tests/cpp_differential.rs`) with:
+  - `foreign_fconstant`
+  - `foreign_fvariable`
+  - `foreign_ffunction`
+- Differential run (C++ source-of-truth root `/Users/letz/Developpements/RUST/faust`, commit `8eebea429`, binary `/usr/local/bin/faust`) passed with no class mismatch on new foreign cases.
+- Validation:
+  - `cargo test -p parser-proto --test cpp_differential --offline -- --nocapture`
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline --no-fail-fast`

@@ -138,6 +138,84 @@ impl ParseState {
         ident
     }
 
+    /// Builds one symbol tree from a token and optionally marks use property.
+    #[must_use]
+    pub fn symbol_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+        mark_use: bool,
+    ) -> TreeId {
+        let span = token_span(&tok);
+        self.update_cursor_from_span(lexer, span);
+        let sym = self.arena.symbol(lexer.span_str(span));
+        if mark_use {
+            self.ctx.set_use_prop_at_cursor(sym);
+        }
+        sym
+    }
+
+    /// Builds a raw symbol from one token text (used for `STRING`/`FSTRING` in foreign forms).
+    #[must_use]
+    pub fn raw_symbol_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+    ) -> TreeId {
+        let span = token_span(&tok);
+        self.update_cursor_from_span(lexer, span);
+        self.arena.symbol(lexer.span_str(span))
+    }
+
+    /// Builds type code node for foreign signatures (`int=0`, `float=1`, `any=2`).
+    #[must_use]
+    pub fn foreign_type_code(&mut self, code: i64) -> TreeId {
+        self.arena.int(code)
+    }
+
+    /// Builds the 4-slot function name list used by C++ foreign signature encoding.
+    #[must_use]
+    pub fn foreign_name_slots(
+        &mut self,
+        n1: TreeId,
+        n2: Option<TreeId>,
+        n3: Option<TreeId>,
+        n4: Option<TreeId>,
+    ) -> TreeId {
+        let nil = self.nil();
+        let s2 = n2.unwrap_or(n1);
+        let s3 = n3.unwrap_or(s2);
+        let s4 = n4.unwrap_or(s3);
+        let l3 = self.cons(s4, nil);
+        let l2 = self.cons(s3, l3);
+        let l1 = self.cons(s2, l2);
+        self.cons(n1, l1)
+    }
+
+    /// Builds C++-shaped foreign signature list: `cons(ret_type, cons(names4, arg_types))`.
+    #[must_use]
+    pub fn foreign_signature(
+        &mut self,
+        ret_type: TreeId,
+        names4: TreeId,
+        arg_types: TreeId,
+    ) -> TreeId {
+        let payload = self.cons(names4, arg_types);
+        self.cons(ret_type, payload)
+    }
+
+    /// Builds C++-equivalent foreign-function descriptor and wraps it as `boxFFun`.
+    #[must_use]
+    pub fn box_foreign_function(
+        &mut self,
+        signature: TreeId,
+        incfile: TreeId,
+        libfile: TreeId,
+    ) -> TreeId {
+        let ff = boxes::ffunction(&mut self.arena, signature, incfile, libfile);
+        boxes::box_ffun(&mut self.arena, ff)
+    }
+
     /// Parses one integer literal token to `boxInt`.
     #[must_use]
     pub fn int_from_token<'lexer, 'input: 'lexer>(

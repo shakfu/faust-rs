@@ -15,6 +15,7 @@
 //!   `box_ipar`, `box_iseq`, `box_isum`, `box_iprod`,
 //!   `box_with_local_def`, `box_environment`, `box_component`, `box_library`,
 //!   `box_waveform`, `box_route`,
+//!   `ffunction`, `box_ffun`, `box_fconst`, `box_fvar`,
 //!   `box_button`, `box_checkbox`, `box_vslider`, `box_hslider`,
 //!   `box_num_entry`, `box_vbargraph`, `box_hbargraph`
 //! - `adapted`: `box_with_rec_def` (see function-level note)
@@ -75,6 +76,10 @@ const BOX_COMPONENT_TAG: &str = "BOXCOMPONENT";
 const BOX_LIBRARY_TAG: &str = "BOXLIBRARY";
 const BOX_WAVEFORM_TAG: &str = "BOXWAVEFORM";
 const BOX_ROUTE_TAG: &str = "BOXROUTE";
+const FFUN_TAG: &str = "FFUN";
+const BOX_FFUN_TAG: &str = "BOXFFUN";
+const BOX_FCONST_TAG: &str = "BOXFCONST";
+const BOX_FVAR_TAG: &str = "BOXFVAR";
 const BOX_BUTTON_TAG: &str = "BOXBUTTON";
 const BOX_CHECKBOX_TAG: &str = "BOXCHECKBOX";
 const BOX_VSLIDER_TAG: &str = "BOXVSLIDER";
@@ -542,6 +547,54 @@ pub fn box_route(arena: &mut TreeArena, n: BoxId, m: BoxId, route_spec: BoxId) -
 #[must_use]
 pub fn is_box_route(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
     match_ternary(arena, b, BOX_ROUTE_TAG)
+}
+
+/// Equivalent to C++ `ffunction(signature, incfile, libfile)`.
+#[must_use]
+pub fn ffunction(arena: &mut TreeArena, signature: BoxId, incfile: BoxId, libfile: BoxId) -> BoxId {
+    intern_tag(arena, FFUN_TAG, &[signature, incfile, libfile])
+}
+
+/// Returns `(signature, incfile, libfile)` when `b` is `ffunction(...)`.
+#[must_use]
+pub fn is_ffunction(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
+    match_ternary(arena, b, FFUN_TAG)
+}
+
+/// Equivalent to C++ `boxFFun`.
+#[must_use]
+pub fn box_ffun(arena: &mut TreeArena, ff: BoxId) -> BoxId {
+    intern_tag(arena, BOX_FFUN_TAG, &[ff])
+}
+
+/// Returns wrapped foreign-function descriptor when `b` is `box_ffun`.
+#[must_use]
+pub fn is_box_ffun(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
+    match_unary(arena, b, BOX_FFUN_TAG)
+}
+
+/// Equivalent to C++ `boxFConst`.
+#[must_use]
+pub fn box_fconst(arena: &mut TreeArena, ty: BoxId, name: BoxId, file: BoxId) -> BoxId {
+    intern_tag(arena, BOX_FCONST_TAG, &[ty, name, file])
+}
+
+/// Returns `(ty, name, file)` when `b` is `box_fconst`.
+#[must_use]
+pub fn is_box_fconst(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
+    match_ternary(arena, b, BOX_FCONST_TAG)
+}
+
+/// Equivalent to C++ `boxFVar`.
+#[must_use]
+pub fn box_fvar(arena: &mut TreeArena, ty: BoxId, name: BoxId, file: BoxId) -> BoxId {
+    intern_tag(arena, BOX_FVAR_TAG, &[ty, name, file])
+}
+
+/// Returns `(ty, name, file)` when `b` is `box_fvar`.
+#[must_use]
+pub fn is_box_fvar(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
+    match_ternary(arena, b, BOX_FVAR_TAG)
 }
 
 /// Equivalent to C++ `boxButton`.

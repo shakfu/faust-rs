@@ -198,6 +198,21 @@ fn load_cases() -> Result<Vec<Case>, String> {
         source: "process = waveform { 1, -2, 3.5 };\n".to_owned(),
         expect_valid: true,
     });
+    cases.push(Case {
+        name: "foreign_fconstant".to_owned(),
+        source: "process = fconstant(int fSamplingFreq, <math.h>);\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "foreign_fvariable".to_owned(),
+        source: "process = fvariable(int count, <math.h>);\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "foreign_ffunction".to_owned(),
+        source: "process = ffunction(float sinhf|sinh|sinhl(float), <math.h>, \"\");\n".to_owned(),
+        expect_valid: true,
+    });
 
     Ok(cases)
 }

@@ -1,15 +1,16 @@
 use boxes::{
     box_access, box_add, box_appl, box_button, box_checkbox, box_component, box_cut, box_delay1,
-    box_environment, box_hbargraph, box_hslider, box_ident, box_ident_name, box_int, box_ipar,
-    box_iprod, box_iseq, box_isum, box_library, box_max, box_merge, box_min, box_mul,
-    box_num_entry, box_par, box_real, box_rec, box_route, box_seq, box_split, box_vbargraph,
-    box_vslider, box_waveform, box_wire, box_with_local_def, box_with_rec_def, dump_box,
-    is_box_access, is_box_add, is_box_appl, is_box_button, is_box_checkbox, is_box_component,
-    is_box_cut, is_box_delay1, is_box_environment, is_box_hbargraph, is_box_hslider, is_box_int,
+    box_environment, box_fconst, box_ffun, box_fvar, box_hbargraph, box_hslider, box_ident,
+    box_ident_name, box_int, box_ipar, box_iprod, box_iseq, box_isum, box_library, box_max,
+    box_merge, box_min, box_mul, box_num_entry, box_par, box_real, box_rec, box_route, box_seq,
+    box_split, box_vbargraph, box_vslider, box_waveform, box_wire, box_with_local_def,
+    box_with_rec_def, dump_box, ffunction, is_box_access, is_box_add, is_box_appl, is_box_button,
+    is_box_checkbox, is_box_component, is_box_cut, is_box_delay1, is_box_environment,
+    is_box_fconst, is_box_ffun, is_box_fvar, is_box_hbargraph, is_box_hslider, is_box_int,
     is_box_ipar, is_box_iprod, is_box_iseq, is_box_isum, is_box_library, is_box_max, is_box_merge,
     is_box_min, is_box_mul, is_box_num_entry, is_box_par, is_box_real, is_box_rec, is_box_route,
     is_box_seq, is_box_split, is_box_vbargraph, is_box_vslider, is_box_waveform, is_box_wire,
-    is_box_with_local_def, is_box_with_rec_def,
+    is_box_with_local_def, is_box_with_rec_def, is_ffunction,
 };
 use tlib::TreeArena;
 
@@ -196,6 +197,44 @@ fn module_waveform_and_route_boxes_roundtrip() {
     let spec = box_par(&mut arena, rz0, rz1);
     let route = box_route(&mut arena, n, m, spec);
     assert_eq!(is_box_route(&arena, route), Some((n, m, spec)));
+}
+
+#[test]
+fn foreign_function_boxes_roundtrip() {
+    let mut arena = TreeArena::new();
+    let ty = box_int(&mut arena, 1);
+    let fname = arena.symbol("sinhf");
+    let nil = arena.nil();
+    let names3 = arena.cons(fname, nil);
+    let names2 = arena.cons(fname, names3);
+    let names1 = arena.cons(fname, names2);
+    let names = arena.cons(fname, names1);
+    let arg0 = box_int(&mut arena, 1);
+    let arg_types = arena.cons(arg0, arena.nil());
+    let sig_payload = arena.cons(names, arg_types);
+    let signature = arena.cons(ty, sig_payload);
+    let incfile = arena.symbol("<math.h>");
+    let libfile = arena.symbol("\"\"");
+    let ff = ffunction(&mut arena, signature, incfile, libfile);
+    assert_eq!(
+        is_ffunction(&arena, ff),
+        Some((signature, incfile, libfile))
+    );
+
+    let wrapped = box_ffun(&mut arena, ff);
+    assert_eq!(is_box_ffun(&arena, wrapped), Some(ff));
+
+    let cname = arena.symbol("fSamplingFreq");
+    let ty0_const = box_int(&mut arena, 0);
+    let fconst = box_fconst(&mut arena, ty0_const, cname, incfile);
+    let ty0_var = box_int(&mut arena, 0);
+    let count = arena.symbol("count");
+    let fvar = box_fvar(&mut arena, ty0_var, count, incfile);
+    assert_eq!(
+        is_box_fconst(&arena, fconst),
+        Some((ty0_const, cname, incfile))
+    );
+    assert!(is_box_fvar(&arena, fvar).is_some());
 }
 
 #[test]
