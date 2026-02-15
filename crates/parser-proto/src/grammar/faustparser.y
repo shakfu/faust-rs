@@ -59,8 +59,8 @@ StmtList -> tlib::TreeId:
       %empty {
           crate::with_state(state, |state| state.nil())
       }
-    | StmtList Statement {
-          crate::with_state(state, |state| state.prepend_statement($1, $2))
+    | StmtList VariantList Statement {
+          crate::with_state(state, |state| state.prepend_statement_with_variant($1, $2, $3))
       }
     ;
 
@@ -68,9 +68,21 @@ DefList -> tlib::TreeId:
       %empty {
           crate::with_state(state, |state| state.nil())
       }
-    | DefList Definition {
-          crate::with_state(state, |state| state.prepend_statement($1, $2))
+    | DefList VariantList Definition {
+          crate::with_state(state, |state| state.prepend_statement_with_variant($1, $2, $3))
       }
+    ;
+
+VariantList -> u8:
+      %empty { 0 }
+    | VariantList Variant { $1 | $2 }
+    ;
+
+Variant -> u8:
+      FLOATMODE { 1 }
+    | DOUBLEMODE { 2 }
+    | QUADMODE { 4 }
+    | FIXEDPOINTMODE { 8 }
     ;
 
 RecList -> tlib::TreeId:

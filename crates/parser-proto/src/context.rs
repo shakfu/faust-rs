@@ -81,6 +81,7 @@ pub struct ParserCtx {
     lst_dependencies: Option<bool>,
     lst_mdoctags: Option<bool>,
     lst_distributed: Option<bool>,
+    float_size: u8,
     props: PropertyStore<SourceLocation>,
     def_prop_key: PropertyKey,
     use_prop_key: PropertyKey,
@@ -119,6 +120,7 @@ impl ParserCtx {
             lst_dependencies: None,
             lst_mdoctags: None,
             lst_distributed: None,
+            float_size: 1,
             props,
             def_prop_key,
             use_prop_key,
@@ -288,6 +290,37 @@ impl ParserCtx {
     #[must_use]
     pub fn lst_distributed(&self) -> Option<bool> {
         self.lst_distributed
+    }
+
+    /// Sets parser float precision mode equivalent to C++ `gFloatSize`:
+    /// `1=single`, `2=double`, `3=quad`, `4=fixed`.
+    pub fn set_float_size(&mut self, float_size: u8) {
+        self.float_size = float_size.clamp(1, 4);
+    }
+
+    /// Returns parser float precision mode equivalent to C++ `gFloatSize`.
+    #[must_use]
+    pub fn float_size(&self) -> u8 {
+        self.float_size
+    }
+
+    /// Equivalent to C++ `acceptdefinition(prefixset)`.
+    ///
+    /// A definition is accepted if `prefixset` is empty or if the current parser
+    /// precision belongs to the variant prefix set.
+    #[must_use]
+    pub fn accept_definition(&self, prefixset: u8) -> bool {
+        if prefixset == 0 {
+            return true;
+        }
+        let precision_mask = match self.float_size {
+            1 => 1,
+            2 => 2,
+            3 => 4,
+            4 => 8,
+            _ => 1,
+        };
+        (prefixset & precision_mask) != 0
     }
 
     /// Equivalent to C++ `setDefProp(sym, file, line)`.

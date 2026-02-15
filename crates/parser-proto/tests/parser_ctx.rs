@@ -53,3 +53,29 @@ fn cursor_hooks_waveform_result_and_diagnostics_are_parser_local() {
     assert_eq!(ctx.diagnostics().len(), 3);
     assert_eq!(ctx.diagnostics()[0].severity, DiagnosticSeverity::Error);
 }
+
+#[test]
+fn variant_prefix_acceptance_follows_cxx_float_mode_contract() {
+    let mut ctx = ParserCtx::new();
+    assert_eq!(ctx.float_size(), 1);
+
+    // single mode: accepts empty and single prefixes only.
+    assert!(ctx.accept_definition(0));
+    assert!(ctx.accept_definition(1));
+    assert!(!ctx.accept_definition(2));
+    assert!(!ctx.accept_definition(4));
+    assert!(!ctx.accept_definition(8));
+    assert!(ctx.accept_definition(1 | 2));
+
+    ctx.set_float_size(2);
+    assert!(!ctx.accept_definition(1));
+    assert!(ctx.accept_definition(2));
+
+    ctx.set_float_size(3);
+    assert!(!ctx.accept_definition(2));
+    assert!(ctx.accept_definition(4));
+
+    ctx.set_float_size(4);
+    assert!(!ctx.accept_definition(4));
+    assert!(ctx.accept_definition(8));
+}

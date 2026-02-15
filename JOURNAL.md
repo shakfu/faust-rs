@@ -1423,3 +1423,29 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline --no-fail-fast`
+
+### Parity closure step 1 (`variant`/`variantlist` precision filters)
+
+- Ported C++ `variant`/`variantlist` grammar behavior (`FLOATMODE/DOUBLEMODE/QUADMODE/FIXEDPOINTMODE`) in parser-proto grammar:
+  - `crates/parser-proto/src/grammar/faustparser.y`
+  - `StmtList` and `DefList` now gate statement/definition insertion through `VariantList`.
+- Added C++-aligned precision acceptance logic in parser context:
+  - `crates/parser-proto/src/context.rs`
+  - `ParserCtx::{set_float_size,float_size,accept_definition}` with default single precision (`gFloatSize=1` equivalent).
+- Added parser-state helper:
+  - `crates/parser-proto/src/lib.rs`
+  - `ParseState::prepend_statement_with_variant(...)`.
+- Added focused tests:
+  - `crates/parser-proto/tests/parser_ctx.rs`:
+    - variant prefix acceptance contract across precision modes.
+  - `crates/parser-proto/tests/parser_slice11_variants.rs`:
+    - filtering of `doubleprecision`-prefixed definitions in default single mode,
+    - acceptance of `singleprecision`-prefixed definitions,
+    - filtering behavior inside local definition lists (`with { ... }`).
+- Updated parity report baseline:
+  - `porting/phases/phase-3-parser-parity-report-en.md`
+  - unresolved nonterminals reduced from `4` to `2` (`modentry`, `modlist`).
+- Validation:
+  - `cargo test -p parser-proto --offline --no-fail-fast`
+  - `cargo run -p xtask --offline -- parser-parity-report`
+  - `cargo fmt --all`

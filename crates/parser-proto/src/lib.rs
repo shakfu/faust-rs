@@ -101,6 +101,20 @@ impl ParseState {
         }
     }
 
+    /// Prepends statement only if C++ `variantlist` accepts current precision mode.
+    #[must_use]
+    pub fn prepend_statement_with_variant(
+        &mut self,
+        list: TreeId,
+        variants: u8,
+        stmt: TreeId,
+    ) -> TreeId {
+        if !self.ctx.accept_definition(variants) {
+            return list;
+        }
+        self.prepend_statement(list, stmt)
+    }
+
     /// Builds one definition node shape compatible with C++ parser (`cons(name, cons(args, expr))`).
     #[must_use]
     pub fn make_definition(&mut self, name: TreeId, args: TreeId, expr: TreeId) -> TreeId {
