@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_31_variant_filters.dsp
+bytes=92
+lines=4
+fnv1a64=eb23287f9295a563

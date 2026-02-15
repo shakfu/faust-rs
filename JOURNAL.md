@@ -1521,3 +1521,15 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo run -p xtask --offline -- parser-parity-report`
   - `cargo fmt --all`
+
+### Parser corpus expansion (`tests/corpus` `rep_31`..`rep_33`)
+
+- Added 3 parser-focused corpus files for newly ported grammar/actions:
+  - `tests/corpus/rep_31_variant_filters.dsp` (`variantlist` precision filtering in top-level and local defs)
+  - `tests/corpus/rep_32_modulation_single.dsp` (single-entry bracket modulation)
+  - `tests/corpus/rep_33_modulation_chain.dsp` (multi-entry bracket modulation nesting)
+- Refreshed Rust golden snapshots to include the new corpus files:
+  - `cargo run -p xtask --offline -- golden-gen-rust`
+- Validation:
+  - `cargo test -p parser-proto --test parser_slice3 --offline --no-fail-fast`
+  - `cargo run -p xtask --offline -- golden-check`

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_32_modulation_single.dsp
+bytes=29
+lines=1
+fnv1a64=dc1459456ee601fa

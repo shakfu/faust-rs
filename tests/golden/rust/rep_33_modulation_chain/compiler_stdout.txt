@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_33_modulation_chain.dsp
+bytes=35
+lines=1
+fnv1a64=b5e8485f3e14b597
