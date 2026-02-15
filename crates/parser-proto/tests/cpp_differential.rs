@@ -170,6 +170,19 @@ fn load_cases() -> Result<Vec<Case>, String> {
         source: "declare author ;\nprocess = _;\n".to_owned(),
         expect_valid: false,
     });
+    cases.push(Case {
+        name: "doc_notice_listing_metadata".to_owned(),
+        source: concat!(
+            "<mdoc>",
+            "<notice/>",
+            "<listingdependencies=\"true\"/>",
+            "<metadata>author</metadata>",
+            "</mdoc>",
+            "process = _;\n",
+        )
+        .to_owned(),
+        expect_valid: true,
+    });
 
     Ok(cases)
 }

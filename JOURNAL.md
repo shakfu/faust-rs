@@ -879,3 +879,15 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo test -p parser-proto --offline --no-fail-fast`
   - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`
+
+### Gate B remaining step 8 (differential suite expansion: documentation case)
+
+- Extended differential harness (`crates/parser-proto/tests/cpp_differential.rs`) with:
+  - `doc_notice_listing_metadata` (valid doc statement case).
+- Differential result: Rust/C++ class parity preserved (`Rust=Ok`, `C++=Ok`) on this new case.
+- Note:
+  - an exploratory malformed doc-unclosed case was not retained in the stable harness because it can cause long-running behavior on the C++ parser binary; timeout-hardening of the harness remains a follow-up task.
+- Validation:
+  - `cargo test -p parser-proto --test cpp_differential --offline -- --nocapture`
+  - `cargo test -p parser-proto --offline --no-fail-fast`
+  - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`
