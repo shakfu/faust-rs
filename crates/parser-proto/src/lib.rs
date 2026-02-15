@@ -268,6 +268,12 @@ impl ParseState {
         boxes::box_case(&mut self.arena, mapped_rules)
     }
 
+    /// Equivalent to C++ `buildBoxAbstr(params, body)` for parser lambda forms.
+    #[must_use]
+    pub fn box_lambda(&mut self, params: TreeId, body: TreeId) -> TreeId {
+        boxes::build_box_abstr(&mut self.arena, params, body)
+    }
+
     fn case_rules_arity_reference(&self, rules: TreeId) -> Option<usize> {
         let first_rule = self.arena.hd(rules)?;
         let (lhs, _rhs) = self.pair_cell(first_rule)?;

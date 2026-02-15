@@ -617,6 +617,18 @@ Primitive -> tlib::TreeId:
     | HBARGRAPH LPAR UQString PAR Argument PAR Argument RPAR {
           crate::with_state(state, |state| boxes::box_hbargraph(&mut state.arena, $3, $5, $7))
       }
+    | VGROUP LPAR UQString PAR Expression RPAR {
+          crate::with_state(state, |state| boxes::box_vgroup(&mut state.arena, $3, $5))
+      }
+    | HGROUP LPAR UQString PAR Expression RPAR {
+          crate::with_state(state, |state| boxes::box_hgroup(&mut state.arena, $3, $5))
+      }
+    | TGROUP LPAR UQString PAR Expression RPAR {
+          crate::with_state(state, |state| boxes::box_tgroup(&mut state.arena, $3, $5))
+      }
+    | SOUNDFILE LPAR UQString PAR Argument RPAR {
+          crate::with_state(state, |state| boxes::box_soundfile(&mut state.arena, $3, $5))
+      }
     | IPAR LPAR IdentExpr PAR Argument PAR Expression RPAR {
           crate::with_state(state, |state| boxes::box_ipar(&mut state.arena, $3, $5, $7))
       }
@@ -628,6 +640,24 @@ Primitive -> tlib::TreeId:
       }
     | IPROD LPAR IdentExpr PAR Argument PAR Expression RPAR {
           crate::with_state(state, |state| boxes::box_iprod(&mut state.arena, $3, $5, $7))
+      }
+    | INPUTS LPAR Expression RPAR {
+          crate::with_state(state, |state| boxes::box_inputs(&mut state.arena, $3))
+      }
+    | OUTPUTS LPAR Expression RPAR {
+          crate::with_state(state, |state| boxes::box_outputs(&mut state.arena, $3))
+      }
+    | ONDEMAND LPAR Expression RPAR {
+          crate::with_state(state, |state| boxes::box_ondemand(&mut state.arena, $3))
+      }
+    | UPSAMPLING LPAR Expression RPAR {
+          crate::with_state(state, |state| boxes::box_upsampling(&mut state.arena, $3))
+      }
+    | DOWNSAMPLING LPAR Expression RPAR {
+          crate::with_state(state, |state| boxes::box_downsampling(&mut state.arena, $3))
+      }
+    | LAMBDA LPAR ParamList RPAR DOT LPAR Expression RPAR {
+          crate::with_state(state, |state| state.box_lambda($3, $7))
       }
     | IdentExpr { $1 }
     | SUB IdentExpr {

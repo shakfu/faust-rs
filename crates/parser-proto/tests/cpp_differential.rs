@@ -223,6 +223,22 @@ fn load_cases() -> Result<Vec<Case>, String> {
         source: "process = case { (x) => x; (x, y) => x; };\n".to_owned(),
         expect_valid: false,
     });
+    cases.push(Case {
+        name: "lambda_identity".to_owned(),
+        source: "process = \\(x).(x);\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "vgroup_basic".to_owned(),
+        source: "process = vgroup(\"g\", _);\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "stream_wrappers".to_owned(),
+        source: "process = inputs(_), outputs(_), ondemand(_), upsampling(_), downsampling(_);\n"
+            .to_owned(),
+        expect_valid: true,
+    });
 
     Ok(cases)
 }

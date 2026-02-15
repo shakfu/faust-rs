@@ -1,17 +1,20 @@
 use boxes::{
-    box_access, box_add, box_appl, box_button, box_case, box_checkbox, box_component, box_cut,
-    box_delay1, box_environment, box_fconst, box_ffun, box_fvar, box_hbargraph, box_hslider,
-    box_ident, box_ident_name, box_int, box_ipar, box_iprod, box_iseq, box_isum, box_library,
-    box_max, box_merge, box_min, box_mul, box_num_entry, box_par, box_pattern_var, box_real,
-    box_rec, box_route, box_seq, box_split, box_vbargraph, box_vslider, box_waveform, box_wire,
-    box_with_local_def, box_with_rec_def, dump_box, ffunction, is_box_access, is_box_add,
-    is_box_appl, is_box_button, is_box_case, is_box_checkbox, is_box_component, is_box_cut,
-    is_box_delay1, is_box_environment, is_box_fconst, is_box_ffun, is_box_fvar, is_box_hbargraph,
-    is_box_hslider, is_box_int, is_box_ipar, is_box_iprod, is_box_iseq, is_box_isum,
-    is_box_library, is_box_max, is_box_merge, is_box_min, is_box_mul, is_box_num_entry, is_box_par,
-    is_box_pattern_var, is_box_real, is_box_rec, is_box_route, is_box_seq, is_box_split,
-    is_box_vbargraph, is_box_vslider, is_box_waveform, is_box_wire, is_box_with_local_def,
-    is_box_with_rec_def, is_ffunction,
+    box_abstr, box_access, box_add, box_appl, box_button, box_case, box_checkbox, box_component,
+    box_cut, box_delay1, box_downsampling, box_environment, box_fconst, box_ffun, box_fvar,
+    box_hbargraph, box_hgroup, box_hslider, box_ident, box_ident_name, box_inputs, box_int,
+    box_ipar, box_iprod, box_iseq, box_isum, box_library, box_max, box_merge, box_min, box_mul,
+    box_num_entry, box_ondemand, box_outputs, box_par, box_pattern_var, box_real, box_rec,
+    box_route, box_seq, box_soundfile, box_split, box_tgroup, box_upsampling, box_vbargraph,
+    box_vgroup, box_vslider, box_waveform, box_wire, box_with_local_def, box_with_rec_def,
+    build_box_abstr, dump_box, ffunction, is_box_abstr, is_box_access, is_box_add, is_box_appl,
+    is_box_button, is_box_case, is_box_checkbox, is_box_component, is_box_cut, is_box_delay1,
+    is_box_downsampling, is_box_environment, is_box_fconst, is_box_ffun, is_box_fvar,
+    is_box_hbargraph, is_box_hgroup, is_box_hslider, is_box_inputs, is_box_int, is_box_ipar,
+    is_box_iprod, is_box_iseq, is_box_isum, is_box_library, is_box_max, is_box_merge, is_box_min,
+    is_box_mul, is_box_num_entry, is_box_ondemand, is_box_outputs, is_box_par, is_box_pattern_var,
+    is_box_real, is_box_rec, is_box_route, is_box_seq, is_box_soundfile, is_box_split,
+    is_box_tgroup, is_box_upsampling, is_box_vbargraph, is_box_vgroup, is_box_vslider,
+    is_box_waveform, is_box_wire, is_box_with_local_def, is_box_with_rec_def, is_ffunction,
 };
 use tlib::TreeArena;
 
@@ -251,6 +254,46 @@ fn case_and_pattern_var_boxes_roundtrip() {
     let rules = arena.cons(rule, arena.nil());
     let case_expr = box_case(&mut arena, rules);
     assert_eq!(is_box_case(&arena, case_expr), Some(rules));
+}
+
+#[test]
+fn lambda_groups_soundfile_and_stream_wrappers_roundtrip() {
+    let mut arena = TreeArena::new();
+    let x = box_ident(&mut arena, "x");
+    let body = box_wire(&mut arena);
+    let abstr = box_abstr(&mut arena, x, body);
+    assert_eq!(is_box_abstr(&arena, abstr), Some((x, body)));
+
+    let a = box_ident(&mut arena, "a");
+    let b = box_ident(&mut arena, "b");
+    let nil = arena.nil();
+    let args_tail = arena.cons(a, nil);
+    let args = arena.cons(b, args_tail);
+    let built = build_box_abstr(&mut arena, args, body);
+    assert!(is_box_abstr(&arena, built).is_some());
+
+    let label = arena.string_lit("ui");
+    let vgroup = box_vgroup(&mut arena, label, body);
+    let hgroup = box_hgroup(&mut arena, label, body);
+    let tgroup = box_tgroup(&mut arena, label, body);
+    assert_eq!(is_box_vgroup(&arena, vgroup), Some((label, body)));
+    assert_eq!(is_box_hgroup(&arena, hgroup), Some((label, body)));
+    assert_eq!(is_box_tgroup(&arena, tgroup), Some((label, body)));
+
+    let chan0 = box_int(&mut arena, 0);
+    let soundfile = box_soundfile(&mut arena, label, chan0);
+    assert!(is_box_soundfile(&arena, soundfile).is_some());
+
+    let inputs = box_inputs(&mut arena, body);
+    let outputs = box_outputs(&mut arena, body);
+    let ondemand = box_ondemand(&mut arena, body);
+    let up = box_upsampling(&mut arena, body);
+    let down = box_downsampling(&mut arena, body);
+    assert_eq!(is_box_inputs(&arena, inputs), Some(body));
+    assert_eq!(is_box_outputs(&arena, outputs), Some(body));
+    assert_eq!(is_box_ondemand(&arena, ondemand), Some(body));
+    assert_eq!(is_box_upsampling(&arena, up), Some(body));
+    assert_eq!(is_box_downsampling(&arena, down), Some(body));
 }
 
 #[test]

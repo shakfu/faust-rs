@@ -1021,3 +1021,52 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline --no-fail-fast`
+
+### Gate B remaining step 3 (grammar parity progress: `lambda` + UI groups + stream wrappers)
+
+- Extended `boxes` API (`crates/boxes/src/lib.rs`) with C++-aligned constructors/predicates:
+  - lambda:
+    - `box_abstr` / `is_box_abstr`
+    - `build_box_abstr` (equivalent to C++ `buildBoxAbstr`)
+  - stream wrappers:
+    - `box_inputs` / `is_box_inputs`
+    - `box_outputs` / `is_box_outputs`
+    - `box_ondemand` / `is_box_ondemand`
+    - `box_upsampling` / `is_box_upsampling`
+    - `box_downsampling` / `is_box_downsampling`
+  - UI grouping and soundfile:
+    - `box_vgroup` / `is_box_vgroup`
+    - `box_hgroup` / `is_box_hgroup`
+    - `box_tgroup` / `is_box_tgroup`
+    - `box_soundfile` / `is_box_soundfile`
+- Extended parser grammar (`crates/parser-proto/src/grammar/faustparser.y`) with:
+  - `LAMBDA (params) . (expression)`
+  - `vgroup(...)`, `hgroup(...)`, `tgroup(...)`
+  - `soundfile(label, chan)`
+  - `inputs(expr)`, `outputs(expr)`, `ondemand(expr)`, `upsampling(expr)`, `downsampling(expr)`
+- Extended parser actions (`crates/parser-proto/src/lib.rs`):
+  - added `box_lambda(...)` helper delegating to `boxes::build_box_abstr(...)`.
+- Added/extended tests:
+  - `crates/parser-proto/tests/parser_slice9_lambda_groups.rs`
+    - lambda nesting shape,
+    - UI group + soundfile forms,
+    - stream wrapper forms.
+  - `crates/boxes/tests/core_api.rs`
+    - lambda/group/soundfile/wrapper constructor roundtrip.
+
+### Gate B remaining step 8 (differential suite expansion: lambda/groups/wrappers)
+
+- Extended differential harness (`crates/parser-proto/tests/cpp_differential.rs`) with:
+  - `lambda_identity`
+  - `vgroup_basic`
+  - `stream_wrappers`
+- Differential run (C++ source-of-truth root `/Users/letz/Developpements/RUST/faust`, commit `8eebea429`, binary `/usr/local/bin/faust`) passed with no new class mismatch.
+- Note:
+  - `soundfile(...)` was kept in parser structural tests but not added to stable differential valid cases because standalone `soundfile` examples can fail later semantic/type checks in full C++ compilation depending on channel/range context, which would make a parse-class gate unstable.
+- Validation:
+  - `cargo test -p boxes --offline --no-fail-fast`
+  - `cargo test -p parser-proto --test parser_slice9_lambda_groups --offline --no-fail-fast`
+  - `cargo test -p parser-proto --test cpp_differential --offline -- --nocapture`
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline --no-fail-fast`

@@ -17,8 +17,11 @@
 //!   `box_waveform`, `box_route`,
 //!   `ffunction`, `box_ffun`, `box_fconst`, `box_fvar`,
 //!   `box_case`, `box_pattern_var`,
+//!   `box_abstr`, `build_box_abstr`,
+//!   `box_inputs`, `box_outputs`, `box_ondemand`, `box_upsampling`, `box_downsampling`,
 //!   `box_button`, `box_checkbox`, `box_vslider`, `box_hslider`,
-//!   `box_num_entry`, `box_vbargraph`, `box_hbargraph`
+//!   `box_num_entry`, `box_vgroup`, `box_hgroup`, `box_tgroup`,
+//!   `box_vbargraph`, `box_hbargraph`, `box_soundfile`
 //! - `adapted`: `box_with_rec_def` (see function-level note)
 //!
 //! # Parity invariants
@@ -83,13 +86,23 @@ const BOX_FCONST_TAG: &str = "BOXFCONST";
 const BOX_FVAR_TAG: &str = "BOXFVAR";
 const BOX_CASE_TAG: &str = "BOXCASE";
 const BOX_PATTERN_VAR_TAG: &str = "BOXPATVAR";
+const BOX_ABSTR_TAG: &str = "BOXABSTR";
+const BOX_INPUTS_TAG: &str = "BOXINPUTS";
+const BOX_OUTPUTS_TAG: &str = "BOXOUTPUTS";
+const BOX_ONDEMAND_TAG: &str = "BOXONDEMAND";
+const BOX_UPSAMPLING_TAG: &str = "BOXUPSAMPLING";
+const BOX_DOWNSAMPLING_TAG: &str = "BOXDOWNSAMPLING";
 const BOX_BUTTON_TAG: &str = "BOXBUTTON";
 const BOX_CHECKBOX_TAG: &str = "BOXCHECKBOX";
 const BOX_VSLIDER_TAG: &str = "BOXVSLIDER";
 const BOX_HSLIDER_TAG: &str = "BOXHSLIDER";
 const BOX_NUM_ENTRY_TAG: &str = "BOXNUMENTRY";
+const BOX_VGROUP_TAG: &str = "BOXVGROUP";
+const BOX_HGROUP_TAG: &str = "BOXHGROUP";
+const BOX_TGROUP_TAG: &str = "BOXTGROUP";
 const BOX_VBARGRAPH_TAG: &str = "BOXVBARGRAPH";
 const BOX_HBARGRAPH_TAG: &str = "BOXHBARGRAPH";
+const BOX_SOUNDFILE_TAG: &str = "BOXSOUNDFILE";
 
 /// Stable crate identifier used in workspace-level tooling and diagnostics.
 #[must_use]
@@ -624,6 +637,96 @@ pub fn is_box_pattern_var(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
     match_unary(arena, b, BOX_PATTERN_VAR_TAG)
 }
 
+/// Equivalent to C++ `boxAbstr`.
+#[must_use]
+pub fn box_abstr(arena: &mut TreeArena, arg: BoxId, body: BoxId) -> BoxId {
+    intern_tag(arena, BOX_ABSTR_TAG, &[arg, body])
+}
+
+/// Returns `(arg, body)` when `b` is `box_abstr`.
+#[must_use]
+pub fn is_box_abstr(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
+    match_binary(arena, b, BOX_ABSTR_TAG)
+}
+
+/// Equivalent to C++ `buildBoxAbstr(largs, body)` using parser-built arg list.
+///
+/// This preserves C++ nesting order by consuming list tail first.
+#[must_use]
+pub fn build_box_abstr(arena: &mut TreeArena, args: BoxId, body: BoxId) -> BoxId {
+    if arena.is_nil(args) {
+        return body;
+    }
+    let Some(head) = arena.hd(args) else {
+        return body;
+    };
+    let Some(tail) = arena.tl(args) else {
+        return body;
+    };
+    let nested = build_box_abstr(arena, tail, body);
+    box_abstr(arena, head, nested)
+}
+
+/// Equivalent to C++ `boxInputs`.
+#[must_use]
+pub fn box_inputs(arena: &mut TreeArena, expr: BoxId) -> BoxId {
+    intern_tag(arena, BOX_INPUTS_TAG, &[expr])
+}
+
+/// Returns wrapped expression when `b` is `box_inputs`.
+#[must_use]
+pub fn is_box_inputs(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
+    match_unary(arena, b, BOX_INPUTS_TAG)
+}
+
+/// Equivalent to C++ `boxOutputs`.
+#[must_use]
+pub fn box_outputs(arena: &mut TreeArena, expr: BoxId) -> BoxId {
+    intern_tag(arena, BOX_OUTPUTS_TAG, &[expr])
+}
+
+/// Returns wrapped expression when `b` is `box_outputs`.
+#[must_use]
+pub fn is_box_outputs(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
+    match_unary(arena, b, BOX_OUTPUTS_TAG)
+}
+
+/// Equivalent to C++ `boxOndemand`.
+#[must_use]
+pub fn box_ondemand(arena: &mut TreeArena, expr: BoxId) -> BoxId {
+    intern_tag(arena, BOX_ONDEMAND_TAG, &[expr])
+}
+
+/// Returns wrapped expression when `b` is `box_ondemand`.
+#[must_use]
+pub fn is_box_ondemand(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
+    match_unary(arena, b, BOX_ONDEMAND_TAG)
+}
+
+/// Equivalent to C++ `boxUpsampling`.
+#[must_use]
+pub fn box_upsampling(arena: &mut TreeArena, expr: BoxId) -> BoxId {
+    intern_tag(arena, BOX_UPSAMPLING_TAG, &[expr])
+}
+
+/// Returns wrapped expression when `b` is `box_upsampling`.
+#[must_use]
+pub fn is_box_upsampling(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
+    match_unary(arena, b, BOX_UPSAMPLING_TAG)
+}
+
+/// Equivalent to C++ `boxDownsampling`.
+#[must_use]
+pub fn box_downsampling(arena: &mut TreeArena, expr: BoxId) -> BoxId {
+    intern_tag(arena, BOX_DOWNSAMPLING_TAG, &[expr])
+}
+
+/// Returns wrapped expression when `b` is `box_downsampling`.
+#[must_use]
+pub fn is_box_downsampling(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
+    match_unary(arena, b, BOX_DOWNSAMPLING_TAG)
+}
+
 /// Equivalent to C++ `boxButton`.
 #[must_use]
 pub fn box_button(arena: &mut TreeArena, label: BoxId) -> BoxId {
@@ -720,6 +823,42 @@ pub fn is_box_num_entry(
     match_slider(arena, b, BOX_NUM_ENTRY_TAG)
 }
 
+/// Equivalent to C++ `boxVGroup`.
+#[must_use]
+pub fn box_vgroup(arena: &mut TreeArena, label: BoxId, expr: BoxId) -> BoxId {
+    intern_tag(arena, BOX_VGROUP_TAG, &[label, expr])
+}
+
+/// Returns `(label, expr)` when `b` is `box_vgroup`.
+#[must_use]
+pub fn is_box_vgroup(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
+    match_binary(arena, b, BOX_VGROUP_TAG)
+}
+
+/// Equivalent to C++ `boxHGroup`.
+#[must_use]
+pub fn box_hgroup(arena: &mut TreeArena, label: BoxId, expr: BoxId) -> BoxId {
+    intern_tag(arena, BOX_HGROUP_TAG, &[label, expr])
+}
+
+/// Returns `(label, expr)` when `b` is `box_hgroup`.
+#[must_use]
+pub fn is_box_hgroup(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
+    match_binary(arena, b, BOX_HGROUP_TAG)
+}
+
+/// Equivalent to C++ `boxTGroup`.
+#[must_use]
+pub fn box_tgroup(arena: &mut TreeArena, label: BoxId, expr: BoxId) -> BoxId {
+    intern_tag(arena, BOX_TGROUP_TAG, &[label, expr])
+}
+
+/// Returns `(label, expr)` when `b` is `box_tgroup`.
+#[must_use]
+pub fn is_box_tgroup(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
+    match_binary(arena, b, BOX_TGROUP_TAG)
+}
+
 /// Equivalent to C++ `boxVBargraph`.
 #[must_use]
 pub fn box_vbargraph(arena: &mut TreeArena, label: BoxId, min: BoxId, max: BoxId) -> BoxId {
@@ -742,6 +881,18 @@ pub fn box_hbargraph(arena: &mut TreeArena, label: BoxId, min: BoxId, max: BoxId
 #[must_use]
 pub fn is_box_hbargraph(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
     match_ternary(arena, b, BOX_HBARGRAPH_TAG)
+}
+
+/// Equivalent to C++ `boxSoundfile`.
+#[must_use]
+pub fn box_soundfile(arena: &mut TreeArena, label: BoxId, chan: BoxId) -> BoxId {
+    intern_tag(arena, BOX_SOUNDFILE_TAG, &[label, chan])
+}
+
+/// Returns `(label, chan)` when `b` is `box_soundfile`.
+#[must_use]
+pub fn is_box_soundfile(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
+    match_binary(arena, b, BOX_SOUNDFILE_TAG)
 }
 
 /// Deterministic structural dump helper for parser differential checks.
