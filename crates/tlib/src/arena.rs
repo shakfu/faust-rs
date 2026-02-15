@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TreeId(u32);
@@ -14,11 +15,11 @@ impl TreeId {
 pub enum NodeKind {
     Nil,
     Cons,
-    Symbol(String),
-    StringLiteral(String),
+    Symbol(Arc<str>),
+    StringLiteral(Arc<str>),
     Int(i64),
     FloatBits(u64),
-    Tag(String),
+    Tag(Arc<str>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,12 +118,12 @@ impl TreeArena {
 
     #[must_use]
     pub fn symbol(&mut self, value: impl Into<String>) -> TreeId {
-        self.intern(NodeKind::Symbol(value.into()), &[])
+        self.intern(NodeKind::Symbol(Arc::<str>::from(value.into())), &[])
     }
 
     #[must_use]
     pub fn string_lit(&mut self, value: impl Into<String>) -> TreeId {
-        self.intern(NodeKind::StringLiteral(value.into()), &[])
+        self.intern(NodeKind::StringLiteral(Arc::<str>::from(value.into())), &[])
     }
 
     #[must_use]
@@ -137,7 +138,7 @@ impl TreeArena {
 
     #[must_use]
     pub fn tag(&mut self, value: impl Into<String>) -> TreeId {
-        self.intern(NodeKind::Tag(value.into()), &[])
+        self.intern(NodeKind::Tag(Arc::<str>::from(value.into())), &[])
     }
 
     #[must_use]

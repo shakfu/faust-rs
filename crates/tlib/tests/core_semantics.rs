@@ -7,8 +7,8 @@ fn interning_reuses_structurally_identical_nodes() {
     let b = arena.symbol("x");
     assert_eq!(a, b);
 
-    let seq1 = arena.intern(NodeKind::Tag("seq".to_owned()), &[a, arena.nil()]);
-    let seq2 = arena.intern(NodeKind::Tag("seq".to_owned()), &[b, arena.nil()]);
+    let seq1 = arena.intern(NodeKind::Tag("seq".into()), &[a, arena.nil()]);
+    let seq2 = arena.intern(NodeKind::Tag("seq".into()), &[b, arena.nil()]);
     assert_eq!(seq1, seq2);
 }
 

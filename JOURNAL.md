@@ -289,3 +289,16 @@ Execution plan (Phase 0 prototype, revised):
   - `property_set=0.075x`
   - `property_get=1.079x`
 - Gate A status updated to **Go**.
+
+### Gate A step 8 (`tlib-core` NodeKind string sharing / lookup parity pass)
+
+- Optimized string-carrying node kinds in `crates/tlib/src/arena.rs`:
+  - `NodeKind::Symbol`, `NodeKind::StringLiteral`, `NodeKind::Tag` now store `Arc<str>` instead of `String`.
+- Updated constructors to build shared string payloads (`Arc::<str>::from(...)`) to reduce clone/allocate pressure in intern hot paths.
+- Updated bench workload in `crates/tlib/src/bin/treearena_bench.rs`:
+  - pre-build and reuse `pair_kind` (`NodeKind::Tag`) instead of rebuilding owned strings in each loop.
+- Updated tests in `crates/tlib/tests/core_semantics.rs` to match the new node payload type.
+- Re-measured (`n=200000`, warm run):
+  - Rust: `create_ms=84.593`, `lookup_ms=67.887`, `traversal_ms=55.365`, `property_set_ms=2.708`, `property_get_ms=1.631`
+  - C++: `create_ms=69.058`, `lookup_ms=66.816`, `traversal_ms=77.092`, `property_set_ms=38.055`, `property_get_ms=1.515`
+  - Ratios: `create=1.225x`, `lookup=1.016x`, `traversal=0.718x`, `property_set=0.071x`, `property_get=1.076x`

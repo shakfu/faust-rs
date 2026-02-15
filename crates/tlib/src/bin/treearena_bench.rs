@@ -1,5 +1,6 @@
 use std::env;
 use std::hint::black_box;
+use std::sync::Arc;
 use std::time::Instant;
 
 use tlib::{NodeKind, PropertyStore, TreeArena};
@@ -16,12 +17,13 @@ fn main() {
 
     let mut arena = TreeArena::new();
     let mut nodes = Vec::with_capacity(n);
+    let pair_kind = NodeKind::Tag(Arc::<str>::from("pair"));
 
     let create_start = Instant::now();
     for i in 0..n {
         let a = arena.int(i as i64);
         let b = arena.int((i as i64) + 1);
-        let node = arena.intern(NodeKind::Tag("pair".to_owned()), &[a, b]);
+        let node = arena.intern(pair_kind.clone(), &[a, b]);
         nodes.push(node);
     }
     let create_elapsed = create_start.elapsed();
@@ -30,7 +32,7 @@ fn main() {
     for i in 0..n {
         let a = arena.int(i as i64);
         let b = arena.int((i as i64) + 1);
-        let node = arena.intern(NodeKind::Tag("pair".to_owned()), &[a, b]);
+        let node = arena.intern(pair_kind.clone(), &[a, b]);
         black_box(node);
     }
     let lookup_elapsed = lookup_start.elapsed();
