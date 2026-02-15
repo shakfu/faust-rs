@@ -85,3 +85,10 @@ Median results (`n=1_000_000`):
 
 Conclusion:
 - `property_get` improved significantly without introducing evidence of regressions on `create`/`lookup` under large-`n` median measurement.
+
+Follow-up tuning (compact children storage):
+- `TreeNode.children` switched from `Vec<TreeId>` to compact `ChildList` (`0/1/2` inline, heap only for `>=3`).
+- Interleaved medians (`n=1_000_000`, 3 runs each):
+  - Rust: `create_ms=439.164`, `lookup_ms=363.015`, `traversal_ms=162.204`, `property_set_ms=5.545`, `property_get_ms=2.239`
+  - C++: `create_ms=881.556`, `lookup_ms=708.131`, `traversal_ms=915.364`, `property_set_ms=469.337`, `property_get_ms=7.467`
+  - Ratios: `create=0.498x`, `lookup=0.513x`, `traversal=0.177x`, `property_set=0.012x`, `property_get=0.300x`

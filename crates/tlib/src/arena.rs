@@ -25,7 +25,62 @@ pub enum NodeKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreeNode {
     pub kind: NodeKind,
-    pub children: Vec<TreeId>,
+    pub children: ChildList,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChildList {
+    Empty,
+    One([TreeId; 1]),
+    Two([TreeId; 2]),
+    Many(Box<[TreeId]>),
+}
+
+impl ChildList {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::Empty
+    }
+
+    #[must_use]
+    pub fn one(child: TreeId) -> Self {
+        Self::One([child])
+    }
+
+    #[must_use]
+    pub fn two(left: TreeId, right: TreeId) -> Self {
+        Self::Two([left, right])
+    }
+
+    #[must_use]
+    pub fn many(children: Vec<TreeId>) -> Self {
+        Self::Many(children.into_boxed_slice())
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::One(_) => 1,
+            Self::Two(_) => 2,
+            Self::Many(children) => children.len(),
+        }
+    }
+
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<TreeId> {
+        self.as_slice().get(index).copied()
+    }
+
+    #[must_use]
+    pub fn as_slice(&self) -> &[TreeId] {
+        match self {
+            Self::Empty => &[],
+            Self::One(children) => &children[..],
+            Self::Two(children) => &children[..],
+            Self::Many(children) => children,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -81,7 +136,7 @@ impl TreeArena {
                 let id = TreeId(self.nodes.len() as u32);
                 self.nodes.push(TreeNode {
                     kind: kind.clone(),
-                    children: Vec::new(),
+                    children: ChildList::empty(),
                 });
                 self.interner0.insert(kind, id);
                 id
@@ -94,7 +149,7 @@ impl TreeArena {
                 let id = TreeId(self.nodes.len() as u32);
                 self.nodes.push(TreeNode {
                     kind: key.0.clone(),
-                    children: vec![*a],
+                    children: ChildList::one(*a),
                 });
                 self.interner1.insert(key, id);
                 id
@@ -107,7 +162,7 @@ impl TreeArena {
                 let id = TreeId(self.nodes.len() as u32);
                 self.nodes.push(TreeNode {
                     kind: key.0.clone(),
-                    children: vec![*a, *b],
+                    children: ChildList::two(*a, *b),
                 });
                 self.interner2.insert(key, id);
                 id
@@ -123,7 +178,7 @@ impl TreeArena {
                 let id = TreeId(self.nodes.len() as u32);
                 self.nodes.push(TreeNode {
                     kind: key.kind.clone(),
-                    children: key.children.clone(),
+                    children: ChildList::many(key.children.clone()),
                 });
                 self.interner_n.insert(key, id);
                 id
@@ -152,7 +207,7 @@ impl TreeArena {
         if !matches!(node.kind, NodeKind::Cons) || node.children.len() != 2 {
             return None;
         }
-        Some(node.children[0])
+        node.children.get(0)
     }
 
     #[must_use]
@@ -161,7 +216,7 @@ impl TreeArena {
         if !matches!(node.kind, NodeKind::Cons) || node.children.len() != 2 {
             return None;
         }
-        Some(node.children[1])
+        node.children.get(1)
     }
 
     #[must_use]

@@ -338,3 +338,19 @@ Execution plan (Phase 0 prototype, revised):
   - Ratios: `create=0.515x`, `lookup=0.551x`, `traversal=0.235x`, `property_set=0.011x`, `property_get=0.283x`
 - Conclusion:
   - `property_get` improved strongly and no regression signal observed on `create/lookup` in large-`n` median comparison.
+
+### Gate A step 12 (`TreeNode` compact children representation)
+
+- Refactored `crates/tlib/src/arena.rs` to remove `Vec<TreeId>` allocation for common arities in node storage:
+  - introduced `ChildList` (`Empty`, `One`, `Two`, `Many`),
+  - `TreeNode.children` now uses `ChildList`,
+  - `children()` API remains exposed as slice (`&[TreeId]`) for read-side compatibility.
+- Exported `ChildList` from `crates/tlib/src/lib.rs`.
+- Goal: reduce per-node allocation pressure for 0/1/2-child nodes (dominant parser shape).
+- Re-measured with interleaved medians (`n=1_000_000`, 3 runs each):
+  - Rust: `create_ms=439.164`, `lookup_ms=363.015`, `traversal_ms=162.204`, `property_set_ms=5.545`, `property_get_ms=2.239`
+  - C++: `create_ms=881.556`, `lookup_ms=708.131`, `traversal_ms=915.364`, `property_set_ms=469.337`, `property_get_ms=7.467`
+  - Ratios: `create=0.498x`, `lookup=0.513x`, `traversal=0.177x`, `property_set=0.012x`, `property_get=0.300x`
+- Conclusion:
+  - measurable gain on `lookup`/`traversal`,
+  - `create` and `property_get` stayed in the same range (noise-level variation), no regression signal at this scale.
