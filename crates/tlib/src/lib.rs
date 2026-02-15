@@ -1,4 +1,8 @@
-#![doc = "Scaffold crate for tlib in the faust-rs workspace."]
+#![doc = "Tree/library core for Faust structures in the faust-rs workspace."]
+
+mod arena;
+
+pub use arena::{NodeKind, TreeArena, TreeId, TreeNode};
 
 pub const CRATE_NAME: &str = "tlib";
 

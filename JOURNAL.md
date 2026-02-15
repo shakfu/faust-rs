@@ -207,3 +207,13 @@ Execution plan (Phase 0 prototype, revised):
   - first crate-boundary contract draft (`compiler`/`tlib`/`boxes`/`parser`/`codegen`/`errors`).
 - Linked the decomposition deliverable into the Phase 0 validation checklist in:
   - `porting/phases/phase-0-validation-en.md`
+
+### Gate A step 1 (`tlib-core` arena foundation)
+
+- Implemented initial `TreeArena` foundation in `crates/tlib/src/arena.rs`:
+  - interned node storage (`TreeId`, `TreeNode`, `NodeKind`),
+  - hash-consing interner for structural identity,
+  - base constructors (`symbol`, `string_lit`, `int`, `float`, `tag`),
+  - predefined `nil` node initialization,
+  - basic accessors (`node`, `kind`, `children`, `len`).
+- Updated `crates/tlib/src/lib.rs` to expose the new arena API.
