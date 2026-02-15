@@ -859,3 +859,23 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo test -p parser-proto --offline --no-fail-fast`
   - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`
+
+### Gate B remaining step 3 (grammar parity progress: documentation statements/tags)
+
+- Extended parser grammar (`crates/parser-proto/src/grammar/faustparser.y`) with doc statement support:
+  - `BDOC ... EDOC` statement form,
+  - doc elements: `DOCCHAR`, `NOTICE`, `BEQN/EEQN`, `BDGM/EDGM`, `BLST/ELST`, `BMETADATA/EMETADATA`,
+  - listing attributes: `dependencies`, `mdoctags`, `distributed` (`LST*` token family).
+- Extended `ParserCtx` (`crates/parser-proto/src/context.rs`) with doc/listing state tracking:
+  - doc block/notice/listing counters,
+  - doc-char counter,
+  - metadata tag capture,
+  - listing switches (`dependencies`, `mdoctags`, `distributed`).
+- Added parser action helpers in `ParseState` (`crates/parser-proto/src/lib.rs`) to route doc/listing effects through `ParserCtx`.
+- Added dedicated tests:
+  - `crates/parser-proto/tests/parser_slice5_doc.rs`
+  - validates doc parse acceptance and recorded doc/listing metadata state.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p parser-proto --offline --no-fail-fast`
+  - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`

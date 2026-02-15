@@ -77,6 +77,74 @@ Statement -> tlib::TreeId:
               state.declare_definition_metadata_from_tokens($lexer, $2, $3, $4)
           })
       }
+    | BDOC DocContent EDOC {
+          crate::with_state(state, |state| state.doc_statement())
+      }
+    ;
+
+DocContent -> u8:
+      %empty { 0 }
+    | DocContent DocElem { 0 }
+    ;
+
+DocElem -> u8:
+      DOCCHAR {
+          crate::with_state(state, |state| {
+              state.note_doc_char();
+              0
+          })
+      }
+    | BEQN Expression EEQN { 0 }
+    | BDGM Expression EDGM { 0 }
+    | NOTICE {
+          crate::with_state(state, |state| {
+              state.note_doc_notice();
+              0
+          })
+      }
+    | BLST LstAttrList ELST {
+          crate::with_state(state, |state| {
+              state.note_doc_listing();
+              0
+          })
+      }
+    | BMETADATA IDENT EMETADATA {
+          crate::with_state(state, |state| {
+              state.note_doc_metadata_tag_from_token($lexer, $2);
+              0
+          })
+      }
+    ;
+
+LstAttrList -> u8:
+      %empty { 0 }
+    | LstAttrList LstAttr { 0 }
+    ;
+
+LstAttr -> u8:
+      LSTDEPENDENCIES LSTEQ LSTQ LstAttrValue LSTQ {
+          crate::with_state(state, |state| {
+              state.set_lst_dependencies($4);
+              0
+          })
+      }
+    | LSTMDOCTAGS LSTEQ LSTQ LstAttrValue LSTQ {
+          crate::with_state(state, |state| {
+              state.set_lst_mdoctags($4);
+              0
+          })
+      }
+    | LSTDISTRIBUTED LSTEQ LSTQ LstAttrValue LSTQ {
+          crate::with_state(state, |state| {
+              state.set_lst_distributed($4);
+              0
+          })
+      }
+    ;
+
+LstAttrValue -> bool:
+      LSTTRUE { true }
+    | LSTFALSE { false }
     ;
 
 Definition -> tlib::TreeId:

@@ -250,6 +250,54 @@ impl ParseState {
         self.nil()
     }
 
+    /// Records one parsed documentation block and returns `nil`.
+    #[must_use]
+    pub fn doc_statement(&mut self) -> TreeId {
+        self.ctx.note_doc_block();
+        self.nil()
+    }
+
+    /// Records one parsed doc notice marker.
+    pub fn note_doc_notice(&mut self) {
+        self.ctx.note_doc_notice();
+    }
+
+    /// Records one parsed listing block.
+    pub fn note_doc_listing(&mut self) {
+        self.ctx.note_doc_listing();
+    }
+
+    /// Records one parsed `DOCCHAR`.
+    pub fn note_doc_char(&mut self) {
+        self.ctx.note_doc_char();
+    }
+
+    /// Records one parsed `<metadata>...</metadata>` tag content from `IDENT`.
+    pub fn note_doc_metadata_tag_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        tag_tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+    ) {
+        let span = token_span(&tag_tok);
+        self.update_cursor_from_span(lexer, span);
+        self.ctx.note_doc_metadata_tag(lexer.span_str(span));
+    }
+
+    /// Updates listing dependencies switch.
+    pub fn set_lst_dependencies(&mut self, value: bool) {
+        self.ctx.set_lst_dependencies(value);
+    }
+
+    /// Updates listing mdoctags switch.
+    pub fn set_lst_mdoctags(&mut self, value: bool) {
+        self.ctx.set_lst_mdoctags(value);
+    }
+
+    /// Updates listing distributed switch.
+    pub fn set_lst_distributed(&mut self, value: bool) {
+        self.ctx.set_lst_distributed(value);
+    }
+
     /// Parses one signed integer literal token to `boxInt`.
     #[must_use]
     pub fn signed_int_from_token<'lexer, 'input: 'lexer>(

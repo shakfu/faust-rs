@@ -73,6 +73,14 @@ pub struct ParserCtx {
     imports: Vec<Box<str>>,
     declared_metadata: Vec<(Box<str>, Box<str>)>,
     declared_definition_metadata: Vec<(Box<str>, Box<str>, Box<str>)>,
+    doc_block_count: u32,
+    doc_notice_count: u32,
+    doc_listing_count: u32,
+    doc_char_count: u32,
+    doc_metadata_tags: Vec<Box<str>>,
+    lst_dependencies: Option<bool>,
+    lst_mdoctags: Option<bool>,
+    lst_distributed: Option<bool>,
     props: PropertyStore<SourceLocation>,
     def_prop_key: PropertyKey,
     use_prop_key: PropertyKey,
@@ -103,6 +111,14 @@ impl ParserCtx {
             imports: Vec::new(),
             declared_metadata: Vec::new(),
             declared_definition_metadata: Vec::new(),
+            doc_block_count: 0,
+            doc_notice_count: 0,
+            doc_listing_count: 0,
+            doc_char_count: 0,
+            doc_metadata_tags: Vec::new(),
+            lst_dependencies: None,
+            lst_mdoctags: None,
+            lst_distributed: None,
             props,
             def_prop_key,
             use_prop_key,
@@ -184,6 +200,94 @@ impl ParserCtx {
     #[must_use]
     pub fn declared_definition_metadata(&self) -> &[(Box<str>, Box<str>, Box<str>)] {
         &self.declared_definition_metadata
+    }
+
+    /// Records one parsed doc block.
+    pub fn note_doc_block(&mut self) {
+        self.doc_block_count = self.doc_block_count.saturating_add(1);
+    }
+
+    /// Number of parsed doc blocks.
+    #[must_use]
+    pub fn doc_block_count(&self) -> u32 {
+        self.doc_block_count
+    }
+
+    /// Records one parsed doc notice.
+    pub fn note_doc_notice(&mut self) {
+        self.doc_notice_count = self.doc_notice_count.saturating_add(1);
+    }
+
+    /// Number of parsed doc notices.
+    #[must_use]
+    pub fn doc_notice_count(&self) -> u32 {
+        self.doc_notice_count
+    }
+
+    /// Records one parsed listing block.
+    pub fn note_doc_listing(&mut self) {
+        self.doc_listing_count = self.doc_listing_count.saturating_add(1);
+    }
+
+    /// Number of parsed listing blocks.
+    #[must_use]
+    pub fn doc_listing_count(&self) -> u32 {
+        self.doc_listing_count
+    }
+
+    /// Records one doc character token consumed by the parser.
+    pub fn note_doc_char(&mut self) {
+        self.doc_char_count = self.doc_char_count.saturating_add(1);
+    }
+
+    /// Number of `DOCCHAR` tokens consumed by the parser.
+    #[must_use]
+    pub fn doc_char_count(&self) -> u32 {
+        self.doc_char_count
+    }
+
+    /// Records one metadata tag name found in `<metadata>...</metadata>`.
+    pub fn note_doc_metadata_tag(&mut self, tag: &str) {
+        self.doc_metadata_tags.push(tag.into());
+    }
+
+    /// Metadata tag names parsed in documentation sections.
+    #[must_use]
+    pub fn doc_metadata_tags(&self) -> &[Box<str>] {
+        &self.doc_metadata_tags
+    }
+
+    /// Equivalent to C++ listing switch update for dependencies.
+    pub fn set_lst_dependencies(&mut self, value: bool) {
+        self.lst_dependencies = Some(value);
+    }
+
+    /// Equivalent to C++ listing switch update for mdoctags.
+    pub fn set_lst_mdoctags(&mut self, value: bool) {
+        self.lst_mdoctags = Some(value);
+    }
+
+    /// Equivalent to C++ listing switch update for distributed.
+    pub fn set_lst_distributed(&mut self, value: bool) {
+        self.lst_distributed = Some(value);
+    }
+
+    /// Last seen dependencies listing switch value.
+    #[must_use]
+    pub fn lst_dependencies(&self) -> Option<bool> {
+        self.lst_dependencies
+    }
+
+    /// Last seen mdoctags listing switch value.
+    #[must_use]
+    pub fn lst_mdoctags(&self) -> Option<bool> {
+        self.lst_mdoctags
+    }
+
+    /// Last seen distributed listing switch value.
+    #[must_use]
+    pub fn lst_distributed(&self) -> Option<bool> {
+        self.lst_distributed
     }
 
     /// Equivalent to C++ `setDefProp(sym, file, line)`.
