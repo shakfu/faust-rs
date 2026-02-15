@@ -225,3 +225,10 @@ Execution plan (Phase 0 prototype, revised):
 - Added generic node-keyed property storage in `crates/tlib/src/property.rs`:
   - `PropertyStore<T>` with `set/get/get_mut/remove/clear/len`.
 - Updated `crates/tlib/src/lib.rs` to expose `PropertyStore`.
+
+### Gate A step 3 (`tlib-core` semantics tests)
+
+- Added integration tests in `crates/tlib/tests/core_semantics.rs` covering:
+  - hash-consing identity reuse for structurally identical nodes,
+  - list ordering semantics for `cons/hd/tl`,
+  - node-keyed property behavior (`set/get/get_mut/remove`).
