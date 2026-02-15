@@ -72,3 +72,20 @@ fn property_store_interned_key_api_matches_string_api() {
     assert_eq!(props.get(node, "order"), Some(&9));
     assert_eq!(props.remove_with_key(node, order), Some(9));
 }
+
+#[test]
+fn property_store_clear_preserves_key_reuse() {
+    let mut arena = TreeArena::new();
+    let node = arena.symbol("gain");
+
+    let mut props = PropertyStore::<i32>::new();
+    assert_eq!(props.set(node, "order", 5), None);
+    assert_eq!(props.get(node, "order"), Some(&5));
+
+    props.clear();
+    assert!(props.is_empty());
+    assert_eq!(props.get(node, "order"), None);
+
+    assert_eq!(props.set(node, "order", 8), None);
+    assert_eq!(props.get(node, "order"), Some(&8));
+}

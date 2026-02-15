@@ -7,7 +7,7 @@ pub struct PropertyKey(u32);
 
 #[derive(Debug)]
 pub struct PropertyStore<T> {
-    values: HashMap<PropertyKey, Vec<Option<T>>>,
+    values: Vec<Vec<Option<T>>>,
     key_intern: HashMap<Box<str>, PropertyKey>,
     next_key: u32,
     len: usize,
@@ -23,7 +23,7 @@ impl<T> PropertyStore<T> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            values: HashMap::new(),
+            values: Vec::new(),
             key_intern: HashMap::new(),
             next_key: 0,
             len: 0,
@@ -35,8 +35,12 @@ impl<T> PropertyStore<T> {
     }
 
     pub fn set_with_key(&mut self, node: TreeId, key: PropertyKey, value: T) -> Option<T> {
+        let key_idx = key.0 as usize;
+        if key_idx >= self.values.len() {
+            self.values.resize_with(key_idx + 1, Vec::new);
+        }
         let idx = node.as_u32() as usize;
-        let slots = self.values.entry(key).or_default();
+        let slots = &mut self.values[key_idx];
         if idx >= slots.len() {
             slots.resize_with(idx + 1, || None);
         }
@@ -51,7 +55,7 @@ impl<T> PropertyStore<T> {
     pub fn get_with_key(&self, node: TreeId, key: PropertyKey) -> Option<&T> {
         let idx = node.as_u32() as usize;
         self.values
-            .get(&key)
+            .get(key.0 as usize)
             .and_then(|slots| slots.get(idx))
             .and_then(Option::as_ref)
     }
@@ -59,14 +63,14 @@ impl<T> PropertyStore<T> {
     pub fn get_mut_with_key(&mut self, node: TreeId, key: PropertyKey) -> Option<&mut T> {
         let idx = node.as_u32() as usize;
         self.values
-            .get_mut(&key)
+            .get_mut(key.0 as usize)
             .and_then(move |slots| slots.get_mut(idx))
             .and_then(Option::as_mut)
     }
 
     pub fn remove_with_key(&mut self, node: TreeId, key: PropertyKey) -> Option<T> {
         let idx = node.as_u32() as usize;
-        let slots = self.values.get_mut(&key)?;
+        let slots = self.values.get_mut(key.0 as usize)?;
         if idx >= slots.len() {
             return None;
         }
@@ -123,6 +127,7 @@ impl<T> PropertyStore<T> {
             .checked_add(1)
             .expect("property key id overflow");
         let _ = self.key_intern.insert(key.to_owned().into_boxed_str(), id);
+        self.values.push(Vec::new());
         id
     }
 }

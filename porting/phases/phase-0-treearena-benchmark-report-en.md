@@ -67,3 +67,21 @@ Implemented optimization that unblocked Gate A:
 
 1. Keep tracking memory footprint tradeoff of sparse high `TreeId` spaces (vector slots per property key).
 2. Preserve this benchmark in Phase 0 evidence when `TreeArena` internals evolve.
+
+## 5. Post-Gate-A tuning (`property_get` fast path)
+
+Implemented:
+- `PropertyStore` storage for keyed access switched from `HashMap<PropertyKey, Vec<Option<T>>>` to direct key-indexed `Vec<Vec<Option<T>>>`.
+- Goal: remove per-lookup hash map overhead in `get_with_key` hot loops.
+
+Validation method:
+- interleaved Rust/C++ runs with larger workload (`n=1_000_000`), 3 runs each.
+- compare medians to reduce run-to-run noise.
+
+Median results (`n=1_000_000`):
+- Rust: `create_ms=431.228`, `lookup_ms=378.125`, `traversal_ms=213.172`, `property_set_ms=5.279`, `property_get_ms=2.139`
+- C++: `create_ms=837.103`, `lookup_ms=686.872`, `traversal_ms=908.958`, `property_set_ms=459.997`, `property_get_ms=7.552`
+- Rust/C++ ratios: `create=0.515x`, `lookup=0.551x`, `traversal=0.235x`, `property_set=0.011x`, `property_get=0.283x`
+
+Conclusion:
+- `property_get` improved significantly without introducing evidence of regressions on `create`/`lookup` under large-`n` median measurement.

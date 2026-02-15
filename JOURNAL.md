@@ -322,3 +322,19 @@ Execution plan (Phase 0 prototype, revised):
 - Kept Gate A status as **Go** with updated evidence:
   - `create` and `lookup` are now faster than the C++ baseline on this workload,
   - `property_get` remains under the acceptance threshold (`<= 2x`).
+
+### Gate A step 11 (`property_get` targeted optimization without cross-metric regression)
+
+- Refactored `PropertyStore` in `crates/tlib/src/property.rs`:
+  - replaced keyed storage `HashMap<PropertyKey, Vec<Option<T>>>` with direct key-indexed `Vec<Vec<Option<T>>>`,
+  - kept `PropertyKey` API and string-key compatibility semantics (`key`, `set/get/remove`, `set_with_key/get_with_key/...`).
+- Added non-regression test in `crates/tlib/tests/core_semantics.rs`:
+  - `property_store_clear_preserves_key_reuse`.
+- Validation strategy:
+  - due high jitter at `n=200000`, ran interleaved Rust/C++ medians at `n=1_000_000` (3 runs each).
+- Median results (`n=1_000_000`):
+  - Rust: `create_ms=431.228`, `lookup_ms=378.125`, `traversal_ms=213.172`, `property_set_ms=5.279`, `property_get_ms=2.139`
+  - C++: `create_ms=837.103`, `lookup_ms=686.872`, `traversal_ms=908.958`, `property_set_ms=459.997`, `property_get_ms=7.552`
+  - Ratios: `create=0.515x`, `lookup=0.551x`, `traversal=0.235x`, `property_set=0.011x`, `property_get=0.283x`
+- Conclusion:
+  - `property_get` improved strongly and no regression signal observed on `create/lookup` in large-`n` median comparison.
