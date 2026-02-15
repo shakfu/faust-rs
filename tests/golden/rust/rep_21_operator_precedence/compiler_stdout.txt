@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_21_operator_precedence.dsp
+bytes=25
+lines=1
+fnv1a64=c68a54cfa64a20d4

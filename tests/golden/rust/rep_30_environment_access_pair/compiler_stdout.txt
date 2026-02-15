@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_30_environment_access_pair.dsp
+bytes=71
+lines=1
+fnv1a64=46c421ca38264678

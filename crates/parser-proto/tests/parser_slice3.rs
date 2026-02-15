@@ -91,19 +91,29 @@ fn supports_recursion_form_plus_tilde_wire() {
 #[test]
 fn parse_only_rep_corpus_subset_is_accepted() {
     let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/corpus");
-    for file in [
-        "rep_01_passthrough.dsp",
-        "rep_02_gain_bias.dsp",
-        "rep_03_stereo_mix.dsp",
-        "rep_04_delay_echo.dsp",
-        "rep_05_one_pole_lowpass.dsp",
-        "rep_06_comb_feedback.dsp",
-        "rep_07_nonlinear_clip.dsp",
-        "rep_08_branch_and_sum.dsp",
-        "rep_09_ui_slider.dsp",
-        "rep_10_two_in_two_out_ui.dsp",
-    ] {
-        let path = corpus.join(file);
+    let mut files = fs::read_dir(&corpus)
+        .expect("corpus directory should be readable")
+        .map(|entry| entry.expect("corpus entry should be readable").path())
+        .filter(|path| {
+            let is_dsp = path.extension().is_some_and(|ext| ext == "dsp");
+            let is_rep = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("rep_"));
+            is_dsp && is_rep
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    assert!(
+        !files.is_empty(),
+        "corpus rep_*.dsp list should not be empty"
+    );
+
+    for path in files {
+        let file = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("corpus file name should be valid utf-8");
         let source = fs::read_to_string(&path).expect("corpus file should be readable");
         let output = parse_program(&source, file);
         assert!(

@@ -1,0 +1,162 @@
+/* ------------------------------------------------------------
+name: "rep_19_primitive_family"
+Code generated with Faust 2.84.3 (https://faust.grame.fr)
+Compilation options: -lang cpp -fpga-mem-th 4 -ct 1 -es 1 -mcl 4 -mcd 9 -mfs 1024 -huf 0 -irt 4 -fls 4 -udd 1 -mdd 1024 -mdy 90 -mca 8 -ss 0 -single -ftz 0
+------------------------------------------------------------ */
+
+#ifndef  __mydsp_H__
+#define  __mydsp_H__
+
+#ifndef FAUSTFLOAT
+#define FAUSTFLOAT float
+#endif
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+
+#ifndef FAUSTCLASS
+#define FAUSTCLASS mydsp
+#endif
+
+#ifdef __APPLE__
+#define exp10f __exp10f
+#define exp10 __exp10
+#endif
+
+#if defined(_WIN32)
+#define RESTRICT __restrict
+#else
+#define RESTRICT __restrict__
+#endif
+
+
+class mydsp : public dsp {
+
+ private:
+
+	float fTempPerm0SE;
+	float fTempPerm1SE;
+	int fSampleRate;
+
+ public:
+	mydsp() {
+	}
+
+	mydsp(const mydsp&) = default;
+
+	virtual ~mydsp() = default;
+
+	mydsp& operator=(const mydsp&) = default;
+
+	void metadata(Meta* m) {
+		m->declare("compile_options", "-lang cpp -fpga-mem-th 4 -ct 1 -es 1 -mcl 4 -mcd 9 -mfs 1024 -huf 0 -irt 4 -fls 4 -udd 1 -mdd 1024 -mdy 90 -mca 8 -ss 0 -single -ftz 0");
+		m->declare("filename", "rep_19_primitive_family.dsp");
+		m->declare("name", "rep_19_primitive_family");
+	}
+
+	virtual int getNumInputs() {
+		return 19;
+	}
+	virtual int getNumOutputs() {
+		return 10;
+	}
+
+	static void classInit(int sample_rate) {
+	}
+
+	virtual void instanceConstants(int sample_rate) {
+		fSampleRate = sample_rate;
+	}
+
+	virtual void instanceResetUserInterface() {
+	}
+
+	virtual void instanceClear() {
+		fTempPerm0SE = 0.0f;
+		fTempPerm1SE = 0.0f;
+	}
+
+	virtual void init(int sample_rate) {
+		classInit(sample_rate);
+		instanceInit(sample_rate);
+	}
+
+	virtual void instanceInit(int sample_rate) {
+		instanceConstants(sample_rate);
+		instanceResetUserInterface();
+		instanceClear();
+	}
+
+	virtual mydsp* clone() {
+		return new mydsp(*this);
+	}
+
+	virtual int getSampleRate() {
+		return fSampleRate;
+	}
+
+	virtual void buildUserInterface(UI* ui_interface) {
+		ui_interface->openVerticalBox("rep_19_primitive_family");
+		ui_interface->closeBox();
+	}
+
+	virtual void compute(int count, FAUSTFLOAT** RESTRICT inputs, FAUSTFLOAT** RESTRICT outputs) {
+		float fTemp0SE = fTempPerm0SE;
+		float fTemp2SE = fTempPerm1SE;
+		FAUSTFLOAT* input0 = inputs[0];
+		FAUSTFLOAT* input1 = inputs[1];
+		FAUSTFLOAT* input2 = inputs[2];
+		FAUSTFLOAT* input3 = inputs[3];
+		FAUSTFLOAT* input4 = inputs[4];
+		FAUSTFLOAT* input5 = inputs[5];
+		FAUSTFLOAT* input6 = inputs[6];
+		FAUSTFLOAT* input7 = inputs[7];
+		FAUSTFLOAT* input8 = inputs[8];
+		FAUSTFLOAT* input9 = inputs[9];
+		FAUSTFLOAT* input10 = inputs[10];
+		FAUSTFLOAT* input11 = inputs[11];
+		FAUSTFLOAT* input12 = inputs[12];
+		FAUSTFLOAT* input13 = inputs[13];
+		FAUSTFLOAT* input14 = inputs[14];
+		FAUSTFLOAT* input15 = inputs[15];
+		FAUSTFLOAT* input16 = inputs[16];
+		FAUSTFLOAT* input17 = inputs[17];
+		FAUSTFLOAT* input18 = inputs[18];
+		FAUSTFLOAT* output0 = outputs[0];
+		FAUSTFLOAT* output1 = outputs[1];
+		FAUSTFLOAT* output2 = outputs[2];
+		FAUSTFLOAT* output3 = outputs[3];
+		FAUSTFLOAT* output4 = outputs[4];
+		FAUSTFLOAT* output5 = outputs[5];
+		FAUSTFLOAT* output6 = outputs[6];
+		FAUSTFLOAT* output7 = outputs[7];
+		FAUSTFLOAT* output8 = outputs[8];
+		FAUSTFLOAT* output9 = outputs[9];
+		for (int i0 = 0; i0 < count; i0 = i0 + 1) {
+			if (static_cast<float>(input14[i0]) != 0.0f) {
+				fTemp0SE = static_cast<float>(input13[i0]);
+			}
+			float fTemp1SE = static_cast<float>(input18[i0]);
+			if (fTemp1SE != 0.0f) {
+				fTemp2SE = static_cast<float>(input17[i0]) * fTemp1SE;
+			}
+			float fTemp3SE = static_cast<float>(input7[i0]);
+			output0[i0] = static_cast<FAUSTFLOAT>(std::pow(static_cast<float>(input0[i0]), static_cast<float>(input1[i0])));
+			output1[i0] = static_cast<FAUSTFLOAT>(static_cast<int>(static_cast<float>(input2[i0])));
+			output2[i0] = static_cast<FAUSTFLOAT>(static_cast<float>(input3[i0]));
+			output3[i0] = static_cast<FAUSTFLOAT>(((static_cast<int>(static_cast<float>(input4[i0]))) ? static_cast<float>(input6[i0]) : static_cast<float>(input5[i0])));
+			output4[i0] = static_cast<FAUSTFLOAT>(((fTemp3SE == 0.0f) ? static_cast<float>(input8[i0]) : ((fTemp3SE == 1.0f) ? static_cast<float>(input9[i0]) : static_cast<float>(input10[i0]))));
+			output5[i0] = static_cast<FAUSTFLOAT>(static_cast<float>(input11[i0]));
+			output6[i0] = static_cast<FAUSTFLOAT>(fTemp0SE);
+			output7[i0] = static_cast<FAUSTFLOAT>(-1.0f);
+			output8[i0] = static_cast<FAUSTFLOAT>(1.0f);
+			output9[i0] = static_cast<FAUSTFLOAT>(fTemp2SE);
+		}
+		fTempPerm0SE = fTemp0SE;
+		fTempPerm1SE = fTemp2SE;
+	}
+
+};
+
+#endif

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_27_lambda_two_args.dsp
+bytes=23
+lines=1
+fnv1a64=c73f84654621b2cb

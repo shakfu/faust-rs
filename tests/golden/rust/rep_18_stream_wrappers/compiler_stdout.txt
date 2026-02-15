@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_18_stream_wrappers.dsp
+bytes=78
+lines=1
+fnv1a64=8b43fee50ab8ff44

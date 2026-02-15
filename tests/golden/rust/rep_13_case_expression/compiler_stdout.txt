@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_13_case_expression.dsp
+bytes=44
+lines=4
+fnv1a64=bc7927431677ce8d

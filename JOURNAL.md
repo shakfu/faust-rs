@@ -1321,3 +1321,81 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline --no-fail-fast`
+
+### Gate B remaining step 9 (production integration phase 4: CLI structural box dump)
+
+- Added a first user-facing CLI tool to inspect parser output box structure:
+  - `crates/compiler/src/main.rs`
+  - new command:
+    - `--dump-box <input.dsp> [-I <dir> ...]`
+  - behavior:
+    - parses through production parser APIs (`Compiler::compile_file_default` / `compile_file`),
+    - prints deterministic structural dump via `boxes::dump_box(...)`,
+    - returns non-zero on parse failure or invalid usage.
+- Refactored parse-related CLI argument handling:
+  - introduced shared helper `parse_input_with_import_dirs(...)` for `--parse` and `--dump-box`.
+- Added `boxes` dependency to compiler crate:
+  - `crates/compiler/Cargo.toml`.
+- Scope note:
+  - this provides a direct operator tool to inspect produced box trees while parser migration continues.
+- Validation:
+  - `cargo run -p compiler --offline -- --dump-box tests/corpus/rep_08_branch_and_sum.dsp`
+  - `cargo test -p compiler --offline --no-fail-fast`
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline --no-fail-fast`
+
+### Parser corpus expansion (`tests/corpus` `rep_11`..`rep_20`)
+
+- Added 10 new parser-focused corpus files:
+  - `tests/corpus/rep_11_declare_metadata.dsp`
+  - `tests/corpus/rep_12_import_statement.dsp`
+  - `tests/corpus/rep_13_case_expression.dsp`
+  - `tests/corpus/rep_14_with_local_scope.dsp`
+  - `tests/corpus/rep_15_letrec_scope.dsp`
+  - `tests/corpus/rep_16_lambda_abstraction.dsp`
+  - `tests/corpus/rep_17_ui_groups.dsp`
+  - `tests/corpus/rep_18_stream_wrappers.dsp`
+  - `tests/corpus/rep_19_primitive_family.dsp`
+  - `tests/corpus/rep_20_environment_waveform.dsp`
+- Updated parser corpus acceptance test:
+  - `crates/parser-proto/tests/parser_slice3.rs`
+  - replaced hard-coded `rep_01..rep_10` list with dynamic `rep_*.dsp` discovery (sorted) to keep coverage growing without test rewrites.
+- Refreshed golden artifacts for the expanded corpus:
+  - Rust reference snapshots:
+    - `cargo run -p xtask --offline -- golden-gen-rust`
+  - C++ reference snapshots (source of truth binary):
+    - `FAUST_CPP_BIN=/usr/local/bin/faust cargo run -p xtask --offline -- golden-gen-cpp`
+- Validation:
+  - `cargo test -p parser-proto --test parser_slice3 --offline --no-fail-fast`
+  - `cargo run -p xtask --offline -- golden-check`
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline --no-fail-fast`
+
+### Parser corpus expansion (`tests/corpus` `rep_21`..`rep_30`)
+
+- Added 10 additional valid corpus files (parser + C++ compilable envelope):
+  - `tests/corpus/rep_21_operator_precedence.dsp`
+  - `tests/corpus/rep_22_parallel_mix.dsp`
+  - `tests/corpus/rep_23_feedback_simple.dsp`
+  - `tests/corpus/rep_24_case_three_rules.dsp`
+  - `tests/corpus/rep_25_with_local_defs.dsp`
+  - `tests/corpus/rep_26_letrec_defs.dsp`
+  - `tests/corpus/rep_27_lambda_two_args.dsp`
+  - `tests/corpus/rep_28_nested_ui_groups.dsp`
+  - `tests/corpus/rep_29_stream_wrapper_pair.dsp`
+  - `tests/corpus/rep_30_environment_access_pair.dsp`
+- Coverage intent:
+  - operator precedence and mixed arithmetic composition,
+  - split/parallel composition + feedback form,
+  - extended `case` shape,
+  - local/recursive scopes (`with`/`letrec`),
+  - lambda + nested UI grouping,
+  - stream wrappers + environment access + waveform.
+- Refreshed golden artifacts:
+  - `cargo run -p xtask --offline -- golden-gen-rust`
+  - `FAUST_CPP_BIN=/usr/local/bin/faust cargo run -p xtask --offline -- golden-gen-cpp`
+- Validation:
+  - `cargo test -p parser-proto --test parser_slice3 --offline --no-fail-fast`
+  - `cargo run -p xtask --offline -- golden-check`

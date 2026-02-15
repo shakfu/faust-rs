@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_20_environment_waveform.dsp
+bytes=63
+lines=1
+fnv1a64=f024d617d7b07eae

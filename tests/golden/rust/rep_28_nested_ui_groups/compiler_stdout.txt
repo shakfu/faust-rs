@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_28_nested_ui_groups.dsp
+bytes=44
+lines=1
+fnv1a64=8536067062fc0f0e

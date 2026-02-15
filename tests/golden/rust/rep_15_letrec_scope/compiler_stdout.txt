@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_15_letrec_scope.dsp
+bytes=34
+lines=3
+fnv1a64=6a2ec684394658a8

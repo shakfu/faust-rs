@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_22_parallel_mix.dsp
+bytes=38
+lines=1
+fnv1a64=0cf76487cfeb0677

@@ -1,0 +1,120 @@
+/* ------------------------------------------------------------
+name: "rep_20_environment_waveform"
+Code generated with Faust 2.84.3 (https://faust.grame.fr)
+Compilation options: -lang cpp -fpga-mem-th 4 -ct 1 -es 1 -mcl 4 -mcd 9 -mfs 1024 -huf 0 -irt 4 -fls 4 -udd 1 -mdd 1024 -mdy 90 -mca 8 -ss 0 -single -ftz 0
+------------------------------------------------------------ */
+
+#ifndef  __mydsp_H__
+#define  __mydsp_H__
+
+#ifndef FAUSTFLOAT
+#define FAUSTFLOAT float
+#endif
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+
+#ifndef FAUSTCLASS
+#define FAUSTCLASS mydsp
+#endif
+
+#ifdef __APPLE__
+#define exp10f __exp10f
+#define exp10 __exp10
+#endif
+
+#if defined(_WIN32)
+#define RESTRICT __restrict
+#else
+#define RESTRICT __restrict__
+#endif
+
+const static float fmydspWave0SC[3] = {1.0f,-2.0f,3.5f};
+
+class mydsp : public dsp {
+
+ private:
+
+	float fConst0KC;
+	int fmydspWave0SC_idx;
+	int fSampleRate;
+
+ public:
+	mydsp() {
+	}
+
+	mydsp(const mydsp&) = default;
+
+	virtual ~mydsp() = default;
+
+	mydsp& operator=(const mydsp&) = default;
+
+	void metadata(Meta* m) {
+		m->declare("compile_options", "-lang cpp -fpga-mem-th 4 -ct 1 -es 1 -mcl 4 -mcd 9 -mfs 1024 -huf 0 -irt 4 -fls 4 -udd 1 -mdd 1024 -mdy 90 -mca 8 -ss 0 -single -ftz 0");
+		m->declare("filename", "rep_20_environment_waveform.dsp");
+		m->declare("name", "rep_20_environment_waveform");
+	}
+
+	virtual int getNumInputs() {
+		return 1;
+	}
+	virtual int getNumOutputs() {
+		return 3;
+	}
+
+	static void classInit(int sample_rate) {
+	}
+
+	virtual void instanceConstants(int sample_rate) {
+		fSampleRate = sample_rate;
+		fConst0KC = 1.0f;
+		fmydspWave0SC_idx = 0;
+	}
+
+	virtual void instanceResetUserInterface() {
+	}
+
+	virtual void instanceClear() {
+	}
+
+	virtual void init(int sample_rate) {
+		classInit(sample_rate);
+		instanceInit(sample_rate);
+	}
+
+	virtual void instanceInit(int sample_rate) {
+		instanceConstants(sample_rate);
+		instanceResetUserInterface();
+		instanceClear();
+	}
+
+	virtual mydsp* clone() {
+		return new mydsp(*this);
+	}
+
+	virtual int getSampleRate() {
+		return fSampleRate;
+	}
+
+	virtual void buildUserInterface(UI* ui_interface) {
+		ui_interface->openVerticalBox("rep_20_environment_waveform");
+		ui_interface->closeBox();
+	}
+
+	virtual void compute(int count, FAUSTFLOAT** RESTRICT inputs, FAUSTFLOAT** RESTRICT outputs) {
+		FAUSTFLOAT* input0 = inputs[0];
+		FAUSTFLOAT* output0 = outputs[0];
+		FAUSTFLOAT* output1 = outputs[1];
+		FAUSTFLOAT* output2 = outputs[2];
+		for (int i0 = 0; i0 < count; i0 = i0 + 1) {
+			output0[i0] = static_cast<FAUSTFLOAT>(static_cast<float>(input0[i0]));
+			output1[i0] = static_cast<FAUSTFLOAT>(3);
+			output2[i0] = static_cast<FAUSTFLOAT>(fmydspWave0SC[fmydspWave0SC_idx]);
+			fmydspWave0SC_idx = (1 + fmydspWave0SC_idx) % 3;
+		}
+	}
+
+};
+
+#endif

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_19_primitive_family.dsp
+bytes=87
+lines=1
+fnv1a64=c1c390f9b268e18f

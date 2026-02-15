@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_14_with_local_scope.dsp
+bytes=31
+lines=3
+fnv1a64=e9d318154fc3380b
