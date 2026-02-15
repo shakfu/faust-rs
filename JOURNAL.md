@@ -525,3 +525,37 @@ Execution plan (Phase 0 prototype, revised):
       `fmt` + `clippy -D warnings` + workspace tests on Linux/macOS/Windows.
   - `AGENTS.md`:
     - mirrored the same mandatory per-step quality-gate rule in Porting Discipline.
+
+### Gate B step 1 (`ParserCtx` + `parser-proto` crate bootstrap)
+
+- Added a new isolated crate:
+  - `crates/parser-proto` (workspace member),
+  - keeps production `crates/parser` untouched while validating parser migration foundations.
+- Added `lrlex`/`lrpar`/`cfgrammar` wiring with compile-time generation:
+  - `crates/parser-proto/build.rs`,
+  - minimal grammar files under `crates/parser-proto/src/grammar/`:
+    - `faustlexer.l`
+    - `faustparser.y`
+  - smoke helper `parse_minimal("process = _;")` in `crates/parser-proto/src/lib.rs`.
+- Implemented `ParserCtx` in `crates/parser-proto/src/context.rs` with explicit C++ provenance mapping:
+  - parser cursor (`FAUSTfilename`/`FAUSTlineno` equivalent),
+  - waveform accumulator (`gWaveForm` equivalent),
+  - parse result root (`gResult` equivalent),
+  - property hooks equivalent to `setDefProp`/`setUseProp` with typed location payload,
+  - parser-local diagnostics + error/recovery counters.
+- Added dedicated tests:
+  - `crates/parser-proto/tests/parser_ctx.rs`:
+    - def/use property mapping semantics,
+    - cursor hooks,
+    - waveform drain behavior,
+    - parse root storage,
+    - diagnostics/counters behavior.
+  - `crates/parser-proto/tests/parser_smoke.rs`:
+    - accept/reject checks for minimal generated lexer/parser pipeline.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline`
+- Quality-gate execution note:
+  - online `cargo clippy` / `cargo test` could not run because crates.io DNS resolution failed in this environment (`Could not resolve host: index.crates.io`);
+  - equivalent offline validation was executed and passed.
