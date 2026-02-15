@@ -767,3 +767,19 @@ Execution plan (Phase 0 prototype, revised):
 - Updated files:
   - `porting/phases/phase-3-parser-en.md`
   - `porting/faust-rust-porting-plan-en.md`
+
+### Gate B remaining step 1 (strict parser-proto baseline gate)
+
+- Locked parser-proto build generation to strict mode:
+  - `crates/parser-proto/build.rs` now uses:
+    - `.warnings_are_errors(true)`
+    - `.show_warnings(true)`
+- Removed hidden warning debt on currently touched Slice 1/2/3 areas:
+  - reduced `%token` declarations in `crates/parser-proto/src/grammar/faustparser.y` to the active subset,
+  - added explicit `LexProbeToken` recovery branch so lexer-priority probe tokens (`WITH`, `LETREC`, `WHERE`, `ARROW`, `LAPPLY`) stay covered without parser-local stubs.
+- Synchronized lexer subset with the strict grammar gate:
+  - simplified `crates/parser-proto/src/grammar/faustlexer.l` to the currently supported token surface,
+  - kept C++ operator-priority probes and keyword-priority probes used by tests.
+- Validation:
+  - `cargo test -p parser-proto --offline --no-fail-fast`
+  - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`

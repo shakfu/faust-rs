@@ -1,8 +1,6 @@
 %start Program
 %parse-param state: &std::cell::RefCell<crate::ParseState>
 
-%left WITH
-%left LETREC
 %right SPLIT MIX
 %right SEQ
 %right PAR
@@ -21,26 +19,12 @@
 %token SEQ PAR SPLIT MIX REC
 %token ADD SUB MUL DIV MOD FDELAY DELAY1
 %token AND OR XOR LSH RSH LT LE GT GE EQ NE
-%token WIRE CUT ENDDEF DEF LPAR RPAR LBRAQ RBRAQ LCROC RCROC DOT
-%token WITH LETREC WHERE
-%token MEM PREFIX
-%token INTCAST FLOATCAST NOTYPECAST
-%token RDTBL RWTBL SELECT2 SELECT3
-%token BUTTON CHECKBOX VSLIDER HSLIDER NENTRY VGROUP HGROUP TGROUP VBARGRAPH HBARGRAPH SOUNDFILE
-%token ATTACH MODULATE
-%token ACOS ASIN ATAN ATAN2 COS SIN TAN
-%token EXP LOG LOG10 POWOP POWFUN SQRT
-%token ABS MIN MAX
-%token FMOD REMAINDER
-%token FLOOR CEIL RINT ROUND
+%token WIRE CUT ENDDEF DEF LPAR RPAR DOT
+%token MEM
+%token WITH LETREC WHERE ARROW LAPPLY
+%token BUTTON CHECKBOX VSLIDER HSLIDER NENTRY VBARGRAPH HBARGRAPH
+%token POWOP MIN MAX
 %token IPAR ISEQ ISUM IPROD
-%token INPUTS OUTPUTS ONDEMAND UPSAMPLING DOWNSAMPLING
-%token IMPORT COMPONENT LIBRARY ENVIRONMENT WAVEFORM ROUTE ENABLE CONTROL
-%token DECLARE CASE ARROW LAPPLY
-%token ASSERTBOUNDS LOWEST HIGHEST
-%token FLOATMODE DOUBLEMODE QUADMODE FIXEDPOINTMODE
-%token LAMBDA
-%token FFUNCTION FCONSTANT FVARIABLE
 %%
 Program -> tlib::TreeId:
       StmtList {
@@ -88,6 +72,29 @@ Definition -> tlib::TreeId:
           crate::with_state(state, |state| {
               state.recovery_statement("syntax error: invalid definition token before ';'")
           })
+      }
+    | DefName DEF LexProbeToken ENDDEF {
+          crate::with_state(state, |state| {
+              state.recovery_statement("syntax error: unsupported prototype token before ';'")
+          })
+      }
+    ;
+
+LexProbeToken -> tlib::TreeId:
+      WITH {
+          crate::with_state(state, |state| state.ident_from_token($lexer, $1, false))
+      }
+    | LETREC {
+          crate::with_state(state, |state| state.ident_from_token($lexer, $1, false))
+      }
+    | WHERE {
+          crate::with_state(state, |state| state.ident_from_token($lexer, $1, false))
+      }
+    | ARROW {
+          crate::with_state(state, |state| state.ident_from_token($lexer, $1, false))
+      }
+    | LAPPLY {
+          crate::with_state(state, |state| state.ident_from_token($lexer, $1, false))
       }
     ;
 
