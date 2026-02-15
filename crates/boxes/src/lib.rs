@@ -12,6 +12,11 @@
 //!   `box_and`, `box_or`, `box_xor`, `box_lsh`, `box_rsh`,
 //!   `box_lt`, `box_le`, `box_gt`, `box_ge`, `box_eq`, `box_ne`,
 //!   `box_pow`, `box_delay`, `box_delay1`, `box_min`, `box_max`,
+//!   `box_prefix`, `box_int_cast`, `box_float_cast`,
+//!   `box_read_only_table`, `box_write_read_table`,
+//!   `box_select2`, `box_select3`,
+//!   `box_assert_bounds`, `box_lowest`, `box_highest`,
+//!   `box_attach`, `box_enable`, `box_control`,
 //!   `box_ipar`, `box_iseq`, `box_isum`, `box_iprod`,
 //!   `box_with_local_def`, `box_environment`, `box_component`, `box_library`,
 //!   `box_waveform`, `box_route`,
@@ -69,6 +74,19 @@ const BOX_DELAY_TAG: &str = "BOXDELAY";
 const BOX_DELAY1_TAG: &str = "BOXDELAY1";
 const BOX_MIN_TAG: &str = "BOXMIN";
 const BOX_MAX_TAG: &str = "BOXMAX";
+const BOX_PREFIX_TAG: &str = "BOXPREFIX";
+const BOX_INT_CAST_TAG: &str = "BOXINTCAST";
+const BOX_FLOAT_CAST_TAG: &str = "BOXFLOATCAST";
+const BOX_READ_ONLY_TABLE_TAG: &str = "BOXRDTBL";
+const BOX_WRITE_READ_TABLE_TAG: &str = "BOXRWTBL";
+const BOX_SELECT2_TAG: &str = "BOXSELECT2";
+const BOX_SELECT3_TAG: &str = "BOXSELECT3";
+const BOX_ASSERT_BOUNDS_TAG: &str = "BOXASSERTBOUNDS";
+const BOX_LOWEST_TAG: &str = "BOXLOWEST";
+const BOX_HIGHEST_TAG: &str = "BOXHIGHEST";
+const BOX_ATTACH_TAG: &str = "BOXATTACH";
+const BOX_ENABLE_TAG: &str = "BOXENABLE";
+const BOX_CONTROL_TAG: &str = "BOXCONTROL";
 const BOX_IPAR_TAG: &str = "BOXIPAR";
 const BOX_ISEQ_TAG: &str = "BOXISEQ";
 const BOX_ISUM_TAG: &str = "BOXISUM";
@@ -387,6 +405,84 @@ pub fn box_max(arena: &mut TreeArena) -> BoxId {
     intern_tag(arena, BOX_MAX_TAG, &[])
 }
 
+/// Equivalent to C++ `boxPrefix`.
+#[must_use]
+pub fn box_prefix(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_PREFIX_TAG, &[])
+}
+
+/// Equivalent to C++ `boxIntCast`.
+#[must_use]
+pub fn box_int_cast(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_INT_CAST_TAG, &[])
+}
+
+/// Equivalent to C++ `boxFloatCast`.
+#[must_use]
+pub fn box_float_cast(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_FLOAT_CAST_TAG, &[])
+}
+
+/// Equivalent to C++ `boxReadOnlyTable`.
+#[must_use]
+pub fn box_read_only_table(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_READ_ONLY_TABLE_TAG, &[])
+}
+
+/// Equivalent to C++ `boxWriteReadTable`.
+#[must_use]
+pub fn box_write_read_table(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_WRITE_READ_TABLE_TAG, &[])
+}
+
+/// Equivalent to C++ `boxSelect2`.
+#[must_use]
+pub fn box_select2(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_SELECT2_TAG, &[])
+}
+
+/// Equivalent to C++ `boxSelect3`.
+#[must_use]
+pub fn box_select3(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_SELECT3_TAG, &[])
+}
+
+/// Equivalent to C++ `boxAssertBound`.
+#[must_use]
+pub fn box_assert_bounds(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_ASSERT_BOUNDS_TAG, &[])
+}
+
+/// Equivalent to C++ `boxLowest`.
+#[must_use]
+pub fn box_lowest(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_LOWEST_TAG, &[])
+}
+
+/// Equivalent to C++ `boxHighest`.
+#[must_use]
+pub fn box_highest(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_HIGHEST_TAG, &[])
+}
+
+/// Equivalent to C++ `boxAttach`.
+#[must_use]
+pub fn box_attach(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_ATTACH_TAG, &[])
+}
+
+/// Equivalent to C++ `boxEnable`.
+#[must_use]
+pub fn box_enable(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_ENABLE_TAG, &[])
+}
+
+/// Equivalent to C++ `boxControl`.
+#[must_use]
+pub fn box_control(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_CONTROL_TAG, &[])
+}
+
 macro_rules! define_is_prim {
     ($fn_name:ident, $tag:ident) => {
         #[must_use]
@@ -417,6 +513,19 @@ define_is_prim!(is_box_delay, BOX_DELAY_TAG);
 define_is_prim!(is_box_delay1, BOX_DELAY1_TAG);
 define_is_prim!(is_box_min, BOX_MIN_TAG);
 define_is_prim!(is_box_max, BOX_MAX_TAG);
+define_is_prim!(is_box_prefix, BOX_PREFIX_TAG);
+define_is_prim!(is_box_int_cast, BOX_INT_CAST_TAG);
+define_is_prim!(is_box_float_cast, BOX_FLOAT_CAST_TAG);
+define_is_prim!(is_box_read_only_table, BOX_READ_ONLY_TABLE_TAG);
+define_is_prim!(is_box_write_read_table, BOX_WRITE_READ_TABLE_TAG);
+define_is_prim!(is_box_select2, BOX_SELECT2_TAG);
+define_is_prim!(is_box_select3, BOX_SELECT3_TAG);
+define_is_prim!(is_box_assert_bounds, BOX_ASSERT_BOUNDS_TAG);
+define_is_prim!(is_box_lowest, BOX_LOWEST_TAG);
+define_is_prim!(is_box_highest, BOX_HIGHEST_TAG);
+define_is_prim!(is_box_attach, BOX_ATTACH_TAG);
+define_is_prim!(is_box_enable, BOX_ENABLE_TAG);
+define_is_prim!(is_box_control, BOX_CONTROL_TAG);
 
 /// Equivalent to C++ `boxIPar`.
 #[must_use]

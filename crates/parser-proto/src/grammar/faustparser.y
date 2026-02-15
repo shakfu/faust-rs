@@ -234,10 +234,8 @@ LexProbeToken -> u8:
     | ABS { 0 }
     | ACOS { 0 }
     | ASIN { 0 }
-    | ASSERTBOUNDS { 0 }
     | ATAN { 0 }
     | ATAN2 { 0 }
-    | ATTACH { 0 }
     | BDGM { 0 }
     | BDOC { 0 }
     | BEQN { 0 }
@@ -246,7 +244,6 @@ LexProbeToken -> u8:
     | CASE { 0 }
     | CEIL { 0 }
     | COMPONENT { 0 }
-    | CONTROL { 0 }
     | COS { 0 }
     | DECLARE { 0 }
     | DOCCHAR { 0 }
@@ -257,7 +254,6 @@ LexProbeToken -> u8:
     | EEQN { 0 }
     | ELST { 0 }
     | EMETADATA { 0 }
-    | ENABLE { 0 }
     | ENVIRONMENT { 0 }
     | EXP { 0 }
     | FCONSTANT { 0 }
@@ -269,7 +265,6 @@ LexProbeToken -> u8:
     | FMOD { 0 }
     | FVARIABLE { 0 }
     | HGROUP { 0 }
-    | HIGHEST { 0 }
     | IMPORT { 0 }
     | INPUTS { 0 }
     | INTCAST { 0 }
@@ -279,7 +274,6 @@ LexProbeToken -> u8:
     | LIBRARY { 0 }
     | LOG { 0 }
     | LOG10 { 0 }
-    | LOWEST { 0 }
     | LSTDEPENDENCIES { 0 }
     | LSTDISTRIBUTED { 0 }
     | LSTEQ { 0 }
@@ -292,19 +286,13 @@ LexProbeToken -> u8:
     | NOTYPECAST { 0 }
     | ONDEMAND { 0 }
     | OUTPUTS { 0 }
-    | POWFUN { 0 }
-    | PREFIX { 0 }
     | QUADMODE { 0 }
     | RBRAQ { 0 }
     | RCROC { 0 }
-    | RDTBL { 0 }
     | REMAINDER { 0 }
     | RINT { 0 }
     | ROUND { 0 }
     | ROUTE { 0 }
-    | RWTBL { 0 }
-    | SELECT2 { 0 }
-    | SELECT3 { 0 }
     | SIN { 0 }
     | SOUNDFILE { 0 }
     | SQRT { 0 }
@@ -502,6 +490,9 @@ Primitive -> tlib::TreeId:
     | MEM {
           crate::with_state(state, |state| boxes::box_delay1(&mut state.arena))
       }
+    | PREFIX {
+          crate::with_state(state, |state| boxes::box_prefix(&mut state.arena))
+      }
     | ADD {
           crate::with_state(state, |state| boxes::box_add(&mut state.arena))
       }
@@ -556,11 +547,44 @@ Primitive -> tlib::TreeId:
     | POWOP {
           crate::with_state(state, |state| boxes::box_pow(&mut state.arena))
       }
+    | POWFUN {
+          crate::with_state(state, |state| boxes::box_pow(&mut state.arena))
+      }
     | MIN {
           crate::with_state(state, |state| boxes::box_min(&mut state.arena))
       }
     | MAX {
           crate::with_state(state, |state| boxes::box_max(&mut state.arena))
+      }
+    | RDTBL {
+          crate::with_state(state, |state| boxes::box_read_only_table(&mut state.arena))
+      }
+    | RWTBL {
+          crate::with_state(state, |state| boxes::box_write_read_table(&mut state.arena))
+      }
+    | SELECT2 {
+          crate::with_state(state, |state| boxes::box_select2(&mut state.arena))
+      }
+    | SELECT3 {
+          crate::with_state(state, |state| boxes::box_select3(&mut state.arena))
+      }
+    | ASSERTBOUNDS {
+          crate::with_state(state, |state| boxes::box_assert_bounds(&mut state.arena))
+      }
+    | LOWEST {
+          crate::with_state(state, |state| boxes::box_lowest(&mut state.arena))
+      }
+    | HIGHEST {
+          crate::with_state(state, |state| boxes::box_highest(&mut state.arena))
+      }
+    | ATTACH {
+          crate::with_state(state, |state| boxes::box_attach(&mut state.arena))
+      }
+    | ENABLE {
+          crate::with_state(state, |state| boxes::box_enable(&mut state.arena))
+      }
+    | CONTROL {
+          crate::with_state(state, |state| boxes::box_control(&mut state.arena))
       }
     | FFUNCTION LPAR Signature PAR FString PAR RawString RPAR {
           crate::with_state(state, |state| state.box_foreign_function($3, $5, $7))
@@ -737,23 +761,22 @@ TypeList -> tlib::TreeId:
     ;
 
 Type -> tlib::TreeId:
-      INTCAST {
-          crate::with_state(state, |state| state.foreign_type_code(0))
-      }
-    | FLOATCAST {
-          crate::with_state(state, |state| state.foreign_type_code(1))
-      }
+      ScalarType { $1 }
     ;
 
 ArgType -> tlib::TreeId:
+      ScalarType { $1 }
+    | NOTYPECAST {
+          crate::with_state(state, |state| state.foreign_type_code(2))
+      }
+    ;
+
+ScalarType -> tlib::TreeId:
       INTCAST {
           crate::with_state(state, |state| state.foreign_type_code(0))
       }
     | FLOATCAST {
           crate::with_state(state, |state| state.foreign_type_code(1))
-      }
-    | NOTYPECAST {
-          crate::with_state(state, |state| state.foreign_type_code(2))
       }
     ;
 

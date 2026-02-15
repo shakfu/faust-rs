@@ -1070,3 +1070,56 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline --no-fail-fast`
+
+### Gate B remaining step 3 (grammar parity progress: primitive families `prefix/table/select/bounds/control`)
+
+- Extended `boxes` primitive API (`crates/boxes/src/lib.rs`) with C++-aligned constructors/predicates:
+  - `box_prefix`
+  - `box_read_only_table` (`rdtable`)
+  - `box_write_read_table` (`rwtable`)
+  - `box_select2`
+  - `box_select3`
+  - `box_assert_bounds`
+  - `box_lowest`
+  - `box_highest`
+  - `box_attach`
+  - `box_enable`
+  - `box_control`
+  - also added API-level support in `boxes` for cast primitives (`box_int_cast`, `box_float_cast`) for later parser integration.
+- Extended parser grammar (`crates/parser-proto/src/grammar/faustparser.y`) with primitive tokens:
+  - `prefix`, `rdtable`, `rwtable`, `select2`, `select3`, `assertbounds`, `lowest`, `highest`, `attach`, `enable`, `control`, `pow`.
+- Added targeted parser test:
+  - `crates/parser-proto/tests/parser_slice10_primitives.rs`
+  - validates structural parse support for the extended primitive token family.
+- Added/updated `boxes` tests:
+  - `crates/boxes/tests/core_api.rs`
+  - primitive roundtrip checks now include these constructors and predicates.
+- Conflict-resolution note:
+  - enabling these zero-argument primitives initially introduced `lrpar` reduce/reduce conflicts due overlap with `LexProbeToken` recovery entries.
+  - resolved by removing now-supported zero-argument tokens from `LexProbeToken` so recovery no longer competes with valid expression reductions.
+  - parser strict conflict gate restored to `0` unresolved conflicts.
+
+### Gate B remaining step 8 (differential suite expansion: primitive family cases)
+
+- Extended differential harness (`crates/parser-proto/tests/cpp_differential.rs`) with stable C++-accepted primitive cases:
+  - `prefix_primitive`
+  - `rdtable_primitive`
+  - `rwtable_primitive`
+  - `select2_primitive`
+  - `select3_primitive`
+  - `lowest_primitive`
+  - `highest_primitive`
+  - `attach_primitive`
+  - `enable_primitive`
+  - `control_primitive`
+- Differential run (C++ source-of-truth root `/Users/letz/Developpements/RUST/faust`, commit `8eebea429`, binary `/usr/local/bin/faust`) passed with no class mismatches.
+- Note:
+  - `assertbounds` is covered in parser structural tests but not included in stable "valid" differential cases because C++ runtime/transform behavior can assert/fail depending on downstream constraints, which makes it unsuitable for a parse-class stability gate.
+  - parser-level cast primitives (`int`/`float`) are left for a dedicated follow-up slice because they overlap with foreign-signature type tokens and require a conflict-free grammar refactor under strict parser gates.
+- Validation:
+  - `cargo test -p boxes --offline --no-fail-fast`
+  - `cargo test -p parser-proto --test parser_slice10_primitives --offline --no-fail-fast`
+  - `cargo test -p parser-proto --test cpp_differential --offline -- --nocapture`
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline --no-fail-fast`

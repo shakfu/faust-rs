@@ -1,20 +1,25 @@
 use boxes::{
-    box_abstr, box_access, box_add, box_appl, box_button, box_case, box_checkbox, box_component,
-    box_cut, box_delay1, box_downsampling, box_environment, box_fconst, box_ffun, box_fvar,
-    box_hbargraph, box_hgroup, box_hslider, box_ident, box_ident_name, box_inputs, box_int,
-    box_ipar, box_iprod, box_iseq, box_isum, box_library, box_max, box_merge, box_min, box_mul,
-    box_num_entry, box_ondemand, box_outputs, box_par, box_pattern_var, box_real, box_rec,
-    box_route, box_seq, box_soundfile, box_split, box_tgroup, box_upsampling, box_vbargraph,
-    box_vgroup, box_vslider, box_waveform, box_wire, box_with_local_def, box_with_rec_def,
-    build_box_abstr, dump_box, ffunction, is_box_abstr, is_box_access, is_box_add, is_box_appl,
-    is_box_button, is_box_case, is_box_checkbox, is_box_component, is_box_cut, is_box_delay1,
-    is_box_downsampling, is_box_environment, is_box_fconst, is_box_ffun, is_box_fvar,
-    is_box_hbargraph, is_box_hgroup, is_box_hslider, is_box_inputs, is_box_int, is_box_ipar,
-    is_box_iprod, is_box_iseq, is_box_isum, is_box_library, is_box_max, is_box_merge, is_box_min,
+    box_abstr, box_access, box_add, box_appl, box_assert_bounds, box_attach, box_button, box_case,
+    box_checkbox, box_component, box_control, box_cut, box_delay1, box_downsampling, box_enable,
+    box_environment, box_fconst, box_ffun, box_float_cast, box_fvar, box_hbargraph, box_hgroup,
+    box_highest, box_hslider, box_ident, box_ident_name, box_inputs, box_int, box_int_cast,
+    box_ipar, box_iprod, box_iseq, box_isum, box_library, box_lowest, box_max, box_merge, box_min,
+    box_mul, box_num_entry, box_ondemand, box_outputs, box_par, box_pattern_var, box_pow,
+    box_prefix, box_read_only_table, box_real, box_rec, box_route, box_select2, box_select3,
+    box_seq, box_soundfile, box_split, box_tgroup, box_upsampling, box_vbargraph, box_vgroup,
+    box_vslider, box_waveform, box_wire, box_with_local_def, box_with_rec_def,
+    box_write_read_table, build_box_abstr, dump_box, ffunction, is_box_abstr, is_box_access,
+    is_box_add, is_box_appl, is_box_assert_bounds, is_box_attach, is_box_button, is_box_case,
+    is_box_checkbox, is_box_component, is_box_control, is_box_cut, is_box_delay1,
+    is_box_downsampling, is_box_enable, is_box_environment, is_box_fconst, is_box_ffun,
+    is_box_float_cast, is_box_fvar, is_box_hbargraph, is_box_hgroup, is_box_highest,
+    is_box_hslider, is_box_inputs, is_box_int, is_box_int_cast, is_box_ipar, is_box_iprod,
+    is_box_iseq, is_box_isum, is_box_library, is_box_lowest, is_box_max, is_box_merge, is_box_min,
     is_box_mul, is_box_num_entry, is_box_ondemand, is_box_outputs, is_box_par, is_box_pattern_var,
-    is_box_real, is_box_rec, is_box_route, is_box_seq, is_box_soundfile, is_box_split,
-    is_box_tgroup, is_box_upsampling, is_box_vbargraph, is_box_vgroup, is_box_vslider,
-    is_box_waveform, is_box_wire, is_box_with_local_def, is_box_with_rec_def, is_ffunction,
+    is_box_pow, is_box_prefix, is_box_read_only_table, is_box_real, is_box_rec, is_box_route,
+    is_box_select2, is_box_select3, is_box_seq, is_box_soundfile, is_box_split, is_box_tgroup,
+    is_box_upsampling, is_box_vbargraph, is_box_vgroup, is_box_vslider, is_box_waveform,
+    is_box_wire, is_box_with_local_def, is_box_with_rec_def, is_box_write_read_table, is_ffunction,
 };
 use tlib::TreeArena;
 
@@ -73,11 +78,39 @@ fn primitive_appl_and_access_boxes_roundtrip() {
     let delay1 = box_delay1(&mut arena);
     let min = box_min(&mut arena);
     let max = box_max(&mut arena);
+    let pow = box_pow(&mut arena);
+    let prefix = box_prefix(&mut arena);
+    let int_cast = box_int_cast(&mut arena);
+    let float_cast = box_float_cast(&mut arena);
+    let rdtable = box_read_only_table(&mut arena);
+    let rwtable = box_write_read_table(&mut arena);
+    let select2 = box_select2(&mut arena);
+    let select3 = box_select3(&mut arena);
+    let assert_bounds = box_assert_bounds(&mut arena);
+    let lowest = box_lowest(&mut arena);
+    let highest = box_highest(&mut arena);
+    let attach = box_attach(&mut arena);
+    let enable = box_enable(&mut arena);
+    let control = box_control(&mut arena);
     assert!(is_box_add(&arena, add));
     assert!(is_box_mul(&arena, mul));
     assert!(is_box_delay1(&arena, delay1));
     assert!(is_box_min(&arena, min));
     assert!(is_box_max(&arena, max));
+    assert!(is_box_pow(&arena, pow));
+    assert!(is_box_prefix(&arena, prefix));
+    assert!(is_box_int_cast(&arena, int_cast));
+    assert!(is_box_float_cast(&arena, float_cast));
+    assert!(is_box_read_only_table(&arena, rdtable));
+    assert!(is_box_write_read_table(&arena, rwtable));
+    assert!(is_box_select2(&arena, select2));
+    assert!(is_box_select3(&arena, select3));
+    assert!(is_box_assert_bounds(&arena, assert_bounds));
+    assert!(is_box_lowest(&arena, lowest));
+    assert!(is_box_highest(&arena, highest));
+    assert!(is_box_attach(&arena, attach));
+    assert!(is_box_enable(&arena, enable));
+    assert!(is_box_control(&arena, control));
 }
 
 #[test]

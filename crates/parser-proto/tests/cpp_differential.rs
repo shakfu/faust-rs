@@ -239,6 +239,56 @@ fn load_cases() -> Result<Vec<Case>, String> {
             .to_owned(),
         expect_valid: true,
     });
+    cases.push(Case {
+        name: "prefix_primitive".to_owned(),
+        source: "process = 0, _ : prefix;\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "rdtable_primitive".to_owned(),
+        source: "process = 4, 0, _ : rdtable;\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "rwtable_primitive".to_owned(),
+        source: "process = 4, 0, 0, _, _ : rwtable;\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "select2_primitive".to_owned(),
+        source: "process = _, _, _ : select2;\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "select3_primitive".to_owned(),
+        source: "process = _, _, _, _ : select3;\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "lowest_primitive".to_owned(),
+        source: "process = _ : lowest;\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "highest_primitive".to_owned(),
+        source: "process = _ : highest;\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "attach_primitive".to_owned(),
+        source: "process = _, _ : attach;\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "enable_primitive".to_owned(),
+        source: "process = _, _ : enable;\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "control_primitive".to_owned(),
+        source: "process = _, _ : control;\n".to_owned(),
+        expect_valid: true,
+    });
 
     Ok(cases)
 }
