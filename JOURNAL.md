@@ -1294,3 +1294,30 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline --no-fail-fast`
+
+### Gate B remaining step 9 (production integration phase 3: `compiler` binary parse path)
+
+- Extended production compiler API with default file parse search path behavior:
+  - `crates/compiler/src/lib.rs`
+  - added `Compiler::compile_file_default(&Path)`:
+    - uses input file parent directory as default import search path,
+    - delegates to production parser-backed `compile_file(...)`.
+- Added dedicated compiler test for this default import behavior:
+  - `crates/compiler/src/lib.rs` tests:
+    - `compiler_compile_file_default_uses_parent_dir_for_imports`.
+- Extended compiler CLI to exercise production parser path directly:
+  - `crates/compiler/src/main.rs`
+  - added `--parse <input.dsp> [-I <dir> ...]` command:
+    - routes to `Compiler::compile_file_default(...)` when no `-I` is provided,
+    - routes to `Compiler::compile_file(...)` when import dirs are provided,
+    - reports parse summary (`root`, parse error count, recovery count),
+    - exits non-zero on parse failure or usage errors.
+- Scope note:
+  - this closes Step 9 production integration at compiler entry points (library + CLI parse mode) for parser consumption;
+  - full end-to-end post-parse compile pipeline integration remains tracked in later phases.
+- Validation:
+  - `cargo run -p compiler --offline -- --parse tests/corpus/rep_01_passthrough.dsp`
+  - `cargo test -p compiler --offline --no-fail-fast`
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline --no-fail-fast`

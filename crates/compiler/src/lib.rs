@@ -49,6 +49,15 @@ impl Compiler {
             parser::parse_file_with_imports(path, search_paths).map_err(CompilerError::Import)?;
         ensure_parse_success(&path.display().to_string(), output)
     }
+
+    /// Parses one source file using its parent directory as default import search path.
+    pub fn compile_file_default(&self, path: &Path) -> Result<ParseOutput, CompilerError> {
+        let search_base = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        self.compile_file(path, std::slice::from_ref(&search_base))
+    }
 }
 
 impl Default for Compiler {
@@ -216,6 +225,25 @@ mod tests {
             .compile_file(&main, std::slice::from_ref(&root))
             .expect_err("missing import should fail");
         assert!(matches!(err, CompilerError::Import(_)));
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn compiler_compile_file_default_uses_parent_dir_for_imports() {
+        let root = make_temp_root("default_search");
+        let main = root.join("main.dsp");
+        let lib = root.join("ops.lib");
+        fs::write(&main, "import(\"ops.lib\");\nprocess = gain;\n")
+            .expect("main should be written");
+        fs::write(&lib, "gain = _;\n").expect("lib should be written");
+
+        let compiler = Compiler::new();
+        let out = compiler
+            .compile_file_default(&main)
+            .expect("default search path should parse local import");
+        assert!(out.root.is_some());
+        assert!(out.errors.is_empty());
 
         fs::remove_dir_all(root).expect("temp root should be removable");
     }
