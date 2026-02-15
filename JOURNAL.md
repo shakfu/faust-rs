@@ -1269,3 +1269,28 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline --no-fail-fast`
+
+### Gate B remaining step 9 (production integration phase 2: `compiler` -> `parser` wiring)
+
+- Wired compiler facade parse orchestration to production `parser` APIs:
+  - `crates/compiler/src/lib.rs`
+  - added:
+    - `Compiler::compile_source(...)` -> `parser::parse_program(...)`,
+    - `Compiler::compile_file(...)` -> `parser::parse_file_with_imports(...)`.
+- Added compiler-stage parser error classification:
+  - `CompilerError::{Import, Parse}`,
+  - parse failures now include parser recovery/error paths (`parse_error_count` and `recovery_count`) instead of treating recovered roots as success.
+- Added compiler integration tests proving parser wiring:
+  - `crates/compiler/src/lib.rs` tests:
+    - valid source compile success,
+    - malformed source compile failure,
+    - file+import compile success,
+    - missing import compile failure.
+- Scope note:
+  - this closes Step 9 phase 2 for parser entry-point wiring in `compiler` crate;
+  - full end-to-end compiler pipeline integration (post-parse orchestration through later phases) remains out of this step scope.
+- Validation:
+  - `cargo test -p compiler --offline --no-fail-fast`
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline --no-fail-fast`

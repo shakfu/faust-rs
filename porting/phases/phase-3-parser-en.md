@@ -384,6 +384,9 @@ Remaining steps to reach full parser completion:
 - Pass criterion: `compiler` path uses production parser APIs (not prototype-only entry points).
 - Integration note:
   - an API-bridge milestone (production `parser` crate delegating to `parser-proto`) is acceptable as an intermediate step, but final gate requires compiler orchestration to consume `crates/parser` directly.
+- Integration status update:
+  - compiler facade wiring milestone is achieved (`crates/compiler` parse entry points now call production `parser` APIs);
+  - remaining work for this step is end-to-end production pipeline consumption beyond parse entry-point boundaries.
 
 10. Close Phase 3 quality/documentation gates.
 - Deliverable: Rustdoc provenance complete on parser modules + CI-quality gates fully green.

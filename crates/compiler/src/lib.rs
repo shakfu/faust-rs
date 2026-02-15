@@ -1,6 +1,16 @@
-#![doc = "Top-level compiler facade crate."]
+//! Top-level compiler facade crate.
+//!
+//! # Source provenance (C++)
+//! - `compiler/libcode.cpp` (compile entry points and orchestration)
+//! - `compiler/global.cpp` (session lifecycle)
+//!
+//! # Current scope
+//! - Exposes minimal compile-session APIs.
+//! - Wires parsing through production `crates/parser` APIs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use parser::{ParseOutput, SourceReaderError};
 
 pub struct Compiler;
 
@@ -14,11 +24,80 @@ impl Compiler {
     pub fn version() -> &'static str {
         env!("CARGO_PKG_VERSION")
     }
+
+    /// Parses one source string through the production parser crate.
+    ///
+    /// Returns [`CompilerError::Parse`] when parser recovery/errors are present.
+    pub fn compile_source(
+        &self,
+        source_name: &str,
+        source: &str,
+    ) -> Result<ParseOutput, CompilerError> {
+        let output = parser::parse_program(source, source_name);
+        ensure_parse_success(source_name, output)
+    }
+
+    /// Parses one source file and expands local imports using `search_paths`.
+    ///
+    /// Returns [`CompilerError::Import`] for import resolution/cycle failures.
+    pub fn compile_file(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+    ) -> Result<ParseOutput, CompilerError> {
+        let output =
+            parser::parse_file_with_imports(path, search_paths).map_err(CompilerError::Import)?;
+        ensure_parse_success(&path.display().to_string(), output)
+    }
 }
 
 impl Default for Compiler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Compiler facade errors for parser-stage orchestration.
+#[derive(Debug)]
+pub enum CompilerError {
+    Import(SourceReaderError),
+    Parse {
+        source: Box<str>,
+        parse_errors: usize,
+        recoveries: u32,
+    },
+}
+
+impl std::fmt::Display for CompilerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Import(err) => write!(f, "{err}"),
+            Self::Parse {
+                source,
+                parse_errors,
+                recoveries,
+            } => write!(
+                f,
+                "parse failed for {source}: errors={parse_errors}, recoveries={recoveries}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CompilerError {}
+
+fn ensure_parse_success(source: &str, output: ParseOutput) -> Result<ParseOutput, CompilerError> {
+    let parse_errors = usize::try_from(output.state.ctx.parse_error_count()).unwrap_or(usize::MAX);
+    let recoveries = output.state.ctx.recovery_count();
+    let has_root = output.root.is_some();
+    if has_root && parse_errors == 0 && recoveries == 0 {
+        Ok(output)
+    } else {
+        Err(CompilerError::Parse {
+            source: source.into(),
+            parse_errors,
+            recoveries,
+        })
     }
 }
 
@@ -57,7 +136,25 @@ fn normalize_newlines(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::golden_snapshot;
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::{Compiler, CompilerError, golden_snapshot};
+
+    fn make_temp_root(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "faust_rs_compiler_{}_{}_{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should move forward")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).expect("temp root should be created");
+        path
+    }
 
     #[test]
     fn golden_snapshot_is_stable_for_lf_vs_crlf() {
@@ -67,5 +164,59 @@ mod tests {
             golden_snapshot("pass_through.dsp", lf),
             golden_snapshot("pass_through.dsp", crlf)
         );
+    }
+
+    #[test]
+    fn compiler_compile_source_accepts_valid_dsp() {
+        let compiler = Compiler::new();
+        let out = compiler
+            .compile_source("valid.dsp", "process = _;")
+            .expect("valid source should parse");
+        assert!(out.root.is_some());
+        assert!(out.errors.is_empty());
+    }
+
+    #[test]
+    fn compiler_compile_source_rejects_malformed_dsp() {
+        let compiler = Compiler::new();
+        let err = compiler
+            .compile_source("invalid.dsp", "process = ;")
+            .expect_err("malformed source should fail compile facade");
+        assert!(matches!(err, CompilerError::Parse { .. }));
+    }
+
+    #[test]
+    fn compiler_compile_file_parses_imported_fixture() {
+        let root = make_temp_root("imports");
+        let main = root.join("main.dsp");
+        let lib = root.join("ops.lib");
+        fs::write(&main, "import(\"ops.lib\");\nprocess = gain;\n")
+            .expect("main should be written");
+        fs::write(&lib, "gain = _;\n").expect("lib should be written");
+
+        let compiler = Compiler::new();
+        let out = compiler
+            .compile_file(&main, std::slice::from_ref(&root))
+            .expect("import fixture should parse");
+        assert!(out.root.is_some());
+        assert!(out.errors.is_empty());
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn compiler_compile_file_reports_missing_import() {
+        let root = make_temp_root("missing_import");
+        let main = root.join("main.dsp");
+        fs::write(&main, "import(\"missing.lib\");\nprocess = _;\n")
+            .expect("main should be written");
+
+        let compiler = Compiler::new();
+        let err = compiler
+            .compile_file(&main, std::slice::from_ref(&root))
+            .expect_err("missing import should fail");
+        assert!(matches!(err, CompilerError::Import(_)));
+
+        fs::remove_dir_all(root).expect("temp root should be removable");
     }
 }
