@@ -251,6 +251,102 @@ Primitive -> tlib::TreeId:
     | CUT {
           crate::with_state(state, |state| boxes::box_cut(&mut state.arena))
       }
+    | MEM {
+          crate::with_state(state, |state| boxes::box_delay1(&mut state.arena))
+      }
+    | ADD {
+          crate::with_state(state, |state| boxes::box_add(&mut state.arena))
+      }
+    | SUB {
+          crate::with_state(state, |state| boxes::box_sub(&mut state.arena))
+      }
+    | MUL {
+          crate::with_state(state, |state| boxes::box_mul(&mut state.arena))
+      }
+    | DIV {
+          crate::with_state(state, |state| boxes::box_div(&mut state.arena))
+      }
+    | MOD {
+          crate::with_state(state, |state| boxes::box_rem(&mut state.arena))
+      }
+    | FDELAY {
+          crate::with_state(state, |state| boxes::box_delay(&mut state.arena))
+      }
+    | AND {
+          crate::with_state(state, |state| boxes::box_and(&mut state.arena))
+      }
+    | OR {
+          crate::with_state(state, |state| boxes::box_or(&mut state.arena))
+      }
+    | XOR {
+          crate::with_state(state, |state| boxes::box_xor(&mut state.arena))
+      }
+    | LSH {
+          crate::with_state(state, |state| boxes::box_lsh(&mut state.arena))
+      }
+    | RSH {
+          crate::with_state(state, |state| boxes::box_rsh(&mut state.arena))
+      }
+    | LT {
+          crate::with_state(state, |state| boxes::box_lt(&mut state.arena))
+      }
+    | LE {
+          crate::with_state(state, |state| boxes::box_le(&mut state.arena))
+      }
+    | GT {
+          crate::with_state(state, |state| boxes::box_gt(&mut state.arena))
+      }
+    | GE {
+          crate::with_state(state, |state| boxes::box_ge(&mut state.arena))
+      }
+    | EQ {
+          crate::with_state(state, |state| boxes::box_eq(&mut state.arena))
+      }
+    | NE {
+          crate::with_state(state, |state| boxes::box_ne(&mut state.arena))
+      }
+    | POWOP {
+          crate::with_state(state, |state| boxes::box_pow(&mut state.arena))
+      }
+    | MIN {
+          crate::with_state(state, |state| boxes::box_min(&mut state.arena))
+      }
+    | MAX {
+          crate::with_state(state, |state| boxes::box_max(&mut state.arena))
+      }
+    | BUTTON LPAR UQString RPAR {
+          crate::with_state(state, |state| boxes::box_button(&mut state.arena, $3))
+      }
+    | CHECKBOX LPAR UQString RPAR {
+          crate::with_state(state, |state| boxes::box_checkbox(&mut state.arena, $3))
+      }
+    | VSLIDER LPAR UQString PAR Argument PAR Argument PAR Argument PAR Argument RPAR {
+          crate::with_state(state, |state| boxes::box_vslider(&mut state.arena, $3, $5, $7, $9, $11))
+      }
+    | HSLIDER LPAR UQString PAR Argument PAR Argument PAR Argument PAR Argument RPAR {
+          crate::with_state(state, |state| boxes::box_hslider(&mut state.arena, $3, $5, $7, $9, $11))
+      }
+    | NENTRY LPAR UQString PAR Argument PAR Argument PAR Argument PAR Argument RPAR {
+          crate::with_state(state, |state| boxes::box_num_entry(&mut state.arena, $3, $5, $7, $9, $11))
+      }
+    | VBARGRAPH LPAR UQString PAR Argument PAR Argument RPAR {
+          crate::with_state(state, |state| boxes::box_vbargraph(&mut state.arena, $3, $5, $7))
+      }
+    | HBARGRAPH LPAR UQString PAR Argument PAR Argument RPAR {
+          crate::with_state(state, |state| boxes::box_hbargraph(&mut state.arena, $3, $5, $7))
+      }
+    | IPAR LPAR IdentExpr PAR Argument PAR Expression RPAR {
+          crate::with_state(state, |state| boxes::box_ipar(&mut state.arena, $3, $5, $7))
+      }
+    | ISEQ LPAR IdentExpr PAR Argument PAR Expression RPAR {
+          crate::with_state(state, |state| boxes::box_iseq(&mut state.arena, $3, $5, $7))
+      }
+    | ISUM LPAR IdentExpr PAR Argument PAR Expression RPAR {
+          crate::with_state(state, |state| boxes::box_isum(&mut state.arena, $3, $5, $7))
+      }
+    | IPROD LPAR IdentExpr PAR Argument PAR Expression RPAR {
+          crate::with_state(state, |state| boxes::box_iprod(&mut state.arena, $3, $5, $7))
+      }
     | IdentExpr { $1 }
     | SUB IdentExpr {
           crate::with_state(state, |state| {
@@ -259,8 +355,14 @@ Primitive -> tlib::TreeId:
           })
       }
     | LPAR Expression RPAR { $2 }
-    | IPAR LPAR IdentExpr PAR Argument PAR Expression RPAR {
-          crate::with_state(state, |state| boxes::box_ipar(&mut state.arena, $3, $5, $7))
+    ;
+
+UQString -> tlib::TreeId:
+      STRING {
+          crate::with_state(state, |state| state.uqstring_from_token($lexer, $1))
+      }
+    | FSTRING {
+          crate::with_state(state, |state| state.uqstring_from_token($lexer, $1))
       }
     ;
 

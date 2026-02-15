@@ -9,8 +9,9 @@
 //! # Scope in this step
 //! - Provides `ParserCtx` for parser-local state and property hooks.
 //! - Ports a first lexer subset from C++ `faustlexer.l` with token-priority tests.
-//! - Implements parser Slice 1 (`program/statement/definition/error ENDDEF`) with real actions.
-//! - Routes expression constructors through `boxes` over `tlib::TreeArena`.
+//! - Implements parser slices 1..3 with real semantic actions (`program/definition`, infix core,
+//!   UI/iterative subset used by prototype corpus).
+//! - Routes expression constructors through `boxes` over `tlib::TreeArena` (no parser-local stubs).
 //! - Keeps production `crates/parser` untouched until Gate B decision.
 
 use cfgrammar::Span;
@@ -172,6 +173,23 @@ impl ParseState {
                 boxes::box_real(&mut self.arena, 0.0)
             }
         }
+    }
+
+    /// Parses one quoted string token and removes outer quotes.
+    #[must_use]
+    pub fn uqstring_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+    ) -> TreeId {
+        let span = token_span(&tok);
+        self.update_cursor_from_span(lexer, span);
+        let raw = lexer.span_str(span);
+        let stripped = raw
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(raw);
+        self.arena.string_lit(stripped)
     }
 
     /// Parses one signed integer literal token to `boxInt`.

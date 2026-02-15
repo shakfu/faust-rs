@@ -655,3 +655,46 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline`
+
+### Gate B step 5 (Slice 3 parser subset: UI + iterative + standalone primitives)
+
+- Extended `crates/parser-proto/src/grammar/faustparser.y` with Slice 3 rules targeting prototype corpus coverage:
+  - standalone primitive forms used as callable functions:
+    - arithmetic/logic/compare core (`+ - * / % @ '`, `and/or/xor`, shifts, comparisons, `pow`),
+    - `mem` mapped to `boxDelay1`,
+    - `min`/`max` primitive tokens.
+  - UI primitives:
+    - `button`, `checkbox`,
+    - `hslider`, `vslider`, `nentry`,
+    - `hbargraph`, `vbargraph`.
+  - iterative primitives:
+    - `ipar`, `iseq`, `isum`, `iprod`.
+  - string-label parsing nonterminal:
+    - `UQString` from `STRING`/`FSTRING`.
+- Extended `crates/parser-proto/src/lib.rs` (`ParseState`):
+  - added `uqstring_from_token(...)` helper (quoted-string unquote bridge),
+  - retained action path through real `boxes` + `tlib` APIs (no stubs).
+- Extended `crates/boxes/src/lib.rs` with parser-needed primitive constructors:
+  - `box_min` / `box_max` + `is_box_min` / `is_box_max`.
+- Extended tests:
+  - `crates/boxes/tests/core_api.rs`:
+    - primitive roundtrip now includes `min/max`.
+  - `crates/parser-proto/tests/parser_slice3.rs`:
+    - UI constructor parse check (`hslider`),
+    - iterative parse checks (`seq/sum/prod` iterator forms),
+    - recursion form check (`process = + ~ _;`),
+    - parse-only acceptance on corpus subset:
+      - `tests/corpus/rep_01_passthrough.dsp`
+      - `tests/corpus/rep_02_gain_bias.dsp`
+      - `tests/corpus/rep_03_stereo_mix.dsp`
+      - `tests/corpus/rep_04_delay_echo.dsp`
+      - `tests/corpus/rep_05_one_pole_lowpass.dsp`
+      - `tests/corpus/rep_06_comb_feedback.dsp`
+      - `tests/corpus/rep_07_nonlinear_clip.dsp`
+      - `tests/corpus/rep_08_branch_and_sum.dsp`
+      - `tests/corpus/rep_09_ui_slider.dsp`
+      - `tests/corpus/rep_10_two_in_two_out_ui.dsp`
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline`

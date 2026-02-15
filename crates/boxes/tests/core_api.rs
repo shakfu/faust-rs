@@ -1,13 +1,13 @@
 use boxes::{
     box_access, box_add, box_appl, box_button, box_checkbox, box_cut, box_delay1, box_environment,
     box_hbargraph, box_hslider, box_ident, box_ident_name, box_int, box_ipar, box_iprod, box_iseq,
-    box_isum, box_merge, box_mul, box_num_entry, box_par, box_real, box_rec, box_seq, box_split,
-    box_vbargraph, box_vslider, box_wire, box_with_local_def, box_with_rec_def, dump_box,
-    is_box_access, is_box_add, is_box_appl, is_box_button, is_box_checkbox, is_box_cut,
+    box_isum, box_max, box_merge, box_min, box_mul, box_num_entry, box_par, box_real, box_rec,
+    box_seq, box_split, box_vbargraph, box_vslider, box_wire, box_with_local_def, box_with_rec_def,
+    dump_box, is_box_access, is_box_add, is_box_appl, is_box_button, is_box_checkbox, is_box_cut,
     is_box_delay1, is_box_environment, is_box_hbargraph, is_box_hslider, is_box_int, is_box_ipar,
-    is_box_iprod, is_box_iseq, is_box_isum, is_box_merge, is_box_mul, is_box_num_entry, is_box_par,
-    is_box_real, is_box_rec, is_box_seq, is_box_split, is_box_vbargraph, is_box_vslider,
-    is_box_wire, is_box_with_local_def, is_box_with_rec_def,
+    is_box_iprod, is_box_iseq, is_box_isum, is_box_max, is_box_merge, is_box_min, is_box_mul,
+    is_box_num_entry, is_box_par, is_box_real, is_box_rec, is_box_seq, is_box_split,
+    is_box_vbargraph, is_box_vslider, is_box_wire, is_box_with_local_def, is_box_with_rec_def,
 };
 use tlib::TreeArena;
 
@@ -64,9 +64,13 @@ fn primitive_appl_and_access_boxes_roundtrip() {
     let add = box_add(&mut arena);
     let mul = box_mul(&mut arena);
     let delay1 = box_delay1(&mut arena);
+    let min = box_min(&mut arena);
+    let max = box_max(&mut arena);
     assert!(is_box_add(&arena, add));
     assert!(is_box_mul(&arena, mul));
     assert!(is_box_delay1(&arena, delay1));
+    assert!(is_box_min(&arena, min));
+    assert!(is_box_max(&arena, max));
 }
 
 #[test]

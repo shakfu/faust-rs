@@ -11,7 +11,7 @@
 //!   `box_add`, `box_sub`, `box_mul`, `box_div`, `box_rem`,
 //!   `box_and`, `box_or`, `box_xor`, `box_lsh`, `box_rsh`,
 //!   `box_lt`, `box_le`, `box_gt`, `box_ge`, `box_eq`, `box_ne`,
-//!   `box_pow`, `box_delay`, `box_delay1`,
+//!   `box_pow`, `box_delay`, `box_delay1`, `box_min`, `box_max`,
 //!   `box_ipar`, `box_iseq`, `box_isum`, `box_iprod`,
 //!   `box_with_local_def`, `box_environment`,
 //!   `box_button`, `box_checkbox`, `box_vslider`, `box_hslider`,
@@ -61,6 +61,8 @@ const BOX_NE_TAG: &str = "BOXNE";
 const BOX_POW_TAG: &str = "BOXPOW";
 const BOX_DELAY_TAG: &str = "BOXDELAY";
 const BOX_DELAY1_TAG: &str = "BOXDELAY1";
+const BOX_MIN_TAG: &str = "BOXMIN";
+const BOX_MAX_TAG: &str = "BOXMAX";
 const BOX_IPAR_TAG: &str = "BOXIPAR";
 const BOX_ISEQ_TAG: &str = "BOXISEQ";
 const BOX_ISUM_TAG: &str = "BOXISUM";
@@ -347,6 +349,18 @@ pub fn box_delay1(arena: &mut TreeArena) -> BoxId {
     intern_tag(arena, BOX_DELAY1_TAG, &[])
 }
 
+/// Equivalent to C++ `boxMin`.
+#[must_use]
+pub fn box_min(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_MIN_TAG, &[])
+}
+
+/// Equivalent to C++ `boxMax`.
+#[must_use]
+pub fn box_max(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_MAX_TAG, &[])
+}
+
 macro_rules! define_is_prim {
     ($fn_name:ident, $tag:ident) => {
         #[must_use]
@@ -375,6 +389,8 @@ define_is_prim!(is_box_ne, BOX_NE_TAG);
 define_is_prim!(is_box_pow, BOX_POW_TAG);
 define_is_prim!(is_box_delay, BOX_DELAY_TAG);
 define_is_prim!(is_box_delay1, BOX_DELAY1_TAG);
+define_is_prim!(is_box_min, BOX_MIN_TAG);
+define_is_prim!(is_box_max, BOX_MAX_TAG);
 
 /// Equivalent to C++ `boxIPar`.
 #[must_use]
