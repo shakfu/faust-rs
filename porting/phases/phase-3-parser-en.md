@@ -342,6 +342,7 @@ Remaining steps to reach full parser completion:
 
 1. Lock prototype baseline and strict build gates.
 - Deliverable: `parser-proto` build path runs with conflict checks enabled and parser/lexer warnings tracked explicitly.
+- Coverage artifact path: `phases/phase-3-parser-parity-report-en.md`.
 - Pass criterion: no unresolved core conflicts and no hidden warning debt for touched grammar/lexer areas.
 
 2. Complete lexer parity (`faustlexer.l` coverage to 100%).

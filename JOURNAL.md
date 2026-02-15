@@ -1399,3 +1399,27 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo test -p parser-proto --test parser_slice3 --offline --no-fail-fast`
   - `cargo run -p xtask --offline -- golden-check`
+
+### Gate B remaining step 1 (parity baseline automation: lexer/grammar coverage report)
+
+- Added a new `xtask` command to generate a reproducible parser/lexer parity baseline:
+  - `cargo run -p xtask -- parser-parity-report`
+  - implementation in `crates/xtask/src/main.rs`.
+- New artifact generated from C++ source-of-truth and Rust parser-proto grammar/lexer:
+  - `porting/phases/phase-3-parser-parity-report-en.md`
+  - compares:
+    - parser token declarations (`%token` + precedence token directives),
+    - lexer state declarations (`%x`/`%s`),
+    - grammar nonterminal coverage (name-based, with explicit alias mapping),
+    - parser/lexer internal consistency (declared vs emitted token sets).
+- Added explicit reference to this artifact in parser phase plan:
+  - `porting/phases/phase-3-parser-en.md` (remaining step 1 coverage artifact path).
+- Current generated baseline highlights:
+  - parser tokens: unresolved missing `0` after alias mapping (`LISTING`->`BLST`, `VIRG`->`PAR`),
+  - lexer states: unresolved missing `0`,
+  - nonterminals: unresolved missing `4` (`modentry`, `modlist`, `variant`, `variantlist`), now explicitly tracked.
+- Validation:
+  - `cargo run -p xtask --offline -- parser-parity-report`
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline --no-fail-fast`
