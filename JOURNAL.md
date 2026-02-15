@@ -217,3 +217,11 @@ Execution plan (Phase 0 prototype, revised):
   - predefined `nil` node initialization,
   - basic accessors (`node`, `kind`, `children`, `len`).
 - Updated `crates/tlib/src/lib.rs` to expose the new arena API.
+
+### Gate A step 2 (`tlib-core` list and properties)
+
+- Added parser-driven list operations to `TreeArena` in `crates/tlib/src/arena.rs`:
+  - `cons`, `hd`, `tl`, `is_nil`, `is_list`.
+- Added generic node-keyed property storage in `crates/tlib/src/property.rs`:
+  - `PropertyStore<T>` with `set/get/get_mut/remove/clear/len`.
+- Updated `crates/tlib/src/lib.rs` to expose `PropertyStore`.

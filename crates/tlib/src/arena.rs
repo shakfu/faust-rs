@@ -83,6 +83,39 @@ impl TreeArena {
     }
 
     #[must_use]
+    pub fn cons(&mut self, head: TreeId, tail: TreeId) -> TreeId {
+        self.intern(NodeKind::Cons, &[head, tail])
+    }
+
+    #[must_use]
+    pub fn is_nil(&self, id: TreeId) -> bool {
+        matches!(self.kind(id), Some(NodeKind::Nil))
+    }
+
+    #[must_use]
+    pub fn is_list(&self, id: TreeId) -> bool {
+        self.is_nil(id) || matches!(self.kind(id), Some(NodeKind::Cons))
+    }
+
+    #[must_use]
+    pub fn hd(&self, list: TreeId) -> Option<TreeId> {
+        let node = self.node(list)?;
+        if !matches!(node.kind, NodeKind::Cons) || node.children.len() != 2 {
+            return None;
+        }
+        Some(node.children[0])
+    }
+
+    #[must_use]
+    pub fn tl(&self, list: TreeId) -> Option<TreeId> {
+        let node = self.node(list)?;
+        if !matches!(node.kind, NodeKind::Cons) || node.children.len() != 2 {
+            return None;
+        }
+        Some(node.children[1])
+    }
+
+    #[must_use]
     pub fn symbol(&mut self, value: impl Into<String>) -> TreeId {
         self.intern(NodeKind::Symbol(value.into()), &[])
     }
