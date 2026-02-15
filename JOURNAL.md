@@ -232,3 +232,16 @@ Execution plan (Phase 0 prototype, revised):
   - hash-consing identity reuse for structurally identical nodes,
   - list ordering semantics for `cons/hd/tl`,
   - node-keyed property behavior (`set/get/get_mut/remove`).
+
+### Gate A step 4 (`tlib-core` micro-bench harness)
+
+- Added a dedicated micro-bench executable:
+  - `crates/tlib/src/bin/treearena_bench.rs`
+- Harness measures parser-driven `TreeArena` operations:
+  - intern/create pass,
+  - repeated intern lookup pass (cache hit behavior),
+  - list traversal pass (`cons`/`tl` chain),
+  - property set/get passes.
+- Usage:
+  - `cargo run -p tlib --bin treearena_bench -- <n>`
+  - default `n=200000`.
