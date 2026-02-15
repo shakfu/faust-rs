@@ -20,7 +20,7 @@ use lrlex::{DefaultLexerTypes, LRNonStreamingLexerDef};
 use lrpar::lrpar_mod;
 use lrpar::{LexError, Lexeme, Lexer, NonStreamingLexer};
 use std::cell::RefCell;
-use tlib::{TreeArena, TreeId};
+use tlib::{NodeKind, TreeArena, TreeId};
 
 pub mod context;
 
@@ -190,6 +190,62 @@ impl ParseState {
             .and_then(|s| s.strip_suffix('"'))
             .unwrap_or(raw);
         self.arena.string_lit(stripped)
+    }
+
+    fn string_node_text(&self, node: TreeId) -> Option<&str> {
+        match self.arena.kind(node) {
+            Some(NodeKind::StringLiteral(value)) => Some(value.as_ref()),
+            Some(NodeKind::Symbol(value)) => Some(value.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// Records one import statement and returns `nil` statement placeholder.
+    #[must_use]
+    pub fn import_statement(&mut self, path_node: TreeId) -> TreeId {
+        match self.string_node_text(path_node).map(str::to_owned) {
+            Some(path) => self.ctx.note_import(&path),
+            None => self.ctx.error("invalid import path literal"),
+        }
+        self.nil()
+    }
+
+    /// Records one `declare key value;` statement and returns `nil`.
+    #[must_use]
+    pub fn declare_metadata_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        key_tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+        value_node: TreeId,
+    ) -> TreeId {
+        let key_span = token_span(&key_tok);
+        self.update_cursor_from_span(lexer, key_span);
+        let key = lexer.span_str(key_span);
+        match self.string_node_text(value_node).map(str::to_owned) {
+            Some(value) => self.ctx.note_declared_metadata(key, &value),
+            None => self.ctx.error("invalid declare metadata value"),
+        }
+        self.nil()
+    }
+
+    /// Records one `declare def key value;` statement and returns `nil`.
+    #[must_use]
+    pub fn declare_definition_metadata_from_tokens<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        def_tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+        key_tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+        value_node: TreeId,
+    ) -> TreeId {
+        let def_span = token_span(&def_tok);
+        self.update_cursor_from_span(lexer, def_span);
+        let def = lexer.span_str(def_span);
+        let key = lexer.span_str(token_span(&key_tok));
+        match self.string_node_text(value_node).map(str::to_owned) {
+            Some(value) => self.ctx.note_declared_definition_metadata(def, key, &value),
+            None => self.ctx.error("invalid declare definition metadata value"),
+        }
+        self.nil()
     }
 
     /// Parses one signed integer literal token to `boxInt`.

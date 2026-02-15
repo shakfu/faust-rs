@@ -801,3 +801,24 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo test -p parser-proto --offline --no-fail-fast`
   - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`
+
+### Gate B remaining step 3 (grammar parity progress: statements `import` / `declare`)
+
+- Extended `Statement` grammar in `crates/parser-proto/src/grammar/faustparser.y` with C++-aligned forms:
+  - `import("...");`
+  - `declare key "value";`
+  - `declare def key "value";`
+- Added parser-side metadata/import recording in `ParserCtx`:
+  - import list (`imports()`),
+  - metadata list (`declared_metadata()`),
+  - definition-metadata list (`declared_definition_metadata()`).
+- Added corresponding semantic-action helpers in `ParseState` (`crates/parser-proto/src/lib.rs`):
+  - `import_statement`,
+  - `declare_metadata_from_token`,
+  - `declare_definition_metadata_from_tokens`.
+- Added dedicated Slice 4 tests:
+  - `crates/parser-proto/tests/parser_slice4.rs`
+  - validates parse acceptance and recorded import/declare payloads.
+- Validation:
+  - `cargo test -p parser-proto --offline --no-fail-fast`
+  - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`

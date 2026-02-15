@@ -64,6 +64,19 @@ StmtList -> tlib::TreeId:
 
 Statement -> tlib::TreeId:
       Definition { $1 }
+    | IMPORT LPAR UQString RPAR ENDDEF {
+          crate::with_state(state, |state| state.import_statement($3))
+      }
+    | DECLARE IDENT UQString ENDDEF {
+          crate::with_state(state, |state| {
+              state.declare_metadata_from_token($lexer, $2, $3)
+          })
+      }
+    | DECLARE IDENT IDENT UQString ENDDEF {
+          crate::with_state(state, |state| {
+              state.declare_definition_metadata_from_tokens($lexer, $2, $3, $4)
+          })
+      }
     ;
 
 Definition -> tlib::TreeId:

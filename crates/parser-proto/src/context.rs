@@ -70,6 +70,9 @@ pub struct ParserCtx {
     recovery_count: u32,
     waveform: Vec<TreeId>,
     parse_result: Option<TreeId>,
+    imports: Vec<Box<str>>,
+    declared_metadata: Vec<(Box<str>, Box<str>)>,
+    declared_definition_metadata: Vec<(Box<str>, Box<str>, Box<str>)>,
     props: PropertyStore<SourceLocation>,
     def_prop_key: PropertyKey,
     use_prop_key: PropertyKey,
@@ -97,6 +100,9 @@ impl ParserCtx {
             recovery_count: 0,
             waveform: Vec::new(),
             parse_result: None,
+            imports: Vec::new(),
+            declared_metadata: Vec::new(),
+            declared_definition_metadata: Vec::new(),
             props,
             def_prop_key,
             use_prop_key,
@@ -144,6 +150,40 @@ impl ParserCtx {
     /// Clears parse root result.
     pub fn clear_parse_result(&mut self) {
         self.parse_result = None;
+    }
+
+    /// Records one `import("...")` statement payload.
+    pub fn note_import(&mut self, path: &str) {
+        self.imports.push(path.into());
+    }
+
+    /// Recorded import paths in parse order.
+    #[must_use]
+    pub fn imports(&self) -> &[Box<str>] {
+        &self.imports
+    }
+
+    /// Records `declare key value;`.
+    pub fn note_declared_metadata(&mut self, key: &str, value: &str) {
+        self.declared_metadata.push((key.into(), value.into()));
+    }
+
+    /// Records `declare def key value;`.
+    pub fn note_declared_definition_metadata(&mut self, def: &str, key: &str, value: &str) {
+        self.declared_definition_metadata
+            .push((def.into(), key.into(), value.into()));
+    }
+
+    /// Recorded `declare key value;` entries.
+    #[must_use]
+    pub fn declared_metadata(&self) -> &[(Box<str>, Box<str>)] {
+        &self.declared_metadata
+    }
+
+    /// Recorded `declare def key value;` entries.
+    #[must_use]
+    pub fn declared_definition_metadata(&self) -> &[(Box<str>, Box<str>, Box<str>)] {
+        &self.declared_definition_metadata
     }
 
     /// Equivalent to C++ `setDefProp(sym, file, line)`.
