@@ -448,12 +448,33 @@ fn parser_parity_report() -> Result<(), Box<dyn std::error::Error>> {
         &rust_lexed_not_declared,
     )?;
 
+    let unresolved_total = parser_token_missing_unresolved.len()
+        + lexer_state_missing.len()
+        + nonterm_missing_unresolved.len();
+    let consistency_issues_total = cpp_declared_not_lexed.len()
+        + rust_declared_not_lexed.len()
+        + cpp_lexed_not_declared.len()
+        + rust_lexed_not_declared.len();
+
     writeln!(&mut out)?;
     writeln!(&mut out, "## Next Actions")?;
-    writeln!(
-        &mut out,
-        "- Resolve all items listed in `Unresolved missing after alias mapping (action required)` for tokens and nonterminals."
-    )?;
+    if unresolved_total == 0 {
+        writeln!(
+            &mut out,
+            "- Unresolved missing items after alias mapping are `0` for parser tokens, lexer states, and grammar nonterminals."
+        )?;
+    } else {
+        writeln!(
+            &mut out,
+            "- Resolve all items listed in `Unresolved missing after alias mapping (action required)` for tokens and nonterminals."
+        )?;
+    }
+    if consistency_issues_total > 0 {
+        writeln!(
+            &mut out,
+            "- Triage items listed under `Parser/Lexer Internal Consistency` (C++ or Rust declared/emitted token mismatches)."
+        )?;
+    }
     writeln!(
         &mut out,
         "- Keep this report regenerated at each parser/lexer migration increment to track closure toward 100% parity."

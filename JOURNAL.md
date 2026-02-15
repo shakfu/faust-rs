@@ -1508,3 +1508,16 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p parser-proto --test parser_diagnostics --offline --no-fail-fast`
   - `cargo test -p parser-proto --test cpp_differential --offline --no-fail-fast`
   - `cargo fmt --all`
+
+### Parity closure step 5 (report closure wording when unresolved gaps are zero)
+
+- Updated parity-report generator to emit closure-specific next actions when unresolved gaps are fully closed:
+  - `crates/xtask/src/main.rs`
+  - `parser-parity-report` now reports:
+    - explicit zero-gap closure message when unresolved parser-token/lexer-state/nonterminal gaps are `0`,
+    - consistency triage action only when parser/lexer declared-vs-emitted mismatches remain.
+- Regenerated phase report artifact:
+  - `porting/phases/phase-3-parser-parity-report-en.md`.
+- Validation:
+  - `cargo run -p xtask --offline -- parser-parity-report`
+  - `cargo fmt --all`

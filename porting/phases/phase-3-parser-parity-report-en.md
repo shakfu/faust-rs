@@ -136,5 +136,6 @@ _Note: `exact name` mismatches below are not necessarily missing functionality; 
 - (none)
 
 ## Next Actions
-- Resolve all items listed in `Unresolved missing after alias mapping (action required)` for tokens and nonterminals.
+- Unresolved missing items after alias mapping are `0` for parser tokens, lexer states, and grammar nonterminals.
+- Triage items listed under `Parser/Lexer Internal Consistency` (C++ or Rust declared/emitted token mismatches).
 - Keep this report regenerated at each parser/lexer migration increment to track closure toward 100% parity.
