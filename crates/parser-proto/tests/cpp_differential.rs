@@ -183,6 +183,21 @@ fn load_cases() -> Result<Vec<Case>, String> {
         .to_owned(),
         expect_valid: true,
     });
+    cases.push(Case {
+        name: "with_local_def".to_owned(),
+        source: "process = _ with { a = _; };\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "letrec_basic".to_owned(),
+        source: "process = _ letrec { 'x = _; };\n".to_owned(),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "waveform_numbers".to_owned(),
+        source: "process = waveform { 1, -2, 3.5 };\n".to_owned(),
+        expect_valid: true,
+    });
 
     Ok(cases)
 }

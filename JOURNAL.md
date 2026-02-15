@@ -891,3 +891,53 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p parser-proto --test cpp_differential --offline -- --nocapture`
   - `cargo test -p parser-proto --offline --no-fail-fast`
   - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`
+
+### Gate B remaining step 3 (grammar parity progress: local scopes + module/route/waveform primitives)
+
+- Extended parser grammar (`crates/parser-proto/src/grammar/faustparser.y`) with additional C++ families:
+  - local scopes:
+    - `expression WITH { deflist }`
+    - `expression LETREC { reclist }`
+    - `expression LETREC { reclist WHERE deflist }`
+  - recursive definition forms:
+    - `recname = DELAY1 ident` (C++-aligned `'x` shape in `letrec`)
+  - module and structural primitives:
+    - `component("...")`
+    - `library("...")`
+    - `environment { stmtlist }`
+    - `waveform { number, ... }`
+    - `route(a, b)` and `route(a, b, expr)`
+- Extended parser semantic actions (`crates/parser-proto/src/lib.rs`):
+  - waveform accumulation bridge:
+    - `push_waveform_value(...)`
+    - `waveform_box_from_ctx(...)`
+  - fake-route compatibility helper:
+    - `route_box_default_spec(...)` producing `boxRoute(a,b,boxPar(boxInt(0),boxInt(0)))` for the 2-argument route form.
+- Extended `boxes` API (`crates/boxes/src/lib.rs`) with C++-aligned constructors/predicates:
+  - `box_component` / `is_box_component`
+  - `box_library` / `is_box_library`
+  - `box_waveform` / `is_box_waveform`
+  - `box_route` / `is_box_route`
+- Added/extended tests:
+  - `crates/parser-proto/tests/parser_slice6_scope_modules.rs`
+    - validates `with`, `letrec`, `environment`, `component`, `library`, `waveform`, `route` parse shapes.
+  - `crates/boxes/tests/core_api.rs`
+    - added roundtrip checks for component/library/waveform/route constructors.
+
+### Gate B remaining step 8 (differential suite expansion: local-scope/waveform cases)
+
+- Extended differential harness (`crates/parser-proto/tests/cpp_differential.rs`) with stable C++ parity cases:
+  - `with_local_def`
+  - `letrec_basic`
+  - `waveform_numbers`
+- Differential reference used:
+  - source-of-truth root: `/Users/letz/Developpements/RUST/faust`
+  - source commit: `8eebea429`
+  - binary: `/usr/local/bin/faust`
+- Note:
+  - exploratory `environment` and `route` differential fixtures were not kept in the stable harness because the current C++ binary returns non-zero status on those standalone snippets in this harness setup (error class not suitable for a strict "valid-case" gate). They remain covered by Rust structural parser tests.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline --no-fail-fast`
+  - `cargo test -p parser-proto --test cpp_differential --offline -- --nocapture`

@@ -13,7 +13,8 @@
 //!   `box_lt`, `box_le`, `box_gt`, `box_ge`, `box_eq`, `box_ne`,
 //!   `box_pow`, `box_delay`, `box_delay1`, `box_min`, `box_max`,
 //!   `box_ipar`, `box_iseq`, `box_isum`, `box_iprod`,
-//!   `box_with_local_def`, `box_environment`,
+//!   `box_with_local_def`, `box_environment`, `box_component`, `box_library`,
+//!   `box_waveform`, `box_route`,
 //!   `box_button`, `box_checkbox`, `box_vslider`, `box_hslider`,
 //!   `box_num_entry`, `box_vbargraph`, `box_hbargraph`
 //! - `adapted`: `box_with_rec_def` (see function-level note)
@@ -70,6 +71,10 @@ const BOX_IPROD_TAG: &str = "BOXIPROD";
 const BOX_WITH_LOCAL_DEF_TAG: &str = "BOXWITHLOCALDEF";
 const BOX_WITH_REC_DEF_TAG: &str = "BOXWITHRECDEF";
 const BOX_ENVIRONMENT_TAG: &str = "BOXENVIRONMENT";
+const BOX_COMPONENT_TAG: &str = "BOXCOMPONENT";
+const BOX_LIBRARY_TAG: &str = "BOXLIBRARY";
+const BOX_WAVEFORM_TAG: &str = "BOXWAVEFORM";
+const BOX_ROUTE_TAG: &str = "BOXROUTE";
 const BOX_BUTTON_TAG: &str = "BOXBUTTON";
 const BOX_CHECKBOX_TAG: &str = "BOXCHECKBOX";
 const BOX_VSLIDER_TAG: &str = "BOXVSLIDER";
@@ -482,6 +487,61 @@ pub fn box_environment(arena: &mut TreeArena) -> BoxId {
 #[must_use]
 pub fn is_box_environment(arena: &TreeArena, b: BoxId) -> bool {
     match_tag_arity(arena, b, BOX_ENVIRONMENT_TAG, 0).is_some()
+}
+
+/// Equivalent to C++ `boxComponent`.
+#[must_use]
+pub fn box_component(arena: &mut TreeArena, filename: BoxId) -> BoxId {
+    intern_tag(arena, BOX_COMPONENT_TAG, &[filename])
+}
+
+/// Returns `filename` when `b` is `box_component`.
+#[must_use]
+pub fn is_box_component(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
+    match_unary(arena, b, BOX_COMPONENT_TAG)
+}
+
+/// Equivalent to C++ `boxLibrary`.
+#[must_use]
+pub fn box_library(arena: &mut TreeArena, filename: BoxId) -> BoxId {
+    intern_tag(arena, BOX_LIBRARY_TAG, &[filename])
+}
+
+/// Returns `filename` when `b` is `box_library`.
+#[must_use]
+pub fn is_box_library(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
+    match_unary(arena, b, BOX_LIBRARY_TAG)
+}
+
+/// Equivalent to C++ `boxWaveform`.
+///
+/// Rust keeps a deterministic list payload in one child:
+/// `tree(BOXWAVEFORM, cons(v0, cons(v1, ...)))`.
+#[must_use]
+pub fn box_waveform(arena: &mut TreeArena, values: &[BoxId]) -> BoxId {
+    let mut list = arena.nil();
+    for value in values.iter().rev() {
+        list = arena.cons(*value, list);
+    }
+    intern_tag(arena, BOX_WAVEFORM_TAG, &[list])
+}
+
+/// Returns waveform list payload when `b` is `box_waveform`.
+#[must_use]
+pub fn is_box_waveform(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
+    match_unary(arena, b, BOX_WAVEFORM_TAG)
+}
+
+/// Equivalent to C++ `boxRoute`.
+#[must_use]
+pub fn box_route(arena: &mut TreeArena, n: BoxId, m: BoxId, route_spec: BoxId) -> BoxId {
+    intern_tag(arena, BOX_ROUTE_TAG, &[n, m, route_spec])
+}
+
+/// Returns `(n, m, route_spec)` when `b` is `box_route`.
+#[must_use]
+pub fn is_box_route(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
+    match_ternary(arena, b, BOX_ROUTE_TAG)
 }
 
 /// Equivalent to C++ `boxButton`.

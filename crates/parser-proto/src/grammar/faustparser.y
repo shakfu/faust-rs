@@ -1,6 +1,8 @@
 %start Program
 %parse-param state: &std::cell::RefCell<crate::ParseState>
 
+%left WITH
+%left LETREC
 %right SPLIT MIX
 %right SEQ
 %right PAR
@@ -58,6 +60,24 @@ StmtList -> tlib::TreeId:
           crate::with_state(state, |state| state.nil())
       }
     | StmtList Statement {
+          crate::with_state(state, |state| state.prepend_statement($1, $2))
+      }
+    ;
+
+DefList -> tlib::TreeId:
+      %empty {
+          crate::with_state(state, |state| state.nil())
+      }
+    | DefList Definition {
+          crate::with_state(state, |state| state.prepend_statement($1, $2))
+      }
+    ;
+
+RecList -> tlib::TreeId:
+      %empty {
+          crate::with_state(state, |state| state.nil())
+      }
+    | RecList RecDefinition {
           crate::with_state(state, |state| state.prepend_statement($1, $2))
       }
     ;
@@ -178,6 +198,33 @@ Definition -> tlib::TreeId:
       }
     ;
 
+RecDefinition -> tlib::TreeId:
+      RecName DEF Expression ENDDEF {
+          crate::with_state(state, |state| {
+              state.mark_def_at_cursor($1);
+              let nil = state.nil();
+              state.make_definition($1, nil, $3)
+          })
+      }
+    | RecName DEF ENDDEF {
+          crate::with_state(state, |state| {
+              state.recovery_statement("syntax error: empty recursive definition body before ';'")
+          })
+      }
+    | RecName DEF EXTRA ENDDEF {
+          crate::with_state(state, |state| {
+              state.recovery_statement("syntax error: invalid recursive definition token before ';'")
+          })
+      }
+    | RecName DEF LexProbeToken ENDDEF {
+          crate::with_state(state, |state| {
+              state.recovery_statement(
+                  "syntax error: unsupported prototype token in recursive definition before ';'",
+              )
+          })
+      }
+    ;
+
 LexProbeToken -> u8:
       WITH { 0 }
     | LETREC { 0 }
@@ -277,6 +324,10 @@ DefName -> tlib::TreeId:
       }
     ;
 
+RecName -> tlib::TreeId:
+      DELAY1 IdentExpr { $2 }
+    ;
+
 ParamList -> tlib::TreeId:
       IdentExpr {
           crate::with_state(state, |state| {
@@ -318,7 +369,27 @@ Argument -> tlib::TreeId:
     ;
 
 Expression -> tlib::TreeId:
-      Expression PAR Expression {
+      Expression WITH LBRAQ DefList RBRAQ {
+          crate::with_state(state, |state| {
+              let defs = state.format_definitions($4);
+              boxes::box_with_local_def(&mut state.arena, $1, defs)
+          })
+      }
+    | Expression LETREC LBRAQ RecList RBRAQ {
+          crate::with_state(state, |state| {
+              let defs = state.format_definitions($4);
+              let nil = state.nil();
+              boxes::box_with_rec_def(&mut state.arena, $1, defs, nil)
+          })
+      }
+    | Expression LETREC LBRAQ RecList WHERE DefList RBRAQ {
+          crate::with_state(state, |state| {
+              let rec_defs = state.format_definitions($4);
+              let defs = state.format_definitions($6);
+              boxes::box_with_rec_def(&mut state.arena, $1, rec_defs, defs)
+          })
+      }
+    | Expression PAR Expression {
           crate::with_state(state, |state| boxes::box_par(&mut state.arena, $1, $3))
       }
     | Expression SEQ Expression {
@@ -491,6 +562,28 @@ Primitive -> tlib::TreeId:
     | MAX {
           crate::with_state(state, |state| boxes::box_max(&mut state.arena))
       }
+    | COMPONENT LPAR UQString RPAR {
+          crate::with_state(state, |state| boxes::box_component(&mut state.arena, $3))
+      }
+    | LIBRARY LPAR UQString RPAR {
+          crate::with_state(state, |state| boxes::box_library(&mut state.arena, $3))
+      }
+    | ENVIRONMENT LBRAQ StmtList RBRAQ {
+          crate::with_state(state, |state| {
+              let env = boxes::box_environment(&mut state.arena);
+              let defs = state.format_definitions($3);
+              boxes::box_with_local_def(&mut state.arena, env, defs)
+          })
+      }
+    | WAVEFORM LBRAQ ValList RBRAQ {
+          crate::with_state(state, |state| state.waveform_box_from_ctx())
+      }
+    | ROUTE LPAR Argument PAR Argument RPAR {
+          crate::with_state(state, |state| state.route_box_default_spec($3, $5))
+      }
+    | ROUTE LPAR Argument PAR Argument PAR Expression RPAR {
+          crate::with_state(state, |state| boxes::box_route(&mut state.arena, $3, $5, $7))
+      }
     | BUTTON LPAR UQString RPAR {
           crate::with_state(state, |state| boxes::box_button(&mut state.arena, $3))
       }
@@ -532,6 +625,42 @@ Primitive -> tlib::TreeId:
           })
       }
     | LPAR Expression RPAR { $2 }
+    ;
+
+ValList -> u8:
+      Number {
+          crate::with_state(state, |state| {
+              state.push_waveform_value($1);
+              0
+          })
+      }
+    | ValList PAR Number {
+          crate::with_state(state, |state| {
+              state.push_waveform_value($3);
+              0
+          })
+      }
+    ;
+
+Number -> tlib::TreeId:
+      INT {
+          crate::with_state(state, |state| state.int_from_token($lexer, $1))
+      }
+    | FLOAT {
+          crate::with_state(state, |state| state.float_from_token($lexer, $1))
+      }
+    | ADD INT {
+          crate::with_state(state, |state| state.signed_int_from_token($lexer, $2, 1))
+      }
+    | ADD FLOAT {
+          crate::with_state(state, |state| state.signed_float_from_token($lexer, $2, 1.0))
+      }
+    | SUB INT {
+          crate::with_state(state, |state| state.signed_int_from_token($lexer, $2, -1))
+      }
+    | SUB FLOAT {
+          crate::with_state(state, |state| state.signed_float_from_token($lexer, $2, -1.0))
+      }
     ;
 
 UQString -> tlib::TreeId:

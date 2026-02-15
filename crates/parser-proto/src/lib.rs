@@ -298,6 +298,27 @@ impl ParseState {
         self.ctx.set_lst_distributed(value);
     }
 
+    /// Appends one waveform numeric value in parse order.
+    pub fn push_waveform_value(&mut self, value: TreeId) {
+        self.ctx.push_waveform_value(value);
+    }
+
+    /// Builds `boxWaveform` from the accumulated parser waveform buffer and clears it.
+    #[must_use]
+    pub fn waveform_box_from_ctx(&mut self) -> TreeId {
+        let values = self.ctx.take_waveform();
+        boxes::box_waveform(&mut self.arena, &values)
+    }
+
+    /// Builds `boxRoute(n,m,boxPar(boxInt(0),boxInt(0)))` like C++ fake-route form.
+    #[must_use]
+    pub fn route_box_default_spec(&mut self, n: TreeId, m: TreeId) -> TreeId {
+        let z0 = boxes::box_int(&mut self.arena, 0);
+        let z1 = boxes::box_int(&mut self.arena, 0);
+        let fake = boxes::box_par(&mut self.arena, z0, z1);
+        boxes::box_route(&mut self.arena, n, m, fake)
+    }
+
     /// Parses one signed integer literal token to `boxInt`.
     #[must_use]
     pub fn signed_int_from_token<'lexer, 'input: 'lexer>(

@@ -1,13 +1,15 @@
 use boxes::{
-    box_access, box_add, box_appl, box_button, box_checkbox, box_cut, box_delay1, box_environment,
-    box_hbargraph, box_hslider, box_ident, box_ident_name, box_int, box_ipar, box_iprod, box_iseq,
-    box_isum, box_max, box_merge, box_min, box_mul, box_num_entry, box_par, box_real, box_rec,
-    box_seq, box_split, box_vbargraph, box_vslider, box_wire, box_with_local_def, box_with_rec_def,
-    dump_box, is_box_access, is_box_add, is_box_appl, is_box_button, is_box_checkbox, is_box_cut,
-    is_box_delay1, is_box_environment, is_box_hbargraph, is_box_hslider, is_box_int, is_box_ipar,
-    is_box_iprod, is_box_iseq, is_box_isum, is_box_max, is_box_merge, is_box_min, is_box_mul,
-    is_box_num_entry, is_box_par, is_box_real, is_box_rec, is_box_seq, is_box_split,
-    is_box_vbargraph, is_box_vslider, is_box_wire, is_box_with_local_def, is_box_with_rec_def,
+    box_access, box_add, box_appl, box_button, box_checkbox, box_component, box_cut, box_delay1,
+    box_environment, box_hbargraph, box_hslider, box_ident, box_ident_name, box_int, box_ipar,
+    box_iprod, box_iseq, box_isum, box_library, box_max, box_merge, box_min, box_mul,
+    box_num_entry, box_par, box_real, box_rec, box_route, box_seq, box_split, box_vbargraph,
+    box_vslider, box_waveform, box_wire, box_with_local_def, box_with_rec_def, dump_box,
+    is_box_access, is_box_add, is_box_appl, is_box_button, is_box_checkbox, is_box_component,
+    is_box_cut, is_box_delay1, is_box_environment, is_box_hbargraph, is_box_hslider, is_box_int,
+    is_box_ipar, is_box_iprod, is_box_iseq, is_box_isum, is_box_library, is_box_max, is_box_merge,
+    is_box_min, is_box_mul, is_box_num_entry, is_box_par, is_box_real, is_box_rec, is_box_route,
+    is_box_seq, is_box_split, is_box_vbargraph, is_box_vslider, is_box_waveform, is_box_wire,
+    is_box_with_local_def, is_box_with_rec_def,
 };
 use tlib::TreeArena;
 
@@ -166,6 +168,34 @@ fn local_and_recursive_def_boxes_roundtrip() {
     let ldef2 = box_par(&mut arena, b_ident, b_value);
     let rec = box_with_rec_def(&mut arena, body, ldef, ldef2);
     assert_eq!(is_box_with_rec_def(&arena, rec), Some((body, ldef, ldef2)));
+}
+
+#[test]
+fn module_waveform_and_route_boxes_roundtrip() {
+    let mut arena = TreeArena::new();
+    let filename = arena.string_lit("foo.lib");
+    let component = box_component(&mut arena, filename);
+    let library = box_library(&mut arena, filename);
+    assert_eq!(is_box_component(&arena, component), Some(filename));
+    assert_eq!(is_box_library(&arena, library), Some(filename));
+
+    let v0 = box_int(&mut arena, 1);
+    let v1 = box_int(&mut arena, -2);
+    let v2 = box_real(&mut arena, 3.5);
+    let values = [v0, v1, v2];
+    let waveform = box_waveform(&mut arena, &values);
+    let wave_list = is_box_waveform(&arena, waveform).expect("waveform payload should exist");
+    assert_eq!(arena.hd(wave_list), Some(values[0]));
+    let wave_tail = arena.tl(wave_list).expect("tail should exist");
+    assert_eq!(arena.hd(wave_tail), Some(values[1]));
+
+    let n = box_wire(&mut arena);
+    let m = box_wire(&mut arena);
+    let rz0 = box_int(&mut arena, 0);
+    let rz1 = box_int(&mut arena, 0);
+    let spec = box_par(&mut arena, rz0, rz1);
+    let route = box_route(&mut arena, n, m, spec);
+    assert_eq!(is_box_route(&arena, route), Some((n, m, spec)));
 }
 
 #[test]
