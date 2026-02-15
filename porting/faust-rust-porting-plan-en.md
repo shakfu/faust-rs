@@ -63,6 +63,14 @@ Related design note (recursion representation and RouteIR coexistence):
     - rationale and compatibility impact,
     - differential/unit tests covering the mapping.
 
+### Mandatory quality gate for each porting step
+
+- Every implementation step must pass this local validation gate before commit:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace --all-targets`
+- If one command cannot be run in the current step, the reason and follow-up owner/date must be recorded in `JOURNAL.md`.
+
 ---
 
 ## 2. Current C++ source code mapping

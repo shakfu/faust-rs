@@ -41,6 +41,10 @@ Guidelines for contributors and coding agents working on `faust-rs`.
 
 - Use the `porting/` documents as source of truth for scope and phases.
 - Preserve behavior first, optimize later.
+- Treat local quality gates as mandatory for each porting step:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace --all-targets`
 - Add or update unit tests in the touched crate(s) as part of each porting change; if tests cannot be added immediately, record the reason, owner, and planned follow-up in `JOURNAL.md`.
 - Document migrated source provenance as you port: add Rustdoc comments (`///` or `//!`) that reference the corresponding C++ source files/functions and capture key invariants/semantic notes needed to maintain parity.
 - Public API migration is parity-driven, not blindly signature-driven:

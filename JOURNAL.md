@@ -507,3 +507,21 @@ Execution plan (Phase 0 prototype, revised):
   - iterative constructor roundtrips (`ipar`/`iseq`/`isum`/`iprod`),
   - UI constructor/predicate roundtrips (button/checkbox/sliders/numentry/bargraphs),
   - structural dump determinism check with stable expected string.
+
+### Gate A.5 step 3 (process docs sync: explicit `clippy` gate in porting docs)
+
+- Completed process documentation so `clippy` usage is explicit beyond AGENTS:
+  - `porting/faust-rust-porting-plan-en.md`:
+    - added a global "mandatory quality gate for each porting step" section:
+      - `cargo fmt --all`
+      - `cargo clippy --workspace --all-targets -- -D warnings`
+      - `cargo test --workspace --all-targets`
+    - added exception tracking rule in `JOURNAL.md` when one command cannot run.
+  - `porting/phases/phase-0-validation-en.md`:
+    - added a dedicated "quality gate discipline" validation item,
+    - added corresponding Phase 0 exit-checklist criterion.
+  - `porting/phases/phase-9-integration-en.md`:
+    - expanded final integration "Done" criteria from tests-only to full
+      `fmt` + `clippy -D warnings` + workspace tests on Linux/macOS/Windows.
+  - `AGENTS.md`:
+    - mirrored the same mandatory per-step quality-gate rule in Porting Discipline.

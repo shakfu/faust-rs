@@ -507,7 +507,9 @@ Excluded backends (`-lang ocpp`) and template/scaffold paths should remain outsi
 - [ ] Linux/macOS/Windows cross compilation via `cargo build`
 - [ ] Compile orchestration is backend-path deterministic (no stale per-request state leakage)
 - [ ] Performance ≥ C++ compiler on the benchmark suite
-- [ ] `cargo test` goes on all 3 platforms
+- [ ] `cargo fmt --all` passes on all 3 platforms
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes on all 3 platforms
+- [ ] `cargo test --workspace --all-targets` passes on all 3 platforms
 - [ ] CI/CD configured (GitHub Actions)
 - [ ] Updated user documentation
 

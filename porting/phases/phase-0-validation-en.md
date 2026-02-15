@@ -15,6 +15,7 @@ Primary goals:
 - Freeze migration scope (included and excluded backends/modes).
 - Validate API lifecycle model and integration constraints.
 - Clarify public API migration policy (`1:1` vs adapted) and traceability.
+- Confirm and enforce the local quality gate used by all porting steps (`fmt` + `clippy -D warnings` + tests).
 - Lock differential testing baseline and acceptance thresholds.
 - Enforce stub minimization in validation prototypes.
 - Define and enforce source-provenance documentation in Rustdoc format during porting.
@@ -94,6 +95,17 @@ Primary goals:
 - Apply the convention in all Phase 0 prototypes touching core migration risks.
 - Record exceptions in `JOURNAL.md` when provenance cannot be attached immediately (owner + follow-up milestone).
 
+### 2.11 Quality gate discipline
+- Standardize the mandatory local validation commands used throughout the port:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace --all-targets`
+- Define exception handling when one command cannot run in a given step:
+  - explicit reason,
+  - owner,
+  - target date for completion,
+  - tracking entry in `JOURNAL.md`.
+
 ---
 
 ## 3. Deliverables
@@ -154,6 +166,7 @@ No-Go:
 - [ ] Recursion/stack strategy documented
 - [ ] Differential corpus and acceptance rules finalized
 - [ ] Rustdoc source-provenance convention defined and applied on touched prototypes
+- [ ] Quality gate command set finalized and enforced (`fmt` + `clippy -D warnings` + tests)
 - [ ] TreeArena hash-consing benchmarks completed and reviewed
 - [ ] Stub debt tracker reviewed (no unowned/unplanned carry-over)
 - [ ] Final Go/No-Go decision recorded
