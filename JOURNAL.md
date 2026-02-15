@@ -354,3 +354,17 @@ Execution plan (Phase 0 prototype, revised):
 - Conclusion:
   - measurable gain on `lookup`/`traversal`,
   - `create` and `property_get` stayed in the same range (noise-level variation), no regression signal at this scale.
+
+### Gate A step 13 (`ahash` fast hasher pass)
+
+- Added `ahash` dependency in `crates/tlib/Cargo.toml`.
+- Switched performance-critical hash maps to `AHashMap`:
+  - `TreeArena` interners in `crates/tlib/src/arena.rs`,
+  - `PropertyStore.key_intern` in `crates/tlib/src/property.rs`.
+- Rationale: remove default SipHash overhead from compiler-internal hash-consing and key interning paths.
+- Re-measured with interleaved medians (`n=1_000_000`, 3 runs each):
+  - Rust: `create_ms=226.897`, `lookup_ms=210.167`, `traversal_ms=99.829`, `property_set_ms=5.794`, `property_get_ms=2.121`
+  - C++: `create_ms=864.897`, `lookup_ms=719.490`, `traversal_ms=984.207`, `property_set_ms=468.464`, `property_get_ms=7.578`
+  - Ratios: `create=0.262x`, `lookup=0.292x`, `traversal=0.101x`, `property_set=0.012x`, `property_get=0.280x`
+- Conclusion:
+  - clear additional gain on `create`/`lookup` with no regression signal on other metrics.

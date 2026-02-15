@@ -1,6 +1,5 @@
-use std::collections::HashMap;
-
 use crate::TreeId;
+use ahash::AHashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PropertyKey(u32);
@@ -8,7 +7,7 @@ pub struct PropertyKey(u32);
 #[derive(Debug)]
 pub struct PropertyStore<T> {
     values: Vec<Vec<Option<T>>>,
-    key_intern: HashMap<Box<str>, PropertyKey>,
+    key_intern: AHashMap<Box<str>, PropertyKey>,
     next_key: u32,
     len: usize,
 }
@@ -24,7 +23,7 @@ impl<T> PropertyStore<T> {
     pub fn new() -> Self {
         Self {
             values: Vec::new(),
-            key_intern: HashMap::new(),
+            key_intern: AHashMap::new(),
             next_key: 0,
             len: 0,
         }

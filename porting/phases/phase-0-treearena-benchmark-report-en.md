@@ -92,3 +92,12 @@ Follow-up tuning (compact children storage):
   - Rust: `create_ms=439.164`, `lookup_ms=363.015`, `traversal_ms=162.204`, `property_set_ms=5.545`, `property_get_ms=2.239`
   - C++: `create_ms=881.556`, `lookup_ms=708.131`, `traversal_ms=915.364`, `property_set_ms=469.337`, `property_get_ms=7.467`
   - Ratios: `create=0.498x`, `lookup=0.513x`, `traversal=0.177x`, `property_set=0.012x`, `property_get=0.300x`
+
+Follow-up tuning (faster hash maps):
+- Switched internal hash maps from standard `HashMap` to `ahash::AHashMap`:
+  - `TreeArena` interners (`interner0`, `interner1`, `interner2`, `interner_n`),
+  - `PropertyStore.key_intern`.
+- Interleaved medians (`n=1_000_000`, 3 runs each):
+  - Rust: `create_ms=226.897`, `lookup_ms=210.167`, `traversal_ms=99.829`, `property_set_ms=5.794`, `property_get_ms=2.121`
+  - C++: `create_ms=864.897`, `lookup_ms=719.490`, `traversal_ms=984.207`, `property_set_ms=468.464`, `property_get_ms=7.578`
+  - Ratios: `create=0.262x`, `lookup=0.292x`, `traversal=0.101x`, `property_set=0.012x`, `property_get=0.280x`

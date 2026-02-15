@@ -1,5 +1,6 @@
-use std::collections::HashMap;
 use std::sync::Arc;
+
+use ahash::AHashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TreeId(u32);
@@ -92,10 +93,10 @@ struct NodeKey {
 #[derive(Debug)]
 pub struct TreeArena {
     nodes: Vec<TreeNode>,
-    interner0: HashMap<NodeKind, TreeId>,
-    interner1: HashMap<(NodeKind, TreeId), TreeId>,
-    interner2: HashMap<(NodeKind, TreeId, TreeId), TreeId>,
-    interner_n: HashMap<NodeKey, TreeId>,
+    interner0: AHashMap<NodeKind, TreeId>,
+    interner1: AHashMap<(NodeKind, TreeId), TreeId>,
+    interner2: AHashMap<(NodeKind, TreeId, TreeId), TreeId>,
+    interner_n: AHashMap<NodeKey, TreeId>,
     nil: TreeId,
 }
 
@@ -110,10 +111,10 @@ impl TreeArena {
     pub fn new() -> Self {
         let mut arena = Self {
             nodes: Vec::new(),
-            interner0: HashMap::new(),
-            interner1: HashMap::new(),
-            interner2: HashMap::new(),
-            interner_n: HashMap::new(),
+            interner0: AHashMap::new(),
+            interner1: AHashMap::new(),
+            interner2: AHashMap::new(),
+            interner_n: AHashMap::new(),
             nil: TreeId(0),
         };
         let nil = arena.intern(NodeKind::Nil, &[]);
