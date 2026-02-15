@@ -14,6 +14,7 @@ Primary goals:
 - Confirm the effective production pipeline to port first.
 - Freeze migration scope (included and excluded backends/modes).
 - Validate API lifecycle model and integration constraints.
+- Clarify public API migration policy (`1:1` vs adapted) and traceability.
 - Lock differential testing baseline and acceptance thresholds.
 - Enforce stub minimization in validation prototypes.
 - Define and enforce source-provenance documentation in Rustdoc format during porting.
@@ -44,6 +45,17 @@ Primary goals:
 - Identify divergent lifecycle paths and normalize to one Rust contract.
 - Lock explicit ownership rules for compile session handles and returned artifacts.
 - For `box_signal_api.cpp`, limit Phase 0 to usage/surface inventory; defer full export prioritization to Phase 1 scope planning.
+
+### 2.4.b Public API mapping policy
+- Define the rule for API migration status on touched public surfaces:
+  - `1:1`: same conceptual API with equivalent contract,
+  - `adapted`: Rust-idiomatic signature/model with preserved documented semantics,
+  - `deferred`: not yet ported, with owner and milestone.
+- Require a mapping record for touched APIs including:
+  - C++ symbol/file reference,
+  - Rust equivalent,
+  - status (`1:1` / `adapted` / `deferred`),
+  - compatibility impact and validation tests.
 
 ### 2.5 Orchestration safety checks
 - Validate that no fixed-size temporary argument staging is kept in Rust design.
@@ -92,6 +104,7 @@ Primary goals:
   - scope decisions
   - capability matrix draft
   - API lifecycle contract
+  - Public API mapping policy and status convention (`1:1` / `adapted` / `deferred`)
   - baseline differential protocol
   - Rustdoc source-provenance convention for migrated modules
   - TreeArena performance report (results, thresholds, decision) (`phase-0-treearena-benchmark-report-en.md`)
@@ -106,6 +119,7 @@ Go:
 - Effective production pipeline is confirmed and documented.
 - Scope exclusions are frozen (`backend-java`, `-lang ocpp`).
 - API lifecycle model is unified and accepted.
+- Public API mapping policy is defined and applied on touched Phase 0 surfaces.
 - Capability matrix approach is defined and testable.
 - Differential baseline corpus and procedure are ready.
 - Rustdoc source-provenance convention is defined and applied on touched prototypes.
@@ -116,6 +130,7 @@ No-Go:
 - Pipeline ownership is ambiguous between competing compile paths.
 - Scope is not frozen or remains contradictory across docs.
 - API lifecycle remains divergent with no agreed target contract.
+- Public API mapping remains implicit (no `1:1`/`adapted`/`deferred` status on touched APIs).
 - Differential baseline cannot be reproduced reliably.
 - Source-provenance remains implicit (no Rustdoc convention and no tracked exceptions).
 - TreeArena performance is outside agreed limits with no credible mitigation path.
@@ -132,6 +147,7 @@ No-Go:
 - [ ] Capability matrix model defined for CLI/backend validation
 - [ ] `gGlobal` decomposition map drafted and reviewed for touched flows
 - [ ] API lifecycle unified across entry points
+- [ ] Public API mapping policy defined and used (`1:1` / `adapted` / `deferred`)
 - [ ] No fixed-size temporary argument staging in target design
 - [ ] Deterministic per-request orchestration state model documented
 - [ ] Typed output sink model documented

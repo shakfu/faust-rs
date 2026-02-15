@@ -43,6 +43,10 @@ Guidelines for contributors and coding agents working on `faust-rs`.
 - Preserve behavior first, optimize later.
 - Add or update unit tests in the touched crate(s) as part of each porting change; if tests cannot be added immediately, record the reason, owner, and planned follow-up in `JOURNAL.md`.
 - Document migrated source provenance as you port: add Rustdoc comments (`///` or `//!`) that reference the corresponding C++ source files/functions and capture key invariants/semantic notes needed to maintain parity.
+- Public API migration is parity-driven, not blindly signature-driven:
+  - internal Rust crate APIs may be adapted for idiomatic ownership/types/error handling,
+  - external compatibility surfaces (CLI + C/C++ API tiers) target stable behavior and compatibility contracts.
+- For each touched public API, document mapping status (`1:1`, `adapted`, or `deferred`) with rationale and compatibility impact in the relevant `porting/` phase document or `JOURNAL.md`.
 - Prefer real end-to-end integrations over temporary stubs; if a stub is unavoidable, it must be explicitly justified, owner-assigned, time-boxed, and removed within the same phase gate.
 - Define explicit deliverables and pass criteria for each phase/prototype before implementation; do not start deep work on tasks with implicit success conditions.
 - For critical compiler behavior, prefer differential tests against C++ reference outputs.

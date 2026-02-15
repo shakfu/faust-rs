@@ -1,9 +1,27 @@
+//! Node-keyed property storage for `tlib` trees.
+//!
+//! # Source provenance (C++)
+//! - `compiler/tlib/property.hh` (`property<T>` wrappers)
+//! - `compiler/tlib/tree.hh` (`CTree::setProperty/getProperty`)
+//!
+//! # Parity invariants
+//! - Properties are attached to node identity (`TreeId`) and a property key.
+//! - String keys are interned once, then fast path uses numeric keys (`PropertyKey`).
+
 use crate::TreeId;
 use ahash::AHashMap;
 
+/// Interned property key identifier.
+///
+/// Keys are stable for the lifetime of one [`PropertyStore`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PropertyKey(u32);
 
+/// Property storage indexed by `(PropertyKey, TreeId)`.
+///
+/// The storage layout is optimized for hot parser/evaluator passes:
+/// - key interning map (`AHashMap<Box<str>, PropertyKey>`),
+/// - slot vectors indexed by `TreeId` for O(1)-like keyed access.
 #[derive(Debug)]
 pub struct PropertyStore<T> {
     values: Vec<Vec<Option<T>>>,
@@ -19,11 +37,13 @@ impl<T> Default for PropertyStore<T> {
 }
 
 impl<T> PropertyStore<T> {
+    /// Creates an empty property store.
     #[must_use]
     pub fn new() -> Self {
         Self::with_key_capacity(0)
     }
 
+    /// Creates an empty property store with expected key capacity.
     #[must_use]
     pub fn with_key_capacity(key_capacity: usize) -> Self {
         Self {
@@ -34,10 +54,14 @@ impl<T> PropertyStore<T> {
         }
     }
 
+    /// Interns `key` (or reuses an existing key) and returns its [`PropertyKey`].
     pub fn key(&mut self, key: impl AsRef<str>) -> PropertyKey {
         self.intern_key(key.as_ref())
     }
 
+    /// Sets value for `(node, key)` using interned key path.
+    ///
+    /// Returns previous value if one existed.
     pub fn set_with_key(&mut self, node: TreeId, key: PropertyKey, value: T) -> Option<T> {
         let key_idx = key.0 as usize;
         if key_idx >= self.values.len() {
@@ -55,6 +79,7 @@ impl<T> PropertyStore<T> {
         prev
     }
 
+    /// Gets value for `(node, key)` using interned key path.
     #[must_use]
     pub fn get_with_key(&self, node: TreeId, key: PropertyKey) -> Option<&T> {
         let idx = node.as_u32() as usize;
@@ -64,6 +89,7 @@ impl<T> PropertyStore<T> {
             .and_then(Option::as_ref)
     }
 
+    /// Mutable variant of [`Self::get_with_key`].
     pub fn get_mut_with_key(&mut self, node: TreeId, key: PropertyKey) -> Option<&mut T> {
         let idx = node.as_u32() as usize;
         self.values
@@ -72,6 +98,7 @@ impl<T> PropertyStore<T> {
             .and_then(Option::as_mut)
     }
 
+    /// Removes value for `(node, key)` and returns removed value if any.
     pub fn remove_with_key(&mut self, node: TreeId, key: PropertyKey) -> Option<T> {
         let idx = node.as_u32() as usize;
         let slots = self.values.get_mut(key.0 as usize)?;
@@ -85,27 +112,34 @@ impl<T> PropertyStore<T> {
         prev
     }
 
+    /// Sets value using string key path (interns key on first use).
     pub fn set(&mut self, node: TreeId, key: impl AsRef<str>, value: T) -> Option<T> {
         let key = self.intern_key(key.as_ref());
         self.set_with_key(node, key, value)
     }
 
+    /// Gets value using string key path.
     #[must_use]
     pub fn get(&self, node: TreeId, key: &str) -> Option<&T> {
         let key = self.key_intern.get(key).copied()?;
         self.get_with_key(node, key)
     }
 
+    /// Mutable variant of [`Self::get`].
     pub fn get_mut(&mut self, node: TreeId, key: &str) -> Option<&mut T> {
         let key = self.key_intern.get(key).copied()?;
         self.get_mut_with_key(node, key)
     }
 
+    /// Removes value using string key path.
     pub fn remove(&mut self, node: TreeId, key: &str) -> Option<T> {
         let key = self.key_intern.get(key).copied()?;
         self.remove_with_key(node, key)
     }
 
+    /// Ensures that storage for `key` can index up to `slots_len` entries.
+    ///
+    /// New entries are initialized to `None`.
     pub fn reserve_slots(&mut self, key: PropertyKey, slots_len: usize) {
         let key_idx = key.0 as usize;
         if key_idx >= self.values.len() {
@@ -117,16 +151,21 @@ impl<T> PropertyStore<T> {
         }
     }
 
+    /// Clears all values.
+    ///
+    /// Interned key mapping is preserved to keep key ids stable for the store lifetime.
     pub fn clear(&mut self) {
         self.values.clear();
         self.len = 0;
     }
 
+    /// Number of stored `(node, key)` values.
     #[must_use]
     pub fn len(&self) -> usize {
         self.len
     }
 
+    /// `true` if no values are stored.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len == 0

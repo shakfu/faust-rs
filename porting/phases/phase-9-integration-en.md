@@ -279,6 +279,18 @@ Given the observed API size, migrate in tiers:
 
 This tiering avoids blocking CLI/compiler parity on full API completion.
 
+API status policy for migration tracking:
+- `1:1`: exported contract kept compatible with legacy API semantics/signature expectations.
+- `adapted`: Rust-internal API shape changed (ownership/types/context modeling) with preserved documented behavior.
+- `deferred`: not yet migrated (owner + milestone required).
+
+For each touched API surface, keep a mapping record with:
+- C++ symbol + file reference,
+- Rust symbol/module,
+- status (`1:1` / `adapted` / `deferred`),
+- compatibility impact and required wrapper/shim notes,
+- test coverage (unit/integration/differential) proving expected behavior.
+
 ### 2.7 Integration into the Faust repository
 
 ```

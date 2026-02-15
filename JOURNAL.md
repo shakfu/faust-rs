@@ -431,3 +431,40 @@ Execution plan (Phase 0 prototype, revised):
   - added corresponding deliverable, go/no-go criteria, and exit-checklist entry.
 - Updated `porting/faust-rust-points-critiques-en.md`:
   - added source-provenance Rustdoc requirement in the top-level prototype execution rules.
+
+### Gate A step 18 (`tlib` Rustdoc provenance pass)
+
+- Documented `crates/tlib` public API in Rustdoc with explicit source provenance and parity invariants:
+  - `crates/tlib/src/lib.rs`:
+    - crate-level overview and C++ source mapping (`tree/list/property/node/symbol` files),
+    - core parity invariants summary.
+  - `crates/tlib/src/arena.rs`:
+    - module-level provenance (`tree.hh/.cpp`, `list.hh/.cpp`, `node.hh`),
+    - invariants for hash-consing, `TreeId`, canonical `nil`, list semantics,
+    - public type/method documentation (`TreeArena`, `NodeKind`, `ChildList`, constructors/accessors).
+  - `crates/tlib/src/property.rs`:
+    - module-level provenance (`property.hh`, `tree.hh` property API),
+    - invariants for node-keyed properties and interned key fast path,
+    - public API documentation (`PropertyStore`, `PropertyKey`, keyed/string methods, reserve behavior).
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p tlib`
+
+### Gate A step 19 (public API migration policy clarification)
+
+- Clarified API migration policy across governance docs:
+  - APIs are not blindly ported signature-by-signature (`1:1`) in all cases,
+  - internal Rust APIs may be adapted when needed for idiomatic ownership/types/error handling,
+  - external compatibility surfaces (CLI + C/C++ API tiers) remain parity targets.
+- Added explicit status convention for touched public APIs:
+  - `1:1`, `adapted`, `deferred`.
+- Added traceability requirements (for touched APIs):
+  - C++ symbol/file reference,
+  - Rust symbol/module,
+  - rationale + compatibility impact,
+  - validation tests.
+- Updated files:
+  - `AGENTS.md`
+  - `porting/faust-rust-porting-plan-en.md`
+  - `porting/phases/phase-0-validation-en.md`
+  - `porting/phases/phase-9-integration-en.md`

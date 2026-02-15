@@ -48,6 +48,21 @@ The objective of the port is to reproduce this pipeline in idiomatic Rust, takin
 Related design note (recursion representation and RouteIR coexistence):
 - `faust-rust-recursion-model-note-en.md`
 
+### Public API migration policy (1:1 vs adaptations)
+
+- **Not all APIs are ported 1:1 at signature level.**
+  - Internal Rust crate APIs are allowed to adapt signatures for idiomatic Rust (ownership/borrowing, `Result`-based errors, explicit context parameters, typed enums).
+  - External compatibility surfaces (CLI behavior and C/C++ exported APIs) remain parity targets by tier.
+- **Behavioral parity is the default objective.**
+  - Any signature adaptation must preserve documented semantics or explicitly declare intentional divergence.
+- **Mapping traceability is mandatory for touched public APIs.**
+  - For each migrated API, record:
+    - C++ source symbol(s) and file path(s),
+    - Rust symbol(s),
+    - status: `1:1`, `adapted`, or `deferred`,
+    - rationale and compatibility impact,
+    - differential/unit tests covering the mapping.
+
 ---
 
 ## 2. Current C++ source code mapping
@@ -929,7 +944,11 @@ For **each phase** of the porting, the following procedure must be followed:
      - source C++ file/function path(s),
      - parity-sensitive invariants and behavior notes kept during migration.
 2. **Write unit tests** alongside the code
-3. **Enrich the logbook** (`JOURNAL.md`) with:
+3. **Maintain public API mapping traceability** for touched APIs:
+   - classify each as `1:1`, `adapted`, or `deferred`,
+   - document rationale + compatibility impact,
+   - point to tests validating parity/adaptation.
+4. **Enrich the logbook** (`JOURNAL.md`) with:
    - Date and description of what was done
    - Design decisions made and their justifications
    - Differences from C++ implementation
@@ -941,6 +960,7 @@ For **each phase** of the porting, the following procedure must be followed:
 1. **Verification by differential tests**: compile the same Faust programs with the C++ version and the Rust version, compare the results
 2. **Rustdoc documentation review**: ensuring it is complete and consistent
 3. **Update of the logbook** with the report of the phase
+4. **Public API mapping review**: ensure mapping table/status is current for touched surfaces
 
 ### 10.4 Logbook (`JOURNAL.md`)
 
