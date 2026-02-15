@@ -4,7 +4,7 @@ mod arena;
 mod property;
 
 pub use arena::{NodeKind, TreeArena, TreeId, TreeNode};
-pub use property::PropertyStore;
+pub use property::{PropertyKey, PropertyStore};
 
 pub const CRATE_NAME: &str = "tlib";
 

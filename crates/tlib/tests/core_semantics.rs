@@ -53,3 +53,22 @@ fn property_store_is_node_keyed() {
     assert_eq!(props.remove(node, "order"), Some(4));
     assert!(props.get(node, "order").is_none());
 }
+
+#[test]
+fn property_store_interned_key_api_matches_string_api() {
+    let mut arena = TreeArena::new();
+    let node = arena.symbol("gain");
+
+    let mut props = PropertyStore::<i32>::new();
+    let order = props.key("order");
+
+    assert_eq!(props.set_with_key(node, order, 7), None);
+    assert_eq!(props.get_with_key(node, order), Some(&7));
+    assert_eq!(props.get(node, "order"), Some(&7));
+
+    if let Some(value) = props.get_mut_with_key(node, order) {
+        *value += 2;
+    }
+    assert_eq!(props.get(node, "order"), Some(&9));
+    assert_eq!(props.remove_with_key(node, order), Some(9));
+}

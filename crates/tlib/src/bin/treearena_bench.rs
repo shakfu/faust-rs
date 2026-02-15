@@ -50,16 +50,17 @@ fn main() {
     black_box(count);
 
     let mut props = PropertyStore::<usize>::new();
+    let hot_key = props.key("hot");
     let prop_set_start = Instant::now();
     for (i, node) in nodes.iter().copied().enumerate() {
-        let _ = props.set(node, "hot", i);
+        let _ = props.set_with_key(node, hot_key, i);
     }
     let prop_set_elapsed = prop_set_start.elapsed();
 
     let prop_get_start = Instant::now();
     let mut checksum = 0usize;
     for node in nodes.iter().copied() {
-        if let Some(v) = props.get(node, "hot") {
+        if let Some(v) = props.get_with_key(node, hot_key) {
             checksum ^= *v;
         }
     }

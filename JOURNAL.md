@@ -271,3 +271,21 @@ Execution plan (Phase 0 prototype, revised):
 - Recorded Gate A decision as **Conditional Go**:
   - create/lookup/traversal/property-set are within threshold or faster than C++,
   - `property_get` remains a hotspot (`12.126x`) and must be addressed before final Gate A closure.
+
+### Gate A step 7 (`tlib-core` property hot-path optimization and closure)
+
+- Refactored `PropertyStore` in `crates/tlib/src/property.rs`:
+  - added interned `PropertyKey`,
+  - added explicit key API (`key`, `set_with_key`, `get_with_key`, `get_mut_with_key`, `remove_with_key`),
+  - switched storage to key-indexed slot vectors (`TreeId` direct indexing) to remove repeated get-path string allocation/hashing.
+- Updated `crates/tlib/src/bin/treearena_bench.rs` to benchmark the parser-like hot path with pre-interned key.
+- Added non-regression coverage in `crates/tlib/tests/core_semantics.rs` for interned-key API parity.
+- Re-ran Rust/C++ benchmark and updated report:
+  - `porting/phases/phase-0-treearena-benchmark-report-en.md`
+- New ratios (`n=200000`):
+  - `create=1.331x`
+  - `lookup=1.524x`
+  - `traversal=0.867x`
+  - `property_set=0.075x`
+  - `property_get=1.079x`
+- Gate A status updated to **Go**.

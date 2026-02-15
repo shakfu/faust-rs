@@ -26,40 +26,40 @@ Measured operations:
 ## 2. Results (`n=200000`)
 
 Rust (`--release`):
-- `create_ms=89.449`
-- `lookup_ms=74.758`
-- `traversal_ms=58.153`
-- `property_set_ms=21.451`
-- `property_get_ms=17.376`
+- `create_ms=95.306`
+- `lookup_ms=71.726`
+- `traversal_ms=56.583`
+- `property_set_ms=2.575`
+- `property_get_ms=1.621`
 - `arena_nodes=600002`
 
 C++ (`-O3`):
-- `create_ms=71.635`
-- `lookup_ms=60.259`
-- `traversal_ms=78.529`
-- `property_set_ms=35.460`
-- `property_get_ms=1.433`
+- `create_ms=71.606`
+- `lookup_ms=47.066`
+- `traversal_ms=65.282`
+- `property_set_ms=34.472`
+- `property_get_ms=1.502`
 
 Rust/C++ ratio:
-- `create`: `1.249x`
-- `lookup`: `1.241x`
-- `traversal`: `0.741x`
-- `property_set`: `0.605x`
-- `property_get`: `12.126x`
+- `create`: `1.331x`
+- `lookup`: `1.524x`
+- `traversal`: `0.867x`
+- `property_set`: `0.075x`
+- `property_get`: `1.079x`
 
 ## 3. Gate A decision
 
-Status: **Conditional Go** (2026-02-15).
+Status: **Go** (2026-02-15).
 
 Accepted:
-- create/lookup/traversal/property-set are within target envelope (`<= 2x`) or faster than C++,
+- create/lookup/traversal/property-set/property-get are within target envelope (`<= 2x`) or faster than C++,
 - benchmark process is reproducible on both Rust and C++ baselines.
 
-Blocking hotspot to clear before Gate A final closure:
-- `property_get` is currently `12.126x` slower than C++ baseline.
+Implemented optimization that unblocked Gate A:
+- `PropertyStore` now uses interned property keys + direct vector slots indexed by `TreeId` for hot-path lookup (`set_with_key`/`get_with_key`).
+- This removed repeated string allocation/hashing on get-path and brought `property_get` from `12.126x` to `1.079x`.
 
 ## 4. Required follow-up
 
-1. Align Rust property key model with C++ usage pattern (tree-key lookup path) and re-measure.
-2. Re-run both harnesses with same workload (`n=200000`) and update ratios.
-3. Convert Gate A from `Conditional Go` to `Go` only when `property_get <= 2x` or with an approved mitigation and explicit ownership/date.
+1. Keep tracking memory footprint tradeoff of sparse high `TreeId` spaces (vector slots per property key).
+2. Preserve this benchmark in Phase 0 evidence when `TreeArena` internals evolve.
