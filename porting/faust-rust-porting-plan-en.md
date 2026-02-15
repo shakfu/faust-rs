@@ -302,6 +302,9 @@ Detailed checklist and Go/No-Go criteria: `phases/phase-0-validation-en.md`.
 3. Semantic actions directly call `boxes` constructors
 4. The advantage of lrlex/lrpar is built-in error recovery, production Rust types, and static grammar compilation via `build.rs`
 
+After Gate B prototype validation, completion work must follow an explicit remaining-step roadmap (lexer/grammar/action parity, diagnostics/recovery parity, SourceReader integration, differential expansion, and merge into production `crates/parser`).
+Detailed sequence with deliverables and pass criteria: `phases/phase-3-parser-en.md` (section `7.4`).
+
 ### Phase 4 — Signals, Evaluation, Propagation (months 5-6)
 
 | Stage | Crate | Description | Validation tests |

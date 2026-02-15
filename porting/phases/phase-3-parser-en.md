@@ -326,6 +326,64 @@ Faust supports `f"signal {expr}"` format strings. The lexer must handle them as 
 - Very large files (> 10K lines)
 - Circular imports
 
+### 7.4 Remaining execution plan after Gate B prototype (full parser port)
+
+Current status:
+- Gate B parser migration prototype (`lrlex`/`lrpar`) is validated on Slice 1/2/3 and parse/recovery class differential checks.
+- Source of truth for C++ behavior remains:
+  - `/Users/letz/Developpements/RUST/faust/compiler/parser/faustparser.y`
+  - `/Users/letz/Developpements/RUST/faust/compiler/parser/faustlexer.l`
+
+Remaining steps to reach full parser completion:
+
+1. Lock prototype baseline and strict build gates.
+- Deliverable: `parser-proto` build path runs with conflict checks enabled and parser/lexer warnings tracked explicitly.
+- Pass criterion: no unresolved core conflicts and no hidden warning debt for touched grammar/lexer areas.
+
+2. Complete lexer parity (`faustlexer.l` coverage to 100%).
+- Deliverable: full token/state mapping table (keywords, operators, comments, doc/listing modes, string/fstring, numeric forms).
+- Pass criterion: token-level parity tests pass for the complete lexer matrix.
+
+3. Complete grammar parity (`faustparser.y` coverage to 100%).
+- Deliverable: full rule coverage map, including imports, metadata/declare, signatures/types, pattern matching, route, waveform, and remaining primitives.
+- Pass criterion: all C++ grammar families are ported and compile with bounded/justified conflicts only.
+
+4. Complete semantic action parity (Tree/boxes behavior).
+- Deliverable: action mapping for each touched grammar family (C++ action -> Rust action).
+- Pass criterion: structural tree/box differentials match C++ on the defined parity corpus.
+
+5. Finalize recovery and diagnostics parity.
+- Deliverable: malformed-input fixture suite with expected class and location checks.
+- Pass criterion: Rust diagnostics (file/line/column + recovery class) match accepted C++ behavior envelopes.
+
+6. Port and integrate `SourceReader` import pipeline.
+- Deliverable: `SourceReader` implementation in `parser` with cache, search paths, cycle handling, and file list tracking.
+- Pass criterion: stdlib/import-heavy parses succeed and cycle cases are detected deterministically.
+
+7. Port optional parser-adjacent modules (`SourceFetcher`, `Enrobage`) per scope decisions.
+- Deliverable: feature-gated implementations and tests (or explicit deferred status in mapping docs).
+- Pass criterion: lifecycle/API status is explicit (`1:1` / `adapted` / `deferred`) and validated.
+
+8. Expand differential validation scope.
+- Deliverable: Rust vs C++ differential harness covering:
+  - full `tests/corpus/rep_*.dsp`,
+  - Faust stdlib files,
+  - expanded malformed/recovery corpus,
+  - structural shape checks (not pointer identity).
+- Pass criterion: no untriaged class mismatches; residual deltas are documented with owner and plan.
+
+9. Merge validated implementation into production `crates/parser`.
+- Deliverable: production parser crate replaces scaffold and exposes stable parse API for compiler orchestration.
+- Pass criterion: `compiler` path uses production parser APIs (not prototype-only entry points).
+
+10. Close Phase 3 quality/documentation gates.
+- Deliverable: Rustdoc provenance complete on parser modules + CI-quality gates fully green.
+- Pass criterion:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace --all-targets`
+  - Phase 3 "Done" checklist fully checked.
+
 ---
 
 ## 8. "Done" criteria

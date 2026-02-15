@@ -749,3 +749,21 @@ Execution plan (Phase 0 prototype, revised):
   - structural tree-shape differential beyond parse/recovery class checks.
 - Consequence:
   - proceed from prototype gate validation to incremental integration path (parser coverage expansion + eventual merge plan from `parser-proto` into production `parser` when target slices are stabilized).
+
+### Parser porting docs update (post Gate B remaining steps)
+
+- Updated parser porting documentation to include an explicit, ordered "remaining steps" roadmap from Gate B prototype to full parser completion.
+- Added concrete deliverable + pass criterion for each remaining step:
+  - strict parser-proto baseline gate,
+  - full lexer parity,
+  - full grammar parity,
+  - semantic action parity,
+  - diagnostics/recovery parity,
+  - `SourceReader` integration,
+  - optional `SourceFetcher`/`Enrobage` scope resolution,
+  - expanded Rust vs C++ differential suite,
+  - merge into production `crates/parser`,
+  - final quality/documentation closure.
+- Updated files:
+  - `porting/phases/phase-3-parser-en.md`
+  - `porting/faust-rust-porting-plan-en.md`
