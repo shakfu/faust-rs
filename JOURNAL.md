@@ -1221,3 +1221,25 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline --no-fail-fast`
+
+### Gate B remaining step 8 (differential suite expansion: import-heavy file fixtures)
+
+- Extended Rust-vs-C++ differential harness to cover two input modes:
+  - inline source cases (`parse_program`),
+  - file fixture cases with imports (`parse_file_with_imports`) and explicit search paths.
+- Updated `crates/parser-proto/tests/cpp_differential.rs`:
+  - introduced fixture-based case model (`CaseInput::FileFixture`) with per-case temp workspace generation,
+  - added C++ execution path for file fixtures with `-I` search path propagation.
+- Added stable import-heavy differential cases:
+  - `import_nested_search_path` (valid):
+    - multi-file import chain with `-I` directory and nested local import.
+  - `import_missing_search_path` (invalid):
+    - unresolved import file path in import-heavy context.
+- Differential run remains green against C++ source-of-truth root `/Users/letz/Developpements/RUST/faust` (commit `8eebea429`) and binary `/usr/local/bin/faust`.
+- Scope note:
+  - full stdlib-wide differential parsing is still pending a later grammar-completeness stage; this step extends import-heavy coverage with stable parser-prototype-compatible fixtures.
+- Validation:
+  - `cargo test -p parser-proto --test cpp_differential --offline -- --nocapture`
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline --no-fail-fast`
