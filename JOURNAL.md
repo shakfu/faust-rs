@@ -1173,3 +1173,28 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline --no-fail-fast`
+
+### Gate B remaining step 4 (semantic action parity mapping + structural corpus)
+
+- Added semantic action mapping artifact for the migrated parser scope:
+  - `porting/phases/phase-3-semantic-action-mapping-en.md`
+  - includes touched grammar-family mapping: C++ action -> Rust action, mapping status (`1:1`/`adapted`), and linked structural checks.
+- Updated parser phase plan to reference the mapping artifact path:
+  - `porting/phases/phase-3-parser-en.md`
+- Added consolidated semantic parity test corpus:
+  - `crates/parser-proto/tests/parser_semantic_parity.rs`
+  - covers C++ action-shape formulas and constructor-family mapping across:
+    - infix/postfix/unary lowering,
+    - application/access and fake-route default shape,
+    - scope families (`with`/`letrec`),
+    - primitive families (`rdtable`, `int`/`float` cast, `attach`, `control`),
+    - module/waveform families,
+    - foreign + case/pattern preparation families.
+- Added C++ acceptance envelope on the stable semantic corpus in the same test:
+  - validates selected structural-corpus fixtures against `/usr/local/bin/faust` (or `FAUST_CPP_BIN`) as source-of-truth compiler behavior.
+  - cases known to be structurally valid but unstable for full C++ compilation-stage acceptance are kept in structural tests and excluded from strict acceptance envelope checks.
+- Validation:
+  - `cargo test -p parser-proto --test parser_semantic_parity --offline --no-fail-fast`
+  - `cargo fmt --all`
+  - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`
+  - `cargo test -p parser-proto --offline --no-fail-fast`

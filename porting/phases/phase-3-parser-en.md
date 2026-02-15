@@ -351,6 +351,7 @@ Remaining steps to reach full parser completion:
 
 4. Complete semantic action parity (Tree/boxes behavior).
 - Deliverable: action mapping for each touched grammar family (C++ action -> Rust action).
+- Mapping artifact path: `phases/phase-3-semantic-action-mapping-en.md`.
 - Pass criterion: structural tree/box differentials match C++ on the defined parity corpus.
 
 5. Finalize recovery and diagnostics parity.
