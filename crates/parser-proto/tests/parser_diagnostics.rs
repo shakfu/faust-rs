@@ -113,6 +113,11 @@ fn malformed_suite_tracks_rust_class_and_location() {
             source: "declare author ;\nprocess = _;\n",
             expected_error_line: 1,
         },
+        MalformedCase {
+            name: "modulation_missing_rcroc",
+            source: "process = [\"gain\" : _ -> _;\n",
+            expected_error_line: 1,
+        },
     ];
 
     for case in cases {
@@ -177,6 +182,10 @@ fn malformed_suite_matches_cpp_error_envelope_when_available() {
             "process = hslider(\"g\", 0.5, 0.0, 1.0, 0.01;\n",
         ),
         ("declare_missing_value", "declare author ;\nprocess = _;\n"),
+        (
+            "modulation_missing_rcroc",
+            "process = [\"gain\" : _ -> _;\n",
+        ),
     ];
 
     for (name, source) in cases {

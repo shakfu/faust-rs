@@ -1491,3 +1491,20 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p boxes --offline --no-fail-fast`
   - `cargo test -p parser-proto --test parser_slice12_modulation --offline --no-fail-fast`
   - `cargo fmt --all`
+
+### Parity closure step 4 (differential validation extension for modulation/recovery)
+
+- Extended Rust vs C++ differential parser suite with modulation forms:
+  - `crates/parser-proto/tests/cpp_differential.rs`
+  - added cases:
+    - `modulation_single`,
+    - `modulation_chain`,
+    - `malformed_modulation_missing_rcroc`.
+- Extended malformed diagnostics suite with modulation recovery coverage:
+  - `crates/parser-proto/tests/parser_diagnostics.rs`
+  - added malformed case `modulation_missing_rcroc` (line-1 location check + C++ error envelope class).
+- Goal: keep parser parity checks tied to C++ source-of-truth while closing the newly ported modulation path.
+- Validation:
+  - `cargo test -p parser-proto --test parser_diagnostics --offline --no-fail-fast`
+  - `cargo test -p parser-proto --test cpp_differential --offline --no-fail-fast`
+  - `cargo fmt --all`

@@ -357,6 +357,21 @@ fn load_cases() -> Result<Vec<Case>, String> {
         expect_valid: true,
     });
     cases.push(Case {
+        name: "modulation_single".to_owned(),
+        input: CaseInput::Inline("process = [\"gain\" : _ -> _];\n".to_owned()),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "modulation_chain".to_owned(),
+        input: CaseInput::Inline("process = [\"a\" : _, \"b\" : _ -> _];\n".to_owned()),
+        expect_valid: true,
+    });
+    cases.push(Case {
+        name: "malformed_modulation_missing_rcroc".to_owned(),
+        input: CaseInput::Inline("process = [\"gain\" : _ -> _;\n".to_owned()),
+        expect_valid: false,
+    });
+    cases.push(Case {
         name: "vgroup_basic".to_owned(),
         input: CaseInput::Inline("process = vgroup(\"g\", _);\n".to_owned()),
         expect_valid: true,
