@@ -1243,3 +1243,29 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets --offline -- -D warnings`
   - `cargo test --workspace --all-targets --offline --no-fail-fast`
+
+### Gate B remaining step 9 (production `parser` integration start: API bridge)
+
+- Replaced `crates/parser` scaffold with production-facing parser API bridge over `parser-proto`:
+  - `crates/parser/src/lib.rs`
+  - exported API includes:
+    - `parse_program`,
+    - `parse_file_with_imports`,
+    - `parse_minimal`,
+    - parser diagnostics/token/source-reader types re-exported for upper-layer integration.
+- Added `parser-proto` dependency in:
+  - `crates/parser/Cargo.toml`
+- Added production parser bridge tests:
+  - `crates/parser/tests/api_bridge.rs`
+  - validates:
+    - minimal parse helper path,
+    - direct string parse path,
+    - file+import parse path through production `parser` crate.
+- Scope note:
+  - this is Step 9 integration phase 1 (API replacement of scaffold);
+  - compiler orchestration wiring to the production parser crate remains a follow-up sub-step.
+- Validation:
+  - `cargo test -p parser --offline --no-fail-fast`
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test --workspace --all-targets --offline --no-fail-fast`

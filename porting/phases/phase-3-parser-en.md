@@ -382,6 +382,8 @@ Remaining steps to reach full parser completion:
 9. Merge validated implementation into production `crates/parser`.
 - Deliverable: production parser crate replaces scaffold and exposes stable parse API for compiler orchestration.
 - Pass criterion: `compiler` path uses production parser APIs (not prototype-only entry points).
+- Integration note:
+  - an API-bridge milestone (production `parser` crate delegating to `parser-proto`) is acceptable as an intermediate step, but final gate requires compiler orchestration to consume `crates/parser` directly.
 
 10. Close Phase 3 quality/documentation gates.
 - Deliverable: Rustdoc provenance complete on parser modules + CI-quality gates fully green.
