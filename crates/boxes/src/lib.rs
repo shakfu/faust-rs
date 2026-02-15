@@ -7,13 +7,18 @@
 //! # Public API mapping status
 //! - `1:1`: `box_ident`, `box_int`, `box_real`, `box_wire`, `box_cut`,
 //!   `box_seq`, `box_par`, `box_rec`, `box_split`, `box_merge`,
-//!   `box_ipar`, `box_with_local_def`, `box_environment`, `box_hslider`
+//!   `box_ipar`, `box_iseq`, `box_isum`, `box_iprod`,
+//!   `box_with_local_def`, `box_environment`,
+//!   `box_button`, `box_checkbox`, `box_vslider`, `box_hslider`,
+//!   `box_num_entry`, `box_vbargraph`, `box_hbargraph`
 //! - `adapted`: `box_with_rec_def` (see function-level note)
 //!
 //! # Parity invariants
 //! - Box nodes are represented as tagged trees with deterministic child order.
 //! - Labels/identifiers are carried as `NodeKind::Symbol`.
 //! - UI slider parameter payload keeps Faust list encoding (`list4(cur,min,max,step)`).
+
+use std::fmt::Write;
 
 use tlib::{NodeKind, TreeArena, TreeId};
 
@@ -31,10 +36,19 @@ const BOX_REC_TAG: &str = "BOXREC";
 const BOX_SPLIT_TAG: &str = "BOXSPLIT";
 const BOX_MERGE_TAG: &str = "BOXMERGE";
 const BOX_IPAR_TAG: &str = "BOXIPAR";
+const BOX_ISEQ_TAG: &str = "BOXISEQ";
+const BOX_ISUM_TAG: &str = "BOXISUM";
+const BOX_IPROD_TAG: &str = "BOXIPROD";
 const BOX_WITH_LOCAL_DEF_TAG: &str = "BOXWITHLOCALDEF";
 const BOX_WITH_REC_DEF_TAG: &str = "BOXWITHRECDEF";
 const BOX_ENVIRONMENT_TAG: &str = "BOXENVIRONMENT";
+const BOX_BUTTON_TAG: &str = "BOXBUTTON";
+const BOX_CHECKBOX_TAG: &str = "BOXCHECKBOX";
+const BOX_VSLIDER_TAG: &str = "BOXVSLIDER";
 const BOX_HSLIDER_TAG: &str = "BOXHSLIDER";
+const BOX_NUM_ENTRY_TAG: &str = "BOXNUMENTRY";
+const BOX_VBARGRAPH_TAG: &str = "BOXVBARGRAPH";
+const BOX_HBARGRAPH_TAG: &str = "BOXHBARGRAPH";
 
 /// Stable crate identifier used in workspace-level tooling and diagnostics.
 #[must_use]
@@ -178,10 +192,43 @@ pub fn box_ipar(arena: &mut TreeArena, index: BoxId, count: BoxId, body: BoxId) 
 /// Returns `(index, count, body)` when `b` is `box_ipar`.
 #[must_use]
 pub fn is_box_ipar(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
-    let [index, count, body] = match_tag_arity(arena, b, BOX_IPAR_TAG, 3)? else {
-        return None;
-    };
-    Some((*index, *count, *body))
+    match_ternary(arena, b, BOX_IPAR_TAG)
+}
+
+/// Equivalent to C++ `boxISeq`.
+#[must_use]
+pub fn box_iseq(arena: &mut TreeArena, index: BoxId, count: BoxId, body: BoxId) -> BoxId {
+    intern_tag(arena, BOX_ISEQ_TAG, &[index, count, body])
+}
+
+/// Returns `(index, count, body)` when `b` is `box_iseq`.
+#[must_use]
+pub fn is_box_iseq(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
+    match_ternary(arena, b, BOX_ISEQ_TAG)
+}
+
+/// Equivalent to C++ `boxISum`.
+#[must_use]
+pub fn box_isum(arena: &mut TreeArena, index: BoxId, count: BoxId, body: BoxId) -> BoxId {
+    intern_tag(arena, BOX_ISUM_TAG, &[index, count, body])
+}
+
+/// Returns `(index, count, body)` when `b` is `box_isum`.
+#[must_use]
+pub fn is_box_isum(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
+    match_ternary(arena, b, BOX_ISUM_TAG)
+}
+
+/// Equivalent to C++ `boxIProd`.
+#[must_use]
+pub fn box_iprod(arena: &mut TreeArena, index: BoxId, count: BoxId, body: BoxId) -> BoxId {
+    intern_tag(arena, BOX_IPROD_TAG, &[index, count, body])
+}
+
+/// Returns `(index, count, body)` when `b` is `box_iprod`.
+#[must_use]
+pub fn is_box_iprod(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
+    match_ternary(arena, b, BOX_IPROD_TAG)
 }
 
 /// Equivalent to C++ `boxWithLocalDef`.
@@ -228,6 +275,53 @@ pub fn is_box_environment(arena: &TreeArena, b: BoxId) -> bool {
     match_tag_arity(arena, b, BOX_ENVIRONMENT_TAG, 0).is_some()
 }
 
+/// Equivalent to C++ `boxButton`.
+#[must_use]
+pub fn box_button(arena: &mut TreeArena, label: BoxId) -> BoxId {
+    intern_tag(arena, BOX_BUTTON_TAG, &[label])
+}
+
+/// Returns `label` when `b` is `box_button`.
+#[must_use]
+pub fn is_box_button(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
+    match_unary(arena, b, BOX_BUTTON_TAG)
+}
+
+/// Equivalent to C++ `boxCheckbox`.
+#[must_use]
+pub fn box_checkbox(arena: &mut TreeArena, label: BoxId) -> BoxId {
+    intern_tag(arena, BOX_CHECKBOX_TAG, &[label])
+}
+
+/// Returns `label` when `b` is `box_checkbox`.
+#[must_use]
+pub fn is_box_checkbox(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
+    match_unary(arena, b, BOX_CHECKBOX_TAG)
+}
+
+/// Equivalent to C++ `boxVSlider`.
+///
+/// C++ payload encoding is preserved:
+/// `tree(BOXVSLIDER, label, list4(cur,min,max,step))`.
+#[must_use]
+pub fn box_vslider(
+    arena: &mut TreeArena,
+    label: BoxId,
+    cur: BoxId,
+    min: BoxId,
+    max: BoxId,
+    step: BoxId,
+) -> BoxId {
+    let params = list4(arena, cur, min, max, step);
+    intern_tag(arena, BOX_VSLIDER_TAG, &[label, params])
+}
+
+/// Returns `(label, cur, min, max, step)` when `b` is `box_vslider`.
+#[must_use]
+pub fn is_box_vslider(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId, BoxId, BoxId)> {
+    match_slider(arena, b, BOX_VSLIDER_TAG)
+}
+
 /// Equivalent to C++ `boxHSlider`.
 ///
 /// C++ payload encoding is preserved:
@@ -248,14 +342,67 @@ pub fn box_hslider(
 /// Returns `(label, cur, min, max, step)` when `b` is `box_hslider`.
 #[must_use]
 pub fn is_box_hslider(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId, BoxId, BoxId)> {
-    let [label, params] = match_tag_arity(arena, b, BOX_HSLIDER_TAG, 2)? else {
-        return None;
-    };
-    let cur = list_nth(arena, *params, 0)?;
-    let min = list_nth(arena, *params, 1)?;
-    let max = list_nth(arena, *params, 2)?;
-    let step = list_nth(arena, *params, 3)?;
-    Some((*label, cur, min, max, step))
+    match_slider(arena, b, BOX_HSLIDER_TAG)
+}
+
+/// Equivalent to C++ `boxNumEntry`.
+///
+/// C++ payload encoding is preserved:
+/// `tree(BOXNUMENTRY, label, list4(cur,min,max,step))`.
+#[must_use]
+pub fn box_num_entry(
+    arena: &mut TreeArena,
+    label: BoxId,
+    cur: BoxId,
+    min: BoxId,
+    max: BoxId,
+    step: BoxId,
+) -> BoxId {
+    let params = list4(arena, cur, min, max, step);
+    intern_tag(arena, BOX_NUM_ENTRY_TAG, &[label, params])
+}
+
+/// Returns `(label, cur, min, max, step)` when `b` is `box_num_entry`.
+#[must_use]
+pub fn is_box_num_entry(
+    arena: &TreeArena,
+    b: BoxId,
+) -> Option<(BoxId, BoxId, BoxId, BoxId, BoxId)> {
+    match_slider(arena, b, BOX_NUM_ENTRY_TAG)
+}
+
+/// Equivalent to C++ `boxVBargraph`.
+#[must_use]
+pub fn box_vbargraph(arena: &mut TreeArena, label: BoxId, min: BoxId, max: BoxId) -> BoxId {
+    intern_tag(arena, BOX_VBARGRAPH_TAG, &[label, min, max])
+}
+
+/// Returns `(label, min, max)` when `b` is `box_vbargraph`.
+#[must_use]
+pub fn is_box_vbargraph(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
+    match_ternary(arena, b, BOX_VBARGRAPH_TAG)
+}
+
+/// Equivalent to C++ `boxHBargraph`.
+#[must_use]
+pub fn box_hbargraph(arena: &mut TreeArena, label: BoxId, min: BoxId, max: BoxId) -> BoxId {
+    intern_tag(arena, BOX_HBARGRAPH_TAG, &[label, min, max])
+}
+
+/// Returns `(label, min, max)` when `b` is `box_hbargraph`.
+#[must_use]
+pub fn is_box_hbargraph(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
+    match_ternary(arena, b, BOX_HBARGRAPH_TAG)
+}
+
+/// Deterministic structural dump helper for parser differential checks.
+///
+/// Output is shape-and-label based and intentionally excludes arena addresses.
+#[must_use]
+pub fn dump_box(arena: &TreeArena, root: BoxId) -> String {
+    let mut out = String::new();
+    dump_node(arena, root, &mut out);
+    out
 }
 
 fn intern_tag(arena: &mut TreeArena, tag: &str, children: &[BoxId]) -> BoxId {
@@ -285,6 +432,35 @@ fn match_binary(arena: &TreeArena, b: BoxId, tag: &str) -> Option<(BoxId, BoxId)
     Some((*left, *right))
 }
 
+fn match_ternary(arena: &TreeArena, b: BoxId, tag: &str) -> Option<(BoxId, BoxId, BoxId)> {
+    let [a, b, c] = match_tag_arity(arena, b, tag, 3)? else {
+        return None;
+    };
+    Some((*a, *b, *c))
+}
+
+fn match_unary(arena: &TreeArena, b: BoxId, tag: &str) -> Option<BoxId> {
+    let [child] = match_tag_arity(arena, b, tag, 1)? else {
+        return None;
+    };
+    Some(*child)
+}
+
+fn match_slider(
+    arena: &TreeArena,
+    b: BoxId,
+    tag: &str,
+) -> Option<(BoxId, BoxId, BoxId, BoxId, BoxId)> {
+    let [label, params] = match_tag_arity(arena, b, tag, 2)? else {
+        return None;
+    };
+    let cur = list_nth(arena, *params, 0)?;
+    let min = list_nth(arena, *params, 1)?;
+    let max = list_nth(arena, *params, 2)?;
+    let step = list_nth(arena, *params, 3)?;
+    Some((*label, cur, min, max, step))
+}
+
 fn list4(arena: &mut TreeArena, a: BoxId, b: BoxId, c: BoxId, d: BoxId) -> BoxId {
     let nil = arena.nil();
     let l3 = arena.cons(d, nil);
@@ -309,5 +485,53 @@ fn list_nth(arena: &TreeArena, mut list: BoxId, mut n: usize) -> Option<BoxId> {
         }
         n -= 1;
         list = tail;
+    }
+}
+
+fn dump_node(arena: &TreeArena, id: BoxId, out: &mut String) {
+    let Some(node) = arena.node(id) else {
+        write!(out, "<invalid:{}>", id.as_u32()).expect("String write cannot fail");
+        return;
+    };
+
+    match &node.kind {
+        NodeKind::Nil => out.push_str("nil"),
+        NodeKind::Cons => {
+            out.push_str("cons(");
+            if let Some(head) = node.children.get(0) {
+                dump_node(arena, head, out);
+            } else {
+                out.push_str("<missing>");
+            }
+            out.push_str(", ");
+            if let Some(tail) = node.children.get(1) {
+                dump_node(arena, tail, out);
+            } else {
+                out.push_str("<missing>");
+            }
+            out.push(')');
+        }
+        NodeKind::Symbol(name) => {
+            write!(out, "sym({name:?})").expect("String write cannot fail");
+        }
+        NodeKind::StringLiteral(value) => {
+            write!(out, "str({value:?})").expect("String write cannot fail");
+        }
+        NodeKind::Int(value) => {
+            write!(out, "int({value})").expect("String write cannot fail");
+        }
+        NodeKind::FloatBits(bits) => {
+            write!(out, "float_bits(0x{bits:016x})").expect("String write cannot fail");
+        }
+        NodeKind::Tag(tag) => {
+            write!(out, "{tag}(").expect("String write cannot fail");
+            for (idx, child) in node.children.as_slice().iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                dump_node(arena, *child, out);
+            }
+            out.push(')');
+        }
     }
 }

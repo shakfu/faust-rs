@@ -1,9 +1,12 @@
 use boxes::{
-    box_cut, box_environment, box_hslider, box_ident, box_ident_name, box_int, box_ipar, box_merge,
-    box_par, box_real, box_rec, box_seq, box_split, box_wire, box_with_local_def, box_with_rec_def,
-    is_box_cut, is_box_environment, is_box_hslider, is_box_int, is_box_ipar, is_box_merge,
-    is_box_par, is_box_real, is_box_rec, is_box_seq, is_box_split, is_box_wire,
-    is_box_with_local_def, is_box_with_rec_def,
+    box_button, box_checkbox, box_cut, box_environment, box_hbargraph, box_hslider, box_ident,
+    box_ident_name, box_int, box_ipar, box_iprod, box_iseq, box_isum, box_merge, box_num_entry,
+    box_par, box_real, box_rec, box_seq, box_split, box_vbargraph, box_vslider, box_wire,
+    box_with_local_def, box_with_rec_def, dump_box, is_box_button, is_box_checkbox, is_box_cut,
+    is_box_environment, is_box_hbargraph, is_box_hslider, is_box_int, is_box_ipar, is_box_iprod,
+    is_box_iseq, is_box_isum, is_box_merge, is_box_num_entry, is_box_par, is_box_real, is_box_rec,
+    is_box_seq, is_box_split, is_box_vbargraph, is_box_vslider, is_box_wire, is_box_with_local_def,
+    is_box_with_rec_def,
 };
 use tlib::TreeArena;
 
@@ -67,19 +70,55 @@ fn ipar_roundtrip_preserves_argument_order() {
 }
 
 #[test]
-fn hslider_preserves_faust_list4_layout() {
+fn iterative_compositions_roundtrip_preserve_argument_order() {
+    let mut arena = TreeArena::new();
+    let idx = box_int(&mut arena, 0);
+    let count = box_int(&mut arena, 4);
+    let body = box_wire(&mut arena);
+
+    let iseq = box_iseq(&mut arena, idx, count, body);
+    let isum = box_isum(&mut arena, idx, count, body);
+    let iprod = box_iprod(&mut arena, idx, count, body);
+
+    assert_eq!(is_box_iseq(&arena, iseq), Some((idx, count, body)));
+    assert_eq!(is_box_isum(&arena, isum), Some((idx, count, body)));
+    assert_eq!(is_box_iprod(&arena, iprod), Some((idx, count, body)));
+}
+
+#[test]
+fn ui_widgets_preserve_expected_layouts() {
     let mut arena = TreeArena::new();
     let label = box_ident(&mut arena, "freq");
     let cur = box_real(&mut arena, 440.0);
     let min = box_real(&mut arena, 20.0);
     let max = box_real(&mut arena, 20_000.0);
     let step = box_real(&mut arena, 1.0);
-    let slider = box_hslider(&mut arena, label, cur, min, max, step);
+    let hslider = box_hslider(&mut arena, label, cur, min, max, step);
+    let vslider = box_vslider(&mut arena, label, cur, min, max, step);
+    let nentry = box_num_entry(&mut arena, label, cur, min, max, step);
 
     assert_eq!(
-        is_box_hslider(&arena, slider),
+        is_box_hslider(&arena, hslider),
         Some((label, cur, min, max, step))
     );
+    assert_eq!(
+        is_box_vslider(&arena, vslider),
+        Some((label, cur, min, max, step))
+    );
+    assert_eq!(
+        is_box_num_entry(&arena, nentry),
+        Some((label, cur, min, max, step))
+    );
+
+    let button = box_button(&mut arena, label);
+    let checkbox = box_checkbox(&mut arena, label);
+    assert_eq!(is_box_button(&arena, button), Some(label));
+    assert_eq!(is_box_checkbox(&arena, checkbox), Some(label));
+
+    let hbar = box_hbargraph(&mut arena, label, min, max);
+    let vbar = box_vbargraph(&mut arena, label, min, max);
+    assert_eq!(is_box_hbargraph(&arena, hbar), Some((label, min, max)));
+    assert_eq!(is_box_vbargraph(&arena, vbar), Some((label, min, max)));
 }
 
 #[test]
@@ -97,4 +136,26 @@ fn local_and_recursive_def_boxes_roundtrip() {
     let ldef2 = box_par(&mut arena, b_ident, b_value);
     let rec = box_with_rec_def(&mut arena, body, ldef, ldef2);
     assert_eq!(is_box_with_rec_def(&arena, rec), Some((body, ldef, ldef2)));
+}
+
+#[test]
+fn structural_dump_is_deterministic_and_id_free() {
+    let mut arena = TreeArena::new();
+    let label = box_ident(&mut arena, "gain");
+    let cur = box_real(&mut arena, 0.5);
+    let min = box_real(&mut arena, 0.0);
+    let max = box_real(&mut arena, 1.0);
+    let step = box_real(&mut arena, 0.01);
+    let slider = box_hslider(&mut arena, label, cur, min, max, step);
+    let wire = box_wire(&mut arena);
+    let root = box_seq(&mut arena, wire, slider);
+
+    let dump_a = dump_box(&arena, root);
+    let dump_b = dump_box(&arena, root);
+    assert_eq!(dump_a, dump_b);
+    assert_eq!(
+        dump_a,
+        "BOXSEQ(BOXWIRE(), BOXHSLIDER(BOXIDENT(sym(\"gain\")), cons(float_bits(0x3fe0000000000000), cons(float_bits(0x0000000000000000), cons(float_bits(0x3ff0000000000000), cons(float_bits(0x3f847ae147ae147b), nil))))))"
+    );
+    assert!(!dump_a.contains("TreeId("));
 }

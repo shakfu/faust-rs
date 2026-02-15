@@ -490,3 +490,20 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo test -p boxes --all-targets`
   - `cargo test -p tlib --all-targets`
+
+### Gate A.5 step 2 (`boxes` iterative/UI completion + structural dump)
+
+- Extended `crates/boxes/src/lib.rs` with parser-needed constructors from C++ `boxes.hh/.cpp`:
+  - iterative composition: `box_iseq`, `box_isum`, `box_iprod` + `is_*`,
+  - UI inputs: `box_button`, `box_checkbox`, `box_vslider`, `box_num_entry` + `is_*`,
+  - UI outputs: `box_vbargraph`, `box_hbargraph` + `is_*`.
+- Preserved C++ UI payload shape for slider-like widgets:
+  - `tree(TAG, label, list4(cur,min,max,step))` for `hslider`/`vslider`/`numentry`.
+- Added deterministic structural dump helper:
+  - `dump_box(&TreeArena, BoxId) -> String`,
+  - output is shape/labels/value based and excludes pointer/address data,
+  - intended for upcoming parser differential checks (Rust vs C++).
+- Extended `crates/boxes/tests/core_api.rs`:
+  - iterative constructor roundtrips (`ipar`/`iseq`/`isum`/`iprod`),
+  - UI constructor/predicate roundtrips (button/checkbox/sliders/numentry/bargraphs),
+  - structural dump determinism check with stable expected string.
