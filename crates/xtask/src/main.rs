@@ -365,19 +365,23 @@ fn parser_parity_report() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     writeln!(&mut out)?;
     writeln!(&mut out, "## Parser Tokens (C++ `%token` vs Rust `%token`)")?;
+    writeln!(
+        &mut out,
+        "_Note: `exact name` mismatches below are not necessarily missing functionality; they can be covered by explicit alias mapping._"
+    )?;
     render_list(
         &mut out,
-        "Missing in Rust (exact name)",
+        "Exact-name mismatch candidates (C++ name not present as-is in Rust)",
         &parser_token_missing_exact,
     )?;
     render_alias_list(
         &mut out,
-        "Missing in Rust but covered by explicit alias mapping",
+        "Exact-name mismatches covered by explicit alias mapping (no action required)",
         &parser_token_alias_covered,
     )?;
     render_list(
         &mut out,
-        "Missing in Rust after alias mapping (action required)",
+        "Unresolved missing after alias mapping (action required)",
         &parser_token_missing_unresolved,
     )?;
     render_list(&mut out, "Extra in Rust", &parser_token_extra)?;
@@ -397,19 +401,23 @@ fn parser_parity_report() -> Result<(), Box<dyn std::error::Error>> {
 
     writeln!(&mut out)?;
     writeln!(&mut out, "## Grammar Nonterminals (name-based)")?;
+    writeln!(
+        &mut out,
+        "_Note: `exact name` mismatches below are not necessarily missing functionality; they can be covered by explicit alias mapping (for example dedicated C++ rules grouped under `Primitive` in Rust)._"
+    )?;
     render_list(
         &mut out,
-        "Missing in Rust (exact name)",
+        "Exact-name mismatch candidates (C++ nonterminal not present as-is in Rust)",
         &nonterm_missing_exact,
     )?;
     render_alias_list(
         &mut out,
-        "Missing in Rust but covered by explicit alias mapping",
+        "Exact-name mismatches covered by explicit alias mapping (no action required)",
         &nonterm_alias_covered,
     )?;
     render_list(
         &mut out,
-        "Missing in Rust after alias mapping (action required)",
+        "Unresolved missing after alias mapping (action required)",
         &nonterm_missing_unresolved,
     )?;
     render_list(&mut out, "Extra in Rust", &nonterm_extra)?;
@@ -444,7 +452,7 @@ fn parser_parity_report() -> Result<(), Box<dyn std::error::Error>> {
     writeln!(&mut out, "## Next Actions")?;
     writeln!(
         &mut out,
-        "- Resolve all items listed in `Missing in Rust after alias mapping (action required)` for tokens and nonterminals."
+        "- Resolve all items listed in `Unresolved missing after alias mapping (action required)` for tokens and nonterminals."
     )?;
     writeln!(
         &mut out,
