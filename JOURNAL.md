@@ -783,3 +783,21 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo test -p parser-proto --offline --no-fail-fast`
   - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`
+
+### Gate B remaining step 2 (lexer parity expansion: `faustlexer.l` -> `lrlex`)
+
+- Expanded `crates/parser-proto/src/grammar/faustlexer.l` toward C++ lexer parity using `lrlex` start states:
+  - `%x comment doc lst`
+  - state transitions for doc/listing/equation/diagram/metadata sections.
+- Extended parser token declarations in `crates/parser-proto/src/grammar/faustparser.y` to the broader lexer surface.
+- Added `LexProbeToken` coverage branch for currently unparsed token families so strict parser generation remains warning-clean while grammar migration is still Slice 1/2/3.
+- Added lexer parity documentation artifact:
+  - `porting/phases/phase-3-lexer-token-mapping-en.md`
+- Linked lexer mapping artifact from:
+  - `porting/phases/phase-3-parser-en.md` (step 2 deliverable path).
+- Extended lexer test coverage in `crates/parser-proto/tests/lexer_tokens.rs`:
+  - doc/listing/equation state transition tests,
+  - extended keyword/token matrix aligned with C++ lexer surface.
+- Validation:
+  - `cargo test -p parser-proto --offline --no-fail-fast`
+  - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`

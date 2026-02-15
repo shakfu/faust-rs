@@ -19,12 +19,29 @@
 %token SEQ PAR SPLIT MIX REC
 %token ADD SUB MUL DIV MOD FDELAY DELAY1
 %token AND OR XOR LSH RSH LT LE GT GE EQ NE
-%token WIRE CUT ENDDEF DEF LPAR RPAR DOT
-%token MEM
-%token WITH LETREC WHERE ARROW LAPPLY
-%token BUTTON CHECKBOX VSLIDER HSLIDER NENTRY VBARGRAPH HBARGRAPH
-%token POWOP MIN MAX
+%token WIRE CUT ENDDEF DEF LPAR RPAR LBRAQ RBRAQ LCROC RCROC DOT
+%token WITH LETREC WHERE
+%token MEM PREFIX
+%token INTCAST FLOATCAST NOTYPECAST
+%token RDTBL RWTBL SELECT2 SELECT3
+%token BUTTON CHECKBOX VSLIDER HSLIDER NENTRY VGROUP HGROUP TGROUP VBARGRAPH HBARGRAPH SOUNDFILE
+%token ATTACH MODULATE
+%token ACOS ASIN ATAN ATAN2 COS SIN TAN
+%token EXP LOG LOG10 POWOP POWFUN SQRT
+%token ABS MIN MAX
+%token FMOD REMAINDER
+%token FLOOR CEIL RINT ROUND
 %token IPAR ISEQ ISUM IPROD
+%token INPUTS OUTPUTS ONDEMAND UPSAMPLING DOWNSAMPLING
+%token IMPORT COMPONENT LIBRARY ENVIRONMENT WAVEFORM ROUTE ENABLE CONTROL
+%token DECLARE CASE ARROW LAPPLY
+%token ASSERTBOUNDS LOWEST HIGHEST
+%token FLOATMODE DOUBLEMODE QUADMODE FIXEDPOINTMODE
+%token LAMBDA
+%token FFUNCTION FCONSTANT FVARIABLE
+%token BDOC EDOC BEQN EEQN BDGM EDGM BLST ELST BMETADATA EMETADATA
+%token DOCCHAR NOTICE
+%token LSTTRUE LSTFALSE LSTDEPENDENCIES LSTMDOCTAGS LSTDISTRIBUTED LSTEQ LSTQ
 %%
 Program -> tlib::TreeId:
       StmtList {
@@ -80,22 +97,94 @@ Definition -> tlib::TreeId:
       }
     ;
 
-LexProbeToken -> tlib::TreeId:
-      WITH {
-          crate::with_state(state, |state| state.ident_from_token($lexer, $1, false))
-      }
-    | LETREC {
-          crate::with_state(state, |state| state.ident_from_token($lexer, $1, false))
-      }
-    | WHERE {
-          crate::with_state(state, |state| state.ident_from_token($lexer, $1, false))
-      }
-    | ARROW {
-          crate::with_state(state, |state| state.ident_from_token($lexer, $1, false))
-      }
-    | LAPPLY {
-          crate::with_state(state, |state| state.ident_from_token($lexer, $1, false))
-      }
+LexProbeToken -> u8:
+      WITH { 0 }
+    | LETREC { 0 }
+    | WHERE { 0 }
+    | ARROW { 0 }
+    | LAPPLY { 0 }
+    | ABS { 0 }
+    | ACOS { 0 }
+    | ASIN { 0 }
+    | ASSERTBOUNDS { 0 }
+    | ATAN { 0 }
+    | ATAN2 { 0 }
+    | ATTACH { 0 }
+    | BDGM { 0 }
+    | BDOC { 0 }
+    | BEQN { 0 }
+    | BLST { 0 }
+    | BMETADATA { 0 }
+    | CASE { 0 }
+    | CEIL { 0 }
+    | COMPONENT { 0 }
+    | CONTROL { 0 }
+    | COS { 0 }
+    | DECLARE { 0 }
+    | DOCCHAR { 0 }
+    | DOUBLEMODE { 0 }
+    | DOWNSAMPLING { 0 }
+    | EDGM { 0 }
+    | EDOC { 0 }
+    | EEQN { 0 }
+    | ELST { 0 }
+    | EMETADATA { 0 }
+    | ENABLE { 0 }
+    | ENVIRONMENT { 0 }
+    | EXP { 0 }
+    | FCONSTANT { 0 }
+    | FFUNCTION { 0 }
+    | FIXEDPOINTMODE { 0 }
+    | FLOATCAST { 0 }
+    | FLOATMODE { 0 }
+    | FLOOR { 0 }
+    | FMOD { 0 }
+    | FVARIABLE { 0 }
+    | HGROUP { 0 }
+    | HIGHEST { 0 }
+    | IMPORT { 0 }
+    | INPUTS { 0 }
+    | INTCAST { 0 }
+    | LAMBDA { 0 }
+    | LBRAQ { 0 }
+    | LCROC { 0 }
+    | LIBRARY { 0 }
+    | LOG { 0 }
+    | LOG10 { 0 }
+    | LOWEST { 0 }
+    | LSTDEPENDENCIES { 0 }
+    | LSTDISTRIBUTED { 0 }
+    | LSTEQ { 0 }
+    | LSTFALSE { 0 }
+    | LSTMDOCTAGS { 0 }
+    | LSTQ { 0 }
+    | LSTTRUE { 0 }
+    | MODULATE { 0 }
+    | NOTICE { 0 }
+    | NOTYPECAST { 0 }
+    | ONDEMAND { 0 }
+    | OUTPUTS { 0 }
+    | POWFUN { 0 }
+    | PREFIX { 0 }
+    | QUADMODE { 0 }
+    | RBRAQ { 0 }
+    | RCROC { 0 }
+    | RDTBL { 0 }
+    | REMAINDER { 0 }
+    | RINT { 0 }
+    | ROUND { 0 }
+    | ROUTE { 0 }
+    | RWTBL { 0 }
+    | SELECT2 { 0 }
+    | SELECT3 { 0 }
+    | SIN { 0 }
+    | SOUNDFILE { 0 }
+    | SQRT { 0 }
+    | TAN { 0 }
+    | TGROUP { 0 }
+    | UPSAMPLING { 0 }
+    | VGROUP { 0 }
+    | WAVEFORM { 0 }
     ;
 
 DefName -> tlib::TreeId:

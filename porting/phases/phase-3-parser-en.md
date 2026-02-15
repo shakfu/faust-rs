@@ -342,6 +342,7 @@ Remaining steps to reach full parser completion:
 
 2. Complete lexer parity (`faustlexer.l` coverage to 100%).
 - Deliverable: full token/state mapping table (keywords, operators, comments, doc/listing modes, string/fstring, numeric forms).
+- Mapping artifact path: `phases/phase-3-lexer-token-mapping-en.md`.
 - Pass criterion: token-level parity tests pass for the complete lexer matrix.
 
 3. Complete grammar parity (`faustparser.y` coverage to 100%).
