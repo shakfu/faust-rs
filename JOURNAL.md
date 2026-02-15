@@ -836,3 +836,26 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p parser-proto --test cpp_differential --offline -- --nocapture`
   - `cargo test -p parser-proto --offline --no-fail-fast`
   - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`
+
+### Gate B remaining step 6 (SourceReader prototype: import expansion + cycle detection)
+
+- Added `SourceReader` prototype in:
+  - `crates/parser-proto/src/source_reader.rs`
+- Implemented:
+  - import resolution with search paths,
+  - recursive `import("...");` expansion,
+  - read cache,
+  - used-files tracking,
+  - import-cycle detection.
+- Exported reader API through `crates/parser-proto/src/lib.rs`:
+  - `SourceReader`,
+  - `SourceReaderError`,
+  - `parse_file_with_imports(...)`.
+- Added dedicated tests:
+  - `crates/parser-proto/tests/source_reader.rs`
+  - resolves imports through search paths,
+  - nested import expansion + used-file tracking,
+  - cycle detection behavior.
+- Validation:
+  - `cargo test -p parser-proto --offline --no-fail-fast`
+  - `cargo clippy -p parser-proto --all-targets --offline -- -D warnings`

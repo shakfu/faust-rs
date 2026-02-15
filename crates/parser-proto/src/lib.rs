@@ -23,8 +23,10 @@ use std::cell::RefCell;
 use tlib::{NodeKind, TreeArena, TreeId};
 
 pub mod context;
+pub mod source_reader;
 
 pub use context::{DiagnosticSeverity, ParserCtx, ParserDiagnostic, SourceLocation};
+pub use source_reader::{SourceReader, SourceReaderError};
 
 /// Primitive operator subset used by parser Slice 2.
 #[derive(Clone, Copy, Debug)]
@@ -439,6 +441,17 @@ pub fn parse_program(input: &str, source_file: &str) -> ParseOutput {
 pub fn parse_minimal(input: &str) -> bool {
     let output = parse_program(input, "<memory>");
     output.root.is_some() && output.errors.is_empty()
+}
+
+/// Reads a source file through [`SourceReader`] import expansion, then parses it.
+pub fn parse_file_with_imports(
+    path: &std::path::Path,
+    search_paths: &[std::path::PathBuf],
+) -> Result<ParseOutput, SourceReaderError> {
+    let mut reader = SourceReader::new(search_paths.to_vec());
+    let expanded = reader.read_file(path)?;
+    let source_name = path.to_string_lossy();
+    Ok(parse_program(&expanded, &source_name))
 }
 
 /// Updates parser cursor from one lexed token, then tags `sym` as use-site at that location.
