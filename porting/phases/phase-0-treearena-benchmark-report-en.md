@@ -101,3 +101,39 @@ Follow-up tuning (faster hash maps):
   - Rust: `create_ms=226.897`, `lookup_ms=210.167`, `traversal_ms=99.829`, `property_set_ms=5.794`, `property_get_ms=2.121`
   - C++: `create_ms=864.897`, `lookup_ms=719.490`, `traversal_ms=984.207`, `property_set_ms=468.464`, `property_get_ms=7.578`
   - Ratios: `create=0.262x`, `lookup=0.292x`, `traversal=0.101x`, `property_set=0.012x`, `property_get=0.280x`
+
+## 6. Pre-allocation A/B (`new` vs `--prealloc`)
+
+Implemented APIs:
+- `TreeArena::with_capacity`, `TreeArena::with_capacities`, `TreeArena::reserve`
+- `PropertyStore::with_key_capacity`, `PropertyStore::reserve_slots`
+
+Benchmark protocol:
+- Rust-only A/B on same harness with `--prealloc` flag.
+- Workload: `n=1_000_000`.
+- 6 runs, alternating execution order to reduce thermal/order bias.
+
+Median results:
+- baseline:
+  - `create_ms=195.569`
+  - `lookup_ms=185.300`
+  - `traversal_ms=97.185`
+  - `property_set_ms=5.954`
+  - `property_get_ms=2.175`
+- `--prealloc`:
+  - `create_ms=178.464`
+  - `lookup_ms=191.432`
+  - `traversal_ms=70.114`
+  - `property_set_ms=2.296`
+  - `property_get_ms=0.845`
+
+`prealloc / baseline`:
+- `create=0.913x`
+- `lookup=1.033x`
+- `traversal=0.721x`
+- `property_set=0.386x`
+- `property_get=0.388x`
+
+Decision:
+- Keep explicit pre-allocation as an opt-in API.
+- Do not force it as default benchmark/compiler path yet due small `lookup` regression on this protocol.

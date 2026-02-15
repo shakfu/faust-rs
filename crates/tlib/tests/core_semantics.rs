@@ -89,3 +89,38 @@ fn property_store_clear_preserves_key_reuse() {
     assert_eq!(props.set(node, "order", 8), None);
     assert_eq!(props.get(node, "order"), Some(&8));
 }
+
+#[test]
+fn tree_arena_with_capacities_preserves_interning_semantics() {
+    let mut arena = TreeArena::with_capacities(64, 64, 16, 64, 16);
+    let x1 = arena.symbol("x");
+    let x2 = arena.symbol("x");
+    assert_eq!(x1, x2);
+
+    let pair1 = arena.intern(NodeKind::Tag("pair".into()), &[x1, arena.nil()]);
+    let pair2 = arena.intern(NodeKind::Tag("pair".into()), &[x2, arena.nil()]);
+    assert_eq!(pair1, pair2);
+}
+
+#[test]
+fn tree_arena_reserve_preserves_interning_semantics() {
+    let mut arena = TreeArena::new();
+    arena.reserve(128, 128, 32, 128, 32);
+    let a = arena.int(1);
+    let b = arena.int(1);
+    assert_eq!(a, b);
+}
+
+#[test]
+fn property_store_reserve_slots_does_not_set_values() {
+    let mut arena = TreeArena::new();
+    let a = arena.symbol("a");
+    let b = arena.symbol("b");
+
+    let mut props = PropertyStore::<i32>::with_key_capacity(1);
+    let key = props.key("k");
+    props.reserve_slots(key, 128);
+    assert_eq!(props.get_with_key(a, key), None);
+    assert_eq!(props.get_with_key(b, key), None);
+    assert!(props.is_empty());
+}

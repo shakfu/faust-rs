@@ -109,12 +109,34 @@ impl Default for TreeArena {
 impl TreeArena {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_capacities(0, 0, 0, 0, 0)
+    }
+
+    #[must_use]
+    pub fn with_capacity(nodes_capacity: usize) -> Self {
+        Self::with_capacities(
+            nodes_capacity,
+            nodes_capacity,
+            nodes_capacity,
+            nodes_capacity,
+            nodes_capacity,
+        )
+    }
+
+    #[must_use]
+    pub fn with_capacities(
+        nodes_capacity: usize,
+        interner0_capacity: usize,
+        interner1_capacity: usize,
+        interner2_capacity: usize,
+        interner_n_capacity: usize,
+    ) -> Self {
         let mut arena = Self {
-            nodes: Vec::new(),
-            interner0: AHashMap::new(),
-            interner1: AHashMap::new(),
-            interner2: AHashMap::new(),
-            interner_n: AHashMap::new(),
+            nodes: Vec::with_capacity(nodes_capacity),
+            interner0: AHashMap::with_capacity(interner0_capacity),
+            interner1: AHashMap::with_capacity(interner1_capacity),
+            interner2: AHashMap::with_capacity(interner2_capacity),
+            interner_n: AHashMap::with_capacity(interner_n_capacity),
             nil: TreeId(0),
         };
         let nil = arena.intern(NodeKind::Nil, &[]);
@@ -125,6 +147,21 @@ impl TreeArena {
     #[must_use]
     pub fn nil(&self) -> TreeId {
         self.nil
+    }
+
+    pub fn reserve(
+        &mut self,
+        additional_nodes: usize,
+        additional_interner0: usize,
+        additional_interner1: usize,
+        additional_interner2: usize,
+        additional_interner_n: usize,
+    ) {
+        self.nodes.reserve(additional_nodes);
+        self.interner0.reserve(additional_interner0);
+        self.interner1.reserve(additional_interner1);
+        self.interner2.reserve(additional_interner2);
+        self.interner_n.reserve(additional_interner_n);
     }
 
     #[must_use]

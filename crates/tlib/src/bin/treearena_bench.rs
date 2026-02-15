@@ -5,17 +5,40 @@ use std::time::Instant;
 
 use tlib::{NodeKind, PropertyStore, TreeArena};
 
-fn parse_size() -> usize {
-    env::args()
-        .nth(1)
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(200_000)
+fn parse_args() -> (usize, bool) {
+    let mut n = 200_000usize;
+    let mut prealloc = false;
+    for arg in env::args().skip(1) {
+        if arg == "--prealloc" {
+            prealloc = true;
+        } else if let Ok(parsed) = arg.parse::<usize>() {
+            n = parsed;
+        }
+    }
+    (n, prealloc)
+}
+
+fn make_arena(n: usize, prealloc: bool) -> TreeArena {
+    if !prealloc {
+        return TreeArena::new();
+    }
+    // For this benchmark workload:
+    // nodes ~= nil + ints(n+1) + pairs(n) + cons(n) = 3n + 2
+    // arity0 ~= nil + ints = n + 2
+    // arity2 (phase 1) ~= pairs = n
+    TreeArena::with_capacities(
+        n.saturating_mul(3).saturating_add(2),
+        n.saturating_add(2),
+        0,
+        n.saturating_add(2),
+        0,
+    )
 }
 
 fn main() {
-    let n = parse_size();
+    let (n, prealloc) = parse_args();
 
-    let mut arena = TreeArena::new();
+    let mut arena = make_arena(n, prealloc);
     let mut nodes = Vec::with_capacity(n);
     let pair_kind = NodeKind::Tag(Arc::<str>::from("pair"));
 
@@ -37,6 +60,11 @@ fn main() {
     }
     let lookup_elapsed = lookup_start.elapsed();
 
+    if prealloc {
+        // Phase 2 adds n extra arity-2 cons nodes.
+        arena.reserve(0, 0, 0, n.saturating_add(2), 0);
+    }
+
     let traversal_start = Instant::now();
     let mut list = arena.nil();
     for node in nodes.iter().copied() {
@@ -51,8 +79,15 @@ fn main() {
     let traversal_elapsed = traversal_start.elapsed();
     black_box(count);
 
-    let mut props = PropertyStore::<usize>::new();
+    let mut props = if prealloc {
+        PropertyStore::<usize>::with_key_capacity(1)
+    } else {
+        PropertyStore::<usize>::new()
+    };
     let hot_key = props.key("hot");
+    if prealloc {
+        props.reserve_slots(hot_key, arena.len());
+    }
     let prop_set_start = Instant::now();
     for (i, node) in nodes.iter().copied().enumerate() {
         let _ = props.set_with_key(node, hot_key, i);
@@ -70,6 +105,7 @@ fn main() {
     black_box(checksum);
 
     println!("TreeArena micro-bench (n={n})");
+    println!("prealloc={prealloc}");
     println!("create_ms={:.3}", create_elapsed.as_secs_f64() * 1_000.0);
     println!("lookup_ms={:.3}", lookup_elapsed.as_secs_f64() * 1_000.0);
     println!(

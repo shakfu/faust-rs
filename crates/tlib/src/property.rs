@@ -21,9 +21,14 @@ impl<T> Default for PropertyStore<T> {
 impl<T> PropertyStore<T> {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_key_capacity(0)
+    }
+
+    #[must_use]
+    pub fn with_key_capacity(key_capacity: usize) -> Self {
         Self {
-            values: Vec::new(),
-            key_intern: AHashMap::new(),
+            values: Vec::with_capacity(key_capacity),
+            key_intern: AHashMap::with_capacity(key_capacity),
             next_key: 0,
             len: 0,
         }
@@ -99,6 +104,17 @@ impl<T> PropertyStore<T> {
     pub fn remove(&mut self, node: TreeId, key: &str) -> Option<T> {
         let key = self.key_intern.get(key).copied()?;
         self.remove_with_key(node, key)
+    }
+
+    pub fn reserve_slots(&mut self, key: PropertyKey, slots_len: usize) {
+        let key_idx = key.0 as usize;
+        if key_idx >= self.values.len() {
+            self.values.resize_with(key_idx + 1, Vec::new);
+        }
+        let slots = &mut self.values[key_idx];
+        if slots.len() < slots_len {
+            slots.resize_with(slots_len, || None);
+        }
     }
 
     pub fn clear(&mut self) {

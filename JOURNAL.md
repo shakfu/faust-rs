@@ -368,3 +368,26 @@ Execution plan (Phase 0 prototype, revised):
   - Ratios: `create=0.262x`, `lookup=0.292x`, `traversal=0.101x`, `property_set=0.012x`, `property_get=0.280x`
 - Conclusion:
   - clear additional gain on `create`/`lookup` with no regression signal on other metrics.
+
+### Gate A step 14 (`pre-allocation` A/B validation pass)
+
+- Added explicit pre-allocation APIs:
+  - `TreeArena::with_capacity`, `TreeArena::with_capacities`, `TreeArena::reserve` in `crates/tlib/src/arena.rs`,
+  - `PropertyStore::with_key_capacity`, `PropertyStore::reserve_slots` in `crates/tlib/src/property.rs`.
+- Extended bench in `crates/tlib/src/bin/treearena_bench.rs`:
+  - new `--prealloc` mode,
+  - two-phase reserve strategy for arity-2 interner (pairs first, then cons).
+- Added non-regression tests in `crates/tlib/tests/core_semantics.rs`:
+  - `tree_arena_with_capacities_preserves_interning_semantics`,
+  - `tree_arena_reserve_preserves_interning_semantics`,
+  - `property_store_reserve_slots_does_not_set_values`.
+- A/B median comparison (`n=1_000_000`, 6 runs, alternating order):
+  - baseline medians:
+    - `create_ms=195.569`, `lookup_ms=185.300`, `traversal_ms=97.185`, `property_set_ms=5.954`, `property_get_ms=2.175`
+  - `--prealloc` medians:
+    - `create_ms=178.464`, `lookup_ms=191.432`, `traversal_ms=70.114`, `property_set_ms=2.296`, `property_get_ms=0.845`
+  - `prealloc / baseline`:
+    - `create=0.913x`, `lookup=1.033x`, `traversal=0.721x`, `property_set=0.386x`, `property_get=0.388x`
+- Conclusion:
+  - pre-allocation gives clear wins on `create`, `traversal`, and property passes,
+  - slight `lookup` regression (~3.3%) remains on this protocol, so keep pre-allocation as opt-in API for now (not default path).
