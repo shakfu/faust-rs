@@ -315,3 +315,10 @@ Execution plan (Phase 0 prototype, revised):
   - Rust: `create_ms=58.701`, `lookup_ms=45.905`, `traversal_ms=33.444`, `property_set_ms=2.469`, `property_get_ms=1.829`
   - C++: `create_ms=78.483`, `lookup_ms=60.262`, `traversal_ms=77.944`, `property_set_ms=35.679`, `property_get_ms=1.436`
   - Ratios: `create=0.748x`, `lookup=0.762x`, `traversal=0.429x`, `property_set=0.069x`, `property_get=1.274x`
+
+### Gate A step 10 (benchmark report refresh after TreeArena optimizations)
+
+- Updated `porting/phases/phase-0-treearena-benchmark-report-en.md` with optimized post-step-8/9 measurements and ratios.
+- Kept Gate A status as **Go** with updated evidence:
+  - `create` and `lookup` are now faster than the C++ baseline on this workload,
+  - `property_get` remains under the acceptance threshold (`<= 2x`).
