@@ -724,7 +724,7 @@ Primitive -> tlib::TreeId:
           crate::with_state(state, |state| state.box_lambda($3, $7))
       }
     | LCROC ModList LAPPLY Expression RCROC {
-          crate::with_state(state, |state| state.build_box_modulation($2, $4))
+          crate::with_state(state, |state| boxes::build_box_modulation(&mut state.arena, $2, $4))
       }
     | IdentExpr { $1 }
     | SUB IdentExpr {

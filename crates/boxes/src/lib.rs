@@ -22,7 +22,7 @@
 //!   `box_waveform`, `box_route`,
 //!   `ffunction`, `box_ffun`, `box_fconst`, `box_fvar`,
 //!   `box_case`, `box_pattern_var`,
-//!   `box_abstr`, `build_box_abstr`,
+//!   `box_abstr`, `box_modulation`, `build_box_abstr`, `build_box_modulation`,
 //!   `box_inputs`, `box_outputs`, `box_ondemand`, `box_upsampling`, `box_downsampling`,
 //!   `box_button`, `box_checkbox`, `box_vslider`, `box_hslider`,
 //!   `box_num_entry`, `box_vgroup`, `box_hgroup`, `box_tgroup`,
@@ -105,6 +105,7 @@ const BOX_FVAR_TAG: &str = "BOXFVAR";
 const BOX_CASE_TAG: &str = "BOXCASE";
 const BOX_PATTERN_VAR_TAG: &str = "BOXPATVAR";
 const BOX_ABSTR_TAG: &str = "BOXABSTR";
+const BOX_MODULATION_TAG: &str = "BOXMODULATION";
 const BOX_INPUTS_TAG: &str = "BOXINPUTS";
 const BOX_OUTPUTS_TAG: &str = "BOXOUTPUTS";
 const BOX_ONDEMAND_TAG: &str = "BOXONDEMAND";
@@ -758,6 +759,18 @@ pub fn is_box_abstr(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
     match_binary(arena, b, BOX_ABSTR_TAG)
 }
 
+/// Equivalent to C++ `boxModulation`.
+#[must_use]
+pub fn box_modulation(arena: &mut TreeArena, arg: BoxId, body: BoxId) -> BoxId {
+    intern_tag(arena, BOX_MODULATION_TAG, &[arg, body])
+}
+
+/// Returns `(arg, body)` when `b` is `box_modulation`.
+#[must_use]
+pub fn is_box_modulation(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
+    match_binary(arena, b, BOX_MODULATION_TAG)
+}
+
 /// Equivalent to C++ `buildBoxAbstr(largs, body)` using parser-built arg list.
 ///
 /// This preserves C++ nesting order by consuming list tail first.
@@ -774,6 +787,25 @@ pub fn build_box_abstr(arena: &mut TreeArena, args: BoxId, body: BoxId) -> BoxId
     };
     let nested = build_box_abstr(arena, tail, body);
     box_abstr(arena, head, nested)
+}
+
+/// Equivalent to C++ `buildBoxModulation(largs, body)` using parser-built arg list.
+///
+/// This preserves C++ nesting order by applying each list head to the current body,
+/// then recursing on the tail.
+#[must_use]
+pub fn build_box_modulation(arena: &mut TreeArena, args: BoxId, body: BoxId) -> BoxId {
+    if arena.is_nil(args) {
+        return body;
+    }
+    let Some(head) = arena.hd(args) else {
+        return body;
+    };
+    let Some(tail) = arena.tl(args) else {
+        return body;
+    };
+    let nested = box_modulation(arena, head, body);
+    build_box_modulation(arena, tail, nested)
 }
 
 /// Equivalent to C++ `boxInputs`.

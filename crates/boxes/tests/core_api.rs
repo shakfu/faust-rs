@@ -4,22 +4,23 @@ use boxes::{
     box_environment, box_fconst, box_ffun, box_float_cast, box_fvar, box_hbargraph, box_hgroup,
     box_highest, box_hslider, box_ident, box_ident_name, box_inputs, box_int, box_int_cast,
     box_ipar, box_iprod, box_iseq, box_isum, box_library, box_lowest, box_max, box_merge, box_min,
-    box_mul, box_num_entry, box_ondemand, box_outputs, box_par, box_pattern_var, box_pow,
-    box_prefix, box_read_only_table, box_real, box_rec, box_route, box_select2, box_select3,
-    box_seq, box_soundfile, box_split, box_tgroup, box_upsampling, box_vbargraph, box_vgroup,
-    box_vslider, box_waveform, box_wire, box_with_local_def, box_with_rec_def,
-    box_write_read_table, build_box_abstr, dump_box, ffunction, is_box_abstr, is_box_access,
-    is_box_add, is_box_appl, is_box_assert_bounds, is_box_attach, is_box_button, is_box_case,
-    is_box_checkbox, is_box_component, is_box_control, is_box_cut, is_box_delay1,
+    box_modulation, box_mul, box_num_entry, box_ondemand, box_outputs, box_par, box_pattern_var,
+    box_pow, box_prefix, box_read_only_table, box_real, box_rec, box_route, box_select2,
+    box_select3, box_seq, box_soundfile, box_split, box_tgroup, box_upsampling, box_vbargraph,
+    box_vgroup, box_vslider, box_waveform, box_wire, box_with_local_def, box_with_rec_def,
+    box_write_read_table, build_box_abstr, build_box_modulation, dump_box, ffunction, is_box_abstr,
+    is_box_access, is_box_add, is_box_appl, is_box_assert_bounds, is_box_attach, is_box_button,
+    is_box_case, is_box_checkbox, is_box_component, is_box_control, is_box_cut, is_box_delay1,
     is_box_downsampling, is_box_enable, is_box_environment, is_box_fconst, is_box_ffun,
     is_box_float_cast, is_box_fvar, is_box_hbargraph, is_box_hgroup, is_box_highest,
     is_box_hslider, is_box_inputs, is_box_int, is_box_int_cast, is_box_ipar, is_box_iprod,
     is_box_iseq, is_box_isum, is_box_library, is_box_lowest, is_box_max, is_box_merge, is_box_min,
-    is_box_mul, is_box_num_entry, is_box_ondemand, is_box_outputs, is_box_par, is_box_pattern_var,
-    is_box_pow, is_box_prefix, is_box_read_only_table, is_box_real, is_box_rec, is_box_route,
-    is_box_select2, is_box_select3, is_box_seq, is_box_soundfile, is_box_split, is_box_tgroup,
-    is_box_upsampling, is_box_vbargraph, is_box_vgroup, is_box_vslider, is_box_waveform,
-    is_box_wire, is_box_with_local_def, is_box_with_rec_def, is_box_write_read_table, is_ffunction,
+    is_box_modulation, is_box_mul, is_box_num_entry, is_box_ondemand, is_box_outputs, is_box_par,
+    is_box_pattern_var, is_box_pow, is_box_prefix, is_box_read_only_table, is_box_real, is_box_rec,
+    is_box_route, is_box_select2, is_box_select3, is_box_seq, is_box_soundfile, is_box_split,
+    is_box_tgroup, is_box_upsampling, is_box_vbargraph, is_box_vgroup, is_box_vslider,
+    is_box_waveform, is_box_wire, is_box_with_local_def, is_box_with_rec_def,
+    is_box_write_read_table, is_ffunction,
 };
 use tlib::TreeArena;
 
@@ -327,6 +328,27 @@ fn lambda_groups_soundfile_and_stream_wrappers_roundtrip() {
     assert_eq!(is_box_ondemand(&arena, ondemand), Some(body));
     assert_eq!(is_box_upsampling(&arena, up), Some(body));
     assert_eq!(is_box_downsampling(&arena, down), Some(body));
+}
+
+#[test]
+fn modulation_boxes_roundtrip_and_build_order_match_cpp() {
+    let mut arena = TreeArena::new();
+    let a = box_ident(&mut arena, "a");
+    let b = box_ident(&mut arena, "b");
+    let body = box_wire(&mut arena);
+
+    let one = box_modulation(&mut arena, a, body);
+    assert_eq!(is_box_modulation(&arena, one), Some((a, body)));
+
+    let nil = arena.nil();
+    let tail = arena.cons(a, nil);
+    let args = arena.cons(b, tail);
+    let built = build_box_modulation(&mut arena, args, body);
+    let (outer, nested) = is_box_modulation(&arena, built).expect("outer modulation");
+    assert_eq!(outer, a);
+    let (inner, inner_body) = is_box_modulation(&arena, nested).expect("inner modulation");
+    assert_eq!(inner, b);
+    assert_eq!(inner_body, body);
 }
 
 #[test]

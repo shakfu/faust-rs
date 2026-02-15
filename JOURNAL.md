@@ -1473,3 +1473,21 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p parser-proto --offline --no-fail-fast`
   - `cargo run -p xtask --offline -- parser-parity-report`
   - `cargo fmt --all`
+
+### Parity closure step 3 (move modulation constructors to `boxes`)
+
+- Moved modulation constructors from parser-local implementation to shared `boxes` APIs:
+  - `crates/boxes/src/lib.rs`
+  - added `box_modulation`, `is_box_modulation`, and `build_box_modulation`.
+- Updated parser-proto semantic action to use `boxes` directly:
+  - `crates/parser-proto/src/grammar/faustparser.y`
+  - modulation form now calls `boxes::build_box_modulation(&mut state.arena, ...)`.
+- Removed parser-local modulation constructors:
+  - `crates/parser-proto/src/lib.rs`
+  - deleted `ParseState::{box_modulation,build_box_modulation}`.
+- Added `boxes` unit coverage for modulation parity and nesting order:
+  - `crates/boxes/tests/core_api.rs`.
+- Validation:
+  - `cargo test -p boxes --offline --no-fail-fast`
+  - `cargo test -p parser-proto --test parser_slice12_modulation --offline --no-fail-fast`
+  - `cargo fmt --all`
