@@ -265,6 +265,7 @@ pub fn eval_box(
             let rev_args = rev_eval_list(arena, arg, env, loop_detector)?;
             apply_list(arena, efun, rev_args, env, loop_detector)
         }
+        BoxMatch::Access(body, field) => eval_access(arena, body, field, env, loop_detector),
         BoxMatch::Case(_) => Ok(expr),
         BoxMatch::PatternVar(_) => Ok(expr),
         BoxMatch::WithLocalDef(body, defs) => {
@@ -301,6 +302,43 @@ pub fn eval_box(
         }
         _ => map_children(arena, expr, env, loop_detector),
     }
+}
+
+fn eval_access(
+    arena: &mut TreeArena,
+    body: TreeId,
+    field: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    match match_box(arena, body) {
+        BoxMatch::WithLocalDef(inner, defs) => {
+            let mut scoped = env.push_scope();
+            bind_definitions(arena, defs, &mut scoped)?;
+            let inner_eval = eval_box(arena, inner, &scoped, loop_detector)?;
+            if matches!(match_box(arena, inner_eval), BoxMatch::Environment) {
+                return eval_box(arena, field, &scoped, loop_detector);
+            }
+        }
+        BoxMatch::WithRecDef(inner, rec_defs, where_defs) => {
+            let mut scoped = env.push_scope();
+            bind_definitions(arena, rec_defs, &mut scoped)?;
+            bind_definitions(arena, where_defs, &mut scoped)?;
+            let inner_eval = eval_box(arena, inner, &scoped, loop_detector)?;
+            if matches!(match_box(arena, inner_eval), BoxMatch::Environment) {
+                return eval_box(arena, field, &scoped, loop_detector);
+            }
+        }
+        _ => {}
+    }
+
+    let eval_body = eval_box(arena, body, env, loop_detector)?;
+    if matches!(match_box(arena, eval_body), BoxMatch::Environment) {
+        return eval_box(arena, field, env, loop_detector);
+    }
+    let eval_field = eval_box(arena, field, env, loop_detector)?;
+    let mut b = BoxBuilder::new(arena);
+    Ok(b.access(eval_body, eval_field))
 }
 
 fn map_children(

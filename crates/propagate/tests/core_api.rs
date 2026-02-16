@@ -194,6 +194,34 @@ fn inputs_outputs_boxes_lower_to_signal_ints() {
     ));
 }
 
+#[test]
+fn waveform_box_lowers_to_size_and_waveform_signal() {
+    let mut arena = TreeArena::new();
+    let waveform = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let v0 = bb.int(1);
+        let v1 = bb.int(-2);
+        let v2 = bb.real(3.5);
+        bb.waveform(&[v0, v1, v2])
+    };
+
+    let arity = box_arity(&arena, waveform).expect("waveform arity should infer");
+    assert_eq!(arity.inputs, 0);
+    assert_eq!(arity.outputs, 2);
+
+    let out = propagate(&mut arena, waveform, &[]).expect("waveform should propagate");
+    assert_eq!(out.len(), 2);
+    assert_eq!(match_sig(&arena, out[0]), SigMatch::Int(3));
+
+    let SigMatch::Waveform(values) = match_sig(&arena, out[1]) else {
+        panic!("second output should be SIGWAVEFORM");
+    };
+    assert_eq!(values.len(), 3);
+    assert!(matches!(match_sig(&arena, values[0]), SigMatch::Int(1)));
+    assert!(matches!(match_sig(&arena, values[1]), SigMatch::Int(-2)));
+    assert!(matches!(match_sig(&arena, values[2]), SigMatch::Real(_)));
+}
+
 fn is_debruijn_rec(arena: &TreeArena, id: TreeId) -> bool {
     matches!(tag_name(arena, id), Some("DEBRUIJN"))
 }

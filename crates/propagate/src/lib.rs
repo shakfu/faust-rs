@@ -272,6 +272,16 @@ pub fn box_arity(arena: &TreeArena, box_tree: BoxId) -> Result<BoxArity, Propaga
                 outputs: 2 + chan,
             })
         }
+        BoxMatch::Waveform(values) => {
+            let _ = list_length(arena, values).ok_or(PropagateError::UnsupportedBox {
+                node: box_tree,
+                kind: "waveform-list",
+            })?;
+            Ok(BoxArity {
+                inputs: 0,
+                outputs: 2,
+            })
+        }
         BoxMatch::VGroup(_, expr) | BoxMatch::HGroup(_, expr) | BoxMatch::TGroup(_, expr) => {
             box_arity(arena, expr)
         }
@@ -411,10 +421,6 @@ pub fn box_arity(arena: &TreeArena, box_tree: BoxId) -> Result<BoxArity, Propaga
         BoxMatch::Library(_) => Err(PropagateError::UnsupportedBox {
             node: box_tree,
             kind: "library",
-        }),
-        BoxMatch::Waveform(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "waveform",
         }),
         BoxMatch::Ffunction(_, _, _) => Err(PropagateError::UnsupportedBox {
             node: box_tree,
@@ -577,6 +583,18 @@ fn propagate_inner(
             expect_input_arity(box_tree, inputs, 1)?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.hbargraph(label, min, max, inputs[0])])
+        }
+        BoxMatch::Waveform(values) => {
+            expect_input_arity(box_tree, inputs, 0)?;
+            let values = list_to_vec(arena, values).ok_or(PropagateError::UnsupportedBox {
+                node: box_tree,
+                kind: "waveform-list",
+            })?;
+            let mut b = SigBuilder::new(arena);
+            let n = i64_from_usize(values.len(), "waveform size")?;
+            let size = b.int(n);
+            let waveform = b.waveform(&values);
+            Ok(vec![size, waveform])
         }
         BoxMatch::VGroup(_, expr) | BoxMatch::HGroup(_, expr) | BoxMatch::TGroup(_, expr) => {
             propagate(arena, expr, inputs)
@@ -748,10 +766,6 @@ fn propagate_inner(
             node: box_tree,
             kind: "library",
         }),
-        BoxMatch::Waveform(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "waveform",
-        }),
         BoxMatch::Route(_, _, _) => Err(PropagateError::UnsupportedBox {
             node: box_tree,
             kind: "route",
@@ -916,6 +930,25 @@ fn mix_signals(arena: &mut TreeArena, inputs: &[SigId], nbus: usize) -> Vec<SigI
     }
 
     out
+}
+
+fn list_length(arena: &TreeArena, mut list: TreeId) -> Option<usize> {
+    let mut len = 0usize;
+    while !arena.is_nil(list) {
+        let _ = arena.hd(list)?;
+        list = arena.tl(list)?;
+        len = len.checked_add(1)?;
+    }
+    Some(len)
+}
+
+fn list_to_vec(arena: &TreeArena, mut list: TreeId) -> Option<Vec<TreeId>> {
+    let mut out = Vec::new();
+    while !arena.is_nil(list) {
+        out.push(arena.hd(list)?);
+        list = arena.tl(list)?;
+    }
+    Some(out)
 }
 
 fn usize_from_int_node(

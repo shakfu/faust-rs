@@ -126,6 +126,40 @@ fn corpus_parallel_mix_lowers_to_sum_of_two_scaled_inputs() {
     assert_mul_input_const(&out.parse.state.arena, rhs, 0);
 }
 
+#[test]
+fn corpus_environment_waveform_combines_access_and_waveform_outputs() {
+    let out = compile_corpus("rep_20_environment_waveform.dsp");
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 3);
+    assert_eq!(out.signals.len(), 3);
+
+    assert_eq!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Input(0)
+    );
+    assert_eq!(
+        match_sig(&out.parse.state.arena, out.signals[1]),
+        SigMatch::Int(3)
+    );
+
+    let SigMatch::Waveform(values) = match_sig(&out.parse.state.arena, out.signals[2]) else {
+        panic!("rep_20 third output should be waveform");
+    };
+    assert_eq!(values.len(), 3);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, values[0]),
+        SigMatch::Int(1)
+    ));
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, values[1]),
+        SigMatch::Int(-2)
+    ));
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, values[2]),
+        SigMatch::Real(_)
+    ));
+}
+
 fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i64) {
     let SigMatch::BinOp(BinOp::Mul, a, b) = match_sig(arena, sig) else {
         panic!("branch should be Mul");

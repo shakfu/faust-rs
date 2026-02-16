@@ -267,6 +267,25 @@ fn eval_box_non_closure_application_reports_too_many_arguments() {
 }
 
 #[test]
+fn eval_box_access_reads_environment_local_binding() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+
+    let env_box = BoxBuilder::new(&mut arena).environment();
+    let wire = make_wire(&mut arena);
+    let a_def = make_def(&mut arena, "a", nil, wire);
+    let defs = make_defs(&mut arena, &[a_def]);
+    let env_with_defs = BoxBuilder::new(&mut arena).with_local_def(env_box, defs);
+    let field = make_ident(&mut arena, "a");
+    let expr = BoxBuilder::new(&mut arena).access(env_with_defs, field);
+
+    let mut loop_detector = LoopDetector::new();
+    let out = eval_box(&mut arena, expr, &Environment::empty(), &mut loop_detector)
+        .expect("access should resolve from local environment");
+    assert!(matches!(match_box(&arena, out), BoxMatch::Wire));
+}
+
+#[test]
 fn eval_iterative_par_expands_with_index_binding() {
     let mut arena = TreeArena::new();
     let i = make_ident(&mut arena, "i");

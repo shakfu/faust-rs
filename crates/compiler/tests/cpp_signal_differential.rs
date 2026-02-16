@@ -171,6 +171,11 @@ fn differential_signal_pipeline_status_against_cpp_reference() {
             expect_valid: true,
         },
         Case {
+            name: "rep_20_environment_waveform",
+            input: CaseInput::CorpusFile("rep_20_environment_waveform.dsp"),
+            expect_valid: true,
+        },
+        Case {
             name: "rep_23_feedback_simple",
             input: CaseInput::CorpusFile("rep_23_feedback_simple.dsp"),
             expect_valid: true,

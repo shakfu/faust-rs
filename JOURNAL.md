@@ -1979,3 +1979,39 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo test -p compiler --test signal_pipeline`
   - `cargo test -p compiler --test cpp_signal_differential -- --nocapture`
+
+### Phase 4 integration step 5 (`rep_20_environment_waveform` end-to-end closure)
+
+- Extended `eval` environment-access behavior in `crates/eval/src/lib.rs`:
+  - added `BoxMatch::Access(body, field)` handling that resolves environment local bindings for:
+    - `with { ... }` environments (`BOXWITHLOCALDEF(BOXENVIRONMENT, defs)`),
+    - `letrec` environments (`BOXWITHRECDEF(BOXENVIRONMENT, ...)`),
+  - this ports the practical C++ `eval.cpp` access-to-closure environment lookup behavior for the
+    currently used corpus shape.
+- Added eval test:
+  - `crates/eval/tests/core_eval.rs`:
+    - `eval_box_access_reads_environment_local_binding`.
+- Extended `propagate` waveform support in `crates/propagate/src/lib.rs`:
+  - `BoxMatch::Waveform(list)` now has arity `(0 -> 2)` (size + waveform),
+  - propagation lowers waveform to:
+    - first output: `int(len(values))`,
+    - second output: `SIGWAVEFORM(values...)`.
+- Added propagate test:
+  - `crates/propagate/tests/core_api.rs`:
+    - `waveform_box_lowers_to_size_and_waveform_signal`.
+- Extended compiler integration coverage:
+  - `crates/compiler/tests/signal_pipeline.rs`:
+    - added `rep_20_environment_waveform.dsp` shape/arity assertions (`1 -> 3`).
+  - `crates/compiler/tests/cpp_signal_differential.rs`:
+    - added `rep_20_environment_waveform.dsp` in Rust vs C++ status set.
+- Differential status (C++ source-of-truth `/Users/letz/Developpements/RUST/faust` @ `8eebea429`):
+  - `rep_20_environment_waveform`: `rust=Ok`, `cpp=Ok`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p eval --all-targets`
+  - `cargo test -p propagate --all-targets`
+  - `cargo test -p compiler --test signal_pipeline`
+  - `cargo test -p compiler --test cpp_signal_differential -- --nocapture`
+  - `cargo run -p compiler -- --dump-sig tests/corpus/rep_20_environment_waveform.dsp`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace --all-targets`
