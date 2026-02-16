@@ -1,4 +1,6 @@
-use boxes::{box_ident_name, is_box_with_local_def};
+#[path = "support/box_match_helpers.rs"]
+mod box_match_helpers;
+use box_match_helpers::*;
 use parser_proto::parse_program;
 use tlib::{TreeArena, TreeId};
 

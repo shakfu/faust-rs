@@ -133,6 +133,44 @@ pub fn match_box(arena: &TreeArena, id: TreeId) -> BoxMatch<'_>;
 
 This approach preserves compatibility with the generic `TreeArena` while providing type certainty.
 
+### 2.3 Canonical API rollout (`BoxBuilder` + `match_box`)
+
+Decision: standardize box construction/traversal around:
+- `BoxBuilder<'a>` for construction,
+- `match_box(arena, id) -> BoxMatch` for canonical dispatch.
+
+Status: migration completed for public `boxes` API.
+- Public construction/inspection is now `BoxBuilder` + `match_box`.
+- Legacy `box_*` / `is_box_*` remain internal-only implementation helpers in `crates/boxes`.
+
+Implementation steps:
+1. Introduce a non-breaking `BoxBuilder` facade in `crates/boxes`.
+- Provide `BoxBuilder::new(&mut TreeArena)` and constructor methods grouped by family (composition, primitives, UI, scope/module, foreign/case, wrappers).
+- Keep signatures parity-friendly with C++ constructor families.
+
+2. Introduce canonical matcher API.
+- Add `BoxMatch` + `match_box(...)` as the single entry point for read-side dispatch.
+- Ensure `BoxMatch` covers all constructors currently needed by parser/eval/propagate scopes.
+
+3. Migrate callers to canonical APIs and remove public legacy wrappers.
+- Parser/actions use `BoxBuilder` methods.
+- Read-side checks use `match_box` decoding.
+
+4. Migrate consumers incrementally.
+- New passes (`eval`/`propagate`/future transforms) must use `match_box` directly to avoid duplicated `is_box_*` ladders.
+
+Deliverables:
+- `crates/boxes`: `BoxBuilder`, `BoxMatch`, `match_box`.
+- Mapping note in Rustdoc: constructor/matcher status (`1:1`, `adapted`, `deferred`) for touched families.
+- Tests proving canonical matcher coverage.
+
+Pass criteria:
+- No behavior drift on existing parser corpus and differential checks.
+- `cargo fmt --all`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test --workspace --all-targets`
+- No new consumer module introduces ad-hoc box dispatch outside `match_box`.
+
 ---
 
 ## 3. Detailed mapping
@@ -280,6 +318,7 @@ In C++, box symbols are in `gGlobal`. Each compilation recreates these symbols. 
 - [ ] `get_box_type` passes the composition tests (seq, par, split, merge, rec)
 - [ ] Pretty-functional printing
 - [ ] Hash-consing: `boxSeq(a, b) == boxSeq(a, b)` (same TreeId)
+- [ ] Canonical box API in place (`BoxBuilder` + `match_box`) and public legacy wrappers removed
 - [ ] No dependency on `gGlobal`
 - [ ] Complete Rustdoc
 - [ ] `Send + Sync` verified

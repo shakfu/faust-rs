@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::Path;
 
-use boxes::{dump_box, is_box_hslider, is_box_iprod, is_box_iseq, is_box_isum};
+#[path = "support/box_match_helpers.rs"]
+mod box_match_helpers;
+use box_match_helpers::*;
+use boxes::dump_box;
 use parser_proto::parse_program;
 use tlib::{TreeArena, TreeId};
 

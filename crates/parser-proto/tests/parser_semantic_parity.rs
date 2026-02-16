@@ -2,12 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use boxes::{
-    dump_box, is_box_attach, is_box_case, is_box_control, is_box_environment, is_box_ffun,
-    is_box_float_cast, is_box_inputs, is_box_int_cast, is_box_ipar, is_box_pattern_var,
-    is_box_read_only_table, is_box_real, is_box_route, is_box_vgroup, is_box_waveform,
-    is_box_with_local_def, is_box_with_rec_def,
-};
+#[path = "support/box_match_helpers.rs"]
+mod box_match_helpers;
+use box_match_helpers::*;
+use boxes::dump_box;
 use parser_proto::parse_program;
 use tlib::{NodeKind, TreeArena, TreeId};
 
@@ -25,7 +23,7 @@ fn definition_expr(arena: &TreeArena, def: TreeId) -> TreeId {
 }
 
 fn flatten_top_par(arena: &TreeArena, expr: TreeId, out: &mut Vec<TreeId>) {
-    if let Some((left, right)) = boxes::is_box_par(arena, expr) {
+    if let Some((left, right)) = is_box_par(arena, expr) {
         out.push(left);
         flatten_top_par(arena, right, out);
     } else {

@@ -44,6 +44,10 @@ The objective of the port is to reproduce this pipeline in idiomatic Rust, takin
 - Prefer real end-to-end integrations over temporary stubs; if a stub is unavoidable, it must be explicitly time-boxed, tracked, and removed within the same phase gate.
 - Require explicit deliverables and pass criteria for each phase/prototype before implementation starts.
 - Document migrated source provenance continuously in Rustdoc format (`///`/`//!`) with C++ source references and parity-relevant invariants.
+- For tree-encoded IR layers, standardize on builder + canonical matcher APIs:
+  - `boxes`: `BoxBuilder` + `match_box`
+  - `signals`: `SigBuilder` + `match_sig`
+  This avoids duplicated constructor/matcher ladders across passes and keeps dispatch logic explicit.
 
 Related design note (recursion representation and RouteIR coexistence):
 - `faust-rust-recursion-model-note-en.md`

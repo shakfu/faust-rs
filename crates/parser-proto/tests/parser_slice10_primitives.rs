@@ -1,8 +1,6 @@
-use boxes::{
-    is_box_assert_bounds, is_box_attach, is_box_control, is_box_enable, is_box_float_cast,
-    is_box_highest, is_box_int_cast, is_box_lowest, is_box_pow, is_box_prefix,
-    is_box_read_only_table, is_box_select2, is_box_select3, is_box_write_read_table,
-};
+#[path = "support/box_match_helpers.rs"]
+mod box_match_helpers;
+use box_match_helpers::*;
 use parser_proto::parse_program;
 use tlib::{TreeArena, TreeId};
 
@@ -20,7 +18,7 @@ fn definition_expr(arena: &TreeArena, def: TreeId) -> TreeId {
 }
 
 fn flatten_top_par(arena: &TreeArena, expr: TreeId, out: &mut Vec<TreeId>) {
-    if let Some((left, right)) = boxes::is_box_par(arena, expr) {
+    if let Some((left, right)) = is_box_par(arena, expr) {
         out.push(left);
         flatten_top_par(arena, right, out);
     } else {

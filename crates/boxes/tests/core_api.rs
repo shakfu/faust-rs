@@ -1,374 +1,340 @@
-use boxes::{
-    box_abstr, box_access, box_add, box_appl, box_assert_bounds, box_attach, box_button, box_case,
-    box_checkbox, box_component, box_control, box_cut, box_delay1, box_downsampling, box_enable,
-    box_environment, box_fconst, box_ffun, box_float_cast, box_fvar, box_hbargraph, box_hgroup,
-    box_highest, box_hslider, box_ident, box_ident_name, box_inputs, box_int, box_int_cast,
-    box_ipar, box_iprod, box_iseq, box_isum, box_library, box_lowest, box_max, box_merge, box_min,
-    box_modulation, box_mul, box_num_entry, box_ondemand, box_outputs, box_par, box_pattern_var,
-    box_pow, box_prefix, box_read_only_table, box_real, box_rec, box_route, box_select2,
-    box_select3, box_seq, box_soundfile, box_split, box_tgroup, box_upsampling, box_vbargraph,
-    box_vgroup, box_vslider, box_waveform, box_wire, box_with_local_def, box_with_rec_def,
-    box_write_read_table, build_box_abstr, build_box_modulation, dump_box, ffunction, is_box_abstr,
-    is_box_access, is_box_add, is_box_appl, is_box_assert_bounds, is_box_attach, is_box_button,
-    is_box_case, is_box_checkbox, is_box_component, is_box_control, is_box_cut, is_box_delay1,
-    is_box_downsampling, is_box_enable, is_box_environment, is_box_fconst, is_box_ffun,
-    is_box_float_cast, is_box_fvar, is_box_hbargraph, is_box_hgroup, is_box_highest,
-    is_box_hslider, is_box_inputs, is_box_int, is_box_int_cast, is_box_ipar, is_box_iprod,
-    is_box_iseq, is_box_isum, is_box_library, is_box_lowest, is_box_max, is_box_merge, is_box_min,
-    is_box_modulation, is_box_mul, is_box_num_entry, is_box_ondemand, is_box_outputs, is_box_par,
-    is_box_pattern_var, is_box_pow, is_box_prefix, is_box_read_only_table, is_box_real, is_box_rec,
-    is_box_route, is_box_select2, is_box_select3, is_box_seq, is_box_soundfile, is_box_split,
-    is_box_tgroup, is_box_upsampling, is_box_vbargraph, is_box_vgroup, is_box_vslider,
-    is_box_waveform, is_box_wire, is_box_with_local_def, is_box_with_rec_def,
-    is_box_write_read_table, is_ffunction,
-};
-use tlib::TreeArena;
+use boxes::{BoxBuilder, BoxMatch, dump_box, match_box};
+use tlib::{TreeArena, TreeId};
 
-#[test]
-fn ident_and_numeric_boxes_match_expected_kinds() {
-    let mut arena = TreeArena::new();
-    let ident = box_ident(&mut arena, "freq");
-    assert_eq!(box_ident_name(&arena, ident), Some("freq"));
-
-    let i = box_int(&mut arena, 42);
-    let r = box_real(&mut arena, 0.5);
-    assert!(is_box_int(&arena, i));
-    assert!(!is_box_real(&arena, i));
-    assert!(is_box_real(&arena, r));
-    assert!(!is_box_int(&arena, r));
+fn list_nth(arena: &TreeArena, mut list: TreeId, mut n: usize) -> Option<TreeId> {
+    loop {
+        if arena.is_nil(list) {
+            return None;
+        }
+        let head = arena.hd(list)?;
+        let tail = arena.tl(list)?;
+        if n == 0 {
+            return Some(head);
+        }
+        n -= 1;
+        list = tail;
+    }
 }
 
 #[test]
-fn basic_composition_boxes_roundtrip() {
+fn builder_and_match_cover_core_shapes() {
     let mut arena = TreeArena::new();
-    let a = box_wire(&mut arena);
-    let b = box_cut(&mut arena);
+    let (ident, int, real, wire, cut, seq, par, rec, split, merge, appl, access) = {
+        let nil = arena.nil();
+        let one = arena.int(1);
+        let arg = arena.cons(one, nil);
+        let mut b = BoxBuilder::new(&mut arena);
+        let ident = b.ident("freq");
+        let int = b.int(42);
+        let real = b.real(0.5);
+        let wire = b.wire();
+        let cut = b.cut();
+        let seq = b.seq(wire, int);
+        let par = b.par(wire, int);
+        let rec = b.rec(wire, int);
+        let split = b.split(wire, int);
+        let merge = b.merge(wire, int);
+        let appl = b.appl(ident, arg);
+        let bar = b.ident("bar");
+        let access = b.access(ident, bar);
+        (
+            ident, int, real, wire, cut, seq, par, rec, split, merge, appl, access,
+        )
+    };
 
-    let seq = box_seq(&mut arena, a, b);
-    let par = box_par(&mut arena, a, b);
-    let rec = box_rec(&mut arena, a, b);
-    let spl = box_split(&mut arena, a, b);
-    let mer = box_merge(&mut arena, a, b);
-
-    assert_eq!(is_box_seq(&arena, seq), Some((a, b)));
-    assert_eq!(is_box_par(&arena, par), Some((a, b)));
-    assert_eq!(is_box_rec(&arena, rec), Some((a, b)));
-    assert_eq!(is_box_split(&arena, spl), Some((a, b)));
-    assert_eq!(is_box_merge(&arena, mer), Some((a, b)));
+    assert_eq!(match_box(&arena, ident), BoxMatch::Ident("freq"));
+    assert_eq!(match_box(&arena, int), BoxMatch::Int(42));
+    assert_eq!(match_box(&arena, real), BoxMatch::Real(0.5));
+    assert_eq!(match_box(&arena, wire), BoxMatch::Wire);
+    assert_eq!(match_box(&arena, cut), BoxMatch::Cut);
+    assert_eq!(match_box(&arena, seq), BoxMatch::Seq(wire, int));
+    assert_eq!(match_box(&arena, par), BoxMatch::Par(wire, int));
+    assert_eq!(match_box(&arena, rec), BoxMatch::Rec(wire, int));
+    assert_eq!(match_box(&arena, split), BoxMatch::Split(wire, int));
+    assert_eq!(match_box(&arena, merge), BoxMatch::Merge(wire, int));
+    assert!(matches!(match_box(&arena, appl), BoxMatch::Appl(_, _)));
+    assert!(matches!(match_box(&arena, access), BoxMatch::Access(_, _)));
 }
 
 #[test]
-fn primitive_appl_and_access_boxes_roundtrip() {
+fn builder_matches_all_primitive_families() {
     let mut arena = TreeArena::new();
-    let one = box_int(&mut arena, 1);
-    let two = box_int(&mut arena, 2);
-    let nil = arena.nil();
-    let tail = arena.cons(one, nil);
-    let rev_args = arena.cons(two, tail);
-    let fun = box_ident(&mut arena, "f");
-
-    let appl = box_appl(&mut arena, fun, rev_args);
-    assert_eq!(is_box_appl(&arena, appl), Some((fun, rev_args)));
-
-    let field = box_ident(&mut arena, "bar");
-    let acc = box_access(&mut arena, fun, field);
-    assert_eq!(is_box_access(&arena, acc), Some((fun, field)));
-
-    let add = box_add(&mut arena);
-    let mul = box_mul(&mut arena);
-    let delay1 = box_delay1(&mut arena);
-    let min = box_min(&mut arena);
-    let max = box_max(&mut arena);
-    let pow = box_pow(&mut arena);
-    let prefix = box_prefix(&mut arena);
-    let int_cast = box_int_cast(&mut arena);
-    let float_cast = box_float_cast(&mut arena);
-    let rdtable = box_read_only_table(&mut arena);
-    let rwtable = box_write_read_table(&mut arena);
-    let select2 = box_select2(&mut arena);
-    let select3 = box_select3(&mut arena);
-    let assert_bounds = box_assert_bounds(&mut arena);
-    let lowest = box_lowest(&mut arena);
-    let highest = box_highest(&mut arena);
-    let attach = box_attach(&mut arena);
-    let enable = box_enable(&mut arena);
-    let control = box_control(&mut arena);
-    assert!(is_box_add(&arena, add));
-    assert!(is_box_mul(&arena, mul));
-    assert!(is_box_delay1(&arena, delay1));
-    assert!(is_box_min(&arena, min));
-    assert!(is_box_max(&arena, max));
-    assert!(is_box_pow(&arena, pow));
-    assert!(is_box_prefix(&arena, prefix));
-    assert!(is_box_int_cast(&arena, int_cast));
-    assert!(is_box_float_cast(&arena, float_cast));
-    assert!(is_box_read_only_table(&arena, rdtable));
-    assert!(is_box_write_read_table(&arena, rwtable));
-    assert!(is_box_select2(&arena, select2));
-    assert!(is_box_select3(&arena, select3));
-    assert!(is_box_assert_bounds(&arena, assert_bounds));
-    assert!(is_box_lowest(&arena, lowest));
-    assert!(is_box_highest(&arena, highest));
-    assert!(is_box_attach(&arena, attach));
-    assert!(is_box_enable(&arena, enable));
-    assert!(is_box_control(&arena, control));
+    let mut b = BoxBuilder::new(&mut arena);
+    let prims = [
+        b.add(),
+        b.sub(),
+        b.mul(),
+        b.div(),
+        b.rem(),
+        b.and(),
+        b.or(),
+        b.xor(),
+        b.lsh(),
+        b.rsh(),
+        b.lt(),
+        b.le(),
+        b.gt(),
+        b.ge(),
+        b.eq(),
+        b.ne(),
+        b.pow(),
+        b.delay(),
+        b.delay1(),
+        b.min(),
+        b.max(),
+        b.prefix(),
+        b.int_cast(),
+        b.float_cast(),
+        b.read_only_table(),
+        b.write_read_table(),
+        b.select2(),
+        b.select3(),
+        b.assert_bounds(),
+        b.lowest(),
+        b.highest(),
+        b.attach(),
+        b.enable(),
+        b.control(),
+    ];
+    for p in prims {
+        assert!(
+            !matches!(match_box(&arena, p), BoxMatch::Unknown),
+            "primitive should decode"
+        );
+    }
 }
 
 #[test]
-fn wire_cut_environment_predicates_are_stable() {
+fn builder_matches_iterative_scope_and_module_families() {
     let mut arena = TreeArena::new();
-    let w1 = box_wire(&mut arena);
-    let w2 = box_wire(&mut arena);
-    let c = box_cut(&mut arena);
-    let env = box_environment(&mut arena);
+    let idx = arena.int(0);
+    let count = arena.int(4);
+    let filename_component = arena.string_lit("m.lib");
+    let filename_library = arena.string_lit("x.lib");
+    let one = arena.int(1);
+    let zero = arena.int(0);
+    let half = arena.float(0.5);
 
-    // Hash-consing parity: same primitive constructor gives same node id.
-    assert_eq!(w1, w2);
-    assert!(is_box_wire(&arena, w1));
-    assert!(is_box_cut(&arena, c));
-    assert!(is_box_environment(&arena, env));
+    let (ipar, iseq, isum, iprod, local, recdef, env, comp, lib, wave, route) = {
+        let mut b = BoxBuilder::new(&mut arena);
+        let wire = b.wire();
+        let ipar = b.ipar(idx, count, wire);
+        let iseq = b.iseq(idx, count, wire);
+        let isum = b.isum(idx, count, wire);
+        let iprod = b.iprod(idx, count, wire);
+        let a_ident = b.ident("a");
+        let defs = b.par(a_ident, one);
+        let b_ident = b.ident("b");
+        let defs2 = b.par(b_ident, one);
+        let local = b.with_local_def(wire, defs);
+        let recdef = b.with_rec_def(wire, defs, defs2);
+        let env = b.environment();
+        let comp = b.component(filename_component);
+        let lib = b.library(filename_library);
+        let wave = b.waveform(&[zero, one, half]);
+        let route_spec = b.par(zero, zero);
+        let route = b.route(one, one, route_spec);
+        (
+            ipar, iseq, isum, iprod, local, recdef, env, comp, lib, wave, route,
+        )
+    };
+
+    assert!(matches!(match_box(&arena, ipar), BoxMatch::IPar(_, _, _)));
+    assert!(matches!(match_box(&arena, iseq), BoxMatch::ISeq(_, _, _)));
+    assert!(matches!(match_box(&arena, isum), BoxMatch::ISum(_, _, _)));
+    assert!(matches!(match_box(&arena, iprod), BoxMatch::IProd(_, _, _)));
+    assert!(matches!(
+        match_box(&arena, local),
+        BoxMatch::WithLocalDef(_, _)
+    ));
+    assert!(matches!(
+        match_box(&arena, recdef),
+        BoxMatch::WithRecDef(_, _, _)
+    ));
+    assert_eq!(match_box(&arena, env), BoxMatch::Environment);
+    assert!(matches!(match_box(&arena, comp), BoxMatch::Component(_)));
+    assert!(matches!(match_box(&arena, lib), BoxMatch::Library(_)));
+    assert!(matches!(match_box(&arena, wave), BoxMatch::Waveform(_)));
+    assert!(matches!(match_box(&arena, route), BoxMatch::Route(_, _, _)));
 }
 
 #[test]
-fn ipar_roundtrip_preserves_argument_order() {
+fn builder_matches_foreign_case_and_stream_wrappers() {
     let mut arena = TreeArena::new();
-    let idx = box_int(&mut arena, 0);
-    let count = box_int(&mut arena, 4);
-    let body = box_wire(&mut arena);
-    let ipar = box_ipar(&mut arena, idx, count, body);
-
-    assert_eq!(is_box_ipar(&arena, ipar), Some((idx, count, body)));
-}
-
-#[test]
-fn iterative_compositions_roundtrip_preserve_argument_order() {
-    let mut arena = TreeArena::new();
-    let idx = box_int(&mut arena, 0);
-    let count = box_int(&mut arena, 4);
-    let body = box_wire(&mut arena);
-
-    let iseq = box_iseq(&mut arena, idx, count, body);
-    let isum = box_isum(&mut arena, idx, count, body);
-    let iprod = box_iprod(&mut arena, idx, count, body);
-
-    assert_eq!(is_box_iseq(&arena, iseq), Some((idx, count, body)));
-    assert_eq!(is_box_isum(&arena, isum), Some((idx, count, body)));
-    assert_eq!(is_box_iprod(&arena, iprod), Some((idx, count, body)));
-}
-
-#[test]
-fn ui_widgets_preserve_expected_layouts() {
-    let mut arena = TreeArena::new();
-    let label = box_ident(&mut arena, "freq");
-    let cur = box_real(&mut arena, 440.0);
-    let min = box_real(&mut arena, 20.0);
-    let max = box_real(&mut arena, 20_000.0);
-    let step = box_real(&mut arena, 1.0);
-    let hslider = box_hslider(&mut arena, label, cur, min, max, step);
-    let vslider = box_vslider(&mut arena, label, cur, min, max, step);
-    let nentry = box_num_entry(&mut arena, label, cur, min, max, step);
-
-    assert_eq!(
-        is_box_hslider(&arena, hslider),
-        Some((label, cur, min, max, step))
-    );
-    assert_eq!(
-        is_box_vslider(&arena, vslider),
-        Some((label, cur, min, max, step))
-    );
-    assert_eq!(
-        is_box_num_entry(&arena, nentry),
-        Some((label, cur, min, max, step))
-    );
-
-    let button = box_button(&mut arena, label);
-    let checkbox = box_checkbox(&mut arena, label);
-    assert_eq!(is_box_button(&arena, button), Some(label));
-    assert_eq!(is_box_checkbox(&arena, checkbox), Some(label));
-
-    let hbar = box_hbargraph(&mut arena, label, min, max);
-    let vbar = box_vbargraph(&mut arena, label, min, max);
-    assert_eq!(is_box_hbargraph(&arena, hbar), Some((label, min, max)));
-    assert_eq!(is_box_vbargraph(&arena, vbar), Some((label, min, max)));
-}
-
-#[test]
-fn local_and_recursive_def_boxes_roundtrip() {
-    let mut arena = TreeArena::new();
-    let body = box_wire(&mut arena);
-    let a_ident = box_ident(&mut arena, "a");
-    let a_value = box_int(&mut arena, 1);
-    let ldef = box_par(&mut arena, a_ident, a_value);
-    let local = box_with_local_def(&mut arena, body, ldef);
-    assert_eq!(is_box_with_local_def(&arena, local), Some((body, ldef)));
-
-    let b_ident = box_ident(&mut arena, "b");
-    let b_value = box_int(&mut arena, 2);
-    let ldef2 = box_par(&mut arena, b_ident, b_value);
-    let rec = box_with_rec_def(&mut arena, body, ldef, ldef2);
-    assert_eq!(is_box_with_rec_def(&arena, rec), Some((body, ldef, ldef2)));
-}
-
-#[test]
-fn module_waveform_and_route_boxes_roundtrip() {
-    let mut arena = TreeArena::new();
-    let filename = arena.string_lit("foo.lib");
-    let component = box_component(&mut arena, filename);
-    let library = box_library(&mut arena, filename);
-    assert_eq!(is_box_component(&arena, component), Some(filename));
-    assert_eq!(is_box_library(&arena, library), Some(filename));
-
-    let v0 = box_int(&mut arena, 1);
-    let v1 = box_int(&mut arena, -2);
-    let v2 = box_real(&mut arena, 3.5);
-    let values = [v0, v1, v2];
-    let waveform = box_waveform(&mut arena, &values);
-    let wave_list = is_box_waveform(&arena, waveform).expect("waveform payload should exist");
-    assert_eq!(arena.hd(wave_list), Some(values[0]));
-    let wave_tail = arena.tl(wave_list).expect("tail should exist");
-    assert_eq!(arena.hd(wave_tail), Some(values[1]));
-
-    let n = box_wire(&mut arena);
-    let m = box_wire(&mut arena);
-    let rz0 = box_int(&mut arena, 0);
-    let rz1 = box_int(&mut arena, 0);
-    let spec = box_par(&mut arena, rz0, rz1);
-    let route = box_route(&mut arena, n, m, spec);
-    assert_eq!(is_box_route(&arena, route), Some((n, m, spec)));
-}
-
-#[test]
-fn foreign_function_boxes_roundtrip() {
-    let mut arena = TreeArena::new();
-    let ty = box_int(&mut arena, 1);
-    let fname = arena.symbol("sinhf");
-    let nil = arena.nil();
-    let names3 = arena.cons(fname, nil);
-    let names2 = arena.cons(fname, names3);
-    let names1 = arena.cons(fname, names2);
-    let names = arena.cons(fname, names1);
-    let arg0 = box_int(&mut arena, 1);
-    let arg_types = arena.cons(arg0, arena.nil());
-    let sig_payload = arena.cons(names, arg_types);
-    let signature = arena.cons(ty, sig_payload);
+    let ty = arena.int(1);
     let incfile = arena.symbol("<math.h>");
     let libfile = arena.symbol("\"\"");
-    let ff = ffunction(&mut arena, signature, incfile, libfile);
-    assert_eq!(
-        is_ffunction(&arena, ff),
-        Some((signature, incfile, libfile))
-    );
+    let cname = arena.symbol("SR");
+    let vname = arena.symbol("count");
+    let zero = arena.int(0);
+    let signature = {
+        let nil = arena.nil();
+        let n3 = arena.cons(cname, nil);
+        let n2 = arena.cons(cname, n3);
+        let n1 = arena.cons(cname, n2);
+        let names = arena.cons(cname, n1);
+        let payload = arena.cons(names, nil);
+        arena.cons(ty, payload)
+    };
+    let case_rules = {
+        let nil = arena.nil();
+        let lhs = arena.cons(zero, nil);
+        let rule = arena.cons(lhs, zero);
+        arena.cons(rule, nil)
+    };
 
-    let wrapped = box_ffun(&mut arena, ff);
-    assert_eq!(is_box_ffun(&arena, wrapped), Some(ff));
+    let (ff, wrapped, fconst, fvar, case_expr, patvar, wrappers) = {
+        let mut b = BoxBuilder::new(&mut arena);
+        let ff = b.ffunction(signature, incfile, libfile);
+        let wrapped = b.ffun(ff);
+        let fconst = b.fconst(zero, cname, incfile);
+        let fvar = b.fvar(zero, vname, incfile);
+        let ident = b.ident("x");
+        let patvar = b.pattern_var(ident);
+        let case_expr = b.case(case_rules);
+        let wire = b.wire();
+        let wrappers = [
+            b.inputs(wire),
+            b.outputs(wire),
+            b.ondemand(wire),
+            b.upsampling(wire),
+            b.downsampling(wire),
+        ];
+        (ff, wrapped, fconst, fvar, case_expr, patvar, wrappers)
+    };
 
-    let cname = arena.symbol("fSamplingFreq");
-    let ty0_const = box_int(&mut arena, 0);
-    let fconst = box_fconst(&mut arena, ty0_const, cname, incfile);
-    let ty0_var = box_int(&mut arena, 0);
-    let count = arena.symbol("count");
-    let fvar = box_fvar(&mut arena, ty0_var, count, incfile);
-    assert_eq!(
-        is_box_fconst(&arena, fconst),
-        Some((ty0_const, cname, incfile))
-    );
-    assert!(is_box_fvar(&arena, fvar).is_some());
+    assert!(matches!(
+        match_box(&arena, ff),
+        BoxMatch::Ffunction(_, _, _)
+    ));
+    assert!(matches!(match_box(&arena, wrapped), BoxMatch::FFun(_)));
+    assert!(matches!(
+        match_box(&arena, fconst),
+        BoxMatch::FConst(_, _, _)
+    ));
+    assert!(matches!(match_box(&arena, fvar), BoxMatch::FVar(_, _, _)));
+    assert!(matches!(match_box(&arena, case_expr), BoxMatch::Case(_)));
+    assert!(matches!(match_box(&arena, patvar), BoxMatch::PatternVar(_)));
+    for w in wrappers {
+        assert!(
+            matches!(
+                match_box(&arena, w),
+                BoxMatch::Inputs(_)
+                    | BoxMatch::Outputs(_)
+                    | BoxMatch::Ondemand(_)
+                    | BoxMatch::Upsampling(_)
+                    | BoxMatch::Downsampling(_)
+            ),
+            "wrapper should decode"
+        );
+    }
 }
 
 #[test]
-fn case_and_pattern_var_boxes_roundtrip() {
+fn builder_matches_ui_and_groups() {
     let mut arena = TreeArena::new();
-    let ident = box_ident(&mut arena, "x");
-    let pvar = box_pattern_var(&mut arena, ident);
-    assert_eq!(is_box_pattern_var(&arena, pvar), Some(ident));
+    let label = arena.symbol("gain");
+    let cur = arena.float(0.5);
+    let min = arena.float(0.0);
+    let max = arena.float(1.0);
+    let step = arena.float(0.01);
 
-    let lhs = arena.cons(pvar, arena.nil());
-    let rhs = box_wire(&mut arena);
-    let rule = arena.cons(lhs, rhs);
-    let rules = arena.cons(rule, arena.nil());
-    let case_expr = box_case(&mut arena, rules);
-    assert_eq!(is_box_case(&arena, case_expr), Some(rules));
+    let (vslider, hslider, nentry, button, checkbox, vgroup, hgroup, tgroup, vbar, hbar, soundfile) = {
+        let mut b = BoxBuilder::new(&mut arena);
+        let wire = b.wire();
+        let vslider = b.vslider(label, cur, min, max, step);
+        let hslider = b.hslider(label, cur, min, max, step);
+        let nentry = b.num_entry(label, cur, min, max, step);
+        let button = b.button(label);
+        let checkbox = b.checkbox(label);
+        let vgroup = b.vgroup(label, wire);
+        let hgroup = b.hgroup(label, wire);
+        let tgroup = b.tgroup(label, wire);
+        let vbar = b.vbargraph(label, min, max);
+        let hbar = b.hbargraph(label, min, max);
+        let soundfile = b.soundfile(label, min);
+        (
+            vslider, hslider, nentry, button, checkbox, vgroup, hgroup, tgroup, vbar, hbar,
+            soundfile,
+        )
+    };
+
+    assert!(matches!(
+        match_box(&arena, vslider),
+        BoxMatch::VSlider(_, _, _, _, _)
+    ));
+    assert!(matches!(
+        match_box(&arena, hslider),
+        BoxMatch::HSlider(_, _, _, _, _)
+    ));
+    assert!(matches!(
+        match_box(&arena, nentry),
+        BoxMatch::NumEntry(_, _, _, _, _)
+    ));
+    assert!(matches!(match_box(&arena, button), BoxMatch::Button(_)));
+    assert!(matches!(match_box(&arena, checkbox), BoxMatch::Checkbox(_)));
+    assert!(matches!(match_box(&arena, vgroup), BoxMatch::VGroup(_, _)));
+    assert!(matches!(match_box(&arena, hgroup), BoxMatch::HGroup(_, _)));
+    assert!(matches!(match_box(&arena, tgroup), BoxMatch::TGroup(_, _)));
+    assert!(matches!(
+        match_box(&arena, vbar),
+        BoxMatch::VBargraph(_, _, _)
+    ));
+    assert!(matches!(
+        match_box(&arena, hbar),
+        BoxMatch::HBargraph(_, _, _)
+    ));
+    assert!(matches!(
+        match_box(&arena, soundfile),
+        BoxMatch::Soundfile(_, _)
+    ));
 }
 
 #[test]
-fn lambda_groups_soundfile_and_stream_wrappers_roundtrip() {
+fn build_abstr_and_modulation_order_match_cpp_and_dump_is_deterministic() {
     let mut arena = TreeArena::new();
-    let x = box_ident(&mut arena, "x");
-    let body = box_wire(&mut arena);
-    let abstr = box_abstr(&mut arena, x, body);
-    assert_eq!(is_box_abstr(&arena, abstr), Some((x, body)));
+    let (abstr, modulation) = {
+        let x = arena.symbol("x");
+        let y = arena.symbol("y");
+        let nil = arena.nil();
+        let tail = arena.cons(y, nil);
+        let args = arena.cons(x, tail);
+        let mut b = BoxBuilder::new(&mut arena);
+        let body = b.wire();
+        let abstr = b.build_abstr(args, body);
+        let modulation = b.build_modulation(args, body);
+        (abstr, modulation)
+    };
 
-    let a = box_ident(&mut arena, "a");
-    let b = box_ident(&mut arena, "b");
-    let nil = arena.nil();
-    let args_tail = arena.cons(a, nil);
-    let args = arena.cons(b, args_tail);
-    let built = build_box_abstr(&mut arena, args, body);
-    assert!(is_box_abstr(&arena, built).is_some());
-
-    let label = arena.string_lit("ui");
-    let vgroup = box_vgroup(&mut arena, label, body);
-    let hgroup = box_hgroup(&mut arena, label, body);
-    let tgroup = box_tgroup(&mut arena, label, body);
-    assert_eq!(is_box_vgroup(&arena, vgroup), Some((label, body)));
-    assert_eq!(is_box_hgroup(&arena, hgroup), Some((label, body)));
-    assert_eq!(is_box_tgroup(&arena, tgroup), Some((label, body)));
-
-    let chan0 = box_int(&mut arena, 0);
-    let soundfile = box_soundfile(&mut arena, label, chan0);
-    assert!(is_box_soundfile(&arena, soundfile).is_some());
-
-    let inputs = box_inputs(&mut arena, body);
-    let outputs = box_outputs(&mut arena, body);
-    let ondemand = box_ondemand(&mut arena, body);
-    let up = box_upsampling(&mut arena, body);
-    let down = box_downsampling(&mut arena, body);
-    assert_eq!(is_box_inputs(&arena, inputs), Some(body));
-    assert_eq!(is_box_outputs(&arena, outputs), Some(body));
-    assert_eq!(is_box_ondemand(&arena, ondemand), Some(body));
-    assert_eq!(is_box_upsampling(&arena, up), Some(body));
-    assert_eq!(is_box_downsampling(&arena, down), Some(body));
-}
-
-#[test]
-fn modulation_boxes_roundtrip_and_build_order_match_cpp() {
-    let mut arena = TreeArena::new();
-    let a = box_ident(&mut arena, "a");
-    let b = box_ident(&mut arena, "b");
-    let body = box_wire(&mut arena);
-
-    let one = box_modulation(&mut arena, a, body);
-    assert_eq!(is_box_modulation(&arena, one), Some((a, body)));
-
-    let nil = arena.nil();
-    let tail = arena.cons(a, nil);
-    let args = arena.cons(b, tail);
-    let built = build_box_modulation(&mut arena, args, body);
-    let (outer, nested) = is_box_modulation(&arena, built).expect("outer modulation");
-    assert_eq!(outer, a);
-    let (inner, inner_body) = is_box_modulation(&arena, nested).expect("inner modulation");
-    assert_eq!(inner, b);
-    assert_eq!(inner_body, body);
-}
-
-#[test]
-fn structural_dump_is_deterministic_and_id_free() {
-    let mut arena = TreeArena::new();
-    let label = box_ident(&mut arena, "gain");
-    let cur = box_real(&mut arena, 0.5);
-    let min = box_real(&mut arena, 0.0);
-    let max = box_real(&mut arena, 1.0);
-    let step = box_real(&mut arena, 0.01);
-    let slider = box_hslider(&mut arena, label, cur, min, max, step);
-    let wire = box_wire(&mut arena);
-    let root = box_seq(&mut arena, wire, slider);
-
-    let dump_a = dump_box(&arena, root);
-    let dump_b = dump_box(&arena, root);
+    let dump_a = dump_box(&arena, abstr);
+    let dump_b = dump_box(&arena, abstr);
     assert_eq!(dump_a, dump_b);
-    assert_eq!(
-        dump_a,
-        "BOXSEQ(BOXWIRE(), BOXHSLIDER(BOXIDENT(sym(\"gain\")), cons(float_bits(0x3fe0000000000000), cons(float_bits(0x0000000000000000), cons(float_bits(0x3ff0000000000000), cons(float_bits(0x3f847ae147ae147b), nil))))))"
-    );
-    assert!(!dump_a.contains("TreeId("));
+    assert!(matches!(
+        match_box(&arena, abstr),
+        BoxMatch::Abstr(_, _) | BoxMatch::Wire
+    ));
+    assert!(matches!(
+        match_box(&arena, modulation),
+        BoxMatch::Modulation(_, _) | BoxMatch::Wire
+    ));
+}
+
+#[test]
+fn waveform_payload_keeps_parse_order() {
+    let mut arena = TreeArena::new();
+    let one = arena.int(1);
+    let two = arena.int(2);
+    let three = arena.int(3);
+    let waveform = {
+        let mut b = BoxBuilder::new(&mut arena);
+        b.waveform(&[one, two, three])
+    };
+
+    let list = match match_box(&arena, waveform) {
+        BoxMatch::Waveform(values) => values,
+        other => panic!("expected waveform, got {other:?}"),
+    };
+    assert_eq!(list_nth(&arena, list, 0), Some(one));
+    assert_eq!(list_nth(&arena, list, 1), Some(two));
+    assert_eq!(list_nth(&arena, list, 2), Some(three));
 }

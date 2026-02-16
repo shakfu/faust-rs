@@ -1533,3 +1533,75 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo test -p parser-proto --test parser_slice3 --offline --no-fail-fast`
   - `cargo run -p xtask --offline -- golden-check`
+
+### Architecture decision update (canonical IR API style: builder + matcher)
+
+- Recorded and aligned the canonical API direction across porting documents:
+  - `boxes`: `BoxBuilder` + `match_box`
+  - `signals`: `SigBuilder` + `match_sig`
+- Updated documentation files:
+  - `porting/phases/phase-2-block-diagrams-en.md`
+  - `porting/phases/phase-4-signaux-en.md`
+  - `porting/faust-rust-porting-plan-en.md`
+  - `AGENTS.md`
+- Added explicit migration guidance for `boxes`:
+  - keep `box_*` / `is_box_*` as compatibility wrappers during transition,
+  - move new read-side dispatch users to canonical `match_box`,
+  - require wrapper equivalence tests and standard quality gates.
+- Goal:
+  - reduce duplicated `is*` ladders across future passes (`eval`/`propagate`/typing/printing),
+  - keep dispatch logic centralized and explicit before deep Phase 4 implementation.
+
+### Boxes canonical API step 1 (`BoxBuilder` + `match_box` core tranche)
+
+- Implemented first production tranche in `crates/boxes/src/lib.rs`:
+  - added `BoxBuilder<'a>` write-side facade,
+  - added `BoxMatch` + `match_box(...)` read-side canonical dispatch.
+- Scope covered in this tranche:
+  - values: `int`, `real`, `ident`,
+  - core composition: `wire`, `cut`, `seq`, `par`, `rec`, `split`, `merge`,
+  - functional forms: `appl`, `access`, `abstr`, `modulation`,
+  - recursive builders: `build_abstr`, `build_modulation`.
+- Kept compatibility API stable:
+  - existing `box_*` / `is_box_*` functions remain public and unchanged at call sites,
+  - core covered functions now delegate to canonical builder/matcher paths.
+- Added dedicated tests in `crates/boxes/tests/core_api.rs`:
+  - `canonical_builder_matches_free_function_ids_for_core_tranche`,
+  - `match_box_decodes_core_tranche_and_falls_back_to_unknown`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings`
+  - `cargo test -p boxes --offline --no-fail-fast`
+  - `cargo test -p parser-proto --offline --no-fail-fast`
+
+### Boxes canonical API completion (remove public `box_*` / `is_box_*`)
+
+- Completed migration from free-function API to canonical builder/matcher API:
+  - `crates/boxes/src/lib.rs`
+  - public surface now centered on:
+    - `BoxBuilder` (construction),
+    - `match_box` + `BoxMatch` (inspection),
+    - `dump_box` (structural diagnostics).
+- Removed public exports of legacy free functions:
+  - `box_*`, `is_box_*`, `ffunction`, `is_ffunction`, `build_box_abstr`, `build_box_modulation`
+  - these remain internal implementation details inside `boxes`.
+- Migrated parser prototype construction paths to builder API:
+  - `crates/parser-proto/src/lib.rs`
+  - `crates/parser-proto/src/grammar/faustparser.y`
+  - grammar semantic actions now use `state.box_builder().*` constructors.
+- Migrated parser-proto tests away from `boxes::is_box_*` helpers:
+  - added matcher-based test adapter module:
+    - `crates/parser-proto/tests/support/box_match_helpers.rs`
+  - updated parser slice/parity tests to consume this adapter.
+- Reworked boxes integration tests to canonical API only:
+  - `crates/boxes/tests/core_api.rs`
+  - no dependency on legacy free-function exports.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p boxes -p parser-proto -p parser --all-targets --offline -- -D warnings`
+  - `cargo test -p boxes --offline --no-fail-fast`
+  - `cargo test -p parser-proto --offline --no-run`
+  - `cargo test -p parser --offline --no-run`
+  - `cargo test -p boxes -p parser -p parser-proto --offline --no-fail-fast`
+    - expected pre-existing failure remains in `parser-proto` differential test:
+      `cpp_differential` mismatch on stream-wrapper cases (`rep_18_stream_wrappers.dsp`, `stream_wrappers`)

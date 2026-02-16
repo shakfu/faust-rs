@@ -157,6 +157,11 @@ pub enum SigMatch {
 pub fn match_sig(arena: &TreeArena, id: TreeId) -> SigMatch;
 ```
 
+Alignment rule with Phase 2:
+- `SigBuilder`/`match_sig` must mirror the canonical boxes API style (`BoxBuilder`/`match_box`).
+- `propagate` is expected to consume boxes via `match_box` and produce signals via `SigBuilder`.
+- Avoid duplicated dispatch ladders (`isBox*`-style clones) in Phase 4 modules.
+
 #### 2.1.2 Binary operators
 
 ```rust
@@ -408,6 +413,7 @@ propagate  → tlib, boxes, signals, eval, errors
 ```
 
 The order of development within the phase:
+0. Confirm canonical boxes read/write API is available (`BoxBuilder` + `match_box`).
 1. `signals` (types + constructors)
 2. `eval` (box evaluation)
 3. `propagate` (boxes → signals)
@@ -497,6 +503,7 @@ Several semantics are encoded via `gGlobal->nil` sentinels, and `subsignals.cpp`
 - [ ] `process = + ~ _;` produces the expected signals
 - [ ] Standard Faust examples pass the parser → eval → propagate pipeline
 - [ ] One canonical signal-node dispatch layer is used by typing, ordering, sub-signal transforms, and printers
+- [ ] Box-to-signal boundary uses canonical dispatch (`match_box` in `propagate`)
 - [ ] Signal variants currently encoded with sentinels are represented explicitly (no semantic `nil` separators in core signal APIs)
 - [ ] Signal annotation caches are session-scoped and explicit (no hidden cross-pass property coupling)
 - [ ] Type inference is split into focused passes with explicit configuration/context

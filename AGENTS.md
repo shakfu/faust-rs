@@ -51,6 +51,10 @@ Guidelines for contributors and coding agents working on `faust-rs`.
   - internal Rust crate APIs may be adapted for idiomatic ownership/types/error handling,
   - external compatibility surfaces (CLI + C/C++ API tiers) target stable behavior and compatibility contracts.
 - For each touched public API, document mapping status (`1:1`, `adapted`, or `deferred`) with rationale and compatibility impact in the relevant `porting/` phase document or `JOURNAL.md`.
+- For tree-encoded IR crates, prefer canonical builder + matcher APIs over scattered helper ladders:
+  - `boxes`: target `BoxBuilder` + `match_box`,
+  - `signals`: target `SigBuilder` + `match_sig`.
+  `boxes` no longer exposes public `box_*` / `is_box_*`; do not reintroduce them.
 - Prefer real end-to-end integrations over temporary stubs; if a stub is unavoidable, it must be explicitly justified, owner-assigned, time-boxed, and removed within the same phase gate.
 - Define explicit deliverables and pass criteria for each phase/prototype before implementation; do not start deep work on tasks with implicit success conditions.
 - For critical compiler behavior, prefer differential tests against C++ reference outputs.

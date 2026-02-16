@@ -376,16 +376,16 @@ ArgList -> tlib::TreeId:
 
 Argument -> tlib::TreeId:
       Argument SEQ Argument {
-          crate::with_state(state, |state| boxes::box_seq(&mut state.arena, $1, $3))
+          crate::with_state(state, |state| state.box_builder().seq($1, $3))
       }
     | Argument SPLIT Argument {
-          crate::with_state(state, |state| boxes::box_split(&mut state.arena, $1, $3))
+          crate::with_state(state, |state| state.box_builder().split($1, $3))
       }
     | Argument MIX Argument {
-          crate::with_state(state, |state| boxes::box_merge(&mut state.arena, $1, $3))
+          crate::with_state(state, |state| state.box_builder().merge($1, $3))
       }
     | Argument REC Argument {
-          crate::with_state(state, |state| boxes::box_rec(&mut state.arena, $1, $3))
+          crate::with_state(state, |state| state.box_builder().rec($1, $3))
       }
     | InfixExp { $1 }
     ;
@@ -394,37 +394,37 @@ Expression -> tlib::TreeId:
       Expression WITH LBRAQ DefList RBRAQ {
           crate::with_state(state, |state| {
               let defs = state.format_definitions($4);
-              boxes::box_with_local_def(&mut state.arena, $1, defs)
+              state.box_builder().with_local_def($1, defs)
           })
       }
     | Expression LETREC LBRAQ RecList RBRAQ {
           crate::with_state(state, |state| {
               let defs = state.format_definitions($4);
               let nil = state.nil();
-              boxes::box_with_rec_def(&mut state.arena, $1, defs, nil)
+              state.box_builder().with_rec_def($1, defs, nil)
           })
       }
     | Expression LETREC LBRAQ RecList WHERE DefList RBRAQ {
           crate::with_state(state, |state| {
               let rec_defs = state.format_definitions($4);
               let defs = state.format_definitions($6);
-              boxes::box_with_rec_def(&mut state.arena, $1, rec_defs, defs)
+              state.box_builder().with_rec_def($1, rec_defs, defs)
           })
       }
     | Expression PAR Expression {
-          crate::with_state(state, |state| boxes::box_par(&mut state.arena, $1, $3))
+          crate::with_state(state, |state| state.box_builder().par($1, $3))
       }
     | Expression SEQ Expression {
-          crate::with_state(state, |state| boxes::box_seq(&mut state.arena, $1, $3))
+          crate::with_state(state, |state| state.box_builder().seq($1, $3))
       }
     | Expression SPLIT Expression {
-          crate::with_state(state, |state| boxes::box_split(&mut state.arena, $1, $3))
+          crate::with_state(state, |state| state.box_builder().split($1, $3))
       }
     | Expression MIX Expression {
-          crate::with_state(state, |state| boxes::box_merge(&mut state.arena, $1, $3))
+          crate::with_state(state, |state| state.box_builder().merge($1, $3))
       }
     | Expression REC Expression {
-          crate::with_state(state, |state| boxes::box_rec(&mut state.arena, $1, $3))
+          crate::with_state(state, |state| state.box_builder().rec($1, $3))
       }
     | InfixExp { $1 }
     ;
@@ -516,139 +516,139 @@ Primitive -> tlib::TreeId:
           crate::with_state(state, |state| state.signed_float_from_token($lexer, $2, -1.0))
       }
     | WIRE {
-          crate::with_state(state, |state| boxes::box_wire(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().wire())
       }
     | CUT {
-          crate::with_state(state, |state| boxes::box_cut(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().cut())
       }
     | MEM {
-          crate::with_state(state, |state| boxes::box_delay1(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().delay1())
       }
     | PREFIX {
-          crate::with_state(state, |state| boxes::box_prefix(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().prefix())
       }
     | INTCAST {
-          crate::with_state(state, |state| boxes::box_int_cast(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().int_cast())
       }
     | FLOATCAST {
-          crate::with_state(state, |state| boxes::box_float_cast(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().float_cast())
       }
     | ADD {
-          crate::with_state(state, |state| boxes::box_add(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().add())
       }
     | SUB {
-          crate::with_state(state, |state| boxes::box_sub(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().sub())
       }
     | MUL {
-          crate::with_state(state, |state| boxes::box_mul(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().mul())
       }
     | DIV {
-          crate::with_state(state, |state| boxes::box_div(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().div())
       }
     | MOD {
-          crate::with_state(state, |state| boxes::box_rem(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().rem())
       }
     | FDELAY {
-          crate::with_state(state, |state| boxes::box_delay(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().delay())
       }
     | AND {
-          crate::with_state(state, |state| boxes::box_and(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().and())
       }
     | OR {
-          crate::with_state(state, |state| boxes::box_or(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().or())
       }
     | XOR {
-          crate::with_state(state, |state| boxes::box_xor(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().xor())
       }
     | LSH {
-          crate::with_state(state, |state| boxes::box_lsh(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().lsh())
       }
     | RSH {
-          crate::with_state(state, |state| boxes::box_rsh(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().rsh())
       }
     | LT {
-          crate::with_state(state, |state| boxes::box_lt(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().lt())
       }
     | LE {
-          crate::with_state(state, |state| boxes::box_le(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().le())
       }
     | GT {
-          crate::with_state(state, |state| boxes::box_gt(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().gt())
       }
     | GE {
-          crate::with_state(state, |state| boxes::box_ge(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().ge())
       }
     | EQ {
-          crate::with_state(state, |state| boxes::box_eq(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().eq())
       }
     | NE {
-          crate::with_state(state, |state| boxes::box_ne(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().ne())
       }
     | POWOP {
-          crate::with_state(state, |state| boxes::box_pow(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().pow())
       }
     | POWFUN {
-          crate::with_state(state, |state| boxes::box_pow(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().pow())
       }
     | MIN {
-          crate::with_state(state, |state| boxes::box_min(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().min())
       }
     | MAX {
-          crate::with_state(state, |state| boxes::box_max(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().max())
       }
     | RDTBL {
-          crate::with_state(state, |state| boxes::box_read_only_table(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().read_only_table())
       }
     | RWTBL {
-          crate::with_state(state, |state| boxes::box_write_read_table(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().write_read_table())
       }
     | SELECT2 {
-          crate::with_state(state, |state| boxes::box_select2(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().select2())
       }
     | SELECT3 {
-          crate::with_state(state, |state| boxes::box_select3(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().select3())
       }
     | ASSERTBOUNDS {
-          crate::with_state(state, |state| boxes::box_assert_bounds(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().assert_bounds())
       }
     | LOWEST {
-          crate::with_state(state, |state| boxes::box_lowest(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().lowest())
       }
     | HIGHEST {
-          crate::with_state(state, |state| boxes::box_highest(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().highest())
       }
     | ATTACH {
-          crate::with_state(state, |state| boxes::box_attach(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().attach())
       }
     | ENABLE {
-          crate::with_state(state, |state| boxes::box_enable(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().enable())
       }
     | CONTROL {
-          crate::with_state(state, |state| boxes::box_control(&mut state.arena))
+          crate::with_state(state, |state| state.box_builder().control())
       }
     | FFUNCTION LPAR Signature PAR FString PAR RawString RPAR {
           crate::with_state(state, |state| state.box_foreign_function($3, $5, $7))
       }
     | FCONSTANT LPAR Type Name PAR FString RPAR {
-          crate::with_state(state, |state| boxes::box_fconst(&mut state.arena, $3, $4, $6))
+          crate::with_state(state, |state| state.box_builder().fconst($3, $4, $6))
       }
     | FVARIABLE LPAR Type Name PAR FString RPAR {
-          crate::with_state(state, |state| boxes::box_fvar(&mut state.arena, $3, $4, $6))
+          crate::with_state(state, |state| state.box_builder().fvar($3, $4, $6))
       }
     | CASE LBRAQ RuleList RBRAQ {
           crate::with_state(state, |state| state.box_case_checked($3))
       }
     | COMPONENT LPAR UQString RPAR {
-          crate::with_state(state, |state| boxes::box_component(&mut state.arena, $3))
+          crate::with_state(state, |state| state.box_builder().component($3))
       }
     | LIBRARY LPAR UQString RPAR {
-          crate::with_state(state, |state| boxes::box_library(&mut state.arena, $3))
+          crate::with_state(state, |state| state.box_builder().library($3))
       }
     | ENVIRONMENT LBRAQ StmtList RBRAQ {
           crate::with_state(state, |state| {
-              let env = boxes::box_environment(&mut state.arena);
+              let env = state.box_builder().environment();
               let defs = state.format_definitions($3);
-              boxes::box_with_local_def(&mut state.arena, env, defs)
+              state.box_builder().with_local_def(env, defs)
           })
       }
     | WAVEFORM LBRAQ ValList RBRAQ {
@@ -658,78 +658,78 @@ Primitive -> tlib::TreeId:
           crate::with_state(state, |state| state.route_box_default_spec($3, $5))
       }
     | ROUTE LPAR Argument PAR Argument PAR Expression RPAR {
-          crate::with_state(state, |state| boxes::box_route(&mut state.arena, $3, $5, $7))
+          crate::with_state(state, |state| state.box_builder().route($3, $5, $7))
       }
     | BUTTON LPAR UQString RPAR {
-          crate::with_state(state, |state| boxes::box_button(&mut state.arena, $3))
+          crate::with_state(state, |state| state.box_builder().button($3))
       }
     | CHECKBOX LPAR UQString RPAR {
-          crate::with_state(state, |state| boxes::box_checkbox(&mut state.arena, $3))
+          crate::with_state(state, |state| state.box_builder().checkbox($3))
       }
     | VSLIDER LPAR UQString PAR Argument PAR Argument PAR Argument PAR Argument RPAR {
-          crate::with_state(state, |state| boxes::box_vslider(&mut state.arena, $3, $5, $7, $9, $11))
+          crate::with_state(state, |state| state.box_builder().vslider($3, $5, $7, $9, $11))
       }
     | HSLIDER LPAR UQString PAR Argument PAR Argument PAR Argument PAR Argument RPAR {
-          crate::with_state(state, |state| boxes::box_hslider(&mut state.arena, $3, $5, $7, $9, $11))
+          crate::with_state(state, |state| state.box_builder().hslider($3, $5, $7, $9, $11))
       }
     | NENTRY LPAR UQString PAR Argument PAR Argument PAR Argument PAR Argument RPAR {
-          crate::with_state(state, |state| boxes::box_num_entry(&mut state.arena, $3, $5, $7, $9, $11))
+          crate::with_state(state, |state| state.box_builder().num_entry($3, $5, $7, $9, $11))
       }
     | VBARGRAPH LPAR UQString PAR Argument PAR Argument RPAR {
-          crate::with_state(state, |state| boxes::box_vbargraph(&mut state.arena, $3, $5, $7))
+          crate::with_state(state, |state| state.box_builder().vbargraph($3, $5, $7))
       }
     | HBARGRAPH LPAR UQString PAR Argument PAR Argument RPAR {
-          crate::with_state(state, |state| boxes::box_hbargraph(&mut state.arena, $3, $5, $7))
+          crate::with_state(state, |state| state.box_builder().hbargraph($3, $5, $7))
       }
     | VGROUP LPAR UQString PAR Expression RPAR {
-          crate::with_state(state, |state| boxes::box_vgroup(&mut state.arena, $3, $5))
+          crate::with_state(state, |state| state.box_builder().vgroup($3, $5))
       }
     | HGROUP LPAR UQString PAR Expression RPAR {
-          crate::with_state(state, |state| boxes::box_hgroup(&mut state.arena, $3, $5))
+          crate::with_state(state, |state| state.box_builder().hgroup($3, $5))
       }
     | TGROUP LPAR UQString PAR Expression RPAR {
-          crate::with_state(state, |state| boxes::box_tgroup(&mut state.arena, $3, $5))
+          crate::with_state(state, |state| state.box_builder().tgroup($3, $5))
       }
     | SOUNDFILE LPAR UQString PAR Argument RPAR {
-          crate::with_state(state, |state| boxes::box_soundfile(&mut state.arena, $3, $5))
+          crate::with_state(state, |state| state.box_builder().soundfile($3, $5))
       }
     | IPAR LPAR IdentExpr PAR Argument PAR Expression RPAR {
-          crate::with_state(state, |state| boxes::box_ipar(&mut state.arena, $3, $5, $7))
+          crate::with_state(state, |state| state.box_builder().ipar($3, $5, $7))
       }
     | ISEQ LPAR IdentExpr PAR Argument PAR Expression RPAR {
-          crate::with_state(state, |state| boxes::box_iseq(&mut state.arena, $3, $5, $7))
+          crate::with_state(state, |state| state.box_builder().iseq($3, $5, $7))
       }
     | ISUM LPAR IdentExpr PAR Argument PAR Expression RPAR {
-          crate::with_state(state, |state| boxes::box_isum(&mut state.arena, $3, $5, $7))
+          crate::with_state(state, |state| state.box_builder().isum($3, $5, $7))
       }
     | IPROD LPAR IdentExpr PAR Argument PAR Expression RPAR {
-          crate::with_state(state, |state| boxes::box_iprod(&mut state.arena, $3, $5, $7))
+          crate::with_state(state, |state| state.box_builder().iprod($3, $5, $7))
       }
     | INPUTS LPAR Expression RPAR {
-          crate::with_state(state, |state| boxes::box_inputs(&mut state.arena, $3))
+          crate::with_state(state, |state| state.box_builder().inputs($3))
       }
     | OUTPUTS LPAR Expression RPAR {
-          crate::with_state(state, |state| boxes::box_outputs(&mut state.arena, $3))
+          crate::with_state(state, |state| state.box_builder().outputs($3))
       }
     | ONDEMAND LPAR Expression RPAR {
-          crate::with_state(state, |state| boxes::box_ondemand(&mut state.arena, $3))
+          crate::with_state(state, |state| state.box_builder().ondemand($3))
       }
     | UPSAMPLING LPAR Expression RPAR {
-          crate::with_state(state, |state| boxes::box_upsampling(&mut state.arena, $3))
+          crate::with_state(state, |state| state.box_builder().upsampling($3))
       }
     | DOWNSAMPLING LPAR Expression RPAR {
-          crate::with_state(state, |state| boxes::box_downsampling(&mut state.arena, $3))
+          crate::with_state(state, |state| state.box_builder().downsampling($3))
       }
     | LAMBDA LPAR ParamList RPAR DOT LPAR Expression RPAR {
           crate::with_state(state, |state| state.box_lambda($3, $7))
       }
     | LCROC ModList LAPPLY Expression RCROC {
-          crate::with_state(state, |state| boxes::build_box_modulation(&mut state.arena, $2, $4))
+          crate::with_state(state, |state| state.box_builder().build_modulation($2, $4))
       }
     | IdentExpr { $1 }
     | SUB IdentExpr {
           crate::with_state(state, |state| {
-              let zero = boxes::box_int(&mut state.arena, 0);
+              let zero = state.box_builder().int(0);
               state.binary_prim(zero, $2, crate::PrimitiveOp::Sub)
           })
       }

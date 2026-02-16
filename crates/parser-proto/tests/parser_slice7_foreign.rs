@@ -1,4 +1,6 @@
-use boxes::{is_box_fconst, is_box_ffun, is_box_fvar, is_ffunction};
+#[path = "support/box_match_helpers.rs"]
+mod box_match_helpers;
+use box_match_helpers::*;
 use parser_proto::parse_program;
 use tlib::{NodeKind, TreeArena, TreeId};
 
