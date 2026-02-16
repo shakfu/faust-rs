@@ -71,6 +71,11 @@ impl ParseState {
         }
     }
 
+    #[must_use]
+    fn node_builder(&mut self) -> boxes::BoxBuilder<'_> {
+        boxes::BoxBuilder::new(&mut self.arena)
+    }
+
     /// Equivalent to parser-level `nil` list root in C++ actions.
     #[must_use]
     pub fn nil(&mut self) -> TreeId {
@@ -145,7 +150,7 @@ impl ParseState {
     ) -> TreeId {
         let span = token_span(&tok);
         self.update_cursor_from_span(lexer, span);
-        let ident = boxes::box_ident(&mut self.arena, lexer.span_str(span));
+        let ident = self.node_builder().ident(lexer.span_str(span));
         if mark_use {
             self.ctx.set_use_prop_at_cursor(ident);
         }
@@ -220,14 +225,14 @@ impl ParseState {
 
     /// Builds C++-equivalent foreign-function descriptor and wraps it as `boxFFun`.
     #[must_use]
-    pub fn box_foreign_function(
+    pub fn node_foreign_function(
         &mut self,
         signature: TreeId,
         incfile: TreeId,
         libfile: TreeId,
     ) -> TreeId {
-        let ff = boxes::ffunction(&mut self.arena, signature, incfile, libfile);
-        boxes::box_ffun(&mut self.arena, ff)
+        let ff = self.node_builder().ffunction(signature, incfile, libfile);
+        self.node_builder().ffun(ff)
     }
 
     /// Builds one `boxCase` after C++-style rule checks and pattern preparation.
@@ -239,7 +244,7 @@ impl ParseState {
     /// Pattern preparation mirrors C++ `prepareRule(s)` behavior:
     /// only the left-hand side list is transformed recursively.
     #[must_use]
-    pub fn box_case_checked(&mut self, rules: TreeId) -> TreeId {
+    pub fn node_case_checked(&mut self, rules: TreeId) -> TreeId {
         if self.arena.is_nil(rules) {
             self.ctx.error("a case expression can't be empty");
             return self.nil();
@@ -279,13 +284,13 @@ impl ParseState {
         for rule in mapped.iter().rev() {
             mapped_rules = self.cons(*rule, mapped_rules);
         }
-        boxes::box_case(&mut self.arena, mapped_rules)
+        self.node_builder().case(mapped_rules)
     }
 
     /// Equivalent to C++ `buildBoxAbstr(params, body)` for parser lambda forms.
     #[must_use]
-    pub fn box_lambda(&mut self, params: TreeId, body: TreeId) -> TreeId {
-        boxes::build_box_abstr(&mut self.arena, params, body)
+    pub fn node_lambda(&mut self, params: TreeId, body: TreeId) -> TreeId {
+        self.node_builder().build_abstr(params, body)
     }
 
     fn case_rules_arity_reference(&self, rules: TreeId) -> Option<usize> {
@@ -332,14 +337,10 @@ impl ParseState {
 
     fn prepare_pattern(&mut self, node: TreeId) -> TreeId {
         match self.arena.kind(node) {
-            Some(NodeKind::Tag(tag_id))
-                if self.arena.tag_name(*tag_id) == Some("BOXIDENT") =>
-            {
-                boxes::box_pattern_var(&mut self.arena, node)
+            Some(NodeKind::Tag(tag_id)) if self.arena.tag_name(*tag_id) == Some("BOXIDENT") => {
+                self.node_builder().pattern_var(node)
             }
-            Some(NodeKind::Tag(tag_id))
-                if self.arena.tag_name(*tag_id) == Some("BOXAPPL") =>
-            {
+            Some(NodeKind::Tag(tag_id)) if self.arena.tag_name(*tag_id) == Some("BOXAPPL") => {
                 let Some(children) = self.arena.children(node) else {
                     return node;
                 };
@@ -357,16 +358,16 @@ impl ParseState {
                     }
                     _ => self.prepare_pattern(fun),
                 };
-                boxes::box_appl(&mut self.arena, mapped_fun, mapped_args)
+                self.node_builder().appl(mapped_fun, mapped_args)
             }
             Some(NodeKind::Tag(tag_id)) => {
-                let tag_kind = NodeKind::Tag(*tag_id);
+                let tag_id = *tag_id;
                 let children = self.arena.children(node).unwrap_or(&[]).to_vec();
                 let mut mapped = Vec::with_capacity(children.len());
                 for child in children {
                     mapped.push(self.prepare_pattern(child));
                 }
-                self.arena.intern(tag_kind, &mapped)
+                self.arena.intern(NodeKind::Tag(tag_id), &mapped)
             }
             Some(NodeKind::Cons) => self.map_list_with(node, |s, id| s.prepare_pattern(id)),
             _ => node,
@@ -384,10 +385,10 @@ impl ParseState {
         self.update_cursor_from_span(lexer, span);
         let raw = lexer.span_str(span);
         match raw.parse::<i64>() {
-            Ok(value) => boxes::box_int(&mut self.arena, value),
+            Ok(value) => self.node_builder().int(value),
             Err(_) => {
                 self.ctx.error("invalid INT literal");
-                boxes::box_int(&mut self.arena, 0)
+                self.node_builder().int(0)
             }
         }
     }
@@ -404,10 +405,10 @@ impl ParseState {
         let raw = lexer.span_str(span);
         let normalized = raw.strip_suffix('f').unwrap_or(raw);
         match normalized.parse::<f64>() {
-            Ok(value) => boxes::box_real(&mut self.arena, value),
+            Ok(value) => self.node_builder().real(value),
             Err(_) => {
                 self.ctx.error("invalid FLOAT literal");
-                boxes::box_real(&mut self.arena, 0.0)
+                self.node_builder().real(0.0)
             }
         }
     }
@@ -542,16 +543,16 @@ impl ParseState {
     #[must_use]
     pub fn waveform_box_from_ctx(&mut self) -> TreeId {
         let values = self.ctx.take_waveform();
-        boxes::box_waveform(&mut self.arena, &values)
+        self.node_builder().waveform(&values)
     }
 
     /// Builds `boxRoute(n,m,boxPar(boxInt(0),boxInt(0)))` like C++ fake-route form.
     #[must_use]
     pub fn route_box_default_spec(&mut self, n: TreeId, m: TreeId) -> TreeId {
-        let z0 = boxes::box_int(&mut self.arena, 0);
-        let z1 = boxes::box_int(&mut self.arena, 0);
-        let fake = boxes::box_par(&mut self.arena, z0, z1);
-        boxes::box_route(&mut self.arena, n, m, fake)
+        let z0 = self.node_builder().int(0);
+        let z1 = self.node_builder().int(0);
+        let fake = self.node_builder().par(z0, z1);
+        self.node_builder().route(n, m, fake)
     }
 
     /// Parses one signed integer literal token to `boxInt`.
@@ -566,10 +567,10 @@ impl ParseState {
         self.update_cursor_from_span(lexer, span);
         let raw = lexer.span_str(span);
         match raw.parse::<i64>() {
-            Ok(value) => boxes::box_int(&mut self.arena, value.saturating_mul(sign)),
+            Ok(value) => self.node_builder().int(value.saturating_mul(sign)),
             Err(_) => {
                 self.ctx.error("invalid signed INT literal");
-                boxes::box_int(&mut self.arena, 0)
+                self.node_builder().int(0)
             }
         }
     }
@@ -587,10 +588,10 @@ impl ParseState {
         let raw = lexer.span_str(span);
         let normalized = raw.strip_suffix('f').unwrap_or(raw);
         match normalized.parse::<f64>() {
-            Ok(value) => boxes::box_real(&mut self.arena, value * sign),
+            Ok(value) => self.node_builder().real(value * sign),
             Err(_) => {
                 self.ctx.error("invalid signed FLOAT literal");
-                boxes::box_real(&mut self.arena, 0.0)
+                self.node_builder().real(0.0)
             }
         }
     }
@@ -598,51 +599,51 @@ impl ParseState {
     /// Encodes C++ infix primitive lowering: `a op b` -> `boxSeq(boxPar(a,b), boxOp())`.
     #[must_use]
     pub fn binary_prim(&mut self, left: TreeId, right: TreeId, op: PrimitiveOp) -> TreeId {
-        let pair = boxes::box_par(&mut self.arena, left, right);
+        let pair = self.node_builder().par(left, right);
         let prim = self.prim_box(op);
-        boxes::box_seq(&mut self.arena, pair, prim)
+        self.node_builder().seq(pair, prim)
     }
 
     /// Encodes postfix primitive lowering: `a op` -> `boxSeq(a, boxOp())`.
     #[must_use]
     pub fn postfix_prim(&mut self, expr: TreeId, op: PrimitiveOp) -> TreeId {
         let prim = self.prim_box(op);
-        boxes::box_seq(&mut self.arena, expr, prim)
+        self.node_builder().seq(expr, prim)
     }
 
     /// Equivalent to C++ `buildBoxAppl` prototype behavior (`boxAppl(fun, revarglist)`).
     #[must_use]
     pub fn apply_box(&mut self, fun: TreeId, rev_arg_list: TreeId) -> TreeId {
-        boxes::box_appl(&mut self.arena, fun, rev_arg_list)
+        self.node_builder().appl(fun, rev_arg_list)
     }
 
     /// Equivalent to C++ `boxAccess`.
     #[must_use]
     pub fn access_box(&mut self, expr: TreeId, ident: TreeId) -> TreeId {
-        boxes::box_access(&mut self.arena, expr, ident)
+        self.node_builder().access(expr, ident)
     }
 
     fn prim_box(&mut self, op: PrimitiveOp) -> TreeId {
         match op {
-            PrimitiveOp::Add => boxes::box_add(&mut self.arena),
-            PrimitiveOp::Sub => boxes::box_sub(&mut self.arena),
-            PrimitiveOp::Mul => boxes::box_mul(&mut self.arena),
-            PrimitiveOp::Div => boxes::box_div(&mut self.arena),
-            PrimitiveOp::Rem => boxes::box_rem(&mut self.arena),
-            PrimitiveOp::And => boxes::box_and(&mut self.arena),
-            PrimitiveOp::Or => boxes::box_or(&mut self.arena),
-            PrimitiveOp::Xor => boxes::box_xor(&mut self.arena),
-            PrimitiveOp::Lsh => boxes::box_lsh(&mut self.arena),
-            PrimitiveOp::Rsh => boxes::box_rsh(&mut self.arena),
-            PrimitiveOp::Lt => boxes::box_lt(&mut self.arena),
-            PrimitiveOp::Le => boxes::box_le(&mut self.arena),
-            PrimitiveOp::Gt => boxes::box_gt(&mut self.arena),
-            PrimitiveOp::Ge => boxes::box_ge(&mut self.arena),
-            PrimitiveOp::Eq => boxes::box_eq(&mut self.arena),
-            PrimitiveOp::Ne => boxes::box_ne(&mut self.arena),
-            PrimitiveOp::Pow => boxes::box_pow(&mut self.arena),
-            PrimitiveOp::Delay => boxes::box_delay(&mut self.arena),
-            PrimitiveOp::Delay1 => boxes::box_delay1(&mut self.arena),
+            PrimitiveOp::Add => self.node_builder().add(),
+            PrimitiveOp::Sub => self.node_builder().sub(),
+            PrimitiveOp::Mul => self.node_builder().mul(),
+            PrimitiveOp::Div => self.node_builder().div(),
+            PrimitiveOp::Rem => self.node_builder().rem(),
+            PrimitiveOp::And => self.node_builder().and(),
+            PrimitiveOp::Or => self.node_builder().or(),
+            PrimitiveOp::Xor => self.node_builder().xor(),
+            PrimitiveOp::Lsh => self.node_builder().lsh(),
+            PrimitiveOp::Rsh => self.node_builder().rsh(),
+            PrimitiveOp::Lt => self.node_builder().lt(),
+            PrimitiveOp::Le => self.node_builder().le(),
+            PrimitiveOp::Gt => self.node_builder().gt(),
+            PrimitiveOp::Ge => self.node_builder().ge(),
+            PrimitiveOp::Eq => self.node_builder().eq(),
+            PrimitiveOp::Ne => self.node_builder().ne(),
+            PrimitiveOp::Pow => self.node_builder().pow(),
+            PrimitiveOp::Delay => self.node_builder().delay(),
+            PrimitiveOp::Delay1 => self.node_builder().delay1(),
         }
     }
 
