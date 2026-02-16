@@ -1896,3 +1896,42 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p compiler --all-targets`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --all-targets`
+
+### Phase 4 integration step 3 (Rust vs C++ differential status for signal pipeline)
+
+- Added differential integration test:
+  - `crates/compiler/tests/cpp_signal_differential.rs`
+- Differential scope (current supported subset):
+  - valid corpus files:
+    - `rep_01_passthrough.dsp`
+    - `rep_02_gain_bias.dsp`
+    - `rep_21_operator_precedence.dsp`
+    - `rep_23_feedback_simple.dsp`
+  - malformed inline case:
+    - `process = ;`
+- Differential policy:
+  - compare Rust signal pipeline status (`compile_*_to_signals`) vs C++ status using
+    `faust -norm`,
+  - robust C++ classification handles `-norm` non-zero exit codes when normal-form dump
+    succeeds (`Dump normal form finished...`),
+  - skip test when no C++ compiler is available (`FAUST_CPP_BIN` unset and no `/usr/local/bin/faust`).
+- Last local differential run (with C++ source-of-truth `/Users/letz/Developpements/RUST/faust`
+  at commit `8eebea429` and binary `/usr/local/bin/faust`):
+  - `rep_01_passthrough`: `rust=Ok`, `cpp=Ok`
+  - `rep_02_gain_bias`: `rust=Ok`, `cpp=Ok`
+  - `rep_21_operator_precedence`: `rust=Ok`, `cpp=Ok`
+  - `rep_23_feedback_simple`: `rust=Ok`, `cpp=Ok`
+  - `malformed_missing_rhs`: `rust=Error`, `cpp=Error`
+- Unresolved gap list (outside this differential subset, tracked for next propagation slices):
+  - sequential arity forms currently rejected in Rust pipeline for:
+    - `tests/corpus/rep_10_two_in_two_out_ui.dsp`
+    - `tests/corpus/rep_22_parallel_mix.dsp`
+  - this indicates remaining `propagate` coverage work for additional composition shapes
+    used after eval lowering.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p compiler --all-targets -- -D warnings`
+  - `cargo test -p compiler --all-targets`
+  - `cargo test -p compiler --test cpp_signal_differential -- --nocapture`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace --all-targets`
