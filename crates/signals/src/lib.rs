@@ -139,6 +139,29 @@ impl BinOp {
             Self::Xor => "^",
         }
     }
+
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Sub => "sub",
+            Self::Mul => "mul",
+            Self::Div => "div",
+            Self::Rem => "rem",
+            Self::Lsh => "lsh",
+            Self::ARsh => "arsh",
+            Self::LRsh => "lrsh",
+            Self::Gt => "gt",
+            Self::Lt => "lt",
+            Self::Ge => "ge",
+            Self::Le => "le",
+            Self::Eq => "eq",
+            Self::Ne => "ne",
+            Self::And => "and",
+            Self::Or => "or",
+            Self::Xor => "xor",
+        }
+    }
 }
 
 /// Canonical builder API for constructing signal nodes.
@@ -661,6 +684,17 @@ pub fn dump_sig(arena: &TreeArena, root: SigId) -> String {
     out
 }
 
+/// Deterministic structural dump with readable `SIGBINOP` opcode names.
+///
+/// This keeps the stable dump shape and only augments binary-operator nodes
+/// with `op=<name> (<symbol>)` metadata.
+#[must_use]
+pub fn dump_sig_readable(arena: &TreeArena, root: SigId) -> String {
+    let mut out = String::new();
+    dump_node_readable(arena, root, &mut out);
+    out
+}
+
 fn intern_tag(arena: &mut TreeArena, tag: &str, children: &[SigId]) -> SigId {
     let tag_id = arena.intern_tag(tag);
     arena.intern(NodeKind::Tag(tag_id), children)
@@ -745,6 +779,77 @@ fn dump_node(arena: &TreeArena, id: SigId, out: &mut String) {
                     out.push_str(", ");
                 }
                 dump_node(arena, *child, out);
+            }
+            out.push(')');
+        }
+    }
+}
+
+fn dump_node_readable(arena: &TreeArena, id: SigId, out: &mut String) {
+    let Some(node) = arena.node(id) else {
+        write!(out, "<invalid:{}>", id.as_u32()).expect("String write cannot fail");
+        return;
+    };
+
+    match &node.kind {
+        NodeKind::Nil => out.push_str("nil"),
+        NodeKind::Cons => {
+            out.push_str("cons(");
+            if let Some(head) = node.children.get(0) {
+                dump_node_readable(arena, head, out);
+            } else {
+                out.push_str("<missing>");
+            }
+            out.push_str(", ");
+            if let Some(tail) = node.children.get(1) {
+                dump_node_readable(arena, tail, out);
+            } else {
+                out.push_str("<missing>");
+            }
+            out.push(')');
+        }
+        NodeKind::Symbol(name) => {
+            write!(out, "sym({name:?})").expect("String write cannot fail");
+        }
+        NodeKind::StringLiteral(value) => {
+            write!(out, "str({value:?})").expect("String write cannot fail");
+        }
+        NodeKind::Int(value) => {
+            write!(out, "int({value})").expect("String write cannot fail");
+        }
+        NodeKind::FloatBits(bits) => {
+            write!(out, "float_bits(0x{bits:016x})").expect("String write cannot fail");
+        }
+        NodeKind::Tag(tag_id) => {
+            let tag_name = arena.tag_name(*tag_id).unwrap_or("<unknown-tag>");
+            if tag_name == SIG_BINOP_TAG && node.children.len() == 3 {
+                let op_id = node.children.get(0).unwrap_or_else(|| arena.nil());
+                let x_id = node.children.get(1).unwrap_or_else(|| arena.nil());
+                let y_id = node.children.get(2).unwrap_or_else(|| arena.nil());
+                out.push_str(SIG_BINOP_TAG);
+                out.push_str("(op=");
+                let op_desc = match arena.kind(op_id) {
+                    Some(NodeKind::Int(raw)) => match BinOp::from_raw(*raw) {
+                        Some(op) => format!("{} ({})", op.name(), op.symbol()),
+                        None => format!("unknown({raw})"),
+                    },
+                    _ => "unknown".to_owned(),
+                };
+                out.push_str(&op_desc);
+                out.push_str(", ");
+                dump_node_readable(arena, x_id, out);
+                out.push_str(", ");
+                dump_node_readable(arena, y_id, out);
+                out.push(')');
+                return;
+            }
+
+            write!(out, "{tag_name}(").expect("String write cannot fail");
+            for (idx, child) in node.children.as_slice().iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                dump_node_readable(arena, *child, out);
             }
             out.push(')');
         }

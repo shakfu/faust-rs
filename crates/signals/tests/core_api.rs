@@ -1,4 +1,4 @@
-use signals::{BinOp, SigBuilder, SigMatch, dump_sig, match_sig};
+use signals::{BinOp, SigBuilder, SigMatch, dump_sig, dump_sig_readable, match_sig};
 use tlib::TreeArena;
 
 #[test]
@@ -136,4 +136,15 @@ fn dump_is_deterministic() {
     let a = dump_sig(&arena, sig);
     let c = dump_sig(&arena, sig);
     assert_eq!(a, c);
+}
+
+#[test]
+fn dump_readable_prints_binop_opcode_name() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let x = b.input(0);
+    let y = b.input(1);
+    let add = b.add(x, y);
+    let got = dump_sig_readable(&arena, add);
+    assert!(got.contains("SIGBINOP(op=add (+),"));
 }

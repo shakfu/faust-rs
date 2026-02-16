@@ -1,6 +1,6 @@
 use boxes::dump_box;
 use compiler::{Compiler, golden_snapshot_from_file};
-use signals::dump_sig;
+use signals::dump_sig_readable;
 use std::path::PathBuf;
 
 fn parse_input_with_import_dirs(
@@ -123,7 +123,10 @@ fn main() {
                         out.process_arity.inputs, out.process_arity.outputs
                     );
                     for (index, sig) in out.signals.iter().enumerate() {
-                        println!("[{index}] {}", dump_sig(&out.parse.state.arena, *sig));
+                        println!(
+                            "[{index}] {}",
+                            dump_sig_readable(&out.parse.state.arena, *sig)
+                        );
                     }
                 }
                 Err(err) => {
