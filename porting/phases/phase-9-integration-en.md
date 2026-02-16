@@ -407,7 +407,7 @@ cffi     → compiler, tlib, boxes, signals
 ```
 
 Additional external dependencies:
-- `clap` or `lexopt`: parsing CLI arguments
+- `clap`: default parser for CLI arguments (fallback alternatives only with documented justification)
 - `rayon`: parallelization (compile_batch, multi-target)
 - `cbindgen`: generation of the C header (build.rs)
 - `sha1`: calculation of SHA for cache keys

@@ -15,6 +15,7 @@ Guidelines for contributors and coding agents working on `faust-rs`.
 - Respect crate boundaries; avoid circular dependencies.
 - Add new code in the most specific crate first, then expose upward through public APIs.
 - Keep `crates/compiler` as the top-level orchestration crate (lib + CLI entry point).
+- Use `clap` as the default command-line argument parser for user-facing binaries; use another parser only with an explicit documented reason in `porting/` or `JOURNAL.md`.
 - Keep crate responsibilities aligned with `porting/faust-rust-porting-plan-en.md` section 2/4.
 - Preserve key integrations recommended by the plan:
   - `patternmatcher` logic merged into `eval`.

@@ -75,6 +75,11 @@ Related design note (recursion representation and RouteIR coexistence):
   - `cargo test --workspace --all-targets`
 - If one command cannot be run in the current step, the reason and follow-up owner/date must be recorded in `JOURNAL.md`.
 
+### CLI argument parsing policy
+
+- Use `clap` as the default CLI argument parser for user-facing binaries (`compiler` CLI and related tools).
+- Alternative parsers are acceptable only when justified with a concrete constraint (for example binary size or startup profile) and documented in `JOURNAL.md` and the relevant phase document.
+
 ---
 
 ## 2. Current C++ source code mapping

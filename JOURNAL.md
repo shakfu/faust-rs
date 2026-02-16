@@ -1676,3 +1676,10 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy -p signals --all-targets --offline -- -D warnings`
   - `cargo test -p signals --offline --no-fail-fast`
+
+### Documentation policy update: `clap` as default CLI parser
+
+- Updated governance docs so CLI parsing policy is explicit and consistent:
+  - `AGENTS.md`: `clap` is the default parser for user-facing binaries.
+  - `porting/faust-rust-porting-plan-en.md`: added a dedicated CLI parsing policy section.
+  - `porting/phases/phase-9-integration-en.md`: dependency list now states `clap` as default, with documented-justification fallback for alternatives.
