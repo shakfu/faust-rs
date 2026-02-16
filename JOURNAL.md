@@ -1605,3 +1605,26 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p boxes -p parser -p parser-proto --offline --no-fail-fast`
     - expected pre-existing failure remains in `parser-proto` differential test:
       `cpp_differential` mismatch on stream-wrapper cases (`rep_18_stream_wrappers.dsp`, `stream_wrappers`)
+
+### `match_box` hot-path benchmark + dispatch optimization
+
+- Added dedicated release benchmark binary:
+  - `crates/boxes/src/bin/match_box_bench.rs`
+  - run with: `cargo run -p boxes --release --bin match_box_bench`
+- Optimized `match_box` dispatch in `crates/boxes/src/lib.rs`:
+  - switched from large tuple/slice pattern matching to arity-first dispatch (`children.len()` -> tag match),
+  - added single-pass slider parameter decoder `slider_params4(...)` to avoid repeated list traversal for
+    `vslider` / `hslider` / `nentry`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p boxes --all-targets --offline -- -D warnings`
+  - `cargo test -p boxes --offline --no-fail-fast`
+- Benchmark results (same machine/workload):
+  - before:
+    - `primitives`: `15.09 ns/op` (`66.28 Mops/s`)
+    - `sliders`: `22.39 ns/op` (`44.66 Mops/s`)
+    - `mixed`: `14.15 ns/op` (`70.65 Mops/s`)
+  - after:
+    - `primitives`: `12.04 ns/op` (`83.09 Mops/s`) -> `~1.25x`
+    - `sliders`: `21.95 ns/op` (`45.55 Mops/s`) -> `~1.02x`
+    - `mixed`: `13.38 ns/op` (`74.76 Mops/s`) -> `~1.06x`

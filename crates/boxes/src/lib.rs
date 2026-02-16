@@ -657,133 +657,128 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
         NodeKind::FloatBits(bits) => BoxMatch::Real(f64::from_bits(*bits)),
         NodeKind::Tag(tag) => {
             let children = node.children.as_slice();
-            match (tag.as_ref(), children) {
-                (BOX_IDENT_TAG, [sym]) => match arena.kind(*sym) {
-                    Some(NodeKind::Symbol(name)) => BoxMatch::Ident(name.as_ref()),
+            match children.len() {
+                0 => match tag.as_ref() {
+                    BOX_WIRE_TAG => BoxMatch::Wire,
+                    BOX_CUT_TAG => BoxMatch::Cut,
+                    BOX_ADD_TAG => BoxMatch::Add,
+                    BOX_SUB_TAG => BoxMatch::Sub,
+                    BOX_MUL_TAG => BoxMatch::Mul,
+                    BOX_DIV_TAG => BoxMatch::Div,
+                    BOX_REM_TAG => BoxMatch::Rem,
+                    BOX_AND_TAG => BoxMatch::And,
+                    BOX_OR_TAG => BoxMatch::Or,
+                    BOX_XOR_TAG => BoxMatch::Xor,
+                    BOX_LSH_TAG => BoxMatch::Lsh,
+                    BOX_RSH_TAG => BoxMatch::Rsh,
+                    BOX_LT_TAG => BoxMatch::Lt,
+                    BOX_LE_TAG => BoxMatch::Le,
+                    BOX_GT_TAG => BoxMatch::Gt,
+                    BOX_GE_TAG => BoxMatch::Ge,
+                    BOX_EQ_TAG => BoxMatch::Eq,
+                    BOX_NE_TAG => BoxMatch::Ne,
+                    BOX_POW_TAG => BoxMatch::Pow,
+                    BOX_DELAY_TAG => BoxMatch::Delay,
+                    BOX_DELAY1_TAG => BoxMatch::Delay1,
+                    BOX_MIN_TAG => BoxMatch::Min,
+                    BOX_MAX_TAG => BoxMatch::Max,
+                    BOX_PREFIX_TAG => BoxMatch::Prefix,
+                    BOX_INT_CAST_TAG => BoxMatch::IntCast,
+                    BOX_FLOAT_CAST_TAG => BoxMatch::FloatCast,
+                    BOX_READ_ONLY_TABLE_TAG => BoxMatch::ReadOnlyTable,
+                    BOX_WRITE_READ_TABLE_TAG => BoxMatch::WriteReadTable,
+                    BOX_SELECT2_TAG => BoxMatch::Select2,
+                    BOX_SELECT3_TAG => BoxMatch::Select3,
+                    BOX_ASSERT_BOUNDS_TAG => BoxMatch::AssertBounds,
+                    BOX_LOWEST_TAG => BoxMatch::Lowest,
+                    BOX_HIGHEST_TAG => BoxMatch::Highest,
+                    BOX_ATTACH_TAG => BoxMatch::Attach,
+                    BOX_ENABLE_TAG => BoxMatch::Enable,
+                    BOX_CONTROL_TAG => BoxMatch::Control,
+                    BOX_ENVIRONMENT_TAG => BoxMatch::Environment,
                     _ => BoxMatch::Unknown,
                 },
-                (BOX_WIRE_TAG, []) => BoxMatch::Wire,
-                (BOX_CUT_TAG, []) => BoxMatch::Cut,
-                (BOX_SEQ_TAG, [l, r]) => BoxMatch::Seq(*l, *r),
-                (BOX_PAR_TAG, [l, r]) => BoxMatch::Par(*l, *r),
-                (BOX_REC_TAG, [l, r]) => BoxMatch::Rec(*l, *r),
-                (BOX_SPLIT_TAG, [l, r]) => BoxMatch::Split(*l, *r),
-                (BOX_MERGE_TAG, [l, r]) => BoxMatch::Merge(*l, *r),
-                (BOX_APPL_TAG, [fun, args]) => BoxMatch::Appl(*fun, *args),
-                (BOX_ACCESS_TAG, [expr, ident]) => BoxMatch::Access(*expr, *ident),
-                (BOX_ADD_TAG, []) => BoxMatch::Add,
-                (BOX_SUB_TAG, []) => BoxMatch::Sub,
-                (BOX_MUL_TAG, []) => BoxMatch::Mul,
-                (BOX_DIV_TAG, []) => BoxMatch::Div,
-                (BOX_REM_TAG, []) => BoxMatch::Rem,
-                (BOX_AND_TAG, []) => BoxMatch::And,
-                (BOX_OR_TAG, []) => BoxMatch::Or,
-                (BOX_XOR_TAG, []) => BoxMatch::Xor,
-                (BOX_LSH_TAG, []) => BoxMatch::Lsh,
-                (BOX_RSH_TAG, []) => BoxMatch::Rsh,
-                (BOX_LT_TAG, []) => BoxMatch::Lt,
-                (BOX_LE_TAG, []) => BoxMatch::Le,
-                (BOX_GT_TAG, []) => BoxMatch::Gt,
-                (BOX_GE_TAG, []) => BoxMatch::Ge,
-                (BOX_EQ_TAG, []) => BoxMatch::Eq,
-                (BOX_NE_TAG, []) => BoxMatch::Ne,
-                (BOX_POW_TAG, []) => BoxMatch::Pow,
-                (BOX_DELAY_TAG, []) => BoxMatch::Delay,
-                (BOX_DELAY1_TAG, []) => BoxMatch::Delay1,
-                (BOX_MIN_TAG, []) => BoxMatch::Min,
-                (BOX_MAX_TAG, []) => BoxMatch::Max,
-                (BOX_PREFIX_TAG, []) => BoxMatch::Prefix,
-                (BOX_INT_CAST_TAG, []) => BoxMatch::IntCast,
-                (BOX_FLOAT_CAST_TAG, []) => BoxMatch::FloatCast,
-                (BOX_READ_ONLY_TABLE_TAG, []) => BoxMatch::ReadOnlyTable,
-                (BOX_WRITE_READ_TABLE_TAG, []) => BoxMatch::WriteReadTable,
-                (BOX_SELECT2_TAG, []) => BoxMatch::Select2,
-                (BOX_SELECT3_TAG, []) => BoxMatch::Select3,
-                (BOX_ASSERT_BOUNDS_TAG, []) => BoxMatch::AssertBounds,
-                (BOX_LOWEST_TAG, []) => BoxMatch::Lowest,
-                (BOX_HIGHEST_TAG, []) => BoxMatch::Highest,
-                (BOX_ATTACH_TAG, []) => BoxMatch::Attach,
-                (BOX_ENABLE_TAG, []) => BoxMatch::Enable,
-                (BOX_CONTROL_TAG, []) => BoxMatch::Control,
-                (BOX_IPAR_TAG, [index, count, body]) => BoxMatch::IPar(*index, *count, *body),
-                (BOX_ISEQ_TAG, [index, count, body]) => BoxMatch::ISeq(*index, *count, *body),
-                (BOX_ISUM_TAG, [index, count, body]) => BoxMatch::ISum(*index, *count, *body),
-                (BOX_IPROD_TAG, [index, count, body]) => BoxMatch::IProd(*index, *count, *body),
-                (BOX_WITH_LOCAL_DEF_TAG, [body, defs]) => BoxMatch::WithLocalDef(*body, *defs),
-                (BOX_WITH_REC_DEF_TAG, [body, defs, defs2]) => {
-                    BoxMatch::WithRecDef(*body, *defs, *defs2)
+                1 => {
+                    let c0 = children[0];
+                    match tag.as_ref() {
+                        BOX_IDENT_TAG => match arena.kind(c0) {
+                            Some(NodeKind::Symbol(name)) => BoxMatch::Ident(name.as_ref()),
+                            _ => BoxMatch::Unknown,
+                        },
+                        BOX_COMPONENT_TAG => BoxMatch::Component(c0),
+                        BOX_LIBRARY_TAG => BoxMatch::Library(c0),
+                        BOX_WAVEFORM_TAG => BoxMatch::Waveform(c0),
+                        BOX_FFUN_TAG => BoxMatch::FFun(c0),
+                        BOX_CASE_TAG => BoxMatch::Case(c0),
+                        BOX_PATTERN_VAR_TAG => BoxMatch::PatternVar(c0),
+                        BOX_INPUTS_TAG => BoxMatch::Inputs(c0),
+                        BOX_OUTPUTS_TAG => BoxMatch::Outputs(c0),
+                        BOX_ONDEMAND_TAG => BoxMatch::Ondemand(c0),
+                        BOX_UPSAMPLING_TAG => BoxMatch::Upsampling(c0),
+                        BOX_DOWNSAMPLING_TAG => BoxMatch::Downsampling(c0),
+                        BOX_BUTTON_TAG => BoxMatch::Button(c0),
+                        BOX_CHECKBOX_TAG => BoxMatch::Checkbox(c0),
+                        _ => BoxMatch::Unknown,
+                    }
                 }
-                (BOX_ENVIRONMENT_TAG, []) => BoxMatch::Environment,
-                (BOX_COMPONENT_TAG, [filename]) => BoxMatch::Component(*filename),
-                (BOX_LIBRARY_TAG, [filename]) => BoxMatch::Library(*filename),
-                (BOX_WAVEFORM_TAG, [values]) => BoxMatch::Waveform(*values),
-                (BOX_ROUTE_TAG, [n, m, spec]) => BoxMatch::Route(*n, *m, *spec),
-                (FFUN_TAG, [sig, inc, lib]) => BoxMatch::Ffunction(*sig, *inc, *lib),
-                (BOX_FFUN_TAG, [ff]) => BoxMatch::FFun(*ff),
-                (BOX_FCONST_TAG, [ty, name, file]) => BoxMatch::FConst(*ty, *name, *file),
-                (BOX_FVAR_TAG, [ty, name, file]) => BoxMatch::FVar(*ty, *name, *file),
-                (BOX_CASE_TAG, [rules]) => BoxMatch::Case(*rules),
-                (BOX_PATTERN_VAR_TAG, [ident]) => BoxMatch::PatternVar(*ident),
-                (BOX_ABSTR_TAG, [arg, body]) => BoxMatch::Abstr(*arg, *body),
-                (BOX_MODULATION_TAG, [arg, body]) => BoxMatch::Modulation(*arg, *body),
-                (BOX_INPUTS_TAG, [expr]) => BoxMatch::Inputs(*expr),
-                (BOX_OUTPUTS_TAG, [expr]) => BoxMatch::Outputs(*expr),
-                (BOX_ONDEMAND_TAG, [expr]) => BoxMatch::Ondemand(*expr),
-                (BOX_UPSAMPLING_TAG, [expr]) => BoxMatch::Upsampling(*expr),
-                (BOX_DOWNSAMPLING_TAG, [expr]) => BoxMatch::Downsampling(*expr),
-                (BOX_BUTTON_TAG, [label]) => BoxMatch::Button(*label),
-                (BOX_CHECKBOX_TAG, [label]) => BoxMatch::Checkbox(*label),
-                (BOX_VSLIDER_TAG, [label, params]) => {
-                    let Some(cur) = list_nth(arena, *params, 0) else {
-                        return BoxMatch::Unknown;
-                    };
-                    let Some(min) = list_nth(arena, *params, 1) else {
-                        return BoxMatch::Unknown;
-                    };
-                    let Some(max) = list_nth(arena, *params, 2) else {
-                        return BoxMatch::Unknown;
-                    };
-                    let Some(step) = list_nth(arena, *params, 3) else {
-                        return BoxMatch::Unknown;
-                    };
-                    BoxMatch::VSlider(*label, cur, min, max, step)
+                2 => {
+                    let c0 = children[0];
+                    let c1 = children[1];
+                    match tag.as_ref() {
+                        BOX_SEQ_TAG => BoxMatch::Seq(c0, c1),
+                        BOX_PAR_TAG => BoxMatch::Par(c0, c1),
+                        BOX_REC_TAG => BoxMatch::Rec(c0, c1),
+                        BOX_SPLIT_TAG => BoxMatch::Split(c0, c1),
+                        BOX_MERGE_TAG => BoxMatch::Merge(c0, c1),
+                        BOX_APPL_TAG => BoxMatch::Appl(c0, c1),
+                        BOX_ACCESS_TAG => BoxMatch::Access(c0, c1),
+                        BOX_WITH_LOCAL_DEF_TAG => BoxMatch::WithLocalDef(c0, c1),
+                        BOX_ABSTR_TAG => BoxMatch::Abstr(c0, c1),
+                        BOX_MODULATION_TAG => BoxMatch::Modulation(c0, c1),
+                        BOX_VGROUP_TAG => BoxMatch::VGroup(c0, c1),
+                        BOX_HGROUP_TAG => BoxMatch::HGroup(c0, c1),
+                        BOX_TGROUP_TAG => BoxMatch::TGroup(c0, c1),
+                        BOX_SOUNDFILE_TAG => BoxMatch::Soundfile(c0, c1),
+                        BOX_VSLIDER_TAG => {
+                            let Some((cur, min, max, step)) = slider_params4(arena, c1) else {
+                                return BoxMatch::Unknown;
+                            };
+                            BoxMatch::VSlider(c0, cur, min, max, step)
+                        }
+                        BOX_HSLIDER_TAG => {
+                            let Some((cur, min, max, step)) = slider_params4(arena, c1) else {
+                                return BoxMatch::Unknown;
+                            };
+                            BoxMatch::HSlider(c0, cur, min, max, step)
+                        }
+                        BOX_NUM_ENTRY_TAG => {
+                            let Some((cur, min, max, step)) = slider_params4(arena, c1) else {
+                                return BoxMatch::Unknown;
+                            };
+                            BoxMatch::NumEntry(c0, cur, min, max, step)
+                        }
+                        _ => BoxMatch::Unknown,
+                    }
                 }
-                (BOX_HSLIDER_TAG, [label, params]) => {
-                    let Some(cur) = list_nth(arena, *params, 0) else {
-                        return BoxMatch::Unknown;
-                    };
-                    let Some(min) = list_nth(arena, *params, 1) else {
-                        return BoxMatch::Unknown;
-                    };
-                    let Some(max) = list_nth(arena, *params, 2) else {
-                        return BoxMatch::Unknown;
-                    };
-                    let Some(step) = list_nth(arena, *params, 3) else {
-                        return BoxMatch::Unknown;
-                    };
-                    BoxMatch::HSlider(*label, cur, min, max, step)
+                3 => {
+                    let c0 = children[0];
+                    let c1 = children[1];
+                    let c2 = children[2];
+                    match tag.as_ref() {
+                        BOX_IPAR_TAG => BoxMatch::IPar(c0, c1, c2),
+                        BOX_ISEQ_TAG => BoxMatch::ISeq(c0, c1, c2),
+                        BOX_ISUM_TAG => BoxMatch::ISum(c0, c1, c2),
+                        BOX_IPROD_TAG => BoxMatch::IProd(c0, c1, c2),
+                        BOX_WITH_REC_DEF_TAG => BoxMatch::WithRecDef(c0, c1, c2),
+                        BOX_ROUTE_TAG => BoxMatch::Route(c0, c1, c2),
+                        FFUN_TAG => BoxMatch::Ffunction(c0, c1, c2),
+                        BOX_FCONST_TAG => BoxMatch::FConst(c0, c1, c2),
+                        BOX_FVAR_TAG => BoxMatch::FVar(c0, c1, c2),
+                        BOX_VBARGRAPH_TAG => BoxMatch::VBargraph(c0, c1, c2),
+                        BOX_HBARGRAPH_TAG => BoxMatch::HBargraph(c0, c1, c2),
+                        _ => BoxMatch::Unknown,
+                    }
                 }
-                (BOX_NUM_ENTRY_TAG, [label, params]) => {
-                    let Some(cur) = list_nth(arena, *params, 0) else {
-                        return BoxMatch::Unknown;
-                    };
-                    let Some(min) = list_nth(arena, *params, 1) else {
-                        return BoxMatch::Unknown;
-                    };
-                    let Some(max) = list_nth(arena, *params, 2) else {
-                        return BoxMatch::Unknown;
-                    };
-                    let Some(step) = list_nth(arena, *params, 3) else {
-                        return BoxMatch::Unknown;
-                    };
-                    BoxMatch::NumEntry(*label, cur, min, max, step)
-                }
-                (BOX_VGROUP_TAG, [label, expr]) => BoxMatch::VGroup(*label, *expr),
-                (BOX_HGROUP_TAG, [label, expr]) => BoxMatch::HGroup(*label, *expr),
-                (BOX_TGROUP_TAG, [label, expr]) => BoxMatch::TGroup(*label, *expr),
-                (BOX_VBARGRAPH_TAG, [label, min, max]) => BoxMatch::VBargraph(*label, *min, *max),
-                (BOX_HBARGRAPH_TAG, [label, min, max]) => BoxMatch::HBargraph(*label, *min, *max),
-                (BOX_SOUNDFILE_TAG, [label, chan]) => BoxMatch::Soundfile(*label, *chan),
                 _ => BoxMatch::Unknown,
             }
         }
@@ -1792,10 +1787,7 @@ fn match_slider(
     let [label, params] = match_tag_arity(arena, b, tag, 2)? else {
         return None;
     };
-    let cur = list_nth(arena, *params, 0)?;
-    let min = list_nth(arena, *params, 1)?;
-    let max = list_nth(arena, *params, 2)?;
-    let step = list_nth(arena, *params, 3)?;
+    let (cur, min, max, step) = slider_params4(arena, *params)?;
     Some((*label, cur, min, max, step))
 }
 
@@ -1807,6 +1799,35 @@ fn list4(arena: &mut TreeArena, a: BoxId, b: BoxId, c: BoxId, d: BoxId) -> BoxId
     arena.cons(a, l1)
 }
 
+fn slider_params4(arena: &TreeArena, params: BoxId) -> Option<(BoxId, BoxId, BoxId, BoxId)> {
+    let node0 = arena.node(params)?;
+    if !matches!(node0.kind, NodeKind::Cons) || node0.children.len() != 2 {
+        return None;
+    }
+    let cur = node0.children.get(0)?;
+
+    let node1 = arena.node(node0.children.get(1)?)?;
+    if !matches!(node1.kind, NodeKind::Cons) || node1.children.len() != 2 {
+        return None;
+    }
+    let min = node1.children.get(0)?;
+
+    let node2 = arena.node(node1.children.get(1)?)?;
+    if !matches!(node2.kind, NodeKind::Cons) || node2.children.len() != 2 {
+        return None;
+    }
+    let max = node2.children.get(0)?;
+
+    let node3 = arena.node(node2.children.get(1)?)?;
+    if !matches!(node3.kind, NodeKind::Cons) || node3.children.len() != 2 {
+        return None;
+    }
+    let step = node3.children.get(0)?;
+
+    Some((cur, min, max, step))
+}
+
+#[allow(dead_code)]
 fn list_nth(arena: &TreeArena, mut list: BoxId, mut n: usize) -> Option<BoxId> {
     loop {
         if arena.is_nil(list) {
