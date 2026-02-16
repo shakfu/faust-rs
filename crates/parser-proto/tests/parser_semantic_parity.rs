@@ -4,7 +4,7 @@ use std::process::Command;
 
 #[path = "support/node_match_helpers.rs"]
 mod node_match_helpers;
-use boxes::dump_box;
+use boxes::{BoxMatch, match_box};
 use node_match_helpers::*;
 use parser_proto::parse_program;
 use tlib::{NodeKind, TreeArena, TreeId};
@@ -93,43 +93,79 @@ fn cpp_accepts(cpp_bin: &Path, source: &str, case_name: &str) -> Result<bool, St
 #[test]
 fn infix_and_unary_follow_cxx_action_formulas() {
     let (arena_prec, expr_prec) = parse_process_expr("process = 1 + 2 * 3;", "semantic_prec.dsp");
-    assert_eq!(
-        dump_box(&arena_prec, expr_prec),
-        "BOXSEQ(BOXPAR(int(1), BOXSEQ(BOXPAR(int(2), int(3)), BOXMUL())), BOXADD())"
-    );
+    let (lhs, rhs) = match match_box(&arena_prec, expr_prec) {
+        BoxMatch::Seq(lhs, rhs) => (lhs, rhs),
+        other => panic!("expected top BOXSEQ, got {:?}", other),
+    };
+    assert!(matches!(match_box(&arena_prec, rhs), BoxMatch::Add));
+    let (one, mul_chain) = match match_box(&arena_prec, lhs) {
+        BoxMatch::Par(one, mul_chain) => (one, mul_chain),
+        other => panic!("expected BOXPAR for + lhs, got {:?}", other),
+    };
+    assert!(matches!(arena_prec.kind(one), Some(NodeKind::Int(1))));
+    let (mul_inputs, mul_op) = match match_box(&arena_prec, mul_chain) {
+        BoxMatch::Seq(mul_inputs, mul_op) => (mul_inputs, mul_op),
+        other => panic!("expected mul chain BOXSEQ, got {:?}", other),
+    };
+    assert!(matches!(match_box(&arena_prec, mul_op), BoxMatch::Mul));
+    let (two, three) = match match_box(&arena_prec, mul_inputs) {
+        BoxMatch::Par(two, three) => (two, three),
+        other => panic!("expected BOXPAR for * inputs, got {:?}", other),
+    };
+    assert!(matches!(arena_prec.kind(two), Some(NodeKind::Int(2))));
+    assert!(matches!(arena_prec.kind(three), Some(NodeKind::Int(3))));
 
     let (arena_unary, expr_unary) = parse_process_expr("process = -foo;", "semantic_unary.dsp");
-    assert_eq!(
-        dump_box(&arena_unary, expr_unary),
-        "BOXSEQ(BOXPAR(int(0), BOXIDENT(sym(\"foo\"))), BOXSUB())"
-    );
+    let (lhs, rhs) = match match_box(&arena_unary, expr_unary) {
+        BoxMatch::Seq(lhs, rhs) => (lhs, rhs),
+        other => panic!("expected unary BOXSEQ, got {:?}", other),
+    };
+    assert!(matches!(match_box(&arena_unary, rhs), BoxMatch::Sub));
+    let (zero, ident) = match match_box(&arena_unary, lhs) {
+        BoxMatch::Par(zero, ident) => (zero, ident),
+        other => panic!("expected unary BOXPAR, got {:?}", other),
+    };
+    assert!(matches!(arena_unary.kind(zero), Some(NodeKind::Int(0))));
+    assert_eq!(node_ident_name(&arena_unary, ident), Some("foo"));
 
     let (arena_delay, expr_delay) = parse_process_expr("process = _';", "semantic_delay.dsp");
-    assert_eq!(
-        dump_box(&arena_delay, expr_delay),
-        "BOXSEQ(BOXWIRE(), BOXDELAY1())"
-    );
+    let (lhs, rhs) = match match_box(&arena_delay, expr_delay) {
+        BoxMatch::Seq(lhs, rhs) => (lhs, rhs),
+        other => panic!("expected delay BOXSEQ, got {:?}", other),
+    };
+    assert!(matches!(match_box(&arena_delay, lhs), BoxMatch::Wire));
+    assert!(matches!(match_box(&arena_delay, rhs), BoxMatch::Delay1));
 }
 
 #[test]
 fn application_access_and_route_follow_cxx_action_formulas() {
     let (arena_appl, expr_appl) = parse_process_expr("process = foo(1, 2);", "semantic_appl.dsp");
-    assert_eq!(
-        dump_box(&arena_appl, expr_appl),
-        "BOXAPPL(BOXIDENT(sym(\"foo\")), cons(int(2), cons(int(1), nil)))"
-    );
+    let (callee, args) = match match_box(&arena_appl, expr_appl) {
+        BoxMatch::Appl(callee, args) => (callee, args),
+        other => panic!("expected BOXAPPL, got {:?}", other),
+    };
+    assert_eq!(node_ident_name(&arena_appl, callee), Some("foo"));
+    let first = arena_appl.hd(args).expect("arg list head");
+    let rest = arena_appl.tl(args).expect("arg list tail");
+    let second = arena_appl.hd(rest).expect("arg list second");
+    assert!(matches!(arena_appl.kind(first), Some(NodeKind::Int(2))));
+    assert!(matches!(arena_appl.kind(second), Some(NodeKind::Int(1))));
 
     let (arena_access, expr_access) =
         parse_process_expr("process = foo.bar;", "semantic_access.dsp");
-    assert_eq!(
-        dump_box(&arena_access, expr_access),
-        "BOXACCESS(BOXIDENT(sym(\"foo\")), BOXIDENT(sym(\"bar\")))"
-    );
+    let (head, field) = match match_box(&arena_access, expr_access) {
+        BoxMatch::Access(head, field) => (head, field),
+        other => panic!("expected BOXACCESS, got {:?}", other),
+    };
+    assert_eq!(node_ident_name(&arena_access, head), Some("foo"));
+    assert_eq!(node_ident_name(&arena_access, field), Some("bar"));
 
     let (arena_route, expr_route) =
         parse_process_expr("process = route(_, _);", "semantic_route.dsp");
     let (_n, _m, fake_spec) = is_node_route(&arena_route, expr_route).expect("expected BOXROUTE");
-    assert_eq!(dump_box(&arena_route, fake_spec), "BOXPAR(int(0), int(0))");
+    let (a, b) = is_node_par(&arena_route, fake_spec).expect("route fake spec should be BOXPAR");
+    assert!(matches!(arena_route.kind(a), Some(NodeKind::Int(0))));
+    assert!(matches!(arena_route.kind(b), Some(NodeKind::Int(0))));
 }
 
 #[test]

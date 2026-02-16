@@ -1,6 +1,5 @@
 #[path = "support/node_match_helpers.rs"]
 mod node_match_helpers;
-use boxes::dump_box;
 use node_match_helpers::*;
 use parser_proto::parse_program;
 use tlib::{NodeKind, TreeArena, TreeId};
@@ -109,10 +108,9 @@ fn supports_waveform_and_route_primitives() {
 
     let (_, _, fake_spec) =
         is_node_route(&output.state.arena, route2).expect("route(_,_) should parse");
-    assert_eq!(
-        dump_box(&output.state.arena, fake_spec),
-        "BOXPAR(int(0), int(0))"
-    );
+    let (a, b) = is_node_par(&output.state.arena, fake_spec).expect("route fake spec should par");
+    assert!(matches!(output.state.arena.kind(a), Some(NodeKind::Int(0))));
+    assert!(matches!(output.state.arena.kind(b), Some(NodeKind::Int(0))));
     assert!(is_node_route(&output.state.arena, route3).is_some());
 
     let wave_list =

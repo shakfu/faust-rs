@@ -3,7 +3,7 @@ use std::path::Path;
 
 #[path = "support/node_match_helpers.rs"]
 mod node_match_helpers;
-use boxes::dump_box;
+use boxes::{BoxMatch, match_box};
 use node_match_helpers::*;
 use parser_proto::parse_program;
 use tlib::{TreeArena, TreeId};
@@ -85,10 +85,15 @@ fn supports_recursion_form_plus_tilde_wire() {
     let root = output.root.expect("root should be present");
     let def = list_head(&output.state.arena, root);
     let expr = definition_expr(&output.state.arena, def);
-    assert_eq!(
-        dump_box(&output.state.arena, expr),
-        "BOXREC(BOXADD(), BOXWIRE())"
-    );
+    let (lhs, rhs) = match match_box(&output.state.arena, expr) {
+        BoxMatch::Rec(lhs, rhs) => (lhs, rhs),
+        other => panic!("expected BOXREC, got {:?}", other),
+    };
+    assert!(matches!(match_box(&output.state.arena, lhs), BoxMatch::Add));
+    assert!(matches!(
+        match_box(&output.state.arena, rhs),
+        BoxMatch::Wire
+    ));
 }
 
 #[test]

@@ -1,9 +1,9 @@
 #[path = "support/node_match_helpers.rs"]
 mod node_match_helpers;
-use boxes::dump_box;
+use boxes::{BoxMatch, match_box};
 use node_match_helpers::*;
 use parser_proto::parse_program;
-use tlib::{TreeArena, TreeId};
+use tlib::{NodeKind, TreeArena, TreeId};
 
 fn list_head(arena: &TreeArena, list: TreeId) -> TreeId {
     arena.hd(list).expect("list must be non-empty")
@@ -40,7 +40,7 @@ fn parses_process_wire_definition_and_sets_def_property() {
     let expr = definition_expr(arena, def);
 
     assert_eq!(node_ident_name(arena, name), Some("process"));
-    assert_eq!(dump_box(arena, expr), "BOXWIRE()");
+    assert!(matches!(match_box(arena, expr), BoxMatch::Wire));
     assert_eq!(ctx.def_file_prop(name), Some("unit.dsp"));
     assert_eq!(ctx.def_line_prop(name), Some(1));
 }
@@ -67,7 +67,7 @@ fn error_enddef_recovery_keeps_following_definition() {
     let expr = definition_expr(arena, def);
 
     assert_eq!(node_ident_name(arena, name), Some("process"));
-    assert_eq!(dump_box(arena, expr), "BOXWIRE()");
+    assert!(matches!(match_box(arena, expr), BoxMatch::Wire));
 }
 
 #[test]
@@ -87,8 +87,8 @@ fn parses_ipar_iterative_form() {
 
     let (index, count, body) = is_node_ipar(arena, expr).expect("expression should be BOXIPAR");
     assert_eq!(node_ident_name(arena, index), Some("i"));
-    assert_eq!(dump_box(arena, count), "int(4)");
-    assert_eq!(dump_box(arena, body), "BOXWIRE()");
+    assert!(matches!(arena.kind(count), Some(NodeKind::Int(4))));
+    assert!(matches!(match_box(arena, body), BoxMatch::Wire));
 }
 
 #[test]
