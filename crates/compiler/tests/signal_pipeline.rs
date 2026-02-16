@@ -100,6 +100,32 @@ fn corpus_feedback_simple_exposes_recursive_projection() {
     ));
 }
 
+#[test]
+fn corpus_two_in_two_out_ui_lowers_to_input_slider_muls() {
+    let out = compile_corpus("rep_10_two_in_two_out_ui.dsp");
+    assert_eq!(out.process_arity.inputs, 2);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+
+    assert_mul_input_ui(&out.parse.state.arena, out.signals[0], 0);
+    assert_mul_input_ui(&out.parse.state.arena, out.signals[1], 1);
+}
+
+#[test]
+fn corpus_parallel_mix_lowers_to_sum_of_two_scaled_inputs() {
+    let out = compile_corpus("rep_22_parallel_mix.dsp");
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+
+    let SigMatch::BinOp(BinOp::Add, lhs, rhs) = match_sig(&out.parse.state.arena, out.signals[0])
+    else {
+        panic!("rep_22 should lower to one add signal");
+    };
+    assert_mul_input_const(&out.parse.state.arena, lhs, 0);
+    assert_mul_input_const(&out.parse.state.arena, rhs, 0);
+}
+
 fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i64) {
     let SigMatch::BinOp(BinOp::Mul, a, b) = match_sig(arena, sig) else {
         panic!("branch should be Mul");
@@ -117,5 +143,23 @@ fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i64) {
     assert!(
         ok,
         "mul branch should combine input({expected_input}) with constant"
+    );
+}
+
+fn assert_mul_input_ui(arena: &TreeArena, sig: TreeId, expected_input: i64) {
+    let SigMatch::BinOp(BinOp::Mul, a, b) = match_sig(arena, sig) else {
+        panic!("branch should be Mul");
+    };
+    let am = match_sig(arena, a);
+    let bm = match_sig(arena, b);
+    let ok = matches!(
+        (am, bm),
+        (SigMatch::Input(i), SigMatch::HSlider(_, _, _, _, _))
+            | (SigMatch::HSlider(_, _, _, _, _), SigMatch::Input(i))
+            if i == expected_input
+    );
+    assert!(
+        ok,
+        "mul branch should combine input({expected_input}) with hslider"
     );
 }

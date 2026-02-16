@@ -1963,3 +1963,19 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p eval --all-targets`
   - `cargo run -p compiler -- --dump-sig tests/corpus/rep_10_two_in_two_out_ui.dsp`
   - `cargo run -p compiler -- --dump-sig tests/corpus/rep_22_parallel_mix.dsp`
+
+### Phase 4 integration step 4 (closure of `rep_10` / `rep_22` signal-pipeline validation)
+
+- Extended compiler signal integration tests (`crates/compiler/tests/signal_pipeline.rs`) with:
+  - `rep_10_two_in_two_out_ui.dsp`:
+    - asserts arity (`2 -> 2`) and output shape (`mul(input, hslider)` on each channel),
+  - `rep_22_parallel_mix.dsp`:
+    - asserts arity (`1 -> 1`) and output shape (`add(mul(input,const), mul(input,const))`).
+- Extended Rust vs C++ differential status test (`crates/compiler/tests/cpp_signal_differential.rs`) with:
+  - `rep_10_two_in_two_out_ui.dsp`
+  - `rep_22_parallel_mix.dsp`
+- Result:
+  - the previously tracked unresolved Phase 4 differential subset gap on `rep_10` / `rep_22` is now closed and CI-visible.
+- Validation:
+  - `cargo test -p compiler --test signal_pipeline`
+  - `cargo test -p compiler --test cpp_signal_differential -- --nocapture`

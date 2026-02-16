@@ -161,6 +161,16 @@ fn differential_signal_pipeline_status_against_cpp_reference() {
             expect_valid: true,
         },
         Case {
+            name: "rep_10_two_in_two_out_ui",
+            input: CaseInput::CorpusFile("rep_10_two_in_two_out_ui.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_22_parallel_mix",
+            input: CaseInput::CorpusFile("rep_22_parallel_mix.dsp"),
+            expect_valid: true,
+        },
+        Case {
             name: "rep_23_feedback_simple",
             input: CaseInput::CorpusFile("rep_23_feedback_simple.dsp"),
             expect_valid: true,
