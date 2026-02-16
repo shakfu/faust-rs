@@ -120,12 +120,15 @@ pub enum EvalError {
     UndefinedSymbol { symbol: String },
     MalformedDefinitionNode { node: TreeId },
     MalformedListNode { node: TreeId },
+    MalformedCaseNode { node: TreeId },
     EmptyArgumentList,
     NonIdentifierParameter { node: TreeId },
     NonIdentifierIterationVariable { node: TreeId },
     IterationCountNotInt { node: TreeId },
     IterationCountTooLarge { value: i64 },
     NegativeIterationCount { value: i64 },
+    PatternArityMismatch { expected: usize, got: usize },
+    PatternMatchFailed,
     LoopDetected { node: TreeId },
     RecursionDepthExceeded { max_depth: usize },
 }
@@ -140,6 +143,9 @@ impl Display for EvalError {
             }
             Self::MalformedListNode { node } => {
                 write!(f, "malformed list node {}", node.as_u32())
+            }
+            Self::MalformedCaseNode { node } => {
+                write!(f, "malformed case node {}", node.as_u32())
             }
             Self::EmptyArgumentList => write!(f, "empty argument list"),
             Self::NonIdentifierParameter { node } => {
@@ -165,6 +171,10 @@ impl Display for EvalError {
             Self::NegativeIterationCount { value } => {
                 write!(f, "iteration count is negative: {value}")
             }
+            Self::PatternArityMismatch { expected, got } => {
+                write!(f, "pattern arity mismatch: expected {expected}, got {got}")
+            }
+            Self::PatternMatchFailed => write!(f, "no case rule matches arguments"),
             Self::LoopDetected { node } => {
                 write!(f, "recursive evaluation loop on node {}", node.as_u32())
             }
@@ -218,6 +228,8 @@ pub fn eval_box(
             let rev_args = rev_eval_list(arena, arg, env, loop_detector)?;
             apply_list(arena, efun, rev_args, env, loop_detector)
         }
+        BoxMatch::Case(_) => Ok(expr),
+        BoxMatch::PatternVar(_) => Ok(expr),
         BoxMatch::WithLocalDef(body, defs) => {
             let mut scoped = env.push_scope();
             bind_definitions(arena, defs, &mut scoped)?;
@@ -383,22 +395,26 @@ fn apply_list(
     if arena.is_nil(larg) {
         return Ok(fun);
     }
-    if let BoxMatch::Abstr(id, body) = match_box(arena, fun) {
-        let param_name = ident_name(arena, id)?;
-        let arg = arena
-            .hd(larg)
-            .ok_or(EvalError::MalformedListNode { node: larg })?;
-        let mut scoped = env.push_scope();
-        scoped.bind(param_name, arg);
-        let f = eval_box(arena, body, &scoped, loop_detector)?;
-        let tl = arena
-            .tl(larg)
-            .ok_or(EvalError::MalformedListNode { node: larg })?;
-        apply_list(arena, f, tl, env, loop_detector)
-    } else {
-        let args_par = larg2par(arena, larg)?;
-        let mut b = BoxBuilder::new(arena);
-        Ok(b.seq(args_par, fun))
+    match match_box(arena, fun) {
+        BoxMatch::Abstr(id, body) => {
+            let param_name = ident_name(arena, id)?;
+            let arg = arena
+                .hd(larg)
+                .ok_or(EvalError::MalformedListNode { node: larg })?;
+            let mut scoped = env.push_scope();
+            scoped.bind(param_name, arg);
+            let f = eval_box(arena, body, &scoped, loop_detector)?;
+            let tl = arena
+                .tl(larg)
+                .ok_or(EvalError::MalformedListNode { node: larg })?;
+            apply_list(arena, f, tl, env, loop_detector)
+        }
+        BoxMatch::Case(rules) => apply_case_rules(arena, rules, larg, env, loop_detector),
+        _ => {
+            let args_par = larg2par(arena, larg)?;
+            let mut b = BoxBuilder::new(arena);
+            Ok(b.seq(args_par, fun))
+        }
     }
 }
 
@@ -578,6 +594,140 @@ fn iterate_prod(
         };
     }
     Ok(res)
+}
+
+fn list_to_vec(arena: &TreeArena, mut list: TreeId) -> Result<Vec<TreeId>, EvalError> {
+    let mut out = Vec::new();
+    while !arena.is_nil(list) {
+        let head = arena
+            .hd(list)
+            .ok_or(EvalError::MalformedListNode { node: list })?;
+        out.push(head);
+        list = arena
+            .tl(list)
+            .ok_or(EvalError::MalformedListNode { node: list })?;
+    }
+    Ok(out)
+}
+
+fn vec_to_list(arena: &mut TreeArena, items: &[TreeId]) -> TreeId {
+    let mut out = arena.nil();
+    for id in items.iter().rev() {
+        out = arena.cons(*id, out);
+    }
+    out
+}
+
+fn rule_parts(arena: &TreeArena, rule: TreeId) -> Result<(TreeId, TreeId), EvalError> {
+    let lhs = arena
+        .hd(rule)
+        .ok_or(EvalError::MalformedCaseNode { node: rule })?;
+    let rhs = arena
+        .tl(rule)
+        .ok_or(EvalError::MalformedCaseNode { node: rule })?;
+    Ok((lhs, rhs))
+}
+
+fn apply_case_rules(
+    arena: &mut TreeArena,
+    rules_rev: TreeId,
+    larg: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let args = list_to_vec(arena, larg)?;
+    let mut rules = list_to_vec(arena, rules_rev)?;
+    rules.reverse();
+    let Some(first_rule) = rules.first().copied() else {
+        return Err(EvalError::MalformedCaseNode { node: rules_rev });
+    };
+
+    let (first_lhs, _first_rhs) = rule_parts(arena, first_rule)?;
+    let expected = list_to_vec(arena, first_lhs)?.len();
+    if args.len() < expected {
+        return Err(EvalError::PatternArityMismatch {
+            expected,
+            got: args.len(),
+        });
+    }
+    let consumed = &args[..expected];
+    let rest = &args[expected..];
+
+    for rule in rules {
+        let (lhs_rev, rhs) = rule_parts(arena, rule)?;
+        let mut patterns = list_to_vec(arena, lhs_rev)?;
+        patterns.reverse();
+        if patterns.len() != expected {
+            return Err(EvalError::MalformedCaseNode { node: rule });
+        }
+
+        let mut bindings = Environment::empty();
+        let mut ok = true;
+        for (pat, arg) in patterns.iter().zip(consumed.iter()) {
+            let prepared_pat = eval_box(arena, *pat, env, loop_detector)?;
+            if !match_pattern(arena, prepared_pat, *arg, &mut bindings)? {
+                ok = false;
+                break;
+            }
+        }
+        if !ok {
+            continue;
+        }
+
+        let mut scoped = env.push_scope();
+        for (name, value) in &bindings.bindings {
+            scoped.bind(name.clone(), *value);
+        }
+        let result = eval_box(arena, rhs, &scoped, loop_detector)?;
+        if rest.is_empty() {
+            return Ok(result);
+        }
+        let rest_list = vec_to_list(arena, rest);
+        return apply_list(arena, result, rest_list, env, loop_detector);
+    }
+
+    Err(EvalError::PatternMatchFailed)
+}
+
+fn match_pattern(
+    arena: &TreeArena,
+    pattern: TreeId,
+    value: TreeId,
+    bindings: &mut Environment,
+) -> Result<bool, EvalError> {
+    if let BoxMatch::PatternVar(ident_node) = match_box(arena, pattern) {
+        let name = ident_name(arena, ident_node)?;
+        if let Some(existing) = bindings.lookup(&name) {
+            return Ok(existing == value);
+        }
+        bindings.bind(name, value);
+        return Ok(true);
+    }
+
+    if pattern == value {
+        return Ok(true);
+    }
+
+    let Some(pn) = arena.node(pattern) else {
+        return Ok(false);
+    };
+    let Some(vn) = arena.node(value) else {
+        return Ok(false);
+    };
+    if pn.kind != vn.kind || pn.children.len() != vn.children.len() {
+        return Ok(false);
+    }
+    for (pc, vc) in pn
+        .children
+        .as_slice()
+        .iter()
+        .zip(vn.children.as_slice().iter())
+    {
+        if !match_pattern(arena, *pc, *vc, bindings)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Stable crate identifier used in workspace-level tooling and diagnostics.

@@ -55,6 +55,20 @@ fn count_add_nodes(arena: &TreeArena, root: TreeId) -> usize {
     n
 }
 
+fn make_rule1(arena: &mut TreeArena, pattern: TreeId, rhs: TreeId) -> TreeId {
+    let nil = arena.nil();
+    let lhs = arena.cons(pattern, nil);
+    arena.cons(lhs, rhs)
+}
+
+fn make_rules_parser_order(arena: &mut TreeArena, source_rules: &[TreeId]) -> TreeId {
+    let mut out = arena.nil();
+    for rule in source_rules {
+        out = arena.cons(*rule, out);
+    }
+    out
+}
+
 #[test]
 fn eval_process_resolves_named_definition() {
     let mut arena = TreeArena::new();
@@ -207,4 +221,102 @@ fn eval_iterative_sum_builds_add_chain() {
     let out = eval_box(&mut arena, expr, &Environment::empty(), &mut loop_detector)
         .expect("isum should expand");
     assert_eq!(count_add_nodes(&arena, out), 2);
+}
+
+#[test]
+fn eval_case_uses_source_rule_priority() {
+    let mut arena = TreeArena::new();
+    let p0 = BoxBuilder::new(&mut arena).int(0);
+    let r1 = BoxBuilder::new(&mut arena).int(1);
+    let x_ident = make_ident(&mut arena, "x");
+    let px = BoxBuilder::new(&mut arena).pattern_var(x_ident);
+    let r2 = BoxBuilder::new(&mut arena).int(2);
+    let rule1 = make_rule1(&mut arena, p0, r1); // source first
+    let rule2 = make_rule1(&mut arena, px, r2); // source second
+    let rules = make_rules_parser_order(&mut arena, &[rule1, rule2]);
+    let case_expr = BoxBuilder::new(&mut arena).case(rules);
+    let arg0 = BoxBuilder::new(&mut arena).int(0);
+    let nil = arena.nil();
+    let args = arena.cons(arg0, nil);
+    let expr = BoxBuilder::new(&mut arena).appl(case_expr, args);
+
+    let mut loop_detector = LoopDetector::new();
+    let out = eval_box(&mut arena, expr, &Environment::empty(), &mut loop_detector)
+        .expect("case application should match first source rule");
+    expect_int(&arena, out, 1);
+}
+
+#[test]
+fn eval_case_pattern_var_binds_argument() {
+    let mut arena = TreeArena::new();
+    let x_ident = make_ident(&mut arena, "x");
+    let px = BoxBuilder::new(&mut arena).pattern_var(x_ident);
+    let rhs = make_ident(&mut arena, "x");
+    let rule = make_rule1(&mut arena, px, rhs);
+    let rules = make_rules_parser_order(&mut arena, &[rule]);
+    let case_expr = BoxBuilder::new(&mut arena).case(rules);
+    let arg = BoxBuilder::new(&mut arena).int(7);
+    let nil = arena.nil();
+    let args = arena.cons(arg, nil);
+    let expr = BoxBuilder::new(&mut arena).appl(case_expr, args);
+
+    let mut loop_detector = LoopDetector::new();
+    let out = eval_box(&mut arena, expr, &Environment::empty(), &mut loop_detector)
+        .expect("pattern var should bind");
+    expect_int(&arena, out, 7);
+}
+
+#[test]
+fn eval_case_reports_arity_mismatch_and_no_match() {
+    let mut arena = TreeArena::new();
+    let x_ident = make_ident(&mut arena, "x");
+    let y_ident = make_ident(&mut arena, "y");
+    let x = BoxBuilder::new(&mut arena).pattern_var(x_ident);
+    let y = BoxBuilder::new(&mut arena).pattern_var(y_ident);
+    let lhs_rev = make_rev_list2(&mut arena, x, y); // parser-style reverse list for (x, y)
+    let rhs = BoxBuilder::new(&mut arena).int(99);
+    let rule = arena.cons(lhs_rev, rhs);
+    let rules = make_rules_parser_order(&mut arena, &[rule]);
+    let case_expr = BoxBuilder::new(&mut arena).case(rules);
+    let one = BoxBuilder::new(&mut arena).int(1);
+    let nil = arena.nil();
+    let args_one = arena.cons(one, nil);
+    let expr_arity = BoxBuilder::new(&mut arena).appl(case_expr, args_one);
+
+    let mut loop_detector = LoopDetector::new();
+    let err = eval_box(
+        &mut arena,
+        expr_arity,
+        &Environment::empty(),
+        &mut loop_detector,
+    )
+    .expect_err("arity mismatch should fail");
+    assert!(matches!(
+        err,
+        EvalError::PatternArityMismatch {
+            expected: 2,
+            got: 1
+        }
+    ));
+
+    // No-match branch: (0) => 1 applied to 2.
+    let p0 = BoxBuilder::new(&mut arena).int(0);
+    let r1 = BoxBuilder::new(&mut arena).int(1);
+    let one_rule = make_rule1(&mut arena, p0, r1);
+    let one_rules = make_rules_parser_order(&mut arena, &[one_rule]);
+    let case_no_match = BoxBuilder::new(&mut arena).case(one_rules);
+    let two = BoxBuilder::new(&mut arena).int(2);
+    let nil2 = arena.nil();
+    let args_two = arena.cons(two, nil2);
+    let expr_no_match = BoxBuilder::new(&mut arena).appl(case_no_match, args_two);
+
+    let mut loop_detector2 = LoopDetector::new();
+    let err2 = eval_box(
+        &mut arena,
+        expr_no_match,
+        &Environment::empty(),
+        &mut loop_detector2,
+    )
+    .expect_err("no matching rule should fail");
+    assert!(matches!(err2, EvalError::PatternMatchFailed));
 }

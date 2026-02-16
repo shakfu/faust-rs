@@ -1736,3 +1736,29 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo clippy -p eval --all-targets -- -D warnings`
   - `cargo test -p eval --all-targets`
   - `cargo test --workspace --all-targets`
+
+### Phase 4 / 2.2-2.3 eval third implementation tranche (`case` / pattern matching)
+
+- Extended `crates/eval/src/lib.rs` with first pattern-matching execution path:
+  - `apply_list` now handles `BoxMatch::Case(rules)` directly.
+  - Case rules are interpreted with parser/C++ list-order parity:
+    - rules and rule-pattern lists are reversed back to source order before matching.
+  - Implemented structural matcher with `BoxMatch::PatternVar` bindings:
+    - repeated pattern variables must match the same value,
+    - recursive structural checks for non-variable subtrees.
+  - Added explicit case errors:
+    - malformed case/rule shapes,
+    - arity mismatch (`PatternArityMismatch`),
+    - no matching rule (`PatternMatchFailed`).
+- Kept `BoxMatch::Case` and `BoxMatch::PatternVar` stable under evaluation (`eval_box`) so
+  pattern nodes are not incorrectly resolved as plain identifiers.
+- Added/extended eval tests in `crates/eval/tests/core_eval.rs`:
+  - source-rule priority despite parser reverse list encoding,
+  - pattern-variable binding (`(x) => x`),
+  - arity mismatch diagnostics,
+  - no-match diagnostics.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p eval --all-targets -- -D warnings`
+  - `cargo test -p eval --all-targets`
+  - `cargo test --workspace --all-targets`
