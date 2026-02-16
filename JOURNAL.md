@@ -1873,3 +1873,26 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p compiler --all-targets`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --all-targets`
+
+### Phase 4 integration step 2 (compiler-level corpus signal integration tests)
+
+- Added compiler integration tests exercising the full `parse -> eval -> propagate` pipeline on
+  real corpus files:
+  - `crates/compiler/tests/signal_pipeline.rs`
+- Covered corpus cases (currently stable under implemented propagation subset):
+  - `rep_01_passthrough.dsp` (direct `sigInput` passthrough),
+  - `rep_02_gain_bias.dsp` (add/mul/constant lowering shape),
+  - `rep_21_operator_precedence.dsp` (structural precedence lowering),
+  - `rep_23_feedback_simple.dsp` (recursive projection output).
+- Added compiler test-only dependency:
+  - `crates/compiler/Cargo.toml` -> `[dev-dependencies] tlib` for arena-level structural assertions.
+- Notes:
+  - initial integration attempts on `rep_10_two_in_two_out_ui.dsp` and `rep_22_parallel_mix.dsp`
+    exposed unsupported sequential arity forms in current propagation subset; these remain tracked
+    for later propagation coverage expansion.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p compiler --all-targets -- -D warnings`
+  - `cargo test -p compiler --all-targets`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace --all-targets`

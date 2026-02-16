@@ -103,6 +103,7 @@ dependencies = [
  "parser",
  "propagate",
  "signals",
+ "tlib",
 ]
 
 [[package]]

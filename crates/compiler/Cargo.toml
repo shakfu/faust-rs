@@ -14,6 +14,9 @@ eval = { path = "../eval" }
 propagate = { path = "../propagate" }
 signals = { path = "../signals" }
 
+[dev-dependencies]
+tlib = { path = "../tlib" }
+
 [[bin]]
 name = "faust-rs"
 path = "src/main.rs"
