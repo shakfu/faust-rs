@@ -1935,3 +1935,31 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p compiler --test cpp_signal_differential -- --nocapture`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --all-targets`
+
+### Phase 4 / 2.2 eval fourth implementation tranche (non-closure partial application parity)
+
+- Ported C++ `applyList` non-closure behavior from source-of-truth:
+  - `/Users/letz/Developpements/RUST/faust/compiler/evaluate/eval.cpp`
+- Extended `crates/eval/src/lib.rs` non-closure application path:
+  - infer function/input arity for fallback apply,
+  - infer evaluated argument list output arity,
+  - reject over-application with explicit error:
+    - `EvalError::TooManyArguments { expected, got }`,
+  - when arguments are missing, synthesize wire placeholders (`_`) and inject them with C++ parity:
+    - binary primitive with one arg (`prim2`) except `prefix`: prepend missing wire,
+    - other partial applications: append missing wire(s),
+  - keep final lowering shape:
+    - `BOXSEQ(larg2par(adjusted_args), fun)`.
+- Added eval tests in `crates/eval/tests/core_eval.rs`:
+  - partial binary primitive (`*(0.5)`) inserts leading wire,
+  - partial `prefix(0)` inserts trailing wire,
+  - over-application (`+(1,2,3)`) reports `TooManyArguments`.
+- This unblocks previously failing pipeline forms that depend on partial primitive application in eval:
+  - `tests/corpus/rep_10_two_in_two_out_ui.dsp`
+  - `tests/corpus/rep_22_parallel_mix.dsp`
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p eval --all-targets -- -D warnings`
+  - `cargo test -p eval --all-targets`
+  - `cargo run -p compiler -- --dump-sig tests/corpus/rep_10_two_in_two_out_ui.dsp`
+  - `cargo run -p compiler -- --dump-sig tests/corpus/rep_22_parallel_mix.dsp`

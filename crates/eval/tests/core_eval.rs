@@ -35,6 +35,13 @@ fn make_rev_list2(arena: &mut TreeArena, a: TreeId, b: TreeId) -> TreeId {
     arena.cons(b, t)
 }
 
+fn make_rev_list3(arena: &mut TreeArena, a: TreeId, b: TreeId, c: TreeId) -> TreeId {
+    let nil = arena.nil();
+    let t1 = arena.cons(a, nil);
+    let t2 = arena.cons(b, t1);
+    arena.cons(c, t2)
+}
+
 fn expect_int(arena: &TreeArena, id: TreeId, expected: i64) {
     assert_eq!(match_box(arena, id), BoxMatch::Int(expected));
 }
@@ -185,6 +192,78 @@ fn eval_box_non_closure_application_falls_back_to_seq_par() {
     };
     expect_int(&arena, a, 1);
     expect_int(&arena, b, 2);
+}
+
+#[test]
+fn eval_box_non_closure_partial_binary_primitive_prepends_missing_wire() {
+    let mut arena = TreeArena::new();
+    let half = BoxBuilder::new(&mut arena).real(0.5);
+    let nil = arena.nil();
+    let args = arena.cons(half, nil);
+    let mul = BoxBuilder::new(&mut arena).mul();
+    let expr = BoxBuilder::new(&mut arena).appl(mul, args);
+
+    let mut loop_detector = LoopDetector::new();
+    let out = eval_box(&mut arena, expr, &Environment::empty(), &mut loop_detector)
+        .expect("partial binary primitive should insert missing wire");
+    let (lhs, rhs) = match match_box(&arena, out) {
+        BoxMatch::Seq(lhs, rhs) => (lhs, rhs),
+        other => panic!("expected BOXSEQ, got {other:?}"),
+    };
+    assert!(matches!(match_box(&arena, rhs), BoxMatch::Mul));
+    let (a, b) = match match_box(&arena, lhs) {
+        BoxMatch::Par(a, b) => (a, b),
+        other => panic!("expected BOXPAR, got {other:?}"),
+    };
+    assert!(matches!(match_box(&arena, a), BoxMatch::Wire));
+    assert!(matches!(match_box(&arena, b), BoxMatch::Real(v) if (v - 0.5).abs() < f64::EPSILON));
+}
+
+#[test]
+fn eval_box_non_closure_partial_prefix_appends_missing_wire() {
+    let mut arena = TreeArena::new();
+    let zero = BoxBuilder::new(&mut arena).int(0);
+    let nil = arena.nil();
+    let args = arena.cons(zero, nil);
+    let prefix = BoxBuilder::new(&mut arena).prefix();
+    let expr = BoxBuilder::new(&mut arena).appl(prefix, args);
+
+    let mut loop_detector = LoopDetector::new();
+    let out = eval_box(&mut arena, expr, &Environment::empty(), &mut loop_detector)
+        .expect("partial prefix should insert missing wire");
+    let (lhs, rhs) = match match_box(&arena, out) {
+        BoxMatch::Seq(lhs, rhs) => (lhs, rhs),
+        other => panic!("expected BOXSEQ, got {other:?}"),
+    };
+    assert!(matches!(match_box(&arena, rhs), BoxMatch::Prefix));
+    let (a, b) = match match_box(&arena, lhs) {
+        BoxMatch::Par(a, b) => (a, b),
+        other => panic!("expected BOXPAR, got {other:?}"),
+    };
+    expect_int(&arena, a, 0);
+    assert!(matches!(match_box(&arena, b), BoxMatch::Wire));
+}
+
+#[test]
+fn eval_box_non_closure_application_reports_too_many_arguments() {
+    let mut arena = TreeArena::new();
+    let one = BoxBuilder::new(&mut arena).int(1);
+    let two = BoxBuilder::new(&mut arena).int(2);
+    let three = BoxBuilder::new(&mut arena).int(3);
+    let args_rev = make_rev_list3(&mut arena, one, two, three); // [3,2,1]
+    let add = BoxBuilder::new(&mut arena).add();
+    let expr = BoxBuilder::new(&mut arena).appl(add, args_rev);
+
+    let mut loop_detector = LoopDetector::new();
+    let err = eval_box(&mut arena, expr, &Environment::empty(), &mut loop_detector)
+        .expect_err("add with 3 arguments should fail");
+    assert_eq!(
+        err,
+        EvalError::TooManyArguments {
+            expected: 2,
+            got: 3
+        }
+    );
 }
 
 #[test]

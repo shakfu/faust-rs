@@ -12,6 +12,7 @@
 //! - Loop detection for recursive symbol expansion.
 //! - Structural recursive evaluation over box trees.
 //! - Function application and iterative form expansion (`ipar/iseq/isum/iprod`).
+//! - Non-closure partial-application parity (`applyList`) with implicit wire insertion.
 
 use std::fmt::{Display, Formatter};
 
@@ -117,20 +118,50 @@ impl Default for LoopDetector {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalError {
     MissingProcessDefinition,
-    UndefinedSymbol { symbol: String },
-    MalformedDefinitionNode { node: TreeId },
-    MalformedListNode { node: TreeId },
-    MalformedCaseNode { node: TreeId },
+    UndefinedSymbol {
+        symbol: String,
+    },
+    MalformedDefinitionNode {
+        node: TreeId,
+    },
+    MalformedListNode {
+        node: TreeId,
+    },
+    MalformedCaseNode {
+        node: TreeId,
+    },
     EmptyArgumentList,
-    NonIdentifierParameter { node: TreeId },
-    NonIdentifierIterationVariable { node: TreeId },
-    IterationCountNotInt { node: TreeId },
-    IterationCountTooLarge { value: i64 },
-    NegativeIterationCount { value: i64 },
-    PatternArityMismatch { expected: usize, got: usize },
+    NonIdentifierParameter {
+        node: TreeId,
+    },
+    NonIdentifierIterationVariable {
+        node: TreeId,
+    },
+    IterationCountNotInt {
+        node: TreeId,
+    },
+    IterationCountTooLarge {
+        value: i64,
+    },
+    NegativeIterationCount {
+        value: i64,
+    },
+    PatternArityMismatch {
+        expected: usize,
+        got: usize,
+    },
     PatternMatchFailed,
-    LoopDetected { node: TreeId },
-    RecursionDepthExceeded { max_depth: usize },
+    /// Non-closure application received more arguments than the function input arity.
+    TooManyArguments {
+        expected: usize,
+        got: usize,
+    },
+    LoopDetected {
+        node: TreeId,
+    },
+    RecursionDepthExceeded {
+        max_depth: usize,
+    },
 }
 
 impl Display for EvalError {
@@ -175,6 +206,12 @@ impl Display for EvalError {
                 write!(f, "pattern arity mismatch: expected {expected}, got {got}")
             }
             Self::PatternMatchFailed => write!(f, "no case rule matches arguments"),
+            Self::TooManyArguments { expected, got } => {
+                write!(
+                    f,
+                    "too many arguments: expected at most {expected}, got {got}"
+                )
+            }
             Self::LoopDetected { node } => {
                 write!(f, "recursive evaluation loop on node {}", node.as_u32())
             }
@@ -411,7 +448,31 @@ fn apply_list(
         }
         BoxMatch::Case(rules) => apply_case_rules(arena, rules, larg, env, loop_detector),
         _ => {
-            let args_par = larg2par(arena, larg)?;
+            // C++ parity (`applyList`): for non-closures, insert implicit wires when
+            // partially applying a function, and reject over-application.
+            let maybe_fun_arity = infer_box_arity(arena, fun);
+            let maybe_larg_outputs = list_outputs(arena, larg);
+            let mut lowered_larg = larg;
+
+            if let (Some((ins, _outs)), Some(larg_outs)) = (maybe_fun_arity, maybe_larg_outputs) {
+                if larg_outs > ins {
+                    return Err(EvalError::TooManyArguments {
+                        expected: ins,
+                        got: larg_outs,
+                    });
+                }
+                let missing = ins - larg_outs;
+                if missing > 0 {
+                    let wires = nwires(arena, missing);
+                    lowered_larg = if larg_outs == 1 && is_binary_primitive_non_prefix(arena, fun) {
+                        concat_lists(arena, wires, larg)?
+                    } else {
+                        concat_lists(arena, larg, wires)?
+                    };
+                }
+            }
+
+            let args_par = larg2par(arena, lowered_larg)?;
             let mut b = BoxBuilder::new(arena);
             Ok(b.seq(args_par, fun))
         }
@@ -435,6 +496,185 @@ fn larg2par(arena: &mut TreeArena, larg: TreeId) -> Result<TreeId, EvalError> {
         let mut b = BoxBuilder::new(arena);
         Ok(b.par(head, right))
     }
+}
+
+fn concat_lists(arena: &mut TreeArena, left: TreeId, right: TreeId) -> Result<TreeId, EvalError> {
+    if arena.is_nil(left) {
+        return Ok(right);
+    }
+    let head = arena
+        .hd(left)
+        .ok_or(EvalError::MalformedListNode { node: left })?;
+    let tail = arena
+        .tl(left)
+        .ok_or(EvalError::MalformedListNode { node: left })?;
+    let rest = concat_lists(arena, tail, right)?;
+    Ok(arena.cons(head, rest))
+}
+
+/// Builds a parser-style list containing `n` wire nodes.
+fn nwires(arena: &mut TreeArena, n: usize) -> TreeId {
+    let mut out = arena.nil();
+    for _ in 0..n {
+        let wire = BoxBuilder::new(arena).wire();
+        out = arena.cons(wire, out);
+    }
+    out
+}
+
+/// Computes total output arity for a list of argument boxes.
+fn list_outputs(arena: &TreeArena, mut list: TreeId) -> Option<usize> {
+    let mut total = 0usize;
+    while !arena.is_nil(list) {
+        let head = arena.hd(list)?;
+        let (_, outs) = infer_box_arity(arena, head)?;
+        total = total.checked_add(outs)?;
+        list = arena.tl(list)?;
+    }
+    Some(total)
+}
+
+/// Local arity inference used by non-closure application lowering.
+fn infer_box_arity(arena: &TreeArena, id: TreeId) -> Option<(usize, usize)> {
+    match match_box(arena, id) {
+        BoxMatch::Int(_) | BoxMatch::Real(_) => Some((0, 1)),
+        BoxMatch::Wire => Some((1, 1)),
+        BoxMatch::Cut => Some((1, 0)),
+        BoxMatch::Add
+        | BoxMatch::Sub
+        | BoxMatch::Mul
+        | BoxMatch::Div
+        | BoxMatch::Rem
+        | BoxMatch::And
+        | BoxMatch::Or
+        | BoxMatch::Xor
+        | BoxMatch::Lsh
+        | BoxMatch::Rsh
+        | BoxMatch::Lt
+        | BoxMatch::Le
+        | BoxMatch::Gt
+        | BoxMatch::Ge
+        | BoxMatch::Eq
+        | BoxMatch::Ne
+        | BoxMatch::Pow
+        | BoxMatch::Delay
+        | BoxMatch::Min
+        | BoxMatch::Max
+        | BoxMatch::Prefix
+        | BoxMatch::Attach
+        | BoxMatch::Enable
+        | BoxMatch::Control => Some((2, 1)),
+        BoxMatch::Delay1
+        | BoxMatch::IntCast
+        | BoxMatch::FloatCast
+        | BoxMatch::Lowest
+        | BoxMatch::Highest => Some((1, 1)),
+        BoxMatch::ReadOnlyTable | BoxMatch::Select2 | BoxMatch::AssertBounds => Some((3, 1)),
+        BoxMatch::Select3 => Some((4, 1)),
+        BoxMatch::WriteReadTable => Some((5, 1)),
+        BoxMatch::FConst(_, _, _) | BoxMatch::FVar(_, _, _) => Some((0, 1)),
+        BoxMatch::Button(_)
+        | BoxMatch::Checkbox(_)
+        | BoxMatch::VSlider(_, _, _, _, _)
+        | BoxMatch::HSlider(_, _, _, _, _)
+        | BoxMatch::NumEntry(_, _, _, _, _) => Some((0, 1)),
+        BoxMatch::VBargraph(_, _, _) | BoxMatch::HBargraph(_, _, _) => Some((1, 1)),
+        BoxMatch::Soundfile(_, chan) => {
+            let BoxMatch::Int(channels) = match_box(arena, chan) else {
+                return None;
+            };
+            let channels = usize::try_from(channels).ok()?;
+            Some((2, channels.checked_add(2)?))
+        }
+        BoxMatch::VGroup(_, inner) | BoxMatch::HGroup(_, inner) | BoxMatch::TGroup(_, inner) => {
+            infer_box_arity(arena, inner)
+        }
+        BoxMatch::Seq(left, right) => {
+            let (ins1, outs1) = infer_box_arity(arena, left)?;
+            let (ins2, outs2) = infer_box_arity(arena, right)?;
+            if outs1 != ins2 {
+                return None;
+            }
+            Some((ins1, outs2))
+        }
+        BoxMatch::Par(left, right) => {
+            let (ins1, outs1) = infer_box_arity(arena, left)?;
+            let (ins2, outs2) = infer_box_arity(arena, right)?;
+            Some((ins1.checked_add(ins2)?, outs1.checked_add(outs2)?))
+        }
+        BoxMatch::Split(left, right) => {
+            let (ins1, outs1) = infer_box_arity(arena, left)?;
+            let (ins2, outs2) = infer_box_arity(arena, right)?;
+            if outs1 != ins2 && (outs1 == 0 || !ins2.is_multiple_of(outs1)) {
+                return None;
+            }
+            Some((ins1, outs2))
+        }
+        BoxMatch::Merge(left, right) => {
+            let (ins1, outs1) = infer_box_arity(arena, left)?;
+            let (ins2, outs2) = infer_box_arity(arena, right)?;
+            if outs1 != ins2 && (ins2 == 0 || !outs1.is_multiple_of(ins2)) {
+                return None;
+            }
+            Some((ins1, outs2))
+        }
+        BoxMatch::Rec(left, right) => {
+            let (ins1, outs1) = infer_box_arity(arena, left)?;
+            let (ins2, outs2) = infer_box_arity(arena, right)?;
+            if ins2 > outs1 || outs2 > ins1 {
+                return None;
+            }
+            Some((ins1 - outs2, outs1))
+        }
+        BoxMatch::Environment => Some((0, 0)),
+        BoxMatch::Route(ins, outs, _) => {
+            let BoxMatch::Int(ins_n) = match_box(arena, ins) else {
+                return None;
+            };
+            let BoxMatch::Int(outs_n) = match_box(arena, outs) else {
+                return None;
+            };
+            let ins_n = usize::try_from(ins_n).ok()?;
+            let outs_n = usize::try_from(outs_n).ok()?;
+            Some((ins_n, outs_n))
+        }
+        BoxMatch::Inputs(_) | BoxMatch::Outputs(_) => Some((0, 1)),
+        BoxMatch::Ondemand(inner) | BoxMatch::Upsampling(inner) | BoxMatch::Downsampling(inner) => {
+            let (ins, outs) = infer_box_arity(arena, inner)?;
+            Some((ins.checked_add(1)?, outs))
+        }
+        _ => None,
+    }
+}
+
+/// Returns true for primitive binary operators that are not `prefix`.
+fn is_binary_primitive_non_prefix(arena: &TreeArena, id: TreeId) -> bool {
+    matches!(
+        match_box(arena, id),
+        BoxMatch::Add
+            | BoxMatch::Sub
+            | BoxMatch::Mul
+            | BoxMatch::Div
+            | BoxMatch::Rem
+            | BoxMatch::And
+            | BoxMatch::Or
+            | BoxMatch::Xor
+            | BoxMatch::Lsh
+            | BoxMatch::Rsh
+            | BoxMatch::Lt
+            | BoxMatch::Le
+            | BoxMatch::Gt
+            | BoxMatch::Ge
+            | BoxMatch::Eq
+            | BoxMatch::Ne
+            | BoxMatch::Pow
+            | BoxMatch::Delay
+            | BoxMatch::Min
+            | BoxMatch::Max
+            | BoxMatch::Attach
+            | BoxMatch::Enable
+            | BoxMatch::Control
+    )
 }
 
 fn iteration_var_name(arena: &TreeArena, id: TreeId) -> Result<String, EvalError> {
