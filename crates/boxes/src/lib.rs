@@ -647,6 +647,13 @@ pub enum BoxMatch<'a> {
     Soundfile(BoxId, BoxId),
 }
 
+/// Decodes one `BoxId` into canonical `BoxMatch` shape.
+///
+/// Performance note:
+/// - The current hot path uses arity-first dispatch (`children.len()`) then tag matching.
+/// - A tag-id-only (`u32`) dispatch prototype was benchmarked on this branch and did not
+///   improve end-to-end throughput under `match_box_bench` workloads, so this version keeps
+///   the best measured implementation for now.
 #[must_use]
 pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
     let Some(node) = arena.node(b) else {

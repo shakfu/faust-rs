@@ -1628,3 +1628,26 @@ Execution plan (Phase 0 prototype, revised):
     - `primitives`: `12.04 ns/op` (`83.09 Mops/s`) -> `~1.25x`
     - `sliders`: `21.95 ns/op` (`45.55 Mops/s`) -> `~1.02x`
     - `mixed`: `13.38 ns/op` (`74.76 Mops/s`) -> `~1.06x`
+
+### `match_box` dispatch experiment (`tag_id/u32`) and decision
+
+- Investigated a direct `tag_id` (`u32`) dispatch variant in `crates/boxes/src/lib.rs` to reduce
+  dependence on string tag comparisons.
+- Two variants were prototyped and benchmarked with
+  `cargo run -p boxes --release --bin match_box_bench`:
+  - `tag_id` decode + per-arena/per-tag cache:
+    - `primitives`: `33.69 ns/op`
+    - `sliders`: `30.01 ns/op`
+    - `mixed`: `23.84 ns/op`
+  - `tag_id` decode without cache:
+    - `primitives`: `16.83 ns/op`
+    - `sliders`: `20.99 ns/op`
+    - `mixed`: `16.19 ns/op`
+- Reference retained implementation (current):
+  - `primitives`: `12.04 ns/op`
+  - `sliders`: `21.95 ns/op`
+  - `mixed`: `13.38 ns/op`
+- Decision:
+  - keep the current arity-first + tag-name matching implementation,
+  - do not merge the `tag_id` dispatch prototype in this state because it regresses hot paths
+    (`primitives`, `mixed`) despite slight slider gain.
