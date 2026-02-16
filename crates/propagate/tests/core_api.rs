@@ -1,7 +1,7 @@
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use propagate::{PropagateError, box_arity, make_sig_input_list, propagate};
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
-use tlib::TreeArena;
+use tlib::{NodeKind, TreeArena, TreeId};
 
 #[test]
 fn make_sig_input_list_builds_ordered_inputs() {
@@ -88,7 +88,7 @@ fn propagate_merge_mixes_buses_before_right_box() {
 }
 
 #[test]
-fn propagate_reports_arity_mismatch_and_unsupported_rec() {
+fn propagate_reports_arity_mismatch_and_supports_rec() {
     let mut arena = TreeArena::new();
     let bad_seq = {
         let mut bb = BoxBuilder::new(&mut arena);
@@ -109,11 +109,63 @@ fn propagate_reports_arity_mismatch_and_unsupported_rec() {
     assert_eq!(rec_arity.inputs, 0);
     assert_eq!(rec_arity.outputs, 1);
 
-    let err = propagate(&mut arena, rec, &[]).expect_err("rec not yet implemented");
-    assert!(matches!(
-        err,
-        PropagateError::UnsupportedBox { kind: "rec", .. }
-    ));
+    let rec_out = propagate(&mut arena, rec, &[]).expect("rec should propagate");
+    assert_eq!(rec_out.len(), 1);
+    let SigMatch::Proj(0, group) = match_sig(&arena, rec_out[0]) else {
+        panic!("rec output should be proj(0, group)");
+    };
+    assert!(is_debruijn_rec(&arena, group));
+}
+
+#[test]
+fn propagate_rec_plus_tilde_wire_shape_is_stable() {
+    let mut arena = TreeArena::new();
+    let rec = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let add = bb.add();
+        let wire = bb.wire();
+        bb.rec(add, wire)
+    };
+    let inputs = make_sig_input_list(&mut arena, 1);
+    let out = propagate(&mut arena, rec, &inputs).expect("rec +~_ should propagate");
+    assert_eq!(out.len(), 1);
+
+    let SigMatch::Proj(0, group) = match_sig(&arena, out[0]) else {
+        panic!("expected proj output");
+    };
+    let body_list = debruijn_body(&arena, group).expect("group should be debruijn(rec-body)");
+    let first = arena
+        .hd(body_list)
+        .expect("rec body should have one branch");
+    let SigMatch::BinOp(BinOp::Add, a, b) = match_sig(&arena, first) else {
+        panic!("rec body branch should be add");
+    };
+    assert_eq!(match_sig(&arena, b), SigMatch::Input(0));
+    let SigMatch::Delay1(d) = match_sig(&arena, a) else {
+        panic!("first add argument should be delay1(proj(...))");
+    };
+    let SigMatch::Proj(0, seed_ref) = match_sig(&arena, d) else {
+        panic!("delay1 arg should be proj(0, DEBRUIJNREF(1))");
+    };
+    assert!(is_debruijn_ref_level1(&arena, seed_ref));
+}
+
+#[test]
+fn propagate_rec_keeps_closed_branches_outside_projection() {
+    let mut arena = TreeArena::new();
+    let rec = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let cst = bb.int(7);
+        let add = bb.add();
+        let left = bb.par(cst, add);
+        let right = bb.wire();
+        bb.rec(left, right)
+    };
+    let inputs = make_sig_input_list(&mut arena, 1);
+    let out = propagate(&mut arena, rec, &inputs).expect("mixed rec should propagate");
+    assert_eq!(out.len(), 2);
+    assert_eq!(match_sig(&arena, out[0]), SigMatch::Int(7));
+    assert!(matches!(match_sig(&arena, out[1]), SigMatch::Proj(1, _)));
 }
 
 #[test]
@@ -140,4 +192,36 @@ fn inputs_outputs_boxes_lower_to_signal_ints() {
         match_box(&arena, outputs_box),
         BoxMatch::Outputs(_)
     ));
+}
+
+fn is_debruijn_rec(arena: &TreeArena, id: TreeId) -> bool {
+    matches!(tag_name(arena, id), Some("DEBRUIJN"))
+}
+
+fn debruijn_body(arena: &TreeArena, id: TreeId) -> Option<TreeId> {
+    if !is_debruijn_rec(arena, id) {
+        return None;
+    }
+    let [body] = arena.children(id)? else {
+        return None;
+    };
+    Some(*body)
+}
+
+fn is_debruijn_ref_level1(arena: &TreeArena, id: TreeId) -> bool {
+    if !matches!(tag_name(arena, id), Some("DEBRUIJNREF")) {
+        return false;
+    }
+    let Some([level]) = arena.children(id) else {
+        return false;
+    };
+    matches!(arena.kind(*level), Some(NodeKind::Int(1)))
+}
+
+fn tag_name(arena: &TreeArena, id: TreeId) -> Option<&str> {
+    let node = arena.node(id)?;
+    let NodeKind::Tag(tag_id) = &node.kind else {
+        return None;
+    };
+    arena.tag_name(*tag_id)
 }

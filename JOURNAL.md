@@ -1809,3 +1809,34 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p propagate --all-targets`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --all-targets`
+
+### Phase 4 / 2.4 propagate second implementation tranche (`rec` support with de-Bruijn refs)
+
+- Extended `crates/propagate/src/lib.rs` to execute `BoxMatch::Rec(left, right)` instead of returning
+  `UnsupportedBox`.
+- Ported the C++ recursion propagation skeleton from:
+  - `/Users/letz/Developpements/RUST/faust/compiler/propagate/propagate.cpp` (`isBoxRec` branch)
+  - `/Users/letz/Developpements/RUST/faust/compiler/tlib/recursive-tree.cpp` (`rec/ref/liftn/aperture` model)
+- Added internal helpers in `propagate` for recursive group plumbing:
+  - de-Bruijn nodes:
+    - `DEBRUIJN` (recursive group wrapper),
+    - `DEBRUIJNREF(level)` (recursive reference placeholder),
+  - `make_mem_sig_proj_list(...)` (`delay1(proj(i, DEBRUIJNREF(1)))` seeds),
+  - `liftn(...)` (minimal free-ref lifting on propagated inputs),
+  - `aperture(...)` (minimal free-ref depth analysis used to keep closed branches out of projected outputs).
+- Rec propagation behavior now implemented:
+  - compute recursive seed list for right branch inputs,
+  - propagate right branch, then left branch with `right_outputs + lifted_inputs`,
+  - build recursive group as `DEBRUIJN(list(left_outputs))`,
+  - output `proj(i, group)` only for branches with positive aperture;
+    closed branches remain as direct expressions (C++ parity intent).
+- Updated tests in `crates/propagate/tests/core_api.rs`:
+  - former `rec unsupported` assertion replaced by positive execution checks,
+  - added `+ ~ _` structure test (`proj` output + expected `DEBRUIJNREF(1)` seed path),
+  - added mixed recursion test verifying closed branch passthrough and projected recursive branch.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p propagate --all-targets -- -D warnings`
+  - `cargo test -p propagate --all-targets`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace --all-targets`

@@ -23,6 +23,8 @@ use signals::{SigBuilder, SigId};
 use tlib::{NodeKind, TreeArena, TreeId};
 
 pub const CRATE_NAME: &str = "propagate";
+const DEBRUIJN_TAG: &str = "DEBRUIJN";
+const DEBRUIJNREF_TAG: &str = "DEBRUIJNREF";
 
 /// Stable crate identifier used in workspace-level tooling and diagnostics.
 #[must_use]
@@ -633,6 +635,41 @@ fn propagate_inner(
             let merge_in = mix_signals(arena, &left_out, right_arity.inputs);
             propagate(arena, right, &merge_in)
         }
+        BoxMatch::Rec(left, right) => {
+            let left_arity = box_arity(arena, left)?;
+            let right_arity = box_arity(arena, right)?;
+            if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
+                return Err(PropagateError::RecArityMismatch {
+                    node: box_tree,
+                    left_inputs: left_arity.inputs,
+                    left_outputs: left_arity.outputs,
+                    right_inputs: right_arity.inputs,
+                    right_outputs: right_arity.outputs,
+                });
+            }
+
+            let l0 = make_mem_sig_proj_list(arena, right_arity.inputs)?;
+            let l1 = propagate(arena, right, &l0)?;
+
+            let mut rec_inputs = l1;
+            rec_inputs.extend(lift_signals(arena, inputs));
+
+            let l2 = propagate(arena, left, &rec_inputs)?;
+            let group_body = vec_to_list(arena, &l2);
+            let group = debruijn_rec(arena, group_body);
+
+            let mut outputs = Vec::with_capacity(l2.len());
+            for (index, expr) in l2.iter().copied().enumerate() {
+                if aperture(arena, expr) > 0 {
+                    let idx = i64_from_usize(index, "rec projection index")?;
+                    let mut b = SigBuilder::new(arena);
+                    outputs.push(b.proj(idx, group));
+                } else {
+                    outputs.push(expr);
+                }
+            }
+            Ok(outputs)
+        }
         BoxMatch::Inputs(expr) => {
             expect_input_arity(box_tree, inputs, 0)?;
             let arity = box_arity(arena, expr)?;
@@ -658,10 +695,6 @@ fn propagate_inner(
         BoxMatch::Ident(_) => Err(PropagateError::UnsupportedBox {
             node: box_tree,
             kind: "ident",
-        }),
-        BoxMatch::Rec(_, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "rec",
         }),
         BoxMatch::Appl(_, _) => Err(PropagateError::UnsupportedBox {
             node: box_tree,
@@ -904,4 +937,136 @@ fn usize_from_int_node(
 
 fn i64_from_usize(value: usize, field: &'static str) -> Result<i64, PropagateError> {
     i64::try_from(value).map_err(|_| PropagateError::IntegerTooLarge { field, value })
+}
+
+fn make_mem_sig_proj_list(arena: &mut TreeArena, n: usize) -> Result<Vec<SigId>, PropagateError> {
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let idx = i64_from_usize(i, "rec projection seed index")?;
+        let rg = debruijn_ref(arena, 1);
+        let mut b = SigBuilder::new(arena);
+        let proj = b.proj(idx, rg);
+        out.push(b.delay1(proj));
+    }
+    Ok(out)
+}
+
+fn lift_signals(arena: &mut TreeArena, inputs: &[SigId]) -> Vec<SigId> {
+    let mut out = Vec::with_capacity(inputs.len());
+    for sig in inputs.iter().copied() {
+        out.push(liftn(arena, sig, 1));
+    }
+    out
+}
+
+fn vec_to_list(arena: &mut TreeArena, values: &[TreeId]) -> TreeId {
+    let mut list = arena.nil();
+    for value in values.iter().rev().copied() {
+        list = arena.cons(value, list);
+    }
+    list
+}
+
+fn debruijn_rec(arena: &mut TreeArena, body: TreeId) -> TreeId {
+    intern_tag(arena, DEBRUIJN_TAG, &[body])
+}
+
+fn debruijn_ref(arena: &mut TreeArena, level: i64) -> TreeId {
+    let lvl = arena.int(level);
+    intern_tag(arena, DEBRUIJNREF_TAG, &[lvl])
+}
+
+fn liftn(arena: &mut TreeArena, root: TreeId, threshold: i64) -> TreeId {
+    if let Some(level) = debruijn_ref_level(arena, root) {
+        if level < threshold {
+            return root;
+        }
+        return debruijn_ref(arena, level + 1);
+    }
+
+    if let Some(body) = debruijn_body(arena, root) {
+        let lifted_body = liftn(arena, body, threshold + 1);
+        return debruijn_rec(arena, lifted_body);
+    }
+
+    let Some(node) = arena.node(root).cloned() else {
+        return root;
+    };
+    if node.children.is_empty() {
+        return root;
+    }
+
+    let original_children = node.children.as_slice();
+    let mut rebuilt = Vec::with_capacity(original_children.len());
+    let mut changed = false;
+    for child in original_children.iter().copied() {
+        let lifted = liftn(arena, child, threshold);
+        if lifted != child {
+            changed = true;
+        }
+        rebuilt.push(lifted);
+    }
+    if changed {
+        arena.intern(node.kind, &rebuilt)
+    } else {
+        root
+    }
+}
+
+fn aperture(arena: &TreeArena, root: TreeId) -> i64 {
+    if let Some(level) = debruijn_ref_level(arena, root) {
+        return level;
+    }
+
+    if let Some(body) = debruijn_body(arena, root) {
+        return aperture(arena, body) - 1;
+    }
+
+    let Some(children) = arena.children(root) else {
+        return 0;
+    };
+    let mut max_aperture = 0;
+    for child in children.iter().copied() {
+        max_aperture = max_aperture.max(aperture(arena, child));
+    }
+    max_aperture
+}
+
+fn debruijn_ref_level(arena: &TreeArena, root: TreeId) -> Option<i64> {
+    let (tag, children) = tag_and_children(arena, root)?;
+    if tag != DEBRUIJNREF_TAG {
+        return None;
+    }
+    let [level_node] = children else {
+        return None;
+    };
+    match arena.kind(*level_node) {
+        Some(NodeKind::Int(level)) => Some(*level),
+        _ => None,
+    }
+}
+
+fn debruijn_body(arena: &TreeArena, root: TreeId) -> Option<TreeId> {
+    let (tag, children) = tag_and_children(arena, root)?;
+    if tag != DEBRUIJN_TAG {
+        return None;
+    }
+    let [body] = children else {
+        return None;
+    };
+    Some(*body)
+}
+
+fn tag_and_children(arena: &TreeArena, root: TreeId) -> Option<(&str, &[TreeId])> {
+    let node = arena.node(root)?;
+    let NodeKind::Tag(tag_id) = &node.kind else {
+        return None;
+    };
+    let tag = arena.tag_name(*tag_id)?;
+    Some((tag, node.children.as_slice()))
+}
+
+fn intern_tag(arena: &mut TreeArena, tag: &str, children: &[TreeId]) -> TreeId {
+    let tag_id = arena.intern_tag(tag);
+    arena.intern(NodeKind::Tag(tag_id), children)
 }
