@@ -1651,3 +1651,28 @@ Execution plan (Phase 0 prototype, revised):
   - keep the current arity-first + tag-name matching implementation,
   - do not merge the `tag_id` dispatch prototype in this state because it regresses hot paths
     (`primitives`, `mixed`) despite slight slider gain.
+
+### Phase 4 start (`signals` canonical API: `SigBuilder` / `SigMatch` / `match_sig`)
+
+- Implemented first production tranche for `crates/signals` (previously scaffold-only):
+  - `crates/signals/src/lib.rs`
+  - `crates/signals/Cargo.toml` (adds dependency on `tlib`)
+- Added Rustdoc provenance and invariants aligned with C++ source of truth:
+  - `/Users/letz/Developpements/RUST/faust/compiler/signals/signals.hh`
+  - `/Users/letz/Developpements/RUST/faust/compiler/signals/signals.cpp`
+  - `/Users/letz/Developpements/RUST/faust/compiler/signals/binop.hh`
+- Added canonical signal write/read APIs:
+  - `SigBuilder` constructors for constants, I/O, delays, casts, tables, selectors, binops,
+    foreign symbols, recursion (`rec`/`proj`), UI items, wrappers (`attach/enable/control`),
+    waveform/soundfile, stream wrappers (`od/us/ds`), sequence/zeropad.
+  - `BinOp` enum aligned to C++ `SOperator` integer mapping.
+  - `SigMatch` + `match_sig(...)` exhaustive decoding for this tranche.
+  - `dump_sig(...)` deterministic structural dump helper.
+- Added integration tests:
+  - `crates/signals/tests/core_api.rs`
+  - coverage includes core shapes, binop decode, `select3` composition shape, slider list payload
+    order, wrapper/recursion forms, dump determinism.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p signals --all-targets --offline -- -D warnings`
+  - `cargo test -p signals --offline --no-fail-fast`
