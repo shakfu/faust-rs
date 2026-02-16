@@ -595,6 +595,9 @@ fn infer_box_arity(arena: &TreeArena, id: TreeId) -> Option<(usize, usize)> {
         | BoxMatch::Eq
         | BoxMatch::Ne
         | BoxMatch::Pow
+        | BoxMatch::Atan2
+        | BoxMatch::Fmod
+        | BoxMatch::Remainder
         | BoxMatch::Delay
         | BoxMatch::Min
         | BoxMatch::Max
@@ -605,6 +608,21 @@ fn infer_box_arity(arena: &TreeArena, id: TreeId) -> Option<(usize, usize)> {
         BoxMatch::Delay1
         | BoxMatch::IntCast
         | BoxMatch::FloatCast
+        | BoxMatch::Acos
+        | BoxMatch::Asin
+        | BoxMatch::Atan
+        | BoxMatch::Cos
+        | BoxMatch::Sin
+        | BoxMatch::Tan
+        | BoxMatch::Exp
+        | BoxMatch::Log
+        | BoxMatch::Log10
+        | BoxMatch::Sqrt
+        | BoxMatch::Abs
+        | BoxMatch::Floor
+        | BoxMatch::Ceil
+        | BoxMatch::Rint
+        | BoxMatch::Round
         | BoxMatch::Lowest
         | BoxMatch::Highest => Some((1, 1)),
         BoxMatch::ReadOnlyTable | BoxMatch::Select2 | BoxMatch::AssertBounds => Some((3, 1)),
@@ -706,6 +724,9 @@ fn is_binary_primitive_non_prefix(arena: &TreeArena, id: TreeId) -> bool {
             | BoxMatch::Eq
             | BoxMatch::Ne
             | BoxMatch::Pow
+            | BoxMatch::Atan2
+            | BoxMatch::Fmod
+            | BoxMatch::Remainder
             | BoxMatch::Delay
             | BoxMatch::Min
             | BoxMatch::Max

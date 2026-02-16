@@ -22,6 +22,54 @@ pub fn is_node_pow(arena: &TreeArena, b: TreeId) -> bool {
     matches!(match_box(arena, b), BoxMatch::Pow)
 }
 
+pub fn is_node_acos(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Acos)
+}
+
+pub fn is_node_asin(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Asin)
+}
+
+pub fn is_node_atan(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Atan)
+}
+
+pub fn is_node_atan2(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Atan2)
+}
+
+pub fn is_node_cos(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Cos)
+}
+
+pub fn is_node_sin(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Sin)
+}
+
+pub fn is_node_tan(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Tan)
+}
+
+pub fn is_node_exp(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Exp)
+}
+
+pub fn is_node_log(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Log)
+}
+
+pub fn is_node_log10(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Log10)
+}
+
+pub fn is_node_sqrt(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Sqrt)
+}
+
+pub fn is_node_abs(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Abs)
+}
+
 pub fn is_node_prefix(arena: &TreeArena, b: TreeId) -> bool {
     matches!(match_box(arena, b), BoxMatch::Prefix)
 }
@@ -72,6 +120,30 @@ pub fn is_node_enable(arena: &TreeArena, b: TreeId) -> bool {
 
 pub fn is_node_control(arena: &TreeArena, b: TreeId) -> bool {
     matches!(match_box(arena, b), BoxMatch::Control)
+}
+
+pub fn is_node_fmod(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Fmod)
+}
+
+pub fn is_node_remainder(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Remainder)
+}
+
+pub fn is_node_floor(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Floor)
+}
+
+pub fn is_node_ceil(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Ceil)
+}
+
+pub fn is_node_rint(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Rint)
+}
+
+pub fn is_node_round(arena: &TreeArena, b: TreeId) -> bool {
+    matches!(match_box(arena, b), BoxMatch::Round)
 }
 
 pub fn is_node_par(arena: &TreeArena, b: TreeId) -> Option<(TreeId, TreeId)> {

@@ -51,6 +51,24 @@ const BOX_GE_TAG: &str = "BOXGE";
 const BOX_EQ_TAG: &str = "BOXEQ";
 const BOX_NE_TAG: &str = "BOXNE";
 const BOX_POW_TAG: &str = "BOXPOW";
+const BOX_ACOS_TAG: &str = "BOXACOS";
+const BOX_ASIN_TAG: &str = "BOXASIN";
+const BOX_ATAN_TAG: &str = "BOXATAN";
+const BOX_ATAN2_TAG: &str = "BOXATAN2";
+const BOX_COS_TAG: &str = "BOXCOS";
+const BOX_SIN_TAG: &str = "BOXSIN";
+const BOX_TAN_TAG: &str = "BOXTAN";
+const BOX_EXP_TAG: &str = "BOXEXP";
+const BOX_LOG_TAG: &str = "BOXLOG";
+const BOX_LOG10_TAG: &str = "BOXLOG10";
+const BOX_SQRT_TAG: &str = "BOXSQRT";
+const BOX_ABS_TAG: &str = "BOXABS";
+const BOX_FMOD_TAG: &str = "BOXFMOD";
+const BOX_REMAINDER_TAG: &str = "BOXREMAINDER";
+const BOX_FLOOR_TAG: &str = "BOXFLOOR";
+const BOX_CEIL_TAG: &str = "BOXCEIL";
+const BOX_RINT_TAG: &str = "BOXRINT";
+const BOX_ROUND_TAG: &str = "BOXROUND";
 const BOX_DELAY_TAG: &str = "BOXDELAY";
 const BOX_DELAY1_TAG: &str = "BOXDELAY1";
 const BOX_MIN_TAG: &str = "BOXMIN";
@@ -266,6 +284,96 @@ impl<'a> BoxBuilder<'a> {
     #[must_use]
     pub fn pow(&mut self) -> BoxId {
         node_pow(self.arena)
+    }
+
+    #[must_use]
+    pub fn acos(&mut self) -> BoxId {
+        node_acos(self.arena)
+    }
+
+    #[must_use]
+    pub fn asin(&mut self) -> BoxId {
+        node_asin(self.arena)
+    }
+
+    #[must_use]
+    pub fn atan(&mut self) -> BoxId {
+        node_atan(self.arena)
+    }
+
+    #[must_use]
+    pub fn atan2(&mut self) -> BoxId {
+        node_atan2(self.arena)
+    }
+
+    #[must_use]
+    pub fn cos(&mut self) -> BoxId {
+        node_cos(self.arena)
+    }
+
+    #[must_use]
+    pub fn sin(&mut self) -> BoxId {
+        node_sin(self.arena)
+    }
+
+    #[must_use]
+    pub fn tan(&mut self) -> BoxId {
+        node_tan(self.arena)
+    }
+
+    #[must_use]
+    pub fn exp(&mut self) -> BoxId {
+        node_exp(self.arena)
+    }
+
+    #[must_use]
+    pub fn log(&mut self) -> BoxId {
+        node_log(self.arena)
+    }
+
+    #[must_use]
+    pub fn log10(&mut self) -> BoxId {
+        node_log10(self.arena)
+    }
+
+    #[must_use]
+    pub fn sqrt(&mut self) -> BoxId {
+        node_sqrt(self.arena)
+    }
+
+    #[must_use]
+    pub fn abs(&mut self) -> BoxId {
+        node_abs(self.arena)
+    }
+
+    #[must_use]
+    pub fn fmod(&mut self) -> BoxId {
+        node_fmod(self.arena)
+    }
+
+    #[must_use]
+    pub fn remainder(&mut self) -> BoxId {
+        node_remainder(self.arena)
+    }
+
+    #[must_use]
+    pub fn floor(&mut self) -> BoxId {
+        node_floor(self.arena)
+    }
+
+    #[must_use]
+    pub fn ceil(&mut self) -> BoxId {
+        node_ceil(self.arena)
+    }
+
+    #[must_use]
+    pub fn rint(&mut self) -> BoxId {
+        node_rint(self.arena)
+    }
+
+    #[must_use]
+    pub fn round(&mut self) -> BoxId {
+        node_round(self.arena)
     }
 
     #[must_use]
@@ -593,6 +701,24 @@ pub enum BoxMatch<'a> {
     Eq,
     Ne,
     Pow,
+    Acos,
+    Asin,
+    Atan,
+    Atan2,
+    Cos,
+    Sin,
+    Tan,
+    Exp,
+    Log,
+    Log10,
+    Sqrt,
+    Abs,
+    Fmod,
+    Remainder,
+    Floor,
+    Ceil,
+    Rint,
+    Round,
     Delay,
     Delay1,
     Min,
@@ -686,6 +812,24 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
                     BOX_EQ_TAG => BoxMatch::Eq,
                     BOX_NE_TAG => BoxMatch::Ne,
                     BOX_POW_TAG => BoxMatch::Pow,
+                    BOX_ACOS_TAG => BoxMatch::Acos,
+                    BOX_ASIN_TAG => BoxMatch::Asin,
+                    BOX_ATAN_TAG => BoxMatch::Atan,
+                    BOX_ATAN2_TAG => BoxMatch::Atan2,
+                    BOX_COS_TAG => BoxMatch::Cos,
+                    BOX_SIN_TAG => BoxMatch::Sin,
+                    BOX_TAN_TAG => BoxMatch::Tan,
+                    BOX_EXP_TAG => BoxMatch::Exp,
+                    BOX_LOG_TAG => BoxMatch::Log,
+                    BOX_LOG10_TAG => BoxMatch::Log10,
+                    BOX_SQRT_TAG => BoxMatch::Sqrt,
+                    BOX_ABS_TAG => BoxMatch::Abs,
+                    BOX_FMOD_TAG => BoxMatch::Fmod,
+                    BOX_REMAINDER_TAG => BoxMatch::Remainder,
+                    BOX_FLOOR_TAG => BoxMatch::Floor,
+                    BOX_CEIL_TAG => BoxMatch::Ceil,
+                    BOX_RINT_TAG => BoxMatch::Rint,
+                    BOX_ROUND_TAG => BoxMatch::Round,
                     BOX_DELAY_TAG => BoxMatch::Delay,
                     BOX_DELAY1_TAG => BoxMatch::Delay1,
                     BOX_MIN_TAG => BoxMatch::Min,
@@ -1045,6 +1189,114 @@ fn node_pow(arena: &mut TreeArena) -> BoxId {
     intern_tag(arena, BOX_POW_TAG, &[])
 }
 
+/// Equivalent to C++ `gAcosPrim->box()`.
+#[must_use]
+fn node_acos(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_ACOS_TAG, &[])
+}
+
+/// Equivalent to C++ `gAsinPrim->box()`.
+#[must_use]
+fn node_asin(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_ASIN_TAG, &[])
+}
+
+/// Equivalent to C++ `gAtanPrim->box()`.
+#[must_use]
+fn node_atan(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_ATAN_TAG, &[])
+}
+
+/// Equivalent to C++ `gAtan2Prim->box()`.
+#[must_use]
+fn node_atan2(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_ATAN2_TAG, &[])
+}
+
+/// Equivalent to C++ `gCosPrim->box()`.
+#[must_use]
+fn node_cos(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_COS_TAG, &[])
+}
+
+/// Equivalent to C++ `gSinPrim->box()`.
+#[must_use]
+fn node_sin(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_SIN_TAG, &[])
+}
+
+/// Equivalent to C++ `gTanPrim->box()`.
+#[must_use]
+fn node_tan(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_TAN_TAG, &[])
+}
+
+/// Equivalent to C++ `gExpPrim->box()`.
+#[must_use]
+fn node_exp(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_EXP_TAG, &[])
+}
+
+/// Equivalent to C++ `gLogPrim->box()`.
+#[must_use]
+fn node_log(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_LOG_TAG, &[])
+}
+
+/// Equivalent to C++ `gLog10Prim->box()`.
+#[must_use]
+fn node_log10(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_LOG10_TAG, &[])
+}
+
+/// Equivalent to C++ `gSqrtPrim->box()`.
+#[must_use]
+fn node_sqrt(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_SQRT_TAG, &[])
+}
+
+/// Equivalent to C++ `gAbsPrim->box()`.
+#[must_use]
+fn node_abs(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_ABS_TAG, &[])
+}
+
+/// Equivalent to C++ `gFmodPrim->box()`.
+#[must_use]
+fn node_fmod(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_FMOD_TAG, &[])
+}
+
+/// Equivalent to C++ `gRemainderPrim->box()`.
+#[must_use]
+fn node_remainder(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_REMAINDER_TAG, &[])
+}
+
+/// Equivalent to C++ `gFloorPrim->box()`.
+#[must_use]
+fn node_floor(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_FLOOR_TAG, &[])
+}
+
+/// Equivalent to C++ `gCeilPrim->box()`.
+#[must_use]
+fn node_ceil(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_CEIL_TAG, &[])
+}
+
+/// Equivalent to C++ `gRintPrim->box()`.
+#[must_use]
+fn node_rint(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_RINT_TAG, &[])
+}
+
+/// Equivalent to C++ `gRoundPrim->box()`.
+#[must_use]
+fn node_round(arena: &mut TreeArena) -> BoxId {
+    intern_tag(arena, BOX_ROUND_TAG, &[])
+}
+
 /// Equivalent to C++ `boxDelay`.
 #[must_use]
 fn node_delay(arena: &mut TreeArena) -> BoxId {
@@ -1174,6 +1426,24 @@ define_is_prim!(is_node_ge, BOX_GE_TAG);
 define_is_prim!(is_node_eq, BOX_EQ_TAG);
 define_is_prim!(is_node_ne, BOX_NE_TAG);
 define_is_prim!(is_node_pow, BOX_POW_TAG);
+define_is_prim!(is_node_acos, BOX_ACOS_TAG);
+define_is_prim!(is_node_asin, BOX_ASIN_TAG);
+define_is_prim!(is_node_atan, BOX_ATAN_TAG);
+define_is_prim!(is_node_atan2, BOX_ATAN2_TAG);
+define_is_prim!(is_node_cos, BOX_COS_TAG);
+define_is_prim!(is_node_sin, BOX_SIN_TAG);
+define_is_prim!(is_node_tan, BOX_TAN_TAG);
+define_is_prim!(is_node_exp, BOX_EXP_TAG);
+define_is_prim!(is_node_log, BOX_LOG_TAG);
+define_is_prim!(is_node_log10, BOX_LOG10_TAG);
+define_is_prim!(is_node_sqrt, BOX_SQRT_TAG);
+define_is_prim!(is_node_abs, BOX_ABS_TAG);
+define_is_prim!(is_node_fmod, BOX_FMOD_TAG);
+define_is_prim!(is_node_remainder, BOX_REMAINDER_TAG);
+define_is_prim!(is_node_floor, BOX_FLOOR_TAG);
+define_is_prim!(is_node_ceil, BOX_CEIL_TAG);
+define_is_prim!(is_node_rint, BOX_RINT_TAG);
+define_is_prim!(is_node_round, BOX_ROUND_TAG);
 define_is_prim!(is_node_delay, BOX_DELAY_TAG);
 define_is_prim!(is_node_delay1, BOX_DELAY1_TAG);
 define_is_prim!(is_node_min, BOX_MIN_TAG);

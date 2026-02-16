@@ -219,6 +219,9 @@ pub fn box_arity(arena: &TreeArena, box_tree: BoxId) -> Result<BoxArity, Propaga
         | BoxMatch::Eq
         | BoxMatch::Ne
         | BoxMatch::Pow
+        | BoxMatch::Atan2
+        | BoxMatch::Fmod
+        | BoxMatch::Remainder
         | BoxMatch::Delay
         | BoxMatch::Min
         | BoxMatch::Max
@@ -232,6 +235,21 @@ pub fn box_arity(arena: &TreeArena, box_tree: BoxId) -> Result<BoxArity, Propaga
         BoxMatch::Delay1
         | BoxMatch::IntCast
         | BoxMatch::FloatCast
+        | BoxMatch::Acos
+        | BoxMatch::Asin
+        | BoxMatch::Atan
+        | BoxMatch::Cos
+        | BoxMatch::Sin
+        | BoxMatch::Tan
+        | BoxMatch::Exp
+        | BoxMatch::Log
+        | BoxMatch::Log10
+        | BoxMatch::Sqrt
+        | BoxMatch::Abs
+        | BoxMatch::Floor
+        | BoxMatch::Ceil
+        | BoxMatch::Rint
+        | BoxMatch::Round
         | BoxMatch::Lowest
         | BoxMatch::Highest => Ok(BoxArity {
             inputs: 1,
@@ -517,10 +535,28 @@ fn propagate_inner(
         BoxMatch::Eq => binary_prim(arena, box_tree, inputs, |b, x, y| b.eq(x, y)),
         BoxMatch::Ne => binary_prim(arena, box_tree, inputs, |b, x, y| b.ne(x, y)),
         BoxMatch::Pow => binary_prim(arena, box_tree, inputs, |b, x, y| b.pow(x, y)),
+        BoxMatch::Atan2 => binary_prim(arena, box_tree, inputs, |b, x, y| b.atan2(x, y)),
+        BoxMatch::Fmod => binary_prim(arena, box_tree, inputs, |b, x, y| b.fmod(x, y)),
+        BoxMatch::Remainder => binary_prim(arena, box_tree, inputs, |b, x, y| b.remainder(x, y)),
         BoxMatch::Min => binary_prim(arena, box_tree, inputs, |b, x, y| b.min(x, y)),
         BoxMatch::Max => binary_prim(arena, box_tree, inputs, |b, x, y| b.max(x, y)),
         BoxMatch::Delay => binary_prim(arena, box_tree, inputs, |b, x, y| b.delay(x, y)),
         BoxMatch::Delay1 => unary_prim(arena, box_tree, inputs, |b, x| b.delay1(x)),
+        BoxMatch::Acos => unary_prim(arena, box_tree, inputs, |b, x| b.acos(x)),
+        BoxMatch::Asin => unary_prim(arena, box_tree, inputs, |b, x| b.asin(x)),
+        BoxMatch::Atan => unary_prim(arena, box_tree, inputs, |b, x| b.atan(x)),
+        BoxMatch::Cos => unary_prim(arena, box_tree, inputs, |b, x| b.cos(x)),
+        BoxMatch::Sin => unary_prim(arena, box_tree, inputs, |b, x| b.sin(x)),
+        BoxMatch::Tan => unary_prim(arena, box_tree, inputs, |b, x| b.tan(x)),
+        BoxMatch::Exp => unary_prim(arena, box_tree, inputs, |b, x| b.exp(x)),
+        BoxMatch::Log => unary_prim(arena, box_tree, inputs, |b, x| b.log(x)),
+        BoxMatch::Log10 => unary_prim(arena, box_tree, inputs, |b, x| b.log10(x)),
+        BoxMatch::Sqrt => unary_prim(arena, box_tree, inputs, |b, x| b.sqrt(x)),
+        BoxMatch::Abs => unary_prim(arena, box_tree, inputs, |b, x| b.abs(x)),
+        BoxMatch::Floor => unary_prim(arena, box_tree, inputs, |b, x| b.floor(x)),
+        BoxMatch::Ceil => unary_prim(arena, box_tree, inputs, |b, x| b.ceil(x)),
+        BoxMatch::Rint => unary_prim(arena, box_tree, inputs, |b, x| b.rint(x)),
+        BoxMatch::Round => unary_prim(arena, box_tree, inputs, |b, x| b.round(x)),
         BoxMatch::Prefix => binary_prim(arena, box_tree, inputs, |b, x, y| b.prefix(x, y)),
         BoxMatch::IntCast => unary_prim(arena, box_tree, inputs, |b, x| b.int_cast(x)),
         BoxMatch::FloatCast => unary_prim(arena, box_tree, inputs, |b, x| b.float_cast(x)),

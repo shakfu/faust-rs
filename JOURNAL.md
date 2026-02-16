@@ -2054,3 +2054,50 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo run -p compiler -- --dump-sig tests/corpus/rep_07_nonlinear_clip.dsp`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --all-targets`
+
+### Phase 4 integration step 7 (full parser/eval/propagate closure for extended math primitives)
+
+- Source of truth checked in C++:
+  - `/Users/letz/Developpements/RUST/faust/compiler/parser/faustparser.y`
+  - `/Users/letz/Developpements/RUST/faust/compiler/parser/faustlexer.l`
+  - `/Users/letz/Developpements/RUST/faust/compiler/signals/signals.hh`
+  - `/Users/letz/Developpements/RUST/faust/compiler/signals/signals.cpp`
+- Extended `crates/boxes/src/lib.rs` with the full parser-exposed extended primitive family:
+  - unary: `acos`, `asin`, `atan`, `cos`, `sin`, `tan`, `exp`, `log`, `log10`, `sqrt`, `abs`, `floor`, `ceil`, `rint`, `round`,
+  - binary: `atan2`, `fmod`, `remainder`,
+  - plus existing `pow/min/max`.
+- Extended `crates/parser-proto/src/grammar/faustparser.y` primitive lowering:
+  - added semantic actions for `ACOS/ASIN/ATAN/ATAN2/COS/SIN/TAN/EXP/LOG/LOG10/SQRT/ABS/FMOD/REMAINDER/FLOOR/CEIL/RINT/ROUND`,
+  - removed these now-supported tokens from `LexProbeToken` recovery branch to avoid parser conflicts.
+- Extended `crates/signals/src/lib.rs`:
+  - added dedicated signal node families and `SigBuilder`/`SigMatch` support for all extended primitives above.
+- Extended `crates/propagate/src/lib.rs`:
+  - full box-arity + lowering support to the new signal nodes for all unary/binary extended primitives.
+- Extended `crates/eval/src/lib.rs` arity model:
+  - added new extended primitive arities in non-closure application inference,
+  - added binary extended primitives in implicit-wire partial application classification.
+- Added/extended tests:
+  - `crates/boxes/tests/core_api.rs`: primitive builder/matcher coverage now includes full extended family.
+  - `crates/parser-proto/tests/parser_slice10_primitives.rs` + `tests/support/node_match_helpers.rs`:
+    - parser primitive matrix now checks all extended tokens map to expected box nodes.
+  - `crates/signals/tests/core_api.rs`: builder/matcher coverage for all extended signal nodes.
+  - `crates/propagate/tests/core_api.rs`:
+    - `propagate_extended_math_primitives_map_to_signal_nodes`.
+  - `crates/compiler/tests/signal_pipeline.rs`:
+    - new integration test `corpus_extended_primitives_cover_unary_and_binary_signal_nodes`.
+  - `crates/compiler/tests/cpp_signal_differential.rs`:
+    - added `rep_31_extended_primitives.dsp`.
+  - new corpus fixture:
+    - `tests/corpus/rep_31_extended_primitives.dsp`.
+- Differential status (C++ source-of-truth `/Users/letz/Developpements/RUST/faust` @ `8eebea429`):
+  - `rep_31_extended_primitives`: `rust=Ok`, `cpp=Ok`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p boxes --all-targets`
+  - `cargo test -p signals --all-targets`
+  - `cargo test -p propagate --all-targets`
+  - `cargo test -p parser-proto --all-targets`
+  - `cargo test -p compiler --test signal_pipeline`
+  - `cargo test -p compiler --test cpp_signal_differential -- --nocapture`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace --all-targets`

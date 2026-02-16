@@ -249,6 +249,103 @@ fn propagate_pow_min_max_map_to_signal_nodes() {
     );
 }
 
+#[test]
+fn propagate_extended_math_primitives_map_to_signal_nodes() {
+    let mut arena = TreeArena::new();
+    let (
+        acos,
+        asin,
+        atan,
+        atan2,
+        cos,
+        sin,
+        tan,
+        exp,
+        log,
+        log10,
+        sqrt,
+        abs,
+        fmod,
+        remainder,
+        floor,
+        ceil,
+        rint,
+        round,
+    ) = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        (
+            bb.acos(),
+            bb.asin(),
+            bb.atan(),
+            bb.atan2(),
+            bb.cos(),
+            bb.sin(),
+            bb.tan(),
+            bb.exp(),
+            bb.log(),
+            bb.log10(),
+            bb.sqrt(),
+            bb.abs(),
+            bb.fmod(),
+            bb.remainder(),
+            bb.floor(),
+            bb.ceil(),
+            bb.rint(),
+            bb.round(),
+        )
+    };
+    let uinputs = make_sig_input_list(&mut arena, 1);
+    let binputs = make_sig_input_list(&mut arena, 2);
+
+    let acos_sig = propagate(&mut arena, acos, &uinputs).expect("acos should propagate")[0];
+    let asin_sig = propagate(&mut arena, asin, &uinputs).expect("asin should propagate")[0];
+    let atan_sig = propagate(&mut arena, atan, &uinputs).expect("atan should propagate")[0];
+    let atan2_sig = propagate(&mut arena, atan2, &binputs).expect("atan2 should propagate")[0];
+    let cos_sig = propagate(&mut arena, cos, &uinputs).expect("cos should propagate")[0];
+    let sin_sig = propagate(&mut arena, sin, &uinputs).expect("sin should propagate")[0];
+    let tan_sig = propagate(&mut arena, tan, &uinputs).expect("tan should propagate")[0];
+    let exp_sig = propagate(&mut arena, exp, &uinputs).expect("exp should propagate")[0];
+    let log_sig = propagate(&mut arena, log, &uinputs).expect("log should propagate")[0];
+    let log10_sig = propagate(&mut arena, log10, &uinputs).expect("log10 should propagate")[0];
+    let sqrt_sig = propagate(&mut arena, sqrt, &uinputs).expect("sqrt should propagate")[0];
+    let abs_sig = propagate(&mut arena, abs, &uinputs).expect("abs should propagate")[0];
+    let fmod_sig = propagate(&mut arena, fmod, &binputs).expect("fmod should propagate")[0];
+    let remainder_sig =
+        propagate(&mut arena, remainder, &binputs).expect("remainder should propagate")[0];
+    let floor_sig = propagate(&mut arena, floor, &uinputs).expect("floor should propagate")[0];
+    let ceil_sig = propagate(&mut arena, ceil, &uinputs).expect("ceil should propagate")[0];
+    let rint_sig = propagate(&mut arena, rint, &uinputs).expect("rint should propagate")[0];
+    let round_sig = propagate(&mut arena, round, &uinputs).expect("round should propagate")[0];
+
+    assert_eq!(match_sig(&arena, acos_sig), SigMatch::Acos(uinputs[0]));
+    assert_eq!(match_sig(&arena, asin_sig), SigMatch::Asin(uinputs[0]));
+    assert_eq!(match_sig(&arena, atan_sig), SigMatch::Atan(uinputs[0]));
+    assert_eq!(
+        match_sig(&arena, atan2_sig),
+        SigMatch::Atan2(binputs[0], binputs[1])
+    );
+    assert_eq!(match_sig(&arena, cos_sig), SigMatch::Cos(uinputs[0]));
+    assert_eq!(match_sig(&arena, sin_sig), SigMatch::Sin(uinputs[0]));
+    assert_eq!(match_sig(&arena, tan_sig), SigMatch::Tan(uinputs[0]));
+    assert_eq!(match_sig(&arena, exp_sig), SigMatch::Exp(uinputs[0]));
+    assert_eq!(match_sig(&arena, log_sig), SigMatch::Log(uinputs[0]));
+    assert_eq!(match_sig(&arena, log10_sig), SigMatch::Log10(uinputs[0]));
+    assert_eq!(match_sig(&arena, sqrt_sig), SigMatch::Sqrt(uinputs[0]));
+    assert_eq!(match_sig(&arena, abs_sig), SigMatch::Abs(uinputs[0]));
+    assert_eq!(
+        match_sig(&arena, fmod_sig),
+        SigMatch::Fmod(binputs[0], binputs[1])
+    );
+    assert_eq!(
+        match_sig(&arena, remainder_sig),
+        SigMatch::Remainder(binputs[0], binputs[1])
+    );
+    assert_eq!(match_sig(&arena, floor_sig), SigMatch::Floor(uinputs[0]));
+    assert_eq!(match_sig(&arena, ceil_sig), SigMatch::Ceil(uinputs[0]));
+    assert_eq!(match_sig(&arena, rint_sig), SigMatch::Rint(uinputs[0]));
+    assert_eq!(match_sig(&arena, round_sig), SigMatch::Round(uinputs[0]));
+}
+
 fn is_debruijn_rec(arena: &TreeArena, id: TreeId) -> bool {
     matches!(tag_name(arena, id), Some("DEBRUIJN"))
 }

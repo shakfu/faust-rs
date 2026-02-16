@@ -195,6 +195,42 @@ fn corpus_primitive_family_includes_pow_output() {
     ));
 }
 
+#[test]
+fn corpus_extended_primitives_cover_unary_and_binary_signal_nodes() {
+    let out = compile_corpus("rep_31_extended_primitives.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 20);
+    assert_eq!(out.signals.len(), 20);
+
+    let got: Vec<SigMatch<'_>> = out
+        .signals
+        .iter()
+        .copied()
+        .map(|s| match_sig(&out.parse.state.arena, s))
+        .collect();
+
+    assert!(matches!(got[0], SigMatch::Acos(_)));
+    assert!(matches!(got[1], SigMatch::Asin(_)));
+    assert!(matches!(got[2], SigMatch::Atan(_)));
+    assert!(matches!(got[3], SigMatch::Atan2(_, _)));
+    assert!(matches!(got[4], SigMatch::Cos(_)));
+    assert!(matches!(got[5], SigMatch::Sin(_)));
+    assert!(matches!(got[6], SigMatch::Tan(_)));
+    assert!(matches!(got[7], SigMatch::Exp(_)));
+    assert!(matches!(got[8], SigMatch::Log(_)));
+    assert!(matches!(got[9], SigMatch::Log10(_)));
+    assert!(matches!(got[10], SigMatch::Sqrt(_)));
+    assert!(matches!(got[11], SigMatch::Abs(_)));
+    assert!(matches!(got[12], SigMatch::Min(_, _)));
+    assert!(matches!(got[13], SigMatch::Max(_, _)));
+    assert!(matches!(got[14], SigMatch::Fmod(_, _)));
+    assert!(matches!(got[15], SigMatch::Remainder(_, _)));
+    assert!(matches!(got[16], SigMatch::Floor(_)));
+    assert!(matches!(got[17], SigMatch::Ceil(_)));
+    assert!(matches!(got[18], SigMatch::Rint(_)));
+    assert!(matches!(got[19], SigMatch::Round(_)));
+}
+
 fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i64) {
     let SigMatch::BinOp(BinOp::Mul, a, b) = match_sig(arena, sig) else {
         panic!("branch should be Mul");

@@ -43,6 +43,24 @@ const SIG_BINOP_TAG: &str = "SIGBINOP";
 const SIG_POW_TAG: &str = "SIGPOW";
 const SIG_MIN_TAG: &str = "SIGMIN";
 const SIG_MAX_TAG: &str = "SIGMAX";
+const SIG_ACOS_TAG: &str = "SIGACOS";
+const SIG_ASIN_TAG: &str = "SIGASIN";
+const SIG_ATAN_TAG: &str = "SIGATAN";
+const SIG_ATAN2_TAG: &str = "SIGATAN2";
+const SIG_COS_TAG: &str = "SIGCOS";
+const SIG_SIN_TAG: &str = "SIGSIN";
+const SIG_TAN_TAG: &str = "SIGTAN";
+const SIG_EXP_TAG: &str = "SIGEXP";
+const SIG_LOG_TAG: &str = "SIGLOG";
+const SIG_LOG10_TAG: &str = "SIGLOG10";
+const SIG_SQRT_TAG: &str = "SIGSQRT";
+const SIG_ABS_TAG: &str = "SIGABS";
+const SIG_FMOD_TAG: &str = "SIGFMOD";
+const SIG_REMAINDER_TAG: &str = "SIGREMAINDER";
+const SIG_FLOOR_TAG: &str = "SIGFLOOR";
+const SIG_CEIL_TAG: &str = "SIGCEIL";
+const SIG_RINT_TAG: &str = "SIGRINT";
+const SIG_ROUND_TAG: &str = "SIGROUND";
 const SIG_FFUN_TAG: &str = "SIGFFUN";
 const SIG_FCONST_TAG: &str = "SIGFCONST";
 const SIG_FVAR_TAG: &str = "SIGFVAR";
@@ -417,6 +435,96 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
+    pub fn acos(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_ACOS_TAG, &[x])
+    }
+
+    #[must_use]
+    pub fn asin(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_ASIN_TAG, &[x])
+    }
+
+    #[must_use]
+    pub fn atan(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_ATAN_TAG, &[x])
+    }
+
+    #[must_use]
+    pub fn atan2(&mut self, x: SigId, y: SigId) -> SigId {
+        intern_tag(self.arena, SIG_ATAN2_TAG, &[x, y])
+    }
+
+    #[must_use]
+    pub fn cos(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_COS_TAG, &[x])
+    }
+
+    #[must_use]
+    pub fn sin(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_SIN_TAG, &[x])
+    }
+
+    #[must_use]
+    pub fn tan(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_TAN_TAG, &[x])
+    }
+
+    #[must_use]
+    pub fn exp(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_EXP_TAG, &[x])
+    }
+
+    #[must_use]
+    pub fn log(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_LOG_TAG, &[x])
+    }
+
+    #[must_use]
+    pub fn log10(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_LOG10_TAG, &[x])
+    }
+
+    #[must_use]
+    pub fn sqrt(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_SQRT_TAG, &[x])
+    }
+
+    #[must_use]
+    pub fn abs(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_ABS_TAG, &[x])
+    }
+
+    #[must_use]
+    pub fn fmod(&mut self, x: SigId, y: SigId) -> SigId {
+        intern_tag(self.arena, SIG_FMOD_TAG, &[x, y])
+    }
+
+    #[must_use]
+    pub fn remainder(&mut self, x: SigId, y: SigId) -> SigId {
+        intern_tag(self.arena, SIG_REMAINDER_TAG, &[x, y])
+    }
+
+    #[must_use]
+    pub fn floor(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_FLOOR_TAG, &[x])
+    }
+
+    #[must_use]
+    pub fn ceil(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_CEIL_TAG, &[x])
+    }
+
+    #[must_use]
+    pub fn rint(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_RINT_TAG, &[x])
+    }
+
+    #[must_use]
+    pub fn round(&mut self, x: SigId) -> SigId {
+        intern_tag(self.arena, SIG_ROUND_TAG, &[x])
+    }
+
+    #[must_use]
     pub fn ffun(&mut self, ff: SigId, largs: SigId) -> SigId {
         intern_tag(self.arena, SIG_FFUN_TAG, &[ff, largs])
     }
@@ -577,6 +685,24 @@ pub enum SigMatch<'a> {
     Pow(SigId, SigId),
     Min(SigId, SigId),
     Max(SigId, SigId),
+    Acos(SigId),
+    Asin(SigId),
+    Atan(SigId),
+    Atan2(SigId, SigId),
+    Cos(SigId),
+    Sin(SigId),
+    Tan(SigId),
+    Exp(SigId),
+    Log(SigId),
+    Log10(SigId),
+    Sqrt(SigId),
+    Abs(SigId),
+    Fmod(SigId, SigId),
+    Remainder(SigId, SigId),
+    Floor(SigId),
+    Ceil(SigId),
+    Rint(SigId),
+    Round(SigId),
     FFun(SigId, SigId),
     FConst(SigId, SigId, SigId),
     FVar(SigId, SigId, SigId),
@@ -647,6 +773,24 @@ pub fn match_sig<'a>(arena: &'a TreeArena, id: SigId) -> SigMatch<'a> {
                 (SIG_POW_TAG, [x, y]) => SigMatch::Pow(*x, *y),
                 (SIG_MIN_TAG, [x, y]) => SigMatch::Min(*x, *y),
                 (SIG_MAX_TAG, [x, y]) => SigMatch::Max(*x, *y),
+                (SIG_ACOS_TAG, [x]) => SigMatch::Acos(*x),
+                (SIG_ASIN_TAG, [x]) => SigMatch::Asin(*x),
+                (SIG_ATAN_TAG, [x]) => SigMatch::Atan(*x),
+                (SIG_ATAN2_TAG, [x, y]) => SigMatch::Atan2(*x, *y),
+                (SIG_COS_TAG, [x]) => SigMatch::Cos(*x),
+                (SIG_SIN_TAG, [x]) => SigMatch::Sin(*x),
+                (SIG_TAN_TAG, [x]) => SigMatch::Tan(*x),
+                (SIG_EXP_TAG, [x]) => SigMatch::Exp(*x),
+                (SIG_LOG_TAG, [x]) => SigMatch::Log(*x),
+                (SIG_LOG10_TAG, [x]) => SigMatch::Log10(*x),
+                (SIG_SQRT_TAG, [x]) => SigMatch::Sqrt(*x),
+                (SIG_ABS_TAG, [x]) => SigMatch::Abs(*x),
+                (SIG_FMOD_TAG, [x, y]) => SigMatch::Fmod(*x, *y),
+                (SIG_REMAINDER_TAG, [x, y]) => SigMatch::Remainder(*x, *y),
+                (SIG_FLOOR_TAG, [x]) => SigMatch::Floor(*x),
+                (SIG_CEIL_TAG, [x]) => SigMatch::Ceil(*x),
+                (SIG_RINT_TAG, [x]) => SigMatch::Rint(*x),
+                (SIG_ROUND_TAG, [x]) => SigMatch::Round(*x),
                 (SIG_FFUN_TAG, [ff, largs]) => SigMatch::FFun(*ff, *largs),
                 (SIG_FCONST_TAG, [ty, name, file]) => SigMatch::FConst(*ty, *name, *file),
                 (SIG_FVAR_TAG, [ty, name, file]) => SigMatch::FVar(*ty, *name, *file),

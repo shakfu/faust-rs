@@ -243,20 +243,13 @@ LexProbeToken -> u8:
     | WHERE { 0 }
     | ARROW { 0 }
     | LAPPLY { 0 }
-    | ABS { 0 }
-    | ACOS { 0 }
-    | ASIN { 0 }
-    | ATAN { 0 }
-    | ATAN2 { 0 }
     | BDGM { 0 }
     | BDOC { 0 }
     | BEQN { 0 }
     | BLST { 0 }
     | BMETADATA { 0 }
     | CASE { 0 }
-    | CEIL { 0 }
     | COMPONENT { 0 }
-    | COS { 0 }
     | DECLARE { 0 }
     | DOCCHAR { 0 }
     | DOUBLEMODE { 0 }
@@ -267,13 +260,10 @@ LexProbeToken -> u8:
     | ELST { 0 }
     | EMETADATA { 0 }
     | ENVIRONMENT { 0 }
-    | EXP { 0 }
     | FCONSTANT { 0 }
     | FFUNCTION { 0 }
     | FIXEDPOINTMODE { 0 }
     | FLOATMODE { 0 }
-    | FLOOR { 0 }
-    | FMOD { 0 }
     | FVARIABLE { 0 }
     | HGROUP { 0 }
     | IMPORT { 0 }
@@ -282,8 +272,6 @@ LexProbeToken -> u8:
     | LBRAQ { 0 }
     | LCROC { 0 }
     | LIBRARY { 0 }
-    | LOG { 0 }
-    | LOG10 { 0 }
     | LSTDEPENDENCIES { 0 }
     | LSTDISTRIBUTED { 0 }
     | LSTEQ { 0 }
@@ -299,14 +287,8 @@ LexProbeToken -> u8:
     | QUADMODE { 0 }
     | RBRAQ { 0 }
     | RCROC { 0 }
-    | REMAINDER { 0 }
-    | RINT { 0 }
-    | ROUND { 0 }
     | ROUTE { 0 }
-    | SIN { 0 }
     | SOUNDFILE { 0 }
-    | SQRT { 0 }
-    | TAN { 0 }
     | TGROUP { 0 }
     | UPSAMPLING { 0 }
     | VGROUP { 0 }
@@ -590,11 +572,65 @@ Primitive -> tlib::TreeId:
     | POWFUN {
           crate::with_state(state, |state| state.node_builder().pow())
       }
+    | ACOS {
+          crate::with_state(state, |state| state.node_builder().acos())
+      }
+    | ASIN {
+          crate::with_state(state, |state| state.node_builder().asin())
+      }
+    | ATAN {
+          crate::with_state(state, |state| state.node_builder().atan())
+      }
+    | ATAN2 {
+          crate::with_state(state, |state| state.node_builder().atan2())
+      }
+    | COS {
+          crate::with_state(state, |state| state.node_builder().cos())
+      }
+    | SIN {
+          crate::with_state(state, |state| state.node_builder().sin())
+      }
+    | TAN {
+          crate::with_state(state, |state| state.node_builder().tan())
+      }
+    | EXP {
+          crate::with_state(state, |state| state.node_builder().exp())
+      }
+    | LOG {
+          crate::with_state(state, |state| state.node_builder().log())
+      }
+    | LOG10 {
+          crate::with_state(state, |state| state.node_builder().log10())
+      }
+    | SQRT {
+          crate::with_state(state, |state| state.node_builder().sqrt())
+      }
+    | ABS {
+          crate::with_state(state, |state| state.node_builder().abs())
+      }
     | MIN {
           crate::with_state(state, |state| state.node_builder().min())
       }
     | MAX {
           crate::with_state(state, |state| state.node_builder().max())
+      }
+    | FMOD {
+          crate::with_state(state, |state| state.node_builder().fmod())
+      }
+    | REMAINDER {
+          crate::with_state(state, |state| state.node_builder().remainder())
+      }
+    | FLOOR {
+          crate::with_state(state, |state| state.node_builder().floor())
+      }
+    | CEIL {
+          crate::with_state(state, |state| state.node_builder().ceil())
+      }
+    | RINT {
+          crate::with_state(state, |state| state.node_builder().rint())
+      }
+    | ROUND {
+          crate::with_state(state, |state| state.node_builder().round())
       }
     | RDTBL {
           crate::with_state(state, |state| state.node_builder().read_only_table())

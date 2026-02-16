@@ -1,0 +1,1 @@
+process = acos(0.5), asin(0.5), atan(0.5), atan2(0.5, 1.0), cos(0.5), sin(0.5), tan(0.5), exp(1.0), log(2.0), log10(10.0), sqrt(9.0), abs(-3), min(1, 2), max(1, 2), fmod(5.5, 2.0), remainder(5.5, 2.0), floor(1.75), ceil(1.25), rint(1.4), round(1.6);
