@@ -1,5 +1,6 @@
 use boxes::dump_box;
 use compiler::{Compiler, golden_snapshot_from_file};
+use signals::dump_sig;
 use std::path::PathBuf;
 
 fn parse_input_with_import_dirs(
@@ -105,6 +106,32 @@ fn main() {
                 }
             }
         }
+        Some("--dump-sig") => {
+            let usage = "Usage: cargo run -p compiler -- --dump-sig <input.dsp> [-I <dir> ...]";
+            let (input_path, search_paths) = parse_input_with_import_dirs(args, usage);
+            let compiler = Compiler::new();
+            let result = if search_paths.is_empty() {
+                compiler.compile_file_default_to_signals(&input_path)
+            } else {
+                compiler.compile_file_to_signals(&input_path, &search_paths)
+            };
+
+            match result {
+                Ok(out) => {
+                    println!(
+                        "Signals OK: inputs={} outputs={}",
+                        out.process_arity.inputs, out.process_arity.outputs
+                    );
+                    for (index, sig) in out.signals.iter().enumerate() {
+                        println!("[{index}] {}", dump_sig(&out.parse.state.arena, *sig));
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Signal pipeline failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
         None => {
             println!("faust-rs compiler scaffold v{}", Compiler::version());
         }
@@ -113,6 +140,7 @@ fn main() {
             eprintln!("  cargo run -p compiler -- --golden <input.dsp>");
             eprintln!("  cargo run -p compiler -- --parse <input.dsp> [-I <dir> ...]");
             eprintln!("  cargo run -p compiler -- --dump-box <input.dsp> [-I <dir> ...]");
+            eprintln!("  cargo run -p compiler -- --dump-sig <input.dsp> [-I <dir> ...]");
             std::process::exit(2);
         }
     }

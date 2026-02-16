@@ -99,7 +99,10 @@ dependencies = [
  "boxes",
  "codegen",
  "errors",
+ "eval",
  "parser",
+ "propagate",
+ "signals",
 ]
 
 [[package]]

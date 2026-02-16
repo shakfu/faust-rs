@@ -1840,3 +1840,36 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p propagate --all-targets`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --all-targets`
+
+### Phase 4 integration step 1 (`compiler` wires `parse -> eval -> propagate`)
+
+- Extended `crates/compiler` to expose a first full signal pipeline API:
+  - added `SignalCompileOutput` (`parse`, `process_box`, `process_arity`, `signals`)
+  - added:
+    - `compile_source_to_signals(...)`
+    - `compile_file_to_signals(...)`
+    - `compile_file_default_to_signals(...)`
+  - internal flow:
+    - parse through production `parser`,
+    - evaluate `process` via `eval::eval_process`,
+    - infer arity + create canonical inputs + propagate via `propagate`.
+- Extended compiler error surface:
+  - `MissingRoot`
+  - `Eval(eval::EvalError)`
+  - `Propagate(propagate::PropagateError)`
+- Added CLI integration in `crates/compiler/src/main.rs`:
+  - new command:
+    - `cargo run -p compiler -- --dump-sig <input.dsp> [-I <dir> ...]`
+  - output prints inferred process arity and one dumped signal per output.
+- Added compiler-level tests (`crates/compiler/src/lib.rs`):
+  - pass-through (`process = _;`) signal pipeline,
+  - recursive process (`process = + ~ _;`) signal pipeline,
+  - missing `process` evaluation error mapping.
+- Updated crate dependencies:
+  - `crates/compiler/Cargo.toml` now depends on `eval`, `propagate`, `signals`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p compiler --all-targets -- -D warnings`
+  - `cargo test -p compiler --all-targets`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace --all-targets`

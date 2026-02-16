@@ -10,7 +10,19 @@
 
 use std::path::{Path, PathBuf};
 
+use boxes::BoxId;
 use parser::{ParseOutput, SourceReaderError};
+use propagate::{BoxArity, PropagateError};
+use signals::SigId;
+
+/// Parse + eval + propagate output package.
+#[derive(Debug)]
+pub struct SignalCompileOutput {
+    pub parse: ParseOutput,
+    pub process_box: BoxId,
+    pub process_arity: BoxArity,
+    pub signals: Vec<SigId>,
+}
 
 pub struct Compiler;
 
@@ -58,6 +70,63 @@ impl Compiler {
             .unwrap_or_else(|| PathBuf::from("."));
         self.compile_file(path, std::slice::from_ref(&search_base))
     }
+
+    /// Parses, evaluates `process`, then propagates boxes to output signals.
+    pub fn compile_source_to_signals(
+        &self,
+        source_name: &str,
+        source: &str,
+    ) -> Result<SignalCompileOutput, CompilerError> {
+        let output = self.compile_source(source_name, source)?;
+        self.pipeline_to_signals(source_name, output)
+    }
+
+    /// Parses one file, evaluates `process`, then propagates boxes to output signals.
+    pub fn compile_file_to_signals(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+    ) -> Result<SignalCompileOutput, CompilerError> {
+        let output = self.compile_file(path, search_paths)?;
+        self.pipeline_to_signals(&path.display().to_string(), output)
+    }
+
+    /// Parses one file with default import search path, then runs eval+propagate.
+    pub fn compile_file_default_to_signals(
+        &self,
+        path: &Path,
+    ) -> Result<SignalCompileOutput, CompilerError> {
+        let search_base = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        self.compile_file_to_signals(path, std::slice::from_ref(&search_base))
+    }
+
+    fn pipeline_to_signals(
+        &self,
+        source: &str,
+        mut output: ParseOutput,
+    ) -> Result<SignalCompileOutput, CompilerError> {
+        let root = output.root.ok_or_else(|| CompilerError::MissingRoot {
+            source: source.into(),
+        })?;
+
+        let process_box =
+            eval::eval_process(&mut output.state.arena, root).map_err(CompilerError::Eval)?;
+        let process_arity = propagate::box_arity(&output.state.arena, process_box)
+            .map_err(CompilerError::Propagate)?;
+        let inputs = propagate::make_sig_input_list(&mut output.state.arena, process_arity.inputs);
+        let signals = propagate::propagate(&mut output.state.arena, process_box, &inputs)
+            .map_err(CompilerError::Propagate)?;
+
+        Ok(SignalCompileOutput {
+            parse: output,
+            process_box,
+            process_arity,
+            signals,
+        })
+    }
 }
 
 impl Default for Compiler {
@@ -70,17 +139,23 @@ impl Default for Compiler {
 #[derive(Debug)]
 pub enum CompilerError {
     Import(SourceReaderError),
+    MissingRoot {
+        source: Box<str>,
+    },
     Parse {
         source: Box<str>,
         parse_errors: usize,
         recoveries: u32,
     },
+    Eval(eval::EvalError),
+    Propagate(PropagateError),
 }
 
 impl std::fmt::Display for CompilerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Import(err) => write!(f, "{err}"),
+            Self::MissingRoot { source } => write!(f, "parse returned no root for {source}"),
             Self::Parse {
                 source,
                 parse_errors,
@@ -89,6 +164,8 @@ impl std::fmt::Display for CompilerError {
                 f,
                 "parse failed for {source}: errors={parse_errors}, recoveries={recoveries}"
             ),
+            Self::Eval(err) => write!(f, "evaluation failed: {err}"),
+            Self::Propagate(err) => write!(f, "propagation failed: {err}"),
         }
     }
 }
@@ -147,6 +224,8 @@ fn normalize_newlines(input: &str) -> String {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+
+    use signals::SigMatch;
 
     use super::{Compiler, CompilerError, golden_snapshot};
 
@@ -246,5 +325,44 @@ mod tests {
         assert!(out.errors.is_empty());
 
         fs::remove_dir_all(root).expect("temp root should be removable");
+    }
+
+    #[test]
+    fn compiler_compile_source_to_signals_pass_through() {
+        let compiler = Compiler::new();
+        let out = compiler
+            .compile_source_to_signals("pass.dsp", "process = _;")
+            .expect("pass-through should compile to signals");
+        assert_eq!(out.process_arity.inputs, 1);
+        assert_eq!(out.process_arity.outputs, 1);
+        assert_eq!(out.signals.len(), 1);
+        assert_eq!(
+            signals::match_sig(&out.parse.state.arena, out.signals[0]),
+            SigMatch::Input(0)
+        );
+    }
+
+    #[test]
+    fn compiler_compile_source_to_signals_recursive_case() {
+        let compiler = Compiler::new();
+        let out = compiler
+            .compile_source_to_signals("rec.dsp", "process = + ~ _;")
+            .expect("recursive process should compile to signals");
+        assert_eq!(out.process_arity.inputs, 1);
+        assert_eq!(out.process_arity.outputs, 1);
+        assert_eq!(out.signals.len(), 1);
+        assert!(matches!(
+            signals::match_sig(&out.parse.state.arena, out.signals[0]),
+            SigMatch::Proj(_, _)
+        ));
+    }
+
+    #[test]
+    fn compiler_compile_source_to_signals_reports_eval_error() {
+        let compiler = Compiler::new();
+        let err = compiler
+            .compile_source_to_signals("missing_process.dsp", "foo = _;")
+            .expect_err("missing process should fail evaluation");
+        assert!(matches!(err, CompilerError::Eval(_)));
     }
 }

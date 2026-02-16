@@ -10,6 +10,9 @@ errors = { path = "../errors" }
 parser = { path = "../parser" }
 codegen = { path = "../codegen" }
 boxes = { path = "../boxes" }
+eval = { path = "../eval" }
+propagate = { path = "../propagate" }
+signals = { path = "../signals" }
 
 [[bin]]
 name = "faust-rs"
