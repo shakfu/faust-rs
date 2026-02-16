@@ -1711,3 +1711,28 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo clippy -p eval --all-targets -- -D warnings`
   - `cargo test -p eval --all-targets`
   - `cargo test --workspace --all-targets`
+
+### Phase 4 / 2.2 eval second implementation tranche (application + iterations)
+
+- Extended `crates/eval/src/lib.rs` with C++-aligned evaluation paths:
+  - `BOXAPPL` evaluation with:
+    - evaluated argument list reversal (`revEvalList` behavior),
+    - abstraction application (`applyList` behavior),
+    - non-closure fallback lowering to `BOXSEQ(larg2par(args), fun)`.
+  - Iterative forms:
+    - `BOXIPAR` -> parallel expansion,
+    - `BOXISEQ` -> sequential expansion,
+    - `BOXISUM` -> chained `BOXADD` reductions,
+    - `BOXIPROD` -> chained `BOXMUL` reductions.
+  - Added evaluator helpers and stricter typed errors for malformed list/application/iteration cases.
+- Kept abstraction building for parser-style reversed parameter lists aligned with C++ `buildBoxAbstr` semantics in eval path (`bind_definitions`).
+- Added tests in `crates/eval/tests/core_eval.rs`:
+  - function application argument order (C++ parity intent),
+  - non-closure application fallback shape,
+  - `ipar` index binding expansion,
+  - `isum` additive chain construction.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p eval --all-targets -- -D warnings`
+  - `cargo test -p eval --all-targets`
+  - `cargo test --workspace --all-targets`
