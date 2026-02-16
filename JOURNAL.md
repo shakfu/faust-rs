@@ -1683,3 +1683,31 @@ Execution plan (Phase 0 prototype, revised):
   - `AGENTS.md`: `clap` is the default parser for user-facing binaries.
   - `porting/faust-rust-porting-plan-en.md`: added a dedicated CLI parsing policy section.
   - `porting/phases/phase-9-integration-en.md`: dependency list now states `clap` as default, with documented-justification fallback for alternatives.
+
+### Phase 4 / 2.2 eval first implementation tranche
+
+- Replaced `crates/eval` scaffold with a first functional evaluator core:
+  - `Environment` with lexical scope chaining (`empty`, `bind`, `lookup`, `push_scope`),
+  - `LoopDetector` with cycle and max-depth guards,
+  - `EvalError` typed error surface (`MissingProcessDefinition`, `UndefinedSymbol`, malformed defs, loop/depth).
+- Added first production APIs:
+  - `eval_process(arena, definitions)`:
+    - decodes parser definition list shape `cons(name, cons(args, expr))`,
+    - builds the top environment,
+    - resolves and evaluates `process`.
+  - `eval_box(arena, expr, env, loop_detector)`:
+    - resolves `BOXIDENT` through environment bindings,
+    - handles lexical scoping for `BOXWITHLOCALDEF`, `BOXWITHRECDEF`, and `BOXABSTR`,
+    - recursively maps/evaluates children for all other box nodes.
+- Added crate tests:
+  - `crates/eval/tests/core_eval.rs`
+  - coverage:
+    - named-definition resolution (`process -> foo -> BOXWIRE`),
+    - `with {}` local-scope resolution,
+    - missing-`process` error,
+    - recursive loop detection (`process <-> foo`).
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p eval --all-targets -- -D warnings`
+  - `cargo test -p eval --all-targets`
+  - `cargo test --workspace --all-targets`

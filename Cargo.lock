@@ -132,6 +132,10 @@ version = "0.1.0"
 [[package]]
 name = "eval"
 version = "0.1.0"
+dependencies = [
+ "boxes",
+ "tlib",
+]
 
 [[package]]
 name = "filetime"
