@@ -72,7 +72,7 @@ impl ParseState {
     }
 
     #[must_use]
-    fn box_builder(&mut self) -> boxes::BoxBuilder<'_> {
+    fn node_builder(&mut self) -> boxes::BoxBuilder<'_> {
         boxes::BoxBuilder::new(&mut self.arena)
     }
 
@@ -150,7 +150,7 @@ impl ParseState {
     ) -> TreeId {
         let span = token_span(&tok);
         self.update_cursor_from_span(lexer, span);
-        let ident = self.box_builder().ident(lexer.span_str(span));
+        let ident = self.node_builder().ident(lexer.span_str(span));
         if mark_use {
             self.ctx.set_use_prop_at_cursor(ident);
         }
@@ -225,14 +225,14 @@ impl ParseState {
 
     /// Builds C++-equivalent foreign-function descriptor and wraps it as `boxFFun`.
     #[must_use]
-    pub fn box_foreign_function(
+    pub fn node_foreign_function(
         &mut self,
         signature: TreeId,
         incfile: TreeId,
         libfile: TreeId,
     ) -> TreeId {
-        let ff = self.box_builder().ffunction(signature, incfile, libfile);
-        self.box_builder().ffun(ff)
+        let ff = self.node_builder().ffunction(signature, incfile, libfile);
+        self.node_builder().ffun(ff)
     }
 
     /// Builds one `boxCase` after C++-style rule checks and pattern preparation.
@@ -244,7 +244,7 @@ impl ParseState {
     /// Pattern preparation mirrors C++ `prepareRule(s)` behavior:
     /// only the left-hand side list is transformed recursively.
     #[must_use]
-    pub fn box_case_checked(&mut self, rules: TreeId) -> TreeId {
+    pub fn node_case_checked(&mut self, rules: TreeId) -> TreeId {
         if self.arena.is_nil(rules) {
             self.ctx.error("a case expression can't be empty");
             return self.nil();
@@ -284,13 +284,13 @@ impl ParseState {
         for rule in mapped.iter().rev() {
             mapped_rules = self.cons(*rule, mapped_rules);
         }
-        self.box_builder().case(mapped_rules)
+        self.node_builder().case(mapped_rules)
     }
 
     /// Equivalent to C++ `buildBoxAbstr(params, body)` for parser lambda forms.
     #[must_use]
-    pub fn box_lambda(&mut self, params: TreeId, body: TreeId) -> TreeId {
-        self.box_builder().build_abstr(params, body)
+    pub fn node_lambda(&mut self, params: TreeId, body: TreeId) -> TreeId {
+        self.node_builder().build_abstr(params, body)
     }
 
     fn case_rules_arity_reference(&self, rules: TreeId) -> Option<usize> {
@@ -338,7 +338,7 @@ impl ParseState {
     fn prepare_pattern(&mut self, node: TreeId) -> TreeId {
         match self.arena.kind(node) {
             Some(NodeKind::Tag(tag)) if tag.as_ref() == "BOXIDENT" => {
-                self.box_builder().pattern_var(node)
+                self.node_builder().pattern_var(node)
             }
             Some(NodeKind::Tag(tag)) if tag.as_ref() == "BOXAPPL" => {
                 let Some(children) = self.arena.children(node) else {
@@ -354,7 +354,7 @@ impl ParseState {
                     Some(NodeKind::Tag(fun_tag)) if fun_tag.as_ref() == "BOXIDENT" => fun,
                     _ => self.prepare_pattern(fun),
                 };
-                self.box_builder().appl(mapped_fun, mapped_args)
+                self.node_builder().appl(mapped_fun, mapped_args)
             }
             Some(NodeKind::Tag(tag)) => {
                 let tag_name = tag.clone();
@@ -381,10 +381,10 @@ impl ParseState {
         self.update_cursor_from_span(lexer, span);
         let raw = lexer.span_str(span);
         match raw.parse::<i64>() {
-            Ok(value) => self.box_builder().int(value),
+            Ok(value) => self.node_builder().int(value),
             Err(_) => {
                 self.ctx.error("invalid INT literal");
-                self.box_builder().int(0)
+                self.node_builder().int(0)
             }
         }
     }
@@ -401,10 +401,10 @@ impl ParseState {
         let raw = lexer.span_str(span);
         let normalized = raw.strip_suffix('f').unwrap_or(raw);
         match normalized.parse::<f64>() {
-            Ok(value) => self.box_builder().real(value),
+            Ok(value) => self.node_builder().real(value),
             Err(_) => {
                 self.ctx.error("invalid FLOAT literal");
-                self.box_builder().real(0.0)
+                self.node_builder().real(0.0)
             }
         }
     }
@@ -539,16 +539,16 @@ impl ParseState {
     #[must_use]
     pub fn waveform_box_from_ctx(&mut self) -> TreeId {
         let values = self.ctx.take_waveform();
-        self.box_builder().waveform(&values)
+        self.node_builder().waveform(&values)
     }
 
     /// Builds `boxRoute(n,m,boxPar(boxInt(0),boxInt(0)))` like C++ fake-route form.
     #[must_use]
     pub fn route_box_default_spec(&mut self, n: TreeId, m: TreeId) -> TreeId {
-        let z0 = self.box_builder().int(0);
-        let z1 = self.box_builder().int(0);
-        let fake = self.box_builder().par(z0, z1);
-        self.box_builder().route(n, m, fake)
+        let z0 = self.node_builder().int(0);
+        let z1 = self.node_builder().int(0);
+        let fake = self.node_builder().par(z0, z1);
+        self.node_builder().route(n, m, fake)
     }
 
     /// Parses one signed integer literal token to `boxInt`.
@@ -563,10 +563,10 @@ impl ParseState {
         self.update_cursor_from_span(lexer, span);
         let raw = lexer.span_str(span);
         match raw.parse::<i64>() {
-            Ok(value) => self.box_builder().int(value.saturating_mul(sign)),
+            Ok(value) => self.node_builder().int(value.saturating_mul(sign)),
             Err(_) => {
                 self.ctx.error("invalid signed INT literal");
-                self.box_builder().int(0)
+                self.node_builder().int(0)
             }
         }
     }
@@ -584,10 +584,10 @@ impl ParseState {
         let raw = lexer.span_str(span);
         let normalized = raw.strip_suffix('f').unwrap_or(raw);
         match normalized.parse::<f64>() {
-            Ok(value) => self.box_builder().real(value * sign),
+            Ok(value) => self.node_builder().real(value * sign),
             Err(_) => {
                 self.ctx.error("invalid signed FLOAT literal");
-                self.box_builder().real(0.0)
+                self.node_builder().real(0.0)
             }
         }
     }
@@ -595,51 +595,51 @@ impl ParseState {
     /// Encodes C++ infix primitive lowering: `a op b` -> `boxSeq(boxPar(a,b), boxOp())`.
     #[must_use]
     pub fn binary_prim(&mut self, left: TreeId, right: TreeId, op: PrimitiveOp) -> TreeId {
-        let pair = self.box_builder().par(left, right);
+        let pair = self.node_builder().par(left, right);
         let prim = self.prim_box(op);
-        self.box_builder().seq(pair, prim)
+        self.node_builder().seq(pair, prim)
     }
 
     /// Encodes postfix primitive lowering: `a op` -> `boxSeq(a, boxOp())`.
     #[must_use]
     pub fn postfix_prim(&mut self, expr: TreeId, op: PrimitiveOp) -> TreeId {
         let prim = self.prim_box(op);
-        self.box_builder().seq(expr, prim)
+        self.node_builder().seq(expr, prim)
     }
 
     /// Equivalent to C++ `buildBoxAppl` prototype behavior (`boxAppl(fun, revarglist)`).
     #[must_use]
     pub fn apply_box(&mut self, fun: TreeId, rev_arg_list: TreeId) -> TreeId {
-        self.box_builder().appl(fun, rev_arg_list)
+        self.node_builder().appl(fun, rev_arg_list)
     }
 
     /// Equivalent to C++ `boxAccess`.
     #[must_use]
     pub fn access_box(&mut self, expr: TreeId, ident: TreeId) -> TreeId {
-        self.box_builder().access(expr, ident)
+        self.node_builder().access(expr, ident)
     }
 
     fn prim_box(&mut self, op: PrimitiveOp) -> TreeId {
         match op {
-            PrimitiveOp::Add => self.box_builder().add(),
-            PrimitiveOp::Sub => self.box_builder().sub(),
-            PrimitiveOp::Mul => self.box_builder().mul(),
-            PrimitiveOp::Div => self.box_builder().div(),
-            PrimitiveOp::Rem => self.box_builder().rem(),
-            PrimitiveOp::And => self.box_builder().and(),
-            PrimitiveOp::Or => self.box_builder().or(),
-            PrimitiveOp::Xor => self.box_builder().xor(),
-            PrimitiveOp::Lsh => self.box_builder().lsh(),
-            PrimitiveOp::Rsh => self.box_builder().rsh(),
-            PrimitiveOp::Lt => self.box_builder().lt(),
-            PrimitiveOp::Le => self.box_builder().le(),
-            PrimitiveOp::Gt => self.box_builder().gt(),
-            PrimitiveOp::Ge => self.box_builder().ge(),
-            PrimitiveOp::Eq => self.box_builder().eq(),
-            PrimitiveOp::Ne => self.box_builder().ne(),
-            PrimitiveOp::Pow => self.box_builder().pow(),
-            PrimitiveOp::Delay => self.box_builder().delay(),
-            PrimitiveOp::Delay1 => self.box_builder().delay1(),
+            PrimitiveOp::Add => self.node_builder().add(),
+            PrimitiveOp::Sub => self.node_builder().sub(),
+            PrimitiveOp::Mul => self.node_builder().mul(),
+            PrimitiveOp::Div => self.node_builder().div(),
+            PrimitiveOp::Rem => self.node_builder().rem(),
+            PrimitiveOp::And => self.node_builder().and(),
+            PrimitiveOp::Or => self.node_builder().or(),
+            PrimitiveOp::Xor => self.node_builder().xor(),
+            PrimitiveOp::Lsh => self.node_builder().lsh(),
+            PrimitiveOp::Rsh => self.node_builder().rsh(),
+            PrimitiveOp::Lt => self.node_builder().lt(),
+            PrimitiveOp::Le => self.node_builder().le(),
+            PrimitiveOp::Gt => self.node_builder().gt(),
+            PrimitiveOp::Ge => self.node_builder().ge(),
+            PrimitiveOp::Eq => self.node_builder().eq(),
+            PrimitiveOp::Ne => self.node_builder().ne(),
+            PrimitiveOp::Pow => self.node_builder().pow(),
+            PrimitiveOp::Delay => self.node_builder().delay(),
+            PrimitiveOp::Delay1 => self.node_builder().delay1(),
         }
     }
 

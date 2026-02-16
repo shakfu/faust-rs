@@ -1,6 +1,6 @@
-#[path = "support/box_match_helpers.rs"]
-mod box_match_helpers;
-use box_match_helpers::*;
+#[path = "support/node_match_helpers.rs"]
+mod node_match_helpers;
+use node_match_helpers::*;
 use parser_proto::parse_program;
 use tlib::{TreeArena, TreeId};
 
@@ -18,7 +18,7 @@ fn definition_expr(arena: &TreeArena, def: TreeId) -> TreeId {
 }
 
 fn flatten_top_par(arena: &TreeArena, expr: TreeId, out: &mut Vec<TreeId>) {
-    if let Some((left, right)) = is_box_par(arena, expr) {
+    if let Some((left, right)) = is_node_par(arena, expr) {
         out.push(left);
         flatten_top_par(arena, right, out);
     } else {
@@ -47,18 +47,18 @@ fn supports_extended_primitive_tokens() {
     flatten_top_par(&output.state.arena, expr, &mut elems);
     assert_eq!(elems.len(), 14);
 
-    assert!(is_box_pow(&output.state.arena, elems[0]));
-    assert!(is_box_prefix(&output.state.arena, elems[1]));
-    assert!(is_box_int_cast(&output.state.arena, elems[2]));
-    assert!(is_box_float_cast(&output.state.arena, elems[3]));
-    assert!(is_box_read_only_table(&output.state.arena, elems[4]));
-    assert!(is_box_write_read_table(&output.state.arena, elems[5]));
-    assert!(is_box_select2(&output.state.arena, elems[6]));
-    assert!(is_box_select3(&output.state.arena, elems[7]));
-    assert!(is_box_assert_bounds(&output.state.arena, elems[8]));
-    assert!(is_box_lowest(&output.state.arena, elems[9]));
-    assert!(is_box_highest(&output.state.arena, elems[10]));
-    assert!(is_box_attach(&output.state.arena, elems[11]));
-    assert!(is_box_enable(&output.state.arena, elems[12]));
-    assert!(is_box_control(&output.state.arena, elems[13]));
+    assert!(is_node_pow(&output.state.arena, elems[0]));
+    assert!(is_node_prefix(&output.state.arena, elems[1]));
+    assert!(is_node_int_cast(&output.state.arena, elems[2]));
+    assert!(is_node_float_cast(&output.state.arena, elems[3]));
+    assert!(is_node_read_only_table(&output.state.arena, elems[4]));
+    assert!(is_node_write_read_table(&output.state.arena, elems[5]));
+    assert!(is_node_select2(&output.state.arena, elems[6]));
+    assert!(is_node_select3(&output.state.arena, elems[7]));
+    assert!(is_node_assert_bounds(&output.state.arena, elems[8]));
+    assert!(is_node_lowest(&output.state.arena, elems[9]));
+    assert!(is_node_highest(&output.state.arena, elems[10]));
+    assert!(is_node_attach(&output.state.arena, elems[11]));
+    assert!(is_node_enable(&output.state.arena, elems[12]));
+    assert!(is_node_control(&output.state.arena, elems[13]));
 }

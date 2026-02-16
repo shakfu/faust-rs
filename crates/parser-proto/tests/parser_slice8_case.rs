@@ -1,6 +1,6 @@
-#[path = "support/box_match_helpers.rs"]
-mod box_match_helpers;
-use box_match_helpers::*;
+#[path = "support/node_match_helpers.rs"]
+mod node_match_helpers;
+use node_match_helpers::*;
 use parser_proto::parse_program;
 use tlib::{TreeArena, TreeId};
 
@@ -30,7 +30,7 @@ fn supports_case_expression_and_prepares_pattern_variables() {
     let root = output.root.expect("root should be present");
     let def = list_head(&output.state.arena, root);
     let expr = definition_expr(&output.state.arena, def);
-    let rules = is_box_case(&output.state.arena, expr).expect("expected BOXCASE");
+    let rules = is_node_case(&output.state.arena, expr).expect("expected BOXCASE");
 
     // At least one identifier in case-lhs is converted to BOXPATVAR.
     let mut cursor = rules;
@@ -41,7 +41,7 @@ fn supports_case_expression_and_prepares_pattern_variables() {
         let mut args = lhs;
         while !output.state.arena.is_nil(args) {
             let arg = output.state.arena.hd(args).expect("arg");
-            if is_box_pattern_var(&output.state.arena, arg).is_some() {
+            if is_node_pattern_var(&output.state.arena, arg).is_some() {
                 has_pattern_var = true;
                 break;
             }

@@ -1,10 +1,10 @@
 use std::fs;
 use std::path::Path;
 
-#[path = "support/box_match_helpers.rs"]
-mod box_match_helpers;
-use box_match_helpers::*;
+#[path = "support/node_match_helpers.rs"]
+mod node_match_helpers;
 use boxes::dump_box;
+use node_match_helpers::*;
 use parser_proto::parse_program;
 use tlib::{TreeArena, TreeId};
 
@@ -35,7 +35,7 @@ fn supports_ui_slider_constructor() {
     let root = output.root.expect("root should be present");
     let def = list_head(&output.state.arena, root);
     let expr = definition_expr(&output.state.arena, def);
-    assert!(is_box_hslider(&output.state.arena, expr).is_some());
+    assert!(is_node_hslider(&output.state.arena, expr).is_some());
 }
 
 #[test]
@@ -44,17 +44,17 @@ fn supports_iterative_seq_sum_prod() {
         (
             "process = seq(i, 4, _);",
             "iseq",
-            is_box_iseq as fn(&TreeArena, TreeId) -> Option<(TreeId, TreeId, TreeId)>,
+            is_node_iseq as fn(&TreeArena, TreeId) -> Option<(TreeId, TreeId, TreeId)>,
         ),
         (
             "process = sum(i, 4, _);",
             "isum",
-            is_box_isum as fn(&TreeArena, TreeId) -> Option<(TreeId, TreeId, TreeId)>,
+            is_node_isum as fn(&TreeArena, TreeId) -> Option<(TreeId, TreeId, TreeId)>,
         ),
         (
             "process = prod(i, 4, _);",
             "iprod",
-            is_box_iprod as fn(&TreeArena, TreeId) -> Option<(TreeId, TreeId, TreeId)>,
+            is_node_iprod as fn(&TreeArena, TreeId) -> Option<(TreeId, TreeId, TreeId)>,
         ),
     ] {
         let output = parse_program(src, "slice3_iter.dsp");

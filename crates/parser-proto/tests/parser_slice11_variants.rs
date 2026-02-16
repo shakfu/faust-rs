@@ -1,6 +1,6 @@
-#[path = "support/box_match_helpers.rs"]
-mod box_match_helpers;
-use box_match_helpers::*;
+#[path = "support/node_match_helpers.rs"]
+mod node_match_helpers;
+use node_match_helpers::*;
 use parser_proto::parse_program;
 use tlib::{TreeArena, TreeId};
 
@@ -26,7 +26,7 @@ fn collect_definition_names(arena: &TreeArena, mut defs: TreeId) -> Vec<String> 
     while !arena.is_nil(defs) {
         let def = arena.hd(defs).expect("definition should exist");
         let name = definition_name(arena, def);
-        let ident = box_ident_name(arena, name).expect("definition name should be BOXIDENT");
+        let ident = node_ident_name(arena, name).expect("definition name should be BOXIDENT");
         out.push(ident.to_owned());
         defs = arena
             .tl(defs)
@@ -85,7 +85,7 @@ fn variantlist_applies_inside_local_definition_lists() {
     let process_def = list_head(&output.state.arena, root);
     let expr = definition_expr(&output.state.arena, process_def);
     let (_body, local_defs) =
-        is_box_with_local_def(&output.state.arena, expr).expect("expected local-def expression");
+        is_node_with_local_def(&output.state.arena, expr).expect("expected local-def expression");
 
     let names = collect_definition_names(&output.state.arena, local_defs);
     assert_eq!(names, vec!["b"]);

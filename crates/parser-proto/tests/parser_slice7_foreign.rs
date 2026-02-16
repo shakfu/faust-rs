@@ -1,6 +1,6 @@
-#[path = "support/box_match_helpers.rs"]
-mod box_match_helpers;
-use box_match_helpers::*;
+#[path = "support/node_match_helpers.rs"]
+mod node_match_helpers;
+use node_match_helpers::*;
 use parser_proto::parse_program;
 use tlib::{NodeKind, TreeArena, TreeId};
 
@@ -31,7 +31,7 @@ fn supports_ffunction_signature_forms() {
     let root = output.root.expect("root should be present");
     let def = list_head(&output.state.arena, root);
     let expr = definition_expr(&output.state.arena, def);
-    let ff = is_box_ffun(&output.state.arena, expr).expect("expected BOXFFUN");
+    let ff = is_node_ffun(&output.state.arena, expr).expect("expected BOXFFUN");
     let (signature, incfile, libfile) =
         is_ffunction(&output.state.arena, ff).expect("expected FFUN payload");
 
@@ -74,14 +74,14 @@ fn supports_fconstant_and_fvariable_forms() {
     let expr_a = definition_expr(&output.state.arena, first);
     let expr_b = definition_expr(&output.state.arena, second);
 
-    let (fconst_expr, fvar_expr) = if is_box_fconst(&output.state.arena, expr_a).is_some() {
+    let (fconst_expr, fvar_expr) = if is_node_fconst(&output.state.arena, expr_a).is_some() {
         (expr_a, expr_b)
     } else {
         (expr_b, expr_a)
     };
 
-    let (t0, _n0, _f0) = is_box_fconst(&output.state.arena, fconst_expr).expect("fconst expected");
-    let (t1, _n1, _f1) = is_box_fvar(&output.state.arena, fvar_expr).expect("fvar expected");
+    let (t0, _n0, _f0) = is_node_fconst(&output.state.arena, fconst_expr).expect("fconst expected");
+    let (t1, _n1, _f1) = is_node_fvar(&output.state.arena, fvar_expr).expect("fvar expected");
     assert!(matches!(
         output.state.arena.kind(t0),
         Some(NodeKind::Int(0))

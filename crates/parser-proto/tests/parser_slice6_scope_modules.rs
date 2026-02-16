@@ -1,7 +1,7 @@
-#[path = "support/box_match_helpers.rs"]
-mod box_match_helpers;
-use box_match_helpers::*;
+#[path = "support/node_match_helpers.rs"]
+mod node_match_helpers;
 use boxes::dump_box;
+use node_match_helpers::*;
 use parser_proto::parse_program;
 use tlib::{NodeKind, TreeArena, TreeId};
 
@@ -19,7 +19,7 @@ fn definition_expr(arena: &TreeArena, def: TreeId) -> TreeId {
 }
 
 fn flatten_top_par(arena: &TreeArena, expr: TreeId, out: &mut Vec<TreeId>) {
-    if let Some((left, right)) = is_box_par(arena, expr) {
+    if let Some((left, right)) = is_node_par(arena, expr) {
         out.push(left);
         flatten_top_par(arena, right, out);
     } else {
@@ -38,7 +38,7 @@ fn supports_with_local_def_expression() {
     let root = output.root.expect("root should be present");
     let def = list_head(&output.state.arena, root);
     let expr = definition_expr(&output.state.arena, def);
-    assert!(is_box_with_local_def(&output.state.arena, expr).is_some());
+    assert!(is_node_with_local_def(&output.state.arena, expr).is_some());
 }
 
 #[test]
@@ -52,8 +52,8 @@ fn supports_letrec_expression() {
     let root = output.root.expect("root should be present");
     let def = list_head(&output.state.arena, root);
     let expr = definition_expr(&output.state.arena, def);
-    let (_body, rec_defs, where_defs) = is_box_with_rec_def(&output.state.arena, expr)
-        .expect("letrec should produce box_with_rec_def");
+    let (_body, rec_defs, where_defs) = is_node_with_rec_def(&output.state.arena, expr)
+        .expect("letrec should produce node_with_rec_def");
     assert!(!output.state.arena.is_nil(rec_defs));
     assert!(output.state.arena.is_nil(where_defs));
 }
@@ -79,11 +79,11 @@ fn supports_environment_component_and_library_primitives() {
     let env_with_def = elems[0];
     let component = elems[1];
     let library = elems[2];
-    let (env, _defs) = is_box_with_local_def(&output.state.arena, env_with_def)
-        .expect("environment should lower to box_with_local_def");
-    assert!(is_box_environment(&output.state.arena, env));
-    assert!(is_box_component(&output.state.arena, component).is_some());
-    assert!(is_box_library(&output.state.arena, library).is_some());
+    let (env, _defs) = is_node_with_local_def(&output.state.arena, env_with_def)
+        .expect("environment should lower to node_with_local_def");
+    assert!(is_node_environment(&output.state.arena, env));
+    assert!(is_node_component(&output.state.arena, component).is_some());
+    assert!(is_node_library(&output.state.arena, library).is_some());
 }
 
 #[test]
@@ -108,15 +108,15 @@ fn supports_waveform_and_route_primitives() {
     let waveform_expr = elems[2];
 
     let (_, _, fake_spec) =
-        is_box_route(&output.state.arena, route2).expect("route(_,_) should parse");
+        is_node_route(&output.state.arena, route2).expect("route(_,_) should parse");
     assert_eq!(
         dump_box(&output.state.arena, fake_spec),
         "BOXPAR(int(0), int(0))"
     );
-    assert!(is_box_route(&output.state.arena, route3).is_some());
+    assert!(is_node_route(&output.state.arena, route3).is_some());
 
     let wave_list =
-        is_box_waveform(&output.state.arena, waveform_expr).expect("waveform should parse");
+        is_node_waveform(&output.state.arena, waveform_expr).expect("waveform should parse");
     let v0 = output.state.arena.hd(wave_list).expect("v0");
     let t1 = output.state.arena.tl(wave_list).expect("tail1");
     let v1 = output.state.arena.hd(t1).expect("v1");
@@ -130,5 +130,5 @@ fn supports_waveform_and_route_primitives() {
         output.state.arena.kind(v1),
         Some(NodeKind::Int(-2))
     ));
-    assert!(is_box_real(&output.state.arena, v2));
+    assert!(is_node_real(&output.state.arena, v2));
 }

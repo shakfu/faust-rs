@@ -1,7 +1,7 @@
-#[path = "support/box_match_helpers.rs"]
-mod box_match_helpers;
-use box_match_helpers::*;
+#[path = "support/node_match_helpers.rs"]
+mod node_match_helpers;
 use boxes::dump_box;
+use node_match_helpers::*;
 use parser_proto::parse_program;
 use tlib::{TreeArena, TreeId};
 
@@ -112,7 +112,7 @@ fn unary_minus_identifier_lowers_to_sub_from_zero() {
     let name = definition_name(arena, def);
     let expr = definition_expr(arena, def);
 
-    assert_eq!(box_ident_name(arena, name), Some("process"));
+    assert_eq!(node_ident_name(arena, name), Some("process"));
     assert_eq!(
         dump_box(arena, expr),
         "BOXSEQ(BOXPAR(int(0), BOXIDENT(sym(\"foo\"))), BOXSUB())"

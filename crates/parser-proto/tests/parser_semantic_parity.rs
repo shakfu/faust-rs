@@ -2,10 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[path = "support/box_match_helpers.rs"]
-mod box_match_helpers;
-use box_match_helpers::*;
+#[path = "support/node_match_helpers.rs"]
+mod node_match_helpers;
 use boxes::dump_box;
+use node_match_helpers::*;
 use parser_proto::parse_program;
 use tlib::{NodeKind, TreeArena, TreeId};
 
@@ -23,7 +23,7 @@ fn definition_expr(arena: &TreeArena, def: TreeId) -> TreeId {
 }
 
 fn flatten_top_par(arena: &TreeArena, expr: TreeId, out: &mut Vec<TreeId>) {
-    if let Some((left, right)) = is_box_par(arena, expr) {
+    if let Some((left, right)) = is_node_par(arena, expr) {
         out.push(left);
         flatten_top_par(arena, right, out);
     } else {
@@ -128,7 +128,7 @@ fn application_access_and_route_follow_cxx_action_formulas() {
 
     let (arena_route, expr_route) =
         parse_process_expr("process = route(_, _);", "semantic_route.dsp");
-    let (_n, _m, fake_spec) = is_box_route(&arena_route, expr_route).expect("expected BOXROUTE");
+    let (_n, _m, fake_spec) = is_node_route(&arena_route, expr_route).expect("expected BOXROUTE");
     assert_eq!(dump_box(&arena_route, fake_spec), "BOXPAR(int(0), int(0))");
 }
 
@@ -137,7 +137,7 @@ fn scoped_forms_and_family_matrix_match_constructor_mapping() {
     let (arena_letrec, expr_letrec) =
         parse_process_expr("process = _ letrec { 'x = _; };", "semantic_letrec.dsp");
     let (_body, rec_defs, where_defs) =
-        is_box_with_rec_def(&arena_letrec, expr_letrec).expect("expected BOXWITHRECDEF");
+        is_node_with_rec_def(&arena_letrec, expr_letrec).expect("expected BOXWITHRECDEF");
     assert!(!arena_letrec.is_nil(rec_defs));
     assert!(arena_letrec.is_nil(where_defs));
 
@@ -163,41 +163,41 @@ fn scoped_forms_and_family_matrix_match_constructor_mapping() {
         elems
             .iter()
             .copied()
-            .any(|id| is_box_vgroup(&arena, id).is_some())
+            .any(|id| is_node_vgroup(&arena, id).is_some())
     );
     assert!(
         elems
             .iter()
             .copied()
-            .any(|id| is_box_ipar(&arena, id).is_some())
+            .any(|id| is_node_ipar(&arena, id).is_some())
     );
     assert!(
         elems
             .iter()
             .copied()
-            .any(|id| is_box_inputs(&arena, id).is_some())
+            .any(|id| is_node_inputs(&arena, id).is_some())
     );
-    assert!(any_match(&arena, &elems, is_box_read_only_table));
-    assert!(any_match(&arena, &elems, is_box_int_cast));
-    assert!(any_match(&arena, &elems, is_box_float_cast));
-    assert!(any_match(&arena, &elems, is_box_attach));
-    assert!(any_match(&arena, &elems, is_box_control));
+    assert!(any_match(&arena, &elems, is_node_read_only_table));
+    assert!(any_match(&arena, &elems, is_node_int_cast));
+    assert!(any_match(&arena, &elems, is_node_float_cast));
+    assert!(any_match(&arena, &elems, is_node_attach));
+    assert!(any_match(&arena, &elems, is_node_control));
 
     let env_local = elems
         .iter()
         .copied()
-        .find(|id| is_box_with_local_def(&arena, *id).is_some())
+        .find(|id| is_node_with_local_def(&arena, *id).is_some())
         .expect("environment should lower to local-def");
     let (env, _defs) =
-        is_box_with_local_def(&arena, env_local).expect("expected local-def environment");
-    assert!(is_box_environment(&arena, env));
+        is_node_with_local_def(&arena, env_local).expect("expected local-def environment");
+    assert!(is_node_environment(&arena, env));
 
     let waveform_box = elems
         .iter()
         .copied()
-        .find(|id| is_box_waveform(&arena, *id).is_some())
+        .find(|id| is_node_waveform(&arena, *id).is_some())
         .expect("expected waveform form");
-    let wave_list = is_box_waveform(&arena, waveform_box).expect("expected BOXWAVEFORM");
+    let wave_list = is_node_waveform(&arena, waveform_box).expect("expected BOXWAVEFORM");
     let v0 = arena.hd(wave_list).expect("waveform v0");
     let t1 = arena.tl(wave_list).expect("waveform tail1");
     let v1 = arena.hd(t1).expect("waveform v1");
@@ -205,7 +205,7 @@ fn scoped_forms_and_family_matrix_match_constructor_mapping() {
     let v2 = arena.hd(t2).expect("waveform v2");
     assert!(matches!(arena.kind(v0), Some(NodeKind::Int(1))));
     assert!(matches!(arena.kind(v1), Some(NodeKind::Int(-2))));
-    assert!(is_box_real(&arena, v2));
+    assert!(is_node_real(&arena, v2));
 }
 
 #[test]
@@ -220,13 +220,13 @@ fn foreign_and_case_actions_follow_cxx_families() {
     flatten_top_par(&arena, expr, &mut elems);
     assert_eq!(elems.len(), 2);
 
-    assert!(is_box_ffun(&arena, elems[0]).is_some());
-    let rules = is_box_case(&arena, elems[1]).expect("expected BOXCASE");
+    assert!(is_node_ffun(&arena, elems[0]).is_some());
+    let rules = is_node_case(&arena, elems[1]).expect("expected BOXCASE");
     let rule = arena.hd(rules).expect("rule");
     let lhs = arena.hd(rule).expect("lhs");
     let first_pat = arena.hd(lhs).expect("first pattern");
     assert!(
-        is_box_pattern_var(&arena, first_pat).is_some(),
+        is_node_pattern_var(&arena, first_pat).is_some(),
         "pattern variable should be transformed to BOXPATTERNVAR"
     );
 }
