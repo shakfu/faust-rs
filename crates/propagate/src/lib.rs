@@ -1,8 +1,907 @@
-#![doc = "Scaffold crate for propagate in the faust-rs workspace."]
+//! Box-to-signal propagation (Phase 4, section 2.4).
+//!
+//! # Source provenance (C++)
+//! - `/Users/letz/Developpements/RUST/faust/compiler/propagate/propagate.hh`
+//! - `/Users/letz/Developpements/RUST/faust/compiler/propagate/propagate.cpp`
+//! - `/Users/letz/Developpements/RUST/faust/compiler/boxes/boxtype.cpp`
+//!
+//! # Current scope
+//! - Core box arity inference for supported box families.
+//! - Primitive lowering from `boxes::BoxMatch` to `signals::SigBuilder`.
+//! - Composition algebra: `seq`, `par`, `split`, `merge`.
+//! - Explicit typed errors for unsupported nodes and arity mismatches.
+//!
+//! # Public API mapping status
+//! - `box_arity(...)` mirrors the C++ `getBoxType(...)` role for the supported subset.
+//! - `propagate(...)` mirrors C++ `propagate(...)` on the supported subset.
+//! - `make_sig_input_list(...)` mirrors C++ `makeSigInputList(...)`.
+
+use std::fmt::{Display, Formatter};
+
+use boxes::{BoxId, BoxMatch, match_box};
+use signals::{SigBuilder, SigId};
+use tlib::{NodeKind, TreeArena, TreeId};
 
 pub const CRATE_NAME: &str = "propagate";
 
+/// Stable crate identifier used in workspace-level tooling and diagnostics.
 #[must_use]
 pub fn crate_id() -> &'static str {
     CRATE_NAME
+}
+
+/// Input/output arity of one box expression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoxArity {
+    pub inputs: usize,
+    pub outputs: usize,
+}
+
+/// Propagation/arity inference error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PropagateError {
+    UnsupportedBox {
+        node: TreeId,
+        kind: &'static str,
+    },
+    InvalidIntegerValue {
+        node: TreeId,
+        field: &'static str,
+    },
+    NegativeIntegerValue {
+        field: &'static str,
+        value: i64,
+    },
+    IntegerTooLarge {
+        field: &'static str,
+        value: usize,
+    },
+    InputArityMismatch {
+        node: TreeId,
+        expected: usize,
+        got: usize,
+    },
+    OutputArityMismatch {
+        node: TreeId,
+        expected: usize,
+        got: usize,
+    },
+    SeqArityMismatch {
+        node: TreeId,
+        left_outputs: usize,
+        right_inputs: usize,
+    },
+    SplitArityMismatch {
+        node: TreeId,
+        left_outputs: usize,
+        right_inputs: usize,
+    },
+    MergeArityMismatch {
+        node: TreeId,
+        left_outputs: usize,
+        right_inputs: usize,
+    },
+    RecArityMismatch {
+        node: TreeId,
+        left_inputs: usize,
+        left_outputs: usize,
+        right_inputs: usize,
+        right_outputs: usize,
+    },
+}
+
+impl Display for PropagateError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedBox { node, kind } => {
+                write!(f, "unsupported box node {} ({kind})", node.as_u32())
+            }
+            Self::InvalidIntegerValue { node, field } => {
+                write!(
+                    f,
+                    "invalid integer value for `{field}` at node {}",
+                    node.as_u32()
+                )
+            }
+            Self::NegativeIntegerValue { field, value } => {
+                write!(f, "negative integer value for `{field}`: {value}")
+            }
+            Self::IntegerTooLarge { field, value } => {
+                write!(f, "integer value too large for `{field}`: {value}")
+            }
+            Self::InputArityMismatch {
+                node,
+                expected,
+                got,
+            } => write!(
+                f,
+                "input arity mismatch at node {}: expected {expected}, got {got}",
+                node.as_u32()
+            ),
+            Self::OutputArityMismatch {
+                node,
+                expected,
+                got,
+            } => write!(
+                f,
+                "output arity mismatch at node {}: expected {expected}, got {got}",
+                node.as_u32()
+            ),
+            Self::SeqArityMismatch {
+                node,
+                left_outputs,
+                right_inputs,
+            } => write!(
+                f,
+                "sequential composition mismatch at node {}: left outputs ({left_outputs}) != right inputs ({right_inputs})",
+                node.as_u32()
+            ),
+            Self::SplitArityMismatch {
+                node,
+                left_outputs,
+                right_inputs,
+            } => write!(
+                f,
+                "split composition mismatch at node {}: left outputs ({left_outputs}) must divide right inputs ({right_inputs})",
+                node.as_u32()
+            ),
+            Self::MergeArityMismatch {
+                node,
+                left_outputs,
+                right_inputs,
+            } => write!(
+                f,
+                "merge composition mismatch at node {}: left outputs ({left_outputs}) must be a multiple of right inputs ({right_inputs})",
+                node.as_u32()
+            ),
+            Self::RecArityMismatch {
+                node,
+                left_inputs,
+                left_outputs,
+                right_inputs,
+                right_outputs,
+            } => write!(
+                f,
+                "recursive composition mismatch at node {}: right inputs ({right_inputs}) <= left outputs ({left_outputs}) and right outputs ({right_outputs}) <= left inputs ({left_inputs}) are required",
+                node.as_u32()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PropagateError {}
+
+/// Creates `n` canonical `sigInput(i)` signals.
+#[must_use]
+pub fn make_sig_input_list(arena: &mut TreeArena, n: usize) -> Vec<SigId> {
+    let mut b = SigBuilder::new(arena);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let index = i64::try_from(i).unwrap_or(i64::MAX);
+        out.push(b.input(index));
+    }
+    out
+}
+
+/// Infers input/output arity of one box expression.
+///
+/// This mirrors C++ `getBoxType(...)` behavior for the currently supported subset.
+pub fn box_arity(arena: &TreeArena, box_tree: BoxId) -> Result<BoxArity, PropagateError> {
+    match match_box(arena, box_tree) {
+        BoxMatch::Int(_) | BoxMatch::Real(_) => Ok(BoxArity {
+            inputs: 0,
+            outputs: 1,
+        }),
+        BoxMatch::Wire => Ok(BoxArity {
+            inputs: 1,
+            outputs: 1,
+        }),
+        BoxMatch::Cut => Ok(BoxArity {
+            inputs: 1,
+            outputs: 0,
+        }),
+        BoxMatch::Add
+        | BoxMatch::Sub
+        | BoxMatch::Mul
+        | BoxMatch::Div
+        | BoxMatch::Rem
+        | BoxMatch::And
+        | BoxMatch::Or
+        | BoxMatch::Xor
+        | BoxMatch::Lsh
+        | BoxMatch::Rsh
+        | BoxMatch::Lt
+        | BoxMatch::Le
+        | BoxMatch::Gt
+        | BoxMatch::Ge
+        | BoxMatch::Eq
+        | BoxMatch::Ne
+        | BoxMatch::Pow
+        | BoxMatch::Delay
+        | BoxMatch::Min
+        | BoxMatch::Max
+        | BoxMatch::Prefix
+        | BoxMatch::Attach
+        | BoxMatch::Enable
+        | BoxMatch::Control => Ok(BoxArity {
+            inputs: 2,
+            outputs: 1,
+        }),
+        BoxMatch::Delay1
+        | BoxMatch::IntCast
+        | BoxMatch::FloatCast
+        | BoxMatch::Lowest
+        | BoxMatch::Highest => Ok(BoxArity {
+            inputs: 1,
+            outputs: 1,
+        }),
+        BoxMatch::ReadOnlyTable | BoxMatch::Select2 | BoxMatch::AssertBounds => Ok(BoxArity {
+            inputs: 3,
+            outputs: 1,
+        }),
+        BoxMatch::Select3 => Ok(BoxArity {
+            inputs: 4,
+            outputs: 1,
+        }),
+        BoxMatch::WriteReadTable => Ok(BoxArity {
+            inputs: 5,
+            outputs: 1,
+        }),
+        BoxMatch::FConst(_, _, _) | BoxMatch::FVar(_, _, _) => Ok(BoxArity {
+            inputs: 0,
+            outputs: 1,
+        }),
+        BoxMatch::Button(_)
+        | BoxMatch::Checkbox(_)
+        | BoxMatch::VSlider(_, _, _, _, _)
+        | BoxMatch::HSlider(_, _, _, _, _)
+        | BoxMatch::NumEntry(_, _, _, _, _) => Ok(BoxArity {
+            inputs: 0,
+            outputs: 1,
+        }),
+        BoxMatch::VBargraph(_, _, _) | BoxMatch::HBargraph(_, _, _) => Ok(BoxArity {
+            inputs: 1,
+            outputs: 1,
+        }),
+        BoxMatch::Soundfile(_, chan) => {
+            let chan = usize_from_int_node(arena, chan, "soundfile channels")?;
+            Ok(BoxArity {
+                inputs: 2,
+                outputs: 2 + chan,
+            })
+        }
+        BoxMatch::VGroup(_, expr) | BoxMatch::HGroup(_, expr) | BoxMatch::TGroup(_, expr) => {
+            box_arity(arena, expr)
+        }
+        BoxMatch::Seq(left, right) => {
+            let left_arity = box_arity(arena, left)?;
+            let right_arity = box_arity(arena, right)?;
+            if left_arity.outputs != right_arity.inputs {
+                return Err(PropagateError::SeqArityMismatch {
+                    node: box_tree,
+                    left_outputs: left_arity.outputs,
+                    right_inputs: right_arity.inputs,
+                });
+            }
+            Ok(BoxArity {
+                inputs: left_arity.inputs,
+                outputs: right_arity.outputs,
+            })
+        }
+        BoxMatch::Par(left, right) => {
+            let left_arity = box_arity(arena, left)?;
+            let right_arity = box_arity(arena, right)?;
+            Ok(BoxArity {
+                inputs: left_arity.inputs + right_arity.inputs,
+                outputs: left_arity.outputs + right_arity.outputs,
+            })
+        }
+        BoxMatch::Split(left, right) => {
+            let left_arity = box_arity(arena, left)?;
+            let right_arity = box_arity(arena, right)?;
+            if !split_compatible(left_arity.outputs, right_arity.inputs) {
+                return Err(PropagateError::SplitArityMismatch {
+                    node: box_tree,
+                    left_outputs: left_arity.outputs,
+                    right_inputs: right_arity.inputs,
+                });
+            }
+            Ok(BoxArity {
+                inputs: left_arity.inputs,
+                outputs: right_arity.outputs,
+            })
+        }
+        BoxMatch::Merge(left, right) => {
+            let left_arity = box_arity(arena, left)?;
+            let right_arity = box_arity(arena, right)?;
+            if !merge_compatible(left_arity.outputs, right_arity.inputs) {
+                return Err(PropagateError::MergeArityMismatch {
+                    node: box_tree,
+                    left_outputs: left_arity.outputs,
+                    right_inputs: right_arity.inputs,
+                });
+            }
+            Ok(BoxArity {
+                inputs: left_arity.inputs,
+                outputs: right_arity.outputs,
+            })
+        }
+        BoxMatch::Rec(left, right) => {
+            let left_arity = box_arity(arena, left)?;
+            let right_arity = box_arity(arena, right)?;
+            if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
+                return Err(PropagateError::RecArityMismatch {
+                    node: box_tree,
+                    left_inputs: left_arity.inputs,
+                    left_outputs: left_arity.outputs,
+                    right_inputs: right_arity.inputs,
+                    right_outputs: right_arity.outputs,
+                });
+            }
+            Ok(BoxArity {
+                inputs: left_arity.inputs - right_arity.outputs,
+                outputs: left_arity.outputs,
+            })
+        }
+        BoxMatch::Environment => Ok(BoxArity {
+            inputs: 0,
+            outputs: 0,
+        }),
+        BoxMatch::Route(ins, outs, _) => Ok(BoxArity {
+            inputs: usize_from_int_node(arena, ins, "route inputs")?,
+            outputs: usize_from_int_node(arena, outs, "route outputs")?,
+        }),
+        BoxMatch::Inputs(_) | BoxMatch::Outputs(_) => Ok(BoxArity {
+            inputs: 0,
+            outputs: 1,
+        }),
+        BoxMatch::Ondemand(expr) | BoxMatch::Upsampling(expr) | BoxMatch::Downsampling(expr) => {
+            let inner = box_arity(arena, expr)?;
+            Ok(BoxArity {
+                inputs: inner.inputs + 1,
+                outputs: inner.outputs,
+            })
+        }
+        BoxMatch::Unknown => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "unknown",
+        }),
+        BoxMatch::Ident(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "ident",
+        }),
+        BoxMatch::Appl(_, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "appl",
+        }),
+        BoxMatch::Access(_, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "access",
+        }),
+        BoxMatch::IPar(_, _, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "ipar",
+        }),
+        BoxMatch::ISeq(_, _, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "iseq",
+        }),
+        BoxMatch::ISum(_, _, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "isum",
+        }),
+        BoxMatch::IProd(_, _, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "iprod",
+        }),
+        BoxMatch::WithLocalDef(_, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "withlocaldef",
+        }),
+        BoxMatch::WithRecDef(_, _, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "withrecdef",
+        }),
+        BoxMatch::Component(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "component",
+        }),
+        BoxMatch::Library(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "library",
+        }),
+        BoxMatch::Waveform(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "waveform",
+        }),
+        BoxMatch::Ffunction(_, _, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "ffunction",
+        }),
+        BoxMatch::FFun(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "ffun",
+        }),
+        BoxMatch::Case(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "case",
+        }),
+        BoxMatch::PatternVar(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "patternvar",
+        }),
+        BoxMatch::Abstr(_, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "abstr",
+        }),
+        BoxMatch::Modulation(_, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "modulation",
+        }),
+    }
+}
+
+/// Propagates input signals through one evaluated box expression.
+///
+/// This function validates input/output arity using [`box_arity`].
+pub fn propagate(
+    arena: &mut TreeArena,
+    box_tree: BoxId,
+    inputs: &[SigId],
+) -> Result<Vec<SigId>, PropagateError> {
+    let arity = box_arity(arena, box_tree)?;
+    if inputs.len() != arity.inputs {
+        return Err(PropagateError::InputArityMismatch {
+            node: box_tree,
+            expected: arity.inputs,
+            got: inputs.len(),
+        });
+    }
+    let outputs = propagate_inner(arena, box_tree, inputs)?;
+    if outputs.len() != arity.outputs {
+        return Err(PropagateError::OutputArityMismatch {
+            node: box_tree,
+            expected: arity.outputs,
+            got: outputs.len(),
+        });
+    }
+    Ok(outputs)
+}
+
+fn propagate_inner(
+    arena: &mut TreeArena,
+    box_tree: BoxId,
+    inputs: &[SigId],
+) -> Result<Vec<SigId>, PropagateError> {
+    match match_box(arena, box_tree) {
+        BoxMatch::Int(value) => {
+            expect_input_arity(box_tree, inputs, 0)?;
+            let mut b = SigBuilder::new(arena);
+            Ok(vec![b.int(value)])
+        }
+        BoxMatch::Real(value) => {
+            expect_input_arity(box_tree, inputs, 0)?;
+            let mut b = SigBuilder::new(arena);
+            Ok(vec![b.real(value)])
+        }
+        BoxMatch::Wire => {
+            expect_input_arity(box_tree, inputs, 1)?;
+            Ok(vec![inputs[0]])
+        }
+        BoxMatch::Cut => {
+            expect_input_arity(box_tree, inputs, 1)?;
+            Ok(Vec::new())
+        }
+        BoxMatch::Add => binary_prim(arena, box_tree, inputs, |b, x, y| b.add(x, y)),
+        BoxMatch::Sub => binary_prim(arena, box_tree, inputs, |b, x, y| b.sub(x, y)),
+        BoxMatch::Mul => binary_prim(arena, box_tree, inputs, |b, x, y| b.mul(x, y)),
+        BoxMatch::Div => binary_prim(arena, box_tree, inputs, |b, x, y| b.div(x, y)),
+        BoxMatch::Rem => binary_prim(arena, box_tree, inputs, |b, x, y| b.rem(x, y)),
+        BoxMatch::And => binary_prim(arena, box_tree, inputs, |b, x, y| b.and(x, y)),
+        BoxMatch::Or => binary_prim(arena, box_tree, inputs, |b, x, y| b.or(x, y)),
+        BoxMatch::Xor => binary_prim(arena, box_tree, inputs, |b, x, y| b.xor(x, y)),
+        BoxMatch::Lsh => binary_prim(arena, box_tree, inputs, |b, x, y| b.lsh(x, y)),
+        BoxMatch::Rsh => binary_prim(arena, box_tree, inputs, |b, x, y| b.arsh(x, y)),
+        BoxMatch::Lt => binary_prim(arena, box_tree, inputs, |b, x, y| b.lt(x, y)),
+        BoxMatch::Le => binary_prim(arena, box_tree, inputs, |b, x, y| b.le(x, y)),
+        BoxMatch::Gt => binary_prim(arena, box_tree, inputs, |b, x, y| b.gt(x, y)),
+        BoxMatch::Ge => binary_prim(arena, box_tree, inputs, |b, x, y| b.ge(x, y)),
+        BoxMatch::Eq => binary_prim(arena, box_tree, inputs, |b, x, y| b.eq(x, y)),
+        BoxMatch::Ne => binary_prim(arena, box_tree, inputs, |b, x, y| b.ne(x, y)),
+        BoxMatch::Delay => binary_prim(arena, box_tree, inputs, |b, x, y| b.delay(x, y)),
+        BoxMatch::Delay1 => unary_prim(arena, box_tree, inputs, |b, x| b.delay1(x)),
+        BoxMatch::Prefix => binary_prim(arena, box_tree, inputs, |b, x, y| b.prefix(x, y)),
+        BoxMatch::IntCast => unary_prim(arena, box_tree, inputs, |b, x| b.int_cast(x)),
+        BoxMatch::FloatCast => unary_prim(arena, box_tree, inputs, |b, x| b.float_cast(x)),
+        BoxMatch::ReadOnlyTable => ternary_prim(arena, box_tree, inputs, |b, x, y, z| {
+            b.read_only_table(x, y, z)
+        }),
+        BoxMatch::WriteReadTable => quinary_prim(arena, box_tree, inputs, |b, s, i, wi, ws, ri| {
+            b.write_read_table(s, i, wi, ws, ri)
+        }),
+        BoxMatch::Select2 => ternary_prim(arena, box_tree, inputs, |b, x, y, z| b.select2(x, y, z)),
+        BoxMatch::Select3 => quaternary_prim(arena, box_tree, inputs, |b, x, y, z, w| {
+            b.select3(x, y, z, w)
+        }),
+        BoxMatch::AssertBounds => ternary_prim(arena, box_tree, inputs, |b, x, y, z| {
+            b.assert_bounds(x, y, z)
+        }),
+        BoxMatch::Lowest => unary_prim(arena, box_tree, inputs, |b, x| b.lowest(x)),
+        BoxMatch::Highest => unary_prim(arena, box_tree, inputs, |b, x| b.highest(x)),
+        BoxMatch::Attach => binary_prim(arena, box_tree, inputs, |b, x, y| b.attach(x, y)),
+        BoxMatch::Enable => binary_prim(arena, box_tree, inputs, |b, x, y| b.enable(x, y)),
+        BoxMatch::Control => binary_prim(arena, box_tree, inputs, |b, x, y| b.control(x, y)),
+        BoxMatch::FConst(ty, name, file) => {
+            expect_input_arity(box_tree, inputs, 0)?;
+            let mut b = SigBuilder::new(arena);
+            Ok(vec![b.fconst(ty, name, file)])
+        }
+        BoxMatch::FVar(ty, name, file) => {
+            expect_input_arity(box_tree, inputs, 0)?;
+            let mut b = SigBuilder::new(arena);
+            Ok(vec![b.fvar(ty, name, file)])
+        }
+        BoxMatch::Button(label) => {
+            expect_input_arity(box_tree, inputs, 0)?;
+            let mut b = SigBuilder::new(arena);
+            Ok(vec![b.button(label)])
+        }
+        BoxMatch::Checkbox(label) => {
+            expect_input_arity(box_tree, inputs, 0)?;
+            let mut b = SigBuilder::new(arena);
+            Ok(vec![b.checkbox(label)])
+        }
+        BoxMatch::VSlider(label, cur, min, max, step) => {
+            expect_input_arity(box_tree, inputs, 0)?;
+            let mut b = SigBuilder::new(arena);
+            Ok(vec![b.vslider(label, cur, min, max, step)])
+        }
+        BoxMatch::HSlider(label, cur, min, max, step) => {
+            expect_input_arity(box_tree, inputs, 0)?;
+            let mut b = SigBuilder::new(arena);
+            Ok(vec![b.hslider(label, cur, min, max, step)])
+        }
+        BoxMatch::NumEntry(label, cur, min, max, step) => {
+            expect_input_arity(box_tree, inputs, 0)?;
+            let mut b = SigBuilder::new(arena);
+            Ok(vec![b.numentry(label, cur, min, max, step)])
+        }
+        BoxMatch::VBargraph(label, min, max) => {
+            expect_input_arity(box_tree, inputs, 1)?;
+            let mut b = SigBuilder::new(arena);
+            Ok(vec![b.vbargraph(label, min, max, inputs[0])])
+        }
+        BoxMatch::HBargraph(label, min, max) => {
+            expect_input_arity(box_tree, inputs, 1)?;
+            let mut b = SigBuilder::new(arena);
+            Ok(vec![b.hbargraph(label, min, max, inputs[0])])
+        }
+        BoxMatch::VGroup(_, expr) | BoxMatch::HGroup(_, expr) | BoxMatch::TGroup(_, expr) => {
+            propagate(arena, expr, inputs)
+        }
+        BoxMatch::Seq(left, right) => {
+            let left_arity = box_arity(arena, left)?;
+            let right_arity = box_arity(arena, right)?;
+            if left_arity.outputs != right_arity.inputs {
+                return Err(PropagateError::SeqArityMismatch {
+                    node: box_tree,
+                    left_outputs: left_arity.outputs,
+                    right_inputs: right_arity.inputs,
+                });
+            }
+            let mid = propagate(arena, left, inputs)?;
+            propagate(arena, right, &mid)
+        }
+        BoxMatch::Par(left, right) => {
+            let left_arity = box_arity(arena, left)?;
+            let right_arity = box_arity(arena, right)?;
+            let left_out = propagate(arena, left, &inputs[..left_arity.inputs])?;
+            let mut right_out = propagate(
+                arena,
+                right,
+                &inputs[left_arity.inputs..left_arity.inputs + right_arity.inputs],
+            )?;
+            let mut out = left_out;
+            out.append(&mut right_out);
+            Ok(out)
+        }
+        BoxMatch::Split(left, right) => {
+            let left_arity = box_arity(arena, left)?;
+            let right_arity = box_arity(arena, right)?;
+            if !split_compatible(left_arity.outputs, right_arity.inputs) {
+                return Err(PropagateError::SplitArityMismatch {
+                    node: box_tree,
+                    left_outputs: left_arity.outputs,
+                    right_inputs: right_arity.inputs,
+                });
+            }
+            let left_out = propagate(arena, left, inputs)?;
+            let split_in = split_signals(&left_out, right_arity.inputs);
+            propagate(arena, right, &split_in)
+        }
+        BoxMatch::Merge(left, right) => {
+            let left_arity = box_arity(arena, left)?;
+            let right_arity = box_arity(arena, right)?;
+            if !merge_compatible(left_arity.outputs, right_arity.inputs) {
+                return Err(PropagateError::MergeArityMismatch {
+                    node: box_tree,
+                    left_outputs: left_arity.outputs,
+                    right_inputs: right_arity.inputs,
+                });
+            }
+            let left_out = propagate(arena, left, inputs)?;
+            let merge_in = mix_signals(arena, &left_out, right_arity.inputs);
+            propagate(arena, right, &merge_in)
+        }
+        BoxMatch::Inputs(expr) => {
+            expect_input_arity(box_tree, inputs, 0)?;
+            let arity = box_arity(arena, expr)?;
+            let value = i64_from_usize(arity.inputs, "inputs")?;
+            let mut b = SigBuilder::new(arena);
+            Ok(vec![b.int(value)])
+        }
+        BoxMatch::Outputs(expr) => {
+            expect_input_arity(box_tree, inputs, 0)?;
+            let arity = box_arity(arena, expr)?;
+            let value = i64_from_usize(arity.outputs, "outputs")?;
+            let mut b = SigBuilder::new(arena);
+            Ok(vec![b.int(value)])
+        }
+        BoxMatch::Environment => {
+            expect_input_arity(box_tree, inputs, 0)?;
+            Ok(Vec::new())
+        }
+        BoxMatch::Unknown => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "unknown",
+        }),
+        BoxMatch::Ident(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "ident",
+        }),
+        BoxMatch::Rec(_, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "rec",
+        }),
+        BoxMatch::Appl(_, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "appl",
+        }),
+        BoxMatch::Access(_, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "access",
+        }),
+        BoxMatch::Pow => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "pow",
+        }),
+        BoxMatch::Min => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "min",
+        }),
+        BoxMatch::Max => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "max",
+        }),
+        BoxMatch::IPar(_, _, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "ipar",
+        }),
+        BoxMatch::ISeq(_, _, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "iseq",
+        }),
+        BoxMatch::ISum(_, _, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "isum",
+        }),
+        BoxMatch::IProd(_, _, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "iprod",
+        }),
+        BoxMatch::WithLocalDef(_, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "withlocaldef",
+        }),
+        BoxMatch::WithRecDef(_, _, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "withrecdef",
+        }),
+        BoxMatch::Component(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "component",
+        }),
+        BoxMatch::Library(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "library",
+        }),
+        BoxMatch::Waveform(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "waveform",
+        }),
+        BoxMatch::Route(_, _, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "route",
+        }),
+        BoxMatch::Ffunction(_, _, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "ffunction",
+        }),
+        BoxMatch::FFun(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "ffun",
+        }),
+        BoxMatch::Case(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "case",
+        }),
+        BoxMatch::PatternVar(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "patternvar",
+        }),
+        BoxMatch::Abstr(_, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "abstr",
+        }),
+        BoxMatch::Modulation(_, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "modulation",
+        }),
+        BoxMatch::Ondemand(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "ondemand",
+        }),
+        BoxMatch::Upsampling(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "upsampling",
+        }),
+        BoxMatch::Downsampling(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "downsampling",
+        }),
+        BoxMatch::Soundfile(_, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "soundfile",
+        }),
+    }
+}
+
+fn expect_input_arity(
+    node: TreeId,
+    inputs: &[SigId],
+    expected: usize,
+) -> Result<(), PropagateError> {
+    if inputs.len() == expected {
+        Ok(())
+    } else {
+        Err(PropagateError::InputArityMismatch {
+            node,
+            expected,
+            got: inputs.len(),
+        })
+    }
+}
+
+fn unary_prim(
+    arena: &mut TreeArena,
+    node: TreeId,
+    inputs: &[SigId],
+    f: impl FnOnce(&mut SigBuilder<'_>, SigId) -> SigId,
+) -> Result<Vec<SigId>, PropagateError> {
+    expect_input_arity(node, inputs, 1)?;
+    let mut b = SigBuilder::new(arena);
+    Ok(vec![f(&mut b, inputs[0])])
+}
+
+fn binary_prim(
+    arena: &mut TreeArena,
+    node: TreeId,
+    inputs: &[SigId],
+    f: impl FnOnce(&mut SigBuilder<'_>, SigId, SigId) -> SigId,
+) -> Result<Vec<SigId>, PropagateError> {
+    expect_input_arity(node, inputs, 2)?;
+    let mut b = SigBuilder::new(arena);
+    Ok(vec![f(&mut b, inputs[0], inputs[1])])
+}
+
+fn ternary_prim(
+    arena: &mut TreeArena,
+    node: TreeId,
+    inputs: &[SigId],
+    f: impl FnOnce(&mut SigBuilder<'_>, SigId, SigId, SigId) -> SigId,
+) -> Result<Vec<SigId>, PropagateError> {
+    expect_input_arity(node, inputs, 3)?;
+    let mut b = SigBuilder::new(arena);
+    Ok(vec![f(&mut b, inputs[0], inputs[1], inputs[2])])
+}
+
+fn quaternary_prim(
+    arena: &mut TreeArena,
+    node: TreeId,
+    inputs: &[SigId],
+    f: impl FnOnce(&mut SigBuilder<'_>, SigId, SigId, SigId, SigId) -> SigId,
+) -> Result<Vec<SigId>, PropagateError> {
+    expect_input_arity(node, inputs, 4)?;
+    let mut b = SigBuilder::new(arena);
+    Ok(vec![f(&mut b, inputs[0], inputs[1], inputs[2], inputs[3])])
+}
+
+fn quinary_prim(
+    arena: &mut TreeArena,
+    node: TreeId,
+    inputs: &[SigId],
+    f: impl FnOnce(&mut SigBuilder<'_>, SigId, SigId, SigId, SigId, SigId) -> SigId,
+) -> Result<Vec<SigId>, PropagateError> {
+    expect_input_arity(node, inputs, 5)?;
+    let mut b = SigBuilder::new(arena);
+    Ok(vec![f(
+        &mut b, inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+    )])
+}
+
+fn split_compatible(left_outputs: usize, right_inputs: usize) -> bool {
+    (left_outputs == right_inputs)
+        || (left_outputs != 0 && right_inputs.is_multiple_of(left_outputs))
+}
+
+fn merge_compatible(left_outputs: usize, right_inputs: usize) -> bool {
+    (left_outputs == right_inputs)
+        || (right_inputs != 0 && left_outputs.is_multiple_of(right_inputs))
+}
+
+fn split_signals(inputs: &[SigId], nbus: usize) -> Vec<SigId> {
+    if nbus == 0 || inputs.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(nbus);
+    for b in 0..nbus {
+        out.push(inputs[b % inputs.len()]);
+    }
+    out
+}
+
+fn mix_signals(arena: &mut TreeArena, inputs: &[SigId], nbus: usize) -> Vec<SigId> {
+    if nbus == 0 {
+        return Vec::new();
+    }
+
+    let mut b = SigBuilder::new(arena);
+    let mut out = Vec::with_capacity(nbus);
+
+    for bus in 0..nbus {
+        let mut acc = if bus < inputs.len() {
+            inputs[bus]
+        } else {
+            b.int(0)
+        };
+        let mut idx = bus + nbus;
+        while idx < inputs.len() {
+            acc = b.add(acc, inputs[idx]);
+            idx += nbus;
+        }
+        out.push(acc);
+    }
+
+    out
+}
+
+fn usize_from_int_node(
+    arena: &TreeArena,
+    node: TreeId,
+    field: &'static str,
+) -> Result<usize, PropagateError> {
+    let Some(NodeKind::Int(value)) = arena.kind(node) else {
+        return Err(PropagateError::InvalidIntegerValue { node, field });
+    };
+    if *value < 0 {
+        return Err(PropagateError::NegativeIntegerValue {
+            field,
+            value: *value,
+        });
+    }
+    usize::try_from(*value).map_err(|_| PropagateError::InvalidIntegerValue { node, field })
+}
+
+fn i64_from_usize(value: usize, field: &'static str) -> Result<i64, PropagateError> {
+    i64::try_from(value).map_err(|_| PropagateError::IntegerTooLarge { field, value })
 }

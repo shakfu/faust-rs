@@ -372,6 +372,11 @@ dependencies = [
 [[package]]
 name = "propagate"
 version = "0.1.0"
+dependencies = [
+ "boxes",
+ "signals",
+ "tlib",
+]
 
 [[package]]
 name = "quote"

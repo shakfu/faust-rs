@@ -5,5 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[dependencies]
+boxes = { path = "../boxes" }
+signals = { path = "../signals" }
+tlib = { path = "../tlib" }
+
 [lints]
 workspace = true

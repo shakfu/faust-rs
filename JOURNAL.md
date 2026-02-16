@@ -1762,3 +1762,50 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo clippy -p eval --all-targets -- -D warnings`
   - `cargo test -p eval --all-targets`
   - `cargo test --workspace --all-targets`
+
+## 2026-02-16
+
+### Phase 4 / 2.4 propagate first implementation tranche (`boxes` -> `signals`)
+
+- Replaced `crates/propagate` scaffold with a first functional propagation layer:
+  - `crates/propagate/src/lib.rs`
+  - `crates/propagate/Cargo.toml` (adds `boxes`/`signals`/`tlib` dependencies)
+- Added Rustdoc provenance and scope notes aligned with C++ source-of-truth:
+  - `/Users/letz/Developpements/RUST/faust/compiler/propagate/propagate.hh`
+  - `/Users/letz/Developpements/RUST/faust/compiler/propagate/propagate.cpp`
+  - `/Users/letz/Developpements/RUST/faust/compiler/boxes/boxtype.cpp`
+- Added first production APIs:
+  - `make_sig_input_list(arena, n)` -> canonical `sigInput(i)` vector.
+  - `box_arity(arena, box_tree)` -> typed box arity inference (`BoxArity`) for supported families.
+  - `propagate(arena, box_tree, inputs)` -> typed propagation with I/O arity validation.
+- Implemented propagation support for:
+  - constants and wire/cut (`int`, `real`, `_`, `!`),
+  - primitive lowering subset (`add/sub/mul/div/rem/logic/shifts/comparisons`, `delay/delay1/prefix`,
+    `int/float cast`, `table/select/assert/lowest/highest`, `attach/enable/control`),
+  - UI subset (`button`, `checkbox`, sliders, bargraphs),
+  - foreign constants/variables (`fconst`, `fvar`),
+  - composition algebra subset (`seq`, `par`, `split`, `merge`),
+  - arity-introspection wrappers (`inputs`, `outputs`), plus `environment`.
+- Added explicit typed diagnostics in `PropagateError`:
+  - unsupported box families,
+  - input/output arity mismatches,
+  - composition coherence mismatches (`seq`/`split`/`merge`/`rec`),
+  - integer payload validation errors.
+- Added crate tests:
+  - `crates/propagate/tests/core_api.rs`
+  - coverage:
+    - input signal list generation,
+    - primitive lowering (`+`),
+    - `seq/par/split` composition behavior,
+    - `merge` bus mixing behavior,
+    - mismatch and unsupported diagnostics,
+    - `inputs(...)` / `outputs(...)` lowering to signal integers.
+- Current explicit limitation kept intentional:
+  - `rec` propagation execution path is still rejected as `UnsupportedBox` (arity inference exists),
+    pending dedicated recursion group semantics port (`sigRec/sigProj` group handling parity).
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p propagate --all-targets -- -D warnings`
+  - `cargo test -p propagate --all-targets`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace --all-targets`
