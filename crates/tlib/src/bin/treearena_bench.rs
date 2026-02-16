@@ -1,6 +1,5 @@
 use std::env;
 use std::hint::black_box;
-use std::sync::Arc;
 use std::time::Instant;
 
 use tlib::{NodeKind, PropertyStore, TreeArena};
@@ -40,7 +39,8 @@ fn main() {
 
     let mut arena = make_arena(n, prealloc);
     let mut nodes = Vec::with_capacity(n);
-    let pair_kind = NodeKind::Tag(Arc::<str>::from("pair"));
+    let pair_tag_id = arena.intern_tag("pair");
+    let pair_kind = NodeKind::Tag(pair_tag_id);
 
     let create_start = Instant::now();
     for i in 0..n {

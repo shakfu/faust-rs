@@ -31,6 +31,10 @@ impl TreeId {
 /// Node payload kind equivalent to Faust C++ `Node` categories plus list tags.
 ///
 /// `FloatBits` stores raw IEEE bits so NaN payloads/signs are preserved exactly.
+///
+/// `Tag` stores a numeric id interned via [`TreeArena::intern_tag`]. This makes
+/// `Hash`, `PartialEq`, and `Clone` on tag nodes O(1) (integer operations) instead
+/// of O(string length), matching the C++ compiler's interned `Sym` pointer semantics.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum NodeKind {
     Nil,
@@ -39,7 +43,7 @@ pub enum NodeKind {
     StringLiteral(Arc<str>),
     Int(i64),
     FloatBits(u64),
-    Tag(Arc<str>),
+    Tag(u32),
 }
 
 /// Interned node stored in [`TreeArena`].
@@ -124,6 +128,43 @@ struct NodeKey {
     children: Vec<TreeId>,
 }
 
+/// Internal registry that maps tag strings to numeric ids and back.
+///
+/// This mirrors the C++ compiler's `Sym` interning: each unique tag string is
+/// assigned a `u32` id so that all subsequent operations (hash, equality, clone)
+/// on `NodeKind::Tag` are O(1) integer operations.
+#[derive(Debug)]
+struct TagRegistry {
+    to_id: AHashMap<Arc<str>, u32>,
+    to_str: Vec<Arc<str>>,
+}
+
+impl TagRegistry {
+    fn new() -> Self {
+        Self {
+            to_id: AHashMap::new(),
+            to_str: Vec::new(),
+        }
+    }
+
+    /// Interns `tag` and returns its numeric id. Returns existing id on duplicates.
+    fn intern(&mut self, tag: &str) -> u32 {
+        if let Some(&id) = self.to_id.get(tag) {
+            return id;
+        }
+        let id = self.to_str.len() as u32;
+        let arc: Arc<str> = Arc::from(tag);
+        self.to_str.push(Arc::clone(&arc));
+        self.to_id.insert(arc, id);
+        id
+    }
+
+    /// Returns the string for a numeric tag id.
+    fn name(&self, id: u32) -> Option<&str> {
+        self.to_str.get(id as usize).map(|s| s.as_ref())
+    }
+}
+
 /// Hash-consing arena for tree nodes.
 ///
 /// # Source provenance (C++)
@@ -132,6 +173,8 @@ struct NodeKey {
 /// # Invariants
 /// - For a given arena instance, each structural node appears once.
 /// - `nil()` always points to the canonical `NodeKind::Nil` node.
+/// - Tag strings are interned via [`TagRegistry`] so `NodeKind::Tag(u32)` operations
+///   are O(1).
 #[derive(Debug)]
 pub struct TreeArena {
     nodes: Vec<TreeNode>,
@@ -139,6 +182,7 @@ pub struct TreeArena {
     interner1: AHashMap<(NodeKind, TreeId), TreeId>,
     interner2: AHashMap<(NodeKind, TreeId, TreeId), TreeId>,
     interner_n: AHashMap<NodeKey, TreeId>,
+    tag_registry: TagRegistry,
     nil: TreeId,
 }
 
@@ -186,6 +230,7 @@ impl TreeArena {
             interner1: AHashMap::with_capacity(interner1_capacity),
             interner2: AHashMap::with_capacity(interner2_capacity),
             interner_n: AHashMap::with_capacity(interner_n_capacity),
+            tag_registry: TagRegistry::new(),
             nil: TreeId(0),
         };
         let nil = arena.intern(NodeKind::Nil, &[]);
@@ -342,10 +387,26 @@ impl TreeArena {
         self.intern(NodeKind::FloatBits(value.to_bits()), &[])
     }
 
+    /// Interns a tag string and returns its numeric tag id.
+    ///
+    /// This is the low-level API used by IR builders (`BoxBuilder`, `SigBuilder`,
+    /// `FirBuilder`) to obtain tag ids for `NodeKind::Tag(u32)`.
+    pub fn intern_tag(&mut self, tag: &str) -> u32 {
+        self.tag_registry.intern(tag)
+    }
+
+    /// Returns the string name for a numeric tag id, or `None` if unknown.
+    #[must_use]
+    pub fn tag_name(&self, tag_id: u32) -> Option<&str> {
+        self.tag_registry.name(tag_id)
+    }
+
     /// Interns a generic tag atom used by higher-level IR builders.
     #[must_use]
     pub fn tag(&mut self, value: impl Into<String>) -> TreeId {
-        self.intern(NodeKind::Tag(Arc::<str>::from(value.into())), &[])
+        let s: String = value.into();
+        let tag_id = self.tag_registry.intern(&s);
+        self.intern(NodeKind::Tag(tag_id), &[])
     }
 
     /// Returns raw node by id.

@@ -7,8 +7,10 @@ fn interning_reuses_structurally_identical_nodes() {
     let b = arena.symbol("x");
     assert_eq!(a, b);
 
-    let seq1 = arena.intern(NodeKind::Tag("seq".into()), &[a, arena.nil()]);
-    let seq2 = arena.intern(NodeKind::Tag("seq".into()), &[b, arena.nil()]);
+    let seq_tag = arena.intern_tag("seq");
+    let nil = arena.nil();
+    let seq1 = arena.intern(NodeKind::Tag(seq_tag), &[a, nil]);
+    let seq2 = arena.intern(NodeKind::Tag(seq_tag), &[b, nil]);
     assert_eq!(seq1, seq2);
 }
 
@@ -97,8 +99,10 @@ fn tree_arena_with_capacities_preserves_interning_semantics() {
     let x2 = arena.symbol("x");
     assert_eq!(x1, x2);
 
-    let pair1 = arena.intern(NodeKind::Tag("pair".into()), &[x1, arena.nil()]);
-    let pair2 = arena.intern(NodeKind::Tag("pair".into()), &[x2, arena.nil()]);
+    let pair_tag = arena.intern_tag("pair");
+    let nil = arena.nil();
+    let pair1 = arena.intern(NodeKind::Tag(pair_tag), &[x1, nil]);
+    let pair2 = arena.intern(NodeKind::Tag(pair_tag), &[x2, nil]);
     assert_eq!(pair1, pair2);
 }
 

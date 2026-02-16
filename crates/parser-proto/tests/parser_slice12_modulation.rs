@@ -18,7 +18,9 @@ fn modulation_parts(arena: &TreeArena, node: TreeId) -> (TreeId, TreeId) {
     let children = arena.children(node).expect("node should exist");
     assert_eq!(children.len(), 2, "modulation should have arity 2");
     match arena.kind(node) {
-        Some(NodeKind::Tag(tag)) => assert_eq!(tag.as_ref(), "BOXMODULATION"),
+        Some(NodeKind::Tag(tag_id)) => {
+            assert_eq!(arena.tag_name(*tag_id), Some("BOXMODULATION"));
+        }
         _ => panic!("expected BOXMODULATION tag"),
     }
     (children[0], children[1])
