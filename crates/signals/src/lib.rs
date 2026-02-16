@@ -40,6 +40,9 @@ const SIG_ASSERT_BOUNDS_TAG: &str = "SIGASSERTBOUNDS";
 const SIG_LOWEST_TAG: &str = "SIGLOWEST";
 const SIG_HIGHEST_TAG: &str = "SIGHIGHEST";
 const SIG_BINOP_TAG: &str = "SIGBINOP";
+const SIG_POW_TAG: &str = "SIGPOW";
+const SIG_MIN_TAG: &str = "SIGMIN";
+const SIG_MAX_TAG: &str = "SIGMAX";
 const SIG_FFUN_TAG: &str = "SIGFFUN";
 const SIG_FCONST_TAG: &str = "SIGFCONST";
 const SIG_FVAR_TAG: &str = "SIGFVAR";
@@ -399,6 +402,21 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
+    pub fn pow(&mut self, x: SigId, y: SigId) -> SigId {
+        intern_tag(self.arena, SIG_POW_TAG, &[x, y])
+    }
+
+    #[must_use]
+    pub fn min(&mut self, x: SigId, y: SigId) -> SigId {
+        intern_tag(self.arena, SIG_MIN_TAG, &[x, y])
+    }
+
+    #[must_use]
+    pub fn max(&mut self, x: SigId, y: SigId) -> SigId {
+        intern_tag(self.arena, SIG_MAX_TAG, &[x, y])
+    }
+
+    #[must_use]
     pub fn ffun(&mut self, ff: SigId, largs: SigId) -> SigId {
         intern_tag(self.arena, SIG_FFUN_TAG, &[ff, largs])
     }
@@ -556,6 +574,9 @@ pub enum SigMatch<'a> {
     Lowest(SigId),
     Highest(SigId),
     BinOp(BinOp, SigId, SigId),
+    Pow(SigId, SigId),
+    Min(SigId, SigId),
+    Max(SigId, SigId),
     FFun(SigId, SigId),
     FConst(SigId, SigId, SigId),
     FVar(SigId, SigId, SigId),
@@ -623,6 +644,9 @@ pub fn match_sig<'a>(arena: &'a TreeArena, id: SigId) -> SigMatch<'a> {
                     },
                     _ => SigMatch::Unknown,
                 },
+                (SIG_POW_TAG, [x, y]) => SigMatch::Pow(*x, *y),
+                (SIG_MIN_TAG, [x, y]) => SigMatch::Min(*x, *y),
+                (SIG_MAX_TAG, [x, y]) => SigMatch::Max(*x, *y),
                 (SIG_FFUN_TAG, [ff, largs]) => SigMatch::FFun(*ff, *largs),
                 (SIG_FCONST_TAG, [ty, name, file]) => SigMatch::FConst(*ty, *name, *file),
                 (SIG_FVAR_TAG, [ty, name, file]) => SigMatch::FVar(*ty, *name, *file),

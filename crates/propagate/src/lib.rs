@@ -516,6 +516,9 @@ fn propagate_inner(
         BoxMatch::Ge => binary_prim(arena, box_tree, inputs, |b, x, y| b.ge(x, y)),
         BoxMatch::Eq => binary_prim(arena, box_tree, inputs, |b, x, y| b.eq(x, y)),
         BoxMatch::Ne => binary_prim(arena, box_tree, inputs, |b, x, y| b.ne(x, y)),
+        BoxMatch::Pow => binary_prim(arena, box_tree, inputs, |b, x, y| b.pow(x, y)),
+        BoxMatch::Min => binary_prim(arena, box_tree, inputs, |b, x, y| b.min(x, y)),
+        BoxMatch::Max => binary_prim(arena, box_tree, inputs, |b, x, y| b.max(x, y)),
         BoxMatch::Delay => binary_prim(arena, box_tree, inputs, |b, x, y| b.delay(x, y)),
         BoxMatch::Delay1 => unary_prim(arena, box_tree, inputs, |b, x| b.delay1(x)),
         BoxMatch::Prefix => binary_prim(arena, box_tree, inputs, |b, x, y| b.prefix(x, y)),
@@ -721,18 +724,6 @@ fn propagate_inner(
         BoxMatch::Access(_, _) => Err(PropagateError::UnsupportedBox {
             node: box_tree,
             kind: "access",
-        }),
-        BoxMatch::Pow => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "pow",
-        }),
-        BoxMatch::Min => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "min",
-        }),
-        BoxMatch::Max => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "max",
         }),
         BoxMatch::IPar(_, _, _) => Err(PropagateError::UnsupportedBox {
             node: box_tree,

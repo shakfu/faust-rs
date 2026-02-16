@@ -2015,3 +2015,42 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo run -p compiler -- --dump-sig tests/corpus/rep_20_environment_waveform.dsp`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --all-targets`
+
+### Phase 4 integration step 6 (`pow/min/max` signal support closure for `rep_07` and `rep_19`)
+
+- Source of truth checked in C++:
+  - `/Users/letz/Developpements/RUST/faust/compiler/signals/signals.hh`
+  - `/Users/letz/Developpements/RUST/faust/compiler/signals/signals.cpp`
+  - (`sigPow`, `sigMin`, `sigMax` exposed as signal constructors via extended math).
+- Extended `crates/signals/src/lib.rs`:
+  - added dedicated signal node families:
+    - `SIGPOW`, `SIGMIN`, `SIGMAX`,
+  - added `SigBuilder` constructors:
+    - `pow(x, y)`, `min(x, y)`, `max(x, y)`,
+  - extended `SigMatch` + `match_sig` with:
+    - `Pow`, `Min`, `Max`.
+- Extended `crates/propagate/src/lib.rs`:
+  - `BoxMatch::Pow/Min/Max` now lower to signal nodes instead of `UnsupportedBox`.
+- Added tests:
+  - `crates/signals/tests/core_api.rs`:
+    - builder/matcher coverage for `Pow/Min/Max`,
+  - `crates/propagate/tests/core_api.rs`:
+    - `propagate_pow_min_max_map_to_signal_nodes`,
+  - `crates/compiler/tests/signal_pipeline.rs`:
+    - `rep_07_nonlinear_clip.dsp` (`max(min(...))` shape),
+    - `rep_19_primitive_family.dsp` (contains `Pow` output),
+  - `crates/compiler/tests/cpp_signal_differential.rs`:
+    - added `rep_07_nonlinear_clip.dsp`,
+    - added `rep_19_primitive_family.dsp`.
+- Differential status (C++ source-of-truth `/Users/letz/Developpements/RUST/faust` @ `8eebea429`):
+  - `rep_07_nonlinear_clip`: `rust=Ok`, `cpp=Ok`,
+  - `rep_19_primitive_family`: `rust=Ok`, `cpp=Ok`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p signals --all-targets`
+  - `cargo test -p propagate --all-targets`
+  - `cargo test -p compiler --test signal_pipeline`
+  - `cargo test -p compiler --test cpp_signal_differential -- --nocapture`
+  - `cargo run -p compiler -- --dump-sig tests/corpus/rep_07_nonlinear_clip.dsp`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace --all-targets`

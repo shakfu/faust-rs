@@ -156,8 +156,18 @@ fn differential_signal_pipeline_status_against_cpp_reference() {
             expect_valid: true,
         },
         Case {
+            name: "rep_07_nonlinear_clip",
+            input: CaseInput::CorpusFile("rep_07_nonlinear_clip.dsp"),
+            expect_valid: true,
+        },
+        Case {
             name: "rep_21_operator_precedence",
             input: CaseInput::CorpusFile("rep_21_operator_precedence.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_19_primitive_family",
+            input: CaseInput::CorpusFile("rep_19_primitive_family.dsp"),
             expect_valid: true,
         },
         Case {

@@ -160,6 +160,41 @@ fn corpus_environment_waveform_combines_access_and_waveform_outputs() {
     ));
 }
 
+#[test]
+fn corpus_nonlinear_clip_lowers_to_min_max_shape() {
+    let out = compile_corpus("rep_07_nonlinear_clip.dsp");
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+
+    let SigMatch::Max(lo, inner) = match_sig(&out.parse.state.arena, out.signals[0]) else {
+        panic!("rep_07 should lower to max(lo, ...)");
+    };
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, lo),
+        SigMatch::Real(_)
+    ));
+    let SigMatch::Min(hi, mul) = match_sig(&out.parse.state.arena, inner) else {
+        panic!("rep_07 inner should lower to min(hi, ...)");
+    };
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, hi),
+        SigMatch::Real(_)
+    ));
+    assert_mul_input_const(&out.parse.state.arena, mul, 0);
+}
+
+#[test]
+fn corpus_primitive_family_includes_pow_output() {
+    let out = compile_corpus("rep_19_primitive_family.dsp");
+    assert_eq!(out.process_arity.outputs, 10);
+    assert_eq!(out.signals.len(), 10);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Pow(_, _)
+    ));
+}
+
 fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i64) {
     let SigMatch::BinOp(BinOp::Mul, a, b) = match_sig(arena, sig) else {
         panic!("branch should be Mul");

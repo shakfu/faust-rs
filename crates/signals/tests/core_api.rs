@@ -15,6 +15,9 @@ fn builder_and_match_cover_core_signal_shapes() {
     let d = b.delay(inp, i1);
     let p = b.prefix(i0, inp);
     let add = b.add(inp, i1);
+    let pow = b.pow(inp, i1);
+    let min = b.min(inp, i1);
+    let max = b.max(inp, i1);
     let cast_i = b.int_cast(r);
     let cast_f = b.float_cast(i1);
 
@@ -26,6 +29,9 @@ fn builder_and_match_cover_core_signal_shapes() {
     assert_eq!(match_sig(&arena, d), SigMatch::Delay(inp, i1));
     assert_eq!(match_sig(&arena, p), SigMatch::Prefix(i0, inp));
     assert_eq!(match_sig(&arena, add), SigMatch::BinOp(BinOp::Add, inp, i1));
+    assert_eq!(match_sig(&arena, pow), SigMatch::Pow(inp, i1));
+    assert_eq!(match_sig(&arena, min), SigMatch::Min(inp, i1));
+    assert_eq!(match_sig(&arena, max), SigMatch::Max(inp, i1));
     assert_eq!(match_sig(&arena, cast_i), SigMatch::IntCast(r));
     assert!(matches!(match_sig(&arena, cast_f), SigMatch::Real(_)));
 }

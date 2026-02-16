@@ -222,6 +222,33 @@ fn waveform_box_lowers_to_size_and_waveform_signal() {
     assert!(matches!(match_sig(&arena, values[2]), SigMatch::Real(_)));
 }
 
+#[test]
+fn propagate_pow_min_max_map_to_signal_nodes() {
+    let mut arena = TreeArena::new();
+    let (pow, min, max) = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        (bb.pow(), bb.min(), bb.max())
+    };
+    let inputs = make_sig_input_list(&mut arena, 2);
+
+    let pow_out = propagate(&mut arena, pow, &inputs).expect("pow should propagate");
+    let min_out = propagate(&mut arena, min, &inputs).expect("min should propagate");
+    let max_out = propagate(&mut arena, max, &inputs).expect("max should propagate");
+
+    assert_eq!(
+        match_sig(&arena, pow_out[0]),
+        SigMatch::Pow(inputs[0], inputs[1])
+    );
+    assert_eq!(
+        match_sig(&arena, min_out[0]),
+        SigMatch::Min(inputs[0], inputs[1])
+    );
+    assert_eq!(
+        match_sig(&arena, max_out[0]),
+        SigMatch::Max(inputs[0], inputs[1])
+    );
+}
+
 fn is_debruijn_rec(arena: &TreeArena, id: TreeId) -> bool {
     matches!(tag_name(arena, id), Some("DEBRUIJN"))
 }
