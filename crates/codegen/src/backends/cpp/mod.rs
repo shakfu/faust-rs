@@ -120,6 +120,15 @@ struct DeclareFunView<'a> {
     is_inline: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum EmitMode {
+    Default,
+    Compute {
+        drop_index: usize,
+        output_channels: usize,
+    },
+}
+
 /// Generates C++ code from a FIR module root.
 ///
 /// # C++ parity mapping
@@ -135,6 +144,11 @@ pub fn generate_cpp_module(
     options: &CppOptions,
 ) -> Result<String, CodegenError> {
     let module = decode_module(store, module)?;
+    let mut effective_options = options.clone();
+    if effective_options.num_outputs == 0 {
+        effective_options.num_outputs =
+            infer_module_compute_output_arity(store, module.declarations);
+    }
     let declared_functions = collect_declared_function_names(store, module.declarations)?;
     let class_name = options
         .class_name
@@ -151,14 +165,34 @@ pub fn generate_cpp_module(
     let _ = writeln!(out, "class {class_name} : public dsp {{");
     let _ = writeln!(out, "private:");
     let _ = writeln!(out, "    int fSampleRate = 0;");
-    emit_section(store, &mut out, options, "dsp_struct", module.dsp_struct, 1)?;
-    emit_section(store, &mut out, options, "globals", module.globals, 1)?;
-    let _ = writeln!(out, "public:");
-    emit_dsp_contract_methods(&mut out, options, class_name, &declared_functions, 1);
     emit_section(
         store,
         &mut out,
-        options,
+        &effective_options,
+        "dsp_struct",
+        module.dsp_struct,
+        1,
+    )?;
+    emit_section(
+        store,
+        &mut out,
+        &effective_options,
+        "globals",
+        module.globals,
+        1,
+    )?;
+    let _ = writeln!(out, "public:");
+    emit_dsp_contract_methods(
+        &mut out,
+        &effective_options,
+        class_name,
+        &declared_functions,
+        1,
+    );
+    emit_section(
+        store,
+        &mut out,
+        &effective_options,
         "functions",
         module.declarations,
         1,
@@ -170,6 +204,20 @@ pub fn generate_cpp_module(
         let _ = writeln!(out, "}} // namespace {namespace}");
     }
     Ok(out)
+}
+
+fn infer_module_compute_output_arity(store: &FirStore, declarations: FirId) -> usize {
+    let FirMatch::Block(items) = match_fir(store, declarations) else {
+        return 0;
+    };
+    for item in items {
+        if let FirMatch::DeclareFun { name, body, .. } = match_fir(store, item)
+            && name == "compute"
+        {
+            return infer_compute_output_arity(store, body);
+        }
+    }
+    0
 }
 
 fn emit_dsp_contract_methods(
@@ -347,6 +395,18 @@ fn emit_stmt(
     stmt: FirId,
     indent: usize,
 ) -> Result<(), CodegenError> {
+    let mut mode = EmitMode::Default;
+    emit_stmt_with_mode(store, out, options, stmt, indent, &mut mode)
+}
+
+fn emit_stmt_with_mode(
+    store: &FirStore,
+    out: &mut String,
+    options: &CppOptions,
+    stmt: FirId,
+    indent: usize,
+    mode: &mut EmitMode,
+) -> Result<(), CodegenError> {
     let tab = "    ".repeat(indent);
     match match_fir(store, stmt) {
         FirMatch::DeclareVar {
@@ -428,6 +488,18 @@ fn emit_stmt(
         }
         FirMatch::Drop(value) => {
             let value = emit_value(store, options, value)?;
+            if let EmitMode::Compute {
+                drop_index,
+                output_channels,
+            } = mode
+            {
+                if *drop_index < *output_channels {
+                    let output_index = *drop_index;
+                    let _ = writeln!(out, "{tab}output{output_index}[i0] = FAUSTFLOAT({value});");
+                    *drop_index += 1;
+                    return Ok(());
+                }
+            }
             let _ = writeln!(out, "{tab}(void)({value});");
             Ok(())
         }
@@ -444,7 +516,7 @@ fn emit_stmt(
             }
             Ok(())
         }
-        FirMatch::Block(_) => emit_block(store, out, options, stmt, indent),
+        FirMatch::Block(_) => emit_block_with_mode(store, out, options, stmt, indent, mode),
         FirMatch::If {
             cond,
             then_block,
@@ -452,11 +524,11 @@ fn emit_stmt(
         } => {
             let cond = emit_value(store, options, cond)?;
             let _ = writeln!(out, "{tab}if ({cond}) {{");
-            emit_block(store, out, options, then_block, indent + 1)?;
+            emit_block_with_mode(store, out, options, then_block, indent + 1, mode)?;
             let _ = writeln!(out, "{tab}}}");
             if let Some(else_block) = else_block {
                 let _ = writeln!(out, "{tab}else {{");
-                emit_block(store, out, options, else_block, indent + 1)?;
+                emit_block_with_mode(store, out, options, else_block, indent + 1, mode)?;
                 let _ = writeln!(out, "{tab}}}");
             }
             Ok(())
@@ -464,7 +536,7 @@ fn emit_stmt(
         FirMatch::Control { cond, stmt } => {
             let cond = emit_value(store, options, cond)?;
             let _ = writeln!(out, "{tab}if ({cond}) {{");
-            emit_stmt(store, out, options, stmt, indent + 1)?;
+            emit_stmt_with_mode(store, out, options, stmt, indent + 1, mode)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
@@ -483,7 +555,7 @@ fn emit_stmt(
                 out,
                 "{tab}for (int {var} = {init}; {var} < {end}; {var} += {step}) {{"
             );
-            emit_block(store, out, options, body, indent + 1)?;
+            emit_block_with_mode(store, out, options, body, indent + 1, mode)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
@@ -495,7 +567,7 @@ fn emit_stmt(
         } => {
             let upper = emit_value(store, options, upper)?;
             let _ = writeln!(out, "{tab}for (int {var} = 0; {var} < {upper}; ++{var}) {{");
-            emit_block(store, out, options, body, indent + 1)?;
+            emit_block_with_mode(store, out, options, body, indent + 1, mode)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
@@ -506,13 +578,13 @@ fn emit_stmt(
         } => {
             let joined = iterators.join(", ");
             let _ = writeln!(out, "{tab}// iterator-for over [{joined}]");
-            emit_block(store, out, options, body, indent + 1)?;
+            emit_block_with_mode(store, out, options, body, indent + 1, mode)?;
             Ok(())
         }
         FirMatch::WhileLoop { cond, body } => {
             let cond = emit_value(store, options, cond)?;
             let _ = writeln!(out, "{tab}while ({cond}) {{");
-            emit_block(store, out, options, body, indent + 1)?;
+            emit_block_with_mode(store, out, options, body, indent + 1, mode)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
@@ -525,13 +597,13 @@ fn emit_stmt(
             let _ = writeln!(out, "{tab}switch ({cond}) {{");
             for (value, block) in cases {
                 let _ = writeln!(out, "{tab}case {value}: {{");
-                emit_block(store, out, options, block, indent + 1)?;
+                emit_block_with_mode(store, out, options, block, indent + 1, mode)?;
                 let _ = writeln!(out, "{tab}    break;");
                 let _ = writeln!(out, "{tab}}}");
             }
             if let Some(default) = default {
                 let _ = writeln!(out, "{tab}default: {{");
-                emit_block(store, out, options, default, indent + 1)?;
+                emit_block_with_mode(store, out, options, default, indent + 1, mode)?;
                 let _ = writeln!(out, "{tab}}}");
             }
             let _ = writeln!(out, "{tab}}}");
@@ -644,11 +716,23 @@ fn emit_block(
     block: FirId,
     indent: usize,
 ) -> Result<(), CodegenError> {
+    let mut mode = EmitMode::Default;
+    emit_block_with_mode(store, out, options, block, indent, &mut mode)
+}
+
+fn emit_block_with_mode(
+    store: &FirStore,
+    out: &mut String,
+    options: &CppOptions,
+    block: FirId,
+    indent: usize,
+    mode: &mut EmitMode,
+) -> Result<(), CodegenError> {
     let FirMatch::Block(items) = match_fir(store, block) else {
         return Err(unsupported_node("expected block", block, store));
     };
     for stmt in items {
-        emit_stmt(store, out, options, stmt, indent)?;
+        emit_stmt_with_mode(store, out, options, stmt, indent, mode)?;
     }
     Ok(())
 }
@@ -694,9 +778,57 @@ fn emit_declare_fun(
     }
     let inline = if decl.is_inline { "inline " } else { "" };
     let _ = writeln!(out, "{tab}{inline}{ret} {}({params}) {{", decl.name);
-    emit_block(store, out, options, decl.body, indent + 1)?;
+    if decl.name == "compute" {
+        emit_compute_body(store, out, options, decl.body, indent + 1)?;
+    } else {
+        emit_block(store, out, options, decl.body, indent + 1)?;
+    }
     let _ = writeln!(out, "{tab}}}");
     Ok(())
+}
+
+/// Emits a Faust-style sample loop for `compute(count, inputs, outputs)`.
+///
+/// This keeps FIR expression lowering in one place while enforcing the DSP API
+/// contract expected by Faust architectures: per-sample processing on channels
+/// carried by `inputs[]`/`outputs[]`.
+fn emit_compute_body(
+    store: &FirStore,
+    out: &mut String,
+    options: &CppOptions,
+    body: FirId,
+    indent: usize,
+) -> Result<(), CodegenError> {
+    let tab = "    ".repeat(indent);
+    let output_channels = if options.num_outputs > 0 {
+        options.num_outputs
+    } else {
+        infer_compute_output_arity(store, body)
+    };
+    for index in 0..options.num_inputs {
+        let _ = writeln!(out, "{tab}FAUSTFLOAT* input{index} = inputs[{index}];");
+    }
+    for index in 0..output_channels {
+        let _ = writeln!(out, "{tab}FAUSTFLOAT* output{index} = outputs[{index}];");
+    }
+    let _ = writeln!(out, "{tab}for (int i0 = 0; i0 < count; i0 = i0 + 1) {{");
+    let mut mode = EmitMode::Compute {
+        drop_index: 0,
+        output_channels,
+    };
+    emit_block_with_mode(store, out, options, body, indent + 1, &mut mode)?;
+    let _ = writeln!(out, "{tab}}}");
+    Ok(())
+}
+
+fn infer_compute_output_arity(store: &FirStore, body: FirId) -> usize {
+    let FirMatch::Block(items) = match_fir(store, body) else {
+        return 0;
+    };
+    items
+        .iter()
+        .filter(|stmt| matches!(match_fir(store, **stmt), FirMatch::Drop(_)))
+        .count()
 }
 
 fn emit_value(
