@@ -136,6 +136,9 @@ This is the first explicit contract for the migrated production flow.
 
 - Owns diagnostic data model and categorization.
 - `compiler` aggregates diagnostics from parser/eval/codegen and maps to API outputs.
+- Owns stable error-code families and rendering contracts (human + machine-readable).
+- Must replace `gErrorCount` / `gErrorMessage` side channels with structured diagnostics bundles.
+- Reference architecture: `porting/faust-rust-diagnostics-model-en.md`.
 
 ## 5. Gate 0 pass statement (current status)
 

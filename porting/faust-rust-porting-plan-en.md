@@ -48,9 +48,12 @@ The objective of the port is to reproduce this pipeline in idiomatic Rust, takin
   - `boxes`: `BoxBuilder` + `match_box`
   - `signals`: `SigBuilder` + `match_sig`
   This avoids duplicated constructor/matcher ladders across passes and keeps dispatch logic explicit.
+- Standardize diagnostics and error reporting on one structured cross-phase model (see `faust-rust-diagnostics-model-en.md`).
 
 Related design note (recursion representation and RouteIR coexistence):
 - `faust-rust-recursion-model-note-en.md`
+Related design note (structured diagnostics and error-reporting model):
+- `faust-rust-diagnostics-model-en.md`
 
 ### Public API migration policy (1:1 vs adaptations)
 
@@ -185,6 +188,17 @@ transform/
     loop_opt.rs      // Loop optimization
 ```
 
+### 3.5 Diagnostics model (cross-phase)
+
+The Rust port should not replicate the C++ string/exception diagnostic style one-to-one. Behavioral parity remains mandatory, but diagnostics should be structured and phase-aware:
+
+- Stable diagnostic codes (parser/eval/propagate/compiler families),
+- explicit severity/stage/source labels,
+- human and JSON renderers for CLI/CI/IDE.
+
+Detailed architecture and rollout are specified in:
+- `faust-rust-diagnostics-model-en.md`
+
 ---
 
 ## 4. Cargo Workspace Architecture
@@ -283,7 +297,7 @@ Detailed checklist and Go/No-Go criteria: `phases/phase-0-validation-en.md`.
 
 | Stage | Crate | Description | Validation tests |
 |-------|-------|-------------|---------------------|
-| 1.1 | `errors` | Error types, source locations, diagnostics | Unit testing |
+| 1.1 | `errors` | Error types, source locations/ranges, diagnostic codes, phase-aware diagnostics bundle, rendering contracts | Unit testing |
 | 1.2 | `utils` | Common utilities (names, paths, global config) | Unit testing |
 | 1.3 | **`tlib`** | **High priority.** Trees with hash-consing, symbols, functional lists (cons/hd/tl), tagged nodes, properties on the nodes. This is the fundamental data structure of the entire compiler. | Comprehensive testing of hash-consing, structural equality, list operations |
 | 1.4 | `interval` | Interval arithmetic (bounds, propagation) | Testing arithmetic operations on intervals |
@@ -313,6 +327,7 @@ Detailed checklist and Go/No-Go criteria: `phases/phase-0-validation-en.md`.
 
 After Gate B prototype validation, completion work must follow an explicit remaining-step roadmap (lexer/grammar/action parity, diagnostics/recovery parity, SourceReader integration, differential expansion, and merge into production `crates/parser`).
 Detailed sequence with deliverables and pass criteria: `phases/phase-3-parser-en.md` (section `7.4`).
+Diagnostics model details for this phase: `faust-rust-diagnostics-model-en.md` (sections 4–6).
 
 ### Phase 4 — Signals, Evaluation, Propagation (months 5-6)
 
@@ -334,6 +349,7 @@ Detailed sequence with deliverables and pass criteria: `phases/phase-3-parser-en
 8. Keep debug/test helpers out of production paths (`testFIR`, ad hoc stderr tracing in core signal helpers).
 9. Put explicit complexity bounds/caching around FIR/IIR gain estimation used during type inference.
 10. Preserve behavior first with differential tests, then apply structural refactors module by module.
+11. Adopt the shared diagnostics model for `eval`/`propagate` error conversion and source labeling (`faust-rust-diagnostics-model-en.md`).
 
 ### Phase 5 — Standardization and Transformation (months 6-8)
 
@@ -1076,6 +1092,7 @@ The Rust port should be expected in a comparable order of magnitude, with possib
 | Leaving backend orchestration as ad hoc `libcode.cpp` branching | Hard-to-maintain Rust core and duplicated compile paths | Introduce a registry-driven backend selector and shared compile pipeline early in Phase 6 |
 | Keeping CLI/backend option constraints as imperative branch chains | Silent validation drift and contradictory rules | Use a declarative capability matrix plus consistency tests in Phase 6/9 |
 | Keeping fixed-size temporary argument buffers in API entry paths | Overflow/undefined behavior under large argument sets | Use dynamic bounded argument vectors with explicit validation and error returns |
+| Keeping ad hoc string-only diagnostics and counter-only failures across parser/eval/propagate/compiler | Weak developer UX, poor CI/IDE integration, and hard cross-phase triage | Implement the structured diagnostics model from `faust-rust-diagnostics-model-en.md` with staged deliverables and snapshot-tested human/JSON outputs |
 | Underestimating C API surface (`box_signal_api.cpp`) | Major Phase 9 delay | Deliver API in tiers (minimal subset first, broad compatibility second) |
 
 ---

@@ -20,6 +20,7 @@
 | 5 | LLVM backend via inkwell | ★★☆ Strong | AVERAGE | 1.5 days |
 | 6 | Compiler Wasm Compilation | ★★☆ Strong | AVERAGE | 0.5 days |
 | 7 | API C (libfaust) — real surface and prioritization | ★★☆ Strong | AVERAGE | 0.5 days |
+| 8 | Structured diagnostics model and error UX parity envelope | ★★☆ Strong | AVERAGE | 1 day |
 
 ---
 
@@ -398,6 +399,46 @@ grep -rn "createDSPFactory\|createInterpreter\|DSPToBoxes\|boxesToSignals\|creat
 
 ---
 
+## Critical point 8 — Structured diagnostics model and error UX parity envelope
+
+### Why it's critical
+
+Even with semantic parity, weak error reporting slows development, regression triage, and user adoption. The C++ model is mostly string/exception and global-counter based; Rust should keep failure-class parity while providing structured diagnostics.
+
+Without an explicit prototype, diagnostics quality is likely to regress into mixed ad hoc strings across parser/eval/propagate/compiler boundaries.
+
+### Validation prototype
+
+```
+Duration: 1 day
+```
+
+1. Define a minimal diagnostics schema in `errors` (`severity`, `stage`, `code`, `labels`, `notes/help`).
+2. Convert one parser error class and one eval/propagate error class into this schema.
+3. Expose two renderers:
+   - human text output,
+   - JSON output for tooling.
+4. Validate deterministic snapshots on malformed fixtures.
+
+### Success criterion
+
+- One shared diagnostics schema is used by at least parser + one Phase 4 crate.
+- Stable diagnostic code families exist (`FRS-PARSE-*`, `FRS-EVAL-*`/`FRS-PROP-*`).
+- Human and JSON outputs are deterministic on CI fixtures.
+
+### Plan B if insufficient coverage
+
+| Situation | Action |
+|-----------|--------|
+| Schema too narrow for cross-phase use | Expand labels/notes/help model before broad rollout |
+| Source spans unavailable in some passes | Keep structured code/stage first, add spans incrementally with explicit TODO owner/date |
+| CLI integration delayed | Keep schema rollout in crates, add renderer in next integration sprint |
+
+Reference architecture:
+- `porting/faust-rust-diagnostics-model-en.md`
+
+---
+
 ## Validation sprint planning
 
 ```
@@ -410,7 +451,7 @@ grep -rn "createDSPFactory\|createInterpreter\|DSPToBoxes\|boxesToSignals\|creat
         │ criterion │ lrpar     │ new       │ audit     │ Wasm test │
         │           │ suite     │ pipeline  │           │ API C     │
         └───────────┴───────────┴───────────┴───────────┴───────────┘
-         Point 2     Point 1     Point 4     Point 3     Points 5-7
+         Point 2     Point 1     Point 4     Point 3     Points 5-8
 ```
 
 ### Sprint deliverables
@@ -424,6 +465,7 @@ At the end of the week, a decision document containing:
 5. **LLVM**: ✅ inkwell OK / ⚠ → fallback interpreter / ❌ → LLVM postponed
 6. **Wasm**: ✅ compiles / ❌ → blocking dependency identified
 7. **C API**: documented minimal subset
+8. **Diagnostics model**: shared schema validated across parser + one downstream phase
 
 ### Go/No-Go decision
 
@@ -434,4 +476,4 @@ At the end of the week, a decision document containing:
 | Point 2 ❌ (TreeArena) | **No-Go** — fundamental problem, reassess the architecture |
 | Point 3 ❌ (pipeline target unclear) | **No-Go** — decide target path before implementation |
 | Point 4 ❌ (gGlobal coupling) | **Go conditional** — allow 1–2 weeks of C++ refactoring first |
-| Points 5–7: Problems | **Go** — these points have viable fallbacks |
+| Points 5–8: Problems | **Go** — these points have viable fallbacks |

@@ -360,8 +360,10 @@ Remaining steps to reach full parser completion:
 - Pass criterion: structural tree/box differentials match C++ on the defined parity corpus.
 
 5. Finalize recovery and diagnostics parity.
-- Deliverable: malformed-input fixture suite with expected class and location checks.
-- Pass criterion: Rust diagnostics (file/line/column + recovery class) match accepted C++ behavior envelopes.
+- Deliverable: malformed-input fixture suite with expected class, location, and diagnostic-code checks.
+- Pass criterion: Rust diagnostics (file/line/column/range + recovery class + stable parser code family) match accepted C++ behavior envelopes.
+- Integration rule: parser diagnostics must stay structured end-to-end (no string-only flattening in production interfaces).
+- Reference model: `porting/faust-rust-diagnostics-model-en.md` (sections 4.1, 5.1, 6-B).
 
 6. Port and integrate `SourceReader` import pipeline.
 - Deliverable: `SourceReader` implementation in `parser` with cache, search paths, cycle handling, and file list tracking.
@@ -398,6 +400,7 @@ Remaining steps to reach full parser completion:
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --all-targets`
   - Phase 3 "Done" checklist fully checked.
+  - parser diagnostics snapshots are stable in human and machine-readable forms.
 
 ---
 

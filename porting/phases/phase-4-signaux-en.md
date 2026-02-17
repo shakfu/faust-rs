@@ -402,6 +402,33 @@ Propagation is the key point that transforms the **functional block language** i
 - `boxMerge(A, B)` → addition of entries of B
 - `boxRec(A, B)` → creation of recursive signals (`sigRec`, `sigProj`)
 
+### 2.5 Diagnostics integration for `eval` + `propagate`
+
+The current Rust Phase 4 implementation already has typed error enums (`EvalError`, `PropagateError`). The remaining work is to map them to the common diagnostics model with source labels and stable codes.
+
+Required integration points:
+
+1. `eval` errors:
+- map top-priority classes to `FRS-EVAL-*` diagnostic codes.
+- attach definition/use source labels when parser metadata is available.
+- include short actionable help for common user mistakes (undefined symbol, bad iterator count, non-identifier parameter).
+
+2. `propagate` errors:
+- map arity/unsupported-node classes to `FRS-PROP-*` diagnostic codes.
+- include expected/got details as structured notes (not only formatted strings).
+- attach source labels on the offending box node when available.
+
+3. compiler orchestration:
+- preserve stage and code information when aggregating Phase 4 errors.
+- avoid reducing failures to generic string messages in CLI/API paths.
+
+Pass criterion for this subsection:
+- negative corpus tests for eval/propagate assert `(stage, code, severity, location)` stability.
+- phase-level outputs are available in human and machine-readable formats.
+
+Reference model:
+- `porting/faust-rust-diagnostics-model-en.md` (sections 4.1, 5.3, 5.4, 6-D/E).
+
 ---
 
 ## 3. Dependencies

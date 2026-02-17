@@ -20,6 +20,7 @@ Primary goals:
 - Enforce stub minimization in validation prototypes.
 - Define and enforce source-provenance documentation in Rustdoc format during porting.
 - Require explicit deliverables and pass criteria per validation task before execution.
+- Freeze a shared structured diagnostics model baseline for parser/eval/propagate/compiler.
 - Surface blockers early with explicit go/no-go criteria.
 
 ---
@@ -106,6 +107,13 @@ Primary goals:
   - target date for completion,
   - tracking entry in `JOURNAL.md`.
 
+### 2.12 Diagnostics model baseline
+- Define a shared diagnostics schema (`severity`, `stage`, `code`, source labels, notes/help) in `errors`.
+- Validate at least one parser error and one downstream error class (`eval` or `propagate`) converted to the schema.
+- Freeze renderer requirements (human + JSON) and deterministic snapshot policy.
+- Reference architecture and staged rollout document:
+  - `porting/faust-rust-diagnostics-model-en.md`.
+
 ---
 
 ## 3. Deliverables
@@ -120,6 +128,7 @@ Primary goals:
   - baseline differential protocol
   - Rustdoc source-provenance convention for migrated modules
   - TreeArena performance report (results, thresholds, decision) (`phase-0-treearena-benchmark-report-en.md`)
+  - diagnostics model baseline (schema + code taxonomy + renderer contract) (`porting/faust-rust-diagnostics-model-en.md`)
 - Go/No-Go decision with explicit blockers list.
 - If blockers exist: mitigation plan with owner and target phase.
 
@@ -137,6 +146,7 @@ Go:
 - Rustdoc source-provenance convention is defined and applied on touched prototypes.
 - TreeArena hash-consing performance is validated against agreed thresholds.
 - No untracked stubs remain in Phase 0 prototypes.
+- Diagnostics schema baseline is validated across parser and one downstream phase.
 
 No-Go:
 - Pipeline ownership is ambiguous between competing compile paths.
@@ -147,6 +157,7 @@ No-Go:
 - Source-provenance remains implicit (no Rustdoc convention and no tracked exceptions).
 - TreeArena performance is outside agreed limits with no credible mitigation path.
 - Stub-dependent prototypes hide target architecture boundaries or carry unowned stub debt.
+- Diagnostics remain fragmented in ad hoc string channels with no shared schema/code taxonomy.
 
 ---
 
@@ -169,4 +180,5 @@ No-Go:
 - [ ] Quality gate command set finalized and enforced (`fmt` + `clippy -D warnings` + tests)
 - [ ] TreeArena hash-consing benchmarks completed and reviewed
 - [ ] Stub debt tracker reviewed (no unowned/unplanned carry-over)
+- [ ] Diagnostics model baseline validated (schema + stable codes + human/JSON outputs)
 - [ ] Final Go/No-Go decision recorded

@@ -203,55 +203,80 @@ pub fn dead_code_conditions(arena: &TreeArena, root: TreeId) -> TreeProperty<boo
 ### 2.2 errors
 
 ```rust
-/// Source location (file + line + column)
+/// Source location (file + line/column range)
 #[derive(Clone, Debug)]
-pub struct SourceLoc {
+pub struct SourceSpan {
     pub file: PathBuf,
     pub line: u32,
     pub col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
 }
 
-/// Severity
+/// Severity level
 #[derive(Clone, Copy, Debug)]
-pub enum Severity { Warning, Error }
+pub enum Severity { Error, Warning, Remark }
 
-/// A diagnostic
+/// Compiler stage emitting a diagnostic
+#[derive(Clone, Debug)]
+pub enum Stage {
+    SourceReader,
+    Lexer,
+    Parser,
+    Eval,
+    Propagate,
+    Normalize,
+    Transform,
+    Fir,
+    Codegen,
+    Compiler,
+}
+
+/// Stable diagnostic code (for tests, CI, IDE)
+#[derive(Clone, Copy, Debug)]
+pub struct DiagnosticCode(&'static str);
+
+/// One source label
+#[derive(Clone, Debug)]
+pub struct Label {
+    pub span: SourceSpan,
+    pub is_primary: bool,
+    pub message: String,
+}
+
+/// One diagnostic entry
 #[derive(Clone, Debug)]
 pub struct Diagnostic {
     pub severity: Severity,
-    pub loc: Option<SourceLoc>,
+    pub stage: Stage,
+    pub code: DiagnosticCode,
     pub message: String,
+    pub labels: Vec<Label>,
+    pub notes: Vec<String>,
+    pub help: Vec<String>,
 }
 
-/// Diagnostic collector (replaces gErrorCount + cerr)
-pub struct DiagnosticCollector {
-    diagnostics: Vec<Diagnostic>,
+/// Aggregated diagnostics emitted by one phase/session
+pub struct DiagnosticBundle {
+    pub diagnostics: Vec<Diagnostic>,
 }
 
-impl DiagnosticCollector {
-    pub fn error(&mut self, loc: Option<SourceLoc>, msg: impl Into<String>);
-    pub fn warning(&mut self, loc: Option<SourceLoc>, msg: impl Into<String>);
-    pub fn has_errors(&self) -> bool;
-    pub fn error_count(&self) -> usize;
-    pub fn emit_all(&self, writer: &mut dyn Write);
-}
-
-/// Compiler exception
+/// Compiler error envelope
 #[derive(Debug)]
 pub struct FaustError {
     pub message: String,
-    pub diagnostics: Vec<Diagnostic>,
+    pub diagnostics: DiagnosticBundle,
 }
 impl std::error::Error for FaustError {}
 
-/// Pass profiling
-pub struct PassTimer { /* ... */ }
-impl PassTimer {
-    pub fn start(&mut self, name: &str);
-    pub fn stop(&mut self, name: &str);
-    pub fn report(&self) -> String;
+/// Conversion contract for phase-local errors
+pub trait IntoDiagnostic {
+    fn into_diagnostic(self) -> Diagnostic;
 }
 ```
+
+Detailed architecture, code taxonomy, migration steps, and pass criteria:
+- `porting/faust-rust-diagnostics-model-en.md`
 
 ### 2.3 uses
 
