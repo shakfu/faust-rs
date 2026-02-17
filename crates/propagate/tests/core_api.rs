@@ -386,6 +386,12 @@ fn propagate_error_converts_to_structured_diagnostic_codes() {
             .iter()
             .any(|n| n.contains("computed: 3 % 2 = 1"))
     );
+    assert!(
+        split
+            .notes
+            .iter()
+            .any(|n| n.contains("suggested target: set inputs(B) to 4"))
+    );
     assert!(!split.help.is_empty());
     assert!(
         split
@@ -405,6 +411,11 @@ fn propagate_error_converts_to_structured_diagnostic_codes() {
     assert_eq!(rec.code, codes::PROP_RECURSION_MISMATCH);
     assert!(!rec.notes.is_empty());
     assert!(!rec.help.is_empty());
+    assert!(
+        rec.notes
+            .iter()
+            .any(|n| n.contains("suggested target: set outputs(A) >= 2 and inputs(A) >= 1"))
+    );
     assert!(
         rec.help
             .iter()

@@ -2639,3 +2639,23 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo test -p compiler --test diagnostic_errors`
   - `cargo test -p compiler --bin faust-rs`
+
+#### Diagnostics readability micro-tranche — Step 4 (numeric correction proposals)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/propagate/src/lib.rs`,
+  - `crates/propagate/tests/core_api.rs`.
+- Implemented:
+  - added numeric target proposals in propagate mismatch diagnostics:
+    - `seq`: common equality target for `outputs(A)` / `inputs(B)`,
+    - `split`: next multiple proposal for `inputs(B)`,
+    - `merge`: next multiple proposal for `outputs(A)`,
+    - `rec`: minimum required targets for `outputs(A)` and `inputs(A)`.
+  - proposals are emitted as structured notes (`suggested target: ...`) with safe
+    fallback text for zero-divisor edge cases.
+  - expanded propagate unit tests to lock proposal presence for representative mismatch types.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p propagate --all-targets`
+  - `cargo test -p compiler --test diagnostic_errors`

@@ -206,6 +206,10 @@ impl IntoDiagnostic for PropagateError {
                     "computed: {left_outputs} == {right_inputs} -> {}",
                     left_outputs == right_inputs
                 ))
+                .with_note(format!(
+                    "suggested target: make outputs(A) and inputs(B) equal (common target: {})",
+                    left_outputs.max(right_inputs)
+                ))
                 .with_help("for `A : B`, enforce outputs(A) == inputs(B)")
                 .with_help("fix pattern: add/remove channels on A, or adapt B to the same bus width"),
             Self::SplitArityMismatch {
@@ -223,6 +227,17 @@ impl IntoDiagnostic for PropagateError {
                     format!(
                         "computed: {right_inputs} % {left_outputs} = {}",
                         right_inputs % left_outputs
+                    )
+                })
+                .with_note(if left_outputs == 0 {
+                    "suggested target: outputs(A) must be > 0 before divisibility can be satisfied".to_owned()
+                } else {
+                    let next = right_inputs
+                        .saturating_add(left_outputs - 1)
+                        / left_outputs
+                        * left_outputs;
+                    format!(
+                        "suggested target: set inputs(B) to {next} (next multiple of outputs(A)={left_outputs})"
                     )
                 })
                 .with_help("for `A <: B`, enforce inputs(B) % outputs(A) == 0")
@@ -244,6 +259,17 @@ impl IntoDiagnostic for PropagateError {
                     format!(
                         "computed: {left_outputs} % {right_inputs} = {}",
                         left_outputs % right_inputs
+                    )
+                })
+                .with_note(if right_inputs == 0 {
+                    "suggested target: inputs(B) must be > 0 before multiple constraints can be satisfied".to_owned()
+                } else {
+                    let next = left_outputs
+                        .saturating_add(right_inputs - 1)
+                        / right_inputs
+                        * right_inputs;
+                    format!(
+                        "suggested target: set outputs(A) to {next} (next multiple of inputs(B)={right_inputs})"
                     )
                 })
                 .with_help("for `A :> B`, enforce outputs(A) % inputs(B) == 0")
@@ -276,6 +302,10 @@ impl IntoDiagnostic for PropagateError {
                 right_outputs,
                 left_inputs,
                 right_outputs <= left_inputs
+            ))
+            .with_note(format!(
+                "suggested target: set outputs(A) >= {} and inputs(A) >= {}",
+                right_inputs, right_outputs
             ))
             .with_help(
                 "for `A ~ B`, enforce inputs(B) <= outputs(A) and outputs(B) <= inputs(A)",
