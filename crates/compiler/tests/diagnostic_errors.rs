@@ -90,6 +90,11 @@ fn eval_error_fixtures_expose_source_labels_and_readable_context() {
             1u32,
             "error originates from definition 'foo'",
         ),
+        (
+            "err_13_eval_undefined_symbol_alias_chain_nested.dsp",
+            1u32,
+            "error originates from definition 'foo'",
+        ),
     ];
 
     for (file, expected_line, owner_note) in fixtures {
@@ -178,9 +183,12 @@ fn eval_undefined_symbol_exposes_binding_trace() {
 #[test]
 fn eval_undefined_symbol_exposes_multi_label_call_and_definition_sites() {
     let compiler = Compiler::new();
-    let source = read_corpus("err_09_eval_undefined_symbol.dsp");
+    let source = read_corpus("err_13_eval_undefined_symbol_alias_chain_nested.dsp");
     let err = compiler
-        .compile_source_to_signals("err_09_eval_undefined_symbol.dsp", &source)
+        .compile_source_to_signals(
+            "err_13_eval_undefined_symbol_alias_chain_nested.dsp",
+            &source,
+        )
         .expect_err("fixture should fail in eval stage");
     let diagnostics = err
         .diagnostics()
@@ -193,9 +201,11 @@ fn eval_undefined_symbol_exposes_multi_label_call_and_definition_sites() {
         !first.labels.is_empty(),
         "eval undefined-symbol diagnostics should expose at least one source label"
     );
-    assert_eq!(first.labels[0].message.as_ref(), "call site");
+    assert_eq!(first.labels[0].message.as_ref(), "definition site");
+    assert_eq!(first.labels[0].span.line, 1);
     if first.labels.len() >= 2 {
-        assert_eq!(first.labels[1].message.as_ref(), "definition site");
+        assert_eq!(first.labels[1].message.as_ref(), "call site");
+        assert_eq!(first.labels[1].span.line, 4);
     } else {
         assert!(
             first
@@ -205,6 +215,46 @@ fn eval_undefined_symbol_exposes_multi_label_call_and_definition_sites() {
             "single-label fallback should still expose owning definition context"
         );
     }
+}
+
+#[test]
+fn eval_undefined_symbol_alias_chain_exposes_rule_computed_and_template_help() {
+    let compiler = Compiler::new();
+    let source = read_corpus("err_13_eval_undefined_symbol_alias_chain_nested.dsp");
+    let err = compiler
+        .compile_source_to_signals(
+            "err_13_eval_undefined_symbol_alias_chain_nested.dsp",
+            &source,
+        )
+        .expect_err("fixture should fail in eval stage");
+    let diagnostics = err
+        .diagnostics()
+        .expect("eval error should expose diagnostics");
+    let first = diagnostics
+        .as_slice()
+        .first()
+        .expect("eval diagnostics should not be empty");
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|n| n.as_ref().starts_with("rule: referenced identifier")),
+        "undefined-symbol diagnostics should expose rule note first-class"
+    );
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|n| n.as_ref().starts_with("computed: `z` is not present")),
+        "undefined-symbol diagnostics should expose computed note"
+    );
+    assert!(
+        first
+            .help
+            .iter()
+            .any(|h| h.as_ref().starts_with("template: z = ...;")),
+        "undefined-symbol diagnostics should expose deterministic correction template"
+    );
 }
 
 #[test]
@@ -271,6 +321,7 @@ fn propagate_error_complex_fixtures_expose_codes_and_source_labels() {
         ("err_06_propagate_split_mismatch_chain.dsp", 1u32),
         ("err_07_propagate_rec_mismatch_alias.dsp", 1u32),
         ("err_08_propagate_seq_ui_mismatch.dsp", 1u32),
+        ("err_14_propagate_split_mismatch_nested_alias.dsp", 1u32),
     ];
 
     for (file, expected_line) in fixtures {
@@ -303,6 +354,36 @@ fn propagate_error_complex_fixtures_expose_codes_and_source_labels() {
             "{file} should point to the expected source line"
         );
     }
+}
+
+#[test]
+fn propagate_split_nested_alias_exposes_trace_and_template_help() {
+    let compiler = Compiler::new();
+    let source = read_corpus("err_14_propagate_split_mismatch_nested_alias.dsp");
+    let err = compiler
+        .compile_source_to_signals("err_14_propagate_split_mismatch_nested_alias.dsp", &source)
+        .expect_err("fixture should fail in propagate stage");
+    let diagnostics = err
+        .diagnostics()
+        .expect("propagate error should expose diagnostics");
+    let first = diagnostics
+        .as_slice()
+        .first()
+        .expect("propagate error bundle should not be empty");
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|n| n.as_ref() == "binding_trace=process -> baz -> bar -> foo"),
+        "nested alias fixture should expose full binding trace"
+    );
+    assert!(
+        first.help.iter().any(|h| {
+            h.as_ref()
+                .starts_with("template: process = A <: B; // inputs(B) % outputs(A) == 0")
+        }),
+        "split mismatch should expose deterministic template help"
+    );
 }
 
 #[test]

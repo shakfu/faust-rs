@@ -127,12 +127,13 @@ impl Compiler {
                     "expr={}",
                     compact_human_box_preview(&output.state.arena, node)
                 ));
-                if let Some(owner) = owner_definition_name_for_node(&output.state.arena, root, node)
-                {
+                let owner = owner_definition_name_for_node(&output.state.arena, root, node);
+                if let Some(owner) = owner.as_deref() {
                     diagnostic =
                         diagnostic.with_note(format!("error originates from definition '{owner}'"));
                 }
-                if let Some(trace) = alias_binding_trace_for_node(&output.state.arena, root, node) {
+                let trace = alias_binding_trace_for_node(&output.state.arena, root, node);
+                if let Some(trace) = trace.as_deref() {
                     diagnostic = diagnostic.with_note(format!("binding_trace={trace}"));
                 }
                 diagnostic = maybe_add_eval_source_labels(
@@ -141,6 +142,7 @@ impl Compiler {
                     &output.state.arena,
                     root,
                     node,
+                    owner.as_deref(),
                 );
             }
             let diagnostics = bundle_from_diagnostic(diagnostic);
@@ -163,9 +165,8 @@ impl Compiler {
                         "expr={}",
                         compact_human_box_preview(&output.state.arena, node)
                     ));
-                    if let Some(owner) =
-                        owner_definition_name_for_node(&output.state.arena, root, node)
-                    {
+                    let owner = owner_definition_name_for_node(&output.state.arena, root, node);
+                    if let Some(owner) = owner.as_deref() {
                         diagnostic = diagnostic
                             .with_note(format!("error originates from definition '{owner}'"));
                     }
@@ -182,6 +183,7 @@ impl Compiler {
                         &output.state.arena,
                         root,
                         node,
+                        owner.as_deref(),
                     );
                 }
                 let diagnostics = bundle_from_diagnostic(diagnostic);
@@ -205,9 +207,8 @@ impl Compiler {
                         "expr={}",
                         compact_human_box_preview(&output.state.arena, node)
                     ));
-                    if let Some(owner) =
-                        owner_definition_name_for_node(&output.state.arena, root, node)
-                    {
+                    let owner = owner_definition_name_for_node(&output.state.arena, root, node);
+                    if let Some(owner) = owner.as_deref() {
                         diagnostic = diagnostic
                             .with_note(format!("error originates from definition '{owner}'"));
                     }
@@ -224,6 +225,7 @@ impl Compiler {
                         &output.state.arena,
                         root,
                         node,
+                        owner.as_deref(),
                     );
                 }
                 let diagnostics = bundle_from_diagnostic(diagnostic);
@@ -684,36 +686,91 @@ fn add_paired_propagate_context(
     diagnostic
 }
 
-/// Attaches a primary source label when parser metadata can be resolved for `node`.
+/// Attaches source labels for propagate/arity diagnostics.
+///
+/// When the owning definition is known, this prefers that origin as primary and
+/// keeps process call-site as secondary to improve alias-chain readability.
 fn maybe_add_source_label(
-    diagnostic: Diagnostic,
+    mut diagnostic: Diagnostic,
     ctx: &parser::ParserCtx,
     arena: &tlib::TreeArena,
     defs_root: BoxId,
     node: BoxId,
+    owner_definition: Option<&str>,
 ) -> Diagnostic {
+    if let Some(owner) = owner_definition {
+        let owner_span = source_span_for_definition_name(ctx, arena, defs_root, owner);
+        let call_span = source_span_for_process_binding_target(ctx, arena, defs_root)
+            .or_else(|| source_span_for_process_definition(ctx, arena, defs_root));
+        if let Some(primary_span) = owner_span {
+            diagnostic = diagnostic.with_label(Label::new(
+                LabelStyle::Primary,
+                primary_span.clone(),
+                "related source",
+            ));
+            if let Some(secondary_span) = call_span
+                && secondary_span != primary_span
+            {
+                diagnostic = diagnostic.with_label(Label::new(
+                    LabelStyle::Secondary,
+                    secondary_span,
+                    "related call site",
+                ));
+            }
+            return diagnostic;
+        }
+        diagnostic = diagnostic
+            .with_note("origin span unavailable; pointing to nearest call/owner site".to_owned());
+    }
+
     let span = source_span_from_node_or_descendant(ctx, arena, node)
         .or_else(|| source_span_for_definition_of_expr(ctx, arena, defs_root, node))
         .or_else(|| source_span_for_process_binding_target(ctx, arena, defs_root))
         .or_else(|| source_span_for_process_definition(ctx, arena, defs_root));
-    let Some(span) = span else {
-        return diagnostic;
-    };
-    diagnostic.with_label(Label::new(LabelStyle::Primary, span, "related source"))
+    if let Some(span) = span {
+        diagnostic = diagnostic.with_label(Label::new(LabelStyle::Primary, span, "related source"));
+    }
+    diagnostic
 }
 
 /// Attaches eval-oriented primary/secondary labels when available.
 ///
 /// Label policy:
-/// - primary: nearest call/use site for the offending node,
-/// - secondary: owning definition site when different from the primary span.
+/// - alias-chain mode (`owner_definition` known): primary origin definition,
+///   secondary process call-site.
+/// - fallback mode: primary nearest call/use site, secondary owning definition.
 fn maybe_add_eval_source_labels(
     mut diagnostic: Diagnostic,
     ctx: &parser::ParserCtx,
     arena: &tlib::TreeArena,
     defs_root: BoxId,
     node: BoxId,
+    owner_definition: Option<&str>,
 ) -> Diagnostic {
+    if let Some(owner) = owner_definition {
+        let origin_span = source_span_for_definition_name(ctx, arena, defs_root, owner);
+        let call_span = source_span_for_process_definition(ctx, arena, defs_root);
+        if let Some(primary_span) = origin_span {
+            diagnostic = diagnostic.with_label(Label::new(
+                LabelStyle::Primary,
+                primary_span.clone(),
+                "definition site",
+            ));
+            if let Some(secondary_span) = call_span
+                && secondary_span != primary_span
+            {
+                diagnostic = diagnostic.with_label(Label::new(
+                    LabelStyle::Secondary,
+                    secondary_span,
+                    "call site",
+                ));
+            }
+            return diagnostic;
+        }
+        diagnostic = diagnostic
+            .with_note("origin span unavailable; pointing to nearest call/owner site".to_owned());
+    }
+
     let primary = source_span_from_node_or_descendant(ctx, arena, node)
         .or_else(|| source_span_for_definition_of_expr(ctx, arena, defs_root, node))
         .or_else(|| source_span_for_process_binding_target(ctx, arena, defs_root))
@@ -726,7 +783,6 @@ fn maybe_add_eval_source_labels(
         primary_span.clone(),
         "call site",
     ));
-
     let secondary = source_span_for_definition_of_expr(ctx, arena, defs_root, node)
         .or_else(|| source_span_for_process_definition(ctx, arena, defs_root));
     if let Some(secondary_span) = secondary
@@ -899,6 +955,21 @@ fn source_span_for_definition_of_expr(
         defs = arena.tl(defs)?;
     }
     None
+}
+
+/// Resolves a source span for one top-level definition name.
+///
+/// Resolution prefers the definition identifier span, then falls back to the
+/// definition expression subtree when identifier metadata is unavailable.
+fn source_span_for_definition_name(
+    ctx: &parser::ParserCtx,
+    arena: &tlib::TreeArena,
+    defs_root: BoxId,
+    wanted: &str,
+) -> Option<SourceSpan> {
+    let (name, expr) = find_definition_name_and_expr(arena, defs_root, wanted)?;
+    source_span_for_definition_node(ctx, name)
+        .or_else(|| source_span_from_node_or_descendant(ctx, arena, expr))
 }
 
 fn subtree_contains_node(arena: &tlib::TreeArena, root: BoxId, needle: BoxId) -> bool {
@@ -1374,7 +1445,7 @@ mod tests {
             errors::codes::PROP_ARITY_MISMATCH,
             "mismatch",
         );
-        let labeled = super::maybe_add_source_label(diag, &ctx, &arena, defs, expr);
+        let labeled = super::maybe_add_source_label(diag, &ctx, &arena, defs, expr, None);
         assert!(!labeled.labels.is_empty());
         assert_eq!(
             labeled.labels[0].span.file.display().to_string(),
@@ -1427,7 +1498,7 @@ mod tests {
             errors::codes::PROP_ARITY_MISMATCH,
             "mismatch",
         );
-        let labeled = super::maybe_add_source_label(diag, &ctx, &arena, defs, bad_node);
+        let labeled = super::maybe_add_source_label(diag, &ctx, &arena, defs, bad_node, None);
         assert!(!labeled.labels.is_empty());
         assert_eq!(
             labeled.labels[0].span.file.display().to_string(),

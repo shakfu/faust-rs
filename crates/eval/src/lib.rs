@@ -332,7 +332,10 @@ impl IntoDiagnostic for EvalError {
                 codes::EVAL_UNDEFINED_SYMBOL,
                 message,
             )
-            .with_note(format!("unresolved identifier: `{symbol}`"))
+            .with_note("rule: referenced identifier must be present in visible lexical scope")
+            .with_note(format!(
+                "computed: `{symbol}` is not present in current visible scope"
+            ))
             .with_note(format!(
                 "scope.local={}",
                 if local_scope.is_empty() {
@@ -358,6 +361,7 @@ impl IntoDiagnostic for EvalError {
                 }
             ))
             .with_help("define the symbol in scope or fix the identifier name")
+            .with_help(format!("template: {symbol} = ...; // define before use"))
             .with_help(
                 "if this is a top-level alias, ensure the target definition exists before use",
             ),
@@ -367,11 +371,16 @@ impl IntoDiagnostic for EvalError {
                 codes::EVAL_ARITY_MISMATCH,
                 message,
             )
-            .with_note(format!("pattern expects {expected} argument(s), got {got}"))
+            .with_note("rule: case rule arity must match provided argument tuple arity")
+            .with_note(format!(
+                "computed: expected={expected}, provided={got}, delta={}",
+                got as i128 - expected as i128
+            ))
             .with_note(format!(
                 "suggested target: call case function with exactly {expected} argument(s)"
             ))
-            .with_help("adapt the case pattern arity or provide the expected number of arguments"),
+            .with_help("adapt the case pattern arity or provide the expected number of arguments")
+            .with_help("template: case { (x, y) => ...; }; // 2-argument rule"),
             Self::TooManyArguments { expected, got, .. } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
@@ -389,7 +398,8 @@ impl IntoDiagnostic for EvalError {
                 "suggested target: remove {} extra argument(s)",
                 got.saturating_sub(expected)
             ))
-            .with_help("remove extra arguments or expand the function input arity"),
+            .with_help("remove extra arguments or expand the function input arity")
+            .with_help("template: f(a, b); // keep provided args <= function input arity"),
             Self::PatternMatchFailed { .. } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
@@ -397,6 +407,7 @@ impl IntoDiagnostic for EvalError {
                 message,
             )
             .with_note("rule: at least one case pattern must match the provided argument tuple")
+            .with_note("computed: provided tuple did not match any declared case pattern")
             .with_help("add a matching case rule or add a catch-all pattern"),
             Self::IterationCountNotInt { .. }
             | Self::IterationCountTooLarge { .. }

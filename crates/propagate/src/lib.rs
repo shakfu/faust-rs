@@ -211,7 +211,8 @@ impl IntoDiagnostic for PropagateError {
                     left_outputs.max(right_inputs)
                 ))
                 .with_help("for `A : B`, enforce outputs(A) == inputs(B)")
-                .with_help("fix pattern: add/remove channels on A, or adapt B to the same bus width"),
+                .with_help("fix pattern: add/remove channels on A, or adapt B to the same bus width")
+                .with_help("template: process = A : B; // outputs(A) == inputs(B)"),
             Self::SplitArityMismatch {
                 left_outputs,
                 right_inputs,
@@ -243,7 +244,8 @@ impl IntoDiagnostic for PropagateError {
                 .with_help("for `A <: B`, enforce inputs(B) % outputs(A) == 0")
                 .with_help(
                     "fix pattern: make B input count a multiple of A output count (duplicate or group channels)",
-                ),
+                )
+                .with_help("template: process = A <: B; // inputs(B) % outputs(A) == 0"),
             Self::MergeArityMismatch {
                 left_outputs,
                 right_inputs,
@@ -275,7 +277,8 @@ impl IntoDiagnostic for PropagateError {
                 .with_help("for `A :> B`, enforce outputs(A) % inputs(B) == 0")
                 .with_help(
                     "fix pattern: adjust A outputs to a multiple of B inputs, or change B input arity",
-                ),
+                )
+                .with_help("template: process = A :> B; // outputs(A) % inputs(B) == 0"),
             Self::RecArityMismatch {
                 left_inputs,
                 left_outputs,
@@ -312,6 +315,9 @@ impl IntoDiagnostic for PropagateError {
             )
             .with_help(
                 "fix pattern: reduce feedback bus size in B or widen matching input/output arity in A",
+            )
+            .with_help(
+                "template: process = A ~ B; // inputs(B)<=outputs(A), outputs(B)<=inputs(A)",
             ),
             Self::InvalidIntegerValue { field, .. } => Diagnostic::new(
                 Severity::Error,

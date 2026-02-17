@@ -810,6 +810,30 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
     }
 
     #[test]
+    fn diagnostics_human_renderer_snapshot_for_eval_undefined_symbol_alias_chain() {
+        let compiler = Compiler::new();
+        let path = corpus_path("err_13_eval_undefined_symbol_alias_chain_nested.dsp");
+        let err = compiler
+            .compile_file_default_to_signals(&path)
+            .expect_err("fixture should fail in eval stage");
+        let diagnostics = err
+            .diagnostics()
+            .expect("fixture error should expose diagnostics");
+        let rendered = format_diagnostics_human(diagnostics);
+        let path_text = path.to_string_lossy().to_string();
+        let normalized = rendered.replace(&path_text, "$FIXTURE");
+
+        assert!(normalized.contains("error [FRS-EVAL-0002] undefined symbol `z`"));
+        assert!(normalized.contains("error originates from definition 'foo'"));
+        assert!(normalized.contains("binding_trace=process -> baz -> bar -> foo"));
+        assert!(
+            normalized
+                .contains("rule: referenced identifier must be present in visible lexical scope")
+        );
+        assert!(normalized.contains("template: z = ...; // define before use"));
+    }
+
+    #[test]
     fn diagnostics_json_renderer_snapshot_for_eval_undefined_symbol() {
         let compiler = Compiler::new();
         let path = corpus_path("err_09_eval_undefined_symbol.dsp");
@@ -833,5 +857,37 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
         assert!(notes.iter().any(|n| n.starts_with("expr=")));
         assert!(notes.contains(&"error originates from definition 'foo'"));
         assert!(notes.contains(&"binding_trace=process -> foo"));
+    }
+
+    #[test]
+    fn diagnostics_json_renderer_snapshot_for_eval_undefined_symbol_alias_chain() {
+        let compiler = Compiler::new();
+        let path = corpus_path("err_13_eval_undefined_symbol_alias_chain_nested.dsp");
+        let err = compiler
+            .compile_file_default_to_signals(&path)
+            .expect_err("fixture should fail in eval stage");
+        let diagnostics = err
+            .diagnostics()
+            .expect("fixture error should expose diagnostics");
+        let rendered = format_diagnostics_json(diagnostics);
+        let value: Value =
+            serde_json::from_str(&rendered).expect("JSON diagnostics output should be valid");
+        let diag = &value["diagnostics"][0];
+        let labels = diag["labels"]
+            .as_array()
+            .expect("labels should be an array");
+        let notes = diag["notes"]
+            .as_array()
+            .expect("notes should be an array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+
+        assert_eq!(diag["code"], "FRS-EVAL-0002");
+        assert_eq!(labels[0]["role"], "definition_site");
+        if labels.len() >= 2 {
+            assert_eq!(labels[1]["role"], "call_site");
+        }
+        assert!(notes.contains(&"binding_trace=process -> baz -> bar -> foo"));
     }
 }

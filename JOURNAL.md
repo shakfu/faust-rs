@@ -2786,3 +2786,29 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --all-targets`
+
+#### Diagnostics quality gate implementation tranche — origin-site priority + templates + nested fixtures
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/src/lib.rs`,
+  - `crates/compiler/src/main.rs`,
+  - `crates/compiler/tests/diagnostic_errors.rs`,
+  - `crates/eval/src/lib.rs`,
+  - `crates/propagate/src/lib.rs`,
+  - `tests/corpus/err_13_eval_undefined_symbol_alias_chain_nested.dsp`,
+  - `tests/corpus/err_14_propagate_split_mismatch_nested_alias.dsp`.
+- Implemented:
+  - source-label strategy updated for alias chains:
+    - when owner definition is known, diagnostics prioritize origin definition span,
+    - process call-site is attached as secondary label when distinct.
+  - explicit fallback note added when origin span cannot be resolved:
+    - `origin span unavailable; pointing to nearest call/owner site`.
+  - eval wording normalized to `rule -> computed -> context -> help` for undefined symbol and arity/case classes.
+  - deterministic correction templates added:
+    - eval undefined symbol / pattern arity / over-application,
+    - propagate seq/split/merge/rec mismatch classes.
+  - added realistic nested negative fixtures:
+    - eval undefined symbol through alias chain (`process -> baz -> bar -> foo`),
+    - propagate split mismatch with nested alias + local scope.
+  - expanded integration/CLI snapshot coverage for new fixtures and label-role expectations.
