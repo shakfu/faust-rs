@@ -2243,7 +2243,7 @@ Execution plan (Phase 0 prototype, revised):
 
 #### Step 8 — compiler cross-phase diagnostics aggregation (`parse/eval/propagate`)
 
-- Commit: pending (working tree step, to be committed separately)
+- Commit: `be79a86`
 - Files:
   - `crates/compiler/src/lib.rs`.
 - Implemented:
@@ -2265,6 +2265,29 @@ Execution plan (Phase 0 prototype, revised):
     - eval failure now asserts `FRS-EVAL-*` presence in returned diagnostics,
     - new propagate failure test asserts `FRS-PROP-*` presence.
 - Validation:
+  - `cargo test -p compiler`
+
+#### Step 9 — CLI diagnostics output model (`--error-format human|json`)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/Cargo.toml`,
+  - `crates/compiler/src/main.rs`.
+- Implemented:
+  - added explicit CLI diagnostics output format selection for parse/signal flows:
+    - `--error-format human` (default),
+    - `--error-format json`,
+  - human rendering kept stable (`file:line:col severity [code] message`),
+  - added structured JSON rendering for diagnostics payload:
+    - severity/stage/code/message,
+    - labels (style + source span),
+    - notes/help,
+  - usage strings updated for `--parse`, `--dump-box`, and `--dump-sig`,
+  - added renderer unit tests in compiler binary:
+    - human output includes location and diagnostic code,
+    - JSON output is valid and exposes expected structured keys for eval failures.
+- Validation:
+  - `cargo fmt --all`
   - `cargo test -p compiler`
 
 #### Documentation updates linked to this rollout

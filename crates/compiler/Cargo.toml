@@ -13,6 +13,7 @@ boxes = { path = "../boxes" }
 eval = { path = "../eval" }
 propagate = { path = "../propagate" }
 signals = { path = "../signals" }
+serde_json = "1"
 
 [dev-dependencies]
 tlib = { path = "../tlib" }
