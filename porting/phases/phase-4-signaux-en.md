@@ -549,6 +549,20 @@ Prioritized implementation roadmap for clearer user-facing errors:
 - add Phase 4 DSP fixtures combining nested aliases, local scopes, and composition mismatch;
 - verify labels/notes remain actionable in these compound cases.
 
+28. Explicit `cause:` line for top failures:
+- add one concise `cause:` note before detailed rule/computed notes for fast user triage.
+
+29. Compound-fixture tranche:
+- add combined eval+propagate negative fixtures (`with + letrec + case + arity mismatch`)
+  to validate readability under stacked contexts.
+
+30. Origin-fallback tests:
+- add dedicated tests where source origin span is intentionally missing and ensure fallback
+  note/label behavior is deterministic.
+
+31. Residual wording sweep:
+- align remaining outlier diagnostics with the standardized vocabulary/order.
+
 Reference model:
 - `porting/faust-rust-diagnostics-model-en.md` (sections 4.1, 5.3, 5.4, 6-D/E).
 

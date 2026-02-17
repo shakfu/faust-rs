@@ -434,6 +434,23 @@ Pass criterion (finalization):
 - wording/order is snapshot-locked across eval+propagate,
 - expanded realistic corpus is green in CI on all platforms.
 
+Polish phase plan (post-finalization, non-blocking):
+
+1. Add explicit `cause:` notes on top frequent diagnostics:
+- keep `rule/computed/context/help`, but prepend one concise `cause:` line for immediate triage.
+
+2. Expand compound negative fixtures:
+- add mixed failures combining `with`, `letrec`, `case`, and composition mismatch in one file.
+
+3. Full wording sweep:
+- normalize remaining outlier variants to the same vocabulary and tone across eval/propagate.
+
+4. Fallback-path lock:
+- add dedicated tests for `origin span unavailable` branch to keep behavior stable.
+
+5. Optional eval readability parity:
+- where meaningful, add C++-style paired context rendering in eval messages too.
+
 ---
 
 ## 7. Test strategy

@@ -227,6 +227,11 @@ Near-term diagnostics UX priorities after baseline rollout:
   - deterministic fix template for each frequent error family,
   - stable wording/order contract across stages (`rule -> computed -> context -> help`),
   - expanded realistic nested negative corpus with human/json snapshot locks.
+- diagnostics polish tranche (non-blocking after quality gate):
+  - add explicit `cause:` line on top frequent errors,
+  - expand compound negative fixtures (stacked eval+propagate contexts),
+  - lock fallback-path behavior when origin span is unavailable,
+  - complete residual wording normalization across variants.
 
 ---
 
