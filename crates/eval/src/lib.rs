@@ -76,6 +76,40 @@ impl Environment {
             parent: Some(Box::new(self.clone())),
         }
     }
+
+    /// Returns names bound in the current lexical scope only.
+    #[must_use]
+    pub fn local_names(&self) -> Vec<String> {
+        let mut out = self
+            .bindings
+            .iter()
+            .map(|(sym, _)| sym.to_string())
+            .collect::<Vec<_>>();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Returns names visible from current scope across lexical parents.
+    #[must_use]
+    pub fn visible_names(&self) -> Vec<String> {
+        let mut out = self.local_names();
+        if let Some(parent) = &self.parent {
+            out.extend(parent.visible_names());
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Returns names from the root (top-level) scope.
+    #[must_use]
+    pub fn top_level_names(&self) -> Vec<String> {
+        match &self.parent {
+            Some(parent) => parent.top_level_names(),
+            None => self.local_names(),
+        }
+    }
 }
 
 /// Infinite loop detector for recursive expansion.
@@ -141,6 +175,12 @@ pub enum EvalError {
         symbol: String,
         /// Identifier node where resolution failed.
         node: TreeId,
+        /// Names bound in the immediate lexical scope.
+        local_scope: Vec<String>,
+        /// Names visible across lexical parents.
+        visible_scope: Vec<String>,
+        /// Names bound at top-level.
+        top_level_scope: Vec<String>,
     },
     MalformedDefinitionNode {
         node: TreeId,
@@ -278,14 +318,45 @@ impl IntoDiagnostic for EvalError {
                     available_defs.join(", ")
                 }
             ))
-            .with_help("define `process = ...;` in the top-level definitions"),
-            Self::UndefinedSymbol { symbol, .. } => Diagnostic::new(
+            .with_help("define `process = ...;` in the top-level definitions")
+            .with_help("template: process = _;"),
+            Self::UndefinedSymbol {
+                symbol,
+                local_scope,
+                visible_scope,
+                top_level_scope,
+                ..
+            } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
                 codes::EVAL_UNDEFINED_SYMBOL,
                 message,
             )
             .with_note(format!("unresolved identifier: `{symbol}`"))
+            .with_note(format!(
+                "scope.local={}",
+                if local_scope.is_empty() {
+                    "<none>".to_owned()
+                } else {
+                    local_scope.join(", ")
+                }
+            ))
+            .with_note(format!(
+                "scope.visible={}",
+                if visible_scope.is_empty() {
+                    "<none>".to_owned()
+                } else {
+                    visible_scope.join(", ")
+                }
+            ))
+            .with_note(format!(
+                "scope.top_level={}",
+                if top_level_scope.is_empty() {
+                    "<none>".to_owned()
+                } else {
+                    top_level_scope.join(", ")
+                }
+            ))
             .with_help("define the symbol in scope or fix the identifier name")
             .with_help(
                 "if this is a top-level alias, ensure the target definition exists before use",
@@ -297,6 +368,9 @@ impl IntoDiagnostic for EvalError {
                 message,
             )
             .with_note(format!("pattern expects {expected} argument(s), got {got}"))
+            .with_note(format!(
+                "suggested target: call case function with exactly {expected} argument(s)"
+            ))
             .with_help("adapt the case pattern arity or provide the expected number of arguments"),
             Self::TooManyArguments { expected, got, .. } => Diagnostic::new(
                 Severity::Error,
@@ -304,10 +378,26 @@ impl IntoDiagnostic for EvalError {
                 codes::EVAL_ARITY_MISMATCH,
                 message,
             )
+            .with_note(
+                "rule: non-closure application requires provided arguments <= function input arity",
+            )
             .with_note(format!(
-                "application accepts at most {expected} argument(s), got {got}"
+                "computed: provided={got}, expected_max={expected}, overflow={}",
+                got.saturating_sub(expected)
+            ))
+            .with_note(format!(
+                "suggested target: remove {} extra argument(s)",
+                got.saturating_sub(expected)
             ))
             .with_help("remove extra arguments or expand the function input arity"),
+            Self::PatternMatchFailed { .. } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_GENERIC_FAILURE,
+                message,
+            )
+            .with_note("rule: at least one case pattern must match the provided argument tuple")
+            .with_help("add a matching case rule or add a catch-all pattern"),
             Self::IterationCountNotInt { .. }
             | Self::IterationCountTooLarge { .. }
             | Self::NegativeIterationCount { .. } => Diagnostic::new(
@@ -368,6 +458,9 @@ pub fn eval_box(
             let value = env.lookup(name).ok_or_else(|| EvalError::UndefinedSymbol {
                 symbol: name.to_owned(),
                 node: expr,
+                local_scope: env.local_names(),
+                visible_scope: env.visible_names(),
+                top_level_scope: env.top_level_names(),
             })?;
             if value == expr {
                 // Shadowing sentinel used for lambda parameters in lexical scopes.

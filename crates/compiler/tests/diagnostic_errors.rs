@@ -94,12 +94,13 @@ fn eval_error_fixtures_expose_source_labels_and_readable_context() {
 
     for (file, expected_line, owner_note) in fixtures {
         let source = read_corpus(file);
-        let err = compiler
-            .compile_source_to_signals(file, &source)
-            .expect_err(&format!("{file} should fail in eval stage"));
+        let err = match compiler.compile_source_to_signals(file, &source) {
+            Ok(_) => panic!("{file} should fail in eval stage"),
+            Err(err) => err,
+        };
         let diagnostics = err
             .diagnostics()
-            .expect(&format!("{file} should expose diagnostics"));
+            .unwrap_or_else(|| panic!("{file} should expose diagnostics"));
         assert!(
             diagnostics
                 .as_slice()
@@ -110,11 +111,11 @@ fn eval_error_fixtures_expose_source_labels_and_readable_context() {
         let first = diagnostics
             .as_slice()
             .first()
-            .expect(&format!("{file} should produce one diagnostic"));
+            .unwrap_or_else(|| panic!("{file} should produce one diagnostic"));
         let primary = first
             .labels
             .first()
-            .expect(&format!("{file} should expose one source label"));
+            .unwrap_or_else(|| panic!("{file} should expose one source label"));
         assert_eq!(
             primary.span.line, expected_line,
             "{file} should point to expected source line"
@@ -151,6 +152,59 @@ fn eval_undefined_symbol_exposes_binding_trace() {
             .any(|n| n.as_ref() == "binding_trace=process -> foo"),
         "undefined symbol diagnostics should include alias-resolution trace"
     );
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|n| n.as_ref().starts_with("scope.local=")),
+        "undefined symbol diagnostics should include local scope context"
+    );
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|n| n.as_ref().starts_with("scope.visible=")),
+        "undefined symbol diagnostics should include visible scope context"
+    );
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|n| n.as_ref().starts_with("scope.top_level=")),
+        "undefined symbol diagnostics should include top-level scope context"
+    );
+}
+
+#[test]
+fn eval_undefined_symbol_exposes_multi_label_call_and_definition_sites() {
+    let compiler = Compiler::new();
+    let source = read_corpus("err_09_eval_undefined_symbol.dsp");
+    let err = compiler
+        .compile_source_to_signals("err_09_eval_undefined_symbol.dsp", &source)
+        .expect_err("fixture should fail in eval stage");
+    let diagnostics = err
+        .diagnostics()
+        .expect("eval error should expose diagnostics");
+    let first = diagnostics
+        .as_slice()
+        .first()
+        .expect("eval diagnostics should not be empty");
+    assert!(
+        !first.labels.is_empty(),
+        "eval undefined-symbol diagnostics should expose at least one source label"
+    );
+    assert_eq!(first.labels[0].message.as_ref(), "call site");
+    if first.labels.len() >= 2 {
+        assert_eq!(first.labels[1].message.as_ref(), "definition site");
+    } else {
+        assert!(
+            first
+                .notes
+                .iter()
+                .any(|n| n.as_ref().starts_with("error originates from definition ")),
+            "single-label fallback should still expose owning definition context"
+        );
+    }
 }
 
 #[test]
@@ -221,13 +275,14 @@ fn propagate_error_complex_fixtures_expose_codes_and_source_labels() {
 
     for (file, expected_line) in fixtures {
         let source = read_corpus(file);
-        let err = compiler
-            .compile_source_to_signals(file, &source)
-            .expect_err(&format!("{file} should fail in propagate stage"));
+        let err = match compiler.compile_source_to_signals(file, &source) {
+            Ok(_) => panic!("{file} should fail in propagate stage"),
+            Err(err) => err,
+        };
 
         let diagnostics = err
             .diagnostics()
-            .expect(&format!("{file} should expose diagnostics"));
+            .unwrap_or_else(|| panic!("{file} should expose diagnostics"));
         assert!(
             diagnostics
                 .as_slice()
@@ -238,11 +293,11 @@ fn propagate_error_complex_fixtures_expose_codes_and_source_labels() {
         let first = diagnostics
             .as_slice()
             .first()
-            .expect(&format!("{file} should produce one diagnostic"));
+            .unwrap_or_else(|| panic!("{file} should produce one diagnostic"));
         let primary = first
             .labels
             .first()
-            .expect(&format!("{file} should include one source label"));
+            .unwrap_or_else(|| panic!("{file} should include one source label"));
         assert_eq!(
             primary.span.line, expected_line,
             "{file} should point to the expected source line"

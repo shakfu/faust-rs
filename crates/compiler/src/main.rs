@@ -179,7 +179,7 @@ fn paired_context_from_notes(notes: &[Box<str>]) -> Option<PairedContext> {
 ///
 /// When paired context exists, low-level `A ...` / `B ...` notes are hidden from
 /// direct printing because they are rendered as condensed C++-style blocks.
-fn filtered_notes_for_human<'a>(notes: &'a [Box<str>], has_paired_context: bool) -> Vec<&'a str> {
+fn filtered_notes_for_human(notes: &[Box<str>], has_paired_context: bool) -> Vec<&str> {
     let mut out = Vec::new();
     for note in notes {
         if has_paired_context
@@ -220,11 +220,13 @@ fn format_diagnostics_json(bundle: &DiagnosticBundle) -> String {
                 .labels
                 .iter()
                 .map(|label| {
+                    let role = label_role(label.message.as_ref());
                     json!({
                         "style": match label.style {
                             LabelStyle::Primary => "primary",
                             LabelStyle::Secondary => "secondary",
                         },
+                        "role": role,
                         "file": label.span.file.display().to_string(),
                         "line": label.span.line,
                         "col": label.span.col,
@@ -257,12 +259,72 @@ fn format_diagnostics_json(bundle: &DiagnosticBundle) -> String {
                 "labels": labels,
                 "notes": diag.notes,
                 "help": diag.help,
+                "context": diagnostic_context_from_notes(diag.notes.as_slice()),
             })
         })
         .collect::<Vec<_>>();
 
     serde_json::to_string_pretty(&json!({ "diagnostics": diagnostics }))
         .expect("diagnostics JSON formatting should not fail")
+}
+
+/// Maps human label messages to stable JSON role identifiers.
+///
+/// This keeps machine-readable output decoupled from prose used in human mode.
+fn label_role(message: &str) -> Option<&'static str> {
+    match message {
+        "call site" => Some("call_site"),
+        "definition site" => Some("definition_site"),
+        _ => None,
+    }
+}
+
+/// Extracts structured context fields from diagnostic notes when present.
+///
+/// The extraction is best-effort and intentionally tolerant: unknown notes are
+/// ignored so textual diagnostics can evolve without breaking JSON consumers.
+fn diagnostic_context_from_notes(notes: &[Box<str>]) -> serde_json::Value {
+    let mut owner_definition = None::<String>;
+    let mut binding_trace = None::<Vec<String>>;
+    let mut scope_local = None::<String>;
+    let mut scope_visible = None::<String>;
+    let mut scope_top_level = None::<String>;
+
+    for note in notes {
+        if let Some(owner) = note.strip_prefix("error originates from definition '") {
+            owner_definition = Some(owner.trim_end_matches('\'').to_owned());
+            continue;
+        }
+        if let Some(trace) = note.strip_prefix("binding_trace=") {
+            let path = trace.split(" -> ").map(str::to_owned).collect::<Vec<_>>();
+            if !path.is_empty() {
+                binding_trace = Some(path);
+            }
+            continue;
+        }
+        if let Some(v) = note.strip_prefix("scope.local=") {
+            scope_local = Some(v.to_owned());
+            continue;
+        }
+        if let Some(v) = note.strip_prefix("scope.visible=") {
+            scope_visible = Some(v.to_owned());
+            continue;
+        }
+        if let Some(v) = note.strip_prefix("scope.top_level=") {
+            scope_top_level = Some(v.to_owned());
+            continue;
+        }
+    }
+
+    json!({
+        "owner_definition": owner_definition,
+        "binding_trace_path": binding_trace,
+        "scope": {
+            "local": scope_local,
+            "visible": scope_visible,
+            "top_level": scope_top_level,
+        }
+    })
 }
 
 fn parse_dump_usage(mode: &str) -> String {
@@ -704,7 +766,7 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
                 .filter_map(Value::as_str)
                 .collect::<Vec<_>>();
             assert!(
-                notes.iter().any(|note| *note == trace),
+                notes.contains(&trace),
                 "{file} json snapshot should contain trace note"
             );
             assert!(
@@ -716,7 +778,7 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
                 "{file} json snapshot should contain right-side note"
             );
             assert!(
-                notes.iter().any(|note| *note == owner_note),
+                notes.contains(&owner_note),
                 "{file} json snapshot should contain owner note"
             );
             assert!(
@@ -769,11 +831,7 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
             .collect::<Vec<_>>();
         assert_eq!(diag["code"], "FRS-EVAL-0002");
         assert!(notes.iter().any(|n| n.starts_with("expr=")));
-        assert!(
-            notes
-                .iter()
-                .any(|n| *n == "error originates from definition 'foo'")
-        );
-        assert!(notes.iter().any(|n| *n == "binding_trace=process -> foo"));
+        assert!(notes.contains(&"error originates from definition 'foo'"));
+        assert!(notes.contains(&"binding_trace=process -> foo"));
     }
 }

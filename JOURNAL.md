@@ -2753,3 +2753,36 @@ Execution plan (Phase 0 prototype, revised):
     - eval/propagate wording normalization,
     - nested realistic eval negative corpus expansion,
     - optional IDE-oriented structured JSON enrichment (`owner_definition`, binding-path vector, label roles).
+
+#### Eval diagnostics v2 implementation — multi-label/source scopes/json context
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/eval/src/lib.rs`,
+  - `crates/eval/tests/core_eval.rs`,
+  - `crates/compiler/src/lib.rs`,
+  - `crates/compiler/src/main.rs`,
+  - `crates/compiler/tests/diagnostic_errors.rs`.
+- Implemented:
+  - enriched unresolved-symbol diagnostics with explicit lexical context:
+    - `scope.local=...`,
+    - `scope.visible=...`,
+    - `scope.top_level=...`.
+  - extended `EvalError::UndefinedSymbol` payload to carry scope vectors for deterministic reporting.
+  - replaced generic eval source-label attachment with eval-specific call/definition pairing:
+    - primary label: `call site`,
+    - secondary label: `definition site` (when distinct).
+  - enriched eval wording for missing process / pattern arity / extra arguments / case no-match.
+  - added compiler integration coverage for:
+    - scope-context notes,
+    - multi-label call/definition contract on undefined-symbol fixture.
+  - enriched JSON diagnostics with optional machine-readable context extraction:
+    - label role mapping (`call_site`, `definition_site`),
+    - `context.owner_definition`,
+    - `context.binding_trace_path`,
+    - `context.scope.{local,visible,top_level}`.
+  - documented new helper behavior in Rustdoc (`label_role`, `diagnostic_context_from_notes`).
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace --all-targets`

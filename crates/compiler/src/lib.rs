@@ -135,7 +135,7 @@ impl Compiler {
                 if let Some(trace) = alias_binding_trace_for_node(&output.state.arena, root, node) {
                     diagnostic = diagnostic.with_note(format!("binding_trace={trace}"));
                 }
-                diagnostic = maybe_add_source_label(
+                diagnostic = maybe_add_eval_source_labels(
                     diagnostic,
                     &output.state.ctx,
                     &output.state.arena,
@@ -146,7 +146,7 @@ impl Compiler {
             let diagnostics = bundle_from_diagnostic(diagnostic);
             CompilerError::Eval {
                 source: source.into(),
-                error,
+                error: Box::new(error),
                 diagnostics,
             }
         })?;
@@ -265,7 +265,7 @@ pub enum CompilerError {
     },
     Eval {
         source: Box<str>,
-        error: eval::EvalError,
+        error: Box<eval::EvalError>,
         diagnostics: DiagnosticBundle,
     },
     Propagate {
@@ -421,15 +421,15 @@ fn render_human_box_expr(arena: &tlib::TreeArena, node: BoxId, depth: usize) -> 
             render_human_box_expr(arena, right, depth + 1)
         ),
         BoxMatch::Seq(left, right) => {
-            if let BoxMatch::Par(lhs, rhs) = match_box(arena, left) {
-                if let Some(op) = prim_infix_symbol(arena, right) {
-                    return format!(
-                        "({} {} {})",
-                        render_human_box_expr(arena, lhs, depth + 1),
-                        op,
-                        render_human_box_expr(arena, rhs, depth + 1)
-                    );
-                }
+            if let BoxMatch::Par(lhs, rhs) = match_box(arena, left)
+                && let Some(op) = prim_infix_symbol(arena, right)
+            {
+                return format!(
+                    "({} {} {})",
+                    render_human_box_expr(arena, lhs, depth + 1),
+                    op,
+                    render_human_box_expr(arena, rhs, depth + 1)
+                );
             }
             format!(
                 "({} : {})",
@@ -702,6 +702,45 @@ fn maybe_add_source_label(
     diagnostic.with_label(Label::new(LabelStyle::Primary, span, "related source"))
 }
 
+/// Attaches eval-oriented primary/secondary labels when available.
+///
+/// Label policy:
+/// - primary: nearest call/use site for the offending node,
+/// - secondary: owning definition site when different from the primary span.
+fn maybe_add_eval_source_labels(
+    mut diagnostic: Diagnostic,
+    ctx: &parser::ParserCtx,
+    arena: &tlib::TreeArena,
+    defs_root: BoxId,
+    node: BoxId,
+) -> Diagnostic {
+    let primary = source_span_from_node_or_descendant(ctx, arena, node)
+        .or_else(|| source_span_for_definition_of_expr(ctx, arena, defs_root, node))
+        .or_else(|| source_span_for_process_binding_target(ctx, arena, defs_root))
+        .or_else(|| source_span_for_process_definition(ctx, arena, defs_root));
+    let Some(primary_span) = primary else {
+        return diagnostic;
+    };
+    diagnostic = diagnostic.with_label(Label::new(
+        LabelStyle::Primary,
+        primary_span.clone(),
+        "call site",
+    ));
+
+    let secondary = source_span_for_definition_of_expr(ctx, arena, defs_root, node)
+        .or_else(|| source_span_for_process_definition(ctx, arena, defs_root));
+    if let Some(secondary_span) = secondary
+        && secondary_span != primary_span
+    {
+        diagnostic = diagnostic.with_label(Label::new(
+            LabelStyle::Secondary,
+            secondary_span,
+            "definition site",
+        ));
+    }
+    diagnostic
+}
+
 /// Resolves one source span from the node itself, then falls back to labeled descendants.
 fn source_span_from_node_or_descendant(
     ctx: &parser::ParserCtx,
@@ -822,10 +861,10 @@ fn find_definition_name_and_expr(
         let name = arena.hd(def)?;
         let args_expr = arena.tl(def)?;
         let expr = arena.tl(args_expr)?;
-        if let BoxMatch::Ident(name_str) = match_box(arena, name) {
-            if name_str == wanted {
-                return Some((name, expr));
-            }
+        if let BoxMatch::Ident(name_str) = match_box(arena, name)
+            && name_str == wanted
+        {
+            return Some((name, expr));
         }
         defs = arena.tl(defs)?;
     }
@@ -902,10 +941,10 @@ fn owner_definition_name_for_node(
         let name = arena.hd(def)?;
         let args_expr = arena.tl(def)?;
         let expr = arena.tl(args_expr)?;
-        if expr == node || subtree_contains_node(arena, expr, node) {
-            if let BoxMatch::Ident(name_str) = match_box(arena, name) {
-                return Some(name_str.into());
-            }
+        if (expr == node || subtree_contains_node(arena, expr, node))
+            && let BoxMatch::Ident(name_str) = match_box(arena, name)
+        {
+            return Some(name_str.into());
         }
         defs = arena.tl(defs)?;
     }
@@ -977,10 +1016,10 @@ fn collect_definition_refs(
         if visited > 4096 {
             break;
         }
-        if let BoxMatch::Ident(name) = match_box(arena, cur) {
-            if known.contains(name) {
-                refs.push(name.into());
-            }
+        if let BoxMatch::Ident(name) = match_box(arena, cur)
+            && known.contains(name)
+        {
+            refs.push(name.into());
         }
         if let Some(children) = arena.children(cur) {
             for child in children.iter().rev() {
@@ -1233,10 +1272,8 @@ mod tests {
             .expect_err("missing process should fail evaluation");
         assert!(matches!(
             err,
-            CompilerError::Eval {
-                error: eval::EvalError::MissingProcessDefinition { .. },
-                ..
-            }
+            CompilerError::Eval { ref error, .. }
+                if matches!(error.as_ref(), eval::EvalError::MissingProcessDefinition { .. })
         ));
         let diagnostics = err
             .diagnostics()

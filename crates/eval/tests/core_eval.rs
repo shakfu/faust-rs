@@ -441,6 +441,9 @@ fn eval_error_converts_to_structured_diagnostic_codes() {
     let undef = EvalError::UndefinedSymbol {
         symbol: "foo".to_owned(),
         node: arena.nil(),
+        local_scope: vec!["x".to_owned()],
+        visible_scope: vec!["x".to_owned(), "y".to_owned()],
+        top_level_scope: vec!["y".to_owned()],
     }
     .into_diagnostic();
     assert_eq!(undef.code, codes::EVAL_UNDEFINED_SYMBOL);
