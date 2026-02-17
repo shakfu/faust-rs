@@ -58,5 +58,11 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets
 
+      - name: Backend C++ module-first checks
+        run: |
+          cargo test -p codegen --all-targets
+          cargo run -p compiler -- --dump-cpp tests/corpus/rep_01_passthrough.dsp
+          cargo run -p xtask -- cpp-backend-diff-report
+
       - name: Golden output check
         run: cargo run -p xtask -- golden-check

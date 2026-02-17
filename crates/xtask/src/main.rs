@@ -678,10 +678,28 @@ fn cpp_backend_diff_report() -> Result<(), Box<dyn std::error::Error>> {
     for case in representative {
         let path = root.join("tests").join("corpus").join(case);
         let rust_output = compiler.compile_file_default_to_cpp(&path, &options);
-        let cpp_output = Command::new(&cpp_bin).arg(&path).output()?;
+        let cpp_output = Command::new(&cpp_bin).arg(&path).output();
 
-        let row = match (rust_output, cpp_output.status.success()) {
-            (Ok(rust_text), true) => {
+        let row = match (rust_output, cpp_output) {
+            (Ok(_), Err(err)) => {
+                unsupported = unsupported.saturating_add(1);
+                CppDiffRow {
+                    case: case.to_owned(),
+                    class: "UNSUPPORTED",
+                    rust_reason: "Rust path ok".to_owned(),
+                    cpp_reason: format!("cannot run `{}`: {err}", cpp_bin.display()),
+                }
+            }
+            (Err(err), Err(cpp_err)) => {
+                unsupported = unsupported.saturating_add(1);
+                CppDiffRow {
+                    case: case.to_owned(),
+                    class: "UNSUPPORTED",
+                    rust_reason: err.to_string(),
+                    cpp_reason: format!("cannot run `{}`: {cpp_err}", cpp_bin.display()),
+                }
+            }
+            (Ok(rust_text), Ok(cpp_output)) if cpp_output.status.success() => {
                 let cpp_text = String::from_utf8(cpp_output.stdout)?;
                 let rust_sig = extract_shell_signature(&rust_text);
                 let cpp_sig = extract_shell_signature(&cpp_text);
@@ -703,7 +721,7 @@ fn cpp_backend_diff_report() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            (Ok(_), false) => {
+            (Ok(_), Ok(cpp_output)) => {
                 unsupported = unsupported.saturating_add(1);
                 CppDiffRow {
                     case: case.to_owned(),
@@ -716,7 +734,7 @@ fn cpp_backend_diff_report() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or_else(|| format!("failed with status {}", cpp_output.status)),
                 }
             }
-            (Err(err), true) => {
+            (Err(err), Ok(cpp_output)) if cpp_output.status.success() => {
                 unsupported = unsupported.saturating_add(1);
                 CppDiffRow {
                     case: case.to_owned(),
@@ -725,7 +743,7 @@ fn cpp_backend_diff_report() -> Result<(), Box<dyn std::error::Error>> {
                     cpp_reason: "C++ path ok".to_owned(),
                 }
             }
-            (Err(err), false) => {
+            (Err(err), Ok(cpp_output)) => {
                 unsupported = unsupported.saturating_add(1);
                 CppDiffRow {
                     case: case.to_owned(),

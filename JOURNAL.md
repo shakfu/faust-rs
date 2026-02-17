@@ -3305,3 +3305,26 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo clippy -p xtask -p compiler --all-targets -- -D warnings`
   - `cargo test -p xtask --all-targets`
   - `cargo run -p xtask -- cpp-backend-diff-report`
+
+#### C++ backend module-first rollout — Step 8 (CI gate for backend-cpp subset)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `.github/workflows/ci.yml`
+  - `crates/xtask/src/main.rs`
+  - `porting/phases/phase-6-cpp-backend-diff-report-en.md`
+  - `JOURNAL.md`
+- Implemented:
+  - added CI step `Backend C++ module-first checks` in `lint_and_test`:
+    - `cargo test -p codegen --all-targets`
+    - `cargo run -p compiler -- --dump-cpp tests/corpus/rep_01_passthrough.dsp`
+    - `cargo run -p xtask -- cpp-backend-diff-report`
+  - hardened `cpp-backend-diff-report` command:
+    - when C++ binary is unavailable on host/CI, rows are classified `UNSUPPORTED`
+      with explicit reason instead of hard-failing the command.
+  - kept generated differential report as tracked artifact in `porting/phases/`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p xtask -p codegen -p compiler --all-targets -- -D warnings`
+  - `cargo test -p xtask -p codegen --all-targets`
+  - `cargo run -p xtask -- cpp-backend-diff-report`
