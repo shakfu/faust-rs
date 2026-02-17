@@ -591,6 +591,7 @@ fn prim_infix_symbol(arena: &tlib::TreeArena, node: BoxId) -> Option<&'static st
     }
 }
 
+/// Returns one readable primitive name for non-infix `BoxMatch` primitive nodes.
 fn prim_readable_name(arena: &tlib::TreeArena, node: BoxId) -> Option<&'static str> {
     match match_box(arena, node) {
         BoxMatch::Delay => Some("@"),

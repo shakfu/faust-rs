@@ -2659,3 +2659,23 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo test -p propagate --all-targets`
   - `cargo test -p compiler --test diagnostic_errors`
+
+#### Diagnostics readability micro-tranche — Step 5 (snapshot lock for readability contract)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/src/main.rs`,
+  - `crates/compiler/src/lib.rs`.
+- Implemented:
+  - expanded human/json complex fixture snapshots to lock readability contract:
+    - `Here A / while B` block expectations in human output,
+    - owner-definition note presence,
+    - numeric suggestion note presence,
+    - readable UI pretty-print (`hslider(...)`) in human output.
+  - added/updated Rustdoc on rendering helpers involved in this contract:
+    - paired-context extraction/filtering in CLI renderer,
+    - primitive readable-name mapping helper in compiler diagnostics enrichment.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --bin faust-rs`
+  - `cargo test -p compiler --test diagnostic_errors`

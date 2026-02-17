@@ -134,6 +134,10 @@ struct PairedContext {
     b_arity: Option<String>,
 }
 
+/// Extracts paired composition context (`A`/`B`) from diagnostic notes.
+///
+/// This enables C++-style human rendering (`Here A ... / while B ...`) without
+/// changing the structured diagnostic schema.
 fn paired_context_from_notes(notes: &[Box<str>]) -> Option<PairedContext> {
     let mut a_expr = None::<String>;
     let mut b_expr = None::<String>;
@@ -171,6 +175,10 @@ fn paired_context_from_notes(notes: &[Box<str>]) -> Option<PairedContext> {
     })
 }
 
+/// Filters note lines for human rendering.
+///
+/// When paired context exists, low-level `A ...` / `B ...` notes are hidden from
+/// direct printing because they are rendered as condensed C++-style blocks.
 fn filtered_notes_for_human<'a>(notes: &'a [Box<str>], has_paired_context: bool) -> Vec<&'a str> {
     let mut out = Vec::new();
     for note in notes {
@@ -586,27 +594,33 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
                 "err_06_propagate_split_mismatch_chain.dsp",
                 vec![
                     "error [FRS-PROP-0002] split composition mismatch",
+                    "error originates from definition 'foo'",
                     "binding_trace=process -> baz -> bar -> foo",
                     "Here  A = (_, _)",
                     "while B = (_, (_, _))",
+                    "suggested target: set inputs(B) to 4",
                 ],
             ),
             (
                 "err_07_propagate_rec_mismatch_alias.dsp",
                 vec![
                     "error [FRS-PROP-0003] recursive composition mismatch",
+                    "error originates from definition 'foo'",
                     "binding_trace=process -> bar -> foo",
                     "Here  A = _",
                     "while B = (_, (_, _))",
+                    "suggested target: set outputs(A) >= 3 and inputs(A) >= 3",
                 ],
             ),
             (
                 "err_08_propagate_seq_ui_mismatch.dsp",
                 vec![
                     "error [FRS-PROP-0002] sequential composition mismatch",
+                    "error originates from definition 'foo'",
                     "binding_trace=process -> foo",
-                    "Here  A = ",
+                    "Here  A = hslider(\"gain\", 0.5, 0, 1, 0.01)",
                     "while B = ",
+                    "suggested target: make outputs(A) and inputs(B) equal (common target: 2)",
                 ],
             ),
         ];
@@ -649,23 +663,29 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
                 "binding_trace=process -> baz -> bar -> foo",
                 "A (split left) = ",
                 "B (split right) = ",
+                "error originates from definition 'foo'",
+                "suggested target: set inputs(B) to 4",
             ),
             (
                 "err_07_propagate_rec_mismatch_alias.dsp",
                 "binding_trace=process -> bar -> foo",
                 "A (rec left) = ",
                 "B (rec right) = ",
+                "error originates from definition 'foo'",
+                "suggested target: set outputs(A) >= 3 and inputs(A) >= 3",
             ),
             (
                 "err_08_propagate_seq_ui_mismatch.dsp",
                 "binding_trace=process -> foo",
                 "A (seq left) = ",
                 "B (seq right) = ",
+                "error originates from definition 'foo'",
+                "suggested target: make outputs(A) and inputs(B) equal (common target: 2)",
             ),
         ];
 
         let compiler = Compiler::new();
-        for (file, trace, left_prefix, right_prefix) in fixtures {
+        for (file, trace, left_prefix, right_prefix, owner_note, suggestion_note) in fixtures {
             let path = corpus_path(file);
             let err = compiler
                 .compile_file_default_to_signals(&path)
@@ -694,6 +714,14 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
             assert!(
                 notes.iter().any(|note| note.starts_with(right_prefix)),
                 "{file} json snapshot should contain right-side note"
+            );
+            assert!(
+                notes.iter().any(|note| *note == owner_note),
+                "{file} json snapshot should contain owner note"
+            );
+            assert!(
+                notes.iter().any(|note| note.starts_with(suggestion_note)),
+                "{file} json snapshot should contain numeric suggestion note"
             );
         }
     }
