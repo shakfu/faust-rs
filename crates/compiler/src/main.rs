@@ -1,5 +1,6 @@
 use boxes::dump_box;
-use compiler::{Compiler, golden_snapshot_from_file};
+use compiler::{Compiler, CompilerError, golden_snapshot_from_file};
+use errors::Severity;
 use signals::dump_sig_readable;
 use std::path::PathBuf;
 
@@ -30,6 +31,32 @@ fn parse_input_with_import_dirs(
     }
 
     (PathBuf::from(input), search_paths)
+}
+
+fn print_structured_diagnostics(err: &CompilerError) {
+    let Some(bundle) = err.diagnostics() else {
+        return;
+    };
+    for diag in bundle.as_slice() {
+        let severity = match diag.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+            Severity::Remark => "remark",
+        };
+        if let Some(label) = diag.labels.first() {
+            eprintln!(
+                "{}:{}:{}: {} [{}] {}",
+                label.span.file.display(),
+                label.span.line,
+                label.span.col,
+                severity,
+                diag.code.0,
+                diag.message
+            );
+        } else {
+            eprintln!("{severity} [{}] {}", diag.code.0, diag.message);
+        }
+    }
 }
 
 fn main() {
@@ -78,6 +105,7 @@ fn main() {
                 }
                 Err(err) => {
                     eprintln!("Parse failed: {err}");
+                    print_structured_diagnostics(&err);
                     std::process::exit(1);
                 }
             }
@@ -102,6 +130,7 @@ fn main() {
                 }
                 Err(err) => {
                     eprintln!("Parse failed: {err}");
+                    print_structured_diagnostics(&err);
                     std::process::exit(1);
                 }
             }
@@ -131,6 +160,7 @@ fn main() {
                 }
                 Err(err) => {
                     eprintln!("Signal pipeline failed: {err}");
+                    print_structured_diagnostics(&err);
                     std::process::exit(1);
                 }
             }

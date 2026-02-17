@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use boxes::BoxId;
+use errors::DiagnosticBundle;
 use parser::{ParseOutput, SourceReaderError};
 use propagate::{BoxArity, PropagateError};
 use signals::SigId;
@@ -146,6 +147,7 @@ pub enum CompilerError {
         source: Box<str>,
         parse_errors: usize,
         recoveries: u32,
+        diagnostics: DiagnosticBundle,
     },
     Eval(eval::EvalError),
     Propagate(PropagateError),
@@ -160,9 +162,11 @@ impl std::fmt::Display for CompilerError {
                 source,
                 parse_errors,
                 recoveries,
+                diagnostics,
             } => write!(
                 f,
-                "parse failed for {source}: errors={parse_errors}, recoveries={recoveries}"
+                "parse failed for {source}: errors={parse_errors}, recoveries={recoveries}, diagnostics={}",
+                diagnostics.len()
             ),
             Self::Eval(err) => write!(f, "evaluation failed: {err}"),
             Self::Propagate(err) => write!(f, "propagation failed: {err}"),
@@ -171,6 +175,17 @@ impl std::fmt::Display for CompilerError {
 }
 
 impl std::error::Error for CompilerError {}
+
+impl CompilerError {
+    /// Returns structured diagnostics when this error variant carries them.
+    #[must_use]
+    pub fn diagnostics(&self) -> Option<&DiagnosticBundle> {
+        match self {
+            Self::Parse { diagnostics, .. } => Some(diagnostics),
+            _ => None,
+        }
+    }
+}
 
 fn ensure_parse_success(source: &str, output: ParseOutput) -> Result<ParseOutput, CompilerError> {
     let parse_errors = usize::try_from(output.state.ctx.parse_error_count()).unwrap_or(usize::MAX);
@@ -183,6 +198,7 @@ fn ensure_parse_success(source: &str, output: ParseOutput) -> Result<ParseOutput
             source: source.into(),
             parse_errors,
             recoveries,
+            diagnostics: output.diagnostics,
         })
     }
 }
@@ -270,7 +286,23 @@ mod tests {
         let err = compiler
             .compile_source("invalid.dsp", "process = ;")
             .expect_err("malformed source should fail compile facade");
-        assert!(matches!(err, CompilerError::Parse { .. }));
+        match err {
+            CompilerError::Parse {
+                parse_errors,
+                diagnostics,
+                ..
+            } => {
+                assert!(parse_errors >= 1);
+                assert!(!diagnostics.is_empty());
+                assert!(
+                    diagnostics
+                        .as_slice()
+                        .iter()
+                        .any(|d| d.code.0.starts_with("FRS-PARSE-"))
+                );
+            }
+            _ => panic!("expected parse error"),
+        }
     }
 
     #[test]
