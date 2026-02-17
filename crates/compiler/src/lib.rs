@@ -106,6 +106,18 @@ impl Compiler {
         self.compile_file_to_signals(path, std::slice::from_ref(&search_base))
     }
 
+    /// Runs eval+propagate on an already parsed Faust program.
+    ///
+    /// This is an advanced entry point used by tooling/tests that need to alter
+    /// parse metadata before Phase 4 (for example diagnostics fallback checks).
+    pub fn compile_parsed_to_signals(
+        &self,
+        source_name: &str,
+        output: ParseOutput,
+    ) -> Result<SignalCompileOutput, CompilerError> {
+        self.pipeline_to_signals(source_name, output)
+    }
+
     fn pipeline_to_signals(
         &self,
         source: &str,
@@ -1554,5 +1566,119 @@ mod tests {
             .expect("definition-of-expression fallback should resolve to foo definition");
         assert_eq!(span.file.display().to_string(), "chain.dsp");
         assert_eq!(span.line, 1);
+    }
+
+    #[test]
+    fn eval_labeler_reports_origin_span_unavailable_fallback_note() {
+        let mut arena = TreeArena::new();
+        let (defs, bad_node) = {
+            let mut bb = BoxBuilder::new(&mut arena);
+            let foo_name = bb.ident("foo");
+            let bad_node = bb.ident("unknown_symbol");
+            let process_name = bb.ident("process");
+            let process_expr = bb.ident("foo");
+
+            let nil = arena.nil();
+            let foo_args_expr = arena.cons(nil, bad_node);
+            let foo_def = arena.cons(foo_name, foo_args_expr);
+            let process_args_expr = arena.cons(nil, process_expr);
+            let process_def = arena.cons(process_name, process_args_expr);
+            let defs_tail = arena.cons(process_def, nil);
+            let defs = arena.cons(foo_def, defs_tail);
+            (defs, bad_node)
+        };
+
+        let ctx = parser::ParserCtx::new();
+        let diag = errors::Diagnostic::new(
+            errors::Severity::Error,
+            errors::Stage::Eval,
+            errors::codes::EVAL_UNDEFINED_SYMBOL,
+            "undefined symbol",
+        );
+        let labeled =
+            super::maybe_add_eval_source_labels(diag, &ctx, &arena, defs, bad_node, Some("foo"));
+        assert!(
+            labeled
+                .notes
+                .iter()
+                .any(|n| n.as_ref()
+                    == "origin span unavailable; pointing to nearest call/owner site"),
+            "eval fallback should explain missing origin span explicitly"
+        );
+    }
+
+    #[test]
+    fn propagate_labeler_reports_origin_span_unavailable_fallback_note() {
+        let mut arena = TreeArena::new();
+        let (defs, bad_node) = {
+            let mut bb = BoxBuilder::new(&mut arena);
+            let foo_name = bb.ident("foo");
+            let l0 = bb.wire();
+            let l1 = bb.wire();
+            let left = bb.par(l0, l1);
+            let r0 = bb.wire();
+            let r1 = bb.wire();
+            let r2 = bb.wire();
+            let r_tail = bb.par(r1, r2);
+            let right = bb.par(r0, r_tail);
+            let bad_node = bb.split(left, right);
+            let process_name = bb.ident("process");
+            let process_expr = bb.ident("foo");
+
+            let nil = arena.nil();
+            let foo_args_expr = arena.cons(nil, bad_node);
+            let foo_def = arena.cons(foo_name, foo_args_expr);
+            let process_args_expr = arena.cons(nil, process_expr);
+            let process_def = arena.cons(process_name, process_args_expr);
+            let defs_tail = arena.cons(process_def, nil);
+            let defs = arena.cons(foo_def, defs_tail);
+            (defs, bad_node)
+        };
+
+        let ctx = parser::ParserCtx::new();
+        let diag = errors::Diagnostic::new(
+            errors::Severity::Error,
+            errors::Stage::Propagate,
+            errors::codes::PROP_ARITY_MISMATCH,
+            "split mismatch",
+        );
+        let labeled =
+            super::maybe_add_source_label(diag, &ctx, &arena, defs, bad_node, Some("foo"));
+        assert!(
+            labeled
+                .notes
+                .iter()
+                .any(|n| n.as_ref()
+                    == "origin span unavailable; pointing to nearest call/owner site"),
+            "propagate fallback should explain missing origin span explicitly"
+        );
+    }
+
+    #[test]
+    fn pipeline_level_eval_reports_origin_fallback_when_parser_props_missing() {
+        let compiler = Compiler::new();
+        let source =
+            include_str!("../../../tests/corpus/err_17_origin_fallback_missing_props_eval.dsp");
+        let mut parsed = parser::parse_program(source, "missing_props.dsp");
+        parsed.state.ctx = parser::ParserCtx::new();
+
+        let err = compiler
+            .pipeline_to_signals("missing_props.dsp", parsed)
+            .expect_err("pipeline should fail in eval without source properties");
+        let diagnostics = err
+            .diagnostics()
+            .expect("pipeline eval failure should expose diagnostics");
+        let first = diagnostics
+            .as_slice()
+            .first()
+            .expect("diagnostic bundle should not be empty");
+        assert!(
+            first
+                .notes
+                .iter()
+                .any(|n| n.as_ref()
+                    == "origin span unavailable; pointing to nearest call/owner site"),
+            "pipeline-level fallback should be visible when parser source props are absent"
+        );
     }
 }

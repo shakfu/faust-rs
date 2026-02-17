@@ -309,6 +309,7 @@ impl IntoDiagnostic for EvalError {
                 codes::EVAL_MISSING_PROCESS,
                 message,
             )
+            .with_note("cause: required top-level `process` definition is missing")
             .with_note("entrypoint contract: one top-level `process = ...;` definition is required")
             .with_note(format!(
                 "available top-level definitions: {}",
@@ -332,6 +333,7 @@ impl IntoDiagnostic for EvalError {
                 codes::EVAL_UNDEFINED_SYMBOL,
                 message,
             )
+            .with_note("cause: unresolved identifier in current lexical scope")
             .with_note("rule: referenced identifier must be present in visible lexical scope")
             .with_note(format!(
                 "computed: `{symbol}` is not present in current visible scope"
@@ -371,6 +373,7 @@ impl IntoDiagnostic for EvalError {
                 codes::EVAL_ARITY_MISMATCH,
                 message,
             )
+            .with_note("cause: case pattern arity does not match provided argument tuple")
             .with_note("rule: case rule arity must match provided argument tuple arity")
             .with_note(format!(
                 "computed: expected={expected}, provided={got}, delta={}",
@@ -387,6 +390,7 @@ impl IntoDiagnostic for EvalError {
                 codes::EVAL_ARITY_MISMATCH,
                 message,
             )
+            .with_note("cause: function application provides more arguments than accepted")
             .with_note(
                 "rule: non-closure application requires provided arguments <= function input arity",
             )
@@ -406,6 +410,7 @@ impl IntoDiagnostic for EvalError {
                 codes::EVAL_GENERIC_FAILURE,
                 message,
             )
+            .with_note("cause: no case rule matched the provided argument tuple")
             .with_note("rule: at least one case pattern must match the provided argument tuple")
             .with_note("computed: provided tuple did not match any declared case pattern")
             .with_help("add a matching case rule or add a catch-all pattern"),
@@ -417,13 +422,18 @@ impl IntoDiagnostic for EvalError {
                 codes::EVAL_ITERATION_INVALID,
                 message,
             )
+            .with_note("cause: iterative combinator count is not a valid non-negative integer")
+            .with_note(
+                "rule: iterator count must be integer, non-negative, and within supported range",
+            )
             .with_help("iteration count must be a non-negative integer in target range"),
             _ => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
                 codes::EVAL_GENERIC_FAILURE,
                 message,
-            ),
+            )
+            .with_note("cause: evaluator reached an unsupported or malformed intermediate form"),
         }
     }
 }

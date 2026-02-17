@@ -185,11 +185,18 @@ impl IntoDiagnostic for PropagateError {
         match self {
             Self::UnsupportedBox { .. } => {
                 Diagnostic::new(Severity::Error, Stage::Propagate, codes::PROP_UNSUPPORTED_BOX, message)
+                    .with_note(
+                        "cause: encountered box node family is not supported in current propagation phase",
+                    )
                     .with_help("evaluate box expression first or add propagation support for this node family")
             }
             Self::InputArityMismatch { expected, got, .. }
             | Self::OutputArityMismatch { expected, got, .. } => {
                 Diagnostic::new(Severity::Error, Stage::Propagate, codes::PROP_ARITY_MISMATCH, message)
+                    .with_note("cause: propagated bus width differs from required arity")
+                    .with_note(
+                        "rule: input/output arities at composition boundary must match target signature",
+                    )
                     .with_note(format!("expected {expected}, got {got}"))
                     .with_help("adjust composition so input/output bus widths match")
             }
@@ -198,6 +205,7 @@ impl IntoDiagnostic for PropagateError {
                 right_inputs,
                 ..
             } => Diagnostic::new(Severity::Error, Stage::Propagate, codes::PROP_ARITY_MISMATCH, message)
+                .with_note("cause: sequential composition bus widths do not match")
                 .with_note("rule: seq(A, B) requires outputs(A) == inputs(B)")
                 .with_note(format!(
                     "sequential composition requires left outputs ({left_outputs}) == right inputs ({right_inputs})"
@@ -218,6 +226,7 @@ impl IntoDiagnostic for PropagateError {
                 right_inputs,
                 ..
             } => Diagnostic::new(Severity::Error, Stage::Propagate, codes::PROP_ARITY_MISMATCH, message)
+                .with_note("cause: split composition divisibility rule is violated")
                 .with_note("rule: split(A, B) requires inputs(B) % outputs(A) == 0")
                 .with_note(format!(
                     "split composition requires right inputs ({right_inputs}) to be divisible by left outputs ({left_outputs})"
@@ -251,6 +260,7 @@ impl IntoDiagnostic for PropagateError {
                 right_inputs,
                 ..
             } => Diagnostic::new(Severity::Error, Stage::Propagate, codes::PROP_ARITY_MISMATCH, message)
+                .with_note("cause: merge composition multiple rule is violated")
                 .with_note("rule: merge(A, B) requires outputs(A) % inputs(B) == 0")
                 .with_note(format!(
                     "merge composition requires left outputs ({left_outputs}) to be a multiple of right inputs ({right_inputs})"
@@ -291,6 +301,7 @@ impl IntoDiagnostic for PropagateError {
                 codes::PROP_RECURSION_MISMATCH,
                 message,
             )
+            .with_note("cause: recursive feedback arity constraints are not satisfied")
             .with_note(
                 "rule: rec(A, B) requires right_inputs <= left_outputs and right_outputs <= left_inputs",
             )
@@ -325,12 +336,16 @@ impl IntoDiagnostic for PropagateError {
                 codes::PROP_GENERIC_FAILURE,
                 message,
             )
+            .with_note("cause: integer-valued propagation field has invalid runtime representation")
             .with_note(format!("invalid integer for field `{field}`")),
             Self::NegativeIntegerValue { field, value } => Diagnostic::new(
                 Severity::Error,
                 Stage::Propagate,
                 codes::PROP_GENERIC_FAILURE,
                 message,
+            )
+            .with_note(
+                "cause: field constrained to non-negative integer received a negative value",
             )
             .with_note(format!("field `{field}` is negative: {value}")),
             Self::IntegerTooLarge { field, value } => Diagnostic::new(
@@ -339,6 +354,7 @@ impl IntoDiagnostic for PropagateError {
                 codes::PROP_GENERIC_FAILURE,
                 message,
             )
+            .with_note("cause: integer field exceeds propagation-supported bounds")
             .with_note(format!("field `{field}` exceeds target range: {value}")),
         }
     }

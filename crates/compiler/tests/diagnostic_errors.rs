@@ -95,6 +95,11 @@ fn eval_error_fixtures_expose_source_labels_and_readable_context() {
             1u32,
             "error originates from definition 'foo'",
         ),
+        (
+            "err_15_eval_compound_with_letrec_case_arity.dsp",
+            4u32,
+            "error originates from definition 'foo'",
+        ),
     ];
 
     for (file, expected_line, owner_note) in fixtures {
@@ -258,6 +263,36 @@ fn eval_undefined_symbol_alias_chain_exposes_rule_computed_and_template_help() {
 }
 
 #[test]
+fn eval_compound_fixture_exposes_cause_and_template_notes() {
+    let compiler = Compiler::new();
+    let source = read_corpus("err_15_eval_compound_with_letrec_case_arity.dsp");
+    let err = compiler
+        .compile_source_to_signals("err_15_eval_compound_with_letrec_case_arity.dsp", &source)
+        .expect_err("fixture should fail in eval stage");
+    let diagnostics = err
+        .diagnostics()
+        .expect("eval error should expose diagnostics");
+    let first = diagnostics
+        .as_slice()
+        .first()
+        .expect("eval diagnostics should not be empty");
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|n| n.as_ref().starts_with("cause: case pattern arity")),
+        "compound eval fixture should expose explicit cause note"
+    );
+    assert!(
+        first.help.iter().any(|h| {
+            h.as_ref()
+                .starts_with("template: case { (x, y) => ...; }; // 2-argument rule")
+        }),
+        "compound eval fixture should expose deterministic template help"
+    );
+}
+
+#[test]
 fn propagate_error_fixture_exposes_frs_prop_code() {
     let compiler = Compiler::new();
     let source = read_corpus("err_03_propagate_split_mismatch.dsp");
@@ -322,6 +357,7 @@ fn propagate_error_complex_fixtures_expose_codes_and_source_labels() {
         ("err_07_propagate_rec_mismatch_alias.dsp", 1u32),
         ("err_08_propagate_seq_ui_mismatch.dsp", 1u32),
         ("err_14_propagate_split_mismatch_nested_alias.dsp", 1u32),
+        ("err_16_propagate_compound_with_letrec_split.dsp", 1u32),
     ];
 
     for (file, expected_line) in fixtures {
@@ -383,6 +419,35 @@ fn propagate_split_nested_alias_exposes_trace_and_template_help() {
                 .starts_with("template: process = A <: B; // inputs(B) % outputs(A) == 0")
         }),
         "split mismatch should expose deterministic template help"
+    );
+}
+
+#[test]
+fn propagate_compound_fixture_exposes_cause_and_template_notes() {
+    let compiler = Compiler::new();
+    let source = read_corpus("err_16_propagate_compound_with_letrec_split.dsp");
+    let err = compiler
+        .compile_source_to_signals("err_16_propagate_compound_with_letrec_split.dsp", &source)
+        .expect_err("fixture should fail in propagate stage");
+    let diagnostics = err
+        .diagnostics()
+        .expect("propagate error should expose diagnostics");
+    let first = diagnostics
+        .as_slice()
+        .first()
+        .expect("propagate error bundle should not be empty");
+    assert!(
+        first.notes.iter().any(|n| n
+            .as_ref()
+            .starts_with("cause: split composition divisibility")),
+        "compound propagate fixture should expose explicit cause note"
+    );
+    assert!(
+        first.help.iter().any(|h| {
+            h.as_ref()
+                .starts_with("template: process = A <: B; // inputs(B) % outputs(A) == 0")
+        }),
+        "compound propagate fixture should expose deterministic template help"
     );
 }
 

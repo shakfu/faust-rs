@@ -447,10 +447,23 @@ fn eval_error_converts_to_structured_diagnostic_codes() {
     }
     .into_diagnostic();
     assert_eq!(undef.code, codes::EVAL_UNDEFINED_SYMBOL);
+    assert!(
+        undef
+            .notes
+            .iter()
+            .any(|n| n.starts_with("cause: unresolved identifier")),
+        "undefined-symbol diagnostics should expose explicit cause note"
+    );
 
     let iter = EvalError::NegativeIterationCount { value: -1 }.into_diagnostic();
     assert_eq!(iter.code, codes::EVAL_ITERATION_INVALID);
     assert!(!iter.help.is_empty());
+    assert!(
+        iter.notes
+            .iter()
+            .any(|n| n.starts_with("cause: iterative combinator count")),
+        "iteration diagnostics should expose explicit cause note"
+    );
 
     let arity = EvalError::TooManyArguments {
         node: arena.nil(),

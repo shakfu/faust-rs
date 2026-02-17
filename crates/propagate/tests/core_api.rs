@@ -360,6 +360,13 @@ fn propagate_error_converts_to_structured_diagnostic_codes() {
     assert_eq!(unsupported.severity, Severity::Error);
     assert_eq!(unsupported.stage, Stage::Propagate);
     assert_eq!(unsupported.code, codes::PROP_UNSUPPORTED_BOX);
+    assert!(
+        unsupported
+            .notes
+            .iter()
+            .any(|n| n.starts_with("cause: encountered box node family")),
+        "unsupported-box diagnostics should expose explicit cause note"
+    );
     assert!(!unsupported.help.is_empty());
 
     let arity = PropagateError::InputArityMismatch {
@@ -370,6 +377,13 @@ fn propagate_error_converts_to_structured_diagnostic_codes() {
     .into_diagnostic();
     assert_eq!(arity.code, codes::PROP_ARITY_MISMATCH);
     assert!(!arity.notes.is_empty());
+    assert!(
+        arity
+            .notes
+            .iter()
+            .any(|n| n.starts_with("cause: propagated bus width differs")),
+        "arity diagnostics should expose explicit cause note"
+    );
     assert!(!arity.help.is_empty());
 
     let split = PropagateError::SplitArityMismatch {

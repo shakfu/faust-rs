@@ -2812,3 +2812,66 @@ Execution plan (Phase 0 prototype, revised):
     - eval undefined symbol through alias chain (`process -> baz -> bar -> foo`),
     - propagate split mismatch with nested alias + local scope.
   - expanded integration/CLI snapshot coverage for new fixtures and label-role expectations.
+
+#### Diagnostics polish tranche — cause-line + compound fixtures + fallback-path lock
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/eval/src/lib.rs`,
+  - `crates/propagate/src/lib.rs`,
+  - `crates/compiler/src/lib.rs`,
+  - `crates/compiler/src/main.rs`,
+  - `crates/compiler/tests/diagnostic_errors.rs`,
+  - `tests/corpus/err_15_eval_compound_with_letrec_case_arity.dsp`,
+  - `tests/corpus/err_16_propagate_compound_with_letrec_split.dsp`.
+- Implemented:
+  - added explicit `cause:` note lines for top frequent eval/propagate failures.
+  - expanded compound negative corpus with stacked contexts:
+    - eval: `with + letrec + case arity mismatch`,
+    - propagate: `with + letrec + alias chain + split mismatch`.
+  - extended human/json snapshot coverage for compound fixtures and `cause:` expectations.
+  - added dedicated fallback-path tests for missing origin spans:
+    - eval labeler fallback note,
+    - propagate labeler fallback note.
+  - kept deterministic correction-template helps and ordering contract intact.
+
+#### Diagnostics polish tranche — secondary coverage + JSON ordering lock + human noise reduction
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/eval/src/lib.rs`,
+  - `crates/eval/tests/core_eval.rs`,
+  - `crates/propagate/src/lib.rs`,
+  - `crates/propagate/tests/core_api.rs`,
+  - `crates/compiler/src/lib.rs`,
+  - `crates/compiler/src/main.rs`,
+  - `tests/corpus/err_17_origin_fallback_missing_props_eval.dsp`.
+- Implemented:
+  - completed explicit `cause:` note coverage on secondary eval/propagate variants:
+    - eval iteration-invalid and generic-eval fallback,
+    - propagate unsupported-box, generic arity mismatch, and integer-field failures.
+  - introduced human diagnostics verbosity modes in CLI:
+    - `--error-verbosity standard` (default concise output),
+    - `--error-verbosity debug` (keeps internal notes).
+  - added Rustdoc-documented advanced compiler API:
+    - `compile_parsed_to_signals(source_name, parse_output)` for test/tooling flows
+      that mutate parser metadata before Phase 4.
+  - added JSON snapshot ordering lock assertions:
+    - eval + propagate (`split`, `merge`, `rec`) fixtures now assert note order
+      contract `cause -> rule -> computed -> context`.
+  - added pipeline-level fallback coverage for missing source properties:
+    - new corpus fixture for origin fallback scenario,
+    - compiler unit test parses fixture then clears parser context properties and verifies
+      `origin span unavailable; pointing to nearest call/owner site`,
+    - dedicated human-renderer snapshot for the same fallback wording.
+  - reduced standard human output noise:
+    - internal notes `node_id=` and `box_expr=` are filtered in human renderer,
+    - readable `expr=` notes remain visible,
+    - debug verbosity keeps full notes for troubleshooting.
+  - added renderer unit lock for this human-noise contract.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test -p compiler --all-targets`
+  - `cargo test -p eval --all-targets`
+  - `cargo test -p propagate --all-targets`
