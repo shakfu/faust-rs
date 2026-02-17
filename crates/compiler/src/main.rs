@@ -104,12 +104,85 @@ fn format_diagnostics_human(bundle: &DiagnosticBundle) -> String {
             out.push_str(&format!("{severity} [{}] {}\n", diag.code.0, diag.message));
         }
 
-        for note in &diag.notes {
+        let paired = paired_context_from_notes(&diag.notes);
+        if let Some(ctx) = &paired {
+            out.push_str(&format!("  = note: Here  A = {}\n", ctx.a_expr));
+            if let Some(arity) = &ctx.a_arity {
+                out.push_str(&format!("  = note: has {arity}\n"));
+            }
+            out.push_str(&format!("  = note: while B = {}\n", ctx.b_expr));
+            if let Some(arity) = &ctx.b_arity {
+                out.push_str(&format!("  = note: has {arity}\n"));
+            }
+        }
+
+        for note in filtered_notes_for_human(&diag.notes, paired.is_some()) {
             out.push_str(&format!("  = note: {note}\n"));
         }
         for help in &diag.help {
             out.push_str(&format!("  = help: {help}\n"));
         }
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PairedContext {
+    a_expr: String,
+    b_expr: String,
+    a_arity: Option<String>,
+    b_arity: Option<String>,
+}
+
+fn paired_context_from_notes(notes: &[Box<str>]) -> Option<PairedContext> {
+    let mut a_expr = None::<String>;
+    let mut b_expr = None::<String>;
+    let mut a_arity = None::<String>;
+    let mut b_arity = None::<String>;
+
+    for note in notes {
+        if let Some(rest) = note.strip_prefix("A arity: ") {
+            a_arity = Some(rest.to_owned());
+            continue;
+        }
+        if let Some(rest) = note.strip_prefix("B arity: ") {
+            b_arity = Some(rest.to_owned());
+            continue;
+        }
+        if let Some(rest) = note.strip_prefix("A ") {
+            if let Some((_, expr)) = rest.split_once(" = ") {
+                a_expr = Some(expr.to_owned());
+            }
+            continue;
+        }
+        if let Some(rest) = note.strip_prefix("B ") {
+            if let Some((_, expr)) = rest.split_once(" = ") {
+                b_expr = Some(expr.to_owned());
+            }
+            continue;
+        }
+    }
+
+    Some(PairedContext {
+        a_expr: a_expr?,
+        b_expr: b_expr?,
+        a_arity,
+        b_arity,
+    })
+}
+
+fn filtered_notes_for_human<'a>(notes: &'a [Box<str>], has_paired_context: bool) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    for note in notes {
+        if has_paired_context
+            && (note.starts_with("A ")
+                || note.starts_with("B ")
+                || note.starts_with("A arity: ")
+                || note.starts_with("B arity: "))
+        {
+            continue;
+        }
+        out.push(note.as_ref());
     }
     out
 }
@@ -473,6 +546,30 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
         assert_eq!(diag["help"][0], "remove one argument");
     }
 
+    #[test]
+    fn diagnostics_human_renderer_renders_cpp_style_a_b_block() {
+        let mut bundle = DiagnosticBundle::new();
+        bundle.push(
+            Diagnostic::new(
+                Severity::Error,
+                Stage::Propagate,
+                DiagnosticCode("FRS-PROP-0002"),
+                "split composition mismatch",
+            )
+            .with_note("A (split left) = (_, _)")
+            .with_note("B (split right) = (_, (_, _))")
+            .with_note("A arity: inputs=2 outputs=2")
+            .with_note("B arity: inputs=3 outputs=3"),
+        );
+
+        let rendered = format_diagnostics_human(&bundle);
+        assert!(rendered.contains("Here  A = (_, _)"));
+        assert!(rendered.contains("while B = (_, (_, _))"));
+        assert!(rendered.contains("has inputs=2 outputs=2"));
+        assert!(rendered.contains("has inputs=3 outputs=3"));
+        assert!(!rendered.contains("A (split left) = "));
+    }
+
     fn corpus_path(file: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -490,8 +587,8 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
                 vec![
                     "error [FRS-PROP-0002] split composition mismatch",
                     "binding_trace=process -> baz -> bar -> foo",
-                    "A (split left) = (_, _)",
-                    "B (split right) = (_, (_, _))",
+                    "Here  A = (_, _)",
+                    "while B = (_, (_, _))",
                 ],
             ),
             (
@@ -499,8 +596,8 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
                 vec![
                     "error [FRS-PROP-0003] recursive composition mismatch",
                     "binding_trace=process -> bar -> foo",
-                    "A (rec left) = _",
-                    "B (rec right) = (_, (_, _))",
+                    "Here  A = _",
+                    "while B = (_, (_, _))",
                 ],
             ),
             (
@@ -508,8 +605,8 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
                 vec![
                     "error [FRS-PROP-0002] sequential composition mismatch",
                     "binding_trace=process -> foo",
-                    "A (seq left) = ",
-                    "B (seq right) = ",
+                    "Here  A = ",
+                    "while B = ",
                 ],
             ),
         ];

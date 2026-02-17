@@ -2583,3 +2583,22 @@ Execution plan (Phase 0 prototype, revised):
     - explicit owner-definition note in alias-expanded failures,
     - computed numeric correction suggestions when deterministic,
     - dedicated human/json snapshot lock for these readability rules.
+
+#### Diagnostics readability micro-tranche — Step 1 (`Here A / while B` human rendering)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/src/main.rs`.
+- Implemented:
+  - human renderer now collapses paired-side notes into explicit C++-style blocks:
+    - `Here  A = ...`,
+    - `has inputs=... outputs=...`,
+    - `while B = ...`,
+    - `has inputs=... outputs=...`.
+  - low-level `A (...) = ...`/`B (...) = ...` notes remain in diagnostics payload (JSON),
+    while human rendering presents the condensed readable form.
+  - updated complex human snapshot expectations accordingly.
+  - added dedicated renderer unit test to lock this formatting contract.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --bin faust-rs`
