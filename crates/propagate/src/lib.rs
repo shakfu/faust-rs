@@ -206,7 +206,8 @@ impl IntoDiagnostic for PropagateError {
                     "computed: {left_outputs} == {right_inputs} -> {}",
                     left_outputs == right_inputs
                 ))
-                .with_help("insert/remap channels so A outputs exactly match B inputs"),
+                .with_help("for `A : B`, enforce outputs(A) == inputs(B)")
+                .with_help("fix pattern: add/remove channels on A, or adapt B to the same bus width"),
             Self::SplitArityMismatch {
                 left_outputs,
                 right_inputs,
@@ -224,7 +225,10 @@ impl IntoDiagnostic for PropagateError {
                         right_inputs % left_outputs
                     )
                 })
-                .with_help("make B input count a multiple of A output count"),
+                .with_help("for `A <: B`, enforce inputs(B) % outputs(A) == 0")
+                .with_help(
+                    "fix pattern: make B input count a multiple of A output count (duplicate or group channels)",
+                ),
             Self::MergeArityMismatch {
                 left_outputs,
                 right_inputs,
@@ -242,7 +246,10 @@ impl IntoDiagnostic for PropagateError {
                         left_outputs % right_inputs
                     )
                 })
-                .with_help("make A output count a multiple of B input count"),
+                .with_help("for `A :> B`, enforce outputs(A) % inputs(B) == 0")
+                .with_help(
+                    "fix pattern: adjust A outputs to a multiple of B inputs, or change B input arity",
+                ),
             Self::RecArityMismatch {
                 left_inputs,
                 left_outputs,
@@ -270,7 +277,12 @@ impl IntoDiagnostic for PropagateError {
                 left_inputs,
                 right_outputs <= left_inputs
             ))
-            .with_help("reduce feedback/output arity or increase matching counterpart arity"),
+            .with_help(
+                "for `A ~ B`, enforce inputs(B) <= outputs(A) and outputs(B) <= inputs(A)",
+            )
+            .with_help(
+                "fix pattern: reduce feedback bus size in B or widen matching input/output arity in A",
+            ),
             Self::InvalidIntegerValue { field, .. } => Diagnostic::new(
                 Severity::Error,
                 Stage::Propagate,

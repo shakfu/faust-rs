@@ -387,6 +387,12 @@ fn propagate_error_converts_to_structured_diagnostic_codes() {
             .any(|n| n.contains("computed: 3 % 2 = 1"))
     );
     assert!(!split.help.is_empty());
+    assert!(
+        split
+            .help
+            .iter()
+            .any(|h| h.contains("for `A <: B`, enforce inputs(B) % outputs(A) == 0"))
+    );
 
     let rec = PropagateError::RecArityMismatch {
         node,
@@ -399,6 +405,11 @@ fn propagate_error_converts_to_structured_diagnostic_codes() {
     assert_eq!(rec.code, codes::PROP_RECURSION_MISMATCH);
     assert!(!rec.notes.is_empty());
     assert!(!rec.help.is_empty());
+    assert!(
+        rec.help
+            .iter()
+            .any(|h| h.contains("for `A ~ B`, enforce inputs(B) <= outputs(A)"))
+    );
 }
 
 fn is_debruijn_rec(arena: &TreeArena, id: TreeId) -> bool {

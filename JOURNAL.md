@@ -2550,3 +2550,21 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo fmt --all`
   - `cargo test -p compiler --bin faust-rs`
+
+#### Diagnostics UX next tranche — Step 6 (operator-specific correction hints)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/propagate/src/lib.rs`,
+  - `crates/propagate/tests/core_api.rs`.
+- Implemented:
+  - refined propagate `help` payload per composition class:
+    - `seq`: explicit `A : B` equality rule + concrete channel-width fix pattern,
+    - `split`: explicit `A <: B` divisibility rule + concrete grouping/duplication fix pattern,
+    - `merge`: explicit `A :> B` multiple rule + concrete arity adjustment fix pattern,
+    - `rec`: explicit `A ~ B` inequalities + concrete feedback-bus fix pattern.
+  - locked help-shape expectations with targeted propagate unit tests.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p propagate --all-targets`
+  - `cargo test -p compiler --test diagnostic_errors`
