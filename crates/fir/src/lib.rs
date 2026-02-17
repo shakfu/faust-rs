@@ -50,8 +50,14 @@ pub enum FirType {
     Int64,
     Float32,
     Float64,
+    Quad,
+    FixedPoint,
     Bool,
     Void,
+    Obj,
+    Sound,
+    UI,
+    Meta,
     Ptr(Box<FirType>),
     Array(Box<FirType>, usize),
     Vector(Box<FirType>, usize),
@@ -120,6 +126,13 @@ pub struct SliderRange {
     pub step: f64,
 }
 
+/// Named type used for function signatures.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NamedType {
+    pub name: String,
+    pub typ: FirType,
+}
+
 /// FIR storage using `tlib::TreeArena` hash-consing.
 #[derive(Debug)]
 pub struct FirStore {
@@ -178,6 +191,7 @@ impl<'a> FirBuilder<'a> {
         Self { store }
     }
 
+    /// C++ parity: `Int32NumInst`.
     #[must_use]
     pub fn int32(&mut self, value: i32) -> FirId {
         let typ = encode_type(&mut self.store.arena, &FirType::Int32);
@@ -185,6 +199,7 @@ impl<'a> FirBuilder<'a> {
         intern_tag(&mut self.store.arena, FIR_V_INT32_TAG, &[typ, val])
     }
 
+    /// C++ parity: `Int64NumInst`.
     #[must_use]
     pub fn int64(&mut self, value: i64) -> FirId {
         let typ = encode_type(&mut self.store.arena, &FirType::Int64);
@@ -192,6 +207,7 @@ impl<'a> FirBuilder<'a> {
         intern_tag(&mut self.store.arena, FIR_V_INT64_TAG, &[typ, val])
     }
 
+    /// C++ parity: `FloatNumInst`.
     #[must_use]
     pub fn float32(&mut self, value: f32) -> FirId {
         let typ = encode_type(&mut self.store.arena, &FirType::Float32);
@@ -199,6 +215,7 @@ impl<'a> FirBuilder<'a> {
         intern_tag(&mut self.store.arena, FIR_V_FLOAT32_TAG, &[typ, bits])
     }
 
+    /// C++ parity: `DoubleNumInst`.
     #[must_use]
     pub fn float64(&mut self, value: f64) -> FirId {
         let typ = encode_type(&mut self.store.arena, &FirType::Float64);
@@ -206,6 +223,7 @@ impl<'a> FirBuilder<'a> {
         intern_tag(&mut self.store.arena, FIR_V_FLOAT64_TAG, &[typ, val])
     }
 
+    /// C++ parity: `BoolNumInst`.
     #[must_use]
     pub fn bool_(&mut self, value: bool) -> FirId {
         let typ = encode_type(&mut self.store.arena, &FirType::Bool);
@@ -213,6 +231,121 @@ impl<'a> FirBuilder<'a> {
         intern_tag(&mut self.store.arena, FIR_V_BOOL_TAG, &[typ, val])
     }
 
+    /// C++ parity: `QuadNumInst`.
+    #[must_use]
+    pub fn quad(&mut self, value: f64) -> FirId {
+        let typ = encode_type(&mut self.store.arena, &FirType::Quad);
+        let val = self.store.arena.float(value);
+        intern_tag(&mut self.store.arena, FIR_V_QUAD_TAG, &[typ, val])
+    }
+
+    /// C++ parity: `FixedPointNumInst`.
+    #[must_use]
+    pub fn fixed_point(&mut self, value: f64) -> FirId {
+        let typ = encode_type(&mut self.store.arena, &FirType::FixedPoint);
+        let val = self.store.arena.float(value);
+        intern_tag(&mut self.store.arena, FIR_V_FIXED_POINT_TAG, &[typ, val])
+    }
+
+    /// C++ parity: `ValueArrayInst`.
+    #[must_use]
+    pub fn value_array(&mut self, values: &[FirId], typ: FirType) -> FirId {
+        let typ_id = encode_type(&mut self.store.arena, &typ);
+        let values_id = encode_list(&mut self.store.arena, values);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_V_VALUE_ARRAY_TAG,
+            &[typ_id, values_id],
+        )
+    }
+
+    /// C++ parity: `Int32ArrayNumInst`.
+    #[must_use]
+    pub fn int32_array(&mut self, values: &[i32]) -> FirId {
+        let typ = encode_type(
+            &mut self.store.arena,
+            &FirType::Array(Box::new(FirType::Int32), values.len()),
+        );
+        let value_ids: Vec<_> = values
+            .iter()
+            .map(|v| self.store.arena.int(i64::from(*v)))
+            .collect();
+        let values_id = encode_list(&mut self.store.arena, &value_ids);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_V_INT32_ARRAY_TAG,
+            &[typ, values_id],
+        )
+    }
+
+    /// C++ parity: `FloatArrayNumInst`.
+    #[must_use]
+    pub fn float32_array(&mut self, values: &[f32]) -> FirId {
+        let typ = encode_type(
+            &mut self.store.arena,
+            &FirType::Array(Box::new(FirType::Float32), values.len()),
+        );
+        let value_ids: Vec<_> = values
+            .iter()
+            .map(|v| self.store.arena.int(i64::from(v.to_bits())))
+            .collect();
+        let values_id = encode_list(&mut self.store.arena, &value_ids);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_V_FLOAT32_ARRAY_TAG,
+            &[typ, values_id],
+        )
+    }
+
+    /// C++ parity: `DoubleArrayNumInst`.
+    #[must_use]
+    pub fn float64_array(&mut self, values: &[f64]) -> FirId {
+        let typ = encode_type(
+            &mut self.store.arena,
+            &FirType::Array(Box::new(FirType::Float64), values.len()),
+        );
+        let value_ids: Vec<_> = values.iter().map(|v| self.store.arena.float(*v)).collect();
+        let values_id = encode_list(&mut self.store.arena, &value_ids);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_V_FLOAT64_ARRAY_TAG,
+            &[typ, values_id],
+        )
+    }
+
+    /// C++ parity: `QuadArrayNumInst`.
+    #[must_use]
+    pub fn quad_array(&mut self, values: &[f64]) -> FirId {
+        let typ = encode_type(
+            &mut self.store.arena,
+            &FirType::Array(Box::new(FirType::Quad), values.len()),
+        );
+        let value_ids: Vec<_> = values.iter().map(|v| self.store.arena.float(*v)).collect();
+        let values_id = encode_list(&mut self.store.arena, &value_ids);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_V_QUAD_ARRAY_TAG,
+            &[typ, values_id],
+        )
+    }
+
+    /// C++ parity: `FixedPointArrayNumInst`.
+    #[must_use]
+    pub fn fixed_point_array(&mut self, values: &[f64]) -> FirId {
+        let typ = encode_type(
+            &mut self.store.arena,
+            &FirType::Array(Box::new(FirType::FixedPoint), values.len()),
+        );
+        let value_ids: Vec<_> = values.iter().map(|v| self.store.arena.float(*v)).collect();
+        let values_id = encode_list(&mut self.store.arena, &value_ids);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_V_FIXED_POINT_ARRAY_TAG,
+            &[typ, values_id],
+        )
+    }
+
+    /// C++ parity: `LoadVarInst`.
     #[must_use]
     pub fn load_var(&mut self, name: impl Into<String>, access: AccessType, typ: FirType) -> FirId {
         let typ_id = encode_type(&mut self.store.arena, &typ);
@@ -225,6 +358,44 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
+    /// C++ parity: `LoadVarAddressInst`.
+    #[must_use]
+    pub fn load_var_address(
+        &mut self,
+        name: impl Into<String>,
+        access: AccessType,
+        typ: FirType,
+    ) -> FirId {
+        let typ_id = encode_type(&mut self.store.arena, &typ);
+        let name_id = self.store.arena.symbol(name);
+        let access_id = encode_access(&mut self.store.arena, access);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_V_LOAD_VAR_ADDRESS_TAG,
+            &[typ_id, name_id, access_id],
+        )
+    }
+
+    /// C++ parity: `TeeVarInst`.
+    #[must_use]
+    pub fn tee_var(
+        &mut self,
+        name: impl Into<String>,
+        access: AccessType,
+        value: FirId,
+        typ: FirType,
+    ) -> FirId {
+        let typ_id = encode_type(&mut self.store.arena, &typ);
+        let name_id = self.store.arena.symbol(name);
+        let access_id = encode_access(&mut self.store.arena, access);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_V_TEE_VAR_TAG,
+            &[typ_id, name_id, access_id, value],
+        )
+    }
+
+    /// C++ parity: `BinopInst`.
     #[must_use]
     pub fn binop(&mut self, op: FirBinOp, lhs: FirId, rhs: FirId, typ: FirType) -> FirId {
         let typ_id = encode_type(&mut self.store.arena, &typ);
@@ -236,12 +407,45 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
+    /// C++ parity: `NegInst`.
+    #[must_use]
+    pub fn neg(&mut self, value: FirId, typ: FirType) -> FirId {
+        let typ_id = encode_type(&mut self.store.arena, &typ);
+        intern_tag(&mut self.store.arena, FIR_V_NEG_TAG, &[typ_id, value])
+    }
+
+    /// C++ parity: `CastInst`.
     #[must_use]
     pub fn cast(&mut self, typ: FirType, value: FirId) -> FirId {
         let typ_id = encode_type(&mut self.store.arena, &typ);
         intern_tag(&mut self.store.arena, FIR_V_CAST_TAG, &[typ_id, value])
     }
 
+    /// C++ parity: `BitcastInst`.
+    #[must_use]
+    pub fn bitcast(&mut self, typ: FirType, value: FirId) -> FirId {
+        let typ_id = encode_type(&mut self.store.arena, &typ);
+        intern_tag(&mut self.store.arena, FIR_V_BITCAST_TAG, &[typ_id, value])
+    }
+
+    /// C++ parity: `Select2Inst`.
+    #[must_use]
+    pub fn select2(
+        &mut self,
+        cond: FirId,
+        then_value: FirId,
+        else_value: FirId,
+        typ: FirType,
+    ) -> FirId {
+        let typ_id = encode_type(&mut self.store.arena, &typ);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_V_SELECT2_TAG,
+            &[typ_id, cond, then_value, else_value],
+        )
+    }
+
+    /// C++ parity: `FunCallInst`.
     #[must_use]
     pub fn fun_call(&mut self, name: impl Into<String>, args: &[FirId], typ: FirType) -> FirId {
         let typ_id = encode_type(&mut self.store.arena, &typ);
@@ -254,6 +458,22 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
+    /// C++ parity: `NullValueInst`.
+    #[must_use]
+    pub fn null_value(&mut self, typ: FirType) -> FirId {
+        let typ_id = encode_type(&mut self.store.arena, &typ);
+        intern_tag(&mut self.store.arena, FIR_V_NULL_TAG, &[typ_id])
+    }
+
+    /// C++ parity: `NewDSPInst`.
+    #[must_use]
+    pub fn new_dsp(&mut self, name: impl Into<String>, typ: FirType) -> FirId {
+        let typ_id = encode_type(&mut self.store.arena, &typ);
+        let name_id = self.store.arena.symbol(name);
+        intern_tag(&mut self.store.arena, FIR_V_NEW_DSP_TAG, &[typ_id, name_id])
+    }
+
+    /// C++ parity: `DeclareVarInst`.
     #[must_use]
     pub fn declare_var(
         &mut self,
@@ -273,6 +493,76 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
+    /// C++ parity: `NullDeclareVarInst`.
+    #[must_use]
+    pub fn null_declare_var(&mut self) -> FirId {
+        intern_tag(&mut self.store.arena, FIR_NULL_DECLARE_VAR_TAG, &[])
+    }
+
+    /// C++ parity: `DeclareFunInst`.
+    #[must_use]
+    pub fn declare_fun(
+        &mut self,
+        name: impl Into<String>,
+        typ: FirType,
+        args: &[NamedType],
+        body: FirId,
+        is_inline: bool,
+    ) -> FirId {
+        let name_id = self.store.arena.symbol(name);
+        let typ_id = encode_type(&mut self.store.arena, &typ);
+        let args_id = encode_named_types(&mut self.store.arena, args);
+        let inline_id = self.store.arena.int(if is_inline { 1 } else { 0 });
+        intern_tag(
+            &mut self.store.arena,
+            FIR_DECLARE_FUN_TAG,
+            &[name_id, typ_id, args_id, body, inline_id],
+        )
+    }
+
+    /// C++ parity: `DeclareStructTypeInst`.
+    #[must_use]
+    pub fn declare_struct_type(&mut self, typ: FirType) -> FirId {
+        let typ_id = encode_type(&mut self.store.arena, &typ);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_DECLARE_STRUCT_TYPE_TAG,
+            &[typ_id],
+        )
+    }
+
+    /// C++ parity: `DeclareBufferIterators`.
+    #[must_use]
+    pub fn declare_buffer_iterators(
+        &mut self,
+        name1: impl Into<String>,
+        name2: impl Into<String>,
+        channels: i32,
+        typ: FirType,
+        mutable: bool,
+        chunk: bool,
+    ) -> FirId {
+        let name1_id = self.store.arena.symbol(name1);
+        let name2_id = self.store.arena.symbol(name2);
+        let channels_id = self.store.arena.int(i64::from(channels));
+        let typ_id = encode_type(&mut self.store.arena, &typ);
+        let mutable_id = self.store.arena.int(if mutable { 1 } else { 0 });
+        let chunk_id = self.store.arena.int(if chunk { 1 } else { 0 });
+        intern_tag(
+            &mut self.store.arena,
+            FIR_DECLARE_BUFFER_ITERATORS_TAG,
+            &[
+                name1_id,
+                name2_id,
+                channels_id,
+                typ_id,
+                mutable_id,
+                chunk_id,
+            ],
+        )
+    }
+
+    /// C++ parity: `StoreVarInst`.
     #[must_use]
     pub fn store_var(
         &mut self,
@@ -289,23 +579,51 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
+    /// C++ parity: `ShiftArrayVarInst`.
+    #[must_use]
+    pub fn shift_array_var(
+        &mut self,
+        name: impl Into<String>,
+        access: AccessType,
+        delay: i32,
+    ) -> FirId {
+        let name_id = self.store.arena.symbol(name);
+        let access_id = encode_access(&mut self.store.arena, access);
+        let delay_id = self.store.arena.int(i64::from(delay));
+        intern_tag(
+            &mut self.store.arena,
+            FIR_SHIFT_ARRAY_VAR_TAG,
+            &[name_id, access_id, delay_id],
+        )
+    }
+
+    /// C++ parity: `DropInst`.
     #[must_use]
     pub fn drop_(&mut self, value: FirId) -> FirId {
         intern_tag(&mut self.store.arena, FIR_DROP_TAG, &[value])
     }
 
+    /// C++ parity: `NullStatementInst`.
+    #[must_use]
+    pub fn null_statement(&mut self) -> FirId {
+        intern_tag(&mut self.store.arena, FIR_NULL_STATEMENT_TAG, &[])
+    }
+
+    /// C++ parity: `RetInst`.
     #[must_use]
     pub fn ret(&mut self, value: Option<FirId>) -> FirId {
         let value_id = value.unwrap_or_else(|| self.store.arena.nil());
         intern_tag(&mut self.store.arena, FIR_RETURN_TAG, &[value_id])
     }
 
+    /// C++ parity: `BlockInst`.
     #[must_use]
     pub fn block(&mut self, body: &[FirId]) -> FirId {
         let list = encode_list(&mut self.store.arena, body);
         intern_tag(&mut self.store.arena, FIR_BLOCK_TAG, &[list])
     }
 
+    /// C++ parity: `IfInst`.
     #[must_use]
     pub fn if_(&mut self, cond: FirId, then_block: FirId, else_block: Option<FirId>) -> FirId {
         let else_id = else_block.unwrap_or_else(|| self.store.arena.nil());
@@ -316,6 +634,33 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
+    /// C++ parity: `ControlInst`.
+    #[must_use]
+    pub fn control(&mut self, cond: FirId, stmt: FirId) -> FirId {
+        intern_tag(&mut self.store.arena, FIR_CONTROL_TAG, &[cond, stmt])
+    }
+
+    /// C++ parity: `ForLoopInst`.
+    #[must_use]
+    pub fn for_loop(
+        &mut self,
+        var: impl Into<String>,
+        init: FirId,
+        end: FirId,
+        step: FirId,
+        body: FirId,
+        is_reverse: bool,
+    ) -> FirId {
+        let var_id = self.store.arena.symbol(var);
+        let reverse = self.store.arena.int(if is_reverse { 1 } else { 0 });
+        intern_tag(
+            &mut self.store.arena,
+            FIR_FOR_LOOP_TAG,
+            &[var_id, init, end, step, body, reverse],
+        )
+    }
+
+    /// C++ parity: `SimpleForLoopInst`.
     #[must_use]
     pub fn simple_for_loop(
         &mut self,
@@ -333,6 +678,63 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
+    /// C++ parity: `IteratorForLoopInst`.
+    #[must_use]
+    pub fn iterator_for_loop(
+        &mut self,
+        iterators: &[&str],
+        is_reverse: bool,
+        body: FirId,
+    ) -> FirId {
+        let iter_ids: Vec<_> = iterators
+            .iter()
+            .map(|name| self.store.arena.symbol(*name))
+            .collect();
+        let iter_list = encode_list(&mut self.store.arena, &iter_ids);
+        let reverse = self.store.arena.int(if is_reverse { 1 } else { 0 });
+        intern_tag(
+            &mut self.store.arena,
+            FIR_ITERATOR_FOR_LOOP_TAG,
+            &[iter_list, reverse, body],
+        )
+    }
+
+    /// C++ parity: `WhileLoopInst`.
+    #[must_use]
+    pub fn while_loop(&mut self, cond: FirId, body: FirId) -> FirId {
+        intern_tag(&mut self.store.arena, FIR_WHILE_LOOP_TAG, &[cond, body])
+    }
+
+    /// C++ parity: `SwitchInst`.
+    #[must_use]
+    pub fn switch(&mut self, cond: FirId, cases: &[(i64, FirId)], default: Option<FirId>) -> FirId {
+        let cases_id = encode_switch_cases(&mut self.store.arena, cases);
+        let default_id = default.unwrap_or_else(|| self.store.arena.nil());
+        intern_tag(
+            &mut self.store.arena,
+            FIR_SWITCH_TAG,
+            &[cond, cases_id, default_id],
+        )
+    }
+
+    /// C++ parity: `ModuleInst`.
+    #[must_use]
+    pub fn module(
+        &mut self,
+        name: impl Into<String>,
+        dsp_struct: FirId,
+        globals: FirId,
+        declarations: FirId,
+    ) -> FirId {
+        let name_id = self.store.arena.symbol(name);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_MODULE_TAG,
+            &[name_id, dsp_struct, globals, declarations],
+        )
+    }
+
+    /// C++ parity: `OpenboxInst`.
     #[must_use]
     pub fn open_box(&mut self, typ: UiBoxType, label: impl Into<String>) -> FirId {
         let typ_id = encode_ui_box_type(&mut self.store.arena, typ);
@@ -340,11 +742,13 @@ impl<'a> FirBuilder<'a> {
         intern_tag(&mut self.store.arena, FIR_OPEN_BOX_TAG, &[typ_id, label_id])
     }
 
+    /// C++ parity: `CloseboxInst`.
     #[must_use]
     pub fn close_box(&mut self) -> FirId {
         intern_tag(&mut self.store.arena, FIR_CLOSE_BOX_TAG, &[])
     }
 
+    /// C++ parity: `AddButtonInst`.
     #[must_use]
     pub fn add_button(
         &mut self,
@@ -362,6 +766,7 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
+    /// C++ parity: `AddSliderInst`.
     #[must_use]
     pub fn add_slider(
         &mut self,
@@ -384,6 +789,7 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
+    /// C++ parity: `AddBargraphInst`.
     #[must_use]
     pub fn add_bargraph(
         &mut self,
@@ -405,6 +811,31 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
+    /// C++ parity: compatibility helper for `AddSoundfileInst` when URL is not provided.
+    #[must_use]
+    pub fn add_soundfile(&mut self, label: impl Into<String>, var: impl Into<String>) -> FirId {
+        self.add_soundfile_with_url(label, "", var)
+    }
+
+    /// C++ parity: `AddSoundfileInst`.
+    #[must_use]
+    pub fn add_soundfile_with_url(
+        &mut self,
+        label: impl Into<String>,
+        url: impl Into<String>,
+        var: impl Into<String>,
+    ) -> FirId {
+        let label_id = self.store.arena.symbol(label);
+        let url_id = self.store.arena.symbol(url);
+        let var_id = self.store.arena.symbol(var);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_ADD_SOUNDFILE_TAG,
+            &[label_id, url_id, var_id],
+        )
+    }
+
+    /// C++ parity: `AddMetaDeclareInst`.
     #[must_use]
     pub fn add_meta_declare(
         &mut self,
@@ -422,6 +853,7 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
+    /// C++ parity: `LabelInst`.
     #[must_use]
     pub fn label(&mut self, label: impl Into<String>) -> FirId {
         let label_id = self.store.arena.symbol(label);
@@ -453,9 +885,52 @@ pub enum FirMatch {
         value: bool,
         typ: FirType,
     },
+    Quad {
+        value: f64,
+        typ: FirType,
+    },
+    FixedPoint {
+        value: f64,
+        typ: FirType,
+    },
+    ValueArray {
+        values: Vec<FirId>,
+        typ: FirType,
+    },
+    Int32Array {
+        values: Vec<i32>,
+        typ: FirType,
+    },
+    Float32Array {
+        values: Vec<f32>,
+        typ: FirType,
+    },
+    Float64Array {
+        values: Vec<f64>,
+        typ: FirType,
+    },
+    QuadArray {
+        values: Vec<f64>,
+        typ: FirType,
+    },
+    FixedPointArray {
+        values: Vec<f64>,
+        typ: FirType,
+    },
     LoadVar {
         name: String,
         access: AccessType,
+        typ: FirType,
+    },
+    LoadVarAddress {
+        name: String,
+        access: AccessType,
+        typ: FirType,
+    },
+    TeeVar {
+        name: String,
+        access: AccessType,
+        value: FirId,
         typ: FirType,
     },
     BinOp {
@@ -464,13 +939,34 @@ pub enum FirMatch {
         rhs: FirId,
         typ: FirType,
     },
+    Neg {
+        value: FirId,
+        typ: FirType,
+    },
     Cast {
         typ: FirType,
         value: FirId,
     },
+    Bitcast {
+        typ: FirType,
+        value: FirId,
+    },
+    Select2 {
+        cond: FirId,
+        then_value: FirId,
+        else_value: FirId,
+        typ: FirType,
+    },
     FunCall {
         name: String,
         args: Vec<FirId>,
+        typ: FirType,
+    },
+    NullValue {
+        typ: FirType,
+    },
+    NewDsp {
+        name: String,
         typ: FirType,
     },
     DeclareVar {
@@ -479,12 +975,37 @@ pub enum FirMatch {
         access: AccessType,
         init: Option<FirId>,
     },
+    NullDeclareVar,
+    DeclareFun {
+        name: String,
+        typ: FirType,
+        args: Vec<NamedType>,
+        body: FirId,
+        is_inline: bool,
+    },
+    DeclareStructType {
+        typ: FirType,
+    },
+    DeclareBufferIterators {
+        name1: String,
+        name2: String,
+        channels: i32,
+        typ: FirType,
+        mutable: bool,
+        chunk: bool,
+    },
     StoreVar {
         name: String,
         access: AccessType,
         value: FirId,
     },
+    ShiftArrayVar {
+        name: String,
+        access: AccessType,
+        delay: i32,
+    },
     Drop(FirId),
+    NullStatement,
     Return(Option<FirId>),
     Block(Vec<FirId>),
     If {
@@ -492,11 +1013,37 @@ pub enum FirMatch {
         then_block: FirId,
         else_block: Option<FirId>,
     },
+    Control {
+        cond: FirId,
+        stmt: FirId,
+    },
+    ForLoop {
+        var: String,
+        init: FirId,
+        end: FirId,
+        step: FirId,
+        body: FirId,
+        is_reverse: bool,
+    },
     SimpleForLoop {
         var: String,
         upper: FirId,
         body: FirId,
         is_reverse: bool,
+    },
+    IteratorForLoop {
+        iterators: Vec<String>,
+        is_reverse: bool,
+        body: FirId,
+    },
+    WhileLoop {
+        cond: FirId,
+        body: FirId,
+    },
+    Switch {
+        cond: FirId,
+        cases: Vec<(i64, FirId)>,
+        default: Option<FirId>,
     },
     OpenBox {
         typ: UiBoxType,
@@ -524,12 +1071,23 @@ pub enum FirMatch {
         lo: f64,
         hi: f64,
     },
+    AddSoundfile {
+        label: String,
+        url: String,
+        var: String,
+    },
     AddMetaDeclare {
         var: String,
         key: String,
         value: String,
     },
     Label(String),
+    Module {
+        name: String,
+        dsp_struct: FirId,
+        globals: FirId,
+        declarations: FirId,
+    },
 }
 
 /// Decodes one [`FirId`] into canonical [`FirMatch`] shape.
@@ -592,6 +1150,78 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
             };
             FirMatch::Bool { value, typ }
         }
+        (FIR_V_QUAD_TAG, [typ, v]) => {
+            let (Some(typ), Some(value)) = (
+                decode_type(&store.arena, *typ),
+                decode_f64(&store.arena, *v),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::Quad { value, typ }
+        }
+        (FIR_V_FIXED_POINT_TAG, [typ, v]) => {
+            let (Some(typ), Some(value)) = (
+                decode_type(&store.arena, *typ),
+                decode_f64(&store.arena, *v),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::FixedPoint { value, typ }
+        }
+        (FIR_V_VALUE_ARRAY_TAG, [typ, values]) => {
+            let (Some(typ), Some(values)) = (
+                decode_type(&store.arena, *typ),
+                decode_list(&store.arena, *values),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::ValueArray { values, typ }
+        }
+        (FIR_V_INT32_ARRAY_TAG, [typ, values]) => {
+            let (Some(typ), Some(values)) = (
+                decode_type(&store.arena, *typ),
+                decode_i32_list(&store.arena, *values),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::Int32Array { values, typ }
+        }
+        (FIR_V_FLOAT32_ARRAY_TAG, [typ, values]) => {
+            let (Some(typ), Some(values)) = (
+                decode_type(&store.arena, *typ),
+                decode_f32_bits_list(&store.arena, *values),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::Float32Array { values, typ }
+        }
+        (FIR_V_FLOAT64_ARRAY_TAG, [typ, values]) => {
+            let (Some(typ), Some(values)) = (
+                decode_type(&store.arena, *typ),
+                decode_f64_list(&store.arena, *values),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::Float64Array { values, typ }
+        }
+        (FIR_V_QUAD_ARRAY_TAG, [typ, values]) => {
+            let (Some(typ), Some(values)) = (
+                decode_type(&store.arena, *typ),
+                decode_f64_list(&store.arena, *values),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::QuadArray { values, typ }
+        }
+        (FIR_V_FIXED_POINT_ARRAY_TAG, [typ, values]) => {
+            let (Some(typ), Some(values)) = (
+                decode_type(&store.arena, *typ),
+                decode_f64_list(&store.arena, *values),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::FixedPointArray { values, typ }
+        }
         (FIR_V_LOAD_VAR_TAG, [typ, name, access]) => {
             let (Some(typ), Some(name), Some(access)) = (
                 decode_type(&store.arena, *typ),
@@ -601,6 +1231,31 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 return FirMatch::Unknown;
             };
             FirMatch::LoadVar { name, access, typ }
+        }
+        (FIR_V_LOAD_VAR_ADDRESS_TAG, [typ, name, access]) => {
+            let (Some(typ), Some(name), Some(access)) = (
+                decode_type(&store.arena, *typ),
+                decode_symbol(&store.arena, *name),
+                decode_access(&store.arena, *access),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::LoadVarAddress { name, access, typ }
+        }
+        (FIR_V_TEE_VAR_TAG, [typ, name, access, value]) => {
+            let (Some(typ), Some(name), Some(access)) = (
+                decode_type(&store.arena, *typ),
+                decode_symbol(&store.arena, *name),
+                decode_access(&store.arena, *access),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::TeeVar {
+                name,
+                access,
+                value: *value,
+                typ,
+            }
         }
         (FIR_V_BINOP_TAG, [typ, op, lhs, rhs]) => {
             let (Some(typ), Some(op)) = (
@@ -616,11 +1271,34 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 typ,
             }
         }
+        (FIR_V_NEG_TAG, [typ, value]) => {
+            let Some(typ) = decode_type(&store.arena, *typ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::Neg { value: *value, typ }
+        }
         (FIR_V_CAST_TAG, [typ, value]) => {
             let Some(typ) = decode_type(&store.arena, *typ) else {
                 return FirMatch::Unknown;
             };
             FirMatch::Cast { typ, value: *value }
+        }
+        (FIR_V_BITCAST_TAG, [typ, value]) => {
+            let Some(typ) = decode_type(&store.arena, *typ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::Bitcast { typ, value: *value }
+        }
+        (FIR_V_SELECT2_TAG, [typ, cond, then_value, else_value]) => {
+            let Some(typ) = decode_type(&store.arena, *typ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::Select2 {
+                cond: *cond,
+                then_value: *then_value,
+                else_value: *else_value,
+                typ,
+            }
         }
         (FIR_V_FUNCALL_TAG, [typ, name, args]) => {
             let (Some(typ), Some(name), Some(args)) = (
@@ -631,6 +1309,21 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 return FirMatch::Unknown;
             };
             FirMatch::FunCall { name, args, typ }
+        }
+        (FIR_V_NULL_TAG, [typ]) => {
+            let Some(typ) = decode_type(&store.arena, *typ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::NullValue { typ }
+        }
+        (FIR_V_NEW_DSP_TAG, [typ, name]) => {
+            let (Some(typ), Some(name)) = (
+                decode_type(&store.arena, *typ),
+                decode_symbol(&store.arena, *name),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::NewDsp { name, typ }
         }
         (FIR_DECLARE_VAR_TAG, [name, typ, access, init]) => {
             let (Some(name), Some(typ), Some(access)) = (
@@ -652,6 +1345,50 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 init,
             }
         }
+        (FIR_NULL_DECLARE_VAR_TAG, []) => FirMatch::NullDeclareVar,
+        (FIR_DECLARE_FUN_TAG, [name, typ, args, body, is_inline]) => {
+            let (Some(name), Some(typ), Some(args), Some(is_inline)) = (
+                decode_symbol(&store.arena, *name),
+                decode_type(&store.arena, *typ),
+                decode_named_types(&store.arena, *args),
+                decode_bool(&store.arena, *is_inline),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::DeclareFun {
+                name,
+                typ,
+                args,
+                body: *body,
+                is_inline,
+            }
+        }
+        (FIR_DECLARE_STRUCT_TYPE_TAG, [typ]) => {
+            let Some(typ) = decode_type(&store.arena, *typ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::DeclareStructType { typ }
+        }
+        (FIR_DECLARE_BUFFER_ITERATORS_TAG, [name1, name2, channels, typ, mutable, chunk]) => {
+            let (Some(name1), Some(name2), Some(channels), Some(typ), Some(mutable), Some(chunk)) = (
+                decode_symbol(&store.arena, *name1),
+                decode_symbol(&store.arena, *name2),
+                decode_i32(&store.arena, *channels),
+                decode_type(&store.arena, *typ),
+                decode_bool(&store.arena, *mutable),
+                decode_bool(&store.arena, *chunk),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::DeclareBufferIterators {
+                name1,
+                name2,
+                channels,
+                typ,
+                mutable,
+                chunk,
+            }
+        }
         (FIR_STORE_VAR_TAG, [name, access, value]) => {
             let (Some(name), Some(access)) = (
                 decode_symbol(&store.arena, *name),
@@ -665,7 +1402,22 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 value: *value,
             }
         }
+        (FIR_SHIFT_ARRAY_VAR_TAG, [name, access, delay]) => {
+            let (Some(name), Some(access), Some(delay)) = (
+                decode_symbol(&store.arena, *name),
+                decode_access(&store.arena, *access),
+                decode_i32(&store.arena, *delay),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::ShiftArrayVar {
+                name,
+                access,
+                delay,
+            }
+        }
         (FIR_DROP_TAG, [value]) => FirMatch::Drop(*value),
+        (FIR_NULL_STATEMENT_TAG, []) => FirMatch::NullStatement,
         (FIR_RETURN_TAG, [value]) => {
             let value = if store.arena.is_nil(*value) {
                 None
@@ -692,6 +1444,26 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 else_block,
             }
         }
+        (FIR_CONTROL_TAG, [cond, stmt]) => FirMatch::Control {
+            cond: *cond,
+            stmt: *stmt,
+        },
+        (FIR_FOR_LOOP_TAG, [var, init, end, step, body, is_reverse]) => {
+            let (Some(var), Some(is_reverse)) = (
+                decode_symbol(&store.arena, *var),
+                decode_bool(&store.arena, *is_reverse),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::ForLoop {
+                var,
+                init: *init,
+                end: *end,
+                step: *step,
+                body: *body,
+                is_reverse,
+            }
+        }
         (FIR_SIMPLE_FOR_LOOP_TAG, [var, upper, body, is_reverse]) => {
             let (Some(var), Some(is_reverse)) = (
                 decode_symbol(&store.arena, *var),
@@ -704,6 +1476,38 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 upper: *upper,
                 body: *body,
                 is_reverse,
+            }
+        }
+        (FIR_ITERATOR_FOR_LOOP_TAG, [iterators, is_reverse, body]) => {
+            let (Some(iterators), Some(is_reverse)) = (
+                decode_symbols_list(&store.arena, *iterators),
+                decode_bool(&store.arena, *is_reverse),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::IteratorForLoop {
+                iterators,
+                is_reverse,
+                body: *body,
+            }
+        }
+        (FIR_WHILE_LOOP_TAG, [cond, body]) => FirMatch::WhileLoop {
+            cond: *cond,
+            body: *body,
+        },
+        (FIR_SWITCH_TAG, [cond, cases, default]) => {
+            let Some(cases) = decode_switch_cases(&store.arena, *cases) else {
+                return FirMatch::Unknown;
+            };
+            let default = if store.arena.is_nil(*default) {
+                None
+            } else {
+                Some(*default)
+            };
+            FirMatch::Switch {
+                cond: *cond,
+                cases,
+                default,
             }
         }
         (FIR_OPEN_BOX_TAG, [typ, label]) => {
@@ -766,6 +1570,30 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 hi,
             }
         }
+        (FIR_ADD_SOUNDFILE_TAG, [label, url, var]) => {
+            let (Some(label), Some(url), Some(var)) = (
+                decode_symbol(&store.arena, *label),
+                decode_symbol(&store.arena, *url),
+                decode_symbol(&store.arena, *var),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::AddSoundfile { label, url, var }
+        }
+        // Compatibility with older rust snapshots where URL was not encoded.
+        (FIR_ADD_SOUNDFILE_TAG, [label, var]) => {
+            let (Some(label), Some(var)) = (
+                decode_symbol(&store.arena, *label),
+                decode_symbol(&store.arena, *var),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::AddSoundfile {
+                label,
+                url: String::new(),
+                var,
+            }
+        }
         (FIR_ADD_META_DECLARE_TAG, [var, key, value]) => {
             let (Some(var), Some(key), Some(value)) = (
                 decode_symbol(&store.arena, *var),
@@ -782,6 +1610,17 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
             };
             FirMatch::Label(label)
         }
+        (FIR_MODULE_TAG, [name, dsp_struct, globals, declarations]) => {
+            let Some(name) = decode_symbol(&store.arena, *name) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::Module {
+                name,
+                dsp_struct: *dsp_struct,
+                globals: *globals,
+                declarations: *declarations,
+            }
+        }
         _ => FirMatch::Unknown,
     }
 }
@@ -790,8 +1629,14 @@ const FIR_TYPE_INT32_TAG: &str = "FIRTYPE_INT32";
 const FIR_TYPE_INT64_TAG: &str = "FIRTYPE_INT64";
 const FIR_TYPE_FLOAT32_TAG: &str = "FIRTYPE_FLOAT32";
 const FIR_TYPE_FLOAT64_TAG: &str = "FIRTYPE_FLOAT64";
+const FIR_TYPE_QUAD_TAG: &str = "FIRTYPE_QUAD";
+const FIR_TYPE_FIXED_POINT_TAG: &str = "FIRTYPE_FIXEDPOINT";
 const FIR_TYPE_BOOL_TAG: &str = "FIRTYPE_BOOL";
 const FIR_TYPE_VOID_TAG: &str = "FIRTYPE_VOID";
+const FIR_TYPE_OBJ_TAG: &str = "FIRTYPE_OBJ";
+const FIR_TYPE_SOUND_TAG: &str = "FIRTYPE_SOUND";
+const FIR_TYPE_UI_TAG: &str = "FIRTYPE_UI";
+const FIR_TYPE_META_TAG: &str = "FIRTYPE_META";
 const FIR_TYPE_PTR_TAG: &str = "FIRTYPE_PTR";
 const FIR_TYPE_ARRAY_TAG: &str = "FIRTYPE_ARRAY";
 const FIR_TYPE_VECTOR_TAG: &str = "FIRTYPE_VECTOR";
@@ -803,25 +1648,55 @@ const FIR_V_INT64_TAG: &str = "FIRV_INT64";
 const FIR_V_FLOAT32_TAG: &str = "FIRV_FLOAT32";
 const FIR_V_FLOAT64_TAG: &str = "FIRV_FLOAT64";
 const FIR_V_BOOL_TAG: &str = "FIRV_BOOL";
+const FIR_V_QUAD_TAG: &str = "FIRV_QUAD";
+const FIR_V_FIXED_POINT_TAG: &str = "FIRV_FIXEDPOINT";
+const FIR_V_VALUE_ARRAY_TAG: &str = "FIRV_VALUEARRAY";
+const FIR_V_INT32_ARRAY_TAG: &str = "FIRV_INT32ARRAY";
+const FIR_V_FLOAT32_ARRAY_TAG: &str = "FIRV_FLOAT32ARRAY";
+const FIR_V_FLOAT64_ARRAY_TAG: &str = "FIRV_FLOAT64ARRAY";
+const FIR_V_QUAD_ARRAY_TAG: &str = "FIRV_QUADARRAY";
+const FIR_V_FIXED_POINT_ARRAY_TAG: &str = "FIRV_FIXEDPOINTARRAY";
 const FIR_V_LOAD_VAR_TAG: &str = "FIRV_LOADVAR";
+const FIR_V_LOAD_VAR_ADDRESS_TAG: &str = "FIRV_LOADVARADDRESS";
+const FIR_V_TEE_VAR_TAG: &str = "FIRV_TEEVAR";
 const FIR_V_BINOP_TAG: &str = "FIRV_BINOP";
+const FIR_V_NEG_TAG: &str = "FIRV_NEG";
 const FIR_V_CAST_TAG: &str = "FIRV_CAST";
+const FIR_V_BITCAST_TAG: &str = "FIRV_BITCAST";
+const FIR_V_SELECT2_TAG: &str = "FIRV_SELECT2";
 const FIR_V_FUNCALL_TAG: &str = "FIRV_FUNCALL";
+const FIR_V_NULL_TAG: &str = "FIRV_NULL";
+const FIR_V_NEW_DSP_TAG: &str = "FIRV_NEWDSP";
 
 const FIR_DECLARE_VAR_TAG: &str = "FIRST_DECLAREVAR";
+const FIR_NULL_DECLARE_VAR_TAG: &str = "FIRST_NULLDECLAREVAR";
+const FIR_DECLARE_FUN_TAG: &str = "FIRST_DECLAREFUN";
+const FIR_DECLARE_STRUCT_TYPE_TAG: &str = "FIRST_DECLARESTRUCTTYPE";
+const FIR_DECLARE_BUFFER_ITERATORS_TAG: &str = "FIRST_DECLAREBUFFERITERATORS";
 const FIR_STORE_VAR_TAG: &str = "FIRST_STOREVAR";
+const FIR_SHIFT_ARRAY_VAR_TAG: &str = "FIRST_SHIFTARRAYVAR";
 const FIR_DROP_TAG: &str = "FIRST_DROP";
+const FIR_NULL_STATEMENT_TAG: &str = "FIRST_NULLSTATEMENT";
 const FIR_RETURN_TAG: &str = "FIRST_RETURN";
 const FIR_BLOCK_TAG: &str = "FIRST_BLOCK";
 const FIR_IF_TAG: &str = "FIRST_IF";
+const FIR_CONTROL_TAG: &str = "FIRST_CONTROL";
+const FIR_FOR_LOOP_TAG: &str = "FIRST_FORLOOP";
 const FIR_SIMPLE_FOR_LOOP_TAG: &str = "FIRST_SIMPLEFOR";
+const FIR_ITERATOR_FOR_LOOP_TAG: &str = "FIRST_ITERATORFOR";
+const FIR_WHILE_LOOP_TAG: &str = "FIRST_WHILELOOP";
+const FIR_SWITCH_TAG: &str = "FIRST_SWITCH";
 const FIR_OPEN_BOX_TAG: &str = "FIRST_OPENBOX";
 const FIR_CLOSE_BOX_TAG: &str = "FIRST_CLOSEBOX";
 const FIR_ADD_BUTTON_TAG: &str = "FIRST_ADDBUTTON";
 const FIR_ADD_SLIDER_TAG: &str = "FIRST_ADDSLIDER";
 const FIR_ADD_BARGRAPH_TAG: &str = "FIRST_ADDBARGRAPH";
+const FIR_ADD_SOUNDFILE_TAG: &str = "FIRST_ADDSOUNDFILE";
 const FIR_ADD_META_DECLARE_TAG: &str = "FIRST_ADDMETA";
 const FIR_LABEL_TAG: &str = "FIRST_LABEL";
+const FIR_MODULE_TAG: &str = "FIRST_MODULE";
+const FIR_NAMED_TYPE_TAG: &str = "FIR_NAMEDTYPE";
+const FIR_SWITCH_CASE_TAG: &str = "FIR_SWITCHCASE";
 
 fn is_value_tag(tag: &str) -> bool {
     matches!(
@@ -831,10 +1706,25 @@ fn is_value_tag(tag: &str) -> bool {
             | FIR_V_FLOAT32_TAG
             | FIR_V_FLOAT64_TAG
             | FIR_V_BOOL_TAG
+            | FIR_V_QUAD_TAG
+            | FIR_V_FIXED_POINT_TAG
+            | FIR_V_VALUE_ARRAY_TAG
+            | FIR_V_INT32_ARRAY_TAG
+            | FIR_V_FLOAT32_ARRAY_TAG
+            | FIR_V_FLOAT64_ARRAY_TAG
+            | FIR_V_QUAD_ARRAY_TAG
+            | FIR_V_FIXED_POINT_ARRAY_TAG
             | FIR_V_LOAD_VAR_TAG
+            | FIR_V_LOAD_VAR_ADDRESS_TAG
+            | FIR_V_TEE_VAR_TAG
             | FIR_V_BINOP_TAG
+            | FIR_V_NEG_TAG
             | FIR_V_CAST_TAG
+            | FIR_V_BITCAST_TAG
+            | FIR_V_SELECT2_TAG
             | FIR_V_FUNCALL_TAG
+            | FIR_V_NULL_TAG
+            | FIR_V_NEW_DSP_TAG
     )
 }
 
@@ -861,14 +1751,131 @@ fn decode_list(arena: &TreeArena, mut list: FirId) -> Option<Vec<FirId>> {
     Some(out)
 }
 
+fn decode_i32_list(arena: &TreeArena, list: FirId) -> Option<Vec<i32>> {
+    let ids = decode_list(arena, list)?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        out.push(decode_i32(arena, id)?);
+    }
+    Some(out)
+}
+
+fn decode_f32_bits_list(arena: &TreeArena, list: FirId) -> Option<Vec<f32>> {
+    let ids = decode_list(arena, list)?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        out.push(decode_f32_bits(arena, id)?);
+    }
+    Some(out)
+}
+
+fn decode_f64_list(arena: &TreeArena, list: FirId) -> Option<Vec<f64>> {
+    let ids = decode_list(arena, list)?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        out.push(decode_f64(arena, id)?);
+    }
+    Some(out)
+}
+
+fn decode_symbols_list(arena: &TreeArena, list: FirId) -> Option<Vec<String>> {
+    let ids = decode_list(arena, list)?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        out.push(decode_symbol(arena, id)?);
+    }
+    Some(out)
+}
+
+fn encode_named_type(arena: &mut TreeArena, value: &NamedType) -> FirId {
+    let name_id = arena.symbol(value.name.clone());
+    let type_id = encode_type(arena, &value.typ);
+    intern_tag(arena, FIR_NAMED_TYPE_TAG, &[name_id, type_id])
+}
+
+fn encode_named_types(arena: &mut TreeArena, values: &[NamedType]) -> FirId {
+    let ids: Vec<_> = values.iter().map(|v| encode_named_type(arena, v)).collect();
+    encode_list(arena, &ids)
+}
+
+fn decode_named_type(arena: &TreeArena, id: FirId) -> Option<NamedType> {
+    let node = arena.node(id)?;
+    let NodeKind::Tag(tag_id) = &node.kind else {
+        return None;
+    };
+    let tag = arena.tag_name(*tag_id)?;
+    let [name, typ] = node.children.as_slice() else {
+        return None;
+    };
+    if tag != FIR_NAMED_TYPE_TAG {
+        return None;
+    }
+    Some(NamedType {
+        name: decode_symbol(arena, *name)?,
+        typ: decode_type(arena, *typ)?,
+    })
+}
+
+fn decode_named_types(arena: &TreeArena, list: FirId) -> Option<Vec<NamedType>> {
+    let ids = decode_list(arena, list)?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        out.push(decode_named_type(arena, id)?);
+    }
+    Some(out)
+}
+
+fn encode_switch_case(arena: &mut TreeArena, value: i64, block: FirId) -> FirId {
+    let value_id = arena.int(value);
+    intern_tag(arena, FIR_SWITCH_CASE_TAG, &[value_id, block])
+}
+
+fn encode_switch_cases(arena: &mut TreeArena, cases: &[(i64, FirId)]) -> FirId {
+    let ids: Vec<_> = cases
+        .iter()
+        .map(|(value, block)| encode_switch_case(arena, *value, *block))
+        .collect();
+    encode_list(arena, &ids)
+}
+
+fn decode_switch_case(arena: &TreeArena, id: FirId) -> Option<(i64, FirId)> {
+    let node = arena.node(id)?;
+    let NodeKind::Tag(tag_id) = &node.kind else {
+        return None;
+    };
+    let tag = arena.tag_name(*tag_id)?;
+    let [value, block] = node.children.as_slice() else {
+        return None;
+    };
+    if tag != FIR_SWITCH_CASE_TAG {
+        return None;
+    }
+    Some((decode_i64(arena, *value)?, *block))
+}
+
+fn decode_switch_cases(arena: &TreeArena, list: FirId) -> Option<Vec<(i64, FirId)>> {
+    let ids = decode_list(arena, list)?;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        out.push(decode_switch_case(arena, id)?);
+    }
+    Some(out)
+}
+
 fn encode_type(arena: &mut TreeArena, typ: &FirType) -> FirId {
     match typ {
         FirType::Int32 => intern_tag(arena, FIR_TYPE_INT32_TAG, &[]),
         FirType::Int64 => intern_tag(arena, FIR_TYPE_INT64_TAG, &[]),
         FirType::Float32 => intern_tag(arena, FIR_TYPE_FLOAT32_TAG, &[]),
         FirType::Float64 => intern_tag(arena, FIR_TYPE_FLOAT64_TAG, &[]),
+        FirType::Quad => intern_tag(arena, FIR_TYPE_QUAD_TAG, &[]),
+        FirType::FixedPoint => intern_tag(arena, FIR_TYPE_FIXED_POINT_TAG, &[]),
         FirType::Bool => intern_tag(arena, FIR_TYPE_BOOL_TAG, &[]),
         FirType::Void => intern_tag(arena, FIR_TYPE_VOID_TAG, &[]),
+        FirType::Obj => intern_tag(arena, FIR_TYPE_OBJ_TAG, &[]),
+        FirType::Sound => intern_tag(arena, FIR_TYPE_SOUND_TAG, &[]),
+        FirType::UI => intern_tag(arena, FIR_TYPE_UI_TAG, &[]),
+        FirType::Meta => intern_tag(arena, FIR_TYPE_META_TAG, &[]),
         FirType::Ptr(inner) => {
             let inner_id = encode_type(arena, inner);
             intern_tag(arena, FIR_TYPE_PTR_TAG, &[inner_id])
@@ -908,8 +1915,14 @@ fn decode_type(arena: &TreeArena, id: FirId) -> Option<FirType> {
         (FIR_TYPE_INT64_TAG, []) => Some(FirType::Int64),
         (FIR_TYPE_FLOAT32_TAG, []) => Some(FirType::Float32),
         (FIR_TYPE_FLOAT64_TAG, []) => Some(FirType::Float64),
+        (FIR_TYPE_QUAD_TAG, []) => Some(FirType::Quad),
+        (FIR_TYPE_FIXED_POINT_TAG, []) => Some(FirType::FixedPoint),
         (FIR_TYPE_BOOL_TAG, []) => Some(FirType::Bool),
         (FIR_TYPE_VOID_TAG, []) => Some(FirType::Void),
+        (FIR_TYPE_OBJ_TAG, []) => Some(FirType::Obj),
+        (FIR_TYPE_SOUND_TAG, []) => Some(FirType::Sound),
+        (FIR_TYPE_UI_TAG, []) => Some(FirType::UI),
+        (FIR_TYPE_META_TAG, []) => Some(FirType::Meta),
         (FIR_TYPE_PTR_TAG, [inner]) => Some(FirType::Ptr(Box::new(decode_type(arena, *inner)?))),
         (FIR_TYPE_ARRAY_TAG, [inner, size]) => {
             let size = usize::try_from(decode_i64(arena, *size)?).ok()?;
@@ -1232,6 +2245,167 @@ mod tests {
         assert_eq!(
             match_fir(&store, block),
             FirMatch::Block(vec![open, slider, close])
+        );
+    }
+
+    #[test]
+    fn builder_and_match_cover_extended_cpp_families() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let x = b.load_var("x", AccessType::Stack, FirType::Float64);
+        let neg = b.neg(x, FirType::Float64);
+        let addr = b.load_var_address(
+            "x",
+            AccessType::Stack,
+            FirType::Ptr(Box::new(FirType::Float64)),
+        );
+        let tee = b.tee_var("x", AccessType::Stack, neg, FirType::Float64);
+        let cond = b.bool_(true);
+        let sel = b.select2(cond, tee, x, FirType::Float64);
+        let nullv = b.null_value(FirType::Void);
+        let newdsp = b.new_dsp("MyDSP", FirType::Obj);
+        let soundfile = b.add_soundfile("sf", "fSound0");
+
+        assert_eq!(
+            match_fir(&store, addr),
+            FirMatch::LoadVarAddress {
+                name: "x".to_string(),
+                access: AccessType::Stack,
+                typ: FirType::Ptr(Box::new(FirType::Float64))
+            }
+        );
+        assert_eq!(
+            match_fir(&store, sel),
+            FirMatch::Select2 {
+                cond,
+                then_value: tee,
+                else_value: x,
+                typ: FirType::Float64
+            }
+        );
+        assert_eq!(
+            match_fir(&store, nullv),
+            FirMatch::NullValue { typ: FirType::Void }
+        );
+        assert_eq!(
+            match_fir(&store, newdsp),
+            FirMatch::NewDsp {
+                name: "MyDSP".to_string(),
+                typ: FirType::Obj
+            }
+        );
+        assert_eq!(
+            match_fir(&store, soundfile),
+            FirMatch::AddSoundfile {
+                label: "sf".to_string(),
+                url: String::new(),
+                var: "fSound0".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn builder_and_match_cover_remaining_cpp_families() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let q = b.quad(1.25);
+        let fx = b.fixed_point(0.5);
+        let arr_i32 = b.int32_array(&[1, 2, 3]);
+        let arr_f32 = b.float32_array(&[1.0, 2.0]);
+        let arr_f64 = b.float64_array(&[3.5, 4.5]);
+        let arr_q = b.quad_array(&[0.125, 0.25]);
+        let arr_fx = b.fixed_point_array(&[0.75, 0.875]);
+        let value_array = b.value_array(&[q, fx], FirType::Array(Box::new(FirType::Float64), 2));
+
+        let dbi = b.declare_buffer_iterators("in", "out", 2, FirType::Float32, true, false);
+        let body = b.block(&[dbi]);
+        let ifor = b.iterator_for_loop(&["i", "j"], true, body);
+        let sound = b.add_soundfile_with_url("sf", "stereo.wav", "fSound0");
+
+        assert_eq!(
+            match_fir(&store, q),
+            FirMatch::Quad {
+                value: 1.25,
+                typ: FirType::Quad
+            }
+        );
+        assert_eq!(
+            match_fir(&store, fx),
+            FirMatch::FixedPoint {
+                value: 0.5,
+                typ: FirType::FixedPoint
+            }
+        );
+        assert_eq!(
+            match_fir(&store, arr_i32),
+            FirMatch::Int32Array {
+                values: vec![1, 2, 3],
+                typ: FirType::Array(Box::new(FirType::Int32), 3)
+            }
+        );
+        assert_eq!(
+            match_fir(&store, arr_f32),
+            FirMatch::Float32Array {
+                values: vec![1.0, 2.0],
+                typ: FirType::Array(Box::new(FirType::Float32), 2)
+            }
+        );
+        assert_eq!(
+            match_fir(&store, arr_f64),
+            FirMatch::Float64Array {
+                values: vec![3.5, 4.5],
+                typ: FirType::Array(Box::new(FirType::Float64), 2)
+            }
+        );
+        assert_eq!(
+            match_fir(&store, arr_q),
+            FirMatch::QuadArray {
+                values: vec![0.125, 0.25],
+                typ: FirType::Array(Box::new(FirType::Quad), 2)
+            }
+        );
+        assert_eq!(
+            match_fir(&store, arr_fx),
+            FirMatch::FixedPointArray {
+                values: vec![0.75, 0.875],
+                typ: FirType::Array(Box::new(FirType::FixedPoint), 2)
+            }
+        );
+        assert_eq!(
+            match_fir(&store, value_array),
+            FirMatch::ValueArray {
+                values: vec![q, fx],
+                typ: FirType::Array(Box::new(FirType::Float64), 2)
+            }
+        );
+        assert_eq!(
+            match_fir(&store, dbi),
+            FirMatch::DeclareBufferIterators {
+                name1: "in".to_string(),
+                name2: "out".to_string(),
+                channels: 2,
+                typ: FirType::Float32,
+                mutable: true,
+                chunk: false
+            }
+        );
+        assert_eq!(
+            match_fir(&store, ifor),
+            FirMatch::IteratorForLoop {
+                iterators: vec!["i".to_string(), "j".to_string()],
+                is_reverse: true,
+                body
+            }
+        );
+        assert_eq!(
+            match_fir(&store, sound),
+            FirMatch::AddSoundfile {
+                label: "sf".to_string(),
+                url: "stereo.wav".to_string(),
+                var: "fSound0".to_string()
+            }
         );
     }
 

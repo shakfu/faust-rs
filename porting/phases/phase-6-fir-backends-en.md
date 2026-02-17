@@ -274,6 +274,42 @@ Rust architectural interpretation:
 - `CodeContainer` and backend emitters consume stable `FirId`/`FirNode` references,
   not ad hoc backend-specific node wrappers.
 
+### 2.1.3 Current Rust FIR coverage vs C++ `instructions.hh`
+
+Implemented in `crates/fir` (Builder + Match):
+
+- Values:
+  - `Int32Num`, `Int64Num`, `FloatNum`, `DoubleNum`, `BoolNum`,
+  - `QuadNum`, `FixedPointNum`,
+  - `ValueArray`, `Int32ArrayNum`, `FloatArrayNum`, `DoubleArrayNum`, `QuadArrayNum`,
+    `FixedPointArrayNum`,
+  - `LoadVar`, `LoadVarAddress`, `TeeVar`,
+  - `Binop`, `Neg`, `Cast`, `Bitcast`, `Select2`,
+  - `FunCall`, `NullValue`, `NewDSP`.
+- Statements/UI:
+  - `DeclareVar`, `NullDeclareVar`, `DeclareFun`, `DeclareStructType`,
+  - `DeclareBufferIterators`,
+  - `StoreVar`, `ShiftArrayVar`, `Drop`, `NullStatement`, `Ret`,
+  - `Block`, `If`, `Control`, `ForLoop`, `SimpleForLoop`, `IteratorForLoop`, `WhileLoop`,
+    `Switch`,
+  - `Module`,
+  - `Openbox`, `Closebox`, `AddButton`, `AddSlider`, `AddBargraph`, `AddSoundfile`,
+    `AddMetaDeclare`, `Label`.
+
+Still missing for full behavioral parity with C++:
+
+- Full C++ address model (`Address`/`NamedAddress`/`IndexedAddress`, volatile/const flags) is still
+  represented in simplified Rust form (`name + AccessType`).
+- `ForLoopInst`/`SimpleForLoopInst` shapes are currently simplified in Rust
+  (`var/init/end/step/body` and no explicit lower bound object for simple loop).
+- `FunCallInst` C++ `method` flag and dedicated void-call helpers are not exposed yet as explicit FIR
+  fields/constructors.
+- Fixed-point type metadata (`msb/lsb/is_signed`) is not yet modeled in `FirType::FixedPoint`.
+- C++ convenience `IB::gen*` helpers remain partially collapsed into fewer Rust builder methods.
+
+These are non-blocking for the current FIR API slice but must be closed before declaring full FIR
+parity.
+
 ### 2.2 fir — FIR→FIR transformations
 
 ```rust

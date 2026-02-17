@@ -3101,3 +3101,38 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo clippy -p fir --all-targets -- -D warnings`
   - `cargo test -p fir --all-targets`
   - `cargo check --workspace --all-targets`
+
+#### FIR parity slice expansion against C++ `instructions.hh`
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/fir/src/lib.rs`
+  - `porting/phases/phase-6-fir-backends-en.md`
+  - `JOURNAL.md`
+- Implemented:
+  - expanded FIR value families toward C++ parity:
+    - added `LoadVarAddress`, `TeeVar`, `Neg`, `Bitcast`, `Select2`,
+      `NullValue`, `NewDsp`, `QuadNum`, `FixedPointNum`,
+      `ValueArray`, `Int32ArrayNum`, `FloatArrayNum`, `DoubleArrayNum`,
+      `QuadArrayNum`, `FixedPointArrayNum`.
+  - expanded FIR statement families toward C++ parity:
+    - added `NullDeclareVar`, `DeclareFun`, `DeclareStructType`, `ShiftArrayVar`,
+      `NullStatement`, `Control`, `ForLoop`, `WhileLoop`, `Switch`, `Module`,
+      `DeclareBufferIterators`, `IteratorForLoop`, and UI `AddSoundfile` (URL support).
+  - extended type coverage in `FirType` with C++-aligned families:
+    - `Quad`, `FixedPoint`, `Obj`, `Sound`, `UI`, `Meta`.
+  - added encode/decode support helpers for:
+    - named function arguments (`NamedType`),
+    - switch case tables,
+    - typed scalar/array literal lists (`i32`, `f32`, `f64`) and iterator-name lists.
+  - Rustdoc updates:
+    - documented C++ parity mapping directly on newly added `FirBuilder` methods.
+  - documented explicit gap list (remaining missing families) in
+    `phase-6-fir-backends-en.md` section `2.1.3`.
+  - residual documented gaps are now mostly semantic/modeling differences
+    (full C++ address objects, full fixed-point metadata, for-loop shape details, method-call flags).
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p fir --all-targets -- -D warnings`
+  - `cargo test -p fir --all-targets`
+  - `cargo check --workspace --all-targets`
