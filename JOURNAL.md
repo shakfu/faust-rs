@@ -2531,3 +2531,22 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo test -p compiler --test diagnostic_errors`
   - `cargo test -p compiler --lib`
+
+#### Diagnostics UX next tranche — Step 5 (snapshot expansion on complex failures)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/src/main.rs`.
+- Implemented:
+  - expanded human/json diagnostics snapshot coverage to complex Phase 4 negative fixtures:
+    - alias-chain split mismatch (`err_06`),
+    - recursive mismatch alias (`err_07`),
+    - UI-driven sequential mismatch (`err_08`).
+  - new CLI renderer tests now assert presence/stability of:
+    - trace notes,
+    - paired-side A/B notes,
+    - source-snippet inclusion in human output,
+    - structured notes shape in JSON output.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --bin faust-rs`

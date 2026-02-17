@@ -341,6 +341,9 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
     use compiler::Compiler;
     use errors::{Diagnostic, DiagnosticBundle, DiagnosticCode, Severity, SourceSpan, Stage};
     use serde_json::Value;
@@ -468,5 +471,133 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
             "application accepts at most 1 argument(s), got 2"
         );
         assert_eq!(diag["help"][0], "remove one argument");
+    }
+
+    fn corpus_path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("corpus")
+            .join(file)
+    }
+
+    #[test]
+    fn diagnostics_human_renderer_snapshots_cover_complex_phase4_failures() {
+        let fixtures = [
+            (
+                "err_06_propagate_split_mismatch_chain.dsp",
+                vec![
+                    "error [FRS-PROP-0002] split composition mismatch",
+                    "binding_trace=process -> baz -> bar -> foo",
+                    "A (split left) = (_, _)",
+                    "B (split right) = (_, (_, _))",
+                ],
+            ),
+            (
+                "err_07_propagate_rec_mismatch_alias.dsp",
+                vec![
+                    "error [FRS-PROP-0003] recursive composition mismatch",
+                    "binding_trace=process -> bar -> foo",
+                    "A (rec left) = _",
+                    "B (rec right) = (_, (_, _))",
+                ],
+            ),
+            (
+                "err_08_propagate_seq_ui_mismatch.dsp",
+                vec![
+                    "error [FRS-PROP-0002] sequential composition mismatch",
+                    "binding_trace=process -> foo",
+                    "A (seq left) = ",
+                    "B (seq right) = ",
+                ],
+            ),
+        ];
+
+        let compiler = Compiler::new();
+        for (file, expected_lines) in fixtures {
+            let path = corpus_path(file);
+            let err = compiler
+                .compile_file_default_to_signals(&path)
+                .expect_err("fixture should fail in signal pipeline");
+            let diagnostics = err
+                .diagnostics()
+                .expect("fixture error should expose diagnostics");
+            let rendered = format_diagnostics_human(diagnostics);
+            let path_text = path.to_string_lossy().to_string();
+            let normalized = rendered.replace(&path_text, "$FIXTURE");
+            for expected in expected_lines {
+                assert!(
+                    normalized.contains(expected),
+                    "{file} human snapshot should contain: {expected}\nrendered:\n{normalized}"
+                );
+            }
+            let source = fs::read_to_string(&path).expect("fixture source should be readable");
+            let first_line = source
+                .lines()
+                .next()
+                .expect("fixture should contain at least one line");
+            assert!(
+                normalized.contains(first_line),
+                "{file} human snapshot should include source snippet line"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostics_json_renderer_snapshots_cover_complex_phase4_failures() {
+        let fixtures = [
+            (
+                "err_06_propagate_split_mismatch_chain.dsp",
+                "binding_trace=process -> baz -> bar -> foo",
+                "A (split left) = ",
+                "B (split right) = ",
+            ),
+            (
+                "err_07_propagate_rec_mismatch_alias.dsp",
+                "binding_trace=process -> bar -> foo",
+                "A (rec left) = ",
+                "B (rec right) = ",
+            ),
+            (
+                "err_08_propagate_seq_ui_mismatch.dsp",
+                "binding_trace=process -> foo",
+                "A (seq left) = ",
+                "B (seq right) = ",
+            ),
+        ];
+
+        let compiler = Compiler::new();
+        for (file, trace, left_prefix, right_prefix) in fixtures {
+            let path = corpus_path(file);
+            let err = compiler
+                .compile_file_default_to_signals(&path)
+                .expect_err("fixture should fail in signal pipeline");
+            let diagnostics = err
+                .diagnostics()
+                .expect("fixture error should expose diagnostics");
+            let rendered = format_diagnostics_json(diagnostics);
+            let value: Value =
+                serde_json::from_str(&rendered).expect("JSON diagnostics output should be valid");
+            let diag = &value["diagnostics"][0];
+            let notes = diag["notes"]
+                .as_array()
+                .expect("notes should be an array")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>();
+            assert!(
+                notes.iter().any(|note| *note == trace),
+                "{file} json snapshot should contain trace note"
+            );
+            assert!(
+                notes.iter().any(|note| note.starts_with(left_prefix)),
+                "{file} json snapshot should contain left-side note"
+            );
+            assert!(
+                notes.iter().any(|note| note.starts_with(right_prefix)),
+                "{file} json snapshot should contain right-side note"
+            );
+        }
     }
 }
