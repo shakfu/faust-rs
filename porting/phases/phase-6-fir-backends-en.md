@@ -664,3 +664,137 @@ type reconstruction as a validation fallback, not a primary mechanism.
 | **Total Phase 6** | **20,546** | **15,000–18,000** | **45–65** |
 
 **Note**: For branch parity, Phase 6 includes the currently used path around `InstructionsCompiler`/`DAGInstructionsCompiler`. The `SignalFIRCompiler` path is treated as optional/future unless upstream flow changes.
+
+---
+
+## 8. C++ Backend Implementation Plan (Module-First Entry)
+
+### 8.1 Goal
+
+Implement the Rust `codegen::backends::cpp` backend with an explicit FIR **module** entrypoint,
+equivalent to C++ `ModuleInst`.
+
+Target API shape in Rust:
+
+```rust
+pub fn generate_cpp_module(
+    store: &FirStore,
+    module: FirId,
+    options: &CppOptions,
+) -> Result<String, CodegenError>;
+```
+
+### 8.2 C++ provenance and reference anchors
+
+Use `/Users/letz/Developpements/RUST/faust` as source of truth:
+
+- `compiler/generator/instructions.hh`: `ModuleInst` structure and `IB::genModuleInst`.
+- `compiler/generator/cpp/cpp_instructions.hh`: `CPPInstVisitor::visit(ModuleInst*)`.
+- `compiler/generator/text_instructions.hh`: shared textual instruction emission behavior.
+- `compiler/generator/cpp/cpp_code_container.hh/.cpp`: production C++ backend flow.
+- `compiler/libcode.cpp`: effective orchestration path (`compileCPP` + `InstructionsCompiler`/`DAGInstructionsCompiler`).
+- `compiler/transform/signalFIRCompiler.cpp`: direct `ModuleInst` construction (`genFIRModule`).
+
+### 8.3 Design contract
+
+1. Canonical dispatch only: backend emission must consume FIR through `match_fir` + Rust `match`.
+2. Entry node is mandatory `FirMatch::Module`; fail with typed diagnostics if input is not a module.
+3. No backend-local FIR node models; use `crates/fir` only.
+4. Public backend API must be Rustdoc-documented with:
+   - C++ provenance,
+   - parity/adaptation notes,
+   - error contract.
+
+### 8.4 Step-by-step rollout
+
+#### Step 1 — Backend API skeleton (module entry)
+
+- Implement:
+  - `CppOptions`,
+  - `CodegenError` variants for invalid module shape / unsupported FIR forms,
+  - `generate_cpp_module(...)`.
+- Deliverables:
+  - public API in `crates/codegen/src/backends/cpp/mod.rs`,
+  - Rustdoc for all public items.
+- Pass criteria:
+  - unit test: rejects non-`Module` root with stable error code/message.
+
+#### Step 2 — Module-level emission parity slice
+
+- Implement `emit_module` matching C++ visitor order:
+  - header macros (`FAUSTCLASS`, `RESTRICT`, Apple `exp10` aliases),
+  - class/struct opening,
+  - DSP fields block,
+  - globals block,
+  - functions block.
+- Deliverables:
+  - deterministic textual output for a minimal module fixture.
+- Pass criteria:
+  - golden output for module shell stable across platforms.
+
+#### Step 3 — Core statement/value emitter
+
+- Implement coverage needed by current FIR slices:
+  - values: literals, load/store, binop/neg/cast/bitcast/select2, funcall,
+  - statements: declarations, block, if/switch, for/simple-for/iterator-for/while, return/drop.
+- Deliverables:
+  - exhaustive `match_fir`-based emitter helpers (`emit_value`, `emit_stmt`, `emit_block`).
+- Pass criteria:
+  - unit corpus on synthetic FIR modules passes;
+  - no `Unknown` fallback in covered paths.
+
+#### Step 4 — Type mapping and C++-specific spelling
+
+- Implement `FirType -> C++` mapping with backend options:
+  - scalar/pointer/array/vector/function forms,
+  - `quad`/`fixed` spellings and explicit adaptation notes where not 1:1.
+- Deliverables:
+  - centralized type printer for C++ backend.
+- Pass criteria:
+  - type-mapping tests (including pointer/array/vector/function signatures).
+
+#### Step 5 — UI and metadata instruction emission
+
+- Implement emission for:
+  - open/close box, button/slider/bargraph/soundfile, metadata declarations.
+- Deliverables:
+  - deterministic UI code generation from FIR module functions.
+- Pass criteria:
+  - fixtures using UI FIR nodes compile and match expected text.
+
+#### Step 6 — Differential gate against C++ backend output
+
+- Build differential harness for representative corpus:
+  - compare Rust-emitted C++ text vs C++ `-lang cpp` output on normalized checks.
+- Deliverables:
+  - report table (`OK/DIFF/UNSUPPORTED`) for selected corpus.
+- Pass criteria:
+  - all MVP fixtures in `OK` state;
+  - all `DIFF` entries documented with explicit adaptation rationale.
+
+#### Step 7 — Bridge toward production path parity
+
+- Introduce adapter from current Rust compile flow to module-based backend entry:
+  - either produce a module FIR node directly from phase output,
+  - or define temporary `CodeContainer -> Module` lowering boundary.
+- Deliverables:
+  - one explicit integration point in `compiler` orchestration.
+- Pass criteria:
+  - end-to-end command emits C++ from real `.dsp` (not only synthetic FIR tests).
+
+#### Step 8 — CI and completion gate
+
+- Add:
+  - backend unit tests,
+  - golden checks for module fixtures,
+  - differential check job for module-first C++ backend subset.
+- Deliverables:
+  - CI stage(s) for `backend-cpp` Rust path.
+- Pass criteria:
+  - CI green on Linux/macOS/Windows for the enabled C++ backend subset.
+
+### 8.5 Scope note
+
+- Module-first backend entry is the **initial implementation lane**.
+- Full parity still requires bridging to the currently effective C++ production path centered on
+  `InstructionsCompiler` + `CodeContainer` orchestration.

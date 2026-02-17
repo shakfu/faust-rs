@@ -3136,3 +3136,26 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo clippy -p fir --all-targets -- -D warnings`
   - `cargo test -p fir --all-targets`
   - `cargo check --workspace --all-targets`
+
+#### Phase 6 plan documented — C++ backend module-first entry (`ModuleInst` parity lane)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `porting/phases/phase-6-fir-backends-en.md`
+  - `porting/faust-rust-fir-architecture-en.md`
+  - `JOURNAL.md`
+- Documented:
+  - added a dedicated implementation plan for Rust `codegen::backends::cpp` with
+    FIR module-first entrypoint:
+    - target API `generate_cpp_module(store, module, options)`,
+    - canonical root contract (`FirMatch::Module` mandatory),
+    - explicit 8-step rollout with deliverables and pass criteria.
+  - anchored the plan to concrete C++ source-of-truth files:
+    - `instructions.hh`, `cpp_instructions.hh`, `text_instructions.hh`,
+      `cpp_code_container.hh/.cpp`, `libcode.cpp`, `signalFIRCompiler.cpp`.
+  - clarified scope:
+    - module-first path as initial backend implementation lane,
+    - bridge to the current production `InstructionsCompiler` + `CodeContainer`
+      path required for full end-to-end parity.
+  - added architecture-level contract in FIR docs:
+    - text backends consuming FIR directly must take a module node as canonical input.

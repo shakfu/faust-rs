@@ -62,6 +62,19 @@ Boundary constraints:
 - Exhaustive dispatch coverage for canonical nodes in `FirMatch`.
 - No hidden global state (`gGlobal`-like) in FIR builders/checkers.
 
+## 5.1 Module Entrypoint Contract for Text Backends
+
+For text backends that consume FIR directly (starting with C++ backend migration), the canonical
+entrypoint is a FIR **module** node:
+
+- input to backend API must be a `FirMatch::Module` node,
+- module children (`dsp_struct`, `globals`, `declarations/functions`) are emitted in deterministic
+  order,
+- non-module roots are rejected with typed backend diagnostics (no silent fallback).
+
+This mirrors C++ `ModuleInst`-based backend visitors while preserving the Rust invariant:
+construction through `FirBuilder`, dispatch through `match_fir`.
+
 ## 6. Implementation Pattern
 
 Recommended internal layering in `crates/fir`:
