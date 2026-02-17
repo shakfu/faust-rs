@@ -99,6 +99,15 @@ fn propagate_error_operator_span_points_to_composition_token() {
         primary.span.col > 1,
         "operator-level span should not point to definition column 1"
     );
+    let readable_expr = first
+        .notes
+        .iter()
+        .find(|note| note.as_ref().starts_with("expr="))
+        .expect("diagnostic should expose readable expression note");
+    assert!(
+        readable_expr.contains("<:"),
+        "readable expression note should preserve split operator context"
+    );
 }
 
 #[test]

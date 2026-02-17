@@ -2492,3 +2492,22 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo fmt --all`
   - `cargo test -p compiler --test diagnostic_errors`
+
+#### Diagnostics UX next tranche — Step 3 (human-readable expression context)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/src/lib.rs`,
+  - `crates/compiler/tests/diagnostic_errors.rs`.
+- Implemented:
+  - added a second expression-context note in diagnostics:
+    - machine-oriented: `box_expr=...` (existing, unchanged),
+    - human-oriented: `expr=...` (Faust-like rendering for common composition/infix forms).
+  - introduced readable rendering helpers with bounded depth/size and stable fallback to
+    `dump_box` for unsupported forms.
+  - diagnostic tests now lock presence of the new `expr=` note and ensure composition
+    operators remain visible in the readable context.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --test diagnostic_errors`
+  - `cargo test -p compiler --lib`

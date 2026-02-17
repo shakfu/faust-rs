@@ -122,6 +122,10 @@ impl Compiler {
                     "box_expr={}",
                     compact_box_preview(&output.state.arena, node)
                 ));
+                diagnostic = diagnostic.with_note(format!(
+                    "expr={}",
+                    compact_human_box_preview(&output.state.arena, node)
+                ));
                 if let Some(trace) = alias_binding_trace_for_node(&output.state.arena, root, node) {
                     diagnostic = diagnostic.with_note(format!("binding_trace={trace}"));
                 }
@@ -148,6 +152,10 @@ impl Compiler {
                     diagnostic = diagnostic.with_note(format!(
                         "box_expr={}",
                         compact_box_preview(&output.state.arena, node)
+                    ));
+                    diagnostic = diagnostic.with_note(format!(
+                        "expr={}",
+                        compact_human_box_preview(&output.state.arena, node)
                     ));
                     if let Some(trace) =
                         alias_binding_trace_for_node(&output.state.arena, root, node)
@@ -178,6 +186,10 @@ impl Compiler {
                     diagnostic = diagnostic.with_note(format!(
                         "box_expr={}",
                         compact_box_preview(&output.state.arena, node)
+                    ));
+                    diagnostic = diagnostic.with_note(format!(
+                        "expr={}",
+                        compact_human_box_preview(&output.state.arena, node)
                     ));
                     if let Some(trace) =
                         alias_binding_trace_for_node(&output.state.arena, root, node)
@@ -341,6 +353,92 @@ fn compact_box_preview(arena: &tlib::TreeArena, node: BoxId) -> String {
         one_line = one_line.chars().take(MAX_CHARS).collect::<String>() + "...";
     }
     one_line
+}
+
+/// Compacts one readable box expression preview to a bounded single-line note payload.
+fn compact_human_box_preview(arena: &tlib::TreeArena, node: BoxId) -> String {
+    let mut rendered = render_human_box_expr(arena, node, 0);
+    const MAX_CHARS: usize = 180;
+    if rendered.chars().count() > MAX_CHARS {
+        rendered = rendered.chars().take(MAX_CHARS).collect::<String>() + "...";
+    }
+    rendered
+}
+
+/// Renders one box subtree to a human-oriented Faust-like expression string.
+fn render_human_box_expr(arena: &tlib::TreeArena, node: BoxId, depth: usize) -> String {
+    if depth > 96 {
+        return "...".to_owned();
+    }
+
+    match match_box(arena, node) {
+        BoxMatch::Wire => "_".to_owned(),
+        BoxMatch::Cut => "!".to_owned(),
+        BoxMatch::Ident(name) => name.to_owned(),
+        BoxMatch::Int(v) => v.to_string(),
+        BoxMatch::Real(v) => v.to_string(),
+        BoxMatch::Par(left, right) => format!(
+            "({}, {})",
+            render_human_box_expr(arena, left, depth + 1),
+            render_human_box_expr(arena, right, depth + 1)
+        ),
+        BoxMatch::Seq(left, right) => {
+            if let BoxMatch::Par(lhs, rhs) = match_box(arena, left) {
+                if let Some(op) = prim_infix_symbol(arena, right) {
+                    return format!(
+                        "({} {} {})",
+                        render_human_box_expr(arena, lhs, depth + 1),
+                        op,
+                        render_human_box_expr(arena, rhs, depth + 1)
+                    );
+                }
+            }
+            format!(
+                "({} : {})",
+                render_human_box_expr(arena, left, depth + 1),
+                render_human_box_expr(arena, right, depth + 1)
+            )
+        }
+        BoxMatch::Split(left, right) => format!(
+            "({} <: {})",
+            render_human_box_expr(arena, left, depth + 1),
+            render_human_box_expr(arena, right, depth + 1)
+        ),
+        BoxMatch::Merge(left, right) => format!(
+            "({} :> {})",
+            render_human_box_expr(arena, left, depth + 1),
+            render_human_box_expr(arena, right, depth + 1)
+        ),
+        BoxMatch::Rec(left, right) => format!(
+            "({} ~ {})",
+            render_human_box_expr(arena, left, depth + 1),
+            render_human_box_expr(arena, right, depth + 1)
+        ),
+        _ => compact_box_preview(arena, node),
+    }
+}
+
+fn prim_infix_symbol(arena: &tlib::TreeArena, node: BoxId) -> Option<&'static str> {
+    match match_box(arena, node) {
+        BoxMatch::Add => Some("+"),
+        BoxMatch::Sub => Some("-"),
+        BoxMatch::Mul => Some("*"),
+        BoxMatch::Div => Some("/"),
+        BoxMatch::Rem => Some("%"),
+        BoxMatch::Pow => Some("^"),
+        BoxMatch::Lt => Some("<"),
+        BoxMatch::Le => Some("<="),
+        BoxMatch::Gt => Some(">"),
+        BoxMatch::Ge => Some(">="),
+        BoxMatch::Eq => Some("=="),
+        BoxMatch::Ne => Some("!="),
+        BoxMatch::And => Some("&"),
+        BoxMatch::Or => Some("|"),
+        BoxMatch::Xor => Some("xor"),
+        BoxMatch::Lsh => Some("<<"),
+        BoxMatch::Rsh => Some(">>"),
+        _ => None,
+    }
 }
 
 /// Attaches a primary source label when parser metadata can be resolved for `node`.
@@ -930,6 +1028,7 @@ mod tests {
             .expect("propagate error bundle should not be empty");
         assert!(first.notes.iter().any(|n| n.starts_with("node_id=")));
         assert!(first.notes.iter().any(|n| n.starts_with("box_expr=")));
+        assert!(first.notes.iter().any(|n| n.starts_with("expr=")));
     }
 
     #[test]
