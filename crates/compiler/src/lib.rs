@@ -286,6 +286,7 @@ fn bundle_from_diagnostic(diagnostic: Diagnostic) -> DiagnosticBundle {
     diagnostics
 }
 
+/// Returns the offending node id for eval errors that carry one.
 fn eval_error_node(error: &eval::EvalError) -> Option<BoxId> {
     match error {
         eval::EvalError::MalformedDefinitionNode { node }
@@ -299,6 +300,7 @@ fn eval_error_node(error: &eval::EvalError) -> Option<BoxId> {
     }
 }
 
+/// Returns the offending node id for propagate errors that carry one.
 fn propagate_error_node(error: &PropagateError) -> Option<BoxId> {
     match error {
         PropagateError::UnsupportedBox { node, .. }
@@ -313,6 +315,7 @@ fn propagate_error_node(error: &PropagateError) -> Option<BoxId> {
     }
 }
 
+/// Compacts one box subtree dump to a bounded single-line preview for diagnostics notes.
 fn compact_box_preview(arena: &tlib::TreeArena, node: BoxId) -> String {
     let preview = dump_box(arena, node);
     let mut one_line = preview.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -323,6 +326,7 @@ fn compact_box_preview(arena: &tlib::TreeArena, node: BoxId) -> String {
     one_line
 }
 
+/// Attaches a primary source label when parser metadata can be resolved for `node`.
 fn maybe_add_source_label(
     diagnostic: Diagnostic,
     ctx: &parser::ParserCtx,
@@ -335,6 +339,7 @@ fn maybe_add_source_label(
     diagnostic.with_label(Label::new(LabelStyle::Primary, span, "related source"))
 }
 
+/// Resolves one source span from the node itself, then falls back to labeled descendants.
 fn source_span_from_node_or_descendant(
     ctx: &parser::ParserCtx,
     arena: &tlib::TreeArena,
@@ -365,6 +370,7 @@ fn source_span_from_node_or_descendant(
     None
 }
 
+/// Resolves one source span for a node from parser `use_prop` / `def_prop`.
 fn source_span_for_node(ctx: &parser::ParserCtx, node: BoxId) -> Option<SourceSpan> {
     let loc = ctx.use_prop(node).or_else(|| ctx.def_prop(node))?;
     Some(SourceSpan::new(

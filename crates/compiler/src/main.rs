@@ -3,7 +3,7 @@ use compiler::{Compiler, CompilerError, golden_snapshot_from_file};
 use errors::{DiagnosticBundle, LabelStyle, Severity, Stage};
 use serde_json::json;
 use signals::dump_sig_readable;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum ErrorFormat {
@@ -70,6 +70,10 @@ fn print_structured_diagnostics(err: &CompilerError, format: ErrorFormat) {
     }
 }
 
+/// Formats diagnostics in a human-oriented form.
+///
+/// When a primary label is available and its source file can be read, this renderer
+/// includes a source snippet line and a caret span.
 fn format_diagnostics_human(bundle: &DiagnosticBundle) -> String {
     let mut out = String::new();
     for diag in bundle.as_slice() {
@@ -88,13 +92,44 @@ fn format_diagnostics_human(bundle: &DiagnosticBundle) -> String {
                 diag.code.0,
                 diag.message
             ));
+            if let Some(line) = source_line(label.span.file.as_path(), label.span.line) {
+                out.push_str(&format!("  {} | {}\n", label.span.line, line));
+                out.push_str(&format!(
+                    "    | {} {}\n",
+                    caret_span(label.span.col, label.span.end_col),
+                    label.message
+                ));
+            }
         } else {
             out.push_str(&format!("{severity} [{}] {}\n", diag.code.0, diag.message));
+        }
+
+        for note in &diag.notes {
+            out.push_str(&format!("  = note: {note}\n"));
+        }
+        for help in &diag.help {
+            out.push_str(&format!("  = help: {help}\n"));
         }
     }
     out
 }
 
+/// Returns one source line from a file (1-based line number).
+fn source_line(path: &Path, line_number: u32) -> Option<String> {
+    let source = std::fs::read_to_string(path).ok()?;
+    let idx = usize::try_from(line_number.checked_sub(1)?).ok()?;
+    source.lines().nth(idx).map(str::to_owned)
+}
+
+/// Builds a caret marker string from 1-based `(col, end_col)` bounds.
+fn caret_span(col: u32, end_col: u32) -> String {
+    let start = usize::try_from(col.saturating_sub(1)).unwrap_or(0);
+    let end = usize::try_from(end_col.saturating_sub(1)).unwrap_or(start);
+    let width = end.saturating_sub(start).max(1);
+    format!("{}{}", " ".repeat(start), "^".repeat(width))
+}
+
+/// Formats diagnostics in a machine-oriented JSON payload.
 fn format_diagnostics_json(bundle: &DiagnosticBundle) -> String {
     let diagnostics = bundle
         .as_slice()
@@ -355,5 +390,83 @@ mod tests {
         assert!(code.starts_with("FRS-EVAL-"));
         assert!(first["message"].is_string());
         assert!(first["labels"].is_array());
+    }
+
+    #[test]
+    fn diagnostics_human_renderer_snapshot_with_snippet_and_caret() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "faust_rs_diag_human_{}_{}.dsp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should move forward")
+                .as_nanos()
+        ));
+        std::fs::write(&path, "process = _,_ <: _,_,_;\n").expect("fixture should be written");
+
+        let mut bundle = DiagnosticBundle::new();
+        bundle.push(
+            Diagnostic::new(
+                Severity::Error,
+                Stage::Propagate,
+                DiagnosticCode("FRS-PROP-0002"),
+                "split composition mismatch",
+            )
+            .with_label(errors::Label::new(
+                errors::LabelStyle::Primary,
+                SourceSpan::new(&path, 1, 13, 1, 15),
+                "related source",
+            ))
+            .with_note("rule: split(A, B) requires inputs(B) % outputs(A) == 0")
+            .with_note("computed: 3 % 2 = 1")
+            .with_help("make B input count a multiple of A output count"),
+        );
+
+        let rendered = format_diagnostics_human(&bundle);
+        let path_text = path.to_string_lossy().to_string();
+        let normalized = rendered.replace(&path_text, "$TMPFILE");
+        let expected = "\
+$TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
+  1 | process = _,_ <: _,_,_;
+    |             ^^ related source
+  = note: rule: split(A, B) requires inputs(B) % outputs(A) == 0
+  = note: computed: 3 % 2 = 1
+  = help: make B input count a multiple of A output count
+";
+        assert_eq!(normalized, expected);
+
+        std::fs::remove_file(path).expect("fixture should be removed");
+    }
+
+    #[test]
+    fn diagnostics_json_renderer_snapshot_shape_stable() {
+        let mut bundle = DiagnosticBundle::new();
+        bundle.push(
+            Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                DiagnosticCode("FRS-EVAL-0003"),
+                "too many arguments",
+            )
+            .with_note("application accepts at most 1 argument(s), got 2")
+            .with_help("remove one argument"),
+        );
+
+        let rendered = format_diagnostics_json(&bundle);
+        let value: Value =
+            serde_json::from_str(&rendered).expect("JSON diagnostics output should be valid");
+        let diag = &value["diagnostics"][0];
+
+        assert_eq!(diag["severity"], "error");
+        assert_eq!(diag["stage"], "eval");
+        assert_eq!(diag["code"], "FRS-EVAL-0003");
+        assert_eq!(diag["message"], "too many arguments");
+        assert!(diag["labels"].is_array());
+        assert_eq!(
+            diag["notes"][0],
+            "application accepts at most 1 argument(s), got 2"
+        );
+        assert_eq!(diag["help"][0], "remove one argument");
     }
 }

@@ -2292,7 +2292,7 @@ Execution plan (Phase 0 prototype, revised):
 
 #### Step 9b — negative corpus fixtures for parser/eval/propagate diagnostics
 
-- Commit: pending (working tree step, to be committed separately)
+- Commit: `b2cab3a`
 - Files:
   - `tests/corpus/err_01_parse_missing_rhs.dsp`,
   - `tests/corpus/err_02_eval_missing_process.dsp`,
@@ -2326,7 +2326,7 @@ Execution plan (Phase 0 prototype, revised):
 
 #### Documentation addendum — diagnostics UX explainability roadmap
 
-- Commit: pending (working tree step, to be committed separately)
+- Commit: `b2cab3a`
 - Files:
   - `porting/faust-rust-diagnostics-model-en.md`,
   - `porting/phases/phase-4-signaux-en.md`,
@@ -2341,7 +2341,7 @@ Execution plan (Phase 0 prototype, revised):
 
 #### Diagnostics UX rollout — Step 1 (node-context enrichment in compiler aggregation)
 
-- Commit: pending (working tree step, to be committed separately)
+- Commit: `56122fb`
 - Files:
   - `crates/compiler/src/lib.rs`,
   - `crates/compiler/Cargo.toml`.
@@ -2358,7 +2358,7 @@ Execution plan (Phase 0 prototype, revised):
 
 #### Diagnostics UX rollout — Step 2 (rule-aware actionable propagate diagnostics)
 
-- Commit: pending (working tree step, to be committed separately)
+- Commit: `1623712`
 - Files:
   - `crates/propagate/src/lib.rs`,
   - `crates/propagate/tests/core_api.rs`.
@@ -2376,7 +2376,7 @@ Execution plan (Phase 0 prototype, revised):
 
 #### Diagnostics UX rollout — Step 3 (source-label attachment when parser metadata is available)
 
-- Commit: pending (working tree step, to be committed separately)
+- Commit: `711365d`
 - Files:
   - `crates/compiler/src/lib.rs`.
 - Implemented:
@@ -2389,6 +2389,25 @@ Execution plan (Phase 0 prototype, revised):
   - added unit tests covering:
     - direct node property lookup,
     - descendant property fallback lookup.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler`
+
+#### Diagnostics UX rollout — Step 4 (human renderer snippet/caret + snapshot lock)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/src/main.rs`,
+  - `crates/compiler/src/lib.rs`.
+- Implemented:
+  - upgraded human diagnostics formatting:
+    - source snippet line and caret span when labeled source file is readable,
+    - explicit note/help lines in output.
+  - kept JSON diagnostics schema stable while extending tests.
+  - added snapshot-style tests in compiler CLI module:
+    - human output snapshot with snippet/caret (path-normalized),
+    - JSON shape stability assertions for eval diagnostics payload.
+  - added Rustdoc comments on new diagnostics helpers (renderer and compiler enrichment).
 - Validation:
   - `cargo fmt --all`
   - `cargo test -p compiler`
