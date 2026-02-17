@@ -399,6 +399,41 @@ Pass criterion:
 - unresolved-symbol diagnostics expose scope context,
 - human/json snapshots cover nested eval failures and new structured fields.
 
+Diagnostics finalization plan (remaining to call error handling "complete"):
+
+1. Precise source anchoring in alias chains:
+- when the failing node originates from an aliased definition (`foo -> bar -> process`),
+  prefer the origin expression span as primary when available and keep call-site as secondary.
+- if origin span is unavailable, emit an explicit fallback note:
+  `origin span unavailable; pointing to nearest call/owner site`.
+
+2. Cause/consequence layering:
+- reserve the top-level message for the root rule violation,
+- move derived numeric consequences into deterministic `note` lines,
+- avoid mixing two root causes in one primary message.
+
+3. Deterministic fix templates:
+- for each high-frequency `FRS-EVAL-*` / `FRS-PROP-*` class, add one concrete fix pattern:
+  - missing process template,
+  - over-application trim template,
+  - composition divisibility/equality template.
+
+4. Wording contract normalization:
+- lock one note/help ordering across eval and propagate:
+  `rule` -> `computed` -> `context` -> `help`,
+- keep vocabulary stable (`call site`, `definition site`, `owner definition`, `binding trace`).
+
+5. Real-world negative corpus expansion:
+- add fixtures with nested `with/letrec/case` + alias chains + composition mismatch combinations,
+- lock both human and JSON snapshots for these realistic cases.
+
+Pass criterion (finalization):
+- representative failures point to origin site or explicitly explain fallback,
+- root cause is readable without internal node knowledge,
+- each frequent error family has one deterministic correction template,
+- wording/order is snapshot-locked across eval+propagate,
+- expanded realistic corpus is green in CI on all platforms.
+
 ---
 
 ## 7. Test strategy

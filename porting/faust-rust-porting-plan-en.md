@@ -221,6 +221,12 @@ Near-term diagnostics UX priorities after baseline rollout:
   - wording normalization across eval/propagate,
   - nested eval negative corpus,
   - optional IDE-oriented structured JSON fields.
+- finalize diagnostics quality gate (parser/eval/propagate/compiler):
+  - origin-site precision for alias-chain failures (with explicit fallback note if unavailable),
+  - root-cause-first primary messages (single cause, consequences in notes),
+  - deterministic fix template for each frequent error family,
+  - stable wording/order contract across stages (`rule -> computed -> context -> help`),
+  - expanded realistic nested negative corpus with human/json snapshot locks.
 
 ---
 

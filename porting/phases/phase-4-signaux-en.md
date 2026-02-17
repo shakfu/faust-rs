@@ -525,6 +525,30 @@ Prioritized implementation roadmap for clearer user-facing errors:
   - binding path vector,
   - label role metadata.
 
+23. Alias-origin source precision:
+- in compiler diagnostics enrichment for Phase 4 failures, prefer origin-definition span
+  for alias-chain failures (`foo -> bar -> process`) when resolvable;
+- keep call-site as secondary label when both are available.
+
+24. Root-cause-first messaging contract:
+- ensure primary error line states one root rule violation only;
+- move computed consequences to notes (`computed:`) to avoid mixed messages.
+
+25. Deterministic correction templates:
+- add one template per frequent eval/propagate class:
+  - missing process,
+  - too many args,
+  - seq/split/merge/rec arity mismatch.
+
+26. Cross-stage wording lock:
+- normalize note/help order across eval and propagate:
+  `rule`, `computed`, `context`, `help`;
+- lock with human/json snapshots.
+
+27. Realistic nested negative fixtures:
+- add Phase 4 DSP fixtures combining nested aliases, local scopes, and composition mismatch;
+- verify labels/notes remain actionable in these compound cases.
+
 Reference model:
 - `porting/faust-rust-diagnostics-model-en.md` (sections 4.1, 5.3, 5.4, 6-D/E).
 
