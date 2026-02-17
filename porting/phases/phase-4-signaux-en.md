@@ -563,6 +563,21 @@ Prioritized implementation roadmap for clearer user-facing errors:
 31. Residual wording sweep:
 - align remaining outlier diagnostics with the standardized vocabulary/order.
 
+32. Secondary-variant `cause:` completion:
+- extend explicit `cause:` notes to remaining less frequent eval/propagate variants.
+
+33. JSON order snapshot lock:
+- add/maintain JSON snapshots asserting ordered notes:
+  `cause`, `rule`, `computed`, then context.
+
+34. End-to-end fallback fixture:
+- add one Phase 4 corpus case exercising `origin span unavailable` in full compiler
+  pipeline output and lock expected fallback wording.
+
+35. Human diagnostic noise follow-up:
+- evaluate reducing internal notes (`node_id`, `box_expr`) in standard human mode,
+  while keeping deterministic debug visibility via dedicated path.
+
 Reference model:
 - `porting/faust-rust-diagnostics-model-en.md` (sections 4.1, 5.3, 5.4, 6-D/E).
 

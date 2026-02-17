@@ -451,6 +451,21 @@ Polish phase plan (post-finalization, non-blocking):
 5. Optional eval readability parity:
 - where meaningful, add C++-style paired context rendering in eval messages too.
 
+6. Cause-note coverage completion:
+- add `cause:` notes on remaining secondary variants to remove wording asymmetry.
+
+7. Ordering contract lock in JSON snapshots:
+- add explicit snapshot assertions for note order:
+  `cause -> rule -> computed -> context`.
+
+8. Pipeline-level fallback fixture:
+- add at least one corpus fixture that triggers `origin span unavailable` through
+  normal CLI pipeline (not only unit-level synthetic tests).
+
+9. Human noise reduction follow-up:
+- evaluate moving low-level internals (`node_id`, `box_expr`) behind an optional
+  debug-oriented switch while preserving current CI contracts.
+
 ---
 
 ## 7. Test strategy

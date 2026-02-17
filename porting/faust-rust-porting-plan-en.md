@@ -232,6 +232,10 @@ Near-term diagnostics UX priorities after baseline rollout:
   - expand compound negative fixtures (stacked eval+propagate contexts),
   - lock fallback-path behavior when origin span is unavailable,
   - complete residual wording normalization across variants.
+  - complete `cause:` coverage on secondary variants,
+  - lock JSON note ordering (`cause -> rule -> computed -> context`) in snapshots,
+  - add one pipeline-level corpus fixture exercising fallback-origin messaging,
+  - evaluate standard human-mode noise reduction for low-level internal notes.
 
 ---
 
