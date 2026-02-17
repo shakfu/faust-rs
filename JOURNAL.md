@@ -2101,3 +2101,104 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p compiler --test cpp_signal_differential -- --nocapture`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --all-targets`
+
+### Diagnostics model rollout (steps 1 to 5, structured error reporting)
+
+- Objective:
+  - start implementing the structured diagnostics model planned in porting docs,
+  - integrate it incrementally in existing code (`errors` -> `parser` -> `compiler`) without breaking current pipeline behavior.
+
+#### Step 1 — core diagnostics model in `errors` crate
+
+- Commit: `e0a6488`
+- Files:
+  - `crates/errors/src/lib.rs`
+- Implemented:
+  - core types: `Severity`, `Stage`, `DiagnosticCode`, `SourceSpan`, `LabelStyle`, `Label`, `Diagnostic`, `DiagnosticBundle`,
+  - conversion trait: `IntoDiagnostic`,
+  - builder-style helpers on `Diagnostic` (`with_label`, `with_note`, `with_help`),
+  - initial unit tests for payload integrity and `error_count`.
+- Validation:
+  - `cargo test -p errors`
+
+#### Step 2 — stable diagnostics code taxonomy
+
+- Commit: `44ac67b`
+- Files:
+  - `crates/errors/src/codes.rs` (new),
+  - `crates/errors/src/lib.rs` (module export).
+- Implemented:
+  - stable code families for current scope:
+    - `FRS-SRC-*`, `FRS-LEX-*`, `FRS-PARSE-*`, `FRS-EVAL-*`, `FRS-PROP-*`, `FRS-COMP-*`,
+  - `all_codes()` listing for cross-checking,
+  - tests for code format and uniqueness.
+- Validation:
+  - `cargo test -p errors`
+
+#### Step 3 — parser structured diagnostics bundle
+
+- Commit: `d834eee`
+- Files:
+  - `crates/parser-proto/Cargo.toml`,
+  - `crates/parser-proto/src/lib.rs`,
+  - `crates/parser-proto/tests/parser_diagnostics.rs`,
+  - `Cargo.lock`.
+- Implemented:
+  - `ParseOutput` now carries `diagnostics: errors::DiagnosticBundle`,
+  - parser diagnostics mapped to structured diagnostics with:
+    - `Stage::Parser`,
+    - stable `FRS-PARSE-*` code family (`unexpected`, `recovery`, `invalid literal`),
+  - compatibility kept:
+    - `ParseOutput.errors: Vec<String>` still present as temporary compatibility channel,
+  - parser diagnostics tests now assert structured diagnostics/code-family presence.
+- Validation:
+  - `cargo test -p parser-proto`
+  - `cargo test -p parser`
+  - `cargo test -p compiler`
+
+#### Step 4 — precise parser span propagation (line/column/range)
+
+- Commit: `1594d48`
+- Files:
+  - `crates/parser-proto/src/context.rs`,
+  - `crates/parser-proto/src/lib.rs`,
+  - `crates/parser-proto/tests/parser_diagnostics.rs`.
+- Implemented:
+  - `SourceLocation` enriched with:
+    - `col`, `end_line`, `end_col`,
+  - parser cursor setters extended:
+    - `set_cursor_with_col`, `set_cursor_span`,
+  - `lrpar` spans now propagated to structured diagnostics labels (`SourceSpan`) with real ranges,
+  - diagnostic tests now assert range consistency.
+- Validation:
+  - `cargo test -p parser-proto`
+  - `cargo test -p parser`
+  - `cargo test -p compiler`
+
+#### Step 5 — compiler facade + CLI surfacing of structured parse diagnostics
+
+- Commit: `2152747`
+- Files:
+  - `crates/compiler/src/lib.rs`,
+  - `crates/compiler/src/main.rs`.
+- Implemented:
+  - `CompilerError::Parse` now carries `diagnostics: DiagnosticBundle`,
+  - `CompilerError::diagnostics()` accessor added,
+  - parse failure path preserves parser diagnostics (not counters only),
+  - CLI parse-failure output now includes structured diagnostics lines:
+    - `file:line:col severity [code] message`.
+- Validation:
+  - `cargo test -p compiler`
+
+#### Documentation updates linked to this rollout
+
+- Commit: `559af95`
+- Added/updated porting docs:
+  - `porting/faust-rust-diagnostics-model-en.md` (new global diagnostics architecture doc),
+  - `porting/faust-rust-porting-plan-en.md`,
+  - `porting/faust-rust-points-critiques-en.md`,
+  - `porting/phases/phase-0-validation-en.md`,
+  - `porting/phases/phase-0-gglobal-decomposition-map-en.md`,
+  - `porting/phases/phase-1-fondations-en.md`,
+  - `porting/phases/phase-3-parser-en.md`,
+  - `porting/phases/phase-4-signaux-en.md`.
