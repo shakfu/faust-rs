@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_06_propagate_split_mismatch_chain.dsp
+bytes=61
+lines=4
+fnv1a64=e61a799b714ee0f0

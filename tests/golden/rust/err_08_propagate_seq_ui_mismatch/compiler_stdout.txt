@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_08_propagate_seq_ui_mismatch.dsp
+bytes=63
+lines=2
+fnv1a64=69621df3183f913d

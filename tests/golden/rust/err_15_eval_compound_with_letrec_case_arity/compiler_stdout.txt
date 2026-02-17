@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_15_eval_compound_with_letrec_case_arity.dsp
+bytes=122
+lines=8
+fnv1a64=b75953fa02449bab

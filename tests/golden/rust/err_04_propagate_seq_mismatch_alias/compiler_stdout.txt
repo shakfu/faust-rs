@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_04_propagate_seq_mismatch_alias.dsp
+bytes=39
+lines=3
+fnv1a64=d94f0abceed68314

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_11_eval_case_arity_mismatch.dsp
+bytes=47
+lines=2
+fnv1a64=827550cde60cdfaa

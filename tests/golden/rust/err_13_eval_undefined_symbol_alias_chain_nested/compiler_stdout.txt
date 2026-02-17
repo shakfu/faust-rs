@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_13_eval_undefined_symbol_alias_chain_nested.dsp
+bytes=59
+lines=4
+fnv1a64=ec73e3eeb065107c

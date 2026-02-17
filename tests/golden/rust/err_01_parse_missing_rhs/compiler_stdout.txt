@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_01_parse_missing_rhs.dsp
+bytes=12
+lines=1
+fnv1a64=35ea26c60b57cc6e

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_03_propagate_split_mismatch.dsp
+bytes=50
+lines=3
+fnv1a64=89f6bcc900b23328

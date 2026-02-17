@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_09_eval_undefined_symbol.dsp
+bytes=26
+lines=2
+fnv1a64=f192f13fe7156fa3

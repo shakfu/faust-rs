@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_05_propagate_merge_mismatch_alias.dsp
+bytes=44
+lines=3
+fnv1a64=6065316b039b9a58

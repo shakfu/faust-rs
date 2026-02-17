@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_12_eval_case_no_match.dsp
+bytes=44
+lines=2
+fnv1a64=5276107ee2ad4923

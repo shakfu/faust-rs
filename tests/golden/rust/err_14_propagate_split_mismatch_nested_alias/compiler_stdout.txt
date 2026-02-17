@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_14_propagate_split_mismatch_nested_alias.dsp
+bytes=83
+lines=6
+fnv1a64=7237a2c39686fb7a

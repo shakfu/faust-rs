@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_10_eval_too_many_arguments.dsp
+bytes=43
+lines=2
+fnv1a64=cb46a38b53b847dd

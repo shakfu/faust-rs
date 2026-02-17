@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_07_propagate_rec_mismatch_alias.dsp
+bytes=45
+lines=3
+fnv1a64=b2a725ea049f4d3d

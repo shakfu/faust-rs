@@ -2927,3 +2927,34 @@ Execution plan (Phase 0 prototype, revised):
     - how to read `cause/rule/computed/help`,
     - quick mapping of error code families.
   - linked both documents from the repository README.
+
+#### Golden refresh (Rust) — negative diagnostics corpus alignment
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `tests/golden/rust/err_01_parse_missing_rhs/compiler_stdout.txt`
+  - `tests/golden/rust/err_02_eval_missing_process/compiler_stdout.txt`
+  - `tests/golden/rust/err_03_propagate_split_mismatch/compiler_stdout.txt`
+  - `tests/golden/rust/err_04_propagate_seq_mismatch_alias/compiler_stdout.txt`
+  - `tests/golden/rust/err_05_propagate_merge_mismatch_alias/compiler_stdout.txt`
+  - `tests/golden/rust/err_06_propagate_split_mismatch_chain/compiler_stdout.txt`
+  - `tests/golden/rust/err_07_propagate_rec_mismatch_alias/compiler_stdout.txt`
+  - `tests/golden/rust/err_08_propagate_seq_ui_mismatch/compiler_stdout.txt`
+  - `tests/golden/rust/err_09_eval_undefined_symbol/compiler_stdout.txt`
+  - `tests/golden/rust/err_10_eval_too_many_arguments/compiler_stdout.txt`
+  - `tests/golden/rust/err_11_eval_case_arity_mismatch/compiler_stdout.txt`
+  - `tests/golden/rust/err_12_eval_case_no_match/compiler_stdout.txt`
+  - `tests/golden/rust/err_13_eval_undefined_symbol_alias_chain_nested/compiler_stdout.txt`
+  - `tests/golden/rust/err_14_propagate_split_mismatch_nested_alias/compiler_stdout.txt`
+  - `tests/golden/rust/err_15_eval_compound_with_letrec_case_arity/compiler_stdout.txt`
+  - `tests/golden/rust/err_16_propagate_compound_with_letrec_split/compiler_stdout.txt`
+  - `tests/golden/rust/err_17_origin_fallback_missing_props_eval/compiler_stdout.txt`
+  - `tests/golden/rust/rep_31_extended_primitives/compiler_stdout.txt`
+  - `JOURNAL.md`.
+- Implemented:
+  - generated missing Rust golden outputs for the `err_*` diagnostics fixtures.
+  - regenerated `rep_31_extended_primitives` Rust golden output for corpus parity with current fixtures.
+  - restored `xtask golden-check` pass on full corpus.
+- Validation:
+  - `cargo run -p xtask -- golden-gen-rust`
+  - `cargo run -p xtask -- golden-check`

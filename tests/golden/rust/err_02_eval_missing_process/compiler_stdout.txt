@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_02_eval_missing_process.dsp
+bytes=9
+lines=1
+fnv1a64=5129fb4231767ce0

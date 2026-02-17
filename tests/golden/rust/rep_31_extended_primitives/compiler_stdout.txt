@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_31_extended_primitives.dsp
+bytes=250
+lines=1
+fnv1a64=3689bffa29318e12
