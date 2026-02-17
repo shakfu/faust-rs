@@ -5,6 +5,7 @@
 > **Crates**: `fir`, `codegen` (including `codegen::backends::c` and `codegen::backends::cpp`)
 > **Estimate**: 45–65 person days
 > **Prerequisites**: Phases 1–5
+> **Architecture note**: `porting/faust-rust-fir-architecture-en.md`
 
 ---
 
@@ -92,7 +93,7 @@
 
 ## 2. Mapping C++ → Rust
 
-### 2.1 fir — FIR types and instructions
+### 2.1 fir — FIR types and instructions (mandatory canonical API)
 
 The FIR hierarchy of 60+ C++ classes → a Rust enum:
 
@@ -206,6 +207,66 @@ pub enum FirStmt {
 
 pub type FirBlock = Vec<FirStmt>;
 ```
+
+### 2.1.1 Canonical construction/matching API (mandatory)
+
+To stay aligned with the Rust architecture already used for boxes/signals, FIR must use one
+canonical API pair:
+
+- construction: `FirBuilder`
+- inspection/dispatch: `FirMatch` + `match_fir`
+
+Reference shape:
+
+```rust
+pub struct FirStore { /* typed nodes arena */ }
+pub struct FirBuilder<'a> { /* wraps &mut FirStore */ }
+
+pub enum FirMatch<'a> {
+    Int32(i32),
+    BinOp { op: FirBinOp, lhs: FirId, rhs: FirId },
+    DeclareVar { name: &'a str, /* ... */ },
+    // ... exhaustive over canonical FIR nodes
+    Unknown,
+}
+
+pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch<'_>;
+```
+
+Mapping rule from C++:
+
+- `IB::gen*` construction entry points map to `FirBuilder::*`.
+- Visitor/RTTI dispatch (`accept`, `DispatchVisitor`, `dynamic_cast` families) maps to
+  exhaustive `match_fir` decoding + Rust `match`.
+- No parallel constructor/matcher ladders are allowed in production paths.
+
+This is a phase-level invariant for backend work. C/C++/Rust/Wasm/LLVM emitters should consume FIR
+through this canonical dispatch surface to keep behavior deterministic and auditable.
+
+### 2.1.2 C++ anchors for the post-signal FIR path
+
+Source-of-truth files to mirror during migration:
+
+- `compiler/generator/instructions.hh`:
+  - class hierarchy for `ValueInst`/`StatementInst`,
+  - central static factory `IB::gen*`,
+  - visitor dispatch (`InstVisitor`, `DispatchVisitor`).
+- `compiler/generator/instructions_type.hh`:
+  - `Typed::VarType` and helper conversions (`getPtrFromType`, `getVecFromType`, ...).
+- `compiler/generator/instructions_compiler.hh/.cpp`:
+  - currently effective production path (`InstructionsCompiler`/`DAGInstructionsCompiler`)
+    that lowers signals to FIR blocks in `CodeContainer`.
+- `compiler/transform/signalFIRCompiler.hh/.cpp`:
+  - alternative direct signal->FIR path (secondary for current parity target).
+- `compiler/generator/code_container.hh/.cpp`:
+  - sectioned FIR ownership and lifecycle (`init`, `clear`, `compute`, UI, metadata).
+
+Rust architectural interpretation:
+
+- `IB::gen*` surface is represented by `FirBuilder` methods.
+- C++ visitor/RTTI dispatch is represented by one `match_fir` + Rust `match`.
+- `CodeContainer` and backend emitters consume stable `FirId`/`FirNode` references,
+  not ad hoc backend-specific node wrappers.
 
 ### 2.2 fir — FIR→FIR transformations
 
@@ -446,7 +507,9 @@ codegen::backends::cpp → codegen, fir
 FIR instructions form a deep inheritance hierarchy (3–4 levels) with visitor pattern. In Rust, we replace with enums + pattern matching. The advantage: guaranteed completeness, no vtable, no casting.
 
 ### 4.2 IB (Instruction Builder) — global factory
-In C++, `IB` is a static class with factory methods (`IB::genLoadVar(...)`, etc.). In Rust, you can simply use enum constructors directly, or provide a `FirBuilder` if ergonomics justifies it.
+In C++, `IB` is a static class with factory methods (`IB::genLoadVar(...)`, etc.). In Rust, this
+must be represented as one canonical `FirBuilder` API (not ad hoc enum-constructor calls spread
+across crates), so construction paths stay uniform and testable.
 
 ### 4.3 Old vs new pipeline
 There are **two** signal→FIR compilation pipelines:
@@ -492,6 +555,10 @@ The orchestration layer currently duplicates compile flow across many backend wr
 ### 4.14 Output stream downcasts in orchestration paths
 Output handling currently depends on stream type checks/downcasts in `libcode.cpp`. Rust should use typed sink interfaces to avoid hidden output-mode branching.
 
+### 4.15 FIR dispatch drift
+If FIR construction/inspection is reimplemented independently in several modules, semantic drift
+between backends is likely. Keep one shared `FirBuilder` + `match_fir` implementation in `crates/fir`.
+
 ---
 
 ## 5. Testing
@@ -516,6 +583,8 @@ Output handling currently depends on stream type checks/downcasts in `libcode.cp
 - [ ] Correct JSON (check with existing Faust tools)
 - [ ] The generated code is bit-identical or functionally equivalent to C++
 - [ ] FIR nodes use enum + typed IDs (no RTTI/dynamic_cast patterns)
+- [ ] FIR construction goes through `FirBuilder` (single canonical entrypoint)
+- [ ] FIR inspection/dispatch goes through `FirMatch` + `match_fir` (no parallel ladders)
 - [ ] FIR building no longer depends on mutable global state
 - [ ] Type mapping uses trait-based backends with shared core type model
 - [ ] Code container uses explicit sectioned model and pass pipeline

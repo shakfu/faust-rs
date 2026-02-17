@@ -1,0 +1,89 @@
+# FIR Architecture Contract (Rust)
+
+**Status**: active design contract for Phase 6 implementation.
+
+## 1. Goal
+
+Define one canonical FIR architecture for the Rust port, so all backends (`c`, `cpp`, `rust`, `wasm`, `llvm`, `interp`, ...) consume the same IR model and dispatch API.
+
+This document is intentionally aligned with:
+
+- `porting/phases/phase-4-signaux-en.md` (signals side of the boundary),
+- `porting/phases/phase-6-fir-backends-en.md` (FIR/backends migration plan),
+- C++ source-of-truth in `/Users/letz/Developpements/RUST/faust`.
+
+## 2. Canonical Public API
+
+FIR must expose exactly one canonical construction/matching surface:
+
+- `FirBuilder`: construction API.
+- `FirMatch` + `match_fir`: inspection/dispatch API.
+- `FirStore` + typed IDs (`FirId`): stable storage and references.
+
+No backend-local constructor ladders and no duplicated matcher ladders are allowed in production paths.
+
+## 3. Mapping from C++
+
+Primary C++ anchors:
+
+- `compiler/generator/instructions.hh`: `ValueInst`/`StatementInst`, visitors, `IB::gen*`.
+- `compiler/generator/instructions_type.hh`: FIR type model (`Typed::VarType` and variants).
+- `compiler/generator/instructions_compiler.hh/.cpp`: currently effective production signal->FIR path.
+- `compiler/transform/signalFIRCompiler.hh/.cpp`: secondary/experimental direct signal->FIR path.
+- `compiler/generator/code_container.hh/.cpp`: sectioned FIR ownership and lifecycle.
+
+Required Rust mapping:
+
+- `IB::gen*` -> `FirBuilder::*` methods.
+- Visitor/RTTI dispatch (`accept`, `DispatchVisitor`, `dynamic_cast`) -> `match_fir` + exhaustive `match`.
+- Pointer-owned instruction graphs -> `FirStore` + `FirId`.
+
+## 4. Pipeline Boundary Contract
+
+Pipeline contract remains:
+
+`parse -> boxes -> eval -> propagate -> normalize -> transform -> fir -> codegen::backends::*`
+
+Boundary constraints:
+
+- `transform` is the producer of FIR nodes.
+- `fir` crate owns FIR node definitions, IDs, builders, matchers, and FIR-local transforms/checkers.
+- `codegen` and every backend are consumers of `fir` crate APIs; they do not redefine FIR semantics.
+
+## 5. Architectural Invariants
+
+- Deterministic node semantics and child ordering.
+- Explicitly typed memory-access classes (`stack`, `struct`, `funargs`, `loop`, ...).
+- Explicitly typed UI FIR nodes (open/close group, button, slider, bargraph, metadata).
+- Exhaustive dispatch coverage for canonical nodes in `FirMatch`.
+- No hidden global state (`gGlobal`-like) in FIR builders/checkers.
+
+## 6. Implementation Pattern
+
+Recommended internal layering in `crates/fir`:
+
+1. `types`: FIR types and operation enums.
+2. `nodes`: canonical FIR node enum + typed IDs.
+3. `builder`: `FirBuilder` (ergonomic and deterministic constructors).
+4. `matching`: `FirMatch` + `match_fir`.
+5. `passes`: FIR->FIR transforms/checkers.
+
+The first migration slice can be partial on node coverage, but it must keep API shape stable and documented.
+
+## 7. Test Contract
+
+Minimum tests per slice:
+
+- unit tests for every newly added `FirBuilder` constructor.
+- unit tests for corresponding `match_fir` variant decoding.
+- negative tests for unknown/invalid IDs.
+- differential tests for emitted FIR dumps once text FIR output is connected.
+
+## 8. Rustdoc Requirements
+
+For each public FIR API item:
+
+- include C++ provenance (`instructions.hh`, `instructions_type.hh`, etc.),
+- state parity invariants,
+- state adaptation policy if not a strict 1:1 signature mapping.
+

@@ -47,6 +47,7 @@ The objective of the port is to reproduce this pipeline in idiomatic Rust, takin
 - For tree-encoded IR layers, standardize on builder + canonical matcher APIs:
   - `boxes`: `BoxBuilder` + `match_box`
   - `signals`: `SigBuilder` + `match_sig`
+  - `fir`: `FirBuilder` + `match_fir`
   This avoids duplicated constructor/matcher ladders across passes and keeps dispatch logic explicit.
 - Standardize diagnostics and error reporting on one structured cross-phase model (see `faust-rust-diagnostics-model-en.md`).
 
@@ -54,6 +55,8 @@ Related design note (recursion representation and RouteIR coexistence):
 - `faust-rust-recursion-model-note-en.md`
 Related design note (structured diagnostics and error-reporting model):
 - `faust-rust-diagnostics-model-en.md`
+Related design note (canonical FIR architecture for backends):
+- `faust-rust-fir-architecture-en.md`
 
 ### Public API migration policy (1:1 vs adaptations)
 
@@ -479,7 +482,7 @@ fn apply_rules(sig: &Signal, rules: &[Box<dyn SignalRewriter>]) -> Signal {
 
 | Stage | Crate | Description | Validation tests |
 |-------|-------|-------------|---------------------|
-| 6.1 | **`fir`** | Faust Intermediate Representation. Instructions (declarations, loops, conditions, operations), FIR types, visitors/FIR transformers. It is the pivot between the world of signals and the world of code generation. | Tests: dump FIR vs reference (-lang fir) |
+| 6.1 | **`fir`** | Faust Intermediate Representation. Instructions (declarations, loops, conditions, operations), FIR types, transformers. Canonical API contract: `FirBuilder` for construction and `match_fir`/`FirMatch` for dispatch. It is the pivot between the world of signals and the world of code generation. | Tests: dump FIR vs reference (-lang fir) |
 | 6.2 | **`codegen`** | Common infrastructure: code containers, management of declarations, variables, buffers, DSP structures. Translation of signals → FIR (the heart of the compilation). | Integration testing |
 | 6.3 | **`codegen::backends::c`** | First backend: generation of C code. Used to validate the entire end-to-end chain. | Comparison of C output with the reference C++ compiler |
 | 6.4 | **`codegen::backends::cpp`** | C++ backend (`-lang cpp`): very similar to the C backend, useful for C/C++ parity checks. | Idem |
@@ -496,15 +499,17 @@ fn apply_rules(sig: &Signal, rules: &[Box<dyn SignalRewriter>]) -> Signal {
 
 1. Replace inheritance + `dynamic_cast`-heavy instruction handling with enum-based FIR nodes and `match`-based passes.
 2. Replace raw-pointer instruction ownership with arena IDs and contiguous collections (`Vec`/`SmallVec`).
-3. Split `IB` into separate concerns:
+3. Standardize FIR construction/inspection on one shared crate-level API:
+   `FirBuilder` + `FirMatch` + `match_fir` (no backend-local ladders).
+4. Split `IB` into separate concerns:
    - pure FIR node construction
    - canonicalization/constant folding
    - target-aware lowering
-4. Route FIR type/memory decisions through explicit context objects (no hidden global-state coupling).
-5. Redesign FIR type modeling to be compositional (`BaseType`, `Pointer`, `Vector`, `Array`, `Function`) instead of enum-variant proliferation.
-6. Replace `TypeManager` class hierarchy with Rust traits + backend formatting tables.
-7. Split DSP struct responsibilities into dedicated subsystems (layout, metadata/usage, emission).
-8. Replace repeated field-name linear scans with indexed lookup tables for struct layout.
+5. Route FIR type/memory decisions through explicit context objects (no hidden global-state coupling).
+6. Redesign FIR type modeling to be compositional (`BaseType`, `Pointer`, `Vector`, `Array`, `Function`) instead of enum-variant proliferation.
+7. Replace `TypeManager` class hierarchy with Rust traits + backend formatting tables.
+8. Split DSP struct responsibilities into dedicated subsystems (layout, metadata/usage, emission).
+9. Replace repeated field-name linear scans with indexed lookup tables for struct layout.
 
 **Phase 6 CodeContainer/codegen restructuring checklist (from `code_container.hh/.cpp` and related container machinery audit):**
 

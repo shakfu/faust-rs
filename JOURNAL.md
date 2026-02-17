@@ -3009,3 +3009,38 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo test -p eval --all-targets`
   - `cargo run -p xtask -- corpus-status-report`
+
+## 2026-02-17
+
+#### Phase 6 FIR architecture contract tightened (Builder/Match model)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/fir/src/lib.rs`
+  - `porting/faust-rust-fir-architecture-en.md` (new)
+  - `porting/phases/phase-6-fir-backends-en.md`
+  - `porting/phases/phase-4-signaux-en.md`
+  - `porting/faust-rust-porting-plan-en.md`
+- Implemented:
+  - replaced the `fir` crate scaffold with a first canonical API slice:
+    - `FirStore` + typed `FirId`,
+    - `FirBuilder` construction helpers,
+    - `FirMatch` + `match_fir` canonical dispatch,
+    - initial FIR node families covering constants, core ops, declarations/stmts, control flow, and UI instructions.
+  - added unit tests in `crates/fir` for:
+    - constructor/matcher parity on value nodes,
+    - constructor/matcher parity on statement/control-flow nodes,
+    - constructor/matcher parity on UI nodes,
+    - out-of-range ID safety (`Unknown`).
+  - added a dedicated FIR architecture note:
+    - `porting/faust-rust-fir-architecture-en.md`,
+    - explicit C++ source anchors (`instructions.hh`, `instructions_type.hh`, `instructions_compiler.hh/.cpp`, `signalFIRCompiler.hh/.cpp`, `code_container.hh/.cpp`),
+    - strict boundary contract from signals/transform to backends via `fir`.
+  - updated planning docs to make `FirBuilder/FirMatch/match_fir` mandatory (not optional):
+    - phase-6 contract now explicitly requires a single canonical FIR construction/inspection surface,
+    - phase-4 now documents the phase-4 -> phase-6 API handoff (`match_sig` -> `FirBuilder`),
+    - global plan now lists `fir` alongside `boxes` and `signals` in the builder/matcher policy.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p fir --all-targets -- -D warnings`
+  - `cargo test -p fir --all-targets`

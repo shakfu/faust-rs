@@ -160,6 +160,8 @@ pub fn match_sig(arena: &TreeArena, id: TreeId) -> SigMatch;
 Alignment rule with Phase 2:
 - `SigBuilder`/`match_sig` must mirror the canonical boxes API style (`BoxBuilder`/`match_box`).
 - `propagate` is expected to consume boxes via `match_box` and produce signals via `SigBuilder`.
+- Phase-6 handoff contract: signal→FIR lowering must consume signals via `match_sig` and emit FIR
+  via `fir::FirBuilder`; FIR inspection in later passes/backends uses `fir::match_fir`.
 - Avoid duplicated dispatch ladders (`isBox*`-style clones) in Phase 4 modules.
 
 #### 2.1.2 Binary operators
