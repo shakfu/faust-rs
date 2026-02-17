@@ -236,6 +236,13 @@ Near-term diagnostics UX priorities after baseline rollout:
   - lock JSON note ordering (`cause -> rule -> computed -> context`) in snapshots,
   - add one pipeline-level corpus fixture exercising fallback-origin messaging,
   - evaluate standard human-mode noise reduction for low-level internal notes.
+  - introduce diagnostics verbosity modes (`standard`/`debug`) for controlled
+    visibility of low-level internals,
+  - extend JSON ordering assertions to broader error families (`merge`, `rec`,
+    additional eval classes),
+  - lock a dedicated human snapshot for pipeline-level fallback-origin messaging,
+  - perform final concision sweep on help/template strings,
+  - add short end-user guidance for reading structured diagnostics.
 
 ---
 

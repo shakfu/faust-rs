@@ -466,6 +466,26 @@ Polish phase plan (post-finalization, non-blocking):
 - evaluate moving low-level internals (`node_id`, `box_expr`) behind an optional
   debug-oriented switch while preserving current CI contracts.
 
+10. Verbosity mode split:
+- add a CLI-level verbosity contract (`standard` vs `debug`) so machine-oriented
+  internals can be re-enabled intentionally without polluting default human output.
+
+11. Ordering lock expansion:
+- extend JSON note-order assertions beyond split/undefined-symbol to additional
+  mismatch families (`merge`, `rec`) for full contract coverage.
+
+12. Fallback human snapshot:
+- add one dedicated human snapshot test for a pipeline-level
+  `origin span unavailable` case to lock user-facing wording.
+
+13. Help/template concision sweep:
+- review remaining help/template lines for consistent length/actionability and
+  remove overly verbose variants.
+
+14. End-user reading guide:
+- document a compact "how to read diagnostics" guide with representative examples
+  (cause/rule/computed/context/help).
+
 ---
 
 ## 7. Test strategy

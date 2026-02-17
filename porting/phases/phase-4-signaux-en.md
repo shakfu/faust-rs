@@ -578,6 +578,23 @@ Prioritized implementation roadmap for clearer user-facing errors:
 - evaluate reducing internal notes (`node_id`, `box_expr`) in standard human mode,
   while keeping deterministic debug visibility via dedicated path.
 
+36. Human/debug verbosity mode:
+- define CLI-level diagnostics verbosity (`standard`/`debug`) and map internal
+  notes visibility accordingly.
+
+37. JSON ordering coverage expansion:
+- add note-order tests for additional propagate mismatch families (`merge`, `rec`)
+  and at least one extra eval family.
+
+38. Pipeline fallback human snapshot:
+- lock a human snapshot for one end-to-end `origin span unavailable` fixture.
+
+39. Help/template concision pass:
+- normalize remaining long help/template strings to concise actionable forms.
+
+40. User diagnostics reading note:
+- add short user-facing guidance for interpreting `cause/rule/computed/context/help`.
+
 Reference model:
 - `porting/faust-rust-diagnostics-model-en.md` (sections 4.1, 5.3, 5.4, 6-D/E).
 
