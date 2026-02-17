@@ -949,6 +949,7 @@ fn emit_type(typ: &FirType, options: &CppOptions) -> String {
         FirType::Int64 => "long long".to_owned(),
         FirType::Float32 => "float".to_owned(),
         FirType::Float64 => "double".to_owned(),
+        FirType::FaustFloat => "FAUSTFLOAT".to_owned(),
         FirType::Quad => options.quad_type_name.clone(),
         FirType::FixedPoint => options.fixed_type_name.clone(),
         FirType::Bool => "bool".to_owned(),
@@ -1204,6 +1205,7 @@ mod tests {
             emit_type(&FirType::Array(Box::new(FirType::Float32), 8), &options),
             "float[8]"
         );
+        assert_eq!(emit_type(&FirType::FaustFloat, &options), "FAUSTFLOAT");
         assert_eq!(
             emit_type(&FirType::Vector(Box::new(FirType::Float64), 4), &options),
             "Vec<double,4>"

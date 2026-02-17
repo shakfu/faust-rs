@@ -11,8 +11,18 @@ fn build_sine_phasor_test_module() -> (FirStore, fir::FirId) {
     let f440 = b.float64(440.0);
     let f02 = b.float64(0.2);
     let f0 = b.float64(0.0);
-    let dec_freq = b.declare_var("fFreq", FirType::Float64, AccessType::Struct, Some(f440));
-    let dec_gain = b.declare_var("fGain", FirType::Float64, AccessType::Struct, Some(f02));
+    let dec_freq = b.declare_var(
+        "fFreq",
+        FirType::FaustFloat,
+        AccessType::Struct,
+        Some(f440),
+    );
+    let dec_gain = b.declare_var(
+        "fGain",
+        FirType::FaustFloat,
+        AccessType::Struct,
+        Some(f02),
+    );
     let dec_phase = b.declare_var("fPhase", FirType::Float64, AccessType::Struct, Some(f0));
     let globals = b.block(&[dec_freq, dec_gain, dec_phase]);
 
@@ -24,7 +34,7 @@ fn build_sine_phasor_test_module() -> (FirStore, fir::FirId) {
         fir::SliderRange {
             init: 440.0,
             lo: 20.0,
-            hi: 20_000.0,
+            hi: 3_000.0,
             step: 1.0,
         },
     );
@@ -52,8 +62,8 @@ fn build_sine_phasor_test_module() -> (FirStore, fir::FirId) {
         false,
     );
 
-    let freq = b.load_var("fFreq", AccessType::Struct, FirType::Float64);
-    let gain = b.load_var("fGain", AccessType::Struct, FirType::Float64);
+    let freq = b.load_var("fFreq", AccessType::Struct, FirType::FaustFloat);
+    let gain = b.load_var("fGain", AccessType::Struct, FirType::FaustFloat);
     let phase = b.load_var("fPhase", AccessType::Struct, FirType::Float64);
     let sample_rate = b.float64(48_000.0);
     let one = b.float64(1.0);

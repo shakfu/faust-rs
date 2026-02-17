@@ -50,6 +50,8 @@ pub enum FirType {
     Int64,
     Float32,
     Float64,
+    /// Backend-defined scalar sample/control type (`FAUSTFLOAT` in C++).
+    FaustFloat,
     Quad,
     FixedPoint,
     Bool,
@@ -1629,6 +1631,7 @@ const FIR_TYPE_INT32_TAG: &str = "FIRTYPE_INT32";
 const FIR_TYPE_INT64_TAG: &str = "FIRTYPE_INT64";
 const FIR_TYPE_FLOAT32_TAG: &str = "FIRTYPE_FLOAT32";
 const FIR_TYPE_FLOAT64_TAG: &str = "FIRTYPE_FLOAT64";
+const FIR_TYPE_FAUSTFLOAT_TAG: &str = "FIRTYPE_FAUSTFLOAT";
 const FIR_TYPE_QUAD_TAG: &str = "FIRTYPE_QUAD";
 const FIR_TYPE_FIXED_POINT_TAG: &str = "FIRTYPE_FIXEDPOINT";
 const FIR_TYPE_BOOL_TAG: &str = "FIRTYPE_BOOL";
@@ -1868,6 +1871,7 @@ fn encode_type(arena: &mut TreeArena, typ: &FirType) -> FirId {
         FirType::Int64 => intern_tag(arena, FIR_TYPE_INT64_TAG, &[]),
         FirType::Float32 => intern_tag(arena, FIR_TYPE_FLOAT32_TAG, &[]),
         FirType::Float64 => intern_tag(arena, FIR_TYPE_FLOAT64_TAG, &[]),
+        FirType::FaustFloat => intern_tag(arena, FIR_TYPE_FAUSTFLOAT_TAG, &[]),
         FirType::Quad => intern_tag(arena, FIR_TYPE_QUAD_TAG, &[]),
         FirType::FixedPoint => intern_tag(arena, FIR_TYPE_FIXED_POINT_TAG, &[]),
         FirType::Bool => intern_tag(arena, FIR_TYPE_BOOL_TAG, &[]),
@@ -1915,6 +1919,7 @@ fn decode_type(arena: &TreeArena, id: FirId) -> Option<FirType> {
         (FIR_TYPE_INT64_TAG, []) => Some(FirType::Int64),
         (FIR_TYPE_FLOAT32_TAG, []) => Some(FirType::Float32),
         (FIR_TYPE_FLOAT64_TAG, []) => Some(FirType::Float64),
+        (FIR_TYPE_FAUSTFLOAT_TAG, []) => Some(FirType::FaustFloat),
         (FIR_TYPE_QUAD_TAG, []) => Some(FirType::Quad),
         (FIR_TYPE_FIXED_POINT_TAG, []) => Some(FirType::FixedPoint),
         (FIR_TYPE_BOOL_TAG, []) => Some(FirType::Bool),
