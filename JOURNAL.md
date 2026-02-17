@@ -2338,3 +2338,20 @@ Execution plan (Phase 0 prototype, revised):
     - source-span propagation for Phase 4 diagnostics,
     - human renderer snippet/caret upgrade with JSON schema stability and snapshot locks.
   - added pass criteria for this UX tranche directly in diagnostics/phase documents.
+
+#### Diagnostics UX rollout — Step 1 (node-context enrichment in compiler aggregation)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/src/lib.rs`,
+  - `crates/compiler/Cargo.toml`.
+- Implemented:
+  - compiler diagnostics aggregation now enriches eval/propagate diagnostics with:
+    - `node_id=<TreeId>` note when the error variant carries a node,
+    - compact `box_expr=<dump_box(...)>` preview note for the offending node.
+  - this context is injected in `pipeline_to_signals` before wrapping into `CompilerError`.
+  - regression test strengthened:
+    - propagate mismatch test now asserts presence of `node_id=` and `box_expr=` notes.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler`

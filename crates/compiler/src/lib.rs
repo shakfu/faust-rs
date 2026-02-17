@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use boxes::BoxId;
+use boxes::{BoxId, dump_box};
 use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic};
 use parser::{ParseOutput, SourceReaderError};
 use propagate::{BoxArity, PropagateError};
@@ -114,7 +114,15 @@ impl Compiler {
         })?;
 
         let process_box = eval::eval_process(&mut output.state.arena, root).map_err(|error| {
-            let diagnostics = bundle_from_diagnostic(error.clone().into_diagnostic());
+            let mut diagnostic = error.clone().into_diagnostic();
+            if let Some(node) = eval_error_node(&error) {
+                diagnostic = diagnostic.with_note(format!("node_id={}", node.as_u32()));
+                diagnostic = diagnostic.with_note(format!(
+                    "box_expr={}",
+                    compact_box_preview(&output.state.arena, node)
+                ));
+            }
+            let diagnostics = bundle_from_diagnostic(diagnostic);
             CompilerError::Eval {
                 source: source.into(),
                 error,
@@ -123,7 +131,15 @@ impl Compiler {
         })?;
         let process_arity =
             propagate::box_arity(&output.state.arena, process_box).map_err(|error| {
-                let diagnostics = bundle_from_diagnostic(error.clone().into_diagnostic());
+                let mut diagnostic = error.clone().into_diagnostic();
+                if let Some(node) = propagate_error_node(&error) {
+                    diagnostic = diagnostic.with_note(format!("node_id={}", node.as_u32()));
+                    diagnostic = diagnostic.with_note(format!(
+                        "box_expr={}",
+                        compact_box_preview(&output.state.arena, node)
+                    ));
+                }
+                let diagnostics = bundle_from_diagnostic(diagnostic);
                 CompilerError::Propagate {
                     source: source.into(),
                     error,
@@ -133,7 +149,15 @@ impl Compiler {
         let inputs = propagate::make_sig_input_list(&mut output.state.arena, process_arity.inputs);
         let signals = propagate::propagate(&mut output.state.arena, process_box, &inputs).map_err(
             |error| {
-                let diagnostics = bundle_from_diagnostic(error.clone().into_diagnostic());
+                let mut diagnostic = error.clone().into_diagnostic();
+                if let Some(node) = propagate_error_node(&error) {
+                    diagnostic = diagnostic.with_note(format!("node_id={}", node.as_u32()));
+                    diagnostic = diagnostic.with_note(format!(
+                        "box_expr={}",
+                        compact_box_preview(&output.state.arena, node)
+                    ));
+                }
+                let diagnostics = bundle_from_diagnostic(diagnostic);
                 CompilerError::Propagate {
                     source: source.into(),
                     error,
@@ -242,6 +266,43 @@ fn bundle_from_diagnostic(diagnostic: Diagnostic) -> DiagnosticBundle {
     let mut diagnostics = DiagnosticBundle::new();
     diagnostics.push(diagnostic);
     diagnostics
+}
+
+fn eval_error_node(error: &eval::EvalError) -> Option<BoxId> {
+    match error {
+        eval::EvalError::MalformedDefinitionNode { node }
+        | eval::EvalError::MalformedListNode { node }
+        | eval::EvalError::MalformedCaseNode { node }
+        | eval::EvalError::NonIdentifierParameter { node }
+        | eval::EvalError::NonIdentifierIterationVariable { node }
+        | eval::EvalError::IterationCountNotInt { node }
+        | eval::EvalError::LoopDetected { node } => Some(*node),
+        _ => None,
+    }
+}
+
+fn propagate_error_node(error: &PropagateError) -> Option<BoxId> {
+    match error {
+        PropagateError::UnsupportedBox { node, .. }
+        | PropagateError::InvalidIntegerValue { node, .. }
+        | PropagateError::InputArityMismatch { node, .. }
+        | PropagateError::OutputArityMismatch { node, .. }
+        | PropagateError::SeqArityMismatch { node, .. }
+        | PropagateError::SplitArityMismatch { node, .. }
+        | PropagateError::MergeArityMismatch { node, .. }
+        | PropagateError::RecArityMismatch { node, .. } => Some(*node),
+        _ => None,
+    }
+}
+
+fn compact_box_preview(arena: &tlib::TreeArena, node: BoxId) -> String {
+    let preview = dump_box(arena, node);
+    let mut one_line = preview.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHARS: usize = 180;
+    if one_line.chars().count() > MAX_CHARS {
+        one_line = one_line.chars().take(MAX_CHARS).collect::<String>() + "...";
+    }
+    one_line
 }
 
 #[must_use]
@@ -470,5 +531,11 @@ mod tests {
                 .iter()
                 .any(|d| d.code.0.starts_with("FRS-PROP-"))
         );
+        let first = diagnostics
+            .as_slice()
+            .first()
+            .expect("propagate error bundle should not be empty");
+        assert!(first.notes.iter().any(|n| n.starts_with("node_id=")));
+        assert!(first.notes.iter().any(|n| n.starts_with("box_expr=")));
     }
 }
