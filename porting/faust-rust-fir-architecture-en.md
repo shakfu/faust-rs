@@ -18,7 +18,8 @@ FIR must expose exactly one canonical construction/matching surface:
 
 - `FirBuilder`: construction API.
 - `FirMatch` + `match_fir`: inspection/dispatch API.
-- `FirStore` + typed IDs (`FirId`): stable storage and references.
+- `FirStore` + typed IDs (`FirId`): stable storage and references (implemented over
+  `tlib::TreeArena` interning).
 
 No backend-local constructor ladders and no duplicated matcher ladders are allowed in production paths.
 
@@ -50,6 +51,7 @@ Boundary constraints:
 - `transform` is the producer of FIR nodes.
 - `fir` crate owns FIR node definitions, IDs, builders, matchers, and FIR-local transforms/checkers.
 - `codegen` and every backend are consumers of `fir` crate APIs; they do not redefine FIR semantics.
+- FIR node storage relies on `tlib` so structurally identical FIR nodes are shared automatically.
 
 ## 5. Architectural Invariants
 

@@ -3078,3 +3078,26 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy -p fir --all-targets -- -D warnings`
   - `cargo test -p fir --all-targets`
+
+#### FIR memory model switched to `tlib::TreeArena` hash-consing
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/fir/src/lib.rs`
+  - `crates/fir/Cargo.toml`
+  - `porting/phases/phase-6-fir-backends-en.md`
+  - `porting/faust-rust-fir-architecture-en.md`
+  - `porting/faust-rust-porting-plan-en.md`
+  - `JOURNAL.md`
+- Implemented:
+  - replaced FIR local `Vec` storage with `tlib::TreeArena` in `FirStore`.
+  - kept canonical API shape (`FirBuilder` / `FirMatch` / `match_fir`) while encoding FIR nodes as tagged trees.
+  - switched `FirId` to `tlib::TreeId` alias to align IDs with arena-backed storage.
+  - added structural-sharing regression test (`identical FIR nodes intern to same id`).
+  - documented dependency/policy change in Phase 6 and architecture notes:
+    FIR now depends on `tlib` for structural hash-consing, while still staying independent from `signals`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p fir --all-targets -- -D warnings`
+  - `cargo test -p fir --all-targets`
+  - `cargo check --workspace --all-targets`

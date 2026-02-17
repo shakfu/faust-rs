@@ -482,7 +482,7 @@ fn apply_rules(sig: &Signal, rules: &[Box<dyn SignalRewriter>]) -> Signal {
 
 | Stage | Crate | Description | Validation tests |
 |-------|-------|-------------|---------------------|
-| 6.1 | **`fir`** | Faust Intermediate Representation. Instructions (declarations, loops, conditions, operations), FIR types, transformers. Canonical API contract: `FirBuilder` for construction and `match_fir`/`FirMatch` for dispatch. It is the pivot between the world of signals and the world of code generation. | Tests: dump FIR vs reference (-lang fir) |
+| 6.1 | **`fir`** | Faust Intermediate Representation. Instructions (declarations, loops, conditions, operations), FIR types, transformers. Canonical API contract: `FirBuilder` for construction and `match_fir`/`FirMatch` for dispatch. Storage policy: use `tlib::TreeArena` for structural hash-consing and automatic sharing of identical FIR trees. It is the pivot between the world of signals and the world of code generation. | Tests: dump FIR vs reference (-lang fir) |
 | 6.2 | **`codegen`** | Common infrastructure: code containers, management of declarations, variables, buffers, DSP structures. Translation of signals → FIR (the heart of the compilation). | Integration testing |
 | 6.3 | **`codegen::backends::c`** | First backend: generation of C code. Used to validate the entire end-to-end chain. | Comparison of C output with the reference C++ compiler |
 | 6.4 | **`codegen::backends::cpp`** | C++ backend (`-lang cpp`): very similar to the C backend, useful for C/C++ parity checks. | Idem |

@@ -497,13 +497,15 @@ Recommended rollout:
 ## 3. Dependencies
 
 ```
-fir         → errors  (pure FIR types, no dependency on signals)
+fir         → tlib, errors
 codegen     → fir, errors, utils
 codegen::backends::c   → codegen, fir
 codegen::backends::cpp → codegen, fir
 ```
 
-**Important**: `fir` does NOT depend on `tlib` nor `signals`. It is an independent intermediate representation. The signal→FIR translation is in `transform` (Phase 5).
+**Important**:
+- `fir` depends on `tlib` for hash-consed tree storage and structural sharing of identical FIR nodes.
+- `fir` does NOT depend on `signals`; the signal→FIR translation remains in `transform` (Phase 5).
 
 ---
 
