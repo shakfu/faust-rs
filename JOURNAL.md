@@ -2679,3 +2679,17 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo test -p compiler --bin faust-rs`
   - `cargo test -p compiler --test diagnostic_errors`
+
+#### Documentation addendum — eval diagnostics readability gap planning
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `porting/faust-rust-diagnostics-model-en.md`,
+  - `porting/phases/phase-4-signaux-en.md`,
+  - `porting/faust-rust-porting-plan-en.md`.
+- Implemented:
+  - documented a dedicated follow-up plan for eval diagnostics readability:
+    - increase node-carrying coverage in `EvalError` where possible,
+    - improve eval source-label attachment quality (or explicit fallback notes),
+    - expand eval-focused human/json negative snapshots,
+    - tune eval-specific actionable hints.

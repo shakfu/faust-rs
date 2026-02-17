@@ -212,6 +212,8 @@ Near-term diagnostics UX priorities after baseline rollout:
 - pretty-print UI/primitive expressions in user-facing notes (no internal tag/list forms),
 - add explicit owner-definition notes plus computed numeric target suggestions,
 - lock these readability rules with dedicated human/json snapshots.
+- close eval readability gap by enriching node-carrying `EvalError` variants and
+  extending eval-focused human/json snapshots and actionable hints.
 
 ---
 

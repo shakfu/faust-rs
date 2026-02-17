@@ -486,6 +486,20 @@ Prioritized implementation roadmap for clearer user-facing errors:
   - UI pretty-print readability,
   - owner + numeric suggestion notes.
 
+14. Eval diagnostics readability completion:
+- extend `EvalError` with more node-context variants where semantics allow;
+- ensure compiler-level source-label attachment can resolve eval failures to actionable
+  source locations (or explicit fallback notes when unavailable).
+
+15. Eval-focused diagnostics snapshots:
+- add/maintain eval-only negative fixtures and human/json snapshots for:
+  - undefined symbol,
+  - missing process,
+  - application/pattern arity mismatch.
+
+16. Eval-specific actionable help pass:
+- tune `FRS-EVAL-*` help/notes with concrete correction guidance and scoped context.
+
 Reference model:
 - `porting/faust-rust-diagnostics-model-en.md` (sections 4.1, 5.3, 5.4, 6-D/E).
 

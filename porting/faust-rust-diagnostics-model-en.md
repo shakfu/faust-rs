@@ -333,6 +333,35 @@ Next micro-tranche (post-step-6, readability-focused):
   - UI pretty-print,
   - owner note + numeric proposal presence.
 
+Eval-specific readability follow-up (after current micro-tranche):
+
+1. Increase node-carrying coverage in `EvalError`:
+- add offending-node context for currently node-less variants where possible:
+  - `UndefinedSymbol`,
+  - `MissingProcessDefinition` (attach process-definition/root context note),
+  - application/matching arity failures.
+
+2. Source-label enrichment for eval failures:
+- when eval emits node context, reuse compiler source-label attachment path to provide
+  line/column/snippet for eval diagnostics with the same quality as propagate.
+
+3. Eval-friendly actionable hints:
+- refine eval `help` payloads with scoped fix patterns:
+  - unresolved symbols (scope/definition site),
+  - missing process (top-level contract),
+  - application arity mismatch (expected vs provided arguments).
+
+4. Eval negative snapshot expansion:
+- add dedicated eval human/json snapshots for:
+  - undefined symbol chains,
+  - missing `process`,
+  - arity and case-pattern mismatch failures.
+
+Pass criterion:
+- representative eval failures include either source label or explicit fallback note,
+- eval diagnostics contain stable `FRS-EVAL-*` codes with user-facing correction hints,
+- human/json snapshots lock the output contract.
+
 ---
 
 ## 7. Test strategy
