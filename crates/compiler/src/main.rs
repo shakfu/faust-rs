@@ -725,4 +725,55 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
             );
         }
     }
+
+    #[test]
+    fn diagnostics_human_renderer_snapshot_for_eval_undefined_symbol() {
+        let compiler = Compiler::new();
+        let path = corpus_path("err_09_eval_undefined_symbol.dsp");
+        let err = compiler
+            .compile_file_default_to_signals(&path)
+            .expect_err("fixture should fail in eval stage");
+        let diagnostics = err
+            .diagnostics()
+            .expect("fixture error should expose diagnostics");
+        let rendered = format_diagnostics_human(diagnostics);
+        let path_text = path.to_string_lossy().to_string();
+        let normalized = rendered.replace(&path_text, "$FIXTURE");
+
+        assert!(normalized.contains("error [FRS-EVAL-0002] undefined symbol `bar`"));
+        assert!(normalized.contains("error originates from definition 'foo'"));
+        assert!(normalized.contains("binding_trace=process -> foo"));
+        assert!(normalized.contains("expr=bar"));
+        assert!(normalized.contains("define the symbol in scope or fix the identifier name"));
+    }
+
+    #[test]
+    fn diagnostics_json_renderer_snapshot_for_eval_undefined_symbol() {
+        let compiler = Compiler::new();
+        let path = corpus_path("err_09_eval_undefined_symbol.dsp");
+        let err = compiler
+            .compile_file_default_to_signals(&path)
+            .expect_err("fixture should fail in eval stage");
+        let diagnostics = err
+            .diagnostics()
+            .expect("fixture error should expose diagnostics");
+        let rendered = format_diagnostics_json(diagnostics);
+        let value: Value =
+            serde_json::from_str(&rendered).expect("JSON diagnostics output should be valid");
+        let diag = &value["diagnostics"][0];
+        let notes = diag["notes"]
+            .as_array()
+            .expect("notes should be an array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(diag["code"], "FRS-EVAL-0002");
+        assert!(notes.iter().any(|n| n.starts_with("expr=")));
+        assert!(
+            notes
+                .iter()
+                .any(|n| *n == "error originates from definition 'foo'")
+        );
+        assert!(notes.iter().any(|n| *n == "binding_trace=process -> foo"));
+    }
 }

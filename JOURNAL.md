@@ -2693,3 +2693,47 @@ Execution plan (Phase 0 prototype, revised):
     - improve eval source-label attachment quality (or explicit fallback notes),
     - expand eval-focused human/json negative snapshots,
     - tune eval-specific actionable hints.
+
+#### Eval diagnostics readability implementation (node context + fixtures + snapshots)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/eval/src/lib.rs`,
+  - `crates/eval/tests/core_eval.rs`,
+  - `crates/compiler/src/lib.rs`,
+  - `crates/compiler/src/main.rs`,
+  - `crates/compiler/tests/diagnostic_errors.rs`,
+  - `tests/corpus/err_09_eval_undefined_symbol.dsp`,
+  - `tests/corpus/err_10_eval_too_many_arguments.dsp`,
+  - `tests/corpus/err_11_eval_case_arity_mismatch.dsp`,
+  - `tests/corpus/err_12_eval_case_no_match.dsp`.
+- Implemented:
+  - enriched `EvalError` context payload for readability/source mapping:
+    - `MissingProcessDefinition { definitions, available_defs }`,
+    - `UndefinedSymbol { symbol, node }`,
+    - `EmptyArgumentList { node }`,
+    - `PatternArityMismatch { node, expected, got }`,
+    - `PatternMatchFailed { node }`,
+    - `TooManyArguments { node, expected, got }`.
+  - improved `EvalError -> Diagnostic` conversion:
+    - richer notes/help for missing process, undefined symbol, arity mismatch.
+    - explicit top-level definition inventory on missing process.
+  - added deterministic helper for top-level name extraction in eval diagnostics
+    with Rustdoc (`top_level_definition_names`).
+  - adjusted evaluator call-site tracking so `TooManyArguments` carries source-relevant node
+    from application site (not only post-eval function value).
+  - extended compiler eval-node extraction to attach source labels/notes for new eval variants.
+  - added eval negative DSP fixtures:
+    - undefined symbol,
+    - too many arguments,
+    - case arity mismatch,
+    - case no-match.
+  - expanded eval diagnostics tests:
+    - compiler integration tests for `FRS-EVAL-*` + source labels + readable context + owner/binding notes,
+    - CLI human/json snapshot tests for eval undefined symbol readability contract.
+  - updated eval unit tests to lock new error payload shape and diagnostic conversion.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p eval --all-targets`
+  - `cargo test -p compiler --test diagnostic_errors`
+  - `cargo test -p compiler --bin faust-rs`

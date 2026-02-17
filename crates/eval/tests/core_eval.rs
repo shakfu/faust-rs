@@ -115,7 +115,10 @@ fn eval_process_reports_missing_process() {
     let foo = make_def(&mut arena, "foo", nil, foo_wire);
     let root = make_defs(&mut arena, &[foo]);
     let err = eval_process(&mut arena, root).expect_err("missing process should fail");
-    assert_eq!(err, EvalError::MissingProcessDefinition);
+    assert!(matches!(
+        err,
+        EvalError::MissingProcessDefinition { definitions, .. } if definitions == root
+    ));
 }
 
 #[test]
@@ -261,6 +264,7 @@ fn eval_box_non_closure_application_reports_too_many_arguments() {
     assert_eq!(
         err,
         EvalError::TooManyArguments {
+            node: add,
             expected: 2,
             got: 3
         }
@@ -393,6 +397,7 @@ fn eval_case_reports_arity_mismatch_and_no_match() {
     assert!(matches!(
         err,
         EvalError::PatternArityMismatch {
+            node: _,
             expected: 2,
             got: 1
         }
@@ -417,12 +422,17 @@ fn eval_case_reports_arity_mismatch_and_no_match() {
         &mut loop_detector2,
     )
     .expect_err("no matching rule should fail");
-    assert!(matches!(err2, EvalError::PatternMatchFailed));
+    assert!(matches!(err2, EvalError::PatternMatchFailed { .. }));
 }
 
 #[test]
 fn eval_error_converts_to_structured_diagnostic_codes() {
-    let missing = EvalError::MissingProcessDefinition.into_diagnostic();
+    let arena = TreeArena::new();
+    let missing = EvalError::MissingProcessDefinition {
+        definitions: arena.nil(),
+        available_defs: vec!["foo".to_owned()],
+    }
+    .into_diagnostic();
     assert_eq!(missing.severity, Severity::Error);
     assert_eq!(missing.stage, Stage::Eval);
     assert_eq!(missing.code, codes::EVAL_MISSING_PROCESS);
@@ -430,6 +440,7 @@ fn eval_error_converts_to_structured_diagnostic_codes() {
 
     let undef = EvalError::UndefinedSymbol {
         symbol: "foo".to_owned(),
+        node: arena.nil(),
     }
     .into_diagnostic();
     assert_eq!(undef.code, codes::EVAL_UNDEFINED_SYMBOL);
@@ -439,6 +450,7 @@ fn eval_error_converts_to_structured_diagnostic_codes() {
     assert!(!iter.help.is_empty());
 
     let arity = EvalError::TooManyArguments {
+        node: arena.nil(),
         expected: 2,
         got: 3,
     }

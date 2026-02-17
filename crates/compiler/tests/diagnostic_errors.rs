@@ -53,6 +53,104 @@ fn eval_error_fixture_exposes_frs_eval_code() {
             .iter()
             .any(|d| d.code.0.starts_with("FRS-EVAL-"))
     );
+    let first = diagnostics
+        .as_slice()
+        .first()
+        .expect("eval diagnostics should not be empty");
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|n| n.contains("available top-level definitions")),
+        "missing-process diagnostics should include top-level definition context"
+    );
+}
+
+#[test]
+fn eval_error_fixtures_expose_source_labels_and_readable_context() {
+    let compiler = Compiler::new();
+    let fixtures = [
+        (
+            "err_09_eval_undefined_symbol.dsp",
+            1u32,
+            "error originates from definition 'foo'",
+        ),
+        (
+            "err_10_eval_too_many_arguments.dsp",
+            2u32,
+            "error originates from definition 'process'",
+        ),
+        (
+            "err_11_eval_case_arity_mismatch.dsp",
+            1u32,
+            "error originates from definition 'foo'",
+        ),
+        (
+            "err_12_eval_case_no_match.dsp",
+            1u32,
+            "error originates from definition 'foo'",
+        ),
+    ];
+
+    for (file, expected_line, owner_note) in fixtures {
+        let source = read_corpus(file);
+        let err = compiler
+            .compile_source_to_signals(file, &source)
+            .expect_err(&format!("{file} should fail in eval stage"));
+        let diagnostics = err
+            .diagnostics()
+            .expect(&format!("{file} should expose diagnostics"));
+        assert!(
+            diagnostics
+                .as_slice()
+                .iter()
+                .any(|d| d.code.0.starts_with("FRS-EVAL-")),
+            "{file} should expose FRS-EVAL-* code"
+        );
+        let first = diagnostics
+            .as_slice()
+            .first()
+            .expect(&format!("{file} should produce one diagnostic"));
+        let primary = first
+            .labels
+            .first()
+            .expect(&format!("{file} should expose one source label"));
+        assert_eq!(
+            primary.span.line, expected_line,
+            "{file} should point to expected source line"
+        );
+        assert!(
+            first.notes.iter().any(|n| n.starts_with("expr=")),
+            "{file} should include readable expression context"
+        );
+        assert!(
+            first.notes.iter().any(|n| n.as_ref() == owner_note),
+            "{file} should expose owner definition note"
+        );
+    }
+}
+
+#[test]
+fn eval_undefined_symbol_exposes_binding_trace() {
+    let compiler = Compiler::new();
+    let source = read_corpus("err_09_eval_undefined_symbol.dsp");
+    let err = compiler
+        .compile_source_to_signals("err_09_eval_undefined_symbol.dsp", &source)
+        .expect_err("fixture should fail in eval stage");
+    let diagnostics = err
+        .diagnostics()
+        .expect("eval error should expose diagnostics");
+    let first = diagnostics
+        .as_slice()
+        .first()
+        .expect("eval diagnostics should not be empty");
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|n| n.as_ref() == "binding_trace=process -> foo"),
+        "undefined symbol diagnostics should include alias-resolution trace"
+    );
 }
 
 #[test]

@@ -340,12 +340,20 @@ fn bundle_from_diagnostic(diagnostic: Diagnostic) -> DiagnosticBundle {
 /// Returns the offending node id for eval errors that carry one.
 fn eval_error_node(error: &eval::EvalError) -> Option<BoxId> {
     match error {
-        eval::EvalError::MalformedDefinitionNode { node }
+        eval::EvalError::MissingProcessDefinition {
+            definitions: node, ..
+        }
+        | eval::EvalError::UndefinedSymbol { node, .. }
+        | eval::EvalError::MalformedDefinitionNode { node }
         | eval::EvalError::MalformedListNode { node }
         | eval::EvalError::MalformedCaseNode { node }
+        | eval::EvalError::EmptyArgumentList { node }
         | eval::EvalError::NonIdentifierParameter { node }
         | eval::EvalError::NonIdentifierIterationVariable { node }
         | eval::EvalError::IterationCountNotInt { node }
+        | eval::EvalError::PatternArityMismatch { node, .. }
+        | eval::EvalError::PatternMatchFailed { node }
+        | eval::EvalError::TooManyArguments { node, .. }
         | eval::EvalError::LoopDetected { node } => Some(*node),
         _ => None,
     }
@@ -1226,7 +1234,7 @@ mod tests {
         assert!(matches!(
             err,
             CompilerError::Eval {
-                error: eval::EvalError::MissingProcessDefinition,
+                error: eval::EvalError::MissingProcessDefinition { .. },
                 ..
             }
         ));

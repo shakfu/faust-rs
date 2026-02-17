@@ -131,9 +131,16 @@ impl Default for LoopDetector {
 /// Evaluator error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalError {
-    MissingProcessDefinition,
+    MissingProcessDefinition {
+        /// Parser root definitions list used for fallback source-label resolution.
+        definitions: TreeId,
+        /// Deterministic list of top-level definition names available in this program.
+        available_defs: Vec<String>,
+    },
     UndefinedSymbol {
         symbol: String,
+        /// Identifier node where resolution failed.
+        node: TreeId,
     },
     MalformedDefinitionNode {
         node: TreeId,
@@ -144,7 +151,10 @@ pub enum EvalError {
     MalformedCaseNode {
         node: TreeId,
     },
-    EmptyArgumentList,
+    EmptyArgumentList {
+        /// Argument-list node that was expected to contain at least one item.
+        node: TreeId,
+    },
     NonIdentifierParameter {
         node: TreeId,
     },
@@ -161,12 +171,19 @@ pub enum EvalError {
         value: i64,
     },
     PatternArityMismatch {
+        /// Case-rules root node used to evaluate matching.
+        node: TreeId,
         expected: usize,
         got: usize,
     },
-    PatternMatchFailed,
+    PatternMatchFailed {
+        /// Case-rules root node where no rule matched provided arguments.
+        node: TreeId,
+    },
     /// Non-closure application received more arguments than the function input arity.
     TooManyArguments {
+        /// Function-like node receiving too many arguments.
+        node: TreeId,
         expected: usize,
         got: usize,
     },
@@ -181,8 +198,8 @@ pub enum EvalError {
 impl Display for EvalError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingProcessDefinition => write!(f, "missing `process` definition"),
-            Self::UndefinedSymbol { symbol } => write!(f, "undefined symbol `{symbol}`"),
+            Self::MissingProcessDefinition { .. } => write!(f, "missing `process` definition"),
+            Self::UndefinedSymbol { symbol, .. } => write!(f, "undefined symbol `{symbol}`"),
             Self::MalformedDefinitionNode { node } => {
                 write!(f, "malformed definition node {}", node.as_u32())
             }
@@ -192,7 +209,7 @@ impl Display for EvalError {
             Self::MalformedCaseNode { node } => {
                 write!(f, "malformed case node {}", node.as_u32())
             }
-            Self::EmptyArgumentList => write!(f, "empty argument list"),
+            Self::EmptyArgumentList { .. } => write!(f, "empty argument list"),
             Self::NonIdentifierParameter { node } => {
                 write!(
                     f,
@@ -216,11 +233,11 @@ impl Display for EvalError {
             Self::NegativeIterationCount { value } => {
                 write!(f, "iteration count is negative: {value}")
             }
-            Self::PatternArityMismatch { expected, got } => {
+            Self::PatternArityMismatch { expected, got, .. } => {
                 write!(f, "pattern arity mismatch: expected {expected}, got {got}")
             }
-            Self::PatternMatchFailed => write!(f, "no case rule matches arguments"),
-            Self::TooManyArguments { expected, got } => {
+            Self::PatternMatchFailed { .. } => write!(f, "no case rule matches arguments"),
+            Self::TooManyArguments { expected, got, .. } => {
                 write!(
                     f,
                     "too many arguments: expected at most {expected}, got {got}"
@@ -246,28 +263,42 @@ impl IntoDiagnostic for EvalError {
     fn into_diagnostic(self) -> Diagnostic {
         let message = self.to_string();
         match self {
-            Self::MissingProcessDefinition => Diagnostic::new(
+            Self::MissingProcessDefinition { available_defs, .. } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
                 codes::EVAL_MISSING_PROCESS,
                 message,
             )
+            .with_note("entrypoint contract: one top-level `process = ...;` definition is required")
+            .with_note(format!(
+                "available top-level definitions: {}",
+                if available_defs.is_empty() {
+                    "<none>".to_owned()
+                } else {
+                    available_defs.join(", ")
+                }
+            ))
             .with_help("define `process = ...;` in the top-level definitions"),
-            Self::UndefinedSymbol { .. } => Diagnostic::new(
+            Self::UndefinedSymbol { symbol, .. } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
                 codes::EVAL_UNDEFINED_SYMBOL,
                 message,
             )
-            .with_help("check symbol name and definition order/scope"),
-            Self::PatternArityMismatch { expected, got } => Diagnostic::new(
+            .with_note(format!("unresolved identifier: `{symbol}`"))
+            .with_help("define the symbol in scope or fix the identifier name")
+            .with_help(
+                "if this is a top-level alias, ensure the target definition exists before use",
+            ),
+            Self::PatternArityMismatch { expected, got, .. } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
                 codes::EVAL_ARITY_MISMATCH,
                 message,
             )
-            .with_note(format!("pattern expects {expected} argument(s), got {got}")),
-            Self::TooManyArguments { expected, got } => Diagnostic::new(
+            .with_note(format!("pattern expects {expected} argument(s), got {got}"))
+            .with_help("adapt the case pattern arity or provide the expected number of arguments"),
+            Self::TooManyArguments { expected, got, .. } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
                 codes::EVAL_ARITY_MISMATCH,
@@ -275,7 +306,8 @@ impl IntoDiagnostic for EvalError {
             )
             .with_note(format!(
                 "application accepts at most {expected} argument(s), got {got}"
-            )),
+            ))
+            .with_help("remove extra arguments or expand the function input arity"),
             Self::IterationCountNotInt { .. }
             | Self::IterationCountTooLarge { .. }
             | Self::NegativeIterationCount { .. } => Diagnostic::new(
@@ -305,9 +337,13 @@ impl IntoDiagnostic for EvalError {
 pub fn eval_process(arena: &mut TreeArena, definitions: TreeId) -> Result<TreeId, EvalError> {
     let mut env = Environment::empty();
     bind_definitions(arena, definitions, &mut env)?;
+    let available_defs = top_level_definition_names(arena, definitions)?;
     let process = env
         .lookup("process")
-        .ok_or(EvalError::MissingProcessDefinition)?;
+        .ok_or(EvalError::MissingProcessDefinition {
+            definitions,
+            available_defs,
+        })?;
     let mut loop_detector = LoopDetector::new();
     eval_box(arena, process, &env, &mut loop_detector)
 }
@@ -331,6 +367,7 @@ pub fn eval_box(
         BoxMatch::Ident(name) => {
             let value = env.lookup(name).ok_or_else(|| EvalError::UndefinedSymbol {
                 symbol: name.to_owned(),
+                node: expr,
             })?;
             if value == expr {
                 // Shadowing sentinel used for lambda parameters in lexical scopes.
@@ -344,7 +381,7 @@ pub fn eval_box(
         BoxMatch::Appl(fun, arg) => {
             let efun = eval_box(arena, fun, env, loop_detector)?;
             let rev_args = rev_eval_list(arena, arg, env, loop_detector)?;
-            apply_list(arena, efun, rev_args, env, loop_detector)
+            apply_list(arena, efun, rev_args, env, loop_detector, Some(fun))
         }
         BoxMatch::Access(body, field) => eval_access(arena, body, field, env, loop_detector),
         BoxMatch::Case(_) => Ok(expr),
@@ -503,6 +540,29 @@ fn decode_definition(
     Ok((name, args, expr))
 }
 
+/// Extracts top-level definition names in deterministic order for diagnostics.
+///
+/// Names are sorted and deduplicated so diagnostic snapshots remain stable.
+fn top_level_definition_names(
+    arena: &TreeArena,
+    mut defs: TreeId,
+) -> Result<Vec<String>, EvalError> {
+    let mut names = Vec::new();
+    while !arena.is_nil(defs) {
+        let def = arena
+            .hd(defs)
+            .ok_or(EvalError::MalformedDefinitionNode { node: defs })?;
+        let (name, _args, _expr) = decode_definition(arena, def)?;
+        names.push(name);
+        defs = arena
+            .tl(defs)
+            .ok_or(EvalError::MalformedDefinitionNode { node: defs })?;
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 /// Returns identifier text for one `BOXIDENT` node.
 fn ident_name(arena: &TreeArena, id: TreeId) -> Result<String, EvalError> {
     match match_box(arena, id) {
@@ -571,6 +631,7 @@ fn apply_list(
     larg: TreeId,
     env: &Environment,
     loop_detector: &mut LoopDetector,
+    call_site: Option<TreeId>,
 ) -> Result<TreeId, EvalError> {
     if arena.is_nil(larg) {
         return Ok(fun);
@@ -587,9 +648,11 @@ fn apply_list(
             let tl = arena
                 .tl(larg)
                 .ok_or(EvalError::MalformedListNode { node: larg })?;
-            apply_list(arena, f, tl, env, loop_detector)
+            apply_list(arena, f, tl, env, loop_detector, call_site)
         }
-        BoxMatch::Case(rules) => apply_case_rules(arena, rules, larg, env, loop_detector),
+        BoxMatch::Case(rules) => {
+            apply_case_rules(arena, rules, larg, env, loop_detector, call_site)
+        }
         _ => {
             // C++ parity (`applyList`): for non-closures, insert implicit wires when
             // partially applying a function, and reject over-application.
@@ -600,6 +663,7 @@ fn apply_list(
             if let (Some((ins, _outs)), Some(larg_outs)) = (maybe_fun_arity, maybe_larg_outputs) {
                 if larg_outs > ins {
                     return Err(EvalError::TooManyArguments {
+                        node: call_site.unwrap_or(fun),
                         expected: ins,
                         got: larg_outs,
                     });
@@ -627,7 +691,7 @@ fn apply_list(
 /// Example: `[a,b,c] -> par(a, par(b, c))`.
 fn larg2par(arena: &mut TreeArena, larg: TreeId) -> Result<TreeId, EvalError> {
     if arena.is_nil(larg) {
-        return Err(EvalError::EmptyArgumentList);
+        return Err(EvalError::EmptyArgumentList { node: larg });
     }
     let head = arena
         .hd(larg)
@@ -1056,6 +1120,7 @@ fn apply_case_rules(
     larg: TreeId,
     env: &Environment,
     loop_detector: &mut LoopDetector,
+    call_site: Option<TreeId>,
 ) -> Result<TreeId, EvalError> {
     let args = list_to_vec(arena, larg)?;
     let mut rules = list_to_vec(arena, rules_rev)?;
@@ -1068,6 +1133,7 @@ fn apply_case_rules(
     let expected = list_to_vec(arena, first_lhs)?.len();
     if args.len() < expected {
         return Err(EvalError::PatternArityMismatch {
+            node: rules_rev,
             expected,
             got: args.len(),
         });
@@ -1105,10 +1171,10 @@ fn apply_case_rules(
             return Ok(result);
         }
         let rest_list = vec_to_list(arena, rest);
-        return apply_list(arena, result, rest_list, env, loop_detector);
+        return apply_list(arena, result, rest_list, env, loop_detector, call_site);
     }
 
-    Err(EvalError::PatternMatchFailed)
+    Err(EvalError::PatternMatchFailed { node: rules_rev })
 }
 
 /// Structural pattern matching helper used by case-rule application.
