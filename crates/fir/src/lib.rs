@@ -14,6 +14,8 @@
 //!
 //! # Parity invariants
 //! - FIR nodes are represented as typed enum variants with explicit IDs.
+//! - FIR value nodes carry explicit result types, so backend passes do not need
+//!   a separate type-reconstruction phase.
 //! - Dispatch is explicit and exhaustive via `match_fir`, no RTTI/dynamic-cast.
 //! - This crate is independent from `tlib` and `signals`.
 
@@ -123,9 +125,24 @@ pub struct SliderRange {
     pub step: f64,
 }
 
-/// Canonical FIR node representation.
+/// Typed FIR value node.
+///
+/// # C++ provenance
+/// - `compiler/generator/instructions.hh` (`ValueInst` hierarchy)
+/// - `compiler/generator/typing_instructions.hh` (type reconstruction pass)
+///
+/// Rust adaptation:
+/// - carries the resulting `typ` directly on value construction to avoid a
+///   separate type-reconstruction pass for backend consumers.
 #[derive(Clone, Debug, PartialEq)]
-pub enum FirNode {
+pub struct FirValue {
+    pub typ: FirType,
+    pub kind: FirValueKind,
+}
+
+/// Structural kind of a typed FIR value node.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FirValueKind {
     Int32(i32),
     Int64(i64),
     Float32(f32),
@@ -141,13 +158,18 @@ pub enum FirNode {
         rhs: FirId,
     },
     Cast {
-        typ: FirType,
         value: FirId,
     },
     FunCall {
         name: String,
         args: Vec<FirId>,
     },
+}
+
+/// Canonical FIR node representation.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FirNode {
+    Value(FirValue),
     DeclareVar {
         name: String,
         typ: FirType,
@@ -234,6 +256,15 @@ impl FirStore {
         self.nodes.get(id.as_index())
     }
 
+    /// Returns the value type when `id` points to a value node.
+    #[must_use]
+    pub fn value_type(&self, id: FirId) -> Option<&FirType> {
+        match self.node(id) {
+            Some(FirNode::Value(value)) => Some(&value.typ),
+            _ => None,
+        }
+    }
+
     fn push(&mut self, node: FirNode) -> FirId {
         let idx = self.nodes.len();
         self.nodes.push(node);
@@ -252,55 +283,65 @@ impl<'a> FirBuilder<'a> {
         Self { store }
     }
 
+    fn value(&mut self, typ: FirType, kind: FirValueKind) -> FirId {
+        self.store.push(FirNode::Value(FirValue { typ, kind }))
+    }
+
     #[must_use]
     pub fn int32(&mut self, value: i32) -> FirId {
-        self.store.push(FirNode::Int32(value))
+        self.value(FirType::Int32, FirValueKind::Int32(value))
     }
 
     #[must_use]
     pub fn int64(&mut self, value: i64) -> FirId {
-        self.store.push(FirNode::Int64(value))
+        self.value(FirType::Int64, FirValueKind::Int64(value))
     }
 
     #[must_use]
     pub fn float32(&mut self, value: f32) -> FirId {
-        self.store.push(FirNode::Float32(value))
+        self.value(FirType::Float32, FirValueKind::Float32(value))
     }
 
     #[must_use]
     pub fn float64(&mut self, value: f64) -> FirId {
-        self.store.push(FirNode::Float64(value))
+        self.value(FirType::Float64, FirValueKind::Float64(value))
     }
 
     #[must_use]
     pub fn bool_(&mut self, value: bool) -> FirId {
-        self.store.push(FirNode::Bool(value))
+        self.value(FirType::Bool, FirValueKind::Bool(value))
     }
 
     #[must_use]
-    pub fn load_var(&mut self, name: impl Into<String>, access: AccessType) -> FirId {
-        self.store.push(FirNode::LoadVar {
-            name: name.into(),
-            access,
-        })
+    pub fn load_var(&mut self, name: impl Into<String>, access: AccessType, typ: FirType) -> FirId {
+        self.value(
+            typ,
+            FirValueKind::LoadVar {
+                name: name.into(),
+                access,
+            },
+        )
     }
 
     #[must_use]
-    pub fn binop(&mut self, op: FirBinOp, lhs: FirId, rhs: FirId) -> FirId {
-        self.store.push(FirNode::BinOp { op, lhs, rhs })
+    pub fn binop(&mut self, op: FirBinOp, lhs: FirId, rhs: FirId, typ: FirType) -> FirId {
+        self.value(typ, FirValueKind::BinOp { op, lhs, rhs })
     }
 
     #[must_use]
     pub fn cast(&mut self, typ: FirType, value: FirId) -> FirId {
-        self.store.push(FirNode::Cast { typ, value })
+        self.value(typ, FirValueKind::Cast { value })
     }
 
     #[must_use]
-    pub fn fun_call(&mut self, name: impl Into<String>, args: &[FirId]) -> FirId {
-        self.store.push(FirNode::FunCall {
-            name: name.into(),
-            args: args.to_vec(),
-        })
+    pub fn fun_call(&mut self, name: impl Into<String>, args: &[FirId], typ: FirType) -> FirId {
+        self.value(
+            typ,
+            FirValueKind::FunCall {
+                name: name.into(),
+                args: args.to_vec(),
+            },
+        )
     }
 
     #[must_use]
@@ -461,19 +502,36 @@ impl<'a> FirBuilder<'a> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FirMatch<'a> {
     Unknown,
-    Int32(i32),
-    Int64(i64),
-    Float32(f32),
-    Float64(f64),
-    Bool(bool),
+    Int32 {
+        value: i32,
+        typ: &'a FirType,
+    },
+    Int64 {
+        value: i64,
+        typ: &'a FirType,
+    },
+    Float32 {
+        value: f32,
+        typ: &'a FirType,
+    },
+    Float64 {
+        value: f64,
+        typ: &'a FirType,
+    },
+    Bool {
+        value: bool,
+        typ: &'a FirType,
+    },
     LoadVar {
         name: &'a str,
         access: AccessType,
+        typ: &'a FirType,
     },
     BinOp {
         op: FirBinOp,
         lhs: FirId,
         rhs: FirId,
+        typ: &'a FirType,
     },
     Cast {
         typ: &'a FirType,
@@ -482,6 +540,7 @@ pub enum FirMatch<'a> {
     FunCall {
         name: &'a str,
         args: &'a [FirId],
+        typ: &'a FirType,
     },
     DeclareVar {
         name: &'a str,
@@ -549,22 +608,48 @@ pub fn match_fir<'a>(store: &'a FirStore, id: FirId) -> FirMatch<'a> {
         return FirMatch::Unknown;
     };
     match node {
-        FirNode::Int32(v) => FirMatch::Int32(*v),
-        FirNode::Int64(v) => FirMatch::Int64(*v),
-        FirNode::Float32(v) => FirMatch::Float32(*v),
-        FirNode::Float64(v) => FirMatch::Float64(*v),
-        FirNode::Bool(v) => FirMatch::Bool(*v),
-        FirNode::LoadVar { name, access } => FirMatch::LoadVar {
-            name,
-            access: *access,
+        FirNode::Value(value) => match &value.kind {
+            FirValueKind::Int32(v) => FirMatch::Int32 {
+                value: *v,
+                typ: &value.typ,
+            },
+            FirValueKind::Int64(v) => FirMatch::Int64 {
+                value: *v,
+                typ: &value.typ,
+            },
+            FirValueKind::Float32(v) => FirMatch::Float32 {
+                value: *v,
+                typ: &value.typ,
+            },
+            FirValueKind::Float64(v) => FirMatch::Float64 {
+                value: *v,
+                typ: &value.typ,
+            },
+            FirValueKind::Bool(v) => FirMatch::Bool {
+                value: *v,
+                typ: &value.typ,
+            },
+            FirValueKind::LoadVar { name, access } => FirMatch::LoadVar {
+                name,
+                access: *access,
+                typ: &value.typ,
+            },
+            FirValueKind::BinOp { op, lhs, rhs } => FirMatch::BinOp {
+                op: *op,
+                lhs: *lhs,
+                rhs: *rhs,
+                typ: &value.typ,
+            },
+            FirValueKind::Cast { value: casted } => FirMatch::Cast {
+                typ: &value.typ,
+                value: *casted,
+            },
+            FirValueKind::FunCall { name, args } => FirMatch::FunCall {
+                name,
+                args,
+                typ: &value.typ,
+            },
         },
-        FirNode::BinOp { op, lhs, rhs } => FirMatch::BinOp {
-            op: *op,
-            lhs: *lhs,
-            rhs: *rhs,
-        },
-        FirNode::Cast { typ, value } => FirMatch::Cast { typ, value: *value },
-        FirNode::FunCall { name, args } => FirMatch::FunCall { name, args },
         FirNode::DeclareVar {
             name,
             typ,
@@ -661,24 +746,32 @@ mod tests {
 
         let one = b.int32(1);
         let two = b.int32(2);
-        let sum = b.binop(FirBinOp::Add, one, two);
-        let call = b.fun_call("foo", &[sum]);
+        let sum = b.binop(FirBinOp::Add, one, two, FirType::Int32);
+        let call = b.fun_call("foo", &[sum], FirType::Int32);
         let cast = b.cast(FirType::Float64, call);
 
-        assert_eq!(match_fir(&store, one), FirMatch::Int32(1));
+        assert_eq!(
+            match_fir(&store, one),
+            FirMatch::Int32 {
+                value: 1,
+                typ: &FirType::Int32
+            }
+        );
         assert_eq!(
             match_fir(&store, sum),
             FirMatch::BinOp {
                 op: FirBinOp::Add,
                 lhs: one,
-                rhs: two
+                rhs: two,
+                typ: &FirType::Int32
             }
         );
         assert_eq!(
             match_fir(&store, call),
             FirMatch::FunCall {
                 name: "foo",
-                args: &[sum]
+                args: &[sum],
+                typ: &FirType::Int32
             }
         );
         assert_eq!(
@@ -688,6 +781,8 @@ mod tests {
                 value: call
             }
         );
+        assert_eq!(store.value_type(cast), Some(&FirType::Float64));
+        assert_eq!(store.value_type(sum), Some(&FirType::Int32));
     }
 
     #[test]
@@ -773,5 +868,6 @@ mod tests {
     fn match_unknown_on_out_of_range_id() {
         let store = FirStore::new();
         assert_eq!(match_fir(&store, FirId(999)), FirMatch::Unknown);
+        assert_eq!(store.value_type(FirId(999)), None);
     }
 }

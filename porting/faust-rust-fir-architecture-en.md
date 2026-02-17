@@ -37,6 +37,7 @@ Required Rust mapping:
 - `IB::gen*` -> `FirBuilder::*` methods.
 - Visitor/RTTI dispatch (`accept`, `DispatchVisitor`, `dynamic_cast`) -> `match_fir` + exhaustive `match`.
 - Pointer-owned instruction graphs -> `FirStore` + `FirId`.
+- Value typing reconstruction (`typing_instructions.hh`) -> explicit `typ` carried in Rust FIR value nodes.
 
 ## 4. Pipeline Boundary Contract
 
@@ -54,6 +55,7 @@ Boundary constraints:
 
 - Deterministic node semantics and child ordering.
 - Explicitly typed memory-access classes (`stack`, `struct`, `funargs`, `loop`, ...).
+- Explicit value-node result typing (`FirValue.typ`) available at IR construction time.
 - Explicitly typed UI FIR nodes (open/close group, button, slider, bargraph, metadata).
 - Exhaustive dispatch coverage for canonical nodes in `FirMatch`.
 - No hidden global state (`gGlobal`-like) in FIR builders/checkers.
@@ -86,4 +88,3 @@ For each public FIR API item:
 - include C++ provenance (`instructions.hh`, `instructions_type.hh`, etc.),
 - state parity invariants,
 - state adaptation policy if not a strict 1:1 signature mapping.
-

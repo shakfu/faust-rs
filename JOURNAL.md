@@ -3044,3 +3044,37 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy -p fir --all-targets -- -D warnings`
   - `cargo test -p fir --all-targets`
+
+#### FIR value typing model (carry type on value nodes)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/fir/src/lib.rs`
+  - `porting/phases/phase-6-fir-backends-en.md`
+  - `porting/faust-rust-fir-architecture-en.md`
+  - `porting/faust-rust-porting-plan-en.md`
+  - `JOURNAL.md`
+- Evaluation:
+  - C++ `ValueInst` does not embed type directly and relies on dedicated reconstruction
+    (`typing_instructions.hh`) when needed by backends.
+  - Rust can keep this cleaner by carrying `FirType` directly on FIR value nodes.
+  - Benefit: backend lowering/dispatch and diagnostics can query value type in O(1),
+    without pass-order coupling to a separate typing reconstruction stage.
+  - Tradeoff: slightly larger value-node payload; accepted because it simplifies
+    invariants and avoids duplicated backend-local typing logic.
+- Implemented:
+  - introduced typed value model in `fir`:
+    - new `FirValue { typ, kind }` and `FirValueKind`,
+    - `FirNode::Value(FirValue)` canonical representation for value nodes.
+  - updated `FirBuilder` value constructors to assign explicit result type at creation:
+    - constants infer intrinsic scalar type,
+    - `load_var`/`binop`/`fun_call` now receive explicit result type,
+    - `cast` sets target type directly.
+  - updated `FirMatch`/`match_fir` to expose value type for all value families.
+  - added `FirStore::value_type(FirId)` helper for direct typed queries.
+  - updated tests to lock typed-value behavior and typed matcher outputs.
+  - updated Phase 6 and global planning docs to codify the typed-value policy.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p fir --all-targets -- -D warnings`
+  - `cargo test -p fir --all-targets`

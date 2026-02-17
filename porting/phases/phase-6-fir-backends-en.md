@@ -137,23 +137,22 @@ pub enum AccessType {
 
 /// FIR instructions — Values (expressions)
 #[derive(Clone, Debug)]
-pub enum FirValue {
+pub struct FirValue {
+    pub typ: FirType,
+    pub kind: FirValueKind,
+}
+
+#[derive(Clone, Debug)]
+pub enum FirValueKind {
     Int32(i32),
     Int64(i64),
-    Float(f32),
-    Double(f64),
+    Float32(f32),
+    Float64(f64),
     Bool(bool),
     LoadVar { name: String, access: AccessType },
-    LoadVarAddress { name: String, access: AccessType },
-    TeeVar { name: String, access: AccessType, value: Box<FirValue> },
     BinOp { op: BinOp, lhs: Box<FirValue>, rhs: Box<FirValue> },
-    Neg(Box<FirValue>),
-    Cast { typ: FirType, value: Box<FirValue> },
-    Bitcast { typ: FirType, value: Box<FirValue> },
-    Select2 { cond: Box<FirValue>, then_: Box<FirValue>, else_: Box<FirValue> },
+    Cast { value: Box<FirValue> },
     FunCall { name: String, args: Vec<FirValue> },
-    ArrayAccess { array: Box<FirValue>, index: Box<FirValue> },
-    Null,
 }
 
 /// FIR instructions — Statements
@@ -207,6 +206,13 @@ pub enum FirStmt {
 
 pub type FirBlock = Vec<FirStmt>;
 ```
+
+Typed-value policy:
+
+- unlike C++ `ValueInst`, Rust FIR values carry their result type directly
+  (`FirValue.typ`);
+- this removes the need for a separate type-reconstruction pass equivalent to
+  `typing_instructions.hh` for backend dispatch/lowering.
 
 ### 2.1.1 Canonical construction/matching API (mandatory)
 
@@ -558,6 +564,11 @@ Output handling currently depends on stream type checks/downcasts in `libcode.cp
 ### 4.15 FIR dispatch drift
 If FIR construction/inspection is reimplemented independently in several modules, semantic drift
 between backends is likely. Keep one shared `FirBuilder` + `match_fir` implementation in `crates/fir`.
+
+### 4.16 Late value-type reconstruction
+Reconstructing value types in separate backend-specific passes (C++ style `typing_instructions.hh`)
+creates drift and debugging overhead. Rust FIR should keep type on value nodes directly and treat
+type reconstruction as a validation fallback, not a primary mechanism.
 
 ---
 

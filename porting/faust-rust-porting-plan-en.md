@@ -510,6 +510,8 @@ fn apply_rules(sig: &Signal, rules: &[Box<dyn SignalRewriter>]) -> Signal {
 7. Replace `TypeManager` class hierarchy with Rust traits + backend formatting tables.
 8. Split DSP struct responsibilities into dedicated subsystems (layout, metadata/usage, emission).
 9. Replace repeated field-name linear scans with indexed lookup tables for struct layout.
+10. Carry value result types directly in Rust FIR value nodes to avoid backend-local type
+    reconstruction passes (`typing_instructions.hh`-style).
 
 **Phase 6 CodeContainer/codegen restructuring checklist (from `code_container.hh/.cpp` and related container machinery audit):**
 
