@@ -353,6 +353,7 @@ version = "0.1.0"
 dependencies = [
  "boxes",
  "cfgrammar",
+ "errors",
  "lrlex",
  "lrpar",
  "tlib",

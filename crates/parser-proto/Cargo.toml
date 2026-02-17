@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 boxes = { path = "../boxes" }
+errors = { path = "../errors" }
 cfgrammar = "0.13.10"
 lrlex = "0.13.10"
 lrpar = "0.13.10"

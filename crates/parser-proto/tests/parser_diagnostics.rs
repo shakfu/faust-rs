@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use errors::Stage;
 use parser_proto::{DiagnosticSeverity, parse_program};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +133,18 @@ fn malformed_suite_tracks_rust_class_and_location() {
         assert!(
             out.state.ctx.parse_error_count() > 0 || !out.errors.is_empty(),
             "malformed case {} should emit parser errors",
+            case.name
+        );
+        assert!(
+            !out.diagnostics.is_empty(),
+            "malformed case {} should emit structured diagnostics",
+            case.name
+        );
+        assert!(
+            out.diagnostics.as_slice().iter().any(|d| {
+                d.stage == Stage::Parser && d.code.0.starts_with("FRS-PARSE-")
+            }),
+            "malformed case {} should include parser diagnostic code family",
             case.name
         );
         assert!(

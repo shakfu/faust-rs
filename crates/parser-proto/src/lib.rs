@@ -15,6 +15,8 @@
 //! - Keeps production `crates/parser` untouched until Gate B decision.
 
 use cfgrammar::Span;
+use errors::codes;
+use errors::{Diagnostic, DiagnosticBundle, DiagnosticCode, Label, LabelStyle, Severity, SourceSpan, Stage};
 use lrlex::lrlex_mod;
 use lrlex::{DefaultLexerTypes, LRNonStreamingLexerDef};
 use lrpar::lrpar_mod;
@@ -688,6 +690,7 @@ pub struct LexedToken {
 pub struct ParseOutput {
     pub root: Option<TreeId>,
     pub errors: Vec<String>,
+    pub diagnostics: DiagnosticBundle,
     pub state: ParseState,
 }
 
@@ -741,9 +744,12 @@ pub fn parse_program(input: &str, source_file: &str) -> ParseOutput {
         rendered_errors.push(message);
     }
 
+    let diagnostics = parser_ctx_to_bundle(&state.ctx);
+
     ParseOutput {
         root,
         errors: rendered_errors,
+        diagnostics,
         state,
     }
 }
@@ -770,4 +776,44 @@ pub fn parse_file_with_imports(
 pub fn set_use_prop_from_token(ctx: &mut ParserCtx, sym: TreeId, file: &str, token: &LexedToken) {
     ctx.set_cursor(file, token.start_line);
     ctx.set_use_prop_at_cursor(sym);
+}
+
+fn parser_ctx_to_bundle(ctx: &ParserCtx) -> DiagnosticBundle {
+    let diagnostics = ctx
+        .diagnostics()
+        .iter()
+        .map(|diag| {
+            let severity = match diag.severity {
+                DiagnosticSeverity::Error => Severity::Error,
+                DiagnosticSeverity::Warning => Severity::Warning,
+                DiagnosticSeverity::Remark => Severity::Remark,
+            };
+            let code = parser_code_for_message(diag.message.as_ref(), diag.severity);
+            let mut out = Diagnostic::new(severity, Stage::Parser, code, diag.message.clone());
+            if let Some(location) = &diag.location {
+                let span = SourceSpan::new(
+                    location.file(),
+                    location.line(),
+                    1,
+                    location.line(),
+                    1,
+                );
+                out = out.with_label(Label::new(LabelStyle::Primary, span, "parser location"));
+            }
+            out
+        })
+        .collect::<Vec<_>>();
+    DiagnosticBundle::from(diagnostics)
+}
+
+fn parser_code_for_message(message: &str, severity: DiagnosticSeverity) -> DiagnosticCode {
+    if matches!(severity, DiagnosticSeverity::Warning | DiagnosticSeverity::Remark)
+        || message.to_ascii_lowercase().contains("recover")
+    {
+        codes::PARSE_RECOVERY
+    } else if message.contains("invalid") && message.contains("literal") {
+        codes::PARSE_INVALID_LITERAL
+    } else {
+        codes::PARSE_UNEXPECTED_TOKEN
+    }
 }
