@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use boxes::{BoxId, dump_box};
+use boxes::{BoxId, BoxMatch, dump_box, match_box};
 use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, SourceSpan};
 use parser::{ParseOutput, SourceReaderError};
 use propagate::{BoxArity, PropagateError};
@@ -125,6 +125,7 @@ impl Compiler {
                     diagnostic,
                     &output.state.ctx,
                     &output.state.arena,
+                    root,
                     node,
                 );
             }
@@ -148,6 +149,7 @@ impl Compiler {
                         diagnostic,
                         &output.state.ctx,
                         &output.state.arena,
+                        root,
                         node,
                     );
                 }
@@ -172,6 +174,7 @@ impl Compiler {
                         diagnostic,
                         &output.state.ctx,
                         &output.state.arena,
+                        root,
                         node,
                     );
                 }
@@ -331,9 +334,14 @@ fn maybe_add_source_label(
     diagnostic: Diagnostic,
     ctx: &parser::ParserCtx,
     arena: &tlib::TreeArena,
+    defs_root: BoxId,
     node: BoxId,
 ) -> Diagnostic {
-    let Some(span) = source_span_from_node_or_descendant(ctx, arena, node) else {
+    let span = source_span_for_definition_of_expr(ctx, arena, defs_root, node)
+        .or_else(|| source_span_from_node_or_descendant(ctx, arena, node))
+        .or_else(|| source_span_for_process_binding_target(ctx, arena, defs_root))
+        .or_else(|| source_span_for_process_definition(ctx, arena, defs_root));
+    let Some(span) = span else {
         return diagnostic;
     };
     diagnostic.with_label(Label::new(LabelStyle::Primary, span, "related source"))
@@ -380,6 +388,146 @@ fn source_span_for_node(ctx: &parser::ParserCtx, node: BoxId) -> Option<SourceSp
         loc.end_line(),
         loc.end_col(),
     ))
+}
+
+/// Resolves one source span for a definition node, preferring `def_prop`.
+///
+/// This is used for alias fallback (`process = foo;`) where we want the location
+/// of the defining equation, not the use-site of `foo`.
+fn source_span_for_definition_node(ctx: &parser::ParserCtx, node: BoxId) -> Option<SourceSpan> {
+    let loc = ctx.def_prop(node).or_else(|| ctx.use_prop(node))?;
+    Some(SourceSpan::new(
+        loc.file(),
+        loc.line(),
+        loc.col(),
+        loc.end_line(),
+        loc.end_col(),
+    ))
+}
+
+/// Fallback source span for the `process` definition identifier.
+///
+/// Used when the offending propagated/evaluated node cannot be mapped to a more
+/// specific source location.
+fn source_span_for_process_definition(
+    ctx: &parser::ParserCtx,
+    arena: &tlib::TreeArena,
+    defs_root: BoxId,
+) -> Option<SourceSpan> {
+    let mut defs = defs_root;
+    let mut visited = 0usize;
+    while !arena.is_nil(defs) {
+        visited = visited.saturating_add(1);
+        if visited > 4096 {
+            break;
+        }
+        let def = arena.hd(defs)?;
+        let name = arena.hd(def)?;
+        if let BoxMatch::Ident("process") = match_box(arena, name) {
+            return source_span_for_node(ctx, name);
+        }
+        defs = arena.tl(defs)?;
+    }
+    None
+}
+
+/// Fallback source span for direct process aliases (`process = <ident>;`).
+///
+/// When `process` is a direct identifier alias, this resolves the target definition
+/// location (for example `foo = ...; process = foo;` -> label on `foo = ...`).
+fn source_span_for_process_binding_target(
+    ctx: &parser::ParserCtx,
+    arena: &tlib::TreeArena,
+    defs_root: BoxId,
+) -> Option<SourceSpan> {
+    let (_process_name, process_expr) = find_definition_name_and_expr(arena, defs_root, "process")?;
+    let BoxMatch::Ident(target_name) = match_box(arena, process_expr) else {
+        return None;
+    };
+    let (target_def_name, _target_expr) =
+        find_definition_name_and_expr(arena, defs_root, target_name)?;
+    source_span_for_definition_node(ctx, target_def_name)
+}
+
+/// Finds one `(definition_name, definition_expr)` pair by identifier name
+/// in the parser root definitions list.
+fn find_definition_name_and_expr(
+    arena: &tlib::TreeArena,
+    defs_root: BoxId,
+    wanted: &str,
+) -> Option<(BoxId, BoxId)> {
+    let mut defs = defs_root;
+    let mut visited = 0usize;
+    while !arena.is_nil(defs) {
+        visited = visited.saturating_add(1);
+        if visited > 4096 {
+            break;
+        }
+        let def = arena.hd(defs)?;
+        let name = arena.hd(def)?;
+        let args_expr = arena.tl(def)?;
+        let expr = arena.tl(args_expr)?;
+        if let BoxMatch::Ident(name_str) = match_box(arena, name) {
+            if name_str == wanted {
+                return Some((name, expr));
+            }
+        }
+        defs = arena.tl(defs)?;
+    }
+    None
+}
+
+/// Fallback source span from a definition whose expression matches (or contains) `node`.
+///
+/// This covers alias chains such as:
+/// `foo = <bad>; bar = foo; process = bar,bar;`
+/// where the failing node belongs to `foo` but `process` is not a direct identifier alias.
+fn source_span_for_definition_of_expr(
+    ctx: &parser::ParserCtx,
+    arena: &tlib::TreeArena,
+    defs_root: BoxId,
+    node: BoxId,
+) -> Option<SourceSpan> {
+    let mut defs = defs_root;
+    let mut visited = 0usize;
+    while !arena.is_nil(defs) {
+        visited = visited.saturating_add(1);
+        if visited > 4096 {
+            break;
+        }
+        let def = arena.hd(defs)?;
+        let name = arena.hd(def)?;
+        let args_expr = arena.tl(def)?;
+        let expr = arena.tl(args_expr)?;
+        if expr == node || subtree_contains_node(arena, expr, node) {
+            return source_span_for_definition_node(ctx, name);
+        }
+        defs = arena.tl(defs)?;
+    }
+    None
+}
+
+fn subtree_contains_node(arena: &tlib::TreeArena, root: BoxId, needle: BoxId) -> bool {
+    if root == needle {
+        return true;
+    }
+    let mut stack = vec![root];
+    let mut visited = 0usize;
+    while let Some(cur) = stack.pop() {
+        visited = visited.saturating_add(1);
+        if visited > 4096 {
+            break;
+        }
+        if cur == needle {
+            return true;
+        }
+        if let Some(children) = arena.children(cur) {
+            for child in children.iter().rev() {
+                stack.push(*child);
+            }
+        }
+    }
+    false
 }
 
 #[must_use]
@@ -649,5 +797,146 @@ mod tests {
             .expect("descendant property should resolve to source span");
         assert_eq!(span.file.display().to_string(), "desc.dsp");
         assert_eq!(span.line, 19);
+    }
+
+    #[test]
+    fn process_definition_span_fallback_resolves_when_node_has_no_property() {
+        let mut arena = TreeArena::new();
+        let (defs, process_name, expr) = {
+            let mut bb = BoxBuilder::new(&mut arena);
+            let process_name = bb.ident("process");
+            let wire = bb.wire();
+            let cut = bb.cut();
+            let expr = bb.seq(wire, cut);
+            let nil = arena.nil();
+            let args_expr = arena.cons(nil, expr);
+            let def = arena.cons(process_name, args_expr);
+            let defs = arena.cons(def, nil);
+            (defs, process_name, expr)
+        };
+
+        let mut ctx = parser::ParserCtx::new();
+        ctx.set_def_prop(process_name, "fallback.dsp", 11);
+
+        let span = super::source_span_for_process_definition(&ctx, &arena, defs)
+            .expect("process definition should provide fallback span");
+        assert_eq!(span.file.display().to_string(), "fallback.dsp");
+        assert_eq!(span.line, 11);
+
+        let diag = errors::Diagnostic::new(
+            errors::Severity::Error,
+            errors::Stage::Propagate,
+            errors::codes::PROP_ARITY_MISMATCH,
+            "mismatch",
+        );
+        let labeled = super::maybe_add_source_label(diag, &ctx, &arena, defs, expr);
+        assert!(!labeled.labels.is_empty());
+        assert_eq!(
+            labeled.labels[0].span.file.display().to_string(),
+            "fallback.dsp"
+        );
+    }
+
+    #[test]
+    fn process_binding_target_span_preferred_over_process_line() {
+        let mut arena = TreeArena::new();
+        let (defs, process_name, foo_name, bad_node) = {
+            let mut bb = BoxBuilder::new(&mut arena);
+            let foo_name = bb.ident("foo");
+            let wire_a = bb.wire();
+            let wire_b = bb.wire();
+            let left = bb.par(wire_a, wire_b);
+            let wire_c = bb.wire();
+            let wire_d = bb.wire();
+            let wire_e = bb.wire();
+            let right_tail = bb.par(wire_d, wire_e);
+            let right = bb.par(wire_c, right_tail);
+            let foo_expr = bb.split(left, right);
+
+            let process_name = bb.ident("process");
+            let process_expr = bb.ident("foo");
+
+            let nil = arena.nil();
+            let foo_args_expr = arena.cons(nil, foo_expr);
+            let foo_def = arena.cons(foo_name, foo_args_expr);
+            let process_args_expr = arena.cons(nil, process_expr);
+            let process_def = arena.cons(process_name, process_args_expr);
+            let tail_defs = arena.cons(process_def, nil);
+            let defs = arena.cons(foo_def, tail_defs);
+
+            (defs, process_name, foo_name, foo_expr)
+        };
+
+        let mut ctx = parser::ParserCtx::new();
+        ctx.set_def_prop(foo_name, "foo_file.dsp", 1);
+        ctx.set_def_prop(process_name, "foo_file.dsp", 4);
+
+        let direct = super::source_span_for_process_binding_target(&ctx, &arena, defs)
+            .expect("process binding target should resolve to foo definition");
+        assert_eq!(direct.file.display().to_string(), "foo_file.dsp");
+        assert_eq!(direct.line, 1);
+
+        let diag = errors::Diagnostic::new(
+            errors::Severity::Error,
+            errors::Stage::Propagate,
+            errors::codes::PROP_ARITY_MISMATCH,
+            "mismatch",
+        );
+        let labeled = super::maybe_add_source_label(diag, &ctx, &arena, defs, bad_node);
+        assert!(!labeled.labels.is_empty());
+        assert_eq!(
+            labeled.labels[0].span.file.display().to_string(),
+            "foo_file.dsp"
+        );
+        assert_eq!(labeled.labels[0].span.line, 1);
+    }
+
+    #[test]
+    fn definition_of_expr_fallback_handles_alias_chain() {
+        let mut arena = TreeArena::new();
+        let (defs, process_name, bar_name, foo_name, bad_node) = {
+            let mut bb = BoxBuilder::new(&mut arena);
+            let foo_name = bb.ident("foo");
+            let wire_a = bb.wire();
+            let wire_b = bb.wire();
+            let left = bb.par(wire_a, wire_b);
+            let wire_c = bb.wire();
+            let wire_d = bb.wire();
+            let wire_e = bb.wire();
+            let right_tail = bb.par(wire_d, wire_e);
+            let right = bb.par(wire_c, right_tail);
+            let foo_expr = bb.split(left, right);
+
+            let bar_name = bb.ident("bar");
+            let bar_expr = bb.ident("foo");
+
+            let process_name = bb.ident("process");
+            let process_bar_l = bb.ident("bar");
+            let process_bar_r = bb.ident("bar");
+            let process_rhs = bb.par(process_bar_l, process_bar_r);
+
+            let nil = arena.nil();
+            let foo_args_expr = arena.cons(nil, foo_expr);
+            let foo_def = arena.cons(foo_name, foo_args_expr);
+            let bar_args_expr = arena.cons(nil, bar_expr);
+            let bar_def = arena.cons(bar_name, bar_args_expr);
+            let process_args_expr = arena.cons(nil, process_rhs);
+            let process_def = arena.cons(process_name, process_args_expr);
+            let defs_tail = arena.cons(process_def, nil);
+            let defs_tail = arena.cons(bar_def, defs_tail);
+            let defs = arena.cons(foo_def, defs_tail);
+
+            (defs, process_name, bar_name, foo_name, foo_expr)
+        };
+
+        let mut ctx = parser::ParserCtx::new();
+        ctx.set_def_prop(foo_name, "chain.dsp", 1);
+        ctx.set_def_prop(bar_name, "chain.dsp", 2);
+        ctx.set_def_prop(process_name, "chain.dsp", 3);
+
+        let span = super::source_span_for_definition_of_expr(&ctx, &arena, defs, bad_node)
+            .expect("definition-of-expression fallback should resolve to foo definition");
+        assert_eq!(span.file.display().to_string(), "chain.dsp");
+        assert_eq!(span.line, 1);
     }
 }

@@ -73,3 +73,45 @@ fn propagate_error_fixture_exposes_frs_prop_code() {
             .any(|d| d.code.0.starts_with("FRS-PROP-"))
     );
 }
+
+#[test]
+fn propagate_error_complex_fixtures_expose_codes_and_source_labels() {
+    let compiler = Compiler::new();
+    let fixtures = [
+        ("err_04_propagate_seq_mismatch_alias.dsp", 1u32),
+        ("err_05_propagate_merge_mismatch_alias.dsp", 1u32),
+        ("err_06_propagate_split_mismatch_chain.dsp", 1u32),
+        ("err_07_propagate_rec_mismatch_alias.dsp", 1u32),
+        ("err_08_propagate_seq_ui_mismatch.dsp", 1u32),
+    ];
+
+    for (file, expected_line) in fixtures {
+        let source = read_corpus(file);
+        let err = compiler
+            .compile_source_to_signals(file, &source)
+            .expect_err(&format!("{file} should fail in propagate stage"));
+
+        let diagnostics = err
+            .diagnostics()
+            .expect(&format!("{file} should expose diagnostics"));
+        assert!(
+            diagnostics
+                .as_slice()
+                .iter()
+                .any(|d| d.code.0.starts_with("FRS-PROP-")),
+            "{file} should expose FRS-PROP-* code"
+        );
+        let first = diagnostics
+            .as_slice()
+            .first()
+            .expect(&format!("{file} should produce one diagnostic"));
+        let primary = first
+            .labels
+            .first()
+            .expect(&format!("{file} should include one source label"));
+        assert_eq!(
+            primary.span.line, expected_line,
+            "{file} should point to the expected source line"
+        );
+    }
+}

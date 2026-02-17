@@ -2411,3 +2411,27 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo fmt --all`
   - `cargo test -p compiler`
+
+#### Diagnostics UX rollout — Step 4b (complex propagate error fixtures + alias-chain source mapping)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `tests/corpus/err_04_propagate_seq_mismatch_alias.dsp`,
+  - `tests/corpus/err_05_propagate_merge_mismatch_alias.dsp`,
+  - `tests/corpus/err_06_propagate_split_mismatch_chain.dsp`,
+  - `tests/corpus/err_07_propagate_rec_mismatch_alias.dsp`,
+  - `tests/corpus/err_08_propagate_seq_ui_mismatch.dsp`,
+  - `crates/compiler/tests/diagnostic_errors.rs`,
+  - `crates/compiler/src/lib.rs`.
+- Implemented:
+  - added a richer negative corpus of connection errors (seq/split/merge/rec + alias chains).
+  - extended compiler diagnostics integration tests to assert:
+    - `FRS-PROP-*` code family,
+    - source-label presence and expected source line.
+  - refined source-label fallback in compiler diagnostics:
+    - prefers the definition owning the failing expression (`foo = ...`) over top-level alias lines,
+    - handles alias-chain forms (`foo -> bar -> process`).
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --test diagnostic_errors`
+  - `cargo test -p compiler --lib`

@@ -1,3 +1,4 @@
 foo = _,_ <: _,_,_;
 bar = foo;
-process = bar,bar;
+baz = bar;
+process = baz,baz;
