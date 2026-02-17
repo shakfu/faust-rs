@@ -208,6 +208,10 @@ Near-term diagnostics UX priorities after baseline rollout:
 - include alias-resolution context in diagnostics (`process -> ... -> owner`),
 - expose paired left/right mismatch context with computed arities,
 - expand complex negative corpus and operator-specific correction hints.
+- add C++-style readable `Here A / while B` blocks in human output for composition errors,
+- pretty-print UI/primitive expressions in user-facing notes (no internal tag/list forms),
+- add explicit owner-definition notes plus computed numeric target suggestions,
+- lock these readability rules with dedicated human/json snapshots.
 
 ---
 

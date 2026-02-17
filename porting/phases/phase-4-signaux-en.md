@@ -462,6 +462,30 @@ Prioritized implementation roadmap for clearer user-facing errors:
 8. Extended negative corpus lock:
 - add and maintain complex connection-failure fixtures (alias chains, recursive mismatches, UI/route-driven mismatches) with stable snapshot assertions.
 
+9. Human readability parity pass (C++-inspired formatting):
+- extend human renderer payload with explicit paired blocks:
+  - `Here A = ...`,
+  - `while B = ...`,
+  - each with arity lines.
+
+10. Pretty-print parity for UI/primitive expressions:
+- avoid internal node/tag dumps in user-facing notes;
+- render common forms as Faust syntax (`hslider(...)`, primitive infix/prefix symbols).
+
+11. Owner-definition note:
+- add direct ownership message when alias expansion is involved:
+  - `error originates from definition 'foo'`;
+- keep trace (`process -> ... -> foo`) for debugging.
+
+12. Concrete numeric fix suggestions:
+- for arity/divisibility mismatches, provide computed target suggestions where deterministic.
+
+13. Snapshot lock for readability contract:
+- add/maintain human+json snapshots asserting:
+  - A/B block presence,
+  - UI pretty-print readability,
+  - owner + numeric suggestion notes.
+
 Reference model:
 - `porting/faust-rust-diagnostics-model-en.md` (sections 4.1, 5.3, 5.4, 6-D/E).
 

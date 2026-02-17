@@ -2568,3 +2568,18 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo test -p propagate --all-targets`
   - `cargo test -p compiler --test diagnostic_errors`
+
+#### Documentation addendum — diagnostics readability micro-tranche planning
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `porting/faust-rust-diagnostics-model-en.md`,
+  - `porting/phases/phase-4-signaux-en.md`,
+  - `porting/faust-rust-porting-plan-en.md`.
+- Implemented:
+  - documented a follow-up diagnostics UX micro-tranche focused on user readability:
+    - C++-style paired `Here A / while B` rendering with arity lines,
+    - readable pretty-print for UI/primitive expressions in notes,
+    - explicit owner-definition note in alias-expanded failures,
+    - computed numeric correction suggestions when deterministic,
+    - dedicated human/json snapshot lock for these readability rules.

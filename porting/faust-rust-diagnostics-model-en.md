@@ -306,6 +306,33 @@ Remaining UX improvements (next tranche, prioritized):
 6. Operator-specific correction hints:
 - tune `help` messages per composition class (`seq`, `split`, `merge`, `rec`) with concrete fix patterns.
 
+Next micro-tranche (post-step-6, readability-focused):
+
+1. C++-style paired rendering in human output:
+- add explicit blocks:
+  - `Here A = ...` (+ `has ... inputs/outputs`),
+  - `while B = ...` (+ `has ... inputs/outputs`).
+
+2. Readable primitive/UI expression pretty-print:
+- replace internal forms (`1(str(...), cons(...))`, primitive tags) with user-facing Faust forms:
+  - `hslider("gain", 0.5, 0.0, 1.0, 0.01)`,
+  - `+`, `*`, etc.
+
+3. Definition-owner clarity:
+- add explicit owner note when available:
+  - `error originates from definition 'foo'`,
+  - keep `binding_trace=process -> ... -> foo` as structural context.
+
+4. Numeric correction proposals:
+- include one computed target when possible:
+  - e.g. `right inputs should be 4 (nearest multiple of 2), got 3`.
+
+5. Snapshot lock for readability rules:
+- add human/json snapshot assertions specifically for:
+  - C++-style `A/B` blocks,
+  - UI pretty-print,
+  - owner note + numeric proposal presence.
+
 ---
 
 ## 7. Test strategy
