@@ -654,9 +654,14 @@ impl ParseState {
         lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
         span: Span,
     ) {
-        let ((line, _), _) = lexer.line_col(span);
-        let line = u32::try_from(line).unwrap_or(u32::MAX);
-        self.ctx.set_cursor(&self.source_file, line);
+        let ((line, col), (end_line, end_col)) = lexer.line_col(span);
+        self.ctx.set_cursor_span(
+            &self.source_file,
+            u32::try_from(line).unwrap_or(u32::MAX),
+            u32::try_from(col).unwrap_or(u32::MAX),
+            u32::try_from(end_line).unwrap_or(u32::MAX),
+            u32::try_from(end_col).unwrap_or(u32::MAX),
+        );
     }
 }
 
@@ -736,9 +741,14 @@ pub fn parse_program(input: &str, source_file: &str) -> ParseOutput {
             lrpar::LexParseError::LexError(e) => e.span(),
             lrpar::LexParseError::ParseError(e) => e.lexeme().span(),
         };
-        let ((line, _col), _) = lexer.line_col(span);
-        let line = u32::try_from(line).unwrap_or(u32::MAX);
-        state.ctx.set_cursor(source_file, line);
+        let ((line, col), (end_line, end_col)) = lexer.line_col(span);
+        state.ctx.set_cursor_span(
+            source_file,
+            u32::try_from(line).unwrap_or(u32::MAX),
+            u32::try_from(col).unwrap_or(u32::MAX),
+            u32::try_from(end_line).unwrap_or(u32::MAX),
+            u32::try_from(end_col).unwrap_or(u32::MAX),
+        );
         let message = err.pp(&lexer, &faustparser_y::token_epp).to_string();
         state.ctx.error(&message);
         rendered_errors.push(message);
@@ -774,7 +784,7 @@ pub fn parse_file_with_imports(
 
 /// Updates parser cursor from one lexed token, then tags `sym` as use-site at that location.
 pub fn set_use_prop_from_token(ctx: &mut ParserCtx, sym: TreeId, file: &str, token: &LexedToken) {
-    ctx.set_cursor(file, token.start_line);
+    ctx.set_cursor_with_col(file, token.start_line, token.start_col);
     ctx.set_use_prop_at_cursor(sym);
 }
 
@@ -794,9 +804,9 @@ fn parser_ctx_to_bundle(ctx: &ParserCtx) -> DiagnosticBundle {
                 let span = SourceSpan::new(
                     location.file(),
                     location.line(),
-                    1,
-                    location.line(),
-                    1,
+                    location.col(),
+                    location.end_line(),
+                    location.end_col(),
                 );
                 out = out.with_label(Label::new(LabelStyle::Primary, span, "parser location"));
             }

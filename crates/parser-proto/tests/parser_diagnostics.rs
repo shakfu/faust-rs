@@ -168,6 +168,20 @@ fn malformed_suite_tracks_rust_class_and_location() {
             "missing error diagnostic location for case {} at line {}",
             case.name, case.expected_error_line
         );
+        assert!(
+            out.diagnostics.as_slice().iter().any(|d| {
+                d.labels.iter().any(|label| {
+                    label.span.file.to_string_lossy() == case.name
+                        && label.span.line == case.expected_error_line
+                        && label.span.col >= 1
+                        && label.span.end_line >= label.span.line
+                        && label.span.end_col >= label.span.col
+                })
+            }),
+            "missing structured parser range for case {} at line {}",
+            case.name,
+            case.expected_error_line
+        );
     }
 }
 

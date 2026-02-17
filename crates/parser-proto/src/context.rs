@@ -15,20 +15,39 @@
 
 use tlib::{PropertyKey, PropertyStore, TreeId};
 
-/// Parser source location equivalent to `(filename, lineno)` in C++ parser globals.
+/// Parser source location equivalent to `(filename, lineno)` in C++ parser globals,
+/// extended with optional column/range precision from `lrpar` spans.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceLocation {
     file: Box<str>,
     line: u32,
+    col: u32,
+    end_line: u32,
+    end_col: u32,
 }
 
 impl SourceLocation {
     /// Creates a source location.
     #[must_use]
     pub fn new(file: &str, line: u32) -> Self {
+        Self::new_span(file, line, 1, line, 1)
+    }
+
+    /// Creates a source location with explicit column.
+    #[must_use]
+    pub fn new_with_col(file: &str, line: u32, col: u32) -> Self {
+        Self::new_span(file, line, col, line, col)
+    }
+
+    /// Creates a source location with explicit start/end range.
+    #[must_use]
+    pub fn new_span(file: &str, line: u32, col: u32, end_line: u32, end_col: u32) -> Self {
         Self {
             file: file.into(),
             line,
+            col,
+            end_line,
+            end_col,
         }
     }
 
@@ -42,6 +61,24 @@ impl SourceLocation {
     #[must_use]
     pub fn line(&self) -> u32 {
         self.line
+    }
+
+    /// 1-based start column number.
+    #[must_use]
+    pub fn col(&self) -> u32 {
+        self.col
+    }
+
+    /// 1-based end line number.
+    #[must_use]
+    pub fn end_line(&self) -> u32 {
+        self.end_line
+    }
+
+    /// 1-based end column number.
+    #[must_use]
+    pub fn end_col(&self) -> u32 {
+        self.end_col
     }
 }
 
@@ -130,6 +167,23 @@ impl ParserCtx {
     /// Sets parser cursor location (equivalent to lexer-maintained file/line globals).
     pub fn set_cursor(&mut self, file: &str, line: u32) {
         self.cursor = SourceLocation::new(file, line);
+    }
+
+    /// Sets parser cursor location with explicit column.
+    pub fn set_cursor_with_col(&mut self, file: &str, line: u32, col: u32) {
+        self.cursor = SourceLocation::new_with_col(file, line, col);
+    }
+
+    /// Sets parser cursor location with explicit start/end range.
+    pub fn set_cursor_span(
+        &mut self,
+        file: &str,
+        line: u32,
+        col: u32,
+        end_line: u32,
+        end_col: u32,
+    ) {
+        self.cursor = SourceLocation::new_span(file, line, col, end_line, end_col);
     }
 
     /// Returns current parser cursor.
