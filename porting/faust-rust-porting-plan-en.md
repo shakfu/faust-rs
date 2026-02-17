@@ -243,6 +243,8 @@ Near-term diagnostics UX priorities after baseline rollout:
   - lock a dedicated human snapshot for pipeline-level fallback-origin messaging,
   - perform final concision sweep on help/template strings,
   - add short end-user guidance for reading structured diagnostics.
+  - status: first implementation slice completed (verbosity modes, JSON debug
+    enrichment in debug mode, and initial help/template concision pass).
 
 ---
 

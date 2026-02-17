@@ -511,7 +511,31 @@ Polish phase plan (post-finalization, non-blocking):
 
 ---
 
-## 8. Non-goals
+## 8. Reading diagnostics (quick guide)
+
+Recommended reading order for one diagnostic:
+
+1. `message`: high-level failure summary.
+2. `cause:`: immediate root cause in one line.
+3. `rule:`: exact invariant that was violated.
+4. `computed:`: concrete values used to detect failure.
+5. `context`: owner/binding/scope notes and source labels.
+6. `help` / `template`: shortest deterministic correction path.
+
+CLI modes:
+
+- `--error-format human --error-verbosity standard`:
+  concise user-facing diagnostics (default).
+- `--error-format human --error-verbosity debug`:
+  includes internal notes (`node_id`, `box_expr`) for deep troubleshooting.
+- `--error-format json`:
+  stable machine contract for CI/IDE.
+- `--error-format json --error-verbosity debug`:
+  adds optional `diagnostics[*].debug` enrichment.
+
+---
+
+## 9. Non-goals
 
 1. Reproducing byte-for-byte C++ error strings.
 2. Reintroducing global mutable error channels.
@@ -521,7 +545,7 @@ The target is stable structured diagnostics with incremental UX improvements.
 
 ---
 
-## 9. Adoption links in the porting plan
+## 10. Adoption links in the porting plan
 
 This document is normative for diagnostics architecture and must be read with:
 

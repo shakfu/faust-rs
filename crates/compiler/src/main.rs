@@ -99,9 +99,13 @@ fn print_structured_diagnostics(
                 format_diagnostics_human_with_verbosity(bundle, verbosity)
             ),
         },
-        ErrorFormat::Json => {
-            eprintln!("{}", format_diagnostics_json(bundle));
-        }
+        ErrorFormat::Json => match verbosity {
+            ErrorVerbosity::Standard => eprintln!("{}", format_diagnostics_json(bundle)),
+            ErrorVerbosity::Debug => eprintln!(
+                "{}",
+                format_diagnostics_json_with_verbosity(bundle, verbosity)
+            ),
+        },
     }
 }
 
@@ -270,6 +274,17 @@ fn caret_span(col: u32, end_col: u32) -> String {
 
 /// Formats diagnostics in a machine-oriented JSON payload.
 fn format_diagnostics_json(bundle: &DiagnosticBundle) -> String {
+    format_diagnostics_json_with_verbosity(bundle, ErrorVerbosity::Standard)
+}
+
+/// Formats diagnostics in JSON with optional debug-oriented enrichment.
+///
+/// `Standard` keeps the stable CI/IDE contract.
+/// `Debug` adds extracted low-level fields under `diagnostics[*].debug`.
+fn format_diagnostics_json_with_verbosity(
+    bundle: &DiagnosticBundle,
+    verbosity: ErrorVerbosity,
+) -> String {
     let diagnostics = bundle
         .as_slice()
         .iter()
@@ -294,7 +309,7 @@ fn format_diagnostics_json(bundle: &DiagnosticBundle) -> String {
                     })
                 })
                 .collect::<Vec<_>>();
-            json!({
+            let mut payload = json!({
                 "severity": match diag.severity {
                     Severity::Error => "error",
                     Severity::Warning => "warning",
@@ -318,7 +333,16 @@ fn format_diagnostics_json(bundle: &DiagnosticBundle) -> String {
                 "notes": diag.notes,
                 "help": diag.help,
                 "context": diagnostic_context_from_notes(diag.notes.as_slice()),
-            })
+            });
+            if matches!(verbosity, ErrorVerbosity::Debug)
+                && let Some(obj) = payload.as_object_mut()
+            {
+                obj.insert(
+                    "debug".to_owned(),
+                    diagnostic_debug_from_notes(diag.notes.as_slice()),
+                );
+            }
+            payload
         })
         .collect::<Vec<_>>();
 
@@ -382,6 +406,29 @@ fn diagnostic_context_from_notes(notes: &[Box<str>]) -> serde_json::Value {
             "visible": scope_visible,
             "top_level": scope_top_level,
         }
+    })
+}
+
+/// Extracts debug-only fields from diagnostic notes.
+///
+/// This keeps internal details (`node_id`, `box_expr`) out of the default JSON
+/// surface while still allowing explicit debug workflows.
+fn diagnostic_debug_from_notes(notes: &[Box<str>]) -> serde_json::Value {
+    let mut node_id = None::<u32>;
+    let mut box_expr = None::<String>;
+    for note in notes {
+        if let Some(v) = note.strip_prefix("node_id=") {
+            node_id = v.parse::<u32>().ok();
+            continue;
+        }
+        if let Some(v) = note.strip_prefix("box_expr=") {
+            box_expr = Some(v.to_owned());
+            continue;
+        }
+    }
+    json!({
+        "node_id": node_id,
+        "box_expr": box_expr
     })
 }
 
@@ -554,7 +601,7 @@ mod tests {
 
     use super::{
         ErrorVerbosity, format_diagnostics_human, format_diagnostics_human_with_verbosity,
-        format_diagnostics_json,
+        format_diagnostics_json, format_diagnostics_json_with_verbosity,
     };
 
     #[test]
@@ -678,6 +725,47 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
             "application accepts at most 1 argument(s), got 2"
         );
         assert_eq!(diag["help"][0], "remove one argument");
+    }
+
+    #[test]
+    fn diagnostics_json_renderer_debug_mode_exposes_internal_fields() {
+        let mut bundle = DiagnosticBundle::new();
+        bundle.push(
+            Diagnostic::new(
+                Severity::Error,
+                Stage::Propagate,
+                DiagnosticCode("FRS-PROP-0002"),
+                "split mismatch",
+            )
+            .with_note("node_id=42")
+            .with_note("box_expr=3(1(), 1())"),
+        );
+        let rendered = format_diagnostics_json_with_verbosity(&bundle, ErrorVerbosity::Debug);
+        let value: Value =
+            serde_json::from_str(&rendered).expect("JSON diagnostics output should be valid");
+        let diag = &value["diagnostics"][0];
+        assert_eq!(diag["debug"]["node_id"], 42);
+        assert_eq!(diag["debug"]["box_expr"], "3(1(), 1())");
+    }
+
+    #[test]
+    fn diagnostics_json_renderer_standard_mode_omits_internal_debug_fields() {
+        let mut bundle = DiagnosticBundle::new();
+        bundle.push(
+            Diagnostic::new(
+                Severity::Error,
+                Stage::Propagate,
+                DiagnosticCode("FRS-PROP-0002"),
+                "split mismatch",
+            )
+            .with_note("node_id=42")
+            .with_note("box_expr=3(1(), 1())"),
+        );
+        let rendered = format_diagnostics_json_with_verbosity(&bundle, ErrorVerbosity::Standard);
+        let value: Value =
+            serde_json::from_str(&rendered).expect("JSON diagnostics output should be valid");
+        let diag = &value["diagnostics"][0];
+        assert!(diag["debug"].is_null());
     }
 
     #[test]

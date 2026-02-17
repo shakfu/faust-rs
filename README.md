@@ -46,6 +46,22 @@ Run the scaffold CLI binary:
 cargo run -p compiler
 ```
 
+Run parser/signal diagnostics with explicit output controls:
+
+```bash
+# Human diagnostics (default), concise note stream
+cargo run -p compiler -- --dump-sig tests/corpus/err_03_propagate_split_mismatch.dsp --error-format human --error-verbosity standard
+
+# Human diagnostics with internal debug notes
+cargo run -p compiler -- --dump-sig tests/corpus/err_03_propagate_split_mismatch.dsp --error-format human --error-verbosity debug
+
+# JSON diagnostics (stable contract)
+cargo run -p compiler -- --dump-sig tests/corpus/err_03_propagate_split_mismatch.dsp --error-format json
+
+# JSON diagnostics with debug enrichment (`diagnostics[*].debug`)
+cargo run -p compiler -- --dump-sig tests/corpus/err_03_propagate_split_mismatch.dsp --error-format json --error-verbosity debug
+```
+
 ## C++ golden outputs
 
 Corpus and golden layout:

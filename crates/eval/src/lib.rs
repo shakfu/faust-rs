@@ -364,9 +364,7 @@ impl IntoDiagnostic for EvalError {
             ))
             .with_help("define the symbol in scope or fix the identifier name")
             .with_help(format!("template: {symbol} = ...; // define before use"))
-            .with_help(
-                "if this is a top-level alias, ensure the target definition exists before use",
-            ),
+            .with_help("for top-level aliases: define target before first use"),
             Self::PatternArityMismatch { expected, got, .. } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,

@@ -595,6 +595,13 @@ Prioritized implementation roadmap for clearer user-facing errors:
 40. User diagnostics reading note:
 - add short user-facing guidance for interpreting `cause/rule/computed/context/help`.
 
+Status update (implemented in current tranche):
+- diagnostics verbosity modes are now wired in compiler CLI:
+  - `--error-verbosity standard|debug`,
+  - standard hides internal notes in human mode, debug keeps them.
+- JSON debug enrichment is available in debug verbosity (`diagnostics[*].debug`).
+- concise wording pass applied on major eval/propagate help/template messages.
+
 Reference model:
 - `porting/faust-rust-diagnostics-model-en.md` (sections 4.1, 5.3, 5.4, 6-D/E).
 

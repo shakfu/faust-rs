@@ -2875,3 +2875,36 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p compiler --all-targets`
   - `cargo test -p eval --all-targets`
   - `cargo test -p propagate --all-targets`
+
+#### Diagnostics polish tranche — verbosity modes + JSON debug enrichment + help concision
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/src/lib.rs`,
+  - `crates/compiler/src/main.rs`,
+  - `crates/eval/src/lib.rs`,
+  - `crates/propagate/src/lib.rs`,
+  - `README.md`,
+  - `porting/faust-rust-diagnostics-model-en.md`,
+  - `tests/corpus/err_17_origin_fallback_missing_props_eval.dsp`.
+- Implemented:
+  - added diagnostics verbosity contract to compiler CLI:
+    - `--error-verbosity standard` (default concise human output),
+    - `--error-verbosity debug` (keeps internal note stream).
+  - extended JSON diagnostics with optional debug enrichment:
+    - `diagnostics[*].debug = { node_id, box_expr }` in debug verbosity only.
+  - added advanced compiler API entry point with Rustdoc:
+    - `compile_parsed_to_signals(source_name, parse_output)`.
+  - expanded JSON note-order coverage to additional families:
+    - propagate split/merge/rec ordering checks,
+    - eval undefined-symbol ordering check.
+  - added pipeline-level human snapshot for origin-fallback wording by running
+    eval/propagate on parsed output with parser source properties cleared.
+  - performed help/template concision pass on eval/propagate diagnostics wording.
+  - documented diagnostics CLI usage and quick reading guide in project docs.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test -p compiler --all-targets`
+  - `cargo test -p eval --all-targets`
+  - `cargo test -p propagate --all-targets`
