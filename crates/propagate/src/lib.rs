@@ -191,31 +191,58 @@ impl IntoDiagnostic for PropagateError {
             | Self::OutputArityMismatch { expected, got, .. } => {
                 Diagnostic::new(Severity::Error, Stage::Propagate, codes::PROP_ARITY_MISMATCH, message)
                     .with_note(format!("expected {expected}, got {got}"))
+                    .with_help("adjust composition so input/output bus widths match")
             }
             Self::SeqArityMismatch {
                 left_outputs,
                 right_inputs,
                 ..
             } => Diagnostic::new(Severity::Error, Stage::Propagate, codes::PROP_ARITY_MISMATCH, message)
+                .with_note("rule: seq(A, B) requires outputs(A) == inputs(B)")
                 .with_note(format!(
                     "sequential composition requires left outputs ({left_outputs}) == right inputs ({right_inputs})"
-                )),
+                ))
+                .with_note(format!(
+                    "computed: {left_outputs} == {right_inputs} -> {}",
+                    left_outputs == right_inputs
+                ))
+                .with_help("insert/remap channels so A outputs exactly match B inputs"),
             Self::SplitArityMismatch {
                 left_outputs,
                 right_inputs,
                 ..
             } => Diagnostic::new(Severity::Error, Stage::Propagate, codes::PROP_ARITY_MISMATCH, message)
+                .with_note("rule: split(A, B) requires inputs(B) % outputs(A) == 0")
                 .with_note(format!(
                     "split composition requires right inputs ({right_inputs}) to be divisible by left outputs ({left_outputs})"
-                )),
+                ))
+                .with_note(if left_outputs == 0 {
+                    "computed: divisor outputs(A)=0 is invalid".to_owned()
+                } else {
+                    format!(
+                        "computed: {right_inputs} % {left_outputs} = {}",
+                        right_inputs % left_outputs
+                    )
+                })
+                .with_help("make B input count a multiple of A output count"),
             Self::MergeArityMismatch {
                 left_outputs,
                 right_inputs,
                 ..
             } => Diagnostic::new(Severity::Error, Stage::Propagate, codes::PROP_ARITY_MISMATCH, message)
+                .with_note("rule: merge(A, B) requires outputs(A) % inputs(B) == 0")
                 .with_note(format!(
                     "merge composition requires left outputs ({left_outputs}) to be a multiple of right inputs ({right_inputs})"
-                )),
+                ))
+                .with_note(if right_inputs == 0 {
+                    "computed: divisor inputs(B)=0 is invalid".to_owned()
+                } else {
+                    format!(
+                        "computed: {left_outputs} % {right_inputs} = {}",
+                        left_outputs % right_inputs
+                    )
+                })
+                .with_help("make A output count a multiple of B input count"),
             Self::RecArityMismatch {
                 left_inputs,
                 left_outputs,
@@ -228,9 +255,22 @@ impl IntoDiagnostic for PropagateError {
                 codes::PROP_RECURSION_MISMATCH,
                 message,
             )
+            .with_note(
+                "rule: rec(A, B) requires right_inputs <= left_outputs and right_outputs <= left_inputs",
+            )
             .with_note(format!(
                 "required: right_inputs ({right_inputs}) <= left_outputs ({left_outputs}) and right_outputs ({right_outputs}) <= left_inputs ({left_inputs})"
-            )),
+            ))
+            .with_note(format!(
+                "computed: {} <= {} is {}, {} <= {} is {}",
+                right_inputs,
+                left_outputs,
+                right_inputs <= left_outputs,
+                right_outputs,
+                left_inputs,
+                right_outputs <= left_inputs
+            ))
+            .with_help("reduce feedback/output arity or increase matching counterpart arity"),
             Self::InvalidIntegerValue { field, .. } => Diagnostic::new(
                 Severity::Error,
                 Stage::Propagate,

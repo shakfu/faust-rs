@@ -370,6 +370,23 @@ fn propagate_error_converts_to_structured_diagnostic_codes() {
     .into_diagnostic();
     assert_eq!(arity.code, codes::PROP_ARITY_MISMATCH);
     assert!(!arity.notes.is_empty());
+    assert!(!arity.help.is_empty());
+
+    let split = PropagateError::SplitArityMismatch {
+        node,
+        left_outputs: 2,
+        right_inputs: 3,
+    }
+    .into_diagnostic();
+    assert_eq!(split.code, codes::PROP_ARITY_MISMATCH);
+    assert!(split.notes.iter().any(|n| n.contains("rule: split(A, B)")));
+    assert!(
+        split
+            .notes
+            .iter()
+            .any(|n| n.contains("computed: 3 % 2 = 1"))
+    );
+    assert!(!split.help.is_empty());
 
     let rec = PropagateError::RecArityMismatch {
         node,
@@ -381,6 +398,7 @@ fn propagate_error_converts_to_structured_diagnostic_codes() {
     .into_diagnostic();
     assert_eq!(rec.code, codes::PROP_RECURSION_MISMATCH);
     assert!(!rec.notes.is_empty());
+    assert!(!rec.help.is_empty());
 }
 
 fn is_debruijn_rec(arena: &TreeArena, id: TreeId) -> bool {

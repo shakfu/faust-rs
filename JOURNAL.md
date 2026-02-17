@@ -2355,3 +2355,21 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo fmt --all`
   - `cargo test -p compiler`
+
+#### Diagnostics UX rollout — Step 2 (rule-aware actionable propagate diagnostics)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/propagate/src/lib.rs`,
+  - `crates/propagate/tests/core_api.rs`.
+- Implemented:
+  - enriched `PropagateError -> Diagnostic` conversion for composition/arity failures:
+    - explicit rule notes (seq/split/merge/rec),
+    - computed-condition notes (including divisibility remainders),
+    - actionable help text for correction.
+  - widened baseline arity mismatch diagnostics with direct help hints.
+  - extended propagate diagnostics unit tests to lock the new notes/help payloads.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p propagate --all-targets`
+  - `cargo test -p compiler`
