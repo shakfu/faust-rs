@@ -2,6 +2,10 @@
 
 use std::path::PathBuf;
 
+pub mod codes;
+
+pub use codes::all_codes;
+
 pub const CRATE_NAME: &str = "errors";
 
 #[must_use]
