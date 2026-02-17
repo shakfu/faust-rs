@@ -3184,3 +3184,27 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy -p codegen --all-targets -- -D warnings`
   - `cargo test -p codegen --all-targets`
+
+#### C++ backend module-first rollout — Step 3 (core statement/value emitter)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/codegen/src/backends/cpp/mod.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - added FIR-driven emission helpers with explicit `match_fir` dispatch:
+    - `emit_value`: literals, load/store-related value forms, `binop`, `neg`, `cast`,
+      `bitcast`, `select2`, `funcall`, plus array/value-list forms.
+    - `emit_stmt`: declarations, blocks, `if/switch`, `for/simple-for/iterator-for/while`,
+      `return`, `drop`, `label`.
+    - `emit_block` for recursive statement rendering.
+  - wired section emission to render statement bodies instead of shell comments only.
+  - added stable typed backend error for unsupported FIR shapes:
+    - `FRS-CGEN-CPP-0003` (`UnsupportedNode`).
+  - added unit coverage:
+    - synthetic module using core statement/value forms renders expected snippets,
+    - unsupported UI node path explicitly fails with `FRS-CGEN-CPP-0003`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p codegen --all-targets -- -D warnings`
+  - `cargo test -p codegen --all-targets`

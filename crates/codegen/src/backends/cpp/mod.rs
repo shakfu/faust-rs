@@ -6,19 +6,19 @@
 //! - `compiler/generator/text_instructions.hh`
 //!
 //! # Current slice
-//! This initial slice validates the module-first backend contract:
-//! input must be a FIR module node and generation fails with a typed
-//! backend error otherwise.
+//! This backend follows a module-first contract:
+//! input must be a FIR module node and code generation walks FIR through
+//! `match_fir` only.
 
 use std::fmt::Write as _;
 
-use fir::{FirId, FirMatch, FirStore, match_fir};
+use fir::{FirBinOp, FirId, FirMatch, FirStore, FirType, NamedType, match_fir};
 
 pub const BACKEND_NAME: &str = "cpp";
 
 /// C++ backend options for module-first emission.
 ///
-/// This type is intentionally small in the first slice and will be
+/// This type is intentionally small in the first slices and will be
 /// extended as parity grows (`namespace`, virtual/final policy, etc.).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CppOptions {
@@ -35,6 +35,8 @@ pub enum CodegenErrorCode {
     RootNotModule,
     /// Module section is not a FIR block shape.
     InvalidModuleSection,
+    /// One FIR node is not yet supported by the C++ emitter slice.
+    UnsupportedNode,
 }
 
 impl CodegenErrorCode {
@@ -43,6 +45,7 @@ impl CodegenErrorCode {
         match self {
             Self::RootNotModule => "FRS-CGEN-CPP-0001",
             Self::InvalidModuleSection => "FRS-CGEN-CPP-0002",
+            Self::UnsupportedNode => "FRS-CGEN-CPP-0003",
         }
     }
 }
@@ -85,6 +88,14 @@ struct ModuleView {
     declarations: FirId,
 }
 
+struct DeclareFunView<'a> {
+    name: &'a str,
+    typ: &'a FirType,
+    named_args: &'a [NamedType],
+    body: FirId,
+    is_inline: bool,
+}
+
 /// Generates C++ code from a FIR module root.
 ///
 /// # C++ parity mapping
@@ -114,10 +125,10 @@ pub fn generate_cpp_module(
 
     let _ = writeln!(out, "class {class_name} : public dsp {{");
     let _ = writeln!(out, "private:");
-    emit_section_shell(store, &mut out, "dsp_struct", module.dsp_struct, 1)?;
-    emit_section_shell(store, &mut out, "globals", module.globals, 1)?;
+    emit_section(store, &mut out, "dsp_struct", module.dsp_struct, 1)?;
+    emit_section(store, &mut out, "globals", module.globals, 1)?;
     let _ = writeln!(out, "public:");
-    emit_section_shell(store, &mut out, "functions", module.declarations, 1)?;
+    emit_section(store, &mut out, "functions", module.declarations, 1)?;
     let _ = writeln!(out, "}};");
 
     if let Some(namespace) = options.namespace.as_deref() {
@@ -145,7 +156,7 @@ fn emit_cpp_header(out: &mut String, class_name: &str) {
     let _ = writeln!(out);
 }
 
-fn emit_section_shell(
+fn emit_section(
     store: &FirStore,
     out: &mut String,
     section_name: &str,
@@ -168,7 +179,412 @@ fn emit_section_shell(
         "{tab}// section: {section_name} ({} items)",
         items.len()
     );
+    for item in items {
+        emit_stmt(store, out, item, indent)?;
+    }
     Ok(())
+}
+
+fn emit_stmt(
+    store: &FirStore,
+    out: &mut String,
+    stmt: FirId,
+    indent: usize,
+) -> Result<(), CodegenError> {
+    let tab = "    ".repeat(indent);
+    match match_fir(store, stmt) {
+        FirMatch::DeclareVar {
+            name,
+            typ,
+            access: _,
+            init,
+        } => {
+            let _ = write!(out, "{tab}{} {name}", emit_type(&typ));
+            if let Some(init) = init {
+                let init = emit_value(store, init)?;
+                let _ = write!(out, " = {init}");
+            }
+            let _ = writeln!(out, ";");
+            Ok(())
+        }
+        FirMatch::DeclareFun {
+            name,
+            typ,
+            args,
+            body,
+            is_inline,
+        } => emit_declare_fun(
+            store,
+            out,
+            DeclareFunView {
+                name: &name,
+                typ: &typ,
+                named_args: &args,
+                body,
+                is_inline,
+            },
+            indent,
+        ),
+        FirMatch::NullDeclareVar => {
+            let _ = writeln!(out, "{tab}/* null declare */");
+            Ok(())
+        }
+        FirMatch::DeclareStructType { typ } => {
+            let _ = writeln!(out, "{tab}// struct type declaration: {}", emit_type(&typ));
+            Ok(())
+        }
+        FirMatch::DeclareBufferIterators {
+            name1,
+            name2,
+            channels,
+            typ,
+            mutable,
+            chunk,
+        } => {
+            let _ = writeln!(
+                out,
+                "{tab}// buffer iterators: {name1}, {name2}, channels={channels}, type={}, mutable={mutable}, chunk={chunk}",
+                emit_type(&typ)
+            );
+            Ok(())
+        }
+        FirMatch::StoreVar {
+            name,
+            access: _,
+            value,
+        } => {
+            let value = emit_value(store, value)?;
+            let _ = writeln!(out, "{tab}{name} = {value};");
+            Ok(())
+        }
+        FirMatch::ShiftArrayVar {
+            name,
+            access: _,
+            delay,
+        } => {
+            let _ = writeln!(out, "{tab}// shift array {name} by {delay}");
+            Ok(())
+        }
+        FirMatch::Drop(value) => {
+            let value = emit_value(store, value)?;
+            let _ = writeln!(out, "{tab}(void)({value});");
+            Ok(())
+        }
+        FirMatch::NullStatement => {
+            let _ = writeln!(out, "{tab};");
+            Ok(())
+        }
+        FirMatch::Return(value) => {
+            if let Some(value) = value {
+                let value = emit_value(store, value)?;
+                let _ = writeln!(out, "{tab}return {value};");
+            } else {
+                let _ = writeln!(out, "{tab}return;");
+            }
+            Ok(())
+        }
+        FirMatch::Block(_) => emit_block(store, out, stmt, indent),
+        FirMatch::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            let cond = emit_value(store, cond)?;
+            let _ = writeln!(out, "{tab}if ({cond}) {{");
+            emit_block(store, out, then_block, indent + 1)?;
+            let _ = writeln!(out, "{tab}}}");
+            if let Some(else_block) = else_block {
+                let _ = writeln!(out, "{tab}else {{");
+                emit_block(store, out, else_block, indent + 1)?;
+                let _ = writeln!(out, "{tab}}}");
+            }
+            Ok(())
+        }
+        FirMatch::Control { cond, stmt } => {
+            let cond = emit_value(store, cond)?;
+            let _ = writeln!(out, "{tab}if ({cond}) {{");
+            emit_stmt(store, out, stmt, indent + 1)?;
+            let _ = writeln!(out, "{tab}}}");
+            Ok(())
+        }
+        FirMatch::ForLoop {
+            var,
+            init,
+            end,
+            step,
+            body,
+            is_reverse: _,
+        } => {
+            let init = emit_value(store, init)?;
+            let end = emit_value(store, end)?;
+            let step = emit_value(store, step)?;
+            let _ = writeln!(
+                out,
+                "{tab}for (int {var} = {init}; {var} < {end}; {var} += {step}) {{"
+            );
+            emit_block(store, out, body, indent + 1)?;
+            let _ = writeln!(out, "{tab}}}");
+            Ok(())
+        }
+        FirMatch::SimpleForLoop {
+            var,
+            upper,
+            body,
+            is_reverse: _,
+        } => {
+            let upper = emit_value(store, upper)?;
+            let _ = writeln!(out, "{tab}for (int {var} = 0; {var} < {upper}; ++{var}) {{");
+            emit_block(store, out, body, indent + 1)?;
+            let _ = writeln!(out, "{tab}}}");
+            Ok(())
+        }
+        FirMatch::IteratorForLoop {
+            iterators,
+            is_reverse: _,
+            body,
+        } => {
+            let joined = iterators.join(", ");
+            let _ = writeln!(out, "{tab}// iterator-for over [{joined}]");
+            emit_block(store, out, body, indent + 1)?;
+            Ok(())
+        }
+        FirMatch::WhileLoop { cond, body } => {
+            let cond = emit_value(store, cond)?;
+            let _ = writeln!(out, "{tab}while ({cond}) {{");
+            emit_block(store, out, body, indent + 1)?;
+            let _ = writeln!(out, "{tab}}}");
+            Ok(())
+        }
+        FirMatch::Switch {
+            cond,
+            cases,
+            default,
+        } => {
+            let cond = emit_value(store, cond)?;
+            let _ = writeln!(out, "{tab}switch ({cond}) {{");
+            for (value, block) in cases {
+                let _ = writeln!(out, "{tab}case {value}: {{");
+                emit_block(store, out, block, indent + 1)?;
+                let _ = writeln!(out, "{tab}    break;");
+                let _ = writeln!(out, "{tab}}}");
+            }
+            if let Some(default) = default {
+                let _ = writeln!(out, "{tab}default: {{");
+                emit_block(store, out, default, indent + 1)?;
+                let _ = writeln!(out, "{tab}}}");
+            }
+            let _ = writeln!(out, "{tab}}}");
+            Ok(())
+        }
+        FirMatch::Label(label) => {
+            let _ = writeln!(out, "{tab}// {label}");
+            Ok(())
+        }
+        _ => Err(unsupported_node("statement", stmt, store)),
+    }
+}
+
+fn emit_block(
+    store: &FirStore,
+    out: &mut String,
+    block: FirId,
+    indent: usize,
+) -> Result<(), CodegenError> {
+    let FirMatch::Block(items) = match_fir(store, block) else {
+        return Err(unsupported_node("expected block", block, store));
+    };
+    for stmt in items {
+        emit_stmt(store, out, stmt, indent)?;
+    }
+    Ok(())
+}
+
+fn emit_declare_fun(
+    store: &FirStore,
+    out: &mut String,
+    decl: DeclareFunView<'_>,
+    indent: usize,
+) -> Result<(), CodegenError> {
+    let tab = "    ".repeat(indent);
+    let (ret, params) = match decl.typ {
+        FirType::Fun {
+            args: typed_args,
+            ret,
+        } => {
+            let ret = emit_type(ret);
+            let mut rendered = Vec::with_capacity(typed_args.len());
+            for (index, arg_type) in typed_args.iter().enumerate() {
+                let name = decl
+                    .named_args
+                    .get(index)
+                    .map_or_else(|| format!("arg{index}"), |named| named.name.clone());
+                rendered.push(format!("{} {}", emit_type(arg_type), name));
+            }
+            (ret, rendered.join(", "))
+        }
+        other => (emit_type(other), String::new()),
+    };
+    let inline = if decl.is_inline { "inline " } else { "" };
+    let _ = writeln!(out, "{tab}{inline}{ret} {}({params}) {{", decl.name);
+    emit_block(store, out, decl.body, indent + 1)?;
+    let _ = writeln!(out, "{tab}}}");
+    Ok(())
+}
+
+fn emit_value(store: &FirStore, value: FirId) -> Result<String, CodegenError> {
+    match match_fir(store, value) {
+        FirMatch::Int32 { value, .. } => Ok(value.to_string()),
+        FirMatch::Int64 { value, .. } => Ok(value.to_string()),
+        FirMatch::Float32 { value, .. } => Ok(format!("{}f", trim_float(f64::from(value)))),
+        FirMatch::Float64 { value, .. } => Ok(trim_float(value)),
+        FirMatch::Bool { value, .. } => Ok(if value { "true" } else { "false" }.to_owned()),
+        FirMatch::Quad { value, .. } => Ok(trim_float(value)),
+        FirMatch::FixedPoint { value, .. } => Ok(trim_float(value)),
+        FirMatch::ValueArray { values, .. } => {
+            let mut out = String::from("{");
+            for (index, item) in values.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&emit_value(store, *item)?);
+            }
+            out.push('}');
+            Ok(out)
+        }
+        FirMatch::Int32Array { values, .. } => {
+            Ok(format_array(values.iter().map(ToString::to_string)))
+        }
+        FirMatch::Float32Array { values, .. } => Ok(format_array(
+            values
+                .iter()
+                .map(|v| format!("{}f", trim_float(f64::from(*v)))),
+        )),
+        FirMatch::Float64Array { values, .. }
+        | FirMatch::QuadArray { values, .. }
+        | FirMatch::FixedPointArray { values, .. } => {
+            Ok(format_array(values.iter().map(|v| trim_float(*v))))
+        }
+        FirMatch::LoadVar {
+            name, access: _, ..
+        }
+        | FirMatch::LoadVarAddress {
+            name, access: _, ..
+        } => Ok(name),
+        FirMatch::TeeVar {
+            name,
+            access: _,
+            value,
+            ..
+        } => {
+            let value = emit_value(store, value)?;
+            Ok(format!("({name} = {value})"))
+        }
+        FirMatch::BinOp { op, lhs, rhs, .. } => {
+            let lhs = emit_value(store, lhs)?;
+            let rhs = emit_value(store, rhs)?;
+            Ok(format!("({lhs} {} {rhs})", emit_binop(op)))
+        }
+        FirMatch::Neg { value, .. } => {
+            let value = emit_value(store, value)?;
+            Ok(format!("(-{value})"))
+        }
+        FirMatch::Cast { typ, value } => {
+            let value = emit_value(store, value)?;
+            Ok(format!("(({})({value}))", emit_type(&typ)))
+        }
+        FirMatch::Bitcast { typ, value } => {
+            let value = emit_value(store, value)?;
+            Ok(format!("bitcast<{}>({value})", emit_type(&typ)))
+        }
+        FirMatch::Select2 {
+            cond,
+            then_value,
+            else_value,
+            ..
+        } => {
+            let cond = emit_value(store, cond)?;
+            let then_value = emit_value(store, then_value)?;
+            let else_value = emit_value(store, else_value)?;
+            Ok(format!("({cond} ? {then_value} : {else_value})"))
+        }
+        FirMatch::FunCall { name, args, .. } => {
+            let mut rendered = Vec::with_capacity(args.len());
+            for arg in args {
+                rendered.push(emit_value(store, arg)?);
+            }
+            Ok(format!("{name}({})", rendered.join(", ")))
+        }
+        FirMatch::NullValue { .. } => Ok("nullptr".to_owned()),
+        FirMatch::NewDsp { name, .. } => Ok(format!("new {name}()")),
+        _ => Err(unsupported_node("value", value, store)),
+    }
+}
+
+fn emit_binop(op: FirBinOp) -> &'static str {
+    match op {
+        FirBinOp::Add => "+",
+        FirBinOp::Sub => "-",
+        FirBinOp::Mul => "*",
+        FirBinOp::Div => "/",
+        FirBinOp::Rem => "%",
+        FirBinOp::And => "&",
+        FirBinOp::Or => "|",
+        FirBinOp::Xor => "^",
+        FirBinOp::Eq => "==",
+        FirBinOp::Ne => "!=",
+        FirBinOp::Lt => "<",
+        FirBinOp::Le => "<=",
+        FirBinOp::Gt => ">",
+        FirBinOp::Ge => ">=",
+    }
+}
+
+fn emit_type(typ: &FirType) -> String {
+    match typ {
+        FirType::Int32 => "int".to_owned(),
+        FirType::Int64 => "long long".to_owned(),
+        FirType::Float32 => "float".to_owned(),
+        FirType::Float64 => "double".to_owned(),
+        FirType::Quad => "quad".to_owned(),
+        FirType::FixedPoint => "fixed".to_owned(),
+        FirType::Bool => "bool".to_owned(),
+        FirType::Void => "void".to_owned(),
+        FirType::Obj => "void*".to_owned(),
+        FirType::Sound => "Soundfile*".to_owned(),
+        FirType::UI => "UI*".to_owned(),
+        FirType::Meta => "Meta*".to_owned(),
+        FirType::Ptr(inner) => format!("{}*", emit_type(inner)),
+        FirType::Array(inner, size) => format!("{}[{size}]", emit_type(inner)),
+        FirType::Vector(inner, lanes) => format!("Vec<{},{lanes}>", emit_type(inner)),
+        FirType::Struct(name) => name.clone(),
+        FirType::Fun { args, ret } => {
+            let args = args.iter().map(emit_type).collect::<Vec<_>>().join(", ");
+            format!("{}({args})", emit_type(ret))
+        }
+    }
+}
+
+fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
+    CodegenError::new(
+        CodegenErrorCode::UnsupportedNode,
+        format!(
+            "unsupported FIR {kind} node {:?} at {}",
+            match_fir(store, node),
+            node.as_u32()
+        ),
+    )
+}
+
+fn trim_float(value: f64) -> String {
+    let mut text = format!("{value}");
+    if !text.contains(['.', 'e', 'E']) {
+        text.push_str(".0");
+    }
+    text
+}
+
+fn format_array(values: impl Iterator<Item = String>) -> String {
+    format!("{{{}}}", values.collect::<Vec<_>>().join(", "))
 }
 
 fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
@@ -245,5 +661,82 @@ mod tests {
             .expect_err("non-block section must fail");
         assert_eq!(err.code(), CodegenErrorCode::InvalidModuleSection);
         assert!(err.to_string().contains("FRS-CGEN-CPP-0002"));
+    }
+
+    #[test]
+    fn emits_core_statement_and_value_slice() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let one = b.int32(1);
+        let two = b.int32(2);
+        let sum = b.binop(FirBinOp::Add, one, two, FirType::Int32);
+        let dec = b.declare_var("acc", FirType::Int32, fir::AccessType::Stack, Some(sum));
+        let acc = b.load_var("acc", fir::AccessType::Stack, FirType::Int32);
+        let sixteen = b.int32(16);
+        let cond = b.binop(FirBinOp::Lt, acc, sixteen, FirType::Bool);
+        let neg_acc = b.neg(acc, FirType::Int32);
+        let then_store = b.store_var("acc", fir::AccessType::Stack, neg_acc);
+        let then_block = b.block(&[then_store]);
+        let branch = b.if_(cond, then_block, None);
+        let loop_drop = b.drop_(acc);
+        let loop_body = b.block(&[loop_drop]);
+        let four = b.int32(4);
+        let loop_ = b.simple_for_loop("i", four, loop_body, false);
+        let while_drop = b.drop_(acc);
+        let while_body = b.block(&[while_drop]);
+        let while_ = b.while_loop(cond, while_body);
+        let switch_drop = b.drop_(acc);
+        let switch_case = b.block(&[switch_drop]);
+        let switch_default = b.block(&[]);
+        let switch_ = b.switch(acc, &[(0, switch_case)], Some(switch_default));
+        let ret = b.ret(Some(acc));
+
+        let body = b.block(&[dec, branch, loop_, while_, switch_, ret]);
+        let fun_ty = FirType::Fun {
+            args: vec![FirType::Int32],
+            ret: Box::new(FirType::Int32),
+        };
+        let args = vec![NamedType {
+            name: "x".to_owned(),
+            typ: FirType::Int32,
+        }];
+        let fun = b.declare_fun("compute", fun_ty, &args, body, false);
+
+        let dsp_struct = b.block(&[]);
+        let globals = b.block(&[]);
+        let declarations = b.block(&[fun]);
+        let module = b.module("mydsp", dsp_struct, globals, declarations);
+        let out = generate_cpp_module(&store, module, &CppOptions::default())
+            .expect("core statement/value slice should generate");
+
+        assert!(out.contains("int compute(int x)"));
+        assert!(out.contains("if ((acc < 16))"));
+        assert!(out.contains("for (int i = 0; i < 4; ++i)"));
+        assert!(out.contains("while ((acc < 16))"));
+        assert!(out.contains("switch (acc)"));
+        assert!(out.contains("return acc;"));
+    }
+
+    #[test]
+    fn rejects_ui_nodes_before_step_5() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let open = b.open_box(fir::UiBoxType::Vertical, "v");
+        let body = b.block(&[open]);
+        let fun_ty = FirType::Fun {
+            args: Vec::new(),
+            ret: Box::new(FirType::Void),
+        };
+        let fun = b.declare_fun("ui", fun_ty, &[], body, false);
+        let dsp_struct = b.block(&[]);
+        let globals = b.block(&[]);
+        let declarations = b.block(&[fun]);
+        let module = b.module("mydsp", dsp_struct, globals, declarations);
+
+        let err = generate_cpp_module(&store, module, &CppOptions::default())
+            .expect_err("UI node should still be unsupported in step 3");
+        assert_eq!(err.code(), CodegenErrorCode::UnsupportedNode);
+        assert!(err.to_string().contains("FRS-CGEN-CPP-0003"));
     }
 }
