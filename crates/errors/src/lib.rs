@@ -210,7 +210,8 @@ pub trait IntoDiagnostic {
 #[cfg(test)]
 mod tests {
     use super::{
-        Diagnostic, DiagnosticBundle, DiagnosticCode, Label, LabelStyle, Severity, SourceSpan, Stage,
+        Diagnostic, DiagnosticBundle, DiagnosticCode, Label, LabelStyle, Severity, SourceSpan,
+        Stage,
     };
 
     #[test]

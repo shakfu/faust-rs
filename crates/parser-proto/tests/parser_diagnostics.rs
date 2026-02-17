@@ -141,9 +141,10 @@ fn malformed_suite_tracks_rust_class_and_location() {
             case.name
         );
         assert!(
-            out.diagnostics.as_slice().iter().any(|d| {
-                d.stage == Stage::Parser && d.code.0.starts_with("FRS-PARSE-")
-            }),
+            out.diagnostics
+                .as_slice()
+                .iter()
+                .any(|d| { d.stage == Stage::Parser && d.code.0.starts_with("FRS-PARSE-") }),
             "malformed case {} should include parser diagnostic code family",
             case.name
         );

@@ -16,7 +16,9 @@
 
 use cfgrammar::Span;
 use errors::codes;
-use errors::{Diagnostic, DiagnosticBundle, DiagnosticCode, Label, LabelStyle, Severity, SourceSpan, Stage};
+use errors::{
+    Diagnostic, DiagnosticBundle, DiagnosticCode, Label, LabelStyle, Severity, SourceSpan, Stage,
+};
 use lrlex::lrlex_mod;
 use lrlex::{DefaultLexerTypes, LRNonStreamingLexerDef};
 use lrpar::lrpar_mod;
@@ -817,8 +819,10 @@ fn parser_ctx_to_bundle(ctx: &ParserCtx) -> DiagnosticBundle {
 }
 
 fn parser_code_for_message(message: &str, severity: DiagnosticSeverity) -> DiagnosticCode {
-    if matches!(severity, DiagnosticSeverity::Warning | DiagnosticSeverity::Remark)
-        || message.to_ascii_lowercase().contains("recover")
+    if matches!(
+        severity,
+        DiagnosticSeverity::Warning | DiagnosticSeverity::Remark
+    ) || message.to_ascii_lowercase().contains("recover")
     {
         codes::PARSE_RECOVERY
     } else if message.contains("invalid") && message.contains("literal") {
