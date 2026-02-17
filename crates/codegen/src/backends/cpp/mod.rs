@@ -17,15 +17,33 @@ use fir::{FirBinOp, FirId, FirMatch, FirStore, FirType, NamedType, match_fir};
 pub const BACKEND_NAME: &str = "cpp";
 
 /// C++ backend options for module-first emission.
-///
-/// This type is intentionally small in the first slices and will be
-/// extended as parity grows (`namespace`, virtual/final policy, etc.).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CppOptions {
     /// Optional namespace wrapping generated code.
     pub namespace: Option<String>,
     /// Optional class name override for the FIR module name.
     pub class_name: Option<String>,
+    /// C++ spelling used for FIR `Quad` values.
+    ///
+    /// C++ uses target-dependent `quad` spellings; Rust backend keeps this
+    /// configurable to preserve parity when exact 1:1 naming is unavailable.
+    pub quad_type_name: String,
+    /// C++ spelling used for FIR `FixedPoint` values.
+    ///
+    /// C++ fixed-point support may be backend-specific; Rust backend keeps this
+    /// configurable to document/adapt non-1:1 mappings explicitly.
+    pub fixed_type_name: String,
+}
+
+impl Default for CppOptions {
+    fn default() -> Self {
+        Self {
+            namespace: None,
+            class_name: None,
+            quad_type_name: "quad".to_owned(),
+            fixed_type_name: "fixed".to_owned(),
+        }
+    }
 }
 
 /// Stable backend error codes for C++ code generation.
@@ -125,10 +143,17 @@ pub fn generate_cpp_module(
 
     let _ = writeln!(out, "class {class_name} : public dsp {{");
     let _ = writeln!(out, "private:");
-    emit_section(store, &mut out, "dsp_struct", module.dsp_struct, 1)?;
-    emit_section(store, &mut out, "globals", module.globals, 1)?;
+    emit_section(store, &mut out, options, "dsp_struct", module.dsp_struct, 1)?;
+    emit_section(store, &mut out, options, "globals", module.globals, 1)?;
     let _ = writeln!(out, "public:");
-    emit_section(store, &mut out, "functions", module.declarations, 1)?;
+    emit_section(
+        store,
+        &mut out,
+        options,
+        "functions",
+        module.declarations,
+        1,
+    )?;
     let _ = writeln!(out, "}};");
 
     if let Some(namespace) = options.namespace.as_deref() {
@@ -159,6 +184,7 @@ fn emit_cpp_header(out: &mut String, class_name: &str) {
 fn emit_section(
     store: &FirStore,
     out: &mut String,
+    options: &CppOptions,
     section_name: &str,
     section_id: FirId,
     indent: usize,
@@ -174,13 +200,14 @@ fn emit_section(
             ),
         ));
     };
+
     let _ = writeln!(
         out,
         "{tab}// section: {section_name} ({} items)",
         items.len()
     );
     for item in items {
-        emit_stmt(store, out, item, indent)?;
+        emit_stmt(store, out, options, item, indent)?;
     }
     Ok(())
 }
@@ -188,6 +215,7 @@ fn emit_section(
 fn emit_stmt(
     store: &FirStore,
     out: &mut String,
+    options: &CppOptions,
     stmt: FirId,
     indent: usize,
 ) -> Result<(), CodegenError> {
@@ -199,9 +227,9 @@ fn emit_stmt(
             access: _,
             init,
         } => {
-            let _ = write!(out, "{tab}{} {name}", emit_type(&typ));
+            let _ = write!(out, "{tab}{} {name}", emit_type(&typ, options));
             if let Some(init) = init {
-                let init = emit_value(store, init)?;
+                let init = emit_value(store, options, init)?;
                 let _ = write!(out, " = {init}");
             }
             let _ = writeln!(out, ";");
@@ -216,6 +244,7 @@ fn emit_stmt(
         } => emit_declare_fun(
             store,
             out,
+            options,
             DeclareFunView {
                 name: &name,
                 typ: &typ,
@@ -230,7 +259,11 @@ fn emit_stmt(
             Ok(())
         }
         FirMatch::DeclareStructType { typ } => {
-            let _ = writeln!(out, "{tab}// struct type declaration: {}", emit_type(&typ));
+            let _ = writeln!(
+                out,
+                "{tab}// struct type declaration: {}",
+                emit_type(&typ, options)
+            );
             Ok(())
         }
         FirMatch::DeclareBufferIterators {
@@ -244,7 +277,7 @@ fn emit_stmt(
             let _ = writeln!(
                 out,
                 "{tab}// buffer iterators: {name1}, {name2}, channels={channels}, type={}, mutable={mutable}, chunk={chunk}",
-                emit_type(&typ)
+                emit_type(&typ, options)
             );
             Ok(())
         }
@@ -253,7 +286,7 @@ fn emit_stmt(
             access: _,
             value,
         } => {
-            let value = emit_value(store, value)?;
+            let value = emit_value(store, options, value)?;
             let _ = writeln!(out, "{tab}{name} = {value};");
             Ok(())
         }
@@ -266,7 +299,7 @@ fn emit_stmt(
             Ok(())
         }
         FirMatch::Drop(value) => {
-            let value = emit_value(store, value)?;
+            let value = emit_value(store, options, value)?;
             let _ = writeln!(out, "{tab}(void)({value});");
             Ok(())
         }
@@ -276,34 +309,34 @@ fn emit_stmt(
         }
         FirMatch::Return(value) => {
             if let Some(value) = value {
-                let value = emit_value(store, value)?;
+                let value = emit_value(store, options, value)?;
                 let _ = writeln!(out, "{tab}return {value};");
             } else {
                 let _ = writeln!(out, "{tab}return;");
             }
             Ok(())
         }
-        FirMatch::Block(_) => emit_block(store, out, stmt, indent),
+        FirMatch::Block(_) => emit_block(store, out, options, stmt, indent),
         FirMatch::If {
             cond,
             then_block,
             else_block,
         } => {
-            let cond = emit_value(store, cond)?;
+            let cond = emit_value(store, options, cond)?;
             let _ = writeln!(out, "{tab}if ({cond}) {{");
-            emit_block(store, out, then_block, indent + 1)?;
+            emit_block(store, out, options, then_block, indent + 1)?;
             let _ = writeln!(out, "{tab}}}");
             if let Some(else_block) = else_block {
                 let _ = writeln!(out, "{tab}else {{");
-                emit_block(store, out, else_block, indent + 1)?;
+                emit_block(store, out, options, else_block, indent + 1)?;
                 let _ = writeln!(out, "{tab}}}");
             }
             Ok(())
         }
         FirMatch::Control { cond, stmt } => {
-            let cond = emit_value(store, cond)?;
+            let cond = emit_value(store, options, cond)?;
             let _ = writeln!(out, "{tab}if ({cond}) {{");
-            emit_stmt(store, out, stmt, indent + 1)?;
+            emit_stmt(store, out, options, stmt, indent + 1)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
@@ -315,14 +348,14 @@ fn emit_stmt(
             body,
             is_reverse: _,
         } => {
-            let init = emit_value(store, init)?;
-            let end = emit_value(store, end)?;
-            let step = emit_value(store, step)?;
+            let init = emit_value(store, options, init)?;
+            let end = emit_value(store, options, end)?;
+            let step = emit_value(store, options, step)?;
             let _ = writeln!(
                 out,
                 "{tab}for (int {var} = {init}; {var} < {end}; {var} += {step}) {{"
             );
-            emit_block(store, out, body, indent + 1)?;
+            emit_block(store, out, options, body, indent + 1)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
@@ -332,9 +365,9 @@ fn emit_stmt(
             body,
             is_reverse: _,
         } => {
-            let upper = emit_value(store, upper)?;
+            let upper = emit_value(store, options, upper)?;
             let _ = writeln!(out, "{tab}for (int {var} = 0; {var} < {upper}; ++{var}) {{");
-            emit_block(store, out, body, indent + 1)?;
+            emit_block(store, out, options, body, indent + 1)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
@@ -345,13 +378,13 @@ fn emit_stmt(
         } => {
             let joined = iterators.join(", ");
             let _ = writeln!(out, "{tab}// iterator-for over [{joined}]");
-            emit_block(store, out, body, indent + 1)?;
+            emit_block(store, out, options, body, indent + 1)?;
             Ok(())
         }
         FirMatch::WhileLoop { cond, body } => {
-            let cond = emit_value(store, cond)?;
+            let cond = emit_value(store, options, cond)?;
             let _ = writeln!(out, "{tab}while ({cond}) {{");
-            emit_block(store, out, body, indent + 1)?;
+            emit_block(store, out, options, body, indent + 1)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
@@ -360,17 +393,17 @@ fn emit_stmt(
             cases,
             default,
         } => {
-            let cond = emit_value(store, cond)?;
+            let cond = emit_value(store, options, cond)?;
             let _ = writeln!(out, "{tab}switch ({cond}) {{");
             for (value, block) in cases {
                 let _ = writeln!(out, "{tab}case {value}: {{");
-                emit_block(store, out, block, indent + 1)?;
+                emit_block(store, out, options, block, indent + 1)?;
                 let _ = writeln!(out, "{tab}    break;");
                 let _ = writeln!(out, "{tab}}}");
             }
             if let Some(default) = default {
                 let _ = writeln!(out, "{tab}default: {{");
-                emit_block(store, out, default, indent + 1)?;
+                emit_block(store, out, options, default, indent + 1)?;
                 let _ = writeln!(out, "{tab}}}");
             }
             let _ = writeln!(out, "{tab}}}");
@@ -387,6 +420,7 @@ fn emit_stmt(
 fn emit_block(
     store: &FirStore,
     out: &mut String,
+    options: &CppOptions,
     block: FirId,
     indent: usize,
 ) -> Result<(), CodegenError> {
@@ -394,7 +428,7 @@ fn emit_block(
         return Err(unsupported_node("expected block", block, store));
     };
     for stmt in items {
-        emit_stmt(store, out, stmt, indent)?;
+        emit_stmt(store, out, options, stmt, indent)?;
     }
     Ok(())
 }
@@ -402,6 +436,7 @@ fn emit_block(
 fn emit_declare_fun(
     store: &FirStore,
     out: &mut String,
+    options: &CppOptions,
     decl: DeclareFunView<'_>,
     indent: usize,
 ) -> Result<(), CodegenError> {
@@ -411,27 +446,31 @@ fn emit_declare_fun(
             args: typed_args,
             ret,
         } => {
-            let ret = emit_type(ret);
+            let ret = emit_type(ret, options);
             let mut rendered = Vec::with_capacity(typed_args.len());
             for (index, arg_type) in typed_args.iter().enumerate() {
                 let name = decl
                     .named_args
                     .get(index)
                     .map_or_else(|| format!("arg{index}"), |named| named.name.clone());
-                rendered.push(format!("{} {}", emit_type(arg_type), name));
+                rendered.push(format!("{} {}", emit_type(arg_type, options), name));
             }
             (ret, rendered.join(", "))
         }
-        other => (emit_type(other), String::new()),
+        other => (emit_type(other, options), String::new()),
     };
     let inline = if decl.is_inline { "inline " } else { "" };
     let _ = writeln!(out, "{tab}{inline}{ret} {}({params}) {{", decl.name);
-    emit_block(store, out, decl.body, indent + 1)?;
+    emit_block(store, out, options, decl.body, indent + 1)?;
     let _ = writeln!(out, "{tab}}}");
     Ok(())
 }
 
-fn emit_value(store: &FirStore, value: FirId) -> Result<String, CodegenError> {
+fn emit_value(
+    store: &FirStore,
+    options: &CppOptions,
+    value: FirId,
+) -> Result<String, CodegenError> {
     match match_fir(store, value) {
         FirMatch::Int32 { value, .. } => Ok(value.to_string()),
         FirMatch::Int64 { value, .. } => Ok(value.to_string()),
@@ -446,7 +485,7 @@ fn emit_value(store: &FirStore, value: FirId) -> Result<String, CodegenError> {
                 if index > 0 {
                     out.push_str(", ");
                 }
-                out.push_str(&emit_value(store, *item)?);
+                out.push_str(&emit_value(store, options, *item)?);
             }
             out.push('}');
             Ok(out)
@@ -476,25 +515,25 @@ fn emit_value(store: &FirStore, value: FirId) -> Result<String, CodegenError> {
             value,
             ..
         } => {
-            let value = emit_value(store, value)?;
+            let value = emit_value(store, options, value)?;
             Ok(format!("({name} = {value})"))
         }
         FirMatch::BinOp { op, lhs, rhs, .. } => {
-            let lhs = emit_value(store, lhs)?;
-            let rhs = emit_value(store, rhs)?;
+            let lhs = emit_value(store, options, lhs)?;
+            let rhs = emit_value(store, options, rhs)?;
             Ok(format!("({lhs} {} {rhs})", emit_binop(op)))
         }
         FirMatch::Neg { value, .. } => {
-            let value = emit_value(store, value)?;
+            let value = emit_value(store, options, value)?;
             Ok(format!("(-{value})"))
         }
         FirMatch::Cast { typ, value } => {
-            let value = emit_value(store, value)?;
-            Ok(format!("(({})({value}))", emit_type(&typ)))
+            let value = emit_value(store, options, value)?;
+            Ok(format!("(({})({value}))", emit_type(&typ, options)))
         }
         FirMatch::Bitcast { typ, value } => {
-            let value = emit_value(store, value)?;
-            Ok(format!("bitcast<{}>({value})", emit_type(&typ)))
+            let value = emit_value(store, options, value)?;
+            Ok(format!("bitcast<{}>({value})", emit_type(&typ, options)))
         }
         FirMatch::Select2 {
             cond,
@@ -502,15 +541,15 @@ fn emit_value(store: &FirStore, value: FirId) -> Result<String, CodegenError> {
             else_value,
             ..
         } => {
-            let cond = emit_value(store, cond)?;
-            let then_value = emit_value(store, then_value)?;
-            let else_value = emit_value(store, else_value)?;
+            let cond = emit_value(store, options, cond)?;
+            let then_value = emit_value(store, options, then_value)?;
+            let else_value = emit_value(store, options, else_value)?;
             Ok(format!("({cond} ? {then_value} : {else_value})"))
         }
         FirMatch::FunCall { name, args, .. } => {
             let mut rendered = Vec::with_capacity(args.len());
             for arg in args {
-                rendered.push(emit_value(store, arg)?);
+                rendered.push(emit_value(store, options, arg)?);
             }
             Ok(format!("{name}({})", rendered.join(", ")))
         }
@@ -539,27 +578,31 @@ fn emit_binop(op: FirBinOp) -> &'static str {
     }
 }
 
-fn emit_type(typ: &FirType) -> String {
+fn emit_type(typ: &FirType, options: &CppOptions) -> String {
     match typ {
         FirType::Int32 => "int".to_owned(),
         FirType::Int64 => "long long".to_owned(),
         FirType::Float32 => "float".to_owned(),
         FirType::Float64 => "double".to_owned(),
-        FirType::Quad => "quad".to_owned(),
-        FirType::FixedPoint => "fixed".to_owned(),
+        FirType::Quad => options.quad_type_name.clone(),
+        FirType::FixedPoint => options.fixed_type_name.clone(),
         FirType::Bool => "bool".to_owned(),
         FirType::Void => "void".to_owned(),
         FirType::Obj => "void*".to_owned(),
         FirType::Sound => "Soundfile*".to_owned(),
         FirType::UI => "UI*".to_owned(),
         FirType::Meta => "Meta*".to_owned(),
-        FirType::Ptr(inner) => format!("{}*", emit_type(inner)),
-        FirType::Array(inner, size) => format!("{}[{size}]", emit_type(inner)),
-        FirType::Vector(inner, lanes) => format!("Vec<{},{lanes}>", emit_type(inner)),
+        FirType::Ptr(inner) => format!("{}*", emit_type(inner, options)),
+        FirType::Array(inner, size) => format!("{}[{size}]", emit_type(inner, options)),
+        FirType::Vector(inner, lanes) => format!("Vec<{},{lanes}>", emit_type(inner, options)),
         FirType::Struct(name) => name.clone(),
         FirType::Fun { args, ret } => {
-            let args = args.iter().map(emit_type).collect::<Vec<_>>().join(", ");
-            format!("{}({args})", emit_type(ret))
+            let args = args
+                .iter()
+                .map(|arg| emit_type(arg, options))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}({args})", emit_type(ret, options))
         }
     }
 }
@@ -738,5 +781,43 @@ mod tests {
             .expect_err("UI node should still be unsupported in step 3");
         assert_eq!(err.code(), CodegenErrorCode::UnsupportedNode);
         assert!(err.to_string().contains("FRS-CGEN-CPP-0003"));
+    }
+
+    #[test]
+    fn type_mapping_covers_pointer_array_vector_and_function_forms() {
+        let options = CppOptions::default();
+        assert_eq!(
+            emit_type(&FirType::Ptr(Box::new(FirType::Int32)), &options),
+            "int*"
+        );
+        assert_eq!(
+            emit_type(&FirType::Array(Box::new(FirType::Float32), 8), &options),
+            "float[8]"
+        );
+        assert_eq!(
+            emit_type(&FirType::Vector(Box::new(FirType::Float64), 4), &options),
+            "Vec<double,4>"
+        );
+        assert_eq!(
+            emit_type(
+                &FirType::Fun {
+                    args: vec![FirType::Int32, FirType::Ptr(Box::new(FirType::Float32))],
+                    ret: Box::new(FirType::Float64),
+                },
+                &options,
+            ),
+            "double(int, float*)"
+        );
+    }
+
+    #[test]
+    fn type_mapping_supports_quad_and_fixed_spelling_overrides() {
+        let options = CppOptions {
+            quad_type_name: "long double".to_owned(),
+            fixed_type_name: "faustfixed".to_owned(),
+            ..CppOptions::default()
+        };
+        assert_eq!(emit_type(&FirType::Quad, &options), "long double");
+        assert_eq!(emit_type(&FirType::FixedPoint, &options), "faustfixed");
     }
 }

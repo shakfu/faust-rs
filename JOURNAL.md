@@ -3208,3 +3208,26 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy -p codegen --all-targets -- -D warnings`
   - `cargo test -p codegen --all-targets`
+
+#### C++ backend module-first rollout — Step 4 (type mapping and spelling options)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/codegen/src/backends/cpp/mod.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - added centralized C++ type mapping used by the backend emitter:
+    - scalar, pointer, array, vector, function-signature forms.
+  - extended `CppOptions` with explicit type spelling policy:
+    - `quad_type_name`,
+    - `fixed_type_name`.
+  - documented adaptation rationale in Rustdoc:
+    - `quad` and `fixed` spellings are backend/target-sensitive and not always 1:1 with C++ defaults.
+  - routed all value/statement/function emission through the centralized `emit_type` helper.
+  - added dedicated unit tests for:
+    - pointer/array/vector/function mapping,
+    - `quad`/`fixed` spelling overrides.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p codegen --all-targets -- -D warnings`
+  - `cargo test -p codegen --all-targets`
