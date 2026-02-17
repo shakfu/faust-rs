@@ -3231,3 +3231,22 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy -p codegen --all-targets -- -D warnings`
   - `cargo test -p codegen --all-targets`
+
+#### C++ backend module-first rollout — Step 5 (UI + metadata emission)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/codegen/src/backends/cpp/mod.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - added emission support for UI/metadata FIR instructions:
+    - `OpenBox` / `CloseBox`,
+    - `AddButton`, `AddSlider`, `AddBargraph`,
+    - `AddSoundfile`,
+    - `AddMetaDeclare`.
+  - introduced deterministic C++ string escaping helper for labels/metadata payloads.
+  - switched tests from “UI unsupported” to positive deterministic generation assertions.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p codegen --all-targets -- -D warnings`
+  - `cargo test -p codegen --all-targets`

@@ -413,6 +413,98 @@ fn emit_stmt(
             let _ = writeln!(out, "{tab}// {label}");
             Ok(())
         }
+        FirMatch::OpenBox { typ, label } => {
+            let api = match typ {
+                fir::UiBoxType::Vertical => "openVerticalBox",
+                fir::UiBoxType::Horizontal => "openHorizontalBox",
+                fir::UiBoxType::Tab => "openTabBox",
+            };
+            let _ = writeln!(
+                out,
+                "{tab}ui_interface->{api}({});",
+                cpp_string_literal(&label)
+            );
+            Ok(())
+        }
+        FirMatch::CloseBox => {
+            let _ = writeln!(out, "{tab}ui_interface->closeBox();");
+            Ok(())
+        }
+        FirMatch::AddButton { typ, label, var } => {
+            let api = match typ {
+                fir::ButtonType::Button => "addButton",
+                fir::ButtonType::Checkbox => "addCheckButton",
+            };
+            let _ = writeln!(
+                out,
+                "{tab}ui_interface->{api}({}, &{var});",
+                cpp_string_literal(&label)
+            );
+            Ok(())
+        }
+        FirMatch::AddSlider {
+            typ,
+            label,
+            var,
+            init,
+            lo,
+            hi,
+            step,
+        } => {
+            let api = match typ {
+                fir::SliderType::Horizontal => "addHorizontalSlider",
+                fir::SliderType::Vertical => "addVerticalSlider",
+                fir::SliderType::NumEntry => "addNumEntry",
+            };
+            let _ = writeln!(
+                out,
+                "{tab}ui_interface->{api}({}, &{var}, {}, {}, {}, {});",
+                cpp_string_literal(&label),
+                trim_float(init),
+                trim_float(lo),
+                trim_float(hi),
+                trim_float(step)
+            );
+            Ok(())
+        }
+        FirMatch::AddBargraph {
+            typ,
+            label,
+            var,
+            lo,
+            hi,
+        } => {
+            let api = match typ {
+                fir::BargraphType::Horizontal => "addHorizontalBargraph",
+                fir::BargraphType::Vertical => "addVerticalBargraph",
+            };
+            let _ = writeln!(
+                out,
+                "{tab}ui_interface->{api}({}, &{var}, {}, {});",
+                cpp_string_literal(&label),
+                trim_float(lo),
+                trim_float(hi)
+            );
+            Ok(())
+        }
+        FirMatch::AddSoundfile { label, url, var } => {
+            let _ = writeln!(
+                out,
+                "{tab}ui_interface->addSoundfile({}, {}, &{var});",
+                cpp_string_literal(&label),
+                cpp_string_literal(&url)
+            );
+            Ok(())
+        }
+        FirMatch::AddMetaDeclare { var, key, value } => {
+            let _ = writeln!(
+                out,
+                "{tab}m->declare(&{var}, {}, {});",
+                cpp_string_literal(&key),
+                cpp_string_literal(&value)
+            );
+            Ok(())
+        }
         _ => Err(unsupported_node("statement", stmt, store)),
     }
 }
@@ -630,6 +722,14 @@ fn format_array(values: impl Iterator<Item = String>) -> String {
     format!("{{{}}}", values.collect::<Vec<_>>().join(", "))
 }
 
+fn cpp_string_literal(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
+    format!("\"{escaped}\"")
+}
+
 fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
     match match_fir(store, module) {
         FirMatch::Module {
@@ -762,11 +862,27 @@ mod tests {
     }
 
     #[test]
-    fn rejects_ui_nodes_before_step_5() {
+    fn emits_ui_and_metadata_nodes() {
         let mut store = FirStore::new();
         let mut b = FirBuilder::new(&mut store);
-        let open = b.open_box(fir::UiBoxType::Vertical, "v");
-        let body = b.block(&[open]);
+        let open = b.open_box(fir::UiBoxType::Vertical, "group");
+        let button = b.add_button(fir::ButtonType::Button, "gate", "fGate");
+        let slider = b.add_slider(
+            fir::SliderType::Horizontal,
+            "gain",
+            "fGain",
+            fir::SliderRange {
+                init: 0.5,
+                lo: 0.0,
+                hi: 1.0,
+                step: 0.01,
+            },
+        );
+        let bargraph = b.add_bargraph(fir::BargraphType::Horizontal, "level", "fLevel", -60.0, 6.0);
+        let soundfile = b.add_soundfile_with_url("sample", "samples/piano.wav", "fSample");
+        let meta = b.add_meta_declare("fGain", "unit", "dB");
+        let close = b.close_box();
+        let body = b.block(&[open, button, slider, bargraph, soundfile, meta, close]);
         let fun_ty = FirType::Fun {
             args: Vec::new(),
             ret: Box::new(FirType::Void),
@@ -777,10 +893,25 @@ mod tests {
         let declarations = b.block(&[fun]);
         let module = b.module("mydsp", dsp_struct, globals, declarations);
 
-        let err = generate_cpp_module(&store, module, &CppOptions::default())
-            .expect_err("UI node should still be unsupported in step 3");
-        assert_eq!(err.code(), CodegenErrorCode::UnsupportedNode);
-        assert!(err.to_string().contains("FRS-CGEN-CPP-0003"));
+        let out =
+            generate_cpp_module(&store, module, &CppOptions::default()).expect("UI nodes emit");
+        assert!(out.contains("ui_interface->openVerticalBox(\"group\");"));
+        assert!(out.contains("ui_interface->addButton(\"gate\", &fGate);"));
+        assert!(
+            out.contains(
+                "ui_interface->addHorizontalSlider(\"gain\", &fGain, 0.5, 0.0, 1.0, 0.01);"
+            )
+        );
+        assert!(
+            out.contains("ui_interface->addHorizontalBargraph(\"level\", &fLevel, -60.0, 6.0);")
+        );
+        assert!(
+            out.contains(
+                "ui_interface->addSoundfile(\"sample\", \"samples/piano.wav\", &fSample);"
+            )
+        );
+        assert!(out.contains("m->declare(&fGain, \"unit\", \"dB\");"));
+        assert!(out.contains("ui_interface->closeBox();"));
     }
 
     #[test]
