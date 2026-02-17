@@ -10,6 +10,7 @@
 //! - Primitive lowering from `boxes::BoxMatch` to `signals::SigBuilder`.
 //! - Composition algebra: `seq`, `par`, `split`, `merge`.
 //! - Explicit typed errors for unsupported nodes and arity mismatches.
+//! - Recursive composition lowering with De Bruijn-style placeholders (`sigRec/sigProj` shape).
 //!
 //! # Public API mapping status
 //! - `box_arity(...)` mirrors the C++ `getBoxType(...)` role for the supported subset.
@@ -35,7 +36,9 @@ pub fn crate_id() -> &'static str {
 /// Input/output arity of one box expression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BoxArity {
+    /// Number of required input signals.
     pub inputs: usize,
+    /// Number of produced output signals.
     pub outputs: usize,
 }
 
@@ -174,6 +177,8 @@ impl Display for PropagateError {
 impl std::error::Error for PropagateError {}
 
 /// Creates `n` canonical `sigInput(i)` signals.
+///
+/// Output order is stable and follows input bus index order: `0..n-1`.
 #[must_use]
 pub fn make_sig_input_list(arena: &mut TreeArena, n: usize) -> Vec<SigId> {
     let mut b = SigBuilder::new(arena);
@@ -188,6 +193,7 @@ pub fn make_sig_input_list(arena: &mut TreeArena, n: usize) -> Vec<SigId> {
 /// Infers input/output arity of one box expression.
 ///
 /// This mirrors C++ `getBoxType(...)` behavior for the currently supported subset.
+/// Unsupported box families return [`PropagateError::UnsupportedBox`].
 pub fn box_arity(arena: &TreeArena, box_tree: BoxId) -> Result<BoxArity, PropagateError> {
     match match_box(arena, box_tree) {
         BoxMatch::Int(_) | BoxMatch::Real(_) => Ok(BoxArity {
@@ -470,6 +476,9 @@ pub fn box_arity(arena: &TreeArena, box_tree: BoxId) -> Result<BoxArity, Propaga
 /// Propagates input signals through one evaluated box expression.
 ///
 /// This function validates input/output arity using [`box_arity`].
+///
+/// Precondition: `box_tree` should already be in the evaluated box domain
+/// (typically output of `eval::eval_process` / `eval::eval_box`).
 pub fn propagate(
     arena: &mut TreeArena,
     box_tree: BoxId,
@@ -494,6 +503,7 @@ pub fn propagate(
     Ok(outputs)
 }
 
+/// Internal propagation dispatcher once input arity has been validated.
 fn propagate_inner(
     arena: &mut TreeArena,
     box_tree: BoxId,
@@ -840,6 +850,7 @@ fn propagate_inner(
     }
 }
 
+/// Validates that a primitive receives exactly the expected number of inputs.
 fn expect_input_arity(
     node: TreeId,
     inputs: &[SigId],
@@ -856,6 +867,7 @@ fn expect_input_arity(
     }
 }
 
+/// Lowers one unary primitive and returns a single output signal.
 fn unary_prim(
     arena: &mut TreeArena,
     node: TreeId,
@@ -867,6 +879,7 @@ fn unary_prim(
     Ok(vec![f(&mut b, inputs[0])])
 }
 
+/// Lowers one binary primitive and returns a single output signal.
 fn binary_prim(
     arena: &mut TreeArena,
     node: TreeId,
@@ -878,6 +891,7 @@ fn binary_prim(
     Ok(vec![f(&mut b, inputs[0], inputs[1])])
 }
 
+/// Lowers one ternary primitive and returns a single output signal.
 fn ternary_prim(
     arena: &mut TreeArena,
     node: TreeId,
@@ -889,6 +903,7 @@ fn ternary_prim(
     Ok(vec![f(&mut b, inputs[0], inputs[1], inputs[2])])
 }
 
+/// Lowers one quaternary primitive and returns a single output signal.
 fn quaternary_prim(
     arena: &mut TreeArena,
     node: TreeId,
@@ -900,6 +915,7 @@ fn quaternary_prim(
     Ok(vec![f(&mut b, inputs[0], inputs[1], inputs[2], inputs[3])])
 }
 
+/// Lowers one quinary primitive and returns a single output signal.
 fn quinary_prim(
     arena: &mut TreeArena,
     node: TreeId,
@@ -913,16 +929,27 @@ fn quinary_prim(
     )])
 }
 
+/// Returns whether `split` wiring law is satisfied.
+///
+/// C++ parity rule:
+/// - exact match, or
+/// - right inputs is an integer multiple of left outputs.
 fn split_compatible(left_outputs: usize, right_inputs: usize) -> bool {
     (left_outputs == right_inputs)
         || (left_outputs != 0 && right_inputs.is_multiple_of(left_outputs))
 }
 
+/// Returns whether `merge` wiring law is satisfied.
+///
+/// C++ parity rule:
+/// - exact match, or
+/// - left outputs is an integer multiple of right inputs.
 fn merge_compatible(left_outputs: usize, right_inputs: usize) -> bool {
     (left_outputs == right_inputs)
         || (right_inputs != 0 && left_outputs.is_multiple_of(right_inputs))
 }
 
+/// Replicates input buses cyclically to feed `split` right-side arity.
 fn split_signals(inputs: &[SigId], nbus: usize) -> Vec<SigId> {
     if nbus == 0 || inputs.is_empty() {
         return Vec::new();
@@ -934,6 +961,7 @@ fn split_signals(inputs: &[SigId], nbus: usize) -> Vec<SigId> {
     out
 }
 
+/// Mixes grouped buses by summing channels modulo `nbus` (merge semantics).
 fn mix_signals(arena: &mut TreeArena, inputs: &[SigId], nbus: usize) -> Vec<SigId> {
     if nbus == 0 {
         return Vec::new();
@@ -959,6 +987,7 @@ fn mix_signals(arena: &mut TreeArena, inputs: &[SigId], nbus: usize) -> Vec<SigI
     out
 }
 
+/// Returns list length for a `cons`/`nil` encoded list.
 fn list_length(arena: &TreeArena, mut list: TreeId) -> Option<usize> {
     let mut len = 0usize;
     while !arena.is_nil(list) {
@@ -969,6 +998,7 @@ fn list_length(arena: &TreeArena, mut list: TreeId) -> Option<usize> {
     Some(len)
 }
 
+/// Converts a `cons`/`nil` list into a vector preserving order.
 fn list_to_vec(arena: &TreeArena, mut list: TreeId) -> Option<Vec<TreeId>> {
     let mut out = Vec::new();
     while !arena.is_nil(list) {
@@ -978,6 +1008,7 @@ fn list_to_vec(arena: &TreeArena, mut list: TreeId) -> Option<Vec<TreeId>> {
     Some(out)
 }
 
+/// Reads a non-negative integer node and converts it to `usize`.
 fn usize_from_int_node(
     arena: &TreeArena,
     node: TreeId,
@@ -995,10 +1026,12 @@ fn usize_from_int_node(
     usize::try_from(*value).map_err(|_| PropagateError::InvalidIntegerValue { node, field })
 }
 
+/// Fallible `usize -> i64` conversion used for stable signal-index nodes.
 fn i64_from_usize(value: usize, field: &'static str) -> Result<i64, PropagateError> {
     i64::try_from(value).map_err(|_| PropagateError::IntegerTooLarge { field, value })
 }
 
+/// Seeds recursive feedback inputs with `delay1(proj(i, DEBRUIJNREF(1)))`.
 fn make_mem_sig_proj_list(arena: &mut TreeArena, n: usize) -> Result<Vec<SigId>, PropagateError> {
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
@@ -1011,6 +1044,7 @@ fn make_mem_sig_proj_list(arena: &mut TreeArena, n: usize) -> Result<Vec<SigId>,
     Ok(out)
 }
 
+/// Lifts De Bruijn references of input signals by one recursion level.
 fn lift_signals(arena: &mut TreeArena, inputs: &[SigId]) -> Vec<SigId> {
     let mut out = Vec::with_capacity(inputs.len());
     for sig in inputs.iter().copied() {
@@ -1019,6 +1053,7 @@ fn lift_signals(arena: &mut TreeArena, inputs: &[SigId]) -> Vec<SigId> {
     out
 }
 
+/// Converts a vector to a `cons`/`nil` list preserving order.
 fn vec_to_list(arena: &mut TreeArena, values: &[TreeId]) -> TreeId {
     let mut list = arena.nil();
     for value in values.iter().rev().copied() {
@@ -1027,15 +1062,18 @@ fn vec_to_list(arena: &mut TreeArena, values: &[TreeId]) -> TreeId {
     list
 }
 
+/// Builds one recursive signal group wrapper (`DEBRUIJN(body)`).
 fn debruijn_rec(arena: &mut TreeArena, body: TreeId) -> TreeId {
     intern_tag(arena, DEBRUIJN_TAG, &[body])
 }
 
+/// Builds one De Bruijn reference node (`DEBRUIJNREF(level)`).
 fn debruijn_ref(arena: &mut TreeArena, level: i64) -> TreeId {
     let lvl = arena.int(level);
     intern_tag(arena, DEBRUIJNREF_TAG, &[lvl])
 }
 
+/// Recursively lifts De Bruijn reference levels starting at `threshold`.
 fn liftn(arena: &mut TreeArena, root: TreeId, threshold: i64) -> TreeId {
     if let Some(level) = debruijn_ref_level(arena, root) {
         if level < threshold {
@@ -1073,6 +1111,7 @@ fn liftn(arena: &mut TreeArena, root: TreeId, threshold: i64) -> TreeId {
     }
 }
 
+/// Computes free-recursion aperture used to decide `sigProj` re-emission.
 fn aperture(arena: &TreeArena, root: TreeId) -> i64 {
     if let Some(level) = debruijn_ref_level(arena, root) {
         return level;
@@ -1092,6 +1131,7 @@ fn aperture(arena: &TreeArena, root: TreeId) -> i64 {
     max_aperture
 }
 
+/// Returns De Bruijn level for a reference node, if `root` is `DEBRUIJNREF`.
 fn debruijn_ref_level(arena: &TreeArena, root: TreeId) -> Option<i64> {
     let (tag, children) = tag_and_children(arena, root)?;
     if tag != DEBRUIJNREF_TAG {
@@ -1106,6 +1146,7 @@ fn debruijn_ref_level(arena: &TreeArena, root: TreeId) -> Option<i64> {
     }
 }
 
+/// Returns recursive group body when `root` is a `DEBRUIJN` node.
 fn debruijn_body(arena: &TreeArena, root: TreeId) -> Option<TreeId> {
     let (tag, children) = tag_and_children(arena, root)?;
     if tag != DEBRUIJN_TAG {
@@ -1117,6 +1158,7 @@ fn debruijn_body(arena: &TreeArena, root: TreeId) -> Option<TreeId> {
     Some(*body)
 }
 
+/// Helper to decode `(tag_name, children)` from one tagged node.
 fn tag_and_children(arena: &TreeArena, root: TreeId) -> Option<(&str, &[TreeId])> {
     let node = arena.node(root)?;
     let NodeKind::Tag(tag_id) = &node.kind else {
@@ -1126,6 +1168,7 @@ fn tag_and_children(arena: &TreeArena, root: TreeId) -> Option<(&str, &[TreeId])
     Some((tag, node.children.as_slice()))
 }
 
+/// Interns one tag node with children in the arena.
 fn intern_tag(arena: &mut TreeArena, tag: &str, children: &[TreeId]) -> TreeId {
     let tag_id = arena.intern_tag(tag);
     arena.intern(NodeKind::Tag(tag_id), children)

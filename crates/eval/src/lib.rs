@@ -13,6 +13,18 @@
 //! - Structural recursive evaluation over box trees.
 //! - Function application and iterative form expansion (`ipar/iseq/isum/iprod`).
 //! - Non-closure partial-application parity (`applyList`) with implicit wire insertion.
+//!
+//! # Execution model
+//! 1. Build an environment from parser definitions (`name -> expr`).
+//! 2. Resolve `process`.
+//! 3. Evaluate recursively by box family:
+//!    - lexical forms (`abstr`, `with`, `letrec`, `access`),
+//!    - application (`appl` / `case`),
+//!    - iterative forms (`ipar`, `iseq`, `isum`, `iprod`),
+//!    - fallback structural map for nodes without eval-time reduction.
+//!
+//! The evaluator returns a normalized box tree meant to be consumed by later passes
+//! (`propagate`, typing, transforms). It does not emit signals directly.
 
 use std::fmt::{Display, Formatter};
 
@@ -228,6 +240,9 @@ impl std::error::Error for EvalError {}
 ///
 /// `definitions` is expected to be the parser root list where each item is:
 /// `cons(name, cons(args, expr))`.
+///
+/// The returned tree is still a box IR node. It can contain high-level forms
+/// when they are intentionally preserved for later passes.
 pub fn eval_process(arena: &mut TreeArena, definitions: TreeId) -> Result<TreeId, EvalError> {
     let mut env = Environment::empty();
     bind_definitions(arena, definitions, &mut env)?;
@@ -238,7 +253,14 @@ pub fn eval_process(arena: &mut TreeArena, definitions: TreeId) -> Result<TreeId
     eval_box(arena, process, &env, &mut loop_detector)
 }
 
-/// Complete evaluation of a box expression in an environment.
+/// Evaluates one box expression in the provided lexical environment.
+///
+/// This function is the core recursive evaluator and may:
+/// - resolve identifiers,
+/// - inline/apply abstractions,
+/// - evaluate `with`/`letrec` scopes,
+/// - expand iterative forms,
+/// - keep non-reduced nodes structurally intact.
 pub fn eval_box(
     arena: &mut TreeArena,
     expr: TreeId,
@@ -304,6 +326,11 @@ pub fn eval_box(
     }
 }
 
+/// Evaluates `expr.ident` access with Faust environment semantics.
+///
+/// When `expr` evaluates to an environment-like form, `ident` is resolved inside
+/// this scoped environment. Otherwise the access node is reconstructed on evaluated
+/// children.
 fn eval_access(
     arena: &mut TreeArena,
     body: TreeId,
@@ -341,6 +368,7 @@ fn eval_access(
     Ok(b.access(eval_body, eval_field))
 }
 
+/// Structural fallback: evaluate all children, then rebuild the node unchanged in kind.
 fn map_children(
     arena: &mut TreeArena,
     expr: TreeId,
@@ -357,6 +385,11 @@ fn map_children(
     Ok(arena.intern(node.kind, &children))
 }
 
+/// Binds parser definition list into an environment.
+///
+/// Parser definitions are in `cons(name, cons(args, expr))` form.
+/// When `args` is non-empty, this creates nested abstractions (`buildBoxAbstr` parity)
+/// before binding.
 fn bind_definitions(
     arena: &mut TreeArena,
     mut defs: TreeId,
@@ -380,6 +413,7 @@ fn bind_definitions(
     Ok(())
 }
 
+/// Decodes one parser definition node into `(name, args, expr)`.
 fn decode_definition(
     arena: &TreeArena,
     def: TreeId,
@@ -410,6 +444,7 @@ fn decode_definition(
     Ok((name, args, expr))
 }
 
+/// Returns identifier text for one `BOXIDENT` node.
 fn ident_name(arena: &TreeArena, id: TreeId) -> Result<String, EvalError> {
     match match_box(arena, id) {
         BoxMatch::Ident(name) => Ok(name.to_owned()),
@@ -440,6 +475,10 @@ fn build_abstr_from_parser_args(
     Ok(out)
 }
 
+/// Evaluates argument list nodes and returns the reversed evaluated list.
+///
+/// This mirrors the C++ parser/evaluator list convention where argument lists are
+/// accumulated in reverse order.
 fn rev_eval_list(
     arena: &mut TreeArena,
     mut list: TreeId,
@@ -460,6 +499,13 @@ fn rev_eval_list(
     Ok(result)
 }
 
+/// Applies an evaluated function-like box to an evaluated argument list.
+///
+/// Behavior summary:
+/// - `abstr`: beta-like application in lexical scope.
+/// - `case`: pattern-match dispatch.
+/// - other node families: C++-compatible non-closure lowering to `seq(par(args), fun)`,
+///   including implicit wire insertion for partial applications.
 fn apply_list(
     arena: &mut TreeArena,
     fun: TreeId,
@@ -517,6 +563,9 @@ fn apply_list(
     }
 }
 
+/// Converts parser-style argument list to parallel composition tree.
+///
+/// Example: `[a,b,c] -> par(a, par(b, c))`.
 fn larg2par(arena: &mut TreeArena, larg: TreeId) -> Result<TreeId, EvalError> {
     if arena.is_nil(larg) {
         return Err(EvalError::EmptyArgumentList);
@@ -536,6 +585,7 @@ fn larg2par(arena: &mut TreeArena, larg: TreeId) -> Result<TreeId, EvalError> {
     }
 }
 
+/// Concatenates two parser-style lists while preserving element order.
 fn concat_lists(arena: &mut TreeArena, left: TreeId, right: TreeId) -> Result<TreeId, EvalError> {
     if arena.is_nil(left) {
         return Ok(right);
@@ -573,6 +623,9 @@ fn list_outputs(arena: &TreeArena, mut list: TreeId) -> Option<usize> {
 }
 
 /// Local arity inference used by non-closure application lowering.
+///
+/// Returns `(inputs, outputs)` for the subset needed in `apply_list`.
+/// `None` means arity is unknown or invalid for this fast-path inference.
 fn infer_box_arity(arena: &TreeArena, id: TreeId) -> Option<(usize, usize)> {
     match match_box(arena, id) {
         BoxMatch::Int(_) | BoxMatch::Real(_) => Some((0, 1)),
@@ -743,6 +796,7 @@ fn iteration_var_name(arena: &TreeArena, id: TreeId) -> Result<String, EvalError
     }
 }
 
+/// Evaluates iterative count expression and enforces a non-negative integer result.
 fn eval_non_negative_count(
     arena: &mut TreeArena,
     count_expr: TreeId,
@@ -759,6 +813,7 @@ fn eval_non_negative_count(
     }
 }
 
+/// Evaluates iterative body with one bound loop index (`i`).
 fn eval_iter_body(
     arena: &mut TreeArena,
     var_name: &str,
@@ -775,6 +830,7 @@ fn eval_iter_body(
     eval_box(arena, body, &scoped, loop_detector)
 }
 
+/// Returns the C++-compatible empty-iteration neutral box (`route(0,0,par(0,0))`).
 fn empty_iteration_route(arena: &mut TreeArena) -> TreeId {
     let mut b = BoxBuilder::new(arena);
     let z0 = b.int(0);
@@ -783,6 +839,7 @@ fn empty_iteration_route(arena: &mut TreeArena) -> TreeId {
     b.route(z0, z1, spec)
 }
 
+/// Expands `ipar(i,n,body)` into nested `par` composition.
 fn iterate_par(
     arena: &mut TreeArena,
     index: TreeId,
@@ -807,6 +864,7 @@ fn iterate_par(
     Ok(res)
 }
 
+/// Expands `iseq(i,n,body)` into nested `seq` composition.
 fn iterate_seq(
     arena: &mut TreeArena,
     index: TreeId,
@@ -831,6 +889,7 @@ fn iterate_seq(
     Ok(res)
 }
 
+/// Expands `isum(i,n,body)` into a fold using `add` primitive.
 fn iterate_sum(
     arena: &mut TreeArena,
     index: TreeId,
@@ -863,6 +922,7 @@ fn iterate_sum(
     Ok(res)
 }
 
+/// Expands `iprod(i,n,body)` into a fold using `mul` primitive.
 fn iterate_prod(
     arena: &mut TreeArena,
     index: TreeId,
@@ -895,6 +955,7 @@ fn iterate_prod(
     Ok(res)
 }
 
+/// Converts a parser-style list into a vector in traversal order.
 fn list_to_vec(arena: &TreeArena, mut list: TreeId) -> Result<Vec<TreeId>, EvalError> {
     let mut out = Vec::new();
     while !arena.is_nil(list) {
@@ -909,6 +970,7 @@ fn list_to_vec(arena: &TreeArena, mut list: TreeId) -> Result<Vec<TreeId>, EvalE
     Ok(out)
 }
 
+/// Converts a vector into a parser-style list preserving order.
 fn vec_to_list(arena: &mut TreeArena, items: &[TreeId]) -> TreeId {
     let mut out = arena.nil();
     for id in items.iter().rev() {
@@ -917,6 +979,7 @@ fn vec_to_list(arena: &mut TreeArena, items: &[TreeId]) -> TreeId {
     out
 }
 
+/// Decodes a case rule node into `(lhs_patterns, rhs_expr)`.
 fn rule_parts(arena: &TreeArena, rule: TreeId) -> Result<(TreeId, TreeId), EvalError> {
     let lhs = arena
         .hd(rule)
@@ -927,6 +990,7 @@ fn rule_parts(arena: &TreeArena, rule: TreeId) -> Result<(TreeId, TreeId), EvalE
     Ok((lhs, rhs))
 }
 
+/// Applies case rules to a given argument list with C++-compatible first-match semantics.
 fn apply_case_rules(
     arena: &mut TreeArena,
     rules_rev: TreeId,
@@ -988,6 +1052,7 @@ fn apply_case_rules(
     Err(EvalError::PatternMatchFailed)
 }
 
+/// Structural pattern matching helper used by case-rule application.
 fn match_pattern(
     arena: &TreeArena,
     pattern: TreeId,
