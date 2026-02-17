@@ -16,6 +16,7 @@ use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, So
 use parser::{ParseOutput, SourceReaderError};
 use propagate::{BoxArity, PropagateError};
 use signals::SigId;
+use tlib::NodeKind;
 
 /// Parse + eval + propagate output package.
 #[derive(Debug)]
@@ -375,6 +376,14 @@ fn render_human_box_expr(arena: &tlib::TreeArena, node: BoxId, depth: usize) -> 
         return "...".to_owned();
     }
 
+    if let Some(kind) = arena.kind(node) {
+        match kind {
+            NodeKind::StringLiteral(s) => return format!("\"{}\"", s),
+            NodeKind::Symbol(s) => return s.to_string(),
+            _ => {}
+        }
+    }
+
     match match_box(arena, node) {
         BoxMatch::Wire => "_".to_owned(),
         BoxMatch::Cut => "!".to_owned(),
@@ -418,6 +427,126 @@ fn render_human_box_expr(arena: &tlib::TreeArena, node: BoxId, depth: usize) -> 
             render_human_box_expr(arena, left, depth + 1),
             render_human_box_expr(arena, right, depth + 1)
         ),
+        BoxMatch::Button(label) => {
+            format!("button({})", render_human_box_expr(arena, label, depth + 1))
+        }
+        BoxMatch::Checkbox(label) => {
+            format!(
+                "checkbox({})",
+                render_human_box_expr(arena, label, depth + 1)
+            )
+        }
+        BoxMatch::VSlider(label, cur, min, max, step) => format!(
+            "vslider({}, {}, {}, {}, {})",
+            render_human_box_expr(arena, label, depth + 1),
+            render_human_box_expr(arena, cur, depth + 1),
+            render_human_box_expr(arena, min, depth + 1),
+            render_human_box_expr(arena, max, depth + 1),
+            render_human_box_expr(arena, step, depth + 1)
+        ),
+        BoxMatch::HSlider(label, cur, min, max, step) => format!(
+            "hslider({}, {}, {}, {}, {})",
+            render_human_box_expr(arena, label, depth + 1),
+            render_human_box_expr(arena, cur, depth + 1),
+            render_human_box_expr(arena, min, depth + 1),
+            render_human_box_expr(arena, max, depth + 1),
+            render_human_box_expr(arena, step, depth + 1)
+        ),
+        BoxMatch::NumEntry(label, cur, min, max, step) => format!(
+            "nentry({}, {}, {}, {}, {})",
+            render_human_box_expr(arena, label, depth + 1),
+            render_human_box_expr(arena, cur, depth + 1),
+            render_human_box_expr(arena, min, depth + 1),
+            render_human_box_expr(arena, max, depth + 1),
+            render_human_box_expr(arena, step, depth + 1)
+        ),
+        BoxMatch::VBargraph(label, min, max) => format!(
+            "vbargraph({}, {}, {})",
+            render_human_box_expr(arena, label, depth + 1),
+            render_human_box_expr(arena, min, depth + 1),
+            render_human_box_expr(arena, max, depth + 1)
+        ),
+        BoxMatch::HBargraph(label, min, max) => format!(
+            "hbargraph({}, {}, {})",
+            render_human_box_expr(arena, label, depth + 1),
+            render_human_box_expr(arena, min, depth + 1),
+            render_human_box_expr(arena, max, depth + 1)
+        ),
+        BoxMatch::VGroup(label, expr) => format!(
+            "vgroup({}, {})",
+            render_human_box_expr(arena, label, depth + 1),
+            render_human_box_expr(arena, expr, depth + 1)
+        ),
+        BoxMatch::HGroup(label, expr) => format!(
+            "hgroup({}, {})",
+            render_human_box_expr(arena, label, depth + 1),
+            render_human_box_expr(arena, expr, depth + 1)
+        ),
+        BoxMatch::TGroup(label, expr) => format!(
+            "tgroup({}, {})",
+            render_human_box_expr(arena, label, depth + 1),
+            render_human_box_expr(arena, expr, depth + 1)
+        ),
+        BoxMatch::Soundfile(label, chan) => format!(
+            "soundfile({}, {})",
+            render_human_box_expr(arena, label, depth + 1),
+            render_human_box_expr(arena, chan, depth + 1)
+        ),
+        BoxMatch::Add
+        | BoxMatch::Sub
+        | BoxMatch::Mul
+        | BoxMatch::Div
+        | BoxMatch::Rem
+        | BoxMatch::And
+        | BoxMatch::Or
+        | BoxMatch::Xor
+        | BoxMatch::Lsh
+        | BoxMatch::Rsh
+        | BoxMatch::Lt
+        | BoxMatch::Le
+        | BoxMatch::Gt
+        | BoxMatch::Ge
+        | BoxMatch::Eq
+        | BoxMatch::Ne
+        | BoxMatch::Pow
+        | BoxMatch::Delay
+        | BoxMatch::Delay1
+        | BoxMatch::Min
+        | BoxMatch::Max
+        | BoxMatch::Acos
+        | BoxMatch::Asin
+        | BoxMatch::Atan
+        | BoxMatch::Atan2
+        | BoxMatch::Cos
+        | BoxMatch::Sin
+        | BoxMatch::Tan
+        | BoxMatch::Exp
+        | BoxMatch::Log
+        | BoxMatch::Log10
+        | BoxMatch::Sqrt
+        | BoxMatch::Abs
+        | BoxMatch::Fmod
+        | BoxMatch::Remainder
+        | BoxMatch::Floor
+        | BoxMatch::Ceil
+        | BoxMatch::Rint
+        | BoxMatch::Round
+        | BoxMatch::Prefix
+        | BoxMatch::IntCast
+        | BoxMatch::FloatCast
+        | BoxMatch::ReadOnlyTable
+        | BoxMatch::WriteReadTable
+        | BoxMatch::Select2
+        | BoxMatch::Select3
+        | BoxMatch::AssertBounds
+        | BoxMatch::Lowest
+        | BoxMatch::Highest
+        | BoxMatch::Attach
+        | BoxMatch::Enable
+        | BoxMatch::Control => prim_infix_symbol(arena, node)
+            .or_else(|| prim_readable_name(arena, node))
+            .unwrap_or("?")
+            .to_owned(),
         _ => compact_box_preview(arena, node),
     }
 }
@@ -441,6 +570,47 @@ fn prim_infix_symbol(arena: &tlib::TreeArena, node: BoxId) -> Option<&'static st
         BoxMatch::Xor => Some("xor"),
         BoxMatch::Lsh => Some("<<"),
         BoxMatch::Rsh => Some(">>"),
+        _ => None,
+    }
+}
+
+fn prim_readable_name(arena: &tlib::TreeArena, node: BoxId) -> Option<&'static str> {
+    match match_box(arena, node) {
+        BoxMatch::Delay => Some("@"),
+        BoxMatch::Delay1 => Some("'"),
+        BoxMatch::Min => Some("min"),
+        BoxMatch::Max => Some("max"),
+        BoxMatch::Acos => Some("acos"),
+        BoxMatch::Asin => Some("asin"),
+        BoxMatch::Atan => Some("atan"),
+        BoxMatch::Atan2 => Some("atan2"),
+        BoxMatch::Cos => Some("cos"),
+        BoxMatch::Sin => Some("sin"),
+        BoxMatch::Tan => Some("tan"),
+        BoxMatch::Exp => Some("exp"),
+        BoxMatch::Log => Some("log"),
+        BoxMatch::Log10 => Some("log10"),
+        BoxMatch::Sqrt => Some("sqrt"),
+        BoxMatch::Abs => Some("abs"),
+        BoxMatch::Fmod => Some("fmod"),
+        BoxMatch::Remainder => Some("remainder"),
+        BoxMatch::Floor => Some("floor"),
+        BoxMatch::Ceil => Some("ceil"),
+        BoxMatch::Rint => Some("rint"),
+        BoxMatch::Round => Some("round"),
+        BoxMatch::Prefix => Some("prefix"),
+        BoxMatch::IntCast => Some("int"),
+        BoxMatch::FloatCast => Some("float"),
+        BoxMatch::ReadOnlyTable => Some("rdtable"),
+        BoxMatch::WriteReadTable => Some("rwtable"),
+        BoxMatch::Select2 => Some("select2"),
+        BoxMatch::Select3 => Some("select3"),
+        BoxMatch::AssertBounds => Some("assertbounds"),
+        BoxMatch::Lowest => Some("lowest"),
+        BoxMatch::Highest => Some("highest"),
+        BoxMatch::Attach => Some("attach"),
+        BoxMatch::Enable => Some("enable"),
+        BoxMatch::Control => Some("control"),
         _ => None,
     }
 }

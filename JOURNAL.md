@@ -2602,3 +2602,23 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo fmt --all`
   - `cargo test -p compiler --bin faust-rs`
+
+#### Diagnostics readability micro-tranche — Step 2 (UI/primitive pretty-print in `expr=`)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/src/lib.rs`,
+  - `crates/compiler/tests/diagnostic_errors.rs`.
+- Implemented:
+  - extended `render_human_box_expr` to avoid internal tag/list forms on common UI and
+    primitive nodes in diagnostics expression notes.
+  - added readable forms for:
+    - UI nodes (`button`, `checkbox`, `hslider`, `vslider`, `nentry`, `bargraph`, groups, soundfile),
+    - primitive names/symbols (infix and named primitives).
+  - string/symbol literal rendering now uses source-like forms (`"..."`, symbol names).
+  - added integration test lock to ensure UI mismatch diagnostics no longer expose
+    internal `float_bits(...)` / `cons(...)` payloads in `expr=`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --test diagnostic_errors`
+  - `cargo test -p compiler --bin faust-rs`

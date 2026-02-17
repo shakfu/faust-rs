@@ -220,3 +220,29 @@ fn propagate_error_includes_paired_side_context_notes() {
         "diagnostic should expose right-side arity context"
     );
 }
+
+#[test]
+fn propagate_error_ui_expr_note_is_pretty_printed() {
+    let compiler = Compiler::new();
+    let source = read_corpus("err_08_propagate_seq_ui_mismatch.dsp");
+    let err = compiler
+        .compile_source_to_signals("err_08_propagate_seq_ui_mismatch.dsp", &source)
+        .expect_err("fixture should fail in propagate stage");
+
+    let diagnostics = err
+        .diagnostics()
+        .expect("propagate error should expose diagnostics");
+    let first = diagnostics
+        .as_slice()
+        .first()
+        .expect("propagate error bundle should not be empty");
+    let expr_note = first
+        .notes
+        .iter()
+        .find(|note| note.starts_with("expr="))
+        .expect("diagnostic should expose readable expression note");
+    assert!(expr_note.contains("hslider("));
+    assert!(expr_note.contains(" : +"));
+    assert!(!expr_note.contains("float_bits("));
+    assert!(!expr_note.contains("cons("));
+}
