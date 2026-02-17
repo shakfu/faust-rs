@@ -2475,3 +2475,20 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo test -p parser-proto --test parser_slice1`
   - `cargo test -p compiler --test diagnostic_errors`
+
+#### Diagnostics UX next tranche — Step 2 (alias-resolution context notes)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/src/lib.rs`,
+  - `crates/compiler/tests/diagnostic_errors.rs`.
+- Implemented:
+  - compiler diagnostics enrichment now computes a deterministic binding/reference trace
+    from `process` to the definition owning the failing node when available.
+  - added `binding_trace=process -> ... -> owner` notes on eval/propagate diagnostics.
+  - trace resolution handles non-direct aliases by following identifier references
+    in top-level definition expressions (example: `process = baz,baz; baz = bar; bar = foo`).
+  - added integration test lock for alias-chain trace on `err_06`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --test diagnostic_errors`

@@ -142,3 +142,27 @@ fn propagate_error_complex_fixtures_expose_codes_and_source_labels() {
         );
     }
 }
+
+#[test]
+fn propagate_error_alias_chain_exposes_binding_trace_note() {
+    let compiler = Compiler::new();
+    let source = read_corpus("err_06_propagate_split_mismatch_chain.dsp");
+    let err = compiler
+        .compile_source_to_signals("err_06_propagate_split_mismatch_chain.dsp", &source)
+        .expect_err("fixture should fail in propagate stage");
+
+    let diagnostics = err
+        .diagnostics()
+        .expect("propagate error should expose diagnostics");
+    let first = diagnostics
+        .as_slice()
+        .first()
+        .expect("propagate error bundle should not be empty");
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|note| note.as_ref() == "binding_trace=process -> baz -> bar -> foo"),
+        "alias chain note should expose the ownership trace"
+    );
+}

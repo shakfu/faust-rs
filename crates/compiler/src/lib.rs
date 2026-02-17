@@ -8,6 +8,7 @@
 //! - Exposes minimal compile-session APIs.
 //! - Wires parsing through production `crates/parser` APIs.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use boxes::{BoxId, BoxMatch, dump_box, match_box};
@@ -121,6 +122,9 @@ impl Compiler {
                     "box_expr={}",
                     compact_box_preview(&output.state.arena, node)
                 ));
+                if let Some(trace) = alias_binding_trace_for_node(&output.state.arena, root, node) {
+                    diagnostic = diagnostic.with_note(format!("binding_trace={trace}"));
+                }
                 diagnostic = maybe_add_source_label(
                     diagnostic,
                     &output.state.ctx,
@@ -145,6 +149,11 @@ impl Compiler {
                         "box_expr={}",
                         compact_box_preview(&output.state.arena, node)
                     ));
+                    if let Some(trace) =
+                        alias_binding_trace_for_node(&output.state.arena, root, node)
+                    {
+                        diagnostic = diagnostic.with_note(format!("binding_trace={trace}"));
+                    }
                     diagnostic = maybe_add_source_label(
                         diagnostic,
                         &output.state.ctx,
@@ -170,6 +179,11 @@ impl Compiler {
                         "box_expr={}",
                         compact_box_preview(&output.state.arena, node)
                     ));
+                    if let Some(trace) =
+                        alias_binding_trace_for_node(&output.state.arena, root, node)
+                    {
+                        diagnostic = diagnostic.with_note(format!("binding_trace={trace}"));
+                    }
                     diagnostic = maybe_add_source_label(
                         diagnostic,
                         &output.state.ctx,
@@ -528,6 +542,158 @@ fn subtree_contains_node(arena: &tlib::TreeArena, root: BoxId, needle: BoxId) ->
         }
     }
     false
+}
+
+/// Returns the owning definition name for one offending expression node.
+fn owner_definition_name_for_node(
+    arena: &tlib::TreeArena,
+    defs_root: BoxId,
+    node: BoxId,
+) -> Option<Box<str>> {
+    let mut defs = defs_root;
+    let mut visited = 0usize;
+    while !arena.is_nil(defs) {
+        visited = visited.saturating_add(1);
+        if visited > 4096 {
+            break;
+        }
+        let def = arena.hd(defs)?;
+        let name = arena.hd(def)?;
+        let args_expr = arena.tl(def)?;
+        let expr = arena.tl(args_expr)?;
+        if expr == node || subtree_contains_node(arena, expr, node) {
+            if let BoxMatch::Ident(name_str) = match_box(arena, name) {
+                return Some(name_str.into());
+            }
+        }
+        defs = arena.tl(defs)?;
+    }
+    None
+}
+
+/// Builds one deterministic reference graph between top-level definition names.
+///
+/// Each edge `A -> B` means definition `A` references identifier `B` somewhere in its expression.
+fn definition_reference_edges(
+    arena: &tlib::TreeArena,
+    defs_root: BoxId,
+) -> HashMap<Box<str>, Vec<Box<str>>> {
+    let mut defs = defs_root;
+    let mut visited = 0usize;
+    let mut rows: Vec<(Box<str>, BoxId)> = Vec::new();
+    while !arena.is_nil(defs) {
+        visited = visited.saturating_add(1);
+        if visited > 4096 {
+            break;
+        }
+        let Some(def) = arena.hd(defs) else {
+            break;
+        };
+        let Some(name) = arena.hd(def) else {
+            break;
+        };
+        let Some(args_expr) = arena.tl(def) else {
+            break;
+        };
+        let Some(expr) = arena.tl(args_expr) else {
+            break;
+        };
+        if let BoxMatch::Ident(name_str) = match_box(arena, name) {
+            rows.push((name_str.into(), expr));
+        }
+        defs = match arena.tl(defs) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+
+    let known = rows
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<HashSet<_>>();
+
+    let mut out: HashMap<Box<str>, Vec<Box<str>>> = HashMap::new();
+    for (name, expr) in rows {
+        let mut refs = collect_definition_refs(arena, expr, &known);
+        refs.sort_unstable();
+        refs.dedup();
+        out.insert(name, refs);
+    }
+    out
+}
+
+/// Collects all definition-name identifiers referenced in one expression subtree.
+fn collect_definition_refs(
+    arena: &tlib::TreeArena,
+    root: BoxId,
+    known: &HashSet<Box<str>>,
+) -> Vec<Box<str>> {
+    let mut refs = Vec::new();
+    let mut stack = vec![root];
+    let mut visited = 0usize;
+    while let Some(cur) = stack.pop() {
+        visited = visited.saturating_add(1);
+        if visited > 4096 {
+            break;
+        }
+        if let BoxMatch::Ident(name) = match_box(arena, cur) {
+            if known.contains(name) {
+                refs.push(name.into());
+            }
+        }
+        if let Some(children) = arena.children(cur) {
+            for child in children.iter().rev() {
+                stack.push(*child);
+            }
+        }
+    }
+    refs
+}
+
+/// Finds one alias/binding trace from `process` to the owner of `node`.
+///
+/// The trace is expression-reference based (not only direct aliases), allowing contextual chains
+/// such as `process = bar,bar; bar = foo; foo = ...` -> `process -> bar -> foo`.
+fn alias_binding_trace_for_node(
+    arena: &tlib::TreeArena,
+    defs_root: BoxId,
+    node: BoxId,
+) -> Option<String> {
+    let owner = owner_definition_name_for_node(arena, defs_root, node)?;
+    if owner.as_ref() == "process" {
+        return Some("process".to_owned());
+    }
+
+    let edges = definition_reference_edges(arena, defs_root);
+    if !edges.contains_key("process") {
+        return None;
+    }
+
+    let mut queue: VecDeque<Vec<Box<str>>> = VecDeque::new();
+    let mut seen: HashSet<Box<str>> = HashSet::new();
+    queue.push_back(vec!["process".into()]);
+    seen.insert("process".into());
+
+    while let Some(path) = queue.pop_front() {
+        let Some(last) = path.last() else {
+            continue;
+        };
+        if last.as_ref() == owner.as_ref() {
+            return Some(path.join(" -> "));
+        }
+        let Some(nexts) = edges.get(last) else {
+            continue;
+        };
+        for next in nexts {
+            if seen.insert(next.clone()) {
+                let mut extended = path.clone();
+                extended.push(next.clone());
+                queue.push_back(extended);
+            }
+        }
+    }
+
+    None
 }
 
 #[must_use]
