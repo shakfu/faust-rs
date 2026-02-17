@@ -214,6 +214,13 @@ Near-term diagnostics UX priorities after baseline rollout:
 - lock these readability rules with dedicated human/json snapshots.
 - close eval readability gap by enriching node-carrying `EvalError` variants and
   extending eval-focused human/json snapshots and actionable hints.
+- continue with eval diagnostics v2:
+  - multi-label call-site/definition-site coverage,
+  - explicit scope-resolution context for unresolved symbols,
+  - deterministic correction templates,
+  - wording normalization across eval/propagate,
+  - nested eval negative corpus,
+  - optional IDE-oriented structured JSON fields.
 
 ---
 

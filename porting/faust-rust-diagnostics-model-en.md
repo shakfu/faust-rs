@@ -362,6 +362,43 @@ Pass criterion:
 - eval diagnostics contain stable `FRS-EVAL-*` codes with user-facing correction hints,
 - human/json snapshots lock the output contract.
 
+Eval diagnostics v2 (remaining quality gaps, prioritized):
+
+1. Multi-label eval diagnostics:
+- attach primary + secondary labels where available:
+  - application site,
+  - originating definition/use site.
+
+2. Scope-resolution context:
+- add explicit scope notes for unresolved symbols:
+  - lambda parameters in scope,
+  - local `with/letrec` bindings,
+  - top-level definitions considered.
+
+3. Correction templates:
+- include one concrete “fixed form” hint when deterministic:
+  - e.g. trim over-application argument lists,
+  - explicit `process = ...;` skeleton.
+
+4. Cross-phase wording normalization:
+- keep eval/propagate note/help wording conventions aligned
+  (rule/computed/suggested target/help ordering and style).
+
+5. Realistic nested negative fixtures:
+- expand eval negative corpus with deeper nested `with/letrec/case` alias chains,
+  then lock with human/json snapshots.
+
+6. IDE-oriented JSON fields:
+- extend JSON payload with optional structured fields for tooling:
+  - `owner_definition`,
+  - structured binding trace path,
+  - source-role labels (call-site/definition-site).
+
+Pass criterion:
+- multi-label coverage exists on representative eval failures,
+- unresolved-symbol diagnostics expose scope context,
+- human/json snapshots cover nested eval failures and new structured fields.
+
 ---
 
 ## 7. Test strategy

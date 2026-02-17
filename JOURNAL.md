@@ -2737,3 +2737,19 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p eval --all-targets`
   - `cargo test -p compiler --test diagnostic_errors`
   - `cargo test -p compiler --bin faust-rs`
+
+#### Documentation addendum — eval diagnostics v2 planning
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `porting/faust-rust-diagnostics-model-en.md`,
+  - `porting/phases/phase-4-signaux-en.md`,
+  - `porting/faust-rust-porting-plan-en.md`.
+- Implemented:
+  - documented remaining eval diagnostics improvements after current rollout:
+    - multi-label call-site/definition-site diagnostics,
+    - explicit scope-resolution notes for unresolved symbols,
+    - deterministic correction templates,
+    - eval/propagate wording normalization,
+    - nested realistic eval negative corpus expansion,
+    - optional IDE-oriented structured JSON enrichment (`owner_definition`, binding-path vector, label roles).

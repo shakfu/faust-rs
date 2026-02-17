@@ -500,6 +500,31 @@ Prioritized implementation roadmap for clearer user-facing errors:
 16. Eval-specific actionable help pass:
 - tune `FRS-EVAL-*` help/notes with concrete correction guidance and scoped context.
 
+17. Eval multi-labels and source roles:
+- enrich eval diagnostics with primary/secondary labels where possible:
+  - call-site,
+  - definition/use-site.
+
+18. Eval scope-context notes:
+- include explicit lookup context for unresolved symbols
+  (params/local defs/top-level candidates).
+
+19. Eval correction-template hints:
+- provide deterministic correction templates in notes/help when applicable.
+
+20. Eval diagnostics wording normalization:
+- align note/help layout and terminology with propagate diagnostics style.
+
+21. Nested eval failure corpus expansion:
+- add deep nested negative fixtures (`with/letrec/case` + alias chains),
+  lock via human/json snapshots.
+
+22. IDE JSON enrichment for eval:
+- extend machine payload with optional structured fields:
+  - owner definition,
+  - binding path vector,
+  - label role metadata.
+
 Reference model:
 - `porting/faust-rust-diagnostics-model-en.md` (sections 4.1, 5.3, 5.4, 6-D/E).
 
