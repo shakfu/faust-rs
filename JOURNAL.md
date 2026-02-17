@@ -3159,3 +3159,28 @@ Execution plan (Phase 0 prototype, revised):
       path required for full end-to-end parity.
   - added architecture-level contract in FIR docs:
     - text backends consuming FIR directly must take a module node as canonical input.
+
+#### C++ backend module-first rollout — Step 2 (module shell emission order)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/codegen/src/backends/cpp/mod.rs`
+  - `Cargo.lock`
+  - `JOURNAL.md`
+- Implemented:
+  - completed the module-shell emission slice in `codegen::backends::cpp`:
+    - header macro block (`FAUSTCLASS`, Apple `exp10` aliases, `RESTRICT`),
+    - class opening/closing (`class <name> : public dsp { ... };`),
+    - deterministic section order:
+      - `dsp_struct`,
+      - `globals`,
+      - `functions` (from module declarations).
+  - added typed backend failure for invalid module section shape:
+    - `FRS-CGEN-CPP-0002` when a section is not a FIR `Block`.
+  - expanded unit coverage:
+    - module-root acceptance now asserts shell markers,
+    - non-block section rejection now validates stable typed error code.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p codegen --all-targets -- -D warnings`
+  - `cargo test -p codegen --all-targets`

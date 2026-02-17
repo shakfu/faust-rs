@@ -33,6 +33,8 @@ pub struct CppOptions {
 pub enum CodegenErrorCode {
     /// Root FIR node is not a module (`FirMatch::Module`).
     RootNotModule,
+    /// Module section is not a FIR block shape.
+    InvalidModuleSection,
 }
 
 impl CodegenErrorCode {
@@ -40,6 +42,7 @@ impl CodegenErrorCode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::RootNotModule => "FRS-CGEN-CPP-0001",
+            Self::InvalidModuleSection => "FRS-CGEN-CPP-0002",
         }
     }
 }
@@ -103,23 +106,69 @@ pub fn generate_cpp_module(
         .unwrap_or(module.name.as_str());
 
     let mut out = String::new();
+    emit_cpp_header(&mut out, class_name);
     if let Some(namespace) = options.namespace.as_deref() {
         let _ = writeln!(out, "namespace {namespace} {{");
+        let _ = writeln!(out);
     }
-    let _ = writeln!(out, "// module-first C++ backend scaffold");
-    let _ = writeln!(out, "// module={}", module.name);
-    let _ = writeln!(out, "// class={class_name}");
-    let _ = writeln!(
-        out,
-        "// sections: dsp_struct={}, globals={}, declarations={}",
-        module.dsp_struct.as_u32(),
-        module.globals.as_u32(),
-        module.declarations.as_u32()
-    );
+
+    let _ = writeln!(out, "class {class_name} : public dsp {{");
+    let _ = writeln!(out, "private:");
+    emit_section_shell(store, &mut out, "dsp_struct", module.dsp_struct, 1)?;
+    emit_section_shell(store, &mut out, "globals", module.globals, 1)?;
+    let _ = writeln!(out, "public:");
+    emit_section_shell(store, &mut out, "functions", module.declarations, 1)?;
+    let _ = writeln!(out, "}};");
+
     if let Some(namespace) = options.namespace.as_deref() {
+        let _ = writeln!(out);
         let _ = writeln!(out, "}} // namespace {namespace}");
     }
     Ok(out)
+}
+
+fn emit_cpp_header(out: &mut String, class_name: &str) {
+    let _ = writeln!(out, "#ifndef FAUSTCLASS");
+    let _ = writeln!(out, "#define FAUSTCLASS {class_name}");
+    let _ = writeln!(out, "#endif");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "#ifdef __APPLE__");
+    let _ = writeln!(out, "#define exp10f __exp10f");
+    let _ = writeln!(out, "#define exp10 __exp10");
+    let _ = writeln!(out, "#endif");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "#if defined(_WIN32)");
+    let _ = writeln!(out, "#define RESTRICT __restrict");
+    let _ = writeln!(out, "#else");
+    let _ = writeln!(out, "#define RESTRICT __restrict__");
+    let _ = writeln!(out, "#endif");
+    let _ = writeln!(out);
+}
+
+fn emit_section_shell(
+    store: &FirStore,
+    out: &mut String,
+    section_name: &str,
+    section_id: FirId,
+    indent: usize,
+) -> Result<(), CodegenError> {
+    let tab = "    ".repeat(indent);
+    let FirMatch::Block(items) = match_fir(store, section_id) else {
+        return Err(CodegenError::new(
+            CodegenErrorCode::InvalidModuleSection,
+            format!(
+                "section '{section_name}' must be a FIR block, got {:?} at node {}",
+                match_fir(store, section_id),
+                section_id.as_u32()
+            ),
+        ));
+    };
+    let _ = writeln!(
+        out,
+        "{tab}// section: {section_name} ({} items)",
+        items.len()
+    );
+    Ok(())
 }
 
 fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
@@ -178,7 +227,23 @@ mod tests {
 
         let out = generate_cpp_module(&store, module, &CppOptions::default())
             .expect("module root should generate");
-        assert!(out.contains("module=mydsp"));
-        assert!(out.contains("dsp_struct="));
+        assert!(out.contains("#define FAUSTCLASS mydsp"));
+        assert!(out.contains("class mydsp : public dsp"));
+        assert!(out.contains("// section: dsp_struct (0 items)"));
+        assert!(out.contains("// section: functions (0 items)"));
+    }
+
+    #[test]
+    fn rejects_non_block_module_section() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let dsp_struct = b.int32(1);
+        let globals = b.block(&[]);
+        let declarations = b.block(&[]);
+        let module = b.module("mydsp", dsp_struct, globals, declarations);
+        let err = generate_cpp_module(&store, module, &CppOptions::default())
+            .expect_err("non-block section must fail");
+        assert_eq!(err.code(), CodegenErrorCode::InvalidModuleSection);
+        assert!(err.to_string().contains("FRS-CGEN-CPP-0002"));
     }
 }
