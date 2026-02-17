@@ -3328,3 +3328,31 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo clippy -p xtask -p codegen -p compiler --all-targets -- -D warnings`
   - `cargo test -p xtask -p codegen --all-targets`
   - `cargo run -p xtask -- cpp-backend-diff-report`
+
+#### C++ backend: align generated class with official `dsp` API contract
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/codegen/src/backends/cpp/mod.rs`
+  - `porting/phases/phase-6-fir-backends-en.md`
+  - `JOURNAL.md`
+- Analysis documented:
+  - compared architecture API contract in
+    `/Users/letz/Developpements/RUST/faust/architecture/faust/dsp/dsp.h`
+    with generated Rust backend output and `organ.cpp` reference.
+  - identified missing mandatory virtual methods in current Rust C++ emission
+    (`getNumInputs/Outputs`, `buildUserInterface(UI*)`, lifecycle init/reset methods,
+    `clone`, `metadata`, `compute(int, FAUSTFLOAT**...)`).
+- Implemented:
+  - C++ backend now emits a deterministic `dsp`-compatible method layer in every class:
+    - `getNumInputs`, `getNumOutputs`,
+    - `classInit`, `getSampleRate`,
+    - `init`, `instanceInit`, `instanceConstants`, `instanceResetUserInterface`, `instanceClear`,
+    - `clone`,
+    - `metadata(Meta*)`,
+    - `buildUserInterface(UI*)`,
+    - `compute(int, FAUSTFLOAT** RESTRICT, FAUSTFLOAT** RESTRICT)`.
+  - added `CppOptions` fields for IO contract values:
+    - `num_inputs`, `num_outputs`.
+  - backend keeps existing FIR-emitted functions while adding architecture-facing wrappers/fallbacks.
+  - added plan documentation in Phase 6 (`8.6 Mandatory dsp API contract`).

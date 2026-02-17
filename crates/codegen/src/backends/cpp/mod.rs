@@ -23,6 +23,10 @@ pub struct CppOptions {
     pub namespace: Option<String>,
     /// Optional class name override for the FIR module name.
     pub class_name: Option<String>,
+    /// Number of audio inputs reported by `getNumInputs()`.
+    pub num_inputs: usize,
+    /// Number of audio outputs reported by `getNumOutputs()`.
+    pub num_outputs: usize,
     /// C++ spelling used for FIR `Quad` values.
     ///
     /// C++ uses target-dependent `quad` spellings; Rust backend keeps this
@@ -40,6 +44,8 @@ impl Default for CppOptions {
         Self {
             namespace: None,
             class_name: None,
+            num_inputs: 0,
+            num_outputs: 0,
             quad_type_name: "quad".to_owned(),
             fixed_type_name: "fixed".to_owned(),
         }
@@ -129,6 +135,7 @@ pub fn generate_cpp_module(
     options: &CppOptions,
 ) -> Result<String, CodegenError> {
     let module = decode_module(store, module)?;
+    let declared_functions = collect_declared_function_names(store, module.declarations)?;
     let class_name = options
         .class_name
         .as_deref()
@@ -143,9 +150,11 @@ pub fn generate_cpp_module(
 
     let _ = writeln!(out, "class {class_name} : public dsp {{");
     let _ = writeln!(out, "private:");
+    let _ = writeln!(out, "    int fSampleRate = 0;");
     emit_section(store, &mut out, options, "dsp_struct", module.dsp_struct, 1)?;
     emit_section(store, &mut out, options, "globals", module.globals, 1)?;
     let _ = writeln!(out, "public:");
+    emit_dsp_contract_methods(&mut out, options, class_name, &declared_functions, 1);
     emit_section(
         store,
         &mut out,
@@ -161,6 +170,125 @@ pub fn generate_cpp_module(
         let _ = writeln!(out, "}} // namespace {namespace}");
     }
     Ok(out)
+}
+
+fn emit_dsp_contract_methods(
+    out: &mut String,
+    options: &CppOptions,
+    class_name: &str,
+    declared_functions: &[String],
+    indent: usize,
+) {
+    let tab = "    ".repeat(indent);
+    let has_build_ui = declared_functions
+        .iter()
+        .any(|name| name == "buildUserInterface");
+    let has_metadata = declared_functions.iter().any(|name| name == "metadata");
+    let has_instance_constants = declared_functions
+        .iter()
+        .any(|name| name == "instanceConstants");
+    let has_instance_reset_ui = declared_functions
+        .iter()
+        .any(|name| name == "instanceResetUserInterface");
+    let has_instance_clear = declared_functions
+        .iter()
+        .any(|name| name == "instanceClear");
+    let has_compute = declared_functions.iter().any(|name| name == "compute");
+
+    let _ = writeln!(out, "{tab}virtual int getNumInputs() {{");
+    let _ = writeln!(out, "{tab}    return {};", options.num_inputs);
+    let _ = writeln!(out, "{tab}}}");
+    let _ = writeln!(out, "{tab}virtual int getNumOutputs() {{");
+    let _ = writeln!(out, "{tab}    return {};", options.num_outputs);
+    let _ = writeln!(out, "{tab}}}");
+    let _ = writeln!(out, "{tab}static void classInit(int sample_rate) {{");
+    let _ = writeln!(out, "{tab}    (void)sample_rate;");
+    let _ = writeln!(out, "{tab}}}");
+    let _ = writeln!(out, "{tab}virtual int getSampleRate() {{");
+    let _ = writeln!(out, "{tab}    return fSampleRate;");
+    let _ = writeln!(out, "{tab}}}");
+    let _ = writeln!(
+        out,
+        "{tab}virtual void instanceConstants(int sample_rate) {{"
+    );
+    let _ = writeln!(out, "{tab}    fSampleRate = sample_rate;");
+    if has_instance_constants {
+        let _ = writeln!(out, "{tab}    instanceConstants();");
+    }
+    let _ = writeln!(out, "{tab}}}");
+    let _ = writeln!(out, "{tab}virtual void instanceResetUserInterface() {{");
+    if has_instance_reset_ui {
+        let _ = writeln!(out, "{tab}    instanceResetUserInterface();");
+    }
+    let _ = writeln!(out, "{tab}}}");
+    let _ = writeln!(out, "{tab}virtual void instanceClear() {{");
+    if has_instance_clear {
+        let _ = writeln!(out, "{tab}    instanceClear();");
+    }
+    let _ = writeln!(out, "{tab}}}");
+    let _ = writeln!(out, "{tab}virtual void init(int sample_rate) {{");
+    let _ = writeln!(out, "{tab}    classInit(sample_rate);");
+    let _ = writeln!(out, "{tab}    instanceInit(sample_rate);");
+    let _ = writeln!(out, "{tab}}}");
+    let _ = writeln!(out, "{tab}virtual void instanceInit(int sample_rate) {{");
+    let _ = writeln!(out, "{tab}    instanceConstants(sample_rate);");
+    let _ = writeln!(out, "{tab}    instanceResetUserInterface();");
+    let _ = writeln!(out, "{tab}    instanceClear();");
+    let _ = writeln!(out, "{tab}}}");
+    let _ = writeln!(out, "{tab}virtual {class_name}* clone() {{");
+    let _ = writeln!(out, "{tab}    return new {class_name}(*this);");
+    let _ = writeln!(out, "{tab}}}");
+    if !has_metadata {
+        let _ = writeln!(out, "{tab}virtual void metadata(Meta* m) {{");
+        let _ = writeln!(out, "{tab}    (void)m;");
+        let _ = writeln!(
+            out,
+            "{tab}    m->declare(\"faust-rs\", \"module-first cpp backend prototype\");"
+        );
+        let _ = writeln!(out, "{tab}}}");
+    }
+    if !has_build_ui {
+        let _ = writeln!(
+            out,
+            "{tab}virtual void buildUserInterface(UI* ui_interface) {{"
+        );
+        let _ = writeln!(out, "{tab}    (void)ui_interface;");
+        let _ = writeln!(out, "{tab}}}");
+    }
+    if !has_compute {
+        let _ = writeln!(
+            out,
+            "{tab}virtual void compute(int count, FAUSTFLOAT** RESTRICT inputs, FAUSTFLOAT** RESTRICT outputs) {{"
+        );
+        let _ = writeln!(out, "{tab}    (void)count;");
+        let _ = writeln!(out, "{tab}    (void)inputs;");
+        let _ = writeln!(out, "{tab}    (void)outputs;");
+        let _ = writeln!(out, "{tab}}}");
+    }
+}
+
+fn collect_declared_function_names(
+    store: &FirStore,
+    declarations: FirId,
+) -> Result<Vec<String>, CodegenError> {
+    let FirMatch::Block(items) = match_fir(store, declarations) else {
+        return Err(CodegenError::new(
+            CodegenErrorCode::InvalidModuleSection,
+            format!(
+                "section 'functions' must be a FIR block, got {:?} at node {}",
+                match_fir(store, declarations),
+                declarations.as_u32()
+            ),
+        ));
+    };
+
+    let mut names = Vec::new();
+    for item in items {
+        if let FirMatch::DeclareFun { name, .. } = match_fir(store, item) {
+            names.push(name);
+        }
+    }
+    Ok(names)
 }
 
 fn emit_cpp_header(out: &mut String, class_name: &str) {
@@ -533,7 +661,8 @@ fn emit_declare_fun(
     indent: usize,
 ) -> Result<(), CodegenError> {
     let tab = "    ".repeat(indent);
-    let (ret, params) = match decl.typ {
+    let mut params_override: Option<String> = None;
+    let (ret, mut params) = match decl.typ {
         FirType::Fun {
             args: typed_args,
             ret,
@@ -551,6 +680,18 @@ fn emit_declare_fun(
         }
         other => (emit_type(other, options), String::new()),
     };
+    if decl.name == "buildUserInterface" && params.is_empty() {
+        params_override = Some("UI* ui_interface".to_owned());
+    } else if decl.name == "metadata" && params.is_empty() {
+        params_override = Some("Meta* m".to_owned());
+    } else if decl.name == "compute" && params.is_empty() {
+        params_override = Some(
+            "int count, FAUSTFLOAT** RESTRICT inputs, FAUSTFLOAT** RESTRICT outputs".to_owned(),
+        );
+    }
+    if let Some(override_params) = params_override {
+        params = override_params;
+    }
     let inline = if decl.is_inline { "inline " } else { "" };
     let _ = writeln!(out, "{tab}{inline}{ret} {}({params}) {{", decl.name);
     emit_block(store, out, options, decl.body, indent + 1)?;
@@ -788,6 +929,12 @@ mod tests {
             .expect("module root should generate");
         assert!(out.contains("#define FAUSTCLASS mydsp"));
         assert!(out.contains("class mydsp : public dsp"));
+        assert!(out.contains("virtual int getNumInputs()"));
+        assert!(out.contains("virtual int getNumOutputs()"));
+        assert!(out.contains("virtual void buildUserInterface(UI* ui_interface)"));
+        assert!(out.contains(
+            "virtual void compute(int count, FAUSTFLOAT** RESTRICT inputs, FAUSTFLOAT** RESTRICT outputs)"
+        ));
         assert!(out.contains("// section: dsp_struct (0 items)"));
         assert!(out.contains("// section: functions (0 items)"));
     }

@@ -798,3 +798,27 @@ Use `/Users/letz/Developpements/RUST/faust` as source of truth:
 - Module-first backend entry is the **initial implementation lane**.
 - Full parity still requires bridging to the currently effective C++ production path centered on
   `InstructionsCompiler` + `CodeContainer` orchestration.
+
+### 8.6 Mandatory `dsp` API contract (C++ architecture compatibility)
+
+Even in module-first mode, generated classes must respect the public architecture
+contract defined in:
+
+- `/Users/letz/Developpements/RUST/faust/architecture/faust/dsp/dsp.h`.
+
+Minimum required methods on `class <Name> : public dsp`:
+
+- `getNumInputs()`, `getNumOutputs()`
+- `buildUserInterface(UI*)`
+- `getSampleRate()`
+- `init(int)`, `instanceInit(int)`, `instanceConstants(int)`,
+  `instanceResetUserInterface()`, `instanceClear()`
+- `clone()`
+- `metadata(Meta*)`
+- `compute(int, FAUSTFLOAT** RESTRICT, FAUSTFLOAT** RESTRICT)`
+
+Porting rule:
+
+- until full signal->FIR production parity is available, backend output must still emit
+  this full API shape with deterministic fallback bodies, so generated C++ remains
+  architecture-compatible and testable.
