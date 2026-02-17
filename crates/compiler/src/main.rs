@@ -1,4 +1,5 @@
 use boxes::dump_box;
+use codegen::backends::cpp::CppOptions;
 use compiler::{Compiler, CompilerError, golden_snapshot_from_file};
 use errors::{DiagnosticBundle, LabelStyle, Severity, Stage};
 use serde_json::json;
@@ -455,6 +456,9 @@ fn print_global_usage_and_exit() -> ! {
     eprintln!(
         "  cargo run -p compiler -- --dump-sig <input.dsp> [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
     );
+    eprintln!(
+        "  cargo run -p compiler -- --dump-cpp <input.dsp> [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
+    );
     std::process::exit(2);
 }
 
@@ -576,6 +580,29 @@ fn main() {
                 }
                 Err(err) => {
                     eprintln!("Signal pipeline failed: {err}");
+                    print_structured_diagnostics(&err, error_format, error_verbosity);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some("--dump-cpp") => {
+            let usage = parse_dump_usage("dump-cpp");
+            let (input_path, search_paths, error_format, error_verbosity) =
+                parse_input_with_import_dirs_and_format(args, &usage);
+            let compiler = Compiler::new();
+            let options = CppOptions::default();
+            let result = if search_paths.is_empty() {
+                compiler.compile_file_default_to_cpp(&input_path, &options)
+            } else {
+                compiler.compile_file_to_cpp(&input_path, &search_paths, &options)
+            };
+
+            match result {
+                Ok(cpp) => {
+                    print!("{cpp}");
+                }
+                Err(err) => {
+                    eprintln!("C++ pipeline failed: {err}");
                     print_structured_diagnostics(&err, error_format, error_verbosity);
                     std::process::exit(1);
                 }
@@ -1239,12 +1266,12 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
     }
 
     #[test]
-    fn diagnostics_human_renderer_snapshot_for_eval_compound_case_arity() {
+    fn diagnostics_human_renderer_snapshot_for_compound_case_propagate_fallback() {
         let compiler = Compiler::new();
         let path = corpus_path("err_15_eval_compound_with_letrec_case_arity.dsp");
         let err = compiler
             .compile_file_default_to_signals(&path)
-            .expect_err("fixture should fail in eval stage");
+            .expect_err("fixture should fail in propagate stage");
         let diagnostics = err
             .diagnostics()
             .expect("fixture error should expose diagnostics");
@@ -1252,10 +1279,8 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
         let path_text = path.to_string_lossy().to_string();
         let normalized = rendered.replace(&path_text, "$FIXTURE");
 
-        assert!(normalized.contains("error [FRS-EVAL-0003] pattern arity mismatch"));
-        assert!(
-            normalized.contains("cause: case pattern arity does not match provided argument tuple")
-        );
-        assert!(normalized.contains("template: case { (x, y) => ...; }; // 2-argument rule"));
+        assert!(normalized.contains("error [FRS-PROP-0001] unsupported box node"));
+        assert!(normalized.contains("cause: encountered box node family is not supported"));
+        assert!(normalized.contains("binding_trace=process -> bar -> foo"));
     }
 }

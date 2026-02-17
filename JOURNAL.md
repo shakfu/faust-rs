@@ -3250,3 +3250,32 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo clippy -p codegen --all-targets -- -D warnings`
   - `cargo test -p codegen --all-targets`
+
+#### C++ backend module-first rollout — Step 7 (compiler bridge to real `.dsp`)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/Cargo.toml`
+  - `crates/compiler/src/lib.rs`
+  - `crates/compiler/src/main.rs`
+  - `crates/compiler/tests/diagnostic_errors.rs`
+  - `crates/xtask/src/main.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - added an explicit integration bridge in `compiler` orchestration:
+    - `compile_source_to_cpp`,
+    - `compile_file_to_cpp`,
+    - `compile_file_default_to_cpp`.
+  - bridge contract:
+    - current output path is `parse -> eval -> propagate -> temporary FIR module -> codegen::backends::cpp`.
+    - module contains deterministic signal-summary labels, keeping module-first backend exercised on real `.dsp` inputs.
+  - added CLI entrypoint:
+    - `cargo run -p compiler -- --dump-cpp <input.dsp>`.
+  - added `CompilerError::Codegen` for typed backend failures.
+  - updated diagnostics tests to align with current case-node status (`err_11`/`err_15` now propagate-stage).
+  - Rustdoc added on the new bridge APIs to make temporary-lowering status explicit.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p compiler -p xtask --all-targets -- -D warnings`
+  - `cargo test -p compiler -p xtask --all-targets`
+  - `cargo run -p compiler -- --dump-cpp tests/corpus/rep_01_passthrough.dsp`

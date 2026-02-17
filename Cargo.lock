@@ -103,6 +103,7 @@ dependencies = [
  "codegen",
  "errors",
  "eval",
+ "fir",
  "parser",
  "propagate",
  "serde_json",

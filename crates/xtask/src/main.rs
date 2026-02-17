@@ -678,6 +678,7 @@ fn rust_case_status(compiler: &compiler::Compiler, input: &Path) -> CaseStatus {
                 compiler::CompilerError::Parse { .. } => ("parse", err.to_string()),
                 compiler::CompilerError::Eval { .. } => ("eval", err.to_string()),
                 compiler::CompilerError::Propagate { .. } => ("propagate", err.to_string()),
+                compiler::CompilerError::Codegen { .. } => ("codegen", err.to_string()),
                 compiler::CompilerError::MissingRoot { .. } => ("parse", err.to_string()),
             };
             CaseStatus {

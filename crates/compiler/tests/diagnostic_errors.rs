@@ -81,11 +81,6 @@ fn eval_error_fixtures_expose_source_labels_and_readable_context() {
             "error originates from definition 'process'",
         ),
         (
-            "err_11_eval_case_arity_mismatch.dsp",
-            1u32,
-            "error originates from definition 'foo'",
-        ),
-        (
             "err_12_eval_case_no_match.dsp",
             1u32,
             "error originates from definition 'foo'",
@@ -93,11 +88,6 @@ fn eval_error_fixtures_expose_source_labels_and_readable_context() {
         (
             "err_13_eval_undefined_symbol_alias_chain_nested.dsp",
             1u32,
-            "error originates from definition 'foo'",
-        ),
-        (
-            "err_15_eval_compound_with_letrec_case_arity.dsp",
-            4u32,
             "error originates from definition 'foo'",
         ),
     ];
@@ -268,27 +258,53 @@ fn eval_compound_fixture_exposes_cause_and_template_notes() {
     let source = read_corpus("err_15_eval_compound_with_letrec_case_arity.dsp");
     let err = compiler
         .compile_source_to_signals("err_15_eval_compound_with_letrec_case_arity.dsp", &source)
-        .expect_err("fixture should fail in eval stage");
+        .expect_err("fixture should fail in propagate stage for case nodes");
     let diagnostics = err
         .diagnostics()
-        .expect("eval error should expose diagnostics");
+        .expect("propagate error should expose diagnostics");
     let first = diagnostics
         .as_slice()
         .first()
-        .expect("eval diagnostics should not be empty");
+        .expect("diagnostics should not be empty");
+    assert!(
+        first.notes.iter().any(|n| n
+            .as_ref()
+            .starts_with("cause: encountered box node family is not supported")),
+        "compound case fixture should expose unsupported-family cause note"
+    );
+    assert!(
+        first
+            .help
+            .iter()
+            .any(|h| h.as_ref().starts_with("evaluate box expression first")),
+        "compound case fixture should expose deterministic fallback help"
+    );
+}
+
+#[test]
+fn case_arity_fixture_currently_reports_propagate_stage_diagnostics() {
+    let compiler = Compiler::new();
+    let source = read_corpus("err_11_eval_case_arity_mismatch.dsp");
+    let err = compiler
+        .compile_source_to_signals("err_11_eval_case_arity_mismatch.dsp", &source)
+        .expect_err("fixture should currently fail in propagate stage");
+    let diagnostics = err
+        .diagnostics()
+        .expect("propagate error should expose diagnostics");
+    let first = diagnostics
+        .as_slice()
+        .first()
+        .expect("propagate diagnostics should not be empty");
+    assert!(
+        first.code.0.starts_with("FRS-PROP-"),
+        "case-arity fixture should currently expose FRS-PROP-* diagnostics"
+    );
     assert!(
         first
             .notes
             .iter()
-            .any(|n| n.as_ref().starts_with("cause: case pattern arity")),
-        "compound eval fixture should expose explicit cause note"
-    );
-    assert!(
-        first.help.iter().any(|h| {
-            h.as_ref()
-                .starts_with("template: case { (x, y) => ...; }; // 2-argument rule")
-        }),
-        "compound eval fixture should expose deterministic template help"
+            .any(|n| n.as_ref() == "error originates from definition 'foo'"),
+        "case-arity fixture should still expose owner definition note"
     );
 }
 

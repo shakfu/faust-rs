@@ -12,10 +12,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use boxes::{BoxId, BoxMatch, dump_box, match_box};
+use codegen::backends::cpp::{CodegenError, CppOptions, generate_cpp_module};
 use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, SourceSpan};
+use fir::{FirBuilder, FirStore, FirType};
 use parser::{ParseOutput, SourceReaderError};
 use propagate::{BoxArity, PropagateError};
-use signals::SigId;
+use signals::{SigId, dump_sig_readable};
 use tlib::NodeKind;
 
 /// Parse + eval + propagate output package.
@@ -116,6 +118,57 @@ impl Compiler {
         output: ParseOutput,
     ) -> Result<SignalCompileOutput, CompilerError> {
         self.pipeline_to_signals(source_name, output)
+    }
+
+    /// Parses + evaluates + propagates one source, then lowers to a temporary
+    /// FIR module and emits C++ text through the module-first backend.
+    ///
+    /// # Rustdoc note
+    /// This is a bridge API for Phase 6 Step 7. The produced C++ currently uses
+    /// a temporary signal-summary module, not the final production FIR lowering.
+    pub fn compile_source_to_cpp(
+        &self,
+        source_name: &str,
+        source: &str,
+        options: &CppOptions,
+    ) -> Result<String, CompilerError> {
+        let signals = self.compile_source_to_signals(source_name, source)?;
+        lower_signals_to_cpp(source_name, &signals, options).map_err(|error| {
+            CompilerError::Codegen {
+                source: source_name.into(),
+                error,
+            }
+        })
+    }
+
+    /// Parses + evaluates + propagates one file, then emits C++ text from
+    /// the temporary module-first FIR bridge.
+    pub fn compile_file_to_cpp(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        options: &CppOptions,
+    ) -> Result<String, CompilerError> {
+        let signals = self.compile_file_to_signals(path, search_paths)?;
+        let source = path.display().to_string();
+        lower_signals_to_cpp(&source, &signals, options).map_err(|error| CompilerError::Codegen {
+            source: source.into(),
+            error,
+        })
+    }
+
+    /// Parses + evaluates + propagates one file with default import search path,
+    /// then emits C++ text from the temporary module-first FIR bridge.
+    pub fn compile_file_default_to_cpp(
+        &self,
+        path: &Path,
+        options: &CppOptions,
+    ) -> Result<String, CompilerError> {
+        let search_base = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        self.compile_file_to_cpp(path, std::slice::from_ref(&search_base), options)
     }
 
     fn pipeline_to_signals(
@@ -287,6 +340,10 @@ pub enum CompilerError {
         error: PropagateError,
         diagnostics: DiagnosticBundle,
     },
+    Codegen {
+        source: Box<str>,
+        error: CodegenError,
+    },
 }
 
 impl std::fmt::Display for CompilerError {
@@ -310,6 +367,9 @@ impl std::fmt::Display for CompilerError {
             Self::Propagate { source, error, .. } => {
                 write!(f, "propagation failed for {source}: {error}")
             }
+            Self::Codegen { source, error } => {
+                write!(f, "code generation failed for {source}: {error}")
+            }
         }
     }
 }
@@ -324,6 +384,7 @@ impl CompilerError {
             Self::Parse { diagnostics, .. } => Some(diagnostics),
             Self::Eval { diagnostics, .. } => Some(diagnostics),
             Self::Propagate { diagnostics, .. } => Some(diagnostics),
+            Self::Codegen { .. } => None,
             _ => None,
         }
     }
@@ -343,6 +404,77 @@ fn ensure_parse_success(source: &str, output: ParseOutput) -> Result<ParseOutput
             diagnostics: output.diagnostics,
         })
     }
+}
+
+/// Lowers current signal output to a temporary FIR module, then emits C++ text.
+///
+/// This bridge keeps one explicit integration point in `compiler` while the
+/// production signal->FIR lowering is still being implemented.
+fn lower_signals_to_cpp(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &CppOptions,
+) -> Result<String, CodegenError> {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+    let mut body = Vec::new();
+
+    body.push(b.label(format!("source: {source_name}")));
+    body.push(b.label(format!(
+        "io: inputs={} outputs={}",
+        output.process_arity.inputs, output.process_arity.outputs
+    )));
+    for (index, sig) in output.signals.iter().enumerate() {
+        body.push(b.label(format!(
+            "sig[{index}]: {}",
+            dump_sig_readable(&output.parse.state.arena, *sig)
+        )));
+    }
+
+    let body = b.block(&body);
+    let compute_type = FirType::Fun {
+        args: Vec::new(),
+        ret: Box::new(FirType::Void),
+    };
+    let compute = b.declare_fun("compute", compute_type, &[], body, false);
+
+    let declarations = b.block(&[compute]);
+    let dsp_struct = b.block(&[]);
+    let globals = b.block(&[]);
+    let module_name = options
+        .class_name
+        .as_deref()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| sanitize_cpp_ident(source_name_to_class(source_name).as_str()));
+    let module = b.module(module_name, dsp_struct, globals, declarations);
+    generate_cpp_module(&store, module, options)
+}
+
+fn source_name_to_class(source_name: &str) -> String {
+    Path::new(source_name)
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("faust_dsp")
+        .to_owned()
+}
+
+fn sanitize_cpp_ident(input: &str) -> String {
+    let mut out = String::with_capacity(input.len().max(8));
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push_str("faust_dsp");
+    }
+    if out.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        out.insert(0, '_');
+    }
+    out
 }
 
 fn bundle_from_diagnostic(diagnostic: Diagnostic) -> DiagnosticBundle {
@@ -1198,6 +1330,7 @@ mod tests {
     use std::path::PathBuf;
 
     use boxes::BoxBuilder;
+    use codegen::backends::cpp::CppOptions;
     use signals::SigMatch;
     use tlib::TreeArena;
 
@@ -1330,6 +1463,17 @@ mod tests {
             signals::match_sig(&out.parse.state.arena, out.signals[0]),
             SigMatch::Input(0)
         );
+    }
+
+    #[test]
+    fn compiler_compile_source_to_cpp_emits_module_text() {
+        let compiler = Compiler::new();
+        let cpp = compiler
+            .compile_source_to_cpp("pass.dsp", "process = _;", &CppOptions::default())
+            .expect("pass-through should compile to C++");
+        assert!(cpp.contains("class pass : public dsp"));
+        assert!(cpp.contains("void compute()"));
+        assert!(cpp.contains("// sig[0]: SIGINPUT(int(0))"));
     }
 
     #[test]
