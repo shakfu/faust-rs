@@ -138,6 +138,7 @@ name = "eval"
 version = "0.1.0"
 dependencies = [
  "boxes",
+ "errors",
  "tlib",
 ]
 

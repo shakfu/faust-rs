@@ -29,6 +29,8 @@
 use std::fmt::{Display, Formatter};
 
 use boxes::{BoxBuilder, BoxMatch, match_box};
+use errors::codes;
+use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
 use tlib::{NodeKind, TreeArena, TreeId};
 
 pub const CRATE_NAME: &str = "eval";
@@ -235,6 +237,63 @@ impl Display for EvalError {
 }
 
 impl std::error::Error for EvalError {}
+
+/// Converts one evaluator error into the workspace diagnostics model.
+///
+/// This keeps `EvalError` as the local phase error type while exposing
+/// stable stage/code metadata for compiler-level aggregation and CLI rendering.
+impl IntoDiagnostic for EvalError {
+    fn into_diagnostic(self) -> Diagnostic {
+        let message = self.to_string();
+        match self {
+            Self::MissingProcessDefinition => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_MISSING_PROCESS,
+                message,
+            )
+            .with_help("define `process = ...;` in the top-level definitions"),
+            Self::UndefinedSymbol { .. } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_UNDEFINED_SYMBOL,
+                message,
+            )
+            .with_help("check symbol name and definition order/scope"),
+            Self::PatternArityMismatch { expected, got } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_ARITY_MISMATCH,
+                message,
+            )
+            .with_note(format!("pattern expects {expected} argument(s), got {got}")),
+            Self::TooManyArguments { expected, got } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_ARITY_MISMATCH,
+                message,
+            )
+            .with_note(format!(
+                "application accepts at most {expected} argument(s), got {got}"
+            )),
+            Self::IterationCountNotInt { .. }
+            | Self::IterationCountTooLarge { .. }
+            | Self::NegativeIterationCount { .. } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_ITERATION_INVALID,
+                message,
+            )
+            .with_help("iteration count must be a non-negative integer in target range"),
+            _ => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_GENERIC_FAILURE,
+                message,
+            ),
+        }
+    }
+}
 
 /// Evaluates one Faust program root list and returns the resolved `process` expression.
 ///

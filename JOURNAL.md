@@ -2102,7 +2102,7 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --all-targets`
 
-### Diagnostics model rollout (steps 1 to 5, structured error reporting)
+### Diagnostics model rollout (steps 1 to 6, structured error reporting)
 
 - Objective:
   - start implementing the structured diagnostics model planned in porting docs,
@@ -2188,6 +2188,32 @@ Execution plan (Phase 0 prototype, revised):
   - CLI parse-failure output now includes structured diagnostics lines:
     - `file:line:col severity [code] message`.
 - Validation:
+  - `cargo test -p compiler`
+
+#### Step 6 — `eval` diagnostics conversion (`EvalError` -> structured diagnostics)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/eval/Cargo.toml`,
+  - `crates/eval/src/lib.rs`,
+  - `crates/eval/tests/core_eval.rs`,
+  - `crates/errors/src/codes.rs`.
+- Implemented:
+  - `eval` now depends on `errors` and implements:
+    - `impl IntoDiagnostic for EvalError`,
+  - stable code mapping in eval diagnostics:
+    - `FRS-EVAL-0001` (`EVAL_MISSING_PROCESS`),
+    - `FRS-EVAL-0002` (`EVAL_UNDEFINED_SYMBOL`),
+    - `FRS-EVAL-0003` (`EVAL_ARITY_MISMATCH`),
+    - `FRS-EVAL-0004` (`EVAL_ITERATION_INVALID`),
+    - `FRS-EVAL-0099` (`EVAL_GENERIC_FAILURE`) for remaining variants,
+  - contextual note/help entries added for common classes (missing process, symbol, arity, iteration),
+  - Rustdoc added on conversion semantics in `eval` (`IntoDiagnostic` impl block),
+  - new eval test coverage:
+    - `eval_error_converts_to_structured_diagnostic_codes`.
+- Validation:
+  - `cargo test -p errors`
+  - `cargo test -p eval`
   - `cargo test -p compiler`
 
 #### Documentation updates linked to this rollout

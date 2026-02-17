@@ -1,4 +1,5 @@
 use boxes::{BoxBuilder, BoxMatch, match_box};
+use errors::{IntoDiagnostic, Severity, Stage, codes};
 use eval::{Environment, EvalError, LoopDetector, eval_box, eval_process};
 use tlib::{TreeArena, TreeId};
 
@@ -417,4 +418,31 @@ fn eval_case_reports_arity_mismatch_and_no_match() {
     )
     .expect_err("no matching rule should fail");
     assert!(matches!(err2, EvalError::PatternMatchFailed));
+}
+
+#[test]
+fn eval_error_converts_to_structured_diagnostic_codes() {
+    let missing = EvalError::MissingProcessDefinition.into_diagnostic();
+    assert_eq!(missing.severity, Severity::Error);
+    assert_eq!(missing.stage, Stage::Eval);
+    assert_eq!(missing.code, codes::EVAL_MISSING_PROCESS);
+    assert!(!missing.help.is_empty());
+
+    let undef = EvalError::UndefinedSymbol {
+        symbol: "foo".to_owned(),
+    }
+    .into_diagnostic();
+    assert_eq!(undef.code, codes::EVAL_UNDEFINED_SYMBOL);
+
+    let iter = EvalError::NegativeIterationCount { value: -1 }.into_diagnostic();
+    assert_eq!(iter.code, codes::EVAL_ITERATION_INVALID);
+    assert!(!iter.help.is_empty());
+
+    let arity = EvalError::TooManyArguments {
+        expected: 2,
+        got: 3,
+    }
+    .into_diagnostic();
+    assert_eq!(arity.code, codes::EVAL_ARITY_MISMATCH);
+    assert!(!arity.notes.is_empty());
 }

@@ -7,6 +7,7 @@ authors.workspace = true
 
 [dependencies]
 boxes = { path = "../boxes" }
+errors = { path = "../errors" }
 tlib = { path = "../tlib" }
 
 [lints]

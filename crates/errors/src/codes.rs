@@ -19,6 +19,7 @@ pub const EVAL_MISSING_PROCESS: DiagnosticCode = DiagnosticCode("FRS-EVAL-0001")
 pub const EVAL_UNDEFINED_SYMBOL: DiagnosticCode = DiagnosticCode("FRS-EVAL-0002");
 pub const EVAL_ARITY_MISMATCH: DiagnosticCode = DiagnosticCode("FRS-EVAL-0003");
 pub const EVAL_ITERATION_INVALID: DiagnosticCode = DiagnosticCode("FRS-EVAL-0004");
+pub const EVAL_GENERIC_FAILURE: DiagnosticCode = DiagnosticCode("FRS-EVAL-0099");
 
 pub const PROP_UNSUPPORTED_BOX: DiagnosticCode = DiagnosticCode("FRS-PROP-0001");
 pub const PROP_ARITY_MISMATCH: DiagnosticCode = DiagnosticCode("FRS-PROP-0002");
@@ -43,6 +44,7 @@ pub fn all_codes() -> &'static [DiagnosticCode] {
         EVAL_UNDEFINED_SYMBOL,
         EVAL_ARITY_MISMATCH,
         EVAL_ITERATION_INVALID,
+        EVAL_GENERIC_FAILURE,
         PROP_UNSUPPORTED_BOX,
         PROP_ARITY_MISMATCH,
         PROP_RECURSION_MISMATCH,
@@ -83,7 +85,11 @@ mod tests {
     #[test]
     fn all_codes_follow_stable_format() {
         for code in all_codes() {
-            assert!(is_valid_code(code.0), "invalid diagnostic code format: {}", code.0);
+            assert!(
+                is_valid_code(code.0),
+                "invalid diagnostic code format: {}",
+                code.0
+            );
         }
     }
 
