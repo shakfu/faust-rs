@@ -2102,7 +2102,7 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --all-targets`
 
-### Diagnostics model rollout (steps 1 to 6, structured error reporting)
+### Diagnostics model rollout (steps 1 to 7, structured error reporting)
 
 - Objective:
   - start implementing the structured diagnostics model planned in porting docs,
@@ -2214,6 +2214,31 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo test -p errors`
   - `cargo test -p eval`
+  - `cargo test -p compiler`
+
+#### Step 7 — `propagate` diagnostics conversion (`PropagateError` -> structured diagnostics)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/propagate/Cargo.toml`,
+  - `crates/propagate/src/lib.rs`,
+  - `crates/propagate/tests/core_api.rs`,
+  - `crates/errors/src/codes.rs`.
+- Implemented:
+  - `propagate` now depends on `errors` and implements:
+    - `impl IntoDiagnostic for PropagateError`,
+  - stable code mapping in propagate diagnostics:
+    - `FRS-PROP-0001` (`PROP_UNSUPPORTED_BOX`),
+    - `FRS-PROP-0002` (`PROP_ARITY_MISMATCH`) for input/output/seq/split/merge mismatches,
+    - `FRS-PROP-0003` (`PROP_RECURSION_MISMATCH`) for recursive composition constraints,
+    - `FRS-PROP-0099` (`PROP_GENERIC_FAILURE`) for integer conversion/range classes,
+  - contextual note/help entries added for arity and recursion mismatch classes,
+  - Rustdoc added on conversion semantics in `propagate` (`IntoDiagnostic` impl block),
+  - new propagate test coverage:
+    - `propagate_error_converts_to_structured_diagnostic_codes`.
+- Validation:
+  - `cargo test -p errors`
+  - `cargo test -p propagate`
   - `cargo test -p compiler`
 
 #### Documentation updates linked to this rollout

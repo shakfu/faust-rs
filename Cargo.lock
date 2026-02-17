@@ -380,6 +380,7 @@ name = "propagate"
 version = "0.1.0"
 dependencies = [
  "boxes",
+ "errors",
  "signals",
  "tlib",
 ]

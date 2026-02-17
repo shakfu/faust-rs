@@ -24,6 +24,7 @@ pub const EVAL_GENERIC_FAILURE: DiagnosticCode = DiagnosticCode("FRS-EVAL-0099")
 pub const PROP_UNSUPPORTED_BOX: DiagnosticCode = DiagnosticCode("FRS-PROP-0001");
 pub const PROP_ARITY_MISMATCH: DiagnosticCode = DiagnosticCode("FRS-PROP-0002");
 pub const PROP_RECURSION_MISMATCH: DiagnosticCode = DiagnosticCode("FRS-PROP-0003");
+pub const PROP_GENERIC_FAILURE: DiagnosticCode = DiagnosticCode("FRS-PROP-0099");
 
 pub const COMP_PARSE_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0001");
 pub const COMP_EVAL_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0002");
@@ -48,6 +49,7 @@ pub fn all_codes() -> &'static [DiagnosticCode] {
         PROP_UNSUPPORTED_BOX,
         PROP_ARITY_MISMATCH,
         PROP_RECURSION_MISMATCH,
+        PROP_GENERIC_FAILURE,
         COMP_PARSE_FAILED,
         COMP_EVAL_FAILED,
         COMP_PROPAGATE_FAILED,

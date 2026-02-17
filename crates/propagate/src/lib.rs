@@ -20,6 +20,8 @@
 use std::fmt::{Display, Formatter};
 
 use boxes::{BoxId, BoxMatch, match_box};
+use errors::codes;
+use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
 use signals::{SigBuilder, SigId};
 use tlib::{NodeKind, TreeArena, TreeId};
 
@@ -175,6 +177,84 @@ impl Display for PropagateError {
 }
 
 impl std::error::Error for PropagateError {}
+
+/// Converts propagation errors into structured diagnostics used by the compiler facade.
+impl IntoDiagnostic for PropagateError {
+    fn into_diagnostic(self) -> Diagnostic {
+        let message = self.to_string();
+        match self {
+            Self::UnsupportedBox { .. } => {
+                Diagnostic::new(Severity::Error, Stage::Propagate, codes::PROP_UNSUPPORTED_BOX, message)
+                    .with_help("evaluate box expression first or add propagation support for this node family")
+            }
+            Self::InputArityMismatch { expected, got, .. }
+            | Self::OutputArityMismatch { expected, got, .. } => {
+                Diagnostic::new(Severity::Error, Stage::Propagate, codes::PROP_ARITY_MISMATCH, message)
+                    .with_note(format!("expected {expected}, got {got}"))
+            }
+            Self::SeqArityMismatch {
+                left_outputs,
+                right_inputs,
+                ..
+            } => Diagnostic::new(Severity::Error, Stage::Propagate, codes::PROP_ARITY_MISMATCH, message)
+                .with_note(format!(
+                    "sequential composition requires left outputs ({left_outputs}) == right inputs ({right_inputs})"
+                )),
+            Self::SplitArityMismatch {
+                left_outputs,
+                right_inputs,
+                ..
+            } => Diagnostic::new(Severity::Error, Stage::Propagate, codes::PROP_ARITY_MISMATCH, message)
+                .with_note(format!(
+                    "split composition requires right inputs ({right_inputs}) to be divisible by left outputs ({left_outputs})"
+                )),
+            Self::MergeArityMismatch {
+                left_outputs,
+                right_inputs,
+                ..
+            } => Diagnostic::new(Severity::Error, Stage::Propagate, codes::PROP_ARITY_MISMATCH, message)
+                .with_note(format!(
+                    "merge composition requires left outputs ({left_outputs}) to be a multiple of right inputs ({right_inputs})"
+                )),
+            Self::RecArityMismatch {
+                left_inputs,
+                left_outputs,
+                right_inputs,
+                right_outputs,
+                ..
+            } => Diagnostic::new(
+                Severity::Error,
+                Stage::Propagate,
+                codes::PROP_RECURSION_MISMATCH,
+                message,
+            )
+            .with_note(format!(
+                "required: right_inputs ({right_inputs}) <= left_outputs ({left_outputs}) and right_outputs ({right_outputs}) <= left_inputs ({left_inputs})"
+            )),
+            Self::InvalidIntegerValue { field, .. } => Diagnostic::new(
+                Severity::Error,
+                Stage::Propagate,
+                codes::PROP_GENERIC_FAILURE,
+                message,
+            )
+            .with_note(format!("invalid integer for field `{field}`")),
+            Self::NegativeIntegerValue { field, value } => Diagnostic::new(
+                Severity::Error,
+                Stage::Propagate,
+                codes::PROP_GENERIC_FAILURE,
+                message,
+            )
+            .with_note(format!("field `{field}` is negative: {value}")),
+            Self::IntegerTooLarge { field, value } => Diagnostic::new(
+                Severity::Error,
+                Stage::Propagate,
+                codes::PROP_GENERIC_FAILURE,
+                message,
+            )
+            .with_note(format!("field `{field}` exceeds target range: {value}")),
+        }
+    }
+}
 
 /// Creates `n` canonical `sigInput(i)` signals.
 ///
