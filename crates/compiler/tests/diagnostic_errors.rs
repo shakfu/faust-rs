@@ -75,6 +75,33 @@ fn propagate_error_fixture_exposes_frs_prop_code() {
 }
 
 #[test]
+fn propagate_error_operator_span_points_to_composition_token() {
+    let compiler = Compiler::new();
+    let source = read_corpus("err_03_propagate_split_mismatch.dsp");
+    let err = compiler
+        .compile_source_to_signals("err_03_propagate_split_mismatch.dsp", &source)
+        .expect_err("propagate error fixture should fail propagate stage");
+
+    let diagnostics = err
+        .diagnostics()
+        .expect("propagate error should expose diagnostics");
+    let first = diagnostics
+        .as_slice()
+        .first()
+        .expect("propagate error bundle should not be empty");
+    let primary = first
+        .labels
+        .first()
+        .expect("propagate error should include one source label");
+
+    assert_eq!(primary.span.line, 1);
+    assert!(
+        primary.span.col > 1,
+        "operator-level span should not point to definition column 1"
+    );
+}
+
+#[test]
 fn propagate_error_complex_fixtures_expose_codes_and_source_labels() {
     let compiler = Compiler::new();
     let fixtures = [

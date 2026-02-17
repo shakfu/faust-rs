@@ -600,6 +600,71 @@ impl ParseState {
         }
     }
 
+    /// Builds `boxPar(left, right)` and tags it with the operator token span.
+    #[must_use]
+    pub fn par_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+        left: TreeId,
+        right: TreeId,
+    ) -> TreeId {
+        let node = self.node_builder().par(left, right);
+        self.mark_use_from_token(lexer, tok, node)
+    }
+
+    /// Builds `boxSeq(left, right)` and tags it with the operator token span.
+    #[must_use]
+    pub fn seq_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+        left: TreeId,
+        right: TreeId,
+    ) -> TreeId {
+        let node = self.node_builder().seq(left, right);
+        self.mark_use_from_token(lexer, tok, node)
+    }
+
+    /// Builds `boxSplit(left, right)` and tags it with the operator token span.
+    #[must_use]
+    pub fn split_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+        left: TreeId,
+        right: TreeId,
+    ) -> TreeId {
+        let node = self.node_builder().split(left, right);
+        self.mark_use_from_token(lexer, tok, node)
+    }
+
+    /// Builds `boxMerge(left, right)` and tags it with the operator token span.
+    #[must_use]
+    pub fn merge_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+        left: TreeId,
+        right: TreeId,
+    ) -> TreeId {
+        let node = self.node_builder().merge(left, right);
+        self.mark_use_from_token(lexer, tok, node)
+    }
+
+    /// Builds `boxRec(left, right)` and tags it with the operator token span.
+    #[must_use]
+    pub fn rec_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+        left: TreeId,
+        right: TreeId,
+    ) -> TreeId {
+        let node = self.node_builder().rec(left, right);
+        self.mark_use_from_token(lexer, tok, node)
+    }
+
     /// Encodes C++ infix primitive lowering: `a op b` -> `boxSeq(boxPar(a,b), boxOp())`.
     #[must_use]
     pub fn binary_prim(&mut self, left: TreeId, right: TreeId, op: PrimitiveOp) -> TreeId {
@@ -649,6 +714,18 @@ impl ParseState {
             PrimitiveOp::Delay => self.node_builder().delay(),
             PrimitiveOp::Delay1 => self.node_builder().delay1(),
         }
+    }
+
+    fn mark_use_from_token<'lexer, 'input: 'lexer>(
+        &mut self,
+        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        tok: Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>,
+        node: TreeId,
+    ) -> TreeId {
+        let span = token_span(&tok);
+        self.update_cursor_from_span(lexer, span);
+        self.ctx.set_use_prop_at_cursor(node);
+        node
     }
 
     fn update_cursor_from_span<'lexer, 'input: 'lexer>(

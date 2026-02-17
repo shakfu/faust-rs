@@ -2451,3 +2451,27 @@ Execution plan (Phase 0 prototype, revised):
     - richer human-readable expression context,
     - expanded complex negative snapshot corpus,
     - operator-specific correction hints.
+
+#### Diagnostics UX next tranche — Step 1 (operator-level source precision)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/parser-proto/src/context.rs`,
+  - `crates/parser-proto/src/lib.rs`,
+  - `crates/parser-proto/src/grammar/faustparser.y`,
+  - `crates/compiler/src/lib.rs`,
+  - `crates/compiler/tests/diagnostic_errors.rs`.
+- Implemented:
+  - parser context now preserves full cursor span (`line/col/end_line/end_col`) when
+    storing def/use properties from cursor hooks.
+  - parser semantic actions for composition operators now tag produced expression nodes
+    with operator-token source spans (`PAR`, `SEQ`, `SPLIT`, `MIX`, `REC`) so diagnostics
+    can point to the operator column.
+  - compiler label-resolution priority now prefers direct offending-node spans before
+    definition fallback, keeping alias-chain ownership fallback intact.
+  - added compiler integration test to lock operator-level label behavior on propagate
+    split mismatch fixtures.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p parser-proto --test parser_slice1`
+  - `cargo test -p compiler --test diagnostic_errors`

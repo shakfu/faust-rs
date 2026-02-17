@@ -384,6 +384,11 @@ impl ParserCtx {
             .set_with_key(sym, self.def_prop_key, SourceLocation::new(file, line));
     }
 
+    /// Sets definition property with full source span precision.
+    pub fn set_def_prop_location(&mut self, sym: TreeId, location: SourceLocation) {
+        let _ = self.props.set_with_key(sym, self.def_prop_key, location);
+    }
+
     /// Equivalent to C++ `setUseProp(sym, file, line)`.
     pub fn set_use_prop(&mut self, sym: TreeId, file: &str, line: u32) {
         let _ = self
@@ -391,16 +396,21 @@ impl ParserCtx {
             .set_with_key(sym, self.use_prop_key, SourceLocation::new(file, line));
     }
 
+    /// Sets usage property with full source span precision.
+    pub fn set_use_prop_location(&mut self, sym: TreeId, location: SourceLocation) {
+        let _ = self.props.set_with_key(sym, self.use_prop_key, location);
+    }
+
     /// Convenience hook: set definition property from current parser cursor.
     pub fn set_def_prop_at_cursor(&mut self, sym: TreeId) {
         let loc = self.cursor.clone();
-        self.set_def_prop(sym, loc.file(), loc.line());
+        self.set_def_prop_location(sym, loc);
     }
 
     /// Convenience hook: set usage property from current parser cursor.
     pub fn set_use_prop_at_cursor(&mut self, sym: TreeId) {
         let loc = self.cursor.clone();
-        self.set_use_prop(sym, loc.file(), loc.line());
+        self.set_use_prop_location(sym, loc);
     }
 
     /// Equivalent to C++ `hasDefProp(sym)`.

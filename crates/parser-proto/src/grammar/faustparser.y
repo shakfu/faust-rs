@@ -358,16 +358,16 @@ ArgList -> tlib::TreeId:
 
 Argument -> tlib::TreeId:
       Argument SEQ Argument {
-          crate::with_state(state, |state| state.node_builder().seq($1, $3))
+          crate::with_state(state, |state| state.seq_from_token($lexer, $2, $1, $3))
       }
     | Argument SPLIT Argument {
-          crate::with_state(state, |state| state.node_builder().split($1, $3))
+          crate::with_state(state, |state| state.split_from_token($lexer, $2, $1, $3))
       }
     | Argument MIX Argument {
-          crate::with_state(state, |state| state.node_builder().merge($1, $3))
+          crate::with_state(state, |state| state.merge_from_token($lexer, $2, $1, $3))
       }
     | Argument REC Argument {
-          crate::with_state(state, |state| state.node_builder().rec($1, $3))
+          crate::with_state(state, |state| state.rec_from_token($lexer, $2, $1, $3))
       }
     | InfixExp { $1 }
     ;
@@ -394,19 +394,19 @@ Expression -> tlib::TreeId:
           })
       }
     | Expression PAR Expression {
-          crate::with_state(state, |state| state.node_builder().par($1, $3))
+          crate::with_state(state, |state| state.par_from_token($lexer, $2, $1, $3))
       }
     | Expression SEQ Expression {
-          crate::with_state(state, |state| state.node_builder().seq($1, $3))
+          crate::with_state(state, |state| state.seq_from_token($lexer, $2, $1, $3))
       }
     | Expression SPLIT Expression {
-          crate::with_state(state, |state| state.node_builder().split($1, $3))
+          crate::with_state(state, |state| state.split_from_token($lexer, $2, $1, $3))
       }
     | Expression MIX Expression {
-          crate::with_state(state, |state| state.node_builder().merge($1, $3))
+          crate::with_state(state, |state| state.merge_from_token($lexer, $2, $1, $3))
       }
     | Expression REC Expression {
-          crate::with_state(state, |state| state.node_builder().rec($1, $3))
+          crate::with_state(state, |state| state.rec_from_token($lexer, $2, $1, $3))
       }
     | InfixExp { $1 }
     ;

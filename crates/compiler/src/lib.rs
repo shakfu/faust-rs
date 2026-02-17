@@ -337,8 +337,8 @@ fn maybe_add_source_label(
     defs_root: BoxId,
     node: BoxId,
 ) -> Diagnostic {
-    let span = source_span_for_definition_of_expr(ctx, arena, defs_root, node)
-        .or_else(|| source_span_from_node_or_descendant(ctx, arena, node))
+    let span = source_span_from_node_or_descendant(ctx, arena, node)
+        .or_else(|| source_span_for_definition_of_expr(ctx, arena, defs_root, node))
         .or_else(|| source_span_for_process_binding_target(ctx, arena, defs_root))
         .or_else(|| source_span_for_process_definition(ctx, arena, defs_root));
     let Some(span) = span else {
