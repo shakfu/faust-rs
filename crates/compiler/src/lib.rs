@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use boxes::BoxId;
-use errors::DiagnosticBundle;
+use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic};
 use parser::{ParseOutput, SourceReaderError};
 use propagate::{BoxArity, PropagateError};
 use signals::SigId;
@@ -113,13 +113,34 @@ impl Compiler {
             source: source.into(),
         })?;
 
-        let process_box =
-            eval::eval_process(&mut output.state.arena, root).map_err(CompilerError::Eval)?;
-        let process_arity = propagate::box_arity(&output.state.arena, process_box)
-            .map_err(CompilerError::Propagate)?;
+        let process_box = eval::eval_process(&mut output.state.arena, root).map_err(|error| {
+            let diagnostics = bundle_from_diagnostic(error.clone().into_diagnostic());
+            CompilerError::Eval {
+                source: source.into(),
+                error,
+                diagnostics,
+            }
+        })?;
+        let process_arity =
+            propagate::box_arity(&output.state.arena, process_box).map_err(|error| {
+                let diagnostics = bundle_from_diagnostic(error.clone().into_diagnostic());
+                CompilerError::Propagate {
+                    source: source.into(),
+                    error,
+                    diagnostics,
+                }
+            })?;
         let inputs = propagate::make_sig_input_list(&mut output.state.arena, process_arity.inputs);
-        let signals = propagate::propagate(&mut output.state.arena, process_box, &inputs)
-            .map_err(CompilerError::Propagate)?;
+        let signals = propagate::propagate(&mut output.state.arena, process_box, &inputs).map_err(
+            |error| {
+                let diagnostics = bundle_from_diagnostic(error.clone().into_diagnostic());
+                CompilerError::Propagate {
+                    source: source.into(),
+                    error,
+                    diagnostics,
+                }
+            },
+        )?;
 
         Ok(SignalCompileOutput {
             parse: output,
@@ -149,8 +170,16 @@ pub enum CompilerError {
         recoveries: u32,
         diagnostics: DiagnosticBundle,
     },
-    Eval(eval::EvalError),
-    Propagate(PropagateError),
+    Eval {
+        source: Box<str>,
+        error: eval::EvalError,
+        diagnostics: DiagnosticBundle,
+    },
+    Propagate {
+        source: Box<str>,
+        error: PropagateError,
+        diagnostics: DiagnosticBundle,
+    },
 }
 
 impl std::fmt::Display for CompilerError {
@@ -168,8 +197,12 @@ impl std::fmt::Display for CompilerError {
                 "parse failed for {source}: errors={parse_errors}, recoveries={recoveries}, diagnostics={}",
                 diagnostics.len()
             ),
-            Self::Eval(err) => write!(f, "evaluation failed: {err}"),
-            Self::Propagate(err) => write!(f, "propagation failed: {err}"),
+            Self::Eval { source, error, .. } => {
+                write!(f, "evaluation failed for {source}: {error}")
+            }
+            Self::Propagate { source, error, .. } => {
+                write!(f, "propagation failed for {source}: {error}")
+            }
         }
     }
 }
@@ -182,6 +215,8 @@ impl CompilerError {
     pub fn diagnostics(&self) -> Option<&DiagnosticBundle> {
         match self {
             Self::Parse { diagnostics, .. } => Some(diagnostics),
+            Self::Eval { diagnostics, .. } => Some(diagnostics),
+            Self::Propagate { diagnostics, .. } => Some(diagnostics),
             _ => None,
         }
     }
@@ -201,6 +236,12 @@ fn ensure_parse_success(source: &str, output: ParseOutput) -> Result<ParseOutput
             diagnostics: output.diagnostics,
         })
     }
+}
+
+fn bundle_from_diagnostic(diagnostic: Diagnostic) -> DiagnosticBundle {
+    let mut diagnostics = DiagnosticBundle::new();
+    diagnostics.push(diagnostic);
+    diagnostics
 }
 
 #[must_use]
@@ -395,6 +436,39 @@ mod tests {
         let err = compiler
             .compile_source_to_signals("missing_process.dsp", "foo = _;")
             .expect_err("missing process should fail evaluation");
-        assert!(matches!(err, CompilerError::Eval(_)));
+        assert!(matches!(
+            err,
+            CompilerError::Eval {
+                error: eval::EvalError::MissingProcessDefinition,
+                ..
+            }
+        ));
+        let diagnostics = err
+            .diagnostics()
+            .expect("eval failure should expose structured diagnostics");
+        assert!(
+            diagnostics
+                .as_slice()
+                .iter()
+                .any(|d| d.code.0.starts_with("FRS-EVAL-"))
+        );
+    }
+
+    #[test]
+    fn compiler_compile_source_to_signals_reports_propagate_error() {
+        let compiler = Compiler::new();
+        let err = compiler
+            .compile_source_to_signals("prop_mismatch.dsp", "process = _,_ <: _,_,_;")
+            .expect_err("invalid split arity should fail propagation");
+        assert!(matches!(err, CompilerError::Propagate { .. }));
+        let diagnostics = err
+            .diagnostics()
+            .expect("propagate failure should expose structured diagnostics");
+        assert!(
+            diagnostics
+                .as_slice()
+                .iter()
+                .any(|d| d.code.0.starts_with("FRS-PROP-"))
+        );
     }
 }

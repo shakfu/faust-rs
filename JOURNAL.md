@@ -2102,7 +2102,7 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --all-targets`
 
-### Diagnostics model rollout (steps 1 to 7, structured error reporting)
+### Diagnostics model rollout (steps 1 to 8, structured error reporting)
 
 - Objective:
   - start implementing the structured diagnostics model planned in porting docs,
@@ -2192,7 +2192,7 @@ Execution plan (Phase 0 prototype, revised):
 
 #### Step 6 — `eval` diagnostics conversion (`EvalError` -> structured diagnostics)
 
-- Commit: pending (working tree step, to be committed separately)
+- Commit: `cb9e513`
 - Files:
   - `crates/eval/Cargo.toml`,
   - `crates/eval/src/lib.rs`,
@@ -2218,7 +2218,7 @@ Execution plan (Phase 0 prototype, revised):
 
 #### Step 7 — `propagate` diagnostics conversion (`PropagateError` -> structured diagnostics)
 
-- Commit: pending (working tree step, to be committed separately)
+- Commit: `17fc686`
 - Files:
   - `crates/propagate/Cargo.toml`,
   - `crates/propagate/src/lib.rs`,
@@ -2239,6 +2239,32 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo test -p errors`
   - `cargo test -p propagate`
+  - `cargo test -p compiler`
+
+#### Step 8 — compiler cross-phase diagnostics aggregation (`parse/eval/propagate`)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/src/lib.rs`.
+- Implemented:
+  - `Compiler::pipeline_to_signals` now wraps `EvalError` and `PropagateError` into
+    `CompilerError` variants carrying:
+    - `source`,
+    - original typed error,
+    - `DiagnosticBundle` created from `IntoDiagnostic`.
+  - `CompilerError` variants enriched:
+    - `Eval { source, error, diagnostics }`,
+    - `Propagate { source, error, diagnostics }`,
+    replacing payload-only tuple variants.
+  - `CompilerError::diagnostics()` now exposes structured diagnostics for all three
+    relevant phases:
+    - parse,
+    - eval,
+    - propagate.
+  - compiler tests strengthened:
+    - eval failure now asserts `FRS-EVAL-*` presence in returned diagnostics,
+    - new propagate failure test asserts `FRS-PROP-*` presence.
+- Validation:
   - `cargo test -p compiler`
 
 #### Documentation updates linked to this rollout
