@@ -2622,3 +2622,20 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo test -p compiler --test diagnostic_errors`
   - `cargo test -p compiler --bin faust-rs`
+
+#### Diagnostics readability micro-tranche — Step 3 (explicit owner-definition note)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/src/lib.rs`,
+  - `crates/compiler/tests/diagnostic_errors.rs`.
+- Implemented:
+  - diagnostics enrichment now emits an explicit ownership note when resolvable:
+    - `error originates from definition 'foo'`.
+  - owner note is emitted for both eval and propagate node-based failures and complements
+    `binding_trace=process -> ... -> foo`.
+  - added integration test lock on alias-chain mismatch fixture to assert owner note presence.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --test diagnostic_errors`
+  - `cargo test -p compiler --bin faust-rs`

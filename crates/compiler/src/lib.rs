@@ -127,6 +127,11 @@ impl Compiler {
                     "expr={}",
                     compact_human_box_preview(&output.state.arena, node)
                 ));
+                if let Some(owner) = owner_definition_name_for_node(&output.state.arena, root, node)
+                {
+                    diagnostic =
+                        diagnostic.with_note(format!("error originates from definition '{owner}'"));
+                }
                 if let Some(trace) = alias_binding_trace_for_node(&output.state.arena, root, node) {
                     diagnostic = diagnostic.with_note(format!("binding_trace={trace}"));
                 }
@@ -158,6 +163,12 @@ impl Compiler {
                         "expr={}",
                         compact_human_box_preview(&output.state.arena, node)
                     ));
+                    if let Some(owner) =
+                        owner_definition_name_for_node(&output.state.arena, root, node)
+                    {
+                        diagnostic = diagnostic
+                            .with_note(format!("error originates from definition '{owner}'"));
+                    }
                     if let Some(trace) =
                         alias_binding_trace_for_node(&output.state.arena, root, node)
                     {
@@ -194,6 +205,12 @@ impl Compiler {
                         "expr={}",
                         compact_human_box_preview(&output.state.arena, node)
                     ));
+                    if let Some(owner) =
+                        owner_definition_name_for_node(&output.state.arena, root, node)
+                    {
+                        diagnostic = diagnostic
+                            .with_note(format!("error originates from definition '{owner}'"));
+                    }
                     if let Some(trace) =
                         alias_binding_trace_for_node(&output.state.arena, root, node)
                     {

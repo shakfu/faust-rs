@@ -174,6 +174,13 @@ fn propagate_error_alias_chain_exposes_binding_trace_note() {
             .any(|note| note.as_ref() == "binding_trace=process -> baz -> bar -> foo"),
         "alias chain note should expose the ownership trace"
     );
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|note| note.as_ref() == "error originates from definition 'foo'"),
+        "alias chain note should expose the owner definition"
+    );
 }
 
 #[test]
