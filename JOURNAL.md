@@ -3279,3 +3279,29 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo clippy -p compiler -p xtask --all-targets -- -D warnings`
   - `cargo test -p compiler -p xtask --all-targets`
   - `cargo run -p compiler -- --dump-cpp tests/corpus/rep_01_passthrough.dsp`
+
+#### C++ backend module-first rollout — Step 6 (differential report vs C++)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/xtask/Cargo.toml`
+  - `crates/xtask/src/main.rs`
+  - `porting/phases/phase-6-cpp-backend-diff-report-en.md`
+  - `JOURNAL.md`
+- Implemented:
+  - added a dedicated differential command:
+    - `cargo run -p xtask -- cpp-backend-diff-report`.
+  - new report output:
+    - `porting/phases/phase-6-cpp-backend-diff-report-en.md`.
+  - comparison policy:
+    - Rust backend output (`compiler` module-first C++ bridge) vs C++ `faust`,
+    - shell-normalized signature check (`FAUSTCLASS`, class declaration, `RESTRICT`, Apple aliases),
+    - explicit `OK/DIFF/UNSUPPORTED` classification table.
+  - representative corpus set includes 8 DSP fixtures (audio, UI, extended primitives).
+  - current run result:
+    - `OK=8`, `DIFF=0`, `UNSUPPORTED=0`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy -p xtask -p compiler --all-targets -- -D warnings`
+  - `cargo test -p xtask --all-targets`
+  - `cargo run -p xtask -- cpp-backend-diff-report`

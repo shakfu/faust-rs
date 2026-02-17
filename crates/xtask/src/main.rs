@@ -15,6 +15,7 @@ Usage:
   cargo run -p xtask -- golden-gen-cpp [-- <extra args passed to FAUST_CPP_BIN>]
   cargo run -p xtask -- parser-parity-report
   cargo run -p xtask -- corpus-status-report
+  cargo run -p xtask -- cpp-backend-diff-report
 \nEnvironment for golden-gen-cpp:
   FAUST_CPP_BIN   Path to reference C++ faust binary
 \nEnvironment for golden-check:
@@ -25,6 +26,8 @@ const CPP_SOURCE_ROOT: &str = "/Users/letz/Developpements/RUST/faust";
 const PARITY_REPORT_REL_PATH: &str = "porting/phases/phase-3-parser-parity-report-en.md";
 const CORPUS_STATUS_REPORT_REL_PATH: &str =
     "porting/phases/phase-4-corpus-status-diff-report-en.md";
+const CPP_BACKEND_DIFF_REPORT_REL_PATH: &str =
+    "porting/phases/phase-6-cpp-backend-diff-report-en.md";
 
 fn main() {
     if let Err(err) = run() {
@@ -58,6 +61,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         "parser-parity-report" => parser_parity_report()?,
         "corpus-status-report" => corpus_status_report()?,
+        "cpp-backend-diff-report" => cpp_backend_diff_report()?,
         _ => {
             print!("{USAGE}");
         }
@@ -627,6 +631,219 @@ fn corpus_status_report() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(&report_path, out)?;
     println!("updated {}", report_path.display());
     Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ShellSignature {
+    faustclass: Option<String>,
+    class_decl: Option<String>,
+    has_restrict_define: bool,
+    has_exp10_aliases: bool,
+}
+
+#[derive(Clone, Debug)]
+struct CppDiffRow {
+    case: String,
+    class: &'static str,
+    rust_reason: String,
+    cpp_reason: String,
+}
+
+fn cpp_backend_diff_report() -> Result<(), Box<dyn std::error::Error>> {
+    let root = workspace_root();
+    let report_path = root.join(CPP_BACKEND_DIFF_REPORT_REL_PATH);
+    let compiler = compiler::Compiler::new();
+    let (cpp_bin, cpp_bin_is_fallback) = resolve_cpp_faust_bin();
+    let options = codegen::backends::cpp::CppOptions {
+        class_name: Some("mydsp".to_owned()),
+        ..codegen::backends::cpp::CppOptions::default()
+    };
+
+    let representative = [
+        "rep_01_passthrough.dsp",
+        "rep_05_one_pole_lowpass.dsp",
+        "rep_09_ui_slider.dsp",
+        "rep_17_ui_groups.dsp",
+        "rep_20_environment_waveform.dsp",
+        "rep_22_parallel_mix.dsp",
+        "rep_28_nested_ui_groups.dsp",
+        "rep_31_extended_primitives.dsp",
+    ];
+
+    let mut rows = Vec::with_capacity(representative.len());
+    let mut ok = 0usize;
+    let mut diff = 0usize;
+    let mut unsupported = 0usize;
+
+    for case in representative {
+        let path = root.join("tests").join("corpus").join(case);
+        let rust_output = compiler.compile_file_default_to_cpp(&path, &options);
+        let cpp_output = Command::new(&cpp_bin).arg(&path).output()?;
+
+        let row = match (rust_output, cpp_output.status.success()) {
+            (Ok(rust_text), true) => {
+                let cpp_text = String::from_utf8(cpp_output.stdout)?;
+                let rust_sig = extract_shell_signature(&rust_text);
+                let cpp_sig = extract_shell_signature(&cpp_text);
+                if rust_sig == cpp_sig {
+                    ok = ok.saturating_add(1);
+                    CppDiffRow {
+                        case: case.to_owned(),
+                        class: "OK",
+                        rust_reason: "shell signature matches".to_owned(),
+                        cpp_reason: "ok".to_owned(),
+                    }
+                } else {
+                    diff = diff.saturating_add(1);
+                    CppDiffRow {
+                        case: case.to_owned(),
+                        class: "DIFF",
+                        rust_reason: format!("rust={rust_sig:?}"),
+                        cpp_reason: format!("cpp={cpp_sig:?}"),
+                    }
+                }
+            }
+            (Ok(_), false) => {
+                unsupported = unsupported.saturating_add(1);
+                CppDiffRow {
+                    case: case.to_owned(),
+                    class: "UNSUPPORTED",
+                    rust_reason: "Rust path ok".to_owned(),
+                    cpp_reason: first_non_empty_line(&String::from_utf8_lossy(&cpp_output.stderr))
+                        .or_else(|| {
+                            first_non_empty_line(&String::from_utf8_lossy(&cpp_output.stdout))
+                        })
+                        .unwrap_or_else(|| format!("failed with status {}", cpp_output.status)),
+                }
+            }
+            (Err(err), true) => {
+                unsupported = unsupported.saturating_add(1);
+                CppDiffRow {
+                    case: case.to_owned(),
+                    class: "UNSUPPORTED",
+                    rust_reason: err.to_string(),
+                    cpp_reason: "C++ path ok".to_owned(),
+                }
+            }
+            (Err(err), false) => {
+                unsupported = unsupported.saturating_add(1);
+                CppDiffRow {
+                    case: case.to_owned(),
+                    class: "UNSUPPORTED",
+                    rust_reason: err.to_string(),
+                    cpp_reason: first_non_empty_line(&String::from_utf8_lossy(&cpp_output.stderr))
+                        .or_else(|| {
+                            first_non_empty_line(&String::from_utf8_lossy(&cpp_output.stdout))
+                        })
+                        .unwrap_or_else(|| format!("failed with status {}", cpp_output.status)),
+                }
+            }
+        };
+        rows.push(row);
+    }
+
+    let mut out = String::new();
+    writeln!(
+        &mut out,
+        "# Phase 6 C++ Backend Differential Report (Module-First, Shell-Normalized)"
+    )?;
+    writeln!(&mut out)?;
+    writeln!(
+        &mut out,
+        "Generated by: `cargo run -p xtask -- cpp-backend-diff-report`"
+    )?;
+    writeln!(&mut out, "- C++ binary: `{}`", cpp_bin.display())?;
+    if cpp_bin_is_fallback {
+        writeln!(
+            &mut out,
+            "- Note: fallback to `faust` from PATH because `{}/build/bin/faust` was not found.",
+            CPP_SOURCE_ROOT
+        )?;
+    }
+    writeln!(
+        &mut out,
+        "- Normalization: compare module-shell signature only"
+    )?;
+    writeln!(&mut out, "  - `#define FAUSTCLASS <name>`")?;
+    writeln!(&mut out, "  - `class <name> : public dsp`")?;
+    writeln!(
+        &mut out,
+        "  - presence of `RESTRICT` and Apple `exp10` aliases"
+    )?;
+    writeln!(&mut out)?;
+    writeln!(&mut out, "## Summary")?;
+    writeln!(&mut out, "- Cases: `{}`", rows.len())?;
+    writeln!(&mut out, "- `OK`: `{ok}`")?;
+    writeln!(&mut out, "- `DIFF`: `{diff}`")?;
+    writeln!(&mut out, "- `UNSUPPORTED`: `{unsupported}`")?;
+    writeln!(&mut out)?;
+    writeln!(
+        &mut out,
+        "| Case | Status | Rust detail | C++ detail |\n|------|--------|-------------|------------|"
+    )?;
+    for row in &rows {
+        writeln!(
+            &mut out,
+            "| `{}` | `{}` | `{}` | `{}` |",
+            row.case,
+            row.class,
+            markdown_escape(&row.rust_reason),
+            markdown_escape(&row.cpp_reason)
+        )?;
+    }
+    writeln!(&mut out)?;
+    writeln!(&mut out, "## Notes")?;
+    writeln!(
+        &mut out,
+        "- This report tracks module-shell parity while full production signal->FIR lowering is still in progress."
+    )?;
+    writeln!(
+        &mut out,
+        "- `DIFF` rows are expected to shrink as statement/value lowering and orchestration parity advance."
+    )?;
+
+    if let Some(parent) = report_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&report_path, out)?;
+    println!("updated {}", report_path.display());
+    Ok(())
+}
+
+fn extract_shell_signature(text: &str) -> ShellSignature {
+    let mut faustclass = None::<String>;
+    let mut class_decl = None::<String>;
+    let mut has_restrict_define = false;
+    let mut has_exp10f_alias = false;
+    let mut has_exp10_alias = false;
+
+    for raw in text.lines() {
+        let line = raw.trim();
+        if let Some(rest) = line.strip_prefix("#define FAUSTCLASS ") {
+            faustclass = Some(rest.trim().to_owned());
+        }
+        if let Some(rest) = line.strip_prefix("class ")
+            && let Some((name, _)) = rest.split_once(" : public dsp")
+        {
+            class_decl = Some(name.trim().to_owned());
+        }
+        if line.contains("#define RESTRICT") {
+            has_restrict_define = true;
+        }
+        if line == "#define exp10f __exp10f" {
+            has_exp10f_alias = true;
+        }
+        if line == "#define exp10 __exp10" {
+            has_exp10_alias = true;
+        }
+    }
+
+    ShellSignature {
+        faustclass,
+        class_decl,
+        has_restrict_define,
+        has_exp10_aliases: has_exp10f_alias && has_exp10_alias,
+    }
 }
 
 fn resolve_cpp_faust_bin() -> (PathBuf, bool) {
