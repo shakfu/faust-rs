@@ -175,3 +175,48 @@ fn propagate_error_alias_chain_exposes_binding_trace_note() {
         "alias chain note should expose the ownership trace"
     );
 }
+
+#[test]
+fn propagate_error_includes_paired_side_context_notes() {
+    let compiler = Compiler::new();
+    let source = read_corpus("err_05_propagate_merge_mismatch_alias.dsp");
+    let err = compiler
+        .compile_source_to_signals("err_05_propagate_merge_mismatch_alias.dsp", &source)
+        .expect_err("fixture should fail in propagate stage");
+
+    let diagnostics = err
+        .diagnostics()
+        .expect("propagate error should expose diagnostics");
+    let first = diagnostics
+        .as_slice()
+        .first()
+        .expect("propagate error bundle should not be empty");
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|note| note.as_ref().starts_with("A (merge left) = ")),
+        "diagnostic should expose left-side expression context"
+    );
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|note| note.as_ref().starts_with("B (merge right) = ")),
+        "diagnostic should expose right-side expression context"
+    );
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|note| note.as_ref().starts_with("A arity: ")),
+        "diagnostic should expose left-side arity context"
+    );
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|note| note.as_ref().starts_with("B arity: ")),
+        "diagnostic should expose right-side arity context"
+    );
+}

@@ -162,6 +162,8 @@ impl Compiler {
                     {
                         diagnostic = diagnostic.with_note(format!("binding_trace={trace}"));
                     }
+                    diagnostic =
+                        add_paired_propagate_context(diagnostic, &error, &output.state.arena);
                     diagnostic = maybe_add_source_label(
                         diagnostic,
                         &output.state.ctx,
@@ -196,6 +198,8 @@ impl Compiler {
                     {
                         diagnostic = diagnostic.with_note(format!("binding_trace={trace}"));
                     }
+                    diagnostic =
+                        add_paired_propagate_context(diagnostic, &error, &output.state.arena);
                     diagnostic = maybe_add_source_label(
                         diagnostic,
                         &output.state.ctx,
@@ -439,6 +443,49 @@ fn prim_infix_symbol(arena: &tlib::TreeArena, node: BoxId) -> Option<&'static st
         BoxMatch::Rsh => Some(">>"),
         _ => None,
     }
+}
+
+/// Enriches arity-mismatch diagnostics with explicit paired A/B expression context.
+fn add_paired_propagate_context(
+    mut diagnostic: Diagnostic,
+    error: &PropagateError,
+    arena: &tlib::TreeArena,
+) -> Diagnostic {
+    let (node, op_name) = match error {
+        PropagateError::SeqArityMismatch { node, .. } => (*node, "seq"),
+        PropagateError::SplitArityMismatch { node, .. } => (*node, "split"),
+        PropagateError::MergeArityMismatch { node, .. } => (*node, "merge"),
+        PropagateError::RecArityMismatch { node, .. } => (*node, "rec"),
+        _ => return diagnostic,
+    };
+
+    let (left, right) = match match_box(arena, node) {
+        BoxMatch::Seq(left, right)
+        | BoxMatch::Split(left, right)
+        | BoxMatch::Merge(left, right)
+        | BoxMatch::Rec(left, right) => (left, right),
+        _ => return diagnostic,
+    };
+
+    let left_expr = compact_human_box_preview(arena, left);
+    let right_expr = compact_human_box_preview(arena, right);
+    diagnostic = diagnostic.with_note(format!("A ({op_name} left) = {left_expr}"));
+    diagnostic = diagnostic.with_note(format!("B ({op_name} right) = {right_expr}"));
+
+    if let Ok(a) = propagate::box_arity(arena, left) {
+        diagnostic = diagnostic.with_note(format!(
+            "A arity: inputs={} outputs={}",
+            a.inputs, a.outputs
+        ));
+    }
+    if let Ok(b) = propagate::box_arity(arena, right) {
+        diagnostic = diagnostic.with_note(format!(
+            "B arity: inputs={} outputs={}",
+            b.inputs, b.outputs
+        ));
+    }
+
+    diagnostic
 }
 
 /// Attaches a primary source label when parser metadata can be resolved for `node`.

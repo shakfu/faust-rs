@@ -2511,3 +2511,23 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo test -p compiler --test diagnostic_errors`
   - `cargo test -p compiler --lib`
+
+#### Diagnostics UX next tranche — Step 4 (paired-side mismatch context)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/src/lib.rs`,
+  - `crates/compiler/tests/diagnostic_errors.rs`.
+- Implemented:
+  - propagate mismatch diagnostics now include explicit paired context:
+    - `A (<op> left) = <expr>`,
+    - `B (<op> right) = <expr>`,
+    - `A arity: inputs=... outputs=...`,
+    - `B arity: inputs=... outputs=...`.
+  - this aligns Rust diagnostics with the C++ style expectation of naming both sides
+    of a composition error while keeping the structured note model.
+  - added integration test lock on merge-mismatch alias fixture.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --test diagnostic_errors`
+  - `cargo test -p compiler --lib`
