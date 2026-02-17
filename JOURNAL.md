@@ -2435,3 +2435,19 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo test -p compiler --test diagnostic_errors`
   - `cargo test -p compiler --lib`
+
+#### Documentation addendum — diagnostics UX next tranche planning
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `porting/faust-rust-diagnostics-model-en.md`,
+  - `porting/phases/phase-4-signaux-en.md`,
+  - `porting/faust-rust-porting-plan-en.md`.
+- Implemented:
+  - documented the next prioritized diagnostics-improvement tranche:
+    - operator-level source precision (column-level spans),
+    - alias-resolution context notes (`process -> ... -> owner`),
+    - paired-side mismatch context (left/right arity notes),
+    - richer human-readable expression context,
+    - expanded complex negative snapshot corpus,
+    - operator-specific correction hints.

@@ -450,6 +450,18 @@ Prioritized implementation roadmap for clearer user-facing errors:
 - keep `--error-format json` schema unchanged,
 - add snapshot tests for both formats on representative Phase 4 failures.
 
+5. Operator-level source precision:
+- propagate parser-origin spans beyond identifier nodes so composition failures can highlight exact operator/source column.
+
+6. Alias-chain explanation notes:
+- add contextual trace notes for resolved bindings in failures (`process -> bar -> foo`) to make ownership of faulty expressions explicit.
+
+7. Paired mismatch display:
+- expose left/right composition sides with computed arities in structured notes.
+
+8. Extended negative corpus lock:
+- add and maintain complex connection-failure fixtures (alias chains, recursive mismatches, UI/route-driven mismatches) with stable snapshot assertions.
+
 Reference model:
 - `porting/faust-rust-diagnostics-model-en.md` (sections 4.1, 5.3, 5.4, 6-D/E).
 

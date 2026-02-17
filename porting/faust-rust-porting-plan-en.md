@@ -204,6 +204,10 @@ Near-term diagnostics UX priorities after baseline rollout:
 - add rule-aware actionable explanations for arity/composition mismatches,
 - propagate source spans into Phase 4 diagnostics when available,
 - lock human+JSON renderer behavior with snapshot tests.
+- add operator-level source pointing (column-precise spans on composition operators),
+- include alias-resolution context in diagnostics (`process -> ... -> owner`),
+- expose paired left/right mismatch context with computed arities,
+- expand complex negative corpus and operator-specific correction hints.
 
 ---
 

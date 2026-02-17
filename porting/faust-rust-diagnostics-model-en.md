@@ -286,6 +286,26 @@ Pass criterion:
 - Snapshot tests cover both `--error-format human` and `--error-format json`
   on Linux/macOS/Windows.
 
+Remaining UX improvements (next tranche, prioritized):
+
+1. Precise in-line pointing:
+- attach parser-origin spans to non-identifier expression nodes so diagnostics can point to operator-level columns (`<:`, `:>`, `~`, etc.), not only definition starts.
+
+2. Alias-resolution context:
+- include explicit binding trace notes for propagated failures when relevant (`process -> bar -> foo`).
+
+3. Readable expression context:
+- keep machine-oriented internal preview (`box_expr=...`) but add a human-facing normalized expression form for diagnostics.
+
+4. Paired-side mismatch context:
+- for composition errors, include both sides with computed arities in dedicated notes (left expression/output vs right expression/input).
+
+5. Snapshot expansion:
+- extend negative snapshot corpus to alias chains, recursive mismatches, and UI-driven composition failures.
+
+6. Operator-specific correction hints:
+- tune `help` messages per composition class (`seq`, `split`, `merge`, `rec`) with concrete fix patterns.
+
 ---
 
 ## 7. Test strategy
