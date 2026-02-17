@@ -370,7 +370,7 @@ fn eval_case_pattern_var_binds_argument() {
 }
 
 #[test]
-fn eval_case_reports_arity_mismatch_and_no_match() {
+fn eval_case_under_application_lowers_and_no_match_still_errors() {
     let mut arena = TreeArena::new();
     let x_ident = make_ident(&mut arena, "x");
     let y_ident = make_ident(&mut arena, "y");
@@ -387,21 +387,30 @@ fn eval_case_reports_arity_mismatch_and_no_match() {
     let expr_arity = BoxBuilder::new(&mut arena).appl(case_expr, args_one);
 
     let mut loop_detector = LoopDetector::new();
-    let err = eval_box(
+    let lowered = eval_box(
         &mut arena,
         expr_arity,
         &Environment::empty(),
         &mut loop_detector,
     )
-    .expect_err("arity mismatch should fail");
-    assert!(matches!(
-        err,
-        EvalError::PatternArityMismatch {
-            node: _,
-            expected: 2,
-            got: 1
-        }
-    ));
+    .expect("under-applied case should lower to seq(par(args+wires), case)");
+    let (lhs, rhs) = match match_box(&arena, lowered) {
+        BoxMatch::Seq(lhs, rhs) => (lhs, rhs),
+        other => panic!("expected BOXSEQ, got {other:?}"),
+    };
+    assert_eq!(
+        rhs, case_expr,
+        "lowered function should keep original case node"
+    );
+    let (a, b) = match match_box(&arena, lhs) {
+        BoxMatch::Par(a, b) => (a, b),
+        other => panic!("expected BOXPAR, got {other:?}"),
+    };
+    expect_int(&arena, a, 1);
+    assert!(
+        matches!(match_box(&arena, b), BoxMatch::Wire),
+        "under-application should append one implicit wire"
+    );
 
     // No-match branch: (0) => 1 applied to 2.
     let p0 = BoxBuilder::new(&mut arena).int(0);

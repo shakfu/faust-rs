@@ -1041,9 +1041,21 @@ For **each phase** of the porting, the following procedure must be followed:
 ### 10.3 After porting each crate
 
 1. **Verification by differential tests**: compile the same Faust programs with the C++ version and the Rust version, compare the results
-2. **Rustdoc documentation review**: ensuring it is complete and consistent
-3. **Update of the logbook** with the report of the phase
-4. **Public API mapping review**: ensure mapping table/status is current for touched surfaces
+2. **Corpus-wide C++ status differential (mandatory gate)**:
+   - run **every** `tests/corpus/*.dsp` with:
+     - Rust (`cargo run -p compiler -- --dump-sig <file.dsp>`),
+     - C++ reference compiler (`faust <file.dsp>`), using `/Users/letz/Developpements/RUST/faust` as source-of-truth tree for the reference binary/toolchain.
+   - classify each case as:
+     - `OK/OK` (both succeed),
+     - `ERR/ERR` (both fail),
+     - `OK/ERR` or `ERR/OK` (parity mismatch, blocking until documented and triaged).
+   - record results in a persistent report under `porting/phases/` and list remaining mismatches as explicit TODO items.
+3. **Negative corpus discipline**:
+   - `err_*` fixtures are not "Rust-expected failure" by default.
+   - each `err_*` case must be validated against C++ first; if C++ succeeds and Rust fails, treat as Rust regression gap and move/fix classification accordingly.
+4. **Rustdoc documentation review**: ensuring it is complete and consistent
+5. **Update of the logbook** with the report of the phase
+6. **Public API mapping review**: ensure mapping table/status is current for touched surfaces
 
 ### 10.4 Logbook (`JOURNAL.md`)
 

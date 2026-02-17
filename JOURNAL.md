@@ -2958,3 +2958,54 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo run -p xtask -- golden-gen-rust`
   - `cargo run -p xtask -- golden-check`
+
+#### Corpus-wide C++ vs Rust status differential gate (Phase 4/9)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/xtask/src/main.rs`,
+  - `porting/faust-rust-porting-plan-en.md`,
+  - `porting/phases/phase-4-signaux-en.md`,
+  - `porting/phases/phase-9-integration-en.md`,
+  - `porting/phases/phase-4-corpus-status-diff-report-en.md`,
+  - `README.md`.
+- Implemented:
+  - documented a mandatory corpus-wide parity gate in porting docs:
+    - run every `tests/corpus/*.dsp` with C++ `faust` and Rust `--dump-sig`,
+    - classify `OK/OK`, `ERR/ERR`, `OK/ERR`, `ERR/OK`,
+    - treat mixed statuses as blocking parity tasks.
+  - added new automation command:
+    - `cargo run -p xtask -- corpus-status-report`.
+  - command generates:
+    - `porting/phases/phase-4-corpus-status-diff-report-en.md` with summary, mismatch table, and full matrix.
+  - first full run result:
+    - total `51`,
+    - `OK/OK=26`,
+    - `ERR/ERR=16`,
+    - `OK/ERR=9`,
+    - `ERR/OK=0`.
+  - confirmed user-reported mismatch:
+    - `err_11_eval_case_arity_mismatch`: `C++=OK`, `Rust=ERR` (`eval` stage).
+- Validation:
+  - `cargo run -p xtask -- corpus-status-report`
+
+#### Eval parity fix — `case` under-application (C++ behavior)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/eval/src/lib.rs`,
+  - `crates/eval/tests/core_eval.rs`,
+  - `porting/phases/phase-4-corpus-status-diff-report-en.md`.
+- Implemented:
+  - aligned `eval::apply_list` for `BoxMatch::Case` with C++ under-application behavior:
+    - when provided args `<` case arity, keep `case` node and lower to
+      `seq(par(args + implicit_wires), case)` instead of raising `PatternArityMismatch`.
+  - added eval regression test locking this behavior.
+  - retained no-match failure behavior for fully-applied case dispatch.
+- Result:
+  - `err_11_eval_case_arity_mismatch` and `err_15_eval_compound_with_letrec_case_arity`
+    are no longer failing in `eval`; they now fail later in `propagate` due unsupported
+    `case` box family (expected until propagate support is extended).
+- Validation:
+  - `cargo test -p eval --all-targets`
+  - `cargo run -p xtask -- corpus-status-report`

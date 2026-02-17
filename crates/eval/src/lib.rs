@@ -734,7 +734,8 @@ fn rev_eval_list(
 ///
 /// Behavior summary:
 /// - `abstr`: beta-like application in lexical scope.
-/// - `case`: pattern-match dispatch.
+/// - `case`: pattern-match dispatch when sufficiently applied, otherwise lowers to
+///   non-closure style `seq(par(args + implicit_wires), case)` for C++ parity.
 /// - other node families: C++-compatible non-closure lowering to `seq(par(args), fun)`,
 ///   including implicit wire insertion for partial applications.
 fn apply_list(
@@ -763,6 +764,19 @@ fn apply_list(
             apply_list(arena, f, tl, env, loop_detector, call_site)
         }
         BoxMatch::Case(rules) => {
+            let expected = case_expected_arity(arena, rules)?;
+            let got = list_to_vec(arena, larg)?.len();
+            if got < expected {
+                // C++ parity (`applyList` on under-applied closures): keep the case form
+                // and insert implicit wires for missing arguments instead of evaluating
+                // the case immediately.
+                let missing = expected - got;
+                let wires = nwires(arena, missing);
+                let lowered_larg = concat_lists(arena, larg, wires)?;
+                let args_par = larg2par(arena, lowered_larg)?;
+                let mut b = BoxBuilder::new(arena);
+                return Ok(b.seq(args_par, fun));
+            }
             apply_case_rules(arena, rules, larg, env, loop_detector, call_site)
         }
         _ => {
@@ -1223,6 +1237,17 @@ fn rule_parts(arena: &TreeArena, rule: TreeId) -> Result<(TreeId, TreeId), EvalE
         .tl(rule)
         .ok_or(EvalError::MalformedCaseNode { node: rule })?;
     Ok((lhs, rhs))
+}
+
+/// Returns expected argument arity for a case-rule set (first source rule arity).
+fn case_expected_arity(arena: &TreeArena, rules_rev: TreeId) -> Result<usize, EvalError> {
+    let mut rules = list_to_vec(arena, rules_rev)?;
+    rules.reverse();
+    let Some(first_rule) = rules.first().copied() else {
+        return Err(EvalError::MalformedCaseNode { node: rules_rev });
+    };
+    let (first_lhs, _first_rhs) = rule_parts(arena, first_rule)?;
+    Ok(list_to_vec(arena, first_lhs)?.len())
 }
 
 /// Applies case rules to a given argument list with C++-compatible first-match semantics.

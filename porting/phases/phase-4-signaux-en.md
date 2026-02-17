@@ -693,6 +693,13 @@ Several semantics are encoded via `gGlobal->nil` sentinels, and `subsignals.cpp`
 - **Unit**: Parallel composition (`_, _` → 2 inputs, 2 outputs)
 - **Unit**: Recursion (`+ ~ _` → 1 input, 1 output)
 - **Differential**: Compare the signals produced with C++ on 20+ examples
+- **Corpus-wide status differential (mandatory)**:
+  - run every `tests/corpus/*.dsp` with C++ `faust` and Rust `compiler --dump-sig`,
+  - classify results as `OK/OK`, `ERR/ERR`, `OK/ERR`, `ERR/OK`,
+  - treat mixed statuses (`OK/ERR`, `ERR/OK`) as blocking parity issues for Phase 4.
+- **Fixture classification discipline**:
+  - `err_*` fixtures must be validated against C++ before being treated as expected failures.
+  - if C++ succeeds and Rust fails (or vice versa), open a parity task and do not treat it as a locked negative test.
 
 ---
 
@@ -705,6 +712,7 @@ Several semantics are encoded via `gGlobal->nil` sentinels, and `subsignals.cpp`
 - [ ] Propagation converts boxes into signals correctly
 - [ ] `process = + ~ _;` produces the expected signals
 - [ ] Standard Faust examples pass the parser → eval → propagate pipeline
+- [ ] Full `tests/corpus/*.dsp` C++ vs Rust status matrix is current and Phase 4 mixed-status cases are triaged/fixed
 - [ ] One canonical signal-node dispatch layer is used by typing, ordering, sub-signal transforms, and printers
 - [ ] Box-to-signal boundary uses canonical dispatch (`match_box` in `propagate`)
 - [ ] Signal variants currently encoded with sentinels are represented explicitly (no semantic `nil` separators in core signal APIs)

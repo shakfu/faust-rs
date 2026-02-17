@@ -476,6 +476,26 @@ Excluded backends (`-lang ocpp`) and template/scaffold paths should remain outsi
 - Compile the ~200 Faust examples with both compilers (C++ and Rust)
 - Compare outputs for each backend
 - Accept cosmetic, not structural, differences
+- Add a **status differential gate** on the full local corpus (`tests/corpus/*.dsp`) before backend-level parity:
+  - run C++ reference compiler on each case (`faust <case>.dsp`),
+  - run Rust pipeline on each case (`cargo run -p compiler -- --dump-sig <case>.dsp`),
+  - classify `OK/OK`, `ERR/ERR`, `OK/ERR`, `ERR/OK`,
+  - treat `OK/ERR` and `ERR/OK` as parity mismatches that must be triaged and tracked.
+
+#### 6.2.1 Operational protocol (mandatory)
+
+1. Use `/Users/letz/Developpements/RUST/faust` as the source-of-truth C++ compiler tree.
+2. Produce/update a persistent mismatch report in `porting/phases/` with:
+   - case name,
+   - C++ status and short reason/output class,
+   - Rust status and short reason/output class,
+   - owner crate (`parser` / `eval` / `propagate` / other),
+   - next action.
+   - recommended automation command:
+     - `cargo run -p xtask -- corpus-status-report`
+     - output: `porting/phases/phase-4-corpus-status-diff-report-en.md`
+3. Re-run the full status differential after each parity fix touching parser/eval/propagate.
+4. Only reclassify corpus fixtures (`err_*` vs `rep_*`) after C++ status is verified.
 
 ### 6.3 C API testing
 - Call `createDSPFactoryFromString()` from a C program
@@ -499,6 +519,7 @@ Excluded backends (`-lang ocpp`) and template/scaffold paths should remain outsi
 - [ ] The `faust` Rust binary accepts all C++ CLI options
 - [ ] CLI/backend option compatibility is capability-matrix-driven and contradiction-tested
 - [ ] The ~200 Faust examples compile with all backends enabled
+- [ ] Full `tests/corpus/*.dsp` C++ vs Rust status matrix is generated and all `OK/ERR` + `ERR/OK` mismatches are either fixed or explicitly waived with rationale
 - [ ] The C API (`libfaust.so`/`.dylib`/`.dll`) is compatible with existing tools
 - [ ] C API argument normalization safely handles long argument vectors (no fixed temporary staging limits)
 - [ ] C entry points follow one lifecycle contract (no divergent context init/teardown paths)

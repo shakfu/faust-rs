@@ -84,6 +84,9 @@ cargo run -p xtask -- golden-check
 # Check Rust output against C++ reference goldens (expected to fail until parity)
 cargo run -p xtask -- golden-check-cpp
 
+# Generate corpus-wide C++ vs Rust status differential report
+cargo run -p xtask -- corpus-status-report
+
 # Bootstrap/update golden files from current Rust scaffold output
 cargo run -p xtask -- golden-gen-rust
 
