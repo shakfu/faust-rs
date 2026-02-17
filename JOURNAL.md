@@ -2908,3 +2908,22 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p compiler --all-targets`
   - `cargo test -p eval --all-targets`
   - `cargo test -p propagate --all-targets`
+
+#### Diagnostics documentation synthesis (parser -> eval -> propagate)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `porting/faust-rust-error-flow-en.md` (new),
+  - `docs/user-diagnostics-guide-en.md` (new),
+  - `README.md`.
+- Implemented:
+  - added a concise technical reference for contributors describing:
+    - the diagnostics data flow from parser context to eval/propagate and compiler aggregation,
+    - the stable diagnostics code families,
+    - source-label resolution/fallback strategy,
+    - rendering contract (`human/json`, `standard/debug`).
+  - added a user-facing diagnostics guide with:
+    - practical command-line usage,
+    - how to read `cause/rule/computed/help`,
+    - quick mapping of error code families.
+  - linked both documents from the repository README.

@@ -11,7 +11,9 @@ Rust workspace for the Faust compiler port.
 - `porting/faust-rust-recursion-model-note-en.md`: recursion model analysis (`sigRec/sigProj` vs RouteIR rec groups)
 - `porting/faust-rust-bilan-effort-en.md`: effort assessment
 - `porting/faust-rust-bilan-global-en.md`: overall status summary
+- `porting/faust-rust-error-flow-en.md`: concise parser -> eval -> propagate error flow
 - `porting/phases/`: detailed phase-by-phase execution notes (`phase-0` to `phase-9`)
+- `docs/user-diagnostics-guide-en.md`: user-oriented diagnostics guide
 
 ## Suggested reading order
 
@@ -61,6 +63,8 @@ cargo run -p compiler -- --dump-sig tests/corpus/err_03_propagate_split_mismatch
 # JSON diagnostics with debug enrichment (`diagnostics[*].debug`)
 cargo run -p compiler -- --dump-sig tests/corpus/err_03_propagate_split_mismatch.dsp --error-format json --error-verbosity debug
 ```
+
+See `docs/user-diagnostics-guide-en.md` for a quick reading guide of `cause/rule/computed/help`.
 
 ## C++ golden outputs
 
