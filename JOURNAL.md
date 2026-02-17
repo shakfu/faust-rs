@@ -2373,3 +2373,22 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo test -p propagate --all-targets`
   - `cargo test -p compiler`
+
+#### Diagnostics UX rollout — Step 3 (source-label attachment when parser metadata is available)
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `crates/compiler/src/lib.rs`.
+- Implemented:
+  - compiler diagnostics enrichment now attempts to attach a primary source label for
+    eval/propagate node-based errors by consulting parser metadata:
+    - direct node property (`use_prop` / `def_prop`),
+    - fallback search on labeled descendants in the offending subtree.
+  - this keeps labels opportunistic (added only when metadata exists) and does not
+    regress diagnostics when source info is absent.
+  - added unit tests covering:
+    - direct node property lookup,
+    - descendant property fallback lookup.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler`

@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use boxes::{BoxId, dump_box};
-use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic};
+use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, SourceSpan};
 use parser::{ParseOutput, SourceReaderError};
 use propagate::{BoxArity, PropagateError};
 use signals::SigId;
@@ -121,6 +121,12 @@ impl Compiler {
                     "box_expr={}",
                     compact_box_preview(&output.state.arena, node)
                 ));
+                diagnostic = maybe_add_source_label(
+                    diagnostic,
+                    &output.state.ctx,
+                    &output.state.arena,
+                    node,
+                );
             }
             let diagnostics = bundle_from_diagnostic(diagnostic);
             CompilerError::Eval {
@@ -138,6 +144,12 @@ impl Compiler {
                         "box_expr={}",
                         compact_box_preview(&output.state.arena, node)
                     ));
+                    diagnostic = maybe_add_source_label(
+                        diagnostic,
+                        &output.state.ctx,
+                        &output.state.arena,
+                        node,
+                    );
                 }
                 let diagnostics = bundle_from_diagnostic(diagnostic);
                 CompilerError::Propagate {
@@ -156,6 +168,12 @@ impl Compiler {
                         "box_expr={}",
                         compact_box_preview(&output.state.arena, node)
                     ));
+                    diagnostic = maybe_add_source_label(
+                        diagnostic,
+                        &output.state.ctx,
+                        &output.state.arena,
+                        node,
+                    );
                 }
                 let diagnostics = bundle_from_diagnostic(diagnostic);
                 CompilerError::Propagate {
@@ -305,6 +323,59 @@ fn compact_box_preview(arena: &tlib::TreeArena, node: BoxId) -> String {
     one_line
 }
 
+fn maybe_add_source_label(
+    diagnostic: Diagnostic,
+    ctx: &parser::ParserCtx,
+    arena: &tlib::TreeArena,
+    node: BoxId,
+) -> Diagnostic {
+    let Some(span) = source_span_from_node_or_descendant(ctx, arena, node) else {
+        return diagnostic;
+    };
+    diagnostic.with_label(Label::new(LabelStyle::Primary, span, "related source"))
+}
+
+fn source_span_from_node_or_descendant(
+    ctx: &parser::ParserCtx,
+    arena: &tlib::TreeArena,
+    node: BoxId,
+) -> Option<SourceSpan> {
+    if let Some(span) = source_span_for_node(ctx, node) {
+        return Some(span);
+    }
+
+    let mut stack = vec![node];
+    let mut visited = 0usize;
+    while let Some(cur) = stack.pop() {
+        visited = visited.saturating_add(1);
+        if visited > 4096 {
+            break;
+        }
+
+        if let Some(span) = source_span_for_node(ctx, cur) {
+            return Some(span);
+        }
+
+        if let Some(children) = arena.children(cur) {
+            for child in children.iter().rev() {
+                stack.push(*child);
+            }
+        }
+    }
+    None
+}
+
+fn source_span_for_node(ctx: &parser::ParserCtx, node: BoxId) -> Option<SourceSpan> {
+    let loc = ctx.use_prop(node).or_else(|| ctx.def_prop(node))?;
+    Some(SourceSpan::new(
+        loc.file(),
+        loc.line(),
+        loc.col(),
+        loc.end_line(),
+        loc.end_col(),
+    ))
+}
+
 #[must_use]
 pub fn golden_snapshot(source_name: &str, source: &str) -> String {
     let normalized_source = normalize_newlines(source);
@@ -343,7 +414,9 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use boxes::BoxBuilder;
     use signals::SigMatch;
+    use tlib::TreeArena;
 
     use super::{Compiler, CompilerError, golden_snapshot};
 
@@ -537,5 +610,38 @@ mod tests {
             .expect("propagate error bundle should not be empty");
         assert!(first.notes.iter().any(|n| n.starts_with("node_id=")));
         assert!(first.notes.iter().any(|n| n.starts_with("box_expr=")));
+    }
+
+    #[test]
+    fn source_span_lookup_finds_direct_node_property() {
+        let mut arena = TreeArena::new();
+        let ident = BoxBuilder::new(&mut arena).ident("x");
+        let mut ctx = parser::ParserCtx::new();
+        ctx.set_use_prop(ident, "fixture.dsp", 7);
+
+        let span = super::source_span_from_node_or_descendant(&ctx, &arena, ident)
+            .expect("direct property should resolve to source span");
+        assert_eq!(span.file.display().to_string(), "fixture.dsp");
+        assert_eq!(span.line, 7);
+        assert_eq!(span.col, 1);
+    }
+
+    #[test]
+    fn source_span_lookup_finds_descendant_property() {
+        let mut arena = TreeArena::new();
+        let (parent, child) = {
+            let mut bb = BoxBuilder::new(&mut arena);
+            let wire = bb.wire();
+            let ident = bb.ident("x");
+            let seq = bb.seq(wire, ident);
+            (seq, ident)
+        };
+        let mut ctx = parser::ParserCtx::new();
+        ctx.set_use_prop(child, "desc.dsp", 19);
+
+        let span = super::source_span_from_node_or_descendant(&ctx, &arena, parent)
+            .expect("descendant property should resolve to source span");
+        assert_eq!(span.file.display().to_string(), "desc.dsp");
+        assert_eq!(span.line, 19);
     }
 }
