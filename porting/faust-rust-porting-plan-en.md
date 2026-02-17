@@ -199,6 +199,12 @@ The Rust port should not replicate the C++ string/exception diagnostic style one
 Detailed architecture and rollout are specified in:
 - `faust-rust-diagnostics-model-en.md`
 
+Near-term diagnostics UX priorities after baseline rollout:
+- enrich eval/propagate failures with explicit node context and expression preview,
+- add rule-aware actionable explanations for arity/composition mismatches,
+- propagate source spans into Phase 4 diagnostics when available,
+- lock human+JSON renderer behavior with snapshot tests.
+
 ---
 
 ## 4. Cargo Workspace Architecture

@@ -426,6 +426,30 @@ Pass criterion for this subsection:
 - negative corpus tests for eval/propagate assert `(stage, code, severity, location)` stability.
 - phase-level outputs are available in human and machine-readable formats.
 
+Prioritized implementation roadmap for clearer user-facing errors:
+
+1. Node-context enrichment (immediate, low-risk):
+- in `eval`/`propagate` diagnostics conversion, include fallback notes with:
+  - `node_id=<TreeId>`,
+  - compact `dump_box` preview of the failing expression.
+- objective: remove opaque "node N" messages without waiting for full span propagation.
+
+2. Rule-aware actionable explanations:
+- for `seq/split/merge/rec` mismatches, emit:
+  - the exact failed condition,
+  - computed values,
+  - one concrete correction hint.
+- example shape: "split requires right_inputs % left_outputs == 0; got 3 % 2 = 1".
+
+3. Source-label propagation from parser metadata:
+- carry node-origin spans through Phase 4 and attach them as primary labels when available.
+- keep node-context notes as fallback when source location is absent.
+
+4. Human renderer upgrade + snapshot lock:
+- print source snippet + caret for labeled diagnostics in `--error-format human`,
+- keep `--error-format json` schema unchanged,
+- add snapshot tests for both formats on representative Phase 4 failures.
+
 Reference model:
 - `porting/faust-rust-diagnostics-model-en.md` (sections 4.1, 5.3, 5.4, 6-D/E).
 

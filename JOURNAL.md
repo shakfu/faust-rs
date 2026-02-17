@@ -2269,7 +2269,7 @@ Execution plan (Phase 0 prototype, revised):
 
 #### Step 9 — CLI diagnostics output model (`--error-format human|json`)
 
-- Commit: pending (working tree step, to be committed separately)
+- Commit: `01b3fe6`
 - Files:
   - `crates/compiler/Cargo.toml`,
   - `crates/compiler/src/main.rs`.
@@ -2290,6 +2290,27 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo test -p compiler`
 
+#### Step 9b — negative corpus fixtures for parser/eval/propagate diagnostics
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `tests/corpus/err_01_parse_missing_rhs.dsp`,
+  - `tests/corpus/err_02_eval_missing_process.dsp`,
+  - `tests/corpus/err_03_propagate_split_mismatch.dsp`,
+  - `crates/compiler/tests/diagnostic_errors.rs`.
+- Implemented:
+  - added dedicated `.dsp` fixtures triggering one representative failure per stage:
+    - parse failure (`process = ;`),
+    - eval failure (missing `process` definition),
+    - propagate failure (split arity mismatch),
+  - added compiler integration tests validating stage-specific structured diagnostic code families:
+    - `FRS-PARSE-*`,
+    - `FRS-EVAL-*`,
+    - `FRS-PROP-*`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --test diagnostic_errors`
+
 #### Documentation updates linked to this rollout
 
 - Commit: `559af95`
@@ -2302,3 +2323,18 @@ Execution plan (Phase 0 prototype, revised):
   - `porting/phases/phase-1-fondations-en.md`,
   - `porting/phases/phase-3-parser-en.md`,
   - `porting/phases/phase-4-signaux-en.md`.
+
+#### Documentation addendum — diagnostics UX explainability roadmap
+
+- Commit: pending (working tree step, to be committed separately)
+- Files:
+  - `porting/faust-rust-diagnostics-model-en.md`,
+  - `porting/phases/phase-4-signaux-en.md`,
+  - `porting/faust-rust-porting-plan-en.md`.
+- Implemented:
+  - documented a prioritized post-step-9 plan to make errors more explicit for users:
+    - node-context enrichment (`node_id` + expression preview),
+    - rule-aware actionable arity/composition explanations,
+    - source-span propagation for Phase 4 diagnostics,
+    - human renderer snippet/caret upgrade with JSON schema stability and snapshot locks.
+  - added pass criteria for this UX tranche directly in diagnostics/phase documents.

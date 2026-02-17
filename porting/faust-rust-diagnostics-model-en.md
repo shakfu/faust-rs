@@ -189,6 +189,10 @@ Required outcomes:
 1. Map key evaluator failures to stable codes.
 2. Attach relevant definition/use labels when source metadata exists.
 3. Provide contextual help for common mistakes (undefined symbol, arity mismatch, invalid iteration count).
+4. When full source labels are not available, include explicit node context notes:
+   - `node_id`,
+   - canonical box expression preview for the offending node.
+5. For undefined-symbol failures, provide nearest-symbol suggestions from visible scope.
 
 ### 5.4 Propagate diagnostics
 
@@ -197,6 +201,8 @@ Required outcomes:
 1. Stable codes for arity and unsupported-node classes.
 2. Include box-node context and, when available, source labels propagated from parser metadata.
 3. Emit concise primary messages and explicit expected/got notes.
+4. Add rule-specific computed explanations and corrective hints for composition errors
+   (for example split/merge divisibility and computed remainder).
 
 ### 5.5 Compiler orchestration diagnostics
 
@@ -205,6 +211,8 @@ Required outcomes:
 1. Preserve stage information from lower crates.
 2. Never reduce failures to counters only when diagnostics are available.
 3. Export consolidated bundle for CLI and API surfaces.
+4. Keep JSON output schema stable (`severity`, `stage`, `code`, `message`, `labels`, `notes`, `help`).
+5. In human format, render snippets/carets whenever labels with source spans are available.
 
 ---
 
@@ -256,6 +264,27 @@ Pass criterion:
 
 Pass criterion:
 - no touched phase documents rely on ad hoc string-only error channels.
+
+### Deliverable G — diagnostics UX explainability tranche (post step-9)
+
+- Enrich `EvalError`/`PropagateError` conversion with explicit node context notes:
+  - `node_id=<id>`,
+  - compact box-expression preview.
+- Add rule-specific guidance for arity/composition failures:
+  - failed algebraic condition,
+  - computed values,
+  - actionable correction hints.
+- Propagate parser-origin spans to Phase 4 errors when available on offending nodes.
+- Upgrade human renderer with snippet/caret output while keeping JSON schema stable.
+- Expand negative corpus + snapshots for both formats.
+
+Pass criterion:
+- For representative eval/propagate failures, CLI human output identifies:
+  - source location (or explicit fallback when unavailable),
+  - failing expression context,
+  - correction hint.
+- Snapshot tests cover both `--error-format human` and `--error-format json`
+  on Linux/macOS/Windows.
 
 ---
 
