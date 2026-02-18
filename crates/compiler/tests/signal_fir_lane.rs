@@ -69,18 +69,28 @@ fn legacy_and_fastlane_both_compile_feedback_projection_fixture() {
 }
 
 #[test]
-fn legacy_and_fastlane_both_compile_environment_waveform_fixture() {
+fn legacy_compiles_environment_waveform_fixture_and_fastlane_reports_unsupported_waveform() {
     let legacy = compile_cpp_with_lane(
         "rep_20_environment_waveform.dsp",
         SignalFirLane::LegacyBridge,
     );
-    let fast = compile_cpp_with_lane(
-        "rep_20_environment_waveform.dsp",
-        SignalFirLane::TransformFastLane,
-    );
     assert!(legacy.contains("class rep_20_environment_waveform : public dsp"));
-    assert!(fast.contains("class rep_20_environment_waveform : public dsp"));
-    assert!(fast.contains("void compute("));
+    let compiler = Compiler::new();
+    let path = corpus_path("rep_20_environment_waveform.dsp");
+    let err = compiler
+        .compile_file_default_to_cpp_with_lane(
+            &path,
+            &codegen::backends::cpp::CppOptions::default(),
+            SignalFirLane::TransformFastLane,
+        )
+        .expect_err(
+            "fast-lane should reject waveform/table nodes until FIR-native lowering exists",
+        );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("SIGWAVEFORM is not FIR-native yet in fast-lane Step 2F"),
+        "unexpected fast-lane error for waveform fixture: {msg}"
+    );
 }
 
 #[test]
@@ -96,6 +106,10 @@ fn legacy_and_fastlane_both_compile_extended_primitives_fixture() {
     assert!(legacy.contains("class rep_31_extended_primitives : public dsp"));
     assert!(fast.contains("class rep_31_extended_primitives : public dsp"));
     assert!(fast.contains("void compute("));
+    assert!(
+        !fast.contains("frs_"),
+        "Step 2F fast-lane output should not contain frs_* shims"
+    );
 }
 
 #[test]
@@ -108,6 +122,10 @@ fn legacy_and_fastlane_both_compile_nonlinear_clip_fixture() {
     assert!(legacy.contains("class rep_07_nonlinear_clip : public dsp"));
     assert!(fast.contains("class rep_07_nonlinear_clip : public dsp"));
     assert!(fast.contains("void compute("));
+    assert!(
+        !fast.contains("frs_"),
+        "Step 2F fast-lane output should not contain frs_* shims"
+    );
 }
 
 #[test]
@@ -125,5 +143,9 @@ fn fastlane_ui_fixture_uses_native_ui_path_without_slider_shims() {
     assert!(
         !fast.contains("frs_vslider"),
         "UI sliders should use native FIR UI instructions, not frs_* shims"
+    );
+    assert!(
+        !fast.contains("frs_"),
+        "Step 2F fast-lane output should not contain frs_* shims"
     );
 }

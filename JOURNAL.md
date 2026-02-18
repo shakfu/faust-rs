@@ -3745,3 +3745,35 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p transform --all-targets`
   - `cargo test -p compiler --test signal_fir_lane`
   - `cargo clippy -p transform -p compiler --all-targets -- -D warnings`
+
+#### signalFIRCompiler fast-lane: Step 2F eliminate last critical shims
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/mod.rs`
+  - `crates/compiler/tests/signal_fir_lane.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - removed the last fast-lane `frs_*` calls from lowering:
+    - `SIGWAVEFORM`, `SIGRDTBL`, `SIGWRTBL` no longer lower to shim calls;
+      they now fail explicitly with typed `UnsupportedSignalNode` diagnostics in
+      Step 2F until FIR-native table lowering is implemented.
+  - replaced `SIGSOUNDFILE` shim call with FIR-native UI declaration path:
+    - struct soundfile variable declaration,
+    - `AddSoundfile` emitted in `buildUserInterface`,
+    - compute-side value uses `LoadVar`.
+  - renamed internal delay/proj state names from `frs_state_n*` to `state_n*`
+    so fast-lane generated C++ contains no `frs_*` placeholders.
+  - strengthened compiler integration guardrails:
+    - fast-lane for waveform fixture now asserts explicit unsupported diagnostic
+      instead of silently depending on shim runtime symbols,
+    - fast-lane C++ output tests assert no `frs_` strings remain for covered
+      executable fixtures.
+  - updated Rustdoc status in `transform::signal_fir` to reflect Step 2F and
+    the explicit temporary unsupported status of waveform/table nodes.
+- Validation:
+  - `cargo fmt -p transform -p compiler`
+  - `cargo test -p transform --all-targets`
+  - `cargo test -p compiler --test signal_fir_lane`
+  - `cargo clippy -p transform -p compiler --all-targets -- -D warnings`

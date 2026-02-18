@@ -127,6 +127,7 @@ struct SignalToFirLower<'a> {
     scheduled_state_updates: HashSet<SigId>,
     recursion_stack: Vec<String>,
     ui_controls: HashMap<SigId, String>,
+    soundfiles: HashMap<SigId, String>,
     ui_statements: Vec<FirId>,
     named_struct_vars: HashSet<String>,
 }
@@ -144,6 +145,7 @@ impl<'a> SignalToFirLower<'a> {
             scheduled_state_updates: HashSet::new(),
             recursion_stack: Vec::new(),
             ui_controls: HashMap::new(),
+            soundfiles: HashMap::new(),
             ui_statements: Vec::new(),
             named_struct_vars: HashSet::new(),
         }
@@ -206,11 +208,20 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Round(value) => self.lower_fun1("std::round", value)?,
             SigMatch::Lowest(value) => self.lower_signal(value)?,
             SigMatch::Highest(value) => self.lower_signal(value)?,
-            SigMatch::RdTbl(tbl, ridx) => self.lower_fun2("frs_rdtbl", tbl, ridx)?,
-            SigMatch::WrTbl(size, generator, widx, wsig) => {
-                self.lower_fun4("frs_wrtbl", size, generator, widx, wsig)?
+            SigMatch::RdTbl(_, _) => {
+                return self
+                    .unsupported_node(sig, "SIGRDTBL is not FIR-native yet in fast-lane Step 2F");
             }
-            SigMatch::Waveform(values) => self.lower_fun_list("frs_waveform", values)?,
+            SigMatch::WrTbl(_, _, _, _) => {
+                return self
+                    .unsupported_node(sig, "SIGWRTBL is not FIR-native yet in fast-lane Step 2F");
+            }
+            SigMatch::Waveform(_) => {
+                return self.unsupported_node(
+                    sig,
+                    "SIGWAVEFORM is not FIR-native yet in fast-lane Step 2F",
+                );
+            }
             SigMatch::Button(label) => self.lower_button(sig, label, ButtonType::Button),
             SigMatch::Checkbox(label) => self.lower_button(sig, label, ButtonType::Checkbox),
             SigMatch::VSlider(label, init, min, max, step) => {
@@ -243,7 +254,7 @@ impl<'a> SignalToFirLower<'a> {
                 let _ = self.lower_signal(rhs)?;
                 self.lower_signal(lhs)?
             }
-            SigMatch::Soundfile(label) => self.lower_fun1("frs_soundfile", label)?,
+            SigMatch::Soundfile(label) => self.lower_soundfile(sig, label),
             other => {
                 return Err(SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
@@ -336,7 +347,7 @@ impl<'a> SignalToFirLower<'a> {
         if let Some(name) = self.state_name_by_node.get(&node) {
             return name.clone();
         }
-        let name = format!("frs_state_n{}", node.as_u32());
+        let name = format!("state_n{}", node.as_u32());
         let mut b = FirBuilder::new(&mut self.store);
         let dec = b.declare_var(
             name.clone(),
@@ -372,7 +383,7 @@ impl<'a> SignalToFirLower<'a> {
         }
         let var = format!("fUiCtl{}", node.as_u32());
         let init = self.float_const(0.0);
-        self.ensure_named_struct_var(&var, init);
+        self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init));
         let label = self.label_text(label);
         let mut b = FirBuilder::new(&mut self.store);
         self.ui_statements
@@ -398,7 +409,7 @@ impl<'a> SignalToFirLower<'a> {
         let max_v = self.constant_f64(max).unwrap_or(1.0);
         let step_v = self.constant_f64(step).unwrap_or(0.01);
         let init_id = self.float_const(init_v);
-        self.ensure_named_struct_var(&var, init_id);
+        self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init_id));
         let label = self.label_text(label);
         let range = SliderRange {
             init: init_v,
@@ -425,7 +436,7 @@ impl<'a> SignalToFirLower<'a> {
         if !self.ui_controls.contains_key(&node) {
             let var = format!("fUiMeter{}", node.as_u32());
             let init = self.float_const(0.0);
-            self.ensure_named_struct_var(&var, init);
+            self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init));
             let label = self.label_text(label);
             let min_v = self.constant_f64(min).unwrap_or(0.0);
             let max_v = self.constant_f64(max).unwrap_or(1.0);
@@ -437,19 +448,35 @@ impl<'a> SignalToFirLower<'a> {
         self.lower_signal(value)
     }
 
-    fn ensure_named_struct_var(&mut self, name: &str, init: FirId) {
+    fn lower_soundfile(&mut self, node: SigId, label: SigId) -> FirId {
+        if let Some(var) = self.soundfiles.get(&node).cloned() {
+            let mut b = FirBuilder::new(&mut self.store);
+            return b.load_var(var, AccessType::Struct, FirType::Sound);
+        }
+        let var = format!("fSound{}", node.as_u32());
+        self.ensure_named_struct_var(&var, FirType::Sound, None);
+        let label = self.label_text(label);
+        let mut b = FirBuilder::new(&mut self.store);
+        self.ui_statements.push(b.add_soundfile(label, var.clone()));
+        self.soundfiles.insert(node, var.clone());
+        b.load_var(var, AccessType::Struct, FirType::Sound)
+    }
+
+    fn ensure_named_struct_var(&mut self, name: &str, typ: FirType, init: Option<FirId>) {
         if self.named_struct_vars.contains(name) {
             return;
         }
         let mut b = FirBuilder::new(&mut self.store);
-        let dec = b.declare_var(
-            name.to_owned(),
-            FirType::FaustFloat,
-            AccessType::Struct,
-            Some(init),
-        );
+        let dec = b.declare_var(name.to_owned(), typ, AccessType::Struct, init);
         self.struct_declarations.push(dec);
         self.named_struct_vars.insert(name.to_owned());
+    }
+
+    fn unsupported_node<T>(&self, sig: SigId, detail: &str) -> Result<T, SignalFirError> {
+        Err(SignalFirError::new(
+            SignalFirErrorCode::UnsupportedSignalNode,
+            format!("{detail} (expr={})", dump_sig_readable(self.arena, sig)),
+        ))
     }
 
     fn label_text(&self, label: SigId) -> String {
@@ -494,31 +521,6 @@ impl<'a> SignalToFirLower<'a> {
         let rhs = self.lower_signal(rhs)?;
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.fun_call(name, &[lhs, rhs], FirType::FaustFloat))
-    }
-
-    fn lower_fun4(
-        &mut self,
-        name: &str,
-        a: SigId,
-        b: SigId,
-        c: SigId,
-        d: SigId,
-    ) -> Result<FirId, SignalFirError> {
-        let a = self.lower_signal(a)?;
-        let b = self.lower_signal(b)?;
-        let c = self.lower_signal(c)?;
-        let d = self.lower_signal(d)?;
-        let mut fb = FirBuilder::new(&mut self.store);
-        Ok(fb.fun_call(name, &[a, b, c, d], FirType::FaustFloat))
-    }
-
-    fn lower_fun_list(&mut self, name: &str, values: &[SigId]) -> Result<FirId, SignalFirError> {
-        let mut args = Vec::with_capacity(values.len());
-        for v in values {
-            args.push(self.lower_signal(*v)?);
-        }
-        let mut fb = FirBuilder::new(&mut self.store);
-        Ok(fb.fun_call(name, &args, FirType::FaustFloat))
     }
 
     fn lower_cast(&mut self, typ: FirType, value: SigId) -> Result<FirId, SignalFirError> {
