@@ -1,10 +1,13 @@
-//! Experimental signal->FIR fast-lane (Step 1A contract).
+//! Experimental signal->FIR fast-lane (Step 2A slice).
 //!
 //! # Status
-//! This module currently provides a **contract-only skeleton**:
-//! it validates entry arguments and emits a minimal FIR `Module` root.
-//! Signal semantics/resource planning parity is intentionally deferred to
-//! Step 2+ of the fast-lane plan.
+//! This module currently provides an **executable base slice**:
+//! - contract validation (`Step 1A`),
+//! - lowering for `SIGINPUT`, numeric constants, `SIGBINOP`, and `SIGOUTPUT`
+//!   passthrough (`Step 2A`).
+//!
+//! Other signal families still return typed `FRS-SFIR-*` errors until the
+//! remaining lowering slices are implemented.
 //!
 //! # Crate boundary contract
 //! - `transform` owns signal->FIR lowering entrypoints.
@@ -51,9 +54,9 @@ pub struct SignalFirOutput {
 
 /// Compiles propagated signals into a FIR module using the experimental fast-lane.
 ///
-/// # Current behavior (Step 1A)
+/// # Current behavior (Step 2A)
 /// - validates options and top-level signal/arity contract,
-/// - emits a minimal valid FIR module with a placeholder `compute`.
+/// - lowers one executable base signal slice to FIR.
 ///
 /// # Errors
 /// Returns [`SignalFirError`] when options are invalid or the top-level
@@ -66,16 +69,14 @@ pub fn compile_signals_to_fir_fastlane(
     options: &SignalFirOptions,
 ) -> Result<SignalFirOutput, SignalFirError> {
     let plan = planner::plan_signals(signals, num_inputs, num_outputs, options)?;
-    Ok(module::build_module(&plan, options.module_name.as_str()))
+    module::build_module(&plan, options.module_name.as_str(), _arena, signals)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane,
-    };
-    use fir::{FirMatch, match_fir};
-    use signals::SigBuilder;
+    use super::{SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane};
+    use fir::{FirBinOp, FirMatch, match_fir};
+    use signals::{BinOp, SigBuilder};
     use tlib::TreeArena;
 
     #[test]
@@ -83,18 +84,49 @@ mod tests {
         let mut arena = TreeArena::new();
         let sig0 = {
             let mut b = SigBuilder::new(&mut arena);
-            b.input(0)
+            let i0 = b.input(0);
+            let c0 = b.real(0.5);
+            b.binop(BinOp::Mul, i0, c0)
         };
-        let out = compile_signals_to_fir_fastlane(
-            &arena,
-            &[sig0],
-            1,
-            1,
-            &SignalFirOptions::default(),
-        )
-        .expect("Step 1A should emit a module for valid top-level inputs");
+        let out =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+                .expect("Step 1A should emit a module for valid top-level inputs");
 
-        assert!(matches!(match_fir(&out.store, out.module), FirMatch::Module { .. }));
+        assert!(matches!(
+            match_fir(&out.store, out.module),
+            FirMatch::Module { .. }
+        ));
+        let FirMatch::Module { declarations, .. } = match_fir(&out.store, out.module) else {
+            panic!("module root expected");
+        };
+        let FirMatch::Block(decls) = match_fir(&out.store, declarations) else {
+            panic!("module declarations block expected");
+        };
+        let compute = decls
+            .iter()
+            .copied()
+            .find(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareFun { .. }))
+            .expect("compute declaration expected");
+        let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
+            panic!("declare fun expected");
+        };
+        let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
+            panic!("compute block expected");
+        };
+        let drop_value = stmts
+            .iter()
+            .find_map(|id| match match_fir(&out.store, *id) {
+                FirMatch::Drop(value) => Some(value),
+                _ => None,
+            })
+            .expect("compute should include one output drop");
+        assert!(matches!(
+            match_fir(&out.store, drop_value),
+            FirMatch::BinOp {
+                op: FirBinOp::Mul,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -118,5 +150,36 @@ mod tests {
 
         assert_eq!(err.code(), SignalFirErrorCode::InvalidOptions);
         assert_eq!(err.code().as_str(), "FRS-SFIR-0001");
+    }
+
+    #[test]
+    fn unsupported_signal_family_returns_typed_error_code() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let i0 = b.input(0);
+            b.delay1(i0)
+        };
+        let err =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+                .expect_err("delay1 is outside Step 2A lowering slice");
+
+        assert_eq!(err.code(), SignalFirErrorCode::UnsupportedSignalNode);
+        assert_eq!(err.code().as_str(), "FRS-SFIR-0004");
+    }
+
+    #[test]
+    fn input_index_out_of_range_returns_typed_error_code() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            b.input(1)
+        };
+        let err =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+                .expect_err("input(1) is invalid when num_inputs=1");
+
+        assert_eq!(err.code(), SignalFirErrorCode::InputIndexOutOfRange);
+        assert_eq!(err.code().as_str(), "FRS-SFIR-0006");
     }
 }

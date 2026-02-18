@@ -14,6 +14,12 @@ pub enum SignalFirErrorCode {
     EmptySignalList,
     /// Requested output arity does not match provided signal count.
     OutputArityMismatch,
+    /// Encountered one signal node family not yet supported in the fast-lane slice.
+    UnsupportedSignalNode,
+    /// Encountered one signal binary operator not yet supported in the fast-lane slice.
+    UnsupportedBinOp,
+    /// Signal input index is invalid for the declared DSP input arity.
+    InputIndexOutOfRange,
 }
 
 impl SignalFirErrorCode {
@@ -24,6 +30,9 @@ impl SignalFirErrorCode {
             Self::InvalidOptions => "FRS-SFIR-0001",
             Self::EmptySignalList => "FRS-SFIR-0002",
             Self::OutputArityMismatch => "FRS-SFIR-0003",
+            Self::UnsupportedSignalNode => "FRS-SFIR-0004",
+            Self::UnsupportedBinOp => "FRS-SFIR-0005",
+            Self::InputIndexOutOfRange => "FRS-SFIR-0006",
         }
     }
 }

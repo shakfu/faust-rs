@@ -3506,3 +3506,45 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p compiler --all-targets`
   - `cargo clippy -p compiler --all-targets -- -D warnings`
   - `cargo test -p errors --all-targets`
+
+#### signalFIRCompiler fast-lane: Step 2A executable slice in `crates/transform`
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/mod.rs`
+  - `crates/transform/src/signal_fir/error.rs`
+  - `crates/transform/src/signal_fir/planner.rs`
+  - `crates/compiler/src/lib.rs`
+  - `crates/errors/src/codes.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - replaced the Step 1A placeholder module body with a first executable
+    signal-lowering path (`Step 2A`) in `transform::signal_fir`.
+  - added recursive lowering from `signals::SigMatch` to FIR values for:
+    - `SIGINPUT`,
+    - integer/real constants,
+    - `SIGBINOP` (arithmetic/comparison/bitwise subset),
+    - `SIGOUTPUT` passthrough.
+  - compute body now emits one FIR `Drop` per output signal, enabling backend
+    `compute` output writes in the generated C++ path.
+  - added signal-lowering cache (`SigId -> FirId`) to avoid duplicate lowering
+    work on shared DAG subgraphs.
+  - introduced additional typed fast-lane error codes:
+    - `FRS-SFIR-0004` unsupported signal node,
+    - `FRS-SFIR-0005` unsupported binary operator,
+    - `FRS-SFIR-0006` input index out of range.
+  - extended compiler diagnostic mapping (`Stage::Transform`) to cover new
+    `SignalFirErrorCode` variants and added corresponding stable entries in
+    `errors::codes`.
+  - expanded `transform` tests for:
+    - executable lowering path (`SIGBINOP` -> FIR `BinOp` + `Drop`),
+    - unsupported node error typing,
+    - input-index-range error typing.
+- Validation:
+  - `cargo fmt -p transform -p compiler -p errors`
+  - `cargo test -p transform --all-targets`
+  - `cargo clippy -p transform --all-targets -- -D warnings`
+  - `cargo test -p compiler --all-targets`
+  - `cargo clippy -p compiler --all-targets -- -D warnings`
+  - `cargo clippy -p errors --all-targets -- -D warnings`

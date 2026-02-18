@@ -3,8 +3,8 @@
 //! Step 1A intentionally keeps this planner minimal and deterministic:
 //! it only validates static contract inputs and records basic shape metadata.
 
-use super::error::{SignalFirError, SignalFirErrorCode};
 use super::SignalFirOptions;
+use super::error::{SignalFirError, SignalFirErrorCode};
 use signals::SigId;
 
 /// Minimal deterministic planning output for Step 1A.

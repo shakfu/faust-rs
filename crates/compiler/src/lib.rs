@@ -587,6 +587,9 @@ fn signal_fir_diagnostic(error: &SignalFirError) -> Diagnostic {
         SignalFirErrorCode::InvalidOptions => errors::codes::SFIR_INVALID_OPTIONS,
         SignalFirErrorCode::EmptySignalList => errors::codes::SFIR_EMPTY_SIGNAL_LIST,
         SignalFirErrorCode::OutputArityMismatch => errors::codes::SFIR_OUTPUT_ARITY_MISMATCH,
+        SignalFirErrorCode::UnsupportedSignalNode => errors::codes::SFIR_UNSUPPORTED_SIGNAL_NODE,
+        SignalFirErrorCode::UnsupportedBinOp => errors::codes::SFIR_UNSUPPORTED_BINOP,
+        SignalFirErrorCode::InputIndexOutOfRange => errors::codes::SFIR_INPUT_INDEX_OUT_OF_RANGE,
     };
     Diagnostic::new(
         errors::Severity::Error,
