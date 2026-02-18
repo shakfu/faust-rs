@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_39_bargraph.dsp
+bytes=66
+lines=2
+fnv1a64=0b2d94fe84ae6fea
