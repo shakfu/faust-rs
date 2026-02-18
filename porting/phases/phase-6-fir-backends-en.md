@@ -1108,6 +1108,23 @@ Current Step 7B status (C fast-lane differential gate vs C++ `signalFIRCompiler`
   - MVP fixtures in `OK`,
   - each `DIFF` documented with rationale and owner action.
 
+Current Step 8A status (full-corpus backend differential gate):
+
+- Automated command available:
+  - `cargo run -p xtask -- backend-full-corpus-diff-report`
+- Report output:
+  - `porting/phases/phase-6-backend-full-corpus-diff-report-en.md`
+- Scope:
+  - full `tests/corpus/*.dsp`,
+  - Rust fast-lane C++ backend vs `faust -lang cpp -cn mydsp`,
+  - Rust fast-lane C backend vs `faust -lang c -cn mydsp`.
+- Current outcome:
+  - C++ backend: `OK=28`, `DIFF=0`, `UNSUPPORTED=27`
+  - C backend: `OK=28`, `DIFF=0`, `UNSUPPORTED=27`
+- Interpretation:
+  - remaining non-`OK` rows are unsupported pipeline coverage gaps
+    (parser/eval/propagate/transform), not backend-shell diffs.
+
 Current Step 2J closure status (table-focused differential slice):
 
 - Automated command available:

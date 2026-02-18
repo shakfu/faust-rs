@@ -4074,3 +4074,29 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo run -p xtask -- c-fastlane-diff-report`
   - `cargo clippy -p xtask --all-targets -- -D warnings`
+
+#### signalFIRCompiler fast-lane: Step 8A full-corpus backend differential gate (C/C++)
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/xtask/src/main.rs`
+  - `porting/phases/phase-6-backend-full-corpus-diff-report-en.md`
+  - `porting/phases/phase-6-fir-backends-en.md`
+  - `JOURNAL.md`
+- Implemented:
+  - added new command:
+    - `cargo run -p xtask -- backend-full-corpus-diff-report`
+  - report runs full-corpus backend differential checks for both targets:
+    - Rust fast-lane C++ backend vs `faust -lang cpp -cn mydsp`,
+    - Rust fast-lane C backend vs `faust -lang c -cn mydsp`.
+  - generated report:
+    - `porting/phases/phase-6-backend-full-corpus-diff-report-en.md`
+  - current result:
+    - C++ backend: `OK=28`, `DIFF=0`, `UNSUPPORTED=27`
+    - C backend: `OK=28`, `DIFF=0`, `UNSUPPORTED=27`
+  - interpretation captured in phase-6 doc:
+    - no backend-shell signature diffs on supported cases,
+    - remaining rows are unsupported pipeline coverage tasks upstream.
+- Validation:
+  - `cargo run -p xtask -- backend-full-corpus-diff-report`
+  - `cargo clippy -p xtask --all-targets -- -D warnings`
