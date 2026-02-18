@@ -4239,3 +4239,27 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo check -p compiler --all-targets`
   - `cargo run -p compiler -- -lang cpp tests/corpus/rep_38_sine_phasor.dsp -o /tmp/rep_38_sine_phasor.cpp`
+
+#### Compiler CLI: default codegen lane switched to fast for `-lang`/codegen flow
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/compiler/src/main.rs`
+- Implemented:
+  - changed CLI lane selection so codegen-oriented flows default to
+    `--signal-fir-lane fast` when not explicitly provided:
+    - `-lang c ...`
+    - `-lang cpp ...`
+    - `--dump-c ...`
+    - `--dump-cpp ...`
+    - implicit default backend mode (`faust-rs <file.dsp>`).
+  - explicit override still supported:
+    - `--signal-fir-lane legacy|fast`.
+  - kept validation that `--signal-fir-lane` is rejected on non-codegen modes
+    (`--parse`, `--dump-box`, `--dump-sig`, `--golden`).
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p compiler --all-targets`
+  - `cargo run -p compiler -- -lang cpp tests/corpus/rep_38_sine_phasor.dsp -o /tmp/rep_38_sine_phasor_default.cpp`
+  - `cargo run -p compiler -- -lang c tests/corpus/rep_38_sine_phasor.dsp -o /tmp/rep_38_sine_phasor_default.c`
+  - confirmed both outputs now contain UI controls and sample writes (`output0[i0]`), not empty loop stubs.

@@ -101,12 +101,8 @@ struct CliArgs {
     )]
     error_verbosity: ErrorVerbosity,
     /// Signal->FIR compilation lane (only valid with `--dump-cpp`/`--dump-c`).
-    #[arg(
-        long = "signal-fir-lane",
-        value_enum,
-        default_value_t = CliSignalFirLane::Legacy
-    )]
-    signal_fir_lane: CliSignalFirLane,
+    #[arg(long = "signal-fir-lane", value_enum)]
+    signal_fir_lane: Option<CliSignalFirLane>,
 }
 
 fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -536,6 +532,10 @@ fn emit_output(content: &str, output: Option<&PathBuf>) {
     }
 }
 
+fn selected_codegen_lane(cli: &CliArgs) -> CliSignalFirLane {
+    cli.signal_fir_lane.unwrap_or(CliSignalFirLane::Fast)
+}
+
 fn main() {
     let args = normalize_legacy_args(std::env::args());
     let cli = CliArgs::parse_from(args);
@@ -570,9 +570,7 @@ fn main() {
         print_global_usage_and_exit();
     };
 
-    if (cli.dump_box || cli.dump_sig || cli.parse || cli.golden)
-        && cli.signal_fir_lane != CliSignalFirLane::Legacy
-    {
+    if (cli.dump_box || cli.dump_sig || cli.parse || cli.golden) && cli.signal_fir_lane.is_some() {
         eprintln!("--signal-fir-lane is only valid with --dump-cpp/--dump-c");
         std::process::exit(2);
     }
@@ -686,14 +684,14 @@ fn main() {
             compiler.compile_file_default_to_cpp_with_lane(
                 input_path,
                 &options,
-                cli.signal_fir_lane.into_compiler_lane(),
+                selected_codegen_lane(&cli).into_compiler_lane(),
             )
         } else {
             compiler.compile_file_to_cpp_with_lane(
                 input_path,
                 &cli.import_dir,
                 &options,
-                cli.signal_fir_lane.into_compiler_lane(),
+                selected_codegen_lane(&cli).into_compiler_lane(),
             )
         };
 
@@ -717,14 +715,14 @@ fn main() {
             compiler.compile_file_default_to_c_with_lane(
                 input_path,
                 &options,
-                cli.signal_fir_lane.into_compiler_lane(),
+                selected_codegen_lane(&cli).into_compiler_lane(),
             )
         } else {
             compiler.compile_file_to_c_with_lane(
                 input_path,
                 &cli.import_dir,
                 &options,
-                cli.signal_fir_lane.into_compiler_lane(),
+                selected_codegen_lane(&cli).into_compiler_lane(),
             )
         };
 
