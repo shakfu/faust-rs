@@ -574,6 +574,11 @@ dependencies = [
 [[package]]
 name = "transform"
 version = "0.1.0"
+dependencies = [
+ "fir",
+ "signals",
+ "tlib",
+]
 
 [[package]]
 name = "unicode-ident"

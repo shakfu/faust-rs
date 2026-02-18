@@ -3430,3 +3430,39 @@ Execution plan (Phase 0 prototype, revised):
     - Step 1B for `crates/compiler` (fast-lane API/CLI wiring, lane enum,
       diagnostics mapping, integration tests, validation commands).
   - kept deliverables/pass-criteria format for direct execution tracking.
+
+#### signalFIRCompiler fast-lane: Step 1A implemented in `crates/transform`
+
+- Commit: `ac0f2be` (amended in this step)
+- Files:
+  - `crates/transform/Cargo.toml`
+  - `crates/transform/src/lib.rs`
+  - `crates/transform/src/signal_fir/mod.rs`
+  - `crates/transform/src/signal_fir/error.rs`
+  - `crates/transform/src/signal_fir/planner.rs`
+  - `crates/transform/src/signal_fir/module.rs`
+  - `Cargo.lock`
+  - `JOURNAL.md`
+- Implemented:
+  - added new `transform::signal_fir` module for the experimental
+    signal-to-FIR fast-lane entry point.
+  - defined typed and stable fast-lane errors:
+    - `FRS-SFIR-0001` invalid options,
+    - `FRS-SFIR-0002` empty signal list,
+    - `FRS-SFIR-0003` output arity mismatch.
+  - added Step 1A planner that validates top-level API contract:
+    - non-empty module name,
+    - non-empty signals slice,
+    - `num_outputs == signals.len()`.
+  - added minimal FIR module skeleton builder returning a valid FIR module root
+    (`SignalFirOutput`) while deferring true signal lowering to later steps.
+  - exposed public API:
+    - `SignalFirOptions`,
+    - `SignalFirOutput`,
+    - `compile_signals_to_fir_fastlane(...)`.
+  - added unit tests for:
+    - successful module root creation on valid inputs,
+    - stable typed error code on invalid options.
+- Validation:
+  - `cargo test -p transform --all-targets`
+  - `cargo clippy -p transform --all-targets -- -D warnings`
