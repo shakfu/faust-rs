@@ -76,6 +76,30 @@ cargo run -p compiler -- -lang fir foo.dsp
 - User diagnostics guide: `docs/user-diagnostics-guide-en.md`
 - Technical/developer workflows: `docs/developer-workflows-en.md`
 
+## Generate API docs
+
+Generate Rustdoc for workspace crates only (recommended):
+
+```bash
+cargo doc --workspace --no-deps
+```
+
+Generate Rustdoc including dependencies:
+
+```bash
+cargo doc --workspace
+```
+
+Open the generated HTML entry point:
+
+```bash
+open target/doc/index.html
+```
+
+Crate-specific entry point example:
+
+- `target/doc/compiler/index.html`
+
 ## Porting references
 
 - Porting plan: `porting/faust-rust-porting-plan-en.md`
