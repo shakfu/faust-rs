@@ -489,6 +489,24 @@ fn apply_rules(sig: &Signal, rules: &[Box<dyn SignalRewriter>]) -> Signal {
 
 **Audit correction (important)**: on the current branch, the end-to-end compile path for major backends is still centered on `InstructionsCompiler`/`DAGInstructionsCompiler` through `libcode.cpp`. The Rust MVP should therefore port this effective path first. `signalFIRCompiler` should be treated as a secondary/experimental path until explicitly promoted in upstream C++.
 
+**Temporary testing lane (accepted)**: in parallel with the official path, a
+`signalFIRCompiler`-style Rust lane can be used to accelerate end-to-end testing
+from parser to C/C++ backends:
+
+`parse -> eval -> propagate(signals) -> signal->FIR fast-lane -> backend c/cpp`
+
+Rules for this lane:
+
+1. Keep it explicit/opt-in (do not silently replace default production route).
+2. Keep it differentially tested against C++ `signalFIRCompiler`.
+3. Keep unsupported signal families explicit (typed diagnostics, no silent stubs).
+4. Keep backend entrypoint canonical (`FirBuilder` module + `match_fir` consumers).
+
+Detailed execution plan and pass criteria are tracked in:
+
+- `porting/phases/phase-6-fir-backends-en.md` section
+  **"Experimental End-to-End Fast-Lane: signalFIRCompiler-Style Rust Port"**.
+
 **Critical point — Signals → FIR translation**: This is the most complex part of the current compiler. The code in C++ is dense and has accumulated a lot of historical complexity. Taking advantage of porting to **simplify this translation** is a major opportunity. Suggestions:
 
 - Break down the translation into clearly identified passes (type analysis → signal classification → declaration generation → loop generation → peephole optimizations)

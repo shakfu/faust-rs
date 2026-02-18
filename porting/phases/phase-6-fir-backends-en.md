@@ -822,3 +822,200 @@ Porting rule:
 - until full signal->FIR production parity is available, backend output must still emit
   this full API shape with deterministic fallback bodies, so generated C++ remains
   architecture-compatible and testable.
+
+---
+
+## 9. Experimental End-to-End Fast-Lane: `signalFIRCompiler`-Style Rust Port
+
+### 9.1 Goal and positioning
+
+Build a **test-oriented end-to-end path**:
+
+`parser -> eval -> propagate(signals) -> signal->FIR fast-lane -> backends c/cpp`
+
+using `signalFIRCompiler` C++ as semantic blueprint, even if this is not the official
+production path today.
+
+This lane is explicitly:
+
+- useful to validate parser/signal/backends integration early,
+- non-blocking for the official `InstructionsCompiler` parity track,
+- constrained by explicit feature gates and differential tests.
+
+### 9.2 C++ source-of-truth anchors
+
+Use `/Users/letz/Developpements/RUST/faust`:
+
+- `compiler/transform/signalFIRCompiler.hh/.cpp`
+  - two-stage model: `SignalBuilder` (resource planning) + `SignalFIRCompiler` (FIR emission),
+  - sectioned FIR blocks (`fDeclareBlock`, `fInitBlock`, `fResetBlock`, `fUIBlock`,
+    `fControlBlock`, `fSampleBlock`, etc.),
+  - table prefill path (`compileTables()`),
+  - final module assembly (`genFIRModule()`).
+- `compiler/generator/instructions_compiler.cpp`
+  - confirms this is currently not the default production route.
+
+### 9.2.1 Observed C++ behavior snapshot (to preserve/test explicitly)
+
+From `signalFIRCompiler.hh/.cpp`:
+
+1. Two-stage flow is explicit:
+   - `SignalBuilder` plans resources first (delay/table/UI),
+   - compiler pass then emits FIR statements from signal traversal.
+2. FIR is assembled as sectioned blocks:
+   - declarations, init/constants/reset/clear, metadata, UI, tables, control, sample.
+3. `compileTables()` pre-fills tables before compute path generation.
+4. `compile()` emits output stores and increments `fIOTA`.
+5. `genFIRModule()` wires full DSP API methods and compute input/output stack views.
+
+Known C++ limitations/TODOs to model as explicit Rust diagnostics/backlog:
+
+- `compileSigFConst`: only `fSamplingFreq` special case implemented.
+- `compileSigWaveform`: placeholder behavior.
+- soundfile family: placeholder behavior.
+- `compileSigPrefix`: simplified behavior.
+- `writeStatement`: currently forced to sample block (variability routing commented out).
+
+### 9.3 Rust target architecture (recommended)
+
+Implement in `crates/transform` as an isolated module (example naming):
+
+- `transform::signal_fir::planner`
+  - delay lines, tables, UI zones allocation from `signals::match_sig`.
+- `transform::signal_fir::emitter`
+  - `SigMatch` -> FIR value/statement emission.
+- `transform::signal_fir::tables`
+  - table precomputation loops for `instanceConstants`/init section.
+- `transform::signal_fir::module`
+  - assembly of final FIR module sections with `fir::FirBuilder`.
+- `transform::signal_fir::error`
+  - explicit diagnostics/errors for unsupported signal forms.
+
+Canonical API (proposed):
+
+```rust
+pub fn compile_signals_to_fir_fastlane(
+    arena: &mut TreeArena,
+    signals: &[SigId],
+    num_inputs: usize,
+    num_outputs: usize,
+    module_name: &str,
+) -> Result<FirId, SignalFirError>;
+```
+
+### 9.4 Differential baseline before coding
+
+Before implementing each slice, lock reference behavior on a corpus:
+
+- run C++ with stable flags (`-lang c`, `-lang cpp`, `-norm` where applicable),
+- record:
+  - generated `compute` shape,
+  - delay/table/UI behavior,
+  - unsupported/placeholder areas currently present in C++ `signalFIRCompiler`.
+
+Minimum fixtures:
+
+- arithmetic + delay feedback (`+~_`, `@`, `prefix` patterns),
+- table read/write and waveform usage,
+- UI controls (button/checkbox/slider/bargraph),
+- recursion/projection (`sigRec/sigProj`),
+- soundfile and `fconst` edge cases.
+
+### 9.5 Step-by-step porting plan (with deliverables and pass criteria)
+
+#### Step 1 — Fast-lane contract and crate boundaries
+
+- Deliverables:
+  - `transform` public API + typed error model,
+  - architecture note (what is in/out of scope for this lane).
+- Pass criteria:
+  - compile-only smoke test from `signals` input to FIR module root.
+
+#### Step 2 — Resource planner parity slice
+
+- Scope:
+  - delay-line allocation sizing (power-of-two policy),
+  - table declarations,
+  - UI in/out control registration.
+- Deliverables:
+  - planner output struct with deterministic IDs/order.
+- Pass criteria:
+  - fixture tests validate planned resources count/naming/order.
+
+#### Step 3 — Core signal emission MVP
+
+- Scope:
+  - constants, inputs/outputs, binop, select2, casts,
+  - `delay1`, `delay`, recursion projection path.
+- Deliverables:
+  - emitter producing FIR statements/values via `FirBuilder`.
+- Pass criteria:
+  - `process = +~_;` and delay fixtures emit FIR + compile in C/C++ backend.
+
+#### Step 4 — Table emission path
+
+- Scope:
+  - `wrtbl/rdtbl/gen` with prefill loops equivalent to `compileTables()`.
+- Deliverables:
+  - FIR init/constants section population for tables.
+- Pass criteria:
+  - table fixtures run through backend C/C++ without placeholder paths.
+
+#### Step 5 — UI emission path
+
+- Scope:
+  - button/checkbox/vslider/hslider/numentry/bargraphs metadata wiring.
+- Deliverables:
+  - deterministic `buildUserInterface` FIR section.
+- Pass criteria:
+  - generated C/C++ UI calls match expected signatures and types (`FAUSTFLOAT` zones).
+
+#### Step 6 — FIR module assembly parity
+
+- Scope:
+  - section wiring for init/reset/clear/constants/UI/control/sample,
+  - compute loop with `inputs[]/outputs[]`.
+- Deliverables:
+  - one FIR module root consumable by both `codegen::backends::c` and `cpp`.
+- Pass criteria:
+  - `compiler` can emit C and C++ from real `.dsp` through this lane.
+
+#### Step 7 — Compiler integration (explicit experimental route)
+
+- Deliverables:
+  - explicit compiler API/CLI route, example:
+    - `--dump-c --fir-lane signal-fast`,
+    - `--dump-cpp --fir-lane signal-fast`.
+- Pass criteria:
+  - route is deterministic and isolated from default production path.
+
+#### Step 8 — Differential tests Rust vs C++ `signalFIRCompiler`
+
+- Deliverables:
+  - report table `OK/DIFF/UNSUPPORTED` on fixture corpus.
+- Pass criteria:
+  - MVP fixtures in `OK`,
+  - each `DIFF` documented with rationale and owner action.
+
+#### Step 9 — Unsupported/TODO closure map
+
+- Scope:
+  - explicit backlog for known C++ TODO/approx paths:
+    - `sigFConst` general handling,
+    - waveform specifics,
+    - soundfile family,
+    - `sigPrefix` and `sigEnable` precise semantics.
+- Deliverables:
+  - prioritized issue list linked to tests.
+- Pass criteria:
+  - no silent fallback; all unsupported paths produce typed diagnostics.
+
+### 9.6 Guardrails
+
+- Keep this lane behind an explicit compiler option until parity is proven.
+- Do not couple this lane to backend internals; backend input stays canonical FIR module.
+- Keep one shared fixture set for both C and C++ backend checks.
+- Keep every step documented in `JOURNAL.md` with:
+  - files touched,
+  - validation commands,
+  - differential status updates.
