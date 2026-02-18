@@ -1,4 +1,4 @@
-//! Experimental signal->FIR fast-lane (Step 2A/2B/2C/2D/2E/2F/2G slices).
+//! Experimental signal->FIR fast-lane (Step 2A/2B/2C/2D/2E/2F/2G/2H slices).
 //!
 //! # Status
 //! This module currently provides an **executable base slice**:
@@ -14,10 +14,12 @@
 //! - critical shim elimination (`Step 2F`): no `frs_*` calls remain in fast-lane
 //!   generated C++,
 //! - first FIR-native table lowering (`Step 2G`) for
-//!   `SIGWAVEFORM` / `SIGRDTBL` / `SIGWRTBL`.
+//!   `SIGWAVEFORM` / `SIGRDTBL` / `SIGWRTBL`,
+//! - non-trivial table slice (`Step 2H`) for `SIGWRTBL(size, gen(..), ..)` with
+//!   constant size and deterministic generator expansion.
 //!
-//! Current `Step 2G` scope is intentionally focused on direct waveform tables.
-//! More advanced table-generation patterns are still reported as typed
+//! Current `Step 2H` scope still excludes complex generator forms depending on
+//! runtime context/loop variables; those are reported as typed
 //! `UnsupportedSignalNode` errors.
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors until the
@@ -68,7 +70,7 @@ pub struct SignalFirOutput {
 
 /// Compiles propagated signals into a FIR module using the experimental fast-lane.
 ///
-/// # Current behavior (Step 2A/2B/2C/2D/2E/2F/2G)
+/// # Current behavior (Step 2A/2B/2C/2D/2E/2F/2G/2H)
 /// - validates options and top-level signal/arity contract,
 /// - lowers one executable bootstrap signal slice to FIR.
 ///
@@ -335,6 +337,78 @@ mod tests {
                 FirMatch::LoadTable { .. }
             ),
             "rdtbl output should lower to FIR table read"
+        );
+    }
+
+    #[test]
+    fn wrtbl_readonly_generator_constant_lowers_to_declared_table() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let size = b.int(8);
+            let init = b.real(0.25);
+            let ridx = b.input(0);
+            b.read_only_table(size, init, ridx)
+        };
+        let out =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+                .expect("Step 2H should support readonly wrtbl with constant generator");
+
+        let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+            panic!("module expected");
+        };
+        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+            panic!("dsp_struct block expected");
+        };
+        let table = struct_items
+            .iter()
+            .copied()
+            .find(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareTable { .. }))
+            .expect("readonly wrtbl should declare one table");
+        let FirMatch::DeclareTable { values, .. } = match_fir(&out.store, table) else {
+            panic!("declare table expected");
+        };
+        assert_eq!(values.len(), 8, "table must use requested constant size");
+    }
+
+    #[test]
+    fn wrtbl_runtime_write_emits_store_table_update() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let size = b.int(4);
+            let init = b.real(0.0);
+            let widx = b.input(0);
+            let wsig = b.input(1);
+            let ridx = b.input(0);
+            b.write_read_table(size, init, widx, wsig, ridx)
+        };
+        let out =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 2, 1, &SignalFirOptions::default())
+                .expect("Step 2H should support wrtbl runtime write/read shape");
+
+        let FirMatch::Module { declarations, .. } = match_fir(&out.store, out.module) else {
+            panic!("module expected");
+        };
+        let FirMatch::Block(decls) = match_fir(&out.store, declarations) else {
+            panic!("declarations block expected");
+        };
+        let compute = decls
+            .iter()
+            .copied()
+            .find(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareFun { .. }))
+            .expect("compute declaration expected");
+        let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
+            panic!("declare fun expected");
+        };
+        let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
+            panic!("compute block expected");
+        };
+        assert!(
+            stmts
+                .iter()
+                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::StoreTable { .. })),
+            "runtime wrtbl should emit FIR store_table update in compute body"
         );
     }
 

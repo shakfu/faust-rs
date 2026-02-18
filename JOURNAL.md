@@ -3816,3 +3816,35 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p compiler --test signal_fir_lane`
   - `cargo clippy -p fir -p transform -p codegen -p compiler --all-targets -- -D warnings`
   - `cargo run -p compiler -- --dump-cpp tests/corpus/rep_20_environment_waveform.dsp --signal-fir-lane fast`
+
+#### signalFIRCompiler fast-lane: Step 2H non-trivial table coverage and semantic gap reduction
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/mod.rs`
+- Implemented:
+  - extended table resolution beyond direct `SIGWAVEFORM`:
+    - supports `SIGWRTBL(size, generator, wi, ws)` table identity in fast-lane,
+    - supports generator expansion when `generator` is `SIGGEN` over:
+      - scalar constants (`int`/`real`) replicated to table size,
+      - waveform literals repeated/truncated to table size.
+  - added explicit size contract for this slice:
+    - `SIGWRTBL` size must be a positive constant integer in Step 2H.
+  - aligned `rdtbl` evaluation order with C++ `compileSigRDTbl`:
+    - table expression is lowered first (so `wrtbl` side effects are emitted),
+    - then table read is emitted.
+  - improved table index semantics:
+    - normalized modulo indexing for reads/writes: `((idx % size) + size) % size`
+      to keep index in `[0, size)`, including negative indices.
+  - added transform unit tests for non-trivial table patterns:
+    - readonly wrtbl with constant generator and constant size,
+    - runtime write/read wrtbl path emitting `StoreTable` in compute.
+  - updated Rustdoc module status from Step 2G to Step 2H with current limits.
+- Validation:
+  - `cargo fmt -p transform`
+  - `cargo test -p transform --all-targets`
+  - `cargo test -p compiler --test signal_fir_lane`
+  - `cargo test -p codegen --all-targets`
+  - `cargo clippy -p transform --all-targets -- -D warnings`
+  - `cargo clippy -p fir -p transform -p codegen -p compiler --all-targets -- -D warnings`

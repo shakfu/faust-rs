@@ -474,69 +474,65 @@ impl<'a> SignalToFirLower<'a> {
         tbl: SigId,
         ridx: SigId,
     ) -> Result<FirId, SignalFirError> {
-        let (table_name, table_len) = self.resolve_waveform_table(tbl)?;
+        // Keep C++ `compileSigRDTbl` evaluation order: evaluate table first so
+        // pending `wrtbl` side-effects are emitted before read access.
+        let _ = self.lower_signal(tbl)?;
+        let (table_name, table_len) = self.resolve_table(tbl)?;
         if table_len == 0 {
             return self.unsupported_node(node, "SIGRDTBL cannot read an empty table");
         }
         let ridx = self.lower_signal(ridx)?;
-        let ridx = {
-            let mut b = FirBuilder::new(&mut self.store);
-            b.cast(FirType::Int32, ridx)
-        };
-        let index = {
-            let mut b = FirBuilder::new(&mut self.store);
-            let size = b.int32(i32::try_from(table_len).unwrap_or(i32::MAX));
-            b.binop(FirBinOp::Rem, ridx, size, FirType::Int32)
-        };
+        let index = self.normalized_table_index(ridx, table_len);
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.load_table(table_name, AccessType::Struct, index, FirType::FaustFloat))
     }
 
     fn lower_wrtbl(
         &mut self,
-        _node: SigId,
+        node: SigId,
         _size: SigId,
         generator: SigId,
         widx: SigId,
         wsig: SigId,
     ) -> Result<FirId, SignalFirError> {
-        let (table_name, table_len) = self.resolve_waveform_table(generator)?;
+        let (table_name, table_len) = self.resolve_table(node)?;
         if table_len == 0 {
             return self.unsupported_node(generator, "SIGWRTBL cannot write an empty table");
         }
-        let wsig_value = self.lower_signal(wsig)?;
         if self.arena.is_nil(widx) {
-            return Ok(wsig_value);
+            if self.arena.is_nil(wsig) {
+                return Ok(self.float_const(0.0));
+            }
+            return self.lower_signal(wsig);
         }
+        if self.arena.is_nil(wsig) {
+            return self.unsupported_node(node, "SIGWRTBL write requires wsig when widx is set");
+        }
+        let wsig_value = self.lower_signal(wsig)?;
         let widx = self.lower_signal(widx)?;
-        let widx = {
-            let mut b = FirBuilder::new(&mut self.store);
-            b.cast(FirType::Int32, widx)
-        };
-        let index = {
-            let mut b = FirBuilder::new(&mut self.store);
-            let size = b.int32(i32::try_from(table_len).unwrap_or(i32::MAX));
-            b.binop(FirBinOp::Rem, widx, size, FirType::Int32)
-        };
+        let index = self.normalized_table_index(widx, table_len);
         let mut b = FirBuilder::new(&mut self.store);
         self.compute_updates
             .push(b.store_table(table_name, AccessType::Struct, index, wsig_value));
         Ok(wsig_value)
     }
 
-    fn resolve_waveform_table(&mut self, sig: SigId) -> Result<(String, usize), SignalFirError> {
-        if let SigMatch::Waveform(values) = match_sig(self.arena, sig) {
-            let name = self.ensure_waveform_table(sig, values)?;
-            return Ok((name, values.len()));
-        }
+    fn resolve_table(&mut self, sig: SigId) -> Result<(String, usize), SignalFirError> {
         if let Some(name) = self.waveform_tables.get(&sig).cloned() {
             let len = self.waveform_table_len.get(&sig).copied().unwrap_or(0);
             return Ok((name, len));
         }
-        self.unsupported_node(
-            sig,
-            "table access currently supports direct SIGWAVEFORM tables in Step 2G",
-        )
+        match match_sig(self.arena, sig) {
+            SigMatch::Waveform(values) => {
+                let name = self.ensure_waveform_table(sig, values)?;
+                Ok((name, values.len()))
+            }
+            SigMatch::WrTbl(size, generator, _, _) => self.ensure_wrtbl_table(sig, size, generator),
+            _ => self.unsupported_node(
+                sig,
+                "table access currently supports SIGWAVEFORM and SIGWRTBL forms in Step 2H",
+            ),
+        }
     }
 
     fn ensure_waveform_table(
@@ -563,6 +559,107 @@ impl<'a> SignalToFirLower<'a> {
         self.waveform_tables.insert(sig, name.clone());
         self.waveform_table_len.insert(sig, values.len());
         Ok(name)
+    }
+
+    fn ensure_wrtbl_table(
+        &mut self,
+        sig: SigId,
+        size_sig: SigId,
+        generator_sig: SigId,
+    ) -> Result<(String, usize), SignalFirError> {
+        let size = self.table_size_from_sig(size_sig)?;
+        let generated = self.expand_generator_values(generator_sig, size)?;
+        let name = format!("table_n{}", sig.as_u32());
+        let mut b = FirBuilder::new(&mut self.store);
+        let decl = b.declare_table(
+            name.clone(),
+            AccessType::Struct,
+            FirType::FaustFloat,
+            &generated,
+        );
+        self.struct_declarations.push(decl);
+        self.waveform_tables.insert(sig, name.clone());
+        self.waveform_table_len.insert(sig, size);
+        Ok((name, size))
+    }
+
+    fn table_size_from_sig(&self, size_sig: SigId) -> Result<usize, SignalFirError> {
+        match match_sig(self.arena, size_sig) {
+            SigMatch::Int(v) if v > 0 => usize::try_from(v).map_err(|_| {
+                SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!("SIGWRTBL size conversion overflow: {v}"),
+                )
+            }),
+            SigMatch::Int(v) => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("SIGWRTBL size must be > 0, got {v}"),
+            )),
+            _ => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                "SIGWRTBL currently requires constant integer size in Step 2H",
+            )),
+        }
+    }
+
+    fn expand_generator_values(
+        &mut self,
+        generator_sig: SigId,
+        size: usize,
+    ) -> Result<Vec<FirId>, SignalFirError> {
+        let init_sig = if let SigMatch::Gen(inner) = match_sig(self.arena, generator_sig) {
+            inner
+        } else {
+            generator_sig
+        };
+        match match_sig(self.arena, init_sig) {
+            SigMatch::Waveform(values) => {
+                if values.is_empty() {
+                    return Err(SignalFirError::new(
+                        SignalFirErrorCode::UnsupportedSignalNode,
+                        "SIGGEN waveform cannot be empty in Step 2H",
+                    ));
+                }
+                let mut out = Vec::with_capacity(size);
+                for index in 0..size {
+                    let item = values[index % values.len()];
+                    out.push(self.lower_signal(item)?);
+                }
+                Ok(out)
+            }
+            SigMatch::Int(_) | SigMatch::Real(_) => {
+                let v = self.lower_signal(init_sig)?;
+                Ok(vec![v; size])
+            }
+            _ => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "SIGGEN table init unsupported in Step 2H (expr={})",
+                    dump_sig_readable(self.arena, init_sig)
+                ),
+            )),
+        }
+    }
+
+    fn normalized_table_index(&mut self, index: FirId, table_len: usize) -> FirId {
+        let idx_i32 = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.cast(FirType::Int32, index)
+        };
+        let size = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.int32(i32::try_from(table_len).unwrap_or(i32::MAX))
+        };
+        let rem = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.binop(FirBinOp::Rem, idx_i32, size, FirType::Int32)
+        };
+        let rem_plus_size = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.binop(FirBinOp::Add, rem, size, FirType::Int32)
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        b.binop(FirBinOp::Rem, rem_plus_size, size, FirType::Int32)
     }
 
     fn ensure_named_struct_var(&mut self, name: &str, typ: FirType, init: Option<FirId>) {
