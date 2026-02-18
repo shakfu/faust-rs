@@ -14,7 +14,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirStore, FirType};
+use fir::{
+    AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirStore, FirType,
+    SliderRange, SliderType,
+};
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{NodeKind, TreeArena};
 
@@ -66,10 +69,33 @@ pub fn build_module(
             false,
         )
     };
+    let build_ui = if lower.ui_statements.is_empty() {
+        None
+    } else {
+        let ui_body = {
+            let mut b = FirBuilder::new(&mut lower.store);
+            b.block(&lower.ui_statements)
+        };
+        let mut b = FirBuilder::new(&mut lower.store);
+        Some(b.declare_fun(
+            "buildUserInterface",
+            FirType::Fun {
+                args: Vec::new(),
+                ret: Box::new(FirType::Void),
+            },
+            &[],
+            ui_body,
+            false,
+        ))
+    };
 
     let declarations = {
         let mut b = FirBuilder::new(&mut lower.store);
-        b.block(&[compute])
+        if let Some(build_ui) = build_ui {
+            b.block(&[build_ui, compute])
+        } else {
+            b.block(&[compute])
+        }
     };
     let dsp_struct = {
         let mut b = FirBuilder::new(&mut lower.store);
@@ -100,6 +126,9 @@ struct SignalToFirLower<'a> {
     state_name_by_node: HashMap<SigId, String>,
     scheduled_state_updates: HashSet<SigId>,
     recursion_stack: Vec<String>,
+    ui_controls: HashMap<SigId, String>,
+    ui_statements: Vec<FirId>,
+    named_struct_vars: HashSet<String>,
 }
 
 impl<'a> SignalToFirLower<'a> {
@@ -114,6 +143,9 @@ impl<'a> SignalToFirLower<'a> {
             state_name_by_node: HashMap::new(),
             scheduled_state_updates: HashSet::new(),
             recursion_stack: Vec::new(),
+            ui_controls: HashMap::new(),
+            ui_statements: Vec::new(),
+            named_struct_vars: HashSet::new(),
         }
     }
 
@@ -172,33 +204,45 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Ceil(value) => self.lower_fun1("std::ceil", value)?,
             SigMatch::Rint(value) => self.lower_fun1("std::rint", value)?,
             SigMatch::Round(value) => self.lower_fun1("std::round", value)?,
-            SigMatch::Lowest(value) => self.lower_fun1("frs_lowest", value)?,
-            SigMatch::Highest(value) => self.lower_fun1("frs_highest", value)?,
+            SigMatch::Lowest(value) => self.lower_signal(value)?,
+            SigMatch::Highest(value) => self.lower_signal(value)?,
             SigMatch::RdTbl(tbl, ridx) => self.lower_fun2("frs_rdtbl", tbl, ridx)?,
             SigMatch::WrTbl(size, generator, widx, wsig) => {
                 self.lower_fun4("frs_wrtbl", size, generator, widx, wsig)?
             }
             SigMatch::Waveform(values) => self.lower_fun_list("frs_waveform", values)?,
-            SigMatch::Button(label) => self.lower_fun1("frs_button", label)?,
-            SigMatch::Checkbox(label) => self.lower_fun1("frs_checkbox", label)?,
+            SigMatch::Button(label) => self.lower_button(sig, label, ButtonType::Button),
+            SigMatch::Checkbox(label) => self.lower_button(sig, label, ButtonType::Checkbox),
             SigMatch::VSlider(label, init, min, max, step) => {
-                self.lower_fun5("frs_vslider", label, init, min, max, step)?
+                self.lower_slider(sig, [label, init, min, max, step], SliderType::Vertical)?
             }
             SigMatch::HSlider(label, init, min, max, step) => {
-                self.lower_fun5("frs_hslider", label, init, min, max, step)?
+                self.lower_slider(sig, [label, init, min, max, step], SliderType::Horizontal)?
             }
             SigMatch::NumEntry(label, init, min, max, step) => {
-                self.lower_fun5("frs_numentry", label, init, min, max, step)?
+                self.lower_slider(sig, [label, init, min, max, step], SliderType::NumEntry)?
             }
             SigMatch::VBargraph(label, min, max, value) => {
-                self.lower_fun4("frs_vbargraph", label, min, max, value)?
+                self.lower_bargraph(sig, label, min, max, value, BargraphType::Vertical)?
             }
             SigMatch::HBargraph(label, min, max, value) => {
-                self.lower_fun4("frs_hbargraph", label, min, max, value)?
+                self.lower_bargraph(sig, label, min, max, value, BargraphType::Horizontal)?
             }
-            SigMatch::Attach(lhs, rhs) => self.lower_fun2("frs_attach", lhs, rhs)?,
-            SigMatch::Enable(lhs, rhs) => self.lower_fun2("frs_enable", lhs, rhs)?,
-            SigMatch::Control(lhs, rhs) => self.lower_fun2("frs_control", lhs, rhs)?,
+            SigMatch::Attach(lhs, rhs) => {
+                let _ = self.lower_signal(rhs)?;
+                self.lower_signal(lhs)?
+            }
+            SigMatch::Enable(lhs, rhs) => {
+                let zero = self.float_const(0.0);
+                let lhs = self.lower_signal(lhs)?;
+                let cond = self.lower_signal(rhs)?;
+                let mut b = FirBuilder::new(&mut self.store);
+                b.select2(cond, lhs, zero, FirType::FaustFloat)
+            }
+            SigMatch::Control(lhs, rhs) => {
+                let _ = self.lower_signal(rhs)?;
+                self.lower_signal(lhs)?
+            }
             SigMatch::Soundfile(label) => self.lower_fun1("frs_soundfile", label)?,
             other => {
                 return Err(SignalFirError::new(
@@ -321,6 +365,111 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
+    fn lower_button(&mut self, node: SigId, label: SigId, typ: ButtonType) -> FirId {
+        if let Some(var) = self.ui_controls.get(&node).cloned() {
+            let mut b = FirBuilder::new(&mut self.store);
+            return b.load_var(var, AccessType::Struct, FirType::FaustFloat);
+        }
+        let var = format!("fUiCtl{}", node.as_u32());
+        let init = self.float_const(0.0);
+        self.ensure_named_struct_var(&var, init);
+        let label = self.label_text(label);
+        let mut b = FirBuilder::new(&mut self.store);
+        self.ui_statements
+            .push(b.add_button(typ, label, var.clone()));
+        self.ui_controls.insert(node, var.clone());
+        b.load_var(var, AccessType::Struct, FirType::FaustFloat)
+    }
+
+    fn lower_slider(
+        &mut self,
+        node: SigId,
+        params: [SigId; 5],
+        typ: SliderType,
+    ) -> Result<FirId, SignalFirError> {
+        let [label, init, min, max, step] = params;
+        if let Some(var) = self.ui_controls.get(&node).cloned() {
+            let mut b = FirBuilder::new(&mut self.store);
+            return Ok(b.load_var(var, AccessType::Struct, FirType::FaustFloat));
+        }
+        let var = format!("fUiCtl{}", node.as_u32());
+        let init_v = self.constant_f64(init).unwrap_or(0.0);
+        let min_v = self.constant_f64(min).unwrap_or(0.0);
+        let max_v = self.constant_f64(max).unwrap_or(1.0);
+        let step_v = self.constant_f64(step).unwrap_or(0.01);
+        let init_id = self.float_const(init_v);
+        self.ensure_named_struct_var(&var, init_id);
+        let label = self.label_text(label);
+        let range = SliderRange {
+            init: init_v,
+            lo: min_v,
+            hi: max_v,
+            step: step_v,
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        self.ui_statements
+            .push(b.add_slider(typ, label, var.clone(), range));
+        self.ui_controls.insert(node, var.clone());
+        Ok(b.load_var(var, AccessType::Struct, FirType::FaustFloat))
+    }
+
+    fn lower_bargraph(
+        &mut self,
+        node: SigId,
+        label: SigId,
+        min: SigId,
+        max: SigId,
+        value: SigId,
+        typ: BargraphType,
+    ) -> Result<FirId, SignalFirError> {
+        if !self.ui_controls.contains_key(&node) {
+            let var = format!("fUiMeter{}", node.as_u32());
+            let init = self.float_const(0.0);
+            self.ensure_named_struct_var(&var, init);
+            let label = self.label_text(label);
+            let min_v = self.constant_f64(min).unwrap_or(0.0);
+            let max_v = self.constant_f64(max).unwrap_or(1.0);
+            let mut b = FirBuilder::new(&mut self.store);
+            self.ui_statements
+                .push(b.add_bargraph(typ, label, var.clone(), min_v, max_v));
+            self.ui_controls.insert(node, var);
+        }
+        self.lower_signal(value)
+    }
+
+    fn ensure_named_struct_var(&mut self, name: &str, init: FirId) {
+        if self.named_struct_vars.contains(name) {
+            return;
+        }
+        let mut b = FirBuilder::new(&mut self.store);
+        let dec = b.declare_var(
+            name.to_owned(),
+            FirType::FaustFloat,
+            AccessType::Struct,
+            Some(init),
+        );
+        self.struct_declarations.push(dec);
+        self.named_struct_vars.insert(name.to_owned());
+    }
+
+    fn label_text(&self, label: SigId) -> String {
+        match self.arena.kind(label) {
+            Some(NodeKind::Symbol(s)) => s.to_string(),
+            Some(NodeKind::StringLiteral(s)) => s.to_string(),
+            Some(NodeKind::Int(v)) => v.to_string(),
+            Some(NodeKind::FloatBits(bits)) => f64::from_bits(*bits).to_string(),
+            _ => "ui".to_owned(),
+        }
+    }
+
+    fn constant_f64(&self, sig: SigId) -> Option<f64> {
+        match match_sig(self.arena, sig) {
+            SigMatch::Int(v) => Some(v as f64),
+            SigMatch::Real(v) => Some(v),
+            _ => None,
+        }
+    }
+
     fn lower_binop(&mut self, op: BinOp, lhs: SigId, rhs: SigId) -> Result<FirId, SignalFirError> {
         let lhs = self.lower_signal(lhs)?;
         let rhs = self.lower_signal(rhs)?;
@@ -361,24 +510,6 @@ impl<'a> SignalToFirLower<'a> {
         let d = self.lower_signal(d)?;
         let mut fb = FirBuilder::new(&mut self.store);
         Ok(fb.fun_call(name, &[a, b, c, d], FirType::FaustFloat))
-    }
-
-    fn lower_fun5(
-        &mut self,
-        name: &str,
-        a: SigId,
-        b: SigId,
-        c: SigId,
-        d: SigId,
-        e: SigId,
-    ) -> Result<FirId, SignalFirError> {
-        let a = self.lower_signal(a)?;
-        let b = self.lower_signal(b)?;
-        let c = self.lower_signal(c)?;
-        let d = self.lower_signal(d)?;
-        let e = self.lower_signal(e)?;
-        let mut fb = FirBuilder::new(&mut self.store);
-        Ok(fb.fun_call(name, &[a, b, c, d, e], FirType::FaustFloat))
     }
 
     fn lower_fun_list(&mut self, name: &str, values: &[SigId]) -> Result<FirId, SignalFirError> {

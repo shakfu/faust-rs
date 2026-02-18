@@ -3712,3 +3712,36 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p transform --all-targets`
   - `cargo clippy -p transform -p compiler --all-targets -- -D warnings`
   - `cargo test -p compiler --test signal_fir_lane`
+
+#### signalFIRCompiler fast-lane: Step 2E shim reduction (`frs_*`) and FIR-native replacements
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/mod.rs`
+  - `crates/compiler/tests/signal_fir_lane.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - replaced several shim-based lowering paths with FIR-native behavior:
+    - `Lowest/Highest` now lower directly to inner signal (no shim call),
+    - `Attach/Control` now lower to direct value path with explicit lowering of
+      the secondary argument for deterministic traversal,
+    - `Enable` now lowers to FIR `Select2(cond, value, 0.0)` instead of shim.
+  - implemented native UI lowering path (no `frs_*slider/button/bargraph` shims):
+    - UI control nodes now allocate struct vars (`DeclareVar`),
+    - emit FIR UI instructions in a generated `buildUserInterface` function:
+      `AddButton`, `AddSlider`, `AddBargraph`,
+    - compute path reads control values via FIR `LoadVar`.
+  - retained explicit residual shims for families not yet FIR-native in this step:
+    - `frs_rdtbl`,
+    - `frs_wrtbl`,
+    - `frs_waveform`,
+    - `frs_soundfile`.
+  - added integration test proving UI path uses native FIR UI lowering without
+    slider shim names for `rep_10_two_in_two_out_ui.dsp`.
+  - updated Rustdoc status to include Step 2E and explicit residual-shim list.
+- Validation:
+  - `cargo fmt -p transform -p compiler`
+  - `cargo test -p transform --all-targets`
+  - `cargo test -p compiler --test signal_fir_lane`
+  - `cargo clippy -p transform -p compiler --all-targets -- -D warnings`

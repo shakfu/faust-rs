@@ -109,3 +109,21 @@ fn legacy_and_fastlane_both_compile_nonlinear_clip_fixture() {
     assert!(fast.contains("class rep_07_nonlinear_clip : public dsp"));
     assert!(fast.contains("void compute("));
 }
+
+#[test]
+fn fastlane_ui_fixture_uses_native_ui_path_without_slider_shims() {
+    let fast = compile_cpp_with_lane(
+        "rep_10_two_in_two_out_ui.dsp",
+        SignalFirLane::TransformFastLane,
+    );
+    assert!(fast.contains("class rep_10_two_in_two_out_ui : public dsp"));
+    assert!(fast.contains("void buildUserInterface("));
+    assert!(
+        !fast.contains("frs_hslider"),
+        "UI sliders should use native FIR UI instructions, not frs_* shims"
+    );
+    assert!(
+        !fast.contains("frs_vslider"),
+        "UI sliders should use native FIR UI instructions, not frs_* shims"
+    );
+}

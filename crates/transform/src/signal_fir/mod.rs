@@ -1,4 +1,4 @@
-//! Experimental signal->FIR fast-lane (Step 2A/2B/2C/2D slices).
+//! Experimental signal->FIR fast-lane (Step 2A/2B/2C/2D/2E slices).
 //!
 //! # Status
 //! This module currently provides an **executable base slice**:
@@ -8,7 +8,12 @@
 //! - core math and control/state bootstrap nodes (`Step 2B`),
 //! - explicit state lowering for `delay`-family nodes (`Step 2C` first slice),
 //! - first breadth coverage for extended primitives, waveform/table/UI families
-//!   (`Step 2D`).
+//!   (`Step 2D`),
+//! - first shim-reduction pass replacing several `frs_*` calls with native FIR
+//!   lowering (`Step 2E`).
+//!
+//! Residual shims are intentionally explicit in this step:
+//! - `frs_rdtbl`, `frs_wrtbl`, `frs_waveform`, `frs_soundfile`.
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors until the
 //! remaining lowering slices are implemented.
@@ -58,7 +63,7 @@ pub struct SignalFirOutput {
 
 /// Compiles propagated signals into a FIR module using the experimental fast-lane.
 ///
-/// # Current behavior (Step 2A/2B/2C/2D)
+/// # Current behavior (Step 2A/2B/2C/2D/2E)
 /// - validates options and top-level signal/arity contract,
 /// - lowers one executable bootstrap signal slice to FIR.
 ///
