@@ -3608,3 +3608,32 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo clippy -p transform --all-targets -- -D warnings`
   - `cargo test -p compiler --all-targets`
   - `cargo clippy -p compiler --all-targets -- -D warnings`
+
+#### signalFIRCompiler fast-lane: Step 2C first semantic state slice
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/mod.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - replaced `frs_delay*` function-call placeholders with explicit FIR state for:
+    - `SIGDELAY1`,
+    - `SIGDELAY` when amount is `1`,
+    - `SIGPREFIX` (with constant init fallback to `0.0` when init is non-constant).
+  - lowering now emits:
+    - struct declarations (`DeclareVar` in FIR `dsp_struct` section),
+    - per-sample state update stores (`StoreVar`) appended in `compute` body.
+  - kept unsupported delay shapes explicit (typed error) for now:
+    - `SIGDELAY` with non-integer amount,
+    - `SIGDELAY` integer amount other than `1`.
+  - preserved existing Step 2B coverage (`math`, `select/casts`, bootstrap `rec/proj`).
+  - added transform structural test proving delay lowering creates both:
+    - state declaration in `dsp_struct`,
+    - update store in `compute`.
+  - updated Rustdoc status wording in `transform::signal_fir` to include Step 2C.
+- Validation:
+  - `cargo fmt -p transform -p compiler`
+  - `cargo test -p transform --all-targets`
+  - `cargo clippy -p transform --all-targets -- -D warnings`
+  - `cargo test -p compiler --test signal_fir_lane`

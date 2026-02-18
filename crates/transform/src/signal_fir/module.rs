@@ -12,7 +12,7 @@
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirStore, FirType};
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
@@ -47,6 +47,7 @@ pub fn build_module(
         let mut b = FirBuilder::new(&mut lower.store);
         statements.push(b.drop_(value));
     }
+    statements.extend(lower.compute_updates.iter().copied());
 
     let compute_body = {
         let mut b = FirBuilder::new(&mut lower.store);
@@ -72,7 +73,7 @@ pub fn build_module(
     };
     let dsp_struct = {
         let mut b = FirBuilder::new(&mut lower.store);
-        b.block(&[])
+        b.block(&lower.struct_declarations)
     };
     let globals = {
         let mut b = FirBuilder::new(&mut lower.store);
@@ -94,6 +95,10 @@ struct SignalToFirLower<'a> {
     num_inputs: usize,
     store: FirStore,
     cache: HashMap<SigId, FirId>,
+    struct_declarations: Vec<FirId>,
+    compute_updates: Vec<FirId>,
+    state_name_by_node: HashMap<SigId, String>,
+    scheduled_state_updates: HashSet<SigId>,
 }
 
 impl<'a> SignalToFirLower<'a> {
@@ -103,6 +108,10 @@ impl<'a> SignalToFirLower<'a> {
             num_inputs,
             store: FirStore::new(),
             cache: HashMap::new(),
+            struct_declarations: Vec::new(),
+            compute_updates: Vec::new(),
+            state_name_by_node: HashMap::new(),
+            scheduled_state_updates: HashSet::new(),
         }
     }
 
@@ -122,9 +131,15 @@ impl<'a> SignalToFirLower<'a> {
             }
             SigMatch::Input(index) => self.lower_input(index)?,
             SigMatch::Output(_, inner) => self.lower_signal(inner)?,
-            SigMatch::Delay1(value) => self.lower_fun1("frs_delay1", value)?,
-            SigMatch::Delay(value, amount) => self.lower_fun2("frs_delay", value, amount)?,
-            SigMatch::Prefix(init, value) => self.lower_fun2("frs_prefix", init, value)?,
+            SigMatch::Delay1(value) => {
+                let init = self.float_const(0.0);
+                self.lower_delay_state(sig, value, init)?
+            }
+            SigMatch::Delay(value, amount) => self.lower_delay(sig, value, amount)?,
+            SigMatch::Prefix(init_sig, value) => {
+                let init = self.initial_state_from_signal(init_sig);
+                self.lower_delay_state(sig, value, init)?
+            }
             SigMatch::IntCast(value) => self.lower_cast(FirType::Int64, value)?,
             SigMatch::BitCast(value) => self.lower_bitcast(FirType::FaustFloat, value)?,
             SigMatch::FloatCast(value) => self.lower_cast(FirType::FaustFloat, value)?,
@@ -149,7 +164,7 @@ impl<'a> SignalToFirLower<'a> {
                 return Err(SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
                     format!(
-                        "unsupported signal node in Step 2B: {other:?} (expr={})",
+                        "unsupported signal node in Step 2C: {other:?} (expr={})",
                         dump_sig_readable(self.arena, sig)
                     ),
                 ));
@@ -189,6 +204,81 @@ impl<'a> SignalToFirLower<'a> {
             AccessType::FunArgs,
             FirType::FaustFloat,
         ))
+    }
+
+    fn lower_delay(
+        &mut self,
+        node: SigId,
+        value: SigId,
+        amount: SigId,
+    ) -> Result<FirId, SignalFirError> {
+        match match_sig(self.arena, amount) {
+            SigMatch::Int(1) => {
+                let init = self.float_const(0.0);
+                self.lower_delay_state(node, value, init)
+            }
+            SigMatch::Int(other) => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("SIGDELAY amount {other} unsupported in Step 2C (only 1)"),
+            )),
+            _ => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                "SIGDELAY amount must be integer in Step 2C",
+            )),
+        }
+    }
+
+    fn lower_delay_state(
+        &mut self,
+        node: SigId,
+        value: SigId,
+        init: FirId,
+    ) -> Result<FirId, SignalFirError> {
+        let name = self.ensure_state_slot(node, init);
+        let out = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.load_var(name.clone(), AccessType::Struct, FirType::FaustFloat)
+        };
+        if self.scheduled_state_updates.insert(node) {
+            let next = self.lower_signal(value)?;
+            let mut b = FirBuilder::new(&mut self.store);
+            self.compute_updates
+                .push(b.store_var(name, AccessType::Struct, next));
+        }
+        Ok(out)
+    }
+
+    fn ensure_state_slot(&mut self, node: SigId, init: FirId) -> String {
+        if let Some(name) = self.state_name_by_node.get(&node) {
+            return name.clone();
+        }
+        let name = format!("frs_state_n{}", node.as_u32());
+        let mut b = FirBuilder::new(&mut self.store);
+        let dec = b.declare_var(
+            name.clone(),
+            FirType::FaustFloat,
+            AccessType::Struct,
+            Some(init),
+        );
+        self.struct_declarations.push(dec);
+        self.state_name_by_node.insert(node, name.clone());
+        name
+    }
+
+    fn float_const(&mut self, value: f64) -> FirId {
+        let mut b = FirBuilder::new(&mut self.store);
+        b.float64(value)
+    }
+
+    fn initial_state_from_signal(&mut self, sig: SigId) -> FirId {
+        match match_sig(self.arena, sig) {
+            SigMatch::Int(v) => {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.int64(v)
+            }
+            SigMatch::Real(v) => self.float_const(v),
+            _ => self.float_const(0.0),
+        }
     }
 
     fn lower_binop(&mut self, op: BinOp, lhs: SigId, rhs: SigId) -> Result<FirId, SignalFirError> {

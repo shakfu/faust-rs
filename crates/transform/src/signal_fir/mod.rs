@@ -1,11 +1,12 @@
-//! Experimental signal->FIR fast-lane (Step 2A/2B slices).
+//! Experimental signal->FIR fast-lane (Step 2A/2B/2C slices).
 //!
 //! # Status
 //! This module currently provides an **executable base slice**:
 //! - contract validation (`Step 1A`),
 //! - lowering for `SIGINPUT`, numeric constants, `SIGBINOP`, and `SIGOUTPUT`
 //!   passthrough (`Step 2A`),
-//! - core math and control/state bootstrap nodes (`Step 2B`).
+//! - core math and control/state bootstrap nodes (`Step 2B`),
+//! - explicit state lowering for `delay`-family nodes (`Step 2C` first slice).
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors until the
 //! remaining lowering slices are implemented.
@@ -55,7 +56,7 @@ pub struct SignalFirOutput {
 
 /// Compiles propagated signals into a FIR module using the experimental fast-lane.
 ///
-/// # Current behavior (Step 2A/2B)
+/// # Current behavior (Step 2A/2B/2C)
 /// - validates options and top-level signal/arity contract,
 /// - lowers one executable bootstrap signal slice to FIR.
 ///
@@ -276,5 +277,57 @@ mod tests {
 
         compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
             .expect("Step 2B.2 should support rec/proj placeholder lowering");
+    }
+
+    #[test]
+    fn delay1_lowers_to_struct_state_declaration_and_update() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let i0 = b.input(0);
+            b.delay1(i0)
+        };
+        let out =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+                .expect("delay1 should lower with explicit state");
+
+        let FirMatch::Module {
+            dsp_struct,
+            declarations,
+            ..
+        } = match_fir(&out.store, out.module)
+        else {
+            panic!("module expected");
+        };
+        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+            panic!("dsp_struct block expected");
+        };
+        assert!(
+            struct_items
+                .iter()
+                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareVar { .. })),
+            "delay state should create struct declaration"
+        );
+
+        let FirMatch::Block(decls) = match_fir(&out.store, declarations) else {
+            panic!("declarations block expected");
+        };
+        let compute = decls
+            .iter()
+            .copied()
+            .find(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareFun { .. }))
+            .expect("compute declaration expected");
+        let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
+            panic!("declare fun expected");
+        };
+        let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
+            panic!("compute block expected");
+        };
+        assert!(
+            stmts
+                .iter()
+                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::StoreVar { .. })),
+            "delay state should create compute update store"
+        );
     }
 }
