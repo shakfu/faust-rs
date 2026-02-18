@@ -3415,3 +3415,18 @@ Execution plan (Phase 0 prototype, revised):
     (compute-mode output write dispatch).
 - Validation:
   - `cargo clippy --workspace --all-targets -- -D warnings`
+
+#### signalFIRCompiler fast-lane plan: Step 1 split into immediate checklists
+
+- Commit: pending (working tree step)
+- Files:
+  - `porting/phases/phase-6-fir-backends-en.md`
+  - `JOURNAL.md`
+- Implemented:
+  - split Step 1 of the `signalFIRCompiler` fast-lane into concrete immediate
+    implementation checklists by crate:
+    - Step 1A for `crates/transform` (module layout, API contract, typed errors,
+      skeleton FIR module builder, tests, validation commands),
+    - Step 1B for `crates/compiler` (fast-lane API/CLI wiring, lane enum,
+      diagnostics mapping, integration tests, validation commands).
+  - kept deliverables/pass-criteria format for direct execution tracking.

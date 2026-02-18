@@ -931,6 +931,71 @@ Minimum fixtures:
 - Pass criteria:
   - compile-only smoke test from `signals` input to FIR module root.
 
+##### Step 1A — Immediate checklist (`crates/transform`)
+
+Goal: create the minimal compile contract and module skeleton without semantics yet.
+
+1. File/module layout
+   - Add `crates/transform/src/signal_fir/mod.rs`.
+   - Add `crates/transform/src/signal_fir/error.rs`.
+   - Add `crates/transform/src/signal_fir/planner.rs`.
+   - Add `crates/transform/src/signal_fir/module.rs`.
+   - Export `pub mod signal_fir;` from `crates/transform/src/lib.rs`.
+2. Public API contract (compile-time only)
+   - Define `SignalFirOptions` (module name, strict mode/feature flags placeholder).
+   - Define `SignalFirError` + stable error-code enum (`FRS-SFIR-*` namespace).
+   - Expose:
+     - `compile_signals_to_fir_fastlane(...) -> Result<FirId, SignalFirError>`.
+3. FIR module skeleton builder
+   - In `module.rs`, emit a minimal FIR `Module` with empty sections + stub `compute`.
+   - Keep `FirBuilder`/`match_fir` canonical usage only.
+4. Rustdoc obligations
+   - Document API status explicitly: "contract-only, semantics pending Step 2+".
+   - Document ownership and crate boundaries (`transform` produces FIR, `codegen` consumes FIR).
+5. Tests (must add now)
+   - Unit test: non-empty signal slice returns a FIR module root.
+   - Unit test: invalid options yield typed `SignalFirError` with stable code.
+
+Validation commands:
+
+- `cargo test -p transform --all-targets`
+- `cargo clippy -p transform --all-targets -- -D warnings`
+
+##### Step 1B — Immediate checklist (`crates/compiler`)
+
+Goal: wire an explicit experimental route from parser/eval/propagate to the new fast-lane API.
+
+1. Compiler facade API
+   - Add opt-in methods in `crates/compiler/src/lib.rs`:
+     - `compile_source_to_c_fastlane(...)`,
+     - `compile_source_to_cpp_fastlane(...)`,
+     - file-based variants mirroring existing `compile_file*_to_cpp`.
+2. Explicit lane typing
+   - Add a small lane enum (example):
+     - `SignalFirLane::DefaultProduction`,
+     - `SignalFirLane::SignalFastExperimental`.
+   - Keep current default path unchanged.
+3. C backend bridge
+   - Add temporary `lower_signals_to_c(...)` bridge analogous to current C++ bridge,
+     then switch it to consume `transform::signal_fir` as soon as Step 1A API exists.
+4. CLI exposure (explicit opt-in)
+   - In `crates/compiler/src/main.rs`, add:
+     - `--dump-c`,
+     - `--fir-lane signal-fast|default`.
+   - Reject unknown lane values with explicit usage text.
+5. Diagnostics
+   - Map `SignalFirError` to `CompilerError::Transform` (or dedicated variant) with
+     preserved stable code and source context.
+6. Tests (must add now)
+   - Integration test: `--dump-cpp --fir-lane signal-fast` succeeds on one tiny fixture.
+   - Integration test: invalid lane value fails with deterministic message/code.
+   - Integration test: default path behavior unchanged when `--fir-lane` absent.
+
+Validation commands:
+
+- `cargo test -p compiler --all-targets`
+- `cargo clippy -p compiler --all-targets -- -D warnings`
+
 #### Step 2 — Resource planner parity slice
 
 - Scope:
