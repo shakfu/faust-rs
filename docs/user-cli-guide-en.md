@@ -21,6 +21,7 @@ cargo install --path crates/compiler
 # Then use the installed command directly
 faust-rs -lang c foo.dsp
 faust-rs -lang cpp foo.dsp
+faust-rs -lang fir foo.dsp
 ```
 
 ## 2. Main command form
@@ -93,26 +94,37 @@ Generate C backend output text.
 cargo run -p compiler -- --dump-c tests/corpus/rep_01_passthrough.dsp
 ```
 
-### `--lang c|cpp`
+### `--lang c|cpp|fir`
 
-Faust-style backend language selector (equivalent to `--dump-c` or `--dump-cpp`).
+Faust-style backend language selector (equivalent to `--dump-c`, `--dump-cpp`, or `--dump-fir`).
 
 ```bash
 cargo run -p compiler -- --lang c tests/corpus/rep_01_passthrough.dsp
 cargo run -p compiler -- --lang cpp tests/corpus/rep_01_passthrough.dsp
+cargo run -p compiler -- --lang fir tests/corpus/rep_01_passthrough.dsp
 ```
 
 Legacy compatibility:
 
-- `-lang c` and `-lang cpp` are accepted.
+- `-lang c`, `-lang cpp`, and `-lang fir` are accepted.
 - `-lang -c` maps to `--lang c`.
 - `-lang -cpp` maps to `--lang cpp`.
+- `-lang -fir` maps to `--lang fir`.
 
 Installed binary examples:
 
 ```bash
 faust-rs -lang c foo.dsp
 faust-rs -lang cpp foo.dsp
+faust-rs -lang fir foo.dsp
+```
+
+If your command is named `faust` (symlink/wrapper), the same commands work:
+
+```bash
+faust -lang c foo.dsp
+faust -lang cpp foo.dsp
+faust -lang fir foo.dsp
 ```
 
 ## 4. Common options

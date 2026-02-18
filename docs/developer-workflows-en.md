@@ -53,7 +53,17 @@ See:
 - `docs/user-diagnostics-guide-en.md`
 - `docs/user-cli-guide-en.md`
 
-## 5. Golden workflow
+## 5. CLI language model
+
+The compiler supports `-lang c|cpp|fir`:
+
+```bash
+cargo run -p compiler -- -lang c tests/corpus/rep_01_passthrough.dsp
+cargo run -p compiler -- -lang cpp tests/corpus/rep_01_passthrough.dsp
+cargo run -p compiler -- -lang fir tests/corpus/rep_01_passthrough.dsp
+```
+
+## 6. Golden workflow
 
 Corpus and golden layout:
 
@@ -82,4 +92,3 @@ FAUST_CPP_BIN=/path/to/faust cargo run -p xtask -- golden-gen-cpp -- <extra-args
 ```
 
 Note: CI runs `cargo run -p xtask -- golden-check` (Rust reference mode) on every platform.
-

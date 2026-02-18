@@ -17,6 +17,7 @@ enum CliLang {
     C,
     #[value(alias = "cxx", alias = "c++")]
     Cpp,
+    Fir,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -78,9 +79,9 @@ struct CliArgs {
     /// Compile to FIR and dump FIR IR.
     #[arg(long = "dump-fir", action = ArgAction::SetTrue)]
     dump_fir: bool,
-    /// Select backend language (Faust-style): `-lang c` or `-lang cpp`.
+    /// Select backend language (Faust-style): `-lang c`, `-lang cpp`, or `-lang fir`.
     ///
-    /// This option is equivalent to `--dump-c` / `--dump-cpp`.
+    /// This option is equivalent to `--dump-c` / `--dump-cpp` / `--dump-fir`.
     #[arg(long = "lang", value_enum, allow_hyphen_values = true)]
     lang: Option<CliLang>,
     /// Print dedicated help for diagnostic output formats and exit.
@@ -104,7 +105,7 @@ struct CliArgs {
         default_value_t = ErrorVerbosity::Standard
     )]
     error_verbosity: ErrorVerbosity,
-    /// Signal->FIR compilation lane (only valid with `--dump-cpp`/`--dump-c`).
+    /// Signal->FIR compilation lane (only valid with `--dump-cpp`/`--dump-c`/`--dump-fir`).
     #[arg(long = "signal-fir-lane", value_enum)]
     signal_fir_lane: Option<CliSignalFirLane>,
 }
@@ -119,6 +120,7 @@ fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> 
                 let mapped = match value.as_str() {
                     "-c" => "c".to_owned(),
                     "-cpp" => "cpp".to_owned(),
+                    "-fir" => "fir".to_owned(),
                     _ => value,
                 };
                 normalized.push(mapped);
@@ -482,7 +484,7 @@ fn diagnostic_debug_from_notes(notes: &[Box<str>]) -> serde_json::Value {
 fn print_global_usage_and_exit() -> ! {
     eprintln!("Usage:");
     eprintln!(
-        "  cargo run -p compiler -- -lang c|cpp <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- -lang c|cpp|fir <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!("  cargo run -p compiler -- --golden <input.dsp>");
     eprintln!(
@@ -685,7 +687,7 @@ fn main() {
         return;
     }
 
-    if cli.dump_fir {
+    if cli.dump_fir || matches!(cli.lang, Some(CliLang::Fir)) {
         let compiler = Compiler::new();
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_fir_with_lane(
@@ -787,14 +789,42 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use clap::Parser;
     use compiler::Compiler;
     use errors::{Diagnostic, DiagnosticBundle, DiagnosticCode, Severity, SourceSpan, Stage};
     use serde_json::Value;
 
     use super::{
-        ErrorVerbosity, format_diagnostics_human, format_diagnostics_human_with_verbosity,
-        format_diagnostics_json, format_diagnostics_json_with_verbosity,
+        CliArgs, CliLang, ErrorVerbosity, format_diagnostics_human,
+        format_diagnostics_human_with_verbosity, format_diagnostics_json,
+        format_diagnostics_json_with_verbosity, normalize_legacy_args,
     };
+
+    #[test]
+    fn normalize_legacy_args_maps_dash_fir_to_lang_fir() {
+        let args = vec![
+            "faust-rs".to_owned(),
+            "-lang".to_owned(),
+            "-fir".to_owned(),
+            "foo.dsp".to_owned(),
+        ];
+        let normalized = normalize_legacy_args(args);
+        assert_eq!(
+            normalized,
+            vec![
+                "faust-rs".to_owned(),
+                "--lang".to_owned(),
+                "fir".to_owned(),
+                "foo.dsp".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn cli_parse_accepts_lang_fir() {
+        let cli = CliArgs::parse_from(["faust-rs", "--lang", "fir", "foo.dsp"]);
+        assert!(matches!(cli.lang, Some(CliLang::Fir)));
+    }
 
     #[test]
     fn diagnostics_human_renderer_keeps_code_and_location() {
