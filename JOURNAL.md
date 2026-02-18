@@ -3892,3 +3892,29 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo run -p compiler -- --dump-sig tests/corpus/rep_37_table_rwtable_negative_indices.dsp`
   - `cargo run -p xtask -- golden-check`
   - `cargo run -p xtask -- corpus-status-report`
+
+#### signalFIRCompiler fast-lane: Step 2J targeted closure via automated C++ differential
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/xtask/src/main.rs`
+  - `porting/phases/phase-6-table-fastlane-diff-report-en.md`
+  - `porting/phases/phase-6-fir-backends-en.md`
+  - `JOURNAL.md`
+- Implemented:
+  - added new automation command in `xtask`:
+    - `cargo run -p xtask -- table-fastlane-diff-report`
+  - report compares C++ reference output vs Rust fast-lane (`SignalFirLane::TransformFastLane`)
+    on a focused table fixture set, using the same shell-signature metric as existing
+    backend diff report (`FAUSTCLASS`, class declaration, macro aliases).
+  - generated report at:
+    - `porting/phases/phase-6-table-fastlane-diff-report-en.md`
+  - current result:
+    - `OK=6`, `DIFF=0`, `UNSUPPORTED=0` on:
+      - `rep_20`, `rep_30`, `rep_34`, `rep_35`, `rep_36`, `rep_37`.
+  - documented this Step 2J status in `phase-6-fir-backends-en.md` Step 8 section.
+- Validation:
+  - `cargo fmt -p xtask`
+  - `cargo clippy -p xtask --all-targets -- -D warnings`
+  - `cargo run -p xtask -- table-fastlane-diff-report`
+  - `cargo test -p compiler --test signal_fir_lane`

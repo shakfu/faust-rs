@@ -1062,6 +1062,22 @@ Validation commands:
   - MVP fixtures in `OK`,
   - each `DIFF` documented with rationale and owner action.
 
+Current Step 2J closure status (table-focused differential slice):
+
+- Automated command available:
+  - `cargo run -p xtask -- table-fastlane-diff-report`
+- Report output:
+  - `porting/phases/phase-6-table-fastlane-diff-report-en.md`
+- Coverage in this focused report:
+  - `rep_20_environment_waveform.dsp`
+  - `rep_30_environment_access_pair.dsp`
+  - `rep_34_table_rdtable_readonly_const.dsp`
+  - `rep_35_table_rwtable_runtime_write.dsp`
+  - `rep_36_table_rdtable_negative_index.dsp`
+  - `rep_37_table_rwtable_negative_indices.dsp`
+- Current outcome:
+  - `OK=6`, `DIFF=0`, `UNSUPPORTED=0` (shell-signature diff metric).
+
 #### Step 9 — Unsupported/TODO closure map
 
 - Scope:

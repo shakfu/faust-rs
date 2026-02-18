@@ -16,6 +16,7 @@ Usage:
   cargo run -p xtask -- parser-parity-report
   cargo run -p xtask -- corpus-status-report
   cargo run -p xtask -- cpp-backend-diff-report
+  cargo run -p xtask -- table-fastlane-diff-report
 \nEnvironment for golden-gen-cpp:
   FAUST_CPP_BIN   Path to reference C++ faust binary
 \nEnvironment for golden-check:
@@ -28,6 +29,8 @@ const CORPUS_STATUS_REPORT_REL_PATH: &str =
     "porting/phases/phase-4-corpus-status-diff-report-en.md";
 const CPP_BACKEND_DIFF_REPORT_REL_PATH: &str =
     "porting/phases/phase-6-cpp-backend-diff-report-en.md";
+const TABLE_FASTLANE_DIFF_REPORT_REL_PATH: &str =
+    "porting/phases/phase-6-table-fastlane-diff-report-en.md";
 
 fn main() {
     if let Err(err) = run() {
@@ -62,6 +65,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "parser-parity-report" => parser_parity_report()?,
         "corpus-status-report" => corpus_status_report()?,
         "cpp-backend-diff-report" => cpp_backend_diff_report()?,
+        "table-fastlane-diff-report" => table_fastlane_diff_report()?,
         _ => {
             print!("{USAGE}");
         }
@@ -818,6 +822,181 @@ fn cpp_backend_diff_report() -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         &mut out,
         "- `DIFF` rows are expected to shrink as statement/value lowering and orchestration parity advance."
+    )?;
+
+    if let Some(parent) = report_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&report_path, out)?;
+    println!("updated {}", report_path.display());
+    Ok(())
+}
+
+fn table_fastlane_diff_report() -> Result<(), Box<dyn std::error::Error>> {
+    let root = workspace_root();
+    let report_path = root.join(TABLE_FASTLANE_DIFF_REPORT_REL_PATH);
+    let compiler = compiler::Compiler::new();
+    let (cpp_bin, cpp_bin_is_fallback) = resolve_cpp_faust_bin();
+    let options = codegen::backends::cpp::CppOptions {
+        class_name: Some("mydsp".to_owned()),
+        ..codegen::backends::cpp::CppOptions::default()
+    };
+
+    let representative = [
+        "rep_20_environment_waveform.dsp",
+        "rep_30_environment_access_pair.dsp",
+        "rep_34_table_rdtable_readonly_const.dsp",
+        "rep_35_table_rwtable_runtime_write.dsp",
+        "rep_36_table_rdtable_negative_index.dsp",
+        "rep_37_table_rwtable_negative_indices.dsp",
+    ];
+
+    let mut rows = Vec::with_capacity(representative.len());
+    let mut ok = 0usize;
+    let mut diff = 0usize;
+    let mut unsupported = 0usize;
+
+    for case in representative {
+        let path = root.join("tests").join("corpus").join(case);
+        let rust_output = compiler.compile_file_default_to_cpp_with_lane(
+            &path,
+            &options,
+            compiler::SignalFirLane::TransformFastLane,
+        );
+        let cpp_output = Command::new(&cpp_bin).arg(&path).output();
+
+        let row = match (rust_output, cpp_output) {
+            (Ok(_), Err(err)) => {
+                unsupported = unsupported.saturating_add(1);
+                CppDiffRow {
+                    case: case.to_owned(),
+                    class: "UNSUPPORTED",
+                    rust_reason: "Rust fast-lane ok".to_owned(),
+                    cpp_reason: format!("cannot run `{}`: {err}", cpp_bin.display()),
+                }
+            }
+            (Err(err), Err(cpp_err)) => {
+                unsupported = unsupported.saturating_add(1);
+                CppDiffRow {
+                    case: case.to_owned(),
+                    class: "UNSUPPORTED",
+                    rust_reason: err.to_string(),
+                    cpp_reason: format!("cannot run `{}`: {cpp_err}", cpp_bin.display()),
+                }
+            }
+            (Ok(rust_text), Ok(cpp_output)) if cpp_output.status.success() => {
+                let cpp_text = String::from_utf8(cpp_output.stdout)?;
+                let rust_sig = extract_shell_signature(&rust_text);
+                let cpp_sig = extract_shell_signature(&cpp_text);
+                if rust_sig == cpp_sig {
+                    ok = ok.saturating_add(1);
+                    CppDiffRow {
+                        case: case.to_owned(),
+                        class: "OK",
+                        rust_reason: "shell signature matches".to_owned(),
+                        cpp_reason: "ok".to_owned(),
+                    }
+                } else {
+                    diff = diff.saturating_add(1);
+                    CppDiffRow {
+                        case: case.to_owned(),
+                        class: "DIFF",
+                        rust_reason: format!("rust={rust_sig:?}"),
+                        cpp_reason: format!("cpp={cpp_sig:?}"),
+                    }
+                }
+            }
+            (Ok(_), Ok(cpp_output)) => {
+                unsupported = unsupported.saturating_add(1);
+                CppDiffRow {
+                    case: case.to_owned(),
+                    class: "UNSUPPORTED",
+                    rust_reason: "Rust fast-lane ok".to_owned(),
+                    cpp_reason: first_non_empty_line(&String::from_utf8_lossy(&cpp_output.stderr))
+                        .or_else(|| {
+                            first_non_empty_line(&String::from_utf8_lossy(&cpp_output.stdout))
+                        })
+                        .unwrap_or_else(|| format!("failed with status {}", cpp_output.status)),
+                }
+            }
+            (Err(err), Ok(cpp_output)) if cpp_output.status.success() => {
+                unsupported = unsupported.saturating_add(1);
+                CppDiffRow {
+                    case: case.to_owned(),
+                    class: "UNSUPPORTED",
+                    rust_reason: err.to_string(),
+                    cpp_reason: "C++ path ok".to_owned(),
+                }
+            }
+            (Err(err), Ok(cpp_output)) => {
+                unsupported = unsupported.saturating_add(1);
+                CppDiffRow {
+                    case: case.to_owned(),
+                    class: "UNSUPPORTED",
+                    rust_reason: err.to_string(),
+                    cpp_reason: first_non_empty_line(&String::from_utf8_lossy(&cpp_output.stderr))
+                        .or_else(|| {
+                            first_non_empty_line(&String::from_utf8_lossy(&cpp_output.stdout))
+                        })
+                        .unwrap_or_else(|| format!("failed with status {}", cpp_output.status)),
+                }
+            }
+        };
+        rows.push(row);
+    }
+
+    let mut out = String::new();
+    writeln!(
+        &mut out,
+        "# Phase 6 Table Fast-Lane Differential Report (C++ vs Rust)"
+    )?;
+    writeln!(&mut out)?;
+    writeln!(
+        &mut out,
+        "Generated by: `cargo run -p xtask -- table-fastlane-diff-report`"
+    )?;
+    writeln!(&mut out, "- C++ binary: `{}`", cpp_bin.display())?;
+    if cpp_bin_is_fallback {
+        writeln!(
+            &mut out,
+            "- Note: fallback to `faust` from PATH because `{}/build/bin/faust` was not found.",
+            CPP_SOURCE_ROOT
+        )?;
+    }
+    writeln!(
+        &mut out,
+        "- Rust route: `compiler::SignalFirLane::TransformFastLane`"
+    )?;
+    writeln!(&mut out)?;
+    writeln!(&mut out, "## Summary")?;
+    writeln!(&mut out, "- Cases: `{}`", rows.len())?;
+    writeln!(&mut out, "- `OK`: `{ok}`")?;
+    writeln!(&mut out, "- `DIFF`: `{diff}`")?;
+    writeln!(&mut out, "- `UNSUPPORTED`: `{unsupported}`")?;
+    writeln!(&mut out)?;
+    writeln!(
+        &mut out,
+        "| Case | Status | Rust detail | C++ detail |\n|------|--------|-------------|------------|"
+    )?;
+    for row in &rows {
+        writeln!(
+            &mut out,
+            "| `{}` | `{}` | `{}` | `{}` |",
+            row.case,
+            row.class,
+            markdown_escape(&row.rust_reason),
+            markdown_escape(&row.cpp_reason)
+        )?;
+    }
+    writeln!(&mut out)?;
+    writeln!(&mut out, "## Notes")?;
+    writeln!(
+        &mut out,
+        "- Comparison is shell-signature based (`FAUSTCLASS`, class declaration, macro aliases)."
+    )?;
+    writeln!(
+        &mut out,
+        "- This report focuses on table-oriented fixtures for Step 2J closure."
     )?;
 
     if let Some(parent) = report_path.parent() {
