@@ -568,11 +568,11 @@ fn main() {
         print_global_usage_and_exit();
     }
 
+    if mode_count == 0 && cli.input.is_none() {
+        println!("faust-rs compiler scaffold v{}", Compiler::version());
+        return;
+    }
     if mode_count == 0 {
-        if cli.input.is_none() {
-            println!("faust-rs compiler scaffold v{}", Compiler::version());
-            return;
-        }
         // Default compile mode: C++ backend, aligned with Faust CLI behavior.
     }
 
