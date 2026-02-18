@@ -1056,6 +1056,18 @@ Current Step 3/3B status (implemented slice):
   - runtime state reset writes in `instanceClear`.
 - Coverage is locked by transform unit tests that assert section content routing.
 
+Current Step 3C status (lifecycle alignment slice):
+
+- C backend now enforces sample-rate state update in `instanceConstants*` even
+  when fast-lane provides a concrete FIR `instanceConstants` body:
+  - emits `dsp->fSampleRate = sample_rate;` before section statements.
+- Lifecycle call order is explicitly covered by tests:
+  - C backend unit test validates
+    `instanceConstants -> instanceResetUserInterface -> instanceClear`
+    order inside `instanceInit*`.
+  - compiler fast-lane integration test validates the same order in generated
+    C++ `instanceInit(int sample_rate)`.
+
 #### Step 7 — Compiler integration (explicit experimental route)
 
 - Deliverables:

@@ -3986,3 +3986,30 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p transform --all-targets`
   - `cargo clippy -p transform --all-targets -- -D warnings`
   - `cargo test -p compiler --test signal_fir_lane`
+
+#### signalFIRCompiler fast-lane: Step 3C lifecycle-order alignment (C/C++)
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/codegen/src/backends/c/mod.rs`
+  - `crates/compiler/tests/signal_fir_lane.rs`
+  - `porting/phases/phase-6-fir-backends-en.md`
+  - `JOURNAL.md`
+- Implemented:
+  - fixed C backend lifecycle parity gap:
+    - `instanceConstants*` now always writes
+      `dsp->fSampleRate = sample_rate;` before section body statements,
+      including when a fast-lane FIR `instanceConstants` function is present.
+  - added C backend lifecycle assertions:
+    - verifies generated `instanceInit*` call order:
+      `instanceConstants*` -> `instanceResetUserInterface*` -> `instanceClear*`.
+  - added compiler fast-lane integration assertion on generated C++:
+    - verifies `instanceInit(int sample_rate)` call order:
+      `instanceConstants(sample_rate)` ->
+      `instanceResetUserInterface()` -> `instanceClear()`.
+  - updated phase-6 planning doc with Step 3C status.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p codegen --all-targets`
+  - `cargo test -p compiler --test signal_fir_lane`
+  - `cargo clippy -p codegen -p compiler --all-targets -- -D warnings`

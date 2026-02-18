@@ -168,3 +168,30 @@ fn legacy_and_fastlane_both_compile_table_fixtures() {
         );
     }
 }
+
+#[test]
+fn fastlane_cpp_lifecycle_order_matches_faust_instance_init_flow() {
+    let fast = compile_cpp_with_lane(
+        "rep_10_two_in_two_out_ui.dsp",
+        SignalFirLane::TransformFastLane,
+    );
+    assert!(fast.contains("void instanceInit(int sample_rate)"));
+    let instance_init_sig = "virtual void instanceInit(int sample_rate) {";
+    let instance_init_start = fast
+        .find(instance_init_sig)
+        .expect("instanceInit signature should be present");
+    let instance_init_body = &fast[instance_init_start..];
+    let constants_i = instance_init_body
+        .find("instanceConstants(sample_rate);")
+        .expect("instanceConstants call should be present");
+    let reset_i = instance_init_body
+        .find("instanceResetUserInterface();")
+        .expect("instanceResetUserInterface call should be present");
+    let clear_i = instance_init_body
+        .find("instanceClear();")
+        .expect("instanceClear call should be present");
+    assert!(
+        constants_i < reset_i && reset_i < clear_i,
+        "instanceInit should call constants -> resetUI -> clear in order"
+    );
+}

@@ -15,6 +15,8 @@
 //! - Emits Faust C-style exported functions:
 //!   `new*`, `delete*`, `metadata*`, `getNum*`, `init*`, `buildUserInterface*`,
 //!   `compute*`.
+//! - `instanceConstants*` always writes `dsp->fSampleRate = sample_rate` before
+//!   section body statements, keeping lifecycle parity with Faust C++ init flow.
 //! - Emits `compute*(..., int count, FAUSTFLOAT** RESTRICT, FAUSTFLOAT** RESTRICT)`
 //!   with a per-sample loop and channel writes.
 //!
@@ -567,6 +569,9 @@ fn emit_named_fun(
         ),
     };
     let _ = writeln!(out, "{signature} {{");
+    if decl.name == "instanceConstants" {
+        let _ = writeln!(out, "    dsp->fSampleRate = sample_rate;");
+    }
     if decl.name == "compute" {
         emit_compute_body(store, out, options, decl.body, 1)?;
     } else {
@@ -1249,5 +1254,25 @@ mod tests {
         assert!(out.contains("for (i0 = 0; i0 < count; i0 = i0 + 1)"));
         assert!(out.contains("output0[i0] = (FAUSTFLOAT)("));
         assert!(out.contains("sin("));
+        assert!(out.contains("void instanceConstantsmydsp(mydsp* dsp, int sample_rate) {"));
+        assert!(out.contains("dsp->fSampleRate = sample_rate;"));
+        let instance_init_i = out
+            .find("void instanceInitmydsp(mydsp* dsp, int sample_rate) {")
+            .expect("instanceInit should be emitted");
+        let constants_call_i = out
+            .find("instanceConstantsmydsp(dsp, sample_rate);")
+            .expect("instanceConstants call should be emitted");
+        let reset_call_i = out
+            .find("instanceResetUserInterfacemydsp(dsp);")
+            .expect("instanceResetUserInterface call should be emitted");
+        let clear_call_i = out
+            .find("instanceClearmydsp(dsp);")
+            .expect("instanceClear call should be emitted");
+        assert!(
+            instance_init_i < constants_call_i
+                && constants_call_i < reset_call_i
+                && reset_call_i < clear_call_i,
+            "instanceInit should call constants -> resetUI -> clear in order"
+        );
     }
 }
