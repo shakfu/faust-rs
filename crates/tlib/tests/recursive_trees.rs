@@ -1,0 +1,136 @@
+//! Integration tests for recursive-tree conversion parity helpers.
+
+use tlib::{
+    NodeKind, RecursionError, TreeArena, de_bruijn_aperture, de_bruijn_rec, de_bruijn_ref,
+    de_bruijn_to_sym, lift_de_bruijn, lift_de_bruijn_n, match_de_bruijn_rec, match_de_bruijn_ref,
+    match_sym_rec, match_sym_ref, sym_rec, sym_ref,
+};
+
+#[test]
+fn de_bruijn_to_sym_converts_simple_rec_group() {
+    let mut arena = TreeArena::new();
+    let x = arena.symbol("x");
+    let r1 = de_bruijn_ref(&mut arena, 1);
+    let body = pair(&mut arena, r1, x);
+    let root = de_bruijn_rec(&mut arena, body);
+
+    let converted = de_bruijn_to_sym(&mut arena, root).expect("closed de Bruijn tree should map");
+    let (var, sym_body) = match_sym_rec(&arena, converted).expect("expected SYMREC(var, body)");
+    let (left, right) = pair_children(&arena, sym_body).expect("pair shape should be preserved");
+
+    assert_eq!(right, x);
+    assert_eq!(
+        match_sym_ref(&arena, left),
+        Some(var),
+        "DEBRUIJNREF(1) should become SYMREF(var)"
+    );
+}
+
+#[test]
+fn de_bruijn_to_sym_converts_nested_scopes() {
+    let mut arena = TreeArena::new();
+    let r1 = de_bruijn_ref(&mut arena, 1);
+    let r2 = de_bruijn_ref(&mut arena, 2);
+    let inner = pair(&mut arena, r1, r2);
+    let nested = de_bruijn_rec(&mut arena, inner);
+    let root = de_bruijn_rec(&mut arena, nested);
+
+    let converted = de_bruijn_to_sym(&mut arena, root).expect("nested closed de Bruijn tree");
+
+    let (outer_var, outer_body) =
+        match_sym_rec(&arena, converted).expect("outer group should be symbolic");
+    let (inner_var, inner_body) =
+        match_sym_rec(&arena, outer_body).expect("inner group should be symbolic");
+    let (lhs, rhs) = pair_children(&arena, inner_body).expect("inner pair should stay stable");
+
+    assert_eq!(match_sym_ref(&arena, lhs), Some(inner_var));
+    assert_eq!(match_sym_ref(&arena, rhs), Some(outer_var));
+}
+
+#[test]
+fn de_bruijn_to_sym_rejects_open_tree() {
+    let mut arena = TreeArena::new();
+    let root = de_bruijn_ref(&mut arena, 1);
+
+    let err = de_bruijn_to_sym(&mut arena, root).expect_err("open de Bruijn tree should fail");
+    assert_eq!(err, RecursionError::OpenDeBruijnTree { aperture: 1 });
+}
+
+#[test]
+fn aperture_matches_de_bruijn_rules() {
+    let mut arena = TreeArena::new();
+    let r1 = de_bruijn_ref(&mut arena, 1);
+    let nested = de_bruijn_rec(&mut arena, r1);
+    let r2 = de_bruijn_ref(&mut arena, 2);
+    let root = pair(&mut arena, r2, nested);
+
+    assert_eq!(de_bruijn_aperture(&arena, root), 2);
+    assert_eq!(de_bruijn_aperture(&arena, nested), 0);
+}
+
+#[test]
+fn lift_de_bruijn_only_lifts_free_references() {
+    let mut arena = TreeArena::new();
+    let r1 = de_bruijn_ref(&mut arena, 1);
+    let r2 = de_bruijn_ref(&mut arena, 2);
+    let body = pair(&mut arena, r1, r2);
+    let group = de_bruijn_rec(&mut arena, body);
+
+    let lifted = lift_de_bruijn(&mut arena, group);
+    let lifted_body = match_de_bruijn_rec(&arena, lifted).expect("still de Bruijn rec");
+    let (lhs, rhs) = pair_children(&arena, lifted_body).expect("pair shape preserved");
+    assert_eq!(
+        match_de_bruijn_ref(&arena, lhs),
+        Some(1),
+        "bound ref stays bound"
+    );
+    assert_eq!(
+        match_de_bruijn_ref(&arena, rhs),
+        Some(3),
+        "free ref gets lifted"
+    );
+}
+
+#[test]
+fn lift_de_bruijn_n_honors_threshold() {
+    let mut arena = TreeArena::new();
+    let r1 = de_bruijn_ref(&mut arena, 1);
+    let r2 = de_bruijn_ref(&mut arena, 2);
+    let root = pair(&mut arena, r1, r2);
+    let lifted = lift_de_bruijn_n(&mut arena, root, 2);
+    let (lhs, rhs) = pair_children(&arena, lifted).expect("pair shape preserved");
+
+    assert_eq!(match_de_bruijn_ref(&arena, lhs), Some(1));
+    assert_eq!(match_de_bruijn_ref(&arena, rhs), Some(3));
+}
+
+#[test]
+fn explicit_symbolic_helpers_roundtrip() {
+    let mut arena = TreeArena::new();
+    let var = arena.symbol("v");
+    let body = arena.int(9);
+    let rec = sym_rec(&mut arena, var, body);
+    let rf = sym_ref(&mut arena, var);
+
+    assert_eq!(match_sym_rec(&arena, rec), Some((var, body)));
+    assert_eq!(match_sym_ref(&arena, rf), Some(var));
+}
+
+fn pair(arena: &mut TreeArena, lhs: tlib::TreeId, rhs: tlib::TreeId) -> tlib::TreeId {
+    let tag = arena.intern_tag("PAIR");
+    arena.intern(NodeKind::Tag(tag), &[lhs, rhs])
+}
+
+fn pair_children(arena: &TreeArena, id: tlib::TreeId) -> Option<(tlib::TreeId, tlib::TreeId)> {
+    let node = arena.node(id)?;
+    let NodeKind::Tag(tag_id) = &node.kind else {
+        return None;
+    };
+    if arena.tag_name(*tag_id)? != "PAIR" {
+        return None;
+    }
+    match node.children.as_slice() {
+        [lhs, rhs] => Some((*lhs, *rhs)),
+        _ => None,
+    }
+}

@@ -1,6 +1,6 @@
 # Phase 5 Addendum - Recursive Trees and `deBruijn2Sym` Porting Plan
 
-> Status: planned  
+> Status: implemented (initial phase scope delivered on February 18, 2026)  
 > Scope: clean Rust port of recursive-tree machinery and `deBruijn2Sym` parity behavior.
 
 ---
@@ -151,6 +151,17 @@ Pass criteria:
 - `cargo test --workspace --all-targets`
 - `cargo run -p xtask -- golden-check`
 
+### Current implementation status
+
+- Step 0: implemented (baseline matrix report added in `porting/phases/phase-5-recursive-baseline-matrix-en.md`).
+- Step 1: implemented in `crates/tlib/src/recursion.rs` (`de_bruijn_to_sym`, `substitute` parity helper, aperture/lift helpers, memoized conversion context).
+- Step 2: implemented in `crates/tlib/src/recursion.rs` with explicit symbolic tags:
+  - `SYMREC(var, body)`
+  - `SYMREF(var)`
+  plus integration coverage in `crates/tlib/tests/recursive_trees.rs`.
+- Step 3: documented below (pass-level recursion contract) and aligned with current code (`propagate` + fast-lane keep de Bruijn).
+- Step 4: implemented for current scope (`cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets`, `cargo run -p xtask -- golden-check` all passing locally).
+
 ---
 
 ## 7. Fast-Lane Position (Current)
@@ -163,6 +174,15 @@ Current decision:
 Future revisit trigger:
 
 - when a full normalization pipeline is active and parity evidence shows clear benefit/risk reduction.
+
+## 7.1 Pass-level recursion contract (current)
+
+| Pass / boundary | Accepted recursion form | Produced recursion form | `de_bruijn_to_sym` policy |
+|---|---|---|---|
+| `propagate` output | n/a (input is box graph) | `DEBRUIJN` + `DEBRUIJNREF` placeholders | forbidden |
+| `transform::signal_fir` fast-lane input | `DEBRUIJN` + `DEBRUIJNREF` (plus `SIGREC/SIGPROJ`) | FIR recursion/state form | forbidden |
+| `normalize` (future dedicated pass) | de Bruijn closed trees | symbolic recursion (`SYMREC/SYMREF`) | mandatory when normalization parity is enabled |
+| generic `tlib` utilities | both forms may exist | caller-defined | optional (explicit API call) |
 
 ---
 

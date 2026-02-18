@@ -4334,3 +4334,36 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p codegen`
   - `cargo test -p fir`
   - `cargo clippy --workspace --all-targets -- -D warnings`
+
+## 2026-02-18
+
+#### Phase 5 recursion addendum implementation (`de_bruijn_to_sym`) + Rustdoc/JOURNAL sync
+
+- Commit: amended from `00015c0` (Phase 5 implementation commit)
+- Files:
+  - `crates/tlib/src/recursion.rs`
+  - `crates/tlib/src/lib.rs`
+  - `crates/tlib/tests/recursive_trees.rs`
+  - `porting/phases/phase-5-recursive-trees-debruijn2sym-en.md`
+  - `porting/phases/phase-5-recursive-baseline-matrix-en.md`
+  - `JOURNAL.md`
+- Implemented:
+  - delivered Phase 5 recursive-tree kernel in `tlib`:
+    - `de_bruijn_to_sym` conversion with explicit error handling,
+    - `substitute`/aperture/lift parity logic (`liftn` equivalent),
+    - explicit symbolic shape `SYMREC(var, body)` and `SYMREF(var)`.
+  - added integration coverage for recursion behavior:
+    - simple and nested de Bruijn conversion cases,
+    - open-tree rejection,
+    - aperture and lift invariants.
+  - updated Phase 5 porting docs:
+    - status moved from planned to implemented for current scope,
+    - pass-level recursion contract documented (`propagate`, fast-lane, normalize),
+    - baseline acceptance matrix added with pinned C++ reference metadata.
+  - added crate-level Rustdoc entrypoint for Phase 5 recursion APIs in `tlib`:
+    - documented public builders/matchers, conversion helpers, and current pipeline contract.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace --all-targets`
+  - `cargo run -p xtask -- golden-check`
