@@ -23,3 +23,39 @@ fn dump_cpp_fastlane_compiles_fixture() {
         .unwrap_or_else(|e| panic!("fast-lane C++ compilation failed: {e}"));
     assert!(cpp.contains("class rep_01_passthrough : public dsp"));
 }
+
+fn compile_cpp_with_lane(file: &str, lane: SignalFirLane) -> String {
+    let compiler = Compiler::new();
+    let path = corpus_path(file);
+    compiler
+        .compile_file_default_to_cpp_with_lane(
+            &path,
+            &codegen::backends::cpp::CppOptions::default(),
+            lane,
+        )
+        .unwrap_or_else(|e| panic!("{file} C++ compilation failed for lane {lane:?}: {e}"))
+}
+
+#[test]
+fn legacy_and_fastlane_both_compile_lowpass_feedback_fixture() {
+    let legacy = compile_cpp_with_lane("rep_05_one_pole_lowpass.dsp", SignalFirLane::LegacyBridge);
+    let fast = compile_cpp_with_lane(
+        "rep_05_one_pole_lowpass.dsp",
+        SignalFirLane::TransformFastLane,
+    );
+    assert!(legacy.contains("class rep_05_one_pole_lowpass : public dsp"));
+    assert!(fast.contains("class rep_05_one_pole_lowpass : public dsp"));
+    assert!(fast.contains("void compute("));
+}
+
+#[test]
+fn legacy_and_fastlane_both_compile_feedback_projection_fixture() {
+    let legacy = compile_cpp_with_lane("rep_23_feedback_simple.dsp", SignalFirLane::LegacyBridge);
+    let fast = compile_cpp_with_lane(
+        "rep_23_feedback_simple.dsp",
+        SignalFirLane::TransformFastLane,
+    );
+    assert!(legacy.contains("class rep_23_feedback_simple : public dsp"));
+    assert!(fast.contains("class rep_23_feedback_simple : public dsp"));
+    assert!(fast.contains("void compute("));
+}

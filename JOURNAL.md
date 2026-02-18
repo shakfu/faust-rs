@@ -3573,3 +3573,38 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p transform --all-targets`
   - `cargo clippy -p transform --all-targets -- -D warnings`
   - `cargo test -p compiler --all-targets`
+
+#### signalFIRCompiler fast-lane: Step 2B.2 state/control bootstrap slice
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/mod.rs`
+  - `crates/compiler/tests/signal_fir_lane.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - extended signal->FIR lowering with first state/control bootstrap nodes:
+    - `SIGDELAY1`, `SIGDELAY`, `SIGPREFIX`,
+    - `SIGSELECT2`,
+    - `SIGINTCAST`, `SIGFLOATCAST`, `SIGBITCAST`,
+    - `SIGPROJ`, `SIGREC` (placeholder-compatible lowering for bootstrap parity).
+  - lowering strategy remains deterministic and explicit:
+    - arithmetic/control nodes lowered to FIR value forms (`FunCall`, `Select2`, `Cast`),
+    - recursion/projection bootstrap represented via stable placeholder loads
+      to keep pipeline execution unblocked while full recurrence lowering is pending.
+  - added transform tests covering:
+    - delay/prefix/select/cast support,
+    - rec/proj placeholder support,
+    - unsupported-family typed error remains stable.
+  - added compiler differential lane checks for bootstrap corpus:
+    - `rep_05_one_pole_lowpass.dsp`,
+    - `rep_23_feedback_simple.dsp`,
+    validating both `LegacyBridge` and `TransformFastLane` compile paths.
+  - updated Rustdoc status wording in `transform::signal_fir` to reflect
+    Step 2A/2B coverage.
+- Validation:
+  - `cargo fmt -p transform -p compiler`
+  - `cargo test -p transform --all-targets`
+  - `cargo clippy -p transform --all-targets -- -D warnings`
+  - `cargo test -p compiler --all-targets`
+  - `cargo clippy -p compiler --all-targets -- -D warnings`

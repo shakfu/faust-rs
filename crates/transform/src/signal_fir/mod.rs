@@ -1,10 +1,11 @@
-//! Experimental signal->FIR fast-lane (Step 2A slice).
+//! Experimental signal->FIR fast-lane (Step 2A/2B slices).
 //!
 //! # Status
 //! This module currently provides an **executable base slice**:
 //! - contract validation (`Step 1A`),
 //! - lowering for `SIGINPUT`, numeric constants, `SIGBINOP`, and `SIGOUTPUT`
-//!   passthrough (`Step 2A`).
+//!   passthrough (`Step 2A`),
+//! - core math and control/state bootstrap nodes (`Step 2B`).
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors until the
 //! remaining lowering slices are implemented.
@@ -54,9 +55,9 @@ pub struct SignalFirOutput {
 
 /// Compiles propagated signals into a FIR module using the experimental fast-lane.
 ///
-/// # Current behavior (Step 2A)
+/// # Current behavior (Step 2A/2B)
 /// - validates options and top-level signal/arity contract,
-/// - lowers one executable base signal slice to FIR.
+/// - lowers one executable bootstrap signal slice to FIR.
 ///
 /// # Errors
 /// Returns [`SignalFirError`] when options are invalid or the top-level
@@ -157,12 +158,12 @@ mod tests {
         let mut arena = TreeArena::new();
         let sig0 = {
             let mut b = SigBuilder::new(&mut arena);
-            let i0 = b.input(0);
-            b.delay1(i0)
+            let lbl = b.int(0);
+            b.button(lbl)
         };
         let err =
             compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-                .expect_err("delay1 is outside Step 2A lowering slice");
+                .expect_err("button is outside Step 2B.2 lowering slice");
 
         assert_eq!(err.code(), SignalFirErrorCode::UnsupportedSignalNode);
         assert_eq!(err.code().as_str(), "FRS-SFIR-0004");
@@ -237,5 +238,43 @@ mod tests {
             panic!("rhs should lower to min/max fun call");
         };
         assert_eq!(rhs_name, "std::fmax");
+    }
+
+    #[test]
+    fn delay_prefix_select_and_cast_nodes_are_supported() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let in0 = b.input(0);
+            let z0 = b.real(0.0);
+            let pre = b.prefix(z0, in0);
+            let d1 = b.delay1(pre);
+            let n1 = b.int(1);
+            let delayed = b.delay(d1, n1);
+            let as_int = b.int_cast(delayed);
+            let as_float = b.float_cast(as_int);
+            let c1 = b.real(1.0);
+            let c0 = b.real(0.0);
+            b.select2(c1, as_float, c0)
+        };
+
+        compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect("Step 2B.2 should support delay/prefix/select/casts slice");
+    }
+
+    #[test]
+    fn rec_proj_placeholder_slice_is_supported() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let in0 = b.input(0);
+            let c0 = b.real(0.1);
+            let body = b.binop(BinOp::Add, in0, c0);
+            let rec = b.rec(body);
+            b.proj(0, rec)
+        };
+
+        compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect("Step 2B.2 should support rec/proj placeholder lowering");
     }
 }

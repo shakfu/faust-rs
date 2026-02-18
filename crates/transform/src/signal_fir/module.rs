@@ -1,10 +1,13 @@
 //! FIR module emission for the signal->FIR fast-lane.
 //!
-//! Step 2A lowers a first executable signal slice:
+//! Step 2A/2B lowers an executable bootstrap signal slice:
 //! - `SIGINPUT`, integer/real constants,
 //! - `SIGBINOP` (arithmetic/comparison/bitwise subset),
 //! - `SIGPOW`/`SIGMIN`/`SIGMAX`,
 //! - core unary math nodes (`sin/cos/tan/exp/log/log10/sqrt/abs`),
+//! - `SIGDELAY1`/`SIGDELAY`/`SIGPREFIX`,
+//! - `SIGSELECT2`, `SIGINTCAST`/`SIGFLOATCAST`/`SIGBITCAST`,
+//! - `SIGPROJ`/`SIGREC` (placeholder-compatible lowering).
 //! - `SIGOUTPUT` passthrough nodes.
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors.
@@ -119,6 +122,17 @@ impl<'a> SignalToFirLower<'a> {
             }
             SigMatch::Input(index) => self.lower_input(index)?,
             SigMatch::Output(_, inner) => self.lower_signal(inner)?,
+            SigMatch::Delay1(value) => self.lower_fun1("frs_delay1", value)?,
+            SigMatch::Delay(value, amount) => self.lower_fun2("frs_delay", value, amount)?,
+            SigMatch::Prefix(init, value) => self.lower_fun2("frs_prefix", init, value)?,
+            SigMatch::IntCast(value) => self.lower_cast(FirType::Int64, value)?,
+            SigMatch::BitCast(value) => self.lower_bitcast(FirType::FaustFloat, value)?,
+            SigMatch::FloatCast(value) => self.lower_cast(FirType::FaustFloat, value)?,
+            SigMatch::Select2(cond, then_value, else_value) => {
+                self.lower_select2(cond, then_value, else_value)?
+            }
+            SigMatch::Proj(index, group) => self.lower_proj(index, group),
+            SigMatch::Rec(_body) => self.lower_placeholder("rec", sig),
             SigMatch::BinOp(op, lhs, rhs) => self.lower_binop(op, lhs, rhs)?,
             SigMatch::Pow(lhs, rhs) => self.lower_fun2("std::pow", lhs, rhs)?,
             SigMatch::Min(lhs, rhs) => self.lower_fun2("std::fmin", lhs, rhs)?,
@@ -135,7 +149,7 @@ impl<'a> SignalToFirLower<'a> {
                 return Err(SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
                     format!(
-                        "unsupported signal node in Step 2A: {other:?} (expr={})",
+                        "unsupported signal node in Step 2B: {other:?} (expr={})",
                         dump_sig_readable(self.arena, sig)
                     ),
                 ));
@@ -201,6 +215,44 @@ impl<'a> SignalToFirLower<'a> {
         let rhs = self.lower_signal(rhs)?;
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.fun_call(name, &[lhs, rhs], FirType::FaustFloat))
+    }
+
+    fn lower_cast(&mut self, typ: FirType, value: SigId) -> Result<FirId, SignalFirError> {
+        let value = self.lower_signal(value)?;
+        let mut b = FirBuilder::new(&mut self.store);
+        Ok(b.cast(typ, value))
+    }
+
+    fn lower_bitcast(&mut self, typ: FirType, value: SigId) -> Result<FirId, SignalFirError> {
+        let value = self.lower_signal(value)?;
+        let mut b = FirBuilder::new(&mut self.store);
+        Ok(b.bitcast(typ, value))
+    }
+
+    fn lower_select2(
+        &mut self,
+        cond: SigId,
+        then_value: SigId,
+        else_value: SigId,
+    ) -> Result<FirId, SignalFirError> {
+        let cond = self.lower_signal(cond)?;
+        let then_value = self.lower_signal(then_value)?;
+        let else_value = self.lower_signal(else_value)?;
+        let mut b = FirBuilder::new(&mut self.store);
+        Ok(b.select2(cond, then_value, else_value, FirType::FaustFloat))
+    }
+
+    fn lower_proj(&mut self, index: i64, group: SigId) -> FirId {
+        self.lower_placeholder(format!("proj{index}_g{}", group.as_u32()).as_str(), group)
+    }
+
+    fn lower_placeholder(&mut self, prefix: &str, sig: SigId) -> FirId {
+        let mut b = FirBuilder::new(&mut self.store);
+        b.load_var(
+            format!("frs_{prefix}_n{}", sig.as_u32()),
+            AccessType::Struct,
+            FirType::FaustFloat,
+        )
     }
 }
 
