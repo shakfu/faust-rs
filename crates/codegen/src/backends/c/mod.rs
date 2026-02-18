@@ -128,6 +128,14 @@ struct StructInit {
     init: FirId,
 }
 
+#[derive(Clone, Debug)]
+struct TableInit {
+    name: String,
+    access: AccessType,
+    elem_type: FirType,
+    values: Vec<FirId>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmitMode {
     Default,
@@ -189,6 +197,7 @@ pub fn generate_c_module(
 
     let declared_functions = collect_declared_functions(store, module.declarations)?;
     let struct_inits = collect_struct_initializers(store, module.dsp_struct, module.globals)?;
+    let table_inits = collect_table_initializers(store, module.dsp_struct, module.globals)?;
     let mut out = String::new();
     emit_c_header(&mut out, &class_name);
     emit_struct_definition(
@@ -206,6 +215,7 @@ pub fn generate_c_module(
         &class_name,
         &declared_functions,
         &struct_inits,
+        &table_inits,
     )?;
     emit_c_footer(&mut out);
     Ok(out)
@@ -289,9 +299,26 @@ fn emit_struct_fields(
     };
 
     for item in items {
-        if let FirMatch::DeclareVar { name, typ, .. } = match_fir(store, item) {
-            let _ = write!(out, "    {} {name}", emit_type(&typ, options));
-            let _ = writeln!(out, ";");
+        match match_fir(store, item) {
+            FirMatch::DeclareVar { name, typ, .. } => {
+                let _ = write!(out, "    {} {name}", emit_type(&typ, options));
+                let _ = writeln!(out, ";");
+            }
+            FirMatch::DeclareTable {
+                name,
+                elem_type,
+                values,
+                ..
+            } => {
+                let _ = writeln!(
+                    out,
+                    "    {} {}[{}];",
+                    emit_type(&elem_type, options),
+                    name,
+                    values.len()
+                );
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -304,6 +331,7 @@ fn emit_c_api(
     class_name: &str,
     declared_functions: &[DeclareFunView],
     struct_inits: &[StructInit],
+    table_inits: &[TableInit],
 ) -> Result<(), CodegenError> {
     let names: Vec<&str> = declared_functions.iter().map(|f| f.name.as_str()).collect();
 
@@ -379,7 +407,7 @@ fn emit_c_api(
             out,
             "void instanceResetUserInterface{class_name}({class_name}* dsp) {{"
         );
-        if struct_inits.is_empty() {
+        if struct_inits.is_empty() && table_inits.is_empty() {
             let _ = writeln!(out, "    (void)dsp;");
         } else {
             for init in struct_inits {
@@ -390,6 +418,17 @@ fn emit_c_api(
                     init.name,
                     emit_type(&init.typ, options)
                 );
+            }
+            for init in table_inits {
+                for (index, value_id) in init.values.iter().copied().enumerate() {
+                    let value = emit_value(store, options, value_id)?;
+                    let table_ref = emit_var_ref(&init.name, init.access);
+                    let _ = writeln!(
+                        out,
+                        "    {table_ref}[{index}] = ({})({value});",
+                        emit_type(&init.elem_type, options)
+                    );
+                }
             }
         }
         let _ = writeln!(out, "}}");
@@ -654,6 +693,43 @@ fn collect_struct_initializers(
     Ok(out)
 }
 
+fn collect_table_initializers(
+    store: &FirStore,
+    dsp_struct: FirId,
+    globals: FirId,
+) -> Result<Vec<TableInit>, CodegenError> {
+    let mut out = Vec::new();
+    for section in [dsp_struct, globals] {
+        let FirMatch::Block(items) = match_fir(store, section) else {
+            return Err(CodegenError::new(
+                CodegenErrorCode::InvalidModuleSection,
+                format!(
+                    "struct section must be a FIR block, got {:?} at node {}",
+                    match_fir(store, section),
+                    section.as_u32()
+                ),
+            ));
+        };
+        for item in items {
+            if let FirMatch::DeclareTable {
+                name,
+                access,
+                elem_type,
+                values,
+            } = match_fir(store, item)
+            {
+                out.push(TableInit {
+                    name,
+                    access,
+                    elem_type,
+                    values,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn infer_compute_output_arity(store: &FirStore, body: FirId) -> usize {
     let FirMatch::Block(items) = match_fir(store, body) else {
         return 0;
@@ -752,6 +828,26 @@ fn emit_stmt(
             let _ = writeln!(out, ";");
             Ok(())
         }
+        FirMatch::DeclareTable {
+            name,
+            elem_type,
+            values,
+            ..
+        } => {
+            let mut rendered = Vec::with_capacity(values.len());
+            for value in &values {
+                rendered.push(emit_value(store, options, *value)?);
+            }
+            let _ = writeln!(
+                out,
+                "{tab}{} {}[{}] = {{{}}};",
+                emit_type(&elem_type, options),
+                name,
+                values.len(),
+                rendered.join(", ")
+            );
+            Ok(())
+        }
         FirMatch::StoreVar {
             name,
             access,
@@ -760,6 +856,18 @@ fn emit_stmt(
             let value = emit_value(store, options, value)?;
             let target = emit_var_ref(&name, access);
             let _ = writeln!(out, "{tab}{target} = {value};");
+            Ok(())
+        }
+        FirMatch::StoreTable {
+            name,
+            access,
+            index,
+            value,
+        } => {
+            let index = emit_value(store, options, index)?;
+            let value = emit_value(store, options, value)?;
+            let target = emit_var_ref(&name, access);
+            let _ = writeln!(out, "{tab}{target}[{index}] = {value};");
             Ok(())
         }
         FirMatch::Drop(value) => {
@@ -934,6 +1042,15 @@ fn emit_value(store: &FirStore, options: &COptions, value: FirId) -> Result<Stri
         FirMatch::Bool { value, .. } => Ok(if value { "1" } else { "0" }.to_owned()),
         FirMatch::LoadVar { name, access, .. } | FirMatch::LoadVarAddress { name, access, .. } => {
             Ok(emit_var_ref(&name, access))
+        }
+        FirMatch::LoadTable {
+            name,
+            access,
+            index,
+            ..
+        } => {
+            let index = emit_value(store, options, index)?;
+            Ok(format!("{}[{index}]", emit_var_ref(&name, access)))
         }
         FirMatch::TeeVar {
             name,

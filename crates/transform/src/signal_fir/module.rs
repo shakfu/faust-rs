@@ -1,6 +1,6 @@
 //! FIR module emission for the signal->FIR fast-lane.
 //!
-//! Step 2A/2B lowers an executable bootstrap signal slice:
+//! Step 2A..2G lowers an executable fast-lane slice:
 //! - `SIGINPUT`, integer/real constants,
 //! - `SIGBINOP` (arithmetic/comparison/bitwise subset),
 //! - `SIGPOW`/`SIGMIN`/`SIGMAX`,
@@ -8,6 +8,7 @@
 //! - `SIGDELAY1`/`SIGDELAY`/`SIGPREFIX`,
 //! - `SIGSELECT2`, `SIGINTCAST`/`SIGFLOATCAST`/`SIGBITCAST`,
 //! - `SIGPROJ`/`SIGREC` (real lowering for canonical `DEBRUIJN`/`DEBRUIJNREF` recursion).
+//! - `SIGWAVEFORM`/`SIGRDTBL`/`SIGWRTBL` for direct waveform tables.
 //! - `SIGOUTPUT` passthrough nodes.
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors.
@@ -128,6 +129,8 @@ struct SignalToFirLower<'a> {
     recursion_stack: Vec<String>,
     ui_controls: HashMap<SigId, String>,
     soundfiles: HashMap<SigId, String>,
+    waveform_tables: HashMap<SigId, String>,
+    waveform_table_len: HashMap<SigId, usize>,
     ui_statements: Vec<FirId>,
     named_struct_vars: HashSet<String>,
 }
@@ -146,6 +149,8 @@ impl<'a> SignalToFirLower<'a> {
             recursion_stack: Vec::new(),
             ui_controls: HashMap::new(),
             soundfiles: HashMap::new(),
+            waveform_tables: HashMap::new(),
+            waveform_table_len: HashMap::new(),
             ui_statements: Vec::new(),
             named_struct_vars: HashSet::new(),
         }
@@ -208,20 +213,11 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Round(value) => self.lower_fun1("std::round", value)?,
             SigMatch::Lowest(value) => self.lower_signal(value)?,
             SigMatch::Highest(value) => self.lower_signal(value)?,
-            SigMatch::RdTbl(_, _) => {
-                return self
-                    .unsupported_node(sig, "SIGRDTBL is not FIR-native yet in fast-lane Step 2F");
+            SigMatch::RdTbl(tbl, ridx) => self.lower_rdtbl(sig, tbl, ridx)?,
+            SigMatch::WrTbl(size, generator, widx, wsig) => {
+                self.lower_wrtbl(sig, size, generator, widx, wsig)?
             }
-            SigMatch::WrTbl(_, _, _, _) => {
-                return self
-                    .unsupported_node(sig, "SIGWRTBL is not FIR-native yet in fast-lane Step 2F");
-            }
-            SigMatch::Waveform(_) => {
-                return self.unsupported_node(
-                    sig,
-                    "SIGWAVEFORM is not FIR-native yet in fast-lane Step 2F",
-                );
-            }
+            SigMatch::Waveform(values) => self.lower_waveform(sig, values)?,
             SigMatch::Button(label) => self.lower_button(sig, label, ButtonType::Button),
             SigMatch::Checkbox(label) => self.lower_button(sig, label, ButtonType::Checkbox),
             SigMatch::VSlider(label, init, min, max, step) => {
@@ -460,6 +456,113 @@ impl<'a> SignalToFirLower<'a> {
         self.ui_statements.push(b.add_soundfile(label, var.clone()));
         self.soundfiles.insert(node, var.clone());
         b.load_var(var, AccessType::Struct, FirType::Sound)
+    }
+
+    fn lower_waveform(&mut self, node: SigId, values: &[SigId]) -> Result<FirId, SignalFirError> {
+        let table_name = self.ensure_waveform_table(node, values)?;
+        let index = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.int32(0)
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        Ok(b.load_table(table_name, AccessType::Struct, index, FirType::FaustFloat))
+    }
+
+    fn lower_rdtbl(
+        &mut self,
+        node: SigId,
+        tbl: SigId,
+        ridx: SigId,
+    ) -> Result<FirId, SignalFirError> {
+        let (table_name, table_len) = self.resolve_waveform_table(tbl)?;
+        if table_len == 0 {
+            return self.unsupported_node(node, "SIGRDTBL cannot read an empty table");
+        }
+        let ridx = self.lower_signal(ridx)?;
+        let ridx = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.cast(FirType::Int32, ridx)
+        };
+        let index = {
+            let mut b = FirBuilder::new(&mut self.store);
+            let size = b.int32(i32::try_from(table_len).unwrap_or(i32::MAX));
+            b.binop(FirBinOp::Rem, ridx, size, FirType::Int32)
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        Ok(b.load_table(table_name, AccessType::Struct, index, FirType::FaustFloat))
+    }
+
+    fn lower_wrtbl(
+        &mut self,
+        _node: SigId,
+        _size: SigId,
+        generator: SigId,
+        widx: SigId,
+        wsig: SigId,
+    ) -> Result<FirId, SignalFirError> {
+        let (table_name, table_len) = self.resolve_waveform_table(generator)?;
+        if table_len == 0 {
+            return self.unsupported_node(generator, "SIGWRTBL cannot write an empty table");
+        }
+        let wsig_value = self.lower_signal(wsig)?;
+        if self.arena.is_nil(widx) {
+            return Ok(wsig_value);
+        }
+        let widx = self.lower_signal(widx)?;
+        let widx = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.cast(FirType::Int32, widx)
+        };
+        let index = {
+            let mut b = FirBuilder::new(&mut self.store);
+            let size = b.int32(i32::try_from(table_len).unwrap_or(i32::MAX));
+            b.binop(FirBinOp::Rem, widx, size, FirType::Int32)
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        self.compute_updates
+            .push(b.store_table(table_name, AccessType::Struct, index, wsig_value));
+        Ok(wsig_value)
+    }
+
+    fn resolve_waveform_table(&mut self, sig: SigId) -> Result<(String, usize), SignalFirError> {
+        if let SigMatch::Waveform(values) = match_sig(self.arena, sig) {
+            let name = self.ensure_waveform_table(sig, values)?;
+            return Ok((name, values.len()));
+        }
+        if let Some(name) = self.waveform_tables.get(&sig).cloned() {
+            let len = self.waveform_table_len.get(&sig).copied().unwrap_or(0);
+            return Ok((name, len));
+        }
+        self.unsupported_node(
+            sig,
+            "table access currently supports direct SIGWAVEFORM tables in Step 2G",
+        )
+    }
+
+    fn ensure_waveform_table(
+        &mut self,
+        sig: SigId,
+        values: &[SigId],
+    ) -> Result<String, SignalFirError> {
+        if let Some(name) = self.waveform_tables.get(&sig).cloned() {
+            return Ok(name);
+        }
+        let mut lowered_values = Vec::with_capacity(values.len());
+        for value in values {
+            lowered_values.push(self.lower_signal(*value)?);
+        }
+        let name = format!("table_n{}", sig.as_u32());
+        let mut b = FirBuilder::new(&mut self.store);
+        let decl = b.declare_table(
+            name.clone(),
+            AccessType::Struct,
+            FirType::FaustFloat,
+            &lowered_values,
+        );
+        self.struct_declarations.push(decl);
+        self.waveform_tables.insert(sig, name.clone());
+        self.waveform_table_len.insert(sig, values.len());
+        Ok(name)
     }
 
     fn ensure_named_struct_var(&mut self, name: &str, typ: FirType, init: Option<FirId>) {

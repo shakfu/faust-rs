@@ -360,6 +360,25 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
+    /// C++ parity helper: explicit table read expression.
+    #[must_use]
+    pub fn load_table(
+        &mut self,
+        name: impl Into<String>,
+        access: AccessType,
+        index: FirId,
+        typ: FirType,
+    ) -> FirId {
+        let typ_id = encode_type(&mut self.store.arena, &typ);
+        let name_id = self.store.arena.symbol(name);
+        let access_id = encode_access(&mut self.store.arena, access);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_V_LOAD_TABLE_TAG,
+            &[typ_id, name_id, access_id, index],
+        )
+    }
+
     /// C++ parity: `LoadVarAddressInst`.
     #[must_use]
     pub fn load_var_address(
@@ -495,6 +514,26 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
+    /// C++ parity helper: explicit table declaration with literal initial values.
+    #[must_use]
+    pub fn declare_table(
+        &mut self,
+        name: impl Into<String>,
+        access: AccessType,
+        elem_type: FirType,
+        values: &[FirId],
+    ) -> FirId {
+        let name_id = self.store.arena.symbol(name);
+        let access_id = encode_access(&mut self.store.arena, access);
+        let typ_id = encode_type(&mut self.store.arena, &elem_type);
+        let values_id = encode_list(&mut self.store.arena, values);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_DECLARE_TABLE_TAG,
+            &[name_id, access_id, typ_id, values_id],
+        )
+    }
+
     /// C++ parity: `NullDeclareVarInst`.
     #[must_use]
     pub fn null_declare_var(&mut self) -> FirId {
@@ -578,6 +617,24 @@ impl<'a> FirBuilder<'a> {
             &mut self.store.arena,
             FIR_STORE_VAR_TAG,
             &[name_id, access_id, value],
+        )
+    }
+
+    /// C++ parity helper: explicit table write statement.
+    #[must_use]
+    pub fn store_table(
+        &mut self,
+        name: impl Into<String>,
+        access: AccessType,
+        index: FirId,
+        value: FirId,
+    ) -> FirId {
+        let name_id = self.store.arena.symbol(name);
+        let access_id = encode_access(&mut self.store.arena, access);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_STORE_TABLE_TAG,
+            &[name_id, access_id, index, value],
         )
     }
 
@@ -924,6 +981,12 @@ pub enum FirMatch {
         access: AccessType,
         typ: FirType,
     },
+    LoadTable {
+        name: String,
+        access: AccessType,
+        index: FirId,
+        typ: FirType,
+    },
     LoadVarAddress {
         name: String,
         access: AccessType,
@@ -977,6 +1040,12 @@ pub enum FirMatch {
         access: AccessType,
         init: Option<FirId>,
     },
+    DeclareTable {
+        name: String,
+        access: AccessType,
+        elem_type: FirType,
+        values: Vec<FirId>,
+    },
     NullDeclareVar,
     DeclareFun {
         name: String,
@@ -999,6 +1068,12 @@ pub enum FirMatch {
     StoreVar {
         name: String,
         access: AccessType,
+        value: FirId,
+    },
+    StoreTable {
+        name: String,
+        access: AccessType,
+        index: FirId,
         value: FirId,
     },
     ShiftArrayVar {
@@ -1234,6 +1309,21 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
             };
             FirMatch::LoadVar { name, access, typ }
         }
+        (FIR_V_LOAD_TABLE_TAG, [typ, name, access, index]) => {
+            let (Some(typ), Some(name), Some(access)) = (
+                decode_type(&store.arena, *typ),
+                decode_symbol(&store.arena, *name),
+                decode_access(&store.arena, *access),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::LoadTable {
+                name,
+                access,
+                index: *index,
+                typ,
+            }
+        }
         (FIR_V_LOAD_VAR_ADDRESS_TAG, [typ, name, access]) => {
             let (Some(typ), Some(name), Some(access)) = (
                 decode_type(&store.arena, *typ),
@@ -1347,6 +1437,22 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 init,
             }
         }
+        (FIR_DECLARE_TABLE_TAG, [name, access, typ, values]) => {
+            let (Some(name), Some(access), Some(elem_type), Some(values)) = (
+                decode_symbol(&store.arena, *name),
+                decode_access(&store.arena, *access),
+                decode_type(&store.arena, *typ),
+                decode_list(&store.arena, *values),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::DeclareTable {
+                name,
+                access,
+                elem_type,
+                values,
+            }
+        }
         (FIR_NULL_DECLARE_VAR_TAG, []) => FirMatch::NullDeclareVar,
         (FIR_DECLARE_FUN_TAG, [name, typ, args, body, is_inline]) => {
             let (Some(name), Some(typ), Some(args), Some(is_inline)) = (
@@ -1401,6 +1507,20 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
             FirMatch::StoreVar {
                 name,
                 access,
+                value: *value,
+            }
+        }
+        (FIR_STORE_TABLE_TAG, [name, access, index, value]) => {
+            let (Some(name), Some(access)) = (
+                decode_symbol(&store.arena, *name),
+                decode_access(&store.arena, *access),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::StoreTable {
+                name,
+                access,
+                index: *index,
                 value: *value,
             }
         }
@@ -1660,6 +1780,7 @@ const FIR_V_FLOAT64_ARRAY_TAG: &str = "FIRV_FLOAT64ARRAY";
 const FIR_V_QUAD_ARRAY_TAG: &str = "FIRV_QUADARRAY";
 const FIR_V_FIXED_POINT_ARRAY_TAG: &str = "FIRV_FIXEDPOINTARRAY";
 const FIR_V_LOAD_VAR_TAG: &str = "FIRV_LOADVAR";
+const FIR_V_LOAD_TABLE_TAG: &str = "FIRV_LOADTABLE";
 const FIR_V_LOAD_VAR_ADDRESS_TAG: &str = "FIRV_LOADVARADDRESS";
 const FIR_V_TEE_VAR_TAG: &str = "FIRV_TEEVAR";
 const FIR_V_BINOP_TAG: &str = "FIRV_BINOP";
@@ -1672,11 +1793,13 @@ const FIR_V_NULL_TAG: &str = "FIRV_NULL";
 const FIR_V_NEW_DSP_TAG: &str = "FIRV_NEWDSP";
 
 const FIR_DECLARE_VAR_TAG: &str = "FIRST_DECLAREVAR";
+const FIR_DECLARE_TABLE_TAG: &str = "FIRST_DECLARETABLE";
 const FIR_NULL_DECLARE_VAR_TAG: &str = "FIRST_NULLDECLAREVAR";
 const FIR_DECLARE_FUN_TAG: &str = "FIRST_DECLAREFUN";
 const FIR_DECLARE_STRUCT_TYPE_TAG: &str = "FIRST_DECLARESTRUCTTYPE";
 const FIR_DECLARE_BUFFER_ITERATORS_TAG: &str = "FIRST_DECLAREBUFFERITERATORS";
 const FIR_STORE_VAR_TAG: &str = "FIRST_STOREVAR";
+const FIR_STORE_TABLE_TAG: &str = "FIRST_STORETABLE";
 const FIR_SHIFT_ARRAY_VAR_TAG: &str = "FIRST_SHIFTARRAYVAR";
 const FIR_DROP_TAG: &str = "FIRST_DROP";
 const FIR_NULL_STATEMENT_TAG: &str = "FIRST_NULLSTATEMENT";
@@ -1718,6 +1841,7 @@ fn is_value_tag(tag: &str) -> bool {
             | FIR_V_QUAD_ARRAY_TAG
             | FIR_V_FIXED_POINT_ARRAY_TAG
             | FIR_V_LOAD_VAR_TAG
+            | FIR_V_LOAD_TABLE_TAG
             | FIR_V_LOAD_VAR_ADDRESS_TAG
             | FIR_V_TEE_VAR_TAG
             | FIR_V_BINOP_TAG
@@ -2412,6 +2536,48 @@ mod tests {
                 var: "fSound0".to_string()
             }
         );
+    }
+
+    #[test]
+    fn builder_and_match_cover_table_nodes() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let i0 = b.int32(0);
+        let v0 = b.float64(1.0);
+        let v1 = b.float64(-2.0);
+        let table = b.declare_table("fTbl0", AccessType::Struct, FirType::FaustFloat, &[v0, v1]);
+        let read = b.load_table("fTbl0", AccessType::Struct, i0, FirType::FaustFloat);
+        let write = b.store_table("fTbl0", AccessType::Struct, i0, read);
+
+        assert_eq!(
+            match_fir(&store, table),
+            FirMatch::DeclareTable {
+                name: "fTbl0".to_string(),
+                access: AccessType::Struct,
+                elem_type: FirType::FaustFloat,
+                values: vec![v0, v1]
+            }
+        );
+        assert_eq!(
+            match_fir(&store, read),
+            FirMatch::LoadTable {
+                name: "fTbl0".to_string(),
+                access: AccessType::Struct,
+                index: i0,
+                typ: FirType::FaustFloat
+            }
+        );
+        assert_eq!(
+            match_fir(&store, write),
+            FirMatch::StoreTable {
+                name: "fTbl0".to_string(),
+                access: AccessType::Struct,
+                index: i0,
+                value: read
+            }
+        );
+        assert_eq!(store.value_type(read), Some(FirType::FaustFloat));
     }
 
     #[test]

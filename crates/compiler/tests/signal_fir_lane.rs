@@ -69,27 +69,21 @@ fn legacy_and_fastlane_both_compile_feedback_projection_fixture() {
 }
 
 #[test]
-fn legacy_compiles_environment_waveform_fixture_and_fastlane_reports_unsupported_waveform() {
+fn legacy_and_fastlane_both_compile_environment_waveform_fixture() {
     let legacy = compile_cpp_with_lane(
         "rep_20_environment_waveform.dsp",
         SignalFirLane::LegacyBridge,
     );
+    let fast = compile_cpp_with_lane(
+        "rep_20_environment_waveform.dsp",
+        SignalFirLane::TransformFastLane,
+    );
     assert!(legacy.contains("class rep_20_environment_waveform : public dsp"));
-    let compiler = Compiler::new();
-    let path = corpus_path("rep_20_environment_waveform.dsp");
-    let err = compiler
-        .compile_file_default_to_cpp_with_lane(
-            &path,
-            &codegen::backends::cpp::CppOptions::default(),
-            SignalFirLane::TransformFastLane,
-        )
-        .expect_err(
-            "fast-lane should reject waveform/table nodes until FIR-native lowering exists",
-        );
-    let msg = err.to_string();
+    assert!(fast.contains("class rep_20_environment_waveform : public dsp"));
+    assert!(fast.contains("void compute("));
     assert!(
-        msg.contains("SIGWAVEFORM is not FIR-native yet in fast-lane Step 2F"),
-        "unexpected fast-lane error for waveform fixture: {msg}"
+        !fast.contains("frs_"),
+        "Step 2G fast-lane output should not contain frs_* shims"
     );
 }
 

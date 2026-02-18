@@ -1,4 +1,4 @@
-//! Experimental signal->FIR fast-lane (Step 2A/2B/2C/2D/2E/2F slices).
+//! Experimental signal->FIR fast-lane (Step 2A/2B/2C/2D/2E/2F/2G slices).
 //!
 //! # Status
 //! This module currently provides an **executable base slice**:
@@ -12,11 +12,13 @@
 //! - first shim-reduction pass replacing several `frs_*` calls with native FIR
 //!   lowering (`Step 2E`),
 //! - critical shim elimination (`Step 2F`): no `frs_*` calls remain in fast-lane
-//!   generated C++.
+//!   generated C++,
+//! - first FIR-native table lowering (`Step 2G`) for
+//!   `SIGWAVEFORM` / `SIGRDTBL` / `SIGWRTBL`.
 //!
-//! Waveform/table families (`SIGWAVEFORM`, `SIGRDTBL`, `SIGWRTBL`) are now
-//! explicit typed `UnsupportedSignalNode` errors in fast-lane until dedicated
-//! FIR-native lowering is added.
+//! Current `Step 2G` scope is intentionally focused on direct waveform tables.
+//! More advanced table-generation patterns are still reported as typed
+//! `UnsupportedSignalNode` errors.
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors until the
 //! remaining lowering slices are implemented.
@@ -66,7 +68,7 @@ pub struct SignalFirOutput {
 
 /// Compiles propagated signals into a FIR module using the experimental fast-lane.
 ///
-/// # Current behavior (Step 2A/2B/2C/2D/2E/2F)
+/// # Current behavior (Step 2A/2B/2C/2D/2E/2F/2G)
 /// - validates options and top-level signal/arity contract,
 /// - lowers one executable bootstrap signal slice to FIR.
 ///
@@ -271,6 +273,69 @@ mod tests {
 
         compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
             .expect("Step 2B.2 should support delay/prefix/select/casts slice");
+    }
+
+    #[test]
+    fn waveform_and_rdtbl_lower_to_fir_table_nodes() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let v0 = b.real(1.0);
+            let v1 = b.real(-2.0);
+            let v2 = b.real(3.5);
+            let table = b.waveform(&[v0, v1, v2]);
+            let idx = b.input(0);
+            b.rdtbl(table, idx)
+        };
+        let out =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+                .expect("Step 2G should support waveform+rdtbl table lowering");
+
+        let FirMatch::Module {
+            dsp_struct,
+            declarations,
+            ..
+        } = match_fir(&out.store, out.module)
+        else {
+            panic!("module expected");
+        };
+        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+            panic!("dsp_struct block expected");
+        };
+        assert!(
+            struct_items
+                .iter()
+                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareTable { .. })),
+            "Step 2G should allocate waveform table in DSP struct"
+        );
+        let FirMatch::Block(decls) = match_fir(&out.store, declarations) else {
+            panic!("declarations block expected");
+        };
+        let compute = decls
+            .iter()
+            .copied()
+            .find(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareFun { .. }))
+            .expect("compute declaration expected");
+        let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
+            panic!("declare fun expected");
+        };
+        let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
+            panic!("compute block expected");
+        };
+        let drop_value = stmts
+            .iter()
+            .find_map(|id| match match_fir(&out.store, *id) {
+                FirMatch::Drop(value) => Some(value),
+                _ => None,
+            })
+            .expect("compute should include one output drop");
+        assert!(
+            matches!(
+                match_fir(&out.store, drop_value),
+                FirMatch::LoadTable { .. }
+            ),
+            "rdtbl output should lower to FIR table read"
+        );
     }
 
     #[test]

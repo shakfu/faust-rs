@@ -3777,3 +3777,42 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p transform --all-targets`
   - `cargo test -p compiler --test signal_fir_lane`
   - `cargo clippy -p transform -p compiler --all-targets -- -D warnings`
+
+#### signalFIRCompiler fast-lane: Step 2G FIR-native table lowering (`SIGWAVEFORM`/`SIGRDTBL`/`SIGWRTBL`)
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/fir/src/lib.rs`
+  - `crates/codegen/src/backends/cpp/mod.rs`
+  - `crates/codegen/src/backends/c/mod.rs`
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/mod.rs`
+  - `crates/compiler/tests/signal_fir_lane.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - added FIR-native table nodes to `fir`:
+    - value: `LoadTable`,
+    - statements: `DeclareTable`, `StoreTable`,
+    - with `FirBuilder` constructors + `match_fir` decoding + tests.
+  - extended C++ backend codegen:
+    - emit table declaration with literal initializer,
+    - emit indexed table read/write expressions/statements.
+  - extended C backend codegen:
+    - emit table fields in DSP struct,
+    - emit table reads/writes in expression/statement codegen,
+    - initialize table content in default `instanceResetUserInterface`.
+  - wired transform fast-lane Step 2G lowering:
+    - `SIGWAVEFORM` allocates one FIR table in DSP struct and lowers as table read,
+    - `SIGRDTBL` lowers to modulo-indexed FIR table read,
+    - `SIGWRTBL` lowers to modulo-indexed FIR table write + passthrough value.
+  - updated Rustdoc status in `transform::signal_fir` and module-level docs.
+  - updated integration guardrail:
+    - `rep_20_environment_waveform.dsp` now compiles on fast-lane (instead of typed unsupported error).
+- Validation:
+  - `cargo fmt -p fir -p transform -p codegen -p compiler`
+  - `cargo test -p fir --all-targets`
+  - `cargo test -p transform --all-targets`
+  - `cargo test -p codegen --all-targets`
+  - `cargo test -p compiler --test signal_fir_lane`
+  - `cargo clippy -p fir -p transform -p codegen -p compiler --all-targets -- -D warnings`
+  - `cargo run -p compiler -- --dump-cpp tests/corpus/rep_20_environment_waveform.dsp --signal-fir-lane fast`

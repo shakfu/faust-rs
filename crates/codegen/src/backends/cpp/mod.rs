@@ -442,6 +442,26 @@ fn emit_stmt_with_mode(
             let _ = writeln!(out, ";");
             Ok(())
         }
+        FirMatch::DeclareTable {
+            name,
+            elem_type,
+            values,
+            ..
+        } => {
+            let mut rendered = Vec::with_capacity(values.len());
+            for value in &values {
+                rendered.push(emit_value(store, options, *value)?);
+            }
+            let _ = writeln!(
+                out,
+                "{tab}{} {}[{}] = {{{}}};",
+                emit_type(&elem_type, options),
+                name,
+                values.len(),
+                rendered.join(", ")
+            );
+            Ok(())
+        }
         FirMatch::DeclareFun {
             name,
             typ,
@@ -495,6 +515,14 @@ fn emit_stmt_with_mode(
         } => {
             let value = emit_value(store, options, value)?;
             let _ = writeln!(out, "{tab}{name} = {value};");
+            Ok(())
+        }
+        FirMatch::StoreTable {
+            name, index, value, ..
+        } => {
+            let index = emit_value(store, options, index)?;
+            let value = emit_value(store, options, value)?;
+            let _ = writeln!(out, "{tab}{name}[{index}] = {value};");
             Ok(())
         }
         FirMatch::ShiftArrayVar {
@@ -892,6 +920,15 @@ fn emit_value(
         | FirMatch::LoadVarAddress {
             name, access: _, ..
         } => Ok(name),
+        FirMatch::LoadTable {
+            name,
+            index,
+            access: _,
+            ..
+        } => {
+            let index = emit_value(store, options, index)?;
+            Ok(format!("{name}[{index}]"))
+        }
         FirMatch::TeeVar {
             name,
             access: _,
