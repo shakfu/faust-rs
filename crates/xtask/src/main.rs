@@ -16,6 +16,7 @@ Usage:
   cargo run -p xtask -- parser-parity-report
   cargo run -p xtask -- corpus-status-report
   cargo run -p xtask -- cpp-backend-diff-report
+  cargo run -p xtask -- c-fastlane-diff-report
   cargo run -p xtask -- table-fastlane-diff-report
 \nEnvironment for golden-gen-cpp:
   FAUST_CPP_BIN   Path to reference C++ faust binary
@@ -29,6 +30,7 @@ const CORPUS_STATUS_REPORT_REL_PATH: &str =
     "porting/phases/phase-4-corpus-status-diff-report-en.md";
 const CPP_BACKEND_DIFF_REPORT_REL_PATH: &str =
     "porting/phases/phase-6-cpp-backend-diff-report-en.md";
+const C_FASTLANE_DIFF_REPORT_REL_PATH: &str = "porting/phases/phase-6-c-fastlane-diff-report-en.md";
 const TABLE_FASTLANE_DIFF_REPORT_REL_PATH: &str =
     "porting/phases/phase-6-table-fastlane-diff-report-en.md";
 
@@ -65,6 +67,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "parser-parity-report" => parser_parity_report()?,
         "corpus-status-report" => corpus_status_report()?,
         "cpp-backend-diff-report" => cpp_backend_diff_report()?,
+        "c-fastlane-diff-report" => c_fastlane_diff_report()?,
         "table-fastlane-diff-report" => table_fastlane_diff_report()?,
         _ => {
             print!("{USAGE}");
@@ -653,6 +656,20 @@ struct CppDiffRow {
     cpp_reason: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CShellSignature {
+    has_typedef_struct: bool,
+    has_faustfloat_define: bool,
+    has_restrict_define: bool,
+    has_instance_constants_fn: bool,
+    has_instance_reset_ui_fn: bool,
+    has_instance_clear_fn: bool,
+    has_instance_init_fn: bool,
+    has_build_ui_fn: bool,
+    has_compute_fn: bool,
+    has_instance_init_ordered_calls: bool,
+}
+
 fn cpp_backend_diff_report() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root();
     let report_path = root.join(CPP_BACKEND_DIFF_REPORT_REL_PATH);
@@ -1007,6 +1024,201 @@ fn table_fastlane_diff_report() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn c_fastlane_diff_report() -> Result<(), Box<dyn std::error::Error>> {
+    let root = workspace_root();
+    let report_path = root.join(C_FASTLANE_DIFF_REPORT_REL_PATH);
+    let compiler = compiler::Compiler::new();
+    let (cpp_bin, cpp_bin_is_fallback) = resolve_cpp_faust_bin();
+    let options = codegen::backends::c::COptions {
+        class_name: Some("mydsp".to_owned()),
+        ..codegen::backends::c::COptions::default()
+    };
+
+    let representative = [
+        "rep_01_passthrough.dsp",
+        "rep_05_one_pole_lowpass.dsp",
+        "rep_07_nonlinear_clip.dsp",
+        "rep_09_ui_slider.dsp",
+        "rep_10_two_in_two_out_ui.dsp",
+        "rep_17_ui_groups.dsp",
+        "rep_20_environment_waveform.dsp",
+        "rep_22_parallel_mix.dsp",
+        "rep_23_feedback_simple.dsp",
+        "rep_28_nested_ui_groups.dsp",
+        "rep_30_environment_access_pair.dsp",
+        "rep_31_extended_primitives.dsp",
+        "rep_34_table_rdtable_readonly_const.dsp",
+        "rep_35_table_rwtable_runtime_write.dsp",
+        "rep_36_table_rdtable_negative_index.dsp",
+        "rep_37_table_rwtable_negative_indices.dsp",
+    ];
+
+    let mut rows = Vec::with_capacity(representative.len());
+    let mut ok = 0usize;
+    let mut diff = 0usize;
+    let mut unsupported = 0usize;
+
+    for case in representative {
+        let path = root.join("tests").join("corpus").join(case);
+        let rust_output = compiler.compile_file_default_to_c_with_lane(
+            &path,
+            &options,
+            compiler::SignalFirLane::TransformFastLane,
+        );
+        let cpp_output = Command::new(&cpp_bin)
+            .arg(&path)
+            .arg("-lang")
+            .arg("c")
+            .arg("-cn")
+            .arg("mydsp")
+            .output();
+
+        let row = match (rust_output, cpp_output) {
+            (Ok(_), Err(err)) => {
+                unsupported = unsupported.saturating_add(1);
+                CppDiffRow {
+                    case: case.to_owned(),
+                    class: "UNSUPPORTED",
+                    rust_reason: "Rust C fast-lane ok".to_owned(),
+                    cpp_reason: format!("cannot run `{}`: {err}", cpp_bin.display()),
+                }
+            }
+            (Err(err), Err(cpp_err)) => {
+                unsupported = unsupported.saturating_add(1);
+                CppDiffRow {
+                    case: case.to_owned(),
+                    class: "UNSUPPORTED",
+                    rust_reason: err.to_string(),
+                    cpp_reason: format!("cannot run `{}`: {cpp_err}", cpp_bin.display()),
+                }
+            }
+            (Ok(rust_text), Ok(cpp_output)) if cpp_output.status.success() => {
+                let cpp_text = String::from_utf8(cpp_output.stdout)?;
+                let rust_sig = extract_c_shell_signature(&rust_text);
+                let cpp_sig = extract_c_shell_signature(&cpp_text);
+                if rust_sig == cpp_sig {
+                    ok = ok.saturating_add(1);
+                    CppDiffRow {
+                        case: case.to_owned(),
+                        class: "OK",
+                        rust_reason: "C shell signature matches".to_owned(),
+                        cpp_reason: "ok".to_owned(),
+                    }
+                } else {
+                    diff = diff.saturating_add(1);
+                    CppDiffRow {
+                        case: case.to_owned(),
+                        class: "DIFF",
+                        rust_reason: format!("rust={rust_sig:?}"),
+                        cpp_reason: format!("cpp={cpp_sig:?}"),
+                    }
+                }
+            }
+            (Ok(_), Ok(cpp_output)) => {
+                unsupported = unsupported.saturating_add(1);
+                CppDiffRow {
+                    case: case.to_owned(),
+                    class: "UNSUPPORTED",
+                    rust_reason: "Rust C fast-lane ok".to_owned(),
+                    cpp_reason: first_non_empty_line(&String::from_utf8_lossy(&cpp_output.stderr))
+                        .or_else(|| {
+                            first_non_empty_line(&String::from_utf8_lossy(&cpp_output.stdout))
+                        })
+                        .unwrap_or_else(|| format!("failed with status {}", cpp_output.status)),
+                }
+            }
+            (Err(err), Ok(cpp_output)) if cpp_output.status.success() => {
+                unsupported = unsupported.saturating_add(1);
+                CppDiffRow {
+                    case: case.to_owned(),
+                    class: "UNSUPPORTED",
+                    rust_reason: err.to_string(),
+                    cpp_reason: "C++ C backend path ok".to_owned(),
+                }
+            }
+            (Err(err), Ok(cpp_output)) => {
+                unsupported = unsupported.saturating_add(1);
+                CppDiffRow {
+                    case: case.to_owned(),
+                    class: "UNSUPPORTED",
+                    rust_reason: err.to_string(),
+                    cpp_reason: first_non_empty_line(&String::from_utf8_lossy(&cpp_output.stderr))
+                        .or_else(|| {
+                            first_non_empty_line(&String::from_utf8_lossy(&cpp_output.stdout))
+                        })
+                        .unwrap_or_else(|| format!("failed with status {}", cpp_output.status)),
+                }
+            }
+        };
+        rows.push(row);
+    }
+
+    let mut out = String::new();
+    writeln!(
+        &mut out,
+        "# Phase 6 C Fast-Lane Differential Report (C++ `-lang c` vs Rust)"
+    )?;
+    writeln!(&mut out)?;
+    writeln!(
+        &mut out,
+        "Generated by: `cargo run -p xtask -- c-fastlane-diff-report`"
+    )?;
+    writeln!(&mut out, "- C++ binary: `{}`", cpp_bin.display())?;
+    if cpp_bin_is_fallback {
+        writeln!(
+            &mut out,
+            "- Note: fallback to `faust` from PATH because `{}/build/bin/faust` was not found.",
+            CPP_SOURCE_ROOT
+        )?;
+    }
+    writeln!(
+        &mut out,
+        "- C++ command: `faust <case>.dsp -lang c -cn mydsp`"
+    )?;
+    writeln!(
+        &mut out,
+        "- Rust route: `compiler::SignalFirLane::TransformFastLane` + `--dump-c`"
+    )?;
+    writeln!(&mut out)?;
+    writeln!(&mut out, "## Summary")?;
+    writeln!(&mut out, "- Cases: `{}`", rows.len())?;
+    writeln!(&mut out, "- `OK`: `{ok}`")?;
+    writeln!(&mut out, "- `DIFF`: `{diff}`")?;
+    writeln!(&mut out, "- `UNSUPPORTED`: `{unsupported}`")?;
+    writeln!(&mut out)?;
+    writeln!(
+        &mut out,
+        "| Case | Status | Rust detail | C++ detail |\n|------|--------|-------------|------------|"
+    )?;
+    for row in &rows {
+        writeln!(
+            &mut out,
+            "| `{}` | `{}` | `{}` | `{}` |",
+            row.case,
+            row.class,
+            markdown_escape(&row.rust_reason),
+            markdown_escape(&row.cpp_reason)
+        )?;
+    }
+    writeln!(&mut out)?;
+    writeln!(&mut out, "## Notes")?;
+    writeln!(
+        &mut out,
+        "- Comparison is C-shell signature based (typedef/defines/lifecycle/UI/compute function presence and init call ordering)."
+    )?;
+    writeln!(
+        &mut out,
+        "- This report is the Step 7B guardrail for C fast-lane parity progression."
+    )?;
+
+    if let Some(parent) = report_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&report_path, out)?;
+    println!("updated {}", report_path.display());
+    Ok(())
+}
+
 fn extract_shell_signature(text: &str) -> ShellSignature {
     let mut faustclass = None::<String>;
     let mut class_decl = None::<String>;
@@ -1041,6 +1253,51 @@ fn extract_shell_signature(text: &str) -> ShellSignature {
         has_restrict_define,
         has_exp10_aliases: has_exp10f_alias && has_exp10_alias,
     }
+}
+
+fn extract_c_shell_signature(text: &str) -> CShellSignature {
+    let has_typedef_struct = text.contains("typedef struct {");
+    let has_faustfloat_define = text.contains("#ifndef FAUSTFLOAT");
+    let has_restrict_define = text.contains("#define RESTRICT");
+    let has_instance_constants_fn = text.contains("void instanceConstants");
+    let has_instance_reset_ui_fn = text.contains("void instanceResetUserInterface");
+    let has_instance_clear_fn = text.contains("void instanceClear");
+    let has_instance_init_fn = text.contains("void instanceInit");
+    let has_build_ui_fn = text.contains("void buildUserInterface");
+    let has_compute_fn = text.contains("void compute");
+
+    let has_instance_init_ordered_calls = has_ordered_instance_init_calls(text);
+
+    CShellSignature {
+        has_typedef_struct,
+        has_faustfloat_define,
+        has_restrict_define,
+        has_instance_constants_fn,
+        has_instance_reset_ui_fn,
+        has_instance_clear_fn,
+        has_instance_init_fn,
+        has_build_ui_fn,
+        has_compute_fn,
+        has_instance_init_ordered_calls,
+    }
+}
+
+fn has_ordered_instance_init_calls(text: &str) -> bool {
+    let mut search_from = 0usize;
+    while let Some(rel) = text[search_from..].find("void instanceInit") {
+        let start = search_from + rel;
+        let tail = &text[start..];
+        let end = tail.find("}\n").unwrap_or(tail.len());
+        let body = &tail[..end];
+        let c_i = body.find("instanceConstants");
+        let r_i = body.find("instanceResetUserInterface");
+        let cl_i = body.find("instanceClear");
+        if matches!((c_i, r_i, cl_i), (Some(a), Some(b), Some(c)) if a < b && b < c) {
+            return true;
+        }
+        search_from = start + "void instanceInit".len();
+    }
+    false
 }
 
 fn resolve_cpp_faust_bin() -> (PathBuf, bool) {
@@ -1094,6 +1351,7 @@ fn rust_case_status(compiler: &compiler::Compiler, input: &Path) -> CaseStatus {
                 compiler::CompilerError::Propagate { .. } => ("propagate", err.to_string()),
                 compiler::CompilerError::Transform { .. } => ("transform", err.to_string()),
                 compiler::CompilerError::Codegen { .. } => ("codegen", err.to_string()),
+                compiler::CompilerError::CodegenC { .. } => ("codegen", err.to_string()),
                 compiler::CompilerError::MissingRoot { .. } => ("parse", err.to_string()),
             };
             CaseStatus {

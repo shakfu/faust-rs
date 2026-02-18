@@ -1089,6 +1089,17 @@ Current Step 7A status (`--dump-c` fast-lane exposure):
 - Integration coverage now validates both lanes for C output on corpus fixtures,
   including lifecycle order and absence of `frs_*` shim names in fast-lane.
 
+Current Step 7B status (C fast-lane differential gate vs C++ `signalFIRCompiler` path):
+
+- Automated command available:
+  - `cargo run -p xtask -- c-fastlane-diff-report`
+- Report output:
+  - `porting/phases/phase-6-c-fastlane-diff-report-en.md`
+- Current outcome on representative corpus:
+  - `OK=16`, `DIFF=0`, `UNSUPPORTED=0`
+- C reference route used by the report:
+  - `faust <case>.dsp -lang c -cn mydsp`
+
 #### Step 8 — Differential tests Rust vs C++ `signalFIRCompiler`
 
 - Deliverables:

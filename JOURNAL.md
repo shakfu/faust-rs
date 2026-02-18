@@ -4047,3 +4047,30 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p compiler --all-targets`
   - `cargo test -p codegen --all-targets`
   - `cargo clippy -p compiler -p codegen --all-targets -- -D warnings`
+
+#### signalFIRCompiler fast-lane: Step 7B C differential parity gate vs C++ (`-lang c`)
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/xtask/src/main.rs`
+  - `porting/phases/phase-6-c-fastlane-diff-report-en.md`
+  - `porting/phases/phase-6-fir-backends-en.md`
+  - `JOURNAL.md`
+- Implemented:
+  - added new automated differential command:
+    - `cargo run -p xtask -- c-fastlane-diff-report`
+  - compares:
+    - Rust C fast-lane output (`compile_file_default_to_c_with_lane`, `TransformFastLane`)
+    - C reference output via `faust -lang c -cn mydsp`
+  - added C-shell signature extractor for stable structural parity checks:
+    - typedef/defines,
+    - lifecycle/UI/compute function presence,
+    - `instanceInit` call ordering (`instanceConstants -> instanceResetUserInterface -> instanceClear`).
+  - generated report:
+    - `porting/phases/phase-6-c-fastlane-diff-report-en.md`
+  - current result on representative corpus:
+    - `OK=16`, `DIFF=0`, `UNSUPPORTED=0`.
+  - updated phase-6 planning doc with Step 7B status.
+- Validation:
+  - `cargo run -p xtask -- c-fastlane-diff-report`
+  - `cargo clippy -p xtask --all-targets -- -D warnings`
