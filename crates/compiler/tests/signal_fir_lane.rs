@@ -143,3 +143,28 @@ fn fastlane_ui_fixture_uses_native_ui_path_without_slider_shims() {
         "Step 2F fast-lane output should not contain frs_* shims"
     );
 }
+
+#[test]
+fn legacy_and_fastlane_both_compile_table_fixtures() {
+    for file in [
+        "rep_34_table_rdtable_readonly_const.dsp",
+        "rep_35_table_rwtable_runtime_write.dsp",
+        "rep_36_table_rdtable_negative_index.dsp",
+        "rep_37_table_rwtable_negative_indices.dsp",
+    ] {
+        let legacy = compile_cpp_with_lane(file, SignalFirLane::LegacyBridge);
+        let fast = compile_cpp_with_lane(file, SignalFirLane::TransformFastLane);
+        assert!(
+            legacy.contains("class "),
+            "legacy lane should compile table fixture {file}"
+        );
+        assert!(
+            fast.contains("class "),
+            "fast lane should compile table fixture {file}"
+        );
+        assert!(
+            !fast.contains("frs_"),
+            "fast lane output should not contain frs_* shim names for {file}"
+        );
+    }
+}

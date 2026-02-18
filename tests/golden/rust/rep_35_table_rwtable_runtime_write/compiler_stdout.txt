@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_35_table_rwtable_runtime_write.dsp
+bytes=52
+lines=1
+fnv1a64=70c536c4a7b081bc

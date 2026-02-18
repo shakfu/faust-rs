@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_36_table_rdtable_negative_index.dsp
+bytes=40
+lines=1
+fnv1a64=4c139c25c78e55a3

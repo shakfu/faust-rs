@@ -3848,3 +3848,47 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p codegen --all-targets`
   - `cargo clippy -p transform --all-targets -- -D warnings`
   - `cargo clippy -p fir -p transform -p codegen -p compiler --all-targets -- -D warnings`
+
+#### signalFIRCompiler fast-lane: Step 2I table differential validation on dedicated corpus
+
+- Commit: pending (working tree step)
+- Files:
+  - `tests/corpus/rep_34_table_rdtable_readonly_const.dsp`
+  - `tests/corpus/rep_35_table_rwtable_runtime_write.dsp`
+  - `tests/corpus/rep_36_table_rdtable_negative_index.dsp`
+  - `tests/corpus/rep_37_table_rwtable_negative_indices.dsp`
+  - `tests/golden/rust/rep_34_table_rdtable_readonly_const/compiler_stdout.txt`
+  - `tests/golden/rust/rep_35_table_rwtable_runtime_write/compiler_stdout.txt`
+  - `tests/golden/rust/rep_36_table_rdtable_negative_index/compiler_stdout.txt`
+  - `tests/golden/rust/rep_37_table_rwtable_negative_indices/compiler_stdout.txt`
+  - `tests/golden/cpp/rep_34_table_rdtable_readonly_const/compiler_stdout.txt`
+  - `tests/golden/cpp/rep_35_table_rwtable_runtime_write/compiler_stdout.txt`
+  - `tests/golden/cpp/rep_36_table_rdtable_negative_index/compiler_stdout.txt`
+  - `tests/golden/cpp/rep_37_table_rwtable_negative_indices/compiler_stdout.txt`
+  - `crates/compiler/tests/signal_fir_lane.rs`
+  - `crates/xtask/src/main.rs`
+  - `porting/phases/phase-4-corpus-status-diff-report-en.md`
+  - `JOURNAL.md`
+- Implemented:
+  - added a dedicated table corpus slice for Step 2I:
+    - readonly `rdtable`,
+    - runtime-write `rwtable`,
+    - negative read index,
+    - negative write/read indices.
+  - extended fast-lane integration test coverage to compile these four fixtures in
+    both lanes (`legacy` and `fast`) and assert no `frs_*` shim names in fast output.
+  - fixed `xtask` exhaustiveness for `CompilerError::Transform` so corpus
+    differential tooling compiles with current compiler error enum.
+  - generated Rust golden snapshots for the new table fixtures.
+  - generated C++ reference snapshots for the new table fixtures from
+    `/Users/letz/Developpements/RUST/faust/build/bin/faust`.
+  - refreshed the C++ vs Rust corpus status report:
+    - `rep_34..37` are all `OK/OK`.
+- Validation:
+  - `cargo test -p compiler --test signal_fir_lane`
+  - `cargo run -p compiler -- --dump-sig tests/corpus/rep_34_table_rdtable_readonly_const.dsp`
+  - `cargo run -p compiler -- --dump-sig tests/corpus/rep_35_table_rwtable_runtime_write.dsp`
+  - `cargo run -p compiler -- --dump-sig tests/corpus/rep_36_table_rdtable_negative_index.dsp`
+  - `cargo run -p compiler -- --dump-sig tests/corpus/rep_37_table_rwtable_negative_indices.dsp`
+  - `cargo run -p xtask -- golden-check`
+  - `cargo run -p xtask -- corpus-status-report`
