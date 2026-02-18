@@ -310,6 +310,49 @@ mod tests {
     }
 
     #[test]
+    fn bargraph_emits_runtime_zone_store_in_compute() {
+        let mut arena = TreeArena::new();
+        let level = arena.symbol("level");
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let min = b.real(-60.0);
+            let max = b.real(6.0);
+            let in0 = b.input(0);
+            b.hbargraph(level, min, max, in0)
+        };
+        let out =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+                .expect("bargraph signal should compile");
+
+        let FirMatch::Module { declarations, .. } = match_fir(&out.store, out.module) else {
+            panic!("module root expected");
+        };
+        let compute_body = find_decl_fun_body(&out.store, declarations, "compute");
+        let ui_body = find_decl_fun_body(&out.store, declarations, "buildUserInterface");
+
+        let FirMatch::Block(compute_stmts) = match_fir(&out.store, compute_body) else {
+            panic!("compute body block expected");
+        };
+        assert!(
+            compute_stmts.iter().any(|id| matches!(
+                match_fir(&out.store, *id),
+                FirMatch::StoreVar { ref name, .. } if name.starts_with("fHbargraph")
+            )),
+            "bargraph should emit runtime zone store in compute body"
+        );
+
+        let FirMatch::Block(ui_stmts) = match_fir(&out.store, ui_body) else {
+            panic!("buildUserInterface body block expected");
+        };
+        assert!(
+            ui_stmts
+                .iter()
+                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::AddBargraph { .. })),
+            "bargraph should be declared in buildUserInterface"
+        );
+    }
+
+    #[test]
     fn unsupported_signal_family_returns_typed_error_code() {
         let mut arena = TreeArena::new();
         let sig0 = {

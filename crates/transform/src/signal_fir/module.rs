@@ -635,7 +635,16 @@ impl<'a> SignalToFirLower<'a> {
                 .push(b.add_bargraph(typ, label, var.clone(), min_v, max_v));
             self.ui_controls.insert(node, var);
         }
-        self.lower_signal(value)
+        let value = self.lower_signal(value)?;
+        let var = self
+            .ui_controls
+            .get(&node)
+            .cloned()
+            .expect("bargraph variable should exist after declaration");
+        let mut b = FirBuilder::new(&mut self.store);
+        self.sample_statements
+            .push(b.store_var(var, AccessType::Struct, value));
+        Ok(value)
     }
 
     fn lower_soundfile(&mut self, node: SigId, label: SigId) -> FirId {
