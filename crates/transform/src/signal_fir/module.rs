@@ -519,7 +519,13 @@ impl<'a> SignalToFirLower<'a> {
             let mut b = FirBuilder::new(&mut self.store);
             return b.load_var(var, AccessType::Struct, FirType::FaustFloat);
         }
-        let var = format!("fUiCtl{}", node.as_u32());
+        let var = self.ui_control_var_name(
+            node,
+            match typ {
+                ButtonType::Button => "fButton",
+                ButtonType::Checkbox => "fCheckbox",
+            },
+        );
         let init = self.float_const(0.0);
         self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init));
         let label = self.label_text(label);
@@ -541,7 +547,14 @@ impl<'a> SignalToFirLower<'a> {
             let mut b = FirBuilder::new(&mut self.store);
             return Ok(b.load_var(var, AccessType::Struct, FirType::FaustFloat));
         }
-        let var = format!("fUiCtl{}", node.as_u32());
+        let var = self.ui_control_var_name(
+            node,
+            match typ {
+                SliderType::Horizontal => "fHslider",
+                SliderType::Vertical => "fVslider",
+                SliderType::NumEntry => "fEntry",
+            },
+        );
         let init_v = self.constant_f64(init).unwrap_or(0.0);
         let min_v = self.constant_f64(min).unwrap_or(0.0);
         let max_v = self.constant_f64(max).unwrap_or(1.0);
@@ -572,7 +585,13 @@ impl<'a> SignalToFirLower<'a> {
         typ: BargraphType,
     ) -> Result<FirId, SignalFirError> {
         if !self.ui_controls.contains_key(&node) {
-            let var = format!("fUiMeter{}", node.as_u32());
+            let var = self.ui_control_var_name(
+                node,
+                match typ {
+                    BargraphType::Horizontal => "fHbargraph",
+                    BargraphType::Vertical => "fVbargraph",
+                },
+            );
             let init = self.float_const(0.0);
             self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init));
             let label = self.label_text(label);
@@ -883,6 +902,10 @@ impl<'a> SignalToFirLower<'a> {
             Some(NodeKind::FloatBits(bits)) => f64::from_bits(*bits).to_string(),
             _ => "ui".to_owned(),
         }
+    }
+
+    fn ui_control_var_name(&self, node: SigId, prefix: &str) -> String {
+        format!("{prefix}{}", node.as_u32())
     }
 
     fn constant_f64(&self, sig: SigId) -> Option<f64> {

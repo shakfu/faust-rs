@@ -250,7 +250,12 @@ mod tests {
         assert!(
             reset_stmts.iter().any(|id| matches!(
                 match_fir(&out.store, *id),
-                FirMatch::StoreVar { ref name, .. } if name.starts_with("fUiCtl")
+                FirMatch::StoreVar { ref name, .. }
+                    if name.starts_with("fHslider")
+                        || name.starts_with("fVslider")
+                        || name.starts_with("fEntry")
+                        || name.starts_with("fButton")
+                        || name.starts_with("fCheckbox")
             )),
             "UI zone init should be emitted in instanceResetUserInterface"
         );

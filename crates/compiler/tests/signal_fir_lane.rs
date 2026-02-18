@@ -189,6 +189,8 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
     assert!(fast.contains("class mydsp : public dsp"));
     assert!(fast.contains("void compute("));
     assert!(!fast.contains("frs_"));
+    assert!(fast.contains("fHslider"));
+    assert!(!fast.contains("fUiCtl"));
     assert!(fast.contains("ui_interface->openVerticalBox(\"mydsp\");"));
     assert!(fast.contains("ui_interface->closeBox();"));
     assert_eq!(
@@ -207,6 +209,8 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
     assert!(legacy_c.contains("void computemydsp("));
     assert!(fast_c.contains("void computemydsp("));
     assert!(!fast_c.contains("frs_"));
+    assert!(fast_c.contains("fHslider"));
+    assert!(!fast_c.contains("fUiCtl"));
     assert!(fast_c.contains("ui_interface->openVerticalBox(ui_interface->uiInterface, \"mydsp\");"));
     assert!(fast_c.contains("ui_interface->closeBox(ui_interface->uiInterface);"));
 }
