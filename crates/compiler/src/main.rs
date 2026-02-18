@@ -10,6 +10,14 @@ use serde_json::json;
 use signals::dump_sig_readable;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CliLang {
+    #[value(alias = "c99")]
+    C,
+    #[value(alias = "cxx", alias = "c++")]
+    Cpp,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 enum ErrorFormat {
     #[default]
@@ -66,11 +74,19 @@ struct CliArgs {
     /// Compile to C and print generated code.
     #[arg(long = "dump-c", action = ArgAction::SetTrue)]
     dump_c: bool,
+    /// Select backend language (Faust-style): `-lang c` or `-lang cpp`.
+    ///
+    /// This option is equivalent to `--dump-c` / `--dump-cpp`.
+    #[arg(long = "lang", value_enum, allow_hyphen_values = true)]
+    lang: Option<CliLang>,
     /// Print dedicated help for diagnostic output formats and exit.
     #[arg(long = "help-error-format", action = ArgAction::SetTrue)]
     help_error_format: bool,
     /// Optional DSP input file (required by operational modes).
     input: Option<PathBuf>,
+    /// Optional output file. When omitted, generated text is written to stdout.
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
     /// Extra import search directories.
     #[arg(short = 'I', long = "import-dir")]
     import_dir: Vec<PathBuf>,
@@ -91,6 +107,27 @@ struct CliArgs {
         default_value_t = CliSignalFirLane::Legacy
     )]
     signal_fir_lane: CliSignalFirLane,
+}
+
+fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    let mut it = args.into_iter();
+    while let Some(arg) = it.next() {
+        if arg == "-lang" {
+            normalized.push("--lang".to_owned());
+            if let Some(value) = it.next() {
+                let mapped = match value.as_str() {
+                    "-c" => "c".to_owned(),
+                    "-cpp" => "cpp".to_owned(),
+                    _ => value,
+                };
+                normalized.push(mapped);
+            }
+            continue;
+        }
+        normalized.push(arg);
+    }
+    normalized
 }
 
 fn print_structured_diagnostics(
@@ -444,21 +481,24 @@ fn diagnostic_debug_from_notes(notes: &[Box<str>]) -> serde_json::Value {
 
 fn print_global_usage_and_exit() -> ! {
     eprintln!("Usage:");
+    eprintln!(
+        "  cargo run -p compiler -- -lang c|cpp <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+    );
     eprintln!("  cargo run -p compiler -- --golden <input.dsp>");
     eprintln!(
         "  cargo run -p compiler -- --parse <input.dsp> [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!(
-        "  cargo run -p compiler -- --dump-box <input.dsp> [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- --dump-box <input.dsp> [-o <file>] [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!(
-        "  cargo run -p compiler -- --dump-sig <input.dsp> [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- --dump-sig <input.dsp> [-o <file>] [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!(
-        "  cargo run -p compiler -- --dump-cpp <input.dsp> [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- --dump-cpp <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!(
-        "  cargo run -p compiler -- --dump-c <input.dsp> [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- --dump-c <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     std::process::exit(2);
 }
@@ -475,8 +515,30 @@ fn maybe_print_error_format_help(enabled: bool) {
     }
 }
 
+fn emit_output(content: &str, output: Option<&PathBuf>) {
+    if let Some(path) = output {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && let Err(err) = std::fs::create_dir_all(parent)
+        {
+            eprintln!(
+                "Failed to create output directory {}: {err}",
+                parent.display()
+            );
+            std::process::exit(1);
+        }
+        if let Err(err) = std::fs::write(path, content) {
+            eprintln!("Failed to write output file {}: {err}", path.display());
+            std::process::exit(1);
+        }
+    } else {
+        print!("{content}");
+    }
+}
+
 fn main() {
-    let cli = CliArgs::parse();
+    let args = normalize_legacy_args(std::env::args());
+    let cli = CliArgs::parse_from(args);
     maybe_print_error_format_help(cli.help_error_format);
 
     let mode_count = [
@@ -486,6 +548,7 @@ fn main() {
         cli.dump_sig,
         cli.dump_cpp,
         cli.dump_c,
+        cli.lang.is_some(),
     ]
     .into_iter()
     .filter(|v| *v)
@@ -496,11 +559,11 @@ fn main() {
     }
 
     if mode_count == 0 {
-        if cli.input.is_some() {
-            print_global_usage_and_exit();
+        if cli.input.is_none() {
+            println!("faust-rs compiler scaffold v{}", Compiler::version());
+            return;
         }
-        println!("faust-rs compiler scaffold v{}", Compiler::version());
-        return;
+        // Default compile mode: C++ backend, aligned with Faust CLI behavior.
     }
 
     let Some(input_path) = cli.input.as_ref() else {
@@ -521,7 +584,7 @@ fn main() {
         }
         match golden_snapshot_from_file(input_path) {
             Ok(snapshot) => {
-                print!("{snapshot}");
+                emit_output(&snapshot, cli.output.as_ref());
             }
             Err(err) => {
                 eprintln!("Failed to create golden snapshot: {err}");
@@ -571,7 +634,8 @@ fn main() {
                     eprintln!("Parse failed: no root node produced");
                     std::process::exit(1);
                 };
-                println!("{}", dump_box(&out.state.arena, root));
+                let rendered = format!("{}\n", dump_box(&out.state.arena, root));
+                emit_output(&rendered, cli.output.as_ref());
             }
             Err(err) => {
                 eprintln!("Parse failed: {err}");
@@ -592,16 +656,19 @@ fn main() {
 
         match result {
             Ok(out) => {
-                println!(
+                let mut rendered = format!(
                     "Signals OK: inputs={} outputs={}",
                     out.process_arity.inputs, out.process_arity.outputs
                 );
                 for (index, sig) in out.signals.iter().enumerate() {
-                    println!(
+                    rendered.push('\n');
+                    rendered.push_str(&format!(
                         "[{index}] {}",
                         dump_sig_readable(&out.parse.state.arena, *sig)
-                    );
+                    ));
                 }
+                rendered.push('\n');
+                emit_output(&rendered, cli.output.as_ref());
             }
             Err(err) => {
                 eprintln!("Signal pipeline failed: {err}");
@@ -612,7 +679,7 @@ fn main() {
         return;
     }
 
-    if cli.dump_cpp {
+    if cli.dump_cpp || matches!(cli.lang, Some(CliLang::Cpp)) || mode_count == 0 {
         let compiler = Compiler::new();
         let options = CppOptions::default();
         let result = if cli.import_dir.is_empty() {
@@ -632,7 +699,7 @@ fn main() {
 
         match result {
             Ok(cpp) => {
-                print!("{cpp}");
+                emit_output(&cpp, cli.output.as_ref());
             }
             Err(err) => {
                 eprintln!("C++ pipeline failed: {err}");
@@ -643,7 +710,7 @@ fn main() {
         return;
     }
 
-    if cli.dump_c {
+    if cli.dump_c || matches!(cli.lang, Some(CliLang::C)) {
         let compiler = Compiler::new();
         let options = COptions::default();
         let result = if cli.import_dir.is_empty() {
@@ -663,7 +730,7 @@ fn main() {
 
         match result {
             Ok(c_code) => {
-                print!("{c_code}");
+                emit_output(&c_code, cli.output.as_ref());
             }
             Err(err) => {
                 eprintln!("C pipeline failed: {err}");

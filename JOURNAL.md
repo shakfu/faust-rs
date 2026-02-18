@@ -4179,3 +4179,63 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo check -p compiler --all-targets`
   - `cargo run -p compiler -- --help-error-format`
   - `cargo run -p compiler -- --parse tests/corpus/rep_05_one_pole_lowpass.dsp`
+
+#### Compiler CLI: add Faust-style `-lang` backend selection
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/compiler/src/main.rs`
+- Implemented:
+  - added `-lang/--lang` option to select backend language directly:
+    - `-lang c <file.dsp>` routes to C backend output.
+    - `-lang cpp <file.dsp>` routes to C++ backend output.
+  - kept existing `--dump-c` / `--dump-cpp` options intact.
+  - added legacy compatibility normalization:
+    - `-lang` is normalized to `--lang` for clap parsing.
+    - `-lang -c ...` and `-lang -cpp ...` are normalized to `c` / `cpp`.
+  - updated global usage output to include the new `-lang` flow.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p compiler --all-targets`
+  - `cargo run -p compiler -- -lang c tests/corpus/rep_05_one_pole_lowpass.dsp`
+  - `cargo run -p compiler -- -lang cpp tests/corpus/rep_05_one_pole_lowpass.dsp`
+  - `cargo run -p compiler -- -lang -c tests/corpus/rep_05_one_pole_lowpass.dsp`
+
+#### Compiler CLI: default backend mode set to C++
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/compiler/src/main.rs`
+- Implemented:
+  - when a DSP input is provided without explicit mode flags (`--dump-*`, `--parse`,
+    `--golden`, `-lang`), the compiler now defaults to C++ backend generation.
+  - `faust-rs <file.dsp>` is now equivalent to `faust-rs -lang cpp <file.dsp>`.
+  - no-input behavior is unchanged (`faust-rs` prints scaffold version).
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p compiler --all-targets`
+  - `cargo run -p compiler -- tests/corpus/rep_05_one_pole_lowpass.dsp`
+
+#### Compiler CLI: add `-o/--output` file emission option
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/compiler/src/main.rs`
+- Implemented:
+  - added `-o/--output <file>` CLI option.
+  - when `-o` is provided, emitted text output is written to the given file instead
+    of stdout for:
+    - `--golden`
+    - `--dump-box`
+    - `--dump-sig`
+    - `--dump-cpp`
+    - `--dump-c`
+    - default C++ mode (`faust-rs <file.dsp>`)
+    - `-lang c|cpp` mode.
+  - output directory is created automatically when needed.
+  - legacy `-lang -c` / `-lang -cpp` compatibility remains active.
+  - updated usage text to include `[-o <file>]` for codegen/dump modes.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p compiler --all-targets`
+  - `cargo run -p compiler -- -lang cpp tests/corpus/rep_38_sine_phasor.dsp -o /tmp/rep_38_sine_phasor.cpp`
