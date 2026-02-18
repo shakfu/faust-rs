@@ -6,6 +6,7 @@ use codegen::backends::c::COptions;
 use codegen::backends::cpp::CppOptions;
 use compiler::{Compiler, CompilerError, SignalFirLane, golden_snapshot_from_file};
 use errors::{DiagnosticBundle, LabelStyle, Severity, Stage};
+use fir::dump_fir;
 use serde_json::json;
 use signals::dump_sig_readable;
 use std::path::{Path, PathBuf};
@@ -74,6 +75,9 @@ struct CliArgs {
     /// Compile to C and print generated code.
     #[arg(long = "dump-c", action = ArgAction::SetTrue)]
     dump_c: bool,
+    /// Compile to FIR and dump FIR IR.
+    #[arg(long = "dump-fir", action = ArgAction::SetTrue)]
+    dump_fir: bool,
     /// Select backend language (Faust-style): `-lang c` or `-lang cpp`.
     ///
     /// This option is equivalent to `--dump-c` / `--dump-cpp`.
@@ -491,6 +495,9 @@ fn print_global_usage_and_exit() -> ! {
         "  cargo run -p compiler -- --dump-sig <input.dsp> [-o <file>] [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!(
+        "  cargo run -p compiler -- --dump-fir <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+    );
+    eprintln!(
         "  cargo run -p compiler -- --dump-cpp <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!(
@@ -548,6 +555,7 @@ fn main() {
         cli.dump_sig,
         cli.dump_cpp,
         cli.dump_c,
+        cli.dump_fir,
         cli.lang.is_some(),
     ]
     .into_iter()
@@ -571,7 +579,7 @@ fn main() {
     };
 
     if (cli.dump_box || cli.dump_sig || cli.parse || cli.golden) && cli.signal_fir_lane.is_some() {
-        eprintln!("--signal-fir-lane is only valid with --dump-cpp/--dump-c");
+        eprintln!("--signal-fir-lane is only valid with --dump-cpp/--dump-c/--dump-fir");
         std::process::exit(2);
     }
 
@@ -670,6 +678,38 @@ fn main() {
             }
             Err(err) => {
                 eprintln!("Signal pipeline failed: {err}");
+                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if cli.dump_fir {
+        let compiler = Compiler::new();
+        let result = if cli.import_dir.is_empty() {
+            compiler.compile_file_default_to_fir_with_lane(
+                input_path,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        } else {
+            compiler.compile_file_to_fir_with_lane(
+                input_path,
+                &cli.import_dir,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        };
+
+        match result {
+            Ok(out) => {
+                let mut rendered = dump_fir(&out.store, out.module);
+                if !rendered.ends_with('\n') {
+                    rendered.push('\n');
+                }
+                emit_output(&rendered, cli.output.as_ref());
+            }
+            Err(err) => {
+                eprintln!("FIR pipeline failed: {err}");
                 print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
                 std::process::exit(1);
             }

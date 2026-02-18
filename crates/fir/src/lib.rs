@@ -19,6 +19,9 @@
 //!   a separate type-reconstruction phase.
 //! - Dispatch is explicit and exhaustive via `match_fir`, no RTTI/dynamic-cast.
 
+use std::collections::HashSet;
+use std::fmt::Write as _;
+
 use tlib::{NodeKind, TreeArena, TreeId};
 
 pub const CRATE_NAME: &str = "fir";
@@ -1744,6 +1747,128 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
             }
         }
         _ => FirMatch::Unknown,
+    }
+}
+
+/// Deterministic structural dump helper for FIR differential checks.
+///
+/// The dump is rooted at `root` and recursively expands child FIR ids.
+#[must_use]
+pub fn dump_fir(store: &FirStore, root: FirId) -> String {
+    let mut out = String::new();
+    let mut seen = HashSet::new();
+    dump_node(store, root, 0, &mut out, &mut seen);
+    out
+}
+
+fn dump_node(
+    store: &FirStore,
+    id: FirId,
+    depth: usize,
+    out: &mut String,
+    seen: &mut HashSet<FirId>,
+) {
+    let indent = "  ".repeat(depth);
+    let node = match_fir(store, id);
+    let _ = writeln!(out, "{indent}#{} {:?}", id.as_u32(), node);
+    if !seen.insert(id) {
+        return;
+    }
+    for child in child_ids(&node) {
+        dump_node(store, child, depth + 1, out, seen);
+    }
+}
+
+fn child_ids(node: &FirMatch) -> Vec<FirId> {
+    match node {
+        FirMatch::Unknown
+        | FirMatch::Int32 { .. }
+        | FirMatch::Int64 { .. }
+        | FirMatch::Float32 { .. }
+        | FirMatch::Float64 { .. }
+        | FirMatch::Bool { .. }
+        | FirMatch::Quad { .. }
+        | FirMatch::FixedPoint { .. }
+        | FirMatch::Int32Array { .. }
+        | FirMatch::Float32Array { .. }
+        | FirMatch::Float64Array { .. }
+        | FirMatch::QuadArray { .. }
+        | FirMatch::FixedPointArray { .. }
+        | FirMatch::LoadVar { .. }
+        | FirMatch::LoadVarAddress { .. }
+        | FirMatch::NullValue { .. }
+        | FirMatch::NewDsp { .. }
+        | FirMatch::NullDeclareVar
+        | FirMatch::DeclareStructType { .. }
+        | FirMatch::DeclareBufferIterators { .. }
+        | FirMatch::ShiftArrayVar { .. }
+        | FirMatch::NullStatement
+        | FirMatch::OpenBox { .. }
+        | FirMatch::CloseBox
+        | FirMatch::AddButton { .. }
+        | FirMatch::AddSlider { .. }
+        | FirMatch::AddBargraph { .. }
+        | FirMatch::AddSoundfile { .. }
+        | FirMatch::AddMetaDeclare { .. }
+        | FirMatch::Label(_) => Vec::new(),
+        FirMatch::ValueArray { values, .. }
+        | FirMatch::FunCall { args: values, .. }
+        | FirMatch::DeclareTable { values, .. }
+        | FirMatch::Block(values) => values.clone(),
+        FirMatch::LoadTable { index, .. }
+        | FirMatch::TeeVar { value: index, .. }
+        | FirMatch::Neg { value: index, .. }
+        | FirMatch::Cast { value: index, .. }
+        | FirMatch::Bitcast { value: index, .. }
+        | FirMatch::StoreVar { value: index, .. }
+        | FirMatch::SimpleForLoop { upper: index, .. }
+        | FirMatch::Drop(index) => vec![*index],
+        FirMatch::BinOp { lhs, rhs, .. } => vec![*lhs, *rhs],
+        FirMatch::Select2 {
+            cond,
+            then_value,
+            else_value,
+            ..
+        } => vec![*cond, *then_value, *else_value],
+        FirMatch::DeclareVar { init, .. } => init.iter().copied().collect(),
+        FirMatch::DeclareFun { body, .. } => vec![*body],
+        FirMatch::StoreTable { index, value, .. } => vec![*index, *value],
+        FirMatch::Return(value) => value.iter().copied().collect(),
+        FirMatch::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            let mut out = vec![*cond, *then_block];
+            out.extend(else_block.iter().copied());
+            out
+        }
+        FirMatch::Control { cond, stmt } => vec![*cond, *stmt],
+        FirMatch::ForLoop {
+            init,
+            end,
+            step,
+            body,
+            ..
+        } => vec![*init, *end, *step, *body],
+        FirMatch::IteratorForLoop { body, .. } => vec![*body],
+        FirMatch::WhileLoop { cond, body } => vec![*cond, *body],
+        FirMatch::Switch {
+            cond,
+            cases,
+            default,
+        } => {
+            let mut out = vec![*cond];
+            out.extend(cases.iter().map(|(_, block)| *block));
+            out.extend(default.iter().copied());
+            out
+        }
+        FirMatch::Module {
+            dsp_struct,
+            globals,
+            declarations,
+            ..
+        } => vec![*dsp_struct, *globals, *declarations],
     }
 }
 

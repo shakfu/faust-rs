@@ -15,7 +15,7 @@ use boxes::{BoxId, BoxMatch, dump_box, match_box};
 use codegen::backends::c::{COptions, CodegenError as CCodegenError, generate_c_module};
 use codegen::backends::cpp::{CodegenError, CppOptions, generate_cpp_module};
 use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, SourceSpan};
-use fir::{FirBuilder, FirStore, FirType};
+use fir::{FirBuilder, FirId, FirStore, FirType};
 use parser::{ParseOutput, SourceReaderError};
 use propagate::{BoxArity, PropagateError};
 use signals::{SigId, dump_sig_readable};
@@ -35,6 +35,15 @@ pub struct SignalCompileOutput {
     pub process_arity: BoxArity,
     /// Final propagated output signal list (`process_arity.outputs` items).
     pub signals: Vec<SigId>,
+}
+
+/// Parse + eval + propagate + FIR lowering output package.
+#[derive(Debug)]
+pub struct FirCompileOutput {
+    /// FIR storage arena.
+    pub store: FirStore,
+    /// FIR module root id.
+    pub module: FirId,
 }
 
 /// Main façade orchestrating the current production compilation pipeline.
@@ -240,6 +249,24 @@ impl Compiler {
         })
     }
 
+    /// Parses + evaluates + propagates one source, then lowers to FIR using
+    /// the selected signal->FIR lane.
+    pub fn compile_source_to_fir_with_lane(
+        &self,
+        source_name: &str,
+        source: &str,
+        lane: SignalFirLane,
+    ) -> Result<FirCompileOutput, CompilerError> {
+        let signals = self.compile_source_to_signals(source_name, source)?;
+        lower_signals_to_fir(source_name, &signals, lane).map_err(|error| {
+            CompilerError::Transform {
+                source: source_name.into(),
+                diagnostics: bundle_from_diagnostic(signal_fir_diagnostic(&error)),
+                error,
+            }
+        })
+    }
+
     /// Parses + evaluates + propagates one file, then emits C++ text from
     /// the temporary module-first FIR bridge.
     pub fn compile_file_to_cpp(
@@ -316,6 +343,23 @@ impl Compiler {
         })
     }
 
+    /// Parses + evaluates + propagates one file, then lowers to FIR using
+    /// the selected signal->FIR lane.
+    pub fn compile_file_to_fir_with_lane(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        lane: SignalFirLane,
+    ) -> Result<FirCompileOutput, CompilerError> {
+        let signals = self.compile_file_to_signals(path, search_paths)?;
+        let source = path.display().to_string();
+        lower_signals_to_fir(&source, &signals, lane).map_err(|error| CompilerError::Transform {
+            source: source.into(),
+            diagnostics: bundle_from_diagnostic(signal_fir_diagnostic(&error)),
+            error,
+        })
+    }
+
     /// Parses + evaluates + propagates one file with default import search path,
     /// then emits C++ text from the temporary module-first FIR bridge.
     pub fn compile_file_default_to_cpp(
@@ -364,6 +408,20 @@ impl Compiler {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         self.compile_file_to_cpp_with_lane(path, std::slice::from_ref(&search_base), options, lane)
+    }
+
+    /// Parses + evaluates + propagates one file with default import search path,
+    /// then lowers to FIR using the selected signal->FIR lane.
+    pub fn compile_file_default_to_fir_with_lane(
+        &self,
+        path: &Path,
+        lane: SignalFirLane,
+    ) -> Result<FirCompileOutput, CompilerError> {
+        let search_base = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        self.compile_file_to_fir_with_lane(path, std::slice::from_ref(&search_base), lane)
     }
 
     fn pipeline_to_signals(
@@ -672,11 +730,29 @@ fn lower_signals_to_c(
     }
 }
 
-fn lower_signals_to_cpp_legacy_bridge(
+fn lower_signals_to_fir(
     source_name: &str,
     output: &SignalCompileOutput,
-    options: &CppOptions,
-) -> Result<String, LowerToCppError> {
+    lane: SignalFirLane,
+) -> Result<FirCompileOutput, SignalFirError> {
+    let module_name = sanitize_cpp_ident(source_name_to_class(source_name).as_str());
+    match lane {
+        SignalFirLane::LegacyBridge => Ok(lower_signals_to_fir_legacy_bridge(
+            source_name,
+            output,
+            module_name,
+        )),
+        SignalFirLane::TransformFastLane => {
+            lower_signals_to_fir_transform_fastlane(output, module_name)
+        }
+    }
+}
+
+fn lower_signals_to_fir_legacy_bridge(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    module_name: String,
+) -> FirCompileOutput {
     let mut store = FirStore::new();
     let mut b = FirBuilder::new(&mut store);
     let mut body = Vec::new();
@@ -699,17 +775,47 @@ fn lower_signals_to_cpp_legacy_bridge(
         ret: Box::new(FirType::Void),
     };
     let compute = b.declare_fun("compute", compute_type, &[], body, false);
-
     let declarations = b.block(&[compute]);
     let dsp_struct = b.block(&[]);
     let globals = b.block(&[]);
+    let module = b.module(module_name, dsp_struct, globals, declarations);
+
+    FirCompileOutput { store, module }
+}
+
+fn lower_signals_to_fir_transform_fastlane(
+    output: &SignalCompileOutput,
+    module_name: String,
+) -> Result<FirCompileOutput, SignalFirError> {
+    let signal_fir_options = SignalFirOptions {
+        module_name,
+        strict_mode: true,
+    };
+    let lowered = compile_signals_to_fir_fastlane(
+        &output.parse.state.arena,
+        &output.signals,
+        output.process_arity.inputs,
+        output.process_arity.outputs,
+        &signal_fir_options,
+    )?;
+    Ok(FirCompileOutput {
+        store: lowered.store,
+        module: lowered.module,
+    })
+}
+
+fn lower_signals_to_cpp_legacy_bridge(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &CppOptions,
+) -> Result<String, LowerToCppError> {
     let module_name = options
         .class_name
         .as_deref()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| sanitize_cpp_ident(source_name_to_class(source_name).as_str()));
-    let module = b.module(module_name, dsp_struct, globals, declarations);
-    generate_cpp_module(&store, module, options).map_err(LowerToCppError::Codegen)
+    let lowered = lower_signals_to_fir_legacy_bridge(source_name, output, module_name);
+    generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerToCppError::Codegen)
 }
 
 fn lower_signals_to_cpp_transform_fastlane(
@@ -722,18 +828,8 @@ fn lower_signals_to_cpp_transform_fastlane(
         .as_deref()
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| sanitize_cpp_ident(source_name_to_class(source_name).as_str()));
-    let signal_fir_options = SignalFirOptions {
-        module_name,
-        strict_mode: true,
-    };
-    let lowered = compile_signals_to_fir_fastlane(
-        &output.parse.state.arena,
-        &output.signals,
-        output.process_arity.inputs,
-        output.process_arity.outputs,
-        &signal_fir_options,
-    )
-    .map_err(LowerToCppError::Transform)?;
+    let lowered = lower_signals_to_fir_transform_fastlane(output, module_name)
+        .map_err(LowerToCppError::Transform)?;
     generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerToCppError::Codegen)
 }
 
@@ -1689,6 +1785,7 @@ mod tests {
     use boxes::BoxBuilder;
     use codegen::backends::c::COptions;
     use codegen::backends::cpp::CppOptions;
+    use fir::{FirMatch, match_fir};
     use signals::SigMatch;
     use tlib::TreeArena;
 
@@ -1909,6 +2006,38 @@ mod tests {
                 .iter()
                 .any(|d| d.code.0.starts_with("FRS-SFIR-"))
         );
+    }
+
+    #[test]
+    fn compiler_compile_source_to_fir_legacy_bridge_returns_module() {
+        let compiler = Compiler::new();
+        let out = compiler
+            .compile_source_to_fir_with_lane(
+                "pass.dsp",
+                "process = _;",
+                super::SignalFirLane::LegacyBridge,
+            )
+            .expect("pass-through should compile to legacy FIR bridge");
+        assert!(matches!(
+            match_fir(&out.store, out.module),
+            FirMatch::Module { .. }
+        ));
+    }
+
+    #[test]
+    fn compiler_compile_source_to_fir_fastlane_returns_module() {
+        let compiler = Compiler::new();
+        let out = compiler
+            .compile_source_to_fir_with_lane(
+                "pass.dsp",
+                "process = _;",
+                super::SignalFirLane::TransformFastLane,
+            )
+            .expect("pass-through should compile to transform fast-lane FIR");
+        assert!(matches!(
+            match_fir(&out.store, out.module),
+            FirMatch::Module { .. }
+        ));
     }
 
     #[test]
