@@ -1,3 +1,5 @@
+//! Integration tests for core_semantics.rs.
+
 use tlib::{NodeKind, PropertyStore, TreeArena};
 
 #[test]

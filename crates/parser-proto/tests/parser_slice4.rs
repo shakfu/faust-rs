@@ -1,3 +1,5 @@
+//! Integration tests for parser_slice4.rs.
+
 use parser_proto::parse_program;
 
 #[test]

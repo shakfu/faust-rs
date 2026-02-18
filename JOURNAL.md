@@ -4100,3 +4100,58 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo run -p xtask -- backend-full-corpus-diff-report`
   - `cargo clippy -p xtask --all-targets -- -D warnings`
+
+#### Documentation pass: Rustdoc precision update on pipeline/public APIs
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/compiler/src/lib.rs`
+  - `crates/codegen/src/backends/cpp/mod.rs`
+  - `crates/codegen/src/backends/c/mod.rs`
+  - `crates/transform/src/signal_fir/module.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - expanded Rustdoc on `compiler` public facade:
+    - `SignalCompileOutput` field-level contract docs,
+    - `Compiler` role doc in the canonical pipeline,
+    - `CompilerError` variant-level semantics (`Import/Parse/Eval/Propagate/Transform/Codegen`).
+  - clarified Rustdoc default-option policy in C/C++ backends:
+    - `class_name = Some(\"mydsp\")` as deterministic default naming convention.
+  - documented fast-lane UI wrapper helper behavior in transform:
+    - implicit root `openVerticalBox/closeBox` injection only when widgets exist
+      and no explicit group is present.
+- Validation:
+  - `cargo test -p codegen --all-targets`
+  - `cargo test -p compiler --all-targets`
+  - `cargo clippy -p codegen -p compiler --all-targets -- -D warnings`
+
+#### Global Rustdoc pass: all Rust files baseline coverage
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/errors/src/lib.rs`
+  - `crates/errors/src/codes.rs`
+  - `crates/tlib/src/lib.rs`
+  - `crates/tlib/src/arena.rs`
+  - all `.rs` files that previously had no module-level docs in:
+    - `crates/*/tests/`
+    - `crates/*/src/bin/`
+    - `crates/compiler/src/main.rs`
+    - `crates/parser-proto/build.rs`
+    - `crates/xtask/src/main.rs`
+- Implemented:
+  - added module-level Rustdoc headers (`//!`) across Rust files that had no
+    top-level documentation, including tests/tooling entry points.
+  - expanded public API Rustdoc in `errors`:
+    - severity/stage variants,
+    - source span and diagnostic payload fields,
+    - conversion trait contract,
+    - stable diagnostic code constants.
+  - expanded public API Rustdoc in `tlib` core types:
+    - crate identity constant,
+    - `NodeKind` variants,
+    - `TreeNode` field semantics,
+    - `ChildList` storage variants.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check --workspace --all-targets`

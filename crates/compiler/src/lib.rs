@@ -27,12 +27,20 @@ use transform::signal_fir::{
 /// Parse + eval + propagate output package.
 #[derive(Debug)]
 pub struct SignalCompileOutput {
+    /// Full parser output (arena + metadata + diagnostics from parse stage).
     pub parse: ParseOutput,
+    /// Evaluated `process` box expression after `eval`.
     pub process_box: BoxId,
+    /// Inferred process arity (`inputs`/`outputs`) from `propagate::box_arity`.
     pub process_arity: BoxArity,
+    /// Final propagated output signal list (`process_arity.outputs` items).
     pub signals: Vec<SigId>,
 }
 
+/// Main façade orchestrating the current production compilation pipeline.
+///
+/// Current canonical flow:
+/// `parse -> eval -> propagate -> (optional signal->FIR lowering) -> codegen`.
 pub struct Compiler;
 
 /// Selects which signal->FIR lowering lane is used before C++ emission.
@@ -507,35 +515,41 @@ impl Default for Compiler {
 /// Compiler facade errors for parser-stage orchestration.
 #[derive(Debug)]
 pub enum CompilerError {
+    /// Import resolution/read failure before parse completion.
     Import(SourceReaderError),
-    MissingRoot {
-        source: Box<str>,
-    },
+    /// Parse output did not expose a root node.
+    MissingRoot { source: Box<str> },
+    /// Parse failed (`errors` or `recoveries` present).
     Parse {
         source: Box<str>,
         parse_errors: usize,
         recoveries: u32,
         diagnostics: DiagnosticBundle,
     },
+    /// Eval stage failed while reducing boxes.
     Eval {
         source: Box<str>,
         error: Box<eval::EvalError>,
         diagnostics: DiagnosticBundle,
     },
+    /// Propagate stage failed while lowering boxes to signals.
     Propagate {
         source: Box<str>,
         error: PropagateError,
         diagnostics: DiagnosticBundle,
     },
+    /// Transform stage failed while lowering signals to FIR.
     Transform {
         source: Box<str>,
         error: SignalFirError,
         diagnostics: DiagnosticBundle,
     },
+    /// C++ backend emission failed from FIR.
     Codegen {
         source: Box<str>,
         error: CodegenError,
     },
+    /// C backend emission failed from FIR.
     CodegenC {
         source: Box<str>,
         error: CCodegenError,

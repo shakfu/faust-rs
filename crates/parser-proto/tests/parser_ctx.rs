@@ -1,3 +1,5 @@
+//! Integration tests for parser_ctx.rs.
+
 use parser_proto::{DiagnosticSeverity, ParserCtx};
 use tlib::TreeArena;
 

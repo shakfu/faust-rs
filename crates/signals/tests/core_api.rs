@@ -1,3 +1,5 @@
+//! Integration tests for core_api.rs.
+
 use signals::{BinOp, SigBuilder, SigMatch, dump_sig, dump_sig_readable, match_sig};
 use tlib::TreeArena;
 

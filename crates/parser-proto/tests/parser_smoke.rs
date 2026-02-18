@@ -1,3 +1,5 @@
+//! Integration tests for parser_smoke.rs.
+
 use parser_proto::parse_minimal;
 
 #[test]

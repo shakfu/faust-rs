@@ -1,3 +1,5 @@
+//! Integration tests for support/node_match_helpers.rs.
+
 #![allow(dead_code)]
 
 use boxes::{BoxMatch, match_box};

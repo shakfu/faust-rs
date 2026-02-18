@@ -1,3 +1,5 @@
+//! Integration tests for parser_slice12_modulation.rs.
+
 use parser_proto::parse_program;
 use tlib::{NodeKind, TreeArena, TreeId};
 

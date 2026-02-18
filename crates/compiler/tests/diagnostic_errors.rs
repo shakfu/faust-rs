@@ -1,3 +1,5 @@
+//! Integration tests for diagnostic_errors.rs.
+
 use std::fs;
 use std::path::PathBuf;
 

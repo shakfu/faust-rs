@@ -1,3 +1,5 @@
+//! CLI entry point.
+
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt::Write as _;

@@ -1,3 +1,5 @@
+//! Integration tests for signal_pipeline.rs.
+
 use std::path::PathBuf;
 
 use compiler::Compiler;
@@ -238,13 +240,17 @@ fn corpus_sine_phasor_lowers_to_gain_times_sin_of_feedback_phase() {
     assert_eq!(out.process_arity.outputs, 1);
     assert_eq!(out.signals.len(), 1);
 
-    let SigMatch::BinOp(BinOp::Mul, gain, carrier) = match_sig(&out.parse.state.arena, out.signals[0])
+    let SigMatch::BinOp(BinOp::Mul, gain, carrier) =
+        match_sig(&out.parse.state.arena, out.signals[0])
     else {
         panic!("rep_38 should lower to gain * carrier");
     };
     assert!(matches!(
         match_sig(&out.parse.state.arena, gain),
-        SigMatch::HSlider(_, _, _, _, _) | SigMatch::VSlider(_, _, _, _, _) | SigMatch::NumEntry(_, _, _, _, _) | SigMatch::Real(_)
+        SigMatch::HSlider(_, _, _, _, _)
+            | SigMatch::VSlider(_, _, _, _, _)
+            | SigMatch::NumEntry(_, _, _, _, _)
+            | SigMatch::Real(_)
     ));
     assert!(matches!(
         match_sig(&out.parse.state.arena, carrier),

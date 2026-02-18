@@ -1,3 +1,5 @@
+//! Integration tests for core_api.rs.
+
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::{IntoDiagnostic, Severity, Stage, codes};
 use propagate::{PropagateError, box_arity, make_sig_input_list, propagate};

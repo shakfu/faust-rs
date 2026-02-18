@@ -1,3 +1,5 @@
+//! Command-line benchmark/tool entry point for match_box_bench.rs.
+
 use std::hint::black_box;
 use std::mem::discriminant;
 use std::time::Instant;

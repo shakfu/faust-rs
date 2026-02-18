@@ -1,3 +1,5 @@
+//! Integration tests for parser_slice6_scope_modules.rs.
+
 #[path = "support/node_match_helpers.rs"]
 mod node_match_helpers;
 use node_match_helpers::*;

@@ -23,8 +23,8 @@
 use std::collections::{HashMap, HashSet};
 
 use fir::{
-    AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirMatch, FirStore,
-    FirType, SliderRange, SliderType, UiBoxType, match_fir,
+    AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirMatch, FirStore, FirType,
+    SliderRange, SliderType, UiBoxType, match_fir,
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{NodeKind, TreeArena};
@@ -137,7 +137,8 @@ pub fn build_module(
         )
     };
 
-    let ui_statements = maybe_wrap_ui_in_root_group(&mut lower.store, module_name, &lower.ui_statements);
+    let ui_statements =
+        maybe_wrap_ui_in_root_group(&mut lower.store, module_name, &lower.ui_statements);
     let ui_body = {
         let mut b = FirBuilder::new(&mut lower.store);
         b.block(&ui_statements)
@@ -210,6 +211,12 @@ pub fn build_module(
     })
 }
 
+/// Wraps top-level UI widgets in an implicit root vertical box when needed.
+///
+/// Parity policy:
+/// - if explicit groups (`OpenBox`/`CloseBox`) are already present, keep UI as-is;
+/// - if widgets exist but no group exists, inject:
+///   `openVerticalBox(module_name) ... closeBox`.
 fn maybe_wrap_ui_in_root_group(
     store: &mut FirStore,
     module_name: &str,

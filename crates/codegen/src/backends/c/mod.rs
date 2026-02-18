@@ -51,6 +51,10 @@ pub struct COptions {
 }
 
 impl Default for COptions {
+    /// Default backend options.
+    ///
+    /// Uses `class_name = Some("mydsp")` to match the current workspace
+    /// convention for deterministic generated type names.
     fn default() -> Self {
         Self {
             class_name: Some("mydsp".to_owned()),

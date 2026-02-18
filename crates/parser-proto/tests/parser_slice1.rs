@@ -1,3 +1,5 @@
+//! Integration tests for parser_slice1.rs.
+
 #[path = "support/node_match_helpers.rs"]
 mod node_match_helpers;
 use boxes::{BoxMatch, match_box};

@@ -1,3 +1,5 @@
+//! Integration tests for core_eval.rs.
+
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::{IntoDiagnostic, Severity, Stage, codes};
 use eval::{Environment, EvalError, LoopDetector, eval_box, eval_process};

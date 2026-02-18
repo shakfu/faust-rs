@@ -37,28 +37,41 @@ impl TreeId {
 /// of O(string length), matching the C++ compiler's interned `Sym` pointer semantics.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum NodeKind {
+    /// Canonical empty list node.
     Nil,
+    /// Cons-list constructor node.
     Cons,
+    /// Symbol identifier payload.
     Symbol(Arc<str>),
+    /// String literal payload.
     StringLiteral(Arc<str>),
+    /// Signed integer literal payload.
     Int(i64),
+    /// Floating-point literal stored as raw IEEE 754 bits.
     FloatBits(u64),
+    /// Interned numeric tag id.
     Tag(u32),
 }
 
 /// Interned node stored in [`TreeArena`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreeNode {
+    /// Node payload kind.
     pub kind: NodeKind,
+    /// Ordered child list.
     pub children: ChildList,
 }
 
 /// Compact children storage optimized for low arity nodes (`0/1/2`) common in Faust IR.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChildList {
+    /// Zero children.
     Empty,
+    /// Single child, inline.
     One([TreeId; 1]),
+    /// Two children, inline.
     Two([TreeId; 2]),
+    /// Three or more children on heap.
     Many(Box<[TreeId]>),
 }
 

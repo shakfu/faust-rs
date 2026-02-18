@@ -5,36 +5,61 @@
 
 use crate::DiagnosticCode;
 
+/// Source reader I/O failure.
 pub const SRC_IO_ERROR: DiagnosticCode = DiagnosticCode("FRS-SRC-0001");
+/// Imported file could not be resolved.
 pub const SRC_UNRESOLVED_IMPORT: DiagnosticCode = DiagnosticCode("FRS-SRC-0002");
+/// Import graph contains a cycle.
 pub const SRC_IMPORT_CYCLE: DiagnosticCode = DiagnosticCode("FRS-SRC-0003");
 
+/// Lexer encountered an invalid token sequence.
 pub const LEX_INVALID_TOKEN: DiagnosticCode = DiagnosticCode("FRS-LEX-0001");
 
+/// Parser encountered an unexpected token.
 pub const PARSE_UNEXPECTED_TOKEN: DiagnosticCode = DiagnosticCode("FRS-PARSE-0001");
+/// Parser recovered from an error and emitted recovery diagnostics.
 pub const PARSE_RECOVERY: DiagnosticCode = DiagnosticCode("FRS-PARSE-0002");
+/// Parser encountered an invalid literal form.
 pub const PARSE_INVALID_LITERAL: DiagnosticCode = DiagnosticCode("FRS-PARSE-0003");
 
+/// `process` definition is missing.
 pub const EVAL_MISSING_PROCESS: DiagnosticCode = DiagnosticCode("FRS-EVAL-0001");
+/// Symbol lookup failed during eval.
 pub const EVAL_UNDEFINED_SYMBOL: DiagnosticCode = DiagnosticCode("FRS-EVAL-0002");
+/// Arity mismatch detected during eval.
 pub const EVAL_ARITY_MISMATCH: DiagnosticCode = DiagnosticCode("FRS-EVAL-0003");
+/// Invalid iteration construct detected during eval.
 pub const EVAL_ITERATION_INVALID: DiagnosticCode = DiagnosticCode("FRS-EVAL-0004");
+/// Generic eval failure fallback code.
 pub const EVAL_GENERIC_FAILURE: DiagnosticCode = DiagnosticCode("FRS-EVAL-0099");
 
+/// Unsupported box node in propagate.
 pub const PROP_UNSUPPORTED_BOX: DiagnosticCode = DiagnosticCode("FRS-PROP-0001");
+/// Arity mismatch in propagate composition rules.
 pub const PROP_ARITY_MISMATCH: DiagnosticCode = DiagnosticCode("FRS-PROP-0002");
+/// Recursion/projection contract mismatch in propagate.
 pub const PROP_RECURSION_MISMATCH: DiagnosticCode = DiagnosticCode("FRS-PROP-0003");
+/// Generic propagate failure fallback code.
 pub const PROP_GENERIC_FAILURE: DiagnosticCode = DiagnosticCode("FRS-PROP-0099");
 
+/// Invalid options passed to signal->FIR lowering.
 pub const SFIR_INVALID_OPTIONS: DiagnosticCode = DiagnosticCode("FRS-SFIR-0001");
+/// Empty signal list provided to signal->FIR lowering.
 pub const SFIR_EMPTY_SIGNAL_LIST: DiagnosticCode = DiagnosticCode("FRS-SFIR-0002");
+/// Signal outputs arity mismatch in signal->FIR lowering.
 pub const SFIR_OUTPUT_ARITY_MISMATCH: DiagnosticCode = DiagnosticCode("FRS-SFIR-0003");
+/// Unsupported signal node in signal->FIR lowering.
 pub const SFIR_UNSUPPORTED_SIGNAL_NODE: DiagnosticCode = DiagnosticCode("FRS-SFIR-0004");
+/// Unsupported binary operator in signal->FIR lowering.
 pub const SFIR_UNSUPPORTED_BINOP: DiagnosticCode = DiagnosticCode("FRS-SFIR-0005");
+/// Input index out of range in signal->FIR lowering.
 pub const SFIR_INPUT_INDEX_OUT_OF_RANGE: DiagnosticCode = DiagnosticCode("FRS-SFIR-0006");
 
+/// Parse stage failed in top-level compiler pipeline.
 pub const COMP_PARSE_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0001");
+/// Eval stage failed in top-level compiler pipeline.
 pub const COMP_EVAL_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0002");
+/// Propagate stage failed in top-level compiler pipeline.
 pub const COMP_PROPAGATE_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0003");
 
 /// Returns all built-in stable diagnostic codes.

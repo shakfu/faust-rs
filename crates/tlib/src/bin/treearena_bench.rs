@@ -1,3 +1,5 @@
+//! Command-line benchmark/tool entry point for treearena_bench.rs.
+
 use std::env;
 use std::hint::black_box;
 use std::time::Instant;

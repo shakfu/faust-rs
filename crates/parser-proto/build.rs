@@ -1,3 +1,5 @@
+//! Build script for parser-proto grammar/lexer generation.
+
 use cfgrammar::yacc::YaccKind;
 use lrlex::CTLexerBuilder;
 

@@ -1,3 +1,5 @@
+//! CLI entry point.
+
 use boxes::dump_box;
 use codegen::backends::c::COptions;
 use codegen::backends::cpp::CppOptions;

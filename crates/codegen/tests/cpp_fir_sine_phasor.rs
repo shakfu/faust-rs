@@ -1,3 +1,5 @@
+//! Integration tests for cpp_fir_sine_phasor.rs.
+
 use codegen::backends::cpp::{CppOptions, generate_cpp_module};
 use codegen::fixtures::build_sine_phasor_test_module;
 

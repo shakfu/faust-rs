@@ -17,6 +17,7 @@ mod property;
 pub use arena::{ChildList, NodeKind, TreeArena, TreeId, TreeNode};
 pub use property::{PropertyKey, PropertyStore};
 
+/// Stable crate identifier used by workspace tooling and diagnostics.
 pub const CRATE_NAME: &str = "tlib";
 
 /// Stable crate identifier used in workspace-level tooling and diagnostics.

@@ -1,3 +1,5 @@
+//! Integration tests for parser_slice3.rs.
+
 use std::fs;
 use std::path::Path;
 

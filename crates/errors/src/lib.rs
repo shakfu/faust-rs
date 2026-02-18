@@ -6,8 +6,10 @@ pub mod codes;
 
 pub use codes::all_codes;
 
+/// Stable crate identifier used by shared metadata and diagnostics.
 pub const CRATE_NAME: &str = "errors";
 
+/// Returns the stable identifier of the `errors` crate.
 #[must_use]
 pub fn crate_id() -> &'static str {
     CRATE_NAME
@@ -16,23 +18,36 @@ pub fn crate_id() -> &'static str {
 /// Diagnostic severity level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Severity {
+    /// A blocking problem that prevents successful compilation.
     Error,
+    /// A non-blocking problem that should be shown to the user.
     Warning,
+    /// An informational remark attached to successful or recoverable flows.
     Remark,
 }
 
 /// Compiler stage producing one diagnostic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Stage {
+    /// Source loading and import resolution.
     SourceReader,
+    /// Lexical analysis.
     Lexer,
+    /// Grammar parsing and parse recovery.
     Parser,
+    /// Box-level semantic evaluation.
     Eval,
+    /// Box-to-signal propagation and structural checks.
     Propagate,
+    /// Signal normalization passes.
     Normalize,
+    /// Mid-level transform passes.
     Transform,
+    /// FIR lowering and FIR-level checks.
     Fir,
+    /// Backend code generation.
     Codegen,
+    /// Top-level compiler orchestration.
     Compiler,
 }
 
@@ -43,10 +58,15 @@ pub struct DiagnosticCode(pub &'static str);
 /// File-local source span.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SourceSpan {
+    /// File where this span originates.
     pub file: PathBuf,
+    /// 1-based start line.
     pub line: u32,
+    /// 1-based start column.
     pub col: u32,
+    /// 1-based end line.
     pub end_line: u32,
+    /// 1-based end column.
     pub end_col: u32,
 }
 
@@ -67,15 +87,20 @@ impl SourceSpan {
 /// Source label style.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LabelStyle {
+    /// Main location that should be highlighted first.
     Primary,
+    /// Related location that provides extra context.
     Secondary,
 }
 
 /// One labeled source span attached to a diagnostic.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Label {
+    /// Visual role of the label in rendered diagnostics.
     pub style: LabelStyle,
+    /// Source location attached to this label.
     pub span: SourceSpan,
+    /// User-facing label text.
     pub message: Box<str>,
 }
 
@@ -94,12 +119,19 @@ impl Label {
 /// Structured diagnostic payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
+    /// Severity level of the diagnostic.
     pub severity: Severity,
+    /// Compiler stage that emitted this diagnostic.
     pub stage: Stage,
+    /// Stable machine-readable diagnostic code.
     pub code: DiagnosticCode,
+    /// Main human-readable message.
     pub message: Box<str>,
+    /// Source labels attached to this diagnostic.
     pub labels: Vec<Label>,
+    /// Additional explanatory notes.
     pub notes: Vec<Box<str>>,
+    /// Suggested actionable fixes.
     pub help: Vec<Box<str>>,
 }
 
@@ -204,6 +236,7 @@ impl From<Vec<Diagnostic>> for DiagnosticBundle {
 
 /// Conversion contract for phase-local errors to diagnostics.
 pub trait IntoDiagnostic {
+    /// Converts one phase-local error value into a structured [`Diagnostic`].
     fn into_diagnostic(self) -> Diagnostic;
 }
 

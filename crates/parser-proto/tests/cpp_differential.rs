@@ -1,3 +1,5 @@
+//! Integration tests for cpp_differential.rs.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

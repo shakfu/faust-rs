@@ -1,3 +1,5 @@
+//! Integration tests for lexer_tokens.rs.
+
 use parser_proto::{ParserCtx, lex_tokens, set_use_prop_from_token};
 use tlib::TreeArena;
 

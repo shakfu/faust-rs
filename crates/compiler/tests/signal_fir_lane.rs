@@ -1,3 +1,5 @@
+//! Integration tests for signal_fir_lane.rs.
+
 use compiler::{Compiler, SignalFirLane};
 use std::path::PathBuf;
 
@@ -211,7 +213,9 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
     assert!(!fast_c.contains("frs_"));
     assert!(fast_c.contains("fHslider"));
     assert!(!fast_c.contains("fUiCtl"));
-    assert!(fast_c.contains("ui_interface->openVerticalBox(ui_interface->uiInterface, \"mydsp\");"));
+    assert!(
+        fast_c.contains("ui_interface->openVerticalBox(ui_interface->uiInterface, \"mydsp\");")
+    );
     assert!(fast_c.contains("ui_interface->closeBox(ui_interface->uiInterface);"));
 }
 

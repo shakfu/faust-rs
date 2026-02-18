@@ -1,3 +1,5 @@
+//! Integration tests for parser_diagnostics.rs.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

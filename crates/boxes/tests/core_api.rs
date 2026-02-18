@@ -1,3 +1,5 @@
+//! Integration tests for core_api.rs.
+
 use boxes::{BoxBuilder, BoxMatch, dump_box, match_box};
 use tlib::{TreeArena, TreeId};
 

@@ -1,3 +1,5 @@
+//! Integration tests for source_reader.rs.
+
 use std::fs;
 use std::path::PathBuf;
 

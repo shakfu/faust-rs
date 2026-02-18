@@ -1,3 +1,5 @@
+//! Integration tests for api_bridge.rs.
+
 use std::fs;
 use std::path::PathBuf;
 

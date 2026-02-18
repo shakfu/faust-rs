@@ -50,6 +50,10 @@ pub struct CppOptions {
 }
 
 impl Default for CppOptions {
+    /// Default backend options.
+    ///
+    /// Uses `class_name = Some("mydsp")` to match the current workspace
+    /// convention for deterministic generated type names.
     fn default() -> Self {
         Self {
             namespace: None,
