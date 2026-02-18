@@ -23,8 +23,8 @@
 use std::collections::{HashMap, HashSet};
 
 use fir::{
-    AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirStore, FirType,
-    SliderRange, SliderType,
+    AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirMatch, FirStore,
+    FirType, SliderRange, SliderType, UiBoxType, match_fir,
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{NodeKind, TreeArena};
@@ -137,9 +137,10 @@ pub fn build_module(
         )
     };
 
+    let ui_statements = maybe_wrap_ui_in_root_group(&mut lower.store, module_name, &lower.ui_statements);
     let ui_body = {
         let mut b = FirBuilder::new(&mut lower.store);
-        b.block(&lower.ui_statements)
+        b.block(&ui_statements)
     };
     let build_ui = {
         let mut b = FirBuilder::new(&mut lower.store);
@@ -207,6 +208,40 @@ pub fn build_module(
         store: lower.store,
         module,
     })
+}
+
+fn maybe_wrap_ui_in_root_group(
+    store: &mut FirStore,
+    module_name: &str,
+    ui_statements: &[FirId],
+) -> Vec<FirId> {
+    if ui_statements.is_empty() {
+        return Vec::new();
+    }
+
+    let mut has_group = false;
+    let mut has_widget = false;
+    for stmt in ui_statements {
+        match match_fir(store, *stmt) {
+            FirMatch::OpenBox { .. } | FirMatch::CloseBox => has_group = true,
+            FirMatch::AddButton { .. }
+            | FirMatch::AddSlider { .. }
+            | FirMatch::AddBargraph { .. }
+            | FirMatch::AddSoundfile { .. } => has_widget = true,
+            _ => {}
+        }
+    }
+
+    if has_group || !has_widget {
+        return ui_statements.to_vec();
+    }
+
+    let mut wrapped = Vec::with_capacity(ui_statements.len() + 2);
+    let mut b = FirBuilder::new(store);
+    wrapped.push(b.open_box(UiBoxType::Vertical, module_name));
+    wrapped.extend(ui_statements.iter().copied());
+    wrapped.push(b.close_box());
+    wrapped
 }
 
 struct SignalToFirLower<'a> {

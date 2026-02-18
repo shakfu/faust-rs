@@ -189,12 +189,16 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
     assert!(fast.contains("class rep_38_sine_phasor : public dsp"));
     assert!(fast.contains("void compute("));
     assert!(!fast.contains("frs_"));
+    assert!(fast.contains("ui_interface->openVerticalBox(\"rep_38_sine_phasor\");"));
+    assert!(fast.contains("ui_interface->closeBox();"));
 
     let legacy_c = compile_c_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::LegacyBridge);
     let fast_c = compile_c_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::TransformFastLane);
     assert!(legacy_c.contains("void computerep_38_sine_phasor("));
     assert!(fast_c.contains("void computerep_38_sine_phasor("));
     assert!(!fast_c.contains("frs_"));
+    assert!(fast_c.contains("ui_interface->openVerticalBox(ui_interface->uiInterface, \"rep_38_sine_phasor\");"));
+    assert!(fast_c.contains("ui_interface->closeBox(ui_interface->uiInterface);"));
 }
 
 #[test]
