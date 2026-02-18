@@ -7,7 +7,7 @@
 //! - core unary math nodes (`sin/cos/tan/exp/log/log10/sqrt/abs`),
 //! - `SIGDELAY1`/`SIGDELAY`/`SIGPREFIX`,
 //! - `SIGSELECT2`, `SIGINTCAST`/`SIGFLOATCAST`/`SIGBITCAST`,
-//! - `SIGPROJ`/`SIGREC` (placeholder-compatible lowering).
+//! - `SIGPROJ`/`SIGREC` (real lowering for canonical `DEBRUIJN`/`DEBRUIJNREF` recursion).
 //! - `SIGOUTPUT` passthrough nodes.
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors.
@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 
 use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirStore, FirType};
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
-use tlib::TreeArena;
+use tlib::{NodeKind, TreeArena};
 
 use super::SignalFirOutput;
 use super::error::{SignalFirError, SignalFirErrorCode};
@@ -99,6 +99,7 @@ struct SignalToFirLower<'a> {
     compute_updates: Vec<FirId>,
     state_name_by_node: HashMap<SigId, String>,
     scheduled_state_updates: HashSet<SigId>,
+    recursion_stack: Vec<String>,
 }
 
 impl<'a> SignalToFirLower<'a> {
@@ -112,6 +113,7 @@ impl<'a> SignalToFirLower<'a> {
             compute_updates: Vec::new(),
             state_name_by_node: HashMap::new(),
             scheduled_state_updates: HashSet::new(),
+            recursion_stack: Vec::new(),
         }
     }
 
@@ -146,8 +148,8 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Select2(cond, then_value, else_value) => {
                 self.lower_select2(cond, then_value, else_value)?
             }
-            SigMatch::Proj(index, group) => self.lower_proj(index, group),
-            SigMatch::Rec(_body) => self.lower_placeholder("rec", sig),
+            SigMatch::Proj(index, group) => self.lower_proj(sig, index, group)?,
+            SigMatch::Rec(body) => self.lower_signal(body)?,
             SigMatch::BinOp(op, lhs, rhs) => self.lower_binop(op, lhs, rhs)?,
             SigMatch::Pow(lhs, rhs) => self.lower_fun2("std::pow", lhs, rhs)?,
             SigMatch::Min(lhs, rhs) => self.lower_fun2("std::fmin", lhs, rhs)?,
@@ -332,17 +334,91 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.select2(cond, then_value, else_value, FirType::FaustFloat))
     }
 
-    fn lower_proj(&mut self, index: i64, group: SigId) -> FirId {
-        self.lower_placeholder(format!("proj{index}_g{}", group.as_u32()).as_str(), group)
+    fn lower_proj(
+        &mut self,
+        node: SigId,
+        index: i64,
+        group: SigId,
+    ) -> Result<FirId, SignalFirError> {
+        if index != 0 {
+            return Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("SIGPROJ index {index} unsupported in Step 2C.2 (only 0)"),
+            ));
+        }
+
+        if let Some(depth) = self.decode_debruijn_ref(group) {
+            if depth == 0 || depth > self.recursion_stack.len() {
+                return Err(SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!("invalid DEBRUIJNREF depth {depth}"),
+                ));
+            }
+            let name = self.recursion_stack[self.recursion_stack.len() - depth].clone();
+            let mut b = FirBuilder::new(&mut self.store);
+            return Ok(b.load_var(name, AccessType::Struct, FirType::FaustFloat));
+        }
+
+        let body = if let Some(body) = self.decode_debruijn_group(group) {
+            body
+        } else if let SigMatch::Rec(body) = match_sig(self.arena, group) {
+            body
+        } else {
+            return Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "SIGPROJ group must be DEBRUIJN/DEBRUIJNREF/SIGREC in Step 2C.2 (expr={})",
+                    dump_sig_readable(self.arena, node)
+                ),
+            ));
+        };
+
+        let init = self.float_const(0.0);
+        let name = self.ensure_state_slot(node, init);
+        let out = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.load_var(name.clone(), AccessType::Struct, FirType::FaustFloat)
+        };
+        if self.scheduled_state_updates.insert(node) {
+            self.recursion_stack.push(name.clone());
+            let rhs = self.lower_signal(body)?;
+            self.recursion_stack.pop();
+            let mut b = FirBuilder::new(&mut self.store);
+            self.compute_updates
+                .push(b.store_var(name, AccessType::Struct, rhs));
+        }
+        Ok(out)
     }
 
-    fn lower_placeholder(&mut self, prefix: &str, sig: SigId) -> FirId {
-        let mut b = FirBuilder::new(&mut self.store);
-        b.load_var(
-            format!("frs_{prefix}_n{}", sig.as_u32()),
-            AccessType::Struct,
-            FirType::FaustFloat,
-        )
+    fn decode_debruijn_group(&self, group: SigId) -> Option<SigId> {
+        let node = self.arena.node(group)?;
+        let NodeKind::Tag(tag_id) = node.kind else {
+            return None;
+        };
+        if self.arena.tag_name(tag_id)? != "DEBRUIJN" {
+            return None;
+        }
+        let [list] = node.children.as_slice() else {
+            return None;
+        };
+        self.arena.hd(*list)
+    }
+
+    fn decode_debruijn_ref(&self, group: SigId) -> Option<usize> {
+        let node = self.arena.node(group)?;
+        let NodeKind::Tag(tag_id) = node.kind else {
+            return None;
+        };
+        if self.arena.tag_name(tag_id)? != "DEBRUIJNREF" {
+            return None;
+        }
+        let [depth] = node.children.as_slice() else {
+            return None;
+        };
+        match self.arena.kind(*depth) {
+            Some(NodeKind::Int(v)) => usize::try_from(*v).ok(),
+            _ => None,
+        }
     }
 }
 

@@ -264,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn rec_proj_placeholder_slice_is_supported() {
+    fn rec_proj_lowers_without_placeholder_nodes() {
         let mut arena = TreeArena::new();
         let sig0 = {
             let mut b = SigBuilder::new(&mut arena);
@@ -275,8 +275,47 @@ mod tests {
             b.proj(0, rec)
         };
 
-        compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-            .expect("Step 2B.2 should support rec/proj placeholder lowering");
+        let out =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+                .expect("Step 2C.2 should support rec/proj real lowering");
+
+        let FirMatch::Module {
+            dsp_struct,
+            declarations,
+            ..
+        } = match_fir(&out.store, out.module)
+        else {
+            panic!("module expected");
+        };
+        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+            panic!("dsp_struct block expected");
+        };
+        assert!(
+            struct_items
+                .iter()
+                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareVar { .. })),
+            "rec/proj should allocate explicit state slot"
+        );
+        let FirMatch::Block(decls) = match_fir(&out.store, declarations) else {
+            panic!("declarations block expected");
+        };
+        let compute = decls
+            .iter()
+            .copied()
+            .find(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareFun { .. }))
+            .expect("compute declaration expected");
+        let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
+            panic!("declare fun expected");
+        };
+        let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
+            panic!("compute block expected");
+        };
+        assert!(
+            stmts
+                .iter()
+                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::StoreVar { .. })),
+            "rec/proj should schedule state update in compute"
+        );
     }
 
     #[test]

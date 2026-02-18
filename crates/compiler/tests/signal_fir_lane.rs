@@ -58,4 +58,12 @@ fn legacy_and_fastlane_both_compile_feedback_projection_fixture() {
     assert!(legacy.contains("class rep_23_feedback_simple : public dsp"));
     assert!(fast.contains("class rep_23_feedback_simple : public dsp"));
     assert!(fast.contains("void compute("));
+    assert!(
+        !fast.contains("frs_proj"),
+        "Step 2C.2 should remove proj placeholder names from fast-lane output"
+    );
+    assert!(
+        !fast.contains("frs_rec"),
+        "Step 2C.2 should remove rec placeholder names from fast-lane output"
+    );
 }

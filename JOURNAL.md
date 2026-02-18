@@ -3637,3 +3637,37 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p transform --all-targets`
   - `cargo clippy -p transform --all-targets -- -D warnings`
   - `cargo test -p compiler --test signal_fir_lane`
+
+#### signalFIRCompiler fast-lane: Step 2C.2 real recursion (`Rec/Proj`) without placeholders
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/mod.rs`
+  - `crates/compiler/tests/signal_fir_lane.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - replaced `proj/rec` placeholder loads with explicit recursive state lowering.
+  - added canonical recursion-group decoding in `transform::signal_fir` for:
+    - `DEBRUIJN(cons(body, ...))`,
+    - `DEBRUIJNREF(depth)` lexical back-references,
+    - direct `SIGREC(body)` group fallback used by synthetic unit tests.
+  - introduced recursion context stack during lowering to resolve nested
+    `DEBRUIJNREF` projections to the correct active recursive state slot.
+  - for supported `SIGPROJ(index=0, group=...)` shapes:
+    - emit one state variable declaration in FIR `dsp_struct`,
+    - use state load as projection value,
+    - schedule one deterministic `StoreVar` update in `compute`.
+  - kept unsupported recursion shapes explicit with typed errors:
+    - `SIGPROJ` index other than `0`,
+    - malformed/unknown recursion group shape.
+  - strengthened tests:
+    - transform unit test now asserts `rec/proj` lowering emits explicit
+      state declaration + compute update (no placeholder path),
+    - compiler fast-lane test for `rep_23_feedback_simple.dsp` asserts generated
+      C++ no longer contains `frs_proj`/`frs_rec` placeholder names.
+- Validation:
+  - `cargo fmt -p transform -p compiler`
+  - `cargo test -p transform --all-targets`
+  - `cargo clippy -p transform --all-targets -- -D warnings`
+  - `cargo test -p compiler --test signal_fir_lane`
