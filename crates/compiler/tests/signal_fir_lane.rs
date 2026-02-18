@@ -67,3 +67,45 @@ fn legacy_and_fastlane_both_compile_feedback_projection_fixture() {
         "Step 2C.2 should remove rec placeholder names from fast-lane output"
     );
 }
+
+#[test]
+fn legacy_and_fastlane_both_compile_environment_waveform_fixture() {
+    let legacy = compile_cpp_with_lane(
+        "rep_20_environment_waveform.dsp",
+        SignalFirLane::LegacyBridge,
+    );
+    let fast = compile_cpp_with_lane(
+        "rep_20_environment_waveform.dsp",
+        SignalFirLane::TransformFastLane,
+    );
+    assert!(legacy.contains("class rep_20_environment_waveform : public dsp"));
+    assert!(fast.contains("class rep_20_environment_waveform : public dsp"));
+    assert!(fast.contains("void compute("));
+}
+
+#[test]
+fn legacy_and_fastlane_both_compile_extended_primitives_fixture() {
+    let legacy = compile_cpp_with_lane(
+        "rep_31_extended_primitives.dsp",
+        SignalFirLane::LegacyBridge,
+    );
+    let fast = compile_cpp_with_lane(
+        "rep_31_extended_primitives.dsp",
+        SignalFirLane::TransformFastLane,
+    );
+    assert!(legacy.contains("class rep_31_extended_primitives : public dsp"));
+    assert!(fast.contains("class rep_31_extended_primitives : public dsp"));
+    assert!(fast.contains("void compute("));
+}
+
+#[test]
+fn legacy_and_fastlane_both_compile_nonlinear_clip_fixture() {
+    let legacy = compile_cpp_with_lane("rep_07_nonlinear_clip.dsp", SignalFirLane::LegacyBridge);
+    let fast = compile_cpp_with_lane(
+        "rep_07_nonlinear_clip.dsp",
+        SignalFirLane::TransformFastLane,
+    );
+    assert!(legacy.contains("class rep_07_nonlinear_clip : public dsp"));
+    assert!(fast.contains("class rep_07_nonlinear_clip : public dsp"));
+    assert!(fast.contains("void compute("));
+}

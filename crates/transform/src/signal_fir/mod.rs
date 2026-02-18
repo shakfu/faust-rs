@@ -1,4 +1,4 @@
-//! Experimental signal->FIR fast-lane (Step 2A/2B/2C slices).
+//! Experimental signal->FIR fast-lane (Step 2A/2B/2C/2D slices).
 //!
 //! # Status
 //! This module currently provides an **executable base slice**:
@@ -6,7 +6,9 @@
 //! - lowering for `SIGINPUT`, numeric constants, `SIGBINOP`, and `SIGOUTPUT`
 //!   passthrough (`Step 2A`),
 //! - core math and control/state bootstrap nodes (`Step 2B`),
-//! - explicit state lowering for `delay`-family nodes (`Step 2C` first slice).
+//! - explicit state lowering for `delay`-family nodes (`Step 2C` first slice),
+//! - first breadth coverage for extended primitives, waveform/table/UI families
+//!   (`Step 2D`).
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors until the
 //! remaining lowering slices are implemented.
@@ -56,7 +58,7 @@ pub struct SignalFirOutput {
 
 /// Compiles propagated signals into a FIR module using the experimental fast-lane.
 ///
-/// # Current behavior (Step 2A/2B/2C)
+/// # Current behavior (Step 2A/2B/2C/2D)
 /// - validates options and top-level signal/arity contract,
 /// - lowers one executable bootstrap signal slice to FIR.
 ///
@@ -159,12 +161,12 @@ mod tests {
         let mut arena = TreeArena::new();
         let sig0 = {
             let mut b = SigBuilder::new(&mut arena);
-            let lbl = b.int(0);
-            b.button(lbl)
+            let i0 = b.input(0);
+            b.upsampling(&[i0])
         };
         let err =
             compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-                .expect_err("button is outside Step 2B.2 lowering slice");
+                .expect_err("upsampling is outside current lowering slice");
 
         assert_eq!(err.code(), SignalFirErrorCode::UnsupportedSignalNode);
         assert_eq!(err.code().as_str(), "FRS-SFIR-0004");

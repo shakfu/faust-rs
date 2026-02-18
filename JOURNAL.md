@@ -3671,3 +3671,44 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p transform --all-targets`
   - `cargo clippy -p transform --all-targets -- -D warnings`
   - `cargo test -p compiler --test signal_fir_lane`
+
+#### signalFIRCompiler fast-lane: Step 2D breadth coverage to reduce `UnsupportedSignalNode`
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/mod.rs`
+  - `crates/compiler/tests/signal_fir_lane.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - expanded signal lowering coverage to avoid `FRS-SFIR-0004` on a wider corpus:
+    - extended primitives:
+      - `Acos/Asin/Atan/Atan2`,
+      - `Fmod/Remainder/Floor/Ceil/Rint/Round`,
+      - `Lowest/Highest`,
+    - table/waveform family:
+      - `RdTbl`, `WrTbl`, `Waveform`,
+    - UI/control family:
+      - `Button/Checkbox`,
+      - `VSlider/HSlider/NumEntry`,
+      - `VBargraph/HBargraph`,
+      - `Attach/Enable/Control`,
+      - `Soundfile`.
+  - mapping strategy in this phase remains explicit and deterministic:
+    - supported nodes lower to FIR values using `FunCall` shims where no final
+      dedicated FIR lowering exists yet,
+    - still-unsupported families continue to fail with typed errors
+      (`FRS-SFIR-*`) for visibility and incremental planning.
+  - strengthened fast-lane differential coverage in compiler integration tests:
+    - `rep_07_nonlinear_clip.dsp`,
+    - `rep_20_environment_waveform.dsp`,
+    - `rep_31_extended_primitives.dsp`,
+    in addition to existing `rep_05` and `rep_23` checks.
+  - updated Rustdoc status wording in `transform::signal_fir` to include Step 2D.
+- Validation:
+  - `cargo fmt -p transform -p compiler`
+  - `cargo run -p compiler -- --dump-cpp tests/corpus/rep_20_environment_waveform.dsp --signal-fir-lane fast`
+  - `cargo run -p compiler -- --dump-cpp tests/corpus/rep_31_extended_primitives.dsp --signal-fir-lane fast`
+  - `cargo test -p transform --all-targets`
+  - `cargo clippy -p transform -p compiler --all-targets -- -D warnings`
+  - `cargo test -p compiler --test signal_fir_lane`

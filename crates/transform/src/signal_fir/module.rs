@@ -156,12 +156,50 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Max(lhs, rhs) => self.lower_fun2("std::fmax", lhs, rhs)?,
             SigMatch::Sin(value) => self.lower_fun1("std::sin", value)?,
             SigMatch::Cos(value) => self.lower_fun1("std::cos", value)?,
+            SigMatch::Acos(value) => self.lower_fun1("std::acos", value)?,
+            SigMatch::Asin(value) => self.lower_fun1("std::asin", value)?,
+            SigMatch::Atan(value) => self.lower_fun1("std::atan", value)?,
+            SigMatch::Atan2(lhs, rhs) => self.lower_fun2("std::atan2", lhs, rhs)?,
             SigMatch::Tan(value) => self.lower_fun1("std::tan", value)?,
             SigMatch::Exp(value) => self.lower_fun1("std::exp", value)?,
             SigMatch::Log(value) => self.lower_fun1("std::log", value)?,
             SigMatch::Log10(value) => self.lower_fun1("std::log10", value)?,
             SigMatch::Sqrt(value) => self.lower_fun1("std::sqrt", value)?,
             SigMatch::Abs(value) => self.lower_fun1("std::fabs", value)?,
+            SigMatch::Fmod(lhs, rhs) => self.lower_fun2("std::fmod", lhs, rhs)?,
+            SigMatch::Remainder(lhs, rhs) => self.lower_fun2("std::remainder", lhs, rhs)?,
+            SigMatch::Floor(value) => self.lower_fun1("std::floor", value)?,
+            SigMatch::Ceil(value) => self.lower_fun1("std::ceil", value)?,
+            SigMatch::Rint(value) => self.lower_fun1("std::rint", value)?,
+            SigMatch::Round(value) => self.lower_fun1("std::round", value)?,
+            SigMatch::Lowest(value) => self.lower_fun1("frs_lowest", value)?,
+            SigMatch::Highest(value) => self.lower_fun1("frs_highest", value)?,
+            SigMatch::RdTbl(tbl, ridx) => self.lower_fun2("frs_rdtbl", tbl, ridx)?,
+            SigMatch::WrTbl(size, generator, widx, wsig) => {
+                self.lower_fun4("frs_wrtbl", size, generator, widx, wsig)?
+            }
+            SigMatch::Waveform(values) => self.lower_fun_list("frs_waveform", values)?,
+            SigMatch::Button(label) => self.lower_fun1("frs_button", label)?,
+            SigMatch::Checkbox(label) => self.lower_fun1("frs_checkbox", label)?,
+            SigMatch::VSlider(label, init, min, max, step) => {
+                self.lower_fun5("frs_vslider", label, init, min, max, step)?
+            }
+            SigMatch::HSlider(label, init, min, max, step) => {
+                self.lower_fun5("frs_hslider", label, init, min, max, step)?
+            }
+            SigMatch::NumEntry(label, init, min, max, step) => {
+                self.lower_fun5("frs_numentry", label, init, min, max, step)?
+            }
+            SigMatch::VBargraph(label, min, max, value) => {
+                self.lower_fun4("frs_vbargraph", label, min, max, value)?
+            }
+            SigMatch::HBargraph(label, min, max, value) => {
+                self.lower_fun4("frs_hbargraph", label, min, max, value)?
+            }
+            SigMatch::Attach(lhs, rhs) => self.lower_fun2("frs_attach", lhs, rhs)?,
+            SigMatch::Enable(lhs, rhs) => self.lower_fun2("frs_enable", lhs, rhs)?,
+            SigMatch::Control(lhs, rhs) => self.lower_fun2("frs_control", lhs, rhs)?,
+            SigMatch::Soundfile(label) => self.lower_fun1("frs_soundfile", label)?,
             other => {
                 return Err(SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
@@ -307,6 +345,49 @@ impl<'a> SignalToFirLower<'a> {
         let rhs = self.lower_signal(rhs)?;
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.fun_call(name, &[lhs, rhs], FirType::FaustFloat))
+    }
+
+    fn lower_fun4(
+        &mut self,
+        name: &str,
+        a: SigId,
+        b: SigId,
+        c: SigId,
+        d: SigId,
+    ) -> Result<FirId, SignalFirError> {
+        let a = self.lower_signal(a)?;
+        let b = self.lower_signal(b)?;
+        let c = self.lower_signal(c)?;
+        let d = self.lower_signal(d)?;
+        let mut fb = FirBuilder::new(&mut self.store);
+        Ok(fb.fun_call(name, &[a, b, c, d], FirType::FaustFloat))
+    }
+
+    fn lower_fun5(
+        &mut self,
+        name: &str,
+        a: SigId,
+        b: SigId,
+        c: SigId,
+        d: SigId,
+        e: SigId,
+    ) -> Result<FirId, SignalFirError> {
+        let a = self.lower_signal(a)?;
+        let b = self.lower_signal(b)?;
+        let c = self.lower_signal(c)?;
+        let d = self.lower_signal(d)?;
+        let e = self.lower_signal(e)?;
+        let mut fb = FirBuilder::new(&mut self.store);
+        Ok(fb.fun_call(name, &[a, b, c, d, e], FirType::FaustFloat))
+    }
+
+    fn lower_fun_list(&mut self, name: &str, values: &[SigId]) -> Result<FirId, SignalFirError> {
+        let mut args = Vec::with_capacity(values.len());
+        for v in values {
+            args.push(self.lower_signal(*v)?);
+        }
+        let mut fb = FirBuilder::new(&mut self.store);
+        Ok(fb.fun_call(name, &args, FirType::FaustFloat))
     }
 
     fn lower_cast(&mut self, typ: FirType, value: SigId) -> Result<FirId, SignalFirError> {
