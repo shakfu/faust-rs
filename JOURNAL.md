@@ -3380,3 +3380,26 @@ Execution plan (Phase 0 prototype, revised):
 - Rationale:
   - avoid fixture drift between backends,
   - ensure differential backend checks compare codegen behavior only, not differing FIR setup.
+
+#### Rustdoc reinforcement for C/C++ backends (public contracts and limits)
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/codegen/src/backends/c/mod.rs`
+  - `crates/codegen/src/backends/cpp/mod.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - expanded module-level docs for both backends with:
+    - input model (`FIR Module`),
+    - output contract (generated API shape),
+    - current emitter limitations.
+  - documented public API behavior:
+    - `backend_id`,
+    - `generate_c_module` / `generate_cpp_module`,
+    - option semantics (including output arity inference when `num_outputs == 0`).
+  - documented error API more explicitly:
+    - stable textual error codes (`as_str`),
+    - constructors/accessors (`new`, `code`).
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p codegen --all-targets`

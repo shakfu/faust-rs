@@ -9,6 +9,16 @@
 //! This backend follows a module-first contract:
 //! input must be a FIR module node and code generation walks FIR through
 //! `match_fir` only.
+//!
+//! # Output contract
+//! - Emits `class <name> : public dsp`.
+//! - Emits Faust `dsp` lifecycle/API methods (`init`, `instance*`,
+//!   `buildUserInterface`, `compute`, `getNumInputs/Outputs`, `metadata`).
+//! - Emits `compute(int count, FAUSTFLOAT** RESTRICT, FAUSTFLOAT** RESTRICT)`
+//!   with a per-sample loop and channel writes.
+//!
+//! # Limitations
+//! Unsupported FIR nodes currently fail fast with `FRS-CGEN-CPP-0003`.
 
 use std::fmt::Write as _;
 
@@ -64,6 +74,7 @@ pub enum CodegenErrorCode {
 }
 
 impl CodegenErrorCode {
+    /// Stable textual code used in diagnostics and tests.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -82,6 +93,7 @@ pub struct CodegenError {
 }
 
 impl CodegenError {
+    /// Creates a typed C++ backend code generation error.
     #[must_use]
     pub fn new(code: CodegenErrorCode, message: impl Into<String>) -> Self {
         Self {
@@ -90,6 +102,7 @@ impl CodegenError {
         }
     }
 
+    /// Returns the stable backend error code.
     #[must_use]
     pub fn code(&self) -> CodegenErrorCode {
         self.code
@@ -134,6 +147,12 @@ enum EmitMode {
 /// # C++ parity mapping
 /// This is the Rust module-first entrypoint corresponding to C++ `ModuleInst`
 /// visitor-based emission.
+///
+/// # Options behavior
+/// - `class_name`: overrides FIR module name.
+/// - `namespace`: wraps the generated class in `namespace <name>`.
+/// - `num_inputs`/`num_outputs`: drive `getNumInputs/Outputs`; when
+///   `num_outputs == 0`, output arity is inferred from `compute` drops.
 ///
 /// # Errors
 /// Returns [`CodegenError`] with code `FRS-CGEN-CPP-0001` when `module`
@@ -1029,6 +1048,7 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
 }
 
 #[must_use]
+/// Returns the stable backend identifier (`"cpp"`).
 pub fn backend_id() -> &'static str {
     BACKEND_NAME
 }

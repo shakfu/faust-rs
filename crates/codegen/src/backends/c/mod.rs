@@ -8,6 +8,18 @@
 //! - Module-first emission from FIR `Module`.
 //! - C API style output (`typedef struct`, `new/delete/init/buildUI/compute`).
 //! - `compute` emits a sample loop and writes signal outputs to `outputs[]`.
+//!
+//! # Output contract
+//! - Emits C header-style unit with include guard + `extern "C"` section.
+//! - Emits `typedef struct { ... } <name>;` as DSP state container.
+//! - Emits Faust C-style exported functions:
+//!   `new*`, `delete*`, `metadata*`, `getNum*`, `init*`, `buildUserInterface*`,
+//!   `compute*`.
+//! - Emits `compute*(..., int count, FAUSTFLOAT** RESTRICT, FAUSTFLOAT** RESTRICT)`
+//!   with a per-sample loop and channel writes.
+//!
+//! # Limitations
+//! Unsupported FIR nodes currently fail fast with `FRS-CGEN-C-0003`.
 
 use std::fmt::Write as _;
 
@@ -59,6 +71,7 @@ pub enum CodegenErrorCode {
 }
 
 impl CodegenErrorCode {
+    /// Stable textual code used in diagnostics and tests.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -133,6 +146,7 @@ struct DeclareFunView {
 }
 
 #[must_use]
+/// Returns the stable backend identifier (`"c"`).
 pub fn backend_id() -> &'static str {
     BACKEND_NAME
 }
@@ -151,6 +165,11 @@ pub fn backend_id() -> &'static str {
 /// # Errors
 /// Returns [`CodegenError`] if the root is not a FIR module or if the module
 /// contains unsupported FIR nodes for the current C emitter slice.
+///
+/// # Options behavior
+/// - `class_name`: overrides FIR module name.
+/// - `num_inputs`/`num_outputs`: drive `getNumInputs*`/`getNumOutputs*`; when
+///   `num_outputs == 0`, output arity is inferred from `compute` drops.
 pub fn generate_c_module(
     store: &FirStore,
     module: FirId,
