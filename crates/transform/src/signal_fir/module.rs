@@ -13,6 +13,11 @@
 //! - sectioned FIR module assembly (`metadata`, `instanceConstants`,
 //!   `instanceResetUserInterface`, `instanceClear`, `buildUserInterface`, `compute`).
 //!
+//! Section placement policy (Step 3B):
+//! - `instanceConstants`: table initialization and compile-time constants.
+//! - `instanceResetUserInterface`: UI zone reset values.
+//! - `instanceClear`: runtime signal state reset values (delay/rec state).
+//!
 //! Other signal families still return typed `FRS-SFIR-*` errors.
 
 use std::collections::{HashMap, HashSet};
@@ -649,13 +654,14 @@ impl<'a> SignalToFirLower<'a> {
         for value in values {
             lowered_values.push(self.lower_signal(*value)?);
         }
+        let declared_zeros = self.zero_table_values(values.len());
         let name = format!("table_n{}", sig.as_u32());
         let mut b = FirBuilder::new(&mut self.store);
         let decl = b.declare_table(
             name.clone(),
             AccessType::Struct,
             FirType::FaustFloat,
-            &lowered_values,
+            &declared_zeros,
         );
         self.struct_declarations.push(decl);
         for (index, value) in lowered_values.iter().copied().enumerate() {
@@ -684,13 +690,14 @@ impl<'a> SignalToFirLower<'a> {
     ) -> Result<(String, usize), SignalFirError> {
         let size = self.table_size_from_sig(size_sig)?;
         let generated = self.expand_generator_values(generator_sig, size)?;
+        let declared_zeros = self.zero_table_values(size);
         let name = format!("table_n{}", sig.as_u32());
         let mut b = FirBuilder::new(&mut self.store);
         let decl = b.declare_table(
             name.clone(),
             AccessType::Struct,
             FirType::FaustFloat,
-            &generated,
+            &declared_zeros,
         );
         self.struct_declarations.push(decl);
         for (index, value) in generated.iter().copied().enumerate() {
@@ -709,6 +716,11 @@ impl<'a> SignalToFirLower<'a> {
         self.waveform_tables.insert(sig, name.clone());
         self.waveform_table_len.insert(sig, size);
         Ok((name, size))
+    }
+
+    fn zero_table_values(&mut self, size: usize) -> Vec<FirId> {
+        let zero = self.float_const(0.0);
+        vec![zero; size]
     }
 
     fn table_size_from_sig(&self, size_sig: SigId) -> Result<usize, SignalFirError> {

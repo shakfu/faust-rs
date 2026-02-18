@@ -1045,6 +1045,17 @@ Validation commands:
 - Pass criteria:
   - `compiler` can emit C and C++ from real `.dsp` through this lane.
 
+Current Step 3/3B status (implemented slice):
+
+- Fast-lane now emits explicit sectioned functions:
+  - `metadata`, `instanceConstants`, `instanceResetUserInterface`,
+    `instanceClear`, `buildUserInterface`, `compute`.
+- Section-placement policy currently enforced in Rust lowering:
+  - table init writes in `instanceConstants`,
+  - UI zone reset writes in `instanceResetUserInterface`,
+  - runtime state reset writes in `instanceClear`.
+- Coverage is locked by transform unit tests that assert section content routing.
+
 #### Step 7 — Compiler integration (explicit experimental route)
 
 - Deliverables:

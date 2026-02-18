@@ -95,6 +95,30 @@ mod tests {
     use signals::{BinOp, SigBuilder};
     use tlib::TreeArena;
 
+    fn find_decl_fun_body(
+        store: &fir::FirStore,
+        declarations: fir::FirId,
+        target: &str,
+    ) -> fir::FirId {
+        let FirMatch::Block(decls) = match_fir(store, declarations) else {
+            panic!("declarations block expected");
+        };
+        let fun = decls
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    match_fir(store, *id),
+                    FirMatch::DeclareFun { ref name, .. } if name == target
+                )
+            })
+            .unwrap_or_else(|| panic!("function `{target}` expected"));
+        let FirMatch::DeclareFun { body, .. } = match_fir(store, fun) else {
+            panic!("declare fun expected for `{target}`");
+        };
+        body
+    }
+
     #[test]
     fn non_empty_signal_list_returns_fir_module_root() {
         let mut arena = TreeArena::new();
@@ -189,6 +213,95 @@ mod tests {
 
         assert_eq!(err.code(), SignalFirErrorCode::InvalidOptions);
         assert_eq!(err.code().as_str(), "FRS-SFIR-0001");
+    }
+
+    #[test]
+    fn section_routing_places_ui_and_state_resets_in_distinct_functions() {
+        let mut arena = TreeArena::new();
+        let gain = arena.symbol("gain");
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let init = b.real(0.2);
+            let min = b.real(0.0);
+            let max = b.real(1.0);
+            let step = b.real(0.01);
+            let slider = b.hslider(gain, init, min, max, step);
+            let delayed = b.delay1(slider);
+            let in0 = b.input(0);
+            b.binop(BinOp::Add, delayed, in0)
+        };
+        let out =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+                .expect("sectioned module should compile");
+
+        let FirMatch::Module { declarations, .. } = match_fir(&out.store, out.module) else {
+            panic!("module root expected");
+        };
+        let reset_body = find_decl_fun_body(&out.store, declarations, "instanceResetUserInterface");
+        let clear_body = find_decl_fun_body(&out.store, declarations, "instanceClear");
+
+        let FirMatch::Block(reset_stmts) = match_fir(&out.store, reset_body) else {
+            panic!("reset body block expected");
+        };
+        let FirMatch::Block(clear_stmts) = match_fir(&out.store, clear_body) else {
+            panic!("clear body block expected");
+        };
+
+        assert!(
+            reset_stmts.iter().any(|id| matches!(
+                match_fir(&out.store, *id),
+                FirMatch::StoreVar { ref name, .. } if name.starts_with("fUiCtl")
+            )),
+            "UI zone init should be emitted in instanceResetUserInterface"
+        );
+        assert!(
+            clear_stmts.iter().any(|id| matches!(
+                match_fir(&out.store, *id),
+                FirMatch::StoreVar { ref name, .. } if name.starts_with("state_n")
+            )),
+            "signal state init should be emitted in instanceClear"
+        );
+    }
+
+    #[test]
+    fn section_routing_places_table_initialization_in_instance_constants() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let size = b.int(4);
+            let init = b.real(0.5);
+            let ridx = b.input(0);
+            b.read_only_table(size, init, ridx)
+        };
+        let out =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+                .expect("table section routing should compile");
+
+        let FirMatch::Module { declarations, .. } = match_fir(&out.store, out.module) else {
+            panic!("module root expected");
+        };
+        let constants_body = find_decl_fun_body(&out.store, declarations, "instanceConstants");
+        let clear_body = find_decl_fun_body(&out.store, declarations, "instanceClear");
+
+        let FirMatch::Block(constants_stmts) = match_fir(&out.store, constants_body) else {
+            panic!("constants body block expected");
+        };
+        let FirMatch::Block(clear_stmts) = match_fir(&out.store, clear_body) else {
+            panic!("clear body block expected");
+        };
+
+        assert!(
+            constants_stmts
+                .iter()
+                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::StoreTable { .. })),
+            "table initialization should be emitted in instanceConstants"
+        );
+        assert!(
+            !clear_stmts
+                .iter()
+                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::StoreTable { .. })),
+            "instanceClear should not contain table initialization stores"
+        );
     }
 
     #[test]

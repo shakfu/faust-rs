@@ -3961,3 +3961,28 @@ Execution plan (Phase 0 prototype, revised):
     - confirms emitted functions include:
       `metadata`, `instanceConstants`, `instanceResetUserInterface`,
       `instanceClear`, `buildUserInterface`, `compute`.
+
+#### signalFIRCompiler fast-lane: Step 3B section-placement alignment (tables/UI/state)
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/mod.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - tightened and documented section placement policy:
+    - `instanceConstants`: table initialization writes,
+    - `instanceResetUserInterface`: UI zone reset stores,
+    - `instanceClear`: runtime signal state reset stores (`state_n*`).
+  - adjusted table declaration strategy:
+    - struct table declarations are emitted with zero-initialized literal payload,
+    - effective values are written explicitly in `instanceConstants` via `StoreTable`.
+  - added section-content tests (not just section-presence):
+    - `section_routing_places_ui_and_state_resets_in_distinct_functions`,
+    - `section_routing_places_table_initialization_in_instance_constants`.
+  - kept existing fast-lane integration suite green (`signal_fir_lane`).
+- Validation:
+  - `cargo fmt -p transform`
+  - `cargo test -p transform --all-targets`
+  - `cargo clippy -p transform --all-targets -- -D warnings`
+  - `cargo test -p compiler --test signal_fir_lane`
