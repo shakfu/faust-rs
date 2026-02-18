@@ -14,6 +14,7 @@ Rust workspace for the Faust compiler port.
 - `porting/faust-rust-error-flow-en.md`: concise parser -> eval -> propagate error flow
 - `porting/phases/`: detailed phase-by-phase execution notes (`phase-0` to `phase-9`)
 - `docs/user-diagnostics-guide-en.md`: user-oriented diagnostics guide
+- `docs/user-cli-guide-en.md`: user-oriented CLI options reference
 
 ## Suggested reading order
 
@@ -48,6 +49,14 @@ Run the scaffold CLI binary:
 cargo run -p compiler
 ```
 
+Install and use the CLI binary directly:
+
+```bash
+cargo install --path crates/compiler
+faust-rs -lang c foo.dsp
+faust-rs -lang cpp foo.dsp
+```
+
 Run parser/signal diagnostics with explicit output controls:
 
 ```bash
@@ -65,6 +74,7 @@ cargo run -p compiler -- --dump-sig tests/corpus/err_03_propagate_split_mismatch
 ```
 
 See `docs/user-diagnostics-guide-en.md` for a quick reading guide of `cause/rule/computed/help`.
+See `docs/user-cli-guide-en.md` for full CLI modes/options and compatibility rules.
 
 ## C++ golden outputs
 
