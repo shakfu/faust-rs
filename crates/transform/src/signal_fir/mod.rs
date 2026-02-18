@@ -118,10 +118,33 @@ mod tests {
         let FirMatch::Block(decls) = match_fir(&out.store, declarations) else {
             panic!("module declarations block expected");
         };
+        for required_name in [
+            "metadata",
+            "instanceConstants",
+            "instanceResetUserInterface",
+            "instanceClear",
+            "buildUserInterface",
+            "compute",
+        ] {
+            assert!(
+                decls.iter().any(|id| {
+                    matches!(
+                        match_fir(&out.store, *id),
+                        FirMatch::DeclareFun { ref name, .. } if name == required_name
+                    )
+                }),
+                "section function `{required_name}` must exist in fast-lane module"
+            );
+        }
         let compute = decls
             .iter()
             .copied()
-            .find(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareFun { .. }))
+            .find(|id| {
+                matches!(
+                    match_fir(&out.store, *id),
+                    FirMatch::DeclareFun { ref name, .. } if name == "compute"
+                )
+            })
             .expect("compute declaration expected");
         let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
             panic!("declare fun expected");
@@ -224,7 +247,12 @@ mod tests {
         let compute = decls
             .iter()
             .copied()
-            .find(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareFun { .. }))
+            .find(|id| {
+                matches!(
+                    match_fir(&out.store, *id),
+                    FirMatch::DeclareFun { ref name, .. } if name == "compute"
+                )
+            })
             .expect("compute declaration expected");
         let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
             panic!("declare fun expected");
@@ -316,7 +344,12 @@ mod tests {
         let compute = decls
             .iter()
             .copied()
-            .find(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareFun { .. }))
+            .find(|id| {
+                matches!(
+                    match_fir(&out.store, *id),
+                    FirMatch::DeclareFun { ref name, .. } if name == "compute"
+                )
+            })
             .expect("compute declaration expected");
         let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
             panic!("declare fun expected");
@@ -396,7 +429,12 @@ mod tests {
         let compute = decls
             .iter()
             .copied()
-            .find(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareFun { .. }))
+            .find(|id| {
+                matches!(
+                    match_fir(&out.store, *id),
+                    FirMatch::DeclareFun { ref name, .. } if name == "compute"
+                )
+            })
             .expect("compute declaration expected");
         let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
             panic!("declare fun expected");
@@ -451,7 +489,12 @@ mod tests {
         let compute = decls
             .iter()
             .copied()
-            .find(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareFun { .. }))
+            .find(|id| {
+                matches!(
+                    match_fir(&out.store, *id),
+                    FirMatch::DeclareFun { ref name, .. } if name == "compute"
+                )
+            })
             .expect("compute declaration expected");
         let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
             panic!("declare fun expected");
@@ -503,7 +546,12 @@ mod tests {
         let compute = decls
             .iter()
             .copied()
-            .find(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareFun { .. }))
+            .find(|id| {
+                matches!(
+                    match_fir(&out.store, *id),
+                    FirMatch::DeclareFun { ref name, .. } if name == "compute"
+                )
+            })
             .expect("compute declaration expected");
         let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
             panic!("declare fun expected");

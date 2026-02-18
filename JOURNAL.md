@@ -3918,3 +3918,46 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo clippy -p xtask --all-targets -- -D warnings`
   - `cargo run -p xtask -- table-fastlane-diff-report`
   - `cargo test -p compiler --test signal_fir_lane`
+
+#### signalFIRCompiler fast-lane: Step 3 first sectioned FIR module slice
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/mod.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - moved from a mostly compute-only assembly to an explicit sectioned function
+    model in fast-lane FIR module emission:
+    - `metadata`,
+    - `instanceConstants`,
+    - `instanceResetUserInterface`,
+    - `instanceClear`,
+    - `buildUserInterface`,
+    - `compute`.
+  - introduced section-specific statement buffers in lowerer:
+    - `constants_statements`,
+    - `reset_statements`,
+    - `clear_statements`,
+    - `control_statements`,
+    - `sample_statements`.
+  - added deterministic init routing:
+    - state slots (`state_n*`) register init stores into `instanceClear`,
+    - named UI/control vars register init stores into
+      `instanceResetUserInterface`,
+    - table declarations register explicit `store_table` initialization in
+      `instanceConstants`.
+  - compute body now composes control metadata labels + sample/drop/update
+    statements explicitly (instead of one undifferentiated vector).
+  - updated transform tests to locate `compute` by function name and added
+    section-presence assertion in module declaration block.
+  - updated Rustdoc module comment to mention sectioned assembly.
+- Validation:
+  - `cargo fmt -p transform`
+  - `cargo test -p transform --all-targets`
+  - `cargo test -p compiler --test signal_fir_lane`
+  - `cargo clippy -p transform -p compiler --all-targets -- -D warnings`
+  - `cargo run -p compiler -- --dump-cpp tests/corpus/rep_35_table_rwtable_runtime_write.dsp --signal-fir-lane fast`
+    - confirms emitted functions include:
+      `metadata`, `instanceConstants`, `instanceResetUserInterface`,
+      `instanceClear`, `buildUserInterface`, `compute`.

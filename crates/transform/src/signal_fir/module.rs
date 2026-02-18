@@ -10,6 +10,8 @@
 //! - `SIGPROJ`/`SIGREC` (real lowering for canonical `DEBRUIJN`/`DEBRUIJNREF` recursion).
 //! - `SIGWAVEFORM`/`SIGRDTBL`/`SIGWRTBL` for direct waveform tables.
 //! - `SIGOUTPUT` passthrough nodes.
+//! - sectioned FIR module assembly (`metadata`, `instanceConstants`,
+//!   `instanceResetUserInterface`, `instanceClear`, `buildUserInterface`, `compute`).
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors.
 
@@ -34,28 +36,129 @@ pub fn build_module(
     signals: &[SigId],
 ) -> Result<SignalFirOutput, SignalFirError> {
     let mut lower = SignalToFirLower::new(arena, plan.num_inputs);
-    let mut statements = Vec::new();
 
     {
         let mut b = FirBuilder::new(&mut lower.store);
-        statements.push(b.label("signal_fir_fastlane_step2a: executable base slice"));
-        statements.push(b.label(format!(
+        lower
+            .control_statements
+            .push(b.label("signal_fir_fastlane_step2a: executable base slice"));
+        lower.control_statements.push(b.label(format!(
             "io: inputs={} outputs={}",
             plan.num_inputs, plan.num_outputs
         )));
-        statements.push(b.label(format!("signals: {}", plan.signal_count)));
+        lower
+            .control_statements
+            .push(b.label(format!("signals: {}", plan.signal_count)));
     }
 
     for sig in signals {
         let value = lower.lower_signal(*sig)?;
         let mut b = FirBuilder::new(&mut lower.store);
-        statements.push(b.drop_(value));
+        lower.sample_statements.push(b.drop_(value));
     }
-    statements.extend(lower.compute_updates.iter().copied());
+    lower
+        .sample_statements
+        .extend(lower.compute_updates.iter().copied());
 
+    let metadata_body = {
+        let mut b = FirBuilder::new(&mut lower.store);
+        b.block(&[])
+    };
+    let metadata = {
+        let mut b = FirBuilder::new(&mut lower.store);
+        b.declare_fun(
+            "metadata",
+            FirType::Fun {
+                args: Vec::new(),
+                ret: Box::new(FirType::Void),
+            },
+            &[],
+            metadata_body,
+            false,
+        )
+    };
+
+    let constants_body = {
+        let mut b = FirBuilder::new(&mut lower.store);
+        b.block(&lower.constants_statements)
+    };
+    let instance_constants = {
+        let mut b = FirBuilder::new(&mut lower.store);
+        b.declare_fun(
+            "instanceConstants",
+            FirType::Fun {
+                args: Vec::new(),
+                ret: Box::new(FirType::Void),
+            },
+            &[],
+            constants_body,
+            false,
+        )
+    };
+
+    let reset_body = {
+        let mut b = FirBuilder::new(&mut lower.store);
+        b.block(&lower.reset_statements)
+    };
+    let instance_reset_ui = {
+        let mut b = FirBuilder::new(&mut lower.store);
+        b.declare_fun(
+            "instanceResetUserInterface",
+            FirType::Fun {
+                args: Vec::new(),
+                ret: Box::new(FirType::Void),
+            },
+            &[],
+            reset_body,
+            false,
+        )
+    };
+
+    let clear_body = {
+        let mut b = FirBuilder::new(&mut lower.store);
+        b.block(&lower.clear_statements)
+    };
+    let instance_clear = {
+        let mut b = FirBuilder::new(&mut lower.store);
+        b.declare_fun(
+            "instanceClear",
+            FirType::Fun {
+                args: Vec::new(),
+                ret: Box::new(FirType::Void),
+            },
+            &[],
+            clear_body,
+            false,
+        )
+    };
+
+    let ui_body = {
+        let mut b = FirBuilder::new(&mut lower.store);
+        b.block(&lower.ui_statements)
+    };
+    let build_ui = {
+        let mut b = FirBuilder::new(&mut lower.store);
+        b.declare_fun(
+            "buildUserInterface",
+            FirType::Fun {
+                args: Vec::new(),
+                ret: Box::new(FirType::Void),
+            },
+            &[],
+            ui_body,
+            false,
+        )
+    };
+
+    let compute_statements = {
+        let mut all = Vec::new();
+        all.extend(lower.control_statements.iter().copied());
+        all.extend(lower.sample_statements.iter().copied());
+        all
+    };
     let compute_body = {
         let mut b = FirBuilder::new(&mut lower.store);
-        b.block(&statements)
+        b.block(&compute_statements)
     };
     let compute = {
         let mut b = FirBuilder::new(&mut lower.store);
@@ -70,33 +173,17 @@ pub fn build_module(
             false,
         )
     };
-    let build_ui = if lower.ui_statements.is_empty() {
-        None
-    } else {
-        let ui_body = {
-            let mut b = FirBuilder::new(&mut lower.store);
-            b.block(&lower.ui_statements)
-        };
-        let mut b = FirBuilder::new(&mut lower.store);
-        Some(b.declare_fun(
-            "buildUserInterface",
-            FirType::Fun {
-                args: Vec::new(),
-                ret: Box::new(FirType::Void),
-            },
-            &[],
-            ui_body,
-            false,
-        ))
-    };
 
     let declarations = {
         let mut b = FirBuilder::new(&mut lower.store);
-        if let Some(build_ui) = build_ui {
-            b.block(&[build_ui, compute])
-        } else {
-            b.block(&[compute])
-        }
+        b.block(&[
+            metadata,
+            instance_constants,
+            instance_reset_ui,
+            instance_clear,
+            build_ui,
+            compute,
+        ])
     };
     let dsp_struct = {
         let mut b = FirBuilder::new(&mut lower.store);
@@ -123,6 +210,11 @@ struct SignalToFirLower<'a> {
     store: FirStore,
     cache: HashMap<SigId, FirId>,
     struct_declarations: Vec<FirId>,
+    constants_statements: Vec<FirId>,
+    reset_statements: Vec<FirId>,
+    clear_statements: Vec<FirId>,
+    control_statements: Vec<FirId>,
+    sample_statements: Vec<FirId>,
     compute_updates: Vec<FirId>,
     state_name_by_node: HashMap<SigId, String>,
     scheduled_state_updates: HashSet<SigId>,
@@ -133,6 +225,8 @@ struct SignalToFirLower<'a> {
     waveform_table_len: HashMap<SigId, usize>,
     ui_statements: Vec<FirId>,
     named_struct_vars: HashSet<String>,
+    reset_init_seen: HashSet<String>,
+    clear_init_seen: HashSet<String>,
 }
 
 impl<'a> SignalToFirLower<'a> {
@@ -143,6 +237,11 @@ impl<'a> SignalToFirLower<'a> {
             store: FirStore::new(),
             cache: HashMap::new(),
             struct_declarations: Vec::new(),
+            constants_statements: Vec::new(),
+            reset_statements: Vec::new(),
+            clear_statements: Vec::new(),
+            control_statements: Vec::new(),
+            sample_statements: Vec::new(),
             compute_updates: Vec::new(),
             state_name_by_node: HashMap::new(),
             scheduled_state_updates: HashSet::new(),
@@ -153,6 +252,8 @@ impl<'a> SignalToFirLower<'a> {
             waveform_table_len: HashMap::new(),
             ui_statements: Vec::new(),
             named_struct_vars: HashSet::new(),
+            reset_init_seen: HashSet::new(),
+            clear_init_seen: HashSet::new(),
         }
     }
 
@@ -352,6 +453,7 @@ impl<'a> SignalToFirLower<'a> {
             Some(init),
         );
         self.struct_declarations.push(dec);
+        self.register_clear_init(name.clone(), init);
         self.state_name_by_node.insert(node, name.clone());
         name
     }
@@ -556,6 +658,19 @@ impl<'a> SignalToFirLower<'a> {
             &lowered_values,
         );
         self.struct_declarations.push(decl);
+        for (index, value) in lowered_values.iter().copied().enumerate() {
+            let index = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.int32(i32::try_from(index).unwrap_or(i32::MAX))
+            };
+            let mut b = FirBuilder::new(&mut self.store);
+            self.constants_statements.push(b.store_table(
+                name.clone(),
+                AccessType::Struct,
+                index,
+                value,
+            ));
+        }
         self.waveform_tables.insert(sig, name.clone());
         self.waveform_table_len.insert(sig, values.len());
         Ok(name)
@@ -578,6 +693,19 @@ impl<'a> SignalToFirLower<'a> {
             &generated,
         );
         self.struct_declarations.push(decl);
+        for (index, value) in generated.iter().copied().enumerate() {
+            let index = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.int32(i32::try_from(index).unwrap_or(i32::MAX))
+            };
+            let mut b = FirBuilder::new(&mut self.store);
+            self.constants_statements.push(b.store_table(
+                name.clone(),
+                AccessType::Struct,
+                index,
+                value,
+            ));
+        }
         self.waveform_tables.insert(sig, name.clone());
         self.waveform_table_len.insert(sig, size);
         Ok((name, size))
@@ -670,6 +798,27 @@ impl<'a> SignalToFirLower<'a> {
         let dec = b.declare_var(name.to_owned(), typ, AccessType::Struct, init);
         self.struct_declarations.push(dec);
         self.named_struct_vars.insert(name.to_owned());
+        if let Some(init) = init {
+            self.register_reset_init(name.to_owned(), init);
+        }
+    }
+
+    fn register_reset_init(&mut self, name: String, init: FirId) {
+        if !self.reset_init_seen.insert(name.clone()) {
+            return;
+        }
+        let mut b = FirBuilder::new(&mut self.store);
+        self.reset_statements
+            .push(b.store_var(name, AccessType::Struct, init));
+    }
+
+    fn register_clear_init(&mut self, name: String, init: FirId) {
+        if !self.clear_init_seen.insert(name.clone()) {
+            return;
+        }
+        let mut b = FirBuilder::new(&mut self.store);
+        self.clear_statements
+            .push(b.store_var(name, AccessType::Struct, init));
     }
 
     fn unsupported_node<T>(&self, sig: SigId, detail: &str) -> Result<T, SignalFirError> {
