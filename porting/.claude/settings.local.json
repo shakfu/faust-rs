@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(find:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo test:*)",
+      "Bash(git stash:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo run:*)",
+      "Bash(git commit:*)"
     ]
   }
 }
