@@ -1,6 +1,7 @@
 //! CLI entry point.
 
 use boxes::dump_box;
+use clap::{ArgAction, Parser, ValueEnum};
 use codegen::backends::c::COptions;
 use codegen::backends::cpp::CppOptions;
 use compiler::{Compiler, CompilerError, SignalFirLane, golden_snapshot_from_file};
@@ -9,21 +10,21 @@ use serde_json::json;
 use signals::dump_sig_readable;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 enum ErrorFormat {
     #[default]
     Human,
     Json,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 enum ErrorVerbosity {
     #[default]
     Standard,
     Debug,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 enum CliSignalFirLane {
     #[default]
     Legacy,
@@ -39,155 +40,57 @@ impl CliSignalFirLane {
     }
 }
 
-fn parse_input_with_import_dirs_and_format(
-    mut args: impl Iterator<Item = String>,
-    usage: &str,
-) -> (PathBuf, Vec<PathBuf>, ErrorFormat, ErrorVerbosity) {
-    let Some(input) = args.next() else {
-        eprintln!("{usage}");
-        std::process::exit(2);
-    };
-
-    let mut search_paths = Vec::new();
-    let mut error_format = ErrorFormat::Human;
-    let mut error_verbosity = ErrorVerbosity::Standard;
-    while let Some(flag) = args.next() {
-        match flag.as_str() {
-            "-I" | "--import-dir" => {
-                let Some(dir) = args.next() else {
-                    eprintln!("{usage}");
-                    std::process::exit(2);
-                };
-                search_paths.push(PathBuf::from(dir));
-            }
-            "--error-format" => {
-                let Some(format) = args.next() else {
-                    eprintln!("{usage}");
-                    std::process::exit(2);
-                };
-                error_format = match format.as_str() {
-                    "human" => ErrorFormat::Human,
-                    "json" => ErrorFormat::Json,
-                    _ => {
-                        eprintln!("{usage}");
-                        std::process::exit(2);
-                    }
-                };
-            }
-            "--error-verbosity" => {
-                let Some(level) = args.next() else {
-                    eprintln!("{usage}");
-                    std::process::exit(2);
-                };
-                error_verbosity = match level.as_str() {
-                    "standard" => ErrorVerbosity::Standard,
-                    "debug" => ErrorVerbosity::Debug,
-                    _ => {
-                        eprintln!("{usage}");
-                        std::process::exit(2);
-                    }
-                };
-            }
-            _ => {
-                eprintln!("{usage}");
-                std::process::exit(2);
-            }
-        }
-    }
-
-    (
-        PathBuf::from(input),
-        search_paths,
-        error_format,
-        error_verbosity,
-    )
-}
-
-fn parse_dump_codegen_input(
-    mut args: impl Iterator<Item = String>,
-    usage: &str,
-) -> (
-    PathBuf,
-    Vec<PathBuf>,
-    CliSignalFirLane,
-    ErrorFormat,
-    ErrorVerbosity,
-) {
-    let Some(input) = args.next() else {
-        eprintln!("{usage}");
-        std::process::exit(2);
-    };
-
-    let mut search_paths = Vec::new();
-    let mut lane = CliSignalFirLane::Legacy;
-    let mut error_format = ErrorFormat::Human;
-    let mut error_verbosity = ErrorVerbosity::Standard;
-
-    while let Some(flag) = args.next() {
-        match flag.as_str() {
-            "-I" | "--import-dir" => {
-                let Some(dir) = args.next() else {
-                    eprintln!("{usage}");
-                    std::process::exit(2);
-                };
-                search_paths.push(PathBuf::from(dir));
-            }
-            "--signal-fir-lane" => {
-                let Some(v) = args.next() else {
-                    eprintln!("{usage}");
-                    std::process::exit(2);
-                };
-                lane = match v.as_str() {
-                    "legacy" => CliSignalFirLane::Legacy,
-                    "fast" => CliSignalFirLane::Fast,
-                    _ => {
-                        eprintln!("{usage}");
-                        std::process::exit(2);
-                    }
-                };
-            }
-            "--error-format" => {
-                let Some(format) = args.next() else {
-                    eprintln!("{usage}");
-                    std::process::exit(2);
-                };
-                error_format = match format.as_str() {
-                    "human" => ErrorFormat::Human,
-                    "json" => ErrorFormat::Json,
-                    _ => {
-                        eprintln!("{usage}");
-                        std::process::exit(2);
-                    }
-                };
-            }
-            "--error-verbosity" => {
-                let Some(level) = args.next() else {
-                    eprintln!("{usage}");
-                    std::process::exit(2);
-                };
-                error_verbosity = match level.as_str() {
-                    "standard" => ErrorVerbosity::Standard,
-                    "debug" => ErrorVerbosity::Debug,
-                    _ => {
-                        eprintln!("{usage}");
-                        std::process::exit(2);
-                    }
-                };
-            }
-            _ => {
-                eprintln!("{usage}");
-                std::process::exit(2);
-            }
-        }
-    }
-
-    (
-        PathBuf::from(input),
-        search_paths,
-        lane,
-        error_format,
-        error_verbosity,
-    )
+/// Command-line arguments for the compiler binary.
+///
+/// Legacy mode flags are intentionally kept (`--parse`, `--dump-box`, etc.)
+/// to avoid breaking existing scripts while benefiting from robust `clap`
+/// parsing and help generation.
+#[derive(Debug, Parser)]
+#[command(name = "faust-rs", disable_version_flag = true)]
+struct CliArgs {
+    /// Generate the golden snapshot output for one DSP file.
+    #[arg(long, action = ArgAction::SetTrue)]
+    golden: bool,
+    /// Parse one DSP file and print parser status.
+    #[arg(long, action = ArgAction::SetTrue)]
+    parse: bool,
+    /// Parse and dump box IR.
+    #[arg(long = "dump-box", action = ArgAction::SetTrue)]
+    dump_box: bool,
+    /// Compile to signals and dump signal IR.
+    #[arg(long = "dump-sig", action = ArgAction::SetTrue)]
+    dump_sig: bool,
+    /// Compile to C++ and print generated code.
+    #[arg(long = "dump-cpp", action = ArgAction::SetTrue)]
+    dump_cpp: bool,
+    /// Compile to C and print generated code.
+    #[arg(long = "dump-c", action = ArgAction::SetTrue)]
+    dump_c: bool,
+    /// Print dedicated help for diagnostic output formats and exit.
+    #[arg(long = "help-error-format", action = ArgAction::SetTrue)]
+    help_error_format: bool,
+    /// Optional DSP input file (required by operational modes).
+    input: Option<PathBuf>,
+    /// Extra import search directories.
+    #[arg(short = 'I', long = "import-dir")]
+    import_dir: Vec<PathBuf>,
+    /// Diagnostic output format.
+    #[arg(long = "error-format", value_enum, default_value_t = ErrorFormat::Human)]
+    error_format: ErrorFormat,
+    /// Diagnostic verbosity level.
+    #[arg(
+        long = "error-verbosity",
+        value_enum,
+        default_value_t = ErrorVerbosity::Standard
+    )]
+    error_verbosity: ErrorVerbosity,
+    /// Signal->FIR compilation lane (only valid with `--dump-cpp`/`--dump-c`).
+    #[arg(
+        long = "signal-fir-lane",
+        value_enum,
+        default_value_t = CliSignalFirLane::Legacy
+    )]
+    signal_fir_lane: CliSignalFirLane,
 }
 
 fn print_structured_diagnostics(
@@ -539,23 +442,6 @@ fn diagnostic_debug_from_notes(notes: &[Box<str>]) -> serde_json::Value {
     })
 }
 
-fn parse_dump_usage(mode: &str) -> String {
-    if mode == "dump-cpp" || mode == "dump-c" {
-        format!(
-            "Usage: cargo run -p compiler -- --{mode} <input.dsp> [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
-        )
-    } else {
-        format!(
-            "Usage: cargo run -p compiler -- --{mode} <input.dsp> [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
-        )
-    }
-}
-
-fn parse_usage() -> String {
-    "Usage: cargo run -p compiler -- --parse <input.dsp> [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
-        .to_owned()
-}
-
 fn print_global_usage_and_exit() -> ! {
     eprintln!("Usage:");
     eprintln!("  cargo run -p compiler -- --golden <input.dsp>");
@@ -577,8 +463,8 @@ fn print_global_usage_and_exit() -> ! {
     std::process::exit(2);
 }
 
-fn maybe_print_error_format_help(args: &[String]) {
-    if args.iter().any(|arg| arg == "--help-error-format") {
+fn maybe_print_error_format_help(enabled: bool) {
+    if enabled {
         println!("--error-format human|json");
         println!("--error-verbosity standard|debug");
         println!("  human: file:line:col severity [CODE] message");
@@ -590,187 +476,205 @@ fn maybe_print_error_format_help(args: &[String]) {
 }
 
 fn main() {
-    let argv = std::env::args().skip(1).collect::<Vec<_>>();
-    maybe_print_error_format_help(&argv);
-    let mut args = argv.into_iter();
-    match args.next().as_deref() {
-        Some("--golden") => {
-            let Some(input) = args.next() else {
-                eprintln!("Usage: cargo run -p compiler -- --golden <input.dsp>");
-                std::process::exit(2);
-            };
+    let cli = CliArgs::parse();
+    maybe_print_error_format_help(cli.help_error_format);
 
-            if args.next().is_some() {
-                eprintln!("Usage: cargo run -p compiler -- --golden <input.dsp>");
-                std::process::exit(2);
-            }
+    let mode_count = [
+        cli.golden,
+        cli.parse,
+        cli.dump_box,
+        cli.dump_sig,
+        cli.dump_cpp,
+        cli.dump_c,
+    ]
+    .into_iter()
+    .filter(|v| *v)
+    .count();
 
-            let input_path = PathBuf::from(input);
-            match golden_snapshot_from_file(&input_path) {
-                Ok(snapshot) => {
-                    print!("{snapshot}");
-                }
-                Err(err) => {
-                    eprintln!("Failed to create golden snapshot: {err}");
-                    std::process::exit(1);
-                }
-            }
-        }
-        Some("--parse") => {
-            let usage = parse_usage();
-            let (input_path, search_paths, error_format, error_verbosity) =
-                parse_input_with_import_dirs_and_format(args, &usage);
-            let compiler = Compiler::new();
-            let result = if search_paths.is_empty() {
-                compiler.compile_file_default(&input_path)
-            } else {
-                compiler.compile_file(&input_path, &search_paths)
-            };
+    if mode_count > 1 {
+        print_global_usage_and_exit();
+    }
 
-            match result {
-                Ok(out) => {
-                    println!(
-                        "Parsed OK: root={:?} parse_errors={} recoveries={}",
-                        out.root,
-                        out.errors.len(),
-                        out.state.ctx.recovery_count()
-                    );
-                }
-                Err(err) => {
-                    eprintln!("Parse failed: {err}");
-                    print_structured_diagnostics(&err, error_format, error_verbosity);
-                    std::process::exit(1);
-                }
-            }
-        }
-        Some("--dump-box") => {
-            let usage = parse_dump_usage("dump-box");
-            let (input_path, search_paths, error_format, error_verbosity) =
-                parse_input_with_import_dirs_and_format(args, &usage);
-            let compiler = Compiler::new();
-            let result = if search_paths.is_empty() {
-                compiler.compile_file_default(&input_path)
-            } else {
-                compiler.compile_file(&input_path, &search_paths)
-            };
-
-            match result {
-                Ok(out) => {
-                    let Some(root) = out.root else {
-                        eprintln!("Parse failed: no root node produced");
-                        std::process::exit(1);
-                    };
-                    println!("{}", dump_box(&out.state.arena, root));
-                }
-                Err(err) => {
-                    eprintln!("Parse failed: {err}");
-                    print_structured_diagnostics(&err, error_format, error_verbosity);
-                    std::process::exit(1);
-                }
-            }
-        }
-        Some("--dump-sig") => {
-            let usage = parse_dump_usage("dump-sig");
-            let (input_path, search_paths, error_format, error_verbosity) =
-                parse_input_with_import_dirs_and_format(args, &usage);
-            let compiler = Compiler::new();
-            let result = if search_paths.is_empty() {
-                compiler.compile_file_default_to_signals(&input_path)
-            } else {
-                compiler.compile_file_to_signals(&input_path, &search_paths)
-            };
-
-            match result {
-                Ok(out) => {
-                    println!(
-                        "Signals OK: inputs={} outputs={}",
-                        out.process_arity.inputs, out.process_arity.outputs
-                    );
-                    for (index, sig) in out.signals.iter().enumerate() {
-                        println!(
-                            "[{index}] {}",
-                            dump_sig_readable(&out.parse.state.arena, *sig)
-                        );
-                    }
-                }
-                Err(err) => {
-                    eprintln!("Signal pipeline failed: {err}");
-                    print_structured_diagnostics(&err, error_format, error_verbosity);
-                    std::process::exit(1);
-                }
-            }
-        }
-        Some("--dump-cpp") => {
-            let usage = parse_dump_usage("dump-cpp");
-            let (input_path, search_paths, lane, error_format, error_verbosity) =
-                parse_dump_codegen_input(args, &usage);
-            let compiler = Compiler::new();
-            let options = CppOptions::default();
-            let result = if search_paths.is_empty() {
-                compiler.compile_file_default_to_cpp_with_lane(
-                    &input_path,
-                    &options,
-                    lane.into_compiler_lane(),
-                )
-            } else {
-                compiler.compile_file_to_cpp_with_lane(
-                    &input_path,
-                    &search_paths,
-                    &options,
-                    lane.into_compiler_lane(),
-                )
-            };
-
-            match result {
-                Ok(cpp) => {
-                    print!("{cpp}");
-                }
-                Err(err) => {
-                    eprintln!("C++ pipeline failed: {err}");
-                    print_structured_diagnostics(&err, error_format, error_verbosity);
-                    std::process::exit(1);
-                }
-            }
-        }
-        Some("--dump-c") => {
-            let usage = parse_dump_usage("dump-c");
-            let (input_path, search_paths, lane, error_format, error_verbosity) =
-                parse_dump_codegen_input(args, &usage);
-            let compiler = Compiler::new();
-            let options = COptions::default();
-            let result = if search_paths.is_empty() {
-                compiler.compile_file_default_to_c_with_lane(
-                    &input_path,
-                    &options,
-                    lane.into_compiler_lane(),
-                )
-            } else {
-                compiler.compile_file_to_c_with_lane(
-                    &input_path,
-                    &search_paths,
-                    &options,
-                    lane.into_compiler_lane(),
-                )
-            };
-
-            match result {
-                Ok(c_code) => {
-                    print!("{c_code}");
-                }
-                Err(err) => {
-                    eprintln!("C pipeline failed: {err}");
-                    print_structured_diagnostics(&err, error_format, error_verbosity);
-                    std::process::exit(1);
-                }
-            }
-        }
-        None => {
-            println!("faust-rs compiler scaffold v{}", Compiler::version());
-        }
-        Some(_) => {
+    if mode_count == 0 {
+        if cli.input.is_some() {
             print_global_usage_and_exit();
         }
+        println!("faust-rs compiler scaffold v{}", Compiler::version());
+        return;
     }
+
+    let Some(input_path) = cli.input.as_ref() else {
+        print_global_usage_and_exit();
+    };
+
+    if (cli.dump_box || cli.dump_sig || cli.parse || cli.golden)
+        && cli.signal_fir_lane != CliSignalFirLane::Legacy
+    {
+        eprintln!("--signal-fir-lane is only valid with --dump-cpp/--dump-c");
+        std::process::exit(2);
+    }
+
+    if cli.golden {
+        if !cli.import_dir.is_empty() {
+            eprintln!("--import-dir is not supported with --golden");
+            std::process::exit(2);
+        }
+        match golden_snapshot_from_file(input_path) {
+            Ok(snapshot) => {
+                print!("{snapshot}");
+            }
+            Err(err) => {
+                eprintln!("Failed to create golden snapshot: {err}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if cli.parse {
+        let compiler = Compiler::new();
+        let result = if cli.import_dir.is_empty() {
+            compiler.compile_file_default(input_path)
+        } else {
+            compiler.compile_file(input_path, &cli.import_dir)
+        };
+
+        match result {
+            Ok(out) => {
+                println!(
+                    "Parsed OK: root={:?} parse_errors={} recoveries={}",
+                    out.root,
+                    out.errors.len(),
+                    out.state.ctx.recovery_count()
+                );
+            }
+            Err(err) => {
+                eprintln!("Parse failed: {err}");
+                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if cli.dump_box {
+        let compiler = Compiler::new();
+        let result = if cli.import_dir.is_empty() {
+            compiler.compile_file_default(input_path)
+        } else {
+            compiler.compile_file(input_path, &cli.import_dir)
+        };
+
+        match result {
+            Ok(out) => {
+                let Some(root) = out.root else {
+                    eprintln!("Parse failed: no root node produced");
+                    std::process::exit(1);
+                };
+                println!("{}", dump_box(&out.state.arena, root));
+            }
+            Err(err) => {
+                eprintln!("Parse failed: {err}");
+                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if cli.dump_sig {
+        let compiler = Compiler::new();
+        let result = if cli.import_dir.is_empty() {
+            compiler.compile_file_default_to_signals(input_path)
+        } else {
+            compiler.compile_file_to_signals(input_path, &cli.import_dir)
+        };
+
+        match result {
+            Ok(out) => {
+                println!(
+                    "Signals OK: inputs={} outputs={}",
+                    out.process_arity.inputs, out.process_arity.outputs
+                );
+                for (index, sig) in out.signals.iter().enumerate() {
+                    println!(
+                        "[{index}] {}",
+                        dump_sig_readable(&out.parse.state.arena, *sig)
+                    );
+                }
+            }
+            Err(err) => {
+                eprintln!("Signal pipeline failed: {err}");
+                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if cli.dump_cpp {
+        let compiler = Compiler::new();
+        let options = CppOptions::default();
+        let result = if cli.import_dir.is_empty() {
+            compiler.compile_file_default_to_cpp_with_lane(
+                input_path,
+                &options,
+                cli.signal_fir_lane.into_compiler_lane(),
+            )
+        } else {
+            compiler.compile_file_to_cpp_with_lane(
+                input_path,
+                &cli.import_dir,
+                &options,
+                cli.signal_fir_lane.into_compiler_lane(),
+            )
+        };
+
+        match result {
+            Ok(cpp) => {
+                print!("{cpp}");
+            }
+            Err(err) => {
+                eprintln!("C++ pipeline failed: {err}");
+                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if cli.dump_c {
+        let compiler = Compiler::new();
+        let options = COptions::default();
+        let result = if cli.import_dir.is_empty() {
+            compiler.compile_file_default_to_c_with_lane(
+                input_path,
+                &options,
+                cli.signal_fir_lane.into_compiler_lane(),
+            )
+        } else {
+            compiler.compile_file_to_c_with_lane(
+                input_path,
+                &cli.import_dir,
+                &options,
+                cli.signal_fir_lane.into_compiler_lane(),
+            )
+        };
+
+        match result {
+            Ok(c_code) => {
+                print!("{c_code}");
+            }
+            Err(err) => {
+                eprintln!("C pipeline failed: {err}");
+                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    print_global_usage_and_exit();
 }
 
 #[cfg(test)]

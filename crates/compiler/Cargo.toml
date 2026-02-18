@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 errors = { path = "../errors" }
 parser = { path = "../parser" }
 codegen = { path = "../codegen" }

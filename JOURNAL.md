@@ -4155,3 +4155,27 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo fmt --all`
   - `cargo check --workspace --all-targets`
+
+#### Compiler CLI: migrate argument parsing to `clap` (compat flags kept)
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/compiler/Cargo.toml`
+  - `crates/compiler/src/main.rs`
+- Implemented:
+  - replaced manual `std::env::args` parsing with `clap` derive parser.
+  - kept existing operational flags for compatibility:
+    - `--golden`, `--parse`, `--dump-box`, `--dump-sig`, `--dump-cpp`, `--dump-c`.
+  - kept shared options with typed validation:
+    - `-I/--import-dir`, `--error-format`, `--error-verbosity`, `--signal-fir-lane`.
+  - kept dedicated diagnostic-help behavior:
+    - `--help-error-format`.
+  - added mode consistency checks:
+    - single active mode required,
+    - `--signal-fir-lane` rejected outside `--dump-cpp/--dump-c`,
+    - `--golden` rejects `--import-dir`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p compiler --all-targets`
+  - `cargo run -p compiler -- --help-error-format`
+  - `cargo run -p compiler -- --parse tests/corpus/rep_05_one_pole_lowpass.dsp`
