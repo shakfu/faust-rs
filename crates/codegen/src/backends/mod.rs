@@ -1,5 +1,7 @@
 //! Backend modules colocated under `codegen`.
 
+pub(crate) mod faust_api;
+
 pub mod c;
 pub mod cmajor;
 pub mod codebox;

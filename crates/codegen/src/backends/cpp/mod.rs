@@ -24,6 +24,8 @@ use std::fmt::Write as _;
 
 use fir::{FirBinOp, FirId, FirMatch, FirStore, FirType, NamedType, match_fir};
 
+use crate::backends::faust_api;
+
 pub const BACKEND_NAME: &str = "cpp";
 
 /// C++ backend options for module-first emission.
@@ -792,7 +794,8 @@ fn emit_declare_fun(
     decl: DeclareFunView<'_>,
     indent: usize,
 ) -> Result<(), CodegenError> {
-    validate_faust_api_signature(&decl)?;
+    faust_api::validate_canonical_dsp_api_signature(decl.name, decl.typ, decl.named_args)
+        .map_err(|msg| CodegenError::new(CodegenErrorCode::InvalidModuleSection, msg))?;
     let tab = "    ".repeat(indent);
     let mut params_override: Option<String> = None;
     let (ret, mut params) = match decl.typ {
@@ -817,7 +820,8 @@ fn emit_declare_fun(
         params_override = Some("UI* ui_interface".to_owned());
     } else if decl.name == "metadata" && params.is_empty() {
         params_override = Some("Meta* m".to_owned());
-    } else if decl.name == "compute" && (params.is_empty() || is_faust_compute_signature(decl.typ))
+    } else if decl.name == "compute"
+        && (params.is_empty() || faust_api::is_canonical_compute_signature(decl.typ))
     {
         params_override = Some(
             "int count, FAUSTFLOAT** RESTRICT inputs, FAUSTFLOAT** RESTRICT outputs".to_owned(),
@@ -834,99 +838,6 @@ fn emit_declare_fun(
         emit_block(store, out, options, decl.body, indent + 1)?;
     }
     let _ = writeln!(out, "{tab}}}");
-    Ok(())
-}
-
-fn is_faust_compute_signature(typ: &FirType) -> bool {
-    let FirType::Fun { args, .. } = typ else {
-        return false;
-    };
-    matches!(
-        args.as_slice(),
-        [
-            FirType::Int32,
-            FirType::Ptr(inner_inputs),
-            FirType::Ptr(inner_outputs)
-        ] if matches!(
-            (inner_inputs.as_ref(), inner_outputs.as_ref()),
-            (
-                FirType::Ptr(ff_inputs),
-                FirType::Ptr(ff_outputs)
-            ) if matches!(
-                (ff_inputs.as_ref(), ff_outputs.as_ref()),
-                (FirType::FaustFloat, FirType::FaustFloat)
-            )
-        )
-    )
-}
-
-fn validate_faust_api_signature(decl: &DeclareFunView<'_>) -> Result<(), CodegenError> {
-    let (expected_args, expected_ret, api_sig) = match decl.name {
-        "metadata" => (vec![FirType::Meta], FirType::Void, "void metadata(Meta*)"),
-        "instanceConstants" => (
-            vec![FirType::Int32],
-            FirType::Void,
-            "void instanceConstants(int)",
-        ),
-        "instanceResetUserInterface" => (
-            Vec::new(),
-            FirType::Void,
-            "void instanceResetUserInterface()",
-        ),
-        "instanceClear" => (Vec::new(), FirType::Void, "void instanceClear()"),
-        "buildUserInterface" => (
-            vec![FirType::UI],
-            FirType::Void,
-            "void buildUserInterface(UI*)",
-        ),
-        "compute" => (
-            vec![
-                FirType::Int32,
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            ],
-            FirType::Void,
-            "void compute(int, FAUSTFLOAT**, FAUSTFLOAT**)",
-        ),
-        _ => return Ok(()),
-    };
-
-    let FirType::Fun { args, ret } = decl.typ else {
-        return Err(CodegenError::new(
-            CodegenErrorCode::InvalidModuleSection,
-            format!(
-                "invalid FIR signature for {}: expected {api_sig}, got non-function type {:?}",
-                decl.name, decl.typ
-            ),
-        ));
-    };
-
-    if *args != expected_args || ret.as_ref() != &expected_ret {
-        return Err(CodegenError::new(
-            CodegenErrorCode::InvalidModuleSection,
-            format!(
-                "invalid FIR signature for {}: expected {api_sig}, got {:?}",
-                decl.name, decl.typ
-            ),
-        ));
-    }
-
-    if decl.named_args.len() != expected_args.len()
-        || decl
-            .named_args
-            .iter()
-            .zip(expected_args.iter())
-            .any(|(named, expected)| named.typ != *expected)
-    {
-        return Err(CodegenError::new(
-            CodegenErrorCode::InvalidModuleSection,
-            format!(
-                "invalid FIR named args for {}: expected types {:?}, got {:?}",
-                decl.name, expected_args, decl.named_args
-            ),
-        ));
-    }
-
     Ok(())
 }
 

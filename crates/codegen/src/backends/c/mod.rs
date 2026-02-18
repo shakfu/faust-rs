@@ -27,6 +27,8 @@ use std::fmt::Write as _;
 
 use fir::{AccessType, FirBinOp, FirId, FirMatch, FirStore, FirType, NamedType, match_fir};
 
+use crate::backends::faust_api;
+
 pub const BACKEND_NAME: &str = "c";
 
 /// C backend options for module-first emission.
@@ -551,7 +553,8 @@ fn emit_named_fun(
     class_name: &str,
     decl: &DeclareFunView,
 ) -> Result<(), CodegenError> {
-    validate_faust_api_signature(decl)?;
+    faust_api::validate_canonical_dsp_api_signature(&decl.name, &decl.typ, &decl.named_args)
+        .map_err(|msg| CodegenError::new(CodegenErrorCode::InvalidModuleSection, msg))?;
     let signature = match decl.name.as_str() {
         "metadata" => format!("void metadata{class_name}(MetaGlue* m)"),
         "instanceConstants" => {
@@ -584,76 +587,6 @@ fn emit_named_fun(
     }
     let _ = writeln!(out, "}}");
     let _ = writeln!(out);
-    Ok(())
-}
-
-fn validate_faust_api_signature(decl: &DeclareFunView) -> Result<(), CodegenError> {
-    let (expected_args, expected_ret, api_sig) = match decl.name.as_str() {
-        "metadata" => (vec![FirType::Meta], FirType::Void, "void metadata(Meta*)"),
-        "instanceConstants" => (
-            vec![FirType::Int32],
-            FirType::Void,
-            "void instanceConstants(int)",
-        ),
-        "instanceResetUserInterface" => (
-            Vec::new(),
-            FirType::Void,
-            "void instanceResetUserInterface()",
-        ),
-        "instanceClear" => (Vec::new(), FirType::Void, "void instanceClear()"),
-        "buildUserInterface" => (
-            vec![FirType::UI],
-            FirType::Void,
-            "void buildUserInterface(UI*)",
-        ),
-        "compute" => (
-            vec![
-                FirType::Int32,
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            ],
-            FirType::Void,
-            "void compute(int, FAUSTFLOAT**, FAUSTFLOAT**)",
-        ),
-        _ => return Ok(()),
-    };
-
-    let FirType::Fun { args, ret } = &decl.typ else {
-        return Err(CodegenError::new(
-            CodegenErrorCode::InvalidModuleSection,
-            format!(
-                "invalid FIR signature for {}: expected {api_sig}, got non-function type {:?}",
-                decl.name, decl.typ
-            ),
-        ));
-    };
-
-    if *args != expected_args || ret.as_ref() != &expected_ret {
-        return Err(CodegenError::new(
-            CodegenErrorCode::InvalidModuleSection,
-            format!(
-                "invalid FIR signature for {}: expected {api_sig}, got {:?}",
-                decl.name, decl.typ
-            ),
-        ));
-    }
-
-    if decl.named_args.len() != expected_args.len()
-        || decl
-            .named_args
-            .iter()
-            .zip(expected_args.iter())
-            .any(|(named, expected)| named.typ != *expected)
-    {
-        return Err(CodegenError::new(
-            CodegenErrorCode::InvalidModuleSection,
-            format!(
-                "invalid FIR named args for {}: expected types {:?}, got {:?}",
-                decl.name, expected_args, decl.named_args
-            ),
-        ));
-    }
-
     Ok(())
 }
 
