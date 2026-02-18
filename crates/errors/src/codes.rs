@@ -26,6 +26,10 @@ pub const PROP_ARITY_MISMATCH: DiagnosticCode = DiagnosticCode("FRS-PROP-0002");
 pub const PROP_RECURSION_MISMATCH: DiagnosticCode = DiagnosticCode("FRS-PROP-0003");
 pub const PROP_GENERIC_FAILURE: DiagnosticCode = DiagnosticCode("FRS-PROP-0099");
 
+pub const SFIR_INVALID_OPTIONS: DiagnosticCode = DiagnosticCode("FRS-SFIR-0001");
+pub const SFIR_EMPTY_SIGNAL_LIST: DiagnosticCode = DiagnosticCode("FRS-SFIR-0002");
+pub const SFIR_OUTPUT_ARITY_MISMATCH: DiagnosticCode = DiagnosticCode("FRS-SFIR-0003");
+
 pub const COMP_PARSE_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0001");
 pub const COMP_EVAL_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0002");
 pub const COMP_PROPAGATE_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0003");
@@ -50,6 +54,9 @@ pub fn all_codes() -> &'static [DiagnosticCode] {
         PROP_ARITY_MISMATCH,
         PROP_RECURSION_MISMATCH,
         PROP_GENERIC_FAILURE,
+        SFIR_INVALID_OPTIONS,
+        SFIR_EMPTY_SIGNAL_LIST,
+        SFIR_OUTPUT_ARITY_MISMATCH,
         COMP_PARSE_FAILED,
         COMP_EVAL_FAILED,
         COMP_PROPAGATE_FAILED,

@@ -1,6 +1,6 @@
 use boxes::dump_box;
 use codegen::backends::cpp::CppOptions;
-use compiler::{Compiler, CompilerError, golden_snapshot_from_file};
+use compiler::{Compiler, CompilerError, SignalFirLane, golden_snapshot_from_file};
 use errors::{DiagnosticBundle, LabelStyle, Severity, Stage};
 use serde_json::json;
 use signals::dump_sig_readable;
@@ -18,6 +18,22 @@ enum ErrorVerbosity {
     #[default]
     Standard,
     Debug,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum CliSignalFirLane {
+    #[default]
+    Legacy,
+    Fast,
+}
+
+impl CliSignalFirLane {
+    fn into_compiler_lane(self) -> SignalFirLane {
+        match self {
+            Self::Legacy => SignalFirLane::LegacyBridge,
+            Self::Fast => SignalFirLane::TransformFastLane,
+        }
+    }
 }
 
 fn parse_input_with_import_dirs_and_format(
@@ -79,6 +95,93 @@ fn parse_input_with_import_dirs_and_format(
     (
         PathBuf::from(input),
         search_paths,
+        error_format,
+        error_verbosity,
+    )
+}
+
+fn parse_dump_cpp_input(
+    mut args: impl Iterator<Item = String>,
+    usage: &str,
+) -> (
+    PathBuf,
+    Vec<PathBuf>,
+    CliSignalFirLane,
+    ErrorFormat,
+    ErrorVerbosity,
+) {
+    let Some(input) = args.next() else {
+        eprintln!("{usage}");
+        std::process::exit(2);
+    };
+
+    let mut search_paths = Vec::new();
+    let mut lane = CliSignalFirLane::Legacy;
+    let mut error_format = ErrorFormat::Human;
+    let mut error_verbosity = ErrorVerbosity::Standard;
+
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "-I" | "--import-dir" => {
+                let Some(dir) = args.next() else {
+                    eprintln!("{usage}");
+                    std::process::exit(2);
+                };
+                search_paths.push(PathBuf::from(dir));
+            }
+            "--signal-fir-lane" => {
+                let Some(v) = args.next() else {
+                    eprintln!("{usage}");
+                    std::process::exit(2);
+                };
+                lane = match v.as_str() {
+                    "legacy" => CliSignalFirLane::Legacy,
+                    "fast" => CliSignalFirLane::Fast,
+                    _ => {
+                        eprintln!("{usage}");
+                        std::process::exit(2);
+                    }
+                };
+            }
+            "--error-format" => {
+                let Some(format) = args.next() else {
+                    eprintln!("{usage}");
+                    std::process::exit(2);
+                };
+                error_format = match format.as_str() {
+                    "human" => ErrorFormat::Human,
+                    "json" => ErrorFormat::Json,
+                    _ => {
+                        eprintln!("{usage}");
+                        std::process::exit(2);
+                    }
+                };
+            }
+            "--error-verbosity" => {
+                let Some(level) = args.next() else {
+                    eprintln!("{usage}");
+                    std::process::exit(2);
+                };
+                error_verbosity = match level.as_str() {
+                    "standard" => ErrorVerbosity::Standard,
+                    "debug" => ErrorVerbosity::Debug,
+                    _ => {
+                        eprintln!("{usage}");
+                        std::process::exit(2);
+                    }
+                };
+            }
+            _ => {
+                eprintln!("{usage}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    (
+        PathBuf::from(input),
+        search_paths,
+        lane,
         error_format,
         error_verbosity,
     )
@@ -434,9 +537,14 @@ fn diagnostic_debug_from_notes(notes: &[Box<str>]) -> serde_json::Value {
 }
 
 fn parse_dump_usage(mode: &str) -> String {
-    format!(
-        "Usage: cargo run -p compiler -- --{mode} <input.dsp> [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
-    )
+    if mode == "dump-cpp" {
+        "Usage: cargo run -p compiler -- --dump-cpp <input.dsp> [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+            .to_owned()
+    } else {
+        format!(
+            "Usage: cargo run -p compiler -- --{mode} <input.dsp> [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
+        )
+    }
 }
 
 fn parse_usage() -> String {
@@ -457,7 +565,7 @@ fn print_global_usage_and_exit() -> ! {
         "  cargo run -p compiler -- --dump-sig <input.dsp> [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!(
-        "  cargo run -p compiler -- --dump-cpp <input.dsp> [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- --dump-cpp <input.dsp> [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     std::process::exit(2);
 }
@@ -587,14 +695,23 @@ fn main() {
         }
         Some("--dump-cpp") => {
             let usage = parse_dump_usage("dump-cpp");
-            let (input_path, search_paths, error_format, error_verbosity) =
-                parse_input_with_import_dirs_and_format(args, &usage);
+            let (input_path, search_paths, lane, error_format, error_verbosity) =
+                parse_dump_cpp_input(args, &usage);
             let compiler = Compiler::new();
             let options = CppOptions::default();
             let result = if search_paths.is_empty() {
-                compiler.compile_file_default_to_cpp(&input_path, &options)
+                compiler.compile_file_default_to_cpp_with_lane(
+                    &input_path,
+                    &options,
+                    lane.into_compiler_lane(),
+                )
             } else {
-                compiler.compile_file_to_cpp(&input_path, &search_paths, &options)
+                compiler.compile_file_to_cpp_with_lane(
+                    &input_path,
+                    &search_paths,
+                    &options,
+                    lane.into_compiler_lane(),
+                )
             };
 
             match result {

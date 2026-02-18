@@ -3466,3 +3466,43 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo test -p transform --all-targets`
   - `cargo clippy -p transform --all-targets -- -D warnings`
+
+#### signalFIRCompiler fast-lane: Step 1B implemented in `crates/compiler`
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/compiler/Cargo.toml`
+  - `crates/compiler/src/lib.rs`
+  - `crates/compiler/src/main.rs`
+  - `crates/compiler/tests/signal_fir_lane.rs`
+  - `crates/errors/src/codes.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - added compiler-side lane selector:
+    - `SignalFirLane::LegacyBridge` (default behavior),
+    - `SignalFirLane::TransformFastLane` (routes through `transform::signal_fir`).
+  - kept existing APIs stable and added explicit lane entrypoints:
+    - `compile_source_to_cpp_with_lane(...)`,
+    - `compile_file_to_cpp_with_lane(...)`,
+    - `compile_file_default_to_cpp_with_lane(...)`.
+  - wired fast-lane path to call:
+    - `transform::signal_fir::compile_signals_to_fir_fastlane(...)`,
+    - then `codegen::backends::cpp::generate_cpp_module(...)`.
+  - added compiler diagnostic mapping for fast-lane errors:
+    - new `CompilerError::Transform` variant,
+    - mapped `SignalFirErrorCode` to stable diagnostics
+      `FRS-SFIR-0001..0003` at `Stage::Transform`.
+  - added stable error-code constants in `errors`:
+    - `SFIR_INVALID_OPTIONS`,
+    - `SFIR_EMPTY_SIGNAL_LIST`,
+    - `SFIR_OUTPUT_ARITY_MISMATCH`.
+  - added CLI wiring for C++ dump lane selection:
+    - `--signal-fir-lane legacy|fast` on `--dump-cpp`.
+  - added tests:
+    - unit tests for fast-lane success/error behavior in compiler facade,
+    - integration test `crates/compiler/tests/signal_fir_lane.rs`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --all-targets`
+  - `cargo clippy -p compiler --all-targets -- -D warnings`
+  - `cargo test -p errors --all-targets`

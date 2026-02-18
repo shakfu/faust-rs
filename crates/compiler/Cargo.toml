@@ -16,6 +16,7 @@ signals = { path = "../signals" }
 fir = { path = "../fir" }
 serde_json = "1"
 tlib = { path = "../tlib" }
+transform = { path = "../transform" }
 
 [dev-dependencies]
 [[bin]]
