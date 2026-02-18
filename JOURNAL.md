@@ -3548,3 +3548,28 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p compiler --all-targets`
   - `cargo clippy -p compiler --all-targets -- -D warnings`
   - `cargo clippy -p errors --all-targets -- -D warnings`
+
+#### signalFIRCompiler fast-lane: Step 2B.1 math slice in `crates/transform`
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/mod.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - extended signal->FIR lowering with first math-family slice:
+    - binary math nodes: `SIGPOW`, `SIGMIN`, `SIGMAX`,
+    - unary math nodes: `SIGSIN`, `SIGCOS`, `SIGTAN`, `SIGEXP`, `SIGLOG`,
+      `SIGLOG10`, `SIGSQRT`, `SIGABS`.
+  - lowering strategy uses FIR `FunCall` nodes (e.g. `std::pow`, `std::sin`,
+    `std::fmax`) so C++ backend can emit executable expressions without adding
+    new FIR node families.
+  - kept unsupported signal families explicitly typed with `FRS-SFIR-*` errors
+    to preserve deterministic fast-fail behavior while coverage expands.
+  - added structural test ensuring nested `pow/sin/max` lowers to nested FIR
+    `FunCall` nodes in `compute` output `Drop`.
+- Validation:
+  - `cargo fmt -p transform`
+  - `cargo test -p transform --all-targets`
+  - `cargo clippy -p transform --all-targets -- -D warnings`
+  - `cargo test -p compiler --all-targets`

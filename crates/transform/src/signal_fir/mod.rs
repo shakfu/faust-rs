@@ -182,4 +182,60 @@ mod tests {
         assert_eq!(err.code(), SignalFirErrorCode::InputIndexOutOfRange);
         assert_eq!(err.code().as_str(), "FRS-SFIR-0006");
     }
+
+    #[test]
+    fn pow_min_max_and_unary_math_lower_to_fir_fun_calls() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let i0 = b.input(0);
+            let s0 = b.sin(i0);
+            let c0 = b.real(0.25);
+            let c1 = b.real(0.5);
+            let mx = b.max(c0, c1);
+            b.pow(s0, mx)
+        };
+        let out =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+                .expect("pow/min/max/unary should be supported in Step 2B.1");
+
+        let FirMatch::Module { declarations, .. } = match_fir(&out.store, out.module) else {
+            panic!("module root expected");
+        };
+        let FirMatch::Block(decls) = match_fir(&out.store, declarations) else {
+            panic!("module declarations block expected");
+        };
+        let compute = decls
+            .iter()
+            .copied()
+            .find(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareFun { .. }))
+            .expect("compute declaration expected");
+        let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
+            panic!("declare fun expected");
+        };
+        let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
+            panic!("compute block expected");
+        };
+        let drop_value = stmts
+            .iter()
+            .find_map(|id| match match_fir(&out.store, *id) {
+                FirMatch::Drop(value) => Some(value),
+                _ => None,
+            })
+            .expect("compute should include one output drop");
+        let FirMatch::FunCall { name, args, .. } = match_fir(&out.store, drop_value) else {
+            panic!("top-level pow should lower to FIR fun call");
+        };
+        assert_eq!(name, "std::pow");
+        assert_eq!(args.len(), 2);
+
+        let FirMatch::FunCall { name: lhs_name, .. } = match_fir(&out.store, args[0]) else {
+            panic!("lhs should lower to unary fun call");
+        };
+        assert_eq!(lhs_name, "std::sin");
+        let FirMatch::FunCall { name: rhs_name, .. } = match_fir(&out.store, args[1]) else {
+            panic!("rhs should lower to min/max fun call");
+        };
+        assert_eq!(rhs_name, "std::fmax");
+    }
 }

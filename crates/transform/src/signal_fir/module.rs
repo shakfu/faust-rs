@@ -3,6 +3,8 @@
 //! Step 2A lowers a first executable signal slice:
 //! - `SIGINPUT`, integer/real constants,
 //! - `SIGBINOP` (arithmetic/comparison/bitwise subset),
+//! - `SIGPOW`/`SIGMIN`/`SIGMAX`,
+//! - core unary math nodes (`sin/cos/tan/exp/log/log10/sqrt/abs`),
 //! - `SIGOUTPUT` passthrough nodes.
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors.
@@ -118,6 +120,17 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Input(index) => self.lower_input(index)?,
             SigMatch::Output(_, inner) => self.lower_signal(inner)?,
             SigMatch::BinOp(op, lhs, rhs) => self.lower_binop(op, lhs, rhs)?,
+            SigMatch::Pow(lhs, rhs) => self.lower_fun2("std::pow", lhs, rhs)?,
+            SigMatch::Min(lhs, rhs) => self.lower_fun2("std::fmin", lhs, rhs)?,
+            SigMatch::Max(lhs, rhs) => self.lower_fun2("std::fmax", lhs, rhs)?,
+            SigMatch::Sin(value) => self.lower_fun1("std::sin", value)?,
+            SigMatch::Cos(value) => self.lower_fun1("std::cos", value)?,
+            SigMatch::Tan(value) => self.lower_fun1("std::tan", value)?,
+            SigMatch::Exp(value) => self.lower_fun1("std::exp", value)?,
+            SigMatch::Log(value) => self.lower_fun1("std::log", value)?,
+            SigMatch::Log10(value) => self.lower_fun1("std::log10", value)?,
+            SigMatch::Sqrt(value) => self.lower_fun1("std::sqrt", value)?,
+            SigMatch::Abs(value) => self.lower_fun1("std::fabs", value)?,
             other => {
                 return Err(SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
@@ -175,6 +188,19 @@ impl<'a> SignalToFirLower<'a> {
         })?;
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.binop(fir_op, lhs, rhs, typ))
+    }
+
+    fn lower_fun1(&mut self, name: &str, value: SigId) -> Result<FirId, SignalFirError> {
+        let value = self.lower_signal(value)?;
+        let mut b = FirBuilder::new(&mut self.store);
+        Ok(b.fun_call(name, &[value], FirType::FaustFloat))
+    }
+
+    fn lower_fun2(&mut self, name: &str, lhs: SigId, rhs: SigId) -> Result<FirId, SignalFirError> {
+        let lhs = self.lower_signal(lhs)?;
+        let rhs = self.lower_signal(rhs)?;
+        let mut b = FirBuilder::new(&mut self.store);
+        Ok(b.fun_call(name, &[lhs, rhs], FirType::FaustFloat))
     }
 }
 
