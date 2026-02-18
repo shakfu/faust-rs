@@ -3356,3 +3356,27 @@ Execution plan (Phase 0 prototype, revised):
     - `num_inputs`, `num_outputs`.
   - backend keeps existing FIR-emitted functions while adding architecture-facing wrappers/fallbacks.
   - added plan documentation in Phase 6 (`8.6 Mandatory dsp API contract`).
+
+#### Shared FIR fixture for backend C/C++ examples and tests
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/codegen/src/fixtures.rs`
+  - `crates/codegen/src/lib.rs`
+  - `crates/codegen/examples/dump_sine_phasor_cpp.rs`
+  - `crates/codegen/examples/dump_sine_phasor_c.rs`
+  - `crates/codegen/tests/cpp_fir_sine_phasor.rs`
+  - `crates/codegen/src/backends/c/mod.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - extracted a canonical FIR builder:
+    - `codegen::fixtures::build_sine_phasor_test_module()`.
+  - removed duplicated sine-phasor FIR construction code from:
+    - C++ example,
+    - C example,
+    - C++ backend integration test,
+    - C backend unit test.
+  - all these paths now validate code generation from the exact same FIR input.
+- Rationale:
+  - avoid fixture drift between backends,
+  - ensure differential backend checks compare codegen behavior only, not differing FIR setup.

@@ -1,6 +1,7 @@
 #![doc = "Code generation crate for the faust-rs workspace."]
 
 pub mod backends;
+pub mod fixtures;
 
 pub const CRATE_NAME: &str = "codegen";
 
