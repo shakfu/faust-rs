@@ -283,16 +283,14 @@ fn emit_dsp_contract_methods(
         let _ = writeln!(out, "{tab}    instanceConstants();");
     }
     let _ = writeln!(out, "{tab}}}");
-    let _ = writeln!(out, "{tab}virtual void instanceResetUserInterface() {{");
-    if has_instance_reset_ui {
-        let _ = writeln!(out, "{tab}    instanceResetUserInterface();");
+    if !has_instance_reset_ui {
+        let _ = writeln!(out, "{tab}virtual void instanceResetUserInterface() {{");
+        let _ = writeln!(out, "{tab}}}");
     }
-    let _ = writeln!(out, "{tab}}}");
-    let _ = writeln!(out, "{tab}virtual void instanceClear() {{");
-    if has_instance_clear {
-        let _ = writeln!(out, "{tab}    instanceClear();");
+    if !has_instance_clear {
+        let _ = writeln!(out, "{tab}virtual void instanceClear() {{");
+        let _ = writeln!(out, "{tab}}}");
     }
-    let _ = writeln!(out, "{tab}}}");
     let _ = writeln!(out, "{tab}virtual void init(int sample_rate) {{");
     let _ = writeln!(out, "{tab}    classInit(sample_rate);");
     let _ = writeln!(out, "{tab}    instanceInit(sample_rate);");

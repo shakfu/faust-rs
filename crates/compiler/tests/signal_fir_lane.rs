@@ -191,6 +191,16 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
     assert!(!fast.contains("frs_"));
     assert!(fast.contains("ui_interface->openVerticalBox(\"rep_38_sine_phasor\");"));
     assert!(fast.contains("ui_interface->closeBox();"));
+    assert_eq!(
+        fast.matches("void instanceResetUserInterface() {").count(),
+        1,
+        "instanceResetUserInterface should be emitted once"
+    );
+    assert_eq!(
+        fast.matches("void instanceClear() {").count(),
+        1,
+        "instanceClear should be emitted once"
+    );
 
     let legacy_c = compile_c_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::LegacyBridge);
     let fast_c = compile_c_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::TransformFastLane);
