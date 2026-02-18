@@ -231,6 +231,27 @@ fn corpus_extended_primitives_cover_unary_and_binary_signal_nodes() {
     assert!(matches!(got[19], SigMatch::Round(_)));
 }
 
+#[test]
+fn corpus_sine_phasor_lowers_to_gain_times_sin_of_feedback_phase() {
+    let out = compile_corpus("rep_38_sine_phasor.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+
+    let SigMatch::BinOp(BinOp::Mul, gain, carrier) = match_sig(&out.parse.state.arena, out.signals[0])
+    else {
+        panic!("rep_38 should lower to gain * carrier");
+    };
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, gain),
+        SigMatch::HSlider(_, _, _, _, _) | SigMatch::VSlider(_, _, _, _, _) | SigMatch::NumEntry(_, _, _, _, _) | SigMatch::Real(_)
+    ));
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, carrier),
+        SigMatch::Sin(_)
+    ));
+}
+
 fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i64) {
     let SigMatch::BinOp(BinOp::Mul, a, b) = match_sig(arena, sig) else {
         panic!("branch should be Mul");

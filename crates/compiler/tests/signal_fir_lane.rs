@@ -182,6 +182,22 @@ fn legacy_and_fastlane_both_compile_table_fixtures() {
 }
 
 #[test]
+fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
+    let legacy = compile_cpp_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::LegacyBridge);
+    let fast = compile_cpp_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::TransformFastLane);
+    assert!(legacy.contains("class rep_38_sine_phasor : public dsp"));
+    assert!(fast.contains("class rep_38_sine_phasor : public dsp"));
+    assert!(fast.contains("void compute("));
+    assert!(!fast.contains("frs_"));
+
+    let legacy_c = compile_c_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::LegacyBridge);
+    let fast_c = compile_c_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::TransformFastLane);
+    assert!(legacy_c.contains("void computerep_38_sine_phasor("));
+    assert!(fast_c.contains("void computerep_38_sine_phasor("));
+    assert!(!fast_c.contains("frs_"));
+}
+
+#[test]
 fn fastlane_cpp_lifecycle_order_matches_faust_instance_init_flow() {
     let fast = compile_cpp_with_lane(
         "rep_10_two_in_two_out_ui.dsp",
