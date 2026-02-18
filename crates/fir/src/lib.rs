@@ -71,12 +71,28 @@ pub enum FirType {
     Bool,
     Void,
     Obj,
-    /// C++ parity note: maps current FIR API handle type used like `kSound_ptr`.
+    /// C++ parity note: API handle kind equivalent to `kSound_ptr`.
+    ///
+    /// Semantics: this variant already models a pointer-shaped handle.
+    /// Use `FirType::Ptr(Box::new(FirType::Sound))` only for explicit extra
+    /// pointer indirection (for example `Soundfile**`).
     Sound,
-    /// C++ parity note: maps current FIR API handle type used like `kUI_ptr`.
+    /// C++ parity note: API handle kind equivalent to `kUI_ptr`.
+    ///
+    /// Semantics: this variant already models a pointer-shaped handle.
+    /// Canonical FIR API signatures therefore use `UI` directly
+    /// (`buildUserInterface(UI)`), not `Ptr(UI)`.
     UI,
-    /// C++ parity note: maps current FIR API handle type used like `kMeta_ptr`.
+    /// C++ parity note: API handle kind equivalent to `kMeta_ptr`.
+    ///
+    /// Semantics: this variant already models a pointer-shaped handle.
+    /// Use `Ptr(Meta)` only when an additional pointer level is intended.
     Meta,
+    /// Generic explicit pointer constructor.
+    ///
+    /// This is used for pointer depth that is semantically relevant in FIR
+    /// values/signatures (for example `FAUSTFLOAT**` in `compute`), while
+    /// `UI`/`Sound`/`Meta` already encode their base API-handle pointer level.
     Ptr(Box<FirType>),
     Array(Box<FirType>, usize),
     Vector(Box<FirType>, usize),

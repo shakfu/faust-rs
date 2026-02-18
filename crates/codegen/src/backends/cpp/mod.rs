@@ -1020,6 +1020,8 @@ fn emit_type(typ: &FirType, options: &CppOptions) -> String {
         FirType::Bool => "bool".to_owned(),
         FirType::Void => "void".to_owned(),
         FirType::Obj => "void*".to_owned(),
+        // FIR handle kinds are already pointer-shaped at the type-model level.
+        // `Ptr(UI)` would therefore become `UI**`.
         FirType::Sound => "Soundfile*".to_owned(),
         FirType::UI => "UI*".to_owned(),
         FirType::Meta => "Meta*".to_owned(),

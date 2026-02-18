@@ -4367,3 +4367,14 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace --all-targets`
   - `cargo run -p xtask -- golden-check`
+
+#### FIR type-model documentation clarity (`UI`/`Sound`/`Meta` handle semantics)
+
+- Added explicit non-code documentation for FIR type conventions:
+  - new `crates/fir/README.md` section `Type conventions`.
+- Clarified and synchronized in-code docs/comments so pointer depth is explicit:
+  - `FirType::UI`, `FirType::Sound`, `FirType::Meta` are already pointer-shaped handles,
+  - `FirType::Ptr(...)` is reserved for additional pointer indirection only.
+- Added backend mapping notes near C/C++ emitters to avoid ambiguity:
+  - `UI` => `UI*` / `UIGlue*`,
+  - `Ptr(UI)` => `UI**` / `UIGlue**`.
