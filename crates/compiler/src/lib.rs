@@ -1815,7 +1815,7 @@ mod tests {
         let cpp = compiler
             .compile_source_to_cpp("pass.dsp", "process = _;", &CppOptions::default())
             .expect("pass-through should compile to C++");
-        assert!(cpp.contains("class pass : public dsp"));
+        assert!(cpp.contains("class mydsp : public dsp"));
         assert!(cpp.contains("void compute("));
         assert!(cpp.contains("// sig[0]: SIGINPUT(int(0))"));
     }
@@ -1831,7 +1831,7 @@ mod tests {
                 super::SignalFirLane::TransformFastLane,
             )
             .expect("pass-through should compile to C++ through transform fast-lane");
-        assert!(cpp.contains("class pass : public dsp"));
+        assert!(cpp.contains("class mydsp : public dsp"));
         assert!(cpp.contains("void compute("));
     }
 
@@ -1868,7 +1868,7 @@ mod tests {
             .compile_source_to_c("pass.dsp", "process = _;", &COptions::default())
             .expect("pass-through should compile to C");
         assert!(c_code.contains("typedef struct {"));
-        assert!(c_code.contains("void computepass("));
+        assert!(c_code.contains("void computemydsp("));
     }
 
     #[test]

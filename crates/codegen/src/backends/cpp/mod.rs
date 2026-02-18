@@ -53,7 +53,7 @@ impl Default for CppOptions {
     fn default() -> Self {
         Self {
             namespace: None,
-            class_name: None,
+            class_name: Some("mydsp".to_owned()),
             num_inputs: 0,
             num_outputs: 0,
             quad_type_name: "quad".to_owned(),

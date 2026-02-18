@@ -53,7 +53,7 @@ pub struct COptions {
 impl Default for COptions {
     fn default() -> Self {
         Self {
-            class_name: None,
+            class_name: Some("mydsp".to_owned()),
             num_inputs: 0,
             num_outputs: 0,
             quad_type_name: "quad".to_owned(),

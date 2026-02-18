@@ -21,7 +21,7 @@ fn dump_cpp_fastlane_compiles_fixture() {
             SignalFirLane::TransformFastLane,
         )
         .unwrap_or_else(|e| panic!("fast-lane C++ compilation failed: {e}"));
-    assert!(cpp.contains("class rep_01_passthrough : public dsp"));
+    assert!(cpp.contains("class mydsp : public dsp"));
 }
 
 fn compile_cpp_with_lane(file: &str, lane: SignalFirLane) -> String {
@@ -55,8 +55,8 @@ fn legacy_and_fastlane_both_compile_lowpass_feedback_fixture() {
         "rep_05_one_pole_lowpass.dsp",
         SignalFirLane::TransformFastLane,
     );
-    assert!(legacy.contains("class rep_05_one_pole_lowpass : public dsp"));
-    assert!(fast.contains("class rep_05_one_pole_lowpass : public dsp"));
+    assert!(legacy.contains("class mydsp : public dsp"));
+    assert!(fast.contains("class mydsp : public dsp"));
     assert!(fast.contains("void compute("));
 }
 
@@ -67,8 +67,8 @@ fn legacy_and_fastlane_both_compile_feedback_projection_fixture() {
         "rep_23_feedback_simple.dsp",
         SignalFirLane::TransformFastLane,
     );
-    assert!(legacy.contains("class rep_23_feedback_simple : public dsp"));
-    assert!(fast.contains("class rep_23_feedback_simple : public dsp"));
+    assert!(legacy.contains("class mydsp : public dsp"));
+    assert!(fast.contains("class mydsp : public dsp"));
     assert!(fast.contains("void compute("));
     assert!(
         !fast.contains("frs_proj"),
@@ -90,8 +90,8 @@ fn legacy_and_fastlane_both_compile_environment_waveform_fixture() {
         "rep_20_environment_waveform.dsp",
         SignalFirLane::TransformFastLane,
     );
-    assert!(legacy.contains("class rep_20_environment_waveform : public dsp"));
-    assert!(fast.contains("class rep_20_environment_waveform : public dsp"));
+    assert!(legacy.contains("class mydsp : public dsp"));
+    assert!(fast.contains("class mydsp : public dsp"));
     assert!(fast.contains("void compute("));
     assert!(
         !fast.contains("frs_"),
@@ -109,8 +109,8 @@ fn legacy_and_fastlane_both_compile_extended_primitives_fixture() {
         "rep_31_extended_primitives.dsp",
         SignalFirLane::TransformFastLane,
     );
-    assert!(legacy.contains("class rep_31_extended_primitives : public dsp"));
-    assert!(fast.contains("class rep_31_extended_primitives : public dsp"));
+    assert!(legacy.contains("class mydsp : public dsp"));
+    assert!(fast.contains("class mydsp : public dsp"));
     assert!(fast.contains("void compute("));
     assert!(
         !fast.contains("frs_"),
@@ -125,8 +125,8 @@ fn legacy_and_fastlane_both_compile_nonlinear_clip_fixture() {
         "rep_07_nonlinear_clip.dsp",
         SignalFirLane::TransformFastLane,
     );
-    assert!(legacy.contains("class rep_07_nonlinear_clip : public dsp"));
-    assert!(fast.contains("class rep_07_nonlinear_clip : public dsp"));
+    assert!(legacy.contains("class mydsp : public dsp"));
+    assert!(fast.contains("class mydsp : public dsp"));
     assert!(fast.contains("void compute("));
     assert!(
         !fast.contains("frs_"),
@@ -140,7 +140,7 @@ fn fastlane_ui_fixture_uses_native_ui_path_without_slider_shims() {
         "rep_10_two_in_two_out_ui.dsp",
         SignalFirLane::TransformFastLane,
     );
-    assert!(fast.contains("class rep_10_two_in_two_out_ui : public dsp"));
+    assert!(fast.contains("class mydsp : public dsp"));
     assert!(fast.contains("void buildUserInterface("));
     assert!(
         !fast.contains("frs_hslider"),
@@ -185,11 +185,11 @@ fn legacy_and_fastlane_both_compile_table_fixtures() {
 fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
     let legacy = compile_cpp_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::LegacyBridge);
     let fast = compile_cpp_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::TransformFastLane);
-    assert!(legacy.contains("class rep_38_sine_phasor : public dsp"));
-    assert!(fast.contains("class rep_38_sine_phasor : public dsp"));
+    assert!(legacy.contains("class mydsp : public dsp"));
+    assert!(fast.contains("class mydsp : public dsp"));
     assert!(fast.contains("void compute("));
     assert!(!fast.contains("frs_"));
-    assert!(fast.contains("ui_interface->openVerticalBox(\"rep_38_sine_phasor\");"));
+    assert!(fast.contains("ui_interface->openVerticalBox(\"mydsp\");"));
     assert!(fast.contains("ui_interface->closeBox();"));
     assert_eq!(
         fast.matches("void instanceResetUserInterface() {").count(),
@@ -204,10 +204,10 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
 
     let legacy_c = compile_c_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::LegacyBridge);
     let fast_c = compile_c_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::TransformFastLane);
-    assert!(legacy_c.contains("void computerep_38_sine_phasor("));
-    assert!(fast_c.contains("void computerep_38_sine_phasor("));
+    assert!(legacy_c.contains("void computemydsp("));
+    assert!(fast_c.contains("void computemydsp("));
     assert!(!fast_c.contains("frs_"));
-    assert!(fast_c.contains("ui_interface->openVerticalBox(ui_interface->uiInterface, \"rep_38_sine_phasor\");"));
+    assert!(fast_c.contains("ui_interface->openVerticalBox(ui_interface->uiInterface, \"mydsp\");"));
     assert!(fast_c.contains("ui_interface->closeBox(ui_interface->uiInterface);"));
 }
 
@@ -242,7 +242,7 @@ fn fastlane_cpp_lifecycle_order_matches_faust_instance_init_flow() {
 fn dump_c_fastlane_compiles_fixture() {
     let fast = compile_c_with_lane("rep_01_passthrough.dsp", SignalFirLane::TransformFastLane);
     assert!(fast.contains("typedef struct {"));
-    assert!(fast.contains("void computerep_01_passthrough("));
+    assert!(fast.contains("void computemydsp("));
 }
 
 #[test]
@@ -276,19 +276,19 @@ fn fastlane_c_lifecycle_order_matches_faust_instance_init_flow() {
         "rep_10_two_in_two_out_ui.dsp",
         SignalFirLane::TransformFastLane,
     );
-    let instance_init_sig = "void instanceInitrep_10_two_in_two_out_ui(rep_10_two_in_two_out_ui* dsp, int sample_rate) {";
+    let instance_init_sig = "void instanceInitmydsp(mydsp* dsp, int sample_rate) {";
     let instance_init_start = fast
         .find(instance_init_sig)
         .expect("instanceInit signature should be present");
     let instance_init_body = &fast[instance_init_start..];
     let constants_i = instance_init_body
-        .find("instanceConstantsrep_10_two_in_two_out_ui(dsp, sample_rate);")
+        .find("instanceConstantsmydsp(dsp, sample_rate);")
         .expect("instanceConstants call should be present");
     let reset_i = instance_init_body
-        .find("instanceResetUserInterfacerep_10_two_in_two_out_ui(dsp);")
+        .find("instanceResetUserInterfacemydsp(dsp);")
         .expect("instanceResetUserInterface call should be present");
     let clear_i = instance_init_body
-        .find("instanceClearrep_10_two_in_two_out_ui(dsp);")
+        .find("instanceClearmydsp(dsp);")
         .expect("instanceClear call should be present");
     assert!(
         constants_i < reset_i && reset_i < clear_i,
