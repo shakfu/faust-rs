@@ -229,16 +229,7 @@ fn cpp_class_for_case(cpp_bin: &Path, case: &Case) -> Result<(CppClass, i32), St
 }
 
 fn cpp_bin() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("FAUST_CPP_BIN") {
-        return Some(PathBuf::from(path));
-    }
-
-    let default = PathBuf::from("/usr/local/bin/faust");
-    if default.exists() {
-        Some(default)
-    } else {
-        None
-    }
+    std::env::var_os("FAUST_CPP_BIN").map(PathBuf::from)
 }
 
 fn load_cases() -> Result<Vec<Case>, String> {
@@ -501,7 +492,7 @@ fn git_head_short(path: &str) -> Option<String> {
 fn differential_parse_recovery_against_cpp_reference() {
     let Some(cpp_bin) = cpp_bin() else {
         eprintln!(
-            "Skipping differential test: FAUST_CPP_BIN not set and /usr/local/bin/faust not found"
+            "Skipping differential test: set FAUST_CPP_BIN to run against a pinned C++ faust binary"
         );
         return;
     };

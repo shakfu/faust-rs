@@ -186,7 +186,7 @@ impl TagRegistry {
 /// # Invariants
 /// - For a given arena instance, each structural node appears once.
 /// - `nil()` always points to the canonical `NodeKind::Nil` node.
-/// - Tag strings are interned via [`TagRegistry`] so `NodeKind::Tag(u32)` operations
+/// - Tag strings are interned via the internal tag registry so `NodeKind::Tag(u32)` operations
 ///   are O(1).
 #[derive(Debug)]
 pub struct TreeArena {

@@ -280,15 +280,14 @@ fn emit_dsp_contract_methods(
     let _ = writeln!(out, "{tab}virtual int getSampleRate() {{");
     let _ = writeln!(out, "{tab}    return fSampleRate;");
     let _ = writeln!(out, "{tab}}}");
-    let _ = writeln!(
-        out,
-        "{tab}virtual void instanceConstants(int sample_rate) {{"
-    );
-    let _ = writeln!(out, "{tab}    fSampleRate = sample_rate;");
-    if has_instance_constants {
-        let _ = writeln!(out, "{tab}    instanceConstants();");
+    if !has_instance_constants {
+        let _ = writeln!(
+            out,
+            "{tab}virtual void instanceConstants(int sample_rate) {{"
+        );
+        let _ = writeln!(out, "{tab}    fSampleRate = sample_rate;");
+        let _ = writeln!(out, "{tab}}}");
     }
-    let _ = writeln!(out, "{tab}}}");
     if !has_instance_reset_ui {
         let _ = writeln!(out, "{tab}virtual void instanceResetUserInterface() {{");
         let _ = writeln!(out, "{tab}}}");
@@ -832,7 +831,10 @@ fn emit_declare_fun(
     }
     let inline = if decl.is_inline { "inline " } else { "" };
     let _ = writeln!(out, "{tab}{inline}{ret} {}({params}) {{", decl.name);
-    if decl.name == "compute" {
+    if decl.name == "instanceConstants" {
+        let _ = writeln!(out, "{tab}    fSampleRate = sample_rate;");
+        emit_block(store, out, options, decl.body, indent + 1)?;
+    } else if decl.name == "compute" {
         emit_compute_body(store, out, options, decl.body, indent + 1)?;
     } else {
         emit_block(store, out, options, decl.body, indent + 1)?;

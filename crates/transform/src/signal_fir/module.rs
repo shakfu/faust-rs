@@ -91,15 +91,19 @@ pub fn build_module(
         let mut b = FirBuilder::new(&mut lower.store);
         b.block(&lower.constants_statements)
     };
+    let constants_args = [NamedType {
+        name: "sample_rate".to_string(),
+        typ: FirType::Int32,
+    }];
     let instance_constants = {
         let mut b = FirBuilder::new(&mut lower.store);
         b.declare_fun(
             "instanceConstants",
             FirType::Fun {
-                args: Vec::new(),
+                args: vec![FirType::Int32],
                 ret: Box::new(FirType::Void),
             },
-            &[],
+            &constants_args,
             constants_body,
             false,
         )
