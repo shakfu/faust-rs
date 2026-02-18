@@ -15,7 +15,7 @@ use boxes::{BoxId, BoxMatch, dump_box, match_box};
 use codegen::backends::c::{COptions, CodegenError as CCodegenError, generate_c_module};
 use codegen::backends::cpp::{CodegenError, CppOptions, generate_cpp_module};
 use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, SourceSpan};
-use fir::{FirBuilder, FirId, FirStore, FirType};
+use fir::{FirBuilder, FirId, FirStore, FirType, NamedType};
 use parser::{ParseOutput, SourceReaderError};
 use propagate::{BoxArity, PropagateError};
 use signals::{SigId, dump_sig_readable};
@@ -770,11 +770,29 @@ fn lower_signals_to_fir_legacy_bridge(
     }
 
     let body = b.block(&body);
+    let compute_args = [
+        NamedType {
+            name: "count".to_string(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
     let compute_type = FirType::Fun {
-        args: Vec::new(),
+        args: vec![
+            FirType::Int32,
+            FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        ],
         ret: Box::new(FirType::Void),
     };
-    let compute = b.declare_fun("compute", compute_type, &[], body, false);
+    let compute = b.declare_fun("compute", compute_type, &compute_args, body, false);
     let declarations = b.block(&[compute]);
     let dsp_struct = b.block(&[]);
     let globals = b.block(&[]);
@@ -843,11 +861,29 @@ fn lower_signals_to_c_legacy_bridge(
     // Keep legacy C bridge intentionally minimal: C backend currently does not
     // emit FIR label statements, so we avoid `Label` nodes here.
     let body = b.block(&[]);
+    let compute_args = [
+        NamedType {
+            name: "count".to_string(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
     let compute_type = FirType::Fun {
-        args: Vec::new(),
+        args: vec![
+            FirType::Int32,
+            FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        ],
         ret: Box::new(FirType::Void),
     };
-    let compute = b.declare_fun("compute", compute_type, &[], body, false);
+    let compute = b.declare_fun("compute", compute_type, &compute_args, body, false);
 
     let declarations = b.block(&[compute]);
     let dsp_struct = b.block(&[]);

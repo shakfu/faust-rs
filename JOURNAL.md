@@ -4277,3 +4277,33 @@ Execution plan (Phase 0 prototype, revised):
 - Result:
   - repository now includes the missing Rust golden snapshot for
     `tests/corpus/rep_38_sine_phasor.dsp`, and `golden-check` passes.
+
+#### FIR type parity audit: explicit DSP API function signatures (`kMeta_ptr` / `kUI_ptr` / compute buffers)
+
+- Context:
+  - C++ FIR builders declare typed function signatures:
+    - `metadata(Meta*)` (`kMeta_ptr`)
+    - `buildUserInterface(UI*)` (`kUI_ptr`)
+    - `compute(int, FAUSTFLOAT**, FAUSTFLOAT**)`
+  - Rust FIR model used empty arg lists in several module builders and relied on
+    backend fallbacks to patch signatures.
+- Implemented:
+  - updated FIR-producing call sites to declare explicit typed args:
+    - `crates/transform/src/signal_fir/module.rs`
+    - `crates/compiler/src/lib.rs` (legacy bridge `compute`)
+    - `crates/codegen/src/fixtures.rs`
+  - kept C++ backend ABI spelling for canonical DSP `compute(...)` with
+    `RESTRICT` while allowing non-canonical helper functions named `compute`
+    to keep their own typed signature.
+  - added FIR unit coverage for metadata/buildUI/compute signature round-trip:
+    - `crates/fir/src/lib.rs` test
+      `builder_and_match_cover_faust_dsp_api_fun_signatures`.
+  - clarified Rustdoc parity notes on `FirType::{Sound,UI,Meta}` regarding
+    `kSound_ptr` / `kUI_ptr` / `kMeta_ptr` usage at FIR API boundaries.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p fir`
+  - `cargo test -p codegen`
+  - `cargo test -p transform`
+  - `cargo test -p compiler`
+  - `cargo clippy --workspace --all-targets -- -D warnings`

@@ -3,7 +3,9 @@
 //! These builders define canonical FIR modules reused across multiple backend
 //! tests (C, C++, and future backends) to avoid copy/paste drift.
 
-use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirStore, FirType, SliderType, UiBoxType};
+use fir::{
+    AccessType, FirBinOp, FirBuilder, FirId, FirStore, FirType, NamedType, SliderType, UiBoxType,
+};
 
 /// Builds a canonical FIR module for a phasor-driven sine oscillator.
 ///
@@ -52,13 +54,17 @@ pub fn build_sine_phasor_test_module() -> (FirStore, FirId) {
     );
     let close = b.close_box();
     let build_ui_body = b.block(&[open, freq_slider, gain_slider, close]);
+    let build_ui_args = [NamedType {
+        name: "ui_interface".to_string(),
+        typ: FirType::UI,
+    }];
     let build_ui = b.declare_fun(
         "buildUserInterface",
         FirType::Fun {
-            args: Vec::new(),
+            args: vec![FirType::UI],
             ret: Box::new(FirType::Void),
         },
-        &[],
+        &build_ui_args,
         build_ui_body,
         false,
     );
@@ -83,13 +89,31 @@ pub fn build_sine_phasor_test_module() -> (FirStore, FirId) {
     let drop_out = b.drop_(out);
 
     let compute_body = b.block(&[store_phase, drop_out]);
+    let compute_args = [
+        NamedType {
+            name: "count".to_string(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
     let compute = b.declare_fun(
         "compute",
         FirType::Fun {
-            args: Vec::new(),
+            args: vec![
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
             ret: Box::new(FirType::Void),
         },
-        &[],
+        &compute_args,
         compute_body,
         false,
     );

@@ -816,7 +816,8 @@ fn emit_declare_fun(
         params_override = Some("UI* ui_interface".to_owned());
     } else if decl.name == "metadata" && params.is_empty() {
         params_override = Some("Meta* m".to_owned());
-    } else if decl.name == "compute" && params.is_empty() {
+    } else if decl.name == "compute" && (params.is_empty() || is_faust_compute_signature(decl.typ))
+    {
         params_override = Some(
             "int count, FAUSTFLOAT** RESTRICT inputs, FAUSTFLOAT** RESTRICT outputs".to_owned(),
         );
@@ -833,6 +834,29 @@ fn emit_declare_fun(
     }
     let _ = writeln!(out, "{tab}}}");
     Ok(())
+}
+
+fn is_faust_compute_signature(typ: &FirType) -> bool {
+    let FirType::Fun { args, .. } = typ else {
+        return false;
+    };
+    matches!(
+        args.as_slice(),
+        [
+            FirType::Int32,
+            FirType::Ptr(inner_inputs),
+            FirType::Ptr(inner_outputs)
+        ] if matches!(
+            (inner_inputs.as_ref(), inner_outputs.as_ref()),
+            (
+                FirType::Ptr(ff_inputs),
+                FirType::Ptr(ff_outputs)
+            ) if matches!(
+                (ff_inputs.as_ref(), ff_outputs.as_ref()),
+                (FirType::FaustFloat, FirType::FaustFloat)
+            )
+        )
+    )
 }
 
 /// Emits a Faust-style sample loop for `compute(count, inputs, outputs)`.

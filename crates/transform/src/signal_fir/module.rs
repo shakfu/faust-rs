@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 
 use fir::{
     AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirMatch, FirStore, FirType,
-    SliderRange, SliderType, UiBoxType, match_fir,
+    NamedType, SliderRange, SliderType, UiBoxType, match_fir,
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{NodeKind, TreeArena};
@@ -69,15 +69,19 @@ pub fn build_module(
         let mut b = FirBuilder::new(&mut lower.store);
         b.block(&[])
     };
+    let metadata_args = [NamedType {
+        name: "m".to_string(),
+        typ: FirType::Meta,
+    }];
     let metadata = {
         let mut b = FirBuilder::new(&mut lower.store);
         b.declare_fun(
             "metadata",
             FirType::Fun {
-                args: Vec::new(),
+                args: vec![FirType::Meta],
                 ret: Box::new(FirType::Void),
             },
-            &[],
+            &metadata_args,
             metadata_body,
             false,
         )
@@ -143,15 +147,19 @@ pub fn build_module(
         let mut b = FirBuilder::new(&mut lower.store);
         b.block(&ui_statements)
     };
+    let build_ui_args = [NamedType {
+        name: "ui_interface".to_string(),
+        typ: FirType::UI,
+    }];
     let build_ui = {
         let mut b = FirBuilder::new(&mut lower.store);
         b.declare_fun(
             "buildUserInterface",
             FirType::Fun {
-                args: Vec::new(),
+                args: vec![FirType::UI],
                 ret: Box::new(FirType::Void),
             },
-            &[],
+            &build_ui_args,
             ui_body,
             false,
         )
@@ -167,15 +175,33 @@ pub fn build_module(
         let mut b = FirBuilder::new(&mut lower.store);
         b.block(&compute_statements)
     };
+    let compute_args = [
+        NamedType {
+            name: "count".to_string(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
     let compute = {
         let mut b = FirBuilder::new(&mut lower.store);
         b.declare_fun(
             "compute",
             FirType::Fun {
-                args: Vec::new(),
+                args: vec![
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
                 ret: Box::new(FirType::Void),
             },
-            &[],
+            &compute_args,
             compute_body,
             false,
         )

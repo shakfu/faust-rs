@@ -60,8 +60,11 @@ pub enum FirType {
     Bool,
     Void,
     Obj,
+    /// C++ parity note: maps current FIR API handle type used like `kSound_ptr`.
     Sound,
+    /// C++ parity note: maps current FIR API handle type used like `kUI_ptr`.
     UI,
+    /// C++ parity note: maps current FIR API handle type used like `kMeta_ptr`.
     Meta,
     Ptr(Box<FirType>),
     Array(Box<FirType>, usize),
@@ -2703,6 +2706,88 @@ mod tests {
             }
         );
         assert_eq!(store.value_type(read), Some(FirType::FaustFloat));
+    }
+
+    #[test]
+    fn builder_and_match_cover_faust_dsp_api_fun_signatures() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let body = b.block(&[]);
+
+        let metadata_args = vec![NamedType {
+            name: "m".to_string(),
+            typ: FirType::Meta,
+        }];
+        let metadata_ty = FirType::Fun {
+            args: vec![FirType::Meta],
+            ret: Box::new(FirType::Void),
+        };
+        let metadata = b.declare_fun("metadata", metadata_ty.clone(), &metadata_args, body, false);
+
+        let ui_args = vec![NamedType {
+            name: "ui_interface".to_string(),
+            typ: FirType::UI,
+        }];
+        let ui_ty = FirType::Fun {
+            args: vec![FirType::UI],
+            ret: Box::new(FirType::Void),
+        };
+        let build_ui = b.declare_fun("buildUserInterface", ui_ty.clone(), &ui_args, body, false);
+
+        let compute_args = vec![
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute_ty = FirType::Fun {
+            args: vec![
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            ret: Box::new(FirType::Void),
+        };
+        let compute = b.declare_fun("compute", compute_ty.clone(), &compute_args, body, false);
+
+        assert_eq!(
+            match_fir(&store, metadata),
+            FirMatch::DeclareFun {
+                name: "metadata".to_string(),
+                typ: metadata_ty,
+                args: metadata_args,
+                body,
+                is_inline: false
+            }
+        );
+        assert_eq!(
+            match_fir(&store, build_ui),
+            FirMatch::DeclareFun {
+                name: "buildUserInterface".to_string(),
+                typ: ui_ty,
+                args: ui_args,
+                body,
+                is_inline: false
+            }
+        );
+        assert_eq!(
+            match_fir(&store, compute),
+            FirMatch::DeclareFun {
+                name: "compute".to_string(),
+                typ: compute_ty,
+                args: compute_args,
+                body,
+                is_inline: false
+            }
+        );
     }
 
     #[test]
