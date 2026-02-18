@@ -511,13 +511,12 @@ fn emit_stmt_with_mode(
                 drop_index,
                 output_channels,
             } = mode
+                && *drop_index < *output_channels
             {
-                if *drop_index < *output_channels {
-                    let output_index = *drop_index;
-                    let _ = writeln!(out, "{tab}output{output_index}[i0] = FAUSTFLOAT({value});");
-                    *drop_index += 1;
-                    return Ok(());
-                }
+                let output_index = *drop_index;
+                let _ = writeln!(out, "{tab}output{output_index}[i0] = FAUSTFLOAT({value});");
+                *drop_index += 1;
+                return Ok(());
             }
             let _ = writeln!(out, "{tab}(void)({value});");
             Ok(())

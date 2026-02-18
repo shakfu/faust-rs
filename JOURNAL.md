@@ -3403,3 +3403,15 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo fmt --all`
   - `cargo test -p codegen --all-targets`
+
+#### Clippy workspace fix (`-D warnings`) after C/C++ backend updates
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/codegen/src/backends/cpp/mod.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - fixed a `clippy::collapsible_if` warning in C++ backend `Drop` emission path
+    (compute-mode output write dispatch).
+- Validation:
+  - `cargo clippy --workspace --all-targets -- -D warnings`
