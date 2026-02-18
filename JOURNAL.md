@@ -4263,3 +4263,17 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo run -p compiler -- -lang cpp tests/corpus/rep_38_sine_phasor.dsp -o /tmp/rep_38_sine_phasor_default.cpp`
   - `cargo run -p compiler -- -lang c tests/corpus/rep_38_sine_phasor.dsp -o /tmp/rep_38_sine_phasor_default.c`
   - confirmed both outputs now contain UI controls and sample writes (`output0[i0]`), not empty loop stubs.
+
+#### Golden refresh: add missing Rust snapshot for `rep_38_sine_phasor`
+
+- Context:
+  - CI failed in `xtask golden-check` due to missing file:
+    - `tests/golden/rust/rep_38_sine_phasor/compiler_stdout.txt`
+- Action:
+  - generated Rust golden snapshots with:
+    - `cargo run -p xtask -- golden-gen-rust`
+  - verified with:
+    - `cargo run -p xtask -- golden-check`
+- Result:
+  - repository now includes the missing Rust golden snapshot for
+    `tests/corpus/rep_38_sine_phasor.dsp`, and `golden-check` passes.
