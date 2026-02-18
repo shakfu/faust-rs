@@ -36,6 +36,18 @@ fn compile_cpp_with_lane(file: &str, lane: SignalFirLane) -> String {
         .unwrap_or_else(|e| panic!("{file} C++ compilation failed for lane {lane:?}: {e}"))
 }
 
+fn compile_c_with_lane(file: &str, lane: SignalFirLane) -> String {
+    let compiler = Compiler::new();
+    let path = corpus_path(file);
+    compiler
+        .compile_file_default_to_c_with_lane(
+            &path,
+            &codegen::backends::c::COptions::default(),
+            lane,
+        )
+        .unwrap_or_else(|e| panic!("{file} C compilation failed for lane {lane:?}: {e}"))
+}
+
 #[test]
 fn legacy_and_fastlane_both_compile_lowpass_feedback_fixture() {
     let legacy = compile_cpp_with_lane("rep_05_one_pole_lowpass.dsp", SignalFirLane::LegacyBridge);
@@ -189,6 +201,64 @@ fn fastlane_cpp_lifecycle_order_matches_faust_instance_init_flow() {
         .expect("instanceResetUserInterface call should be present");
     let clear_i = instance_init_body
         .find("instanceClear();")
+        .expect("instanceClear call should be present");
+    assert!(
+        constants_i < reset_i && reset_i < clear_i,
+        "instanceInit should call constants -> resetUI -> clear in order"
+    );
+}
+
+#[test]
+fn dump_c_fastlane_compiles_fixture() {
+    let fast = compile_c_with_lane("rep_01_passthrough.dsp", SignalFirLane::TransformFastLane);
+    assert!(fast.contains("typedef struct {"));
+    assert!(fast.contains("void computerep_01_passthrough("));
+}
+
+#[test]
+fn legacy_and_fastlane_both_compile_c_table_fixtures_without_shims() {
+    for file in [
+        "rep_34_table_rdtable_readonly_const.dsp",
+        "rep_35_table_rwtable_runtime_write.dsp",
+        "rep_36_table_rdtable_negative_index.dsp",
+        "rep_37_table_rwtable_negative_indices.dsp",
+    ] {
+        let legacy = compile_c_with_lane(file, SignalFirLane::LegacyBridge);
+        let fast = compile_c_with_lane(file, SignalFirLane::TransformFastLane);
+        assert!(
+            legacy.contains("void compute"),
+            "legacy lane should compile C fixture {file}"
+        );
+        assert!(
+            fast.contains("void compute"),
+            "fast lane should compile C fixture {file}"
+        );
+        assert!(
+            !fast.contains("frs_"),
+            "fast lane C output should not contain frs_* shim names for {file}"
+        );
+    }
+}
+
+#[test]
+fn fastlane_c_lifecycle_order_matches_faust_instance_init_flow() {
+    let fast = compile_c_with_lane(
+        "rep_10_two_in_two_out_ui.dsp",
+        SignalFirLane::TransformFastLane,
+    );
+    let instance_init_sig = "void instanceInitrep_10_two_in_two_out_ui(rep_10_two_in_two_out_ui* dsp, int sample_rate) {";
+    let instance_init_start = fast
+        .find(instance_init_sig)
+        .expect("instanceInit signature should be present");
+    let instance_init_body = &fast[instance_init_start..];
+    let constants_i = instance_init_body
+        .find("instanceConstantsrep_10_two_in_two_out_ui(dsp, sample_rate);")
+        .expect("instanceConstants call should be present");
+    let reset_i = instance_init_body
+        .find("instanceResetUserInterfacerep_10_two_in_two_out_ui(dsp);")
+        .expect("instanceResetUserInterface call should be present");
+    let clear_i = instance_init_body
+        .find("instanceClearrep_10_two_in_two_out_ui(dsp);")
         .expect("instanceClear call should be present");
     assert!(
         constants_i < reset_i && reset_i < clear_i,

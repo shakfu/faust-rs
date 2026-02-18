@@ -1077,6 +1077,18 @@ Current Step 3C status (lifecycle alignment slice):
 - Pass criteria:
   - route is deterministic and isolated from default production path.
 
+Current Step 7A status (`--dump-c` fast-lane exposure):
+
+- `compiler` now exposes C emission APIs with lane selection parity to C++:
+  - `compile_source_to_c_with_lane`,
+  - `compile_file_to_c_with_lane`,
+  - `compile_file_default_to_c_with_lane`.
+- CLI now exposes:
+  - `--dump-c <input.dsp> --signal-fir-lane legacy|fast`
+  - with the same import/error-format options as `--dump-cpp`.
+- Integration coverage now validates both lanes for C output on corpus fixtures,
+  including lifecycle order and absence of `frs_*` shim names in fast-lane.
+
 #### Step 8 — Differential tests Rust vs C++ `signalFIRCompiler`
 
 - Deliverables:

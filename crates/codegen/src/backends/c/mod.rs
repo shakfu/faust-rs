@@ -1034,6 +1034,10 @@ fn emit_stmt(
             let _ = writeln!(out, "{tab};");
             Ok(())
         }
+        FirMatch::Label(label) => {
+            let _ = writeln!(out, "{tab}// {label}");
+            Ok(())
+        }
         _ => Err(unsupported_node("statement", stmt, store)),
     }
 }

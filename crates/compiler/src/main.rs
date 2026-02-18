@@ -1,4 +1,5 @@
 use boxes::dump_box;
+use codegen::backends::c::COptions;
 use codegen::backends::cpp::CppOptions;
 use compiler::{Compiler, CompilerError, SignalFirLane, golden_snapshot_from_file};
 use errors::{DiagnosticBundle, LabelStyle, Severity, Stage};
@@ -100,7 +101,7 @@ fn parse_input_with_import_dirs_and_format(
     )
 }
 
-fn parse_dump_cpp_input(
+fn parse_dump_codegen_input(
     mut args: impl Iterator<Item = String>,
     usage: &str,
 ) -> (
@@ -537,9 +538,10 @@ fn diagnostic_debug_from_notes(notes: &[Box<str>]) -> serde_json::Value {
 }
 
 fn parse_dump_usage(mode: &str) -> String {
-    if mode == "dump-cpp" {
-        "Usage: cargo run -p compiler -- --dump-cpp <input.dsp> [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
-            .to_owned()
+    if mode == "dump-cpp" || mode == "dump-c" {
+        format!(
+            "Usage: cargo run -p compiler -- --{mode} <input.dsp> [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+        )
     } else {
         format!(
             "Usage: cargo run -p compiler -- --{mode} <input.dsp> [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
@@ -566,6 +568,9 @@ fn print_global_usage_and_exit() -> ! {
     );
     eprintln!(
         "  cargo run -p compiler -- --dump-cpp <input.dsp> [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+    );
+    eprintln!(
+        "  cargo run -p compiler -- --dump-c <input.dsp> [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     std::process::exit(2);
 }
@@ -696,7 +701,7 @@ fn main() {
         Some("--dump-cpp") => {
             let usage = parse_dump_usage("dump-cpp");
             let (input_path, search_paths, lane, error_format, error_verbosity) =
-                parse_dump_cpp_input(args, &usage);
+                parse_dump_codegen_input(args, &usage);
             let compiler = Compiler::new();
             let options = CppOptions::default();
             let result = if search_paths.is_empty() {
@@ -720,6 +725,38 @@ fn main() {
                 }
                 Err(err) => {
                     eprintln!("C++ pipeline failed: {err}");
+                    print_structured_diagnostics(&err, error_format, error_verbosity);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Some("--dump-c") => {
+            let usage = parse_dump_usage("dump-c");
+            let (input_path, search_paths, lane, error_format, error_verbosity) =
+                parse_dump_codegen_input(args, &usage);
+            let compiler = Compiler::new();
+            let options = COptions::default();
+            let result = if search_paths.is_empty() {
+                compiler.compile_file_default_to_c_with_lane(
+                    &input_path,
+                    &options,
+                    lane.into_compiler_lane(),
+                )
+            } else {
+                compiler.compile_file_to_c_with_lane(
+                    &input_path,
+                    &search_paths,
+                    &options,
+                    lane.into_compiler_lane(),
+                )
+            };
+
+            match result {
+                Ok(c_code) => {
+                    print!("{c_code}");
+                }
+                Err(err) => {
+                    eprintln!("C pipeline failed: {err}");
                     print_structured_diagnostics(&err, error_format, error_verbosity);
                     std::process::exit(1);
                 }

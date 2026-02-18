@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use boxes::{BoxId, BoxMatch, dump_box, match_box};
+use codegen::backends::c::{COptions, CodegenError as CCodegenError, generate_c_module};
 use codegen::backends::cpp::{CodegenError, CppOptions, generate_cpp_module};
 use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, SourceSpan};
 use fir::{FirBuilder, FirStore, FirType};
@@ -158,6 +159,53 @@ impl Compiler {
         )
     }
 
+    /// Parses + evaluates + propagates one source, then lowers to a temporary
+    /// FIR module and emits C text through the module-first backend.
+    ///
+    /// # Rustdoc note
+    /// This is a bridge API for Phase 6 Step 7A. The produced C currently uses
+    /// the same lane selection model as C++ (`legacy` bridge or `transform`
+    /// fast-lane) while parity is being finalized.
+    pub fn compile_source_to_c(
+        &self,
+        source_name: &str,
+        source: &str,
+        options: &COptions,
+    ) -> Result<String, CompilerError> {
+        self.compile_source_to_c_with_lane(
+            source_name,
+            source,
+            options,
+            SignalFirLane::LegacyBridge,
+        )
+    }
+
+    /// Parses + evaluates + propagates one source, then emits C text using
+    /// the selected signal->FIR lowering lane.
+    pub fn compile_source_to_c_with_lane(
+        &self,
+        source_name: &str,
+        source: &str,
+        options: &COptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        let signals = self.compile_source_to_signals(source_name, source)?;
+        lower_signals_to_c(source_name, &signals, options, lane).map_err(|error| match error {
+            LowerToCError::Transform(error) => {
+                let diagnostic = signal_fir_diagnostic(&error);
+                CompilerError::Transform {
+                    source: source_name.into(),
+                    error,
+                    diagnostics: bundle_from_diagnostic(diagnostic),
+                }
+            }
+            LowerToCError::Codegen(error) => CompilerError::CodegenC {
+                source: source_name.into(),
+                error,
+            },
+        })
+    }
+
     /// Parses + evaluates + propagates one source, then emits C++ text using
     /// the selected signal->FIR lowering lane.
     pub fn compile_source_to_cpp_with_lane(
@@ -195,6 +243,44 @@ impl Compiler {
         self.compile_file_to_cpp_with_lane(path, search_paths, options, SignalFirLane::LegacyBridge)
     }
 
+    /// Parses + evaluates + propagates one file, then emits C text from
+    /// the temporary module-first FIR bridge.
+    pub fn compile_file_to_c(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        options: &COptions,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_to_c_with_lane(path, search_paths, options, SignalFirLane::LegacyBridge)
+    }
+
+    /// Parses + evaluates + propagates one file, then emits C text using
+    /// the selected signal->FIR lowering lane.
+    pub fn compile_file_to_c_with_lane(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        options: &COptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        let signals = self.compile_file_to_signals(path, search_paths)?;
+        let source = path.display().to_string();
+        lower_signals_to_c(&source, &signals, options, lane).map_err(|error| match error {
+            LowerToCError::Transform(error) => {
+                let diagnostic = signal_fir_diagnostic(&error);
+                CompilerError::Transform {
+                    source: source.clone().into(),
+                    error,
+                    diagnostics: bundle_from_diagnostic(diagnostic),
+                }
+            }
+            LowerToCError::Codegen(error) => CompilerError::CodegenC {
+                source: source.into(),
+                error,
+            },
+        })
+    }
+
     /// Parses + evaluates + propagates one file, then emits C++ text using
     /// the selected signal->FIR lowering lane.
     pub fn compile_file_to_cpp_with_lane(
@@ -230,6 +316,31 @@ impl Compiler {
         options: &CppOptions,
     ) -> Result<String, CompilerError> {
         self.compile_file_default_to_cpp_with_lane(path, options, SignalFirLane::LegacyBridge)
+    }
+
+    /// Parses + evaluates + propagates one file with default import search path,
+    /// then emits C text from the temporary module-first FIR bridge.
+    pub fn compile_file_default_to_c(
+        &self,
+        path: &Path,
+        options: &COptions,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_default_to_c_with_lane(path, options, SignalFirLane::LegacyBridge)
+    }
+
+    /// Parses + evaluates + propagates one file with default import search path,
+    /// then emits C text using the selected signal->FIR lowering lane.
+    pub fn compile_file_default_to_c_with_lane(
+        &self,
+        path: &Path,
+        options: &COptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        let search_base = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        self.compile_file_to_c_with_lane(path, std::slice::from_ref(&search_base), options, lane)
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -425,6 +536,10 @@ pub enum CompilerError {
         source: Box<str>,
         error: CodegenError,
     },
+    CodegenC {
+        source: Box<str>,
+        error: CCodegenError,
+    },
 }
 
 impl std::fmt::Display for CompilerError {
@@ -454,6 +569,9 @@ impl std::fmt::Display for CompilerError {
             Self::Codegen { source, error } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
+            Self::CodegenC { source, error } => {
+                write!(f, "code generation failed for {source}: {error}")
+            }
         }
     }
 }
@@ -470,6 +588,7 @@ impl CompilerError {
             Self::Propagate { diagnostics, .. } => Some(diagnostics),
             Self::Transform { diagnostics, .. } => Some(diagnostics),
             Self::Codegen { .. } => None,
+            Self::CodegenC { .. } => None,
             _ => None,
         }
     }
@@ -501,6 +620,12 @@ enum LowerToCppError {
     Codegen(CodegenError),
 }
 
+#[derive(Debug)]
+enum LowerToCError {
+    Transform(SignalFirError),
+    Codegen(CCodegenError),
+}
+
 fn lower_signals_to_cpp(
     source_name: &str,
     output: &SignalCompileOutput,
@@ -513,6 +638,22 @@ fn lower_signals_to_cpp(
         }
         SignalFirLane::TransformFastLane => {
             lower_signals_to_cpp_transform_fastlane(source_name, output, options)
+        }
+    }
+}
+
+fn lower_signals_to_c(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &COptions,
+    lane: SignalFirLane,
+) -> Result<String, LowerToCError> {
+    match lane {
+        SignalFirLane::LegacyBridge => {
+            lower_signals_to_c_legacy_bridge(source_name, output, options)
+        }
+        SignalFirLane::TransformFastLane => {
+            lower_signals_to_c_transform_fastlane(source_name, output, options)
         }
     }
 }
@@ -580,6 +721,59 @@ fn lower_signals_to_cpp_transform_fastlane(
     )
     .map_err(LowerToCppError::Transform)?;
     generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerToCppError::Codegen)
+}
+
+fn lower_signals_to_c_legacy_bridge(
+    source_name: &str,
+    _output: &SignalCompileOutput,
+    options: &COptions,
+) -> Result<String, LowerToCError> {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+    // Keep legacy C bridge intentionally minimal: C backend currently does not
+    // emit FIR label statements, so we avoid `Label` nodes here.
+    let body = b.block(&[]);
+    let compute_type = FirType::Fun {
+        args: Vec::new(),
+        ret: Box::new(FirType::Void),
+    };
+    let compute = b.declare_fun("compute", compute_type, &[], body, false);
+
+    let declarations = b.block(&[compute]);
+    let dsp_struct = b.block(&[]);
+    let globals = b.block(&[]);
+    let module_name = options
+        .class_name
+        .as_deref()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| sanitize_cpp_ident(source_name_to_class(source_name).as_str()));
+    let module = b.module(module_name, dsp_struct, globals, declarations);
+    generate_c_module(&store, module, options).map_err(LowerToCError::Codegen)
+}
+
+fn lower_signals_to_c_transform_fastlane(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &COptions,
+) -> Result<String, LowerToCError> {
+    let module_name = options
+        .class_name
+        .as_deref()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| sanitize_cpp_ident(source_name_to_class(source_name).as_str()));
+    let signal_fir_options = SignalFirOptions {
+        module_name,
+        strict_mode: true,
+    };
+    let lowered = compile_signals_to_fir_fastlane(
+        &output.parse.state.arena,
+        &output.signals,
+        output.process_arity.inputs,
+        output.process_arity.outputs,
+        &signal_fir_options,
+    )
+    .map_err(LowerToCError::Transform)?;
+    generate_c_module(&lowered.store, lowered.module, options).map_err(LowerToCError::Codegen)
 }
 
 fn signal_fir_diagnostic(error: &SignalFirError) -> Diagnostic {
@@ -1479,6 +1673,7 @@ mod tests {
     use std::path::PathBuf;
 
     use boxes::BoxBuilder;
+    use codegen::backends::c::COptions;
     use codegen::backends::cpp::CppOptions;
     use signals::SigMatch;
     use tlib::TreeArena;
@@ -1650,6 +1845,42 @@ mod tests {
                 &CppOptions {
                     class_name: Some(String::new()),
                     ..CppOptions::default()
+                },
+                super::SignalFirLane::TransformFastLane,
+            )
+            .expect_err("empty class/module name should fail transform fast-lane validation");
+        assert!(matches!(err, CompilerError::Transform { .. }));
+        let diagnostics = err
+            .diagnostics()
+            .expect("transform failure should expose structured diagnostics");
+        assert!(
+            diagnostics
+                .as_slice()
+                .iter()
+                .any(|d| d.code.0.starts_with("FRS-SFIR-"))
+        );
+    }
+
+    #[test]
+    fn compiler_compile_source_to_c_emits_module_text() {
+        let compiler = Compiler::new();
+        let c_code = compiler
+            .compile_source_to_c("pass.dsp", "process = _;", &COptions::default())
+            .expect("pass-through should compile to C");
+        assert!(c_code.contains("typedef struct {"));
+        assert!(c_code.contains("void computepass("));
+    }
+
+    #[test]
+    fn compiler_compile_source_to_c_fastlane_reports_transform_error() {
+        let compiler = Compiler::new();
+        let err = compiler
+            .compile_source_to_c_with_lane(
+                "pass.dsp",
+                "process = _;",
+                &COptions {
+                    class_name: Some(String::new()),
+                    ..COptions::default()
                 },
                 super::SignalFirLane::TransformFastLane,
             )

@@ -4013,3 +4013,37 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p codegen --all-targets`
   - `cargo test -p compiler --test signal_fir_lane`
   - `cargo clippy -p codegen -p compiler --all-targets -- -D warnings`
+
+#### signalFIRCompiler fast-lane: Step 7A expose C lane in compiler/CLI
+
+- Commit: pending (working tree step)
+- Files:
+  - `crates/compiler/src/lib.rs`
+  - `crates/compiler/src/main.rs`
+  - `crates/compiler/tests/signal_fir_lane.rs`
+  - `crates/codegen/src/backends/c/mod.rs`
+  - `porting/phases/phase-6-fir-backends-en.md`
+  - `JOURNAL.md`
+- Implemented:
+  - added C lane-aware compiler APIs mirroring C++:
+    - `compile_source_to_c_with_lane`,
+    - `compile_file_to_c_with_lane`,
+    - `compile_file_default_to_c_with_lane`,
+    - plus default wrappers using `SignalFirLane::LegacyBridge`.
+  - added dedicated C lowering path with lane dispatch:
+    - `LegacyBridge` route (minimal module body for backend compatibility),
+    - `TransformFastLane` route via `transform::signal_fir`.
+  - extended compiler error surface with `CompilerError::CodegenC`.
+  - added CLI route:
+    - `--dump-c <input.dsp> --signal-fir-lane legacy|fast`.
+  - extended integration tests:
+    - C fast-lane fixture compile smoke test,
+    - C lifecycle order check in generated `instanceInit*`,
+    - C table fixtures for legacy/fast and `frs_*` absence in fast-lane.
+  - added C backend support for FIR `Label` statements (emitted as C comments),
+    needed by transform fast-lane module sections/control labels.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --all-targets`
+  - `cargo test -p codegen --all-targets`
+  - `cargo clippy -p compiler -p codegen --all-targets -- -D warnings`
