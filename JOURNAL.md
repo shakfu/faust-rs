@@ -4307,3 +4307,30 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p transform`
   - `cargo test -p compiler`
   - `cargo clippy --workspace --all-targets -- -D warnings`
+
+#### Codegen hardening: explicit canonical DSP signature validation + FIR type model formalization
+
+- Implemented:
+  - added explicit canonical signature validation in C/C++ backends for
+    DSP API methods when declared in FIR:
+    - `metadata(Meta)`
+    - `instanceConstants(Int32)`
+    - `instanceResetUserInterface()`
+    - `instanceClear()`
+    - `buildUserInterface(UI)`
+    - `compute(Int32, Ptr(Ptr(FaustFloat)), Ptr(Ptr(FaustFloat)))`
+  - invalid signatures now fail fast with `InvalidModuleSection` backend errors.
+  - updated C++ backend tests to keep helper coverage while reserving canonical
+    function names for validated DSP API signatures.
+  - added negative tests:
+    - C: invalid `metadata` signature is rejected.
+    - C++: invalid `buildUserInterface` signature is rejected.
+  - formalized FIR type-model docs:
+    - `FirType::{UI, Sound, Meta}` are pointer-shaped API handles corresponding
+      to C++ `kUI_ptr` / `kSound_ptr` / `kMeta_ptr`,
+      while generic nesting remains encoded by `FirType::Ptr`.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p codegen`
+  - `cargo test -p fir`
+  - `cargo clippy --workspace --all-targets -- -D warnings`

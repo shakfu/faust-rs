@@ -792,6 +792,7 @@ fn emit_declare_fun(
     decl: DeclareFunView<'_>,
     indent: usize,
 ) -> Result<(), CodegenError> {
+    validate_faust_api_signature(&decl)?;
     let tab = "    ".repeat(indent);
     let mut params_override: Option<String> = None;
     let (ret, mut params) = match decl.typ {
@@ -857,6 +858,76 @@ fn is_faust_compute_signature(typ: &FirType) -> bool {
             )
         )
     )
+}
+
+fn validate_faust_api_signature(decl: &DeclareFunView<'_>) -> Result<(), CodegenError> {
+    let (expected_args, expected_ret, api_sig) = match decl.name {
+        "metadata" => (vec![FirType::Meta], FirType::Void, "void metadata(Meta*)"),
+        "instanceConstants" => (
+            vec![FirType::Int32],
+            FirType::Void,
+            "void instanceConstants(int)",
+        ),
+        "instanceResetUserInterface" => (
+            Vec::new(),
+            FirType::Void,
+            "void instanceResetUserInterface()",
+        ),
+        "instanceClear" => (Vec::new(), FirType::Void, "void instanceClear()"),
+        "buildUserInterface" => (
+            vec![FirType::UI],
+            FirType::Void,
+            "void buildUserInterface(UI*)",
+        ),
+        "compute" => (
+            vec![
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            FirType::Void,
+            "void compute(int, FAUSTFLOAT**, FAUSTFLOAT**)",
+        ),
+        _ => return Ok(()),
+    };
+
+    let FirType::Fun { args, ret } = decl.typ else {
+        return Err(CodegenError::new(
+            CodegenErrorCode::InvalidModuleSection,
+            format!(
+                "invalid FIR signature for {}: expected {api_sig}, got non-function type {:?}",
+                decl.name, decl.typ
+            ),
+        ));
+    };
+
+    if *args != expected_args || ret.as_ref() != &expected_ret {
+        return Err(CodegenError::new(
+            CodegenErrorCode::InvalidModuleSection,
+            format!(
+                "invalid FIR signature for {}: expected {api_sig}, got {:?}",
+                decl.name, decl.typ
+            ),
+        ));
+    }
+
+    if decl.named_args.len() != expected_args.len()
+        || decl
+            .named_args
+            .iter()
+            .zip(expected_args.iter())
+            .any(|(named, expected)| named.typ != *expected)
+    {
+        return Err(CodegenError::new(
+            CodegenErrorCode::InvalidModuleSection,
+            format!(
+                "invalid FIR named args for {}: expected types {:?}, got {:?}",
+                decl.name, expected_args, decl.named_args
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Emits a Faust-style sample loop for `compute(count, inputs, outputs)`.
@@ -1206,7 +1277,7 @@ mod tests {
             name: "x".to_owned(),
             typ: FirType::Int32,
         }];
-        let fun = b.declare_fun("compute", fun_ty, &args, body, false);
+        let fun = b.declare_fun("helper", fun_ty, &args, body, false);
 
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
@@ -1215,12 +1286,40 @@ mod tests {
         let out = generate_cpp_module(&store, module, &CppOptions::default())
             .expect("core statement/value slice should generate");
 
-        assert!(out.contains("int compute(int x)"));
+        assert!(out.contains("int helper(int x)"));
         assert!(out.contains("if ((acc < 16))"));
         assert!(out.contains("for (int i = 0; i < 4; ++i)"));
         assert!(out.contains("while ((acc < 16))"));
         assert!(out.contains("switch (acc)"));
         assert!(out.contains("return acc;"));
+    }
+
+    #[test]
+    fn rejects_invalid_canonical_build_ui_signature() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let body = b.block(&[]);
+        let bad_ty = FirType::Fun {
+            args: vec![FirType::Int32],
+            ret: Box::new(FirType::Void),
+        };
+        let bad_args = vec![NamedType {
+            name: "x".to_owned(),
+            typ: FirType::Int32,
+        }];
+        let build_ui = b.declare_fun("buildUserInterface", bad_ty, &bad_args, body, false);
+        let dsp_struct = b.block(&[]);
+        let globals = b.block(&[]);
+        let declarations = b.block(&[build_ui]);
+        let module = b.module("mydsp", dsp_struct, globals, declarations);
+
+        let err = generate_cpp_module(&store, module, &CppOptions::default())
+            .expect_err("invalid canonical buildUserInterface signature must fail");
+        assert_eq!(err.code(), CodegenErrorCode::InvalidModuleSection);
+        assert!(
+            err.to_string()
+                .contains("invalid FIR signature for buildUserInterface")
+        );
     }
 
     #[test]

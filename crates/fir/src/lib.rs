@@ -12,6 +12,17 @@
 //!   `crates/signals`.
 //! - Public inspection API is [`match_fir`] + [`FirMatch`].
 //!
+//! # Type model parity notes
+//! - `FirType::UI`, `FirType::Sound`, and `FirType::Meta` represent the
+//!   C++ FIR API handle layer historically spelled through pointer kinds
+//!   (`kUI_ptr`, `kSound_ptr`, `kMeta_ptr`) in `instructions_type.hh`.
+//! - Generic pointer nesting remains explicit with `FirType::Ptr(...)`
+//!   (for example `FAUSTFLOAT**` is `Ptr(Ptr(FaustFloat))`).
+//! - Canonical DSP API signatures should therefore use:
+//!   - `metadata(Meta)` (pointer-shaped handle),
+//!   - `buildUserInterface(UI)` (pointer-shaped handle),
+//!   - `compute(Int32, Ptr(Ptr(FaustFloat)), Ptr(Ptr(FaustFloat)))`.
+//!
 //! # Parity invariants
 //! - FIR nodes are represented as hash-consed trees in `tlib::TreeArena`.
 //! - Identical FIR nodes are structurally shared automatically by interning.

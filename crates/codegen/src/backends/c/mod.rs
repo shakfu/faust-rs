@@ -551,6 +551,7 @@ fn emit_named_fun(
     class_name: &str,
     decl: &DeclareFunView,
 ) -> Result<(), CodegenError> {
+    validate_faust_api_signature(decl)?;
     let signature = match decl.name.as_str() {
         "metadata" => format!("void metadata{class_name}(MetaGlue* m)"),
         "instanceConstants" => {
@@ -583,6 +584,76 @@ fn emit_named_fun(
     }
     let _ = writeln!(out, "}}");
     let _ = writeln!(out);
+    Ok(())
+}
+
+fn validate_faust_api_signature(decl: &DeclareFunView) -> Result<(), CodegenError> {
+    let (expected_args, expected_ret, api_sig) = match decl.name.as_str() {
+        "metadata" => (vec![FirType::Meta], FirType::Void, "void metadata(Meta*)"),
+        "instanceConstants" => (
+            vec![FirType::Int32],
+            FirType::Void,
+            "void instanceConstants(int)",
+        ),
+        "instanceResetUserInterface" => (
+            Vec::new(),
+            FirType::Void,
+            "void instanceResetUserInterface()",
+        ),
+        "instanceClear" => (Vec::new(), FirType::Void, "void instanceClear()"),
+        "buildUserInterface" => (
+            vec![FirType::UI],
+            FirType::Void,
+            "void buildUserInterface(UI*)",
+        ),
+        "compute" => (
+            vec![
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            FirType::Void,
+            "void compute(int, FAUSTFLOAT**, FAUSTFLOAT**)",
+        ),
+        _ => return Ok(()),
+    };
+
+    let FirType::Fun { args, ret } = &decl.typ else {
+        return Err(CodegenError::new(
+            CodegenErrorCode::InvalidModuleSection,
+            format!(
+                "invalid FIR signature for {}: expected {api_sig}, got non-function type {:?}",
+                decl.name, decl.typ
+            ),
+        ));
+    };
+
+    if *args != expected_args || ret.as_ref() != &expected_ret {
+        return Err(CodegenError::new(
+            CodegenErrorCode::InvalidModuleSection,
+            format!(
+                "invalid FIR signature for {}: expected {api_sig}, got {:?}",
+                decl.name, decl.typ
+            ),
+        ));
+    }
+
+    if decl.named_args.len() != expected_args.len()
+        || decl
+            .named_args
+            .iter()
+            .zip(expected_args.iter())
+            .any(|(named, expected)| named.typ != *expected)
+    {
+        return Err(CodegenError::new(
+            CodegenErrorCode::InvalidModuleSection,
+            format!(
+                "invalid FIR named args for {}: expected types {:?}, got {:?}",
+                decl.name, expected_args, decl.named_args
+            ),
+        ));
+    }
+
     Ok(())
 }
 
@@ -1234,6 +1305,7 @@ fn c_string_literal(input: &str) -> String {
 mod tests {
     use super::{COptions, generate_c_module};
     use crate::fixtures::build_sine_phasor_test_module;
+    use fir::{FirBuilder, FirStore, FirType, NamedType};
 
     #[test]
     fn emits_c_module_with_dsp_struct_ui_and_compute_loop() {
@@ -1281,6 +1353,34 @@ mod tests {
                 && constants_call_i < reset_call_i
                 && reset_call_i < clear_call_i,
             "instanceInit should call constants -> resetUI -> clear in order"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_canonical_metadata_signature() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let body = b.block(&[]);
+        let bad_ty = FirType::Fun {
+            args: vec![FirType::Int32],
+            ret: Box::new(FirType::Void),
+        };
+        let bad_args = vec![NamedType {
+            name: "x".to_string(),
+            typ: FirType::Int32,
+        }];
+        let metadata = b.declare_fun("metadata", bad_ty, &bad_args, body, false);
+        let dsp_struct = b.block(&[]);
+        let globals = b.block(&[]);
+        let declarations = b.block(&[metadata]);
+        let module = b.module("mydsp", dsp_struct, globals, declarations);
+
+        let err = generate_c_module(&store, module, &COptions::default())
+            .expect_err("invalid canonical metadata signature must fail");
+        assert_eq!(err.code(), super::CodegenErrorCode::InvalidModuleSection);
+        assert!(
+            err.to_string()
+                .contains("invalid FIR signature for metadata")
         );
     }
 }
