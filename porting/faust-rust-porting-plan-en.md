@@ -53,6 +53,8 @@ The objective of the port is to reproduce this pipeline in idiomatic Rust, takin
 
 Related design note (recursion representation and RouteIR coexistence):
 - `faust-rust-recursion-model-note-en.md`
+Related implementation addendum (recursive trees and `deBruijn2Sym` porting):
+- `phases/phase-5-recursive-trees-debruijn2sym-en.md`
 Related design note (structured diagnostics and error-reporting model):
 - `faust-rust-diagnostics-model-en.md`
 Related design note (canonical FIR architecture for backends):
