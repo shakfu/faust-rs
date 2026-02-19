@@ -169,6 +169,7 @@ pub fn generate_cpp_module(
     options: &CppOptions,
 ) -> Result<String, CodegenError> {
     let module = decode_module(store, module)?;
+    let module_name = module.name.clone();
     let mut effective_options = options.clone();
     if effective_options.num_outputs == 0 {
         effective_options.num_outputs =
@@ -181,7 +182,7 @@ pub fn generate_cpp_module(
         .unwrap_or(module.name.as_str());
 
     let mut out = String::new();
-    emit_cpp_header(&mut out, class_name);
+    emit_cpp_header(&mut out, class_name, &module_name);
     if let Some(namespace) = options.namespace.as_deref() {
         let _ = writeln!(out, "namespace {namespace} {{");
         let _ = writeln!(out);
@@ -189,11 +190,12 @@ pub fn generate_cpp_module(
 
     let _ = writeln!(out, "class {class_name} : public dsp {{");
     let _ = writeln!(out, "private:");
-    let _ = writeln!(out, "    int fSampleRate = 0;");
+    let _ = writeln!(out, "    int fSampleRate;");
     emit_section(
         store,
         &mut out,
         &effective_options,
+        &module_name,
         "dsp_struct",
         module.dsp_struct,
         1,
@@ -202,6 +204,7 @@ pub fn generate_cpp_module(
         store,
         &mut out,
         &effective_options,
+        &module_name,
         "globals",
         module.globals,
         1,
@@ -211,6 +214,7 @@ pub fn generate_cpp_module(
         &mut out,
         &effective_options,
         class_name,
+        &module_name,
         &declared_functions,
         1,
     );
@@ -218,6 +222,7 @@ pub fn generate_cpp_module(
         store,
         &mut out,
         &effective_options,
+        &module_name,
         "functions",
         module.declarations,
         1,
@@ -228,6 +233,8 @@ pub fn generate_cpp_module(
         let _ = writeln!(out);
         let _ = writeln!(out, "}} // namespace {namespace}");
     }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "#endif");
     Ok(out)
 }
 
@@ -249,6 +256,7 @@ fn emit_dsp_contract_methods(
     out: &mut String,
     options: &CppOptions,
     class_name: &str,
+    module_name: &str,
     declared_functions: &[String],
     indent: usize,
 ) {
@@ -268,6 +276,18 @@ fn emit_dsp_contract_methods(
         .any(|name| name == "instanceClear");
     let has_compute = declared_functions.iter().any(|name| name == "compute");
 
+    let _ = writeln!(out, "{tab}{class_name}() {{");
+    let _ = writeln!(out, "{tab}}}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "{tab}{class_name}(const {class_name}&) = default;");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "{tab}virtual ~{class_name}() = default;");
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "{tab}{class_name}& operator=(const {class_name}&) = default;"
+    );
+    let _ = writeln!(out);
     let _ = writeln!(out, "{tab}virtual int getNumInputs() {{");
     let _ = writeln!(out, "{tab}    return {};", options.num_inputs);
     let _ = writeln!(out, "{tab}}}");
@@ -313,8 +333,10 @@ fn emit_dsp_contract_methods(
         let _ = writeln!(out, "{tab}    (void)m;");
         let _ = writeln!(
             out,
-            "{tab}    m->declare(\"faust-rs\", \"module-first cpp backend prototype\");"
+            "{tab}    m->declare(\"filename\", \"{}.dsp\");",
+            module_name
         );
+        let _ = writeln!(out, "{tab}    m->declare(\"name\", \"{module_name}\");");
         let _ = writeln!(out, "{tab}}}");
     }
     if !has_build_ui {
@@ -322,7 +344,12 @@ fn emit_dsp_contract_methods(
             out,
             "{tab}virtual void buildUserInterface(UI* ui_interface) {{"
         );
-        let _ = writeln!(out, "{tab}    (void)ui_interface;");
+        let _ = writeln!(
+            out,
+            "{tab}    ui_interface->openVerticalBox({});",
+            cpp_string_literal(module_name)
+        );
+        let _ = writeln!(out, "{tab}    ui_interface->closeBox();");
         let _ = writeln!(out, "{tab}}}");
     }
     if !has_compute {
@@ -361,7 +388,29 @@ fn collect_declared_function_names(
     Ok(names)
 }
 
-fn emit_cpp_header(out: &mut String, class_name: &str) {
+fn emit_cpp_header(out: &mut String, class_name: &str, module_name: &str) {
+    let _ = writeln!(
+        out,
+        "/* ------------------------------------------------------------"
+    );
+    let _ = writeln!(out, "name: {}", cpp_string_literal(module_name));
+    let _ = writeln!(out, "Code generated with Faust (https://faust.grame.fr)");
+    let _ = writeln!(
+        out,
+        "------------------------------------------------------------ */"
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "#ifndef  __{class_name}_H__");
+    let _ = writeln!(out, "#define  __{class_name}_H__");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "#ifndef FAUSTFLOAT");
+    let _ = writeln!(out, "#define FAUSTFLOAT float");
+    let _ = writeln!(out, "#endif");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "#include <algorithm>");
+    let _ = writeln!(out, "#include <cmath>");
+    let _ = writeln!(out, "#include <cstdint>");
+    let _ = writeln!(out);
     let _ = writeln!(out, "#ifndef FAUSTCLASS");
     let _ = writeln!(out, "#define FAUSTCLASS {class_name}");
     let _ = writeln!(out, "#endif");
@@ -383,11 +432,11 @@ fn emit_section(
     store: &FirStore,
     out: &mut String,
     options: &CppOptions,
+    module_name: &str,
     section_name: &str,
     section_id: FirId,
-    indent: usize,
+    _indent: usize,
 ) -> Result<(), CodegenError> {
-    let tab = "    ".repeat(indent);
     let FirMatch::Block(items) = match_fir(store, section_id) else {
         return Err(CodegenError::new(
             CodegenErrorCode::InvalidModuleSection,
@@ -399,13 +448,8 @@ fn emit_section(
         ));
     };
 
-    let _ = writeln!(
-        out,
-        "{tab}// section: {section_name} ({} items)",
-        items.len()
-    );
     for item in items {
-        emit_stmt(store, out, options, item, indent)?;
+        emit_stmt(store, out, options, module_name, item, _indent)?;
     }
     Ok(())
 }
@@ -414,17 +458,19 @@ fn emit_stmt(
     store: &FirStore,
     out: &mut String,
     options: &CppOptions,
+    module_name: &str,
     stmt: FirId,
     indent: usize,
 ) -> Result<(), CodegenError> {
     let mut mode = EmitMode::Default;
-    emit_stmt_with_mode(store, out, options, stmt, indent, &mut mode)
+    emit_stmt_with_mode(store, out, options, module_name, stmt, indent, &mut mode)
 }
 
 fn emit_stmt_with_mode(
     store: &FirStore,
     out: &mut String,
     options: &CppOptions,
+    module_name: &str,
     stmt: FirId,
     indent: usize,
     mode: &mut EmitMode,
@@ -475,6 +521,7 @@ fn emit_stmt_with_mode(
             store,
             out,
             options,
+            module_name,
             DeclareFunView {
                 name: &name,
                 typ: &typ,
@@ -545,7 +592,10 @@ fn emit_stmt_with_mode(
                 && *drop_index < *output_channels
             {
                 let output_index = *drop_index;
-                let _ = writeln!(out, "{tab}output{output_index}[i0] = FAUSTFLOAT({value});");
+                let _ = writeln!(
+                    out,
+                    "{tab}output{output_index}[i0] = static_cast<FAUSTFLOAT>({value});"
+                );
                 *drop_index += 1;
                 return Ok(());
             }
@@ -565,7 +615,9 @@ fn emit_stmt_with_mode(
             }
             Ok(())
         }
-        FirMatch::Block(_) => emit_block_with_mode(store, out, options, stmt, indent, mode),
+        FirMatch::Block(_) => {
+            emit_block_with_mode(store, out, options, module_name, stmt, indent, mode)
+        }
         FirMatch::If {
             cond,
             then_block,
@@ -573,11 +625,27 @@ fn emit_stmt_with_mode(
         } => {
             let cond = emit_value(store, options, cond)?;
             let _ = writeln!(out, "{tab}if ({cond}) {{");
-            emit_block_with_mode(store, out, options, then_block, indent + 1, mode)?;
+            emit_block_with_mode(
+                store,
+                out,
+                options,
+                module_name,
+                then_block,
+                indent + 1,
+                mode,
+            )?;
             let _ = writeln!(out, "{tab}}}");
             if let Some(else_block) = else_block {
                 let _ = writeln!(out, "{tab}else {{");
-                emit_block_with_mode(store, out, options, else_block, indent + 1, mode)?;
+                emit_block_with_mode(
+                    store,
+                    out,
+                    options,
+                    module_name,
+                    else_block,
+                    indent + 1,
+                    mode,
+                )?;
                 let _ = writeln!(out, "{tab}}}");
             }
             Ok(())
@@ -585,7 +653,7 @@ fn emit_stmt_with_mode(
         FirMatch::Control { cond, stmt } => {
             let cond = emit_value(store, options, cond)?;
             let _ = writeln!(out, "{tab}if ({cond}) {{");
-            emit_stmt_with_mode(store, out, options, stmt, indent + 1, mode)?;
+            emit_stmt_with_mode(store, out, options, module_name, stmt, indent + 1, mode)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
@@ -604,7 +672,7 @@ fn emit_stmt_with_mode(
                 out,
                 "{tab}for (int {var} = {init}; {var} < {end}; {var} += {step}) {{"
             );
-            emit_block_with_mode(store, out, options, body, indent + 1, mode)?;
+            emit_block_with_mode(store, out, options, module_name, body, indent + 1, mode)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
@@ -616,7 +684,7 @@ fn emit_stmt_with_mode(
         } => {
             let upper = emit_value(store, options, upper)?;
             let _ = writeln!(out, "{tab}for (int {var} = 0; {var} < {upper}; ++{var}) {{");
-            emit_block_with_mode(store, out, options, body, indent + 1, mode)?;
+            emit_block_with_mode(store, out, options, module_name, body, indent + 1, mode)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
@@ -627,13 +695,13 @@ fn emit_stmt_with_mode(
         } => {
             let joined = iterators.join(", ");
             let _ = writeln!(out, "{tab}// iterator-for over [{joined}]");
-            emit_block_with_mode(store, out, options, body, indent + 1, mode)?;
+            emit_block_with_mode(store, out, options, module_name, body, indent + 1, mode)?;
             Ok(())
         }
         FirMatch::WhileLoop { cond, body } => {
             let cond = emit_value(store, options, cond)?;
             let _ = writeln!(out, "{tab}while ({cond}) {{");
-            emit_block_with_mode(store, out, options, body, indent + 1, mode)?;
+            emit_block_with_mode(store, out, options, module_name, body, indent + 1, mode)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
@@ -646,20 +714,20 @@ fn emit_stmt_with_mode(
             let _ = writeln!(out, "{tab}switch ({cond}) {{");
             for (value, block) in cases {
                 let _ = writeln!(out, "{tab}case {value}: {{");
-                emit_block_with_mode(store, out, options, block, indent + 1, mode)?;
+                emit_block_with_mode(store, out, options, module_name, block, indent + 1, mode)?;
                 let _ = writeln!(out, "{tab}    break;");
                 let _ = writeln!(out, "{tab}}}");
             }
             if let Some(default) = default {
                 let _ = writeln!(out, "{tab}default: {{");
-                emit_block_with_mode(store, out, options, default, indent + 1, mode)?;
+                emit_block_with_mode(store, out, options, module_name, default, indent + 1, mode)?;
                 let _ = writeln!(out, "{tab}}}");
             }
             let _ = writeln!(out, "{tab}}}");
             Ok(())
         }
         FirMatch::Label(label) => {
-            let _ = writeln!(out, "{tab}// {label}");
+            let _ = label;
             Ok(())
         }
         FirMatch::OpenBox { typ, label } => {
@@ -762,17 +830,19 @@ fn emit_block(
     store: &FirStore,
     out: &mut String,
     options: &CppOptions,
+    module_name: &str,
     block: FirId,
     indent: usize,
 ) -> Result<(), CodegenError> {
     let mut mode = EmitMode::Default;
-    emit_block_with_mode(store, out, options, block, indent, &mut mode)
+    emit_block_with_mode(store, out, options, module_name, block, indent, &mut mode)
 }
 
 fn emit_block_with_mode(
     store: &FirStore,
     out: &mut String,
     options: &CppOptions,
+    module_name: &str,
     block: FirId,
     indent: usize,
     mode: &mut EmitMode,
@@ -781,7 +851,7 @@ fn emit_block_with_mode(
         return Err(unsupported_node("expected block", block, store));
     };
     for stmt in items {
-        emit_stmt_with_mode(store, out, options, stmt, indent, mode)?;
+        emit_stmt_with_mode(store, out, options, module_name, stmt, indent, mode)?;
     }
     Ok(())
 }
@@ -790,6 +860,7 @@ fn emit_declare_fun(
     store: &FirStore,
     out: &mut String,
     options: &CppOptions,
+    module_name: &str,
     decl: DeclareFunView<'_>,
     indent: usize,
 ) -> Result<(), CodegenError> {
@@ -829,15 +900,36 @@ fn emit_declare_fun(
     if let Some(override_params) = params_override {
         params = override_params;
     }
+    let is_dsp_api = is_dsp_api_method(decl.name);
+    let method_prefix = if is_dsp_api { "virtual " } else { "" };
     let inline = if decl.is_inline { "inline " } else { "" };
-    let _ = writeln!(out, "{tab}{inline}{ret} {}({params}) {{", decl.name);
+    let _ = writeln!(
+        out,
+        "{tab}{inline}{method_prefix}{ret} {}({params}) {{",
+        decl.name
+    );
     if decl.name == "instanceConstants" {
         let _ = writeln!(out, "{tab}    fSampleRate = sample_rate;");
-        emit_block(store, out, options, decl.body, indent + 1)?;
+        emit_block(store, out, options, module_name, decl.body, indent + 1)?;
     } else if decl.name == "compute" {
         emit_compute_body(store, out, options, decl.body, indent + 1)?;
+    } else if decl.name == "metadata" && is_empty_block(store, decl.body) {
+        let _ = writeln!(out, "{tab}    (void)m;");
+        let _ = writeln!(
+            out,
+            "{tab}    m->declare(\"filename\", \"{}.dsp\");",
+            module_name
+        );
+        let _ = writeln!(out, "{tab}    m->declare(\"name\", \"{module_name}\");");
+    } else if decl.name == "buildUserInterface" && is_empty_block(store, decl.body) {
+        let _ = writeln!(
+            out,
+            "{tab}    ui_interface->openVerticalBox({});",
+            cpp_string_literal(module_name)
+        );
+        let _ = writeln!(out, "{tab}    ui_interface->closeBox();");
     } else {
-        emit_block(store, out, options, decl.body, indent + 1)?;
+        emit_block(store, out, options, module_name, decl.body, indent + 1)?;
     }
     let _ = writeln!(out, "{tab}}}");
     Ok(())
@@ -872,9 +964,28 @@ fn emit_compute_body(
         drop_index: 0,
         output_channels,
     };
-    emit_block_with_mode(store, out, options, body, indent + 1, &mut mode)?;
+    emit_block_with_mode(store, out, options, "", body, indent + 1, &mut mode)?;
     let _ = writeln!(out, "{tab}}}");
     Ok(())
+}
+
+fn is_dsp_api_method(name: &str) -> bool {
+    matches!(
+        name,
+        "metadata"
+            | "instanceConstants"
+            | "instanceResetUserInterface"
+            | "instanceClear"
+            | "buildUserInterface"
+            | "compute"
+    )
+}
+
+fn is_empty_block(store: &FirStore, body: FirId) -> bool {
+    match match_fir(store, body) {
+        FirMatch::Block(items) => items.is_empty(),
+        _ => false,
+    }
 }
 
 fn infer_compute_output_arity(store: &FirStore, body: FirId) -> usize {
@@ -1147,8 +1258,10 @@ mod tests {
         assert!(out.contains(
             "virtual void compute(int count, FAUSTFLOAT** RESTRICT inputs, FAUSTFLOAT** RESTRICT outputs)"
         ));
-        assert!(out.contains("// section: dsp_struct (0 items)"));
-        assert!(out.contains("// section: functions (0 items)"));
+        assert!(out.contains("#ifndef  __mydsp_H__"));
+        assert!(out.contains("#include <cmath>"));
+        assert!(out.contains("Code generated with Faust (https://faust.grame.fr)"));
+        assert!(out.contains("\n#endif\n"));
     }
 
     #[test]

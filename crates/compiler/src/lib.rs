@@ -857,7 +857,12 @@ fn lower_signals_to_cpp_legacy_bridge(
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| sanitize_cpp_ident(source_name_to_class(source_name).as_str()));
     let lowered = lower_signals_to_fir_legacy_bridge(source_name, output, module_name);
-    generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerToCppError::Codegen)
+    let mut effective_options = options.clone();
+    if effective_options.num_inputs == 0 {
+        effective_options.num_inputs = output.process_arity.inputs;
+    }
+    generate_cpp_module(&lowered.store, lowered.module, &effective_options)
+        .map_err(LowerToCppError::Codegen)
 }
 
 fn lower_signals_to_cpp_transform_fastlane(
@@ -872,7 +877,12 @@ fn lower_signals_to_cpp_transform_fastlane(
         .unwrap_or_else(|| sanitize_cpp_ident(source_name_to_class(source_name).as_str()));
     let lowered = lower_signals_to_fir_transform_fastlane(output, module_name)
         .map_err(LowerToCppError::Transform)?;
-    generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerToCppError::Codegen)
+    let mut effective_options = options.clone();
+    if effective_options.num_inputs == 0 {
+        effective_options.num_inputs = output.process_arity.inputs;
+    }
+    generate_cpp_module(&lowered.store, lowered.module, &effective_options)
+        .map_err(LowerToCppError::Codegen)
 }
 
 fn lower_signals_to_c_legacy_bridge(
@@ -1990,7 +2000,7 @@ mod tests {
             .expect("pass-through should compile to C++");
         assert!(cpp.contains("class mydsp : public dsp"));
         assert!(cpp.contains("void compute("));
-        assert!(cpp.contains("// sig[0]: SIGINPUT(int(0))"));
+        assert!(cpp.contains("FAUSTFLOAT* input0 = inputs[0];"));
     }
 
     #[test]

@@ -4900,3 +4900,31 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo test -p xtask`
   - `rg -n "/opt/homebrew/share/faust" crates -g '*.rs'` (no matches)
+
+#### C++ backend envelope cleanup (explicit input arity, no local inference)
+
+- Scope:
+  - removed backend-local compute input arity inference and aligned C++ emission
+    with explicit arity coming from the compiler signal pipeline.
+- Files:
+  - `crates/codegen/src/backends/cpp/mod.rs`
+  - `crates/compiler/src/lib.rs`
+  - `crates/codegen/tests/cpp_fir_sine_phasor.rs`
+- Implemented:
+  - removed `infer_compute_input_arity`/`infer_module_compute_input_arity` and
+    related scan helpers from C++ codegen.
+  - wired `num_inputs` in compiler lowering from `process_arity.inputs` when
+    options do not set it explicitly (legacy bridge + transform fast-lane).
+  - updated C++ backend envelope output:
+    - module banner + include guard closure,
+    - explicit default ctor/copy/dtor/assignment in dsp contract methods,
+    - metadata/build UI fallback shape using module name,
+    - `Drop` to output cast style switched to `static_cast<FAUSTFLOAT>(...)`.
+  - removed non-essential hardcoded metadata constants for generated version and
+    compile options in the emitted fallback metadata.
+  - updated tests to match the new generated output contract.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p codegen`
+  - `cargo test -p compiler --lib`
+  - `cargo clippy -p codegen -p compiler --all-targets -- -D warnings`
