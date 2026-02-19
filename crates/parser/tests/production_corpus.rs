@@ -50,16 +50,21 @@ fn production_api_accepts_rep_corpus() {
 fn production_api_reports_malformed_inputs() {
     let malformed = [
         ("missing_rhs", "process = ;\n"),
-        ("missing_rpar", "process = hslider(\"g\", 0.5, 0.0, 1.0, 0.01;\n"),
-        ("legacy_minput_modulation", "process = minput(\"gain\" : _).(_);\n"),
+        (
+            "missing_rpar",
+            "process = hslider(\"g\", 0.5, 0.0, 1.0, 0.01;\n",
+        ),
+        (
+            "legacy_minput_modulation",
+            "process = minput(\"gain\" : _).(_);\n",
+        ),
         ("missing_enddef", "process = _\n"),
     ];
 
     for (name, source) in malformed {
         let out = parse_program(source, name);
-        let rust_class_ok = out.root.is_some()
-            && out.state.ctx.parse_error_count() == 0
-            && out.errors.is_empty();
+        let rust_class_ok =
+            out.root.is_some() && out.state.ctx.parse_error_count() == 0 && out.errors.is_empty();
         assert!(!rust_class_ok, "{name} should not parse as valid");
     }
 }

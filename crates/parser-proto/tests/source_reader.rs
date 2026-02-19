@@ -124,9 +124,9 @@ fn prefers_import_from_local_directory_over_search_paths() {
     let local_shared = src.join("shared.lib");
     let search_shared = libs.join("shared.lib");
 
-    fs::write(&main, "import(\"shared.lib\");\nprocess = marker;\n").expect("main should be written");
-    fs::write(&local_shared, "marker = local_version;\n")
-        .expect("local shared should be written");
+    fs::write(&main, "import(\"shared.lib\");\nprocess = marker;\n")
+        .expect("main should be written");
+    fs::write(&local_shared, "marker = local_version;\n").expect("local shared should be written");
     fs::write(&search_shared, "marker = search_path_version;\n")
         .expect("search-path shared should be written");
 

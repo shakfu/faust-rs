@@ -286,8 +286,10 @@ fn foreign_and_case_actions_follow_cxx_families() {
 
 #[test]
 fn modulation_forms_follow_cpp_buildboxmodulation_shape() {
-    let (arena_bracket, bracket_expr) =
-        parse_process_expr(r#"process = ["gain" : _ -> _];"#, "semantic_mod_bracket.dsp");
+    let (arena_bracket, bracket_expr) = parse_process_expr(
+        r#"process = ["gain" : _ -> _];"#,
+        "semantic_mod_bracket.dsp",
+    );
     let (entry, _body) = modulation_parts(&arena_bracket, bracket_expr)
         .expect("bracket modulation should lower to BOXMODULATION");
     let label = arena_bracket.hd(entry).expect("entry label should exist");

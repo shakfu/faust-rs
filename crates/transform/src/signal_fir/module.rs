@@ -978,7 +978,12 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.math_call(op, &[value], FirType::FaustFloat))
     }
 
-    fn lower_math2(&mut self, op: FirMathOp, lhs: SigId, rhs: SigId) -> Result<FirId, SignalFirError> {
+    fn lower_math2(
+        &mut self,
+        op: FirMathOp,
+        lhs: SigId,
+        rhs: SigId,
+    ) -> Result<FirId, SignalFirError> {
         let lhs = self.lower_signal(lhs)?;
         let rhs = self.lower_signal(rhs)?;
         let mut b = FirBuilder::new(&mut self.store);
