@@ -236,6 +236,12 @@ fn cpp_bin() -> Option<PathBuf> {
     std::env::var_os("FAUST_CPP_BIN").map(PathBuf::from)
 }
 
+fn corpus_case_expect_valid(name: &str) -> bool {
+    // `tests/corpus/err_*` is mostly used for post-parse pipeline failures.
+    // Keep parser-level invalid corpus cases explicit by naming convention.
+    !(name.starts_with("err_") && name.contains("_parse_"))
+}
+
 fn load_cases() -> Result<Vec<Case>, String> {
     let corpus = corpus_dir();
     let mut files: Vec<PathBuf> = fs::read_dir(&corpus)
@@ -260,9 +266,9 @@ fn load_cases() -> Result<Vec<Case>, String> {
         let source = fs::read_to_string(&path)
             .map_err(|e| format!("cannot read corpus file {}: {e}", path.display()))?;
         cases.push(Case {
+            expect_valid: corpus_case_expect_valid(&name),
             name,
             input: CaseInput::Inline(source),
-            expect_valid: true,
         });
     }
 

@@ -4540,3 +4540,16 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p fir`
   - `cargo test -p transform signal_fir`
   - `cargo test -p codegen cpp`
+
+#### Parser full parity execution — Step 1 (differential baseline classification)
+
+- Scope:
+  - stabilized parser differential case classification for corpus-driven checks.
+- Files:
+  - `crates/parser-proto/tests/cpp_differential.rs`
+- Implemented:
+  - added explicit corpus validity classification so parser-invalid fixtures
+    (`err_*_parse_*`) are treated as malformed parser cases.
+  - kept non-parser `err_*` fixtures classified as parser-valid envelopes.
+- Validation:
+  - `FAUST_CPP_BIN=/usr/local/bin/faust cargo test -p parser-proto --test cpp_differential -- --nocapture`
