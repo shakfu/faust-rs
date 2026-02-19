@@ -4696,3 +4696,30 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo fmt --all`
   - `cargo test -p compiler --test enrobage_paths`
+
+#### Enrobage porting — Step C (search/open semantics)
+
+- Scope:
+  - implemented C++-style architecture/source file opening helpers with
+    deterministic search order and import-dir side effects.
+- Files:
+  - `crates/compiler/src/enrobage.rs`
+  - `crates/compiler/tests/enrobage_search.rs`
+- Implemented:
+  - added `open_arch_stream(filename, architecture_dirs)`:
+    - direct filename open first,
+    - fallback over architecture dirs in declared order.
+  - added `fopen_search(filename, import_dirs)` with return type
+    `FileSearchResult { file, full_path }`:
+    - direct open path first,
+    - direct open enriches `import_dirs` with the file dirname,
+    - fallback search over existing `import_dirs` does not add new entries.
+  - added helper path logic (`is_absolute_pathname`, `build_full_pathname`) to
+    preserve C++ pathname envelope.
+  - added integration tests for:
+    - architecture-dir precedence,
+    - direct-open enrichment side effect,
+    - import-dir lookup full-path + non-enrichment behavior.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --test enrobage_paths --test enrobage_search`
