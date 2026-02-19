@@ -122,6 +122,92 @@ pub enum FirBinOp {
     Ge,
 }
 
+/// Canonical FIR math operation identifiers used by backend-agnostic lowering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FirMathOp {
+    Pow,
+    Min,
+    Max,
+    Sin,
+    Cos,
+    Acos,
+    Asin,
+    Atan,
+    Atan2,
+    Tan,
+    Exp,
+    Log,
+    Log10,
+    Sqrt,
+    Abs,
+    Fmod,
+    Remainder,
+    Floor,
+    Ceil,
+    Rint,
+    Round,
+}
+
+impl FirMathOp {
+    /// Returns the backend-agnostic FIR symbol used for this operation.
+    #[must_use]
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::Pow => "pow",
+            Self::Min => "fmin",
+            Self::Max => "fmax",
+            Self::Sin => "sin",
+            Self::Cos => "cos",
+            Self::Acos => "acos",
+            Self::Asin => "asin",
+            Self::Atan => "atan",
+            Self::Atan2 => "atan2",
+            Self::Tan => "tan",
+            Self::Exp => "exp",
+            Self::Log => "log",
+            Self::Log10 => "log10",
+            Self::Sqrt => "sqrt",
+            Self::Abs => "fabs",
+            Self::Fmod => "fmod",
+            Self::Remainder => "remainder",
+            Self::Floor => "floor",
+            Self::Ceil => "ceil",
+            Self::Rint => "rint",
+            Self::Round => "round",
+        }
+    }
+
+    /// Parses a FIR math symbol, accepting both canonical and `std::` forms.
+    #[must_use]
+    pub fn from_symbol(name: &str) -> Option<Self> {
+        let symbol = name.strip_prefix("std::").unwrap_or(name);
+        match symbol {
+            "pow" => Some(Self::Pow),
+            "fmin" => Some(Self::Min),
+            "fmax" => Some(Self::Max),
+            "sin" => Some(Self::Sin),
+            "cos" => Some(Self::Cos),
+            "acos" => Some(Self::Acos),
+            "asin" => Some(Self::Asin),
+            "atan" => Some(Self::Atan),
+            "atan2" => Some(Self::Atan2),
+            "tan" => Some(Self::Tan),
+            "exp" => Some(Self::Exp),
+            "log" => Some(Self::Log),
+            "log10" => Some(Self::Log10),
+            "sqrt" => Some(Self::Sqrt),
+            "fabs" => Some(Self::Abs),
+            "fmod" => Some(Self::Fmod),
+            "remainder" => Some(Self::Remainder),
+            "floor" => Some(Self::Floor),
+            "ceil" => Some(Self::Ceil),
+            "rint" => Some(Self::Rint),
+            "round" => Some(Self::Round),
+            _ => None,
+        }
+    }
+}
+
 /// UI box orientation for FIR UI instructions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum UiBoxType {
@@ -513,6 +599,12 @@ impl<'a> FirBuilder<'a> {
             FIR_V_FUNCALL_TAG,
             &[typ_id, name_id, args_id],
         )
+    }
+
+    /// C++ parity helper: typed math call that avoids stringly-typed lowering sites.
+    #[must_use]
+    pub fn math_call(&mut self, op: FirMathOp, args: &[FirId], typ: FirType) -> FirId {
+        self.fun_call(op.symbol(), args, typ)
     }
 
     /// C++ parity: `NullValueInst`.

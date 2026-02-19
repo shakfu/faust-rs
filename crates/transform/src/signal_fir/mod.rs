@@ -431,17 +431,17 @@ mod tests {
         let FirMatch::FunCall { name, args, .. } = match_fir(&out.store, drop_value) else {
             panic!("top-level pow should lower to FIR fun call");
         };
-        assert_eq!(name, "std::pow");
+        assert_eq!(name, "pow");
         assert_eq!(args.len(), 2);
 
         let FirMatch::FunCall { name: lhs_name, .. } = match_fir(&out.store, args[0]) else {
             panic!("lhs should lower to unary fun call");
         };
-        assert_eq!(lhs_name, "std::sin");
+        assert_eq!(lhs_name, "sin");
         let FirMatch::FunCall { name: rhs_name, .. } = match_fir(&out.store, args[1]) else {
             panic!("rhs should lower to min/max fun call");
         };
-        assert_eq!(rhs_name, "std::fmax");
+        assert_eq!(rhs_name, "fmax");
     }
 
     #[test]

@@ -27,8 +27,8 @@
 use std::collections::{HashMap, HashSet};
 
 use fir::{
-    AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirMatch, FirStore, FirType,
-    NamedType, SliderRange, SliderType, UiBoxType, match_fir,
+    AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirMatch, FirMathOp,
+    FirStore, FirType, NamedType, SliderRange, SliderType, UiBoxType, match_fir,
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{NodeKind, TreeArena};
@@ -369,27 +369,27 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Proj(index, group) => self.lower_proj(sig, index, group)?,
             SigMatch::Rec(body) => self.lower_signal(body)?,
             SigMatch::BinOp(op, lhs, rhs) => self.lower_binop(op, lhs, rhs)?,
-            SigMatch::Pow(lhs, rhs) => self.lower_fun2("std::pow", lhs, rhs)?,
-            SigMatch::Min(lhs, rhs) => self.lower_fun2("std::fmin", lhs, rhs)?,
-            SigMatch::Max(lhs, rhs) => self.lower_fun2("std::fmax", lhs, rhs)?,
-            SigMatch::Sin(value) => self.lower_fun1("std::sin", value)?,
-            SigMatch::Cos(value) => self.lower_fun1("std::cos", value)?,
-            SigMatch::Acos(value) => self.lower_fun1("std::acos", value)?,
-            SigMatch::Asin(value) => self.lower_fun1("std::asin", value)?,
-            SigMatch::Atan(value) => self.lower_fun1("std::atan", value)?,
-            SigMatch::Atan2(lhs, rhs) => self.lower_fun2("std::atan2", lhs, rhs)?,
-            SigMatch::Tan(value) => self.lower_fun1("std::tan", value)?,
-            SigMatch::Exp(value) => self.lower_fun1("std::exp", value)?,
-            SigMatch::Log(value) => self.lower_fun1("std::log", value)?,
-            SigMatch::Log10(value) => self.lower_fun1("std::log10", value)?,
-            SigMatch::Sqrt(value) => self.lower_fun1("std::sqrt", value)?,
-            SigMatch::Abs(value) => self.lower_fun1("std::fabs", value)?,
-            SigMatch::Fmod(lhs, rhs) => self.lower_fun2("std::fmod", lhs, rhs)?,
-            SigMatch::Remainder(lhs, rhs) => self.lower_fun2("std::remainder", lhs, rhs)?,
-            SigMatch::Floor(value) => self.lower_fun1("std::floor", value)?,
-            SigMatch::Ceil(value) => self.lower_fun1("std::ceil", value)?,
-            SigMatch::Rint(value) => self.lower_fun1("std::rint", value)?,
-            SigMatch::Round(value) => self.lower_fun1("std::round", value)?,
+            SigMatch::Pow(lhs, rhs) => self.lower_math2(FirMathOp::Pow, lhs, rhs)?,
+            SigMatch::Min(lhs, rhs) => self.lower_math2(FirMathOp::Min, lhs, rhs)?,
+            SigMatch::Max(lhs, rhs) => self.lower_math2(FirMathOp::Max, lhs, rhs)?,
+            SigMatch::Sin(value) => self.lower_math1(FirMathOp::Sin, value)?,
+            SigMatch::Cos(value) => self.lower_math1(FirMathOp::Cos, value)?,
+            SigMatch::Acos(value) => self.lower_math1(FirMathOp::Acos, value)?,
+            SigMatch::Asin(value) => self.lower_math1(FirMathOp::Asin, value)?,
+            SigMatch::Atan(value) => self.lower_math1(FirMathOp::Atan, value)?,
+            SigMatch::Atan2(lhs, rhs) => self.lower_math2(FirMathOp::Atan2, lhs, rhs)?,
+            SigMatch::Tan(value) => self.lower_math1(FirMathOp::Tan, value)?,
+            SigMatch::Exp(value) => self.lower_math1(FirMathOp::Exp, value)?,
+            SigMatch::Log(value) => self.lower_math1(FirMathOp::Log, value)?,
+            SigMatch::Log10(value) => self.lower_math1(FirMathOp::Log10, value)?,
+            SigMatch::Sqrt(value) => self.lower_math1(FirMathOp::Sqrt, value)?,
+            SigMatch::Abs(value) => self.lower_math1(FirMathOp::Abs, value)?,
+            SigMatch::Fmod(lhs, rhs) => self.lower_math2(FirMathOp::Fmod, lhs, rhs)?,
+            SigMatch::Remainder(lhs, rhs) => self.lower_math2(FirMathOp::Remainder, lhs, rhs)?,
+            SigMatch::Floor(value) => self.lower_math1(FirMathOp::Floor, value)?,
+            SigMatch::Ceil(value) => self.lower_math1(FirMathOp::Ceil, value)?,
+            SigMatch::Rint(value) => self.lower_math1(FirMathOp::Rint, value)?,
+            SigMatch::Round(value) => self.lower_math1(FirMathOp::Round, value)?,
             SigMatch::Lowest(value) => self.lower_signal(value)?,
             SigMatch::Highest(value) => self.lower_signal(value)?,
             SigMatch::RdTbl(tbl, ridx) => self.lower_rdtbl(sig, tbl, ridx)?,
@@ -972,17 +972,17 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.binop(fir_op, lhs, rhs, typ))
     }
 
-    fn lower_fun1(&mut self, name: &str, value: SigId) -> Result<FirId, SignalFirError> {
+    fn lower_math1(&mut self, op: FirMathOp, value: SigId) -> Result<FirId, SignalFirError> {
         let value = self.lower_signal(value)?;
         let mut b = FirBuilder::new(&mut self.store);
-        Ok(b.fun_call(name, &[value], FirType::FaustFloat))
+        Ok(b.math_call(op, &[value], FirType::FaustFloat))
     }
 
-    fn lower_fun2(&mut self, name: &str, lhs: SigId, rhs: SigId) -> Result<FirId, SignalFirError> {
+    fn lower_math2(&mut self, op: FirMathOp, lhs: SigId, rhs: SigId) -> Result<FirId, SignalFirError> {
         let lhs = self.lower_signal(lhs)?;
         let rhs = self.lower_signal(rhs)?;
         let mut b = FirBuilder::new(&mut self.store);
-        Ok(b.fun_call(name, &[lhs, rhs], FirType::FaustFloat))
+        Ok(b.math_call(op, &[lhs, rhs], FirType::FaustFloat))
     }
 
     fn lower_cast(&mut self, typ: FirType, value: SigId) -> Result<FirId, SignalFirError> {

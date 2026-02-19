@@ -22,7 +22,7 @@
 
 use std::fmt::Write as _;
 
-use fir::{FirBinOp, FirId, FirMatch, FirStore, FirType, NamedType, match_fir};
+use fir::{FirBinOp, FirId, FirMatch, FirMathOp, FirStore, FirType, NamedType, match_fir};
 
 use crate::backends::faust_api;
 
@@ -981,11 +981,22 @@ fn emit_value(
             for arg in args {
                 rendered.push(emit_value(store, options, arg)?);
             }
-            Ok(format!("{name}({})", rendered.join(", ")))
+            let cpp_name = emit_cpp_fun_name(&name);
+            Ok(format!("{cpp_name}({})", rendered.join(", ")))
         }
         FirMatch::NullValue { .. } => Ok("nullptr".to_owned()),
         FirMatch::NewDsp { name, .. } => Ok(format!("new {name}()")),
         _ => Err(unsupported_node("value", value, store)),
+    }
+}
+
+fn emit_cpp_fun_name(name: &str) -> String {
+    if name.contains("::") {
+        return name.to_owned();
+    }
+    match FirMathOp::from_symbol(name) {
+        Some(op) => format!("std::{}", op.symbol()),
+        None => name.to_owned(),
     }
 }
 

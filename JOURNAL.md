@@ -4507,3 +4507,36 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo fmt --all`
   - `cargo check -p compiler -p codegen -p parser-proto -p transform -p signals -p boxes -p fir -p tlib -p eval -p propagate -p errors -p xtask`
+
+#### FIR math call typing (`FirMathOp`) and backend-specific C++ qualification
+
+- Scope:
+  - remove stringly-typed math op lowering in `signal_fir` and centralize math
+    operation identity in `fir`.
+  - keep FIR symbols backend-agnostic and move `std::` qualification to C++
+    emission only.
+- Files:
+  - `crates/fir/src/lib.rs`
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/mod.rs`
+  - `crates/codegen/src/backends/cpp/mod.rs`
+- Implemented:
+  - added `FirMathOp` enum (canonical FIR math op set) in `fir`, with:
+    - `FirMathOp::symbol()` for canonical FIR symbol spelling,
+    - `FirMathOp::from_symbol()` accepting canonical and `std::` prefixed forms.
+  - added `FirBuilder::math_call(op, args, typ)` helper to avoid direct string
+    literals at lowering call sites.
+  - migrated `signal_fir` lowering from string literals (`"sin"`, `"pow"`, ...)
+    to typed operations (`FirMathOp::Sin`, `FirMathOp::Pow`, ...).
+  - kept FIR-level expectations backend-agnostic in `transform` tests.
+  - updated C++ backend function emission to use `FirMathOp::from_symbol()` and
+    qualify recognized math calls as `std::<name>` during C++ rendering.
+- Invariants and rationale:
+  - FIR now carries stable, canonical math call names independent of a target
+    language namespace policy.
+  - backend-specific namespace policies (such as C++ `std::`) are localized in
+    the backend, not embedded in transform/lowering logic.
+- Validation:
+  - `cargo test -p fir`
+  - `cargo test -p transform signal_fir`
+  - `cargo test -p codegen cpp`
