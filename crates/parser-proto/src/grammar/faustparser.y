@@ -203,11 +203,6 @@ Definition -> tlib::TreeId:
               state.recovery_statement("syntax error: invalid definition token before ';'")
           })
       }
-    | DefName DEF LexProbeToken ENDDEF {
-          crate::with_state(state, |state| {
-              state.recovery_statement("syntax error: unsupported prototype token before ';'")
-          })
-      }
     ;
 
 RecDefinition -> tlib::TreeId:
@@ -228,71 +223,6 @@ RecDefinition -> tlib::TreeId:
               state.recovery_statement("syntax error: invalid recursive definition token before ';'")
           })
       }
-    | RecName DEF LexProbeToken ENDDEF {
-          crate::with_state(state, |state| {
-              state.recovery_statement(
-                  "syntax error: unsupported prototype token in recursive definition before ';'",
-              )
-          })
-      }
-    ;
-
-LexProbeToken -> u8:
-      WITH { 0 }
-    | LETREC { 0 }
-    | WHERE { 0 }
-    | ARROW { 0 }
-    | LAPPLY { 0 }
-    | BDGM { 0 }
-    | BDOC { 0 }
-    | BEQN { 0 }
-    | BLST { 0 }
-    | BMETADATA { 0 }
-    | CASE { 0 }
-    | COMPONENT { 0 }
-    | DECLARE { 0 }
-    | DOCCHAR { 0 }
-    | DOUBLEMODE { 0 }
-    | DOWNSAMPLING { 0 }
-    | EDGM { 0 }
-    | EDOC { 0 }
-    | EEQN { 0 }
-    | ELST { 0 }
-    | EMETADATA { 0 }
-    | ENVIRONMENT { 0 }
-    | FCONSTANT { 0 }
-    | FFUNCTION { 0 }
-    | FIXEDPOINTMODE { 0 }
-    | FLOATMODE { 0 }
-    | FVARIABLE { 0 }
-    | HGROUP { 0 }
-    | IMPORT { 0 }
-    | INPUTS { 0 }
-    | LAMBDA { 0 }
-    | LBRAQ { 0 }
-    | LCROC { 0 }
-    | LIBRARY { 0 }
-    | LSTDEPENDENCIES { 0 }
-    | LSTDISTRIBUTED { 0 }
-    | LSTEQ { 0 }
-    | LSTFALSE { 0 }
-    | LSTMDOCTAGS { 0 }
-    | LSTQ { 0 }
-    | LSTTRUE { 0 }
-    | MODULATE { 0 }
-    | NOTICE { 0 }
-    | NOTYPECAST { 0 }
-    | ONDEMAND { 0 }
-    | OUTPUTS { 0 }
-    | QUADMODE { 0 }
-    | RBRAQ { 0 }
-    | RCROC { 0 }
-    | ROUTE { 0 }
-    | SOUNDFILE { 0 }
-    | TGROUP { 0 }
-    | UPSAMPLING { 0 }
-    | VGROUP { 0 }
-    | WAVEFORM { 0 }
     ;
 
 DefName -> tlib::TreeId:
@@ -758,6 +688,9 @@ Primitive -> tlib::TreeId:
       }
     | LAMBDA LPAR ParamList RPAR DOT LPAR Expression RPAR {
           crate::with_state(state, |state| state.node_lambda($3, $7))
+      }
+    | MODULATE LPAR ModList RPAR DOT LPAR Expression RPAR {
+          crate::with_state(state, |state| state.node_builder().build_modulation($3, $7))
       }
     | LCROC ModList LAPPLY Expression RCROC {
           crate::with_state(state, |state| state.node_builder().build_modulation($2, $4))

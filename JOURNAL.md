@@ -4553,3 +4553,19 @@ Execution plan (Phase 0 prototype, revised):
   - kept non-parser `err_*` fixtures classified as parser-valid envelopes.
 - Validation:
   - `FAUST_CPP_BIN=/usr/local/bin/faust cargo test -p parser-proto --test cpp_differential -- --nocapture`
+
+#### Parser full parity execution — Step 2 (prototype fallback removal)
+
+- Scope:
+  - removed grammar-level prototype fallback usage and kept explicit parity
+    behavior for legacy modulation syntax.
+- Files:
+  - `crates/parser-proto/src/grammar/faustparser.y`
+  - `crates/parser-proto/tests/parser_slice12_modulation.rs`
+- Implemented:
+  - removed `LexProbeToken` recovery branches from definition rules.
+  - retained `MODULATE` token through an explicit legacy `minput(...)` form
+    branch mapped to parser recovery (C++-aligned parse rejection envelope).
+  - added/updated modulation tests to keep bracket form accepted and legacy form rejected.
+- Validation:
+  - `cargo test -p parser-proto --no-fail-fast`

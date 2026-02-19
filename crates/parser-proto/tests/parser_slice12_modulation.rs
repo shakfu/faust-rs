@@ -77,3 +77,23 @@ fn modulation_entry_order_matches_cpp_buildboxmodulation() {
     let (inner_entry, _) = modulation_parts(&output.state.arena, nested_body);
     assert_eq!(entry_label(&output.state.arena, inner_entry), "b");
 }
+
+#[test]
+fn supports_legacy_minput_modulation_form() {
+    let output = parse_program(
+        r#"process = minput("gain" : _).(_);"#,
+        "slice12_mod_legacy_minput.dsp",
+    );
+    assert!(
+        output.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        output.errors
+    );
+
+    let root = output.root.expect("root should be present");
+    let def = list_head(&output.state.arena, root);
+    let expr = definition_expr(&output.state.arena, def);
+    let (entry, body) = modulation_parts(&output.state.arena, expr);
+    assert_eq!(entry_label(&output.state.arena, entry), "gain");
+    assert!(!output.state.arena.is_nil(body));
+}
