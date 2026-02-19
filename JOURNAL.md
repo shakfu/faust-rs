@@ -4723,3 +4723,31 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo fmt --all`
   - `cargo test -p compiler --test enrobage_paths --test enrobage_search`
+
+#### Enrobage porting — Step D (stream copy, injection, class replacement)
+
+- Scope:
+  - ported C++ stream-copy architecture wrapping behavior with inline include
+    injection and class-name replacement semantics.
+- Files:
+  - `crates/compiler/src/enrobage.rs`
+  - `crates/compiler/tests/enrobage_stream.rs`
+  - `crates/compiler/tests/fixtures/enrobage/corpus/wrapper_until_includeclass.expected.cpp`
+  - `crates/compiler/tests/fixtures/enrobage/corpus/wrapper_until_end.expected.cpp`
+- Implemented:
+  - added stream-copy API with explicit Rustdoc and parity invariants:
+    - `stream_copy_license`,
+    - `stream_copy_until`,
+    - `stream_copy_until_end`,
+    - `StreamCopyConfig`, `StreamCopyState`.
+  - implemented C++-style helper behavior:
+    - blank/header detection + exception-tag header removal,
+    - `removeSpaces` sentinel stop logic,
+    - forced replacement of `mydsp` and word-boundary replacement of `dsp`,
+    - `#include <faust/...>` and `#include "faust/..."` injection,
+    - include de-duplication and recoverable `not found` error recording.
+  - added golden expected outputs for wrapper stream-copy stops (`<<includeclass>>`
+    and full-end copy).
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --test enrobage_paths --test enrobage_search --test enrobage_stream`

@@ -14,8 +14,10 @@
 //! - `stripEnd` => [`strip_end`] (`1:1` suffix behavior).
 //! - `makeOutputFile` => [`make_output_file`] (`adapted` to `PathBuf`).
 
+use std::collections::HashSet;
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::{env, fs::File, io};
+use std::{env, fs::File};
 
 /// Returns the basename portion of a path-like string.
 ///
@@ -153,6 +155,151 @@ pub fn fopen_search(
     ))
 }
 
+/// Stream-copy configuration used by [`stream_copy_until`] and
+/// [`stream_copy_until_end`].
+#[derive(Debug, Clone)]
+pub struct StreamCopyConfig {
+    /// Replacement target for `mydsp` occurrences (forced replacement).
+    pub class_name: String,
+    /// Replacement target for `dsp` occurrences (word-boundary replacement).
+    pub super_class_name: String,
+    /// Enables architecture include inlining (`#include <faust/...>`).
+    pub inline_arch_switch: bool,
+    /// Search path used when resolving injected include files.
+    pub architecture_dirs: Vec<PathBuf>,
+}
+
+impl Default for StreamCopyConfig {
+    fn default() -> Self {
+        Self {
+            class_name: "mydsp".to_owned(),
+            super_class_name: "dsp".to_owned(),
+            inline_arch_switch: false,
+            architecture_dirs: Vec::new(),
+        }
+    }
+}
+
+/// Mutable stream-copy state shared across nested include injections.
+#[derive(Debug, Default)]
+pub struct StreamCopyState {
+    /// Tracks architecture includes already injected.
+    pub already_included: HashSet<String>,
+    /// Last recoverable include-injection error (`ERROR : <file> not found`).
+    pub last_error: Option<String>,
+}
+
+/// Copies/removes architecture license header from `src` into `dst`.
+///
+/// C++ parity behavior:
+/// - blank leading lines are copied,
+/// - first non-blank line must begin a block comment (`/*`) to be treated as
+///   license header,
+/// - when the header contains `exception_tag`, the header is removed.
+pub fn stream_copy_license<R: BufRead, W: Write>(
+    src: &mut R,
+    dst: &mut W,
+    exception_tag: &str,
+) -> io::Result<()> {
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        if src.read_line(&mut line)? == 0 {
+            return Ok(());
+        }
+        trim_single_newline(&mut line);
+        if is_blank(&line) {
+            writeln!(dst, "{line}")?;
+            continue;
+        }
+        break;
+    }
+
+    if !line.contains("/*") {
+        writeln!(dst, "{line}")?;
+        return Ok(());
+    }
+
+    let mut header = vec![line];
+    let mut remove = false;
+    loop {
+        let mut current = String::new();
+        if src.read_line(&mut current)? == 0 {
+            break;
+        }
+        trim_single_newline(&mut current);
+        if current.contains("*/") {
+            if !remove {
+                for h in &header {
+                    writeln!(dst, "{h}")?;
+                }
+                writeln!(dst, "{current}")?;
+            }
+            return Ok(());
+        }
+        if current.contains(exception_tag) {
+            remove = true;
+        }
+        header.push(current);
+    }
+    Ok(())
+}
+
+/// Copies lines from `src` into `dst` until `remove_spaces(line) == until`.
+///
+/// While copying:
+/// - class names are rewritten with `mydsp`/`dsp` C++ rules,
+/// - when `inline_arch_switch` is enabled, recognized `faust` includes are
+///   injected exactly once and removed from output.
+pub fn stream_copy_until<R: BufRead, W: Write>(
+    src: &mut R,
+    dst: &mut W,
+    until: &str,
+    config: &StreamCopyConfig,
+    state: &mut StreamCopyState,
+) -> io::Result<()> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if src.read_line(&mut line)? == 0 {
+            return Ok(());
+        }
+        trim_single_newline(&mut line);
+        if remove_spaces(&line) == until {
+            return Ok(());
+        }
+
+        if config.inline_arch_switch
+            && let Some(fname) = is_faust_include(&line)
+        {
+            inject(dst, &fname, config, state)?;
+            continue;
+        }
+
+        let replaced = replace_class_name(&line, &config.class_name, &config.super_class_name);
+        writeln!(dst, "{replaced}")?;
+    }
+}
+
+/// Copies `src` into `dst` until stream end.
+///
+/// This is a thin wrapper using the C++ sentinel convention.
+pub fn stream_copy_until_end<R: BufRead, W: Write>(
+    src: &mut R,
+    dst: &mut W,
+    config: &StreamCopyConfig,
+    state: &mut StreamCopyState,
+) -> io::Result<()> {
+    stream_copy_until(
+        src,
+        dst,
+        "<<<FORBIDDEN LINE IN A FAUST ARCHITECTURE FILE>>>",
+        config,
+        state,
+    )
+}
+
 fn is_absolute_pathname(filename: &str) -> bool {
     let bytes = filename.as_bytes();
     if bytes.len() > 1 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
@@ -169,5 +316,123 @@ fn build_full_pathname(filename: &str) -> io::Result<PathBuf> {
         Ok(PathBuf::from(filename))
     } else {
         Ok(env::current_dir()?.join(filename))
+    }
+}
+
+fn trim_single_newline(line: &mut String) {
+    if line.ends_with('\n') {
+        line.pop();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+    }
+}
+
+fn is_blank(s: &str) -> bool {
+    s.chars().all(|c| c == ' ' || c == '\t')
+}
+
+fn remove_spaces(s: &str) -> String {
+    s.chars().filter(|c| *c != ' ').collect()
+}
+
+fn word_boundaries(s: &str, pos: usize, len: usize) -> bool {
+    let before = if pos == 0 {
+        None
+    } else {
+        s[..pos].chars().next_back()
+    };
+    if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
+
+    let after_index = pos + len;
+    let after = if after_index >= s.len() {
+        None
+    } else {
+        s[after_index..].chars().next()
+    };
+    if after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
+    true
+}
+
+fn replace_occurrences(mut s: String, old: &str, new: &str, force: bool) -> String {
+    if old.is_empty() {
+        return s;
+    }
+    let mut pos = 0usize;
+    while let Some(found) = s[pos..].find(old) {
+        let at = pos + found;
+        let replace = force || word_boundaries(&s, at, old.len());
+        if replace {
+            s.replace_range(at..(at + old.len()), new);
+            pos = at + new.len();
+        } else {
+            pos = at + old.len();
+        }
+    }
+    s
+}
+
+fn replace_class_name(line: &str, class_name: &str, super_class_name: &str) -> String {
+    let line = replace_occurrences(line.to_owned(), "mydsp", class_name, true);
+    replace_occurrences(line, "dsp", super_class_name, false)
+}
+
+fn parse_include_filename(s: &str) -> Option<String> {
+    let mut chars = s.chars();
+    let start = chars.next()?;
+    if start != '<' && start != '"' {
+        return None;
+    }
+    let end = if start == '<' { '>' } else { '"' };
+    let mut out = String::new();
+    for ch in chars {
+        if ch == end {
+            return Some(out);
+        }
+        out.push(ch);
+    }
+    None
+}
+
+fn is_faust_include(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("#include") {
+        let file = parse_include_filename(rest.trim_start())?;
+        if file.starts_with("faust/") {
+            return Some(file);
+        }
+    } else if let Some(rest) = trimmed.strip_prefix("include(") {
+        let file = parse_include_filename(rest.trim_start())?;
+        if file.starts_with("/usr/local/share/faust/julia") {
+            return Some(file);
+        }
+    }
+    None
+}
+
+fn inject<W: Write>(
+    dst: &mut W,
+    fname: &str,
+    config: &StreamCopyConfig,
+    state: &mut StreamCopyState,
+) -> io::Result<()> {
+    if state.already_included.contains(fname) {
+        return Ok(());
+    }
+    state.already_included.insert(fname.to_owned());
+
+    match open_arch_stream(fname, &config.architecture_dirs) {
+        Ok(file) => {
+            let mut src = BufReader::new(file);
+            stream_copy_until_end(&mut src, dst, config, state)
+        }
+        Err(_) => {
+            state.last_error = Some(format!("ERROR : {fname} not found\n"));
+            Ok(())
+        }
     }
 }
