@@ -391,6 +391,7 @@ Remaining steps to reach full parser completion:
   - compiler facade wiring milestone is achieved (`crates/compiler` parse entry points now call production `parser` APIs);
   - compiler binary parse milestone is achieved (`crates/compiler` exposes `--parse <input.dsp> [-I <dir> ...]` over production parser APIs, including default parent-directory import path behavior);
   - compiler structural dump milestone is achieved (`crates/compiler` exposes `--dump-box <input.dsp> [-I <dir> ...]` to inspect parsed box trees through production parser integration);
+  - production parser API corpus coverage milestone is achieved (`crates/parser/tests/production_corpus.rs` validates `rep_*.dsp` acceptance and malformed parser cases through `crates/parser` public APIs);
   - remaining work for this step is end-to-end production pipeline consumption beyond parse entry-point boundaries.
 
 10. Close Phase 3 quality/documentation gates.

@@ -4632,3 +4632,18 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo test -p parser-proto --test cpp_differential -- --nocapture`
   - `cargo run -p xtask -- parser-parity-report`
+
+#### Parser full parity execution — Step 7 (production parser API corpus gate)
+
+- Scope:
+  - added production-boundary parser corpus checks through `crates/parser` APIs.
+- Files:
+  - `crates/parser/tests/production_corpus.rs`
+  - `porting/phases/phase-3-parser-en.md`
+- Implemented:
+  - added `rep_*.dsp` acceptance checks through `parser::parse_program`.
+  - added malformed parser checks (`missing_rhs`, `missing_rpar`,
+    `legacy_minput_modulation`, `missing_enddef`) through production API.
+  - recorded production API corpus coverage milestone in Phase 3 parser doc.
+- Validation:
+  - `cargo test -p parser --no-fail-fast`
