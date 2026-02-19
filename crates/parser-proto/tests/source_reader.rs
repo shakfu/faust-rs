@@ -111,3 +111,60 @@ fn url_imports_are_unresolved_in_parser_proto_scope() {
 
     fs::remove_dir_all(root).expect("temp root should be removable");
 }
+
+#[test]
+fn prefers_import_from_local_directory_over_search_paths() {
+    let root = make_temp_root("local_precedence");
+    let src = root.join("src");
+    let libs = root.join("libs");
+    fs::create_dir_all(&src).expect("src dir should be created");
+    fs::create_dir_all(&libs).expect("libs dir should be created");
+
+    let main = src.join("main.dsp");
+    let local_shared = src.join("shared.lib");
+    let search_shared = libs.join("shared.lib");
+
+    fs::write(&main, "import(\"shared.lib\");\nprocess = marker;\n").expect("main should be written");
+    fs::write(&local_shared, "marker = local_version;\n")
+        .expect("local shared should be written");
+    fs::write(&search_shared, "marker = search_path_version;\n")
+        .expect("search-path shared should be written");
+
+    let mut reader = SourceReader::new(vec![libs.clone()]);
+    let expanded = reader.read_file(&main).expect("read should succeed");
+
+    assert!(expanded.contains("local_version"));
+    assert!(!expanded.contains("search_path_version"));
+
+    fs::remove_dir_all(root).expect("temp root should be removable");
+}
+
+#[test]
+fn resolves_parent_relative_imports_and_keeps_used_files_unique() {
+    let root = make_temp_root("parent_relative");
+    let src = root.join("src");
+    let lib = root.join("lib");
+    fs::create_dir_all(&src).expect("src dir should be created");
+    fs::create_dir_all(&lib).expect("lib dir should be created");
+
+    let main = src.join("main.dsp");
+    let mid = src.join("mid.lib");
+    let common = lib.join("common.lib");
+
+    fs::write(
+        &main,
+        "import(\"../lib/common.lib\");\nimport(\"mid.lib\");\nprocess = out;\n",
+    )
+    .expect("main should be written");
+    fs::write(&mid, "import(\"../lib/common.lib\");\nout = _;\n").expect("mid should be written");
+    fs::write(&common, "common = _;\n").expect("common should be written");
+
+    let mut reader = SourceReader::new(vec![]);
+    let expanded = reader.read_file(&main).expect("read should succeed");
+
+    assert!(expanded.contains("common = _;"));
+    assert!(expanded.contains("out = _;"));
+    assert_eq!(reader.used_files().len(), 3);
+
+    fs::remove_dir_all(root).expect("temp root should be removable");
+}

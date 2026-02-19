@@ -34,3 +34,12 @@ Before moving these modules out of `deferred`:
    - successful/failed URL fetch cases (if enabled),
    - wrapper/architecture file insertion behavior parity,
    - deterministic behavior when network is disabled.
+
+## 5. Step-5 Coverage Update (Import Envelope)
+
+Additional `parser-proto` `SourceReader` tests now cover:
+- local-directory import precedence over global search paths when both provide the same import name,
+- parent-relative import resolution (`../...`) through nested source trees,
+- uniqueness of `used_files` tracking under repeated imports through different paths.
+
+These checks extend the local-file import parity envelope while keeping network fetch out of scope for Phase 3.

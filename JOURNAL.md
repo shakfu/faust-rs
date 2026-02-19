@@ -4600,3 +4600,18 @@ Execution plan (Phase 0 prototype, revised):
   - extended C++ error-envelope assertions for the new malformed set.
 - Validation:
   - `cargo test -p parser-proto --test parser_diagnostics -- --nocapture`
+
+#### Parser full parity execution — Step 5 (SourceReader import envelope)
+
+- Scope:
+  - reinforced import-resolution coverage on local-file `SourceReader`.
+- Files:
+  - `crates/parser-proto/tests/source_reader.rs`
+  - `porting/phases/phase-3-parser-adjacent-modules-status-en.md`
+- Implemented:
+  - added tests for local-directory precedence over search paths.
+  - added tests for parent-relative imports and uniqueness of `used_files`
+    tracking under repeated import paths.
+  - documented the expanded import envelope in the adjacent-modules status note.
+- Validation:
+  - `cargo test -p parser-proto --test source_reader`
