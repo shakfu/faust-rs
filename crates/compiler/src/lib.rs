@@ -28,6 +28,8 @@
 //! - [`SignalFirLane::LegacyBridge`] and [`SignalFirLane::TransformFastLane`]
 //!   coexist to de-risk migration of signal->FIR lowering ownership.
 
+pub mod enrobage;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 

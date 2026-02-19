@@ -4674,3 +4674,25 @@ Execution plan (Phase 0 prototype, revised):
     - class-name replacement edge tokens (`mydsp`, `dsp`, boundary/non-boundary).
 - Validation:
   - fixture-only step (no code path changes).
+
+#### Enrobage porting — Step B (pure path/output helpers)
+
+- Scope:
+  - implemented C++ `enrobage` pure helpers in `compiler` with Rust-native
+    `PathBuf` adaptation and parity-focused tests.
+- Files:
+  - `crates/compiler/src/lib.rs`
+  - `crates/compiler/src/enrobage.rs`
+  - `crates/compiler/tests/enrobage_paths.rs`
+- Implemented:
+  - added new public module `compiler::enrobage`.
+  - implemented C++-parity helper mappings:
+    - `fileBasename` -> `file_basename`,
+    - `fileDirname` -> `file_dirname`,
+    - `stripEnd` -> `strip_end` (including original `len >= 4` guard behavior),
+    - `makeOutputFile` -> `make_output_file` (`PathBuf` adaptation).
+  - added integration tests for unix/windows path forms, dirname fallback,
+    suffix stripping edge behavior, and output-dir composition.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --test enrobage_paths`
