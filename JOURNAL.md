@@ -4751,3 +4751,31 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo fmt --all`
   - `cargo test -p compiler --test enrobage_paths --test enrobage_search --test enrobage_stream`
+
+#### Enrobage porting — Step E (compiler integration path)
+
+- Scope:
+  - integrated Rust enrobage wrapping in the production C++ output path
+    (`compiler` CLI) behind explicit architecture flags.
+- Files:
+  - `crates/compiler/src/enrobage.rs`
+  - `crates/compiler/src/main.rs`
+  - `crates/compiler/tests/enrobage_integration.rs`
+  - `crates/compiler/tests/fixtures/enrobage/corpus/wrapper_wrapped.expected.cpp`
+- Implemented:
+  - added high-level enrobage wrapper API:
+    - `EnrobageOptions`,
+    - `WrappedCppCode`,
+    - `wrap_cpp_with_architecture`.
+  - wired C++ output flow in `faust-rs` CLI:
+    - `-a/--architecture <file>`,
+    - `-A/--architecture-dir <dir>` (repeatable),
+    - `-i/--inline-architecture-files`.
+  - wrapping is now applied on C++ output when `--architecture` is provided,
+    with explicit error handling for wrapper open/copy failures.
+  - added integration test covering marker slicing + generated class insertion
+    against a golden wrapped fixture output.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test -p compiler --test enrobage_paths --test enrobage_search --test enrobage_stream --test enrobage_integration`
+  - `cargo test -p compiler --bin faust-rs --no-run`

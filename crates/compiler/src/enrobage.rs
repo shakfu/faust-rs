@@ -300,6 +300,83 @@ pub fn stream_copy_until_end<R: BufRead, W: Write>(
     )
 }
 
+/// Top-level options used to wrap generated C++ class text with an
+/// architecture template.
+#[derive(Debug, Clone)]
+pub struct EnrobageOptions {
+    /// Architecture template filename/path.
+    pub architecture_file: PathBuf,
+    /// Additional architecture search directories.
+    pub architecture_dirs: Vec<PathBuf>,
+    /// Replacement target for `mydsp`.
+    pub class_name: String,
+    /// Replacement target for `dsp`.
+    pub super_class_name: String,
+    /// Enables inline architecture include injection.
+    pub inline_arch_files: bool,
+}
+
+impl EnrobageOptions {
+    /// Creates default wrapping options for one architecture file.
+    #[must_use]
+    pub fn new(architecture_file: PathBuf) -> Self {
+        Self {
+            architecture_file,
+            architecture_dirs: Vec::new(),
+            class_name: "mydsp".to_owned(),
+            super_class_name: "dsp".to_owned(),
+            inline_arch_files: false,
+        }
+    }
+}
+
+/// Result of [`wrap_cpp_with_architecture`].
+#[derive(Debug)]
+pub struct WrappedCppCode {
+    /// Final wrapped C++ output text.
+    pub code: String,
+    /// Last recoverable include-injection error, if any.
+    pub recoverable_error: Option<String>,
+}
+
+/// Wraps generated C++ class text into an architecture template.
+///
+/// This follows the C++ `generateCodeAux1` assembly shape:
+/// - copy architecture prologue until `<<includeIntrinsic>>`,
+/// - copy intermediate section until `<<includeclass>>`,
+/// - inject generated class/module text,
+/// - copy architecture epilogue to end.
+pub fn wrap_cpp_with_architecture(
+    generated_cpp: &str,
+    options: &EnrobageOptions,
+) -> io::Result<WrappedCppCode> {
+    let architecture_name = options.architecture_file.to_string_lossy();
+    let file = open_arch_stream(architecture_name.as_ref(), &options.architecture_dirs)?;
+    let mut src = BufReader::new(file);
+    let mut out = Vec::<u8>::new();
+    let mut state = StreamCopyState::default();
+    let cfg = StreamCopyConfig {
+        class_name: options.class_name.clone(),
+        super_class_name: options.super_class_name.clone(),
+        inline_arch_switch: options.inline_arch_files,
+        architecture_dirs: options.architecture_dirs.clone(),
+    };
+
+    stream_copy_until(&mut src, &mut out, "<<includeIntrinsic>>", &cfg, &mut state)?;
+    stream_copy_until(&mut src, &mut out, "<<includeclass>>", &cfg, &mut state)?;
+    write!(out, "{generated_cpp}")?;
+    if !generated_cpp.ends_with('\n') {
+        writeln!(out)?;
+    }
+    stream_copy_until_end(&mut src, &mut out, &cfg, &mut state)?;
+
+    Ok(WrappedCppCode {
+        code: String::from_utf8(out)
+            .expect("architecture wrapping output is expected to stay UTF-8 text"),
+        recoverable_error: state.last_error,
+    })
+}
+
 fn is_absolute_pathname(filename: &str) -> bool {
     let bytes = filename.as_bytes();
     if bytes.len() > 1 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {

@@ -20,7 +20,11 @@ use boxes::dump_box;
 use clap::{ArgAction, Parser, ValueEnum};
 use codegen::backends::c::COptions;
 use codegen::backends::cpp::CppOptions;
-use compiler::{Compiler, CompilerError, SignalFirLane, golden_snapshot_from_file};
+use compiler::{
+    Compiler, CompilerError, SignalFirLane,
+    enrobage::{EnrobageOptions, wrap_cpp_with_architecture},
+    golden_snapshot_from_file,
+};
 use errors::{DiagnosticBundle, LabelStyle, Severity, Stage};
 use fir::dump_fir;
 use serde_json::json;
@@ -111,6 +115,15 @@ struct CliArgs {
     /// Extra import search directories.
     #[arg(short = 'I', long = "import-dir")]
     import_dir: Vec<PathBuf>,
+    /// Wrapper architecture file (`-a` compatibility).
+    #[arg(short = 'a', long = "architecture")]
+    architecture: Option<PathBuf>,
+    /// Additional architecture search directories.
+    #[arg(short = 'A', long = "architecture-dir")]
+    architecture_dir: Vec<PathBuf>,
+    /// Inline `#include <faust/...>` architecture files.
+    #[arg(short = 'i', long = "inline-architecture-files", action = ArgAction::SetTrue)]
+    inline_architecture_files: bool,
     /// Diagnostic output format.
     #[arg(long = "error-format", value_enum, default_value_t = ErrorFormat::Human)]
     error_format: ErrorFormat,
@@ -600,6 +613,18 @@ fn main() {
         eprintln!("--signal-fir-lane is only valid with --dump-cpp/--dump-c/--dump-fir");
         std::process::exit(2);
     }
+    if (cli.dump_c || cli.dump_fir || matches!(cli.lang, Some(CliLang::C | CliLang::Fir)))
+        && cli.architecture.is_some()
+    {
+        eprintln!("--architecture is currently supported only for C++ output");
+        std::process::exit(2);
+    }
+    if cli.architecture.is_none()
+        && (!cli.architecture_dir.is_empty() || cli.inline_architecture_files)
+    {
+        eprintln!("--architecture-dir/--inline-architecture-files require --architecture <file>");
+        std::process::exit(2);
+    }
 
     if cli.golden {
         if !cli.import_dir.is_empty() {
@@ -755,7 +780,26 @@ fn main() {
 
         match result {
             Ok(cpp) => {
-                emit_output(&cpp, cli.output.as_ref());
+                let rendered = if let Some(architecture_file) = cli.architecture.as_ref() {
+                    let mut options = EnrobageOptions::new(architecture_file.clone());
+                    options.architecture_dirs = cli.architecture_dir.clone();
+                    options.inline_arch_files = cli.inline_architecture_files;
+                    let wrapped = match wrap_cpp_with_architecture(&cpp, &options) {
+                        Ok(wrapped) => wrapped,
+                        Err(err) => {
+                            eprintln!("Architecture wrapping failed: {err}");
+                            std::process::exit(1);
+                        }
+                    };
+                    if let Some(err) = wrapped.recoverable_error.as_deref() {
+                        eprintln!("{err}");
+                        std::process::exit(1);
+                    }
+                    wrapped.code
+                } else {
+                    cpp
+                };
+                emit_output(&rendered, cli.output.as_ref());
             }
             Err(err) => {
                 eprintln!("C++ pipeline failed: {err}");
