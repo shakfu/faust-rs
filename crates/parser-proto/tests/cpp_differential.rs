@@ -233,7 +233,11 @@ fn cpp_class_for_case(cpp_bin: &Path, case: &Case) -> Result<(CppClass, i32), St
 }
 
 fn cpp_bin() -> Option<PathBuf> {
-    std::env::var_os("FAUST_CPP_BIN").map(PathBuf::from)
+    if let Some(path) = std::env::var_os("FAUST_CPP_BIN") {
+        return Some(PathBuf::from(path));
+    }
+    let default = PathBuf::from("/usr/local/bin/faust");
+    default.exists().then_some(default)
 }
 
 fn corpus_case_expect_valid(name: &str) -> bool {
@@ -372,6 +376,16 @@ fn load_cases() -> Result<Vec<Case>, String> {
     cases.push(Case {
         name: "malformed_modulation_missing_rcroc".to_owned(),
         input: CaseInput::Inline("process = [\"gain\" : _ -> _;\n".to_owned()),
+        expect_valid: false,
+    });
+    cases.push(Case {
+        name: "legacy_minput_modulation".to_owned(),
+        input: CaseInput::Inline("process = minput(\"gain\" : _).(_);\n".to_owned()),
+        expect_valid: false,
+    });
+    cases.push(Case {
+        name: "missing_enddef".to_owned(),
+        input: CaseInput::Inline("process = _\n".to_owned()),
         expect_valid: false,
     });
     cases.push(Case {

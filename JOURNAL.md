@@ -4615,3 +4615,20 @@ Execution plan (Phase 0 prototype, revised):
   - documented the expanded import envelope in the adjacent-modules status note.
 - Validation:
   - `cargo test -p parser-proto --test source_reader`
+
+#### Parser full parity execution — Step 6 (differential expansion + triage)
+
+- Scope:
+  - expanded parser differential malformed coverage and added a triage artifact.
+- Files:
+  - `crates/parser-proto/tests/cpp_differential.rs`
+  - `porting/phases/phase-3-parser-parity-report-en.md`
+  - `porting/phases/phase-3-parser-differential-triage-en.md`
+- Implemented:
+  - added malformed differential cases (`legacy_minput_modulation`,
+    `missing_enddef`) and default C++ binary fallback (`/usr/local/bin/faust`).
+  - refreshed parser parity coverage report.
+  - added explicit differential triage table and update rule.
+- Validation:
+  - `cargo test -p parser-proto --test cpp_differential -- --nocapture`
+  - `cargo run -p xtask -- parser-parity-report`
