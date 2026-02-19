@@ -4779,3 +4779,31 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo fmt --all`
   - `cargo test -p compiler --test enrobage_paths --test enrobage_search --test enrobage_stream --test enrobage_integration`
   - `cargo test -p compiler --bin faust-rs --no-run`
+
+#### Enrobage porting — Step F (differential validation + status closure)
+
+- Scope:
+  - executed differential validation against C++ wrapper behavior and updated
+    integration status documents.
+- Files:
+  - `porting/phases/phase-9-enrobage-diff-report-en.md`
+  - `porting/phases/phase-9-enrobage-porting-plan-en.md`
+  - `porting/phases/phase-3-parser-adjacent-modules-status-en.md`
+  - `porting/phases/phase-9-integration-en.md`
+- Implemented:
+  - produced a dedicated Phase 9 differential report with reproducible Rust/C++
+    commands, reference revisions, and triage notes.
+  - validated enrobage-specific wrapper envelope parity on selected fixture:
+    include injection multiplicity, marker elimination, and wrapper placement
+    ordering.
+  - recorded and triaged remaining full-file differences as backend-emission
+    contract differences outside strict enrobage API scope.
+  - updated parser-adjacent status matrix: `enrobage` moved from `deferred` to
+    `adapted (implemented for C++ output path)`.
+  - updated Phase 9 integration document with explicit enrobage implementation
+    status and validation evidence links.
+  - marked Phase 9 enrobage plan execution checklist as completed (A-F).
+- Validation:
+  - `cargo run -p compiler -- -lang cpp tests/corpus/rep_01_passthrough.dsp -a crates/compiler/tests/fixtures/enrobage/arch/wrapper.cpp -A crates/compiler/tests/fixtures/enrobage/arch -i -o /tmp/enrobage_rust_wrap.cpp`
+  - `/usr/local/bin/faust tests/corpus/rep_01_passthrough.dsp -lang cpp -a crates/compiler/tests/fixtures/enrobage/arch/wrapper.cpp -A crates/compiler/tests/fixtures/enrobage/arch -i -o /tmp/enrobage_cpp_wrap.cpp`
+  - wrapper-envelope line/marker differential checks documented in report.

@@ -132,3 +132,12 @@ The enrobage port can be marked complete when:
   - `phase-3-parser-adjacent-modules-status-en.md` (enrobage no longer deferred),
   - `phase-9-integration-en.md` integration status updated,
   - `JOURNAL.md` records behavior and parity evidence.
+
+## 8. Execution Status (2026-02-19)
+
+- Step A: completed (`3835350`)
+- Step B: completed (`ad5b7d4`)
+- Step C: completed (`53141d6`)
+- Step D: completed (`5ff437d`)
+- Step E: completed (`db919f0`)
+- Step F: completed (current branch tip)

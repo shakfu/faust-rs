@@ -6,6 +6,31 @@
 
 ---
 
+## 0. Enrobage integration status update (2026-02-19)
+
+- `compiler` now contains a dedicated Rust enrobage module:
+  - `crates/compiler/src/enrobage.rs`
+- Implemented APIs cover the in-scope C++ set from Phase 9 plan:
+  - path/output helpers,
+  - architecture/search open helpers,
+  - stream copy + include injection + class-name replacement,
+  - high-level wrapper assembly for C++ output.
+- CLI integration is available on the production C++ path:
+  - `-a/--architecture`,
+  - `-A/--architecture-dir`,
+  - `-i/--inline-architecture-files`.
+- Validation evidence:
+  - `crates/compiler/tests/enrobage_paths.rs`
+  - `crates/compiler/tests/enrobage_search.rs`
+  - `crates/compiler/tests/enrobage_stream.rs`
+  - `crates/compiler/tests/enrobage_integration.rs`
+  - differential report:
+    `porting/phases/phase-9-enrobage-diff-report-en.md`
+- Remaining out-of-scope item in parser-adjacent area:
+  - `sourcefetcher` remains deferred.
+
+---
+
 ## 1. C++ Inventory
 
 ### 1.1 Top-level files — 9,097 lines
