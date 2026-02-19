@@ -4838,3 +4838,65 @@ Execution plan (Phase 0 prototype, revised):
     `-A/--architecture-dir expects a directory, not a file: <path>`.
 - Validation:
   - `cargo run -p compiler -- -A /usr/local/share/faust/minimal.cpp tests/corpus/rep_07_nonlinear_clip.dsp`
+
+## 2026-02-19
+
+#### Workspace quality gate fix (`cargo test` / `clippy`)
+
+- Scope:
+  - fixed a type mismatch in compiler integration tests that was breaking
+    workspace-level test and clippy gates.
+- Files:
+  - `crates/compiler/tests/signal_pipeline.rs`
+- Implemented:
+  - aligned helper signatures with signal API integer conventions:
+    - `assert_mul_input_const(..., expected_input: i32)`
+    - `assert_mul_input_ui(..., expected_input: i32)`
+  - removed `i32` vs `i64` comparison mismatches in pattern guards.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test --workspace --all-targets`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+
+#### `xtask golden-check-cpp` robustness fix (no more missing-file hard stop)
+
+- Scope:
+  - fixed `golden-check-cpp` behavior so it validates against the actual C++
+    golden corpus present on disk instead of failing immediately on missing
+    snapshot files for non-covered corpus cases.
+- Files:
+  - `crates/xtask/src/main.rs`
+- Implemented:
+  - added `golden_cases_for_check(...)`:
+    - Rust reference checks still iterate all `tests/corpus/*.dsp`,
+    - C++ reference checks now iterate only directories that actually contain
+      `tests/golden/cpp/<case>/compiler_stdout.txt`.
+  - added C++ output rendering path for C++ reference mode:
+    - `render_rust_cpp_output(...)` compiles each case with Rust C++ backend,
+      then compares generated C++ text to C++ golden snapshots.
+  - improved failure surface:
+    - missing corpus file for an existing golden case now reports explicit error,
+    - compile failures on Rust side are rendered as tagged mismatch payload
+      (`__RUST_CPP_ERROR__`) instead of a panic path.
+  - adjusted import fallback used by this check:
+    - include case parent directory,
+    - include `/usr/local/share/faust` when present.
+- Validation:
+  - `cargo test -p xtask`
+  - `cargo run -p xtask -- golden-check`
+  - `cargo run -p xtask -- golden-check-cpp`
+    - now executes parity comparison and reports real content diffs
+      (instead of failing on missing snapshot files).
+
+#### Homebrew import fallback removal in `xtask`
+
+- Scope:
+  - removed Homebrew-specific fallback path from `xtask` C++ parity check flow.
+- Files:
+  - `crates/xtask/src/main.rs`
+- Implemented:
+  - removed `/opt/homebrew/share/faust` from default import search list used by
+    `golden-check-cpp`.
+- Validation:
+  - `cargo test -p xtask`
+  - `rg -n "/opt/homebrew/share/faust" crates -g '*.rs'` (no matches)

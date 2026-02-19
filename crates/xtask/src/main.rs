@@ -136,6 +136,46 @@ fn case_name(path: &Path) -> Result<String, io::Error> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid corpus filename"))
 }
 
+fn golden_cases_for_check(golden_ref: GoldenRef) -> Result<Vec<(String, PathBuf)>, io::Error> {
+    let root = workspace_root();
+    match golden_ref {
+        GoldenRef::Rust => {
+            let mut cases = Vec::new();
+            for file in corpus_files()? {
+                cases.push((case_name(&file)?, file));
+            }
+            Ok(cases)
+        }
+        GoldenRef::Cpp => {
+            let golden_root = root.join("tests/golden").join(golden_ref.as_dir_name());
+            let mut cases = Vec::new();
+            for entry in fs::read_dir(golden_root)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let case = entry
+                    .file_name()
+                    .to_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid golden case directory name",
+                        )
+                    })?;
+                let expected = entry.path().join("compiler_stdout.txt");
+                if expected.is_file() {
+                    let source = root.join("tests/corpus").join(format!("{case}.dsp"));
+                    cases.push((case, source));
+                }
+            }
+            cases.sort_by(|a, b| a.0.cmp(&b.0));
+            Ok(cases)
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GoldenRef {
     Rust,
@@ -182,6 +222,27 @@ fn render_rust_snapshot(input: &Path) -> Result<String, io::Error> {
         .and_then(std::ffi::OsStr::to_str)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid input filename"))?;
     Ok(compiler::golden_snapshot(name, &source))
+}
+
+fn default_import_search_paths(input: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(parent) = input.parent() {
+        paths.push(parent.to_path_buf());
+    }
+    for candidate in ["/usr/local/share/faust"] {
+        let path = PathBuf::from(candidate);
+        if path.is_dir() {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+fn render_rust_cpp_output(input: &Path) -> Result<String, compiler::CompilerError> {
+    let compiler = compiler::Compiler::new();
+    let options = codegen::backends::cpp::CppOptions::default();
+    let search_paths = default_import_search_paths(input);
+    compiler.compile_file_to_cpp(input, &search_paths, &options)
 }
 
 fn golden_gen_rust() -> Result<(), Box<dyn std::error::Error>> {
@@ -259,11 +320,24 @@ fn golden_check(forced: Option<GoldenRef>) -> Result<(), Box<dyn std::error::Err
         None => golden_ref_from_env()?,
     };
 
-    let files = corpus_files()?;
+    let files = golden_cases_for_check(golden_ref)?;
+    if files.is_empty() {
+        return Err(format!(
+            "no golden cases found for reference `{}`",
+            golden_ref.as_dir_name()
+        )
+        .into());
+    }
     let mut failures = 0usize;
 
-    for file in files {
-        let case = case_name(&file)?;
+    for (case, file) in files {
+        if !file.exists() {
+            return Err(format!(
+                "missing corpus file for golden case `{case}`: {}",
+                file.display()
+            )
+            .into());
+        }
         let expected_path = golden_file_for_ref(&case, golden_ref);
         let expected = fs::read_to_string(&expected_path).map_err(|err| {
             io::Error::new(
@@ -275,7 +349,13 @@ fn golden_check(forced: Option<GoldenRef>) -> Result<(), Box<dyn std::error::Err
             )
         })?;
 
-        let actual = normalize(&render_rust_snapshot(&file)?);
+        let actual = match golden_ref {
+            GoldenRef::Rust => normalize(&render_rust_snapshot(&file)?),
+            GoldenRef::Cpp => match render_rust_cpp_output(&file) {
+                Ok(output) => normalize(&output),
+                Err(error) => format!("__RUST_CPP_ERROR__\n{error}\n"),
+            },
+        };
         let expected = normalize(&expected);
 
         if actual != expected {

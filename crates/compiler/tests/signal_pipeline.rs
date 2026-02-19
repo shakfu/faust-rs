@@ -262,7 +262,7 @@ fn corpus_sine_phasor_lowers_to_gain_times_sin_of_feedback_phase() {
     ));
 }
 
-fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i64) {
+fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i32) {
     let SigMatch::BinOp(BinOp::Mul, a, b) = match_sig(arena, sig) else {
         panic!("branch should be Mul");
     };
@@ -282,7 +282,7 @@ fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i64) {
     );
 }
 
-fn assert_mul_input_ui(arena: &TreeArena, sig: TreeId, expected_input: i64) {
+fn assert_mul_input_ui(arena: &TreeArena, sig: TreeId, expected_input: i32) {
     let SigMatch::BinOp(BinOp::Mul, a, b) = match_sig(arena, sig) else {
         panic!("branch should be Mul");
     };
