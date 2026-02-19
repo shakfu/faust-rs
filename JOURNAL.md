@@ -4647,3 +4647,30 @@ Execution plan (Phase 0 prototype, revised):
   - recorded production API corpus coverage milestone in Phase 3 parser doc.
 - Validation:
   - `cargo test -p parser --no-fail-fast`
+
+#### Enrobage porting — Step A (baseline plan + fixtures)
+
+- Scope:
+  - established the Phase 9 enrobage execution plan and created a baseline
+    fixture corpus for architecture wrapping semantics.
+- Files:
+  - `porting/phases/phase-9-enrobage-porting-plan-en.md`
+  - `porting/phases/phase-3-parser-adjacent-modules-status-en.md`
+  - `crates/compiler/tests/fixtures/enrobage/arch/license_keep.cpp`
+  - `crates/compiler/tests/fixtures/enrobage/arch/license_remove.cpp`
+  - `crates/compiler/tests/fixtures/enrobage/arch/wrapper.cpp`
+  - `crates/compiler/tests/fixtures/enrobage/arch/faust/injected_one.inc`
+  - `crates/compiler/tests/fixtures/enrobage/arch/faust/injected_two.inc`
+  - `crates/compiler/tests/fixtures/enrobage/corpus/README.md`
+- Implemented:
+  - added a parity-first plan for C++ `enrobage` APIs mapped to Rust placement
+    and execution steps A-F.
+  - linked parser-adjacent status tracking to the dedicated Phase 9 enrobage
+    execution plan.
+  - added deterministic fixtures covering:
+    - license-header keep/remove envelopes,
+    - architecture sentinels (`<<includeIntrinsic>>`, `<<includeclass>>`),
+    - include injection candidates (`#include <faust/...>` and quoted form),
+    - class-name replacement edge tokens (`mydsp`, `dsp`, boundary/non-boundary).
+- Validation:
+  - fixture-only step (no code path changes).
