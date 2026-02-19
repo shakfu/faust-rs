@@ -1,4 +1,8 @@
-//! Integration tests for diagnostic_errors.rs.
+//! Integration tests for `diagnostic_errors`.
+//!
+//! Scope:
+//! - Exercises public APIs and structural invariants for the targeted module.
+//! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
 use std::fs;
 use std::path::PathBuf;

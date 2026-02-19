@@ -1,4 +1,20 @@
-//! CLI entry point.
+//! `faust-rs` CLI entry point.
+//!
+//! # Role
+//! - Front-end command-line interface for the workspace compiler facade
+//!   ([`compiler::Compiler`]).
+//! - Exposes parse/dump/compile operations used by local parity workflows and
+//!   day-to-day debugging.
+//!
+//! # Supported modes
+//! - parse diagnostics (`--parse`)
+//! - box/signal/FIR dumps (`--dump-box`, `--dump-sig`, `--dump-fir`)
+//! - backend text emission (`--dump-c`, `--dump-cpp`, `-lang`)
+//! - golden snapshot output (`--golden`)
+//!
+//! # Compatibility note
+//! - Legacy flag forms are normalized to `clap` options (e.g. `-lang`) to keep
+//!   script compatibility while converging on typed CLI parsing.
 
 use boxes::dump_box;
 use clap::{ArgAction, Parser, ValueEnum};

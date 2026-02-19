@@ -1,4 +1,8 @@
-//! Integration tests for core_api.rs.
+//! Integration tests for `core_api`.
+//!
+//! Scope:
+//! - Exercises public APIs and structural invariants for the targeted module.
+//! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
 use boxes::{BoxBuilder, BoxMatch, dump_box, match_box};
 use tlib::{TreeArena, TreeId};

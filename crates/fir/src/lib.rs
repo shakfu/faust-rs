@@ -182,6 +182,7 @@ impl Default for FirStore {
 
 impl FirStore {
     #[must_use]
+    /// Creates a new instance of this type.
     pub fn new() -> Self {
         Self {
             arena: TreeArena::new(),
@@ -189,6 +190,7 @@ impl FirStore {
     }
 
     #[must_use]
+    /// Returns the number of elements currently stored.
     pub fn len(&self) -> usize {
         self.arena.len()
     }
@@ -222,6 +224,7 @@ pub struct FirBuilder<'a> {
 
 impl<'a> FirBuilder<'a> {
     #[must_use]
+    /// Creates a new instance of this type.
     pub fn new(store: &'a mut FirStore) -> Self {
         Self { store }
     }

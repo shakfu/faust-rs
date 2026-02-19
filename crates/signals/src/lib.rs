@@ -14,6 +14,12 @@
 //! - Signal nodes are represented as tagged trees with deterministic child order.
 //! - Numeric constants are direct `Int` / `FloatBits` nodes.
 //! - Slider parameter payload keeps Faust list encoding (`list4(init,min,max,step)`).
+//!
+//! # Integer convention
+//! - Public signal integer surface (`SigBuilder::int`, `SigMatch::Int`, and
+//!   index-bearing shapes such as `Input/Output/Proj`) uses `i32` semantics.
+//! - Underlying arena storage remains `NodeKind::Int(i64)`; this crate owns the
+//!   narrowing conversion at decode boundaries.
 
 use std::fmt::Write;
 
@@ -115,6 +121,7 @@ pub enum BinOp {
 
 impl BinOp {
     #[must_use]
+    /// Executes this operation and returns its result.
     pub fn from_raw(raw: i64) -> Option<Self> {
         match raw {
             0 => Some(Self::Add),
@@ -139,6 +146,7 @@ impl BinOp {
     }
 
     #[must_use]
+    /// Executes this operation and returns its result.
     pub fn symbol(self) -> &'static str {
         match self {
             Self::Add => "+",
@@ -162,6 +170,7 @@ impl BinOp {
     }
 
     #[must_use]
+    /// Executes this operation and returns its result.
     pub fn name(self) -> &'static str {
         match self {
             Self::Add => "add",
@@ -192,48 +201,57 @@ pub struct SigBuilder<'a> {
 
 impl<'a> SigBuilder<'a> {
     #[must_use]
+    /// Creates a `SigBuilder` bound to one mutable `TreeArena`.
     pub fn new(arena: &'a mut TreeArena) -> Self {
         Self { arena }
     }
 
     #[must_use]
+    /// Builds one signal node for `int` and returns its `SigId`.
     pub fn int(&mut self, n: i32) -> SigId {
         self.arena.int(i64::from(n))
     }
 
     #[must_use]
+    /// Builds one signal node for `real` and returns its `SigId`.
     pub fn real(&mut self, r: f64) -> SigId {
         self.arena.float(r)
     }
 
     #[must_use]
+    /// Builds one signal node for `input` and returns its `SigId`.
     pub fn input(&mut self, index: i32) -> SigId {
         let idx = self.arena.int(i64::from(index));
         intern_tag(self.arena, SIG_INPUT_TAG, &[idx])
     }
 
     #[must_use]
+    /// Builds one signal node for `output` and returns its `SigId`.
     pub fn output(&mut self, index: i32, sig: SigId) -> SigId {
         let idx = self.arena.int(i64::from(index));
         intern_tag(self.arena, SIG_OUTPUT_TAG, &[idx, sig])
     }
 
     #[must_use]
+    /// Builds one signal node for `delay1` and returns its `SigId`.
     pub fn delay1(&mut self, sig: SigId) -> SigId {
         intern_tag(self.arena, SIG_DELAY1_TAG, &[sig])
     }
 
     #[must_use]
+    /// Builds one signal node for `delay` and returns its `SigId`.
     pub fn delay(&mut self, sig: SigId, amount: SigId) -> SigId {
         intern_tag(self.arena, SIG_DELAY_TAG, &[sig, amount])
     }
 
     #[must_use]
+    /// Builds one signal node for `prefix` and returns its `SigId`.
     pub fn prefix(&mut self, init: SigId, sig: SigId) -> SigId {
         intern_tag(self.arena, SIG_PREFIX_TAG, &[init, sig])
     }
 
     #[must_use]
+    /// Builds one signal node for `int_cast` and returns its `SigId`.
     pub fn int_cast(&mut self, sig: SigId) -> SigId {
         if matches!(self.arena.kind(sig), Some(NodeKind::Int(_))) {
             sig
@@ -243,11 +261,13 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one signal node for `bit_cast` and returns its `SigId`.
     pub fn bit_cast(&mut self, sig: SigId) -> SigId {
         intern_tag(self.arena, SIG_BIT_CAST_TAG, &[sig])
     }
 
     #[must_use]
+    /// Builds one signal node for `float_cast` and returns its `SigId`.
     pub fn float_cast(&mut self, sig: SigId) -> SigId {
         match self.arena.kind(sig) {
             Some(NodeKind::Int(v)) => self.arena.float(*v as f64),
@@ -257,27 +277,32 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one signal node for `generate` and returns its `SigId`.
     pub fn generate(&mut self, content: SigId) -> SigId {
         intern_tag(self.arena, SIG_GEN_TAG, &[content])
     }
 
     #[must_use]
+    /// Builds one signal node for `wrtbl` and returns its `SigId`.
     pub fn wrtbl(&mut self, size: SigId, generator: SigId, widx: SigId, wsig: SigId) -> SigId {
         intern_tag(self.arena, SIG_WRTBL_TAG, &[size, generator, widx, wsig])
     }
 
     #[must_use]
+    /// Builds one signal node for `wrtbl_readonly` and returns its `SigId`.
     pub fn wrtbl_readonly(&mut self, size: SigId, generator: SigId) -> SigId {
         let nil = self.arena.nil();
         self.wrtbl(size, generator, nil, nil)
     }
 
     #[must_use]
+    /// Builds one signal node for `rdtbl` and returns its `SigId`.
     pub fn rdtbl(&mut self, tbl: SigId, ridx: SigId) -> SigId {
         intern_tag(self.arena, SIG_RDTBL_TAG, &[tbl, ridx])
     }
 
     #[must_use]
+    /// Builds one signal node for `write_read_table` and returns its `SigId`.
     pub fn write_read_table(
         &mut self,
         size: SigId,
@@ -292,6 +317,7 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one signal node for `read_only_table` and returns its `SigId`.
     pub fn read_only_table(&mut self, size: SigId, init: SigId, ridx: SigId) -> SigId {
         let generator = self.generate(init);
         let tbl = self.wrtbl_readonly(size, generator);
@@ -299,11 +325,13 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one signal node for `select2` and returns its `SigId`.
     pub fn select2(&mut self, selector: SigId, s1: SigId, s2: SigId) -> SigId {
         intern_tag(self.arena, SIG_SELECT2_TAG, &[selector, s1, s2])
     }
 
     #[must_use]
+    /// Builds one signal node for `select3` and returns its `SigId`.
     pub fn select3(&mut self, selector: SigId, s1: SigId, s2: SigId, s3: SigId) -> SigId {
         let zero = self.int(0);
         let one = self.int(1);
@@ -314,253 +342,303 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one signal node for `assert_bounds` and returns its `SigId`.
     pub fn assert_bounds(&mut self, s1: SigId, s2: SigId, s3: SigId) -> SigId {
         intern_tag(self.arena, SIG_ASSERT_BOUNDS_TAG, &[s1, s2, s3])
     }
 
     #[must_use]
+    /// Builds one signal node for `lowest` and returns its `SigId`.
     pub fn lowest(&mut self, sig: SigId) -> SigId {
         intern_tag(self.arena, SIG_LOWEST_TAG, &[sig])
     }
 
     #[must_use]
+    /// Builds one signal node for `highest` and returns its `SigId`.
     pub fn highest(&mut self, sig: SigId) -> SigId {
         intern_tag(self.arena, SIG_HIGHEST_TAG, &[sig])
     }
 
     #[must_use]
+    /// Builds one signal node for `binop` and returns its `SigId`.
     pub fn binop(&mut self, op: BinOp, x: SigId, y: SigId) -> SigId {
         let opn = self.arena.int(op as i64);
         intern_tag(self.arena, SIG_BINOP_TAG, &[opn, x, y])
     }
 
     #[must_use]
+    /// Builds one signal node for `add` and returns its `SigId`.
     pub fn add(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::Add, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `sub` and returns its `SigId`.
     pub fn sub(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::Sub, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `mul` and returns its `SigId`.
     pub fn mul(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::Mul, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `div` and returns its `SigId`.
     pub fn div(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::Div, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `rem` and returns its `SigId`.
     pub fn rem(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::Rem, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `and` and returns its `SigId`.
     pub fn and(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::And, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `or` and returns its `SigId`.
     pub fn or(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::Or, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `xor` and returns its `SigId`.
     pub fn xor(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::Xor, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `lsh` and returns its `SigId`.
     pub fn lsh(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::Lsh, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `arsh` and returns its `SigId`.
     pub fn arsh(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::ARsh, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `lrsh` and returns its `SigId`.
     pub fn lrsh(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::LRsh, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `gt` and returns its `SigId`.
     pub fn gt(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::Gt, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `lt` and returns its `SigId`.
     pub fn lt(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::Lt, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `ge` and returns its `SigId`.
     pub fn ge(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::Ge, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `le` and returns its `SigId`.
     pub fn le(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::Le, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `eq` and returns its `SigId`.
     pub fn eq(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::Eq, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `ne` and returns its `SigId`.
     pub fn ne(&mut self, x: SigId, y: SigId) -> SigId {
         self.binop(BinOp::Ne, x, y)
     }
 
     #[must_use]
+    /// Builds one signal node for `pow` and returns its `SigId`.
     pub fn pow(&mut self, x: SigId, y: SigId) -> SigId {
         intern_tag(self.arena, SIG_POW_TAG, &[x, y])
     }
 
     #[must_use]
+    /// Builds one signal node for `min` and returns its `SigId`.
     pub fn min(&mut self, x: SigId, y: SigId) -> SigId {
         intern_tag(self.arena, SIG_MIN_TAG, &[x, y])
     }
 
     #[must_use]
+    /// Builds one signal node for `max` and returns its `SigId`.
     pub fn max(&mut self, x: SigId, y: SigId) -> SigId {
         intern_tag(self.arena, SIG_MAX_TAG, &[x, y])
     }
 
     #[must_use]
+    /// Builds one signal node for `acos` and returns its `SigId`.
     pub fn acos(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_ACOS_TAG, &[x])
     }
 
     #[must_use]
+    /// Builds one signal node for `asin` and returns its `SigId`.
     pub fn asin(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_ASIN_TAG, &[x])
     }
 
     #[must_use]
+    /// Builds one signal node for `atan` and returns its `SigId`.
     pub fn atan(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_ATAN_TAG, &[x])
     }
 
     #[must_use]
+    /// Builds one signal node for `atan2` and returns its `SigId`.
     pub fn atan2(&mut self, x: SigId, y: SigId) -> SigId {
         intern_tag(self.arena, SIG_ATAN2_TAG, &[x, y])
     }
 
     #[must_use]
+    /// Builds one signal node for `cos` and returns its `SigId`.
     pub fn cos(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_COS_TAG, &[x])
     }
 
     #[must_use]
+    /// Builds one signal node for `sin` and returns its `SigId`.
     pub fn sin(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_SIN_TAG, &[x])
     }
 
     #[must_use]
+    /// Builds one signal node for `tan` and returns its `SigId`.
     pub fn tan(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_TAN_TAG, &[x])
     }
 
     #[must_use]
+    /// Builds one signal node for `exp` and returns its `SigId`.
     pub fn exp(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_EXP_TAG, &[x])
     }
 
     #[must_use]
+    /// Builds one signal node for `log` and returns its `SigId`.
     pub fn log(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_LOG_TAG, &[x])
     }
 
     #[must_use]
+    /// Builds one signal node for `log10` and returns its `SigId`.
     pub fn log10(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_LOG10_TAG, &[x])
     }
 
     #[must_use]
+    /// Builds one signal node for `sqrt` and returns its `SigId`.
     pub fn sqrt(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_SQRT_TAG, &[x])
     }
 
     #[must_use]
+    /// Builds one signal node for `abs` and returns its `SigId`.
     pub fn abs(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_ABS_TAG, &[x])
     }
 
     #[must_use]
+    /// Builds one signal node for `fmod` and returns its `SigId`.
     pub fn fmod(&mut self, x: SigId, y: SigId) -> SigId {
         intern_tag(self.arena, SIG_FMOD_TAG, &[x, y])
     }
 
     #[must_use]
+    /// Builds one signal node for `remainder` and returns its `SigId`.
     pub fn remainder(&mut self, x: SigId, y: SigId) -> SigId {
         intern_tag(self.arena, SIG_REMAINDER_TAG, &[x, y])
     }
 
     #[must_use]
+    /// Builds one signal node for `floor` and returns its `SigId`.
     pub fn floor(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_FLOOR_TAG, &[x])
     }
 
     #[must_use]
+    /// Builds one signal node for `ceil` and returns its `SigId`.
     pub fn ceil(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_CEIL_TAG, &[x])
     }
 
     #[must_use]
+    /// Builds one signal node for `rint` and returns its `SigId`.
     pub fn rint(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_RINT_TAG, &[x])
     }
 
     #[must_use]
+    /// Builds one signal node for `round` and returns its `SigId`.
     pub fn round(&mut self, x: SigId) -> SigId {
         intern_tag(self.arena, SIG_ROUND_TAG, &[x])
     }
 
     #[must_use]
+    /// Builds one signal node for `ffun` and returns its `SigId`.
     pub fn ffun(&mut self, ff: SigId, largs: SigId) -> SigId {
         intern_tag(self.arena, SIG_FFUN_TAG, &[ff, largs])
     }
 
     #[must_use]
+    /// Builds one signal node for `fconst` and returns its `SigId`.
     pub fn fconst(&mut self, ty: SigId, name: SigId, file: SigId) -> SigId {
         intern_tag(self.arena, SIG_FCONST_TAG, &[ty, name, file])
     }
 
     #[must_use]
+    /// Builds one signal node for `fvar` and returns its `SigId`.
     pub fn fvar(&mut self, ty: SigId, name: SigId, file: SigId) -> SigId {
         intern_tag(self.arena, SIG_FVAR_TAG, &[ty, name, file])
     }
 
     #[must_use]
+    /// Builds one signal node for `proj` and returns its `SigId`.
     pub fn proj(&mut self, index: i32, group: SigId) -> SigId {
         let idx = self.arena.int(i64::from(index));
         intern_tag(self.arena, SIG_PROJ_TAG, &[idx, group])
     }
 
     #[must_use]
+    /// Builds one signal node for `rec` and returns its `SigId`.
     pub fn rec(&mut self, body: SigId) -> SigId {
         intern_tag(self.arena, SIG_REC_TAG, &[body])
     }
 
     #[must_use]
+    /// Builds one signal node for `button` and returns its `SigId`.
     pub fn button(&mut self, label: SigId) -> SigId {
         intern_tag(self.arena, SIG_BUTTON_TAG, &[label])
     }
 
     #[must_use]
+    /// Builds one signal node for `checkbox` and returns its `SigId`.
     pub fn checkbox(&mut self, label: SigId) -> SigId {
         intern_tag(self.arena, SIG_CHECKBOX_TAG, &[label])
     }
 
     #[must_use]
+    /// Builds one signal node for `vslider` and returns its `SigId`.
     pub fn vslider(
         &mut self,
         label: SigId,
@@ -574,6 +652,7 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one signal node for `hslider` and returns its `SigId`.
     pub fn hslider(
         &mut self,
         label: SigId,
@@ -587,6 +666,7 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one signal node for `numentry` and returns its `SigId`.
     pub fn numentry(
         &mut self,
         label: SigId,
@@ -600,61 +680,73 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one signal node for `vbargraph` and returns its `SigId`.
     pub fn vbargraph(&mut self, label: SigId, min: SigId, max: SigId, sig: SigId) -> SigId {
         intern_tag(self.arena, SIG_VBARGRAPH_TAG, &[label, min, max, sig])
     }
 
     #[must_use]
+    /// Builds one signal node for `hbargraph` and returns its `SigId`.
     pub fn hbargraph(&mut self, label: SigId, min: SigId, max: SigId, sig: SigId) -> SigId {
         intern_tag(self.arena, SIG_HBARGRAPH_TAG, &[label, min, max, sig])
     }
 
     #[must_use]
+    /// Builds one signal node for `waveform` and returns its `SigId`.
     pub fn waveform(&mut self, values: &[SigId]) -> SigId {
         intern_tag(self.arena, SIG_WAVEFORM_TAG, values)
     }
 
     #[must_use]
+    /// Builds one signal node for `soundfile` and returns its `SigId`.
     pub fn soundfile(&mut self, label: SigId) -> SigId {
         intern_tag(self.arena, SIG_SOUNDFILE_TAG, &[label])
     }
 
     #[must_use]
+    /// Builds one signal node for `attach` and returns its `SigId`.
     pub fn attach(&mut self, x: SigId, y: SigId) -> SigId {
         intern_tag(self.arena, SIG_ATTACH_TAG, &[x, y])
     }
 
     #[must_use]
+    /// Builds one signal node for `enable` and returns its `SigId`.
     pub fn enable(&mut self, x: SigId, y: SigId) -> SigId {
         intern_tag(self.arena, SIG_ENABLE_TAG, &[x, y])
     }
 
     #[must_use]
+    /// Builds one signal node for `control` and returns its `SigId`.
     pub fn control(&mut self, x: SigId, y: SigId) -> SigId {
         intern_tag(self.arena, SIG_CONTROL_TAG, &[x, y])
     }
 
     #[must_use]
+    /// Builds one signal node for `seq` and returns its `SigId`.
     pub fn seq(&mut self, x: SigId, y: SigId) -> SigId {
         intern_tag(self.arena, SIG_SEQ_TAG, &[x, y])
     }
 
     #[must_use]
+    /// Builds one signal node for `zero_pad` and returns its `SigId`.
     pub fn zero_pad(&mut self, x: SigId, y: SigId) -> SigId {
         intern_tag(self.arena, SIG_ZEROPAD_TAG, &[x, y])
     }
 
     #[must_use]
+    /// Builds one signal node for `on_demand` and returns its `SigId`.
     pub fn on_demand(&mut self, sigs: &[SigId]) -> SigId {
         intern_tag(self.arena, SIG_OD_TAG, sigs)
     }
 
     #[must_use]
+    /// Builds one signal node for `upsampling` and returns its `SigId`.
     pub fn upsampling(&mut self, sigs: &[SigId]) -> SigId {
         intern_tag(self.arena, SIG_US_TAG, sigs)
     }
 
     #[must_use]
+    /// Builds one signal node for `downsampling` and returns its `SigId`.
     pub fn downsampling(&mut self, sigs: &[SigId]) -> SigId {
         intern_tag(self.arena, SIG_DS_TAG, sigs)
     }

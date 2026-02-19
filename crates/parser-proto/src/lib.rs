@@ -13,6 +13,12 @@
 //!   UI/iterative subset used by prototype corpus).
 //! - Routes expression constructors through `boxes` over `tlib::TreeArena` (no parser-local stubs).
 //! - Keeps production `crates/parser` untouched until Gate B decision.
+//!
+//! # Integer literal convention
+//! - Parser integer tokens are lowered to `boxes` integer nodes with `i32`
+//!   semantic width.
+//! - Token parsing still uses `i64` as an intermediate and clamps to `i32`
+//!   bounds at the parser boundary for deterministic behavior.
 
 use cfgrammar::Span;
 use errors::codes;

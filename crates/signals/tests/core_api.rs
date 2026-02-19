@@ -1,4 +1,8 @@
-//! Integration tests for core_api.rs.
+//! Integration tests for `core_api`.
+//!
+//! Scope:
+//! - Exercises public APIs and structural invariants for the targeted module.
+//! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
 use signals::{BinOp, SigBuilder, SigMatch, dump_sig, dump_sig_readable, match_sig};
 use tlib::TreeArena;

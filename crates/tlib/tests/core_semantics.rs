@@ -1,4 +1,8 @@
-//! Integration tests for core_semantics.rs.
+//! Integration tests for `core_semantics`.
+//!
+//! Scope:
+//! - Exercises public APIs and structural invariants for the targeted module.
+//! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
 use tlib::{NodeKind, PropertyStore, TreeArena};
 

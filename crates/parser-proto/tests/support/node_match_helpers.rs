@@ -1,4 +1,8 @@
-//! Integration tests for support/node_match_helpers.rs.
+//! Integration tests for `node_match_helpers`.
+//!
+//! Scope:
+//! - Exercises public APIs and structural invariants for the targeted module.
+//! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
 #![allow(dead_code)]
 

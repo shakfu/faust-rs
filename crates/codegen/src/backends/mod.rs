@@ -1,4 +1,24 @@
 //! Backend modules colocated under `codegen`.
+//!
+//! # Organization
+//! - Implemented backends:
+//!   - [`c`], [`cpp`]
+//! - Shared signature-validation helper:
+//!   - internal [`faust_api`] module
+//! - Scaffolded backends (planned parity targets):
+//!   - `cmajor`, `codebox`, `csharp`, `dlang`, `interp`, `jax`, `jsfx`,
+//!     `julia`, `llvm`, `rust`, `sdf3`, `vhdl`, `wasm`.
+//!
+//! # Module contract
+//! - Each backend module owns:
+//!   - option struct(s),
+//!   - typed backend error surface,
+//!   - generation entry point(s) from FIR module roots.
+//! - Unsupported FIR nodes must fail with stable backend-specific error codes.
+//!
+//! # API mapping status
+//! - Implemented backends expose `adapted` APIs (parity-driven behavior with
+//!   Rust-native options/results).
 
 pub(crate) mod faust_api;
 

@@ -1,4 +1,9 @@
-//! Command-line benchmark/tool entry point for match_box_bench.rs.
+//! Micro-benchmark for `boxes::match_box` dispatch performance.
+//!
+//! # Scope
+//! - Builds representative node sets for the active `BoxMatch` families.
+//! - Measures hot-path matching throughput over repeated decode rounds.
+//! - Prints per-case timings to support local dispatch regression tracking.
 
 use std::hint::black_box;
 use std::mem::discriminant;

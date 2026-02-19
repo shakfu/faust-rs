@@ -1,4 +1,8 @@
-//! Integration tests for signal_fir_lane.rs.
+//! Integration tests for `signal_fir_lane`.
+//!
+//! Scope:
+//! - Exercises public APIs and structural invariants for the targeted module.
+//! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
 use compiler::{Compiler, SignalFirLane};
 use std::path::PathBuf;

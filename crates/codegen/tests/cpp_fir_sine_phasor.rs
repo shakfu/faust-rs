@@ -1,4 +1,8 @@
-//! Integration tests for cpp_fir_sine_phasor.rs.
+//! Integration tests for `cpp_fir_sine_phasor`.
+//!
+//! Scope:
+//! - Exercises public APIs and structural invariants for the targeted module.
+//! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
 use codegen::backends::cpp::{CppOptions, generate_cpp_module};
 use codegen::fixtures::build_sine_phasor_test_module;

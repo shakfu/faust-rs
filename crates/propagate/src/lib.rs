@@ -16,6 +16,11 @@
 //! - `box_arity(...)` mirrors the C++ `getBoxType(...)` role for the supported subset.
 //! - `propagate(...)` mirrors C++ `propagate(...)` on the supported subset.
 //! - `make_sig_input_list(...)` mirrors C++ `makeSigInputList(...)`.
+//!
+//! # Integer convention
+//! - Integer signals emitted by this pass are `i32`-semantic.
+//! - Conversions from container sizes/indices (`usize`) are explicit and
+//!   fallible to preserve deterministic diagnostics on overflow.
 
 use std::fmt::{Display, Formatter};
 

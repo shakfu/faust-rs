@@ -1,4 +1,8 @@
-//! Integration tests for parser_slice12_modulation.rs.
+//! Integration tests for `parser_slice12_modulation`.
+//!
+//! Scope:
+//! - Exercises public APIs and structural invariants for the targeted module.
+//! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
 use parser_proto::parse_program;
 use tlib::{NodeKind, TreeArena, TreeId};

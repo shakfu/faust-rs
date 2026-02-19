@@ -1,4 +1,8 @@
-//! Integration tests for parser_smoke.rs.
+//! Integration tests for `parser_smoke`.
+//!
+//! Scope:
+//! - Exercises public APIs and structural invariants for the targeted module.
+//! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
 use parser_proto::parse_minimal;
 

@@ -9,6 +9,21 @@
 //! - This crate exposes the parser APIs consumed by upper crates.
 //! - The implementation is delegated to `parser-proto` while Gate B migration
 //!   is being integrated into production boundaries.
+//!
+//! # Role in pipeline
+//! - Production parser facade used by `compiler` and CLI flows.
+//! - Owns stable entry points for:
+//!   - in-memory source parsing,
+//!   - file parsing with import expansion,
+//!   - tokenization helpers used by parser tests/tooling.
+//!
+//! # API mapping status
+//! - Public parsing functions are `adapted`: behavior follows Faust parser
+//!   semantics while exposing Rust-native `Result`/typed error surfaces.
+//!
+//! # Stability note
+//! - Even while internals evolve (`parser-proto` slices), this crate is the
+//!   compatibility boundary intended for upper-layer consumption.
 
 use std::path::{Path, PathBuf};
 

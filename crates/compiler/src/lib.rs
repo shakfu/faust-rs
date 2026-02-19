@@ -7,6 +7,26 @@
 //! # Current scope
 //! - Exposes minimal compile-session APIs.
 //! - Wires parsing through production `crates/parser` APIs.
+//!
+//! # Canonical pipeline
+//! `parse -> eval -> propagate -> normalize/type/interval (incremental) -> transform -> fir -> backend`
+//!
+//! The currently wired production fast path in this crate is:
+//! `parse -> eval -> propagate -> (optional signal->FIR) -> codegen`.
+//!
+//! # Facade responsibilities
+//! - Provide one orchestrator type ([`Compiler`]) for file-based compilation.
+//! - Aggregate typed stage errors into one top-level [`CompilerError`] surface.
+//! - Provide test/golden-oriented helper outputs (box dump, signal dump, FIR dump).
+//! - Route backend generation to C/C++ emitters with consistent options.
+//!
+//! # API mapping status
+//! - External facade API is `adapted`: it targets behavior compatibility with
+//!   C++ compile flows while using Rust structs/results and explicit lane options.
+//!
+//! # Current lane note
+//! - [`SignalFirLane::LegacyBridge`] and [`SignalFirLane::TransformFastLane`]
+//!   coexist to de-risk migration of signal->FIR lowering ownership.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -69,11 +89,13 @@ pub enum SignalFirLane {
 
 impl Compiler {
     #[must_use]
+    /// Creates a new top-level compiler facade instance.
     pub fn new() -> Self {
         Self
     }
 
     #[must_use]
+    /// Returns the crate package version used by this binary/library build.
     pub fn version() -> &'static str {
         env!("CARGO_PKG_VERSION")
     }
@@ -1781,6 +1803,7 @@ fn alias_binding_trace_for_node(
 }
 
 #[must_use]
+/// Executes this operation and returns its result.
 pub fn golden_snapshot(source_name: &str, source: &str) -> String {
     let normalized_source = normalize_newlines(source);
     let line_count = normalized_source.lines().count();
@@ -1792,6 +1815,7 @@ pub fn golden_snapshot(source_name: &str, source: &str) -> String {
     )
 }
 
+/// Executes this operation and returns its result.
 pub fn golden_snapshot_from_file(path: &Path) -> Result<String, std::io::Error> {
     let source = std::fs::read_to_string(path)?;
     Ok(golden_snapshot(&path.display().to_string(), &source))

@@ -4423,3 +4423,87 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo check -p boxes -p signals -p parser-proto -p eval -p propagate -p transform -p compiler`
   - `cargo test -p boxes -p signals -p eval -p propagate -p parser-proto -p transform`
   - `cargo run -p xtask -- golden-check`
+
+#### Workspace-wide Rustdoc pass (crate roots and CLI entrypoints)
+
+- Scope:
+  - harmonized crate-level Rustdoc across the workspace with explicit sections
+    (`Source provenance`, `Role in pipeline`, `Current status`, `API mapping status`,
+    and pass-specific invariants where relevant).
+- Files:
+  - `crates/algebra/src/lib.rs`
+  - `crates/codegen/src/lib.rs`
+  - `crates/codegen/src/backends/mod.rs`
+  - `crates/compiler/src/lib.rs`
+  - `crates/compiler/src/main.rs`
+  - `crates/doc/src/lib.rs`
+  - `crates/draw/src/lib.rs`
+  - `crates/errors/src/lib.rs`
+  - `crates/graph/src/lib.rs`
+  - `crates/interval/src/lib.rs`
+  - `crates/normalize/src/lib.rs`
+  - `crates/parser/src/lib.rs`
+  - `crates/parser-proto/src/lib.rs`
+  - `crates/propagate/src/lib.rs`
+  - `crates/signals/src/lib.rs`
+  - `crates/transform/src/lib.rs`
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/utils/src/lib.rs`
+  - `crates/boxes/src/lib.rs`
+  - `crates/xtask/src/main.rs`
+- Implemented:
+  - replaced terse scaffold crate docs with detailed Rustdoc explaining intended
+    responsibilities and current implementation status.
+  - clarified CLI crate documentation for `faust-rs` and `xtask` operational modes.
+  - documented backend module organization and status in `codegen`.
+  - added explicit cross-crate integer-width notes (`i32` semantics at API level
+    with `tlib` `i64` storage boundary conversions) in parser/IR pipeline crates.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p algebra -p boxes -p codegen -p compiler -p doc -p draw -p errors -p eval -p fir -p graph -p interval -p normalize -p parser -p parser-proto -p propagate -p signals -p tlib -p transform -p utils -p xtask`
+
+#### Workspace-wide Rustdoc pass (remaining files: tests, scaffold backends, bench tools)
+
+- Scope:
+  - completed file-level Rustdoc enrichment for files still using terse headers.
+  - focused on precision for:
+    - integration test modules,
+    - scaffold backend modules,
+    - benchmark/tool binaries.
+- Files:
+  - all `crates/*/tests/*.rs` files that still had generic one-line headers.
+  - `crates/parser-proto/tests/support/node_match_helpers.rs`
+  - scaffold backend files:
+    - `crates/codegen/src/backends/{cmajor,codebox,csharp,dlang,interp,jax,jsfx,julia,llvm,rust,sdf3,vhdl,wasm}/mod.rs`
+  - benchmark/tool binaries:
+    - `crates/boxes/src/bin/match_box_bench.rs`
+    - `crates/tlib/src/bin/treearena_bench.rs`
+- Implemented:
+  - replaced generic `Integration tests for ...` headers with explicit module
+    scope/invariant descriptions.
+  - replaced single-line scaffold backend docs with structured placeholders
+    documenting intended role, status, and planned parity integration.
+  - expanded benchmark tool docs with workload and measurement intent.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p codegen -p parser-proto -p compiler -p xtask`
+
+#### Function-level Rustdoc enrichment across `src/` modules
+
+- Scope:
+  - added missing Rustdoc comments on public functions in source modules to
+    complement crate/file-level documentation.
+  - prioritized core builders/facades where many methods were previously
+    implicit by naming convention.
+- Files (high impact):
+  - `crates/boxes/src/lib.rs` (`BoxBuilder` public methods)
+  - `crates/signals/src/lib.rs` (`SigBuilder` public methods)
+  - `crates/compiler/src/lib.rs` (`Compiler` facade methods)
+  - additional source modules where public methods lacked inline Rustdoc.
+- Implemented:
+  - each previously undocumented `pub fn` in `src/` now has an explicit
+    operation-oriented Rustdoc sentence.
+  - existing detailed docs were preserved; only missing function docs were added.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo check -p compiler -p codegen -p parser-proto -p transform -p signals -p boxes -p fir -p tlib -p eval -p propagate -p errors -p xtask`

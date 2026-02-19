@@ -1,4 +1,22 @@
-//! CLI entry point.
+//! `xtask` CLI entry point for repository maintenance workflows.
+//!
+//! # Role
+//! - Hosts developer/CI automation that should not be part of runtime compiler
+//!   crates (golden generation/checks, parity reports, differential reports).
+//!
+//! # Primary workflows
+//! - Golden snapshots:
+//!   - `golden-check`, `golden-check-cpp`
+//!   - `golden-gen-rust`, `golden-gen-cpp`
+//! - Differential reports:
+//!   - parser parity report
+//!   - corpus status report
+//!   - backend diff reports
+//!
+//! # Design invariants
+//! - Deterministic corpus file ordering.
+//! - Normalized output text before snapshot comparison.
+//! - Fail-fast behavior when one case diverges to preserve CI signal quality.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;

@@ -1,4 +1,8 @@
-//! Integration tests for parser_slice7_foreign.rs.
+//! Integration tests for `parser_slice7_foreign`.
+//!
+//! Scope:
+//! - Exercises public APIs and structural invariants for the targeted module.
+//! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
 #[path = "support/node_match_helpers.rs"]
 mod node_match_helpers;

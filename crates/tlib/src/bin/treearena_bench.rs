@@ -1,4 +1,9 @@
-//! Command-line benchmark/tool entry point for treearena_bench.rs.
+//! Micro-benchmark for `tlib::TreeArena` interning and property operations.
+//!
+//! # Scope
+//! - Exercises symbol/tag/list interning workloads under configurable sizes.
+//! - Measures baseline timings for creation and lookup patterns.
+//! - Supports optional preallocation mode (`--prealloc`) for capacity studies.
 
 use std::env;
 use std::hint::black_box;

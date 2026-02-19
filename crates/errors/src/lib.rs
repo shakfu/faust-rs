@@ -1,4 +1,25 @@
-#![doc = "Structured diagnostics model for the `faust-rs` workspace."]
+//! Structured diagnostics model for `faust-rs`.
+//!
+//! # Source provenance (C++)
+//! - `compiler/errors/*` (error classes and reporting helpers)
+//! - parser/eval/propagate diagnostics conventions in pass-specific code
+//!
+//! # Role in pipeline
+//! - Define a shared, typed diagnostic envelope used by all compiler stages.
+//! - Keep stable diagnostic codes (`codes::*`) suitable for tests, CI gates and
+//!   tooling integrations.
+//! - Offer stage/severity/source-span metadata independent from output format.
+//!
+//! # Design invariants
+//! - Diagnostic codes are stable identifiers: textual wording can evolve without
+//!   breaking CI/tool consumers.
+//! - Stage attribution is explicit (`Stage` enum) so failures can be bucketed
+//!   per pipeline step.
+//! - Rendering policy is caller-owned: this crate models data, not UI.
+//!
+//! # API mapping status
+//! - Public API is `adapted`: equivalent diagnostic intent to C++ with Rust
+//!   ownership/typing and structured aggregation via [`DiagnosticBundle`].
 
 use std::path::PathBuf;
 

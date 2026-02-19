@@ -18,6 +18,10 @@
 //! - `instanceResetUserInterface`: UI zone reset values.
 //! - `instanceClear`: runtime signal state reset values (delay/rec state).
 //!
+//! Integer policy:
+//! - `SIGINT`/`SIGINTCAST` and integer bitwise operations lower to FIR `Int32`
+//!   nodes/types for C++ parity in the active fast-lane.
+//!
 //! Other signal families still return typed `FRS-SFIR-*` errors.
 
 use std::collections::{HashMap, HashSet};

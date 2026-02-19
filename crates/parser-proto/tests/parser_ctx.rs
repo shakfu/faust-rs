@@ -1,4 +1,8 @@
-//! Integration tests for parser_ctx.rs.
+//! Integration tests for `parser_ctx`.
+//!
+//! Scope:
+//! - Exercises public APIs and structural invariants for the targeted module.
+//! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
 use parser_proto::{DiagnosticSeverity, ParserCtx};
 use tlib::TreeArena;

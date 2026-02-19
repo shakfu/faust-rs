@@ -1057,11 +1057,9 @@ fn eval_non_negative_count(
         BoxMatch::Int(v) if v < 0 => Err(EvalError::NegativeIterationCount {
             value: i64::from(v),
         }),
-        BoxMatch::Int(v) => {
-            usize::try_from(v).map_err(|_| EvalError::IterationCountTooLarge {
-                value: i64::from(v),
-            })
-        }
+        BoxMatch::Int(v) => usize::try_from(v).map_err(|_| EvalError::IterationCountTooLarge {
+            value: i64::from(v),
+        }),
         _ => Err(EvalError::IterationCountNotInt { node: count }),
     }
 }

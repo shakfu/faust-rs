@@ -1,4 +1,8 @@
-//! Integration tests for cpp_signal_differential.rs.
+//! Integration tests for `cpp_signal_differential`.
+//!
+//! Scope:
+//! - Exercises public APIs and structural invariants for the targeted module.
+//! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
 use std::fs;
 use std::path::{Path, PathBuf};
