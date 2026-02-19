@@ -147,7 +147,7 @@ impl<'a> BoxBuilder<'a> {
     }
 
     #[must_use]
-    pub fn int(&mut self, value: i64) -> BoxId {
+    pub fn int(&mut self, value: i32) -> BoxId {
         node_int(self.arena, value)
     }
 
@@ -673,7 +673,7 @@ impl<'a> BoxBuilder<'a> {
 pub enum BoxMatch<'a> {
     Unknown,
     Ident(&'a str),
-    Int(i64),
+    Int(i32),
     Real(f64),
     Wire,
     Cut,
@@ -786,7 +786,10 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
         return BoxMatch::Unknown;
     };
     match &node.kind {
-        NodeKind::Int(v) => BoxMatch::Int(*v),
+        NodeKind::Int(v) => match i32::try_from(*v) {
+            Ok(v) => BoxMatch::Int(v),
+            Err(_) => BoxMatch::Unknown,
+        },
         NodeKind::FloatBits(bits) => BoxMatch::Real(f64::from_bits(*bits)),
         NodeKind::Tag(tag) => {
             let tag = arena.tag_name(*tag).unwrap_or("");
@@ -960,8 +963,8 @@ fn node_ident_name(arena: &TreeArena, b: BoxId) -> Option<&str> {
 
 /// Equivalent to C++ `boxInt`.
 #[must_use]
-fn node_int(arena: &mut TreeArena, value: i64) -> BoxId {
-    arena.int(value)
+fn node_int(arena: &mut TreeArena, value: i32) -> BoxId {
+    arena.int(i64::from(value))
 }
 
 /// Equivalent to C++ `boxReal`.

@@ -362,7 +362,7 @@ pub fn make_sig_input_list(arena: &mut TreeArena, n: usize) -> Vec<SigId> {
     let mut b = SigBuilder::new(arena);
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        let index = i64::try_from(i).unwrap_or(i64::MAX);
+        let index = i32::try_from(i).unwrap_or(i32::MAX);
         out.push(b.input(index));
     }
     out
@@ -818,7 +818,7 @@ fn propagate_inner(
                 kind: "waveform-list",
             })?;
             let mut b = SigBuilder::new(arena);
-            let n = i64_from_usize(values.len(), "waveform size")?;
+            let n = i32_from_usize(values.len(), "waveform size")?;
             let size = b.int(n);
             let waveform = b.waveform(&values);
             Ok(vec![size, waveform])
@@ -906,7 +906,7 @@ fn propagate_inner(
             let mut outputs = Vec::with_capacity(l2.len());
             for (index, expr) in l2.iter().copied().enumerate() {
                 if aperture(arena, expr) > 0 {
-                    let idx = i64_from_usize(index, "rec projection index")?;
+                    let idx = i32_from_usize(index, "rec projection index")?;
                     let mut b = SigBuilder::new(arena);
                     outputs.push(b.proj(idx, group));
                 } else {
@@ -918,14 +918,14 @@ fn propagate_inner(
         BoxMatch::Inputs(expr) => {
             expect_input_arity(box_tree, inputs, 0)?;
             let arity = box_arity(arena, expr)?;
-            let value = i64_from_usize(arity.inputs, "inputs")?;
+            let value = i32_from_usize(arity.inputs, "inputs")?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.int(value)])
         }
         BoxMatch::Outputs(expr) => {
             expect_input_arity(box_tree, inputs, 0)?;
             let arity = box_arity(arena, expr)?;
-            let value = i64_from_usize(arity.outputs, "outputs")?;
+            let value = i32_from_usize(arity.outputs, "outputs")?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.int(value)])
         }
@@ -1204,16 +1204,16 @@ fn usize_from_int_node(
     usize::try_from(*value).map_err(|_| PropagateError::InvalidIntegerValue { node, field })
 }
 
-/// Fallible `usize -> i64` conversion used for stable signal-index nodes.
-fn i64_from_usize(value: usize, field: &'static str) -> Result<i64, PropagateError> {
-    i64::try_from(value).map_err(|_| PropagateError::IntegerTooLarge { field, value })
+/// Fallible `usize -> i32` conversion used for stable signal-index nodes.
+fn i32_from_usize(value: usize, field: &'static str) -> Result<i32, PropagateError> {
+    i32::try_from(value).map_err(|_| PropagateError::IntegerTooLarge { field, value })
 }
 
 /// Seeds recursive feedback inputs with `delay1(proj(i, DEBRUIJNREF(1)))`.
 fn make_mem_sig_proj_list(arena: &mut TreeArena, n: usize) -> Result<Vec<SigId>, PropagateError> {
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        let idx = i64_from_usize(i, "rec projection seed index")?;
+        let idx = i32_from_usize(i, "rec projection seed index")?;
         let rg = debruijn_ref(arena, 1);
         let mut b = SigBuilder::new(arena);
         let proj = b.proj(idx, rg);

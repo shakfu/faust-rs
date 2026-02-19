@@ -4378,3 +4378,48 @@ Execution plan (Phase 0 prototype, revised):
 - Added backend mapping notes near C/C++ emitters to avoid ambiguity:
   - `UI` => `UI*` / `UIGlue*`,
   - `Ptr(UI)` => `UI**` / `UIGlue**`.
+
+## 2026-02-19
+
+#### Int32 semantic alignment across parser -> boxes -> eval -> propagate -> signals -> FIR
+
+- Commit: amended from `f65a39d`.
+- Scope:
+  - enforce `i32` integer semantics across the active compile chain while keeping
+    `tlib::NodeKind::Int(i64)` as an internal storage representation.
+- Files:
+  - `crates/parser-proto/src/lib.rs`
+  - `crates/boxes/src/lib.rs`
+  - `crates/eval/src/lib.rs`
+  - `crates/eval/tests/core_eval.rs`
+  - `crates/propagate/src/lib.rs`
+  - `crates/signals/src/lib.rs`
+  - `crates/transform/src/signal_fir/module.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - parser integer literal lowering now feeds `boxInt(i32)` with explicit saturating
+    conversion from parsed `i64` tokens.
+  - `boxes` public integer API/matcher aligned to `i32`:
+    - `BoxBuilder::int(i32)`,
+    - `BoxMatch::Int(i32)`,
+    - `match_box` converts `NodeKind::Int(i64)` to `i32` (out-of-range => `Unknown`).
+  - `signals` public integer API/matcher aligned to `i32`:
+    - `SigBuilder::{int,input,output,proj}` now take `i32`,
+    - `SigMatch::{Int,Input,Output,Proj}` now carry `i32`,
+    - `match_sig` converts `NodeKind::Int(i64)` to `i32` (out-of-range => `Unknown`).
+  - `propagate` updated to produce/consume `i32` integer signal nodes:
+    - replaced `usize -> i64` helper with `usize -> i32`,
+    - adjusted recursive projection and size/arity integer emissions.
+  - `eval` updated where error payloads still expected `i64` for diagnostics:
+    - explicit widening from `i32` to `i64` at error construction points.
+  - `transform/signal_fir` updated to consume `i32` signal integers end-to-end:
+    - `lower_input`/`lower_proj` signatures now use `i32`,
+    - `lower_int32_const` simplified to direct `i32` emission.
+- Invariants and rationale:
+  - semantic integer width in the compile pipeline is now explicit `i32` at layer APIs.
+  - `tlib` integer storage remains `i64` for generic tree infrastructure and compatibility;
+    range narrowing is handled at subsystem boundaries.
+- Validation:
+  - `cargo check -p boxes -p signals -p parser-proto -p eval -p propagate -p transform -p compiler`
+  - `cargo test -p boxes -p signals -p eval -p propagate -p parser-proto -p transform`
+  - `cargo run -p xtask -- golden-check`

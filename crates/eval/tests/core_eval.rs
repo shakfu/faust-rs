@@ -45,7 +45,7 @@ fn make_rev_list3(arena: &mut TreeArena, a: TreeId, b: TreeId, c: TreeId) -> Tre
     arena.cons(c, t2)
 }
 
-fn expect_int(arena: &TreeArena, id: TreeId, expected: i64) {
+fn expect_int(arena: &TreeArena, id: TreeId, expected: i32) {
     assert_eq!(match_box(arena, id), BoxMatch::Int(expected));
 }
 

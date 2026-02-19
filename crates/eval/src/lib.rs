@@ -1054,9 +1054,13 @@ fn eval_non_negative_count(
 ) -> Result<usize, EvalError> {
     let count = eval_box(arena, count_expr, env, loop_detector)?;
     match match_box(arena, count) {
-        BoxMatch::Int(v) if v < 0 => Err(EvalError::NegativeIterationCount { value: v }),
+        BoxMatch::Int(v) if v < 0 => Err(EvalError::NegativeIterationCount {
+            value: i64::from(v),
+        }),
         BoxMatch::Int(v) => {
-            usize::try_from(v).map_err(|_| EvalError::IterationCountTooLarge { value: v })
+            usize::try_from(v).map_err(|_| EvalError::IterationCountTooLarge {
+                value: i64::from(v),
+            })
         }
         _ => Err(EvalError::IterationCountNotInt { node: count }),
     }

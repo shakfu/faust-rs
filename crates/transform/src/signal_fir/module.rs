@@ -340,10 +340,7 @@ impl<'a> SignalToFirLower<'a> {
         }
 
         let lowered = match match_sig(self.arena, sig) {
-            SigMatch::Int(value) => {
-                let mut b = FirBuilder::new(&mut self.store);
-                b.int64(value)
-            }
+            SigMatch::Int(value) => self.lower_int32_const(value),
             SigMatch::Real(value) => {
                 let mut b = FirBuilder::new(&mut self.store);
                 b.float64(value)
@@ -359,7 +356,7 @@ impl<'a> SignalToFirLower<'a> {
                 let init = self.initial_state_from_signal(init_sig);
                 self.lower_delay_state(sig, value, init)?
             }
-            SigMatch::IntCast(value) => self.lower_cast(FirType::Int64, value)?,
+            SigMatch::IntCast(value) => self.lower_cast(FirType::Int32, value)?,
             SigMatch::BitCast(value) => self.lower_bitcast(FirType::FaustFloat, value)?,
             SigMatch::FloatCast(value) => self.lower_cast(FirType::FaustFloat, value)?,
             SigMatch::Select2(cond, then_value, else_value) => {
@@ -444,13 +441,7 @@ impl<'a> SignalToFirLower<'a> {
         Ok(lowered)
     }
 
-    fn lower_input(&mut self, index: i64) -> Result<FirId, SignalFirError> {
-        if index < 0 {
-            return Err(SignalFirError::new(
-                SignalFirErrorCode::InputIndexOutOfRange,
-                format!("input index must be >= 0, got {index}"),
-            ));
-        }
+    fn lower_input(&mut self, index: i32) -> Result<FirId, SignalFirError> {
         let index = usize::try_from(index).map_err(|_| {
             SignalFirError::new(
                 SignalFirErrorCode::InputIndexOutOfRange,
@@ -542,13 +533,15 @@ impl<'a> SignalToFirLower<'a> {
 
     fn initial_state_from_signal(&mut self, sig: SigId) -> FirId {
         match match_sig(self.arena, sig) {
-            SigMatch::Int(v) => {
-                let mut b = FirBuilder::new(&mut self.store);
-                b.int64(v)
-            }
+            SigMatch::Int(v) => self.lower_int32_const(v),
             SigMatch::Real(v) => self.float_const(v),
             _ => self.float_const(0.0),
         }
+    }
+
+    fn lower_int32_const(&mut self, value: i32) -> FirId {
+        let mut b = FirBuilder::new(&mut self.store);
+        b.int32(value)
     }
 
     fn lower_button(&mut self, node: SigId, label: SigId, typ: ButtonType) -> FirId {
@@ -1016,7 +1009,7 @@ impl<'a> SignalToFirLower<'a> {
     fn lower_proj(
         &mut self,
         node: SigId,
-        index: i64,
+        index: i32,
         group: SigId,
     ) -> Result<FirId, SignalFirError> {
         if index != 0 {
@@ -1114,9 +1107,9 @@ fn map_binop(op: BinOp) -> Option<(FirBinOp, FirType)> {
         BinOp::Le => Some((FirBinOp::Le, FirType::Bool)),
         BinOp::Eq => Some((FirBinOp::Eq, FirType::Bool)),
         BinOp::Ne => Some((FirBinOp::Ne, FirType::Bool)),
-        BinOp::And => Some((FirBinOp::And, FirType::Int64)),
-        BinOp::Or => Some((FirBinOp::Or, FirType::Int64)),
-        BinOp::Xor => Some((FirBinOp::Xor, FirType::Int64)),
+        BinOp::And => Some((FirBinOp::And, FirType::Int32)),
+        BinOp::Or => Some((FirBinOp::Or, FirType::Int32)),
+        BinOp::Xor => Some((FirBinOp::Xor, FirType::Int32)),
         BinOp::Lsh | BinOp::ARsh | BinOp::LRsh => None,
     }
 }

@@ -389,7 +389,7 @@ impl ParseState {
         self.update_cursor_from_span(lexer, span);
         let raw = lexer.span_str(span);
         match raw.parse::<i64>() {
-            Ok(value) => self.node_builder().int(value),
+            Ok(value) => self.node_builder().int(i32_saturating_from_i64(value)),
             Err(_) => {
                 self.ctx.error("invalid INT literal");
                 self.node_builder().int(0)
@@ -571,7 +571,9 @@ impl ParseState {
         self.update_cursor_from_span(lexer, span);
         let raw = lexer.span_str(span);
         match raw.parse::<i64>() {
-            Ok(value) => self.node_builder().int(value.saturating_mul(sign)),
+            Ok(value) => self
+                .node_builder()
+                .int(i32_saturating_from_i64(value.saturating_mul(sign))),
             Err(_) => {
                 self.ctx.error("invalid signed INT literal");
                 self.node_builder().int(0)
@@ -748,6 +750,16 @@ fn token_span(tok: &Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>
     match tok {
         Ok(lexeme) | Err(lexeme) => lexeme.span(),
     }
+}
+
+fn i32_saturating_from_i64(value: i64) -> i32 {
+    i32::try_from(value).unwrap_or_else(|_| {
+        if value.is_negative() {
+            i32::MIN
+        } else {
+            i32::MAX
+        }
+    })
 }
 
 /// Executes one mutable operation against parser state passed through `%parse-param`.

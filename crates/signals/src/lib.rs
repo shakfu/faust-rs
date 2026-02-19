@@ -197,8 +197,8 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
-    pub fn int(&mut self, n: i64) -> SigId {
-        self.arena.int(n)
+    pub fn int(&mut self, n: i32) -> SigId {
+        self.arena.int(i64::from(n))
     }
 
     #[must_use]
@@ -207,14 +207,14 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
-    pub fn input(&mut self, index: i64) -> SigId {
-        let idx = self.arena.int(index);
+    pub fn input(&mut self, index: i32) -> SigId {
+        let idx = self.arena.int(i64::from(index));
         intern_tag(self.arena, SIG_INPUT_TAG, &[idx])
     }
 
     #[must_use]
-    pub fn output(&mut self, index: i64, sig: SigId) -> SigId {
-        let idx = self.arena.int(index);
+    pub fn output(&mut self, index: i32, sig: SigId) -> SigId {
+        let idx = self.arena.int(i64::from(index));
         intern_tag(self.arena, SIG_OUTPUT_TAG, &[idx, sig])
     }
 
@@ -540,8 +540,8 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
-    pub fn proj(&mut self, index: i64, group: SigId) -> SigId {
-        let idx = self.arena.int(index);
+    pub fn proj(&mut self, index: i32, group: SigId) -> SigId {
+        let idx = self.arena.int(i64::from(index));
         intern_tag(self.arena, SIG_PROJ_TAG, &[idx, group])
     }
 
@@ -664,10 +664,10 @@ impl<'a> SigBuilder<'a> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SigMatch<'a> {
     Unknown,
-    Int(i64),
+    Int(i32),
     Real(f64),
-    Input(i64),
-    Output(i64, SigId),
+    Input(i32),
+    Output(i32, SigId),
     Delay1(SigId),
     Delay(SigId, SigId),
     Prefix(SigId, SigId),
@@ -706,7 +706,7 @@ pub enum SigMatch<'a> {
     FFun(SigId, SigId),
     FConst(SigId, SigId, SigId),
     FVar(SigId, SigId, SigId),
-    Proj(i64, SigId),
+    Proj(i32, SigId),
     Rec(SigId),
     Button(SigId),
     Checkbox(SigId),
@@ -734,18 +734,27 @@ pub fn match_sig<'a>(arena: &'a TreeArena, id: SigId) -> SigMatch<'a> {
         return SigMatch::Unknown;
     };
     match &node.kind {
-        NodeKind::Int(v) => SigMatch::Int(*v),
+        NodeKind::Int(v) => match i32::try_from(*v) {
+            Ok(v) => SigMatch::Int(v),
+            Err(_) => SigMatch::Unknown,
+        },
         NodeKind::FloatBits(bits) => SigMatch::Real(f64::from_bits(*bits)),
         NodeKind::Tag(tag_id) => {
             let tag = arena.tag_name(*tag_id).unwrap_or("");
             let ch = node.children.as_slice();
             match (tag, ch) {
                 (SIG_INPUT_TAG, [idx]) => match arena.kind(*idx) {
-                    Some(NodeKind::Int(i)) => SigMatch::Input(*i),
+                    Some(NodeKind::Int(i)) => match i32::try_from(*i) {
+                        Ok(i) => SigMatch::Input(i),
+                        Err(_) => SigMatch::Unknown,
+                    },
                     _ => SigMatch::Unknown,
                 },
                 (SIG_OUTPUT_TAG, [idx, s]) => match arena.kind(*idx) {
-                    Some(NodeKind::Int(i)) => SigMatch::Output(*i, *s),
+                    Some(NodeKind::Int(i)) => match i32::try_from(*i) {
+                        Ok(i) => SigMatch::Output(i, *s),
+                        Err(_) => SigMatch::Unknown,
+                    },
                     _ => SigMatch::Unknown,
                 },
                 (SIG_DELAY1_TAG, [s]) => SigMatch::Delay1(*s),
@@ -795,7 +804,10 @@ pub fn match_sig<'a>(arena: &'a TreeArena, id: SigId) -> SigMatch<'a> {
                 (SIG_FCONST_TAG, [ty, name, file]) => SigMatch::FConst(*ty, *name, *file),
                 (SIG_FVAR_TAG, [ty, name, file]) => SigMatch::FVar(*ty, *name, *file),
                 (SIG_PROJ_TAG, [idx, group]) => match arena.kind(*idx) {
-                    Some(NodeKind::Int(i)) => SigMatch::Proj(*i, *group),
+                    Some(NodeKind::Int(i)) => match i32::try_from(*i) {
+                        Ok(i) => SigMatch::Proj(i, *group),
+                        Err(_) => SigMatch::Unknown,
+                    },
                     _ => SigMatch::Unknown,
                 },
                 (SIG_REC_TAG, [body]) => SigMatch::Rec(*body),
