@@ -617,6 +617,13 @@ fn main() {
         eprintln!("--architecture is currently supported only for C/C++ output");
         std::process::exit(2);
     }
+    if let Some(path) = cli.architecture_dir.iter().find(|path| path.is_file()) {
+        eprintln!(
+            "-A/--architecture-dir expects a directory, not a file: {}",
+            path.display()
+        );
+        std::process::exit(2);
+    }
     if cli.architecture.is_none()
         && (!cli.architecture_dir.is_empty() || cli.inline_architecture_files)
     {

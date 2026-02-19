@@ -4825,3 +4825,16 @@ Execution plan (Phase 0 prototype, revised):
 - Validation:
   - `cargo test -p compiler --bin faust-rs --no-run`
   - `cargo run -p compiler -- -lang c -a /usr/local/share/faust/minimal.cpp tests/corpus/rep_07_nonlinear_clip.dsp -o /tmp/faust_rs_c_arch.c`
+
+#### CLI diagnostic wording update (`-A/--architecture-dir`)
+
+- Scope:
+  - clarified invalid `--architecture-dir` diagnostics in English.
+- Files:
+  - `crates/compiler/src/main.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - when `-A/--architecture-dir` receives a file path, CLI now reports:
+    `-A/--architecture-dir expects a directory, not a file: <path>`.
+- Validation:
+  - `cargo run -p compiler -- -A /usr/local/share/faust/minimal.cpp tests/corpus/rep_07_nonlinear_clip.dsp`
