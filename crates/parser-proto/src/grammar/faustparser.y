@@ -690,7 +690,12 @@ Primitive -> tlib::TreeId:
           crate::with_state(state, |state| state.node_lambda($3, $7))
       }
     | MODULATE LPAR ModList RPAR DOT LPAR Expression RPAR {
-          crate::with_state(state, |state| state.node_builder().build_modulation($3, $7))
+          crate::with_state(state, |state| {
+              let _ = ($3, $7);
+              state.recovery_statement(
+                  "syntax error: legacy minput modulation form is not supported; use [modlist -> expression]",
+              )
+          })
       }
     | LCROC ModList LAPPLY Expression RCROC {
           crate::with_state(state, |state| state.node_builder().build_modulation($2, $4))

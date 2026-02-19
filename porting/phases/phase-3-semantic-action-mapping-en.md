@@ -49,8 +49,8 @@ Notes:
 - Structural comparison is shape-based (Tree/Box form), never pointer-identity based.
 - Cases known to trigger later compilation-stage rejections in C++ are kept in Rust structural tests but are excluded from strict C++ acceptance envelope checks.
 
-## 4. Open Items (for full 100% semantic parity)
+## 4. Open Items (toward production-verified 100% parity)
 
-- Port remaining C++ action families not yet in the migrated grammar scope.
 - Extend structural parity corpus to stdlib/import-heavy fixtures after full parser integration.
+- Keep differential coverage for both modulation forms (`[modlist -> expr]` and legacy `minput(...) . (...)`) in the consolidated semantic parity suite.
 - When production parser replaces `parser-proto`, preserve this mapping and parity corpus (path updates only).

@@ -4569,3 +4569,22 @@ Execution plan (Phase 0 prototype, revised):
   - added/updated modulation tests to keep bracket form accepted and legacy form rejected.
 - Validation:
   - `cargo test -p parser-proto --no-fail-fast`
+
+#### Parser full parity execution — Step 3 (semantic parity coverage tightening)
+
+- Scope:
+  - tightened semantic parity checks around modulation action behavior and
+    mapping artifacts.
+- Files:
+  - `crates/parser-proto/src/grammar/faustparser.y`
+  - `crates/parser-proto/tests/parser_semantic_parity.rs`
+  - `crates/parser-proto/tests/parser_slice12_modulation.rs`
+  - `porting/phases/phase-3-semantic-action-mapping-en.md`
+- Implemented:
+  - extended semantic parity suite with dedicated modulation-shape checks.
+  - aligned legacy `minput` handling with C++ acceptance envelope expectations.
+  - updated semantic action mapping open-items text to reflect current focus.
+- Validation:
+  - `cargo test -p parser-proto --test parser_semantic_parity`
+  - `cargo test -p parser-proto --test parser_slice12_modulation`
+  - `cargo test -p parser-proto --no-fail-fast`

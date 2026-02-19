@@ -41,6 +41,17 @@ fn any_match(arena: &TreeArena, elems: &[TreeId], pred: fn(&TreeArena, TreeId) -
     elems.iter().copied().any(|id| pred(arena, id))
 }
 
+fn modulation_parts(arena: &TreeArena, node: TreeId) -> Option<(TreeId, TreeId)> {
+    let children = arena.children(node)?;
+    if children.len() != 2 {
+        return None;
+    }
+    let NodeKind::Tag(tag_id) = arena.kind(node)? else {
+        return None;
+    };
+    (arena.tag_name(*tag_id) == Some("BOXMODULATION")).then_some((children[0], children[1]))
+}
+
 fn parse_process_expr(source: &str, source_name: &str) -> (TreeArena, TreeId) {
     let output = parse_program(source, source_name);
     assert!(
@@ -274,6 +285,20 @@ fn foreign_and_case_actions_follow_cxx_families() {
 }
 
 #[test]
+fn modulation_forms_follow_cpp_buildboxmodulation_shape() {
+    let (arena_bracket, bracket_expr) =
+        parse_process_expr(r#"process = ["gain" : _ -> _];"#, "semantic_mod_bracket.dsp");
+    let (entry, _body) = modulation_parts(&arena_bracket, bracket_expr)
+        .expect("bracket modulation should lower to BOXMODULATION");
+    let label = arena_bracket.hd(entry).expect("entry label should exist");
+    match arena_bracket.kind(label) {
+        Some(NodeKind::StringLiteral(s)) => assert_eq!(s.as_ref(), "gain"),
+        Some(NodeKind::Symbol(s)) => assert_eq!(s.as_ref(), "gain"),
+        other => panic!("unexpected modulation label node: {other:?}"),
+    }
+}
+
+#[test]
 fn semantic_shape_corpus_is_accepted_by_cpp_reference() {
     let Some(cpp_bin) = cpp_bin() else {
         eprintln!(
@@ -303,6 +328,7 @@ fn semantic_shape_corpus_is_accepted_by_cpp_reference() {
                 "case { (x) => x; };",
             ),
         ),
+        ("semantic_mod_bracket", r#"process = ["gain" : _ -> _];"#),
     ];
 
     let mut rejected = Vec::new();
