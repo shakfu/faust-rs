@@ -125,6 +125,16 @@ fn malformed_suite_tracks_rust_class_and_location() {
             source: "process = [\"gain\" : _ -> _;\n",
             expected_error_line: 1,
         },
+        MalformedCase {
+            name: "legacy_minput_modulation",
+            source: "process = minput(\"gain\" : _).(_);\n",
+            expected_error_line: 1,
+        },
+        MalformedCase {
+            name: "missing_enddef",
+            source: "process = _\n",
+            expected_error_line: 1,
+        },
     ];
 
     for case in cases {
@@ -220,6 +230,11 @@ fn malformed_suite_matches_cpp_error_envelope_when_available() {
             "modulation_missing_rcroc",
             "process = [\"gain\" : _ -> _;\n",
         ),
+        (
+            "legacy_minput_modulation",
+            "process = minput(\"gain\" : _).(_);\n",
+        ),
+        ("missing_enddef", "process = _\n"),
     ];
 
     for (name, source) in cases {

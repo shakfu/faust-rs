@@ -4588,3 +4588,15 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p parser-proto --test parser_semantic_parity`
   - `cargo test -p parser-proto --test parser_slice12_modulation`
   - `cargo test -p parser-proto --no-fail-fast`
+
+#### Parser full parity execution — Step 4 (diagnostics/recovery envelope extension)
+
+- Scope:
+  - expanded malformed diagnostics suite and C++ envelope checks.
+- Files:
+  - `crates/parser-proto/tests/parser_diagnostics.rs`
+- Implemented:
+  - added malformed fixtures for legacy modulation and missing `ENDDEF`.
+  - extended C++ error-envelope assertions for the new malformed set.
+- Validation:
+  - `cargo test -p parser-proto --test parser_diagnostics -- --nocapture`
