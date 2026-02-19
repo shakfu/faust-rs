@@ -613,10 +613,8 @@ fn main() {
         eprintln!("--signal-fir-lane is only valid with --dump-cpp/--dump-c/--dump-fir");
         std::process::exit(2);
     }
-    if (cli.dump_c || cli.dump_fir || matches!(cli.lang, Some(CliLang::C | CliLang::Fir)))
-        && cli.architecture.is_some()
-    {
-        eprintln!("--architecture is currently supported only for C++ output");
+    if (cli.dump_fir || matches!(cli.lang, Some(CliLang::Fir))) && cli.architecture.is_some() {
+        eprintln!("--architecture is currently supported only for C/C++ output");
         std::process::exit(2);
     }
     if cli.architecture.is_none()
@@ -830,7 +828,26 @@ fn main() {
 
         match result {
             Ok(c_code) => {
-                emit_output(&c_code, cli.output.as_ref());
+                let rendered = if let Some(architecture_file) = cli.architecture.as_ref() {
+                    let mut options = EnrobageOptions::new(architecture_file.clone());
+                    options.architecture_dirs = cli.architecture_dir.clone();
+                    options.inline_arch_files = cli.inline_architecture_files;
+                    let wrapped = match wrap_cpp_with_architecture(&c_code, &options) {
+                        Ok(wrapped) => wrapped,
+                        Err(err) => {
+                            eprintln!("Architecture wrapping failed: {err}");
+                            std::process::exit(1);
+                        }
+                    };
+                    if let Some(err) = wrapped.recoverable_error.as_deref() {
+                        eprintln!("{err}");
+                        std::process::exit(1);
+                    }
+                    wrapped.code
+                } else {
+                    c_code
+                };
+                emit_output(&rendered, cli.output.as_ref());
             }
             Err(err) => {
                 eprintln!("C pipeline failed: {err}");

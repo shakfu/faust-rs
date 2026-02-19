@@ -4807,3 +4807,21 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo run -p compiler -- -lang cpp tests/corpus/rep_01_passthrough.dsp -a crates/compiler/tests/fixtures/enrobage/arch/wrapper.cpp -A crates/compiler/tests/fixtures/enrobage/arch -i -o /tmp/enrobage_rust_wrap.cpp`
   - `/usr/local/bin/faust tests/corpus/rep_01_passthrough.dsp -lang cpp -a crates/compiler/tests/fixtures/enrobage/arch/wrapper.cpp -A crates/compiler/tests/fixtures/enrobage/arch -i -o /tmp/enrobage_cpp_wrap.cpp`
   - wrapper-envelope line/marker differential checks documented in report.
+
+#### Enrobage CLI update (C backend support)
+
+- Scope:
+  - enabled architecture wrapping options for C backend output in the `compiler`
+    CLI path.
+- Files:
+  - `crates/compiler/src/main.rs`
+  - `JOURNAL.md`
+- Implemented:
+  - `-a/--architecture`, `-A/--architecture-dir`, and
+    `-i/--inline-architecture-files` are now accepted for `-lang c` / `--dump-c`.
+  - C output branch now applies the same enrobage wrapper assembly flow as C++
+    when `--architecture` is set.
+  - architecture wrapping remains rejected for FIR output.
+- Validation:
+  - `cargo test -p compiler --bin faust-rs --no-run`
+  - `cargo run -p compiler -- -lang c -a /usr/local/share/faust/minimal.cpp tests/corpus/rep_07_nonlinear_clip.dsp -o /tmp/faust_rs_c_arch.c`
