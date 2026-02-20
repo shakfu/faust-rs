@@ -184,7 +184,12 @@ impl Compiler {
         source: &str,
         options: &CppOptions,
     ) -> Result<String, CompilerError> {
-        self.compile_source_to_cpp_with_lane(source_name, source, options, SignalFirLane::LegacyBridge)
+        self.compile_source_to_cpp_with_lane(
+            source_name,
+            source,
+            options,
+            SignalFirLane::LegacyBridge,
+        )
     }
 
     /// Parses + evaluates + propagates one source, then lowers to a temporary
@@ -200,7 +205,12 @@ impl Compiler {
         source: &str,
         options: &COptions,
     ) -> Result<String, CompilerError> {
-        self.compile_source_to_c_with_lane(source_name, source, options, SignalFirLane::LegacyBridge)
+        self.compile_source_to_c_with_lane(
+            source_name,
+            source,
+            options,
+            SignalFirLane::LegacyBridge,
+        )
     }
 
     /// Parses + evaluates + propagates one source, then emits C text using
@@ -371,43 +381,40 @@ impl Compiler {
             source: source.into(),
         })?;
 
-        let process_box =
-            eval::eval_process(&mut output.state.arena, root).map_err(|error| {
-                let node = eval_error_node(&error);
-                let owner = node.and_then(|n| {
-                    owner_definition_name_for_node(&output.state.arena, root, n)
-                });
-                let mut diagnostic = error.clone().into_diagnostic();
-                if let Some(n) = node {
-                    diagnostic = enrich_diagnostic_with_node(
-                        diagnostic,
-                        &output.state.arena,
-                        root,
-                        n,
-                        owner.as_deref(),
-                    );
-                    diagnostic = maybe_add_eval_source_labels(
-                        diagnostic,
-                        &output.state.ctx,
-                        &output.state.arena,
-                        root,
-                        n,
-                        owner.as_deref(),
-                    );
-                }
-                CompilerError::Eval {
-                    source: source.into(),
-                    error: Box::new(error),
-                    diagnostics: bundle_from_diagnostic(diagnostic),
-                }
-            })?;
+        let process_box = eval::eval_process(&mut output.state.arena, root).map_err(|error| {
+            let node = eval_error_node(&error);
+            let owner =
+                node.and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
+            let mut diagnostic = error.clone().into_diagnostic();
+            if let Some(n) = node {
+                diagnostic = enrich_diagnostic_with_node(
+                    diagnostic,
+                    &output.state.arena,
+                    root,
+                    n,
+                    owner.as_deref(),
+                );
+                diagnostic = maybe_add_eval_source_labels(
+                    diagnostic,
+                    &output.state.ctx,
+                    &output.state.arena,
+                    root,
+                    n,
+                    owner.as_deref(),
+                );
+            }
+            CompilerError::Eval {
+                source: source.into(),
+                error: Box::new(error),
+                diagnostics: bundle_from_diagnostic(diagnostic),
+            }
+        })?;
 
         let process_arity =
             propagate::box_arity(&output.state.arena, process_box).map_err(|error| {
                 let node = propagate_error_node(&error);
-                let owner = node.and_then(|n| {
-                    owner_definition_name_for_node(&output.state.arena, root, n)
-                });
+                let owner =
+                    node.and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
                 let mut diagnostic = error.clone().into_diagnostic();
                 if let Some(n) = node {
                     diagnostic = enrich_diagnostic_with_node(
@@ -439,9 +446,8 @@ impl Compiler {
         let signals = propagate::propagate(&mut output.state.arena, process_box, &inputs).map_err(
             |error| {
                 let node = propagate_error_node(&error);
-                let owner = node.and_then(|n| {
-                    owner_definition_name_for_node(&output.state.arena, root, n)
-                });
+                let owner =
+                    node.and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
                 let mut diagnostic = error.clone().into_diagnostic();
                 if let Some(n) = node {
                     diagnostic = enrich_diagnostic_with_node(
@@ -661,8 +667,7 @@ fn enrich_diagnostic_with_node(
         .with_note(format!("box_expr={}", compact_box_preview(arena, node)))
         .with_note(format!("expr={}", compact_human_box_preview(arena, node)));
     if let Some(owner) = owner {
-        diagnostic =
-            diagnostic.with_note(format!("error originates from definition '{owner}'"));
+        diagnostic = diagnostic.with_note(format!("error originates from definition '{owner}'"));
     }
     if let Some(trace) = alias_binding_trace_for_node(arena, root, node) {
         diagnostic = diagnostic.with_note(format!("binding_trace={trace}"));
@@ -747,9 +752,18 @@ fn lower_signals_to_fir(
 fn make_compute_fir_signature() -> (FirType, [NamedType; 3]) {
     let ff_ptr_ptr = FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat))));
     let args = [
-        NamedType { name: "count".to_string(),   typ: FirType::Int32 },
-        NamedType { name: "inputs".to_string(),  typ: ff_ptr_ptr.clone() },
-        NamedType { name: "outputs".to_string(), typ: ff_ptr_ptr.clone() },
+        NamedType {
+            name: "count".to_string(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_string(),
+            typ: ff_ptr_ptr.clone(),
+        },
+        NamedType {
+            name: "outputs".to_string(),
+            typ: ff_ptr_ptr.clone(),
+        },
     ];
     let typ = FirType::Fun {
         args: vec![FirType::Int32, ff_ptr_ptr.clone(), ff_ptr_ptr],
@@ -1809,8 +1823,10 @@ fn normalize_newlines(input: &str) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{Compiler, CompilerError, default_search_base, golden_snapshot,
-                make_compute_fir_signature, resolve_module_name};
+    use super::{
+        Compiler, CompilerError, default_search_base, golden_snapshot, make_compute_fir_signature,
+        resolve_module_name,
+    };
 
     // ── golden helpers ────────────────────────────────────────────────────────
 
@@ -1866,7 +1882,10 @@ mod tests {
     #[test]
     fn resolve_module_name_prefixes_leading_digit() {
         let name = resolve_module_name(None, "123dsp.dsp");
-        assert!(name.starts_with('_'), "expected leading underscore, got {name}");
+        assert!(
+            name.starts_with('_'),
+            "expected leading underscore, got {name}"
+        );
     }
 
     // ── make_compute_fir_signature ────────────────────────────────────────────
