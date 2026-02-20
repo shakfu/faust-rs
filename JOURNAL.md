@@ -1,166 +1,5 @@
 # JOURNAL
 
-## 2026-02-20 (4)
-
-### Fix `--dump-box` — Tag nodes printed their raw numeric id instead of their name
-
-`dump_node` in `crates/boxes/src/lib.rs` formatted the `NodeKind::Tag(tag)` arm
-with `{tag}` (the raw `u32` from the interning registry), producing unreadable
-output such as:
-
-```
-3(0(sym("clip")), cons(7(5(4(), float_bits(…)), 6()), nil))
-```
-
-instead of:
-
-```
-BOXAPPL(BOXIDENT(sym("clip")), cons(BOXSEQ(BOXPAR(BOXWIRE(), float_bits(…)), BOXMUL()), nil))
-```
-
-**Root cause**: `NodeKind::Tag(u32)` stores an interned integer assigned by
-`TreeArena::intern_tag`. The display code used that integer directly without
-resolving it back to its name.
-
-**Fix** (`crates/boxes/src/lib.rs`, `dump_node`):
-
-```rust
-// before
-NodeKind::Tag(tag) => {
-    write!(out, "{tag}(").expect("String write cannot fail");
-    …
-}
-
-// after
-NodeKind::Tag(tag) => {
-    match arena.tag_name(*tag) {
-        Some(name) => out.push_str(name),
-        None => write!(out, "<tag:{tag}>").expect("String write cannot fail"),
-    }
-    out.push('(');
-    …
-}
-```
-
-`TreeArena::tag_name(id)` is already publicly exposed; `dump_node` already
-receives `arena: &TreeArena`, so no signature changes were needed.
-The `<tag:N>` fallback covers the theoretically unreachable case of an orphaned id.
-
-- Validation:
-  - `cargo build -p boxes`
-  - `cargo run -p compiler -- --dump-box tests/corpus/rep_07_nonlinear_clip.dsp`
-    → readable output with `BOXIDENT`, `BOXAPPL`, `BOXSEQ`, `BOXPAR`, `BOXWIRE`,
-      `BOXMUL`, `BOXMAX`, `BOXMIN`.
-
----
-
-## 2026-02-20 (3)
-
-### Fix Windows CI — CRLF line endings in fixture reads
-
-Three test helpers were reading fixture files with `fs::read_to_string` and
-comparing the result directly to generated output (which always uses `\n`).
-On Windows, checked-out fixture files contain `\r\n`, causing `assert_eq!` to fail:
-
-```
-left:  "…\n…"   // generated code
-right: "…\r\n…" // fixture file as read on Windows
-```
-
-Fixed by appending `.replace("\r\n", "\n")` in each fixture-reading helper:
-
-- `crates/compiler/tests/enrobage_integration.rs` — `fn read()`
-- `crates/compiler/tests/enrobage_stream.rs` — `fn read()`
-- `crates/compiler/tests/diagnostic_errors.rs` — `fn read_corpus()`
-
-Other `read_to_string` call-sites in tests read `.dsp` source files that are
-fed to the compiler (not compared to a golden string), so they are unaffected.
-
----
-
-## 2026-02-20 (2)
-
-### Fix clippy CI — `xtask/src/main.rs`
-
-`cargo clippy --workspace --all-targets -- -D warnings` was failing in CI with:
-
-```
-error: for loop over a single element
-  --> crates/xtask/src/main.rs:232:5
-   |
-   for candidate in ["/usr/local/share/faust"] { … }
-   |
-   = note: `-D clippy::single-element-loop` implied by `-D warnings`
-```
-
-A `for` loop over a single-element array literal triggers `clippy::single_element_loop`.
-Replaced with a plain block assigning the candidate directly:
-
-```rust
-// before
-for candidate in ["/usr/local/share/faust"] {
-    let path = PathBuf::from(candidate);
-    if path.is_dir() { paths.push(path); }
-}
-
-// after
-{
-    let path = PathBuf::from("/usr/local/share/faust");
-    if path.is_dir() { paths.push(path); }
-}
-```
-
-`cargo clippy --workspace --all-targets -- -D warnings` now passes with no warnings.
-
----
-
-## 2026-02-20
-
-### Refactorisation de `crates/compiler/src/lib.rs`
-
-Four duplication patterns were identified and removed from the compiler facade:
-
-1. **`default_search_base` helper** — the three-line parent-directory resolution was
-   duplicated across `compile_file_default`, `compile_file_default_to_signals`,
-   `compile_file_default_to_c_with_lane`, `compile_file_default_to_cpp_with_lane`, and
-   `compile_file_default_to_fir_with_lane`. Extracted to a single free function; all
-   five callers now delegate to `compile_file_to_*_with_lane` via `&[default_search_base(path)]`.
-
-2. **`enrich_diagnostic_with_node` helper** — the five-note enrichment block
-   (`node_id`, `box_expr`, `expr`, `owner`, `binding_trace`) was copy-pasted verbatim
-   in each of the three `pipeline_to_signals` error closures (eval, box_arity, propagate).
-   Extracted as a free function taking `arena`, `root`, `node`, and `owner`; no stored
-   reference is held, preserving the mutable borrow window needed by `eval_process` and
-   `propagate`.
-
-3. **`resolve_module_name` helper** — the `class_name.as_deref().map(…).unwrap_or_else(…)`
-   pattern for deriving a sanitized module name was repeated in four bridge functions
-   (`lower_signals_to_cpp_legacy_bridge`, `lower_signals_to_cpp_transform_fastlane`,
-   `lower_signals_to_c_legacy_bridge`, `lower_signals_to_c_transform_fastlane`).
-   Extracted to a single function.
-
-4. **`make_compute_fir_signature` helper** — the `FirType::Fun { args: [Int32, Ptr<Ptr<FaustFloat>>, …] }`
-   construction and its `[NamedType; 3]` companion were duplicated in the C++ and C
-   legacy bridge bodies. Extracted to a single function returning `(FirType, [NamedType; 3])`.
-
-5. **Error mapping helpers** — the `match error { Transform(e) => …, Codegen(e) => … }`
-   blocks inside `compile_source_to_c_with_lane`, `compile_source_to_cpp_with_lane`,
-   `compile_file_to_c_with_lane`, and `compile_file_to_cpp_with_lane` were identical
-   modulo the `CompilerError` variant. Extracted to `lower_c_error_to_compiler` and
-   `lower_cpp_error_to_compiler`, both calling the shared `transform_error_to_compiler`.
-
-Net result: −~200 lines (from ~1 850 to ~1 650), zero semantic change, all 11 existing
-unit tests pass, full workspace test suite green (0 failures across all crates).
-
-New unit tests added to cover the extracted helpers:
-- `default_search_base_returns_parent_when_present`
-- `default_search_base_returns_dot_for_bare_filename`
-- `resolve_module_name_uses_explicit_class_name`
-- `resolve_module_name_derives_from_source_name`
-- `resolve_module_name_sanitizes_invalid_chars`
-- `resolve_module_name_prefixes_leading_digit`
-- `make_compute_fir_signature_produces_three_named_args`
-- `make_compute_fir_signature_fun_type_matches_args`
 
 ## 2026-02-14
 
@@ -5090,3 +4929,160 @@ Execution plan (Phase 0 prototype, revised):
   - `cargo test -p codegen`
   - `cargo test -p compiler --lib`
   - `cargo clippy -p codegen -p compiler --all-targets -- -D warnings`
+
+## 2026-02-20
+
+### Refactorisation de `crates/compiler/src/lib.rs`
+
+Four duplication patterns were identified and removed from the compiler facade:
+
+1. **`default_search_base` helper** — the three-line parent-directory resolution was
+   duplicated across `compile_file_default`, `compile_file_default_to_signals`,
+   `compile_file_default_to_c_with_lane`, `compile_file_default_to_cpp_with_lane`, and
+   `compile_file_default_to_fir_with_lane`. Extracted to a single free function; all
+   five callers now delegate to `compile_file_to_*_with_lane` via `&[default_search_base(path)]`.
+
+2. **`enrich_diagnostic_with_node` helper** — the five-note enrichment block
+   (`node_id`, `box_expr`, `expr`, `owner`, `binding_trace`) was copy-pasted verbatim
+   in each of the three `pipeline_to_signals` error closures (eval, box_arity, propagate).
+   Extracted as a free function taking `arena`, `root`, `node`, and `owner`; no stored
+   reference is held, preserving the mutable borrow window needed by `eval_process` and
+   `propagate`.
+
+3. **`resolve_module_name` helper** — the `class_name.as_deref().map(…).unwrap_or_else(…)`
+   pattern for deriving a sanitized module name was repeated in four bridge functions
+   (`lower_signals_to_cpp_legacy_bridge`, `lower_signals_to_cpp_transform_fastlane`,
+   `lower_signals_to_c_legacy_bridge`, `lower_signals_to_c_transform_fastlane`).
+   Extracted to a single function.
+
+4. **`make_compute_fir_signature` helper** — the `FirType::Fun { args: [Int32, Ptr<Ptr<FaustFloat>>, …] }`
+   construction and its `[NamedType; 3]` companion were duplicated in the C++ and C
+   legacy bridge bodies. Extracted to a single function returning `(FirType, [NamedType; 3])`.
+
+5. **Error mapping helpers** — the `match error { Transform(e) => …, Codegen(e) => … }`
+   blocks inside `compile_source_to_c_with_lane`, `compile_source_to_cpp_with_lane`,
+   `compile_file_to_c_with_lane`, and `compile_file_to_cpp_with_lane` were identical
+   modulo the `CompilerError` variant. Extracted to `lower_c_error_to_compiler` and
+   `lower_cpp_error_to_compiler`, both calling the shared `transform_error_to_compiler`.
+
+Net result: −~200 lines (from ~1 850 to ~1 650), zero semantic change, all 11 existing
+unit tests pass, full workspace test suite green (0 failures across all crates).
+
+New unit tests added to cover the extracted helpers:
+- `default_search_base_returns_parent_when_present`
+- `default_search_base_returns_dot_for_bare_filename`
+- `resolve_module_name_uses_explicit_class_name`
+- `resolve_module_name_derives_from_source_name`
+- `resolve_module_name_sanitizes_invalid_chars`
+- `resolve_module_name_prefixes_leading_digit`
+- `make_compute_fir_signature_produces_three_named_args`
+- `make_compute_fir_signature_fun_type_matches_args`
+
+## 2026-02-20 (2)
+
+### Fix clippy CI — `xtask/src/main.rs`
+
+`cargo clippy --workspace --all-targets -- -D warnings` was failing in CI with:
+
+```
+error: for loop over a single element
+  --> crates/xtask/src/main.rs:232:5
+   |
+   for candidate in ["/usr/local/share/faust"] { … }
+   |
+   = note: `-D clippy::single-element-loop` implied by `-D warnings`
+```
+
+A `for` loop over a single-element array literal triggers `clippy::single_element_loop`.
+Replaced with a plain block assigning the candidate directly:
+
+```rust
+// before
+for candidate in ["/usr/local/share/faust"] {
+    let path = PathBuf::from(candidate);
+    if path.is_dir() { paths.push(path); }
+}
+
+// after
+{
+    let path = PathBuf::from("/usr/local/share/faust");
+    if path.is_dir() { paths.push(path); }
+}
+```
+
+`cargo clippy --workspace --all-targets -- -D warnings` now passes with no warnings.
+
+## 2026-02-20 (3)
+
+### Fix Windows CI — CRLF line endings in fixture reads
+
+Three test helpers were reading fixture files with `fs::read_to_string` and
+comparing the result directly to generated output (which always uses `\n`).
+On Windows, checked-out fixture files contain `\r\n`, causing `assert_eq!` to fail:
+
+```
+left:  "…\n…"   // generated code
+right: "…\r\n…" // fixture file as read on Windows
+```
+
+Fixed by appending `.replace("\r\n", "\n")` in each fixture-reading helper:
+
+- `crates/compiler/tests/enrobage_integration.rs` — `fn read()`
+- `crates/compiler/tests/enrobage_stream.rs` — `fn read()`
+- `crates/compiler/tests/diagnostic_errors.rs` — `fn read_corpus()`
+
+Other `read_to_string` call-sites in tests read `.dsp` source files that are
+fed to the compiler (not compared to a golden string), so they are unaffected.
+
+## 2026-02-20 (4)
+
+### Fix `--dump-box` — Tag nodes printed their raw numeric id instead of their name
+
+`dump_node` in `crates/boxes/src/lib.rs` formatted the `NodeKind::Tag(tag)` arm
+with `{tag}` (the raw `u32` from the interning registry), producing unreadable
+output such as:
+
+```
+3(0(sym("clip")), cons(7(5(4(), float_bits(…)), 6()), nil))
+```
+
+instead of:
+
+```
+BOXAPPL(BOXIDENT(sym("clip")), cons(BOXSEQ(BOXPAR(BOXWIRE(), float_bits(…)), BOXMUL()), nil))
+```
+
+**Root cause**: `NodeKind::Tag(u32)` stores an interned integer assigned by
+`TreeArena::intern_tag`. The display code used that integer directly without
+resolving it back to its name.
+
+**Fix** (`crates/boxes/src/lib.rs`, `dump_node`):
+
+```rust
+// before
+NodeKind::Tag(tag) => {
+    write!(out, "{tag}(").expect("String write cannot fail");
+    …
+}
+
+// after
+NodeKind::Tag(tag) => {
+    match arena.tag_name(*tag) {
+        Some(name) => out.push_str(name),
+        None => write!(out, "<tag:{tag}>").expect("String write cannot fail"),
+    }
+    out.push('(');
+    …
+}
+```
+
+`TreeArena::tag_name(id)` is already publicly exposed; `dump_node` already
+receives `arena: &TreeArena`, so no signature changes were needed.
+The `<tag:N>` fallback covers the theoretically unreachable case of an orphaned id.
+
+- Validation:
+  - `cargo build -p boxes`
+  - `cargo run -p compiler -- --dump-box tests/corpus/rep_07_nonlinear_clip.dsp`
+    → readable output with `BOXIDENT`, `BOXAPPL`, `BOXSEQ`, `BOXPAR`, `BOXWIRE`,
+      `BOXMUL`, `BOXMAX`, `BOXMIN`.
+
