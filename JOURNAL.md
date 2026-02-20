@@ -1,5 +1,41 @@
 # JOURNAL
 
+## 2026-02-20 (2)
+
+### Fix clippy CI — `xtask/src/main.rs`
+
+`cargo clippy --workspace --all-targets -- -D warnings` was failing in CI with:
+
+```
+error: for loop over a single element
+  --> crates/xtask/src/main.rs:232:5
+   |
+   for candidate in ["/usr/local/share/faust"] { … }
+   |
+   = note: `-D clippy::single-element-loop` implied by `-D warnings`
+```
+
+A `for` loop over a single-element array literal triggers `clippy::single_element_loop`.
+Replaced with a plain block assigning the candidate directly:
+
+```rust
+// before
+for candidate in ["/usr/local/share/faust"] {
+    let path = PathBuf::from(candidate);
+    if path.is_dir() { paths.push(path); }
+}
+
+// after
+{
+    let path = PathBuf::from("/usr/local/share/faust");
+    if path.is_dir() { paths.push(path); }
+}
+```
+
+`cargo clippy --workspace --all-targets -- -D warnings` now passes with no warnings.
+
+---
+
 ## 2026-02-20
 
 ### Refactorisation de `crates/compiler/src/lib.rs`
