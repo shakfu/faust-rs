@@ -1,5 +1,59 @@
 # JOURNAL
 
+## 2026-02-20 (4)
+
+### Fix `--dump-box` — Tag nodes printed their raw numeric id instead of their name
+
+`dump_node` in `crates/boxes/src/lib.rs` formatted the `NodeKind::Tag(tag)` arm
+with `{tag}` (the raw `u32` from the interning registry), producing unreadable
+output such as:
+
+```
+3(0(sym("clip")), cons(7(5(4(), float_bits(…)), 6()), nil))
+```
+
+instead of:
+
+```
+BOXAPPL(BOXIDENT(sym("clip")), cons(BOXSEQ(BOXPAR(BOXWIRE(), float_bits(…)), BOXMUL()), nil))
+```
+
+**Root cause**: `NodeKind::Tag(u32)` stores an interned integer assigned by
+`TreeArena::intern_tag`. The display code used that integer directly without
+resolving it back to its name.
+
+**Fix** (`crates/boxes/src/lib.rs`, `dump_node`):
+
+```rust
+// before
+NodeKind::Tag(tag) => {
+    write!(out, "{tag}(").expect("String write cannot fail");
+    …
+}
+
+// after
+NodeKind::Tag(tag) => {
+    match arena.tag_name(*tag) {
+        Some(name) => out.push_str(name),
+        None => write!(out, "<tag:{tag}>").expect("String write cannot fail"),
+    }
+    out.push('(');
+    …
+}
+```
+
+`TreeArena::tag_name(id)` is already publicly exposed; `dump_node` already
+receives `arena: &TreeArena`, so no signature changes were needed.
+The `<tag:N>` fallback covers the theoretically unreachable case of an orphaned id.
+
+- Validation:
+  - `cargo build -p boxes`
+  - `cargo run -p compiler -- --dump-box tests/corpus/rep_07_nonlinear_clip.dsp`
+    → readable output with `BOXIDENT`, `BOXAPPL`, `BOXSEQ`, `BOXPAR`, `BOXWIRE`,
+      `BOXMUL`, `BOXMAX`, `BOXMIN`.
+
+---
+
 ## 2026-02-20 (3)
 
 ### Fix Windows CI — CRLF line endings in fixture reads

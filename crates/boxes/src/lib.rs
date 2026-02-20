@@ -2272,7 +2272,11 @@ fn dump_node(arena: &TreeArena, id: BoxId, out: &mut String) {
             write!(out, "float_bits(0x{bits:016x})").expect("String write cannot fail");
         }
         NodeKind::Tag(tag) => {
-            write!(out, "{tag}(").expect("String write cannot fail");
+            match arena.tag_name(*tag) {
+                Some(name) => out.push_str(name),
+                None => write!(out, "<tag:{tag}>").expect("String write cannot fail"),
+            }
+            out.push('(');
             for (idx, child) in node.children.as_slice().iter().enumerate() {
                 if idx > 0 {
                     out.push_str(", ");
