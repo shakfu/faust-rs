@@ -229,8 +229,8 @@ fn default_import_search_paths(input: &Path) -> Vec<PathBuf> {
     if let Some(parent) = input.parent() {
         paths.push(parent.to_path_buf());
     }
-    for candidate in ["/usr/local/share/faust"] {
-        let path = PathBuf::from(candidate);
+    {
+        let path = PathBuf::from("/usr/local/share/faust");
         if path.is_dir() {
             paths.push(path);
         }
