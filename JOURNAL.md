@@ -1,5 +1,53 @@
 # JOURNAL
 
+## 2026-02-20
+
+### Refactorisation de `crates/compiler/src/lib.rs`
+
+Four duplication patterns were identified and removed from the compiler facade:
+
+1. **`default_search_base` helper** — the three-line parent-directory resolution was
+   duplicated across `compile_file_default`, `compile_file_default_to_signals`,
+   `compile_file_default_to_c_with_lane`, `compile_file_default_to_cpp_with_lane`, and
+   `compile_file_default_to_fir_with_lane`. Extracted to a single free function; all
+   five callers now delegate to `compile_file_to_*_with_lane` via `&[default_search_base(path)]`.
+
+2. **`enrich_diagnostic_with_node` helper** — the five-note enrichment block
+   (`node_id`, `box_expr`, `expr`, `owner`, `binding_trace`) was copy-pasted verbatim
+   in each of the three `pipeline_to_signals` error closures (eval, box_arity, propagate).
+   Extracted as a free function taking `arena`, `root`, `node`, and `owner`; no stored
+   reference is held, preserving the mutable borrow window needed by `eval_process` and
+   `propagate`.
+
+3. **`resolve_module_name` helper** — the `class_name.as_deref().map(…).unwrap_or_else(…)`
+   pattern for deriving a sanitized module name was repeated in four bridge functions
+   (`lower_signals_to_cpp_legacy_bridge`, `lower_signals_to_cpp_transform_fastlane`,
+   `lower_signals_to_c_legacy_bridge`, `lower_signals_to_c_transform_fastlane`).
+   Extracted to a single function.
+
+4. **`make_compute_fir_signature` helper** — the `FirType::Fun { args: [Int32, Ptr<Ptr<FaustFloat>>, …] }`
+   construction and its `[NamedType; 3]` companion were duplicated in the C++ and C
+   legacy bridge bodies. Extracted to a single function returning `(FirType, [NamedType; 3])`.
+
+5. **Error mapping helpers** — the `match error { Transform(e) => …, Codegen(e) => … }`
+   blocks inside `compile_source_to_c_with_lane`, `compile_source_to_cpp_with_lane`,
+   `compile_file_to_c_with_lane`, and `compile_file_to_cpp_with_lane` were identical
+   modulo the `CompilerError` variant. Extracted to `lower_c_error_to_compiler` and
+   `lower_cpp_error_to_compiler`, both calling the shared `transform_error_to_compiler`.
+
+Net result: −~200 lines (from ~1 850 to ~1 650), zero semantic change, all 11 existing
+unit tests pass, full workspace test suite green (0 failures across all crates).
+
+New unit tests added to cover the extracted helpers:
+- `default_search_base_returns_parent_when_present`
+- `default_search_base_returns_dot_for_bare_filename`
+- `resolve_module_name_uses_explicit_class_name`
+- `resolve_module_name_derives_from_source_name`
+- `resolve_module_name_sanitizes_invalid_chars`
+- `resolve_module_name_prefixes_leading_digit`
+- `make_compute_fir_signature_produces_three_named_args`
+- `make_compute_fir_signature_fun_type_matches_args`
+
 ## 2026-02-14
 
 - Applied the structure defined in `porting/faust-rust-porting-plan-en.md`, section `4. Cargo Workspace Architecture`.

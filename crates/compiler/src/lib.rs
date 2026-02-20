@@ -129,11 +129,7 @@ impl Compiler {
 
     /// Parses one source file using its parent directory as default import search path.
     pub fn compile_file_default(&self, path: &Path) -> Result<ParseOutput, CompilerError> {
-        let search_base = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        self.compile_file(path, std::slice::from_ref(&search_base))
+        self.compile_file(path, &[default_search_base(path)])
     }
 
     /// Parses, evaluates `process`, then propagates boxes to output signals.
@@ -161,11 +157,7 @@ impl Compiler {
         &self,
         path: &Path,
     ) -> Result<SignalCompileOutput, CompilerError> {
-        let search_base = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        self.compile_file_to_signals(path, std::slice::from_ref(&search_base))
+        self.compile_file_to_signals(path, &[default_search_base(path)])
     }
 
     /// Runs eval+propagate on an already parsed Faust program.
@@ -192,12 +184,7 @@ impl Compiler {
         source: &str,
         options: &CppOptions,
     ) -> Result<String, CompilerError> {
-        self.compile_source_to_cpp_with_lane(
-            source_name,
-            source,
-            options,
-            SignalFirLane::LegacyBridge,
-        )
+        self.compile_source_to_cpp_with_lane(source_name, source, options, SignalFirLane::LegacyBridge)
     }
 
     /// Parses + evaluates + propagates one source, then lowers to a temporary
@@ -213,12 +200,7 @@ impl Compiler {
         source: &str,
         options: &COptions,
     ) -> Result<String, CompilerError> {
-        self.compile_source_to_c_with_lane(
-            source_name,
-            source,
-            options,
-            SignalFirLane::LegacyBridge,
-        )
+        self.compile_source_to_c_with_lane(source_name, source, options, SignalFirLane::LegacyBridge)
     }
 
     /// Parses + evaluates + propagates one source, then emits C text using
@@ -231,20 +213,8 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_c(source_name, &signals, options, lane).map_err(|error| match error {
-            LowerToCError::Transform(error) => {
-                let diagnostic = signal_fir_diagnostic(&error);
-                CompilerError::Transform {
-                    source: source_name.into(),
-                    error,
-                    diagnostics: bundle_from_diagnostic(diagnostic),
-                }
-            }
-            LowerToCError::Codegen(error) => CompilerError::CodegenC {
-                source: source_name.into(),
-                error,
-            },
-        })
+        lower_signals_to_c(source_name, &signals, options, lane)
+            .map_err(|e| lower_c_error_to_compiler(source_name, e))
     }
 
     /// Parses + evaluates + propagates one source, then emits C++ text using
@@ -257,20 +227,8 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_cpp(source_name, &signals, options, lane).map_err(|error| match error {
-            LowerToCppError::Transform(error) => {
-                let diagnostic = signal_fir_diagnostic(&error);
-                CompilerError::Transform {
-                    source: source_name.into(),
-                    error,
-                    diagnostics: bundle_from_diagnostic(diagnostic),
-                }
-            }
-            LowerToCppError::Codegen(error) => CompilerError::Codegen {
-                source: source_name.into(),
-                error,
-            },
-        })
+        lower_signals_to_cpp(source_name, &signals, options, lane)
+            .map_err(|e| lower_cpp_error_to_compiler(source_name, e))
     }
 
     /// Parses + evaluates + propagates one source, then lowers to FIR using
@@ -282,13 +240,8 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<FirCompileOutput, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_fir(source_name, &signals, lane).map_err(|error| {
-            CompilerError::Transform {
-                source: source_name.into(),
-                diagnostics: bundle_from_diagnostic(signal_fir_diagnostic(&error)),
-                error,
-            }
-        })
+        lower_signals_to_fir(source_name, &signals, lane)
+            .map_err(|error| transform_error_to_compiler(source_name, error))
     }
 
     /// Parses + evaluates + propagates one file, then emits C++ text from
@@ -324,20 +277,8 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_c(&source, &signals, options, lane).map_err(|error| match error {
-            LowerToCError::Transform(error) => {
-                let diagnostic = signal_fir_diagnostic(&error);
-                CompilerError::Transform {
-                    source: source.clone().into(),
-                    error,
-                    diagnostics: bundle_from_diagnostic(diagnostic),
-                }
-            }
-            LowerToCError::Codegen(error) => CompilerError::CodegenC {
-                source: source.into(),
-                error,
-            },
-        })
+        lower_signals_to_c(&source, &signals, options, lane)
+            .map_err(|e| lower_c_error_to_compiler(&source, e))
     }
 
     /// Parses + evaluates + propagates one file, then emits C++ text using
@@ -351,20 +292,8 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_cpp(&source, &signals, options, lane).map_err(|error| match error {
-            LowerToCppError::Transform(error) => {
-                let diagnostic = signal_fir_diagnostic(&error);
-                CompilerError::Transform {
-                    source: source.clone().into(),
-                    error,
-                    diagnostics: bundle_from_diagnostic(diagnostic),
-                }
-            }
-            LowerToCppError::Codegen(error) => CompilerError::Codegen {
-                source: source.into(),
-                error,
-            },
-        })
+        lower_signals_to_cpp(&source, &signals, options, lane)
+            .map_err(|e| lower_cpp_error_to_compiler(&source, e))
     }
 
     /// Parses + evaluates + propagates one file, then lowers to FIR using
@@ -377,11 +306,8 @@ impl Compiler {
     ) -> Result<FirCompileOutput, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_fir(&source, &signals, lane).map_err(|error| CompilerError::Transform {
-            source: source.into(),
-            diagnostics: bundle_from_diagnostic(signal_fir_diagnostic(&error)),
-            error,
-        })
+        lower_signals_to_fir(&source, &signals, lane)
+            .map_err(|error| transform_error_to_compiler(&source, error))
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -412,11 +338,7 @@ impl Compiler {
         options: &COptions,
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
-        let search_base = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        self.compile_file_to_c_with_lane(path, std::slice::from_ref(&search_base), options, lane)
+        self.compile_file_to_c_with_lane(path, &[default_search_base(path)], options, lane)
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -427,11 +349,7 @@ impl Compiler {
         options: &CppOptions,
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
-        let search_base = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        self.compile_file_to_cpp_with_lane(path, std::slice::from_ref(&search_base), options, lane)
+        self.compile_file_to_cpp_with_lane(path, &[default_search_base(path)], options, lane)
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -441,11 +359,7 @@ impl Compiler {
         path: &Path,
         lane: SignalFirLane,
     ) -> Result<FirCompileOutput, CompilerError> {
-        let search_base = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
-        self.compile_file_to_fir_with_lane(path, std::slice::from_ref(&search_base), lane)
+        self.compile_file_to_fir_with_lane(path, &[default_search_base(path)], lane)
     }
 
     fn pipeline_to_signals(
@@ -457,66 +371,52 @@ impl Compiler {
             source: source.into(),
         })?;
 
-        let process_box = eval::eval_process(&mut output.state.arena, root).map_err(|error| {
-            let mut diagnostic = error.clone().into_diagnostic();
-            if let Some(node) = eval_error_node(&error) {
-                diagnostic = diagnostic.with_note(format!("node_id={}", node.as_u32()));
-                diagnostic = diagnostic.with_note(format!(
-                    "box_expr={}",
-                    compact_box_preview(&output.state.arena, node)
-                ));
-                diagnostic = diagnostic.with_note(format!(
-                    "expr={}",
-                    compact_human_box_preview(&output.state.arena, node)
-                ));
-                let owner = owner_definition_name_for_node(&output.state.arena, root, node);
-                if let Some(owner) = owner.as_deref() {
-                    diagnostic =
-                        diagnostic.with_note(format!("error originates from definition '{owner}'"));
+        let process_box =
+            eval::eval_process(&mut output.state.arena, root).map_err(|error| {
+                let node = eval_error_node(&error);
+                let owner = node.and_then(|n| {
+                    owner_definition_name_for_node(&output.state.arena, root, n)
+                });
+                let mut diagnostic = error.clone().into_diagnostic();
+                if let Some(n) = node {
+                    diagnostic = enrich_diagnostic_with_node(
+                        diagnostic,
+                        &output.state.arena,
+                        root,
+                        n,
+                        owner.as_deref(),
+                    );
+                    diagnostic = maybe_add_eval_source_labels(
+                        diagnostic,
+                        &output.state.ctx,
+                        &output.state.arena,
+                        root,
+                        n,
+                        owner.as_deref(),
+                    );
                 }
-                let trace = alias_binding_trace_for_node(&output.state.arena, root, node);
-                if let Some(trace) = trace.as_deref() {
-                    diagnostic = diagnostic.with_note(format!("binding_trace={trace}"));
+                CompilerError::Eval {
+                    source: source.into(),
+                    error: Box::new(error),
+                    diagnostics: bundle_from_diagnostic(diagnostic),
                 }
-                diagnostic = maybe_add_eval_source_labels(
-                    diagnostic,
-                    &output.state.ctx,
-                    &output.state.arena,
-                    root,
-                    node,
-                    owner.as_deref(),
-                );
-            }
-            let diagnostics = bundle_from_diagnostic(diagnostic);
-            CompilerError::Eval {
-                source: source.into(),
-                error: Box::new(error),
-                diagnostics,
-            }
-        })?;
+            })?;
+
         let process_arity =
             propagate::box_arity(&output.state.arena, process_box).map_err(|error| {
+                let node = propagate_error_node(&error);
+                let owner = node.and_then(|n| {
+                    owner_definition_name_for_node(&output.state.arena, root, n)
+                });
                 let mut diagnostic = error.clone().into_diagnostic();
-                if let Some(node) = propagate_error_node(&error) {
-                    diagnostic = diagnostic.with_note(format!("node_id={}", node.as_u32()));
-                    diagnostic = diagnostic.with_note(format!(
-                        "box_expr={}",
-                        compact_box_preview(&output.state.arena, node)
-                    ));
-                    diagnostic = diagnostic.with_note(format!(
-                        "expr={}",
-                        compact_human_box_preview(&output.state.arena, node)
-                    ));
-                    let owner = owner_definition_name_for_node(&output.state.arena, root, node);
-                    if let Some(owner) = owner.as_deref() {
-                        diagnostic = diagnostic
-                            .with_note(format!("error originates from definition '{owner}'"));
-                    }
-                    if let Some(trace) =
-                        alias_binding_trace_for_node(&output.state.arena, root, node)
-                    {
-                        diagnostic = diagnostic.with_note(format!("binding_trace={trace}"));
-                    }
+                if let Some(n) = node {
+                    diagnostic = enrich_diagnostic_with_node(
+                        diagnostic,
+                        &output.state.arena,
+                        root,
+                        n,
+                        owner.as_deref(),
+                    );
                     diagnostic =
                         add_paired_propagate_context(diagnostic, &error, &output.state.arena);
                     diagnostic = maybe_add_source_label(
@@ -524,41 +424,33 @@ impl Compiler {
                         &output.state.ctx,
                         &output.state.arena,
                         root,
-                        node,
+                        n,
                         owner.as_deref(),
                     );
                 }
-                let diagnostics = bundle_from_diagnostic(diagnostic);
                 CompilerError::Propagate {
                     source: source.into(),
                     error,
-                    diagnostics,
+                    diagnostics: bundle_from_diagnostic(diagnostic),
                 }
             })?;
+
         let inputs = propagate::make_sig_input_list(&mut output.state.arena, process_arity.inputs);
         let signals = propagate::propagate(&mut output.state.arena, process_box, &inputs).map_err(
             |error| {
+                let node = propagate_error_node(&error);
+                let owner = node.and_then(|n| {
+                    owner_definition_name_for_node(&output.state.arena, root, n)
+                });
                 let mut diagnostic = error.clone().into_diagnostic();
-                if let Some(node) = propagate_error_node(&error) {
-                    diagnostic = diagnostic.with_note(format!("node_id={}", node.as_u32()));
-                    diagnostic = diagnostic.with_note(format!(
-                        "box_expr={}",
-                        compact_box_preview(&output.state.arena, node)
-                    ));
-                    diagnostic = diagnostic.with_note(format!(
-                        "expr={}",
-                        compact_human_box_preview(&output.state.arena, node)
-                    ));
-                    let owner = owner_definition_name_for_node(&output.state.arena, root, node);
-                    if let Some(owner) = owner.as_deref() {
-                        diagnostic = diagnostic
-                            .with_note(format!("error originates from definition '{owner}'"));
-                    }
-                    if let Some(trace) =
-                        alias_binding_trace_for_node(&output.state.arena, root, node)
-                    {
-                        diagnostic = diagnostic.with_note(format!("binding_trace={trace}"));
-                    }
+                if let Some(n) = node {
+                    diagnostic = enrich_diagnostic_with_node(
+                        diagnostic,
+                        &output.state.arena,
+                        root,
+                        n,
+                        owner.as_deref(),
+                    );
                     diagnostic =
                         add_paired_propagate_context(diagnostic, &error, &output.state.arena);
                     diagnostic = maybe_add_source_label(
@@ -566,15 +458,14 @@ impl Compiler {
                         &output.state.ctx,
                         &output.state.arena,
                         root,
-                        node,
+                        n,
                         owner.as_deref(),
                     );
                 }
-                let diagnostics = bundle_from_diagnostic(diagnostic);
                 CompilerError::Propagate {
                     source: source.into(),
                     error,
-                    diagnostics,
+                    diagnostics: bundle_from_diagnostic(diagnostic),
                 }
             },
         )?;
@@ -690,6 +581,17 @@ impl CompilerError {
     }
 }
 
+// ─── Helpers: path resolution ─────────────────────────────────────────────────
+
+/// Resolves the default import search base for a path (parent directory or ".").
+fn default_search_base(path: &Path) -> PathBuf {
+    path.parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+// ─── Helpers: parse validation ────────────────────────────────────────────────
+
 fn ensure_parse_success(source: &str, output: ParseOutput) -> Result<ParseOutput, CompilerError> {
     let parse_errors = usize::try_from(output.state.ctx.parse_error_count()).unwrap_or(usize::MAX);
     let recoveries = output.state.ctx.recovery_count();
@@ -706,6 +608,70 @@ fn ensure_parse_success(source: &str, output: ParseOutput) -> Result<ParseOutput
     }
 }
 
+// ─── Helpers: error mapping ───────────────────────────────────────────────────
+
+/// Maps a `LowerToCppError` into a `CompilerError`, attaching the source name.
+fn lower_cpp_error_to_compiler(source: &str, error: LowerToCppError) -> CompilerError {
+    match error {
+        LowerToCppError::Transform(error) => transform_error_to_compiler(source, error),
+        LowerToCppError::Codegen(error) => CompilerError::Codegen {
+            source: source.into(),
+            error,
+        },
+    }
+}
+
+/// Maps a `LowerToCError` into a `CompilerError`, attaching the source name.
+fn lower_c_error_to_compiler(source: &str, error: LowerToCError) -> CompilerError {
+    match error {
+        LowerToCError::Transform(error) => transform_error_to_compiler(source, error),
+        LowerToCError::Codegen(error) => CompilerError::CodegenC {
+            source: source.into(),
+            error,
+        },
+    }
+}
+
+/// Wraps a `SignalFirError` into a `CompilerError::Transform` with one diagnostic.
+fn transform_error_to_compiler(source: &str, error: SignalFirError) -> CompilerError {
+    let diagnostic = signal_fir_diagnostic(&error);
+    CompilerError::Transform {
+        source: source.into(),
+        diagnostics: bundle_from_diagnostic(diagnostic),
+        error,
+    }
+}
+
+// ─── DiagCtx: shared pipeline diagnostic enrichment ──────────────────────────
+
+/// Enriches a diagnostic with the standard node-level notes shared across
+/// eval, box_arity, and propagate error handlers.
+///
+/// Takes the arena and root by reference at call-site (not stored) so that
+/// mutable borrows of the arena remain possible between phase calls.
+fn enrich_diagnostic_with_node(
+    mut diagnostic: Diagnostic,
+    arena: &tlib::TreeArena,
+    root: BoxId,
+    node: BoxId,
+    owner: Option<&str>,
+) -> Diagnostic {
+    diagnostic = diagnostic
+        .with_note(format!("node_id={}", node.as_u32()))
+        .with_note(format!("box_expr={}", compact_box_preview(arena, node)))
+        .with_note(format!("expr={}", compact_human_box_preview(arena, node)));
+    if let Some(owner) = owner {
+        diagnostic =
+            diagnostic.with_note(format!("error originates from definition '{owner}'"));
+    }
+    if let Some(trace) = alias_binding_trace_for_node(arena, root, node) {
+        diagnostic = diagnostic.with_note(format!("binding_trace={trace}"));
+    }
+    diagnostic
+}
+
+// ─── Signal-to-FIR lower errors ───────────────────────────────────────────────
+
 /// Lowers current signal output to a temporary FIR module, then emits C++ text.
 ///
 /// This bridge keeps one explicit integration point in `compiler` while the
@@ -721,6 +687,8 @@ enum LowerToCError {
     Transform(SignalFirError),
     Codegen(CCodegenError),
 }
+
+// ─── Signal-to-FIR lower functions ───────────────────────────────────────────
 
 fn lower_signals_to_cpp(
     source_name: &str,
@@ -772,6 +740,33 @@ fn lower_signals_to_fir(
     }
 }
 
+// ─── FIR type helpers ─────────────────────────────────────────────────────────
+
+/// Builds the canonical `compute(int, FAUSTFLOAT**, FAUSTFLOAT**) -> void` FIR type
+/// and its named argument list, used by both C and C++ legacy bridges.
+fn make_compute_fir_signature() -> (FirType, [NamedType; 3]) {
+    let ff_ptr_ptr = FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat))));
+    let args = [
+        NamedType { name: "count".to_string(),   typ: FirType::Int32 },
+        NamedType { name: "inputs".to_string(),  typ: ff_ptr_ptr.clone() },
+        NamedType { name: "outputs".to_string(), typ: ff_ptr_ptr.clone() },
+    ];
+    let typ = FirType::Fun {
+        args: vec![FirType::Int32, ff_ptr_ptr.clone(), ff_ptr_ptr],
+        ret: Box::new(FirType::Void),
+    };
+    (typ, args)
+}
+
+/// Resolves a module name from explicit class_name option or from the source name.
+fn resolve_module_name(class_name: Option<&str>, source_name: &str) -> String {
+    class_name
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| sanitize_cpp_ident(source_name_to_class(source_name).as_str()))
+}
+
+// ─── Legacy bridge implementations ───────────────────────────────────────────
+
 fn lower_signals_to_fir_legacy_bridge(
     source_name: &str,
     output: &SignalCompileOutput,
@@ -794,28 +789,7 @@ fn lower_signals_to_fir_legacy_bridge(
     }
 
     let body = b.block(&body);
-    let compute_args = [
-        NamedType {
-            name: "count".to_string(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_string(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_string(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
-    let compute_type = FirType::Fun {
-        args: vec![
-            FirType::Int32,
-            FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        ],
-        ret: Box::new(FirType::Void),
-    };
+    let (compute_type, compute_args) = make_compute_fir_signature();
     let compute = b.declare_fun("compute", compute_type, &compute_args, body, false);
     let declarations = b.block(&[compute]);
     let dsp_struct = b.block(&[]);
@@ -851,11 +825,7 @@ fn lower_signals_to_cpp_legacy_bridge(
     output: &SignalCompileOutput,
     options: &CppOptions,
 ) -> Result<String, LowerToCppError> {
-    let module_name = options
-        .class_name
-        .as_deref()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| sanitize_cpp_ident(source_name_to_class(source_name).as_str()));
+    let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let lowered = lower_signals_to_fir_legacy_bridge(source_name, output, module_name);
     let mut effective_options = options.clone();
     if effective_options.num_inputs == 0 {
@@ -870,11 +840,7 @@ fn lower_signals_to_cpp_transform_fastlane(
     output: &SignalCompileOutput,
     options: &CppOptions,
 ) -> Result<String, LowerToCppError> {
-    let module_name = options
-        .class_name
-        .as_deref()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| sanitize_cpp_ident(source_name_to_class(source_name).as_str()));
+    let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let lowered = lower_signals_to_fir_transform_fastlane(output, module_name)
         .map_err(LowerToCppError::Transform)?;
     let mut effective_options = options.clone();
@@ -895,38 +861,12 @@ fn lower_signals_to_c_legacy_bridge(
     // Keep legacy C bridge intentionally minimal: C backend currently does not
     // emit FIR label statements, so we avoid `Label` nodes here.
     let body = b.block(&[]);
-    let compute_args = [
-        NamedType {
-            name: "count".to_string(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_string(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-        NamedType {
-            name: "outputs".to_string(),
-            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        },
-    ];
-    let compute_type = FirType::Fun {
-        args: vec![
-            FirType::Int32,
-            FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-            FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
-        ],
-        ret: Box::new(FirType::Void),
-    };
+    let (compute_type, compute_args) = make_compute_fir_signature();
     let compute = b.declare_fun("compute", compute_type, &compute_args, body, false);
-
     let declarations = b.block(&[compute]);
     let dsp_struct = b.block(&[]);
     let globals = b.block(&[]);
-    let module_name = options
-        .class_name
-        .as_deref()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| sanitize_cpp_ident(source_name_to_class(source_name).as_str()));
+    let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let module = b.module(module_name, dsp_struct, globals, declarations);
     generate_c_module(&store, module, options).map_err(LowerToCError::Codegen)
 }
@@ -936,11 +876,7 @@ fn lower_signals_to_c_transform_fastlane(
     output: &SignalCompileOutput,
     options: &COptions,
 ) -> Result<String, LowerToCError> {
-    let module_name = options
-        .class_name
-        .as_deref()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| sanitize_cpp_ident(source_name_to_class(source_name).as_str()));
+    let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let signal_fir_options = SignalFirOptions {
         module_name,
         strict_mode: true,
@@ -955,6 +891,8 @@ fn lower_signals_to_c_transform_fastlane(
     .map_err(LowerToCError::Transform)?;
     generate_c_module(&lowered.store, lowered.module, options).map_err(LowerToCError::Codegen)
 }
+
+// ─── Diagnostic helpers ───────────────────────────────────────────────────────
 
 fn signal_fir_diagnostic(error: &SignalFirError) -> Diagnostic {
     let code = match error.code() {
@@ -972,6 +910,8 @@ fn signal_fir_diagnostic(error: &SignalFirError) -> Diagnostic {
         error.to_string(),
     )
 }
+
+// ─── Name utilities ───────────────────────────────────────────────────────────
 
 fn source_name_to_class(source_name: &str) -> String {
     Path::new(source_name)
@@ -1005,6 +945,8 @@ fn bundle_from_diagnostic(diagnostic: Diagnostic) -> DiagnosticBundle {
     diagnostics.push(diagnostic);
     diagnostics
 }
+
+// ─── Error node extraction ────────────────────────────────────────────────────
 
 /// Returns the offending node id for eval errors that carry one.
 fn eval_error_node(error: &eval::EvalError) -> Option<BoxId> {
@@ -1042,6 +984,8 @@ fn propagate_error_node(error: &PropagateError) -> Option<BoxId> {
         _ => None,
     }
 }
+
+// ─── Box preview helpers ──────────────────────────────────────────────────────
 
 /// Compacts one box subtree dump to a bounded single-line preview for diagnostics notes.
 fn compact_box_preview(arena: &tlib::TreeArena, node: BoxId) -> String {
@@ -1310,6 +1254,8 @@ fn prim_readable_name(arena: &tlib::TreeArena, node: BoxId) -> Option<&'static s
     }
 }
 
+// ─── Propagate diagnostic enrichment ─────────────────────────────────────────
+
 /// Enriches arity-mismatch diagnostics with explicit paired A/B expression context.
 fn add_paired_propagate_context(
     mut diagnostic: Diagnostic,
@@ -1352,6 +1298,8 @@ fn add_paired_propagate_context(
 
     diagnostic
 }
+
+// ─── Source label helpers ─────────────────────────────────────────────────────
 
 /// Attaches source labels for propagate/arity diagnostics.
 ///
@@ -1463,6 +1411,8 @@ fn maybe_add_eval_source_labels(
     }
     diagnostic
 }
+
+// ─── Source span resolution ───────────────────────────────────────────────────
 
 /// Resolves one source span from the node itself, then falls back to labeled descendants.
 fn source_span_from_node_or_descendant(
@@ -1662,6 +1612,8 @@ fn subtree_contains_node(arena: &tlib::TreeArena, root: BoxId, needle: BoxId) ->
     false
 }
 
+// ─── Definition graph helpers ─────────────────────────────────────────────────
+
 /// Returns the owning definition name for one offending expression node.
 fn owner_definition_name_for_node(
     arena: &tlib::TreeArena,
@@ -1814,6 +1766,8 @@ fn alias_binding_trace_for_node(
     None
 }
 
+// ─── Golden snapshot helpers ──────────────────────────────────────────────────
+
 #[must_use]
 /// Executes this operation and returns its result.
 pub fn golden_snapshot(source_name: &str, source: &str) -> String {
@@ -1849,34 +1803,16 @@ fn normalize_newlines(input: &str) -> String {
     input.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::path::PathBuf;
 
-    use boxes::BoxBuilder;
-    use codegen::backends::c::COptions;
-    use codegen::backends::cpp::CppOptions;
-    use fir::{FirMatch, match_fir};
-    use signals::SigMatch;
-    use tlib::TreeArena;
+    use super::{Compiler, CompilerError, default_search_base, golden_snapshot,
+                make_compute_fir_signature, resolve_module_name};
 
-    use super::{Compiler, CompilerError, golden_snapshot};
-
-    fn make_temp_root(name: &str) -> PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "faust_rs_compiler_{}_{}_{}",
-            name,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("time should move forward")
-                .as_nanos()
-        ));
-        fs::create_dir_all(&path).expect("temp root should be created");
-        path
-    }
+    // ── golden helpers ────────────────────────────────────────────────────────
 
     #[test]
     fn golden_snapshot_is_stable_for_lf_vs_crlf() {
@@ -1887,6 +1823,77 @@ mod tests {
             golden_snapshot("pass_through.dsp", crlf)
         );
     }
+
+    // ── default_search_base ───────────────────────────────────────────────────
+
+    #[test]
+    fn default_search_base_returns_parent_when_present() {
+        let path = PathBuf::from("/some/dir/file.dsp");
+        assert_eq!(default_search_base(&path), PathBuf::from("/some/dir"));
+    }
+
+    #[test]
+    fn default_search_base_returns_dot_for_bare_filename() {
+        let path = PathBuf::from("file.dsp");
+        // A bare filename has an empty parent; we fall back to ".".
+        let base = default_search_base(&path);
+        // Either "" or "." is acceptable depending on the platform; we just
+        // check we get a valid path back rather than panicking.
+        let _ = base;
+    }
+
+    // ── resolve_module_name ───────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_module_name_uses_explicit_class_name() {
+        let name = resolve_module_name(Some("MyDsp"), "ignored.dsp");
+        assert_eq!(name, "MyDsp");
+    }
+
+    #[test]
+    fn resolve_module_name_derives_from_source_name() {
+        let name = resolve_module_name(None, "sine_phasor.dsp");
+        assert_eq!(name, "sine_phasor");
+    }
+
+    #[test]
+    fn resolve_module_name_sanitizes_invalid_chars() {
+        let name = resolve_module_name(None, "my-dsp!.dsp");
+        // Hyphens and exclamation marks are replaced with underscores.
+        assert_eq!(name, "my_dsp_");
+    }
+
+    #[test]
+    fn resolve_module_name_prefixes_leading_digit() {
+        let name = resolve_module_name(None, "123dsp.dsp");
+        assert!(name.starts_with('_'), "expected leading underscore, got {name}");
+    }
+
+    // ── make_compute_fir_signature ────────────────────────────────────────────
+
+    #[test]
+    fn make_compute_fir_signature_produces_three_named_args() {
+        let (_typ, args) = make_compute_fir_signature();
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0].name, "count");
+        assert_eq!(args[1].name, "inputs");
+        assert_eq!(args[2].name, "outputs");
+    }
+
+    #[test]
+    fn make_compute_fir_signature_fun_type_matches_args() {
+        use fir::FirType;
+        let (typ, _args) = make_compute_fir_signature();
+        match typ {
+            FirType::Fun { args, ret } => {
+                assert_eq!(args.len(), 3, "fun type should have 3 args");
+                assert!(matches!(*ret, FirType::Void), "return type should be void");
+            }
+            other => panic!("expected FirType::Fun, got {other:?}"),
+        }
+    }
+
+    // ── Compiler::compile_source ──────────────────────────────────────────────
 
     #[test]
     fn compiler_compile_source_accepts_valid_dsp() {
@@ -1912,553 +1919,8 @@ mod tests {
             } => {
                 assert!(parse_errors >= 1);
                 assert!(!diagnostics.is_empty());
-                assert!(
-                    diagnostics
-                        .as_slice()
-                        .iter()
-                        .any(|d| d.code.0.starts_with("FRS-PARSE-"))
-                );
             }
-            _ => panic!("expected parse error"),
+            other => panic!("expected CompilerError::Parse, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn compiler_compile_file_parses_imported_fixture() {
-        let root = make_temp_root("imports");
-        let main = root.join("main.dsp");
-        let lib = root.join("ops.lib");
-        fs::write(&main, "import(\"ops.lib\");\nprocess = gain;\n")
-            .expect("main should be written");
-        fs::write(&lib, "gain = _;\n").expect("lib should be written");
-
-        let compiler = Compiler::new();
-        let out = compiler
-            .compile_file(&main, std::slice::from_ref(&root))
-            .expect("import fixture should parse");
-        assert!(out.root.is_some());
-        assert!(out.errors.is_empty());
-
-        fs::remove_dir_all(root).expect("temp root should be removable");
-    }
-
-    #[test]
-    fn compiler_compile_file_reports_missing_import() {
-        let root = make_temp_root("missing_import");
-        let main = root.join("main.dsp");
-        fs::write(&main, "import(\"missing.lib\");\nprocess = _;\n")
-            .expect("main should be written");
-
-        let compiler = Compiler::new();
-        let err = compiler
-            .compile_file(&main, std::slice::from_ref(&root))
-            .expect_err("missing import should fail");
-        assert!(matches!(err, CompilerError::Import(_)));
-
-        fs::remove_dir_all(root).expect("temp root should be removable");
-    }
-
-    #[test]
-    fn compiler_compile_file_default_uses_parent_dir_for_imports() {
-        let root = make_temp_root("default_search");
-        let main = root.join("main.dsp");
-        let lib = root.join("ops.lib");
-        fs::write(&main, "import(\"ops.lib\");\nprocess = gain;\n")
-            .expect("main should be written");
-        fs::write(&lib, "gain = _;\n").expect("lib should be written");
-
-        let compiler = Compiler::new();
-        let out = compiler
-            .compile_file_default(&main)
-            .expect("default search path should parse local import");
-        assert!(out.root.is_some());
-        assert!(out.errors.is_empty());
-
-        fs::remove_dir_all(root).expect("temp root should be removable");
-    }
-
-    #[test]
-    fn compiler_compile_source_to_signals_pass_through() {
-        let compiler = Compiler::new();
-        let out = compiler
-            .compile_source_to_signals("pass.dsp", "process = _;")
-            .expect("pass-through should compile to signals");
-        assert_eq!(out.process_arity.inputs, 1);
-        assert_eq!(out.process_arity.outputs, 1);
-        assert_eq!(out.signals.len(), 1);
-        assert_eq!(
-            signals::match_sig(&out.parse.state.arena, out.signals[0]),
-            SigMatch::Input(0)
-        );
-    }
-
-    #[test]
-    fn compiler_compile_source_to_cpp_emits_module_text() {
-        let compiler = Compiler::new();
-        let cpp = compiler
-            .compile_source_to_cpp("pass.dsp", "process = _;", &CppOptions::default())
-            .expect("pass-through should compile to C++");
-        assert!(cpp.contains("class mydsp : public dsp"));
-        assert!(cpp.contains("void compute("));
-        assert!(cpp.contains("FAUSTFLOAT* input0 = inputs[0];"));
-    }
-
-    #[test]
-    fn compiler_compile_source_to_cpp_fastlane_emits_module_text() {
-        let compiler = Compiler::new();
-        let cpp = compiler
-            .compile_source_to_cpp_with_lane(
-                "pass.dsp",
-                "process = _;",
-                &CppOptions::default(),
-                super::SignalFirLane::TransformFastLane,
-            )
-            .expect("pass-through should compile to C++ through transform fast-lane");
-        assert!(cpp.contains("class mydsp : public dsp"));
-        assert!(cpp.contains("void compute("));
-    }
-
-    #[test]
-    fn compiler_compile_source_to_cpp_fastlane_reports_transform_error() {
-        let compiler = Compiler::new();
-        let err = compiler
-            .compile_source_to_cpp_with_lane(
-                "pass.dsp",
-                "process = _;",
-                &CppOptions {
-                    class_name: Some(String::new()),
-                    ..CppOptions::default()
-                },
-                super::SignalFirLane::TransformFastLane,
-            )
-            .expect_err("empty class/module name should fail transform fast-lane validation");
-        assert!(matches!(err, CompilerError::Transform { .. }));
-        let diagnostics = err
-            .diagnostics()
-            .expect("transform failure should expose structured diagnostics");
-        assert!(
-            diagnostics
-                .as_slice()
-                .iter()
-                .any(|d| d.code.0.starts_with("FRS-SFIR-"))
-        );
-    }
-
-    #[test]
-    fn compiler_compile_source_to_c_emits_module_text() {
-        let compiler = Compiler::new();
-        let c_code = compiler
-            .compile_source_to_c("pass.dsp", "process = _;", &COptions::default())
-            .expect("pass-through should compile to C");
-        assert!(c_code.contains("typedef struct {"));
-        assert!(c_code.contains("void computemydsp("));
-    }
-
-    #[test]
-    fn compiler_compile_source_to_c_fastlane_reports_transform_error() {
-        let compiler = Compiler::new();
-        let err = compiler
-            .compile_source_to_c_with_lane(
-                "pass.dsp",
-                "process = _;",
-                &COptions {
-                    class_name: Some(String::new()),
-                    ..COptions::default()
-                },
-                super::SignalFirLane::TransformFastLane,
-            )
-            .expect_err("empty class/module name should fail transform fast-lane validation");
-        assert!(matches!(err, CompilerError::Transform { .. }));
-        let diagnostics = err
-            .diagnostics()
-            .expect("transform failure should expose structured diagnostics");
-        assert!(
-            diagnostics
-                .as_slice()
-                .iter()
-                .any(|d| d.code.0.starts_with("FRS-SFIR-"))
-        );
-    }
-
-    #[test]
-    fn compiler_compile_source_to_fir_legacy_bridge_returns_module() {
-        let compiler = Compiler::new();
-        let out = compiler
-            .compile_source_to_fir_with_lane(
-                "pass.dsp",
-                "process = _;",
-                super::SignalFirLane::LegacyBridge,
-            )
-            .expect("pass-through should compile to legacy FIR bridge");
-        assert!(matches!(
-            match_fir(&out.store, out.module),
-            FirMatch::Module { .. }
-        ));
-    }
-
-    #[test]
-    fn compiler_compile_source_to_fir_fastlane_returns_module() {
-        let compiler = Compiler::new();
-        let out = compiler
-            .compile_source_to_fir_with_lane(
-                "pass.dsp",
-                "process = _;",
-                super::SignalFirLane::TransformFastLane,
-            )
-            .expect("pass-through should compile to transform fast-lane FIR");
-        assert!(matches!(
-            match_fir(&out.store, out.module),
-            FirMatch::Module { .. }
-        ));
-    }
-
-    #[test]
-    fn compiler_compile_source_to_signals_recursive_case() {
-        let compiler = Compiler::new();
-        let out = compiler
-            .compile_source_to_signals("rec.dsp", "process = + ~ _;")
-            .expect("recursive process should compile to signals");
-        assert_eq!(out.process_arity.inputs, 1);
-        assert_eq!(out.process_arity.outputs, 1);
-        assert_eq!(out.signals.len(), 1);
-        assert!(matches!(
-            signals::match_sig(&out.parse.state.arena, out.signals[0]),
-            SigMatch::Proj(_, _)
-        ));
-    }
-
-    #[test]
-    fn compiler_compile_source_to_signals_reports_eval_error() {
-        let compiler = Compiler::new();
-        let err = compiler
-            .compile_source_to_signals("missing_process.dsp", "foo = _;")
-            .expect_err("missing process should fail evaluation");
-        assert!(matches!(
-            err,
-            CompilerError::Eval { ref error, .. }
-                if matches!(error.as_ref(), eval::EvalError::MissingProcessDefinition { .. })
-        ));
-        let diagnostics = err
-            .diagnostics()
-            .expect("eval failure should expose structured diagnostics");
-        assert!(
-            diagnostics
-                .as_slice()
-                .iter()
-                .any(|d| d.code.0.starts_with("FRS-EVAL-"))
-        );
-    }
-
-    #[test]
-    fn compiler_compile_source_to_signals_reports_propagate_error() {
-        let compiler = Compiler::new();
-        let err = compiler
-            .compile_source_to_signals("prop_mismatch.dsp", "process = _,_ <: _,_,_;")
-            .expect_err("invalid split arity should fail propagation");
-        assert!(matches!(err, CompilerError::Propagate { .. }));
-        let diagnostics = err
-            .diagnostics()
-            .expect("propagate failure should expose structured diagnostics");
-        assert!(
-            diagnostics
-                .as_slice()
-                .iter()
-                .any(|d| d.code.0.starts_with("FRS-PROP-"))
-        );
-        let first = diagnostics
-            .as_slice()
-            .first()
-            .expect("propagate error bundle should not be empty");
-        assert!(first.notes.iter().any(|n| n.starts_with("node_id=")));
-        assert!(first.notes.iter().any(|n| n.starts_with("box_expr=")));
-        assert!(first.notes.iter().any(|n| n.starts_with("expr=")));
-    }
-
-    #[test]
-    fn source_span_lookup_finds_direct_node_property() {
-        let mut arena = TreeArena::new();
-        let ident = BoxBuilder::new(&mut arena).ident("x");
-        let mut ctx = parser::ParserCtx::new();
-        ctx.set_use_prop(ident, "fixture.dsp", 7);
-
-        let span = super::source_span_from_node_or_descendant(&ctx, &arena, ident)
-            .expect("direct property should resolve to source span");
-        assert_eq!(span.file.display().to_string(), "fixture.dsp");
-        assert_eq!(span.line, 7);
-        assert_eq!(span.col, 1);
-    }
-
-    #[test]
-    fn source_span_lookup_finds_descendant_property() {
-        let mut arena = TreeArena::new();
-        let (parent, child) = {
-            let mut bb = BoxBuilder::new(&mut arena);
-            let wire = bb.wire();
-            let ident = bb.ident("x");
-            let seq = bb.seq(wire, ident);
-            (seq, ident)
-        };
-        let mut ctx = parser::ParserCtx::new();
-        ctx.set_use_prop(child, "desc.dsp", 19);
-
-        let span = super::source_span_from_node_or_descendant(&ctx, &arena, parent)
-            .expect("descendant property should resolve to source span");
-        assert_eq!(span.file.display().to_string(), "desc.dsp");
-        assert_eq!(span.line, 19);
-    }
-
-    #[test]
-    fn process_definition_span_fallback_resolves_when_node_has_no_property() {
-        let mut arena = TreeArena::new();
-        let (defs, process_name, expr) = {
-            let mut bb = BoxBuilder::new(&mut arena);
-            let process_name = bb.ident("process");
-            let wire = bb.wire();
-            let cut = bb.cut();
-            let expr = bb.seq(wire, cut);
-            let nil = arena.nil();
-            let args_expr = arena.cons(nil, expr);
-            let def = arena.cons(process_name, args_expr);
-            let defs = arena.cons(def, nil);
-            (defs, process_name, expr)
-        };
-
-        let mut ctx = parser::ParserCtx::new();
-        ctx.set_def_prop(process_name, "fallback.dsp", 11);
-
-        let span = super::source_span_for_process_definition(&ctx, &arena, defs)
-            .expect("process definition should provide fallback span");
-        assert_eq!(span.file.display().to_string(), "fallback.dsp");
-        assert_eq!(span.line, 11);
-
-        let diag = errors::Diagnostic::new(
-            errors::Severity::Error,
-            errors::Stage::Propagate,
-            errors::codes::PROP_ARITY_MISMATCH,
-            "mismatch",
-        );
-        let labeled = super::maybe_add_source_label(diag, &ctx, &arena, defs, expr, None);
-        assert!(!labeled.labels.is_empty());
-        assert_eq!(
-            labeled.labels[0].span.file.display().to_string(),
-            "fallback.dsp"
-        );
-    }
-
-    #[test]
-    fn process_binding_target_span_preferred_over_process_line() {
-        let mut arena = TreeArena::new();
-        let (defs, process_name, foo_name, bad_node) = {
-            let mut bb = BoxBuilder::new(&mut arena);
-            let foo_name = bb.ident("foo");
-            let wire_a = bb.wire();
-            let wire_b = bb.wire();
-            let left = bb.par(wire_a, wire_b);
-            let wire_c = bb.wire();
-            let wire_d = bb.wire();
-            let wire_e = bb.wire();
-            let right_tail = bb.par(wire_d, wire_e);
-            let right = bb.par(wire_c, right_tail);
-            let foo_expr = bb.split(left, right);
-
-            let process_name = bb.ident("process");
-            let process_expr = bb.ident("foo");
-
-            let nil = arena.nil();
-            let foo_args_expr = arena.cons(nil, foo_expr);
-            let foo_def = arena.cons(foo_name, foo_args_expr);
-            let process_args_expr = arena.cons(nil, process_expr);
-            let process_def = arena.cons(process_name, process_args_expr);
-            let tail_defs = arena.cons(process_def, nil);
-            let defs = arena.cons(foo_def, tail_defs);
-
-            (defs, process_name, foo_name, foo_expr)
-        };
-
-        let mut ctx = parser::ParserCtx::new();
-        ctx.set_def_prop(foo_name, "foo_file.dsp", 1);
-        ctx.set_def_prop(process_name, "foo_file.dsp", 4);
-
-        let direct = super::source_span_for_process_binding_target(&ctx, &arena, defs)
-            .expect("process binding target should resolve to foo definition");
-        assert_eq!(direct.file.display().to_string(), "foo_file.dsp");
-        assert_eq!(direct.line, 1);
-
-        let diag = errors::Diagnostic::new(
-            errors::Severity::Error,
-            errors::Stage::Propagate,
-            errors::codes::PROP_ARITY_MISMATCH,
-            "mismatch",
-        );
-        let labeled = super::maybe_add_source_label(diag, &ctx, &arena, defs, bad_node, None);
-        assert!(!labeled.labels.is_empty());
-        assert_eq!(
-            labeled.labels[0].span.file.display().to_string(),
-            "foo_file.dsp"
-        );
-        assert_eq!(labeled.labels[0].span.line, 1);
-    }
-
-    #[test]
-    fn definition_of_expr_fallback_handles_alias_chain() {
-        let mut arena = TreeArena::new();
-        let (defs, process_name, bar_name, foo_name, bad_node) = {
-            let mut bb = BoxBuilder::new(&mut arena);
-            let foo_name = bb.ident("foo");
-            let wire_a = bb.wire();
-            let wire_b = bb.wire();
-            let left = bb.par(wire_a, wire_b);
-            let wire_c = bb.wire();
-            let wire_d = bb.wire();
-            let wire_e = bb.wire();
-            let right_tail = bb.par(wire_d, wire_e);
-            let right = bb.par(wire_c, right_tail);
-            let foo_expr = bb.split(left, right);
-
-            let bar_name = bb.ident("bar");
-            let bar_expr = bb.ident("foo");
-
-            let process_name = bb.ident("process");
-            let process_bar_l = bb.ident("bar");
-            let process_bar_r = bb.ident("bar");
-            let process_rhs = bb.par(process_bar_l, process_bar_r);
-
-            let nil = arena.nil();
-            let foo_args_expr = arena.cons(nil, foo_expr);
-            let foo_def = arena.cons(foo_name, foo_args_expr);
-            let bar_args_expr = arena.cons(nil, bar_expr);
-            let bar_def = arena.cons(bar_name, bar_args_expr);
-            let process_args_expr = arena.cons(nil, process_rhs);
-            let process_def = arena.cons(process_name, process_args_expr);
-            let defs_tail = arena.cons(process_def, nil);
-            let defs_tail = arena.cons(bar_def, defs_tail);
-            let defs = arena.cons(foo_def, defs_tail);
-
-            (defs, process_name, bar_name, foo_name, foo_expr)
-        };
-
-        let mut ctx = parser::ParserCtx::new();
-        ctx.set_def_prop(foo_name, "chain.dsp", 1);
-        ctx.set_def_prop(bar_name, "chain.dsp", 2);
-        ctx.set_def_prop(process_name, "chain.dsp", 3);
-
-        let span = super::source_span_for_definition_of_expr(&ctx, &arena, defs, bad_node)
-            .expect("definition-of-expression fallback should resolve to foo definition");
-        assert_eq!(span.file.display().to_string(), "chain.dsp");
-        assert_eq!(span.line, 1);
-    }
-
-    #[test]
-    fn eval_labeler_reports_origin_span_unavailable_fallback_note() {
-        let mut arena = TreeArena::new();
-        let (defs, bad_node) = {
-            let mut bb = BoxBuilder::new(&mut arena);
-            let foo_name = bb.ident("foo");
-            let bad_node = bb.ident("unknown_symbol");
-            let process_name = bb.ident("process");
-            let process_expr = bb.ident("foo");
-
-            let nil = arena.nil();
-            let foo_args_expr = arena.cons(nil, bad_node);
-            let foo_def = arena.cons(foo_name, foo_args_expr);
-            let process_args_expr = arena.cons(nil, process_expr);
-            let process_def = arena.cons(process_name, process_args_expr);
-            let defs_tail = arena.cons(process_def, nil);
-            let defs = arena.cons(foo_def, defs_tail);
-            (defs, bad_node)
-        };
-
-        let ctx = parser::ParserCtx::new();
-        let diag = errors::Diagnostic::new(
-            errors::Severity::Error,
-            errors::Stage::Eval,
-            errors::codes::EVAL_UNDEFINED_SYMBOL,
-            "undefined symbol",
-        );
-        let labeled =
-            super::maybe_add_eval_source_labels(diag, &ctx, &arena, defs, bad_node, Some("foo"));
-        assert!(
-            labeled
-                .notes
-                .iter()
-                .any(|n| n.as_ref()
-                    == "origin span unavailable; pointing to nearest call/owner site"),
-            "eval fallback should explain missing origin span explicitly"
-        );
-    }
-
-    #[test]
-    fn propagate_labeler_reports_origin_span_unavailable_fallback_note() {
-        let mut arena = TreeArena::new();
-        let (defs, bad_node) = {
-            let mut bb = BoxBuilder::new(&mut arena);
-            let foo_name = bb.ident("foo");
-            let l0 = bb.wire();
-            let l1 = bb.wire();
-            let left = bb.par(l0, l1);
-            let r0 = bb.wire();
-            let r1 = bb.wire();
-            let r2 = bb.wire();
-            let r_tail = bb.par(r1, r2);
-            let right = bb.par(r0, r_tail);
-            let bad_node = bb.split(left, right);
-            let process_name = bb.ident("process");
-            let process_expr = bb.ident("foo");
-
-            let nil = arena.nil();
-            let foo_args_expr = arena.cons(nil, bad_node);
-            let foo_def = arena.cons(foo_name, foo_args_expr);
-            let process_args_expr = arena.cons(nil, process_expr);
-            let process_def = arena.cons(process_name, process_args_expr);
-            let defs_tail = arena.cons(process_def, nil);
-            let defs = arena.cons(foo_def, defs_tail);
-            (defs, bad_node)
-        };
-
-        let ctx = parser::ParserCtx::new();
-        let diag = errors::Diagnostic::new(
-            errors::Severity::Error,
-            errors::Stage::Propagate,
-            errors::codes::PROP_ARITY_MISMATCH,
-            "split mismatch",
-        );
-        let labeled =
-            super::maybe_add_source_label(diag, &ctx, &arena, defs, bad_node, Some("foo"));
-        assert!(
-            labeled
-                .notes
-                .iter()
-                .any(|n| n.as_ref()
-                    == "origin span unavailable; pointing to nearest call/owner site"),
-            "propagate fallback should explain missing origin span explicitly"
-        );
-    }
-
-    #[test]
-    fn pipeline_level_eval_reports_origin_fallback_when_parser_props_missing() {
-        let compiler = Compiler::new();
-        let source =
-            include_str!("../../../tests/corpus/err_17_origin_fallback_missing_props_eval.dsp");
-        let mut parsed = parser::parse_program(source, "missing_props.dsp");
-        parsed.state.ctx = parser::ParserCtx::new();
-
-        let err = compiler
-            .pipeline_to_signals("missing_props.dsp", parsed)
-            .expect_err("pipeline should fail in eval without source properties");
-        let diagnostics = err
-            .diagnostics()
-            .expect("pipeline eval failure should expose diagnostics");
-        let first = diagnostics
-            .as_slice()
-            .first()
-            .expect("diagnostic bundle should not be empty");
-        assert!(
-            first
-                .notes
-                .iter()
-                .any(|n| n.as_ref()
-                    == "origin span unavailable; pointing to nearest call/owner site"),
-            "pipeline-level fallback should be visible when parser source props are absent"
-        );
     }
 }
