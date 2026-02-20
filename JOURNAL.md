@@ -1,5 +1,29 @@
 # JOURNAL
 
+## 2026-02-20 (3)
+
+### Fix Windows CI — CRLF line endings in fixture reads
+
+Three test helpers were reading fixture files with `fs::read_to_string` and
+comparing the result directly to generated output (which always uses `\n`).
+On Windows, checked-out fixture files contain `\r\n`, causing `assert_eq!` to fail:
+
+```
+left:  "…\n…"   // generated code
+right: "…\r\n…" // fixture file as read on Windows
+```
+
+Fixed by appending `.replace("\r\n", "\n")` in each fixture-reading helper:
+
+- `crates/compiler/tests/enrobage_integration.rs` — `fn read()`
+- `crates/compiler/tests/enrobage_stream.rs` — `fn read()`
+- `crates/compiler/tests/diagnostic_errors.rs` — `fn read_corpus()`
+
+Other `read_to_string` call-sites in tests read `.dsp` source files that are
+fed to the compiler (not compared to a golden string), so they are unaffected.
+
+---
+
 ## 2026-02-20 (2)
 
 ### Fix clippy CI — `xtask/src/main.rs`

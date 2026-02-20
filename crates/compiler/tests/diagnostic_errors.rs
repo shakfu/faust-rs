@@ -20,7 +20,9 @@ fn corpus_path(file: &str) -> PathBuf {
 
 fn read_corpus(file: &str) -> String {
     let path = corpus_path(file);
-    fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+    fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        .replace("\r\n", "\n")
 }
 
 #[test]
