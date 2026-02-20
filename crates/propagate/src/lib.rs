@@ -24,11 +24,15 @@
 
 use std::fmt::{Display, Formatter};
 
+use ahash::AHashMap;
 use boxes::{BoxId, BoxMatch, match_box};
 use errors::codes;
 use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
 use signals::{SigBuilder, SigId};
 use tlib::{NodeKind, TreeArena, TreeId};
+
+/// Memoization cache for [`box_arity`] results, keyed by `BoxId`.
+pub type ArityCache = AHashMap<BoxId, Result<BoxArity, PropagateError>>;
 
 pub const CRATE_NAME: &str = "propagate";
 const DEBRUIJN_TAG: &str = "DEBRUIJN";
@@ -373,11 +377,32 @@ pub fn make_sig_input_list(arena: &mut TreeArena, n: usize) -> Vec<SigId> {
     out
 }
 
-/// Infers input/output arity of one box expression.
+/// Infers input/output arity of one box expression (memoized).
 ///
 /// This mirrors C++ `getBoxType(...)` behavior for the currently supported subset.
 /// Unsupported box families return [`PropagateError::UnsupportedBox`].
-pub fn box_arity(arena: &TreeArena, box_tree: BoxId) -> Result<BoxArity, PropagateError> {
+///
+/// Callers should create one [`ArityCache`] and pass it through to amortise
+/// repeated sub-expression visits across multiple calls.
+pub fn box_arity(
+    arena: &TreeArena,
+    box_tree: BoxId,
+    cache: &mut ArityCache,
+) -> Result<BoxArity, PropagateError> {
+    if let Some(cached) = cache.get(&box_tree) {
+        return cached.clone();
+    }
+    let result = box_arity_inner(arena, box_tree, cache);
+    cache.insert(box_tree, result.clone());
+    result
+}
+
+/// Core arity inference logic, called only on cache miss.
+fn box_arity_inner(
+    arena: &TreeArena,
+    box_tree: BoxId,
+    cache: &mut ArityCache,
+) -> Result<BoxArity, PropagateError> {
     match match_box(arena, box_tree) {
         BoxMatch::Int(_) | BoxMatch::Real(_) => Ok(BoxArity {
             inputs: 0,
@@ -490,11 +515,11 @@ pub fn box_arity(arena: &TreeArena, box_tree: BoxId) -> Result<BoxArity, Propaga
             })
         }
         BoxMatch::VGroup(_, expr) | BoxMatch::HGroup(_, expr) | BoxMatch::TGroup(_, expr) => {
-            box_arity(arena, expr)
+            box_arity(arena, expr, cache)
         }
         BoxMatch::Seq(left, right) => {
-            let left_arity = box_arity(arena, left)?;
-            let right_arity = box_arity(arena, right)?;
+            let left_arity = box_arity(arena, left, cache)?;
+            let right_arity = box_arity(arena, right, cache)?;
             if left_arity.outputs != right_arity.inputs {
                 return Err(PropagateError::SeqArityMismatch {
                     node: box_tree,
@@ -508,16 +533,16 @@ pub fn box_arity(arena: &TreeArena, box_tree: BoxId) -> Result<BoxArity, Propaga
             })
         }
         BoxMatch::Par(left, right) => {
-            let left_arity = box_arity(arena, left)?;
-            let right_arity = box_arity(arena, right)?;
+            let left_arity = box_arity(arena, left, cache)?;
+            let right_arity = box_arity(arena, right, cache)?;
             Ok(BoxArity {
                 inputs: left_arity.inputs + right_arity.inputs,
                 outputs: left_arity.outputs + right_arity.outputs,
             })
         }
         BoxMatch::Split(left, right) => {
-            let left_arity = box_arity(arena, left)?;
-            let right_arity = box_arity(arena, right)?;
+            let left_arity = box_arity(arena, left, cache)?;
+            let right_arity = box_arity(arena, right, cache)?;
             if !split_compatible(left_arity.outputs, right_arity.inputs) {
                 return Err(PropagateError::SplitArityMismatch {
                     node: box_tree,
@@ -531,8 +556,8 @@ pub fn box_arity(arena: &TreeArena, box_tree: BoxId) -> Result<BoxArity, Propaga
             })
         }
         BoxMatch::Merge(left, right) => {
-            let left_arity = box_arity(arena, left)?;
-            let right_arity = box_arity(arena, right)?;
+            let left_arity = box_arity(arena, left, cache)?;
+            let right_arity = box_arity(arena, right, cache)?;
             if !merge_compatible(left_arity.outputs, right_arity.inputs) {
                 return Err(PropagateError::MergeArityMismatch {
                     node: box_tree,
@@ -546,8 +571,8 @@ pub fn box_arity(arena: &TreeArena, box_tree: BoxId) -> Result<BoxArity, Propaga
             })
         }
         BoxMatch::Rec(left, right) => {
-            let left_arity = box_arity(arena, left)?;
-            let right_arity = box_arity(arena, right)?;
+            let left_arity = box_arity(arena, left, cache)?;
+            let right_arity = box_arity(arena, right, cache)?;
             if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
                 return Err(PropagateError::RecArityMismatch {
                     node: box_tree,
@@ -575,7 +600,7 @@ pub fn box_arity(arena: &TreeArena, box_tree: BoxId) -> Result<BoxArity, Propaga
             outputs: 1,
         }),
         BoxMatch::Ondemand(expr) | BoxMatch::Upsampling(expr) | BoxMatch::Downsampling(expr) => {
-            let inner = box_arity(arena, expr)?;
+            let inner = box_arity(arena, expr, cache)?;
             Ok(BoxArity {
                 inputs: inner.inputs + 1,
                 outputs: inner.outputs,
@@ -656,18 +681,22 @@ pub fn box_arity(arena: &TreeArena, box_tree: BoxId) -> Result<BoxArity, Propaga
     }
 }
 
-/// Propagates input signals through one evaluated box expression.
+/// Propagates input signals through one evaluated box expression (memoized arity).
 ///
 /// This function validates input/output arity using [`box_arity`].
 ///
 /// Precondition: `box_tree` should already be in the evaluated box domain
 /// (typically output of `eval::eval_process` / `eval::eval_box`).
+///
+/// Callers should create one [`ArityCache`] and pass it through to amortise
+/// repeated sub-expression arity lookups.
 pub fn propagate(
     arena: &mut TreeArena,
     box_tree: BoxId,
     inputs: &[SigId],
+    cache: &mut ArityCache,
 ) -> Result<Vec<SigId>, PropagateError> {
-    let arity = box_arity(arena, box_tree)?;
+    let arity = box_arity(arena, box_tree, cache)?;
     if inputs.len() != arity.inputs {
         return Err(PropagateError::InputArityMismatch {
             node: box_tree,
@@ -675,7 +704,7 @@ pub fn propagate(
             got: inputs.len(),
         });
     }
-    let outputs = propagate_inner(arena, box_tree, inputs)?;
+    let outputs = propagate_inner(arena, box_tree, inputs, cache)?;
     if outputs.len() != arity.outputs {
         return Err(PropagateError::OutputArityMismatch {
             node: box_tree,
@@ -691,6 +720,7 @@ fn propagate_inner(
     arena: &mut TreeArena,
     box_tree: BoxId,
     inputs: &[SigId],
+    cache: &mut ArityCache,
 ) -> Result<Vec<SigId>, PropagateError> {
     match match_box(arena, box_tree) {
         BoxMatch::Int(value) => {
@@ -829,11 +859,11 @@ fn propagate_inner(
             Ok(vec![size, waveform])
         }
         BoxMatch::VGroup(_, expr) | BoxMatch::HGroup(_, expr) | BoxMatch::TGroup(_, expr) => {
-            propagate(arena, expr, inputs)
+            propagate(arena, expr, inputs, cache)
         }
         BoxMatch::Seq(left, right) => {
-            let left_arity = box_arity(arena, left)?;
-            let right_arity = box_arity(arena, right)?;
+            let left_arity = box_arity(arena, left, cache)?;
+            let right_arity = box_arity(arena, right, cache)?;
             if left_arity.outputs != right_arity.inputs {
                 return Err(PropagateError::SeqArityMismatch {
                     node: box_tree,
@@ -841,25 +871,26 @@ fn propagate_inner(
                     right_inputs: right_arity.inputs,
                 });
             }
-            let mid = propagate(arena, left, inputs)?;
-            propagate(arena, right, &mid)
+            let mid = propagate(arena, left, inputs, cache)?;
+            propagate(arena, right, &mid, cache)
         }
         BoxMatch::Par(left, right) => {
-            let left_arity = box_arity(arena, left)?;
-            let right_arity = box_arity(arena, right)?;
-            let left_out = propagate(arena, left, &inputs[..left_arity.inputs])?;
+            let left_arity = box_arity(arena, left, cache)?;
+            let right_arity = box_arity(arena, right, cache)?;
+            let left_out = propagate(arena, left, &inputs[..left_arity.inputs], cache)?;
             let mut right_out = propagate(
                 arena,
                 right,
                 &inputs[left_arity.inputs..left_arity.inputs + right_arity.inputs],
+                cache,
             )?;
             let mut out = left_out;
             out.append(&mut right_out);
             Ok(out)
         }
         BoxMatch::Split(left, right) => {
-            let left_arity = box_arity(arena, left)?;
-            let right_arity = box_arity(arena, right)?;
+            let left_arity = box_arity(arena, left, cache)?;
+            let right_arity = box_arity(arena, right, cache)?;
             if !split_compatible(left_arity.outputs, right_arity.inputs) {
                 return Err(PropagateError::SplitArityMismatch {
                     node: box_tree,
@@ -867,13 +898,13 @@ fn propagate_inner(
                     right_inputs: right_arity.inputs,
                 });
             }
-            let left_out = propagate(arena, left, inputs)?;
+            let left_out = propagate(arena, left, inputs, cache)?;
             let split_in = split_signals(&left_out, right_arity.inputs);
-            propagate(arena, right, &split_in)
+            propagate(arena, right, &split_in, cache)
         }
         BoxMatch::Merge(left, right) => {
-            let left_arity = box_arity(arena, left)?;
-            let right_arity = box_arity(arena, right)?;
+            let left_arity = box_arity(arena, left, cache)?;
+            let right_arity = box_arity(arena, right, cache)?;
             if !merge_compatible(left_arity.outputs, right_arity.inputs) {
                 return Err(PropagateError::MergeArityMismatch {
                     node: box_tree,
@@ -881,13 +912,13 @@ fn propagate_inner(
                     right_inputs: right_arity.inputs,
                 });
             }
-            let left_out = propagate(arena, left, inputs)?;
+            let left_out = propagate(arena, left, inputs, cache)?;
             let merge_in = mix_signals(arena, &left_out, right_arity.inputs);
-            propagate(arena, right, &merge_in)
+            propagate(arena, right, &merge_in, cache)
         }
         BoxMatch::Rec(left, right) => {
-            let left_arity = box_arity(arena, left)?;
-            let right_arity = box_arity(arena, right)?;
+            let left_arity = box_arity(arena, left, cache)?;
+            let right_arity = box_arity(arena, right, cache)?;
             if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
                 return Err(PropagateError::RecArityMismatch {
                     node: box_tree,
@@ -899,12 +930,12 @@ fn propagate_inner(
             }
 
             let l0 = make_mem_sig_proj_list(arena, right_arity.inputs)?;
-            let l1 = propagate(arena, right, &l0)?;
+            let l1 = propagate(arena, right, &l0, cache)?;
 
             let mut rec_inputs = l1;
             rec_inputs.extend(lift_signals(arena, inputs));
 
-            let l2 = propagate(arena, left, &rec_inputs)?;
+            let l2 = propagate(arena, left, &rec_inputs, cache)?;
             let group_body = vec_to_list(arena, &l2);
             let group = debruijn_rec(arena, group_body);
 
@@ -922,14 +953,14 @@ fn propagate_inner(
         }
         BoxMatch::Inputs(expr) => {
             expect_input_arity(box_tree, inputs, 0)?;
-            let arity = box_arity(arena, expr)?;
+            let arity = box_arity(arena, expr, cache)?;
             let value = i32_from_usize(arity.inputs, "inputs")?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.int(value)])
         }
         BoxMatch::Outputs(expr) => {
             expect_input_arity(box_tree, inputs, 0)?;
-            let arity = box_arity(arena, expr)?;
+            let arity = box_arity(arena, expr, cache)?;
             let value = i32_from_usize(arity.outputs, "outputs")?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.int(value)])

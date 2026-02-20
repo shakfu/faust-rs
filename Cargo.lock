@@ -503,6 +503,7 @@ dependencies = [
 name = "propagate"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "boxes",
  "errors",
  "signals",

@@ -5086,3 +5086,16 @@ The `<tag:N>` fallback covers the theoretically unreachable case of an orphaned 
     → readable output with `BOXIDENT`, `BOXAPPL`, `BOXSEQ`, `BOXPAR`, `BOXWIRE`,
       `BOXMUL`, `BOXMAX`, `BOXMIN`.
 
+## 2026-02-20 (5)
+
+### Memoize `box_arity` and `propagate` in `crates/propagate`
+
+The validation of input/output arities in `propagate` historically walked the box expression tree repeatedly without caching, leading to exponential cost on certain constructs.
+
+- Added `ahash` dependency to `crates/propagate/Cargo.toml`.
+- Introduced `ArityCache` (`AHashMap<BoxId, Result<BoxArity, PropagateError>>`) in `crates/propagate/src/lib.rs`.
+- Refactored `box_arity` to take an `&mut ArityCache` parameter and memoize intermediate inference results.
+- Refactored `propagate` to also take an `&mut ArityCache` parameter, threading the exact same cache through both arity checks and the internal propagate dispatch tree.
+- Updated `crates/compiler/src/lib.rs` and `crates/propagate/tests` to provide `&mut ArityCache::new()` to public API calls.
+
+This brings Rust's `propagate` performance characteristics closer to C++ Faust, ensuring tree navigations stay linear.

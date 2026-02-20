@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+ahash = "0.8"
 boxes = { path = "../boxes" }
 errors = { path = "../errors" }
 signals = { path = "../signals" }

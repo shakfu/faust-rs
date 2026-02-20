@@ -6,7 +6,7 @@
 
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::{IntoDiagnostic, Severity, Stage, codes};
-use propagate::{PropagateError, box_arity, make_sig_input_list, propagate};
+use propagate::{ArityCache, PropagateError, box_arity, make_sig_input_list, propagate};
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId};
 
@@ -26,7 +26,7 @@ fn propagate_add_maps_to_signal_binop() {
     let mut arena = TreeArena::new();
     let add = BoxBuilder::new(&mut arena).add();
     let inputs = make_sig_input_list(&mut arena, 2);
-    let out = propagate(&mut arena, add, &inputs).expect("add should propagate");
+    let out = propagate(&mut arena, add, &inputs, &mut ArityCache::new()).expect("add should propagate");
     assert_eq!(out.len(), 1);
     assert_eq!(
         match_sig(&arena, out[0]),
@@ -46,19 +46,19 @@ fn propagate_seq_par_and_split_composition() {
         let split = bb.split(wire, add);
         (seq, split)
     };
-    let arity_seq = box_arity(&arena, seq).expect("seq arity should infer");
+    let arity_seq = box_arity(&arena, seq, &mut ArityCache::new()).expect("seq arity should infer");
     assert_eq!(arity_seq.inputs, 2);
     assert_eq!(arity_seq.outputs, 1);
 
     let seq_inputs = make_sig_input_list(&mut arena, 2);
-    let seq_out = propagate(&mut arena, seq, &seq_inputs).expect("seq should propagate");
+    let seq_out = propagate(&mut arena, seq, &seq_inputs, &mut ArityCache::new()).expect("seq should propagate");
     assert_eq!(
         match_sig(&arena, seq_out[0]),
         SigMatch::BinOp(BinOp::Add, seq_inputs[0], seq_inputs[1])
     );
 
     let split_inputs = make_sig_input_list(&mut arena, 1);
-    let split_out = propagate(&mut arena, split, &split_inputs).expect("split should propagate");
+    let split_out = propagate(&mut arena, split, &split_inputs, &mut ArityCache::new()).expect("split should propagate");
     assert_eq!(
         match_sig(&arena, split_out[0]),
         SigMatch::BinOp(BinOp::Add, split_inputs[0], split_inputs[0])
@@ -78,7 +78,7 @@ fn propagate_merge_mixes_buses_before_right_box() {
     };
     let inputs = make_sig_input_list(&mut arena, 4);
 
-    let out = propagate(&mut arena, merge, &inputs).expect("merge should propagate");
+    let out = propagate(&mut arena, merge, &inputs, &mut ArityCache::new()).expect("merge should propagate");
     assert_eq!(out.len(), 1);
 
     let SigMatch::BinOp(BinOp::Add, lhs, rhs) = match_sig(&arena, out[0]) else {
@@ -104,7 +104,7 @@ fn propagate_reports_arity_mismatch_and_supports_rec() {
         bb.seq(wire, add)
     };
     let sig0 = SigBuilder::new(&mut arena).input(0);
-    let err = propagate(&mut arena, bad_seq, &[sig0]).expect_err("bad seq must fail");
+    let err = propagate(&mut arena, bad_seq, &[sig0], &mut ArityCache::new()).expect_err("bad seq must fail");
     assert!(matches!(err, PropagateError::SeqArityMismatch { .. }));
 
     let rec = {
@@ -112,11 +112,11 @@ fn propagate_reports_arity_mismatch_and_supports_rec() {
         let wire = bb.wire();
         bb.rec(wire, wire)
     };
-    let rec_arity = box_arity(&arena, rec).expect("rec arity should infer");
+    let rec_arity = box_arity(&arena, rec, &mut ArityCache::new()).expect("rec arity should infer");
     assert_eq!(rec_arity.inputs, 0);
     assert_eq!(rec_arity.outputs, 1);
 
-    let rec_out = propagate(&mut arena, rec, &[]).expect("rec should propagate");
+    let rec_out = propagate(&mut arena, rec, &[], &mut ArityCache::new()).expect("rec should propagate");
     assert_eq!(rec_out.len(), 1);
     let SigMatch::Proj(0, group) = match_sig(&arena, rec_out[0]) else {
         panic!("rec output should be proj(0, group)");
@@ -134,7 +134,7 @@ fn propagate_rec_plus_tilde_wire_shape_is_stable() {
         bb.rec(add, wire)
     };
     let inputs = make_sig_input_list(&mut arena, 1);
-    let out = propagate(&mut arena, rec, &inputs).expect("rec +~_ should propagate");
+    let out = propagate(&mut arena, rec, &inputs, &mut ArityCache::new()).expect("rec +~_ should propagate");
     assert_eq!(out.len(), 1);
 
     let SigMatch::Proj(0, group) = match_sig(&arena, out[0]) else {
@@ -169,7 +169,7 @@ fn propagate_rec_keeps_closed_branches_outside_projection() {
         bb.rec(left, right)
     };
     let inputs = make_sig_input_list(&mut arena, 1);
-    let out = propagate(&mut arena, rec, &inputs).expect("mixed rec should propagate");
+    let out = propagate(&mut arena, rec, &inputs, &mut ArityCache::new()).expect("mixed rec should propagate");
     assert_eq!(out.len(), 2);
     assert_eq!(match_sig(&arena, out[0]), SigMatch::Int(7));
     assert!(matches!(match_sig(&arena, out[1]), SigMatch::Proj(1, _)));
@@ -188,8 +188,8 @@ fn inputs_outputs_boxes_lower_to_signal_ints() {
         (inputs_box, outputs_box)
     };
 
-    let iout = propagate(&mut arena, inputs_box, &[]).expect("inputs(...) should propagate");
-    let oout = propagate(&mut arena, outputs_box, &[]).expect("outputs(...) should propagate");
+    let iout = propagate(&mut arena, inputs_box, &[], &mut ArityCache::new()).expect("inputs(...) should propagate");
+    let oout = propagate(&mut arena, outputs_box, &[], &mut ArityCache::new()).expect("outputs(...) should propagate");
 
     assert_eq!(match_sig(&arena, iout[0]), SigMatch::Int(3));
     assert_eq!(match_sig(&arena, oout[0]), SigMatch::Int(2));
@@ -212,11 +212,11 @@ fn waveform_box_lowers_to_size_and_waveform_signal() {
         bb.waveform(&[v0, v1, v2])
     };
 
-    let arity = box_arity(&arena, waveform).expect("waveform arity should infer");
+    let arity = box_arity(&arena, waveform, &mut ArityCache::new()).expect("waveform arity should infer");
     assert_eq!(arity.inputs, 0);
     assert_eq!(arity.outputs, 2);
 
-    let out = propagate(&mut arena, waveform, &[]).expect("waveform should propagate");
+    let out = propagate(&mut arena, waveform, &[], &mut ArityCache::new()).expect("waveform should propagate");
     assert_eq!(out.len(), 2);
     assert_eq!(match_sig(&arena, out[0]), SigMatch::Int(3));
 
@@ -238,9 +238,9 @@ fn propagate_pow_min_max_map_to_signal_nodes() {
     };
     let inputs = make_sig_input_list(&mut arena, 2);
 
-    let pow_out = propagate(&mut arena, pow, &inputs).expect("pow should propagate");
-    let min_out = propagate(&mut arena, min, &inputs).expect("min should propagate");
-    let max_out = propagate(&mut arena, max, &inputs).expect("max should propagate");
+    let pow_out = propagate(&mut arena, pow, &inputs, &mut ArityCache::new()).expect("pow should propagate");
+    let min_out = propagate(&mut arena, min, &inputs, &mut ArityCache::new()).expect("min should propagate");
+    let max_out = propagate(&mut arena, max, &inputs, &mut ArityCache::new()).expect("max should propagate");
 
     assert_eq!(
         match_sig(&arena, pow_out[0]),
@@ -304,25 +304,25 @@ fn propagate_extended_math_primitives_map_to_signal_nodes() {
     let uinputs = make_sig_input_list(&mut arena, 1);
     let binputs = make_sig_input_list(&mut arena, 2);
 
-    let acos_sig = propagate(&mut arena, acos, &uinputs).expect("acos should propagate")[0];
-    let asin_sig = propagate(&mut arena, asin, &uinputs).expect("asin should propagate")[0];
-    let atan_sig = propagate(&mut arena, atan, &uinputs).expect("atan should propagate")[0];
-    let atan2_sig = propagate(&mut arena, atan2, &binputs).expect("atan2 should propagate")[0];
-    let cos_sig = propagate(&mut arena, cos, &uinputs).expect("cos should propagate")[0];
-    let sin_sig = propagate(&mut arena, sin, &uinputs).expect("sin should propagate")[0];
-    let tan_sig = propagate(&mut arena, tan, &uinputs).expect("tan should propagate")[0];
-    let exp_sig = propagate(&mut arena, exp, &uinputs).expect("exp should propagate")[0];
-    let log_sig = propagate(&mut arena, log, &uinputs).expect("log should propagate")[0];
-    let log10_sig = propagate(&mut arena, log10, &uinputs).expect("log10 should propagate")[0];
-    let sqrt_sig = propagate(&mut arena, sqrt, &uinputs).expect("sqrt should propagate")[0];
-    let abs_sig = propagate(&mut arena, abs, &uinputs).expect("abs should propagate")[0];
-    let fmod_sig = propagate(&mut arena, fmod, &binputs).expect("fmod should propagate")[0];
+    let acos_sig = propagate(&mut arena, acos, &uinputs, &mut ArityCache::new()).expect("acos should propagate")[0];
+    let asin_sig = propagate(&mut arena, asin, &uinputs, &mut ArityCache::new()).expect("asin should propagate")[0];
+    let atan_sig = propagate(&mut arena, atan, &uinputs, &mut ArityCache::new()).expect("atan should propagate")[0];
+    let atan2_sig = propagate(&mut arena, atan2, &binputs, &mut ArityCache::new()).expect("atan2 should propagate")[0];
+    let cos_sig = propagate(&mut arena, cos, &uinputs, &mut ArityCache::new()).expect("cos should propagate")[0];
+    let sin_sig = propagate(&mut arena, sin, &uinputs, &mut ArityCache::new()).expect("sin should propagate")[0];
+    let tan_sig = propagate(&mut arena, tan, &uinputs, &mut ArityCache::new()).expect("tan should propagate")[0];
+    let exp_sig = propagate(&mut arena, exp, &uinputs, &mut ArityCache::new()).expect("exp should propagate")[0];
+    let log_sig = propagate(&mut arena, log, &uinputs, &mut ArityCache::new()).expect("log should propagate")[0];
+    let log10_sig = propagate(&mut arena, log10, &uinputs, &mut ArityCache::new()).expect("log10 should propagate")[0];
+    let sqrt_sig = propagate(&mut arena, sqrt, &uinputs, &mut ArityCache::new()).expect("sqrt should propagate")[0];
+    let abs_sig = propagate(&mut arena, abs, &uinputs, &mut ArityCache::new()).expect("abs should propagate")[0];
+    let fmod_sig = propagate(&mut arena, fmod, &binputs, &mut ArityCache::new()).expect("fmod should propagate")[0];
     let remainder_sig =
-        propagate(&mut arena, remainder, &binputs).expect("remainder should propagate")[0];
-    let floor_sig = propagate(&mut arena, floor, &uinputs).expect("floor should propagate")[0];
-    let ceil_sig = propagate(&mut arena, ceil, &uinputs).expect("ceil should propagate")[0];
-    let rint_sig = propagate(&mut arena, rint, &uinputs).expect("rint should propagate")[0];
-    let round_sig = propagate(&mut arena, round, &uinputs).expect("round should propagate")[0];
+        propagate(&mut arena, remainder, &binputs, &mut ArityCache::new()).expect("remainder should propagate")[0];
+    let floor_sig = propagate(&mut arena, floor, &uinputs, &mut ArityCache::new()).expect("floor should propagate")[0];
+    let ceil_sig = propagate(&mut arena, ceil, &uinputs, &mut ArityCache::new()).expect("ceil should propagate")[0];
+    let rint_sig = propagate(&mut arena, rint, &uinputs, &mut ArityCache::new()).expect("rint should propagate")[0];
+    let round_sig = propagate(&mut arena, round, &uinputs, &mut ArityCache::new()).expect("round should propagate")[0];
 
     assert_eq!(match_sig(&arena, acos_sig), SigMatch::Acos(uinputs[0]));
     assert_eq!(match_sig(&arena, asin_sig), SigMatch::Asin(uinputs[0]));

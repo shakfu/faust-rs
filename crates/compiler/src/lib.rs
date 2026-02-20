@@ -39,7 +39,7 @@ use codegen::backends::cpp::{CodegenError, CppOptions, generate_cpp_module};
 use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, SourceSpan};
 use fir::{FirBuilder, FirId, FirStore, FirType, NamedType};
 use parser::{ParseOutput, SourceReaderError};
-use propagate::{BoxArity, PropagateError};
+use propagate::{ArityCache, BoxArity, PropagateError};
 use signals::{SigId, dump_sig_readable};
 use tlib::NodeKind;
 use transform::signal_fir::{
@@ -410,8 +410,9 @@ impl Compiler {
             }
         })?;
 
+        let mut arity_cache = ArityCache::new();
         let process_arity =
-            propagate::box_arity(&output.state.arena, process_box).map_err(|error| {
+            propagate::box_arity(&output.state.arena, process_box, &mut arity_cache).map_err(|error| {
                 let node = propagate_error_node(&error);
                 let owner =
                     node.and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
@@ -443,7 +444,7 @@ impl Compiler {
             })?;
 
         let inputs = propagate::make_sig_input_list(&mut output.state.arena, process_arity.inputs);
-        let signals = propagate::propagate(&mut output.state.arena, process_box, &inputs).map_err(
+        let signals = propagate::propagate(&mut output.state.arena, process_box, &inputs, &mut arity_cache).map_err(
             |error| {
                 let node = propagate_error_node(&error);
                 let owner =
@@ -1297,13 +1298,14 @@ fn add_paired_propagate_context(
     diagnostic = diagnostic.with_note(format!("A ({op_name} left) = {left_expr}"));
     diagnostic = diagnostic.with_note(format!("B ({op_name} right) = {right_expr}"));
 
-    if let Ok(a) = propagate::box_arity(arena, left) {
+    let mut arity_cache = ArityCache::new();
+    if let Ok(a) = propagate::box_arity(arena, left, &mut arity_cache) {
         diagnostic = diagnostic.with_note(format!(
             "A arity: inputs={} outputs={}",
             a.inputs, a.outputs
         ));
     }
-    if let Ok(b) = propagate::box_arity(arena, right) {
+    if let Ok(b) = propagate::box_arity(arena, right, &mut arity_cache) {
         diagnostic = diagnostic.with_note(format!(
             "B arity: inputs={} outputs={}",
             b.inputs, b.outputs
