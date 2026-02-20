@@ -5099,3 +5099,13 @@ The validation of input/output arities in `propagate` historically walked the bo
 - Updated `crates/compiler/src/lib.rs` and `crates/propagate/tests` to provide `&mut ArityCache::new()` to public API calls.
 
 This brings Rust's `propagate` performance characteristics closer to C++ Faust, ensuring tree navigations stay linear.
+
+## 2026-02-21 (1)
+
+### Document Memoization Strategy
+
+Following the implementation of `box_arity` caching, analyzed the remaining C++ Faust `getProperty` memoization sites:
+- Verified `eval` pass does not require memoization (relies on lexical `Environment` and `TreeArena` hash-consing).
+- Identified upcoming memoization requirements for the Rust port: `normalize` (signal simplification), `transform` (recursiveness checking), and `codegen` (occurrence counting and compute delay inference).
+- Documented these findings and the "Explicit Cache Threading" Rust pattern in `porting/phases/phase-0-memoization-strategy-en.md`.
+- Linked the new strategy document in `porting/faust-rust-porting-plan-en.md`.

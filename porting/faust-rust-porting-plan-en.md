@@ -344,6 +344,7 @@ This phase is mandatory to avoid locking into incorrect assumptions early (espec
 Each validation/prototype task in this phase must have explicit deliverables and pass criteria before execution.
 
 Detailed checklist and Go/No-Go criteria: `phases/phase-0-validation-en.md`.
+Compiler Memoization Strategy comparison: `phases/phase-0-memoization-strategy-en.md`
 
 ### Phase 1 — Foundations (months 2-3)
 
