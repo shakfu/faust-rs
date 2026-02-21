@@ -1,6 +1,22 @@
 # JOURNAL
 
 
+## 2026-02-21
+
+### Interpreter backend porting plan
+
+- Analyzed the C++ interpreter code in `compiler/generator/interpreter/` (~15,600 LOC across 16 files).
+- Documented the complete FBC (Faust Byte Code) architecture: ~367 opcodes, stack-based instruction set, dual-heap memory model (int + real), computed-goto dispatch, bytecode optimizer, `.fbc` serialization format.
+- Wrote the interpreter backend porting plan: `porting/phases/faust-rust-interpreter-porting-en.md`.
+
+Key design decisions:
+- **FBC does not use TreeArena**: unlike boxes, signals, and FIR, FBC is a flat linear instruction stream designed for sequential execution, not a functional tree. Using TreeArena would add counterproductive indirection in the hot dispatch loop. FBC uses `#[repr(u16)]` Rust enums + `Vec` for contiguous cache-friendly storage.
+- **Computed goto equivalent**: Rust has no `goto*` extension. Primary strategy is `match` on `#[repr(u16)]` enum (LLVM generates equivalent jump table). Two fallback strategies documented (function-pointer dispatch table, flattened threaded code) to be evaluated by benchmarks.
+- **Block ownership via `BlockId` indices** into `FbcBlockArena<R>`, replacing C++ raw pointers.
+- **`FbcReal` trait** replaces C++ `template <class REAL>` with f32/f64 implementations.
+- **Runtime trace level** (enum) instead of C++ compile-time `TRACE` template parameter, with `#[inline(always)]` checks that LLVM can eliminate when trace is disabled.
+- Execution plan in 6 steps: opcodes/types → interpreter loop → FIR→FBC compiler → optimizer → factory/serialization → benchmarks.
+
 ## 2026-02-14
 
 - Applied the structure defined in `porting/faust-rust-porting-plan-en.md`, section `4. Cargo Workspace Architecture`.
