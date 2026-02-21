@@ -412,70 +412,75 @@ impl Compiler {
 
         let mut arity_cache = ArityCache::new();
         let process_arity =
-            propagate::box_arity(&output.state.arena, process_box, &mut arity_cache).map_err(|error| {
-                let node = propagate_error_node(&error);
-                let owner =
-                    node.and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
-                let mut diagnostic = error.clone().into_diagnostic();
-                if let Some(n) = node {
-                    diagnostic = enrich_diagnostic_with_node(
-                        diagnostic,
-                        &output.state.arena,
-                        root,
-                        n,
-                        owner.as_deref(),
-                    );
-                    diagnostic =
-                        add_paired_propagate_context(diagnostic, &error, &output.state.arena);
-                    diagnostic = maybe_add_source_label(
-                        diagnostic,
-                        &output.state.ctx,
-                        &output.state.arena,
-                        root,
-                        n,
-                        owner.as_deref(),
-                    );
-                }
-                CompilerError::Propagate {
-                    source: source.into(),
-                    error,
-                    diagnostics: bundle_from_diagnostic(diagnostic),
-                }
-            })?;
+            propagate::box_arity(&output.state.arena, process_box, &mut arity_cache).map_err(
+                |error| {
+                    let node = propagate_error_node(&error);
+                    let owner = node
+                        .and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
+                    let mut diagnostic = error.clone().into_diagnostic();
+                    if let Some(n) = node {
+                        diagnostic = enrich_diagnostic_with_node(
+                            diagnostic,
+                            &output.state.arena,
+                            root,
+                            n,
+                            owner.as_deref(),
+                        );
+                        diagnostic =
+                            add_paired_propagate_context(diagnostic, &error, &output.state.arena);
+                        diagnostic = maybe_add_source_label(
+                            diagnostic,
+                            &output.state.ctx,
+                            &output.state.arena,
+                            root,
+                            n,
+                            owner.as_deref(),
+                        );
+                    }
+                    CompilerError::Propagate {
+                        source: source.into(),
+                        error,
+                        diagnostics: bundle_from_diagnostic(diagnostic),
+                    }
+                },
+            )?;
 
         let inputs = propagate::make_sig_input_list(&mut output.state.arena, process_arity.inputs);
-        let signals = propagate::propagate(&mut output.state.arena, process_box, &inputs, &mut arity_cache).map_err(
-            |error| {
-                let node = propagate_error_node(&error);
-                let owner =
-                    node.and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
-                let mut diagnostic = error.clone().into_diagnostic();
-                if let Some(n) = node {
-                    diagnostic = enrich_diagnostic_with_node(
-                        diagnostic,
-                        &output.state.arena,
-                        root,
-                        n,
-                        owner.as_deref(),
-                    );
-                    diagnostic =
-                        add_paired_propagate_context(diagnostic, &error, &output.state.arena);
-                    diagnostic = maybe_add_source_label(
-                        diagnostic,
-                        &output.state.ctx,
-                        &output.state.arena,
-                        root,
-                        n,
-                        owner.as_deref(),
-                    );
-                }
-                CompilerError::Propagate {
-                    source: source.into(),
-                    error,
-                    diagnostics: bundle_from_diagnostic(diagnostic),
-                }
-            },
-        )?;
+        let signals = propagate::propagate(
+            &mut output.state.arena,
+            process_box,
+            &inputs,
+            &mut arity_cache,
+        )
+        .map_err(|error| {
+            let node = propagate_error_node(&error);
+            let owner =
+                node.and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
+            let mut diagnostic = error.clone().into_diagnostic();
+            if let Some(n) = node {
+                diagnostic = enrich_diagnostic_with_node(
+                    diagnostic,
+                    &output.state.arena,
+                    root,
+                    n,
+                    owner.as_deref(),
+                );
+                diagnostic = add_paired_propagate_context(diagnostic, &error, &output.state.arena);
+                diagnostic = maybe_add_source_label(
+                    diagnostic,
+                    &output.state.ctx,
+                    &output.state.arena,
+                    root,
+                    n,
+                    owner.as_deref(),
+                );
+            }
+            CompilerError::Propagate {
+                source: source.into(),
+                error,
+                diagnostics: bundle_from_diagnostic(diagnostic),
+            }
+        })?;
 
         Ok(SignalCompileOutput {
             parse: output,
