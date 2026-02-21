@@ -3,6 +3,14 @@
 
 ## 2026-02-21
 
+### Interpreter backend — Step 1 implementation (opcodes, instructions, FbcReal)
+
+- Implemented Step 1 of the interpreter backend porting plan in `crates/codegen/src/backends/interp/`.
+- `opcode.rs`: `FbcOpcode` enum with 294 opcodes (`#[repr(u16)]`), matching C++ `fbc_opcode.hh` discriminant-for-discriminant. `FBC_INSTRUCTION_NAMES` table replicates `gFBCInstructionTable[]` exactly, including 3 documented C++ typos for `.fbc` format compatibility. Safe `from_u16()` via const lookup table (no `unsafe`). Helper methods: `is_math`, `is_real_type`, `is_choice`, `is_extended_unary_math`, `is_extended_binary_math`.
+- `bytecode.rs`: `FbcInstruction<R>`, `FbcBlock<R>`, `FbcBlockArena<R>`, `BlockId`, `BlockStoreData<R>`, `FbcUiInstruction<R>`, `FbcMetaInstruction`. C++ raw pointers replaced by `BlockId` indices into the arena.
+- `real.rs`: `FbcReal` trait (30 methods) with macro-generated `impl` for `f32` and `f64`. Uses `round_ties_even()` for `rint` parity. Bitcast behavior matches C++ `reinterpret_cast` semantics.
+- 50 unit tests + 1 doc-test passing. Full workspace clippy-clean.
+
 ### Interpreter backend porting plan
 
 - Analyzed the C++ interpreter code in `compiler/generator/interpreter/` (~15,600 LOC across 16 files).
