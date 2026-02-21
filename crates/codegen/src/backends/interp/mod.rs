@@ -1,4 +1,4 @@
-//! Interpreter (`interp`) backend — FBC bytecode types and execution engine.
+//! Interpreter (`interp`) backend — FBC bytecode types, compiler, and execution engine.
 //!
 //! # Source provenance (C++)
 //! - `compiler/generator/interpreter/` — full C++ interpreter subsystem.
@@ -10,19 +10,21 @@
 //!   `.fbc` serialization once those phases are implemented.
 //!
 //! # Current status
-//! **Step 2 complete**: execution engine (`FbcExecutor`) with full dispatch loop
-//! for all 294 opcodes, matching C++ `FBCInterpreter<REAL, TRACE>::executeBlock`.
-//! Built on top of the Step 1 foundation (opcode enum, instruction/block types,
-//! block arena, `FbcReal` trait).
+//! **Step 3 complete**: FIR → FBC compiler (`FirToFbcCompiler`) translating FIR
+//! nodes into FBC bytecode blocks, with end-to-end compilation + execution tests.
+//! Built on the Step 1 foundation (opcode enum, instruction/block types, block
+//! arena, `FbcReal` trait) and Step 2 execution engine (`FbcExecutor`).
 //!
 //! # Module layout
 //! - [`opcode`]: `FbcOpcode` enum, `FBC_INSTRUCTION_NAMES`, `INTERP_FILE_VERSION`.
 //! - [`bytecode`]: `FbcInstruction`, `FbcBlock`, `FbcBlockArena`, `BlockId`,
 //!   `FbcUiInstruction`, `FbcMetaInstruction`.
 //! - [`real`]: `FbcReal` trait with f32/f64 implementations.
+//! - [`compiler`]: `FirToFbcCompiler` — FIR → FBC bytecode compiler.
 //! - [`executor`]: `FbcExecutor` — bytecode execution engine with audio I/O.
 
 pub mod bytecode;
+pub mod compiler;
 pub mod executor;
 pub mod opcode;
 pub mod real;
@@ -32,6 +34,7 @@ pub use bytecode::{
     BlockId, BlockStoreData, FbcBlock, FbcBlockArena, FbcInstruction, FbcMetaInstruction,
     FbcUiInstruction,
 };
+pub use compiler::{CompileError, FbcCompileResult, FirToFbcCompiler, HeapType, MemoryDesc};
 pub use executor::FbcExecutor;
 pub use opcode::{FBC_INSTRUCTION_NAMES, FBC_OPCODE_COUNT, FbcOpcode, INTERP_FILE_VERSION};
 pub use real::FbcReal;

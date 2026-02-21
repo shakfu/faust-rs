@@ -38,6 +38,20 @@ impl BlockId {
     pub fn as_u32(self) -> u32 {
         self.0
     }
+
+    /// Creates a `BlockId` from a raw index.
+    ///
+    /// Used by the compiler to predict the next arena allocation index
+    /// for `CondBranch` loop-back references.
+    ///
+    /// # Safety note
+    /// This is `pub(crate)` because it creates an ID that may not yet
+    /// exist in the arena — the caller must allocate the block immediately
+    /// after.
+    #[must_use]
+    pub(crate) fn from_raw(index: u32) -> Self {
+        Self(index)
+    }
 }
 
 /// A single FBC instruction.

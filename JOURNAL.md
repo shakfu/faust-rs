@@ -3,6 +3,32 @@
 
 ## 2026-02-21
 
+### Interpreter backend — Step 3 implementation (FIR → FBC compiler)
+
+- Implemented Step 3 of the interpreter backend porting plan: the FIR → FBC compiler.
+- `compiler.rs`: `FirToFbcCompiler<R: FbcReal>` struct porting C++ `InterpreterInstVisitor<REAL>` (709 lines in `interpreter_instructions.hh`) to Rust.
+- Replaces C++ visitor/`accept()` pattern with exhaustive `match` dispatch on `FirMatch` variants via `match_fir()`.
+- **Block-switching pattern**: `saved_blocks: Vec<FbcBlock<R>>` stack with `begin_sub_block()`/`end_sub_block()` using `std::mem::take`/`replace`, replacing C++ raw-pointer save/restore of `fCurrentBlock`.
+- **Heap allocation**: dual `int_heap_offset`/`real_heap_offset` counters with `field_table: HashMap<String, MemoryDesc>` tracking variable-to-heap-slot mappings.
+- **Compilation methods** (all with C++ source provenance rustdoc):
+  - Values: `compile_int32`, `compile_float32`, `compile_float64`, `compile_bool`.
+  - Variables: `compile_load_var`, `compile_load_table` (with input channel detection), `compile_tee_var`.
+  - Declarations: `compile_declare_var` with array waveform init (`BlockStoreInt`/`BlockStoreReal`) and scalar init paths.
+  - Storage: `compile_store_var`, `compile_store_table` (with output channel detection), `compile_shift_array`.
+  - Arithmetic: `compile_binop` (rhs-first stack convention), `compile_neg` (multiply by -1).
+  - Cast: `compile_cast` (elides same-type casts), `compile_bitcast`.
+  - Control flow: `compile_select2`, `compile_if`, `compile_for_loop` (with `BlockId::from_raw` for CondBranch loop-back prediction), `compile_block`.
+  - Function calls: `compile_fun_call` with reverse-order arg compilation.
+  - UI: `compile_open_box`, `compile_close_box`, `compile_add_button`, `compile_add_slider`, `compile_add_bargraph`, `compile_add_soundfile`, `compile_add_meta_declare`.
+- **Static lookup tables** (no allocation):
+  - `binop_to_fbc()`: maps `FirBinOp` → `(int_opcode, real_opcode)` pairs.
+  - `math_lib_lookup()`: maps C function names (float/double variants) → FBC opcodes (~35 entries, matching `gMathLibTable`).
+- **New types**: `MemoryDesc`, `HeapType`, `CompileError`, `FbcCompileResult<R>`.
+- Added `BlockId::from_raw()` constructor to `bytecode.rs` for CondBranch loop-back prediction.
+- 23 new tests: 14 unit tests (bytecode structure verification) + 4 integration tests (compile→execute roundtrip) + 5 lookup/helper tests.
+- **Pass criteria met**: Int32(42)→42, BinOp(Add,3,4)→7, ForLoop(10 iterations)→x==10, StoreVar/LoadVar roundtrip→99.
+- Quality gate: 94 tests passing, clippy-clean (`-D warnings`), fmt-clean.
+
 ### Fix 3 typos in FBC instruction name table (C++ and Rust)
 
 - Fixed 3 typos in `gFBCInstructionTable[]` in C++ (`fbc_opcode.hh`) and in the Rust `FBC_INSTRUCTION_NAMES` table (`opcode.rs`):
