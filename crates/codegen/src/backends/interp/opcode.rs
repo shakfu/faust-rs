@@ -788,14 +788,8 @@ impl FbcOpcode {
 
 /// Instruction name table for `.fbc` text format serialization.
 ///
-/// This table replicates the C++ `gFBCInstructionTable[]` from `fbc_opcode.hh`
-/// **exactly**, including known typos in the C++ source (marked with comments).
-/// This is required for cross-compiler `.fbc` format compatibility.
-///
-/// # Known C++ typos replicated here
-/// - Index 182: C++ has `"kLTIntValueInvert"` for enum `kGEIntValueInvert`
-/// - Index 261: C++ has `"kMaxStackfValue"` for enum `kMaxfStackValue`
-/// - Index 285: C++ has `"kAddChecButton"` for enum `kAddCheckButton`
+/// Instruction name table matching the C++ `gFBCInstructionTable[]` from
+/// `fbc_opcode.hh`.
 pub static FBC_INSTRUCTION_NAMES: [&str; FBC_OPCODE_COUNT] = [
     // ── Numbers ──
     "kRealValue",  // 0
@@ -988,8 +982,8 @@ pub static FBC_INSTRUCTION_NAMES: [&str; FBC_OPCODE_COUNT] = [
     "kARshIntValueInvert", // 179
     "kLRshIntValueInvert", // 180
     "kGTIntValueInvert",   // 181
-    "kLTIntValueInvert",   // 182  (C++ typo: says "kLTIntValueInvert" for kGEIntValueInvert)
-    "kLTIntValueInvert",   // 183  ← C++ bug: duplicates index 182 instead of "kGEIntValueInvert"
+    "kLTIntValueInvert",   // 182
+    "kGEIntValueInvert",   // 183
     "kLEIntValueInvert",   // 184
     "kGTRealValueInvert",  // 185
     "kLTRealValueInvert",  // 186
@@ -1073,7 +1067,7 @@ pub static FBC_INSTRUCTION_NAMES: [&str; FBC_OPCODE_COUNT] = [
     "kFmodfStackValue",  // 258
     "kPowfStackValue",   // 259
     "kMaxStackValue",    // 260
-    "kMaxStackfValue",   // 261  ← C++ bug: should be "kMaxfStackValue"
+    "kMaxfStackValue",   // 261
     "kMinStackValue",    // 262
     "kMinfStackValue",   // 263
     // ── Extended binary math (value OP heap) ──
@@ -1102,7 +1096,7 @@ pub static FBC_INSTRUCTION_NAMES: [&str; FBC_OPCODE_COUNT] = [
     "kOpenTabBox",            // 282
     "kCloseBox",              // 283
     "kAddButton",             // 284
-    "kAddChecButton",         // 285  ← C++ bug: should be "kAddCheckButton"
+    "kAddCheckButton",        // 285
     "kAddHorizontalSlider",   // 286
     "kAddVerticalSlider",     // 287
     "kAddNumEntry",           // 288
@@ -1211,23 +1205,19 @@ mod tests {
         assert!(!FbcOpcode::Nop.is_real_type());
     }
 
-    /// Verify name table replicates known C++ typos for format compatibility.
     #[test]
-    fn cpp_typos_replicated() {
-        // kGEIntValueInvert (index 183) → "kLTIntValueInvert" in C++
+    fn name_table_matches_enum_names() {
         assert_eq!(
             FBC_INSTRUCTION_NAMES[FbcOpcode::GEIntValueInvert as usize],
-            "kLTIntValueInvert"
+            "kGEIntValueInvert"
         );
-        // kMaxfStackValue (index 261) → "kMaxStackfValue" in C++
         assert_eq!(
             FBC_INSTRUCTION_NAMES[FbcOpcode::MaxfStackValue as usize],
-            "kMaxStackfValue"
+            "kMaxfStackValue"
         );
-        // kAddCheckButton (index 285) → "kAddChecButton" in C++
         assert_eq!(
             FBC_INSTRUCTION_NAMES[FbcOpcode::AddCheckButton as usize],
-            "kAddChecButton"
+            "kAddCheckButton"
         );
     }
 }

@@ -3,6 +3,15 @@
 
 ## 2026-02-21
 
+### Fix 3 typos in FBC instruction name table (C++ and Rust)
+
+- Fixed 3 typos in `gFBCInstructionTable[]` in C++ (`fbc_opcode.hh`) and in the Rust `FBC_INSTRUCTION_NAMES` table (`opcode.rs`):
+  - Index 183: `"kLTIntValueInvert"` (duplicate of 182) → `"kGEIntValueInvert"`.
+  - Index 261: `"kMaxStackfValue"` → `"kMaxfStackValue"`.
+  - Index 285: `"kAddChecButton"` → `"kAddCheckButton"`.
+- Removed documentation that justified replicating the typos for compatibility.
+- Replaced test `cpp_typos_replicated` with `name_table_matches_enum_names` verifying correct names.
+
 ### Interpreter backend — Step 2 implementation (FbcExecutor dispatch loop)
 
 - Implemented Step 2 of the interpreter backend porting plan: the bytecode execution engine.
