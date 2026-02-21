@@ -146,8 +146,16 @@ pub trait FbcReal:
     /// Two-argument arc tangent.
     fn fbc_atan2(self, other: Self) -> Self;
 
-    /// Floating-point modulus.
+    /// Floating-point modulus (truncated division), matching C++ `std::fmod()`.
     fn fbc_fmod(self, other: Self) -> Self;
+
+    /// IEEE 754 remainder, matching C++ `std::remainder()`.
+    ///
+    /// This differs from [`fbc_fmod`](Self::fbc_fmod) which uses truncated
+    /// division. The IEEE remainder is `a - round_ties_even(a/b) * b`.
+    fn fbc_remainder(self, other: Self) -> Self {
+        self - (self / other).fbc_rint() * other
+    }
 
     /// Power.
     fn fbc_pow(self, exp: Self) -> Self;
@@ -388,10 +396,10 @@ mod tests {
 
     #[test]
     fn f32_from_f64_and_back() {
-        let v = 3.14_f64;
+        let v = 3.125_f64;
         let f: f32 = FbcReal::from_f64(v);
-        assert!((f - 3.14_f32).abs() < 1e-5);
-        assert!((f.to_f64() - 3.14).abs() < 1e-5);
+        assert!((f - 3.125_f32).abs() < 1e-5);
+        assert!((f.to_f64() - 3.125).abs() < 1e-5);
     }
 
     #[test]
@@ -449,7 +457,7 @@ mod tests {
 
     #[test]
     fn f32_bitcast_roundtrip() {
-        let v = 3.14_f32;
+        let v = 3.125_f32;
         let bits = v.to_bits_i32();
         let back = f32::from_bits_i32(bits);
         assert_eq!(v, back);

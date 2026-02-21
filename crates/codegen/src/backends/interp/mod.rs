@@ -10,17 +10,20 @@
 //!   `.fbc` serialization once those phases are implemented.
 //!
 //! # Current status
-//! **Step 1 complete**: opcode enum, instruction/block types, block arena,
-//! `FbcReal` trait with f32/f64 implementations, and instruction name table
-//! with full C++ parity.
+//! **Step 2 complete**: execution engine (`FbcExecutor`) with full dispatch loop
+//! for all 294 opcodes, matching C++ `FBCInterpreter<REAL, TRACE>::executeBlock`.
+//! Built on top of the Step 1 foundation (opcode enum, instruction/block types,
+//! block arena, `FbcReal` trait).
 //!
 //! # Module layout
 //! - [`opcode`]: `FbcOpcode` enum, `FBC_INSTRUCTION_NAMES`, `INTERP_FILE_VERSION`.
 //! - [`bytecode`]: `FbcInstruction`, `FbcBlock`, `FbcBlockArena`, `BlockId`,
 //!   `FbcUiInstruction`, `FbcMetaInstruction`.
 //! - [`real`]: `FbcReal` trait with f32/f64 implementations.
+//! - [`executor`]: `FbcExecutor` — bytecode execution engine with audio I/O.
 
 pub mod bytecode;
+pub mod executor;
 pub mod opcode;
 pub mod real;
 
@@ -29,6 +32,7 @@ pub use bytecode::{
     BlockId, BlockStoreData, FbcBlock, FbcBlockArena, FbcInstruction, FbcMetaInstruction,
     FbcUiInstruction,
 };
+pub use executor::FbcExecutor;
 pub use opcode::{FBC_INSTRUCTION_NAMES, FBC_OPCODE_COUNT, FbcOpcode, INTERP_FILE_VERSION};
 pub use real::FbcReal;
 

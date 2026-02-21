@@ -3,6 +3,20 @@
 
 ## 2026-02-21
 
+### Interpreter backend — Step 2 implementation (FbcExecutor dispatch loop)
+
+- Implemented Step 2 of the interpreter backend porting plan: the bytecode execution engine.
+- `executor.rs`: `FbcExecutor<R: FbcReal>` struct with dual-heap memory model (`int_heap`, `real_heap`) and a tight `loop { match }` dispatch loop ported from C++ `FBCInterpreter<REAL, TRACE>::executeBlock`.
+- Full opcode coverage: all 294 FBC opcodes handled across 5 addressing modes (stack×stack, heap×heap, heap×stack, value×stack, value×heap) plus inverted variants for non-commutative operations.
+- Execution stacks: `real_stack[512]`, `int_stack[512]`, `addr_stack[64]` — local to each `execute_block_io` call, matching C++ stack sizes.
+- Control flow: `If`, `SelectReal`/`SelectInt`, `Loop`, `CondBranch`, `Return` — address stack based, replacing C++ computed-goto with LLVM-optimized match dispatch.
+- Extended math: all unary (sin, cos, exp, log, sqrt, etc.) and binary (atan2, fmod, pow, min, max, copysign) operations for both stack and heap variants.
+- Added `fbc_remainder` method to `FbcReal` trait for IEEE 754 remainder (`std::remainder` semantics), distinct from `fbc_fmod` (truncated division).
+- Audio I/O: `LoadInput`/`StoreOutput` opcodes with channel-indexed buffer access.
+- Updated `mod.rs` to register executor module and re-export `FbcExecutor`.
+- 20 executor unit tests covering: push/store, arithmetic, comparisons, casts, bitcasts, heap operations, memory moves, I/O, branching (if-true/false), select, loops (5-iteration counter), extended math, and edge cases (div-by-zero).
+- Quality gate: 71 tests + 1 doc-test passing, clippy-clean (`-D warnings`), fmt-clean.
+
 ### Interpreter backend — Step 1 implementation (opcodes, instructions, FbcReal)
 
 - Implemented Step 1 of the interpreter backend porting plan in `crates/codegen/src/backends/interp/`.

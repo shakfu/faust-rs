@@ -525,10 +525,10 @@ mod tests {
 
     #[test]
     fn instruction_with_values() {
-        let instr = FbcInstruction::<f32>::with_values(FbcOpcode::RealValue, 0, 3.14);
+        let instr = FbcInstruction::<f32>::with_values(FbcOpcode::RealValue, 0, 3.125);
         assert_eq!(instr.opcode, FbcOpcode::RealValue);
         assert_eq!(instr.int_value, 0);
-        assert!((instr.real_value - 3.14).abs() < 1e-6);
+        assert!((instr.real_value - 3.125).abs() < 1e-6);
         assert_eq!(instr.offset1, -1);
         assert_eq!(instr.offset2, -1);
         assert!(instr.branch1.is_none());
