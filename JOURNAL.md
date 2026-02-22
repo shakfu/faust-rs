@@ -3,6 +3,13 @@
 
 ## 2026-02-22
 
+### Clippy housekeeping — codegen crate
+
+- Fixed 2 `clippy::all` warnings in the interpreter backend with no functional change.
+- **`crates/codegen/src/backends/interp/compiler.rs`** — extracted the 5-tuple return type of `FirToFbcCompiler::into_parts` into a named `pub type CompilerParts<R>` alias (`type_complexity` warning); the method signature now reads `pub fn into_parts(self) -> CompilerParts<R>`.
+- **`crates/codegen/src/backends/interp/mod.rs`** — replaced the manual `impl Default for InterpOptions` block with `#[derive(Default)]` on the struct (`derivable_impls` warning); all field defaults (`0`, `None`, `0`, `0`) are the Rust default values so the behaviour is identical.
+- Build: zero warnings, zero errors.
+
 ### Connect Interp backend in the compiler facade
 
 - Wired the interpreter backend into the compiler pipeline, parallel to the existing C and C++ backends.

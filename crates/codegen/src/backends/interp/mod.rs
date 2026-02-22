@@ -65,7 +65,7 @@ pub fn backend_id() -> &'static str {
 /// Options controlling interpreter bytecode generation.
 ///
 /// Parallel to `COptions` and `CppOptions` in the C/C++ backends.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InterpOptions {
     /// Bytecode optimizer level (0 = none, up to [`MAX_OPT_LEVEL`]).
     pub opt_level: i32,
@@ -80,16 +80,6 @@ pub struct InterpOptions {
     pub num_outputs: usize,
 }
 
-impl Default for InterpOptions {
-    fn default() -> Self {
-        Self {
-            opt_level: 0,
-            module_name: None,
-            num_inputs: 0,
-            num_outputs: 0,
-        }
-    }
-}
 
 // ─── Error types ────────────────────────────────────────────────────────────
 

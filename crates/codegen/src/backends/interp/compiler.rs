@@ -36,6 +36,15 @@ use super::real::FbcReal;
 // Helper types
 // ---------------------------------------------------------------------------
 
+/// Return type of [`FirToFbcCompiler::into_parts`].
+pub type CompilerParts<R> = (
+    FbcBlockArena<R>,
+    i32,
+    i32,
+    Vec<FbcUiInstruction<R>>,
+    HashMap<String, MemoryDesc>,
+);
+
 /// Which heap a variable is allocated in.
 ///
 /// # Source provenance (C++)
@@ -399,15 +408,7 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
     /// Call this after all function bodies have been compiled via
     /// [`compile_fir_block`].  The outermost (current) block, which should be
     /// empty at that point, is discarded.
-    pub fn into_parts(
-        self,
-    ) -> (
-        FbcBlockArena<R>,
-        i32,
-        i32,
-        Vec<FbcUiInstruction<R>>,
-        HashMap<String, MemoryDesc>,
-    ) {
+    pub fn into_parts(self) -> CompilerParts<R> {
         (
             self.arena,
             self.int_heap_offset,
