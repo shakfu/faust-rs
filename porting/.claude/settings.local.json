@@ -8,7 +8,24 @@
       "Bash(git stash:*)",
       "Bash(cargo clippy:*)",
       "Bash(cargo run:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(cargo tree:*)",
+      "Bash(wc:*)",
+      "Bash(gh run view:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(cargo build:*)",
+      "Bash(git add:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(echo:*)",
+      "Bash(grep:*)",
+      "Bash(rustc:*)",
+      "Bash(git -C /Users/letz/Developpements/RUST/faust-rs status)",
+      "Bash(git -C /Users/letz/Developpements/RUST/faust-rs log --oneline -3)",
+      "Bash(git -C /Users/letz/Developpements/RUST/faust-rs diff --stat)",
+      "Bash(git -C /Users/letz/Developpements/RUST/faust-rs add crates/codegen/src/backends/interp/opcode.rs JOURNAL.md)",
+      "Bash(git -C:*)",
+      "Bash(ls:*)",
+      "Bash(git status:*)"
     ]
   }
 }

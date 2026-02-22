@@ -3,6 +3,33 @@
 
 ## 2026-02-22
 
+### Interpreter backend — Step 5 implementation (Factory, Serialization, DSP Interface)
+
+- Implemented Step 5 of the interpreter backend porting plan: factory, instance, and `.fbc` serialization — the final integration step.
+- `factory.rs`: `FbcDspFactory<R>` struct porting C++ `interpreter_dsp_factory_aux<REAL, TRACE>` (993 lines in `interpreter_dsp_aux.hh`).
+  - Holds 6 code `BlockId`s, metadata/UI blocks, memory layout info, and optimizer state.
+  - `optimize()` method applies bytecode optimizer levels 1..opt_level to all 6 code blocks (idempotent, one-shot guard).
+  - `new()` constructor with all fields.
+- `instance.rs`: `FbcDspInstance<'a, R>` struct porting C++ `interpreter_dsp_aux<REAL, TRACE>`.
+  - Lifetime-tied to its parent factory reference.
+  - Full DSP lifecycle: `new()` → `init(sr)` → `compute(count, inputs, outputs)`.
+  - `init()`: calls `instanceInit(sr)` which chains: `classInit` → `instanceConstants` → `instanceResetUserInterface` → `instanceClear`.
+  - `compute()`: sets count, executes control block, executes DSP block with audio I/O, increments cycle counter.
+  - Accessors: `get_sample_rate()`, `get_num_inputs()`, `get_num_outputs()`, `is_initialized()`, `cycle()`.
+- `serial.rs`: `.fbc` text format serialization (~600 lines) porting C++ `write()`/`read()` methods.
+  - `write_fbc()`: serializes factory to `.fbc` format (normal and small modes).
+  - `read_fbc()`: deserializes factory from `.fbc` format with full validation.
+  - Handles all instruction types: regular, `BlockStoreReal`/`BlockStoreInt` (with data lines), and branching (`If`/`Select`/`Loop` with recursive sub-blocks).
+  - `FbcSerialError` enum for structured error reporting (version mismatch, type mismatch, parse errors, I/O errors).
+  - String quoting: `quote1()`/`unquote1()` matching C++ `interpreter_bytecode.hh`.
+  - Version check: rejects `.fbc` files with version != `INTERP_FILE_VERSION` (8).
+  - Type check: rejects "float" files when reading as f64 and vice versa.
+- `real.rs`: Added `std::str::FromStr` to `FbcReal` trait supertraits (required by deserializer).
+- Updated `mod.rs`: registered `factory`, `instance`, `serial` modules + re-exports.
+- 19 new tests: 3 factory (construction, optimize, idempotent), 3 instance (lifecycle, passthrough, gain, zero-count), 13 serialization (header format, small mode, meta block, roundtrip, branching, block-store, double, version check, type mismatch, quoted strings).
+- **Pass criteria met**: `.fbc` roundtrip ✓, compute output parity ✓, version check ✓, factory optimization idempotent ✓.
+- Quality gate: 150 tests passing (19 new + 131 existing), clippy-clean (`-D warnings`), fmt-clean.
+
 ### Interpreter backend — Step 4 implementation (FBC bytecode optimizer)
 
 - Implemented Step 4 of the interpreter backend porting plan: the FBC bytecode optimizer.

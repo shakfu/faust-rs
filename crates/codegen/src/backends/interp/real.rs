@@ -48,6 +48,7 @@ pub trait FbcReal:
     + std::ops::Neg<Output = Self>
     + fmt::Debug
     + fmt::Display
+    + std::str::FromStr
     + Send
     + Sync
     + 'static
