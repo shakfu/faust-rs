@@ -10,10 +10,10 @@
 //!   `.fbc` serialization once those phases are implemented.
 //!
 //! # Current status
-//! **Step 3 complete**: FIR → FBC compiler (`FirToFbcCompiler`) translating FIR
-//! nodes into FBC bytecode blocks, with end-to-end compilation + execution tests.
-//! Built on the Step 1 foundation (opcode enum, instruction/block types, block
-//! arena, `FbcReal` trait) and Step 2 execution engine (`FbcExecutor`).
+//! **Step 4 complete**: FBC bytecode optimizer with 6 peephole optimization levels
+//! (index folding, move fusion, block/pair moves, cast fusion, math fusion with
+//! constant folding and identity/annihilator elimination).
+//! Built on Step 1 (types), Step 2 (executor), and Step 3 (compiler).
 //!
 //! # Module layout
 //! - [`opcode`]: `FbcOpcode` enum, `FBC_INSTRUCTION_NAMES`, `INTERP_FILE_VERSION`.
@@ -21,12 +21,14 @@
 //!   `FbcUiInstruction`, `FbcMetaInstruction`.
 //! - [`real`]: `FbcReal` trait with f32/f64 implementations.
 //! - [`compiler`]: `FirToFbcCompiler` — FIR → FBC bytecode compiler.
+//! - [`optimizer`]: `optimize_block` — peephole bytecode optimizer (6 levels).
 //! - [`executor`]: `FbcExecutor` — bytecode execution engine with audio I/O.
 
 pub mod bytecode;
 pub mod compiler;
 pub mod executor;
 pub mod opcode;
+pub mod optimizer;
 pub mod real;
 
 // Re-exports for convenient access.
@@ -37,6 +39,7 @@ pub use bytecode::{
 pub use compiler::{CompileError, FbcCompileResult, FirToFbcCompiler, HeapType, MemoryDesc};
 pub use executor::FbcExecutor;
 pub use opcode::{FBC_INSTRUCTION_NAMES, FBC_OPCODE_COUNT, FbcOpcode, INTERP_FILE_VERSION};
+pub use optimizer::{MAX_OPT_LEVEL, optimize_block};
 pub use real::FbcReal;
 
 pub const BACKEND_NAME: &str = "interp";

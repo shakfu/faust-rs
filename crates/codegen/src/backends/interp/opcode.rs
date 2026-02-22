@@ -784,6 +784,147 @@ impl FbcOpcode {
     pub fn is_choice(self) -> bool {
         matches!(self, Self::If | Self::SelectReal | Self::SelectInt)
     }
+
+    // ── Opcode offset arithmetic (used by the optimizer) ─────────────────
+
+    /// Translate a base (stack OP stack) math opcode to its heap variant.
+    ///
+    /// - Standard math (+28): `AddReal..XORInt` → `AddRealHeap..XORIntHeap`
+    /// - Extended unary (+24): `Abs..Tanhf` → `AbsHeap..TanhfHeap`
+    /// - Extended binary (+8): `Atan2f..Minf` → `Atan2fHeap..MinfHeap`
+    ///
+    /// Returns `None` if the opcode is not a recognised base math opcode.
+    #[must_use]
+    pub fn to_heap(self) -> Option<Self> {
+        let v = self as u16;
+        if self.is_math() {
+            // Standard math: offset = kAddRealHeap - kAddReal = 28
+            Self::from_u16(v + (Self::AddRealHeap as u16 - Self::AddReal as u16))
+        } else if self.is_extended_unary_math() {
+            // Extended unary: offset = kAbsHeap - kAbs = 24
+            Self::from_u16(v + (Self::AbsHeap as u16 - Self::Abs as u16))
+        } else if self.is_extended_binary_math() {
+            // Extended binary: offset = kAtan2fHeap - kAtan2f = 8
+            Self::from_u16(v + (Self::Atan2fHeap as u16 - Self::Atan2f as u16))
+        } else {
+            None
+        }
+    }
+
+    /// Translate a base (stack OP stack) math opcode to its stack (heap OP stack) variant.
+    ///
+    /// - Standard math (+56): `AddReal..XORInt` → `AddRealStack..XORIntStack`
+    /// - Extended binary (+15): `Atan2f..Minf` → `Atan2fStack..MinfStack`
+    ///
+    /// Extended unary opcodes have no stack variant — returns `None` for those.
+    #[must_use]
+    pub fn to_stack(self) -> Option<Self> {
+        let v = self as u16;
+        if self.is_math() {
+            Self::from_u16(v + (Self::AddRealStack as u16 - Self::AddReal as u16))
+        } else if self.is_extended_binary_math() {
+            Self::from_u16(v + (Self::Atan2fStack as u16 - Self::Atan2f as u16))
+        } else {
+            None
+        }
+    }
+
+    /// Translate a base (stack OP stack) math opcode to its stack-value (value OP stack) variant.
+    ///
+    /// - Standard math (+84): `AddReal..XORInt` → `AddRealStackValue..XORIntStackValue`
+    /// - Extended binary (+22): `Atan2f..Minf` → `Atan2fStackValue..MinfStackValue`
+    #[must_use]
+    pub fn to_stack_value(self) -> Option<Self> {
+        let v = self as u16;
+        if self.is_math() {
+            Self::from_u16(v + (Self::AddRealStackValue as u16 - Self::AddReal as u16))
+        } else if self.is_extended_binary_math() {
+            Self::from_u16(v + (Self::Atan2fStackValue as u16 - Self::Atan2f as u16))
+        } else {
+            None
+        }
+    }
+
+    /// Translate a base (stack OP stack) math opcode to its value (value OP heap) variant.
+    ///
+    /// - Standard math (+112): `AddReal..XORInt` → `AddRealValue..XORIntValue`
+    /// - Extended binary (+29): `Atan2f..Minf` → `Atan2fValue..MinfValue`
+    #[must_use]
+    pub fn to_value(self) -> Option<Self> {
+        let v = self as u16;
+        if self.is_math() {
+            Self::from_u16(v + (Self::AddRealValue as u16 - Self::AddReal as u16))
+        } else if self.is_extended_binary_math() {
+            Self::from_u16(v + (Self::Atan2fValue as u16 - Self::Atan2f as u16))
+        } else {
+            None
+        }
+    }
+
+    /// Translate a base (stack OP stack) math opcode to its value-invert variant.
+    ///
+    /// For commutative operations, this returns the same as [`to_value`](Self::to_value).
+    /// For non-commutative operations (Sub, Div, Rem, shifts, comparisons),
+    /// returns the dedicated `*ValueInvert` opcode.
+    ///
+    /// # Source provenance (C++)
+    /// - `gFIRMath2ValueInvert` and `gFIRExtendedMath2ValueInvert` maps in
+    ///   `interpreter_optimizer.hh`
+    #[must_use]
+    pub fn to_value_invert(self) -> Option<Self> {
+        // Standard math: check non-commutative cases first
+        match self {
+            Self::SubReal => Some(Self::SubRealValueInvert),
+            Self::SubInt => Some(Self::SubIntValueInvert),
+            Self::DivReal => Some(Self::DivRealValueInvert),
+            Self::DivInt => Some(Self::DivIntValueInvert),
+            Self::RemReal => Some(Self::RemRealValueInvert),
+            Self::RemInt => Some(Self::RemIntValueInvert),
+            Self::LshInt => Some(Self::LshIntValueInvert),
+            Self::ARshInt => Some(Self::ARshIntValueInvert),
+            Self::LRshInt => Some(Self::LRshIntValueInvert),
+            Self::GTInt => Some(Self::GTIntValueInvert),
+            Self::LTInt => Some(Self::LTIntValueInvert),
+            Self::GEInt => Some(Self::GEIntValueInvert),
+            Self::LEInt => Some(Self::LEIntValueInvert),
+            Self::GTReal => Some(Self::GTRealValueInvert),
+            Self::LTReal => Some(Self::LTRealValueInvert),
+            Self::GEReal => Some(Self::GERealValueInvert),
+            Self::LEReal => Some(Self::LERealValueInvert),
+            // Extended binary non-commutative
+            Self::Atan2f => Some(Self::Atan2fValueInvert),
+            Self::Fmodf => Some(Self::FmodfValueInvert),
+            Self::Powf => Some(Self::PowfValueInvert),
+            // Commutative: fall through to to_value()
+            _ => self.to_value(),
+        }
+    }
+
+    /// Returns `true` if this base math opcode is commutative.
+    ///
+    /// Used by the optimizer to decide between `to_value` and `to_value_invert`.
+    #[must_use]
+    pub fn is_commutative(self) -> bool {
+        matches!(
+            self,
+            Self::AddReal
+                | Self::AddInt
+                | Self::MultReal
+                | Self::MultInt
+                | Self::EQInt
+                | Self::NEInt
+                | Self::EQReal
+                | Self::NEReal
+                | Self::ANDInt
+                | Self::ORInt
+                | Self::XORInt
+                // Extended binary commutative
+                | Self::Max
+                | Self::Maxf
+                | Self::Min
+                | Self::Minf
+        )
+    }
 }
 
 /// Instruction name table for `.fbc` text format serialization.
@@ -1203,6 +1344,107 @@ mod tests {
         assert!(!FbcOpcode::Int32Value.is_real_type());
         assert!(!FbcOpcode::AddInt.is_real_type());
         assert!(!FbcOpcode::Nop.is_real_type());
+    }
+
+    // ── Offset arithmetic helper tests ──────────────────────────────────
+
+    #[test]
+    fn to_heap_standard_math() {
+        assert_eq!(FbcOpcode::AddReal.to_heap(), Some(FbcOpcode::AddRealHeap));
+        assert_eq!(FbcOpcode::SubInt.to_heap(), Some(FbcOpcode::SubIntHeap));
+        assert_eq!(FbcOpcode::XORInt.to_heap(), Some(FbcOpcode::XORIntHeap));
+    }
+
+    #[test]
+    fn to_heap_extended_unary() {
+        assert_eq!(FbcOpcode::Abs.to_heap(), Some(FbcOpcode::AbsHeap));
+        assert_eq!(FbcOpcode::Sinf.to_heap(), Some(FbcOpcode::SinfHeap));
+        assert_eq!(FbcOpcode::Tanhf.to_heap(), Some(FbcOpcode::TanhfHeap));
+    }
+
+    #[test]
+    fn to_heap_extended_binary() {
+        assert_eq!(FbcOpcode::Atan2f.to_heap(), Some(FbcOpcode::Atan2fHeap));
+        assert_eq!(FbcOpcode::Minf.to_heap(), Some(FbcOpcode::MinfHeap));
+    }
+
+    #[test]
+    fn to_stack_standard_math() {
+        assert_eq!(FbcOpcode::AddReal.to_stack(), Some(FbcOpcode::AddRealStack));
+        assert_eq!(FbcOpcode::MultInt.to_stack(), Some(FbcOpcode::MultIntStack));
+    }
+
+    #[test]
+    fn to_stack_extended_binary() {
+        assert_eq!(FbcOpcode::Atan2f.to_stack(), Some(FbcOpcode::Atan2fStack));
+    }
+
+    #[test]
+    fn to_stack_returns_none_for_unary() {
+        assert!(FbcOpcode::Sinf.to_stack().is_none());
+    }
+
+    #[test]
+    fn to_stack_value_standard() {
+        assert_eq!(
+            FbcOpcode::MultReal.to_stack_value(),
+            Some(FbcOpcode::MultRealStackValue)
+        );
+    }
+
+    #[test]
+    fn to_value_standard() {
+        assert_eq!(FbcOpcode::AddReal.to_value(), Some(FbcOpcode::AddRealValue));
+        assert_eq!(FbcOpcode::SubInt.to_value(), Some(FbcOpcode::SubIntValue));
+    }
+
+    #[test]
+    fn to_value_invert_non_commutative() {
+        assert_eq!(
+            FbcOpcode::SubReal.to_value_invert(),
+            Some(FbcOpcode::SubRealValueInvert)
+        );
+        assert_eq!(
+            FbcOpcode::DivInt.to_value_invert(),
+            Some(FbcOpcode::DivIntValueInvert)
+        );
+        assert_eq!(
+            FbcOpcode::GTReal.to_value_invert(),
+            Some(FbcOpcode::GTRealValueInvert)
+        );
+        assert_eq!(
+            FbcOpcode::Atan2f.to_value_invert(),
+            Some(FbcOpcode::Atan2fValueInvert)
+        );
+    }
+
+    #[test]
+    fn to_value_invert_commutative_falls_through() {
+        // Commutative ops: value_invert == value
+        assert_eq!(
+            FbcOpcode::AddReal.to_value_invert(),
+            Some(FbcOpcode::AddRealValue)
+        );
+        assert_eq!(FbcOpcode::Max.to_value_invert(), Some(FbcOpcode::MaxValue));
+    }
+
+    #[test]
+    fn is_commutative_spot_checks() {
+        assert!(FbcOpcode::AddReal.is_commutative());
+        assert!(FbcOpcode::MultInt.is_commutative());
+        assert!(FbcOpcode::EQReal.is_commutative());
+        assert!(FbcOpcode::Maxf.is_commutative());
+        assert!(!FbcOpcode::SubReal.is_commutative());
+        assert!(!FbcOpcode::DivInt.is_commutative());
+        assert!(!FbcOpcode::GTReal.is_commutative());
+        assert!(!FbcOpcode::Atan2f.is_commutative());
+    }
+
+    #[test]
+    fn to_heap_rejects_non_math() {
+        assert!(FbcOpcode::LoadReal.to_heap().is_none());
+        assert!(FbcOpcode::Return.to_heap().is_none());
+        assert!(FbcOpcode::Nop.to_heap().is_none());
     }
 
     #[test]

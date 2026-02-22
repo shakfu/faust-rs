@@ -1,6 +1,43 @@
 # JOURNAL
 
 
+## 2026-02-22
+
+### Interpreter backend — Step 4 implementation (FBC bytecode optimizer)
+
+- Implemented Step 4 of the interpreter backend porting plan: the FBC bytecode optimizer.
+- `optimizer.rs`: ~800 lines porting C++ `FBCInstructionOptimizer<REAL>` (1471 lines in `interpreter_optimizer.hh`) with all 6 optimization levels.
+- Replaces C++ class hierarchy (12 optimizer subclasses with virtual `rewrite()`) with free functions returning `RewriteResult` enum.
+- **Rewrite framework**:
+  - `RewriteResult<R>` enum: `Emit(instruction, advance)` or `Copy(advance)`.
+  - `apply_rewriter()`: single-pass scan applying a rewrite function at each cursor position.
+  - `optimize_until_fixpoint()`: repeats rewriting until block stops shrinking.
+  - `optimize_recursive()`: traverses control-flow sub-blocks (`If`, `Select*`, `Loop`, `CondBranch`) before applying the rewrite pass.
+- **6 optimization levels**:
+  - **Level 1 (LoadStore)**: `Int32Value(idx) + Load/StoreIndexed*` → direct `Load/Store*` with folded offset.
+  - **Level 2 (Move)**: `Load* + Store*` → `Move*`, `Value + Store*` → `Store*Value`.
+  - **Level 3 (BlockMove)**: Runs of sequential `MoveReal` (step-by-2 offsets, >4 elements) → `BlockPairMoveReal`.
+  - **Level 4 (PairMove)**: Two adjacent `Move*` (offset1 = offset2+1, chained) → `PairMove*`.
+  - **Level 5 (Cast)**: `LoadInt + CastReal` → `CastRealHeap`, `LoadReal + CastInt` → `CastIntHeap`.
+  - **Level 6 (Math)**: Combined math optimizer, math specializer, and cast specializer:
+    - **Heap fusion**: `LoadReal + LoadReal + BinOp` → `BinOpHeap` (28 standard + 7 ext binary ops).
+    - **Stack fusion**: `LoadReal + BinOp` → `BinOpStack`.
+    - **StackValue fusion**: `RealValue + BinOp` → `BinOpStackValue`.
+    - **Value fusion**: `LoadReal + RealValue + BinOp` → `BinOpValue` (commutative) / `BinOpValueInvert` (non-commutative).
+    - **Extended unary heap**: `LoadReal + Sinf` → `SinfHeap` (22 ops).
+    - **Constant folding**: `RealValue(a) + RealValue(b) + AddReal` → `RealValue(a+b)` (all real/int/ext binary ops).
+    - **Unary constant fold**: `RealValue(v) + Sinf` → `RealValue(sin(v))` (all 22 unary ops).
+    - **Identity elimination**: `x + 0 → x`, `x * 1 → x` (real and int).
+    - **Annihilator elimination**: `x * 0 → 0`.
+    - **Cast specializer**: `Int32Value(v) + CastReal` → `RealValue(v as f64)`.
+- **Opcode offset arithmetic helpers** added to `opcode.rs`:
+  - `to_heap()`, `to_stack()`, `to_stack_value()`, `to_value()`, `to_value_invert()`: O(1) discriminant arithmetic.
+  - `is_commutative()`: identifies commutative operations for value/value-invert selection.
+- **Public API**: `optimize_block<R>(arena, block_id, min_level, max_level)` — applies levels sequentially with recursive sub-block traversal.
+- 23 new tests: 20 optimizer unit tests (pattern verification for each level) + 8 opcode helper tests + 1 recursive sub-block test + 1 multi-level integration test.
+- **Pass criteria met**: Heap fusion ✓, Value fusion ✓, Identity `x+0→x` ✓, Constant fold `2.0+3.0→5.0` ✓, Semantic preservation ✓.
+- Quality gate: 129 tests passing (23 new + 106 existing), clippy-clean (`-D warnings`), fmt-clean.
+
 ## 2026-02-21
 
 ### Interpreter backend — Step 3 implementation (FIR → FBC compiler)
