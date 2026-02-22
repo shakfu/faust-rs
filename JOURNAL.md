@@ -3,6 +3,12 @@
 
 ## 2026-02-22
 
+### Documentation — READMEs updated for the interpreter backend
+
+- **`README.md`** (root) — added `-lang interp` / `--dump-interp` / `interp-fbc` alias to all CLI example blocks; added `-o foo.fbc` output example.
+- **`crates/codegen/README.md`** — added `backends::interp` row to the public API table; new subsection describing the 5-step interpreter pipeline (`FirToFbcCompiler` → `generate_interp_module` → `FbcDspFactory::optimize` → `write_fbc`/`read_fbc` → `FbcDspInstance`); updated status to mark the interpreter backend as complete; extended the pipeline diagram with `.fbc` output.
+- **`crates/compiler/README.md`** — added a `Compiler` entry-points table listing all three `compile_*_to_interp[_with_lane]` method groups; extended the pipeline diagram to include `.fbc`; updated the facade responsibilities paragraph to mention interpreter bytecode.
+
 ### Clippy housekeeping — codegen crate
 
 - Fixed 2 `clippy::all` warnings in the interpreter backend with no functional change.

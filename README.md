@@ -46,11 +46,17 @@ faust-rs -lang c foo.dsp
 # Generate C++
 faust-rs -lang cpp foo.dsp
 
+# Generate interpreter bytecode (.fbc)
+faust-rs -lang interp foo.dsp
+# alias: -lang interp-fbc
+# shorthand flag: --dump-interp
+
 # Dump FIR text IR
 faust-rs -lang fir foo.dsp
 
 # Write output to a file
 faust-rs -lang cpp foo.dsp -o foo.cpp
+faust-rs -lang interp foo.dsp -o foo.fbc
 ```
 
 If your installed command is named `faust` (for example via a symlink/wrapper),
@@ -59,6 +65,7 @@ the same model applies:
 ```bash
 faust -lang c foo.dsp
 faust -lang cpp foo.dsp
+faust -lang interp foo.dsp
 faust -lang fir foo.dsp
 ```
 
@@ -67,6 +74,7 @@ Without installation (equivalent):
 ```bash
 cargo run -p compiler -- -lang c foo.dsp
 cargo run -p compiler -- -lang cpp foo.dsp
+cargo run -p compiler -- -lang interp foo.dsp
 cargo run -p compiler -- -lang fir foo.dsp
 ```
 
