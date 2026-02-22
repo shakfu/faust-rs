@@ -35,7 +35,7 @@ use super::real::FbcReal;
 ///
 /// This should match the Faust compiler version that generates the bytecode.
 /// For the Rust port, we use a fixed version string.
-pub const FAUST_VERSION: &str = "2.84.5";
+pub const FAUST_VERSION: &str = "2.84.5-rust";
 
 // ── Error type ─────────────────────────────────────────────────────────────
 

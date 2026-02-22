@@ -359,6 +359,64 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         })
     }
 
+    /// Compiles a FIR block node as a new sub-block in the arena and returns
+    /// its allocated [`BlockId`].
+    ///
+    /// If `block_id` does not decode as a [`FirMatch::Block`], an empty block
+    /// (containing only `kReturn`) is emitted.
+    ///
+    /// This is the building block for [`generate_interp_module`] which compiles
+    /// each named DSP section (init, compute, …) into a separate arena block.
+    pub fn compile_fir_block(
+        &mut self,
+        store: &FirStore,
+        block_id: FirId,
+    ) -> Result<BlockId, CompileError> {
+        let nodes = match match_fir(store, block_id) {
+            FirMatch::Block(ids) => ids,
+            _ => vec![],
+        };
+        self.begin_sub_block();
+        for id in &nodes {
+            self.compile_node(store, *id)?;
+        }
+        Ok(self.end_sub_block())
+    }
+
+    /// Allocates an empty block (containing only `kReturn`) in the arena.
+    ///
+    /// Used by [`generate_interp_module`] to fill factory slots for DSP
+    /// sections that are not present in the FIR module (e.g. `staticInit`
+    /// when the legacy bridge is in use).
+    pub fn alloc_empty_block(&mut self) -> BlockId {
+        self.begin_sub_block();
+        self.end_sub_block()
+    }
+
+    /// Destructs the compiler into its arena, heap sizes, UI instructions,
+    /// and field table without sealing the outermost block.
+    ///
+    /// Call this after all function bodies have been compiled via
+    /// [`compile_fir_block`].  The outermost (current) block, which should be
+    /// empty at that point, is discarded.
+    pub fn into_parts(
+        self,
+    ) -> (
+        FbcBlockArena<R>,
+        i32,
+        i32,
+        Vec<FbcUiInstruction<R>>,
+        HashMap<String, MemoryDesc>,
+    ) {
+        (
+            self.arena,
+            self.int_heap_offset,
+            self.real_heap_offset,
+            self.ui_instructions,
+            self.field_table,
+        )
+    }
+
     // -----------------------------------------------------------------------
     // Block switching
     // -----------------------------------------------------------------------

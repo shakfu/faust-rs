@@ -36,6 +36,10 @@ use std::path::{Path, PathBuf};
 use boxes::{BoxId, BoxMatch, dump_box, match_box};
 use codegen::backends::c::{COptions, CodegenError as CCodegenError, generate_c_module};
 use codegen::backends::cpp::{CodegenError, CppOptions, generate_cpp_module};
+use codegen::backends::interp::{
+    CodegenError as InterpCodegenError, CodegenErrorCode as InterpCodegenErrorCode, FbcDspFactory,
+    InterpOptions, generate_interp_module, write_fbc,
+};
 use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, SourceSpan};
 use fir::{FirBuilder, FirId, FirStore, FirType, NamedType};
 use parser::{ParseOutput, SourceReaderError};
@@ -372,6 +376,83 @@ impl Compiler {
         self.compile_file_to_fir_with_lane(path, &[default_search_base(path)], lane)
     }
 
+    /// Parses + evaluates + propagates one source, then emits `.fbc` bytecode
+    /// text via the interpreter backend using the legacy bridge lane.
+    pub fn compile_source_to_interp(
+        &self,
+        source_name: &str,
+        source: &str,
+        options: &InterpOptions,
+    ) -> Result<String, CompilerError> {
+        self.compile_source_to_interp_with_lane(
+            source_name,
+            source,
+            options,
+            SignalFirLane::LegacyBridge,
+        )
+    }
+
+    /// Parses + evaluates + propagates one source, then emits `.fbc` bytecode
+    /// text using the selected signal->FIR lowering lane.
+    pub fn compile_source_to_interp_with_lane(
+        &self,
+        source_name: &str,
+        source: &str,
+        options: &InterpOptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        let signals = self.compile_source_to_signals(source_name, source)?;
+        lower_signals_to_interp(source_name, &signals, options, lane)
+            .map_err(|e| lower_interp_error_to_compiler(source_name, e))
+    }
+
+    /// Parses + evaluates + propagates one file, then emits `.fbc` bytecode
+    /// text via the interpreter backend using the legacy bridge lane.
+    pub fn compile_file_to_interp(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        options: &InterpOptions,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_to_interp_with_lane(path, search_paths, options, SignalFirLane::LegacyBridge)
+    }
+
+    /// Parses + evaluates + propagates one file, then emits `.fbc` bytecode
+    /// text using the selected signal->FIR lowering lane.
+    pub fn compile_file_to_interp_with_lane(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        options: &InterpOptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        let signals = self.compile_file_to_signals(path, search_paths)?;
+        let source = path.display().to_string();
+        lower_signals_to_interp(&source, &signals, options, lane)
+            .map_err(|e| lower_interp_error_to_compiler(&source, e))
+    }
+
+    /// Parses + evaluates + propagates one file with default import search
+    /// path, then emits `.fbc` bytecode text via the interpreter backend.
+    pub fn compile_file_default_to_interp(
+        &self,
+        path: &Path,
+        options: &InterpOptions,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_default_to_interp_with_lane(path, options, SignalFirLane::LegacyBridge)
+    }
+
+    /// Parses + evaluates + propagates one file with default import search
+    /// path, then emits `.fbc` bytecode text using the selected lane.
+    pub fn compile_file_default_to_interp_with_lane(
+        &self,
+        path: &Path,
+        options: &InterpOptions,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_to_interp_with_lane(path, &[default_search_base(path)], options, lane)
+    }
+
     fn pipeline_to_signals(
         &self,
         source: &str,
@@ -539,6 +620,11 @@ pub enum CompilerError {
         source: Box<str>,
         error: CCodegenError,
     },
+    /// Interpreter backend emission failed from FIR.
+    CodegenInterp {
+        source: Box<str>,
+        error: InterpCodegenError,
+    },
 }
 
 impl std::fmt::Display for CompilerError {
@@ -569,6 +655,9 @@ impl std::fmt::Display for CompilerError {
                 write!(f, "code generation failed for {source}: {error}")
             }
             Self::CodegenC { source, error } => {
+                write!(f, "code generation failed for {source}: {error}")
+            }
+            Self::CodegenInterp { source, error } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
         }
@@ -644,6 +733,24 @@ fn lower_c_error_to_compiler(source: &str, error: LowerToCError) -> CompilerErro
     }
 }
 
+/// Maps a `LowerToInterpError` into a `CompilerError`, attaching the source name.
+fn lower_interp_error_to_compiler(source: &str, error: LowerToInterpError) -> CompilerError {
+    match error {
+        LowerToInterpError::Transform(error) => transform_error_to_compiler(source, error),
+        LowerToInterpError::Codegen(error) => CompilerError::CodegenInterp {
+            source: source.into(),
+            error,
+        },
+        LowerToInterpError::Serialize(message) => CompilerError::CodegenInterp {
+            source: source.into(),
+            error: InterpCodegenError {
+                code: InterpCodegenErrorCode::CompilationFailed,
+                message,
+            },
+        },
+    }
+}
+
 /// Wraps a `SignalFirError` into a `CompilerError::Transform` with one diagnostic.
 fn transform_error_to_compiler(source: &str, error: SignalFirError) -> CompilerError {
     let diagnostic = signal_fir_diagnostic(&error);
@@ -699,6 +806,14 @@ enum LowerToCError {
     Codegen(CCodegenError),
 }
 
+#[derive(Debug)]
+enum LowerToInterpError {
+    Transform(SignalFirError),
+    Codegen(InterpCodegenError),
+    /// Serialization of the factory to `.fbc` text failed.
+    Serialize(String),
+}
+
 // ─── Signal-to-FIR lower functions ───────────────────────────────────────────
 
 fn lower_signals_to_cpp(
@@ -731,6 +846,70 @@ fn lower_signals_to_c(
             lower_signals_to_c_transform_fastlane(source_name, output, options)
         }
     }
+}
+
+fn lower_signals_to_interp(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &InterpOptions,
+    lane: SignalFirLane,
+) -> Result<String, LowerToInterpError> {
+    match lane {
+        SignalFirLane::LegacyBridge => {
+            lower_signals_to_interp_legacy_bridge(source_name, output, options)
+        }
+        SignalFirLane::TransformFastLane => {
+            lower_signals_to_interp_transform_fastlane(source_name, output, options)
+        }
+    }
+}
+
+fn lower_signals_to_interp_legacy_bridge(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &InterpOptions,
+) -> Result<String, LowerToInterpError> {
+    let module_name = resolve_module_name(options.module_name.as_deref(), source_name);
+    let lowered = lower_signals_to_fir_legacy_bridge(source_name, output, module_name);
+    let mut effective_options = options.clone();
+    if effective_options.num_inputs == 0 {
+        effective_options.num_inputs = output.process_arity.inputs;
+    }
+    if effective_options.num_outputs == 0 {
+        effective_options.num_outputs = output.process_arity.outputs;
+    }
+    let factory: FbcDspFactory<f32> =
+        generate_interp_module(&lowered.store, lowered.module, &effective_options)
+            .map_err(LowerToInterpError::Codegen)?;
+    serialize_factory(&factory).map_err(LowerToInterpError::Serialize)
+}
+
+fn lower_signals_to_interp_transform_fastlane(
+    source_name: &str,
+    output: &SignalCompileOutput,
+    options: &InterpOptions,
+) -> Result<String, LowerToInterpError> {
+    let module_name = resolve_module_name(options.module_name.as_deref(), source_name);
+    let lowered = lower_signals_to_fir_transform_fastlane(output, module_name)
+        .map_err(LowerToInterpError::Transform)?;
+    let mut effective_options = options.clone();
+    if effective_options.num_inputs == 0 {
+        effective_options.num_inputs = output.process_arity.inputs;
+    }
+    if effective_options.num_outputs == 0 {
+        effective_options.num_outputs = output.process_arity.outputs;
+    }
+    let factory: FbcDspFactory<f32> =
+        generate_interp_module(&lowered.store, lowered.module, &effective_options)
+            .map_err(LowerToInterpError::Codegen)?;
+    serialize_factory(&factory).map_err(LowerToInterpError::Serialize)
+}
+
+/// Serializes a [`FbcDspFactory`] to `.fbc` text format.
+fn serialize_factory(factory: &FbcDspFactory<f32>) -> Result<String, String> {
+    let mut buf = Vec::new();
+    write_fbc(factory, &mut buf, false).map_err(|e| e.to_string())?;
+    String::from_utf8(buf).map_err(|e| e.to_string())
 }
 
 fn lower_signals_to_fir(

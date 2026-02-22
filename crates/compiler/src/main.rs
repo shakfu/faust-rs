@@ -20,6 +20,7 @@ use boxes::dump_box;
 use clap::{ArgAction, Parser, ValueEnum};
 use codegen::backends::c::COptions;
 use codegen::backends::cpp::CppOptions;
+use codegen::backends::interp::InterpOptions;
 use compiler::{
     Compiler, CompilerError, SignalFirLane,
     enrobage::{EnrobageOptions, wrap_cpp_with_architecture},
@@ -38,6 +39,8 @@ enum CliLang {
     #[value(alias = "cxx", alias = "c++")]
     Cpp,
     Fir,
+    #[value(alias = "interp-fbc")]
+    Interp,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -99,6 +102,9 @@ struct CliArgs {
     /// Compile to FIR and dump FIR IR.
     #[arg(long = "dump-fir", action = ArgAction::SetTrue)]
     dump_fir: bool,
+    /// Compile to interpreter bytecode and print `.fbc` text.
+    #[arg(long = "dump-interp", action = ArgAction::SetTrue)]
+    dump_interp: bool,
     /// Select backend language (Faust-style): `-lang c`, `-lang cpp`, or `-lang fir`.
     ///
     /// This option is equivalent to `--dump-c` / `--dump-cpp` / `--dump-fir`.
@@ -150,6 +156,7 @@ fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> 
                     "-c" => "c".to_owned(),
                     "-cpp" => "cpp".to_owned(),
                     "-fir" => "fir".to_owned(),
+                    "-interp" => "interp".to_owned(),
                     _ => value,
                 };
                 normalized.push(mapped);
@@ -587,6 +594,7 @@ fn main() {
         cli.dump_cpp,
         cli.dump_c,
         cli.dump_fir,
+        cli.dump_interp,
         cli.lang.is_some(),
     ]
     .into_iter()
@@ -758,6 +766,37 @@ fn main() {
             }
             Err(err) => {
                 eprintln!("FIR pipeline failed: {err}");
+                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if cli.dump_interp || matches!(cli.lang, Some(CliLang::Interp)) {
+        let compiler = Compiler::new();
+        let options = InterpOptions::default();
+        let result = if cli.import_dir.is_empty() {
+            compiler.compile_file_default_to_interp_with_lane(
+                input_path,
+                &options,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        } else {
+            compiler.compile_file_to_interp_with_lane(
+                input_path,
+                &cli.import_dir,
+                &options,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        };
+
+        match result {
+            Ok(fbc_text) => {
+                emit_output(&fbc_text, cli.output.as_ref());
+            }
+            Err(err) => {
+                eprintln!("Interp pipeline failed: {err}");
                 print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
                 std::process::exit(1);
             }

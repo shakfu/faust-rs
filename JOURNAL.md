@@ -3,6 +3,31 @@
 
 ## 2026-02-22
 
+### Connect Interp backend in the compiler facade
+
+- Wired the interpreter backend into the compiler pipeline, parallel to the existing C and C++ backends.
+- **`crates/codegen/src/backends/interp/compiler.rs`** — added 3 new public methods to `FirToFbcCompiler<R>`:
+  - `compile_fir_block(store, block_id)` — compiles a FIR `Block` node as a new arena sub-block, returning its `BlockId`; used by `generate_interp_module` to compile each named DSP section.
+  - `alloc_empty_block()` — allocates a Return-only block for DSP sections absent from the FIR module.
+  - `into_parts()` — destructs the compiler into `(FbcBlockArena, int_heap_size, real_heap_size, ui_instructions, field_table)` without sealing the outermost block.
+- **`crates/codegen/src/backends/interp/mod.rs`** — backend entry point, parallel to `generate_cpp_module` / `generate_c_module`:
+  - `InterpOptions` struct (`opt_level`, `module_name`, `num_inputs`, `num_outputs`).
+  - `CodegenError` / `CodegenErrorCode` with stable codes `FRS-CGEN-INTERP-0001..0003`.
+  - `generate_interp_module(store, module, options)` — scans the FIR module's `declarations` block for `DeclareFun` nodes, compiles each body into a shared `FirToFbcCompiler`, maps the 6 known function names (`staticInit`, `instanceConstants`, `instanceResetUserInterface`, `instanceClear`, `compute`, `computeThread`) to the 6 `FbcDspFactory` block slots, fills missing slots with empty blocks, resolves heap offsets from the field table, and returns a serialized `.fbc` text string.
+- **`crates/compiler/src/lib.rs`** — compiler facade:
+  - New `CompilerError::CodegenInterp { source, error }` variant.
+  - `LowerToInterpError` enum (`Transform`, `Codegen`, `Serialize`).
+  - `lower_interp_error_to_compiler` mapping helper.
+  - 2 internal lowering functions: `lower_signals_to_interp_legacy_bridge` and `lower_signals_to_interp_transform_fastlane`.
+  - 6 new public `Compiler` methods following the established lane-selection pattern: `compile_source_to_interp[_with_lane]`, `compile_file_to_interp[_with_lane]`, `compile_file_default_to_interp[_with_lane]`.
+- **`crates/compiler/src/main.rs`** — CLI:
+  - `Interp` variant added to `CliLang` (alias `interp-fbc`); `-lang -interp` normalized.
+  - `--dump-interp` flag added.
+  - Dispatch block for `--dump-interp` / `-lang interp` inserted before the C++ default.
+- **`crates/xtask/src/main.rs`** — exhaustive `CompilerError` match updated with `CodegenInterp` arm.
+- **Smoke test**: `--dump-interp --signal-fir-lane legacy passthrough.dsp` produces a valid `.fbc` file with correct `interpreter_dsp_factory float` header, 6 empty code blocks (Return-only), and correct `inputs 1 outputs 1` counts. The transform-fastlane path reaches the FBC compiler and returns a typed `CompilationFailed` error for variables not yet declared in the FIR pipeline — expected at this stage.
+- Build: zero warnings, zero errors; all 11 compiler tests pass.
+
 ### Interpreter FFI crate — `interp-ffi` (C/C++ API export)
 
 - Created `crates/interp-ffi/`: a new crate that wraps the `codegen` interpreter backend behind a `libfaust` static and dynamic library compatible with the official Faust C and C++ APIs.
