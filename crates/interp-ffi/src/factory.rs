@@ -18,11 +18,12 @@ use std::io::BufReader;
 use codegen::backends::interp::{FAUST_VERSION, read_fbc, write_fbc};
 
 use crate::cache::{
-    cache_all_sha_keys, cache_drain, cache_insert, cache_lookup,
-    cache_remove_by_ptr, start_mt, stop_mt,
+    cache_all_sha_keys, cache_drain, cache_insert, cache_lookup, cache_remove_by_ptr, start_mt,
+    stop_mt,
 };
-use crate::types::{alloc_c_string, alloc_factory, free_c_string, free_factory,
-                   InterpreterDspFactory};
+use crate::types::{
+    InterpreterDspFactory, alloc_c_string, alloc_factory, free_c_string, free_factory,
+};
 
 // ── Version ──────────────────────────────────────────────────────────────────
 
@@ -195,7 +196,10 @@ pub unsafe extern "C" fn createCInterpreterDSPFactoryFromFile(
     error_msg: *mut c_char,
 ) -> *mut InterpreterDspFactory {
     unsafe {
-        write_error(error_msg, "createCInterpreterDSPFactoryFromFile: not implemented (full compiler pipeline not available)");
+        write_error(
+            error_msg,
+            "createCInterpreterDSPFactoryFromFile: not implemented (full compiler pipeline not available)",
+        );
         std::ptr::null_mut()
     }
 }
@@ -213,7 +217,10 @@ pub unsafe extern "C" fn createCInterpreterDSPFactoryFromString(
     error_msg: *mut c_char,
 ) -> *mut InterpreterDspFactory {
     unsafe {
-        write_error(error_msg, "createCInterpreterDSPFactoryFromString: not implemented (full compiler pipeline not available)");
+        write_error(
+            error_msg,
+            "createCInterpreterDSPFactoryFromString: not implemented (full compiler pipeline not available)",
+        );
         std::ptr::null_mut()
     }
 }
@@ -251,9 +258,7 @@ pub unsafe extern "C" fn getCInterpreterDSPFactoryFromSHAKey(
 /// # Safety
 /// `factory` must be a valid non-null factory pointer or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn deleteCInterpreterDSPFactory(
-    factory: *mut InterpreterDspFactory,
-) -> bool {
+pub unsafe extern "C" fn deleteCInterpreterDSPFactory(factory: *mut InterpreterDspFactory) -> bool {
     unsafe {
         if factory.is_null() {
             return false;
@@ -287,10 +292,7 @@ pub extern "C" fn getAllCInterpreterDSPFactories() -> *mut *mut c_char {
         return std::ptr::null_mut();
     }
     // Allocate an array of (keys.len() + 1) pointers (null-terminated).
-    let mut ptrs: Vec<*mut c_char> = keys
-        .into_iter()
-        .map(|k| alloc_c_string(&k))
-        .collect();
+    let mut ptrs: Vec<*mut c_char> = keys.into_iter().map(|k| alloc_c_string(&k)).collect();
     ptrs.push(std::ptr::null_mut()); // null terminator
 
     let boxed: Box<[*mut c_char]> = ptrs.into_boxed_slice();

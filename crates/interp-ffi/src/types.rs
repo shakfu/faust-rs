@@ -56,10 +56,8 @@ pub struct UIGlue {
     pub open_horizontal_box: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
     pub open_vertical_box: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
     pub close_box: Option<unsafe extern "C" fn(*mut c_void)>,
-    pub add_button:
-        Option<unsafe extern "C" fn(*mut c_void, *const c_char, *mut FaustFloat)>,
-    pub add_check_button:
-        Option<unsafe extern "C" fn(*mut c_void, *const c_char, *mut FaustFloat)>,
+    pub add_button: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *mut FaustFloat)>,
+    pub add_check_button: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *mut FaustFloat)>,
     pub add_vertical_slider: Option<
         unsafe extern "C" fn(
             *mut c_void,
@@ -94,38 +92,23 @@ pub struct UIGlue {
         ),
     >,
     pub add_horizontal_bargraph: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            *const c_char,
-            *mut FaustFloat,
-            FaustFloat,
-            FaustFloat,
-        ),
+        unsafe extern "C" fn(*mut c_void, *const c_char, *mut FaustFloat, FaustFloat, FaustFloat),
     >,
     pub add_vertical_bargraph: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            *const c_char,
-            *mut FaustFloat,
-            FaustFloat,
-            FaustFloat,
-        ),
+        unsafe extern "C" fn(*mut c_void, *const c_char, *mut FaustFloat, FaustFloat, FaustFloat),
     >,
     /// addSoundfile: `sf_zone` is `Soundfile**` — passed as `*mut *mut c_void` here.
-    pub add_soundfile: Option<
-        unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, *mut *mut c_void),
-    >,
-    pub declare: Option<
-        unsafe extern "C" fn(*mut c_void, *mut FaustFloat, *const c_char, *const c_char),
-    >,
+    pub add_soundfile:
+        Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, *mut *mut c_void)>,
+    pub declare:
+        Option<unsafe extern "C" fn(*mut c_void, *mut FaustFloat, *const c_char, *const c_char)>,
 }
 
 /// C callback table for metadata (mirrors `MetaGlue` in `CInterface.h`).
 #[repr(C)]
 pub struct MetaGlue {
     pub meta_interface: *mut c_void,
-    pub declare:
-        Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
+    pub declare: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
 }
 
 // ── Allocation / deallocation helpers ───────────────────────────────────────
@@ -133,9 +116,7 @@ pub struct MetaGlue {
 /// Boxes a `FbcDspFactory<f32>` and returns a raw owning pointer.
 ///
 /// The caller is responsible for eventually calling [`free_factory`].
-pub(crate) fn alloc_factory(
-    inner: FbcDspFactory<FaustFloat>,
-) -> *mut InterpreterDspFactory {
+pub(crate) fn alloc_factory(inner: FbcDspFactory<FaustFloat>) -> *mut InterpreterDspFactory {
     Box::into_raw(Box::new(InterpreterDspFactory { inner }))
 }
 

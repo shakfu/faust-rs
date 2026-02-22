@@ -414,7 +414,12 @@ impl Compiler {
         search_paths: &[PathBuf],
         options: &InterpOptions,
     ) -> Result<String, CompilerError> {
-        self.compile_file_to_interp_with_lane(path, search_paths, options, SignalFirLane::LegacyBridge)
+        self.compile_file_to_interp_with_lane(
+            path,
+            search_paths,
+            options,
+            SignalFirLane::LegacyBridge,
+        )
     }
 
     /// Parses + evaluates + propagates one file, then emits `.fbc` bytecode

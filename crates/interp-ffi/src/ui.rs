@@ -5,7 +5,7 @@
 
 use std::ffi::CString;
 
-use codegen::backends::interp::{FbcMetaInstruction, FbcUiInstruction, FbcOpcode};
+use codegen::backends::interp::{FbcMetaInstruction, FbcOpcode, FbcUiInstruction};
 
 use crate::types::{FaustFloat, MetaGlue, UIGlue};
 
@@ -155,10 +155,7 @@ pub(crate) unsafe fn dispatch_ui(
 ///
 /// # Safety
 /// `meta` must be non-null and point to a valid `MetaGlue`.
-pub(crate) unsafe fn dispatch_meta(
-    meta_block: &[FbcMetaInstruction],
-    glue: *mut MetaGlue,
-) {
+pub(crate) unsafe fn dispatch_meta(meta_block: &[FbcMetaInstruction], glue: *mut MetaGlue) {
     unsafe {
         let glue = &*glue;
         if let Some(declare) = glue.declare {

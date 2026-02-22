@@ -18,8 +18,8 @@ use std::os::raw::c_int;
 use codegen::backends::interp::FbcExecutor;
 
 use crate::types::{
-    alloc_instance, free_instance, FaustFloat, InterpreterDspFactory,
-    InterpreterDspInstance, MetaGlue, UIGlue,
+    FaustFloat, InterpreterDspFactory, InterpreterDspInstance, MetaGlue, UIGlue, alloc_instance,
+    free_instance,
 };
 use crate::ui::{dispatch_meta, dispatch_ui};
 
@@ -115,7 +115,10 @@ pub unsafe extern "C" fn getSampleRateCInterpreterDSPInstance(
         let sr_off = (*(*dsp).factory).inner.sr_offset as usize;
         // explicit &-ref required to silence `dangerous_implicit_autorefs` (edition 2024)
         #[allow(clippy::needless_borrow)]
-        let result = (&(*dsp).executor.int_heap).get(sr_off).copied().unwrap_or(0);
+        let result = (&(*dsp).executor.int_heap)
+            .get(sr_off)
+            .copied()
+            .unwrap_or(0);
         result
     }
 }
@@ -213,9 +216,7 @@ pub unsafe extern "C" fn instanceResetUserInterfaceCInterpreterDSPInstance(
 /// # Safety
 /// `dsp` must be a valid non-null instance pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn instanceClearCInterpreterDSPInstance(
-    dsp: *mut InterpreterDspInstance,
-) {
+pub unsafe extern "C" fn instanceClearCInterpreterDSPInstance(dsp: *mut InterpreterDspInstance) {
     unsafe {
         if dsp.is_null() {
             return;
@@ -251,8 +252,12 @@ pub unsafe extern "C" fn cloneCInterpreterDSPInstance(
             factory.real_heap_size as usize,
         );
         // Copy heap state from the original.
-        new_executor.int_heap.copy_from_slice(&(*dsp).executor.int_heap);
-        new_executor.real_heap.copy_from_slice(&(*dsp).executor.real_heap);
+        new_executor
+            .int_heap
+            .copy_from_slice(&(*dsp).executor.int_heap);
+        new_executor
+            .real_heap
+            .copy_from_slice(&(*dsp).executor.real_heap);
 
         let clone = alloc_instance(factory_ptr, new_executor);
         (*clone).initialized = (*dsp).initialized;
@@ -350,9 +355,7 @@ pub unsafe extern "C" fn computeCInterpreterDSPInstance(
         // Store frame count in the 'count' heap slot.
         // explicit &mut ref required to silence `dangerous_implicit_autorefs` (edition 2024)
         #[allow(clippy::needless_borrow)]
-        if let Some(slot) = (&mut (*dsp).executor.int_heap)
-            .get_mut(factory.count_offset as usize)
-        {
+        if let Some(slot) = (&mut (*dsp).executor.int_heap).get_mut(factory.count_offset as usize) {
             *slot = count;
         }
 

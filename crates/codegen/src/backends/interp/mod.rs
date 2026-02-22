@@ -80,7 +80,6 @@ pub struct InterpOptions {
     pub num_outputs: usize,
 }
 
-
 // ─── Error types ────────────────────────────────────────────────────────────
 
 /// Error codes for interpreter code-generation failures.
@@ -163,15 +162,13 @@ pub fn generate_interp_module(
     module: fir::FirId,
     options: &InterpOptions,
 ) -> Result<FbcDspFactory<f32>, CodegenError> {
-    use std::collections::HashMap;
     use fir::match_fir;
+    use std::collections::HashMap;
 
     // 1. Decode module root.
     let (module_name_fir, declarations) = match match_fir(store, module) {
         fir::FirMatch::Module {
-            name,
-            declarations,
-            ..
+            name, declarations, ..
         } => (name, declarations),
         _ => {
             return Err(CodegenError::new(
@@ -181,10 +178,7 @@ pub fn generate_interp_module(
         }
     };
 
-    let module_name = options
-        .module_name
-        .clone()
-        .unwrap_or(module_name_fir);
+    let module_name = options.module_name.clone().unwrap_or(module_name_fir);
 
     // 2. Extract declared functions from the declarations block.
     let decl_ids = match match_fir(store, declarations) {
@@ -208,14 +202,12 @@ pub fn generate_interp_module(
             ..
         } = match_fir(store, *decl_id)
         {
-            let block_id = compiler
-                .compile_fir_block(store, body)
-                .map_err(|e| {
-                    CodegenError::new(
-                        CodegenErrorCode::CompilationFailed,
-                        format!("in '{fn_name}': {e}"),
-                    )
-                })?;
+            let block_id = compiler.compile_fir_block(store, body).map_err(|e| {
+                CodegenError::new(
+                    CodegenErrorCode::CompilationFailed,
+                    format!("in '{fn_name}': {e}"),
+                )
+            })?;
             fn_blocks.insert(fn_name, block_id);
         }
     }
@@ -256,10 +248,7 @@ pub fn generate_interp_module(
         .or_else(|| field_table.get("fSampleRate"))
         .map(|d| d.offset)
         .unwrap_or(0);
-    let count_offset = field_table
-        .get("count")
-        .map(|d| d.offset)
-        .unwrap_or(0);
+    let count_offset = field_table.get("count").map(|d| d.offset).unwrap_or(0);
     let iota_offset = field_table
         .get("IOTA")
         .or_else(|| field_table.get("fIOTA"))
@@ -281,8 +270,8 @@ pub fn generate_interp_module(
     // 8. Build and optionally optimize the factory.
     let mut factory = FbcDspFactory::new(
         module_name,
-        "",  // sha_key: not computed at this layer
-        "",  // compile_options: not set at this layer
+        "", // sha_key: not computed at this layer
+        "", // compile_options: not set at this layer
         INTERP_FILE_VERSION,
         num_inputs,
         num_outputs,

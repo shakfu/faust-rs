@@ -16,8 +16,7 @@ use crate::types::InterpreterDspFactory;
 static FACTORY_CACHE: LazyLock<Mutex<HashMap<String, usize>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-static MT_MODE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static MT_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Insert a factory into the cache under its SHA key.
 pub(crate) fn cache_insert(sha: &str, ptr: *mut InterpreterDspFactory) {
