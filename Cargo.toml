@@ -20,6 +20,7 @@ members = [
   "crates/utils",
   "crates/compiler",
   "crates/xtask",
+  "crates/interp-ffi",
 ]
 resolver = "2"
 

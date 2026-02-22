@@ -3,6 +3,36 @@
 
 ## 2026-02-22
 
+### Interpreter FFI crate — `interp-ffi` (C/C++ API export)
+
+- Created `crates/interp-ffi/`: a new crate that wraps the `codegen` interpreter backend behind a `libfaust` static and dynamic library compatible with the official Faust C and C++ APIs.
+- **Goal**: mirror `faust/architecture/faust/dsp/interpreter-dsp.h` (C++ classes) and `interpreter-dsp-c.h` (C opaque-pointer API) so that existing Faust host programs can link against the Rust-ported library without any source changes.
+- **Design decisions**:
+  - `crate-type = ["cdylib", "staticlib"]` with lib name `"faust"` → produces `libfaust.a` and `libfaust.dylib`.
+  - `unsafe_code = "allow"` override (workspace default is `"forbid"`) added directly in the crate-local `[lints.rust]` table to avoid the Cargo limitation of combining `workspace = true` with lint overrides.
+  - Only `f32` (`FAUSTFLOAT = float`) exported; `f64` deferred to a later step.
+  - `FbcDspInstance<'a, R>` lifetime borrow is incompatible with C opaque pointer semantics. Solved by creating `InterpreterDspInstance` with a `*const InterpreterDspFactory` raw pointer and an independent `FbcExecutor<f32>` heap — no lifetime parameter needed.
+  - cbindgen 0.27 does not parse `#[unsafe(no_mangle)]` (Rust edition 2024), so `include/interpreter-dsp-c.h` is maintained manually; `build.rs` only ensures the `include/` directory exists.
+- **Modules**:
+  - `types.rs`: `InterpreterDspFactory` (wraps `FbcDspFactory<f32>`), `InterpreterDspInstance` (raw factory pointer + `FbcExecutor<f32>`), `UIGlue` / `MetaGlue` (`#[repr(C)]` structs mirroring `faust/gui/CInterface.h`), and `alloc_*`/`free_*` helpers using `Box::into_raw` / `Box::from_raw`.
+  - `cache.rs`: global `LazyLock<Mutex<HashMap<String, usize>>>` factory cache keyed by SHA256 string, with insert / lookup / remove / drain / keys helpers, and stub `startMTDSPFactories` / `stopMTDSPFactories`.
+  - `ui.rs`: `dispatch_ui` iterates `FbcUiInstruction` list and calls the matching `UIGlue` function pointer; `dispatch_meta` iterates `FbcMetaInstruction` list and calls `MetaGlue.declare`.
+  - `factory.rs`: 16 `extern "C"` factory functions — bitcode read/write (string and file), unimplemented compiler stubs, cache management, JSON description, library list, and memory management (`freeCMemory`).
+  - `instance.rs`: 15 `extern "C"` instance functions — create/delete, audio layout queries, full init lifecycle (`init` → `instanceInit` → `instanceConstants` → `instanceResetUI` → `instanceClear`), clone, `buildUserInterface`, `metadata`, and `compute`.
+- **Rust edition 2024 adaptations**:
+  - `#[unsafe(no_mangle)]` required on all exported symbols (31 functions).
+  - `dangerous_implicit_autorefs` (deny-by-default): explicit `&` / `&mut` references on raw-pointer dereferences; `#[allow(clippy::needless_borrow)]` resolves the tension with clippy.
+  - `static_mut_refs` (deny): version string uses `OnceLock<CString>` instead of `static mut`.
+  - Non-`Sync` raw pointer in static context: `SyncNullArray([*const c_char; 1])` newtype with `unsafe impl Sync` for the empty library-list sentinel.
+- **Headers** (manually written, kept in sync with Rust source):
+  - `include/interpreter-dsp-c.h`: complete C header with `UIGlue` struct (snake_case fields), `MetaGlue` struct, opaque typedefs, and all 30+ function declarations with documentation.
+  - `include/interpreter-dsp.h`: C++ header with `namespace faust_interp`, `interpreter_dsp_factory` and `interpreter_dsp` wrapper classes delegating to the C API.
+- **Plans**: `porting/faust-rust-ffi-interp-en.md` document the 9-step approach.
+- **Build result**: zero warnings, zero errors.
+  - `target/release/libfaust.a` — 9.0 MB staticlib
+  - `target/release/libfaust.dylib` — 635 KB cdylib
+  - All 30+ C symbols verified via `nm`.
+
 ### Interpreter backend — Step 5 implementation (Factory, Serialization, DSP Interface)
 
 - Implemented Step 5 of the interpreter backend porting plan: factory, instance, and `.fbc` serialization — the final integration step.

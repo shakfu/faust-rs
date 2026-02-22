@@ -1,0 +1,28 @@
+[package]
+name = "interp-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Cannot combine `workspace = true` with lint overrides in the same table.
+# Reproduce workspace lints here, then override unsafe_code for FFI.
+[lints.rust]
+unsafe_code = "allow"           # FFI requires raw pointer operations
+unused_attributes = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+all = "warn"
+
+[lib]
+name = "faust"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+codegen = { path = "../codegen" }
+
+# cbindgen is kept for future use when Rust edition 2024 support is added.
+# For now the C header (include/interpreter-dsp-c.h) is maintained manually.
+# [build-dependencies]
+# cbindgen = "0.27"
