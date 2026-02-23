@@ -1,6 +1,58 @@
 # JOURNAL
 
 
+## 2026-02-23 (session 4)
+
+### Feature — FIR module verifier Phase 1 (`crates/fir/src/checker.rs`)
+
+**Motivation.** The plan in `porting/fir-module-verifier-plan-en.md` (§7 Phase 1) defines the first step of the `FirModuleChecker`: validate the top-level structure of a `FirMatch::Module` node and populate `ModuleSymbols` (struct fields, globals, declared functions). No type inference and no scope tracking are required at this stage; the output feeds subsequent phases.
+
+**Diagnostic codes implemented (17 checks):**
+
+| Code | Sev | Check |
+|---|---|---|
+| FIR-M01 | E | Root node is not a `FirMatch::Module` |
+| FIR-M02 | E | `dsp_struct` is not a valid `DeclareStructType { Struct(…) }` |
+| FIR-M03 | E | `globals` is not a `Block` |
+| FIR-M04 | E | `declarations` is not a `Block` |
+| FIR-M05 | E | Non-`DeclareFun` node in the declarations block |
+| FIR-M06 | W | Duplicate function name in declarations |
+| FIR-M07 | W | Expected DSP API function (`compute`, `buildUserInterface`, …) not declared |
+| FIR-S03 | E | Struct field has `Void` type |
+| FIR-S04 | W | Struct array field has size 0 |
+| FIR-G01 | E | Globals block contains a non-`DeclareVar`/`DeclareTable` node |
+| FIR-G02 | E | Global declaration has wrong access type (not `Static`/`Global`) |
+| FIR-G03 | E | Duplicate global variable name |
+| FIR-F01 | E | Function type is not `FirType::Fun` |
+| FIR-F04 | E | Duplicate parameter name in a function |
+| FIR-F05 | W | `compute` return type is not `Void` |
+| FIR-F06 | W | `compute` parameter count is not 4 |
+| FIR-F07 | W | Function has no body (prototype/extern declaration) |
+
+**Note on S01/S02.** The plan described these checks in terms of named struct fields. After the `FirType::Struct(String, Vec<FirType>)` refactor (session 3), field *names* are not stored in the type — only field *types* are. S01 ("each field is a `DeclareVar` with `kStruct` access") and S02 ("no duplicate field names") cannot be checked at the type level and are deferred to Phase 2 (SC09 cross-validation via `kStruct`-access `DeclareVar` nodes in function bodies).
+
+**Public API introduced (`crates/fir/src/checker.rs`):**
+- `Severity`, `FirDiagnostic`, `DiagContext` — diagnostic value types.
+- `FirVerifyReport` — `has_errors()`, `errors()`, `warnings()`, `assert_ok()`.
+- `FunctionSig`, `ModuleSymbols` — phase-1 symbol tables.
+- `DSP_API_FUNCTIONS: &[&str]` — the 10 expected DSP API names.
+- `verify_fir_module(store, module_id) -> FirVerifyReport` — main entry point.
+- `verify_module_structure(store, module_id) -> (FirVerifyReport, ModuleSymbols)` — entry point that also returns the symbol tables for use by subsequent phases.
+
+**`crates/fir/src/lib.rs`:** added `pub mod checker;`.
+
+**Tests (20 new, all in `checker::tests`):**
+- `valid_module_has_no_errors` — minimal fully-valid module passes with zero errors.
+- `m01` through `m07` — one negative test per M-code.
+- `s03_void_struct_field`, `s04_zero_size_array_field`.
+- `struct_fields_registered_in_symbols` — verifies `ModuleSymbols.struct_fields` and `struct_name`.
+- `g01`, `g02`, `g03`, `globals_registered_in_symbols`.
+- `f01`, `f04`, `f05`, `f06`, `f07`, `functions_registered_in_symbols`.
+
+**Result.** `cargo test -p fir` reports 32 tests (20 new + 12 existing), all passing. Full workspace `cargo test` also passes with zero errors or failures.
+
+---
+
 ## 2026-02-23 (session 3)
 
 ### Refactor — `FirType::Struct` carries field types (`Struct(String, Vec<FirType>)`)

@@ -30,6 +30,8 @@
 //!   a separate type-reconstruction phase.
 //! - Dispatch is explicit and exhaustive via `match_fir`, no RTTI/dynamic-cast.
 
+pub mod checker;
+
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
