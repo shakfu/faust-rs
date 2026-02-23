@@ -1,6 +1,27 @@
 # JOURNAL
 
 
+## 2026-02-23 (session 3)
+
+### Refactor — `FirType::Struct` carries field types (`Struct(String, Vec<FirType>)`)
+
+**Motivation.** `FirType::Struct(String)` only stored the struct name, losing all field-type information. The C++ counterpart `StructTyped` holds `fName` plus `fFields: Vec<NamedTyped*>`, where each `NamedTyped` carries a name and a type. `DeclareStructType` therefore wrapped an opaque name with no structural content, making it impossible for backends or a future FIR verifier to introspect the fields of a declared struct.
+
+**Design.** `FirType::Struct(String, Vec<FirType>)` mirrors `StructTyped` at the type level: the first `String` is the struct name and the `Vec<FirType>` is the ordered list of field types (consistent with how `FirType::Fun` represents its argument list). Field names are not stored in `FirType` because the FIR language models fields through `LoadVar`/`StoreVar` with `AccessType::Struct`, not through named-field references on the type itself.
+
+`DeclareStructType { typ: FirType }` is unchanged; its `typ` field naturally carries a `FirType::Struct(name, fields)` value, matching the C++ relationship `DeclareStructTypeInst { StructTyped* fType }`.
+
+**Arena encoding change.** The tag `FIRTYPE_STRUCT` previously held children `[name]`; it now holds `[name, fields_list]` where `fields_list` is a standard cons-list produced by `encode_list` / `decode_list` (same mechanism used by `FirType::Fun` args).
+
+**Files changed:**
+- `crates/fir/src/lib.rs`: variant definition, `encode_type` (adds `encode_list` for fields), `decode_type` (pattern extended to `[name, fields]`).
+- `crates/codegen/src/backends/cpp/mod.rs`: `emit_type` arm `Struct(name, _fields)`.
+- `crates/codegen/src/backends/c/mod.rs`: `emit_type` arm `Struct(name, _fields)`.
+
+**Result.** `cargo test --workspace` passes with zero failures.
+
+---
+
 ## 2026-02-23 (session 2)
 
 ### Feature — optional body for `DeclareFun` (function prototypes in FIR)

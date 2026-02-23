@@ -96,7 +96,7 @@ pub enum FirType {
     Ptr(Box<FirType>),
     Array(Box<FirType>, usize),
     Vector(Box<FirType>, usize),
-    Struct(String),
+    Struct(String, Vec<FirType>),
     Fun {
         args: Vec<FirType>,
         ret: Box<FirType>,
@@ -2298,9 +2298,11 @@ fn encode_type(arena: &mut TreeArena, typ: &FirType) -> FirId {
             let lanes_id = arena.int(i64::try_from(*lanes).unwrap_or(i64::MAX));
             intern_tag(arena, FIR_TYPE_VECTOR_TAG, &[inner_id, lanes_id])
         }
-        FirType::Struct(name) => {
+        FirType::Struct(name, fields) => {
             let name_id = arena.symbol(name.clone());
-            intern_tag(arena, FIR_TYPE_STRUCT_TAG, &[name_id])
+            let field_ids: Vec<_> = fields.iter().map(|f| encode_type(arena, f)).collect();
+            let fields_list = encode_list(arena, &field_ids);
+            intern_tag(arena, FIR_TYPE_STRUCT_TAG, &[name_id, fields_list])
         }
         FirType::Fun { args, ret } => {
             let args_ids: Vec<_> = args.iter().map(|a| encode_type(arena, a)).collect();
@@ -2344,7 +2346,15 @@ fn decode_type(arena: &TreeArena, id: FirId) -> Option<FirType> {
                 lanes,
             ))
         }
-        (FIR_TYPE_STRUCT_TAG, [name]) => Some(FirType::Struct(decode_symbol(arena, *name)?)),
+        (FIR_TYPE_STRUCT_TAG, [name, fields]) => {
+            let name = decode_symbol(arena, *name)?;
+            let field_ids = decode_list(arena, *fields)?;
+            let mut decoded_fields = Vec::with_capacity(field_ids.len());
+            for fid in field_ids {
+                decoded_fields.push(decode_type(arena, fid)?);
+            }
+            Some(FirType::Struct(name, decoded_fields))
+        }
         (FIR_TYPE_FUN_TAG, [args, ret]) => {
             let args_ids = decode_list(arena, *args)?;
             let mut out = Vec::with_capacity(args_ids.len());

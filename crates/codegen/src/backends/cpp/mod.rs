@@ -1164,7 +1164,7 @@ fn emit_type(typ: &FirType, options: &CppOptions) -> String {
         FirType::Ptr(inner) => format!("{}*", emit_type(inner, options)),
         FirType::Array(inner, size) => format!("{}[{size}]", emit_type(inner, options)),
         FirType::Vector(inner, lanes) => format!("Vec<{},{lanes}>", emit_type(inner, options)),
-        FirType::Struct(name) => name.clone(),
+        FirType::Struct(name, _fields) => name.clone(),
         FirType::Fun { args, ret } => {
             let args = args
                 .iter()
