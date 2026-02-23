@@ -43,7 +43,6 @@
 //! | FIR-SC04 | E | `StoreVar` to undeclared variable |
 //! | FIR-SC05 | E | `StoreVar` access type does not match declaration |
 //! | FIR-SC07 | E | `kFunArgs` variable re-declared inside function body |
-//! | FIR-SC09 | W | `kStruct` access on a name not seen in any struct field |
 //! | FIR-SC10 | E | Local `DeclareVar` uses a non-local access class |
 //! | FIR-L01  | E | `ForLoop` init is not a `DeclareVar(kLoop)` |
 //! | FIR-L02  | E | `ForLoop` loop variable type is not `Int32`/`Int64` |
@@ -52,6 +51,36 @@
 //! | FIR-R03  | W | Statements after a `Return` in a block (dead code) |
 //! | FIR-SW02 | E | Duplicate case value in `Switch` |
 //! | FIR-SW03 | W | `Switch` has no cases |
+//!
+//! ## Phase 3 — type checking and typed conditions
+//! | Code | Sev | Check |
+//! |---|---|---|
+//! | FIR-B01 | E | `BinOp` operand type mismatch (except int/bool mixing) |
+//! | FIR-B02 | E | `BinOp` operand is not numeric |
+//! | FIR-B03 | W | `BinOp` declared result type inconsistent with operands |
+//! | FIR-B04 | W | Division by constant zero |
+//! | FIR-U01 | E | `Neg` operand is not numeric |
+//! | FIR-U02 | W | `Cast` is a no-op |
+//! | FIR-U03 | E | `Cast` between non-numeric types |
+//! | FIR-U04 | W | `Bitcast` width mismatch |
+//! | FIR-C01 | E | `Select2` condition is not int/bool |
+//! | FIR-C02 | W | `Select2` branch type mismatch |
+//! | FIR-C03 | W | `Select2` result type inconsistent with branches |
+//! | FIR-C04 | E | `If` condition is not int/bool |
+//! | FIR-FC01 | E | Call to undeclared function |
+//! | FIR-FC02 | E | Function call arity mismatch |
+//! | FIR-FC03 | W | Function call argument type mismatch |
+//! | FIR-FC04 | W | Function return value type mismatch at use site (partial) |
+//! | FIR-L03  | E | `WhileLoop` condition is not int/bool |
+//! | FIR-SW01 | E | `Switch` condition is not integer |
+//! | FIR-R01  | E | `Return` value type mismatch |
+//! | FIR-T01  | E | Table index is not integer |
+//! | FIR-T02  | E | `StoreTable` value type mismatch |
+//! | FIR-T03  | W | `LoadTable` / `StoreTable` on non-table declaration |
+//! | FIR-MA01 | W | Unary math op called with wrong arity |
+//! | FIR-MA02 | W | Binary math op called with wrong arity |
+//! | FIR-MA03 | W | Floating-point math op called with integer-like argument |
+//! | FIR-MA04 | W | `abs` / `fabs` int-vs-float distinction warning |
 //!
 //! ## Deferred / partial
 //! - **S01/S02** — struct field names not available in `FirType::Struct(_, Vec<FirType>)`.
@@ -76,26 +105,33 @@ use crate::{AccessType, FirBinOp, FirId, FirMatch, FirMathOp, FirStore, FirType,
 /// Severity of a verifier diagnostic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
+    /// A blocking FIR invariant violation.
     Error,
+    /// A non-blocking but suspicious FIR pattern.
     Warning,
 }
 
 /// A single diagnostic produced during FIR verification.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FirDiagnostic {
+    /// Diagnostic severity (`Error` or `Warning`).
     pub severity: Severity,
     /// Short code from the diagnostic registry, e.g. `"FIR-M01"`.
     pub code: &'static str,
+    /// Human-readable diagnostic message.
     pub message: String,
     /// The [`FirId`] most closely associated with the problem.
     pub node: FirId,
+    /// Optional contextual metadata (current function, variable, ...).
     pub context: DiagContext,
 }
 
 /// Contextual location of a diagnostic (enclosing function, variable, etc.).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DiagContext {
+    /// Enclosing function name when the diagnostic originates in a function body.
     pub function_name: Option<String>,
+    /// Variable name when the checker can identify a specific variable symbol.
     pub variable_name: Option<String>,
 }
 
@@ -104,11 +140,13 @@ pub struct DiagContext {
 /// Result of a FIR verification run.
 #[derive(Debug, Default)]
 pub struct FirVerifyReport {
+    /// All diagnostics emitted during the verification run.
     pub diagnostics: Vec<FirDiagnostic>,
 }
 
 impl FirVerifyReport {
     /// Returns `true` if any `Error`-severity diagnostics were emitted.
+    #[must_use]
     pub fn has_errors(&self) -> bool {
         self.diagnostics
             .iter()
@@ -116,6 +154,7 @@ impl FirVerifyReport {
     }
 
     /// Iterates over error-severity diagnostics.
+    #[must_use]
     pub fn errors(&self) -> impl Iterator<Item = &FirDiagnostic> {
         self.diagnostics
             .iter()
@@ -123,6 +162,7 @@ impl FirVerifyReport {
     }
 
     /// Iterates over warning-severity diagnostics.
+    #[must_use]
     pub fn warnings(&self) -> impl Iterator<Item = &FirDiagnostic> {
         self.diagnostics
             .iter()
@@ -151,6 +191,7 @@ impl FirVerifyReport {
 pub struct FunctionSig {
     /// Ordered list of `(param_name, param_type)` pairs.
     pub params: Vec<(String, FirType)>,
+    /// Return type from the function signature.
     pub return_type: FirType,
     /// `true` when the function has no body (prototype / extern declaration).
     pub is_extern: bool,
@@ -171,6 +212,9 @@ pub struct ModuleSymbols {
     /// Global/static variables: name → `(AccessType, FirType)`.
     pub globals: HashMap<String, (AccessType, FirType)>,
     /// Names declared as global/static tables (for T03).
+    ///
+    /// This is tracked separately because table-ness is not encoded in
+    /// [`globals`](Self::globals) (which stores only access + element type).
     pub global_tables: HashSet<String>,
     /// Declared functions: name → [`FunctionSig`].
     pub functions: HashMap<String, FunctionSig>,
@@ -362,6 +406,11 @@ impl ScopeStack {
 // ─── Entry points ─────────────────────────────────────────────────────────────
 
 /// Verify the FIR module (Phase 1 + Phase 2 + Phase 3) and return the diagnostic report.
+///
+/// This is the main verifier entry point used by tests, pass assertions, and
+/// compiler integration. It validates the module shape, collects top-level
+/// symbols, then walks all function bodies for scope and type checks.
+#[must_use]
 pub fn verify_fir_module(store: &FirStore, module_id: FirId) -> FirVerifyReport {
     let (report, _symbols) = verify_module_structure(store, module_id);
     report
@@ -369,6 +418,10 @@ pub fn verify_fir_module(store: &FirStore, module_id: FirId) -> FirVerifyReport 
 
 /// Like [`verify_fir_module`] but also returns the [`ModuleSymbols`] collected
 /// during Phase 1 for targeted function verification or later passes.
+///
+/// The returned [`FirVerifyReport`] already includes all diagnostics emitted by
+/// phase 1, phase 2, and phase 3.
+#[must_use]
 pub fn verify_module_structure(
     store: &FirStore,
     module_id: FirId,
@@ -388,6 +441,10 @@ pub fn verify_module_structure(
 ///
 /// This runs the per-function Phase 2 + Phase 3 semantic checks (no module-shape
 /// validation).
+///
+/// If `fun_id` is not a `DeclareFun` node (or its type is not `FirType::Fun`),
+/// a diagnostic is emitted in the returned report.
+#[must_use]
 pub fn verify_fir_function(
     store: &FirStore,
     fun_id: FirId,
@@ -875,11 +932,24 @@ impl<'s> VerifyCtx<'s> {
     fn infer_value_type(&self, id: FirId) -> Option<FirType> {
         match match_fir(self.store, id) {
             FirMatch::LoadVar { name, access, typ } => {
-                self.resolve(&name, access).map(|e| e.typ).or(Some(typ))
+                // For `kStruct`, `resolve()` intentionally carries a placeholder
+                // type because field names are unavailable at the type level.
+                // Prefer the explicit FIR node type in that case.
+                if access == AccessType::Struct {
+                    Some(typ)
+                } else {
+                    self.resolve(&name, access).map(|e| e.typ).or(Some(typ))
+                }
             }
             FirMatch::LoadTable {
                 name, access, typ, ..
-            } => self.resolve(&name, access).map(|e| e.typ).or(Some(typ)),
+            } => {
+                if access == AccessType::Struct {
+                    Some(typ)
+                } else {
+                    self.resolve(&name, access).map(|e| e.typ).or(Some(typ))
+                }
+            }
             FirMatch::FunCall { name, typ, .. } => self
                 .symbols
                 .functions
