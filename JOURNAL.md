@@ -1,6 +1,38 @@
 # JOURNAL
 
 
+## 2026-02-23
+
+### Design — FIR module verifier plan (`porting/fir-module-verifier-plan-en.md`)
+
+**Motivation.** The C++ compiler contains two partial checkers (`FIRTypeChecker`, `FIRCodeChecker`) and one ancillary checker (`FIRVarChecker`) that operate on isolated blocks or function bodies without any cross-function or module-level awareness. Before implementing the verifier, the three C++ classes were systematically analysed to catalogue every check they perform and to identify the gaps that a full Rust implementation must fill.
+
+**Analysis of C++ sources reviewed:**
+- `compiler/generator/fir_to_fir.hh` — `FIRTypeChecker` (binop/select2/cast consistency) and `FIRVarChecker` (named-address scope, struct vs stack separation).
+- `compiler/generator/fir/fir_code_checker.hh` — `FIRCodeChecker` (variable scope stack, init-flag tracking, function arity).
+- `compiler/generator/typing_instructions.hh` — `TypingVisitor` with C++ type promotion rules (real > int > bool) and `getType()` inference for all value instructions.
+- `compiler/generator/instructions.hh` — full `Address::AccessType` bitmask enum (11 flags: `kStruct`, `kStaticStruct`, `kFunArgs`, `kStack`, `kGlobal`, `kLink`, `kLoop`, `kVolatile`, `kReference`, `kMutable`, `kConst`, `kNoAccess`) and `Typed::VarType` enum (~50 variants including pointer, vector, and double-pointer forms).
+
+**Identified gaps in the C++ checkers:**
+- `FIRTypeChecker` depends on `TypingVisitor::getType()` which requires the global `gGlobal` state (eliminated in Rust) — it cannot run independently.
+- `FIRCodeChecker` does not check function call argument types (only arity), does not validate return types, leaks `kFunArgs` variables into sibling function contexts (missing pop), and has no awareness of struct field declarations or global variables.
+- None of the three checkers perform module-level structural validation (required DSP API functions, duplicate global names, struct field consistency).
+- `Select2` branch type compatibility and binop result type coherence are never checked.
+- Loop variable type constraints (`kLoop` must be integer), switch duplicate-case detection, and array/table index type checks are absent.
+
+**Research:** Cross-referenced with LLVM `lib/IR/Verifier.cpp` (SSA dominance, per-instruction type constraints) and MLIR's per-operation verifier pattern (cheap, run before and after every pass). FIR is not SSA, so dominance analysis is replaced by a scope + `InitStatus` model (No / Yes / Maybe after conditional branches), matching the `FIRCodeChecker` approach but extended to the full module context.
+
+**Plan document produced:** `porting/fir-module-verifier-plan-en.md` — a complete design specification covering:
+- **Architecture**: 3-pass traversal — (1) module structure + symbol collection, (2) per-function scope analysis with `ScopeStack` / `InitStatus`, (3) type consistency with `infer_type()` following C++ promotion rules.
+- **47 checks** classified as Error or Warning, assigned stable codes `FIR-M01` … `FIR-MA04`, grouped into 14 categories: module structure, struct fields, globals, function declarations, variable scope, binary ops, unary ops, conditional selection, function calls, loops, switch, return, table access, math calls.
+- **Public API**: `verify_fir_module(store, module_id) -> FirVerifyReport` + lightweight `verify_fir_function` for per-pass use; `FirVerifyReport::assert_ok()` for debug-build gates.
+- **Key data structures**: `ModuleSymbols` (struct fields / globals / function signatures), `ScopeStack` with `FrameKind` (Block / Loop / Function), `VarEntry` (access, type, `InitStatus`), `FirDiagnostic` with stable code strings.
+- **Implementation phases**: Phase 1 (~2 days) symbol collection, Phase 2 (~3 days) scope analysis, Phase 3 (~3 days) type checking, Phase 4 (~1 day) pipeline integration + CLI flags (`--fir-verify-strict`, `--no-fir-verify`, `--dump-fir-verify`).
+- **Test strategy**: one unit test per check (valid + invalid FIR), full-corpus integration test via `xtask verify-fir-corpus`, and extension of the golden-check pipeline to assert zero verifier errors.
+- **Diagnostic code mapping table** documenting which new Rust check corresponds to which C++ visitor (or is entirely new).
+
+No code changes this session — design only.
+
 ## 2026-02-22
 
 ### Documentation — READMEs updated for the interpreter backend
