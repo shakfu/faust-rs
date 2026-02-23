@@ -873,18 +873,28 @@ fn emit_declare_fun(
         .map_err(|msg| CodegenError::new(CodegenErrorCode::InvalidModuleSection, msg))?;
     let tab = "    ".repeat(indent);
     let mut params_override: Option<String> = None;
+    let strip_explicit_dsp_arg = is_dsp_api_method(decl.name)
+        && matches!(decl.named_args.first(), Some(named) if named.name == "dsp")
+        && matches!(
+            decl.typ,
+            FirType::Fun { args, .. }
+                if matches!(args.first(), Some(FirType::Ptr(inner)) if matches!(inner.as_ref(), FirType::Obj))
+        );
     let (ret, mut params) = match decl.typ {
         FirType::Fun {
             args: typed_args,
             ret,
         } => {
             let ret = emit_type(ret, options);
-            let mut rendered = Vec::with_capacity(typed_args.len());
-            for (index, arg_type) in typed_args.iter().enumerate() {
+            let skip = usize::from(strip_explicit_dsp_arg);
+            let render_args = &typed_args[skip..];
+            let mut rendered = Vec::with_capacity(render_args.len());
+            for (index, arg_type) in render_args.iter().enumerate() {
+                let named_index = index + skip;
                 let name = decl
                     .named_args
-                    .get(index)
-                    .map_or_else(|| format!("arg{index}"), |named| named.name.clone());
+                    .get(named_index)
+                    .map_or_else(|| format!("arg{named_index}"), |named| named.name.clone());
                 rendered.push(format!("{} {}", emit_type(arg_type, options), name));
             }
             (ret, rendered.join(", "))

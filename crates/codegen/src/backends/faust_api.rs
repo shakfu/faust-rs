@@ -2,8 +2,8 @@
 
 use fir::{FirType, NamedType};
 
-/// Returns `true` when `typ` matches the canonical Faust `compute` signature:
-/// `void compute(int, FAUSTFLOAT**, FAUSTFLOAT**)`.
+/// Returns `true` when `typ` matches the canonical Faust `compute` FIR signature:
+/// `void compute(dsp, int, FAUSTFLOAT**, FAUSTFLOAT**)`.
 pub(crate) fn is_canonical_compute_signature(typ: &FirType) -> bool {
     let FirType::Fun { args, .. } = typ else {
         return false;
@@ -11,10 +11,12 @@ pub(crate) fn is_canonical_compute_signature(typ: &FirType) -> bool {
     matches!(
         args.as_slice(),
         [
+            FirType::Ptr(dsp),
             FirType::Int32,
             FirType::Ptr(inner_inputs),
             FirType::Ptr(inner_outputs)
-        ] if matches!(
+        ] if matches!(dsp.as_ref(), FirType::Obj)
+            && matches!(
             (inner_inputs.as_ref(), inner_outputs.as_ref()),
             (
                 FirType::Ptr(ff_inputs),
@@ -68,31 +70,40 @@ pub(crate) fn validate_canonical_dsp_api_signature(
 
 fn expected_signature(name: &str) -> Option<(Vec<FirType>, FirType, &'static str)> {
     match name {
-        "metadata" => Some((vec![FirType::Meta], FirType::Void, "void metadata(Meta*)")),
-        "instanceConstants" => Some((
-            vec![FirType::Int32],
+        "metadata" => Some((
+            vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::Meta],
             FirType::Void,
-            "void instanceConstants(int)",
+            "void metadata(dsp, Meta*)",
+        )),
+        "instanceConstants" => Some((
+            vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::Int32],
+            FirType::Void,
+            "void instanceConstants(dsp, int)",
         )),
         "instanceResetUserInterface" => Some((
-            Vec::new(),
+            vec![FirType::Ptr(Box::new(FirType::Obj))],
             FirType::Void,
-            "void instanceResetUserInterface()",
+            "void instanceResetUserInterface(dsp)",
         )),
-        "instanceClear" => Some((Vec::new(), FirType::Void, "void instanceClear()")),
-        "buildUserInterface" => Some((
-            vec![FirType::UI],
+        "instanceClear" => Some((
+            vec![FirType::Ptr(Box::new(FirType::Obj))],
             FirType::Void,
-            "void buildUserInterface(UI*)",
+            "void instanceClear(dsp)",
+        )),
+        "buildUserInterface" => Some((
+            vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::UI],
+            FirType::Void,
+            "void buildUserInterface(dsp, UI*)",
         )),
         "compute" => Some((
             vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
                 FirType::Int32,
                 FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
                 FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
             ],
             FirType::Void,
-            "void compute(int, FAUSTFLOAT**, FAUSTFLOAT**)",
+            "void compute(dsp, int, FAUSTFLOAT**, FAUSTFLOAT**)",
         )),
         _ => None,
     }

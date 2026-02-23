@@ -186,7 +186,7 @@ A `FirMatch::Module` node contains:
 ```
 Module {
     name: String,           // DSP class name e.g. "mydsp"
-    dsp_struct: FirId,      // → DeclareStructType { typ: FirType::Struct("mydsp") }
+    dsp_struct: FirId,      // → Block [ DeclareVar(kStruct), ... ]
     globals: FirId,         // → Block [ DeclareVar(kStatic|kGlobal), ... ]
     declarations: FirId,    // → Block [ DeclareFun(...), DeclareFun(...), ... ]
 }
@@ -229,7 +229,7 @@ Checks are classified by **severity** and **category**:
 | # | Severity | Check |
 |---|---|---|
 | M01 | E | The root node is `FirMatch::Module` |
-| M02 | E | `dsp_struct` decodes as `DeclareStructType`|
+| M02 | E | `dsp_struct` decodes as `Block`|
 | M03 | E | `globals` decodes as `Block` |
 | M04 | E | `declarations` decodes as `Block` |
 | M05 | E | All nodes in `declarations` are `DeclareFun` |

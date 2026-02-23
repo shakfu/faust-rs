@@ -1,5 +1,66 @@
 # JOURNAL
 
+## 2026-02-23 (session 9)
+
+### Fix — Canonical FIR input accesses in fast-lane + explicit `dsp` funarg for DSP methods
+
+Aligned the signal->FIR fast-lane, FIR checker, and C/C++ backends so the FIR
+uses canonical indexed accesses for audio inputs (instead of pseudo variable
+names like `input0[i0]`) and carries an explicit `dsp` function argument in the
+FIR signatures of emitted DSP API methods (`metadata`, `instanceConstants`,
+`instanceResetUserInterface`, `instanceClear`, `buildUserInterface`, `compute`).
+
+**Fast-lane FIR lowering (`crates/transform/src/signal_fir/module.rs`)**
+- `lower_input(...)` no longer emits pseudo `LoadVar("inputN[i0]", kFunArgs)`.
+- Inputs are now lowered as canonical FIR:
+  - `LoadTable("inputs", kFunArgs, channel_idx, Ptr(FaustFloat))`
+  - cached local pointer alias (`DeclareVar(kStack)`)
+  - `LoadTable(alias, kStack, i0, FaustFloat)`
+- Added explicit `dsp: Ptr(Obj)` as first named/type arg for emitted DSP
+  methods listed above, including `compute`.
+
+**Checker updates (`crates/fir/src/checker.rs`)**
+- `resolve(...)` / `resolve_any_by_name(...)` now recognize the implicit `i0`
+  compute loop index used by backend-generated compute loops, avoiding false
+  undeclared-variable diagnostics when FIR contains canonical indexed accesses.
+- Phase 3 table checks (`T01/T02/T03`) now accept indexable pointer-like
+  declarations (`Ptr`, `Array`, `Vector`) in addition to explicit `DeclareTable`
+  symbols, so `LoadTable` on `inputs` / local channel aliases does not trigger
+  false `T03`.
+- `infer_value_type(...)` for `LoadTable` now infers element type correctly when
+  indexing pointer-like values (instead of returning the container type).
+
+**Compiler/codegen contract updates**
+- `crates/compiler/src/lib.rs`: `make_compute_fir_signature()` now returns the
+  FIR signature `compute(dsp, count, inputs, outputs)` and tests were updated.
+- `crates/codegen/src/backends/faust_api.rs`: canonical FIR signature validation
+  updated for the explicit `dsp` funarg on reserved FIR methods.
+- `crates/codegen/src/backends/cpp/mod.rs`: C++ backend strips the explicit FIR
+  `dsp` funarg for reserved methods when emitting C++ instance methods (where
+  `this` is implicit), while still validating the new FIR contract.
+- `crates/codegen/src/fixtures.rs`: shared FIR fixture signatures updated to the
+  new explicit-`dsp` contract.
+
+**Outcome**
+- `process = +;` no longer fails FIR verification with:
+  - `FIR-SC01` on `input0[i0]` / `input1[i0]`
+  - `FIR-F06` (fast-lane `compute` arity mismatch)
+- Fast-lane FIR verify now passes with warnings only (remaining `FIR-M07`
+  warnings are the known fast-lane gap for still-missing FIR declarations of
+  `classInit` / `instanceInit` / `init` / `getSampleRate`).
+
+**Validation**
+- `cargo fmt --all` ✅
+- `cargo test -p fir checker` ✅
+- `cargo test -p codegen` ✅
+- `cargo test -p compiler` ✅
+- Manual check:
+  - `cargo run -p compiler -- -lang c t1.dsp` ✅
+  - `cargo run -p compiler -- -lang cpp t1.dsp` ✅
+  - `cargo run -p compiler -- --dump-fir-verify t1.dsp` → `errors=0`, `warnings=4` (`M07`)
+
+---
+
 ## 2026-02-23 (session 8)
 
 ### Fix — FIR verifier `dsp_struct` validation aligned with corrected plan

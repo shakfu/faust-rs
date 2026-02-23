@@ -45,6 +45,11 @@ pub fn build_module(
     signals: &[SigId],
 ) -> Result<SignalFirOutput, SignalFirError> {
     let mut lower = SignalToFirLower::new(arena, plan.num_inputs);
+    let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
+    let dsp_arg = NamedType {
+        name: "dsp".to_string(),
+        typ: dsp_arg_type.clone(),
+    };
 
     {
         let mut b = FirBuilder::new(&mut lower.store);
@@ -73,16 +78,19 @@ pub fn build_module(
         let mut b = FirBuilder::new(&mut lower.store);
         b.block(&[])
     };
-    let metadata_args = [NamedType {
-        name: "m".to_string(),
-        typ: FirType::Meta,
-    }];
+    let metadata_args = [
+        dsp_arg.clone(),
+        NamedType {
+            name: "m".to_string(),
+            typ: FirType::Meta,
+        },
+    ];
     let metadata = {
         let mut b = FirBuilder::new(&mut lower.store);
         b.declare_fun(
             "metadata",
             FirType::Fun {
-                args: vec![FirType::Meta],
+                args: vec![dsp_arg_type.clone(), FirType::Meta],
                 ret: Box::new(FirType::Void),
             },
             &metadata_args,
@@ -95,16 +103,19 @@ pub fn build_module(
         let mut b = FirBuilder::new(&mut lower.store);
         b.block(&lower.constants_statements)
     };
-    let constants_args = [NamedType {
-        name: "sample_rate".to_string(),
-        typ: FirType::Int32,
-    }];
+    let constants_args = [
+        dsp_arg.clone(),
+        NamedType {
+            name: "sample_rate".to_string(),
+            typ: FirType::Int32,
+        },
+    ];
     let instance_constants = {
         let mut b = FirBuilder::new(&mut lower.store);
         b.declare_fun(
             "instanceConstants",
             FirType::Fun {
-                args: vec![FirType::Int32],
+                args: vec![dsp_arg_type.clone(), FirType::Int32],
                 ret: Box::new(FirType::Void),
             },
             &constants_args,
@@ -122,10 +133,10 @@ pub fn build_module(
         b.declare_fun(
             "instanceResetUserInterface",
             FirType::Fun {
-                args: Vec::new(),
+                args: vec![dsp_arg_type.clone()],
                 ret: Box::new(FirType::Void),
             },
-            &[],
+            std::slice::from_ref(&dsp_arg),
             Some(reset_body),
             false,
         )
@@ -140,10 +151,10 @@ pub fn build_module(
         b.declare_fun(
             "instanceClear",
             FirType::Fun {
-                args: Vec::new(),
+                args: vec![dsp_arg_type.clone()],
                 ret: Box::new(FirType::Void),
             },
-            &[],
+            std::slice::from_ref(&dsp_arg),
             Some(clear_body),
             false,
         )
@@ -155,16 +166,19 @@ pub fn build_module(
         let mut b = FirBuilder::new(&mut lower.store);
         b.block(&ui_statements)
     };
-    let build_ui_args = [NamedType {
-        name: "ui_interface".to_string(),
-        typ: FirType::UI,
-    }];
+    let build_ui_args = [
+        dsp_arg.clone(),
+        NamedType {
+            name: "ui_interface".to_string(),
+            typ: FirType::UI,
+        },
+    ];
     let build_ui = {
         let mut b = FirBuilder::new(&mut lower.store);
         b.declare_fun(
             "buildUserInterface",
             FirType::Fun {
-                args: vec![FirType::UI],
+                args: vec![dsp_arg_type.clone(), FirType::UI],
                 ret: Box::new(FirType::Void),
             },
             &build_ui_args,
@@ -184,6 +198,7 @@ pub fn build_module(
         b.block(&compute_statements)
     };
     let compute_args = [
+        dsp_arg.clone(),
         NamedType {
             name: "count".to_string(),
             typ: FirType::Int32,
@@ -203,6 +218,7 @@ pub fn build_module(
             "compute",
             FirType::Fun {
                 args: vec![
+                    dsp_arg_type,
                     FirType::Int32,
                     FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
                     FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
@@ -308,6 +324,7 @@ struct SignalToFirLower<'a> {
     named_struct_vars: HashSet<String>,
     reset_init_seen: HashSet<String>,
     clear_init_seen: HashSet<String>,
+    input_ptr_aliases: HashMap<usize, String>,
 }
 
 impl<'a> SignalToFirLower<'a> {
@@ -335,6 +352,7 @@ impl<'a> SignalToFirLower<'a> {
             named_struct_vars: HashSet::new(),
             reset_init_seen: HashSet::new(),
             clear_init_seen: HashSet::new(),
+            input_ptr_aliases: HashMap::new(),
         }
     }
 
@@ -462,12 +480,27 @@ impl<'a> SignalToFirLower<'a> {
             ));
         }
 
+        let alias = if let Some(alias) = self.input_ptr_aliases.get(&index) {
+            alias.clone()
+        } else {
+            let alias = format!("__fir_input_ptr{index}");
+            let mut b = FirBuilder::new(&mut self.store);
+            let chan = b.int32(i32::try_from(index).expect("validated input index fits i32"));
+            let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+            let load_chan_ptr = b.load_table("inputs", AccessType::FunArgs, chan, ptr_ty.clone());
+            self.control_statements.push(b.declare_var(
+                alias.clone(),
+                ptr_ty,
+                AccessType::Stack,
+                Some(load_chan_ptr),
+            ));
+            self.input_ptr_aliases.insert(index, alias.clone());
+            alias
+        };
+
         let mut b = FirBuilder::new(&mut self.store);
-        Ok(b.load_var(
-            format!("input{index}[i0]"),
-            AccessType::FunArgs,
-            FirType::FaustFloat,
-        ))
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        Ok(b.load_table(alias, AccessType::Stack, i0, FirType::FaustFloat))
     }
 
     fn lower_delay(

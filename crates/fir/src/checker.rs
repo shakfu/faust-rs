@@ -957,6 +957,14 @@ impl<'s> VerifyCtx<'s> {
                 })
             }
             AccessType::Stack | AccessType::Loop => {
+                if access == AccessType::Loop && self.is_implicit_compute_loop_index(name) {
+                    return Some(VarEntry {
+                        access: AccessType::Loop,
+                        typ: FirType::Int32,
+                        init: InitStatus::Yes,
+                        is_table: false,
+                    });
+                }
                 let (_, e) = self.scope_stack.lookup(name)?;
                 Some(e.clone())
             }
@@ -968,6 +976,14 @@ impl<'s> VerifyCtx<'s> {
     /// Used to distinguish "undeclared" from "declared in another access space"
     /// so SC02/SC05 can be emitted instead of SC01/SC04.
     fn resolve_any_by_name(&self, name: &str) -> Option<VarEntry> {
+        if self.is_implicit_compute_loop_index(name) {
+            return Some(VarEntry {
+                access: AccessType::Loop,
+                typ: FirType::Int32,
+                init: InitStatus::Yes,
+                is_table: false,
+            });
+        }
         if let Some((_, entry)) = self.scope_stack.lookup(name) {
             return Some(entry.clone());
         }
@@ -1000,6 +1016,19 @@ impl<'s> VerifyCtx<'s> {
 
     // ── Phase 3 helpers (type inference / compatibility) ────────────────────
 
+    fn is_implicit_compute_loop_index(&self, name: &str) -> bool {
+        self.current_function.as_deref() == Some("compute") && name == "i0"
+    }
+
+    fn is_indexable_container_type(&self, typ: &FirType) -> Option<FirType> {
+        match typ {
+            FirType::Ptr(inner) => Some((**inner).clone()),
+            FirType::Array(inner, _) => Some((**inner).clone()),
+            FirType::Vector(inner, _) => Some((**inner).clone()),
+            _ => None,
+        }
+    }
+
     fn infer_value_type(&self, id: FirId) -> Option<FirType> {
         match match_fir(self.store, id) {
             FirMatch::LoadVar { name, access, typ } => {
@@ -1018,7 +1047,15 @@ impl<'s> VerifyCtx<'s> {
                 if access == AccessType::Struct {
                     Some(typ)
                 } else {
-                    self.resolve(&name, access).map(|e| e.typ).or(Some(typ))
+                    self.resolve(&name, access)
+                        .map(|e| {
+                            if e.is_table {
+                                e.typ
+                            } else {
+                                self.is_indexable_container_type(&e.typ).unwrap_or(e.typ)
+                            }
+                        })
+                        .or(Some(typ))
                 }
             }
             FirMatch::FunCall { name, typ, .. } => self
@@ -1455,20 +1492,27 @@ impl<'s> VerifyCtx<'s> {
         }
         if access != AccessType::Struct {
             if let Some(entry) = self.resolve(name, access) {
-                if !entry.is_table {
+                let effective_elem_type = if entry.is_table {
+                    Some(entry.typ.clone())
+                } else {
+                    self.is_indexable_container_type(&entry.typ)
+                };
+                if effective_elem_type.is_none() {
                     self.warn(
                         "FIR-T03",
                         format!("LoadTable '{name}' refers to a non-table declaration"),
                         id,
                     );
                 }
-                if entry.typ != *declared_elem_type {
+                if let Some(expected_elem_type) = effective_elem_type
+                    && expected_elem_type != *declared_elem_type
+                {
                     self.warn(
                         "FIR-T03",
                         format!(
                             "LoadTable '{name}' element type {declared_elem_type:?} differs from \
                              declaration {:?}",
-                            entry.typ
+                            expected_elem_type
                         ),
                         id,
                     );
@@ -1498,7 +1542,12 @@ impl<'s> VerifyCtx<'s> {
             return;
         }
         if let Some(entry) = self.resolve(name, access) {
-            if !entry.is_table {
+            let effective_elem_type = if entry.is_table {
+                Some(entry.typ.clone())
+            } else {
+                self.is_indexable_container_type(&entry.typ)
+            };
+            if effective_elem_type.is_none() {
                 self.warn(
                     "FIR-T03",
                     format!("StoreTable '{name}' refers to a non-table declaration"),
@@ -1506,12 +1555,13 @@ impl<'s> VerifyCtx<'s> {
                 );
             }
             if let Some(val_ty) = self.infer_value_type(value) {
-                if val_ty != entry.typ {
+                let expected_elem_type = effective_elem_type.unwrap_or(entry.typ);
+                if val_ty != expected_elem_type {
                     self.error(
                         "FIR-T02",
                         format!(
                             "StoreTable value type {val_ty:?} does not match element type {:?}",
-                            entry.typ
+                            expected_elem_type
                         ),
                         id,
                     );

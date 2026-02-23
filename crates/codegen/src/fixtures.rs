@@ -54,14 +54,20 @@ pub fn build_sine_phasor_test_module() -> (FirStore, FirId) {
     );
     let close = b.close_box();
     let build_ui_body = b.block(&[open, freq_slider, gain_slider, close]);
-    let build_ui_args = [NamedType {
-        name: "ui_interface".to_string(),
-        typ: FirType::UI,
-    }];
+    let build_ui_args = [
+        NamedType {
+            name: "dsp".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "ui_interface".to_string(),
+            typ: FirType::UI,
+        },
+    ];
     let build_ui = b.declare_fun(
         "buildUserInterface",
         FirType::Fun {
-            args: vec![FirType::UI],
+            args: vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::UI],
             ret: Box::new(FirType::Void),
         },
         &build_ui_args,
@@ -91,6 +97,10 @@ pub fn build_sine_phasor_test_module() -> (FirStore, FirId) {
     let compute_body = b.block(&[store_phase, drop_out]);
     let compute_args = [
         NamedType {
+            name: "dsp".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
             name: "count".to_string(),
             typ: FirType::Int32,
         },
@@ -107,6 +117,7 @@ pub fn build_sine_phasor_test_module() -> (FirStore, FirId) {
         "compute",
         FirType::Fun {
             args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
                 FirType::Int32,
                 FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
                 FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),

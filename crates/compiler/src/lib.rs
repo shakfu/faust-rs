@@ -1026,11 +1026,15 @@ fn lower_signals_to_fir(
 
 // ─── FIR type helpers ─────────────────────────────────────────────────────────
 
-/// Builds the canonical `compute(int, FAUSTFLOAT**, FAUSTFLOAT**) -> void` FIR type
+/// Builds the canonical `compute(dsp, int, FAUSTFLOAT**, FAUSTFLOAT**) -> void` FIR type
 /// and its named argument list, used by both C and C++ legacy bridges.
-fn make_compute_fir_signature() -> (FirType, [NamedType; 3]) {
+fn make_compute_fir_signature() -> (FirType, [NamedType; 4]) {
     let ff_ptr_ptr = FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat))));
     let args = [
+        NamedType {
+            name: "dsp".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
         NamedType {
             name: "count".to_string(),
             typ: FirType::Int32,
@@ -1045,7 +1049,12 @@ fn make_compute_fir_signature() -> (FirType, [NamedType; 3]) {
         },
     ];
     let typ = FirType::Fun {
-        args: vec![FirType::Int32, ff_ptr_ptr.clone(), ff_ptr_ptr],
+        args: vec![
+            FirType::Ptr(Box::new(FirType::Obj)),
+            FirType::Int32,
+            ff_ptr_ptr.clone(),
+            ff_ptr_ptr,
+        ],
         ret: Box::new(FirType::Void),
     };
     (typ, args)
@@ -2221,12 +2230,13 @@ mod tests {
     // ── make_compute_fir_signature ────────────────────────────────────────────
 
     #[test]
-    fn make_compute_fir_signature_produces_three_named_args() {
+    fn make_compute_fir_signature_produces_four_named_args() {
         let (_typ, args) = make_compute_fir_signature();
-        assert_eq!(args.len(), 3);
-        assert_eq!(args[0].name, "count");
-        assert_eq!(args[1].name, "inputs");
-        assert_eq!(args[2].name, "outputs");
+        assert_eq!(args.len(), 4);
+        assert_eq!(args[0].name, "dsp");
+        assert_eq!(args[1].name, "count");
+        assert_eq!(args[2].name, "inputs");
+        assert_eq!(args[3].name, "outputs");
     }
 
     #[test]
@@ -2235,7 +2245,11 @@ mod tests {
         let (typ, _args) = make_compute_fir_signature();
         match typ {
             FirType::Fun { args, ret } => {
-                assert_eq!(args.len(), 3, "fun type should have 3 args");
+                assert_eq!(args.len(), 4, "fun type should have 4 args");
+                assert!(
+                    matches!(args.first(), Some(FirType::Ptr(inner)) if matches!(inner.as_ref(), FirType::Obj)),
+                    "first arg should be dsp pointer"
+                );
                 assert!(matches!(*ret, FirType::Void), "return type should be void");
             }
             other => panic!("expected FirType::Fun, got {other:?}"),
