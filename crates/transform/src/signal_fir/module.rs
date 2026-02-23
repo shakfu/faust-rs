@@ -86,7 +86,7 @@ pub fn build_module(
                 ret: Box::new(FirType::Void),
             },
             &metadata_args,
-            metadata_body,
+            Some(metadata_body),
             false,
         )
     };
@@ -108,7 +108,7 @@ pub fn build_module(
                 ret: Box::new(FirType::Void),
             },
             &constants_args,
-            constants_body,
+            Some(constants_body),
             false,
         )
     };
@@ -126,7 +126,7 @@ pub fn build_module(
                 ret: Box::new(FirType::Void),
             },
             &[],
-            reset_body,
+            Some(reset_body),
             false,
         )
     };
@@ -144,7 +144,7 @@ pub fn build_module(
                 ret: Box::new(FirType::Void),
             },
             &[],
-            clear_body,
+            Some(clear_body),
             false,
         )
     };
@@ -168,7 +168,7 @@ pub fn build_module(
                 ret: Box::new(FirType::Void),
             },
             &build_ui_args,
-            ui_body,
+            Some(ui_body),
             false,
         )
     };
@@ -210,7 +210,7 @@ pub fn build_module(
                 ret: Box::new(FirType::Void),
             },
             &compute_args,
-            compute_body,
+            Some(compute_body),
             false,
         )
     };

@@ -65,7 +65,7 @@ pub fn build_sine_phasor_test_module() -> (FirStore, FirId) {
             ret: Box::new(FirType::Void),
         },
         &build_ui_args,
-        build_ui_body,
+        Some(build_ui_body),
         false,
     );
 
@@ -114,7 +114,7 @@ pub fn build_sine_phasor_test_module() -> (FirStore, FirId) {
             ret: Box::new(FirType::Void),
         },
         &compute_args,
-        compute_body,
+        Some(compute_body),
         false,
     );
 

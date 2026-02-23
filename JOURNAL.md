@@ -1,6 +1,51 @@
 # JOURNAL
 
 
+## 2026-02-23 (session 2)
+
+### Feature — optional body for `DeclareFun` (function prototypes in FIR)
+
+**Motivation.** `FirMatch::DeclareFun` required a mandatory `body: FirId`, preventing the use of FIR to represent C/C++ forward declarations or pure function prototypes. Making `body: Option<FirId>` unblocks modelling DSP API prototype headers as first-class FIR nodes.
+
+**Design.** Two distinct tags are used in the arena encoding:
+- `FIR_DECLARE_FUN_TAG` (`"FIRST_DECLAREFUN"`) — existing tag; children are `[name, typ, args, body, is_inline]`; decoded as `body: Some(id)`.
+- `FIR_DECLARE_FUN_PROTO_TAG` (`"FIRST_DECLAREFUN_PROTO"`) — new tag; children are `[name, typ, args, is_inline]` (no body slot); decoded as `body: None`.
+
+Both tags hash-cons through the same `TreeArena`, so two identical prototypes share the same `FirId`; a prototype and a definition with the same name are always distinct.
+
+**`crates/fir/src/lib.rs`:**
+- `FirMatch::DeclareFun.body`: `FirId` → `Option<FirId>`.
+- `FirBuilder::declare_fun`: `body: FirId` → `body: Option<FirId>`; selects tag from `Some`/`None`.
+- `children_of_fir`: includes body in children only when `Some`.
+- Updated existing test `builder_and_match_cover_faust_dsp_api_fun_signatures` (all `declare_fun` calls wrapped with `Some(body)`; assertions updated to `body: Some(body)`).
+- New test `builder_and_match_cover_declare_fun_proto`: verifies round-trip encode/decode of a body-less declaration, hash-consing of duplicate prototypes, and distinctness from a definition with the same name.
+
+**`crates/codegen/src/backends/cpp/mod.rs`:**
+- `DeclareFunView.body`: `FirId` → `Option<FirId>`.
+- `infer_module_compute_output_arity`: matches `body: Some(body)`.
+- `emit_declare_fun`: when `body.is_none()`, emits a C++ forward declaration (`virtual ret name(params);`) without braces and returns early.
+
+**`crates/codegen/src/backends/c/mod.rs`:**
+- `DeclareFunView.body`: `FirId` → `Option<FirId>`.
+- `collect_declared_functions`: only collects body-bearing `DeclareFun` nodes (`body: Some(body)`); prototype-only nodes are excluded so the canonical C stub generation is unaffected.
+- `infer_module_compute_output_arity`: matches `body: Some(body)`.
+- `emit_named_fun` / `emit_helper_function`: `body` unwrapped with `.expect(…)`; unreachable for prototype-only nodes since `collect_declared_functions` already filters them.
+
+**`crates/codegen/src/backends/interp/mod.rs`:**
+- Generator loop skips body-less `DeclareFun` nodes (only compiles when `body: Some(body)`).
+
+**Call-site updates (`Some(body)` wrapping):**
+- `crates/transform/src/signal_fir/module.rs` — 6 `declare_fun` calls.
+- `crates/compiler/src/lib.rs` — 2 `declare_fun` calls.
+- `crates/codegen/src/fixtures.rs` — 2 `declare_fun` calls.
+- `crates/codegen/src/backends/c/mod.rs` tests — 1 call.
+- `crates/codegen/src/backends/cpp/mod.rs` tests — 3 calls.
+- `crates/transform/src/signal_fir/mod.rs` tests — `find_decl_fun_body` helper and 6 inline patterns updated to use `body: Some(body)` destructuring.
+
+**Result.** `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace --all-targets` all pass with zero warnings or failures.
+
+---
+
 ## 2026-02-23
 
 ### Design — FIR module verifier plan (`porting/fir-module-verifier-plan-en.md`)

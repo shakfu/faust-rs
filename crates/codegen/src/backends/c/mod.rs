@@ -158,7 +158,8 @@ struct DeclareFunView {
     name: String,
     typ: FirType,
     named_args: Vec<NamedType>,
-    body: FirId,
+    /// `None` when this is a prototype-only declaration (no body).
+    body: Option<FirId>,
 }
 
 #[must_use]
@@ -576,14 +577,18 @@ fn emit_named_fun(
             decl.name
         ),
     };
+    // collect_declared_functions only includes body-bearing definitions.
+    let body = decl
+        .body
+        .expect("emit_named_fun called with prototype-only DeclareFunView");
     let _ = writeln!(out, "{signature} {{");
     if decl.name == "instanceConstants" {
         let _ = writeln!(out, "    dsp->fSampleRate = sample_rate;");
     }
     if decl.name == "compute" {
-        emit_compute_body(store, out, options, decl.body, 1)?;
+        emit_compute_body(store, out, options, body, 1)?;
     } else {
-        emit_block(store, out, options, decl.body, 1)?;
+        emit_block(store, out, options, body, 1)?;
     }
     let _ = writeln!(out, "}}");
     let _ = writeln!(out);
@@ -596,6 +601,10 @@ fn emit_helper_function(
     options: &COptions,
     decl: &DeclareFunView,
 ) -> Result<(), CodegenError> {
+    // collect_declared_functions only includes body-bearing definitions.
+    let body = decl
+        .body
+        .expect("emit_helper_function called with prototype-only DeclareFunView");
     let (ret, params) = match &decl.typ {
         FirType::Fun {
             args: typed_args,
@@ -615,7 +624,7 @@ fn emit_helper_function(
         other => (emit_type(other, options), String::new()),
     };
     let _ = writeln!(out, "static {ret} {}({params}) {{", decl.name);
-    emit_block(store, out, options, decl.body, 1)?;
+    emit_block(store, out, options, body, 1)?;
     let _ = writeln!(out, "}}");
     let _ = writeln!(out);
     Ok(())
@@ -665,7 +674,11 @@ fn infer_module_compute_output_arity(store: &FirStore, declarations: FirId) -> u
         return 0;
     };
     for item in items {
-        if let FirMatch::DeclareFun { name, body, .. } = match_fir(store, item)
+        if let FirMatch::DeclareFun {
+            name,
+            body: Some(body),
+            ..
+        } = match_fir(store, item)
             && name == "compute"
         {
             return infer_compute_output_arity(store, body);
@@ -774,15 +787,18 @@ fn collect_declared_functions(
             name,
             typ,
             args,
-            body,
+            body: Some(body),
             ..
         } = match_fir(store, item)
         {
+            // Only collect function *definitions* (with body). Prototype-only
+            // DeclareFun nodes (body: None) are forward declarations and do not
+            // displace the canonical stub generation in emit_c_api.
             names.push(DeclareFunView {
                 name,
                 typ,
                 named_args: args,
-                body,
+                body: Some(body),
             });
         }
     }
@@ -1304,7 +1320,7 @@ mod tests {
             name: "x".to_string(),
             typ: FirType::Int32,
         }];
-        let metadata = b.declare_fun("metadata", bad_ty, &bad_args, body, false);
+        let metadata = b.declare_fun("metadata", bad_ty, &bad_args, Some(body), false);
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let declarations = b.block(&[metadata]);

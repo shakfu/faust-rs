@@ -135,7 +135,8 @@ struct DeclareFunView<'a> {
     name: &'a str,
     typ: &'a FirType,
     named_args: &'a [NamedType],
-    body: FirId,
+    /// `None` when this is a prototype-only declaration (no body).
+    body: Option<FirId>,
     is_inline: bool,
 }
 
@@ -243,7 +244,11 @@ fn infer_module_compute_output_arity(store: &FirStore, declarations: FirId) -> u
         return 0;
     };
     for item in items {
-        if let FirMatch::DeclareFun { name, body, .. } = match_fir(store, item)
+        if let FirMatch::DeclareFun {
+            name,
+            body: Some(body),
+            ..
+        } = match_fir(store, item)
             && name == "compute"
         {
             return infer_compute_output_arity(store, body);
@@ -903,6 +908,15 @@ fn emit_declare_fun(
     let is_dsp_api = is_dsp_api_method(decl.name);
     let method_prefix = if is_dsp_api { "virtual " } else { "" };
     let inline = if decl.is_inline { "inline " } else { "" };
+    // Prototype-only (no body): emit a forward declaration / pure-virtual signature.
+    let Some(body) = decl.body else {
+        let _ = writeln!(
+            out,
+            "{tab}{inline}{method_prefix}{ret} {}({params});",
+            decl.name
+        );
+        return Ok(());
+    };
     let _ = writeln!(
         out,
         "{tab}{inline}{method_prefix}{ret} {}({params}) {{",
@@ -910,10 +924,10 @@ fn emit_declare_fun(
     );
     if decl.name == "instanceConstants" {
         let _ = writeln!(out, "{tab}    fSampleRate = sample_rate;");
-        emit_block(store, out, options, module_name, decl.body, indent + 1)?;
+        emit_block(store, out, options, module_name, body, indent + 1)?;
     } else if decl.name == "compute" {
-        emit_compute_body(store, out, options, decl.body, indent + 1)?;
-    } else if decl.name == "metadata" && is_empty_block(store, decl.body) {
+        emit_compute_body(store, out, options, body, indent + 1)?;
+    } else if decl.name == "metadata" && is_empty_block(store, body) {
         let _ = writeln!(out, "{tab}    (void)m;");
         let _ = writeln!(
             out,
@@ -921,7 +935,7 @@ fn emit_declare_fun(
             module_name
         );
         let _ = writeln!(out, "{tab}    m->declare(\"name\", \"{module_name}\");");
-    } else if decl.name == "buildUserInterface" && is_empty_block(store, decl.body) {
+    } else if decl.name == "buildUserInterface" && is_empty_block(store, body) {
         let _ = writeln!(
             out,
             "{tab}    ui_interface->openVerticalBox({});",
@@ -929,7 +943,7 @@ fn emit_declare_fun(
         );
         let _ = writeln!(out, "{tab}    ui_interface->closeBox();");
     } else {
-        emit_block(store, out, options, module_name, decl.body, indent + 1)?;
+        emit_block(store, out, options, module_name, body, indent + 1)?;
     }
     let _ = writeln!(out, "{tab}}}");
     Ok(())
@@ -1316,7 +1330,7 @@ mod tests {
             name: "x".to_owned(),
             typ: FirType::Int32,
         }];
-        let fun = b.declare_fun("helper", fun_ty, &args, body, false);
+        let fun = b.declare_fun("helper", fun_ty, &args, Some(body), false);
 
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
@@ -1346,7 +1360,7 @@ mod tests {
             name: "x".to_owned(),
             typ: FirType::Int32,
         }];
-        let build_ui = b.declare_fun("buildUserInterface", bad_ty, &bad_args, body, false);
+        let build_ui = b.declare_fun("buildUserInterface", bad_ty, &bad_args, Some(body), false);
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let declarations = b.block(&[build_ui]);
@@ -1387,7 +1401,7 @@ mod tests {
             args: Vec::new(),
             ret: Box::new(FirType::Void),
         };
-        let fun = b.declare_fun("ui", fun_ty, &[], body, false);
+        let fun = b.declare_fun("ui", fun_ty, &[], Some(body), false);
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let declarations = b.block(&[fun]);

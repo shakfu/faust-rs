@@ -994,7 +994,7 @@ fn lower_signals_to_fir_legacy_bridge(
 
     let body = b.block(&body);
     let (compute_type, compute_args) = make_compute_fir_signature();
-    let compute = b.declare_fun("compute", compute_type, &compute_args, body, false);
+    let compute = b.declare_fun("compute", compute_type, &compute_args, Some(body), false);
     let declarations = b.block(&[compute]);
     let dsp_struct = b.block(&[]);
     let globals = b.block(&[]);
@@ -1066,7 +1066,7 @@ fn lower_signals_to_c_legacy_bridge(
     // emit FIR label statements, so we avoid `Label` nodes here.
     let body = b.block(&[]);
     let (compute_type, compute_args) = make_compute_fir_signature();
-    let compute = b.declare_fun("compute", compute_type, &compute_args, body, false);
+    let compute = b.declare_fun("compute", compute_type, &compute_args, Some(body), false);
     let declarations = b.block(&[compute]);
     let dsp_struct = b.block(&[]);
     let globals = b.block(&[]);

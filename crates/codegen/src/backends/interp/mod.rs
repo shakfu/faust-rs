@@ -198,10 +198,11 @@ pub fn generate_interp_module(
     for decl_id in &decl_ids {
         if let fir::FirMatch::DeclareFun {
             name: fn_name,
-            body,
+            body: Some(body),
             ..
         } = match_fir(store, *decl_id)
         {
+            // Prototype-only DeclareFun nodes (body: None) have no bytecode to compile.
             let block_id = compiler.compile_fir_block(store, body).map_err(|e| {
                 CodegenError::new(
                     CodegenErrorCode::CompilationFailed,

@@ -113,8 +113,11 @@ mod tests {
                 )
             })
             .unwrap_or_else(|| panic!("function `{target}` expected"));
-        let FirMatch::DeclareFun { body, .. } = match_fir(store, fun) else {
-            panic!("declare fun expected for `{target}`");
+        let FirMatch::DeclareFun {
+            body: Some(body), ..
+        } = match_fir(store, fun)
+        else {
+            panic!("declare fun with body expected for `{target}`");
         };
         body
     }
@@ -170,8 +173,11 @@ mod tests {
                 )
             })
             .expect("compute declaration expected");
-        let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
-            panic!("declare fun expected");
+        let FirMatch::DeclareFun {
+            body: Some(body), ..
+        } = match_fir(&out.store, compute)
+        else {
+            panic!("declare fun with body expected");
         };
         let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
             panic!("compute block expected");
@@ -415,8 +421,11 @@ mod tests {
                 )
             })
             .expect("compute declaration expected");
-        let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
-            panic!("declare fun expected");
+        let FirMatch::DeclareFun {
+            body: Some(body), ..
+        } = match_fir(&out.store, compute)
+        else {
+            panic!("declare fun with body expected");
         };
         let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
             panic!("compute block expected");
@@ -512,8 +521,11 @@ mod tests {
                 )
             })
             .expect("compute declaration expected");
-        let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
-            panic!("declare fun expected");
+        let FirMatch::DeclareFun {
+            body: Some(body), ..
+        } = match_fir(&out.store, compute)
+        else {
+            panic!("declare fun with body expected");
         };
         let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
             panic!("compute block expected");
@@ -597,8 +609,11 @@ mod tests {
                 )
             })
             .expect("compute declaration expected");
-        let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
-            panic!("declare fun expected");
+        let FirMatch::DeclareFun {
+            body: Some(body), ..
+        } = match_fir(&out.store, compute)
+        else {
+            panic!("declare fun with body expected");
         };
         let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
             panic!("compute block expected");
@@ -657,8 +672,11 @@ mod tests {
                 )
             })
             .expect("compute declaration expected");
-        let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
-            panic!("declare fun expected");
+        let FirMatch::DeclareFun {
+            body: Some(body), ..
+        } = match_fir(&out.store, compute)
+        else {
+            panic!("declare fun with body expected");
         };
         let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
             panic!("compute block expected");
@@ -714,8 +732,11 @@ mod tests {
                 )
             })
             .expect("compute declaration expected");
-        let FirMatch::DeclareFun { body, .. } = match_fir(&out.store, compute) else {
-            panic!("declare fun expected");
+        let FirMatch::DeclareFun {
+            body: Some(body), ..
+        } = match_fir(&out.store, compute)
+        else {
+            panic!("declare fun with body expected");
         };
         let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
             panic!("compute block expected");

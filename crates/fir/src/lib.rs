@@ -669,24 +669,34 @@ impl<'a> FirBuilder<'a> {
     }
 
     /// C++ parity: `DeclareFunInst`.
+    ///
+    /// Pass `body: Some(id)` for a full function definition or `body: None` for
+    /// a pure prototype (forward declaration / pure-virtual equivalent).
     #[must_use]
     pub fn declare_fun(
         &mut self,
         name: impl Into<String>,
         typ: FirType,
         args: &[NamedType],
-        body: FirId,
+        body: Option<FirId>,
         is_inline: bool,
     ) -> FirId {
         let name_id = self.store.arena.symbol(name);
         let typ_id = encode_type(&mut self.store.arena, &typ);
         let args_id = encode_named_types(&mut self.store.arena, args);
         let inline_id = self.store.arena.int(if is_inline { 1 } else { 0 });
-        intern_tag(
-            &mut self.store.arena,
-            FIR_DECLARE_FUN_TAG,
-            &[name_id, typ_id, args_id, body, inline_id],
-        )
+        match body {
+            Some(body_id) => intern_tag(
+                &mut self.store.arena,
+                FIR_DECLARE_FUN_TAG,
+                &[name_id, typ_id, args_id, body_id, inline_id],
+            ),
+            None => intern_tag(
+                &mut self.store.arena,
+                FIR_DECLARE_FUN_PROTO_TAG,
+                &[name_id, typ_id, args_id, inline_id],
+            ),
+        }
     }
 
     /// C++ parity: `DeclareStructTypeInst`.
@@ -1179,7 +1189,8 @@ pub enum FirMatch {
         name: String,
         typ: FirType,
         args: Vec<NamedType>,
-        body: FirId,
+        /// `None` when this is a prototype-only declaration (no body).
+        body: Option<FirId>,
         is_inline: bool,
     },
     DeclareStructType {
@@ -1595,7 +1606,24 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 name,
                 typ,
                 args,
-                body: *body,
+                body: Some(*body),
+                is_inline,
+            }
+        }
+        (FIR_DECLARE_FUN_PROTO_TAG, [name, typ, args, is_inline]) => {
+            let (Some(name), Some(typ), Some(args), Some(is_inline)) = (
+                decode_symbol(&store.arena, *name),
+                decode_type(&store.arena, *typ),
+                decode_named_types(&store.arena, *args),
+                decode_bool(&store.arena, *is_inline),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::DeclareFun {
+                name,
+                typ,
+                args,
+                body: None,
                 is_inline,
             }
         }
@@ -1956,7 +1984,8 @@ fn child_ids(node: &FirMatch) -> Vec<FirId> {
             ..
         } => vec![*cond, *then_value, *else_value],
         FirMatch::DeclareVar { init, .. } => init.iter().copied().collect(),
-        FirMatch::DeclareFun { body, .. } => vec![*body],
+        FirMatch::DeclareFun { body: Some(b), .. } => vec![*b],
+        FirMatch::DeclareFun { body: None, .. } => vec![],
         FirMatch::StoreTable { index, value, .. } => vec![*index, *value],
         FirMatch::Return(value) => value.iter().copied().collect(),
         FirMatch::If {
@@ -2046,6 +2075,7 @@ const FIR_DECLARE_VAR_TAG: &str = "FIRST_DECLAREVAR";
 const FIR_DECLARE_TABLE_TAG: &str = "FIRST_DECLARETABLE";
 const FIR_NULL_DECLARE_VAR_TAG: &str = "FIRST_NULLDECLAREVAR";
 const FIR_DECLARE_FUN_TAG: &str = "FIRST_DECLAREFUN";
+const FIR_DECLARE_FUN_PROTO_TAG: &str = "FIRST_DECLAREFUN_PROTO";
 const FIR_DECLARE_STRUCT_TYPE_TAG: &str = "FIRST_DECLARESTRUCTTYPE";
 const FIR_DECLARE_BUFFER_ITERATORS_TAG: &str = "FIRST_DECLAREBUFFERITERATORS";
 const FIR_STORE_VAR_TAG: &str = "FIRST_STOREVAR";
@@ -2844,7 +2874,13 @@ mod tests {
             args: vec![FirType::Meta],
             ret: Box::new(FirType::Void),
         };
-        let metadata = b.declare_fun("metadata", metadata_ty.clone(), &metadata_args, body, false);
+        let metadata = b.declare_fun(
+            "metadata",
+            metadata_ty.clone(),
+            &metadata_args,
+            Some(body),
+            false,
+        );
 
         let ui_args = vec![NamedType {
             name: "ui_interface".to_string(),
@@ -2854,7 +2890,13 @@ mod tests {
             args: vec![FirType::UI],
             ret: Box::new(FirType::Void),
         };
-        let build_ui = b.declare_fun("buildUserInterface", ui_ty.clone(), &ui_args, body, false);
+        let build_ui = b.declare_fun(
+            "buildUserInterface",
+            ui_ty.clone(),
+            &ui_args,
+            Some(body),
+            false,
+        );
 
         let compute_args = vec![
             NamedType {
@@ -2878,7 +2920,13 @@ mod tests {
             ],
             ret: Box::new(FirType::Void),
         };
-        let compute = b.declare_fun("compute", compute_ty.clone(), &compute_args, body, false);
+        let compute = b.declare_fun(
+            "compute",
+            compute_ty.clone(),
+            &compute_args,
+            Some(body),
+            false,
+        );
 
         assert_eq!(
             match_fir(&store, metadata),
@@ -2886,7 +2934,7 @@ mod tests {
                 name: "metadata".to_string(),
                 typ: metadata_ty,
                 args: metadata_args,
-                body,
+                body: Some(body),
                 is_inline: false
             }
         );
@@ -2896,7 +2944,7 @@ mod tests {
                 name: "buildUserInterface".to_string(),
                 typ: ui_ty,
                 args: ui_args,
-                body,
+                body: Some(body),
                 is_inline: false
             }
         );
@@ -2906,8 +2954,44 @@ mod tests {
                 name: "compute".to_string(),
                 typ: compute_ty,
                 args: compute_args,
-                body,
+                body: Some(body),
                 is_inline: false
+            }
+        );
+    }
+
+    #[test]
+    fn builder_and_match_cover_declare_fun_proto() {
+        let mut store = FirStore::new();
+        let args = vec![NamedType {
+            name: "x".to_string(),
+            typ: FirType::FaustFloat,
+        }];
+        let typ = FirType::Fun {
+            args: vec![FirType::FaustFloat],
+            ret: Box::new(FirType::FaustFloat),
+        };
+        let (proto, proto_dup, proto_with_body) = {
+            let mut b = FirBuilder::new(&mut store);
+            let p = b.declare_fun("myHelper", typ.clone(), &args, None, false);
+            let pd = b.declare_fun("myHelper", typ.clone(), &args, None, false);
+            let body = b.block(&[]);
+            let pb = b.declare_fun("myHelper", typ.clone(), &args, Some(body), false);
+            (p, pd, pb)
+        };
+        // Prototypes are hash-consed.
+        assert_eq!(proto, proto_dup);
+        // A prototype and a definition with the same signature are distinct nodes.
+        assert_ne!(proto, proto_with_body);
+        // Round-trip decode.
+        assert_eq!(
+            match_fir(&store, proto),
+            FirMatch::DeclareFun {
+                name: "myHelper".to_string(),
+                typ,
+                args,
+                body: None,
+                is_inline: false,
             }
         );
     }
