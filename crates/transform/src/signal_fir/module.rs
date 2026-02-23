@@ -65,10 +65,20 @@ pub fn build_module(
             .push(b.label(format!("signals: {}", plan.signal_count)));
     }
 
-    for sig in signals {
+    for (signal_index, sig) in signals.iter().enumerate() {
         let value = lower.lower_signal(*sig)?;
         let mut b = FirBuilder::new(&mut lower.store);
-        lower.sample_statements.push(b.drop_(value));
+        if signal_index < plan.num_outputs {
+            let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+            lower.sample_statements.push(b.store_table(
+                format!("output{signal_index}"),
+                AccessType::Stack,
+                i0,
+                value,
+            ));
+        } else {
+            lower.sample_statements.push(b.drop_(value));
+        }
     }
     for index in 0..plan.num_outputs {
         let mut b = FirBuilder::new(&mut lower.store);

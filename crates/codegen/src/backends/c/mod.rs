@@ -147,10 +147,7 @@ struct TableInit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmitMode {
     Default,
-    Compute {
-        drop_index: usize,
-        output_channels: usize,
-    },
+    Compute,
 }
 
 #[derive(Debug, Clone)]
@@ -186,7 +183,8 @@ pub fn backend_id() -> &'static str {
 /// # Options behavior
 /// - `class_name`: overrides FIR module name.
 /// - `num_inputs`/`num_outputs`: drive `getNumInputs*`/`getNumOutputs*`; when
-///   `num_outputs == 0`, output arity is inferred from `compute` drops.
+///   `num_outputs == 0`, output arity is inferred from explicit
+///   `StoreTable(outputN, ...)` writes in `compute` (with legacy `Drop` fallback).
 pub fn generate_c_module(
     store: &FirStore,
     module: FirId,
@@ -645,7 +643,7 @@ fn emit_compute_body(
     indent: usize,
 ) -> Result<(), CodegenError> {
     let tab = "    ".repeat(indent);
-    let output_channels = if options.num_outputs > 0 {
+    let _output_channels = if options.num_outputs > 0 {
         options.num_outputs
     } else {
         infer_compute_output_arity(store, body)
@@ -653,10 +651,7 @@ fn emit_compute_body(
     let _ = writeln!(out, "{tab}{{");
     let _ = writeln!(out, "{tab}    int i0;");
     let _ = writeln!(out, "{tab}    for (i0 = 0; i0 < count; i0 = i0 + 1) {{");
-    let mut mode = EmitMode::Compute {
-        drop_index: 0,
-        output_channels,
-    };
+    let mut mode = EmitMode::Compute;
     emit_block_with_mode(store, out, options, body, indent + 2, &mut mode)?;
     let _ = writeln!(out, "{tab}    }}");
     let _ = writeln!(out, "{tab}}}");
@@ -754,10 +749,25 @@ fn infer_compute_output_arity(store: &FirStore, body: FirId) -> usize {
     let FirMatch::Block(items) = match_fir(store, body) else {
         return 0;
     };
-    items
-        .iter()
-        .filter(|stmt| matches!(match_fir(store, **stmt), FirMatch::Drop(_)))
-        .count()
+    let mut max_output_index = None;
+    let mut drop_count = 0usize;
+    for stmt in items {
+        match match_fir(store, stmt) {
+            FirMatch::StoreTable { name, .. } => {
+                if let Some(index) = output_alias_index(&name) {
+                    max_output_index =
+                        Some(max_output_index.map_or(index, |m: usize| m.max(index)));
+                }
+            }
+            FirMatch::Drop(_) => drop_count += 1,
+            _ => {}
+        }
+    }
+    max_output_index.map_or(drop_count, |idx| idx + 1)
+}
+
+fn output_alias_index(name: &str) -> Option<usize> {
+    name.strip_prefix("output")?.parse::<usize>().ok()
 }
 
 fn collect_declared_functions(
@@ -895,20 +905,7 @@ fn emit_stmt(
         }
         FirMatch::Drop(value) => {
             let value = emit_value(store, options, value)?;
-            if let EmitMode::Compute {
-                drop_index,
-                output_channels,
-            } = mode
-                && *drop_index < *output_channels
-            {
-                let output_index = *drop_index;
-                let _ = writeln!(
-                    out,
-                    "{tab}output{output_index}[i0] = (FAUSTFLOAT)({value});"
-                );
-                *drop_index += 1;
-                return Ok(());
-            }
+            let _ = mode;
             let _ = writeln!(out, "{tab}(void)({value});");
             Ok(())
         }
@@ -1277,7 +1274,7 @@ mod tests {
         ));
         assert!(out.contains("void computemydsp(mydsp* dsp, int count, FAUSTFLOAT** RESTRICT inputs, FAUSTFLOAT** RESTRICT outputs)"));
         assert!(out.contains("for (i0 = 0; i0 < count; i0 = i0 + 1)"));
-        assert!(out.contains("output0[i0] = (FAUSTFLOAT)("));
+        assert!(out.contains("output0[i0] = "));
         assert!(out.contains("sin("));
         assert!(out.contains("void instanceConstantsmydsp(mydsp* dsp, int sample_rate) {"));
         assert!(out.contains("dsp->fSampleRate = sample_rate;"));

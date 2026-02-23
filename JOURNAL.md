@@ -1,5 +1,48 @@
 # JOURNAL
 
+## 2026-02-23 (session 10)
+
+### Fix — `compute` outputs must be explicit FIR stores (`StoreTable`), not backend `Drop` synthesis
+
+Completed the FIR-side output write model for fast-lane `compute`: output writes
+are now explicitly represented in FIR (`StoreTable("outputN", ...)`) instead of
+being synthesized by the C/C++ backends from `Drop(...)` statements.
+
+**Fast-lane FIR generation (`crates/transform/src/signal_fir/module.rs`)**
+- Fast-lane sample statements now emit explicit:
+  - `StoreTable("output0", AccessType::Stack, i0, value)`
+  - `StoreTable("output1", ...)`, etc.
+  for output signals (up to `num_outputs`).
+- `Drop(...)` is still used only for non-output/discarded values.
+- The generated FIR for `process = +;` now contains:
+  - `DeclareVar input0/input1/output0`
+  - `StoreTable { name: "output0", ... }`
+  and no implicit output write via `Drop`.
+
+**Backends C/C++ (`crates/codegen/src/backends/c/mod.rs`, `crates/codegen/src/backends/cpp/mod.rs`)**
+- Removed special `EmitMode::Compute` behavior that translated `Drop` nodes into
+  `outputN[i0] = ...` assignments.
+- `Drop(...)` is now emitted uniformly as a discard (`(void)(...)`) in compute
+  too.
+- Output arity inference (`num_outputs == 0`) now prefers explicit
+  `StoreTable(outputN, ...)` writes, with a temporary fallback to `Drop` count
+  for older FIR inputs.
+
+**Fixtures/tests**
+- Updated `crates/codegen/src/fixtures.rs` to use explicit `StoreTable` writes
+  in the synthetic sine phasor `compute`.
+- Updated backend tests expecting output writes generated from `Drop`:
+  - `crates/codegen/src/backends/c/mod.rs`
+  - `crates/codegen/tests/cpp_fir_sine_phasor.rs`
+
+**Validation**
+- `cargo fmt --all` ✅
+- `cargo run -p compiler -- --dump-fir --no-fir-verify t1.dsp` ✅
+- `cargo test -p codegen` ✅
+- `cargo test -p compiler` ✅
+
+---
+
 ## 2026-02-23 (session 9)
 
 ### Fix — Canonical FIR input accesses in fast-lane + explicit `dsp` funarg for DSP methods
