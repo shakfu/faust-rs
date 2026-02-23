@@ -1,5 +1,41 @@
 # JOURNAL
 
+## 2026-02-23 (session 8)
+
+### Fix — FIR verifier `dsp_struct` validation aligned with corrected plan
+
+Updated `crates/fir/src/checker.rs` after correcting the `dsp_struct`
+description in `porting/fir-module-verifier-plan-en.md`: the verifier now
+expects `Module.dsp_struct` to be a `Block` (not `DeclareStructType`) and
+accepts only `DeclareVar` / `DeclareTable` entries with `AccessType::Struct`.
+
+**Checker changes (`crates/fir/src/checker.rs`)**
+- `FIR-M02`: now validates that `dsp_struct` is a `Block`.
+- Added/activated struct-field checks on block entries:
+  - `FIR-S01` for non-struct field declarations or invalid node kinds
+  - `FIR-S02` for duplicate struct field names
+  - existing `FIR-S03` / `FIR-S04` now report by field name (from declarations)
+- Phase 1 symbol collection now records struct field names from the `dsp_struct`
+  block (`ModuleSymbols.struct_field_names`) and keeps ordered field types in
+  `ModuleSymbols.struct_fields`.
+- `ModuleSymbols.struct_name` is sourced from `Module.name` (logical DSP struct
+  name), instead of relying on `FirType::Struct`.
+- `FIR-SC09` is now implemented for `kStruct` `LoadVar` / `StoreVar` accesses by
+  validating names against collected `dsp_struct` field names.
+- Rustdoc in `checker.rs` updated to reflect the block-based `dsp_struct` model
+  and to list `FIR-SC09` as implemented.
+
+**Tests**
+- Updated Phase 1 checker tests to build `dsp_struct` as a `Block`.
+- Added regression coverage for:
+  - `FIR-S01` (`dsp_struct` field wrong access)
+  - `FIR-S02` (duplicate struct field name)
+- Validation:
+  - `cargo test -p fir checker` ✅ (60 tests passed)
+  - `cargo fmt -p fir` ✅
+
+---
+
 ## 2026-02-23 (session 7)
 
 ### Feature — FIR verifier Phase 4 integration in `compiler` + CLI

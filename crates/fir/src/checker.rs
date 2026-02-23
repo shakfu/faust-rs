@@ -17,12 +17,14 @@
 //! | Code | Sev | Check |
 //! |---|---|---|
 //! | FIR-M01 | E | Root node is not a Module |
-//! | FIR-M02 | E | `dsp_struct` is not a valid `DeclareStructType` |
+//! | FIR-M02 | E | `dsp_struct` is not a `Block` of struct field declarations |
 //! | FIR-M03 | E | `globals` is not a Block |
 //! | FIR-M04 | E | `declarations` is not a Block |
 //! | FIR-M05 | E | Non-`DeclareFun` node in declarations block |
 //! | FIR-M06 | W | Duplicate function name in declarations |
 //! | FIR-M07 | W | Expected DSP API function is not declared |
+//! | FIR-S01 | E | Struct field declaration is not `DeclareVar/DeclareTable(kStruct)` |
+//! | FIR-S02 | E | Duplicate struct field name in `dsp_struct` |
 //! | FIR-S03 | E | Struct field has `Void` type |
 //! | FIR-S04 | W | Struct array field has size 0 |
 //! | FIR-G01 | E | Globals block contains a non-`DeclareVar`/`DeclareTable` node |
@@ -43,6 +45,7 @@
 //! | FIR-SC04 | E | `StoreVar` to undeclared variable |
 //! | FIR-SC05 | E | `StoreVar` access type does not match declaration |
 //! | FIR-SC07 | E | `kFunArgs` variable re-declared inside function body |
+//! | FIR-SC09 | W | `kStruct` access name not declared in `dsp_struct` |
 //! | FIR-SC10 | E | Local `DeclareVar` uses a non-local access class |
 //! | FIR-L01  | E | `ForLoop` init is not a `DeclareVar(kLoop)` |
 //! | FIR-L02  | E | `ForLoop` loop variable type is not `Int32`/`Int64` |
@@ -83,10 +86,8 @@
 //! | FIR-MA04 | W | `abs` / `fabs` int-vs-float distinction warning |
 //!
 //! ## Deferred / partial
-//! - **S01/S02** — struct field names not available in `FirType::Struct(_, Vec<FirType>)`.
 //! - **SC06/SC08** — naturally enforced by scope-stack pop; SC01 fires for any
 //!   out-of-scope access regardless of the access class.
-//! - **SC09** — field names not available; kStruct accesses are assumed valid.
 //! - **FC04** — implemented partially (discarded non-void call result + call
 //!   node declared-type/signature mismatch), but not yet all assignment/use
 //!   sites.
@@ -202,13 +203,14 @@ pub struct FunctionSig {
 /// These tables feed into Phase 2 (scope analysis) and Phase 3 (type checking).
 #[derive(Clone, Debug, Default)]
 pub struct ModuleSymbols {
-    /// Struct name from `FirType::Struct(name, _)`.
+    /// Logical DSP struct name (currently sourced from `Module.name`).
     pub struct_name: Option<String>,
-    /// Ordered field types from `FirType::Struct(_, fields)`.
+    /// Ordered field types from declarations in the `dsp_struct` block.
     ///
-    /// Field names are not available at the type level; they are gathered from
-    /// `kStruct`-access `DeclareVar` nodes in function bodies during Phase 2.
+    /// Field names are tracked separately in [`Self::struct_field_names`].
     pub struct_fields: Vec<FirType>,
+    /// Set of names declared in the `dsp_struct` block (vars and tables).
+    pub struct_field_names: HashSet<String>,
     /// Global/static variables: name → `(AccessType, FirType)`.
     pub globals: HashMap<String, (AccessType, FirType)>,
     /// Names declared as global/static tables (for T03).
@@ -572,6 +574,10 @@ impl<'s> VerifyCtx<'s> {
             return;
         };
 
+        // `Module.name` is the DSP class name and is used as the logical struct
+        // name in the checker symbols table.
+        self.symbols.struct_name = Some(name.clone());
+
         // M02: validate and register struct fields
         self.check_dsp_struct(dsp_struct);
 
@@ -591,31 +597,86 @@ impl<'s> VerifyCtx<'s> {
     // ── dsp_struct ────────────────────────────────────────────────────────────
 
     fn check_dsp_struct(&mut self, id: FirId) {
-        let FirMatch::DeclareStructType { typ } = match_fir(self.store, id) else {
-            self.error("FIR-M02", "dsp_struct is not a DeclareStructType", id);
+        let FirMatch::Block(stmts) = match_fir(self.store, id) else {
+            self.error("FIR-M02", "dsp_struct is not a Block", id);
             return;
         };
 
-        let FirType::Struct(struct_name, fields) = typ else {
-            self.error("FIR-M02", "dsp_struct type is not FirType::Struct", id);
-            return;
-        };
+        let mut seen = HashSet::new();
+        let mut field_types = Vec::new();
+        for stmt_id in stmts {
+            let (field_name, field_type) = match match_fir(self.store, stmt_id) {
+                FirMatch::DeclareVar {
+                    name, typ, access, ..
+                } => {
+                    if access != AccessType::Struct {
+                        self.error(
+                            "FIR-S01",
+                            format!(
+                                "dsp_struct field '{name}' has access type {access:?}, expected Struct"
+                            ),
+                            stmt_id,
+                        );
+                    }
+                    (name, typ)
+                }
+                FirMatch::DeclareTable {
+                    name,
+                    access,
+                    elem_type,
+                    ..
+                } => {
+                    if access != AccessType::Struct {
+                        self.error(
+                            "FIR-S01",
+                            format!(
+                                "dsp_struct table '{name}' has access type {access:?}, expected Struct"
+                            ),
+                            stmt_id,
+                        );
+                    }
+                    (name, elem_type)
+                }
+                _ => {
+                    self.error(
+                        "FIR-S01",
+                        "dsp_struct contains a node that is not DeclareVar or DeclareTable",
+                        stmt_id,
+                    );
+                    continue;
+                }
+            };
 
-        self.symbols.struct_name = Some(struct_name);
+            if !seen.insert(field_name.clone()) {
+                self.error(
+                    "FIR-S02",
+                    format!("duplicate dsp_struct field name '{field_name}'"),
+                    stmt_id,
+                );
+            }
 
-        for (i, field_type) in fields.iter().enumerate() {
-            match field_type {
+            match &field_type {
                 FirType::Void => {
-                    self.error("FIR-S03", format!("struct field #{i} has Void type"), id);
+                    self.error(
+                        "FIR-S03",
+                        format!("dsp_struct field '{field_name}' has Void type"),
+                        stmt_id,
+                    );
                 }
                 FirType::Array(_, 0) => {
-                    self.warn("FIR-S04", format!("struct array field #{i} has size 0"), id);
+                    self.warn(
+                        "FIR-S04",
+                        format!("dsp_struct array field '{field_name}' has size 0"),
+                        stmt_id,
+                    );
                 }
                 _ => {}
             }
+            field_types.push(field_type);
         }
 
-        self.symbols.struct_fields = fields;
+        self.symbols.struct_field_names = seen;
+        self.symbols.struct_fields = field_types;
     }
 
     // ── globals ───────────────────────────────────────────────────────────────
@@ -859,13 +920,17 @@ impl<'s> VerifyCtx<'s> {
     /// Resolve a variable name+access to its declared `VarEntry`, if any.
     ///
     /// Returns `None` only when the variable is genuinely undeclared.
-    /// For `kStruct` accesses, always returns a dummy `Ok` entry (SC09 deferred).
+    ///
+    /// `kStruct` accesses are validated against names declared in the
+    /// `dsp_struct` block. The returned type remains a placeholder because
+    /// checker phase 3 still relies on the explicit FIR node `typ` for struct
+    /// accesses (name→type mapping is not tracked yet).
     fn resolve(&self, name: &str, access: AccessType) -> Option<VarEntry> {
         match access {
             AccessType::Struct => {
-                // SC09 would validate the name against struct field names, but
-                // FirType::Struct(_, Vec<FirType>) does not store names.
-                // Treat kStruct accesses as always valid.
+                if !self.symbols.struct_field_names.contains(name) {
+                    return None;
+                }
                 Some(VarEntry {
                     access: AccessType::Struct,
                     typ: FirType::Void, // placeholder; type check is Phase 3
@@ -922,8 +987,14 @@ impl<'s> VerifyCtx<'s> {
                 is_table: self.symbols.global_tables.contains(name),
             });
         }
-        // kStruct names cannot be validated precisely in Phase 2 because field
-        // names are not carried in `FirType::Struct(_, Vec<FirType>)`.
+        if self.symbols.struct_field_names.contains(name) {
+            return Some(VarEntry {
+                access: AccessType::Struct,
+                typ: FirType::Void,
+                init: InitStatus::Yes,
+                is_table: false,
+            });
+        }
         None
     }
 
@@ -1636,6 +1707,14 @@ impl<'s> VerifyCtx<'s> {
     // ── LoadVar (value) ───────────────────────────────────────────────────────
 
     fn check_load_var(&mut self, id: FirId, name: &str, access: AccessType) {
+        if access == AccessType::Struct && !self.symbols.struct_field_names.contains(name) {
+            self.warn(
+                "FIR-SC09",
+                format!("kStruct variable '{name}' is not declared in dsp_struct"),
+                id,
+            );
+            return;
+        }
         match self.resolve(name, access) {
             None => {
                 if let Some(entry) = self.resolve_any_by_name(name) {
@@ -1685,6 +1764,14 @@ impl<'s> VerifyCtx<'s> {
     // ── StoreVar (statement) ──────────────────────────────────────────────────
 
     fn check_store_var(&mut self, id: FirId, name: &str, access: AccessType) {
+        if access == AccessType::Struct && !self.symbols.struct_field_names.contains(name) {
+            self.warn(
+                "FIR-SC09",
+                format!("kStruct variable '{name}' is not declared in dsp_struct"),
+                id,
+            );
+            return;
+        }
         match self.resolve(name, access) {
             None => {
                 if let Some(entry) = self.resolve_any_by_name(name) {
@@ -2037,7 +2124,7 @@ mod tests {
     // ══ Phase 1 helpers (unchanged) ═══════════════════════════════════════════
 
     fn make_dsp_struct(b: &mut FirBuilder<'_>) -> FirId {
-        b.declare_struct_type(FirType::Struct("dsp".to_string(), vec![]))
+        b.block(&[])
     }
 
     fn make_empty_block(b: &mut FirBuilder<'_>) -> FirId {
@@ -2123,10 +2210,10 @@ mod tests {
     }
 
     #[test]
-    fn m02_bad_dsp_struct_not_declarestruct() {
+    fn m02_bad_dsp_struct_not_block() {
         let mut store = FirStore::new();
         let mut b = FirBuilder::new(&mut store);
-        let bad_struct = b.block(&[]);
+        let bad_struct = b.int32(0);
         let globals = make_empty_block(&mut b);
         let decls = make_full_declarations(&mut b);
         let module_id = b.module("dsp", bad_struct, globals, decls);
@@ -2234,8 +2321,8 @@ mod tests {
     fn s03_void_struct_field() {
         let mut store = FirStore::new();
         let mut b = FirBuilder::new(&mut store);
-        let bad_struct =
-            b.declare_struct_type(FirType::Struct("dsp".to_string(), vec![FirType::Void]));
+        let bad_field = b.declare_var("f", FirType::Void, AccessType::Struct, None);
+        let bad_struct = b.block(&[bad_field]);
         let globals = make_empty_block(&mut b);
         let decls = make_full_declarations(&mut b);
         let module_id = b.module("dsp", bad_struct, globals, decls);
@@ -2251,10 +2338,13 @@ mod tests {
     fn s04_zero_size_array_field() {
         let mut store = FirStore::new();
         let mut b = FirBuilder::new(&mut store);
-        let bad_struct = b.declare_struct_type(FirType::Struct(
-            "dsp".to_string(),
-            vec![FirType::Array(Box::new(FirType::Float32), 0)],
-        ));
+        let bad_field = b.declare_var(
+            "arr",
+            FirType::Array(Box::new(FirType::Float32), 0),
+            AccessType::Struct,
+            None,
+        );
+        let bad_struct = b.block(&[bad_field]);
         let globals = make_empty_block(&mut b);
         let decls = make_full_declarations(&mut b);
         let module_id = b.module("dsp", bad_struct, globals, decls);
@@ -2268,13 +2358,52 @@ mod tests {
         let mut store = FirStore::new();
         let mut b = FirBuilder::new(&mut store);
         let fields = vec![FirType::Int32, FirType::Float32];
-        let dsp_struct = b.declare_struct_type(FirType::Struct("dsp".to_string(), fields.clone()));
+        let f0 = b.declare_var("a", FirType::Int32, AccessType::Struct, None);
+        let f1 = b.declare_var("b", FirType::Float32, AccessType::Struct, None);
+        let dsp_struct = b.block(&[f0, f1]);
         let globals = make_empty_block(&mut b);
         let decls = make_full_declarations(&mut b);
         let module_id = b.module("dsp", dsp_struct, globals, decls);
         let (_report, symbols) = verify_module_structure(&store, module_id);
         assert_eq!(symbols.struct_name.as_deref(), Some("dsp"));
         assert_eq!(symbols.struct_fields, fields);
+        assert!(symbols.struct_field_names.contains("a"));
+        assert!(symbols.struct_field_names.contains("b"));
+    }
+
+    #[test]
+    fn s01_struct_field_wrong_access() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let bad_field = b.declare_var("f", FirType::Int32, AccessType::Stack, None);
+        let dsp_struct = b.block(&[bad_field]);
+        let globals = make_empty_block(&mut b);
+        let decls = make_full_declarations(&mut b);
+        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let report = verify_fir_module(&store, module_id);
+        assert!(report.has_errors());
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-S01"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn s02_duplicate_struct_field_name() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let f1 = b.declare_var("f", FirType::Int32, AccessType::Struct, None);
+        let f2 = b.declare_table("f", AccessType::Struct, FirType::FaustFloat, &[]);
+        let dsp_struct = b.block(&[f1, f2]);
+        let globals = make_empty_block(&mut b);
+        let decls = make_full_declarations(&mut b);
+        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let report = verify_fir_module(&store, module_id);
+        assert!(report.has_errors());
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-S02"),
+            "{report:?}"
+        );
     }
 
     #[test]
