@@ -8,7 +8,7 @@
 //!
 //! # Supported modes
 //! - parse diagnostics (`--parse`)
-//! - box/signal/FIR dumps (`--dump-box`, `--dump-sig`, `--dump-fir`)
+//! - box/signal/FIR dumps (`--dump-box`, `--dump-sig`, `--dump-fir`, `--dump-fir-verify`)
 //! - backend text emission (`--dump-c`, `--dump-cpp`, `-lang`)
 //! - golden snapshot output (`--golden`)
 //!
@@ -22,12 +22,12 @@ use codegen::backends::c::COptions;
 use codegen::backends::cpp::CppOptions;
 use codegen::backends::interp::InterpOptions;
 use compiler::{
-    Compiler, CompilerError, SignalFirLane,
+    Compiler, CompilerError, FirVerifyOptions, SignalFirLane,
     enrobage::{EnrobageOptions, wrap_cpp_with_architecture},
     golden_snapshot_from_file,
 };
 use errors::{DiagnosticBundle, LabelStyle, Severity, Stage};
-use fir::dump_fir;
+use fir::{checker::verify_fir_module, dump_fir};
 use serde_json::json;
 use signals::dump_sig_readable;
 use std::path::{Path, PathBuf};
@@ -102,6 +102,9 @@ struct CliArgs {
     /// Compile to FIR and dump FIR IR.
     #[arg(long = "dump-fir", action = ArgAction::SetTrue)]
     dump_fir: bool,
+    /// Run FIR verifier and dump the verification report (no codegen).
+    #[arg(long = "dump-fir-verify", action = ArgAction::SetTrue)]
+    dump_fir_verify: bool,
     /// Compile to interpreter bytecode and print `.fbc` text.
     #[arg(long = "dump-interp", action = ArgAction::SetTrue)]
     dump_interp: bool,
@@ -143,6 +146,12 @@ struct CliArgs {
     /// Signal->FIR compilation lane (only valid with `--dump-cpp`/`--dump-c`/`--dump-fir`).
     #[arg(long = "signal-fir-lane", value_enum)]
     signal_fir_lane: Option<CliSignalFirLane>,
+    /// Disable FIR verification before codegen / FIR dump.
+    #[arg(long = "no-fir-verify", action = ArgAction::SetTrue)]
+    no_fir_verify: bool,
+    /// Treat FIR verifier warnings as fatal.
+    #[arg(long = "fir-verify-strict", action = ArgAction::SetTrue)]
+    fir_verify_strict: bool,
 }
 
 fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -522,6 +531,7 @@ fn print_global_usage_and_exit() -> ! {
     eprintln!(
         "  cargo run -p compiler -- -lang c|cpp|fir <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
+    eprintln!("                           [--no-fir-verify] [--fir-verify-strict]");
     eprintln!("  cargo run -p compiler -- --golden <input.dsp>");
     eprintln!(
         "  cargo run -p compiler -- --parse <input.dsp> [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
@@ -534,6 +544,9 @@ fn print_global_usage_and_exit() -> ! {
     );
     eprintln!(
         "  cargo run -p compiler -- --dump-fir <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+    );
+    eprintln!(
+        "  cargo run -p compiler -- --dump-fir-verify <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--fir-verify-strict]"
     );
     eprintln!(
         "  cargo run -p compiler -- --dump-cpp <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
@@ -581,6 +594,41 @@ fn selected_codegen_lane(cli: &CliArgs) -> CliSignalFirLane {
     cli.signal_fir_lane.unwrap_or(CliSignalFirLane::Fast)
 }
 
+fn selected_fir_verify_options(cli: &CliArgs) -> FirVerifyOptions {
+    FirVerifyOptions {
+        enabled: !cli.no_fir_verify,
+        strict: cli.fir_verify_strict,
+    }
+}
+
+fn compiler_from_cli(cli: &CliArgs) -> Compiler {
+    Compiler::new().with_fir_verify_options(selected_fir_verify_options(cli))
+}
+
+fn render_fir_verify_report(store: &fir::FirStore, module: fir::FirId, strict: bool) -> String {
+    let report = verify_fir_module(store, module);
+    let errors = report.errors().count();
+    let warnings = report.warnings().count();
+    let fatal = errors > 0 || (strict && warnings > 0);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "FIR verify: errors={errors} warnings={warnings} strict={strict} status={}\n",
+        if fatal { "FAIL" } else { "OK" }
+    ));
+    for d in &report.diagnostics {
+        let sev = match d.severity {
+            fir::checker::Severity::Error => "error",
+            fir::checker::Severity::Warning => "warning",
+        };
+        out.push_str(&format!("- {sev} [{}] {}", d.code, d.message));
+        if let Some(fun) = d.context.function_name.as_deref() {
+            out.push_str(&format!(" (fn={fun})"));
+        }
+        out.push_str(&format!(" [node={}]\n", d.node.as_u32()));
+    }
+    out
+}
+
 fn main() {
     let args = normalize_legacy_args(std::env::args());
     let cli = CliArgs::parse_from(args);
@@ -594,6 +642,7 @@ fn main() {
         cli.dump_cpp,
         cli.dump_c,
         cli.dump_fir,
+        cli.dump_fir_verify,
         cli.dump_interp,
         cli.lang.is_some(),
     ]
@@ -618,11 +667,19 @@ fn main() {
     };
 
     if (cli.dump_box || cli.dump_sig || cli.parse || cli.golden) && cli.signal_fir_lane.is_some() {
-        eprintln!("--signal-fir-lane is only valid with --dump-cpp/--dump-c/--dump-fir");
+        eprintln!(
+            "--signal-fir-lane is only valid with --dump-cpp/--dump-c/--dump-fir/--dump-fir-verify"
+        );
         std::process::exit(2);
     }
-    if (cli.dump_fir || matches!(cli.lang, Some(CliLang::Fir))) && cli.architecture.is_some() {
+    if (cli.dump_fir || cli.dump_fir_verify || matches!(cli.lang, Some(CliLang::Fir)))
+        && cli.architecture.is_some()
+    {
         eprintln!("--architecture is currently supported only for C/C++ output");
+        std::process::exit(2);
+    }
+    if cli.no_fir_verify && cli.dump_fir_verify {
+        eprintln!("--no-fir-verify is incompatible with --dump-fir-verify");
         std::process::exit(2);
     }
     if let Some(path) = cli.architecture_dir.iter().find(|path| path.is_file()) {
@@ -657,7 +714,7 @@ fn main() {
     }
 
     if cli.parse {
-        let compiler = Compiler::new();
+        let compiler = compiler_from_cli(&cli);
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default(input_path)
         } else {
@@ -683,7 +740,7 @@ fn main() {
     }
 
     if cli.dump_box {
-        let compiler = Compiler::new();
+        let compiler = compiler_from_cli(&cli);
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default(input_path)
         } else {
@@ -709,7 +766,7 @@ fn main() {
     }
 
     if cli.dump_sig {
-        let compiler = Compiler::new();
+        let compiler = compiler_from_cli(&cli);
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_signals(input_path)
         } else {
@@ -741,8 +798,47 @@ fn main() {
         return;
     }
 
+    if cli.dump_fir_verify {
+        let compiler = Compiler::new().with_fir_verify_options(FirVerifyOptions {
+            enabled: false,
+            strict: false,
+        });
+        let result = if cli.import_dir.is_empty() {
+            compiler.compile_file_default_to_fir_with_lane(
+                input_path,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        } else {
+            compiler.compile_file_to_fir_with_lane(
+                input_path,
+                &cli.import_dir,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        };
+
+        match result {
+            Ok(out) => {
+                let rendered =
+                    render_fir_verify_report(&out.store, out.module, cli.fir_verify_strict);
+                let report = verify_fir_module(&out.store, out.module);
+                let fatal = report.has_errors()
+                    || (cli.fir_verify_strict && report.warnings().next().is_some());
+                emit_output(&rendered, cli.output.as_ref());
+                if fatal {
+                    std::process::exit(1);
+                }
+            }
+            Err(err) => {
+                eprintln!("FIR pipeline failed: {err}");
+                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if cli.dump_fir || matches!(cli.lang, Some(CliLang::Fir)) {
-        let compiler = Compiler::new();
+        let compiler = compiler_from_cli(&cli);
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_fir_with_lane(
                 input_path,
@@ -774,7 +870,7 @@ fn main() {
     }
 
     if cli.dump_interp || matches!(cli.lang, Some(CliLang::Interp)) {
-        let compiler = Compiler::new();
+        let compiler = compiler_from_cli(&cli);
         let options = InterpOptions::default();
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_interp_with_lane(
@@ -805,7 +901,7 @@ fn main() {
     }
 
     if cli.dump_cpp || matches!(cli.lang, Some(CliLang::Cpp)) || mode_count == 0 {
-        let compiler = Compiler::new();
+        let compiler = compiler_from_cli(&cli);
         let options = CppOptions::default();
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_cpp_with_lane(
@@ -855,7 +951,7 @@ fn main() {
     }
 
     if cli.dump_c || matches!(cli.lang, Some(CliLang::C)) {
-        let compiler = Compiler::new();
+        let compiler = compiler_from_cli(&cli);
         let options = COptions::default();
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_c_with_lane(

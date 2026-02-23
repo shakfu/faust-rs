@@ -41,7 +41,10 @@ use codegen::backends::interp::{
     InterpOptions, generate_interp_module, write_fbc,
 };
 use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, SourceSpan};
-use fir::{FirBuilder, FirId, FirStore, FirType, NamedType};
+use fir::{
+    FirBuilder, FirId, FirStore, FirType, NamedType,
+    checker::{FirVerifyReport, Severity as FirVerifySeverity, verify_fir_module},
+};
 use parser::{ParseOutput, SourceReaderError};
 use propagate::{ArityCache, BoxArity, PropagateError};
 use signals::{SigId, dump_sig_readable};
@@ -72,11 +75,31 @@ pub struct FirCompileOutput {
     pub module: FirId,
 }
 
+/// FIR verifier configuration used at the compiler facade / CLI integration layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirVerifyOptions {
+    /// Run FIR verifier after FIR generation and before backend codegen.
+    pub enabled: bool,
+    /// Treat warnings as fatal in addition to errors.
+    pub strict: bool,
+}
+
+impl Default for FirVerifyOptions {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            strict: false,
+        }
+    }
+}
+
 /// Main façade orchestrating the current production compilation pipeline.
 ///
 /// Current canonical flow:
 /// `parse -> eval -> propagate -> (optional signal->FIR lowering) -> codegen`.
-pub struct Compiler;
+pub struct Compiler {
+    fir_verify: FirVerifyOptions,
+}
 
 /// Selects which signal->FIR lowering lane is used before C++ emission.
 ///
@@ -97,7 +120,16 @@ impl Compiler {
     #[must_use]
     /// Creates a new top-level compiler facade instance.
     pub fn new() -> Self {
-        Self
+        Self {
+            fir_verify: FirVerifyOptions::default(),
+        }
+    }
+
+    /// Returns a compiler facade configured with FIR verifier settings.
+    #[must_use]
+    pub fn with_fir_verify_options(mut self, fir_verify: FirVerifyOptions) -> Self {
+        self.fir_verify = fir_verify;
+        self
     }
 
     #[must_use]
@@ -227,7 +259,7 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_c(source_name, &signals, options, lane)
+        lower_signals_to_c(source_name, &signals, options, lane, self.fir_verify)
             .map_err(|e| lower_c_error_to_compiler(source_name, e))
     }
 
@@ -241,7 +273,7 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_cpp(source_name, &signals, options, lane)
+        lower_signals_to_cpp(source_name, &signals, options, lane, self.fir_verify)
             .map_err(|e| lower_cpp_error_to_compiler(source_name, e))
     }
 
@@ -254,8 +286,8 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<FirCompileOutput, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_fir(source_name, &signals, lane)
-            .map_err(|error| transform_error_to_compiler(source_name, error))
+        lower_signals_to_fir(source_name, &signals, lane, self.fir_verify)
+            .map_err(|e| lower_fir_error_to_compiler(source_name, e))
     }
 
     /// Parses + evaluates + propagates one file, then emits C++ text from
@@ -291,7 +323,7 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_c(&source, &signals, options, lane)
+        lower_signals_to_c(&source, &signals, options, lane, self.fir_verify)
             .map_err(|e| lower_c_error_to_compiler(&source, e))
     }
 
@@ -306,7 +338,7 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_cpp(&source, &signals, options, lane)
+        lower_signals_to_cpp(&source, &signals, options, lane, self.fir_verify)
             .map_err(|e| lower_cpp_error_to_compiler(&source, e))
     }
 
@@ -320,8 +352,8 @@ impl Compiler {
     ) -> Result<FirCompileOutput, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_fir(&source, &signals, lane)
-            .map_err(|error| transform_error_to_compiler(&source, error))
+        lower_signals_to_fir(&source, &signals, lane, self.fir_verify)
+            .map_err(|e| lower_fir_error_to_compiler(&source, e))
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -402,7 +434,7 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_interp(source_name, &signals, options, lane)
+        lower_signals_to_interp(source_name, &signals, options, lane, self.fir_verify)
             .map_err(|e| lower_interp_error_to_compiler(source_name, e))
     }
 
@@ -433,7 +465,7 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_interp(&source, &signals, options, lane)
+        lower_signals_to_interp(&source, &signals, options, lane, self.fir_verify)
             .map_err(|e| lower_interp_error_to_compiler(&source, e))
     }
 
@@ -615,6 +647,12 @@ pub enum CompilerError {
         error: SignalFirError,
         diagnostics: DiagnosticBundle,
     },
+    /// FIR verifier rejected a lowered FIR module before backend codegen.
+    FirVerify {
+        source: Box<str>,
+        strict: bool,
+        diagnostics: DiagnosticBundle,
+    },
     /// C++ backend emission failed from FIR.
     Codegen {
         source: Box<str>,
@@ -656,6 +694,16 @@ impl std::fmt::Display for CompilerError {
             Self::Transform { source, error, .. } => {
                 write!(f, "transform failed for {source}: {error}")
             }
+            Self::FirVerify {
+                source,
+                strict,
+                diagnostics,
+            } => write!(
+                f,
+                "FIR verification failed for {source}{}: diagnostics={}",
+                if *strict { " (strict mode)" } else { "" },
+                diagnostics.len()
+            ),
             Self::Codegen { source, error } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
@@ -680,6 +728,7 @@ impl CompilerError {
             Self::Eval { diagnostics, .. } => Some(diagnostics),
             Self::Propagate { diagnostics, .. } => Some(diagnostics),
             Self::Transform { diagnostics, .. } => Some(diagnostics),
+            Self::FirVerify { diagnostics, .. } => Some(diagnostics),
             Self::Codegen { .. } => None,
             Self::CodegenC { .. } => None,
             _ => None,
@@ -720,6 +769,7 @@ fn ensure_parse_success(source: &str, output: ParseOutput) -> Result<ParseOutput
 fn lower_cpp_error_to_compiler(source: &str, error: LowerToCppError) -> CompilerError {
     match error {
         LowerToCppError::Transform(error) => transform_error_to_compiler(source, error),
+        LowerToCppError::Verify(report) => fir_verify_error_to_compiler(source, report),
         LowerToCppError::Codegen(error) => CompilerError::Codegen {
             source: source.into(),
             error,
@@ -731,6 +781,7 @@ fn lower_cpp_error_to_compiler(source: &str, error: LowerToCppError) -> Compiler
 fn lower_c_error_to_compiler(source: &str, error: LowerToCError) -> CompilerError {
     match error {
         LowerToCError::Transform(error) => transform_error_to_compiler(source, error),
+        LowerToCError::Verify(report) => fir_verify_error_to_compiler(source, report),
         LowerToCError::Codegen(error) => CompilerError::CodegenC {
             source: source.into(),
             error,
@@ -742,6 +793,7 @@ fn lower_c_error_to_compiler(source: &str, error: LowerToCError) -> CompilerErro
 fn lower_interp_error_to_compiler(source: &str, error: LowerToInterpError) -> CompilerError {
     match error {
         LowerToInterpError::Transform(error) => transform_error_to_compiler(source, error),
+        LowerToInterpError::Verify(report) => fir_verify_error_to_compiler(source, report),
         LowerToInterpError::Codegen(error) => CompilerError::CodegenInterp {
             source: source.into(),
             error,
@@ -756,6 +808,14 @@ fn lower_interp_error_to_compiler(source: &str, error: LowerToInterpError) -> Co
     }
 }
 
+/// Maps a `LowerToFirError` into a `CompilerError`, attaching the source name.
+fn lower_fir_error_to_compiler(source: &str, error: LowerToFirError) -> CompilerError {
+    match error {
+        LowerToFirError::Transform(error) => transform_error_to_compiler(source, error),
+        LowerToFirError::Verify(report) => fir_verify_error_to_compiler(source, report),
+    }
+}
+
 /// Wraps a `SignalFirError` into a `CompilerError::Transform` with one diagnostic.
 fn transform_error_to_compiler(source: &str, error: SignalFirError) -> CompilerError {
     let diagnostic = signal_fir_diagnostic(&error);
@@ -763,6 +823,15 @@ fn transform_error_to_compiler(source: &str, error: SignalFirError) -> CompilerE
         source: source.into(),
         diagnostics: bundle_from_diagnostic(diagnostic),
         error,
+    }
+}
+
+fn fir_verify_error_to_compiler(source: &str, report: FirVerifyReport) -> CompilerError {
+    let strict = report.warnings().next().is_some() && !report.has_errors();
+    CompilerError::FirVerify {
+        source: source.into(),
+        strict,
+        diagnostics: fir_verify_bundle_from_report(&report),
     }
 }
 
@@ -802,21 +871,30 @@ fn enrich_diagnostic_with_node(
 #[derive(Debug)]
 enum LowerToCppError {
     Transform(SignalFirError),
+    Verify(FirVerifyReport),
     Codegen(CodegenError),
 }
 
 #[derive(Debug)]
 enum LowerToCError {
     Transform(SignalFirError),
+    Verify(FirVerifyReport),
     Codegen(CCodegenError),
 }
 
 #[derive(Debug)]
 enum LowerToInterpError {
     Transform(SignalFirError),
+    Verify(FirVerifyReport),
     Codegen(InterpCodegenError),
     /// Serialization of the factory to `.fbc` text failed.
     Serialize(String),
+}
+
+#[derive(Debug)]
+enum LowerToFirError {
+    Transform(SignalFirError),
+    Verify(FirVerifyReport),
 }
 
 // ─── Signal-to-FIR lower functions ───────────────────────────────────────────
@@ -826,13 +904,14 @@ fn lower_signals_to_cpp(
     output: &SignalCompileOutput,
     options: &CppOptions,
     lane: SignalFirLane,
+    fir_verify: FirVerifyOptions,
 ) -> Result<String, LowerToCppError> {
     match lane {
         SignalFirLane::LegacyBridge => {
-            lower_signals_to_cpp_legacy_bridge(source_name, output, options)
+            lower_signals_to_cpp_legacy_bridge(source_name, output, options, fir_verify)
         }
         SignalFirLane::TransformFastLane => {
-            lower_signals_to_cpp_transform_fastlane(source_name, output, options)
+            lower_signals_to_cpp_transform_fastlane(source_name, output, options, fir_verify)
         }
     }
 }
@@ -842,13 +921,14 @@ fn lower_signals_to_c(
     output: &SignalCompileOutput,
     options: &COptions,
     lane: SignalFirLane,
+    fir_verify: FirVerifyOptions,
 ) -> Result<String, LowerToCError> {
     match lane {
         SignalFirLane::LegacyBridge => {
-            lower_signals_to_c_legacy_bridge(source_name, output, options)
+            lower_signals_to_c_legacy_bridge(source_name, output, options, fir_verify)
         }
         SignalFirLane::TransformFastLane => {
-            lower_signals_to_c_transform_fastlane(source_name, output, options)
+            lower_signals_to_c_transform_fastlane(source_name, output, options, fir_verify)
         }
     }
 }
@@ -858,13 +938,14 @@ fn lower_signals_to_interp(
     output: &SignalCompileOutput,
     options: &InterpOptions,
     lane: SignalFirLane,
+    fir_verify: FirVerifyOptions,
 ) -> Result<String, LowerToInterpError> {
     match lane {
         SignalFirLane::LegacyBridge => {
-            lower_signals_to_interp_legacy_bridge(source_name, output, options)
+            lower_signals_to_interp_legacy_bridge(source_name, output, options, fir_verify)
         }
         SignalFirLane::TransformFastLane => {
-            lower_signals_to_interp_transform_fastlane(source_name, output, options)
+            lower_signals_to_interp_transform_fastlane(source_name, output, options, fir_verify)
         }
     }
 }
@@ -873,9 +954,11 @@ fn lower_signals_to_interp_legacy_bridge(
     source_name: &str,
     output: &SignalCompileOutput,
     options: &InterpOptions,
+    fir_verify: FirVerifyOptions,
 ) -> Result<String, LowerToInterpError> {
     let module_name = resolve_module_name(options.module_name.as_deref(), source_name);
     let lowered = lower_signals_to_fir_legacy_bridge(source_name, output, module_name);
+    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToInterpError::Verify)?;
     let mut effective_options = options.clone();
     if effective_options.num_inputs == 0 {
         effective_options.num_inputs = output.process_arity.inputs;
@@ -893,10 +976,12 @@ fn lower_signals_to_interp_transform_fastlane(
     source_name: &str,
     output: &SignalCompileOutput,
     options: &InterpOptions,
+    fir_verify: FirVerifyOptions,
 ) -> Result<String, LowerToInterpError> {
     let module_name = resolve_module_name(options.module_name.as_deref(), source_name);
     let lowered = lower_signals_to_fir_transform_fastlane(output, module_name)
         .map_err(LowerToInterpError::Transform)?;
+    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToInterpError::Verify)?;
     let mut effective_options = options.clone();
     if effective_options.num_inputs == 0 {
         effective_options.num_inputs = output.process_arity.inputs;
@@ -921,9 +1006,10 @@ fn lower_signals_to_fir(
     source_name: &str,
     output: &SignalCompileOutput,
     lane: SignalFirLane,
-) -> Result<FirCompileOutput, SignalFirError> {
+    fir_verify: FirVerifyOptions,
+) -> Result<FirCompileOutput, LowerToFirError> {
     let module_name = sanitize_cpp_ident(source_name_to_class(source_name).as_str());
-    match lane {
+    let lowered = match lane {
         SignalFirLane::LegacyBridge => Ok(lower_signals_to_fir_legacy_bridge(
             source_name,
             output,
@@ -933,6 +1019,9 @@ fn lower_signals_to_fir(
             lower_signals_to_fir_transform_fastlane(output, module_name)
         }
     }
+    .map_err(LowerToFirError::Transform)?;
+    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToFirError::Verify)?;
+    Ok(lowered)
 }
 
 // ─── FIR type helpers ─────────────────────────────────────────────────────────
@@ -1028,9 +1117,11 @@ fn lower_signals_to_cpp_legacy_bridge(
     source_name: &str,
     output: &SignalCompileOutput,
     options: &CppOptions,
+    fir_verify: FirVerifyOptions,
 ) -> Result<String, LowerToCppError> {
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let lowered = lower_signals_to_fir_legacy_bridge(source_name, output, module_name);
+    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToCppError::Verify)?;
     let mut effective_options = options.clone();
     if effective_options.num_inputs == 0 {
         effective_options.num_inputs = output.process_arity.inputs;
@@ -1043,10 +1134,12 @@ fn lower_signals_to_cpp_transform_fastlane(
     source_name: &str,
     output: &SignalCompileOutput,
     options: &CppOptions,
+    fir_verify: FirVerifyOptions,
 ) -> Result<String, LowerToCppError> {
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let lowered = lower_signals_to_fir_transform_fastlane(output, module_name)
         .map_err(LowerToCppError::Transform)?;
+    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToCppError::Verify)?;
     let mut effective_options = options.clone();
     if effective_options.num_inputs == 0 {
         effective_options.num_inputs = output.process_arity.inputs;
@@ -1059,6 +1152,7 @@ fn lower_signals_to_c_legacy_bridge(
     source_name: &str,
     _output: &SignalCompileOutput,
     options: &COptions,
+    fir_verify: FirVerifyOptions,
 ) -> Result<String, LowerToCError> {
     let mut store = FirStore::new();
     let mut b = FirBuilder::new(&mut store);
@@ -1072,13 +1166,16 @@ fn lower_signals_to_c_legacy_bridge(
     let globals = b.block(&[]);
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let module = b.module(module_name, dsp_struct, globals, declarations);
-    generate_c_module(&store, module, options).map_err(LowerToCError::Codegen)
+    let lowered = FirCompileOutput { store, module };
+    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToCError::Verify)?;
+    generate_c_module(&lowered.store, lowered.module, options).map_err(LowerToCError::Codegen)
 }
 
 fn lower_signals_to_c_transform_fastlane(
     source_name: &str,
     output: &SignalCompileOutput,
     options: &COptions,
+    fir_verify: FirVerifyOptions,
 ) -> Result<String, LowerToCError> {
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let signal_fir_options = SignalFirOptions {
@@ -1093,10 +1190,52 @@ fn lower_signals_to_c_transform_fastlane(
         &signal_fir_options,
     )
     .map_err(LowerToCError::Transform)?;
+    let lowered = FirCompileOutput {
+        store: lowered.store,
+        module: lowered.module,
+    };
+    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToCError::Verify)?;
     generate_c_module(&lowered.store, lowered.module, options).map_err(LowerToCError::Codegen)
 }
 
+fn maybe_verify_fir_module(
+    lowered: &FirCompileOutput,
+    options: FirVerifyOptions,
+) -> Result<(), FirVerifyReport> {
+    if !options.enabled {
+        return Ok(());
+    }
+    let report = verify_fir_module(&lowered.store, lowered.module);
+    let fatal = report.has_errors() || (options.strict && report.warnings().next().is_some());
+    if fatal { Err(report) } else { Ok(()) }
+}
+
 // ─── Diagnostic helpers ───────────────────────────────────────────────────────
+
+fn fir_verify_bundle_from_report(report: &FirVerifyReport) -> DiagnosticBundle {
+    let mut bundle = DiagnosticBundle::new();
+    for d in &report.diagnostics {
+        let code = match d.severity {
+            FirVerifySeverity::Error => errors::codes::FIR_VERIFY_ERROR,
+            FirVerifySeverity::Warning => errors::codes::FIR_VERIFY_WARNING,
+        };
+        let severity = match d.severity {
+            FirVerifySeverity::Error => errors::Severity::Error,
+            FirVerifySeverity::Warning => errors::Severity::Warning,
+        };
+        let mut diag = Diagnostic::new(severity, errors::Stage::Fir, code, d.message.clone())
+            .with_note(format!("fir_code={}", d.code))
+            .with_note(format!("fir_node_id={}", d.node.as_u32()));
+        if let Some(fun) = d.context.function_name.as_deref() {
+            diag = diag.with_note(format!("fir_function={fun}"));
+        }
+        if let Some(var) = d.context.variable_name.as_deref() {
+            diag = diag.with_note(format!("fir_variable={var}"));
+        }
+        bundle.push(diag);
+    }
+    bundle
+}
 
 fn signal_fir_diagnostic(error: &SignalFirError) -> Diagnostic {
     let code = match error.code() {

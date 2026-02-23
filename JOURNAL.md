@@ -1,5 +1,58 @@
 # JOURNAL
 
+## 2026-02-23 (session 7)
+
+### Feature — FIR verifier Phase 4 integration in `compiler` + CLI
+
+Implemented Phase 4 integration of the FIR verifier in the `compiler` crate and
+CLI, while preserving current library/test compatibility for in-progress FIR
+lanes.
+
+**Compiler crate integration (`crates/compiler/src/lib.rs`)**
+- Added `FirVerifyOptions { enabled, strict }` in `compiler` to configure FIR
+  verification policy at the facade layer.
+- `Compiler` now stores FIR verifier settings and exposes:
+  - `Compiler::with_fir_verify_options(...)`
+- Wired FIR verification after FIR module generation and before backend codegen
+  in C / C++ / interp codegen paths, and also in FIR-lowering (`compile_*_to_fir`)
+  when verification is enabled.
+- Added `CompilerError::FirVerify { source, strict, diagnostics }`.
+- Added conversion from `fir::checker::FirVerifyReport` to `errors::DiagnosticBundle`
+  (stage = `Stage::Fir`) so CLI and tools can use the normal structured
+  diagnostic rendering pipeline.
+- Added generic stable diagnostic codes in `errors::codes` for FIR verifier
+  integration:
+  - `FRS-FIR-0001` (`FIR_VERIFY_ERROR`)
+  - `FRS-FIR-0002` (`FIR_VERIFY_WARNING`)
+  and preserved original FIR checker codes (e.g. `FIR-B01`, `FIR-R01`) in
+  diagnostic notes (`fir_code=...`).
+
+**CLI integration (`crates/compiler/src/main.rs`)**
+- Added FIR verifier controls:
+  - `--no-fir-verify`
+  - `--fir-verify-strict`
+  - `--dump-fir-verify`
+- `--dump-fir-verify` compiles to FIR, runs the FIR verifier, and prints a
+  textual verification report without codegen.
+- `--fir-verify-strict` makes FIR verifier warnings fatal in CLI FIR verification
+  mode and in CLI codegen/dump modes when verifier is enabled.
+- Updated CLI usage/help text and mode validation (`--signal-fir-lane` validity,
+  `--dump-fir-verify` mode count, incompatible `--no-fir-verify` + `--dump-fir-verify`).
+
+**Compatibility decision**
+- To avoid breaking existing library users and the current `compiler` integration
+  tests while FIR generation parity is still in progress, `Compiler::new()`
+  defaults to `FirVerifyOptions::default()` with `enabled = false`.
+- The CLI still enables FIR verification by default (unless `--no-fir-verify` is
+  passed) by constructing `Compiler` with explicit verifier options.
+
+**Validation**
+- `cargo check -p compiler` ✅
+- `cargo test -p errors` ✅
+- `cargo test -p compiler` ✅
+
+---
+
 ## 2026-02-23 (session 6)
 
 ### Feature — FIR module verifier Phase 3 type checking (`crates/fir/src/checker.rs`)

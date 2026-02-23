@@ -55,6 +55,11 @@ pub const SFIR_UNSUPPORTED_BINOP: DiagnosticCode = DiagnosticCode("FRS-SFIR-0005
 /// Input index out of range in signal->FIR lowering.
 pub const SFIR_INPUT_INDEX_OUT_OF_RANGE: DiagnosticCode = DiagnosticCode("FRS-SFIR-0006");
 
+/// FIR verifier error diagnostic (details in notes: `fir_code=...`).
+pub const FIR_VERIFY_ERROR: DiagnosticCode = DiagnosticCode("FRS-FIR-0001");
+/// FIR verifier warning diagnostic (details in notes: `fir_code=...`).
+pub const FIR_VERIFY_WARNING: DiagnosticCode = DiagnosticCode("FRS-FIR-0002");
+
 /// Parse stage failed in top-level compiler pipeline.
 pub const COMP_PARSE_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0001");
 /// Eval stage failed in top-level compiler pipeline.
@@ -88,6 +93,8 @@ pub fn all_codes() -> &'static [DiagnosticCode] {
         SFIR_UNSUPPORTED_SIGNAL_NODE,
         SFIR_UNSUPPORTED_BINOP,
         SFIR_INPUT_INDEX_OUT_OF_RANGE,
+        FIR_VERIFY_ERROR,
+        FIR_VERIFY_WARNING,
         COMP_PARSE_FAILED,
         COMP_EVAL_FAILED,
         COMP_PROPAGATE_FAILED,
