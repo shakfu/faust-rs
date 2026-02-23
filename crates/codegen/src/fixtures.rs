@@ -92,9 +92,13 @@ pub fn build_sine_phasor_test_module() -> (FirStore, FirId) {
     let phase_angle = b.binop(FirBinOp::Mul, two_pi, wrapped_phase, FirType::Float64);
     let sine = b.fun_call("std::sin", &[phase_angle], FirType::Float64);
     let out = b.binop(FirBinOp::Mul, gain, sine, FirType::Float64);
+    let out_chan = b.int32(0);
+    let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+    let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+    let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
     let drop_out = b.drop_(out);
 
-    let compute_body = b.block(&[store_phase, drop_out]);
+    let compute_body = b.block(&[out_alias, store_phase, drop_out]);
     let compute_args = [
         NamedType {
             name: "dsp".to_string(),

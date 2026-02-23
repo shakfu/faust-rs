@@ -977,12 +977,6 @@ fn emit_compute_body(
     } else {
         infer_compute_output_arity(store, body)
     };
-    for index in 0..options.num_inputs {
-        let _ = writeln!(out, "{tab}FAUSTFLOAT* input{index} = inputs[{index}];");
-    }
-    for index in 0..output_channels {
-        let _ = writeln!(out, "{tab}FAUSTFLOAT* output{index} = outputs[{index}];");
-    }
     let _ = writeln!(out, "{tab}for (int i0 = 0; i0 < count; i0 = i0 + 1) {{");
     let mut mode = EmitMode::Compute {
         drop_index: 0,

@@ -14,8 +14,11 @@ FIR signatures of emitted DSP API methods (`metadata`, `instanceConstants`,
 - `lower_input(...)` no longer emits pseudo `LoadVar("inputN[i0]", kFunArgs)`.
 - Inputs are now lowered as canonical FIR:
   - `LoadTable("inputs", kFunArgs, channel_idx, Ptr(FaustFloat))`
-  - cached local pointer alias (`DeclareVar(kStack)`)
+  - cached local pointer alias (`DeclareVar(kStack)`) named `input0`, `input1`, ...
   - `LoadTable(alias, kStack, i0, FaustFloat)`
+- Output channel pointers are now also declared in FIR control statements as
+  local aliases `output0`, `output1`, ... (loaded from `outputs[k]` via
+  canonical `LoadTable`), instead of being synthesized by C/C++ backends.
 - Added explicit `dsp: Ptr(Obj)` as first named/type arg for emitted DSP
   methods listed above, including `compute`.
 
@@ -38,8 +41,12 @@ FIR signatures of emitted DSP API methods (`metadata`, `instanceConstants`,
 - `crates/codegen/src/backends/cpp/mod.rs`: C++ backend strips the explicit FIR
   `dsp` funarg for reserved methods when emitting C++ instance methods (where
   `this` is implicit), while still validating the new FIR contract.
+- `crates/codegen/src/backends/c/mod.rs` and `crates/codegen/src/backends/cpp/mod.rs`:
+  `compute` wrappers no longer inject `inputN` / `outputN` pointer aliases; FIR
+  is now responsible for declaring them.
 - `crates/codegen/src/fixtures.rs`: shared FIR fixture signatures updated to the
-  new explicit-`dsp` contract.
+  new explicit-`dsp` contract, and fixture `compute` bodies now declare `outputN`
+  aliases explicitly in FIR.
 
 **Outcome**
 - `process = +;` no longer fails FIR verification with:

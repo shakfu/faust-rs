@@ -70,6 +70,18 @@ pub fn build_module(
         let mut b = FirBuilder::new(&mut lower.store);
         lower.sample_statements.push(b.drop_(value));
     }
+    for index in 0..plan.num_outputs {
+        let mut b = FirBuilder::new(&mut lower.store);
+        let chan = b.int32(i32::try_from(index).expect("validated output index fits i32"));
+        let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let load_chan_ptr = b.load_table("outputs", AccessType::FunArgs, chan, ptr_ty.clone());
+        lower.control_statements.push(b.declare_var(
+            format!("output{index}"),
+            ptr_ty,
+            AccessType::Stack,
+            Some(load_chan_ptr),
+        ));
+    }
     lower
         .sample_statements
         .extend(lower.compute_updates.iter().copied());
@@ -483,7 +495,7 @@ impl<'a> SignalToFirLower<'a> {
         let alias = if let Some(alias) = self.input_ptr_aliases.get(&index) {
             alias.clone()
         } else {
-            let alias = format!("__fir_input_ptr{index}");
+            let alias = format!("input{index}");
             let mut b = FirBuilder::new(&mut self.store);
             let chan = b.int32(i32::try_from(index).expect("validated input index fits i32"));
             let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
