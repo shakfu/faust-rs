@@ -1,5 +1,43 @@
 # JOURNAL
 
+## 2026-02-23 (session 11)
+
+### Fix — Reinject explicit `Cast(FaustFloat, ...)` before fast-lane output `StoreTable`
+
+After moving output writes into explicit FIR `StoreTable(outputN, ...)`, the
+fast-lane no longer benefited from the old backend-side implicit `(FAUSTFLOAT)`
+cast that used to be inserted when `Drop(...)` was rewritten as an output write.
+
+This caused incorrect FIR on cases such as:
+
+```faust
+process = int(_);
+```
+
+where the generated FIR stored an `Int32` directly into `output0[i0]`
+(`Ptr(FaustFloat)` element type), triggering:
+- `FIR-T02` (`StoreTable value type Int32 does not match element type FaustFloat`)
+
+**Fix (`crates/transform/src/signal_fir/module.rs`)**
+- In fast-lane sample emission, before `StoreTable("outputN", ...)`:
+  - query the FIR value type,
+  - insert `Cast(FirType::FaustFloat, value)` when the signal value is not
+    already `FaustFloat`.
+- `Drop(...)` emission for non-output values is unchanged.
+
+**Result**
+- `process = int(_);` now produces explicit FIR:
+  - `StoreTable(output0, ..., Cast(FaustFloat, Cast(Int32, ...)))`
+- FIR verification passes (remaining warnings are only the known `FIR-M07` DSP
+  API omissions in fast-lane modules).
+
+**Validation**
+- `cargo fmt -p transform` ✅
+- `cargo run -p compiler -- --dump-fir-verify /tmp/int_cast_test.dsp` ✅ (`errors=0`)
+- `cargo run -p compiler -- --dump-fir --no-fir-verify /tmp/int_cast_test.dsp` ✅
+
+---
+
 ## 2026-02-23 (session 10)
 
 ### Fix — `compute` outputs must be explicit FIR stores (`StoreTable`), not backend `Drop` synthesis

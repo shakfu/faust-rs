@@ -66,9 +66,13 @@ pub fn build_module(
     }
 
     for (signal_index, sig) in signals.iter().enumerate() {
-        let value = lower.lower_signal(*sig)?;
-        let mut b = FirBuilder::new(&mut lower.store);
+        let mut value = lower.lower_signal(*sig)?;
         if signal_index < plan.num_outputs {
+            let needs_output_cast = lower.store.value_type(value) != Some(FirType::FaustFloat);
+            let mut b = FirBuilder::new(&mut lower.store);
+            if needs_output_cast {
+                value = b.cast(FirType::FaustFloat, value);
+            }
             let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
             lower.sample_statements.push(b.store_table(
                 format!("output{signal_index}"),
@@ -77,6 +81,7 @@ pub fn build_module(
                 value,
             ));
         } else {
+            let mut b = FirBuilder::new(&mut lower.store);
             lower.sample_statements.push(b.drop_(value));
         }
     }
