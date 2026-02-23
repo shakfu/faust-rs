@@ -182,15 +182,15 @@ mod tests {
         let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
             panic!("compute block expected");
         };
-        let drop_value = stmts
+        let stored_value = stmts
             .iter()
             .find_map(|id| match match_fir(&out.store, *id) {
-                FirMatch::Drop(value) => Some(value),
+                FirMatch::StoreTable { name, value, .. } if name == "output0" => Some(value),
                 _ => None,
             })
-            .expect("compute should include one output drop");
+            .expect("compute should include one output store");
         assert!(matches!(
-            match_fir(&out.store, drop_value),
+            match_fir(&out.store, stored_value),
             FirMatch::BinOp {
                 op: FirBinOp::Mul,
                 ..
@@ -405,9 +405,28 @@ mod tests {
             compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
                 .expect("pow/min/max/unary should be supported in Step 2B.1");
 
-        let FirMatch::Module { declarations, .. } = match_fir(&out.store, out.module) else {
+        let FirMatch::Module {
+            globals,
+            declarations,
+            ..
+        } = match_fir(&out.store, out.module)
+        else {
             panic!("module root expected");
         };
+        let FirMatch::Block(globals_items) = match_fir(&out.store, globals) else {
+            panic!("module globals block expected");
+        };
+        for expected in ["sin", "fmax", "pow"] {
+            assert!(
+                globals_items.iter().any(|id| {
+                    matches!(
+                        match_fir(&out.store, *id),
+                        FirMatch::DeclareFun { ref name, body: None, .. } if name == expected
+                    )
+                }),
+                "globals should declare extern math prototype '{expected}'"
+            );
+        }
         let FirMatch::Block(decls) = match_fir(&out.store, declarations) else {
             panic!("module declarations block expected");
         };
@@ -430,14 +449,14 @@ mod tests {
         let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
             panic!("compute block expected");
         };
-        let drop_value = stmts
+        let store_value = stmts
             .iter()
             .find_map(|id| match match_fir(&out.store, *id) {
-                FirMatch::Drop(value) => Some(value),
+                FirMatch::StoreTable { name, value, .. } if name == "output0" => Some(value),
                 _ => None,
             })
-            .expect("compute should include one output drop");
-        let FirMatch::FunCall { name, args, .. } = match_fir(&out.store, drop_value) else {
+            .expect("compute should include one output store");
+        let FirMatch::FunCall { name, args, .. } = match_fir(&out.store, store_value) else {
             panic!("top-level pow should lower to FIR fun call");
         };
         assert_eq!(name, "pow");
@@ -530,16 +549,16 @@ mod tests {
         let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
             panic!("compute block expected");
         };
-        let drop_value = stmts
+        let stored_value = stmts
             .iter()
             .find_map(|id| match match_fir(&out.store, *id) {
-                FirMatch::Drop(value) => Some(value),
+                FirMatch::StoreTable { name, value, .. } if name == "output0" => Some(value),
                 _ => None,
             })
-            .expect("compute should include one output drop");
+            .expect("compute should include one output store");
         assert!(
             matches!(
-                match_fir(&out.store, drop_value),
+                match_fir(&out.store, stored_value),
                 FirMatch::LoadTable { .. }
             ),
             "rdtbl output should lower to FIR table read"

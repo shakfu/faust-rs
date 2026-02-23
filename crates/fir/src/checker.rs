@@ -27,7 +27,7 @@
 //! | FIR-S02 | E | Duplicate struct field name in `dsp_struct` |
 //! | FIR-S03 | E | Struct field has `Void` type |
 //! | FIR-S04 | W | Struct array field has size 0 |
-//! | FIR-G01 | E | Globals block contains a non-`DeclareVar`/`DeclareTable` node |
+//! | FIR-G01 | E | Globals block contains a non-`DeclareVar`/`DeclareTable`/`DeclareFun` node |
 //! | FIR-G02 | E | Global declaration has wrong access type |
 //! | FIR-G03 | E | Duplicate global variable name |
 //! | FIR-F01 | E | Function type is not `FirType::Fun` |
@@ -99,7 +99,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::{AccessType, FirBinOp, FirId, FirMatch, FirMathOp, FirStore, FirType, match_fir};
+use crate::{
+    AccessType, FirBinOp, FirId, FirMatch, FirMathOp, FirStore, FirType, NamedType, match_fir,
+};
 
 // ─── Diagnostic types ─────────────────────────────────────────────────────────
 
@@ -736,10 +738,21 @@ impl<'s> VerifyCtx<'s> {
                         );
                     }
                 }
+                FirMatch::DeclareFun {
+                    name,
+                    typ,
+                    args,
+                    body,
+                    ..
+                } => {
+                    self.register_function_signature(
+                        stmt_id, &name, &typ, &args, body, None, false,
+                    );
+                }
                 _ => {
                     self.error(
                         "FIR-G01",
-                        "globals block contains a node that is not DeclareVar or DeclareTable",
+                        "globals block contains a node that is not DeclareVar, DeclareTable, or DeclareFun",
                         stmt_id,
                     );
                 }
@@ -769,81 +782,15 @@ impl<'s> VerifyCtx<'s> {
                 continue;
             };
 
-            if !seen.insert(name.clone()) {
-                self.warn(
-                    "FIR-M06",
-                    format!("duplicate function name '{name}'"),
-                    stmt_id,
-                );
-            }
-
-            let FirType::Fun {
-                args: param_types,
-                ret,
-            } = &typ
-            else {
-                self.error(
-                    "FIR-F01",
-                    format!("function '{name}' has type that is not FirType::Fun"),
-                    stmt_id,
-                );
-                continue;
-            };
-
-            let mut param_names: HashSet<String> = HashSet::new();
-            let mut params_list: Vec<(String, FirType)> = Vec::with_capacity(args.len());
-            for arg in &args {
-                if !param_names.insert(arg.name.clone()) {
-                    self.error(
-                        "FIR-F04",
-                        format!(
-                            "function '{name}' has duplicate parameter name '{}'",
-                            arg.name
-                        ),
-                        stmt_id,
-                    );
-                }
-                params_list.push((arg.name.clone(), arg.typ.clone()));
-            }
-
-            if name == "compute" {
-                if **ret != FirType::Void {
-                    self.warn(
-                        "FIR-F05",
-                        format!("'compute' return type should be Void, got {ret:?}"),
-                        stmt_id,
-                    );
-                }
-                if param_types.len() != 4 {
-                    self.warn(
-                        "FIR-F06",
-                        format!(
-                            "'compute' should have 4 parameters \
-                             (dsp*, count, inputs, outputs), got {}",
-                            param_types.len()
-                        ),
-                        stmt_id,
-                    );
-                }
-            }
-
-            let is_extern = body.is_none();
-            if is_extern {
-                self.warn(
-                    "FIR-F07",
-                    format!("function '{name}' has no body (prototype/extern declaration)"),
-                    stmt_id,
-                );
-            }
-
-            self.symbols
-                .functions
-                .entry(name)
-                .or_insert_with(|| FunctionSig {
-                    params: params_list,
-                    return_type: *ret.clone(),
-                    is_extern,
-                });
+            self.register_function_signature(
+                stmt_id,
+                &name,
+                &typ,
+                &args,
+                body,
+                Some(&mut seen),
+                true,
+            );
         }
 
         for &api_fn in DSP_API_FUNCTIONS {
@@ -855,6 +802,95 @@ impl<'s> VerifyCtx<'s> {
                 );
             }
         }
+    }
+
+    fn register_function_signature(
+        &mut self,
+        stmt_id: FirId,
+        name: &str,
+        typ: &FirType,
+        args: &[NamedType],
+        body: Option<FirId>,
+        seen_names: Option<&mut HashSet<String>>,
+        warn_extern: bool,
+    ) {
+        if let Some(seen) = seen_names {
+            if !seen.insert(name.to_string()) {
+                self.warn(
+                    "FIR-M06",
+                    format!("duplicate function name '{name}'"),
+                    stmt_id,
+                );
+            }
+        }
+
+        let FirType::Fun {
+            args: param_types,
+            ret,
+        } = typ
+        else {
+            self.error(
+                "FIR-F01",
+                format!("function '{name}' has type that is not FirType::Fun"),
+                stmt_id,
+            );
+            return;
+        };
+
+        let mut param_names: HashSet<String> = HashSet::new();
+        let mut params_list: Vec<(String, FirType)> = Vec::with_capacity(args.len());
+        for arg in args {
+            if !param_names.insert(arg.name.clone()) {
+                self.error(
+                    "FIR-F04",
+                    format!(
+                        "function '{name}' has duplicate parameter name '{}'",
+                        arg.name
+                    ),
+                    stmt_id,
+                );
+            }
+            params_list.push((arg.name.clone(), arg.typ.clone()));
+        }
+
+        if name == "compute" {
+            if **ret != FirType::Void {
+                self.warn(
+                    "FIR-F05",
+                    format!("'compute' return type should be Void, got {ret:?}"),
+                    stmt_id,
+                );
+            }
+            if param_types.len() != 4 {
+                self.warn(
+                    "FIR-F06",
+                    format!(
+                        "'compute' should have 4 parameters \
+                         (dsp*, count, inputs, outputs), got {}",
+                        param_types.len()
+                    ),
+                    stmt_id,
+                );
+            }
+        }
+
+        let is_extern = body.is_none();
+        if is_extern && warn_extern {
+            self.warn(
+                "FIR-F07",
+                format!("function '{name}' has no body (prototype/extern declaration)"),
+                stmt_id,
+            );
+        }
+
+        self.symbols
+            .functions
+            .entry(name.to_string())
+            .or_insert_with(|| FunctionSig {
+                params: params_list,
+                return_type: *ret.clone(),
+                is_extern,
+            });
     }
 
     // =========================================================================

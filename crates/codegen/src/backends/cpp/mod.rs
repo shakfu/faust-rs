@@ -452,6 +452,11 @@ fn emit_section(
     };
 
     for item in items {
+        if section_name == "globals"
+            && matches!(match_fir(store, item), FirMatch::DeclareFun { .. })
+        {
+            continue;
+        }
         emit_stmt(store, out, options, module_name, item, _indent)?;
     }
     Ok(())

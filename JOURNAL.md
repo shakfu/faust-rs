@@ -1,5 +1,56 @@
 # JOURNAL
 
+## 2026-02-23 (session 12)
+
+### Fix — Eliminate fast-lane `FIR-FC01` by declaring math prototypes in FIR `globals`
+
+Addressed the remaining verifier failures caused by fast-lane FIR emitting
+math calls (`sin`, `pow`, `fmin`, `fmax`, etc.) without corresponding FIR
+function declarations.
+
+**Fast-lane FIR generation (`crates/transform/src/signal_fir/module.rs`)**
+- Added tracking of used `FirMathOp` during signal lowering.
+- Fast-lane now emits prototype-only `DeclareFun` nodes (`body: None`) for the
+  used math functions.
+- These prototypes are emitted in the FIR module `globals` block (not in
+  `declarations`), so function calls are declared before verifier phase 3
+  checks.
+
+**Verifier updates (`crates/fir/src/checker.rs`)**
+- `globals` block now accepts `DeclareFun` in addition to `DeclareVar` /
+  `DeclareTable`.
+- Function signatures declared in `globals` are registered in
+  `symbols.functions`, which removes false `FIR-FC01` on math calls.
+- Suppressed `FIR-F07` warning for prototype-only functions declared in
+  `globals` (extern prototypes are expected there).
+- Refactored function signature registration into a shared helper used by both
+  `globals` and `declarations`.
+
+**Backend / tests**
+- C++ backend (`crates/codegen/src/backends/cpp/mod.rs`) now ignores
+  `DeclareFun` items in the `globals` section (prevents emitting them as class
+  methods/fields).
+- Updated `signal_fir` tests for:
+  - explicit output `StoreTable` (no `Drop`-based output assertions),
+  - math prototypes expected in `globals`.
+
+**Plan/documentation**
+- Updated `porting/fir-module-verifier-plan-en.md`:
+  - `globals` may contain prototype `DeclareFun` nodes,
+  - `G01` / `FIR-G01` wording adjusted accordingly.
+
+**Result**
+- `process = sin(_);` no longer triggers `FIR-FC01` in `--dump-fir-verify`.
+- Remaining warnings are only the known fast-lane DSP API omissions (`FIR-M07`).
+
+**Validation**
+- `cargo fmt --all` ✅
+- `cargo test -p transform signal_fir` ✅
+- `cargo test -p fir checker` ✅
+- `cargo run -p compiler -- --dump-fir-verify /tmp/fc01_math_proto_test.dsp` ✅
+
+---
+
 ## 2026-02-23 (session 11)
 
 ### Fix — Reinject explicit `Cast(FaustFloat, ...)` before fast-lane output `StoreTable`

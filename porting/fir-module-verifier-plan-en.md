@@ -187,14 +187,14 @@ A `FirMatch::Module` node contains:
 Module {
     name: String,           // DSP class name e.g. "mydsp"
     dsp_struct: FirId,      // → Block [ DeclareVar(kStruct), ... ]
-    globals: FirId,         // → Block [ DeclareVar(kStatic|kGlobal), ... ]
+    globals: FirId,         // → Block [ DeclareVar/DeclareTable(kStatic|kGlobal|kStaticStruct), DeclareFun(extern), ... ]
     declarations: FirId,    // → Block [ DeclareFun(...), DeclareFun(...), ... ]
 }
 ```
 
 The **struct fields** are the `kStruct`-access `DeclareVar` nodes inside `dsp_struct`.
 
-The **globals** are `DeclareVar` / `DeclareTable` nodes with `kStatic` or `kGlobal` access.
+The **globals** are `DeclareVar` / `DeclareTable` nodes (with `kStatic`, `kStaticStruct`, or `kGlobal` access) and may also contain prototype-only `DeclareFun` nodes (extern declarations used by calls in function bodies, e.g. math intrinsics).
 
 The **declarations block** contains `DeclareFun` nodes. Each function has:
 - A name
@@ -249,7 +249,7 @@ Checks are classified by **severity** and **category**:
 
 | # | Severity | Check |
 |---|---|---|
-| G01 | E | Each global is `DeclareVar` or `DeclareTable` |
+| G01 | E | Each globals-block node is `DeclareVar`, `DeclareTable`, or prototype `DeclareFun` |
 | G02 | E | Access type is `kStatic`, `kStaticStruct`, or `kGlobal` |
 | G03 | E | No duplicate global names |
 | G04 | W | Global initializer type matches declared type (if initializer present) |
@@ -747,7 +747,7 @@ The `errors` crate provides `FrsError`, `FrsWarning`, and the diagnostic infrast
 | FIR-S02 | E | Duplicate struct field name |
 | FIR-S03 | E | Struct field has void type |
 | FIR-S04 | W | Struct array field has size 0 |
-| FIR-G01 | E | Global declaration is not DeclareVar or DeclareTable |
+| FIR-G01 | E | Globals-block node is not DeclareVar / DeclareTable / DeclareFun |
 | FIR-G02 | E | Global declaration has wrong access type |
 | FIR-G03 | E | Duplicate global variable name |
 | FIR-G04 | W | Global initializer type mismatch |

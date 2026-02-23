@@ -37,6 +37,30 @@ use super::SignalFirOutput;
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::planner::SignalFirPlan;
 
+const MATH_PROTO_ORDER: &[FirMathOp] = &[
+    FirMathOp::Pow,
+    FirMathOp::Min,
+    FirMathOp::Max,
+    FirMathOp::Sin,
+    FirMathOp::Cos,
+    FirMathOp::Acos,
+    FirMathOp::Asin,
+    FirMathOp::Atan,
+    FirMathOp::Atan2,
+    FirMathOp::Tan,
+    FirMathOp::Exp,
+    FirMathOp::Log,
+    FirMathOp::Log10,
+    FirMathOp::Sqrt,
+    FirMathOp::Abs,
+    FirMathOp::Fmod,
+    FirMathOp::Remainder,
+    FirMathOp::Floor,
+    FirMathOp::Ceil,
+    FirMathOp::Rint,
+    FirMathOp::Round,
+];
+
 /// Emits a FIR module from validated planning data and propagated signals.
 pub fn build_module(
     plan: &SignalFirPlan,
@@ -258,16 +282,53 @@ pub fn build_module(
         )
     };
 
+    let mut math_prototypes = Vec::new();
+    for op in MATH_PROTO_ORDER {
+        if !lower.used_math_ops.contains(op) {
+            continue;
+        }
+        let arity = match op {
+            FirMathOp::Pow
+            | FirMathOp::Min
+            | FirMathOp::Max
+            | FirMathOp::Atan2
+            | FirMathOp::Fmod
+            | FirMathOp::Remainder => 2,
+            _ => 1,
+        };
+        let proto_args: Vec<NamedType> = (0..arity)
+            .map(|i| NamedType {
+                name: format!("arg{i}"),
+                typ: FirType::FaustFloat,
+            })
+            .collect();
+        let proto = {
+            let mut b = FirBuilder::new(&mut lower.store);
+            b.declare_fun(
+                op.symbol(),
+                FirType::Fun {
+                    args: vec![FirType::FaustFloat; arity],
+                    ret: Box::new(FirType::FaustFloat),
+                },
+                &proto_args,
+                None,
+                false,
+            )
+        };
+        math_prototypes.push(proto);
+    }
+
     let declarations = {
         let mut b = FirBuilder::new(&mut lower.store);
-        b.block(&[
+        let decls = [
             metadata,
             instance_constants,
             instance_reset_ui,
             instance_clear,
             build_ui,
             compute,
-        ])
+        ];
+        b.block(&decls)
     };
     let dsp_struct = {
         let mut b = FirBuilder::new(&mut lower.store);
@@ -275,7 +336,7 @@ pub fn build_module(
     };
     let globals = {
         let mut b = FirBuilder::new(&mut lower.store);
-        b.block(&[])
+        b.block(&math_prototypes)
     };
     let module: FirId = {
         let mut b = FirBuilder::new(&mut lower.store);
@@ -352,6 +413,7 @@ struct SignalToFirLower<'a> {
     reset_init_seen: HashSet<String>,
     clear_init_seen: HashSet<String>,
     input_ptr_aliases: HashMap<usize, String>,
+    used_math_ops: HashSet<FirMathOp>,
 }
 
 impl<'a> SignalToFirLower<'a> {
@@ -380,6 +442,7 @@ impl<'a> SignalToFirLower<'a> {
             reset_init_seen: HashSet::new(),
             clear_init_seen: HashSet::new(),
             input_ptr_aliases: HashMap::new(),
+            used_math_ops: HashSet::new(),
         }
     }
 
@@ -1034,6 +1097,7 @@ impl<'a> SignalToFirLower<'a> {
 
     fn lower_math1(&mut self, op: FirMathOp, value: SigId) -> Result<FirId, SignalFirError> {
         let value = self.lower_signal(value)?;
+        self.used_math_ops.insert(op);
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.math_call(op, &[value], FirType::FaustFloat))
     }
@@ -1046,6 +1110,7 @@ impl<'a> SignalToFirLower<'a> {
     ) -> Result<FirId, SignalFirError> {
         let lhs = self.lower_signal(lhs)?;
         let rhs = self.lower_signal(rhs)?;
+        self.used_math_ops.insert(op);
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.math_call(op, &[lhs, rhs], FirType::FaustFloat))
     }
