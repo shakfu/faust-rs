@@ -1,5 +1,61 @@
 # JOURNAL
 
+## 2026-02-23 (session 6)
+
+### Feature — FIR module verifier Phase 3 type checking (`crates/fir/src/checker.rs`)
+
+Implemented Phase 3 of `porting/fir-module-verifier-plan-en.md` in the FIR
+verifier by extending the existing per-function traversal with lightweight type
+inference (`infer_value_type`) and expression/control-flow type validation.
+
+**Key implementation points**
+- Added phase-3 type helpers in `VerifyCtx`:
+  - `infer_value_type(...)` (value-typed node inference using explicit FIR `typ`
+    payloads plus symbol/scope lookup for variables and functions)
+  - numeric / integer / float-like predicates
+  - compatibility helpers and binop result expectation/promotion heuristics
+  - bit-width inference for `Bitcast` checks
+- Extended module/global symbol tracking with `ModuleSymbols.global_tables`
+  and local scope entries with `is_table` to support table diagnostics (`T03`)
+  without changing the external checker API.
+- Phase 3 checks are executed during the same statement/value traversal used by
+  phase 2 (no separate traversal pass yet), so `verify_fir_module` now emits
+  Phase 1 + Phase 2 + Phase 3 diagnostics in one run.
+
+**Phase 3 diagnostics implemented**
+- Binary ops: `FIR-B01`, `FIR-B02`, `FIR-B03`, `FIR-B04`
+- Unary ops: `FIR-U01`, `FIR-U02`, `FIR-U03`, `FIR-U04`
+- Select / conditions: `FIR-C01`, `FIR-C02`, `FIR-C03`, `FIR-C04`
+- Function calls: `FIR-FC01`, `FIR-FC02`, `FIR-FC03`, partial `FIR-FC04`
+  (discarded non-void result + call-node/signature result mismatch)
+- Loops / switch typed conditions: `FIR-L03`, `FIR-SW01`
+- Returns: `FIR-R01`
+- Tables: `FIR-T01`, `FIR-T02`, `FIR-T03`
+- Math calls (`FirMathOp`): `FIR-MA01`, `FIR-MA02`, `FIR-MA03`, `FIR-MA04`
+
+**Behavior notes / current limits**
+- `R01` and `T02` are intentionally checked strictly (`exact type`), while
+  function-call argument checking (`FC03`) remains compatibility-based with
+  implicit numeric compatibility.
+- `kStruct` table/member cross-validation remains limited by the current
+  `FirType::Struct(_, Vec<FirType>)` representation (field names are unavailable),
+  so some `T03`/`SC09` precision is still deferred.
+
+**Tests**
+- Added Phase 3 unit coverage in `checker::tests` for:
+  - `B01`, `U02`, `U03`
+  - `C01`, `C04`
+  - `FC01`, `FC02`, `FC03`
+  - `R01`
+  - `L03`, `SW01`
+  - `T01`, `T02`, `T03`
+  - `MA03`, `MA04`
+- Validation:
+  - `cargo test -p fir checker` → 58 tests passed
+  - `cargo test -p fir` → 68 tests passed
+
+---
+
 ## 2026-02-23 (session 5)
 
 ### Feature — FIR module verifier Phase 2 scope analysis (`crates/fir/src/checker.rs`)

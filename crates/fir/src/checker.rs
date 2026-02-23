@@ -1,4 +1,4 @@
-//! FIR module verifier — Phase 1 and Phase 2.
+//! FIR module verifier — Phase 1, Phase 2, and Phase 3.
 //!
 //! **Phase 1** validates the top-level shape of a `FirMatch::Module` node and
 //! populates [`ModuleSymbols`] (struct fields, globals, declared functions).
@@ -6,6 +6,10 @@
 //! **Phase 2** traverses every function body and performs scope analysis:
 //! variable declarations, accesses, loop structures, return statements, and
 //! switch statements.
+//!
+//! **Phase 3** is implemented on top of the same traversal and adds expression
+//! type checks (binops, casts, select, function calls, table accesses, and
+//! typed control-flow conditions).
 //!
 //! # Diagnostic codes implemented
 //!
@@ -49,14 +53,14 @@
 //! | FIR-SW02 | E | Duplicate case value in `Switch` |
 //! | FIR-SW03 | W | `Switch` has no cases |
 //!
-//! ## Deferred
+//! ## Deferred / partial
 //! - **S01/S02** — struct field names not available in `FirType::Struct(_, Vec<FirType>)`.
 //! - **SC06/SC08** — naturally enforced by scope-stack pop; SC01 fires for any
 //!   out-of-scope access regardless of the access class.
 //! - **SC09** — field names not available; kStruct accesses are assumed valid.
-//! - **L03** — WhileLoop condition type requires Phase 3 type inference.
-//! - **R01** — return value type matching requires Phase 3 type inference.
-//! - **SW01** — switch condition type requires Phase 3 type inference.
+//! - **FC04** — implemented partially (discarded non-void call result + call
+//!   node declared-type/signature mismatch), but not yet all assignment/use
+//!   sites.
 //!
 //! # Source provenance
 //! - Plan: `porting/fir-module-verifier-plan-en.md`, §7
@@ -65,7 +69,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::{AccessType, FirId, FirMatch, FirStore, FirType, match_fir};
+use crate::{AccessType, FirBinOp, FirId, FirMatch, FirMathOp, FirStore, FirType, match_fir};
 
 // ─── Diagnostic types ─────────────────────────────────────────────────────────
 
@@ -166,6 +170,8 @@ pub struct ModuleSymbols {
     pub struct_fields: Vec<FirType>,
     /// Global/static variables: name → `(AccessType, FirType)`.
     pub globals: HashMap<String, (AccessType, FirType)>,
+    /// Names declared as global/static tables (for T03).
+    pub global_tables: HashSet<String>,
     /// Declared functions: name → [`FunctionSig`].
     pub functions: HashMap<String, FunctionSig>,
 }
@@ -205,6 +211,7 @@ struct VarEntry {
     access: AccessType,
     typ: FirType,
     init: InitStatus,
+    is_table: bool,
 }
 
 /// Kind of a scope frame.
@@ -213,7 +220,7 @@ enum FrameKind {
     /// Ordinary `Block`.
     Block,
     /// Loop body (ForLoop / SimpleForLoop / IteratorForLoop).
-    Loop { var_name: String },
+    Loop,
     /// Top-level function frame (holds kFunArgs pre-populated).
     Function,
 }
@@ -221,7 +228,6 @@ enum FrameKind {
 /// One level of the lexical scope stack.
 #[derive(Clone, Debug)]
 struct ScopeFrame {
-    kind: FrameKind,
     vars: HashMap<String, VarEntry>,
 }
 
@@ -235,9 +241,8 @@ impl ScopeStack {
         Self { frames: Vec::new() }
     }
 
-    fn push(&mut self, kind: FrameKind) {
+    fn push(&mut self, _kind: FrameKind) {
         self.frames.push(ScopeFrame {
-            kind,
             vars: HashMap::new(),
         });
     }
@@ -248,8 +253,31 @@ impl ScopeStack {
 
     /// Declare a variable in the current (top) frame.
     fn declare(&mut self, name: String, typ: FirType, access: AccessType, init: InitStatus) {
+        self.declare_with_kind(name, typ, access, init, false);
+    }
+
+    fn declare_table(&mut self, name: String, elem_type: FirType, access: AccessType) {
+        self.declare_with_kind(name, elem_type, access, InitStatus::Yes, true);
+    }
+
+    fn declare_with_kind(
+        &mut self,
+        name: String,
+        typ: FirType,
+        access: AccessType,
+        init: InitStatus,
+        is_table: bool,
+    ) {
         if let Some(frame) = self.frames.last_mut() {
-            frame.vars.insert(name, VarEntry { access, typ, init });
+            frame.vars.insert(
+                name,
+                VarEntry {
+                    access,
+                    typ,
+                    init,
+                    is_table,
+                },
+            );
         }
     }
 
@@ -272,13 +300,6 @@ impl ScopeStack {
                 return;
             }
         }
-    }
-
-    /// Returns `true` if the current stack has at least one Loop frame.
-    fn is_in_loop(&self) -> bool {
-        self.frames
-            .iter()
-            .any(|f| matches!(f.kind, FrameKind::Loop { .. }))
     }
 
     // ── Snapshot / restore for If-branch merge ──────────────────────────────
@@ -340,14 +361,14 @@ impl ScopeStack {
 
 // ─── Entry points ─────────────────────────────────────────────────────────────
 
-/// Verify the FIR module (Phase 1 + Phase 2) and return the diagnostic report.
+/// Verify the FIR module (Phase 1 + Phase 2 + Phase 3) and return the diagnostic report.
 pub fn verify_fir_module(store: &FirStore, module_id: FirId) -> FirVerifyReport {
     let (report, _symbols) = verify_module_structure(store, module_id);
     report
 }
 
 /// Like [`verify_fir_module`] but also returns the [`ModuleSymbols`] collected
-/// during Phase 1, for use by Phase 3 (type checking, not yet implemented).
+/// during Phase 1 for targeted function verification or later passes.
 pub fn verify_module_structure(
     store: &FirStore,
     module_id: FirId,
@@ -365,8 +386,8 @@ pub fn verify_module_structure(
 
 /// Verify a single function body using pre-collected module symbols.
 ///
-/// This runs the Phase 2 scope checks only (no module-shape validation, no
-/// Phase 3 type inference).
+/// This runs the per-function Phase 2 + Phase 3 semantic checks (no module-shape
+/// validation).
 pub fn verify_fir_function(
     store: &FirStore,
     fun_id: FirId,
@@ -587,6 +608,7 @@ impl<'s> VerifyCtx<'s> {
                         );
                     }
                     if seen.insert(name.clone()) {
+                        self.symbols.global_tables.insert(name.clone());
                         self.symbols.globals.insert(name, (access, elem_type));
                     } else {
                         self.error(
@@ -791,6 +813,7 @@ impl<'s> VerifyCtx<'s> {
                     access: AccessType::Struct,
                     typ: FirType::Void, // placeholder; type check is Phase 3
                     init: InitStatus::Yes,
+                    is_table: false,
                 })
             }
             AccessType::Static | AccessType::Global => {
@@ -799,6 +822,7 @@ impl<'s> VerifyCtx<'s> {
                     access: *a,
                     typ: t.clone(),
                     init: InitStatus::Yes,
+                    is_table: self.symbols.global_tables.contains(name),
                 })
             }
             AccessType::FunArgs => {
@@ -807,6 +831,7 @@ impl<'s> VerifyCtx<'s> {
                     access: AccessType::FunArgs,
                     typ: t.clone(),
                     init: InitStatus::Yes,
+                    is_table: false,
                 })
             }
             AccessType::Stack | AccessType::Loop => {
@@ -829,6 +854,7 @@ impl<'s> VerifyCtx<'s> {
                 access: AccessType::FunArgs,
                 typ: t.clone(),
                 init: InitStatus::Yes,
+                is_table: false,
             });
         }
         if let Some((access, typ)) = self.symbols.globals.get(name) {
@@ -836,11 +862,533 @@ impl<'s> VerifyCtx<'s> {
                 access: *access,
                 typ: typ.clone(),
                 init: InitStatus::Yes,
+                is_table: self.symbols.global_tables.contains(name),
             });
         }
         // kStruct names cannot be validated precisely in Phase 2 because field
         // names are not carried in `FirType::Struct(_, Vec<FirType>)`.
         None
+    }
+
+    // ── Phase 3 helpers (type inference / compatibility) ────────────────────
+
+    fn infer_value_type(&self, id: FirId) -> Option<FirType> {
+        match match_fir(self.store, id) {
+            FirMatch::LoadVar { name, access, typ } => {
+                self.resolve(&name, access).map(|e| e.typ).or(Some(typ))
+            }
+            FirMatch::LoadTable {
+                name, access, typ, ..
+            } => self.resolve(&name, access).map(|e| e.typ).or(Some(typ)),
+            FirMatch::FunCall { name, typ, .. } => self
+                .symbols
+                .functions
+                .get(&name)
+                .map(|sig| sig.return_type.clone())
+                .or(Some(typ)),
+            _ => self.store.value_type(id),
+        }
+    }
+
+    fn is_integer_type(&self, typ: &FirType) -> bool {
+        matches!(typ, FirType::Int32 | FirType::Int64)
+    }
+
+    fn is_numeric_type(&self, typ: &FirType) -> bool {
+        matches!(
+            typ,
+            FirType::Int32
+                | FirType::Int64
+                | FirType::Float32
+                | FirType::Float64
+                | FirType::FaustFloat
+                | FirType::Quad
+                | FirType::FixedPoint
+                | FirType::Bool
+        )
+    }
+
+    fn is_float_like_type(&self, typ: &FirType) -> bool {
+        matches!(
+            typ,
+            FirType::Float32 | FirType::Float64 | FirType::FaustFloat | FirType::Quad
+        )
+    }
+
+    fn is_int_or_bool_type(&self, typ: &FirType) -> bool {
+        self.is_integer_type(typ) || *typ == FirType::Bool
+    }
+
+    fn same_or_int_bool_mix(&self, lhs: &FirType, rhs: &FirType) -> bool {
+        lhs == rhs
+            || matches!(
+                (lhs, rhs),
+                (FirType::Bool, FirType::Int32)
+                    | (FirType::Bool, FirType::Int64)
+                    | (FirType::Int32, FirType::Bool)
+                    | (FirType::Int64, FirType::Bool)
+            )
+    }
+
+    fn types_compatible(&self, actual: &FirType, expected: &FirType) -> bool {
+        actual == expected || (self.is_numeric_type(actual) && self.is_numeric_type(expected))
+    }
+
+    fn bit_width(&self, typ: &FirType) -> Option<u32> {
+        match typ {
+            FirType::Bool => Some(1),
+            FirType::Int32 | FirType::Float32 => Some(32),
+            FirType::Int64 | FirType::Float64 => Some(64),
+            FirType::Quad => Some(128),
+            FirType::Ptr(_) | FirType::Obj | FirType::Sound | FirType::UI | FirType::Meta => {
+                Some(64)
+            }
+            _ => None,
+        }
+    }
+
+    fn promoted_numeric_type(&self, lhs: &FirType, rhs: &FirType) -> Option<FirType> {
+        if !self.is_numeric_type(lhs) || !self.is_numeric_type(rhs) {
+            return None;
+        }
+        if lhs == rhs {
+            return Some(lhs.clone());
+        }
+        if self.same_or_int_bool_mix(lhs, rhs) {
+            return Some(
+                if matches!(lhs, FirType::Int64) || matches!(rhs, FirType::Int64) {
+                    FirType::Int64
+                } else {
+                    FirType::Int32
+                },
+            );
+        }
+        let rank = |t: &FirType| -> i32 {
+            match t {
+                FirType::Quad => 70,
+                FirType::Float64 => 60,
+                FirType::FaustFloat => 55,
+                FirType::Float32 => 50,
+                FirType::FixedPoint => 45,
+                FirType::Int64 => 20,
+                FirType::Int32 => 10,
+                FirType::Bool => 0,
+                _ => -1,
+            }
+        };
+        let out = if rank(lhs) >= rank(rhs) { lhs } else { rhs };
+        Some(out.clone())
+    }
+
+    fn expected_binop_result_type(
+        &self,
+        op: FirBinOp,
+        lhs: &FirType,
+        rhs: &FirType,
+    ) -> Option<FirType> {
+        match op {
+            FirBinOp::Eq
+            | FirBinOp::Ne
+            | FirBinOp::Lt
+            | FirBinOp::Le
+            | FirBinOp::Gt
+            | FirBinOp::Ge => Some(FirType::Bool),
+            FirBinOp::And | FirBinOp::Or | FirBinOp::Xor => {
+                if *lhs == FirType::Bool && *rhs == FirType::Bool {
+                    Some(FirType::Bool)
+                } else {
+                    self.promoted_numeric_type(lhs, rhs)
+                }
+            }
+            _ => self.promoted_numeric_type(lhs, rhs),
+        }
+    }
+
+    fn const_is_zero(&self, id: FirId) -> bool {
+        match match_fir(self.store, id) {
+            FirMatch::Int32 { value, .. } => value == 0,
+            FirMatch::Int64 { value, .. } => value == 0,
+            FirMatch::Float32 { value, .. } => value == 0.0,
+            FirMatch::Float64 { value, .. } => value == 0.0,
+            FirMatch::Bool { value, .. } => !value,
+            _ => false,
+        }
+    }
+
+    fn check_int_or_bool_condition(
+        &mut self,
+        id: FirId,
+        cond: FirId,
+        code: &'static str,
+        what: &str,
+    ) {
+        if let Some(cond_ty) = self.infer_value_type(cond) {
+            if !self.is_int_or_bool_type(&cond_ty) {
+                self.error(
+                    code,
+                    format!("{what} condition should be Int32, Int64, or Bool, got {cond_ty:?}"),
+                    id,
+                );
+            }
+        }
+    }
+
+    fn check_switch_condition_type(&mut self, id: FirId, cond: FirId) {
+        if let Some(cond_ty) = self.infer_value_type(cond) {
+            if !self.is_integer_type(&cond_ty) {
+                self.error(
+                    "FIR-SW01",
+                    format!("Switch condition should be Int32 or Int64, got {cond_ty:?}"),
+                    id,
+                );
+            }
+        }
+    }
+
+    fn check_binop_types(
+        &mut self,
+        id: FirId,
+        op: FirBinOp,
+        lhs: FirId,
+        rhs: FirId,
+        declared: &FirType,
+    ) {
+        let lhs_ty = self.infer_value_type(lhs);
+        let rhs_ty = self.infer_value_type(rhs);
+        let (Some(lhs_ty), Some(rhs_ty)) = (lhs_ty, rhs_ty) else {
+            return;
+        };
+
+        if !self.same_or_int_bool_mix(&lhs_ty, &rhs_ty) {
+            self.error(
+                "FIR-B01",
+                format!("BinOp operands have incompatible types: {lhs_ty:?} vs {rhs_ty:?}"),
+                id,
+            );
+        }
+        if !self.is_numeric_type(&lhs_ty) || !self.is_numeric_type(&rhs_ty) {
+            self.error(
+                "FIR-B02",
+                format!("BinOp operands must be numeric, got {lhs_ty:?} and {rhs_ty:?}"),
+                id,
+            );
+        }
+        if let Some(expected) = self.expected_binop_result_type(op, &lhs_ty, &rhs_ty) {
+            if &expected != declared {
+                self.warn(
+                    "FIR-B03",
+                    format!(
+                        "BinOp declared result type {declared:?} is inconsistent with operands \
+                         ({lhs_ty:?}, {rhs_ty:?}); expected {expected:?}"
+                    ),
+                    id,
+                );
+            }
+        }
+        if op == FirBinOp::Div && self.const_is_zero(rhs) {
+            self.warn("FIR-B04", "division by constant zero in BinOp", id);
+        }
+    }
+
+    fn check_neg_type(&mut self, id: FirId, value: FirId) {
+        if let Some(val_ty) = self.infer_value_type(value) {
+            if !self.is_numeric_type(&val_ty) {
+                self.error(
+                    "FIR-U01",
+                    format!("Neg operand must be numeric, got {val_ty:?}"),
+                    id,
+                );
+            }
+        }
+    }
+
+    fn check_cast_type(&mut self, id: FirId, target: &FirType, value: FirId) {
+        if let Some(src_ty) = self.infer_value_type(value) {
+            if &src_ty == target {
+                self.warn("FIR-U02", format!("Cast is a no-op to {target:?}"), id);
+            }
+            if !self.is_numeric_type(&src_ty) || !self.is_numeric_type(target) {
+                self.error(
+                    "FIR-U03",
+                    format!(
+                        "Cast requires numeric source/target types, got {src_ty:?} -> {target:?}"
+                    ),
+                    id,
+                );
+            }
+        }
+    }
+
+    fn check_bitcast_type(&mut self, id: FirId, target: &FirType, value: FirId) {
+        if let Some(src_ty) = self.infer_value_type(value) {
+            let src_w = self.bit_width(&src_ty);
+            let dst_w = self.bit_width(target);
+            if let (Some(sw), Some(dw)) = (src_w, dst_w) {
+                if sw != dw {
+                    self.warn(
+                        "FIR-U04",
+                        format!("Bitcast width mismatch: {src_ty:?} ({sw}) -> {target:?} ({dw})"),
+                        id,
+                    );
+                }
+            }
+        }
+    }
+
+    fn check_select2_types(
+        &mut self,
+        id: FirId,
+        cond: FirId,
+        then_value: FirId,
+        else_value: FirId,
+        declared: &FirType,
+    ) {
+        self.check_int_or_bool_condition(id, cond, "FIR-C01", "Select2");
+        let then_ty = self.infer_value_type(then_value);
+        let else_ty = self.infer_value_type(else_value);
+        if let (Some(tt), Some(et)) = (then_ty, else_ty) {
+            if tt != et {
+                self.warn(
+                    "FIR-C02",
+                    format!("Select2 branches have different types: {tt:?} vs {et:?}"),
+                    id,
+                );
+            }
+            if &tt != declared && &et != declared {
+                self.warn(
+                    "FIR-C03",
+                    format!(
+                        "Select2 declared result type {declared:?} does not match branch types \
+                         ({tt:?}, {et:?})"
+                    ),
+                    id,
+                );
+            }
+        }
+    }
+
+    fn check_fun_call_types(&mut self, id: FirId, name: &str, args: &[FirId], declared: &FirType) {
+        if let Some(sig) = self.symbols.functions.get(name).cloned() {
+            if sig.params.len() != args.len() {
+                self.error(
+                    "FIR-FC02",
+                    format!(
+                        "call to '{name}' has {} args, expected {}",
+                        args.len(),
+                        sig.params.len()
+                    ),
+                    id,
+                );
+            }
+            for (i, (arg_id, (_pname, pty))) in args.iter().zip(sig.params.iter()).enumerate() {
+                if let Some(actual_ty) = self.infer_value_type(*arg_id) {
+                    if !self.types_compatible(&actual_ty, pty) {
+                        self.warn(
+                            "FIR-FC03",
+                            format!(
+                                "call to '{name}' arg #{i} has type {actual_ty:?}, expected {pty:?}"
+                            ),
+                            id,
+                        );
+                    }
+                }
+            }
+            if &sig.return_type != declared {
+                self.warn(
+                    "FIR-FC04",
+                    format!(
+                        "call to '{name}' declared result type {declared:?} differs from function \
+                         signature return type {:?}",
+                        sig.return_type
+                    ),
+                    id,
+                );
+            }
+        } else {
+            self.error(
+                "FIR-FC01",
+                format!("call to undeclared function '{name}'"),
+                id,
+            );
+        }
+
+        self.check_math_call(id, name, args);
+    }
+
+    fn check_math_call(&mut self, id: FirId, name: &str, args: &[FirId]) {
+        let raw = name.strip_prefix("std::").unwrap_or(name);
+        let Some(op) = FirMathOp::from_symbol(name) else {
+            if raw == "abs" {
+                if let Some(arg) = args.first().and_then(|arg| self.infer_value_type(*arg)) {
+                    if self.is_float_like_type(&arg) {
+                        self.warn(
+                            "FIR-MA04",
+                            "use 'fabs' for floating-point absolute value (got 'abs')",
+                            id,
+                        );
+                    }
+                }
+            }
+            return;
+        };
+
+        let expected_arity = match op {
+            FirMathOp::Pow
+            | FirMathOp::Min
+            | FirMathOp::Max
+            | FirMathOp::Atan2
+            | FirMathOp::Fmod
+            | FirMathOp::Remainder => 2,
+            _ => 1,
+        };
+        match expected_arity {
+            1 if args.len() != 1 => self.warn(
+                "FIR-MA01",
+                format!(
+                    "math op '{}' expects 1 arg, got {}",
+                    op.symbol(),
+                    args.len()
+                ),
+                id,
+            ),
+            2 if args.len() != 2 => self.warn(
+                "FIR-MA02",
+                format!(
+                    "math op '{}' expects 2 args, got {}",
+                    op.symbol(),
+                    args.len()
+                ),
+                id,
+            ),
+            _ => {}
+        }
+
+        let is_float_math = !matches!(op, FirMathOp::Abs);
+        if is_float_math && expected_arity == args.len() {
+            for (i, arg_id) in args.iter().enumerate() {
+                if let Some(arg_ty) = self.infer_value_type(*arg_id) {
+                    if self.is_integer_type(&arg_ty) || arg_ty == FirType::Bool {
+                        self.warn(
+                            "FIR-MA03",
+                            format!(
+                                "math op '{}' arg #{i} is integer-like ({arg_ty:?}); \
+                                 floating-point argument expected",
+                                op.symbol()
+                            ),
+                            id,
+                        );
+                    }
+                }
+            }
+        }
+
+        if raw == "fabs" {
+            if let Some(arg_ty) = args.first().and_then(|arg| self.infer_value_type(*arg)) {
+                if self.is_integer_type(&arg_ty) || arg_ty == FirType::Bool {
+                    self.warn(
+                        "FIR-MA04",
+                        format!("'fabs' called with integer-like argument {arg_ty:?}"),
+                        id,
+                    );
+                }
+            }
+        }
+    }
+
+    fn check_load_table_types(
+        &mut self,
+        id: FirId,
+        name: &str,
+        access: AccessType,
+        index: FirId,
+        declared_elem_type: &FirType,
+    ) {
+        if let Some(index_ty) = self.infer_value_type(index) {
+            if !self.is_integer_type(&index_ty) {
+                self.error(
+                    "FIR-T01",
+                    format!("table index must be Int32 or Int64, got {index_ty:?}"),
+                    id,
+                );
+            }
+        }
+        if access != AccessType::Struct {
+            if let Some(entry) = self.resolve(name, access) {
+                if !entry.is_table {
+                    self.warn(
+                        "FIR-T03",
+                        format!("LoadTable '{name}' refers to a non-table declaration"),
+                        id,
+                    );
+                }
+                if entry.typ != *declared_elem_type {
+                    self.warn(
+                        "FIR-T03",
+                        format!(
+                            "LoadTable '{name}' element type {declared_elem_type:?} differs from \
+                             declaration {:?}",
+                            entry.typ
+                        ),
+                        id,
+                    );
+                }
+            }
+        }
+    }
+
+    fn check_store_table_types(
+        &mut self,
+        id: FirId,
+        name: &str,
+        access: AccessType,
+        index: FirId,
+        value: FirId,
+    ) {
+        if let Some(index_ty) = self.infer_value_type(index) {
+            if !self.is_integer_type(&index_ty) {
+                self.error(
+                    "FIR-T01",
+                    format!("table index must be Int32 or Int64, got {index_ty:?}"),
+                    id,
+                );
+            }
+        }
+        if access == AccessType::Struct {
+            return;
+        }
+        if let Some(entry) = self.resolve(name, access) {
+            if !entry.is_table {
+                self.warn(
+                    "FIR-T03",
+                    format!("StoreTable '{name}' refers to a non-table declaration"),
+                    id,
+                );
+            }
+            if let Some(val_ty) = self.infer_value_type(value) {
+                if val_ty != entry.typ {
+                    self.error(
+                        "FIR-T02",
+                        format!(
+                            "StoreTable value type {val_ty:?} does not match element type {:?}",
+                            entry.typ
+                        ),
+                        id,
+                    );
+                }
+            }
+        }
+    }
+
+    fn check_fun_call_drop_use(&mut self, id: FirId, value: FirId) {
+        if let FirMatch::FunCall { name, typ, .. } = match_fir(self.store, value) {
+            if typ != FirType::Void {
+                self.warn(
+                    "FIR-FC04",
+                    format!("discarded non-void return value from '{name}' ({typ:?})"),
+                    id,
+                );
+            }
+        }
     }
 
     // ── Statement traversal ───────────────────────────────────────────────────
@@ -865,8 +1413,7 @@ impl<'s> VerifyCtx<'s> {
                 for v in values {
                     self.check_value(v);
                 }
-                self.scope_stack
-                    .declare(name, elem_type, access, InitStatus::Yes);
+                self.scope_stack.declare_table(name, elem_type, access);
             }
             FirMatch::StoreVar {
                 name,
@@ -876,15 +1423,25 @@ impl<'s> VerifyCtx<'s> {
                 self.check_value(value);
                 self.check_store_var(id, &name, access);
             }
-            FirMatch::StoreTable { index, value, .. } => {
+            FirMatch::StoreTable {
+                name,
+                access,
+                index,
+                value,
+            } => {
                 self.check_value(index);
                 self.check_value(value);
+                self.check_store_var(id, &name, access);
+                self.check_store_table_types(id, &name, access, index, value);
             }
             FirMatch::ShiftArrayVar { name, access, .. } => {
                 // ShiftArrayVar modifies an array variable in-place; treat as a store.
                 self.check_store_var(id, &name, access);
             }
-            FirMatch::Drop(val) => self.check_value(val),
+            FirMatch::Drop(val) => {
+                self.check_value(val);
+                self.check_fun_call_drop_use(id, val);
+            }
             FirMatch::Return(val) => self.check_return(id, val),
             FirMatch::If {
                 cond,
@@ -892,6 +1449,7 @@ impl<'s> VerifyCtx<'s> {
                 else_block,
             } => {
                 self.check_value(cond);
+                self.check_int_or_bool_condition(id, cond, "FIR-C04", "If");
                 self.check_if(then_block, else_block);
             }
             FirMatch::ForLoop {
@@ -916,6 +1474,7 @@ impl<'s> VerifyCtx<'s> {
             }
             FirMatch::WhileLoop { cond, body } => {
                 self.check_value(cond);
+                self.check_int_or_bool_condition(id, cond, "FIR-L03", "WhileLoop");
                 self.scope_stack.push(FrameKind::Block);
                 self.check_stmt(body);
                 self.scope_stack.pop();
@@ -926,6 +1485,7 @@ impl<'s> VerifyCtx<'s> {
                 default,
             } => {
                 self.check_value(cond);
+                self.check_switch_condition_type(id, cond);
                 self.check_switch(id, cases, default);
             }
             FirMatch::Control { cond, stmt } => {
@@ -1147,9 +1707,7 @@ impl<'s> VerifyCtx<'s> {
         }
 
         // Push a Loop frame containing the loop variable
-        self.scope_stack.push(FrameKind::Loop {
-            var_name: var.to_string(),
-        });
+        self.scope_stack.push(FrameKind::Loop);
 
         // Process the init statement (registers the loop variable in the loop frame)
         self.check_stmt(init);
@@ -1172,9 +1730,7 @@ impl<'s> VerifyCtx<'s> {
     // ── SimpleForLoop ─────────────────────────────────────────────────────────
 
     fn check_simple_for_loop(&mut self, id: FirId, var: &str, upper: FirId, body: FirId) {
-        self.scope_stack.push(FrameKind::Loop {
-            var_name: var.to_string(),
-        });
+        self.scope_stack.push(FrameKind::Loop);
 
         // Implicit loop variable: kLoop, Int32, initialized
         self.scope_stack.declare(
@@ -1204,8 +1760,7 @@ impl<'s> VerifyCtx<'s> {
     // ── IteratorForLoop ───────────────────────────────────────────────────────
 
     fn check_iterator_for_loop(&mut self, body: FirId, iterators: &[String]) {
-        let var_name = iterators.first().cloned().unwrap_or_default();
-        self.scope_stack.push(FrameKind::Loop { var_name });
+        self.scope_stack.push(FrameKind::Loop);
         for iter in iterators {
             self.scope_stack.declare(
                 iter.clone(),
@@ -1265,6 +1820,19 @@ impl<'s> VerifyCtx<'s> {
     fn check_return(&mut self, id: FirId, value: Option<FirId>) {
         if let Some(val_id) = value {
             self.check_value(val_id);
+            if let Some(ret_ty) = &self.current_return_type {
+                if let Some(val_ty) = self.infer_value_type(val_id) {
+                    if val_ty != *ret_ty {
+                        self.error(
+                            "FIR-R01",
+                            format!(
+                                "Return value type {val_ty:?} does not match function return type {ret_ty:?}"
+                            ),
+                            id,
+                        );
+                    }
+                }
+            }
         } else {
             // R02: Return(None) in a non-Void function
             if let Some(ret_ty) = &self.current_return_type {
@@ -1338,34 +1906,45 @@ impl<'s> VerifyCtx<'s> {
                 name,
                 access,
                 index,
-                ..
+                typ,
             } => {
                 self.check_load_var(id, &name, access);
                 self.check_value(index);
+                self.check_load_table_types(id, &name, access, index, &typ);
             }
-            FirMatch::BinOp { lhs, rhs, .. } => {
+            FirMatch::BinOp { op, lhs, rhs, typ } => {
                 self.check_value(lhs);
                 self.check_value(rhs);
+                self.check_binop_types(id, op, lhs, rhs, &typ);
             }
-            FirMatch::Neg { value, .. }
-            | FirMatch::Cast { value, .. }
-            | FirMatch::Bitcast { value, .. } => {
+            FirMatch::Neg { value, .. } => {
                 self.check_value(value);
+                self.check_neg_type(id, value);
+            }
+            FirMatch::Cast { typ, value } => {
+                self.check_value(value);
+                self.check_cast_type(id, &typ, value);
+            }
+            FirMatch::Bitcast { typ, value } => {
+                self.check_value(value);
+                self.check_bitcast_type(id, &typ, value);
             }
             FirMatch::Select2 {
                 cond,
                 then_value,
                 else_value,
-                ..
+                typ,
             } => {
                 self.check_value(cond);
                 self.check_value(then_value);
                 self.check_value(else_value);
+                self.check_select2_types(id, cond, then_value, else_value, &typ);
             }
-            FirMatch::FunCall { args, .. } => {
-                for arg in args {
+            FirMatch::FunCall { name, args, typ } => {
+                for &arg in &args {
                     self.check_value(arg);
                 }
+                self.check_fun_call_types(id, &name, &args, &typ);
             }
             FirMatch::ValueArray { values, .. } => {
                 for v in values {
@@ -2269,6 +2848,266 @@ mod tests {
         assert!(report.has_errors());
         assert!(
             report.diagnostics.iter().any(|d| d.code == "FIR-SC01"),
+            "{report:?}"
+        );
+    }
+
+    // ══ Phase 3 — type checks ════════════════════════════════════════════════
+
+    #[test]
+    fn b01_binop_type_mismatch() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let i = b.int32(1);
+        let f = b.float32(2.0);
+        let bad = b.binop(FirBinOp::Add, i, f, FirType::Float32);
+        let drop = b.drop_(bad);
+        let module_id = module_with_body(&mut store, &[drop]);
+        let report = verify_fir_module(&store, module_id);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-B01"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn u02_noop_cast() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let i = b.int32(1);
+        let c = b.cast(FirType::Int32, i);
+        let drop = b.drop_(c);
+        let module_id = module_with_body(&mut store, &[drop]);
+        let report = verify_fir_module(&store, module_id);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-U02"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn u03_cast_non_numeric() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let dsp = b.new_dsp("dsp", FirType::Obj);
+        let c = b.cast(FirType::Int32, dsp);
+        let drop = b.drop_(c);
+        let module_id = module_with_body(&mut store, &[drop]);
+        let report = verify_fir_module(&store, module_id);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-U03"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn c01_select2_bad_condition_type() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let cond = b.float32(0.5);
+        let t = b.int32(1);
+        let e = b.int32(0);
+        let sel = b.select2(cond, t, e, FirType::Int32);
+        let drop = b.drop_(sel);
+        let module_id = module_with_body(&mut store, &[drop]);
+        let report = verify_fir_module(&store, module_id);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-C01"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn c04_if_bad_condition_type() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let cond = b.float32(1.0);
+        let then_block = b.block(&[]);
+        let if_ = b.if_(cond, then_block, None);
+        let module_id = module_with_body(&mut store, &[if_]);
+        let report = verify_fir_module(&store, module_id);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-C04"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn fc01_call_undeclared_function() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let arg = b.int32(1);
+        let call = b.fun_call("missing", &[arg], FirType::Int32);
+        let drop = b.drop_(call);
+        let module_id = module_with_body(&mut store, &[drop]);
+        let report = verify_fir_module(&store, module_id);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-FC01"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn fc02_fc03_call_arity_and_arg_type_mismatch() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let callee_ty = FirType::Fun {
+            args: vec![FirType::Int32],
+            ret: Box::new(FirType::Int32),
+        };
+        let callee_args = vec![NamedType {
+            name: "x".to_string(),
+            typ: FirType::Int32,
+        }];
+        let callee = b.declare_fun("foo", callee_ty, &callee_args, None, false);
+
+        let farg = b.new_dsp("tmp", FirType::Obj);
+        let extra = b.int32(2);
+        let call = b.fun_call("foo", &[farg, extra], FirType::Int32);
+        let drop = b.drop_(call);
+        let body = b.block(&[drop]);
+        let caller_ty = FirType::Fun {
+            args: vec![],
+            ret: Box::new(FirType::Void),
+        };
+        let caller = b.declare_fun("caller", caller_ty, &[], Some(body), false);
+
+        let dsp_struct = make_dsp_struct(&mut b);
+        let globals = make_empty_block(&mut b);
+        let decls = b.block(&[callee, caller]);
+        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let report = verify_fir_module(&store, module_id);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-FC02"),
+            "{report:?}"
+        );
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-FC03"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn r01_return_value_type_mismatch() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let f = b.float32(1.0);
+        let ret = b.ret(Some(f));
+        let module_id = module_with_int_body(&mut store, &[ret]);
+        let report = verify_fir_module(&store, module_id);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-R01"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn l03_whileloop_bad_condition_type() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let cond = b.float32(0.0);
+        let body = b.block(&[]);
+        let w = b.while_loop(cond, body);
+        let module_id = module_with_body(&mut store, &[w]);
+        let report = verify_fir_module(&store, module_id);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-L03"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn sw01_switch_bad_condition_type() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let cond = b.bool_(true);
+        let body = b.block(&[]);
+        let sw = b.switch(cond, &[(0, body)], None);
+        let module_id = module_with_body(&mut store, &[sw]);
+        let report = verify_fir_module(&store, module_id);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-SW01"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn t01_t03_loadtable_bad_index_and_non_table_ref() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let decl = b.declare_var("x", FirType::Int32, AccessType::Stack, None);
+        let idx = b.float32(1.5);
+        let load = b.load_table("x", AccessType::Stack, idx, FirType::Int32);
+        let drop = b.drop_(load);
+        let module_id = module_with_body(&mut store, &[decl, drop]);
+        let report = verify_fir_module(&store, module_id);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-T01"),
+            "{report:?}"
+        );
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-T03"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn t02_storetable_value_type_mismatch() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let v0 = b.int32(0);
+        let table = b.declare_table("t", AccessType::Stack, FirType::Int32, &[v0]);
+        let idx = b.int32(0);
+        let val = b.float32(1.0);
+        let st = b.store_table("t", AccessType::Stack, idx, val);
+        let module_id = module_with_body(&mut store, &[table, st]);
+        let report = verify_fir_module(&store, module_id);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-T02"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn ma03_and_ma04_math_call_warnings() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let proto_ty = FirType::Fun {
+            args: vec![FirType::Float64],
+            ret: Box::new(FirType::Float64),
+        };
+        let proto_args = vec![NamedType {
+            name: "x".to_string(),
+            typ: FirType::Float64,
+        }];
+        let sin_decl = b.declare_fun("sin", proto_ty.clone(), &proto_args, None, false);
+        let fabs_decl = b.declare_fun("fabs", proto_ty, &proto_args, None, false);
+
+        let i = b.int32(1);
+        let call_sin = b.fun_call("sin", &[i], FirType::Float64);
+        let call_fabs = b.fun_call("fabs", &[i], FirType::Float64);
+        let d1 = b.drop_(call_sin);
+        let d2 = b.drop_(call_fabs);
+        let body = b.block(&[d1, d2]);
+        let caller_ty = FirType::Fun {
+            args: vec![],
+            ret: Box::new(FirType::Void),
+        };
+        let caller = b.declare_fun("caller", caller_ty, &[], Some(body), false);
+
+        let dsp_struct = make_dsp_struct(&mut b);
+        let globals = make_empty_block(&mut b);
+        let decls = b.block(&[sin_decl, fabs_decl, caller]);
+        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let report = verify_fir_module(&store, module_id);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-MA03"),
+            "{report:?}"
+        );
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-MA04"),
             "{report:?}"
         );
     }
