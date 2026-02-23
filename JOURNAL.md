@@ -1,5 +1,55 @@
 # JOURNAL
 
+## 2026-02-23 (session 5)
+
+### Feature — FIR module verifier Phase 2 scope analysis (`crates/fir/src/checker.rs`)
+
+Completed Phase 2 of `porting/fir-module-verifier-plan-en.md` for the FIR module
+verifier with per-function scope traversal, lexical scope tracking, control-flow
+checks, and branch initialization-state merging.
+
+**Phase 2 scope/control checks now implemented (active in `verify_fir_module`)**
+- variable resolution and access-class checks for `LoadVar` / `StoreVar`:
+  `FIR-SC01`, `FIR-SC02`, `FIR-SC03`, `FIR-SC04`, `FIR-SC05`, `FIR-SC07`
+- loop checks for `ForLoop` / `SimpleForLoop`:
+  `FIR-L01`, `FIR-L02`, `FIR-L04`
+- return checks:
+  `FIR-R02`, `FIR-R03`
+- switch checks:
+  `FIR-SW02`, `FIR-SW03`
+
+**Phase 2 correctness fixes made while finishing the implementation**
+- Distinguished "undeclared symbol" vs "declared in another access space" during
+  scope resolution, so access mismatches correctly emit `FIR-SC02` / `FIR-SC05`
+  instead of `FIR-SC01` / `FIR-SC04`.
+- `If` branch traversal now wraps both then/else branches in explicit block
+  frames before merging `InitStatus`, preventing scope leakage when a branch is
+  not encoded as a `Block`.
+- `Switch` now emits `FIR-SW03` when there are no explicit `cases`, even if a
+  `default` body exists (matching the plan wording "at least one case").
+- Added `FIR-SC10` (error): local `DeclareVar` with a non-local access class
+  (`Global` / `Static` / `Struct`) inside a function body.
+
+**Public API addition**
+- Added `verify_fir_function(store, fun_id, symbols) -> FirVerifyReport` to run
+  Phase 2 checks on a single `DeclareFun` using pre-collected `ModuleSymbols`
+  (useful for post-pass FIR sanity checks before Phase 3 type checking exists).
+
+**Tests**
+- Fixed newly added FIR checker tests that were failing to compile due to nested
+  mutable borrows of `FirBuilder` in single expressions.
+- Added Phase 2 regression coverage for:
+  - `FIR-SC10` local `DeclareVar` access-class validation
+  - `If` branch non-block scope leakage
+  - `Switch` with `default` only (still warns `FIR-SW03`)
+- Validation run: `cargo test -p fir checker` → 45 tests passed.
+
+**Deferred (unchanged)**
+- Phase 3 type checks (`B*`, `U*`, `C*`, `FC*`, `T*`, `MA*`) and typed return
+  validation (`R01`) remain deferred to the planned type inference pass.
+
+---
+
 
 ## 2026-02-23 (session 4)
 
