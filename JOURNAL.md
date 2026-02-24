@@ -1,5 +1,33 @@
 # JOURNAL
 
+## 2026-02-23 (session 13)
+
+### Docs — Document internal FIR checker functions (`checker.rs`)
+
+Added focused Rustdoc / internal documentation comments across the private
+implementation of `crates/fir/src/checker.rs` to make the verifier easier to
+maintain and extend.
+
+**Coverage added**
+- `ScopeStack` internals (frame lifecycle, declaration helpers, init snapshots)
+- `VerifyCtx` internal helpers (`emit`, `error`, `warn`, phase entrypoints)
+- Phase 1 symbol-collection helpers (`check_dsp_struct`, `check_globals`,
+  `check_declarations`, `register_function_signature`)
+- Phase 2/3 helper functions:
+  - resolution (`resolve*`)
+  - type inference / compatibility / promotion
+  - typed checks (`BinOp`, `Cast`, `Select2`, `FunCall`, math, table loads/stores)
+  - traversal (`check_stmt`, `check_block`, `check_value`, loops, `if`, `switch`)
+
+No behavior changes were introduced; this is a documentation-only maintenance
+pass.
+
+**Validation**
+- `cargo fmt -p fir` ✅
+- `cargo test -p fir checker` ✅
+
+---
+
 ## 2026-02-23 (session 12)
 
 ### Fix — Eliminate fast-lane `FIR-FC01` by declaring math prototypes in FIR `globals`

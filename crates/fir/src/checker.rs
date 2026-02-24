@@ -285,16 +285,22 @@ struct ScopeStack {
 }
 
 impl ScopeStack {
+    /// Creates an empty lexical scope stack.
     fn new() -> Self {
         Self { frames: Vec::new() }
     }
 
+    /// Pushes a new lexical frame.
+    ///
+    /// `FrameKind` is currently carried by callers for readability and future
+    /// extensions; the stack stores only the frame bindings.
     fn push(&mut self, _kind: FrameKind) {
         self.frames.push(ScopeFrame {
             vars: HashMap::new(),
         });
     }
 
+    /// Pops the current lexical frame.
     fn pop(&mut self) {
         self.frames.pop();
     }
@@ -304,10 +310,14 @@ impl ScopeStack {
         self.declare_with_kind(name, typ, access, init, false);
     }
 
+    /// Declare a table-like symbol in the current frame.
+    ///
+    /// Local tables are considered initialized at declaration time.
     fn declare_table(&mut self, name: String, elem_type: FirType, access: AccessType) {
         self.declare_with_kind(name, elem_type, access, InitStatus::Yes, true);
     }
 
+    /// Shared insertion helper for variable/table declarations.
     fn declare_with_kind(
         &mut self,
         name: String,
@@ -517,6 +527,10 @@ struct VerifyCtx<'s> {
 }
 
 impl<'s> VerifyCtx<'s> {
+    /// Creates a new verifier context rooted at `module_id`.
+    ///
+    /// For full-module verification `module_id` is the FIR `Module` node; for
+    /// single-function verification it may temporarily be a `DeclareFun`.
     fn new(store: &'s FirStore, module_id: FirId) -> Self {
         Self {
             store,
@@ -530,6 +544,7 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Appends one diagnostic enriched with current function context.
     fn emit(
         &mut self,
         severity: Severity,
@@ -549,10 +564,12 @@ impl<'s> VerifyCtx<'s> {
         });
     }
 
+    /// Convenience helper for emitting an error diagnostic.
     fn error(&mut self, code: &'static str, message: impl Into<String>, node: FirId) {
         self.emit(Severity::Error, code, message, node);
     }
 
+    /// Convenience helper for emitting a warning diagnostic.
     fn warn(&mut self, code: &'static str, message: impl Into<String>, node: FirId) {
         self.emit(Severity::Warning, code, message, node);
     }
@@ -561,6 +578,10 @@ impl<'s> VerifyCtx<'s> {
     // Phase 1 — module structure and symbol collection
     // =========================================================================
 
+    /// Runs Phase 1 module checks and collects top-level symbols.
+    ///
+    /// This validates the `Module` skeleton (`dsp_struct`, `globals`,
+    /// `declarations`) and populates symbol tables consumed by phases 2/3.
     fn check_phase1(&mut self) {
         let id = self.module_id;
 
@@ -598,6 +619,7 @@ impl<'s> VerifyCtx<'s> {
 
     // ── dsp_struct ────────────────────────────────────────────────────────────
 
+    /// Validates `dsp_struct` layout and records declared struct field names.
     fn check_dsp_struct(&mut self, id: FirId) {
         let FirMatch::Block(stmts) = match_fir(self.store, id) else {
             self.error("FIR-M02", "dsp_struct is not a Block", id);
@@ -683,6 +705,10 @@ impl<'s> VerifyCtx<'s> {
 
     // ── globals ───────────────────────────────────────────────────────────────
 
+    /// Validates `globals` declarations and registers global symbols/functions.
+    ///
+    /// `globals` may contain variable/table declarations and prototype-only
+    /// `DeclareFun` externs (for example math functions used by FIR calls).
     fn check_globals(&mut self, _block_id: FirId, stmts: Vec<FirId>) {
         let mut seen: HashSet<String> = HashSet::new();
 
@@ -762,6 +788,7 @@ impl<'s> VerifyCtx<'s> {
 
     // ── declarations ──────────────────────────────────────────────────────────
 
+    /// Validates the function declarations block and registers all signatures.
     fn check_declarations(&mut self, _block_id: FirId, stmts: Vec<FirId>, _module_name: &str) {
         let mut seen: HashSet<String> = HashSet::new();
 
@@ -804,6 +831,10 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Validates one `DeclareFun` signature and stores it in `symbols.functions`.
+    ///
+    /// This helper is shared by `globals` (extern prototypes) and
+    /// `declarations` (regular function declarations).
     fn register_function_signature(
         &mut self,
         stmt_id: FirId,
@@ -897,6 +928,10 @@ impl<'s> VerifyCtx<'s> {
     // Phase 2 — per-function scope analysis
     // =========================================================================
 
+    /// Runs Phase 2/3 on every function body declared in the module.
+    ///
+    /// Only functions with a body are traversed. Prototype-only `DeclareFun`
+    /// nodes contribute symbols during phase 1 but are not walked here.
     fn check_phase2(&mut self) {
         // Bail out if Phase 1 found a broken module skeleton.
         let FirMatch::Module { declarations, .. } = match_fir(self.store, self.module_id) else {
@@ -929,6 +964,7 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Initializes per-function verification state and seeds `kFunArgs`.
     fn enter_function(
         &mut self,
         name: String,
@@ -944,6 +980,7 @@ impl<'s> VerifyCtx<'s> {
         self.scope_stack.push(FrameKind::Function);
     }
 
+    /// Clears per-function verification state after a body traversal.
     fn leave_function(&mut self) {
         self.scope_stack.pop();
         self.current_function = None;
@@ -1052,10 +1089,12 @@ impl<'s> VerifyCtx<'s> {
 
     // ── Phase 3 helpers (type inference / compatibility) ────────────────────
 
+    /// Recognizes the implicit sample-loop index accepted inside `compute`.
     fn is_implicit_compute_loop_index(&self, name: &str) -> bool {
         self.current_function.as_deref() == Some("compute") && name == "i0"
     }
 
+    /// Returns the element type for pointer/array/vector containers.
     fn is_indexable_container_type(&self, typ: &FirType) -> Option<FirType> {
         match typ {
             FirType::Ptr(inner) => Some((**inner).clone()),
@@ -1065,6 +1104,11 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Infers the semantic value type of one FIR value node.
+    ///
+    /// The checker prefers symbol table information when available, but falls
+    /// back to the explicit type encoded on the FIR node to remain robust to
+    /// partial symbol information (notably some `kStruct` accesses).
     fn infer_value_type(&self, id: FirId) -> Option<FirType> {
         match match_fir(self.store, id) {
             FirMatch::LoadVar { name, access, typ } => {
@@ -1104,10 +1148,15 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Returns `true` for integer scalar types accepted by index/condition rules.
     fn is_integer_type(&self, typ: &FirType) -> bool {
         matches!(typ, FirType::Int32 | FirType::Int64)
     }
 
+    /// Returns `true` for scalar numeric-like types used by arithmetic checks.
+    ///
+    /// `Bool` is intentionally included because some FIR arithmetic/logical
+    /// operations allow explicit bool/int mixtures.
     fn is_numeric_type(&self, typ: &FirType) -> bool {
         matches!(
             typ,
@@ -1122,6 +1171,7 @@ impl<'s> VerifyCtx<'s> {
         )
     }
 
+    /// Returns `true` for floating-point-like scalar types.
     fn is_float_like_type(&self, typ: &FirType) -> bool {
         matches!(
             typ,
@@ -1129,10 +1179,12 @@ impl<'s> VerifyCtx<'s> {
         )
     }
 
+    /// Returns `true` when a type is accepted as an integer/boolean condition.
     fn is_int_or_bool_type(&self, typ: &FirType) -> bool {
         self.is_integer_type(typ) || *typ == FirType::Bool
     }
 
+    /// Returns `true` when operands are identical or one of the allowed bool/int mixes.
     fn same_or_int_bool_mix(&self, lhs: &FirType, rhs: &FirType) -> bool {
         lhs == rhs
             || matches!(
@@ -1144,10 +1196,15 @@ impl<'s> VerifyCtx<'s> {
             )
     }
 
+    /// Compatibility relation used for function-call argument warnings (`FC03`).
+    ///
+    /// This is intentionally broader than exact type equality and allows
+    /// numeric-to-numeric calls, while binops remain stricter (`B01`).
     fn types_compatible(&self, actual: &FirType, expected: &FirType) -> bool {
         actual == expected || (self.is_numeric_type(actual) && self.is_numeric_type(expected))
     }
 
+    /// Best-effort bit width lookup for bitcast validation.
     fn bit_width(&self, typ: &FirType) -> Option<u32> {
         match typ {
             FirType::Bool => Some(1),
@@ -1161,6 +1218,10 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Computes a checker-side numeric promotion target for diagnostics.
+    ///
+    /// This does not rewrite FIR; it is used only to evaluate whether the
+    /// declared result type of operations is plausible (`B03`).
     fn promoted_numeric_type(&self, lhs: &FirType, rhs: &FirType) -> Option<FirType> {
         if !self.is_numeric_type(lhs) || !self.is_numeric_type(rhs) {
             return None;
@@ -1194,6 +1255,7 @@ impl<'s> VerifyCtx<'s> {
         Some(out.clone())
     }
 
+    /// Returns the expected result type for a binop given inferred operand types.
     fn expected_binop_result_type(
         &self,
         op: FirBinOp,
@@ -1218,6 +1280,7 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Detects literal zero values for division-by-zero diagnostics.
     fn const_is_zero(&self, id: FirId) -> bool {
         match match_fir(self.store, id) {
             FirMatch::Int32 { value, .. } => value == 0,
@@ -1229,6 +1292,9 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Shared condition-type check for `If`/`Select2`/`WhileLoop`.
+    ///
+    /// `code` and `what` parameterize the emitted diagnostic.
     fn check_int_or_bool_condition(
         &mut self,
         id: FirId,
@@ -1247,6 +1313,7 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Specialized condition-type check for `Switch` (integers only).
     fn check_switch_condition_type(&mut self, id: FirId, cond: FirId) {
         if let Some(cond_ty) = self.infer_value_type(cond) {
             if !self.is_integer_type(&cond_ty) {
@@ -1259,6 +1326,7 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Validates operand/result typing for one `BinOp` node.
     fn check_binop_types(
         &mut self,
         id: FirId,
@@ -1304,6 +1372,7 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Validates unary negation operand typing.
     fn check_neg_type(&mut self, id: FirId, value: FirId) {
         if let Some(val_ty) = self.infer_value_type(value) {
             if !self.is_numeric_type(&val_ty) {
@@ -1316,6 +1385,7 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Validates numeric cast usage and emits no-op cast warnings.
     fn check_cast_type(&mut self, id: FirId, target: &FirType, value: FirId) {
         if let Some(src_ty) = self.infer_value_type(value) {
             if &src_ty == target {
@@ -1333,6 +1403,7 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Validates bitcast width compatibility (warning-only on mismatch).
     fn check_bitcast_type(&mut self, id: FirId, target: &FirType, value: FirId) {
         if let Some(src_ty) = self.infer_value_type(value) {
             let src_w = self.bit_width(&src_ty);
@@ -1349,6 +1420,7 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Validates `Select2` condition/branch/result typing.
     fn check_select2_types(
         &mut self,
         id: FirId,
@@ -1381,6 +1453,7 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Validates function call arity/signature/result typing and math-call conventions.
     fn check_fun_call_types(&mut self, id: FirId, name: &str, args: &[FirId], declared: &FirType) {
         if let Some(sig) = self.symbols.functions.get(name).cloned() {
             if sig.params.len() != args.len() {
@@ -1429,6 +1502,10 @@ impl<'s> VerifyCtx<'s> {
         self.check_math_call(id, name, args);
     }
 
+    /// Applies math-specific naming/arity/argument diagnostics (`MA*`) to a call.
+    ///
+    /// This runs in addition to generic function-call checks and accepts both
+    /// canonical and `std::`-prefixed symbols.
     fn check_math_call(&mut self, id: FirId, name: &str, args: &[FirId]) {
         let raw = name.strip_prefix("std::").unwrap_or(name);
         let Some(op) = FirMathOp::from_symbol(name) else {
@@ -1509,6 +1586,7 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Validates `LoadTable` index typing and declaration/table consistency.
     fn check_load_table_types(
         &mut self,
         id: FirId,
@@ -1557,6 +1635,7 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Validates `StoreTable` index typing and stored element type compatibility.
     fn check_store_table_types(
         &mut self,
         id: FirId,
@@ -1606,6 +1685,7 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Warns when a `Drop` discards a non-void function return value.
     fn check_fun_call_drop_use(&mut self, id: FirId, value: FirId) {
         if let FirMatch::FunCall { name, typ, .. } = match_fir(self.store, value) {
             if typ != FirType::Void {
@@ -1620,6 +1700,9 @@ impl<'s> VerifyCtx<'s> {
 
     // ── Statement traversal ───────────────────────────────────────────────────
 
+    /// Traverses one statement node and dispatches statement-level checks.
+    ///
+    /// This method is the main recursive entry point for Phase 2/3 body walks.
     fn check_stmt(&mut self, id: FirId) {
         match match_fir(self.store, id) {
             FirMatch::Block(stmts) => self.check_block(stmts),
@@ -1726,6 +1809,7 @@ impl<'s> VerifyCtx<'s> {
 
     // ── Block ─────────────────────────────────────────────────────────────────
 
+    /// Verifies a lexical `Block` with a fresh frame and return-flow tracking.
     fn check_block(&mut self, stmts: Vec<FirId>) {
         self.scope_stack.push(FrameKind::Block);
         let mut returned = false;
@@ -1748,6 +1832,7 @@ impl<'s> VerifyCtx<'s> {
 
     // ── DeclareVar ────────────────────────────────────────────────────────────
 
+    /// Registers and validates a local `DeclareVar` inside a function body.
     fn check_declare_var(
         &mut self,
         id: FirId,
@@ -1792,6 +1877,7 @@ impl<'s> VerifyCtx<'s> {
 
     // ── LoadVar (value) ───────────────────────────────────────────────────────
 
+    /// Validates a variable load (`LoadVar` / `LoadVarAddress`) against scope state.
     fn check_load_var(&mut self, id: FirId, name: &str, access: AccessType) {
         if access == AccessType::Struct && !self.symbols.struct_field_names.contains(name) {
             self.warn(
@@ -1849,6 +1935,7 @@ impl<'s> VerifyCtx<'s> {
 
     // ── StoreVar (statement) ──────────────────────────────────────────────────
 
+    /// Validates a variable store target and updates initialization state.
     fn check_store_var(&mut self, id: FirId, name: &str, access: AccessType) {
         if access == AccessType::Struct && !self.symbols.struct_field_names.contains(name) {
             self.warn(
@@ -1901,6 +1988,7 @@ impl<'s> VerifyCtx<'s> {
 
     // ── ForLoop ───────────────────────────────────────────────────────────────
 
+    /// Validates a full `ForLoop` statement and checks its body in a loop frame.
     fn check_for_loop(
         &mut self,
         id: FirId,
@@ -1972,6 +2060,7 @@ impl<'s> VerifyCtx<'s> {
 
     // ── SimpleForLoop ─────────────────────────────────────────────────────────
 
+    /// Validates a `SimpleForLoop` and introduces its implicit loop variable.
     fn check_simple_for_loop(&mut self, id: FirId, var: &str, upper: FirId, body: FirId) {
         self.scope_stack.push(FrameKind::Loop);
 
@@ -2002,6 +2091,7 @@ impl<'s> VerifyCtx<'s> {
 
     // ── IteratorForLoop ───────────────────────────────────────────────────────
 
+    /// Validates an `IteratorForLoop` by predeclaring all iterator names as loop vars.
     fn check_iterator_for_loop(&mut self, body: FirId, iterators: &[String]) {
         self.scope_stack.push(FrameKind::Loop);
         for iter in iterators {
@@ -2018,6 +2108,10 @@ impl<'s> VerifyCtx<'s> {
 
     // ── If ────────────────────────────────────────────────────────────────────
 
+    /// Verifies both branches of an `If` and merges variable init states.
+    ///
+    /// Declarations remain branch-local; only initialization information for
+    /// pre-existing variables is merged back into the outer frame.
     fn check_if(&mut self, then_block: FirId, else_block: Option<FirId>) {
         let pre = self.scope_stack.snapshot_inits();
 
@@ -2060,6 +2154,7 @@ impl<'s> VerifyCtx<'s> {
 
     // ── Return ────────────────────────────────────────────────────────────────
 
+    /// Validates return statements against the current function return type.
     fn check_return(&mut self, id: FirId, value: Option<FirId>) {
         if let Some(val_id) = value {
             self.check_value(val_id);
@@ -2097,6 +2192,7 @@ impl<'s> VerifyCtx<'s> {
 
     // ── Switch ────────────────────────────────────────────────────────────────
 
+    /// Validates `Switch` case structure and traverses all branch bodies.
     fn check_switch(&mut self, id: FirId, cases: Vec<(i64, FirId)>, default: Option<FirId>) {
         // SW03: at least one case
         if cases.is_empty() {
@@ -2127,6 +2223,10 @@ impl<'s> VerifyCtx<'s> {
 
     // ── Value traversal ───────────────────────────────────────────────────────
 
+    /// Traverses one value expression and dispatches value-level checks.
+    ///
+    /// This recursively descends into expression children before applying local
+    /// typing/scope checks for the current value node.
     fn check_value(&mut self, id: FirId) {
         match match_fir(self.store, id) {
             FirMatch::LoadVar { name, access, .. } => {
