@@ -1,5 +1,49 @@
 # JOURNAL
 
+## 2026-02-24 (session 37)
+
+### Runtime trace harness — add `--strict-fir-types` guardrail
+
+Added a `xtask` runtime-trace mode that rejects traces when the lowered FIR has
+type-related verifier diagnostics (including warnings), so runtime validation can
+be restricted to a meaningful, well-typed FIR subset.
+
+**What changed**
+- `crates/xtask/src/main.rs`
+  - added `--strict-fir-types` to:
+    - `interp-trace-dump`
+    - `interp-trace-gen`
+    - `interp-trace-check`
+    - `interp-trace-diff-lanes`
+  - added `enforce_strict_fir_type_diagnostics(...)`
+    - re-runs `fir::checker::verify_fir_module(...)`
+    - filters type-related FIR diagnostics (`B*`, `U*`, `C*`, `FC*`, `T*`,
+      `MA*`, plus `R01`, `L03`, `SW01`)
+    - fails the trace command if any such diagnostic is present (error or
+      warning)
+  - added unit tests for:
+    - parsing `--strict-fir-types` in dump/batch options
+    - FIR type diagnostic code classification
+- `crates/xtask/README.md`
+  - documented `--strict-fir-types` for runtime trace commands
+
+**Why**
+- some DSPs currently pass FIR verification only with type warnings (e.g.
+  `FIR-B03`) and can still trigger misleading or crashing runtime behavior in
+  `interp`
+- the flag provides a simple guardrail for building a trustworthy runtime
+  validation subset while fast-lane FIR typing remains incomplete
+
+**Validation**
+- `cargo fmt -p xtask` ✅
+- `cargo test -p xtask` ✅ (14 tests)
+- `cargo run -p xtask -- interp-trace-dump --case tests/runtime_corpus/trace_31_extended_primitives_typed.dsp --scenario zeros --lane fast --num-blocks 1 --strict-fir-types` ✅
+- `cargo run -p xtask -- interp-trace-dump --case /tmp/int_plus_one.dsp --scenario ramp --lane fast --num-blocks 1 --strict-fir-types` ✅
+  - now fails early with explicit FIR type warning (`FIR-B03`) instead of
+    reaching the runtime `interp` panic
+
+---
+
 ## 2026-02-24 (session 36)
 
 ### Runtime trace validation — formalize strict-safe fixture subset

@@ -63,6 +63,11 @@ Current scope (Phase 1):
 - runs deterministic inputs (`zeros`, `impulse`, `ramp`, `sine`)
 - prints a JSON trace (stdout or `--out <path>`)
 
+Optional guardrail:
+- `--strict-fir-types` re-runs the FIR verifier and rejects traces when
+  type-related FIR diagnostics are present (including warnings such as
+  `FIR-B03`), preventing misleading runtime results on under-typed FIR.
+
 ## `interp-trace-gen` / `interp-trace-check` (Phase 2 scaffold)
 
 Phase 2 has started with a simple snapshot workflow built on top of
@@ -81,6 +86,8 @@ Current Phase 2 scaffold behavior:
 - writes snapshots under `tests/runtime_traces/rust/<case>/<scenario>.json`
 - checks by regenerating traces and comparing parsed traces with tolerance-based
   float comparison (metadata/shape must still match exactly)
+- supports `--strict-fir-types` to enforce a clean FIR typing subset during
+  generation/check runs
 
 ## `interp-trace-diff-lanes` (Phase 3 scaffold)
 
@@ -91,3 +98,5 @@ Current scaffold behavior:
 - reuses the same fixture/scenario mapping as Phase 2
 - compares traces with the same tolerance-based float comparator
 - skips cases when one lane currently panics/errors (prints a skip reason)
+- supports `--strict-fir-types` to reject lanes that only verify with
+  type-related warnings/errors

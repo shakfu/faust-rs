@@ -40,10 +40,10 @@ Usage:
   cargo run -p xtask -- golden-check-cpp
   cargo run -p xtask -- golden-gen-rust
   cargo run -p xtask -- golden-gen-cpp [-- <extra args passed to FAUST_CPP_BIN>]
-  cargo run -p xtask -- interp-trace-dump --case <tests/corpus/foo.dsp> [--scenario zeros|impulse|ramp|sine] [--lane legacy|fast]
-  cargo run -p xtask -- interp-trace-gen [--case <tests/runtime_corpus/foo.dsp>] [--lane legacy|fast]
-  cargo run -p xtask -- interp-trace-check [--case <tests/runtime_corpus/foo.dsp>] [--lane legacy|fast]
-  cargo run -p xtask -- interp-trace-diff-lanes [--case <tests/runtime_corpus/foo.dsp>]
+  cargo run -p xtask -- interp-trace-dump --case <tests/corpus/foo.dsp> [--scenario zeros|impulse|ramp|sine] [--lane legacy|fast] [--strict-fir-types]
+  cargo run -p xtask -- interp-trace-gen [--case <tests/runtime_corpus/foo.dsp>] [--lane legacy|fast] [--strict-fir-types]
+  cargo run -p xtask -- interp-trace-check [--case <tests/runtime_corpus/foo.dsp>] [--lane legacy|fast] [--strict-fir-types]
+  cargo run -p xtask -- interp-trace-diff-lanes [--case <tests/runtime_corpus/foo.dsp>] [--strict-fir-types]
   cargo run -p xtask -- parser-parity-report
   cargo run -p xtask -- corpus-status-report
   cargo run -p xtask -- cpp-backend-diff-report
@@ -321,6 +321,7 @@ struct InterpTraceDumpOptions {
     sample_rate: usize,
     block_size: usize,
     num_blocks: usize,
+    strict_fir_types: bool,
     out: Option<PathBuf>,
 }
 
@@ -333,6 +334,7 @@ impl Default for InterpTraceDumpOptions {
             sample_rate: 48_000,
             block_size: 64,
             num_blocks: 4,
+            strict_fir_types: false,
             out: None,
         }
     }
@@ -382,6 +384,7 @@ struct InterpTraceBatchOptions {
     sample_rate: usize,
     block_size: usize,
     num_blocks: usize,
+    strict_fir_types: bool,
 }
 
 impl Default for InterpTraceBatchOptions {
@@ -392,6 +395,7 @@ impl Default for InterpTraceBatchOptions {
             sample_rate: 48_000,
             block_size: 64,
             num_blocks: 4,
+            strict_fir_types: false,
         }
     }
 }
@@ -454,6 +458,9 @@ fn parse_interp_trace_dump_options(
                 };
                 options.num_blocks = value.parse::<usize>()?;
             }
+            "--strict-fir-types" => {
+                options.strict_fir_types = true;
+            }
             "--out" => {
                 let Some(path) = args.next() else {
                     return Err("missing value after --out".into());
@@ -461,7 +468,7 @@ fn parse_interp_trace_dump_options(
                 options.out = Some(PathBuf::from(path));
             }
             "--help" | "-h" => {
-                return Err("usage: cargo run -p xtask -- interp-trace-dump --case <path> [--scenario zeros|impulse|ramp|sine] [--lane legacy|fast] [--sample-rate N] [--block-size N] [--num-blocks N] [--out path]".into());
+                return Err("usage: cargo run -p xtask -- interp-trace-dump --case <path> [--scenario zeros|impulse|ramp|sine] [--lane legacy|fast] [--sample-rate N] [--block-size N] [--num-blocks N] [--strict-fir-types] [--out path]".into());
             }
             other => {
                 return Err(format!("unknown interp-trace-dump option: {other}").into());
@@ -503,6 +510,7 @@ fn interp_trace_gen(
                 sample_rate: options.sample_rate,
                 block_size: options.block_size,
                 num_blocks: options.num_blocks,
+                strict_fir_types: options.strict_fir_types,
                 out: None,
             })?;
             let path = runtime_trace_snapshot_path(&case_id, scenario);
@@ -551,6 +559,7 @@ fn interp_trace_check(
                 sample_rate: options.sample_rate,
                 block_size: options.block_size,
                 num_blocks: options.num_blocks,
+                strict_fir_types: options.strict_fir_types,
                 out: None,
             })?;
             let actual = render_runtime_trace_json(&trace);
@@ -606,6 +615,7 @@ fn interp_trace_diff_lanes(
                 sample_rate: options.sample_rate,
                 block_size: options.block_size,
                 num_blocks: options.num_blocks,
+                strict_fir_types: options.strict_fir_types,
                 out: None,
             }) {
                 Ok(trace) => trace,
@@ -625,6 +635,7 @@ fn interp_trace_diff_lanes(
                 sample_rate: options.sample_rate,
                 block_size: options.block_size,
                 num_blocks: options.num_blocks,
+                strict_fir_types: options.strict_fir_types,
                 out: None,
             }) {
                 Ok(trace) => trace,
@@ -738,8 +749,11 @@ fn parse_interp_trace_batch_options(
                 };
                 options.num_blocks = value.parse::<usize>()?;
             }
+            "--strict-fir-types" => {
+                options.strict_fir_types = true;
+            }
             "--help" | "-h" => {
-                return Err("usage: cargo run -p xtask -- interp-trace-gen [--case <path>] [--lane legacy|fast] [--sample-rate N] [--block-size N] [--num-blocks N]".into());
+                return Err("usage: cargo run -p xtask -- interp-trace-gen [--case <path>] [--lane legacy|fast] [--sample-rate N] [--block-size N] [--num-blocks N] [--strict-fir-types]".into());
             }
             other => return Err(format!("unknown interp-trace batch option: {other}").into()),
         }
@@ -803,6 +817,9 @@ fn run_interp_trace_case(
     let signals = compiler.compile_file_default_to_signals(&options.case)?;
     let fir = compiler
         .compile_file_default_to_fir_with_lane(&options.case, options.lane.to_signal_fir_lane())?;
+    if options.strict_fir_types {
+        enforce_strict_fir_type_diagnostics(&fir.store, fir.module, &options.case)?;
+    }
 
     let interp_options = codegen::backends::interp::InterpOptions {
         opt_level: 0,
@@ -856,6 +873,55 @@ fn run_interp_trace_case_catching_panic(
         Ok(Err(err)) => Err(err.to_string()),
         Err(payload) => Err(format!("panic: {}", panic_payload_to_string(payload))),
     }
+}
+
+fn enforce_strict_fir_type_diagnostics(
+    store: &fir::FirStore,
+    module: fir::FirId,
+    case: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let report = fir::checker::verify_fir_module(store, module);
+    let type_diags: Vec<&fir::checker::FirDiagnostic> = report
+        .diagnostics
+        .iter()
+        .filter(|d| is_fir_type_diagnostic_code(d.code))
+        .collect();
+    if type_diags.is_empty() {
+        return Ok(());
+    }
+
+    let mut msg = format!(
+        "strict FIR type diagnostics present for {}: {} diagnostic(s)",
+        case.display(),
+        type_diags.len()
+    );
+    for d in type_diags.iter().take(4) {
+        let sev = match d.severity {
+            fir::checker::Severity::Error => "error",
+            fir::checker::Severity::Warning => "warning",
+        };
+        let fn_ctx = d
+            .context
+            .function_name
+            .as_deref()
+            .map(|f| format!(" (fn={f})"))
+            .unwrap_or_default();
+        msg.push_str(&format!("\n- {sev} [{}] {}{}", d.code, d.message, fn_ctx));
+    }
+    if type_diags.len() > 4 {
+        msg.push_str(&format!("\n- ... {} more", type_diags.len() - 4));
+    }
+    Err(msg.into())
+}
+
+fn is_fir_type_diagnostic_code(code: &str) -> bool {
+    code.starts_with("FIR-B")
+        || code.starts_with("FIR-U")
+        || code.starts_with("FIR-C")
+        || code.starts_with("FIR-FC")
+        || code.starts_with("FIR-T")
+        || code.starts_with("FIR-MA")
+        || matches!(code, "FIR-R01" | "FIR-L03" | "FIR-SW01")
 }
 
 fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
@@ -3008,6 +3074,19 @@ mod tests {
         assert_eq!(opts.sample_rate, 48_000);
         assert_eq!(opts.block_size, 64);
         assert_eq!(opts.num_blocks, 4);
+        assert!(!opts.strict_fir_types);
+    }
+
+    #[test]
+    fn parse_interp_trace_dump_accepts_strict_fir_types_flag() {
+        let mut args = vec![
+            "--case".to_string(),
+            "tests/runtime_corpus/trace_01_passthrough.dsp".to_string(),
+            "--strict-fir-types".to_string(),
+        ]
+        .into_iter();
+        let opts = parse_interp_trace_dump_options(&mut args).unwrap();
+        assert!(opts.strict_fir_types);
     }
 
     #[test]
@@ -3019,6 +3098,28 @@ mod tests {
         assert_eq!(opts.sample_rate, 48_000);
         assert_eq!(opts.block_size, 64);
         assert_eq!(opts.num_blocks, 4);
+        assert!(!opts.strict_fir_types);
+    }
+
+    #[test]
+    fn parse_interp_trace_batch_accepts_strict_fir_types_flag() {
+        let mut args = vec!["--strict-fir-types".to_string()].into_iter();
+        let opts = parse_interp_trace_batch_options(&mut args).unwrap();
+        assert!(opts.strict_fir_types);
+    }
+
+    #[test]
+    fn fir_type_diagnostic_code_filter_matches_expected_groups() {
+        assert!(is_fir_type_diagnostic_code("FIR-B03"));
+        assert!(is_fir_type_diagnostic_code("FIR-U02"));
+        assert!(is_fir_type_diagnostic_code("FIR-C01"));
+        assert!(is_fir_type_diagnostic_code("FIR-FC03"));
+        assert!(is_fir_type_diagnostic_code("FIR-T02"));
+        assert!(is_fir_type_diagnostic_code("FIR-MA04"));
+        assert!(is_fir_type_diagnostic_code("FIR-L03"));
+        assert!(is_fir_type_diagnostic_code("FIR-SW01"));
+        assert!(!is_fir_type_diagnostic_code("FIR-M07"));
+        assert!(!is_fir_type_diagnostic_code("FIR-SC01"));
     }
 
     #[test]
