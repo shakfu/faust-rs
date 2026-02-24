@@ -1,5 +1,37 @@
 # JOURNAL
 
+## 2026-02-24 (session 38)
+
+### Runtime trace validation — document known `interp` runtime repro and exclude it from corpus
+
+Preserved the minimal `interp` runtime repro `process = int(_) + 1;` as a
+documented known-failure fixture while keeping it out of the runtime validation
+corpus used by `xtask`.
+
+**What changed**
+- `tests/runtime_corpus_known_failures/README.md`
+  - documents the current known issue:
+    - FIR warns with `FIR-B03`
+    - `xtask interp-trace-dump` (without strict type guard) can reach a runtime
+      `interp` executor panic on this DSP shape
+  - includes reproduction commands (plain and `--strict-fir-types`)
+- `tests/runtime_corpus_known_failures/int_plus_one_interp_stack_bug.dsp`
+  - minimal repro fixture: `process = int(_) + 1;`
+- `tests/runtime_corpus/README.md`
+  - clarifies known-failure runtime repros live in a separate folder and are
+    intentionally excluded from `xtask` runtime corpus discovery
+
+**Why**
+- keep a stable minimal repro for future `interp` runtime fixes
+- avoid contaminating the semantic runtime validation subset with a known
+  problematic case
+
+**Validation**
+- `cargo run -p xtask -- interp-trace-dump --case tests/runtime_corpus_known_failures/int_plus_one_interp_stack_bug.dsp --scenario ramp --lane fast --num-blocks 1 --strict-fir-types` ✅
+  - expected early rejection with `FIR-B03` (before runtime panic)
+
+---
+
 ## 2026-02-24 (session 37)
 
 ### Runtime trace harness — add `--strict-fir-types` guardrail

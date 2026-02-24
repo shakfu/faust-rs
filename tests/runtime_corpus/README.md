@@ -27,6 +27,9 @@ Notes:
   literals in the extended-primitives corpus case).
 - These files are trace-harness fixtures; the main compile/parity corpus remains
   in `tests/corpus/`.
+- Documented runtime known-failure repros live separately in
+  `tests/runtime_corpus_known_failures/` and are intentionally excluded from
+  `xtask` runtime corpus discovery.
 - Phase 2 snapshot scaffold (`interp-trace-gen` / `interp-trace-check`) only
   enables a subset for now (currently `trace_01_passthrough`,
   `trace_09_ui_slider`, `trace_31_extended_primitives_typed`) and skips the
