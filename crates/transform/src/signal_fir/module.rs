@@ -241,7 +241,15 @@ pub fn build_module(
     let compute_statements = {
         let mut all = Vec::new();
         all.extend(lower.control_statements.iter().copied());
-        all.extend(lower.sample_statements.iter().copied());
+        if !lower.sample_statements.is_empty() {
+            let sample_loop = {
+                let mut b = FirBuilder::new(&mut lower.store);
+                let upper = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+                let body = b.block(&lower.sample_statements);
+                b.simple_for_loop("i0", upper, body, false)
+            };
+            all.push(sample_loop);
+        }
         all
     };
     let compute_body = {

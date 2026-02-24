@@ -1,5 +1,36 @@
 # JOURNAL
 
+## 2026-02-23 (session 22)
+
+### Fast-lane FIR — emit explicit sample loop (`SimpleForLoop i0`) in `compute`
+
+Updated the signal fast-lane FIR lowering (`crates/transform/src/signal_fir/module.rs`)
+to generate an explicit FIR sample loop in `compute` instead of relying on an
+implicit backend-only `i0` convention.
+
+**What changed**
+- `compute` body assembly now wraps per-sample DSP statements in:
+  - `SimpleForLoop("i0", LoadVar("count", kFunArgs), sample_body, false)`
+- `control_statements` remain outside the loop (labels + input/output pointer aliases)
+- `sample_statements` + deferred `compute_updates` remain inside the loop body
+
+**Why**
+- the FIR checker was made strict in session 21 and now rejects undeclared
+  `LoadVar("i0", kLoop, ...)`
+- this makes the fast-lane FIR self-contained/canonical (no hidden backend
+  assumption for the sample index)
+
+**Behavior impact**
+- `--dump-fir-verify` on fast-lane FIR now passes again for `t1.dsp`
+- C/C++/interp backends may temporarily require follow-up adjustments because
+  some still synthesize/assume their own compute-loop structure
+
+**Validation**
+- `cargo run -p compiler -- --dump-fir-verify t1.dsp` ✅ (errors=0)
+- `cargo run -p compiler -- --dump-fir t1.dsp` ✅ (shows `SimpleForLoop { var: "i0", ... }`)
+
+---
+
 ## 2026-02-23 (session 21)
 
 ### FIR checker — remove implicit `compute/i0` exception (strict scope validation)
