@@ -1,5 +1,55 @@
 # JOURNAL
 
+## 2026-02-24 (session 31)
+
+### Runtime trace validation — consolidate Phase 2 (tolerant compare) and start Phase 3 lane diff scaffold
+
+Consolidated the Phase 2 runtime trace snapshot workflow and started a Phase 3
+lane-differential command for `legacy` vs `fast-lane` comparisons.
+
+**What changed**
+- `crates/xtask/Cargo.toml`
+  - added `serde` + `serde_json` for parsing runtime trace snapshots
+- `crates/xtask/src/main.rs`
+  - Phase 2 hardening:
+    - parses snapshot JSON into structured trace objects
+    - compares runtime traces with tolerance-based float matching
+      (`abs_tol`, `rel_tol`) while keeping metadata/shape exact
+    - added comparator helpers and tests (roundtrip JSON + tolerance behavior)
+  - Phase 3 scaffold:
+    - added `interp-trace-diff-lanes`
+    - compares runtime traces from `legacy` vs `fast-lane` on the
+      snapshot-enabled runtime-corpus subset
+    - skips fixtures/scenarios when a lane currently panics/errors, printing a
+      reason instead of aborting the whole run
+- `crates/xtask/README.md`
+  - documented tolerant compare in `interp-trace-check`
+  - documented `interp-trace-diff-lanes` scaffold
+- `tests/runtime_traces/METADATA.toml`
+  - recorded comparison mode `tolerant-float-json`
+  - recorded default tolerances (`abs_tol`, `rel_tol`)
+- `tests/runtime_traces/README.md`
+  - updated status for Phase 2 tolerant compare + Phase 3 scaffold
+- `porting/interp-runtime-trace-validation-plan-en.md`
+  - implementation status updated (Phase 2 consolidation + Phase 3 start)
+
+**Why**
+- exact JSON matching was too brittle as the long-term comparison model; Phase 2
+  needed a real numerical comparator to be meaningful
+- a lane diff command provides immediate migration signal (`legacy` vs
+  `fast-lane`) even before the full runtime corpus is snapshot-enabled
+
+**Validation**
+- `cargo fmt -p xtask` ✅
+- `cargo test -p xtask` ✅ (11 tests)
+- `cargo run -p xtask -- interp-trace-check` ✅
+  - 4 snapshot-enabled traces matched with tolerant comparison
+- `cargo run -p xtask -- interp-trace-diff-lanes` ✅ (scaffold behavior)
+  - current result: all snapshot-enabled fixtures skipped due legacy-lane
+    runtime panic in `interp` path (reported, no crash of `xtask`)
+
+---
+
 ## 2026-02-24 (session 30)
 
 ### Runtime trace validation — Phase 2 scaffold (`interp-trace-gen` / `interp-trace-check`)

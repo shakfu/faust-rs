@@ -4,9 +4,11 @@ backend = "interp"
 snapshot_ref = "rust"
 
 # Phase 2 scaffold note:
-# Comparisons are currently exact JSON using a deterministic renderer.
-# Tolerance-based numeric comparison will be introduced in a follow-up increment.
-compare_mode = "exact-json"
+# Comparisons parse the JSON trace and compare metadata/shape exactly, with
+# tolerance-based float comparison for samples.
+compare_mode = "tolerant-float-json"
+abs_tol = 1e-6
+rel_tol = 1e-5
 
 default_sample_rate = 48000
 default_block_size = 64

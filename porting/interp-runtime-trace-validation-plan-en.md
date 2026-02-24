@@ -9,13 +9,20 @@
   - deterministic input scenarios (`zeros`, `impulse`, `ramp`, `sine`)
   - JSON trace dump (stdout / `--out`)
 - `Phase 2` has started with a snapshot scaffold:
+- `Phase 2` is now partially consolidated:
   - `cargo run -p xtask -- interp-trace-gen`
   - `cargo run -p xtask -- interp-trace-check`
 - Current Phase 2 scaffold scope:
   - generates snapshots under `tests/runtime_traces/rust/`
-  - checks by exact JSON comparison (tolerant numeric compare still pending)
+  - checks by parsed trace comparison with tolerance-based float matching
+    (metadata/shape exact, samples abs/rel tolerance)
   - enables only a snapshot-ready subset of `tests/runtime_corpus/` fixtures
     while known fast-lane FIR typing gaps remain on other fixtures
+- `Phase 3` has started with a lane differential scaffold:
+  - `cargo run -p xtask -- interp-trace-diff-lanes`
+  - compares `legacy` vs `fast-lane` on the same snapshot-enabled subset
+  - currently skips cases when one lane panics/errors (notably legacy on some
+    fixtures in the current interpreter path)
 - Known limitation observed during validation:
   - some runtime-corpus fixtures are intentionally excluded from Phase 2
     snapshot generation/checking until their fast-lane FIR typing issues are

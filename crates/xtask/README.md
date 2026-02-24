@@ -22,7 +22,8 @@ cargo run -p xtask -- <command>
 | `golden-gen-cpp` | Regenerate C++ reference goldens (requires `FAUST_CPP_BIN`) |
 | `interp-trace-dump` | Phase 1 runtime trace harness: execute one DSP through `interp` and dump JSON trace |
 | `interp-trace-gen` | Phase 2 scaffold: generate runtime trace snapshots for `tests/runtime_corpus/` |
-| `interp-trace-check` | Phase 2 scaffold: compare runtime traces against generated snapshots |
+| `interp-trace-check` | Phase 2 scaffold: compare runtime traces against generated snapshots (tolerant float compare) |
+| `interp-trace-diff-lanes` | Phase 3 scaffold: compare `legacy` vs `fast-lane` runtime traces |
 | `parser-parity-report` | Write parser parity report vs C++ |
 | `corpus-status-report` | Write corpus status diff report |
 | `cpp-backend-diff-report` | Write C++ backend diff report |
@@ -78,5 +79,15 @@ Current Phase 2 scaffold behavior:
 - iterates `tests/runtime_corpus/*.dsp`
 - uses a built-in scenario mapping (documented in `tests/runtime_corpus/README.md`)
 - writes snapshots under `tests/runtime_traces/rust/<case>/<scenario>.json`
-- checks by regenerating traces and comparing JSON exactly (tolerance-based
-  numeric compare is deferred to a later Phase 2 increment)
+- checks by regenerating traces and comparing parsed traces with tolerance-based
+  float comparison (metadata/shape must still match exactly)
+
+## `interp-trace-diff-lanes` (Phase 3 scaffold)
+
+Compares runtime traces produced by the `legacy` and `fast-lane` signal->FIR
+lowerings on the snapshot-enabled runtime corpus subset.
+
+Current scaffold behavior:
+- reuses the same fixture/scenario mapping as Phase 2
+- compares traces with the same tolerance-based float comparator
+- skips cases when one lane currently panics/errors (prints a skip reason)

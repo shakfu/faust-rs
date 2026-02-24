@@ -795,6 +795,8 @@ version = "0.1.0"
 dependencies = [
  "codegen",
  "compiler",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

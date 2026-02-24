@@ -11,6 +11,7 @@
 //! - Runtime trace validation (interp backend):
 //!   - `interp-trace-dump` (Phase 1 harness prototype)
 //!   - `interp-trace-gen`, `interp-trace-check` (Phase 2 snapshot scaffold)
+//!   - `interp-trace-diff-lanes` (Phase 3 lane differential scaffold)
 //! - Differential reports:
 //!   - parser parity report
 //!   - corpus status report
@@ -21,11 +22,13 @@
 //! - Normalized output text before snapshot comparison.
 //! - Fail-fast behavior when one case diverges to preserve CI signal quality.
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
@@ -39,6 +42,7 @@ Usage:
   cargo run -p xtask -- interp-trace-dump --case <tests/corpus/foo.dsp> [--scenario zeros|impulse|ramp|sine] [--lane legacy|fast]
   cargo run -p xtask -- interp-trace-gen [--case <tests/runtime_corpus/foo.dsp>] [--lane legacy|fast]
   cargo run -p xtask -- interp-trace-check [--case <tests/runtime_corpus/foo.dsp>] [--lane legacy|fast]
+  cargo run -p xtask -- interp-trace-diff-lanes [--case <tests/runtime_corpus/foo.dsp>]
   cargo run -p xtask -- parser-parity-report
   cargo run -p xtask -- corpus-status-report
   cargo run -p xtask -- cpp-backend-diff-report
@@ -96,6 +100,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "interp-trace-dump" => interp_trace_dump(args)?,
         "interp-trace-gen" => interp_trace_gen(args)?,
         "interp-trace-check" => interp_trace_check(args)?,
+        "interp-trace-diff-lanes" => interp_trace_diff_lanes(args)?,
         "parser-parity-report" => parser_parity_report()?,
         "corpus-status-report" => corpus_status_report()?,
         "cpp-backend-diff-report" => cpp_backend_diff_report()?,
@@ -332,17 +337,41 @@ impl Default for InterpTraceDumpOptions {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct RuntimeTrace {
     dsp_path: String,
-    lane: &'static str,
-    scenario: &'static str,
+    lane: String,
+    scenario: String,
     sample_rate: usize,
     block_size: usize,
     num_blocks: usize,
     num_inputs: usize,
     num_outputs: usize,
     outputs: Vec<Vec<f32>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TraceCompareTolerances {
+    abs_tol: f32,
+    rel_tol: f32,
+}
+
+impl Default for TraceCompareTolerances {
+    fn default() -> Self {
+        Self {
+            abs_tol: 1.0e-6,
+            rel_tol: 1.0e-5,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TraceMismatch {
+    field: String,
+    channel: Option<usize>,
+    sample: Option<usize>,
+    expected: Option<f32>,
+    actual: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -489,6 +518,7 @@ fn interp_trace_check(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let options = parse_interp_trace_batch_options(&mut args)?;
+    let tol = TraceCompareTolerances::default();
     let cases = runtime_trace_cases(&options)?;
     let mut checked = 0usize;
     for case in cases {
@@ -503,7 +533,7 @@ fn interp_trace_check(
         }
         for scenario in scenarios {
             let expected_path = runtime_trace_snapshot_path(&case_id, scenario);
-            let expected = fs::read_to_string(&expected_path).map_err(|err| {
+            let expected_text = fs::read_to_string(&expected_path).map_err(|err| {
                 io::Error::new(
                     err.kind(),
                     format!(
@@ -512,6 +542,7 @@ fn interp_trace_check(
                     ),
                 )
             })?;
+            let expected = parse_runtime_trace_json(&expected_text)?;
             let trace = run_interp_trace_case(&InterpTraceDumpOptions {
                 case: case.clone(),
                 scenario,
@@ -522,11 +553,13 @@ fn interp_trace_check(
                 out: None,
             })?;
             let actual = render_runtime_trace_json(&trace);
-            if normalize(&expected) != normalize(&actual) {
+            let actual_parsed = parse_runtime_trace_json(&actual)?;
+            if let Err(mismatch) = compare_runtime_traces(&expected, &actual_parsed, tol) {
                 return Err(format!(
-                    "interp-trace-check failed for {} [{}]: snapshot differs ({})",
+                    "interp-trace-check failed for {} [{}]: mismatch {:?} ({})",
                     case.display(),
                     scenario.as_str(),
+                    mismatch,
                     expected_path.display()
                 )
                 .into());
@@ -536,6 +569,87 @@ fn interp_trace_check(
         }
     }
     println!("interp-trace-check: {checked} trace snapshot(s) matched");
+    Ok(())
+}
+
+fn interp_trace_diff_lanes(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let options = parse_interp_trace_batch_options(&mut args)?;
+    let tol = TraceCompareTolerances::default();
+    let cases = runtime_trace_cases(&options)?;
+    let mut compared = 0usize;
+    for case in cases {
+        let scenarios = trace_scenarios_for_runtime_case(&case)?;
+        if scenarios.is_empty() {
+            println!(
+                "skip {} (no snapshot-enabled scenarios yet)",
+                case.display()
+            );
+            continue;
+        }
+        for scenario in scenarios {
+            let legacy = match run_interp_trace_case_catching_panic(&InterpTraceDumpOptions {
+                case: case.clone(),
+                scenario,
+                lane: TraceLane::Legacy,
+                sample_rate: options.sample_rate,
+                block_size: options.block_size,
+                num_blocks: options.num_blocks,
+                out: None,
+            }) {
+                Ok(trace) => trace,
+                Err(reason) => {
+                    println!(
+                        "skip {} [{}] (legacy lane panic/error: {reason})",
+                        case.display(),
+                        scenario.as_str()
+                    );
+                    continue;
+                }
+            };
+            let fast = match run_interp_trace_case_catching_panic(&InterpTraceDumpOptions {
+                case: case.clone(),
+                scenario,
+                lane: TraceLane::Fast,
+                sample_rate: options.sample_rate,
+                block_size: options.block_size,
+                num_blocks: options.num_blocks,
+                out: None,
+            }) {
+                Ok(trace) => trace,
+                Err(reason) => {
+                    println!(
+                        "skip {} [{}] (fast lane panic/error: {reason})",
+                        case.display(),
+                        scenario.as_str()
+                    );
+                    continue;
+                }
+            };
+            // Compare semantics while ignoring lane labels.
+            let mut fast_norm = fast.clone();
+            let mut legacy_norm = legacy.clone();
+            fast_norm.lane = "normalized".into();
+            legacy_norm.lane = "normalized".into();
+            if let Err(mismatch) = compare_runtime_traces(&legacy_norm, &fast_norm, tol) {
+                return Err(format!(
+                    "interp-trace-diff-lanes failed for {} [{}]: mismatch {:?}",
+                    case.display(),
+                    scenario.as_str(),
+                    mismatch
+                )
+                .into());
+            }
+            println!(
+                "match {} [{}] (legacy vs fast)",
+                case.display(),
+                scenario.as_str()
+            );
+            compared += 1;
+        }
+    }
+    println!("interp-trace-diff-lanes: {compared} trace(s) matched");
     Ok(())
 }
 
@@ -675,8 +789,8 @@ fn run_interp_trace_case(
 
     Ok(RuntimeTrace {
         dsp_path: options.case.display().to_string(),
-        lane: options.lane.as_str(),
-        scenario: options.scenario.as_str(),
+        lane: options.lane.as_str().to_string(),
+        scenario: options.scenario.as_str().to_string(),
         sample_rate: options.sample_rate,
         block_size: options.block_size,
         num_blocks: options.num_blocks,
@@ -684,6 +798,26 @@ fn run_interp_trace_case(
         num_outputs: signals.process_arity.outputs,
         outputs: output_channels,
     })
+}
+
+fn run_interp_trace_case_catching_panic(
+    options: &InterpTraceDumpOptions,
+) -> Result<RuntimeTrace, String> {
+    match catch_unwind(AssertUnwindSafe(|| run_interp_trace_case(options))) {
+        Ok(Ok(trace)) => Ok(trace),
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(payload) => Err(format!("panic: {}", panic_payload_to_string(payload))),
+    }
+}
+
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
 }
 
 fn generate_trace_inputs(
@@ -787,6 +921,172 @@ fn json_escape(input: &str) -> String {
         }
     }
     out
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeTraceJson {
+    dsp: String,
+    pipeline: RuntimeTracePipelineJson,
+    runtime: RuntimeTraceRuntimeJson,
+    scenario: RuntimeTraceScenarioJson,
+    outputs: Vec<Vec<f32>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeTracePipelineJson {
+    signal_fir_lane: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeTraceRuntimeJson {
+    sample_rate: usize,
+    block_size: usize,
+    num_blocks: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeTraceScenarioJson {
+    name: String,
+    inputs: usize,
+    outputs: usize,
+}
+
+fn parse_runtime_trace_json(text: &str) -> Result<RuntimeTrace, Box<dyn std::error::Error>> {
+    let parsed: RuntimeTraceJson = serde_json::from_str(text)?;
+    Ok(RuntimeTrace {
+        dsp_path: parsed.dsp,
+        lane: parsed.pipeline.signal_fir_lane,
+        scenario: parsed.scenario.name,
+        sample_rate: parsed.runtime.sample_rate,
+        block_size: parsed.runtime.block_size,
+        num_blocks: parsed.runtime.num_blocks,
+        num_inputs: parsed.scenario.inputs,
+        num_outputs: parsed.scenario.outputs,
+        outputs: parsed.outputs,
+    })
+}
+
+fn compare_runtime_traces(
+    expected: &RuntimeTrace,
+    actual: &RuntimeTrace,
+    tol: TraceCompareTolerances,
+) -> Result<(), TraceMismatch> {
+    if expected.dsp_path != actual.dsp_path {
+        return Err(TraceMismatch {
+            field: "dsp".into(),
+            channel: None,
+            sample: None,
+            expected: None,
+            actual: None,
+        });
+    }
+    if expected.lane != actual.lane {
+        return Err(TraceMismatch {
+            field: "pipeline.signal_fir_lane".into(),
+            channel: None,
+            sample: None,
+            expected: None,
+            actual: None,
+        });
+    }
+    if expected.scenario != actual.scenario {
+        return Err(TraceMismatch {
+            field: "scenario.name".into(),
+            channel: None,
+            sample: None,
+            expected: None,
+            actual: None,
+        });
+    }
+    if expected.sample_rate != actual.sample_rate {
+        return Err(TraceMismatch {
+            field: "runtime.sample_rate".into(),
+            channel: None,
+            sample: None,
+            expected: None,
+            actual: None,
+        });
+    }
+    if expected.block_size != actual.block_size {
+        return Err(TraceMismatch {
+            field: "runtime.block_size".into(),
+            channel: None,
+            sample: None,
+            expected: None,
+            actual: None,
+        });
+    }
+    if expected.num_blocks != actual.num_blocks {
+        return Err(TraceMismatch {
+            field: "runtime.num_blocks".into(),
+            channel: None,
+            sample: None,
+            expected: None,
+            actual: None,
+        });
+    }
+    if expected.num_inputs != actual.num_inputs {
+        return Err(TraceMismatch {
+            field: "scenario.inputs".into(),
+            channel: None,
+            sample: None,
+            expected: None,
+            actual: None,
+        });
+    }
+    if expected.num_outputs != actual.num_outputs {
+        return Err(TraceMismatch {
+            field: "scenario.outputs".into(),
+            channel: None,
+            sample: None,
+            expected: None,
+            actual: None,
+        });
+    }
+    if expected.outputs.len() != actual.outputs.len() {
+        return Err(TraceMismatch {
+            field: "outputs.channel_count".into(),
+            channel: None,
+            sample: None,
+            expected: None,
+            actual: None,
+        });
+    }
+    for (ch_idx, (exp_ch, act_ch)) in expected.outputs.iter().zip(&actual.outputs).enumerate() {
+        if exp_ch.len() != act_ch.len() {
+            return Err(TraceMismatch {
+                field: "outputs.sample_count".into(),
+                channel: Some(ch_idx),
+                sample: None,
+                expected: None,
+                actual: None,
+            });
+        }
+        for (i, (&e, &a)) in exp_ch.iter().zip(act_ch.iter()).enumerate() {
+            if !trace_sample_equal(e, a, tol) {
+                return Err(TraceMismatch {
+                    field: "outputs".into(),
+                    channel: Some(ch_idx),
+                    sample: Some(i),
+                    expected: Some(e),
+                    actual: Some(a),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn trace_sample_equal(expected: f32, actual: f32, tol: TraceCompareTolerances) -> bool {
+    if expected.is_nan() || actual.is_nan() {
+        return expected.is_nan() && actual.is_nan();
+    }
+    if expected.is_infinite() || actual.is_infinite() {
+        return expected == actual;
+    }
+    let diff = (expected - actual).abs();
+    let scale = expected.abs().max(actual.abs());
+    diff <= tol.abs_tol + tol.rel_tol * scale
 }
 
 fn render_rust_snapshot(input: &Path) -> Result<String, io::Error> {
@@ -2701,8 +3001,8 @@ mod tests {
     fn render_runtime_trace_json_contains_expected_keys() {
         let trace = RuntimeTrace {
             dsp_path: "tests/corpus/example.dsp".into(),
-            lane: "fast-lane",
-            scenario: "zeros",
+            lane: "fast-lane".into(),
+            scenario: "zeros".into(),
             sample_rate: 48_000,
             block_size: 64,
             num_blocks: 1,
@@ -2715,5 +3015,62 @@ mod tests {
         assert!(json.contains("\"signal_fir_lane\": \"fast-lane\""));
         assert!(json.contains("\"scenario\""));
         assert!(json.contains("\"outputs\""));
+    }
+
+    #[test]
+    fn parse_runtime_trace_json_roundtrip() {
+        let trace = RuntimeTrace {
+            dsp_path: "tests/runtime_corpus/trace_01_passthrough.dsp".into(),
+            lane: "fast-lane".into(),
+            scenario: "impulse".into(),
+            sample_rate: 48_000,
+            block_size: 64,
+            num_blocks: 1,
+            num_inputs: 1,
+            num_outputs: 1,
+            outputs: vec![vec![1.0, 0.0]],
+        };
+        let parsed = parse_runtime_trace_json(&render_runtime_trace_json(&trace)).unwrap();
+        assert_eq!(parsed, trace);
+    }
+
+    #[test]
+    fn compare_runtime_traces_tolerates_small_float_delta() {
+        let a = RuntimeTrace {
+            dsp_path: "x".into(),
+            lane: "normalized".into(),
+            scenario: "zeros".into(),
+            sample_rate: 48_000,
+            block_size: 64,
+            num_blocks: 1,
+            num_inputs: 0,
+            num_outputs: 1,
+            outputs: vec![vec![1.0]],
+        };
+        let mut b = a.clone();
+        b.outputs[0][0] = 1.0 + 1.0e-7;
+        assert!(compare_runtime_traces(&a, &b, TraceCompareTolerances::default()).is_ok());
+    }
+
+    #[test]
+    fn compare_runtime_traces_reports_large_float_delta() {
+        let a = RuntimeTrace {
+            dsp_path: "x".into(),
+            lane: "normalized".into(),
+            scenario: "zeros".into(),
+            sample_rate: 48_000,
+            block_size: 64,
+            num_blocks: 1,
+            num_inputs: 0,
+            num_outputs: 1,
+            outputs: vec![vec![1.0]],
+        };
+        let mut b = a.clone();
+        b.outputs[0][0] = 1.1;
+        let mismatch =
+            compare_runtime_traces(&a, &b, TraceCompareTolerances::default()).unwrap_err();
+        assert_eq!(mismatch.field, "outputs");
+        assert_eq!(mismatch.channel, Some(0));
+        assert_eq!(mismatch.sample, Some(0));
     }
 }
