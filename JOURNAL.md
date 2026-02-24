@@ -1,5 +1,41 @@
 # JOURNAL
 
+## 2026-02-24 (session 34)
+
+### Runtime trace lane diff — skip legacy FIR bridge stub explicitly
+
+Improved `xtask interp-trace-diff-lanes` so it reports a clear `skip` when the
+`legacy` lane goes through the current non-semantic FIR bridge stub (label-only
+`compute`) instead of surfacing misleading semantic mismatches.
+
+**What changed**
+- `crates/xtask/Cargo.toml`
+  - added `fir` dependency so `xtask` can inspect FIR structure directly
+- `crates/xtask/src/main.rs`
+  - added `legacy_interp_bridge_is_nonsemantic_stub(...)`
+    - compiles the case to FIR with `SignalFirLane::LegacyBridge`
+    - detects `compute` bodies that are `Block([Label, Label, ...])`
+    - treats them as the known temporary non-semantic legacy bridge
+  - `interp-trace-diff-lanes` now skips these cases/scenarios with an explicit
+    message instead of returning a mismatch against `fast-lane`
+
+**Why**
+- Phase 3 lane-diff output should distinguish:
+  - true semantic mismatches
+  - infrastructure/runtime errors
+  - known non-semantic legacy bridge limitations
+- this makes the command output actionable while the legacy FIR bridge remains a
+  temporary stub
+
+**Validation**
+- `cargo fmt -p xtask` ✅
+- `cargo test -p xtask` ✅ (11 tests)
+- `cargo run -p xtask -- interp-trace-diff-lanes` ✅
+  - snapshot-enabled legacy cases now print explicit `skip ... non-semantic
+    label-only stub`
+
+---
+
 ## 2026-02-24 (session 33)
 
 ### Transform tests — adapt fast-lane FIR assertions to explicit `compute` sample loop

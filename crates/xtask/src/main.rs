@@ -22,6 +22,7 @@
 //! - Normalized output text before snapshot comparison.
 //! - Fail-fast behavior when one case diverges to preserve CI signal quality.
 
+use fir::{FirMatch, match_fir};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -588,7 +589,16 @@ fn interp_trace_diff_lanes(
             );
             continue;
         }
+        let legacy_is_stub = legacy_interp_bridge_is_nonsemantic_stub(&case)?;
         for scenario in scenarios {
+            if legacy_is_stub {
+                println!(
+                    "skip {} [{}] (legacy lane FIR bridge is non-semantic label-only stub)",
+                    case.display(),
+                    scenario.as_str()
+                );
+                continue;
+            }
             let legacy = match run_interp_trace_case_catching_panic(&InterpTraceDumpOptions {
                 case: case.clone(),
                 scenario,
@@ -651,6 +661,44 @@ fn interp_trace_diff_lanes(
     }
     println!("interp-trace-diff-lanes: {compared} trace(s) matched");
     Ok(())
+}
+
+fn legacy_interp_bridge_is_nonsemantic_stub(
+    case: &Path,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let compiler = compiler::Compiler::new().with_fir_verify_options(compiler::FirVerifyOptions {
+        enabled: false,
+        strict: false,
+    });
+    let fir_out = compiler
+        .compile_file_default_to_fir_with_lane(case, compiler::SignalFirLane::LegacyBridge)?;
+    let FirMatch::Module { declarations, .. } = match_fir(&fir_out.store, fir_out.module) else {
+        return Ok(false);
+    };
+    let FirMatch::Block(decls) = match_fir(&fir_out.store, declarations) else {
+        return Ok(false);
+    };
+    let Some(compute_id) = decls.iter().copied().find(|id| {
+        matches!(
+            match_fir(&fir_out.store, *id),
+            FirMatch::DeclareFun { ref name, .. } if name == "compute"
+        )
+    }) else {
+        return Ok(false);
+    };
+    let FirMatch::DeclareFun {
+        body: Some(body), ..
+    } = match_fir(&fir_out.store, compute_id)
+    else {
+        return Ok(false);
+    };
+    let FirMatch::Block(stmts) = match_fir(&fir_out.store, body) else {
+        return Ok(false);
+    };
+    Ok(!stmts.is_empty()
+        && stmts
+            .iter()
+            .all(|id| matches!(match_fir(&fir_out.store, *id), FirMatch::Label(_))))
 }
 
 fn parse_interp_trace_batch_options(
