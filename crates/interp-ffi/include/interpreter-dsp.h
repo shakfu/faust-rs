@@ -2,9 +2,9 @@
  * C++ wrapper for the Faust FBC interpreter — Rust port
  * (mirrors faust/architecture/faust/dsp/interpreter-dsp.h)
  *
- * This header provides C++ classes that wrap the C API defined in
- * interpreter-dsp-c.h.  Include this file from C++ projects.
- * C projects should include interpreter-dsp-c.h directly.
+ * This header provides C++ classes that wrap the interpreter C API and is
+ * self-contained (it does not include `interpreter-dsp-c.h`).
+ * C projects should include `interpreter-dsp-c.h` directly.
  ************************************************************************/
 
 #ifndef INTERPRETER_DSP_H
@@ -13,18 +13,86 @@
 #include <string>
 #include <vector>
 #include <cstring>    // strdup, strnlen
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include "faust/gui/CInterface.h"
+#include "faust/gui/CGlue.h"
 
-// Pull in the C API declarations and the UIGlue / MetaGlue types.
-#include "interpreter-dsp-c.h"
+// Self-contained C API declarations (mirrors crates/interp-ffi/include/interpreter-dsp-c.h)
+// This header intentionally does not include interpreter-dsp-c.h so it can be
+// used standalone from C++ codebases expecting a single include.
 
-// ── Compatibility shim ────────────────────────────────────────────────────────
-// The Rust-generated header uses snake_case field names (open_tab_box, etc.)
-// to match Rust conventions.  The original CInterface.h uses camelCase.
-// Both layouts are binary-identical (same order, same types), so code using
-// the Faust CInterface.h UIGlue is directly compatible.
+#ifndef FAUSTFLOAT
+#define FAUSTFLOAT float
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Opaque C API types
+#ifdef _MSC_VER
+typedef void cinterpreter_dsp_factory;
+typedef void cinterpreter_dsp;
+#else
+typedef struct InterpreterDspFactory cinterpreter_dsp_factory;
+typedef struct InterpreterDspInstance cinterpreter_dsp;
+#endif
+
+// C API functions used by this C++ wrapper
+const char* getCLibFaustVersion(void);
+
+cinterpreter_dsp_factory* getCInterpreterDSPFactoryFromSHAKey(const char* sha_key);
+cinterpreter_dsp_factory* readCInterpreterDSPFactoryFromBitcode(
+    const char* bitcode, char* error_msg);
+cinterpreter_dsp_factory* readCInterpreterDSPFactoryFromBitcodeFile(
+    const char* bit_code_path, char* error_msg);
+cinterpreter_dsp_factory* createCInterpreterDSPFactoryFromFile(
+    const char* filename, int argc, const char* argv[], char* error_msg);
+cinterpreter_dsp_factory* createCInterpreterDSPFactoryFromString(
+    const char* name_app, const char* dsp_content,
+    int argc, const char* argv[], char* error_msg);
+char* writeCInterpreterDSPFactoryToBitcode(cinterpreter_dsp_factory* factory);
+bool writeCInterpreterDSPFactoryToBitcodeFile(
+    cinterpreter_dsp_factory* factory, const char* bit_code_path);
+bool deleteCInterpreterDSPFactory(cinterpreter_dsp_factory* factory);
+void deleteAllCInterpreterDSPFactories(void);
+char** getAllCInterpreterDSPFactories(void);
+char* getCInterpreterDSPFactoryJSON(cinterpreter_dsp_factory* factory);
+const char** getCInterpreterDSPFactoryLibraryList(cinterpreter_dsp_factory* factory);
+void freeCMemory(void* ptr);
+
+cinterpreter_dsp* createCInterpreterDSPInstance(cinterpreter_dsp_factory* factory);
+void deleteCInterpreterDSPInstance(cinterpreter_dsp* dsp);
+cinterpreter_dsp* cloneCInterpreterDSPInstance(cinterpreter_dsp* dsp);
+
+int getNumInputsCInterpreterDSPInstance(cinterpreter_dsp* dsp);
+int getNumOutputsCInterpreterDSPInstance(cinterpreter_dsp* dsp);
+int getSampleRateCInterpreterDSPInstance(cinterpreter_dsp* dsp);
+void initCInterpreterDSPInstance(cinterpreter_dsp* dsp, int sample_rate);
+void instanceInitCInterpreterDSPInstance(cinterpreter_dsp* dsp, int sample_rate);
+void instanceConstantsCInterpreterDSPInstance(cinterpreter_dsp* dsp, int sample_rate);
+void instanceResetUserInterfaceCInterpreterDSPInstance(cinterpreter_dsp* dsp);
+void instanceClearCInterpreterDSPInstance(cinterpreter_dsp* dsp);
+void buildUserInterfaceCInterpreterDSPInstance(cinterpreter_dsp* dsp, UIGlue* glue);
+void metadataCInterpreterDSPInstance(cinterpreter_dsp* dsp, MetaGlue* meta);
+void computeCInterpreterDSPInstance(cinterpreter_dsp* dsp, int count,
+                                    FAUSTFLOAT** inputs, FAUSTFLOAT** outputs);
+
+#ifdef __cplusplus
+}
+#endif
+
+// ── Compatibility note ────────────────────────────────────────────────────────
+// This self-contained header reuses `faust/gui/CInterface.h` for UIGlue/MetaGlue
+// definitions to remain source-compatible with `CGlue.h`, `GTKUI`, JACK helpers,
+// etc., while still embedding the interpreter C API declarations directly.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #ifdef __cplusplus
+
+class interpreter_dsp;
 
 // ── interpreter_dsp_factory ───────────────────────────────────────────────────
 
@@ -34,9 +102,9 @@
  * Instances are obtained via the free functions below (readInterpreterDSP...).
  * The factory owns its memory; call deleteInterpreterDSPFactory() to free it.
  */
-class interpreter_dsp_factory {
+class interpreter_dsp_factory : public dsp_factory {
 public:
-    explicit interpreter_dsp_factory(::interpreter_dsp_factory* impl)
+    explicit interpreter_dsp_factory(cinterpreter_dsp_factory* impl)
         : impl_(impl) {}
 
     ~interpreter_dsp_factory() = default;
@@ -46,23 +114,50 @@ public:
     interpreter_dsp_factory& operator=(const interpreter_dsp_factory&) = delete;
 
     /// Return the underlying C pointer (for passing to C API functions).
-    ::interpreter_dsp_factory* get() const { return impl_; }
+    cinterpreter_dsp_factory* get() const { return impl_; }
+
+    /// Return factory name (not yet exposed in the C API).
+    std::string getName() override {
+        return "";
+    }
 
     /// Return factory SHA key.
-    std::string getSHAKey() const {
+    std::string getSHAKey() override {
         // SHA key is embedded in the JSON; extract it from getJSON for now.
         // (A dedicated getCInterpreterDSPFactoryName function is not in the
         // initial C API — use the JSON field.)
         return "";  // TODO: expose getSHAKey via C API
     }
 
+    /// Return expanded DSP code (not yet exposed in the C API).
+    std::string getDSPCode() override {
+        return "";
+    }
+
     /// Return factory JSON description.
-    std::string getJSON() const {
+    std::string getJSON() override {
         char* raw = getCInterpreterDSPFactoryJSON(impl_);
         if (!raw) return "{}";
         std::string result(raw);
         freeCMemory(raw);
         return result;
+    }
+
+    /// Return factory compile options (not yet exposed in the C API).
+    std::string getCompileOptions() override {
+        return "";
+    }
+
+    std::vector<std::string> getLibraryList() override {
+        return {};
+    }
+
+    std::vector<std::string> getIncludePathnames() override {
+        return {};
+    }
+
+    std::vector<std::string> getWarningMessages() override {
+        return {};
     }
 
     /// Serialize factory to a bitcode string (in-memory .fbc format).
@@ -82,10 +177,14 @@ public:
     /// Create a new DSP instance from this factory.
     ///
     /// The caller owns the returned object and is responsible for deletion.
-    class interpreter_dsp* createDSPInstance();
+    ::dsp* createDSPInstance() override;
+
+    void setMemoryManager(dsp_memory_manager* /*manager*/) override {}
+
+    dsp_memory_manager* getMemoryManager() override { return nullptr; }
 
 private:
-    ::interpreter_dsp_factory* impl_;
+    cinterpreter_dsp_factory* impl_;
 };
 
 // ── interpreter_dsp ───────────────────────────────────────────────────────────
@@ -96,9 +195,9 @@ private:
  * Instances are created via `interpreter_dsp_factory::createDSPInstance()`.
  * The caller owns the instance; call `delete` or `deleteCInterpreterDSPInstance`.
  */
-class interpreter_dsp {
+class interpreter_dsp : public dsp {
 public:
-    explicit interpreter_dsp(::interpreter_dsp* impl) : impl_(impl) {}
+    explicit interpreter_dsp(cinterpreter_dsp* impl) : impl_(impl) {}
 
     ~interpreter_dsp() {
         if (impl_) {
@@ -111,15 +210,15 @@ public:
     interpreter_dsp(const interpreter_dsp&) = delete;
     interpreter_dsp& operator=(const interpreter_dsp&) = delete;
 
-    int getNumInputs() const {
+    int getNumInputs() override {
         return getNumInputsCInterpreterDSPInstance(impl_);
     }
 
-    int getNumOutputs() const {
+    int getNumOutputs() override {
         return getNumOutputsCInterpreterDSPInstance(impl_);
     }
 
-    int getSampleRate() const {
+    int getSampleRate() override {
         return getSampleRateCInterpreterDSPInstance(impl_);
     }
 
@@ -143,17 +242,24 @@ public:
         instanceClearCInterpreterDSPInstance(impl_);
     }
 
-    interpreter_dsp* clone() const {
-        ::interpreter_dsp* c = cloneCInterpreterDSPInstance(impl_);
+    interpreter_dsp* clone() override {
+        cinterpreter_dsp* c = cloneCInterpreterDSPInstance(impl_);
         return c ? new interpreter_dsp(c) : nullptr;
     }
 
-    /**
-     * Build user interface using a `UIGlue` callback table.
-     *
-     * The UIGlue struct matches `faust/gui/CInterface.h` exactly except
-     * that field names use snake_case (same binary layout).
-     */
+    void buildUserInterface(UI* ui_interface) override {
+        UIGlue glue;
+        buildUIGlue(&glue, ui_interface, sizeof(FAUSTFLOAT) == sizeof(double));
+        buildUserInterfaceCInterpreterDSPInstance(impl_, &glue);
+    }
+
+    void metadata(Meta* meta) override {
+        MetaGlue glue;
+        buildMetaGlue(&glue, meta);
+        metadataCInterpreterDSPInstance(impl_, &glue);
+    }
+
+    // Optional direct C-glue entrypoints kept for convenience.
     void buildUserInterface(UIGlue* glue) {
         buildUserInterfaceCInterpreterDSPInstance(impl_, glue);
     }
@@ -169,20 +275,20 @@ public:
      * @param inputs  array of num_inputs non-interleaved float* buffers
      * @param outputs array of num_outputs non-interleaved float* buffers
      */
-    void compute(int count, FAUSTFLOAT** inputs, FAUSTFLOAT** outputs) {
+    void compute(int count, FAUSTFLOAT** inputs, FAUSTFLOAT** outputs) override {
         computeCInterpreterDSPInstance(impl_, count, inputs, outputs);
     }
 
-    ::interpreter_dsp* get() const { return impl_; }
+    cinterpreter_dsp* get() const { return impl_; }
 
 private:
-    ::interpreter_dsp* impl_;
+    cinterpreter_dsp* impl_;
 };
 
 // ── interpreter_dsp_factory::createDSPInstance (needs interpreter_dsp defined) ─
 
-inline interpreter_dsp* interpreter_dsp_factory::createDSPInstance() {
-    ::interpreter_dsp* c = createCInterpreterDSPInstance(impl_);
+inline ::dsp* interpreter_dsp_factory::createDSPInstance() {
+    cinterpreter_dsp* c = createCInterpreterDSPInstance(impl_);
     return c ? new interpreter_dsp(c) : nullptr;
 }
 
@@ -200,8 +306,55 @@ inline interpreter_dsp_factory* readInterpreterDSPFactoryFromBitcode(
     std::string& error_msg)
 {
     char buf[4096] = {};
-    ::interpreter_dsp_factory* raw =
+    cinterpreter_dsp_factory* raw =
         readCInterpreterDSPFactoryFromBitcode(bit_code.c_str(), buf);
+    if (!raw) {
+        error_msg = buf;
+        return nullptr;
+    }
+    return new interpreter_dsp_factory(raw);
+}
+
+/**
+ * Create a factory from a DSP source file.
+ *
+ * This forwards to the interpreter C API constructor. In the current Rust port,
+ * this entry point may return `nullptr` with an error message if the full Faust
+ * compiler pipeline is not available in the linked C API build.
+ */
+inline interpreter_dsp_factory* createInterpreterDSPFactoryFromFile(
+    const std::string& filename,
+    int argc,
+    const char* argv[],
+    std::string& error_msg)
+{
+    char buf[4096] = {};
+    cinterpreter_dsp_factory* raw =
+        createCInterpreterDSPFactoryFromFile(filename.c_str(), argc, argv, buf);
+    if (!raw) {
+        error_msg = buf;
+        return nullptr;
+    }
+    return new interpreter_dsp_factory(raw);
+}
+
+/**
+ * Create a factory from DSP source code provided as a string.
+ *
+ * This forwards to the interpreter C API constructor. In the current Rust port,
+ * this entry point may return `nullptr` with an error message if the full Faust
+ * compiler pipeline is not available in the linked C API build.
+ */
+inline interpreter_dsp_factory* createInterpreterDSPFactoryFromString(
+    const std::string& name_app,
+    const std::string& dsp_content,
+    int argc,
+    const char* argv[],
+    std::string& error_msg)
+{
+    char buf[4096] = {};
+    cinterpreter_dsp_factory* raw = createCInterpreterDSPFactoryFromString(
+        name_app.c_str(), dsp_content.c_str(), argc, argv, buf);
     if (!raw) {
         error_msg = buf;
         return nullptr;
@@ -233,7 +386,7 @@ inline interpreter_dsp_factory* readInterpreterDSPFactoryFromBitcodeFile(
     std::string& error_msg)
 {
     char buf[4096] = {};
-    ::interpreter_dsp_factory* raw =
+    cinterpreter_dsp_factory* raw =
         readCInterpreterDSPFactoryFromBitcodeFile(path.c_str(), buf);
     if (!raw) {
         error_msg = buf;
@@ -265,7 +418,7 @@ inline bool writeInterpreterDSPFactoryToBitcodeFile(
 inline interpreter_dsp_factory* getInterpreterDSPFactoryFromSHAKey(
     const std::string& sha_key)
 {
-    ::interpreter_dsp_factory* raw =
+    cinterpreter_dsp_factory* raw =
         getCInterpreterDSPFactoryFromSHAKey(sha_key.c_str());
     return raw ? new interpreter_dsp_factory(raw) : nullptr;
 }
@@ -294,12 +447,12 @@ inline void deleteAllInterpreterDSPFactories() {
  * Return all SHA keys in the cache.
  */
 inline std::vector<std::string> getAllInterpreterDSPFactories() {
-    const char** raw = reinterpret_cast<const char**>(getAllCInterpreterDSPFactories());
+    char** raw = getAllCInterpreterDSPFactories();
     std::vector<std::string> result;
     if (!raw) return result;
     for (int i = 0; raw[i]; ++i) {
         result.push_back(raw[i]);
-        freeCMemory(const_cast<void*>(reinterpret_cast<const void*>(raw[i])));
+        freeCMemory(raw[i]);
     }
     freeCMemory(raw);
     return result;

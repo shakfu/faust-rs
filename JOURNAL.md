@@ -1,5 +1,45 @@
 # JOURNAL
 
+## 2026-02-24 (session 47)
+
+### `interp-ffi` C++ header: self-contained `interpreter-dsp.h` compatibility fixes
+
+Reworked `crates/interp-ffi/include/interpreter-dsp.h` so it remains
+self-contained (no `interpreter-dsp-c.h` include) while staying source-compatible
+with existing C++ Faust code that includes `faust/dsp/interpreter-dsp.h`.
+
+**What changed**
+- Inlined the required interpreter C API declarations directly in the header
+  (opaque C handle types + function prototypes).
+- Reused `faust/gui/CInterface.h` + `faust/gui/CGlue.h` instead of redefining
+  `UIGlue` / `MetaGlue` locally (fixes typedef redefinitions and field-name
+  mismatches with `CGlue.h`).
+- Made the C++ wrappers derive from Faust base classes:
+  - `interpreter_dsp_factory : public dsp_factory`
+  - `interpreter_dsp : public dsp`
+  to preserve compatibility with code storing factories as `dsp_factory*`.
+- Added/adjusted wrapper API compatibility:
+  - `createInterpreterDSPFactoryFromFile(...)`
+  - `createInterpreterDSPFactoryFromString(...)`
+  - `createDSPInstance()` override now returns `::dsp*` (avoids incomplete-type
+    covariant return error in Clang).
+- Fixed `getAllInterpreterDSPFactories()` array handling (`char**` vs invalid
+  cast to `const char**`).
+
+**Context**
+- These changes were driven by external C++ build errors when compiling
+  `dynamic-machine-jack-gtk.cpp` against the installed `interpreter-dsp.h`.
+- The goal here is header/source compatibility; some factory constructors may
+  still return `nullptr` at runtime if the linked C API implementation does not
+  provide the full compiler-backed creation path yet.
+
+**Validation**
+- Header compatibility was iterated against user-reported Clang diagnostics
+  (`UIGlue`/`MetaGlue` conflicts, factory pointer inheritance, covariant return).
+- No local C++ build was run in this repo for this header-only change.
+
+---
+
 ## 2026-02-24 (session 46)
 
 ### `xtask`: persist C++ `.fbc` runtime traces (`interp-trace-gen-cppfbc`)
