@@ -1,0 +1,19 @@
+schema_version = 1
+
+# Runtime trace fixture corpus metadata.
+#
+# `strict_safe_cases` defines the current subset recommended for semantic
+# validation runs where we require FIR to be cleanly typed enough for the Rust
+# `interp` backend to act as a meaningful oracle (before comparing with Faust
+# C++).
+#
+# Rationale:
+# - exclude cases currently blocked by known fast-lane FIR typing warnings/errors
+# - exclude cases that hit known `interp` runtime robustness gaps
+# - keep a small deterministic subset for incremental validation
+
+[strict_safe_cases]
+trace_01_passthrough = ["impulse", "ramp"]
+trace_09_ui_slider = ["impulse"]
+trace_31_extended_primitives_typed = ["zeros"]
+

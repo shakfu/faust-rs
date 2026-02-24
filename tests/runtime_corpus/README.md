@@ -6,6 +6,10 @@ runtime trace snapshot checks.
 Goal: favor cases that produce well-typed FIR in the fast-lane and execute
 reliably through the `interp` backend.
 
+The source of truth for the current strict validation subset is:
+
+- `tests/runtime_corpus/METADATA.toml` (`[strict_safe_cases]`)
+
 ## Files and suggested scenarios
 
 - `trace_01_passthrough.dsp`: `impulse`, `ramp`
@@ -27,3 +31,5 @@ Notes:
   enables a subset for now (currently `trace_01_passthrough`,
   `trace_09_ui_slider`, `trace_31_extended_primitives_typed`) and skips the
   others until known fast-lane FIR typing issues are fixed.
+- The same subset is currently the recommended starting point for runtime
+  semantic validation before introducing a Faust C++ differential oracle.

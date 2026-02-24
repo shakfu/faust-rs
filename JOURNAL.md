@@ -1,5 +1,33 @@
 # JOURNAL
 
+## 2026-02-24 (session 36)
+
+### Runtime trace validation — formalize strict-safe fixture subset
+
+Formalized the current runtime trace fixture subset recommended for semantic
+validation runs (before/while building the Faust C++ differential workflow).
+
+**What changed**
+- `tests/runtime_corpus/METADATA.toml`
+  - added `strict_safe_cases` (current well-behaved subset):
+    - `trace_01_passthrough`
+    - `trace_09_ui_slider`
+    - `trace_31_extended_primitives_typed`
+- `tests/runtime_corpus/README.md`
+  - points to `METADATA.toml` as source of truth for the strict-safe subset
+  - clarifies this subset is the recommended starting point for runtime semantic
+    validation while fast-lane FIR typing gaps remain
+
+**Why**
+- make the “known good” runtime validation subset explicit and machine-readable
+- avoid accidental use of fixtures currently blocked by fast-lane FIR typing
+  issues or known `interp` runtime robustness gaps
+
+**Validation**
+- documentation/metadata only (no tests run)
+
+---
+
 ## 2026-02-24 (session 35)
 
 ### Runtime trace validation — plan differential checks against Faust C++ reference
