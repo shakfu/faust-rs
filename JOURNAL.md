@@ -1,5 +1,54 @@
 # JOURNAL
 
+## 2026-02-23 (session 17)
+
+### FIR FunctionInliner — Milestone 3 parameter materialization + `kFunArgs` substitution
+
+Implemented the third step of the Rust FIR `FunctionInliner` plan in
+`crates/fir/src/inliner.rs`: preparation of a callee body for inlining by
+materializing actual arguments and substituting formal parameter accesses.
+
+**What was added**
+- Public API:
+  - `prepare_callee_body_for_inlining(...)`
+- New public result / error / metadata types:
+  - `FirPreparedInlineBody`
+  - `FirMaterializedArgBinding`
+  - `FirInlinePrepareError`
+
+**Behavior (Milestone 3 scope)**
+- Accepts a callee `DeclareFun` + actual argument FIR values
+- Validates:
+  - callee shape (`DeclareFun`)
+  - body presence (`body: Some(...)`)
+  - formal/actual arity match
+- Materializes **all** actual arguments (conservative v1 policy) into fresh
+  `DeclareVar(kStack, init=...)` temporaries in left-to-right order
+- Hygienically clones the callee body and rewrites substituted `kFunArgs`
+  accesses to the generated `kStack` temporaries
+  - applies to loads/stores/table ops/tee/shift for `kFunArgs`
+
+This still does **not** rewrite caller `FunCall` nodes yet; it prepares the
+callee-side payload needed for the upcoming callsite inliner stage.
+
+**Rustdoc**
+- Updated module docs in `crates/fir/src/inliner.rs` to reflect Milestones 1–3
+- Documented the new public stage-3 API and result/error types
+
+**Tests**
+Added unit tests in `crates/fir/src/inliner.rs` for:
+- successful preparation with arg materialization + `kFunArgs` substitution
+- rejection of prototype-only callees
+- rejection of arity mismatch
+- checker-validated embedding of prepared body in a FIR module (no new FIR errors)
+
+**Validation**
+- `cargo fmt -p fir` ✅
+- `cargo test -p fir inliner` ✅
+- `cargo test -p fir checker` ✅
+
+---
+
 ## 2026-02-23 (session 16)
 
 ### FIR FunctionInliner — Milestone 2 hygienic clone + local rename engine

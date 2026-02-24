@@ -24,7 +24,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::{AccessType, FirBuilder, FirId, FirMatch, FirStore, NamedType, SliderRange, match_fir};
+use crate::{
+    AccessType, FirBuilder, FirId, FirMatch, FirStore, FirType, NamedType, SliderRange, match_fir,
+};
 
 const RESERVED_DSP_API_FUNCTIONS: &[&str] = &[
     "classInit",
@@ -749,6 +751,82 @@ impl std::fmt::Display for FirHygienicCloneError {
 
 impl std::error::Error for FirHygienicCloneError {}
 
+/// One formal-parameter materialization generated during inline preparation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FirMaterializedArgBinding {
+    /// Formal parameter name from the callee signature.
+    pub param_name: String,
+    /// Fresh local stack variable storing the actual argument value.
+    pub temp_name: String,
+    /// Parameter type copied from the callee signature.
+    pub typ: FirType,
+    /// `DeclareVar(kStack, init=actual_arg)` statement node in destination FIR.
+    pub declare_stmt: FirId,
+}
+
+/// Result of Milestone-3 callee-body preparation (args materialized + params substituted).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FirPreparedInlineBody {
+    /// Materialization statements to emit before the cloned callee body.
+    ///
+    /// Evaluation order is left-to-right in the original actual-argument order.
+    pub arg_materialization_stmts: Vec<FirId>,
+    /// Hygienically cloned callee body with `kFunArgs` references substituted to stack temps.
+    pub body: FirId,
+    /// Per-parameter temp bindings created during materialization.
+    pub param_bindings: Vec<FirMaterializedArgBinding>,
+    /// Local renames performed while cloning the callee body.
+    pub local_renames: Vec<FirLocalRename>,
+}
+
+/// Errors returned by Milestone-3 callee inline preparation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FirInlinePrepareError {
+    /// `callee_decl` is not a `DeclareFun`.
+    CalleeNotFunction(FirId),
+    /// Callee is a prototype (`body=None`) and cannot be prepared for inlining.
+    CalleeHasNoBody { name: String, node: FirId },
+    /// Number of actual arguments does not match formal parameters.
+    ArgCountMismatch {
+        name: String,
+        expected: usize,
+        got: usize,
+    },
+    /// Error while cloning/materializing source FIR.
+    Clone(FirHygienicCloneError),
+}
+
+impl std::fmt::Display for FirInlinePrepareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CalleeNotFunction(id) => write!(
+                f,
+                "inline preparation expects a DeclareFun callee, got node {}",
+                id.as_u32()
+            ),
+            Self::CalleeHasNoBody { name, node } => write!(
+                f,
+                "callee '{name}' has no body and cannot be prepared for inlining (node={})",
+                node.as_u32()
+            ),
+            Self::ArgCountMismatch {
+                name,
+                expected,
+                got,
+            } => write!(f, "callee '{name}' expects {expected} args, got {got}"),
+            Self::Clone(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for FirInlinePrepareError {}
+
+impl From<FirHygienicCloneError> for FirInlinePrepareError {
+    fn from(value: FirHygienicCloneError) -> Self {
+        Self::Clone(value)
+    }
+}
+
 /// Hygienically clones a FIR subtree into `dst_store` using a fresh local-state.
 ///
 /// This convenience wrapper is suitable for one-off clones. For repeated clones
@@ -799,11 +877,107 @@ pub fn clone_fir_hygienic_with_state(
     })
 }
 
+/// Prepares a callee body for future inlining by materializing actual arguments and
+/// substituting `kFunArgs` references to fresh stack temporaries.
+///
+/// This function implements the Milestone-3 "parameter materialization +
+/// substitution" stage without rewriting a caller `FunCall` yet.
+///
+/// Current policy is intentionally conservative:
+/// - **all** actual arguments are materialized into fresh `kStack` temporaries
+///   (left-to-right evaluation order),
+/// - callee body is then hygienically cloned with every matching `kFunArgs`
+///   access rewritten to the corresponding temp as `kStack`.
+///
+/// The returned [`FirPreparedInlineBody`] can later be spliced into a caller
+/// block by the callsite inliner implementation (Milestone 4+).
+///
+/// # Errors
+/// Returns [`FirInlinePrepareError`] when `callee_decl` is not a function,
+/// the callee has no body, the argument count mismatches, or cloning fails.
+pub fn prepare_callee_body_for_inlining(
+    src_store: &FirStore,
+    callee_decl: FirId,
+    actual_args: &[FirId],
+    dst_store: &mut FirStore,
+    state: &mut FirHygienicCloneState,
+) -> Result<FirPreparedInlineBody, FirInlinePrepareError> {
+    let FirMatch::DeclareFun {
+        name, args, body, ..
+    } = match_fir(src_store, callee_decl)
+    else {
+        return Err(FirInlinePrepareError::CalleeNotFunction(callee_decl));
+    };
+    let Some(body_id) = body else {
+        return Err(FirInlinePrepareError::CalleeHasNoBody {
+            name,
+            node: callee_decl,
+        });
+    };
+    if args.len() != actual_args.len() {
+        return Err(FirInlinePrepareError::ArgCountMismatch {
+            name,
+            expected: args.len(),
+            got: actual_args.len(),
+        });
+    }
+
+    let mut arg_materialization_stmts = Vec::with_capacity(actual_args.len());
+    let mut param_bindings = Vec::with_capacity(actual_args.len());
+    let mut subst = HashMap::<String, String>::new();
+
+    for (param, actual_arg) in args.iter().zip(actual_args.iter().copied()) {
+        let mut arg_cloner = HygienicCloner::new(src_store, dst_store, state);
+        arg_cloner.push_scope();
+        let actual_cloned = arg_cloner.clone_node(actual_arg)?;
+        arg_cloner.pop_scope();
+
+        let temp_name = state_fresh_local_name(state, &format!("arg_{}", param.name));
+        let decl = {
+            let mut b = FirBuilder::new(dst_store);
+            b.declare_var(
+                temp_name.clone(),
+                param.typ.clone(),
+                AccessType::Stack,
+                Some(actual_cloned),
+            )
+        };
+        subst.insert(param.name.clone(), temp_name.clone());
+        arg_materialization_stmts.push(decl);
+        param_bindings.push(FirMaterializedArgBinding {
+            param_name: param.name.clone(),
+            temp_name,
+            typ: param.typ.clone(),
+            declare_stmt: decl,
+        });
+    }
+
+    let mut cloner = HygienicCloner::new(src_store, dst_store, state);
+    cloner.fun_arg_subst = subst;
+    cloner.push_scope();
+    let body = cloner.clone_node(body_id)?;
+    cloner.pop_scope();
+
+    Ok(FirPreparedInlineBody {
+        arg_materialization_stmts,
+        body,
+        param_bindings,
+        local_renames: cloner.local_renames,
+    })
+}
+
+fn state_fresh_local_name(state: &mut FirHygienicCloneState, original: &str) -> String {
+    let id = state.next_local_id;
+    state.next_local_id += 1;
+    format!("{}{}_{}", state.options.local_prefix, id, original)
+}
+
 struct HygienicCloner<'a, 'b> {
     src: &'a FirStore,
     dst: &'b mut FirStore,
     state: &'b mut FirHygienicCloneState,
     scopes: Vec<HashMap<String, String>>,
+    fun_arg_subst: HashMap<String, String>,
     local_renames: Vec<FirLocalRename>,
 }
 
@@ -814,6 +988,7 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
             dst,
             state,
             scopes: Vec::new(),
+            fun_arg_subst: HashMap::new(),
             local_renames: Vec::new(),
         }
     }
@@ -847,6 +1022,13 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
     }
 
     fn remap_name_by_access(&self, name: &str, access: AccessType) -> String {
+        if access == AccessType::FunArgs {
+            return self
+                .fun_arg_subst
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| name.to_string());
+        }
         if matches!(access, AccessType::Stack | AccessType::Loop) {
             self.lookup_local_rename(name)
                 .map(ToOwned::to_owned)
@@ -857,9 +1039,15 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
     }
 
     fn fresh_local_name(&mut self, original: &str) -> String {
-        let id = self.state.next_local_id;
-        self.state.next_local_id += 1;
-        format!("{}{}_{}", self.state.options.local_prefix, id, original)
+        state_fresh_local_name(self.state, original)
+    }
+
+    fn remap_access(&self, access: AccessType, name: &str) -> AccessType {
+        if access == AccessType::FunArgs && self.fun_arg_subst.contains_key(name) {
+            AccessType::Stack
+        } else {
+            access
+        }
     }
 
     fn bind_local_decl(
@@ -953,9 +1141,10 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
                 b.fixed_point_array(&values)
             }
             FirMatch::LoadVar { name, access, typ } => {
+                let out_access = self.remap_access(access, &name);
                 let remap = self.remap_name_by_access(&name, access);
                 let mut b = FirBuilder::new(self.dst);
-                b.load_var(remap, access, typ)
+                b.load_var(remap, out_access, typ)
             }
             FirMatch::LoadTable {
                 name,
@@ -963,15 +1152,17 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
                 index,
                 typ,
             } => {
+                let out_access = self.remap_access(access, &name);
                 let remap = self.remap_name_by_access(&name, access);
                 let index = self.clone_node(index)?;
                 let mut b = FirBuilder::new(self.dst);
-                b.load_table(remap, access, index, typ)
+                b.load_table(remap, out_access, index, typ)
             }
             FirMatch::LoadVarAddress { name, access, typ } => {
+                let out_access = self.remap_access(access, &name);
                 let remap = self.remap_name_by_access(&name, access);
                 let mut b = FirBuilder::new(self.dst);
-                b.load_var_address(remap, access, typ)
+                b.load_var_address(remap, out_access, typ)
             }
             FirMatch::TeeVar {
                 name,
@@ -979,10 +1170,11 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
                 value,
                 typ,
             } => {
+                let out_access = self.remap_access(access, &name);
                 let remap = self.remap_name_by_access(&name, access);
                 let value = self.clone_node(value)?;
                 let mut b = FirBuilder::new(self.dst);
-                b.tee_var(remap, access, value, typ)
+                b.tee_var(remap, out_access, value, typ)
             }
             FirMatch::BinOp { op, lhs, rhs, typ } => {
                 let lhs = self.clone_node(lhs)?;
@@ -1119,10 +1311,11 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
                 access,
                 value,
             } => {
+                let out_access = self.remap_access(access, &name);
                 let remap = self.remap_name_by_access(&name, access);
                 let value = self.clone_node(value)?;
                 let mut b = FirBuilder::new(self.dst);
-                b.store_var(remap, access, value)
+                b.store_var(remap, out_access, value)
             }
             FirMatch::StoreTable {
                 name,
@@ -1130,20 +1323,22 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
                 index,
                 value,
             } => {
+                let out_access = self.remap_access(access, &name);
                 let remap = self.remap_name_by_access(&name, access);
                 let index = self.clone_node(index)?;
                 let value = self.clone_node(value)?;
                 let mut b = FirBuilder::new(self.dst);
-                b.store_table(remap, access, index, value)
+                b.store_table(remap, out_access, index, value)
             }
             FirMatch::ShiftArrayVar {
                 name,
                 access,
                 delay,
             } => {
+                let out_access = self.remap_access(access, &name);
                 let remap = self.remap_name_by_access(&name, access);
                 let mut b = FirBuilder::new(self.dst);
-                b.shift_array_var(remap, access, delay)
+                b.shift_array_var(remap, out_access, delay)
             }
             FirMatch::Drop(v) => {
                 let v = self.clone_node(v)?;
@@ -1767,5 +1962,124 @@ mod tests {
             b.module("mydsp", dsp_struct, globals, decls)
         };
         assert_no_checker_errors(&dst, module);
+    }
+
+    #[test]
+    fn prepare_callee_body_materializes_args_and_substitutes_funargs() {
+        let mut src = FirStore::new();
+        let (callee_decl, actual0, actual1) = {
+            let mut b = FirBuilder::new(&mut src);
+            let ff = FirType::FaustFloat;
+            let x = NamedType {
+                name: "x".to_string(),
+                typ: ff.clone(),
+            };
+            let y = NamedType {
+                name: "y".to_string(),
+                typ: ff.clone(),
+            };
+            let body = {
+                let lx = b.load_var("x", AccessType::FunArgs, ff.clone());
+                let ly = b.load_var("y", AccessType::FunArgs, ff.clone());
+                let sum = b.binop(crate::FirBinOp::Add, lx, ly, ff.clone());
+                let ret = b.ret(Some(sum));
+                b.block(&[ret])
+            };
+            let callee = fun(&mut b, "add2", &[x, y], ff.clone(), Some(body), true);
+
+            let c0 = b.float64(0.5);
+            let c1 = b.float64(1.5);
+            let c2 = b.float64(2.5);
+            let arg0 = b.binop(crate::FirBinOp::Add, c0, c1, ff.clone());
+            (callee, arg0, c2)
+        };
+
+        let mut dst = FirStore::new();
+        let mut state = FirHygienicCloneState::default();
+        let prepared = prepare_callee_body_for_inlining(
+            &src,
+            callee_decl,
+            &[actual0, actual1],
+            &mut dst,
+            &mut state,
+        )
+        .expect("preparation should succeed");
+
+        assert_eq!(prepared.arg_materialization_stmts.len(), 2);
+        assert_eq!(prepared.param_bindings.len(), 2);
+        for binding in &prepared.param_bindings {
+            assert!(binding.temp_name.starts_with("__fir_inl"));
+        }
+
+        let dump = dump_fir(&dst, prepared.body);
+        assert!(
+            !dump.contains("access: FunArgs"),
+            "prepared body should no longer reference substituted kFunArgs"
+        );
+        for binding in &prepared.param_bindings {
+            assert!(dump.contains(&binding.temp_name));
+        }
+
+        let module = {
+            let mut b = FirBuilder::new(&mut dst);
+            let mut body_stmts = prepared.arg_materialization_stmts.clone();
+            body_stmts.push(prepared.body);
+            let wrapper_body = b.block(&body_stmts);
+            let wrapper = fun(
+                &mut b,
+                "wrapper",
+                &[],
+                FirType::FaustFloat,
+                Some(wrapper_body),
+                false,
+            );
+            let dsp_struct = b.block(&[]);
+            let globals = b.block(&[]);
+            let decls = b.block(&[wrapper]);
+            b.module("mydsp", dsp_struct, globals, decls)
+        };
+        assert_no_checker_errors(&dst, module);
+    }
+
+    #[test]
+    fn prepare_callee_body_rejects_bad_arity_and_prototype() {
+        let mut src = FirStore::new();
+        let (proto, body_fun, arg) = {
+            let mut b = FirBuilder::new(&mut src);
+            let ff = FirType::FaustFloat;
+            let x = NamedType {
+                name: "x".to_string(),
+                typ: ff.clone(),
+            };
+            let proto = fun(
+                &mut b,
+                "proto",
+                std::slice::from_ref(&x),
+                ff.clone(),
+                None,
+                false,
+            );
+            let body = {
+                let lx = b.load_var("x", AccessType::FunArgs, ff.clone());
+                let ret = b.ret(Some(lx));
+                b.block(&[ret])
+            };
+            let body_fun = fun(&mut b, "id", &[x], ff.clone(), Some(body), false);
+            let arg = b.float64(0.0);
+            (proto, body_fun, arg)
+        };
+
+        let mut dst = FirStore::new();
+        let mut state = FirHygienicCloneState::default();
+        let err = prepare_callee_body_for_inlining(&src, proto, &[arg], &mut dst, &mut state)
+            .expect_err("prototype should be rejected");
+        assert!(matches!(err, FirInlinePrepareError::CalleeHasNoBody { .. }));
+
+        let err = prepare_callee_body_for_inlining(&src, body_fun, &[], &mut dst, &mut state)
+            .expect_err("arity mismatch should be rejected");
+        assert!(matches!(
+            err,
+            FirInlinePrepareError::ArgCountMismatch { .. }
+        ));
     }
 }
