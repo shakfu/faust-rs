@@ -1954,6 +1954,7 @@ impl<R: FbcReal> FbcExecutor<R> {
 mod tests {
     use super::*;
     use crate::backends::interp::bytecode::{FbcBlock, FbcInstruction};
+    use std::time::{Duration, Instant};
 
     /// Helper: build a block from a list of instructions, appending Return.
     fn make_block(instrs: Vec<FbcInstruction<f32>>) -> FbcBlock<f32> {
@@ -2568,5 +2569,184 @@ mod tests {
         // v1=7 (top), v2=3, max(7,3)=7, min(7,3)=3
         assert_eq!(exec.int_heap[0], 7);
         assert_eq!(exec.int_heap[1], 3);
+    }
+
+    fn run_bench_case<F>(name: &str, iters: usize, mut f: F) -> Duration
+    where
+        F: FnMut(),
+    {
+        let start = Instant::now();
+        for _ in 0..iters {
+            f();
+            std::hint::black_box(());
+        }
+        let elapsed = start.elapsed();
+        let ns_per_iter = elapsed.as_nanos() as f64 / iters as f64;
+        eprintln!("{name}: {elapsed:?} total ({ns_per_iter:.1} ns/iter)");
+        elapsed
+    }
+
+    #[test]
+    #[ignore = "manual benchmark: run in release with -- --ignored --nocapture"]
+    fn benchmark_fast_vs_try_executor_paths() {
+        // Case 1: tiny no-IO arithmetic/control block (dispatch-heavy)
+        let mut arena1 = FbcBlockArena::<f32>::new();
+        let block1 = make_block(vec![
+            FbcInstruction::with_values(FbcOpcode::RealValue, 0, 1.0),
+            FbcInstruction::with_values(FbcOpcode::RealValue, 0, 2.0),
+            FbcInstruction::new(FbcOpcode::AddReal),
+            FbcInstruction::with_values(FbcOpcode::RealValue, 0, 3.0),
+            FbcInstruction::new(FbcOpcode::MultReal),
+            FbcInstruction::with_values_and_offsets(FbcOpcode::StoreReal, 0, 0.0, 0, -1),
+        ]);
+        let bid1 = arena1.alloc(block1);
+        let mut exec1_fast = FbcExecutor::new(0, 4);
+        let mut exec1_try = FbcExecutor::new(0, 4);
+
+        // Case 2: IO roundtrip for one sample (exercise IO + stacks)
+        let mut arena2 = FbcBlockArena::<f32>::new();
+        let block2 = make_block(vec![
+            FbcInstruction::with_values(FbcOpcode::Int32Value, 0, 0.0),
+            FbcInstruction::with_values_and_offsets(FbcOpcode::LoadInput, 0, 0.0, 0, -1),
+            FbcInstruction::with_values(FbcOpcode::Int32Value, 0, 0.0),
+            FbcInstruction::with_values_and_offsets(FbcOpcode::StoreOutput, 0, 0.0, 0, -1),
+        ]);
+        let bid2 = arena2.alloc(block2);
+        let input_data = [1.0_f32];
+        let inputs: &[&[f32]] = &[&input_data];
+        let mut out_fast = [0.0_f32; 1];
+        let mut out_try = [0.0_f32; 1];
+        let mut exec2_fast = FbcExecutor::new(0, 0);
+        let mut exec2_try = FbcExecutor::new(0, 0);
+
+        // Case 3: simple integer loop (control-flow heavy)
+        let mut arena3 = FbcBlockArena::<f32>::new();
+        let init_block = make_block(vec![
+            FbcInstruction::with_values(FbcOpcode::Int32Value, 0, 0.0),
+            FbcInstruction::with_values_and_offsets(FbcOpcode::StoreInt, 0, 0.0, 0, -1),
+        ]);
+        let init_id = arena3.alloc(init_block);
+        let body_placeholder = FbcBlock::new();
+        let body_id = arena3.alloc(body_placeholder);
+        let mut body = FbcBlock::new();
+        body.push(FbcInstruction::with_values_and_offsets(
+            FbcOpcode::LoadInt,
+            0,
+            0.0,
+            1,
+            -1,
+        ));
+        body.push(FbcInstruction::with_values(FbcOpcode::Int32Value, 1, 0.0));
+        body.push(FbcInstruction::new(FbcOpcode::AddInt));
+        body.push(FbcInstruction::with_values_and_offsets(
+            FbcOpcode::StoreInt,
+            0,
+            0.0,
+            1,
+            -1,
+        ));
+        body.push(FbcInstruction::with_values_and_offsets(
+            FbcOpcode::LoadInt,
+            0,
+            0.0,
+            0,
+            -1,
+        ));
+        body.push(FbcInstruction::with_values(FbcOpcode::Int32Value, 1, 0.0));
+        body.push(FbcInstruction::new(FbcOpcode::AddInt));
+        body.push(FbcInstruction::with_values_and_offsets(
+            FbcOpcode::StoreInt,
+            0,
+            0.0,
+            0,
+            -1,
+        ));
+        body.push(FbcInstruction::with_values(FbcOpcode::Int32Value, 8, 0.0));
+        body.push(FbcInstruction::with_values_and_offsets(
+            FbcOpcode::LoadInt,
+            0,
+            0.0,
+            0,
+            -1,
+        ));
+        body.push(FbcInstruction::new(FbcOpcode::LTInt));
+        body.push(FbcInstruction::full(
+            FbcOpcode::CondBranch,
+            "",
+            0,
+            0.0,
+            -1,
+            -1,
+            Some(body_id),
+            None,
+        ));
+        body.push(FbcInstruction::new(FbcOpcode::Return));
+        *arena3.get_mut(body_id) = body;
+        let main_block = make_block(vec![FbcInstruction::full(
+            FbcOpcode::Loop,
+            "",
+            0,
+            0.0,
+            -1,
+            -1,
+            Some(init_id),
+            Some(body_id),
+        )]);
+        let bid3 = arena3.alloc(main_block);
+        let mut exec3_fast = FbcExecutor::new(4, 0);
+        let mut exec3_try = FbcExecutor::new(4, 0);
+
+        // Warmup
+        for _ in 0..1000 {
+            exec1_fast.execute_block(&arena1, bid1);
+            exec1_try.try_execute_block(&arena1, bid1).unwrap();
+            exec2_fast.execute_block_io(&arena2, bid2, inputs, &mut [&mut out_fast]);
+            exec2_try
+                .try_execute_block_io(&arena2, bid2, inputs, &mut [&mut out_try])
+                .unwrap();
+            exec3_fast.execute_block(&arena3, bid3);
+            exec3_try.try_execute_block(&arena3, bid3).unwrap();
+        }
+
+        let iters_small = 200_000;
+        let iters_loop = 60_000;
+
+        eprintln!("\n== bench: arithmetic block ==");
+        let fast1 = run_bench_case("fast execute_block", iters_small, || {
+            exec1_fast.execute_block(&arena1, bid1);
+        });
+        let try1 = run_bench_case("try  execute_block", iters_small, || {
+            exec1_try.try_execute_block(&arena1, bid1).unwrap();
+        });
+        eprintln!(
+            "ratio try/fast = {:.3}x\n",
+            try1.as_secs_f64() / fast1.as_secs_f64()
+        );
+
+        eprintln!("== bench: single-sample IO block ==");
+        let fast2 = run_bench_case("fast execute_block_io", iters_small, || {
+            exec2_fast.execute_block_io(&arena2, bid2, inputs, &mut [&mut out_fast]);
+        });
+        let try2 = run_bench_case("try  execute_block_io", iters_small, || {
+            exec2_try
+                .try_execute_block_io(&arena2, bid2, inputs, &mut [&mut out_try])
+                .unwrap();
+        });
+        eprintln!(
+            "ratio try/fast = {:.3}x\n",
+            try2.as_secs_f64() / fast2.as_secs_f64()
+        );
+
+        eprintln!("== bench: loop/control-flow block ==");
+        let fast3 = run_bench_case("fast execute_block(loop)", iters_loop, || {
+            exec3_fast.execute_block(&arena3, bid3);
+        });
+        let try3 = run_bench_case("try  execute_block(loop)", iters_loop, || {
+            exec3_try.try_execute_block(&arena3, bid3).unwrap();
+        });
+        eprintln!(
+            "ratio try/fast = {:.3}x\n",
+            try3.as_secs_f64() / fast3.as_secs_f64()
+        );
     }
 }

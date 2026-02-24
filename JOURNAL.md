@@ -1,5 +1,45 @@
 # JOURNAL
 
+## 2026-02-24 (session 44)
+
+### Interp executor dual-mode — fast vs try microbench baseline
+
+Added a reproducible microbenchmark (manual `#[ignore]` test) in
+`crates/codegen/src/backends/interp/executor.rs` to compare the separated fast
+path (`execute_*`) and checked path (`try_execute_*`) after the dual-mode
+hardening work.
+
+**What changed**
+- `crates/codegen/src/backends/interp/executor.rs`
+  - added `benchmark_fast_vs_try_executor_paths` (`#[test] #[ignore]`)
+  - measures `execute_*` vs `try_execute_*` on 3 small representative workloads:
+    - arithmetic/dispatch-heavy block
+    - single-sample I/O block (`LoadInput`/`StoreOutput`)
+    - loop/control-flow-heavy block (`Loop` + `CondBranch`)
+  - prints total duration, ns/iter, and `try/fast` ratio for each case
+
+**How to run**
+- `cargo test -p codegen benchmark_fast_vs_try_executor_paths --release -- --ignored --nocapture`
+
+**Observed baseline (2 local release runs, same machine)**
+- Results are noisy at this scale (sub-microsecond per iteration), but they
+  confirm no obvious large regression from the checked path in the current
+  implementation:
+  - arithmetic block: `try/fast` around `0.97x .. 1.06x`
+  - single-sample I/O block: `try/fast` around `0.87x .. 1.10x`
+  - loop/control block: `try/fast` around `0.80x .. 0.98x`
+- Interpretation:
+  - measurement noise and CPU scheduling effects dominate these tiny workloads
+  - no evidence of a large (>2x) checked-path penalty in this microbench
+  - a more stable benchmark harness (batching, pinning, Criterion/perf tools)
+    remains a follow-up if we need precise perf claims
+
+**Validation**
+- `cargo fmt -p codegen` ✅
+- `cargo test -p codegen benchmark_fast_vs_try_executor_paths --release -- --ignored --nocapture` ✅ (run twice)
+
+---
+
 ## 2026-02-24 (session 43)
 
 ### Interp checked executor hardening — explicit block/pc errors and heap OOB classification
