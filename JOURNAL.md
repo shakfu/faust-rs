@@ -1,5 +1,37 @@
 # JOURNAL
 
+## 2026-02-24 (session 40)
+
+### Interp executor hardening — document dual-mode (fast + checked) rollout plan
+
+Added a dedicated plan for generalizing the interpreter executor runtime
+hardening work into a dual-mode architecture:
+
+- fast `execute_*` path (performance-oriented)
+- checked `try_execute_*` path (structured runtime errors, validation-oriented)
+
+**What changed**
+- `porting/interp-executor-dual-mode-hardening-plan-en.md`
+  - defines the dual execution model and compatibility policy
+  - documents a structured runtime error model (`FbcExecError` categories and
+    required context)
+  - proposes a hot-path-aware rollout strategy (Phase A/B/C by opcode family)
+  - compares implementation options (shared checked helpers vs generic core)
+  - outlines performance expectations and benchmark plan
+  - specifies test strategy and acceptance criteria
+
+**Why**
+- the recent `StoreOutput` underflow fix establishes the pattern, but a broader
+  plan is needed to harden all panic-prone opcodes without regressing
+  interpreter performance
+- this clarifies how `xtask`/validation can use checked mode while preserving a
+  fast execution path
+
+**Validation**
+- documentation only (no tests run)
+
+---
+
 ## 2026-02-24 (session 39)
 
 ### Interp runtime — replace `StoreOutput` stack panic with structured execution error
