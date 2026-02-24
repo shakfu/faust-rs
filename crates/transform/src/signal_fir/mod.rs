@@ -122,6 +122,19 @@ mod tests {
         body
     }
 
+    fn find_compute_loop_body(store: &fir::FirStore, declarations: fir::FirId) -> fir::FirId {
+        let compute_body = find_decl_fun_body(store, declarations, "compute");
+        let FirMatch::Block(stmts) = match_fir(store, compute_body) else {
+            panic!("compute block expected");
+        };
+        stmts.iter()
+            .find_map(|id| match match_fir(store, *id) {
+                FirMatch::SimpleForLoop { body, .. } | FirMatch::ForLoop { body, .. } => Some(body),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("compute should contain an explicit sample loop"))
+    }
+
     #[test]
     fn non_empty_signal_list_returns_fir_module_root() {
         let mut arena = TreeArena::new();
@@ -163,24 +176,9 @@ mod tests {
                 "section function `{required_name}` must exist in fast-lane module"
             );
         }
-        let compute = decls
-            .iter()
-            .copied()
-            .find(|id| {
-                matches!(
-                    match_fir(&out.store, *id),
-                    FirMatch::DeclareFun { ref name, .. } if name == "compute"
-                )
-            })
-            .expect("compute declaration expected");
-        let FirMatch::DeclareFun {
-            body: Some(body), ..
-        } = match_fir(&out.store, compute)
-        else {
-            panic!("declare fun with body expected");
-        };
-        let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
-            panic!("compute block expected");
+        let loop_body = find_compute_loop_body(&out.store, declarations);
+        let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+            panic!("compute loop body block expected");
         };
         let stored_value = stmts
             .iter()
@@ -333,11 +331,11 @@ mod tests {
         let FirMatch::Module { declarations, .. } = match_fir(&out.store, out.module) else {
             panic!("module root expected");
         };
-        let compute_body = find_decl_fun_body(&out.store, declarations, "compute");
+        let compute_loop_body = find_compute_loop_body(&out.store, declarations);
         let ui_body = find_decl_fun_body(&out.store, declarations, "buildUserInterface");
 
-        let FirMatch::Block(compute_stmts) = match_fir(&out.store, compute_body) else {
-            panic!("compute body block expected");
+        let FirMatch::Block(compute_stmts) = match_fir(&out.store, compute_loop_body) else {
+            panic!("compute loop body block expected");
         };
         assert!(
             compute_stmts.iter().any(|id| matches!(
@@ -427,27 +425,9 @@ mod tests {
                 "globals should declare extern math prototype '{expected}'"
             );
         }
-        let FirMatch::Block(decls) = match_fir(&out.store, declarations) else {
-            panic!("module declarations block expected");
-        };
-        let compute = decls
-            .iter()
-            .copied()
-            .find(|id| {
-                matches!(
-                    match_fir(&out.store, *id),
-                    FirMatch::DeclareFun { ref name, .. } if name == "compute"
-                )
-            })
-            .expect("compute declaration expected");
-        let FirMatch::DeclareFun {
-            body: Some(body), ..
-        } = match_fir(&out.store, compute)
-        else {
-            panic!("declare fun with body expected");
-        };
-        let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
-            panic!("compute block expected");
+        let loop_body = find_compute_loop_body(&out.store, declarations);
+        let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+            panic!("compute loop body block expected");
         };
         let store_value = stmts
             .iter()
@@ -527,27 +507,9 @@ mod tests {
                 .any(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareTable { .. })),
             "Step 2G should allocate waveform table in DSP struct"
         );
-        let FirMatch::Block(decls) = match_fir(&out.store, declarations) else {
-            panic!("declarations block expected");
-        };
-        let compute = decls
-            .iter()
-            .copied()
-            .find(|id| {
-                matches!(
-                    match_fir(&out.store, *id),
-                    FirMatch::DeclareFun { ref name, .. } if name == "compute"
-                )
-            })
-            .expect("compute declaration expected");
-        let FirMatch::DeclareFun {
-            body: Some(body), ..
-        } = match_fir(&out.store, compute)
-        else {
-            panic!("declare fun with body expected");
-        };
-        let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
-            panic!("compute block expected");
+        let loop_body = find_compute_loop_body(&out.store, declarations);
+        let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+            panic!("compute loop body block expected");
         };
         let stored_value = stmts
             .iter()
@@ -615,27 +577,9 @@ mod tests {
         let FirMatch::Module { declarations, .. } = match_fir(&out.store, out.module) else {
             panic!("module expected");
         };
-        let FirMatch::Block(decls) = match_fir(&out.store, declarations) else {
-            panic!("declarations block expected");
-        };
-        let compute = decls
-            .iter()
-            .copied()
-            .find(|id| {
-                matches!(
-                    match_fir(&out.store, *id),
-                    FirMatch::DeclareFun { ref name, .. } if name == "compute"
-                )
-            })
-            .expect("compute declaration expected");
-        let FirMatch::DeclareFun {
-            body: Some(body), ..
-        } = match_fir(&out.store, compute)
-        else {
-            panic!("declare fun with body expected");
-        };
-        let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
-            panic!("compute block expected");
+        let loop_body = find_compute_loop_body(&out.store, declarations);
+        let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+            panic!("compute loop body block expected");
         };
         assert!(
             stmts
@@ -678,27 +622,9 @@ mod tests {
                 .any(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareVar { .. })),
             "rec/proj should allocate explicit state slot"
         );
-        let FirMatch::Block(decls) = match_fir(&out.store, declarations) else {
-            panic!("declarations block expected");
-        };
-        let compute = decls
-            .iter()
-            .copied()
-            .find(|id| {
-                matches!(
-                    match_fir(&out.store, *id),
-                    FirMatch::DeclareFun { ref name, .. } if name == "compute"
-                )
-            })
-            .expect("compute declaration expected");
-        let FirMatch::DeclareFun {
-            body: Some(body), ..
-        } = match_fir(&out.store, compute)
-        else {
-            panic!("declare fun with body expected");
-        };
-        let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
-            panic!("compute block expected");
+        let loop_body = find_compute_loop_body(&out.store, declarations);
+        let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+            panic!("compute loop body block expected");
         };
         assert!(
             stmts
@@ -738,27 +664,9 @@ mod tests {
             "delay state should create struct declaration"
         );
 
-        let FirMatch::Block(decls) = match_fir(&out.store, declarations) else {
-            panic!("declarations block expected");
-        };
-        let compute = decls
-            .iter()
-            .copied()
-            .find(|id| {
-                matches!(
-                    match_fir(&out.store, *id),
-                    FirMatch::DeclareFun { ref name, .. } if name == "compute"
-                )
-            })
-            .expect("compute declaration expected");
-        let FirMatch::DeclareFun {
-            body: Some(body), ..
-        } = match_fir(&out.store, compute)
-        else {
-            panic!("declare fun with body expected");
-        };
-        let FirMatch::Block(stmts) = match_fir(&out.store, body) else {
-            panic!("compute block expected");
+        let loop_body = find_compute_loop_body(&out.store, declarations);
+        let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+            panic!("compute loop body block expected");
         };
         assert!(
             stmts

@@ -1,5 +1,34 @@
 # JOURNAL
 
+## 2026-02-24 (session 33)
+
+### Transform tests — adapt fast-lane FIR assertions to explicit `compute` sample loop
+
+Fixed `cargo test` failures in `crates/transform` caused by the recent fast-lane
+FIR contract change where `compute` now contains an explicit sample loop
+(`SimpleForLoop`) instead of placing sample-level stores/updates directly at the
+top level of the `compute` body.
+
+**What changed**
+- `crates/transform/src/signal_fir/mod.rs`
+  - added test helper `find_compute_loop_body(...)`
+    - locates `compute`
+    - extracts the explicit sample loop (`SimpleForLoop` or `ForLoop`)
+    - returns the loop body for assertions
+  - updated `signal_fir` tests that previously searched top-level `compute`
+    statements for `StoreTable` / state updates / bargraph writes so they now
+    inspect the loop body instead
+
+**Why**
+- keeps tests aligned with the canonical FIR shape (`compute` preamble + explicit
+  sample loop)
+- avoids duplicating fragile traversal logic across multiple tests
+
+**Validation**
+- `cargo test -p transform --lib` ✅ (14 tests)
+
+---
+
 ## 2026-02-24 (session 32)
 
 ### Interp legacy lane — reserve `sampleRate` / `count` slots in factory generation (Option A)
