@@ -1,5 +1,35 @@
 # JOURNAL
 
+## 2026-02-23 (session 21)
+
+### FIR checker — remove implicit `compute/i0` exception (strict scope validation)
+
+Hardened `crates/fir/src/checker.rs` so the FIR verifier no longer accepts the
+implicit loop index `i0` inside `compute` without an explicit FIR loop
+declaration.
+
+**What changed**
+- Removed the fast-lane-specific implicit `i0` acceptance in:
+  - `resolve(...)`
+  - `resolve_any_by_name(...)`
+- Removed the helper that recognized the implicit `compute` loop index
+- Added a regression test:
+  - `sc01_implicit_compute_i0_is_rejected`
+
+**Behavior impact**
+- FIR with `LoadVar("i0", kLoop, ...)` in `compute` now correctly fails with
+  `FIR-SC01` unless `i0` is declared by an explicit loop construct.
+- `faust-rs -lang interp t1.dsp` now fails earlier at FIR verification (strict
+  checker) instead of failing later in the interpreter backend code generator.
+
+**Validation**
+- `cargo fmt -p fir` ✅
+- `cargo test -p fir checker` ✅
+- `cargo run -p compiler -- --dump-fir-verify t1.dsp` ✅ (expected `FIR-SC01`)
+- `cargo run -p compiler -- -lang interp t1.dsp` ✅ (expected FIR verify failure)
+
+---
+
 ## 2026-02-23 (session 20)
 
 ### FIR FunctionInliner plan document — align with actual `inliner.rs` status (Phases A–E)

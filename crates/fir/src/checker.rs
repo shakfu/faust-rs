@@ -1030,14 +1030,6 @@ impl<'s> VerifyCtx<'s> {
                 })
             }
             AccessType::Stack | AccessType::Loop => {
-                if access == AccessType::Loop && self.is_implicit_compute_loop_index(name) {
-                    return Some(VarEntry {
-                        access: AccessType::Loop,
-                        typ: FirType::Int32,
-                        init: InitStatus::Yes,
-                        is_table: false,
-                    });
-                }
                 let (_, e) = self.scope_stack.lookup(name)?;
                 Some(e.clone())
             }
@@ -1049,14 +1041,6 @@ impl<'s> VerifyCtx<'s> {
     /// Used to distinguish "undeclared" from "declared in another access space"
     /// so SC02/SC05 can be emitted instead of SC01/SC04.
     fn resolve_any_by_name(&self, name: &str) -> Option<VarEntry> {
-        if self.is_implicit_compute_loop_index(name) {
-            return Some(VarEntry {
-                access: AccessType::Loop,
-                typ: FirType::Int32,
-                init: InitStatus::Yes,
-                is_table: false,
-            });
-        }
         if let Some((_, entry)) = self.scope_stack.lookup(name) {
             return Some(entry.clone());
         }
@@ -1088,11 +1072,6 @@ impl<'s> VerifyCtx<'s> {
     }
 
     // ── Phase 3 helpers (type inference / compatibility) ────────────────────
-
-    /// Recognizes the implicit sample-loop index accepted inside `compute`.
-    fn is_implicit_compute_loop_index(&self, name: &str) -> bool {
-        self.current_function.as_deref() == Some("compute") && name == "i0"
-    }
 
     /// Returns the element type for pointer/array/vector containers.
     fn is_indexable_container_type(&self, typ: &FirType) -> Option<FirType> {
@@ -2958,6 +2937,42 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|d| matches!(d.code, "FIR-SC01" | "FIR-SC02")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn sc01_implicit_compute_i0_is_rejected() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let idx = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let drop = b.drop_(idx);
+        let body = b.block(&[drop]);
+
+        let params = vec![
+            FirType::Ptr(Box::new(FirType::Obj)),
+            FirType::Int32,
+            FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        ];
+        let args: Vec<NamedType> = params
+            .iter()
+            .enumerate()
+            .map(|(i, t)| NamedType {
+                name: format!("p{i}"),
+                typ: t.clone(),
+            })
+            .collect();
+        let typ = FirType::Fun {
+            args: params,
+            ret: Box::new(FirType::Void),
+        };
+        let compute = b.declare_fun("compute", typ, &args, Some(body), false);
+        let module_id = module_with_fun(&mut store, compute);
+        let report = verify_fir_module(&store, module_id);
+        assert!(report.has_errors(), "{report:?}");
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-SC01"),
             "{report:?}"
         );
     }
