@@ -1,5 +1,59 @@
 # JOURNAL
 
+## 2026-02-24 (session 30)
+
+### Runtime trace validation — Phase 2 scaffold (`interp-trace-gen` / `interp-trace-check`)
+
+Started Phase 2 of the `interp` runtime trace validation work by adding a
+snapshot generation/check workflow in `xtask` on top of the Phase 1
+`interp-trace-dump` command.
+
+**What changed**
+- `crates/xtask/src/main.rs`
+  - added `interp-trace-gen`
+  - added `interp-trace-check`
+  - added runtime-corpus discovery (`tests/runtime_corpus/*.dsp`)
+  - added snapshot path/layout helpers (`tests/runtime_traces/rust/<case>/<scenario>.json`)
+  - added Phase 2 batch option parsing (`--case`, `--lane`, runtime params)
+  - added built-in fixture -> scenario mapping for the runtime corpus
+  - Phase 2 scaffold currently compares exact JSON output (deterministic
+    renderer) rather than tolerant numeric diffs
+  - skips fixtures that are present in `tests/runtime_corpus/` but not yet
+    snapshot-enabled due to known fast-lane FIR typing issues
+  - added unit tests for batch option parsing / snapshot path / scenario mapping
+- `crates/xtask/README.md`
+  - documented `interp-trace-gen` / `interp-trace-check`
+  - documented current exact-JSON comparison limitation
+- `tests/runtime_traces/`
+  - added `README.md`
+  - added `METADATA.toml` (Phase 2 scaffold metadata)
+  - generated initial Rust snapshots:
+    - `trace_01_passthrough` (`impulse`, `ramp`)
+    - `trace_09_ui_slider` (`impulse`)
+    - `trace_31_extended_primitives_typed` (`zeros`)
+- `tests/runtime_corpus/README.md`
+  - documented which fixtures are currently snapshot-enabled vs skipped
+- `porting/interp-runtime-trace-validation-plan-en.md`
+  - updated implementation status: Phase 2 scaffold started
+
+**Why**
+- moves the runtime-trace work from a single-DSP probe command to an actual
+  repeatable snapshot workflow
+- provides a concrete CI-ready shape for later refinement (numeric tolerances,
+  lane diff, expanded fixture enablement)
+- preserves momentum while the fast-lane FIR typing issues are still being
+  corrected on part of the runtime fixture set
+
+**Validation**
+- `cargo fmt -p xtask` ✅
+- `cargo test -p xtask` ✅ (8 tests)
+- `cargo run -p xtask -- interp-trace-gen` ✅
+  - generated 4 snapshots, skipped non-enabled fixtures
+- `cargo run -p xtask -- interp-trace-check` ✅
+  - all 4 generated snapshots matched
+
+---
+
 ## 2026-02-24 (session 29)
 
 ### Runtime trace corpus (Phase 1) — add curated `interp`-safe DSP fixtures

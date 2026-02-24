@@ -10,6 +10,7 @@
 //!   - `golden-gen-rust`, `golden-gen-cpp`
 //! - Runtime trace validation (interp backend):
 //!   - `interp-trace-dump` (Phase 1 harness prototype)
+//!   - `interp-trace-gen`, `interp-trace-check` (Phase 2 snapshot scaffold)
 //! - Differential reports:
 //!   - parser parity report
 //!   - corpus status report
@@ -36,6 +37,8 @@ Usage:
   cargo run -p xtask -- golden-gen-rust
   cargo run -p xtask -- golden-gen-cpp [-- <extra args passed to FAUST_CPP_BIN>]
   cargo run -p xtask -- interp-trace-dump --case <tests/corpus/foo.dsp> [--scenario zeros|impulse|ramp|sine] [--lane legacy|fast]
+  cargo run -p xtask -- interp-trace-gen [--case <tests/runtime_corpus/foo.dsp>] [--lane legacy|fast]
+  cargo run -p xtask -- interp-trace-check [--case <tests/runtime_corpus/foo.dsp>] [--lane legacy|fast]
   cargo run -p xtask -- parser-parity-report
   cargo run -p xtask -- corpus-status-report
   cargo run -p xtask -- cpp-backend-diff-report
@@ -91,6 +94,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             golden_gen_cpp(&passthrough)?;
         }
         "interp-trace-dump" => interp_trace_dump(args)?,
+        "interp-trace-gen" => interp_trace_gen(args)?,
+        "interp-trace-check" => interp_trace_check(args)?,
         "parser-parity-report" => parser_parity_report()?,
         "corpus-status-report" => corpus_status_report()?,
         "cpp-backend-diff-report" => cpp_backend_diff_report()?,
@@ -131,6 +136,28 @@ fn corpus_files() -> Result<Vec<PathBuf>, io::Error> {
 
     files.sort();
     Ok(files)
+}
+
+fn runtime_corpus_files() -> Result<Vec<PathBuf>, io::Error> {
+    let root = workspace_root();
+    let dir = root.join("tests/runtime_corpus");
+    let mut files = Vec::new();
+    if !dir.exists() {
+        return Ok(files);
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "dsp") {
+            files.push(path);
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn runtime_trace_snapshot_root() -> PathBuf {
+    workspace_root().join("tests/runtime_traces").join("rust")
 }
 
 fn case_name(path: &Path) -> Result<String, io::Error> {
@@ -318,6 +345,27 @@ struct RuntimeTrace {
     outputs: Vec<Vec<f32>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InterpTraceBatchOptions {
+    case: Option<PathBuf>,
+    lane: TraceLane,
+    sample_rate: usize,
+    block_size: usize,
+    num_blocks: usize,
+}
+
+impl Default for InterpTraceBatchOptions {
+    fn default() -> Self {
+        Self {
+            case: None,
+            lane: TraceLane::Fast,
+            sample_rate: 48_000,
+            block_size: 64,
+            num_blocks: 4,
+        }
+    }
+}
+
 fn interp_trace_dump(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -398,6 +446,188 @@ fn parse_interp_trace_dump_options(
         return Err("block-size and num-blocks must be > 0".into());
     }
     Ok(options)
+}
+
+fn interp_trace_gen(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let options = parse_interp_trace_batch_options(&mut args)?;
+    let cases = runtime_trace_cases(&options)?;
+    let mut generated = 0usize;
+    for case in cases {
+        let case_id = case_name(&case)?;
+        fs::create_dir_all(runtime_trace_snapshot_root().join(&case_id))?;
+        let scenarios = trace_scenarios_for_runtime_case(&case)?;
+        if scenarios.is_empty() {
+            println!(
+                "skip {} (no snapshot-enabled scenarios yet)",
+                case.display()
+            );
+            continue;
+        }
+        for scenario in scenarios {
+            let trace = run_interp_trace_case(&InterpTraceDumpOptions {
+                case: case.clone(),
+                scenario,
+                lane: options.lane,
+                sample_rate: options.sample_rate,
+                block_size: options.block_size,
+                num_blocks: options.num_blocks,
+                out: None,
+            })?;
+            let path = runtime_trace_snapshot_path(&case_id, scenario);
+            fs::write(&path, render_runtime_trace_json(&trace))?;
+            println!("generated {}", path.display());
+            generated += 1;
+        }
+    }
+    println!("interp-trace-gen: generated {generated} trace snapshot(s)");
+    Ok(())
+}
+
+fn interp_trace_check(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let options = parse_interp_trace_batch_options(&mut args)?;
+    let cases = runtime_trace_cases(&options)?;
+    let mut checked = 0usize;
+    for case in cases {
+        let case_id = case_name(&case)?;
+        let scenarios = trace_scenarios_for_runtime_case(&case)?;
+        if scenarios.is_empty() {
+            println!(
+                "skip {} (no snapshot-enabled scenarios yet)",
+                case.display()
+            );
+            continue;
+        }
+        for scenario in scenarios {
+            let expected_path = runtime_trace_snapshot_path(&case_id, scenario);
+            let expected = fs::read_to_string(&expected_path).map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    format!(
+                        "missing runtime trace snapshot {}: {err} (run interp-trace-gen)",
+                        expected_path.display()
+                    ),
+                )
+            })?;
+            let trace = run_interp_trace_case(&InterpTraceDumpOptions {
+                case: case.clone(),
+                scenario,
+                lane: options.lane,
+                sample_rate: options.sample_rate,
+                block_size: options.block_size,
+                num_blocks: options.num_blocks,
+                out: None,
+            })?;
+            let actual = render_runtime_trace_json(&trace);
+            if normalize(&expected) != normalize(&actual) {
+                return Err(format!(
+                    "interp-trace-check failed for {} [{}]: snapshot differs ({})",
+                    case.display(),
+                    scenario.as_str(),
+                    expected_path.display()
+                )
+                .into());
+            }
+            println!("ok {} [{}]", case.display(), scenario.as_str());
+            checked += 1;
+        }
+    }
+    println!("interp-trace-check: {checked} trace snapshot(s) matched");
+    Ok(())
+}
+
+fn parse_interp_trace_batch_options(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<InterpTraceBatchOptions, Box<dyn std::error::Error>> {
+    let mut options = InterpTraceBatchOptions::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--case" => {
+                let Some(path) = args.next() else {
+                    return Err("missing value after --case".into());
+                };
+                options.case = Some(PathBuf::from(path));
+            }
+            "--lane" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value after --lane".into());
+                };
+                options.lane = TraceLane::parse(&value)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            }
+            "--sample-rate" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value after --sample-rate".into());
+                };
+                options.sample_rate = value.parse::<usize>()?;
+            }
+            "--block-size" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value after --block-size".into());
+                };
+                options.block_size = value.parse::<usize>()?;
+            }
+            "--num-blocks" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value after --num-blocks".into());
+                };
+                options.num_blocks = value.parse::<usize>()?;
+            }
+            "--help" | "-h" => {
+                return Err("usage: cargo run -p xtask -- interp-trace-gen [--case <path>] [--lane legacy|fast] [--sample-rate N] [--block-size N] [--num-blocks N]".into());
+            }
+            other => return Err(format!("unknown interp-trace batch option: {other}").into()),
+        }
+    }
+    if options.block_size == 0 || options.num_blocks == 0 {
+        return Err("block-size and num-blocks must be > 0".into());
+    }
+    Ok(options)
+}
+
+fn runtime_trace_cases(
+    options: &InterpTraceBatchOptions,
+) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    if let Some(case) = &options.case {
+        return Ok(vec![case.clone()]);
+    }
+    let cases = runtime_corpus_files()?;
+    if cases.is_empty() {
+        return Err("no runtime trace corpus files found in tests/runtime_corpus".into());
+    }
+    Ok(cases)
+}
+
+fn trace_scenarios_for_runtime_case(
+    case: &Path,
+) -> Result<Vec<TraceScenario>, Box<dyn std::error::Error>> {
+    let name = case_name(case)?;
+    let scenarios = match name.as_str() {
+        "trace_01_passthrough" => vec![TraceScenario::Impulse, TraceScenario::Ramp],
+        "trace_02_gain_bias_typed" => vec![],
+        "trace_03_stereo_mix" => vec![],
+        "trace_07_nonlinear_clip" => vec![],
+        "trace_09_ui_slider" => vec![TraceScenario::Impulse],
+        "trace_22_parallel_mix" => vec![],
+        "trace_31_extended_primitives_typed" => vec![TraceScenario::Zeros],
+        "trace_38_sine_phasor" => vec![],
+        other => {
+            return Err(format!(
+                "no runtime trace scenario mapping defined for {other} (update xtask)"
+            )
+            .into());
+        }
+    };
+    Ok(scenarios)
+}
+
+fn runtime_trace_snapshot_path(case_id: &str, scenario: TraceScenario) -> PathBuf {
+    runtime_trace_snapshot_root()
+        .join(case_id)
+        .join(format!("{}.json", scenario.as_str()))
 }
 
 fn run_interp_trace_case(
@@ -2430,6 +2660,33 @@ mod tests {
         assert_eq!(opts.sample_rate, 48_000);
         assert_eq!(opts.block_size, 64);
         assert_eq!(opts.num_blocks, 4);
+    }
+
+    #[test]
+    fn parse_interp_trace_batch_defaults() {
+        let mut args = std::iter::empty::<String>();
+        let opts = parse_interp_trace_batch_options(&mut args).unwrap();
+        assert_eq!(opts.case, None);
+        assert_eq!(opts.lane, TraceLane::Fast);
+        assert_eq!(opts.sample_rate, 48_000);
+        assert_eq!(opts.block_size, 64);
+        assert_eq!(opts.num_blocks, 4);
+    }
+
+    #[test]
+    fn runtime_trace_scenario_mapping_for_typed_primitives() {
+        let scenarios = trace_scenarios_for_runtime_case(Path::new(
+            "tests/runtime_corpus/trace_31_extended_primitives_typed.dsp",
+        ))
+        .unwrap();
+        assert_eq!(scenarios, vec![TraceScenario::Zeros]);
+    }
+
+    #[test]
+    fn runtime_trace_snapshot_path_uses_case_and_scenario() {
+        let path = runtime_trace_snapshot_path("trace_01_passthrough", TraceScenario::Impulse);
+        let text = path.to_string_lossy();
+        assert!(text.ends_with("tests/runtime_traces/rust/trace_01_passthrough/impulse.json"));
     }
 
     #[test]

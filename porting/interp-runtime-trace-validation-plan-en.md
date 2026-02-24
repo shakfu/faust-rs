@@ -8,13 +8,18 @@
   - programmatic compile via Rust APIs (`compiler` + `interp` backend)
   - deterministic input scenarios (`zeros`, `impulse`, `ramp`, `sine`)
   - JSON trace dump (stdout / `--out`)
-- Snapshot generation/checking (`interp-trace-gen` / `interp-trace-check`) is
-  still pending (`Phase 2`).
+- `Phase 2` has started with a snapshot scaffold:
+  - `cargo run -p xtask -- interp-trace-gen`
+  - `cargo run -p xtask -- interp-trace-check`
+- Current Phase 2 scaffold scope:
+  - generates snapshots under `tests/runtime_traces/rust/`
+  - checks by exact JSON comparison (tolerant numeric compare still pending)
+  - enables only a snapshot-ready subset of `tests/runtime_corpus/` fixtures
+    while known fast-lane FIR typing gaps remain on other fixtures
 - Known limitation observed during validation:
-  - some DSPs may still panic at runtime in the `interp` executor path
-    (example: `rep_31_extended_primitives.dsp` at the time of the Phase 1
-    implementation). Phase 1 validation therefore uses a stable simple case
-    (`rep_01_passthrough.dsp`) for end-to-end smoke testing.
+  - some runtime-corpus fixtures are intentionally excluded from Phase 2
+    snapshot generation/checking until their fast-lane FIR typing issues are
+    fixed (they remain available for manual `interp-trace-dump`)
 
 ### Purpose
 

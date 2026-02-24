@@ -21,6 +21,8 @@ cargo run -p xtask -- <command>
 | `golden-gen-rust` | Regenerate Rust golden snapshots from current output |
 | `golden-gen-cpp` | Regenerate C++ reference goldens (requires `FAUST_CPP_BIN`) |
 | `interp-trace-dump` | Phase 1 runtime trace harness: execute one DSP through `interp` and dump JSON trace |
+| `interp-trace-gen` | Phase 2 scaffold: generate runtime trace snapshots for `tests/runtime_corpus/` |
+| `interp-trace-check` | Phase 2 scaffold: compare runtime traces against generated snapshots |
 | `parser-parity-report` | Write parser parity report vs C++ |
 | `corpus-status-report` | Write corpus status diff report |
 | `cpp-backend-diff-report` | Write C++ backend diff report |
@@ -60,5 +62,21 @@ Current scope (Phase 1):
 - runs deterministic inputs (`zeros`, `impulse`, `ramp`, `sine`)
 - prints a JSON trace (stdout or `--out <path>`)
 
-This command is intentionally a prototype and does not yet implement snapshot
-generation/checking (`interp-trace-gen` / `interp-trace-check` planned in later phases).
+## `interp-trace-gen` / `interp-trace-check` (Phase 2 scaffold)
+
+Phase 2 has started with a simple snapshot workflow built on top of
+`interp-trace-dump`.
+
+Examples:
+
+```bash
+cargo run -p xtask -- interp-trace-gen
+cargo run -p xtask -- interp-trace-check
+```
+
+Current Phase 2 scaffold behavior:
+- iterates `tests/runtime_corpus/*.dsp`
+- uses a built-in scenario mapping (documented in `tests/runtime_corpus/README.md`)
+- writes snapshots under `tests/runtime_traces/rust/<case>/<scenario>.json`
+- checks by regenerating traces and comparing JSON exactly (tolerance-based
+  numeric compare is deferred to a later Phase 2 increment)

@@ -23,3 +23,7 @@ Notes:
   literals in the extended-primitives corpus case).
 - These files are trace-harness fixtures; the main compile/parity corpus remains
   in `tests/corpus/`.
+- Phase 2 snapshot scaffold (`interp-trace-gen` / `interp-trace-check`) only
+  enables a subset for now (currently `trace_01_passthrough`,
+  `trace_09_ui_slider`, `trace_31_extended_primitives_typed`) and skips the
+  others until known fast-lane FIR typing issues are fixed.
