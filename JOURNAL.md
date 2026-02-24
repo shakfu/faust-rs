@@ -1,5 +1,42 @@
 # JOURNAL
 
+## 2026-02-23 (session 24)
+
+### Interp backend — auto-split FIR `compute` into control/DSP blocks (no FIR `computeThread` required)
+
+Aligned the interpreter backend with the new FIR model where `compute` is the
+single source of truth (including the explicit FIR sample loop), and removed the
+need for a separate FIR `computeThread` function.
+
+**What changed**
+- `crates/codegen/src/backends/interp/mod.rs`
+  - `generate_interp_module(...)` now compiles `compute` as the DSP block by default
+  - added automatic split detection for `compute` bodies shaped as:
+    `Block(prefix..., <ForLoop|SimpleForLoop last>)`
+    - prefix statements -> `compute_block` (control block)
+    - final loop statement -> `compute_dsp_block`
+  - updated backend docs/comments to document the new FIR contract (no FIR
+    `computeThread`)
+- `crates/codegen/src/backends/interp/compiler.rs`
+  - added `compile_fir_stmt_list_block(...)` helper for compiling split prefix/loop sublists
+  - added `SimpleForLoop` lowering to FBC `kLoop`
+  - added pragmatic support for `LoadVar("count", kFunArgs, Int32)` by
+    materializing a stable int heap slot for `count` on demand
+
+**Why**
+- fast-lane FIR now emits an explicit `SimpleForLoop("i0", count, ...)` in `compute`
+- the old interpreter backend contract expected a separate FIR `computeThread`
+  and did not match the new canonical FIR shape
+- auto-splitting preserves the interpreter runtime’s internal two-block model
+  while making the FIR contract simpler and backend-agnostic
+
+**Validation**
+- `cargo run -p compiler -- -lang interp t1.dsp` ✅
+- `cargo test -p compiler --test signal_fir_lane` ✅
+- `cargo test -p codegen backends::interp::compiler::tests::test_roundtrip_for_loop -- --nocapture` ✅
+
+---
+
 ## 2026-02-23 (session 23)
 
 ### C/C++ backends — stop synthesizing `compute` sample loop (consume explicit FIR loop)

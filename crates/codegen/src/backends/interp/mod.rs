@@ -139,7 +139,7 @@ impl std::error::Error for CodegenError {}
 /// # Function-to-block mapping
 ///
 /// The FIR module's `declarations` block is scanned for `DeclareFun` nodes.
-/// Known function names are mapped to the six [`FbcDspFactory`] code blocks:
+/// Known function names are mapped to the factory code blocks.
 ///
 /// | FIR function name              | Factory block          |
 /// |--------------------------------|------------------------|
@@ -147,12 +147,12 @@ impl std::error::Error for CodegenError {}
 /// | `"instanceConstants"`          | `init_block`           |
 /// | `"instanceResetUserInterface"` | `reset_ui_block`       |
 /// | `"instanceClear"`              | `clear_block`          |
-/// | `"compute"`                    | `compute_block`        |
-/// | `"computeThread"`              | `compute_dsp_block`    |
+/// | `"compute"`                    | `compute_dsp_block`    |
 ///
 /// DSP sections absent from the FIR module produce an empty block (only
-/// `kReturn`), which is correct for the legacy-bridge lane whose FIR module
-/// only carries a minimal `compute` stub.
+/// `kReturn`). The Rust FIR fast-lane uses a single explicit-loop `compute`
+/// function as the DSP block; `computeThread` is no longer part of the FIR
+/// contract for this backend.
 ///
 /// # Source provenance (C++)
 /// - `InterpreterInstVisitor<REAL>` + `interpreter_dsp_factory_aux` in
@@ -194,6 +194,7 @@ pub fn generate_interp_module(
     // 3. Compile each function body using a shared FirToFbcCompiler.
     let mut compiler: compiler::FirToFbcCompiler<f32> = compiler::FirToFbcCompiler::new();
     let mut fn_blocks: HashMap<String, BlockId> = HashMap::new();
+    let mut split_compute_blocks: Option<(BlockId, BlockId)> = None;
 
     for decl_id in &decl_ids {
         if let fir::FirMatch::DeclareFun {
@@ -202,6 +203,29 @@ pub fn generate_interp_module(
             ..
         } = match_fir(store, *decl_id)
         {
+            if fn_name == "compute"
+                && let Some((control_prefix, dsp_loop_stmt)) =
+                    detect_compute_control_dsp_split(store, body)
+            {
+                let control_block = compiler
+                    .compile_fir_stmt_list_block(store, &control_prefix)
+                    .map_err(|e| {
+                        CodegenError::new(
+                            CodegenErrorCode::CompilationFailed,
+                            format!("in 'compute' control split: {e}"),
+                        )
+                    })?;
+                let dsp_block = compiler
+                    .compile_fir_stmt_list_block(store, &[dsp_loop_stmt])
+                    .map_err(|e| {
+                        CodegenError::new(
+                            CodegenErrorCode::CompilationFailed,
+                            format!("in 'compute' dsp split: {e}"),
+                        )
+                    })?;
+                split_compute_blocks = Some((control_block, dsp_block));
+                continue;
+            }
             // Prototype-only DeclareFun nodes (body: None) have no bytecode to compile.
             let block_id = compiler.compile_fir_block(store, body).map_err(|e| {
                 CodegenError::new(
@@ -213,8 +237,10 @@ pub fn generate_interp_module(
         }
     }
 
-    // 4. Map function names to the six factory block slots.
-    //    Slots without a matching function get a dedicated empty block.
+    // 4. Map function names to factory block slots.
+    //    The interpreter runtime still has separate control/DSP slots, but the
+    //    FIR contract now provides a single `compute` body used as DSP block.
+    //    We keep `compute_block` empty and ignore legacy `computeThread`.
     let static_init_block = fn_blocks
         .get("staticInit")
         .copied()
@@ -231,14 +257,17 @@ pub fn generate_interp_module(
         .get("instanceClear")
         .copied()
         .unwrap_or_else(|| compiler.alloc_empty_block());
-    let compute_block = fn_blocks
-        .get("compute")
-        .copied()
-        .unwrap_or_else(|| compiler.alloc_empty_block());
-    let compute_dsp_block = fn_blocks
-        .get("computeThread")
-        .copied()
-        .unwrap_or_else(|| compiler.alloc_empty_block());
+    let (compute_block, compute_dsp_block) = if let Some((control, dsp)) = split_compute_blocks {
+        (control, dsp)
+    } else {
+        (
+            compiler.alloc_empty_block(),
+            fn_blocks
+                .get("compute")
+                .copied()
+                .unwrap_or_else(|| compiler.alloc_empty_block()),
+        )
+    };
 
     // 5. Extract arena, heap layout, UI instructions, and field table.
     let (arena, int_heap_size, real_heap_size, ui_block, field_table) = compiler.into_parts();
@@ -298,4 +327,24 @@ pub fn generate_interp_module(
     }
 
     Ok(factory)
+}
+
+/// Detects a split-friendly `compute` body shape:
+/// `Block(prefix..., <top-level ForLoop|SimpleForLoop as last stmt>)`.
+///
+/// Returns `(control_prefix_statements, dsp_loop_stmt)` when the shape matches.
+fn detect_compute_control_dsp_split(
+    store: &fir::FirStore,
+    body: fir::FirId,
+) -> Option<(Vec<fir::FirId>, fir::FirId)> {
+    let fir::FirMatch::Block(stmts) = fir::match_fir(store, body) else {
+        return None;
+    };
+    let (last, prefix) = stmts.split_last()?;
+    match fir::match_fir(store, *last) {
+        fir::FirMatch::SimpleForLoop { .. } | fir::FirMatch::ForLoop { .. } => {
+            Some((prefix.to_vec(), *last))
+        }
+        _ => None,
+    }
 }

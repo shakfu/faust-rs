@@ -288,6 +288,12 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 body,
                 ..
             } => self.compile_for_loop(store, init, end, step, body),
+            FirMatch::SimpleForLoop {
+                ref var,
+                upper,
+                body,
+                ..
+            } => self.compile_simple_for_loop(store, var, upper, body),
             FirMatch::Block(ref stmts) => {
                 let stmts = stmts.clone();
                 self.compile_block(store, &stmts)
@@ -388,6 +394,23 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         self.begin_sub_block();
         for id in &nodes {
             self.compile_node(store, *id)?;
+        }
+        Ok(self.end_sub_block())
+    }
+
+    /// Compiles a list of FIR statements as a new sub-block in the arena.
+    ///
+    /// This is used by the interpreter backend to split a single FIR `compute`
+    /// body into a control prefix block and a DSP loop block without inventing
+    /// extra FIR declarations.
+    pub fn compile_fir_stmt_list_block(
+        &mut self,
+        store: &FirStore,
+        stmts: &[FirId],
+    ) -> Result<BlockId, CompileError> {
+        self.begin_sub_block();
+        for &id in stmts {
+            self.compile_node(store, id)?;
         }
         Ok(self.end_sub_block())
     }
@@ -507,9 +530,23 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         &mut self,
         _store: &FirStore,
         name: &str,
-        _access: AccessType,
+        access: AccessType,
         _typ: &FirType,
     ) -> Result<(), CompileError> {
+        if access == AccessType::FunArgs && name == "count" && !self.field_table.contains_key(name)
+        {
+            // Reserve a stable int heap slot for the runtime-set `count` pseudo argument.
+            let offset = self.int_heap_offset;
+            self.int_heap_offset += 1;
+            self.field_table.insert(
+                name.to_string(),
+                MemoryDesc {
+                    offset,
+                    size: 1,
+                    heap_type: HeapType::Int,
+                },
+            );
+        }
         let desc = self
             .field_table
             .get(name)
@@ -1103,6 +1140,113 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         debug_assert_eq!(loop_body_id.as_u32(), next_id.as_u32());
 
         // Emit kLoop in the parent block. vec_size = 1 (conservative).
+        self.current_block.push(FbcInstruction::full(
+            FbcOpcode::Loop,
+            "",
+            1,
+            R::default(),
+            0,
+            0,
+            Some(init_block_id),
+            Some(loop_body_id),
+        ));
+        Ok(())
+    }
+
+    /// Compiles `SimpleForLoop(var, upper, body)` as a canonical counting loop:
+    /// `for (var = 0; var < upper; var = var + 1)`.
+    fn compile_simple_for_loop(
+        &mut self,
+        store: &FirStore,
+        var: &str,
+        upper: FirId,
+        body: FirId,
+    ) -> Result<(), CompileError> {
+        // Allocate loop variable if missing (simple pragmatic model: function-scoped slot).
+        if !self.field_table.contains_key(var) {
+            let offset = self.int_heap_offset;
+            self.int_heap_offset += 1;
+            self.field_table.insert(
+                var.to_string(),
+                MemoryDesc {
+                    offset,
+                    size: 1,
+                    heap_type: HeapType::Int,
+                },
+            );
+        }
+        let desc =
+            self.field_table
+                .get(var)
+                .cloned()
+                .ok_or_else(|| CompileError::UndeclaredVariable {
+                    name: var.to_string(),
+                })?;
+
+        // Init block: `var = 0`.
+        self.begin_sub_block();
+        self.current_block
+            .push(FbcInstruction::with_values_and_offsets(
+                FbcOpcode::StoreIntValue,
+                0,
+                R::default(),
+                desc.offset,
+                0,
+            ));
+        let init_block_id = self.end_sub_block();
+
+        // Body block: body; `var = var + 1`; `var < upper`; cond-branch(loop back).
+        self.begin_sub_block();
+        self.compile_node(store, body)?;
+        self.current_block
+            .push(FbcInstruction::with_values_and_offsets(
+                FbcOpcode::LoadInt,
+                0,
+                R::default(),
+                desc.offset,
+                0,
+            ));
+        self.current_block.push(FbcInstruction::with_values(
+            FbcOpcode::Int32Value,
+            1,
+            R::default(),
+        ));
+        self.current_block
+            .push(FbcInstruction::new(FbcOpcode::AddInt));
+        self.current_block
+            .push(FbcInstruction::with_values_and_offsets(
+                FbcOpcode::StoreInt,
+                0,
+                R::default(),
+                desc.offset,
+                0,
+            ));
+        self.current_block
+            .push(FbcInstruction::with_values_and_offsets(
+                FbcOpcode::LoadInt,
+                0,
+                R::default(),
+                desc.offset,
+                0,
+            ));
+        self.compile_node(store, upper)?;
+        self.current_block
+            .push(FbcInstruction::new(FbcOpcode::LTInt));
+
+        let next_id = BlockId::from_raw(self.arena.len() as u32);
+        self.current_block.push(FbcInstruction::full(
+            FbcOpcode::CondBranch,
+            "",
+            0,
+            R::default(),
+            0,
+            0,
+            Some(next_id),
+            None,
+        ));
+        let loop_body_id = self.end_sub_block();
+        debug_assert_eq!(loop_body_id.as_u32(), next_id.as_u32());
+
         self.current_block.push(FbcInstruction::full(
             FbcOpcode::Loop,
             "",
