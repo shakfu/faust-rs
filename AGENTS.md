@@ -37,6 +37,9 @@ Guidelines for contributors and coding agents working on `faust-rs`.
 - CI stages include `cargo check`, formatting, clippy, and tests.
 - CI also runs golden parity guardrails via `cargo run -p xtask -- golden-check`.
 - A change is not considered ready unless CI is green.
+- For filesystem path assertions in tests, compare `Path`/`PathBuf` values (or
+  components) instead of stringified paths; avoid hardcoded `/` separators
+  because CI runs on Windows.
 
 ## 5. Porting Discipline
 

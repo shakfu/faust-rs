@@ -3516,8 +3516,10 @@ mod tests {
     #[test]
     fn runtime_trace_snapshot_path_uses_case_and_scenario() {
         let path = runtime_trace_snapshot_path("trace_01_passthrough", TraceScenario::Impulse);
-        let text = path.to_string_lossy();
-        assert!(text.ends_with("tests/runtime_traces/rust/trace_01_passthrough/impulse.json"));
+        let expected = runtime_trace_snapshot_root()
+            .join("trace_01_passthrough")
+            .join("impulse.json");
+        assert_eq!(path, expected);
     }
 
     #[test]

@@ -1,5 +1,26 @@
 # JOURNAL
 
+## 2026-02-24 (session 49)
+
+### Fix Windows path-separator test failure in `xtask` and document CI path assertions
+
+Fixed a Windows-only unit test failure in `crates/xtask` caused by string-based
+path assertions using hardcoded `/` separators.
+
+**What changed**
+- `crates/xtask/src/main.rs`
+  - `runtime_trace_snapshot_path_uses_case_and_scenario` now compares `PathBuf`
+    values instead of `to_string_lossy().ends_with(".../...")`
+- `AGENTS.md`
+  - added a short CI portability rule: for path assertions, compare `Path` /
+    `PathBuf` values (or components), not stringified paths, because CI runs on
+    Windows
+
+**Validation**
+- `cargo test -p xtask runtime_trace_snapshot_path_uses_case_and_scenario -- --nocapture` ✅
+
+---
+
 ## 2026-02-24 (session 48)
 
 ### Clippy `-D warnings` cleanup across FIR / compiler / interp executor
