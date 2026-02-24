@@ -1,15 +1,17 @@
-//! FIR function inliner analysis scaffolding (Milestone 1).
+//! FIR function inliner scaffolding (Milestones 1–2).
 //!
 //! # Scope
-//! This module intentionally implements **analysis only**:
+//! This module currently implements:
 //! - function indexing from a FIR `Module`,
 //! - call graph extraction,
 //! - SCC detection,
 //! - simple callee size metrics,
 //! - candidate selection decisions (legality/profitability pre-checks).
+//! - hygienic FIR subtree cloning with local-variable renaming (future inlining substrate).
 //!
-//! It does **not** rewrite FIR yet. Rewriting/inlining will be layered on top of
-//! this analysis in later milestones.
+//! It still does **not** inline `FunCall` nodes yet. Callsite rewriting and
+//! statement splicing will be layered on top of these analysis/clone utilities
+//! in later milestones.
 //!
 //! # Source provenance (C++)
 //! - `compiler/generator/fir_to_fir.cpp` (`FunctionInliner`, `FunctionCallInliner`)
@@ -22,7 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::{FirId, FirMatch, FirStore, NamedType, match_fir};
+use crate::{AccessType, FirBuilder, FirId, FirMatch, FirStore, NamedType, SliderRange, match_fir};
 
 const RESERVED_DSP_API_FUNCTIONS: &[&str] = &[
     "classInit",
@@ -645,10 +647,702 @@ fn decide_callee_candidate(
     }
 }
 
+/// Options controlling hygienic FIR subtree cloning for future inlining.
+///
+/// This is the Milestone-2 rename engine used to clone callee bodies into a
+/// destination store while avoiding local variable name capture/collisions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FirHygienicCloneOptions {
+    /// Prefix used for generated fresh local names.
+    ///
+    /// Generated names are of the form `<prefix><counter>_<original>`.
+    pub local_prefix: String,
+}
+
+impl Default for FirHygienicCloneOptions {
+    fn default() -> Self {
+        Self {
+            local_prefix: "__fir_inl".to_string(),
+        }
+    }
+}
+
+/// Reusable freshness state for hygienic cloning across multiple callsites.
+///
+/// Reusing one state instance across repeated clones guarantees distinct fresh
+/// local names across all those clones, which is required for future inlining
+/// of the same callee multiple times into one caller block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FirHygienicCloneState {
+    /// Clone options (notably fresh-name prefix).
+    pub options: FirHygienicCloneOptions,
+    /// Next fresh local id.
+    pub next_local_id: usize,
+}
+
+impl Default for FirHygienicCloneState {
+    fn default() -> Self {
+        Self {
+            options: FirHygienicCloneOptions::default(),
+            next_local_id: 0,
+        }
+    }
+}
+
+/// Kind of local binding that was renamed during hygienic cloning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirLocalRenameKind {
+    /// Local `DeclareVar` (`kStack` or `kLoop`).
+    DeclareVar,
+    /// Local `DeclareTable` (`kStack` or `kLoop`).
+    DeclareTable,
+    /// `ForLoop.var` / `SimpleForLoop.var` loop control variable.
+    LoopVar,
+    /// `IteratorForLoop.iterators[*]`.
+    IteratorVar,
+    /// `DeclareBufferIterators` generated locals.
+    BufferIterator,
+}
+
+/// One recorded local rename performed by the hygienic clone engine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FirLocalRename {
+    /// Source FIR node that introduced the binding.
+    pub origin_node: FirId,
+    /// Original local symbol name.
+    pub original: String,
+    /// Fresh cloned symbol name.
+    pub renamed: String,
+    /// Access class of the renamed local.
+    pub access: AccessType,
+    /// Syntactic origin category.
+    pub kind: FirLocalRenameKind,
+}
+
+/// Result of a hygienic subtree clone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FirHygienicCloneResult {
+    /// Root node id in the destination store.
+    pub root: FirId,
+    /// Local symbol renames performed during the clone.
+    pub local_renames: Vec<FirLocalRename>,
+}
+
+/// Errors returned by the hygienic clone engine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FirHygienicCloneError {
+    /// Source node could not be decoded by `match_fir`.
+    UnknownNode(FirId),
+}
+
+impl std::fmt::Display for FirHygienicCloneError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownNode(id) => write!(
+                f,
+                "hygienic FIR clone cannot clone unknown node {}",
+                id.as_u32()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FirHygienicCloneError {}
+
+/// Hygienically clones a FIR subtree into `dst_store` using a fresh local-state.
+///
+/// This convenience wrapper is suitable for one-off clones. For repeated clones
+/// into the same destination (future inlining of the same callee in multiple
+/// callsites), prefer [`clone_fir_hygienic_with_state`] so fresh local names
+/// remain unique across clones.
+///
+/// # Errors
+/// Returns [`FirHygienicCloneError`] if the source subtree contains an unknown
+/// FIR node.
+pub fn clone_fir_hygienic(
+    src_store: &FirStore,
+    root: FirId,
+    dst_store: &mut FirStore,
+) -> Result<FirHygienicCloneResult, FirHygienicCloneError> {
+    let mut state = FirHygienicCloneState::default();
+    clone_fir_hygienic_with_state(src_store, root, dst_store, &mut state)
+}
+
+/// Hygienically clones a FIR subtree into `dst_store` using caller-provided freshness state.
+///
+/// Local symbols declared in the cloned subtree (`kStack`, `kLoop`, loop
+/// iterators, and buffer iterators) are renamed to fresh names and all matching
+/// references are rewritten consistently.
+///
+/// The clone is scope-aware:
+/// - `Block` introduces a new lexical frame,
+/// - `If`/`Switch` branches are cloned in isolated branch frames,
+/// - loop constructs introduce loop frames so iterator/loop-variable names do
+///   not leak outside the cloned loop.
+///
+/// # Errors
+/// Returns [`FirHygienicCloneError`] if the source subtree contains an unknown
+/// FIR node.
+pub fn clone_fir_hygienic_with_state(
+    src_store: &FirStore,
+    root: FirId,
+    dst_store: &mut FirStore,
+    state: &mut FirHygienicCloneState,
+) -> Result<FirHygienicCloneResult, FirHygienicCloneError> {
+    let mut cloner = HygienicCloner::new(src_store, dst_store, state);
+    cloner.push_scope();
+    let root = cloner.clone_node(root)?;
+    cloner.pop_scope();
+    Ok(FirHygienicCloneResult {
+        root,
+        local_renames: cloner.local_renames,
+    })
+}
+
+struct HygienicCloner<'a, 'b> {
+    src: &'a FirStore,
+    dst: &'b mut FirStore,
+    state: &'b mut FirHygienicCloneState,
+    scopes: Vec<HashMap<String, String>>,
+    local_renames: Vec<FirLocalRename>,
+}
+
+impl<'a, 'b> HygienicCloner<'a, 'b> {
+    fn new(src: &'a FirStore, dst: &'b mut FirStore, state: &'b mut FirHygienicCloneState) -> Self {
+        Self {
+            src,
+            dst,
+            state,
+            scopes: Vec::new(),
+            local_renames: Vec::new(),
+        }
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    fn pop_scope(&mut self) {
+        let _ = self.scopes.pop();
+    }
+
+    fn clone_in_new_scope(&mut self, id: FirId) -> Result<FirId, FirHygienicCloneError> {
+        self.push_scope();
+        let out = self.clone_node(id);
+        self.pop_scope();
+        out
+    }
+
+    fn lookup_local_rename(&self, name: &str) -> Option<&str> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).map(String::as_str))
+    }
+
+    fn maybe_renamed_unqualified(&self, name: &str) -> String {
+        self.lookup_local_rename(name)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    fn remap_name_by_access(&self, name: &str, access: AccessType) -> String {
+        if matches!(access, AccessType::Stack | AccessType::Loop) {
+            self.lookup_local_rename(name)
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| name.to_string())
+        } else {
+            name.to_string()
+        }
+    }
+
+    fn fresh_local_name(&mut self, original: &str) -> String {
+        let id = self.state.next_local_id;
+        self.state.next_local_id += 1;
+        format!("{}{}_{}", self.state.options.local_prefix, id, original)
+    }
+
+    fn bind_local_decl(
+        &mut self,
+        origin_node: FirId,
+        original: &str,
+        access: AccessType,
+        kind: FirLocalRenameKind,
+    ) -> String {
+        let existing = self
+            .scopes
+            .last()
+            .and_then(|scope| scope.get(original))
+            .cloned();
+        if let Some(existing) = existing {
+            return existing;
+        }
+        let renamed = self.fresh_local_name(original);
+        let Some(scope) = self.scopes.last_mut() else {
+            return original.to_string();
+        };
+        scope.insert(original.to_string(), renamed.clone());
+        self.local_renames.push(FirLocalRename {
+            origin_node,
+            original: original.to_string(),
+            renamed: renamed.clone(),
+            access,
+            kind,
+        });
+        renamed
+    }
+
+    fn clone_node(&mut self, id: FirId) -> Result<FirId, FirHygienicCloneError> {
+        let node = match_fir(self.src, id);
+        let out = match node {
+            FirMatch::Unknown => return Err(FirHygienicCloneError::UnknownNode(id)),
+            FirMatch::Int32 { value, .. } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.int32(value)
+            }
+            FirMatch::Int64 { value, .. } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.int64(value)
+            }
+            FirMatch::Float32 { value, .. } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.float32(value)
+            }
+            FirMatch::Float64 { value, .. } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.float64(value)
+            }
+            FirMatch::Bool { value, .. } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.bool_(value)
+            }
+            FirMatch::Quad { value, .. } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.quad(value)
+            }
+            FirMatch::FixedPoint { value, .. } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.fixed_point(value)
+            }
+            FirMatch::ValueArray { values, typ } => {
+                let mut cloned = Vec::with_capacity(values.len());
+                for v in values {
+                    cloned.push(self.clone_node(v)?);
+                }
+                let mut b = FirBuilder::new(self.dst);
+                b.value_array(&cloned, typ)
+            }
+            FirMatch::Int32Array { values, .. } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.int32_array(&values)
+            }
+            FirMatch::Float32Array { values, .. } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.float32_array(&values)
+            }
+            FirMatch::Float64Array { values, .. } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.float64_array(&values)
+            }
+            FirMatch::QuadArray { values, .. } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.quad_array(&values)
+            }
+            FirMatch::FixedPointArray { values, .. } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.fixed_point_array(&values)
+            }
+            FirMatch::LoadVar { name, access, typ } => {
+                let remap = self.remap_name_by_access(&name, access);
+                let mut b = FirBuilder::new(self.dst);
+                b.load_var(remap, access, typ)
+            }
+            FirMatch::LoadTable {
+                name,
+                access,
+                index,
+                typ,
+            } => {
+                let remap = self.remap_name_by_access(&name, access);
+                let index = self.clone_node(index)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.load_table(remap, access, index, typ)
+            }
+            FirMatch::LoadVarAddress { name, access, typ } => {
+                let remap = self.remap_name_by_access(&name, access);
+                let mut b = FirBuilder::new(self.dst);
+                b.load_var_address(remap, access, typ)
+            }
+            FirMatch::TeeVar {
+                name,
+                access,
+                value,
+                typ,
+            } => {
+                let remap = self.remap_name_by_access(&name, access);
+                let value = self.clone_node(value)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.tee_var(remap, access, value, typ)
+            }
+            FirMatch::BinOp { op, lhs, rhs, typ } => {
+                let lhs = self.clone_node(lhs)?;
+                let rhs = self.clone_node(rhs)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.binop(op, lhs, rhs, typ)
+            }
+            FirMatch::Neg { value, typ } => {
+                let value = self.clone_node(value)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.neg(value, typ)
+            }
+            FirMatch::Cast { typ, value } => {
+                let value = self.clone_node(value)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.cast(typ, value)
+            }
+            FirMatch::Bitcast { typ, value } => {
+                let value = self.clone_node(value)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.bitcast(typ, value)
+            }
+            FirMatch::Select2 {
+                cond,
+                then_value,
+                else_value,
+                typ,
+            } => {
+                let cond = self.clone_node(cond)?;
+                let then_value = self.clone_node(then_value)?;
+                let else_value = self.clone_node(else_value)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.select2(cond, then_value, else_value, typ)
+            }
+            FirMatch::FunCall { name, args, typ } => {
+                let mut cloned_args = Vec::with_capacity(args.len());
+                for a in args {
+                    cloned_args.push(self.clone_node(a)?);
+                }
+                let mut b = FirBuilder::new(self.dst);
+                b.fun_call(name, &cloned_args, typ)
+            }
+            FirMatch::NullValue { typ } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.null_value(typ)
+            }
+            FirMatch::NewDsp { name, typ } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.new_dsp(name, typ)
+            }
+            FirMatch::DeclareVar {
+                name,
+                typ,
+                access,
+                init,
+            } => {
+                let init = match init {
+                    Some(v) => Some(self.clone_node(v)?),
+                    None => None,
+                };
+                let name = if matches!(access, AccessType::Stack | AccessType::Loop) {
+                    self.bind_local_decl(id, &name, access, FirLocalRenameKind::DeclareVar)
+                } else {
+                    name
+                };
+                let mut b = FirBuilder::new(self.dst);
+                b.declare_var(name, typ, access, init)
+            }
+            FirMatch::DeclareTable {
+                name,
+                access,
+                elem_type,
+                values,
+            } => {
+                let mut cloned_values = Vec::with_capacity(values.len());
+                for v in values {
+                    cloned_values.push(self.clone_node(v)?);
+                }
+                let name = if matches!(access, AccessType::Stack | AccessType::Loop) {
+                    self.bind_local_decl(id, &name, access, FirLocalRenameKind::DeclareTable)
+                } else {
+                    name
+                };
+                let mut b = FirBuilder::new(self.dst);
+                b.declare_table(name, access, elem_type, &cloned_values)
+            }
+            FirMatch::NullDeclareVar => {
+                let mut b = FirBuilder::new(self.dst);
+                b.null_declare_var()
+            }
+            FirMatch::DeclareFun {
+                name,
+                typ,
+                args,
+                body,
+                is_inline,
+            } => {
+                let body = match body {
+                    Some(body_id) => Some(self.clone_in_new_scope(body_id)?),
+                    None => None,
+                };
+                let mut b = FirBuilder::new(self.dst);
+                b.declare_fun(name, typ, &args, body, is_inline)
+            }
+            FirMatch::DeclareStructType { typ } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.declare_struct_type(typ)
+            }
+            FirMatch::DeclareBufferIterators {
+                name1,
+                name2,
+                channels,
+                typ,
+                mutable,
+                chunk,
+            } => {
+                let name1 = self.bind_local_decl(
+                    id,
+                    &name1,
+                    AccessType::Loop,
+                    FirLocalRenameKind::BufferIterator,
+                );
+                let name2 = self.bind_local_decl(
+                    id,
+                    &name2,
+                    AccessType::Loop,
+                    FirLocalRenameKind::BufferIterator,
+                );
+                let mut b = FirBuilder::new(self.dst);
+                b.declare_buffer_iterators(name1, name2, channels, typ, mutable, chunk)
+            }
+            FirMatch::StoreVar {
+                name,
+                access,
+                value,
+            } => {
+                let remap = self.remap_name_by_access(&name, access);
+                let value = self.clone_node(value)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.store_var(remap, access, value)
+            }
+            FirMatch::StoreTable {
+                name,
+                access,
+                index,
+                value,
+            } => {
+                let remap = self.remap_name_by_access(&name, access);
+                let index = self.clone_node(index)?;
+                let value = self.clone_node(value)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.store_table(remap, access, index, value)
+            }
+            FirMatch::ShiftArrayVar {
+                name,
+                access,
+                delay,
+            } => {
+                let remap = self.remap_name_by_access(&name, access);
+                let mut b = FirBuilder::new(self.dst);
+                b.shift_array_var(remap, access, delay)
+            }
+            FirMatch::Drop(v) => {
+                let v = self.clone_node(v)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.drop_(v)
+            }
+            FirMatch::NullStatement => {
+                let mut b = FirBuilder::new(self.dst);
+                b.null_statement()
+            }
+            FirMatch::Return(v) => {
+                let v = match v {
+                    Some(v) => Some(self.clone_node(v)?),
+                    None => None,
+                };
+                let mut b = FirBuilder::new(self.dst);
+                b.ret(v)
+            }
+            FirMatch::Block(stmts) => {
+                self.push_scope();
+                let mut cloned = Vec::with_capacity(stmts.len());
+                for s in stmts {
+                    cloned.push(self.clone_node(s)?);
+                }
+                self.pop_scope();
+                let mut b = FirBuilder::new(self.dst);
+                b.block(&cloned)
+            }
+            FirMatch::If {
+                cond,
+                then_block,
+                else_block,
+            } => {
+                let cond = self.clone_node(cond)?;
+                let then_block = self.clone_in_new_scope(then_block)?;
+                let else_block = match else_block {
+                    Some(v) => Some(self.clone_in_new_scope(v)?),
+                    None => None,
+                };
+                let mut b = FirBuilder::new(self.dst);
+                b.if_(cond, then_block, else_block)
+            }
+            FirMatch::Control { cond, stmt } => {
+                let cond = self.clone_node(cond)?;
+                let stmt = self.clone_node(stmt)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.control(cond, stmt)
+            }
+            FirMatch::ForLoop {
+                var,
+                init,
+                end,
+                step,
+                body,
+                is_reverse,
+            } => {
+                self.push_scope();
+                let renamed_var =
+                    self.bind_local_decl(id, &var, AccessType::Loop, FirLocalRenameKind::LoopVar);
+                let init = self.clone_node(init)?;
+                let end = self.clone_node(end)?;
+                let step = self.clone_node(step)?;
+                let body = self.clone_node(body)?;
+                self.pop_scope();
+                let mut b = FirBuilder::new(self.dst);
+                b.for_loop(renamed_var, init, end, step, body, is_reverse)
+            }
+            FirMatch::SimpleForLoop {
+                var,
+                upper,
+                body,
+                is_reverse,
+            } => {
+                self.push_scope();
+                let renamed_var =
+                    self.bind_local_decl(id, &var, AccessType::Loop, FirLocalRenameKind::LoopVar);
+                let upper = self.clone_node(upper)?;
+                let body = self.clone_node(body)?;
+                self.pop_scope();
+                let mut b = FirBuilder::new(self.dst);
+                b.simple_for_loop(renamed_var, upper, body, is_reverse)
+            }
+            FirMatch::IteratorForLoop {
+                iterators,
+                is_reverse,
+                body,
+            } => {
+                self.push_scope();
+                let mut renamed_iterators = Vec::with_capacity(iterators.len());
+                for it in &iterators {
+                    renamed_iterators.push(self.bind_local_decl(
+                        id,
+                        it,
+                        AccessType::Loop,
+                        FirLocalRenameKind::IteratorVar,
+                    ));
+                }
+                let iter_refs: Vec<&str> = renamed_iterators.iter().map(String::as_str).collect();
+                let body = self.clone_node(body)?;
+                self.pop_scope();
+                let mut b = FirBuilder::new(self.dst);
+                b.iterator_for_loop(&iter_refs, is_reverse, body)
+            }
+            FirMatch::WhileLoop { cond, body } => {
+                let cond = self.clone_node(cond)?;
+                let body = self.clone_in_new_scope(body)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.while_loop(cond, body)
+            }
+            FirMatch::Switch {
+                cond,
+                cases,
+                default,
+            } => {
+                let cond = self.clone_node(cond)?;
+                let mut cloned_cases = Vec::with_capacity(cases.len());
+                for (value, body) in cases {
+                    cloned_cases.push((value, self.clone_in_new_scope(body)?));
+                }
+                let default = match default {
+                    Some(v) => Some(self.clone_in_new_scope(v)?),
+                    None => None,
+                };
+                let mut b = FirBuilder::new(self.dst);
+                b.switch(cond, &cloned_cases, default)
+            }
+            FirMatch::OpenBox { typ, label } => {
+                let mut b = FirBuilder::new(self.dst);
+                b.open_box(typ, label)
+            }
+            FirMatch::CloseBox => {
+                let mut b = FirBuilder::new(self.dst);
+                b.close_box()
+            }
+            FirMatch::AddButton { typ, label, var } => {
+                let var = self.maybe_renamed_unqualified(&var);
+                let mut b = FirBuilder::new(self.dst);
+                b.add_button(typ, label, var)
+            }
+            FirMatch::AddSlider {
+                typ,
+                label,
+                var,
+                init,
+                lo,
+                hi,
+                step,
+            } => {
+                let var = self.maybe_renamed_unqualified(&var);
+                let mut b = FirBuilder::new(self.dst);
+                b.add_slider(typ, label, var, SliderRange { init, lo, hi, step })
+            }
+            FirMatch::AddBargraph {
+                typ,
+                label,
+                var,
+                lo,
+                hi,
+            } => {
+                let var = self.maybe_renamed_unqualified(&var);
+                let mut b = FirBuilder::new(self.dst);
+                b.add_bargraph(typ, label, var, lo, hi)
+            }
+            FirMatch::AddSoundfile { label, url, var } => {
+                let var = self.maybe_renamed_unqualified(&var);
+                let mut b = FirBuilder::new(self.dst);
+                b.add_soundfile_with_url(label, url, var)
+            }
+            FirMatch::AddMetaDeclare { var, key, value } => {
+                let var = self.maybe_renamed_unqualified(&var);
+                let mut b = FirBuilder::new(self.dst);
+                b.add_meta_declare(var, key, value)
+            }
+            FirMatch::Label(label) => {
+                let mut b = FirBuilder::new(self.dst);
+                b.label(label)
+            }
+            FirMatch::Module {
+                name,
+                dsp_struct,
+                globals,
+                declarations,
+            } => {
+                let dsp_struct = self.clone_node(dsp_struct)?;
+                let globals = self.clone_node(globals)?;
+                let declarations = self.clone_node(declarations)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.module(name, dsp_struct, globals, declarations)
+            }
+        };
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FirBuilder, FirType, NamedType};
+    use crate::checker::{Severity, verify_fir_module};
+    use crate::{AccessType, FirBuilder, FirStore, FirType, NamedType, dump_fir};
 
     fn fun(
         b: &mut FirBuilder<'_>,
@@ -663,6 +1357,19 @@ mod tests {
             ret: Box::new(ret),
         };
         b.declare_fun(name, sig, args, body, is_inline)
+    }
+
+    fn assert_no_checker_errors(store: &FirStore, module: FirId) {
+        let report = verify_fir_module(store, module);
+        let errors: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "expected no FIR checker errors after hygienic clone, got: {errors:?}"
+        );
     }
 
     #[test]
@@ -931,5 +1638,134 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, FirInlineSkipReason::TooLarge { .. }))
         );
+    }
+
+    #[test]
+    fn hygienic_clone_renames_local_decls_and_rewrites_local_uses() {
+        let mut src = FirStore::new();
+        let src_block = {
+            let mut b = FirBuilder::new(&mut src);
+            let zero = b.int32(0);
+            let decl = b.declare_var("tmp", FirType::Int32, AccessType::Stack, Some(zero));
+            let load = b.load_var("tmp", AccessType::Stack, FirType::Int32);
+            let dropv = b.drop_(load);
+            b.block(&[decl, dropv])
+        };
+
+        let mut dst = FirStore::new();
+        let cloned = clone_fir_hygienic(&src, src_block, &mut dst).expect("clone should succeed");
+
+        assert_eq!(cloned.local_renames.len(), 1);
+        let rename = &cloned.local_renames[0];
+        assert_eq!(rename.original, "tmp");
+        assert_ne!(rename.renamed, "tmp");
+        assert!(rename.renamed.starts_with("__fir_inl"));
+
+        let dump = dump_fir(&dst, cloned.root);
+        assert!(dump.contains(&format!("DeclareVar {{ name: \"{}\"", rename.renamed)));
+        assert!(dump.contains(&format!("LoadVar {{ name: \"{}\"", rename.renamed)));
+        assert!(!dump.contains("DeclareVar { name: \"tmp\""));
+    }
+
+    #[test]
+    fn hygienic_clone_state_avoids_name_collisions_across_repeated_clones() {
+        let mut src = FirStore::new();
+        let src_block = {
+            let mut b = FirBuilder::new(&mut src);
+            let zero = b.int32(0);
+            let decl = b.declare_var("tmp", FirType::Int32, AccessType::Stack, Some(zero));
+            let upper = b.int32(4);
+            let body = {
+                let i = b.load_var("i", AccessType::Loop, FirType::Int32);
+                let st = b.store_var("tmp", AccessType::Stack, i);
+                b.block(&[st])
+            };
+            let loop_stmt = b.simple_for_loop("i", upper, body, false);
+            let load = b.load_var("tmp", AccessType::Stack, FirType::Int32);
+            let dropv = b.drop_(load);
+            b.block(&[decl, loop_stmt, dropv])
+        };
+
+        let mut dst = FirStore::new();
+        let mut state = FirHygienicCloneState::default();
+        let c1 = clone_fir_hygienic_with_state(&src, src_block, &mut dst, &mut state)
+            .expect("first clone should succeed");
+        let c2 = clone_fir_hygienic_with_state(&src, src_block, &mut dst, &mut state)
+            .expect("second clone should succeed");
+
+        let c1_names: HashSet<_> = c1.local_renames.iter().map(|r| r.renamed.clone()).collect();
+        let c2_names: HashSet<_> = c2.local_renames.iter().map(|r| r.renamed.clone()).collect();
+        assert!(
+            c1_names.is_disjoint(&c2_names),
+            "reused clone state should generate disjoint fresh locals"
+        );
+
+        let module = {
+            let mut b = FirBuilder::new(&mut dst);
+            let body = b.block(&[c1.root, c2.root]);
+            let f = fun(&mut b, "helper", &[], FirType::Void, Some(body), false);
+            let dsp_struct = b.block(&[]);
+            let globals = b.block(&[]);
+            let decls = b.block(&[f]);
+            b.module("mydsp", dsp_struct, globals, decls)
+        };
+        assert_no_checker_errors(&dst, module);
+    }
+
+    #[test]
+    fn hygienic_clone_renames_loop_vars_and_iterators_consistently() {
+        let mut src = FirStore::new();
+        let src_block = {
+            let mut b = FirBuilder::new(&mut src);
+            let zero = b.int32(0);
+            let for_init = b.declare_var("j", FirType::Int32, AccessType::Loop, Some(zero));
+            let end = b.int32(4);
+            let j_load = b.load_var("j", AccessType::Loop, FirType::Int32);
+            let one = b.int32(1);
+            let j_next = b.binop(crate::FirBinOp::Add, j_load, one, FirType::Int32);
+            let step = b.store_var("j", AccessType::Loop, j_next);
+            let for_body = {
+                let j = b.load_var("j", AccessType::Loop, FirType::Int32);
+                let dj = b.drop_(j);
+                b.block(&[dj])
+            };
+            let for_loop = b.for_loop("j", for_init, end, step, for_body, false);
+
+            let iter_body = {
+                let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+                let i1 = b.load_var("i1", AccessType::Loop, FirType::Int32);
+                let sum = b.binop(crate::FirBinOp::Add, i0, i1, FirType::Int32);
+                let ds = b.drop_(sum);
+                b.block(&[ds])
+            };
+            let iter_loop = b.iterator_for_loop(&["i0", "i1"], false, iter_body);
+            b.block(&[for_loop, iter_loop])
+        };
+
+        let mut dst = FirStore::new();
+        let cloned = clone_fir_hygienic(&src, src_block, &mut dst).expect("clone should succeed");
+        let renamed_originals: HashSet<_> = cloned
+            .local_renames
+            .iter()
+            .map(|r| r.original.as_str())
+            .collect();
+        assert!(renamed_originals.contains("j"));
+        assert!(renamed_originals.contains("i0"));
+        assert!(renamed_originals.contains("i1"));
+
+        let dump = dump_fir(&dst, cloned.root);
+        assert!(!dump.contains("ForLoop { var: \"j\""));
+        assert!(!dump.contains("IteratorForLoop { iterators: [\"i0\", \"i1\"]"));
+
+        let module = {
+            let mut b = FirBuilder::new(&mut dst);
+            let body = b.block(&[cloned.root]);
+            let f = fun(&mut b, "helper", &[], FirType::Void, Some(body), false);
+            let dsp_struct = b.block(&[]);
+            let globals = b.block(&[]);
+            let decls = b.block(&[f]);
+            b.module("mydsp", dsp_struct, globals, decls)
+        };
+        assert_no_checker_errors(&dst, module);
     }
 }

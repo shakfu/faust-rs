@@ -1,5 +1,60 @@
 # JOURNAL
 
+## 2026-02-23 (session 16)
+
+### FIR FunctionInliner — Milestone 2 hygienic clone + local rename engine
+
+Implemented the second step of the Rust FIR `FunctionInliner` plan in
+`crates/fir/src/inliner.rs`: a **scope-aware hygienic subtree clone engine**
+that will serve as the rewrite substrate for future callsite inlining.
+
+**What was added**
+- Public clone API:
+  - `clone_fir_hygienic(...)`
+  - `clone_fir_hygienic_with_state(...)`
+- Reusable freshness state:
+  - `FirHygienicCloneState`
+  - `FirHygienicCloneOptions` (fresh-name prefix)
+- Rename tracking/result structs:
+  - `FirHygienicCloneResult`
+  - `FirLocalRename`
+  - `FirLocalRenameKind`
+- Clone error type:
+  - `FirHygienicCloneError`
+
+**Behavior (Milestone 2 scope)**
+- Deep FIR subtree cloning into a destination `FirStore`
+- Hygienic renaming of local symbols introduced by the cloned subtree:
+  - `DeclareVar(kStack|kLoop)`
+  - `DeclareTable(kStack|kLoop)`
+  - `ForLoop.var` / `SimpleForLoop.var`
+  - `IteratorForLoop.iterators`
+  - `DeclareBufferIterators`
+- Consistent rewriting of local references:
+  - `LoadVar`, `LoadVarAddress`, `StoreVar`, `TeeVar`
+  - `LoadTable`, `StoreTable`, `ShiftArrayVar`
+- Scope-aware cloning for branch/loop boundaries (`Block`, `If`, `Switch`, loops, `WhileLoop`)
+- Reusable state guarantees fresh names across repeated clones (required for
+  inlining the same callee multiple times into one caller)
+
+**Rustdoc**
+- Updated module docs (`crates/fir/src/inliner.rs`) to reflect Milestones 1–2
+- Documented all new public types/functions and their role in future inlining
+
+**Tests**
+Added unit tests in `crates/fir/src/inliner.rs` for:
+- local declare/use rename consistency
+- repeated clone uniqueness with shared `FirHygienicCloneState`
+- loop/iterator variable renaming consistency
+- checker-based validation on modules embedding cloned blocks (no new FIR errors)
+
+**Validation**
+- `cargo fmt -p fir` ✅
+- `cargo test -p fir inliner` ✅
+- `cargo test -p fir checker` ✅
+
+---
+
 ## 2026-02-23 (session 15)
 
 ### FIR FunctionInliner — Milestone 1 analysis scaffolding in `crates/fir`
