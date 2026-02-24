@@ -1,5 +1,47 @@
 # JOURNAL
 
+## 2026-02-24 (session 29)
+
+### Runtime trace corpus (Phase 1) — add curated `interp`-safe DSP fixtures
+
+Added a curated mini-corpus for the new `xtask interp-trace-dump` runtime trace
+harness, separated from the main `tests/corpus/` parity/compile corpus.
+
+**What changed**
+- added `tests/runtime_corpus/README.md`
+  - documents the Phase 1 fixture set and recommended scenarios
+- added runtime-trace fixtures:
+  - `tests/runtime_corpus/trace_01_passthrough.dsp`
+  - `tests/runtime_corpus/trace_02_gain_bias_typed.dsp`
+  - `tests/runtime_corpus/trace_03_stereo_mix.dsp`
+  - `tests/runtime_corpus/trace_07_nonlinear_clip.dsp`
+  - `tests/runtime_corpus/trace_09_ui_slider.dsp`
+  - `tests/runtime_corpus/trace_22_parallel_mix.dsp`
+  - `tests/runtime_corpus/trace_31_extended_primitives_typed.dsp`
+  - `tests/runtime_corpus/trace_38_sine_phasor.dsp`
+
+**Why**
+- the runtime trace harness needs a stable subset that:
+  - produces well-typed FIR in the fast-lane,
+  - passes FIR verification,
+  - executes reliably through `interp`
+- `*_typed` variants force float literals for known fast-lane typing gaps in
+  math calls (`abs/min/max` on integer literals), especially for the extended
+  primitives coverage case
+- keeps the main `tests/corpus/rep_*` files unchanged for parity/compile work
+
+**Selection notes**
+- replaced a planned operator-precedence fixture with a UI slider fixture for
+  Phase 1 because the current fast-lane still produces FIR type mismatches on
+  constant-only precedence expressions (`FIR-B01/B03`)
+
+**Validation**
+- `cargo run -p xtask -- interp-trace-dump --case tests/runtime_corpus/trace_01_passthrough.dsp --scenario impulse --lane fast --num-blocks 1 --out /tmp/trace01.json` ✅
+- `cargo run -p xtask -- interp-trace-dump --case tests/runtime_corpus/trace_09_ui_slider.dsp --scenario impulse --lane fast --num-blocks 1 --out /tmp/trace09.json` ✅
+- `cargo run -p xtask -- interp-trace-dump --case tests/runtime_corpus/trace_31_extended_primitives_typed.dsp --scenario zeros --lane fast --num-blocks 1 --out /tmp/trace31_typed.json` ✅
+
+---
+
 ## 2026-02-24 (session 28)
 
 ### `xtask` runtime trace harness — Phase 1 prototype (`interp-trace-dump`)
