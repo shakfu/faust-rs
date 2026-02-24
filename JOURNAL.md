@@ -1,5 +1,37 @@
 # JOURNAL
 
+## 2026-02-24 (session 27)
+
+### Runtime validation plan — continuous DSP execution traces via `interp`
+
+Wrote a complete implementation plan for continuous compiler validation using
+the Rust interpreter backend (`interp`) as a runtime execution oracle for DSP
+corpus tests.
+
+**What changed**
+- added `porting/interp-runtime-trace-validation-plan-en.md`
+  - goals / non-goals
+  - corpus subset and deterministic scenario strategy
+  - trace format and snapshot layout proposal (`tests/runtime_traces/`)
+  - numeric comparison rules (tolerances, NaN/Inf handling)
+  - `xtask` command design (`interp-trace-gen`, `interp-trace-check`, lane diff)
+  - phased implementation plan (Phase 0→5)
+  - CI integration plan
+  - risk analysis and acceptance criteria
+  - explicit hooks/usage for FIR checker + future FIR pass equivalence checks
+
+**Why**
+- compile-only checks and text goldens do not validate runtime sample semantics
+- interpreter execution traces provide a practical continuous regression oracle
+  for FIR/lowering/backend changes
+- this will be especially useful to validate semantic-preserving FIR passes
+  (for example the `FunctionInliner`) after `checker.rs` structural validation
+
+**Validation**
+- documentation-only change (no code/tests run)
+
+---
+
 ## 2026-02-23 (session 26)
 
 ### Interp backend — accept C math names `fmin` / `fmax` in `math_lib_lookup`
