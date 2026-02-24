@@ -1,5 +1,80 @@
 # JOURNAL
 
+## 2026-02-24 (session 41)
+
+### Interp executor hardening plan — implement Phases A/B/C (checked path) in `try_execute_*`
+
+Implemented the planned executor hardening phases (hot-path aware checked-path
+coverage) in `crates/codegen/src/backends/interp/executor.rs`, extending the
+dual-mode runtime pattern:
+
+- fast-ish compatibility path remains via `execute_*` wrappers
+- checked path (`try_execute_*`) now protects a much broader set of failure
+  modes with structured runtime errors
+
+**Scope implemented (grouped across plan phases)**
+- **Phase A (hot path / immediate value)**:
+  - generalized stack-underflow checks for stack pops used in `try_execute_*`
+    (I/O, casts, control flow, math, etc.) by replacing `pop().unwrap()` with
+    checked helpers
+  - branch target checks in control-flow opcodes (`If`, `Select*`,
+    `CondBranch`, `Loop`) now return `missing_branch_target`
+  - `LoadSoundField*` no longer `unimplemented!` in checked mode; returns
+    `unsupported_runtime_feature`
+- **Phase B (global safety net in checked mode)**:
+  - added `panic_trapped` fallback in `try_execute_block_io(...)`
+  - wraps the checked executor loop in `catch_unwind` and reports a structured
+    error with last execution site `(opcode, block, pc)` for remaining unchecked
+    failures (for example heap OOB not yet explicitly categorized)
+- **Phase C (explicit I/O hardening)**:
+  - `LoadInput` / `StoreOutput` now validate channel/sample indices and return
+    `io_oob` instead of panicking
+  - `FbcExecError` extended with optional `channel` / `sample` metadata
+
+**What changed**
+- `crates/codegen/src/backends/interp/executor.rs`
+  - expanded `FbcExecError` categories:
+    - `stack_underflow`
+    - `missing_branch_target`
+    - `unsupported_runtime_feature`
+    - `panic_trapped`
+    - `io_oob`
+  - added helper functions:
+    - `pop_real_stack(...)`
+    - `pop_int_stack(...)`
+    - `require_branch_target(...)`
+  - added `ExecSite` tracking for panic-trap context (`opcode`, `block_id`, `pc`)
+  - `try_execute_block_io(...)` now wraps `try_execute_block_io_inner(...)`
+    in `catch_unwind` and converts uncaught panics to `panic_trapped`
+  - structured checked-mode handling added/extended across many opcode arms
+  - added regression tests:
+    - `store_output_stack_underflow_returns_structured_error`
+    - `unchecked_heap_oob_is_trapped_as_structured_panic_error_in_try_mode`
+    - `load_input_oob_returns_structured_io_error`
+
+**Why**
+- make checked-mode runtime validation (`xtask`, future differential traces)
+  robust across a wide range of malformed/inconsistent bytecode cases
+- preserve strict semantics (no implicit runtime repair/casts)
+- improve diagnostics quality while continuing to harden opcode coverage
+
+**Validation**
+- `cargo fmt -p codegen -p xtask` ✅
+- `cargo test -p codegen backends::interp::executor::tests::io_load_store -- --nocapture` ✅
+- `cargo test -p codegen backends::interp::executor::tests::store_output_stack_underflow_returns_structured_error -- --nocapture` ✅
+- `cargo test -p codegen backends::interp::executor::tests::unchecked_heap_oob_is_trapped_as_structured_panic_error_in_try_mode -- --nocapture` ✅
+- `cargo test -p codegen backends::interp::executor::tests::load_input_oob_returns_structured_io_error -- --nocapture` ✅
+- `cargo test -p xtask` ✅
+- `cargo run -p xtask -- interp-trace-dump --case tests/runtime_corpus_known_failures/int_plus_one_interp_stack_bug.dsp --scenario ramp --lane fast --num-blocks 1` ✅
+  - still reports structured `stack_underflow` (no panic)
+
+**Note**
+- `execute_*` / `compute()` compatibility APIs are still wrappers over checked
+  execution at this stage; a truly separated fast-path core remains a follow-up
+  optimization step from the dual-mode hardening plan.
+
+---
+
 ## 2026-02-24 (session 40)
 
 ### Interp executor hardening — document dual-mode (fast + checked) rollout plan
