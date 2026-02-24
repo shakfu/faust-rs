@@ -13,6 +13,7 @@
 //!   - `interp-trace-gen`, `interp-trace-check` (Phase 2 snapshot scaffold)
 //!   - `interp-trace-diff-lanes` (Phase 3 lane differential scaffold)
 //!   - `interp-trace-dump-cppfbc` (C++ Faust `.fbc` -> Rust interp runtime)
+//!   - `interp-trace-gen-cppfbc` (batch-generate persisted traces from C++ `.fbc`)
 //! - Differential reports:
 //!   - parser parity report
 //!   - corpus status report
@@ -43,6 +44,7 @@ Usage:
   cargo run -p xtask -- golden-gen-cpp [-- <extra args passed to FAUST_CPP_BIN>]
   cargo run -p xtask -- interp-trace-dump --case <tests/corpus/foo.dsp> [--scenario zeros|impulse|ramp|sine] [--lane legacy|fast] [--strict-fir-types]
   cargo run -p xtask -- interp-trace-dump-cppfbc --case <tests/corpus/foo.dsp> [--scenario zeros|impulse|ramp|sine] [--faust-bin /path/to/faust]
+  cargo run -p xtask -- interp-trace-gen-cppfbc [--case <tests/corpus/foo.dsp>] [--scenario zeros|impulse|ramp|sine] [--out-dir <dir>] [--faust-bin /path/to/faust]
   cargo run -p xtask -- interp-trace-gen [--case <tests/runtime_corpus/foo.dsp>] [--lane legacy|fast] [--strict-fir-types]
   cargo run -p xtask -- interp-trace-check [--case <tests/runtime_corpus/foo.dsp>] [--lane legacy|fast] [--strict-fir-types]
   cargo run -p xtask -- interp-trace-diff-lanes [--case <tests/runtime_corpus/foo.dsp>] [--strict-fir-types]
@@ -102,6 +104,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         "interp-trace-dump" => interp_trace_dump(args)?,
         "interp-trace-dump-cppfbc" => interp_trace_dump_cppfbc(args)?,
+        "interp-trace-gen-cppfbc" => interp_trace_gen_cppfbc(args)?,
         "interp-trace-gen" => interp_trace_gen(args)?,
         "interp-trace-check" => interp_trace_check(args)?,
         "interp-trace-diff-lanes" => interp_trace_diff_lanes(args)?,
@@ -334,6 +337,31 @@ struct InterpTraceCppFbcDumpOptions {
     faust_bin: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InterpTraceCppFbcBatchOptions {
+    case: Option<PathBuf>,
+    scenario: TraceScenario,
+    sample_rate: usize,
+    block_size: usize,
+    num_blocks: usize,
+    out_dir: PathBuf,
+    faust_bin: Option<PathBuf>,
+}
+
+impl Default for InterpTraceCppFbcBatchOptions {
+    fn default() -> Self {
+        Self {
+            case: None,
+            scenario: TraceScenario::Impulse,
+            sample_rate: 48_000,
+            block_size: 64,
+            num_blocks: 1,
+            out_dir: workspace_root().join("tests/runtime_traces").join("cppfbc"),
+            faust_bin: None,
+        }
+    }
+}
+
 impl Default for InterpTraceDumpOptions {
     fn default() -> Self {
         Self {
@@ -434,6 +462,57 @@ fn interp_trace_dump_cppfbc(
     } else {
         print!("{json}");
     }
+    Ok(())
+}
+
+fn interp_trace_gen_cppfbc(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let options = parse_interp_trace_gen_cppfbc_options(&mut args)?;
+    let mut cases = if let Some(case) = &options.case {
+        vec![case.clone()]
+    } else {
+        corpus_files()?
+            .into_iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .is_some_and(|n| n.starts_with("rep_"))
+            })
+            .collect()
+    };
+    cases.sort();
+    if cases.is_empty() {
+        return Err("no corpus cases found for interp-trace-gen-cppfbc".into());
+    }
+
+    let mut generated = 0usize;
+    for case in cases {
+        let case_id = case_name(&case)?;
+        let trace = run_interp_trace_case_from_cpp_fbc(&InterpTraceCppFbcDumpOptions {
+            trace: InterpTraceDumpOptions {
+                case: case.clone(),
+                scenario: options.scenario,
+                lane: TraceLane::Fast,
+                sample_rate: options.sample_rate,
+                block_size: options.block_size,
+                num_blocks: options.num_blocks,
+                strict_fir_types: false,
+                out: None,
+            },
+            faust_bin: options.faust_bin.clone(),
+        })?;
+        let case_dir = options.out_dir.join(&case_id);
+        fs::create_dir_all(&case_dir)?;
+        let path = case_dir.join(format!("{}.json", options.scenario.as_str()));
+        fs::write(&path, render_runtime_trace_json(&trace))?;
+        println!("generated {}", path.display());
+        generated += 1;
+    }
+    println!(
+        "interp-trace-gen-cppfbc: generated {generated} trace snapshot(s) in {}",
+        options.out_dir.display()
+    );
     Ok(())
 }
 
@@ -586,6 +665,67 @@ fn parse_interp_trace_dump_cppfbc_options(
         return Err("block-size and num-blocks must be > 0".into());
     }
     options.trace.lane = TraceLane::Fast;
+    Ok(options)
+}
+
+fn parse_interp_trace_gen_cppfbc_options(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<InterpTraceCppFbcBatchOptions, Box<dyn std::error::Error>> {
+    let mut options = InterpTraceCppFbcBatchOptions::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--case" => {
+                let Some(path) = args.next() else {
+                    return Err("missing value after --case".into());
+                };
+                options.case = Some(PathBuf::from(path));
+            }
+            "--scenario" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value after --scenario".into());
+                };
+                options.scenario = TraceScenario::parse(&value)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            }
+            "--faust-bin" => {
+                let Some(path) = args.next() else {
+                    return Err("missing value after --faust-bin".into());
+                };
+                options.faust_bin = Some(PathBuf::from(path));
+            }
+            "--sample-rate" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value after --sample-rate".into());
+                };
+                options.sample_rate = value.parse::<usize>()?;
+            }
+            "--block-size" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value after --block-size".into());
+                };
+                options.block_size = value.parse::<usize>()?;
+            }
+            "--num-blocks" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value after --num-blocks".into());
+                };
+                options.num_blocks = value.parse::<usize>()?;
+            }
+            "--out-dir" => {
+                let Some(path) = args.next() else {
+                    return Err("missing value after --out-dir".into());
+                };
+                options.out_dir = PathBuf::from(path);
+            }
+            "--help" | "-h" => {
+                return Err("usage: cargo run -p xtask -- interp-trace-gen-cppfbc [--case <path>] [--scenario zeros|impulse|ramp|sine] [--faust-bin /path/to/faust] [--sample-rate N] [--block-size N] [--num-blocks N] [--out-dir <dir>]".into());
+            }
+            other => return Err(format!("unknown interp-trace-gen-cppfbc option: {other}").into()),
+        }
+    }
+    if options.block_size == 0 || options.num_blocks == 0 {
+        return Err("block-size and num-blocks must be > 0".into());
+    }
     Ok(options)
 }
 

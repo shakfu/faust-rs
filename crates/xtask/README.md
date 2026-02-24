@@ -22,6 +22,7 @@ cargo run -p xtask -- <command>
 | `golden-gen-cpp` | Regenerate C++ reference goldens (requires `FAUST_CPP_BIN`) |
 | `interp-trace-dump` | Phase 1 runtime trace harness: execute one DSP through `interp` and dump JSON trace |
 | `interp-trace-dump-cppfbc` | Generate C++ Faust `.fbc` (`-lang interp`), then execute it with the Rust `interp` runtime and dump JSON trace |
+| `interp-trace-gen-cppfbc` | Batch-generate persisted runtime traces from C++ Faust `.fbc` files and execute them with the Rust `interp` runtime |
 | `interp-trace-gen` | Phase 2 scaffold: generate runtime trace snapshots for `tests/runtime_corpus/` |
 | `interp-trace-check` | Phase 2 scaffold: compare runtime traces against generated snapshots (tolerant float compare) |
 | `interp-trace-diff-lanes` | Phase 3 scaffold: compare `legacy` vs `fast-lane` runtime traces |
@@ -36,7 +37,7 @@ cargo run -p xtask -- <command>
 
 | Variable | Used by | Description |
 |---|---|---|
-| `FAUST_CPP_BIN` | `golden-gen-cpp`, `interp-trace-dump-cppfbc` | Path to reference C++ `faust` binary |
+| `FAUST_CPP_BIN` | `golden-gen-cpp`, `interp-trace-dump-cppfbc`, `interp-trace-gen-cppfbc` | Path to reference C++ `faust` binary |
 | `GOLDEN_REF` | `golden-check` | `rust` (default) or `cpp` |
 
 ## Design invariants
@@ -95,6 +96,40 @@ Notes:
   Rust FIR lowering pipeline
 - `--lane` and `--strict-fir-types` do not apply to this command (source is the
   C++-generated `.fbc`, not Rust-generated FIR)
+
+## `interp-trace-gen-cppfbc` (persisted C++ `.fbc` traces)
+
+Batch-generates and persists JSON execution traces by:
+- compiling DSPs with C++ Faust (`-lang interp`)
+- loading the generated `.fbc` in Rust
+- executing with the Rust `interp` runtime
+- writing traces to disk for later inspection/comparison
+
+Examples:
+
+```bash
+cargo run -p xtask -- interp-trace-gen-cppfbc \
+  --case tests/corpus/rep_01_passthrough.dsp \
+  --scenario impulse \
+  --out-dir /tmp/runtime_traces_cppfbc
+```
+
+```bash
+FAUST_CPP_BIN=/usr/local/bin/faust \
+cargo run -p xtask -- interp-trace-gen-cppfbc \
+  --scenario impulse
+```
+
+Current behavior:
+- default corpus = `tests/corpus/rep_*.dsp`
+- default output directory = `tests/runtime_traces/cppfbc`
+- one scenario per invocation (`--scenario`)
+- writes traces under `<out-dir>/<case>/<scenario>.json`
+
+Notes:
+- this command is intended to preserve traces (unlike ad hoc one-off dumps)
+- it complements `interp-trace-dump-cppfbc` and enables future C++ differential
+  runtime workflows
 
 ## `interp-trace-gen` / `interp-trace-check` (Phase 2 scaffold)
 
