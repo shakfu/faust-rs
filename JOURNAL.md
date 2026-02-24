@@ -1,5 +1,40 @@
 # JOURNAL
 
+## 2026-02-23 (session 26)
+
+### Interp backend — accept C math names `fmin` / `fmax` in `math_lib_lookup`
+
+Fixed the remaining tri-backend corpus inconsistency where
+`tests/corpus/rep_31_extended_primitives.dsp` compiled on `C`/`C++` but failed
+on `Interp` with `unknown math function: fmin`.
+
+**What changed**
+- `crates/codegen/src/backends/interp/compiler.rs`
+  - extended `math_lib_lookup(...)` to accept standard C math names:
+    - `fminf`, `fmin` -> `FbcOpcode::Minf`
+    - `fmaxf`, `fmax` -> `FbcOpcode::Maxf`
+  - kept legacy aliases (`min_f`, `min_`, `max_f`, `max_`) unchanged
+  - expanded `test_math_lib_lookup` with `fmin/fmax` assertions
+
+**Why**
+- the interpreter backend already supports `Minf`/`Maxf` opcodes in the
+  compiler/executor/optimizer stack
+- only the function-name lookup table was missing the standard `fmin/fmax`
+  spellings emitted/used in FIR math call prototypes
+
+**Validation**
+- `cargo fmt -p codegen` ✅
+- `cargo test -p codegen backends::interp::compiler::tests::test_math_lib_lookup -- --nocapture` ✅
+- `cargo build -p compiler` ✅
+- `faust-rs -lang interp tests/corpus/rep_31_extended_primitives.dsp` ✅
+- corpus re-check (`tests/corpus/rep_*.dsp`) on `C/C++/Interp`:
+  - `C: 19 OK / 21 FAIL`
+  - `C++: 19 OK / 21 FAIL`
+  - `Interp: 19 OK / 21 FAIL`
+  - `mixed backend outcomes: 0` ✅
+
+---
+
 ## 2026-02-23 (session 25)
 
 ### Interp backend — predeclare FIR module storage (`dsp_struct` / `globals`) before compiling functions

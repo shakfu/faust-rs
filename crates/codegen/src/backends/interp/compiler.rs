@@ -1561,6 +1561,13 @@ pub const fn binop_to_fbc(op: fir::FirBinOp) -> (FbcOpcode, FbcOpcode) {
 /// - `InterpreterInstVisitor::initMathTable()` in `interpreter_instructions.hh`.
 ///
 /// Handles both float-suffix (`sinf`) and double (bare `sin`) forms.
+///
+/// Note on `min`/`max` aliases:
+/// - `fmin`/`fmax` (and `fminf`/`fmaxf`) are the standard C math spellings and
+///   are the primary names used by the current FIR fast-lane/tests.
+/// - `min_f`/`min_` and `max_f`/`max_` are kept for compatibility with older
+///   or alternate FIR producers. They appear to be legacy aliases and may be
+///   removable after a dedicated compatibility audit.
 #[must_use]
 pub fn math_lib_lookup(name: &str) -> Option<FbcOpcode> {
     match name {
@@ -1581,8 +1588,10 @@ pub fn math_lib_lookup(name: &str) -> Option<FbcOpcode> {
         "fmodf" | "fmod" => Some(FbcOpcode::Fmodf),
         "logf" | "log" => Some(FbcOpcode::Logf),
         "log10f" | "log10" => Some(FbcOpcode::Log10f),
-        "min_f" | "min_" => Some(FbcOpcode::Minf),
-        "max_f" | "max_" => Some(FbcOpcode::Maxf),
+        // Legacy aliases (`min_f`/`min_`, `max_f`/`max_`) are preserved for
+        // compatibility; prefer standard C names `fmin`/`fmax`.
+        "min_f" | "min_" | "fminf" | "fmin" => Some(FbcOpcode::Minf),
+        "max_f" | "max_" | "fmaxf" | "fmax" => Some(FbcOpcode::Maxf),
         "powf" | "pow" => Some(FbcOpcode::Powf),
         "remainderf" | "remainder" => Some(FbcOpcode::RemReal),
         "rintf" | "rint" => Some(FbcOpcode::Rintf),
@@ -2130,6 +2139,10 @@ mod tests {
         assert_eq!(math_lib_lookup("sinf"), Some(FbcOpcode::Sinf));
         assert_eq!(math_lib_lookup("sin"), Some(FbcOpcode::Sinf));
         assert_eq!(math_lib_lookup("abs"), Some(FbcOpcode::Abs));
+        assert_eq!(math_lib_lookup("fminf"), Some(FbcOpcode::Minf));
+        assert_eq!(math_lib_lookup("fmin"), Some(FbcOpcode::Minf));
+        assert_eq!(math_lib_lookup("fmaxf"), Some(FbcOpcode::Maxf));
+        assert_eq!(math_lib_lookup("fmax"), Some(FbcOpcode::Maxf));
         assert_eq!(math_lib_lookup("unknown"), None);
     }
 
