@@ -1,5 +1,58 @@
 # JOURNAL
 
+## 2026-02-23 (session 18)
+
+### FIR FunctionInliner — Milestone 4 one-pass callsite rewrite (canonical helper inlining)
+
+Implemented the fourth step of the Rust FIR `FunctionInliner` plan in
+`crates/fir/src/inliner.rs`: a first **module-level callsite rewrite pass**
+that inlines eligible `FunCall` nodes into function bodies when the callee body
+has a canonical extractable return shape.
+
+**What was added**
+- Public one-pass rewrite API:
+  - `inline_fir_module_once(...)`
+- New rewrite diagnostics/stats types:
+  - `FirInlineRewriteStats`
+  - `FirInlineRewriteError`
+
+**Behavior (Milestone 4 scope)**
+- Analyzes the module with `analyze_fir_inliner(...)`
+- Rewrites all function bodies once (globals + declarations are rebuilt into a
+  new `FirStore`)
+- For eligible callsites:
+  - rewrites actual arguments recursively
+  - materializes args (Milestone 3)
+  - hygienically clones/substitutes the callee body
+  - splices canonical callee prefix statements + replaces the `FunCall` with the
+    extracted returned value
+- Tracks one-pass rewrite statistics:
+  - seen / inlined / skipped-non-candidate / skipped-unknown / skipped-unsupported-shape
+
+**Current limitations (documented in Rustdoc)**
+- One pass only (no fixpoint iteration)
+- No recursive re-inlining of the freshly inlined body in the same pass
+- Only canonical callee bodies ending with a top-level `Return(Some(v))`
+- Loop/switch statement internals are currently cloned hygienically but not yet
+  recursively rewritten for nested callsites
+
+**Rustdoc**
+- Updated module docs in `crates/fir/src/inliner.rs` to reflect Milestones 1–4
+- Documented the new Milestone 4 public API and rewrite stats/error types
+
+**Tests**
+Added unit tests in `crates/fir/src/inliner.rs` for:
+- successful inlining of a canonical helper callsite
+- skip/preserve behavior for non-canonical callee return shape (with stats)
+- checker validation of rewritten modules after inlining/skipping
+
+**Validation**
+- `cargo fmt -p fir` ✅
+- `cargo test -p fir inliner` ✅
+- `cargo test -p fir checker` ✅
+
+---
+
 ## 2026-02-23 (session 17)
 
 ### FIR FunctionInliner — Milestone 3 parameter materialization + `kFunArgs` substitution

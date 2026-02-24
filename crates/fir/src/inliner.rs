@@ -1,4 +1,4 @@
-//! FIR function inliner scaffolding (Milestones 1–2).
+//! FIR function inliner scaffolding (Milestones 1–4).
 //!
 //! # Scope
 //! This module currently implements:
@@ -7,11 +7,13 @@
 //! - SCC detection,
 //! - simple callee size metrics,
 //! - candidate selection decisions (legality/profitability pre-checks).
-//! - hygienic FIR subtree cloning with local-variable renaming (future inlining substrate).
+//! - hygienic FIR subtree cloning with local-variable renaming,
+//! - callee argument materialization and `kFunArgs` substitution,
+//! - one-pass callsite rewriting for canonical value-returning helper bodies.
 //!
-//! It still does **not** inline `FunCall` nodes yet. Callsite rewriting and
-//! statement splicing will be layered on top of these analysis/clone utilities
-//! in later milestones.
+//! Current rewrite support is intentionally conservative: only a subset of
+//! statement/value shapes are recursively rewritten for nested callsites, and
+//! only canonical callee bodies ending with `Return(Some(v))` are inlined.
 //!
 //! # Source provenance (C++)
 //! - `compiler/generator/fir_to_fir.cpp` (`FunctionInliner`, `FunctionCallInliner`)
@@ -827,6 +829,63 @@ impl From<FirHygienicCloneError> for FirInlinePrepareError {
     }
 }
 
+/// One-pass callsite inlining statistics for [`inline_fir_module_once`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FirInlineRewriteStats {
+    /// Number of `FunCall` nodes visited while rewriting function bodies.
+    pub callsites_seen: usize,
+    /// Number of callsites actually inlined.
+    pub callsites_inlined: usize,
+    /// Calls skipped because the callee is not an eligible candidate.
+    pub callsites_skipped_non_candidate: usize,
+    /// Calls skipped because the callee body shape is not yet supported for
+    /// value extraction/splicing (for example non-canonical returns).
+    pub callsites_skipped_unsupported_shape: usize,
+    /// Calls skipped because the callee name is unknown in the analyzed module.
+    pub callsites_skipped_unknown_callee: usize,
+}
+
+/// Errors returned by the one-pass FIR module inliner rewrite.
+#[derive(Debug)]
+pub enum FirInlineRewriteError {
+    /// Analysis stage failed (invalid module shape, duplicate functions, ...).
+    Analysis(FirInlineAnalysisError),
+    /// Hygienic cloning failed on an unsupported/unknown node.
+    Clone(FirHygienicCloneError),
+    /// Callee-body preparation failed during a callsite inline attempt.
+    Prepare(FirInlinePrepareError),
+}
+
+impl std::fmt::Display for FirInlineRewriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Analysis(err) => err.fmt(f),
+            Self::Clone(err) => err.fmt(f),
+            Self::Prepare(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for FirInlineRewriteError {}
+
+impl From<FirInlineAnalysisError> for FirInlineRewriteError {
+    fn from(value: FirInlineAnalysisError) -> Self {
+        Self::Analysis(value)
+    }
+}
+
+impl From<FirHygienicCloneError> for FirInlineRewriteError {
+    fn from(value: FirHygienicCloneError) -> Self {
+        Self::Clone(value)
+    }
+}
+
+impl From<FirInlinePrepareError> for FirInlineRewriteError {
+    fn from(value: FirInlinePrepareError) -> Self {
+        Self::Prepare(value)
+    }
+}
+
 /// Hygienically clones a FIR subtree into `dst_store` using a fresh local-state.
 ///
 /// This convenience wrapper is suitable for one-off clones. For repeated clones
@@ -951,7 +1010,34 @@ pub fn prepare_callee_body_for_inlining(
             declare_stmt: decl,
         });
     }
+    prepare_callee_body_for_inlining_with_cloned_args(
+        src_store,
+        callee_decl,
+        body_id,
+        dst_store,
+        state,
+        arg_materialization_stmts,
+        param_bindings,
+        subst,
+    )
+}
 
+fn state_fresh_local_name(state: &mut FirHygienicCloneState, original: &str) -> String {
+    let id = state.next_local_id;
+    state.next_local_id += 1;
+    format!("{}{}_{}", state.options.local_prefix, id, original)
+}
+
+fn prepare_callee_body_for_inlining_with_cloned_args(
+    src_store: &FirStore,
+    _callee_decl: FirId,
+    body_id: FirId,
+    dst_store: &mut FirStore,
+    state: &mut FirHygienicCloneState,
+    arg_materialization_stmts: Vec<FirId>,
+    param_bindings: Vec<FirMaterializedArgBinding>,
+    subst: HashMap<String, String>,
+) -> Result<FirPreparedInlineBody, FirInlinePrepareError> {
     let mut cloner = HygienicCloner::new(src_store, dst_store, state);
     cloner.fun_arg_subst = subst;
     cloner.push_scope();
@@ -966,10 +1052,625 @@ pub fn prepare_callee_body_for_inlining(
     })
 }
 
-fn state_fresh_local_name(state: &mut FirHygienicCloneState, original: &str) -> String {
-    let id = state.next_local_id;
-    state.next_local_id += 1;
-    format!("{}{}_{}", state.options.local_prefix, id, original)
+fn prepare_callee_body_for_inlining_from_cloned_args(
+    src_store: &FirStore,
+    callee_decl: FirId,
+    actual_args_in_dst: &[FirId],
+    dst_store: &mut FirStore,
+    state: &mut FirHygienicCloneState,
+) -> Result<FirPreparedInlineBody, FirInlinePrepareError> {
+    let FirMatch::DeclareFun {
+        name, args, body, ..
+    } = match_fir(src_store, callee_decl)
+    else {
+        return Err(FirInlinePrepareError::CalleeNotFunction(callee_decl));
+    };
+    let Some(body_id) = body else {
+        return Err(FirInlinePrepareError::CalleeHasNoBody {
+            name,
+            node: callee_decl,
+        });
+    };
+    if args.len() != actual_args_in_dst.len() {
+        return Err(FirInlinePrepareError::ArgCountMismatch {
+            name,
+            expected: args.len(),
+            got: actual_args_in_dst.len(),
+        });
+    }
+
+    let mut arg_materialization_stmts = Vec::with_capacity(actual_args_in_dst.len());
+    let mut param_bindings = Vec::with_capacity(actual_args_in_dst.len());
+    let mut subst = HashMap::<String, String>::new();
+
+    for (param, actual_arg) in args.iter().zip(actual_args_in_dst.iter().copied()) {
+        let temp_name = state_fresh_local_name(state, &format!("arg_{}", param.name));
+        let decl = {
+            let mut b = FirBuilder::new(dst_store);
+            b.declare_var(
+                temp_name.clone(),
+                param.typ.clone(),
+                AccessType::Stack,
+                Some(actual_arg),
+            )
+        };
+        subst.insert(param.name.clone(), temp_name.clone());
+        arg_materialization_stmts.push(decl);
+        param_bindings.push(FirMaterializedArgBinding {
+            param_name: param.name.clone(),
+            temp_name,
+            typ: param.typ.clone(),
+            declare_stmt: decl,
+        });
+    }
+
+    prepare_callee_body_for_inlining_with_cloned_args(
+        src_store,
+        callee_decl,
+        body_id,
+        dst_store,
+        state,
+        arg_materialization_stmts,
+        param_bindings,
+        subst,
+    )
+}
+
+/// Inline eligible FIR callsites in one pass over all function bodies in a module.
+///
+/// This implements the first callsite-rewrite milestone:
+/// - analyze the module with [`analyze_fir_inliner`],
+/// - rewrite every function body once,
+/// - splice prepared callee statements for calls whose callee is an eligible
+///   candidate **and** whose body has a canonical inlineable shape.
+///
+/// Current limitations (deferred to later milestones):
+/// - one pass only (no fixpoint iteration),
+/// - inlined callee bodies are not recursively re-inlined in the same pass,
+/// - only canonical callee bodies ending with `Return(Some(v))` are inlined.
+///
+/// # Errors
+/// Returns [`FirInlineRewriteError`] if module analysis fails or if the rewriter
+/// encounters a cloning/preparation error on supported rewrite paths.
+pub fn inline_fir_module_once(
+    src_store: &FirStore,
+    module: FirId,
+    options: &FirInlineOptions,
+) -> Result<(FirStore, FirId, FirInlineRewriteStats), FirInlineRewriteError> {
+    let analysis = analyze_fir_inliner(src_store, module, options)?;
+    let mut dst_store = FirStore::new();
+    let mut state = FirHygienicCloneState::default();
+    let mut stats = FirInlineRewriteStats::default();
+
+    let fn_decls: BTreeMap<String, FirId> = analysis
+        .functions
+        .iter()
+        .map(|(name, summary)| (name.clone(), summary.decl_id))
+        .collect();
+
+    let module = rewrite_module_once(
+        src_store,
+        module,
+        &analysis,
+        &fn_decls,
+        &mut dst_store,
+        &mut state,
+        &mut stats,
+    )?;
+
+    Ok((dst_store, module, stats))
+}
+
+fn rewrite_module_once(
+    src_store: &FirStore,
+    module: FirId,
+    analysis: &FirInlineAnalysis,
+    fn_decls: &BTreeMap<String, FirId>,
+    dst_store: &mut FirStore,
+    state: &mut FirHygienicCloneState,
+    stats: &mut FirInlineRewriteStats,
+) -> Result<FirId, FirInlineRewriteError> {
+    let FirMatch::Module {
+        name,
+        dsp_struct,
+        globals,
+        declarations,
+    } = match_fir(src_store, module)
+    else {
+        return Err(FirInlineRewriteError::Analysis(
+            FirInlineAnalysisError::RootNotModule,
+        ));
+    };
+
+    let dsp_struct = clone_fir_hygienic_with_state(src_store, dsp_struct, dst_store, state)?.root;
+    let globals = rewrite_fun_section_once(
+        src_store,
+        globals,
+        analysis,
+        fn_decls,
+        dst_store,
+        state,
+        stats,
+        FirFunctionSection::Globals,
+    )?;
+    let declarations = rewrite_fun_section_once(
+        src_store,
+        declarations,
+        analysis,
+        fn_decls,
+        dst_store,
+        state,
+        stats,
+        FirFunctionSection::Declarations,
+    )?;
+
+    let mut b = FirBuilder::new(dst_store);
+    Ok(b.module(name, dsp_struct, globals, declarations))
+}
+
+fn rewrite_fun_section_once(
+    src_store: &FirStore,
+    section_id: FirId,
+    analysis: &FirInlineAnalysis,
+    fn_decls: &BTreeMap<String, FirId>,
+    dst_store: &mut FirStore,
+    state: &mut FirHygienicCloneState,
+    stats: &mut FirInlineRewriteStats,
+    _section_kind: FirFunctionSection,
+) -> Result<FirId, FirInlineRewriteError> {
+    let FirMatch::Block(items) = match_fir(src_store, section_id) else {
+        return Err(FirInlineRewriteError::Analysis(
+            FirInlineAnalysisError::InvalidModuleSection {
+                section: "section",
+                node: section_id,
+            },
+        ));
+    };
+
+    let mut out_items = Vec::with_capacity(items.len());
+    for item in items {
+        match match_fir(src_store, item) {
+            FirMatch::DeclareFun {
+                name,
+                typ,
+                args,
+                body: Some(body),
+                is_inline,
+            } => {
+                let body = rewrite_function_body_once(
+                    src_store, body, analysis, fn_decls, dst_store, state, stats,
+                )?;
+                let mut b = FirBuilder::new(dst_store);
+                out_items.push(b.declare_fun(name, typ, &args, Some(body), is_inline));
+            }
+            FirMatch::DeclareFun {
+                name,
+                typ,
+                args,
+                body: None,
+                is_inline,
+            } => {
+                let mut b = FirBuilder::new(dst_store);
+                out_items.push(b.declare_fun(name, typ, &args, None, is_inline));
+            }
+            _ => {
+                out_items
+                    .push(clone_fir_hygienic_with_state(src_store, item, dst_store, state)?.root);
+            }
+        }
+    }
+    let mut b = FirBuilder::new(dst_store);
+    Ok(b.block(&out_items))
+}
+
+fn rewrite_function_body_once(
+    src_store: &FirStore,
+    body: FirId,
+    analysis: &FirInlineAnalysis,
+    fn_decls: &BTreeMap<String, FirId>,
+    dst_store: &mut FirStore,
+    state: &mut FirHygienicCloneState,
+    stats: &mut FirInlineRewriteStats,
+) -> Result<FirId, FirInlineRewriteError> {
+    let mut rw = InlineBodyRewriter {
+        src: src_store,
+        dst: dst_store,
+        analysis,
+        fn_decls,
+        state,
+        stats,
+    };
+    rw.rewrite_stmt_root(body)
+}
+
+fn canonical_inline_body_from_prepared(
+    store: &FirStore,
+    body: FirId,
+) -> Option<(Vec<FirId>, FirId)> {
+    let FirMatch::Block(stmts) = match_fir(store, body) else {
+        return None;
+    };
+    let (last, prefix) = stmts.split_last()?;
+    if prefix
+        .iter()
+        .any(|stmt| matches!(match_fir(store, *stmt), FirMatch::Return(_)))
+    {
+        return None;
+    }
+    let FirMatch::Return(Some(ret_value)) = match_fir(store, *last) else {
+        return None;
+    };
+    Some((prefix.to_vec(), ret_value))
+}
+
+struct InlineBodyRewriter<'a, 'b> {
+    src: &'a FirStore,
+    dst: &'b mut FirStore,
+    analysis: &'a FirInlineAnalysis,
+    fn_decls: &'a BTreeMap<String, FirId>,
+    state: &'b mut FirHygienicCloneState,
+    stats: &'b mut FirInlineRewriteStats,
+}
+
+impl<'a, 'b> InlineBodyRewriter<'a, 'b> {
+    fn rewrite_stmt_root(&mut self, root: FirId) -> Result<FirId, FirInlineRewriteError> {
+        let mut inner = InlineStmtCloner {
+            cloner: HygienicCloner::new(self.src, self.dst, self.state),
+            analysis: self.analysis,
+            fn_decls: self.fn_decls,
+            stats: self.stats,
+        };
+        inner.rewrite_stmt_as_stmt(root)
+    }
+}
+
+struct InlineStmtCloner<'a, 'b, 'c> {
+    cloner: HygienicCloner<'a, 'b>,
+    analysis: &'c FirInlineAnalysis,
+    fn_decls: &'c BTreeMap<String, FirId>,
+    stats: &'c mut FirInlineRewriteStats,
+}
+
+impl<'a, 'b, 'c> InlineStmtCloner<'a, 'b, 'c> {
+    fn rewrite_stmt_as_stmt(&mut self, id: FirId) -> Result<FirId, FirInlineRewriteError> {
+        let stmts = self.rewrite_stmt_to_vec(id)?;
+        if stmts.len() == 1 {
+            Ok(stmts[0])
+        } else {
+            let mut b = FirBuilder::new(self.cloner.dst);
+            Ok(b.block(&stmts))
+        }
+    }
+
+    fn rewrite_block(&mut self, stmts: Vec<FirId>) -> Result<FirId, FirInlineRewriteError> {
+        self.cloner.push_scope();
+        let mut out = Vec::new();
+        for stmt in stmts {
+            out.extend(self.rewrite_stmt_to_vec(stmt)?);
+        }
+        self.cloner.pop_scope();
+        let mut b = FirBuilder::new(self.cloner.dst);
+        Ok(b.block(&out))
+    }
+
+    fn rewrite_stmt_to_vec(&mut self, id: FirId) -> Result<Vec<FirId>, FirInlineRewriteError> {
+        let out = match match_fir(self.cloner.src, id) {
+            FirMatch::Block(stmts) => vec![self.rewrite_block(stmts)?],
+            FirMatch::DeclareVar {
+                name,
+                typ,
+                access,
+                init,
+            } => {
+                let mut prefix = Vec::new();
+                let init = if let Some(init_id) = init {
+                    let (mut p, v) = self.rewrite_value(init_id)?;
+                    prefix.append(&mut p);
+                    Some(v)
+                } else {
+                    None
+                };
+                let name = if matches!(access, AccessType::Stack | AccessType::Loop) {
+                    self.cloner
+                        .bind_local_decl(id, &name, access, FirLocalRenameKind::DeclareVar)
+                } else {
+                    name
+                };
+                let stmt = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.declare_var(name, typ, access, init)
+                };
+                prefix.push(stmt);
+                prefix
+            }
+            FirMatch::DeclareTable {
+                name,
+                access,
+                elem_type,
+                values,
+            } => {
+                let mut prefix = Vec::new();
+                let mut cloned_values = Vec::with_capacity(values.len());
+                for v in values {
+                    let (mut p, vv) = self.rewrite_value(v)?;
+                    prefix.append(&mut p);
+                    cloned_values.push(vv);
+                }
+                let name = if matches!(access, AccessType::Stack | AccessType::Loop) {
+                    self.cloner
+                        .bind_local_decl(id, &name, access, FirLocalRenameKind::DeclareTable)
+                } else {
+                    name
+                };
+                let stmt = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.declare_table(name, access, elem_type, &cloned_values)
+                };
+                prefix.push(stmt);
+                prefix
+            }
+            FirMatch::StoreVar {
+                name,
+                access,
+                value,
+            } => {
+                let (mut prefix, value) = self.rewrite_value(value)?;
+                let remap = self.cloner.remap_name_by_access(&name, access);
+                let out_access = self.cloner.remap_access(access, &name);
+                let stmt = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.store_var(remap, out_access, value)
+                };
+                prefix.push(stmt);
+                prefix
+            }
+            FirMatch::StoreTable {
+                name,
+                access,
+                index,
+                value,
+            } => {
+                let (mut p_idx, idx) = self.rewrite_value(index)?;
+                let (mut p_val, val) = self.rewrite_value(value)?;
+                let mut prefix = Vec::new();
+                prefix.append(&mut p_idx);
+                prefix.append(&mut p_val);
+                let remap = self.cloner.remap_name_by_access(&name, access);
+                let out_access = self.cloner.remap_access(access, &name);
+                let stmt = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.store_table(remap, out_access, idx, val)
+                };
+                prefix.push(stmt);
+                prefix
+            }
+            FirMatch::Drop(v) => {
+                let (mut prefix, v) = self.rewrite_value(v)?;
+                let stmt = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.drop_(v)
+                };
+                prefix.push(stmt);
+                prefix
+            }
+            FirMatch::Return(v) => {
+                let mut prefix = Vec::new();
+                let v = if let Some(v) = v {
+                    let (mut p, vv) = self.rewrite_value(v)?;
+                    prefix.append(&mut p);
+                    Some(vv)
+                } else {
+                    None
+                };
+                let stmt = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.ret(v)
+                };
+                prefix.push(stmt);
+                prefix
+            }
+            FirMatch::If {
+                cond,
+                then_block,
+                else_block,
+            } => {
+                let (mut prefix, cond) = self.rewrite_value(cond)?;
+                let then_stmt = self.rewrite_stmt_as_stmt(then_block)?;
+                let else_stmt = match else_block {
+                    Some(v) => Some(self.rewrite_stmt_as_stmt(v)?),
+                    None => None,
+                };
+                let stmt = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.if_(cond, then_stmt, else_stmt)
+                };
+                prefix.push(stmt);
+                prefix
+            }
+            FirMatch::Control { cond, stmt } => {
+                let (mut prefix, cond) = self.rewrite_value(cond)?;
+                let stmt = self.rewrite_stmt_as_stmt(stmt)?;
+                let out_stmt = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.control(cond, stmt)
+                };
+                prefix.push(out_stmt);
+                prefix
+            }
+            // Current stage: loops/switch are cloned hygienically but do not receive
+            // inline-call rewriting in their nested expressions/bodies yet.
+            FirMatch::ForLoop { .. }
+            | FirMatch::SimpleForLoop { .. }
+            | FirMatch::IteratorForLoop { .. }
+            | FirMatch::WhileLoop { .. }
+            | FirMatch::Switch { .. } => vec![self.cloner.clone_node(id)?],
+            _ => vec![self.cloner.clone_node(id)?],
+        };
+        Ok(out)
+    }
+
+    fn rewrite_value(&mut self, id: FirId) -> Result<(Vec<FirId>, FirId), FirInlineRewriteError> {
+        let node = match_fir(self.cloner.src, id);
+        let out = match node {
+            FirMatch::FunCall { name, args, typ } => {
+                self.stats.callsites_seen += 1;
+                let mut prefix = Vec::new();
+                let mut rewritten_args = Vec::with_capacity(args.len());
+                for arg in args {
+                    let (mut p, v) = self.rewrite_value(arg)?;
+                    prefix.append(&mut p);
+                    rewritten_args.push(v);
+                }
+
+                let callee_decl = match self.fn_decls.get(&name).copied() {
+                    Some(id) => id,
+                    None => {
+                        self.stats.callsites_skipped_unknown_callee += 1;
+                        let call = {
+                            let mut b = FirBuilder::new(self.cloner.dst);
+                            b.fun_call(name, &rewritten_args, typ)
+                        };
+                        return Ok((prefix, call));
+                    }
+                };
+
+                let candidate = self
+                    .analysis
+                    .candidate_decisions
+                    .get(&name)
+                    .map(|d| d.eligible)
+                    .unwrap_or(false);
+                if !candidate {
+                    self.stats.callsites_skipped_non_candidate += 1;
+                    let call = {
+                        let mut b = FirBuilder::new(self.cloner.dst);
+                        b.fun_call(name, &rewritten_args, typ)
+                    };
+                    (prefix, call)
+                } else {
+                    let prepared = prepare_callee_body_for_inlining_from_cloned_args(
+                        self.cloner.src,
+                        callee_decl,
+                        &rewritten_args,
+                        self.cloner.dst,
+                        self.cloner.state,
+                    )?;
+                    if let Some((body_prefix, ret_value)) =
+                        canonical_inline_body_from_prepared(self.cloner.dst, prepared.body)
+                    {
+                        self.stats.callsites_inlined += 1;
+                        prefix.extend(prepared.arg_materialization_stmts);
+                        prefix.extend(body_prefix);
+                        (prefix, ret_value)
+                    } else {
+                        self.stats.callsites_skipped_unsupported_shape += 1;
+                        let call = {
+                            let mut b = FirBuilder::new(self.cloner.dst);
+                            b.fun_call(name, &rewritten_args, typ)
+                        };
+                        (prefix, call)
+                    }
+                }
+            }
+            FirMatch::LoadTable {
+                name,
+                access,
+                index,
+                typ,
+            } => {
+                let (prefix, index) = self.rewrite_value(index)?;
+                let remap = self.cloner.remap_name_by_access(&name, access);
+                let out_access = self.cloner.remap_access(access, &name);
+                let v = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.load_table(remap, out_access, index, typ)
+                };
+                (prefix, v)
+            }
+            FirMatch::TeeVar {
+                name,
+                access,
+                value,
+                typ,
+            } => {
+                let (prefix, value) = self.rewrite_value(value)?;
+                let remap = self.cloner.remap_name_by_access(&name, access);
+                let out_access = self.cloner.remap_access(access, &name);
+                let v = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.tee_var(remap, out_access, value, typ)
+                };
+                (prefix, v)
+            }
+            FirMatch::BinOp { op, lhs, rhs, typ } => {
+                let (mut p1, lhs) = self.rewrite_value(lhs)?;
+                let (mut p2, rhs) = self.rewrite_value(rhs)?;
+                p1.append(&mut p2);
+                let v = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.binop(op, lhs, rhs, typ)
+                };
+                (p1, v)
+            }
+            FirMatch::Neg { value, typ } => {
+                let (prefix, value) = self.rewrite_value(value)?;
+                let v = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.neg(value, typ)
+                };
+                (prefix, v)
+            }
+            FirMatch::Cast { typ, value } => {
+                let (prefix, value) = self.rewrite_value(value)?;
+                let v = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.cast(typ, value)
+                };
+                (prefix, v)
+            }
+            FirMatch::Bitcast { typ, value } => {
+                let (prefix, value) = self.rewrite_value(value)?;
+                let v = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.bitcast(typ, value)
+                };
+                (prefix, v)
+            }
+            FirMatch::Select2 {
+                cond,
+                then_value,
+                else_value,
+                typ,
+            } => {
+                let (mut p0, cond) = self.rewrite_value(cond)?;
+                let (mut p1, then_value) = self.rewrite_value(then_value)?;
+                let (mut p2, else_value) = self.rewrite_value(else_value)?;
+                p0.append(&mut p1);
+                p0.append(&mut p2);
+                let v = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.select2(cond, then_value, else_value, typ)
+                };
+                (p0, v)
+            }
+            FirMatch::ValueArray { values, typ } => {
+                let mut prefix = Vec::new();
+                let mut out_vals = Vec::with_capacity(values.len());
+                for v in values {
+                    let (mut p, vv) = self.rewrite_value(v)?;
+                    prefix.append(&mut p);
+                    out_vals.push(vv);
+                }
+                let v = {
+                    let mut b = FirBuilder::new(self.cloner.dst);
+                    b.value_array(&out_vals, typ)
+                };
+                (prefix, v)
+            }
+            _ => (Vec::new(), self.cloner.clone_node(id)?),
+        };
+        Ok(out)
+    }
 }
 
 struct HygienicCloner<'a, 'b> {
@@ -2081,5 +2782,139 @@ mod tests {
             err,
             FirInlinePrepareError::ArgCountMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn inline_module_once_inlines_canonical_helper_calls() {
+        let mut src = FirStore::new();
+        let module = {
+            let mut b = FirBuilder::new(&mut src);
+            let ff = FirType::FaustFloat;
+            let x = NamedType {
+                name: "x".to_string(),
+                typ: ff.clone(),
+            };
+
+            let helper_body = {
+                let lx = b.load_var("x", AccessType::FunArgs, ff.clone());
+                let ret = b.ret(Some(lx));
+                b.block(&[ret])
+            };
+            let helper = fun(
+                &mut b,
+                "helper",
+                std::slice::from_ref(&x),
+                ff.clone(),
+                Some(helper_body),
+                true,
+            );
+
+            let wrapper_body = {
+                let raw = b.float64(4.0);
+                let arg = b.cast(ff.clone(), raw);
+                let call = b.fun_call("helper", &[arg], ff.clone());
+                let ret = b.ret(Some(call));
+                b.block(&[ret])
+            };
+            let wrapper = fun(
+                &mut b,
+                "wrapper",
+                &[],
+                ff.clone(),
+                Some(wrapper_body),
+                false,
+            );
+
+            let dsp_struct = b.block(&[]);
+            let globals = b.block(&[]);
+            let decls = b.block(&[helper, wrapper]);
+            b.module("mydsp", dsp_struct, globals, decls)
+        };
+
+        let (dst, rewritten, stats) =
+            inline_fir_module_once(&src, module, &FirInlineOptions::default())
+                .expect("rewrite should succeed");
+        assert_eq!(stats.callsites_seen, 1);
+        assert_eq!(stats.callsites_inlined, 1);
+        assert_eq!(stats.callsites_skipped_non_candidate, 0);
+        assert_eq!(stats.callsites_skipped_unsupported_shape, 0);
+
+        let dump = dump_fir(&dst, rewritten);
+        assert!(
+            !dump.contains("FunCall { name: \"helper\""),
+            "helper call should have been inlined once:\n{dump}"
+        );
+        assert!(
+            dump.contains("DeclareVar { name: \"__fir_inl"),
+            "argument materialization temp should be emitted in rewritten body:\n{dump}"
+        );
+        assert_no_checker_errors(&dst, rewritten);
+    }
+
+    #[test]
+    fn inline_module_once_skips_non_canonical_return_shape() {
+        let mut src = FirStore::new();
+        let module = {
+            let mut b = FirBuilder::new(&mut src);
+            let ff = FirType::FaustFloat;
+            let x = NamedType {
+                name: "x".to_string(),
+                typ: ff.clone(),
+            };
+
+            // Two top-level returns: valid enough for the checker, but intentionally
+            // non-canonical for Milestone-4 extraction/splicing.
+            let helper_body = {
+                let lx0 = b.load_var("x", AccessType::FunArgs, ff.clone());
+                let ret0 = b.ret(Some(lx0));
+                let lx1 = b.load_var("x", AccessType::FunArgs, ff.clone());
+                let ret1 = b.ret(Some(lx1));
+                b.block(&[ret0, ret1])
+            };
+            let helper = fun(
+                &mut b,
+                "helper",
+                std::slice::from_ref(&x),
+                ff.clone(),
+                Some(helper_body),
+                true,
+            );
+
+            let wrapper_body = {
+                let arg = b.float64(2.0);
+                let call = b.fun_call("helper", &[arg], ff.clone());
+                let ret = b.ret(Some(call));
+                b.block(&[ret])
+            };
+            let wrapper = fun(
+                &mut b,
+                "wrapper",
+                &[],
+                ff.clone(),
+                Some(wrapper_body),
+                false,
+            );
+
+            let dsp_struct = b.block(&[]);
+            let globals = b.block(&[]);
+            let decls = b.block(&[helper, wrapper]);
+            b.module("mydsp", dsp_struct, globals, decls)
+        };
+
+        assert_no_checker_errors(&src, module);
+
+        let (dst, rewritten, stats) =
+            inline_fir_module_once(&src, module, &FirInlineOptions::default())
+                .expect("rewrite should succeed");
+        assert_eq!(stats.callsites_seen, 1);
+        assert_eq!(stats.callsites_inlined, 0);
+        assert_eq!(stats.callsites_skipped_unsupported_shape, 1);
+
+        let dump = dump_fir(&dst, rewritten);
+        assert!(
+            dump.contains("FunCall { name: \"helper\""),
+            "non-canonical helper should remain as call:\n{dump}"
+        );
+        assert_no_checker_errors(&dst, rewritten);
     }
 }
