@@ -1,5 +1,32 @@
 # JOURNAL
 
+## 2026-02-23 (session 20)
+
+### FIR FunctionInliner plan document — align with actual `inliner.rs` status (Phases A–E)
+
+Updated `porting/fir-function-inliner-plan-en.md` to reflect the current
+implementation state of `crates/fir/src/inliner.rs` instead of leaving the
+document in a pure "future plan" state.
+
+**What was documented**
+- current implemented public API snapshot (actual Rust names/types)
+- implemented phases (A–E) and current milestone status
+- current limitations of the inliner (canonical return shape, partial nested
+  rewrite coverage in some statement kinds, conservative arg materialization,
+  no compiler integration yet)
+- explicit remaining work to reach the "complete" goal
+- Phase F status (`Not implemented yet`) plus recommended cleanup v1 scope
+
+**Why**
+- keeps the plan usable as an implementation/status reference
+- makes remaining work and current constraints explicit before compiler
+  integration and Phase F cleanup work starts
+
+**Validation**
+- documentation-only change (no code/tests run)
+
+---
+
 ## 2026-02-23 (session 19)
 
 ### FIR FunctionInliner — Phase E fixpoint iteration driver + SCC rewrite order

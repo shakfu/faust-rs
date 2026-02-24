@@ -1,5 +1,93 @@
 # FIR Function Inliner Plan (Rust, Module-Level)
 
+## 0. Current Implementation Status (as of 2026-02-23, sessions 15–19)
+
+The Rust FIR inliner has progressed beyond the original "design only" stage.
+`crates/fir/src/inliner.rs` now contains a working staged implementation for
+Phases A–E (analysis, hygienic clone, parameter materialization, one-pass
+callsite rewriting, and iterative/fixpoint driving).
+
+### 0.1 Implemented today in `crates/fir/src/inliner.rs`
+
+Implemented public APIs (current names):
+
+- Analysis / candidate selection:
+  - `analyze_fir_inliner(...)`
+  - `FirInlineOptions`
+  - `FirInlineAnalysis`, `FirFunctionSummary`, `FirInlineScc`
+  - `FirInlineCandidateDecision`, `FirInlineSkipReason`
+- Hygienic clone / rename substrate:
+  - `clone_fir_hygienic(...)`
+  - `clone_fir_hygienic_with_state(...)`
+  - `FirHygienicCloneState`, `FirHygienicCloneOptions`
+  - `FirHygienicCloneResult`, `FirLocalRename`, `FirLocalRenameKind`
+- Parameter materialization + `kFunArgs` substitution:
+  - `prepare_callee_body_for_inlining(...)`
+  - `FirPreparedInlineBody`, `FirMaterializedArgBinding`
+- One-pass callsite rewrite:
+  - `inline_fir_module_once(...)`
+  - `FirInlineRewriteStats`, `FirInlineRewriteError`
+- Iterative/fixpoint module driver (Phase E):
+  - `inline_fir_module(...)`
+  - `FirInlineFixpointStats`, `FirInlineFixpointStopReason`
+
+What works today:
+
+- direct `FunCall` inlining from same-module `DeclareFun` bodies
+- SCC-based analysis and recursive-SCC skipping (default)
+- hygienic renaming of local names in cloned callee bodies
+- left-to-right argument materialization (conservative: materialize all args)
+- statement splicing + return-value extraction for canonical callee bodies
+- iterative reruns until fixpoint / iteration cap / expansion budget
+- checker-driven validation in unit tests (`verify_fir_module` on rewritten FIR)
+
+### 0.2 Current known limitations (important)
+
+The implementation is intentionally conservative and not yet "complete" in the
+strongest compiler-inliner sense.
+
+- Body-shape limitation:
+  - only canonical callee bodies with top-level `Block(..., Return(Some(v)))`
+    are inlined
+  - non-canonical returns (multiple returns, earlier returns in prefix, etc.)
+    are skipped
+- Rewrite coverage limitation:
+  - some statement forms (notably loop/switch internals) are currently cloned
+    hygienically but not recursively rewritten for nested `FunCall` inlining
+- No recursive inlining by default:
+  - recursive/self-recursive SCCs are skipped unless policy changes later
+- Profitability is v1-simple:
+  - body node threshold + `is_inline`/policy filters only
+  - no "called once" heuristics, no dynamic cost model
+- Argument materialization is conservative:
+  - all actual arguments are materialized into temps (safe but not minimal)
+- No cleanup pass yet (Phase F):
+  - dead helper functions / dead prototypes may remain after inlining
+- Not integrated in `crates/compiler` yet:
+  - no CLI/compiler flag and no automatic pre-codegen inliner pipeline stage
+
+### 0.3 What remains to reach the "complete" goal in this plan
+
+Priority remaining work:
+
+1. Compiler integration (planned milestone gate)
+- run inliner before codegen in `crates/compiler`
+- add opt-in options/flags and post-inline FIR checker validation
+- corpus smoke testing for regressions
+
+2. Broaden rewrite legality/coverage
+- support more callee return/control-flow shapes (or canonicalization helper)
+- recursively rewrite nested callsites in currently cloned-only statement forms
+  (loops/switch/while subtrees)
+
+3. Optional cleanup pass (Phase F)
+- remove unused helper functions/prototypes after inlining (FIR→FIR cleanup)
+
+4. Heuristics improvements (later)
+- trivial-argument fast path (avoid materializing all args)
+- better profitability model / called-once heuristics
+- optional recursive policy extensions
+
 ## 1. Goal
 
 Design and implement a **complete `FunctionInliner`** for the Rust FIR module IR
@@ -189,13 +277,13 @@ This enables a practical validation loop:
 
 The checker should be treated as the primary correctness oracle during rollout.
 
-## 5. Proposed Rust API (Pass Surface)
+## 5. Rust API (Design vs Current Implementation)
 
 Create a new FIR→FIR transform entrypoint (suggested location):
 
 - `crates/fir/src/inliner.rs` (or `crates/fir/src/transforms/inliner.rs`)
 
-Suggested API:
+Originally proposed API (design target):
 
 ```rust
 pub struct FirInlineOptions {
@@ -228,9 +316,29 @@ Notes:
 - avoid mutating the input store in v1
 - stats are essential for debugging and tests
 
+### 5.1 Current implemented API snapshot (actual names/types)
+
+The implementation has split the functionality into several staged APIs and
+stats types rather than a single monolithic `FirInlineStats`/`FirInlineError`.
+
+- Iterative driver (Phase E):
+  - `inline_fir_module(...) -> Result<(FirStore, FirId, FirInlineFixpointStats), FirInlineRewriteError>`
+- One-pass rewrite:
+  - `inline_fir_module_once(...) -> Result<(FirStore, FirId, FirInlineRewriteStats), FirInlineRewriteError>`
+- Analysis:
+  - `analyze_fir_inliner(...) -> Result<FirInlineAnalysis, FirInlineAnalysisError>`
+- Preparation / clone helpers:
+  - `prepare_callee_body_for_inlining(...)`
+  - `clone_fir_hygienic(...)`, `clone_fir_hygienic_with_state(...)`
+
+This staged surface has proven useful for targeted unit tests and checker-driven
+validation of each phase independently.
+
 ## 6. Transformation Architecture (Implementation Plan)
 
 ### Phase A — Analysis scaffolding (no rewrite yet)
+
+Status: `Implemented`
 
 Deliverables:
 
@@ -245,6 +353,8 @@ Validation:
 - unit tests over synthetic modules (acyclic / recursive / extern / missing body)
 
 ### Phase B — Hygienic clone + rename engine
+
+Status: `Implemented`
 
 Deliverables:
 
@@ -267,6 +377,8 @@ Validation:
 
 ### Phase C — Parameter materialization and substitution
 
+Status: `Implemented` (conservative "materialize all args" policy)
+
 Deliverables:
 
 - classify “simple” vs “non-simple” actual arguments
@@ -285,6 +397,8 @@ Validation:
 - regression tests for repeated parameter use
 
 ### Phase D — Inline expression calls inside blocks
+
+Status: `Implemented (v1 subset)`
 
 Deliverables:
 
@@ -306,12 +420,19 @@ Scope for v1:
   reachable at top level (possibly with preceding statements)
 - skip bodies with unsupported control-flow return shapes
 
+Additional current limitation:
+
+- some statement kinds (loop/switch internals) are still cloned without nested
+  callsite rewriting; this is correct but not maximal inlining
+
 Validation:
 
 - end-to-end module tests
 - post-pass `verify_fir_module`
 
 ### Phase E — Module iteration strategy
+
+Status: `Implemented (v1)`
 
 Deliverables:
 
@@ -324,6 +445,16 @@ Validation:
 - stats-based tests (number of inlines)
 - stable output determinism tests
 
+Current implementation notes:
+
+- iterative driver: `inline_fir_module(...)`
+- deterministic function rewrite order uses reverse-topological SCC-DAG order
+  (callees before callers), while preserving module declaration order
+- stop conditions implemented:
+  - fixpoint (no inlines in a pass)
+  - `max_inline_depth` iteration cap
+  - simple module-node expansion budget from `max_expansion_factor`
+
 ### Phase F — Optional cleanup pass (follow-up)
 
 Not required for initial inliner correctness, but useful:
@@ -332,6 +463,15 @@ Not required for initial inliner correctness, but useful:
 - remove dead extern prototypes introduced only for intermediate forms
 
 This can be a separate FIR pass.
+
+Status: `Not implemented yet`
+
+Planned v1 cleanup scope (recommended):
+
+- remove unreachable helper `DeclareFun` bodies after inlining
+- remove unused extern/prototype `DeclareFun { body: None }`
+- preserve reserved DSP API functions by default
+- keep cleanup as a separate FIR→FIR pass (do not block inliner correctness)
 
 ## 7. Inlining Legality Matrix (FIR v1)
 
@@ -429,11 +569,15 @@ Suggested CLI flags later:
 - no rewriting yet
 - deterministic stats
 
+Status: `Done`
+
 ### Milestone 2 — Leaf expression inlining
 
 - inline simple non-recursive helpers with canonical single return
 - hygienic renaming implemented
 - checker passes on all unit tests
+
+Status: `Done` (implemented through staged Phases B–D)
 
 ### Milestone 3 — Nested/block-aware inlining
 
@@ -441,18 +585,37 @@ Suggested CLI flags later:
 - parameter materialization stable
 - checker-validated end-to-end examples
 
+Status: `Partially done`
+
+- done:
+  - nested value-tree rewriting and statement prefix splicing in supported shapes
+  - parameter materialization + checker-validated end-to-end examples
+- remaining for full milestone intent:
+  - broader nested rewriting coverage in loop/switch/other currently cloned-only subtrees
+  - broader callee return/control-flow shape support
+
 ### Milestone 4 — Compiler integration (optional gate)
 
 - pass can run before backend codegen
 - post-inline FIR checker validation available
 - corpus smoke test shows no regressions
 
-## 11. Open Questions (to resolve before coding)
+Status: `Not started`
 
-1. Should v1 inline only `is_inline=true` callees, or also heuristic small callees by default?
-2. Which FIR nodes in callee bodies are explicitly supported in v1 rename/substitution?
-3. Do we want “materialize all args” in v1 (simpler) or immediate occurrence-based optimization?
-4. Should dead now-unused helper functions be removed in the same pass or deferred to a dedicated DCE pass?
+## 11. Open Questions / Follow-up Decisions (updated after Phases A–E)
+
+Resolved / current decisions:
+
+1. `materialize all args` in v1 was chosen and implemented (safe default).
+2. Recursive SCCs are skipped by default (`allow_recursive=false` policy).
+3. Cleanup is deferred to a dedicated follow-up pass (Phase F), not mixed into the inliner.
+
+Still open (practical follow-ups):
+
+1. Should default policy inline heuristic-small callees even when `is_inline=false`, or require `inline_marked_only=true` in compiler integration?
+2. Which additional FIR statement/value forms should be upgraded from "clone-only" to full nested rewrite in v1.1?
+3. Do we want a canonicalization helper for multi-return bodies before inlining, or keep inliner legality strict?
+4. Should compiler integration run post-inline `verify_fir_module` unconditionally when FIR verify is enabled, or behind a dedicated inliner-verify option?
 
 ## 12. Internet Research Notes / Sources
 
