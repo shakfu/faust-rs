@@ -1,5 +1,53 @@
 # JOURNAL
 
+## 2026-02-23 (session 19)
+
+### FIR FunctionInliner — Phase E fixpoint iteration driver + SCC rewrite order
+
+Implemented Phase E of the FIR `FunctionInliner` plan in
+`crates/fir/src/inliner.rs`: an iterative module-level inlining driver that
+repeats one-pass inlining until a fixpoint (or budget) and uses a deterministic
+callee-first function rewrite order derived from the SCC DAG.
+
+**What was added**
+- New iterative API:
+  - `inline_fir_module(...)`
+- New public Phase-E stats/stop types:
+  - `FirInlineFixpointStats`
+  - `FirInlineFixpointStopReason`
+- Internal helpers:
+  - unique-node counting for expansion budgeting
+  - SCC-DAG reverse-topological function ordering (`callees first`)
+
+**Behavior (Phase E scope)**
+- Re-runs `inline_fir_module_once(...)` on the rewritten module until:
+  - no callsites are inlined (fixpoint), or
+  - `max_inline_depth` iteration cap is reached, or
+  - module size exceeds the simple expansion budget derived from
+    `max_expansion_factor`
+- Recomputes inliner analysis/SCCs on each pass
+- Rewrites function bodies in deterministic reverse-topological SCC order
+  (leaf callees before callers), while preserving declaration order in the
+  rebuilt module
+
+**Rustdoc**
+- Updated `crates/fir/src/inliner.rs` module docs to mention the Phase-E
+  fixpoint driver and SCC-based ordering
+- Documented the new iterative API and fixpoint stats/stop enums
+
+**Tests**
+Added unit tests in `crates/fir/src/inliner.rs` for:
+- deterministic SCC-DAG rewrite order (`leaf < helper < wrapper`)
+- multi-pass fixpoint inlining of a call chain (`wrapper -> helper -> leaf`)
+  with checker validation of the final FIR
+
+**Validation**
+- `cargo fmt -p fir` ✅
+- `cargo test -p fir inliner` ✅
+- `cargo test -p fir checker` ✅
+
+---
+
 ## 2026-02-23 (session 18)
 
 ### FIR FunctionInliner — Milestone 4 one-pass callsite rewrite (canonical helper inlining)

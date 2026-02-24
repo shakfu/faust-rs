@@ -1,4 +1,4 @@
-//! FIR function inliner scaffolding (Milestones 1–4).
+//! FIR function inliner scaffolding (Milestones 1–4 + Phase E iteration).
 //!
 //! # Scope
 //! This module currently implements:
@@ -9,7 +9,8 @@
 //! - candidate selection decisions (legality/profitability pre-checks).
 //! - hygienic FIR subtree cloning with local-variable renaming,
 //! - callee argument materialization and `kFunArgs` substitution,
-//! - one-pass callsite rewriting for canonical value-returning helper bodies.
+//! - one-pass callsite rewriting for canonical value-returning helper bodies,
+//! - iterative fixpoint driver with SCC-based deterministic function order.
 //!
 //! Current rewrite support is intentionally conservative: only a subset of
 //! statement/value shapes are recursively rewritten for nested callsites, and
@@ -418,6 +419,20 @@ fn collect_body_metrics(store: &FirStore, root: FirId) -> BodyMetrics {
     metrics
 }
 
+/// Counts unique FIR nodes reachable from `root` (module-size baseline/expansion budget).
+fn count_unique_nodes(store: &FirStore, root: FirId) -> usize {
+    let mut seen = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let node = match_fir(store, id);
+        stack.extend(child_ids(&node));
+    }
+    seen.len()
+}
+
 /// Returns child FIR ids for recursive traversal.
 ///
 /// This is intentionally local to the inliner module so analysis remains
@@ -613,6 +628,63 @@ fn tarjan_sccs(
     }
 
     (sccs, scc_index_by_name)
+}
+
+/// Returns a deterministic function rewrite order: callees first (reverse topo of SCC DAG).
+///
+/// Edges are caller -> callee. Reverse topological order therefore visits acyclic
+/// leaf callees before their callers, which maximizes progress across fixpoint
+/// iterations. Functions within the same SCC use the deterministic order stored
+/// in [`FirInlineAnalysis::sccs`].
+fn function_rewrite_order_by_scc(analysis: &FirInlineAnalysis) -> Vec<String> {
+    let scc_count = analysis.sccs.len();
+    let mut succs: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); scc_count];
+    let mut indegree = vec![0usize; scc_count];
+
+    for (caller, callees) in &analysis.call_graph {
+        let Some(caller_summary) = analysis.functions.get(caller) else {
+            continue;
+        };
+        let caller_scc = caller_summary.scc_index;
+        for callee in callees {
+            let Some(callee_summary) = analysis.functions.get(callee) else {
+                continue;
+            };
+            let callee_scc = callee_summary.scc_index;
+            if caller_scc != callee_scc && succs[caller_scc].insert(callee_scc) {
+                indegree[callee_scc] += 1;
+            }
+        }
+    }
+
+    let mut ready = BTreeSet::new();
+    for (idx, deg) in indegree.iter().copied().enumerate() {
+        if deg == 0 {
+            ready.insert(idx);
+        }
+    }
+
+    let mut topo = Vec::with_capacity(scc_count);
+    while let Some(next) = ready.iter().next().copied() {
+        ready.remove(&next);
+        topo.push(next);
+        for succ in succs[next].iter().copied() {
+            indegree[succ] -= 1;
+            if indegree[succ] == 0 {
+                ready.insert(succ);
+            }
+        }
+    }
+    if topo.len() != scc_count {
+        // SCC DAG should be acyclic by construction; fall back deterministically.
+        topo = (0..scc_count).collect();
+    }
+
+    let mut order = Vec::new();
+    for scc_idx in topo.into_iter().rev() {
+        order.extend(analysis.sccs[scc_idx].functions.iter().cloned());
+    }
+    order
 }
 
 /// Applies the current (conservative) callee-eligibility policy.
@@ -845,6 +917,40 @@ pub struct FirInlineRewriteStats {
     pub callsites_skipped_unknown_callee: usize,
 }
 
+/// Why [`inline_fir_module`] stopped iterating.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirInlineFixpointStopReason {
+    /// Last pass produced no new inlined callsites.
+    Fixpoint,
+    /// Reached `FirInlineOptions.max_inline_depth` iterations.
+    MaxIterations,
+    /// Output module exceeded the configured expansion budget.
+    ExpansionBudget,
+}
+
+/// Aggregate statistics for iterative module inlining (`Phase E`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FirInlineFixpointStats {
+    /// Number of rewrite passes executed.
+    pub iterations: usize,
+    /// Per-pass one-pass rewrite statistics in execution order.
+    pub pass_stats: Vec<FirInlineRewriteStats>,
+    /// Sum of all per-pass `callsites_seen`.
+    pub total_callsites_seen: usize,
+    /// Sum of all per-pass `callsites_inlined`.
+    pub total_callsites_inlined: usize,
+    /// Number of passes with `callsites_inlined > 0`.
+    pub passes_with_progress: usize,
+    /// Unique-node count of the input module used as the expansion baseline.
+    pub baseline_module_nodes: usize,
+    /// Final unique-node count of the returned module.
+    pub final_module_nodes: usize,
+    /// Budget threshold used for expansion checks.
+    pub expansion_limit_nodes: usize,
+    /// Why iteration stopped.
+    pub stop_reason: FirInlineFixpointStopReason,
+}
+
 /// Errors returned by the one-pass FIR module inliner rewrite.
 #[derive(Debug)]
 pub enum FirInlineRewriteError {
@@ -884,6 +990,81 @@ impl From<FirInlinePrepareError> for FirInlineRewriteError {
     fn from(value: FirInlinePrepareError) -> Self {
         Self::Prepare(value)
     }
+}
+
+/// Iteratively inline FIR callsites until a fixpoint or budget is reached.
+///
+/// Phase E wraps [`inline_fir_module_once`] in a deterministic fixpoint driver:
+/// - reruns one-pass inlining on the rewritten module,
+/// - stops when a pass performs no inlining,
+/// - or when `max_inline_depth`/expansion budget limits are reached.
+///
+/// Functions are still analyzed per pass, so candidate decisions and SCCs are
+/// recomputed after each transformation step.
+///
+/// # Errors
+/// Returns [`FirInlineRewriteError`] if any pass fails analysis or rewriting.
+pub fn inline_fir_module(
+    src_store: &FirStore,
+    module: FirId,
+    options: &FirInlineOptions,
+) -> Result<(FirStore, FirId, FirInlineFixpointStats), FirInlineRewriteError> {
+    let baseline_nodes = count_unique_nodes(src_store, module);
+    let expansion_factor = options.max_expansion_factor.max(1);
+    let expansion_limit_nodes = baseline_nodes.saturating_mul(expansion_factor);
+    let max_iterations = options.max_inline_depth.max(1);
+
+    let mut current_store: Option<FirStore> = None;
+    let mut current_module = module;
+    let mut pass_stats = Vec::new();
+    let mut total_callsites_seen = 0usize;
+    let mut total_callsites_inlined = 0usize;
+    let mut passes_with_progress = 0usize;
+    let mut final_nodes = baseline_nodes;
+    let mut stop_reason = FirInlineFixpointStopReason::MaxIterations;
+
+    for _iter in 0..max_iterations {
+        let (next_store, next_module, stats) = if let Some(store) = current_store.as_ref() {
+            inline_fir_module_once(store, current_module, options)?
+        } else {
+            inline_fir_module_once(src_store, current_module, options)?
+        };
+
+        total_callsites_seen += stats.callsites_seen;
+        total_callsites_inlined += stats.callsites_inlined;
+        if stats.callsites_inlined > 0 {
+            passes_with_progress += 1;
+        }
+        final_nodes = count_unique_nodes(&next_store, next_module);
+        let had_progress = stats.callsites_inlined > 0;
+        pass_stats.push(stats);
+        current_module = next_module;
+        current_store = Some(next_store);
+
+        if !had_progress {
+            stop_reason = FirInlineFixpointStopReason::Fixpoint;
+            break;
+        }
+        if final_nodes > expansion_limit_nodes {
+            stop_reason = FirInlineFixpointStopReason::ExpansionBudget;
+            break;
+        }
+    }
+
+    let out_store = current_store.expect("at least one iteration is always executed");
+    let out_module = current_module;
+    let stats = FirInlineFixpointStats {
+        iterations: pass_stats.len(),
+        pass_stats,
+        total_callsites_seen,
+        total_callsites_inlined,
+        passes_with_progress,
+        baseline_module_nodes: baseline_nodes,
+        final_module_nodes: final_nodes,
+        expansion_limit_nodes,
+        stop_reason,
+    };
+    Ok((out_store, out_module, stats))
 }
 
 /// Hygienically clones a FIR subtree into `dst_store` using a fresh local-state.
@@ -1141,6 +1322,7 @@ pub fn inline_fir_module_once(
     let mut dst_store = FirStore::new();
     let mut state = FirHygienicCloneState::default();
     let mut stats = FirInlineRewriteStats::default();
+    let rewrite_order = function_rewrite_order_by_scc(&analysis);
 
     let fn_decls: BTreeMap<String, FirId> = analysis
         .functions
@@ -1153,6 +1335,7 @@ pub fn inline_fir_module_once(
         module,
         &analysis,
         &fn_decls,
+        &rewrite_order,
         &mut dst_store,
         &mut state,
         &mut stats,
@@ -1166,6 +1349,7 @@ fn rewrite_module_once(
     module: FirId,
     analysis: &FirInlineAnalysis,
     fn_decls: &BTreeMap<String, FirId>,
+    rewrite_order: &[String],
     dst_store: &mut FirStore,
     state: &mut FirHygienicCloneState,
     stats: &mut FirInlineRewriteStats,
@@ -1188,6 +1372,7 @@ fn rewrite_module_once(
         globals,
         analysis,
         fn_decls,
+        rewrite_order,
         dst_store,
         state,
         stats,
@@ -1198,6 +1383,7 @@ fn rewrite_module_once(
         declarations,
         analysis,
         fn_decls,
+        rewrite_order,
         dst_store,
         state,
         stats,
@@ -1213,10 +1399,11 @@ fn rewrite_fun_section_once(
     section_id: FirId,
     analysis: &FirInlineAnalysis,
     fn_decls: &BTreeMap<String, FirId>,
+    rewrite_order: &[String],
     dst_store: &mut FirStore,
     state: &mut FirHygienicCloneState,
     stats: &mut FirInlineRewriteStats,
-    _section_kind: FirFunctionSection,
+    section_kind: FirFunctionSection,
 ) -> Result<FirId, FirInlineRewriteError> {
     let FirMatch::Block(items) = match_fir(src_store, section_id) else {
         return Err(FirInlineRewriteError::Analysis(
@@ -1227,6 +1414,35 @@ fn rewrite_fun_section_once(
         ));
     };
 
+    let mut body_ids_by_name = BTreeMap::<String, FirId>::new();
+    for item in &items {
+        if let FirMatch::DeclareFun {
+            name,
+            body: Some(body),
+            ..
+        } = match_fir(src_store, *item)
+        {
+            body_ids_by_name.insert(name, body);
+        }
+    }
+
+    let mut rewritten_bodies = BTreeMap::<String, FirId>::new();
+    for name in rewrite_order {
+        let Some(summary) = analysis.functions.get(name) else {
+            continue;
+        };
+        if summary.section != section_kind || !summary.has_body {
+            continue;
+        }
+        let Some(body) = body_ids_by_name.get(name).copied() else {
+            continue;
+        };
+        let rewritten = rewrite_function_body_once(
+            src_store, body, analysis, fn_decls, dst_store, state, stats,
+        )?;
+        rewritten_bodies.insert(name.clone(), rewritten);
+    }
+
     let mut out_items = Vec::with_capacity(items.len());
     for item in items {
         match match_fir(src_store, item) {
@@ -1234,12 +1450,12 @@ fn rewrite_fun_section_once(
                 name,
                 typ,
                 args,
-                body: Some(body),
+                body: Some(_body),
                 is_inline,
             } => {
-                let body = rewrite_function_body_once(
-                    src_store, body, analysis, fn_decls, dst_store, state, stats,
-                )?;
+                let body = *rewritten_bodies
+                    .get(&name)
+                    .expect("all function bodies in section should be rewritten");
                 let mut b = FirBuilder::new(dst_store);
                 out_items.push(b.declare_fun(name, typ, &args, Some(body), is_inline));
             }
@@ -2915,6 +3131,163 @@ mod tests {
             dump.contains("FunCall { name: \"helper\""),
             "non-canonical helper should remain as call:\n{dump}"
         );
+        assert_no_checker_errors(&dst, rewritten);
+    }
+
+    #[test]
+    fn function_rewrite_order_is_callees_first_across_scc_dag() {
+        let mut store = FirStore::new();
+        let module = {
+            let mut b = FirBuilder::new(&mut store);
+            let ff = FirType::FaustFloat;
+            let x = NamedType {
+                name: "x".to_string(),
+                typ: ff.clone(),
+            };
+
+            let leaf_body = {
+                let lx = b.load_var("x", AccessType::FunArgs, ff.clone());
+                let ret = b.ret(Some(lx));
+                b.block(&[ret])
+            };
+            let leaf = fun(
+                &mut b,
+                "leaf",
+                std::slice::from_ref(&x),
+                ff.clone(),
+                Some(leaf_body),
+                true,
+            );
+
+            let helper_body = {
+                let lx = b.load_var("x", AccessType::FunArgs, ff.clone());
+                let call = b.fun_call("leaf", &[lx], ff.clone());
+                let ret = b.ret(Some(call));
+                b.block(&[ret])
+            };
+            let helper = fun(
+                &mut b,
+                "helper",
+                std::slice::from_ref(&x),
+                ff.clone(),
+                Some(helper_body),
+                true,
+            );
+
+            let wrapper_body = {
+                let raw = b.float64(3.0);
+                let arg = b.cast(ff.clone(), raw);
+                let call = b.fun_call("helper", &[arg], ff.clone());
+                let ret = b.ret(Some(call));
+                b.block(&[ret])
+            };
+            let wrapper = fun(
+                &mut b,
+                "wrapper",
+                &[],
+                ff.clone(),
+                Some(wrapper_body),
+                false,
+            );
+
+            let dsp_struct = b.block(&[]);
+            let globals = b.block(&[]);
+            let decls = b.block(&[wrapper, helper, leaf]);
+            b.module("mydsp", dsp_struct, globals, decls)
+        };
+
+        let analysis =
+            analyze_fir_inliner(&store, module, &FirInlineOptions::default()).expect("analysis ok");
+        let order = function_rewrite_order_by_scc(&analysis);
+
+        let leaf_pos = order.iter().position(|n| n == "leaf").unwrap();
+        let helper_pos = order.iter().position(|n| n == "helper").unwrap();
+        let wrapper_pos = order.iter().position(|n| n == "wrapper").unwrap();
+        assert!(
+            leaf_pos < helper_pos && helper_pos < wrapper_pos,
+            "{order:?}"
+        );
+    }
+
+    #[test]
+    fn inline_module_fixpoint_inlines_call_chain_across_multiple_passes() {
+        let mut src = FirStore::new();
+        let module = {
+            let mut b = FirBuilder::new(&mut src);
+            let ff = FirType::FaustFloat;
+            let x = NamedType {
+                name: "x".to_string(),
+                typ: ff.clone(),
+            };
+
+            let leaf_body = {
+                let lx = b.load_var("x", AccessType::FunArgs, ff.clone());
+                let ret = b.ret(Some(lx));
+                b.block(&[ret])
+            };
+            let leaf = fun(
+                &mut b,
+                "leaf",
+                std::slice::from_ref(&x),
+                ff.clone(),
+                Some(leaf_body),
+                true,
+            );
+
+            let helper_body = {
+                let lx = b.load_var("x", AccessType::FunArgs, ff.clone());
+                let call = b.fun_call("leaf", &[lx], ff.clone());
+                let ret = b.ret(Some(call));
+                b.block(&[ret])
+            };
+            let helper = fun(
+                &mut b,
+                "helper",
+                std::slice::from_ref(&x),
+                ff.clone(),
+                Some(helper_body),
+                true,
+            );
+
+            let wrapper_body = {
+                let raw = b.float64(9.0);
+                let arg = b.cast(ff.clone(), raw);
+                let call = b.fun_call("helper", &[arg], ff.clone());
+                let ret = b.ret(Some(call));
+                b.block(&[ret])
+            };
+            let wrapper = fun(
+                &mut b,
+                "wrapper",
+                &[],
+                ff.clone(),
+                Some(wrapper_body),
+                false,
+            );
+
+            let dsp_struct = b.block(&[]);
+            let globals = b.block(&[]);
+            let decls = b.block(&[wrapper, helper, leaf]);
+            b.module("mydsp", dsp_struct, globals, decls)
+        };
+
+        let (dst, rewritten, stats) =
+            inline_fir_module(&src, module, &FirInlineOptions::default()).expect("fixpoint ok");
+        assert!(
+            stats.total_callsites_inlined >= 2,
+            "expected at least chain-length worth of inlines, got {:?}",
+            stats
+        );
+        assert!(
+            stats.iterations >= 2,
+            "expected at least one progress pass plus fixpoint pass"
+        );
+        assert_eq!(stats.stop_reason, FirInlineFixpointStopReason::Fixpoint);
+        assert!(stats.passes_with_progress >= 2);
+
+        let dump = dump_fir(&dst, rewritten);
+        assert!(!dump.contains("FunCall { name: \"helper\""), "{dump}");
+        assert!(!dump.contains("FunCall { name: \"leaf\""), "{dump}");
         assert_no_checker_errors(&dst, rewritten);
     }
 }
