@@ -1,5 +1,39 @@
 # JOURNAL
 
+## 2026-02-24 (session 35)
+
+### Runtime trace validation — plan differential checks against Faust C++ reference
+
+Added a dedicated implementation plan for comparing Rust `interp` runtime traces
+(`fast-lane` FIR path) against the current Faust C++ compiler runtime behavior,
+using a curated DSP fixture set with explicit source-level typing.
+
+**What changed**
+- `porting/interp-runtime-trace-cpp-differential-plan-en.md`
+  - defines the goal/scope for `Rust interp (fast-lane)` vs `Faust C++`
+    differential runtime validation
+  - documents reference execution options (native C++ executable wrapper vs C++
+    interpreter backend path)
+  - proposes a type-explicit fixture corpus (`cppref_*`) and fixture rules
+  - specifies trace format/comparison reuse (JSON + tolerant float compare)
+  - proposes `xtask` command structure:
+    - `interp-trace-dump-cppref`
+    - `interp-trace-diff-cpp`
+    - optional snapshot commands (`gen/check-cppref`)
+  - defines phased implementation milestones (A→E), risks, CI strategy,
+    acceptance criteria, and open questions
+
+**Why**
+- current `legacy` lane FIR bridge used by `interp` is non-semantic and cannot
+  serve as a runtime oracle
+- a C++ reference runtime path provides a stronger semantic oracle while avoiding
+  immediate fast-lane typing refactors by using explicit-type DSP fixtures
+
+**Validation**
+- documentation only (no tests run)
+
+---
+
 ## 2026-02-24 (session 34)
 
 ### Runtime trace lane diff — skip legacy FIR bridge stub explicitly
