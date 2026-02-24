@@ -157,7 +157,6 @@ impl FirVerifyReport {
     }
 
     /// Iterates over error-severity diagnostics.
-    #[must_use]
     pub fn errors(&self) -> impl Iterator<Item = &FirDiagnostic> {
         self.diagnostics
             .iter()
@@ -165,7 +164,6 @@ impl FirVerifyReport {
     }
 
     /// Iterates over warning-severity diagnostics.
-    #[must_use]
     pub fn warnings(&self) -> impl Iterator<Item = &FirDiagnostic> {
         self.diagnostics
             .iter()
@@ -380,10 +378,10 @@ impl ScopeStack {
     /// remove variables, only resets existing init flags).
     fn restore_inits(&mut self, snap: &[(usize, String, InitStatus)]) {
         for (fi, name, status) in snap {
-            if let Some(frame) = self.frames.get_mut(*fi) {
-                if let Some(entry) = frame.vars.get_mut(name.as_str()) {
-                    entry.init = *status;
-                }
+            if let Some(frame) = self.frames.get_mut(*fi)
+                && let Some(entry) = frame.vars.get_mut(name.as_str())
+            {
+                entry.init = *status;
             }
         }
     }
@@ -409,10 +407,10 @@ impl ScopeStack {
 
     /// Set the `InitStatus` of a specific `(frame_idx, var_name)` pair.
     fn set_init(&mut self, fi: usize, name: &str, status: InitStatus) {
-        if let Some(frame) = self.frames.get_mut(fi) {
-            if let Some(entry) = frame.vars.get_mut(name) {
-                entry.init = status;
-            }
+        if let Some(frame) = self.frames.get_mut(fi)
+            && let Some(entry) = frame.vars.get_mut(name)
+        {
+            entry.init = status;
         }
     }
 }
@@ -835,6 +833,7 @@ impl<'s> VerifyCtx<'s> {
     ///
     /// This helper is shared by `globals` (extern prototypes) and
     /// `declarations` (regular function declarations).
+    #[allow(clippy::too_many_arguments)]
     fn register_function_signature(
         &mut self,
         stmt_id: FirId,
@@ -845,14 +844,14 @@ impl<'s> VerifyCtx<'s> {
         seen_names: Option<&mut HashSet<String>>,
         warn_extern: bool,
     ) {
-        if let Some(seen) = seen_names {
-            if !seen.insert(name.to_string()) {
-                self.warn(
-                    "FIR-M06",
-                    format!("duplicate function name '{name}'"),
-                    stmt_id,
-                );
-            }
+        if let Some(seen) = seen_names
+            && !seen.insert(name.to_string())
+        {
+            self.warn(
+                "FIR-M06",
+                format!("duplicate function name '{name}'"),
+                stmt_id,
+            );
         }
 
         let FirType::Fun {
@@ -1281,27 +1280,27 @@ impl<'s> VerifyCtx<'s> {
         code: &'static str,
         what: &str,
     ) {
-        if let Some(cond_ty) = self.infer_value_type(cond) {
-            if !self.is_int_or_bool_type(&cond_ty) {
-                self.error(
-                    code,
-                    format!("{what} condition should be Int32, Int64, or Bool, got {cond_ty:?}"),
-                    id,
-                );
-            }
+        if let Some(cond_ty) = self.infer_value_type(cond)
+            && !self.is_int_or_bool_type(&cond_ty)
+        {
+            self.error(
+                code,
+                format!("{what} condition should be Int32, Int64, or Bool, got {cond_ty:?}"),
+                id,
+            );
         }
     }
 
     /// Specialized condition-type check for `Switch` (integers only).
     fn check_switch_condition_type(&mut self, id: FirId, cond: FirId) {
-        if let Some(cond_ty) = self.infer_value_type(cond) {
-            if !self.is_integer_type(&cond_ty) {
-                self.error(
-                    "FIR-SW01",
-                    format!("Switch condition should be Int32 or Int64, got {cond_ty:?}"),
-                    id,
-                );
-            }
+        if let Some(cond_ty) = self.infer_value_type(cond)
+            && !self.is_integer_type(&cond_ty)
+        {
+            self.error(
+                "FIR-SW01",
+                format!("Switch condition should be Int32 or Int64, got {cond_ty:?}"),
+                id,
+            );
         }
     }
 
@@ -1334,17 +1333,17 @@ impl<'s> VerifyCtx<'s> {
                 id,
             );
         }
-        if let Some(expected) = self.expected_binop_result_type(op, &lhs_ty, &rhs_ty) {
-            if &expected != declared {
-                self.warn(
-                    "FIR-B03",
-                    format!(
-                        "BinOp declared result type {declared:?} is inconsistent with operands \
-                         ({lhs_ty:?}, {rhs_ty:?}); expected {expected:?}"
-                    ),
-                    id,
-                );
-            }
+        if let Some(expected) = self.expected_binop_result_type(op, &lhs_ty, &rhs_ty)
+            && &expected != declared
+        {
+            self.warn(
+                "FIR-B03",
+                format!(
+                    "BinOp declared result type {declared:?} is inconsistent with operands \
+                     ({lhs_ty:?}, {rhs_ty:?}); expected {expected:?}"
+                ),
+                id,
+            );
         }
         if op == FirBinOp::Div && self.const_is_zero(rhs) {
             self.warn("FIR-B04", "division by constant zero in BinOp", id);
@@ -1353,14 +1352,14 @@ impl<'s> VerifyCtx<'s> {
 
     /// Validates unary negation operand typing.
     fn check_neg_type(&mut self, id: FirId, value: FirId) {
-        if let Some(val_ty) = self.infer_value_type(value) {
-            if !self.is_numeric_type(&val_ty) {
-                self.error(
-                    "FIR-U01",
-                    format!("Neg operand must be numeric, got {val_ty:?}"),
-                    id,
-                );
-            }
+        if let Some(val_ty) = self.infer_value_type(value)
+            && !self.is_numeric_type(&val_ty)
+        {
+            self.error(
+                "FIR-U01",
+                format!("Neg operand must be numeric, got {val_ty:?}"),
+                id,
+            );
         }
     }
 
@@ -1387,14 +1386,14 @@ impl<'s> VerifyCtx<'s> {
         if let Some(src_ty) = self.infer_value_type(value) {
             let src_w = self.bit_width(&src_ty);
             let dst_w = self.bit_width(target);
-            if let (Some(sw), Some(dw)) = (src_w, dst_w) {
-                if sw != dw {
-                    self.warn(
-                        "FIR-U04",
-                        format!("Bitcast width mismatch: {src_ty:?} ({sw}) -> {target:?} ({dw})"),
-                        id,
-                    );
-                }
+            if let (Some(sw), Some(dw)) = (src_w, dst_w)
+                && sw != dw
+            {
+                self.warn(
+                    "FIR-U04",
+                    format!("Bitcast width mismatch: {src_ty:?} ({sw}) -> {target:?} ({dw})"),
+                    id,
+                );
             }
         }
     }
@@ -1447,16 +1446,16 @@ impl<'s> VerifyCtx<'s> {
                 );
             }
             for (i, (arg_id, (_pname, pty))) in args.iter().zip(sig.params.iter()).enumerate() {
-                if let Some(actual_ty) = self.infer_value_type(*arg_id) {
-                    if !self.types_compatible(&actual_ty, pty) {
-                        self.warn(
-                            "FIR-FC03",
-                            format!(
-                                "call to '{name}' arg #{i} has type {actual_ty:?}, expected {pty:?}"
-                            ),
-                            id,
-                        );
-                    }
+                if let Some(actual_ty) = self.infer_value_type(*arg_id)
+                    && !self.types_compatible(&actual_ty, pty)
+                {
+                    self.warn(
+                        "FIR-FC03",
+                        format!(
+                            "call to '{name}' arg #{i} has type {actual_ty:?}, expected {pty:?}"
+                        ),
+                        id,
+                    );
                 }
             }
             if &sig.return_type != declared {
@@ -1488,16 +1487,15 @@ impl<'s> VerifyCtx<'s> {
     fn check_math_call(&mut self, id: FirId, name: &str, args: &[FirId]) {
         let raw = name.strip_prefix("std::").unwrap_or(name);
         let Some(op) = FirMathOp::from_symbol(name) else {
-            if raw == "abs" {
-                if let Some(arg) = args.first().and_then(|arg| self.infer_value_type(*arg)) {
-                    if self.is_float_like_type(&arg) {
-                        self.warn(
-                            "FIR-MA04",
-                            "use 'fabs' for floating-point absolute value (got 'abs')",
-                            id,
-                        );
-                    }
-                }
+            if raw == "abs"
+                && let Some(arg) = args.first().and_then(|arg| self.infer_value_type(*arg))
+                && self.is_float_like_type(&arg)
+            {
+                self.warn(
+                    "FIR-MA04",
+                    "use 'fabs' for floating-point absolute value (got 'abs')",
+                    id,
+                );
             }
             return;
         };
@@ -1536,32 +1534,31 @@ impl<'s> VerifyCtx<'s> {
         let is_float_math = !matches!(op, FirMathOp::Abs);
         if is_float_math && expected_arity == args.len() {
             for (i, arg_id) in args.iter().enumerate() {
-                if let Some(arg_ty) = self.infer_value_type(*arg_id) {
-                    if self.is_integer_type(&arg_ty) || arg_ty == FirType::Bool {
-                        self.warn(
-                            "FIR-MA03",
-                            format!(
-                                "math op '{}' arg #{i} is integer-like ({arg_ty:?}); \
-                                 floating-point argument expected",
-                                op.symbol()
-                            ),
-                            id,
-                        );
-                    }
-                }
-            }
-        }
-
-        if raw == "fabs" {
-            if let Some(arg_ty) = args.first().and_then(|arg| self.infer_value_type(*arg)) {
-                if self.is_integer_type(&arg_ty) || arg_ty == FirType::Bool {
+                if let Some(arg_ty) = self.infer_value_type(*arg_id)
+                    && (self.is_integer_type(&arg_ty) || arg_ty == FirType::Bool)
+                {
                     self.warn(
-                        "FIR-MA04",
-                        format!("'fabs' called with integer-like argument {arg_ty:?}"),
+                        "FIR-MA03",
+                        format!(
+                            "math op '{}' arg #{i} is integer-like ({arg_ty:?}); \
+                             floating-point argument expected",
+                            op.symbol()
+                        ),
                         id,
                     );
                 }
             }
+        }
+
+        if raw == "fabs"
+            && let Some(arg_ty) = args.first().and_then(|arg| self.infer_value_type(*arg))
+            && (self.is_integer_type(&arg_ty) || arg_ty == FirType::Bool)
+        {
+            self.warn(
+                "FIR-MA04",
+                format!("'fabs' called with integer-like argument {arg_ty:?}"),
+                id,
+            );
         }
     }
 
@@ -1574,42 +1571,42 @@ impl<'s> VerifyCtx<'s> {
         index: FirId,
         declared_elem_type: &FirType,
     ) {
-        if let Some(index_ty) = self.infer_value_type(index) {
-            if !self.is_integer_type(&index_ty) {
-                self.error(
-                    "FIR-T01",
-                    format!("table index must be Int32 or Int64, got {index_ty:?}"),
+        if let Some(index_ty) = self.infer_value_type(index)
+            && !self.is_integer_type(&index_ty)
+        {
+            self.error(
+                "FIR-T01",
+                format!("table index must be Int32 or Int64, got {index_ty:?}"),
+                id,
+            );
+        }
+        if access != AccessType::Struct
+            && let Some(entry) = self.resolve(name, access)
+        {
+            let effective_elem_type = if entry.is_table {
+                Some(entry.typ.clone())
+            } else {
+                self.is_indexable_container_type(&entry.typ)
+            };
+            if effective_elem_type.is_none() {
+                self.warn(
+                    "FIR-T03",
+                    format!("LoadTable '{name}' refers to a non-table declaration"),
                     id,
                 );
             }
-        }
-        if access != AccessType::Struct {
-            if let Some(entry) = self.resolve(name, access) {
-                let effective_elem_type = if entry.is_table {
-                    Some(entry.typ.clone())
-                } else {
-                    self.is_indexable_container_type(&entry.typ)
-                };
-                if effective_elem_type.is_none() {
-                    self.warn(
-                        "FIR-T03",
-                        format!("LoadTable '{name}' refers to a non-table declaration"),
-                        id,
-                    );
-                }
-                if let Some(expected_elem_type) = effective_elem_type
-                    && expected_elem_type != *declared_elem_type
-                {
-                    self.warn(
-                        "FIR-T03",
-                        format!(
-                            "LoadTable '{name}' element type {declared_elem_type:?} differs from \
-                             declaration {:?}",
-                            expected_elem_type
-                        ),
-                        id,
-                    );
-                }
+            if let Some(expected_elem_type) = effective_elem_type
+                && expected_elem_type != *declared_elem_type
+            {
+                self.warn(
+                    "FIR-T03",
+                    format!(
+                        "LoadTable '{name}' element type {declared_elem_type:?} differs from \
+                         declaration {:?}",
+                        expected_elem_type
+                    ),
+                    id,
+                );
             }
         }
     }
@@ -1623,14 +1620,14 @@ impl<'s> VerifyCtx<'s> {
         index: FirId,
         value: FirId,
     ) {
-        if let Some(index_ty) = self.infer_value_type(index) {
-            if !self.is_integer_type(&index_ty) {
-                self.error(
-                    "FIR-T01",
-                    format!("table index must be Int32 or Int64, got {index_ty:?}"),
-                    id,
-                );
-            }
+        if let Some(index_ty) = self.infer_value_type(index)
+            && !self.is_integer_type(&index_ty)
+        {
+            self.error(
+                "FIR-T01",
+                format!("table index must be Int32 or Int64, got {index_ty:?}"),
+                id,
+            );
         }
         if access == AccessType::Struct {
             return;
@@ -1666,14 +1663,14 @@ impl<'s> VerifyCtx<'s> {
 
     /// Warns when a `Drop` discards a non-void function return value.
     fn check_fun_call_drop_use(&mut self, id: FirId, value: FirId) {
-        if let FirMatch::FunCall { name, typ, .. } = match_fir(self.store, value) {
-            if typ != FirType::Void {
-                self.warn(
-                    "FIR-FC04",
-                    format!("discarded non-void return value from '{name}' ({typ:?})"),
-                    id,
-                );
-            }
+        if let FirMatch::FunCall { name, typ, .. } = match_fir(self.store, value)
+            && typ != FirType::Void
+        {
+            self.warn(
+                "FIR-FC04",
+                format!("discarded non-void return value from '{name}' ({typ:?})"),
+                id,
+            );
         }
     }
 
@@ -2027,10 +2024,10 @@ impl<'s> VerifyCtx<'s> {
         self.check_stmt(step);
 
         // L04: body must be non-empty
-        if let FirMatch::Block(ref stmts) = match_fir(self.store, body) {
-            if stmts.is_empty() {
-                self.warn("FIR-L04", format!("ForLoop '{var}' body is empty"), id);
-            }
+        if let FirMatch::Block(ref stmts) = match_fir(self.store, body)
+            && stmts.is_empty()
+        {
+            self.warn("FIR-L04", format!("ForLoop '{var}' body is empty"), id);
         }
         self.check_stmt(body);
 
@@ -2054,14 +2051,14 @@ impl<'s> VerifyCtx<'s> {
         self.check_value(upper);
 
         // L04: body must be non-empty
-        if let FirMatch::Block(ref stmts) = match_fir(self.store, body) {
-            if stmts.is_empty() {
-                self.warn(
-                    "FIR-L04",
-                    format!("SimpleForLoop '{var}' body is empty"),
-                    id,
-                );
-            }
+        if let FirMatch::Block(ref stmts) = match_fir(self.store, body)
+            && stmts.is_empty()
+        {
+            self.warn(
+                "FIR-L04",
+                format!("SimpleForLoop '{var}' body is empty"),
+                id,
+            );
         }
         self.check_stmt(body);
 
@@ -2137,33 +2134,32 @@ impl<'s> VerifyCtx<'s> {
     fn check_return(&mut self, id: FirId, value: Option<FirId>) {
         if let Some(val_id) = value {
             self.check_value(val_id);
-            if let Some(ret_ty) = &self.current_return_type {
-                if let Some(val_ty) = self.infer_value_type(val_id) {
-                    if val_ty != *ret_ty {
-                        self.error(
-                            "FIR-R01",
-                            format!(
-                                "Return value type {val_ty:?} does not match function return type {ret_ty:?}"
-                            ),
-                            id,
-                        );
-                    }
-                }
+            if let Some(ret_ty) = &self.current_return_type
+                && let Some(val_ty) = self.infer_value_type(val_id)
+                && val_ty != *ret_ty
+            {
+                self.error(
+                    "FIR-R01",
+                    format!(
+                        "Return value type {val_ty:?} does not match function return type {ret_ty:?}"
+                    ),
+                    id,
+                );
             }
         } else {
             // R02: Return(None) in a non-Void function
-            if let Some(ret_ty) = &self.current_return_type {
-                if *ret_ty != FirType::Void {
-                    self.warn(
-                        "FIR-R02",
-                        format!(
-                            "Return without value in function '{}' whose return type is {:?}",
-                            self.current_function.as_deref().unwrap_or("?"),
-                            ret_ty
-                        ),
-                        id,
-                    );
-                }
+            if let Some(ret_ty) = &self.current_return_type
+                && *ret_ty != FirType::Void
+            {
+                self.warn(
+                    "FIR-R02",
+                    format!(
+                        "Return without value in function '{}' whose return type is {:?}",
+                        self.current_function.as_deref().unwrap_or("?"),
+                        ret_ty
+                    ),
+                    id,
+                );
             }
         }
         // R03 is handled by check_block which detects statements after a Return.

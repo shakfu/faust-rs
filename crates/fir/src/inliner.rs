@@ -748,21 +748,12 @@ impl Default for FirHygienicCloneOptions {
 /// Reusing one state instance across repeated clones guarantees distinct fresh
 /// local names across all those clones, which is required for future inlining
 /// of the same callee multiple times into one caller block.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct FirHygienicCloneState {
     /// Clone options (notably fresh-name prefix).
     pub options: FirHygienicCloneOptions,
     /// Next fresh local id.
     pub next_local_id: usize,
-}
-
-impl Default for FirHygienicCloneState {
-    fn default() -> Self {
-        Self {
-            options: FirHygienicCloneOptions::default(),
-            next_local_id: 0,
-        }
-    }
 }
 
 /// Kind of local binding that was renamed during hygienic cloning.
@@ -1209,6 +1200,7 @@ fn state_fresh_local_name(state: &mut FirHygienicCloneState, original: &str) -> 
     format!("{}{}_{}", state.options.local_prefix, id, original)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_callee_body_for_inlining_with_cloned_args(
     src_store: &FirStore,
     _callee_decl: FirId,
@@ -1344,6 +1336,7 @@ pub fn inline_fir_module_once(
     Ok((dst_store, module, stats))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rewrite_module_once(
     src_store: &FirStore,
     module: FirId,
@@ -1394,6 +1387,7 @@ fn rewrite_module_once(
     Ok(b.module(name, dsp_struct, globals, declarations))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rewrite_fun_section_once(
     src_store: &FirStore,
     section_id: FirId,

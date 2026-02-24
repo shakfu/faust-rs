@@ -76,21 +76,12 @@ pub struct FirCompileOutput {
 }
 
 /// FIR verifier configuration used at the compiler facade / CLI integration layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FirVerifyOptions {
     /// Run FIR verifier after FIR generation and before backend codegen.
     pub enabled: bool,
     /// Treat warnings as fatal in addition to errors.
     pub strict: bool,
-}
-
-impl Default for FirVerifyOptions {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            strict: false,
-        }
-    }
 }
 
 /// Main façade orchestrating the current production compilation pipeline.

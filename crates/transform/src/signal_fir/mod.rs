@@ -127,7 +127,8 @@ mod tests {
         let FirMatch::Block(stmts) = match_fir(store, compute_body) else {
             panic!("compute block expected");
         };
-        stmts.iter()
+        stmts
+            .iter()
             .find_map(|id| match match_fir(store, *id) {
                 FirMatch::SimpleForLoop { body, .. } | FirMatch::ForLoop { body, .. } => Some(body),
                 _ => None,

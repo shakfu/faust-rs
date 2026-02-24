@@ -1,5 +1,35 @@
 # JOURNAL
 
+## 2026-02-24 (session 48)
+
+### Clippy `-D warnings` cleanup across FIR / compiler / interp executor
+
+Ran `cargo clippy --workspace --all-targets -- -D warnings` and fixed the
+reported warnings to restore a clean local quality gate.
+
+**What changed**
+- `crates/fir/src/checker.rs`
+  - removed redundant `#[must_use]` on iterator-returning methods (`errors`,
+    `warnings`)
+  - collapsed nested `if` statements flagged by `clippy::collapsible_if`
+  - added a targeted `#[allow(clippy::too_many_arguments)]` on
+    `register_function_signature(...)` (internal helper with a stable, explicit
+    parameter list)
+- `crates/fir/src/inliner.rs`
+  - derived `Default` for `FirHygienicCloneState` (replacing manual impl)
+  - added targeted `#[allow(clippy::too_many_arguments)]` on three internal
+    rewrite/preparation helpers
+- `crates/codegen/src/backends/interp/executor.rs`
+  - collapsed nested `if` in trapped-panic classification helper
+- `crates/compiler/src/lib.rs`
+  - derived `Default` for `FirVerifyOptions` (replacing manual impl)
+
+**Validation**
+- `cargo clippy -p fir --all-targets -- -D warnings` ✅
+- `cargo clippy --workspace --all-targets -- -D warnings` ✅
+
+---
+
 ## 2026-02-24 (session 47)
 
 ### `interp-ffi` C++ header: self-contained `interpreter-dsp.h` compatibility fixes

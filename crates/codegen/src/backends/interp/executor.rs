@@ -240,14 +240,13 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> Option<&str> {
 }
 
 fn classify_trapped_panic(payload: &(dyn std::any::Any + Send), site: ExecSite) -> FbcExecError {
-    if let Some(msg) = panic_payload_message(payload) {
-        if msg.contains("index out of bounds")
+    if let Some(msg) = panic_payload_message(payload)
+        && (msg.contains("index out of bounds")
             || msg.contains("range end index")
             || msg.contains("range start index")
-            || msg.contains("slice index")
-        {
-            return FbcExecError::heap_oob(site.opcode, site.block_id, site.pc);
-        }
+            || msg.contains("slice index"))
+    {
+        return FbcExecError::heap_oob(site.opcode, site.block_id, site.pc);
     }
     FbcExecError::panic_trapped(site.opcode, site.block_id, site.pc)
 }
