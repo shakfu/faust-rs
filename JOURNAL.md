@@ -1,5 +1,48 @@
 # JOURNAL
 
+## 2026-02-24 (session 32)
+
+### Interp legacy lane — reserve `sampleRate` / `count` slots in factory generation (Option A)
+
+Fixed the `interp` legacy-lane runtime panic exposed by
+`interp-trace-diff-lanes` using a strict-parity generation fix (not a runtime
+guard).
+
+**Problem**
+- `legacy` lane + `interp` could generate a factory with:
+  - `int_heap_size = 0`
+  - `sr_offset = 0`
+  - `count_offset = 0`
+- `FbcDspInstance` then writes `sampleRate` and `count` unconditionally through
+  those offsets (matching the C++ interpreter contract), causing an out-of-bounds
+  panic before any DSP execution.
+
+**What changed**
+- `crates/codegen/src/backends/interp/mod.rs`
+  - `generate_interp_module(...)` now reserves pseudo int-heap slots for
+    `sr_offset` / `count_offset` when the FIR producer did not materialize
+    `fSampleRate` / `count` in the field table (notably the temporary legacy FIR
+    bridge)
+  - added `reserve_pseudo_int_slot(...)` helper with documentation referencing
+    the C++ runtime invariant (unconditional writes of sample-rate/count)
+  - added unit test
+    `generate_interp_module_reserves_sr_and_count_slots_when_missing`
+
+**Why this approach**
+- keeps Rust `interp` runtime behavior aligned with the C++ interpreter contract
+  (no special runtime guards needed for missing offsets)
+- fixes the generation-side invariant instead of masking it at runtime
+
+**Validation**
+- `cargo test -p codegen generate_interp_module_reserves_sr_and_count_slots_when_missing -- --nocapture` ✅
+- `cargo run -p xtask -- interp-trace-diff-lanes --case tests/runtime_corpus/trace_01_passthrough.dsp` ✅
+  - no more legacy-lane panic
+  - now reports a semantic mismatch (`legacy` vs `fast-lane`) which is expected
+    because the current `legacy`->FIR bridge used by `interp` is a non-semantic
+    stub (`Label`-only `compute`)
+
+---
+
 ## 2026-02-24 (session 31)
 
 ### Runtime trace validation — consolidate Phase 2 (tolerant compare) and start Phase 3 lane diff scaffold

@@ -289,15 +289,19 @@ pub fn generate_interp_module(
     };
 
     // 5. Extract arena, heap layout, UI instructions, and field table.
-    let (arena, int_heap_size, real_heap_size, ui_block, field_table) = compiler.into_parts();
+    let (arena, mut int_heap_size, real_heap_size, ui_block, field_table) = compiler.into_parts();
 
     // 6. Resolve well-known heap offsets from the field table.
-    let sr_offset = field_table
+    let sr_offset_existing = field_table
         .get("fSamplingFreq")
         .or_else(|| field_table.get("fSampleRate"))
-        .map(|d| d.offset)
-        .unwrap_or(0);
-    let count_offset = field_table.get("count").map(|d| d.offset).unwrap_or(0);
+        .map(|d| d.offset);
+    let count_offset_existing = field_table.get("count").map(|d| d.offset);
+    // C++ interpreter runtime writes sample-rate/count unconditionally, so the
+    // factory must provide valid int-heap offsets even when the FIR producer
+    // (notably the temporary legacy bridge) did not materialize these symbols.
+    let sr_offset = reserve_pseudo_int_slot(sr_offset_existing, &mut int_heap_size);
+    let count_offset = reserve_pseudo_int_slot(count_offset_existing, &mut int_heap_size);
     let iota_offset = field_table
         .get("IOTA")
         .or_else(|| field_table.get("fIOTA"))
@@ -348,6 +352,22 @@ pub fn generate_interp_module(
     Ok(factory)
 }
 
+/// Returns an existing int-heap offset or reserves a new pseudo-slot at the
+/// end of the int heap.
+///
+/// This keeps the Rust interpreter runtime aligned with the C++ contract where
+/// `instanceConstants()` and `compute()` write `sampleRate`/`count`
+/// unconditionally through well-known offsets.
+fn reserve_pseudo_int_slot(existing: Option<i32>, int_heap_size: &mut i32) -> i32 {
+    if let Some(offset) = existing {
+        offset
+    } else {
+        let offset = *int_heap_size;
+        *int_heap_size += 1;
+        offset
+    }
+}
+
 /// Detects a split-friendly `compute` body shape:
 /// `Block(prefix..., <top-level ForLoop|SimpleForLoop as last stmt>)`.
 ///
@@ -365,5 +385,75 @@ fn detect_compute_control_dsp_split(
             Some((prefix.to_vec(), *last))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fir::{FirBuilder, FirType, NamedType};
+
+    fn make_minimal_legacy_like_module() -> (fir::FirStore, fir::FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let label = b.label("legacy bridge compute stub");
+        let body = b.block(&[label]);
+        let ff_ptr_ptr = FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat))));
+        let compute_type = FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                ff_ptr_ptr.clone(),
+                ff_ptr_ptr,
+            ],
+            ret: Box::new(FirType::Void),
+        };
+        let compute_args = [
+            NamedType {
+                name: "dsp".into(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".into(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".into(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".into(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun("compute", compute_type, &compute_args, Some(body), false);
+        let dsp_struct = b.block(&[]);
+        let globals = b.block(&[]);
+        let declarations = b.block(&[compute]);
+        let module = b.module("legacy_like", dsp_struct, globals, declarations);
+        (store, module)
+    }
+
+    #[test]
+    fn generate_interp_module_reserves_sr_and_count_slots_when_missing() {
+        let (store, module) = make_minimal_legacy_like_module();
+        let factory = generate_interp_module(
+            &store,
+            module,
+            &InterpOptions {
+                opt_level: 0,
+                module_name: None,
+                num_inputs: 1,
+                num_outputs: 1,
+            },
+        )
+        .expect("minimal legacy-like module should compile to interp factory");
+
+        assert!(factory.int_heap_size >= 2);
+        assert!(factory.sr_offset >= 0);
+        assert!(factory.count_offset >= 0);
+        assert!(factory.sr_offset < factory.int_heap_size);
+        assert!(factory.count_offset < factory.int_heap_size);
+        assert_ne!(factory.sr_offset, factory.count_offset);
     }
 }
