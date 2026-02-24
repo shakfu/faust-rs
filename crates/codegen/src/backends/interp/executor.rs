@@ -107,6 +107,42 @@ impl FbcExecError {
         }
     }
 
+    fn invalid_block_id(opcode: FbcOpcode, block_id: BlockId, pc: usize) -> Self {
+        Self {
+            kind: "invalid_block_id",
+            opcode,
+            block_id,
+            pc,
+            stack: None,
+            channel: None,
+            sample: None,
+        }
+    }
+
+    fn invalid_block_pc(opcode: FbcOpcode, block_id: BlockId, pc: usize) -> Self {
+        Self {
+            kind: "invalid_block_pc",
+            opcode,
+            block_id,
+            pc,
+            stack: None,
+            channel: None,
+            sample: None,
+        }
+    }
+
+    fn heap_oob(opcode: FbcOpcode, block_id: BlockId, pc: usize) -> Self {
+        Self {
+            kind: "heap_oob",
+            opcode,
+            block_id,
+            pc,
+            stack: None,
+            channel: None,
+            sample: None,
+        }
+    }
+
     fn panic_trapped(opcode: FbcOpcode, block_id: BlockId, pc: usize) -> Self {
         Self {
             kind: "panic_trapped",
@@ -191,6 +227,29 @@ fn require_branch_target(
     pc: usize,
 ) -> Result<BlockId, FbcExecError> {
     target.ok_or_else(|| FbcExecError::missing_branch_target(opcode, block_id, pc))
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> Option<&str> {
+    if let Some(msg) = payload.downcast_ref::<&'static str>() {
+        Some(msg)
+    } else if let Some(msg) = payload.downcast_ref::<String>() {
+        Some(msg.as_str())
+    } else {
+        None
+    }
+}
+
+fn classify_trapped_panic(payload: &(dyn std::any::Any + Send), site: ExecSite) -> FbcExecError {
+    if let Some(msg) = panic_payload_message(payload) {
+        if msg.contains("index out of bounds")
+            || msg.contains("range end index")
+            || msg.contains("range start index")
+            || msg.contains("slice index")
+        {
+            return FbcExecError::heap_oob(site.opcode, site.block_id, site.pc);
+        }
+    }
+    FbcExecError::panic_trapped(site.opcode, site.block_id, site.pc)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -291,11 +350,7 @@ impl<R: FbcReal> FbcExecutor<R> {
             self.try_execute_block_io_inner(arena, block_id, inputs, outputs, &mut last_site)
         })) {
             Ok(result) => result,
-            Err(_payload) => Err(FbcExecError::panic_trapped(
-                last_site.opcode,
-                last_site.block_id,
-                last_site.pc,
-            )),
+            Err(payload) => Err(classify_trapped_panic(&*payload, last_site)),
         }
     }
 
@@ -320,8 +375,13 @@ impl<R: FbcReal> FbcExecutor<R> {
         let mut pc: usize = 0;
 
         loop {
-            let block = arena.get(cur_block);
-            let instr = &block.instructions[pc];
+            let block = arena
+                .try_get(cur_block)
+                .ok_or_else(|| FbcExecError::invalid_block_id(last_site.opcode, cur_block, pc))?;
+            let instr = block
+                .instructions
+                .get(pc)
+                .ok_or_else(|| FbcExecError::invalid_block_pc(last_site.opcode, cur_block, pc))?;
             *last_site = ExecSite {
                 opcode: instr.opcode,
                 block_id: cur_block,
@@ -2344,7 +2404,7 @@ mod tests {
     }
 
     #[test]
-    fn unchecked_heap_oob_is_trapped_as_structured_panic_error_in_try_mode() {
+    fn unchecked_heap_oob_is_reported_as_structured_heap_error_in_try_mode() {
         let mut arena = FbcBlockArena::<f32>::new();
         // StoreReal into heap[4] while heap size is 1 -> indexing panic in the
         // current unchecked fast-style implementation path, which try-mode must
@@ -2360,10 +2420,42 @@ mod tests {
             .try_execute_block(&arena, bid)
             .expect_err("heap OOB should be trapped as a structured runtime error");
 
-        assert_eq!(err.kind, "panic_trapped");
+        assert_eq!(err.kind, "heap_oob");
         assert_eq!(err.opcode, FbcOpcode::StoreReal);
         assert_eq!(err.block_id, bid);
         assert_eq!(err.pc, 1);
+    }
+
+    #[test]
+    fn invalid_block_id_returns_structured_error() {
+        let mut arena = FbcBlockArena::<f32>::new();
+        let valid = make_block(vec![]);
+        let _ = arena.alloc(valid);
+        let invalid = BlockId::from_raw(42);
+
+        let mut exec = FbcExecutor::new(0, 0);
+        let err = exec
+            .try_execute_block(&arena, invalid)
+            .expect_err("invalid block id should return a structured error");
+
+        assert_eq!(err.kind, "invalid_block_id");
+        assert_eq!(err.block_id, invalid);
+    }
+
+    #[test]
+    fn invalid_block_pc_returns_structured_error() {
+        let mut arena = FbcBlockArena::<f32>::new();
+        let empty_block = FbcBlock::new(); // no Return, invalid runtime block shape on purpose
+        let bid = arena.alloc(empty_block);
+
+        let mut exec = FbcExecutor::new(0, 0);
+        let err = exec
+            .try_execute_block(&arena, bid)
+            .expect_err("invalid pc fetch should return a structured error");
+
+        assert_eq!(err.kind, "invalid_block_pc");
+        assert_eq!(err.block_id, bid);
+        assert_eq!(err.pc, 0);
     }
 
     #[test]

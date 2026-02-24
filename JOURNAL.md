@@ -1,5 +1,47 @@
 # JOURNAL
 
+## 2026-02-24 (session 43)
+
+### Interp checked executor hardening — explicit block/pc errors and heap OOB classification
+
+Completed the next hardening pass for the checked interpreter execution path
+(`try_execute_*`) by turning more executor failures into structured runtime
+errors and reducing reliance on the generic `panic_trapped` fallback.
+
+**What changed**
+- `crates/codegen/src/backends/interp/bytecode.rs`
+  - added `FbcBlockArena::try_get(...)` and `try_get_mut(...)` to support
+    non-panicking block lookup in checked executor mode
+- `crates/codegen/src/backends/interp/executor.rs`
+  - extended `FbcExecError` with explicit categories:
+    - `invalid_block_id`
+    - `invalid_block_pc`
+    - `heap_oob`
+  - `try_execute_block_io_inner(...)` now validates:
+    - block lookup via `arena.try_get(...)`
+    - instruction fetch via `block.instructions.get(pc)`
+    and returns structured errors instead of panicking on invalid block/pc
+  - improved panic trapping in `try_execute_block_io(...)`:
+    - classifies index/slice range panics as `heap_oob`
+    - keeps `panic_trapped` fallback for remaining uncategorized panics
+  - executor tests updated/extended:
+    - heap OOB checked-mode test now expects `heap_oob`
+    - added `invalid_block_id_returns_structured_error`
+    - added `invalid_block_pc_returns_structured_error`
+
+**Why**
+- This completes the requested hardening pass for the checked execution mode:
+  runtime trace tooling (`xtask`) now gets structured errors for more classes of
+  interpreter/runtime invariants, while keeping the fast path separate.
+- It improves diagnostics without introducing implicit runtime type repair.
+
+**Validation**
+- `cargo fmt -p codegen` ✅
+- `cargo test -p codegen backends::interp::executor::tests -- --nocapture` ✅
+- `cargo test -p xtask` ✅
+
+---
+
 ## 2026-02-24 (session 42)
 
 ### Interp executor dual-mode — restore a separate fast execution path

@@ -336,12 +336,23 @@ impl<R: FbcReal> FbcBlockArena<R> {
         &self.blocks[id.0 as usize]
     }
 
+    /// Returns a reference to the block at the given ID, or `None` if out of range.
+    #[must_use]
+    pub fn try_get(&self, id: BlockId) -> Option<&FbcBlock<R>> {
+        self.blocks.get(id.0 as usize)
+    }
+
     /// Returns a mutable reference to the block at the given ID.
     ///
     /// # Panics
     /// Panics if `id` is out of range.
     pub fn get_mut(&mut self, id: BlockId) -> &mut FbcBlock<R> {
         &mut self.blocks[id.0 as usize]
+    }
+
+    /// Returns a mutable reference to the block at the given ID, or `None` if out of range.
+    pub fn try_get_mut(&mut self, id: BlockId) -> Option<&mut FbcBlock<R>> {
+        self.blocks.get_mut(id.0 as usize)
     }
 
     /// Returns the number of blocks in the arena.
