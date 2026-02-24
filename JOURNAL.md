@@ -1,5 +1,58 @@
 # JOURNAL
 
+## 2026-02-24 (session 28)
+
+### `xtask` runtime trace harness — Phase 1 prototype (`interp-trace-dump`)
+
+Implemented Phase 1 of the runtime trace validation plan: a minimal `xtask`
+command that compiles a single DSP through the Rust pipeline, runs it with the
+`interp` backend on deterministic inputs, and dumps a JSON trace of output
+samples.
+
+**What changed**
+- `crates/xtask/src/main.rs`
+  - added `interp-trace-dump` subcommand
+  - parses options:
+    - `--case`
+    - `--scenario zeros|impulse|ramp|sine`
+    - `--lane legacy|fast`
+    - `--sample-rate`, `--block-size`, `--num-blocks`
+    - `--out <path>`
+  - uses Rust APIs directly (no CLI output parsing):
+    - `compiler::Compiler` (`compile_file_default_to_signals`, `compile_file_default_to_fir_with_lane`)
+    - `codegen::backends::interp::generate_interp_module`
+    - `FbcDspInstance` runtime execution
+  - deterministic input generators (`zeros`, `impulse`, `ramp`, `sine`)
+  - JSON trace renderer (Phase 1 schema draft)
+  - unit tests for parser/scenarios/JSON rendering
+- `crates/xtask/README.md`
+  - documented the new `interp-trace-dump` command and Phase 1 scope
+- `porting/interp-runtime-trace-validation-plan-en.md`
+  - added implementation status section
+  - marked Phase 1 prototype as implemented
+  - recorded current known limitation (`rep_31_extended_primitives.dsp` runtime panic in `interp`)
+
+**Why**
+- establishes a practical executable trace harness for continuous validation of
+  runtime semantics
+- creates the foundation for Phase 2 (`interp-trace-gen` / `interp-trace-check`)
+  snapshot workflows
+- enables future FIR pass equivalence checks (checker validity + trace equality)
+
+**Validation**
+- `cargo fmt -p xtask` ✅
+- `cargo test -p xtask` ✅ (5 tests)
+- `cargo run -p xtask -- interp-trace-dump --case tests/corpus/rep_01_passthrough.dsp --scenario impulse --lane fast --num-blocks 1 --out /tmp/rep01_trace.json` ✅
+  - verified JSON trace output created and contains expected impulse passthrough samples
+
+**Known limitation (tracked)**
+- `rep_31_extended_primitives.dsp` currently panics at runtime in the `interp`
+  executor path when used through the new harness (`executor.rs` `Option::unwrap`)
+  despite compiling successfully. This is an existing interpreter runtime issue,
+  not a harness parsing/compilation issue, and will need a dedicated backend fix.
+
+---
+
 ## 2026-02-24 (session 27)
 
 ### Runtime validation plan — continuous DSP execution traces via `interp`

@@ -1,5 +1,21 @@
 ## Interp Runtime Trace Validation Plan (Continuous Compiler Validation)
 
+### Implementation Status (2026-02-24)
+
+- `Phase 1` is now implemented as a prototype command:
+  - `cargo run -p xtask -- interp-trace-dump --case <dsp> ...`
+- Current prototype capabilities:
+  - programmatic compile via Rust APIs (`compiler` + `interp` backend)
+  - deterministic input scenarios (`zeros`, `impulse`, `ramp`, `sine`)
+  - JSON trace dump (stdout / `--out`)
+- Snapshot generation/checking (`interp-trace-gen` / `interp-trace-check`) is
+  still pending (`Phase 2`).
+- Known limitation observed during validation:
+  - some DSPs may still panic at runtime in the `interp` executor path
+    (example: `rep_31_extended_primitives.dsp` at the time of the Phase 1
+    implementation). Phase 1 validation therefore uses a stable simple case
+    (`rep_01_passthrough.dsp`) for end-to-end smoke testing.
+
 ### Purpose
 
 Use the Rust `interp` backend as a continuous execution oracle for DSP corpus
@@ -556,4 +572,3 @@ The plan is considered implemented when all of the following are true:
 5. Should `xtask` support per-case runtime parameter overrides in v1?
    - recommendation: yes (via metadata), but only implement if needed by the
      initial subset
-

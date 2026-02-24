@@ -8,6 +8,8 @@
 //! - Golden snapshots:
 //!   - `golden-check`, `golden-check-cpp`
 //!   - `golden-gen-rust`, `golden-gen-cpp`
+//! - Runtime trace validation (interp backend):
+//!   - `interp-trace-dump` (Phase 1 harness prototype)
 //! - Differential reports:
 //!   - parser parity report
 //!   - corpus status report
@@ -33,6 +35,7 @@ Usage:
   cargo run -p xtask -- golden-check-cpp
   cargo run -p xtask -- golden-gen-rust
   cargo run -p xtask -- golden-gen-cpp [-- <extra args passed to FAUST_CPP_BIN>]
+  cargo run -p xtask -- interp-trace-dump --case <tests/corpus/foo.dsp> [--scenario zeros|impulse|ramp|sine] [--lane legacy|fast]
   cargo run -p xtask -- parser-parity-report
   cargo run -p xtask -- corpus-status-report
   cargo run -p xtask -- cpp-backend-diff-report
@@ -87,6 +90,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             golden_gen_cpp(&passthrough)?;
         }
+        "interp-trace-dump" => interp_trace_dump(args)?,
         "parser-parity-report" => parser_parity_report()?,
         "corpus-status-report" => corpus_status_report()?,
         "cpp-backend-diff-report" => cpp_backend_diff_report()?,
@@ -213,6 +217,346 @@ fn normalize(text: &str) -> String {
     normalized = lines.join("\n");
     normalized.push('\n');
     normalized
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TraceScenario {
+    Zeros,
+    Impulse,
+    Ramp,
+    Sine,
+}
+
+impl TraceScenario {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Zeros => "zeros",
+            Self::Impulse => "impulse",
+            Self::Ramp => "ramp",
+            Self::Sine => "sine",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "zeros" => Ok(Self::Zeros),
+            "impulse" => Ok(Self::Impulse),
+            "ramp" => Ok(Self::Ramp),
+            "sine" => Ok(Self::Sine),
+            _ => Err(format!(
+                "unknown scenario '{s}' (expected: zeros|impulse|ramp|sine)"
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TraceLane {
+    Legacy,
+    Fast,
+}
+
+impl TraceLane {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Fast => "fast-lane",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "legacy" => Ok(Self::Legacy),
+            "fast" | "fast-lane" | "transform" => Ok(Self::Fast),
+            _ => Err(format!("unknown lane '{s}' (expected: legacy|fast)")),
+        }
+    }
+
+    fn to_signal_fir_lane(self) -> compiler::SignalFirLane {
+        match self {
+            Self::Legacy => compiler::SignalFirLane::LegacyBridge,
+            Self::Fast => compiler::SignalFirLane::TransformFastLane,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InterpTraceDumpOptions {
+    case: PathBuf,
+    scenario: TraceScenario,
+    lane: TraceLane,
+    sample_rate: usize,
+    block_size: usize,
+    num_blocks: usize,
+    out: Option<PathBuf>,
+}
+
+impl Default for InterpTraceDumpOptions {
+    fn default() -> Self {
+        Self {
+            case: PathBuf::new(),
+            scenario: TraceScenario::Zeros,
+            lane: TraceLane::Fast,
+            sample_rate: 48_000,
+            block_size: 64,
+            num_blocks: 4,
+            out: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeTrace {
+    dsp_path: String,
+    lane: &'static str,
+    scenario: &'static str,
+    sample_rate: usize,
+    block_size: usize,
+    num_blocks: usize,
+    num_inputs: usize,
+    num_outputs: usize,
+    outputs: Vec<Vec<f32>>,
+}
+
+fn interp_trace_dump(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let options = parse_interp_trace_dump_options(&mut args)?;
+    let trace = run_interp_trace_case(&options)?;
+    let json = render_runtime_trace_json(&trace);
+    if let Some(path) = &options.out {
+        fs::write(path, json)?;
+    } else {
+        print!("{json}");
+    }
+    Ok(())
+}
+
+fn parse_interp_trace_dump_options(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<InterpTraceDumpOptions, Box<dyn std::error::Error>> {
+    let mut options = InterpTraceDumpOptions::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--case" => {
+                let Some(path) = args.next() else {
+                    return Err("missing value after --case".into());
+                };
+                options.case = PathBuf::from(path);
+            }
+            "--scenario" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value after --scenario".into());
+                };
+                options.scenario = TraceScenario::parse(&value)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            }
+            "--lane" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value after --lane".into());
+                };
+                options.lane = TraceLane::parse(&value)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            }
+            "--sample-rate" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value after --sample-rate".into());
+                };
+                options.sample_rate = value.parse::<usize>()?;
+            }
+            "--block-size" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value after --block-size".into());
+                };
+                options.block_size = value.parse::<usize>()?;
+            }
+            "--num-blocks" => {
+                let Some(value) = args.next() else {
+                    return Err("missing value after --num-blocks".into());
+                };
+                options.num_blocks = value.parse::<usize>()?;
+            }
+            "--out" => {
+                let Some(path) = args.next() else {
+                    return Err("missing value after --out".into());
+                };
+                options.out = Some(PathBuf::from(path));
+            }
+            "--help" | "-h" => {
+                return Err("usage: cargo run -p xtask -- interp-trace-dump --case <path> [--scenario zeros|impulse|ramp|sine] [--lane legacy|fast] [--sample-rate N] [--block-size N] [--num-blocks N] [--out path]".into());
+            }
+            other => {
+                return Err(format!("unknown interp-trace-dump option: {other}").into());
+            }
+        }
+    }
+
+    if options.case.as_os_str().is_empty() {
+        return Err("interp-trace-dump requires --case <path>".into());
+    }
+    if options.block_size == 0 || options.num_blocks == 0 {
+        return Err("block-size and num-blocks must be > 0".into());
+    }
+    Ok(options)
+}
+
+fn run_interp_trace_case(
+    options: &InterpTraceDumpOptions,
+) -> Result<RuntimeTrace, Box<dyn std::error::Error>> {
+    let compiler = compiler::Compiler::new().with_fir_verify_options(compiler::FirVerifyOptions {
+        enabled: true,
+        strict: false,
+    });
+
+    let signals = compiler.compile_file_default_to_signals(&options.case)?;
+    let fir = compiler
+        .compile_file_default_to_fir_with_lane(&options.case, options.lane.to_signal_fir_lane())?;
+
+    let interp_options = codegen::backends::interp::InterpOptions {
+        opt_level: 0,
+        module_name: None,
+        num_inputs: signals.process_arity.inputs,
+        num_outputs: signals.process_arity.outputs,
+    };
+    let mut factory =
+        codegen::backends::interp::generate_interp_module(&fir.store, fir.module, &interp_options)?;
+    let mut instance = codegen::backends::interp::FbcDspInstance::new(&mut factory);
+    instance.init(options.sample_rate as i32);
+
+    let total_samples = options.block_size * options.num_blocks;
+    let input_channels = generate_trace_inputs(
+        options.scenario,
+        signals.process_arity.inputs,
+        total_samples,
+        options.sample_rate,
+    );
+    let mut output_channels = vec![vec![0.0f32; total_samples]; signals.process_arity.outputs];
+
+    for block_idx in 0..options.num_blocks {
+        let start = block_idx * options.block_size;
+        let end = start + options.block_size;
+        let input_refs: Vec<&[f32]> = input_channels.iter().map(|ch| &ch[start..end]).collect();
+        let mut output_refs: Vec<&mut [f32]> = output_channels
+            .iter_mut()
+            .map(|ch| &mut ch[start..end])
+            .collect();
+        instance.compute(options.block_size as i32, &input_refs, &mut output_refs);
+    }
+
+    Ok(RuntimeTrace {
+        dsp_path: options.case.display().to_string(),
+        lane: options.lane.as_str(),
+        scenario: options.scenario.as_str(),
+        sample_rate: options.sample_rate,
+        block_size: options.block_size,
+        num_blocks: options.num_blocks,
+        num_inputs: signals.process_arity.inputs,
+        num_outputs: signals.process_arity.outputs,
+        outputs: output_channels,
+    })
+}
+
+fn generate_trace_inputs(
+    scenario: TraceScenario,
+    num_inputs: usize,
+    total_samples: usize,
+    sample_rate: usize,
+) -> Vec<Vec<f32>> {
+    let mut inputs = vec![vec![0.0f32; total_samples]; num_inputs];
+    match scenario {
+        TraceScenario::Zeros => {}
+        TraceScenario::Impulse => {
+            if total_samples > 0 {
+                for channel in &mut inputs {
+                    channel[0] = 1.0;
+                }
+            }
+        }
+        TraceScenario::Ramp => {
+            if total_samples == 0 {
+                return inputs;
+            }
+            let denom = (total_samples.saturating_sub(1)).max(1) as f32;
+            for channel in &mut inputs {
+                for (i, sample) in channel.iter_mut().enumerate() {
+                    *sample = (i as f32) / denom;
+                }
+            }
+        }
+        TraceScenario::Sine => {
+            let sr = sample_rate.max(1) as f32;
+            let freq_hz = 440.0f32;
+            let w = core::f32::consts::TAU * freq_hz / sr;
+            for (ch_idx, channel) in inputs.iter_mut().enumerate() {
+                let phase = (ch_idx as f32) * 0.25 * core::f32::consts::TAU;
+                for (i, sample) in channel.iter_mut().enumerate() {
+                    *sample = (w * (i as f32) + phase).sin();
+                }
+            }
+        }
+    }
+    inputs
+}
+
+fn render_runtime_trace_json(trace: &RuntimeTrace) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "{{");
+    let _ = writeln!(out, "  \"schema_version\": 1,");
+    let _ = writeln!(out, "  \"dsp\": \"{}\",", json_escape(&trace.dsp_path));
+    let _ = writeln!(out, "  \"backend\": \"interp\",");
+    let _ = writeln!(out, "  \"pipeline\": {{");
+    let _ = writeln!(out, "    \"signal_fir_lane\": \"{}\"", trace.lane);
+    let _ = writeln!(out, "  }},");
+    let _ = writeln!(out, "  \"runtime\": {{");
+    let _ = writeln!(out, "    \"sample_rate\": {},", trace.sample_rate);
+    let _ = writeln!(out, "    \"block_size\": {},", trace.block_size);
+    let _ = writeln!(out, "    \"num_blocks\": {}", trace.num_blocks);
+    let _ = writeln!(out, "  }},");
+    let _ = writeln!(out, "  \"scenario\": {{");
+    let _ = writeln!(out, "    \"name\": \"{}\",", trace.scenario);
+    let _ = writeln!(out, "    \"inputs\": {},", trace.num_inputs);
+    let _ = writeln!(out, "    \"outputs\": {}", trace.num_outputs);
+    let _ = writeln!(out, "  }},");
+    let _ = writeln!(out, "  \"outputs\": [");
+    for (ch_idx, channel) in trace.outputs.iter().enumerate() {
+        let _ = write!(out, "    [");
+        for (i, sample) in channel.iter().enumerate() {
+            if i > 0 {
+                let _ = write!(out, ", ");
+            }
+            let _ = write!(out, "{:.9}", sample);
+        }
+        let _ = writeln!(
+            out,
+            "]{}",
+            if ch_idx + 1 == trace.outputs.len() {
+                ""
+            } else {
+                ","
+            }
+        );
+    }
+    let _ = writeln!(out, "  ]");
+    let _ = writeln!(out, "}}");
+    out
+}
+
+fn json_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn render_rust_snapshot(input: &Path) -> Result<String, io::Error> {
@@ -2048,4 +2392,71 @@ fn render_alias_list(
         writeln!(out, "- `{source}` -> {mapped}")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trace_scenario_parse_accepts_known_names() {
+        assert_eq!(TraceScenario::parse("zeros").unwrap(), TraceScenario::Zeros);
+        assert_eq!(
+            TraceScenario::parse("impulse").unwrap(),
+            TraceScenario::Impulse
+        );
+        assert_eq!(TraceScenario::parse("ramp").unwrap(), TraceScenario::Ramp);
+        assert_eq!(TraceScenario::parse("sine").unwrap(), TraceScenario::Sine);
+    }
+
+    #[test]
+    fn trace_lane_parse_accepts_fast_aliases() {
+        assert_eq!(TraceLane::parse("legacy").unwrap(), TraceLane::Legacy);
+        assert_eq!(TraceLane::parse("fast").unwrap(), TraceLane::Fast);
+        assert_eq!(TraceLane::parse("fast-lane").unwrap(), TraceLane::Fast);
+        assert_eq!(TraceLane::parse("transform").unwrap(), TraceLane::Fast);
+    }
+
+    #[test]
+    fn parse_interp_trace_dump_defaults_and_required_case() {
+        let mut args = vec![
+            "--case".to_string(),
+            "tests/corpus/rep_31_extended_primitives.dsp".to_string(),
+        ]
+        .into_iter();
+        let opts = parse_interp_trace_dump_options(&mut args).unwrap();
+        assert_eq!(opts.scenario, TraceScenario::Zeros);
+        assert_eq!(opts.lane, TraceLane::Fast);
+        assert_eq!(opts.sample_rate, 48_000);
+        assert_eq!(opts.block_size, 64);
+        assert_eq!(opts.num_blocks, 4);
+    }
+
+    #[test]
+    fn generate_impulse_inputs_sets_first_sample_only() {
+        let inputs = generate_trace_inputs(TraceScenario::Impulse, 2, 5, 48_000);
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0], vec![1.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(inputs[1], vec![1.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn render_runtime_trace_json_contains_expected_keys() {
+        let trace = RuntimeTrace {
+            dsp_path: "tests/corpus/example.dsp".into(),
+            lane: "fast-lane",
+            scenario: "zeros",
+            sample_rate: 48_000,
+            block_size: 64,
+            num_blocks: 1,
+            num_inputs: 1,
+            num_outputs: 1,
+            outputs: vec![vec![0.0, 1.0]],
+        };
+        let json = render_runtime_trace_json(&trace);
+        assert!(json.contains("\"backend\": \"interp\""));
+        assert!(json.contains("\"signal_fir_lane\": \"fast-lane\""));
+        assert!(json.contains("\"scenario\""));
+        assert!(json.contains("\"outputs\""));
+    }
 }
