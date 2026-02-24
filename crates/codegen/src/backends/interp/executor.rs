@@ -232,8 +232,7 @@ impl<R: FbcReal> FbcExecutor<R> {
 
     /// Executes a block without audio I/O (for init, clear, control blocks).
     pub fn execute_block(&mut self, arena: &FbcBlockArena<R>, block_id: BlockId) {
-        self.try_execute_block(arena, block_id)
-            .unwrap_or_else(|e| panic!("{e}"));
+        self.execute_block_io(arena, block_id, &[], &mut []);
     }
 
     /// Executes a block without audio I/O (for init, clear, control blocks),
@@ -265,7 +264,12 @@ impl<R: FbcReal> FbcExecutor<R> {
         inputs: &[&[R]],
         outputs: &mut [&mut [R]],
     ) {
-        self.try_execute_block_io(arena, block_id, inputs, outputs)
+        let mut last_site = ExecSite {
+            opcode: FbcOpcode::Nop,
+            block_id,
+            pc: 0,
+        };
+        self.try_execute_block_io_inner(arena, block_id, inputs, outputs, &mut last_site)
             .unwrap_or_else(|e| panic!("{e}"));
     }
 

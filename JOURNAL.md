@@ -1,5 +1,38 @@
 # JOURNAL
 
+## 2026-02-24 (session 42)
+
+### Interp executor dual-mode — restore a separate fast execution path
+
+Completed the next dual-mode hardening step by separating the fast execution
+path from the checked (`try_*`) wrappers.
+
+**What changed**
+- `crates/codegen/src/backends/interp/executor.rs`
+  - `execute_block(...)` no longer calls `try_execute_block(...)`
+  - `execute_block_io(...)` no longer calls `try_execute_block_io(...)`
+  - fast path now calls the internal executor core directly (no `catch_unwind`,
+    no `panic_trapped` conversion on the normal path)
+- `crates/codegen/src/backends/interp/instance.rs`
+  - `FbcDspInstance::compute(...)` no longer wraps `try_compute(...)`
+  - restored a direct fast runtime path (control block + DSP block execution)
+  - `try_compute(...)` remains available for checked/diagnostic mode (used by
+    `xtask`)
+
+**Why**
+- the previous step had compatibility APIs (`execute_*`, `compute()`) layered on
+  top of checked execution, which kept checked-mode overhead on the fast path
+- this restores the intended dual-mode split:
+  - fast path for runtime/perf-oriented use
+  - checked path for validation and structured diagnostics
+
+**Validation**
+- `cargo fmt -p codegen` ✅
+- `cargo test -p codegen backends::interp::instance::tests::instance_compute_passthrough -- --nocapture` ✅
+- `cargo test -p xtask` ✅
+
+---
+
 ## 2026-02-24 (session 41)
 
 ### Interp executor hardening plan — implement Phases A/B/C (checked path) in `try_execute_*`

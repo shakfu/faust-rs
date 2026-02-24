@@ -158,8 +158,26 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
     /// - `interpreter_dsp_aux::compute()` in `interpreter_dsp_aux.hh`
     ///   (lines 706–790).
     pub fn compute(&mut self, count: i32, inputs: &[&[R]], outputs: &mut [&mut [R]]) {
-        self.try_compute(count, inputs, outputs)
-            .unwrap_or_else(|e| panic!("{e}"));
+        if count == 0 {
+            return; // Beware: compiled loop does not work with an index of 0.
+        }
+
+        // Set count in 'count' variable at the correct offset in fIntHeap.
+        self.executor.int_heap[self.factory.count_offset as usize] = count;
+
+        // Executes the 'control' block.
+        self.executor
+            .execute_block(&self.factory.arena, self.factory.compute_block);
+
+        // Executes the 'DSP' block (with audio I/O).
+        self.executor.execute_block_io(
+            &self.factory.arena,
+            self.factory.compute_dsp_block,
+            inputs,
+            outputs,
+        );
+
+        self.cycle += 1;
     }
 
     /// Processes one buffer of audio samples and returns a structured runtime
