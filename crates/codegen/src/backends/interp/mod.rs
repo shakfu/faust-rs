@@ -44,9 +44,9 @@ pub use bytecode::{
     FbcUiInstruction,
 };
 pub use compiler::{CompileError, FbcCompileResult, FirToFbcCompiler, HeapType, MemoryDesc};
-pub use executor::FbcExecutor;
+pub use executor::{FbcExecError, FbcExecutor, FbcStackKind};
 pub use factory::FbcDspFactory;
-pub use instance::FbcDspInstance;
+pub use instance::{FbcDspInstance, FbcDspRuntimeError};
 pub use opcode::{FBC_INSTRUCTION_NAMES, FBC_OPCODE_COUNT, FbcOpcode, INTERP_FILE_VERSION};
 pub use optimizer::{MAX_OPT_LEVEL, optimize_block};
 pub use real::FbcReal;

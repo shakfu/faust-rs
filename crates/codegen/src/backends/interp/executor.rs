@@ -37,6 +37,66 @@ const REAL_STACK_CAPACITY: usize = 512;
 const INT_STACK_CAPACITY: usize = 512;
 const ADDR_STACK_CAPACITY: usize = 64;
 
+/// Execution stack kind used in structured runtime errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FbcStackKind {
+    /// Integer value stack (`int_stack`).
+    Int,
+    /// Real value stack (`real_stack`).
+    Real,
+}
+
+/// Structured runtime execution error for bytecode interpreter failures.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FbcExecError {
+    /// Human-readable stable error category.
+    pub kind: &'static str,
+    /// Opcode being executed when the error occurred.
+    pub opcode: FbcOpcode,
+    /// Block id of the executing bytecode block.
+    pub block_id: BlockId,
+    /// Program counter within the block.
+    pub pc: usize,
+    /// Optional stack underflow detail.
+    pub stack: Option<FbcStackKind>,
+}
+
+impl FbcExecError {
+    fn stack_underflow(
+        opcode: FbcOpcode,
+        block_id: BlockId,
+        pc: usize,
+        stack: FbcStackKind,
+    ) -> Self {
+        Self {
+            kind: "stack_underflow",
+            opcode,
+            block_id,
+            pc,
+            stack: Some(stack),
+        }
+    }
+}
+
+impl std::fmt::Display for FbcExecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.stack {
+            Some(stack) => write!(
+                f,
+                "FBC runtime error [{}] opcode={:?} block={:?} pc={} stack={:?}",
+                self.kind, self.opcode, self.block_id, self.pc, stack
+            ),
+            None => write!(
+                f,
+                "FBC runtime error [{}] opcode={:?} block={:?} pc={}",
+                self.kind, self.opcode, self.block_id, self.pc
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FbcExecError {}
+
 /// FBC bytecode execution engine.
 ///
 /// Holds mutable state (heaps) and executes bytecode blocks from an
@@ -69,7 +129,18 @@ impl<R: FbcReal> FbcExecutor<R> {
 
     /// Executes a block without audio I/O (for init, clear, control blocks).
     pub fn execute_block(&mut self, arena: &FbcBlockArena<R>, block_id: BlockId) {
-        self.execute_block_io(arena, block_id, &[], &mut []);
+        self.try_execute_block(arena, block_id)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Executes a block without audio I/O (for init, clear, control blocks),
+    /// returning a structured runtime error instead of panicking.
+    pub fn try_execute_block(
+        &mut self,
+        arena: &FbcBlockArena<R>,
+        block_id: BlockId,
+    ) -> Result<(), FbcExecError> {
+        self.try_execute_block_io(arena, block_id, &[], &mut [])
     }
 
     /// Executes a block with audio I/O (for compute blocks).
@@ -91,6 +162,19 @@ impl<R: FbcReal> FbcExecutor<R> {
         inputs: &[&[R]],
         outputs: &mut [&mut [R]],
     ) {
+        self.try_execute_block_io(arena, block_id, inputs, outputs)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Executes a block with audio I/O and returns a structured runtime error
+    /// for detected stack-discipline failures instead of panicking.
+    pub fn try_execute_block_io(
+        &mut self,
+        arena: &FbcBlockArena<R>,
+        block_id: BlockId,
+        inputs: &[&[R]],
+        outputs: &mut [&mut [R]],
+    ) -> Result<(), FbcExecError> {
         use FbcOpcode::*;
 
         // Execution stacks (local to this call, matching C++ local arrays).
@@ -253,8 +337,22 @@ impl<R: FbcReal> FbcExecutor<R> {
                     pc += 1;
                 }
                 StoreOutput => {
-                    let sample_idx = int_stack.pop().unwrap() as usize;
-                    let val = real_stack.pop().unwrap();
+                    let sample_idx = int_stack.pop().ok_or_else(|| {
+                        FbcExecError::stack_underflow(
+                            instr.opcode,
+                            cur_block,
+                            pc,
+                            FbcStackKind::Int,
+                        )
+                    })? as usize;
+                    let val = real_stack.pop().ok_or_else(|| {
+                        FbcExecError::stack_underflow(
+                            instr.opcode,
+                            cur_block,
+                            pc,
+                            FbcStackKind::Real,
+                        )
+                    })?;
                     outputs[o1][sample_idx] = val;
                     pc += 1;
                 }
@@ -1562,7 +1660,7 @@ impl<R: FbcReal> FbcExecutor<R> {
                         pc = saved_pc;
                     } else {
                         // Empty address stack = end of execution.
-                        return;
+                        return Ok(());
                     }
                 }
 
@@ -2045,6 +2143,30 @@ mod tests {
         let mut exec = FbcExecutor::new(0, 0);
         exec.execute_block_io(&arena, bid, inputs, &mut [&mut output_data]);
         assert!((output_data[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn store_output_stack_underflow_returns_structured_error() {
+        let mut arena = FbcBlockArena::<f32>::new();
+        // Push only an int sample index, then attempt StoreOutput. This leaves
+        // no value on the real stack and should report a structured underflow.
+        let block = make_block(vec![
+            FbcInstruction::with_values(FbcOpcode::Int32Value, 0, 0.0),
+            FbcInstruction::with_values_and_offsets(FbcOpcode::StoreOutput, 0, 0.0, 0, -1),
+        ]);
+        let bid = arena.alloc(block);
+
+        let mut output_data = [0.0_f32; 1];
+        let mut exec = FbcExecutor::new(0, 0);
+        let err = exec
+            .try_execute_block_io(&arena, bid, &[], &mut [&mut output_data])
+            .expect_err("StoreOutput with empty real stack should not panic");
+
+        assert_eq!(err.kind, "stack_underflow");
+        assert_eq!(err.opcode, FbcOpcode::StoreOutput);
+        assert_eq!(err.block_id, bid);
+        assert_eq!(err.pc, 1);
+        assert_eq!(err.stack, Some(FbcStackKind::Real));
     }
 
     #[test]

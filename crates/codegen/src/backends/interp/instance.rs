@@ -11,7 +11,7 @@
 //!   enforced by requiring `&mut FbcDspFactory` in `new()`.
 //! - No `TRACE` template parameter — tracing is a future runtime option.
 
-use super::executor::FbcExecutor;
+use super::executor::{FbcExecError, FbcExecutor};
 use super::factory::FbcDspFactory;
 use super::real::FbcReal;
 
@@ -28,6 +28,29 @@ pub struct FbcDspInstance<'a, R: FbcReal> {
     executor: FbcExecutor<R>,
     initialized: bool,
     cycle: usize,
+}
+
+/// Structured runtime error returned by `FbcDspInstance::try_compute`.
+#[derive(Debug)]
+pub enum FbcDspRuntimeError {
+    /// Bytecode executor reported a structured execution failure.
+    Exec(FbcExecError),
+}
+
+impl std::fmt::Display for FbcDspRuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exec(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for FbcDspRuntimeError {}
+
+impl From<FbcExecError> for FbcDspRuntimeError {
+    fn from(value: FbcExecError) -> Self {
+        Self::Exec(value)
+    }
 }
 
 impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
@@ -135,8 +158,20 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
     /// - `interpreter_dsp_aux::compute()` in `interpreter_dsp_aux.hh`
     ///   (lines 706–790).
     pub fn compute(&mut self, count: i32, inputs: &[&[R]], outputs: &mut [&mut [R]]) {
+        self.try_compute(count, inputs, outputs)
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Processes one buffer of audio samples and returns a structured runtime
+    /// error for detected execution failures (for example stack underflow).
+    pub fn try_compute(
+        &mut self,
+        count: i32,
+        inputs: &[&[R]],
+        outputs: &mut [&mut [R]],
+    ) -> Result<(), FbcDspRuntimeError> {
         if count == 0 {
-            return; // Beware: compiled loop does not work with an index of 0.
+            return Ok(()); // Beware: compiled loop does not work with an index of 0.
         }
 
         // Set count in 'count' variable at the correct offset in fIntHeap.
@@ -147,14 +182,15 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
             .execute_block(&self.factory.arena, self.factory.compute_block);
 
         // Executes the 'DSP' block (with audio I/O).
-        self.executor.execute_block_io(
+        self.executor.try_execute_block_io(
             &self.factory.arena,
             self.factory.compute_dsp_block,
             inputs,
             outputs,
-        );
+        )?;
 
         self.cycle += 1;
+        Ok(())
     }
 
     /// Returns the current sample rate.

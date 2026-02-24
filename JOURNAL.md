@@ -1,5 +1,57 @@
 # JOURNAL
 
+## 2026-02-24 (session 39)
+
+### Interp runtime — replace `StoreOutput` stack panic with structured execution error
+
+Replaced the observed `interp` runtime panic (`Option::unwrap()` in
+`StoreOutput`) with a structured execution error on the runtime path used by
+`xtask`, without introducing any implicit auto-cast behavior.
+
+**What changed**
+- `crates/codegen/src/backends/interp/executor.rs`
+  - added structured runtime error types:
+    - `FbcExecError`
+    - `FbcStackKind`
+  - added non-panicking execution APIs:
+    - `try_execute_block(...)`
+    - `try_execute_block_io(...)`
+  - `StoreOutput` now detects stack underflow and returns
+    `FbcExecError { kind: "stack_underflow", opcode=StoreOutput, ... }` instead
+    of panicking on `real_stack.pop().unwrap()`
+  - existing `execute_block(...)` / `execute_block_io(...)` kept as panicking
+    wrappers for backward compatibility (they now panic with the structured
+    error message)
+  - added regression test:
+    `store_output_stack_underflow_returns_structured_error`
+- `crates/codegen/src/backends/interp/instance.rs`
+  - added `FbcDspRuntimeError`
+  - added `try_compute(...)` returning structured runtime errors
+  - existing `compute(...)` kept as panicking wrapper for compatibility
+- `crates/codegen/src/backends/interp/mod.rs`
+  - re-exported new runtime error types (`FbcExecError`, `FbcStackKind`,
+    `FbcDspRuntimeError`)
+- `crates/xtask/src/main.rs`
+  - runtime trace harness now uses `FbcDspInstance::try_compute(...)`
+  - `interp-trace-dump` reports a structured runtime error instead of a panic
+    when this stack-discipline bug is hit
+
+**Why**
+- preserve strict semantics (no implicit casts inserted at runtime)
+- make runtime failures actionable and debuggable in trace workflows
+- avoid hard panics for known bytecode/FIR stack-discipline mismatches
+
+**Validation**
+- `cargo fmt -p codegen -p xtask` ✅
+- `cargo test -p codegen backends::interp::executor::tests::store_output_stack_underflow_returns_structured_error -- --nocapture` ✅
+- `cargo test -p xtask` ✅
+- `cargo run -p xtask -- interp-trace-dump --case tests/runtime_corpus_known_failures/int_plus_one_interp_stack_bug.dsp --scenario ramp --lane fast --num-blocks 1` ✅
+  - now returns:
+    `FBC runtime error [stack_underflow] opcode=StoreOutput ... stack=Real`
+    (no panic)
+
+---
+
 ## 2026-02-24 (session 38)
 
 ### Runtime trace validation — document known `interp` runtime repro and exclude it from corpus

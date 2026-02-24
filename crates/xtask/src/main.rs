@@ -849,7 +849,14 @@ fn run_interp_trace_case(
             .iter_mut()
             .map(|ch| &mut ch[start..end])
             .collect();
-        instance.compute(options.block_size as i32, &input_refs, &mut output_refs);
+        instance
+            .try_compute(options.block_size as i32, &input_refs, &mut output_refs)
+            .map_err(|e| {
+                format!(
+                    "interp runtime execution failed in compute block (block_idx={}): {e}",
+                    block_idx
+                )
+            })?;
     }
 
     Ok(RuntimeTrace {
