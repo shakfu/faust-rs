@@ -642,20 +642,13 @@ fn emit_compute_body(
     body: FirId,
     indent: usize,
 ) -> Result<(), CodegenError> {
-    let tab = "    ".repeat(indent);
     let _output_channels = if options.num_outputs > 0 {
         options.num_outputs
     } else {
         infer_compute_output_arity(store, body)
     };
-    let _ = writeln!(out, "{tab}{{");
-    let _ = writeln!(out, "{tab}    int i0;");
-    let _ = writeln!(out, "{tab}    for (i0 = 0; i0 < count; i0 = i0 + 1) {{");
     let mut mode = EmitMode::Compute;
-    emit_block_with_mode(store, out, options, body, indent + 2, &mut mode)?;
-    let _ = writeln!(out, "{tab}    }}");
-    let _ = writeln!(out, "{tab}}}");
-    Ok(())
+    emit_block_with_mode(store, out, options, body, indent, &mut mode)
 }
 
 fn infer_module_compute_output_arity(store: &FirStore, declarations: FirId) -> usize {
@@ -746,23 +739,35 @@ fn collect_table_initializers(
 }
 
 fn infer_compute_output_arity(store: &FirStore, body: FirId) -> usize {
-    let FirMatch::Block(items) = match_fir(store, body) else {
-        return 0;
-    };
     let mut max_output_index = None;
     let mut drop_count = 0usize;
-    for stmt in items {
-        match match_fir(store, stmt) {
-            FirMatch::StoreTable { name, .. } => {
-                if let Some(index) = output_alias_index(&name) {
-                    max_output_index =
-                        Some(max_output_index.map_or(index, |m: usize| m.max(index)));
+
+    fn visit(
+        store: &FirStore,
+        id: FirId,
+        max_output_index: &mut Option<usize>,
+        drop_count: &mut usize,
+    ) {
+        match match_fir(store, id) {
+            FirMatch::Block(items) => {
+                for stmt in items {
+                    visit(store, stmt, max_output_index, drop_count);
                 }
             }
-            FirMatch::Drop(_) => drop_count += 1,
+            FirMatch::SimpleForLoop { body, .. } | FirMatch::ForLoop { body, .. } => {
+                visit(store, body, max_output_index, drop_count);
+            }
+            FirMatch::StoreTable { name, .. } => {
+                if let Some(index) = output_alias_index(&name) {
+                    *max_output_index = Some(max_output_index.map_or(index, |m| m.max(index)));
+                }
+            }
+            FirMatch::Drop(_) => *drop_count += 1,
             _ => {}
         }
     }
+
+    visit(store, body, &mut max_output_index, &mut drop_count);
     max_output_index.map_or(drop_count, |idx| idx + 1)
 }
 
@@ -950,6 +955,28 @@ fn emit_stmt(
                 out,
                 "{tab}for (int {var} = {init}; {var} < {end}; {var} = {var} + {step}) {{"
             );
+            emit_block_with_mode(store, out, options, body, indent + 1, mode)?;
+            let _ = writeln!(out, "{tab}}}");
+            Ok(())
+        }
+        FirMatch::SimpleForLoop {
+            var,
+            upper,
+            body,
+            is_reverse,
+        } => {
+            let upper = emit_value(store, options, upper)?;
+            if is_reverse {
+                let _ = writeln!(
+                    out,
+                    "{tab}for (int {var} = ({upper}) - 1; {var} >= 0; {var} = {var} - 1) {{"
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "{tab}for (int {var} = 0; {var} < {upper}; {var} = {var} + 1) {{"
+                );
+            }
             emit_block_with_mode(store, out, options, body, indent + 1, mode)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
@@ -1273,7 +1300,7 @@ mod tests {
             "ui_interface->addHorizontalSlider(ui_interface->uiInterface, \"freq\", &dsp->fFreq, (FAUSTFLOAT)440.0, (FAUSTFLOAT)20.0, (FAUSTFLOAT)3000.0, (FAUSTFLOAT)1.0);"
         ));
         assert!(out.contains("void computemydsp(mydsp* dsp, int count, FAUSTFLOAT** RESTRICT inputs, FAUSTFLOAT** RESTRICT outputs)"));
-        assert!(out.contains("for (i0 = 0; i0 < count; i0 = i0 + 1)"));
+        assert!(out.contains("for (int i0 = 0; i0 < count; i0 = i0 + 1)"));
         assert!(out.contains("output0[i0] = "));
         assert!(out.contains("sin("));
         assert!(out.contains("void instanceConstantsmydsp(mydsp* dsp, int sample_rate) {"));

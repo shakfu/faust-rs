@@ -949,11 +949,10 @@ fn emit_declare_fun(
     Ok(())
 }
 
-/// Emits a Faust-style sample loop for `compute(count, inputs, outputs)`.
+/// Emits the FIR `compute` body as-is.
 ///
-/// This keeps FIR expression lowering in one place while enforcing the DSP API
-/// contract expected by Faust architectures: per-sample processing on channels
-/// carried by `inputs[]`/`outputs[]` and explicit FIR stores to `outputN[i0]`.
+/// The fast-lane now emits an explicit FIR sample loop (`SimpleForLoop/ForLoop`)
+/// inside `compute`, so the C++ backend must not synthesize an extra `i0` loop.
 fn emit_compute_body(
     store: &FirStore,
     out: &mut String,
@@ -961,17 +960,13 @@ fn emit_compute_body(
     body: FirId,
     indent: usize,
 ) -> Result<(), CodegenError> {
-    let tab = "    ".repeat(indent);
     let _output_channels = if options.num_outputs > 0 {
         options.num_outputs
     } else {
         infer_compute_output_arity(store, body)
     };
-    let _ = writeln!(out, "{tab}for (int i0 = 0; i0 < count; i0 = i0 + 1) {{");
     let mut mode = EmitMode::Compute;
-    emit_block_with_mode(store, out, options, "", body, indent + 1, &mut mode)?;
-    let _ = writeln!(out, "{tab}}}");
-    Ok(())
+    emit_block_with_mode(store, out, options, "", body, indent, &mut mode)
 }
 
 fn is_dsp_api_method(name: &str) -> bool {
@@ -994,23 +989,35 @@ fn is_empty_block(store: &FirStore, body: FirId) -> bool {
 }
 
 fn infer_compute_output_arity(store: &FirStore, body: FirId) -> usize {
-    let FirMatch::Block(items) = match_fir(store, body) else {
-        return 0;
-    };
     let mut max_output_index = None;
     let mut drop_count = 0usize;
-    for stmt in items {
-        match match_fir(store, stmt) {
-            FirMatch::StoreTable { name, .. } => {
-                if let Some(index) = output_alias_index(&name) {
-                    max_output_index =
-                        Some(max_output_index.map_or(index, |m: usize| m.max(index)));
+
+    fn visit(
+        store: &FirStore,
+        id: FirId,
+        max_output_index: &mut Option<usize>,
+        drop_count: &mut usize,
+    ) {
+        match match_fir(store, id) {
+            FirMatch::Block(items) => {
+                for stmt in items {
+                    visit(store, stmt, max_output_index, drop_count);
                 }
             }
-            FirMatch::Drop(_) => drop_count += 1,
+            FirMatch::SimpleForLoop { body, .. } | FirMatch::ForLoop { body, .. } => {
+                visit(store, body, max_output_index, drop_count);
+            }
+            FirMatch::StoreTable { name, .. } => {
+                if let Some(index) = output_alias_index(&name) {
+                    *max_output_index = Some(max_output_index.map_or(index, |m| m.max(index)));
+                }
+            }
+            FirMatch::Drop(_) => *drop_count += 1,
             _ => {}
         }
     }
+
+    visit(store, body, &mut max_output_index, &mut drop_count);
     max_output_index.map_or(drop_count, |idx| idx + 1)
 }
 

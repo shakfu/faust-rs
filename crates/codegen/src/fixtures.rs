@@ -99,7 +99,10 @@ pub fn build_sine_phasor_test_module() -> (FirStore, FirId) {
     let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
     let store_out = b.store_table("output0", AccessType::Stack, i0, out);
 
-    let compute_body = b.block(&[out_alias, store_phase, store_out]);
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let sample_body = b.block(&[store_phase, store_out]);
+    let sample_loop = b.simple_for_loop("i0", count, sample_body, false);
+    let compute_body = b.block(&[out_alias, sample_loop]);
     let compute_args = [
         NamedType {
             name: "dsp".to_string(),

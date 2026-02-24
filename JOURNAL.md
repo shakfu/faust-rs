@@ -1,5 +1,42 @@
 # JOURNAL
 
+## 2026-02-23 (session 23)
+
+### C/C++ backends — stop synthesizing `compute` sample loop (consume explicit FIR loop)
+
+Aligned the C and C++ FIR backends with the new fast-lane contract where
+`compute` contains an explicit FIR loop (`SimpleForLoop` / `ForLoop`) and the
+backend must emit the FIR body as-is.
+
+**What changed**
+- `crates/codegen/src/backends/c/mod.rs`
+  - `emit_compute_body(...)` no longer emits a synthetic `int i0; for (...)`
+    wrapper around `compute`
+  - added `SimpleForLoop` statement emission support in the C backend
+  - `infer_compute_output_arity(...)` now traverses nested loop bodies to find
+    `StoreTable(outputN, ...)`
+- `crates/codegen/src/backends/cpp/mod.rs`
+  - `emit_compute_body(...)` no longer emits a synthetic sample loop
+  - `infer_compute_output_arity(...)` now traverses nested loop bodies
+  - docs updated to state the explicit-FIR-loop contract
+- `crates/codegen/src/fixtures.rs`
+  - shared FIR sine/phasor fixture now builds `compute` with an explicit
+    `SimpleForLoop("i0", count, ...)`
+- `crates/codegen/tests/cpp_fir_sine_phasor.rs`
+  - assertions updated to the current C++ emitted loop form (`++i0`)
+
+**Why**
+- session 22 moved the sample loop into FIR fast-lane output
+- keeping backend-synthesized loops would duplicate the sample loop and break
+  the "FIR is the source of truth" contract for `compute`
+
+**Validation**
+- `cargo test -p codegen` ✅
+- `cargo test -p compiler --test signal_fir_lane` ✅
+- `cargo fmt -p codegen` ✅
+
+---
+
 ## 2026-02-23 (session 22)
 
 ### Fast-lane FIR — emit explicit sample loop (`SimpleForLoop i0`) in `compute`
