@@ -1,5 +1,37 @@
 # JOURNAL
 
+## 2026-02-23 (session 14)
+
+### Plan — Rust FIR `FunctionInliner` (module-level) specification and implementation roadmap
+
+Added a dedicated planning document for a Rust FIR→FIR function inliner pass:
+
+- `porting/fir-function-inliner-plan-en.md`
+
+The plan is grounded in:
+
+- existing C++ Faust code in `compiler/generator/fir_to_fir.cpp/.hh`
+  (`FunctionInliner`, `FunctionCallInliner`)
+- standard compiler inliner design (LLVM / MLIR / GCC references)
+- Rust FIR module constraints and checker-based validation workflow
+
+**Documented scope**
+- module-level inlining goals and pass API shape
+- legality checks (callee body, recursion/SCC, supported body shapes)
+- parameter substitution semantics and temporary materialization
+- hygienic local renaming requirements (fixing the C++ TODO/name-clash gap)
+- return extraction + statement splicing for `FunCall` replacement
+- call graph / SCC traversal strategy
+- cost/profitability heuristics and rollout milestones
+
+**Validation strategy captured in the plan**
+- use `crates/fir/src/checker.rs` as the correctness oracle before/after inlining
+- require no new FIR verifier errors (`SC*`, `FC*`, `B*`, etc.) after rewrite
+
+This is a planning/documentation step only (no code changes yet).
+
+---
+
 ## 2026-02-23 (session 13)
 
 ### Docs — Document internal FIR checker functions (`checker.rs`)
