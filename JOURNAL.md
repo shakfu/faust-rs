@@ -1,5 +1,56 @@
 # JOURNAL
 
+## 2026-02-23 (session 15)
+
+### FIR FunctionInliner — Milestone 1 analysis scaffolding in `crates/fir`
+
+Implemented the first step of the Rust FIR `FunctionInliner` plan as an
+analysis-only module:
+
+- `crates/fir/src/inliner.rs`
+- exported via `crates/fir/src/lib.rs` (`pub mod inliner;`)
+
+**What is implemented (no rewrite yet)**
+- module-level FIR function indexing (`globals` + `declarations`)
+- direct call graph extraction from `FunCall` nodes in function bodies
+- deterministic SCC decomposition (Tarjan) over the call graph
+- callee body size metric (`unique reachable FIR node count`)
+- candidate selection decisions with explicit skip reasons:
+  - disabled
+  - prototype-only
+  - reserved DSP API function
+  - recursive SCC
+  - not marked inline (when `inline_marked_only`)
+  - too large (threshold)
+
+**Public API / Rustdoc**
+- `FirInlineOptions`
+- `FirInlineAnalysisError`
+- `FirFunctionSection`
+- `FirFunctionSummary`
+- `FirInlineSkipReason`
+- `FirInlineCandidateDecision`
+- `FirInlineScc`
+- `FirInlineAnalysis`
+- `analyze_fir_inliner(...)`
+
+The module also includes internal documentation for the key analysis helpers
+(function collection, body metrics traversal, child traversal, SCC builder, and
+candidate policy).
+
+**Tests**
+Added unit tests in `crates/fir/src/inliner.rs` covering:
+- call graph extraction + size metrics + basic candidate eligibility
+- recursive SCC detection and skip classification
+- candidate policy behavior (`inline_marked_only`, reserved API exclusion, size threshold)
+
+**Validation**
+- `cargo fmt -p fir` ✅
+- `cargo test -p fir inliner` ✅
+- `cargo test -p fir checker` ✅
+
+---
+
 ## 2026-02-23 (session 14)
 
 ### Plan — Rust FIR `FunctionInliner` (module-level) specification and implementation roadmap
