@@ -415,6 +415,45 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         Ok(self.end_sub_block())
     }
 
+    /// Pre-declares storage nodes from a FIR `Block` into the heap layout.
+    ///
+    /// This allocates entries in [`Self::field_table`] for top-level module
+    /// storage (`dsp_struct`, `globals`) without emitting executable bytecode.
+    /// The interpreter backend uses this to make struct/global fields visible
+    /// before compiling function bodies that reference them.
+    ///
+    /// Only direct `DeclareVar` / `DeclareTable` items are accepted; other
+    /// nodes are ignored so prototype-only `DeclareFun` entries in `globals`
+    /// can coexist with storage declarations.
+    pub fn predeclare_storage_block(
+        &mut self,
+        store: &FirStore,
+        block_id: FirId,
+    ) -> Result<(), CompileError> {
+        let nodes = match match_fir(store, block_id) {
+            FirMatch::Block(ids) => ids,
+            _ => return Ok(()),
+        };
+        for id in nodes {
+            match match_fir(store, id) {
+                FirMatch::DeclareVar {
+                    ref name, ref typ, ..
+                } => self.predeclare_var_storage(name, typ),
+                FirMatch::DeclareTable {
+                    ref name,
+                    ref elem_type,
+                    ref values,
+                    ..
+                } => self.predeclare_table_storage(name, elem_type, values.len() as i32),
+                FirMatch::DeclareFun { .. }
+                | FirMatch::NullDeclareVar
+                | FirMatch::DeclareStructType { .. } => {}
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Allocates an empty block (containing only `kReturn`) in the arena.
     ///
     /// Used by [`generate_interp_module`] to fill factory slots for DSP
@@ -684,29 +723,7 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
             FirType::Array(elem, size) => (elem.as_ref(), *size as i32),
             _ => (typ, 1),
         };
-        let heap_type = if is_int_type(elem_type) {
-            HeapType::Int
-        } else {
-            HeapType::Real
-        };
-
-        // Allocate heap slots.
-        let offset = if heap_type == HeapType::Int {
-            let o = self.int_heap_offset;
-            self.int_heap_offset += array_size;
-            o
-        } else {
-            let o = self.real_heap_offset;
-            self.real_heap_offset += array_size;
-            o
-        };
-
-        let desc = MemoryDesc {
-            offset,
-            size: array_size,
-            heap_type,
-        };
-        self.field_table.insert(name.to_string(), desc);
+        self.alloc_storage_desc(name, elem_type, array_size);
 
         // Compile initializer if present.
         if let Some(init_id) = init {
@@ -795,6 +812,63 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 0,
             ));
         Ok(())
+    }
+
+    /// Reserves heap storage for a scalar/array variable declaration without
+    /// compiling its initializer.
+    fn predeclare_var_storage(&mut self, name: &str, typ: &FirType) {
+        if name.starts_with("input") || name.starts_with("output") {
+            return;
+        }
+        let (elem_type, array_size) = match typ {
+            FirType::Array(elem, size) => (elem.as_ref(), *size as i32),
+            _ => (typ, 1),
+        };
+        let _ = self.alloc_storage_desc(name, elem_type, array_size);
+    }
+
+    /// Reserves heap storage for a table declaration without compiling values.
+    fn predeclare_table_storage(&mut self, name: &str, elem_type: &FirType, size: i32) {
+        if name.starts_with("input") || name.starts_with("output") {
+            return;
+        }
+        let _ = self.alloc_storage_desc(name, elem_type, size.max(0));
+    }
+
+    /// Allocates (or reuses) a memory descriptor in the compiler heap layout.
+    ///
+    /// If the name already exists, the previous descriptor is preserved so
+    /// repeated pre-declaration/compilation passes remain idempotent.
+    fn alloc_storage_desc(
+        &mut self,
+        name: &str,
+        elem_type: &FirType,
+        array_size: i32,
+    ) -> MemoryDesc {
+        if let Some(existing) = self.field_table.get(name) {
+            return existing.clone();
+        }
+        let heap_type = if is_int_type(elem_type) {
+            HeapType::Int
+        } else {
+            HeapType::Real
+        };
+        let offset = if heap_type == HeapType::Int {
+            let o = self.int_heap_offset;
+            self.int_heap_offset += array_size;
+            o
+        } else {
+            let o = self.real_heap_offset;
+            self.real_heap_offset += array_size;
+            o
+        };
+        let desc = MemoryDesc {
+            offset,
+            size: array_size,
+            heap_type,
+        };
+        self.field_table.insert(name.to_string(), desc.clone());
+        desc
     }
 
     // -----------------------------------------------------------------------

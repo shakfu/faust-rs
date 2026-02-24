@@ -1,5 +1,44 @@
 # JOURNAL
 
+## 2026-02-23 (session 25)
+
+### Interp backend — predeclare FIR module storage (`dsp_struct` / `globals`) before compiling functions
+
+Fixed an interpreter backend codegen failure on UI-enabled DSPs (for example
+`t2.dsp`) where `instanceResetUserInterface` referenced struct fields such as
+`fButton58` before the interpreter compiler had registered them in its internal
+heap layout (`field_table`).
+
+**What changed**
+- `crates/codegen/src/backends/interp/compiler.rs`
+  - added `predeclare_storage_block(...)` to pre-allocate storage symbols from a
+    FIR `Block` without emitting executable bytecode
+  - supports top-level `DeclareVar` and `DeclareTable`
+  - ignores non-storage entries (including `DeclareFun` prototypes in `globals`)
+  - refactored storage allocation into a reusable helper so pre-declare and
+    normal declaration compilation share the same heap allocation path
+- `crates/codegen/src/backends/interp/mod.rs`
+  - `generate_interp_module(...)` now decodes `dsp_struct` and `globals` from
+    the FIR `Module`
+  - calls `predeclare_storage_block(...)` on both sections before compiling
+    function bodies from `declarations`
+
+**Why**
+- FIR is correct: UI fields are declared in `dsp_struct` and referenced with
+  `AccessType::Struct`
+- the interpreter backend previously compiled only `declarations`, so struct
+  fields were missing from `field_table` when `instanceResetUserInterface` was
+  compiled
+- pre-declaration aligns the backend with the FIR module contract without
+  emitting dead bytecode
+
+**Validation**
+- `cargo fmt -p codegen` ✅
+- `cargo run -p compiler -- -lang interp t2.dsp` ✅
+- `cargo test -p compiler --test signal_fir_lane` ✅
+
+---
+
 ## 2026-02-23 (session 24)
 
 ### Interp backend — auto-split FIR `compute` into control/DSP blocks (no FIR `computeThread` required)

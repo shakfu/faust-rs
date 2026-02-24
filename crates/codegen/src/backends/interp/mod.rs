@@ -166,10 +166,13 @@ pub fn generate_interp_module(
     use std::collections::HashMap;
 
     // 1. Decode module root.
-    let (module_name_fir, declarations) = match match_fir(store, module) {
+    let (module_name_fir, dsp_struct, globals, declarations) = match match_fir(store, module) {
         fir::FirMatch::Module {
-            name, declarations, ..
-        } => (name, declarations),
+            name,
+            dsp_struct,
+            globals,
+            declarations,
+        } => (name, dsp_struct, globals, declarations),
         _ => {
             return Err(CodegenError::new(
                 CodegenErrorCode::RootNotModule,
@@ -193,6 +196,22 @@ pub fn generate_interp_module(
 
     // 3. Compile each function body using a shared FirToFbcCompiler.
     let mut compiler: compiler::FirToFbcCompiler<f32> = compiler::FirToFbcCompiler::new();
+    compiler
+        .predeclare_storage_block(store, dsp_struct)
+        .map_err(|e| {
+            CodegenError::new(
+                CodegenErrorCode::CompilationFailed,
+                format!("in module dsp_struct predeclare: {e}"),
+            )
+        })?;
+    compiler
+        .predeclare_storage_block(store, globals)
+        .map_err(|e| {
+            CodegenError::new(
+                CodegenErrorCode::CompilationFailed,
+                format!("in module globals predeclare: {e}"),
+            )
+        })?;
     let mut fn_blocks: HashMap<String, BlockId> = HashMap::new();
     let mut split_compute_blocks: Option<(BlockId, BlockId)> = None;
 
