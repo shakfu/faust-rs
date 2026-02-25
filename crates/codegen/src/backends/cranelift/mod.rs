@@ -517,9 +517,189 @@ extern "C" fn host_sin(x: f64) -> f64 {
     x.sin()
 }
 
+extern "C" fn host_cosf(x: f32) -> f32 {
+    x.cos()
+}
+
+extern "C" fn host_cos(x: f64) -> f64 {
+    x.cos()
+}
+
+extern "C" fn host_expf(x: f32) -> f32 {
+    x.exp()
+}
+
+extern "C" fn host_exp(x: f64) -> f64 {
+    x.exp()
+}
+
+extern "C" fn host_logf(x: f32) -> f32 {
+    x.ln()
+}
+
+extern "C" fn host_log(x: f64) -> f64 {
+    x.ln()
+}
+
+extern "C" fn host_log10f(x: f32) -> f32 {
+    x.log10()
+}
+
+extern "C" fn host_log10(x: f64) -> f64 {
+    x.log10()
+}
+
+extern "C" fn host_sqrtf(x: f32) -> f32 {
+    x.sqrt()
+}
+
+extern "C" fn host_sqrt(x: f64) -> f64 {
+    x.sqrt()
+}
+
+extern "C" fn host_fabsf(x: f32) -> f32 {
+    x.abs()
+}
+
+extern "C" fn host_fabs(x: f64) -> f64 {
+    x.abs()
+}
+
+extern "C" fn host_floorf(x: f32) -> f32 {
+    x.floor()
+}
+
+extern "C" fn host_floor(x: f64) -> f64 {
+    x.floor()
+}
+
+extern "C" fn host_ceilf(x: f32) -> f32 {
+    x.ceil()
+}
+
+extern "C" fn host_ceil(x: f64) -> f64 {
+    x.ceil()
+}
+
+extern "C" fn host_tanf(x: f32) -> f32 {
+    x.tan()
+}
+
+extern "C" fn host_tan(x: f64) -> f64 {
+    x.tan()
+}
+
+extern "C" fn host_atanf(x: f32) -> f32 {
+    x.atan()
+}
+
+extern "C" fn host_atan(x: f64) -> f64 {
+    x.atan()
+}
+
+extern "C" fn host_asinf(x: f32) -> f32 {
+    x.asin()
+}
+
+extern "C" fn host_asin(x: f64) -> f64 {
+    x.asin()
+}
+
+extern "C" fn host_acosf(x: f32) -> f32 {
+    x.acos()
+}
+
+extern "C" fn host_acos(x: f64) -> f64 {
+    x.acos()
+}
+
+extern "C" fn host_roundf(x: f32) -> f32 {
+    x.round()
+}
+
+extern "C" fn host_round(x: f64) -> f64 {
+    x.round()
+}
+
+extern "C" fn host_fminf(a: f32, b: f32) -> f32 {
+    a.min(b)
+}
+
+extern "C" fn host_fmin(a: f64, b: f64) -> f64 {
+    a.min(b)
+}
+
+extern "C" fn host_fmaxf(a: f32, b: f32) -> f32 {
+    a.max(b)
+}
+
+extern "C" fn host_fmax(a: f64, b: f64) -> f64 {
+    a.max(b)
+}
+
+extern "C" fn host_powf(a: f32, b: f32) -> f32 {
+    a.powf(b)
+}
+
+extern "C" fn host_pow(a: f64, b: f64) -> f64 {
+    a.powf(b)
+}
+
+extern "C" fn host_atan2f(a: f32, b: f32) -> f32 {
+    a.atan2(b)
+}
+
+extern "C" fn host_atan2(a: f64, b: f64) -> f64 {
+    a.atan2(b)
+}
+
+extern "C" fn host_fmodf(a: f32, b: f32) -> f32 {
+    a % b
+}
+
+extern "C" fn host_fmod(a: f64, b: f64) -> f64 {
+    a % b
+}
+
 fn register_host_symbols(jit_builder: &mut JITBuilder) {
     jit_builder.symbol("sinf", host_sinf as *const u8);
     jit_builder.symbol("sin", host_sin as *const u8);
+    jit_builder.symbol("cosf", host_cosf as *const u8);
+    jit_builder.symbol("cos", host_cos as *const u8);
+    jit_builder.symbol("expf", host_expf as *const u8);
+    jit_builder.symbol("exp", host_exp as *const u8);
+    jit_builder.symbol("logf", host_logf as *const u8);
+    jit_builder.symbol("log", host_log as *const u8);
+    jit_builder.symbol("log10f", host_log10f as *const u8);
+    jit_builder.symbol("log10", host_log10 as *const u8);
+    jit_builder.symbol("sqrtf", host_sqrtf as *const u8);
+    jit_builder.symbol("sqrt", host_sqrt as *const u8);
+    jit_builder.symbol("fabsf", host_fabsf as *const u8);
+    jit_builder.symbol("fabs", host_fabs as *const u8);
+    jit_builder.symbol("floorf", host_floorf as *const u8);
+    jit_builder.symbol("floor", host_floor as *const u8);
+    jit_builder.symbol("ceilf", host_ceilf as *const u8);
+    jit_builder.symbol("ceil", host_ceil as *const u8);
+    jit_builder.symbol("tanf", host_tanf as *const u8);
+    jit_builder.symbol("tan", host_tan as *const u8);
+    jit_builder.symbol("atanf", host_atanf as *const u8);
+    jit_builder.symbol("atan", host_atan as *const u8);
+    jit_builder.symbol("asinf", host_asinf as *const u8);
+    jit_builder.symbol("asin", host_asin as *const u8);
+    jit_builder.symbol("acosf", host_acosf as *const u8);
+    jit_builder.symbol("acos", host_acos as *const u8);
+    jit_builder.symbol("roundf", host_roundf as *const u8);
+    jit_builder.symbol("round", host_round as *const u8);
+    jit_builder.symbol("fminf", host_fminf as *const u8);
+    jit_builder.symbol("fmin", host_fmin as *const u8);
+    jit_builder.symbol("fmaxf", host_fmaxf as *const u8);
+    jit_builder.symbol("fmax", host_fmax as *const u8);
+    jit_builder.symbol("powf", host_powf as *const u8);
+    jit_builder.symbol("pow", host_pow as *const u8);
+    jit_builder.symbol("atan2f", host_atan2f as *const u8);
+    jit_builder.symbol("atan2", host_atan2 as *const u8);
+    jit_builder.symbol("fmodf", host_fmodf as *const u8);
+    jit_builder.symbol("fmod", host_fmod as *const u8);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -618,8 +798,7 @@ struct ComputeLowering<'a, 'b, 'c> {
     struct_layout: &'a StructLayoutPlan,
     ptr_ty: Type,
     vars: HashMap<String, LoweredExpr>,
-    sinf_ref: Option<FuncRef>,
-    sin_ref: Option<FuncRef>,
+    import_refs: HashMap<String, FuncRef>,
     _marker: std::marker::PhantomData<&'c ()>,
 }
 
@@ -1411,17 +1590,46 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
             LoweringError::Unsupported(format!("unsupported function call `{name}`"))
         })?;
         match (math, typ, args) {
-            (fir::FirMathOp::Sin, FirType::FaustFloat, [x])
-            | (fir::FirMathOp::Sin, FirType::Float32, [x]) => {
+            (math, FirType::FaustFloat | FirType::Float32, [x])
+                if unary_math_symbol_f32(math).is_some() =>
+            {
                 let xv = self.lower_expr(*x, Some(typ))?.value();
-                let fref = self.ensure_unary_import("sinf", types::F32)?;
+                let fref = self.ensure_unary_import(
+                    unary_math_symbol_f32(math).expect("guarded by is_some"),
+                    types::F32,
+                )?;
                 let call = self.fb.ins().call(fref, &[xv]);
                 Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]))
             }
-            (fir::FirMathOp::Sin, FirType::Float64, [x]) => {
+            (math, FirType::Float64, [x]) if unary_math_symbol_f64(math).is_some() => {
                 let xv = self.lower_expr(*x, Some(typ))?.value();
-                let fref = self.ensure_unary_import("sin", types::F64)?;
+                let fref = self.ensure_unary_import(
+                    unary_math_symbol_f64(math).expect("guarded by is_some"),
+                    types::F64,
+                )?;
                 let call = self.fb.ins().call(fref, &[xv]);
+                Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]))
+            }
+            (math, FirType::FaustFloat | FirType::Float32, [x, y])
+                if binary_math_symbol_f32(math).is_some() =>
+            {
+                let xv = self.lower_expr(*x, Some(typ))?.value();
+                let yv = self.lower_expr(*y, Some(typ))?.value();
+                let fref = self.ensure_binary_import(
+                    binary_math_symbol_f32(math).expect("guarded by is_some"),
+                    types::F32,
+                )?;
+                let call = self.fb.ins().call(fref, &[xv, yv]);
+                Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]))
+            }
+            (math, FirType::Float64, [x, y]) if binary_math_symbol_f64(math).is_some() => {
+                let xv = self.lower_expr(*x, Some(typ))?.value();
+                let yv = self.lower_expr(*y, Some(typ))?.value();
+                let fref = self.ensure_binary_import(
+                    binary_math_symbol_f64(math).expect("guarded by is_some"),
+                    types::F64,
+                )?;
+                let call = self.fb.ins().call(fref, &[xv, yv]);
                 Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]))
             }
             _ => Err(LoweringError::Unsupported(format!(
@@ -1432,25 +1640,106 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
     }
 
     fn ensure_unary_import(&mut self, symbol: &str, ty: Type) -> Result<FuncRef, LoweringError> {
-        let cache = if ty == types::F32 {
-            &mut self.sinf_ref
-        } else {
-            &mut self.sin_ref
-        };
-        if let Some(fref) = *cache {
+        self.ensure_import(symbol, &[ty], ty)
+    }
+
+    fn ensure_binary_import(&mut self, symbol: &str, ty: Type) -> Result<FuncRef, LoweringError> {
+        self.ensure_import(symbol, &[ty, ty], ty)
+    }
+
+    fn ensure_import(
+        &mut self,
+        symbol: &str,
+        params: &[Type],
+        ret: Type,
+    ) -> Result<FuncRef, LoweringError> {
+        let cache_key = format!(
+            "{symbol}({})->{}",
+            params
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            ret
+        );
+        if let Some(fref) = self.import_refs.get(&cache_key).copied() {
             return Ok(fref);
         }
         let mut sig = self.jit.make_signature();
-        sig.params.push(AbiParam::new(ty));
-        sig.returns.push(AbiParam::new(ty));
+        for param in params {
+            sig.params.push(AbiParam::new(*param));
+        }
+        sig.returns.push(AbiParam::new(ret));
         let func_id = self
             .jit
             .declare_function(symbol, Linkage::Import, &sig)
             .map_err(|e| LoweringError::Jit(format!("declare import `{symbol}` failed: {e}")))?;
         let fref = self.jit.declare_func_in_func(func_id, self.fb.func);
-        *cache = Some(fref);
+        self.import_refs.insert(cache_key, fref);
         Ok(fref)
     }
+}
+
+fn unary_math_symbol_f32(math: fir::FirMathOp) -> Option<&'static str> {
+    Some(match math {
+        fir::FirMathOp::Sin => "sinf",
+        fir::FirMathOp::Cos => "cosf",
+        fir::FirMathOp::Acos => "acosf",
+        fir::FirMathOp::Asin => "asinf",
+        fir::FirMathOp::Atan => "atanf",
+        fir::FirMathOp::Tan => "tanf",
+        fir::FirMathOp::Exp => "expf",
+        fir::FirMathOp::Log => "logf",
+        fir::FirMathOp::Log10 => "log10f",
+        fir::FirMathOp::Sqrt => "sqrtf",
+        fir::FirMathOp::Abs => "fabsf",
+        fir::FirMathOp::Floor => "floorf",
+        fir::FirMathOp::Ceil => "ceilf",
+        fir::FirMathOp::Round => "roundf",
+        _ => return None,
+    })
+}
+
+fn unary_math_symbol_f64(math: fir::FirMathOp) -> Option<&'static str> {
+    Some(match math {
+        fir::FirMathOp::Sin => "sin",
+        fir::FirMathOp::Cos => "cos",
+        fir::FirMathOp::Acos => "acos",
+        fir::FirMathOp::Asin => "asin",
+        fir::FirMathOp::Atan => "atan",
+        fir::FirMathOp::Tan => "tan",
+        fir::FirMathOp::Exp => "exp",
+        fir::FirMathOp::Log => "log",
+        fir::FirMathOp::Log10 => "log10",
+        fir::FirMathOp::Sqrt => "sqrt",
+        fir::FirMathOp::Abs => "fabs",
+        fir::FirMathOp::Floor => "floor",
+        fir::FirMathOp::Ceil => "ceil",
+        fir::FirMathOp::Round => "round",
+        _ => return None,
+    })
+}
+
+fn binary_math_symbol_f32(math: fir::FirMathOp) -> Option<&'static str> {
+    Some(match math {
+        fir::FirMathOp::Pow => "powf",
+        fir::FirMathOp::Min => "fminf",
+        fir::FirMathOp::Max => "fmaxf",
+        fir::FirMathOp::Atan2 => "atan2f",
+        fir::FirMathOp::Fmod => "fmodf",
+        _ => return None,
+    })
+}
+
+fn binary_math_symbol_f64(math: fir::FirMathOp) -> Option<&'static str> {
+    Some(match math {
+        fir::FirMathOp::Pow => "pow",
+        fir::FirMathOp::Min => "fmin",
+        fir::FirMathOp::Max => "fmax",
+        fir::FirMathOp::Atan2 => "atan2",
+        fir::FirMathOp::Fmod => "fmod",
+        _ => return None,
+    })
 }
 
 fn try_lower_compute_body(
@@ -1508,8 +1797,7 @@ fn try_lower_compute_body(
         struct_layout,
         ptr_ty,
         vars,
-        sinf_ref: None,
-        sin_ref: None,
+        import_refs: HashMap::new(),
         _marker: std::marker::PhantomData,
     };
     lowering.lower_stmt(body)?;
@@ -1637,7 +1925,7 @@ fn subset_expr_shape(store: &FirStore, id: FirId) -> bool {
         }
         FirMatch::Neg { value, .. } => subset_expr_shape(store, value),
         FirMatch::FunCall { name, args, .. } => {
-            fir::FirMathOp::from_symbol(&name) == Some(fir::FirMathOp::Sin)
+            fir::FirMathOp::from_symbol(&name).is_some()
                 && args.into_iter().all(|x| subset_expr_shape(store, x))
         }
         FirMatch::Cast { value, .. } => subset_expr_shape(store, value),
@@ -1871,6 +2159,78 @@ mod tests {
         let (store, module) = build_subset_lowerable_compute_module();
         let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
             .expect("subset fixture should compile with body lowering");
+        assert!(compiled.has_compute_entry());
+        assert!(compiled.compute_body_lowered());
+    }
+
+    fn build_math_intrinsics_subset_module() -> (fir::FirStore, FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let globals = b.block(&[]);
+        let dsp_struct = b.block(&[]);
+
+        let out_chan = b.int32(0);
+        let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+        let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let x = b.float32(0.25);
+        let y = b.float32(0.75);
+        let cosx = b.fun_call("std::cos", &[x], FirType::FaustFloat);
+        let ex = b.fun_call("std::exp", &[x], FirType::FaustFloat);
+        let sqrt_ex = b.fun_call("std::sqrt", &[ex], FirType::FaustFloat);
+        let m = b.fun_call("std::fmax", &[cosx, sqrt_ex], FirType::FaustFloat);
+        let p = b.fun_call("std::pow", &[m, y], FirType::FaustFloat);
+        let z = b.fun_call("std::fmod", &[p, y], FirType::FaustFloat);
+        let store_out = b.store_table("output0", AccessType::Stack, i0, z);
+        let loop_body = b.block(&[store_out]);
+        let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+        let compute_body = b.block(&[out_alias, sample_loop]);
+        let compute_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        );
+        let declarations = b.block(&[compute]);
+        let module = b.module("math_intrinsics_subset", dsp_struct, globals, declarations);
+        (store, module)
+    }
+
+    #[test]
+    fn compile_module_lowers_common_math_intrinsics_subset() {
+        let (store, module) = build_math_intrinsics_subset_module();
+        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+            .expect("math intrinsics subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
     }

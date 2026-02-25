@@ -7985,6 +7985,39 @@ Local validation:
 
 All checks passed locally.
 
+### Cranelift backend: extend FIR `FunCall` lowering with common math intrinsics
+
+Extended the Cranelift backend subset lowering for FIR math calls beyond the
+initial `std::sin` bring-up, so more real DSP `compute` bodies can remain on
+the lowered path instead of falling back to the stub.
+
+Implemented in `crates/codegen/src/backends/cranelift/mod.rs`:
+
+- host math symbol registration expanded (JIT imports), including:
+  - unary: `sin/cos/acos/asin/atan/tan/exp/log/log10/sqrt/fabs/floor/ceil/round`
+  - binary: `pow/fmin/fmax/atan2/fmod`
+  - both `f32` (`*f`) and `f64` symbol variants
+- `ComputeLowering::lower_fun_call` now supports unary and binary FIR math ops
+  for `FaustFloat`/`Float32` and `Float64`
+- generalized imported-function cache:
+  - replaced `sin/sinf`-specific cached refs with a signature-keyed import map
+- subset matcher (`subset_expr_shape`) now accepts the supported FIR math-call
+  family instead of only `Sin`
+
+Tests added:
+
+- synthetic compute fixture exercising common math intrinsics:
+  - `std::cos`, `std::exp`, `std::sqrt`, `std::fmax`, `std::pow`, `std::fmod`
+- test asserts successful real body lowering (`compute_body_lowered() == true`)
+
+Validation:
+
+- `cargo fmt --all`
+- `cargo clippy -p codegen --all-targets -- -D warnings`
+- `cargo test -p codegen cranelift -- --nocapture`
+
+All checks passed locally.
+
 ### Cranelift FFI: retain compiled backend JIT module in factories
 
 Connected the `cranelift-ffi` factory scaffold to the now-real Cranelift backend
