@@ -1,23 +1,178 @@
-// cranelift-dsp.h — Phase 1 scaffold placeholder
-//
-// Planned role:
-// - C++ wrapper API for `cranelift_dsp` / `cranelift_dsp_factory`.
-// - V1 parity target: same usage strategy as `llvm_dsp` / `interpreter_dsp`.
-// - C API naming convention is locked to backend-prefixed symbols, e.g.
-//   `createCCraneliftDSPFactoryFromFile` / `createCCraneliftDSPInstance`
-//   (see `cranelift-dsp-c.h` and
-//   `porting/cranelift-dsp-ffi-parity-matrix-en.md`).
-//
-// This header is intentionally incomplete in Phase 1. Exact class members and
-// wrappers will be filled after the mandatory export parity matrix is defined.
+/* cranelift-dsp.h — C++ API scaffold for the Cranelift backend
+ *
+ * Planned role:
+ * - C++ wrapper API for `cranelift_dsp` / `cranelift_dsp_factory`.
+ * - V1 parity target: same usage strategy as `llvm_dsp` / `interpreter_dsp`,
+ *   with Cranelift-specific naming and the V1 deferred families documented in:
+ *   `porting/cranelift-dsp-ffi-parity-matrix-en.md`
+ *
+ * Current status:
+ * - Declaration-only scaffold (no C++ implementation in this phase).
+ * - The executable scaffold currently exists in Rust as the C ABI layer
+ *   (`cranelift-dsp-c.h` + `cranelift-ffi` exports).
+ *
+ * Important design note:
+ * - This header intentionally does NOT include `cranelift-dsp-c.h`.
+ *   The C API opaque type names (`cranelift_dsp`, `cranelift_dsp_factory`) would
+ *   collide in C++ with the wrapper class names of the same identifiers.
+ */
 
 #ifndef FAUST_CRANELIFT_DSP_H
 #define FAUST_CRANELIFT_DSP_H
 
-#include "cranelift-dsp-c.h"
+#ifdef _WIN32
+#define DEPRECATED(fun) __declspec(deprecated) fun
+#else
+#define DEPRECATED(fun) fun __attribute__((deprecated));
+#endif
 
-// Placeholder wrapper forward declarations (shape only).
-class cranelift_dsp;
-class cranelift_dsp_factory;
+#include <string>
+#include <vector>
 
-#endif  // FAUST_CRANELIFT_DSP_H
+#include "faust/dsp/dsp.h"
+#include "faust/dsp/libfaust-box.h"
+#include "faust/dsp/libfaust-signal.h"
+#include "faust/gui/meta.h"
+
+/*!
+ \addtogroup craneliftcpp C++ interface scaffold for compiling Faust code with a Cranelift backend.
+ Note that the API is not thread safe: use `startMTDSPFactories/stopMTDSPFactories`
+ to coordinate global factory-cache access (same usage strategy as existing backends).
+ @{
+ */
+
+/**
+ * Get the library version.
+ *
+ * The current Rust scaffold exports a backend-specific placeholder version
+ * string through the shared `getCLibFaustVersion` symbol.
+ */
+extern "C" LIBFAUST_API const char* getCLibFaustVersion();
+
+/**
+ * DSP instance class (declaration-only scaffold).
+ *
+ * V1 target surface mirrors `interpreter_dsp` / `llvm_dsp` instance methods:
+ * lifecycle, UI, metadata, and compute.
+ */
+class LIBFAUST_API cranelift_dsp : public dsp {
+    private:
+        // `cranelift_dsp` objects are intended to be created by
+        // `cranelift_dsp_factory::createDSPInstance()`.
+        cranelift_dsp() {}
+
+    public:
+        int getNumInputs();
+        int getNumOutputs();
+        void buildUserInterface(UI* ui_interface);
+        int getSampleRate();
+        void init(int sample_rate);
+        void instanceInit(int sample_rate);
+        void instanceConstants(int sample_rate);
+        void instanceResetUserInterface();
+        void instanceClear();
+        cranelift_dsp* clone();
+        void metadata(Meta* m);
+        void compute(int count, FAUSTFLOAT** inputs, FAUSTFLOAT** outputs);
+};
+
+/**
+ * DSP factory class (declaration-only scaffold).
+ *
+ * V1 target surface keeps the common factory query/create APIs and excludes
+ * families explicitly deferred in V1 (target getters, memory manager hooks,
+ * foreign-function registration).
+ */
+class LIBFAUST_API cranelift_dsp_factory : public dsp_factory {
+    public:
+        virtual ~cranelift_dsp_factory();
+
+        std::string getName();
+        std::string getSHAKey();
+        std::string getDSPCode();
+        std::string getJSON();
+        std::string getCompileOptions();
+        std::vector<std::string> getLibraryList();
+        std::vector<std::string> getIncludePathnames();
+        std::vector<std::string> getWarningMessages();
+
+        cranelift_dsp* createDSPInstance();
+};
+
+// ── Factory cache / lifecycle (V1 target families) ──────────────────────────
+
+LIBFAUST_API cranelift_dsp_factory* getCraneliftDSPFactoryFromSHAKey(
+    const std::string& sha_key);
+
+LIBFAUST_API cranelift_dsp_factory* createCraneliftDSPFactoryFromFile(
+    const std::string& filename,
+    int argc,
+    const char* argv[],
+    std::string& error_msg,
+    int opt_level = 0);
+
+LIBFAUST_API cranelift_dsp_factory* createCraneliftDSPFactoryFromString(
+    const std::string& name_app,
+    const std::string& dsp_content,
+    int argc,
+    const char* argv[],
+    std::string& error_msg,
+    int opt_level = 0);
+
+LIBFAUST_API cranelift_dsp_factory* createCraneliftDSPFactoryFromSignals(
+    const std::string& name_app,
+    tvec signals,
+    int argc,
+    const char* argv[],
+    std::string& error_msg,
+    int opt_level = 0);
+
+LIBFAUST_API cranelift_dsp_factory* createCraneliftDSPFactoryFromBoxes(
+    const std::string& name_app,
+    Box box,
+    int argc,
+    const char* argv[],
+    std::string& error_msg,
+    int opt_level = 0);
+
+LIBFAUST_API bool deleteCraneliftDSPFactory(cranelift_dsp_factory* factory);
+LIBFAUST_API void deleteAllCraneliftDSPFactories();
+LIBFAUST_API std::vector<std::string> getAllCraneliftDSPFactories();
+
+// ── Multi-thread cache mode compatibility ────────────────────────────────────
+
+extern "C" LIBFAUST_API bool startMTDSPFactories();
+extern "C" LIBFAUST_API void stopMTDSPFactories();
+
+// ── Cranelift backend bitcode family (V1 symbols present, scaffold impl) ────
+
+LIBFAUST_API cranelift_dsp_factory* readCraneliftDSPFactoryFromBitcode(
+    const std::string& bit_code,
+    std::string& error_msg);
+
+LIBFAUST_API std::string writeCraneliftDSPFactoryToBitcode(
+    cranelift_dsp_factory* factory);
+
+LIBFAUST_API cranelift_dsp_factory* readCraneliftDSPFactoryFromBitcodeFile(
+    const std::string& bit_code_path,
+    std::string& error_msg);
+
+LIBFAUST_API bool writeCraneliftDSPFactoryToBitcodeFile(
+    cranelift_dsp_factory* factory,
+    const std::string& bit_code_path);
+
+// ── Explicit V1 omissions (deferred without symbols) ────────────────────────
+
+/* Intentionally omitted from the V1 Cranelift C++ API declaration scaffold:
+ * - target getters (`getDSPMachineTarget`, factory `getTarget`)
+ * - LLVM-only IR/machine/object serialization families
+ * - memory manager hooks (`setMemoryManager/getMemoryManager`)
+ * - foreign-function registration
+ * - LLVM-only `classInit` factory method (decision postponed)
+ */
+
+/*!
+ @}
+ */
+
+#endif /* FAUST_CRANELIFT_DSP_H */

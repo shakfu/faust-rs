@@ -7689,6 +7689,37 @@ Header updates:
 Validation:
 - Header/documentation synchronization only (no code/tests run)
 
+### Cranelift FFI Phase 1: add a declaration-only C++ API scaffold header (`cranelift-dsp.h`)
+
+Replaced the placeholder `cranelift-dsp.h` with a **declaration-only C++ API
+scaffold** aligned with the current Cranelift FFI V1 decisions and the already
+implemented Rust C ABI scaffold.
+
+Implemented in `crates/cranelift-ffi/include/cranelift-dsp.h`:
+
+- declared `cranelift_dsp` and `cranelift_dsp_factory` C++ wrapper classes
+  (method declarations only, no implementation yet)
+- declared the targeted V1 free-function families for factory lifecycle/cache
+  and bitcode I/O (`createCraneliftDSPFactoryFrom*`, `get...FromSHAKey`,
+  `delete*`, `getAll*`, `read/write...Bitcode[File]`)
+- declared instance-method surface matching the V1 target (`init`, `compute`,
+  `buildUserInterface`, `metadata`, etc.)
+- documented explicit V1 omissions/deferred families directly in the header:
+  - target getters
+  - LLVM-only IR/machine/object serialization
+  - memory-manager hooks
+  - foreign-function registration
+  - LLVM-only `classInit` factory method
+
+Important compatibility note captured in the header:
+
+- `cranelift-dsp.h` intentionally does **not** include `cranelift-dsp-c.h`
+  because the C opaque names (`cranelift_dsp`, `cranelift_dsp_factory`) would
+  collide in C++ with the wrapper class identifiers of the same names.
+
+Validation:
+- Header/documentation scaffold change only (no code/tests run)
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the
