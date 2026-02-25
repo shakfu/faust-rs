@@ -7430,3 +7430,11 @@ Validation:
 - `cargo run -p xtask -- fir-dump-scan --case tests/corpus/rep_38_sine_phasor.dsp --lane fast`
 - `cargo run -p xtask -- backend-align-smoke --skip-golden`
 - `cargo run -p xtask -- backend-align-nightly --skip-golden --skip-diff-lanes`
+
+### CI (PR only): wire `backend-align-smoke` into `.github/workflows/ci.yml`
+
+- Added a PR-only CI step on `ubuntu-latest`:
+  `cargo run -p xtask -- backend-align-smoke --skip-golden`
+- The step is intentionally Linux-only for runtime/cost control in PR CI.
+- `--skip-golden` avoids duplicate work because `golden-check` already runs in
+  the same workflow.

@@ -66,3 +66,7 @@ jobs:
 
       - name: Golden output check
         run: cargo run -p xtask -- golden-check
+
+      - name: Backend alignment smoke (PR only)
+        if: github.event_name == 'pull_request' && matrix.os == 'ubuntu-latest'
+        run: cargo run -p xtask -- backend-align-smoke --skip-golden
