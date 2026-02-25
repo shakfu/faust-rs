@@ -977,6 +977,11 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 else_block,
             } => self.lower_if_stmt(cond, then_block, else_block),
             FirMatch::Control { cond, stmt } => self.lower_control_stmt(cond, stmt),
+            FirMatch::Switch {
+                cond,
+                cases,
+                default,
+            } => self.lower_switch_stmt(cond, &cases, default),
             FirMatch::ForLoop {
                 var,
                 init,
@@ -1234,6 +1239,80 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
 
     fn lower_control_stmt(&mut self, cond: FirId, stmt: FirId) -> Result<(), LoweringError> {
         self.lower_if_stmt(cond, stmt, None)
+    }
+
+    fn lower_switch_stmt(
+        &mut self,
+        cond: FirId,
+        cases: &[(i64, FirId)],
+        default: Option<FirId>,
+    ) -> Result<(), LoweringError> {
+        let cond_v = self.lower_expr(cond, None)?.value();
+        let cond_ty = self.fb.func.dfg.value_type(cond_v);
+        match cond_ty {
+            types::I8 | types::I32 | types::I64 => {}
+            other => {
+                return Err(LoweringError::Unsupported(format!(
+                    "unsupported `Switch` condition CLIF type in subset lowering: {other}"
+                )));
+            }
+        }
+
+        let cont_b = self.fb.create_block();
+        let default_b = default.map(|_| self.fb.create_block());
+        if cases.is_empty() {
+            if let Some(default_stmt) = default {
+                self.lower_stmt(default_stmt)?;
+            }
+            if !is_return_terminated(self.fb) {
+                self.fb.ins().jump(cont_b, &[]);
+            }
+            self.fb.switch_to_block(cont_b);
+            self.fb.seal_block(cont_b);
+            return Ok(());
+        }
+
+        for (idx, (case_value, case_stmt)) in cases.iter().enumerate() {
+            let then_b = self.fb.create_block();
+            let is_last = idx + 1 == cases.len();
+            let next_b = if is_last {
+                None
+            } else {
+                Some(self.fb.create_block())
+            };
+            let fallthrough_b = next_b.or(default_b).unwrap_or(cont_b);
+
+            let cond_match = self.fb.ins().icmp_imm(IntCC::Equal, cond_v, *case_value);
+            self.fb
+                .ins()
+                .brif(cond_match, then_b, &[], fallthrough_b, &[]);
+
+            self.fb.switch_to_block(then_b);
+            self.lower_stmt(*case_stmt)?;
+            if !is_return_terminated(self.fb) {
+                self.fb.ins().jump(cont_b, &[]);
+            }
+            self.fb.seal_block(then_b);
+
+            if let Some(next_b) = next_b {
+                self.fb.switch_to_block(next_b);
+                self.fb.seal_block(next_b);
+            }
+        }
+
+        if let Some(default_stmt) = default {
+            self.fb
+                .switch_to_block(default_b.expect("present when default stmt exists"));
+            self.lower_stmt(default_stmt)?;
+            self.fb
+                .seal_block(default_b.expect("present when default stmt exists"));
+        }
+        if !is_return_terminated(self.fb) {
+            self.fb.ins().jump(cont_b, &[]);
+        }
+        self.fb.switch_to_block(cont_b);
+        self.fb.seal_block(cont_b);
+        Ok(())
     }
 
     fn lower_for_loop(
@@ -1894,6 +1973,17 @@ fn subset_stmt_shape(store: &FirStore, id: FirId) -> bool {
         FirMatch::Control { cond, stmt } => {
             subset_expr_shape(store, cond) && subset_stmt_shape(store, stmt)
         }
+        FirMatch::Switch {
+            cond,
+            cases,
+            default,
+        } => {
+            subset_expr_shape(store, cond)
+                && cases
+                    .into_iter()
+                    .all(|(_, stmt)| subset_stmt_shape(store, stmt))
+                && default.is_none_or(|stmt| subset_stmt_shape(store, stmt))
+        }
         FirMatch::SimpleForLoop {
             upper,
             body,
@@ -2357,6 +2447,86 @@ mod tests {
         let (store, module) = build_label_and_uninitialized_stack_subset_module();
         let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
             .expect("label/uninitialized-stack subset fixture should compile with body lowering");
+        assert!(compiled.has_compute_entry());
+        assert!(compiled.compute_body_lowered());
+    }
+
+    fn build_switch_subset_module() -> (fir::FirStore, FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let globals = b.block(&[]);
+        let dsp_struct = b.block(&[]);
+
+        let out_chan = b.int32(0);
+        let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+        let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let v0 = b.float32(0.0);
+        let v1 = b.float32(1.0);
+        let v2 = b.float32(2.0);
+        let v3 = b.float32(3.0);
+        let store_case0 = b.store_table("output0", AccessType::Stack, i0, v0);
+        let store_case1 = b.store_table("output0", AccessType::Stack, i0, v1);
+        let store_case2 = b.store_table("output0", AccessType::Stack, i0, v2);
+        let store_default = b.store_table("output0", AccessType::Stack, i0, v3);
+        let case0 = b.block(&[store_case0]);
+        let case1 = b.block(&[store_case1]);
+        let case2 = b.block(&[store_case2]);
+        let default_case = b.block(&[store_default]);
+        let switch_stmt = b.switch(
+            i0,
+            &[(0, case0), (1, case1), (2, case2)],
+            Some(default_case),
+        );
+        let loop_body = b.block(&[switch_stmt]);
+        let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+        let compute_body = b.block(&[out_alias, sample_loop]);
+        let compute_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        );
+        let declarations = b.block(&[compute]);
+        let module = b.module("switch_subset", dsp_struct, globals, declarations);
+        (store, module)
+    }
+
+    #[test]
+    fn compile_module_lowers_switch_subset_body() {
+        let (store, module) = build_switch_subset_module();
+        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+            .expect("switch subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
     }

@@ -7985,6 +7985,42 @@ Local validation:
 
 All checks passed locally.
 
+### Cranelift backend: add `Switch` statement lowering to the compute subset
+
+Extended the Cranelift backend compute lowering subset with FIR `Switch`
+statement support, lowering it as an explicit branch chain (`if/else` style)
+with an optional dedicated `default` block.
+
+Implemented in `crates/codegen/src/backends/cranelift/mod.rs`:
+
+- statement lowering:
+  - `Switch { cond, cases, default }`
+- supported condition types (current subset):
+  - `Bool` / `Int32` / `Int64` (lowered to CLIF integer compare + branches)
+- control-flow topology:
+  - one `then` block per case
+  - chained fallthrough blocks between cases
+  - dedicated `default` block when present
+  - shared continuation block
+- subset pre-scan updated to accept `Switch` when condition and case/default
+  bodies are in the supported subset
+
+Tests added:
+
+- synthetic compute fixture exercising `Switch` in a sample loop with:
+  - multiple integer cases
+  - default case
+  - `StoreTable` writes in each branch
+- test asserts real body lowering (`compute_body_lowered() == true`)
+
+Validation:
+
+- `cargo fmt --all`
+- `cargo clippy -p codegen --all-targets -- -D warnings`
+- `cargo test -p codegen cranelift -- --nocapture`
+
+All checks passed locally.
+
 ### Cranelift backend: tolerate FIR labels and stack locals without explicit init
 
 Broadened the Cranelift backend compute lowering subset to accept common
