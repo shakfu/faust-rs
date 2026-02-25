@@ -131,3 +131,20 @@ From `porting/faust-rust-recursion-model-note-en.md`:
 - Update `README.md` when user-facing build/run instructions change.
 - Update `JOURNAL.md` for notable architecture, CI, or process changes.
 - Keep comments and docs concise, factual, and implementation-oriented.
+
+## 12. Collaboration Requirement During Porting (Mandatory)
+
+- During implementation/porting work, if you encounter an ambiguity, missing
+  requirement, or design tradeoff that is not already resolved by the active
+  `porting/` documents or explicit user instructions, ask the user immediately
+  before proceeding with the affected part.
+- Do not silently choose behavior in parity-sensitive areas when requirements
+  are unclear.
+- This is especially mandatory for:
+  - external C/C++ API compatibility decisions,
+  - lifecycle/cache semantics,
+  - ABI/layout/calling-convention choices,
+  - UI/meta callback behavior,
+  - unsupported-feature/error-policy decisions.
+- When stopping to ask, state the concrete decision point and the impact on
+  parity/compatibility so the user can answer quickly.

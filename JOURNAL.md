@@ -7484,3 +7484,18 @@ The document is planning-only at this stage (no implementation started yet).
 
 Validation:
 - Documentation change only (no code/tests run)
+
+### AGENTS.md: mandatory collaboration rule for ambiguous porting decisions
+
+Added a new global contributor/agent rule in `AGENTS.md`:
+
+- during porting/implementation work, if requirements are ambiguous or missing
+  (and not resolved by active `porting/` docs or explicit user instructions),
+  stop and ask the user before proceeding on the affected part
+- explicitly call out the decision point and parity/compatibility impact
+
+This generalizes the same collaboration discipline now documented in the
+Cranelift backend plan and applies it repository-wide for parity-sensitive work.
+
+Validation:
+- Documentation change only (no code/tests run)
