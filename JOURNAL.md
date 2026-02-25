@@ -8107,6 +8107,46 @@ Validation:
 
 All checks passed locally.
 
+### Cranelift backend Phase 1.5: add `ForLoop`/`WhileLoop` lowering and local `StoreVar` updates
+
+Extended the Cranelift backend subset with additional control-flow and local
+state update primitives to support a broader range of FIR loop forms.
+
+Implemented in `crates/codegen/src/backends/cranelift/mod.rs`:
+
+- statement lowering
+  - `ForLoop` (`FirMatch::ForLoop`)
+  - `WhileLoop` (`FirMatch::WhileLoop`)
+  - local `StoreVar` updates for `AccessType::Stack` and `AccessType::Loop`
+- subset pre-scan coverage updated for:
+  - `ForLoop`
+  - `WhileLoop`
+  - local `StoreVar`
+
+Design notes:
+
+- `ForLoop` lowering currently targets the common integer loop-variable form
+  with explicit `init/end/step` FIR expressions and preserves `is_reverse`.
+- `WhileLoop` lowering uses explicit header/body/exit blocks.
+- This continues the same “lower if supported, otherwise fallback to no-op
+  `compute` stub” bring-up policy at the module level.
+
+Tests added:
+
+- new synthetic subset fixture covering:
+  - `ForLoop`
+  - `WhileLoop` (constant false guard)
+  - local `StoreVar` + `LoadVar`
+- test asserts successful real body lowering (`compute_body_lowered() == true`)
+
+Validation:
+
+- `cargo fmt --all`
+- `cargo clippy -p codegen --all-targets -- -D warnings`
+- `cargo test -p codegen cranelift -- --nocapture`
+
+All checks passed locally.
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the

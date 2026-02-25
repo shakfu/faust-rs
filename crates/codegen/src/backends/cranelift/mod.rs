@@ -690,12 +690,26 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 access: AccessType::Struct,
                 value,
             } => self.lower_store_var_struct(&name, value),
+            FirMatch::StoreVar {
+                name,
+                access: AccessType::Stack | AccessType::Loop,
+                value,
+            } => self.lower_store_var_local(&name, value),
             FirMatch::If {
                 cond,
                 then_block,
                 else_block,
             } => self.lower_if_stmt(cond, then_block, else_block),
             FirMatch::Control { cond, stmt } => self.lower_control_stmt(cond, stmt),
+            FirMatch::ForLoop {
+                var,
+                init,
+                end,
+                step,
+                body,
+                is_reverse,
+            } => self.lower_for_loop(var, init, end, step, body, is_reverse),
+            FirMatch::WhileLoop { cond, body } => self.lower_while_loop(cond, body),
             FirMatch::Drop(value) => {
                 let _ = self.lower_expr(value, None)?;
                 Ok(())
@@ -799,6 +813,21 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         Ok(())
     }
 
+    fn lower_store_var_local(&mut self, name: &str, value: FirId) -> Result<(), LoweringError> {
+        let prev = self.vars.get(name).copied().ok_or_else(|| {
+            LoweringError::Unsupported(format!("local variable `{name}` not found"))
+        })?;
+        let new_value = match prev {
+            LoweredExpr::Scalar(_) => LoweredExpr::Scalar(self.lower_expr(value, None)?.value()),
+            LoweredExpr::Ptr { pointee, .. } => {
+                let v = self.lower_expr(value, None)?.value();
+                LoweredExpr::Ptr { value: v, pointee }
+            }
+        };
+        self.vars.insert(name.to_string(), new_value);
+        Ok(())
+    }
+
     fn lower_if_stmt(
         &mut self,
         cond: FirId,
@@ -835,6 +864,77 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
 
     fn lower_control_stmt(&mut self, cond: FirId, stmt: FirId) -> Result<(), LoweringError> {
         self.lower_if_stmt(cond, stmt, None)
+    }
+
+    fn lower_for_loop(
+        &mut self,
+        var: String,
+        init: FirId,
+        end: FirId,
+        step: FirId,
+        body: FirId,
+        is_reverse: bool,
+    ) -> Result<(), LoweringError> {
+        let init_v = self.lower_expr(init, Some(&FirType::Int32))?.value();
+        let header = self.fb.create_block();
+        let body_block = self.fb.create_block();
+        let exit = self.fb.create_block();
+        self.fb.append_block_param(header, types::I32);
+        self.fb.ins().jump(header, &[init_v]);
+
+        self.fb.switch_to_block(header);
+        let i_val = self.fb.block_params(header)[0];
+        let prev = self.vars.insert(var.clone(), LoweredExpr::Scalar(i_val));
+        let end_v = self.lower_expr(end, Some(&FirType::Int32))?.value();
+        let cc = if is_reverse {
+            IntCC::SignedGreaterThan
+        } else {
+            IntCC::SignedLessThan
+        };
+        let cond = self.fb.ins().icmp(cc, i_val, end_v);
+        self.fb.ins().brif(cond, body_block, &[], exit, &[]);
+
+        self.fb.switch_to_block(body_block);
+        self.lower_stmt(body)?;
+        let step_v = self.lower_expr(step, Some(&FirType::Int32))?.value();
+        let next = self.fb.ins().iadd(i_val, step_v);
+        self.fb.ins().jump(header, &[next]);
+        self.fb.seal_block(body_block);
+        self.fb.seal_block(header);
+
+        if let Some(old) = prev {
+            self.vars.insert(var, old);
+        } else {
+            self.vars.remove(&var);
+        }
+
+        self.fb.switch_to_block(exit);
+        self.fb.seal_block(exit);
+        Ok(())
+    }
+
+    fn lower_while_loop(&mut self, cond: FirId, body: FirId) -> Result<(), LoweringError> {
+        let header = self.fb.create_block();
+        let body_block = self.fb.create_block();
+        let exit = self.fb.create_block();
+        self.fb.ins().jump(header, &[]);
+
+        self.fb.switch_to_block(header);
+        let cond_v = self.lower_expr(cond, Some(&FirType::Bool))?.value();
+        let cond_b1 = self.fb.ins().icmp_imm(IntCC::NotEqual, cond_v, 0);
+        self.fb.ins().brif(cond_b1, body_block, &[], exit, &[]);
+
+        self.fb.switch_to_block(body_block);
+        self.lower_stmt(body)?;
+        if !is_return_terminated(self.fb) {
+            self.fb.ins().jump(header, &[]);
+        }
+        self.fb.seal_block(body_block);
+        self.fb.seal_block(header);
+
+        self.fb.switch_to_block(exit);
+        self.fb.seal_block(exit);
+        Ok(())
     }
 
     fn indexed_addr(&mut self, base_ptr: Value, index_i32: Value, elem_size: i64) -> Value {
@@ -1256,6 +1356,11 @@ fn subset_stmt_shape(store: &FirStore, id: FirId) -> bool {
             value,
             ..
         } => subset_expr_shape(store, value),
+        FirMatch::StoreVar {
+            access: AccessType::Stack | AccessType::Loop,
+            value,
+            ..
+        } => subset_expr_shape(store, value),
         FirMatch::If {
             cond,
             then_block,
@@ -1274,6 +1379,21 @@ fn subset_stmt_shape(store: &FirStore, id: FirId) -> bool {
             is_reverse: false,
             ..
         } => subset_expr_shape(store, upper) && subset_stmt_shape(store, body),
+        FirMatch::ForLoop {
+            init,
+            end,
+            step,
+            body,
+            ..
+        } => {
+            subset_expr_shape(store, init)
+                && subset_expr_shape(store, end)
+                && subset_expr_shape(store, step)
+                && subset_stmt_shape(store, body)
+        }
+        FirMatch::WhileLoop { cond, body } => {
+            subset_expr_shape(store, cond) && subset_stmt_shape(store, body)
+        }
         FirMatch::StoreTable {
             access: AccessType::Stack,
             index,
@@ -1622,6 +1742,87 @@ mod tests {
         let (store, module) = build_if_control_neg_subset_module();
         let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
             .expect("if/control/neg subset fixture should compile with body lowering");
+        assert!(compiled.has_compute_entry());
+        assert!(compiled.compute_body_lowered());
+    }
+
+    fn build_for_while_local_store_subset_module() -> (fir::FirStore, FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let globals = b.block(&[]);
+        let dsp_struct = b.block(&[]);
+        let out_chan = b.int32(0);
+        let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+        let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+        let tmp0 = b.float32(0.2);
+        let tmp = b.declare_var("tmp", FirType::FaustFloat, AccessType::Stack, Some(tmp0));
+        let tmpv = b.load_var("tmp", AccessType::Stack, FirType::FaustFloat);
+        let neg = b.neg(tmpv, FirType::FaustFloat);
+        let tmp_set = b.store_var("tmp", AccessType::Stack, neg);
+        let false_cond = b.bool_(false);
+        let empty = b.block(&[]);
+        let while_ = b.while_loop(false_cond, empty);
+
+        let init = b.int32(0);
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let step = b.int32(1);
+        let i = b.load_var("i", AccessType::Loop, FirType::Int32);
+        let tmp_cur = b.load_var("tmp", AccessType::Stack, FirType::FaustFloat);
+        let store_out = b.store_table("output0", AccessType::Stack, i, tmp_cur);
+        let for_body = b.block(&[store_out]);
+        let for_ = b.for_loop("i", init, count, step, for_body, false);
+
+        let compute_body = b.block(&[out_alias, tmp, tmp_set, while_, for_]);
+        let compute_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        );
+        let declarations = b.block(&[compute]);
+        let module = b.module(
+            "for_while_local_store_subset",
+            dsp_struct,
+            globals,
+            declarations,
+        );
+        (store, module)
+    }
+
+    #[test]
+    fn compile_module_lowers_for_while_and_local_store_subset_body() {
+        let (store, module) = build_for_while_local_store_subset_module();
+        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+            .expect("for/while/local-store subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
     }
