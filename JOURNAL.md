@@ -7784,6 +7784,46 @@ Validation:
 - `cargo clippy -p cranelift-ffi --all-targets -- -D warnings`
 - `cargo test -p cranelift-ffi` (13 tests passed)
 
+### Cranelift FFI Phase 1: implement temporary scaffold bitcode read/write family (memory + file)
+
+Replaced the `cranelift_dsp` bitcode placeholders in `cranelift-ffi` with a
+**temporary scaffold serialization format** so the Cranelift bitcode API family
+can already be exercised end-to-end before the real backend serialization
+format exists.
+
+Implemented in `crates/cranelift-ffi/src/factory.rs`:
+
+- `writeCCraneliftDSPFactoryToBitcode`
+  - returns a heap C string containing a temporary text payload
+- `readCCraneliftDSPFactoryFromBitcode`
+  - parses the temporary payload and reconstructs a scaffold factory
+  - inserts the restored factory into the cache
+- `writeCCraneliftDSPFactoryToBitcodeFile`
+  - writes the same temporary payload to disk
+- `readCCraneliftDSPFactoryFromBitcodeFile`
+  - reads/parses the payload from disk and reconstructs a scaffold factory
+- helper functions:
+  - `encode_scaffold_bitcode`
+  - `decode_scaffold_bitcode`
+
+Format notes:
+
+- The payload is explicitly marked as a **temporary scaffold format**
+  (`CRANELIFT_FFI_SCAFFOLD_V1`) and is not a commitment to the final Cranelift
+  backend serialization format.
+- Goal is API-family validation and test coverage, not parity with LLVM or
+  interpreter backend bitcode semantics yet.
+
+Tests:
+
+- added in-memory roundtrip test:
+  - `scaffold_bitcode_roundtrip_in_memory`
+
+Validation:
+- `cargo fmt --all`
+- `cargo clippy -p cranelift-ffi --all-targets -- -D warnings`
+- `cargo test -p cranelift-ffi` (14 tests passed)
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the

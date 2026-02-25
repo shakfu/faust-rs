@@ -386,16 +386,33 @@ pub unsafe extern "C" fn getCCraneliftDSPFactoryWarningMessages(
 /// `error_msg` follows the standard Faust C API error-buffer contract.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn readCCraneliftDSPFactoryFromBitcode(
-    _bit_code: *const c_char,
+    bit_code: *const c_char,
     error_msg: *mut c_char,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        write_error(
-            error_msg,
-            "readCCraneliftDSPFactoryFromBitcode is not implemented yet",
-        );
+        if bit_code.is_null() {
+            write_error(error_msg, "null bit_code pointer");
+            return std::ptr::null_mut();
+        }
+        let text = match CStr::from_ptr(bit_code).to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                write_error(error_msg, &format!("invalid UTF-8 in bitcode: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        match decode_scaffold_bitcode(text) {
+            Ok(factory) => {
+                let ptr = alloc_factory(factory);
+                cache_insert(&(*ptr).sha_key, ptr);
+                ptr
+            }
+            Err(e) => {
+                write_error(error_msg, &e);
+                std::ptr::null_mut()
+            }
+        }
     }
-    std::ptr::null_mut()
 }
 
 /// Write a Cranelift factory to a backend bitcode string (symbol present, not implemented).
@@ -404,9 +421,14 @@ pub unsafe extern "C" fn readCCraneliftDSPFactoryFromBitcode(
 /// `factory` may be null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn writeCCraneliftDSPFactoryToBitcode(
-    _factory: *mut CraneliftDspFactory,
+    factory: *mut CraneliftDspFactory,
 ) -> *mut c_char {
-    std::ptr::null_mut()
+    unsafe {
+        if factory.is_null() {
+            return std::ptr::null_mut();
+        }
+        alloc_c_string(&encode_scaffold_bitcode(&*factory))
+    }
 }
 
 /// Read a Cranelift factory from a bitcode file (symbol present, not implemented).
@@ -415,16 +437,43 @@ pub unsafe extern "C" fn writeCCraneliftDSPFactoryToBitcode(
 /// `error_msg` follows the standard Faust C API error-buffer contract.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn readCCraneliftDSPFactoryFromBitcodeFile(
-    _bit_code_path: *const c_char,
+    bit_code_path: *const c_char,
     error_msg: *mut c_char,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        write_error(
-            error_msg,
-            "readCCraneliftDSPFactoryFromBitcodeFile is not implemented yet",
-        );
+        if bit_code_path.is_null() {
+            write_error(error_msg, "null bit_code_path pointer");
+            return std::ptr::null_mut();
+        }
+        let path = match CStr::from_ptr(bit_code_path).to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                write_error(error_msg, &format!("invalid UTF-8 in path: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        let text = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                write_error(
+                    error_msg,
+                    &format!("cannot read bitcode file '{path}': {e}"),
+                );
+                return std::ptr::null_mut();
+            }
+        };
+        match decode_scaffold_bitcode(&text) {
+            Ok(factory) => {
+                let ptr = alloc_factory(factory);
+                cache_insert(&(*ptr).sha_key, ptr);
+                ptr
+            }
+            Err(e) => {
+                write_error(error_msg, &e);
+                std::ptr::null_mut()
+            }
+        }
     }
-    std::ptr::null_mut()
 }
 
 /// Write a Cranelift factory to a bitcode file (symbol present, not implemented).
@@ -433,10 +482,19 @@ pub unsafe extern "C" fn readCCraneliftDSPFactoryFromBitcodeFile(
 /// `factory` and `bit_code_path` may be null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn writeCCraneliftDSPFactoryToBitcodeFile(
-    _factory: *mut CraneliftDspFactory,
-    _bit_code_path: *const c_char,
+    factory: *mut CraneliftDspFactory,
+    bit_code_path: *const c_char,
 ) -> bool {
-    false
+    unsafe {
+        if factory.is_null() || bit_code_path.is_null() {
+            return false;
+        }
+        let path = match CStr::from_ptr(bit_code_path).to_str() {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        std::fs::write(path, encode_scaffold_bitcode(&*factory)).is_ok()
+    }
 }
 
 /// Enable multi-thread-safe factory mode.
@@ -634,6 +692,92 @@ fn collect_search_paths_for_file(path: &Path, argv: &[String]) -> Vec<PathBuf> {
     paths
 }
 
+/// Encodes a scaffold factory into a temporary text payload for the bitcode family.
+///
+/// This is a placeholder serialization format used only until real Cranelift
+/// backend serialization is implemented.
+fn encode_scaffold_bitcode(factory: &CraneliftDspFactory) -> String {
+    fn esc(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('\n', "\\n")
+    }
+    format!(
+        "CRANELIFT_FFI_SCAFFOLD_V1\nname={}\nsha={}\ninputs={}\noutputs={}\ncompile_options={}\ndsp_code={}\njson={}\n",
+        esc(&factory.name),
+        esc(&factory.sha_key),
+        factory.num_inputs,
+        factory.num_outputs,
+        esc(&factory.compile_options),
+        esc(&factory.dsp_code),
+        esc(&factory.json),
+    )
+}
+
+/// Decodes the temporary scaffold bitcode payload back into a factory scaffold.
+fn decode_scaffold_bitcode(text: &str) -> Result<CraneliftDspFactory, String> {
+    fn unesc(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut it = s.chars();
+        while let Some(ch) = it.next() {
+            if ch == '\\' {
+                match it.next() {
+                    Some('n') => out.push('\n'),
+                    Some('\\') => out.push('\\'),
+                    Some(other) => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                    None => out.push('\\'),
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        out
+    }
+
+    let mut lines = text.lines();
+    match lines.next() {
+        Some("CRANELIFT_FFI_SCAFFOLD_V1") => {}
+        Some(_) => return Err("unsupported cranelift scaffold bitcode format".to_owned()),
+        None => return Err("empty bitcode payload".to_owned()),
+    }
+
+    let mut name = None;
+    let mut sha_key = None;
+    let mut compile_options = None;
+    let mut dsp_code = None;
+    let mut json = None;
+    let mut num_inputs = None;
+    let mut num_outputs = None;
+
+    for line in lines {
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        match k {
+            "name" => name = Some(unesc(v)),
+            "sha" => sha_key = Some(unesc(v)),
+            "compile_options" => compile_options = Some(unesc(v)),
+            "dsp_code" => dsp_code = Some(unesc(v)),
+            "json" => json = Some(unesc(v)),
+            "inputs" => num_inputs = v.parse::<i32>().ok(),
+            "outputs" => num_outputs = v.parse::<i32>().ok(),
+            _ => {}
+        }
+    }
+
+    Ok(CraneliftDspFactory {
+        name: name.ok_or_else(|| "missing 'name' field".to_owned())?,
+        sha_key: sha_key.ok_or_else(|| "missing 'sha' field".to_owned())?,
+        dsp_code: dsp_code.ok_or_else(|| "missing 'dsp_code' field".to_owned())?,
+        compile_options: compile_options
+            .ok_or_else(|| "missing 'compile_options' field".to_owned())?,
+        json: json.ok_or_else(|| "missing 'json' field".to_owned())?,
+        num_inputs: num_inputs.ok_or_else(|| "missing 'inputs' field".to_owned())?,
+        num_outputs: num_outputs.ok_or_else(|| "missing 'outputs' field".to_owned())?,
+    })
+}
+
 /// Return a static null-terminated empty `char**` array.
 fn null_c_string_array() -> *const *const c_char {
     struct SyncNullArray([*const c_char; 1]);
@@ -674,6 +818,7 @@ mod tests {
         getAllCCraneliftDSPFactories, getCCraneliftDSPFactoryCompileOptions,
         getCCraneliftDSPFactoryFromSHAKey, getCCraneliftDSPFactoryJSON,
         getCCraneliftDSPFactoryName, getCCraneliftDSPFactorySHAKey, getCLibFaustVersion,
+        readCCraneliftDSPFactoryFromBitcode, writeCCraneliftDSPFactoryToBitcode,
     };
 
     #[test]
@@ -802,6 +947,37 @@ mod tests {
             // free returned strings (outer array is intentionally not freed in scaffold).
             freeCMemory(first.cast());
             deleteAllCCraneliftDSPFactories();
+        }
+    }
+
+    #[test]
+    fn scaffold_bitcode_roundtrip_in_memory() {
+        let name = c"bitcode";
+        let src = c"process = _;";
+        let mut err = [0_i8; 4096];
+        let factory = unsafe {
+            createCCraneliftDSPFactoryFromString(
+                name.as_ptr(),
+                src.as_ptr(),
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+                1,
+            )
+        };
+        assert!(!factory.is_null());
+
+        let bitcode = unsafe { writeCCraneliftDSPFactoryToBitcode(factory) };
+        assert!(!bitcode.is_null());
+
+        let restored =
+            unsafe { readCCraneliftDSPFactoryFromBitcode(bitcode.cast_const(), err.as_mut_ptr()) };
+        assert!(!restored.is_null());
+
+        unsafe {
+            freeCMemory(bitcode.cast());
+            assert!(deleteCCraneliftDSPFactory(factory));
+            assert!(deleteCCraneliftDSPFactory(restored));
         }
     }
 }
