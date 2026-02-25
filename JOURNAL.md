@@ -7985,6 +7985,52 @@ Local validation:
 
 All checks passed locally.
 
+### Cranelift backend: add subset-gap diagnostics and scan `tests/corpus` fallback causes
+
+Added a backend diagnostic helper and a temporary corpus scan example to make
+stub fallback reasons observable, so Cranelift subset work can be prioritized
+from real corpus data instead of ad hoc guesses.
+
+Implemented in `crates/codegen/src/backends/cranelift/mod.rs`:
+
+- new public helper:
+  - `diagnose_cranelift_compute_subset_gap(store, module) -> Result<Option<String>, ...>`
+- internal subset matcher refactored to compute a first-gap reason:
+  - `compute_body_subset_gap_reason_from_compute_decl`
+  - `subset_stmt_gap_reason`
+  - `subset_expr_gap_reason`
+- existing stub-fallback decision remains unchanged semantically (still falls
+  back when subset does not match), but now diagnostics are available
+
+Temporary local tooling added (analysis aid, not product API):
+
+- `crates/compiler/examples/corpus_scan_cranelift.rs`
+  - scans `tests/corpus/*.dsp`
+  - runs `compiler -> FIR (fast lane) -> Cranelift backend`
+  - reports `lowered_ok / stub_ok / errors`
+  - reports a frequency table of Cranelift subset-gap reasons for stub cases
+
+Observed corpus result after the `DeclareFun` globals fix:
+
+- `lowered_ok=0 stub_ok=26 errors=31`
+
+Dominant stub fallback cause (by far):
+
+- `unsupported expr variant in subset: LoadTable { ..., access: Stack, ... }`
+  - appears on all sampled `stub_ok` cases
+  - typical form is reading from stack aliases like `input0`, `input1`, etc.
+  - this identifies the next highest-leverage backend step:
+    support `LoadTable` with `AccessType::Stack`
+
+Validation:
+
+- `cargo fmt --all`
+- `cargo clippy -p codegen --all-targets -- -D warnings`
+- `cargo test -p codegen cranelift -- --nocapture`
+- `cargo run -p compiler --example corpus_scan_cranelift`
+
+All checks passed locally.
+
 ### Cranelift backend: ignore helper `DeclareFun` prototypes in module globals
 
 Fixed a corpus-facing Cranelift backend issue where fast-lane FIR emits helper

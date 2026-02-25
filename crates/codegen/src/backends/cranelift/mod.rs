@@ -1927,145 +1927,152 @@ fn try_lower_compute_body(
 }
 
 fn compute_body_matches_current_subset(store: &FirStore, compute_decl: FirId) -> bool {
+    compute_body_subset_gap_reason_from_compute_decl(store, compute_decl).is_none()
+}
+
+fn compute_body_subset_gap_reason_from_compute_decl(
+    store: &FirStore,
+    compute_decl: FirId,
+) -> Option<String> {
     let body = match match_fir(store, compute_decl) {
         FirMatch::DeclareFun {
             body: Some(body), ..
         } => body,
-        _ => return false,
+        other => return Some(format!("unsupported compute declaration shape: {other:?}")),
     };
-    subset_stmt_shape(store, body)
+    subset_stmt_gap_reason(store, body)
 }
 
-fn subset_stmt_shape(store: &FirStore, id: FirId) -> bool {
+fn subset_stmt_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
     match match_fir(store, id) {
-        FirMatch::Block(items) => items.into_iter().all(|x| subset_stmt_shape(store, x)),
+        FirMatch::Block(items) => items
+            .into_iter()
+            .find_map(|x| subset_stmt_gap_reason(store, x)),
         FirMatch::DeclareVar {
             access: AccessType::Stack,
             init: Some(init),
             ..
-        } => subset_expr_shape(store, init),
+        } => subset_expr_gap_reason(store, init),
         FirMatch::DeclareVar {
             access: AccessType::Stack,
             init: None,
             ..
-        } => true,
-        FirMatch::NullDeclareVar | FirMatch::Label(_) => true,
+        } => None,
+        FirMatch::NullDeclareVar | FirMatch::Label(_) => None,
         FirMatch::StoreVar {
             access: AccessType::Struct,
             value,
             ..
-        } => subset_expr_shape(store, value),
+        } => subset_expr_gap_reason(store, value),
         FirMatch::StoreVar {
             access: AccessType::Stack | AccessType::Loop,
             value,
             ..
-        } => subset_expr_shape(store, value),
+        } => subset_expr_gap_reason(store, value),
         FirMatch::ShiftArrayVar {
             access: AccessType::Struct,
             ..
-        } => true,
+        } => None,
         FirMatch::If {
             cond,
             then_block,
             else_block,
-        } => {
-            subset_expr_shape(store, cond)
-                && subset_stmt_shape(store, then_block)
-                && else_block.is_none_or(|b| subset_stmt_shape(store, b))
-        }
+        } => subset_expr_gap_reason(store, cond)
+            .or_else(|| subset_stmt_gap_reason(store, then_block))
+            .or_else(|| else_block.and_then(|b| subset_stmt_gap_reason(store, b))),
         FirMatch::Control { cond, stmt } => {
-            subset_expr_shape(store, cond) && subset_stmt_shape(store, stmt)
+            subset_expr_gap_reason(store, cond).or_else(|| subset_stmt_gap_reason(store, stmt))
         }
         FirMatch::Switch {
             cond,
             cases,
             default,
-        } => {
-            subset_expr_shape(store, cond)
-                && cases
+        } => subset_expr_gap_reason(store, cond)
+            .or_else(|| {
+                cases
                     .into_iter()
-                    .all(|(_, stmt)| subset_stmt_shape(store, stmt))
-                && default.is_none_or(|stmt| subset_stmt_shape(store, stmt))
-        }
+                    .find_map(|(_, stmt)| subset_stmt_gap_reason(store, stmt))
+            })
+            .or_else(|| default.and_then(|stmt| subset_stmt_gap_reason(store, stmt))),
         FirMatch::SimpleForLoop {
             upper,
             body,
             is_reverse: false,
             ..
-        } => subset_expr_shape(store, upper) && subset_stmt_shape(store, body),
+        } => subset_expr_gap_reason(store, upper).or_else(|| subset_stmt_gap_reason(store, body)),
         FirMatch::ForLoop {
             init,
             end,
             step,
             body,
             ..
-        } => {
-            subset_expr_shape(store, init)
-                && subset_expr_shape(store, end)
-                && subset_expr_shape(store, step)
-                && subset_stmt_shape(store, body)
-        }
+        } => subset_expr_gap_reason(store, init)
+            .or_else(|| subset_expr_gap_reason(store, end))
+            .or_else(|| subset_expr_gap_reason(store, step))
+            .or_else(|| subset_stmt_gap_reason(store, body)),
         FirMatch::WhileLoop { cond, body } => {
-            subset_expr_shape(store, cond) && subset_stmt_shape(store, body)
+            subset_expr_gap_reason(store, cond).or_else(|| subset_stmt_gap_reason(store, body))
         }
         FirMatch::StoreTable {
             access: AccessType::Stack,
             index,
             value,
             ..
-        } => subset_expr_shape(store, index) && subset_expr_shape(store, value),
+        } => subset_expr_gap_reason(store, index).or_else(|| subset_expr_gap_reason(store, value)),
         FirMatch::StoreTable {
             access: AccessType::Struct,
             index,
             value,
             ..
-        } => subset_expr_shape(store, index) && subset_expr_shape(store, value),
-        FirMatch::Drop(v) => subset_expr_shape(store, v),
-        FirMatch::NullStatement | FirMatch::Return(None) => true,
-        _ => false,
+        } => subset_expr_gap_reason(store, index).or_else(|| subset_expr_gap_reason(store, value)),
+        FirMatch::Drop(v) => subset_expr_gap_reason(store, v),
+        FirMatch::NullStatement | FirMatch::Return(None) => None,
+        other => Some(format!("unsupported stmt variant in subset: {other:?}")),
     }
 }
 
-fn subset_expr_shape(store: &FirStore, id: FirId) -> bool {
+fn subset_expr_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
     match match_fir(store, id) {
         FirMatch::Int32 { .. }
         | FirMatch::Bool { .. }
         | FirMatch::Float32 { .. }
-        | FirMatch::Float64 { .. } => true,
+        | FirMatch::Float64 { .. } => None,
         FirMatch::LoadVar {
             access: AccessType::Stack | AccessType::FunArgs | AccessType::Loop | AccessType::Struct,
             ..
-        } => true,
+        } => None,
         FirMatch::LoadTable {
             access: AccessType::FunArgs,
             index,
             ..
-        } => subset_expr_shape(store, index),
+        } => subset_expr_gap_reason(store, index),
         FirMatch::LoadTable {
             access: AccessType::Struct,
             index,
             ..
-        } => subset_expr_shape(store, index),
+        } => subset_expr_gap_reason(store, index),
         FirMatch::BinOp { lhs, rhs, .. } => {
-            subset_expr_shape(store, lhs) && subset_expr_shape(store, rhs)
+            subset_expr_gap_reason(store, lhs).or_else(|| subset_expr_gap_reason(store, rhs))
         }
         FirMatch::Select2 {
             cond,
             then_value,
             else_value,
             ..
-        } => {
-            subset_expr_shape(store, cond)
-                && subset_expr_shape(store, then_value)
-                && subset_expr_shape(store, else_value)
-        }
-        FirMatch::Neg { value, .. } => subset_expr_shape(store, value),
+        } => subset_expr_gap_reason(store, cond)
+            .or_else(|| subset_expr_gap_reason(store, then_value))
+            .or_else(|| subset_expr_gap_reason(store, else_value)),
+        FirMatch::Neg { value, .. } => subset_expr_gap_reason(store, value),
         FirMatch::FunCall { name, args, .. } => {
-            fir::FirMathOp::from_symbol(&name).is_some()
-                && args.into_iter().all(|x| subset_expr_shape(store, x))
+            if fir::FirMathOp::from_symbol(&name).is_none() {
+                Some(format!("unsupported math call in subset: {name}"))
+            } else {
+                args.into_iter()
+                    .find_map(|x| subset_expr_gap_reason(store, x))
+            }
         }
-        FirMatch::Cast { value, .. } => subset_expr_shape(store, value),
-        _ => false,
+        FirMatch::Cast { value, .. } => subset_expr_gap_reason(store, value),
+        other => Some(format!("unsupported expr variant in subset: {other:?}")),
     }
 }
 
@@ -2175,6 +2182,22 @@ pub fn compile_fir_to_cranelift_jit(
         struct_layout,
         jit_module: jit,
     })
+}
+
+/// Diagnoses why the current Cranelift `compute` subset matcher would fall back
+/// to the no-op stub for a given FIR module.
+///
+/// Returns `Ok(None)` when the `compute` body matches the current lowering
+/// subset, and `Ok(Some(reason))` otherwise.
+pub fn diagnose_cranelift_compute_subset_gap(
+    store: &FirStore,
+    module: FirId,
+) -> Result<Option<String>, CraneliftBackendError> {
+    let (_module_name, compute_decl) = find_module_and_compute(store, module)?;
+    Ok(compute_body_subset_gap_reason_from_compute_decl(
+        store,
+        compute_decl,
+    ))
 }
 
 #[cfg(test)]
