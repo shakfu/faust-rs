@@ -7568,6 +7568,44 @@ Decisions/doc updates:
 Validation:
 - Documentation/header placeholder changes only (no code/tests run)
 
+### Cranelift backend: expand Rustdoc for public API and lowering internals
+
+Substantially expanded Rust documentation in
+`crates/codegen/src/backends/cranelift/mod.rs` to improve maintainability of
+the backend bring-up implementation and make key invariants explicit for future
+porting work.
+
+Documentation additions include:
+
+- module-level backend status and design notes:
+  - real JIT integration + subset lowering
+  - stub fallback policy
+  - current `FAUSTFLOAT -> f32` bring-up decision
+- public API and data structures:
+  - `CraneliftBackendError`
+  - `JitDspModule` (ownership/lifetime of JIT code memory, `compute` address semantics)
+  - `StructLayoutPlan` / `StructFieldLayout` / `StructFieldKind`
+  - `compile_fir_to_cranelift_jit`
+  - `diagnose_cranelift_compute_subset_gap`
+- internal backend helpers (maintenance-focused Rustdoc):
+  - FIR module/`compute` discovery
+  - `dsp*` struct layout derivation rules
+  - JIT builder setup and host symbol registration
+  - subset matcher / first-gap diagnostics
+  - `compute` function emission + stub fallback integration
+- lowering internals (`ComputeLowering`) with comments on:
+  - pointer/scalar local environment model
+  - coercion policy
+  - `Struct` / stack alias memory access lowering
+  - loop/control-flow lowering helpers
+  - imported math call caching and symbol mapping
+
+Validation:
+
+- `cargo fmt --all`
+
+Documentation-only change in code comments/Rustdoc (no tests run).
+
 ### Cranelift FFI Phase 1: executable C ABI scaffold for `cranelift_dsp` factory/instance lifecycle
 
 Moved `cranelift-ffi` from header-only placeholders to a first **executable C

@@ -11,12 +11,23 @@
 //!   behavior (`llvm_dsp` / `interpreter_dsp`-style API strategy).
 //!
 //! # Current status
-//! - Phase 1.5 bring-up: a real Cranelift JIT module is emitted for the FIR
-//!   module `compute` entry point, but the emitted `compute` body is currently
-//!   a no-op stub (`return`) while FIR body lowering is implemented
-//!   incrementally.
-//! - This validates Cranelift toolchain integration, symbol declaration,
-//!   function definition/finalization, and module ownership.
+//! - Early backend bring-up with a real Cranelift JIT integration:
+//!   - a finalized `compute` symbol is emitted,
+//!   - finalized code is kept alive by an owned `JITModule`,
+//!   - a backend `dsp*` layout contract is derived from FIR `globals`.
+//! - FIR `compute` body lowering is implemented incrementally through a
+//!   supported subset (loops, arithmetic, selected control flow, part of math
+//!   intrinsics, struct globals/tables, etc.).
+//! - When the FIR body exceeds the current subset, the backend deliberately
+//!   falls back to a valid no-op `compute` stub instead of failing the whole
+//!   compilation.
+//!
+//! # Design notes (current phase)
+//! - The backend prioritizes compile-path integration and diagnosability over
+//!   runtime parity completeness.
+//! - `FAUSTFLOAT` is currently mapped to `f32` in the Cranelift lowering path.
+//! - The exported FFI/runtime layer (`cranelift_dsp`) can consume diagnostic
+//!   metadata such as whether `compute` was really lowered or stubbed.
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{AbiParam, FuncRef, InstBuilder, MemFlags, Type, Value, types};
@@ -92,7 +103,16 @@ impl CraneliftBackendErrorCode {
     }
 }
 
-/// Typed Cranelift backend error (scaffold).
+/// Typed Cranelift backend error used by the Cranelift codegen entry points.
+///
+/// This is the stable Rust-facing error container returned by
+/// [`compile_fir_to_cranelift_jit`] and related helpers. It carries:
+/// - a stable machine-readable code ([`CraneliftBackendErrorCode`]),
+/// - a human-readable message suitable for diagnostics/logging.
+///
+/// # Stability notes
+/// - `code` is intended to remain stable for tooling/tests.
+/// - `message` may evolve as lowering coverage and diagnostics improve.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CraneliftBackendError {
     /// Machine-readable stable backend error code.
@@ -136,8 +156,20 @@ impl std::error::Error for CraneliftBackendError {}
 ///
 /// Current contents:
 /// - owned Cranelift JIT module (keeps finalized code alive),
-/// - finalized `compute` symbol address (opaque, not yet invoked here),
+/// - finalized `compute` symbol address (opaque integer),
 /// - module/function names for debug/test assertions.
+/// - `compute` subset-lowering status,
+/// - backend-derived `dsp*` memory layout contract.
+///
+/// # Ownership / lifetime
+/// The finalized machine code remains valid only while this value is alive,
+/// because the underlying [`JITModule`] owns the emitted code memory and import
+/// bookkeeping. Dropping [`JitDspModule`] invalidates `compute_entry_addr()`.
+///
+/// # Safety note
+/// This type intentionally exposes the finalized entry address as `usize`
+/// instead of a typed function pointer because invoking the code would require
+/// `unsafe`, which is deferred to the future runtime/FFI layers.
 ///
 /// API mapping status: `adapted`.
 pub struct JitDspModule {
@@ -160,13 +192,19 @@ impl std::fmt::Debug for JitDspModule {
 }
 
 impl JitDspModule {
-    /// Returns the FIR module name captured during compilation.
+    /// Returns the FIR module name captured from the FIR `Module` node.
+    ///
+    /// This is useful for logging/debugging and for predictable symbol naming
+    /// assertions in tests.
     #[must_use]
     pub fn module_name(&self) -> &str {
         &self.module_name
     }
 
-    /// Returns the finalized Cranelift symbol name used for the `compute` stub.
+    /// Returns the finalized Cranelift symbol name used for `compute`.
+    ///
+    /// The name is exported inside the Cranelift JIT module and is currently
+    /// derived as `"{module_name}::compute"`.
     #[must_use]
     pub fn compute_symbol_name(&self) -> &str {
         &self.compute_symbol_name
@@ -181,7 +219,11 @@ impl JitDspModule {
         self.compute_entry_addr
     }
 
-    /// Returns true when a finalized `compute` symbol address is present.
+    /// Returns `true` when a finalized non-null `compute` symbol address exists.
+    ///
+    /// This is a cheap postcondition check for callers that only need to know
+    /// whether JIT finalization produced an address, without inspecting the
+    /// lowering mode (`real subset lowering` vs `stub fallback`).
     #[must_use]
     pub fn has_compute_entry(&self) -> bool {
         self.compute_entry_addr != 0
@@ -196,12 +238,21 @@ impl JitDspModule {
 
     /// Returns the backend `dsp*` struct layout contract derived from FIR
     /// `globals` declarations.
+    ///
+    /// The returned layout is deterministic for a given FIR module and current
+    /// backend contract (including the current `FAUSTFLOAT -> f32` decision).
+    /// It is used by lowering of `AccessType::Struct` loads/stores and is also
+    /// intended to be reused by future runtime allocation paths.
     #[must_use]
     pub fn struct_layout(&self) -> &StructLayoutPlan {
         &self.struct_layout
     }
 
     /// Internal guard used by tests to ensure the JIT module stays owned/alive.
+    ///
+    /// This method intentionally touches the private `jit_module` field so test
+    /// code can assert the ownership path without exposing the Cranelift type
+    /// itself in the public API.
     #[must_use]
     pub fn jit_module_is_alive(&self) -> bool {
         let _ = &self.jit_module;
@@ -228,21 +279,35 @@ pub struct StructLayoutPlan {
 }
 
 impl StructLayoutPlan {
+    /// Returns all fields in declaration/layout order.
+    ///
+    /// Order is significant: offsets are assigned by iterating FIR `globals`
+    /// in order and applying alignment. Callers should not assume name sorting.
     #[must_use]
     pub fn fields(&self) -> &[StructFieldLayout] {
         &self.fields
     }
 
+    /// Returns the total struct size in bytes, including final padding.
+    ///
+    /// The size is rounded up to `align_bytes()`.
     #[must_use]
     pub fn size_bytes(&self) -> u32 {
         self.size_bytes
     }
 
+    /// Returns the required alignment of the full `dsp*` state struct in bytes.
+    ///
+    /// This is currently the maximum alignment of all included fields.
     #[must_use]
     pub fn align_bytes(&self) -> u32 {
         self.align_bytes
     }
 
+    /// Looks up a field by FIR/global name.
+    ///
+    /// Returns `None` when the name is not part of the backend layout (for
+    /// example helper prototypes in `globals`, which are intentionally ignored).
     #[must_use]
     pub fn field(&self, name: &str) -> Option<&StructFieldLayout> {
         self.fields.iter().find(|f| f.name == name)
@@ -252,21 +317,34 @@ impl StructLayoutPlan {
 /// One field in the Cranelift backend `dsp*` struct layout.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StructFieldLayout {
+    /// FIR/global variable name used as the layout key.
     pub name: String,
+    /// Storage shape in the backend contract (scalar or inline table).
     pub kind: StructFieldKind,
+    /// Byte offset relative to the `dsp*` base pointer.
     pub offset_bytes: u32,
+    /// Field storage size in bytes (table payload size for tables).
     pub size_bytes: u32,
+    /// Field alignment in bytes.
     pub align_bytes: u32,
 }
 
 /// Backend `dsp*` field storage kind in the Cranelift layout contract.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StructFieldKind {
+    /// Single scalar value stored inline.
     Scalar(FirType),
+    /// Inline array/table payload stored inside the `dsp*` allocation.
+    ///
+    /// `len` is the number of elements (not bytes).
     Table { elem_type: FirType, len: u32 },
 }
 
 impl StructFieldLayout {
+    /// Returns the scalar FIR type when this field is [`StructFieldKind::Scalar`].
+    ///
+    /// This is a convenience helper for callers that only care about scalar
+    /// state and want to skip manual enum matching.
     #[must_use]
     pub fn scalar_type(&self) -> Option<&FirType> {
         match &self.kind {
@@ -294,6 +372,15 @@ fn align_up(value: u32, align: u32) -> u32 {
     }
 }
 
+/// Finds the FIR module name and the concrete `compute` declaration to lower.
+///
+/// # Expected FIR shape
+/// - root node: `Module`
+/// - `declarations`: `Block([...])`
+/// - a `DeclareFun { name: "compute", body: Some(..) }` entry exists
+///
+/// Prototype-only `compute` declarations (`body: None`) are ignored because the
+/// Cranelift backend currently requires an executable body.
 fn find_module_and_compute(
     store: &FirStore,
     module: FirId,
@@ -344,6 +431,14 @@ fn find_module_and_compute(
     Ok((module_name, compute_id))
 }
 
+/// Maps a FIR scalar/storage type to the backend `dsp*` layout scalar size/alignment.
+///
+/// This helper is used only while deriving the backend `StructLayoutPlan` from
+/// FIR `globals`. It intentionally reflects the current bring-up contract
+/// (notably `FAUSTFLOAT -> f32`).
+///
+/// Unsupported FIR types here are rejected as module-shape issues because they
+/// make the current backend state layout contract undefined.
 fn fir_type_layout_scalar(
     ptr_size: u32,
     typ: &FirType,
@@ -368,6 +463,18 @@ fn fir_type_layout_scalar(
     Ok(s)
 }
 
+/// Builds the deterministic backend `dsp*` state layout from FIR module globals.
+///
+/// # Inclusion rules (current contract)
+/// - includes `DeclareVar { access: Struct, .. }` as scalar fields
+/// - includes `DeclareTable { access: Struct, .. }` as inline table fields
+/// - ignores helper function prototypes (`DeclareFun { body: None, .. }`)
+/// - ignores `NullDeclareVar`
+///
+/// # Rejection policy
+/// Any other global entry shape (for example unsupported access classes or
+/// unsupported FIR types) is rejected with `UnsupportedModuleShape`, because
+/// lowering `AccessType::Struct` depends on a total, unambiguous layout.
 fn build_struct_layout_for_module(
     store: &FirStore,
     module: FirId,
@@ -480,6 +587,17 @@ fn build_struct_layout_for_module(
     })
 }
 
+/// Creates and configures a Cranelift JIT builder for the host machine.
+///
+/// # Current policy
+/// - Uses the host ISA via `cranelift_native`.
+/// - Applies backend options such as optimization level.
+/// - Disables a few relocation/libcall assumptions (`is_pic`,
+///   `use_colocated_libcalls`) to simplify early cross-platform bring-up.
+/// - Registers default libcall names (Cranelift helper convention).
+///
+/// Host math symbols used by FIR math lowering are registered later by
+/// [`register_host_symbols`].
 fn make_jit_builder(options: &CraneliftOptions) -> Result<JITBuilder, CraneliftBackendError> {
     let mut builder = settings::builder();
     let opt_level = match options.opt_level {
@@ -664,6 +782,14 @@ extern "C" fn host_fmod(a: f64, b: f64) -> f64 {
     a % b
 }
 
+/// Registers Rust host math functions as JIT-importable symbols.
+///
+/// The Cranelift lowering emits imported calls for many FIR math operations
+/// (`sin`, `pow`, `fmin`, etc.). This function binds those symbol names to Rust
+/// implementations so the JIT can resolve them during finalization.
+///
+/// Both `f32` (`*f`) and `f64` symbol variants are registered where the subset
+/// lowering supports both result types.
 fn register_host_symbols(jit_builder: &mut JITBuilder) {
     jit_builder.symbol("sinf", host_sinf as *const u8);
     jit_builder.symbol("sin", host_sin as *const u8);
@@ -705,6 +831,14 @@ fn register_host_symbols(jit_builder: &mut JITBuilder) {
     jit_builder.symbol("fmod", host_fmod as *const u8);
 }
 
+/// Lowered expression value tracked in the local Cranelift lowering environment.
+///
+/// FIR names in the current subset can denote either:
+/// - scalar SSA values (ints/floats/bools), or
+/// - pointer values (for stack aliases like `input0` / `output0`, fun args, etc.)
+///
+/// This enum preserves that distinction so statement lowering can reject invalid
+/// uses early (for example writing a scalar as if it were a pointer table base).
 #[derive(Clone, Copy, Debug)]
 enum LoweredExpr {
     Scalar(Value),
@@ -715,6 +849,9 @@ enum LoweredExpr {
 }
 
 impl LoweredExpr {
+    /// Returns the underlying CLIF value regardless of scalar/pointer tagging.
+    ///
+    /// Use this only when the consumer already knows the semantic category.
     fn value(self) -> Value {
         match self {
             Self::Scalar(v) => v,
@@ -722,6 +859,7 @@ impl LoweredExpr {
         }
     }
 
+    /// Returns the pointer CLIF value when this expression represents a pointer.
     fn ptr(self) -> Option<Value> {
         match self {
             Self::Ptr { value, .. } => Some(value),
@@ -729,6 +867,10 @@ impl LoweredExpr {
         }
     }
 
+    /// Returns the tracked pointee category for pointer expressions.
+    ///
+    /// This metadata is backend-local and intentionally coarse (see
+    /// [`FirTypeRef`]); it is sufficient for current alias/table lowering.
     fn pointee(self) -> Option<FirTypeRef> {
         match self {
             Self::Ptr { pointee, .. } => pointee,
@@ -737,6 +879,11 @@ impl LoweredExpr {
     }
 }
 
+/// Lightweight FIR type classifier used in local lowering metadata.
+///
+/// This is intentionally smaller than [`FirType`] and mainly exists to annotate
+/// pointer aliases (`LoweredExpr::Ptr`) with enough information to safely lower
+/// `LoadTable`/`StoreTable` on stack aliases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FirTypeRef {
     Bool,
@@ -753,6 +900,10 @@ enum FirTypeRef {
 }
 
 impl FirTypeRef {
+    /// Converts a full FIR type to the reduced local classification.
+    ///
+    /// Unsupported/compound FIR types collapse to `Ptr` because the current
+    /// pointer alias metadata only needs rough categories, not full fidelity.
     fn from_fir_type(typ: &FirType) -> Self {
         match typ {
             FirType::Bool => Self::Bool,
@@ -771,16 +922,28 @@ impl FirTypeRef {
     }
 }
 
+/// Internal lowering failure type used while emitting the Cranelift `compute` body.
+///
+/// `Unsupported` means "valid FIR, but outside current subset"; callers may
+/// convert this into a stub fallback. `Jit` represents structural/codegen
+/// failures that should surface as backend errors.
 #[derive(Debug)]
 enum LoweringError {
     Unsupported(String),
     Jit(String),
 }
 
+/// Emits a valid no-op `return` for the current CLIF function.
+///
+/// This is the canonical stub body used by the early fallback policy.
 fn emit_return_stub(fb: &mut FunctionBuilder<'_>) {
     fb.ins().return_(&[]);
 }
 
+/// Returns `true` when the current block already ends with a `return`.
+///
+/// Used to avoid emitting duplicate terminators after lowering control-flow
+/// constructs that may already have returned.
 fn is_return_terminated(fb: &FunctionBuilder<'_>) -> bool {
     let Some(block) = fb.current_block() else {
         return false;
@@ -794,6 +957,16 @@ fn is_return_terminated(fb: &FunctionBuilder<'_>) -> bool {
     )
 }
 
+/// Stateful FIR -> Cranelift lowering context for a single `compute` function.
+///
+/// This context owns:
+/// - references to FIR storage and the active Cranelift JIT module,
+/// - the current CLIF function builder,
+/// - the backend `dsp*` layout contract for `AccessType::Struct`,
+/// - a local name environment (`vars`) for FIR variables/aliases,
+/// - cached imported function refs for math calls.
+///
+/// It is intentionally function-scoped: one instance per `compute` lowering.
 struct ComputeLowering<'a, 'b, 'c> {
     store: &'a FirStore,
     jit: &'a mut JITModule,
@@ -806,17 +979,20 @@ struct ComputeLowering<'a, 'b, 'c> {
 }
 
 impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
+    /// Converts a CLIF boolean (`b1`) to the backend FIR-bool representation (`i8` 0/1).
     fn bool_b1_to_i8(&mut self, b1: Value) -> Value {
         let one = self.fb.ins().iconst(types::I8, 1);
         let zero = self.fb.ins().iconst(types::I8, 0);
         self.fb.ins().select(b1, one, zero)
     }
 
+    /// Emits an integer comparison and returns FIR-style boolean `i8` (0/1).
     fn int_cmp_to_i8(&mut self, cc: IntCC, lhs: Value, rhs: Value) -> Value {
         let b1 = self.fb.ins().icmp(cc, lhs, rhs);
         self.bool_b1_to_i8(b1)
     }
 
+    /// Emits a floating-point comparison and returns FIR-style boolean `i8` (0/1).
     fn float_cmp_to_i8(
         &mut self,
         cc: cranelift_codegen::ir::condcodes::FloatCC,
@@ -827,6 +1003,9 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         self.bool_b1_to_i8(b1)
     }
 
+    /// Maps a FIR type to the corresponding Cranelift value type used by this backend.
+    ///
+    /// This reflects current bring-up decisions, especially `FAUSTFLOAT -> F32`.
     fn fir_type_to_clif(&self, typ: &FirType) -> Result<Type, LoweringError> {
         match typ {
             FirType::Int32 => Ok(types::I32),
@@ -844,12 +1023,14 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         }
     }
 
+    /// Returns the CLIF `dsp*` base pointer argument from the local environment.
     fn dsp_base_ptr(&self) -> Result<Value, LoweringError> {
         self.vars.get("dsp").and_then(|v| v.ptr()).ok_or_else(|| {
             LoweringError::Unsupported("missing `dsp` base pointer argument".to_string())
         })
     }
 
+    /// Looks up a named `dsp*` field in the backend struct layout contract.
     fn struct_field(&self, name: &str) -> Result<&StructFieldLayout, LoweringError> {
         self.struct_layout.field(name).ok_or_else(|| {
             LoweringError::Unsupported(format!(
@@ -858,6 +1039,11 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         })
     }
 
+    /// Coerces a CLIF value to the CLIF type expected by a target FIR type.
+    ///
+    /// This is a small, explicit conversion set used by current subset lowering
+    /// (not a general FIR coercion engine). Unsupported conversions are surfaced
+    /// as subset-lowering failures.
     fn coerce_value_to_fir_type(
         &mut self,
         value: Value,
@@ -879,6 +1065,14 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         }
     }
 
+    /// Produces a conservative default value for uninitialized stack locals.
+    ///
+    /// Current policy:
+    /// - scalars => zero
+    /// - pointers/object-like refs => null
+    ///
+    /// This supports FIR patterns where `DeclareVar { access: Stack, init: None }`
+    /// appears in `compute` and is assigned before use.
     fn default_lowered_value_for_type(
         &mut self,
         typ: &FirType,
@@ -905,6 +1099,11 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         }
     }
 
+    /// Lowers a FIR statement node in the current subset.
+    ///
+    /// This is the central dispatcher for statement lowering. Unsupported
+    /// variants return `LoweringError::Unsupported`, which callers may route to
+    /// the stub fallback policy.
     fn lower_stmt(&mut self, id: FirId) -> Result<(), LoweringError> {
         match match_fir(self.store, id) {
             FirMatch::Block(items) => {
@@ -1013,6 +1212,7 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         }
     }
 
+    /// Lowers `SimpleForLoop` (`for i in 0..upper`) in forward direction.
     fn lower_simple_for(
         &mut self,
         var: String,
@@ -1052,6 +1252,9 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         Ok(())
     }
 
+    /// Lowers `StoreTable` for stack pointer aliases (for example `output0[i] = ...`).
+    ///
+    /// The alias must resolve to a pointer-valued local in `vars`.
     fn lower_store_table_stack(
         &mut self,
         name: &str,
@@ -1091,6 +1294,7 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         Ok(())
     }
 
+    /// Lowers `StoreVar` into a scalar field of the backend `dsp*` struct.
     fn lower_store_var_struct(&mut self, name: &str, value: FirId) -> Result<(), LoweringError> {
         let field = self.struct_field(name)?.clone();
         let scalar_ty = match &field.kind {
@@ -1109,6 +1313,7 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         Ok(())
     }
 
+    /// Lowers `StoreTable` into an inline table field of the backend `dsp*` struct.
     fn lower_store_table_struct(
         &mut self,
         name: &str,
@@ -1135,6 +1340,11 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         Ok(())
     }
 
+    /// Lowers `ShiftArrayVar` on an inline `Struct` table using a descending loop.
+    ///
+    /// Semantics (current implementation):
+    /// - shifts right by one (`tbl[i] = tbl[i-1]`) for `i = shift_len .. 1`
+    /// - clamps the effective shift range to the declared table length
     fn lower_shift_array_var_struct(
         &mut self,
         name: &str,
@@ -1191,6 +1401,11 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         Ok(())
     }
 
+    /// Updates a local stack/loop variable in the lowering environment.
+    ///
+    /// This mutates the name->value mapping only; it does not emit memory
+    /// traffic because stack locals in the current subset are modelled as SSA
+    /// values/pointers in the lowering environment.
     fn lower_store_var_local(&mut self, name: &str, value: FirId) -> Result<(), LoweringError> {
         let prev = self.vars.get(name).copied().ok_or_else(|| {
             LoweringError::Unsupported(format!("local variable `{name}` not found"))
@@ -1206,6 +1421,7 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         Ok(())
     }
 
+    /// Lowers FIR `If` with explicit then/else/continuation CLIF blocks.
     fn lower_if_stmt(
         &mut self,
         cond: FirId,
@@ -1240,10 +1456,16 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         Ok(())
     }
 
+    /// Lowers FIR `Control` as an `if (cond) stmt`.
     fn lower_control_stmt(&mut self, cond: FirId, stmt: FirId) -> Result<(), LoweringError> {
         self.lower_if_stmt(cond, stmt, None)
     }
 
+    /// Lowers FIR `Switch` as a chain of integer comparisons and branches.
+    ///
+    /// This is a simple, explicit lowering intended for bring-up and debugging.
+    /// It favors clarity and deterministic diagnostics over optimal jump-table
+    /// generation (which can be considered later).
     fn lower_switch_stmt(
         &mut self,
         cond: FirId,
@@ -1318,6 +1540,10 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         Ok(())
     }
 
+    /// Lowers FIR `ForLoop` with explicit header/body/exit blocks.
+    ///
+    /// The loop variable is installed in the local environment as a loop-local
+    /// scalar and restored/removed after lowering the loop.
     fn lower_for_loop(
         &mut self,
         var: String,
@@ -1365,6 +1591,7 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         Ok(())
     }
 
+    /// Lowers FIR `WhileLoop` with explicit header/body/exit blocks.
     fn lower_while_loop(&mut self, cond: FirId, body: FirId) -> Result<(), LoweringError> {
         let header = self.fb.create_block();
         let body_block = self.fb.create_block();
@@ -1389,6 +1616,9 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         Ok(())
     }
 
+    /// Computes an element address `base + index * elem_size`.
+    ///
+    /// `index_i32` is widened to pointer width as needed (`I32`/`I64` target).
     fn indexed_addr(&mut self, base_ptr: Value, index_i32: Value, elem_size: i64) -> Value {
         let idx_ptr = if self.ptr_ty == types::I64 {
             self.fb.ins().uextend(types::I64, index_i32)
@@ -1400,6 +1630,10 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         self.fb.ins().iadd(base_ptr, offset)
     }
 
+    /// Lowers a FIR expression node in the current subset.
+    ///
+    /// `expected` is a backend-local hint used in a few places to guide type
+    /// coercions and pointer/scalar handling; it is not a full FIR typechecker.
     fn lower_expr(
         &mut self,
         id: FirId,
@@ -1532,6 +1766,9 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         }
     }
 
+    /// Lowers FIR `BinOp` arithmetic/comparisons to CLIF instructions.
+    ///
+    /// Comparisons return FIR-style booleans (`i8` 0/1), not CLIF `b1`.
     fn lower_binop(
         &mut self,
         op: FirBinOp,
@@ -1699,6 +1936,10 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         Ok(LoweredExpr::Scalar(out))
     }
 
+    /// Lowers FIR math calls to imported host functions (`sinf`, `pow`, ...).
+    ///
+    /// Supported operations are determined by the `*_math_symbol_*` helpers and
+    /// are intentionally explicit to keep subset coverage auditable.
     fn lower_fun_call(
         &mut self,
         name: &str,
@@ -1758,14 +1999,20 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         }
     }
 
+    /// Ensures a cached unary imported function reference exists.
     fn ensure_unary_import(&mut self, symbol: &str, ty: Type) -> Result<FuncRef, LoweringError> {
         self.ensure_import(symbol, &[ty], ty)
     }
 
+    /// Ensures a cached binary imported function reference exists.
     fn ensure_binary_import(&mut self, symbol: &str, ty: Type) -> Result<FuncRef, LoweringError> {
         self.ensure_import(symbol, &[ty, ty], ty)
     }
 
+    /// Declares/imports a CLIF function and caches the `FuncRef` by signature key.
+    ///
+    /// Cranelift imports are identified by both symbol and signature, so the
+    /// cache key includes parameter and return types.
     fn ensure_import(
         &mut self,
         symbol: &str,
@@ -1799,6 +2046,10 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
     }
 }
 
+/// Maps a FIR unary math op to the imported `f32` host symbol used by lowering.
+///
+/// Returns `None` when the operation is not yet supported in the current
+/// subset-lowering implementation.
 fn unary_math_symbol_f32(math: fir::FirMathOp) -> Option<&'static str> {
     Some(match math {
         fir::FirMathOp::Sin => "sinf",
@@ -1819,6 +2070,10 @@ fn unary_math_symbol_f32(math: fir::FirMathOp) -> Option<&'static str> {
     })
 }
 
+/// Maps a FIR unary math op to the imported `f64` host symbol used by lowering.
+///
+/// Returns `None` when the operation is not yet supported in the current
+/// subset-lowering implementation.
 fn unary_math_symbol_f64(math: fir::FirMathOp) -> Option<&'static str> {
     Some(match math {
         fir::FirMathOp::Sin => "sin",
@@ -1839,6 +2094,7 @@ fn unary_math_symbol_f64(math: fir::FirMathOp) -> Option<&'static str> {
     })
 }
 
+/// Maps a FIR binary math op to the imported `f32` host symbol used by lowering.
 fn binary_math_symbol_f32(math: fir::FirMathOp) -> Option<&'static str> {
     Some(match math {
         fir::FirMathOp::Pow => "powf",
@@ -1850,6 +2106,7 @@ fn binary_math_symbol_f32(math: fir::FirMathOp) -> Option<&'static str> {
     })
 }
 
+/// Maps a FIR binary math op to the imported `f64` host symbol used by lowering.
 fn binary_math_symbol_f64(math: fir::FirMathOp) -> Option<&'static str> {
     Some(match math {
         fir::FirMathOp::Pow => "pow",
@@ -1861,6 +2118,17 @@ fn binary_math_symbol_f64(math: fir::FirMathOp) -> Option<&'static str> {
     })
 }
 
+/// Attempts to lower the FIR `compute` body into the current Cranelift subset.
+///
+/// Returns `Ok(true)` when lowering succeeds and a real body is emitted.
+///
+/// This function assumes the caller already created and switched to a valid
+/// Cranelift entry block with function params matching the `compute` ABI.
+/// It binds FIR arguments (`dsp`, `count`, `inputs`, `outputs`) into the local
+/// lowering environment before recursively lowering the statement body.
+///
+/// Any unsupported FIR node shape returns `LoweringError::Unsupported`, which
+/// the caller may convert into a controlled stub fallback.
 fn try_lower_compute_body(
     store: &FirStore,
     jit: &mut JITModule,
@@ -1926,10 +2194,24 @@ fn try_lower_compute_body(
     Ok(true)
 }
 
+/// Fast pre-check: returns `true` when the current subset matcher accepts the
+/// FIR `compute` body, `false` when the backend should fall back to a stub.
+///
+/// This is implemented as a thin wrapper over
+/// [`compute_body_subset_gap_reason_from_compute_decl`] so the backend can keep
+/// a cheap boolean decision while diagnostics tooling can request the reason.
 fn compute_body_matches_current_subset(store: &FirStore, compute_decl: FirId) -> bool {
     compute_body_subset_gap_reason_from_compute_decl(store, compute_decl).is_none()
 }
 
+/// Returns the first subset-gap reason for a FIR `compute` declaration.
+///
+/// `None` means the `compute` body matches the currently supported lowering
+/// subset. `Some(reason)` captures the first unsupported shape encountered while
+/// recursively walking statements/expressions.
+///
+/// The reason string is intentionally human-readable and may contain FIR debug
+/// formatting; it is meant for diagnostics and prioritization, not a stable ABI.
 fn compute_body_subset_gap_reason_from_compute_decl(
     store: &FirStore,
     compute_decl: FirId,
@@ -1943,6 +2225,11 @@ fn compute_body_subset_gap_reason_from_compute_decl(
     subset_stmt_gap_reason(store, body)
 }
 
+/// Recursive subset matcher for FIR statements used by stub-fallback diagnostics.
+///
+/// The function returns the first unsupported statement/expression shape found
+/// in depth-first order. This "first gap" policy keeps diagnostics concise and
+/// deterministic, which is useful for corpus scans and progress tracking.
 fn subset_stmt_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
     match match_fir(store, id) {
         FirMatch::Block(items) => items
@@ -2031,6 +2318,12 @@ fn subset_stmt_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
     }
 }
 
+/// Recursive subset matcher for FIR expressions used by stub-fallback diagnostics.
+///
+/// This matcher intentionally mirrors the expression coverage expected by the
+/// current lowering implementation (`ComputeLowering::lower_expr` and friends).
+/// When new lowering support is added, this function should be updated in the
+/// same change so subset pre-checks and diagnostics stay aligned.
 fn subset_expr_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
     match match_fir(store, id) {
         FirMatch::Int32 { .. }
@@ -2076,6 +2369,22 @@ fn subset_expr_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
     }
 }
 
+/// Declares, defines and finalizes the exported `compute` function in the JIT.
+///
+/// # Behavior
+/// - Creates the Cranelift function signature for the Faust `compute` ABI.
+/// - Tries real subset lowering when the subset pre-check accepts the body.
+/// - Emits a no-op `return` stub otherwise (or when lowering reports an
+///   unsupported shape).
+/// - Finalizes definitions and returns:
+///   - exported symbol name,
+///   - finalized function address,
+///   - whether a real body was lowered.
+///
+/// # Why the name says `stub`
+/// Historically this helper started as pure stub emission during bring-up; it
+/// now owns both real subset lowering and stub fallback while keeping the same
+/// outer responsibility (emit/finalize `compute`).
 fn declare_compute_stub(
     module_name: &str,
     compute_decl: FirId,
@@ -2147,14 +2456,34 @@ fn declare_compute_stub(
     Ok((compute_symbol_name, addr, compute_body_lowered))
 }
 
-/// Compiles a FIR module to a Cranelift JIT module (early bring-up).
+/// Compiles a FIR module to a Cranelift JIT module.
 ///
-/// # Current behavior
-/// - Validates FIR root/module shape and locates a `compute` definition.
-/// - Emits a real finalized Cranelift JIT function for `compute`, but the
-///   generated body is currently a no-op stub.
-/// - This is the first backend implementation slice to de-risk Cranelift
-///   integration before full FIR body lowering.
+/// This is the main backend entry point used by higher-level crates (`compiler`,
+/// `cranelift-ffi`, tests) to turn FIR into an owned Cranelift JIT artifact.
+///
+/// # What it does
+/// - validates FIR module shape and locates `compute`,
+/// - builds the current backend `dsp*` layout contract from FIR `globals`,
+/// - initializes a Cranelift JIT module and registers required host symbols,
+/// - emits and finalizes the `compute` function,
+/// - returns an owned [`JitDspModule`] that keeps code memory alive.
+///
+/// # Lowering policy (current phase)
+/// - If `compute` matches the currently supported FIR subset, the backend emits
+///   a real lowered body and `JitDspModule::compute_body_lowered()` returns
+///   `true`.
+/// - Otherwise, the backend emits a valid no-op `compute` stub and returns
+///   success with `compute_body_lowered() == false`.
+///
+/// This "compile-success + stub fallback" policy is intentional during bring-up
+/// because it allows end-to-end integration and corpus diagnostics to progress
+/// while lowering coverage is expanded.
+///
+/// # Errors
+/// Returns [`CraneliftBackendError`] for:
+/// - invalid FIR module/`compute` shapes,
+/// - missing `compute`,
+/// - Cranelift JIT initialization/verification/finalization failures.
 pub fn compile_fir_to_cranelift_jit(
     store: &FirStore,
     module: FirId,
@@ -2189,6 +2518,15 @@ pub fn compile_fir_to_cranelift_jit(
 ///
 /// Returns `Ok(None)` when the `compute` body matches the current lowering
 /// subset, and `Ok(Some(reason))` otherwise.
+///
+/// # Intended use
+/// This helper is for diagnostics/tooling (tests, temporary corpus scanners,
+/// future `xtask` checks), not for production runtime decisions.
+///
+/// The returned reason is intentionally human-readable and may include FIR
+/// debug formatting (for example unsupported node variants). It is useful for
+/// prioritizing backend work, but should not be treated as a stable machine
+/// interface.
 pub fn diagnose_cranelift_compute_subset_gap(
     store: &FirStore,
     module: FirId,
