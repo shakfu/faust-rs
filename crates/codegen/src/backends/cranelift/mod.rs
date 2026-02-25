@@ -750,6 +750,11 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 access: AccessType::Stack | AccessType::Loop,
                 value,
             } => self.lower_store_var_local(&name, value),
+            FirMatch::ShiftArrayVar {
+                name,
+                access: AccessType::Struct,
+                delay,
+            } => self.lower_shift_array_var_struct(&name, delay),
             FirMatch::If {
                 cond,
                 then_block,
@@ -765,6 +770,10 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 is_reverse,
             } => self.lower_for_loop(var, init, end, step, body, is_reverse),
             FirMatch::WhileLoop { cond, body } => self.lower_while_loop(cond, body),
+            FirMatch::ShiftArrayVar { .. } => Err(LoweringError::Unsupported(
+                "ShiftArrayVar is currently only supported for AccessType::Struct tables"
+                    .to_string(),
+            )),
             FirMatch::Drop(value) => {
                 let _ = self.lower_expr(value, None)?;
                 Ok(())
@@ -899,6 +908,62 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         let elem_clif = self.fir_type_to_clif(&elem_type)?;
         let addr = self.indexed_addr(base, index_v, i64::from(elem_clif.bytes()));
         self.fb.ins().store(MemFlags::new(), value_v, addr, 0);
+        Ok(())
+    }
+
+    fn lower_shift_array_var_struct(
+        &mut self,
+        name: &str,
+        delay: i32,
+    ) -> Result<(), LoweringError> {
+        let field = self.struct_field(name)?.clone();
+        let (elem_type, len) = match &field.kind {
+            StructFieldKind::Table { elem_type, len } => (elem_type.clone(), *len),
+            StructFieldKind::Scalar(_) => {
+                return Err(LoweringError::Unsupported(format!(
+                    "`ShiftArrayVar` cannot target scalar field `{name}`"
+                )));
+            }
+        };
+        let max_shift = delay.max(0) as u32;
+        if len <= 1 || max_shift == 0 {
+            return Ok(());
+        }
+        let shift_len = max_shift.min(len.saturating_sub(1));
+        if shift_len == 0 {
+            return Ok(());
+        }
+
+        let dsp = self.dsp_base_ptr()?;
+        let base = self.fb.ins().iadd_imm(dsp, i64::from(field.offset_bytes));
+        let elem_clif = self.fir_type_to_clif(&elem_type)?;
+        let elem_bytes = i64::from(elem_clif.bytes());
+
+        let header = self.fb.create_block();
+        let body = self.fb.create_block();
+        let exit = self.fb.create_block();
+        let init_i = self.fb.ins().iconst(types::I32, i64::from(shift_len));
+        self.fb.append_block_param(header, types::I32);
+        self.fb.ins().jump(header, &[init_i]);
+
+        self.fb.switch_to_block(header);
+        let i_val = self.fb.block_params(header)[0];
+        let cond = self.fb.ins().icmp_imm(IntCC::SignedGreaterThan, i_val, 0);
+        self.fb.ins().brif(cond, body, &[], exit, &[]);
+
+        self.fb.switch_to_block(body);
+        let src_idx = self.fb.ins().iadd_imm(i_val, -1);
+        let src_addr = self.indexed_addr(base, src_idx, elem_bytes);
+        let dst_addr = self.indexed_addr(base, i_val, elem_bytes);
+        let v = self.fb.ins().load(elem_clif, MemFlags::new(), src_addr, 0);
+        self.fb.ins().store(MemFlags::new(), v, dst_addr, 0);
+        let next = self.fb.ins().iadd_imm(i_val, -1);
+        self.fb.ins().jump(header, &[next]);
+        self.fb.seal_block(body);
+        self.fb.seal_block(header);
+
+        self.fb.switch_to_block(exit);
+        self.fb.seal_block(exit);
         Ok(())
     }
 
@@ -1482,6 +1547,10 @@ fn subset_stmt_shape(store: &FirStore, id: FirId) -> bool {
             value,
             ..
         } => subset_expr_shape(store, value),
+        FirMatch::ShiftArrayVar {
+            access: AccessType::Struct,
+            ..
+        } => true,
         FirMatch::If {
             cond,
             then_block,
@@ -2045,5 +2114,83 @@ mod tests {
                 len: 3
             }
         ));
+    }
+
+    fn build_shift_array_var_struct_subset_module() -> (fir::FirStore, FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let z = b.float32(0.0);
+        let o = b.float32(1.0);
+        let t = b.float32(2.0);
+        let tbl = b.declare_table("hist", AccessType::Struct, FirType::FaustFloat, &[z, o, t]);
+        let globals = b.block(&[tbl]);
+        let dsp_struct = b.block(&[]);
+
+        let out_chan = b.int32(0);
+        let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+        let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let idx0 = b.int32(0);
+        let sample = b.load_table("hist", AccessType::Struct, idx0, FirType::FaustFloat);
+        let push = b.store_table("hist", AccessType::Struct, idx0, sample);
+        let shift = b.shift_array_var("hist", AccessType::Struct, 2);
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let outv = b.load_table("hist", AccessType::Struct, idx0, FirType::FaustFloat);
+        let store_out = b.store_table("output0", AccessType::Stack, i0, outv);
+        let loop_body = b.block(&[shift, push, store_out]);
+        let loop_ = b.simple_for_loop("i0", count, loop_body, false);
+        let compute_body = b.block(&[out_alias, loop_]);
+        let compute_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        );
+        let declarations = b.block(&[compute]);
+        let module = b.module(
+            "shift_array_var_struct_subset",
+            dsp_struct,
+            globals,
+            declarations,
+        );
+        (store, module)
+    }
+
+    #[test]
+    fn compile_module_lowers_shift_array_var_struct_subset_body() {
+        let (store, module) = build_shift_array_var_struct_subset_module();
+        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+            .expect("shift-array-var struct subset fixture should compile with body lowering");
+        assert!(compiled.has_compute_entry());
+        assert!(compiled.compute_body_lowered());
     }
 }

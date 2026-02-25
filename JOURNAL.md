@@ -8193,6 +8193,42 @@ Validation:
 
 All checks passed locally.
 
+### Cranelift backend Phase 1.5: add `ShiftArrayVar` lowering for `Struct` tables (delay-line style shift)
+
+Extended the Cranelift backend subset to support FIR `ShiftArrayVar` for global
+`Struct` tables, which is a common building block for delay-line style state
+updates.
+
+Implemented in `crates/codegen/src/backends/cranelift/mod.rs`:
+
+- statement lowering:
+  - `ShiftArrayVar` with `AccessType::Struct`
+- semantics (current implementation):
+  - treats the target as an inline table field in the `dsp*` layout
+  - shifts elements right by one (`tbl[i] = tbl[i-1]`) in a descending loop
+  - loop upper bound is clamped to the table length (`min(delay, len - 1)`)
+- explicit rejection for unsupported `ShiftArrayVar` targets (non-`Struct`)
+
+Subset pre-scan:
+
+- now accepts `ShiftArrayVar` for `AccessType::Struct`
+
+Tests added:
+
+- synthetic subset fixture covering:
+  - global `Struct` table
+  - `ShiftArrayVar`
+  - `LoadTable/StoreTable` around the shift
+- test asserts successful real body lowering (`compute_body_lowered() == true`)
+
+Validation:
+
+- `cargo fmt --all`
+- `cargo clippy -p codegen --all-targets -- -D warnings`
+- `cargo test -p codegen cranelift -- --nocapture`
+
+All checks passed locally.
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the
