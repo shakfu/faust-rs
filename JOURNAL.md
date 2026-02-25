@@ -7985,6 +7985,40 @@ Local validation:
 
 All checks passed locally.
 
+### Cranelift backend: tolerate FIR labels and stack locals without explicit init
+
+Broadened the Cranelift backend compute lowering subset to accept common
+structural FIR nodes emitted by the fast-lane pipeline, reducing unnecessary
+fallback to the no-op `compute` stub for otherwise lowerable DSP bodies.
+
+Implemented in `crates/codegen/src/backends/cranelift/mod.rs`:
+
+- statement lowering now accepts as no-ops:
+  - `Label(...)`
+  - `NullDeclareVar`
+- stack local declarations now support `DeclareVar { access: Stack, init: None }`
+  with conservative default initialization:
+  - scalars -> zero
+  - pointers / object-like refs -> null
+- subset pre-scan updated accordingly so these nodes remain on the lowered path
+
+Tests added:
+
+- synthetic fixture covering:
+  - fast-lane style `Label(...)` statements in `compute`
+  - stack local `DeclareVar` without init
+  - subsequent `StoreVar`/`LoadVar`/`StoreTable`
+  - trailing `NullDeclareVar`
+- test asserts real body lowering (`compute_body_lowered() == true`)
+
+Validation:
+
+- `cargo fmt --all`
+- `cargo clippy -p codegen --all-targets -- -D warnings`
+- `cargo test -p codegen cranelift -- --nocapture`
+
+All checks passed locally.
+
 ### Cranelift backend: extend FIR `FunCall` lowering with common math intrinsics
 
 Extended the Cranelift backend subset lowering for FIR math calls beyond the

@@ -876,6 +876,32 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         }
     }
 
+    fn default_lowered_value_for_type(
+        &mut self,
+        typ: &FirType,
+    ) -> Result<LoweredExpr, LoweringError> {
+        match typ {
+            FirType::Int32 => Ok(LoweredExpr::Scalar(self.fb.ins().iconst(types::I32, 0))),
+            FirType::Int64 => Ok(LoweredExpr::Scalar(self.fb.ins().iconst(types::I64, 0))),
+            FirType::Bool => Ok(LoweredExpr::Scalar(self.fb.ins().iconst(types::I8, 0))),
+            FirType::Float32 | FirType::FaustFloat => {
+                Ok(LoweredExpr::Scalar(self.fb.ins().f32const(0.0)))
+            }
+            FirType::Float64 => Ok(LoweredExpr::Scalar(self.fb.ins().f64const(0.0))),
+            FirType::Ptr(inner) => Ok(LoweredExpr::Ptr {
+                value: self.fb.ins().iconst(self.ptr_ty, 0),
+                pointee: Some(FirTypeRef::from_fir_type(inner)),
+            }),
+            FirType::Obj | FirType::UI | FirType::Meta | FirType::Sound => Ok(LoweredExpr::Ptr {
+                value: self.fb.ins().iconst(self.ptr_ty, 0),
+                pointee: None,
+            }),
+            other => Err(LoweringError::Unsupported(format!(
+                "unsupported default stack init type in Cranelift subset lowering: {other:?}"
+            ))),
+        }
+    }
+
     fn lower_stmt(&mut self, id: FirId) -> Result<(), LoweringError> {
         match match_fir(self.store, id) {
             FirMatch::Block(items) => {
@@ -901,6 +927,17 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 self.vars.insert(name, stored);
                 Ok(())
             }
+            FirMatch::DeclareVar {
+                name,
+                typ,
+                access: AccessType::Stack,
+                init: None,
+            } => {
+                let init_v = self.default_lowered_value_for_type(&typ)?;
+                self.vars.insert(name, init_v);
+                Ok(())
+            }
+            FirMatch::NullDeclareVar | FirMatch::Label(_) => Ok(()),
             FirMatch::SimpleForLoop {
                 var,
                 upper,
@@ -1825,6 +1862,12 @@ fn subset_stmt_shape(store: &FirStore, id: FirId) -> bool {
             init: Some(init),
             ..
         } => subset_expr_shape(store, init),
+        FirMatch::DeclareVar {
+            access: AccessType::Stack,
+            init: None,
+            ..
+        } => true,
+        FirMatch::NullDeclareVar | FirMatch::Label(_) => true,
         FirMatch::StoreVar {
             access: AccessType::Struct,
             value,
@@ -2231,6 +2274,89 @@ mod tests {
         let (store, module) = build_math_intrinsics_subset_module();
         let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
             .expect("math intrinsics subset fixture should compile with body lowering");
+        assert!(compiled.has_compute_entry());
+        assert!(compiled.compute_body_lowered());
+    }
+
+    fn build_label_and_uninitialized_stack_subset_module() -> (fir::FirStore, FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let globals = b.block(&[]);
+        let dsp_struct = b.block(&[]);
+
+        let out_chan = b.int32(0);
+        let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+        let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+        let tmp_decl = b.declare_var("tmp", FirType::FaustFloat, AccessType::Stack, None);
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let x = b.float32(0.125);
+        let store_tmp = b.store_var("tmp", AccessType::Stack, x);
+        let tmp = b.load_var("tmp", AccessType::Stack, FirType::FaustFloat);
+        let store_out = b.store_table("output0", AccessType::Stack, i0, tmp);
+        let loop_body = b.block(&[store_tmp, store_out]);
+        let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+        let label_phase = b.label("signal_fir_fastlane_step2a: executable base slice");
+        let label_io = b.label("io: inputs=0 outputs=1");
+        let null_decl = b.null_declare_var();
+        let compute_body = b.block(&[
+            label_phase,
+            label_io,
+            out_alias,
+            tmp_decl,
+            sample_loop,
+            null_decl,
+        ]);
+        let compute_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        );
+        let declarations = b.block(&[compute]);
+        let module = b.module(
+            "labels_uninit_stack_subset",
+            dsp_struct,
+            globals,
+            declarations,
+        );
+        (store, module)
+    }
+
+    #[test]
+    fn compile_module_lowers_labels_and_uninitialized_stack_subset() {
+        let (store, module) = build_label_and_uninitialized_stack_subset_module();
+        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+            .expect("label/uninitialized-stack subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
     }
