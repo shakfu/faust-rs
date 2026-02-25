@@ -17,6 +17,13 @@
 #ifndef FAUST_CRANELIFT_DSP_C_H
 #define FAUST_CRANELIFT_DSP_C_H
 
+#include <stdbool.h>
+
+/* Matches the Faust C API callback glue definitions (`UIGlue`, `MetaGlue`,
+ * `MemoryManagerGlue`, `FAUSTFLOAT`).
+ */
+#include "faust/gui/CInterface.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -24,10 +31,10 @@ extern "C" {
 typedef struct cranelift_dsp_factory cranelift_dsp_factory;
 typedef struct cranelift_dsp cranelift_dsp;
 
-/* Placeholder version accessor for scaffold smoke wiring. */
+/* Version (scaffold implementation returns a process-lifetime static string). */
 const char* getCLibFaustVersion(void);
 
-/* Placeholder target names (Phase 0 parity matrix in progress, no implementation yet).
+/* Factory creation (source path/string wired to scaffold runtime shape only).
  *
  * User-locked signature policy for Cranelift source-creation APIs:
  * - keep `opt_level` when Cranelift optimization levels are exposed
@@ -38,7 +45,82 @@ cranelift_dsp_factory* createCCraneliftDSPFactoryFromFile(const char* filename,
                                                           const char* argv[],
                                                           char* error_msg,
                                                           int opt_level);
+cranelift_dsp_factory* createCCraneliftDSPFactoryFromString(const char* name_app,
+                                                            const char* dsp_content,
+                                                            int argc,
+                                                            const char* argv[],
+                                                            char* error_msg,
+                                                            int opt_level);
+/* Present in V1 surface, not implemented yet (returns null + error message). */
+cranelift_dsp_factory* createCCraneliftDSPFactoryFromSignals(const char* name_app,
+                                                             void* signals,
+                                                             int argc,
+                                                             const char* argv[],
+                                                             char* error_msg,
+                                                             int opt_level);
+cranelift_dsp_factory* createCCraneliftDSPFactoryFromBoxes(const char* name_app,
+                                                           void* box_expr,
+                                                           int argc,
+                                                           const char* argv[],
+                                                           char* error_msg,
+                                                           int opt_level);
+
+/* Factory cache / lifecycle (minimal scaffold cache is wired). */
+cranelift_dsp_factory* getCCraneliftDSPFactoryFromSHAKey(const char* sha_key);
+bool deleteCCraneliftDSPFactory(cranelift_dsp_factory* factory);
+void deleteAllCCraneliftDSPFactories(void);
+char** getAllCCraneliftDSPFactories(void);
+
+/* Factory queries (scaffold values for now, caller frees strings with freeCMemory). */
+char* getCCraneliftDSPFactoryName(cranelift_dsp_factory* factory);
+char* getCCraneliftDSPFactorySHAKey(cranelift_dsp_factory* factory);
+char* getCCraneliftDSPFactoryDSPCode(cranelift_dsp_factory* factory);
+char* getCCraneliftDSPFactoryJSON(cranelift_dsp_factory* factory);
+char* getCCraneliftDSPFactoryCompileOptions(cranelift_dsp_factory* factory);
+const char** getCCraneliftDSPFactoryLibraryList(cranelift_dsp_factory* factory);
+const char** getCCraneliftDSPFactoryIncludePathnames(cranelift_dsp_factory* factory);
+const char** getCCraneliftDSPFactoryWarningMessages(cranelift_dsp_factory* factory);
+
+/* Cranelift backend bitcode family (symbols present, backend format not implemented yet). */
+cranelift_dsp_factory* readCCraneliftDSPFactoryFromBitcode(const char* bit_code,
+                                                           char* error_msg);
+char* writeCCraneliftDSPFactoryToBitcode(cranelift_dsp_factory* factory);
+cranelift_dsp_factory* readCCraneliftDSPFactoryFromBitcodeFile(const char* bit_code_path,
+                                                               char* error_msg);
+bool writeCCraneliftDSPFactoryToBitcodeFile(cranelift_dsp_factory* factory,
+                                            const char* bit_code_path);
+
+/* Multi-thread mode compatibility flag (cache guarded independently in scaffold). */
+bool startMTDSPFactories(void);
+void stopMTDSPFactories(void);
+
+/* Memory allocated by this library (currently strings; array ownership still scaffold-level). */
+void freeCMemory(void* ptr);
+
+/* DSP instance lifecycle and DSP methods (scaffold behavior, symbol set present). */
 cranelift_dsp* createCCraneliftDSPInstance(cranelift_dsp_factory* factory);
+void deleteCCraneliftDSPInstance(cranelift_dsp* dsp);
+cranelift_dsp* cloneCCraneliftDSPInstance(cranelift_dsp* dsp);
+int getNumInputsCCraneliftDSPInstance(cranelift_dsp* dsp);
+int getNumOutputsCCraneliftDSPInstance(cranelift_dsp* dsp);
+int getSampleRateCCraneliftDSPInstance(cranelift_dsp* dsp);
+void initCCraneliftDSPInstance(cranelift_dsp* dsp, int sample_rate);
+void instanceInitCCraneliftDSPInstance(cranelift_dsp* dsp, int sample_rate);
+void instanceConstantsCCraneliftDSPInstance(cranelift_dsp* dsp, int sample_rate);
+void instanceResetUserInterfaceCCraneliftDSPInstance(cranelift_dsp* dsp);
+void instanceClearCCraneliftDSPInstance(cranelift_dsp* dsp);
+void buildUserInterfaceCCraneliftDSPInstance(cranelift_dsp* dsp, UIGlue* ui);
+void metadataCCraneliftDSPInstance(cranelift_dsp* dsp, MetaGlue* meta);
+void computeCCraneliftDSPInstance(cranelift_dsp* dsp,
+                                  int count,
+                                  FAUSTFLOAT** inputs,
+                                  FAUSTFLOAT** outputs);
+
+/* Explicitly omitted from this header in V1 (deferred without symbols):
+ * - LLVM-only IR/machine/object serialization families
+ * - target getter/query functions (`...FactoryTarget`, `...MachineTarget`)
+ * - memory-manager and foreign-function registration families
+ */
 
 #ifdef __cplusplus
 }

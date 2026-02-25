@@ -7659,6 +7659,36 @@ Validation:
 - `cargo clippy -p cranelift-ffi --all-targets -- -D warnings`
 - `cargo test -p cranelift-ffi` (12 tests passed)
 
+### Cranelift FFI Phase 1: sync `cranelift-dsp-c.h` with implemented scaffold exports
+
+Updated `crates/cranelift-ffi/include/cranelift-dsp-c.h` to match the current
+set of **actually exported** Cranelift FFI scaffold symbols, instead of keeping
+only the initial placeholder declarations.
+
+Header updates:
+
+- added the expected C API support includes (`<stdbool.h>`,
+  `faust/gui/CInterface.h`) so callback glue types (`UIGlue`, `MetaGlue`,
+  `FAUSTFLOAT`) are available at declaration sites
+- declared the currently implemented factory symbols:
+  - source creation (`FromFile`, `FromString`, `FromSignals`, `FromBoxes`)
+  - cache/lifecycle (`getBySHA`, `delete`, `deleteAll`, `getAll`)
+  - query functions (`Name`, `SHAKey`, `DSPCode`, `JSON`, `CompileOptions`,
+    library/include/warning lists)
+  - bitcode family placeholders (`read/write...Bitcode[File]`)
+  - `startMTDSPFactories`, `stopMTDSPFactories`, `freeCMemory`
+- declared the currently implemented instance symbols:
+  - lifecycle (`create`, `delete`, `clone`)
+  - arity/sample-rate getters
+  - init/instance lifecycle methods
+  - `buildUserInterface`, `metadata`, `compute`
+- documented the V1 families that remain intentionally **deferred without
+  exported symbols** (IR/machine/object serialization, target getters,
+  memory-manager and foreign-function registration)
+
+Validation:
+- Header/documentation synchronization only (no code/tests run)
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the
