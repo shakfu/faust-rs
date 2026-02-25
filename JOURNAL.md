@@ -8147,6 +8147,52 @@ Validation:
 
 All checks passed locally.
 
+### Cranelift backend Phase 1.5: support global `Struct` tables in layout and lowering (`DeclareTable`, `LoadTable`, `StoreTable`)
+
+Extended the Cranelift backend `dsp*` layout contract and subset lowering to
+handle FIR global tables declared in the module `globals` block.
+
+Implemented in `crates/codegen/src/backends/cranelift/mod.rs`:
+
+- layout contract refactor
+  - `StructFieldLayout` now stores `StructFieldKind` instead of a scalar type
+  - `StructFieldKind` variants:
+    - `Scalar(FirType)`
+    - `Table { elem_type, len }`
+- `StructLayoutPlan` builder support for:
+  - `DeclareTable` with `AccessType::Struct`
+  - inline table storage in `dsp*` layout (natural alignment, byte-size tracked)
+- lowering support for global table accesses:
+  - `LoadTable` (`AccessType::Struct`)
+  - `StoreTable` (`AccessType::Struct`)
+- scalar `Struct` load/store paths updated to reject table fields explicitly
+  (instead of silently mis-lowering)
+
+Notes:
+
+- This is a compile/lowering step only; it does not yet initialize table
+  contents at runtime in `cranelift_dsp`.
+- The layout contract now carries enough metadata for future runtime init of
+  global tables from FIR constant values.
+
+Tests added:
+
+- new synthetic subset fixture covering:
+  - global `DeclareTable` (`AccessType::Struct`)
+  - `LoadTable` / `StoreTable` (`AccessType::Struct`)
+- test asserts:
+  - successful real body lowering
+  - table field presence in `StructLayoutPlan`
+  - correct `StructFieldKind::Table { elem_type: FaustFloat, len: 3 }`
+
+Validation:
+
+- `cargo fmt --all`
+- `cargo clippy -p codegen --all-targets -- -D warnings`
+- `cargo test -p codegen cranelift -- --nocapture`
+
+All checks passed locally.
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the

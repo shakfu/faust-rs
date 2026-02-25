@@ -253,10 +253,27 @@ impl StructLayoutPlan {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StructFieldLayout {
     pub name: String,
-    pub typ: FirType,
+    pub kind: StructFieldKind,
     pub offset_bytes: u32,
     pub size_bytes: u32,
     pub align_bytes: u32,
+}
+
+/// Backend `dsp*` field storage kind in the Cranelift layout contract.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StructFieldKind {
+    Scalar(FirType),
+    Table { elem_type: FirType, len: u32 },
+}
+
+impl StructFieldLayout {
+    #[must_use]
+    pub fn scalar_type(&self) -> Option<&FirType> {
+        match &self.kind {
+            StructFieldKind::Scalar(t) => Some(t),
+            StructFieldKind::Table { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -390,7 +407,7 @@ fn build_struct_layout_for_module(
                 offset = align_up(offset, scalar.align);
                 fields.push(StructFieldLayout {
                     name,
-                    typ,
+                    kind: StructFieldKind::Scalar(typ),
                     offset_bytes: offset,
                     size_bytes: scalar.size,
                     align_bytes: scalar.align,
@@ -407,9 +424,41 @@ fn build_struct_layout_for_module(
                     "unsupported global variable access class for Cranelift dsp* layout: {name} ({access:?})"
                 )));
             }
-            FirMatch::DeclareTable { name, .. } => {
+            FirMatch::DeclareTable {
+                name,
+                access: AccessType::Struct,
+                elem_type,
+                values,
+            } => {
+                let scalar = fir_type_layout_scalar(ptr_size, &elem_type)?;
+                let len = u32::try_from(values.len()).map_err(|_| {
+                    CraneliftBackendError::unsupported_module_shape(
+                        "Cranelift dsp* table length does not fit in u32",
+                    )
+                })?;
+                let size = scalar.size.checked_mul(len).ok_or_else(|| {
+                    CraneliftBackendError::unsupported_module_shape(
+                        "Cranelift dsp* table size overflow",
+                    )
+                })?;
+                offset = align_up(offset, scalar.align);
+                fields.push(StructFieldLayout {
+                    name,
+                    kind: StructFieldKind::Table { elem_type, len },
+                    offset_bytes: offset,
+                    size_bytes: size,
+                    align_bytes: scalar.align,
+                });
+                offset = offset.checked_add(size).ok_or_else(|| {
+                    CraneliftBackendError::unsupported_module_shape(
+                        "Cranelift dsp* layout size overflow",
+                    )
+                })?;
+                struct_align = struct_align.max(scalar.align);
+            }
+            FirMatch::DeclareTable { access, name, .. } => {
                 return Err(CraneliftBackendError::unsupported_module_shape(format!(
-                    "Struct layout contract v1 bring-up does not support global tables yet: `{name}`"
+                    "unsupported global table access class for Cranelift dsp* layout: {name} ({access:?})"
                 )));
             }
             FirMatch::NullDeclareVar => {}
@@ -685,6 +734,12 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 index,
                 value,
             } => self.lower_store_table_stack(&name, index, value),
+            FirMatch::StoreTable {
+                name,
+                access: AccessType::Struct,
+                index,
+                value,
+            } => self.lower_store_table_struct(&name, index, value),
             FirMatch::StoreVar {
                 name,
                 access: AccessType::Struct,
@@ -805,10 +860,44 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
 
     fn lower_store_var_struct(&mut self, name: &str, value: FirId) -> Result<(), LoweringError> {
         let field = self.struct_field(name)?.clone();
+        let scalar_ty = match &field.kind {
+            StructFieldKind::Scalar(typ) => typ.clone(),
+            StructFieldKind::Table { .. } => {
+                return Err(LoweringError::Unsupported(format!(
+                    "`StoreVar` cannot target table field `{name}`"
+                )));
+            }
+        };
         let dsp = self.dsp_base_ptr()?;
         let addr = self.fb.ins().iadd_imm(dsp, i64::from(field.offset_bytes));
-        let mut value_v = self.lower_expr(value, Some(&field.typ))?.value();
-        value_v = self.coerce_value_to_fir_type(value_v, &field.typ)?;
+        let mut value_v = self.lower_expr(value, Some(&scalar_ty))?.value();
+        value_v = self.coerce_value_to_fir_type(value_v, &scalar_ty)?;
+        self.fb.ins().store(MemFlags::new(), value_v, addr, 0);
+        Ok(())
+    }
+
+    fn lower_store_table_struct(
+        &mut self,
+        name: &str,
+        index: FirId,
+        value: FirId,
+    ) -> Result<(), LoweringError> {
+        let field = self.struct_field(name)?.clone();
+        let elem_type = match &field.kind {
+            StructFieldKind::Table { elem_type, .. } => elem_type.clone(),
+            StructFieldKind::Scalar(_) => {
+                return Err(LoweringError::Unsupported(format!(
+                    "`StoreTable` cannot target scalar field `{name}`"
+                )));
+            }
+        };
+        let dsp = self.dsp_base_ptr()?;
+        let base = self.fb.ins().iadd_imm(dsp, i64::from(field.offset_bytes));
+        let index_v = self.lower_expr(index, Some(&FirType::Int32))?.value();
+        let mut value_v = self.lower_expr(value, Some(&elem_type))?.value();
+        value_v = self.coerce_value_to_fir_type(value_v, &elem_type)?;
+        let elem_clif = self.fir_type_to_clif(&elem_type)?;
+        let addr = self.indexed_addr(base, index_v, i64::from(elem_clif.bytes()));
         self.fb.ins().store(MemFlags::new(), value_v, addr, 0);
         Ok(())
     }
@@ -972,9 +1061,17 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 typ,
             } => {
                 let field = self.struct_field(&name)?.clone();
+                let scalar_ty = match &field.kind {
+                    StructFieldKind::Scalar(t) => t.clone(),
+                    StructFieldKind::Table { .. } => {
+                        return Err(LoweringError::Unsupported(format!(
+                            "`LoadVar` cannot target table field `{name}`"
+                        )));
+                    }
+                };
                 let dsp = self.dsp_base_ptr()?;
                 let addr = self.fb.ins().iadd_imm(dsp, i64::from(field.offset_bytes));
-                let field_clif_ty = self.fir_type_to_clif(&field.typ)?;
+                let field_clif_ty = self.fir_type_to_clif(&scalar_ty)?;
                 let raw = self.fb.ins().load(field_clif_ty, MemFlags::new(), addr, 0);
                 let coerced = self.coerce_value_to_fir_type(raw, &typ)?;
                 Ok(LoweredExpr::Scalar(coerced))
@@ -1005,6 +1102,30 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                     value: loaded,
                     pointee,
                 })
+            }
+            FirMatch::LoadTable {
+                name,
+                access: AccessType::Struct,
+                index,
+                typ,
+            } => {
+                let field = self.struct_field(&name)?.clone();
+                let elem_type = match &field.kind {
+                    StructFieldKind::Table { elem_type, .. } => elem_type.clone(),
+                    StructFieldKind::Scalar(_) => {
+                        return Err(LoweringError::Unsupported(format!(
+                            "`LoadTable` cannot target scalar field `{name}`"
+                        )));
+                    }
+                };
+                let dsp = self.dsp_base_ptr()?;
+                let base = self.fb.ins().iadd_imm(dsp, i64::from(field.offset_bytes));
+                let index_v = self.lower_expr(index, Some(&FirType::Int32))?.value();
+                let elem_clif = self.fir_type_to_clif(&elem_type)?;
+                let addr = self.indexed_addr(base, index_v, i64::from(elem_clif.bytes()));
+                let raw = self.fb.ins().load(elem_clif, MemFlags::new(), addr, 0);
+                let coerced = self.coerce_value_to_fir_type(raw, &typ)?;
+                Ok(LoweredExpr::Scalar(coerced))
             }
             FirMatch::Select2 {
                 cond,
@@ -1400,6 +1521,12 @@ fn subset_stmt_shape(store: &FirStore, id: FirId) -> bool {
             value,
             ..
         } => subset_expr_shape(store, index) && subset_expr_shape(store, value),
+        FirMatch::StoreTable {
+            access: AccessType::Struct,
+            index,
+            value,
+            ..
+        } => subset_expr_shape(store, index) && subset_expr_shape(store, value),
         FirMatch::Drop(v) => subset_expr_shape(store, v),
         FirMatch::NullStatement | FirMatch::Return(None) => true,
         _ => false,
@@ -1418,6 +1545,11 @@ fn subset_expr_shape(store: &FirStore, id: FirId) -> bool {
         } => true,
         FirMatch::LoadTable {
             access: AccessType::FunArgs,
+            index,
+            ..
+        } => subset_expr_shape(store, index),
+        FirMatch::LoadTable {
+            access: AccessType::Struct,
             index,
             ..
         } => subset_expr_shape(store, index),
@@ -1555,7 +1687,7 @@ pub fn compile_fir_to_cranelift_jit(
 #[cfg(test)]
 mod tests {
     use super::{
-        BACKEND_NAME, CraneliftBackendErrorCode, CraneliftOptions, backend_id,
+        BACKEND_NAME, CraneliftBackendErrorCode, CraneliftOptions, StructFieldKind, backend_id,
         compile_fir_to_cranelift_jit,
     };
     use crate::fixtures::build_sine_phasor_test_module;
@@ -1825,5 +1957,93 @@ mod tests {
             .expect("for/while/local-store subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
+    }
+
+    fn build_global_table_subset_module() -> (fir::FirStore, FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let t0 = b.float64(0.0);
+        let t1 = b.float64(1.0);
+        let t2 = b.float64(2.0);
+        let table = b.declare_table(
+            "fTbl0",
+            AccessType::Struct,
+            FirType::FaustFloat,
+            &[t0, t1, t2],
+        );
+        let globals = b.block(&[table]);
+        let dsp_struct = b.block(&[]);
+
+        let out_chan = b.int32(0);
+        let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+        let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let zero = b.int32(0);
+        let read0 = b.load_table("fTbl0", AccessType::Struct, zero, FirType::FaustFloat);
+        let write0 = b.store_table("fTbl0", AccessType::Struct, zero, read0);
+        let i = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let out_val = b.load_table("fTbl0", AccessType::Struct, zero, FirType::FaustFloat);
+        let store_out = b.store_table("output0", AccessType::Stack, i, out_val);
+        let loop_body = b.block(&[write0, store_out]);
+        let loop_ = b.simple_for_loop("i0", count, loop_body, false);
+        let compute_body = b.block(&[out_alias, loop_]);
+        let compute_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        );
+        let declarations = b.block(&[compute]);
+        let module = b.module("global_table_subset", dsp_struct, globals, declarations);
+        (store, module)
+    }
+
+    #[test]
+    fn compile_module_lowers_global_struct_table_subset_body() {
+        let (store, module) = build_global_table_subset_module();
+        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+            .expect("global-struct-table subset fixture should compile with body lowering");
+        assert!(compiled.has_compute_entry());
+        assert!(compiled.compute_body_lowered());
+        let table = compiled
+            .struct_layout()
+            .field("fTbl0")
+            .expect("table field in layout");
+        assert!(matches!(
+            &table.kind,
+            StructFieldKind::Table {
+                elem_type: FirType::FaustFloat,
+                len: 3
+            }
+        ));
     }
 }
