@@ -206,7 +206,7 @@ pub unsafe extern "C" fn buildUserInterfaceCCraneliftDSPInstance(
 /// the caller's responsibility.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn metadataCCraneliftDSPInstance(
-    _dsp: *mut CraneliftDspInstance,
+    dsp: *mut CraneliftDspInstance,
     meta: *mut MetaGlue,
 ) {
     unsafe {
@@ -219,6 +219,26 @@ pub unsafe extern "C" fn metadataCCraneliftDSPInstance(
         let key = c"backend";
         let value = c"cranelift-scaffold";
         declare((*meta).meta_interface, key.as_ptr(), value.as_ptr());
+
+        if !dsp.is_null() && !(*dsp).factory.is_null() {
+            let factory = &*(*dsp).factory;
+
+            let key = c"cranelift-jit-compiled";
+            let value = if factory.compiled_jit.is_some() {
+                c"true"
+            } else {
+                c"false"
+            };
+            declare((*meta).meta_interface, key.as_ptr(), value.as_ptr());
+
+            let key = c"cranelift-compute-body-lowered";
+            let value = if factory.compute_body_lowered {
+                c"true"
+            } else {
+                c"false"
+            };
+            declare((*meta).meta_interface, key.as_ptr(), value.as_ptr());
+        }
     }
 }
 
@@ -336,6 +356,16 @@ mod tests {
             entries
                 .iter()
                 .any(|(k, v)| k == "backend" && v == "cranelift-scaffold")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|(k, v)| k == "cranelift-jit-compiled" && v == "true")
+        );
+        assert!(
+            entries.iter().any(
+                |(k, v)| k == "cranelift-compute-body-lowered" && (v == "true" || v == "false")
+            )
         );
 
         let mut in_buf = [0.0_f32; 8];

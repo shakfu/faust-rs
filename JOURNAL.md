@@ -7985,6 +7985,47 @@ Local validation:
 
 All checks passed locally.
 
+### Cranelift FFI: retain compiled backend JIT module in factories
+
+Connected the `cranelift-ffi` factory scaffold to the now-real Cranelift backend
+compile step, so successful `createCCraneliftDSPFactoryFromFile/String`
+allocations retain the compiled `JitDspModule` instead of using a throwaway
+preflight.
+
+Implemented in `crates/cranelift-ffi/src/factory.rs` and
+`crates/cranelift-ffi/src/types.rs`:
+
+- `CraneliftDspFactory` now stores:
+  - `compiled_jit: Option<JitDspModule>`
+  - `compute_body_lowered: bool`
+- file/string factory creation paths now:
+  - compile Faust -> FIR (fast lane),
+  - compile FIR through the Cranelift backend,
+  - retain the returned `JitDspModule` in the factory scaffold
+- scaffold JSON and compile-options strings now include
+  `compute_body_lowered` for diagnostics
+- bitcode scaffold decode initializes the new fields deterministically
+
+Scaffold metadata exposure (`crates/cranelift-ffi/src/instance.rs`):
+
+- `metadataCCraneliftDSPInstance` now emits:
+  - `cranelift-jit-compiled=true|false`
+  - `cranelift-compute-body-lowered=true|false`
+
+Tests updated:
+
+- factory query roundtrip test asserts the retained JIT is present for string
+  compilation and that JSON includes `compute_body_lowered`
+- instance metadata smoke test asserts the new metadata pairs are emitted
+
+Validation:
+
+- `cargo fmt --all`
+- `cargo clippy -p cranelift-ffi --all-targets -- -D warnings`
+- `cargo test -p cranelift-ffi -- --nocapture`
+
+All checks passed locally.
+
 ### Cranelift backend Phase 1.5: define a deterministic `dsp*` struct layout contract (V1-oriented backend contract)
 
 Before implementing `LoadVar/StoreVar` for `AccessType::Struct`, added a

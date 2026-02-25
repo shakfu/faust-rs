@@ -12,6 +12,8 @@
 
 use std::ffi::{CString, c_char, c_void};
 
+use codegen::backends::cranelift::JitDspModule;
+
 /// `FAUSTFLOAT` used by the exported C API (v1 planned default).
 pub type FaustFloat = f32;
 
@@ -31,6 +33,10 @@ pub struct CraneliftDspFactory {
     pub(crate) compile_options: String,
     /// Placeholder JSON UI/metadata payload.
     pub(crate) json: String,
+    /// Compiled Cranelift JIT module (present for real file/string compilation paths).
+    pub(crate) compiled_jit: Option<JitDspModule>,
+    /// Whether the backend lowered the FIR `compute` body (vs stub fallback).
+    pub(crate) compute_body_lowered: bool,
     /// Audio layout (placeholder until real lowering/JIT metadata is wired).
     pub(crate) num_inputs: i32,
     /// Audio layout (placeholder until real lowering/JIT metadata is wired).
@@ -205,6 +211,8 @@ mod tests {
             dsp_code: "process=_;".into(),
             compile_options: "-vec 0".into(),
             json: "{}".into(),
+            compiled_jit: None,
+            compute_body_lowered: false,
             num_inputs: 1,
             num_outputs: 1,
         });

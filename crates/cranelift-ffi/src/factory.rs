@@ -15,7 +15,7 @@ use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
 
 use codegen::backends::cranelift::{
-    CraneliftBackendErrorCode, CraneliftOptLevel, CraneliftOptions, compile_fir_to_cranelift_jit,
+    CraneliftOptLevel, CraneliftOptions, JitDspModule, compile_fir_to_cranelift_jit,
 };
 use compiler::{Compiler as FaustCompiler, SignalFirLane, default_import_search_base};
 
@@ -81,11 +81,19 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
                 return std::ptr::null_mut();
             }
         };
-        if let Err(e) = preflight_compile_file_to_cranelift(Path::new(filename), &args, opt_level) {
-            write_error(error_msg, &e);
-            return std::ptr::null_mut();
-        }
-        let ptr = alloc_factory(build_scaffold_factory_from_file(filename, &args, opt_level));
+        let jit = match preflight_compile_file_to_cranelift(Path::new(filename), &args, opt_level) {
+            Ok(jit) => jit,
+            Err(e) => {
+                write_error(error_msg, &e);
+                return std::ptr::null_mut();
+            }
+        };
+        let ptr = alloc_factory(build_scaffold_factory_from_file(
+            filename,
+            &args,
+            opt_level,
+            Some(jit),
+        ));
         cache_insert(&(*ptr).sha_key, ptr);
         ptr
     }
@@ -138,15 +146,19 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
                 return std::ptr::null_mut();
             }
         };
-        if let Err(e) = preflight_compile_source_to_cranelift(name_app, dsp_content, opt_level) {
-            write_error(error_msg, &e);
-            return std::ptr::null_mut();
-        }
+        let jit = match preflight_compile_source_to_cranelift(name_app, dsp_content, opt_level) {
+            Ok(jit) => jit,
+            Err(e) => {
+                write_error(error_msg, &e);
+                return std::ptr::null_mut();
+            }
+        };
         let ptr = alloc_factory(build_scaffold_factory_from_source(
             name_app,
             dsp_content,
             &args,
             opt_level,
+            Some(jit),
         ));
         cache_insert(&(*ptr).sha_key, ptr);
         ptr
@@ -536,6 +548,7 @@ fn build_scaffold_factory_from_file(
     filename: &str,
     argv: &[String],
     opt_level: c_int,
+    jit: Option<JitDspModule>,
 ) -> CraneliftDspFactory {
     let source_name = Path::new(filename)
         .file_stem()
@@ -543,7 +556,7 @@ fn build_scaffold_factory_from_file(
         .filter(|s| !s.is_empty())
         .unwrap_or("FaustDSP");
     let dsp_code = format!("// scaffold source from file: {filename}");
-    build_scaffold_factory_common(source_name, &dsp_code, argv, opt_level)
+    build_scaffold_factory_common(source_name, &dsp_code, argv, opt_level, jit)
 }
 
 /// Build a placeholder factory from inline DSP source.
@@ -552,8 +565,9 @@ fn build_scaffold_factory_from_source(
     dsp_content: &str,
     argv: &[String],
     opt_level: c_int,
+    jit: Option<JitDspModule>,
 ) -> CraneliftDspFactory {
-    build_scaffold_factory_common(name_app, dsp_content, argv, opt_level)
+    build_scaffold_factory_common(name_app, dsp_content, argv, opt_level, jit)
 }
 
 /// Shared placeholder factory builder.
@@ -562,11 +576,18 @@ fn build_scaffold_factory_common(
     dsp_code: &str,
     argv: &[String],
     opt_level: c_int,
+    jit: Option<JitDspModule>,
 ) -> CraneliftDspFactory {
+    let compute_body_lowered = jit
+        .as_ref()
+        .is_some_and(codegen::backends::cranelift::JitDspModule::compute_body_lowered);
     let compile_options = if argv.is_empty() {
-        format!("opt_level={opt_level}")
+        format!("opt_level={opt_level}; compute_body_lowered={compute_body_lowered}")
     } else {
-        format!("opt_level={opt_level}; argv={}", argv.join(" "))
+        format!(
+            "opt_level={opt_level}; compute_body_lowered={compute_body_lowered}; argv={}",
+            argv.join(" ")
+        )
     };
     let sha_key = format!(
         "cranelift-scaffold:{}:{}:{}",
@@ -574,16 +595,22 @@ fn build_scaffold_factory_common(
         opt_level,
         argv.join("\x1f")
     );
-    let json = format!(
-        "{{\"name\":\"{}\",\"backend\":\"cranelift\",\"status\":\"scaffold\"}}",
-        json_escape(name)
-    );
     CraneliftDspFactory {
         name: name.to_owned(),
         sha_key,
         dsp_code: dsp_code.to_owned(),
         compile_options,
-        json,
+        json: format!(
+            "{{\"name\":\"{}\",\"backend\":\"cranelift\",\"status\":\"scaffold\",\"compute_body_lowered\":{}}}",
+            json_escape(name),
+            if compute_body_lowered {
+                "true"
+            } else {
+                "false"
+            }
+        ),
+        compiled_jit: jit,
+        compute_body_lowered,
         num_inputs: 1,
         num_outputs: 1,
     }
@@ -623,13 +650,13 @@ fn preflight_compile_file_to_cranelift(
     path: &Path,
     argv: &[String],
     opt_level: c_int,
-) -> Result<(), String> {
+) -> Result<JitDspModule, String> {
     let compiler = FaustCompiler::new();
     let search_paths = collect_search_paths_for_file(path, argv);
     let fir = compiler
         .compile_file_to_fir_with_lane(path, &search_paths, SignalFirLane::TransformFastLane)
         .map_err(|e| e.to_string())?;
-    tolerate_cranelift_placeholder_backend(fir, opt_level)
+    compile_with_cranelift_backend(fir, opt_level)
 }
 
 /// Runs the real compiler pipeline on inline source to FIR, then the backend placeholder.
@@ -637,26 +664,25 @@ fn preflight_compile_source_to_cranelift(
     source_name: &str,
     source: &str,
     opt_level: c_int,
-) -> Result<(), String> {
+) -> Result<JitDspModule, String> {
     let compiler = FaustCompiler::new();
     let fir = compiler
         .compile_source_to_fir_with_lane(source_name, source, SignalFirLane::TransformFastLane)
         .map_err(|e| e.to_string())?;
-    tolerate_cranelift_placeholder_backend(fir, opt_level)
+    compile_with_cranelift_backend(fir, opt_level)
 }
 
-/// Calls the Cranelift backend scaffold and accepts `NotImplemented` as an expected result.
-fn tolerate_cranelift_placeholder_backend(
+/// Calls the Cranelift backend and returns the compiled JIT module.
+fn compile_with_cranelift_backend(
     fir: compiler::FirCompileOutput,
     opt_level: c_int,
-) -> Result<(), String> {
+) -> Result<JitDspModule, String> {
     let options = CraneliftOptions {
         opt_level: map_c_opt_level(opt_level),
         ..CraneliftOptions::default()
     };
     match compile_fir_to_cranelift_jit(&fir.store, fir.module, &options) {
-        Ok(_jit) => Ok(()),
-        Err(err) if err.code == CraneliftBackendErrorCode::NotImplemented => Ok(()),
+        Ok(jit) => Ok(jit),
         Err(err) => Err(err.to_string()),
     }
 }
@@ -773,6 +799,8 @@ fn decode_scaffold_bitcode(text: &str) -> Result<CraneliftDspFactory, String> {
         compile_options: compile_options
             .ok_or_else(|| "missing 'compile_options' field".to_owned())?,
         json: json.ok_or_else(|| "missing 'json' field".to_owned())?,
+        compiled_jit: None,
+        compute_body_lowered: false,
         num_inputs: num_inputs.ok_or_else(|| "missing 'inputs' field".to_owned())?,
         num_outputs: num_outputs.ok_or_else(|| "missing 'outputs' field".to_owned())?,
     })
@@ -870,6 +898,12 @@ mod tests {
         assert!(opts_s.contains("opt_level=2"));
 
         unsafe {
+            assert!((*factory).compiled_jit.is_some());
+            let lowered = (*factory).compute_body_lowered;
+            assert!(json_s.contains(&format!(
+                "\"compute_body_lowered\":{}",
+                if lowered { "true" } else { "false" }
+            )));
             freeCMemory(name_ptr.cast());
             freeCMemory(json_ptr.cast());
             freeCMemory(opts_ptr.cast());
