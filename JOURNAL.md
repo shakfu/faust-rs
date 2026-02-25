@@ -7568,6 +7568,56 @@ Decisions/doc updates:
 Validation:
 - Documentation/header placeholder changes only (no code/tests run)
 
+### Cranelift backend: support `LoadTable` on stack pointer aliases (`AccessType::Stack`)
+
+Implemented `LoadTable { access: Stack, .. }` in the Cranelift `compute`
+subset lowering, which is the common FIR pattern used for reading through stack
+pointer aliases such as `input0[i]` / `input1[i]`.
+
+Implemented in `crates/codegen/src/backends/cranelift/mod.rs`:
+
+- `ComputeLowering::lower_expr` now lowers:
+  - `LoadTable { access: AccessType::Stack, ... }`
+- behavior:
+  - resolves the alias from the local lowering environment (`vars`)
+  - checks the alias is pointer-valued
+  - derives element type from alias pointee metadata (`LoweredExpr::Ptr.pointee`)
+  - emits indexed load (`base + i * elem_size`)
+  - coerces to the requested FIR result type
+- subset pre-scan/diagnostics updated:
+  - `subset_expr_gap_reason` now accepts `LoadTable { access: Stack, ... }`
+
+Tests added:
+
+- synthetic subset fixture covering:
+  - `inputs`/`outputs` function-arg table aliases -> `input0` / `output0`
+  - `LoadTable(input0, AccessType::Stack, i0, FaustFloat)`
+  - `StoreTable(output0, AccessType::Stack, i0, ...)`
+- test asserts successful real body lowering (`compute_body_lowered() == true`)
+
+Validation:
+
+- `cargo fmt --all`
+- `cargo clippy -p codegen --all-targets -- -D warnings`
+- `cargo test -p codegen cranelift -- --nocapture`
+
+Corpus impact (temporary scan via `crates/compiler/examples/corpus_scan_cranelift.rs`):
+
+- before: `lowered_ok=0 stub_ok=26 errors=31`
+- after: `lowered_ok=13 stub_ok=0 errors=44`
+
+Interpretation:
+
+- the dominant stub-fallback cause (`LoadTable { access: Stack, ... }`) is now
+  removed
+- many corpus cases moved from stub fallback to real lowering
+- remaining failures are now mostly:
+  - expected pipeline errors/limitations (`err_*`, imports, fast-lane transform limits)
+  - backend Cranelift verifier failures (`FRS-CGEN-CLIF-0004`) on some lowered cases
+
+This is a major backend coverage step and makes the next priority clear:
+investigate/fix Cranelift verifier failures on the newly-lowered corpus cases.
+
 ### Cranelift backend: expand Rustdoc for public API and lowering internals
 
 Substantially expanded Rust documentation in

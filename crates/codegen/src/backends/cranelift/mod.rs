@@ -1678,6 +1678,41 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
             }),
             FirMatch::LoadTable {
                 name,
+                access: AccessType::Stack,
+                index,
+                typ,
+            } => {
+                let alias = self.vars.get(&name).copied().ok_or_else(|| {
+                    LoweringError::Unsupported(format!("stack table base `{name}` not found"))
+                })?;
+                let base_ptr = alias.ptr().ok_or_else(|| {
+                    LoweringError::Unsupported(format!(
+                        "stack table base `{name}` is not a pointer alias"
+                    ))
+                })?;
+                let index_v = self.lower_expr(index, Some(&FirType::Int32))?.value();
+                let elem_fir_ty = match alias.pointee() {
+                    Some(FirTypeRef::FaustFloat) => FirType::FaustFloat,
+                    Some(FirTypeRef::Float32) => FirType::Float32,
+                    Some(FirTypeRef::Float64) => FirType::Float64,
+                    Some(FirTypeRef::Int32) => FirType::Int32,
+                    Some(FirTypeRef::Int64) => FirType::Int64,
+                    Some(FirTypeRef::Bool) => FirType::Bool,
+                    Some(other) => {
+                        return Err(LoweringError::Unsupported(format!(
+                            "unsupported stack pointer alias pointee for load_table `{name}`: {other:?}"
+                        )));
+                    }
+                    None => typ.clone(),
+                };
+                let elem_clif = self.fir_type_to_clif(&elem_fir_ty)?;
+                let addr = self.indexed_addr(base_ptr, index_v, i64::from(elem_clif.bytes()));
+                let raw = self.fb.ins().load(elem_clif, MemFlags::new(), addr, 0);
+                let coerced = self.coerce_value_to_fir_type(raw, &typ)?;
+                Ok(LoweredExpr::Scalar(coerced))
+            }
+            FirMatch::LoadTable {
+                name,
                 access: AccessType::FunArgs,
                 index,
                 typ,
@@ -2335,6 +2370,11 @@ fn subset_expr_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
             ..
         } => None,
         FirMatch::LoadTable {
+            access: AccessType::Stack,
+            index,
+            ..
+        } => subset_expr_gap_reason(store, index),
+        FirMatch::LoadTable {
             access: AccessType::FunArgs,
             index,
             ..
@@ -2656,6 +2696,75 @@ mod tests {
         let (store, module) = build_subset_lowerable_compute_module();
         let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
             .expect("subset fixture should compile with body lowering");
+        assert!(compiled.has_compute_entry());
+        assert!(compiled.compute_body_lowered());
+    }
+
+    fn build_stack_input_load_subset_module() -> (fir::FirStore, FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let globals = b.block(&[]);
+        let dsp_struct = b.block(&[]);
+
+        let chan0 = b.int32(0);
+        let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let in_ptr = b.load_table("inputs", AccessType::FunArgs, chan0, ptr_ty.clone());
+        let out_ptr = b.load_table("outputs", AccessType::FunArgs, chan0, ptr_ty.clone());
+        let in_alias = b.declare_var("input0", ptr_ty.clone(), AccessType::Stack, Some(in_ptr));
+        let out_alias = b.declare_var("output0", ptr_ty, AccessType::Stack, Some(out_ptr));
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let x = b.load_table("input0", AccessType::Stack, i0, FirType::FaustFloat);
+        let half = b.float32(0.5);
+        let y = b.binop(FirBinOp::Mul, x, half, FirType::FaustFloat);
+        let store_out = b.store_table("output0", AccessType::Stack, i0, y);
+        let loop_body = b.block(&[store_out]);
+        let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+        let compute_body = b.block(&[in_alias, out_alias, sample_loop]);
+        let compute_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        );
+        let declarations = b.block(&[compute]);
+        let module = b.module("stack_input_load_subset", dsp_struct, globals, declarations);
+        (store, module)
+    }
+
+    #[test]
+    fn compile_module_lowers_stack_input_load_subset_body() {
+        let (store, module) = build_stack_input_load_subset_module();
+        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+            .expect("stack-input-load subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
     }
