@@ -7985,6 +7985,48 @@ Local validation:
 
 All checks passed locally.
 
+### Cranelift backend: ignore helper `DeclareFun` prototypes in module globals
+
+Fixed a corpus-facing Cranelift backend issue where fast-lane FIR emits helper
+math prototypes (for example `fmin`, `pow`) inside `Module.globals`, and the
+Cranelift `dsp*` layout builder incorrectly rejected them as unsupported
+globals entries.
+
+Implemented in `crates/codegen/src/backends/cranelift/mod.rs`:
+
+- `build_struct_layout_for_module(...)` now ignores:
+  - `DeclareFun { body: None, .. }`
+- rationale:
+  - these entries are helper function prototypes, not instance-state fields,
+    so they must not participate in `dsp*` layout computation
+
+Tests added:
+
+- synthetic module fixture with:
+  - `Struct` global scalar field (`fGain`)
+  - helper prototype in `globals` (`DeclareFun` without body)
+  - lowerable `compute`
+- test asserts:
+  - compile succeeds
+  - `compute_body_lowered() == true`
+  - helper prototype is not present in the computed struct layout
+
+Validation:
+
+- `cargo fmt --all`
+- `cargo clippy -p codegen --all-targets -- -D warnings`
+- `cargo test -p codegen cranelift -- --nocapture`
+
+Corpus impact (scan via temporary local harness, fast-lane FIR):
+
+- before: `lowered_ok=0 stub_ok=24 errors=33`
+- after: `lowered_ok=0 stub_ok=26 errors=31`
+- improved examples:
+  - `tests/corpus/rep_07_nonlinear_clip.dsp` (now backend stub-ok)
+  - `tests/corpus/rep_19_primitive_family.dsp` (now backend stub-ok)
+
+All checks passed locally.
+
 ### Cranelift backend: add `Switch` statement lowering to the compute subset
 
 Extended the Cranelift backend compute lowering subset with FIR `Switch`

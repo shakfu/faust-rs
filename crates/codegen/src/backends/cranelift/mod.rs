@@ -461,6 +461,9 @@ fn build_struct_layout_for_module(
                     "unsupported global table access class for Cranelift dsp* layout: {name} ({access:?})"
                 )));
             }
+            // Fast-lane FIR may place helper math prototypes (`fmin`, `pow`, ...)
+            // in module globals. They are declarations, not `dsp*` state fields.
+            FirMatch::DeclareFun { body: None, .. } => {}
             FirMatch::NullDeclareVar => {}
             other => {
                 return Err(CraneliftBackendError::unsupported_module_shape(format!(
@@ -2770,6 +2773,101 @@ mod tests {
                 len: 3
             }
         ));
+    }
+
+    fn build_globals_with_helper_prototype_subset_module() -> (fir::FirStore, FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let init = b.float64(0.5);
+        let gain = b.declare_var("fGain", FirType::FaustFloat, AccessType::Struct, Some(init));
+        let helper_args = [
+            NamedType {
+                name: "arg0".to_string(),
+                typ: FirType::FaustFloat,
+            },
+            NamedType {
+                name: "arg1".to_string(),
+                typ: FirType::FaustFloat,
+            },
+        ];
+        let helper_proto = b.declare_fun(
+            "fmin",
+            FirType::Fun {
+                args: vec![FirType::FaustFloat, FirType::FaustFloat],
+                ret: Box::new(FirType::FaustFloat),
+            },
+            &helper_args,
+            None,
+            false,
+        );
+        let globals = b.block(&[gain, helper_proto]);
+        let dsp_struct = b.block(&[]);
+
+        let out_chan = b.int32(0);
+        let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+        let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let g = b.load_var("fGain", AccessType::Struct, FirType::FaustFloat);
+        let store_out = b.store_table("output0", AccessType::Stack, i0, g);
+        let loop_body = b.block(&[store_out]);
+        let loop_ = b.simple_for_loop("i0", count, loop_body, false);
+        let compute_body = b.block(&[out_alias, loop_]);
+        let compute_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        );
+        let declarations = b.block(&[compute]);
+        let module = b.module(
+            "globals_helper_proto_subset",
+            dsp_struct,
+            globals,
+            declarations,
+        );
+        (store, module)
+    }
+
+    #[test]
+    fn compile_module_ignores_helper_prototypes_in_globals_layout() {
+        let (store, module) = build_globals_with_helper_prototype_subset_module();
+        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+            .expect("helper prototypes in globals should be ignored for dsp* layout");
+        assert!(compiled.has_compute_entry());
+        assert!(compiled.compute_body_lowered());
+        let layout = compiled.struct_layout();
+        assert!(layout.field("fGain").is_some());
+        assert!(layout.field("fmin").is_none());
     }
 
     fn build_shift_array_var_struct_subset_module() -> (fir::FirStore, FirId) {
