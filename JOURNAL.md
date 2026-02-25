@@ -7748,6 +7748,42 @@ Local validation (syntax-only):
 
 Both checks passed locally.
 
+### Cranelift FFI Phase 1: wire factory creation to compiler/FIR preflight (backend placeholder tolerated)
+
+Upgraded `cranelift-ffi` factory creation (`createCCraneliftDSPFactoryFromFile/String`)
+from a pure metadata scaffold to a **real compiler/FIR preflight path** before
+returning a scaffold factory object.
+
+Implemented in `crates/cranelift-ffi/src/factory.rs`:
+
+- `createCCraneliftDSPFactoryFromFile` and `createCCraneliftDSPFactoryFromString`
+  now run:
+  - `compiler::Compiler`
+  - signal pipeline -> FIR (`SignalFirLane::TransformFastLane`)
+  - Cranelift backend placeholder entry point
+    (`codegen::backends::cranelift::compile_fir_to_cranelift_jit`)
+- backend placeholder `NotImplemented` (`FRS-CGEN-CLIF-0001`) is treated as an
+  **expected scaffold result** and does not fail factory creation yet
+- parse/eval/propagate/FIR lowering errors now fail the FFI call and populate
+  the standard C `error_msg` buffer (4096 bytes)
+- file path compilation preflight now honors minimal `-I` import search path
+  parsing (`-I path` and `-Ipath`) using `compiler::default_import_search_base`
+  + extra paths from argv
+- added a regression test ensuring invalid Faust source returns `null` and sets
+  `error_msg`
+
+Why this step matters:
+
+- It validates that `cranelift-ffi` is now wired to the **actual production
+  front-end pipeline** up to FIR, instead of only returning synthetic scaffold
+  factories.
+- It keeps momentum while the backend lowering/JIT is still a placeholder.
+
+Validation:
+- `cargo fmt --all`
+- `cargo clippy -p cranelift-ffi --all-targets -- -D warnings`
+- `cargo test -p cranelift-ffi` (13 tests passed)
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the

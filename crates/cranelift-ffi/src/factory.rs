@@ -12,7 +12,12 @@
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::os::raw::c_int;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use codegen::backends::cranelift::{
+    CraneliftBackendErrorCode, CraneliftOptLevel, CraneliftOptions, compile_fir_to_cranelift_jit,
+};
+use compiler::{Compiler as FaustCompiler, SignalFirLane, default_import_search_base};
 
 use crate::cache::{
     cache_all_sha_keys, cache_drain, cache_insert, cache_lookup, cache_remove_by_ptr, start_mt,
@@ -76,6 +81,10 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
                 return std::ptr::null_mut();
             }
         };
+        if let Err(e) = preflight_compile_file_to_cranelift(Path::new(filename), &args, opt_level) {
+            write_error(error_msg, &e);
+            return std::ptr::null_mut();
+        }
         let ptr = alloc_factory(build_scaffold_factory_from_file(filename, &args, opt_level));
         cache_insert(&(*ptr).sha_key, ptr);
         ptr
@@ -129,6 +138,10 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
                 return std::ptr::null_mut();
             }
         };
+        if let Err(e) = preflight_compile_source_to_cranelift(name_app, dsp_content, opt_level) {
+            write_error(error_msg, &e);
+            return std::ptr::null_mut();
+        }
         let ptr = alloc_factory(build_scaffold_factory_from_source(
             name_app,
             dsp_content,
@@ -544,6 +557,83 @@ fn decode_c_argv(argc: c_int, argv: *const *const c_char) -> Result<Vec<String>,
     Ok(out)
 }
 
+/// Runs the real compiler pipeline to FIR, then calls the Cranelift backend placeholder.
+///
+/// `NotImplemented` from the backend is treated as success during scaffold phases,
+/// because the goal is to validate the front-end and FIR path integration first.
+fn preflight_compile_file_to_cranelift(
+    path: &Path,
+    argv: &[String],
+    opt_level: c_int,
+) -> Result<(), String> {
+    let compiler = FaustCompiler::new();
+    let search_paths = collect_search_paths_for_file(path, argv);
+    let fir = compiler
+        .compile_file_to_fir_with_lane(path, &search_paths, SignalFirLane::TransformFastLane)
+        .map_err(|e| e.to_string())?;
+    tolerate_cranelift_placeholder_backend(fir, opt_level)
+}
+
+/// Runs the real compiler pipeline on inline source to FIR, then the backend placeholder.
+fn preflight_compile_source_to_cranelift(
+    source_name: &str,
+    source: &str,
+    opt_level: c_int,
+) -> Result<(), String> {
+    let compiler = FaustCompiler::new();
+    let fir = compiler
+        .compile_source_to_fir_with_lane(source_name, source, SignalFirLane::TransformFastLane)
+        .map_err(|e| e.to_string())?;
+    tolerate_cranelift_placeholder_backend(fir, opt_level)
+}
+
+/// Calls the Cranelift backend scaffold and accepts `NotImplemented` as an expected result.
+fn tolerate_cranelift_placeholder_backend(
+    fir: compiler::FirCompileOutput,
+    opt_level: c_int,
+) -> Result<(), String> {
+    let options = CraneliftOptions {
+        opt_level: map_c_opt_level(opt_level),
+        ..CraneliftOptions::default()
+    };
+    match compile_fir_to_cranelift_jit(&fir.store, fir.module, &options) {
+        Ok(_jit) => Ok(()),
+        Err(err) if err.code == CraneliftBackendErrorCode::NotImplemented => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+/// Maps C integer optimization levels to the current Cranelift backend scaffold enum.
+fn map_c_opt_level(level: c_int) -> CraneliftOptLevel {
+    match level {
+        i if i <= 0 => CraneliftOptLevel::None,
+        1 | 2 => CraneliftOptLevel::Speed,
+        _ => CraneliftOptLevel::SpeedAndSize,
+    }
+}
+
+/// Builds import search paths for file compilation from default base + `-I` args.
+fn collect_search_paths_for_file(path: &Path, argv: &[String]) -> Vec<PathBuf> {
+    let mut paths = vec![default_import_search_base(path)];
+    let mut i = 0usize;
+    while i < argv.len() {
+        let arg = &argv[i];
+        if arg == "-I" {
+            if let Some(next) = argv.get(i + 1) {
+                paths.push(PathBuf::from(next));
+                i += 2;
+                continue;
+            }
+        } else if let Some(rest) = arg.strip_prefix("-I")
+            && !rest.is_empty()
+        {
+            paths.push(PathBuf::from(rest));
+        }
+        i += 1;
+    }
+    paths
+}
+
 /// Return a static null-terminated empty `char**` array.
 fn null_c_string_array() -> *const *const c_char {
     struct SyncNullArray([*const c_char; 1]);
@@ -656,6 +746,27 @@ mod tests {
         assert!(factory.is_null());
         let msg = unsafe { CStr::from_ptr(err.as_ptr()) }.to_str().unwrap();
         assert!(msg.contains("null filename"));
+    }
+
+    #[test]
+    fn create_factory_from_string_reports_compiler_error_for_invalid_faust() {
+        let name = c"bad";
+        let src = c"process = ;";
+        let mut err = [0_i8; 4096];
+
+        let factory = unsafe {
+            createCCraneliftDSPFactoryFromString(
+                name.as_ptr(),
+                src.as_ptr(),
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+                0,
+            )
+        };
+        assert!(factory.is_null());
+        let msg = unsafe { CStr::from_ptr(err.as_ptr()) }.to_str().unwrap();
+        assert!(!msg.is_empty());
     }
 
     #[test]
