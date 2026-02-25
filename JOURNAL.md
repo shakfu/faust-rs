@@ -7893,6 +7893,37 @@ Local validation (syntax-only):
 
 Both C++ syntax-only checks passed locally.
 
+### Cranelift FFI Phase 1: expand C++ header smoke coverage for the wrapper scaffold surface
+
+Expanded the C++ header smoke fixture so it references a much larger portion of
+the current `cranelift_dsp` / `cranelift_dsp_factory` wrapper scaffold surface.
+
+Updated:
+
+- `crates/cranelift-ffi/tests/header-smoke/cranelift_dsp_cpp_header_smoke.cpp`
+  - now exercises additional instance lifecycle methods (`init`,
+    `instanceInit`, `instanceConstants`, `instanceResetUserInterface`,
+    `instanceClear`, `clone`, `compute`, `getSampleRate`)
+  - now exercises more factory queries (`getSHAKey`, `getDSPCode`,
+    `getLibraryList`, `getIncludePathnames`, `getWarningMessages`)
+  - now references C++ free-function wrappers for cache and bitcode scaffold
+    families (`getAllCraneliftDSPFactories`, `read/write...Bitcode[File]`,
+    `start/stopMTDSPFactories`, `deleteAllCraneliftDSPFactories`)
+  - now references both source-creation wrappers
+    (`createCraneliftDSPFactoryFromFile/String`)
+
+Purpose:
+
+- This remains a compile-time (syntax-only) smoke, but it reduces the chance of
+  silent C++ wrapper/header drift as the scaffold surface grows.
+
+Local validation (syntax-only):
+
+- `c++ -std=c++11 -fsyntax-only -I crates/cranelift-ffi/include -I /Users/letz/Developpements/RUST/faust/architecture crates/cranelift-ffi/tests/header-smoke/cranelift_dsp_cpp_header_smoke.cpp`
+- `c++ -std=c++11 -fsyntax-only -I crates/cranelift-ffi/include -I /Users/letz/Developpements/RUST/faust/architecture crates/cranelift-ffi/cpp/cranelift-dsp.cpp`
+
+Both syntax-only checks passed locally after the smoke expansion.
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the
