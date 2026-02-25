@@ -546,8 +546,10 @@ fn compile_factory_from_file_fastlane(
     argv: &[String],
 ) -> Result<codegen::backends::interp::FbcDspFactory<f32>, String> {
     let parsed = parse_ffi_compile_args(argv)?;
-    let mut interp_options = codegen::backends::interp::InterpOptions::default();
-    interp_options.module_name = parsed.module_name;
+    let interp_options = codegen::backends::interp::InterpOptions {
+        module_name: parsed.module_name,
+        ..codegen::backends::interp::InterpOptions::default()
+    };
 
     let mut search_paths = vec![default_import_search_base(path)];
     search_paths.extend(parsed.search_paths);
@@ -575,8 +577,10 @@ fn compile_factory_from_string_fastlane(
     argv: &[String],
 ) -> Result<codegen::backends::interp::FbcDspFactory<f32>, String> {
     let parsed = parse_ffi_compile_args(argv)?;
-    let mut interp_options = codegen::backends::interp::InterpOptions::default();
-    interp_options.module_name = parsed.module_name.or_else(|| Some(source_name.to_owned()));
+    let interp_options = codegen::backends::interp::InterpOptions {
+        module_name: parsed.module_name.or_else(|| Some(source_name.to_owned())),
+        ..codegen::backends::interp::InterpOptions::default()
+    };
 
     let compiler = FaustCompiler::new();
     let fbc = compiler
@@ -652,12 +656,12 @@ fn parse_ffi_compile_args(argv: &[String]) -> Result<FfiCompileArgs, String> {
             i += 2;
             continue;
         }
-        if let Some(value) = arg.strip_prefix("-I") {
-            if !value.is_empty() {
-                parsed.search_paths.push(PathBuf::from(value));
-                i += 1;
-                continue;
-            }
+        if let Some(value) = arg.strip_prefix("-I")
+            && !value.is_empty()
+        {
+            parsed.search_paths.push(PathBuf::from(value));
+            i += 1;
+            continue;
         }
         if arg == "-cn" {
             let Some(value) = argv.get(i + 1) else {

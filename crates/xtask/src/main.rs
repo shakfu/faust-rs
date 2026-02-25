@@ -285,10 +285,11 @@ fn parse_backend_align_smoke_options(
     args: &mut impl Iterator<Item = String>,
 ) -> Result<BackendAlignSmokeOptions, Box<dyn std::error::Error>> {
     let mut options = BackendAlignSmokeOptions::default();
-    while let Some(arg) = args.next() {
+    let iter = args.by_ref();
+    while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--case" => {
-                let Some(path) = args.next() else {
+                let Some(path) = iter.next() else {
                     return Err("--case requires a path".into());
                 };
                 options.cases.push(PathBuf::from(path));
@@ -405,7 +406,7 @@ fn parse_backend_align_nightly_options(
     args: &mut impl Iterator<Item = String>,
 ) -> Result<BackendAlignNightlyOptions, Box<dyn std::error::Error>> {
     let mut options = BackendAlignNightlyOptions::default();
-    while let Some(arg) = args.next() {
+    for arg in args.by_ref() {
         match arg.as_str() {
             "--strict-fir-types" => options.strict_fir_types = true,
             "--skip-golden" => options.skip_golden = true,

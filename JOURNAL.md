@@ -7438,3 +7438,24 @@ Validation:
 - The step is intentionally Linux-only for runtime/cost control in PR CI.
 - `--skip-golden` avoids duplicate work because `golden-check` already runs in
   the same workflow.
+
+### Clippy cleanup after backend-alignment and interp-ffi wiring changes
+
+Fixed `cargo clippy --workspace --all-targets -- -D warnings` regressions
+introduced by the recent `xtask` / `interp-ffi` additions:
+
+- `crates/xtask/src/main.rs`
+  - replaced one options-parser iterator loop with `for arg in args.by_ref()`
+    where no nested `next()` call is needed
+  - used the `let iter = args.by_ref(); while let Some(arg) = iter.next()` form
+    where nested `iter.next()` is required for `--case <path>` parsing (avoids
+    mutable borrow conflicts while satisfying clippy)
+- `crates/interp-ffi/src/factory.rs`
+  - initialized `InterpOptions` using struct update syntax instead of
+    `Default::default()` followed by field reassignment
+  - collapsed nested `if` for `-Ipath` parsing (`collapsible_if`)
+
+Validation:
+- `cargo clippy -p xtask -- -D warnings`
+- `cargo clippy -p interp-ffi -- -D warnings`
+- `cargo clippy --workspace --all-targets -- -D warnings`
