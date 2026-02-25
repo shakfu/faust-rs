@@ -260,6 +260,28 @@ target and document the divergence explicitly in the parity matrix and
 - The exported function **set/strategy** remains a parity target against the
   `llvm_dsp` family; only the backend-specific naming prefix follows the
   `interpreter_dsp` style.
+- Apply this interpreter-style backend prefixing rule consistently to Cranelift
+  helper/query functions as well (for example LLVM-only generic C helpers),
+  rather than reusing LLVM generic symbol names.
+
+**C API source-creation signature policy (locked):**
+
+- For `createCCraneliftDSPFactoryFromFile/String/Signals/Boxes`:
+  - keep `opt_level` if Cranelift optimization levels are exposed,
+  - do **not** carry the LLVM-specific `target` string parameter.
+- This is an intentional ABI adaptation relative to `llvm_dsp` signatures while
+  preserving function-family parity.
+
+**V1 defer (locked):**
+
+- Cranelift target getter/query functions corresponding to LLVM target-specific
+  concepts (for example factory/machine target string getters) are deferred in
+  V1 and tracked in the FFI parity matrix as `v1-deferred`.
+- Memory-manager and foreign-function registration families (C and C++) are
+  deferred in V1 and tracked in the FFI parity matrix as `v1-deferred`.
+- LLVM-only IR/machine/object serialization families are deferred in V1
+  **without exported symbols** (tracked in the FFI parity matrix as
+  `v1-deferred`).
 
 ## 5.2 DSP state ownership (v1)
 

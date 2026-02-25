@@ -27,11 +27,17 @@ typedef struct cranelift_dsp cranelift_dsp;
 /* Placeholder version accessor for scaffold smoke wiring. */
 const char* getCLibFaustVersion(void);
 
-/* Placeholder target names (Phase 0 parity matrix in progress, no implementation yet). */
+/* Placeholder target names (Phase 0 parity matrix in progress, no implementation yet).
+ *
+ * User-locked signature policy for Cranelift source-creation APIs:
+ * - keep `opt_level` when Cranelift optimization levels are exposed
+ * - do not carry LLVM-specific `target` string parameter
+ */
 cranelift_dsp_factory* createCCraneliftDSPFactoryFromFile(const char* filename,
                                                           int argc,
                                                           const char* argv[],
-                                                          char* error_msg);
+                                                          char* error_msg,
+                                                          int opt_level);
 cranelift_dsp* createCCraneliftDSPInstance(cranelift_dsp_factory* factory);
 
 #ifdef __cplusplus

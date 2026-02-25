@@ -7567,3 +7567,44 @@ Decisions/doc updates:
 
 Validation:
 - Documentation/header placeholder changes only (no code/tests run)
+
+### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
+
+Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the
+main remaining ambiguities before implementing real `cranelift_dsp` C ABI
+exports.
+
+Locked decisions (user-confirmed):
+
+- **Helper/query naming strategy** follows `interpreter_dsp` style:
+  Cranelift helper/query symbols use backend-prefixed names (`getCCranelift...`,
+  `registerCCranelift...`, etc.) instead of LLVM generic symbol names.
+- **Source-creation C API signatures** (`createCCraneliftDSPFactoryFrom*`) use
+  an adapted shape:
+  - keep `opt_level` (when Cranelift optimization levels are exposed),
+  - drop LLVM-specific `target` parameter.
+- **LLVM target-specific getter/query functions** are deferred in V1:
+  - `getCCraneliftDSPFactoryTarget`
+  - `getCCraneliftDSPMachineTarget`
+- **Memory manager / foreign function registration families** are deferred in
+  V1 (C and C++ wrappers):
+  - `setCCraneliftMemoryManager`
+  - `registerCCraneliftForeignFunction`
+  - corresponding C++ wrapper methods/functions
+- **LLVM-only serialization families** (IR / machine / objectcode) are deferred
+  in V1 **without exported symbols**.
+
+Documentation updates:
+
+- `porting/cranelift-backend-plan-en.md`
+  - records locked naming/signature policy and V1 deferred families
+- `porting/cranelift-dsp-ffi-parity-matrix-en.md`
+  - expanded C/C++ parity matrix
+  - exact-signature inventory notes
+  - updated `Open Decisions` list after user decisions
+- `crates/cranelift-ffi/include/cranelift-dsp-c.h`
+  - placeholder `createCCraneliftDSPFactoryFromFile(...)` updated to include
+    `opt_level` and omit `target`
+
+Validation:
+- Documentation/header placeholder changes only (no code/tests run)

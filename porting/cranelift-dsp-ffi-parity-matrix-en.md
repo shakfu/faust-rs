@@ -43,10 +43,13 @@ Rule:
 
 - Preserve the **function family/semantics** parity of `llvm_dsp`
 - Replace the backend-specific naming prefix with `Cranelift`
+- For LLVM-only generic helper/query C symbols, use the same
+  interpreter-style backend-prefixed approach (no LLVM generic symbol reuse as
+  the primary Cranelift name).
 
 ---
 
-## 3. C API Parity Matrix (Initial Draft)
+## 3. C API Parity Matrix (Phase 0 Working Draft)
 
 Legend:
 
@@ -74,10 +77,28 @@ Legend:
 
 | Family | LLVM C API | Interpreter C API | Target (Cranelift C API) | Status | Notes |
 |---|---|---|---|---|---|
-| From file | `createCDSPFactoryFromFile` | `createCInterpreterDSPFactoryFromFile` | `createCCraneliftDSPFactoryFromFile` | `v1-required` | User-locked naming |
-| From string | `createCDSPFactoryFromString` | `createCInterpreterDSPFactoryFromString` | `createCCraneliftDSPFactoryFromString` | `v1-required` | |
-| From signals | `createCDSPFactoryFromSignals` | `createCInterpreterDSPFactoryFromSignals` | `createCCraneliftDSPFactoryFromSignals` | `v1-required` | May return typed unsupported initially, but symbol present |
-| From boxes | `createCDSPFactoryFromBoxes` | `createCInterpreterDSPFactoryFromBoxes` | `createCCraneliftDSPFactoryFromBoxes` | `v1-required` | May return typed unsupported initially, but symbol present |
+| From file | `createCDSPFactoryFromFile` | `createCInterpreterDSPFactoryFromFile` | `createCCraneliftDSPFactoryFromFile` | `v1-required` | User-locked naming; LLVM adds `(target, opt_level)` args |
+| From string | `createCDSPFactoryFromString` | `createCInterpreterDSPFactoryFromString` | `createCCraneliftDSPFactoryFromString` | `v1-required` | LLVM adds `(target, opt_level)` args |
+| From signals | `createCDSPFactoryFromSignals` | `createCInterpreterDSPFactoryFromSignals` | `createCCraneliftDSPFactoryFromSignals` | `v1-required` | LLVM adds `(target, opt_level)` args; may return typed unsupported initially |
+| From boxes | `createCDSPFactoryFromBoxes` | `createCInterpreterDSPFactoryFromBoxes` | `createCCraneliftDSPFactoryFromBoxes` | `v1-required` | LLVM adds `(target, opt_level)` args; may return typed unsupported initially |
+
+### 3.3.1 Signature delta note (LLVM vs Interpreter)
+
+LLVM source-creation APIs include backend-specific compilation parameters:
+
+- `const char* target`
+- `int opt_level`
+
+Interpreter source-creation APIs do not.
+
+Phase-0 implication for `cranelift_dsp`:
+
+- Keep the **same exported family** as LLVM/interpreter parity matrix requires.
+- User-locked source-creation signature policy:
+  - keep `opt_level` (when Cranelift optimization levels are exposed)
+  - drop LLVM-specific `target` string parameter
+- This is an **adapted ABI shape** relative to `llvm_dsp` source-creation C APIs.
+  Function-family parity is preserved; signature parity is intentionally adapted.
 
 ## 3.4 Factory deletion and metadata/query surface
 
@@ -86,30 +107,30 @@ Legend:
 | Delete factory | `deleteCDSPFactory` | `deleteCInterpreterDSPFactory` | `deleteCCraneliftDSPFactory` | `v1-required` | |
 | JSON | `getCDSPFactoryJSON` | `getCInterpreterDSPFactoryJSON` | `getCCraneliftDSPFactoryJSON` | `v1-required` | |
 | Library list | `getCDSPFactoryLibraryList` | `getCInterpreterDSPFactoryLibraryList` | `getCCraneliftDSPFactoryLibraryList` | `v1-required` | |
-| Name | `getCName` | C++ method only helper equivalent | `getCCraneliftDSPFactoryName` (or parity alias decision pending) | `decision-pending` | LLVM has generic naming here; exact C name needs final convention decision |
-| SHA key | `getCSHAKey` | no same C symbol in interpreter C header | `getCCraneliftDSPFactorySHAKey` (or alias decision pending) | `decision-pending` | |
-| Expanded code | `getCDSPCode` | not present in interpreter C header | `getCCraneliftDSPFactoryDSPCode` (or alias decision pending) | `decision-pending` | likely `v1-required` if following LLVM full surface |
-| Compile options | `getCDSPFactoryCompileOptions` | not present in interpreter C header | `getCCraneliftDSPFactoryCompileOptions` | `decision-pending` | |
-| Target string | `getCTarget` | not present | `getCCraneliftDSPFactoryTarget` | `decision-pending` | Cranelift target semantics need Phase 0 ABI decision |
-| Include pathnames | `getCDSPFactoryIncludePathnames` | not present in interpreter C header | `getCCraneliftDSPFactoryIncludePathnames` | `decision-pending` | |
-| Warning messages | `getCWarningMessages` | not present in interpreter C header | `getCCraneliftDSPFactoryWarningMessages` | `decision-pending` | |
+| Name | `getCName` | C++ method only helper equivalent | `getCCraneliftDSPFactoryName` | `v1-required` | Naming locked to interpreter-style backend prefix |
+| SHA key | `getCSHAKey` | no same C symbol in interpreter C header | `getCCraneliftDSPFactorySHAKey` | `v1-required` | Naming locked to interpreter-style backend prefix |
+| Expanded code | `getCDSPCode` | not present in interpreter C header | `getCCraneliftDSPFactoryDSPCode` | `v1-required` | Naming locked; implementation may initially return typed unsupported only if necessary |
+| Compile options | `getCDSPFactoryCompileOptions` | not present in interpreter C header | `getCCraneliftDSPFactoryCompileOptions` | `v1-required` | Naming locked to interpreter-style backend prefix |
+| Target string | `getCTarget` | not present | `getCCraneliftDSPFactoryTarget` | `v1-deferred` | Naming locked; deferred in V1 (target semantics are LLVM-specific) |
+| Include pathnames | `getCDSPFactoryIncludePathnames` | not present in interpreter C header | `getCCraneliftDSPFactoryIncludePathnames` | `v1-required` | Naming locked to interpreter-style backend prefix |
+| Warning messages | `getCWarningMessages` | not present in interpreter C header | `getCCraneliftDSPFactoryWarningMessages` | `v1-required` | Naming locked to interpreter-style backend prefix |
 
 ## 3.5 Factory serialization / code import-export families
 
 | Family | LLVM C API | Interpreter C API | Target (Cranelift C API) | Status | Notes |
 |---|---|---|---|---|---|
 | Bitcode read/write (backend bytecode) | `readCDSPFactoryFromBitcode`, `writeCDSPFactoryToBitcode`, `...File` | `readCInterpreterDSPFactoryFromBitcode`, `writeCInterpreterDSPFactoryToBitcode`, `...File` | `readCCraneliftDSPFactoryFromBitcode`, `writeCCraneliftDSPFactoryToBitcode`, `...File` | `v1-required` | Exact backend payload format TBD (likely Cranelift-specific compiled snapshot or deferred stub with typed error) |
-| IR read/write | `readCDSPFactoryFromIR`, `writeCDSPFactoryToIR`, `...File` | n/a | `readCCraneliftDSPFactoryFromIR`, `writeCCraneliftDSPFactoryToIR`, `...File` | `v1-deferred` | May exist as symbols returning typed unsupported if strict parity set is required |
-| Machine read/write | `readCDSPFactoryFromMachine`, `writeCDSPFactoryToMachine`, `...File` | n/a | `readCCraneliftDSPFactoryFromMachine`, `writeCCraneliftDSPFactoryToMachine`, `...File` | `v1-deferred` | Depends on object/machine snapshot strategy |
+| IR read/write | `readCDSPFactoryFromIR`, `writeCDSPFactoryToIR`, `...File` | n/a | `readCCraneliftDSPFactoryFromIR`, `writeCCraneliftDSPFactoryToIR`, `...File` | `v1-deferred` | Deferred in V1 **without exported symbols** |
+| Machine read/write | `readCDSPFactoryFromMachine`, `writeCDSPFactoryToMachine`, `...File` | n/a | `readCCraneliftDSPFactoryFromMachine`, `writeCCraneliftDSPFactoryToMachine`, `...File` | `v1-deferred` | Deferred in V1 **without exported symbols** |
 
 ## 3.6 Factory runtime/global configuration
 
 | Family | LLVM C API | Interpreter C API | Target (Cranelift C API) | Status | Notes |
 |---|---|---|---|---|---|
 | Class init on factory | `classCInit` | n/a | `classCCraneliftInit` (naming pending) | `decision-pending` | LLVM-specific pattern; may be represented via instance APIs only |
-| Memory manager setter | `setCMemoryManager` | n/a (in current interpreter C header) | `setCCraneliftMemoryManager` (or parity alias) | `decision-pending` | Important for `llvm_dsp` parity; exact support strategy needs user decision |
-| Register foreign function | `registerCForeignFunction` | n/a | `registerCCraneliftForeignFunction` (or parity alias) | `decision-pending` | Depends on Cranelift host-call policy |
-| Machine target getter | `getCDSPMachineTarget` | n/a | `getCCraneliftDSPMachineTarget` or shared alias | `decision-pending` | Cranelift target exposure policy needs decision |
+| Memory manager setter | `setCMemoryManager` | n/a (in current interpreter C header) | `setCCraneliftMemoryManager` | `v1-deferred` | Naming locked; family deferred in V1 |
+| Register foreign function | `registerCForeignFunction` | n/a | `registerCCraneliftForeignFunction` | `v1-deferred` | Naming locked; family deferred in V1 |
+| Machine target getter | `getCDSPMachineTarget` | n/a | `getCCraneliftDSPMachineTarget` | `v1-deferred` | Naming locked; deferred in V1 |
 
 ## 3.7 DSP instance functions (C API)
 
@@ -136,9 +157,75 @@ Legend:
 |---|---|---|---|---|---|
 | `freeCMemory` | Present in LLVM C API family support stack | Present in interpreter C API implementation/export | `freeCMemory` | `v1-required` | Shared utility name (same symbol strategy) |
 
+## 3.9 C API exact-signature inventory (to finalize before ABI freeze)
+
+This section tracks the concrete signature families that must be frozen before
+implementing the exported `cranelift_dsp` ABI. It is intentionally focused on
+the **shape** differences that matter for parity and compatibility.
+
+### 3.9.1 Global/shared (common signatures)
+
+- `const char* getCLibFaustVersion(void);`
+- `bool startMTDSPFactories(void);`
+- `void stopMTDSPFactories(void);`
+- `void freeCMemory(void* ptr);` (shared utility, declared in support headers)
+
+### 3.9.2 Factory creation (LLVM-style extended shape vs Interpreter reduced shape)
+
+LLVM C API shape examples:
+
+- `createCDSPFactoryFromFile(filename, argc, argv, target, error_msg, opt_level)`
+- `createCDSPFactoryFromString(name_app, dsp_content, argc, argv, target, error_msg, opt_level)`
+- `createCDSPFactoryFromSignals(name_app, signals, argc, argv, target, error_msg, opt_level)`
+- `createCDSPFactoryFromBoxes(name_app, box, argc, argv, target, error_msg, opt_level)`
+
+Interpreter C API shape examples:
+
+- `createCInterpreterDSPFactoryFromFile(filename, argc, argv, error_msg)`
+- `createCInterpreterDSPFactoryFromString(name_app, dsp_content, argc, argv, error_msg)`
+- `createCInterpreterDSPFactoryFromSignals(name_app, signals, argc, argv, error_msg)`
+- `createCInterpreterDSPFactoryFromBoxes(name_app, box, argc, argv, error_msg)`
+
+Cranelift target:
+
+- naming is locked (`createCCranelift...`)
+- source-creation signatures keep `opt_level` and omit LLVM-specific `target`
+
+### 3.9.3 Serialization families (signature group deltas)
+
+LLVM includes target/opt-level parameters in several read functions:
+
+- bitcode read/read-file: `(bit_code, target, error_msg, opt_level)`
+- IR read/read-file: `(ir_code/path, target, error_msg, opt_level)`
+- machine read/read-file: target-aware forms
+
+Interpreter bitcode forms are simpler:
+
+- `readCInterpreterDSPFactoryFromBitcode(bitcode, error_msg)`
+- `readCInterpreterDSPFactoryFromBitcodeFile(bit_code_path, error_msg)`
+
+Cranelift target:
+
+- bitcode family is `v1-required`
+- IR/machine families are `v1-deferred` **without exported symbols** in V1
+
+### 3.9.4 Instance methods (C API)
+
+LLVM and Interpreter C instance signatures are effectively aligned in shape:
+
+- `getNumInputs*`, `getNumOutputs*`, `getSampleRate*`
+- `buildUserInterface*(..., UIGlue*)`
+- `metadata*(..., MetaGlue*)`
+- `init*`, `instanceInit*`, `instanceConstants*`, `instanceResetUserInterface*`, `instanceClear*`
+- `clone*`
+- `compute*(..., int count, FAUSTFLOAT** input, FAUSTFLOAT** output)`
+- `create*Instance(factory)`, `delete*Instance(dsp)`
+
+This aligned shape is the default target for Cranelift V1.
+
 ---
 
-## 4. C++ Wrapper Parity Matrix (Initial Draft)
+## 4. C++ Wrapper Parity Matrix (Phase 0 Working Draft)
 
 Phase 0 requirement is to mirror the **usage strategy** and class roles of:
 
@@ -150,7 +237,7 @@ Initial V1 target classes:
 - `cranelift_dsp` (inherits/behaves as `dsp`)
 - `cranelift_dsp_factory` (inherits/behaves as `dsp_factory`)
 
-### Required V1 wrapper capabilities
+### 4.1 Wrapper class roles (V1)
 
 - create/delete factory wrappers over C API
 - create/delete DSP instances
@@ -158,29 +245,69 @@ Initial V1 target classes:
 - `buildUserInterface`, `metadata`
 - cache-aware factory acquisition/release strategy
 
-### Phase 0 action item (still pending)
+### 4.2 DSP instance class method parity (`llvm_dsp` vs `interpreter_dsp`)
 
-Add a method-by-method matrix (C++ wrappers) mapped from:
+Observed parity is strong; both classes expose the same operational surface.
 
-- `llvm-dsp.h` methods/functions (primary)
-- `interpreter-dsp.h` methods/functions (secondary cross-check)
+| Method family | `llvm_dsp` | `interpreter_dsp` | `cranelift_dsp` target | Status | Notes |
+|---|---|---|---|---|---|
+| Inputs/outputs | `getNumInputs`, `getNumOutputs` | same | same | `v1-required` | |
+| UI build | `buildUserInterface(UI*)` | same | same | `v1-required` | UI mandatory in V1 |
+| Sample rate | `getSampleRate` | same | same | `v1-required` | |
+| Init family | `init`, `instanceInit`, `instanceConstants`, `instanceResetUserInterface`, `instanceClear` | same | same | `v1-required` | |
+| Clone | `clone()` | same | same | `v1-required` | |
+| Metadata | `metadata(Meta*)` | same | same | `v1-required` | Meta mandatory in V1 |
+| Compute | `compute(int, FAUSTFLOAT**, FAUSTFLOAT**)` | same | same | `v1-required` | |
 
-This submatrix is not complete yet and must be finalized before Phase 5.
+### 4.3 DSP factory class method parity (`llvm_dsp_factory` vs `interpreter_dsp_factory`)
+
+Most factory methods overlap; LLVM adds target/class-init specific APIs.
+
+| Method family | `llvm_dsp_factory` | `interpreter_dsp_factory` | `cranelift_dsp_factory` target | Status | Notes |
+|---|---|---|---|---|---|
+| Destructor | `~llvm_dsp_factory()` | `~interpreter_dsp_factory()` | `~cranelift_dsp_factory()` | `v1-required` | |
+| Name | `getName()` | `getName()` | `getName()` | `v1-required` | |
+| SHA key | `getSHAKey()` | `getSHAKey()` | `getSHAKey()` | `v1-required` | |
+| Expanded DSP code | `getDSPCode()` | `getDSPCode()` | `getDSPCode()` | `v1-required` | |
+| JSON | `getJSON()` | `getJSON()` | `getJSON()` | `v1-required` | |
+| Compile options | `getCompileOptions()` | `getCompileOptions()` | `getCompileOptions()` | `v1-required` | |
+| Library list | `getLibraryList()` | `getLibraryList()` | `getLibraryList()` | `v1-required` | |
+| Include pathnames | `getIncludePathnames()` | `getIncludePathnames()` | `getIncludePathnames()` | `v1-required` | |
+| Warning messages | `getWarningMessages()` | `getWarningMessages()` | `getWarningMessages()` | `v1-required` | |
+| Create instance | `createDSPInstance()` | `createDSPInstance()` | `createDSPInstance()` | `v1-required` | |
+| Memory manager set/get | `setMemoryManager/getMemoryManager` | same | same | `v1-deferred` | Family deferred in V1 (C and C++ wrappers) |
+| Target getter | `getTarget()` | n/a | `getTarget()`? | `decision-pending` | Depends on Cranelift target exposure semantics |
+| `classInit(sample_rate)` | present | n/a | `classInit(sample_rate)`? | `decision-pending` | LLVM-only in wrapper |
+
+### 4.4 C++ global/free function parity (factory/cache/serialization)
+
+| Family | LLVM C++ API | Interpreter C++ API | Cranelift C++ target | Status | Notes |
+|---|---|---|---|---|---|
+| Version | `getCLibFaustVersion` | `getCLibFaustVersion` | `getCLibFaustVersion` | `v1-required` | shared C symbol |
+| Cache get by SHA | `getDSPFactoryFromSHAKey` | `getInterpreterDSPFactoryFromSHAKey` | `getCraneliftDSPFactoryFromSHAKey` | `v1-required` | backend-prefixed C++ style expected |
+| Create from file/string/signals/boxes | `createDSPFactoryFrom*` | `createInterpreterDSPFactoryFrom*` | `createCraneliftDSPFactoryFrom*` | `v1-required` | adapted shape: keep `opt_level`, omit LLVM-specific `target` |
+| Delete factory | `deleteDSPFactory` | `deleteInterpreterDSPFactory` | `deleteCraneliftDSPFactory` | `v1-required` | |
+| Cache list/delete-all | `getAllDSPFactories`, `deleteAllDSPFactories` | `getAllInterpreterDSPFactories`, `deleteAllInterpreterDSPFactories` | `getAllCraneliftDSPFactories`, `deleteAllCraneliftDSPFactories` | `v1-required` | |
+| MT start/stop | `startMTDSPFactories`, `stopMTDSPFactories` | same | same | `v1-required` | shared C symbol |
+| Bitcode read/write | `readDSPFactoryFromBitcode*`, `writeDSPFactoryToBitcode*` | `readInterpreterDSPFactoryFromBitcode*`, `writeInterpreterDSPFactoryToBitcode*` | `readCraneliftDSPFactoryFromBitcode*`, `writeCraneliftDSPFactoryToBitcode*` | `v1-required` | |
+| IR read/write | `readDSPFactoryFromIR*`, `writeDSPFactoryToIR*` | n/a | `readCraneliftDSPFactoryFromIR*`, `writeCraneliftDSPFactoryToIR*` | `v1-deferred` | Deferred in V1 **without exported symbols** |
+| Machine/object read/write | `readDSPFactoryFromMachine*`, `writeDSPFactoryToMachine*`, `writeDSPFactoryToObjectcodeFile` | n/a | Cranelift equivalents TBD | `v1-deferred` | Deferred in V1 **without exported symbols** |
+| Foreign function registration | `registerForeignFunction` | n/a | `registerCraneliftForeignFunction` | `v1-deferred` | Naming locked; family deferred in V1 |
+### 4.5 Remaining Phase 0 work for C++ wrappers
+
+- Confirm exact naming of Cranelift C++ free functions for LLVM-only families
+  (`getDSPMachineTarget`, IR/machine/object helpers, foreign-function registration).
+- Freeze adapter behavior where Cranelift cannot implement an LLVM-specific
+  backend artifact in V1 (real implementation vs typed unsupported).
+- Add a final "exact signature" appendix for the chosen Cranelift C++ wrappers
+  after the remaining LLVM-only helper naming decisions are resolved.
 
 ---
 
 ## 5. Open Decisions (Must be Resolved Before Deep Implementation)
 
-1. **Exact Cranelift C names for LLVM-only generic C helpers**
-   - examples: `getCName`, `getCSHAKey`, `getCDSPCode`, `getCTarget`
-   - choose whether to keep LLVM generic names for strict set parity, or use
-     backend-prefixed Cranelift names + aliases
-2. **V1 policy for LLVM-only serialization families (IR/machine)**
-   - real implementation vs typed unsupported stubs with exported symbols
-3. **Memory manager and foreign-function registration C APIs**
-   - full V1 implementation vs exported typed unsupported stubs
-4. **Machine target getter naming and semantics**
-   - shared/global symbol vs backend-prefixed symbol
+1. **Machine target getter semantics (post-V1 if reintroduced)**
+   - meaning/format for Cranelift target exposure if target getters are added after V1
 
 Per repository collaboration rule, these require explicit requester confirmation
 before implementation proceeds on the affected function families.
