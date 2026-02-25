@@ -8029,6 +8029,44 @@ Local validation:
 
 Both checks passed locally.
 
+### Cranelift backend Phase 1.5: lower `AccessType::Struct` globals and make `sine_phasor` body lower in Cranelift
+
+Extended the Cranelift backend subset lowering to consume the newly defined
+`dsp*` layout contract and handle FIR accesses to instance state (`Struct`
+globals), which unlocks the `sine_phasor` fixture on the real lowering path.
+
+Implemented in `crates/codegen/src/backends/cranelift/mod.rs`:
+
+- `LoadVar` / `StoreVar` support for `AccessType::Struct`
+  - addresses computed from `dsp` base pointer + `StructLayoutPlan` offsets
+  - type-aware loads/stores using the field type from the layout contract
+- pointer alias metadata propagation (`LoweredExpr::Ptr { pointee, ... }`)
+  - preserves pointee type for stack aliases like `output0`
+  - enables type-aware `StoreTable` element coercion
+- coercion helper for common bring-up conversions
+  - `f32 -> f64` (`fpromote`) for mixed arithmetic in FIR typed as `Float64`
+  - `f64 -> f32` (`fdemote`) for writing `Float64` expressions to
+    `FAUSTFLOAT` (`f32`) output buffers
+  - small integer widening for boolean comparisons when needed
+- `Cast` support (minimal) using the same coercion path
+- subset pre-scan updated to include:
+  - `LoadVar/StoreVar` with `AccessType::Struct`
+  - `Cast`
+
+Result:
+
+- The `codegen` sine-phasor Cranelift backend test now compiles a **real lowered
+  `compute` body** (`compute_body_lowered() == true`) instead of falling back to
+  the no-op stub.
+
+Validation:
+
+- `cargo fmt --all`
+- `cargo clippy -p codegen --all-targets -- -D warnings`
+- `cargo test -p codegen cranelift -- --nocapture`
+
+All checks passed locally.
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the

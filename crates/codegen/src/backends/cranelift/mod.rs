@@ -270,7 +270,11 @@ fn align_up(value: u32, align: u32) -> u32 {
         return value;
     }
     let rem = value % align;
-    if rem == 0 { value } else { value + (align - rem) }
+    if rem == 0 {
+        value
+    } else {
+        value + (align - rem)
+    }
 }
 
 fn find_module_and_compute(
@@ -323,7 +327,10 @@ fn find_module_and_compute(
     Ok((module_name, compute_id))
 }
 
-fn fir_type_layout_scalar(ptr_size: u32, typ: &FirType) -> Result<LayoutScalar, CraneliftBackendError> {
+fn fir_type_layout_scalar(
+    ptr_size: u32,
+    typ: &FirType,
+) -> Result<LayoutScalar, CraneliftBackendError> {
     let s = match typ {
         FirType::Bool => LayoutScalar { size: 1, align: 1 },
         FirType::Int32 => LayoutScalar { size: 4, align: 4 },
@@ -469,20 +476,65 @@ fn register_host_symbols(jit_builder: &mut JITBuilder) {
 #[derive(Clone, Copy, Debug)]
 enum LoweredExpr {
     Scalar(Value),
-    Ptr(Value),
+    Ptr {
+        value: Value,
+        pointee: Option<FirTypeRef>,
+    },
 }
 
 impl LoweredExpr {
     fn value(self) -> Value {
         match self {
-            Self::Scalar(v) | Self::Ptr(v) => v,
+            Self::Scalar(v) => v,
+            Self::Ptr { value, .. } => value,
         }
     }
 
     fn ptr(self) -> Option<Value> {
         match self {
-            Self::Ptr(v) => Some(v),
+            Self::Ptr { value, .. } => Some(value),
             Self::Scalar(_) => None,
+        }
+    }
+
+    fn pointee(self) -> Option<FirTypeRef> {
+        match self {
+            Self::Ptr { pointee, .. } => pointee,
+            Self::Scalar(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FirTypeRef {
+    Bool,
+    Int32,
+    Int64,
+    Float32,
+    Float64,
+    FaustFloat,
+    Obj,
+    UI,
+    Meta,
+    Sound,
+    Ptr,
+}
+
+impl FirTypeRef {
+    fn from_fir_type(typ: &FirType) -> Self {
+        match typ {
+            FirType::Bool => Self::Bool,
+            FirType::Int32 => Self::Int32,
+            FirType::Int64 => Self::Int64,
+            FirType::Float32 => Self::Float32,
+            FirType::Float64 => Self::Float64,
+            FirType::FaustFloat => Self::FaustFloat,
+            FirType::Obj => Self::Obj,
+            FirType::UI => Self::UI,
+            FirType::Meta => Self::Meta,
+            FirType::Sound => Self::Sound,
+            FirType::Ptr(_) => Self::Ptr,
+            _ => Self::Ptr,
         }
     }
 }
@@ -514,6 +566,7 @@ struct ComputeLowering<'a, 'b, 'c> {
     store: &'a FirStore,
     jit: &'a mut JITModule,
     fb: &'a mut FunctionBuilder<'b>,
+    struct_layout: &'a StructLayoutPlan,
     ptr_ty: Type,
     vars: HashMap<String, LoweredExpr>,
     sinf_ref: Option<FuncRef>,
@@ -560,6 +613,41 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         }
     }
 
+    fn dsp_base_ptr(&self) -> Result<Value, LoweringError> {
+        self.vars.get("dsp").and_then(|v| v.ptr()).ok_or_else(|| {
+            LoweringError::Unsupported("missing `dsp` base pointer argument".to_string())
+        })
+    }
+
+    fn struct_field(&self, name: &str) -> Result<&StructFieldLayout, LoweringError> {
+        self.struct_layout.field(name).ok_or_else(|| {
+            LoweringError::Unsupported(format!(
+                "struct field `{name}` not present in Cranelift dsp* layout contract"
+            ))
+        })
+    }
+
+    fn coerce_value_to_fir_type(
+        &mut self,
+        value: Value,
+        target: &FirType,
+    ) -> Result<Value, LoweringError> {
+        let src_ty = self.fb.func.dfg.value_type(value);
+        let dst_ty = self.fir_type_to_clif(target)?;
+        if src_ty == dst_ty {
+            return Ok(value);
+        }
+        match (src_ty, dst_ty) {
+            (types::F32, types::F64) => Ok(self.fb.ins().fpromote(types::F64, value)),
+            (types::F64, types::F32) => Ok(self.fb.ins().fdemote(types::F32, value)),
+            (types::I8, types::I32) => Ok(self.fb.ins().uextend(types::I32, value)),
+            (types::I8, types::I64) => Ok(self.fb.ins().uextend(types::I64, value)),
+            _ => Err(LoweringError::Unsupported(format!(
+                "unsupported Cranelift coercion {src_ty} -> {dst_ty} for FIR target {target:?}"
+            ))),
+        }
+    }
+
     fn lower_stmt(&mut self, id: FirId) -> Result<(), LoweringError> {
         match match_fir(self.store, id) {
             FirMatch::Block(items) => {
@@ -575,7 +663,14 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 init: Some(init),
             } => {
                 let init_v = self.lower_expr(init, Some(&typ))?;
-                self.vars.insert(name, init_v);
+                let stored = match (&typ, init_v) {
+                    (FirType::Ptr(inner), LoweredExpr::Ptr { value, .. }) => LoweredExpr::Ptr {
+                        value,
+                        pointee: Some(FirTypeRef::from_fir_type(inner)),
+                    },
+                    (_, other) => other,
+                };
+                self.vars.insert(name, stored);
                 Ok(())
             }
             FirMatch::SimpleForLoop {
@@ -590,6 +685,11 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 index,
                 value,
             } => self.lower_store_table_stack(&name, index, value),
+            FirMatch::StoreVar {
+                name,
+                access: AccessType::Struct,
+                value,
+            } => self.lower_store_var_struct(&name, value),
             FirMatch::Drop(value) => {
                 let _ = self.lower_expr(value, None)?;
                 Ok(())
@@ -650,14 +750,45 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         index: FirId,
         value: FirId,
     ) -> Result<(), LoweringError> {
-        let base_ptr = self.vars.get(name).and_then(|v| v.ptr()).ok_or_else(|| {
+        let alias = self.vars.get(name).copied().ok_or_else(|| {
             LoweringError::Unsupported(format!("stack pointer alias `{name}` not found"))
         })?;
+        let base_ptr = alias.ptr().ok_or_else(|| {
+            LoweringError::Unsupported(format!("stack alias `{name}` is not a pointer"))
+        })?;
         let index_v = self.lower_expr(index, Some(&FirType::Int32))?.value();
-        let value_v = self.lower_expr(value, None)?.value();
-        let elem_ty = self.fb.func.dfg.value_type(value_v);
+        let mut value_v = self.lower_expr(value, None)?.value();
+        let elem_ty = if let Some(pointee) = alias.pointee() {
+            let fir_target = match pointee {
+                FirTypeRef::FaustFloat => FirType::FaustFloat,
+                FirTypeRef::Float32 => FirType::Float32,
+                FirTypeRef::Float64 => FirType::Float64,
+                FirTypeRef::Int32 => FirType::Int32,
+                FirTypeRef::Int64 => FirType::Int64,
+                FirTypeRef::Bool => FirType::Bool,
+                _ => {
+                    return Err(LoweringError::Unsupported(format!(
+                        "unsupported stack pointer alias pointee for store_table `{name}`: {pointee:?}"
+                    )));
+                }
+            };
+            value_v = self.coerce_value_to_fir_type(value_v, &fir_target)?;
+            self.fb.func.dfg.value_type(value_v)
+        } else {
+            self.fb.func.dfg.value_type(value_v)
+        };
         let elem_size = i64::from(elem_ty.bytes());
         let addr = self.indexed_addr(base_ptr, index_v, elem_size);
+        self.fb.ins().store(MemFlags::new(), value_v, addr, 0);
+        Ok(())
+    }
+
+    fn lower_store_var_struct(&mut self, name: &str, value: FirId) -> Result<(), LoweringError> {
+        let field = self.struct_field(name)?.clone();
+        let dsp = self.dsp_base_ptr()?;
+        let addr = self.fb.ins().iadd_imm(dsp, i64::from(field.offset_bytes));
+        let mut value_v = self.lower_expr(value, Some(&field.typ))?.value();
+        value_v = self.coerce_value_to_fir_type(value_v, &field.typ)?;
         self.fb.ins().store(MemFlags::new(), value_v, addr, 0);
         Ok(())
     }
@@ -691,6 +822,19 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
             FirMatch::Float64 { value, .. } => {
                 Ok(LoweredExpr::Scalar(self.fb.ins().f64const(value)))
             }
+            FirMatch::LoadVar {
+                name,
+                access: AccessType::Struct,
+                typ,
+            } => {
+                let field = self.struct_field(&name)?.clone();
+                let dsp = self.dsp_base_ptr()?;
+                let addr = self.fb.ins().iadd_imm(dsp, i64::from(field.offset_bytes));
+                let field_clif_ty = self.fir_type_to_clif(&field.typ)?;
+                let raw = self.fb.ins().load(field_clif_ty, MemFlags::new(), addr, 0);
+                let coerced = self.coerce_value_to_fir_type(raw, &typ)?;
+                Ok(LoweredExpr::Scalar(coerced))
+            }
             FirMatch::LoadVar { name, .. } => self.vars.get(&name).copied().ok_or_else(|| {
                 LoweringError::Unsupported(format!("load of unknown variable `{name}`"))
             }),
@@ -709,7 +853,14 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 let elem_ty = self.fir_type_to_clif(&typ)?;
                 let addr = self.indexed_addr(base_ptr, index_v, i64::from(self.ptr_ty.bytes()));
                 let loaded = self.fb.ins().load(elem_ty, MemFlags::new(), addr, 0);
-                Ok(LoweredExpr::Ptr(loaded))
+                let pointee = match &typ {
+                    FirType::Ptr(inner) => Some(FirTypeRef::from_fir_type(inner)),
+                    _ => None,
+                };
+                Ok(LoweredExpr::Ptr {
+                    value: loaded,
+                    pointee,
+                })
             }
             FirMatch::Select2 {
                 cond,
@@ -722,6 +873,11 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 let else_v = self.lower_expr(else_value, Some(&typ))?.value();
                 let bool_cond = self.fb.ins().icmp_imm(IntCC::NotEqual, cond_v, 0);
                 let out = self.fb.ins().select(bool_cond, then_v, else_v);
+                Ok(LoweredExpr::Scalar(out))
+            }
+            FirMatch::Cast { typ, value } => {
+                let src = self.lower_expr(value, None)?.value();
+                let out = self.coerce_value_to_fir_type(src, &typ)?;
                 Ok(LoweredExpr::Scalar(out))
             }
             FirMatch::BinOp { op, lhs, rhs, typ } => self.lower_binop(op, lhs, rhs, &typ),
@@ -800,6 +956,8 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
             };
             return Ok(LoweredExpr::Scalar(out));
         }
+        let l = self.coerce_value_to_fir_type(l, typ)?;
+        let r = self.coerce_value_to_fir_type(r, typ)?;
         let out = match typ {
             FirType::Int32 => match op {
                 FirBinOp::Add => self.fb.ins().iadd(l, r),
@@ -953,6 +1111,7 @@ fn try_lower_compute_body(
     store: &FirStore,
     jit: &mut JITModule,
     fb: &mut FunctionBuilder<'_>,
+    struct_layout: &StructLayoutPlan,
     ptr_ty: Type,
     compute_decl: FirId,
 ) -> Result<bool, LoweringError> {
@@ -983,9 +1142,14 @@ fn try_lower_compute_body(
     let mut vars = HashMap::new();
     for (arg, value) in args.iter().zip(params) {
         let lowered = match arg.typ {
-            FirType::Ptr(_) | FirType::Obj | FirType::UI | FirType::Meta | FirType::Sound => {
-                LoweredExpr::Ptr(value)
-            }
+            FirType::Ptr(ref inner) => LoweredExpr::Ptr {
+                value,
+                pointee: Some(FirTypeRef::from_fir_type(inner)),
+            },
+            FirType::Obj | FirType::UI | FirType::Meta | FirType::Sound => LoweredExpr::Ptr {
+                value,
+                pointee: None,
+            },
             _ => LoweredExpr::Scalar(value),
         };
         vars.insert(arg.name.clone(), lowered);
@@ -995,6 +1159,7 @@ fn try_lower_compute_body(
         store,
         jit,
         fb,
+        struct_layout,
         ptr_ty,
         vars,
         sinf_ref: None,
@@ -1026,6 +1191,11 @@ fn subset_stmt_shape(store: &FirStore, id: FirId) -> bool {
             init: Some(init),
             ..
         } => subset_expr_shape(store, init),
+        FirMatch::StoreVar {
+            access: AccessType::Struct,
+            value,
+            ..
+        } => subset_expr_shape(store, value),
         FirMatch::SimpleForLoop {
             upper,
             body,
@@ -1051,7 +1221,7 @@ fn subset_expr_shape(store: &FirStore, id: FirId) -> bool {
         | FirMatch::Float32 { .. }
         | FirMatch::Float64 { .. } => true,
         FirMatch::LoadVar {
-            access: AccessType::Stack | AccessType::FunArgs | AccessType::Loop,
+            access: AccessType::Stack | AccessType::FunArgs | AccessType::Loop | AccessType::Struct,
             ..
         } => true,
         FirMatch::LoadTable {
@@ -1076,6 +1246,7 @@ fn subset_expr_shape(store: &FirStore, id: FirId) -> bool {
             fir::FirMathOp::from_symbol(&name) == Some(fir::FirMathOp::Sin)
                 && args.into_iter().all(|x| subset_expr_shape(store, x))
         }
+        FirMatch::Cast { value, .. } => subset_expr_shape(store, value),
         _ => false,
     }
 }
@@ -1084,6 +1255,7 @@ fn declare_compute_stub(
     module_name: &str,
     compute_decl: FirId,
     store: &FirStore,
+    struct_layout: &StructLayoutPlan,
     jit: &mut JITModule,
 ) -> Result<(String, usize, bool), CraneliftBackendError> {
     let ptr_ty = jit.target_config().pointer_type();
@@ -1115,7 +1287,7 @@ fn declare_compute_stub(
         fb.switch_to_block(entry);
         fb.seal_block(entry);
         if compute_body_matches_current_subset(store, compute_decl) {
-            match try_lower_compute_body(store, jit, &mut fb, ptr_ty, compute_decl) {
+            match try_lower_compute_body(store, jit, &mut fb, struct_layout, ptr_ty, compute_decl) {
                 Ok(lowered) => compute_body_lowered = lowered,
                 Err(LoweringError::Unsupported(reason)) => {
                     let _ = reason;
@@ -1170,7 +1342,7 @@ pub fn compile_fir_to_cranelift_jit(
     let ptr_size = jit.target_config().pointer_type().bytes();
     let struct_layout = build_struct_layout_for_module(store, module, ptr_size)?;
     let (compute_symbol_name, compute_entry_addr, compute_body_lowered) =
-        declare_compute_stub(&module_name, compute_decl, store, &mut jit)?;
+        declare_compute_stub(&module_name, compute_decl, store, &struct_layout, &mut jit)?;
     if compute_entry_addr == 0 {
         return Err(CraneliftBackendError::jit_failure(
             "finalized compute symbol address is null",
@@ -1224,19 +1396,13 @@ mod tests {
         assert_eq!(compiled.compute_symbol_name(), "mydsp::compute");
         assert!(compiled.has_compute_entry());
         assert_ne!(compiled.compute_entry_addr(), 0);
-        assert!(!compiled.compute_body_lowered());
+        assert!(compiled.compute_body_lowered());
         let layout = compiled.struct_layout();
         assert_eq!(layout.align_bytes(), 8);
         assert_eq!(layout.size_bytes(), 16);
         assert_eq!(layout.fields().len(), 3);
-        assert_eq!(
-            layout.field("fFreq").expect("fFreq field").offset_bytes,
-            0
-        );
-        assert_eq!(
-            layout.field("fGain").expect("fGain field").offset_bytes,
-            4
-        );
+        assert_eq!(layout.field("fFreq").expect("fFreq field").offset_bytes, 0);
+        assert_eq!(layout.field("fGain").expect("fGain field").offset_bytes, 4);
         assert_eq!(
             layout.field("fPhase").expect("fPhase field").offset_bytes,
             8
