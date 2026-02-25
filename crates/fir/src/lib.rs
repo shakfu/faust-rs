@@ -1977,8 +1977,8 @@ fn child_ids(node: &FirMatch) -> Vec<FirId> {
         | FirMatch::Cast { value: index, .. }
         | FirMatch::Bitcast { value: index, .. }
         | FirMatch::StoreVar { value: index, .. }
-        | FirMatch::SimpleForLoop { upper: index, .. }
         | FirMatch::Drop(index) => vec![*index],
+        FirMatch::SimpleForLoop { upper, body, .. } => vec![*upper, *body],
         FirMatch::BinOp { lhs, rhs, .. } => vec![*lhs, *rhs],
         FirMatch::Select2 {
             cond,
@@ -2623,6 +2623,65 @@ mod tests {
             }
         );
         assert_eq!(match_fir(&store, block), FirMatch::Block(vec![loop_, ret]));
+    }
+
+    #[test]
+    fn dump_fir_expands_simple_for_loop_body() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let one = b.int32(1);
+        let upper = b.int32(8);
+        let body_stmt = b.store_var("acc", AccessType::Stack, one);
+        let body = b.block(&[body_stmt]);
+        let loop_ = b.simple_for_loop("i", upper, body, false);
+        let root = b.block(&[loop_]);
+
+        let dump = dump_fir(&store, root);
+        assert!(dump.contains("SimpleForLoop"));
+        assert!(dump.contains("StoreVar { name: \"acc\""));
+        assert!(dump.contains("Int32 { value: 1"));
+        assert!(dump.contains(&format!("#{}", body.as_u32())));
+        assert!(dump.contains(&format!("#{}", body_stmt.as_u32())));
+    }
+
+    #[test]
+    fn dump_fir_expands_for_loop_body() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let zero = b.int32(0);
+        let one = b.int32(1);
+        let ten = b.int32(10);
+        let init = b.declare_var("i", FirType::Int32, AccessType::Loop, Some(zero));
+        let body_stmt = b.store_var("acc", AccessType::Stack, one);
+        let body = b.block(&[body_stmt]);
+        let loop_ = b.for_loop("i", init, ten, one, body, false);
+        let root = b.block(&[loop_]);
+
+        let dump = dump_fir(&store, root);
+        assert!(dump.contains("ForLoop {"));
+        assert!(dump.contains("StoreVar { name: \"acc\""));
+        assert!(dump.contains(&format!("#{}", body.as_u32())));
+        assert!(dump.contains(&format!("#{}", body_stmt.as_u32())));
+    }
+
+    #[test]
+    fn dump_fir_expands_iterator_for_loop_body() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let one = b.int32(1);
+        let body_stmt = b.store_var("acc", AccessType::Stack, one);
+        let body = b.block(&[body_stmt]);
+        let loop_ = b.iterator_for_loop(&["i0", "i1"], false, body);
+        let root = b.block(&[loop_]);
+
+        let dump = dump_fir(&store, root);
+        assert!(dump.contains("IteratorForLoop {"));
+        assert!(dump.contains("StoreVar { name: \"acc\""));
+        assert!(dump.contains(&format!("#{}", body.as_u32())));
+        assert!(dump.contains(&format!("#{}", body_stmt.as_u32())));
     }
 
     #[test]

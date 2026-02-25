@@ -7376,3 +7376,26 @@ Following the implementation of `box_arity` caching, analyzed the remaining C++ 
 
 - Validation:
   - `cargo test -p interp-ffi`
+
+### Fix `--dump-fir`: `SimpleForLoop` body omitted from recursive dump traversal
+
+Observed on `faust-rs --dump-fir` for
+`/Users/letz/Developpements/Recherche/WAC/WAC 2017/Faust/mix.dsp`:
+the fast-lane FIR `compute` function printed a `SimpleForLoop` node with a
+`body: TreeId(...)` reference, but the dump did not expand that body subtree,
+making the FIR appear incomplete.
+
+Root cause:
+- `crates/fir/src/lib.rs` `child_ids()` handled
+  `FirMatch::SimpleForLoop { upper, .. }` by returning only `upper`, omitting
+  the loop `body`.
+- `dump_fir()` therefore printed the loop header (`Debug`) but never recursed
+  into the actual compute statements.
+
+Fix:
+- `child_ids()` now returns both `upper` and `body` for `SimpleForLoop`.
+- Added a regression test in `crates/fir/src/lib.rs` asserting that `dump_fir()`
+  expands a `SimpleForLoop` body and includes its `StoreVar` statement.
+
+Validation:
+- `cargo test -p fir dump_fir_expands_simple_for_loop_body`
