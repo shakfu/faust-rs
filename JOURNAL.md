@@ -7568,6 +7568,55 @@ Decisions/doc updates:
 Validation:
 - Documentation/header placeholder changes only (no code/tests run)
 
+### Cranelift FFI Phase 1: executable C ABI scaffold for `cranelift_dsp` factory/instance lifecycle
+
+Moved `cranelift-ffi` from header-only placeholders to a first **executable C
+ABI scaffold** so the Cranelift FFI surface can be exercised end-to-end before
+real Cranelift JIT/lowering integration.
+
+Implemented (scaffold behavior only, no Cranelift codegen yet):
+
+- `crates/cranelift-ffi/src/types.rs`
+  - heap-owned opaque wrappers `CraneliftDspFactory` / `CraneliftDspInstance`
+  - minimal placeholder factory/instance state (name/SHA/json/compile options,
+    sample rate, lifecycle flags)
+  - allocation helpers for factories/instances and C strings
+  - `UIGlue` / `MetaGlue` callback tables kept as parity-target types
+- `crates/cranelift-ffi/src/factory.rs`
+  - exported `extern "C"` symbols for:
+    - version (`getCLibFaustVersion`)
+    - factory creation from file/string with locked Cranelift signature shape
+      (`opt_level` kept, LLVM `target` omitted)
+    - factory create-from-signals/boxes (symbols present, typed placeholder errors)
+    - factory delete + basic query functions (`Name`, `SHAKey`, `DSPCode`,
+      `JSON`, `CompileOptions`)
+    - cache function family placeholders (`getBySHA`, `getAll`, `deleteAll`)
+    - bitcode function family placeholders (`read/write...Bitcode[File]`)
+    - `startMTDSPFactories`, `stopMTDSPFactories`, `freeCMemory`
+  - null-safety and C error buffer (`4096`) writing helpers
+- `crates/cranelift-ffi/src/instance.rs`
+  - exported `extern "C"` symbols for instance lifecycle and DSP methods:
+    - create/delete/clone
+    - I/O arity getters and sample-rate getter
+    - init/instanceInit/instanceConstants/instanceResetUserInterface/instanceClear
+    - `buildUserInterface`, `metadata`, `compute`
+  - scaffold runtime behavior:
+    - lifecycle state updates (`sample_rate`, `initialized`, `cycle`)
+    - UI entry point no-op
+    - metadata emits a placeholder `backend=cranelift-scaffold` declaration
+    - compute is a no-op (increments internal cycle counter)
+
+Notes:
+
+- This is intentionally a **scaffold ABI**, not semantic parity yet.
+- The goal is to validate symbol presence, pointer ownership shape, lifecycle
+  flow, and callback path wiring before connecting the real backend.
+
+Validation:
+- `cargo fmt --all`
+- `cargo clippy -p cranelift-ffi --all-targets -- -D warnings`
+- `cargo test -p cranelift-ffi` (10 tests passed)
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the
