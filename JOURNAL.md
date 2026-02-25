@@ -7459,3 +7459,28 @@ Validation:
 - `cargo clippy -p xtask -- -D warnings`
 - `cargo clippy -p interp-ffi -- -D warnings`
 - `cargo clippy --workspace --all-targets -- -D warnings`
+
+### New planning document: Cranelift backend + `cranelift_dsp` V1 contract (C/C++)
+
+Added `porting/cranelift-backend-plan-en.md` as a detailed implementation plan
+for a new Cranelift backend and its exported runtime layer.
+
+Key planning decisions captured in the document:
+
+- V1 includes a new backend module (`codegen::backends::cranelift`) and a new
+  FFI export crate (`cranelift-ffi`).
+- V1 must provide an exported C/C++ `cranelift_dsp` family (factory + instance)
+  with:
+  - the same exported function set strategy as `llvm_dsp` / `interpreter_dsp`,
+  - the same cache/factory lifecycle strategy (parity target),
+  - UI/meta callable paths (`buildUserInterface`, `metadata`) included in V1.
+- FIR UI/meta statements are explicitly part of the V1 lowering subset.
+- Phase 0 now requires a function-by-function parity matrix for exported C/C++
+  functions and cache semantics against `llvm_dsp` / `interpreter_dsp`.
+- The plan explicitly mandates requester confirmation during porting whenever
+  ambiguities remain (ABI/cache/UI-meta/unsupported-FIR policy, etc.).
+
+The document is planning-only at this stage (no implementation started yet).
+
+Validation:
+- Documentation change only (no code/tests run)
