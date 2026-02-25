@@ -3,6 +3,10 @@
 // Planned role:
 // - C++ wrapper API for `cranelift_dsp` / `cranelift_dsp_factory`.
 // - V1 parity target: same usage strategy as `llvm_dsp` / `interpreter_dsp`.
+// - C API naming convention is locked to backend-prefixed symbols, e.g.
+//   `createCCraneliftDSPFactoryFromFile` / `createCCraneliftDSPInstance`
+//   (see `cranelift-dsp-c.h` and
+//   `porting/cranelift-dsp-ffi-parity-matrix-en.md`).
 //
 // This header is intentionally incomplete in Phase 1. Exact class members and
 // wrappers will be filled after the mandatory export parity matrix is defined.

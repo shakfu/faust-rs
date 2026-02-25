@@ -7540,3 +7540,30 @@ Validation:
 - `cargo fmt --all`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace --all-targets`
+
+### Cranelift FFI Phase 0: lock backend-prefixed C API naming and add export parity matrix draft
+
+Continued the Cranelift backend porting preparation by locking the **C API
+naming convention** and introducing the first dedicated **FFI export parity
+matrix** document for `cranelift_dsp`.
+
+Decisions/doc updates:
+
+- Locked the Cranelift C API naming style to the interpreter-style backend
+  prefix (user decision), with examples:
+  - `createCCraneliftDSPFactoryFromFile`
+  - `createCCraneliftDSPFactoryFromString`
+  - `createCCraneliftDSPInstance`
+- Clarified in the Cranelift backend plan that this affects naming only; the
+  exported function **set/strategy** still targets parity with `llvm_dsp`
+  (primary reference), with `interpreter_dsp` as secondary cross-check.
+- Added `porting/cranelift-dsp-ffi-parity-matrix-en.md` to track function-family
+  parity, V1-required/deferred status, and open decisions before filling the
+  final `cranelift_dsp` C/C++ API contract.
+- Updated the `cranelift-dsp` placeholder headers to reference the parity matrix
+  and encode the locked naming convention, including placeholder declarations
+  for the first target symbols (`createCCraneliftDSPFactoryFromFile`,
+  `createCCraneliftDSPInstance`).
+
+Validation:
+- Documentation/header placeholder changes only (no code/tests run)

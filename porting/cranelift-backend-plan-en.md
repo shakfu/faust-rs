@@ -250,6 +250,17 @@ If `llvm_dsp` and `interpreter_dsp` differ, use `llvm_dsp` as the default
 target and document the divergence explicitly in the parity matrix and
 `JOURNAL.md` before implementation proceeds on the affected function family.
 
+**C API naming convention (locked):**
+
+- Use the interpreter-style backend-prefixed naming pattern for Cranelift C API
+  functions (examples):
+  - `createCCraneliftDSPFactoryFromFile`
+  - `createCCraneliftDSPFactoryFromString`
+  - `createCCraneliftDSPInstance`
+- The exported function **set/strategy** remains a parity target against the
+  `llvm_dsp` family; only the backend-specific naming prefix follows the
+  `interpreter_dsp` style.
+
 ## 5.2 DSP state ownership (v1)
 
 - `JitDspModule` owns compiled machine code and metadata (field layout, function registry).
