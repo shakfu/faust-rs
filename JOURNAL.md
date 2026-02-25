@@ -7924,6 +7924,67 @@ Local validation (syntax-only):
 
 Both syntax-only checks passed locally after the smoke expansion.
 
+### Cranelift backend Phase 1.5: start real backend implementation (JIT `compute` + first FIR body lowering subset)
+
+Started the **real Cranelift backend implementation** in `codegen` (beyond the
+placeholder scaffold), with the user-approved bring-up strategy:
+
+- prioritize the backend/JIT path first,
+- keep `FAUSTFLOAT = f32` initially (pragmatic bring-up),
+- start with `compute` only (UI/meta still handled by scaffold layers).
+
+Implemented in `crates/codegen/src/backends/cranelift/mod.rs`:
+
+- real Cranelift JIT integration in `compile_fir_to_cranelift_jit(...)`
+  - validates FIR module shape (`Module` root + `declarations` block)
+  - locates the FIR `compute` function definition
+  - creates a native Cranelift JIT module and emits/finalizes a `compute`
+    symbol
+- portable JIT initialization for non-x86_64 hosts (notably Apple Silicon)
+  - uses `JITBuilder::with_isa(...)` with explicit native ISA flags
+  - forces `is_pic=false` and `use_colocated_libcalls=false` for bring-up
+- host symbol registration for math calls used by the subset lowering
+  - `sinf` and `sin`
+- first FIR body lowering subset for `compute` (with `FAUSTFLOAT -> f32`)
+  - `Block`
+  - `DeclareVar` stack alias (`AccessType::Stack`, `init: Some(...)`)
+  - `SimpleForLoop` (forward)
+  - `StoreTable` (`AccessType::Stack`)
+  - `BinOp` arithmetic subset
+  - `FunCall std::sin` / `sin`
+- explicit fallback policy during bring-up
+  - if the `compute` body is outside the currently supported subset, emit a
+    valid no-op `compute` stub instead of failing hard
+  - this preserves existing integration/preflight flows while lowering support
+    grows incrementally
+- `JitDspModule` diagnostics/introspection
+  - records finalized `compute` symbol address
+  - exposes `compute_body_lowered()` to distinguish real lowering vs stub
+
+Dependency updates:
+
+- `crates/codegen/Cargo.toml`
+  - added Cranelift runtime/codegen crates:
+    `cranelift-codegen`, `cranelift-frontend`, `cranelift-jit`,
+    `cranelift-module`, `cranelift-native`
+- `Cargo.lock` refreshed accordingly
+
+Tests added/updated:
+
+- rejects non-module FIR roots with typed backend error
+- compiles the existing `sine_phasor` fixture to a real JIT `compute` symbol
+  (currently falls back to stub because the body exceeds the supported subset)
+- new subset-specific FIR fixture verifies that the requested lowering subset is
+  actually lowered (`compute_body_lowered() == true`)
+
+Local validation:
+
+- `cargo test -p codegen cranelift -- --nocapture`
+- `cargo fmt --all`
+- `cargo clippy -p codegen --all-targets -- -D warnings`
+
+All checks passed locally.
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the

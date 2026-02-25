@@ -10,3 +10,8 @@ workspace = true
 
 [dependencies]
 fir = { path = "../fir" }
+cranelift-codegen = "0.117"
+cranelift-frontend = "0.117"
+cranelift-jit = "0.117"
+cranelift-module = "0.117"
+cranelift-native = "0.117"
