@@ -6,7 +6,7 @@
 //! - Shared signature-validation helper:
 //!   - internal [`faust_api`] module
 //! - Scaffolded backends (planned parity targets):
-//!   - `cmajor`, `codebox`, `csharp`, `dlang`, `interp`, `jax`, `jsfx`,
+//!   - `cranelift`, `cmajor`, `codebox`, `csharp`, `dlang`, `interp`, `jax`, `jsfx`,
 //!     `julia`, `llvm`, `rust`, `sdf3`, `vhdl`, `wasm`.
 //!
 //! # Module contract
@@ -26,6 +26,7 @@ pub mod c;
 pub mod cmajor;
 pub mod codebox;
 pub mod cpp;
+pub mod cranelift;
 pub mod csharp;
 pub mod dlang;
 pub mod interp;

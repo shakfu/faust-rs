@@ -1,0 +1,24 @@
+[package]
+name = "cranelift-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "faust_cranelift"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+codegen = { path = "../codegen" }
+compiler = { path = "../compiler" }
+
+# FFI crate will require raw pointers/unsafe in later phases; allow is local to
+# this crate so the workspace default can remain strict.
+[lints.rust]
+unsafe_code = "allow"
+unused_attributes = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+all = "warn"

@@ -7499,3 +7499,44 @@ Cranelift backend plan and applies it repository-wide for parity-sensitive work.
 
 Validation:
 - Documentation change only (no code/tests run)
+
+### Start Cranelift porting (Phase 1 scaffolding): `codegen` backend + `cranelift-ffi` crate skeleton
+
+Started the Cranelift backend implementation with a **Phase 1 scaffold** aligned
+with `porting/cranelift-backend-plan-en.md` (no lowering/JIT execution yet).
+
+Implemented:
+
+- `crates/codegen/src/backends/cranelift/mod.rs`
+  - stable backend id (`"cranelift"`)
+  - scaffolded options surface (`CraneliftOptions`, `CraneliftOptLevel`)
+  - typed backend error surface (`CraneliftBackendError`, stable code
+    `FRS-CGEN-CLIF-0001`)
+  - placeholder entry point `compile_fir_to_cranelift_jit(...)` returning a
+    typed `NotImplemented` error
+  - unit tests for backend id stability and typed placeholder behavior
+- `crates/codegen/src/backends/mod.rs`
+  - registered `pub mod cranelift;`
+  - updated backend module documentation list
+- New workspace member: `crates/cranelift-ffi`
+  - `Cargo.toml` scaffold (cdylib/staticlib target)
+  - `src/lib.rs` + scaffold modules (`cache`, `factory`, `instance`, `types`, `ui`)
+  - placeholder `UIGlue` / `MetaGlue` callback structs in `types.rs`
+  - unit tests for scaffold module/type presence
+  - placeholder headers:
+    - `crates/cranelift-ffi/include/cranelift-dsp-c.h`
+    - `crates/cranelift-ffi/include/cranelift-dsp.h`
+    documenting the Phase-0 parity-matrix requirement before filling the exact
+    export list
+
+Intentional scope limit (Phase 1):
+
+- no Cranelift crates added yet
+- no FIR lowering implementation
+- no JIT runtime
+- no exported C ABI symbols yet (headers are placeholders only)
+
+Validation:
+- `cargo fmt --all`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test --workspace --all-targets`
