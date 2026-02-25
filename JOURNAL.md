@@ -7344,3 +7344,35 @@ Following the implementation of `box_arity` caching, analyzed the remaining C++ 
 - Identified upcoming memoization requirements for the Rust port: `normalize` (signal simplification), `transform` (recursiveness checking), and `codegen` (occurrence counting and compute delay inference).
 - Documented these findings and the "Explicit Cache Threading" Rust pattern in `porting/phases/phase-0-memoization-strategy-en.md`.
 - Linked the new strategy document in `porting/faust-rust-porting-plan-en.md`.
+
+## 2026-02-25
+
+### `interp-ffi`: brancher la compilation factory sur le backend Interp fast-lane
+
+- Implemented `createCInterpreterDSPFactoryFromFile` and
+  `createCInterpreterDSPFactoryFromString` in `crates/interp-ffi/src/factory.rs`
+  using the top-level `compiler` facade with `SignalFirLane::TransformFastLane`.
+- The FFI path now compiles Faust source to interpreter `.fbc` text, then
+  reuses `codegen::backends::interp::read_fbc` to build the exported
+  `FbcDspFactory<f32>` (same cache insertion path as bitcode import).
+- Added minimal FFI option parsing for common compile arguments needed to test
+  the full chain with imports/class naming:
+  - `-I <path>` / `-Ipath` (extra import search paths)
+  - `-cn <name>` (module/class name override)
+- Added unit tests in `crates/interp-ffi/src/factory.rs`:
+  - FFI argv parsing (`-I`, `-cn`)
+  - end-to-end source-string compilation through Interp fast-lane
+
+### Factorisation: default import search base
+
+- Promoted the compiler helper to a public API:
+  `compiler::default_import_search_base(&Path) -> PathBuf`
+  in `crates/compiler/src/lib.rs`.
+- `crates/interp-ffi` now uses this helper instead of duplicating the
+  `path.parent().unwrap_or(\".\")` logic, keeping import path behavior aligned
+  with the compiler facade.
+- Added `compiler` dependency to `crates/interp-ffi/Cargo.toml`
+  (and corresponding `Cargo.lock` update).
+
+- Validation:
+  - `cargo test -p interp-ffi`

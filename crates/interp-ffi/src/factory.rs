@@ -8,14 +8,17 @@
 //!   `codegen::backends::interp::serial::read_fbc`.
 //! - `writeCInterpreterDSPFactoryToBitcode[File]` — fully implemented via
 //!   `codegen::backends::interp::serial::write_fbc`.
-//! - `createCInterpreterDSPFactoryFromFile/String/Signals/Boxes` — return
-//!   `null` (full compiler pipeline not yet available in this crate).
+//! - `createCInterpreterDSPFactoryFromFile/String` — implemented through the
+//!   top-level `compiler` crate wired to the interpreter backend fast-lane.
+//! - `createCInterpreterDSPFactoryFromSignals/Boxes` — return `null`.
 //! - Cache management functions — fully implemented.
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::io::BufReader;
+use std::path::{Path, PathBuf};
 
 use codegen::backends::interp::{FAUST_VERSION, read_fbc, write_fbc};
+use compiler::{Compiler as FaustCompiler, SignalFirLane, default_import_search_base};
 
 use crate::cache::{
     cache_all_sha_keys, cache_drain, cache_insert, cache_lookup, cache_remove_by_ptr, start_mt,
@@ -181,47 +184,108 @@ pub unsafe extern "C" fn writeCInterpreterDSPFactoryToBitcodeFile(
     }
 }
 
-// ── Unimplemented factory constructors ───────────────────────────────────────
-// These require the full Faust compiler pipeline which is not yet available.
+// ── Factory constructors (compiler pipeline) ─────────────────────────────────
 
-/// Not implemented — returns null.
+/// Create a DSP factory from a Faust source file using the compiler fast-lane.
 ///
 /// # Safety
-/// All pointer arguments are accepted but the function always returns null.
+/// Pointer arguments must follow the C API contract (null-terminated strings).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn createCInterpreterDSPFactoryFromFile(
-    _filename: *const c_char,
-    _argc: i32,
-    _argv: *const *const c_char,
+    filename: *const c_char,
+    argc: i32,
+    argv: *const *const c_char,
     error_msg: *mut c_char,
 ) -> *mut InterpreterDspFactory {
     unsafe {
-        write_error(
-            error_msg,
-            "createCInterpreterDSPFactoryFromFile: not implemented (full compiler pipeline not available)",
-        );
-        std::ptr::null_mut()
+        if filename.is_null() {
+            write_error(error_msg, "null filename pointer");
+            return std::ptr::null_mut();
+        }
+        let filename = match CStr::from_ptr(filename).to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                write_error(error_msg, &format!("invalid UTF-8 in filename: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        let argv = match decode_c_argv(argc, argv) {
+            Ok(args) => args,
+            Err(e) => {
+                write_error(error_msg, &e);
+                return std::ptr::null_mut();
+            }
+        };
+        match compile_factory_from_file_fastlane(Path::new(filename), &argv) {
+            Ok(factory) => {
+                let sha = factory.sha_key.clone();
+                let ptr = alloc_factory(factory);
+                cache_insert(&sha, ptr);
+                ptr
+            }
+            Err(e) => {
+                write_error(error_msg, &e);
+                std::ptr::null_mut()
+            }
+        }
     }
 }
 
-/// Not implemented — returns null.
+/// Create a DSP factory from a Faust source string using the compiler fast-lane.
 ///
 /// # Safety
-/// All pointer arguments are accepted but the function always returns null.
+/// Pointer arguments must follow the C API contract (null-terminated strings).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn createCInterpreterDSPFactoryFromString(
-    _name_app: *const c_char,
-    _dsp_content: *const c_char,
-    _argc: i32,
-    _argv: *const *const c_char,
+    name_app: *const c_char,
+    dsp_content: *const c_char,
+    argc: i32,
+    argv: *const *const c_char,
     error_msg: *mut c_char,
 ) -> *mut InterpreterDspFactory {
     unsafe {
-        write_error(
-            error_msg,
-            "createCInterpreterDSPFactoryFromString: not implemented (full compiler pipeline not available)",
-        );
-        std::ptr::null_mut()
+        if dsp_content.is_null() {
+            write_error(error_msg, "null dsp_content pointer");
+            return std::ptr::null_mut();
+        }
+        let source_name = if name_app.is_null() {
+            "FaustDSP"
+        } else {
+            match CStr::from_ptr(name_app).to_str() {
+                Ok(s) if !s.is_empty() => s,
+                Ok(_) => "FaustDSP",
+                Err(e) => {
+                    write_error(error_msg, &format!("invalid UTF-8 in name_app: {e}"));
+                    return std::ptr::null_mut();
+                }
+            }
+        };
+        let dsp_content = match CStr::from_ptr(dsp_content).to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                write_error(error_msg, &format!("invalid UTF-8 in dsp_content: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        let argv = match decode_c_argv(argc, argv) {
+            Ok(args) => args,
+            Err(e) => {
+                write_error(error_msg, &e);
+                return std::ptr::null_mut();
+            }
+        };
+        match compile_factory_from_string_fastlane(source_name, dsp_content, &argv) {
+            Ok(factory) => {
+                let sha = factory.sha_key.clone();
+                let ptr = alloc_factory(factory);
+                cache_insert(&sha, ptr);
+                ptr
+            }
+            Err(e) => {
+                write_error(error_msg, &e);
+                std::ptr::null_mut()
+            }
+        }
     }
 }
 
@@ -453,4 +517,191 @@ fn json_escape(s: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+/// Minimal subset of Faust CLI-like arguments interpreted by `interp-ffi`
+/// factory constructors.
+///
+/// This intentionally supports only the options needed to exercise the full
+/// parser/eval/propagate -> signal->FIR (fast-lane) -> interp backend chain
+/// from the C API during parity testing.
+#[derive(Debug, Default)]
+struct FfiCompileArgs {
+    /// Extra import search paths collected from `-I <path>` / `-Ipath`.
+    search_paths: Vec<PathBuf>,
+    /// Optional module/class name override from `-cn <name>`.
+    module_name: Option<String>,
+}
+
+/// Compile a Faust source file to an interpreter factory via the compiler
+/// facade using the transform fast-lane.
+///
+/// Pipeline used:
+/// `parse -> eval -> propagate -> transform::signal_fir -> codegen::interp`
+///
+/// The resulting `.fbc` text is immediately re-read with `read_fbc` so this
+/// FFI layer reuses the same factory construction path as bitcode import.
+fn compile_factory_from_file_fastlane(
+    path: &Path,
+    argv: &[String],
+) -> Result<codegen::backends::interp::FbcDspFactory<f32>, String> {
+    let parsed = parse_ffi_compile_args(argv)?;
+    let mut interp_options = codegen::backends::interp::InterpOptions::default();
+    interp_options.module_name = parsed.module_name;
+
+    let mut search_paths = vec![default_import_search_base(path)];
+    search_paths.extend(parsed.search_paths);
+
+    let compiler = FaustCompiler::new();
+    let fbc = compiler
+        .compile_file_to_interp_with_lane(
+            path,
+            &search_paths,
+            &interp_options,
+            SignalFirLane::TransformFastLane,
+        )
+        .map_err(|e| format!("{e}"))?;
+    compile_factory_from_fbc_text(&fbc)
+}
+
+/// Compile a Faust source string to an interpreter factory via the compiler
+/// facade using the transform fast-lane.
+///
+/// Unlike the file-based constructor, this path does not resolve imports from a
+/// source-file parent directory; only the supported parsed options are applied.
+fn compile_factory_from_string_fastlane(
+    source_name: &str,
+    source: &str,
+    argv: &[String],
+) -> Result<codegen::backends::interp::FbcDspFactory<f32>, String> {
+    let parsed = parse_ffi_compile_args(argv)?;
+    let mut interp_options = codegen::backends::interp::InterpOptions::default();
+    interp_options.module_name = parsed.module_name.or_else(|| Some(source_name.to_owned()));
+
+    let compiler = FaustCompiler::new();
+    let fbc = compiler
+        .compile_source_to_interp_with_lane(
+            source_name,
+            source,
+            &interp_options,
+            SignalFirLane::TransformFastLane,
+        )
+        .map_err(|e| format!("{e}"))?;
+    compile_factory_from_fbc_text(&fbc)
+}
+
+/// Parse in-memory `.fbc` text emitted by the compiler facade back into an
+/// owned interpreter factory.
+///
+/// This keeps the exported FFI factory allocation path identical regardless of
+/// whether the source came from direct bitcode import or source compilation.
+fn compile_factory_from_fbc_text(
+    fbc: &str,
+) -> Result<codegen::backends::interp::FbcDspFactory<f32>, String> {
+    let mut reader = BufReader::new(fbc.as_bytes());
+    read_fbc::<f32>(&mut reader).map_err(|e| format!("{e}"))
+}
+
+/// Decode the `argc`/`argv` pair from the C API into owned UTF-8 Rust strings.
+///
+/// # Safety
+/// - When `argc > 0`, `argv` must be non-null and point to at least `argc`
+///   entries.
+/// - Each entry must be a valid null-terminated C string.
+unsafe fn decode_c_argv(argc: i32, argv: *const *const c_char) -> Result<Vec<String>, String> {
+    if argc <= 0 {
+        return Ok(Vec::new());
+    }
+    if argv.is_null() {
+        return Err("argv is null while argc > 0".to_owned());
+    }
+    let argc = usize::try_from(argc).map_err(|_| "invalid negative argc".to_owned())?;
+    let raw_args = unsafe { std::slice::from_raw_parts(argv, argc) };
+    let mut result = Vec::with_capacity(raw_args.len());
+    for (index, ptr) in raw_args.iter().copied().enumerate() {
+        if ptr.is_null() {
+            return Err(format!("argv[{index}] is null"));
+        }
+        let value = unsafe { CStr::from_ptr(ptr) }
+            .to_str()
+            .map_err(|e| format!("invalid UTF-8 in argv[{index}]: {e}"))?;
+        result.push(value.to_owned());
+    }
+    Ok(result)
+}
+
+/// Parse the FFI-supported subset of Faust CLI options.
+///
+/// Currently recognized:
+/// - `-I <path>`
+/// - `-Ipath`
+/// - `-cn <name>`
+///
+/// Unknown options are ignored so callers can pass broader option vectors while
+/// the FFI implementation incrementally grows coverage.
+fn parse_ffi_compile_args(argv: &[String]) -> Result<FfiCompileArgs, String> {
+    let mut parsed = FfiCompileArgs::default();
+    let mut i = 0usize;
+    while i < argv.len() {
+        let arg = &argv[i];
+        if arg == "-I" {
+            let Some(value) = argv.get(i + 1) else {
+                return Err("missing path after -I".to_owned());
+            };
+            parsed.search_paths.push(PathBuf::from(value));
+            i += 2;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("-I") {
+            if !value.is_empty() {
+                parsed.search_paths.push(PathBuf::from(value));
+                i += 1;
+                continue;
+            }
+        }
+        if arg == "-cn" {
+            let Some(value) = argv.get(i + 1) else {
+                return Err("missing class name after -cn".to_owned());
+            };
+            parsed.module_name = Some(value.clone());
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    Ok(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compile_factory_from_string_fastlane, parse_ffi_compile_args};
+
+    #[test]
+    fn parse_ffi_compile_args_accepts_i_and_cn() {
+        let argv = vec![
+            "-I".to_owned(),
+            "lib1".to_owned(),
+            "-Ilib2".to_owned(),
+            "-cn".to_owned(),
+            "MyDSP".to_owned(),
+        ];
+        let parsed = parse_ffi_compile_args(&argv).expect("ffi args should parse");
+        assert_eq!(parsed.search_paths.len(), 2);
+        assert_eq!(parsed.search_paths[0], std::path::PathBuf::from("lib1"));
+        assert_eq!(parsed.search_paths[1], std::path::PathBuf::from("lib2"));
+        assert_eq!(parsed.module_name.as_deref(), Some("MyDSP"));
+    }
+
+    #[test]
+    fn create_factory_from_string_wires_interp_fastlane() {
+        let factory = compile_factory_from_string_fastlane(
+            "UnitTestDSP",
+            "process = _;",
+            &["-cn".to_owned(), "UnitTestDSP".to_owned()],
+        )
+        .expect("fast-lane interp compilation should succeed");
+        assert_eq!(factory.num_inputs, 1);
+        assert_eq!(factory.num_outputs, 1);
+        assert_eq!(factory.name, "UnitTestDSP");
+    }
 }

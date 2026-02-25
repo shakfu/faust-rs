@@ -730,10 +730,17 @@ impl CompilerError {
 // ─── Helpers: path resolution ─────────────────────────────────────────────────
 
 /// Resolves the default import search base for a path (parent directory or ".").
-fn default_search_base(path: &Path) -> PathBuf {
+///
+/// Public helper used by external integration crates (e.g. FFI frontends) to
+/// mirror the facade's file-import search-path behavior.
+pub fn default_import_search_base(path: &Path) -> PathBuf {
     path.parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn default_search_base(path: &Path) -> PathBuf {
+    default_import_search_base(path)
 }
 
 // ─── Helpers: parse validation ────────────────────────────────────────────────
