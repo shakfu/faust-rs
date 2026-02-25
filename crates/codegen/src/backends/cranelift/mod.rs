@@ -690,6 +690,12 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 access: AccessType::Struct,
                 value,
             } => self.lower_store_var_struct(&name, value),
+            FirMatch::If {
+                cond,
+                then_block,
+                else_block,
+            } => self.lower_if_stmt(cond, then_block, else_block),
+            FirMatch::Control { cond, stmt } => self.lower_control_stmt(cond, stmt),
             FirMatch::Drop(value) => {
                 let _ = self.lower_expr(value, None)?;
                 Ok(())
@@ -793,6 +799,44 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         Ok(())
     }
 
+    fn lower_if_stmt(
+        &mut self,
+        cond: FirId,
+        then_block: FirId,
+        else_block: Option<FirId>,
+    ) -> Result<(), LoweringError> {
+        let cond_v = self.lower_expr(cond, Some(&FirType::Bool))?.value();
+        let cond_b1 = self.fb.ins().icmp_imm(IntCC::NotEqual, cond_v, 0);
+        let then_b = self.fb.create_block();
+        let else_b = self.fb.create_block();
+        let cont_b = self.fb.create_block();
+        self.fb.ins().brif(cond_b1, then_b, &[], else_b, &[]);
+
+        self.fb.switch_to_block(then_b);
+        self.lower_stmt(then_block)?;
+        if !is_return_terminated(self.fb) {
+            self.fb.ins().jump(cont_b, &[]);
+        }
+        self.fb.seal_block(then_b);
+
+        self.fb.switch_to_block(else_b);
+        if let Some(else_block) = else_block {
+            self.lower_stmt(else_block)?;
+        }
+        if !is_return_terminated(self.fb) {
+            self.fb.ins().jump(cont_b, &[]);
+        }
+        self.fb.seal_block(else_b);
+
+        self.fb.switch_to_block(cont_b);
+        self.fb.seal_block(cont_b);
+        Ok(())
+    }
+
+    fn lower_control_stmt(&mut self, cond: FirId, stmt: FirId) -> Result<(), LoweringError> {
+        self.lower_if_stmt(cond, stmt, None)
+    }
+
     fn indexed_addr(&mut self, base_ptr: Value, index_i32: Value, elem_size: i64) -> Value {
         let idx_ptr = if self.ptr_ty == types::I64 {
             self.fb.ins().uextend(types::I64, index_i32)
@@ -873,6 +917,22 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 let else_v = self.lower_expr(else_value, Some(&typ))?.value();
                 let bool_cond = self.fb.ins().icmp_imm(IntCC::NotEqual, cond_v, 0);
                 let out = self.fb.ins().select(bool_cond, then_v, else_v);
+                Ok(LoweredExpr::Scalar(out))
+            }
+            FirMatch::Neg { value, typ } => {
+                let v = self.lower_expr(value, Some(&typ))?.value();
+                let v = self.coerce_value_to_fir_type(v, &typ)?;
+                let out = match typ {
+                    FirType::Int32 | FirType::Int64 => self.fb.ins().ineg(v),
+                    FirType::Float32 | FirType::Float64 | FirType::FaustFloat => {
+                        self.fb.ins().fneg(v)
+                    }
+                    _ => {
+                        return Err(LoweringError::Unsupported(format!(
+                            "unsupported negation type in subset lowering: {typ:?}"
+                        )));
+                    }
+                };
                 Ok(LoweredExpr::Scalar(out))
             }
             FirMatch::Cast { typ, value } => {
@@ -1196,6 +1256,18 @@ fn subset_stmt_shape(store: &FirStore, id: FirId) -> bool {
             value,
             ..
         } => subset_expr_shape(store, value),
+        FirMatch::If {
+            cond,
+            then_block,
+            else_block,
+        } => {
+            subset_expr_shape(store, cond)
+                && subset_stmt_shape(store, then_block)
+                && else_block.is_none_or(|b| subset_stmt_shape(store, b))
+        }
+        FirMatch::Control { cond, stmt } => {
+            subset_expr_shape(store, cond) && subset_stmt_shape(store, stmt)
+        }
         FirMatch::SimpleForLoop {
             upper,
             body,
@@ -1242,6 +1314,7 @@ fn subset_expr_shape(store: &FirStore, id: FirId) -> bool {
                 && subset_expr_shape(store, then_value)
                 && subset_expr_shape(store, else_value)
         }
+        FirMatch::Neg { value, .. } => subset_expr_shape(store, value),
         FirMatch::FunCall { name, args, .. } => {
             fir::FirMathOp::from_symbol(&name) == Some(fir::FirMathOp::Sin)
                 && args.into_iter().all(|x| subset_expr_shape(store, x))
@@ -1477,6 +1550,78 @@ mod tests {
         let (store, module) = build_subset_lowerable_compute_module();
         let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
             .expect("subset fixture should compile with body lowering");
+        assert!(compiled.has_compute_entry());
+        assert!(compiled.compute_body_lowered());
+    }
+
+    fn build_if_control_neg_subset_module() -> (fir::FirStore, FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let globals = b.block(&[]);
+        let dsp_struct = b.block(&[]);
+
+        let out_chan = b.int32(0);
+        let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+        let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let one_i = b.int32(1);
+        let cond = b.binop(FirBinOp::Ge, count, one_i, FirType::Bool);
+        let base = b.float32(0.125);
+        let neg = b.neg(base, FirType::FaustFloat);
+        let store_then = b.store_table("output0", AccessType::Stack, i0, neg);
+        let then_block = b.block(&[store_then]);
+        let else_store = b.store_table("output0", AccessType::Stack, i0, base);
+        let else_block = b.block(&[else_store]);
+        let if_stmt = b.if_(cond, then_block, Some(else_block));
+        let loop_body = b.block(&[if_stmt]);
+        let loop_ = b.simple_for_loop("i0", count, loop_body, false);
+        let compute_body = b.block(&[out_alias, loop_]);
+        let compute_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        );
+        let declarations = b.block(&[compute]);
+        let module = b.module("if_control_neg_subset", dsp_struct, globals, declarations);
+        (store, module)
+    }
+
+    #[test]
+    fn compile_module_lowers_if_control_and_neg_subset_body() {
+        let (store, module) = build_if_control_neg_subset_module();
+        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+            .expect("if/control/neg subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
     }

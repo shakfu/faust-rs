@@ -8067,6 +8067,46 @@ Validation:
 
 All checks passed locally.
 
+### Cranelift backend Phase 1.5: add `If`/`Control` statement lowering and `Neg` expression lowering
+
+Extended the Cranelift backend subset with basic control-flow statements and
+unary negation to increase coverage of real FIR `compute` bodies beyond the
+initial arithmetic/loop subset.
+
+Implemented in `crates/codegen/src/backends/cranelift/mod.rs`:
+
+- statement lowering
+  - `If` (`FirMatch::If`)
+  - `Control` (`FirMatch::Control`) via `If` lowering helper
+- expression lowering
+  - `Neg` (`FirMatch::Neg`) for integer and floating-point scalar values
+- subset pre-scan coverage updated for:
+  - `If`
+  - `Control`
+  - `Neg`
+
+Notes:
+
+- CFG construction uses explicit `then` / `else` / `cont` blocks and preserves
+  the early bring-up fallback behavior for unsupported FIR outside the subset.
+- This change stays within the current `compute`-only backend bring-up scope.
+
+Tests added:
+
+- new synthetic Cranelift subset fixture covering:
+  - `If`
+  - `Neg`
+  - looped `StoreTable`
+- test asserts successful real body lowering (`compute_body_lowered() == true`)
+
+Validation:
+
+- `cargo fmt --all`
+- `cargo clippy -p codegen --all-targets -- -D warnings`
+- `cargo test -p codegen cranelift -- --nocapture`
+
+All checks passed locally.
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the
