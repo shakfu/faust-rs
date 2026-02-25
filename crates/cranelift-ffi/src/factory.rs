@@ -818,7 +818,8 @@ mod tests {
         getAllCCraneliftDSPFactories, getCCraneliftDSPFactoryCompileOptions,
         getCCraneliftDSPFactoryFromSHAKey, getCCraneliftDSPFactoryJSON,
         getCCraneliftDSPFactoryName, getCCraneliftDSPFactorySHAKey, getCLibFaustVersion,
-        readCCraneliftDSPFactoryFromBitcode, writeCCraneliftDSPFactoryToBitcode,
+        readCCraneliftDSPFactoryFromBitcode, readCCraneliftDSPFactoryFromBitcodeFile,
+        writeCCraneliftDSPFactoryToBitcode, writeCCraneliftDSPFactoryToBitcodeFile,
     };
 
     #[test]
@@ -979,5 +980,57 @@ mod tests {
             assert!(deleteCCraneliftDSPFactory(factory));
             assert!(deleteCCraneliftDSPFactory(restored));
         }
+    }
+
+    #[test]
+    fn scaffold_bitcode_roundtrip_via_file() {
+        let name = c"bitfile";
+        let src = c"process = _;";
+        let mut err = [0_i8; 4096];
+        let factory = unsafe {
+            createCCraneliftDSPFactoryFromString(
+                name.as_ptr(),
+                src.as_ptr(),
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+                1,
+            )
+        };
+        assert!(!factory.is_null());
+
+        let path = std::env::temp_dir().join(format!(
+            "faust-rs-cranelift-ffi-{}-{}.fbc.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path_c = std::ffi::CString::new(path.as_os_str().to_string_lossy().as_bytes()).unwrap();
+
+        let wrote = unsafe { writeCCraneliftDSPFactoryToBitcodeFile(factory, path_c.as_ptr()) };
+        assert!(wrote);
+
+        let restored =
+            unsafe { readCCraneliftDSPFactoryFromBitcodeFile(path_c.as_ptr(), err.as_mut_ptr()) };
+        assert!(!restored.is_null());
+
+        let _ = std::fs::remove_file(&path);
+        unsafe {
+            assert!(deleteCCraneliftDSPFactory(factory));
+            assert!(deleteCCraneliftDSPFactory(restored));
+        }
+    }
+
+    #[test]
+    fn scaffold_bitcode_read_rejects_invalid_format() {
+        let bad = c"NOT_A_CRANELIFT_FORMAT";
+        let mut err = [0_i8; 4096];
+        let restored =
+            unsafe { readCCraneliftDSPFactoryFromBitcode(bad.as_ptr(), err.as_mut_ptr()) };
+        assert!(restored.is_null());
+        let msg = unsafe { CStr::from_ptr(err.as_ptr()) }.to_str().unwrap();
+        assert!(msg.contains("unsupported") || msg.contains("format"));
     }
 }

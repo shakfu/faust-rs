@@ -7818,11 +7818,15 @@ Tests:
 
 - added in-memory roundtrip test:
   - `scaffold_bitcode_roundtrip_in_memory`
+- added file roundtrip test:
+  - `scaffold_bitcode_roundtrip_via_file`
+- added invalid-format rejection test:
+  - `scaffold_bitcode_read_rejects_invalid_format`
 
 Validation:
 - `cargo fmt --all`
 - `cargo clippy -p cranelift-ffi --all-targets -- -D warnings`
-- `cargo test -p cranelift-ffi` (14 tests passed)
+- `cargo test -p cranelift-ffi` (16 tests passed)
 
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
