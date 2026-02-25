@@ -145,6 +145,7 @@ pub struct JitDspModule {
     compute_symbol_name: String,
     compute_entry_addr: usize,
     compute_body_lowered: bool,
+    struct_layout: StructLayoutPlan,
     jit_module: JITModule,
 }
 
@@ -193,6 +194,13 @@ impl JitDspModule {
         self.compute_body_lowered
     }
 
+    /// Returns the backend `dsp*` struct layout contract derived from FIR
+    /// `globals` declarations.
+    #[must_use]
+    pub fn struct_layout(&self) -> &StructLayoutPlan {
+        &self.struct_layout
+    }
+
     /// Internal guard used by tests to ensure the JIT module stays owned/alive.
     #[must_use]
     pub fn jit_module_is_alive(&self) -> bool {
@@ -201,14 +209,81 @@ impl JitDspModule {
     }
 }
 
+/// Deterministic layout of the backend `dsp*` instance state for Cranelift.
+///
+/// Contract (current V1-oriented backend contract):
+/// - Derived from FIR module `globals` block in declaration order.
+/// - Includes `DeclareVar` with `AccessType::Struct`.
+/// - `FAUSTFLOAT` is laid out as `f32` during the current bring-up.
+/// - Natural alignment is applied per field (backend-target pointer size aware).
+/// - Offsets are byte offsets relative to the `dsp*` base pointer.
+///
+/// This contract is backend-internal for now, but is designed to be stable and
+/// reusable by the future `cranelift_dsp` instance allocation/runtime path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructLayoutPlan {
+    fields: Vec<StructFieldLayout>,
+    size_bytes: u32,
+    align_bytes: u32,
+}
+
+impl StructLayoutPlan {
+    #[must_use]
+    pub fn fields(&self) -> &[StructFieldLayout] {
+        &self.fields
+    }
+
+    #[must_use]
+    pub fn size_bytes(&self) -> u32 {
+        self.size_bytes
+    }
+
+    #[must_use]
+    pub fn align_bytes(&self) -> u32 {
+        self.align_bytes
+    }
+
+    #[must_use]
+    pub fn field(&self, name: &str) -> Option<&StructFieldLayout> {
+        self.fields.iter().find(|f| f.name == name)
+    }
+}
+
+/// One field in the Cranelift backend `dsp*` struct layout.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructFieldLayout {
+    pub name: String,
+    pub typ: FirType,
+    pub offset_bytes: u32,
+    pub size_bytes: u32,
+    pub align_bytes: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LayoutScalar {
+    size: u32,
+    align: u32,
+}
+
+fn align_up(value: u32, align: u32) -> u32 {
+    if align <= 1 {
+        return value;
+    }
+    let rem = value % align;
+    if rem == 0 { value } else { value + (align - rem) }
+}
+
 fn find_module_and_compute(
     store: &FirStore,
     module: FirId,
 ) -> Result<(String, FirId), CraneliftBackendError> {
-    let (module_name, declarations) = match match_fir(store, module) {
+    let (module_name, _globals, declarations) = match match_fir(store, module) {
         FirMatch::Module {
-            name, declarations, ..
-        } => (name, declarations),
+            name,
+            globals,
+            declarations,
+            ..
+        } => (name, globals, declarations),
         other => {
             return Err(CraneliftBackendError::unsupported_module_shape(format!(
                 "expected FIR Module root, got {other:?} at {}",
@@ -246,6 +321,104 @@ fn find_module_and_compute(
         })?;
 
     Ok((module_name, compute_id))
+}
+
+fn fir_type_layout_scalar(ptr_size: u32, typ: &FirType) -> Result<LayoutScalar, CraneliftBackendError> {
+    let s = match typ {
+        FirType::Bool => LayoutScalar { size: 1, align: 1 },
+        FirType::Int32 => LayoutScalar { size: 4, align: 4 },
+        FirType::Float32 | FirType::FaustFloat => LayoutScalar { size: 4, align: 4 },
+        FirType::Int64 | FirType::Float64 => LayoutScalar { size: 8, align: 8 },
+        FirType::Ptr(_) | FirType::Obj | FirType::UI | FirType::Meta | FirType::Sound => {
+            LayoutScalar {
+                size: ptr_size,
+                align: ptr_size,
+            }
+        }
+        other => {
+            return Err(CraneliftBackendError::unsupported_module_shape(format!(
+                "unsupported Cranelift dsp* layout field type in V1 bring-up contract: {other:?}"
+            )));
+        }
+    };
+    Ok(s)
+}
+
+fn build_struct_layout_for_module(
+    store: &FirStore,
+    module: FirId,
+    ptr_size: u32,
+) -> Result<StructLayoutPlan, CraneliftBackendError> {
+    let globals = match match_fir(store, module) {
+        FirMatch::Module { globals, .. } => globals,
+        other => {
+            return Err(CraneliftBackendError::unsupported_module_shape(format!(
+                "expected FIR Module root for struct layout, got {other:?} at {}",
+                module.as_u32()
+            )));
+        }
+    };
+    let global_items = match match_fir(store, globals) {
+        FirMatch::Block(items) => items,
+        other => {
+            return Err(CraneliftBackendError::unsupported_module_shape(format!(
+                "module globals must be FIR Block, got {other:?} at {}",
+                globals.as_u32()
+            )));
+        }
+    };
+
+    let mut fields = Vec::new();
+    let mut offset = 0u32;
+    let mut struct_align = 1u32;
+    for item in global_items {
+        match match_fir(store, item) {
+            FirMatch::DeclareVar {
+                name,
+                typ,
+                access: AccessType::Struct,
+                ..
+            } => {
+                let scalar = fir_type_layout_scalar(ptr_size, &typ)?;
+                offset = align_up(offset, scalar.align);
+                fields.push(StructFieldLayout {
+                    name,
+                    typ,
+                    offset_bytes: offset,
+                    size_bytes: scalar.size,
+                    align_bytes: scalar.align,
+                });
+                offset = offset.checked_add(scalar.size).ok_or_else(|| {
+                    CraneliftBackendError::unsupported_module_shape(
+                        "Cranelift dsp* layout size overflow",
+                    )
+                })?;
+                struct_align = struct_align.max(scalar.align);
+            }
+            FirMatch::DeclareVar { access, name, .. } => {
+                return Err(CraneliftBackendError::unsupported_module_shape(format!(
+                    "unsupported global variable access class for Cranelift dsp* layout: {name} ({access:?})"
+                )));
+            }
+            FirMatch::DeclareTable { name, .. } => {
+                return Err(CraneliftBackendError::unsupported_module_shape(format!(
+                    "Struct layout contract v1 bring-up does not support global tables yet: `{name}`"
+                )));
+            }
+            FirMatch::NullDeclareVar => {}
+            other => {
+                return Err(CraneliftBackendError::unsupported_module_shape(format!(
+                    "unsupported globals entry for Cranelift dsp* layout: {other:?}"
+                )));
+            }
+        }
+    }
+    let size_bytes = align_up(offset, struct_align);
+    Ok(StructLayoutPlan {
+        fields,
+        size_bytes,
+        align_bytes: struct_align,
+    })
 }
 
 fn make_jit_builder(options: &CraneliftOptions) -> Result<JITBuilder, CraneliftBackendError> {
@@ -349,6 +522,27 @@ struct ComputeLowering<'a, 'b, 'c> {
 }
 
 impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
+    fn bool_b1_to_i8(&mut self, b1: Value) -> Value {
+        let one = self.fb.ins().iconst(types::I8, 1);
+        let zero = self.fb.ins().iconst(types::I8, 0);
+        self.fb.ins().select(b1, one, zero)
+    }
+
+    fn int_cmp_to_i8(&mut self, cc: IntCC, lhs: Value, rhs: Value) -> Value {
+        let b1 = self.fb.ins().icmp(cc, lhs, rhs);
+        self.bool_b1_to_i8(b1)
+    }
+
+    fn float_cmp_to_i8(
+        &mut self,
+        cc: cranelift_codegen::ir::condcodes::FloatCC,
+        lhs: Value,
+        rhs: Value,
+    ) -> Value {
+        let b1 = self.fb.ins().fcmp(cc, lhs, rhs);
+        self.bool_b1_to_i8(b1)
+    }
+
     fn fir_type_to_clif(&self, typ: &FirType) -> Result<Type, LoweringError> {
         match typ {
             FirType::Int32 => Ok(types::I32),
@@ -356,6 +550,7 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
             FirType::Float32 => Ok(types::F32),
             FirType::Float64 => Ok(types::F64),
             FirType::FaustFloat => Ok(types::F32),
+            FirType::Bool => Ok(types::I8),
             FirType::Ptr(_) | FirType::Obj | FirType::UI | FirType::Meta | FirType::Sound => {
                 Ok(self.ptr_ty)
             }
@@ -487,6 +682,9 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
             FirMatch::Int32 { value, .. } => Ok(LoweredExpr::Scalar(
                 self.fb.ins().iconst(types::I32, i64::from(value)),
             )),
+            FirMatch::Bool { value, .. } => Ok(LoweredExpr::Scalar(
+                self.fb.ins().iconst(types::I8, if value { 1 } else { 0 }),
+            )),
             FirMatch::Float32 { value, .. } => {
                 Ok(LoweredExpr::Scalar(self.fb.ins().f32const(value)))
             }
@@ -513,6 +711,19 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 let loaded = self.fb.ins().load(elem_ty, MemFlags::new(), addr, 0);
                 Ok(LoweredExpr::Ptr(loaded))
             }
+            FirMatch::Select2 {
+                cond,
+                then_value,
+                else_value,
+                typ,
+            } => {
+                let cond_v = self.lower_expr(cond, Some(&FirType::Bool))?.value();
+                let then_v = self.lower_expr(then_value, Some(&typ))?.value();
+                let else_v = self.lower_expr(else_value, Some(&typ))?.value();
+                let bool_cond = self.fb.ins().icmp_imm(IntCC::NotEqual, cond_v, 0);
+                let out = self.fb.ins().select(bool_cond, then_v, else_v);
+                Ok(LoweredExpr::Scalar(out))
+            }
             FirMatch::BinOp { op, lhs, rhs, typ } => self.lower_binop(op, lhs, rhs, &typ),
             FirMatch::FunCall { name, args, typ } => self.lower_fun_call(&name, &args, &typ),
             other => Err(LoweringError::Unsupported(format!(
@@ -530,12 +741,77 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
     ) -> Result<LoweredExpr, LoweringError> {
         let l = self.lower_expr(lhs, Some(typ))?.value();
         let r = self.lower_expr(rhs, Some(typ))?.value();
+        if matches!(typ, FirType::Bool) {
+            let lty = self.fb.func.dfg.value_type(l);
+            let out = if lty.is_int() {
+                match op {
+                    FirBinOp::Eq => self.int_cmp_to_i8(IntCC::Equal, l, r),
+                    FirBinOp::Ne => self.int_cmp_to_i8(IntCC::NotEqual, l, r),
+                    FirBinOp::Lt => self.int_cmp_to_i8(IntCC::SignedLessThan, l, r),
+                    FirBinOp::Le => self.int_cmp_to_i8(IntCC::SignedLessThanOrEqual, l, r),
+                    FirBinOp::Gt => self.int_cmp_to_i8(IntCC::SignedGreaterThan, l, r),
+                    FirBinOp::Ge => self.int_cmp_to_i8(IntCC::SignedGreaterThanOrEqual, l, r),
+                    _ => {
+                        return Err(LoweringError::Unsupported(format!(
+                            "unsupported bool-result int comparison in subset lowering: {op:?}"
+                        )));
+                    }
+                }
+            } else if lty.is_float() {
+                match op {
+                    FirBinOp::Eq => {
+                        self.float_cmp_to_i8(cranelift_codegen::ir::condcodes::FloatCC::Equal, l, r)
+                    }
+                    FirBinOp::Ne => self.float_cmp_to_i8(
+                        cranelift_codegen::ir::condcodes::FloatCC::NotEqual,
+                        l,
+                        r,
+                    ),
+                    FirBinOp::Lt => self.float_cmp_to_i8(
+                        cranelift_codegen::ir::condcodes::FloatCC::LessThan,
+                        l,
+                        r,
+                    ),
+                    FirBinOp::Le => self.float_cmp_to_i8(
+                        cranelift_codegen::ir::condcodes::FloatCC::LessThanOrEqual,
+                        l,
+                        r,
+                    ),
+                    FirBinOp::Gt => self.float_cmp_to_i8(
+                        cranelift_codegen::ir::condcodes::FloatCC::GreaterThan,
+                        l,
+                        r,
+                    ),
+                    FirBinOp::Ge => self.float_cmp_to_i8(
+                        cranelift_codegen::ir::condcodes::FloatCC::GreaterThanOrEqual,
+                        l,
+                        r,
+                    ),
+                    _ => {
+                        return Err(LoweringError::Unsupported(format!(
+                            "unsupported bool-result float comparison in subset lowering: {op:?}"
+                        )));
+                    }
+                }
+            } else {
+                return Err(LoweringError::Unsupported(format!(
+                    "unsupported comparison operand CLIF type in subset lowering: {lty}"
+                )));
+            };
+            return Ok(LoweredExpr::Scalar(out));
+        }
         let out = match typ {
             FirType::Int32 => match op {
                 FirBinOp::Add => self.fb.ins().iadd(l, r),
                 FirBinOp::Sub => self.fb.ins().isub(l, r),
                 FirBinOp::Mul => self.fb.ins().imul(l, r),
                 FirBinOp::Div => self.fb.ins().sdiv(l, r),
+                FirBinOp::Eq => self.int_cmp_to_i8(IntCC::Equal, l, r),
+                FirBinOp::Ne => self.int_cmp_to_i8(IntCC::NotEqual, l, r),
+                FirBinOp::Lt => self.int_cmp_to_i8(IntCC::SignedLessThan, l, r),
+                FirBinOp::Le => self.int_cmp_to_i8(IntCC::SignedLessThanOrEqual, l, r),
+                FirBinOp::Gt => self.int_cmp_to_i8(IntCC::SignedGreaterThan, l, r),
+                FirBinOp::Ge => self.int_cmp_to_i8(IntCC::SignedGreaterThanOrEqual, l, r),
                 _ => {
                     return Err(LoweringError::Unsupported(format!(
                         "unsupported Int32 binop in subset lowering: {op:?}"
@@ -547,6 +823,30 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 FirBinOp::Sub => self.fb.ins().fsub(l, r),
                 FirBinOp::Mul => self.fb.ins().fmul(l, r),
                 FirBinOp::Div => self.fb.ins().fdiv(l, r),
+                FirBinOp::Eq => {
+                    self.float_cmp_to_i8(cranelift_codegen::ir::condcodes::FloatCC::Equal, l, r)
+                }
+                FirBinOp::Ne => {
+                    self.float_cmp_to_i8(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, l, r)
+                }
+                FirBinOp::Lt => {
+                    self.float_cmp_to_i8(cranelift_codegen::ir::condcodes::FloatCC::LessThan, l, r)
+                }
+                FirBinOp::Le => self.float_cmp_to_i8(
+                    cranelift_codegen::ir::condcodes::FloatCC::LessThanOrEqual,
+                    l,
+                    r,
+                ),
+                FirBinOp::Gt => self.float_cmp_to_i8(
+                    cranelift_codegen::ir::condcodes::FloatCC::GreaterThan,
+                    l,
+                    r,
+                ),
+                FirBinOp::Ge => self.float_cmp_to_i8(
+                    cranelift_codegen::ir::condcodes::FloatCC::GreaterThanOrEqual,
+                    l,
+                    r,
+                ),
                 _ => {
                     return Err(LoweringError::Unsupported(format!(
                         "unsupported float32/faustfloat binop in subset lowering: {op:?}"
@@ -558,6 +858,30 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 FirBinOp::Sub => self.fb.ins().fsub(l, r),
                 FirBinOp::Mul => self.fb.ins().fmul(l, r),
                 FirBinOp::Div => self.fb.ins().fdiv(l, r),
+                FirBinOp::Eq => {
+                    self.float_cmp_to_i8(cranelift_codegen::ir::condcodes::FloatCC::Equal, l, r)
+                }
+                FirBinOp::Ne => {
+                    self.float_cmp_to_i8(cranelift_codegen::ir::condcodes::FloatCC::NotEqual, l, r)
+                }
+                FirBinOp::Lt => {
+                    self.float_cmp_to_i8(cranelift_codegen::ir::condcodes::FloatCC::LessThan, l, r)
+                }
+                FirBinOp::Le => self.float_cmp_to_i8(
+                    cranelift_codegen::ir::condcodes::FloatCC::LessThanOrEqual,
+                    l,
+                    r,
+                ),
+                FirBinOp::Gt => self.float_cmp_to_i8(
+                    cranelift_codegen::ir::condcodes::FloatCC::GreaterThan,
+                    l,
+                    r,
+                ),
+                FirBinOp::Ge => self.float_cmp_to_i8(
+                    cranelift_codegen::ir::condcodes::FloatCC::GreaterThanOrEqual,
+                    l,
+                    r,
+                ),
                 _ => {
                     return Err(LoweringError::Unsupported(format!(
                         "unsupported Float64 binop in subset lowering: {op:?}"
@@ -722,7 +1046,10 @@ fn subset_stmt_shape(store: &FirStore, id: FirId) -> bool {
 
 fn subset_expr_shape(store: &FirStore, id: FirId) -> bool {
     match match_fir(store, id) {
-        FirMatch::Int32 { .. } | FirMatch::Float32 { .. } | FirMatch::Float64 { .. } => true,
+        FirMatch::Int32 { .. }
+        | FirMatch::Bool { .. }
+        | FirMatch::Float32 { .. }
+        | FirMatch::Float64 { .. } => true,
         FirMatch::LoadVar {
             access: AccessType::Stack | AccessType::FunArgs | AccessType::Loop,
             ..
@@ -734,6 +1061,16 @@ fn subset_expr_shape(store: &FirStore, id: FirId) -> bool {
         } => subset_expr_shape(store, index),
         FirMatch::BinOp { lhs, rhs, .. } => {
             subset_expr_shape(store, lhs) && subset_expr_shape(store, rhs)
+        }
+        FirMatch::Select2 {
+            cond,
+            then_value,
+            else_value,
+            ..
+        } => {
+            subset_expr_shape(store, cond)
+                && subset_expr_shape(store, then_value)
+                && subset_expr_shape(store, else_value)
         }
         FirMatch::FunCall { name, args, .. } => {
             fir::FirMathOp::from_symbol(&name) == Some(fir::FirMathOp::Sin)
@@ -795,12 +1132,14 @@ fn declare_compute_stub(
             emit_return_stub(&mut fb);
             compute_body_lowered = false;
         }
+        fb.seal_all_blocks();
         fb.finalize();
     }
 
     jit.define_function(func_id, &mut ctx).map_err(|e| {
         CraneliftBackendError::jit_failure(format!(
-            "define_function `{compute_symbol_name}` failed: {e}"
+            "define_function `{compute_symbol_name}` failed: {e}\nCLIF:\n{}",
+            ctx.func.display()
         ))
     })?;
     jit.clear_context(&mut ctx);
@@ -828,6 +1167,8 @@ pub fn compile_fir_to_cranelift_jit(
     let mut jit_builder = make_jit_builder(options)?;
     register_host_symbols(&mut jit_builder);
     let mut jit = JITModule::new(jit_builder);
+    let ptr_size = jit.target_config().pointer_type().bytes();
+    let struct_layout = build_struct_layout_for_module(store, module, ptr_size)?;
     let (compute_symbol_name, compute_entry_addr, compute_body_lowered) =
         declare_compute_stub(&module_name, compute_decl, store, &mut jit)?;
     if compute_entry_addr == 0 {
@@ -841,6 +1182,7 @@ pub fn compile_fir_to_cranelift_jit(
         compute_symbol_name,
         compute_entry_addr,
         compute_body_lowered,
+        struct_layout,
         jit_module: jit,
     })
 }
@@ -883,6 +1225,22 @@ mod tests {
         assert!(compiled.has_compute_entry());
         assert_ne!(compiled.compute_entry_addr(), 0);
         assert!(!compiled.compute_body_lowered());
+        let layout = compiled.struct_layout();
+        assert_eq!(layout.align_bytes(), 8);
+        assert_eq!(layout.size_bytes(), 16);
+        assert_eq!(layout.fields().len(), 3);
+        assert_eq!(
+            layout.field("fFreq").expect("fFreq field").offset_bytes,
+            0
+        );
+        assert_eq!(
+            layout.field("fGain").expect("fGain field").offset_bytes,
+            4
+        );
+        assert_eq!(
+            layout.field("fPhase").expect("fPhase field").offset_bytes,
+            8
+        );
         assert!(compiled.jit_module_is_alive());
     }
 
@@ -900,9 +1258,12 @@ mod tests {
         let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
         let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
         let x = b.float32(0.5);
+        let half = b.float32(0.5);
+        let cond = b.binop(FirBinOp::Ge, x, half, FirType::Bool);
         let s = b.fun_call("std::sin", &[x], FirType::FaustFloat);
         let g = b.float32(0.25);
-        let y = b.binop(FirBinOp::Mul, s, g, FirType::FaustFloat);
+        let sg = b.binop(FirBinOp::Mul, s, g, FirType::FaustFloat);
+        let y = b.select2(cond, sg, g, FirType::FaustFloat);
         let store_out = b.store_table("output0", AccessType::Stack, i0, y);
         let loop_body = b.block(&[store_out]);
         let sample_loop = b.simple_for_loop("i0", count, loop_body, false);

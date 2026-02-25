@@ -7985,6 +7985,50 @@ Local validation:
 
 All checks passed locally.
 
+### Cranelift backend Phase 1.5: define a deterministic `dsp*` struct layout contract (V1-oriented backend contract)
+
+Before implementing `LoadVar/StoreVar` for `AccessType::Struct`, added a
+dedicated and testable **backend `dsp*` layout contract** in the Cranelift
+backend instead of using an ad-hoc bring-up mapping.
+
+Implemented in `crates/codegen/src/backends/cranelift/mod.rs`:
+
+- `StructLayoutPlan` + `StructFieldLayout`
+  - deterministic field order derived from FIR module `globals` declarations
+  - byte offsets/sizes/alignments recorded per field
+  - aggregate struct size/alignment computed with natural alignment
+- `compile_fir_to_cranelift_jit(...)`
+  - now builds and stores the layout plan in `JitDspModule`
+  - exposes `struct_layout()` for tests and future runtime/FFI wiring
+- V1-oriented backend layout rules (documented in Rustdoc)
+  - only `DeclareVar` globals with `AccessType::Struct`
+  - `FAUSTFLOAT -> f32` for current bring-up
+  - pointer-shaped FIR API handles use target pointer size/alignment
+  - global tables are explicitly rejected for now (not silently approximated)
+
+Why this step first:
+
+- It avoids locking `Struct` loads/stores onto a temporary opaque layout.
+- It creates a stable backend contract that can later be shared with the
+  `cranelift_dsp` runtime/instance allocation path.
+
+Tests updated:
+
+- The existing `sine_phasor` Cranelift backend test now also asserts the
+  derived `dsp*` layout:
+  - `fFreq @ 0`
+  - `fGain @ 4`
+  - `fPhase @ 8`
+  - struct align `8`
+  - struct size `16`
+
+Local validation:
+
+- `cargo test -p codegen cranelift -- --nocapture`
+- `cargo clippy -p codegen --all-targets -- -D warnings`
+
+Both checks passed locally.
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the
