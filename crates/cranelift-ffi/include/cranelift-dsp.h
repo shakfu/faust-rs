@@ -49,6 +49,8 @@
  */
 extern "C" LIBFAUST_API const char* getCLibFaustVersion();
 
+class cranelift_dsp_factory;
+
 /**
  * DSP instance class (declaration-only scaffold).
  *
@@ -57,11 +59,29 @@ extern "C" LIBFAUST_API const char* getCLibFaustVersion();
  */
 class LIBFAUST_API cranelift_dsp : public dsp {
     private:
-        // `cranelift_dsp` objects are intended to be created by
-        // `cranelift_dsp_factory::createDSPInstance()`.
-        cranelift_dsp() {}
+        // Opaque C handle (`cranelift_dsp*` from the C API), stored as `void*`
+        // to avoid including `cranelift-dsp-c.h` in this header.
+        void* fHandle;
+
+        // Wrapper objects are created by factory/wrapper helper functions.
+        explicit cranelift_dsp(void* c_handle);
+        friend class cranelift_dsp_factory;
+        friend LIBFAUST_API cranelift_dsp_factory* createCraneliftDSPFactoryFromFile(
+            const std::string&, int, const char*[], std::string&, int);
+        friend LIBFAUST_API cranelift_dsp_factory* createCraneliftDSPFactoryFromString(
+            const std::string&, const std::string&, int, const char*[], std::string&, int);
+        friend LIBFAUST_API cranelift_dsp_factory* readCraneliftDSPFactoryFromBitcode(
+            const std::string&, std::string&);
+        friend LIBFAUST_API cranelift_dsp_factory* readCraneliftDSPFactoryFromBitcodeFile(
+            const std::string&, std::string&);
 
     public:
+        virtual ~cranelift_dsp() noexcept;
+        cranelift_dsp(const cranelift_dsp&) = delete;
+        cranelift_dsp& operator=(const cranelift_dsp&) = delete;
+        // Internal scaffold bridge helper (C++ wrapper implementation only).
+        void* rawCHandle() const noexcept;
+
         int getNumInputs();
         int getNumOutputs();
         void buildUserInterface(UI* ui_interface);
@@ -84,8 +104,33 @@ class LIBFAUST_API cranelift_dsp : public dsp {
  * foreign-function registration).
  */
 class LIBFAUST_API cranelift_dsp_factory : public dsp_factory {
+    protected:
+        // Opaque C handle (`cranelift_dsp_factory*` from the C API), stored as
+        // `void*` to avoid including `cranelift-dsp-c.h` in this header.
+        void* fHandle;
+
+        explicit cranelift_dsp_factory(void* c_handle);
+        friend LIBFAUST_API cranelift_dsp_factory* getCraneliftDSPFactoryFromSHAKey(
+            const std::string&);
+        friend LIBFAUST_API cranelift_dsp_factory* createCraneliftDSPFactoryFromFile(
+            const std::string&, int, const char*[], std::string&, int);
+        friend LIBFAUST_API cranelift_dsp_factory* createCraneliftDSPFactoryFromString(
+            const std::string&, const std::string&, int, const char*[], std::string&, int);
+        friend LIBFAUST_API cranelift_dsp_factory* createCraneliftDSPFactoryFromSignals(
+            const std::string&, tvec, int, const char*[], std::string&, int);
+        friend LIBFAUST_API cranelift_dsp_factory* createCraneliftDSPFactoryFromBoxes(
+            const std::string&, Box, int, const char*[], std::string&, int);
+        friend LIBFAUST_API cranelift_dsp_factory* readCraneliftDSPFactoryFromBitcode(
+            const std::string&, std::string&);
+        friend LIBFAUST_API cranelift_dsp_factory* readCraneliftDSPFactoryFromBitcodeFile(
+            const std::string&, std::string&);
+
     public:
         virtual ~cranelift_dsp_factory() noexcept;
+        cranelift_dsp_factory(const cranelift_dsp_factory&) = delete;
+        cranelift_dsp_factory& operator=(const cranelift_dsp_factory&) = delete;
+        // Internal scaffold bridge helper (C++ wrapper implementation only).
+        void* rawCHandle() const noexcept;
 
         std::string getName();
         std::string getSHAKey();

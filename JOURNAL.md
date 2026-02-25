@@ -7853,6 +7853,46 @@ Local validation:
 
 The syntax-only C header smoke check passed locally.
 
+### Cranelift FFI Phase 1: add a first C++ wrapper bridge scaffold (`cranelift-dsp.cpp`) over the C ABI
+
+Started the C++ wrapper implementation layer for `cranelift_dsp` by adding a
+first **bridge scaffold** that routes C++ methods/free functions to the Rust
+`cranelift-ffi` C ABI exports.
+
+Implemented:
+
+- `crates/cranelift-ffi/cpp/cranelift-dsp.cpp`
+  - C++ wrapper implementations for the current scaffold subset:
+    - `cranelift_dsp` lifecycle / DSP methods (`init`, `compute`, `metadata`,
+      `buildUserInterface`, etc.)
+    - `cranelift_dsp_factory` query methods and `createDSPInstance`
+    - free functions for factory creation/cache/bitcode families
+  - bridge uses the C API (`cranelift-dsp-c.h`) via an include-time typedef
+    renaming workaround to avoid the C opaque-type vs C++ class-name collision
+  - temporary no-op concrete subclass `cranelift_dsp_factory_impl` provides
+    `dsp_factory` pure virtual memory-manager hooks (`setMemoryManager`,
+    `getMemoryManager`) while that family remains deferred in V1
+- `crates/cranelift-ffi/include/cranelift-dsp.h`
+  - added internal wrapper handle storage (`void* fHandle`) and internal
+    constructors/accessors used by the bridge implementation
+  - added forward declaration and friend declarations needed for wrapper factory
+    construction
+  - kept public V1 API shape unchanged
+
+Design notes:
+
+- This is a **scaffold bridge**: it validates wrapper shape and ABI routing, not
+  final semantics.
+- Memory-manager wrapper behavior is intentionally stubbed/no-op in the internal
+  implementation because that family is explicitly deferred in V1.
+
+Local validation (syntax-only):
+
+- `c++ -std=c++11 -fsyntax-only -I crates/cranelift-ffi/include -I /Users/letz/Developpements/RUST/faust/architecture crates/cranelift-ffi/cpp/cranelift-dsp.cpp`
+- `c++ -std=c++11 -fsyntax-only -I crates/cranelift-ffi/include -I /Users/letz/Developpements/RUST/faust/architecture crates/cranelift-ffi/tests/header-smoke/cranelift_dsp_cpp_header_smoke.cpp`
+
+Both C++ syntax-only checks passed locally.
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the
