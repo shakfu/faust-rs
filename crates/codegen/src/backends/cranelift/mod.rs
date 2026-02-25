@@ -480,12 +480,25 @@ fn build_struct_layout_for_module(
     module: FirId,
     ptr_size: u32,
 ) -> Result<StructLayoutPlan, CraneliftBackendError> {
-    let globals = match match_fir(store, module) {
-        FirMatch::Module { globals, .. } => globals,
+    let (dsp_struct, globals) = match match_fir(store, module) {
+        FirMatch::Module {
+            dsp_struct,
+            globals,
+            ..
+        } => (dsp_struct, globals),
         other => {
             return Err(CraneliftBackendError::unsupported_module_shape(format!(
                 "expected FIR Module root for struct layout, got {other:?} at {}",
                 module.as_u32()
+            )));
+        }
+    };
+    let dsp_struct_items = match match_fir(store, dsp_struct) {
+        FirMatch::Block(items) => items,
+        other => {
+            return Err(CraneliftBackendError::unsupported_module_shape(format!(
+                "module dsp_struct must be FIR Block, got {other:?} at {}",
+                dsp_struct.as_u32()
             )));
         }
     };
@@ -502,7 +515,7 @@ fn build_struct_layout_for_module(
     let mut fields = Vec::new();
     let mut offset = 0u32;
     let mut struct_align = 1u32;
-    for item in global_items {
+    for item in dsp_struct_items.into_iter().chain(global_items.into_iter()) {
         match match_fir(store, item) {
             FirMatch::DeclareVar {
                 name,
@@ -1237,8 +1250,10 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         self.fb.switch_to_block(body_block);
         let prev = self.vars.insert(var.clone(), LoweredExpr::Scalar(i_val));
         self.lower_stmt(body)?;
-        let next = self.fb.ins().iadd(i_val, one);
-        self.fb.ins().jump(header, &[next]);
+        if !is_return_terminated(self.fb) {
+            let next = self.fb.ins().iadd(i_val, one);
+            self.fb.ins().jump(header, &[next]);
+        }
         if let Some(old) = prev {
             self.vars.insert(var, old);
         } else {
@@ -1988,7 +2003,8 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
             (math, FirType::FaustFloat | FirType::Float32, [x])
                 if unary_math_symbol_f32(math).is_some() =>
             {
-                let xv = self.lower_expr(*x, Some(typ))?.value();
+                let mut xv = self.lower_expr(*x, Some(typ))?.value();
+                xv = self.coerce_value_to_fir_type(xv, typ)?;
                 let fref = self.ensure_unary_import(
                     unary_math_symbol_f32(math).expect("guarded by is_some"),
                     types::F32,
@@ -1997,7 +2013,8 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]))
             }
             (math, FirType::Float64, [x]) if unary_math_symbol_f64(math).is_some() => {
-                let xv = self.lower_expr(*x, Some(typ))?.value();
+                let mut xv = self.lower_expr(*x, Some(typ))?.value();
+                xv = self.coerce_value_to_fir_type(xv, typ)?;
                 let fref = self.ensure_unary_import(
                     unary_math_symbol_f64(math).expect("guarded by is_some"),
                     types::F64,
@@ -2008,8 +2025,10 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
             (math, FirType::FaustFloat | FirType::Float32, [x, y])
                 if binary_math_symbol_f32(math).is_some() =>
             {
-                let xv = self.lower_expr(*x, Some(typ))?.value();
-                let yv = self.lower_expr(*y, Some(typ))?.value();
+                let mut xv = self.lower_expr(*x, Some(typ))?.value();
+                let mut yv = self.lower_expr(*y, Some(typ))?.value();
+                xv = self.coerce_value_to_fir_type(xv, typ)?;
+                yv = self.coerce_value_to_fir_type(yv, typ)?;
                 let fref = self.ensure_binary_import(
                     binary_math_symbol_f32(math).expect("guarded by is_some"),
                     types::F32,
@@ -2018,8 +2037,10 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]))
             }
             (math, FirType::Float64, [x, y]) if binary_math_symbol_f64(math).is_some() => {
-                let xv = self.lower_expr(*x, Some(typ))?.value();
-                let yv = self.lower_expr(*y, Some(typ))?.value();
+                let mut xv = self.lower_expr(*x, Some(typ))?.value();
+                let mut yv = self.lower_expr(*y, Some(typ))?.value();
+                xv = self.coerce_value_to_fir_type(xv, typ)?;
+                yv = self.coerce_value_to_fir_type(yv, typ)?;
                 let fref = self.ensure_binary_import(
                     binary_math_symbol_f64(math).expect("guarded by is_some"),
                     types::F64,
@@ -2464,9 +2485,9 @@ fn declare_compute_stub(
             match try_lower_compute_body(store, jit, &mut fb, struct_layout, ptr_ty, compute_decl) {
                 Ok(lowered) => compute_body_lowered = lowered,
                 Err(LoweringError::Unsupported(reason)) => {
-                    let _ = reason;
-                    emit_return_stub(&mut fb);
-                    compute_body_lowered = false;
+                    return Err(CraneliftBackendError::unsupported_module_shape(format!(
+                        "Cranelift subset matcher drift: pre-check accepted `compute`, but lowering rejected it: {reason}"
+                    )));
                 }
                 Err(LoweringError::Jit(msg)) => {
                     return Err(CraneliftBackendError::jit_failure(msg));

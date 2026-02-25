@@ -8,12 +8,21 @@ use codegen::backends::cranelift::{
 use compiler::{Compiler, SignalFirLane};
 
 fn main() {
+    let filters: Vec<String> = std::env::args().skip(1).collect();
     let root = Path::new("tests/corpus");
     let mut files: Vec<PathBuf> = fs::read_dir(root)
         .expect("read tests/corpus")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("dsp"))
+        .filter(|p| {
+            if filters.is_empty() {
+                true
+            } else {
+                let s = p.to_string_lossy();
+                filters.iter().any(|f| s.contains(f))
+            }
+        })
         .collect();
     files.sort();
 
@@ -93,6 +102,12 @@ fn main() {
             let first = e.lines().next().unwrap_or("");
             println!("  {} => {}", p.display(), first);
         }
+        if files_were_filtered(&filters) {
+            println!("\nFull error details (filtered run):");
+            for (p, e) in &errors {
+                println!("--- {} ---\n{}\n", p.display(), e);
+            }
+        }
     }
 
     if !lowered_ok.is_empty() {
@@ -101,4 +116,8 @@ fn main() {
             println!("  {}", p.display());
         }
     }
+}
+
+fn files_were_filtered(filters: &[String]) -> bool {
+    !filters.is_empty()
 }

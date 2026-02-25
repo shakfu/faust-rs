@@ -7618,6 +7618,83 @@ Interpretation:
 This is a major backend coverage step and makes the next priority clear:
 investigate/fix Cranelift verifier failures on the newly-lowered corpus cases.
 
+### Cranelift backend: diagnose and fix verifier errors on newly-lowered corpus cases
+
+Investigated Cranelift `Verifier errors` observed after enabling
+`LoadTable { access: Stack }` on corpus cases such as:
+
+- `rep_05_one_pole_lowpass.dsp`
+- `rep_07_nonlinear_clip.dsp`
+- `rep_09_ui_slider.dsp`
+- `rep_10_two_in_two_out_ui.dsp`
+
+Diagnostic method:
+
+- extended temporary tool `crates/compiler/examples/corpus_scan_cranelift.rs`
+  to support filtered runs and print full backend errors (including CLIF dumps)
+- ran targeted scans for the failing corpus entries to inspect generated CLIF
+
+Findings:
+
+1. **CFG inconsistency from fallback after partial lowering**
+- the subset pre-check may accept a `compute` body, but real lowering can still
+  fail later on a semantic detail (subset matcher drift)
+- previous behavior on `LoweringError::Unsupported` after partial emission:
+  - emit a stub `return` into the partially-built function
+  - continue to `define_function`
+- this could produce invalid CLIF CFG and surface as generic verifier errors
+
+2. **Missing `dsp_struct` fields in backend state layout**
+- some FIR modules (for example UI slider cases) store instance-state variables
+  in `Module.dsp_struct`, while `globals` is empty
+- backend layout derivation only scanned `globals`, causing lowering failures
+  like:
+  - `struct field 'fHslider29' not present in Cranelift dsp* layout contract`
+
+3. **Math-call argument type mismatch (f64 constants passed to f32 imports)**
+- for `FaustFloat`/`Float32` math calls, constants may enter lowering as `f64`
+  literals
+- backend emitted imported calls with `f32` signatures but passed uncoerced `f64`
+  arguments in some cases (e.g. `fmin` / `fmax`), causing verifier errors
+
+Fixes implemented in `crates/codegen/src/backends/cranelift/mod.rs`:
+
+- `build_struct_layout_for_module(...)`
+  - now derives layout from `dsp_struct` **and** `globals` blocks
+  - preserves support for ignored helper prototypes in `globals`
+- `lower_fun_call(...)`
+  - now coerces unary/binary math call arguments to the requested FIR result
+    type before emitting the imported call (`f32`/`f64`)
+- `declare_compute_stub(...)`
+  - on subset pre-check drift (`LoweringError::Unsupported` after partial emit),
+    no longer emits a stub into a partially-built function
+  - returns an explicit backend error instead (diagnostic-friendly and avoids
+    invalid CLIF verifier noise)
+
+Validation:
+
+- `cargo fmt --all`
+- `cargo clippy -p codegen --all-targets -- -D warnings`
+- `cargo test -p codegen cranelift -- --nocapture`
+- `cargo run -p compiler --example corpus_scan_cranelift rep_05 rep_07 rep_09 rep_10`
+- `cargo run -p compiler --example corpus_scan_cranelift`
+
+Targeted result (after fixes):
+
+- `rep_05`, `rep_07`, `rep_09`, `rep_10` now all compile with real lowering
+  (`lowered_ok=4`, `errors=0` in filtered run)
+
+Corpus impact (fast-lane FIR):
+
+- before this step (after `LoadTable(Stack)`): `lowered_ok=13 stub_ok=0 errors=44`
+- after this step: `lowered_ok=20 stub_ok=0 errors=37`
+
+Remaining backend issues are now more explicit (subset-matcher drift with
+missing coercions outside current conversion set), e.g.:
+
+- `f32 -> i32` for `rep_19_primitive_family.dsp`
+- `i32 -> f32` for `rep_20_environment_waveform.dsp`
+
 ### Cranelift backend: expand Rustdoc for public API and lowering internals
 
 Substantially expanded Rust documentation in
