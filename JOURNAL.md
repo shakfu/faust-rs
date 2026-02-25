@@ -7828,6 +7828,31 @@ Validation:
 - `cargo clippy -p cranelift-ffi --all-targets -- -D warnings`
 - `cargo test -p cranelift-ffi` (16 tests passed)
 
+### Cranelift FFI Phase 1: document temporary bitcode scaffold format in C header and extend C header smoke coverage
+
+Kept the public C header and smoke checks aligned after implementing the
+temporary Cranelift scaffold bitcode read/write family.
+
+Updates:
+
+- `crates/cranelift-ffi/include/cranelift-dsp-c.h`
+  - updated the bitcode-family comment to explicitly document that the current
+    implementation uses a **temporary scaffold format** marked by
+    `CRANELIFT_FFI_SCAFFOLD_V1`
+  - clarified that this is for API-family validation only (not the final
+    backend serialization format)
+- `crates/cranelift-ffi/tests/header-smoke/cranelift_dsp_c_header_smoke.c`
+  - expanded symbol references to cover:
+    - `getAllCCraneliftDSPFactories`
+    - `read/writeCCraneliftDSPFactoryTo/FromBitcode`
+    - `read/writeCCraneliftDSPFactoryTo/FromBitcodeFile`
+
+Local validation:
+
+- `cc -fsyntax-only -I crates/cranelift-ffi/include -I /Users/letz/Developpements/RUST/faust/architecture crates/cranelift-ffi/tests/header-smoke/cranelift_dsp_c_header_smoke.c`
+
+The syntax-only C header smoke check passed locally.
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the

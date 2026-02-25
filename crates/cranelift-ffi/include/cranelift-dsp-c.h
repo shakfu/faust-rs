@@ -81,7 +81,12 @@ const char** getCCraneliftDSPFactoryLibraryList(cranelift_dsp_factory* factory);
 const char** getCCraneliftDSPFactoryIncludePathnames(cranelift_dsp_factory* factory);
 const char** getCCraneliftDSPFactoryWarningMessages(cranelift_dsp_factory* factory);
 
-/* Cranelift backend bitcode family (symbols present, backend format not implemented yet). */
+/* Cranelift backend bitcode family (temporary scaffold format implemented).
+ *
+ * The current Rust implementation uses a temporary text format marker
+ * (`CRANELIFT_FFI_SCAFFOLD_V1`) for API-family validation only. It is not the
+ * final backend serialization format.
+ */
 cranelift_dsp_factory* readCCraneliftDSPFactoryFromBitcode(const char* bit_code,
                                                            char* error_msg);
 char* writeCCraneliftDSPFactoryToBitcode(cranelift_dsp_factory* factory);
