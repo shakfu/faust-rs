@@ -14,6 +14,10 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::os::raw::c_int;
 use std::path::Path;
 
+use crate::cache::{
+    cache_all_sha_keys, cache_drain, cache_insert, cache_lookup, cache_remove_by_ptr, start_mt,
+    stop_mt,
+};
 use crate::types::{
     CraneliftDspFactory, alloc_c_string, alloc_factory, free_c_string, free_factory,
 };
@@ -72,7 +76,9 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
                 return std::ptr::null_mut();
             }
         };
-        alloc_factory(build_scaffold_factory_from_file(filename, &args, opt_level))
+        let ptr = alloc_factory(build_scaffold_factory_from_file(filename, &args, opt_level));
+        cache_insert(&(*ptr).sha_key, ptr);
+        ptr
     }
 }
 
@@ -123,12 +129,14 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
                 return std::ptr::null_mut();
             }
         };
-        alloc_factory(build_scaffold_factory_from_source(
+        let ptr = alloc_factory(build_scaffold_factory_from_source(
             name_app,
             dsp_content,
             &args,
             opt_level,
-        ))
+        ));
+        cache_insert(&(*ptr).sha_key, ptr);
+        ptr
     }
 }
 
@@ -178,15 +186,22 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
 
 /// Returns a factory from the cache by SHA key.
 ///
-/// The cache is not wired yet in the scaffold, so this always returns null.
-///
 /// # Safety
-/// `sha_key` may be null; no dereference occurs in the current scaffold.
+/// `sha_key` may be null; invalid UTF-8 returns null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getCCraneliftDSPFactoryFromSHAKey(
-    _sha_key: *const c_char,
+    sha_key: *const c_char,
 ) -> *mut CraneliftDspFactory {
-    std::ptr::null_mut()
+    unsafe {
+        if sha_key.is_null() {
+            return std::ptr::null_mut();
+        }
+        let sha_key = match CStr::from_ptr(sha_key).to_str() {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        };
+        cache_lookup(sha_key)
+    }
 }
 
 /// Delete a Cranelift DSP factory.
@@ -202,21 +217,39 @@ pub unsafe extern "C" fn deleteCCraneliftDSPFactory(factory: *mut CraneliftDspFa
         if factory.is_null() {
             return false;
         }
+        cache_remove_by_ptr(factory);
         free_factory(factory);
         true
     }
 }
 
-/// Delete all cached Cranelift factories (scaffold no-op).
+/// Delete all cached Cranelift factories.
 #[unsafe(no_mangle)]
-pub extern "C" fn deleteAllCCraneliftDSPFactories() {}
+pub extern "C" fn deleteAllCCraneliftDSPFactories() {
+    for ptr in cache_drain() {
+        unsafe {
+            if !ptr.is_null() {
+                free_factory(ptr);
+            }
+        }
+    }
+}
 
-/// Return all cached Cranelift factory SHA keys (scaffold: empty).
+/// Return all cached Cranelift factory SHA keys as a null-terminated array.
 ///
-/// Returns null while the cache is not implemented.
+/// The returned strings must be freed individually with `freeCMemory`. As in
+/// the current `interp-ffi` implementation, the outer array deallocation path is
+/// not yet modeled separately in the scaffold.
 #[unsafe(no_mangle)]
 pub extern "C" fn getAllCCraneliftDSPFactories() -> *mut *mut c_char {
-    std::ptr::null_mut()
+    let keys = cache_all_sha_keys();
+    if keys.is_empty() {
+        return std::ptr::null_mut();
+    }
+    let mut ptrs: Vec<*mut c_char> = keys.into_iter().map(|k| alloc_c_string(&k)).collect();
+    ptrs.push(std::ptr::null_mut());
+    let boxed: Box<[*mut c_char]> = ptrs.into_boxed_slice();
+    Box::into_raw(boxed).cast::<*mut c_char>()
 }
 
 /// Return a factory JSON description string.
@@ -395,15 +428,17 @@ pub unsafe extern "C" fn writeCCraneliftDSPFactoryToBitcodeFile(
 
 /// Enable multi-thread-safe factory mode.
 ///
-/// The scaffold returns `true` and performs no additional work yet.
+/// The scaffold toggles an internal compatibility flag and returns `true`.
 #[unsafe(no_mangle)]
 pub extern "C" fn startMTDSPFactories() -> bool {
-    true
+    start_mt()
 }
 
-/// Disable multi-thread-safe factory mode (scaffold no-op).
+/// Disable multi-thread-safe factory mode (compatibility flag only).
 #[unsafe(no_mangle)]
-pub extern "C" fn stopMTDSPFactories() {}
+pub extern "C" fn stopMTDSPFactories() {
+    stop_mt();
+}
 
 /// Free memory allocated by this library for C strings.
 ///
@@ -545,9 +580,10 @@ mod tests {
 
     use super::{
         createCCraneliftDSPFactoryFromFile, createCCraneliftDSPFactoryFromString,
-        deleteCCraneliftDSPFactory, factory_status, freeCMemory,
-        getCCraneliftDSPFactoryCompileOptions, getCCraneliftDSPFactoryJSON,
-        getCCraneliftDSPFactoryName, getCLibFaustVersion,
+        deleteAllCCraneliftDSPFactories, deleteCCraneliftDSPFactory, factory_status, freeCMemory,
+        getAllCCraneliftDSPFactories, getCCraneliftDSPFactoryCompileOptions,
+        getCCraneliftDSPFactoryFromSHAKey, getCCraneliftDSPFactoryJSON,
+        getCCraneliftDSPFactoryName, getCCraneliftDSPFactorySHAKey, getCLibFaustVersion,
     };
 
     #[test]
@@ -620,5 +656,41 @@ mod tests {
         assert!(factory.is_null());
         let msg = unsafe { CStr::from_ptr(err.as_ptr()) }.to_str().unwrap();
         assert!(msg.contains("null filename"));
+    }
+
+    #[test]
+    fn cache_lookup_and_list_are_wired_to_created_factories() {
+        let name = c"cachetest";
+        let src = c"process = _;";
+        let mut err = [0_i8; 4096];
+
+        let factory = unsafe {
+            createCCraneliftDSPFactoryFromString(
+                name.as_ptr(),
+                src.as_ptr(),
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+                3,
+            )
+        };
+        assert!(!factory.is_null());
+
+        let sha_ptr = unsafe { getCCraneliftDSPFactorySHAKey(factory) };
+        assert!(!sha_ptr.is_null());
+        let looked_up = unsafe { getCCraneliftDSPFactoryFromSHAKey(sha_ptr.cast_const()) };
+        assert_eq!(looked_up, factory);
+
+        let all_ptr = getAllCCraneliftDSPFactories();
+        assert!(!all_ptr.is_null());
+        let first = unsafe { *all_ptr };
+        assert!(!first.is_null());
+
+        unsafe {
+            freeCMemory(sha_ptr.cast());
+            // free returned strings (outer array is intentionally not freed in scaffold).
+            freeCMemory(first.cast());
+            deleteAllCCraneliftDSPFactories();
+        }
     }
 }

@@ -7617,6 +7617,48 @@ Validation:
 - `cargo clippy -p cranelift-ffi --all-targets -- -D warnings`
 - `cargo test -p cranelift-ffi` (10 tests passed)
 
+### Cranelift FFI Phase 1: wire a minimal factory cache into the executable C ABI scaffold
+
+Extended the Cranelift FFI executable scaffold with a **minimal working factory
+cache** (SHA key -> raw factory pointer) so the cache-related C API family can
+already be exercised in tests.
+
+Implemented:
+
+- `crates/cranelift-ffi/src/cache.rs`
+  - replaced status-only scaffold with a `Mutex<HashMap<String, usize>>` cache
+    (same early strategy as `interp-ffi`)
+  - added helpers:
+    - `cache_insert`
+    - `cache_lookup`
+    - `cache_remove_by_ptr`
+    - `cache_drain`
+    - `cache_all_sha_keys`
+    - `start_mt` / `stop_mt` compatibility flag
+  - added unit tests for raw-pointer roundtrip behavior
+- `crates/cranelift-ffi/src/factory.rs`
+  - insert newly created factories into the cache on `create...FromFile/String`
+  - implement `getCCraneliftDSPFactoryFromSHAKey`
+  - implement `deleteAllCCraneliftDSPFactories` (drain + free)
+  - implement `getAllCCraneliftDSPFactories` (null-terminated SHA string array)
+  - remove factory entries from the cache in `deleteCCraneliftDSPFactory`
+  - route `startMTDSPFactories` / `stopMTDSPFactories` to cache compatibility helpers
+  - add FFI tests covering lookup/list behavior through exported symbols
+
+Notes:
+
+- This remains a **scaffold cache**:
+  - no refcount semantics yet
+  - no duplicate-compilation coalescing semantics yet
+  - returned cached pointers are direct raw pointers
+- Outer `char**` array deallocation remains temporary (same limitation currently
+  present in the scaffold path).
+
+Validation:
+- `cargo fmt --all`
+- `cargo clippy -p cranelift-ffi --all-targets -- -D warnings`
+- `cargo test -p cranelift-ffi` (12 tests passed)
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the
