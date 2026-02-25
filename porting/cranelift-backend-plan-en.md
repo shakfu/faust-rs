@@ -241,6 +241,15 @@ families (`llvm_dsp`, `interpreter_dsp`) for:
 **Phase-0 requirement:** produce a function-by-function parity matrix
 (`llvm/interpreter` exports -> `cranelift` exports) before implementation deepens.
 
+**Reference priority for the parity matrix (locked):**
+
+- **Primary reference:** `llvm_dsp` / `llvm_dsp_factory` (C and C++ exports)
+- **Secondary cross-check:** `interpreter_dsp` / `interpreter_dsp_factory`
+
+If `llvm_dsp` and `interpreter_dsp` differ, use `llvm_dsp` as the default
+target and document the divergence explicitly in the parity matrix and
+`JOURNAL.md` before implementation proceeds on the affected function family.
+
 ## 5.2 DSP state ownership (v1)
 
 - `JitDspModule` owns compiled machine code and metadata (field layout, function registry).
