@@ -7720,6 +7720,34 @@ Important compatibility note captured in the header:
 Validation:
 - Header/documentation scaffold change only (no code/tests run)
 
+### Cranelift FFI Phase 1: add C/C++ header smoke fixtures and validate syntax locally
+
+Added lightweight **header smoke fixtures** for the Cranelift FFI C and C++
+headers to catch declaration drift and obvious C++ compatibility issues early,
+before wiring a full C/C++ build/test path in CI.
+
+Added files:
+
+- `crates/cranelift-ffi/tests/header-smoke/cranelift_dsp_c_header_smoke.c`
+  - includes `cranelift-dsp-c.h`
+  - references representative factory/instance symbols from the current scaffold
+- `crates/cranelift-ffi/tests/header-smoke/cranelift_dsp_cpp_header_smoke.cpp`
+  - includes `cranelift-dsp.h`
+  - references representative wrapper methods and free functions
+
+Fix applied after smoke compile:
+
+- `crates/cranelift-ffi/include/cranelift-dsp.h`
+  - declared `cranelift_dsp_factory` destructor as `noexcept` to match the
+    base `dsp_factory` virtual destructor contract from Faust headers
+
+Local validation (syntax-only):
+
+- `cc -fsyntax-only -I crates/cranelift-ffi/include -I /Users/letz/Developpements/RUST/faust/architecture crates/cranelift-ffi/tests/header-smoke/cranelift_dsp_c_header_smoke.c`
+- `c++ -std=c++11 -fsyntax-only -I crates/cranelift-ffi/include -I /Users/letz/Developpements/RUST/faust/architecture crates/cranelift-ffi/tests/header-smoke/cranelift_dsp_cpp_header_smoke.cpp`
+
+Both checks passed locally.
+
 ### Cranelift FFI Phase 0: freeze V1 surface decisions for signatures and deferred families
 
 Refined the Cranelift FFI Phase 0 parity matrix and backend plan to remove the

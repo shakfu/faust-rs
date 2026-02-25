@@ -85,7 +85,7 @@ class LIBFAUST_API cranelift_dsp : public dsp {
  */
 class LIBFAUST_API cranelift_dsp_factory : public dsp_factory {
     public:
-        virtual ~cranelift_dsp_factory();
+        virtual ~cranelift_dsp_factory() noexcept;
 
         std::string getName();
         std::string getSHAKey();
