@@ -7399,3 +7399,34 @@ Fix:
 
 Validation:
 - `cargo test -p fir dump_fir_expands_simple_for_loop_body`
+
+### `xtask`: backend alignment smoke/nightly orchestration + FIR dump structural scan
+
+To reduce backend/tooling drift and catch dump-only regressions earlier, added
+alignment orchestration commands in `crates/xtask/src/main.rs`:
+
+- `backend-align-smoke`
+  - optional `golden-check`
+  - `interp-trace-check` on a small runtime subset (fast lane)
+  - optional `interp-trace-diff-lanes`
+  - `fir-dump-scan` on a small corpus subset (fast lane)
+- `backend-align-nightly`
+  - optional `golden-check`
+  - `interp-trace-check` on all runtime corpus cases (fast lane)
+  - optional `interp-trace-diff-lanes`
+  - `fir-dump-scan` on the full corpus (fast lane)
+- `fir-dump-scan`
+  - compiles to FIR and runs `dump_fir`
+  - scans loop nodes (`SimpleForLoop`, `ForLoop`, `IteratorForLoop`)
+  - fails if a loop `body: TreeId(...)` reference is not expanded elsewhere in
+    the dump output
+  - skips compile failures (unsupported corpus cases / expected errors) and
+    reports a summary (`compiled_cases`, `skipped_compile`, `loop_nodes_seen`)
+
+This directly guards against the class of issue found on `mix.dsp` where FIR was
+valid but `dump_fir` traversal was incomplete.
+
+Validation:
+- `cargo run -p xtask -- fir-dump-scan --case tests/corpus/rep_38_sine_phasor.dsp --lane fast`
+- `cargo run -p xtask -- backend-align-smoke --skip-golden`
+- `cargo run -p xtask -- backend-align-nightly --skip-golden --skip-diff-lanes`

@@ -14,6 +14,9 @@
 //!   - `interp-trace-diff-lanes` (Phase 3 lane differential scaffold)
 //!   - `interp-trace-dump-cppfbc` (C++ Faust `.fbc` -> Rust interp runtime)
 //!   - `interp-trace-gen-cppfbc` (batch-generate persisted traces from C++ `.fbc`)
+//!   - `backend-align-smoke` (CI-friendly smoke alignment orchestration)
+//!   - `backend-align-nightly` (broader alignment orchestration)
+//!   - `fir-dump-scan` (structural scan of `dump_fir` loop body expansion)
 //! - Differential reports:
 //!   - parser parity report
 //!   - corpus status report
@@ -24,7 +27,7 @@
 //! - Normalized output text before snapshot comparison.
 //! - Fail-fast behavior when one case diverges to preserve CI signal quality.
 
-use fir::{FirMatch, match_fir};
+use fir::{FirMatch, dump_fir, match_fir};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -48,6 +51,9 @@ Usage:
   cargo run -p xtask -- interp-trace-gen [--case <tests/runtime_corpus/foo.dsp>] [--lane legacy|fast] [--strict-fir-types]
   cargo run -p xtask -- interp-trace-check [--case <tests/runtime_corpus/foo.dsp>] [--lane legacy|fast] [--strict-fir-types]
   cargo run -p xtask -- interp-trace-diff-lanes [--case <tests/runtime_corpus/foo.dsp>] [--strict-fir-types]
+  cargo run -p xtask -- fir-dump-scan [--case <tests/corpus/foo.dsp> ...] [--lane legacy|fast]
+  cargo run -p xtask -- backend-align-smoke [--case <tests/runtime_corpus/foo.dsp> ...] [--strict-fir-types] [--skip-golden] [--skip-diff-lanes] [--skip-fir-dump-scan]
+  cargo run -p xtask -- backend-align-nightly [--strict-fir-types] [--skip-golden] [--skip-diff-lanes] [--skip-fir-dump-scan]
   cargo run -p xtask -- parser-parity-report
   cargo run -p xtask -- corpus-status-report
   cargo run -p xtask -- cpp-backend-diff-report
@@ -108,6 +114,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "interp-trace-gen" => interp_trace_gen(args)?,
         "interp-trace-check" => interp_trace_check(args)?,
         "interp-trace-diff-lanes" => interp_trace_diff_lanes(args)?,
+        "fir-dump-scan" => fir_dump_scan(args)?,
+        "backend-align-smoke" => backend_align_smoke(args)?,
+        "backend-align-nightly" => backend_align_nightly(args)?,
         "parser-parity-report" => parser_parity_report()?,
         "corpus-status-report" => corpus_status_report()?,
         "cpp-backend-diff-report" => cpp_backend_diff_report()?,
@@ -172,11 +181,398 @@ fn runtime_trace_snapshot_root() -> PathBuf {
     workspace_root().join("tests/runtime_traces").join("rust")
 }
 
+const BACKEND_ALIGN_SMOKE_DEFAULT_CASES: &[&str] = &[
+    "tests/runtime_corpus/trace_01_passthrough.dsp",
+    "tests/runtime_corpus/trace_07_nonlinear_clip.dsp",
+    "tests/runtime_corpus/trace_38_sine_phasor.dsp",
+];
+const BACKEND_ALIGN_SMOKE_FIR_CASES: &[&str] = &[
+    "tests/corpus/rep_01_passthrough.dsp",
+    "tests/corpus/rep_07_nonlinear_clip.dsp",
+    "tests/corpus/rep_38_sine_phasor.dsp",
+];
+
 fn case_name(path: &Path) -> Result<String, io::Error> {
     path.file_stem()
         .and_then(std::ffi::OsStr::to_str)
         .map(ToOwned::to_owned)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid corpus filename"))
+}
+
+#[derive(Debug, Default)]
+struct BackendAlignSmokeOptions {
+    cases: Vec<PathBuf>,
+    strict_fir_types: bool,
+    skip_golden: bool,
+    skip_diff_lanes: bool,
+    skip_fir_dump_scan: bool,
+}
+
+fn backend_align_smoke(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let options = parse_backend_align_smoke_options(&mut args)?;
+    println!("backend-align-smoke: start");
+
+    if !options.skip_golden {
+        println!("backend-align-smoke: golden-check");
+        golden_check(None)?;
+    } else {
+        println!("backend-align-smoke: skip golden-check");
+    }
+
+    let cases = backend_align_smoke_cases(&options)?;
+    if cases.is_empty() {
+        return Err("backend-align-smoke: no runtime cases selected".into());
+    }
+
+    for case in &cases {
+        let mut trace_check_args = vec![
+            "--case".to_owned(),
+            case.display().to_string(),
+            "--lane".to_owned(),
+            "fast".to_owned(),
+        ];
+        if options.strict_fir_types {
+            trace_check_args.push("--strict-fir-types".to_owned());
+        }
+        println!("backend-align-smoke: interp-trace-check {}", case.display());
+        interp_trace_check(trace_check_args.into_iter())?;
+    }
+
+    if !options.skip_diff_lanes {
+        for case in &cases {
+            let mut diff_args = vec!["--case".to_owned(), case.display().to_string()];
+            if options.strict_fir_types {
+                diff_args.push("--strict-fir-types".to_owned());
+            }
+            println!(
+                "backend-align-smoke: interp-trace-diff-lanes {}",
+                case.display()
+            );
+            interp_trace_diff_lanes(diff_args.into_iter())?;
+        }
+    } else {
+        println!("backend-align-smoke: skip interp-trace-diff-lanes");
+    }
+
+    if !options.skip_fir_dump_scan {
+        let mut scan_args: Vec<String> = Vec::new();
+        for case in backend_align_smoke_fir_cases()? {
+            scan_args.push("--case".to_owned());
+            scan_args.push(case.display().to_string());
+        }
+        scan_args.push("--lane".to_owned());
+        scan_args.push("fast".to_owned());
+        println!("backend-align-smoke: fir-dump-scan (fast lane corpus subset)");
+        fir_dump_scan(scan_args.into_iter())?;
+    } else {
+        println!("backend-align-smoke: skip fir-dump-scan");
+    }
+
+    println!(
+        "backend-align-smoke: OK (runtime_cases={}, strict_fir_types={}, golden={}, diff_lanes={}, fir_dump_scan={})",
+        cases.len(),
+        options.strict_fir_types,
+        !options.skip_golden,
+        !options.skip_diff_lanes,
+        !options.skip_fir_dump_scan
+    );
+    Ok(())
+}
+
+fn parse_backend_align_smoke_options(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<BackendAlignSmokeOptions, Box<dyn std::error::Error>> {
+    let mut options = BackendAlignSmokeOptions::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--case" => {
+                let Some(path) = args.next() else {
+                    return Err("--case requires a path".into());
+                };
+                options.cases.push(PathBuf::from(path));
+            }
+            "--strict-fir-types" => options.strict_fir_types = true,
+            "--skip-golden" => options.skip_golden = true,
+            "--skip-diff-lanes" => options.skip_diff_lanes = true,
+            "--skip-fir-dump-scan" => options.skip_fir_dump_scan = true,
+            "--help" | "-h" => {
+                return Err("usage: cargo run -p xtask -- backend-align-smoke [--case <tests/runtime_corpus/foo.dsp> ...] [--strict-fir-types] [--skip-golden] [--skip-diff-lanes] [--skip-fir-dump-scan]".into());
+            }
+            other => return Err(format!("unknown backend-align-smoke option: {other}").into()),
+        }
+    }
+    Ok(options)
+}
+
+fn backend_align_smoke_cases(
+    options: &BackendAlignSmokeOptions,
+) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    if !options.cases.is_empty() {
+        return Ok(options.cases.clone());
+    }
+    let root = workspace_root();
+    let mut cases = Vec::new();
+    for rel in BACKEND_ALIGN_SMOKE_DEFAULT_CASES {
+        let path = root.join(rel);
+        if !path.exists() {
+            return Err(format!(
+                "backend-align-smoke default case missing: {}",
+                path.display()
+            )
+            .into());
+        }
+        cases.push(path);
+    }
+    Ok(cases)
+}
+
+fn backend_align_smoke_fir_cases() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let root = workspace_root();
+    let mut cases = Vec::new();
+    for rel in BACKEND_ALIGN_SMOKE_FIR_CASES {
+        let path = root.join(rel);
+        if !path.exists() {
+            return Err(format!(
+                "backend-align-smoke default FIR case missing: {}",
+                path.display()
+            )
+            .into());
+        }
+        cases.push(path);
+    }
+    Ok(cases)
+}
+
+#[derive(Debug, Default)]
+struct BackendAlignNightlyOptions {
+    strict_fir_types: bool,
+    skip_golden: bool,
+    skip_diff_lanes: bool,
+    skip_fir_dump_scan: bool,
+}
+
+fn backend_align_nightly(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let options = parse_backend_align_nightly_options(&mut args)?;
+    println!("backend-align-nightly: start");
+
+    if !options.skip_golden {
+        println!("backend-align-nightly: golden-check");
+        golden_check(None)?;
+    } else {
+        println!("backend-align-nightly: skip golden-check");
+    }
+
+    let mut trace_check_args = vec!["--lane".to_owned(), "fast".to_owned()];
+    if options.strict_fir_types {
+        trace_check_args.push("--strict-fir-types".to_owned());
+    }
+    println!("backend-align-nightly: interp-trace-check (all runtime cases, fast lane)");
+    interp_trace_check(trace_check_args.into_iter())?;
+
+    if !options.skip_diff_lanes {
+        let mut diff_args: Vec<String> = Vec::new();
+        if options.strict_fir_types {
+            diff_args.push("--strict-fir-types".to_owned());
+        }
+        println!("backend-align-nightly: interp-trace-diff-lanes (all runtime cases)");
+        interp_trace_diff_lanes(diff_args.into_iter())?;
+    } else {
+        println!("backend-align-nightly: skip interp-trace-diff-lanes");
+    }
+
+    if !options.skip_fir_dump_scan {
+        println!("backend-align-nightly: fir-dump-scan (all corpus cases, fast lane)");
+        fir_dump_scan(["--lane".to_owned(), "fast".to_owned()].into_iter())?;
+    } else {
+        println!("backend-align-nightly: skip fir-dump-scan");
+    }
+
+    println!(
+        "backend-align-nightly: OK (strict_fir_types={}, golden={}, diff_lanes={}, fir_dump_scan={})",
+        options.strict_fir_types,
+        !options.skip_golden,
+        !options.skip_diff_lanes,
+        !options.skip_fir_dump_scan
+    );
+    Ok(())
+}
+
+fn parse_backend_align_nightly_options(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<BackendAlignNightlyOptions, Box<dyn std::error::Error>> {
+    let mut options = BackendAlignNightlyOptions::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--strict-fir-types" => options.strict_fir_types = true,
+            "--skip-golden" => options.skip_golden = true,
+            "--skip-diff-lanes" => options.skip_diff_lanes = true,
+            "--skip-fir-dump-scan" => options.skip_fir_dump_scan = true,
+            "--help" | "-h" => {
+                return Err("usage: cargo run -p xtask -- backend-align-nightly [--strict-fir-types] [--skip-golden] [--skip-diff-lanes] [--skip-fir-dump-scan]".into());
+            }
+            other => return Err(format!("unknown backend-align-nightly option: {other}").into()),
+        }
+    }
+    Ok(options)
+}
+
+#[derive(Debug)]
+struct FirDumpScanOptions {
+    cases: Vec<PathBuf>,
+    lane: TraceLane,
+}
+
+impl Default for FirDumpScanOptions {
+    fn default() -> Self {
+        Self {
+            cases: Vec::new(),
+            lane: TraceLane::Fast,
+        }
+    }
+}
+
+fn fir_dump_scan(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
+    let options = parse_fir_dump_scan_options(&mut args)?;
+    let cases = if options.cases.is_empty() {
+        corpus_files()?
+    } else {
+        options.cases
+    };
+    let compiler = compiler::Compiler::new();
+
+    let mut compiled_cases = 0usize;
+    let mut skipped_compile = 0usize;
+    let mut loop_nodes_seen = 0usize;
+    let mut issues: Vec<String> = Vec::new();
+
+    for case in cases {
+        let lowered = match compiler
+            .compile_file_default_to_fir_with_lane(&case, options.lane.to_signal_fir_lane())
+        {
+            Ok(out) => out,
+            Err(e) => {
+                skipped_compile += 1;
+                println!("skip {} (FIR compile failed: {e})", case.display());
+                continue;
+            }
+        };
+        let rendered = dump_fir(&lowered.store, lowered.module);
+        compiled_cases += 1;
+        loop_nodes_seen += count_loop_nodes_in_dump(&rendered);
+
+        let missing = find_unexpanded_loop_bodies(&rendered);
+        if missing.is_empty() {
+            println!("ok {} [lane={}]", case.display(), options.lane.as_str());
+            continue;
+        }
+
+        for (loop_kind, loop_id, body_id) in missing {
+            issues.push(format!(
+                "{} [lane={}] {loop_kind} node #{loop_id} body #{body_id} not expanded in dump_fir output",
+                case.display(),
+                options.lane.as_str()
+            ));
+        }
+    }
+
+    if !issues.is_empty() {
+        for issue in &issues {
+            println!("[FAIL] {issue}");
+        }
+        return Err(format!(
+            "fir-dump-scan failed: {} issue(s) across {} compiled case(s) (skipped_compile={})",
+            issues.len(),
+            compiled_cases,
+            skipped_compile
+        )
+        .into());
+    }
+
+    println!(
+        "fir-dump-scan: OK (lane={}, compiled_cases={}, skipped_compile={}, loop_nodes_seen={})",
+        options.lane.as_str(),
+        compiled_cases,
+        skipped_compile,
+        loop_nodes_seen
+    );
+    Ok(())
+}
+
+fn parse_fir_dump_scan_options(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<FirDumpScanOptions, Box<dyn std::error::Error>> {
+    let mut options = FirDumpScanOptions::default();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--case" => {
+                let Some(path) = args.next() else {
+                    return Err("--case requires a path".into());
+                };
+                options.cases.push(PathBuf::from(path));
+            }
+            "--lane" => {
+                let Some(value) = args.next() else {
+                    return Err("--lane requires legacy|fast".into());
+                };
+                options.lane = TraceLane::parse(&value)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            }
+            "--help" | "-h" => {
+                return Err("usage: cargo run -p xtask -- fir-dump-scan [--case <tests/corpus/foo.dsp> ...] [--lane legacy|fast]".into());
+            }
+            other => return Err(format!("unknown fir-dump-scan option: {other}").into()),
+        }
+    }
+    Ok(options)
+}
+
+fn count_loop_nodes_in_dump(rendered: &str) -> usize {
+    rendered.matches("SimpleForLoop {").count()
+        + rendered.matches("ForLoop {").count()
+        + rendered.matches("IteratorForLoop {").count()
+}
+
+fn find_unexpanded_loop_bodies(rendered: &str) -> Vec<(&'static str, u32, u32)> {
+    let mut issues = Vec::new();
+    for line in rendered.lines() {
+        let Some((loop_kind, loop_id, body_id)) = parse_loop_line_body_ids(line) else {
+            continue;
+        };
+        let body_marker = format!("#{body_id} ");
+        if !rendered.contains(&body_marker) {
+            issues.push((loop_kind, loop_id, body_id));
+        }
+    }
+    issues
+}
+
+fn parse_loop_line_body_ids(line: &str) -> Option<(&'static str, u32, u32)> {
+    let trimmed = line.trim_start();
+    let rest = trimmed.strip_prefix('#')?;
+    let loop_id_end = rest.find(' ')?;
+    let loop_id = rest[..loop_id_end].parse().ok()?;
+    let rest = &rest[loop_id_end + 1..];
+
+    let loop_kind = if rest.starts_with("SimpleForLoop {") {
+        "SimpleForLoop"
+    } else if rest.starts_with("ForLoop {") {
+        "ForLoop"
+    } else if rest.starts_with("IteratorForLoop {") {
+        "IteratorForLoop"
+    } else {
+        return None;
+    };
+
+    let body_key = "body: TreeId(";
+    let body_pos = rest.find(body_key)?;
+    let body_tail = &rest[body_pos + body_key.len()..];
+    let body_end = body_tail.find(')')?;
+    let body_id = body_tail[..body_end].parse().ok()?;
+    Some((loop_kind, loop_id, body_id))
 }
 
 fn golden_cases_for_check(golden_ref: GoldenRef) -> Result<Vec<(String, PathBuf)>, io::Error> {
