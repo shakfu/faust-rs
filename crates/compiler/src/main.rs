@@ -20,6 +20,10 @@ use boxes::dump_box;
 use clap::{ArgAction, Parser, ValueEnum};
 use codegen::backends::c::COptions;
 use codegen::backends::cpp::CppOptions;
+use codegen::backends::cranelift::{
+    CraneliftOptions, StructFieldKind, compile_fir_to_cranelift_jit,
+    diagnose_cranelift_compute_subset_gap,
+};
 use codegen::backends::interp::InterpOptions;
 use compiler::{
     Compiler, CompilerError, FirVerifyOptions, SignalFirLane,
@@ -41,6 +45,8 @@ enum CliLang {
     Fir,
     #[value(alias = "interp-fbc")]
     Interp,
+    #[value(alias = "clif")]
+    Cranelift,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -108,9 +114,13 @@ struct CliArgs {
     /// Compile to interpreter bytecode and print `.fbc` text.
     #[arg(long = "dump-interp", action = ArgAction::SetTrue)]
     dump_interp: bool,
-    /// Select backend language (Faust-style): `-lang c`, `-lang cpp`, or `-lang fir`.
+    /// Compile through the experimental Cranelift backend and print a backend report.
+    #[arg(long = "dump-cranelift", action = ArgAction::SetTrue)]
+    dump_cranelift: bool,
+    /// Select backend language (Faust-style): `-lang c`, `-lang cpp`, `-lang cranelift`, `-lang fir`, or `-lang interp`.
     ///
-    /// This option is equivalent to `--dump-c` / `--dump-cpp` / `--dump-fir`.
+    /// This option is equivalent to `--dump-c` / `--dump-cpp` / `--dump-fir`
+    /// / `--dump-interp` / `--dump-cranelift`.
     #[arg(long = "lang", value_enum, allow_hyphen_values = true)]
     lang: Option<CliLang>,
     /// Print dedicated help for diagnostic output formats and exit.
@@ -590,6 +600,50 @@ fn emit_output(content: &str, output: Option<&PathBuf>) {
     }
 }
 
+fn render_cranelift_report(
+    compiled: &codegen::backends::cranelift::JitDspModule,
+    subset_gap: Option<&str>,
+) -> String {
+    let layout = compiled.struct_layout();
+    let mut out = String::new();
+    out.push_str("backend: cranelift (experimental)\n");
+    out.push_str(&format!("module: {}\n", compiled.module_name()));
+    out.push_str(&format!(
+        "compute_symbol: {}\n",
+        compiled.compute_symbol_name()
+    ));
+    out.push_str(&format!(
+        "compute_entry_addr: 0x{:x}\n",
+        compiled.compute_entry_addr()
+    ));
+    out.push_str(&format!(
+        "compute_body_lowered: {}\n",
+        compiled.compute_body_lowered()
+    ));
+    if let Some(reason) = subset_gap {
+        out.push_str(&format!("subset_gap: {reason}\n"));
+    }
+    out.push_str(&format!(
+        "dsp_struct_layout: size={} align={} fields={}\n",
+        layout.size_bytes(),
+        layout.align_bytes(),
+        layout.fields().len()
+    ));
+    for field in layout.fields() {
+        let kind = match &field.kind {
+            StructFieldKind::Scalar(typ) => format!("scalar:{typ:?}"),
+            StructFieldKind::Table { elem_type, len } => {
+                format!("table:{elem_type:?}[{len}]")
+            }
+        };
+        out.push_str(&format!(
+            "  - {} @{} size={} align={} {}\n",
+            field.name, field.offset_bytes, field.size_bytes, field.align_bytes, kind
+        ));
+    }
+    out
+}
+
 fn selected_codegen_lane(cli: &CliArgs) -> CliSignalFirLane {
     cli.signal_fir_lane.unwrap_or(CliSignalFirLane::Fast)
 }
@@ -644,6 +698,7 @@ fn main() {
         cli.dump_fir,
         cli.dump_fir_verify,
         cli.dump_interp,
+        cli.dump_cranelift,
         cli.lang.is_some(),
     ]
     .into_iter()
@@ -668,7 +723,7 @@ fn main() {
 
     if (cli.dump_box || cli.dump_sig || cli.parse || cli.golden) && cli.signal_fir_lane.is_some() {
         eprintln!(
-            "--signal-fir-lane is only valid with --dump-cpp/--dump-c/--dump-fir/--dump-fir-verify"
+            "--signal-fir-lane is only valid with --dump-cpp/--dump-c/--dump-fir/--dump-fir-verify/--dump-cranelift"
         );
         std::process::exit(2);
     }
@@ -900,6 +955,49 @@ fn main() {
         return;
     }
 
+    if cli.dump_cranelift || matches!(cli.lang, Some(CliLang::Cranelift)) {
+        let compiler = compiler_from_cli(&cli);
+        let result = if cli.import_dir.is_empty() {
+            compiler.compile_file_default_to_fir_with_lane(
+                input_path,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        } else {
+            compiler.compile_file_to_fir_with_lane(
+                input_path,
+                &cli.import_dir,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        };
+
+        match result {
+            Ok(out) => {
+                let subset_gap = diagnose_cranelift_compute_subset_gap(&out.store, out.module)
+                    .map_err(|err| err.to_string());
+                let compiled = match compile_fir_to_cranelift_jit(
+                    &out.store,
+                    out.module,
+                    &CraneliftOptions::default(),
+                ) {
+                    Ok(compiled) => compiled,
+                    Err(err) => {
+                        eprintln!("Cranelift pipeline failed: {err}");
+                        std::process::exit(1);
+                    }
+                };
+                let rendered =
+                    render_cranelift_report(&compiled, subset_gap.ok().flatten().as_deref());
+                emit_output(&rendered, cli.output.as_ref());
+            }
+            Err(err) => {
+                eprintln!("Cranelift FIR pipeline failed: {err}");
+                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if cli.dump_cpp || matches!(cli.lang, Some(CliLang::Cpp)) || mode_count == 0 {
         let compiler = compiler_from_cli(&cli);
         let options = CppOptions::default();
@@ -1043,6 +1141,18 @@ mod tests {
     fn cli_parse_accepts_lang_fir() {
         let cli = CliArgs::parse_from(["faust-rs", "--lang", "fir", "foo.dsp"]);
         assert!(matches!(cli.lang, Some(CliLang::Fir)));
+    }
+
+    #[test]
+    fn cli_parse_accepts_lang_cranelift() {
+        let cli = CliArgs::parse_from(["faust-rs", "--lang", "cranelift", "foo.dsp"]);
+        assert!(matches!(cli.lang, Some(CliLang::Cranelift)));
+    }
+
+    #[test]
+    fn cli_parse_accepts_dump_cranelift() {
+        let cli = CliArgs::parse_from(["faust-rs", "--dump-cranelift", "foo.dsp"]);
+        assert!(cli.dump_cranelift);
     }
 
     #[test]

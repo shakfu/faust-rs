@@ -8150,6 +8150,46 @@ Local validation:
 
 All checks passed locally.
 
+### Compiler CLI: add experimental Cranelift backend mode (`--dump-cranelift` / `-lang cranelift`)
+
+Wired the Cranelift backend bring-up path into the `faust-rs` compiler CLI as an
+explicit experimental mode, so backend progress can be exercised directly from
+the top-level compiler without going through the FFI scaffold.
+
+Changes in `crates/compiler/src/main.rs`:
+
+- added `--dump-cranelift` (experimental backend report mode)
+- added `-lang cranelift` (with `clif` alias) and routed it to the same codepath
+- updated mode validation/counting so Cranelift is treated like other backend
+  dump modes
+- updated `--signal-fir-lane` compatibility message to mention
+  `--dump-cranelift`
+- added a Cranelift report renderer printing:
+  - module name
+  - finalized `compute` symbol name
+  - JIT entry address
+  - `compute_body_lowered` (`true` vs stub fallback)
+  - derived backend `dsp*` struct layout summary + fields
+- fixed CLI help text for `--lang` to explicitly mention `interp`
+- sorted the `--lang` help examples alphabetically (`c`, `cpp`, `cranelift`,
+  `fir`, `interp`)
+
+Behavior notes:
+
+- `--dump-cranelift` / `-lang cranelift` first compile to FIR (respecting
+  `--signal-fir-lane`), then invoke the Cranelift backend and print a textual
+  backend report instead of generated source code.
+- FIR verifier failures still stop before backend invocation (same compiler
+  policy as other backend paths).
+
+Tests/validation:
+
+- `cargo fmt --all`
+- `cargo clippy -p compiler --all-targets -- -D warnings`
+- `cargo test -p compiler cli_parse_accepts_lang_cranelift -- --nocapture`
+- `cargo run -p compiler -- --dump-cranelift tests/corpus/rep_01_passthrough.dsp`
+- `cargo run -p compiler -- -lang cranelift tests/corpus/rep_01_passthrough.dsp`
+
 ### Cranelift backend: add subset-gap diagnostics and scan `tests/corpus` fallback causes
 
 Added a backend diagnostic helper and a temporary corpus scan example to make
