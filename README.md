@@ -59,6 +59,29 @@ faust-rs -lang cpp foo.dsp -o foo.cpp
 faust-rs -lang interp foo.dsp -o foo.fbc
 ```
 
+Built-in FIR backend fixtures (for backend debugging / bring-up):
+
+```bash
+# List internal FIR fixtures
+faust-rs --list-fir-fixtures
+
+# Dump a built-in FIR fixture
+faust-rs --fir-fixture sine_phasor -lang fir
+
+# Generate backend output directly from a built-in FIR fixture
+faust-rs --fir-fixture control_flow -lang c
+faust-rs --fir-fixture gain_bias_ui_meta -lang cpp
+faust-rs --fir-fixture sine_phasor -lang interp
+faust-rs --fir-fixture sine_phasor -lang cranelift
+```
+
+Notes:
+
+- `--fir-fixture` bypasses the Faust front-end pipeline and feeds a hand-written
+  FIR module from `codegen::fixtures` directly into the selected backend.
+- It is intended for backend debugging and parity bring-up, not end-user DSP
+  compilation workflows.
+
 If your installed command is named `faust` (for example via a symlink/wrapper),
 the same model applies:
 

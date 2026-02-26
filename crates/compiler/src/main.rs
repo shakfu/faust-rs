@@ -19,12 +19,15 @@
 use boxes::dump_box;
 use clap::{ArgAction, Parser, ValueEnum};
 use codegen::backends::c::COptions;
+use codegen::backends::c::generate_c_module;
 use codegen::backends::cpp::CppOptions;
+use codegen::backends::cpp::generate_cpp_module;
 use codegen::backends::cranelift::{
     CraneliftOptions, StructFieldKind, compile_fir_to_cranelift_jit,
     diagnose_cranelift_compute_subset_gap,
 };
-use codegen::backends::interp::InterpOptions;
+use codegen::backends::interp::{InterpOptions, generate_interp_module, write_fbc};
+use codegen::fixtures::backend_test_fixtures;
 use compiler::{
     Compiler, CompilerError, FirVerifyOptions, SignalFirLane,
     enrobage::{EnrobageOptions, wrap_cpp_with_architecture},
@@ -126,6 +129,15 @@ struct CliArgs {
     /// Print dedicated help for diagnostic output formats and exit.
     #[arg(long = "help-error-format", action = ArgAction::SetTrue)]
     help_error_format: bool,
+    /// List built-in FIR fixtures available for backend debugging and exit.
+    #[arg(long = "list-fir-fixtures", action = ArgAction::SetTrue)]
+    list_fir_fixtures: bool,
+    /// Use a built-in FIR fixture instead of compiling a DSP input file.
+    ///
+    /// This is intended for backend debugging / bring-up. Combine with
+    /// `-lang fir|c|cpp|interp|cranelift` (or corresponding `--dump-*` flags).
+    #[arg(long = "fir-fixture")]
+    fir_fixture: Option<String>,
     /// Optional DSP input file (required by operational modes).
     input: Option<PathBuf>,
     /// Optional output file. When omitted, generated text is written to stdout.
@@ -659,6 +671,33 @@ fn compiler_from_cli(cli: &CliArgs) -> Compiler {
     Compiler::new().with_fir_verify_options(selected_fir_verify_options(cli))
 }
 
+fn render_fir_fixture_list() -> String {
+    let mut out = String::from("Built-in FIR fixtures:\n");
+    for (name, _) in backend_test_fixtures() {
+        out.push_str("- ");
+        out.push_str(name);
+        out.push('\n');
+    }
+    out
+}
+
+fn find_fir_fixture(name: &str) -> Option<codegen::fixtures::FirFixtureBuilder> {
+    backend_test_fixtures()
+        .iter()
+        .find_map(|(n, build)| (*n == name).then_some(*build))
+}
+
+fn compile_fixture_to_interp_text(
+    store: &fir::FirStore,
+    module: fir::FirId,
+    options: &InterpOptions,
+) -> Result<String, String> {
+    let factory = generate_interp_module(store, module, options).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    write_fbc(&factory, &mut buf, false).map_err(|e| e.to_string())?;
+    String::from_utf8(buf).map_err(|e| e.to_string())
+}
+
 fn render_fir_verify_report(store: &fir::FirStore, module: fir::FirId, strict: bool) -> String {
     let report = verify_fir_module(store, module);
     let errors = report.errors().count();
@@ -688,6 +727,15 @@ fn main() {
     let cli = CliArgs::parse_from(args);
     maybe_print_error_format_help(cli.help_error_format);
 
+    if cli.list_fir_fixtures {
+        if cli.fir_fixture.is_some() || cli.input.is_some() {
+            eprintln!("--list-fir-fixtures does not accept --fir-fixture or input file");
+            std::process::exit(2);
+        }
+        emit_output(&render_fir_fixture_list(), cli.output.as_ref());
+        return;
+    }
+
     let mode_count = [
         cli.golden,
         cli.parse,
@@ -709,7 +757,7 @@ fn main() {
         print_global_usage_and_exit();
     }
 
-    if mode_count == 0 && cli.input.is_none() {
+    if mode_count == 0 && cli.input.is_none() && cli.fir_fixture.is_none() {
         println!("faust-rs compiler scaffold v{}", Compiler::version());
         return;
     }
@@ -717,9 +765,10 @@ fn main() {
         // Default compile mode: C++ backend, aligned with Faust CLI behavior.
     }
 
-    let Some(input_path) = cli.input.as_ref() else {
-        print_global_usage_and_exit();
-    };
+    if cli.fir_fixture.is_some() && cli.input.is_some() {
+        eprintln!("--fir-fixture is incompatible with a DSP input file");
+        std::process::exit(2);
+    }
 
     if (cli.dump_box || cli.dump_sig || cli.parse || cli.golden) && cli.signal_fir_lane.is_some() {
         eprintln!(
@@ -750,6 +799,150 @@ fn main() {
         eprintln!("--architecture-dir/--inline-architecture-files require --architecture <file>");
         std::process::exit(2);
     }
+
+    if cli.fir_fixture.is_some() {
+        if cli.golden || cli.parse || cli.dump_box || cli.dump_sig {
+            eprintln!(
+                "--fir-fixture supports only FIR/backend dump modes (fir/c/cpp/interp/cranelift)"
+            );
+            std::process::exit(2);
+        }
+        if cli.signal_fir_lane.is_some() {
+            eprintln!("--signal-fir-lane is not applicable with --fir-fixture (already FIR)");
+            std::process::exit(2);
+        }
+        if !cli.import_dir.is_empty() {
+            eprintln!("--import-dir is not used with --fir-fixture");
+            std::process::exit(2);
+        }
+    }
+
+    if let Some(fixture_name) = cli.fir_fixture.as_deref() {
+        let Some(build_fixture) = find_fir_fixture(fixture_name) else {
+            eprintln!("Unknown FIR fixture: {fixture_name}");
+            eprintln!("{}", render_fir_fixture_list());
+            std::process::exit(2);
+        };
+        let (store, module) = build_fixture();
+
+        if cli.dump_fir_verify {
+            let rendered = render_fir_verify_report(&store, module, cli.fir_verify_strict);
+            let report = verify_fir_module(&store, module);
+            let fatal = report.has_errors()
+                || (cli.fir_verify_strict && report.warnings().next().is_some());
+            emit_output(&rendered, cli.output.as_ref());
+            if fatal {
+                std::process::exit(1);
+            }
+            return;
+        }
+
+        if cli.dump_fir || matches!(cli.lang, Some(CliLang::Fir)) {
+            let mut rendered = dump_fir(&store, module);
+            if !rendered.ends_with('\n') {
+                rendered.push('\n');
+            }
+            emit_output(&rendered, cli.output.as_ref());
+            return;
+        }
+
+        if cli.dump_interp || matches!(cli.lang, Some(CliLang::Interp)) {
+            match compile_fixture_to_interp_text(&store, module, &InterpOptions::default()) {
+                Ok(fbc_text) => emit_output(&fbc_text, cli.output.as_ref()),
+                Err(err) => {
+                    eprintln!("Interp fixture codegen failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+
+        if cli.dump_cranelift || matches!(cli.lang, Some(CliLang::Cranelift)) {
+            let subset_gap = diagnose_cranelift_compute_subset_gap(&store, module)
+                .map_err(|err| err.to_string());
+            let compiled =
+                match compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default()) {
+                    Ok(compiled) => compiled,
+                    Err(err) => {
+                        eprintln!("Cranelift fixture codegen failed: {err}");
+                        std::process::exit(1);
+                    }
+                };
+            let rendered = render_cranelift_report(&compiled, subset_gap.ok().flatten().as_deref());
+            emit_output(&rendered, cli.output.as_ref());
+            return;
+        }
+
+        if cli.dump_cpp || matches!(cli.lang, Some(CliLang::Cpp)) || mode_count == 0 {
+            match generate_cpp_module(&store, module, &CppOptions::default()) {
+                Ok(cpp) => {
+                    let rendered = if let Some(architecture_file) = cli.architecture.as_ref() {
+                        let mut options = EnrobageOptions::new(architecture_file.clone());
+                        options.architecture_dirs = cli.architecture_dir.clone();
+                        options.inline_arch_files = cli.inline_architecture_files;
+                        let wrapped = match wrap_cpp_with_architecture(&cpp, &options) {
+                            Ok(wrapped) => wrapped,
+                            Err(err) => {
+                                eprintln!("Architecture wrapping failed: {err}");
+                                std::process::exit(1);
+                            }
+                        };
+                        if let Some(err) = wrapped.recoverable_error.as_deref() {
+                            eprintln!("{err}");
+                            std::process::exit(1);
+                        }
+                        wrapped.code
+                    } else {
+                        cpp
+                    };
+                    emit_output(&rendered, cli.output.as_ref());
+                }
+                Err(err) => {
+                    eprintln!("C++ fixture codegen failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+
+        if cli.dump_c || matches!(cli.lang, Some(CliLang::C)) {
+            match generate_c_module(&store, module, &COptions::default()) {
+                Ok(c_code) => {
+                    let rendered = if let Some(architecture_file) = cli.architecture.as_ref() {
+                        let mut options = EnrobageOptions::new(architecture_file.clone());
+                        options.architecture_dirs = cli.architecture_dir.clone();
+                        options.inline_arch_files = cli.inline_architecture_files;
+                        let wrapped = match wrap_cpp_with_architecture(&c_code, &options) {
+                            Ok(wrapped) => wrapped,
+                            Err(err) => {
+                                eprintln!("Architecture wrapping failed: {err}");
+                                std::process::exit(1);
+                            }
+                        };
+                        if let Some(err) = wrapped.recoverable_error.as_deref() {
+                            eprintln!("{err}");
+                            std::process::exit(1);
+                        }
+                        wrapped.code
+                    } else {
+                        c_code
+                    };
+                    emit_output(&rendered, cli.output.as_ref());
+                }
+                Err(err) => {
+                    eprintln!("C fixture codegen failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+
+        print_global_usage_and_exit();
+    }
+
+    let Some(input_path) = cli.input.as_ref() else {
+        print_global_usage_and_exit();
+    };
 
     if cli.golden {
         if !cli.import_dir.is_empty() {
@@ -1153,6 +1346,19 @@ mod tests {
     fn cli_parse_accepts_dump_cranelift() {
         let cli = CliArgs::parse_from(["faust-rs", "--dump-cranelift", "foo.dsp"]);
         assert!(cli.dump_cranelift);
+    }
+
+    #[test]
+    fn cli_parse_accepts_list_fir_fixtures() {
+        let cli = CliArgs::parse_from(["faust-rs", "--list-fir-fixtures"]);
+        assert!(cli.list_fir_fixtures);
+    }
+
+    #[test]
+    fn cli_parse_accepts_fir_fixture_with_lang() {
+        let cli = CliArgs::parse_from(["faust-rs", "--fir-fixture", "sine_phasor", "--lang", "cpp"]);
+        assert_eq!(cli.fir_fixture.as_deref(), Some("sine_phasor"));
+        assert!(matches!(cli.lang, Some(CliLang::Cpp)));
     }
 
     #[test]
