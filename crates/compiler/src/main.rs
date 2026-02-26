@@ -1356,7 +1356,8 @@ mod tests {
 
     #[test]
     fn cli_parse_accepts_fir_fixture_with_lang() {
-        let cli = CliArgs::parse_from(["faust-rs", "--fir-fixture", "sine_phasor", "--lang", "cpp"]);
+        let cli =
+            CliArgs::parse_from(["faust-rs", "--fir-fixture", "sine_phasor", "--lang", "cpp"]);
         assert_eq!(cli.fir_fixture.as_deref(), Some("sine_phasor"));
         assert!(matches!(cli.lang, Some(CliLang::Cpp)));
     }
