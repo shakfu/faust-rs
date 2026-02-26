@@ -76,21 +76,15 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
                 return std::ptr::null_mut();
             }
         };
-        let jit = match preflight_compile_file_to_cranelift(Path::new(filename), &args, opt_level) {
-            Ok(jit) => jit,
-            Err(e) => {
-                write_error(error_msg, &e);
-                return std::ptr::null_mut();
-            }
-        };
-        let ptr = alloc_factory(build_scaffold_factory_from_file(
-            filename,
-            &args,
-            opt_level,
-            Some(jit),
-        ));
-        cache_insert(&(*ptr).sha_key, ptr);
-        ptr
+        create_cranelift_factory_with_argv(&args, error_msg, |args| {
+            let jit = preflight_compile_file_to_cranelift(Path::new(filename), args, opt_level)?;
+            Ok(build_scaffold_factory_from_file(
+                filename,
+                args,
+                opt_level,
+                Some(jit),
+            ))
+        })
     }
 }
 
@@ -133,22 +127,16 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
                 return std::ptr::null_mut();
             }
         };
-        let jit = match preflight_compile_source_to_cranelift(name_app, dsp_content, opt_level) {
-            Ok(jit) => jit,
-            Err(e) => {
-                write_error(error_msg, &e);
-                return std::ptr::null_mut();
-            }
-        };
-        let ptr = alloc_factory(build_scaffold_factory_from_source(
-            name_app,
-            dsp_content,
-            &args,
-            opt_level,
-            Some(jit),
-        ));
-        cache_insert(&(*ptr).sha_key, ptr);
-        ptr
+        create_cranelift_factory_with_argv(&args, error_msg, |args| {
+            let jit = preflight_compile_source_to_cranelift(name_app, dsp_content, opt_level)?;
+            Ok(build_scaffold_factory_from_source(
+                name_app,
+                dsp_content,
+                args,
+                opt_level,
+                Some(jit),
+            ))
+        })
     }
 }
 
@@ -750,6 +738,35 @@ fn decode_scaffold_bitcode(text: &str) -> Result<CraneliftDspFactory, String> {
 /// `buf` must point to at least 4096 bytes or be null.
 unsafe fn write_error(buf: *mut c_char, msg: &str) {
     unsafe { write_error_4096(buf, msg) }
+}
+
+/// Runs the shared post-`argv` FFI factory creation flow for Cranelift backend.
+///
+/// This centralizes common FFI mechanics (error buffer + cache insertion +
+/// final allocation) while keeping file-vs-string compilation/preflight paths
+/// separate so path-based import semantics remain backend-correct.
+unsafe fn create_cranelift_factory_with_argv<F>(
+    argv: &[String],
+    error_msg: *mut c_char,
+    build: F,
+) -> *mut CraneliftDspFactory
+where
+    F: FnOnce(&[String]) -> Result<CraneliftDspFactory, String>,
+{
+    match build(argv) {
+        Ok(factory) => {
+            let ptr = alloc_factory(factory);
+            // SAFETY: `ptr` was just allocated and is non-null.
+            unsafe {
+                cache_insert(&(*ptr).sha_key, ptr);
+            }
+            ptr
+        }
+        Err(e) => {
+            unsafe { write_error(error_msg, &e) };
+            std::ptr::null_mut()
+        }
+    }
 }
 
 /// Minimal JSON string escaping for scaffold metadata text.

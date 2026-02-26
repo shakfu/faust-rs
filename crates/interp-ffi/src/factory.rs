@@ -211,18 +211,9 @@ pub unsafe extern "C" fn createCInterpreterDSPFactoryFromFile(
                 return std::ptr::null_mut();
             }
         };
-        match compile_factory_from_file_fastlane(Path::new(filename), &argv) {
-            Ok(factory) => {
-                let sha = factory.sha_key.clone();
-                let ptr = alloc_factory(factory);
-                cache_insert(&sha, ptr);
-                ptr
-            }
-            Err(e) => {
-                write_error(error_msg, &e);
-                std::ptr::null_mut()
-            }
-        }
+        create_interp_factory_with_argv(&argv, error_msg, |argv| {
+            compile_factory_from_file_fastlane(Path::new(filename), argv)
+        })
     }
 }
 
@@ -265,18 +256,9 @@ pub unsafe extern "C" fn createCInterpreterDSPFactoryFromString(
                 return std::ptr::null_mut();
             }
         };
-        match compile_factory_from_string_fastlane(source_name, dsp_content, &argv) {
-            Ok(factory) => {
-                let sha = factory.sha_key.clone();
-                let ptr = alloc_factory(factory);
-                cache_insert(&sha, ptr);
-                ptr
-            }
-            Err(e) => {
-                write_error(error_msg, &e);
-                std::ptr::null_mut()
-            }
-        }
+        create_interp_factory_with_argv(&argv, error_msg, |argv| {
+            compile_factory_from_string_fastlane(source_name, dsp_content, argv)
+        })
     }
 }
 
@@ -428,6 +410,37 @@ pub unsafe extern "C" fn freeCMemory(ptr: *mut c_void) {
 /// `buf` must point to at least 4096 bytes or be null.
 unsafe fn write_error(buf: *mut c_char, msg: &str) {
     unsafe { write_error_4096(buf, msg) }
+}
+
+/// Runs the shared post-`argv` FFI factory creation flow for interpreter backend.
+///
+/// This helper centralizes:
+/// - backend-agnostic C error-buffer wiring,
+/// - common cache insertion,
+/// - final opaque pointer allocation.
+///
+/// File and string constructors still keep distinct compile paths so file-based
+/// import resolution semantics (`default_import_search_base`) remain intact.
+unsafe fn create_interp_factory_with_argv<F>(
+    argv: &[String],
+    error_msg: *mut c_char,
+    compile: F,
+) -> *mut InterpreterDspFactory
+where
+    F: FnOnce(&[String]) -> Result<codegen::backends::interp::FbcDspFactory<f32>, String>,
+{
+    match compile(argv) {
+        Ok(factory) => {
+            let sha = factory.sha_key.clone();
+            let ptr = alloc_factory(factory);
+            cache_insert(&sha, ptr);
+            ptr
+        }
+        Err(e) => {
+            unsafe { write_error(error_msg, &e) };
+            std::ptr::null_mut()
+        }
+    }
 }
 
 /// Build a minimal JSON description of a factory's UI and metadata.
