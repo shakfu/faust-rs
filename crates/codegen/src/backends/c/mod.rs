@@ -940,6 +940,28 @@ fn emit_stmt(
             }
             Ok(())
         }
+        FirMatch::Switch {
+            cond,
+            ref cases,
+            default,
+        } => {
+            let cond = emit_value(store, options, cond)?;
+            let _ = writeln!(out, "{tab}switch ({cond}) {{");
+            for (value, block) in cases {
+                let _ = writeln!(out, "{tab}case {value}: {{");
+                emit_block_with_mode(store, out, options, *block, indent + 1, mode)?;
+                let _ = writeln!(out, "{tab}    break;");
+                let _ = writeln!(out, "{tab}}}");
+            }
+            if let Some(default) = default {
+                let _ = writeln!(out, "{tab}default: {{");
+                emit_block_with_mode(store, out, options, default, indent + 1, mode)?;
+                let _ = writeln!(out, "{tab}    break;");
+                let _ = writeln!(out, "{tab}}}");
+            }
+            let _ = writeln!(out, "{tab}}}");
+            Ok(())
+        }
         FirMatch::ForLoop {
             var,
             init,

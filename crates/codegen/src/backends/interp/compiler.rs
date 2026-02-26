@@ -281,6 +281,11 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 then_block,
                 else_block,
             } => self.compile_if(store, cond, then_block, else_block),
+            FirMatch::Switch {
+                cond,
+                ref cases,
+                default,
+            } => self.compile_switch(store, cond, cases, default),
             FirMatch::ForLoop {
                 init,
                 end,
@@ -1174,6 +1179,68 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
             Some(else_block_id),
         ));
         Ok(())
+    }
+
+    /// Compiles `Switch(cond, cases, default)` as a nested `If` chain.
+    ///
+    /// This backend lowering currently assumes integer-like switch conditions
+    /// and case labels, which matches the active FIR fixtures and the most
+    /// common control dispatch patterns.
+    fn compile_switch(
+        &mut self,
+        store: &FirStore,
+        cond: FirId,
+        cases: &[(i64, FirId)],
+        default: Option<FirId>,
+    ) -> Result<(), CompileError> {
+        self.compile_switch_cases(store, cond, cases, default)
+    }
+
+    fn compile_switch_cases(
+        &mut self,
+        store: &FirStore,
+        cond: FirId,
+        cases: &[(i64, FirId)],
+        default: Option<FirId>,
+    ) -> Result<(), CompileError> {
+        if let Some((&(case_value, case_block), rest)) = cases.split_first() {
+            // Evaluate `cond == case_value` then branch.
+            self.compile_node(store, cond)?;
+            self.compile_int32(i32::try_from(case_value).map_err(|_| {
+                CompileError::UnsupportedNode {
+                    description: format!("switch case value out of i32 range: {case_value}"),
+                }
+            })?)?;
+            self.current_block
+                .push(FbcInstruction::new(FbcOpcode::EQInt));
+
+            // Then branch: compile case block.
+            self.begin_sub_block();
+            self.compile_node(store, case_block)?;
+            let then_block_id = self.end_sub_block();
+
+            // Else branch: recurse on remaining cases or compile default.
+            self.begin_sub_block();
+            self.compile_switch_cases(store, cond, rest, default)?;
+            let else_block_id = self.end_sub_block();
+
+            self.current_block.push(FbcInstruction::full(
+                FbcOpcode::If,
+                "",
+                0,
+                R::default(),
+                0,
+                0,
+                Some(then_block_id),
+                Some(else_block_id),
+            ));
+            Ok(())
+        } else {
+            if let Some(default_block) = default {
+                self.compile_node(store, default_block)?;
+            }
+            Ok(())
+        }
     }
 
     /// # Source provenance (C++)

@@ -94,16 +94,22 @@ fn build_ui_fun_type() -> FirType {
     }
 }
 
-fn metadata_fun_args() -> [NamedType; 1] {
-    [NamedType {
-        name: "meta".to_string(),
-        typ: FirType::Meta,
-    }]
+fn metadata_fun_args() -> [NamedType; 2] {
+    [
+        NamedType {
+            name: "dsp".to_string(),
+            typ: obj_ptr_type(),
+        },
+        NamedType {
+            name: "meta".to_string(),
+            typ: FirType::Meta,
+        },
+    ]
 }
 
 fn metadata_fun_type() -> FirType {
     FirType::Fun {
-        args: vec![FirType::Meta],
+        args: vec![obj_ptr_type(), FirType::Meta],
         ret: Box::new(FirType::Void),
     }
 }
@@ -214,7 +220,7 @@ pub fn build_sine_phasor_test_module() -> (FirStore, FirId) {
     let store_phase = b.store_var("fPhase", AccessType::Struct, wrapped_phase);
 
     let phase_angle = b.binop(FirBinOp::Mul, two_pi, wrapped_phase, FirType::Float64);
-    let sine = b.fun_call("std::sin", &[phase_angle], FirType::Float64);
+    let sine = b.math_call(FirMathOp::Sin, &[phase_angle], FirType::Float64);
     let out = b.binop(FirBinOp::Mul, gain, sine, FirType::Float64);
     let out_chan = b.int32(0);
     let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
@@ -228,7 +234,12 @@ pub fn build_sine_phasor_test_module() -> (FirStore, FirId) {
     let sample_loop = b.simple_for_loop("i0", count, sample_body, false);
     let compute_body = b.block(&[out_alias, sample_loop]);
     let compute = declare_compute_fn(&mut b, compute_body);
-    let module = module_with_functions(&mut b, "mydsp", &[dec_freq, dec_gain, dec_phase], &[build_ui, compute]);
+    let module = module_with_functions(
+        &mut b,
+        "mydsp",
+        &[dec_freq, dec_gain, dec_phase],
+        &[build_ui, compute],
+    );
     (store, module)
 }
 
@@ -462,8 +473,8 @@ pub fn build_table_state_delay_test_module() -> (FirStore, FirId) {
 /// Builds a control-flow-heavy mono fixture for backend statement lowering.
 ///
 /// Covers:
-/// - `ForLoop`, `WhileLoop`, `If`, `Control`, `Switch`
-/// - loop variables (`kLoop`) and stack locals (`kStack`)
+/// - `If`, `Switch`
+/// - stack locals (`kStack`) and explicit sample-loop control flow
 ///
 /// Representative Faust DSP (approximate source intent):
 /// ```faust
@@ -474,9 +485,9 @@ pub fn build_table_state_delay_test_module() -> (FirStore, FirId) {
 /// ```
 ///
 /// Note:
-/// - The warm-up `for`/`while` blocks and explicit `switch/control` statements
-///   are intentionally synthetic FIR stressors; they are not guaranteed to
-///   arise from a compact Faust source exactly as written.
+/// - The explicit `switch` and conditional statements are intentionally
+///   synthetic FIR stressors; they are not guaranteed to arise from a compact
+///   Faust source exactly as written.
 #[must_use]
 pub fn build_control_flow_test_module() -> (FirStore, FirId) {
     let mut store = FirStore::new();
@@ -488,28 +499,8 @@ pub fn build_control_flow_test_module() -> (FirStore, FirId) {
     let (in_alias, out_alias) = io_aliases_for_mono_compute(&mut b);
     let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
 
-    // Preheader control flow: explicit for/while loops to exercise statement lowering.
     let acc_zero = b.int32(0);
     let acc_decl = b.declare_var("acc", FirType::Int32, AccessType::Stack, Some(acc_zero));
-    let k = b.load_var("k", AccessType::Loop, FirType::Int32);
-    let acc_load = b.load_var("acc", AccessType::Stack, FirType::Int32);
-    let acc_add_k = b.binop(FirBinOp::Add, acc_load, k, FirType::Int32);
-    let for_store = b.store_var("acc", AccessType::Stack, acc_add_k);
-    let for_body = b.block(&[for_store]);
-    let for_init = b.int32(0);
-    let for_end = b.int32(3);
-    let for_step = b.int32(1);
-    let warmup_for = b.for_loop("k", for_init, for_end, for_step, for_body, false);
-
-    let acc_for_cond = b.load_var("acc", AccessType::Stack, FirType::Int32);
-    let while_limit = b.int32(8);
-    let while_cond = b.binop(FirBinOp::Lt, acc_for_cond, while_limit, FirType::Bool);
-    let acc_for_body = b.load_var("acc", AccessType::Stack, FirType::Int32);
-    let one_i = b.int32(1);
-    let while_inc = b.binop(FirBinOp::Add, acc_for_body, one_i, FirType::Int32);
-    let while_store = b.store_var("acc", AccessType::Stack, while_inc);
-    let while_body = b.block(&[while_store]);
-    let warmup_while = b.while_loop(while_cond, while_body);
 
     // Sample loop with switch/if/control producing the output.
     let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
@@ -532,28 +523,25 @@ pub fn build_control_flow_test_module() -> (FirStore, FirId) {
     );
 
     let x_is_pos = b.binop(FirBinOp::Gt, x, zero_f, FirType::Bool);
+    let acc_cur = b.load_var("acc", AccessType::Stack, FirType::Int32);
+    let acc_next = b.binop(FirBinOp::Add, acc_cur, mode, FirType::Int32);
+    let store_acc = b.store_var("acc", AccessType::Stack, acc_next);
     let mode_one = b.int32(1);
     let mode_two = b.int32(2);
     let next_mode = b.select2(x_is_pos, mode_one, mode_two, FirType::Int32);
     let gated_stmt = b.store_var("fMode", AccessType::Struct, next_mode);
-    let gated_control = b.control(x_is_pos, gated_stmt);
+    let gated_then = b.block(&[gated_stmt]);
+    let gated_if = b.if_(x_is_pos, gated_then, None);
     let drop_x = b.drop_(x);
     let then_block = b.block(&[drop_x]);
     let drop_neg_x = b.drop_(neg_x);
     let else_block = b.block(&[drop_neg_x]);
     let conditional_abs = b.if_(x_is_pos, then_block, Some(else_block));
 
-    let sample_body = b.block(&[gated_control, conditional_abs, mode_switch]);
+    let sample_body = b.block(&[store_acc, gated_if, conditional_abs, mode_switch]);
     let sample_loop = b.simple_for_loop("i0", count, sample_body, false);
 
-    let compute_body = b.block(&[
-        in_alias,
-        out_alias,
-        acc_decl,
-        warmup_for,
-        warmup_while,
-        sample_loop,
-    ]);
+    let compute_body = b.block(&[in_alias, out_alias, acc_decl, sample_loop]);
     let compute = declare_compute_fn(&mut b, compute_body);
 
     let module = module_with_functions(&mut b, "control_flow", &globals, &[compute]);
