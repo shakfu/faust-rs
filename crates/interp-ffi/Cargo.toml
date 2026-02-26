@@ -22,6 +22,7 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 codegen = { path = "../codegen" }
 compiler = { path = "../compiler" }
+utils = { path = "../utils" }
 
 # cbindgen is kept for future use when Rust edition 2024 support is added.
 # For now the C header (include/interpreter-dsp-c.h) is maintained manually.

@@ -8,67 +8,51 @@
 //! - Returns raw pointers directly from the cache.
 //! - Intended for FFI/lifecycle smoke validation during early Cranelift porting.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 
 use crate::types::CraneliftDspFactory;
+use utils::FactoryCache;
 
-// Store pointers as usize so the map remains Send/Sync-safe under Mutex.
-static FACTORY_CACHE: LazyLock<Mutex<HashMap<String, usize>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-static MT_MODE: AtomicBool = AtomicBool::new(false);
+static FACTORY_CACHE: LazyLock<FactoryCache<CraneliftDspFactory>> =
+    LazyLock::new(FactoryCache::new);
 
 /// Insert or replace a factory pointer under a SHA key.
 pub(crate) fn cache_insert(sha: &str, ptr: *mut CraneliftDspFactory) {
-    let mut guard = FACTORY_CACHE.lock().unwrap();
-    guard.insert(sha.to_owned(), ptr as usize);
+    FACTORY_CACHE.insert(sha, ptr);
 }
 
 /// Look up a factory pointer by SHA key.
 #[must_use]
 pub(crate) fn cache_lookup(sha: &str) -> *mut CraneliftDspFactory {
-    let guard = FACTORY_CACHE.lock().unwrap();
-    guard
-        .get(sha)
-        .copied()
-        .map_or(std::ptr::null_mut(), |v| v as *mut CraneliftDspFactory)
+    FACTORY_CACHE.lookup(sha)
 }
 
 /// Remove a factory from the cache by pointer value.
 pub(crate) fn cache_remove_by_ptr(ptr: *mut CraneliftDspFactory) {
-    let mut guard = FACTORY_CACHE.lock().unwrap();
-    guard.retain(|_, v| *v != ptr as usize);
+    FACTORY_CACHE.remove_by_ptr(ptr);
 }
 
 /// Drain the entire cache and return factory pointers for caller-side freeing.
 #[must_use]
 pub(crate) fn cache_drain() -> Vec<*mut CraneliftDspFactory> {
-    let mut guard = FACTORY_CACHE.lock().unwrap();
-    guard
-        .drain()
-        .map(|(_, v)| v as *mut CraneliftDspFactory)
-        .collect()
+    FACTORY_CACHE.drain()
 }
 
 /// Return all SHA keys currently stored in the cache.
 #[must_use]
 pub(crate) fn cache_all_sha_keys() -> Vec<String> {
-    let guard = FACTORY_CACHE.lock().unwrap();
-    guard.keys().cloned().collect()
+    FACTORY_CACHE.all_sha_keys()
 }
 
 /// Enable multi-thread mode (compatibility flag only in the scaffold).
 #[must_use]
 pub(crate) fn start_mt() -> bool {
-    MT_MODE.store(true, Ordering::SeqCst);
-    true
+    FACTORY_CACHE.start_mt()
 }
 
 /// Disable multi-thread mode (compatibility flag only in the scaffold).
 pub(crate) fn stop_mt() {
-    MT_MODE.store(false, Ordering::SeqCst);
+    FACTORY_CACHE.stop_mt();
 }
 
 /// Returns a short status string used by tests to assert the scaffold module is present.
