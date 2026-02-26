@@ -132,6 +132,27 @@ From `porting/faust-rust-recursion-model-note-en.md`:
 - Update `JOURNAL.md` for notable architecture, CI, or process changes.
 - Keep comments and docs concise, factual, and implementation-oriented.
 
+### Journaling Format (Daily Split)
+
+- `JOURNAL.md` is now a **top-level index** (not the full monolithic journal body).
+- Detailed journal content lives in `porting/journal/` with one file per day:
+  - `porting/journal/YYYY-MM-DD.md`
+- `porting/journal/README.md` lists the day files in chronological order
+  (oldest day first).
+- Inside each daily file, entries must be ordered by **Git commit recency**
+  (most recent commit at the top, oldest at the bottom).
+- Each journal entry should include:
+  - `Commit date: YYYY-MM-DD`
+  - `Source commit: <hash>` (or equivalent auditable commit reference) when
+    generated from Git history.
+- When reorganizing/splitting journal content, use the Git history of
+  `JOURNAL.md` as the source of truth for ordering/dating instead of manual
+  visual ordering.
+- Preserve original journal **day buckets** (semantic day grouping) when
+  generating or regenerating `porting/journal/*.md`.
+- Do not reintroduce a large monolithic chronological body into `JOURNAL.md`;
+  keep it as an index/redirect to the daily files.
+
 ## 12. Collaboration Requirement During Porting (Mandatory)
 
 - During implementation/porting work, if you encounter an ambiguity, missing
