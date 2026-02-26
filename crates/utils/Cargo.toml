@@ -5,5 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "allow" # shared FFI helpers require raw-pointer operations
+unused_attributes = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+all = "warn"

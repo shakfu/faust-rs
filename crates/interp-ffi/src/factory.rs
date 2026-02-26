@@ -15,18 +15,21 @@
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::io::BufReader;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use codegen::backends::interp::{FAUST_VERSION, read_fbc, write_fbc};
 use compiler::{Compiler as FaustCompiler, SignalFirLane, default_import_search_base};
+use utils::{
+    FfiCompileArgs, decode_c_argv as decode_c_argv_shared, free_c_memory_c_string_only,
+    null_c_string_array, optional_c_str_arg,
+    parse_ffi_compile_args as parse_ffi_compile_args_shared, required_c_str_arg, write_error_4096,
+};
 
 use crate::cache::{
     cache_all_sha_keys, cache_drain, cache_insert, cache_lookup, cache_remove_by_ptr, start_mt,
     stop_mt,
 };
-use crate::types::{
-    InterpreterDspFactory, alloc_c_string, alloc_factory, free_c_string, free_factory,
-};
+use crate::types::{InterpreterDspFactory, alloc_c_string, alloc_factory, free_factory};
 
 // ── Version ──────────────────────────────────────────────────────────────────
 
@@ -121,14 +124,10 @@ pub unsafe extern "C" fn readCInterpreterDSPFactoryFromBitcodeFile(
     error_msg: *mut c_char,
 ) -> *mut InterpreterDspFactory {
     unsafe {
-        if bit_code_path.is_null() {
-            write_error(error_msg, "null path pointer");
-            return std::ptr::null_mut();
-        }
-        let path = match CStr::from_ptr(bit_code_path).to_str() {
+        let path = match required_c_str_arg(bit_code_path, "path") {
             Ok(s) => s,
             Err(e) => {
-                write_error(error_msg, &format!("invalid UTF-8 in path: {e}"));
+                write_error(error_msg, &e);
                 return std::ptr::null_mut();
             }
         };
@@ -171,7 +170,7 @@ pub unsafe extern "C" fn writeCInterpreterDSPFactoryToBitcodeFile(
         if factory.is_null() || bit_code_path.is_null() {
             return false;
         }
-        let path = match CStr::from_ptr(bit_code_path).to_str() {
+        let path = match required_c_str_arg(bit_code_path, "path") {
             Ok(s) => s,
             Err(_) => return false,
         };
@@ -198,14 +197,10 @@ pub unsafe extern "C" fn createCInterpreterDSPFactoryFromFile(
     error_msg: *mut c_char,
 ) -> *mut InterpreterDspFactory {
     unsafe {
-        if filename.is_null() {
-            write_error(error_msg, "null filename pointer");
-            return std::ptr::null_mut();
-        }
-        let filename = match CStr::from_ptr(filename).to_str() {
+        let filename = match required_c_str_arg(filename, "filename") {
             Ok(s) => s,
             Err(e) => {
-                write_error(error_msg, &format!("invalid UTF-8 in filename: {e}"));
+                write_error(error_msg, &e);
                 return std::ptr::null_mut();
             }
         };
@@ -248,22 +243,18 @@ pub unsafe extern "C" fn createCInterpreterDSPFactoryFromString(
             write_error(error_msg, "null dsp_content pointer");
             return std::ptr::null_mut();
         }
-        let source_name = if name_app.is_null() {
-            "FaustDSP"
-        } else {
-            match CStr::from_ptr(name_app).to_str() {
-                Ok(s) if !s.is_empty() => s,
-                Ok(_) => "FaustDSP",
-                Err(e) => {
-                    write_error(error_msg, &format!("invalid UTF-8 in name_app: {e}"));
-                    return std::ptr::null_mut();
-                }
+        let source_name = match optional_c_str_arg(name_app, "name_app") {
+            Ok(Some(s)) if !s.is_empty() => s,
+            Ok(_) => "FaustDSP",
+            Err(e) => {
+                write_error(error_msg, &e);
+                return std::ptr::null_mut();
             }
         };
-        let dsp_content = match CStr::from_ptr(dsp_content).to_str() {
+        let dsp_content = match required_c_str_arg(dsp_content, "dsp_content") {
             Ok(s) => s,
             Err(e) => {
-                write_error(error_msg, &format!("invalid UTF-8 in dsp_content: {e}"));
+                write_error(error_msg, &e);
                 return std::ptr::null_mut();
             }
         };
@@ -303,10 +294,7 @@ pub unsafe extern "C" fn getCInterpreterDSPFactoryFromSHAKey(
     sha_key: *const c_char,
 ) -> *mut InterpreterDspFactory {
     unsafe {
-        if sha_key.is_null() {
-            return std::ptr::null_mut();
-        }
-        let sha = match CStr::from_ptr(sha_key).to_str() {
+        let sha = match required_c_str_arg(sha_key, "sha_key") {
             Ok(s) => s,
             Err(_) => return std::ptr::null_mut(),
         };
@@ -397,11 +385,7 @@ pub unsafe extern "C" fn getCInterpreterDSPFactoryLibraryList(
     _factory: *mut InterpreterDspFactory,
 ) -> *const *const c_char {
     // The interpreter backend has no external library dependencies.
-    // Wrap in a Sync-safe newtype because raw pointers are not Sync by default.
-    struct SyncNullArray([*const c_char; 1]);
-    unsafe impl Sync for SyncNullArray {}
-    static NULL_ARRAY: SyncNullArray = SyncNullArray([std::ptr::null()]);
-    NULL_ARRAY.0.as_ptr()
+    null_c_string_array()
 }
 
 // ── Multi-thread mode ─────────────────────────────────────────────────────────
@@ -433,11 +417,7 @@ pub extern "C" fn stopMTDSPFactories() {
 /// outer array pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn freeCMemory(ptr: *mut c_void) {
-    unsafe {
-        if !ptr.is_null() {
-            free_c_string(ptr as *mut c_char);
-        }
-    }
+    unsafe { free_c_memory_c_string_only(ptr) }
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -447,15 +427,7 @@ pub unsafe extern "C" fn freeCMemory(ptr: *mut c_void) {
 /// # Safety
 /// `buf` must point to at least 4096 bytes or be null.
 unsafe fn write_error(buf: *mut c_char, msg: &str) {
-    if buf.is_null() {
-        return;
-    }
-    unsafe {
-        let bytes = msg.as_bytes();
-        let len = bytes.len().min(4095);
-        std::ptr::copy_nonoverlapping(bytes.as_ptr().cast::<c_char>(), buf, len);
-        *buf.add(len) = 0;
-    }
+    unsafe { write_error_4096(buf, msg) }
 }
 
 /// Build a minimal JSON description of a factory's UI and metadata.
@@ -525,14 +497,6 @@ fn json_escape(s: &str) -> String {
 /// This intentionally supports only the options needed to exercise the full
 /// parser/eval/propagate -> signal->FIR (fast-lane) -> interp backend chain
 /// from the C API during parity testing.
-#[derive(Debug, Default)]
-struct FfiCompileArgs {
-    /// Extra import search paths collected from `-I <path>` / `-Ipath`.
-    search_paths: Vec<PathBuf>,
-    /// Optional module/class name override from `-cn <name>`.
-    module_name: Option<String>,
-}
-
 /// Compile a Faust source file to an interpreter factory via the compiler
 /// facade using the transform fast-lane.
 ///
@@ -616,64 +580,19 @@ unsafe fn decode_c_argv(argc: i32, argv: *const *const c_char) -> Result<Vec<Str
     if argc <= 0 {
         return Ok(Vec::new());
     }
-    if argv.is_null() {
-        return Err("argv is null while argc > 0".to_owned());
-    }
-    let argc = usize::try_from(argc).map_err(|_| "invalid negative argc".to_owned())?;
-    let raw_args = unsafe { std::slice::from_raw_parts(argv, argc) };
-    let mut result = Vec::with_capacity(raw_args.len());
-    for (index, ptr) in raw_args.iter().copied().enumerate() {
-        if ptr.is_null() {
-            return Err(format!("argv[{index}] is null"));
-        }
-        let value = unsafe { CStr::from_ptr(ptr) }
-            .to_str()
-            .map_err(|e| format!("invalid UTF-8 in argv[{index}]: {e}"))?;
-        result.push(value.to_owned());
-    }
-    Ok(result)
+    unsafe { decode_c_argv_shared(argc, argv) }
 }
 
 /// Parse the FFI-supported subset of Faust CLI options.
 ///
 /// Currently recognized:
 /// - `-I <path>`
-/// - `-Ipath`
 /// - `-cn <name>`
 ///
 /// Unknown options are ignored so callers can pass broader option vectors while
 /// the FFI implementation incrementally grows coverage.
 fn parse_ffi_compile_args(argv: &[String]) -> Result<FfiCompileArgs, String> {
-    let mut parsed = FfiCompileArgs::default();
-    let mut i = 0usize;
-    while i < argv.len() {
-        let arg = &argv[i];
-        if arg == "-I" {
-            let Some(value) = argv.get(i + 1) else {
-                return Err("missing path after -I".to_owned());
-            };
-            parsed.search_paths.push(PathBuf::from(value));
-            i += 2;
-            continue;
-        }
-        if let Some(value) = arg.strip_prefix("-I")
-            && !value.is_empty()
-        {
-            parsed.search_paths.push(PathBuf::from(value));
-            i += 1;
-            continue;
-        }
-        if arg == "-cn" {
-            let Some(value) = argv.get(i + 1) else {
-                return Err("missing class name after -cn".to_owned());
-            };
-            parsed.module_name = Some(value.clone());
-            i += 2;
-            continue;
-        }
-        i += 1;
-    }
-    Ok(parsed)
+    parse_ffi_compile_args_shared(argv)
 }
 
 #[cfg(test)]
@@ -685,7 +604,8 @@ mod tests {
         let argv = vec![
             "-I".to_owned(),
             "lib1".to_owned(),
-            "-Ilib2".to_owned(),
+            "-I".to_owned(),
+            "lib2".to_owned(),
             "-cn".to_owned(),
             "MyDSP".to_owned(),
         ];

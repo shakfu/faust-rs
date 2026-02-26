@@ -10,7 +10,7 @@
 //! support null-safe lifecycle smoke tests, but do not yet invoke the Cranelift
 //! backend or real factory caching.
 
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{CString, c_char, c_void};
 use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
 
@@ -18,17 +18,16 @@ use codegen::backends::cranelift::{
     CraneliftOptLevel, CraneliftOptions, JitDspModule, compile_fir_to_cranelift_jit,
 };
 use compiler::{Compiler as FaustCompiler, SignalFirLane, default_import_search_base};
+use utils::{
+    decode_c_argv as decode_c_argv_shared, free_c_memory_c_string_only, null_c_string_array,
+    optional_c_str_arg, parse_ffi_compile_args, required_c_str_arg, write_error_4096,
+};
 
 use crate::cache::{
     cache_all_sha_keys, cache_drain, cache_insert, cache_lookup, cache_remove_by_ptr, start_mt,
     stop_mt,
 };
-use crate::types::{
-    CraneliftDspFactory, alloc_c_string, alloc_factory, free_c_string, free_factory,
-};
-
-/// Fixed error buffer size used by the Faust C APIs.
-const ERROR_MSG_CAPACITY: usize = 4096;
+use crate::types::{CraneliftDspFactory, alloc_c_string, alloc_factory, free_factory};
 
 /// Stable placeholder version string returned by [`getCLibFaustVersion`].
 const CRANELIFT_FFI_SCAFFOLD_VERSION: &str =
@@ -63,14 +62,10 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
     opt_level: c_int,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        if filename.is_null() {
-            write_error(error_msg, "null filename pointer");
-            return std::ptr::null_mut();
-        }
-        let filename = match CStr::from_ptr(filename).to_str() {
+        let filename = match required_c_str_arg(filename, "filename") {
             Ok(s) => s,
             Err(e) => {
-                write_error(error_msg, &format!("invalid UTF-8 in filename: {e}"));
+                write_error(error_msg, &e);
                 return std::ptr::null_mut();
             }
         };
@@ -116,26 +111,18 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
     opt_level: c_int,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        if dsp_content.is_null() {
-            write_error(error_msg, "null dsp_content pointer");
-            return std::ptr::null_mut();
-        }
-        let name_app = if name_app.is_null() {
-            "FaustDSP"
-        } else {
-            match CStr::from_ptr(name_app).to_str() {
-                Ok(s) if !s.is_empty() => s,
-                Ok(_) => "FaustDSP",
-                Err(e) => {
-                    write_error(error_msg, &format!("invalid UTF-8 in name_app: {e}"));
-                    return std::ptr::null_mut();
-                }
+        let name_app = match optional_c_str_arg(name_app, "name_app") {
+            Ok(Some(s)) if !s.is_empty() => s,
+            Ok(_) => "FaustDSP",
+            Err(e) => {
+                write_error(error_msg, &e);
+                return std::ptr::null_mut();
             }
         };
-        let dsp_content = match CStr::from_ptr(dsp_content).to_str() {
+        let dsp_content = match required_c_str_arg(dsp_content, "dsp_content") {
             Ok(s) => s,
             Err(e) => {
-                write_error(error_msg, &format!("invalid UTF-8 in dsp_content: {e}"));
+                write_error(error_msg, &e);
                 return std::ptr::null_mut();
             }
         };
@@ -218,10 +205,7 @@ pub unsafe extern "C" fn getCCraneliftDSPFactoryFromSHAKey(
     sha_key: *const c_char,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        if sha_key.is_null() {
-            return std::ptr::null_mut();
-        }
-        let sha_key = match CStr::from_ptr(sha_key).to_str() {
+        let sha_key = match required_c_str_arg(sha_key, "sha_key") {
             Ok(s) => s,
             Err(_) => return std::ptr::null_mut(),
         };
@@ -402,14 +386,10 @@ pub unsafe extern "C" fn readCCraneliftDSPFactoryFromBitcode(
     error_msg: *mut c_char,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        if bit_code.is_null() {
-            write_error(error_msg, "null bit_code pointer");
-            return std::ptr::null_mut();
-        }
-        let text = match CStr::from_ptr(bit_code).to_str() {
+        let text = match required_c_str_arg(bit_code, "bitcode") {
             Ok(s) => s,
             Err(e) => {
-                write_error(error_msg, &format!("invalid UTF-8 in bitcode: {e}"));
+                write_error(error_msg, &e);
                 return std::ptr::null_mut();
             }
         };
@@ -453,14 +433,10 @@ pub unsafe extern "C" fn readCCraneliftDSPFactoryFromBitcodeFile(
     error_msg: *mut c_char,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        if bit_code_path.is_null() {
-            write_error(error_msg, "null bit_code_path pointer");
-            return std::ptr::null_mut();
-        }
-        let path = match CStr::from_ptr(bit_code_path).to_str() {
+        let path = match required_c_str_arg(bit_code_path, "path") {
             Ok(s) => s,
             Err(e) => {
-                write_error(error_msg, &format!("invalid UTF-8 in path: {e}"));
+                write_error(error_msg, &e);
                 return std::ptr::null_mut();
             }
         };
@@ -501,7 +477,7 @@ pub unsafe extern "C" fn writeCCraneliftDSPFactoryToBitcodeFile(
         if factory.is_null() || bit_code_path.is_null() {
             return false;
         }
-        let path = match CStr::from_ptr(bit_code_path).to_str() {
+        let path = match required_c_str_arg(bit_code_path, "path") {
             Ok(s) => s,
             Err(_) => return false,
         };
@@ -530,11 +506,7 @@ pub extern "C" fn stopMTDSPFactories() {
 /// function that documents `freeCMemory` ownership.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn freeCMemory(ptr: *mut c_void) {
-    unsafe {
-        if !ptr.is_null() {
-            free_c_string(ptr.cast::<c_char>());
-        }
-    }
+    unsafe { free_c_memory_c_string_only(ptr) }
 }
 
 /// Scaffold-only factory status string kept for unit tests.
@@ -618,28 +590,7 @@ fn build_scaffold_factory_common(
 
 /// Decode a conventional `argc`/`argv` C array into owned Rust strings.
 fn decode_c_argv(argc: c_int, argv: *const *const c_char) -> Result<Vec<String>, String> {
-    if argc < 0 {
-        return Err("negative argc".to_owned());
-    }
-    let argc = usize::try_from(argc).map_err(|_| "argc out of range".to_owned())?;
-    if argc == 0 {
-        return Ok(Vec::new());
-    }
-    if argv.is_null() {
-        return Err("argv is null while argc > 0".to_owned());
-    }
-    let mut out = Vec::with_capacity(argc);
-    for idx in 0..argc {
-        let ptr = unsafe { *argv.add(idx) };
-        if ptr.is_null() {
-            return Err(format!("argv[{idx}] is null"));
-        }
-        let s = unsafe { CStr::from_ptr(ptr) }
-            .to_str()
-            .map_err(|e| format!("argv[{idx}] invalid UTF-8: {e}"))?;
-        out.push(s.to_owned());
-    }
-    Ok(out)
+    unsafe { decode_c_argv_shared(argc, argv) }
 }
 
 /// Runs the real compiler pipeline to FIR, then calls the Cranelift backend placeholder.
@@ -699,21 +650,8 @@ fn map_c_opt_level(level: c_int) -> CraneliftOptLevel {
 /// Builds import search paths for file compilation from default base + `-I` args.
 fn collect_search_paths_for_file(path: &Path, argv: &[String]) -> Vec<PathBuf> {
     let mut paths = vec![default_import_search_base(path)];
-    let mut i = 0usize;
-    while i < argv.len() {
-        let arg = &argv[i];
-        if arg == "-I" {
-            if let Some(next) = argv.get(i + 1) {
-                paths.push(PathBuf::from(next));
-                i += 2;
-                continue;
-            }
-        } else if let Some(rest) = arg.strip_prefix("-I")
-            && !rest.is_empty()
-        {
-            paths.push(PathBuf::from(rest));
-        }
-        i += 1;
+    if let Ok(parsed) = parse_ffi_compile_args(argv) {
+        paths.extend(parsed.search_paths);
     }
     paths
 }
@@ -806,29 +744,12 @@ fn decode_scaffold_bitcode(text: &str) -> Result<CraneliftDspFactory, String> {
     })
 }
 
-/// Return a static null-terminated empty `char**` array.
-fn null_c_string_array() -> *const *const c_char {
-    struct SyncNullArray([*const c_char; 1]);
-    // SAFETY: Immutable static null pointer array.
-    unsafe impl Sync for SyncNullArray {}
-    static NULL_ARRAY: SyncNullArray = SyncNullArray([std::ptr::null()]);
-    NULL_ARRAY.0.as_ptr()
-}
-
 /// Write an error message to a standard 4096-byte Faust error buffer.
 ///
 /// # Safety
 /// `buf` must point to at least 4096 bytes or be null.
 unsafe fn write_error(buf: *mut c_char, msg: &str) {
-    if buf.is_null() {
-        return;
-    }
-    let bytes = msg.as_bytes();
-    let len = bytes.len().min(ERROR_MSG_CAPACITY - 1);
-    unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr().cast::<c_char>(), buf, len);
-        *buf.add(len) = 0;
-    }
+    unsafe { write_error_4096(buf, msg) }
 }
 
 /// Minimal JSON string escaping for scaffold metadata text.
