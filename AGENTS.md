@@ -153,6 +153,20 @@ From `porting/faust-rust-recursion-model-note-en.md`:
 - Do not reintroduce a large monolithic chronological body into `JOURNAL.md`;
   keep it as an index/redirect to the daily files.
 
+### Session Handoff (Recommended)
+
+- When ending a substantial work session (especially multi-step porting/backends),
+  create or update `porting/HANDOFF.md` using `porting/HANDOFF_TEMPLATE.md`.
+- Treat the handoff as a resumability artifact:
+  - current branch/HEAD,
+  - working tree state (tracked + notable untracked local files),
+  - decisions taken,
+  - validations run,
+  - next steps and useful commands.
+- Keep the handoff concise but concrete; prefer exact file paths and commands.
+- If a session introduces major context shifts, update the handoff before the
+  final commit (or explicitly document why it was skipped).
+
 ## 12. Collaboration Requirement During Porting (Mandatory)
 
 - During implementation/porting work, if you encounter an ambiguity, missing
