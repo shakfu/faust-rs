@@ -469,7 +469,7 @@ fn fir_type_layout_scalar(
 /// - includes `DeclareVar { access: Struct, .. }` as scalar fields
 /// - includes `DeclareTable { access: Struct, .. }` as inline table fields
 /// - ignores helper function prototypes (`DeclareFun { body: None, .. }`)
-/// - ignores `NullDeclareVar`
+/// - ignores helper declarations/prototypes that are not `dsp*` state
 ///
 /// # Rejection policy
 /// Any other global entry shape (for example unsupported access classes or
@@ -584,7 +584,6 @@ fn build_struct_layout_for_module(
             // Fast-lane FIR may place helper math prototypes (`fmin`, `pow`, ...)
             // in module globals. They are declarations, not `dsp*` state fields.
             FirMatch::DeclareFun { body: None, .. } => {}
-            FirMatch::NullDeclareVar => {}
             other => {
                 return Err(CraneliftBackendError::unsupported_module_shape(format!(
                     "unsupported globals entry for Cranelift dsp* layout: {other:?}"
@@ -1152,7 +1151,7 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 self.vars.insert(name, init_v);
                 Ok(())
             }
-            FirMatch::NullDeclareVar | FirMatch::Label(_) => Ok(()),
+            FirMatch::Label(_) => Ok(()),
             FirMatch::SimpleForLoop {
                 var,
                 upper,
@@ -2301,7 +2300,7 @@ fn subset_stmt_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
             init: None,
             ..
         } => None,
-        FirMatch::NullDeclareVar | FirMatch::Label(_) => None,
+        FirMatch::Label(_) => None,
         FirMatch::StoreVar {
             access: AccessType::Struct,
             value,
@@ -2884,15 +2883,7 @@ mod tests {
         let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
         let label_phase = b.label("signal_fir_fastlane_step2a: executable base slice");
         let label_io = b.label("io: inputs=0 outputs=1");
-        let null_decl = b.null_declare_var();
-        let compute_body = b.block(&[
-            label_phase,
-            label_io,
-            out_alias,
-            tmp_decl,
-            sample_loop,
-            null_decl,
-        ]);
+        let compute_body = b.block(&[label_phase, label_io, out_alias, tmp_decl, sample_loop]);
         let compute_args = [
             NamedType {
                 name: "dsp".to_string(),

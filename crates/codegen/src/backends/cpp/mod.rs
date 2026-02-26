@@ -539,10 +539,6 @@ fn emit_stmt_with_mode(
             },
             indent,
         ),
-        FirMatch::NullDeclareVar => {
-            let _ = writeln!(out, "{tab}/* null declare */");
-            Ok(())
-        }
         FirMatch::DeclareStructType { typ } => {
             let _ = writeln!(
                 out,

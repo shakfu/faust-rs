@@ -456,7 +456,6 @@ fn child_ids(node: &FirMatch) -> Vec<FirId> {
         | FirMatch::LoadVarAddress { .. }
         | FirMatch::NullValue { .. }
         | FirMatch::NewDsp { .. }
-        | FirMatch::NullDeclareVar
         | FirMatch::DeclareStructType { .. }
         | FirMatch::DeclareBufferIterators { .. }
         | FirMatch::ShiftArrayVar { .. }
@@ -2171,10 +2170,6 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
                 };
                 let mut b = FirBuilder::new(self.dst);
                 b.declare_table(name, access, elem_type, &cloned_values)
-            }
-            FirMatch::NullDeclareVar => {
-                let mut b = FirBuilder::new(self.dst);
-                b.null_declare_var()
             }
             FirMatch::DeclareFun {
                 name,

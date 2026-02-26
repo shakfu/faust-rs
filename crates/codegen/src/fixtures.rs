@@ -602,7 +602,7 @@ pub fn build_math_intrinsics_test_module() -> (FirStore, FirId) {
 /// - `DeclareFun` prototype (`body=None`)
 /// - `DeclareStructType`
 /// - `DeclareBufferIterators`
-/// - `Label`, `NullDeclareVar`, `NullStatement`, `Drop`
+/// - `Label`, `NullStatement`, `Drop`
 /// - `LoadVarAddress`, `TeeVar`, `Bitcast`
 /// - `IteratorForLoop`
 ///
@@ -663,7 +663,6 @@ pub fn build_ir_coverage_test_module() -> (FirStore, FirId) {
 
     let label = b.label("coverage-start");
     let null_stmt = b.null_statement();
-    let null_decl = b.null_declare_var();
     let buf_iters = b.declare_buffer_iterators("it0", "it1", 2, FirType::FaustFloat, true, false);
     let tmp_one = b.int32(1);
     let tmp_decl = b.declare_var("tmp", FirType::Int32, AccessType::Stack, Some(tmp_one));
@@ -689,7 +688,6 @@ pub fn build_ir_coverage_test_module() -> (FirStore, FirId) {
     let helper_body = b.block(&[
         label,
         null_stmt,
-        null_decl,
         buf_iters,
         tmp_decl,
         drop_addr,

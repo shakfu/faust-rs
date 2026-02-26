@@ -665,12 +665,6 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
-    /// C++ parity: `NullDeclareVarInst`.
-    #[must_use]
-    pub fn null_declare_var(&mut self) -> FirId {
-        intern_tag(&mut self.store.arena, FIR_NULL_DECLARE_VAR_TAG, &[])
-    }
-
     /// C++ parity: `DeclareFunInst`.
     ///
     /// Pass `body: Some(id)` for a full function definition or `body: None` for
@@ -1187,7 +1181,6 @@ pub enum FirMatch {
         elem_type: FirType,
         values: Vec<FirId>,
     },
-    NullDeclareVar,
     DeclareFun {
         name: String,
         typ: FirType,
@@ -1595,7 +1588,6 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 values,
             }
         }
-        (FIR_NULL_DECLARE_VAR_TAG, []) => FirMatch::NullDeclareVar,
         (FIR_DECLARE_FUN_TAG, [name, typ, args, body, is_inline]) => {
             let (Some(name), Some(typ), Some(args), Some(is_inline)) = (
                 decode_symbol(&store.arena, *name),
@@ -1954,7 +1946,6 @@ fn child_ids(node: &FirMatch) -> Vec<FirId> {
         | FirMatch::LoadVarAddress { .. }
         | FirMatch::NullValue { .. }
         | FirMatch::NewDsp { .. }
-        | FirMatch::NullDeclareVar
         | FirMatch::DeclareStructType { .. }
         | FirMatch::DeclareBufferIterators { .. }
         | FirMatch::ShiftArrayVar { .. }
@@ -2076,7 +2067,6 @@ const FIR_V_NEW_DSP_TAG: &str = "FIRV_NEWDSP";
 
 const FIR_DECLARE_VAR_TAG: &str = "FIRST_DECLAREVAR";
 const FIR_DECLARE_TABLE_TAG: &str = "FIRST_DECLARETABLE";
-const FIR_NULL_DECLARE_VAR_TAG: &str = "FIRST_NULLDECLAREVAR";
 const FIR_DECLARE_FUN_TAG: &str = "FIRST_DECLAREFUN";
 const FIR_DECLARE_FUN_PROTO_TAG: &str = "FIRST_DECLAREFUN_PROTO";
 const FIR_DECLARE_STRUCT_TYPE_TAG: &str = "FIRST_DECLARESTRUCTTYPE";

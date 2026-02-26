@@ -241,7 +241,7 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 access,
                 init,
             } => self.compile_declare_var(store, name, typ, access, init),
-            FirMatch::DeclareFun { .. } | FirMatch::NullDeclareVar => Ok(()),
+            FirMatch::DeclareFun { .. } => Ok(()),
             FirMatch::DeclareStructType { .. } => Ok(()),
 
             // --- Storage ---
@@ -450,9 +450,7 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                     ref values,
                     ..
                 } => self.predeclare_table_storage(name, elem_type, values.len() as i32),
-                FirMatch::DeclareFun { .. }
-                | FirMatch::NullDeclareVar
-                | FirMatch::DeclareStructType { .. } => {}
+                FirMatch::DeclareFun { .. } | FirMatch::DeclareStructType { .. } => {}
                 _ => {}
             }
         }
