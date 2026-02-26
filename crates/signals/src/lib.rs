@@ -967,11 +967,21 @@ pub fn dump_sig_readable(arena: &TreeArena, root: SigId) -> String {
     out
 }
 
+/// Interns a tagged signal node with deterministic child ordering.
+///
+/// This is the shared low-level constructor used by [`SigBuilder`] methods.
+/// It mirrors the C++ `tree(tag, ...)` style while ensuring:
+/// - tag strings are interned in the arena tag table,
+/// - the node itself is hash-consed through [`TreeArena::intern`].
 fn intern_tag(arena: &mut TreeArena, tag: &str, children: &[SigId]) -> SigId {
     let tag_id = arena.intern_tag(tag);
     arena.intern(NodeKind::Tag(tag_id), children)
 }
 
+/// Builds a canonical 4-element Faust list payload (`cons(a, cons(b, ...)))`.
+///
+/// Signal UI slider parameters keep the historical Faust list encoding, so this
+/// helper centralizes the exact shape used by builder methods and tests.
 fn list4(arena: &mut TreeArena, a: SigId, b: SigId, c: SigId, d: SigId) -> SigId {
     let nil = arena.nil();
     let l3 = arena.cons(d, nil);
@@ -980,6 +990,13 @@ fn list4(arena: &mut TreeArena, a: SigId, b: SigId, c: SigId, d: SigId) -> SigId
     arena.cons(a, l1)
 }
 
+/// Decodes a canonical 4-element slider parameter list.
+///
+/// Returns `(init, min, max, step)` when `params` matches the expected
+/// `cons(x0, cons(x1, cons(x2, cons(x3, _))))` shape.
+///
+/// The matcher is intentionally strict on `Cons` arity to keep malformed arena
+/// shapes from silently decoding as valid slider payloads.
 fn slider_params4(arena: &TreeArena, params: SigId) -> Option<(SigId, SigId, SigId, SigId)> {
     let n0 = arena.node(params)?;
     if !matches!(n0.kind, NodeKind::Cons) || n0.children.len() != 2 {
@@ -1008,6 +1025,14 @@ fn slider_params4(arena: &TreeArena, params: SigId) -> Option<(SigId, SigId, Sig
     Some((init, min, max, step))
 }
 
+/// Recursive structural dumper used by [`dump_sig`].
+///
+/// This function intentionally emits:
+/// - stable tag names,
+/// - explicit primitive payloads (`int`, `float_bits`, `sym`, `str`),
+/// - no arena addresses or hash-consing identities.
+///
+/// The output is therefore suitable for differential snapshots across runs.
 fn dump_node(arena: &TreeArena, id: SigId, out: &mut String) {
     let Some(node) = arena.node(id) else {
         write!(out, "<invalid:{}>", id.as_u32()).expect("String write cannot fail");
@@ -1057,6 +1082,10 @@ fn dump_node(arena: &TreeArena, id: SigId, out: &mut String) {
     }
 }
 
+/// Recursive structural dumper used by [`dump_sig_readable`].
+///
+/// Same shape guarantees as [`dump_node`], but augments binary-operator tag
+/// nodes with a readable `SIGBINOP` opcode annotation when possible.
 fn dump_node_readable(arena: &TreeArena, id: SigId, out: &mut String) {
     let Some(node) = arena.node(id) else {
         write!(out, "<invalid:{}>", id.as_u32()).expect("String write cannot fail");

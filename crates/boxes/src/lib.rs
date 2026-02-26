@@ -2122,11 +2122,25 @@ pub fn dump_box(arena: &TreeArena, root: BoxId) -> String {
     out
 }
 
+/// Interns a tagged box node with deterministic child ordering.
+///
+/// Shared low-level constructor for internal `node_*` helpers. Mirrors the C++
+/// `tree(tag, ...)` construction idiom while using arena tag interning and
+/// hash-consing (`TreeArena::intern`) for canonicalization.
 fn intern_tag(arena: &mut TreeArena, tag: &str, children: &[BoxId]) -> BoxId {
     let tag_id = arena.intern_tag(tag);
     arena.intern(NodeKind::Tag(tag_id), children)
 }
 
+/// Matches a tagged box node by exact tag name and exact arity.
+///
+/// Returns the child slice when:
+/// - `b` is a `NodeKind::Tag`,
+/// - the tag name equals `tag`,
+/// - the node has exactly `arity` children.
+///
+/// This helper centralizes the hot-path shape guard used by many internal
+/// `is_node_*` matchers.
 fn match_tag_arity<'a>(
     arena: &'a TreeArena,
     b: BoxId,
@@ -2143,6 +2157,10 @@ fn match_tag_arity<'a>(
     }
 }
 
+/// Matches a binary tagged node and returns `(left, right)`.
+///
+/// Thin convenience wrapper over [`match_tag_arity`] used by many internal
+/// `is_node_*` helpers.
 #[allow(dead_code)]
 fn match_binary(arena: &TreeArena, b: BoxId, tag: &str) -> Option<(BoxId, BoxId)> {
     let [left, right] = match_tag_arity(arena, b, tag, 2)? else {
@@ -2151,6 +2169,7 @@ fn match_binary(arena: &TreeArena, b: BoxId, tag: &str) -> Option<(BoxId, BoxId)
     Some((*left, *right))
 }
 
+/// Matches a ternary tagged node and returns its 3 children.
 #[allow(dead_code)]
 fn match_ternary(arena: &TreeArena, b: BoxId, tag: &str) -> Option<(BoxId, BoxId, BoxId)> {
     let [a, b, c] = match_tag_arity(arena, b, tag, 3)? else {
@@ -2159,6 +2178,7 @@ fn match_ternary(arena: &TreeArena, b: BoxId, tag: &str) -> Option<(BoxId, BoxId
     Some((*a, *b, *c))
 }
 
+/// Matches a unary tagged node and returns its sole child.
 #[allow(dead_code)]
 fn match_unary(arena: &TreeArena, b: BoxId, tag: &str) -> Option<BoxId> {
     let [child] = match_tag_arity(arena, b, tag, 1)? else {
@@ -2167,6 +2187,10 @@ fn match_unary(arena: &TreeArena, b: BoxId, tag: &str) -> Option<BoxId> {
     Some(*child)
 }
 
+/// Matches a slider-like node with `(label, list4(cur,min,max,step))` payload.
+///
+/// Returns `(label, cur, min, max, step)` after validating the outer node tag
+/// and decoding the canonical Faust `list4` parameter encoding.
 #[allow(dead_code)]
 fn match_slider(
     arena: &TreeArena,
@@ -2180,6 +2204,9 @@ fn match_slider(
     Some((*label, cur, min, max, step))
 }
 
+/// Builds a canonical 4-element Faust list payload (`cons(a, cons(b, ...)))`.
+///
+/// Used for slider parameter encoding to preserve C++/Faust list shape exactly.
 fn list4(arena: &mut TreeArena, a: BoxId, b: BoxId, c: BoxId, d: BoxId) -> BoxId {
     let nil = arena.nil();
     let l3 = arena.cons(d, nil);
@@ -2188,6 +2215,9 @@ fn list4(arena: &mut TreeArena, a: BoxId, b: BoxId, c: BoxId, d: BoxId) -> BoxId
     arena.cons(a, l1)
 }
 
+/// Decodes a canonical `list4` slider payload into `(cur, min, max, step)`.
+///
+/// Returns `None` when `params` is not the expected nested `Cons` shape.
 fn slider_params4(arena: &TreeArena, params: BoxId) -> Option<(BoxId, BoxId, BoxId, BoxId)> {
     let node0 = arena.node(params)?;
     if !matches!(node0.kind, NodeKind::Cons) || node0.children.len() != 2 {
@@ -2216,6 +2246,12 @@ fn slider_params4(arena: &TreeArena, params: BoxId) -> Option<(BoxId, BoxId, Box
     Some((cur, min, max, step))
 }
 
+/// Returns the `n`th element of a proper Faust list (`Cons` chain).
+///
+/// This is a strict structural helper:
+/// - returns `None` on `nil`,
+/// - returns `None` on malformed non-list nodes,
+/// - does not attempt implicit coercions.
 #[allow(dead_code)]
 fn list_nth(arena: &TreeArena, mut list: BoxId, mut n: usize) -> Option<BoxId> {
     loop {
@@ -2236,6 +2272,12 @@ fn list_nth(arena: &TreeArena, mut list: BoxId, mut n: usize) -> Option<BoxId> {
     }
 }
 
+/// Recursive structural dumper used by [`dump_box`].
+///
+/// Emits a deterministic, shape-oriented textual representation suitable for
+/// parser differential tests and snapshots. Arena addresses / node ids are not
+/// embedded, except for explicit `<invalid:id>` placeholders when a child id
+/// cannot be resolved.
 fn dump_node(arena: &TreeArena, id: BoxId, out: &mut String) {
     let Some(node) = arena.node(id) else {
         write!(out, "<invalid:{}>", id.as_u32()).expect("String write cannot fail");
