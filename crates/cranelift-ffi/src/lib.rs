@@ -25,6 +25,7 @@
 #![allow(non_snake_case)] // FFI parity requires preserving C API symbol names.
 
 pub mod cache;
+pub(crate) mod clif;
 pub mod factory;
 pub mod instance;
 pub mod types;
