@@ -1082,4 +1082,49 @@ mod tests {
         let msg = unsafe { CStr::from_ptr(err.as_ptr()) }.to_str().unwrap();
         assert!(msg.contains("unsupported") || msg.contains("format"));
     }
+
+    #[test]
+    fn selected_runtime_corpus_cases_lower_compute_body() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root");
+        let cases = [
+            "tests/corpus/rep_01_passthrough.dsp",
+            "tests/corpus/rep_02_gain_bias.dsp",
+            "tests/corpus/rep_03_stereo_mix.dsp",
+            "tests/corpus/rep_07_nonlinear_clip.dsp",
+            "tests/corpus/rep_38_sine_phasor.dsp",
+        ];
+
+        for rel in cases {
+            let mut err = [0_i8; 4096];
+            let path = root.join(rel);
+            let c_path =
+                std::ffi::CString::new(path.to_string_lossy().as_bytes()).expect("path CString");
+            let factory = unsafe {
+                createCCraneliftDSPFactoryFromFile(
+                    c_path.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                    err.as_mut_ptr(),
+                    1,
+                )
+            };
+            assert!(
+                !factory.is_null(),
+                "factory creation failed for {rel}: {}",
+                unsafe { CStr::from_ptr(err.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned()
+            );
+            unsafe {
+                assert!(
+                    (*factory).compute_body_lowered,
+                    "Cranelift fallback used for selected corpus case {rel}"
+                );
+                assert!(deleteCCraneliftDSPFactory(factory));
+            }
+        }
+    }
 }
