@@ -35,10 +35,6 @@ pub struct CppOptions {
     pub namespace: Option<String>,
     /// Optional class name override for the FIR module name.
     pub class_name: Option<String>,
-    /// Number of audio inputs reported by `getNumInputs()`.
-    pub num_inputs: usize,
-    /// Number of audio outputs reported by `getNumOutputs()`.
-    pub num_outputs: usize,
     /// C++ spelling used for FIR `Quad` values.
     ///
     /// C++ uses target-dependent `quad` spellings; Rust backend keeps this
@@ -60,8 +56,6 @@ impl Default for CppOptions {
         Self {
             namespace: None,
             class_name: Some("mydsp".to_owned()),
-            num_inputs: 0,
-            num_outputs: 0,
             quad_type_name: "quad".to_owned(),
             fixed_type_name: "fixed".to_owned(),
         }
@@ -129,6 +123,8 @@ struct ModuleView {
     dsp_struct: FirId,
     globals: FirId,
     declarations: FirId,
+    num_inputs: usize,
+    num_outputs: usize,
 }
 
 struct DeclareFunView<'a> {
@@ -155,9 +151,7 @@ enum EmitMode {
 /// # Options behavior
 /// - `class_name`: overrides FIR module name.
 /// - `namespace`: wraps the generated class in `namespace <name>`.
-/// - `num_inputs`/`num_outputs`: drive `getNumInputs/Outputs`; when
-///   `num_outputs == 0`, output arity is inferred from explicit
-///   `StoreTable(outputN, ...)` writes in `compute` (with legacy `Drop` fallback).
+/// - input/output arity is taken from FIR module metadata.
 ///
 /// # Errors
 /// Returns [`CodegenError`] with code `FRS-CGEN-CPP-0001` when `module`
@@ -169,11 +163,7 @@ pub fn generate_cpp_module(
 ) -> Result<String, CodegenError> {
     let module = decode_module(store, module)?;
     let module_name = module.name.clone();
-    let mut effective_options = options.clone();
-    if effective_options.num_outputs == 0 {
-        effective_options.num_outputs =
-            infer_module_compute_output_arity(store, module.declarations);
-    }
+    let effective_options = options.clone();
     let declared_functions = collect_declared_function_names(store, module.declarations)?;
     let class_name = options
         .class_name
@@ -211,7 +201,8 @@ pub fn generate_cpp_module(
     let _ = writeln!(out, "public:");
     emit_dsp_contract_methods(
         &mut out,
-        &effective_options,
+        module.num_inputs,
+        module.num_outputs,
         class_name,
         &module_name,
         &declared_functions,
@@ -237,27 +228,10 @@ pub fn generate_cpp_module(
     Ok(out)
 }
 
-fn infer_module_compute_output_arity(store: &FirStore, declarations: FirId) -> usize {
-    let FirMatch::Block(items) = match_fir(store, declarations) else {
-        return 0;
-    };
-    for item in items {
-        if let FirMatch::DeclareFun {
-            name,
-            body: Some(body),
-            ..
-        } = match_fir(store, item)
-            && name == "compute"
-        {
-            return infer_compute_output_arity(store, body);
-        }
-    }
-    0
-}
-
 fn emit_dsp_contract_methods(
     out: &mut String,
-    options: &CppOptions,
+    num_inputs: usize,
+    num_outputs: usize,
     class_name: &str,
     module_name: &str,
     declared_functions: &[String],
@@ -292,10 +266,10 @@ fn emit_dsp_contract_methods(
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "{tab}virtual int getNumInputs() {{");
-    let _ = writeln!(out, "{tab}    return {};", options.num_inputs);
+    let _ = writeln!(out, "{tab}    return {};", num_inputs);
     let _ = writeln!(out, "{tab}}}");
     let _ = writeln!(out, "{tab}virtual int getNumOutputs() {{");
-    let _ = writeln!(out, "{tab}    return {};", options.num_outputs);
+    let _ = writeln!(out, "{tab}    return {};", num_outputs);
     let _ = writeln!(out, "{tab}}}");
     let _ = writeln!(out, "{tab}static void classInit(int sample_rate) {{");
     let _ = writeln!(out, "{tab}    (void)sample_rate;");
@@ -956,11 +930,6 @@ fn emit_compute_body(
     body: FirId,
     indent: usize,
 ) -> Result<(), CodegenError> {
-    let _output_channels = if options.num_outputs > 0 {
-        options.num_outputs
-    } else {
-        infer_compute_output_arity(store, body)
-    };
     let mut mode = EmitMode::Compute;
     emit_block_with_mode(store, out, options, "", body, indent, &mut mode)
 }
@@ -982,43 +951,6 @@ fn is_empty_block(store: &FirStore, body: FirId) -> bool {
         FirMatch::Block(items) => items.is_empty(),
         _ => false,
     }
-}
-
-fn infer_compute_output_arity(store: &FirStore, body: FirId) -> usize {
-    let mut max_output_index = None;
-    let mut drop_count = 0usize;
-
-    fn visit(
-        store: &FirStore,
-        id: FirId,
-        max_output_index: &mut Option<usize>,
-        drop_count: &mut usize,
-    ) {
-        match match_fir(store, id) {
-            FirMatch::Block(items) => {
-                for stmt in items {
-                    visit(store, stmt, max_output_index, drop_count);
-                }
-            }
-            FirMatch::SimpleForLoop { body, .. } | FirMatch::ForLoop { body, .. } => {
-                visit(store, body, max_output_index, drop_count);
-            }
-            FirMatch::StoreTable { name, .. } => {
-                if let Some(index) = output_alias_index(&name) {
-                    *max_output_index = Some(max_output_index.map_or(index, |m| m.max(index)));
-                }
-            }
-            FirMatch::Drop(_) => *drop_count += 1,
-            _ => {}
-        }
-    }
-
-    visit(store, body, &mut max_output_index, &mut drop_count);
-    max_output_index.map_or(drop_count, |idx| idx + 1)
-}
-
-fn output_alias_index(name: &str) -> Option<usize> {
-    name.strip_prefix("output")?.parse::<usize>().ok()
 }
 
 fn emit_value(
@@ -1223,11 +1155,15 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
             dsp_struct,
             globals,
             declarations,
+            num_inputs,
+            num_outputs,
         } => Ok(ModuleView {
             name,
             dsp_struct,
             globals,
             declarations,
+            num_inputs,
+            num_outputs,
         }),
         _ => Err(CodegenError::new(
             CodegenErrorCode::RootNotModule,
@@ -1269,7 +1205,7 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let declarations = b.block(&[]);
-        let module = b.module("mydsp", dsp_struct, globals, declarations);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, declarations);
 
         let out = generate_cpp_module(&store, module, &CppOptions::default())
             .expect("module root should generate");
@@ -1294,7 +1230,7 @@ mod tests {
         let dsp_struct = b.int32(1);
         let globals = b.block(&[]);
         let declarations = b.block(&[]);
-        let module = b.module("mydsp", dsp_struct, globals, declarations);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, declarations);
         let err = generate_cpp_module(&store, module, &CppOptions::default())
             .expect_err("non-block section must fail");
         assert_eq!(err.code(), CodegenErrorCode::InvalidModuleSection);
@@ -1344,7 +1280,7 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let declarations = b.block(&[fun]);
-        let module = b.module("mydsp", dsp_struct, globals, declarations);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, declarations);
         let out = generate_cpp_module(&store, module, &CppOptions::default())
             .expect("core statement/value slice should generate");
 
@@ -1373,7 +1309,7 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let declarations = b.block(&[build_ui]);
-        let module = b.module("mydsp", dsp_struct, globals, declarations);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, declarations);
 
         let err = generate_cpp_module(&store, module, &CppOptions::default())
             .expect_err("invalid canonical buildUserInterface signature must fail");
@@ -1414,7 +1350,7 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let declarations = b.block(&[fun]);
-        let module = b.module("mydsp", dsp_struct, globals, declarations);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, declarations);
 
         let out =
             generate_cpp_module(&store, module, &CppOptions::default()).expect("UI nodes emit");

@@ -617,8 +617,8 @@ or `getNumOutputs*` disagreeing with actual buffer accesses).
 Phase 6 contract:
 - FIR module metadata must be the primary source for DSP audio arity.
 - C/C++ backends must read arity from FIR module metadata first.
-- Backend-local inference is temporary fallback only during migration and must
-  emit typed warnings.
+- Backend-local inference is forbidden in production code paths; missing arity
+  is a hard error.
 - FIR checker must validate arity presence/consistency at module level.
 
 ---
@@ -658,7 +658,7 @@ Phase 6 contract:
 - [ ] Backend selection is registry-driven with shared compile template flow
 - [ ] Output writing in orchestration paths uses typed sinks (no stream downcasts)
 - [ ] API compile entry points share one lifecycle model (no divergent init/teardown behavior)
-- [ ] C/C++ backends consume module arity metadata as primary contract (inference kept only as migration fallback)
+- [ ] C/C++ backends consume module arity metadata as mandatory contract (no inference fallback)
 - [ ] CLI/backend option compatibility is driven by a declarative capability matrix with consistency tests
 - [ ] API argument normalization uses dynamic vectors (no fixed-size temporary `argv` staging)
 - [ ] Orchestration stack handling avoids hidden thread-trampoline behavior in core compile flow

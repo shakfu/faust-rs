@@ -1531,8 +1531,6 @@ fn run_interp_trace_case(
     let interp_options = codegen::backends::interp::InterpOptions {
         opt_level: 0,
         module_name: None,
-        num_inputs: signals.process_arity.inputs,
-        num_outputs: signals.process_arity.outputs,
     };
     let mut factory =
         codegen::backends::interp::generate_interp_module(&fir.store, fir.module, &interp_options)?;

@@ -351,7 +351,14 @@ pub fn build_module(
     };
     let module: FirId = {
         let mut b = FirBuilder::new(&mut lower.store);
-        b.module(module_name, dsp_struct, globals, declarations)
+        b.module(
+            plan.num_inputs,
+            plan.num_outputs,
+            module_name,
+            dsp_struct,
+            globals,
+            declarations,
+        )
     };
 
     Ok(SignalFirOutput {

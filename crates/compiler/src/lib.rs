@@ -957,15 +957,8 @@ fn lower_signals_to_interp_legacy_bridge(
     let module_name = resolve_module_name(options.module_name.as_deref(), source_name);
     let lowered = lower_signals_to_fir_legacy_bridge(source_name, output, module_name);
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToInterpError::Verify)?;
-    let mut effective_options = options.clone();
-    if effective_options.num_inputs == 0 {
-        effective_options.num_inputs = output.process_arity.inputs;
-    }
-    if effective_options.num_outputs == 0 {
-        effective_options.num_outputs = output.process_arity.outputs;
-    }
     let factory: FbcDspFactory<f32> =
-        generate_interp_module(&lowered.store, lowered.module, &effective_options)
+        generate_interp_module(&lowered.store, lowered.module, options)
             .map_err(LowerToInterpError::Codegen)?;
     serialize_factory(&factory).map_err(LowerToInterpError::Serialize)
 }
@@ -980,15 +973,8 @@ fn lower_signals_to_interp_transform_fastlane(
     let lowered = lower_signals_to_fir_transform_fastlane(output, module_name)
         .map_err(LowerToInterpError::Transform)?;
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToInterpError::Verify)?;
-    let mut effective_options = options.clone();
-    if effective_options.num_inputs == 0 {
-        effective_options.num_inputs = output.process_arity.inputs;
-    }
-    if effective_options.num_outputs == 0 {
-        effective_options.num_outputs = output.process_arity.outputs;
-    }
     let factory: FbcDspFactory<f32> =
-        generate_interp_module(&lowered.store, lowered.module, &effective_options)
+        generate_interp_module(&lowered.store, lowered.module, options)
             .map_err(LowerToInterpError::Codegen)?;
     serialize_factory(&factory).map_err(LowerToInterpError::Serialize)
 }
@@ -1094,7 +1080,14 @@ fn lower_signals_to_fir_legacy_bridge(
     let declarations = b.block(&[compute]);
     let dsp_struct = b.block(&[]);
     let globals = b.block(&[]);
-    let module = b.module(module_name, dsp_struct, globals, declarations);
+    let module = b.module(
+        output.process_arity.inputs,
+        output.process_arity.outputs,
+        module_name,
+        dsp_struct,
+        globals,
+        declarations,
+    );
 
     FirCompileOutput { store, module }
 }
@@ -1129,12 +1122,7 @@ fn lower_signals_to_cpp_legacy_bridge(
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let lowered = lower_signals_to_fir_legacy_bridge(source_name, output, module_name);
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToCppError::Verify)?;
-    let mut effective_options = options.clone();
-    if effective_options.num_inputs == 0 {
-        effective_options.num_inputs = output.process_arity.inputs;
-    }
-    generate_cpp_module(&lowered.store, lowered.module, &effective_options)
-        .map_err(LowerToCppError::Codegen)
+    generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerToCppError::Codegen)
 }
 
 fn lower_signals_to_cpp_transform_fastlane(
@@ -1147,12 +1135,7 @@ fn lower_signals_to_cpp_transform_fastlane(
     let lowered = lower_signals_to_fir_transform_fastlane(output, module_name)
         .map_err(LowerToCppError::Transform)?;
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToCppError::Verify)?;
-    let mut effective_options = options.clone();
-    if effective_options.num_inputs == 0 {
-        effective_options.num_inputs = output.process_arity.inputs;
-    }
-    generate_cpp_module(&lowered.store, lowered.module, &effective_options)
-        .map_err(LowerToCppError::Codegen)
+    generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerToCppError::Codegen)
 }
 
 fn lower_signals_to_c_legacy_bridge(
@@ -1172,7 +1155,7 @@ fn lower_signals_to_c_legacy_bridge(
     let dsp_struct = b.block(&[]);
     let globals = b.block(&[]);
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
-    let module = b.module(module_name, dsp_struct, globals, declarations);
+    let module = b.module(0, 0, module_name, dsp_struct, globals, declarations);
     let lowered = FirCompileOutput { store, module };
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToCError::Verify)?;
     generate_c_module(&lowered.store, lowered.module, options).map_err(LowerToCError::Codegen)

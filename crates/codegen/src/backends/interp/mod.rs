@@ -72,12 +72,6 @@ pub struct InterpOptions {
     /// Override module/class name.  When `None`, the name embedded in the FIR
     /// module is used.
     pub module_name: Option<String>,
-    /// Number of audio inputs.  When `0`, the compiler facade fills this from
-    /// the propagation arity.
-    pub num_inputs: usize,
-    /// Number of audio outputs.  When `0`, the compiler facade fills this from
-    /// the propagation arity.
-    pub num_outputs: usize,
 }
 
 // ─── Error types ────────────────────────────────────────────────────────────
@@ -166,20 +160,30 @@ pub fn generate_interp_module(
     use std::collections::HashMap;
 
     // 1. Decode module root.
-    let (module_name_fir, dsp_struct, globals, declarations) = match match_fir(store, module) {
-        fir::FirMatch::Module {
-            name,
-            dsp_struct,
-            globals,
-            declarations,
-        } => (name, dsp_struct, globals, declarations),
-        _ => {
-            return Err(CodegenError::new(
-                CodegenErrorCode::RootNotModule,
-                "FIR root is not a Module",
-            ));
-        }
-    };
+    let (module_name_fir, dsp_struct, globals, declarations, module_num_inputs, module_num_outputs) =
+        match match_fir(store, module) {
+            fir::FirMatch::Module {
+                name,
+                dsp_struct,
+                globals,
+                declarations,
+                num_inputs,
+                num_outputs,
+            } => (
+                name,
+                dsp_struct,
+                globals,
+                declarations,
+                num_inputs,
+                num_outputs,
+            ),
+            _ => {
+                return Err(CodegenError::new(
+                    CodegenErrorCode::RootNotModule,
+                    "FIR root is not a Module",
+                ));
+            }
+        };
 
     let module_name = options.module_name.clone().unwrap_or(module_name_fir);
 
@@ -309,16 +313,8 @@ pub fn generate_interp_module(
         .unwrap_or(0);
 
     // 7. Resolve audio I/O counts.
-    let num_inputs = if options.num_inputs > 0 {
-        options.num_inputs as i32
-    } else {
-        0
-    };
-    let num_outputs = if options.num_outputs > 0 {
-        options.num_outputs as i32
-    } else {
-        0
-    };
+    let num_inputs = module_num_inputs as i32;
+    let num_outputs = module_num_outputs as i32;
 
     // 8. Build and optionally optimize the factory.
     let mut factory = FbcDspFactory::new(
@@ -430,7 +426,7 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let declarations = b.block(&[compute]);
-        let module = b.module("legacy_like", dsp_struct, globals, declarations);
+        let module = b.module(0, 0, "legacy_like", dsp_struct, globals, declarations);
         (store, module)
     }
 
@@ -443,8 +439,6 @@ mod tests {
             &InterpOptions {
                 opt_level: 0,
                 module_name: None,
-                num_inputs: 1,
-                num_outputs: 1,
             },
         )
         .expect("minimal legacy-like module should compile to interp factory");

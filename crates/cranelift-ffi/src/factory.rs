@@ -90,7 +90,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
             let sidecar = compile_interp_sidecar_from_file(Path::new(filename), args)?;
             let dsp_source = std::fs::read_to_string(filename)
                 .map_err(|e| format!("cannot read DSP source '{filename}': {e}"))?;
-            Ok(build_scaffold_factory_from_file(
+            build_scaffold_factory_from_file(
                 filename,
                 &dsp_source,
                 args,
@@ -98,7 +98,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
                 Some(compiled.jit),
                 Some(sidecar),
                 &compiled.fir_dump,
-            ))
+            )
         })
     }
 }
@@ -145,7 +145,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
             let compiled = preflight_compile_source_to_cranelift(name_app, dsp_content, opt_level)?;
             let sidecar = compile_interp_sidecar_from_source(name_app, dsp_content, args)?;
-            Ok(build_scaffold_factory_common(
+            build_scaffold_factory_common(
                 FactoryBuildSpec {
                     name: name_app,
                     dsp_code: dsp_content,
@@ -156,7 +156,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
                 },
                 Some(compiled.jit),
                 Some(sidecar),
-            ))
+            )
         })
     }
 }
@@ -206,7 +206,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromSignals(
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
             let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
             let sidecar = compile_interp_sidecar_from_fir(source_name, &fir)?;
-            Ok(build_scaffold_factory_common(
+            build_scaffold_factory_common(
                 FactoryBuildSpec {
                     name: source_name,
                     dsp_code: &fir_dump,
@@ -217,7 +217,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromSignals(
                 },
                 Some(jit),
                 Some(sidecar),
-            ))
+            )
         })
     }
 }
@@ -263,7 +263,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
             let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
             let sidecar = compile_interp_sidecar_from_fir(source_name, &fir)?;
-            Ok(build_scaffold_factory_common(
+            build_scaffold_factory_common(
                 FactoryBuildSpec {
                     name: source_name,
                     dsp_code: &fir_dump,
@@ -274,7 +274,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
                 },
                 Some(jit),
                 Some(sidecar),
-            ))
+            )
         })
     }
 }
@@ -642,7 +642,7 @@ fn build_scaffold_factory_from_file(
     jit: Option<JitDspModule>,
     sidecar: Option<FbcDspFactory<f32>>,
     semantic_fingerprint: &str,
-) -> CraneliftDspFactory {
+) -> Result<CraneliftDspFactory, String> {
     let source_name = Path::new(filename)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -667,7 +667,7 @@ fn build_scaffold_factory_common(
     spec: FactoryBuildSpec<'_>,
     jit: Option<JitDspModule>,
     sidecar: Option<FbcDspFactory<f32>>,
-) -> CraneliftDspFactory {
+) -> Result<CraneliftDspFactory, String> {
     let FactoryBuildSpec {
         name,
         dsp_code,
@@ -693,10 +693,22 @@ fn build_scaffold_factory_common(
         argv.join("\x1f"),
         semantic_fingerprint
     );
-    let (num_inputs, num_outputs) = sidecar
-        .as_ref()
-        .map_or((0, 0), |f| (f.num_inputs, f.num_outputs));
-    CraneliftDspFactory {
+    let sidecar = sidecar.ok_or_else(|| {
+        "internal error: missing interpreter sidecar; FIR module arity must be explicit and propagated to factory metadata".to_owned()
+    })?;
+    let num_inputs = usize::try_from(sidecar.num_inputs).map_err(|_| {
+        format!(
+            "invalid negative input arity from sidecar factory: {}",
+            sidecar.num_inputs
+        )
+    })?;
+    let num_outputs = usize::try_from(sidecar.num_outputs).map_err(|_| {
+        format!(
+            "invalid negative output arity from sidecar factory: {}",
+            sidecar.num_outputs
+        )
+    })?;
+    Ok(CraneliftDspFactory {
         name: name.to_owned(),
         sha_key,
         dsp_code: dsp_code.to_owned(),
@@ -716,11 +728,11 @@ fn build_scaffold_factory_common(
         compile_argv: argv.to_vec(),
         opt_level,
         compiled_jit: jit,
-        interp_sidecar: sidecar,
+        interp_sidecar: Some(sidecar),
         compute_body_lowered,
         num_inputs,
         num_outputs,
-    }
+    })
 }
 
 /// Decode a conventional `argc`/`argv` C array into owned Rust strings.
@@ -828,8 +840,6 @@ fn compile_interp_sidecar_from_fir(
         fir.module,
         &InterpOptions {
             module_name: Some(module_name.to_owned()),
-            num_inputs: fir.num_inputs,
-            num_outputs: fir.num_outputs,
             ..InterpOptions::default()
         },
     )
@@ -961,7 +971,21 @@ fn decode_factory_bitcode(text: &str) -> Result<CraneliftDspFactory, String> {
             decoded.opt_level,
             &decoded.expected_sha,
             &decoded.expected_compile_options,
-        );
+        )
+        .and_then(|rebuilt| {
+            if rebuilt.num_inputs != decoded.num_inputs
+                || rebuilt.num_outputs != decoded.num_outputs
+            {
+                return Err(format!(
+                    "bitcode arity mismatch: payload in/out={}/{}, rebuilt in/out={}/{}",
+                    decoded.num_inputs,
+                    decoded.num_outputs,
+                    rebuilt.num_inputs,
+                    rebuilt.num_outputs
+                ));
+            }
+            Ok(rebuilt)
+        });
     }
     let mut lines = text.lines();
     match lines.next() {
@@ -1042,7 +1066,7 @@ fn rebuild_factory_from_source(
         },
         Some(compiled.jit),
         Some(sidecar),
-    );
+    )?;
     if rebuilt.sha_key != expected_sha {
         return Err(format!(
             "bitcode SHA mismatch: expected '{}', rebuilt '{}'",
@@ -1353,6 +1377,8 @@ mod tests {
         assert!(!restored.is_null());
         unsafe {
             assert!((*restored).compiled_jit.is_some());
+            assert_eq!((*restored).num_inputs, (*factory).num_inputs);
+            assert_eq!((*restored).num_outputs, (*factory).num_outputs);
             assert_eq!((*restored).sha_key, (*factory).sha_key);
             assert_eq!((*restored).compile_options, (*factory).compile_options);
             freeCMemory(payload.cast());
@@ -1396,6 +1422,8 @@ mod tests {
         assert!(!restored.is_null());
         unsafe {
             assert!((*restored).compiled_jit.is_some());
+            assert_eq!((*restored).num_inputs, (*factory).num_inputs);
+            assert_eq!((*restored).num_outputs, (*factory).num_outputs);
             assert_eq!((*restored).sha_key, (*factory).sha_key);
             assert_eq!((*restored).compile_options, (*factory).compile_options);
         }
@@ -1417,6 +1445,27 @@ mod tests {
         assert!(restored.is_null());
         let msg = unsafe { CStr::from_ptr(err.as_ptr()) }.to_str().unwrap();
         assert!(msg.contains("unsupported") || msg.contains("format"));
+    }
+
+    #[test]
+    fn shared_factory_builder_rejects_missing_sidecar_arity_metadata() {
+        let _guard = crate::test_serial_guard();
+        let result = super::build_scaffold_factory_common(
+            super::FactoryBuildSpec {
+                name: "dsp",
+                dsp_code: "process = _;",
+                argv: &[],
+                opt_level: 1,
+                semantic_fingerprint: "fingerprint",
+                source_is_faust: true,
+            },
+            None,
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "builder must fail instead of silently defaulting arity to 0/0"
+        );
     }
 
     #[test]

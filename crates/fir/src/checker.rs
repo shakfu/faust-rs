@@ -589,6 +589,8 @@ impl<'s> VerifyCtx<'s> {
             dsp_struct,
             globals,
             declarations,
+            num_inputs,
+            num_outputs,
         } = match_fir(self.store, id)
         else {
             self.error("FIR-M01", "root node is not a FirMatch::Module", id);
@@ -598,7 +600,6 @@ impl<'s> VerifyCtx<'s> {
         // `Module.name` is the DSP class name and is used as the logical struct
         // name in the checker symbols table.
         self.symbols.struct_name = Some(name.clone());
-
         // M02: validate and register struct fields
         self.check_dsp_struct(dsp_struct);
 
@@ -610,8 +611,187 @@ impl<'s> VerifyCtx<'s> {
 
         // M04: declarations must be a Block
         match match_fir(self.store, declarations) {
-            FirMatch::Block(stmts) => self.check_declarations(declarations, stmts, &name),
+            FirMatch::Block(stmts) => {
+                self.check_declarations(declarations, stmts, &name);
+                self.check_compute_io_arity_contract(declarations, num_inputs, num_outputs);
+            }
             _ => self.error("FIR-M04", "declarations is not a Block", declarations),
+        }
+    }
+
+    fn check_compute_io_arity_contract(
+        &mut self,
+        declarations: FirId,
+        num_inputs: usize,
+        num_outputs: usize,
+    ) {
+        let FirMatch::Block(items) = match_fir(self.store, declarations) else {
+            return;
+        };
+        for item in items {
+            let FirMatch::DeclareFun {
+                name,
+                body: Some(body),
+                ..
+            } = match_fir(self.store, item)
+            else {
+                continue;
+            };
+            if name != "compute" {
+                continue;
+            }
+            self.check_compute_body_io_access(body, num_inputs, num_outputs);
+            break;
+        }
+    }
+
+    fn check_compute_body_io_access(&mut self, id: FirId, num_inputs: usize, num_outputs: usize) {
+        match match_fir(self.store, id) {
+            FirMatch::Block(items) => {
+                for stmt in items {
+                    self.check_compute_body_io_access(stmt, num_inputs, num_outputs);
+                }
+            }
+            FirMatch::DeclareVar { name, init, .. } => {
+                if let Some(index) = input_alias_index(name.as_str())
+                    && index >= num_inputs
+                {
+                    self.error(
+                        "FIR-M08",
+                        format!(
+                            "compute declares input alias '{name}' out of module input arity {num_inputs}"
+                        ),
+                        id,
+                    );
+                }
+                if let Some(index) = output_alias_index(name.as_str())
+                    && index >= num_outputs
+                {
+                    self.error(
+                        "FIR-M09",
+                        format!(
+                            "compute declares output alias '{name}' out of module output arity {num_outputs}"
+                        ),
+                        id,
+                    );
+                }
+                if let Some(init) = init {
+                    self.check_compute_body_io_access(init, num_inputs, num_outputs);
+                }
+            }
+            FirMatch::LoadTable {
+                name,
+                access: AccessType::FunArgs,
+                index,
+                ..
+            } => {
+                if let Some(index) = funargs_constant_index(self.store, index) {
+                    if name == "inputs" && index >= num_inputs {
+                        self.error(
+                            "FIR-M08",
+                            format!(
+                                "compute reads inputs[{index}] but module has {num_inputs} inputs"
+                            ),
+                            id,
+                        );
+                    } else if name == "outputs" && index >= num_outputs {
+                        self.error(
+                            "FIR-M09",
+                            format!(
+                                "compute reads outputs[{index}] but module has {num_outputs} outputs"
+                            ),
+                            id,
+                        );
+                    }
+                }
+                self.check_compute_body_io_access(index, num_inputs, num_outputs);
+            }
+            FirMatch::StoreTable { index, value, .. } => {
+                self.check_compute_body_io_access(index, num_inputs, num_outputs);
+                self.check_compute_body_io_access(value, num_inputs, num_outputs);
+            }
+            FirMatch::SimpleForLoop { upper, body, .. } => {
+                self.check_compute_body_io_access(upper, num_inputs, num_outputs);
+                self.check_compute_body_io_access(body, num_inputs, num_outputs);
+            }
+            FirMatch::ForLoop {
+                init,
+                end,
+                step,
+                body,
+                ..
+            } => {
+                self.check_compute_body_io_access(init, num_inputs, num_outputs);
+                self.check_compute_body_io_access(end, num_inputs, num_outputs);
+                self.check_compute_body_io_access(step, num_inputs, num_outputs);
+                self.check_compute_body_io_access(body, num_inputs, num_outputs);
+            }
+            FirMatch::If {
+                cond,
+                then_block,
+                else_block,
+            } => {
+                self.check_compute_body_io_access(cond, num_inputs, num_outputs);
+                self.check_compute_body_io_access(then_block, num_inputs, num_outputs);
+                if let Some(else_block) = else_block {
+                    self.check_compute_body_io_access(else_block, num_inputs, num_outputs);
+                }
+            }
+            FirMatch::Control { cond, stmt } => {
+                self.check_compute_body_io_access(cond, num_inputs, num_outputs);
+                self.check_compute_body_io_access(stmt, num_inputs, num_outputs);
+            }
+            FirMatch::Switch {
+                cond,
+                cases,
+                default,
+            } => {
+                self.check_compute_body_io_access(cond, num_inputs, num_outputs);
+                for (_, block) in cases {
+                    self.check_compute_body_io_access(block, num_inputs, num_outputs);
+                }
+                if let Some(default) = default {
+                    self.check_compute_body_io_access(default, num_inputs, num_outputs);
+                }
+            }
+            FirMatch::WhileLoop { cond, body } => {
+                self.check_compute_body_io_access(cond, num_inputs, num_outputs);
+                self.check_compute_body_io_access(body, num_inputs, num_outputs);
+            }
+            FirMatch::BinOp { lhs, rhs, .. } => {
+                self.check_compute_body_io_access(lhs, num_inputs, num_outputs);
+                self.check_compute_body_io_access(rhs, num_inputs, num_outputs);
+            }
+            FirMatch::Neg { value, .. }
+            | FirMatch::Cast { value, .. }
+            | FirMatch::Bitcast { value, .. }
+            | FirMatch::StoreVar { value, .. }
+            | FirMatch::TeeVar { value, .. }
+            | FirMatch::Drop(value)
+            | FirMatch::Return(Some(value)) => {
+                self.check_compute_body_io_access(value, num_inputs, num_outputs);
+            }
+            FirMatch::Select2 {
+                cond,
+                then_value,
+                else_value,
+                ..
+            } => {
+                self.check_compute_body_io_access(cond, num_inputs, num_outputs);
+                self.check_compute_body_io_access(then_value, num_inputs, num_outputs);
+                self.check_compute_body_io_access(else_value, num_inputs, num_outputs);
+            }
+            FirMatch::FunCall { args, .. } | FirMatch::ValueArray { values: args, .. } => {
+                for arg in args {
+                    self.check_compute_body_io_access(arg, num_inputs, num_outputs);
+                }
+            }
+            FirMatch::DeclareTable { values, .. } => {
+                for value in values {
+                    self.check_compute_body_io_access(value, num_inputs, num_outputs);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2275,6 +2455,21 @@ impl<'s> VerifyCtx<'s> {
     }
 }
 
+fn input_alias_index(name: &str) -> Option<usize> {
+    name.strip_prefix("input")?.parse::<usize>().ok()
+}
+
+fn output_alias_index(name: &str) -> Option<usize> {
+    name.strip_prefix("output")?.parse::<usize>().ok()
+}
+
+fn funargs_constant_index(store: &FirStore, id: FirId) -> Option<usize> {
+    match match_fir(store, id) {
+        FirMatch::Int32 { value, .. } if value >= 0 => usize::try_from(value).ok(),
+        _ => None,
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2338,7 +2533,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let declarations = make_full_declarations(&mut b);
-        b.module("dsp", dsp_struct, globals, declarations)
+        b.module(0, 0, "dsp", dsp_struct, globals, declarations)
     }
 
     // ── Helper: build a minimal module with one custom function ───────────────
@@ -2349,7 +2544,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let decls = b.block(&[fun_id]);
-        b.module("dsp", dsp_struct, globals, decls)
+        b.module(0, 0, "dsp", dsp_struct, globals, decls)
     }
 
     // ══ Phase 1 tests (unchanged) ═════════════════════════════════════════════
@@ -2377,7 +2572,7 @@ mod tests {
         let bad_struct = b.int32(0);
         let globals = make_empty_block(&mut b);
         let decls = make_full_declarations(&mut b);
-        let module_id = b.module("dsp", bad_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", bad_struct, globals, decls);
         let report = verify_fir_module(&store, module_id);
         assert!(report.diagnostics.iter().any(|d| d.code == "FIR-M02"));
     }
@@ -2389,7 +2584,7 @@ mod tests {
         let bad_struct = b.declare_struct_type(FirType::Int32);
         let globals = make_empty_block(&mut b);
         let decls = make_full_declarations(&mut b);
-        let module_id = b.module("dsp", bad_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", bad_struct, globals, decls);
         let report = verify_fir_module(&store, module_id);
         assert!(report.diagnostics.iter().any(|d| d.code == "FIR-M02"));
     }
@@ -2401,7 +2596,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let bad_globals = b.int32(0);
         let decls = make_full_declarations(&mut b);
-        let module_id = b.module("dsp", dsp_struct, bad_globals, decls);
+        let module_id = b.module(0, 0, "dsp", dsp_struct, bad_globals, decls);
         assert!(
             verify_fir_module(&store, module_id)
                 .diagnostics
@@ -2417,7 +2612,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let bad_decls = b.int32(0);
-        let module_id = b.module("dsp", dsp_struct, globals, bad_decls);
+        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, bad_decls);
         assert!(
             verify_fir_module(&store, module_id)
                 .diagnostics
@@ -2434,7 +2629,7 @@ mod tests {
         let globals = make_empty_block(&mut b);
         let intruder = b.int32(99);
         let decls = b.block(&[intruder]);
-        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, decls);
         assert!(
             verify_fir_module(&store, module_id)
                 .diagnostics
@@ -2452,7 +2647,7 @@ mod tests {
         let f1 = make_void_fun(&mut b, "myFun");
         let f2 = make_void_fun(&mut b, "myFun");
         let decls = b.block(&[f1, f2]);
-        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, decls);
         let report = verify_fir_module(&store, module_id);
         assert!(!report.has_errors());
         assert!(report.diagnostics.iter().any(|d| d.code == "FIR-M06"));
@@ -2465,7 +2660,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let decls = make_empty_block(&mut b);
-        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, decls);
         let report = verify_fir_module(&store, module_id);
         assert!(!report.has_errors());
         assert_eq!(
@@ -2486,7 +2681,7 @@ mod tests {
         let bad_struct = b.block(&[bad_field]);
         let globals = make_empty_block(&mut b);
         let decls = make_full_declarations(&mut b);
-        let module_id = b.module("dsp", bad_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", bad_struct, globals, decls);
         assert!(
             verify_fir_module(&store, module_id)
                 .diagnostics
@@ -2508,7 +2703,7 @@ mod tests {
         let bad_struct = b.block(&[bad_field]);
         let globals = make_empty_block(&mut b);
         let decls = make_full_declarations(&mut b);
-        let module_id = b.module("dsp", bad_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", bad_struct, globals, decls);
         let report = verify_fir_module(&store, module_id);
         assert!(!report.has_errors());
         assert!(report.diagnostics.iter().any(|d| d.code == "FIR-S04"));
@@ -2524,7 +2719,7 @@ mod tests {
         let dsp_struct = b.block(&[f0, f1]);
         let globals = make_empty_block(&mut b);
         let decls = make_full_declarations(&mut b);
-        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, decls);
         let (_report, symbols) = verify_module_structure(&store, module_id);
         assert_eq!(symbols.struct_name.as_deref(), Some("dsp"));
         assert_eq!(symbols.struct_fields, fields);
@@ -2540,7 +2735,7 @@ mod tests {
         let dsp_struct = b.block(&[bad_field]);
         let globals = make_empty_block(&mut b);
         let decls = make_full_declarations(&mut b);
-        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, decls);
         let report = verify_fir_module(&store, module_id);
         assert!(report.has_errors());
         assert!(
@@ -2558,7 +2753,7 @@ mod tests {
         let dsp_struct = b.block(&[f1, f2]);
         let globals = make_empty_block(&mut b);
         let decls = make_full_declarations(&mut b);
-        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, decls);
         let report = verify_fir_module(&store, module_id);
         assert!(report.has_errors());
         assert!(
@@ -2575,7 +2770,7 @@ mod tests {
         let intruder = b.int32(0);
         let globals = b.block(&[intruder]);
         let decls = make_full_declarations(&mut b);
-        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, decls);
         assert!(
             verify_fir_module(&store, module_id)
                 .diagnostics
@@ -2592,7 +2787,7 @@ mod tests {
         let bad_var = b.declare_var("x", FirType::Int32, AccessType::Stack, None);
         let globals = b.block(&[bad_var]);
         let decls = make_full_declarations(&mut b);
-        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, decls);
         assert!(
             verify_fir_module(&store, module_id)
                 .diagnostics
@@ -2610,7 +2805,7 @@ mod tests {
         let v2 = b.declare_var("g", FirType::Int32, AccessType::Global, None);
         let globals = b.block(&[v1, v2]);
         let decls = make_full_declarations(&mut b);
-        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, decls);
         assert!(
             verify_fir_module(&store, module_id)
                 .diagnostics
@@ -2627,7 +2822,7 @@ mod tests {
         let var = b.declare_var("gRate", FirType::Int32, AccessType::Global, None);
         let globals = b.block(&[var]);
         let decls = make_full_declarations(&mut b);
-        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, decls);
         let (_report, symbols) = verify_module_structure(&store, module_id);
         assert!(symbols.globals.contains_key("gRate"));
     }
@@ -2770,7 +2965,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let decls = b.block(&[fun]);
-        b.module("dsp", dsp_struct, globals, decls)
+        b.module(0, 0, "dsp", dsp_struct, globals, decls)
     }
 
     /// Build a single-function module that returns an Int32 value.
@@ -2785,7 +2980,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let decls = b.block(&[fun]);
-        b.module("dsp", dsp_struct, globals, decls)
+        b.module(0, 0, "dsp", dsp_struct, globals, decls)
     }
 
     // ══ Phase 2 — SC checks ═══════════════════════════════════════════════════
@@ -2990,7 +3185,7 @@ mod tests {
         };
         let fun = b.declare_fun("f", typ, &[], Some(body), false);
         let decls = b.block(&[fun]);
-        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, decls);
         let report = verify_fir_module(&store, module_id);
         assert!(
             !report.diagnostics.iter().any(|d| d.code == "FIR-SC01"),
@@ -3372,7 +3567,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let decls = b.block(&[callee, caller]);
-        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, decls);
         let report = verify_fir_module(&store, module_id);
         assert!(
             report.diagnostics.iter().any(|d| d.code == "FIR-FC02"),
@@ -3496,7 +3691,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let decls = b.block(&[sin_decl, fabs_decl, caller]);
-        let module_id = b.module("dsp", dsp_struct, globals, decls);
+        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, decls);
         let report = verify_fir_module(&store, module_id);
         assert!(
             report.diagnostics.iter().any(|d| d.code == "FIR-MA03"),
@@ -3504,6 +3699,60 @@ mod tests {
         );
         assert!(
             report.diagnostics.iter().any(|d| d.code == "FIR-MA04"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn m08_compute_input_index_out_of_module_arity() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let idx0 = b.int32(0);
+        let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let input_ptr = b.load_table("inputs", AccessType::FunArgs, idx0, ptr_ty.clone());
+        let input_alias = b.declare_var("input0", ptr_ty, AccessType::Stack, Some(input_ptr));
+        let body = b.block(&[input_alias]);
+        let compute_ty = FirType::Fun {
+            args: vec![],
+            ret: Box::new(FirType::Void),
+        };
+        let compute = b.declare_fun("compute", compute_ty, &[], Some(body), false);
+
+        let dsp_struct = make_dsp_struct(&mut b);
+        let globals = make_empty_block(&mut b);
+        let decls = b.block(&[compute]);
+        let module_id = b.module(0, 1, "dsp", dsp_struct, globals, decls);
+        let report = verify_fir_module(&store, module_id);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-M08"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn m09_compute_output_index_out_of_module_arity() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let idx1 = b.int32(1);
+        let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let output_ptr = b.load_table("outputs", AccessType::FunArgs, idx1, ptr_ty.clone());
+        let output_alias = b.declare_var("output1", ptr_ty, AccessType::Stack, Some(output_ptr));
+        let body = b.block(&[output_alias]);
+        let compute_ty = FirType::Fun {
+            args: vec![],
+            ret: Box::new(FirType::Void),
+        };
+        let compute = b.declare_fun("compute", compute_ty, &[], Some(body), false);
+
+        let dsp_struct = make_dsp_struct(&mut b);
+        let globals = make_empty_block(&mut b);
+        let decls = b.block(&[compute]);
+        let module_id = b.module(1, 1, "dsp", dsp_struct, globals, decls);
+        let report = verify_fir_module(&store, module_id);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "FIR-M09"),
             "{report:?}"
         );
     }

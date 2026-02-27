@@ -120,11 +120,20 @@ fn module_with_functions(
     name: &str,
     globals: &[FirId],
     declarations: &[FirId],
+    num_inputs: usize,
+    num_outputs: usize,
 ) -> FirId {
     let dsp_struct = b.block(&[]);
     let globals = b.block(globals);
     let declarations = b.block(declarations);
-    b.module(name, dsp_struct, globals, declarations)
+    b.module(
+        num_inputs,
+        num_outputs,
+        name,
+        dsp_struct,
+        globals,
+        declarations,
+    )
 }
 
 fn declare_compute_fn(b: &mut FirBuilder<'_>, body: FirId) -> FirId {
@@ -240,6 +249,8 @@ pub fn build_sine_phasor_test_module() -> (FirStore, FirId) {
         "mydsp",
         &[dec_freq, dec_gain, dec_phase],
         &[build_ui, compute],
+        0,
+        1,
     );
     (store, module)
 }
@@ -271,7 +282,7 @@ pub fn build_passthrough_test_module() -> (FirStore, FirId) {
     let compute_body = b.block(&[in_alias, out_alias, sample_loop]);
     let compute = declare_compute_fn(&mut b, compute_body);
 
-    let module = module_with_functions(&mut b, "passthrough", &[], &[compute]);
+    let module = module_with_functions(&mut b, "passthrough", &[], &[compute], 1, 1);
     (store, module)
 }
 
@@ -409,6 +420,8 @@ pub fn build_gain_bias_ui_meta_test_module() -> (FirStore, FirId) {
         "gain_bias_ui_meta",
         &globals,
         &[build_ui, metadata, compute],
+        1,
+        1,
     );
     (store, module)
 }
@@ -467,7 +480,7 @@ pub fn build_table_state_delay_test_module() -> (FirStore, FirId) {
     let compute_body = b.block(&[in_alias, out_alias, sample_loop]);
     let compute = declare_compute_fn(&mut b, compute_body);
 
-    let module = module_with_functions(&mut b, "table_state_delay", &globals, &[compute]);
+    let module = module_with_functions(&mut b, "table_state_delay", &globals, &[compute], 1, 1);
     (store, module)
 }
 
@@ -545,7 +558,7 @@ pub fn build_control_flow_test_module() -> (FirStore, FirId) {
     let compute_body = b.block(&[in_alias, out_alias, acc_decl, sample_loop]);
     let compute = declare_compute_fn(&mut b, compute_body);
 
-    let module = module_with_functions(&mut b, "control_flow", &globals, &[compute]);
+    let module = module_with_functions(&mut b, "control_flow", &globals, &[compute], 1, 1);
     (store, module)
 }
 
@@ -590,7 +603,7 @@ pub fn build_math_intrinsics_test_module() -> (FirStore, FirId) {
     let compute_body = b.block(&[in_alias, out_alias, sample_loop]);
     let compute = declare_compute_fn(&mut b, compute_body);
 
-    let module = module_with_functions(&mut b, "math_intrinsics", &[], &[compute]);
+    let module = module_with_functions(&mut b, "math_intrinsics", &[], &[compute], 1, 1);
     (store, module)
 }
 
@@ -673,7 +686,7 @@ pub fn build_heavy_bench_test_module() -> (FirStore, FirId) {
     let sample_loop = b.simple_for_loop("i0", count, sample_body, false);
     let compute_body = b.block(&[in_alias, out_alias, sample_loop]);
     let compute = declare_compute_fn(&mut b, compute_body);
-    let module = module_with_functions(&mut b, "heavy_bench", &globals, &[compute]);
+    let module = module_with_functions(&mut b, "heavy_bench", &globals, &[compute], 1, 1);
     (store, module)
 }
 
@@ -811,7 +824,7 @@ pub fn build_ir_coverage_test_module() -> (FirStore, FirId) {
     let dsp_struct = b.block(&[struct_decl]);
     let globals_block = b.block(&globals);
     let declarations = b.block(&[helper, compute]);
-    let module = b.module("ir_coverage", dsp_struct, globals_block, declarations);
+    let module = b.module(1, 1, "ir_coverage", dsp_struct, globals_block, declarations);
     (store, module)
 }
 

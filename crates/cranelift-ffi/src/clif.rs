@@ -42,6 +42,8 @@ pub(crate) struct DecodedClifPayload {
     pub(crate) expected_sha: String,
     pub(crate) expected_compile_options: String,
     pub(crate) opt_level: i32,
+    pub(crate) num_inputs: usize,
+    pub(crate) num_outputs: usize,
     pub(crate) argv: Vec<String>,
     pub(crate) source_fallback: String,
     pub(crate) clif_functions: Vec<(String, String)>,
@@ -211,6 +213,16 @@ pub(crate) fn decode_factory_clif(text: &str) -> Result<DecodedClifPayload, Stri
         .ok_or_else(|| "missing 'argc' field".to_owned())?
         .parse::<usize>()
         .map_err(|e| format!("invalid 'argc' field: {e}"))?;
+    let num_inputs = fields
+        .remove("num_inputs")
+        .ok_or_else(|| "missing 'num_inputs' field".to_owned())?
+        .parse::<usize>()
+        .map_err(|e| format!("invalid 'num_inputs' field: {e}"))?;
+    let num_outputs = fields
+        .remove("num_outputs")
+        .ok_or_else(|| "missing 'num_outputs' field".to_owned())?
+        .parse::<usize>()
+        .map_err(|e| format!("invalid 'num_outputs' field: {e}"))?;
     let mut argv = Vec::with_capacity(argc);
     for idx in 0..argc {
         let key = format!("arg{idx}");
@@ -225,6 +237,8 @@ pub(crate) fn decode_factory_clif(text: &str) -> Result<DecodedClifPayload, Stri
         expected_sha,
         expected_compile_options,
         opt_level,
+        num_inputs,
+        num_outputs,
         argv,
         source_fallback,
         clif_functions,

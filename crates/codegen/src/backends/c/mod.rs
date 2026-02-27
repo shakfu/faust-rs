@@ -36,10 +36,6 @@ pub const BACKEND_NAME: &str = "c";
 pub struct COptions {
     /// Optional C struct name override for the FIR module name.
     pub class_name: Option<String>,
-    /// Number of audio inputs reported by `getNumInputs*`.
-    pub num_inputs: usize,
-    /// Number of audio outputs reported by `getNumOutputs*`.
-    pub num_outputs: usize,
     /// C spelling used for FIR `Quad` values.
     ///
     /// Kept configurable because C targets can differ on extended precision
@@ -60,8 +56,6 @@ impl Default for COptions {
     fn default() -> Self {
         Self {
             class_name: Some("mydsp".to_owned()),
-            num_inputs: 0,
-            num_outputs: 0,
             quad_type_name: "quad".to_owned(),
             fixed_type_name: "fixed".to_owned(),
         }
@@ -127,6 +121,8 @@ struct ModuleView {
     dsp_struct: FirId,
     globals: FirId,
     declarations: FirId,
+    num_inputs: usize,
+    num_outputs: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -182,9 +178,7 @@ pub fn backend_id() -> &'static str {
 ///
 /// # Options behavior
 /// - `class_name`: overrides FIR module name.
-/// - `num_inputs`/`num_outputs`: drive `getNumInputs*`/`getNumOutputs*`; when
-///   `num_outputs == 0`, output arity is inferred from explicit
-///   `StoreTable(outputN, ...)` writes in `compute` (with legacy `Drop` fallback).
+/// - input/output arity is taken from FIR module metadata.
 pub fn generate_c_module(
     store: &FirStore,
     module: FirId,
@@ -196,11 +190,7 @@ pub fn generate_c_module(
         .as_deref()
         .unwrap_or(module.name.as_str())
         .to_owned();
-    let mut effective_options = options.clone();
-    if effective_options.num_outputs == 0 {
-        effective_options.num_outputs =
-            infer_module_compute_output_arity(store, module.declarations);
-    }
+    let effective_options = options.clone();
 
     let declared_functions = collect_declared_functions(store, module.declarations)?;
     let struct_inits = collect_struct_initializers(store, module.dsp_struct, module.globals)?;
@@ -220,6 +210,8 @@ pub fn generate_c_module(
         &mut out,
         &effective_options,
         &class_name,
+        module.num_inputs,
+        module.num_outputs,
         &declared_functions,
         &struct_inits,
         &table_inits,
@@ -336,6 +328,8 @@ fn emit_c_api(
     out: &mut String,
     options: &COptions,
     class_name: &str,
+    num_inputs: usize,
+    num_outputs: usize,
     declared_functions: &[DeclareFunView],
     struct_inits: &[StructInit],
     table_inits: &[TableInit],
@@ -371,7 +365,7 @@ fn emit_c_api(
         "int getNumInputs{class_name}({class_name}* RESTRICT dsp) {{"
     );
     let _ = writeln!(out, "    (void)dsp;");
-    let _ = writeln!(out, "    return {};", options.num_inputs);
+    let _ = writeln!(out, "    return {};", num_inputs);
     let _ = writeln!(out, "}}");
     let _ = writeln!(out);
 
@@ -380,7 +374,7 @@ fn emit_c_api(
         "int getNumOutputs{class_name}({class_name}* RESTRICT dsp) {{"
     );
     let _ = writeln!(out, "    (void)dsp;");
-    let _ = writeln!(out, "    return {};", options.num_outputs);
+    let _ = writeln!(out, "    return {};", num_outputs);
     let _ = writeln!(out, "}}");
     let _ = writeln!(out);
 
@@ -642,31 +636,8 @@ fn emit_compute_body(
     body: FirId,
     indent: usize,
 ) -> Result<(), CodegenError> {
-    let _output_channels = if options.num_outputs > 0 {
-        options.num_outputs
-    } else {
-        infer_compute_output_arity(store, body)
-    };
     let mut mode = EmitMode::Compute;
     emit_block_with_mode(store, out, options, body, indent, &mut mode)
-}
-
-fn infer_module_compute_output_arity(store: &FirStore, declarations: FirId) -> usize {
-    let FirMatch::Block(items) = match_fir(store, declarations) else {
-        return 0;
-    };
-    for item in items {
-        if let FirMatch::DeclareFun {
-            name,
-            body: Some(body),
-            ..
-        } = match_fir(store, item)
-            && name == "compute"
-        {
-            return infer_compute_output_arity(store, body);
-        }
-    }
-    0
 }
 
 fn collect_struct_initializers(
@@ -736,43 +707,6 @@ fn collect_table_initializers(
         }
     }
     Ok(out)
-}
-
-fn infer_compute_output_arity(store: &FirStore, body: FirId) -> usize {
-    let mut max_output_index = None;
-    let mut drop_count = 0usize;
-
-    fn visit(
-        store: &FirStore,
-        id: FirId,
-        max_output_index: &mut Option<usize>,
-        drop_count: &mut usize,
-    ) {
-        match match_fir(store, id) {
-            FirMatch::Block(items) => {
-                for stmt in items {
-                    visit(store, stmt, max_output_index, drop_count);
-                }
-            }
-            FirMatch::SimpleForLoop { body, .. } | FirMatch::ForLoop { body, .. } => {
-                visit(store, body, max_output_index, drop_count);
-            }
-            FirMatch::StoreTable { name, .. } => {
-                if let Some(index) = output_alias_index(&name) {
-                    *max_output_index = Some(max_output_index.map_or(index, |m| m.max(index)));
-                }
-            }
-            FirMatch::Drop(_) => *drop_count += 1,
-            _ => {}
-        }
-    }
-
-    visit(store, body, &mut max_output_index, &mut drop_count);
-    max_output_index.map_or(drop_count, |idx| idx + 1)
-}
-
-fn output_alias_index(name: &str) -> Option<usize> {
-    name.strip_prefix("output")?.parse::<usize>().ok()
 }
 
 fn collect_declared_functions(
@@ -1235,6 +1169,8 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
         dsp_struct,
         globals,
         declarations,
+        num_inputs,
+        num_outputs,
     } = match_fir(store, module)
     {
         Ok(ModuleView {
@@ -1242,6 +1178,8 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
             dsp_struct,
             globals,
             declarations,
+            num_inputs,
+            num_outputs,
         })
     } else {
         Err(CodegenError::new(
@@ -1301,15 +1239,8 @@ mod tests {
     #[test]
     fn emits_c_module_with_dsp_struct_ui_and_compute_loop() {
         let (store, module) = build_sine_phasor_test_module();
-        let out = generate_c_module(
-            &store,
-            module,
-            &COptions {
-                num_outputs: 1,
-                ..COptions::default()
-            },
-        )
-        .expect("c module generation should succeed");
+        let out = generate_c_module(&store, module, &COptions::default())
+            .expect("c module generation should succeed");
 
         assert!(out.contains("typedef struct {"));
         assert!(out.contains("FAUSTFLOAT fFreq;"));
@@ -1364,7 +1295,7 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let declarations = b.block(&[metadata]);
-        let module = b.module("mydsp", dsp_struct, globals, declarations);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, declarations);
 
         let err = generate_c_module(&store, module, &COptions::default())
             .expect_err("invalid canonical metadata signature must fail");

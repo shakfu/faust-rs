@@ -31,6 +31,10 @@ const WARMUP_BLOCKS: usize = 256;
 type ComputeFn =
     unsafe extern "C" fn(*mut std::ffi::c_void, i32, *mut *mut FaustFloat, *mut *mut FaustFloat);
 
+fn c_int_arity_to_usize(value: i32, label: &str) -> Result<usize, String> {
+    usize::try_from(value).map_err(|_| format!("invalid negative {label}: {value}"))
+}
+
 #[derive(Debug, Clone, Copy)]
 enum BenchInput<'a> {
     DspFile(&'a Path),
@@ -150,8 +154,14 @@ fn run_interp_file(case: &Path) -> Result<(Duration, f64), String> {
     }
     unsafe { initCInterpreterDSPInstance(dsp, SAMPLE_RATE) };
 
-    let num_inputs = unsafe { getNumInputsCInterpreterDSPInstance(dsp) }.max(0) as usize;
-    let num_outputs = unsafe { getNumOutputsCInterpreterDSPInstance(dsp) }.max(0) as usize;
+    let num_inputs = c_int_arity_to_usize(
+        unsafe { getNumInputsCInterpreterDSPInstance(dsp) },
+        "interp input arity",
+    )?;
+    let num_outputs = c_int_arity_to_usize(
+        unsafe { getNumOutputsCInterpreterDSPInstance(dsp) },
+        "interp output arity",
+    )?;
 
     let (elapsed, checksum) =
         run_blocked_bench(num_inputs, num_outputs, |input_ptrs, output_ptrs| {
@@ -171,11 +181,7 @@ fn run_interp_file(case: &Path) -> Result<(Duration, f64), String> {
 
 fn run_interp_fixture_sine_phasor() -> Result<(Duration, f64), String> {
     let (store, module) = build_sine_phasor_test_module();
-    let options = InterpOptions {
-        num_inputs: 0,
-        num_outputs: 1,
-        ..InterpOptions::default()
-    };
+    let options = InterpOptions::default();
     let factory = generate_interp_module(&store, module, &options).map_err(|e| e.to_string())?;
     let mut fbc_bytes = Vec::<u8>::new();
     write_fbc(&factory, &mut fbc_bytes, false).map_err(|e| e.to_string())?;
@@ -199,8 +205,14 @@ fn run_interp_fixture_sine_phasor() -> Result<(Duration, f64), String> {
     }
     unsafe { initCInterpreterDSPInstance(dsp, SAMPLE_RATE) };
 
-    let num_inputs = unsafe { getNumInputsCInterpreterDSPInstance(dsp) }.max(0) as usize;
-    let num_outputs = unsafe { getNumOutputsCInterpreterDSPInstance(dsp) }.max(0) as usize;
+    let num_inputs = c_int_arity_to_usize(
+        unsafe { getNumInputsCInterpreterDSPInstance(dsp) },
+        "interp fixture sine_phasor input arity",
+    )?;
+    let num_outputs = c_int_arity_to_usize(
+        unsafe { getNumOutputsCInterpreterDSPInstance(dsp) },
+        "interp fixture sine_phasor output arity",
+    )?;
     if num_outputs == 0 {
         unsafe {
             deleteCInterpreterDSPInstance(dsp);
@@ -227,11 +239,7 @@ fn run_interp_fixture_sine_phasor() -> Result<(Duration, f64), String> {
 
 fn run_interp_fixture_heavy_bench() -> Result<(Duration, f64), String> {
     let (store, module) = build_heavy_bench_test_module();
-    let options = InterpOptions {
-        num_inputs: 1,
-        num_outputs: 1,
-        ..InterpOptions::default()
-    };
+    let options = InterpOptions::default();
     let factory = generate_interp_module(&store, module, &options).map_err(|e| e.to_string())?;
     let mut fbc_bytes = Vec::<u8>::new();
     write_fbc(&factory, &mut fbc_bytes, false).map_err(|e| e.to_string())?;
@@ -255,8 +263,14 @@ fn run_interp_fixture_heavy_bench() -> Result<(Duration, f64), String> {
     }
     unsafe { initCInterpreterDSPInstance(dsp, SAMPLE_RATE) };
 
-    let num_inputs = unsafe { getNumInputsCInterpreterDSPInstance(dsp) }.max(0) as usize;
-    let num_outputs = unsafe { getNumOutputsCInterpreterDSPInstance(dsp) }.max(0) as usize;
+    let num_inputs = c_int_arity_to_usize(
+        unsafe { getNumInputsCInterpreterDSPInstance(dsp) },
+        "interp fixture heavy_bench input arity",
+    )?;
+    let num_outputs = c_int_arity_to_usize(
+        unsafe { getNumOutputsCInterpreterDSPInstance(dsp) },
+        "interp fixture heavy_bench output arity",
+    )?;
     if num_inputs == 0 || num_outputs == 0 {
         unsafe {
             deleteCInterpreterDSPInstance(dsp);
@@ -319,8 +333,14 @@ fn run_cranelift_file(case: &Path) -> Result<(Duration, f64), String> {
     }
     unsafe { initCCraneliftDSPInstance(dsp, SAMPLE_RATE) };
 
-    let num_inputs = unsafe { getNumInputsCCraneliftDSPInstance(dsp) }.max(0) as usize;
-    let num_outputs = unsafe { getNumOutputsCCraneliftDSPInstance(dsp) }.max(0) as usize;
+    let num_inputs = c_int_arity_to_usize(
+        unsafe { getNumInputsCCraneliftDSPInstance(dsp) },
+        "cranelift input arity",
+    )?;
+    let num_outputs = c_int_arity_to_usize(
+        unsafe { getNumOutputsCCraneliftDSPInstance(dsp) },
+        "cranelift output arity",
+    )?;
     let (elapsed, checksum) =
         run_blocked_bench(num_inputs, num_outputs, |input_ptrs, output_ptrs| {
             unsafe {

@@ -1351,6 +1351,8 @@ fn rewrite_module_once(
         dsp_struct,
         globals,
         declarations,
+        num_inputs,
+        num_outputs,
     } = match_fir(src_store, module)
     else {
         return Err(FirInlineRewriteError::Analysis(
@@ -1383,7 +1385,14 @@ fn rewrite_module_once(
     )?;
 
     let mut b = FirBuilder::new(dst_store);
-    Ok(b.module(name, dsp_struct, globals, declarations))
+    Ok(b.module(
+        num_inputs,
+        num_outputs,
+        name,
+        dsp_struct,
+        globals,
+        declarations,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2427,12 +2436,21 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
                 dsp_struct,
                 globals,
                 declarations,
+                num_inputs,
+                num_outputs,
             } => {
                 let dsp_struct = self.clone_node(dsp_struct)?;
                 let globals = self.clone_node(globals)?;
                 let declarations = self.clone_node(declarations)?;
                 let mut b = FirBuilder::new(self.dst);
-                b.module(name, dsp_struct, globals, declarations)
+                b.module(
+                    num_inputs,
+                    num_outputs,
+                    name,
+                    dsp_struct,
+                    globals,
+                    declarations,
+                )
             }
         };
         Ok(out)
@@ -2534,7 +2552,7 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[h_proto]);
         let decls = b.block(&[g_fun, f_fun]);
-        let module = b.module("mydsp", dsp_struct, globals, decls);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, decls);
 
         let analysis = analyze_fir_inliner(&store, module, &FirInlineOptions::default())
             .expect("valid module should analyze");
@@ -2620,7 +2638,7 @@ mod tests {
             let dsp_struct = b.block(&[]);
             let globals = b.block(&[]);
             let decls = b.block(&[f_fun, g_fun]);
-            b.module("mydsp", dsp_struct, globals, decls)
+            b.module(0, 0, "mydsp", dsp_struct, globals, decls)
         };
 
         let analysis = analyze_fir_inliner(&store, module, &FirInlineOptions::default())
@@ -2705,7 +2723,7 @@ mod tests {
             let dsp_struct = b.block(&[]);
             let globals = b.block(&[]);
             let decls = b.block(&[helper, compute, large]);
-            b.module("mydsp", dsp_struct, globals, decls)
+            b.module(0, 0, "mydsp", dsp_struct, globals, decls)
         };
 
         let opts = FirInlineOptions {
@@ -2808,7 +2826,7 @@ mod tests {
             let dsp_struct = b.block(&[]);
             let globals = b.block(&[]);
             let decls = b.block(&[f]);
-            b.module("mydsp", dsp_struct, globals, decls)
+            b.module(0, 0, "mydsp", dsp_struct, globals, decls)
         };
         assert_no_checker_errors(&dst, module);
     }
@@ -2865,7 +2883,7 @@ mod tests {
             let dsp_struct = b.block(&[]);
             let globals = b.block(&[]);
             let decls = b.block(&[f]);
-            b.module("mydsp", dsp_struct, globals, decls)
+            b.module(0, 0, "mydsp", dsp_struct, globals, decls)
         };
         assert_no_checker_errors(&dst, module);
     }
@@ -2942,7 +2960,7 @@ mod tests {
             let dsp_struct = b.block(&[]);
             let globals = b.block(&[]);
             let decls = b.block(&[wrapper]);
-            b.module("mydsp", dsp_struct, globals, decls)
+            b.module(0, 0, "mydsp", dsp_struct, globals, decls)
         };
         assert_no_checker_errors(&dst, module);
     }
@@ -3033,7 +3051,7 @@ mod tests {
             let dsp_struct = b.block(&[]);
             let globals = b.block(&[]);
             let decls = b.block(&[helper, wrapper]);
-            b.module("mydsp", dsp_struct, globals, decls)
+            b.module(0, 0, "mydsp", dsp_struct, globals, decls)
         };
 
         let (dst, rewritten, stats) =
@@ -3103,7 +3121,7 @@ mod tests {
             let dsp_struct = b.block(&[]);
             let globals = b.block(&[]);
             let decls = b.block(&[helper, wrapper]);
-            b.module("mydsp", dsp_struct, globals, decls)
+            b.module(0, 0, "mydsp", dsp_struct, globals, decls)
         };
 
         assert_no_checker_errors(&src, module);
@@ -3182,7 +3200,7 @@ mod tests {
             let dsp_struct = b.block(&[]);
             let globals = b.block(&[]);
             let decls = b.block(&[wrapper, helper, leaf]);
-            b.module("mydsp", dsp_struct, globals, decls)
+            b.module(0, 0, "mydsp", dsp_struct, globals, decls)
         };
 
         let analysis =
@@ -3257,7 +3275,7 @@ mod tests {
             let dsp_struct = b.block(&[]);
             let globals = b.block(&[]);
             let decls = b.block(&[wrapper, helper, leaf]);
-            b.module("mydsp", dsp_struct, globals, decls)
+            b.module(0, 0, "mydsp", dsp_struct, globals, decls)
         };
 
         let (dst, rewritten, stats) =

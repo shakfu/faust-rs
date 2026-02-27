@@ -915,16 +915,27 @@ impl<'a> FirBuilder<'a> {
     #[must_use]
     pub fn module(
         &mut self,
+        num_inputs: usize,
+        num_outputs: usize,
         name: impl Into<String>,
         dsp_struct: FirId,
         globals: FirId,
         declarations: FirId,
     ) -> FirId {
         let name_id = self.store.arena.symbol(name);
+        let num_inputs_id = self.store.arena.int(num_inputs as i64);
+        let num_outputs_id = self.store.arena.int(num_outputs as i64);
         intern_tag(
             &mut self.store.arena,
             FIR_MODULE_TAG,
-            &[name_id, dsp_struct, globals, declarations],
+            &[
+                name_id,
+                dsp_struct,
+                globals,
+                declarations,
+                num_inputs_id,
+                num_outputs_id,
+            ],
         )
     }
 
@@ -1299,6 +1310,8 @@ pub enum FirMatch {
         dsp_struct: FirId,
         globals: FirId,
         declarations: FirId,
+        num_inputs: usize,
+        num_outputs: usize,
     },
 }
 
@@ -1883,8 +1896,30 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
             };
             FirMatch::Label(label)
         }
-        (FIR_MODULE_TAG, [name, dsp_struct, globals, declarations]) => {
+        (
+            FIR_MODULE_TAG,
+            [
+                name,
+                dsp_struct,
+                globals,
+                declarations,
+                num_inputs,
+                num_outputs,
+            ],
+        ) => {
             let Some(name) = decode_symbol(&store.arena, *name) else {
+                return FirMatch::Unknown;
+            };
+            let Some(raw_num_inputs) = decode_i64(&store.arena, *num_inputs) else {
+                return FirMatch::Unknown;
+            };
+            let Some(raw_num_outputs) = decode_i64(&store.arena, *num_outputs) else {
+                return FirMatch::Unknown;
+            };
+            let (Ok(num_inputs), Ok(num_outputs)) = (
+                usize::try_from(raw_num_inputs),
+                usize::try_from(raw_num_outputs),
+            ) else {
                 return FirMatch::Unknown;
             };
             FirMatch::Module {
@@ -1892,6 +1927,8 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 dsp_struct: *dsp_struct,
                 globals: *globals,
                 declarations: *declarations,
+                num_inputs,
+                num_outputs,
             }
         }
         _ => FirMatch::Unknown,

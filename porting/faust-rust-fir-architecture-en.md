@@ -93,8 +93,7 @@ but this is fragile and can diverge across backends.
   - `num_outputs: u32`
 - These values are the canonical source for DSP audio arity in all backends
   (`c`, `cpp`, `interp`, `cranelift`, and future backends).
-- Backend-local arity inference becomes fallback-only tooling and must not be
-  the primary runtime contract.
+- Backend-local arity inference is forbidden in production code paths.
 
 ### Implementation strategy
 
@@ -104,18 +103,14 @@ but this is fragile and can diverge across backends.
 3. Update FIR checker with module-level validation:
    - arity fields are present and non-negative,
    - `compute` declaration shape remains compatible with canonical DSP API,
-   - optional consistency warning when declared arity disagrees with detectable
-     `compute` accesses.
+   - explicit errors when declared arity disagrees with detectable `compute`
+     accesses.
 4. Update backends to consume arity from FIR module metadata first.
-5. Keep current inference as temporary compatibility fallback behind explicit
-   warning diagnostics until all producers are migrated.
+5. Remove runtime inference paths; missing/invalid arity must fail fast.
 
 ### Migration and compatibility policy
 
-- During migration, missing module arity is accepted but must trigger a typed
-  warning and fallback inference.
-- After migration gate closure, missing arity becomes a verifier error for
-  production pipelines.
+- Missing module arity is a verifier error for production pipelines.
 - The `parse -> ... -> transform -> fir -> backend` contract is then: arity is
   produced in FIR, not reconstructed in backends.
 

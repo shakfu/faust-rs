@@ -2557,8 +2557,6 @@ pub unsafe extern "C" fn CcreateSourceFromBoxes(
                 fir.module,
                 &COptions {
                     class_name: Some(module_name.clone()),
-                    num_inputs: fir.num_inputs,
-                    num_outputs: fir.num_outputs,
                     ..COptions::default()
                 },
             )
@@ -2568,8 +2566,6 @@ pub unsafe extern "C" fn CcreateSourceFromBoxes(
                 fir.module,
                 &CppOptions {
                     class_name: Some(module_name.clone()),
-                    num_inputs: fir.num_inputs,
-                    num_outputs: fir.num_outputs,
                     ..CppOptions::default()
                 },
             )
@@ -2581,8 +2577,6 @@ pub unsafe extern "C" fn CcreateSourceFromBoxes(
                     fir.module,
                     &InterpOptions {
                         module_name: Some(module_name.clone()),
-                        num_inputs: fir.num_inputs,
-                        num_outputs: fir.num_outputs,
                         ..InterpOptions::default()
                     },
                 )

@@ -28,6 +28,10 @@ mod tests {
     const ABS_TOL: f32 = 5e-4;
     const REL_TOL: f32 = 5e-4;
 
+    fn c_int_arity_to_usize(value: i32, label: &str) -> Result<usize, String> {
+        usize::try_from(value).map_err(|_| format!("invalid negative {label}: {value}"))
+    }
+
     fn workspace_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -56,8 +60,8 @@ mod tests {
             .map_err(|e| e.to_string())?;
         let mut reader = BufReader::new(fbc.as_bytes());
         let mut factory = read_fbc::<f32>(&mut reader).map_err(|e| e.to_string())?;
-        let num_inputs = factory.num_inputs.max(0) as usize;
-        let num_outputs = factory.num_outputs.max(0) as usize;
+        let num_inputs = c_int_arity_to_usize(factory.num_inputs, "interp input arity")?;
+        let num_outputs = c_int_arity_to_usize(factory.num_outputs, "interp output arity")?;
         let mut instance = FbcDspInstance::new(&mut factory);
         instance.init(SAMPLE_RATE as i32);
 
@@ -109,8 +113,14 @@ mod tests {
         }
         unsafe { initCCraneliftDSPInstance(dsp, SAMPLE_RATE as i32) };
 
-        let num_inputs = unsafe { getNumInputsCCraneliftDSPInstance(dsp) }.max(0) as usize;
-        let num_outputs = unsafe { getNumOutputsCCraneliftDSPInstance(dsp) }.max(0) as usize;
+        let num_inputs = c_int_arity_to_usize(
+            unsafe { getNumInputsCCraneliftDSPInstance(dsp) },
+            "input arity",
+        )?;
+        let num_outputs = c_int_arity_to_usize(
+            unsafe { getNumOutputsCCraneliftDSPInstance(dsp) },
+            "output arity",
+        )?;
         let total_samples = BLOCK_SIZE * NUM_BLOCKS;
         let mut input_channels = generate_impulse_inputs(num_inputs, total_samples);
         let mut output_channels = vec![vec![0.0f32; total_samples]; num_outputs];

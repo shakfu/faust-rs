@@ -64,9 +64,9 @@ pub struct CraneliftDspFactory {
     /// Whether the backend lowered the FIR `compute` body (vs stub fallback).
     pub(crate) compute_body_lowered: bool,
     /// Audio input count.
-    pub(crate) num_inputs: i32,
+    pub(crate) num_inputs: usize,
     /// Audio output count.
-    pub(crate) num_outputs: i32,
+    pub(crate) num_outputs: usize,
 }
 
 /// Opaque Cranelift DSP instance wrapper exported as `cranelift_dsp*`.

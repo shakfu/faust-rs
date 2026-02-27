@@ -20,6 +20,10 @@ use crate::ui::{dispatch_meta, dispatch_ui};
 type ComputeFn =
     unsafe extern "C" fn(*mut c_void, c_int, *mut *mut FaustFloat, *mut *mut FaustFloat);
 
+fn arity_to_c_int(value: usize) -> c_int {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
 /// Create a new Cranelift DSP instance from a factory.
 ///
 /// # Safety
@@ -118,7 +122,7 @@ pub unsafe extern "C" fn getNumInputsCCraneliftDSPInstance(
         if dsp.is_null() || (*dsp).factory.is_null() {
             return 0;
         }
-        (*(*dsp).factory).num_inputs
+        arity_to_c_int((*(*dsp).factory).num_inputs)
     }
 }
 
@@ -134,7 +138,7 @@ pub unsafe extern "C" fn getNumOutputsCCraneliftDSPInstance(
         if dsp.is_null() || (*dsp).factory.is_null() {
             return 0;
         }
-        (*(*dsp).factory).num_outputs
+        arity_to_c_int((*(*dsp).factory).num_outputs)
     }
 }
 

@@ -2752,7 +2752,14 @@ mod tests {
             false,
         );
         let declarations = b.block(&[compute]);
-        let module = b.module("subset_gap_fun_call", dsp_struct, globals, declarations);
+        let module = b.module(
+            0,
+            0,
+            "subset_gap_fun_call",
+            dsp_struct,
+            globals,
+            declarations,
+        );
         (store, module)
     }
 
@@ -2835,7 +2842,7 @@ mod tests {
             false,
         );
         let declarations = b.block(&[compute]);
-        let module = b.module("subset_lowerable", dsp_struct, globals, declarations);
+        let module = b.module(0, 0, "subset_lowerable", dsp_struct, globals, declarations);
         (store, module)
     }
 
@@ -2904,7 +2911,14 @@ mod tests {
             false,
         );
         let declarations = b.block(&[compute]);
-        let module = b.module("stack_input_load_subset", dsp_struct, globals, declarations);
+        let module = b.module(
+            0,
+            0,
+            "stack_input_load_subset",
+            dsp_struct,
+            globals,
+            declarations,
+        );
         (store, module)
     }
 
@@ -2976,7 +2990,14 @@ mod tests {
             false,
         );
         let declarations = b.block(&[compute]);
-        let module = b.module("math_intrinsics_subset", dsp_struct, globals, declarations);
+        let module = b.module(
+            0,
+            0,
+            "math_intrinsics_subset",
+            dsp_struct,
+            globals,
+            declarations,
+        );
         (store, module)
     }
 
@@ -3047,6 +3068,8 @@ mod tests {
         );
         let declarations = b.block(&[compute]);
         let module = b.module(
+            0,
+            0,
             "labels_uninit_stack_subset",
             dsp_struct,
             globals,
@@ -3131,7 +3154,7 @@ mod tests {
             false,
         );
         let declarations = b.block(&[compute]);
-        let module = b.module("switch_subset", dsp_struct, globals, declarations);
+        let module = b.module(0, 0, "switch_subset", dsp_struct, globals, declarations);
         (store, module)
     }
 
@@ -3203,7 +3226,14 @@ mod tests {
             false,
         );
         let declarations = b.block(&[compute]);
-        let module = b.module("if_control_neg_subset", dsp_struct, globals, declarations);
+        let module = b.module(
+            0,
+            0,
+            "if_control_neg_subset",
+            dsp_struct,
+            globals,
+            declarations,
+        );
         (store, module)
     }
 
@@ -3280,6 +3310,8 @@ mod tests {
         );
         let declarations = b.block(&[compute]);
         let module = b.module(
+            0,
+            0,
             "for_while_local_store_subset",
             dsp_struct,
             globals,
@@ -3361,7 +3393,14 @@ mod tests {
             false,
         );
         let declarations = b.block(&[compute]);
-        let module = b.module("global_table_subset", dsp_struct, globals, declarations);
+        let module = b.module(
+            0,
+            0,
+            "global_table_subset",
+            dsp_struct,
+            globals,
+            declarations,
+        );
         (store, module)
     }
 
@@ -3460,6 +3499,8 @@ mod tests {
         );
         let declarations = b.block(&[compute]);
         let module = b.module(
+            0,
+            0,
             "globals_helper_proto_subset",
             dsp_struct,
             globals,
@@ -3541,6 +3582,8 @@ mod tests {
         );
         let declarations = b.block(&[compute]);
         let module = b.module(
+            0,
+            0,
             "shift_array_var_struct_subset",
             dsp_struct,
             globals,
