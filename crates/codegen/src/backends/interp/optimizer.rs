@@ -57,18 +57,41 @@ fn apply_rewriter<R: FbcReal>(
     rewrite: impl Fn(&[FbcInstruction<R>], usize) -> RewriteResult<R>,
 ) -> FbcBlock<R> {
     let instrs = &block.instructions;
+    let block_store_at = block
+        .block_store_data
+        .iter()
+        .map(|(idx, data)| (*idx, data))
+        .collect::<std::collections::HashMap<usize, _>>();
     let mut result = FbcBlock::new();
     let mut cursor = 0;
 
     while cursor < instrs.len() {
         match rewrite(instrs, cursor) {
             RewriteResult::Emit(inst, advance) => {
-                result.push(inst);
+                // Preserve BlockStore payload only when a 1:1 rewrite keeps the
+                // same BlockStore opcode at the same source position.
+                if advance == 1
+                    && let Some(data) = block_store_at.get(&cursor)
+                    && matches!(
+                        inst.opcode,
+                        FbcOpcode::BlockStoreReal | FbcOpcode::BlockStoreInt
+                    )
+                {
+                    result.push_block_store(inst, (*data).clone());
+                } else {
+                    result.push(inst);
+                }
                 cursor += advance;
             }
             RewriteResult::Copy(advance) => {
                 for i in 0..advance {
-                    result.push(instrs[cursor + i].clone());
+                    let src_idx = cursor + i;
+                    let inst = instrs[src_idx].clone();
+                    if let Some(data) = block_store_at.get(&src_idx) {
+                        result.push_block_store(inst, (*data).clone());
+                    } else {
+                        result.push(inst);
+                    }
                 }
                 cursor += advance;
             }
@@ -1660,5 +1683,30 @@ mod tests {
         assert_eq!(result.instructions[0].opcode, FbcOpcode::MoveReal);
         assert_eq!(result.instructions[0].offset1, 5); // destination
         assert_eq!(result.instructions[0].offset2, 13); // source (3 + 10)
+    }
+
+    #[test]
+    fn test_block_store_payload_preserved_across_optimization() {
+        let mut block = FbcBlock::new();
+        let store =
+            FbcInstruction::with_values_and_offsets(FbcOpcode::BlockStoreReal, 0, 0.0, 0, 3);
+        block.push_block_store(
+            store,
+            super::super::bytecode::BlockStoreData::Real(vec![0.5, 0.6, 0.7]),
+        );
+        block.push(inst(FbcOpcode::Return));
+
+        let result = optimize_until_fixpoint(block, rewrite_load_store);
+
+        assert_eq!(result.instructions[0].opcode, FbcOpcode::BlockStoreReal);
+        assert_eq!(result.block_store_data.len(), 1);
+        let (idx, data) = &result.block_store_data[0];
+        assert_eq!(*idx, 0);
+        match data {
+            super::super::bytecode::BlockStoreData::Real(values) => {
+                assert_eq!(values.as_slice(), &[0.5, 0.6, 0.7]);
+            }
+            _ => panic!("expected BlockStoreData::Real"),
+        }
     }
 }
