@@ -28,3 +28,15 @@ pub mod factory;
 pub mod instance;
 pub mod types;
 pub mod ui;
+
+#[cfg(test)]
+mod diff;
+
+#[cfg(test)]
+pub(crate) fn test_serial_guard() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("test mutex")
+}

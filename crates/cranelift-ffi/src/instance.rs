@@ -419,6 +419,7 @@ mod tests {
 
     #[test]
     fn instance_status_is_stable() {
+        let _guard = crate::test_serial_guard();
         assert_eq!(instance_status(), "cranelift-ffi instance runtime");
     }
 
@@ -434,6 +435,7 @@ mod tests {
 
     #[test]
     fn instance_lifecycle_scaffold_roundtrip() {
+        let _guard = crate::test_serial_guard();
         let name = CString::new("demo").unwrap();
         let src = CString::new("process = _;").unwrap();
         let mut err = [0_i8; 4096];

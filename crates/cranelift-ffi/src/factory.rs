@@ -1057,7 +1057,6 @@ fn json_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::ffi::CStr;
-    use std::sync::{Mutex, OnceLock};
 
     use super::{
         createCCraneliftDSPFactoryFromBoxes, createCCraneliftDSPFactoryFromFile,
@@ -1070,22 +1069,15 @@ mod tests {
         writeCCraneliftDSPFactoryToBitcode, writeCCraneliftDSPFactoryToBitcodeFile,
     };
 
-    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("test mutex")
-    }
-
     #[test]
     fn factory_scaffold_status_is_stable() {
-        let _guard = test_guard();
+        let _guard = crate::test_serial_guard();
         assert_eq!(factory_status(), "cranelift-ffi factory runtime");
     }
 
     #[test]
     fn version_symbol_returns_static_c_string() {
-        let _guard = test_guard();
+        let _guard = crate::test_serial_guard();
         let ptr = getCLibFaustVersion();
         assert!(!ptr.is_null());
         let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
@@ -1094,7 +1086,7 @@ mod tests {
 
     #[test]
     fn create_factory_from_string_runtime_roundtrip_queries() {
-        let _guard = test_guard();
+        let _guard = crate::test_serial_guard();
         let name = c"mydsp";
         let src = c"process = _;";
         let args = [c"-vec"];
@@ -1143,7 +1135,7 @@ mod tests {
 
     #[test]
     fn create_factory_from_file_rejects_null_filename() {
-        let _guard = test_guard();
+        let _guard = crate::test_serial_guard();
         let mut err = [0_i8; 4096];
         let factory = unsafe {
             createCCraneliftDSPFactoryFromFile(
@@ -1161,7 +1153,7 @@ mod tests {
 
     #[test]
     fn create_factory_from_string_reports_compiler_error_for_invalid_faust() {
-        let _guard = test_guard();
+        let _guard = crate::test_serial_guard();
         let name = c"bad";
         let src = c"process = ;";
         let mut err = [0_i8; 4096];
@@ -1183,7 +1175,7 @@ mod tests {
 
     #[test]
     fn cache_lookup_and_list_are_wired_to_created_factories() {
-        let _guard = test_guard();
+        let _guard = crate::test_serial_guard();
         let name = c"cachetest";
         let src = c"process = _;";
         let mut err = [0_i8; 4096];
@@ -1220,7 +1212,7 @@ mod tests {
 
     #[test]
     fn source_backed_bitcode_roundtrip_in_memory() {
-        let _guard = test_guard();
+        let _guard = crate::test_serial_guard();
         let name = c"bitcode";
         let src = c"process = _;";
         let mut err = [0_i8; 4096];
@@ -1257,7 +1249,7 @@ mod tests {
 
     #[test]
     fn source_backed_bitcode_roundtrip_via_file() {
-        let _guard = test_guard();
+        let _guard = crate::test_serial_guard();
         let name = c"bitfile";
         let src = c"process = _;";
         let mut err = [0_i8; 4096];
@@ -1304,7 +1296,7 @@ mod tests {
 
     #[test]
     fn source_backed_bitcode_read_rejects_invalid_format() {
-        let _guard = test_guard();
+        let _guard = crate::test_serial_guard();
         let bad = c"NOT_A_CRANELIFT_FORMAT";
         let mut err = [0_i8; 4096];
         let restored =
@@ -1316,7 +1308,7 @@ mod tests {
 
     #[test]
     fn selected_runtime_corpus_cases_lower_compute_body() {
-        let _guard = test_guard();
+        let _guard = crate::test_serial_guard();
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -1362,7 +1354,7 @@ mod tests {
 
     #[test]
     fn boxes_and_signals_constructor_match_string_constructor_sha() {
-        let _guard = test_guard();
+        let _guard = crate::test_serial_guard();
         faust_box::createLibContext();
         let box_root = faust_box::CboxWire();
         assert!(!box_root.is_null());
