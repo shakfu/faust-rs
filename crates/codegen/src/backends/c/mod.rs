@@ -208,13 +208,15 @@ pub fn generate_c_module(
     emit_c_api(
         store,
         &mut out,
-        &effective_options,
-        &class_name,
-        module.num_inputs,
-        module.num_outputs,
-        &declared_functions,
-        &struct_inits,
-        &table_inits,
+        CApiEmitInput {
+            options: &effective_options,
+            class_name: &class_name,
+            num_inputs: module.num_inputs,
+            num_outputs: module.num_outputs,
+            declared_functions: &declared_functions,
+            struct_inits: &struct_inits,
+            table_inits: &table_inits,
+        },
     )?;
     emit_c_footer(&mut out);
     Ok(out)
@@ -323,17 +325,30 @@ fn emit_struct_fields(
     Ok(())
 }
 
+struct CApiEmitInput<'a> {
+    options: &'a COptions,
+    class_name: &'a str,
+    num_inputs: usize,
+    num_outputs: usize,
+    declared_functions: &'a [DeclareFunView],
+    struct_inits: &'a [StructInit],
+    table_inits: &'a [TableInit],
+}
+
 fn emit_c_api(
     store: &FirStore,
     out: &mut String,
-    options: &COptions,
-    class_name: &str,
-    num_inputs: usize,
-    num_outputs: usize,
-    declared_functions: &[DeclareFunView],
-    struct_inits: &[StructInit],
-    table_inits: &[TableInit],
+    spec: CApiEmitInput<'_>,
 ) -> Result<(), CodegenError> {
+    let CApiEmitInput {
+        options,
+        class_name,
+        num_inputs,
+        num_outputs,
+        declared_functions,
+        struct_inits,
+        table_inits,
+    } = spec;
     let names: Vec<&str> = declared_functions.iter().map(|f| f.name.as_str()).collect();
 
     let _ = writeln!(out, "{class_name}* new{class_name}() {{");
