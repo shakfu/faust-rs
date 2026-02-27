@@ -188,6 +188,13 @@ Acceptance criteria:
 - `BlockStoreReal/Int` payload is always instruction-owned.
 - No known payload-loss class remains in optimizer/serialization paths.
 
+Execution status (2026-02-27):
+- Completed in Rust implementation (`codegen::backends::interp`).
+- `FbcBlock` no longer carries `block_store_data` side-table.
+- `FbcInstruction` now owns optional inline `block_store` payload.
+- Serializer / executor / optimizer paths were migrated accordingly.
+- `cargo test -p codegen` passes after migration.
+
 ### 3.2 Opcode representation
 
 ```rust

@@ -352,15 +352,8 @@ fn write_code_block<R: FbcReal>(
 ) -> io::Result<()> {
     let block = arena.get(block_id);
     writeln!(writer, "block_size {}", block.instructions.len())?;
-    for (idx, instr) in block.instructions.iter().enumerate() {
-        // Check for block-store data at this instruction index.
-        let store_data = block
-            .block_store_data
-            .iter()
-            .find(|(i, _)| *i == idx)
-            .map(|(_, d)| d);
-
-        if let Some(data) = store_data {
+    for instr in &block.instructions {
+        if let Some(data) = instr.block_store.as_ref() {
             write_block_store_instruction(instr, data, writer, small)?;
         } else {
             write_instruction(instr, writer, small)?;
@@ -849,18 +842,14 @@ fn read_code_block<R: FbcReal>(
 
     for _ in 0..size {
         let line = read_line(reader)?;
-        let (instr, store_data) = read_code_instruction::<R>(&line, reader, arena)?;
+        let instr = read_code_instruction::<R>(&line, reader, arena)?;
 
         // Special case for loops: CondBranch's branch1 is set to the
         // containing block (loop-back pointer). We'll fix this up after
         // the block is allocated.
         let is_cond_branch = instr.opcode == FbcOpcode::CondBranch;
 
-        if let Some(data) = store_data {
-            block.push_block_store(instr, data);
-        } else {
-            block.push(instr);
-        }
+        block.push(instr);
 
         // For CondBranch, branch1 will be set to this block's ID after allocation.
         if is_cond_branch {
@@ -890,7 +879,7 @@ fn read_code_instruction<R: FbcReal>(
     line: &str,
     reader: &mut dyn BufRead,
     arena: &mut FbcBlockArena<R>,
-) -> Result<(FbcInstruction<R>, Option<BlockStoreData<R>>), FbcSerialError> {
+) -> Result<FbcInstruction<R>, FbcSerialError> {
     let mut tokens = line.split_whitespace();
 
     let _opcode_label = tokens.next(); // "opcode"
@@ -918,9 +907,10 @@ fn read_code_instruction<R: FbcReal>(
             values.push(v);
         }
 
-        let instr =
+        let mut instr =
             FbcInstruction::with_values_and_offsets(opcode, 0, R::default(), offset1, offset2);
-        Ok((instr, Some(BlockStoreData::Real(values))))
+        instr.block_store = Some(BlockStoreData::Real(values));
+        Ok(instr)
     } else if opcode == FbcOpcode::BlockStoreInt {
         // Format: opcode NUM kBlockStoreInt offset1 O1 offset2 O2 size S
         let _offset1_label = tokens.next(); // "offset1"
@@ -940,9 +930,10 @@ fn read_code_instruction<R: FbcReal>(
             values.push(v);
         }
 
-        let instr =
+        let mut instr =
             FbcInstruction::with_values_and_offsets(opcode, 0, R::default(), offset1, offset2);
-        Ok((instr, Some(BlockStoreData::Int(values))))
+        instr.block_store = Some(BlockStoreData::Int(values));
+        Ok(instr)
     } else {
         // General instruction format:
         // opcode NUM kName int V real R offset1 O1 offset2 O2 [name N]
@@ -978,7 +969,7 @@ fn read_code_instruction<R: FbcReal>(
         let instr = FbcInstruction::full(
             opcode, name, int_value, real_value, offset1, offset2, branch1, branch2,
         );
-        Ok((instr, None))
+        Ok(instr)
     }
 }
 
@@ -1426,16 +1417,16 @@ mod tests {
         let block = factory2.arena.get(factory2.static_init_block);
         assert_eq!(block.len(), 2);
         assert_eq!(block.instructions[0].opcode, FbcOpcode::BlockStoreReal);
-        assert_eq!(block.block_store_data.len(), 1);
-        match &block.block_store_data[0].1 {
-            BlockStoreData::Real(v) => {
+        match &block.instructions[0].block_store {
+            Some(BlockStoreData::Real(v)) => {
                 assert_eq!(v.len(), 4);
                 assert!((v[0] - 1.0).abs() < 1e-6);
                 assert!((v[1] - 2.0).abs() < 1e-6);
                 assert!((v[2] - 3.0).abs() < 1e-6);
                 assert!((v[3] - 4.0).abs() < 1e-6);
             }
-            BlockStoreData::Int(_) => panic!("expected Real data"),
+            Some(BlockStoreData::Int(_)) => panic!("expected Real data"),
+            None => panic!("expected inline block store payload"),
         }
     }
 

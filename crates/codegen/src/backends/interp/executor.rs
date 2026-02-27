@@ -467,18 +467,14 @@ impl<R: FbcReal> FbcExecutor<R> {
                     pc += 1;
                 }
                 BlockStoreReal => {
-                    if let Some((_, BlockStoreData::Real(table))) =
-                        block.block_store_data.iter().find(|(idx, _)| *idx == pc)
-                    {
+                    if let Some(BlockStoreData::Real(table)) = instr.block_store.as_ref() {
                         let count = o2;
                         self.real_heap[o1..(count + o1)].copy_from_slice(&table[..count]);
                     }
                     pc += 1;
                 }
                 BlockStoreInt => {
-                    if let Some((_, BlockStoreData::Int(table))) =
-                        block.block_store_data.iter().find(|(idx, _)| *idx == pc)
-                    {
+                    if let Some(BlockStoreData::Int(table)) = instr.block_store.as_ref() {
                         let count = o2;
                         self.int_heap[o1..(count + o1)].copy_from_slice(&table[..count]);
                     }

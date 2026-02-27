@@ -77,6 +77,11 @@ pub struct FbcInstruction<R: FbcReal> {
     pub real_value: R,
     pub offset1: i32,
     pub offset2: i32,
+    /// Optional inline payload for `BlockStoreReal` / `BlockStoreInt`.
+    ///
+    /// This keeps block-store table ownership attached to the instruction
+    /// itself, mirroring C++ specialized instruction objects.
+    pub block_store: Option<BlockStoreData<R>>,
     pub branch1: Option<BlockId>,
     pub branch2: Option<BlockId>,
 }
@@ -94,6 +99,7 @@ impl<R: FbcReal> FbcInstruction<R> {
             real_value: R::default(),
             offset1: -1,
             offset2: -1,
+            block_store: None,
             branch1: None,
             branch2: None,
         }
@@ -111,6 +117,7 @@ impl<R: FbcReal> FbcInstruction<R> {
             real_value,
             offset1: -1,
             offset2: -1,
+            block_store: None,
             branch1: None,
             branch2: None,
         }
@@ -134,6 +141,7 @@ impl<R: FbcReal> FbcInstruction<R> {
             real_value,
             offset1,
             offset2,
+            block_store: None,
             branch1: None,
             branch2: None,
         }
@@ -151,6 +159,7 @@ impl<R: FbcReal> FbcInstruction<R> {
             real_value: R::default(),
             offset1: -1,
             offset2: -1,
+            block_store: None,
             branch1: None,
             branch2: None,
         }
@@ -178,6 +187,7 @@ impl<R: FbcReal> FbcInstruction<R> {
             real_value,
             offset1,
             offset2,
+            block_store: None,
             branch1,
             branch2,
         }
@@ -213,7 +223,7 @@ impl<R: FbcReal> FbcInstruction<R> {
 ///   in `interpreter_bytecode.hh`.
 ///
 /// In C++ these are subclasses carrying a `fNumTable` vector. In Rust we model
-/// them as an auxiliary enum stored alongside the instruction in the block.
+/// them as an auxiliary enum stored inline on the instruction.
 #[derive(Clone, Debug)]
 pub enum BlockStoreData<R: FbcReal> {
     Real(Vec<R>),
@@ -231,9 +241,6 @@ pub enum BlockStoreData<R: FbcReal> {
 #[derive(Clone, Debug)]
 pub struct FbcBlock<R: FbcReal> {
     pub instructions: Vec<FbcInstruction<R>>,
-    /// Optional bulk-store data for `BlockStoreReal`/`BlockStoreInt` instructions.
-    /// Keyed by instruction index within this block.
-    pub block_store_data: Vec<(usize, BlockStoreData<R>)>,
 }
 
 impl<R: FbcReal> FbcBlock<R> {
@@ -242,7 +249,6 @@ impl<R: FbcReal> FbcBlock<R> {
     pub fn new() -> Self {
         Self {
             instructions: Vec::new(),
-            block_store_data: Vec::new(),
         }
     }
 
@@ -252,10 +258,9 @@ impl<R: FbcReal> FbcBlock<R> {
     }
 
     /// Appends a block-store instruction with associated data table.
-    pub fn push_block_store(&mut self, instr: FbcInstruction<R>, data: BlockStoreData<R>) {
-        let idx = self.instructions.len();
+    pub fn push_block_store(&mut self, mut instr: FbcInstruction<R>, data: BlockStoreData<R>) {
+        instr.block_store = Some(data);
         self.instructions.push(instr);
-        self.block_store_data.push((idx, data));
     }
 
     /// Returns `true` if the block ends with a `Return` instruction.
@@ -623,8 +628,10 @@ mod tests {
         block.push(FbcInstruction::new(FbcOpcode::Return));
 
         assert_eq!(block.len(), 2);
-        assert_eq!(block.block_store_data.len(), 1);
-        assert_eq!(block.block_store_data[0].0, 0); // index of the block-store instruction
+        assert!(matches!(
+            block.instructions[0].block_store,
+            Some(BlockStoreData::Real(_))
+        ));
     }
 
     #[test]
