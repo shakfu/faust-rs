@@ -1,14 +1,16 @@
-//! Factory-level `extern "C"` functions for `cranelift_dsp` (scaffold ABI).
+//! Factory-level `extern "C"` functions for `cranelift_dsp`.
 //!
-//! This module exports a first executable C ABI surface matching the Cranelift
-//! FFI Phase-0 decisions:
+//! This module exports the runtime factory ABI for Cranelift and currently
+//! includes:
 //! - backend-prefixed naming (`createCCranelift...`)
 //! - source creation keeps `opt_level`, omits LLVM `target`
-//! - several LLVM-only families are intentionally deferred in V1
+//! - several LLVM-only families intentionally deferred in V1
 //!
-//! The current implementation is a placeholder runtime layer: symbols exist and
-//! support null-safe lifecycle smoke tests, but do not yet invoke the Cranelift
-//! backend or real factory caching.
+//! Runtime state:
+//! - file/string constructors compile real FIR -> Cranelift JIT modules
+//! - instances can execute real `compute` entry points
+//! - signals/boxes constructors and bitcode persistence families remain deferred
+//!   or temporary and are explicitly documented.
 
 use std::ffi::{CString, c_char, c_void};
 use std::io::BufReader;
@@ -31,13 +33,12 @@ use crate::cache::{
 };
 use crate::types::{CraneliftDspFactory, alloc_c_string, alloc_factory, free_factory};
 
-/// Stable placeholder version string returned by [`getCLibFaustVersion`].
-const CRANELIFT_FFI_SCAFFOLD_VERSION: &str =
-    concat!("faust-rs-cranelift-ffi/", env!("CARGO_PKG_VERSION"));
+/// Stable version string returned by [`getCLibFaustVersion`].
+const CRANELIFT_FFI_VERSION: &str = concat!("faust-rs-cranelift-ffi/", env!("CARGO_PKG_VERSION"));
 
 /// Returns the Faust library version string.
 ///
-/// This is a process-lifetime static C string in the scaffold implementation.
+/// This is a process-lifetime static C string.
 ///
 /// # Safety
 /// The returned pointer is process-static and must not be freed or mutated.
@@ -46,13 +47,11 @@ pub extern "C" fn getCLibFaustVersion() -> *const c_char {
     use std::sync::OnceLock;
     static VERSION_C: OnceLock<CString> = OnceLock::new();
     VERSION_C
-        .get_or_init(|| {
-            CString::new(CRANELIFT_FFI_SCAFFOLD_VERSION).expect("version contains no NUL")
-        })
+        .get_or_init(|| CString::new(CRANELIFT_FFI_VERSION).expect("version contains no NUL"))
         .as_ptr()
 }
 
-/// Create a Cranelift DSP factory from a Faust source file (scaffold).
+/// Create a Cranelift DSP factory from a Faust source file.
 ///
 /// # Safety
 /// - `filename` must be a valid null-terminated C string.
@@ -95,7 +94,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
     }
 }
 
-/// Create a Cranelift DSP factory from a Faust source string (scaffold).
+/// Create a Cranelift DSP factory from a Faust source string.
 ///
 /// # Safety
 /// - `dsp_content` must be a valid null-terminated C string.
@@ -315,7 +314,7 @@ pub unsafe extern "C" fn getCCraneliftDSPFactorySHAKey(
     }
 }
 
-/// Return the expanded DSP code as a heap C string (scaffold placeholder).
+/// Return the expanded DSP code as a heap C string.
 ///
 /// # Safety
 /// `factory` must be a valid factory pointer.
@@ -347,10 +346,10 @@ pub unsafe extern "C" fn getCCraneliftDSPFactoryCompileOptions(
     }
 }
 
-/// Return the factory library dependency list (scaffold: empty static array).
+/// Return the factory library dependency list.
 ///
 /// # Safety
-/// `factory` may be null; it is ignored by the scaffold.
+/// `factory` may be null; it is ignored by the current implementation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getCCraneliftDSPFactoryLibraryList(
     _factory: *mut CraneliftDspFactory,
@@ -358,10 +357,10 @@ pub unsafe extern "C" fn getCCraneliftDSPFactoryLibraryList(
     null_c_string_array()
 }
 
-/// Return include pathnames used by the factory (scaffold: empty static array).
+/// Return include pathnames used by the factory.
 ///
 /// # Safety
-/// `factory` may be null; it is ignored by the scaffold.
+/// `factory` may be null; it is ignored by the current implementation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getCCraneliftDSPFactoryIncludePathnames(
     _factory: *mut CraneliftDspFactory,
@@ -369,10 +368,10 @@ pub unsafe extern "C" fn getCCraneliftDSPFactoryIncludePathnames(
     null_c_string_array()
 }
 
-/// Return warning messages produced during compilation (scaffold: empty static array).
+/// Return warning messages produced during compilation.
 ///
 /// # Safety
-/// `factory` may be null; it is ignored by the scaffold.
+/// `factory` may be null; it is ignored by the current implementation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getCCraneliftDSPFactoryWarningMessages(
     _factory: *mut CraneliftDspFactory,
@@ -380,7 +379,7 @@ pub unsafe extern "C" fn getCCraneliftDSPFactoryWarningMessages(
     null_c_string_array()
 }
 
-/// Read a Cranelift factory from bitcode in memory (symbol present, not implemented).
+/// Read a Cranelift factory from bitcode in memory.
 ///
 /// # Safety
 /// `error_msg` follows the standard Faust C API error-buffer contract.
@@ -411,7 +410,7 @@ pub unsafe extern "C" fn readCCraneliftDSPFactoryFromBitcode(
     }
 }
 
-/// Write a Cranelift factory to a backend bitcode string (symbol present, not implemented).
+/// Write a Cranelift factory to a backend bitcode string.
 ///
 /// # Safety
 /// `factory` may be null.
@@ -427,7 +426,7 @@ pub unsafe extern "C" fn writeCCraneliftDSPFactoryToBitcode(
     }
 }
 
-/// Read a Cranelift factory from a bitcode file (symbol present, not implemented).
+/// Read a Cranelift factory from a bitcode file.
 ///
 /// # Safety
 /// `error_msg` follows the standard Faust C API error-buffer contract.
@@ -468,7 +467,7 @@ pub unsafe extern "C" fn readCCraneliftDSPFactoryFromBitcodeFile(
     }
 }
 
-/// Write a Cranelift factory to a bitcode file (symbol present, not implemented).
+/// Write a Cranelift factory to a bitcode file.
 ///
 /// # Safety
 /// `factory` and `bit_code_path` may be null.
@@ -491,7 +490,7 @@ pub unsafe extern "C" fn writeCCraneliftDSPFactoryToBitcodeFile(
 
 /// Enable multi-thread-safe factory mode.
 ///
-/// The scaffold toggles an internal compatibility flag and returns `true`.
+/// Returns `true` when multi-thread-safe cache mode is enabled.
 ///
 /// # Safety
 /// Callers must coordinate access mode transitions across all foreign threads.
@@ -500,7 +499,7 @@ pub extern "C" fn startMTDSPFactories() -> bool {
     start_mt()
 }
 
-/// Disable multi-thread-safe factory mode (compatibility flag only).
+/// Disable multi-thread-safe factory mode.
 ///
 /// # Safety
 /// Callers must coordinate access mode transitions across all foreign threads.
@@ -519,13 +518,13 @@ pub unsafe extern "C" fn freeCMemory(ptr: *mut c_void) {
     unsafe { free_c_memory_c_string_only(ptr) }
 }
 
-/// Scaffold-only factory status string kept for unit tests.
+/// Factory runtime status string kept for module-presence tests.
 #[must_use]
 pub fn factory_status() -> &'static str {
-    "cranelift-ffi factory scaffold"
+    "cranelift-ffi factory runtime"
 }
 
-/// Build a placeholder factory from a source file path.
+/// Build one factory object from a source file path and compiled backend artifacts.
 fn build_scaffold_factory_from_file(
     filename: &str,
     argv: &[String],
@@ -542,7 +541,7 @@ fn build_scaffold_factory_from_file(
     build_scaffold_factory_common(source_name, &dsp_code, argv, opt_level, jit, sidecar)
 }
 
-/// Build a placeholder factory from inline DSP source.
+/// Build one factory object from inline DSP source and compiled backend artifacts.
 fn build_scaffold_factory_from_source(
     name_app: &str,
     dsp_content: &str,
@@ -554,7 +553,7 @@ fn build_scaffold_factory_from_source(
     build_scaffold_factory_common(name_app, dsp_content, argv, opt_level, jit, sidecar)
 }
 
-/// Shared placeholder factory builder.
+/// Shared factory object builder.
 fn build_scaffold_factory_common(
     name: &str,
     dsp_code: &str,
@@ -574,12 +573,7 @@ fn build_scaffold_factory_common(
             argv.join(" ")
         )
     };
-    let sha_key = format!(
-        "cranelift-scaffold:{}:{}:{}",
-        name,
-        opt_level,
-        argv.join("\x1f")
-    );
+    let sha_key = format!("cranelift:{}:{}:{}", name, opt_level, argv.join("\x1f"));
     let (num_inputs, num_outputs) = sidecar
         .as_ref()
         .map_or((0, 0), |f| (f.num_inputs, f.num_outputs));
@@ -589,8 +583,9 @@ fn build_scaffold_factory_common(
         dsp_code: dsp_code.to_owned(),
         compile_options,
         json: format!(
-            "{{\"name\":\"{}\",\"backend\":\"cranelift\",\"status\":\"scaffold\",\"compute_body_lowered\":{}}}",
+            "{{\"name\":\"{}\",\"backend\":\"cranelift\",\"jit_compiled\":{},\"compute_body_lowered\":{}}}",
             json_escape(name),
+            if jit.is_some() { "true" } else { "false" },
             if compute_body_lowered {
                 "true"
             } else {
@@ -725,7 +720,7 @@ fn collect_search_paths_for_file(path: &Path, argv: &[String]) -> Vec<PathBuf> {
     paths
 }
 
-/// Encodes a scaffold factory into a temporary text payload for the bitcode family.
+/// Encodes one factory into the current temporary text payload for the bitcode family.
 ///
 /// This is a placeholder serialization format used only until real Cranelift
 /// backend serialization is implemented.
@@ -734,7 +729,7 @@ fn encode_scaffold_bitcode(factory: &CraneliftDspFactory) -> String {
         s.replace('\\', "\\\\").replace('\n', "\\n")
     }
     format!(
-        "CRANELIFT_FFI_SCAFFOLD_V1\nname={}\nsha={}\ninputs={}\noutputs={}\ncompile_options={}\ndsp_code={}\njson={}\n",
+        "CRANELIFT_FFI_V1_TEMP\nname={}\nsha={}\ninputs={}\noutputs={}\ncompile_options={}\ndsp_code={}\njson={}\n",
         esc(&factory.name),
         esc(&factory.sha_key),
         factory.num_inputs,
@@ -745,7 +740,7 @@ fn encode_scaffold_bitcode(factory: &CraneliftDspFactory) -> String {
     )
 }
 
-/// Decodes the temporary scaffold bitcode payload back into a factory scaffold.
+/// Decodes the current temporary bitcode payload back into a factory object.
 fn decode_scaffold_bitcode(text: &str) -> Result<CraneliftDspFactory, String> {
     fn unesc(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
@@ -770,8 +765,8 @@ fn decode_scaffold_bitcode(text: &str) -> Result<CraneliftDspFactory, String> {
 
     let mut lines = text.lines();
     match lines.next() {
-        Some("CRANELIFT_FFI_SCAFFOLD_V1") => {}
-        Some(_) => return Err("unsupported cranelift scaffold bitcode format".to_owned()),
+        Some("CRANELIFT_FFI_V1_TEMP") => {}
+        Some(_) => return Err("unsupported temporary cranelift bitcode format".to_owned()),
         None => return Err("empty bitcode payload".to_owned()),
     }
 
@@ -872,7 +867,7 @@ mod tests {
 
     #[test]
     fn factory_scaffold_status_is_stable() {
-        assert_eq!(factory_status(), "cranelift-ffi factory scaffold");
+        assert_eq!(factory_status(), "cranelift-ffi factory runtime");
     }
 
     #[test]
@@ -884,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn create_factory_from_string_scaffold_roundtrip_queries() {
+    fn create_factory_from_string_runtime_roundtrip_queries() {
         let name = c"mydsp";
         let src = c"process = _;";
         let args = [c"-vec"];
@@ -1006,7 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_bitcode_roundtrip_in_memory() {
+    fn temporary_bitcode_roundtrip_in_memory() {
         let name = c"bitcode";
         let src = c"process = _;";
         let mut err = [0_i8; 4096];
@@ -1037,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_bitcode_roundtrip_via_file() {
+    fn temporary_bitcode_roundtrip_via_file() {
         let name = c"bitfile";
         let src = c"process = _;";
         let mut err = [0_i8; 4096];
@@ -1078,7 +1073,7 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_bitcode_read_rejects_invalid_format() {
+    fn temporary_bitcode_read_rejects_invalid_format() {
         let bad = c"NOT_A_CRANELIFT_FORMAT";
         let mut err = [0_i8; 4096];
         let restored =

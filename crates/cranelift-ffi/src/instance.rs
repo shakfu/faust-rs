@@ -69,7 +69,7 @@ pub unsafe extern "C" fn deleteCCraneliftDSPInstance(dsp: *mut CraneliftDspInsta
     }
 }
 
-/// Clone a Cranelift DSP instance (scaffold heap/state clone).
+/// Clone a Cranelift DSP instance (state + sidecar heaps).
 ///
 /// # Safety
 /// `dsp` must be a valid non-null instance pointer.
@@ -138,7 +138,7 @@ pub unsafe extern "C" fn getNumOutputsCCraneliftDSPInstance(
     }
 }
 
-/// Return the current sample rate recorded in the scaffold instance.
+/// Return the current sample rate recorded in the instance.
 ///
 /// # Safety
 /// `dsp` must be a valid instance pointer.
@@ -172,7 +172,7 @@ pub unsafe extern "C" fn initCCraneliftDSPInstance(
     }
 }
 
-/// Instance init entry point (scaffold records sample rate and runs substeps).
+/// Instance init entry point (runs class-init/constants/reset/clear sequence).
 ///
 /// # Safety
 /// `dsp` must be a valid instance pointer.
@@ -192,7 +192,7 @@ pub unsafe extern "C" fn instanceInitCCraneliftDSPInstance(
     }
 }
 
-/// Record the sample rate in the scaffold instance.
+/// Record the sample rate in the instance and run sidecar init block.
 ///
 /// # Safety
 /// `dsp` must be a valid instance pointer.
@@ -222,7 +222,7 @@ pub unsafe extern "C" fn instanceConstantsCCraneliftDSPInstance(
     }
 }
 
-/// Reset UI state (scaffold no-op).
+/// Reset UI state by executing sidecar reset-ui instructions when available.
 ///
 /// # Safety
 /// `dsp` must be a valid instance pointer.
@@ -247,7 +247,7 @@ pub unsafe extern "C" fn instanceResetUserInterfaceCCraneliftDSPInstance(
     }
 }
 
-/// Clear DSP state (scaffold resets `cycle` counter).
+/// Clear DSP state and reset cycle counter.
 ///
 /// # Safety
 /// `dsp` must be a valid instance pointer.
@@ -268,10 +268,10 @@ pub unsafe extern "C" fn instanceClearCCraneliftDSPInstance(dsp: *mut CraneliftD
     }
 }
 
-/// Trigger UI callbacks for the instance (scaffold currently emits no widgets).
+/// Trigger UI callbacks for the instance from sidecar UI instruction lists.
 ///
 /// # Safety
-/// `dsp` and `ui` may be null; the scaffold performs no dereference when null.
+/// `dsp` and `ui` may be null; null values are ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn buildUserInterfaceCCraneliftDSPInstance(
     dsp: *mut CraneliftDspInstance,
@@ -294,7 +294,7 @@ pub unsafe extern "C" fn buildUserInterfaceCCraneliftDSPInstance(
     }
 }
 
-/// Trigger metadata callbacks for the instance (scaffold emits one placeholder pair).
+/// Trigger metadata callbacks for the instance.
 ///
 /// # Safety
 /// `meta` may be null. If non-null and `declare` is set, callback contract is
@@ -337,11 +337,11 @@ pub unsafe extern "C" fn metadataCCraneliftDSPInstance(
     }
 }
 
-/// Compute audio for one block (scaffold no-op; increments internal cycle count).
+/// Compute audio for one block by invoking the finalized Cranelift JIT entry.
 ///
 /// # Safety
-/// `dsp` must be a valid instance pointer. Input/output buffers are ignored in
-/// the scaffold implementation.
+/// `dsp` must be a valid instance pointer and `inputs`/`outputs` must follow
+/// the standard Faust `FAUSTFLOAT**` contract for `count` frames.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn computeCCraneliftDSPInstance(
     dsp: *mut CraneliftDspInstance,

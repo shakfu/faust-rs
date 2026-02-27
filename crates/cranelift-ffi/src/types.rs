@@ -1,9 +1,10 @@
 //! Opaque FFI types and allocation helpers for `cranelift_dsp`.
 //!
-//! This is the first executable FFI scaffold layer for the Cranelift backend:
-//! it provides heap-owned opaque pointers and utility helpers used by the
-//! exported C ABI functions while the real JIT runtime is still under
-//! development.
+//! This module provides the runtime ownership layer used by exported C ABI
+//! functions:
+//! - heap-owned opaque factory/instance pointers,
+//! - per-instance aligned `dsp*` state buffers,
+//! - shared callback glue structs (`UIGlue`, `MetaGlue`).
 //!
 //! # API mapping status
 //! - External compatibility surface: `adapted` during scaffolding.
@@ -34,13 +35,13 @@ pub use utils::MetaGlue;
 pub struct CraneliftDspFactory {
     /// Display name (`declare name`, file stem, or `name_app` fallback).
     pub(crate) name: String,
-    /// Placeholder factory hash key (stable enough for tests, not final parity).
+    /// Factory hash key used by the cache layer.
     pub(crate) sha_key: String,
-    /// Expanded DSP source placeholder text.
+    /// Expanded DSP source text (or source marker for file-based creation).
     pub(crate) dsp_code: String,
     /// Compiled options summary string.
     pub(crate) compile_options: String,
-    /// Placeholder JSON UI/metadata payload.
+    /// JSON UI/metadata payload exposed by the C API query family.
     pub(crate) json: String,
     /// Compiled Cranelift JIT module (present for real file/string compilation paths).
     pub(crate) compiled_jit: Option<JitDspModule>,
@@ -51,9 +52,9 @@ pub struct CraneliftDspFactory {
     pub(crate) interp_sidecar: Option<FbcDspFactory<FaustFloat>>,
     /// Whether the backend lowered the FIR `compute` body (vs stub fallback).
     pub(crate) compute_body_lowered: bool,
-    /// Audio layout (placeholder until real lowering/JIT metadata is wired).
+    /// Audio input count.
     pub(crate) num_inputs: i32,
-    /// Audio layout (placeholder until real lowering/JIT metadata is wired).
+    /// Audio output count.
     pub(crate) num_outputs: i32,
 }
 
@@ -66,7 +67,7 @@ pub struct CraneliftDspInstance {
     pub(crate) sample_rate: i32,
     /// Whether `init()` has been called.
     pub(crate) initialized: bool,
-    /// Number of `compute()` calls observed (scaffold diagnostic state).
+    /// Number of `compute()` calls observed.
     pub(crate) cycle: usize,
     /// Owned backend `dsp*` state allocation passed to the JIT `compute` entry.
     pub(crate) dsp_state: DspStateBuffer,
@@ -158,7 +159,7 @@ impl Drop for DspStateBuffer {
     }
 }
 
-/// Boxes a Cranelift factory scaffold and returns an owning raw pointer.
+/// Boxes a Cranelift factory and returns an owning raw pointer.
 #[must_use]
 pub(crate) fn alloc_factory(factory: CraneliftDspFactory) -> *mut CraneliftDspFactory {
     utils::alloc_opaque(factory)
@@ -173,7 +174,7 @@ pub(crate) unsafe fn free_factory(ptr: *mut CraneliftDspFactory) {
     unsafe { utils::free_opaque(ptr) }
 }
 
-/// Boxes a Cranelift instance scaffold and returns an owning raw pointer.
+/// Boxes a Cranelift instance and returns an owning raw pointer.
 #[must_use]
 pub(crate) fn alloc_instance(
     factory: *const CraneliftDspFactory,
