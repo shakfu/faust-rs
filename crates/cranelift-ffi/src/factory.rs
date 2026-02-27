@@ -13,6 +13,7 @@
 //! - bitcode persistence is source/options-backed and recompiles a runnable JIT
 //!   factory on load.
 
+use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
 use std::io::BufReader;
 use std::os::raw::c_int;
@@ -143,14 +144,17 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
             let compiled = preflight_compile_source_to_cranelift(name_app, dsp_content, opt_level)?;
             let sidecar = compile_interp_sidecar_from_source(name_app, dsp_content, args)?;
-            Ok(build_scaffold_factory_from_source(
-                name_app,
-                dsp_content,
-                args,
-                opt_level,
+            Ok(build_scaffold_factory_common(
+                FactoryBuildSpec {
+                    name: name_app,
+                    dsp_code: dsp_content,
+                    argv: args,
+                    opt_level,
+                    semantic_fingerprint: &compiled.fir_dump,
+                    source_is_faust: true,
+                },
                 Some(compiled.jit),
                 Some(sidecar),
-                &compiled.fir_dump,
             ))
         })
     }
@@ -201,14 +205,17 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromSignals(
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
             let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
             let sidecar = compile_interp_sidecar_from_fir(source_name, &fir)?;
-            Ok(build_scaffold_factory_from_source(
-                source_name,
-                &fir_dump,
-                args,
-                opt_level,
+            Ok(build_scaffold_factory_common(
+                FactoryBuildSpec {
+                    name: source_name,
+                    dsp_code: &fir_dump,
+                    argv: args,
+                    opt_level,
+                    semantic_fingerprint: &fir_dump,
+                    source_is_faust: false,
+                },
                 Some(jit),
                 Some(sidecar),
-                &fir_dump,
             ))
         })
     }
@@ -255,14 +262,17 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
             let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
             let sidecar = compile_interp_sidecar_from_fir(source_name, &fir)?;
-            Ok(build_scaffold_factory_from_source(
-                source_name,
-                &fir_dump,
-                args,
-                opt_level,
+            Ok(build_scaffold_factory_common(
+                FactoryBuildSpec {
+                    name: source_name,
+                    dsp_code: &fir_dump,
+                    argv: args,
+                    opt_level,
+                    semantic_fingerprint: &fir_dump,
+                    source_is_faust: false,
+                },
                 Some(jit),
                 Some(sidecar),
-                &fir_dump,
             ))
         })
     }
@@ -455,7 +465,10 @@ pub unsafe extern "C" fn getCCraneliftDSPFactoryWarningMessages(
     null_c_string_array()
 }
 
-/// Read a Cranelift factory from bitcode in memory.
+/// Read a Cranelift factory from source-backed bitcode in memory.
+///
+/// The payload contains serialized source/options and recompiles a runnable JIT
+/// factory on load.
 ///
 /// # Safety
 /// `error_msg` follows the standard Faust C API error-buffer contract.
@@ -472,7 +485,7 @@ pub unsafe extern "C" fn readCCraneliftDSPFactoryFromBitcode(
                 return std::ptr::null_mut();
             }
         };
-        match decode_scaffold_bitcode(text) {
+        match decode_factory_bitcode(text) {
             Ok(factory) => {
                 let ptr = alloc_factory(factory);
                 cache_insert(&(*ptr).sha_key, ptr);
@@ -486,7 +499,10 @@ pub unsafe extern "C" fn readCCraneliftDSPFactoryFromBitcode(
     }
 }
 
-/// Write a Cranelift factory to a backend bitcode string.
+/// Write a Cranelift factory to a source-backed bitcode string.
+///
+/// Returns null when the factory is not source-backed (for example created
+/// from signal/box handles).
 ///
 /// # Safety
 /// `factory` may be null.
@@ -498,11 +514,14 @@ pub unsafe extern "C" fn writeCCraneliftDSPFactoryToBitcode(
         if factory.is_null() {
             return std::ptr::null_mut();
         }
-        alloc_c_string(&encode_scaffold_bitcode(&*factory))
+        match encode_factory_bitcode(&*factory) {
+            Ok(payload) => alloc_c_string(&payload),
+            Err(_) => std::ptr::null_mut(),
+        }
     }
 }
 
-/// Read a Cranelift factory from a bitcode file.
+/// Read a Cranelift factory from a source-backed bitcode file.
 ///
 /// # Safety
 /// `error_msg` follows the standard Faust C API error-buffer contract.
@@ -529,7 +548,7 @@ pub unsafe extern "C" fn readCCraneliftDSPFactoryFromBitcodeFile(
                 return std::ptr::null_mut();
             }
         };
-        match decode_scaffold_bitcode(&text) {
+        match decode_factory_bitcode(&text) {
             Ok(factory) => {
                 let ptr = alloc_factory(factory);
                 cache_insert(&(*ptr).sha_key, ptr);
@@ -543,7 +562,7 @@ pub unsafe extern "C" fn readCCraneliftDSPFactoryFromBitcodeFile(
     }
 }
 
-/// Write a Cranelift factory to a bitcode file.
+/// Write a Cranelift factory to a source-backed bitcode file.
 ///
 /// # Safety
 /// `factory` and `bit_code_path` may be null.
@@ -560,7 +579,11 @@ pub unsafe extern "C" fn writeCCraneliftDSPFactoryToBitcodeFile(
             Ok(s) => s,
             Err(_) => return false,
         };
-        std::fs::write(path, encode_scaffold_bitcode(&*factory)).is_ok()
+        let payload = match encode_factory_bitcode(&*factory) {
+            Ok(payload) => payload,
+            Err(_) => return false,
+        };
+        std::fs::write(path, payload).is_ok()
     }
 }
 
@@ -600,6 +623,15 @@ pub fn factory_status() -> &'static str {
     "cranelift-ffi factory runtime"
 }
 
+struct FactoryBuildSpec<'a> {
+    name: &'a str,
+    dsp_code: &'a str,
+    argv: &'a [String],
+    opt_level: c_int,
+    semantic_fingerprint: &'a str,
+    source_is_faust: bool,
+}
+
 /// Build one factory object from a source file path and compiled backend artifacts.
 fn build_scaffold_factory_from_file(
     filename: &str,
@@ -616,47 +648,33 @@ fn build_scaffold_factory_from_file(
         .filter(|s| !s.is_empty())
         .unwrap_or("FaustDSP");
     build_scaffold_factory_common(
-        source_name,
-        dsp_source,
-        argv,
-        opt_level,
+        FactoryBuildSpec {
+            name: source_name,
+            dsp_code: dsp_source,
+            argv,
+            opt_level,
+            semantic_fingerprint,
+            source_is_faust: true,
+        },
         jit,
         sidecar,
-        semantic_fingerprint,
-    )
-}
-
-/// Build one factory object from inline DSP source and compiled backend artifacts.
-fn build_scaffold_factory_from_source(
-    name_app: &str,
-    dsp_content: &str,
-    argv: &[String],
-    opt_level: c_int,
-    jit: Option<JitDspModule>,
-    sidecar: Option<FbcDspFactory<f32>>,
-    semantic_fingerprint: &str,
-) -> CraneliftDspFactory {
-    build_scaffold_factory_common(
-        name_app,
-        dsp_content,
-        argv,
-        opt_level,
-        jit,
-        sidecar,
-        semantic_fingerprint,
     )
 }
 
 /// Shared factory object builder.
 fn build_scaffold_factory_common(
-    name: &str,
-    dsp_code: &str,
-    argv: &[String],
-    opt_level: c_int,
+    spec: FactoryBuildSpec<'_>,
     jit: Option<JitDspModule>,
     sidecar: Option<FbcDspFactory<f32>>,
-    semantic_fingerprint: &str,
 ) -> CraneliftDspFactory {
+    let FactoryBuildSpec {
+        name,
+        dsp_code,
+        argv,
+        opt_level,
+        semantic_fingerprint,
+        source_is_faust,
+    } = spec;
     let compute_body_lowered = jit
         .as_ref()
         .is_some_and(codegen::backends::cranelift::JitDspModule::compute_body_lowered);
@@ -692,6 +710,10 @@ fn build_scaffold_factory_common(
                 "false"
             }
         ),
+        source_is_faust,
+        source_name: name.to_owned(),
+        compile_argv: argv.to_vec(),
+        opt_level,
         compiled_jit: jit,
         interp_sidecar: sidecar,
         compute_body_lowered,
@@ -858,93 +880,136 @@ fn collect_search_paths_for_file(path: &Path, argv: &[String]) -> Vec<PathBuf> {
     paths
 }
 
-/// Encodes one factory into the current temporary text payload for the bitcode family.
-///
-/// This is a placeholder serialization format used only until real Cranelift
-/// backend serialization is implemented.
-fn encode_scaffold_bitcode(factory: &CraneliftDspFactory) -> String {
-    fn esc(s: &str) -> String {
-        s.replace('\\', "\\\\").replace('\n', "\\n")
-    }
-    format!(
-        "CRANELIFT_FFI_V1_TEMP\nname={}\nsha={}\ninputs={}\noutputs={}\ncompile_options={}\ndsp_code={}\njson={}\n",
-        esc(&factory.name),
-        esc(&factory.sha_key),
-        factory.num_inputs,
-        factory.num_outputs,
-        esc(&factory.compile_options),
-        esc(&factory.dsp_code),
-        esc(&factory.json),
-    )
+fn esc_bitcode_field(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\n', "\\n")
 }
 
-/// Decodes the current temporary bitcode payload back into a factory object.
-fn decode_scaffold_bitcode(text: &str) -> Result<CraneliftDspFactory, String> {
-    fn unesc(s: &str) -> String {
-        let mut out = String::with_capacity(s.len());
-        let mut it = s.chars();
-        while let Some(ch) = it.next() {
-            if ch == '\\' {
-                match it.next() {
-                    Some('n') => out.push('\n'),
-                    Some('\\') => out.push('\\'),
-                    Some(other) => {
-                        out.push('\\');
-                        out.push(other);
-                    }
-                    None => out.push('\\'),
+fn unesc_bitcode_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(ch) = it.next() {
+        if ch == '\\' {
+            match it.next() {
+                Some('n') => out.push('\n'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
                 }
-            } else {
-                out.push(ch);
+                None => out.push('\\'),
             }
+        } else {
+            out.push(ch);
         }
-        out
     }
+    out
+}
 
+/// Encodes one factory into the Cranelift source-backed bitcode payload.
+///
+/// The payload stores enough information to recompile a runnable JIT module on
+/// load while preserving factory identity fields (`sha_key`, `compile_options`).
+fn encode_factory_bitcode(factory: &CraneliftDspFactory) -> Result<String, String> {
+    if !factory.source_is_faust {
+        return Err(
+            "bitcode write is currently supported only for source-backed factories".to_owned(),
+        );
+    }
+    let mut out = String::from("CRANELIFT_FFI_V2_SOURCE\n");
+    out.push_str(&format!(
+        "name={}\n",
+        esc_bitcode_field(&factory.source_name)
+    ));
+    out.push_str(&format!("sha={}\n", esc_bitcode_field(&factory.sha_key)));
+    out.push_str(&format!(
+        "compile_options={}\n",
+        esc_bitcode_field(&factory.compile_options)
+    ));
+    out.push_str(&format!("opt_level={}\n", factory.opt_level));
+    out.push_str(&format!("argc={}\n", factory.compile_argv.len()));
+    for (idx, arg) in factory.compile_argv.iter().enumerate() {
+        out.push_str(&format!("arg{idx}={}\n", esc_bitcode_field(arg)));
+    }
+    out.push_str(&format!(
+        "source={}\n",
+        esc_bitcode_field(&factory.dsp_code)
+    ));
+    Ok(out)
+}
+
+/// Decodes a Cranelift source-backed bitcode payload and rebuilds a runnable
+/// JIT factory.
+fn decode_factory_bitcode(text: &str) -> Result<CraneliftDspFactory, String> {
     let mut lines = text.lines();
     match lines.next() {
-        Some("CRANELIFT_FFI_V1_TEMP") => {}
-        Some(_) => return Err("unsupported temporary cranelift bitcode format".to_owned()),
+        Some("CRANELIFT_FFI_V2_SOURCE") => {}
+        Some(_) => return Err("unsupported cranelift bitcode format".to_owned()),
         None => return Err("empty bitcode payload".to_owned()),
     }
 
-    let mut name = None;
-    let mut sha_key = None;
-    let mut compile_options = None;
-    let mut dsp_code = None;
-    let mut json = None;
-    let mut num_inputs = None;
-    let mut num_outputs = None;
-
+    let mut fields: HashMap<String, String> = HashMap::new();
     for line in lines {
         let Some((k, v)) = line.split_once('=') else {
             continue;
         };
-        match k {
-            "name" => name = Some(unesc(v)),
-            "sha" => sha_key = Some(unesc(v)),
-            "compile_options" => compile_options = Some(unesc(v)),
-            "dsp_code" => dsp_code = Some(unesc(v)),
-            "json" => json = Some(unesc(v)),
-            "inputs" => num_inputs = v.parse::<i32>().ok(),
-            "outputs" => num_outputs = v.parse::<i32>().ok(),
-            _ => {}
-        }
+        fields.insert(k.to_owned(), unesc_bitcode_field(v));
     }
 
-    Ok(CraneliftDspFactory {
-        name: name.ok_or_else(|| "missing 'name' field".to_owned())?,
-        sha_key: sha_key.ok_or_else(|| "missing 'sha' field".to_owned())?,
-        dsp_code: dsp_code.ok_or_else(|| "missing 'dsp_code' field".to_owned())?,
-        compile_options: compile_options
-            .ok_or_else(|| "missing 'compile_options' field".to_owned())?,
-        json: json.ok_or_else(|| "missing 'json' field".to_owned())?,
-        compiled_jit: None,
-        interp_sidecar: None,
-        compute_body_lowered: false,
-        num_inputs: num_inputs.ok_or_else(|| "missing 'inputs' field".to_owned())?,
-        num_outputs: num_outputs.ok_or_else(|| "missing 'outputs' field".to_owned())?,
-    })
+    let name = fields
+        .remove("name")
+        .ok_or_else(|| "missing 'name' field".to_owned())?;
+    let expected_sha = fields
+        .remove("sha")
+        .ok_or_else(|| "missing 'sha' field".to_owned())?;
+    let expected_compile_options = fields
+        .remove("compile_options")
+        .ok_or_else(|| "missing 'compile_options' field".to_owned())?;
+    let source = fields
+        .remove("source")
+        .ok_or_else(|| "missing 'source' field".to_owned())?;
+    let opt_level = fields
+        .remove("opt_level")
+        .ok_or_else(|| "missing 'opt_level' field".to_owned())?
+        .parse::<c_int>()
+        .map_err(|e| format!("invalid 'opt_level' field: {e}"))?;
+    let argc = fields
+        .remove("argc")
+        .ok_or_else(|| "missing 'argc' field".to_owned())?
+        .parse::<usize>()
+        .map_err(|e| format!("invalid 'argc' field: {e}"))?;
+    let mut argv = Vec::with_capacity(argc);
+    for idx in 0..argc {
+        let key = format!("arg{idx}");
+        let arg = fields
+            .remove(&key)
+            .ok_or_else(|| format!("missing '{key}' field"))?;
+        argv.push(arg);
+    }
+
+    let compiled = preflight_compile_source_to_cranelift(&name, &source, opt_level)?;
+    let sidecar = compile_interp_sidecar_from_source(&name, &source, &argv)?;
+    let rebuilt = build_scaffold_factory_common(
+        FactoryBuildSpec {
+            name: &name,
+            dsp_code: &source,
+            argv: &argv,
+            opt_level,
+            semantic_fingerprint: &compiled.fir_dump,
+            source_is_faust: true,
+        },
+        Some(compiled.jit),
+        Some(sidecar),
+    );
+    if rebuilt.sha_key != expected_sha {
+        return Err(format!(
+            "bitcode SHA mismatch: expected '{}', rebuilt '{}'",
+            expected_sha, rebuilt.sha_key
+        ));
+    }
+    if rebuilt.compile_options != expected_compile_options {
+        return Err("bitcode compile options mismatch after rebuild".to_owned());
+    }
+    Ok(rebuilt)
 }
 
 /// Write an error message to a standard 4096-byte Faust error buffer.
@@ -1154,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn temporary_bitcode_roundtrip_in_memory() {
+    fn source_backed_bitcode_roundtrip_in_memory() {
         let _guard = test_guard();
         let name = c"bitcode";
         let src = c"process = _;";
@@ -1177,6 +1242,11 @@ mod tests {
         let restored =
             unsafe { readCCraneliftDSPFactoryFromBitcode(bitcode.cast_const(), err.as_mut_ptr()) };
         assert!(!restored.is_null());
+        unsafe {
+            assert!((*restored).compiled_jit.is_some());
+            assert_eq!((*restored).sha_key, (*factory).sha_key);
+            assert_eq!((*restored).compile_options, (*factory).compile_options);
+        }
 
         unsafe {
             freeCMemory(bitcode.cast());
@@ -1186,7 +1256,7 @@ mod tests {
     }
 
     #[test]
-    fn temporary_bitcode_roundtrip_via_file() {
+    fn source_backed_bitcode_roundtrip_via_file() {
         let _guard = test_guard();
         let name = c"bitfile";
         let src = c"process = _;";
@@ -1219,6 +1289,11 @@ mod tests {
         let restored =
             unsafe { readCCraneliftDSPFactoryFromBitcodeFile(path_c.as_ptr(), err.as_mut_ptr()) };
         assert!(!restored.is_null());
+        unsafe {
+            assert!((*restored).compiled_jit.is_some());
+            assert_eq!((*restored).sha_key, (*factory).sha_key);
+            assert_eq!((*restored).compile_options, (*factory).compile_options);
+        }
 
         let _ = std::fs::remove_file(&path);
         unsafe {
@@ -1228,7 +1303,7 @@ mod tests {
     }
 
     #[test]
-    fn temporary_bitcode_read_rejects_invalid_format() {
+    fn source_backed_bitcode_read_rejects_invalid_format() {
         let _guard = test_guard();
         let bad = c"NOT_A_CRANELIFT_FORMAT";
         let mut err = [0_i8; 4096];

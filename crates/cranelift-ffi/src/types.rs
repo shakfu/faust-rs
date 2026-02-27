@@ -43,6 +43,17 @@ pub struct CraneliftDspFactory {
     pub(crate) compile_options: String,
     /// JSON UI/metadata payload exposed by the C API query family.
     pub(crate) json: String,
+    /// Whether `dsp_code` contains canonical Faust source text.
+    ///
+    /// When this is `false`, bitcode persistence currently cannot rebuild a
+    /// runnable factory because no FIR-text parser exists yet in this port.
+    pub(crate) source_is_faust: bool,
+    /// Canonical source/module name used for source-string compilation.
+    pub(crate) source_name: String,
+    /// Original FFI compile `argv` options.
+    pub(crate) compile_argv: Vec<String>,
+    /// Original FFI compile optimization level.
+    pub(crate) opt_level: i32,
     /// Compiled Cranelift JIT module (present for real file/string compilation paths).
     pub(crate) compiled_jit: Option<JitDspModule>,
     /// Optional interpreter sidecar used to dispatch UI/meta callback instructions.
@@ -232,6 +243,10 @@ mod tests {
             dsp_code: "process=_;".into(),
             compile_options: "-vec 0".into(),
             json: "{}".into(),
+            source_is_faust: true,
+            source_name: "n".into(),
+            compile_argv: vec!["-vec".into()],
+            opt_level: 0,
             compiled_jit: None,
             interp_sidecar: None,
             compute_body_lowered: false,
