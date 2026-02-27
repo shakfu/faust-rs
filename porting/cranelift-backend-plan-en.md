@@ -599,6 +599,18 @@ Then expand to:
 This section is the concrete completion plan from the current codebase state.
 Each step is intentionally commit-sized and has strict pass criteria.
 
+Execution status snapshot (2026-02-27):
+
+- Step A1: `done`
+- Step A2: `done`
+- Step B1: `done` (signals/boxes constructors implemented through `box-ffi` handle bridge)
+- Step B2: `done` (source-backed bitcode rebuild contract)
+- Step C1: `done`
+- Step C2: `done` (strict subset mode + validation gate wiring)
+- Step D1: `adapted` (runtime differential smoke implemented for `rep_01`/`rep_07` + UI/meta callback smoke; `rep_38` remains deferred)
+- Step D2: `adapted` (Cranelift strict/runtime gates are wired into `backend-align-smoke/nightly`; full command success still depends on existing interp trace snapshot drift unrelated to Cranelift)
+- Step E1: `done`
+
 ### Step A1 — Real Cranelift instance runtime in `cranelift-ffi`
 
 Scope:

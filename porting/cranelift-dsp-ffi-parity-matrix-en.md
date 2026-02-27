@@ -1,7 +1,7 @@
 # Cranelift DSP FFI Parity Matrix (Phase 0)
 
-**Date:** 2026-02-25  
-**Status:** Draft (started during Phase 0)  
+**Date:** 2026-02-27  
+**Status:** Active implementation tracking (E1 closure update)  
 **Primary reference:** `llvm_dsp` / `llvm_dsp_factory` (C + C++)  
 **Secondary cross-check:** `interpreter_dsp` / `interpreter_dsp_factory` (C + C++)  
 **Target surface:** `cranelift_dsp` / `cranelift_dsp_factory` (C + C++)
@@ -46,6 +46,33 @@ Rule:
 - For LLVM-only generic helper/query C symbols, use the same
   interpreter-style backend-prefixed approach (no LLVM generic symbol reuse as
   the primary Cranelift name).
+
+## 2.3 Current implementation closure status (2026-02-27)
+
+Status legend used for implementation tracking:
+
+- `done`: implemented and validated in current codebase
+- `adapted`: implemented with documented behavior differences vs LLVM reference
+- `deferred-v1`: intentionally not exported/implemented in V1
+
+| Family | Status | Notes |
+|---|---|---|
+| Global shared (`getCLibFaustVersion`, `startMTDSPFactories`, `stopMTDSPFactories`, `freeCMemory`) | `done` | Exported and tested in `cranelift-ffi`. |
+| Factory cache lifecycle (`get*FromSHAKey`, `deleteAll*`, `getAll*`) | `done` | Shared cache wired with SHA map and deletion APIs. |
+| Factory constructors from file/string | `done` | Fast-lane compiler path + Cranelift JIT + interp sidecar for UI/meta. |
+| Factory constructors from signals/boxes | `adapted` | Implemented via `box-ffi` handle bridge (`CboxesToSignals*` contract). |
+| Factory metadata/query surface (`JSON`, `name`, `sha`, `DSPCode`, `compile options`) | `done` | Exported and covered by runtime tests. |
+| Factory library/include/warning lists | `adapted` | Exported with empty-list behavior for current V1 runtime. |
+| Bitcode read/write family | `adapted` | Source-backed `CRANELIFT_FFI_V2_SOURCE` payload with rebuild; non-source factories (signals/boxes) return null/false on write. |
+| IR read/write family | `deferred-v1` | Not exported in V1. |
+| Machine/object read/write family | `deferred-v1` | Not exported in V1. |
+| Memory manager / foreign-function registration | `deferred-v1` | Not exported in V1. |
+| Target/machine-target getter family | `deferred-v1` | LLVM-specific semantics intentionally deferred. |
+| DSP instance lifecycle (`create/delete/clone/init/reset/clear`) | `done` | Real instance state allocation + lifecycle hooks. |
+| DSP instance compute | `done` | Calls finalized Cranelift JIT entry with backend `dsp*` layout. |
+| DSP instance UI/meta callbacks | `adapted` | Implemented via interpreter sidecar instruction dispatch; metadata includes Cranelift-specific diagnostics keys. |
+| Runtime differential validation (`interp` vs `cranelift`) | `adapted` | Automated smoke differential tests currently cover `rep_01` and `rep_07`; `rep_38` remains tracked for later parity completion. |
+| CI/PR smoke gate integration | `adapted` | `backend-align-smoke/nightly` now execute strict Cranelift subset gate + Cranelift runtime diff smoke before interp trace checks. |
 
 ---
 
