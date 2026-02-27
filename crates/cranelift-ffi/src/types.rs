@@ -10,9 +10,12 @@
 //! - Naming and V1 family coverage are driven by
 //!   `porting/cranelift-dsp-ffi-parity-matrix-en.md`.
 
+use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::ffi::c_char;
+use std::ptr::NonNull;
 
 use codegen::backends::cranelift::JitDspModule;
+use codegen::backends::interp::{FbcDspFactory, FbcExecutor};
 
 /// `FAUSTFLOAT` used by the exported C API (v1 planned default).
 pub type FaustFloat = f32;
@@ -41,6 +44,11 @@ pub struct CraneliftDspFactory {
     pub(crate) json: String,
     /// Compiled Cranelift JIT module (present for real file/string compilation paths).
     pub(crate) compiled_jit: Option<JitDspModule>,
+    /// Optional interpreter sidecar used to dispatch UI/meta callback instructions.
+    ///
+    /// This keeps callback semantics aligned with existing backend behavior while
+    /// Cranelift lowering currently focuses on executable DSP paths.
+    pub(crate) interp_sidecar: Option<FbcDspFactory<FaustFloat>>,
     /// Whether the backend lowered the FIR `compute` body (vs stub fallback).
     pub(crate) compute_body_lowered: bool,
     /// Audio layout (placeholder until real lowering/JIT metadata is wired).
@@ -60,11 +68,95 @@ pub struct CraneliftDspInstance {
     pub(crate) initialized: bool,
     /// Number of `compute()` calls observed (scaffold diagnostic state).
     pub(crate) cycle: usize,
+    /// Owned backend `dsp*` state allocation passed to the JIT `compute` entry.
+    pub(crate) dsp_state: DspStateBuffer,
+    /// Optional interpreter-side executor used for UI/meta callback state.
+    pub(crate) sidecar_executor: Option<FbcExecutor<FaustFloat>>,
 }
 
 // SAFETY: Instances are opaque and not internally synchronized. The C API
 // contract does not require shared concurrent access to the same instance.
 unsafe impl Send for CraneliftDspInstance {}
+
+/// Owned, aligned state buffer used as the Cranelift backend `dsp*` instance memory.
+///
+/// The allocation policy mirrors the backend layout contract:
+/// - size and alignment come from [`codegen::backends::cranelift::StructLayoutPlan`],
+/// - bytes are zero-initialized on allocation,
+/// - the memory is released when the instance is dropped.
+#[derive(Debug)]
+pub(crate) struct DspStateBuffer {
+    ptr: Option<NonNull<u8>>,
+    layout: Option<Layout>,
+}
+
+impl DspStateBuffer {
+    /// Allocates one zeroed state buffer.
+    ///
+    /// # Parameters
+    /// - `size`: requested byte size (`0` is allowed and produces an empty buffer)
+    /// - `align`: requested byte alignment (`0` is treated as `1`)
+    pub(crate) fn new(size: usize, align: usize) -> Result<Self, String> {
+        // Keep a non-null allocation even for empty logical layouts so runtime
+        // code can always pass a stable `dsp*` pointer to JIT entry points.
+        let size = size.max(1);
+        let align = align.max(1);
+        let layout = Layout::from_size_align(size, align)
+            .map_err(|e| format!("invalid DSP state layout size={size} align={align}: {e}"))?;
+        // SAFETY: layout is valid and non-zero-sized; zeroed allocation is intentional.
+        let raw = unsafe { alloc_zeroed(layout) };
+        let ptr = NonNull::new(raw).ok_or_else(|| {
+            format!("failed to allocate Cranelift DSP state ({size} bytes, align {align})")
+        })?;
+        Ok(Self {
+            ptr: Some(ptr),
+            layout: Some(layout),
+        })
+    }
+
+    /// Returns the mutable base pointer to pass as `dsp*` to JIT code.
+    ///
+    /// For empty buffers this returns null.
+    #[must_use]
+    pub(crate) fn as_mut_ptr(&self) -> *mut u8 {
+        self.ptr.map_or(std::ptr::null_mut(), NonNull::as_ptr)
+    }
+
+    /// Clears the state buffer to zero.
+    pub(crate) fn zero(&mut self) {
+        let (Some(ptr), Some(layout)) = (self.ptr, self.layout) else {
+            return;
+        };
+        // SAFETY: pointer/layout are paired from allocation and valid for writes.
+        unsafe { std::ptr::write_bytes(ptr.as_ptr(), 0_u8, layout.size()) };
+    }
+
+    /// Clones the allocation and bytes into a new owned buffer.
+    pub(crate) fn deep_clone(&self) -> Result<Self, String> {
+        let (Some(src_ptr), Some(layout)) = (self.ptr, self.layout) else {
+            return Self::new(0, 1);
+        };
+        let cloned = Self::new(layout.size(), layout.align())?;
+        if let (Some(dst_ptr), Some(dst_layout)) = (cloned.ptr, cloned.layout) {
+            debug_assert_eq!(layout, dst_layout);
+            // SAFETY: source/destination are valid non-overlapping buffers of equal size.
+            unsafe {
+                std::ptr::copy_nonoverlapping(src_ptr.as_ptr(), dst_ptr.as_ptr(), layout.size());
+            }
+        }
+        Ok(cloned)
+    }
+}
+
+impl Drop for DspStateBuffer {
+    fn drop(&mut self) {
+        let (Some(ptr), Some(layout)) = (self.ptr.take(), self.layout.take()) else {
+            return;
+        };
+        // SAFETY: pointer/layout pair originated from `alloc_zeroed` with same layout.
+        unsafe { dealloc(ptr.as_ptr(), layout) };
+    }
+}
 
 /// Boxes a Cranelift factory scaffold and returns an owning raw pointer.
 #[must_use]
@@ -86,12 +178,16 @@ pub(crate) unsafe fn free_factory(ptr: *mut CraneliftDspFactory) {
 pub(crate) fn alloc_instance(
     factory: *const CraneliftDspFactory,
     sample_rate: i32,
+    dsp_state: DspStateBuffer,
+    sidecar_executor: Option<FbcExecutor<FaustFloat>>,
 ) -> *mut CraneliftDspInstance {
     utils::alloc_opaque(CraneliftDspInstance {
         factory,
         sample_rate,
         initialized: false,
         cycle: 0,
+        dsp_state,
+        sidecar_executor,
     })
 }
 
@@ -115,8 +211,8 @@ pub(crate) fn alloc_c_string(s: &str) -> *mut c_char {
 #[cfg(test)]
 mod tests {
     use super::{
-        CraneliftDspFactory, CraneliftDspInstance, MetaGlue, UIGlue, alloc_c_string, alloc_factory,
-        alloc_instance, free_factory, free_instance,
+        CraneliftDspFactory, CraneliftDspInstance, DspStateBuffer, MetaGlue, UIGlue,
+        alloc_c_string, alloc_factory, alloc_instance, free_factory, free_instance,
     };
 
     #[test]
@@ -136,11 +232,17 @@ mod tests {
             compile_options: "-vec 0".into(),
             json: "{}".into(),
             compiled_jit: None,
+            interp_sidecar: None,
             compute_body_lowered: false,
             num_inputs: 1,
             num_outputs: 1,
         });
-        let instance = alloc_instance(factory, 48_000);
+        let instance = alloc_instance(
+            factory,
+            48_000,
+            DspStateBuffer::new(32, 8).expect("test allocation"),
+            None,
+        );
         let s = alloc_c_string("ok");
         unsafe {
             utils::free_c_string(s);

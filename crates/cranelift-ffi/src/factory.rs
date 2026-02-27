@@ -11,12 +11,14 @@
 //! backend or real factory caching.
 
 use std::ffi::{CString, c_char, c_void};
+use std::io::BufReader;
 use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
 
 use codegen::backends::cranelift::{
     CraneliftOptLevel, CraneliftOptions, JitDspModule, compile_fir_to_cranelift_jit,
 };
+use codegen::backends::interp::{FbcDspFactory, InterpOptions, read_fbc};
 use compiler::{Compiler as FaustCompiler, SignalFirLane, default_import_search_base};
 use utils::{
     decode_c_argv as decode_c_argv_shared, free_c_memory_c_string_only, null_c_string_array,
@@ -81,11 +83,13 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
         };
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
             let jit = preflight_compile_file_to_cranelift(Path::new(filename), args, opt_level)?;
+            let sidecar = compile_interp_sidecar_from_file(Path::new(filename), args)?;
             Ok(build_scaffold_factory_from_file(
                 filename,
                 args,
                 opt_level,
                 Some(jit),
+                Some(sidecar),
             ))
         })
     }
@@ -132,12 +136,14 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
         };
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
             let jit = preflight_compile_source_to_cranelift(name_app, dsp_content, opt_level)?;
+            let sidecar = compile_interp_sidecar_from_source(name_app, dsp_content, args)?;
             Ok(build_scaffold_factory_from_source(
                 name_app,
                 dsp_content,
                 args,
                 opt_level,
                 Some(jit),
+                Some(sidecar),
             ))
         })
     }
@@ -525,6 +531,7 @@ fn build_scaffold_factory_from_file(
     argv: &[String],
     opt_level: c_int,
     jit: Option<JitDspModule>,
+    sidecar: Option<FbcDspFactory<f32>>,
 ) -> CraneliftDspFactory {
     let source_name = Path::new(filename)
         .file_stem()
@@ -532,7 +539,7 @@ fn build_scaffold_factory_from_file(
         .filter(|s| !s.is_empty())
         .unwrap_or("FaustDSP");
     let dsp_code = format!("// scaffold source from file: {filename}");
-    build_scaffold_factory_common(source_name, &dsp_code, argv, opt_level, jit)
+    build_scaffold_factory_common(source_name, &dsp_code, argv, opt_level, jit, sidecar)
 }
 
 /// Build a placeholder factory from inline DSP source.
@@ -542,8 +549,9 @@ fn build_scaffold_factory_from_source(
     argv: &[String],
     opt_level: c_int,
     jit: Option<JitDspModule>,
+    sidecar: Option<FbcDspFactory<f32>>,
 ) -> CraneliftDspFactory {
-    build_scaffold_factory_common(name_app, dsp_content, argv, opt_level, jit)
+    build_scaffold_factory_common(name_app, dsp_content, argv, opt_level, jit, sidecar)
 }
 
 /// Shared placeholder factory builder.
@@ -553,6 +561,7 @@ fn build_scaffold_factory_common(
     argv: &[String],
     opt_level: c_int,
     jit: Option<JitDspModule>,
+    sidecar: Option<FbcDspFactory<f32>>,
 ) -> CraneliftDspFactory {
     let compute_body_lowered = jit
         .as_ref()
@@ -571,6 +580,9 @@ fn build_scaffold_factory_common(
         opt_level,
         argv.join("\x1f")
     );
+    let (num_inputs, num_outputs) = sidecar
+        .as_ref()
+        .map_or((0, 0), |f| (f.num_inputs, f.num_outputs));
     CraneliftDspFactory {
         name: name.to_owned(),
         sha_key,
@@ -586,9 +598,10 @@ fn build_scaffold_factory_common(
             }
         ),
         compiled_jit: jit,
+        interp_sidecar: sidecar,
         compute_body_lowered,
-        num_inputs: 1,
-        num_outputs: 1,
+        num_inputs,
+        num_outputs,
     }
 }
 
@@ -625,6 +638,58 @@ fn preflight_compile_source_to_cranelift(
         .compile_source_to_fir_with_lane(source_name, source, SignalFirLane::TransformFastLane)
         .map_err(|e| e.to_string())?;
     compile_with_cranelift_backend(fir, opt_level)
+}
+
+/// Compiles one Faust file to an interpreter sidecar factory used for UI/meta dispatch.
+fn compile_interp_sidecar_from_file(
+    path: &Path,
+    argv: &[String],
+) -> Result<FbcDspFactory<f32>, String> {
+    let compiler = FaustCompiler::new();
+    let parsed = parse_ffi_compile_args(argv).map_err(|e| e.to_string())?;
+    let options = InterpOptions {
+        module_name: parsed.module_name,
+        ..InterpOptions::default()
+    };
+    let search_paths = collect_search_paths_for_file(path, argv);
+    let fbc = compiler
+        .compile_file_to_interp_with_lane(
+            path,
+            &search_paths,
+            &options,
+            SignalFirLane::TransformFastLane,
+        )
+        .map_err(|e| e.to_string())?;
+    parse_interp_factory_from_fbc_text(&fbc)
+}
+
+/// Compiles inline Faust source to an interpreter sidecar factory used for UI/meta dispatch.
+fn compile_interp_sidecar_from_source(
+    source_name: &str,
+    source: &str,
+    argv: &[String],
+) -> Result<FbcDspFactory<f32>, String> {
+    let compiler = FaustCompiler::new();
+    let parsed = parse_ffi_compile_args(argv).map_err(|e| e.to_string())?;
+    let options = InterpOptions {
+        module_name: parsed.module_name.or_else(|| Some(source_name.to_owned())),
+        ..InterpOptions::default()
+    };
+    let fbc = compiler
+        .compile_source_to_interp_with_lane(
+            source_name,
+            source,
+            &options,
+            SignalFirLane::TransformFastLane,
+        )
+        .map_err(|e| e.to_string())?;
+    parse_interp_factory_from_fbc_text(&fbc)
+}
+
+/// Parses textual `.fbc` into a typed interpreter factory.
+fn parse_interp_factory_from_fbc_text(fbc: &str) -> Result<FbcDspFactory<f32>, String> {
+    let mut reader = BufReader::new(fbc.as_bytes());
+    read_fbc::<f32>(&mut reader).map_err(|e| e.to_string())
 }
 
 /// Calls the Cranelift backend and returns the compiled JIT module.
@@ -742,6 +807,7 @@ fn decode_scaffold_bitcode(text: &str) -> Result<CraneliftDspFactory, String> {
             .ok_or_else(|| "missing 'compile_options' field".to_owned())?,
         json: json.ok_or_else(|| "missing 'json' field".to_owned())?,
         compiled_jit: None,
+        interp_sidecar: None,
         compute_body_lowered: false,
         num_inputs: num_inputs.ok_or_else(|| "missing 'inputs' field".to_owned())?,
         num_outputs: num_outputs.ok_or_else(|| "missing 'outputs' field".to_owned())?,
