@@ -1,8 +1,8 @@
 # Cranelift Backend Plan (Faust Rust Port)
 
-**Date:** 2026-02-25  
-**Status:** Draft (planning only; no implementation started)  
-**Target crates:** `codegen`, `compiler`, `xtask`, `cranelift-ffi` (new, planned)  
+**Date:** 2026-02-27  
+**Status:** Active implementation (partially implemented; finish plan below)  
+**Target crates:** `codegen`, `compiler`, `xtask`, `cranelift-ffi`  
 **Primary backend module (planned):** `codegen::backends::cranelift`
 
 ---
@@ -15,6 +15,31 @@ backend** in `faust-rs`.
 This backend is **not a direct C++ parity backend** (unlike C/C++/Interp/Wasm/LLVM
 paths that map to existing Faust backends). It is a **Rust-native extension**
 that compiles Faust FIR to native machine code via the Cranelift code generator.
+
+### Current implementation snapshot (2026-02-27)
+
+What is already in place:
+
+- `codegen::backends::cranelift` has a real Cranelift JIT integration.
+- FIR lowering covers a non-trivial executable subset (`Block`, `DeclareVar`,
+  `If`, `Switch`, `SimpleForLoop`, `ForLoop`, `WhileLoop`, `StoreVar`,
+  `StoreTable`, `LoadVar`, `LoadTable`, several math calls, etc.).
+- `compiler` CLI has experimental integration (`--dump-cranelift`,
+  `-lang cranelift`).
+- `cranelift-ffi` can compile through the compiler facade and stores a compiled
+  `JitDspModule` in factory objects.
+
+What is still blocking v1 completion:
+
+- `cranelift-ffi` instance runtime is still scaffolded:
+  `compute/buildUserInterface/metadata` are placeholders and do not execute the
+  real generated DSP code path.
+- Factory APIs from signals/boxes are not implemented.
+- Bitcode read/write in `cranelift-ffi` is scaffold serialization, not a real
+  backend serialization contract.
+- Subset fallback policy (`compute` stub on unsupported FIR) is still used; v1
+  completion requires explicit corpus-level coverage and strict diagnostics
+  policy.
 
 ### Why add a Cranelift backend?
 
@@ -569,7 +594,147 @@ Then expand to:
 
 ---
 
-## 10. Implementation Phases (Detailed)
+## 10. Finish Backlog from Current State (Execution Order)
+
+This section is the concrete completion plan from the current codebase state.
+Each step is intentionally commit-sized and has strict pass criteria.
+
+### Step A1 — Real Cranelift instance runtime in `cranelift-ffi`
+
+Scope:
+
+- Replace scaffold no-op behavior in:
+  - `computeCCraneliftDSPInstance`
+  - `buildUserInterfaceCCraneliftDSPInstance`
+  - `metadataCCraneliftDSPInstance`
+- Wire instance state allocation to the backend `dsp*` layout
+  (`JitDspModule::struct_layout()`), so JIT compute receives a valid `dsp` pointer.
+- Isolate all required function-pointer invocation `unsafe` with Rustdoc `# Safety`
+  invariants and dedicated tests.
+
+Pass criteria:
+
+- C API smoke test executes non-trivial audio (`count > 0`) and mutates outputs.
+- `metadata` and `buildUserInterface` dispatch real callback events (not placeholder strings only).
+- `cargo test -p cranelift-ffi` passes with no scaffold-only compute path.
+
+### Step A2 — Remove scaffold semantics in factory/instance metadata
+
+Scope:
+
+- Remove scaffold markers from JSON/status fields where runtime is now real.
+- Fill `num_inputs` / `num_outputs` from real FIR/module metadata.
+- Keep remaining deferred families explicitly labeled as deferred.
+
+Pass criteria:
+
+- Factory and instance tests assert real backend state fields.
+- No remaining `"status":"scaffold"` dependency in runtime correctness tests.
+
+### Step B1 — Complete mandatory FFI factory families
+
+Scope:
+
+- Implement `createCCraneliftDSPFactoryFromSignals`.
+- Implement `createCCraneliftDSPFactoryFromBoxes`.
+- Reuse compiler facade and existing conversion path (no duplicate pipelines).
+
+Pass criteria:
+
+- File/string/signals/boxes constructors all compile the same DSP semantics for smoke fixtures.
+- Cache-key behavior consistent across constructor families for identical resulting DSP/options.
+
+### Step B2 — Replace scaffold bitcode family
+
+Scope:
+
+- Replace temporary scaffold text serializer with a real, documented backend
+  persistence contract for Cranelift factories.
+- Keep function family names unchanged (`read*/write*Bitcode[File]`), but stop
+  using placeholder payload format.
+
+Pass criteria:
+
+- Bitcode in-memory and file round-trip produce runnable factories.
+- Round-trip preserves compile options and factory identity fields.
+
+### Step C1 — Lowering coverage closure on corpus
+
+Scope:
+
+- Run corpus diagnostics with `diagnose_cranelift_compute_subset_gap`.
+- Prioritize and implement missing FIR nodes/intrinsics required by selected
+  runtime corpus (`tests/corpus` + runtime traces subset).
+- Keep pre-check and lowering in lockstep.
+
+Pass criteria:
+
+- Selected v1 corpus compiles with `compute_body_lowered == true` (no stub fallback).
+- Any remaining unsupported nodes are explicitly documented in this plan and `JOURNAL`.
+
+### Step C2 — Fallback policy hardening
+
+Scope:
+
+- Add a strict mode that turns subset fallback into hard error.
+- Use strict mode in validation/CI gates.
+
+Pass criteria:
+
+- CI validation path fails when any selected case falls back to stub.
+- Developer mode can still optionally keep permissive behavior for exploratory scans.
+
+### Step D1 — Differential runtime validation (`interp` vs `cranelift`)
+
+Scope:
+
+- Add/extend automated runtime differential checks with numeric tolerance.
+- Cover at least the initial smoke corpus plus UI/meta callback smoke paths.
+
+Pass criteria:
+
+- Repeatable one-command local run for Cranelift differential checks.
+- Failure reports include case name, backend, and first mismatch context.
+
+### Step D2 — `xtask` + CI integration
+
+Scope:
+
+- Add Cranelift backend checks to PR-level smoke workflow (small subset).
+- Keep extended subset/nightly separately if runtime cost is high.
+
+Pass criteria:
+
+- CI has at least one mandatory Cranelift runtime smoke gate.
+- Gate includes FFI lifecycle + compute + UI/meta callback coverage.
+
+### Step E1 — Documentation and parity matrix closure
+
+Scope:
+
+- Update `porting/cranelift-dsp-ffi-parity-matrix-en.md` after each implemented family.
+- Keep explicit status per family: `done`, `adapted`, `deferred-v1`.
+- Document every remaining deferred item with rationale and owner.
+
+Pass criteria:
+
+- Matrix matches actual exported symbols and behavior.
+- No undocumented divergence between plan and code.
+
+### Immediate next PR sequence (recommended)
+
+1. PR-1: Step A1 + tests (`cranelift-ffi` runtime becomes real).
+2. PR-2: Step B1 + Step A2 (constructor parity + cleanup).
+3. PR-3: Step C1 targeted lowering closure for smoke corpus.
+4. PR-4: Step C2 + Step D1 + Step D2 (strict gate + automated validation).
+
+---
+
+## 11. Implementation Phases (Detailed)
+
+Note: this phase decomposition is kept as the baseline roadmap. The current
+codebase has already entered implementation beyond pure scaffolding, and the
+authoritative completion order from now on is the execution backlog in Section 10.
 
 ## Phase 0 — Backend/FFI Design Freeze (2–4 days)
 
@@ -709,9 +874,9 @@ Then expand to:
 
 ---
 
-## 11. Test Strategy (Detailed)
+## 12. Test Strategy (Detailed)
 
-## 11.1 Unit tests (`codegen::backends::cranelift`)
+## 12.1 Unit tests (`codegen::backends::cranelift`)
 
 - type mapping
 - signature mapping
@@ -720,12 +885,12 @@ Then expand to:
 - lowering of representative FIR fragments
 - unsupported FIR node/type diagnostics
 
-## 11.2 Integration tests (new crate tests or `compiler` tests)
+## 12.2 Integration tests (new crate tests or `compiler` tests)
 
 - compile selected DSPs to FIR, run via Cranelift JIT
 - compare output buffers to interpreter traces within tolerance
 
-## 11.3 FFI/export tests (`cranelift-ffi`)
+## 12.3 FFI/export tests (`cranelift-ffi`)
 
 - C API:
   - export parity smoke (expected function set present and callable)
@@ -743,7 +908,7 @@ Then expand to:
   - `buildUserInterface` / `metadata` callback smoke
   - lifecycle order consistency vs wrapper expectations
 
-## 11.4 Differential regression policy
+## 12.4 Differential regression policy
 
 For every newly supported FIR family (example: `Switch`):
 
@@ -753,33 +918,33 @@ For every newly supported FIR family (example: `Switch`):
 
 ---
 
-## 12. Performance and Benchmarking Plan
+## 13. Performance and Benchmarking Plan
 
 Performance is secondary to correctness for v1, but basic measurement is still required.
 
-## 12.1 Metrics (v1)
+## 13.1 Metrics (v1)
 
 - FIR -> Cranelift compile time
 - JIT finalize time
 - runtime throughput vs `interp` on selected cases
 
-## 12.2 Benchmark corpus (initial)
+## 13.2 Benchmark corpus (initial)
 
 - `trace_01_passthrough`
 - `trace_07_nonlinear_clip`
 - `trace_31_extended_primitives_typed`
 - `trace_38_sine_phasor`
 
-## 12.3 Acceptance (v1, non-blocking)
+## 13.3 Acceptance (v1, non-blocking)
 
 - no hard performance target yet
 - benchmark results documented in `JOURNAL.md` before broad CI enablement
 
 ---
 
-## 13. Risks and Mitigations
+## 14. Risks and Mitigations
 
-## 13.1 Key risks
+## 14.1 Key risks
 
 1. **ABI/layout mismatch for `kStruct`/buffers**
    - Mitigation: centralize layout planner + unit tests + differential runtime checks
@@ -798,7 +963,7 @@ Performance is secondary to correctness for v1, but basic measurement is still r
 8. **Cache strategy divergence from reference runtime families**
    - Mitigation: parity matrix + cache API semantics tests + shared FFI design review
 
-## 13.2 Existing project risks to re-check (from critical points note)
+## 14.2 Existing project risks to re-check (from critical points note)
 
 This backend does not replace the project’s main critical risks, but it can be
 impacted by:
@@ -811,7 +976,7 @@ Reference: `porting/faust-rust-points-critiques-en.md`
 
 ---
 
-## 14. Documentation and Provenance Requirements
+## 15. Documentation and Provenance Requirements
 
 For implementation PRs touching the Cranelift backend or `cranelift-ffi`:
 
@@ -823,7 +988,7 @@ For implementation PRs touching the Cranelift backend or `cranelift-ffi`:
 - record public API mapping status (`adapted`/`deferred`) and compatibility notes
   in `JOURNAL.md` or this plan as scope evolves
 
-## 14.1 Collaboration requirement during porting (mandatory)
+## 15.1 Collaboration requirement during porting (mandatory)
 
 During implementation/porting phases, if any ambiguity, missing requirement, or
 design trade-off is encountered that is not already resolved by this plan, the
@@ -846,7 +1011,7 @@ Rule of execution:
 
 ---
 
-## 15. Exit Criteria for v1
+## 16. Exit Criteria for v1
 
 The Cranelift backend v1 is considered achieved when all of the following are true:
 
@@ -864,7 +1029,7 @@ The Cranelift backend v1 is considered achieved when all of the following are tr
 
 ---
 
-## 16. Recommended Next Step (Implementation kickoff)
+## 17. Recommended Next Step (Implementation kickoff)
 
 Start with **Phase 0 + Phase 1 only** in the first implementation PR:
 
