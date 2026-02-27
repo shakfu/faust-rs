@@ -226,6 +226,9 @@ fn backend_align_smoke(
         return Err("backend-align-smoke: no runtime cases selected".into());
     }
 
+    println!("backend-align-smoke: cranelift-subset-strict-check");
+    cranelift_subset_strict_check_cases(&cases)?;
+
     for case in &cases {
         let mut trace_check_args = vec![
             "--case".to_owned(),
@@ -271,7 +274,7 @@ fn backend_align_smoke(
     }
 
     println!(
-        "backend-align-smoke: OK (runtime_cases={}, strict_fir_types={}, golden={}, diff_lanes={}, fir_dump_scan={})",
+        "backend-align-smoke: OK (runtime_cases={}, strict_fir_types={}, golden={}, cranelift_strict_subset=true, diff_lanes={}, fir_dump_scan={})",
         cases.len(),
         options.strict_fir_types,
         !options.skip_golden,
@@ -346,6 +349,40 @@ fn backend_align_smoke_fir_cases() -> Result<Vec<PathBuf>, Box<dyn std::error::E
     Ok(cases)
 }
 
+fn cranelift_subset_strict_check_cases(
+    cases: &[PathBuf],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let compiler = compiler::Compiler::new();
+    for case in cases {
+        let fir = compiler
+            .compile_file_default_to_fir_with_lane(case, compiler::SignalFirLane::TransformFastLane)
+            .map_err(|e| {
+                format!(
+                    "Cranelift strict subset FIR compile failed for {}: {e}",
+                    case.display()
+                )
+            })?;
+        let options = codegen::backends::cranelift::CraneliftOptions {
+            fail_on_subset_gap: true,
+            ..codegen::backends::cranelift::CraneliftOptions::default()
+        };
+        codegen::backends::cranelift::compile_fir_to_cranelift_jit(
+            &fir.store, fir.module, &options,
+        )
+        .map_err(|e| {
+            format!(
+                "Cranelift strict subset check failed for {}: {e}",
+                case.display()
+            )
+        })?;
+    }
+    println!(
+        "cranelift-subset-strict-check: {} case(s) compiled without fallback",
+        cases.len()
+    );
+    Ok(())
+}
+
 #[derive(Debug, Default)]
 struct BackendAlignNightlyOptions {
     strict_fir_types: bool,
@@ -366,6 +403,10 @@ fn backend_align_nightly(
     } else {
         println!("backend-align-nightly: skip golden-check");
     }
+
+    let nightly_cases = runtime_corpus_files()?;
+    println!("backend-align-nightly: cranelift-subset-strict-check (all runtime cases)");
+    cranelift_subset_strict_check_cases(&nightly_cases)?;
 
     let mut trace_check_args = vec!["--lane".to_owned(), "fast".to_owned()];
     if options.strict_fir_types {
@@ -393,7 +434,7 @@ fn backend_align_nightly(
     }
 
     println!(
-        "backend-align-nightly: OK (strict_fir_types={}, golden={}, diff_lanes={}, fir_dump_scan={})",
+        "backend-align-nightly: OK (strict_fir_types={}, golden={}, cranelift_strict_subset=true, diff_lanes={}, fir_dump_scan={})",
         options.strict_fir_types,
         !options.skip_golden,
         !options.skip_diff_lanes,

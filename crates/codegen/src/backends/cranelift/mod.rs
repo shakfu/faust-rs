@@ -77,6 +77,12 @@ pub struct CraneliftOptions {
     pub enable_nan_canonicalization: bool,
     /// Emit backend debug IR dumps once implemented.
     pub debug_ir_dump: bool,
+    /// Fails compilation when the `compute` body falls outside the current
+    /// lowering subset instead of emitting the no-op fallback stub.
+    ///
+    /// This is intended for strict validation/CI workflows to prevent silent
+    /// runtime acceptance with reduced behavior.
+    pub fail_on_subset_gap: bool,
 }
 
 /// Stable error codes for the Cranelift backend scaffold and future lowering.
@@ -2450,6 +2456,7 @@ fn declare_compute_stub(
     compute_decl: FirId,
     store: &FirStore,
     struct_layout: &StructLayoutPlan,
+    fail_on_subset_gap: bool,
     jit: &mut JITModule,
 ) -> Result<(String, usize, bool), CraneliftBackendError> {
     let ptr_ty = jit.target_config().pointer_type();
@@ -2493,6 +2500,13 @@ fn declare_compute_stub(
                 }
             }
         } else {
+            if fail_on_subset_gap {
+                let reason = compute_body_subset_gap_reason_from_compute_decl(store, compute_decl)
+                    .unwrap_or_else(|| "unknown subset-gap reason".to_owned());
+                return Err(CraneliftBackendError::unsupported_module_shape(format!(
+                    "Cranelift strict mode rejected fallback to compute stub: {reason}"
+                )));
+            }
             // Early bring-up policy: emit a valid no-op `compute` stub when the
             // FIR body exceeds the currently supported lowering subset.
             emit_return_stub(&mut fb);
@@ -2532,8 +2546,12 @@ fn declare_compute_stub(
 /// - If `compute` matches the currently supported FIR subset, the backend emits
 ///   a real lowered body and `JitDspModule::compute_body_lowered()` returns
 ///   `true`.
-/// - Otherwise, the backend emits a valid no-op `compute` stub and returns
-///   success with `compute_body_lowered() == false`.
+/// - Otherwise:
+///   - when `options.fail_on_subset_gap == false` (default), the backend emits
+///     a valid no-op `compute` stub and returns success with
+///     `compute_body_lowered() == false`;
+///   - when `options.fail_on_subset_gap == true`, compilation fails with
+///     `UnsupportedModuleShape`.
 ///
 /// This "compile-success + stub fallback" policy is intentional during bring-up
 /// because it allows end-to-end integration and corpus diagnostics to progress
@@ -2555,8 +2573,14 @@ pub fn compile_fir_to_cranelift_jit(
     let mut jit = JITModule::new(jit_builder);
     let ptr_size = jit.target_config().pointer_type().bytes();
     let struct_layout = build_struct_layout_for_module(store, module, ptr_size)?;
-    let (compute_symbol_name, compute_entry_addr, compute_body_lowered) =
-        declare_compute_stub(&module_name, compute_decl, store, &struct_layout, &mut jit)?;
+    let (compute_symbol_name, compute_entry_addr, compute_body_lowered) = declare_compute_stub(
+        &module_name,
+        compute_decl,
+        store,
+        &struct_layout,
+        options.fail_on_subset_gap,
+        &mut jit,
+    )?;
     if compute_entry_addr == 0 {
         return Err(CraneliftBackendError::jit_failure(
             "finalized compute symbol address is null",
@@ -2647,6 +2671,85 @@ mod tests {
             8
         );
         assert!(compiled.jit_module_is_alive());
+    }
+
+    fn build_subset_gap_fun_call_module() -> (fir::FirStore, FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let globals = b.block(&[]);
+        let dsp_struct = b.block(&[]);
+
+        let out_chan = b.int32(0);
+        let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+        let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let x = b.float32(0.25);
+        // Deliberately unsupported in current subset matcher.
+        let y = b.fun_call("std::erf", &[x], FirType::FaustFloat);
+        let store_out = b.store_table("output0", AccessType::Stack, i0, y);
+        let loop_body = b.block(&[store_out]);
+        let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+        let compute_body = b.block(&[out_alias, sample_loop]);
+        let compute_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        );
+        let declarations = b.block(&[compute]);
+        let module = b.module("subset_gap_fun_call", dsp_struct, globals, declarations);
+        (store, module)
+    }
+
+    #[test]
+    fn compile_module_falls_back_to_stub_without_strict_subset_mode() {
+        let (store, module) = build_subset_gap_fun_call_module();
+        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+            .expect("default mode should allow subset-gap fallback");
+        assert!(!compiled.compute_body_lowered());
+    }
+
+    #[test]
+    fn compile_module_fails_on_subset_gap_with_strict_mode() {
+        let (store, module) = build_subset_gap_fun_call_module();
+        let options = CraneliftOptions {
+            fail_on_subset_gap: true,
+            ..CraneliftOptions::default()
+        };
+        let err = compile_fir_to_cranelift_jit(&store, module, &options)
+            .expect_err("strict mode must reject subset-gap fallback");
+        assert_eq!(err.code, CraneliftBackendErrorCode::UnsupportedModuleShape);
+        assert!(err.message.contains("strict mode rejected fallback"));
     }
 
     fn build_subset_lowerable_compute_module() -> (fir::FirStore, FirId) {
