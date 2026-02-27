@@ -352,6 +352,7 @@ dependencies = [
  "codegen",
  "compiler",
  "fir",
+ "interp-ffi",
  "utils",
 ]
 

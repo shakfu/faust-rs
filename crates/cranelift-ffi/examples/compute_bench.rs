@@ -1,0 +1,454 @@
+use std::ffi::{CStr, CString};
+use std::hint::black_box;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use codegen::backends::cranelift::{CraneliftOptions, compile_fir_to_cranelift_jit};
+use codegen::backends::interp::{InterpOptions, generate_interp_module, write_fbc};
+use codegen::fixtures::{build_heavy_bench_test_module, build_sine_phasor_test_module};
+use faust_cranelift::factory::{createCCraneliftDSPFactoryFromFile, deleteCCraneliftDSPFactory};
+use faust_cranelift::instance::{
+    computeCCraneliftDSPInstance, createCCraneliftDSPInstance, deleteCCraneliftDSPInstance,
+    getNumInputsCCraneliftDSPInstance, getNumOutputsCCraneliftDSPInstance,
+    initCCraneliftDSPInstance,
+};
+use faust_cranelift::types::FaustFloat;
+use interp_ffi::factory::{
+    createCInterpreterDSPFactoryFromFile, deleteCInterpreterDSPFactory,
+    readCInterpreterDSPFactoryFromBitcode,
+};
+use interp_ffi::instance::{
+    computeCInterpreterDSPInstance, createCInterpreterDSPInstance, deleteCInterpreterDSPInstance,
+    getNumInputsCInterpreterDSPInstance, getNumOutputsCInterpreterDSPInstance,
+    initCInterpreterDSPInstance,
+};
+
+const SAMPLE_RATE: i32 = 48_000;
+const BLOCK_SIZE: usize = 64;
+const NUM_BLOCKS: usize = 4096;
+const WARMUP_BLOCKS: usize = 256;
+
+type ComputeFn =
+    unsafe extern "C" fn(*mut std::ffi::c_void, i32, *mut *mut FaustFloat, *mut *mut FaustFloat);
+
+#[derive(Debug, Clone, Copy)]
+enum BenchInput<'a> {
+    DspFile(&'a Path),
+    FixtureSinePhasor,
+    FixtureHeavyBench,
+}
+
+struct OwnedAlignedDspState {
+    ptr: *mut u8,
+    layout: std::alloc::Layout,
+}
+
+impl OwnedAlignedDspState {
+    fn new(size: usize, align: usize) -> Result<Self, String> {
+        let layout = std::alloc::Layout::from_size_align(size.max(1), align.max(1))
+            .map_err(|e| format!("invalid layout size={size} align={align}: {e}"))?;
+        // SAFETY: layout is valid and non-zero sized.
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        if ptr.is_null() {
+            return Err(format!(
+                "allocation failed (size={}, align={})",
+                layout.size(),
+                layout.align()
+            ));
+        }
+        Ok(Self { ptr, layout })
+    }
+}
+
+impl Drop for OwnedAlignedDspState {
+    fn drop(&mut self) {
+        // SAFETY: `ptr/layout` pair came from `alloc_zeroed` with same layout.
+        unsafe { std::alloc::dealloc(self.ptr, self.layout) };
+    }
+}
+
+fn prepare_impulse_block(input_channels: &mut [Vec<f32>], global_start: usize) {
+    for (ch_idx, channel) in input_channels.iter_mut().enumerate() {
+        channel.fill(0.0);
+        if global_start == 0 && !channel.is_empty() {
+            channel[0] = 1.0f32 + ch_idx as f32;
+        }
+    }
+}
+
+fn run_blocked_bench<F>(
+    num_inputs: usize,
+    num_outputs: usize,
+    mut compute_block: F,
+) -> (Duration, f64)
+where
+    F: FnMut(*mut *mut FaustFloat, *mut *mut FaustFloat),
+{
+    let mut input_channels = vec![vec![0.0f32; BLOCK_SIZE]; num_inputs];
+    let mut output_channels = vec![vec![0.0f32; BLOCK_SIZE]; num_outputs];
+    let mut input_ptrs: Vec<*mut FaustFloat> = input_channels
+        .iter_mut()
+        .map(|ch| ch.as_mut_ptr())
+        .collect();
+    let mut output_ptrs: Vec<*mut FaustFloat> = output_channels
+        .iter_mut()
+        .map(|ch| ch.as_mut_ptr())
+        .collect();
+
+    for block_idx in 0..WARMUP_BLOCKS {
+        prepare_impulse_block(&mut input_channels, block_idx * BLOCK_SIZE);
+        for ch in &mut output_channels {
+            ch.fill(0.0);
+        }
+        compute_block(input_ptrs.as_mut_ptr(), output_ptrs.as_mut_ptr());
+    }
+
+    let t0 = Instant::now();
+    let mut checksum = 0.0f64;
+    for block_idx in WARMUP_BLOCKS..(WARMUP_BLOCKS + NUM_BLOCKS) {
+        prepare_impulse_block(&mut input_channels, block_idx * BLOCK_SIZE);
+        for ch in &mut output_channels {
+            ch.fill(0.0);
+        }
+        compute_block(input_ptrs.as_mut_ptr(), output_ptrs.as_mut_ptr());
+        checksum += output_channels
+            .iter()
+            .flat_map(|ch| ch.iter())
+            .map(|x| f64::from(*x))
+            .sum::<f64>();
+    }
+    (t0.elapsed(), checksum)
+}
+
+fn run_interp(input: BenchInput<'_>) -> Result<(Duration, f64), String> {
+    match input {
+        BenchInput::DspFile(case) => run_interp_file(case),
+        BenchInput::FixtureSinePhasor => run_interp_fixture_sine_phasor(),
+        BenchInput::FixtureHeavyBench => run_interp_fixture_heavy_bench(),
+    }
+}
+
+fn run_interp_file(case: &Path) -> Result<(Duration, f64), String> {
+    let c_path = CString::new(case.to_string_lossy().as_bytes())
+        .map_err(|e| format!("CString path: {e}"))?;
+    let mut err = [0_i8; 4096];
+    let factory = unsafe {
+        createCInterpreterDSPFactoryFromFile(c_path.as_ptr(), 0, std::ptr::null(), err.as_mut_ptr())
+    };
+    if factory.is_null() {
+        return Err(format!(
+            "createCInterpreterDSPFactoryFromFile failed: {}",
+            unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy()
+        ));
+    }
+    let dsp = unsafe { createCInterpreterDSPInstance(factory) };
+    if dsp.is_null() {
+        unsafe {
+            let _ = deleteCInterpreterDSPFactory(factory);
+        }
+        return Err("createCInterpreterDSPInstance failed".to_owned());
+    }
+    unsafe { initCInterpreterDSPInstance(dsp, SAMPLE_RATE) };
+
+    let num_inputs = unsafe { getNumInputsCInterpreterDSPInstance(dsp) }.max(0) as usize;
+    let num_outputs = unsafe { getNumOutputsCInterpreterDSPInstance(dsp) }.max(0) as usize;
+
+    let (elapsed, checksum) =
+        run_blocked_bench(num_inputs, num_outputs, |input_ptrs, output_ptrs| {
+            unsafe {
+                computeCInterpreterDSPInstance(dsp, BLOCK_SIZE as i32, input_ptrs, output_ptrs)
+            };
+        });
+
+    unsafe {
+        deleteCInterpreterDSPInstance(dsp);
+        let _ = deleteCInterpreterDSPFactory(factory);
+    }
+
+    black_box(checksum);
+    Ok((elapsed, checksum))
+}
+
+fn run_interp_fixture_sine_phasor() -> Result<(Duration, f64), String> {
+    let (store, module) = build_sine_phasor_test_module();
+    let options = InterpOptions {
+        num_inputs: 0,
+        num_outputs: 1,
+        ..InterpOptions::default()
+    };
+    let factory = generate_interp_module(&store, module, &options).map_err(|e| e.to_string())?;
+    let mut fbc_bytes = Vec::<u8>::new();
+    write_fbc(&factory, &mut fbc_bytes, false).map_err(|e| e.to_string())?;
+    let fbc_text = String::from_utf8(fbc_bytes).map_err(|e| format!("utf8 FBC: {e}"))?;
+    let c_fbc = CString::new(fbc_text.as_bytes()).map_err(|e| format!("CString FBC: {e}"))?;
+    let mut err = [0_i8; 4096];
+    let ffi_factory =
+        unsafe { readCInterpreterDSPFactoryFromBitcode(c_fbc.as_ptr(), err.as_mut_ptr()) };
+    if ffi_factory.is_null() {
+        return Err(format!(
+            "readCInterpreterDSPFactoryFromBitcode failed: {}",
+            unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy()
+        ));
+    }
+    let dsp = unsafe { createCInterpreterDSPInstance(ffi_factory) };
+    if dsp.is_null() {
+        unsafe {
+            let _ = deleteCInterpreterDSPFactory(ffi_factory);
+        }
+        return Err("createCInterpreterDSPInstance(fixture) failed".to_owned());
+    }
+    unsafe { initCInterpreterDSPInstance(dsp, SAMPLE_RATE) };
+
+    let num_inputs = unsafe { getNumInputsCInterpreterDSPInstance(dsp) }.max(0) as usize;
+    let num_outputs = unsafe { getNumOutputsCInterpreterDSPInstance(dsp) }.max(0) as usize;
+    if num_outputs == 0 {
+        unsafe {
+            deleteCInterpreterDSPInstance(dsp);
+            let _ = deleteCInterpreterDSPFactory(ffi_factory);
+        }
+        return Err("interp fixture sine_phasor reported 0 outputs".to_owned());
+    }
+
+    let (elapsed, checksum) =
+        run_blocked_bench(num_inputs, num_outputs, |input_ptrs, output_ptrs| {
+            unsafe {
+                computeCInterpreterDSPInstance(dsp, BLOCK_SIZE as i32, input_ptrs, output_ptrs)
+            };
+        });
+
+    unsafe {
+        deleteCInterpreterDSPInstance(dsp);
+        let _ = deleteCInterpreterDSPFactory(ffi_factory);
+    }
+
+    black_box(checksum);
+    Ok((elapsed, checksum))
+}
+
+fn run_interp_fixture_heavy_bench() -> Result<(Duration, f64), String> {
+    let (store, module) = build_heavy_bench_test_module();
+    let options = InterpOptions {
+        num_inputs: 1,
+        num_outputs: 1,
+        ..InterpOptions::default()
+    };
+    let factory = generate_interp_module(&store, module, &options).map_err(|e| e.to_string())?;
+    let mut fbc_bytes = Vec::<u8>::new();
+    write_fbc(&factory, &mut fbc_bytes, false).map_err(|e| e.to_string())?;
+    let fbc_text = String::from_utf8(fbc_bytes).map_err(|e| format!("utf8 FBC: {e}"))?;
+    let c_fbc = CString::new(fbc_text.as_bytes()).map_err(|e| format!("CString FBC: {e}"))?;
+    let mut err = [0_i8; 4096];
+    let ffi_factory =
+        unsafe { readCInterpreterDSPFactoryFromBitcode(c_fbc.as_ptr(), err.as_mut_ptr()) };
+    if ffi_factory.is_null() {
+        return Err(format!(
+            "readCInterpreterDSPFactoryFromBitcode failed: {}",
+            unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy()
+        ));
+    }
+    let dsp = unsafe { createCInterpreterDSPInstance(ffi_factory) };
+    if dsp.is_null() {
+        unsafe {
+            let _ = deleteCInterpreterDSPFactory(ffi_factory);
+        }
+        return Err("createCInterpreterDSPInstance(fixture heavy_bench) failed".to_owned());
+    }
+    unsafe { initCInterpreterDSPInstance(dsp, SAMPLE_RATE) };
+
+    let num_inputs = unsafe { getNumInputsCInterpreterDSPInstance(dsp) }.max(0) as usize;
+    let num_outputs = unsafe { getNumOutputsCInterpreterDSPInstance(dsp) }.max(0) as usize;
+    if num_inputs == 0 || num_outputs == 0 {
+        unsafe {
+            deleteCInterpreterDSPInstance(dsp);
+            let _ = deleteCInterpreterDSPFactory(ffi_factory);
+        }
+        return Err(format!(
+            "interp fixture heavy_bench reported invalid IO (in={num_inputs}, out={num_outputs})"
+        ));
+    }
+
+    let (elapsed, checksum) =
+        run_blocked_bench(num_inputs, num_outputs, |input_ptrs, output_ptrs| {
+            unsafe {
+                computeCInterpreterDSPInstance(dsp, BLOCK_SIZE as i32, input_ptrs, output_ptrs)
+            };
+        });
+
+    unsafe {
+        deleteCInterpreterDSPInstance(dsp);
+        let _ = deleteCInterpreterDSPFactory(ffi_factory);
+    }
+
+    black_box(checksum);
+    Ok((elapsed, checksum))
+}
+
+fn run_cranelift(input: BenchInput<'_>) -> Result<(Duration, f64), String> {
+    match input {
+        BenchInput::DspFile(case) => run_cranelift_file(case),
+        BenchInput::FixtureSinePhasor => run_cranelift_fixture_sine_phasor(),
+        BenchInput::FixtureHeavyBench => run_cranelift_fixture_heavy_bench(),
+    }
+}
+
+fn run_cranelift_file(case: &Path) -> Result<(Duration, f64), String> {
+    let c_path = CString::new(case.to_string_lossy().as_bytes())
+        .map_err(|e| format!("CString path: {e}"))?;
+    let mut err = [0_i8; 4096];
+    let factory = unsafe {
+        createCCraneliftDSPFactoryFromFile(
+            c_path.as_ptr(),
+            0,
+            std::ptr::null(),
+            err.as_mut_ptr(),
+            1,
+        )
+    };
+    if factory.is_null() {
+        return Err(format!(
+            "createCCraneliftDSPFactoryFromFile failed: {}",
+            unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy()
+        ));
+    }
+    let dsp = unsafe { createCCraneliftDSPInstance(factory) };
+    if dsp.is_null() {
+        unsafe {
+            let _ = deleteCCraneliftDSPFactory(factory);
+        }
+        return Err("createCCraneliftDSPInstance failed".to_owned());
+    }
+    unsafe { initCCraneliftDSPInstance(dsp, SAMPLE_RATE) };
+
+    let num_inputs = unsafe { getNumInputsCCraneliftDSPInstance(dsp) }.max(0) as usize;
+    let num_outputs = unsafe { getNumOutputsCCraneliftDSPInstance(dsp) }.max(0) as usize;
+    let (elapsed, checksum) =
+        run_blocked_bench(num_inputs, num_outputs, |input_ptrs, output_ptrs| {
+            unsafe {
+                computeCCraneliftDSPInstance(dsp, BLOCK_SIZE as i32, input_ptrs, output_ptrs)
+            };
+        });
+
+    unsafe {
+        deleteCCraneliftDSPInstance(dsp);
+        let _ = deleteCCraneliftDSPFactory(factory);
+    }
+
+    black_box(checksum);
+    Ok((elapsed, checksum))
+}
+
+fn run_cranelift_fixture_sine_phasor() -> Result<(Duration, f64), String> {
+    let (store, module) = build_sine_phasor_test_module();
+    let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+        .map_err(|e| e.to_string())?;
+    let compute_addr = compiled.compute_entry_addr();
+    if compute_addr == 0 {
+        return Err("compiled compute address is null".to_owned());
+    }
+    // SAFETY: `compute_addr` comes from Cranelift with the exact compute ABI.
+    let compute: ComputeFn = unsafe { std::mem::transmute(compute_addr) };
+
+    let layout = compiled.struct_layout();
+    let dsp_state =
+        OwnedAlignedDspState::new(layout.size_bytes() as usize, layout.align_bytes() as usize)?;
+
+    let num_inputs = 0usize;
+    let num_outputs = 1usize;
+    let (elapsed, checksum) =
+        run_blocked_bench(num_inputs, num_outputs, |input_ptrs, output_ptrs| {
+            // SAFETY: pointer tables and dsp pointer respect compute ABI.
+            unsafe {
+                compute(
+                    dsp_state.ptr.cast(),
+                    BLOCK_SIZE as i32,
+                    input_ptrs,
+                    output_ptrs,
+                )
+            };
+        });
+    black_box(checksum);
+    Ok((elapsed, checksum))
+}
+
+fn run_cranelift_fixture_heavy_bench() -> Result<(Duration, f64), String> {
+    let (store, module) = build_heavy_bench_test_module();
+    let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+        .map_err(|e| e.to_string())?;
+    let compute_addr = compiled.compute_entry_addr();
+    if compute_addr == 0 {
+        return Err("compiled compute address is null".to_owned());
+    }
+    // SAFETY: `compute_addr` comes from Cranelift with the exact compute ABI.
+    let compute: ComputeFn = unsafe { std::mem::transmute(compute_addr) };
+
+    let layout = compiled.struct_layout();
+    let dsp_state =
+        OwnedAlignedDspState::new(layout.size_bytes() as usize, layout.align_bytes() as usize)?;
+
+    let num_inputs = 1usize;
+    let num_outputs = 1usize;
+    let (elapsed, checksum) =
+        run_blocked_bench(num_inputs, num_outputs, |input_ptrs, output_ptrs| {
+            unsafe {
+                compute(
+                    dsp_state.ptr.cast(),
+                    BLOCK_SIZE as i32,
+                    input_ptrs,
+                    output_ptrs,
+                )
+            };
+        });
+    black_box(checksum);
+    Ok((elapsed, checksum))
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let input = match args.as_slice() {
+        [flag, name] if flag == "--fixture" && name == "sine_phasor" => {
+            BenchInput::FixtureSinePhasor
+        }
+        [flag, name] if flag == "--fixture" && name == "heavy_bench" => {
+            BenchInput::FixtureHeavyBench
+        }
+        [dsp] => BenchInput::DspFile(Path::new(dsp)),
+        _ => {
+            eprintln!(
+                "usage:\n  cargo run -p cranelift-ffi --release --example compute_bench -- <dsp-file>\n  cargo run -p cranelift-ffi --release --example compute_bench -- --fixture sine_phasor\n  cargo run -p cranelift-ffi --release --example compute_bench -- --fixture heavy_bench"
+            );
+            std::process::exit(2);
+        }
+    };
+    let total_samples = (BLOCK_SIZE * NUM_BLOCKS) as f64;
+
+    let (interp_t, interp_sum) = run_interp(input).expect("interp bench");
+    let (clif_t, clif_sum) = run_cranelift(input).expect("cranelift bench");
+
+    let interp_ns_per_sample = interp_t.as_secs_f64() * 1e9 / total_samples;
+    let clif_ns_per_sample = clif_t.as_secs_f64() * 1e9 / total_samples;
+    let speedup = interp_ns_per_sample / clif_ns_per_sample;
+
+    let label = match input {
+        BenchInput::DspFile(path) => path.display().to_string(),
+        BenchInput::FixtureSinePhasor => "fixture:sine_phasor".to_owned(),
+        BenchInput::FixtureHeavyBench => "fixture:heavy_bench".to_owned(),
+    };
+    println!("DSP: {label}");
+    println!(
+        "Config: sr={} block_size={} blocks={} warmup_blocks={}",
+        SAMPLE_RATE, BLOCK_SIZE, NUM_BLOCKS, WARMUP_BLOCKS
+    );
+    println!(
+        "Interp   : {:>10.3} ms total | {:>8.3} ns/sample | checksum={:.6}",
+        interp_t.as_secs_f64() * 1e3,
+        interp_ns_per_sample,
+        interp_sum
+    );
+    println!(
+        "Cranelift: {:>10.3} ms total | {:>8.3} ns/sample | checksum={:.6}",
+        clif_t.as_secs_f64() * 1e3,
+        clif_ns_per_sample,
+        clif_sum
+    );
+    println!("Speedup (Cranelift vs Interp): {:.2}x", speedup);
+}

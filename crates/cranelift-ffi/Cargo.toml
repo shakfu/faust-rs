@@ -20,6 +20,9 @@ compiler = { path = "../compiler" }
 fir = { path = "../fir" }
 utils = { path = "../utils" }
 
+[dev-dependencies]
+interp_ffi = { package = "interp-ffi", path = "../interp-ffi" }
+
 # FFI crate will require raw pointers/unsafe in later phases; allow is local to
 # this crate so the workspace default can remain strict.
 [lints.rust]

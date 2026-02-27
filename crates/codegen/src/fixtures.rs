@@ -20,6 +20,7 @@ pub type FirFixtureBuilder = fn() -> (FirStore, FirId);
 pub fn backend_test_fixtures() -> &'static [(&'static str, FirFixtureBuilder)] {
     &[
         ("sine_phasor", build_sine_phasor_test_module),
+        ("heavy_bench", build_heavy_bench_test_module),
         ("passthrough", build_passthrough_test_module),
         ("gain_bias_ui_meta", build_gain_bias_ui_meta_test_module),
         ("table_state_delay", build_table_state_delay_test_module),
@@ -434,7 +435,7 @@ pub fn build_table_state_delay_test_module() -> (FirStore, FirId) {
     let mut store = FirStore::new();
     let mut b = FirBuilder::new(&mut store);
 
-    let z = b.float64(0.0);
+    let z = b.float32(0.0);
     let idx0 = b.int32(0);
     let globals = [
         b.declare_var("fWriteIdx", FirType::Int32, AccessType::Struct, Some(idx0)),
@@ -590,6 +591,89 @@ pub fn build_math_intrinsics_test_module() -> (FirStore, FirId) {
     let compute = declare_compute_fn(&mut b, compute_body);
 
     let module = module_with_functions(&mut b, "math_intrinsics", &[], &[compute]);
+    (store, module)
+}
+
+/// Builds a large mono fixture intended for backend compute benchmarking.
+///
+/// Design goals:
+/// - much heavier per-sample workload than `sine_phasor`
+/// - deterministic and backend-agnostic FIR
+/// - stress arithmetic + math-call lowering in a realistic stateful loop
+///
+/// Shape:
+/// - one input / one output
+/// - 12 persistent state variables (`s0..s11`)
+/// - per-sample unrolled stage chain:
+///   - mix accumulator with stage state
+///   - apply stage scaling + cubic waveshaper
+///   - store feedback into stage state
+///   - accumulate feedback into running output
+///
+/// Representative Faust DSP intent (approximate):
+/// ```faust
+/// // Conceptual structure only, not exact normalized source.
+/// process(x) = chainN(x) with {
+///   stage(s, x) = y with {
+///     z = (x + s) * c;
+///     y = z - (z*z*z)*k;
+///     s = y * 0.97;
+///   };
+/// };
+/// ```
+#[must_use]
+pub fn build_heavy_bench_test_module() -> (FirStore, FirId) {
+    const STAGES: usize = 12;
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let mut globals = Vec::<FirId>::with_capacity(STAGES);
+    let z = b.float32(0.0);
+    for idx in 0..STAGES {
+        let name = format!("s{idx}");
+        globals.push(b.declare_var(&name, FirType::FaustFloat, AccessType::Struct, Some(z)));
+    }
+
+    let (in_alias, out_alias) = io_aliases_for_mono_compute(&mut b);
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+    let x = b.load_table("input0", AccessType::Stack, i0, FirType::FaustFloat);
+    let acc_init = b.declare_var("acc", FirType::FaustFloat, AccessType::Stack, Some(x));
+
+    let mut sample_stmts = Vec::<FirId>::with_capacity((STAGES * 2) + 2);
+    sample_stmts.push(acc_init);
+    for idx in 0..STAGES {
+        let name = format!("s{idx}");
+        let s = b.load_var(&name, AccessType::Struct, FirType::FaustFloat);
+        let acc_cur = b.load_var("acc", AccessType::Stack, FirType::FaustFloat);
+        let mixed = b.binop(FirBinOp::Add, acc_cur, s, FirType::FaustFloat);
+        let coeff = b.float32((0.62 + 0.013 * idx as f64) as f32);
+        let scaled = b.binop(FirBinOp::Mul, mixed, coeff, FirType::FaustFloat);
+        let z2 = b.binop(FirBinOp::Mul, scaled, scaled, FirType::FaustFloat);
+        let z3 = b.binop(FirBinOp::Mul, z2, scaled, FirType::FaustFloat);
+        let curve_k = b.float32((0.05 + 0.004 * idx as f64) as f32);
+        let shaped = b.binop(FirBinOp::Mul, z3, curve_k, FirType::FaustFloat);
+        let nonlin = b.binop(FirBinOp::Sub, scaled, shaped, FirType::FaustFloat);
+        let fb_gain = b.float32(0.97);
+        let feedback = b.binop(FirBinOp::Mul, nonlin, fb_gain, FirType::FaustFloat);
+        let store_state = b.store_var(&name, AccessType::Struct, feedback);
+        sample_stmts.push(store_state);
+        let acc_next = feedback;
+        let store_acc = b.store_var("acc", AccessType::Stack, acc_next);
+        sample_stmts.push(store_acc);
+    }
+
+    let acc_final = b.load_var("acc", AccessType::Stack, FirType::FaustFloat);
+    let out_scale = b.float32((1.0 / STAGES as f64) as f32);
+    let y = b.binop(FirBinOp::Mul, acc_final, out_scale, FirType::FaustFloat);
+    let write = b.store_table("output0", AccessType::Stack, i0, y);
+    sample_stmts.push(write);
+
+    let sample_body = b.block(&sample_stmts);
+    let sample_loop = b.simple_for_loop("i0", count, sample_body, false);
+    let compute_body = b.block(&[in_alias, out_alias, sample_loop]);
+    let compute = declare_compute_fn(&mut b, compute_body);
+    let module = module_with_functions(&mut b, "heavy_bench", &globals, &[compute]);
     (store, module)
 }
 

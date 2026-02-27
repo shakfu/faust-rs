@@ -1502,8 +1502,9 @@ mod tests {
 
             let payload = unsafe { writeCCraneliftDSPFactoryToBitcode(factory) };
             assert!(!payload.is_null(), "write bitcode failed for {rel}");
-            let restored =
-                unsafe { readCCraneliftDSPFactoryFromBitcode(payload.cast_const(), err.as_mut_ptr()) };
+            let restored = unsafe {
+                readCCraneliftDSPFactoryFromBitcode(payload.cast_const(), err.as_mut_ptr())
+            };
             assert!(
                 !restored.is_null(),
                 "restore from bitcode failed for {rel}: {}",
@@ -1511,9 +1512,19 @@ mod tests {
             );
 
             unsafe {
-                assert!((*factory).compiled_jit.is_some(), "missing original jit for {rel}");
-                assert!((*restored).compiled_jit.is_some(), "missing restored jit for {rel}");
-                assert_eq!((*restored).sha_key, (*factory).sha_key, "sha mismatch for {rel}");
+                assert!(
+                    (*factory).compiled_jit.is_some(),
+                    "missing original jit for {rel}"
+                );
+                assert!(
+                    (*restored).compiled_jit.is_some(),
+                    "missing restored jit for {rel}"
+                );
+                assert_eq!(
+                    (*restored).sha_key,
+                    (*factory).sha_key,
+                    "sha mismatch for {rel}"
+                );
                 assert_eq!(
                     (*restored).compile_options,
                     (*factory).compile_options,
