@@ -45,7 +45,7 @@ const CRANELIFT_FFI_VERSION: &str = concat!("faust-rs-cranelift-ffi/", env!("CAR
 ///
 /// # Safety
 /// The returned pointer is process-static and must not be freed or mutated.
-#[unsafe(no_mangle)]
+#[cfg_attr(feature = "standalone-capi-globals", unsafe(no_mangle))]
 pub extern "C" fn getCLibFaustVersion() -> *const c_char {
     use std::sync::OnceLock;
     static VERSION_C: OnceLock<CString> = OnceLock::new();
@@ -593,7 +593,7 @@ pub unsafe extern "C" fn writeCCraneliftDSPFactoryToBitcodeFile(
 ///
 /// # Safety
 /// Callers must coordinate access mode transitions across all foreign threads.
-#[unsafe(no_mangle)]
+#[cfg_attr(feature = "standalone-capi-globals", unsafe(no_mangle))]
 pub extern "C" fn startMTDSPFactories() -> bool {
     start_mt()
 }
@@ -602,7 +602,7 @@ pub extern "C" fn startMTDSPFactories() -> bool {
 ///
 /// # Safety
 /// Callers must coordinate access mode transitions across all foreign threads.
-#[unsafe(no_mangle)]
+#[cfg_attr(feature = "standalone-capi-globals", unsafe(no_mangle))]
 pub extern "C" fn stopMTDSPFactories() {
     stop_mt();
 }
@@ -612,7 +612,7 @@ pub extern "C" fn stopMTDSPFactories() {
 /// # Safety
 /// `ptr` must be null or a pointer previously returned by a Cranelift FFI
 /// function that documents `freeCMemory` ownership.
-#[unsafe(no_mangle)]
+#[cfg_attr(feature = "standalone-capi-globals", unsafe(no_mangle))]
 pub unsafe extern "C" fn freeCMemory(ptr: *mut c_void) {
     unsafe { free_c_memory_c_string_only(ptr) }
 }

@@ -453,7 +453,7 @@ pub extern "C" fn destroyLibContext() {
     });
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(feature = "standalone-capi-globals", unsafe(no_mangle))]
 /// Free a heap-allocated C string returned by this library.
 ///
 /// # Safety

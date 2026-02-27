@@ -15,7 +15,11 @@ all = "warn"
 
 [lib]
 name = "faust_box"
-crate-type = ["rlib", "cdylib", "staticlib"]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = ["standalone-capi-globals"]
+standalone-capi-globals = []
 
 [dependencies]
 boxes = { path = "../boxes" }
