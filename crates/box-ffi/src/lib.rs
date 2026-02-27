@@ -26,6 +26,7 @@
 //! exist yet in this port.
 
 #![allow(unsafe_code)]
+#![allow(non_snake_case)] // FFI parity requires preserving C API symbol names.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};

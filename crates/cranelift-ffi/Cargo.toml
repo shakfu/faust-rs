@@ -10,7 +10,7 @@ name = "faust_cranelift"
 crate-type = ["rlib"]
 
 [features]
-default = ["standalone-capi-globals"]
+default = []
 standalone-capi-globals = []
 
 [dependencies]

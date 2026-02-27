@@ -22,6 +22,7 @@
 //! - [`ui`] — UI/meta callback dispatch helpers.
 
 #![allow(unsafe_code)] // Future FFI implementation will require raw pointers.
+#![allow(non_snake_case)] // FFI parity requires preserving C API symbol names.
 
 pub mod cache;
 pub mod factory;
