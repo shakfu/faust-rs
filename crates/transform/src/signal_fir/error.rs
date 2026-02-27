@@ -41,6 +41,10 @@ impl SignalFirErrorCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalFirError {
     code: SignalFirErrorCode,
+    /// Human-readable detail intended for logs and terminal diagnostics.
+    ///
+    /// This text is not a stable API contract; callers should key behavior on
+    /// [`SignalFirError::code`] / [`SignalFirErrorCode::as_str`].
     message: String,
 }
 
@@ -58,6 +62,12 @@ impl SignalFirError {
     #[must_use]
     pub fn code(&self) -> SignalFirErrorCode {
         self.code
+    }
+
+    /// Returns the non-stable, human-readable explanation.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
     }
 }
 

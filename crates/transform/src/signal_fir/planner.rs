@@ -22,6 +22,11 @@ pub struct SignalFirPlan {
 ///
 /// This is intentionally conservative in Step 1A: semantics/resource details
 /// (delay lines/tables/UI) are added in Step 2+.
+///
+/// Invariants guaranteed on success:
+/// - `signal_count == signals.len()`
+/// - `num_outputs == signals.len()` (strict top-level output contract)
+/// - `options.module_name` is non-empty after trim
 pub fn plan_signals(
     signals: &[SigId],
     num_inputs: usize,

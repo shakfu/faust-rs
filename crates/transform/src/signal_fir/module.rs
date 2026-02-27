@@ -37,6 +37,9 @@ use super::SignalFirOutput;
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::planner::SignalFirPlan;
 
+/// Deterministic prototype emission order for math helper functions.
+///
+/// Keeping this order stable avoids noisy golden diffs in generated FIR/C/C++.
 const MATH_PROTO_ORDER: &[FirMathOp] = &[
     FirMathOp::Pow,
     FirMathOp::Min,
@@ -363,6 +366,9 @@ pub fn build_module(
 /// - if explicit groups (`OpenBox`/`CloseBox`) are already present, keep UI as-is;
 /// - if widgets exist but no group exists, inject:
 ///   `openVerticalBox(module_name) ... closeBox`.
+///
+/// This mirrors Faust behavior where a root group is synthesized to keep UI
+/// hierarchy valid for consumers expecting balanced open/close group events.
 fn maybe_wrap_ui_in_root_group(
     store: &mut FirStore,
     module_name: &str,
@@ -397,6 +403,13 @@ fn maybe_wrap_ui_in_root_group(
     wrapped
 }
 
+/// Stateful lowering engine from propagated signals to FIR.
+///
+/// Design notes:
+/// - memoizes lowered signal nodes in [`Self::cache`] for DAG sharing;
+/// - splits statements by lifecycle section (`constants/reset/clear/compute`);
+/// - tracks emitted state/UI/table declarations to keep output deterministic and
+///   avoid duplicate declarations.
 struct SignalToFirLower<'a> {
     arena: &'a TreeArena,
     num_inputs: usize,
@@ -425,6 +438,7 @@ struct SignalToFirLower<'a> {
 }
 
 impl<'a> SignalToFirLower<'a> {
+    /// Creates one fresh lowering state for a module build.
     fn new(arena: &'a TreeArena, num_inputs: usize) -> Self {
         Self {
             arena,
@@ -454,6 +468,10 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
+    /// Lowers one signal node to a FIR value expression.
+    ///
+    /// This function is the central dispatcher over [`signals::SigMatch`].
+    /// Unsupported families return typed `FRS-SFIR-*` errors.
     fn lower_signal(&mut self, sig: SigId) -> Result<FirId, SignalFirError> {
         if let Some(id) = self.cache.get(&sig).copied() {
             return Ok(id);
@@ -561,6 +579,8 @@ impl<'a> SignalToFirLower<'a> {
         Ok(lowered)
     }
 
+    /// Lowers one input signal by materializing channel-pointer aliases once
+    /// and generating a per-sample table load (`inputN[i0]`).
     fn lower_input(&mut self, index: i32) -> Result<FirId, SignalFirError> {
         let index = usize::try_from(index).map_err(|_| {
             SignalFirError::new(
@@ -601,6 +621,9 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.load_table(alias, AccessType::Stack, i0, FirType::FaustFloat))
     }
 
+    /// Lowers general `SIGDELAY` currently restricted to integer amount `1`.
+    ///
+    /// Non-unit delays are explicitly rejected in the current fast-lane slice.
     fn lower_delay(
         &mut self,
         node: SigId,
@@ -623,6 +646,9 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
+    /// Lowers one single-sample state edge (`delay1`/`prefix`) as:
+    /// `out = load(state); update(state, next)` with update deferred to the
+    /// compute-loop update list.
     fn lower_delay_state(
         &mut self,
         node: SigId,
@@ -643,6 +669,8 @@ impl<'a> SignalToFirLower<'a> {
         Ok(out)
     }
 
+    /// Ensures one struct state slot exists for `node`, creating declaration
+    /// and `instanceClear` initialization on first use.
     fn ensure_state_slot(&mut self, node: SigId, init: FirId) -> String {
         if let Some(name) = self.state_name_by_node.get(&node) {
             return name.clone();
@@ -661,11 +689,13 @@ impl<'a> SignalToFirLower<'a> {
         name
     }
 
+    /// Emits one floating-point constant in FIR.
     fn float_const(&mut self, value: f64) -> FirId {
         let mut b = FirBuilder::new(&mut self.store);
         b.float64(value)
     }
 
+    /// Derives an initial state value from a signal if constant, otherwise `0`.
     fn initial_state_from_signal(&mut self, sig: SigId) -> FirId {
         match match_sig(self.arena, sig) {
             SigMatch::Int(v) => self.lower_int32_const(v),
@@ -674,11 +704,13 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
+    /// Emits one `Int32` FIR constant.
     fn lower_int32_const(&mut self, value: i32) -> FirId {
         let mut b = FirBuilder::new(&mut self.store);
         b.int32(value)
     }
 
+    /// Lowers button/checkbox UI controls as zone-backed struct variables.
     fn lower_button(&mut self, node: SigId, label: SigId, typ: ButtonType) -> FirId {
         if let Some(var) = self.ui_controls.get(&node).cloned() {
             let mut b = FirBuilder::new(&mut self.store);
@@ -701,6 +733,8 @@ impl<'a> SignalToFirLower<'a> {
         b.load_var(var, AccessType::Struct, FirType::FaustFloat)
     }
 
+    /// Lowers slider-style UI controls and records metadata in
+    /// `buildUserInterface`.
     fn lower_slider(
         &mut self,
         node: SigId,
@@ -740,6 +774,8 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.load_var(var, AccessType::Struct, FirType::FaustFloat))
     }
 
+    /// Lowers bargraph UI nodes by creating UI descriptors and storing incoming
+    /// runtime value in a dedicated control zone.
     fn lower_bargraph(
         &mut self,
         node: SigId,
@@ -779,6 +815,8 @@ impl<'a> SignalToFirLower<'a> {
         Ok(value)
     }
 
+    /// Lowers a soundfile declaration into UI-only registration and an opaque
+    /// struct-backed runtime handle.
     fn lower_soundfile(&mut self, node: SigId, label: SigId) -> FirId {
         if let Some(var) = self.soundfiles.get(&node).cloned() {
             let mut b = FirBuilder::new(&mut self.store);
@@ -793,6 +831,8 @@ impl<'a> SignalToFirLower<'a> {
         b.load_var(var, AccessType::Struct, FirType::Sound)
     }
 
+    /// Lowers waveform literals into constant FIR tables and returns a pointer
+    /// alias to the declared table.
     fn lower_waveform(&mut self, node: SigId, values: &[SigId]) -> Result<FirId, SignalFirError> {
         let table_name = self.ensure_waveform_table(node, values)?;
         let index = {
@@ -803,6 +843,8 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.load_table(table_name, AccessType::Struct, index, FirType::FaustFloat))
     }
 
+    /// Lowers one table read by resolving the table producer and normalizing
+    /// the runtime read index according to table length.
     fn lower_rdtbl(
         &mut self,
         node: SigId,
@@ -822,6 +864,10 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.load_table(table_name, AccessType::Struct, index, FirType::FaustFloat))
     }
 
+    /// Lowers one table write producer (`SIGWRTBL`) and returns the table alias.
+    ///
+    /// Current scope supports deterministic constant-size tables with generator
+    /// expansion handled by [`Self::expand_generator_values`].
     fn lower_wrtbl(
         &mut self,
         node: SigId,
@@ -852,6 +898,7 @@ impl<'a> SignalToFirLower<'a> {
         Ok(wsig_value)
     }
 
+    /// Resolves a table-producing signal into `(table_name, table_len)`.
     fn resolve_table(&mut self, sig: SigId) -> Result<(String, usize), SignalFirError> {
         if let Some(name) = self.waveform_tables.get(&sig).cloned() {
             let len = self.waveform_table_len.get(&sig).copied().unwrap_or(0);
@@ -870,6 +917,7 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
+    /// Ensures one waveform table declaration is emitted exactly once.
     fn ensure_waveform_table(
         &mut self,
         sig: SigId,
@@ -910,6 +958,8 @@ impl<'a> SignalToFirLower<'a> {
         Ok(name)
     }
 
+    /// Ensures one writable table declaration and initialization are emitted
+    /// exactly once.
     fn ensure_wrtbl_table(
         &mut self,
         sig: SigId,
@@ -946,11 +996,13 @@ impl<'a> SignalToFirLower<'a> {
         Ok((name, size))
     }
 
+    /// Creates a zero-filled table initializer fallback.
     fn zero_table_values(&mut self, size: usize) -> Vec<FirId> {
         let zero = self.float_const(0.0);
         vec![zero; size]
     }
 
+    /// Evaluates table-size signal to a positive `usize`.
     fn table_size_from_sig(&self, size_sig: SigId) -> Result<usize, SignalFirError> {
         match match_sig(self.arena, size_sig) {
             SigMatch::Int(v) if v > 0 => usize::try_from(v).map_err(|_| {
@@ -970,6 +1022,10 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
+    /// Expands a table generator signal into concrete initializer values.
+    ///
+    /// Only generator shapes that can be fully resolved at compile-time are
+    /// accepted in the current fast-lane slice.
     fn expand_generator_values(
         &mut self,
         generator_sig: SigId,
@@ -1009,6 +1065,7 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
+    /// Normalizes one table index to `[0, table_len)` with integer modulo.
     fn normalized_table_index(&mut self, index: FirId, table_len: usize) -> FirId {
         let idx_i32 = {
             let mut b = FirBuilder::new(&mut self.store);
@@ -1030,6 +1087,7 @@ impl<'a> SignalToFirLower<'a> {
         b.binop(FirBinOp::Rem, rem_plus_size, size, FirType::Int32)
     }
 
+    /// Declares one named struct variable once.
     fn ensure_named_struct_var(&mut self, name: &str, typ: FirType, init: Option<FirId>) {
         if self.named_struct_vars.contains(name) {
             return;
@@ -1043,6 +1101,7 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
+    /// Registers one reset-time assignment for UI controls (`instanceResetUserInterface`).
     fn register_reset_init(&mut self, name: String, init: FirId) {
         if !self.reset_init_seen.insert(name.clone()) {
             return;
@@ -1052,6 +1111,7 @@ impl<'a> SignalToFirLower<'a> {
             .push(b.store_var(name, AccessType::Struct, init));
     }
 
+    /// Registers one clear-time assignment for runtime state (`instanceClear`).
     fn register_clear_init(&mut self, name: String, init: FirId) {
         if !self.clear_init_seen.insert(name.clone()) {
             return;
@@ -1061,6 +1121,7 @@ impl<'a> SignalToFirLower<'a> {
             .push(b.store_var(name, AccessType::Struct, init));
     }
 
+    /// Helper to produce a typed unsupported-node error with readable dumped IR.
     fn unsupported_node<T>(&self, sig: SigId, detail: &str) -> Result<T, SignalFirError> {
         Err(SignalFirError::new(
             SignalFirErrorCode::UnsupportedSignalNode,
@@ -1068,6 +1129,7 @@ impl<'a> SignalToFirLower<'a> {
         ))
     }
 
+    /// Converts a label signal node to UTF-8 text fallback used by UI emit.
     fn label_text(&self, label: SigId) -> String {
         match self.arena.kind(label) {
             Some(NodeKind::Symbol(s)) => s.to_string(),
@@ -1078,10 +1140,12 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
+    /// Stable generated UI zone variable naming policy.
     fn ui_control_var_name(&self, node: SigId, prefix: &str) -> String {
         format!("{prefix}{}", node.as_u32())
     }
 
+    /// Extracts a compile-time floating constant when possible.
     fn constant_f64(&self, sig: SigId) -> Option<f64> {
         match match_sig(self.arena, sig) {
             SigMatch::Int(v) => Some(v as f64),
@@ -1090,6 +1154,7 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
+    /// Lowers one binary signal operator to FIR binop.
     fn lower_binop(&mut self, op: BinOp, lhs: SigId, rhs: SigId) -> Result<FirId, SignalFirError> {
         let lhs = self.lower_signal(lhs)?;
         let rhs = self.lower_signal(rhs)?;
@@ -1103,6 +1168,7 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.binop(fir_op, lhs, rhs, typ))
     }
 
+    /// Lowers one unary math intrinsic call.
     fn lower_math1(&mut self, op: FirMathOp, value: SigId) -> Result<FirId, SignalFirError> {
         let value = self.lower_signal(value)?;
         self.used_math_ops.insert(op);
@@ -1110,6 +1176,7 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.math_call(op, &[value], FirType::FaustFloat))
     }
 
+    /// Lowers one binary math intrinsic call.
     fn lower_math2(
         &mut self,
         op: FirMathOp,
@@ -1123,18 +1190,21 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.math_call(op, &[lhs, rhs], FirType::FaustFloat))
     }
 
+    /// Lowers one numeric cast.
     fn lower_cast(&mut self, typ: FirType, value: SigId) -> Result<FirId, SignalFirError> {
         let value = self.lower_signal(value)?;
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.cast(typ, value))
     }
 
+    /// Lowers one bitcast operation.
     fn lower_bitcast(&mut self, typ: FirType, value: SigId) -> Result<FirId, SignalFirError> {
         let value = self.lower_signal(value)?;
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.bitcast(typ, value))
     }
 
+    /// Lowers `select2` with explicit result-type selection.
     fn lower_select2(
         &mut self,
         cond: SigId,
@@ -1148,6 +1218,8 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.select2(cond, then_value, else_value, FirType::FaustFloat))
     }
 
+    /// Lowers recursion projection nodes by decoding de Bruijn references and
+    /// recursively lowering the resolved group body.
     fn lower_proj(
         &mut self,
         node: SigId,
@@ -1204,6 +1276,7 @@ impl<'a> SignalToFirLower<'a> {
         Ok(out)
     }
 
+    /// Decodes one `SIGREC`/legacy recursion wrapper to its body signal.
     fn decode_debruijn_group(&self, group: SigId) -> Option<SigId> {
         let node = self.arena.node(group)?;
         let NodeKind::Tag(tag_id) = node.kind else {
@@ -1218,6 +1291,7 @@ impl<'a> SignalToFirLower<'a> {
         self.arena.hd(*list)
     }
 
+    /// Decodes one `DEBRUIJNREF(level)` index from a recursion group payload.
     fn decode_debruijn_ref(&self, group: SigId) -> Option<usize> {
         let node = self.arena.node(group)?;
         let NodeKind::Tag(tag_id) = node.kind else {
@@ -1233,6 +1307,7 @@ impl<'a> SignalToFirLower<'a> {
     }
 }
 
+/// Maps signal-level operators to FIR operators with result typing policy.
 fn map_binop(op: BinOp) -> Option<(FirBinOp, FirType)> {
     match op {
         BinOp::Add => Some((FirBinOp::Add, FirType::FaustFloat)),
