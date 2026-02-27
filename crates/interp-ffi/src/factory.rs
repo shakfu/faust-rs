@@ -36,6 +36,9 @@ use crate::types::{InterpreterDspFactory, alloc_c_string, alloc_factory, free_fa
 /// Returns the Faust library version string.
 ///
 /// The returned pointer is valid for the lifetime of the process (static data).
+///
+/// # Safety
+/// The returned pointer must not be freed or mutated by the caller.
 #[unsafe(no_mangle)]
 pub extern "C" fn getCLibFaustVersion() -> *const c_char {
     use std::sync::OnceLock;
@@ -304,6 +307,9 @@ pub unsafe extern "C" fn deleteCInterpreterDSPFactory(factory: *mut InterpreterD
 }
 
 /// Delete all factories held in the global cache.
+///
+/// # Safety
+/// Callers must ensure no live instances still reference the deleted factories.
 #[unsafe(no_mangle)]
 pub extern "C" fn deleteAllCInterpreterDSPFactories() {
     for ptr in cache_drain() {
@@ -319,6 +325,10 @@ pub extern "C" fn deleteAllCInterpreterDSPFactories() {
 /// The outer array pointer itself must also be freed with `freeCMemory`.
 ///
 /// Returns null if the cache is empty.
+///
+/// # Safety
+/// The caller owns the returned allocation and must free each string element,
+/// then free the outer array pointer using `freeCMemory`.
 #[unsafe(no_mangle)]
 pub extern "C" fn getAllCInterpreterDSPFactories() -> *mut *mut c_char {
     let keys = cache_all_sha_keys();
@@ -375,12 +385,19 @@ pub unsafe extern "C" fn getCInterpreterDSPFactoryLibraryList(
 /// Enable multi-thread safe access mode.
 ///
 /// Returns `true` if multi-thread access was successfully started.
+///
+/// # Safety
+/// Enabling MT mode concurrently with non-MT cache access from foreign code is
+/// undefined at the C ABI contract level.
 #[unsafe(no_mangle)]
 pub extern "C" fn startMTDSPFactories() -> bool {
     start_mt()
 }
 
 /// Disable multi-thread safe access mode.
+///
+/// # Safety
+/// Callers must coordinate with all threads currently using factory pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn stopMTDSPFactories() {
     stop_mt();

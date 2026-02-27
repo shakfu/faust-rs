@@ -36,6 +36,9 @@ const CRANELIFT_FFI_SCAFFOLD_VERSION: &str =
 /// Returns the Faust library version string.
 ///
 /// This is a process-lifetime static C string in the scaffold implementation.
+///
+/// # Safety
+/// The returned pointer is process-static and must not be freed or mutated.
 #[unsafe(no_mangle)]
 pub extern "C" fn getCLibFaustVersion() -> *const c_char {
     use std::sync::OnceLock;
@@ -221,6 +224,9 @@ pub unsafe extern "C" fn deleteCCraneliftDSPFactory(factory: *mut CraneliftDspFa
 }
 
 /// Delete all cached Cranelift factories.
+///
+/// # Safety
+/// Callers must ensure no live DSP instances still reference these factories.
 #[unsafe(no_mangle)]
 pub extern "C" fn deleteAllCCraneliftDSPFactories() {
     for ptr in cache_drain() {
@@ -237,6 +243,10 @@ pub extern "C" fn deleteAllCCraneliftDSPFactories() {
 /// The returned strings must be freed individually with `freeCMemory`. As in
 /// the current `interp-ffi` implementation, the outer array deallocation path is
 /// not yet modeled separately in the scaffold.
+///
+/// # Safety
+/// The caller owns the returned allocations and must free each returned string;
+/// the outer array ownership follows the crate's current scaffold contract.
 #[unsafe(no_mangle)]
 pub extern "C" fn getAllCCraneliftDSPFactories() -> *mut *mut c_char {
     let keys = cache_all_sha_keys();
@@ -476,12 +486,18 @@ pub unsafe extern "C" fn writeCCraneliftDSPFactoryToBitcodeFile(
 /// Enable multi-thread-safe factory mode.
 ///
 /// The scaffold toggles an internal compatibility flag and returns `true`.
+///
+/// # Safety
+/// Callers must coordinate access mode transitions across all foreign threads.
 #[unsafe(no_mangle)]
 pub extern "C" fn startMTDSPFactories() -> bool {
     start_mt()
 }
 
 /// Disable multi-thread-safe factory mode (compatibility flag only).
+///
+/// # Safety
+/// Callers must coordinate access mode transitions across all foreign threads.
 #[unsafe(no_mangle)]
 pub extern "C" fn stopMTDSPFactories() {
     stop_mt();

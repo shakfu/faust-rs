@@ -48,3 +48,47 @@ pub const CRATE_NAME: &str = "tlib";
 pub fn crate_id() -> &'static str {
     CRATE_NAME
 }
+
+/// Converts one tree node to a compact textual atom representation.
+///
+/// This helper is intentionally shallow (single node, not recursive pretty-print):
+/// - `Symbol`/`StringLiteral` -> raw string payload
+/// - `Int`/`FloatBits` -> numeric text
+/// - `Tag` -> interned tag name when available, empty string otherwise
+/// - `Nil`/`Cons` -> `"nil"` / `"cons"`
+/// - unknown id -> empty string
+#[must_use]
+pub fn tree_to_string(arena: &TreeArena, id: TreeId) -> String {
+    match arena.kind(id) {
+        Some(NodeKind::Symbol(s)) => s.to_string(),
+        Some(NodeKind::StringLiteral(s)) => s.to_string(),
+        Some(NodeKind::Int(v)) => v.to_string(),
+        Some(NodeKind::FloatBits(bits)) => f64::from_bits(*bits).to_string(),
+        Some(NodeKind::Tag(t)) => arena.tag_name(*t).unwrap_or("").to_owned(),
+        Some(NodeKind::Nil) => "nil".to_owned(),
+        Some(NodeKind::Cons) => "cons".to_owned(),
+        None => String::new(),
+    }
+}
+
+/// Extracts an integer atom value from one tree node.
+///
+/// Returns `None` when the node is not an `Int`.
+#[must_use]
+pub fn tree_to_int(arena: &TreeArena, id: TreeId) -> Option<i64> {
+    match arena.kind(id) {
+        Some(NodeKind::Int(v)) => Some(*v),
+        _ => None,
+    }
+}
+
+/// Extracts a floating-point atom value from one tree node.
+///
+/// Returns `None` when the node is not a `FloatBits`.
+#[must_use]
+pub fn tree_to_double(arena: &TreeArena, id: TreeId) -> Option<f64> {
+    match arena.kind(id) {
+        Some(NodeKind::FloatBits(bits)) => Some(f64::from_bits(*bits)),
+        _ => None,
+    }
+}

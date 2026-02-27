@@ -36,7 +36,7 @@ pub mod inliner;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
-use tlib::{NodeKind, TreeArena, TreeId};
+use tlib::{NodeKind, TreeArena, TreeId, tree_to_double, tree_to_int};
 
 pub const CRATE_NAME: &str = "fir";
 
@@ -2499,10 +2499,7 @@ fn decode_symbol(arena: &TreeArena, id: FirId) -> Option<String> {
 }
 
 fn decode_i64(arena: &TreeArena, id: FirId) -> Option<i64> {
-    match arena.kind(id)? {
-        NodeKind::Int(v) => Some(*v),
-        _ => None,
-    }
+    tree_to_int(arena, id)
 }
 
 fn decode_i32(arena: &TreeArena, id: FirId) -> Option<i32> {
@@ -2515,11 +2512,7 @@ fn decode_f32_bits(arena: &TreeArena, id: FirId) -> Option<f32> {
 }
 
 fn decode_f64(arena: &TreeArena, id: FirId) -> Option<f64> {
-    match arena.kind(id)? {
-        NodeKind::FloatBits(bits) => Some(f64::from_bits(*bits)),
-        NodeKind::Int(v) => Some(*v as f64),
-        _ => None,
-    }
+    tree_to_double(arena, id).or_else(|| tree_to_int(arena, id).map(|v| v as f64))
 }
 
 fn decode_bool(arena: &TreeArena, id: FirId) -> Option<bool> {

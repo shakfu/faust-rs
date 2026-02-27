@@ -1,0 +1,28 @@
+[package]
+name = "box-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints.rust]
+unsafe_code = "allow"
+unused_attributes = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+all = "warn"
+
+[lib]
+name = "faust_box"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+boxes = { path = "../boxes" }
+tlib = { path = "../tlib" }
+utils = { path = "../utils" }
+compiler = { path = "../compiler" }
+propagate = { path = "../propagate" }
+codegen = { path = "../codegen" }
+transform = { path = "../transform" }
+fir = { path = "../fir" }

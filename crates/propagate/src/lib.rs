@@ -29,7 +29,7 @@ use boxes::{BoxId, BoxMatch, match_box};
 use errors::codes;
 use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
 use signals::{SigBuilder, SigId};
-use tlib::{NodeKind, TreeArena, TreeId};
+use tlib::{NodeKind, TreeArena, TreeId, tree_to_int};
 
 /// Memoization cache for [`box_arity`] results, keyed by `BoxId`.
 pub type ArityCache = AHashMap<BoxId, Result<BoxArity, PropagateError>>;
@@ -1228,16 +1228,13 @@ fn usize_from_int_node(
     node: TreeId,
     field: &'static str,
 ) -> Result<usize, PropagateError> {
-    let Some(NodeKind::Int(value)) = arena.kind(node) else {
+    let Some(value) = tree_to_int(arena, node) else {
         return Err(PropagateError::InvalidIntegerValue { node, field });
     };
-    if *value < 0 {
-        return Err(PropagateError::NegativeIntegerValue {
-            field,
-            value: *value,
-        });
+    if value < 0 {
+        return Err(PropagateError::NegativeIntegerValue { field, value });
     }
-    usize::try_from(*value).map_err(|_| PropagateError::InvalidIntegerValue { node, field })
+    usize::try_from(value).map_err(|_| PropagateError::InvalidIntegerValue { node, field })
 }
 
 /// Fallible `usize -> i32` conversion used for stable signal-index nodes.
@@ -1354,10 +1351,7 @@ fn debruijn_ref_level(arena: &TreeArena, root: TreeId) -> Option<i64> {
     let [level_node] = children else {
         return None;
     };
-    match arena.kind(*level_node) {
-        Some(NodeKind::Int(level)) => Some(*level),
-        _ => None,
-    }
+    tree_to_int(arena, *level_node)
 }
 
 /// Returns recursive group body when `root` is a `DEBRUIJN` node.

@@ -391,6 +391,9 @@ unsafe fn class_init_instance(dsp: *mut InterpreterDspInstance, _sample_rate: c_
 // ── C-string helper re-exported for the C++ wrapper ──────────────────────────
 
 /// Expose a non-null version string for the C++ wrapper header.
+///
+/// # Safety
+/// The returned pointer is process-static and must not be freed or mutated.
 #[unsafe(no_mangle)]
 pub extern "C" fn getInterpreterDSPInstanceVersion() -> *const c_char {
     // Returns the same version as getCLibFaustVersion.

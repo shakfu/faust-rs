@@ -21,7 +21,7 @@ use std::fmt;
 
 use ahash::AHashMap;
 
-use crate::{NodeKind, TreeArena, TreeId};
+use crate::{NodeKind, TreeArena, TreeId, tree_to_int};
 
 /// Tag for one de Bruijn recursive group binder: `DEBRUIJN(body)`.
 pub const DEBRUIJN_TAG: &str = "DEBRUIJN";
@@ -114,10 +114,7 @@ pub fn match_de_bruijn_rec(arena: &TreeArena, id: TreeId) -> Option<TreeId> {
 pub fn match_de_bruijn_ref(arena: &TreeArena, id: TreeId) -> Option<i64> {
     let children = tag_children(arena, id, DEBRUIJNREF_TAG)?;
     match children {
-        [lvl] => match arena.kind(*lvl) {
-            Some(NodeKind::Int(level)) => Some(*level),
-            _ => None,
-        },
+        [lvl] => tree_to_int(arena, *lvl),
         _ => None,
     }
 }

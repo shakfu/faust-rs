@@ -31,7 +31,7 @@ use fir::{
     FirStore, FirType, NamedType, SliderRange, SliderType, UiBoxType, match_fir,
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
-use tlib::{NodeKind, TreeArena};
+use tlib::{NodeKind, TreeArena, tree_to_int};
 
 use super::SignalFirOutput;
 use super::error::{SignalFirError, SignalFirErrorCode};
@@ -1229,10 +1229,7 @@ impl<'a> SignalToFirLower<'a> {
         let [depth] = node.children.as_slice() else {
             return None;
         };
-        match self.arena.kind(*depth) {
-            Some(NodeKind::Int(v)) => usize::try_from(*v).ok(),
-            _ => None,
-        }
+        usize::try_from(tree_to_int(self.arena, *depth)?).ok()
     }
 }
 

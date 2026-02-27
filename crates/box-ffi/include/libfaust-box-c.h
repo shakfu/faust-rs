@@ -1,0 +1,216 @@
+#ifndef LIBFAUST_BOX_C_H
+#define LIBFAUST_BOX_C_H
+
+#include <stdbool.h>
+
+#ifdef _MSC_VER
+typedef void CTree;
+#else
+typedef struct {} CTree;
+#endif
+
+typedef CTree* Signal;
+typedef CTree* Box;
+
+enum SType { kSInt, kSReal };
+enum SOperator {
+    kAdd,
+    kSub,
+    kMul,
+    kDiv,
+    kRem,
+    kLsh,
+    kARsh,
+    kLRsh,
+    kGT,
+    kLT,
+    kGE,
+    kLE,
+    kEQ,
+    kNE,
+    kAND,
+    kOR,
+    kXOR
+};
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void createLibContext(void);
+void destroyLibContext(void);
+void freeCMemory(void* ptr);
+
+char* CprintBox(Box box, bool shared, int max_size);
+char* CprintSignal(Signal sig, bool shared, int max_size);
+
+bool CisNil(Box b);
+const char* Ctree2str(Box b);
+int Ctree2int(Box b);
+void* CgetUserData(Box b);
+
+Box CboxInt(int n);
+Box CboxReal(double n);
+Box CboxWire(void);
+Box CboxCut(void);
+Box CboxSeq(Box x, Box y);
+Box CboxPar(Box x, Box y);
+Box CboxPar3(Box x, Box y, Box z);
+Box CboxPar4(Box a, Box b, Box c, Box d);
+Box CboxPar5(Box a, Box b, Box c, Box d, Box e);
+Box CboxSplit(Box x, Box y);
+Box CboxMerge(Box x, Box y);
+Box CboxRec(Box x, Box y);
+Box CboxRoute(Box n, Box m, Box r);
+
+Box CboxDelay(void);
+Box CboxDelayAux(Box b, Box del);
+Box CboxIntCast(void);
+Box CboxIntCastAux(Box b);
+Box CboxFloatCast(void);
+Box CboxFloatCastAux(Box b);
+
+Box CboxReadOnlyTable(void);
+Box CboxReadOnlyTableAux(Box n, Box init, Box ridx);
+Box CboxWriteReadTable(void);
+Box CboxWriteReadTableAux(Box n, Box init, Box widx, Box wsig, Box ridx);
+
+Box CboxWaveform(Box* wf);
+Box CboxSoundfile(const char* label, Box chan);
+
+Box CboxSelect2(void);
+Box CboxSelect2Aux(Box selector, Box b1, Box b2);
+Box CboxSelect3(void);
+Box CboxSelect3Aux(Box selector, Box b1, Box b2, Box b3);
+
+Box CboxFFun(enum SType rtype, const char** names, enum SType* atypes,
+             const char* incfile, const char* libfile);
+Box CboxFConst(enum SType type, const char* name, const char* incfile);
+Box CboxFVar(enum SType type, const char* name, const char* incfile);
+
+Box CboxBinOp(enum SOperator op);
+Box CboxBinOpAux(enum SOperator op, Box b1, Box b2);
+
+Box CboxAdd(void); Box CboxAddAux(Box b1, Box b2);
+Box CboxSub(void); Box CboxSubAux(Box b1, Box b2);
+Box CboxMul(void); Box CboxMulAux(Box b1, Box b2);
+Box CboxDiv(void); Box CboxDivAux(Box b1, Box b2);
+Box CboxRem(void); Box CboxRemAux(Box b1, Box b2);
+Box CboxLeftShift(void); Box CboxLeftShiftAux(Box b1, Box b2);
+Box CboxLRightShift(void); Box CboxLRightShiftAux(Box b1, Box b2);
+Box CboxARightShift(void); Box CboxARightShiftAux(Box b1, Box b2);
+Box CboxGT(void); Box CboxGTAux(Box b1, Box b2);
+Box CboxLT(void); Box CboxLTAux(Box b1, Box b2);
+Box CboxGE(void); Box CboxGEAux(Box b1, Box b2);
+Box CboxLE(void); Box CboxLEAux(Box b1, Box b2);
+Box CboxEQ(void); Box CboxEQAux(Box b1, Box b2);
+Box CboxNE(void); Box CboxNEAux(Box b1, Box b2);
+Box CboxAND(void); Box CboxANDAux(Box b1, Box b2);
+Box CboxOR(void); Box CboxORAux(Box b1, Box b2);
+Box CboxXOR(void); Box CboxXORAux(Box b1, Box b2);
+
+Box CboxAbs(void); Box CboxAbsAux(Box x);
+Box CboxAcos(void); Box CboxAcosAux(Box x);
+Box CboxTan(void); Box CboxTanAux(Box x);
+Box CboxSqrt(void); Box CboxSqrtAux(Box x);
+Box CboxSin(void); Box CboxSinAux(Box x);
+Box CboxRint(void); Box CboxRintAux(Box x);
+Box CboxRound(void); Box CboxRoundAux(Box x);
+Box CboxLog(void); Box CboxLogAux(Box x);
+Box CboxLog10(void); Box CboxLog10Aux(Box x);
+Box CboxFloor(void); Box CboxFloorAux(Box x);
+Box CboxExp(void); Box CboxExpAux(Box x);
+Box CboxExp10(void); Box CboxExp10Aux(Box x);
+Box CboxCos(void); Box CboxCosAux(Box x);
+Box CboxCeil(void); Box CboxCeilAux(Box x);
+Box CboxAtan(void); Box CboxAtanAux(Box x);
+Box CboxAsin(void); Box CboxAsinAux(Box x);
+
+Box CboxRemainder(void); Box CboxRemainderAux(Box b1, Box b2);
+Box CboxPow(void); Box CboxPowAux(Box b1, Box b2);
+Box CboxMin(void); Box CboxMinAux(Box b1, Box b2);
+Box CboxMax(void); Box CboxMaxAux(Box b1, Box b2);
+Box CboxFmod(void); Box CboxFmodAux(Box b1, Box b2);
+Box CboxAtan2(void); Box CboxAtan2Aux(Box b1, Box b2);
+
+Box CboxButton(const char* label);
+Box CboxCheckbox(const char* label);
+Box CboxVSlider(const char* label, Box init, Box min, Box max, Box step);
+Box CboxHSlider(const char* label, Box init, Box min, Box max, Box step);
+Box CboxNumEntry(const char* label, Box init, Box min, Box max, Box step);
+Box CboxVBargraph(const char* label, Box min, Box max);
+Box CboxVBargraphAux(const char* label, Box min, Box max, Box x);
+Box CboxHBargraph(const char* label, Box min, Box max);
+Box CboxHBargraphAux(const char* label, Box min, Box max, Box x);
+Box CboxVGroup(const char* label, Box group);
+Box CboxHGroup(const char* label, Box group);
+Box CboxTGroup(const char* label, Box group);
+Box CboxAttach(void);
+Box CboxAttachAux(Box b1, Box b2);
+
+bool CisBoxAbstr(Box t, Box* x, Box* y);
+bool CisBoxAccess(Box t, Box* exp, Box* id);
+bool CisBoxAppl(Box t, Box* x, Box* y);
+bool CisBoxButton(Box b, Box* lbl);
+bool CisBoxCase(Box b, Box* rules);
+bool CisBoxCheckbox(Box b, Box* lbl);
+bool CisBoxComponent(Box b, Box* filename);
+bool CisBoxCut(Box t);
+bool CisBoxEnvironment(Box b);
+bool CisBoxError(Box t);
+bool CisBoxFConst(Box b, Box* type, Box* name, Box* file);
+bool CisBoxFFun(Box b, Box* ff);
+bool CisBoxFVar(Box b, Box* type, Box* name, Box* file);
+bool CisBoxHBargraph(Box b, Box* lbl, Box* min, Box* max);
+bool CisBoxHGroup(Box b, Box* lbl, Box* x);
+bool CisBoxHSlider(Box b, Box* lbl, Box* cur, Box* min, Box* max, Box* step);
+bool CisBoxIdent(Box t, const char** str);
+bool CisBoxInputs(Box t, Box* x);
+bool CisBoxInt(Box t, int* i);
+bool CisBoxIPar(Box t, Box* x, Box* y, Box* z);
+bool CisBoxIProd(Box t, Box* x, Box* y, Box* z);
+bool CisBoxISeq(Box t, Box* x, Box* y, Box* z);
+bool CisBoxISum(Box t, Box* x, Box* y, Box* z);
+bool CisBoxLibrary(Box b, Box* filename);
+bool CisBoxMerge(Box t, Box* x, Box* y);
+bool CisBoxMetadata(Box b, Box* exp, Box* mdlist);
+bool CisBoxNumEntry(Box b, Box* lbl, Box* cur, Box* min, Box* max, Box* step);
+bool CisBoxOutputs(Box t, Box* x);
+bool CisBoxPar(Box t, Box* x, Box* y);
+bool CisBoxPatternMatcher(Box b);
+bool CisBoxPatternVar(Box b, Box* id);
+bool CisBoxPrim0(Box b);
+bool CisBoxPrim1(Box b);
+bool CisBoxPrim2(Box b);
+bool CisBoxPrim3(Box b);
+bool CisBoxPrim4(Box b);
+bool CisBoxPrim5(Box b);
+bool CisBoxReal(Box t, double* r);
+bool CisBoxRec(Box t, Box* x, Box* y);
+bool CisBoxRoute(Box b, Box* n, Box* m, Box* r);
+bool CisBoxSeq(Box t, Box* x, Box* y);
+bool CisBoxSlot(Box t, int* id);
+bool CisBoxSoundfile(Box b, Box* label, Box* chan);
+bool CisBoxSplit(Box t, Box* x, Box* y);
+bool CisBoxSymbolic(Box t, Box* slot, Box* body);
+bool CisBoxTGroup(Box b, Box* lbl, Box* x);
+bool CisBoxVBargraph(Box b, Box* lbl, Box* min, Box* max);
+bool CisBoxVGroup(Box b, Box* lbl, Box* x);
+bool CisBoxVSlider(Box b, Box* lbl, Box* cur, Box* min, Box* max, Box* step);
+bool CisBoxWaveform(Box b);
+bool CisBoxWire(Box t);
+bool CisBoxWithLocalDef(Box t, Box* body, Box* ldef);
+
+Box CDSPToBoxes(const char* name_app, const char* dsp_content, int argc,
+                const char* argv[], int* inputs, int* outputs, char* error_msg);
+bool CgetBoxType(Box box, int* inputs, int* outputs);
+Signal* CboxesToSignals(Box box, char* error_msg);
+Signal* CboxesToSignals2(Box box, char* error_msg);
+char* CcreateSourceFromBoxes(const char* name_app, Box box, const char* lang, int argc,
+                             const char* argv[], char* error_msg);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
