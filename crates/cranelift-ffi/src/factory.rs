@@ -34,7 +34,7 @@ use crate::cache::{
     cache_all_sha_keys, cache_drain, cache_insert, cache_lookup, cache_remove_by_ptr, start_mt,
     stop_mt,
 };
-use crate::clif::{CLIF_MAGIC, encode_factory_clif};
+use crate::clif::{CLIF_MAGIC, decode_factory_clif, encode_factory_clif};
 use crate::types::{CraneliftDspFactory, alloc_c_string, alloc_factory, free_factory};
 
 /// Stable version string returned by [`getCLibFaustVersion`].
@@ -466,10 +466,10 @@ pub unsafe extern "C" fn getCCraneliftDSPFactoryWarningMessages(
     null_c_string_array()
 }
 
-/// Read a Cranelift factory from source-backed bitcode in memory.
+/// Read a Cranelift factory from a textual `.clif` bitcode payload in memory.
 ///
-/// The payload contains serialized source/options and recompiles a runnable JIT
-/// factory on load.
+/// The current `FAUST_CLIF_V1` read path rebuilds a runnable JIT factory from
+/// serialized source fallback + options while validating identity fields.
 ///
 /// # Safety
 /// `error_msg` follows the standard Faust C API error-buffer contract.
@@ -522,7 +522,7 @@ pub unsafe extern "C" fn writeCCraneliftDSPFactoryToBitcode(
     }
 }
 
-/// Read a Cranelift factory from a source-backed bitcode file.
+/// Read a Cranelift factory from a textual `.clif` bitcode file.
 ///
 /// # Safety
 /// `error_msg` follows the standard Faust C API error-buffer contract.
@@ -943,7 +943,15 @@ fn encode_legacy_source_backed_bitcode(factory: &CraneliftDspFactory) -> Result<
 /// JIT factory.
 fn decode_factory_bitcode(text: &str) -> Result<CraneliftDspFactory, String> {
     if text.lines().next() == Some(CLIF_MAGIC) {
-        return Err("FAUST_CLIF_V1 read path not implemented yet".to_owned());
+        let decoded = decode_factory_clif(text)?;
+        return rebuild_factory_from_source(
+            &decoded.name,
+            &decoded.source_fallback,
+            &decoded.argv,
+            decoded.opt_level,
+            &decoded.expected_sha,
+            &decoded.expected_compile_options,
+        );
     }
     let mut lines = text.lines();
     match lines.next() {
@@ -991,13 +999,33 @@ fn decode_factory_bitcode(text: &str) -> Result<CraneliftDspFactory, String> {
         argv.push(arg);
     }
 
-    let compiled = preflight_compile_source_to_cranelift(&name, &source, opt_level)?;
-    let sidecar = compile_interp_sidecar_from_source(&name, &source, &argv)?;
+    rebuild_factory_from_source(
+        &name,
+        &source,
+        &argv,
+        opt_level,
+        &expected_sha,
+        &expected_compile_options,
+    )
+}
+
+/// Rebuilds a runnable Cranelift factory from textual source plus expected
+/// identity fields serialized in a bitcode payload.
+fn rebuild_factory_from_source(
+    name: &str,
+    source: &str,
+    argv: &[String],
+    opt_level: c_int,
+    expected_sha: &str,
+    expected_compile_options: &str,
+) -> Result<CraneliftDspFactory, String> {
+    let compiled = preflight_compile_source_to_cranelift(name, source, opt_level)?;
+    let sidecar = compile_interp_sidecar_from_source(name, source, argv)?;
     let rebuilt = build_scaffold_factory_common(
         FactoryBuildSpec {
-            name: &name,
-            dsp_code: &source,
-            argv: &argv,
+            name,
+            dsp_code: source,
+            argv,
             opt_level,
             semantic_fingerprint: &compiled.fir_dump,
             source_is_faust: true,
@@ -1070,8 +1098,8 @@ mod tests {
         getAllCCraneliftDSPFactories, getCCraneliftDSPFactoryCompileOptions,
         getCCraneliftDSPFactoryFromSHAKey, getCCraneliftDSPFactoryJSON,
         getCCraneliftDSPFactoryName, getCCraneliftDSPFactorySHAKey, getCLibFaustVersion,
-        readCCraneliftDSPFactoryFromBitcode, writeCCraneliftDSPFactoryToBitcode,
-        writeCCraneliftDSPFactoryToBitcodeFile,
+        readCCraneliftDSPFactoryFromBitcode, readCCraneliftDSPFactoryFromBitcodeFile,
+        writeCCraneliftDSPFactoryToBitcode, writeCCraneliftDSPFactoryToBitcodeFile,
     };
 
     #[test]
@@ -1284,15 +1312,83 @@ mod tests {
     }
 
     #[test]
-    fn clif_bitcode_read_is_explicitly_deferred_in_step1() {
+    fn clif_bitcode_roundtrip_in_memory_rebuilds_runnable_factory() {
         let _guard = crate::test_serial_guard();
-        let payload = c"FAUST_CLIF_V1\nformat_version=1\n";
+        let name = c"clifroundtrip";
+        let src = c"process = _;";
         let mut err = [0_i8; 4096];
+        let factory = unsafe {
+            createCCraneliftDSPFactoryFromString(
+                name.as_ptr(),
+                src.as_ptr(),
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+                1,
+            )
+        };
+        assert!(!factory.is_null());
+
+        let payload = unsafe { writeCCraneliftDSPFactoryToBitcode(factory) };
+        assert!(!payload.is_null());
+
         let restored =
-            unsafe { readCCraneliftDSPFactoryFromBitcode(payload.as_ptr(), err.as_mut_ptr()) };
-        assert!(restored.is_null());
-        let msg = unsafe { CStr::from_ptr(err.as_ptr()) }.to_str().unwrap();
-        assert!(msg.contains("not implemented yet"));
+            unsafe { readCCraneliftDSPFactoryFromBitcode(payload.cast_const(), err.as_mut_ptr()) };
+        assert!(!restored.is_null());
+        unsafe {
+            assert!((*restored).compiled_jit.is_some());
+            assert_eq!((*restored).sha_key, (*factory).sha_key);
+            assert_eq!((*restored).compile_options, (*factory).compile_options);
+            freeCMemory(payload.cast());
+            assert!(deleteCCraneliftDSPFactory(factory));
+            assert!(deleteCCraneliftDSPFactory(restored));
+        }
+    }
+
+    #[test]
+    fn clif_bitcode_roundtrip_via_file_rebuilds_runnable_factory() {
+        let _guard = crate::test_serial_guard();
+        let name = c"cliffile";
+        let src = c"process = _;";
+        let mut err = [0_i8; 4096];
+        let factory = unsafe {
+            createCCraneliftDSPFactoryFromString(
+                name.as_ptr(),
+                src.as_ptr(),
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+                1,
+            )
+        };
+        assert!(!factory.is_null());
+
+        let path = std::env::temp_dir().join(format!(
+            "faust-rs-cranelift-ffi-clif-{}-{}.clif",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path_c = std::ffi::CString::new(path.as_os_str().to_string_lossy().as_bytes()).unwrap();
+
+        let wrote = unsafe { writeCCraneliftDSPFactoryToBitcodeFile(factory, path_c.as_ptr()) };
+        assert!(wrote);
+        let restored =
+            unsafe { readCCraneliftDSPFactoryFromBitcodeFile(path_c.as_ptr(), err.as_mut_ptr()) };
+        assert!(!restored.is_null());
+        unsafe {
+            assert!((*restored).compiled_jit.is_some());
+            assert_eq!((*restored).sha_key, (*factory).sha_key);
+            assert_eq!((*restored).compile_options, (*factory).compile_options);
+        }
+
+        let _ = std::fs::remove_file(path);
+        unsafe {
+            assert!(deleteCCraneliftDSPFactory(factory));
+            assert!(deleteCCraneliftDSPFactory(restored));
+        }
     }
 
     #[test]

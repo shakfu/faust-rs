@@ -4,9 +4,6 @@
 //! `*Bitcode*` APIs. The container is intentionally deterministic and
 //! self-describing so it can be validated before deserialization.
 //!
-//! Note: in this step, only write-side serialization is wired. Read-side
-//! parsing is completed in a follow-up step.
-
 use crate::types::CraneliftDspFactory;
 
 /// Magic header used to identify Cranelift `.clif` container payloads.
@@ -15,6 +12,38 @@ pub(crate) const CLIF_MAGIC: &str = "FAUST_CLIF_V1";
 /// Escapes one textual field for key/value line serialization.
 fn esc_field(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\n', "\\n")
+}
+
+/// Unescapes one textual field from key/value line serialization.
+fn unesc_field(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(ch) = it.next() {
+        if ch == '\\' {
+            match it.next() {
+                Some('n') => out.push('\n'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Parsed `.clif` payload fields needed to rebuild a runnable factory.
+pub(crate) struct DecodedClifPayload {
+    pub(crate) name: String,
+    pub(crate) expected_sha: String,
+    pub(crate) expected_compile_options: String,
+    pub(crate) opt_level: i32,
+    pub(crate) argv: Vec<String>,
+    pub(crate) source_fallback: String,
 }
 
 /// Encodes one factory into a textual `.clif` container payload.
@@ -77,4 +106,99 @@ pub(crate) fn encode_factory_clif(factory: &CraneliftDspFactory) -> Result<Strin
     ));
     out.push_str("clif_text=deferred\n");
     Ok(out)
+}
+
+/// Decodes one textual `.clif` container payload.
+pub(crate) fn decode_factory_clif(text: &str) -> Result<DecodedClifPayload, String> {
+    let mut lines = text.lines();
+    match lines.next() {
+        Some(CLIF_MAGIC) => {}
+        Some(_) => return Err("unsupported cranelift bitcode format".to_owned()),
+        None => return Err("empty bitcode payload".to_owned()),
+    }
+
+    let mut fields = std::collections::HashMap::<String, String>::new();
+    for line in lines {
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        fields.insert(k.to_owned(), unesc_field(v));
+    }
+
+    let version = fields
+        .remove("format_version")
+        .ok_or_else(|| "missing 'format_version' field".to_owned())?
+        .parse::<u32>()
+        .map_err(|e| format!("invalid 'format_version' field: {e}"))?;
+    if version != 1 {
+        return Err(format!(
+            "unsupported FAUST_CLIF_V1 format_version '{version}'"
+        ));
+    }
+
+    let payload_pointer_width = fields
+        .remove("pointer_width")
+        .ok_or_else(|| "missing 'pointer_width' field".to_owned())?
+        .parse::<usize>()
+        .map_err(|e| format!("invalid 'pointer_width' field: {e}"))?;
+    let host_pointer_width = std::mem::size_of::<usize>() * 8;
+    if payload_pointer_width != host_pointer_width {
+        return Err(format!(
+            "incompatible pointer width: payload {payload_pointer_width}, host {host_pointer_width}"
+        ));
+    }
+
+    let payload_endianness = fields
+        .remove("endianness")
+        .ok_or_else(|| "missing 'endianness' field".to_owned())?;
+    let host_endianness = if cfg!(target_endian = "little") {
+        "little"
+    } else {
+        "big"
+    };
+    if payload_endianness != host_endianness {
+        return Err(format!(
+            "incompatible endianness: payload {payload_endianness}, host {host_endianness}"
+        ));
+    }
+
+    let name = fields
+        .remove("name")
+        .ok_or_else(|| "missing 'name' field".to_owned())?;
+    let expected_sha = fields
+        .remove("sha")
+        .ok_or_else(|| "missing 'sha' field".to_owned())?;
+    let expected_compile_options = fields
+        .remove("compile_options")
+        .ok_or_else(|| "missing 'compile_options' field".to_owned())?;
+    let source_fallback = fields
+        .remove("source_fallback")
+        .ok_or_else(|| "missing 'source_fallback' field".to_owned())?;
+    let opt_level = fields
+        .remove("opt_level")
+        .ok_or_else(|| "missing 'opt_level' field".to_owned())?
+        .parse::<i32>()
+        .map_err(|e| format!("invalid 'opt_level' field: {e}"))?;
+    let argc = fields
+        .remove("argc")
+        .ok_or_else(|| "missing 'argc' field".to_owned())?
+        .parse::<usize>()
+        .map_err(|e| format!("invalid 'argc' field: {e}"))?;
+    let mut argv = Vec::with_capacity(argc);
+    for idx in 0..argc {
+        let key = format!("arg{idx}");
+        let arg = fields
+            .remove(&key)
+            .ok_or_else(|| format!("missing '{key}' field"))?;
+        argv.push(arg);
+    }
+
+    Ok(DecodedClifPayload {
+        name,
+        expected_sha,
+        expected_compile_options,
+        opt_level,
+        argv,
+        source_fallback,
+    })
 }
