@@ -75,6 +75,59 @@ entrypoint is a FIR **module** node:
 This mirrors C++ `ModuleInst`-based backend visitors while preserving the Rust invariant:
 construction through `FirBuilder`, dispatch through `match_fir`.
 
+## 5.2 FIR DSP I/O Arity Contract (General, Backend-Independent)
+
+The FIR module contract must carry DSP audio channel arity explicitly, instead
+of relying on backend-local heuristics.
+
+### Problem statement
+
+Today, several backends can infer `getNumInputs` / `getNumOutputs` from
+`compute` body patterns (aliases like `input0`, `output0`, or table accesses),
+but this is fragile and can diverge across backends.
+
+### Target contract
+
+- FIR module metadata must include:
+  - `num_inputs: u32`
+  - `num_outputs: u32`
+- These values are the canonical source for DSP audio arity in all backends
+  (`c`, `cpp`, `interp`, `cranelift`, and future backends).
+- Backend-local arity inference becomes fallback-only tooling and must not be
+  the primary runtime contract.
+
+### Implementation strategy
+
+1. Extend FIR module representation and builder API to store explicit arity.
+2. Update FIR producers (`transform` fast-lane, fixtures, inliner-preserving
+   paths) to set arity at module construction time.
+3. Update FIR checker with module-level validation:
+   - arity fields are present and non-negative,
+   - `compute` declaration shape remains compatible with canonical DSP API,
+   - optional consistency warning when declared arity disagrees with detectable
+     `compute` accesses.
+4. Update backends to consume arity from FIR module metadata first.
+5. Keep current inference as temporary compatibility fallback behind explicit
+   warning diagnostics until all producers are migrated.
+
+### Migration and compatibility policy
+
+- During migration, missing module arity is accepted but must trigger a typed
+  warning and fallback inference.
+- After migration gate closure, missing arity becomes a verifier error for
+  production pipelines.
+- The `parse -> ... -> transform -> fir -> backend` contract is then: arity is
+  produced in FIR, not reconstructed in backends.
+
+### Required tests
+
+- FIR unit tests: module builder/matcher round-trip for arity fields.
+- FIR checker tests: missing/invalid/inconsistent arity diagnostics.
+- Backend tests (C/C++/Interp/Cranelift): `getNumInputs/getNumOutputs` values
+  must match FIR module arity on shared fixtures.
+- Differential tests: arity consistency between C++ reference outputs and Rust
+  backends on selected corpus cases.
+
 ## 6. Implementation Pattern
 
 Recommended internal layering in `crates/fir`:

@@ -608,6 +608,19 @@ Reconstructing value types in separate backend-specific passes (C++ style `typin
 creates drift and debugging overhead. Rust FIR should keep type on value nodes directly and treat
 type reconstruction as a validation fallback, not a primary mechanism.
 
+### 4.17 Missing explicit DSP I/O arity in FIR module contract
+When `num_inputs` / `num_outputs` are not explicit in FIR module metadata,
+backends are forced to infer channel counts from `compute` implementation
+patterns. This causes backend drift and invalid API contracts (`getNumInputs*`
+or `getNumOutputs*` disagreeing with actual buffer accesses).
+
+Phase 6 contract:
+- FIR module metadata must be the primary source for DSP audio arity.
+- C/C++ backends must read arity from FIR module metadata first.
+- Backend-local inference is temporary fallback only during migration and must
+  emit typed warnings.
+- FIR checker must validate arity presence/consistency at module level.
+
 ---
 
 ## 5. Testing
@@ -635,6 +648,8 @@ type reconstruction as a validation fallback, not a primary mechanism.
 - [ ] FIR construction goes through `FirBuilder` (single canonical entrypoint)
 - [ ] FIR inspection/dispatch goes through `FirMatch` + `match_fir` (no parallel ladders)
 - [ ] FIR building no longer depends on mutable global state
+- [ ] FIR module carries explicit DSP audio arity (`num_inputs`, `num_outputs`)
+- [ ] FIR checker validates module arity and reports typed diagnostics on missing/inconsistent values
 - [ ] Type mapping uses trait-based backends with shared core type model
 - [ ] Code container uses explicit sectioned model and pass pipeline
 - [ ] Loop DAG/scheduling model is deterministic and ID-based
@@ -643,6 +658,7 @@ type reconstruction as a validation fallback, not a primary mechanism.
 - [ ] Backend selection is registry-driven with shared compile template flow
 - [ ] Output writing in orchestration paths uses typed sinks (no stream downcasts)
 - [ ] API compile entry points share one lifecycle model (no divergent init/teardown behavior)
+- [ ] C/C++ backends consume module arity metadata as primary contract (inference kept only as migration fallback)
 - [ ] CLI/backend option compatibility is driven by a declarative capability matrix with consistency tests
 - [ ] API argument normalization uses dynamic vectors (no fixed-size temporary `argv` staging)
 - [ ] Orchestration stack handling avoids hidden thread-trampoline behavior in core compile flow
