@@ -135,6 +135,59 @@ counterproductive in a tight interpreter loop. FBC needs:
 The FBC representation uses **Rust enums + Vec** — the natural fit for a bytecode
 instruction set.
 
+### 3.1.1 Hardening refactor plan: inline `BlockStore*` payload in instruction objects
+
+Context (current Rust implementation):
+- `FbcBlock` stores:
+  - `instructions: Vec<FbcInstruction<R>>`
+  - `block_store_data: Vec<(usize, BlockStoreData<R>)>` (side-table keyed by instruction index)
+- This differs from C++ where `FIRBlockStoreReal/IntInstruction` carry their
+  numeric table payload directly as part of the instruction object.
+
+Risk observed:
+- Any optimization/rewrite pass that rebuilds instruction vectors must also
+  remap the side-table indices perfectly.
+- A recent regression showed payload loss was possible when instructions were
+  copied/re-emitted without preserving side-data.
+
+Target design (C++-closer and structurally safer):
+- Replace side-table storage with an instruction-level payload model.
+- Suggested shape (one of equivalent options):
+  - `enum FbcInstr<R> { Basic(FbcInstruction<R>), BlockStoreReal { header: FbcInstruction<R>, data: Vec<R> }, BlockStoreInt { header: FbcInstruction<R>, data: Vec<i32> } }`
+- `FbcBlock` becomes a single vector of self-contained instructions:
+  - `instructions: Vec<FbcInstr<R>>`
+
+Why this is stronger:
+- Payload cannot be detached from opcode during block rewrites.
+- Optimizer passes become index-stable by construction.
+- Runtime executor and serializer logic are simpler to reason about
+  (`match` on one instruction value instead of opcode + side-table lookup).
+
+Incremental execution plan:
+1. Introduce `FbcInstr<R>` alongside current structures, with conversion helpers.
+2. Migrate serializer read/write to produce/consume `FbcInstr` directly.
+3. Migrate executor dispatch to `match FbcInstr` and remove side-table lookups.
+4. Migrate optimizer passes to rewrite `Vec<FbcInstr<R>>`.
+5. Remove legacy `block_store_data` side-table from `FbcBlock`.
+6. Run full interpreter regression set (`cargo test -p codegen`, runtime `.fbc` checks).
+
+Validation gates (must pass before completion):
+- Unit tests:
+  - existing serialization round-trip tests
+  - existing optimizer tests
+  - existing executor tests
+  - explicit invariant test: every `BlockStore*` instruction still owns payload
+    after each optimization level (`1..=6`)
+- Differential runtime check:
+  - `opt_level=0` vs `opt_level=6` on representative `.fbc` corpus with tables
+    (for example waveform-based and physical-model presets)
+- No behavioral drift on currently passing interpreter traces.
+
+Acceptance criteria:
+- No side-table remains for block-store payload.
+- `BlockStoreReal/Int` payload is always instruction-owned.
+- No known payload-loss class remains in optimizer/serialization paths.
+
 ### 3.2 Opcode representation
 
 ```rust
