@@ -7,7 +7,7 @@ authors.workspace = true
 
 [lib]
 name = "faust_cranelift"
-crate-type = ["rlib", "cdylib"]
+crate-type = ["rlib"]
 
 [features]
 default = ["standalone-capi-globals"]

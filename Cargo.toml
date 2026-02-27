@@ -23,6 +23,7 @@ members = [
   "crates/interp-ffi",
   "crates/cranelift-ffi",
   "crates/box-ffi",
+  "crates/faust-ffi",
 ]
 resolver = "2"
 

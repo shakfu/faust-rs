@@ -17,7 +17,7 @@ all = "warn"
 
 [lib]
 name = "faust"
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 codegen = { path = "../codegen" }

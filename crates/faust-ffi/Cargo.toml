@@ -1,0 +1,23 @@
+[package]
+name = "faust-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints.rust]
+unsafe_code = "allow"
+unused_attributes = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+all = "warn"
+
+[lib]
+name = "faust"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+interp_ffi = { package = "interp-ffi", path = "../interp-ffi" }
+faust_cranelift = { package = "cranelift-ffi", path = "../cranelift-ffi", default-features = false }
+faust_box = { package = "box-ffi", path = "../box-ffi", default-features = false }
