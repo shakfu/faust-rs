@@ -10,8 +10,10 @@ name = "faust_cranelift"
 crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
+faust_box = { package = "box-ffi", path = "../box-ffi" }
 codegen = { path = "../codegen" }
 compiler = { path = "../compiler" }
+fir = { path = "../fir" }
 utils = { path = "../utils" }
 
 # FFI crate will require raw pointers/unsafe in later phases; allow is local to

@@ -36,8 +36,11 @@ use codegen::backends::c::{COptions, generate_c_module};
 use codegen::backends::cpp::{CppOptions, generate_cpp_module};
 use codegen::backends::interp::{InterpOptions, generate_interp_module, write_fbc};
 use compiler::Compiler;
+use fir::{FirId, FirStore};
 use propagate::{ArityCache, box_arity, make_sig_input_list, propagate};
-use tlib::{TreeArena, TreeId, de_bruijn_to_sym, tree_to_double, tree_to_int, tree_to_string};
+use tlib::{
+    NodeKind, TreeArena, TreeId, de_bruijn_to_sym, tree_to_double, tree_to_int, tree_to_string,
+};
 use transform::signal_fir::{SignalFirOptions, compile_signals_to_fir_fastlane};
 
 #[repr(C)]
@@ -167,6 +170,144 @@ fn context() -> &'static Mutex<BoxContext> {
 fn with_ctx<R>(f: impl FnOnce(&mut BoxContext) -> R) -> R {
     let mut guard = context().lock().expect("box context poisoned");
     f(&mut guard)
+}
+
+/// FIR package exported from box/signal handles for backend FFI constructors.
+///
+/// This is a crate-level bridge type used by backend FFI layers (for example
+/// `cranelift-ffi`) so they can reuse the exact same tree decoding and
+/// signal->FIR lowering path as `box-ffi` APIs.
+#[derive(Debug)]
+pub struct BoxFfiFirModule {
+    /// Lowered FIR arena.
+    pub store: FirStore,
+    /// FIR module root id in [`Self::store`].
+    pub module: FirId,
+    /// Number of audio inputs inferred from the source graph.
+    pub num_inputs: usize,
+    /// Number of audio outputs represented by the lowered signal list.
+    pub num_outputs: usize,
+}
+
+fn infer_num_inputs_from_signals(arena: &TreeArena, outputs: &[TreeId]) -> usize {
+    let mut max_input = None::<usize>;
+    let mut stack = outputs.to_vec();
+    let mut seen = std::collections::HashSet::<u32>::new();
+    while let Some(node) = stack.pop() {
+        if !seen.insert(node.as_u32()) {
+            continue;
+        }
+        if let Some(tree) = arena.node(node) {
+            if let NodeKind::Tag(tag_id) = &tree.kind
+                && arena.tag_name(*tag_id) == Some("SIGINPUT")
+                && let Some(index_id) = tree.children.get(0)
+                && let Some(NodeKind::Int(idx)) = arena.kind(index_id)
+                && *idx >= 0
+            {
+                max_input = Some(max_input.map_or(*idx as usize, |cur| cur.max(*idx as usize)));
+            }
+            stack.extend(tree.children.as_slice().iter().copied());
+        }
+    }
+    max_input.map_or(0, |idx| idx.saturating_add(1))
+}
+
+fn lower_signal_roots_to_fir(
+    arena: &TreeArena,
+    signal_roots: &[TreeId],
+    module_name: &str,
+) -> Result<BoxFfiFirModule, String> {
+    if signal_roots.is_empty() {
+        return Err("signal list is empty".to_owned());
+    }
+    let num_inputs = infer_num_inputs_from_signals(arena, signal_roots);
+    let num_outputs = signal_roots.len();
+    let lowered = compile_signals_to_fir_fastlane(
+        arena,
+        signal_roots,
+        num_inputs,
+        num_outputs,
+        &SignalFirOptions {
+            module_name: module_name.to_owned(),
+            strict_mode: true,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(BoxFfiFirModule {
+        store: lowered.store,
+        module: lowered.module,
+        num_inputs,
+        num_outputs,
+    })
+}
+
+fn decode_signal_handle_array(
+    ctx: &BoxContext,
+    signals: *mut c_void,
+) -> Result<Vec<TreeId>, String> {
+    if signals.is_null() {
+        return Err("null signals pointer".to_owned());
+    }
+    let mut out = Vec::new();
+    let mut cur = signals.cast::<*mut c_void>();
+    loop {
+        // SAFETY: caller provides a valid null-terminated signal handle array.
+        let handle = unsafe { *cur };
+        if handle.is_null() {
+            break;
+        }
+        let Some(id) = ctx.decode(handle) else {
+            return Err("unknown signal handle in array".to_owned());
+        };
+        out.push(id);
+        // SAFETY: same as array dereference contract above.
+        cur = unsafe { cur.add(1) };
+    }
+    if out.is_empty() {
+        return Err("signal list is empty".to_owned());
+    }
+    Ok(out)
+}
+
+/// Lower one `Box` handle to FIR for backend-side factory construction.
+///
+/// This function is intended for Rust backend FFI crates and mirrors the exact
+/// lowering used by `CcreateSourceFromBoxes`.
+///
+/// # Safety
+/// `box_ptr` must be a handle created by this `box-ffi` context API.
+pub unsafe fn export_fir_from_box_handle(
+    module_name: &str,
+    box_ptr: *mut c_void,
+) -> Result<BoxFfiFirModule, String> {
+    with_ctx(|ctx| {
+        let Some(box_id) = ctx.decode(box_ptr) else {
+            return Err("null or unknown box pointer".to_owned());
+        };
+        let mut cache = ArityCache::default();
+        let arity = box_arity(&ctx.arena, box_id, &mut cache).map_err(|e| e.to_string())?;
+        let inputs = make_sig_input_list(&mut ctx.arena, arity.inputs);
+        let outputs =
+            propagate(&mut ctx.arena, box_id, &inputs, &mut cache).map_err(|e| e.to_string())?;
+        lower_signal_roots_to_fir(&ctx.arena, &outputs, module_name)
+    })
+}
+
+/// Lower one null-terminated signal handle array to FIR for backend-side
+/// factory construction.
+///
+/// # Safety
+/// - `signals` must point to a valid null-terminated `*mut c_void` array.
+/// - Each non-null entry must be a signal handle created by this `box-ffi`
+///   context API.
+pub unsafe fn export_fir_from_signal_array_handle(
+    module_name: &str,
+    signals: *mut c_void,
+) -> Result<BoxFfiFirModule, String> {
+    with_ctx(|ctx| {
+        let roots = decode_signal_handle_array(ctx, signals)?;
+        lower_signal_roots_to_fir(&ctx.arena, &roots, module_name)
+    })
 }
 
 /// Builds `x : op` helper shape used by unary `...Aux` APIs.
@@ -442,10 +583,10 @@ macro_rules! prim0 {
     ($name:ident, $method:ident) => {
         #[unsafe(no_mangle)]
         #[doc = concat!(
-                                    "Constructs primitive box node `",
-                                    stringify!($name),
-                                    "` (no operand form)."
-                                )]
+                                                            "Constructs primitive box node `",
+                                                            stringify!($name),
+                                                            "` (no operand form)."
+                                                        )]
         ///
         /// # Safety
         /// This function does not dereference raw pointers.
@@ -465,10 +606,10 @@ macro_rules! prim2 {
     ($name:ident, $method:ident) => {
         #[unsafe(no_mangle)]
         #[doc = concat!(
-                                    "Constructs composite node `",
-                                    stringify!($name),
-                                    "` from two input box handles."
-                                )]
+                                                                    "Constructs composite node `",
+                                                                    stringify!($name),
+                                                                    "` from two input box handles."
+                                                                )]
         ///
         /// # Safety
         /// `x` and `y` must be valid box handles created by this library.
@@ -492,12 +633,12 @@ macro_rules! unop {
         prim0!($prim, $method);
         #[unsafe(no_mangle)]
         #[doc = concat!(
-                                    "Builds auxiliary unary form `",
-                                    stringify!($aux),
-                                    "` as `(x) : ",
-                                    stringify!($prim),
-                                    "`."
-                                )]
+                                                                    "Builds auxiliary unary form `",
+                                                                    stringify!($aux),
+                                                                    "` as `(x) : ",
+                                                                    stringify!($prim),
+                                                                    "`."
+                                                                )]
         ///
         /// # Safety
         /// `x` must be a valid box handle created by this library.
@@ -522,12 +663,12 @@ macro_rules! binop {
         prim0!($prim, $method);
         #[unsafe(no_mangle)]
         #[doc = concat!(
-                                    "Builds auxiliary binary form `",
-                                    stringify!($aux),
-                                    "` as `(x, y) : ",
-                                    stringify!($prim),
-                                    "`."
-                                )]
+                                                            "Builds auxiliary binary form `",
+                                                            stringify!($aux),
+                                                            "` as `(x, y) : ",
+                                                            stringify!($prim),
+                                                            "`."
+                                                        )]
         ///
         /// # Safety
         /// `x` and `y` must be valid box handles created by this library.
@@ -1505,10 +1646,10 @@ macro_rules! match_ternary_out {
     ($fn_name:ident, $variant:path) => {
         #[unsafe(no_mangle)]
         #[doc = concat!(
-                                    "Matches box variant `",
-                                    stringify!($fn_name),
-                                    "` and returns three children."
-                                )]
+                                                                    "Matches box variant `",
+                                                                    stringify!($fn_name),
+                                                                    "` and returns three children."
+                                                                )]
         ///
         /// # Safety
         /// All pointers must be null or valid writable pointers/handles.
@@ -2401,19 +2542,10 @@ pub unsafe extern "C" fn CcreateSourceFromBoxes(
             .module_name
             .clone()
             .unwrap_or_else(|| name_app.clone());
-        let fir = match compile_signals_to_fir_fastlane(
-            &ctx.arena,
-            &signals,
-            arity.inputs,
-            arity.outputs,
-            &SignalFirOptions {
-                module_name: module_name.clone(),
-                strict_mode: true,
-            },
-        ) {
+        let fir = match lower_signal_roots_to_fir(&ctx.arena, &signals, &module_name) {
             Ok(v) => v,
             Err(e) => {
-                unsafe { utils::write_error_4096(error_msg, &e.to_string()) };
+                unsafe { utils::write_error_4096(error_msg, &e) };
                 return std::ptr::null_mut();
             }
         };
@@ -2424,8 +2556,8 @@ pub unsafe extern "C" fn CcreateSourceFromBoxes(
                 fir.module,
                 &COptions {
                     class_name: Some(module_name.clone()),
-                    num_inputs: arity.inputs,
-                    num_outputs: arity.outputs,
+                    num_inputs: fir.num_inputs,
+                    num_outputs: fir.num_outputs,
                     ..COptions::default()
                 },
             )
@@ -2435,8 +2567,8 @@ pub unsafe extern "C" fn CcreateSourceFromBoxes(
                 fir.module,
                 &CppOptions {
                     class_name: Some(module_name.clone()),
-                    num_inputs: arity.inputs,
-                    num_outputs: arity.outputs,
+                    num_inputs: fir.num_inputs,
+                    num_outputs: fir.num_outputs,
                     ..CppOptions::default()
                 },
             )
@@ -2448,8 +2580,8 @@ pub unsafe extern "C" fn CcreateSourceFromBoxes(
                     fir.module,
                     &InterpOptions {
                         module_name: Some(module_name.clone()),
-                        num_inputs: arity.inputs,
-                        num_outputs: arity.outputs,
+                        num_inputs: fir.num_inputs,
+                        num_outputs: fir.num_outputs,
                         ..InterpOptions::default()
                     },
                 )

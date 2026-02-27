@@ -348,8 +348,10 @@ dependencies = [
 name = "cranelift-ffi"
 version = "0.1.0"
 dependencies = [
+ "box-ffi",
  "codegen",
  "compiler",
+ "fir",
  "utils",
 ]
 

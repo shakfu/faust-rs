@@ -9,8 +9,9 @@
 //! Runtime state:
 //! - file/string constructors compile real FIR -> Cranelift JIT modules
 //! - instances can execute real `compute` entry points
-//! - signals/boxes constructors and bitcode persistence families remain deferred
-//!   or temporary and are explicitly documented.
+//! - signals/boxes constructors reuse `box-ffi` lowering bridges
+//! - bitcode persistence is source/options-backed and recompiles a runnable JIT
+//!   factory on load.
 
 use std::ffi::{CString, c_char, c_void};
 use std::io::BufReader;
@@ -20,8 +21,9 @@ use std::path::{Path, PathBuf};
 use codegen::backends::cranelift::{
     CraneliftOptLevel, CraneliftOptions, JitDspModule, compile_fir_to_cranelift_jit,
 };
-use codegen::backends::interp::{FbcDspFactory, InterpOptions, read_fbc};
+use codegen::backends::interp::{FbcDspFactory, InterpOptions, generate_interp_module, read_fbc};
 use compiler::{Compiler as FaustCompiler, SignalFirLane, default_import_search_base};
+use faust_box::{BoxFfiFirModule, export_fir_from_box_handle, export_fir_from_signal_array_handle};
 use utils::{
     decode_c_argv as decode_c_argv_shared, free_c_memory_c_string_only, null_c_string_array,
     optional_c_str_arg, parse_ffi_compile_args, required_c_str_arg, write_error_4096,
@@ -81,14 +83,19 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
             }
         };
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
-            let jit = preflight_compile_file_to_cranelift(Path::new(filename), args, opt_level)?;
+            let compiled =
+                preflight_compile_file_to_cranelift(Path::new(filename), args, opt_level)?;
             let sidecar = compile_interp_sidecar_from_file(Path::new(filename), args)?;
+            let dsp_source = std::fs::read_to_string(filename)
+                .map_err(|e| format!("cannot read DSP source '{filename}': {e}"))?;
             Ok(build_scaffold_factory_from_file(
                 filename,
+                &dsp_source,
                 args,
                 opt_level,
-                Some(jit),
+                Some(compiled.jit),
                 Some(sidecar),
+                &compiled.fir_dump,
             ))
         })
     }
@@ -134,62 +141,131 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
             }
         };
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
-            let jit = preflight_compile_source_to_cranelift(name_app, dsp_content, opt_level)?;
+            let compiled = preflight_compile_source_to_cranelift(name_app, dsp_content, opt_level)?;
             let sidecar = compile_interp_sidecar_from_source(name_app, dsp_content, args)?;
             Ok(build_scaffold_factory_from_source(
                 name_app,
                 dsp_content,
                 args,
                 opt_level,
-                Some(jit),
+                Some(compiled.jit),
                 Some(sidecar),
+                &compiled.fir_dump,
             ))
         })
     }
 }
 
-/// Create a Cranelift DSP factory from signals (symbol present, not implemented).
+/// Create a Cranelift DSP factory from a null-terminated signal handle array.
+///
+/// The signal array contract matches `box-ffi` (`CboxesToSignals*`):
+/// - `signals` points to a null-terminated `*mut c_void` array,
+/// - each non-null entry is a signal handle managed by the `box-ffi` context.
 ///
 /// # Safety
-/// `error_msg` follows the same contract as other factory creation functions.
+/// - `name_app` may be null; if non-null it must be a valid C string.
+/// - `signals` must follow the handle-array contract above.
+/// - `argv` must point to `argc` valid C strings (or be null if `argc == 0`).
+/// - `error_msg` may be null; otherwise it must reference at least 4096 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn createCCraneliftDSPFactoryFromSignals(
-    _name_app: *const c_char,
-    _signals: *mut c_void,
-    _argc: c_int,
-    _argv: *const *const c_char,
+    name_app: *const c_char,
+    signals: *mut c_void,
+    argc: c_int,
+    argv: *const *const c_char,
     error_msg: *mut c_char,
-    _opt_level: c_int,
+    opt_level: c_int,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        write_error(
-            error_msg,
-            "createCCraneliftDSPFactoryFromSignals is not implemented yet",
-        );
+        let source_name = match optional_c_str_arg(name_app, "name_app") {
+            Ok(Some(s)) if !s.is_empty() => s,
+            Ok(_) => "FaustDSP",
+            Err(e) => {
+                write_error(error_msg, &e);
+                return std::ptr::null_mut();
+            }
+        };
+        let args = match decode_c_argv(argc, argv) {
+            Ok(args) => args,
+            Err(e) => {
+                write_error(error_msg, &e);
+                return std::ptr::null_mut();
+            }
+        };
+        if signals.is_null() {
+            write_error(error_msg, "null signals pointer");
+            return std::ptr::null_mut();
+        }
+        create_cranelift_factory_with_argv(&args, error_msg, |args| {
+            let fir = export_fir_from_signal_array_handle(source_name, signals)?;
+            let fir_dump = fir::dump_fir(&fir.store, fir.module);
+            let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
+            let sidecar = compile_interp_sidecar_from_fir(source_name, &fir)?;
+            Ok(build_scaffold_factory_from_source(
+                source_name,
+                &fir_dump,
+                args,
+                opt_level,
+                Some(jit),
+                Some(sidecar),
+                &fir_dump,
+            ))
+        })
     }
-    std::ptr::null_mut()
 }
 
-/// Create a Cranelift DSP factory from boxes (symbol present, not implemented).
+/// Create a Cranelift DSP factory from one `box-ffi` box handle.
 ///
 /// # Safety
-/// `error_msg` follows the same contract as other factory creation functions.
+/// - `name_app` may be null; if non-null it must be a valid C string.
+/// - `box_expr` must be a valid `box-ffi` box handle.
+/// - `argv` must point to `argc` valid C strings (or be null if `argc == 0`).
+/// - `error_msg` may be null; otherwise it must reference at least 4096 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
-    _name_app: *const c_char,
-    _box_expr: *mut c_void,
-    _argc: c_int,
-    _argv: *const *const c_char,
+    name_app: *const c_char,
+    box_expr: *mut c_void,
+    argc: c_int,
+    argv: *const *const c_char,
     error_msg: *mut c_char,
-    _opt_level: c_int,
+    opt_level: c_int,
 ) -> *mut CraneliftDspFactory {
     unsafe {
-        write_error(
-            error_msg,
-            "createCCraneliftDSPFactoryFromBoxes is not implemented yet",
-        );
+        let source_name = match optional_c_str_arg(name_app, "name_app") {
+            Ok(Some(s)) if !s.is_empty() => s,
+            Ok(_) => "FaustDSP",
+            Err(e) => {
+                write_error(error_msg, &e);
+                return std::ptr::null_mut();
+            }
+        };
+        let args = match decode_c_argv(argc, argv) {
+            Ok(args) => args,
+            Err(e) => {
+                write_error(error_msg, &e);
+                return std::ptr::null_mut();
+            }
+        };
+        if box_expr.is_null() {
+            write_error(error_msg, "null box_expr pointer");
+            return std::ptr::null_mut();
+        }
+        create_cranelift_factory_with_argv(&args, error_msg, |args| {
+            let fir = export_fir_from_box_handle(source_name, box_expr)?;
+            let fir_dump = fir::dump_fir(&fir.store, fir.module);
+            let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
+            let sidecar = compile_interp_sidecar_from_fir(source_name, &fir)?;
+            Ok(build_scaffold_factory_from_source(
+                source_name,
+                &fir_dump,
+                args,
+                opt_level,
+                Some(jit),
+                Some(sidecar),
+                &fir_dump,
+            ))
+        })
     }
-    std::ptr::null_mut()
 }
 
 /// Returns a factory from the cache by SHA key.
@@ -527,18 +603,27 @@ pub fn factory_status() -> &'static str {
 /// Build one factory object from a source file path and compiled backend artifacts.
 fn build_scaffold_factory_from_file(
     filename: &str,
+    dsp_source: &str,
     argv: &[String],
     opt_level: c_int,
     jit: Option<JitDspModule>,
     sidecar: Option<FbcDspFactory<f32>>,
+    semantic_fingerprint: &str,
 ) -> CraneliftDspFactory {
     let source_name = Path::new(filename)
         .file_stem()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("FaustDSP");
-    let dsp_code = format!("// scaffold source from file: {filename}");
-    build_scaffold_factory_common(source_name, &dsp_code, argv, opt_level, jit, sidecar)
+    build_scaffold_factory_common(
+        source_name,
+        dsp_source,
+        argv,
+        opt_level,
+        jit,
+        sidecar,
+        semantic_fingerprint,
+    )
 }
 
 /// Build one factory object from inline DSP source and compiled backend artifacts.
@@ -549,8 +634,17 @@ fn build_scaffold_factory_from_source(
     opt_level: c_int,
     jit: Option<JitDspModule>,
     sidecar: Option<FbcDspFactory<f32>>,
+    semantic_fingerprint: &str,
 ) -> CraneliftDspFactory {
-    build_scaffold_factory_common(name_app, dsp_content, argv, opt_level, jit, sidecar)
+    build_scaffold_factory_common(
+        name_app,
+        dsp_content,
+        argv,
+        opt_level,
+        jit,
+        sidecar,
+        semantic_fingerprint,
+    )
 }
 
 /// Shared factory object builder.
@@ -561,6 +655,7 @@ fn build_scaffold_factory_common(
     opt_level: c_int,
     jit: Option<JitDspModule>,
     sidecar: Option<FbcDspFactory<f32>>,
+    semantic_fingerprint: &str,
 ) -> CraneliftDspFactory {
     let compute_body_lowered = jit
         .as_ref()
@@ -573,7 +668,12 @@ fn build_scaffold_factory_common(
             argv.join(" ")
         )
     };
-    let sha_key = format!("cranelift:{}:{}:{}", name, opt_level, argv.join("\x1f"));
+    let sha_key = format!(
+        "cranelift:{}:{}:{}",
+        opt_level,
+        argv.join("\x1f"),
+        semantic_fingerprint
+    );
     let (num_inputs, num_outputs) = sidecar
         .as_ref()
         .map_or((0, 0), |f| (f.num_inputs, f.num_outputs));
@@ -605,34 +705,42 @@ fn decode_c_argv(argc: c_int, argv: *const *const c_char) -> Result<Vec<String>,
     unsafe { decode_c_argv_shared(argc, argv) }
 }
 
-/// Runs the real compiler pipeline to FIR, then calls the Cranelift backend placeholder.
-///
-/// `NotImplemented` from the backend is treated as success during scaffold phases,
-/// because the goal is to validate the front-end and FIR path integration first.
+#[derive(Debug)]
+struct CompiledCraneliftFactory {
+    jit: JitDspModule,
+    fir_dump: String,
+}
+
+/// Runs the real compiler pipeline to FIR, then compiles one Cranelift JIT module.
 fn preflight_compile_file_to_cranelift(
     path: &Path,
     argv: &[String],
     opt_level: c_int,
-) -> Result<JitDspModule, String> {
+) -> Result<CompiledCraneliftFactory, String> {
     let compiler = FaustCompiler::new();
     let search_paths = collect_search_paths_for_file(path, argv);
     let fir = compiler
         .compile_file_to_fir_with_lane(path, &search_paths, SignalFirLane::TransformFastLane)
         .map_err(|e| e.to_string())?;
-    compile_with_cranelift_backend(fir, opt_level)
+    let fir_dump = fir::dump_fir(&fir.store, fir.module);
+    let jit = compile_with_cranelift_backend(fir, opt_level)?;
+    Ok(CompiledCraneliftFactory { jit, fir_dump })
 }
 
-/// Runs the real compiler pipeline on inline source to FIR, then the backend placeholder.
+/// Runs the real compiler pipeline on inline source to FIR, then compiles one
+/// Cranelift JIT module.
 fn preflight_compile_source_to_cranelift(
     source_name: &str,
     source: &str,
     opt_level: c_int,
-) -> Result<JitDspModule, String> {
+) -> Result<CompiledCraneliftFactory, String> {
     let compiler = FaustCompiler::new();
     let fir = compiler
         .compile_source_to_fir_with_lane(source_name, source, SignalFirLane::TransformFastLane)
         .map_err(|e| e.to_string())?;
-    compile_with_cranelift_backend(fir, opt_level)
+    let fir_dump = fir::dump_fir(&fir.store, fir.module);
+    let jit = compile_with_cranelift_backend(fir, opt_level)?;
+    Ok(CompiledCraneliftFactory { jit, fir_dump })
 }
 
 /// Compiles one Faust file to an interpreter sidecar factory used for UI/meta dispatch.
@@ -685,6 +793,36 @@ fn compile_interp_sidecar_from_source(
 fn parse_interp_factory_from_fbc_text(fbc: &str) -> Result<FbcDspFactory<f32>, String> {
     let mut reader = BufReader::new(fbc.as_bytes());
     read_fbc::<f32>(&mut reader).map_err(|e| e.to_string())
+}
+
+/// Compiles one FIR module into an interpreter sidecar factory.
+fn compile_interp_sidecar_from_fir(
+    module_name: &str,
+    fir: &BoxFfiFirModule,
+) -> Result<FbcDspFactory<f32>, String> {
+    generate_interp_module(
+        &fir.store,
+        fir.module,
+        &InterpOptions {
+            module_name: Some(module_name.to_owned()),
+            num_inputs: fir.num_inputs,
+            num_outputs: fir.num_outputs,
+            ..InterpOptions::default()
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Compiles one FIR module to Cranelift using one C ABI opt-level request.
+fn compile_fir_module_to_cranelift(
+    fir: &BoxFfiFirModule,
+    opt_level: c_int,
+) -> Result<JitDspModule, String> {
+    let options = CraneliftOptions {
+        opt_level: map_c_opt_level(opt_level),
+        ..CraneliftOptions::default()
+    };
+    compile_fir_to_cranelift_jit(&fir.store, fir.module, &options).map_err(|e| e.to_string())
 }
 
 /// Calls the Cranelift backend and returns the compiled JIT module.
@@ -854,9 +992,11 @@ fn json_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::ffi::CStr;
+    use std::sync::{Mutex, OnceLock};
 
     use super::{
-        createCCraneliftDSPFactoryFromFile, createCCraneliftDSPFactoryFromString,
+        createCCraneliftDSPFactoryFromBoxes, createCCraneliftDSPFactoryFromFile,
+        createCCraneliftDSPFactoryFromSignals, createCCraneliftDSPFactoryFromString,
         deleteAllCCraneliftDSPFactories, deleteCCraneliftDSPFactory, factory_status, freeCMemory,
         getAllCCraneliftDSPFactories, getCCraneliftDSPFactoryCompileOptions,
         getCCraneliftDSPFactoryFromSHAKey, getCCraneliftDSPFactoryJSON,
@@ -865,13 +1005,22 @@ mod tests {
         writeCCraneliftDSPFactoryToBitcode, writeCCraneliftDSPFactoryToBitcodeFile,
     };
 
+    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("test mutex")
+    }
+
     #[test]
     fn factory_scaffold_status_is_stable() {
+        let _guard = test_guard();
         assert_eq!(factory_status(), "cranelift-ffi factory runtime");
     }
 
     #[test]
     fn version_symbol_returns_static_c_string() {
+        let _guard = test_guard();
         let ptr = getCLibFaustVersion();
         assert!(!ptr.is_null());
         let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
@@ -880,6 +1029,7 @@ mod tests {
 
     #[test]
     fn create_factory_from_string_runtime_roundtrip_queries() {
+        let _guard = test_guard();
         let name = c"mydsp";
         let src = c"process = _;";
         let args = [c"-vec"];
@@ -928,6 +1078,7 @@ mod tests {
 
     #[test]
     fn create_factory_from_file_rejects_null_filename() {
+        let _guard = test_guard();
         let mut err = [0_i8; 4096];
         let factory = unsafe {
             createCCraneliftDSPFactoryFromFile(
@@ -945,6 +1096,7 @@ mod tests {
 
     #[test]
     fn create_factory_from_string_reports_compiler_error_for_invalid_faust() {
+        let _guard = test_guard();
         let name = c"bad";
         let src = c"process = ;";
         let mut err = [0_i8; 4096];
@@ -966,6 +1118,7 @@ mod tests {
 
     #[test]
     fn cache_lookup_and_list_are_wired_to_created_factories() {
+        let _guard = test_guard();
         let name = c"cachetest";
         let src = c"process = _;";
         let mut err = [0_i8; 4096];
@@ -1002,6 +1155,7 @@ mod tests {
 
     #[test]
     fn temporary_bitcode_roundtrip_in_memory() {
+        let _guard = test_guard();
         let name = c"bitcode";
         let src = c"process = _;";
         let mut err = [0_i8; 4096];
@@ -1033,6 +1187,7 @@ mod tests {
 
     #[test]
     fn temporary_bitcode_roundtrip_via_file() {
+        let _guard = test_guard();
         let name = c"bitfile";
         let src = c"process = _;";
         let mut err = [0_i8; 4096];
@@ -1074,6 +1229,7 @@ mod tests {
 
     #[test]
     fn temporary_bitcode_read_rejects_invalid_format() {
+        let _guard = test_guard();
         let bad = c"NOT_A_CRANELIFT_FORMAT";
         let mut err = [0_i8; 4096];
         let restored =
@@ -1085,6 +1241,7 @@ mod tests {
 
     #[test]
     fn selected_runtime_corpus_cases_lower_compute_body() {
+        let _guard = test_guard();
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -1126,5 +1283,79 @@ mod tests {
                 assert!(deleteCCraneliftDSPFactory(factory));
             }
         }
+    }
+
+    #[test]
+    fn boxes_and_signals_constructor_match_string_constructor_sha() {
+        let _guard = test_guard();
+        faust_box::createLibContext();
+        let box_root = faust_box::CboxWire();
+        assert!(!box_root.is_null());
+
+        let name = c"same";
+        let src = c"process = _;";
+        let mut err = [0_i8; 4096];
+
+        let from_box = unsafe {
+            createCCraneliftDSPFactoryFromBoxes(
+                name.as_ptr(),
+                box_root,
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+                1,
+            )
+        };
+        assert!(!from_box.is_null());
+        let signals = unsafe { faust_box::CboxesToSignals(box_root, err.as_mut_ptr()) };
+        assert!(!signals.is_null());
+        let from_signals = unsafe {
+            createCCraneliftDSPFactoryFromSignals(
+                name.as_ptr(),
+                signals.cast(),
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+                1,
+            )
+        };
+        assert!(!from_signals.is_null());
+        let from_string = unsafe {
+            createCCraneliftDSPFactoryFromString(
+                name.as_ptr(),
+                src.as_ptr(),
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+                1,
+            )
+        };
+        assert!(!from_string.is_null());
+
+        let sha_box_ptr = unsafe { getCCraneliftDSPFactorySHAKey(from_box) };
+        let sha_signals_ptr = unsafe { getCCraneliftDSPFactorySHAKey(from_signals) };
+        let sha_string_ptr = unsafe { getCCraneliftDSPFactorySHAKey(from_string) };
+        let sha_box = unsafe { CStr::from_ptr(sha_box_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        let sha_signals = unsafe { CStr::from_ptr(sha_signals_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        let sha_string = unsafe { CStr::from_ptr(sha_string_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(sha_box, sha_signals);
+        assert_eq!(sha_box, sha_string);
+
+        unsafe {
+            freeCMemory(sha_box_ptr.cast());
+            freeCMemory(sha_signals_ptr.cast());
+            freeCMemory(sha_string_ptr.cast());
+            faust_box::freeCMemory(signals.cast());
+            assert!(deleteCCraneliftDSPFactory(from_box));
+            assert!(deleteCCraneliftDSPFactory(from_signals));
+            assert!(deleteCCraneliftDSPFactory(from_string));
+        }
+        faust_box::destroyLibContext();
     }
 }
