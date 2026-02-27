@@ -55,6 +55,10 @@ Guidelines for contributors and coding agents working on `faust-rs`.
   - internal Rust crate APIs may be adapted for idiomatic ownership/types/error handling,
   - external compatibility surfaces (CLI + C/C++ API tiers) target stable behavior and compatibility contracts.
 - For each touched public API, document mapping status (`1:1`, `adapted`, or `deferred`) with rationale and compatibility impact in the relevant `porting/` phase document or `JOURNAL.md`.
+- For representation-level adaptations (`adapted`) versus C++ data layout:
+  - keep semantically coupled data co-localized with the owning node/instruction by default (avoid index-based side tables unless explicitly justified),
+  - document invariants, potential failure modes, and mitigation tests in `porting/` or `JOURNAL.md`,
+  - add at least one structural non-regression test for the adaptation itself.
 - For tree-encoded IR crates, prefer canonical builder + matcher APIs over scattered helper ladders:
   - `boxes`: target `BoxBuilder` + `match_box`,
   - `signals`: target `SigBuilder` + `match_sig`.
@@ -62,6 +66,10 @@ Guidelines for contributors and coding agents working on `faust-rs`.
 - Prefer real end-to-end integrations over temporary stubs; if a stub is unavoidable, it must be explicitly justified, owner-assigned, time-boxed, and removed within the same phase gate.
 - Define explicit deliverables and pass criteria for each phase/prototype before implementation; do not start deep work on tasks with implicit success conditions.
 - For critical compiler behavior, prefer differential tests against C++ reference outputs.
+- For optimization-sensitive runtime paths (notably interpreter/backend execution),
+  include a parity check between unoptimized and optimized execution
+  (`opt_level=0` vs `opt_level=max`) on a representative subset to detect
+  optimization-induced semantic drift.
 - Document known gaps and temporary scaffolding in `JOURNAL.md`.
 - Follow the canonical pipeline described in the plan:
   - `parse -> boxes -> eval -> propagate -> normalize -> type/interval -> transform -> fir -> backend`

@@ -75,6 +75,24 @@ Related design note (canonical FIR architecture for backends):
     - rationale and compatibility impact,
     - differential/unit tests covering the mapping.
 
+### Representation integrity policy (mandatory for C++ -> Rust adaptations)
+
+- **Default rule: keep semantically coupled data co-localized.**
+  - If C++ ties payload/state to a node/instruction object, Rust should keep
+    the same semantic ownership model unless there is a strong documented reason
+    not to.
+  - Avoid index-keyed side tables for semantically owned payloads in
+    optimization/rewrite-heavy paths.
+- **If a non-1:1 representation is chosen (`adapted`):**
+  - document invariants and expected ownership boundaries,
+  - document concrete failure modes introduced by the adaptation,
+  - add a dedicated structural non-regression test that would fail on payload
+    detachment/misassociation.
+- **Optimization parity gate for runtime/backends:**
+  - for optimization-sensitive execution paths, run targeted parity checks
+    between unoptimized and optimized behavior (`opt_level=0` vs `opt_level=max`)
+    on representative corpus cases (including table/state-heavy DSPs).
+
 ### Mandatory quality gate for each porting step
 
 - Every implementation step must pass this local validation gate before commit:
