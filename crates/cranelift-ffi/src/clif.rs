@@ -44,6 +44,7 @@ pub(crate) struct DecodedClifPayload {
     pub(crate) opt_level: i32,
     pub(crate) argv: Vec<String>,
     pub(crate) source_fallback: String,
+    pub(crate) clif_functions: Vec<(String, String)>,
 }
 
 /// Encodes one factory into a textual `.clif` container payload.
@@ -104,7 +105,16 @@ pub(crate) fn encode_factory_clif(factory: &CraneliftDspFactory) -> Result<Strin
         "source_fallback={}\n",
         esc_field(&factory.dsp_code)
     ));
-    out.push_str("clif_text=deferred\n");
+    let clif_functions = factory
+        .compiled_jit
+        .as_ref()
+        .map(|jit| jit.generated_functions_clif())
+        .ok_or_else(|| "bitcode write requires compiled Cranelift JIT module".to_owned())?;
+    out.push_str(&format!("clif_func_count={}\n", clif_functions.len()));
+    for (idx, (name, clif_text)) in clif_functions.iter().enumerate() {
+        out.push_str(&format!("clif_func_name_{idx}={}\n", esc_field(name)));
+        out.push_str(&format!("clif_func_body_{idx}={}\n", esc_field(clif_text)));
+    }
     Ok(out)
 }
 
@@ -174,6 +184,23 @@ pub(crate) fn decode_factory_clif(text: &str) -> Result<DecodedClifPayload, Stri
     let source_fallback = fields
         .remove("source_fallback")
         .ok_or_else(|| "missing 'source_fallback' field".to_owned())?;
+    let clif_count = fields
+        .remove("clif_func_count")
+        .ok_or_else(|| "missing 'clif_func_count' field".to_owned())?
+        .parse::<usize>()
+        .map_err(|e| format!("invalid 'clif_func_count' field: {e}"))?;
+    let mut clif_functions = Vec::with_capacity(clif_count);
+    for idx in 0..clif_count {
+        let name_key = format!("clif_func_name_{idx}");
+        let body_key = format!("clif_func_body_{idx}");
+        let func_name = fields
+            .remove(&name_key)
+            .ok_or_else(|| format!("missing '{name_key}' field"))?;
+        let func_body = fields
+            .remove(&body_key)
+            .ok_or_else(|| format!("missing '{body_key}' field"))?;
+        clif_functions.push((func_name, func_body));
+    }
     let opt_level = fields
         .remove("opt_level")
         .ok_or_else(|| "missing 'opt_level' field".to_owned())?
@@ -200,5 +227,6 @@ pub(crate) fn decode_factory_clif(text: &str) -> Result<DecodedClifPayload, Stri
         opt_level,
         argv,
         source_fallback,
+        clif_functions,
     })
 }

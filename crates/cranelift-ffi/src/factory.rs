@@ -944,6 +944,16 @@ fn encode_legacy_source_backed_bitcode(factory: &CraneliftDspFactory) -> Result<
 fn decode_factory_bitcode(text: &str) -> Result<CraneliftDspFactory, String> {
     if text.lines().next() == Some(CLIF_MAGIC) {
         let decoded = decode_factory_clif(text)?;
+        if decoded.clif_functions.is_empty() {
+            return Err("CLIF payload does not contain any generated function bodies".to_owned());
+        }
+        if !decoded
+            .clif_functions
+            .iter()
+            .any(|(name, _)| name.ends_with("::compute") || name == "compute")
+        {
+            return Err("CLIF payload does not contain a compute function body".to_owned());
+        }
         return rebuild_factory_from_source(
             &decoded.name,
             &decoded.source_fallback,
@@ -1265,6 +1275,10 @@ mod tests {
         assert!(!bitcode.is_null());
         let bitcode_s = unsafe { CStr::from_ptr(bitcode) }.to_str().unwrap();
         assert!(bitcode_s.starts_with("FAUST_CLIF_V1\n"));
+        assert!(bitcode_s.contains("clif_func_count="));
+        assert!(bitcode_s.contains("clif_func_name_0="));
+        assert!(bitcode_s.contains("clif_func_body_0="));
+        assert!(!bitcode_s.contains("clif_text=deferred"));
 
         unsafe {
             freeCMemory(bitcode.cast());
@@ -1304,6 +1318,8 @@ mod tests {
         assert!(wrote);
         let text = std::fs::read_to_string(&path).expect("read written .clif");
         assert!(text.starts_with("FAUST_CLIF_V1\n"));
+        assert!(text.contains("clif_func_count="));
+        assert!(text.contains("clif_func_body_0="));
 
         let _ = std::fs::remove_file(&path);
         unsafe {

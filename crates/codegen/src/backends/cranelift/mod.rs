@@ -183,6 +183,7 @@ pub struct JitDspModule {
     compute_symbol_name: String,
     compute_entry_addr: usize,
     compute_body_lowered: bool,
+    generated_functions_clif: Vec<(String, String)>,
     struct_layout: StructLayoutPlan,
     jit_module: JITModule,
 }
@@ -193,6 +194,10 @@ impl std::fmt::Debug for JitDspModule {
             .field("module_name", &self.module_name)
             .field("compute_symbol_name", &self.compute_symbol_name)
             .field("compute_entry_addr", &self.compute_entry_addr)
+            .field(
+                "generated_functions_clif_count",
+                &self.generated_functions_clif.len(),
+            )
             .finish()
     }
 }
@@ -240,6 +245,16 @@ impl JitDspModule {
     #[must_use]
     pub fn compute_body_lowered(&self) -> bool {
         self.compute_body_lowered
+    }
+
+    /// Returns textual CLIF IR generated for all backend-defined DSP functions.
+    ///
+    /// Each entry is `(function_symbol_name, clif_text)`.
+    /// In the current backend state this contains at least `compute`, and it is
+    /// designed to grow as more DSP lifecycle functions are lowered.
+    #[must_use]
+    pub fn generated_functions_clif(&self) -> &[(String, String)] {
+        &self.generated_functions_clif
     }
 
     /// Returns the backend `dsp*` struct layout contract derived from FIR
@@ -2458,7 +2473,7 @@ fn declare_compute_stub(
     struct_layout: &StructLayoutPlan,
     fail_on_subset_gap: bool,
     jit: &mut JITModule,
-) -> Result<(String, usize, bool), CraneliftBackendError> {
+) -> Result<(String, usize, bool, String), CraneliftBackendError> {
     let ptr_ty = jit.target_config().pointer_type();
     let compute_symbol_name = format!("{module_name}::compute");
 
@@ -2516,6 +2531,8 @@ fn declare_compute_stub(
         fb.finalize();
     }
 
+    let compute_clif_text = ctx.func.display().to_string();
+
     jit.define_function(func_id, &mut ctx).map_err(|e| {
         CraneliftBackendError::jit_failure(format!(
             "define_function `{compute_symbol_name}` failed: {e}\nCLIF:\n{}",
@@ -2527,7 +2544,12 @@ fn declare_compute_stub(
         CraneliftBackendError::jit_failure(format!("finalize_definitions failed: {e}"))
     })?;
     let addr = jit.get_finalized_function(func_id) as usize;
-    Ok((compute_symbol_name, addr, compute_body_lowered))
+    Ok((
+        compute_symbol_name,
+        addr,
+        compute_body_lowered,
+        compute_clif_text,
+    ))
 }
 
 /// Compiles a FIR module to a Cranelift JIT module.
@@ -2573,25 +2595,28 @@ pub fn compile_fir_to_cranelift_jit(
     let mut jit = JITModule::new(jit_builder);
     let ptr_size = jit.target_config().pointer_type().bytes();
     let struct_layout = build_struct_layout_for_module(store, module, ptr_size)?;
-    let (compute_symbol_name, compute_entry_addr, compute_body_lowered) = declare_compute_stub(
-        &module_name,
-        compute_decl,
-        store,
-        &struct_layout,
-        options.fail_on_subset_gap,
-        &mut jit,
-    )?;
+    let (compute_symbol_name, compute_entry_addr, compute_body_lowered, compute_clif_text) =
+        declare_compute_stub(
+            &module_name,
+            compute_decl,
+            store,
+            &struct_layout,
+            options.fail_on_subset_gap,
+            &mut jit,
+        )?;
     if compute_entry_addr == 0 {
         return Err(CraneliftBackendError::jit_failure(
             "finalized compute symbol address is null",
         ));
     }
 
+    let generated_functions_clif = vec![(compute_symbol_name.clone(), compute_clif_text)];
     Ok(JitDspModule {
         module_name,
         compute_symbol_name,
         compute_entry_addr,
         compute_body_lowered,
+        generated_functions_clif,
         struct_layout,
         jit_module: jit,
     })
