@@ -228,6 +228,8 @@ fn backend_align_smoke(
 
     println!("backend-align-smoke: cranelift-subset-strict-check");
     cranelift_subset_strict_check_cases(&cases)?;
+    println!("backend-align-smoke: cranelift-ffi-runtime-diff-smoke");
+    run_cranelift_ffi_runtime_diff_smoke()?;
 
     for case in &cases {
         let mut trace_check_args = vec![
@@ -383,6 +385,27 @@ fn cranelift_subset_strict_check_cases(
     Ok(())
 }
 
+fn run_cranelift_ffi_runtime_diff_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    const TESTS: [&str; 2] = [
+        "cranelift_interp_runtime_diff_smoke_corpus",
+        "cranelift_ui_meta_callback_smoke_path",
+    ];
+    for test_name in TESTS {
+        let status = Command::new("cargo")
+            .arg("test")
+            .arg("-p")
+            .arg("cranelift-ffi")
+            .arg(test_name)
+            .arg("--")
+            .arg("--nocapture")
+            .status()?;
+        if !status.success() {
+            return Err(format!("cranelift-ffi smoke test failed: {test_name}").into());
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default)]
 struct BackendAlignNightlyOptions {
     strict_fir_types: bool,
@@ -407,6 +430,8 @@ fn backend_align_nightly(
     let nightly_cases = runtime_corpus_files()?;
     println!("backend-align-nightly: cranelift-subset-strict-check (all runtime cases)");
     cranelift_subset_strict_check_cases(&nightly_cases)?;
+    println!("backend-align-nightly: cranelift-ffi-runtime-diff-smoke");
+    run_cranelift_ffi_runtime_diff_smoke()?;
 
     let mut trace_check_args = vec!["--lane".to_owned(), "fast".to_owned()];
     if options.strict_fir_types {
