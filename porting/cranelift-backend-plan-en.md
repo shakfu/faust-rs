@@ -530,6 +530,101 @@ error flow.
 - stable machine-readable code strings
 - conversion path to `compiler::CompilerError` (when CLI/API integration is added)
 
+## 8.3 `.clif` persistence contract (save/read)
+
+This section defines how Cranelift factories are persisted and restored.
+
+### 8.3.1 API contract (locked)
+
+The existing C API family names remain unchanged for compatibility:
+
+- `readCCraneliftDSPFactoryFromBitcode`
+- `writeCCraneliftDSPFactoryToBitcode`
+- `readCCraneliftDSPFactoryFromBitcodeFile`
+- `writeCCraneliftDSPFactoryToBitcodeFile`
+
+For the Cranelift backend, these four functions must read/write a `.clif`
+container payload (not the current source-backed scaffold format).
+
+### 8.3.2 Container format (`FAUST_CLIF_V1`)
+
+Use a versioned container with deterministic section ordering:
+
+- magic: `FAUST_CLIF_V1`
+- header fields:
+  - `format_version`
+  - `faust_rs_version_or_commit`
+  - `cranelift_codegen_version`
+  - `target_triple`
+  - `pointer_width`
+  - `endianness`
+  - `opt_level`
+  - `compile_options_hash`
+  - `dsp_sha`
+- sections:
+  - `module_metadata` (factory name, io counts, layout digest)
+  - `clif_text` (per-function CLIF textual IR)
+  - `ffi_contract` (mandatory lifecycle symbol names + signatures)
+  - `source_fallback` (optional DSP source to rebuild when CLIF import is rejected)
+  - `checksum` (payload integrity)
+
+### 8.3.3 Write path
+
+1. Compile through current compiler/backend path.
+2. Capture CLIF textual IR for each exported/generated function.
+3. Capture factory metadata required by runtime and FFI instance creation.
+4. Serialize deterministic container bytes.
+5. Expose bytes via `write*Bitcode` and file output via `write*BitcodeFile`.
+
+Hard failures on write:
+
+- missing mandatory lifecycle symbols (`compute`, init/reset family required by wrapper contract)
+- empty function set
+- inconsistent metadata/layout information
+
+### 8.3.4 Read path
+
+1. Parse and validate magic/version.
+2. Validate compatibility (`target_triple`, pointer width, endianness, supported format).
+3. Rebuild module from `clif_text` sections.
+4. Rehydrate factory metadata + runtime layout contract.
+5. Verify mandatory symbol signatures before returning factory.
+6. If direct import is rejected and `source_fallback` exists:
+   - rebuild factory from source through normal compiler path
+   - tag diagnostic as fallback rebuild (not direct CLIF load)
+7. Otherwise return typed load error.
+
+### 8.3.5 Compatibility policy
+
+- Strict major version match (`FAUST_CLIF_V1` only in V1).
+- Allow additive sections only if parser supports unknown-section skipping.
+- Default behavior is fail-fast on incompatible target metadata.
+- `.clif` artifacts are treated as toolchain-coupled unless fallback rebuild is used.
+
+Suggested stable error codes:
+
+- `FRS-CLIF-LOAD-UNSUPPORTED-VERSION`
+- `FRS-CLIF-LOAD-INCOMPATIBLE-TARGET`
+- `FRS-CLIF-LOAD-VERIFY-FAILED`
+- `FRS-CLIF-LOAD-NO-FALLBACK`
+- `FRS-CLIF-SAVE-MISSING-SYMBOL`
+
+### 8.3.6 Required tests
+
+1. In-memory round-trip: compile -> write bytes -> read bytes -> create instance -> compute.
+2. File round-trip: compile -> write file -> read file -> compute.
+3. Corruption tests: bad magic, truncation, checksum mismatch, missing mandatory section.
+4. Compatibility tests: incompatible target metadata rejected deterministically.
+5. Fallback tests: incompatible CLIF + valid source fallback rebuilds and runs.
+6. Determinism tests: repeated writes are stable (excluding explicitly non-deterministic fields).
+
+### 8.3.7 Rollout sequence
+
+1. Add internal serializer/deserializer module for `FAUST_CLIF_V1`.
+2. Wire `read*/write*Bitcode[File]` to `.clif` path.
+3. Keep legacy scaffold parser only for short migration window in tests (if needed).
+4. Remove scaffold format support, update headers/docs/JOURNAL.
+
 ---
 
 ## 9. Validation Strategy (Systematic Alignment)
@@ -604,7 +699,7 @@ Execution status snapshot (2026-02-27):
 - Step A1: `done`
 - Step A2: `done`
 - Step B1: `done` (signals/boxes constructors implemented through `box-ffi` handle bridge)
-- Step B2: `done` (source-backed bitcode rebuild contract)
+- Step B2: `pending` (current implementation is source-backed rebuild; migrate to `.clif` contract from Section 8.3)
 - Step C1: `done`
 - Step C2: `done` (strict subset mode + validation gate wiring)
 - Step D1: `adapted` (runtime differential smoke implemented for `rep_01`/`rep_07` + UI/meta callback smoke; `rep_38` remains deferred)
@@ -661,14 +756,15 @@ Pass criteria:
 Scope:
 
 - Replace temporary scaffold text serializer with a real, documented backend
-  persistence contract for Cranelift factories.
-- Keep function family names unchanged (`read*/write*Bitcode[File]`), but stop
-  using placeholder payload format.
+  persistence contract for Cranelift factories based on `.clif` payloads.
+- Keep function family names unchanged (`read*/write*Bitcode[File]`) for API
+  parity, but map those functions to `.clif` read/write semantics.
 
 Pass criteria:
 
-- Bitcode in-memory and file round-trip produce runnable factories.
-- Round-trip preserves compile options and factory identity fields.
+- `.clif` in-memory and file round-trip produce runnable factories.
+- Round-trip preserves compile options, factory identity fields, and lifecycle
+  metadata needed by instance creation.
 
 ### Step C1 — Lowering coverage closure on corpus
 
@@ -735,10 +831,9 @@ Pass criteria:
 
 ### Immediate next PR sequence (recommended)
 
-1. PR-1: Step A1 + tests (`cranelift-ffi` runtime becomes real).
-2. PR-2: Step B1 + Step A2 (constructor parity + cleanup).
-3. PR-3: Step C1 targeted lowering closure for smoke corpus.
-4. PR-4: Step C2 + Step D1 + Step D2 (strict gate + automated validation).
+1. PR-1: Step B2 (`.clif` persistence path + round-trip tests).
+2. PR-2: Step C1 targeted lowering closure for smoke corpus.
+3. PR-3: Step C2 + Step D1 + Step D2 (strict gate + automated validation).
 
 ---
 
