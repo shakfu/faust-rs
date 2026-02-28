@@ -296,7 +296,7 @@ Execution note (2026-02-28):
 
 ## A4 — Structural differential gate expansion (close G4)
 
-Status: `[ ]`  
+Status: `[x]`  
 Goal: enforce structural parity on a broader corpus, not only parse class parity.
 
 Tasks:
@@ -313,6 +313,17 @@ Validation:
 Exit criteria:
 - structural differential gate runs on representative corpus families.
 - all remaining mismatches are triaged and documented.
+
+Execution note (2026-02-28):
+- Added production parser structural differential suite:
+  - `crates/parser/tests/structural_cpp_differential.rs`
+- The suite now covers:
+  - representative structural shape checks (`prec`, `unary`, `appl`) on parser output,
+  - import-heavy fixture through `parse_file_with_imports`,
+  - optional C++ acceptance cross-check when `FAUST_CPP_BIN` (or `/usr/local/bin/faust`) is available.
+- Validation run:
+  - `cargo test -p parser --all-targets`
+  - `cargo test -p compiler --all-targets`
 
 ## A5 — Source usage exposure in parser API (close G6)
 
