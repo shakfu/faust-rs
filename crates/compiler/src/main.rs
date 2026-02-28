@@ -26,8 +26,10 @@ use codegen::backends::cranelift::{
     CraneliftOptions, StructFieldKind, compile_fir_to_cranelift_jit,
     diagnose_cranelift_compute_subset_gap,
 };
-use codegen::backends::fbc_to_cpp::{FbcCppOptions, generate_cpp_from_fbc};
-use codegen::backends::interp::{InterpOptions, generate_interp_module, read_fbc, write_fbc};
+use codegen::backends::interp::{
+    FbcCppOptions, InterpOptions, generate_cpp_from_fbc, generate_interp_module, read_fbc,
+    write_fbc,
+};
 use codegen::fixtures::backend_test_fixtures;
 use compiler::{
     Compiler, CompilerError, FirVerifyOptions, SignalFirLane,

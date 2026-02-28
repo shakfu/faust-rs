@@ -29,7 +29,6 @@ pub mod cpp;
 pub mod cranelift;
 pub mod csharp;
 pub mod dlang;
-pub mod fbc_to_cpp;
 pub mod interp;
 pub mod jax;
 pub mod jsfx;

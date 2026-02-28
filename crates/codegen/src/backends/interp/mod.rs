@@ -27,11 +27,13 @@
 //! - [`factory`]: `FbcDspFactory` — compiled bytecode program with optimization.
 //! - [`instance`]: `FbcDspInstance` — runtime DSP state with `compute()` loop.
 //! - [`serial`]: `write_fbc` / `read_fbc` — `.fbc` text format serialization.
+//! - [`fbc_to_cpp`]: `generate_cpp_from_fbc` — AOT FBC → native C++ code generator.
 
 pub mod bytecode;
 pub mod compiler;
 pub mod executor;
 pub mod factory;
+pub mod fbc_to_cpp;
 pub mod instance;
 pub mod opcode;
 pub mod optimizer;
@@ -46,6 +48,7 @@ pub use bytecode::{
 pub use compiler::{CompileError, FbcCompileResult, FirToFbcCompiler, HeapType, MemoryDesc};
 pub use executor::{FbcExecError, FbcExecutor, FbcStackKind};
 pub use factory::FbcDspFactory;
+pub use fbc_to_cpp::{FbcCppError, FbcCppOptions, generate_cpp_from_fbc};
 pub use instance::{FbcDspInstance, FbcDspRuntimeError};
 pub use opcode::{FBC_INSTRUCTION_NAMES, FBC_OPCODE_COUNT, FbcOpcode, INTERP_FILE_VERSION};
 pub use optimizer::{MAX_OPT_LEVEL, optimize_block};

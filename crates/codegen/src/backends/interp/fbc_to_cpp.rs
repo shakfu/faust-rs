@@ -37,12 +37,12 @@
 
 use std::fmt::Write as _;
 
-use super::interp::bytecode::{
+use super::bytecode::{
     BlockId, BlockStoreData, FbcBlockArena, FbcInstruction, FbcMetaInstruction, FbcUiInstruction,
 };
-use super::interp::factory::FbcDspFactory;
-use super::interp::opcode::FbcOpcode;
-use super::interp::real::FbcReal;
+use super::factory::FbcDspFactory;
+use super::opcode::FbcOpcode;
+use super::real::FbcReal;
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
