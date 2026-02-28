@@ -26,7 +26,8 @@ use codegen::backends::cranelift::{
     CraneliftOptions, StructFieldKind, compile_fir_to_cranelift_jit,
     diagnose_cranelift_compute_subset_gap,
 };
-use codegen::backends::interp::{InterpOptions, generate_interp_module, write_fbc};
+use codegen::backends::fbc_to_cpp::{FbcCppOptions, generate_cpp_from_fbc};
+use codegen::backends::interp::{InterpOptions, generate_interp_module, read_fbc, write_fbc};
 use codegen::fixtures::backend_test_fixtures;
 use compiler::{
     Compiler, CompilerError, FirVerifyOptions, SignalFirLane,
@@ -105,6 +106,9 @@ struct CliArgs {
     /// Compile to C++ and print generated code.
     #[arg(long = "dump-cpp", action = ArgAction::SetTrue)]
     dump_cpp: bool,
+    /// Read interpreter `.fbc` text and emit a C++ wrapper that delegates to interpreter-dsp runtime.
+    #[arg(long = "dump-cpp-from-fbc", action = ArgAction::SetTrue)]
+    dump_cpp_from_fbc: bool,
     /// Compile to C and print generated code.
     #[arg(long = "dump-c", action = ArgAction::SetTrue)]
     dump_c: bool,
@@ -143,6 +147,9 @@ struct CliArgs {
     /// Optional output file. When omitted, generated text is written to stdout.
     #[arg(short = 'o', long = "output")]
     output: Option<PathBuf>,
+    /// Override generated C++ class base name for `--dump-cpp-from-fbc`.
+    #[arg(long = "cpp-class-name")]
+    cpp_class_name: Option<String>,
     /// Extra import search directories.
     #[arg(short = 'I', long = "import-dir")]
     import_dir: Vec<PathBuf>,
@@ -574,6 +581,9 @@ fn print_global_usage_and_exit() -> ! {
         "  cargo run -p compiler -- --dump-cpp <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!(
+        "  cargo run -p compiler -- --dump-cpp-from-fbc <input.fbc> [-o <file>] [--cpp-class-name <name>]"
+    );
+    eprintln!(
         "  cargo run -p compiler -- --dump-c <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     std::process::exit(2);
@@ -742,6 +752,7 @@ fn main() {
         cli.dump_box,
         cli.dump_sig,
         cli.dump_cpp,
+        cli.dump_cpp_from_fbc,
         cli.dump_c,
         cli.dump_fir,
         cli.dump_fir_verify,
@@ -774,6 +785,29 @@ fn main() {
         eprintln!(
             "--signal-fir-lane is only valid with --dump-cpp/--dump-c/--dump-fir/--dump-fir-verify/--dump-cranelift"
         );
+        std::process::exit(2);
+    }
+    if cli.dump_cpp_from_fbc {
+        if cli.signal_fir_lane.is_some()
+            || !cli.import_dir.is_empty()
+            || cli.architecture.is_some()
+            || !cli.architecture_dir.is_empty()
+            || cli.inline_architecture_files
+            || cli.fir_fixture.is_some()
+        {
+            eprintln!(
+                "--dump-cpp-from-fbc is incompatible with --signal-fir-lane/--import-dir/architecture/--fir-fixture"
+            );
+            std::process::exit(2);
+        }
+        if let Some(input) = cli.input.as_ref()
+            && input.extension().and_then(|e| e.to_str()) != Some("fbc")
+        {
+            eprintln!("--dump-cpp-from-fbc expects an input file with .fbc extension");
+            std::process::exit(2);
+        }
+    } else if cli.cpp_class_name.is_some() {
+        eprintln!("--cpp-class-name is only valid with --dump-cpp-from-fbc");
         std::process::exit(2);
     }
     if (cli.dump_fir || cli.dump_fir_verify || matches!(cli.lang, Some(CliLang::Fir)))
@@ -943,6 +977,37 @@ fn main() {
     let Some(input_path) = cli.input.as_ref() else {
         print_global_usage_and_exit();
     };
+
+    if cli.dump_cpp_from_fbc {
+        let text = match std::fs::read_to_string(input_path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("Cannot read .fbc file '{}': {e}", input_path.display());
+                std::process::exit(1);
+            }
+        };
+        let mut reader = std::io::BufReader::new(text.as_bytes());
+        let factory = match read_fbc::<f32>(&mut reader) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("Failed to parse .fbc: {e}");
+                std::process::exit(1);
+            }
+        };
+        let opts = FbcCppOptions {
+            class_name: cli.cpp_class_name.clone(),
+            pragma_once: true,
+            namespace: None,
+        };
+        match generate_cpp_from_fbc(&factory, &opts) {
+            Ok(cpp) => emit_output(&cpp, cli.output.as_ref()),
+            Err(e) => {
+                eprintln!("Native C++ generation from FBC failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     if cli.golden {
         if !cli.import_dir.is_empty() {
@@ -1297,7 +1362,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use clap::Parser;
     use compiler::Compiler;
@@ -1360,6 +1425,25 @@ mod tests {
             CliArgs::parse_from(["faust-rs", "--fir-fixture", "sine_phasor", "--lang", "cpp"]);
         assert_eq!(cli.fir_fixture.as_deref(), Some("sine_phasor"));
         assert!(matches!(cli.lang, Some(CliLang::Cpp)));
+    }
+
+    #[test]
+    fn cli_parse_accepts_dump_cpp_from_fbc() {
+        let cli = CliArgs::parse_from(["faust-rs", "--dump-cpp-from-fbc", "foo.fbc"]);
+        assert!(cli.dump_cpp_from_fbc);
+        assert_eq!(cli.input.as_deref(), Some(Path::new("foo.fbc")));
+    }
+
+    #[test]
+    fn cli_parse_accepts_cpp_class_name_with_dump_cpp_from_fbc() {
+        let cli = CliArgs::parse_from([
+            "faust-rs",
+            "--dump-cpp-from-fbc",
+            "--cpp-class-name",
+            "my_dsp",
+            "foo.fbc",
+        ]);
+        assert_eq!(cli.cpp_class_name.as_deref(), Some("my_dsp"));
     }
 
     #[test]
