@@ -7,7 +7,6 @@ members = [
   "crates/graph",
   "crates/boxes",
   "crates/parser",
-  "crates/parser-proto",
   "crates/signals",
   "crates/eval",
   "crates/propagate",

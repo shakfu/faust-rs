@@ -2230,8 +2230,8 @@ fn parser_parity_report() -> Result<(), Box<dyn std::error::Error>> {
 
     let cpp_parser = cpp_root.join("compiler/parser/faustparser.y");
     let cpp_lexer = cpp_root.join("compiler/parser/faustlexer.l");
-    let rust_parser = root.join("crates/parser-proto/src/grammar/faustparser.y");
-    let rust_lexer = root.join("crates/parser-proto/src/grammar/faustlexer.l");
+    let rust_parser = root.join("crates/parser/src/grammar/faustparser.y");
+    let rust_lexer = root.join("crates/parser/src/grammar/faustlexer.l");
     let report_path = root.join(PARITY_REPORT_REL_PATH);
 
     for path in [&cpp_parser, &cpp_lexer, &rust_parser, &rust_lexer] {

@@ -741,18 +741,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "parser-proto"
-version = "0.1.0"
-dependencies = [
- "boxes",
- "cfgrammar",
- "errors",
- "lrlex",
- "lrpar",
- "tlib",
-]
-
-[[package]]
 name = "powerfmt"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
