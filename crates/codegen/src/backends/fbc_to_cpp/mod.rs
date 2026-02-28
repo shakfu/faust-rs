@@ -234,6 +234,13 @@ impl<'a, R: FbcReal> CppGen<'a, R> {
         emit_meta_block(&mut out, &f.meta_block, 2);
         writeln!(out, "\t}}\n").unwrap();
 
+        // ── classInit ───────────────────────────────────────────────────
+        // Static/class-level initialization (sample-rate-independent tables).
+        // In dsp.h this is virtual (not pure), so we override it.
+        writeln!(out, "\tvoid classInit(int sample_rate) override {{").unwrap();
+        self.new_block_comp().compile_block(&f.arena, &mut out, 2, f.static_init_block)?;
+        writeln!(out, "\t}}\n").unwrap();
+
         // ── instanceConstants ────────────────────────────────────────────
         writeln!(out, "\tvoid instanceConstants(int sample_rate) override {{").unwrap();
         writeln!(out, "\t\tfSampleRate = sample_rate;").unwrap();
@@ -254,11 +261,9 @@ impl<'a, R: FbcReal> CppGen<'a, R> {
         writeln!(out, "\t}}\n").unwrap();
 
         // ── instanceInit ─────────────────────────────────────────────────
-        // Runs classInit (static_init_block) then delegates to the three
-        // override methods above, matching the interpreter's call sequence.
+        // Pure orchestrator — no inline code, matching dsp.h call sequence.
         writeln!(out, "\tvoid instanceInit(int sample_rate) override {{").unwrap();
-        writeln!(out, "\t\t// classInit (static_init_block)").unwrap();
-        self.new_block_comp().compile_block(&f.arena, &mut out, 2, f.static_init_block)?;
+        writeln!(out, "\t\tclassInit(sample_rate);").unwrap();
         writeln!(out, "\t\tinstanceConstants(sample_rate);").unwrap();
         writeln!(out, "\t\tinstanceResetUserInterface();").unwrap();
         writeln!(out, "\t\tinstanceClear();").unwrap();
