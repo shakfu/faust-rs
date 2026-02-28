@@ -9,4 +9,14 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-parser-proto = { path = "../parser-proto" }
+boxes = { path = "../boxes" }
+errors = { path = "../errors" }
+cfgrammar = "0.13.10"
+lrlex = "0.13.10"
+lrpar = "0.13.10"
+tlib = { path = "../tlib" }
+
+[build-dependencies]
+cfgrammar = "0.13.10"
+lrlex = "0.13.10"
+lrpar = "0.13.10"

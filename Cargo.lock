@@ -732,7 +732,12 @@ dependencies = [
 name = "parser"
 version = "0.1.0"
 dependencies = [
- "parser-proto",
+ "boxes",
+ "cfgrammar",
+ "errors",
+ "lrlex",
+ "lrpar",
+ "tlib",
 ]
 
 [[package]]

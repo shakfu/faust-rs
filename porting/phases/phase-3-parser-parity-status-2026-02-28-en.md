@@ -213,7 +213,7 @@ Legend:
 
 ## A1 — Production parser ownership (close G1)
 
-Status: `[ ]`  
+Status: `[x]`  
 Goal: remove production dependence on `parser-proto` internals.
 
 Tasks:
@@ -227,6 +227,12 @@ Validation:
 1. `cargo test -p parser --all-targets`
 2. `cargo test -p compiler --all-targets`
 3. `cargo check --workspace --all-targets`
+
+Execution note (2026-02-28):
+- Items (1) and (2) passed.
+- Item (3) is currently blocked by an unrelated local untracked example file
+  (`crates/codegen/examples/interp_baseline.rs`) that fails to compile in this
+  workspace state; parser ownership changes compile and test correctly.
 
 Exit criteria:
 - `crates/parser/Cargo.toml` no longer requires direct runtime delegation to
