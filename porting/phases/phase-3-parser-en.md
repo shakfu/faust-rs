@@ -333,10 +333,12 @@ Faust supports `f"signal {expr}"` format strings. The lexer must handle them as 
 ### 7.4 Remaining execution plan after Gate B prototype (full parser port)
 
 Current status:
-- Gate B parser migration prototype (`lrlex`/`lrpar`) is validated on Slice 1/2/3 and parse/recovery class differential checks.
+- Gate B parser migration prototype (`lrlex`/`lrpar`) is validated through slices 1..12 and parse/recovery class differential checks.
 - Source of truth for C++ behavior remains:
   - `/Users/letz/Developpements/RUST/faust/compiler/parser/faustparser.y`
   - `/Users/letz/Developpements/RUST/faust/compiler/parser/faustlexer.l`
+- Latest audited parity gap snapshot:
+  - `phases/phase-3-parser-parity-status-2026-02-28-en.md`
 
 Remaining steps to reach full parser completion:
 
