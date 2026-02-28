@@ -241,7 +241,7 @@ Exit criteria:
 
 ## A2 — Import origin fidelity (close G2)
 
-Status: `[ ]`  
+Status: `[x]`  
 Goal: preserve per-file source locations after import expansion.
 
 Tasks:
@@ -258,6 +258,13 @@ Validation:
 Exit criteria:
 - diagnostics from imported code report imported file paths (not only entry file).
 - source-span fallback notes are reduced for import-heavy malformed cases.
+
+Execution note (2026-02-28):
+- Implemented line-origin propagation from `SourceReader` import expansion into
+  parser cursor mapping.
+- Added regression test:
+  - `parse_file_with_imports_preserves_imported_file_diagnostic_origin`
+    in `crates/parser/tests/api_bridge.rs`.
 
 ## A3 — Diagnostic code matrix hardening (close G3)
 

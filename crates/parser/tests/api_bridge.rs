@@ -60,3 +60,31 @@ fn bridge_exposes_file_import_parsing() {
 
     fs::remove_dir_all(root).expect("temp root should be removable");
 }
+
+#[test]
+fn parse_file_with_imports_preserves_imported_file_diagnostic_origin() {
+    let root = make_temp_root("import_origin");
+    let main = root.join("main.dsp");
+    let lib = root.join("ops.lib");
+
+    fs::write(&main, "import(\"ops.lib\");\nprocess = gain;\n").expect("main should be written");
+    fs::write(&lib, "gain = ;\n").expect("lib should be written");
+
+    let out =
+        parse_file_with_imports(&main, std::slice::from_ref(&root)).expect("parse should succeed");
+
+    let lib_canonical = lib.canonicalize().expect("lib path should canonicalize");
+    let has_label_on_imported_file = out
+        .diagnostics
+        .as_slice()
+        .iter()
+        .flat_map(|d| d.labels.iter())
+        .any(|label| label.span.file == lib_canonical);
+    assert!(
+        has_label_on_imported_file,
+        "expected at least one parser diagnostic label on imported file {}",
+        lib_canonical.display()
+    );
+
+    fs::remove_dir_all(root).expect("temp root should be removable");
+}

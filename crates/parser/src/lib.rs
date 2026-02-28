@@ -33,7 +33,7 @@ pub mod context;
 pub mod source_reader;
 
 pub use context::{DiagnosticSeverity, ParserCtx, ParserDiagnostic, SourceLocation};
-pub use source_reader::{SourceReader, SourceReaderError};
+pub use source_reader::{ExpandedSource, SourceLineOrigin, SourceReader, SourceReaderError};
 
 /// Primitive operator subset used by parser Slice 2.
 #[derive(Clone, Copy, Debug)]
@@ -65,16 +65,27 @@ pub struct ParseState {
     pub arena: TreeArena,
     pub ctx: ParserCtx,
     source_file: Box<str>,
+    source_origins: Option<Vec<SourceLineOrigin>>,
 }
 
 impl ParseState {
     /// Creates parser state bound to one source file name/path.
     #[must_use]
     pub fn new(source_file: &str) -> Self {
+        Self::new_with_origins(source_file, None)
+    }
+
+    /// Creates parser state bound to one source file and optional expanded-source origin map.
+    #[must_use]
+    pub fn new_with_origins(
+        source_file: &str,
+        source_origins: Option<Vec<SourceLineOrigin>>,
+    ) -> Self {
         Self {
             arena: TreeArena::new(),
             ctx: ParserCtx::new(),
             source_file: source_file.into(),
+            source_origins,
         }
     }
 
@@ -739,13 +750,28 @@ impl ParseState {
         span: Span,
     ) {
         let ((line, col), (end_line, end_col)) = lexer.line_col(span);
+        let (file, mapped_line) = self.resolve_source_location(line);
+        let (_, mapped_end_line) = self.resolve_source_location(end_line);
+        let file_owned = file.to_string_lossy().into_owned();
         self.ctx.set_cursor_span(
-            &self.source_file,
-            u32::try_from(line).unwrap_or(u32::MAX),
+            &file_owned,
+            mapped_line,
             u32::try_from(col).unwrap_or(u32::MAX),
-            u32::try_from(end_line).unwrap_or(u32::MAX),
+            mapped_end_line,
             u32::try_from(end_col).unwrap_or(u32::MAX),
         );
+    }
+
+    fn resolve_source_location(&self, line: usize) -> (std::path::PathBuf, u32) {
+        if let Some(origins) = &self.source_origins
+            && let Some(origin) = origins.get(line.saturating_sub(1))
+        {
+            return (origin.file.clone(), origin.line);
+        }
+        (
+            std::path::PathBuf::from(self.source_file.as_ref()),
+            u32::try_from(line).unwrap_or(u32::MAX),
+        )
     }
 }
 
@@ -823,9 +849,17 @@ pub fn lex_tokens(input: &str) -> Result<Vec<LexedToken>, String> {
 /// Parses one input with Slice-1 grammar and returns parser state.
 #[must_use]
 pub fn parse_program(input: &str, source_file: &str) -> ParseOutput {
+    parse_program_with_origins(input, source_file, None)
+}
+
+fn parse_program_with_origins(
+    input: &str,
+    source_file: &str,
+    source_origins: Option<Vec<SourceLineOrigin>>,
+) -> ParseOutput {
     let lexerdef = lexerdef();
     let lexer = lexerdef.lexer(input);
-    let state = RefCell::new(ParseState::new(source_file));
+    let state = RefCell::new(ParseState::new_with_origins(source_file, source_origins));
     let (root, errors) = faustparser_y::parse(&lexer, &state);
     let mut state = state.into_inner();
 
@@ -836,11 +870,14 @@ pub fn parse_program(input: &str, source_file: &str) -> ParseOutput {
             lrpar::LexParseError::ParseError(e) => e.lexeme().span(),
         };
         let ((line, col), (end_line, end_col)) = lexer.line_col(span);
+        let (file, mapped_line) = state.resolve_source_location(line);
+        let (_, mapped_end_line) = state.resolve_source_location(end_line);
+        let file_owned = file.to_string_lossy().into_owned();
         state.ctx.set_cursor_span(
-            source_file,
-            u32::try_from(line).unwrap_or(u32::MAX),
+            &file_owned,
+            mapped_line,
             u32::try_from(col).unwrap_or(u32::MAX),
-            u32::try_from(end_line).unwrap_or(u32::MAX),
+            mapped_end_line,
             u32::try_from(end_col).unwrap_or(u32::MAX),
         );
         let message = err.pp(&lexer, &faustparser_y::token_epp).to_string();
@@ -871,9 +908,13 @@ pub fn parse_file_with_imports(
     search_paths: &[std::path::PathBuf],
 ) -> Result<ParseOutput, SourceReaderError> {
     let mut reader = SourceReader::new(search_paths.to_vec());
-    let expanded = reader.read_file(path)?;
+    let expanded = reader.read_file_with_origins(path)?;
     let source_name = path.to_string_lossy();
-    Ok(parse_program(&expanded, &source_name))
+    Ok(parse_program_with_origins(
+        &expanded.text,
+        &source_name,
+        Some(expanded.line_origins),
+    ))
 }
 
 /// Updates parser cursor from one lexed token, then tags `sym` as use-site at that location.

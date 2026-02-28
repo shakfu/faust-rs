@@ -17,6 +17,24 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// One source-origin marker for a line in expanded source text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLineOrigin {
+    /// Canonical file path where this expanded line originates.
+    pub file: PathBuf,
+    /// 1-based line number in the original source file.
+    pub line: u32,
+}
+
+/// Expanded source payload returned by [`SourceReader`], including per-line origin mapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpandedSource {
+    /// Expanded source text after recursive import substitution.
+    pub text: Box<str>,
+    /// Origin for each line in `text` (same ordering, 1:1 mapping).
+    pub line_origins: Vec<SourceLineOrigin>,
+}
+
 /// Errors returned by [`SourceReader`].
 #[derive(Debug)]
 pub enum SourceReaderError {
@@ -46,7 +64,7 @@ impl std::error::Error for SourceReaderError {}
 /// Reads Faust sources and expands `import("...");` directives recursively.
 #[derive(Debug, Default)]
 pub struct SourceReader {
-    file_cache: HashMap<PathBuf, Box<str>>,
+    file_cache: HashMap<PathBuf, ExpandedSource>,
     search_paths: Vec<PathBuf>,
     used_files: Vec<PathBuf>,
     visiting: HashSet<PathBuf>,
@@ -85,10 +103,20 @@ impl SourceReader {
     /// Reads one source file and recursively expands imports.
     pub fn read_file(&mut self, path: &Path) -> Result<String, SourceReaderError> {
         let canonical = canonicalize_path(path)?;
-        self.read_file_impl(&canonical).map(|text| text.into())
+        self.read_file_impl(&canonical)
+            .map(|expanded| expanded.text.into())
     }
 
-    fn read_file_impl(&mut self, path: &Path) -> Result<Box<str>, SourceReaderError> {
+    /// Reads one source file and recursively expands imports, preserving line origins.
+    pub fn read_file_with_origins(
+        &mut self,
+        path: &Path,
+    ) -> Result<ExpandedSource, SourceReaderError> {
+        let canonical = canonicalize_path(path)?;
+        self.read_file_impl(&canonical)
+    }
+
+    fn read_file_impl(&mut self, path: &Path) -> Result<ExpandedSource, SourceReaderError> {
         if let Some(cached) = self.file_cache.get(path) {
             return Ok(cached.clone());
         }
@@ -110,7 +138,8 @@ impl SourceReader {
         })?;
 
         let mut expanded = String::new();
-        for line in source.lines() {
+        let mut line_origins = Vec::new();
+        for (line_index, line) in source.lines().enumerate() {
             if let Some(import_name) = parse_import_line(line) {
                 let from_dir = path.parent();
                 let Some(import_path) = self.resolve_import_from(&import_name, from_dir) else {
@@ -121,19 +150,27 @@ impl SourceReader {
                     });
                 };
                 let imported = self.read_file_impl(&import_path)?;
-                expanded.push_str(&imported);
+                expanded.push_str(&imported.text);
+                line_origins.extend(imported.line_origins);
                 if !expanded.ends_with('\n') {
                     expanded.push('\n');
                 }
             } else {
                 expanded.push_str(line);
                 expanded.push('\n');
+                line_origins.push(SourceLineOrigin {
+                    file: path.to_path_buf(),
+                    line: u32::try_from(line_index + 1).unwrap_or(u32::MAX),
+                });
             }
         }
 
         self.visiting.remove(path);
 
-        let expanded = expanded.into_boxed_str();
+        let expanded = ExpandedSource {
+            text: expanded.into_boxed_str(),
+            line_origins,
+        };
         self.file_cache.insert(path.to_path_buf(), expanded.clone());
         Ok(expanded)
     }
