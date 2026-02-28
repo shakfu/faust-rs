@@ -236,8 +236,8 @@ impl<'a, R: FbcReal> CppGen<'a, R> {
 
         // ── classInit ───────────────────────────────────────────────────
         // Static/class-level initialization (sample-rate-independent tables).
-        // In dsp.h this is virtual (not pure), so we override it.
-        writeln!(out, "\tvoid classInit(int sample_rate) override {{").unwrap();
+        // Not declared virtual in dsp.h, so no 'override'.
+        writeln!(out, "\tvoid classInit(int sample_rate) {{").unwrap();
         self.new_block_comp().compile_block(&f.arena, &mut out, 2, f.static_init_block)?;
         writeln!(out, "\t}}\n").unwrap();
 
