@@ -816,6 +816,13 @@ pub struct ParseOutput {
     pub root: Option<TreeId>,
     pub errors: Vec<String>,
     pub diagnostics: DiagnosticBundle,
+    /// Canonical source files consumed by parser input resolution.
+    ///
+    /// - For `parse_program(...)`, this list is empty because no filesystem import
+    ///   resolution occurs in-memory.
+    /// - For `parse_file_with_imports(...)`, this list contains the deterministic
+    ///   recursive import expansion order from [`SourceReader`], including the entry file.
+    pub used_files: Vec<std::path::PathBuf>,
     pub state: ParseState,
 }
 
@@ -893,6 +900,7 @@ fn parse_program_with_origins(
         root,
         errors: rendered_errors,
         diagnostics,
+        used_files: Vec::new(),
         state,
     }
 }
@@ -911,12 +919,15 @@ pub fn parse_file_with_imports(
 ) -> Result<ParseOutput, SourceReaderError> {
     let mut reader = SourceReader::new(search_paths.to_vec());
     let expanded = reader.read_file_with_origins(path)?;
+    let used_files = reader.used_files().to_vec();
     let source_name = path.to_string_lossy();
-    Ok(parse_program_with_origins(
+    let mut output = parse_program_with_origins(
         &expanded.text,
         &source_name,
         Some(expanded.line_origins),
-    ))
+    );
+    output.used_files = used_files;
+    Ok(output)
 }
 
 /// Updates parser cursor from one lexed token, then tags `sym` as use-site at that location.

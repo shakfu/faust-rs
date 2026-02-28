@@ -327,7 +327,7 @@ Execution note (2026-02-28):
 
 ## A5 — Source usage exposure in parser API (close G6)
 
-Status: `[ ]`  
+Status: `[x]`  
 Goal: surface used source files through production parser API.
 
 Tasks:
@@ -342,6 +342,21 @@ Validation:
 
 Exit criteria:
 - parser callers can retrieve import-resolved used file list from public API.
+
+Execution note (2026-02-28):
+- Extended production parser API output with source-usage exposure:
+  - `crates/parser/src/lib.rs`:
+    - `ParseOutput` now includes `used_files: Vec<PathBuf>`.
+    - `parse_program(...)` keeps `used_files` empty for in-memory parsing.
+    - `parse_file_with_imports(...)` now forwards deterministic source expansion
+      order from `SourceReader::used_files()`.
+- Added deterministic-order regression coverage:
+  - `crates/parser/tests/api_bridge.rs`:
+    - `parse_file_with_imports_exposes_deterministic_used_files_order`
+    - existing import parse bridge test now also checks `used_files`.
+- Validation run:
+  - `cargo test -p parser --all-targets`
+  - `cargo test -p compiler --all-targets`
 
 ## A6 — Remote import policy and implementation decision (close G5)
 

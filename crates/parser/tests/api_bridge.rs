@@ -57,6 +57,55 @@ fn bridge_exposes_file_import_parsing() {
         "unexpected parse errors: {:?}",
         out.errors
     );
+    assert_eq!(
+        out.used_files.len(),
+        2,
+        "used_files should contain entry + imported file"
+    );
+    assert_eq!(
+        out.used_files[0],
+        main.canonicalize().expect("main should canonicalize")
+    );
+    assert_eq!(
+        out.used_files[1],
+        lib.canonicalize().expect("lib should canonicalize")
+    );
+
+    fs::remove_dir_all(root).expect("temp root should be removable");
+}
+
+#[test]
+fn parse_file_with_imports_exposes_deterministic_used_files_order() {
+    let root = make_temp_root("used_files_order");
+    let main = root.join("main.dsp");
+    let lib_a = root.join("a.lib");
+    let lib_b = root.join("b.lib");
+
+    fs::write(
+        &main,
+        "import(\"a.lib\");\nimport(\"b.lib\");\nprocess = a + b;\n",
+    )
+    .expect("main should be written");
+    fs::write(&lib_a, "a = _;\n").expect("a.lib should be written");
+    fs::write(&lib_b, "b = _;\n").expect("b.lib should be written");
+
+    let out =
+        parse_file_with_imports(&main, std::slice::from_ref(&root)).expect("parse should succeed");
+    assert!(
+        out.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        out.errors
+    );
+
+    let expected = vec![
+        main.canonicalize().expect("main should canonicalize"),
+        lib_a.canonicalize().expect("a.lib should canonicalize"),
+        lib_b.canonicalize().expect("b.lib should canonicalize"),
+    ];
+    assert_eq!(
+        out.used_files, expected,
+        "used_files order should follow deterministic expansion order"
+    );
 
     fs::remove_dir_all(root).expect("temp root should be removable");
 }
