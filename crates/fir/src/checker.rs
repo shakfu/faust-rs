@@ -254,9 +254,13 @@ pub enum InitStatus {
 /// Entry stored in a [`ScopeFrame`] for each declared variable.
 #[derive(Clone, Debug)]
 struct VarEntry {
+    /// Access class used by loads/stores to this symbol.
     access: AccessType,
+    /// FIR type declared for the symbol (element type for tables).
     typ: FirType,
+    /// Definite-initialization state tracked by Phase 2 control-flow analysis.
     init: InitStatus,
+    /// `true` when the symbol was declared as a table (`DeclareTable`).
     is_table: bool,
 }
 
@@ -274,11 +278,13 @@ enum FrameKind {
 /// One level of the lexical scope stack.
 #[derive(Clone, Debug)]
 struct ScopeFrame {
+    /// Variables declared in this lexical frame.
     vars: HashMap<String, VarEntry>,
 }
 
 /// Lexical scope stack for Phase 2 traversal.
 struct ScopeStack {
+    /// Stack of lexical frames from outermost to innermost.
     frames: Vec<ScopeFrame>,
 }
 
@@ -507,10 +513,15 @@ pub fn verify_fir_function(
 
 // ─── Internal context ──────────────────────────────────────────────────────────
 
+/// Mutable verifier state shared by all verification phases.
 struct VerifyCtx<'s> {
+    /// FIR storage containing all nodes referenced by the verifier.
     store: &'s FirStore,
+    /// Root module (or function in single-function mode) currently verified.
     module_id: FirId,
+    /// Collected diagnostics in emission order.
     diags: Vec<FirDiagnostic>,
+    /// Module symbols collected/consumed across verification phases.
     symbols: ModuleSymbols,
 
     // ── Phase 2 per-function state ─────────────────────────────────────────
@@ -619,6 +630,8 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Checks that `compute` body aliases and `inputs[]`/`outputs[]` indices
+    /// stay within the module-level `(num_inputs, num_outputs)` contract.
     fn check_compute_io_arity_contract(
         &mut self,
         declarations: FirId,
@@ -645,6 +658,9 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Recursively walks the `compute` body and emits:
+    /// - `FIR-M08` when an input alias/index exceeds `num_inputs`
+    /// - `FIR-M09` when an output alias/index exceeds `num_outputs`.
     fn check_compute_body_io_access(&mut self, id: FirId, num_inputs: usize, num_outputs: usize) {
         match match_fir(self.store, id) {
             FirMatch::Block(items) => {
@@ -1012,7 +1028,9 @@ impl<'s> VerifyCtx<'s> {
     /// Validates one `DeclareFun` signature and stores it in `symbols.functions`.
     ///
     /// This helper is shared by `globals` (extern prototypes) and
-    /// `declarations` (regular function declarations).
+    /// `declarations` (regular function declarations). It validates function
+    /// signature shape, records signatures into `symbols.functions`, and
+    /// optionally tracks duplicate names in `seen_names`.
     #[allow(clippy::too_many_arguments)]
     fn register_function_signature(
         &mut self,
@@ -2455,14 +2473,19 @@ impl<'s> VerifyCtx<'s> {
     }
 }
 
+/// Parses `inputN` aliases used in `compute` into a zero-based index.
 fn input_alias_index(name: &str) -> Option<usize> {
     name.strip_prefix("input")?.parse::<usize>().ok()
 }
 
+/// Parses `outputN` aliases used in `compute` into a zero-based index.
 fn output_alias_index(name: &str) -> Option<usize> {
     name.strip_prefix("output")?.parse::<usize>().ok()
 }
 
+/// Returns a non-negative constant index from a `kFunArgs` table access node.
+///
+/// Only `Int32` literals with `value >= 0` are accepted.
 fn funargs_constant_index(store: &FirStore, id: FirId) -> Option<usize> {
     match match_fir(store, id) {
         FirMatch::Int32 { value, .. } if value >= 0 => usize::try_from(value).ok(),
