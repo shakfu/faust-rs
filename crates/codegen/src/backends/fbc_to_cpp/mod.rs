@@ -234,31 +234,34 @@ impl<'a, R: FbcReal> CppGen<'a, R> {
         emit_meta_block(&mut out, &f.meta_block, 2);
         writeln!(out, "\t}}\n").unwrap();
 
-        // ── instanceInit ────────────────────────────────────────────────
-        // Merges classInit + instanceConstants + resetUI + instanceClear,
-        // matching the interpreter's instance_init() call sequence.
-        writeln!(out, "\tvoid instanceInit(int sample_rate) {{").unwrap();
-
-        // All four sub-phases share one BlockComp so that temporary variable
-        // names (fRN, iIN) are unique across the entire instanceInit() body.
-        let mut comp = self.new_block_comp();
-
-        writeln!(out, "\t\t// classInit (static_init_block)").unwrap();
-        comp.compile_block(&f.arena, &mut out, 2, f.static_init_block)?;
-
-        writeln!(out, "\t\t// instanceConstants (init_block)").unwrap();
+        // ── instanceConstants ────────────────────────────────────────────
+        writeln!(out, "\tvoid instanceConstants(int sample_rate) override {{").unwrap();
         writeln!(out, "\t\tfSampleRate = sample_rate;").unwrap();
         if f.sr_offset >= 0 && f.sr_offset < f.int_heap_size {
             writeln!(out, "\t\tiVec[{}] = sample_rate;", f.sr_offset).unwrap();
         }
-        comp.compile_block(&f.arena, &mut out, 2, f.init_block)?;
+        self.new_block_comp().compile_block(&f.arena, &mut out, 2, f.init_block)?;
+        writeln!(out, "\t}}\n").unwrap();
 
-        writeln!(out, "\t\t// instanceResetUserInterface (reset_ui_block)").unwrap();
-        comp.compile_block(&f.arena, &mut out, 2, f.reset_ui_block)?;
+        // ── instanceResetUserInterface ───────────────────────────────────
+        writeln!(out, "\tvoid instanceResetUserInterface() override {{").unwrap();
+        self.new_block_comp().compile_block(&f.arena, &mut out, 2, f.reset_ui_block)?;
+        writeln!(out, "\t}}\n").unwrap();
 
-        writeln!(out, "\t\t// instanceClear (clear_block)").unwrap();
-        comp.compile_block(&f.arena, &mut out, 2, f.clear_block)?;
+        // ── instanceClear ────────────────────────────────────────────────
+        writeln!(out, "\tvoid instanceClear() override {{").unwrap();
+        self.new_block_comp().compile_block(&f.arena, &mut out, 2, f.clear_block)?;
+        writeln!(out, "\t}}\n").unwrap();
 
+        // ── instanceInit ─────────────────────────────────────────────────
+        // Runs classInit (static_init_block) then delegates to the three
+        // override methods above, matching the interpreter's call sequence.
+        writeln!(out, "\tvoid instanceInit(int sample_rate) override {{").unwrap();
+        writeln!(out, "\t\t// classInit (static_init_block)").unwrap();
+        self.new_block_comp().compile_block(&f.arena, &mut out, 2, f.static_init_block)?;
+        writeln!(out, "\t\tinstanceConstants(sample_rate);").unwrap();
+        writeln!(out, "\t\tinstanceResetUserInterface();").unwrap();
+        writeln!(out, "\t\tinstanceClear();").unwrap();
         writeln!(out, "\t}}\n").unwrap();
 
         // ── init ────────────────────────────────────────────────────────
@@ -1274,11 +1277,18 @@ fn emit_ui_block<R: FbcReal>(
                 .unwrap();
             }
             FbcOpcode::Declare => {
+                // offset == -1 means "no associated heap slot" (group-level
+                // declare); emit nullptr to avoid out-of-bounds array access.
+                let ptr = if instr.offset < 0 {
+                    "nullptr".to_owned()
+                } else {
+                    format!("&fVec[{}]", instr.offset)
+                };
                 writeln!(
                     out,
-                    "{}ui_interface->declare(&fVec[{}], \"{}\", \"{}\");",
+                    "{}ui_interface->declare({}, \"{}\", \"{}\");",
                     tab(t),
-                    instr.offset,
+                    ptr,
                     escape_str(&instr.key),
                     escape_str(&instr.value)
                 )
