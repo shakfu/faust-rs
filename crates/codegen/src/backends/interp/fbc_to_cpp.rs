@@ -95,14 +95,28 @@ pub enum FbcCppError {
 impl std::fmt::Display for FbcCppError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingBranchTarget { opcode, block_id, pc } => {
-                write!(f, "missing branch target for {opcode:?} at block {block_id:?} pc {pc}")
+            Self::MissingBranchTarget {
+                opcode,
+                block_id,
+                pc,
+            } => {
+                write!(
+                    f,
+                    "missing branch target for {opcode:?} at block {block_id:?} pc {pc}"
+                )
             }
             Self::InvalidBlockId { block_id } => {
                 write!(f, "invalid BlockId {block_id:?}")
             }
-            Self::Unsupported { opcode, block_id, pc } => {
-                write!(f, "unsupported opcode {opcode:?} at block {block_id:?} pc {pc}")
+            Self::Unsupported {
+                opcode,
+                block_id,
+                pc,
+            } => {
+                write!(
+                    f,
+                    "unsupported opcode {opcode:?} at block {block_id:?} pc {pc}"
+                )
             }
         }
     }
@@ -151,8 +165,17 @@ impl<'a, R: FbcReal> CppGen<'a, R> {
                     format!("{base}_dsp")
                 }
             });
-        let real_ctype = if R::TYPE_NAME == "f32" { "float" } else { "double" };
-        Self { factory, options, class_name, real_ctype }
+        let real_ctype = if R::TYPE_NAME == "f32" {
+            "float"
+        } else {
+            "double"
+        };
+        Self {
+            factory,
+            options,
+            class_name,
+            real_ctype,
+        }
     }
 
     fn generate(&self) -> Result<String, FbcCppError> {
@@ -220,12 +243,30 @@ impl<'a, R: FbcReal> CppGen<'a, R> {
         writeln!(out, "\t}}\n").unwrap();
 
         // ── getNumInputs / getNumOutputs / getSampleRate ─────────────────
-        writeln!(out, "\tint getNumInputs() override {{ return {}; }}", f.num_inputs).unwrap();
-        writeln!(out, "\tint getNumOutputs() override {{ return {}; }}", f.num_outputs).unwrap();
-        writeln!(out, "\tint getSampleRate() override {{ return fSampleRate; }}\n").unwrap();
+        writeln!(
+            out,
+            "\tint getNumInputs() override {{ return {}; }}",
+            f.num_inputs
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "\tint getNumOutputs() override {{ return {}; }}",
+            f.num_outputs
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "\tint getSampleRate() override {{ return fSampleRate; }}\n"
+        )
+        .unwrap();
 
         // ── buildUserInterface ───────────────────────────────────────────
-        writeln!(out, "\tvoid buildUserInterface(UI* ui_interface) override {{").unwrap();
+        writeln!(
+            out,
+            "\tvoid buildUserInterface(UI* ui_interface) override {{"
+        )
+        .unwrap();
         emit_ui_block(&mut out, &f.ui_block, self.real_ctype, 2);
         writeln!(out, "\t}}\n").unwrap();
 
@@ -238,7 +279,8 @@ impl<'a, R: FbcReal> CppGen<'a, R> {
         // Static/class-level initialization (sample-rate-independent tables).
         // Not declared virtual in dsp.h, so no 'override'.
         writeln!(out, "\tvoid classInit(int sample_rate) {{").unwrap();
-        self.new_block_comp().compile_block(&f.arena, &mut out, 2, f.static_init_block)?;
+        self.new_block_comp()
+            .compile_block(&f.arena, &mut out, 2, f.static_init_block)?;
         writeln!(out, "\t}}\n").unwrap();
 
         // ── instanceConstants ────────────────────────────────────────────
@@ -247,17 +289,20 @@ impl<'a, R: FbcReal> CppGen<'a, R> {
         if f.sr_offset >= 0 && f.sr_offset < f.int_heap_size {
             writeln!(out, "\t\tiVec[{}] = sample_rate;", f.sr_offset).unwrap();
         }
-        self.new_block_comp().compile_block(&f.arena, &mut out, 2, f.init_block)?;
+        self.new_block_comp()
+            .compile_block(&f.arena, &mut out, 2, f.init_block)?;
         writeln!(out, "\t}}\n").unwrap();
 
         // ── instanceResetUserInterface ───────────────────────────────────
         writeln!(out, "\tvoid instanceResetUserInterface() override {{").unwrap();
-        self.new_block_comp().compile_block(&f.arena, &mut out, 2, f.reset_ui_block)?;
+        self.new_block_comp()
+            .compile_block(&f.arena, &mut out, 2, f.reset_ui_block)?;
         writeln!(out, "\t}}\n").unwrap();
 
         // ── instanceClear ────────────────────────────────────────────────
         writeln!(out, "\tvoid instanceClear() override {{").unwrap();
-        self.new_block_comp().compile_block(&f.arena, &mut out, 2, f.clear_block)?;
+        self.new_block_comp()
+            .compile_block(&f.arena, &mut out, 2, f.clear_block)?;
         writeln!(out, "\t}}\n").unwrap();
 
         // ── instanceInit ─────────────────────────────────────────────────
@@ -333,7 +378,14 @@ struct BlockComp {
 
 impl BlockComp {
     fn new(real_ctype: &'static str) -> Self {
-        Self { real_ctype, rc: 0, ic: 0, tc: 0, rstack: Vec::new(), istack: Vec::new() }
+        Self {
+            real_ctype,
+            rc: 0,
+            ic: 0,
+            tc: 0,
+            rstack: Vec::new(),
+            istack: Vec::new(),
+        }
     }
 
     // ── Stack helpers ────────────────────────────────────────────────────────
@@ -607,13 +659,17 @@ impl BlockComp {
 
             // ── Sound fields (unsupported) ────────────────────────────────
             LoadSoundFieldInt | LoadSoundFieldReal => {
-                return Err(FbcCppError::Unsupported { opcode: instr.opcode, block_id, pc });
+                return Err(FbcCppError::Unsupported {
+                    opcode: instr.opcode,
+                    block_id,
+                    pc,
+                });
             }
 
             // ── Cast / Bitcast ────────────────────────────────────────────
             CastReal => {
                 let v = self.pop_i();
-                self.push_r(out, t, &format!("({}){}",  self.real_ctype, v));
+                self.push_r(out, t, &format!("({}){}", self.real_ctype, v));
             }
             CastInt => {
                 let v = self.pop_r();
@@ -628,29 +684,57 @@ impl BlockComp {
             BitcastInt => {
                 let v = self.pop_r();
                 // Reinterpret float bits as int32.
-                self.push_i(out, t, &format!("([]({} x){{ int r; memcpy(&r, &x, sizeof(int)); return r; }})({})", self.real_ctype, v));
+                self.push_i(
+                    out,
+                    t,
+                    &format!(
+                        "([]({} x){{ int r; memcpy(&r, &x, sizeof(int)); return r; }})({})",
+                        self.real_ctype, v
+                    ),
+                );
             }
             BitcastReal => {
                 let v = self.pop_i();
                 // Reinterpret int32 bits as float.
-                self.push_r(out, t, &format!("([]( int x){{ {} r; memcpy(&r, &x, sizeof({})); return r; }})({})", self.real_ctype, self.real_ctype, v));
+                self.push_r(
+                    out,
+                    t,
+                    &format!(
+                        "([]( int x){{ {} r; memcpy(&r, &x, sizeof({})); return r; }})({})",
+                        self.real_ctype, self.real_ctype, v
+                    ),
+                );
             }
 
             // ════════════════════════════════════════════════════════════
             // Standard math: stack OP stack  (pop2 → push1)
             // ════════════════════════════════════════════════════════════
-            AddReal => { self.bin_rr(out, t, "+"); }
-            SubReal => { self.bin_rr(out, t, "-"); }
-            MultReal => { self.bin_rr(out, t, "*"); }
-            DivReal => { self.bin_rr(out, t, "/"); }
+            AddReal => {
+                self.bin_rr(out, t, "+");
+            }
+            SubReal => {
+                self.bin_rr(out, t, "-");
+            }
+            MultReal => {
+                self.bin_rr(out, t, "*");
+            }
+            DivReal => {
+                self.bin_rr(out, t, "/");
+            }
             RemReal => {
                 let v1 = self.pop_r();
                 let v2 = self.pop_r();
                 self.push_r(out, t, &format!("std::remainder({}, {})", v1, v2));
             }
-            AddInt => { self.bin_ii(out, t, "+"); }
-            SubInt => { self.bin_ii(out, t, "-"); }
-            MultInt => { self.bin_ii(out, t, "*"); }
+            AddInt => {
+                self.bin_ii(out, t, "+");
+            }
+            SubInt => {
+                self.bin_ii(out, t, "-");
+            }
+            MultInt => {
+                self.bin_ii(out, t, "*");
+            }
             DivInt => {
                 let v1 = self.pop_i();
                 let v2 = self.pop_i();
@@ -661,318 +745,951 @@ impl BlockComp {
                 let v2 = self.pop_i();
                 self.push_i(out, t, &format!("({} != 0 ? {} % {} : 0)", v2, v1, v2));
             }
-            LshInt => { self.bin_ii(out, t, "<<"); }
-            ARshInt => { self.bin_ii(out, t, ">>"); }
+            LshInt => {
+                self.bin_ii(out, t, "<<");
+            }
+            ARshInt => {
+                self.bin_ii(out, t, ">>");
+            }
             LRshInt => {
                 let v1 = self.pop_i();
                 let v2 = self.pop_i();
                 self.push_i(out, t, &format!("(int)((unsigned){} >> {})", v1, v2));
             }
-            GTInt => { self.cmp_ii(out, t, ">"); }
-            LTInt => { self.cmp_ii(out, t, "<"); }
-            GEInt => { self.cmp_ii(out, t, ">="); }
-            LEInt => { self.cmp_ii(out, t, "<="); }
-            EQInt => { self.cmp_ii(out, t, "=="); }
-            NEInt => { self.cmp_ii(out, t, "!="); }
-            GTReal => { self.cmp_rr(out, t, ">"); }
-            LTReal => { self.cmp_rr(out, t, "<"); }
-            GEReal => { self.cmp_rr(out, t, ">="); }
-            LEReal => { self.cmp_rr(out, t, "<="); }
-            EQReal => { self.cmp_rr(out, t, "=="); }
-            NEReal => { self.cmp_rr(out, t, "!="); }
-            ANDInt => { self.bin_ii(out, t, "&"); }
-            ORInt => { self.bin_ii(out, t, "|"); }
-            XORInt => { self.bin_ii(out, t, "^"); }
+            GTInt => {
+                self.cmp_ii(out, t, ">");
+            }
+            LTInt => {
+                self.cmp_ii(out, t, "<");
+            }
+            GEInt => {
+                self.cmp_ii(out, t, ">=");
+            }
+            LEInt => {
+                self.cmp_ii(out, t, "<=");
+            }
+            EQInt => {
+                self.cmp_ii(out, t, "==");
+            }
+            NEInt => {
+                self.cmp_ii(out, t, "!=");
+            }
+            GTReal => {
+                self.cmp_rr(out, t, ">");
+            }
+            LTReal => {
+                self.cmp_rr(out, t, "<");
+            }
+            GEReal => {
+                self.cmp_rr(out, t, ">=");
+            }
+            LEReal => {
+                self.cmp_rr(out, t, "<=");
+            }
+            EQReal => {
+                self.cmp_rr(out, t, "==");
+            }
+            NEReal => {
+                self.cmp_rr(out, t, "!=");
+            }
+            ANDInt => {
+                self.bin_ii(out, t, "&");
+            }
+            ORInt => {
+                self.bin_ii(out, t, "|");
+            }
+            XORInt => {
+                self.bin_ii(out, t, "^");
+            }
 
             // ════════════════════════════════════════════════════════════
             // Standard math: heap OP heap  → push1
             // ════════════════════════════════════════════════════════════
-            AddRealHeap => { self.push_r(out, t, &format!("fVec[{}] + fVec[{}]", o1, o2)); }
-            SubRealHeap => { self.push_r(out, t, &format!("fVec[{}] - fVec[{}]", o1, o2)); }
-            MultRealHeap => { self.push_r(out, t, &format!("fVec[{}] * fVec[{}]", o1, o2)); }
-            DivRealHeap => { self.push_r(out, t, &format!("fVec[{}] / fVec[{}]", o1, o2)); }
-            RemRealHeap => {
-                self.push_r(out, t, &format!("std::remainder(fVec[{}], fVec[{}])", o1, o2));
+            AddRealHeap => {
+                self.push_r(out, t, &format!("fVec[{}] + fVec[{}]", o1, o2));
             }
-            AddIntHeap => { self.push_i(out, t, &format!("iVec[{}] + iVec[{}]", o1, o2)); }
-            SubIntHeap => { self.push_i(out, t, &format!("iVec[{}] - iVec[{}]", o1, o2)); }
-            MultIntHeap => { self.push_i(out, t, &format!("iVec[{}] * iVec[{}]", o1, o2)); }
+            SubRealHeap => {
+                self.push_r(out, t, &format!("fVec[{}] - fVec[{}]", o1, o2));
+            }
+            MultRealHeap => {
+                self.push_r(out, t, &format!("fVec[{}] * fVec[{}]", o1, o2));
+            }
+            DivRealHeap => {
+                self.push_r(out, t, &format!("fVec[{}] / fVec[{}]", o1, o2));
+            }
+            RemRealHeap => {
+                self.push_r(
+                    out,
+                    t,
+                    &format!("std::remainder(fVec[{}], fVec[{}])", o1, o2),
+                );
+            }
+            AddIntHeap => {
+                self.push_i(out, t, &format!("iVec[{}] + iVec[{}]", o1, o2));
+            }
+            SubIntHeap => {
+                self.push_i(out, t, &format!("iVec[{}] - iVec[{}]", o1, o2));
+            }
+            MultIntHeap => {
+                self.push_i(out, t, &format!("iVec[{}] * iVec[{}]", o1, o2));
+            }
             DivIntHeap => {
-                self.push_i(out, t, &format!("(iVec[{}] != 0 ? iVec[{}] / iVec[{}] : 0)", o2, o1, o2));
+                self.push_i(
+                    out,
+                    t,
+                    &format!("(iVec[{}] != 0 ? iVec[{}] / iVec[{}] : 0)", o2, o1, o2),
+                );
             }
             RemIntHeap => {
-                self.push_i(out, t, &format!("(iVec[{}] != 0 ? iVec[{}] % iVec[{}] : 0)", o2, o1, o2));
+                self.push_i(
+                    out,
+                    t,
+                    &format!("(iVec[{}] != 0 ? iVec[{}] % iVec[{}] : 0)", o2, o1, o2),
+                );
             }
-            LshIntHeap => { self.push_i(out, t, &format!("iVec[{}] << iVec[{}]", o1, o2)); }
-            ARshIntHeap => { self.push_i(out, t, &format!("iVec[{}] >> iVec[{}]", o1, o2)); }
+            LshIntHeap => {
+                self.push_i(out, t, &format!("iVec[{}] << iVec[{}]", o1, o2));
+            }
+            ARshIntHeap => {
+                self.push_i(out, t, &format!("iVec[{}] >> iVec[{}]", o1, o2));
+            }
             LRshIntHeap => {
-                self.push_i(out, t, &format!("(int)((unsigned)iVec[{}] >> iVec[{}])", o1, o2));
+                self.push_i(
+                    out,
+                    t,
+                    &format!("(int)((unsigned)iVec[{}] >> iVec[{}])", o1, o2),
+                );
             }
-            GTIntHeap => { self.push_i(out, t, &format!("(iVec[{}] > iVec[{}])", o1, o2)); }
-            LTIntHeap => { self.push_i(out, t, &format!("(iVec[{}] < iVec[{}])", o1, o2)); }
-            GEIntHeap => { self.push_i(out, t, &format!("(iVec[{}] >= iVec[{}])", o1, o2)); }
-            LEIntHeap => { self.push_i(out, t, &format!("(iVec[{}] <= iVec[{}])", o1, o2)); }
-            EQIntHeap => { self.push_i(out, t, &format!("(iVec[{}] == iVec[{}])", o1, o2)); }
-            NEIntHeap => { self.push_i(out, t, &format!("(iVec[{}] != iVec[{}])", o1, o2)); }
-            GTRealHeap => { self.push_i(out, t, &format!("(fVec[{}] > fVec[{}])", o1, o2)); }
-            LTRealHeap => { self.push_i(out, t, &format!("(fVec[{}] < fVec[{}])", o1, o2)); }
-            GERealHeap => { self.push_i(out, t, &format!("(fVec[{}] >= fVec[{}])", o1, o2)); }
-            LERealHeap => { self.push_i(out, t, &format!("(fVec[{}] <= fVec[{}])", o1, o2)); }
-            EQRealHeap => { self.push_i(out, t, &format!("(fVec[{}] == fVec[{}])", o1, o2)); }
-            NERealHeap => { self.push_i(out, t, &format!("(fVec[{}] != fVec[{}])", o1, o2)); }
-            ANDIntHeap => { self.push_i(out, t, &format!("iVec[{}] & iVec[{}]", o1, o2)); }
-            ORIntHeap => { self.push_i(out, t, &format!("iVec[{}] | iVec[{}]", o1, o2)); }
-            XORIntHeap => { self.push_i(out, t, &format!("iVec[{}] ^ iVec[{}]", o1, o2)); }
+            GTIntHeap => {
+                self.push_i(out, t, &format!("(iVec[{}] > iVec[{}])", o1, o2));
+            }
+            LTIntHeap => {
+                self.push_i(out, t, &format!("(iVec[{}] < iVec[{}])", o1, o2));
+            }
+            GEIntHeap => {
+                self.push_i(out, t, &format!("(iVec[{}] >= iVec[{}])", o1, o2));
+            }
+            LEIntHeap => {
+                self.push_i(out, t, &format!("(iVec[{}] <= iVec[{}])", o1, o2));
+            }
+            EQIntHeap => {
+                self.push_i(out, t, &format!("(iVec[{}] == iVec[{}])", o1, o2));
+            }
+            NEIntHeap => {
+                self.push_i(out, t, &format!("(iVec[{}] != iVec[{}])", o1, o2));
+            }
+            GTRealHeap => {
+                self.push_i(out, t, &format!("(fVec[{}] > fVec[{}])", o1, o2));
+            }
+            LTRealHeap => {
+                self.push_i(out, t, &format!("(fVec[{}] < fVec[{}])", o1, o2));
+            }
+            GERealHeap => {
+                self.push_i(out, t, &format!("(fVec[{}] >= fVec[{}])", o1, o2));
+            }
+            LERealHeap => {
+                self.push_i(out, t, &format!("(fVec[{}] <= fVec[{}])", o1, o2));
+            }
+            EQRealHeap => {
+                self.push_i(out, t, &format!("(fVec[{}] == fVec[{}])", o1, o2));
+            }
+            NERealHeap => {
+                self.push_i(out, t, &format!("(fVec[{}] != fVec[{}])", o1, o2));
+            }
+            ANDIntHeap => {
+                self.push_i(out, t, &format!("iVec[{}] & iVec[{}]", o1, o2));
+            }
+            ORIntHeap => {
+                self.push_i(out, t, &format!("iVec[{}] | iVec[{}]", o1, o2));
+            }
+            XORIntHeap => {
+                self.push_i(out, t, &format!("iVec[{}] ^ iVec[{}]", o1, o2));
+            }
 
             // ════════════════════════════════════════════════════════════
             // Standard math: heap OP stack  (pop1 stack → push1)
             // Each: v = pop_stack; push heap[o1] OP v
             // ════════════════════════════════════════════════════════════
-            AddRealStack => { let v = self.pop_r(); self.push_r(out, t, &format!("fVec[{}] + {}", o1, v)); }
-            SubRealStack => { let v = self.pop_r(); self.push_r(out, t, &format!("fVec[{}] - {}", o1, v)); }
-            MultRealStack => { let v = self.pop_r(); self.push_r(out, t, &format!("fVec[{}] * {}", o1, v)); }
-            DivRealStack => { let v = self.pop_r(); self.push_r(out, t, &format!("fVec[{}] / {}", o1, v)); }
-            RemRealStack => { let v = self.pop_r(); self.push_r(out, t, &format!("std::remainder(fVec[{}], {})", o1, v)); }
-            AddIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("iVec[{}] + {}", o1, v)); }
-            SubIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("iVec[{}] - {}", o1, v)); }
-            MultIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("iVec[{}] * {}", o1, v)); }
-            DivIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("({v} != 0 ? iVec[{o1}] / {v} : 0)")); }
-            RemIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("({v} != 0 ? iVec[{o1}] % {v} : 0)")); }
-            LshIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("iVec[{}] << {}", o1, v)); }
-            ARshIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("iVec[{}] >> {}", o1, v)); }
-            LRshIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("(int)((unsigned)iVec[{}] >> {})", o1, v)); }
-            GTIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("(iVec[{}] > {})", o1, v)); }
-            LTIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("(iVec[{}] < {})", o1, v)); }
-            GEIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("(iVec[{}] >= {})", o1, v)); }
-            LEIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("(iVec[{}] <= {})", o1, v)); }
-            EQIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("(iVec[{}] == {})", o1, v)); }
-            NEIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("(iVec[{}] != {})", o1, v)); }
-            GTRealStack => { let v = self.pop_r(); self.push_i(out, t, &format!("(fVec[{}] > {})", o1, v)); }
-            LTRealStack => { let v = self.pop_r(); self.push_i(out, t, &format!("(fVec[{}] < {})", o1, v)); }
-            GERealStack => { let v = self.pop_r(); self.push_i(out, t, &format!("(fVec[{}] >= {})", o1, v)); }
-            LERealStack => { let v = self.pop_r(); self.push_i(out, t, &format!("(fVec[{}] <= {})", o1, v)); }
-            EQRealStack => { let v = self.pop_r(); self.push_i(out, t, &format!("(fVec[{}] == {})", o1, v)); }
-            NERealStack => { let v = self.pop_r(); self.push_i(out, t, &format!("(fVec[{}] != {})", o1, v)); }
-            ANDIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("iVec[{}] & {}", o1, v)); }
-            ORIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("iVec[{}] | {}", o1, v)); }
-            XORIntStack => { let v = self.pop_i(); self.push_i(out, t, &format!("iVec[{}] ^ {}", o1, v)); }
+            AddRealStack => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("fVec[{}] + {}", o1, v));
+            }
+            SubRealStack => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("fVec[{}] - {}", o1, v));
+            }
+            MultRealStack => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("fVec[{}] * {}", o1, v));
+            }
+            DivRealStack => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("fVec[{}] / {}", o1, v));
+            }
+            RemRealStack => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::remainder(fVec[{}], {})", o1, v));
+            }
+            AddIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("iVec[{}] + {}", o1, v));
+            }
+            SubIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("iVec[{}] - {}", o1, v));
+            }
+            MultIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("iVec[{}] * {}", o1, v));
+            }
+            DivIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("({v} != 0 ? iVec[{o1}] / {v} : 0)"));
+            }
+            RemIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("({v} != 0 ? iVec[{o1}] % {v} : 0)"));
+            }
+            LshIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("iVec[{}] << {}", o1, v));
+            }
+            ARshIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("iVec[{}] >> {}", o1, v));
+            }
+            LRshIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("(int)((unsigned)iVec[{}] >> {})", o1, v));
+            }
+            GTIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("(iVec[{}] > {})", o1, v));
+            }
+            LTIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("(iVec[{}] < {})", o1, v));
+            }
+            GEIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("(iVec[{}] >= {})", o1, v));
+            }
+            LEIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("(iVec[{}] <= {})", o1, v));
+            }
+            EQIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("(iVec[{}] == {})", o1, v));
+            }
+            NEIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("(iVec[{}] != {})", o1, v));
+            }
+            GTRealStack => {
+                let v = self.pop_r();
+                self.push_i(out, t, &format!("(fVec[{}] > {})", o1, v));
+            }
+            LTRealStack => {
+                let v = self.pop_r();
+                self.push_i(out, t, &format!("(fVec[{}] < {})", o1, v));
+            }
+            GERealStack => {
+                let v = self.pop_r();
+                self.push_i(out, t, &format!("(fVec[{}] >= {})", o1, v));
+            }
+            LERealStack => {
+                let v = self.pop_r();
+                self.push_i(out, t, &format!("(fVec[{}] <= {})", o1, v));
+            }
+            EQRealStack => {
+                let v = self.pop_r();
+                self.push_i(out, t, &format!("(fVec[{}] == {})", o1, v));
+            }
+            NERealStack => {
+                let v = self.pop_r();
+                self.push_i(out, t, &format!("(fVec[{}] != {})", o1, v));
+            }
+            ANDIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("iVec[{}] & {}", o1, v));
+            }
+            ORIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("iVec[{}] | {}", o1, v));
+            }
+            XORIntStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("iVec[{}] ^ {}", o1, v));
+            }
 
             // ════════════════════════════════════════════════════════════
             // Standard math: value OP stack  (pop1 stack + immediate → push1)
             // Each: v = pop_stack; push v OP imm
             // ════════════════════════════════════════════════════════════
-            AddRealStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("{v} + {lit}")); }
-            SubRealStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("{v} - {lit}")); }
-            MultRealStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("{v} * {lit}")); }
-            DivRealStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("{v} / {lit}")); }
-            RemRealStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::remainder({v}, {lit})")); }
-            AddIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("{v} + {iv}")); }
-            SubIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("{v} - {iv}")); }
-            MultIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("{v} * {iv}")); }
-            DivIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("({iv} != 0 ? {v} / {iv} : 0)")); }
-            RemIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("({iv} != 0 ? {v} % {iv} : 0)")); }
-            LshIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("{v} << {iv}")); }
-            ARshIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("{v} >> {iv}")); }
-            LRshIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("(int)((unsigned){v} >> {iv})")); }
-            GTIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("({v} > {iv})")); }
-            LTIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("({v} < {iv})")); }
-            GEIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("({v} >= {iv})")); }
-            LEIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("({v} <= {iv})")); }
-            EQIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("({v} == {iv})")); }
-            NEIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("({v} != {iv})")); }
-            GTRealStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("({v} > {lit})")); }
-            LTRealStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("({v} < {lit})")); }
-            GERealStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("({v} >= {lit})")); }
-            LERealStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("({v} <= {lit})")); }
-            EQRealStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("({v} == {lit})")); }
-            NERealStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("({v} != {lit})")); }
-            ANDIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("{v} & {iv}")); }
-            ORIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("{v} | {iv}")); }
-            XORIntStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("{v} ^ {iv}")); }
+            AddRealStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("{v} + {lit}"));
+            }
+            SubRealStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("{v} - {lit}"));
+            }
+            MultRealStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("{v} * {lit}"));
+            }
+            DivRealStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("{v} / {lit}"));
+            }
+            RemRealStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::remainder({v}, {lit})"));
+            }
+            AddIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("{v} + {iv}"));
+            }
+            SubIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("{v} - {iv}"));
+            }
+            MultIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("{v} * {iv}"));
+            }
+            DivIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("({iv} != 0 ? {v} / {iv} : 0)"));
+            }
+            RemIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("({iv} != 0 ? {v} % {iv} : 0)"));
+            }
+            LshIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("{v} << {iv}"));
+            }
+            ARshIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("{v} >> {iv}"));
+            }
+            LRshIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("(int)((unsigned){v} >> {iv})"));
+            }
+            GTIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("({v} > {iv})"));
+            }
+            LTIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("({v} < {iv})"));
+            }
+            GEIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("({v} >= {iv})"));
+            }
+            LEIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("({v} <= {iv})"));
+            }
+            EQIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("({v} == {iv})"));
+            }
+            NEIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("({v} != {iv})"));
+            }
+            GTRealStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("({v} > {lit})"));
+            }
+            LTRealStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("({v} < {lit})"));
+            }
+            GERealStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("({v} >= {lit})"));
+            }
+            LERealStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("({v} <= {lit})"));
+            }
+            EQRealStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("({v} == {lit})"));
+            }
+            NERealStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("({v} != {lit})"));
+            }
+            ANDIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("{v} & {iv}"));
+            }
+            ORIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("{v} | {iv}"));
+            }
+            XORIntStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("{v} ^ {iv}"));
+            }
 
             // ════════════════════════════════════════════════════════════
             // Standard math: value OP heap  → push1  (non-inverted)
             // heap[o1] OP immediate
             // ════════════════════════════════════════════════════════════
-            AddRealValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("fVec[{o1}] + {lit}")); }
-            SubRealValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("fVec[{o1}] - {lit}")); }
-            MultRealValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("fVec[{o1}] * {lit}")); }
-            DivRealValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("fVec[{o1}] / {lit}")); }
-            RemRealValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::remainder(fVec[{o1}], {lit})")); }
-            AddIntValue => { self.push_i(out, t, &format!("iVec[{o1}] + {iv}")); }
-            SubIntValue => { self.push_i(out, t, &format!("iVec[{o1}] - {iv}")); }
-            MultIntValue => { self.push_i(out, t, &format!("iVec[{o1}] * {iv}")); }
-            DivIntValue => { self.push_i(out, t, &format!("({iv} != 0 ? iVec[{o1}] / {iv} : 0)")); }
-            RemIntValue => { self.push_i(out, t, &format!("({iv} != 0 ? iVec[{o1}] % {iv} : 0)")); }
-            LshIntValue => { self.push_i(out, t, &format!("iVec[{o1}] << {iv}")); }
-            ARshIntValue => { self.push_i(out, t, &format!("iVec[{o1}] >> {iv}")); }
-            LRshIntValue => { self.push_i(out, t, &format!("(int)((unsigned)iVec[{o1}] >> {iv})")); }
-            GTIntValue => { self.push_i(out, t, &format!("(iVec[{o1}] > {iv})")); }
-            LTIntValue => { self.push_i(out, t, &format!("(iVec[{o1}] < {iv})")); }
-            GEIntValue => { self.push_i(out, t, &format!("(iVec[{o1}] >= {iv})")); }
-            LEIntValue => { self.push_i(out, t, &format!("(iVec[{o1}] <= {iv})")); }
-            EQIntValue => { self.push_i(out, t, &format!("(iVec[{o1}] == {iv})")); }
-            NEIntValue => { self.push_i(out, t, &format!("(iVec[{o1}] != {iv})")); }
-            GTRealValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("(fVec[{o1}] > {lit})")); }
-            LTRealValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("(fVec[{o1}] < {lit})")); }
-            GERealValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("(fVec[{o1}] >= {lit})")); }
-            LERealValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("(fVec[{o1}] <= {lit})")); }
-            EQRealValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("(fVec[{o1}] == {lit})")); }
-            NERealValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("(fVec[{o1}] != {lit})")); }
-            ANDIntValue => { self.push_i(out, t, &format!("iVec[{o1}] & {iv}")); }
-            ORIntValue => { self.push_i(out, t, &format!("iVec[{o1}] | {iv}")); }
-            XORIntValue => { self.push_i(out, t, &format!("iVec[{o1}] ^ {iv}")); }
+            AddRealValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("fVec[{o1}] + {lit}"));
+            }
+            SubRealValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("fVec[{o1}] - {lit}"));
+            }
+            MultRealValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("fVec[{o1}] * {lit}"));
+            }
+            DivRealValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("fVec[{o1}] / {lit}"));
+            }
+            RemRealValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::remainder(fVec[{o1}], {lit})"));
+            }
+            AddIntValue => {
+                self.push_i(out, t, &format!("iVec[{o1}] + {iv}"));
+            }
+            SubIntValue => {
+                self.push_i(out, t, &format!("iVec[{o1}] - {iv}"));
+            }
+            MultIntValue => {
+                self.push_i(out, t, &format!("iVec[{o1}] * {iv}"));
+            }
+            DivIntValue => {
+                self.push_i(out, t, &format!("({iv} != 0 ? iVec[{o1}] / {iv} : 0)"));
+            }
+            RemIntValue => {
+                self.push_i(out, t, &format!("({iv} != 0 ? iVec[{o1}] % {iv} : 0)"));
+            }
+            LshIntValue => {
+                self.push_i(out, t, &format!("iVec[{o1}] << {iv}"));
+            }
+            ARshIntValue => {
+                self.push_i(out, t, &format!("iVec[{o1}] >> {iv}"));
+            }
+            LRshIntValue => {
+                self.push_i(out, t, &format!("(int)((unsigned)iVec[{o1}] >> {iv})"));
+            }
+            GTIntValue => {
+                self.push_i(out, t, &format!("(iVec[{o1}] > {iv})"));
+            }
+            LTIntValue => {
+                self.push_i(out, t, &format!("(iVec[{o1}] < {iv})"));
+            }
+            GEIntValue => {
+                self.push_i(out, t, &format!("(iVec[{o1}] >= {iv})"));
+            }
+            LEIntValue => {
+                self.push_i(out, t, &format!("(iVec[{o1}] <= {iv})"));
+            }
+            EQIntValue => {
+                self.push_i(out, t, &format!("(iVec[{o1}] == {iv})"));
+            }
+            NEIntValue => {
+                self.push_i(out, t, &format!("(iVec[{o1}] != {iv})"));
+            }
+            GTRealValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("(fVec[{o1}] > {lit})"));
+            }
+            LTRealValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("(fVec[{o1}] < {lit})"));
+            }
+            GERealValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("(fVec[{o1}] >= {lit})"));
+            }
+            LERealValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("(fVec[{o1}] <= {lit})"));
+            }
+            EQRealValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("(fVec[{o1}] == {lit})"));
+            }
+            NERealValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("(fVec[{o1}] != {lit})"));
+            }
+            ANDIntValue => {
+                self.push_i(out, t, &format!("iVec[{o1}] & {iv}"));
+            }
+            ORIntValue => {
+                self.push_i(out, t, &format!("iVec[{o1}] | {iv}"));
+            }
+            XORIntValue => {
+                self.push_i(out, t, &format!("iVec[{o1}] ^ {iv}"));
+            }
 
             // ════════════════════════════════════════════════════════════
             // Standard math: value OP heap — non-commutative inverted
             // Meaning: immediate OP heap[o1] (operands swapped vs above)
             // ════════════════════════════════════════════════════════════
-            SubRealValueInvert => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("{lit} - fVec[{o1}]")); }
-            SubIntValueInvert => { self.push_i(out, t, &format!("{iv} - iVec[{o1}]")); }
-            DivRealValueInvert => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("{lit} / fVec[{o1}]")); }
-            DivIntValueInvert => { self.push_i(out, t, &format!("(iVec[{o1}] != 0 ? {iv} / iVec[{o1}] : 0)")); }
-            RemRealValueInvert => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::remainder({lit}, fVec[{o1}])")); }
-            RemIntValueInvert => { self.push_i(out, t, &format!("(iVec[{o1}] != 0 ? {iv} % iVec[{o1}] : 0)")); }
-            LshIntValueInvert => { self.push_i(out, t, &format!("iVec[{o1}] << {iv}")); }
-            ARshIntValueInvert => { self.push_i(out, t, &format!("iVec[{o1}] >> {iv}")); }
-            LRshIntValueInvert => { self.push_i(out, t, &format!("(int)((unsigned)iVec[{o1}] >> {iv})")); }
-            GTIntValueInvert => { self.push_i(out, t, &format!("(iVec[{o1}] > {iv})")); }
-            LTIntValueInvert => { self.push_i(out, t, &format!("(iVec[{o1}] < {iv})")); }
-            GEIntValueInvert => { self.push_i(out, t, &format!("(iVec[{o1}] >= {iv})")); }
-            LEIntValueInvert => { self.push_i(out, t, &format!("(iVec[{o1}] <= {iv})")); }
-            GTRealValueInvert => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("(fVec[{o1}] > {lit})")); }
-            LTRealValueInvert => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("(fVec[{o1}] < {lit})")); }
-            GERealValueInvert => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("(fVec[{o1}] >= {lit})")); }
-            LERealValueInvert => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_i(out, t, &format!("(fVec[{o1}] <= {lit})")); }
+            SubRealValueInvert => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("{lit} - fVec[{o1}]"));
+            }
+            SubIntValueInvert => {
+                self.push_i(out, t, &format!("{iv} - iVec[{o1}]"));
+            }
+            DivRealValueInvert => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("{lit} / fVec[{o1}]"));
+            }
+            DivIntValueInvert => {
+                self.push_i(
+                    out,
+                    t,
+                    &format!("(iVec[{o1}] != 0 ? {iv} / iVec[{o1}] : 0)"),
+                );
+            }
+            RemRealValueInvert => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::remainder({lit}, fVec[{o1}])"));
+            }
+            RemIntValueInvert => {
+                self.push_i(
+                    out,
+                    t,
+                    &format!("(iVec[{o1}] != 0 ? {iv} % iVec[{o1}] : 0)"),
+                );
+            }
+            LshIntValueInvert => {
+                self.push_i(out, t, &format!("iVec[{o1}] << {iv}"));
+            }
+            ARshIntValueInvert => {
+                self.push_i(out, t, &format!("iVec[{o1}] >> {iv}"));
+            }
+            LRshIntValueInvert => {
+                self.push_i(out, t, &format!("(int)((unsigned)iVec[{o1}] >> {iv})"));
+            }
+            GTIntValueInvert => {
+                self.push_i(out, t, &format!("(iVec[{o1}] > {iv})"));
+            }
+            LTIntValueInvert => {
+                self.push_i(out, t, &format!("(iVec[{o1}] < {iv})"));
+            }
+            GEIntValueInvert => {
+                self.push_i(out, t, &format!("(iVec[{o1}] >= {iv})"));
+            }
+            LEIntValueInvert => {
+                self.push_i(out, t, &format!("(iVec[{o1}] <= {iv})"));
+            }
+            GTRealValueInvert => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("(fVec[{o1}] > {lit})"));
+            }
+            LTRealValueInvert => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("(fVec[{o1}] < {lit})"));
+            }
+            GERealValueInvert => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("(fVec[{o1}] >= {lit})"));
+            }
+            LERealValueInvert => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_i(out, t, &format!("(fVec[{o1}] <= {lit})"));
+            }
 
             // ════════════════════════════════════════════════════════════
             // Extended unary math (stack)
             // ════════════════════════════════════════════════════════════
-            Abs => { let v = self.pop_i(); self.push_i(out, t, &format!("std::abs({v})")); }
-            Absf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::fabs({v})")); }
-            Acosf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::acos({v})")); }
-            Acoshf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::acosh({v})")); }
-            Asinf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::asin({v})")); }
-            Asinhf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::asinh({v})")); }
-            Atanf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::atan({v})")); }
-            Atanhf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::atanh({v})")); }
-            Ceilf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::ceil({v})")); }
-            Cosf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::cos({v})")); }
-            Coshf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::cosh({v})")); }
-            Expf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::exp({v})")); }
-            Floorf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::floor({v})")); }
-            Logf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::log({v})")); }
-            Log10f => { let v = self.pop_r(); self.push_r(out, t, &format!("std::log10({v})")); }
-            Rintf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::rint({v})")); }
-            Roundf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::round({v})")); }
-            Sinf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::sin({v})")); }
-            Sinhf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::sinh({v})")); }
-            Sqrtf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::sqrt({v})")); }
-            Tanf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::tan({v})")); }
-            Tanhf => { let v = self.pop_r(); self.push_r(out, t, &format!("std::tanh({v})")); }
-            Isnanf => { let v = self.pop_r(); self.push_i(out, t, &format!("std::isnan({v})")); }
-            Isinff => { let v = self.pop_r(); self.push_i(out, t, &format!("std::isinf({v})")); }
+            Abs => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("std::abs({v})"));
+            }
+            Absf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::fabs({v})"));
+            }
+            Acosf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::acos({v})"));
+            }
+            Acoshf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::acosh({v})"));
+            }
+            Asinf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::asin({v})"));
+            }
+            Asinhf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::asinh({v})"));
+            }
+            Atanf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::atan({v})"));
+            }
+            Atanhf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::atanh({v})"));
+            }
+            Ceilf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::ceil({v})"));
+            }
+            Cosf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::cos({v})"));
+            }
+            Coshf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::cosh({v})"));
+            }
+            Expf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::exp({v})"));
+            }
+            Floorf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::floor({v})"));
+            }
+            Logf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::log({v})"));
+            }
+            Log10f => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::log10({v})"));
+            }
+            Rintf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::rint({v})"));
+            }
+            Roundf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::round({v})"));
+            }
+            Sinf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::sin({v})"));
+            }
+            Sinhf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::sinh({v})"));
+            }
+            Sqrtf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::sqrt({v})"));
+            }
+            Tanf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::tan({v})"));
+            }
+            Tanhf => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::tanh({v})"));
+            }
+            Isnanf => {
+                let v = self.pop_r();
+                self.push_i(out, t, &format!("std::isnan({v})"));
+            }
+            Isinff => {
+                let v = self.pop_r();
+                self.push_i(out, t, &format!("std::isinf({v})"));
+            }
 
             // ════════════════════════════════════════════════════════════
             // Extended unary math (heap → stack)
             // ════════════════════════════════════════════════════════════
-            AbsHeap => { self.push_i(out, t, &format!("std::abs(iVec[{o1}])")); }
-            AbsfHeap => { self.push_r(out, t, &format!("std::fabs(fVec[{o1}])")); }
-            AcosfHeap => { self.push_r(out, t, &format!("std::acos(fVec[{o1}])")); }
-            AcoshfHeap => { self.push_r(out, t, &format!("std::acosh(fVec[{o1}])")); }
-            AsinfHeap => { self.push_r(out, t, &format!("std::asin(fVec[{o1}])")); }
-            AsinhfHeap => { self.push_r(out, t, &format!("std::asinh(fVec[{o1}])")); }
-            AtanfHeap => { self.push_r(out, t, &format!("std::atan(fVec[{o1}])")); }
-            AtanhfHeap => { self.push_r(out, t, &format!("std::atanh(fVec[{o1}])")); }
-            CeilfHeap => { self.push_r(out, t, &format!("std::ceil(fVec[{o1}])")); }
-            CosfHeap => { self.push_r(out, t, &format!("std::cos(fVec[{o1}])")); }
-            CoshfHeap => { self.push_r(out, t, &format!("std::cosh(fVec[{o1}])")); }
-            ExpfHeap => { self.push_r(out, t, &format!("std::exp(fVec[{o1}])")); }
-            FloorfHeap => { self.push_r(out, t, &format!("std::floor(fVec[{o1}])")); }
-            LogfHeap => { self.push_r(out, t, &format!("std::log(fVec[{o1}])")); }
-            Log10fHeap => { self.push_r(out, t, &format!("std::log10(fVec[{o1}])")); }
-            RintfHeap => { self.push_r(out, t, &format!("std::rint(fVec[{o1}])")); }
-            RoundfHeap => { self.push_r(out, t, &format!("std::round(fVec[{o1}])")); }
-            SinfHeap => { self.push_r(out, t, &format!("std::sin(fVec[{o1}])")); }
-            SinhfHeap => { self.push_r(out, t, &format!("std::sinh(fVec[{o1}])")); }
-            SqrtfHeap => { self.push_r(out, t, &format!("std::sqrt(fVec[{o1}])")); }
-            TanfHeap => { self.push_r(out, t, &format!("std::tan(fVec[{o1}])")); }
-            TanhfHeap => { self.push_r(out, t, &format!("std::tanh(fVec[{o1}])")); }
+            AbsHeap => {
+                self.push_i(out, t, &format!("std::abs(iVec[{o1}])"));
+            }
+            AbsfHeap => {
+                self.push_r(out, t, &format!("std::fabs(fVec[{o1}])"));
+            }
+            AcosfHeap => {
+                self.push_r(out, t, &format!("std::acos(fVec[{o1}])"));
+            }
+            AcoshfHeap => {
+                self.push_r(out, t, &format!("std::acosh(fVec[{o1}])"));
+            }
+            AsinfHeap => {
+                self.push_r(out, t, &format!("std::asin(fVec[{o1}])"));
+            }
+            AsinhfHeap => {
+                self.push_r(out, t, &format!("std::asinh(fVec[{o1}])"));
+            }
+            AtanfHeap => {
+                self.push_r(out, t, &format!("std::atan(fVec[{o1}])"));
+            }
+            AtanhfHeap => {
+                self.push_r(out, t, &format!("std::atanh(fVec[{o1}])"));
+            }
+            CeilfHeap => {
+                self.push_r(out, t, &format!("std::ceil(fVec[{o1}])"));
+            }
+            CosfHeap => {
+                self.push_r(out, t, &format!("std::cos(fVec[{o1}])"));
+            }
+            CoshfHeap => {
+                self.push_r(out, t, &format!("std::cosh(fVec[{o1}])"));
+            }
+            ExpfHeap => {
+                self.push_r(out, t, &format!("std::exp(fVec[{o1}])"));
+            }
+            FloorfHeap => {
+                self.push_r(out, t, &format!("std::floor(fVec[{o1}])"));
+            }
+            LogfHeap => {
+                self.push_r(out, t, &format!("std::log(fVec[{o1}])"));
+            }
+            Log10fHeap => {
+                self.push_r(out, t, &format!("std::log10(fVec[{o1}])"));
+            }
+            RintfHeap => {
+                self.push_r(out, t, &format!("std::rint(fVec[{o1}])"));
+            }
+            RoundfHeap => {
+                self.push_r(out, t, &format!("std::round(fVec[{o1}])"));
+            }
+            SinfHeap => {
+                self.push_r(out, t, &format!("std::sin(fVec[{o1}])"));
+            }
+            SinhfHeap => {
+                self.push_r(out, t, &format!("std::sinh(fVec[{o1}])"));
+            }
+            SqrtfHeap => {
+                self.push_r(out, t, &format!("std::sqrt(fVec[{o1}])"));
+            }
+            TanfHeap => {
+                self.push_r(out, t, &format!("std::tan(fVec[{o1}])"));
+            }
+            TanhfHeap => {
+                self.push_r(out, t, &format!("std::tanh(fVec[{o1}])"));
+            }
 
             // ════════════════════════════════════════════════════════════
             // Extended binary math (stack OP stack → push1)
             // ════════════════════════════════════════════════════════════
-            Atan2f => { let v1 = self.pop_r(); let v2 = self.pop_r(); self.push_r(out, t, &format!("std::atan2({v1}, {v2})")); }
-            Fmodf => { let v1 = self.pop_r(); let v2 = self.pop_r(); self.push_r(out, t, &format!("std::fmod({v1}, {v2})")); }
-            Powf => { let v1 = self.pop_r(); let v2 = self.pop_r(); self.push_r(out, t, &format!("std::pow({v1}, {v2})")); }
-            Max => { let v1 = self.pop_i(); let v2 = self.pop_i(); self.push_i(out, t, &format!("std::max({v1}, {v2})")); }
-            Maxf => { let v1 = self.pop_r(); let v2 = self.pop_r(); self.push_r(out, t, &format!("std::max({v1}, {v2})")); }
-            Min => { let v1 = self.pop_i(); let v2 = self.pop_i(); self.push_i(out, t, &format!("std::min({v1}, {v2})")); }
-            Minf => { let v1 = self.pop_r(); let v2 = self.pop_r(); self.push_r(out, t, &format!("std::min({v1}, {v2})")); }
-            Copysignf => { let v1 = self.pop_r(); let v2 = self.pop_r(); self.push_r(out, t, &format!("std::copysign({v1}, {v2})")); }
+            Atan2f => {
+                let v1 = self.pop_r();
+                let v2 = self.pop_r();
+                self.push_r(out, t, &format!("std::atan2({v1}, {v2})"));
+            }
+            Fmodf => {
+                let v1 = self.pop_r();
+                let v2 = self.pop_r();
+                self.push_r(out, t, &format!("std::fmod({v1}, {v2})"));
+            }
+            Powf => {
+                let v1 = self.pop_r();
+                let v2 = self.pop_r();
+                self.push_r(out, t, &format!("std::pow({v1}, {v2})"));
+            }
+            Max => {
+                let v1 = self.pop_i();
+                let v2 = self.pop_i();
+                self.push_i(out, t, &format!("std::max({v1}, {v2})"));
+            }
+            Maxf => {
+                let v1 = self.pop_r();
+                let v2 = self.pop_r();
+                self.push_r(out, t, &format!("std::max({v1}, {v2})"));
+            }
+            Min => {
+                let v1 = self.pop_i();
+                let v2 = self.pop_i();
+                self.push_i(out, t, &format!("std::min({v1}, {v2})"));
+            }
+            Minf => {
+                let v1 = self.pop_r();
+                let v2 = self.pop_r();
+                self.push_r(out, t, &format!("std::min({v1}, {v2})"));
+            }
+            Copysignf => {
+                let v1 = self.pop_r();
+                let v2 = self.pop_r();
+                self.push_r(out, t, &format!("std::copysign({v1}, {v2})"));
+            }
 
             // ════════════════════════════════════════════════════════════
             // Extended binary math (heap OP heap → push1)
             // ════════════════════════════════════════════════════════════
-            Atan2fHeap => { self.push_r(out, t, &format!("std::atan2(fVec[{o1}], fVec[{o2}])")); }
-            FmodfHeap => { self.push_r(out, t, &format!("std::fmod(fVec[{o1}], fVec[{o2}])")); }
-            PowfHeap => { self.push_r(out, t, &format!("std::pow(fVec[{o1}], fVec[{o2}])")); }
-            MaxHeap => { self.push_i(out, t, &format!("std::max(iVec[{o1}], iVec[{o2}])")); }
-            MaxfHeap => { self.push_r(out, t, &format!("std::max(fVec[{o1}], fVec[{o2}])")); }
-            MinHeap => { self.push_i(out, t, &format!("std::min(iVec[{o1}], iVec[{o2}])")); }
-            MinfHeap => { self.push_r(out, t, &format!("std::min(fVec[{o1}], fVec[{o2}])")); }
+            Atan2fHeap => {
+                self.push_r(out, t, &format!("std::atan2(fVec[{o1}], fVec[{o2}])"));
+            }
+            FmodfHeap => {
+                self.push_r(out, t, &format!("std::fmod(fVec[{o1}], fVec[{o2}])"));
+            }
+            PowfHeap => {
+                self.push_r(out, t, &format!("std::pow(fVec[{o1}], fVec[{o2}])"));
+            }
+            MaxHeap => {
+                self.push_i(out, t, &format!("std::max(iVec[{o1}], iVec[{o2}])"));
+            }
+            MaxfHeap => {
+                self.push_r(out, t, &format!("std::max(fVec[{o1}], fVec[{o2}])"));
+            }
+            MinHeap => {
+                self.push_i(out, t, &format!("std::min(iVec[{o1}], iVec[{o2}])"));
+            }
+            MinfHeap => {
+                self.push_r(out, t, &format!("std::min(fVec[{o1}], fVec[{o2}])"));
+            }
 
             // ════════════════════════════════════════════════════════════
             // Extended binary math (heap OP stack → push1)
             // ════════════════════════════════════════════════════════════
-            Atan2fStack => { let v = self.pop_r(); self.push_r(out, t, &format!("std::atan2(fVec[{o1}], {v})")); }
-            FmodfStack => { let v = self.pop_r(); self.push_r(out, t, &format!("std::fmod(fVec[{o1}], {v})")); }
-            PowfStack => { let v = self.pop_r(); self.push_r(out, t, &format!("std::pow(fVec[{o1}], {v})")); }
-            MaxStack => { let v = self.pop_i(); self.push_i(out, t, &format!("std::max(iVec[{o1}], {v})")); }
-            MaxfStack => { let v = self.pop_r(); self.push_r(out, t, &format!("std::max(fVec[{o1}], {v})")); }
-            MinStack => { let v = self.pop_i(); self.push_i(out, t, &format!("std::min(iVec[{o1}], {v})")); }
-            MinfStack => { let v = self.pop_r(); self.push_r(out, t, &format!("std::min(fVec[{o1}], {v})")); }
+            Atan2fStack => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::atan2(fVec[{o1}], {v})"));
+            }
+            FmodfStack => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::fmod(fVec[{o1}], {v})"));
+            }
+            PowfStack => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::pow(fVec[{o1}], {v})"));
+            }
+            MaxStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("std::max(iVec[{o1}], {v})"));
+            }
+            MaxfStack => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::max(fVec[{o1}], {v})"));
+            }
+            MinStack => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("std::min(iVec[{o1}], {v})"));
+            }
+            MinfStack => {
+                let v = self.pop_r();
+                self.push_r(out, t, &format!("std::min(fVec[{o1}], {v})"));
+            }
 
             // ════════════════════════════════════════════════════════════
             // Extended binary math (value OP stack → push1)
             // ════════════════════════════════════════════════════════════
-            Atan2fStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::atan2({v}, {lit})")); }
-            FmodfStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::fmod({v}, {lit})")); }
-            PowfStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::pow({v}, {lit})")); }
-            MaxStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("std::max({v}, {iv})")); }
-            MaxfStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::max({v}, {lit})")); }
-            MinStackValue => { let v = self.pop_i(); self.push_i(out, t, &format!("std::min({v}, {iv})")); }
-            MinfStackValue => { let v = self.pop_r(); let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::min({v}, {lit})")); }
+            Atan2fStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::atan2({v}, {lit})"));
+            }
+            FmodfStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::fmod({v}, {lit})"));
+            }
+            PowfStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::pow({v}, {lit})"));
+            }
+            MaxStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("std::max({v}, {iv})"));
+            }
+            MaxfStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::max({v}, {lit})"));
+            }
+            MinStackValue => {
+                let v = self.pop_i();
+                self.push_i(out, t, &format!("std::min({v}, {iv})"));
+            }
+            MinfStackValue => {
+                let v = self.pop_r();
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::min({v}, {lit})"));
+            }
 
             // ════════════════════════════════════════════════════════════
             // Extended binary math (value OP heap → push1)
             // ════════════════════════════════════════════════════════════
-            Atan2fValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::atan2(fVec[{o1}], {lit})")); }
-            FmodfValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::fmod(fVec[{o1}], {lit})")); }
-            PowfValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::pow(fVec[{o1}], {lit})")); }
-            MaxValue => { self.push_i(out, t, &format!("std::max(iVec[{o1}], {iv})")); }
-            MaxfValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::max(fVec[{o1}], {lit})")); }
-            MinValue => { self.push_i(out, t, &format!("std::min(iVec[{o1}], {iv})")); }
-            MinfValue => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::min(fVec[{o1}], {lit})")); }
+            Atan2fValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::atan2(fVec[{o1}], {lit})"));
+            }
+            FmodfValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::fmod(fVec[{o1}], {lit})"));
+            }
+            PowfValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::pow(fVec[{o1}], {lit})"));
+            }
+            MaxValue => {
+                self.push_i(out, t, &format!("std::max(iVec[{o1}], {iv})"));
+            }
+            MaxfValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::max(fVec[{o1}], {lit})"));
+            }
+            MinValue => {
+                self.push_i(out, t, &format!("std::min(iVec[{o1}], {iv})"));
+            }
+            MinfValue => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::min(fVec[{o1}], {lit})"));
+            }
 
             // ════════════════════════════════════════════════════════════
             // Extended binary math: value OP heap — non-commutative inverted
             // ════════════════════════════════════════════════════════════
-            Atan2fValueInvert => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::atan2({lit}, fVec[{o1}])")); }
-            FmodfValueInvert => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::fmod({lit}, fVec[{o1}])")); }
-            PowfValueInvert => { let lit = fmt_real_lit(rv, self.real_ctype); self.push_r(out, t, &format!("std::pow({lit}, fVec[{o1}])")); }
+            Atan2fValueInvert => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::atan2({lit}, fVec[{o1}])"));
+            }
+            FmodfValueInvert => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::fmod({lit}, fVec[{o1}])"));
+            }
+            PowfValueInvert => {
+                let lit = fmt_real_lit(rv, self.real_ctype);
+                self.push_r(out, t, &format!("std::pow({lit}, fVec[{o1}])"));
+            }
 
             // ════════════════════════════════════════════════════════════
             // Control flow
             // ════════════════════════════════════════════════════════════
-
             Loop => {
-                let init_id = instr
-                    .branch1
-                    .ok_or(FbcCppError::MissingBranchTarget { opcode: instr.opcode, block_id, pc })?;
-                let body_id = instr
-                    .branch2
-                    .ok_or(FbcCppError::MissingBranchTarget { opcode: instr.opcode, block_id, pc })?;
+                let init_id = instr.branch1.ok_or(FbcCppError::MissingBranchTarget {
+                    opcode: instr.opcode,
+                    block_id,
+                    pc,
+                })?;
+                let body_id = instr.branch2.ok_or(FbcCppError::MissingBranchTarget {
+                    opcode: instr.opcode,
+                    block_id,
+                    pc,
+                })?;
                 writeln!(out, "{}{{", tab(t)).unwrap();
                 // Compile init block (no-return, just heap writes).
                 self.compile_block(arena, out, t + 1, init_id)?;
@@ -990,12 +1707,16 @@ impl BlockComp {
 
             If => {
                 let cond = self.pop_i();
-                let b1 = instr
-                    .branch1
-                    .ok_or(FbcCppError::MissingBranchTarget { opcode: instr.opcode, block_id, pc })?;
-                let b2 = instr
-                    .branch2
-                    .ok_or(FbcCppError::MissingBranchTarget { opcode: instr.opcode, block_id, pc })?;
+                let b1 = instr.branch1.ok_or(FbcCppError::MissingBranchTarget {
+                    opcode: instr.opcode,
+                    block_id,
+                    pc,
+                })?;
+                let b2 = instr.branch2.ok_or(FbcCppError::MissingBranchTarget {
+                    opcode: instr.opcode,
+                    block_id,
+                    pc,
+                })?;
 
                 // Save stack state; branches should not affect the computation
                 // stack net (they may push/pop internally, ending in balance).
@@ -1015,18 +1736,29 @@ impl BlockComp {
 
             SelectReal => {
                 let cond = self.pop_i();
-                let b1 = instr
-                    .branch1
-                    .ok_or(FbcCppError::MissingBranchTarget { opcode: instr.opcode, block_id, pc })?;
-                let b2 = instr
-                    .branch2
-                    .ok_or(FbcCppError::MissingBranchTarget { opcode: instr.opcode, block_id, pc })?;
+                let b1 = instr.branch1.ok_or(FbcCppError::MissingBranchTarget {
+                    opcode: instr.opcode,
+                    block_id,
+                    pc,
+                })?;
+                let b2 = instr.branch2.ok_or(FbcCppError::MissingBranchTarget {
+                    opcode: instr.opcode,
+                    block_id,
+                    pc,
+                })?;
 
                 // Pre-declare merge variable.
                 let merge = format!("fR{}", self.rc);
                 self.rc += 1;
-                writeln!(out, "{}{} {} = {}(0);", tab(t), self.real_ctype, merge, self.real_ctype)
-                    .unwrap();
+                writeln!(
+                    out,
+                    "{}{} {} = {}(0);",
+                    tab(t),
+                    self.real_ctype,
+                    merge,
+                    self.real_ctype
+                )
+                .unwrap();
 
                 let saved_r = self.rstack.clone();
                 let saved_i = self.istack.clone();
@@ -1056,12 +1788,16 @@ impl BlockComp {
 
             SelectInt => {
                 let cond = self.pop_i();
-                let b1 = instr
-                    .branch1
-                    .ok_or(FbcCppError::MissingBranchTarget { opcode: instr.opcode, block_id, pc })?;
-                let b2 = instr
-                    .branch2
-                    .ok_or(FbcCppError::MissingBranchTarget { opcode: instr.opcode, block_id, pc })?;
+                let b1 = instr.branch1.ok_or(FbcCppError::MissingBranchTarget {
+                    opcode: instr.opcode,
+                    block_id,
+                    pc,
+                })?;
+                let b2 = instr.branch2.ok_or(FbcCppError::MissingBranchTarget {
+                    opcode: instr.opcode,
+                    block_id,
+                    pc,
+                })?;
 
                 let merge = format!("iI{}", self.ic);
                 self.ic += 1;
@@ -1160,13 +1896,31 @@ fn emit_ui_block<R: FbcReal>(
     for instr in ui {
         match instr.opcode {
             FbcOpcode::OpenVerticalBox => {
-                writeln!(out, "{}ui_interface->openVerticalBox(\"{}\");", tab(t), escape_str(&instr.label)).unwrap();
+                writeln!(
+                    out,
+                    "{}ui_interface->openVerticalBox(\"{}\");",
+                    tab(t),
+                    escape_str(&instr.label)
+                )
+                .unwrap();
             }
             FbcOpcode::OpenHorizontalBox => {
-                writeln!(out, "{}ui_interface->openHorizontalBox(\"{}\");", tab(t), escape_str(&instr.label)).unwrap();
+                writeln!(
+                    out,
+                    "{}ui_interface->openHorizontalBox(\"{}\");",
+                    tab(t),
+                    escape_str(&instr.label)
+                )
+                .unwrap();
             }
             FbcOpcode::OpenTabBox => {
-                writeln!(out, "{}ui_interface->openTabBox(\"{}\");", tab(t), escape_str(&instr.label)).unwrap();
+                writeln!(
+                    out,
+                    "{}ui_interface->openTabBox(\"{}\");",
+                    tab(t),
+                    escape_str(&instr.label)
+                )
+                .unwrap();
             }
             FbcOpcode::CloseBox => {
                 writeln!(out, "{}ui_interface->closeBox();", tab(t)).unwrap();
@@ -1402,9 +2156,9 @@ fn escape_str(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backends::interp::FbcInstruction;
     use crate::backends::interp::bytecode::{FbcBlock, FbcBlockArena};
     use crate::backends::interp::opcode::{FbcOpcode, INTERP_FILE_VERSION};
-    use crate::backends::interp::FbcInstruction;
 
     /// Builds a minimal factory with trivial (Return-only) blocks.
     fn trivial_block(arena: &mut FbcBlockArena<f32>) -> BlockId {
@@ -1453,19 +2207,36 @@ mod tests {
         let cpp = generate_cpp_from_fbc(&factory, &opts).expect("generation should succeed");
 
         // Class structure.
-        assert!(cpp.contains("class test_dsp_dsp final : public dsp"), "{cpp}");
-        assert!(cpp.contains("int getNumInputs() override { return 1; }"), "{cpp}");
-        assert!(cpp.contains("int getNumOutputs() override { return 1; }"), "{cpp}");
+        assert!(
+            cpp.contains("class test_dsp_dsp final : public dsp"),
+            "{cpp}"
+        );
+        assert!(
+            cpp.contains("int getNumInputs() override { return 1; }"),
+            "{cpp}"
+        );
+        assert!(
+            cpp.contains("int getNumOutputs() override { return 1; }"),
+            "{cpp}"
+        );
         assert!(cpp.contains("void instanceInit(int sample_rate)"), "{cpp}");
         assert!(cpp.contains("void init(int sample_rate) override"), "{cpp}");
-        assert!(cpp.contains("void compute(int count, FAUSTFLOAT** inputs, FAUSTFLOAT** outputs) override"), "{cpp}");
+        assert!(
+            cpp.contains(
+                "void compute(int count, FAUSTFLOAT** inputs, FAUSTFLOAT** outputs) override"
+            ),
+            "{cpp}"
+        );
         assert!(cpp.contains("dsp* clone() override"), "{cpp}");
     }
 
     #[test]
     fn generate_with_pragma_once() {
         let factory = make_factory();
-        let opts = FbcCppOptions { pragma_once: true, ..Default::default() };
+        let opts = FbcCppOptions {
+            pragma_once: true,
+            ..Default::default()
+        };
         let cpp = generate_cpp_from_fbc(&factory, &opts).unwrap();
         assert!(cpp.starts_with("#pragma once"), "{cpp}");
     }
@@ -1473,7 +2244,10 @@ mod tests {
     #[test]
     fn generate_without_pragma_once() {
         let factory = make_factory();
-        let opts = FbcCppOptions { pragma_once: false, ..Default::default() };
+        let opts = FbcCppOptions {
+            pragma_once: false,
+            ..Default::default()
+        };
         let cpp = generate_cpp_from_fbc(&factory, &opts).unwrap();
         assert!(!cpp.starts_with("#pragma once"), "{cpp}");
     }
@@ -1512,7 +2286,11 @@ mod tests {
 
         let mut init_b = FbcBlock::new();
         init_b.push(FbcInstruction::with_values_and_offsets(
-            FbcOpcode::StoreIntValue, 0, 0.0, 2, -1,
+            FbcOpcode::StoreIntValue,
+            0,
+            0.0,
+            2,
+            -1,
         ));
         init_b.push(FbcInstruction::new(FbcOpcode::Return));
         let init_id = arena.alloc(init_b);
@@ -1523,18 +2301,38 @@ mod tests {
 
         let mut body_b = FbcBlock::new();
         // Load counter, compare with 5, CondBranch.
-        body_b.push(FbcInstruction::with_values_and_offsets(FbcOpcode::LoadInt, 0, 0.0, 2, -1));
+        body_b.push(FbcInstruction::with_values_and_offsets(
+            FbcOpcode::LoadInt,
+            0,
+            0.0,
+            2,
+            -1,
+        ));
         body_b.push(FbcInstruction::with_values(FbcOpcode::Int32Value, 5, 0.0));
         body_b.push(FbcInstruction::new(FbcOpcode::LTInt));
         body_b.push(FbcInstruction::full(
-            FbcOpcode::CondBranch, "", 0, 0.0, -1, -1, Some(body_id), None,
+            FbcOpcode::CondBranch,
+            "",
+            0,
+            0.0,
+            -1,
+            -1,
+            Some(body_id),
+            None,
         ));
         body_b.push(FbcInstruction::new(FbcOpcode::Return));
         *arena.get_mut(body_id) = body_b;
 
         let mut main_b = FbcBlock::new();
         main_b.push(FbcInstruction::full(
-            FbcOpcode::Loop, "", 0, 0.0, -1, -1, Some(init_id), Some(body_id),
+            FbcOpcode::Loop,
+            "",
+            0,
+            0.0,
+            -1,
+            -1,
+            Some(init_id),
+            Some(body_id),
         ));
         main_b.push(FbcInstruction::new(FbcOpcode::Return));
         let main_id = arena.alloc(main_b);
@@ -1586,7 +2384,11 @@ mod tests {
         {
             let mut init_b = FbcBlock::new();
             init_b.push(FbcInstruction::with_values_and_offsets(
-                FbcOpcode::StoreIntValue, 0, 0.0, 2, -1,
+                FbcOpcode::StoreIntValue,
+                0,
+                0.0,
+                2,
+                -1,
             ));
             init_b.push(FbcInstruction::new(FbcOpcode::Return));
             init_id2 = arena2.alloc(init_b);
@@ -1595,18 +2397,38 @@ mod tests {
             body_id2 = arena2.alloc(body_placeholder);
 
             let mut body_b = FbcBlock::new();
-            body_b.push(FbcInstruction::with_values_and_offsets(FbcOpcode::LoadInt, 0, 0.0, 2, -1));
+            body_b.push(FbcInstruction::with_values_and_offsets(
+                FbcOpcode::LoadInt,
+                0,
+                0.0,
+                2,
+                -1,
+            ));
             body_b.push(FbcInstruction::with_values(FbcOpcode::Int32Value, 5, 0.0));
             body_b.push(FbcInstruction::new(FbcOpcode::LTInt));
             body_b.push(FbcInstruction::full(
-                FbcOpcode::CondBranch, "", 0, 0.0, -1, -1, Some(body_id2), None,
+                FbcOpcode::CondBranch,
+                "",
+                0,
+                0.0,
+                -1,
+                -1,
+                Some(body_id2),
+                None,
             ));
             body_b.push(FbcInstruction::new(FbcOpcode::Return));
             *arena2.get_mut(body_id2) = body_b;
 
             let mut main_b = FbcBlock::new();
             main_b.push(FbcInstruction::full(
-                FbcOpcode::Loop, "", 0, 0.0, -1, -1, Some(init_id2), Some(body_id2),
+                FbcOpcode::Loop,
+                "",
+                0,
+                0.0,
+                -1,
+                -1,
+                Some(init_id2),
+                Some(body_id2),
             ));
             main_b.push(FbcInstruction::new(FbcOpcode::Return));
             main_id2 = arena2.alloc(main_b);
@@ -1671,7 +2493,11 @@ mod tests {
 
     #[test]
     fn fmt_real_lit_produces_correct_suffix() {
-        assert!(fmt_real_lit(0.5f32, "float").ends_with('f'), "{}", fmt_real_lit(0.5f32, "float"));
+        assert!(
+            fmt_real_lit(0.5f32, "float").ends_with('f'),
+            "{}",
+            fmt_real_lit(0.5f32, "float")
+        );
         assert!(!fmt_real_lit(0.5f64, "double").ends_with('f'));
         // NaN and Inf handling.
         assert!(fmt_real_lit(f32::NAN, "float").contains("NaN"));
