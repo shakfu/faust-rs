@@ -239,25 +239,25 @@ impl<'a, R: FbcReal> CppGen<'a, R> {
         // matching the interpreter's instance_init() call sequence.
         writeln!(out, "\tvoid instanceInit(int sample_rate) {{").unwrap();
 
+        // All four sub-phases share one BlockComp so that temporary variable
+        // names (fRN, iIN) are unique across the entire instanceInit() body.
+        let mut comp = self.new_block_comp();
+
         writeln!(out, "\t\t// classInit (static_init_block)").unwrap();
-        let static_init = self.compile_block_body(&f.arena, f.static_init_block, 2)?;
-        out.push_str(&static_init);
+        comp.compile_block(&f.arena, &mut out, 2, f.static_init_block)?;
 
         writeln!(out, "\t\t// instanceConstants (init_block)").unwrap();
         writeln!(out, "\t\tfSampleRate = sample_rate;").unwrap();
         if f.sr_offset >= 0 && f.sr_offset < f.int_heap_size {
             writeln!(out, "\t\tiVec[{}] = sample_rate;", f.sr_offset).unwrap();
         }
-        let init_body = self.compile_block_body(&f.arena, f.init_block, 2)?;
-        out.push_str(&init_body);
+        comp.compile_block(&f.arena, &mut out, 2, f.init_block)?;
 
         writeln!(out, "\t\t// instanceResetUserInterface (reset_ui_block)").unwrap();
-        let reset_ui_body = self.compile_block_body(&f.arena, f.reset_ui_block, 2)?;
-        out.push_str(&reset_ui_body);
+        comp.compile_block(&f.arena, &mut out, 2, f.reset_ui_block)?;
 
         writeln!(out, "\t\t// instanceClear (clear_block)").unwrap();
-        let clear_body = self.compile_block_body(&f.arena, f.clear_block, 2)?;
-        out.push_str(&clear_body);
+        comp.compile_block(&f.arena, &mut out, 2, f.clear_block)?;
 
         writeln!(out, "\t}}\n").unwrap();
 
@@ -279,13 +279,14 @@ impl<'a, R: FbcReal> CppGen<'a, R> {
         if f.count_offset >= 0 && f.count_offset < f.int_heap_size {
             writeln!(out, "\t\tiVec[{}] = count;", f.count_offset).unwrap();
         }
+        // Both blocks share one BlockComp so temporaries are unique within compute().
+        let mut comp = self.new_block_comp();
+
         writeln!(out, "\t\t// compute_block (control, runs once per buffer)").unwrap();
-        let compute_body = self.compile_block_body(&f.arena, f.compute_block, 2)?;
-        out.push_str(&compute_body);
+        comp.compile_block(&f.arena, &mut out, 2, f.compute_block)?;
 
         writeln!(out, "\t\t// compute_dsp_block (sample loop)").unwrap();
-        let dsp_body = self.compile_block_body(&f.arena, f.compute_dsp_block, 2)?;
-        out.push_str(&dsp_body);
+        comp.compile_block(&f.arena, &mut out, 2, f.compute_dsp_block)?;
 
         writeln!(out, "\t}}").unwrap();
 
@@ -300,17 +301,9 @@ impl<'a, R: FbcReal> CppGen<'a, R> {
         Ok(out)
     }
 
-    /// Compiles a single FBC block into C++ statements, returning the text.
-    fn compile_block_body(
-        &self,
-        arena: &FbcBlockArena<R>,
-        block_id: BlockId,
-        indent: usize,
-    ) -> Result<String, FbcCppError> {
-        let mut comp = BlockComp::new(self.real_ctype);
-        let mut out = String::new();
-        comp.compile_block(arena, &mut out, indent, block_id)?;
-        Ok(out)
+    /// Returns a fresh `BlockComp` for this generator's real type.
+    fn new_block_comp(&self) -> BlockComp {
+        BlockComp::new(self.real_ctype)
     }
 }
 
@@ -1335,10 +1328,22 @@ fn fmt_real_lit<R: FbcReal>(val: R, real_ctype: &str) -> String {
             format!("{sign}std::numeric_limits<double>::infinity()")
         }
     } else if real_ctype == "float" {
-        // Use Rust's roundtrip display for f32 (adds enough digits).
-        format!("{}f", val)
+        // Use Rust's roundtrip display for f32 (adds enough digits), then
+        // ensure a decimal point is present so the compiler never interprets
+        // e.g. `0f` as an invalid octal constant or `1f` as an integer suffix.
+        let s = format!("{val}");
+        if s.contains('.') || s.contains('e') || s.contains('E') {
+            format!("{s}f")
+        } else {
+            format!("{s}.0f")
+        }
     } else {
-        format!("{}", val)
+        let s = format!("{val}");
+        if s.contains('.') || s.contains('e') || s.contains('E') {
+            s
+        } else {
+            format!("{s}.0")
+        }
     }
 }
 
