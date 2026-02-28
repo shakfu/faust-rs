@@ -148,15 +148,11 @@ fn parse_file_with_imports_keeps_remote_urls_out_of_scope() {
     )
     .expect("main should be written");
 
-    let err =
-        parse_file_with_imports(&main, std::slice::from_ref(&root)).expect_err("must fail");
+    let err = parse_file_with_imports(&main, std::slice::from_ref(&root)).expect_err("must fail");
     match err {
         SourceReaderError::UnresolvedImport { name, from } => {
             assert_eq!(&*name, "https://example.com/stdfaust.lib");
-            assert_eq!(
-                from,
-                main.canonicalize().expect("main should canonicalize")
-            );
+            assert_eq!(from, main.canonicalize().expect("main should canonicalize"));
         }
         other => panic!("unexpected error kind for remote import policy: {other:?}"),
     }

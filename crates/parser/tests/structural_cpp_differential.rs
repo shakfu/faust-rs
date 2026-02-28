@@ -107,17 +107,15 @@ fn production_parser_structural_shapes_align_with_cpp_acceptance() {
                 };
                 assert!(matches!(match_box(&arena, mul_op), BoxMatch::Mul));
             }
-            "unary" => {
-                match match_box(&arena, expr) {
-                    BoxMatch::Seq(_lhs, rhs) => {
-                        assert!(matches!(match_box(&arena, rhs), BoxMatch::Sub));
-                    }
-                    BoxMatch::Int(v) => {
-                        assert_eq!(v, -1);
-                    }
-                    other => panic!("expected unary lowering shape, got {:?}", other),
+            "unary" => match match_box(&arena, expr) {
+                BoxMatch::Seq(_lhs, rhs) => {
+                    assert!(matches!(match_box(&arena, rhs), BoxMatch::Sub));
                 }
-            }
+                BoxMatch::Int(v) => {
+                    assert_eq!(v, -1);
+                }
+                other => panic!("expected unary lowering shape, got {:?}", other),
+            },
             "appl" => {
                 let (_callee, args) = match match_box(&arena, expr) {
                     BoxMatch::Appl(callee, args) => (callee, args),
@@ -156,11 +154,8 @@ fn production_parser_import_heavy_fixture_matches_cpp_acceptance() {
     fs::create_dir_all(lib.parent().expect("lib parent")).expect("create libs");
     fs::create_dir_all(core.parent().expect("core parent")).expect("create core");
 
-    fs::write(
-        &main,
-        "import(\"gain.lib\");\nprocess = gain + gain;\n",
-    )
-    .expect("main should be written");
+    fs::write(&main, "import(\"gain.lib\");\nprocess = gain + gain;\n")
+        .expect("main should be written");
     fs::write(&lib, "import(\"core/base.lib\");\ngain = base;\n").expect("lib should be written");
     fs::write(&core, "base = _;\n").expect("core should be written");
 

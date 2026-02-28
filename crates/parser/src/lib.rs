@@ -921,11 +921,8 @@ pub fn parse_file_with_imports(
     let expanded = reader.read_file_with_origins(path)?;
     let used_files = reader.used_files().to_vec();
     let source_name = path.to_string_lossy();
-    let mut output = parse_program_with_origins(
-        &expanded.text,
-        &source_name,
-        Some(expanded.line_origins),
-    );
+    let mut output =
+        parse_program_with_origins(&expanded.text, &source_name, Some(expanded.line_origins));
     output.used_files = used_files;
     Ok(output)
 }
