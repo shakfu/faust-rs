@@ -268,7 +268,7 @@ Execution note (2026-02-28):
 
 ## A3 — Diagnostic code matrix hardening (close G3)
 
-Status: `[ ]`  
+Status: `[x]`  
 Goal: replace coarse parser-code heuristics with stable category mapping.
 
 Tasks:
@@ -285,6 +285,14 @@ Validation:
 Exit criteria:
 - stable parser diagnostic code family per error/recovery category.
 - snapshot tests prevent unreviewed code drift.
+
+Execution note (2026-02-28):
+- Added explicit parser diagnostic code slot in parser-local diagnostics.
+- Parse-loop classification now sets stable codes directly from error class:
+  - lexical parse errors -> `FRS-LEX-0001`,
+  - grammar parse errors -> `FRS-PARSE-0001`.
+- Bundle conversion now prefers explicit parser-local code over message heuristics.
+- Existing compiler diagnostics snapshot tests remain passing.
 
 ## A4 — Structural differential gate expansion (close G4)
 

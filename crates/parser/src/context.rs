@@ -13,6 +13,7 @@
 //! - Waveform values are accumulated in parse order then drained by the corresponding action.
 //! - Parser diagnostics are explicitly scoped to one parser context (no global mutable singleton).
 
+use errors::DiagnosticCode;
 use tlib::{PropertyKey, PropertyStore, TreeId};
 
 /// Parser source location equivalent to `(filename, lineno)` in C++ parser globals,
@@ -94,6 +95,7 @@ pub enum DiagnosticSeverity {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParserDiagnostic {
     pub severity: DiagnosticSeverity,
+    pub code: Option<DiagnosticCode>,
     pub message: Box<str>,
     pub location: Option<SourceLocation>,
 }
@@ -460,6 +462,18 @@ impl ParserCtx {
         self.parse_error_count = self.parse_error_count.saturating_add(1);
         self.push_diagnostic(
             DiagnosticSeverity::Error,
+            None,
+            message,
+            Some(self.cursor.clone()),
+        );
+    }
+
+    /// Records a parser error at current cursor location with explicit stable diagnostic code.
+    pub fn error_with_code(&mut self, code: DiagnosticCode, message: &str) {
+        self.parse_error_count = self.parse_error_count.saturating_add(1);
+        self.push_diagnostic(
+            DiagnosticSeverity::Error,
+            Some(code),
             message,
             Some(self.cursor.clone()),
         );
@@ -469,6 +483,7 @@ impl ParserCtx {
     pub fn warning(&mut self, message: &str) {
         self.push_diagnostic(
             DiagnosticSeverity::Warning,
+            None,
             message,
             Some(self.cursor.clone()),
         );
@@ -478,6 +493,7 @@ impl ParserCtx {
     pub fn remark(&mut self, message: &str) {
         self.push_diagnostic(
             DiagnosticSeverity::Remark,
+            None,
             message,
             Some(self.cursor.clone()),
         );
@@ -515,11 +531,13 @@ impl ParserCtx {
     fn push_diagnostic(
         &mut self,
         severity: DiagnosticSeverity,
+        code: Option<DiagnosticCode>,
         message: &str,
         location: Option<SourceLocation>,
     ) {
         self.diagnostics.push(ParserDiagnostic {
             severity,
+            code,
             message: message.into(),
             location,
         });

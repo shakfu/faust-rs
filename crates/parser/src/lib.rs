@@ -881,7 +881,9 @@ fn parse_program_with_origins(
             u32::try_from(end_col).unwrap_or(u32::MAX),
         );
         let message = err.pp(&lexer, &faustparser_y::token_epp).to_string();
-        state.ctx.error(&message);
+        state
+            .ctx
+            .error_with_code(parser_code_for_lex_parse_error(&err), &message);
         rendered_errors.push(message);
     }
 
@@ -933,7 +935,9 @@ fn parser_ctx_to_bundle(ctx: &ParserCtx) -> DiagnosticBundle {
                 DiagnosticSeverity::Warning => Severity::Warning,
                 DiagnosticSeverity::Remark => Severity::Remark,
             };
-            let code = parser_code_for_message(diag.message.as_ref(), diag.severity);
+            let code = diag
+                .code
+                .unwrap_or_else(|| parser_code_for_message(diag.message.as_ref(), diag.severity));
             let mut out = Diagnostic::new(severity, Stage::Parser, code, diag.message.clone());
             if let Some(location) = &diag.location {
                 let span = SourceSpan::new(
@@ -955,12 +959,20 @@ fn parser_code_for_message(message: &str, severity: DiagnosticSeverity) -> Diagn
     if matches!(
         severity,
         DiagnosticSeverity::Warning | DiagnosticSeverity::Remark
-    ) || message.to_ascii_lowercase().contains("recover")
-    {
+    ) {
         codes::PARSE_RECOVERY
     } else if message.contains("invalid") && message.contains("literal") {
         codes::PARSE_INVALID_LITERAL
     } else {
         codes::PARSE_UNEXPECTED_TOKEN
+    }
+}
+
+fn parser_code_for_lex_parse_error(
+    err: &lrpar::LexParseError<u32, lrlex::DefaultLexerTypes<u32>>,
+) -> DiagnosticCode {
+    match err {
+        lrpar::LexParseError::LexError(_) => codes::LEX_INVALID_TOKEN,
+        lrpar::LexParseError::ParseError(_) => codes::PARSE_UNEXPECTED_TOKEN,
     }
 }
