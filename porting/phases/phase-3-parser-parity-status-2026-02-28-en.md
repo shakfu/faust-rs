@@ -360,7 +360,7 @@ Execution note (2026-02-28):
 
 ## A6 — Remote import policy and implementation decision (close G5)
 
-Status: `[ ]`  
+Status: `[x]`  
 Goal: decide and implement (or explicitly freeze) network import parity scope.
 
 Tasks:
@@ -380,6 +380,21 @@ Validation:
 Exit criteria:
 - `sourcefetcher` lifecycle is no longer ambiguous (`adapted`/`1:1` implemented
   or explicitly frozen `deferred` with signed scope decision).
+
+Execution note (2026-02-28):
+- Signed scope decision for parser Phase 3: keep network import support explicitly
+  frozen as `deferred` (no fetch stub in parser crate).
+- Updated lifecycle/status mapping:
+  - `porting/phases/phase-3-parser-adjacent-modules-status-en.md`
+    now marks `sourcefetcher` as `deferred (explicitly frozen)` and aligns wording
+    to production `parser` crate tests.
+- Added deterministic policy regression in parser API tests:
+  - `crates/parser/tests/api_bridge.rs`:
+    - `parse_file_with_imports_keeps_remote_urls_out_of_scope`
+      asserts URL imports fail with `SourceReaderError::UnresolvedImport`.
+- Validation run:
+  - `cargo test -p parser --all-targets`
+  - `cargo test -p compiler --all-targets`
 
 ## 6.1 Suggested Execution Sequence
 

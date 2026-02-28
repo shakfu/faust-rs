@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use parser::{parse_file_with_imports, parse_minimal, parse_program};
+use parser::{SourceReaderError, parse_file_with_imports, parse_minimal, parse_program};
 
 fn make_temp_root(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -134,6 +134,32 @@ fn parse_file_with_imports_preserves_imported_file_diagnostic_origin() {
         "expected at least one parser diagnostic label on imported file {}",
         lib_canonical.display()
     );
+
+    fs::remove_dir_all(root).expect("temp root should be removable");
+}
+
+#[test]
+fn parse_file_with_imports_keeps_remote_urls_out_of_scope() {
+    let root = make_temp_root("remote_import_policy");
+    let main = root.join("main.dsp");
+    fs::write(
+        &main,
+        "import(\"https://example.com/stdfaust.lib\");\nprocess = _;\n",
+    )
+    .expect("main should be written");
+
+    let err =
+        parse_file_with_imports(&main, std::slice::from_ref(&root)).expect_err("must fail");
+    match err {
+        SourceReaderError::UnresolvedImport { name, from } => {
+            assert_eq!(&*name, "https://example.com/stdfaust.lib");
+            assert_eq!(
+                from,
+                main.canonicalize().expect("main should canonicalize")
+            );
+        }
+        other => panic!("unexpected error kind for remote import policy: {other:?}"),
+    }
 
     fs::remove_dir_all(root).expect("temp root should be removable");
 }

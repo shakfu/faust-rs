@@ -14,12 +14,12 @@ Source of truth (C++):
 
 | C++ module | Main C++ API / role | Rust target scope | Status | Rationale | Owner + milestone | Validation |
 |---|---|---|---|---|---|---|
-| `sourcefetcher` | low-level `http_fetch(...)` and HTTP helpers used by import/file handling | optional parser-adjacent capability (`parser` feature-gated path) | `deferred` | Not required for parser migration viability gate; introduces network/dependency policy questions; avoid stubs in Phase 3. Core parser/import functionality remains local-file based via `SourceReader`. | Parser integration track, target **Phase 9 integration** | `parser-proto` `SourceReader` tests pass for local/cycle flows; explicit URL import behavior is asserted as unresolved in scope tests. |
+| `sourcefetcher` | low-level `http_fetch(...)` and HTTP helpers used by import/file handling | optional parser-adjacent capability (`parser` feature-gated path) | `deferred` (explicitly frozen) | Not required for parser migration viability gate; introduces network/dependency policy questions; avoid stubs in Phase 3. Core parser/import functionality remains local-file based via `SourceReader`. | Parser integration track, target **Phase 9 integration** | `parser` `SourceReader` flows pass for local/cycle behavior; URL import behavior is explicitly tested as unresolved/out-of-scope. |
 | `enrobage` | architecture-template/file helper set (`openArchStream`, `fopenSearch`, stream copy utilities, output naming) used by `libcode.cpp` and documentator | `compiler` integration layer (`crates/compiler/src/enrobage.rs`) | `adapted` (implemented for C++ output path) | Implemented in Rust with parity-first stream/path helpers and explicit CLI integration (`-a/-A/-i`) for C++ output. Remaining work is full end-to-end output parity cleanup outside strict enrobage scope (codegen-header differences). | Compiler/codegen integration track, **Phase 9 implemented milestone** (report: `phase-9-enrobage-diff-report-en.md`) | `compiler` enrobage tests pass: `enrobage_paths`, `enrobage_search`, `enrobage_stream`, `enrobage_integration`; wrapper differential checks documented in Phase 9 report. |
 
 ## 3. Scope Contract for Phase 3
 
-- `SourceReader` in `parser-proto` is intentionally **local-file only**.
+- `SourceReader` in `parser` is intentionally **local-file only**.
 - URL/network imports are intentionally not fetched in this phase.
 - No placeholder network/wrapper implementation is introduced in Phase 3.
 - This is an explicit **defer decision**, not an omission.
@@ -37,7 +37,7 @@ Before moving these modules out of `deferred`:
 
 ## 5. Step-5 Coverage Update (Import Envelope)
 
-Additional `parser-proto` `SourceReader` tests now cover:
+Additional parser-side `SourceReader` / API tests now cover:
 - local-directory import precedence over global search paths when both provide the same import name,
 - parent-relative import resolution (`../...`) through nested source trees,
 - uniqueness of `used_files` tracking under repeated imports through different paths.
