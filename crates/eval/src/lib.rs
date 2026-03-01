@@ -665,7 +665,10 @@ impl Display for EvalError {
                 )
             }
             Self::RedefinedSymbol { symbol, .. } => {
-                write!(f, "symbol `{symbol}` redefined with a different value in the same scope")
+                write!(
+                    f,
+                    "symbol `{symbol}` redefined with a different value in the same scope"
+                )
             }
             Self::LoopDetected { node } => {
                 write!(f, "recursive evaluation loop on node {}", node.as_u32())
@@ -796,7 +799,9 @@ impl IntoDiagnostic for EvalError {
                 codes::EVAL_REDEFINED_SYMBOL,
                 message,
             )
-            .with_note("cause: the same symbol is bound twice with conflicting values in the same scope")
+            .with_note(
+                "cause: the same symbol is bound twice with conflicting values in the same scope",
+            )
             .with_note(
                 "rule: each symbol may appear at most once per `with {}` block or definition list",
             )

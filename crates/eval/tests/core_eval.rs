@@ -554,8 +554,8 @@ fn bind_definitions_accepts_identical_redefinition_silently() {
     let defs = make_defs(&mut arena, &[def_x1, def_x2, def_process]);
 
     // Should succeed: identical re-binding is silently accepted
-    let out = eval_process(&mut arena, defs)
-        .expect("identical redefinition should be silently accepted");
+    let out =
+        eval_process(&mut arena, defs).expect("identical redefinition should be silently accepted");
     assert!(
         matches!(match_box(&arena, out), BoxMatch::Wire),
         "resolved definition should be the wire node"
@@ -581,8 +581,8 @@ fn bind_definitions_allows_shadowing_from_outer_scope() {
     let def_process = make_def(&mut arena, "process", nil, with_expr);
 
     let defs = make_defs(&mut arena, &[def_x_outer, def_process]);
-    let out = eval_process(&mut arena, defs)
-        .expect("shadowing should not produce a redefinition error");
+    let out =
+        eval_process(&mut arena, defs).expect("shadowing should not produce a redefinition error");
     assert!(
         matches!(match_box(&arena, out), BoxMatch::Cut),
         "inner `x = cut` should shadow outer `x = wire`"
