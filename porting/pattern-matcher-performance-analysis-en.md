@@ -101,7 +101,7 @@ These aspects are **identical** between C++ and Rust — neither has an advantag
 | Aspect | C++ | Rust |
 |---|---|---|
 | Algorithm | Incremental Graef (RTA 1991) | Same |
-| Automaton rebuild per call | `make_pattern_matcher` called each `evalCase` | Same |
+| Automaton rebuild per call | `make_pattern_matcher` called each `evalCase` | Same (before cache, see §8) |
 | Transition ordering invariant | Var first, then Constants sorted, then Ops sorted | Same |
 | Nonlinearity check | Path-based subterm extraction + equality check | Same (`subtree` + `TreeId` equality) |
 | Rule priority | First active rule in final state wins | Same |
@@ -148,23 +148,90 @@ matching. It represents a shared future optimisation opportunity.
 
 ---
 
-## 7. Future optimisation: cache the automaton per `Case` node
+## 7. Rust-only optimisation opportunities
 
-Currently, both C++ and Rust rebuild the automaton on every `apply_case_rules` call.
+The following improvements are applicable to the Rust implementation.
+They are ranked by estimated impact; all are independent of each other.
+
+### 7.1 Cache the automaton per `Case` node *(impact: extreme — implemented)*
+
+**Status: implemented** (see §8 for design details).
+
+Both C++ and Rust originally rebuild the automaton on every `apply_case_rules` call.
 Since the `Case` node is immutable after construction (it is hash-consed in the arena),
-the automaton could be **computed once and stored** — either in a side table keyed by
-`TreeId`, or as a lazily-initialised field associated with the `Case` node.
+the automaton can be computed once and reused for all subsequent applications of the same
+`case` node.
 
-This would reduce the construction cost from O(n_rules × pattern_depth) per call to
-O(1) per call (after the first). It is the most impactful single optimisation available
-to both implementations, independent of the structural advantages described above.
+Cost before: O(n_rules × pattern_depth) per call.
+Cost after: O(n_rules × pattern_depth) for the first call, O(1) for all subsequent calls.
 
-In Rust, a natural implementation would be:
+This is the most impactful single optimisation available — a Faust `case` used inside a
+`par(i, N, …)` or `seq(i, N, …)` loop is applied N times, so the saving scales linearly
+with N.
+
+### 7.2 Remove dead `build_automaton_metadata` *(impact: medium, free)*
+
+`build_automaton_metadata` computes the `match_num` flag for every state after construction
+but `apply_pattern_matcher_internal` never reads it. The full DFS traversal of the automaton
+graph is pure wasted work. Either the flag should be removed, or the numeric fast-path that
+consults it should be implemented.
+
+### 7.3 Defer `Environment` scope creation *(impact: medium)*
+
+`apply_case_rules` currently creates one `Environment` scope per rule before matching begins:
 
 ```rust
-// Side table: TreeId of Case node → compiled Automaton
-type AutomatonCache = AHashMap<TreeId, Automaton>;
+let mut envs: Vec<Option<Environment>> = (0..n).map(|_| Some(env.push_scope())).collect();
 ```
 
-Passed alongside `arena` into `apply_case_rules`, allowing the automaton to be
-reused across repeated applications of the same `case` node.
+If there are R rules and only 1 will win, R−1 scope copies are wasted. Refactoring to
+record only `(variable → path)` pairs during matching and build a single scope for the
+winning rule afterwards would save O(R) allocations per call.
+
+### 7.4 `SmallVec` for `Trans` and `Rule` *(impact: medium)*
+
+Typical states have 3–8 transitions and 1–3 rules. Using `SmallVec<[Trans; 8]>` and
+`SmallVec<[Rule; 4]>` eliminates heap allocation for the common case. This reduces
+allocator pressure during `make_pattern_matcher` and improves locality of the hot loop.
+
+### 7.5 Reusable scratch buffer for `substs` *(impact: medium)*
+
+`apply_pattern_matcher` allocates `vec![Vec::new(); n]` on every call. For a `case` with
+5 rules applied to 3 arguments, that is 15 `Vec` allocations per case application.
+Passing a pre-allocated `&mut Vec<Subst>` and calling `clear()` before each use reduces
+this to zero on the hot path.
+
+---
+
+## 8. Implemented: automaton cache in `LoopDetector`
+
+The automaton cache is stored as a private field of `LoopDetector`:
+
+```rust
+// pattern_matcher.rs
+pub(crate) type AutomatonCache = AHashMap<TreeId, Automaton>;
+
+// lib.rs — LoopDetector gains a private field
+pub struct LoopDetector {
+    call_stack: Vec<TreeId>,
+    max_depth: usize,
+    automaton_cache: AutomatonCache,   // ← new
+}
+```
+
+`LoopDetector` is already threaded through every recursive `eval_box` call, making it
+the natural carrier for evaluation-phase caches without changing any public API.
+
+The lookup in `apply_case_rules` becomes:
+
+```rust
+if !loop_detector.automaton_cache.contains_key(&rules_rev) {
+    let automaton = pattern_matcher::make_pattern_matcher(arena, rules_rev);
+    loop_detector.automaton_cache.insert(rules_rev, automaton);
+}
+let automaton = loop_detector.automaton_cache.get(&rules_rev).unwrap();
+```
+
+Since `Automaton` is stored by value in the map (not behind a pointer), cache hits involve
+a single hash lookup and a direct reference to the contiguous `Vec<State>` — no extra
+indirection compared with the non-cached path.

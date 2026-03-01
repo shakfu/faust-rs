@@ -411,10 +411,21 @@ impl Environment {
 /// - `enter`: O(depth) scan — the entire call stack fits in L1 cache for depth < 256.
 /// - `leave`: O(1) — `Vec::pop`.
 /// - Memory: 8 bytes per frame (one `u32` TreeId, padded).
+///
+/// # Evaluation-phase caches
+///
+/// `LoopDetector` is threaded through every recursive evaluator call, making it the
+/// natural carrier for caches that must survive across the whole evaluation phase.
+/// Currently it holds:
+/// - `automaton_cache`: memoises the compiled [`pattern_matcher::Automaton`] for each
+///   `Case` node, keyed by the node's `TreeId`. See §8 of the pattern-matcher performance
+///   analysis for rationale and design.
 #[derive(Clone, Debug)]
 pub struct LoopDetector {
     call_stack: Vec<TreeId>,
     max_depth: usize,
+    /// Compiled automata keyed by the `TreeId` of the `Case` rule-list.
+    automaton_cache: pattern_matcher::AutomatonCache,
 }
 
 impl LoopDetector {
@@ -427,6 +438,7 @@ impl LoopDetector {
         Self {
             call_stack: Vec::new(),
             max_depth: 1024,
+            automaton_cache: pattern_matcher::AutomatonCache::default(),
         }
     }
 
@@ -439,6 +451,7 @@ impl LoopDetector {
         Self {
             call_stack: Vec::new(),
             max_depth,
+            automaton_cache: pattern_matcher::AutomatonCache::default(),
         }
     }
 
@@ -1853,9 +1866,15 @@ fn apply_case_rules(
     let consumed = args[..expected].to_vec();
     let rest = args[expected..].to_vec();
 
-    // Compile rules into tree automaton.
-    // C++ parallel: `make_pattern_matcher(rules)` called once per case application.
-    let automaton = pattern_matcher::make_pattern_matcher(arena, rules_rev);
+    // Compile rules into tree automaton — or retrieve a cached copy.
+    // The `Case` node is hash-consed: the same `rules_rev` TreeId always represents the
+    // same rule set, so the automaton can be built once and reused across all applications.
+    // C++ parallel: `make_pattern_matcher(rules)` called once per case application (no cache).
+    if !loop_detector.automaton_cache.contains_key(&rules_rev) {
+        let automaton = pattern_matcher::make_pattern_matcher(arena, rules_rev);
+        loop_detector.automaton_cache.insert(rules_rev, automaton);
+    }
+    let automaton = loop_detector.automaton_cache.get(&rules_rev).unwrap();
     let n = automaton.n_rules();
 
     // Per-rule environments: each starts as a child scope of the current env.
@@ -1867,7 +1886,7 @@ fn apply_case_rules(
     let mut state: usize = 0;
     for arg in &consumed {
         let (new_state, _) =
-            pattern_matcher::apply_pattern_matcher(arena, &automaton, state, *arg, &mut envs);
+            pattern_matcher::apply_pattern_matcher(arena, automaton, state, *arg, &mut envs);
         let Some(new_state) = new_state else {
             return Err(EvalError::PatternMatchFailed { node: rules_rev });
         };

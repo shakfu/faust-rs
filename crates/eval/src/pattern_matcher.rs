@@ -56,6 +56,7 @@
 //!
 //! This order mirrors the C++ implementation and ensures deterministic matching.
 
+use ahash::AHashMap;
 use boxes::{BoxMatch, match_box};
 use tlib::{NodeKind, TreeArena, TreeId};
 
@@ -186,7 +187,7 @@ pub struct State {
 ///
 /// # C++ correspondence
 /// `struct Automaton { vector<State*> state; vector<Tree> rhs; … }`.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Automaton {
     /// All states of the automaton, indexed by `usize`.
     pub states: Vec<State>,
@@ -220,6 +221,13 @@ impl Automaton {
         idx
     }
 }
+
+/// Cache keyed by the `TreeId` of a `Case` node's rule-list.
+///
+/// Since `Case` nodes are hash-consed (immutable after construction), the same `TreeId`
+/// always refers to the same set of rules, making it a perfect key for memoising
+/// [`make_pattern_matcher`] across repeated applications of the same `case` expression.
+pub(crate) type AutomatonCache = AHashMap<TreeId, Automaton>;
 
 // ── Internal pattern helpers ──────────────────────────────────────────────────
 
