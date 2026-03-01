@@ -152,6 +152,65 @@ struct TagRegistry {
     to_str: Vec<Arc<str>>,
 }
 
+/// Internal interner for Faust **symbol names** (user-defined identifiers).
+///
+/// Parallel to [`TagRegistry`] but for evaluator symbol names rather than IR node-type tags.
+/// Every unique identifier name (`process`, `f`, `karplus`, …) is assigned a dense `u32` id,
+/// enabling O(1) environment lookup by integer comparison instead of O(len) string comparison.
+///
+/// # C++ parallel
+///
+/// C++ uses hash-consed `Tree` pointers as symbol keys — comparison is O(1) pointer equality.
+/// This registry achieves the same O(1) cost using dense integer IDs stored in a `Vec`.
+///
+/// # Design choices
+///
+/// - **`Arc<str>` strings**: matches [`TagRegistry`] for consistency; the `Arc` avoids a
+///   duplicate allocation when inserting into both `to_id` and `to_str`.
+/// - **`get` vs `intern`**: `get` never allocates and is safe to call from a shared (`&self`)
+///   context. `intern` may allocate and requires `&mut self`. Callers use `get` for lookups
+///   (where an unknown name means "definitely not in env") and `intern` for binds.
+#[derive(Debug, Default)]
+struct SymbolInterner {
+    to_id: AHashMap<Arc<str>, u32>,
+    to_str: Vec<Arc<str>>,
+}
+
+impl SymbolInterner {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Interns `name` and returns its `u32` id.
+    ///
+    /// If `name` was already interned, returns the existing id without allocation.
+    /// Otherwise allocates one `Arc<str>` shared between the two tables.
+    fn intern(&mut self, name: &str) -> u32 {
+        if let Some(&id) = self.to_id.get(name) {
+            return id;
+        }
+        let id = self.to_str.len() as u32;
+        let arc: Arc<str> = Arc::from(name);
+        self.to_str.push(Arc::clone(&arc));
+        self.to_id.insert(arc, id);
+        id
+    }
+
+    /// Looks up `name` without interning it.
+    ///
+    /// Returns `None` if the name has never been interned. A `None` result means the symbol
+    /// was never bound in any environment, so any subsequent `env.lookup` would also return
+    /// `None` — callers can short-circuit to `UndefinedSymbol` without interning.
+    fn get(&self, name: &str) -> Option<u32> {
+        self.to_id.get(name).copied()
+    }
+
+    /// Returns the string for a symbol id, or `None` if the id is out of range.
+    fn name(&self, id: u32) -> Option<&str> {
+        self.to_str.get(id as usize).map(|s| s.as_ref())
+    }
+}
+
 impl TagRegistry {
     fn new() -> Self {
         Self {
@@ -196,6 +255,12 @@ pub struct TreeArena {
     interner2: AHashMap<(NodeKind, TreeId, TreeId), TreeId>,
     interner_n: AHashMap<NodeKey, TreeId>,
     tag_registry: TagRegistry,
+    /// Interner for user-defined Faust symbol names (evaluator `SymId` ↔ `&str`).
+    ///
+    /// Separate from [`tag_registry`](Self::tag_registry) which handles IR node-type tags.
+    /// Public API: [`intern_symbol`](Self::intern_symbol), [`get_symbol`](Self::get_symbol),
+    /// [`symbol_name`](Self::symbol_name).
+    symbol_interner: SymbolInterner,
     nil: TreeId,
 }
 
@@ -244,6 +309,7 @@ impl TreeArena {
             interner2: AHashMap::with_capacity(interner2_capacity),
             interner_n: AHashMap::with_capacity(interner_n_capacity),
             tag_registry: TagRegistry::new(),
+            symbol_interner: SymbolInterner::new(),
             nil: TreeId(0),
         };
         let nil = arena.intern(NodeKind::Nil, &[]);
@@ -412,6 +478,47 @@ impl TreeArena {
     #[must_use]
     pub fn tag_name(&self, tag_id: u32) -> Option<&str> {
         self.tag_registry.name(tag_id)
+    }
+
+    /// Interns a Faust symbol name and returns its `SymId` (`u32`).
+    ///
+    /// If `name` was already interned, returns the existing id in O(1) without allocation.
+    /// Otherwise allocates one `Arc<str>` and assigns the next available id.
+    ///
+    /// **Use this on the bind path** (when storing a name in an [`Environment`]) where the name
+    /// must be assigned a stable id for future lookups.
+    ///
+    /// **C++ parallel**: in C++, symbol identity is pointer equality on hash-consed `Tree` nodes
+    /// (also O(1)). This method achieves the same cost with a dense integer pool.
+    ///
+    /// [`Environment`]: eval::Environment
+    pub fn intern_symbol(&mut self, name: &str) -> u32 {
+        self.symbol_interner.intern(name)
+    }
+
+    /// Looks up a Faust symbol name without interning it.
+    ///
+    /// Returns `None` if `name` has never been passed to [`intern_symbol`](Self::intern_symbol).
+    /// A `None` result means the symbol was never bound in any environment, so any subsequent
+    /// `env.lookup` would also return `None` — callers can short-circuit to `UndefinedSymbol`
+    /// without touching `&mut self`.
+    ///
+    /// **Use this on the lookup path** (when resolving an `Ident`) to avoid polluting the
+    /// interner with unknown symbols and to keep the borrow as `&self`.
+    #[must_use]
+    pub fn get_symbol(&self, name: &str) -> Option<u32> {
+        self.symbol_interner.get(name)
+    }
+
+    /// Returns the string name for an interned symbol id, or `None` if the id is out of range.
+    ///
+    /// Used by [`Environment::local_names`] and friends to produce human-readable diagnostics
+    /// from the compact `u32` ids stored in environment bindings.
+    ///
+    /// [`Environment::local_names`]: eval::Environment::local_names
+    #[must_use]
+    pub fn symbol_name(&self, sym: u32) -> Option<&str> {
+        self.symbol_interner.name(sym)
     }
 
     /// Interns a generic tag atom used by higher-level IR builders.

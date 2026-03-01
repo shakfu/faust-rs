@@ -104,24 +104,20 @@
 //! | Operation | C++ implementation | C++ cost | Rust implementation | Rust cost |
 //! |---|---|---|---|---|
 //! | **Scope push** | `tree(unique("ENV_LAYER"), lenv)` — alloc in hash-cons pool | O(1) amortized + hash | `Vec::new()` + `Box::new(parent.clone())` | O(parent_size) clone |
-//! | **Bind one symbol** | `setProperty(node, id, def)` — hash map insert on tree node | O(1) amortized | `Vec::push((name, id))` | O(1) amortized |
-//! | **Lookup (found at depth d)** | Walk d layers, `getProperty` hash probe per layer | O(d) hash probes | Reverse scan local `Vec` (O(n_local)), recurse O(d) | O(d × n_local × len(name)) |
-//! | **Value size per binding** | `Tree*` pointer to closure node (~64 bytes closure) | Large | `(Box<str>, u32)` (~24 bytes) | Small |
-//! | **Cache locality** | Pointer-chased linked list through hash-cons pool | Poor (pointer indirection) | Contiguous `Vec` in stack-allocated struct | Excellent (sequential) |
+//! | **Bind one symbol** | `setProperty(node, id, def)` — hash map insert on tree node | O(1) amortized | `Vec::push((sym, id))` | O(1) amortized |
+//! | **Lookup (found at depth d)** | Walk d layers, `getProperty` hash probe per layer | O(d) hash probes | Reverse `u32` scan per layer O(n_local), recurse O(d) | O(d × n_local) — O(1) per compare |
+//! | **Value size per binding** | `Tree*` pointer to closure node (~64 bytes closure) | Large | `(u32, u32)` — 8 bytes (`SymId` + `TreeId`) | Excellent |
+//! | **Cache locality** | Pointer-chased linked list through hash-cons pool | Poor (pointer indirection) | Contiguous `Vec<(u32,u32)>` — SIMD-scannable | Excellent (sequential) |
 //! | **Concurrency** | Global `gGlobal` state, not thread-safe | N/A | Fully `Send`/`Sync`, no global state | Thread-safe |
 //!
 //! **In practice**: for typical Faust programs (< 200 top-level definitions, scope depth ≤ 5,
-//! ≤ 30 bindings per scope), the Rust `Vec` linear scan is **faster** than C++ hash-table probes
-//! due to cache locality. Short Faust symbol names (typically < 20 chars) make string comparison
-//! fast enough that the O(len) factor is negligible.
+//! ≤ 30 bindings per scope), the Rust `Vec<(u32,u32)>` scan is **faster** than C++ hash-table
+//! probes due to cache locality and SIMD-friendly layout. Each comparison is O(1) — two `u32`
+//! integer compares — matching the cost of C++ hash-cons pointer equality.
 //!
-//! **Remaining Rust opportunity**: intern symbol names as `u32` IDs (changing `SymId = Box<str>`
-//! to `SymId = u32`) to make per-symbol comparison O(1). This would benefit programs with very
-//! large scopes (> 100 bindings per layer) such as generated stdlib environments.
-//!
-//! The `push_scope()` clone cost is the most significant Rust overhead for deep scope chains.
-//! Replacing `Option<Box<Environment>>` with an index into a scope arena would eliminate all
-//! cloning, at the cost of a more complex API.
+//! **Remaining Rust opportunity**: the `push_scope()` clone cost is the most significant overhead
+//! for deep scope chains. Replacing `Option<Box<Environment>>` with an index into a scope arena
+//! would eliminate all cloning, at the cost of a more complex API.
 //!
 //! # Scope of this crate
 //! - Name resolution against definition environments with redefinition detection.
@@ -153,16 +149,34 @@ use tlib::{NodeKind, TreeArena, TreeId};
 
 pub const CRATE_NAME: &str = "eval";
 
-/// Symbol identifier used in evaluator environments.
+/// Symbol identifier used in evaluator environments — a dense `u32` interned by [`TreeArena`].
 ///
-/// Currently a heap-allocated string slice. An interning optimization (replacing this with a `u32`
-/// index into a symbol table) would make all environment comparisons O(1) instead of O(len(name))
-/// and is the most impactful remaining performance improvement for large-scope programs.
+/// Every unique Faust identifier name (`process`, `f`, `karplus`, …) is assigned a `u32` id
+/// by [`TreeArena::intern_symbol`] the first time it is **bound** to a value. Subsequent lookups
+/// use [`TreeArena::get_symbol`] (which takes `&self`) to retrieve the id in O(1), then compare
+/// it as a plain integer. This achieves:
 ///
-/// **C++ equivalent**: `Tree` nodes used as symbol keys in `setProperty`/`getProperty` calls.
-/// C++ keys are hash-consed, so comparison is O(1) pointer equality. The Rust string comparison
-/// is O(len) but remains practical for Faust's typically short symbol names (< 20 chars).
-pub type SymId = Box<str>;
+/// - **O(1)** symbol comparison (was O(len) with `Box<str>`)
+/// - **8 bytes** per binding in `Vec<(SymId, TreeId)>` (was ~24 bytes with `Box<str>` + padding)
+/// - **SIMD-friendly** scan: the `Vec<(u32, u32)>` layout lets the CPU compare 4 bindings per
+///   16-byte vector register in a typical environment of < 32 bindings.
+///
+/// **C++ parallel**: C++ uses hash-consed `Tree` pointers as symbol keys, achieving O(1)
+/// comparison by pointer equality. This `u32` id pool achieves the same O(1) cost without
+/// pointer chasing, with better cache density (4-byte vs 8-byte pointer).
+///
+/// # Lookup vs intern split
+///
+/// The interner is split into two entry points to avoid `&mut TreeArena` borrows on the
+/// hot lookup path (which runs inside a `match match_box(arena, expr)` arm where `arena` is
+/// already reborrowed as `&TreeArena`):
+///
+/// | Operation | Method | Borrow | Use case |
+/// |---|---|---|---|
+/// | Bind (new name) | [`intern_symbol(&mut self)`](TreeArena::intern_symbol) | `&mut` | `bind_definitions`, `apply_list`, Abstr |
+/// | Lookup (known name) | [`get_symbol(&self)`](TreeArena::get_symbol) | `&` | `eval_box` Ident, `match_pattern` |
+/// | Name resolution | [`symbol_name(&self)`](TreeArena::symbol_name) | `&` | Diagnostics only |
+pub type SymId = u32;
 
 /// Lexical evaluation environment mapping symbol names to box-IR tree nodes.
 ///
@@ -188,7 +202,7 @@ pub type SymId = Box<str>;
 ///
 /// | Aspect | C++ (`environment.cpp`) | Rust (`Environment`) |
 /// |---|---|---|
-/// | Storage | Hash-consed tree nodes with property tables | `Vec<(Box<str>, TreeId)>` |
+/// | Storage | Hash-consed tree nodes with property tables | `Vec<(u32, TreeId)>` — interned `SymId` |
 /// | Values stored | **Closures**: `closure(expr, genv, visited, lenv)` capturing the scope at definition time | **Bare `TreeId`** — no scope capture needed |
 /// | Lookup | `searchIdDef`: walks layers calling `getProperty` (hash probe per layer) | `lookup`: reverse linear scan of `Vec`, then recurse to `parent` |
 /// | Scope push | `pushNewLayer(lenv)` — allocates a unique tree node | `push_scope()` — `Vec::new()` + `Box::new(parent.clone())` |
@@ -199,14 +213,14 @@ pub type SymId = Box<str>;
 ///
 /// # Performance
 ///
-/// For typical Faust programs (scope depth ≤ 5, ≤ 30 bindings/scope, symbol names < 20 chars):
-/// - **Lookup**: O(d × n × len) where d = depth, n = bindings/scope, len = symbol length.
-///   In practice ~50–150 byte comparisons — fits entirely in L1 cache.
+/// For typical Faust programs (scope depth ≤ 5, ≤ 30 bindings/scope):
+/// - **Lookup**: O(d × n) where d = depth, n = bindings/scope. Each compare is O(1) — `u32`
+///   integer equality. In practice ~30–150 comparisons — fits entirely in L1 cache.
 /// - **Bind**: `Vec::push` — amortized O(1), no hashing, no pointer chasing.
 /// - **Push scope**: O(parent_size) due to `clone`. This is the dominant cost for deeply
 ///   nested scopes. A scope-arena design would eliminate it entirely.
-/// - **Memory per binding**: ~24 bytes (`Box<str>` header + u32 TreeId + padding) vs C++'s
-///   ~64 bytes per closure node.
+/// - **Memory per binding**: **8 bytes** (`u32` SymId + `u32` TreeId) vs C++'s ~64 bytes per
+///   closure node. SIMD-scannable `Vec<(u32, u32)>` layout — 4 bindings per 32-byte cache line.
 #[derive(Clone, Debug, Default)]
 pub struct Environment {
     bindings: Vec<(SymId, TreeId)>,
@@ -232,36 +246,41 @@ impl Environment {
     ///
     /// **C++ equivalent**: `setProperty(lenv, id, def)` in `addLayerDef`, but without the
     /// prior duplicate check. The check is performed externally in `bind_definitions`.
-    pub fn bind(&mut self, name: impl Into<SymId>, value: TreeId) {
-        self.bindings.push((name.into(), value));
+    ///
+    /// `sym` must be obtained from [`TreeArena::intern_symbol`] before calling this method.
+    pub fn bind(&mut self, sym: SymId, value: TreeId) {
+        self.bindings.push((sym, value));
     }
 
     /// Looks up a symbol across the full scope chain (current scope and all parents).
     ///
-    /// Returns the **innermost** (most recently bound) binding for `name`, or `None` if the
+    /// Returns the **innermost** (most recently bound) binding for `sym`, or `None` if the
     /// symbol is not visible in any scope. This implements shadowing: a binding in an inner scope
-    /// hides any binding with the same name in an outer scope.
+    /// hides any binding with the same `SymId` in an outer scope.
     ///
-    /// The scan is performed in **reverse insertion order** within each scope, then recurses to
-    /// the parent. This means the last `bind` call for a given name in the current scope wins.
+    /// The scan is performed in **reverse insertion order** within each scope (O(n) integer
+    /// comparisons), then recurses to the parent. The last `bind` call for a given `sym` in the
+    /// current scope wins. Comparison is O(1) — two `u32` values compared by equality.
     ///
     /// **C++ equivalent**: `getProperty(lenv, id, def)` called in a loop walking the layer chain
     /// (`lenv = lenv->branch(0)`) until a hit or `isEnvBarrier`. The C++ lookup uses a hash
-    /// probe per layer; the Rust lookup uses a linear scan per layer. For typical scope sizes
-    /// (< 30 bindings/layer) both are O(1) in practice.
+    /// probe per layer; the Rust lookup uses a linear SIMD-friendly `u32` scan per layer.
     ///
     /// **Does not stop at barriers**: unlike C++ `searchIdDef` (used by the pattern matcher),
     /// this lookup traverses the full parent chain. Pattern-matching scope isolation is achieved
     /// differently in Rust: pattern bindings use a fresh `Environment::empty()` with no parent,
     /// so they never accidentally reach the outer scope.
+    ///
+    /// `sym` must be a valid id returned by [`TreeArena::intern_symbol`] or
+    /// [`TreeArena::get_symbol`].
     #[must_use]
-    pub fn lookup(&self, name: &str) -> Option<TreeId> {
-        for (sym, value) in self.bindings.iter().rev() {
-            if sym.as_ref() == name {
+    pub fn lookup(&self, sym: SymId) -> Option<TreeId> {
+        for (s, value) in self.bindings.iter().rev() {
+            if *s == sym {
                 return Some(*value);
             }
         }
-        self.parent.as_ref().and_then(|p| p.lookup(name))
+        self.parent.as_ref().and_then(|p| p.lookup(sym))
     }
 
     /// Looks up a symbol in the **current scope only**, without consulting any parent.
@@ -280,10 +299,13 @@ impl Environment {
     ///
     /// Unlike [`lookup`](Self::lookup), this method does **not** recurse to the parent, so
     /// re-binding a name that exists in an outer scope (shadowing) is correctly allowed.
+    ///
+    /// `sym` must be a valid id returned by [`TreeArena::intern_symbol`] or
+    /// [`TreeArena::get_symbol`].
     #[must_use]
-    pub fn lookup_local(&self, name: &str) -> Option<TreeId> {
-        for (sym, value) in self.bindings.iter().rev() {
-            if sym.as_ref() == name {
+    pub fn lookup_local(&self, sym: SymId) -> Option<TreeId> {
+        for (s, value) in self.bindings.iter().rev() {
+            if *s == sym {
                 return Some(*value);
             }
         }
@@ -317,12 +339,15 @@ impl Environment {
     ///
     /// Used by [`EvalError::UndefinedSymbol`] to populate the `local_scope` diagnostic field.
     /// Names are sorted and deduplicated for stable diagnostic output.
+    ///
+    /// `arena` is required to resolve interned `u32` symbol ids back to their string names for
+    /// human-readable diagnostics.
     #[must_use]
-    pub fn local_names(&self) -> Vec<String> {
+    pub fn local_names(&self, arena: &TreeArena) -> Vec<String> {
         let mut out = self
             .bindings
             .iter()
-            .map(|(sym, _)| sym.to_string())
+            .filter_map(|(sym, _)| arena.symbol_name(*sym).map(str::to_owned))
             .collect::<Vec<_>>();
         out.sort();
         out.dedup();
@@ -334,10 +359,10 @@ impl Environment {
     /// Used by [`EvalError::UndefinedSymbol`] to populate the `visible_scope` diagnostic field.
     /// Names are sorted and deduplicated — a name shadowed in an inner scope appears only once.
     #[must_use]
-    pub fn visible_names(&self) -> Vec<String> {
-        let mut out = self.local_names();
+    pub fn visible_names(&self, arena: &TreeArena) -> Vec<String> {
+        let mut out = self.local_names(arena);
         if let Some(parent) = &self.parent {
-            out.extend(parent.visible_names());
+            out.extend(parent.visible_names(arena));
         }
         out.sort();
         out.dedup();
@@ -349,10 +374,10 @@ impl Environment {
     /// Used by [`EvalError::UndefinedSymbol`] to populate the `top_level_scope` diagnostic field,
     /// helping users see what top-level definitions are available when a symbol is not found.
     #[must_use]
-    pub fn top_level_names(&self) -> Vec<String> {
+    pub fn top_level_names(&self, arena: &TreeArena) -> Vec<String> {
         match &self.parent {
-            Some(parent) => parent.top_level_names(),
-            None => self.local_names(),
+            Some(parent) => parent.top_level_names(arena),
+            None => self.local_names(arena),
         }
     }
 }
@@ -785,9 +810,10 @@ impl IntoDiagnostic for EvalError {
                  only conflicting redefinitions are errors",
             )
             .with_help(format!("remove the duplicate `{symbol} = ...;` definition"))
-            .with_help(format!(
-                "if shadowing was intended, move the inner definition to a nested `with {{}}` block"
-            )),
+            .with_help(
+                "if shadowing was intended, move the inner definition to a nested `with {}` block"
+                    .to_string(),
+            ),
             Self::PatternMatchFailed { .. } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
@@ -886,8 +912,10 @@ pub fn eval_process_with_stats(
     bind_definitions(arena, definitions, &mut env)?;
     stats.env_layers_pushed += 1; // root scope
     let available_defs = top_level_definition_names(arena, definitions)?;
-    let process = env
-        .lookup("process")
+    // Use get_symbol (no alloc, &self) — if "process" was never interned it was never bound.
+    let process = arena
+        .get_symbol("process")
+        .and_then(|sym| env.lookup(sym))
         .ok_or(EvalError::MissingProcessDefinition {
             definitions,
             available_defs,
@@ -934,13 +962,18 @@ pub fn eval_box(
     match match_box(arena, expr) {
         BoxMatch::Unknown => map_children(arena, expr, env, loop_detector),
         BoxMatch::Ident(name) => {
-            let value = env.lookup(name).ok_or_else(|| EvalError::UndefinedSymbol {
-                symbol: name.to_owned(),
-                node: expr,
-                local_scope: env.local_names(),
-                visible_scope: env.visible_names(),
-                top_level_scope: env.top_level_names(),
-            })?;
+            // get_symbol takes &self — safe to call while `name: &str` borrows `arena`.
+            // If the name was never interned (never bound), it cannot be in the env.
+            let value = arena
+                .get_symbol(name)
+                .and_then(|sym| env.lookup(sym))
+                .ok_or_else(|| EvalError::UndefinedSymbol {
+                    symbol: name.to_owned(),
+                    node: expr,
+                    local_scope: env.local_names(arena),
+                    visible_scope: env.visible_names(arena),
+                    top_level_scope: env.top_level_names(arena),
+                })?;
             if value == expr {
                 // Shadowing sentinel used for lambda parameters in lexical scopes.
                 return Ok(expr);
@@ -972,8 +1005,10 @@ pub fn eval_box(
         BoxMatch::Abstr(arg, body) => {
             let mut scoped = env.push_scope();
             let name = ident_name(arena, arg)?;
+            // intern_symbol is safe here: `name` is an owned String, not borrowed from arena.
+            let sym = arena.intern_symbol(&name);
             // Parameter shadows outer binding in body capture.
-            scoped.bind(name, arg);
+            scoped.bind(sym, arg);
             let evaluated_body = eval_box(arena, body, &scoped, loop_detector)?;
             let mut b = BoxBuilder::new(arena);
             Ok(b.abstr(arg, evaluated_body))
@@ -1106,11 +1141,13 @@ fn bind_definitions(
         } else {
             build_abstr_from_parser_args(arena, args, value)?
         };
+        // Intern the name to get a SymId. This is the bind path — intern_symbol is correct.
+        let sym = arena.intern_symbol(&name);
         // C++ parity: addLayerDef checks for conflicting redefinition within the current layer.
         // Identical bindings (same TreeId = same hash-consed expression) are silently accepted.
         // Conflicting bindings (different TreeId) are an error.
         // Parent-scope shadowing is allowed and is NOT checked here.
-        if let Some(existing) = env.lookup_local(&name) {
+        if let Some(existing) = env.lookup_local(sym) {
             if existing != bound {
                 return Err(EvalError::RedefinedSymbol {
                     symbol: name,
@@ -1120,7 +1157,7 @@ fn bind_definitions(
             }
             // existing == bound: identical redefinition — silently skip (C++ parity)
         } else {
-            env.bind(name, bound);
+            env.bind(sym, bound);
         }
         defs = arena
             .tl(defs)
@@ -1264,7 +1301,9 @@ fn apply_list(
                 .hd(larg)
                 .ok_or(EvalError::MalformedListNode { node: larg })?;
             let mut scoped = env.push_scope();
-            scoped.bind(param_name, arg);
+            // intern_symbol: param_name is an owned String, not borrowed from arena.
+            let sym = arena.intern_symbol(&param_name);
+            scoped.bind(sym, arg);
             let f = eval_box(arena, body, &scoped, loop_detector)?;
             let tl = arena
                 .tl(larg)
@@ -1585,7 +1624,9 @@ fn eval_iter_body(
     let i_as_i64 =
         i64::try_from(i).map_err(|_| EvalError::IterationCountTooLarge { value: i64::MAX })?;
     let ival = arena.int(i_as_i64);
-    scoped.bind(var_name.to_owned(), ival);
+    // var_name is a &str parameter (not borrowed from arena) — intern is safe here.
+    let sym = arena.intern_symbol(var_name);
+    scoped.bind(sym, ival);
     eval_box(arena, body, &scoped, loop_detector)
 }
 
@@ -1810,8 +1851,9 @@ fn apply_case_rules(
         }
 
         let mut scoped = env.push_scope();
-        for (name, value) in &bindings.bindings {
-            scoped.bind(name.clone(), *value);
+        // SymId = u32 is Copy — no clone needed.
+        for &(sym, value) in &bindings.bindings {
+            scoped.bind(sym, value);
         }
         let result = eval_box(arena, rhs, &scoped, loop_detector)?;
         if rest.is_empty() {
@@ -1825,18 +1867,26 @@ fn apply_case_rules(
 }
 
 /// Structural pattern matching helper used by case-rule application.
+///
+/// Takes `arena: &mut TreeArena` so that pattern variable names can be interned
+/// (via [`TreeArena::intern_symbol`]) before being stored in `bindings`. The structural
+/// sub-match path collects child pairs into a temporary `Vec` to release the immutable
+/// `arena` borrow before making recursive `&mut` calls.
 fn match_pattern(
-    arena: &TreeArena,
+    arena: &mut TreeArena,
     pattern: TreeId,
     value: TreeId,
     bindings: &mut Environment,
 ) -> Result<bool, EvalError> {
     if let BoxMatch::PatternVar(ident_node) = match_box(arena, pattern) {
+        // ident_node: TreeId (Copy) — BoxMatch<'_> is consumed, arena borrow released.
         let name = ident_name(arena, ident_node)?;
-        if let Some(existing) = bindings.lookup(&name) {
+        // intern_symbol: name is a local String, not borrowed from arena.
+        let sym = arena.intern_symbol(&name);
+        if let Some(existing) = bindings.lookup(sym) {
             return Ok(existing == value);
         }
-        bindings.bind(name, value);
+        bindings.bind(sym, value);
         return Ok(true);
     }
 
@@ -1844,22 +1894,29 @@ fn match_pattern(
         return Ok(true);
     }
 
-    let Some(pn) = arena.node(pattern) else {
-        return Ok(false);
-    };
-    let Some(vn) = arena.node(value) else {
-        return Ok(false);
-    };
-    if pn.kind != vn.kind || pn.children.len() != vn.children.len() {
-        return Ok(false);
-    }
-    for (pc, vc) in pn
-        .children
-        .as_slice()
-        .iter()
-        .zip(vn.children.as_slice().iter())
-    {
-        if !match_pattern(arena, *pc, *vc, bindings)? {
+    // Collect structural information while holding the arena borrow, then release it
+    // so that recursive calls can take `&mut arena`.
+    let child_pairs: Vec<(TreeId, TreeId)> = {
+        let pn = arena.node(pattern);
+        let vn = arena.node(value);
+        match (pn, vn) {
+            (None, _) | (_, None) => return Ok(false),
+            (Some(pn), Some(vn)) => {
+                if pn.kind != vn.kind || pn.children.len() != vn.children.len() {
+                    return Ok(false);
+                }
+                pn.children
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .zip(vn.children.as_slice().iter().copied())
+                    .collect()
+            }
+        }
+    }; // pn, vn borrows released here — arena is free for &mut below
+
+    for (pc, vc) in child_pairs {
+        if !match_pattern(arena, pc, vc, bindings)? {
             return Ok(false);
         }
     }
