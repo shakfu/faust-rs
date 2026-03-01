@@ -147,6 +147,8 @@ use errors::codes;
 use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
 use tlib::{NodeKind, TreeArena, TreeId};
 
+mod pattern_matcher;
+
 pub const CRATE_NAME: &str = "eval";
 
 /// Symbol identifier used in evaluator environments — a dense `u32` interned by [`TreeArena`].
@@ -1806,7 +1808,23 @@ fn case_expected_arity(arena: &TreeArena, rules_rev: TreeId) -> Result<usize, Ev
     Ok(list_to_vec(arena, first_lhs)?.len())
 }
 
-/// Applies case rules to a given argument list with C++-compatible first-match semantics.
+/// Applies case rules to a given argument list using the compiled tree automaton.
+///
+/// # Algorithm
+///
+/// 1. Determine expected arity from the first rule's LHS pattern count.
+/// 2. Compile all rules into a [`pattern_matcher::Automaton`] via
+///    [`pattern_matcher::make_pattern_matcher`] (Graef incremental algorithm).
+/// 3. Initialise one [`Environment`] child scope per rule.
+/// 4. Feed each consumed argument through the automaton one at a time via
+///    [`pattern_matcher::apply_pattern_matcher`], which advances the state machine
+///    and accumulates variable bindings into per-rule environments.
+/// 5. In the final state, pick the first rule whose environment survived all
+///    nonlinearity checks, evaluate its RHS, and apply any remaining arguments.
+///
+/// # C++ correspondence
+///
+/// `evalCase()` in `compiler/evaluate/eval.cpp`.
 fn apply_case_rules(
     arena: &mut TreeArena,
     rules_rev: TreeId,
@@ -1816,13 +1834,14 @@ fn apply_case_rules(
     call_site: Option<TreeId>,
 ) -> Result<TreeId, EvalError> {
     let args = list_to_vec(arena, larg)?;
-    let mut rules = list_to_vec(arena, rules_rev)?;
-    rules.reverse();
-    let Some(first_rule) = rules.first().copied() else {
+
+    // Determine expected arity from the first rule's LHS.
+    let mut probe = list_to_vec(arena, rules_rev)?;
+    probe.reverse();
+    let Some(first_rule) = probe.first().copied() else {
         return Err(EvalError::MalformedCaseNode { node: rules_rev });
     };
-
-    let (first_lhs, _first_rhs) = rule_parts(arena, first_rule)?;
+    let (first_lhs, _) = rule_parts(arena, first_rule)?;
     let expected = list_to_vec(arena, first_lhs)?.len();
     if args.len() < expected {
         return Err(EvalError::PatternArityMismatch {
@@ -1831,101 +1850,47 @@ fn apply_case_rules(
             got: args.len(),
         });
     }
-    let consumed = &args[..expected];
-    let rest = &args[expected..];
+    let consumed = args[..expected].to_vec();
+    let rest = args[expected..].to_vec();
 
-    for rule in rules {
-        let (lhs_rev, rhs) = rule_parts(arena, rule)?;
-        let mut patterns = list_to_vec(arena, lhs_rev)?;
-        patterns.reverse();
-        if patterns.len() != expected {
-            return Err(EvalError::MalformedCaseNode { node: rule });
-        }
+    // Compile rules into tree automaton.
+    // C++ parallel: `make_pattern_matcher(rules)` called once per case application.
+    let automaton = pattern_matcher::make_pattern_matcher(arena, rules_rev);
+    let n = automaton.n_rules();
 
-        let mut bindings = Environment::empty();
-        let mut ok = true;
-        for (pat, arg) in patterns.iter().zip(consumed.iter()) {
-            let prepared_pat = eval_box(arena, *pat, env, loop_detector)?;
-            if !match_pattern(arena, prepared_pat, *arg, &mut bindings)? {
-                ok = false;
-                break;
+    // Per-rule environments: each starts as a child scope of the current env.
+    // apply_pattern_matcher binds pattern variables and nulls out disqualified rules.
+    let mut envs: Vec<Option<Environment>> = (0..n).map(|_| Some(env.push_scope())).collect();
+
+    // Feed each consumed argument through the automaton state machine, one at a time.
+    // C++ parallel: `for each arg: s = apply_pattern_matcher(A, s, arg, C, E)`.
+    let mut state: usize = 0;
+    for arg in &consumed {
+        let (new_state, _) =
+            pattern_matcher::apply_pattern_matcher(arena, &automaton, state, *arg, &mut envs);
+        let Some(new_state) = new_state else {
+            return Err(EvalError::PatternMatchFailed { node: rules_rev });
+        };
+        state = new_state;
+    }
+
+    // Final state: pick the first rule whose environment survived nonlinearity checks.
+    if !automaton.final_state(state) {
+        return Err(EvalError::PatternMatchFailed { node: rules_rev });
+    }
+    for rule_marker in &automaton.states[state].rules {
+        if let Some(rule_env) = envs[rule_marker.r].take() {
+            let rhs = automaton.rhs[rule_marker.r];
+            let result = eval_box(arena, rhs, &rule_env, loop_detector)?;
+            if rest.is_empty() {
+                return Ok(result);
             }
+            let rest_list = vec_to_list(arena, &rest);
+            return apply_list(arena, result, rest_list, env, loop_detector, call_site);
         }
-        if !ok {
-            continue;
-        }
-
-        let mut scoped = env.push_scope();
-        // SymId = u32 is Copy — no clone needed.
-        for &(sym, value) in &bindings.bindings {
-            scoped.bind(sym, value);
-        }
-        let result = eval_box(arena, rhs, &scoped, loop_detector)?;
-        if rest.is_empty() {
-            return Ok(result);
-        }
-        let rest_list = vec_to_list(arena, rest);
-        return apply_list(arena, result, rest_list, env, loop_detector, call_site);
     }
 
     Err(EvalError::PatternMatchFailed { node: rules_rev })
-}
-
-/// Structural pattern matching helper used by case-rule application.
-///
-/// Takes `arena: &mut TreeArena` so that pattern variable names can be interned
-/// (via [`TreeArena::intern_symbol`]) before being stored in `bindings`. The structural
-/// sub-match path collects child pairs into a temporary `Vec` to release the immutable
-/// `arena` borrow before making recursive `&mut` calls.
-fn match_pattern(
-    arena: &mut TreeArena,
-    pattern: TreeId,
-    value: TreeId,
-    bindings: &mut Environment,
-) -> Result<bool, EvalError> {
-    if let BoxMatch::PatternVar(ident_node) = match_box(arena, pattern) {
-        // ident_node: TreeId (Copy) — BoxMatch<'_> is consumed, arena borrow released.
-        let name = ident_name(arena, ident_node)?;
-        // intern_symbol: name is a local String, not borrowed from arena.
-        let sym = arena.intern_symbol(&name);
-        if let Some(existing) = bindings.lookup(sym) {
-            return Ok(existing == value);
-        }
-        bindings.bind(sym, value);
-        return Ok(true);
-    }
-
-    if pattern == value {
-        return Ok(true);
-    }
-
-    // Collect structural information while holding the arena borrow, then release it
-    // so that recursive calls can take `&mut arena`.
-    let child_pairs: Vec<(TreeId, TreeId)> = {
-        let pn = arena.node(pattern);
-        let vn = arena.node(value);
-        match (pn, vn) {
-            (None, _) | (_, None) => return Ok(false),
-            (Some(pn), Some(vn)) => {
-                if pn.kind != vn.kind || pn.children.len() != vn.children.len() {
-                    return Ok(false);
-                }
-                pn.children
-                    .as_slice()
-                    .iter()
-                    .copied()
-                    .zip(vn.children.as_slice().iter().copied())
-                    .collect()
-            }
-        }
-    }; // pn, vn borrows released here — arena is free for &mut below
-
-    for (pc, vc) in child_pairs {
-        if !match_pattern(arena, pc, vc, bindings)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 /// Stable crate identifier used in workspace-level tooling and diagnostics.
