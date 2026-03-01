@@ -6,7 +6,7 @@
 
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::{IntoDiagnostic, Severity, Stage, codes};
-use eval::{Environment, EvalError, LoopDetector, eval_box, eval_process};
+use eval::{Environment, EvalError, LoopDetector, eval_box, eval_process, eval_process_with_stats};
 use tlib::{TreeArena, TreeId};
 
 fn make_ident(arena: &mut TreeArena, name: &str) -> tlib::TreeId {
@@ -488,4 +488,133 @@ fn eval_error_converts_to_structured_diagnostic_codes() {
     .into_diagnostic();
     assert_eq!(arity.code, codes::EVAL_ARITY_MISMATCH);
     assert!(!arity.notes.is_empty());
+
+    let redef = EvalError::RedefinedSymbol {
+        symbol: "x".to_owned(),
+        first_def: arena.nil(),
+        second_def: arena.nil(),
+    }
+    .into_diagnostic();
+    assert_eq!(redef.code, codes::EVAL_REDEFINED_SYMBOL);
+    assert_eq!(redef.severity, Severity::Error);
+    assert!(
+        redef
+            .notes
+            .iter()
+            .any(|n| n.starts_with("cause: the same symbol is bound twice")),
+        "redefinition diagnostic should expose explicit cause note"
+    );
+    assert!(
+        !redef.help.is_empty(),
+        "redefinition diagnostic should suggest a fix"
+    );
+}
+
+// ── RedefinedSymbol tests ─────────────────────────────────────────────────────
+
+/// C++ parity: `addLayerDef` in `environment.cpp` throws when the same name is bound to a
+/// different definition in the same layer.
+/// Rust equivalent: `bind_definitions` returns `EvalError::RedefinedSymbol`.
+#[test]
+fn bind_definitions_rejects_conflicting_redefinition_in_same_scope() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+    // Two definitions of "x" with different values in the same definition list
+    let wire = BoxBuilder::new(&mut arena).wire();
+    let cut = BoxBuilder::new(&mut arena).cut();
+    let def_x1 = make_def(&mut arena, "x", nil, wire);
+    let def_x2 = make_def(&mut arena, "x", nil, cut); // ← different value: cut ≠ wire
+    let process_ident = make_ident(&mut arena, "x");
+    let def_process = make_def(&mut arena, "process", nil, process_ident);
+    let defs = make_defs(&mut arena, &[def_x1, def_x2, def_process]);
+
+    let err = eval_process(&mut arena, defs).expect_err("conflicting redefinition should fail");
+    assert!(
+        matches!(
+            err,
+            EvalError::RedefinedSymbol { ref symbol, .. } if symbol == "x"
+        ),
+        "expected RedefinedSymbol for `x`, got {err:?}"
+    );
+}
+
+/// C++ parity: `addLayerDef` silently accepts identical redefinitions (same expression by
+/// structural equality / hash-consing).
+/// Rust equivalent: `bind_definitions` silently skips the duplicate.
+#[test]
+fn bind_definitions_accepts_identical_redefinition_silently() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+    // Two definitions of "x" with the SAME value (same TreeId = same hash-consed node)
+    let wire = BoxBuilder::new(&mut arena).wire();
+    let def_x1 = make_def(&mut arena, "x", nil, wire);
+    let def_x2 = make_def(&mut arena, "x", nil, wire); // ← identical TreeId
+    let process_ident = make_ident(&mut arena, "x");
+    let def_process = make_def(&mut arena, "process", nil, process_ident);
+    let defs = make_defs(&mut arena, &[def_x1, def_x2, def_process]);
+
+    // Should succeed: identical re-binding is silently accepted
+    let out = eval_process(&mut arena, defs)
+        .expect("identical redefinition should be silently accepted");
+    assert!(
+        matches!(match_box(&arena, out), BoxMatch::Wire),
+        "resolved definition should be the wire node"
+    );
+}
+
+/// Shadowing: a name defined in an outer scope may be redefined in a nested `with {}` scope.
+/// This should NOT produce a `RedefinedSymbol` error — it is standard lexical shadowing.
+#[test]
+fn bind_definitions_allows_shadowing_from_outer_scope() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+    // Outer: x = wire. Inner with: x = cut. Body resolves to inner x.
+    let wire = BoxBuilder::new(&mut arena).wire();
+    let cut = BoxBuilder::new(&mut arena).cut();
+    let def_x_outer = make_def(&mut arena, "x", nil, wire);
+
+    // build: x with { x = cut } — inner x shadows outer x
+    let inner_def = make_def(&mut arena, "x", nil, cut);
+    let inner_defs = make_defs(&mut arena, &[inner_def]);
+    let x_ident = make_ident(&mut arena, "x");
+    let with_expr = BoxBuilder::new(&mut arena).with_local_def(x_ident, inner_defs);
+    let def_process = make_def(&mut arena, "process", nil, with_expr);
+
+    let defs = make_defs(&mut arena, &[def_x_outer, def_process]);
+    let out = eval_process(&mut arena, defs)
+        .expect("shadowing should not produce a redefinition error");
+    assert!(
+        matches!(match_box(&arena, out), BoxMatch::Cut),
+        "inner `x = cut` should shadow outer `x = wire`"
+    );
+}
+
+// ── EvalStats tests ───────────────────────────────────────────────────────────
+
+/// `eval_process_with_stats` should return the same result as `eval_process` plus stats with
+/// at least one env_lookup (the `process` lookup itself) and at least one layer pushed.
+#[test]
+fn eval_process_with_stats_returns_consistent_result_and_stats() {
+    let mut arena = TreeArena::new();
+    let wire = BoxBuilder::new(&mut arena).wire();
+    let nil = arena.nil();
+    let def_process = make_def(&mut arena, "process", nil, wire);
+    let defs = make_defs(&mut arena, &[def_process]);
+
+    let (out, stats) =
+        eval_process_with_stats(&mut arena, defs).expect("eval_process_with_stats should succeed");
+    assert!(
+        matches!(match_box(&arena, out), BoxMatch::Wire),
+        "result should be the wire node"
+    );
+    assert!(
+        stats.env_lookups >= 1,
+        "at least the `process` lookup should be counted, got {}",
+        stats.env_lookups
+    );
+    assert!(
+        stats.env_layers_pushed >= 1,
+        "at least the root scope should be counted, got {}",
+        stats.env_layers_pushed
+    );
 }

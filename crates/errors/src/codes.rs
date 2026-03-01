@@ -30,6 +30,11 @@ pub const EVAL_UNDEFINED_SYMBOL: DiagnosticCode = DiagnosticCode("FRS-EVAL-0002"
 pub const EVAL_ARITY_MISMATCH: DiagnosticCode = DiagnosticCode("FRS-EVAL-0003");
 /// Invalid iteration construct detected during eval.
 pub const EVAL_ITERATION_INVALID: DiagnosticCode = DiagnosticCode("FRS-EVAL-0004");
+/// Symbol redefined with a different value in the same lexical scope.
+///
+/// C++ equivalent: the `addLayerDef` check in `environment.cpp` that calls
+/// `throw faustexception("redefinition of symbols are not allowed: ...")`.
+pub const EVAL_REDEFINED_SYMBOL: DiagnosticCode = DiagnosticCode("FRS-EVAL-0005");
 /// Generic eval failure fallback code.
 pub const EVAL_GENERIC_FAILURE: DiagnosticCode = DiagnosticCode("FRS-EVAL-0099");
 
@@ -82,6 +87,7 @@ pub fn all_codes() -> &'static [DiagnosticCode] {
         EVAL_UNDEFINED_SYMBOL,
         EVAL_ARITY_MISMATCH,
         EVAL_ITERATION_INVALID,
+        EVAL_REDEFINED_SYMBOL,
         EVAL_GENERIC_FAILURE,
         PROP_UNSUPPORTED_BOX,
         PROP_ARITY_MISMATCH,
