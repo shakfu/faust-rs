@@ -141,42 +141,23 @@ struct NodeKey {
     children: Vec<TreeId>,
 }
 
-/// Internal registry that maps tag strings to numeric ids and back.
+/// Bidirectional `&str ↔ u32` interner.
 ///
-/// This mirrors the C++ compiler's `Sym` interning: each unique tag string is
-/// assigned a `u32` id so that all subsequent operations (hash, equality, clone)
-/// on `NodeKind::Tag` are O(1) integer operations.
-#[derive(Debug)]
-struct TagRegistry {
-    to_id: AHashMap<Arc<str>, u32>,
-    to_str: Vec<Arc<str>>,
-}
-
-/// Internal interner for Faust **symbol names** (user-defined identifiers).
+/// Each unique string is assigned a dense `u32` id so that all subsequent operations
+/// (hash, equality, clone) are O(1) integer operations. One `Arc<str>` is shared between
+/// the forward and reverse tables to avoid duplicate allocations.
 ///
-/// Parallel to [`TagRegistry`] but for evaluator symbol names rather than IR node-type tags.
-/// Every unique identifier name (`process`, `f`, `karplus`, …) is assigned a dense `u32` id,
-/// enabling O(1) environment lookup by integer comparison instead of O(len) string comparison.
-///
-/// # C++ parallel
-///
-/// C++ uses hash-consed `Tree` pointers as symbol keys — comparison is O(1) pointer equality.
-/// This registry achieves the same O(1) cost using dense integer IDs stored in a `Vec`.
-///
-/// # Design choices
-///
-/// - **`Arc<str>` strings**: matches [`TagRegistry`] for consistency; the `Arc` avoids a
-///   duplicate allocation when inserting into both `to_id` and `to_str`.
-/// - **`get` vs `intern`**: `get` never allocates and is safe to call from a shared (`&self`)
-///   context. `intern` may allocate and requires `&mut self`. Callers use `get` for lookups
-///   (where an unknown name means "definitely not in env") and `intern` for binds.
+/// Used twice inside [`TreeArena`]:
+/// - **tag_registry**: interns IR node-type tags (`"ADD"`, `"SEQ"`, …) for `NodeKind::Tag(u32)`.
+/// - **symbol_interner**: interns user-defined Faust identifiers (`"process"`, `"f"`, …) for
+///   O(1) evaluator environment lookups.
 #[derive(Debug, Default)]
-struct SymbolInterner {
+struct SymbolTable {
     to_id: AHashMap<Arc<str>, u32>,
     to_str: Vec<Arc<str>>,
 }
 
-impl SymbolInterner {
+impl SymbolTable {
     fn new() -> Self {
         Self::default()
     }
@@ -198,40 +179,13 @@ impl SymbolInterner {
 
     /// Looks up `name` without interning it.
     ///
-    /// Returns `None` if the name has never been interned. A `None` result means the symbol
-    /// was never bound in any environment, so any subsequent `env.lookup` would also return
-    /// `None` — callers can short-circuit to `UndefinedSymbol` without interning.
+    /// Returns `None` if the name has never been interned — callers can short-circuit
+    /// without requiring `&mut self`.
     fn get(&self, name: &str) -> Option<u32> {
         self.to_id.get(name).copied()
     }
 
-    /// Returns the string for a symbol id, or `None` if the id is out of range.
-    fn name(&self, id: u32) -> Option<&str> {
-        self.to_str.get(id as usize).map(|s| s.as_ref())
-    }
-}
-
-impl TagRegistry {
-    fn new() -> Self {
-        Self {
-            to_id: AHashMap::new(),
-            to_str: Vec::new(),
-        }
-    }
-
-    /// Interns `tag` and returns its numeric id. Returns existing id on duplicates.
-    fn intern(&mut self, tag: &str) -> u32 {
-        if let Some(&id) = self.to_id.get(tag) {
-            return id;
-        }
-        let id = self.to_str.len() as u32;
-        let arc: Arc<str> = Arc::from(tag);
-        self.to_str.push(Arc::clone(&arc));
-        self.to_id.insert(arc, id);
-        id
-    }
-
-    /// Returns the string for a numeric tag id.
+    /// Returns the string for a numeric id, or `None` if the id is out of range.
     fn name(&self, id: u32) -> Option<&str> {
         self.to_str.get(id as usize).map(|s| s.as_ref())
     }
@@ -254,13 +208,8 @@ pub struct TreeArena {
     interner1: AHashMap<(NodeKind, TreeId), TreeId>,
     interner2: AHashMap<(NodeKind, TreeId, TreeId), TreeId>,
     interner_n: AHashMap<NodeKey, TreeId>,
-    tag_registry: TagRegistry,
-    /// Interner for user-defined Faust symbol names (evaluator `SymId` ↔ `&str`).
-    ///
-    /// Separate from [`tag_registry`](Self::tag_registry) which handles IR node-type tags.
-    /// Public API: [`intern_symbol`](Self::intern_symbol), [`get_symbol`](Self::get_symbol),
-    /// [`symbol_name`](Self::symbol_name).
-    symbol_interner: SymbolInterner,
+    tag_registry: SymbolTable,
+    symbol_interner: SymbolTable,
     nil: TreeId,
 }
 
@@ -308,8 +257,8 @@ impl TreeArena {
             interner1: AHashMap::with_capacity(interner1_capacity),
             interner2: AHashMap::with_capacity(interner2_capacity),
             interner_n: AHashMap::with_capacity(interner_n_capacity),
-            tag_registry: TagRegistry::new(),
-            symbol_interner: SymbolInterner::new(),
+            tag_registry: SymbolTable::new(),
+            symbol_interner: SymbolTable::new(),
             nil: TreeId(0),
         };
         let nil = arena.intern(NodeKind::Nil, &[]);
