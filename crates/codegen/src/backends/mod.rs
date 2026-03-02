@@ -4,7 +4,7 @@
 //! - Implemented backends:
 //!   - [`c`], [`cpp`]
 //! - Shared signature-validation helper:
-//!   - internal [`faust_api`] module
+//!   - internal `faust_api` module
 //! - Scaffolded backends (planned parity targets):
 //!   - `cranelift`, `cmajor`, `codebox`, `csharp`, `dlang`, `interp`, `jax`, `jsfx`,
 //!     `julia`, `llvm`, `rust`, `sdf3`, `vhdl`, `wasm`.

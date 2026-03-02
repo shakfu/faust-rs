@@ -30,7 +30,7 @@ pub use utils::MetaGlue;
 /// Opaque DSP factory, exported as `interpreter_dsp_factory*` in C.
 ///
 /// Owns a `FbcDspFactory<f32>` on the Rust heap.
-/// Allocated via [`alloc_factory`], freed via [`free_factory`].
+/// Allocated via `alloc_factory`, freed via `free_factory`.
 pub struct InterpreterDspFactory {
     pub(crate) inner: FbcDspFactory<FaustFloat>,
 }
@@ -39,7 +39,7 @@ pub struct InterpreterDspFactory {
 ///
 /// Holds a non-owning raw pointer to its parent `InterpreterDspFactory`.
 /// The factory MUST outlive this instance (same contract as the C++ API).
-/// Allocated via [`alloc_instance`], freed via [`free_instance`].
+/// Allocated via `alloc_instance`, freed via `free_instance`.
 pub struct InterpreterDspInstance {
     /// Non-owning pointer to the parent factory (factory outlives instance).
     pub(crate) factory: *const InterpreterDspFactory,

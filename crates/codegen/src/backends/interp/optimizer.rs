@@ -10,7 +10,7 @@
 //!
 //! # Design notes
 //! - The C++ class hierarchy is replaced by free functions that each implement
-//!   a rewrite rule returning a [`RewriteResult`].
+//!   a rewrite rule returning a `RewriteResult`.
 //! - Six optimization levels are applied sequentially, each as a peephole pass
 //!   with a fixed-point loop (repeat until the block stops shrinking).
 //! - Sub-blocks referenced by control-flow instructions (`If`, `SelectReal`,
@@ -20,14 +20,14 @@
 //!
 //! # API mapping status
 //! - `FBCInstructionOptimizer::optimizeBlock()` → [`optimize_block`]: 1:1.
-//! - `FBCInstructionLoadStoreOptimizer` → [`rewrite_load_store`] (Level 1).
-//! - `FBCInstructionMoveOptimizer` → [`rewrite_move`] (Level 2).
-//! - `FBCInstructionBlockMoveOptimizer` → [`rewrite_block_move`] (Level 3).
-//! - `FBCInstructionPairMoveOptimizer` → [`rewrite_pair_move`] (Level 4).
-//! - `FBCInstructionCastOptimizer` → [`rewrite_cast`] (Level 5).
-//! - `FBCInstructionMathOptimizer` → [`rewrite_math`] (Level 6).
-//! - `FBCInstructionMathSpecializer` → integrated into [`rewrite_math`].
-//! - `FBCInstructionCastSpecializer` → integrated into [`rewrite_math`].
+//! - `FBCInstructionLoadStoreOptimizer` → `rewrite_load_store` (Level 1).
+//! - `FBCInstructionMoveOptimizer` → `rewrite_move` (Level 2).
+//! - `FBCInstructionBlockMoveOptimizer` → `rewrite_block_move` (Level 3).
+//! - `FBCInstructionPairMoveOptimizer` → `rewrite_pair_move` (Level 4).
+//! - `FBCInstructionCastOptimizer` → `rewrite_cast` (Level 5).
+//! - `FBCInstructionMathOptimizer` → `rewrite_math` (Level 6).
+//! - `FBCInstructionMathSpecializer` → integrated into `rewrite_math`.
+//! - `FBCInstructionCastSpecializer` → integrated into `rewrite_math`.
 
 use super::bytecode::{BlockId, FbcBlock, FbcBlockArena, FbcInstruction};
 use super::opcode::FbcOpcode;

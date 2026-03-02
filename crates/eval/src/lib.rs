@@ -243,7 +243,7 @@ impl Environment {
     ///
     /// This is the unchecked low-level binder. Multiple bindings for the same name in the same
     /// scope are allowed (last binding wins on lookup — shadowing). For definitions that must
-    /// enforce the no-redefinition rule, use [`bind_definitions`] which calls
+    /// enforce the no-redefinition rule, use `bind_definitions` which calls
     /// [`lookup_local`](Self::lookup_local) and returns `EvalError::RedefinedSymbol` on conflict.
     ///
     /// **C++ equivalent**: `setProperty(lenv, id, def)` in `addLayerDef`, but without the
@@ -287,7 +287,7 @@ impl Environment {
 
     /// Looks up a symbol in the **current scope only**, without consulting any parent.
     ///
-    /// This is used by [`bind_definitions`] to detect conflicting redefinitions of the same symbol
+    /// This is used by `bind_definitions` to detect conflicting redefinitions of the same symbol
     /// within the same lexical layer — equivalent to the duplicate check inside C++ `addLayerDef`:
     ///
     /// ```cpp
@@ -417,7 +417,7 @@ impl Environment {
 /// `LoopDetector` is threaded through every recursive evaluator call, making it the
 /// natural carrier for caches that must survive across the whole evaluation phase.
 /// Currently it holds:
-/// - `automaton_cache`: memoises the compiled [`pattern_matcher::Automaton`] for each
+/// - `automaton_cache`: memoises the compiled `pattern_matcher::Automaton` for each
 ///   `Case` node, keyed by the node's `TreeId`. See §8 of the pattern-matcher performance
 ///   analysis for rationale and design.
 #[derive(Clone, Debug)]
@@ -902,7 +902,7 @@ impl IntoDiagnostic for EvalError {
 /// Key differences from C++:
 /// - No global mutable state (`gCurrentEnv`, `gGlobal`) — all state is local.
 /// - Returns `Result<TreeId, EvalError>` instead of throwing `faustexception`.
-/// - Redefinition errors are caught via [`bind_definitions`] instead of propagating globally.
+/// - Redefinition errors are caught via `bind_definitions` instead of propagating globally.
 ///
 /// For performance statistics, use [`eval_process_with_stats`] instead.
 pub fn eval_process(arena: &mut TreeArena, definitions: TreeId) -> Result<TreeId, EvalError> {
@@ -952,7 +952,7 @@ pub fn eval_process_with_stats(
 /// This is the core recursive evaluator. It dispatches on the `BoxMatch` of `expr` and:
 /// - **Resolves identifiers** (`Ident`) by lookup in `env` and recursive evaluation.
 /// - **Beta-reduces applications** (`Appl`) by evaluating function and arguments, then calling
-///   [`apply_list`].
+///   `apply_list`.
 /// - **Evaluates `with`/`letrec` scopes** (`WithLocalDef`, `WithRecDef`) by pushing a child
 ///   scope, binding the local definitions, and evaluating the body in the new scope.
 /// - **Evaluates abstractions** (`Abstr`) by binding the parameter in a child scope and
@@ -966,7 +966,7 @@ pub fn eval_process_with_stats(
 ///
 /// Corresponds to `eval(Tree exp, int numInputs, int numOutputs)` in `eval.cpp`. The Rust
 /// version does not carry `numInputs`/`numOutputs` because arity inference is done lazily in
-/// `apply_list` via [`infer_box_arity`] — the C++ counterpart threads arity through the
+/// `apply_list` via `infer_box_arity` — the C++ counterpart threads arity through the
 /// evaluator for immediate wire-insertion decisions.
 ///
 /// The key structural difference: C++ `eval` calls `evalClosure(exp, …)` when it encounters a

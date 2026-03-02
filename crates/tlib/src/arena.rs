@@ -434,13 +434,12 @@ impl TreeArena {
     /// If `name` was already interned, returns the existing id in O(1) without allocation.
     /// Otherwise allocates one `Arc<str>` and assigns the next available id.
     ///
-    /// **Use this on the bind path** (when storing a name in an [`Environment`]) where the name
+    /// **Use this on the bind path** (when storing a name in an `Environment`) where the name
     /// must be assigned a stable id for future lookups.
     ///
     /// **C++ parallel**: in C++, symbol identity is pointer equality on hash-consed `Tree` nodes
     /// (also O(1)). This method achieves the same cost with a dense integer pool.
     ///
-    /// [`Environment`]: eval::Environment
     pub fn intern_symbol(&mut self, name: &str) -> u32 {
         self.symbol_interner.intern(name)
     }
@@ -461,10 +460,8 @@ impl TreeArena {
 
     /// Returns the string name for an interned symbol id, or `None` if the id is out of range.
     ///
-    /// Used by [`Environment::local_names`] and friends to produce human-readable diagnostics
+    /// Used by `Environment::local_names` and friends to produce human-readable diagnostics
     /// from the compact `u32` ids stored in environment bindings.
-    ///
-    /// [`Environment::local_names`]: eval::Environment::local_names
     #[must_use]
     pub fn symbol_name(&self, sym: u32) -> Option<&str> {
         self.symbol_interner.name(sym)

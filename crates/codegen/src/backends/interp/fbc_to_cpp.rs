@@ -24,7 +24,7 @@
 //! The generated class owns:
 //! - `int iVec[int_heap_size]` — integer heap
 //! - `<REAL> fVec[real_heap_size]` — real heap
-//! - `int fSampleRate` — sample rate shadow (iVec[sr_offset] alias)
+//! - `int fSampleRate` — sample rate shadow (`iVec[sr_offset]` alias)
 //!
 //! # Usage example
 //!
