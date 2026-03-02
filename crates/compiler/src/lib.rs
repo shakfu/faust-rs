@@ -48,7 +48,7 @@ use fir::{
 use parser::{ParseOutput, SourceReaderError};
 use propagate::{ArityCache, BoxArity, PropagateError};
 use signals::{SigId, dump_sig_readable};
-use tlib::{NodeKind, tree_to_string};
+use tlib::NodeKind;
 use transform::signal_fir::{
     SignalFirError, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane,
 };
@@ -1349,8 +1349,8 @@ fn render_human_box_expr(arena: &tlib::TreeArena, node: BoxId, depth: usize) -> 
 
     if let Some(kind) = arena.kind(node) {
         match kind {
-            NodeKind::StringLiteral(_) => return format!("\"{}\"", tree_to_string(arena, node)),
-            NodeKind::Symbol(_) => return tree_to_string(arena, node),
+            NodeKind::StringLiteral(s) => return format!("\"{}\"", s),
+            NodeKind::Symbol(s) => return s.to_string(),
             _ => {}
         }
     }

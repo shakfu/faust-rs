@@ -40,7 +40,7 @@ use compiler::Compiler;
 use fir::{FirId, FirStore};
 use propagate::{ArityCache, box_arity, make_sig_input_list, propagate};
 use tlib::{
-    NodeKind, TreeArena, TreeId, de_bruijn_to_sym, tree_to_double, tree_to_int, tree_to_string,
+    NodeKind, TreeArena, TreeId, de_bruijn_to_sym, tree_to_double, tree_to_int, tree_to_str,
 };
 use transform::signal_fir::{SignalFirOptions, compile_signals_to_fir_fastlane};
 
@@ -510,8 +510,14 @@ pub extern "C" fn Ctree2str(b: *mut c_void) -> *const c_char {
         let Some(id) = ctx.decode(b) else {
             return std::ptr::null();
         };
-        let text = tree_to_string(&ctx.arena, id);
-        utils::alloc_c_string(&text) as *const c_char
+        let Some(name) = tree_to_str(&ctx.arena, id) else {
+            eprintln!(
+                "ERROR : the parameter must be a symbol known at compile time : {:?}",
+                ctx.arena.kind(id)
+            );
+            return std::ptr::null();
+        };
+        utils::alloc_c_string(name) as *const c_char
     })
 }
 
