@@ -405,9 +405,7 @@ mod tests {
                 .expect("pow/min/max/unary should be supported in Step 2B.1");
 
         let FirMatch::Module {
-            globals,
-            functions,
-            ..
+            globals, functions, ..
         } = match_fir(&out.store, out.module)
         else {
             panic!("module root expected");
