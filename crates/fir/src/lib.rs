@@ -920,7 +920,7 @@ impl<'a> FirBuilder<'a> {
         name: impl Into<String>,
         dsp_struct: FirId,
         globals: FirId,
-        declarations: FirId,
+        functions: FirId,
     ) -> FirId {
         let name_id = self.store.arena.symbol(name);
         let num_inputs_id = self.store.arena.int(num_inputs as i64);
@@ -929,12 +929,12 @@ impl<'a> FirBuilder<'a> {
             &mut self.store.arena,
             FIR_MODULE_TAG,
             &[
+                num_inputs_id,
+                num_outputs_id,
                 name_id,
                 dsp_struct,
                 globals,
-                declarations,
-                num_inputs_id,
-                num_outputs_id,
+                functions,
             ],
         )
     }
@@ -1306,12 +1306,12 @@ pub enum FirMatch {
     },
     Label(String),
     Module {
+        num_inputs: usize,
+        num_outputs: usize,
         name: String,
         dsp_struct: FirId,
         globals: FirId,
-        declarations: FirId,
-        num_inputs: usize,
-        num_outputs: usize,
+        functions: FirId,
     },
 }
 
@@ -1899,12 +1899,12 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
         (
             FIR_MODULE_TAG,
             [
+                num_inputs,
+                num_outputs,
                 name,
                 dsp_struct,
                 globals,
-                declarations,
-                num_inputs,
-                num_outputs,
+                functions,
             ],
         ) => {
             let Some(name) = decode_symbol(&store.arena, *name) else {
@@ -1923,12 +1923,12 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 return FirMatch::Unknown;
             };
             FirMatch::Module {
+                num_inputs,
+                num_outputs,
                 name,
                 dsp_struct: *dsp_struct,
                 globals: *globals,
-                declarations: *declarations,
-                num_inputs,
-                num_outputs,
+                functions: *functions,
             }
         }
         _ => FirMatch::Unknown,
@@ -2051,9 +2051,9 @@ fn child_ids(node: &FirMatch) -> Vec<FirId> {
         FirMatch::Module {
             dsp_struct,
             globals,
-            declarations,
+            functions,
             ..
-        } => vec![*dsp_struct, *globals, *declarations],
+        } => vec![*dsp_struct, *globals, *functions],
     }
 }
 

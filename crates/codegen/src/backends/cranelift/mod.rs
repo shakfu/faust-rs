@@ -397,7 +397,7 @@ fn align_up(value: u32, align: u32) -> u32 {
 ///
 /// # Expected FIR shape
 /// - root node: `Module`
-/// - `declarations`: `Block([...])`
+/// - `functions`: `Block([...])`
 /// - a `DeclareFun { name: "compute", body: Some(..) }` entry exists
 ///
 /// Prototype-only `compute` declarations (`body: None`) are ignored because the
@@ -406,13 +406,13 @@ fn find_module_and_compute(
     store: &FirStore,
     module: FirId,
 ) -> Result<(String, FirId), CraneliftBackendError> {
-    let (module_name, _globals, declarations) = match match_fir(store, module) {
+    let (module_name, _globals, functions) = match match_fir(store, module) {
         FirMatch::Module {
             name,
             globals,
-            declarations,
+            functions,
             ..
-        } => (name, globals, declarations),
+        } => (name, globals, functions),
         other => {
             return Err(CraneliftBackendError::unsupported_module_shape(format!(
                 "expected FIR Module root, got {other:?} at {}",
@@ -421,12 +421,12 @@ fn find_module_and_compute(
         }
     };
 
-    let decls = match match_fir(store, declarations) {
+    let decls = match match_fir(store, functions) {
         FirMatch::Block(items) => items,
         other => {
             return Err(CraneliftBackendError::unsupported_module_shape(format!(
-                "module declarations must be FIR Block, got {other:?} at {}",
-                declarations.as_u32()
+                "module functions must be FIR Block, got {other:?} at {}",
+                functions.as_u32()
             )));
         }
     };

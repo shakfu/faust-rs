@@ -135,7 +135,7 @@ impl std::error::Error for CodegenError {}
 ///
 /// # Function-to-block mapping
 ///
-/// The FIR module's `declarations` block is scanned for `DeclareFun` nodes.
+/// The FIR module's `functions` block is scanned for `DeclareFun` nodes.
 /// Known function names are mapped to the factory code blocks.
 ///
 /// | FIR function name              | Factory block          |
@@ -163,22 +163,22 @@ pub fn generate_interp_module(
     use std::collections::HashMap;
 
     // 1. Decode module root.
-    let (module_name_fir, dsp_struct, globals, declarations, module_num_inputs, module_num_outputs) =
+    let (module_num_inputs, module_num_outputs, module_name_fir, dsp_struct, globals, functions) =
         match match_fir(store, module) {
             fir::FirMatch::Module {
+                num_inputs,
+                num_outputs,
                 name,
                 dsp_struct,
                 globals,
-                declarations,
-                num_inputs,
-                num_outputs,
+                functions,
             } => (
+                num_inputs,
+                num_outputs,
                 name,
                 dsp_struct,
                 globals,
-                declarations,
-                num_inputs,
-                num_outputs,
+                functions,
             ),
             _ => {
                 return Err(CodegenError::new(
@@ -190,13 +190,13 @@ pub fn generate_interp_module(
 
     let module_name = options.module_name.clone().unwrap_or(module_name_fir);
 
-    // 2. Extract declared functions from the declarations block.
-    let decl_ids = match match_fir(store, declarations) {
+    // 2. Extract declared functions from the functions block.
+    let decl_ids = match match_fir(store, functions) {
         fir::FirMatch::Block(ids) => ids,
         _ => {
             return Err(CodegenError::new(
                 CodegenErrorCode::InvalidModuleSection,
-                "declarations is not a FIR Block",
+                "functions is not a FIR Block",
             ));
         }
     };

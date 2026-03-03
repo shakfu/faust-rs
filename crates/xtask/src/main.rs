@@ -1390,10 +1390,10 @@ fn legacy_interp_bridge_is_nonsemantic_stub(
     });
     let fir_out = compiler
         .compile_file_default_to_fir_with_lane(case, compiler::SignalFirLane::LegacyBridge)?;
-    let FirMatch::Module { declarations, .. } = match_fir(&fir_out.store, fir_out.module) else {
+    let FirMatch::Module { functions, .. } = match_fir(&fir_out.store, fir_out.module) else {
         return Ok(false);
     };
-    let FirMatch::Block(decls) = match_fir(&fir_out.store, declarations) else {
+    let FirMatch::Block(decls) = match_fir(&fir_out.store, functions) else {
         return Ok(false);
     };
     let Some(compute_id) = decls.iter().copied().find(|id| {

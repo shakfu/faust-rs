@@ -122,7 +122,7 @@ struct ModuleView {
     name: String,
     dsp_struct: FirId,
     globals: FirId,
-    declarations: FirId,
+    functions: FirId,
     num_inputs: usize,
     num_outputs: usize,
 }
@@ -164,7 +164,7 @@ pub fn generate_cpp_module(
     let module = decode_module(store, module)?;
     let module_name = module.name.clone();
     let effective_options = options.clone();
-    let declared_functions = collect_declared_function_names(store, module.declarations)?;
+    let declared_functions = collect_declared_function_names(store, module.functions)?;
     let class_name = options
         .class_name
         .as_deref()
@@ -214,7 +214,7 @@ pub fn generate_cpp_module(
         &effective_options,
         &module_name,
         "functions",
-        module.declarations,
+        module.functions,
         1,
     )?;
     let _ = writeln!(out, "}};");
@@ -1151,17 +1151,17 @@ fn cpp_string_literal(value: &str) -> String {
 fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
     match match_fir(store, module) {
         FirMatch::Module {
+            num_inputs,
+            num_outputs,
             name,
             dsp_struct,
             globals,
-            declarations,
-            num_inputs,
-            num_outputs,
+            functions,
         } => Ok(ModuleView {
             name,
             dsp_struct,
             globals,
-            declarations,
+            functions,
             num_inputs,
             num_outputs,
         }),

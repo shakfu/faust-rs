@@ -120,7 +120,7 @@ struct ModuleView {
     name: String,
     dsp_struct: FirId,
     globals: FirId,
-    declarations: FirId,
+    functions: FirId,
     num_inputs: usize,
     num_outputs: usize,
 }
@@ -192,7 +192,7 @@ pub fn generate_c_module(
         .to_owned();
     let effective_options = options.clone();
 
-    let declared_functions = collect_declared_functions(store, module.declarations)?;
+    let declared_functions = collect_declared_functions(store, module.functions)?;
     let struct_inits = collect_struct_initializers(store, module.dsp_struct, module.globals)?;
     let table_inits = collect_table_initializers(store, module.dsp_struct, module.globals)?;
     let mut out = String::new();
@@ -1180,19 +1180,19 @@ fn emit_type(typ: &FirType, options: &COptions) -> String {
 
 fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
     if let FirMatch::Module {
+        num_inputs,
+        num_outputs,
         name,
         dsp_struct,
         globals,
-        declarations,
-        num_inputs,
-        num_outputs,
+        functions,
     } = match_fir(store, module)
     {
         Ok(ModuleView {
             name,
             dsp_struct,
             globals,
-            declarations,
+            functions,
             num_inputs,
             num_outputs,
         })

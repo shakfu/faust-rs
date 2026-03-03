@@ -16,7 +16,7 @@ unused_lifetimes = "warn"
 all = "warn"
 
 [lib]
-name = "faust"
+name = "faust_interp"
 crate-type = ["rlib"]
 
 [dependencies]

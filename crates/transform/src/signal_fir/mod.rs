@@ -97,11 +97,11 @@ mod tests {
 
     fn find_decl_fun_body(
         store: &fir::FirStore,
-        declarations: fir::FirId,
+        functions: fir::FirId,
         target: &str,
     ) -> fir::FirId {
-        let FirMatch::Block(decls) = match_fir(store, declarations) else {
-            panic!("declarations block expected");
+        let FirMatch::Block(decls) = match_fir(store, functions) else {
+            panic!("functions block expected");
         };
         let fun = decls
             .iter()
@@ -122,8 +122,8 @@ mod tests {
         body
     }
 
-    fn find_compute_loop_body(store: &fir::FirStore, declarations: fir::FirId) -> fir::FirId {
-        let compute_body = find_decl_fun_body(store, declarations, "compute");
+    fn find_compute_loop_body(store: &fir::FirStore, functions: fir::FirId) -> fir::FirId {
+        let compute_body = find_decl_fun_body(store, functions, "compute");
         let FirMatch::Block(stmts) = match_fir(store, compute_body) else {
             panic!("compute block expected");
         };
@@ -153,11 +153,11 @@ mod tests {
             match_fir(&out.store, out.module),
             FirMatch::Module { .. }
         ));
-        let FirMatch::Module { declarations, .. } = match_fir(&out.store, out.module) else {
+        let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
             panic!("module root expected");
         };
-        let FirMatch::Block(decls) = match_fir(&out.store, declarations) else {
-            panic!("module declarations block expected");
+        let FirMatch::Block(decls) = match_fir(&out.store, functions) else {
+            panic!("module functions block expected");
         };
         for required_name in [
             "metadata",
@@ -177,7 +177,7 @@ mod tests {
                 "section function `{required_name}` must exist in fast-lane module"
             );
         }
-        let loop_body = find_compute_loop_body(&out.store, declarations);
+        let loop_body = find_compute_loop_body(&out.store, functions);
         let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
             panic!("compute loop body block expected");
         };
@@ -239,11 +239,11 @@ mod tests {
             compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
                 .expect("sectioned module should compile");
 
-        let FirMatch::Module { declarations, .. } = match_fir(&out.store, out.module) else {
+        let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
             panic!("module root expected");
         };
-        let reset_body = find_decl_fun_body(&out.store, declarations, "instanceResetUserInterface");
-        let clear_body = find_decl_fun_body(&out.store, declarations, "instanceClear");
+        let reset_body = find_decl_fun_body(&out.store, functions, "instanceResetUserInterface");
+        let clear_body = find_decl_fun_body(&out.store, functions, "instanceClear");
 
         let FirMatch::Block(reset_stmts) = match_fir(&out.store, reset_body) else {
             panic!("reset body block expected");
@@ -287,11 +287,11 @@ mod tests {
             compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
                 .expect("table section routing should compile");
 
-        let FirMatch::Module { declarations, .. } = match_fir(&out.store, out.module) else {
+        let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
             panic!("module root expected");
         };
-        let constants_body = find_decl_fun_body(&out.store, declarations, "instanceConstants");
-        let clear_body = find_decl_fun_body(&out.store, declarations, "instanceClear");
+        let constants_body = find_decl_fun_body(&out.store, functions, "instanceConstants");
+        let clear_body = find_decl_fun_body(&out.store, functions, "instanceClear");
 
         let FirMatch::Block(constants_stmts) = match_fir(&out.store, constants_body) else {
             panic!("constants body block expected");
@@ -329,11 +329,11 @@ mod tests {
             compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
                 .expect("bargraph signal should compile");
 
-        let FirMatch::Module { declarations, .. } = match_fir(&out.store, out.module) else {
+        let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
             panic!("module root expected");
         };
-        let compute_loop_body = find_compute_loop_body(&out.store, declarations);
-        let ui_body = find_decl_fun_body(&out.store, declarations, "buildUserInterface");
+        let compute_loop_body = find_compute_loop_body(&out.store, functions);
+        let ui_body = find_decl_fun_body(&out.store, functions, "buildUserInterface");
 
         let FirMatch::Block(compute_stmts) = match_fir(&out.store, compute_loop_body) else {
             panic!("compute loop body block expected");
@@ -406,7 +406,7 @@ mod tests {
 
         let FirMatch::Module {
             globals,
-            declarations,
+            functions,
             ..
         } = match_fir(&out.store, out.module)
         else {
@@ -426,7 +426,7 @@ mod tests {
                 "globals should declare extern math prototype '{expected}'"
             );
         }
-        let loop_body = find_compute_loop_body(&out.store, declarations);
+        let loop_body = find_compute_loop_body(&out.store, functions);
         let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
             panic!("compute loop body block expected");
         };
@@ -493,7 +493,7 @@ mod tests {
 
         let FirMatch::Module {
             dsp_struct,
-            declarations,
+            functions,
             ..
         } = match_fir(&out.store, out.module)
         else {
@@ -508,7 +508,7 @@ mod tests {
                 .any(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareTable { .. })),
             "Step 2G should allocate waveform table in DSP struct"
         );
-        let loop_body = find_compute_loop_body(&out.store, declarations);
+        let loop_body = find_compute_loop_body(&out.store, functions);
         let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
             panic!("compute loop body block expected");
         };
@@ -575,10 +575,10 @@ mod tests {
             compile_signals_to_fir_fastlane(&arena, &[sig0], 2, 1, &SignalFirOptions::default())
                 .expect("Step 2H should support wrtbl runtime write/read shape");
 
-        let FirMatch::Module { declarations, .. } = match_fir(&out.store, out.module) else {
+        let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
             panic!("module expected");
         };
-        let loop_body = find_compute_loop_body(&out.store, declarations);
+        let loop_body = find_compute_loop_body(&out.store, functions);
         let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
             panic!("compute loop body block expected");
         };
@@ -608,7 +608,7 @@ mod tests {
 
         let FirMatch::Module {
             dsp_struct,
-            declarations,
+            functions,
             ..
         } = match_fir(&out.store, out.module)
         else {
@@ -623,7 +623,7 @@ mod tests {
                 .any(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareVar { .. })),
             "rec/proj should allocate explicit state slot"
         );
-        let loop_body = find_compute_loop_body(&out.store, declarations);
+        let loop_body = find_compute_loop_body(&out.store, functions);
         let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
             panic!("compute loop body block expected");
         };
@@ -649,7 +649,7 @@ mod tests {
 
         let FirMatch::Module {
             dsp_struct,
-            declarations,
+            functions,
             ..
         } = match_fir(&out.store, out.module)
         else {
@@ -665,7 +665,7 @@ mod tests {
             "delay state should create struct declaration"
         );
 
-        let loop_body = find_compute_loop_body(&out.store, declarations);
+        let loop_body = find_compute_loop_body(&out.store, functions);
         let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
             panic!("compute loop body block expected");
         };

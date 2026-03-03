@@ -590,18 +590,18 @@ impl<'s> VerifyCtx<'s> {
     /// Runs Phase 1 module checks and collects top-level symbols.
     ///
     /// This validates the `Module` skeleton (`dsp_struct`, `globals`,
-    /// `declarations`) and populates symbol tables consumed by phases 2/3.
+    /// `functions`) and populates symbol tables consumed by phases 2/3.
     fn check_phase1(&mut self) {
         let id = self.module_id;
 
         // M01: root must decode as Module
         let FirMatch::Module {
+            num_inputs,
+            num_outputs,
             name,
             dsp_struct,
             globals,
-            declarations,
-            num_inputs,
-            num_outputs,
+            functions,
         } = match_fir(self.store, id)
         else {
             self.error("FIR-M01", "root node is not a FirMatch::Module", id);
@@ -620,13 +620,13 @@ impl<'s> VerifyCtx<'s> {
             _ => self.error("FIR-M03", "globals is not a Block", globals),
         }
 
-        // M04: declarations must be a Block
-        match match_fir(self.store, declarations) {
+        // M04: functions must be a Block
+        match match_fir(self.store, functions) {
             FirMatch::Block(stmts) => {
-                self.check_declarations(declarations, stmts, &name);
-                self.check_compute_io_arity_contract(declarations, num_inputs, num_outputs);
+                self.check_declarations(functions, stmts, &name);
+                self.check_compute_io_arity_contract(functions, num_inputs, num_outputs);
             }
-            _ => self.error("FIR-M04", "declarations is not a Block", declarations),
+            _ => self.error("FIR-M04", "functions is not a Block", functions),
         }
     }
 
@@ -1131,10 +1131,10 @@ impl<'s> VerifyCtx<'s> {
     /// nodes contribute symbols during phase 1 but are not walked here.
     fn check_phase2(&mut self) {
         // Bail out if Phase 1 found a broken module skeleton.
-        let FirMatch::Module { declarations, .. } = match_fir(self.store, self.module_id) else {
+        let FirMatch::Module { functions, .. } = match_fir(self.store, self.module_id) else {
             return;
         };
-        let FirMatch::Block(stmts) = match_fir(self.store, declarations) else {
+        let FirMatch::Block(stmts) = match_fir(self.store, functions) else {
             return;
         };
 

@@ -140,7 +140,7 @@ impl std::error::Error for FirInlineAnalysisError {}
 pub enum FirFunctionSection {
     /// Function declared in `Module.globals` (often extern prototypes).
     Globals,
-    /// Function declared in `Module.declarations`.
+    /// Function declared in `Module.functions`.
     Declarations,
 }
 
@@ -267,9 +267,7 @@ pub fn analyze_fir_inliner(
     options: &FirInlineOptions,
 ) -> Result<FirInlineAnalysis, FirInlineAnalysisError> {
     let FirMatch::Module {
-        globals,
-        declarations,
-        ..
+        globals, functions, ..
     } = match_fir(store, module)
     else {
         return Err(FirInlineAnalysisError::RootNotModule);
@@ -284,7 +282,7 @@ pub fn analyze_fir_inliner(
     )?;
     collect_functions_from_section(
         store,
-        declarations,
+        functions,
         FirFunctionSection::Declarations,
         &mut raw_functions,
     )?;
@@ -524,9 +522,9 @@ fn child_ids(node: &FirMatch) -> Vec<FirId> {
         FirMatch::Module {
             dsp_struct,
             globals,
-            declarations,
+            functions,
             ..
-        } => vec![*dsp_struct, *globals, *declarations],
+        } => vec![*dsp_struct, *globals, *functions],
     }
 }
 
@@ -1347,12 +1345,12 @@ fn rewrite_module_once(
     stats: &mut FirInlineRewriteStats,
 ) -> Result<FirId, FirInlineRewriteError> {
     let FirMatch::Module {
+        num_inputs,
+        num_outputs,
         name,
         dsp_struct,
         globals,
-        declarations,
-        num_inputs,
-        num_outputs,
+        functions,
     } = match_fir(src_store, module)
     else {
         return Err(FirInlineRewriteError::Analysis(
@@ -1372,9 +1370,9 @@ fn rewrite_module_once(
         stats,
         FirFunctionSection::Globals,
     )?;
-    let declarations = rewrite_fun_section_once(
+    let functions = rewrite_fun_section_once(
         src_store,
-        declarations,
+        functions,
         analysis,
         fn_decls,
         rewrite_order,
@@ -1391,7 +1389,7 @@ fn rewrite_module_once(
         name,
         dsp_struct,
         globals,
-        declarations,
+        functions,
     ))
 }
 
@@ -2432,16 +2430,16 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
                 b.label(label)
             }
             FirMatch::Module {
+                num_inputs,
+                num_outputs,
                 name,
                 dsp_struct,
                 globals,
-                declarations,
-                num_inputs,
-                num_outputs,
+                functions,
             } => {
                 let dsp_struct = self.clone_node(dsp_struct)?;
                 let globals = self.clone_node(globals)?;
-                let declarations = self.clone_node(declarations)?;
+                let functions = self.clone_node(functions)?;
                 let mut b = FirBuilder::new(self.dst);
                 b.module(
                     num_inputs,
@@ -2449,7 +2447,7 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
                     name,
                     dsp_struct,
                     globals,
-                    declarations,
+                    functions,
                 )
             }
         };
