@@ -23,8 +23,8 @@ use codegen::backends::c::generate_c_module;
 use codegen::backends::cpp::CppOptions;
 use codegen::backends::cpp::generate_cpp_module;
 use codegen::backends::cranelift::{
-    CraneliftOptions, StructFieldKind, compile_fir_to_cranelift_jit,
-    diagnose_cranelift_compute_subset_gap,
+    CraneliftOptions, StructFieldKind, diagnose_cranelift_compute_subset_gap,
+    generate_cranelift_module,
 };
 use codegen::backends::interp::{
     FbcCppOptions, InterpOptions, generate_cpp_from_fbc, generate_interp_module, read_fbc,
@@ -897,7 +897,7 @@ fn main() {
             let subset_gap = diagnose_cranelift_compute_subset_gap(&store, module)
                 .map_err(|err| err.to_string());
             let compiled =
-                match compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default()) {
+                match generate_cranelift_module(&store, module, &CraneliftOptions::default()) {
                     Ok(compiled) => compiled,
                     Err(err) => {
                         eprintln!("Cranelift fixture codegen failed: {err}");
@@ -1234,7 +1234,7 @@ fn main() {
             Ok(out) => {
                 let subset_gap = diagnose_cranelift_compute_subset_gap(&out.store, out.module)
                     .map_err(|err| err.to_string());
-                let compiled = match compile_fir_to_cranelift_jit(
+                let compiled = match generate_cranelift_module(
                     &out.store,
                     out.module,
                     &CraneliftOptions::default(),

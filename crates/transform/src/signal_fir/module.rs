@@ -329,9 +329,9 @@ pub fn build_module(
         math_prototypes.push(proto);
     }
 
-    let declarations = {
+    let functions = {
         let mut b = FirBuilder::new(&mut lower.store);
-        let decls = [
+        let function_items = [
             metadata,
             instance_constants,
             instance_reset_ui,
@@ -339,7 +339,7 @@ pub fn build_module(
             build_ui,
             compute,
         ];
-        b.block(&decls)
+        b.block(&function_items)
     };
     let dsp_struct = {
         let mut b = FirBuilder::new(&mut lower.store);
@@ -357,7 +357,7 @@ pub fn build_module(
             module_name,
             dsp_struct,
             globals,
-            declarations,
+            functions,
         )
     };
 

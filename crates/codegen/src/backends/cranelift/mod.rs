@@ -112,7 +112,7 @@ impl CraneliftBackendErrorCode {
 /// Typed Cranelift backend error used by the Cranelift codegen entry points.
 ///
 /// This is the stable Rust-facing error container returned by
-/// [`compile_fir_to_cranelift_jit`] and related helpers. It carries:
+/// [`generate_cranelift_module`] and related helpers. It carries:
 /// - a stable machine-readable code ([`CraneliftBackendErrorCode`]),
 /// - a human-readable message suitable for diagnostics/logging.
 ///
@@ -421,7 +421,7 @@ fn find_module_and_compute(
         }
     };
 
-    let decls = match match_fir(store, functions) {
+    let function_nodes = match match_fir(store, functions) {
         FirMatch::Block(items) => items,
         other => {
             return Err(CraneliftBackendError::unsupported_module_shape(format!(
@@ -431,7 +431,7 @@ fn find_module_and_compute(
         }
     };
 
-    let compute_id = decls
+    let compute_id = function_nodes
         .into_iter()
         .find(|id| {
             matches!(
@@ -2584,7 +2584,7 @@ fn declare_compute_stub(
 /// - invalid FIR module/`compute` shapes,
 /// - missing `compute`,
 /// - Cranelift JIT initialization/verification/finalization failures.
-pub fn compile_fir_to_cranelift_jit(
+pub fn generate_cranelift_module(
     store: &FirStore,
     module: FirId,
     options: &CraneliftOptions,
@@ -2651,7 +2651,7 @@ pub fn diagnose_cranelift_compute_subset_gap(
 mod tests {
     use super::{
         BACKEND_NAME, CraneliftBackendErrorCode, CraneliftOptions, StructFieldKind, backend_id,
-        compile_fir_to_cranelift_jit,
+        generate_cranelift_module,
     };
     use crate::fixtures::build_sine_phasor_test_module;
     use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirType, NamedType};
@@ -2669,7 +2669,7 @@ mod tests {
             let mut b = fir::FirBuilder::new(&mut store);
             b.int32(0)
         };
-        let err = compile_fir_to_cranelift_jit(&store, root, &CraneliftOptions::default())
+        let err = generate_cranelift_module(&store, root, &CraneliftOptions::default())
             .expect_err("non-module root should be rejected");
         assert_eq!(err.code, CraneliftBackendErrorCode::UnsupportedModuleShape);
         assert!(err.to_string().contains("FRS-CGEN-CLIF-0002"));
@@ -2678,7 +2678,7 @@ mod tests {
     #[test]
     fn compile_module_emits_real_cranelift_compute_stub() {
         let (store, module) = build_sine_phasor_test_module();
-        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
             .expect("sine phasor fixture should compile to a Cranelift compute stub");
         assert_eq!(compiled.module_name(), "mydsp");
         assert_eq!(compiled.compute_symbol_name(), "mydsp::compute");
@@ -2751,22 +2751,15 @@ mod tests {
             Some(compute_body),
             false,
         );
-        let declarations = b.block(&[compute]);
-        let module = b.module(
-            0,
-            0,
-            "subset_gap_fun_call",
-            dsp_struct,
-            globals,
-            declarations,
-        );
+        let functions = b.block(&[compute]);
+        let module = b.module(0, 0, "subset_gap_fun_call", dsp_struct, globals, functions);
         (store, module)
     }
 
     #[test]
     fn compile_module_falls_back_to_stub_without_strict_subset_mode() {
         let (store, module) = build_subset_gap_fun_call_module();
-        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
             .expect("default mode should allow subset-gap fallback");
         assert!(!compiled.compute_body_lowered());
     }
@@ -2778,7 +2771,7 @@ mod tests {
             fail_on_subset_gap: true,
             ..CraneliftOptions::default()
         };
-        let err = compile_fir_to_cranelift_jit(&store, module, &options)
+        let err = generate_cranelift_module(&store, module, &options)
             .expect_err("strict mode must reject subset-gap fallback");
         assert_eq!(err.code, CraneliftBackendErrorCode::UnsupportedModuleShape);
         assert!(err.message.contains("strict mode rejected fallback"));
@@ -2841,15 +2834,15 @@ mod tests {
             Some(compute_body),
             false,
         );
-        let declarations = b.block(&[compute]);
-        let module = b.module(0, 0, "subset_lowerable", dsp_struct, globals, declarations);
+        let functions = b.block(&[compute]);
+        let module = b.module(0, 0, "subset_lowerable", dsp_struct, globals, functions);
         (store, module)
     }
 
     #[test]
     fn compile_module_lowers_requested_compute_subset_body() {
         let (store, module) = build_subset_lowerable_compute_module();
-        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
             .expect("subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
@@ -2910,14 +2903,14 @@ mod tests {
             Some(compute_body),
             false,
         );
-        let declarations = b.block(&[compute]);
+        let functions = b.block(&[compute]);
         let module = b.module(
             0,
             0,
             "stack_input_load_subset",
             dsp_struct,
             globals,
-            declarations,
+            functions,
         );
         (store, module)
     }
@@ -2925,7 +2918,7 @@ mod tests {
     #[test]
     fn compile_module_lowers_stack_input_load_subset_body() {
         let (store, module) = build_stack_input_load_subset_module();
-        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
             .expect("stack-input-load subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
@@ -2989,14 +2982,14 @@ mod tests {
             Some(compute_body),
             false,
         );
-        let declarations = b.block(&[compute]);
+        let functions = b.block(&[compute]);
         let module = b.module(
             0,
             0,
             "math_intrinsics_subset",
             dsp_struct,
             globals,
-            declarations,
+            functions,
         );
         (store, module)
     }
@@ -3004,7 +2997,7 @@ mod tests {
     #[test]
     fn compile_module_lowers_common_math_intrinsics_subset() {
         let (store, module) = build_math_intrinsics_subset_module();
-        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
             .expect("math intrinsics subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
@@ -3066,14 +3059,14 @@ mod tests {
             Some(compute_body),
             false,
         );
-        let declarations = b.block(&[compute]);
+        let functions = b.block(&[compute]);
         let module = b.module(
             0,
             0,
             "labels_uninit_stack_subset",
             dsp_struct,
             globals,
-            declarations,
+            functions,
         );
         (store, module)
     }
@@ -3081,7 +3074,7 @@ mod tests {
     #[test]
     fn compile_module_lowers_labels_and_uninitialized_stack_subset() {
         let (store, module) = build_label_and_uninitialized_stack_subset_module();
-        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
             .expect("label/uninitialized-stack subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
@@ -3153,15 +3146,15 @@ mod tests {
             Some(compute_body),
             false,
         );
-        let declarations = b.block(&[compute]);
-        let module = b.module(0, 0, "switch_subset", dsp_struct, globals, declarations);
+        let functions = b.block(&[compute]);
+        let module = b.module(0, 0, "switch_subset", dsp_struct, globals, functions);
         (store, module)
     }
 
     #[test]
     fn compile_module_lowers_switch_subset_body() {
         let (store, module) = build_switch_subset_module();
-        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
             .expect("switch subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
@@ -3225,14 +3218,14 @@ mod tests {
             Some(compute_body),
             false,
         );
-        let declarations = b.block(&[compute]);
+        let functions = b.block(&[compute]);
         let module = b.module(
             0,
             0,
             "if_control_neg_subset",
             dsp_struct,
             globals,
-            declarations,
+            functions,
         );
         (store, module)
     }
@@ -3240,7 +3233,7 @@ mod tests {
     #[test]
     fn compile_module_lowers_if_control_and_neg_subset_body() {
         let (store, module) = build_if_control_neg_subset_module();
-        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
             .expect("if/control/neg subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
@@ -3308,14 +3301,14 @@ mod tests {
             Some(compute_body),
             false,
         );
-        let declarations = b.block(&[compute]);
+        let functions = b.block(&[compute]);
         let module = b.module(
             0,
             0,
             "for_while_local_store_subset",
             dsp_struct,
             globals,
-            declarations,
+            functions,
         );
         (store, module)
     }
@@ -3323,7 +3316,7 @@ mod tests {
     #[test]
     fn compile_module_lowers_for_while_and_local_store_subset_body() {
         let (store, module) = build_for_while_local_store_subset_module();
-        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
             .expect("for/while/local-store subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
@@ -3392,22 +3385,15 @@ mod tests {
             Some(compute_body),
             false,
         );
-        let declarations = b.block(&[compute]);
-        let module = b.module(
-            0,
-            0,
-            "global_table_subset",
-            dsp_struct,
-            globals,
-            declarations,
-        );
+        let functions = b.block(&[compute]);
+        let module = b.module(0, 0, "global_table_subset", dsp_struct, globals, functions);
         (store, module)
     }
 
     #[test]
     fn compile_module_lowers_global_struct_table_subset_body() {
         let (store, module) = build_global_table_subset_module();
-        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
             .expect("global-struct-table subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
@@ -3497,14 +3483,14 @@ mod tests {
             Some(compute_body),
             false,
         );
-        let declarations = b.block(&[compute]);
+        let functions = b.block(&[compute]);
         let module = b.module(
             0,
             0,
             "globals_helper_proto_subset",
             dsp_struct,
             globals,
-            declarations,
+            functions,
         );
         (store, module)
     }
@@ -3512,7 +3498,7 @@ mod tests {
     #[test]
     fn compile_module_ignores_helper_prototypes_in_globals_layout() {
         let (store, module) = build_globals_with_helper_prototype_subset_module();
-        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
             .expect("helper prototypes in globals should be ignored for dsp* layout");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
@@ -3580,14 +3566,14 @@ mod tests {
             Some(compute_body),
             false,
         );
-        let declarations = b.block(&[compute]);
+        let functions = b.block(&[compute]);
         let module = b.module(
             0,
             0,
             "shift_array_var_struct_subset",
             dsp_struct,
             globals,
-            declarations,
+            functions,
         );
         (store, module)
     }
@@ -3595,7 +3581,7 @@ mod tests {
     #[test]
     fn compile_module_lowers_shift_array_var_struct_subset_body() {
         let (store, module) = build_shift_array_var_struct_subset_module();
-        let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
             .expect("shift-array-var struct subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());

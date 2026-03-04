@@ -368,10 +368,8 @@ fn cranelift_subset_strict_check_cases(
             fail_on_subset_gap: true,
             ..codegen::backends::cranelift::CraneliftOptions::default()
         };
-        codegen::backends::cranelift::compile_fir_to_cranelift_jit(
-            &fir.store, fir.module, &options,
-        )
-        .map_err(|e| {
+        codegen::backends::cranelift::generate_cranelift_module(&fir.store, fir.module, &options)
+            .map_err(|e| {
             format!(
                 "Cranelift strict subset check failed for {}: {e}",
                 case.display()

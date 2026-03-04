@@ -3,7 +3,7 @@ use std::hint::black_box;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use codegen::backends::cranelift::{CraneliftOptions, compile_fir_to_cranelift_jit};
+use codegen::backends::cranelift::{CraneliftOptions, generate_cranelift_module};
 use codegen::backends::interp::{InterpOptions, generate_interp_module, write_fbc};
 use codegen::fixtures::{build_heavy_bench_test_module, build_sine_phasor_test_module};
 use faust_cranelift::factory::{createCCraneliftDSPFactoryFromFile, deleteCCraneliftDSPFactory};
@@ -359,7 +359,7 @@ fn run_cranelift_file(case: &Path) -> Result<(Duration, f64), String> {
 
 fn run_cranelift_fixture_sine_phasor() -> Result<(Duration, f64), String> {
     let (store, module) = build_sine_phasor_test_module();
-    let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+    let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
         .map_err(|e| e.to_string())?;
     let compute_addr = compiled.compute_entry_addr();
     if compute_addr == 0 {
@@ -392,7 +392,7 @@ fn run_cranelift_fixture_sine_phasor() -> Result<(Duration, f64), String> {
 
 fn run_cranelift_fixture_heavy_bench() -> Result<(Duration, f64), String> {
     let (store, module) = build_heavy_bench_test_module();
-    let compiled = compile_fir_to_cranelift_jit(&store, module, &CraneliftOptions::default())
+    let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
         .map_err(|e| e.to_string())?;
     let compute_addr = compiled.compute_entry_addr();
     if compute_addr == 0 {

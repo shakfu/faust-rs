@@ -192,7 +192,7 @@ pub fn generate_c_module(
         .to_owned();
     let effective_options = options.clone();
 
-    let declared_functions = collect_declared_functions(store, module.functions)?;
+    let declared_functions = collect_module_functions(store, module.functions)?;
     let struct_inits = collect_struct_initializers(store, module.dsp_struct, module.globals)?;
     let table_inits = collect_table_initializers(store, module.dsp_struct, module.globals)?;
     let mut out = String::new();
@@ -724,17 +724,17 @@ fn collect_table_initializers(
     Ok(out)
 }
 
-fn collect_declared_functions(
+fn collect_module_functions(
     store: &FirStore,
-    declarations: FirId,
+    functions: FirId,
 ) -> Result<Vec<DeclareFunView>, CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, declarations) else {
+    let FirMatch::Block(items) = match_fir(store, functions) else {
         return Err(CodegenError::new(
             CodegenErrorCode::InvalidModuleSection,
             format!(
                 "section 'functions' must be a FIR block, got {:?} at node {}",
-                match_fir(store, declarations),
-                declarations.as_u32()
+                match_fir(store, functions),
+                functions.as_u32()
             ),
         ));
     };
@@ -1309,8 +1309,8 @@ mod tests {
         let metadata = b.declare_fun("metadata", bad_ty, &bad_args, Some(body), false);
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
-        let declarations = b.block(&[metadata]);
-        let module = b.module(0, 0, "mydsp", dsp_struct, globals, declarations);
+        let functions = b.block(&[metadata]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
 
         let err = generate_c_module(&store, module, &COptions::default())
             .expect_err("invalid canonical metadata signature must fail");

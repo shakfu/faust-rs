@@ -38,7 +38,7 @@ parser → boxes → signals → fir → transform → [codegen] → C source
 | `cpp` | ✅ Implemented | `generate_cpp_module` |
 | `interp` | ✅ Implemented | `generate_interp_module` |
 | `interp::fbc_to_cpp` | ✅ Implemented | `generate_cpp_from_fbc` |
-| `cranelift` | 🔧 Bring-up | `compile_fir_to_cranelift_jit` |
+| `cranelift` | 🔧 Bring-up | `generate_cranelift_module` |
 | `cmajor` | 🗂 Scaffolded | — |
 | `codebox` | 🗂 Scaffolded | — |
 | `csharp` | 🗂 Scaffolded | — |
@@ -251,17 +251,17 @@ compile-path coverage and diagnosability; falls back to a no-op `compute` stub
 for FIR nodes outside the current lowering subset.
 
 ```rust
-use codegen::backends::cranelift::{CraneliftOptions, compile_fir_to_cranelift_jit};
+use codegen::backends::cranelift::{CraneliftOptions, generate_cranelift_module};
 
 let opts = CraneliftOptions::default(); // opt_level: Speed
-let jit = compile_fir_to_cranelift_jit(&store, root_id, &opts)?;
+let jit = generate_cranelift_module(&store, root_id, &opts)?;
 ```
 
 | Item | Description |
 |---|---|
 | `CraneliftOptions` | `opt_level`, `target_triple`, `enable_nan_canonicalization`, `fail_on_subset_gap` |
 | `CraneliftOptLevel` | `None`, `Speed` (default), `SpeedAndSize` |
-| `compile_fir_to_cranelift_jit` | Main entry point; returns compiled JIT module |
+| `generate_cranelift_module` | Main entry point; returns compiled JIT module |
 | `diagnose_cranelift_compute_subset_gap` | Reports unsupported FIR nodes |
 
 ---

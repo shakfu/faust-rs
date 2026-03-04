@@ -428,8 +428,8 @@ mod tests {
         let compute = b.declare_fun("compute", compute_type, &compute_args, Some(body), false);
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
-        let declarations = b.block(&[compute]);
-        let module = b.module(0, 0, "legacy_like", dsp_struct, globals, declarations);
+        let functions = b.block(&[compute]);
+        let module = b.module(0, 0, "legacy_like", dsp_struct, globals, functions);
         (store, module)
     }
 

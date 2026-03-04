@@ -20,7 +20,7 @@ use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
 
 use codegen::backends::cranelift::{
-    CraneliftOptLevel, CraneliftOptions, JitDspModule, compile_fir_to_cranelift_jit,
+    CraneliftOptLevel, CraneliftOptions, JitDspModule, generate_cranelift_module,
 };
 use codegen::backends::interp::{FbcDspFactory, InterpOptions, generate_interp_module, read_fbc};
 use compiler::{Compiler as FaustCompiler, SignalFirLane, default_import_search_base};
@@ -855,7 +855,7 @@ fn compile_fir_module_to_cranelift(
         opt_level: map_c_opt_level(opt_level),
         ..CraneliftOptions::default()
     };
-    compile_fir_to_cranelift_jit(&fir.store, fir.module, &options).map_err(|e| e.to_string())
+    generate_cranelift_module(&fir.store, fir.module, &options).map_err(|e| e.to_string())
 }
 
 /// Calls the Cranelift backend and returns the compiled JIT module.
@@ -867,7 +867,7 @@ fn compile_with_cranelift_backend(
         opt_level: map_c_opt_level(opt_level),
         ..CraneliftOptions::default()
     };
-    match compile_fir_to_cranelift_jit(&fir.store, fir.module, &options) {
+    match generate_cranelift_module(&fir.store, fir.module, &options) {
         Ok(jit) => Ok(jit),
         Err(err) => Err(err.to_string()),
     }

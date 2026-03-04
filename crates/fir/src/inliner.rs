@@ -141,7 +141,7 @@ pub enum FirFunctionSection {
     /// Function declared in `Module.globals` (often extern prototypes).
     Globals,
     /// Function declared in `Module.functions`.
-    Declarations,
+    Functions,
 }
 
 /// Per-function summary extracted during module analysis.
@@ -283,7 +283,7 @@ pub fn analyze_fir_inliner(
     collect_functions_from_section(
         store,
         functions,
-        FirFunctionSection::Declarations,
+        FirFunctionSection::Functions,
         &mut raw_functions,
     )?;
 
@@ -344,7 +344,7 @@ pub fn analyze_fir_inliner(
     })
 }
 
-/// Collects all `DeclareFun` nodes from a module section (`globals`/`declarations`).
+/// Collects all `DeclareFun` nodes from a module section (`globals`/`functions`).
 fn collect_functions_from_section(
     store: &FirStore,
     section_id: FirId,
@@ -353,7 +353,7 @@ fn collect_functions_from_section(
 ) -> Result<(), FirInlineAnalysisError> {
     let section_name = match section {
         FirFunctionSection::Globals => "globals",
-        FirFunctionSection::Declarations => "declarations",
+        FirFunctionSection::Functions => "functions",
     };
     let FirMatch::Block(items) = match_fir(store, section_id) else {
         return Err(FirInlineAnalysisError::InvalidModuleSection {
@@ -1379,7 +1379,7 @@ fn rewrite_module_once(
         dst_store,
         state,
         stats,
-        FirFunctionSection::Declarations,
+        FirFunctionSection::Functions,
     )?;
 
     let mut b = FirBuilder::new(dst_store);

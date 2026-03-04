@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use codegen::backends::cranelift::{
-    CraneliftOptions, compile_fir_to_cranelift_jit, diagnose_cranelift_compute_subset_gap,
+    CraneliftOptions, diagnose_cranelift_compute_subset_gap, generate_cranelift_module,
 };
 use compiler::{Compiler, SignalFirLane};
 
@@ -45,7 +45,7 @@ fn main() {
             &search_paths,
             SignalFirLane::TransformFastLane,
         ) {
-            Ok(fir_out) => match compile_fir_to_cranelift_jit(
+            Ok(fir_out) => match generate_cranelift_module(
                 &fir_out.store,
                 fir_out.module,
                 &CraneliftOptions::default(),

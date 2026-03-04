@@ -164,7 +164,7 @@ pub fn generate_cpp_module(
     let module = decode_module(store, module)?;
     let module_name = module.name.clone();
     let effective_options = options.clone();
-    let declared_functions = collect_declared_function_names(store, module.functions)?;
+    let declared_functions = collect_module_function_names(store, module.functions)?;
     let class_name = options
         .class_name
         .as_deref()
@@ -341,17 +341,17 @@ fn emit_dsp_contract_methods(
     }
 }
 
-fn collect_declared_function_names(
+fn collect_module_function_names(
     store: &FirStore,
-    declarations: FirId,
+    functions: FirId,
 ) -> Result<Vec<String>, CodegenError> {
-    let FirMatch::Block(items) = match_fir(store, declarations) else {
+    let FirMatch::Block(items) = match_fir(store, functions) else {
         return Err(CodegenError::new(
             CodegenErrorCode::InvalidModuleSection,
             format!(
                 "section 'functions' must be a FIR block, got {:?} at node {}",
-                match_fir(store, declarations),
-                declarations.as_u32()
+                match_fir(store, functions),
+                functions.as_u32()
             ),
         ));
     };
@@ -1204,8 +1204,8 @@ mod tests {
         let mut b = FirBuilder::new(&mut store);
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
-        let declarations = b.block(&[]);
-        let module = b.module(0, 0, "mydsp", dsp_struct, globals, declarations);
+        let functions = b.block(&[]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
 
         let out = generate_cpp_module(&store, module, &CppOptions::default())
             .expect("module root should generate");
@@ -1229,8 +1229,8 @@ mod tests {
         let mut b = FirBuilder::new(&mut store);
         let dsp_struct = b.int32(1);
         let globals = b.block(&[]);
-        let declarations = b.block(&[]);
-        let module = b.module(0, 0, "mydsp", dsp_struct, globals, declarations);
+        let functions = b.block(&[]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
         let err = generate_cpp_module(&store, module, &CppOptions::default())
             .expect_err("non-block section must fail");
         assert_eq!(err.code(), CodegenErrorCode::InvalidModuleSection);
@@ -1279,8 +1279,8 @@ mod tests {
 
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
-        let declarations = b.block(&[fun]);
-        let module = b.module(0, 0, "mydsp", dsp_struct, globals, declarations);
+        let functions = b.block(&[fun]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
         let out = generate_cpp_module(&store, module, &CppOptions::default())
             .expect("core statement/value slice should generate");
 
@@ -1308,8 +1308,8 @@ mod tests {
         let build_ui = b.declare_fun("buildUserInterface", bad_ty, &bad_args, Some(body), false);
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
-        let declarations = b.block(&[build_ui]);
-        let module = b.module(0, 0, "mydsp", dsp_struct, globals, declarations);
+        let functions = b.block(&[build_ui]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
 
         let err = generate_cpp_module(&store, module, &CppOptions::default())
             .expect_err("invalid canonical buildUserInterface signature must fail");
@@ -1349,8 +1349,8 @@ mod tests {
         let fun = b.declare_fun("ui", fun_ty, &[], Some(body), false);
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
-        let declarations = b.block(&[fun]);
-        let module = b.module(0, 0, "mydsp", dsp_struct, globals, declarations);
+        let functions = b.block(&[fun]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
 
         let out =
             generate_cpp_module(&store, module, &CppOptions::default()).expect("UI nodes emit");

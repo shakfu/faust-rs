@@ -119,20 +119,20 @@ fn module_with_functions(
     b: &mut FirBuilder<'_>,
     name: &str,
     globals: &[FirId],
-    declarations: &[FirId],
+    functions: &[FirId],
     num_inputs: usize,
     num_outputs: usize,
 ) -> FirId {
     let dsp_struct = b.block(&[]);
     let globals = b.block(globals);
-    let declarations = b.block(declarations);
+    let functions = b.block(functions);
     b.module(
         num_inputs,
         num_outputs,
         name,
         dsp_struct,
         globals,
-        declarations,
+        functions,
     )
 }
 
@@ -823,8 +823,8 @@ pub fn build_ir_coverage_test_module() -> (FirStore, FirId) {
     ));
     let dsp_struct = b.block(&[struct_decl]);
     let globals_block = b.block(&globals);
-    let declarations = b.block(&[helper, compute]);
-    let module = b.module(1, 1, "ir_coverage", dsp_struct, globals_block, declarations);
+    let functions = b.block(&[helper, compute]);
+    let module = b.module(1, 1, "ir_coverage", dsp_struct, globals_block, functions);
     (store, module)
 }
 
