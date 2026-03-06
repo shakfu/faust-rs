@@ -222,11 +222,12 @@ impl Automaton {
     }
 }
 
-/// Cache keyed by the `TreeId` of a `Case` node's rule-list.
+/// Cache keyed by the `TreeId` of an evaluated `Case` rule-list.
 ///
-/// Since `Case` nodes are hash-consed (immutable after construction), the same `TreeId`
-/// always refers to the same set of rules, making it a perfect key for memoising
-/// [`make_pattern_matcher`] across repeated applications of the same `case` expression.
+/// Raw parser rule-lists are not sufficient keys because pattern evaluation can
+/// depend on the surrounding lexical environment. `apply_case_rules` therefore
+/// evaluates/simplifies patterns first and only then memoises the compiled
+/// automaton under the resulting hash-consed rule-list `TreeId`.
 pub(crate) type AutomatonCache = AHashMap<TreeId, Automaton>;
 
 // ── Internal pattern helpers ──────────────────────────────────────────────────
@@ -881,7 +882,7 @@ pub fn apply_pattern_matcher(
             let sym_id = arena.intern_symbol(&name);
 
             if let Some(env) = env_out[rule_r].as_mut() {
-                if let Some(existing) = env.lookup(sym_id) {
+                if let Some(existing) = env.lookup_until_barrier(sym_id) {
                     if existing != z1 {
                         // Nonlinearity failure: same variable matched two different values.
                         env_out[rule_r] = None;

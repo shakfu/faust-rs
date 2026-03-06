@@ -86,15 +86,16 @@
 //! 2. Faust has no imperative mutation of environments — scopes are always additive.
 //! 3. `with`/`letrec` bodies are evaluated in the scope that includes their own definitions
 //!    (enabling mutual reference), both in C++ and in Rust.
-//! 4. Pattern-matching bindings are collected in a fresh local scope, never escaping to the outer
-//!    environment — equivalent to C++ `searchIdDef` stopping at a `BARRIER`.
+//! 4. Pattern-matching bindings are collected in a barrier child scope, so repeated pattern
+//!    variables only see bindings introduced by the current rule while normal RHS evaluation
+//!    still sees the outer lexical environment.
 //!
 //! ## Divergences from C++ (intentional)
 //!
 //! | Feature | C++ | Rust | Notes |
 //! |---|---|---|---|
 //! | Value stored | `closure(expr, genv, visited, lenv)` | Bare `TreeId` | Not needed (eager eval) |
-//! | Barrier mechanism | `pushEnvBarrier` / `searchIdDef` | Local `Environment::empty()` | Functionally equivalent |
+//! | Barrier mechanism | `pushEnvBarrier` / `searchIdDef` | `push_barrier_scope()` + `lookup_until_barrier()` | Same semantics |
 //! | `copyEnvReplaceDefs` | Present (letrec env rewiring) | Not needed | Flat `push_scope` is equivalent |
 //! | Redefinition check | `addLayerDef` throws on conflict | `bind_definitions` returns `EvalError::RedefinedSymbol` | Same semantics, typed error |
 //! | Profiling | `gGlobal->gStats` (global mutable) | `EvalStats` (returned value) | Safer, composable |
@@ -209,7 +210,7 @@ pub type SymId = u32;
 /// | Lookup | `searchIdDef`: walks layers calling `getProperty` (hash probe per layer) | `lookup`: reverse linear scan of `Vec`, then recurse to `parent` |
 /// | Scope push | `pushNewLayer(lenv)` — allocates a unique tree node | `push_scope()` — `Vec::new()` + `Box::new(parent.clone())` |
 /// | Redefinition | `addLayerDef` throws `faustexception` on conflicting rebind | `bind_definitions` returns `EvalError::RedefinedSymbol` |
-/// | Barrier | `pushEnvBarrier` / `isEnvBarrier` — stops pattern-matcher lookup | Not needed — pattern bindings use a fresh `Environment::empty()` |
+/// | Barrier | `pushEnvBarrier` / `isEnvBarrier` — stops pattern-matcher lookup | `push_barrier_scope()` / `lookup_until_barrier()` |
 /// | Env copy/rewire | `copyEnvReplaceDefs` + `updateClosures` — for letrec env fixup | Not needed — `push_scope` + flat binding is equivalent |
 /// | Profiling | `gGlobal->gStats.fEnvLayersPushed/fEnvLookups/fEnvLookupTotalDepth` | [`EvalStats`] returned from [`eval_process_with_stats`] |
 ///
@@ -227,6 +228,7 @@ pub type SymId = u32;
 pub struct Environment {
     bindings: Vec<(SymId, TreeId)>,
     parent: Option<Box<Environment>>,
+    barrier: bool,
 }
 
 impl Environment {
@@ -236,7 +238,11 @@ impl Environment {
     /// `pushMultiClosureDefs` call in `eval.cpp`.
     #[must_use]
     pub fn empty() -> Self {
-        Self::default()
+        Self {
+            bindings: Vec::new(),
+            parent: None,
+            barrier: false,
+        }
     }
 
     /// Binds one symbol to a tree node in the **current scope** (not a parent).
@@ -269,9 +275,8 @@ impl Environment {
     /// probe per layer; the Rust lookup uses a linear SIMD-friendly `u32` scan per layer.
     ///
     /// **Does not stop at barriers**: unlike C++ `searchIdDef` (used by the pattern matcher),
-    /// this lookup traverses the full parent chain. Pattern-matching scope isolation is achieved
-    /// differently in Rust: pattern bindings use a fresh `Environment::empty()` with no parent,
-    /// so they never accidentally reach the outer scope.
+    /// this lookup traverses the full parent chain. Pattern-matching nonlinearity checks must
+    /// instead use [`lookup_until_barrier`](Self::lookup_until_barrier).
     ///
     /// `sym` must be a valid id returned by [`TreeArena::intern_symbol`] or
     /// [`TreeArena::get_symbol`].
@@ -283,6 +288,32 @@ impl Environment {
             }
         }
         self.parent.as_ref().and_then(|p| p.lookup(sym))
+    }
+
+    /// Looks up a symbol across the current scope chain but stops when a barrier scope is reached.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/evaluate/environment.cpp`
+    /// - `searchIdDef`
+    /// - `pushEnvBarrier`
+    ///
+    /// This is used by the pattern matcher to implement rule-local nonlinearity:
+    /// repeated pattern variables must only compare against bindings created while matching the
+    /// current rule. Outer lexical bindings remain visible to normal RHS evaluation through
+    /// [`lookup`](Self::lookup), but they must not participate in pattern-variable equality checks.
+    #[must_use]
+    pub fn lookup_until_barrier(&self, sym: SymId) -> Option<TreeId> {
+        for (s, value) in self.bindings.iter().rev() {
+            if *s == sym {
+                return Some(*value);
+            }
+        }
+        if self.barrier {
+            return None;
+        }
+        self.parent
+            .as_ref()
+            .and_then(|p| p.lookup_until_barrier(sym))
     }
 
     /// Looks up a symbol in the **current scope only**, without consulting any parent.
@@ -334,6 +365,26 @@ impl Environment {
         Self {
             bindings: Vec::new(),
             parent: Some(Box::new(self.clone())),
+            barrier: false,
+        }
+    }
+
+    /// Creates a new child scope that acts as a pattern-matching barrier.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/evaluate/environment.cpp`
+    /// - `pushEnvBarrier`
+    ///
+    /// Normal lookup through [`lookup`](Self::lookup) still crosses this node, so rule RHS
+    /// evaluation can see the outer lexical environment. Only
+    /// [`lookup_until_barrier`](Self::lookup_until_barrier) stops here, matching C++
+    /// `searchIdDef`.
+    #[must_use]
+    pub fn push_barrier_scope(&self) -> Self {
+        Self {
+            bindings: Vec::new(),
+            parent: Some(Box::new(self.clone())),
+            barrier: true,
         }
     }
 
@@ -418,13 +469,14 @@ impl Environment {
 /// natural carrier for caches that must survive across the whole evaluation phase.
 /// Currently it holds:
 /// - `automaton_cache`: memoises the compiled `pattern_matcher::Automaton` for each
-///   `Case` node, keyed by the node's `TreeId`. See §8 of the pattern-matcher performance
-///   analysis for rationale and design.
+///   **evaluated** `Case` rule-list, keyed by the resulting rule-list `TreeId`.
+///   This is important for parity: the same raw `case` syntax can yield different
+///   effective patterns under different lexical environments.
 #[derive(Clone, Debug)]
 pub struct LoopDetector {
     call_stack: Vec<TreeId>,
     max_depth: usize,
-    /// Compiled automata keyed by the `TreeId` of the `Case` rule-list.
+    /// Compiled automata keyed by the `TreeId` of the evaluated `Case` rule-list.
     automaton_cache: pattern_matcher::AutomatonCache,
 }
 
@@ -1829,18 +1881,284 @@ fn case_expected_arity(arena: &TreeArena, rules_rev: TreeId) -> Result<usize, Ev
     Ok(list_to_vec(arena, first_lhs)?.len())
 }
 
+/// Evaluates a case-rule list for matching.
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/eval.cpp`
+/// - `evalRuleList`
+/// - `evalRule`
+/// - `evalPatternList`
+/// - `evalPattern`
+///
+/// Only the left-hand side patterns are evaluated and simplified. The right-hand
+/// side remains unchanged so it can later be evaluated in the chosen rule
+/// environment.
+fn eval_rule_list(
+    arena: &mut TreeArena,
+    rules_rev: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let rules = list_to_vec(arena, rules_rev)?;
+    let mut out = Vec::with_capacity(rules.len());
+    for rule in rules {
+        let (lhs, rhs) = rule_parts(arena, rule)?;
+        let lhs_eval = eval_pattern_list(arena, lhs, env, loop_detector)?;
+        out.push(arena.cons(lhs_eval, rhs));
+    }
+    Ok(vec_to_list(arena, &out))
+}
+
+/// Evaluates each pattern of one rule, preserving parser list order.
+fn eval_pattern_list(
+    arena: &mut TreeArena,
+    patterns: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let items = list_to_vec(arena, patterns)?;
+    let mut out = Vec::with_capacity(items.len());
+    for pattern in items {
+        out.push(eval_pattern(arena, pattern, env, loop_detector)?);
+    }
+    Ok(vec_to_list(arena, &out))
+}
+
+/// Evaluates and simplifies one pattern before automaton construction.
+///
+/// This restores the C++ `evalPattern` behavior: lexical identifiers are resolved
+/// in the current environment, then constant-only numeric subgraphs are folded so
+/// patterns like `(1+1)` match the same way they do in the C++ compiler.
+fn eval_pattern(
+    arena: &mut TreeArena,
+    pattern: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let evaluated = eval_box(arena, pattern, env, loop_detector)?;
+    Ok(pattern_simplification(arena, evaluated))
+}
+
+/// Simplifies a pattern bottom-up after pattern evaluation.
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/eval.cpp`
+/// - `patternSimplification`
+fn pattern_simplification(arena: &mut TreeArena, pattern: TreeId) -> TreeId {
+    let simplified = match match_box(arena, pattern) {
+        BoxMatch::Seq(a, b) => {
+            let sa = pattern_simplification(arena, a);
+            let sb = pattern_simplification(arena, b);
+            let mut bld = BoxBuilder::new(arena);
+            bld.seq(sa, sb)
+        }
+        BoxMatch::Par(a, b) => {
+            let sa = pattern_simplification(arena, a);
+            let sb = pattern_simplification(arena, b);
+            let mut bld = BoxBuilder::new(arena);
+            bld.par(sa, sb)
+        }
+        BoxMatch::Split(a, b) => {
+            let sa = pattern_simplification(arena, a);
+            let sb = pattern_simplification(arena, b);
+            let mut bld = BoxBuilder::new(arena);
+            bld.split(sa, sb)
+        }
+        BoxMatch::Merge(a, b) => {
+            let sa = pattern_simplification(arena, a);
+            let sb = pattern_simplification(arena, b);
+            let mut bld = BoxBuilder::new(arena);
+            bld.merge(sa, sb)
+        }
+        BoxMatch::Rec(a, b) => {
+            let sa = pattern_simplification(arena, a);
+            let sb = pattern_simplification(arena, b);
+            let mut bld = BoxBuilder::new(arena);
+            bld.rec(sa, sb)
+        }
+        BoxMatch::HGroup(a, b) => {
+            let sa = pattern_simplification(arena, a);
+            let sb = pattern_simplification(arena, b);
+            let mut bld = BoxBuilder::new(arena);
+            bld.hgroup(sa, sb)
+        }
+        BoxMatch::VGroup(a, b) => {
+            let sa = pattern_simplification(arena, a);
+            let sb = pattern_simplification(arena, b);
+            let mut bld = BoxBuilder::new(arena);
+            bld.vgroup(sa, sb)
+        }
+        BoxMatch::TGroup(a, b) => {
+            let sa = pattern_simplification(arena, a);
+            let sb = pattern_simplification(arena, b);
+            let mut bld = BoxBuilder::new(arena);
+            bld.tgroup(sa, sb)
+        }
+        BoxMatch::Route(a, b, c) => {
+            let sa = pattern_simplification(arena, a);
+            let sb = pattern_simplification(arena, b);
+            let sc = pattern_simplification(arena, c);
+            let mut bld = BoxBuilder::new(arena);
+            bld.route(sa, sb, sc)
+        }
+        _ => pattern,
+    };
+
+    simplify_numeric_pattern(arena, simplified).unwrap_or(simplified)
+}
+
+#[derive(Clone, Copy)]
+enum NumericValue {
+    Int(i32),
+    Real(f64),
+}
+
+fn simplify_numeric_pattern(arena: &mut TreeArena, pattern: TreeId) -> Option<TreeId> {
+    let value = eval_numeric_pattern_value(arena, pattern)?;
+    let mut b = BoxBuilder::new(arena);
+    Some(match value {
+        NumericValue::Int(v) => b.int(v),
+        NumericValue::Real(v) => b.real(v),
+    })
+}
+
+fn eval_numeric_pattern_value(arena: &TreeArena, pattern: TreeId) -> Option<NumericValue> {
+    match match_box(arena, pattern) {
+        BoxMatch::Int(v) => Some(NumericValue::Int(v)),
+        BoxMatch::Real(v) => Some(NumericValue::Real(v)),
+        BoxMatch::Seq(inputs, op) => {
+            let BoxMatch::Par(lhs, rhs) = match_box(arena, inputs) else {
+                return None;
+            };
+            let lhs = eval_numeric_pattern_value(arena, lhs)?;
+            let rhs = eval_numeric_pattern_value(arena, rhs)?;
+            eval_numeric_binary_op(arena, op, lhs, rhs)
+        }
+        _ => None,
+    }
+}
+
+fn eval_numeric_binary_op(
+    arena: &TreeArena,
+    op: TreeId,
+    lhs: NumericValue,
+    rhs: NumericValue,
+) -> Option<NumericValue> {
+    match match_box(arena, op) {
+        BoxMatch::Add => numeric_add(lhs, rhs),
+        BoxMatch::Sub => numeric_sub(lhs, rhs),
+        BoxMatch::Mul => numeric_mul(lhs, rhs),
+        BoxMatch::Div => numeric_div(lhs, rhs),
+        BoxMatch::Rem => numeric_rem(lhs, rhs),
+        BoxMatch::Pow => Some(NumericValue::Real(
+            numeric_as_f64(lhs).powf(numeric_as_f64(rhs)),
+        )),
+        BoxMatch::Lt => Some(NumericValue::Int(
+            (numeric_as_f64(lhs) < numeric_as_f64(rhs)) as i32,
+        )),
+        BoxMatch::Le => Some(NumericValue::Int(
+            (numeric_as_f64(lhs) <= numeric_as_f64(rhs)) as i32,
+        )),
+        BoxMatch::Gt => Some(NumericValue::Int(
+            (numeric_as_f64(lhs) > numeric_as_f64(rhs)) as i32,
+        )),
+        BoxMatch::Ge => Some(NumericValue::Int(
+            (numeric_as_f64(lhs) >= numeric_as_f64(rhs)) as i32,
+        )),
+        BoxMatch::Eq => Some(NumericValue::Int(
+            (numeric_as_f64(lhs) == numeric_as_f64(rhs)) as i32,
+        )),
+        BoxMatch::Ne => Some(NumericValue::Int(
+            (numeric_as_f64(lhs) != numeric_as_f64(rhs)) as i32,
+        )),
+        BoxMatch::And => numeric_int_binop(lhs, rhs, |a, b| a & b),
+        BoxMatch::Or => numeric_int_binop(lhs, rhs, |a, b| a | b),
+        BoxMatch::Xor => numeric_int_binop(lhs, rhs, |a, b| a ^ b),
+        BoxMatch::Lsh => numeric_int_binop(lhs, rhs, |a, b| a.wrapping_shl(b as u32)),
+        BoxMatch::Rsh => numeric_int_binop(lhs, rhs, |a, b| a.wrapping_shr(b as u32)),
+        _ => None,
+    }
+}
+
+fn numeric_add(lhs: NumericValue, rhs: NumericValue) -> Option<NumericValue> {
+    match (lhs, rhs) {
+        (NumericValue::Int(a), NumericValue::Int(b)) => Some(NumericValue::Int(a.wrapping_add(b))),
+        _ => Some(NumericValue::Real(
+            numeric_as_f64(lhs) + numeric_as_f64(rhs),
+        )),
+    }
+}
+
+fn numeric_sub(lhs: NumericValue, rhs: NumericValue) -> Option<NumericValue> {
+    match (lhs, rhs) {
+        (NumericValue::Int(a), NumericValue::Int(b)) => Some(NumericValue::Int(a.wrapping_sub(b))),
+        _ => Some(NumericValue::Real(
+            numeric_as_f64(lhs) - numeric_as_f64(rhs),
+        )),
+    }
+}
+
+fn numeric_mul(lhs: NumericValue, rhs: NumericValue) -> Option<NumericValue> {
+    match (lhs, rhs) {
+        (NumericValue::Int(a), NumericValue::Int(b)) => Some(NumericValue::Int(a.wrapping_mul(b))),
+        _ => Some(NumericValue::Real(
+            numeric_as_f64(lhs) * numeric_as_f64(rhs),
+        )),
+    }
+}
+
+fn numeric_div(lhs: NumericValue, rhs: NumericValue) -> Option<NumericValue> {
+    match (lhs, rhs) {
+        (_, NumericValue::Int(0)) => None,
+        (_, NumericValue::Real(v)) if v == 0.0 => None,
+        (NumericValue::Int(a), NumericValue::Int(b)) => Some(NumericValue::Int(a / b)),
+        _ => Some(NumericValue::Real(
+            numeric_as_f64(lhs) / numeric_as_f64(rhs),
+        )),
+    }
+}
+
+fn numeric_rem(lhs: NumericValue, rhs: NumericValue) -> Option<NumericValue> {
+    match (lhs, rhs) {
+        (NumericValue::Int(_), NumericValue::Int(0)) => None,
+        (NumericValue::Int(a), NumericValue::Int(b)) => Some(NumericValue::Int(a % b)),
+        _ => Some(NumericValue::Real(
+            numeric_as_f64(lhs) % numeric_as_f64(rhs),
+        )),
+    }
+}
+
+fn numeric_int_binop(
+    lhs: NumericValue,
+    rhs: NumericValue,
+    op: impl FnOnce(i32, i32) -> i32,
+) -> Option<NumericValue> {
+    let (NumericValue::Int(a), NumericValue::Int(b)) = (lhs, rhs) else {
+        return None;
+    };
+    Some(NumericValue::Int(op(a, b)))
+}
+
+fn numeric_as_f64(value: NumericValue) -> f64 {
+    match value {
+        NumericValue::Int(v) => f64::from(v),
+        NumericValue::Real(v) => v,
+    }
+}
+
 /// Applies case rules to a given argument list using the compiled tree automaton.
 ///
 /// # Algorithm
 ///
-/// 1. Determine expected arity from the first rule's LHS pattern count.
-/// 2. Compile all rules into a [`pattern_matcher::Automaton`] via
+/// 1. Evaluate and simplify all rule LHS patterns in the current environment.
+/// 2. Determine expected arity from the first evaluated rule's LHS pattern count.
+/// 3. Compile all evaluated rules into a [`pattern_matcher::Automaton`] via
 ///    [`pattern_matcher::make_pattern_matcher`] (Graef incremental algorithm).
-/// 3. Initialise one [`Environment`] child scope per rule.
-/// 4. Feed each consumed argument through the automaton one at a time via
+/// 4. Initialise one barrier child [`Environment`] per rule.
+/// 5. Feed each consumed argument through the automaton one at a time via
 ///    [`pattern_matcher::apply_pattern_matcher`], which advances the state machine
 ///    and accumulates variable bindings into per-rule environments.
-/// 5. In the final state, pick the first rule whose environment survived all
+/// 6. In the final state, pick the first rule whose environment survived all
 ///    nonlinearity checks, evaluate its RHS, and apply any remaining arguments.
 ///
 /// # C++ correspondence
@@ -1855,9 +2173,10 @@ fn apply_case_rules(
     call_site: Option<TreeId>,
 ) -> Result<TreeId, EvalError> {
     let args = list_to_vec(arena, larg)?;
+    let evaluated_rules = eval_rule_list(arena, rules_rev, env, loop_detector)?;
 
     // Determine expected arity from the first rule's LHS.
-    let mut probe = list_to_vec(arena, rules_rev)?;
+    let mut probe = list_to_vec(arena, evaluated_rules)?;
     probe.reverse();
     let Some(first_rule) = probe.first().copied() else {
         return Err(EvalError::MalformedCaseNode { node: rules_rev });
@@ -1874,20 +2193,19 @@ fn apply_case_rules(
     let consumed = args[..expected].to_vec();
     let rest = args[expected..].to_vec();
 
-    // Compile rules into tree automaton — or retrieve a cached copy.
-    // The `Case` node is hash-consed: the same `rules_rev` TreeId always represents the
-    // same rule set, so the automaton can be built once and reused across all applications.
-    // C++ parallel: `make_pattern_matcher(rules)` called once per case application (no cache).
-    if !loop_detector.automaton_cache.contains_key(&rules_rev) {
-        let automaton = pattern_matcher::make_pattern_matcher(arena, rules_rev);
-        loop_detector.automaton_cache.insert(rules_rev, automaton);
+    // Compile evaluated rules into a tree automaton — or retrieve a cached copy.
+    if !loop_detector.automaton_cache.contains_key(&evaluated_rules) {
+        let automaton = pattern_matcher::make_pattern_matcher(arena, evaluated_rules);
+        loop_detector
+            .automaton_cache
+            .insert(evaluated_rules, automaton);
     }
-    let automaton = loop_detector.automaton_cache.get(&rules_rev).unwrap();
+    let automaton = loop_detector.automaton_cache.get(&evaluated_rules).unwrap();
     let n = automaton.n_rules();
 
-    // Per-rule environments: each starts as a child scope of the current env.
-    // apply_pattern_matcher binds pattern variables and nulls out disqualified rules.
-    let mut envs: Vec<Option<Environment>> = (0..n).map(|_| Some(env.push_scope())).collect();
+    // Per-rule environments: each starts as a barrier child scope of the current env.
+    let mut envs: Vec<Option<Environment>> =
+        (0..n).map(|_| Some(env.push_barrier_scope())).collect();
 
     // Feed each consumed argument through the automaton state machine, one at a time.
     // C++ parallel: `for each arg: s = apply_pattern_matcher(A, s, arg, C, E)`.

@@ -376,6 +376,54 @@ fn eval_case_pattern_var_binds_argument() {
 }
 
 #[test]
+fn eval_case_evaluates_numeric_patterns_before_matching() {
+    let mut arena = TreeArena::new();
+    let one_a = BoxBuilder::new(&mut arena).int(1);
+    let one_b = BoxBuilder::new(&mut arena).int(1);
+    let plus_inputs = BoxBuilder::new(&mut arena).par(one_a, one_b);
+    let plus = BoxBuilder::new(&mut arena).add();
+    let numeric_pattern = BoxBuilder::new(&mut arena).seq(plus_inputs, plus);
+    let rhs = BoxBuilder::new(&mut arena).int(7);
+    let rule = make_rule1(&mut arena, numeric_pattern, rhs);
+    let rules = make_rules_parser_order(&mut arena, &[rule]);
+    let case_expr = BoxBuilder::new(&mut arena).case(rules);
+    let arg = BoxBuilder::new(&mut arena).int(2);
+    let nil = arena.nil();
+    let args = arena.cons(arg, nil);
+    let expr = BoxBuilder::new(&mut arena).appl(case_expr, args);
+
+    let mut loop_detector = LoopDetector::new();
+    let out = eval_box(&mut arena, expr, &Environment::empty(), &mut loop_detector)
+        .expect("numeric pattern should be simplified before matching");
+    expect_int(&arena, out, 7);
+}
+
+#[test]
+fn eval_case_pattern_var_lookup_stops_at_barrier_scope() {
+    let mut arena = TreeArena::new();
+    let outer_x = BoxBuilder::new(&mut arena).int(1);
+    let sym_x = arena.intern_symbol("x");
+    let mut env = Environment::empty();
+    env.bind(sym_x, outer_x);
+
+    let x_ident = make_ident(&mut arena, "x");
+    let px = BoxBuilder::new(&mut arena).pattern_var(x_ident);
+    let rhs = make_ident(&mut arena, "x");
+    let rule = make_rule1(&mut arena, px, rhs);
+    let rules = make_rules_parser_order(&mut arena, &[rule]);
+    let case_expr = BoxBuilder::new(&mut arena).case(rules);
+    let arg = BoxBuilder::new(&mut arena).int(2);
+    let nil = arena.nil();
+    let args = arena.cons(arg, nil);
+    let expr = BoxBuilder::new(&mut arena).appl(case_expr, args);
+
+    let mut loop_detector = LoopDetector::new();
+    let out = eval_box(&mut arena, expr, &env, &mut loop_detector)
+        .expect("pattern-variable matching should ignore outer bindings");
+    expect_int(&arena, out, 2);
+}
+
+#[test]
 fn eval_case_under_application_lowers_and_no_match_still_errors() {
     let mut arena = TreeArena::new();
     let x_ident = make_ident(&mut arena, "x");

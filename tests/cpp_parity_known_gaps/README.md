@@ -35,17 +35,22 @@ while the Rust port still diverges in parse or eval semantics.
 
 - `gap_03_case_pattern_constant_folding.dsp`
   - purpose: `case` pattern requiring compile-time pattern evaluation
-  - current gap:
+  - current status:
     - C++: accepted
-    - Rust: evaluation reports `no case rule matches arguments` because
-      `case` matching is built from raw rules and misses the folded match
+    - Rust: fixed in the eval phase; the folded pattern now matches correctly
+  - next step:
+    - promote this fixture into the regular parity guardrails instead of keeping
+      it only in the known-gap corpus
 
 - `gap_04_case_pattern_scope_barrier.dsp`
   - purpose: rule-local pattern variable that must not capture an outer binding
-  - current gap:
+  - current status:
     - C++: accepted
-    - Rust: evaluation reports `no case rule matches arguments` because
-      pattern-variable lookup crosses outer scopes and prevents the match
+    - Rust: fixed in the eval phase; pattern-variable lookup now stops at the
+      barrier for nonlinearity checks while RHS evaluation still sees outer scope
+  - next step:
+    - promote this fixture into the regular parity guardrails instead of keeping
+      it only in the known-gap corpus
 
 ## Suggested manual differential commands
 
