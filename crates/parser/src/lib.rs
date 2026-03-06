@@ -17,6 +17,7 @@
 //! - Token parsing still uses `i64` as an intermediate and clamps to `i32`
 //!   bounds at the parser boundary for deterministic behavior.
 
+use boxes::match_box;
 use cfgrammar::Span;
 use errors::codes;
 use errors::{
@@ -27,6 +28,7 @@ use lrlex::{DefaultLexerTypes, LRNonStreamingLexerDef};
 use lrpar::lrpar_mod;
 use lrpar::{LexError, Lexeme, Lexer, NonStreamingLexer};
 use std::cell::RefCell;
+use std::collections::{BTreeMap, HashSet};
 use tlib::{NodeKind, TreeArena, TreeId};
 
 pub mod context;
@@ -106,12 +108,59 @@ impl ParseState {
         self.arena.cons(head, tail)
     }
 
-    /// Prototype equivalent to C++ `formatDefinitions`.
+    /// Formats raw parser definitions into normalized Faust definition bodies.
     ///
-    /// In Slice 1 we keep definition order as parser-built cons-list for deterministic checks.
+    /// Source provenance (C++):
+    /// - `compiler/parser/sourcereader.cpp`
+    /// - `standardArgList`
+    /// - `makeDefinition`
+    /// - `formatDefinitions`
+    ///
+    /// Raw parser definitions are stored as `cons(name, cons(args, body))`, where:
+    /// - `args == nil` means plain `name = body;`
+    /// - non-`nil` `args` retains the parser arglist (reversed list convention)
+    ///
+    /// This pass groups same-name definitions and lowers them as C++ does:
+    /// - one no-arg clause -> body
+    /// - one standard identifier arglist -> nested `abstr`
+    /// - one non-standard arglist -> `case` with one rule
+    /// - multiple clauses -> `case` (all clauses must have the same arity and arity > 0)
     #[must_use]
     pub fn format_definitions(&mut self, defs: TreeId) -> TreeId {
-        defs
+        let mut grouped: BTreeMap<String, (TreeId, Vec<TreeId>)> = BTreeMap::new();
+        let mut cursor = defs;
+
+        while !self.arena.is_nil(cursor) {
+            let Some(def) = self.arena.hd(cursor) else {
+                self.ctx.error("invalid definition list cell");
+                return self.nil();
+            };
+            if !self.arena.is_nil(def) {
+                let Some((name, payload)) = self.definition_name_and_payload(def) else {
+                    self.ctx.error("invalid definition node shape");
+                    return self.nil();
+                };
+                let Some(key) = self.definition_name_key(name) else {
+                    self.ctx.error("invalid definition name");
+                    return self.nil();
+                };
+                grouped
+                    .entry(key)
+                    .and_modify(|(_, variants)| variants.push(payload))
+                    .or_insert_with(|| (name, vec![payload]));
+            }
+            cursor = self.arena.tl(cursor).unwrap_or_else(|| self.nil());
+        }
+
+        let mut out = self.nil();
+        for (_key, (name, variants_rev)) in grouped {
+            let formatted = self.make_definition_from_variants(name, &variants_rev);
+            if self.arena.is_nil(formatted) {
+                continue;
+            }
+            out = self.cons(formatted, out);
+        }
+        out
     }
 
     /// Prepends non-`nil` statement in parser list order.
@@ -351,6 +400,120 @@ impl ParseState {
             out = self.cons(*item, out);
         }
         out
+    }
+
+    fn definition_name_and_payload(&self, def: TreeId) -> Option<(TreeId, TreeId)> {
+        let name = self.arena.hd(def)?;
+        let payload = self.arena.tl(def)?;
+        Some((name, payload))
+    }
+
+    fn definition_name_key(&self, name: TreeId) -> Option<String> {
+        match match_box(&self.arena, name) {
+            boxes::BoxMatch::Ident(text) => Some(text.to_owned()),
+            _ => match self.arena.kind(name) {
+                Some(NodeKind::Symbol(text)) => Some(text.as_ref().to_owned()),
+                _ => None,
+            },
+        }
+    }
+
+    fn definition_payload_parts(&self, payload: TreeId) -> Option<(TreeId, TreeId)> {
+        let args = self.arena.hd(payload)?;
+        let body = self.arena.tl(payload)?;
+        Some((args, body))
+    }
+
+    fn standard_arg_list(&self, mut args: TreeId) -> bool {
+        let mut seen = HashSet::new();
+        while !self.arena.is_nil(args) {
+            let Some(head) = self.arena.hd(args) else {
+                return false;
+            };
+            let Some(name) = self.definition_name_key(head) else {
+                return false;
+            };
+            if !seen.insert(name) {
+                return false;
+            }
+            let Some(tail) = self.arena.tl(args) else {
+                return false;
+            };
+            args = tail;
+        }
+        true
+    }
+
+    fn list_len_strict(&self, mut list: TreeId) -> Option<usize> {
+        let mut len = 0usize;
+        while !self.arena.is_nil(list) {
+            let _ = self.arena.hd(list)?;
+            list = self.arena.tl(list)?;
+            len = len.saturating_add(1);
+        }
+        Some(len)
+    }
+
+    fn make_definition_from_variants(&mut self, name: TreeId, variants_rev: &[TreeId]) -> TreeId {
+        let mut variants = variants_rev.iter().rev();
+        let Some(first_payload) = variants.next().copied() else {
+            self.ctx.error("definition group should not be empty");
+            return self.nil();
+        };
+        let Some((first_args, first_body)) = self.definition_payload_parts(first_payload) else {
+            self.ctx.error("invalid definition payload");
+            return self.nil();
+        };
+
+        let formatted_expr = if variants_rev.len() == 1 {
+            if self.arena.is_nil(first_args) {
+                first_body
+            } else if self.standard_arg_list(first_args) {
+                self.node_builder().build_abstr(first_args, first_body)
+            } else {
+                let nil = self.nil();
+                let rules = self.cons(first_payload, nil);
+                self.node_builder().case(rules)
+            }
+        } else {
+            let Some(expected_arity) = self.list_len_strict(first_args) else {
+                self.ctx.error("invalid definition arglist");
+                return self.nil();
+            };
+            if expected_arity == 0 {
+                self.ctx
+                    .error("multiple definitions of a zero-argument symbol are not allowed");
+                return self.nil();
+            }
+
+            let mut rules = self.nil();
+            let mut prev_args = first_args;
+            let mut prev_body = first_body;
+            for payload in variants_rev.iter().rev() {
+                let Some((args, body)) = self.definition_payload_parts(*payload) else {
+                    self.ctx.error("invalid definition payload");
+                    return self.nil();
+                };
+                let Some(arity) = self.list_len_strict(args) else {
+                    self.ctx.error("invalid definition arglist");
+                    return self.nil();
+                };
+                if arity != expected_arity {
+                    self.ctx.error(&format!(
+                        "inconsistent number of parameters in pattern-matching rule: previous arity {expected_arity}, got {arity}"
+                    ));
+                    let _ = (prev_args, prev_body, body);
+                    return self.nil();
+                }
+                prev_args = args;
+                prev_body = body;
+                rules = self.cons(*payload, rules);
+            }
+            self.node_builder().case(rules)
+        };
+
+        let nil = self.nil();
+        self.make_definition(name, nil, formatted_expr)
     }
 
     fn prepare_pattern(&mut self, node: TreeId) -> TreeId {

@@ -20,14 +20,18 @@ while the Rust port still diverges in parse or eval semantics.
     clause
   - current gap:
     - C++: accepted
-    - Rust: parser rejects the patterned definition form
+    - Rust: parser/eval now accept it, but the signal pipeline still stops in
+      `propagate` because the normalized definition lowers to a `case` node and
+      `a2sb()` is still missing
 
 - `gap_02_pattern_def_clause_grouping.dsp`
   - purpose: repeated same-name definition clauses that should be grouped into a
     single pattern-based definition family
   - current gap:
     - C++: accepted
-    - Rust: evaluation rejects the second clause as a plain symbol redefinition
+    - Rust: parser/eval now group the clauses correctly, but the signal
+      pipeline still stops in `propagate` because the grouped definition lowers
+      to a `case` node and `a2sb()` is still missing
 
 - `gap_03_case_pattern_constant_folding.dsp`
   - purpose: `case` pattern requiring compile-time pattern evaluation

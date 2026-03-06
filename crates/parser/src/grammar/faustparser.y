@@ -187,7 +187,7 @@ Definition -> tlib::TreeId:
               state.make_definition($1, nil, $3)
           })
       }
-    | DefName LPAR ParamList RPAR DEF Expression ENDDEF {
+    | DefName LPAR ArgList RPAR DEF Expression ENDDEF {
           crate::with_state(state, |state| {
               state.mark_def_at_cursor($1);
               state.make_definition($1, $3, $6)

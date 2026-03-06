@@ -21,6 +21,39 @@ fn definition_expr(arena: &TreeArena, def: TreeId) -> TreeId {
     list_tail(arena, payload)
 }
 
+fn definition_name(arena: &TreeArena, def: TreeId) -> String {
+    let name = list_head(arena, def);
+    match match_box(arena, name) {
+        BoxMatch::Ident(text) => text.to_owned(),
+        other => panic!("expected definition name ident, got {:?}", other),
+    }
+}
+
+fn find_definition_expr(arena: &TreeArena, mut defs: TreeId, expected: &str) -> Option<TreeId> {
+    while !arena.is_nil(defs) {
+        let def = arena.hd(defs)?;
+        if definition_name(arena, def) == expected {
+            return Some(definition_expr(arena, def));
+        }
+        defs = arena.tl(defs)?;
+    }
+    None
+}
+
+fn count_definitions_named(arena: &TreeArena, mut defs: TreeId, expected: &str) -> usize {
+    let mut count = 0usize;
+    while !arena.is_nil(defs) {
+        let Some(def) = arena.hd(defs) else {
+            break;
+        };
+        if definition_name(arena, def) == expected {
+            count = count.saturating_add(1);
+        }
+        defs = arena.tl(defs).unwrap_or_else(|| arena.nil());
+    }
+    count
+}
+
 fn parse_process_expr(source: &str, source_name: &str) -> (TreeArena, TreeId) {
     let output = parse_program(source, source_name);
     assert!(
@@ -188,4 +221,48 @@ fn production_parser_import_heavy_fixture_matches_cpp_acceptance() {
     }
 
     fs::remove_dir_all(root).expect("temp root should be removable");
+}
+
+#[test]
+fn production_parser_groups_patterned_and_multi_clause_definitions_like_cpp() {
+    let cases = [
+        (
+            "patterned_constant_clause",
+            "foo(0) = _;\nfoo(x) = x;\nprocess = foo;\n",
+        ),
+        (
+            "grouped_identifier_clauses",
+            "foo(x) = x;\nfoo(y) = y;\nprocess = foo;\n",
+        ),
+    ];
+
+    let cpp = cpp_bin();
+    for (name, source) in cases {
+        if let Some(cpp_bin) = &cpp {
+            let cpp_ok = cpp_accepts_source(cpp_bin, source, name)
+                .unwrap_or_else(|e| panic!("C++ run failed for {name}: {e}"));
+            assert!(cpp_ok, "C++ should accept grouped-definition case {name}");
+        }
+
+        let output = parse_program(source, &format!("structural_{name}.dsp"));
+        assert!(
+            output.errors.is_empty(),
+            "unexpected parse errors for {}: {:?}",
+            name,
+            output.errors
+        );
+        let root = output.root.expect("root should be present");
+        let foo_expr = find_definition_expr(&output.state.arena, root, "foo")
+            .unwrap_or_else(|| panic!("missing foo definition for {name}"));
+        assert!(
+            matches!(match_box(&output.state.arena, foo_expr), BoxMatch::Case(_)),
+            "foo should be normalized to BOXCASE for {name}, got {:?}",
+            match_box(&output.state.arena, foo_expr)
+        );
+        assert_eq!(
+            count_definitions_named(&output.state.arena, root, "foo"),
+            1,
+            "foo should be grouped into one definition for {name}"
+        );
+    }
 }

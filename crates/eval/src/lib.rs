@@ -1110,9 +1110,17 @@ fn map_children(
 
 /// Binds a parser definition list into an environment, enforcing the no-redefinition rule.
 ///
-/// Each definition in `defs` is a `cons(name, cons(args, expr))` node. When `args` is non-nil,
-/// a sequence of `abstr` nodes is built wrapping `expr` (equivalent to C++ `buildBoxAbstr`),
-/// turning `f(x, y) = e;` into `f = abstr(x, abstr(y, e))` before binding.
+/// Each definition in `defs` is a `cons(name, cons(args, expr))` node.
+///
+/// Parser-originated definition lists are expected to be pre-normalized by
+/// `parser::ParseState::format_definitions()` so that `args` is typically `nil`
+/// and `expr` is already one of:
+/// - plain body,
+/// - nested `abstr`,
+/// - `case`.
+///
+/// The `args != nil` fallback is retained for direct test construction and
+/// compatibility with any remaining raw-definition call sites.
 ///
 /// # Redefinition check — C++ `addLayerDef` parity
 ///
