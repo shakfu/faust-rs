@@ -32,6 +32,8 @@ pub type BoxId = TreeId;
 const BOX_IDENT_TAG: &str = "BOXIDENT";
 const BOX_WIRE_TAG: &str = "BOXWIRE";
 const BOX_CUT_TAG: &str = "BOXCUT";
+const BOX_SLOT_TAG: &str = "BOXSLOT";
+const BOX_SYMBOLIC_TAG: &str = "BOXSYMBOLIC";
 const BOX_SEQ_TAG: &str = "BOXSEQ";
 const BOX_PAR_TAG: &str = "BOXPAR";
 const BOX_REC_TAG: &str = "BOXREC";
@@ -532,6 +534,18 @@ impl<'a> BoxBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one box node for `slot` and returns its `BoxId`.
+    pub fn slot(&mut self, id: i32) -> BoxId {
+        node_slot(self.arena, id)
+    }
+
+    #[must_use]
+    /// Builds one box node for `symbolic` and returns its `BoxId`.
+    pub fn symbolic(&mut self, slot: BoxId, body: BoxId) -> BoxId {
+        node_symbolic(self.arena, slot, body)
+    }
+
+    #[must_use]
     /// Builds one box node for `ipar` and returns its `BoxId`.
     pub fn ipar(&mut self, index: BoxId, count: BoxId, body: BoxId) -> BoxId {
         node_ipar(self.arena, index, count, body)
@@ -843,6 +857,8 @@ pub enum BoxMatch<'a> {
     Attach,
     Enable,
     Control,
+    Slot(i32),
+    Symbolic(BoxId, BoxId),
     IPar(BoxId, BoxId, BoxId),
     ISeq(BoxId, BoxId, BoxId),
     ISum(BoxId, BoxId, BoxId),
@@ -967,6 +983,13 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
                             Some(NodeKind::Symbol(name)) => BoxMatch::Ident(name.as_ref()),
                             _ => BoxMatch::Unknown,
                         },
+                        BOX_SLOT_TAG => match arena.kind(c0) {
+                            Some(NodeKind::Int(v)) => match i32::try_from(*v) {
+                                Ok(v) => BoxMatch::Slot(v),
+                                Err(_) => BoxMatch::Unknown,
+                            },
+                            _ => BoxMatch::Unknown,
+                        },
                         BOX_COMPONENT_TAG => BoxMatch::Component(c0),
                         BOX_LIBRARY_TAG => BoxMatch::Library(c0),
                         BOX_WAVEFORM_TAG => BoxMatch::Waveform(c0),
@@ -994,6 +1017,7 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
                         BOX_MERGE_TAG => BoxMatch::Merge(c0, c1),
                         BOX_APPL_TAG => BoxMatch::Appl(c0, c1),
                         BOX_ACCESS_TAG => BoxMatch::Access(c0, c1),
+                        BOX_SYMBOLIC_TAG => BoxMatch::Symbolic(c0, c1),
                         BOX_WITH_LOCAL_DEF_TAG => BoxMatch::WithLocalDef(c0, c1),
                         BOX_ABSTR_TAG => BoxMatch::Abstr(c0, c1),
                         BOX_MODULATION_TAG => BoxMatch::Modulation(c0, c1),
@@ -1053,6 +1077,19 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
 fn node_ident(arena: &mut TreeArena, name: &str) -> BoxId {
     let sym = arena.symbol(name);
     intern_tag(arena, BOX_IDENT_TAG, &[sym])
+}
+
+/// Equivalent to C++ `boxSlot`.
+#[must_use]
+fn node_slot(arena: &mut TreeArena, id: i32) -> BoxId {
+    let raw = arena.int(i64::from(id));
+    intern_tag(arena, BOX_SLOT_TAG, &[raw])
+}
+
+/// Equivalent to C++ `boxSymbolic`.
+#[must_use]
+fn node_symbolic(arena: &mut TreeArena, slot: BoxId, body: BoxId) -> BoxId {
+    intern_tag(arena, BOX_SYMBOLIC_TAG, &[slot, body])
 }
 
 /// Returns identifier symbol name when `b` is `node_ident`.

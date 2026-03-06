@@ -478,6 +478,17 @@ pub struct LoopDetector {
     max_depth: usize,
     /// Compiled automata keyed by the `TreeId` of the evaluated `Case` rule-list.
     automaton_cache: pattern_matcher::AutomatonCache,
+    /// Monotonic slot id source used by [`a2sb`] when lowering residual closures.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/evaluate/eval.cpp`
+    /// - `gGlobal->gBoxSlotNumber`
+    ///
+    /// The Rust port keeps this counter local to one evaluation pass instead of
+    /// storing it in global state. The numeric payload is only used as a stable,
+    /// debuggable slot label; semantic identity is carried by the unique `BoxId`
+    /// of each `boxSlot(...)` node.
+    next_slot_id: i32,
 }
 
 impl LoopDetector {
@@ -491,6 +502,7 @@ impl LoopDetector {
             call_stack: Vec::new(),
             max_depth: 1024,
             automaton_cache: pattern_matcher::AutomatonCache::default(),
+            next_slot_id: 0,
         }
     }
 
@@ -504,6 +516,7 @@ impl LoopDetector {
             call_stack: Vec::new(),
             max_depth,
             automaton_cache: pattern_matcher::AutomatonCache::default(),
+            next_slot_id: 0,
         }
     }
 
@@ -656,6 +669,13 @@ pub enum EvalError {
         expected: usize,
         got: usize,
     },
+    InvalidModulationLabel {
+        node: TreeId,
+    },
+    InvalidModulationCircuit {
+        node: TreeId,
+        reason: &'static str,
+    },
     /// A symbol is redefined with a **different** value within the same lexical scope layer.
     ///
     /// Identical redefinitions (same `first_def == second_def` by `TreeId` identity) are
@@ -730,6 +750,12 @@ impl Display for EvalError {
                     f,
                     "too many arguments: expected at most {expected}, got {got}"
                 )
+            }
+            Self::InvalidModulationLabel { node } => {
+                write!(f, "invalid modulation label at node {}", node.as_u32())
+            }
+            Self::InvalidModulationCircuit { reason, .. } => {
+                write!(f, "invalid modulation circuit: {reason}")
             }
             Self::RedefinedSymbol { symbol, .. } => {
                 write!(
@@ -856,6 +882,24 @@ impl IntoDiagnostic for EvalError {
             ))
             .with_help("remove extra arguments or expand the function input arity")
             .with_help("template: f(a, b); // keep provided args <= function input arity"),
+            Self::InvalidModulationLabel { .. } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_GENERIC_FAILURE,
+                message,
+            )
+            .with_note("cause: modulation target did not resolve to a valid label string")
+            .with_note("rule: modulation target must be a string-like Faust label")
+            .with_help("use a literal label such as [\"gain\" : _ -> expr]"),
+            Self::InvalidModulationCircuit { reason, .. } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_GENERIC_FAILURE,
+                message,
+            )
+            .with_note("cause: modulation circuit violates Faust box-arity constraints")
+            .with_note(format!("computed: {reason}"))
+            .with_help("use a modulation circuit with at most 2 inputs and exactly 1 output"),
             Self::RedefinedSymbol {
                 symbol,
                 first_def,
@@ -995,8 +1039,134 @@ pub fn eval_process_with_stats(
     stats.env_lookups += 1;
     let mut loop_detector = LoopDetector::new();
     let result = eval_box(arena, process, &env, &mut loop_detector)?;
+    let result = a2sb(arena, result, &mut loop_detector)?;
     stats.loop_detector_max_depth = loop_detector.call_stack.len();
     Ok((result, stats))
+}
+
+/// Lowers residual abstractions and case closures into symbolic boxes.
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/eval.cpp`
+/// - `a2sb`
+/// - `real_a2sb`
+///
+/// The C++ evaluator applies `a2sb(eval(...))` before the propagation phase so
+/// `propagate` never receives raw closures or pattern matchers. Rust does not
+/// materialize explicit closure nodes, so this helper operates directly on the
+/// residual evaluated `BoxMatch::Abstr` and `BoxMatch::Case` shapes:
+///
+/// - `abstr(x, body)` becomes `symbolic(slot, lowered(body[x := slot]))`
+/// - `case { ... }` becomes one nested `symbolic(slot_i, ...)` per expected
+///   argument, after fully applying the case node to fresh slots
+///
+/// This is an **adapted** internal representation, not a byte-for-byte port of
+/// C++ closure objects. The semantic contract is the same: later passes observe
+/// only first-order symbolic boxes, never unapplied evaluator-only forms.
+fn a2sb(
+    arena: &mut TreeArena,
+    expr: TreeId,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    match match_box(arena, expr) {
+        BoxMatch::Abstr(_, _) => lower_abstraction_to_symbolic(arena, expr, loop_detector),
+        BoxMatch::Case(_) => lower_case_to_symbolic(arena, expr, loop_detector),
+        _ => {
+            let Some(node) = arena.node(expr).cloned() else {
+                return Ok(expr);
+            };
+            if node.children.is_empty() {
+                return Ok(expr);
+            }
+
+            let mut rebuilt = Vec::with_capacity(node.children.len());
+            let mut changed = false;
+            for child in node.children.as_slice().iter().copied() {
+                let lowered = a2sb(arena, child, loop_detector)?;
+                if lowered != child {
+                    changed = true;
+                }
+                rebuilt.push(lowered);
+            }
+
+            if changed {
+                Ok(arena.intern(node.kind, &rebuilt))
+            } else {
+                Ok(expr)
+            }
+        }
+    }
+}
+
+/// Adapts one residual `abstr` closure into a first-order symbolic box.
+///
+/// The abstraction is applied to a fresh `boxSlot` using the same evaluator
+/// machinery as C++ `a2sb`, then the resulting body is recursively lowered.
+fn lower_abstraction_to_symbolic(
+    arena: &mut TreeArena,
+    abstraction: TreeId,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let slot = fresh_slot(arena, loop_detector);
+    let args = vec_to_list(arena, &[slot]);
+    let applied = apply_list(
+        arena,
+        abstraction,
+        args,
+        &Environment::empty(),
+        loop_detector,
+        Some(abstraction),
+    )?;
+    let lowered_body = a2sb(arena, applied, loop_detector)?;
+    let mut b = BoxBuilder::new(arena);
+    Ok(b.symbolic(slot, lowered_body))
+}
+
+/// Adapts one residual `case` node into nested symbolic boxes.
+///
+/// C++ lowers pattern matchers by applying them to fresh slots one argument at a
+/// time. Rust keeps raw `case` nodes until this point, so the adapted lowering
+/// applies the case to **all** required slots in one step, then wraps the
+/// resulting body in nested `symbolic` nodes. This preserves the same external
+/// meaning while avoiding the under-application placeholder path of
+/// [`apply_list`].
+fn lower_case_to_symbolic(
+    arena: &mut TreeArena,
+    case_expr: TreeId,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let BoxMatch::Case(rules) = match_box(arena, case_expr) else {
+        return Ok(case_expr);
+    };
+    let arity = case_expected_arity(arena, rules)?;
+    let slots: Vec<_> = (0..arity)
+        .map(|_| fresh_slot(arena, loop_detector))
+        .collect();
+    let slot_args = vec_to_list(arena, &slots);
+    let applied = apply_list(
+        arena,
+        case_expr,
+        slot_args,
+        &Environment::empty(),
+        loop_detector,
+        Some(case_expr),
+    )?;
+    let mut result = a2sb(arena, applied, loop_detector)?;
+    for slot in slots.into_iter().rev() {
+        let mut b = BoxBuilder::new(arena);
+        result = b.symbolic(slot, result);
+    }
+    Ok(result)
+}
+
+/// Allocates one fresh `boxSlot(...)` node for [`a2sb`].
+///
+/// The numeric id mirrors the C++ `gBoxSlotNumber` counter and is only used for
+/// stable debug identity. Semantic binding later relies on the unique `BoxId`.
+fn fresh_slot(arena: &mut TreeArena, loop_detector: &mut LoopDetector) -> TreeId {
+    loop_detector.next_slot_id = loop_detector.next_slot_id.saturating_add(1);
+    let mut b = BoxBuilder::new(arena);
+    b.slot(loop_detector.next_slot_id)
 }
 
 /// Evaluates one box expression in the provided lexical environment.
@@ -1085,6 +1255,9 @@ pub fn eval_box(
             let mut b = BoxBuilder::new(arena);
             Ok(b.abstr(arg, evaluated_body))
         }
+        BoxMatch::Modulation(var, body) => {
+            eval_modulation(arena, expr, var, body, env, loop_detector)
+        }
         BoxMatch::IPar(index, count, body) => {
             iterate_par(arena, index, count, body, env, loop_detector)
         }
@@ -1141,6 +1314,329 @@ fn eval_access(
     let eval_field = eval_box(arena, field, env, loop_detector)?;
     let mut b = BoxBuilder::new(arena);
     Ok(b.access(eval_body, eval_field))
+}
+
+/// Evaluates one modulation form and rewrites matching widgets in the body.
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/eval.cpp` modulation branch
+/// - `compiler/transform/boxModulationImplanter.cpp`
+///
+/// This is an adapted Rust port of the same semantics:
+/// - evaluate the target label and optional modulation circuit,
+/// - validate modulation-circuit arity,
+/// - fully evaluate the body and lower residual closures with [`a2sb`],
+/// - implant the circuit around widgets whose path matches the target.
+///
+/// The current implementation supports literal/group-path matching, which is
+/// sufficient for the production corpus and the parity fixtures in this
+/// repository.
+fn eval_modulation(
+    arena: &mut TreeArena,
+    modulation_node: TreeId,
+    var: TreeId,
+    body: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let target_label = eval_modulation_label(arena, var, env, loop_detector)?;
+    let target_path = modulation_target_path(&target_label);
+    let modulation_circuit =
+        eval_modulation_circuit(arena, modulation_node, var, env, loop_detector)?;
+    let Some((inputs, outputs)) = infer_box_arity(arena, modulation_circuit) else {
+        return Err(EvalError::InvalidModulationCircuit {
+            node: modulation_node,
+            reason: "circuit should evaluate to a block diagram",
+        });
+    };
+    if inputs > 2 {
+        return Err(EvalError::InvalidModulationCircuit {
+            node: modulation_node,
+            reason: "circuit should have no more than 2 inputs",
+        });
+    }
+    if outputs != 1 {
+        return Err(EvalError::InvalidModulationCircuit {
+            node: modulation_node,
+            reason: "circuit should have exactly 1 output",
+        });
+    }
+
+    let slot = if inputs == 2 {
+        Some(fresh_slot(arena, loop_detector))
+    } else {
+        None
+    };
+    let evaluated_body = eval_box(arena, body, env, loop_detector)?;
+    let lowered_body = a2sb(arena, evaluated_body, loop_detector)?;
+    let rewritten = implant_modulation(
+        arena,
+        lowered_body,
+        &ModulationRewrite {
+            target_path: &target_path,
+            slot,
+            inputs_number: inputs,
+            modulation_circuit,
+        },
+        &mut Vec::new(),
+    );
+
+    if rewritten == lowered_body {
+        Ok(lowered_body)
+    } else if let Some(slot) = slot {
+        let mut b = BoxBuilder::new(arena);
+        Ok(b.symbolic(slot, rewritten))
+    } else {
+        Ok(rewritten)
+    }
+}
+
+/// Immutable modulation rewrite context derived from one evaluated modulation node.
+///
+/// Grouping these fields keeps the recursive transformer signatures short and
+/// makes the C++-parallel invariants explicit at the call site.
+struct ModulationRewrite<'a> {
+    target_path: &'a [String],
+    slot: Option<TreeId>,
+    inputs_number: usize,
+    modulation_circuit: TreeId,
+}
+
+/// Evaluates the modulation target to a plain label string.
+///
+/// C++ supports richer `%` substitutions via `evalLabel(...)`. The Rust port
+/// currently implements the literal-label subset required by the active corpus.
+fn eval_modulation_label(
+    arena: &mut TreeArena,
+    var: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<String, EvalError> {
+    let label_node = arena
+        .hd(var)
+        .ok_or(EvalError::MalformedListNode { node: var })?;
+    let evaluated = eval_box(arena, label_node, env, loop_detector)?;
+    let Some(label) = label_node_text(arena, evaluated) else {
+        return Err(EvalError::InvalidModulationLabel { node: evaluated });
+    };
+    Ok(strip_label_metadata(label).to_owned())
+}
+
+/// Evaluates the optional modulation circuit, defaulting to multiplication.
+fn eval_modulation_circuit(
+    arena: &mut TreeArena,
+    modulation_node: TreeId,
+    var: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let circuit = arena
+        .tl(var)
+        .ok_or(EvalError::MalformedListNode { node: var })?;
+    if arena.is_nil(circuit) {
+        let mut b = BoxBuilder::new(arena);
+        return Ok(b.mul());
+    }
+    let evaluated = eval_box(arena, circuit, env, loop_detector)?;
+    let lowered = a2sb(arena, evaluated, loop_detector)?;
+    if infer_box_arity(arena, lowered).is_none() {
+        return Err(EvalError::InvalidModulationCircuit {
+            node: modulation_node,
+            reason: "circuit should evaluate to a block diagram",
+        });
+    }
+    Ok(lowered)
+}
+
+/// Recursively implants one modulation circuit into matching widgets.
+fn implant_modulation(
+    arena: &mut TreeArena,
+    expr: TreeId,
+    rewrite: &ModulationRewrite<'_>,
+    group_stack: &mut Vec<String>,
+) -> TreeId {
+    match match_box(arena, expr) {
+        BoxMatch::Button(label) | BoxMatch::Checkbox(label) => {
+            implant_widget_if_match(arena, expr, label, rewrite, group_stack)
+        }
+        BoxMatch::VSlider(label, cur, min, max, step) => {
+            let rebuilt = {
+                let cur = implant_modulation(arena, cur, rewrite, group_stack);
+                let min = implant_modulation(arena, min, rewrite, group_stack);
+                let max = implant_modulation(arena, max, rewrite, group_stack);
+                let step = implant_modulation(arena, step, rewrite, group_stack);
+                let mut b = BoxBuilder::new(arena);
+                b.vslider(label, cur, min, max, step)
+            };
+            implant_widget_if_match(arena, rebuilt, label, rewrite, group_stack)
+        }
+        BoxMatch::HSlider(label, cur, min, max, step) => {
+            let rebuilt = {
+                let cur = implant_modulation(arena, cur, rewrite, group_stack);
+                let min = implant_modulation(arena, min, rewrite, group_stack);
+                let max = implant_modulation(arena, max, rewrite, group_stack);
+                let step = implant_modulation(arena, step, rewrite, group_stack);
+                let mut b = BoxBuilder::new(arena);
+                b.hslider(label, cur, min, max, step)
+            };
+            implant_widget_if_match(arena, rebuilt, label, rewrite, group_stack)
+        }
+        BoxMatch::NumEntry(label, cur, min, max, step) => {
+            let rebuilt = {
+                let cur = implant_modulation(arena, cur, rewrite, group_stack);
+                let min = implant_modulation(arena, min, rewrite, group_stack);
+                let max = implant_modulation(arena, max, rewrite, group_stack);
+                let step = implant_modulation(arena, step, rewrite, group_stack);
+                let mut b = BoxBuilder::new(arena);
+                b.num_entry(label, cur, min, max, step)
+            };
+            implant_widget_if_match(arena, rebuilt, label, rewrite, group_stack)
+        }
+        BoxMatch::VBargraph(label, min, max) => {
+            let rebuilt = {
+                let min = implant_modulation(arena, min, rewrite, group_stack);
+                let max = implant_modulation(arena, max, rewrite, group_stack);
+                let mut b = BoxBuilder::new(arena);
+                b.vbargraph(label, min, max)
+            };
+            implant_widget_if_match(arena, rebuilt, label, rewrite, group_stack)
+        }
+        BoxMatch::HBargraph(label, min, max) => {
+            let rebuilt = {
+                let min = implant_modulation(arena, min, rewrite, group_stack);
+                let max = implant_modulation(arena, max, rewrite, group_stack);
+                let mut b = BoxBuilder::new(arena);
+                b.hbargraph(label, min, max)
+            };
+            implant_widget_if_match(arena, rebuilt, label, rewrite, group_stack)
+        }
+        BoxMatch::VGroup(label, inner) => {
+            group_stack.push(strip_label_node(arena, label));
+            let rewritten = implant_modulation(arena, inner, rewrite, group_stack);
+            group_stack.pop();
+            let mut b = BoxBuilder::new(arena);
+            b.vgroup(label, rewritten)
+        }
+        BoxMatch::HGroup(label, inner) => {
+            group_stack.push(strip_label_node(arena, label));
+            let rewritten = implant_modulation(arena, inner, rewrite, group_stack);
+            group_stack.pop();
+            let mut b = BoxBuilder::new(arena);
+            b.hgroup(label, rewritten)
+        }
+        BoxMatch::TGroup(label, inner) => {
+            group_stack.push(strip_label_node(arena, label));
+            let rewritten = implant_modulation(arena, inner, rewrite, group_stack);
+            group_stack.pop();
+            let mut b = BoxBuilder::new(arena);
+            b.tgroup(label, rewritten)
+        }
+        _ => {
+            let Some(node) = arena.node(expr).cloned() else {
+                return expr;
+            };
+            if node.children.is_empty() {
+                return expr;
+            }
+
+            let mut rebuilt = Vec::with_capacity(node.children.len());
+            let mut changed = false;
+            for child in node.children.as_slice().iter().copied() {
+                let rewritten = implant_modulation(arena, child, rewrite, group_stack);
+                if rewritten != child {
+                    changed = true;
+                }
+                rebuilt.push(rewritten);
+            }
+
+            if changed {
+                arena.intern(node.kind, &rebuilt)
+            } else {
+                expr
+            }
+        }
+    }
+}
+
+/// Applies the modulation circuit around one widget when its path matches.
+fn implant_widget_if_match(
+    arena: &mut TreeArena,
+    widget: TreeId,
+    label: TreeId,
+    rewrite: &ModulationRewrite<'_>,
+    group_stack: &[String],
+) -> TreeId {
+    if !widget_matches_modulation_target(arena, label, rewrite.target_path, group_stack) {
+        return widget;
+    }
+    let mut b = BoxBuilder::new(arena);
+    match rewrite.inputs_number {
+        0 => rewrite.modulation_circuit,
+        1 => b.seq(widget, rewrite.modulation_circuit),
+        2 => {
+            let slot = rewrite.slot.expect("two-input modulation requires a slot");
+            let pair = b.par(widget, slot);
+            b.seq(pair, rewrite.modulation_circuit)
+        }
+        _ => widget,
+    }
+}
+
+fn widget_matches_modulation_target(
+    arena: &TreeArena,
+    label: TreeId,
+    target_path: &[String],
+    group_stack: &[String],
+) -> bool {
+    let Some(label) = label_node_text(arena, label) else {
+        return false;
+    };
+    let mut widget_path = Vec::with_capacity(group_stack.len() + 1);
+    widget_path.push(strip_label_metadata(label).to_owned());
+    for group in group_stack.iter().rev() {
+        widget_path.push(group.clone());
+    }
+    is_subsequence(target_path, &widget_path)
+}
+
+fn modulation_target_path(label: &str) -> Vec<String> {
+    label
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(strip_label_metadata)
+        .filter(|segment| !segment.is_empty())
+        .map(ToOwned::to_owned)
+        .rev()
+        .collect()
+}
+
+fn strip_label_node(arena: &TreeArena, label: TreeId) -> String {
+    label_node_text(arena, label)
+        .map(strip_label_metadata)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn strip_label_metadata(label: &str) -> &str {
+    label
+        .split_once('[')
+        .map_or(label, |(prefix, _)| prefix)
+        .trim()
+}
+
+fn label_node_text(arena: &TreeArena, label: TreeId) -> Option<&str> {
+    match arena.kind(label) {
+        Some(NodeKind::StringLiteral(label)) => Some(label.as_ref()),
+        Some(NodeKind::Symbol(label)) => Some(label.as_ref()),
+        _ => None,
+    }
+}
+
+fn is_subsequence(needle: &[String], haystack: &[String]) -> bool {
+    let mut haystack_iter = haystack.iter();
+    needle
+        .iter()
+        .all(|target| haystack_iter.by_ref().any(|candidate| candidate == target))
 }
 
 /// Structural fallback: evaluate all children, then rebuild the node unchanged in kind.
@@ -1505,6 +2001,7 @@ fn list_outputs(arena: &TreeArena, mut list: TreeId) -> Option<usize> {
 fn infer_box_arity(arena: &TreeArena, id: TreeId) -> Option<(usize, usize)> {
     match match_box(arena, id) {
         BoxMatch::Int(_) | BoxMatch::Real(_) => Some((0, 1)),
+        BoxMatch::Slot(_) => Some((0, 1)),
         BoxMatch::Wire => Some((1, 1)),
         BoxMatch::Cut => Some((1, 0)),
         BoxMatch::Add
@@ -1573,6 +2070,10 @@ fn infer_box_arity(arena: &TreeArena, id: TreeId) -> Option<(usize, usize)> {
         }
         BoxMatch::VGroup(_, inner) | BoxMatch::HGroup(_, inner) | BoxMatch::TGroup(_, inner) => {
             infer_box_arity(arena, inner)
+        }
+        BoxMatch::Symbolic(_, inner) => {
+            let (ins, outs) = infer_box_arity(arena, inner)?;
+            Some((ins.checked_add(1)?, outs))
         }
         BoxMatch::Seq(left, right) => {
             let (ins1, outs1) = infer_box_arity(arena, left)?;
@@ -2110,7 +2611,7 @@ fn numeric_mul(lhs: NumericValue, rhs: NumericValue) -> Option<NumericValue> {
 fn numeric_div(lhs: NumericValue, rhs: NumericValue) -> Option<NumericValue> {
     match (lhs, rhs) {
         (_, NumericValue::Int(0)) => None,
-        (_, NumericValue::Real(v)) if v == 0.0 => None,
+        (_, NumericValue::Real(0.0)) => None,
         (NumericValue::Int(a), NumericValue::Int(b)) => Some(NumericValue::Int(a / b)),
         _ => Some(NumericValue::Real(
             numeric_as_f64(lhs) / numeric_as_f64(rhs),

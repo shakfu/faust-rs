@@ -272,6 +272,50 @@ fn propagate_pow_min_max_map_to_signal_nodes() {
 }
 
 #[test]
+fn slot_and_symbolic_boxes_propagate_like_cpp_placeholders() {
+    let mut arena = TreeArena::new();
+    let (slot7, passthrough, pair) = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let slot7 = bb.slot(7);
+        let slot1 = bb.slot(1);
+        let slot2 = bb.slot(2);
+        let passthrough = bb.symbolic(slot1, slot1);
+        let pair_body = bb.par(slot1, slot2);
+        let pair_inner = bb.symbolic(slot2, pair_body);
+        let pair = bb.symbolic(slot1, pair_inner);
+        (slot7, passthrough, pair)
+    };
+
+    let slot_arity =
+        box_arity(&arena, slot7, &mut ArityCache::new()).expect("slot arity should infer");
+    assert_eq!(slot_arity.inputs, 0);
+    assert_eq!(slot_arity.outputs, 1);
+
+    let fallback = propagate(&mut arena, slot7, &[], &mut ArityCache::new())
+        .expect("raw slot should lower to deterministic dummy input");
+    assert_eq!(match_sig(&arena, fallback[0]), SigMatch::Input(7));
+
+    let inputs = make_sig_input_list(&mut arena, 2);
+    let passthrough_out = propagate(
+        &mut arena,
+        passthrough,
+        &inputs[..1],
+        &mut ArityCache::new(),
+    )
+    .expect("symbolic(slot, slot) should forward its bound input");
+    assert_eq!(passthrough_out, vec![inputs[0]]);
+
+    let pair_arity = box_arity(&arena, pair, &mut ArityCache::new())
+        .expect("nested symbolic arity should infer");
+    assert_eq!(pair_arity.inputs, 2);
+    assert_eq!(pair_arity.outputs, 2);
+
+    let pair_out = propagate(&mut arena, pair, &inputs, &mut ArityCache::new())
+        .expect("nested symbolic should preserve remaining inputs");
+    assert_eq!(pair_out, inputs);
+}
+
+#[test]
 fn propagate_extended_math_primitives_map_to_signal_nodes() {
     let mut arena = TreeArena::new();
     let (

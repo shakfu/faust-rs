@@ -33,6 +33,7 @@ use tlib::{NodeKind, TreeArena, TreeId, tree_to_int};
 
 /// Memoization cache for [`box_arity`] results, keyed by `BoxId`.
 pub type ArityCache = AHashMap<BoxId, Result<BoxArity, PropagateError>>;
+type SlotEnv = AHashMap<BoxId, SigId>;
 
 pub const CRATE_NAME: &str = "propagate";
 const DEBRUIJN_TAG: &str = "DEBRUIJN";
@@ -408,6 +409,10 @@ fn box_arity_inner(
             inputs: 0,
             outputs: 1,
         }),
+        BoxMatch::Slot(_) => Ok(BoxArity {
+            inputs: 0,
+            outputs: 1,
+        }),
         BoxMatch::Wire => Ok(BoxArity {
             inputs: 1,
             outputs: 1,
@@ -516,6 +521,13 @@ fn box_arity_inner(
         }
         BoxMatch::VGroup(_, expr) | BoxMatch::HGroup(_, expr) | BoxMatch::TGroup(_, expr) => {
             box_arity(arena, expr, cache)
+        }
+        BoxMatch::Symbolic(_, body) => {
+            let inner = box_arity(arena, body, cache)?;
+            Ok(BoxArity {
+                inputs: inner.inputs + 1,
+                outputs: inner.outputs,
+            })
         }
         BoxMatch::Seq(left, right) => {
             let left_arity = box_arity(arena, left, cache)?;
@@ -696,6 +708,27 @@ pub fn propagate(
     inputs: &[SigId],
     cache: &mut ArityCache,
 ) -> Result<Vec<SigId>, PropagateError> {
+    let mut slot_env = SlotEnv::default();
+    propagate_in_slot_env(arena, box_tree, inputs, cache, &mut slot_env)
+}
+
+/// Propagates one box tree with an explicit slot environment.
+///
+/// Source provenance (C++):
+/// - `compiler/propagate/propagate.cpp`
+/// - `propagate(...)`
+///
+/// C++ threads a dedicated `slotenv` alongside the normal recursion so
+/// `boxSymbolic(slot, body)` can bind the first input bus to `boxSlot(slot)`.
+/// Rust keeps the same semantic mechanism but uses a local hash map keyed by the
+/// canonical `BoxId` of each slot node instead of global tree properties.
+fn propagate_in_slot_env(
+    arena: &mut TreeArena,
+    box_tree: BoxId,
+    inputs: &[SigId],
+    cache: &mut ArityCache,
+    slot_env: &mut SlotEnv,
+) -> Result<Vec<SigId>, PropagateError> {
     let arity = box_arity(arena, box_tree, cache)?;
     if inputs.len() != arity.inputs {
         return Err(PropagateError::InputArityMismatch {
@@ -704,7 +737,7 @@ pub fn propagate(
             got: inputs.len(),
         });
     }
-    let outputs = propagate_inner(arena, box_tree, inputs, cache)?;
+    let outputs = propagate_inner(arena, box_tree, inputs, cache, slot_env)?;
     if outputs.len() != arity.outputs {
         return Err(PropagateError::OutputArityMismatch {
             node: box_tree,
@@ -721,6 +754,7 @@ fn propagate_inner(
     box_tree: BoxId,
     inputs: &[SigId],
     cache: &mut ArityCache,
+    slot_env: &mut SlotEnv,
 ) -> Result<Vec<SigId>, PropagateError> {
     match match_box(arena, box_tree) {
         BoxMatch::Int(value) => {
@@ -732,6 +766,15 @@ fn propagate_inner(
             expect_input_arity(box_tree, inputs, 0)?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.real(value)])
+        }
+        BoxMatch::Slot(id) => {
+            expect_input_arity(box_tree, inputs, 0)?;
+            if let Some(sig) = slot_env.get(&box_tree).copied() {
+                Ok(vec![sig])
+            } else {
+                let mut b = SigBuilder::new(arena);
+                Ok(vec![b.input(id)])
+            }
         }
         BoxMatch::Wire => {
             expect_input_arity(box_tree, inputs, 1)?;
@@ -859,7 +902,24 @@ fn propagate_inner(
             Ok(vec![size, waveform])
         }
         BoxMatch::VGroup(_, expr) | BoxMatch::HGroup(_, expr) | BoxMatch::TGroup(_, expr) => {
-            propagate(arena, expr, inputs, cache)
+            propagate_in_slot_env(arena, expr, inputs, cache, slot_env)
+        }
+        BoxMatch::Symbolic(slot, body) => {
+            if inputs.is_empty() {
+                return Err(PropagateError::InputArityMismatch {
+                    node: box_tree,
+                    expected: 1,
+                    got: 0,
+                });
+            }
+            let previous = slot_env.insert(slot, inputs[0]);
+            let result = propagate_in_slot_env(arena, body, &inputs[1..], cache, slot_env);
+            if let Some(sig) = previous {
+                slot_env.insert(slot, sig);
+            } else {
+                slot_env.remove(&slot);
+            }
+            result
         }
         BoxMatch::Seq(left, right) => {
             let left_arity = box_arity(arena, left, cache)?;
@@ -871,18 +931,20 @@ fn propagate_inner(
                     right_inputs: right_arity.inputs,
                 });
             }
-            let mid = propagate(arena, left, inputs, cache)?;
-            propagate(arena, right, &mid, cache)
+            let mid = propagate_in_slot_env(arena, left, inputs, cache, slot_env)?;
+            propagate_in_slot_env(arena, right, &mid, cache, slot_env)
         }
         BoxMatch::Par(left, right) => {
             let left_arity = box_arity(arena, left, cache)?;
             let right_arity = box_arity(arena, right, cache)?;
-            let left_out = propagate(arena, left, &inputs[..left_arity.inputs], cache)?;
-            let mut right_out = propagate(
+            let left_out =
+                propagate_in_slot_env(arena, left, &inputs[..left_arity.inputs], cache, slot_env)?;
+            let mut right_out = propagate_in_slot_env(
                 arena,
                 right,
                 &inputs[left_arity.inputs..left_arity.inputs + right_arity.inputs],
                 cache,
+                slot_env,
             )?;
             let mut out = left_out;
             out.append(&mut right_out);
@@ -898,9 +960,9 @@ fn propagate_inner(
                     right_inputs: right_arity.inputs,
                 });
             }
-            let left_out = propagate(arena, left, inputs, cache)?;
+            let left_out = propagate_in_slot_env(arena, left, inputs, cache, slot_env)?;
             let split_in = split_signals(&left_out, right_arity.inputs);
-            propagate(arena, right, &split_in, cache)
+            propagate_in_slot_env(arena, right, &split_in, cache, slot_env)
         }
         BoxMatch::Merge(left, right) => {
             let left_arity = box_arity(arena, left, cache)?;
@@ -912,9 +974,9 @@ fn propagate_inner(
                     right_inputs: right_arity.inputs,
                 });
             }
-            let left_out = propagate(arena, left, inputs, cache)?;
+            let left_out = propagate_in_slot_env(arena, left, inputs, cache, slot_env)?;
             let merge_in = mix_signals(arena, &left_out, right_arity.inputs);
-            propagate(arena, right, &merge_in, cache)
+            propagate_in_slot_env(arena, right, &merge_in, cache, slot_env)
         }
         BoxMatch::Rec(left, right) => {
             let left_arity = box_arity(arena, left, cache)?;
@@ -930,12 +992,12 @@ fn propagate_inner(
             }
 
             let l0 = make_mem_sig_proj_list(arena, right_arity.inputs)?;
-            let l1 = propagate(arena, right, &l0, cache)?;
+            let l1 = propagate_in_slot_env(arena, right, &l0, cache, slot_env)?;
 
             let mut rec_inputs = l1;
             rec_inputs.extend(lift_signals(arena, inputs));
 
-            let l2 = propagate(arena, left, &rec_inputs, cache)?;
+            let l2 = propagate_in_slot_env(arena, left, &rec_inputs, cache, slot_env)?;
             let group_body = vec_to_list(arena, &l2);
             let group = debruijn_rec(arena, group_body);
 

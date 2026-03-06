@@ -8,6 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use compiler::Compiler;
+use signals::{SigMatch, match_sig};
 
 fn corpus_path(file: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -261,58 +262,34 @@ fn eval_undefined_symbol_alias_chain_exposes_rule_computed_and_template_help() {
 }
 
 #[test]
-fn eval_compound_fixture_exposes_cause_and_template_notes() {
+fn eval_compound_fixture_now_lowers_through_case_semantics() {
     let compiler = Compiler::new();
     let source = read_corpus("err_15_eval_compound_with_letrec_case_arity.dsp");
-    let err = compiler
+    let out = compiler
         .compile_source_to_signals("err_15_eval_compound_with_letrec_case_arity.dsp", &source)
-        .expect_err("fixture should fail in propagate stage for case nodes");
-    let diagnostics = err
-        .diagnostics()
-        .expect("propagate error should expose diagnostics");
-    let first = diagnostics
-        .as_slice()
-        .first()
-        .expect("diagnostics should not be empty");
-    assert!(
-        first.notes.iter().any(|n| n
-            .as_ref()
-            .starts_with("cause: encountered box node family is not supported")),
-        "compound case fixture should expose unsupported-family cause note"
-    );
-    assert!(
-        first
-            .help
-            .iter()
-            .any(|h| h.as_ref().starts_with("evaluate box expression first")),
-        "compound case fixture should expose deterministic fallback help"
+        .expect("fixture should now compile to signals");
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+    assert_eq!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Int(1)
     );
 }
 
 #[test]
-fn case_arity_fixture_currently_reports_propagate_stage_diagnostics() {
+fn case_arity_fixture_now_lowers_through_under_application_semantics() {
     let compiler = Compiler::new();
     let source = read_corpus("err_11_eval_case_arity_mismatch.dsp");
-    let err = compiler
+    let out = compiler
         .compile_source_to_signals("err_11_eval_case_arity_mismatch.dsp", &source)
-        .expect_err("fixture should currently fail in propagate stage");
-    let diagnostics = err
-        .diagnostics()
-        .expect("propagate error should expose diagnostics");
-    let first = diagnostics
-        .as_slice()
-        .first()
-        .expect("propagate diagnostics should not be empty");
-    assert!(
-        first.code.0.starts_with("FRS-PROP-"),
-        "case-arity fixture should currently expose FRS-PROP-* diagnostics"
-    );
-    assert!(
-        first
-            .notes
-            .iter()
-            .any(|n| n.as_ref() == "error originates from definition 'foo'"),
-        "case-arity fixture should still expose owner definition note"
+        .expect("fixture should now compile to signals");
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+    assert_eq!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Int(1)
     );
 }
 

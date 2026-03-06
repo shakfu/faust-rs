@@ -1370,6 +1370,7 @@ mod tests {
     use compiler::Compiler;
     use errors::{Diagnostic, DiagnosticBundle, DiagnosticCode, Severity, SourceSpan, Stage};
     use serde_json::Value;
+    use signals::{SigMatch, match_sig};
 
     use super::{
         CliArgs, CliLang, ErrorVerbosity, format_diagnostics_human,
@@ -2083,21 +2084,18 @@ $TMPFILE:1:13: error [FRS-PROP-0002] split composition mismatch
     }
 
     #[test]
-    fn diagnostics_human_renderer_snapshot_for_compound_case_propagate_fallback() {
+    fn diagnostics_human_renderer_compound_case_fixture_now_compiles() {
         let compiler = Compiler::new();
         let path = corpus_path("err_15_eval_compound_with_letrec_case_arity.dsp");
-        let err = compiler
+        let out = compiler
             .compile_file_default_to_signals(&path)
-            .expect_err("fixture should fail in propagate stage");
-        let diagnostics = err
-            .diagnostics()
-            .expect("fixture error should expose diagnostics");
-        let rendered = format_diagnostics_human(diagnostics);
-        let path_text = path.to_string_lossy().to_string();
-        let normalized = rendered.replace(&path_text, "$FIXTURE");
-
-        assert!(normalized.contains("error [FRS-PROP-0001] unsupported box node"));
-        assert!(normalized.contains("cause: encountered box node family is not supported"));
-        assert!(normalized.contains("binding_trace=process -> bar -> foo"));
+            .expect("fixture should now compile to signals");
+        assert_eq!(out.process_arity.inputs, 1);
+        assert_eq!(out.process_arity.outputs, 1);
+        assert_eq!(out.signals.len(), 1);
+        assert_eq!(
+            match_sig(&out.parse.state.arena, out.signals[0]),
+            SigMatch::Int(1)
+        );
     }
 }

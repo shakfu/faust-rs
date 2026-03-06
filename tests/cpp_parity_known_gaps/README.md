@@ -10,28 +10,29 @@ Purpose:
   default golden snapshots,
 - provide focused inputs for manual differential runs and future parity gates.
 
-These files are currently expected to be accepted by the C++ reference compiler
-while the Rust port still diverges in parse or eval semantics.
+These files were added as focused C++ parity reproducers. The parser/eval
+pipeline now accepts all current entries; they are kept here until they are
+promoted into the regular parity guardrails.
 
 ## Current entries
 
 - `gap_01_pattern_def_constant_clause.dsp`
   - purpose: patterned definition with a constant clause followed by a variable
     clause
-  - current gap:
+  - current status:
     - C++: accepted
-    - Rust: parser/eval now accept it, but the signal pipeline still stops in
-      `propagate` because the normalized definition lowers to a `case` node and
-      `a2sb()` is still missing
+    - Rust: fixed through parser `prepare_pattern` + eval `a2sb`
+  - next step:
+    - promote this fixture into the regular parity guardrails
 
 - `gap_02_pattern_def_clause_grouping.dsp`
   - purpose: repeated same-name definition clauses that should be grouped into a
     single pattern-based definition family
-  - current gap:
+  - current status:
     - C++: accepted
-    - Rust: parser/eval now group the clauses correctly, but the signal
-      pipeline still stops in `propagate` because the grouped definition lowers
-      to a `case` node and `a2sb()` is still missing
+    - Rust: fixed through parser `prepare_pattern` + eval `a2sb`
+  - next step:
+    - promote this fixture into the regular parity guardrails
 
 - `gap_03_case_pattern_constant_folding.dsp`
   - purpose: `case` pattern requiring compile-time pattern evaluation

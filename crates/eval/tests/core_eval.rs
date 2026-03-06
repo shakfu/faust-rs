@@ -666,3 +666,100 @@ fn eval_process_with_stats_returns_consistent_result_and_stats() {
         stats.env_layers_pushed
     );
 }
+
+#[test]
+fn eval_process_lowers_residual_abstraction_to_symbolic_box() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+    let x = make_ident(&mut arena, "x");
+    let lambda = BoxBuilder::new(&mut arena).abstr(x, x);
+    let def_process = make_def(&mut arena, "process", nil, lambda);
+    let defs = make_defs(&mut arena, &[def_process]);
+
+    let out = eval_process(&mut arena, defs).expect("residual abstraction should lower via a2sb");
+    let BoxMatch::Symbolic(slot, body) = match_box(&arena, out) else {
+        panic!("expected symbolic box after a2sb lowering");
+    };
+    assert_eq!(
+        body, slot,
+        "identity lambda should lower to symbolic(slot, slot)"
+    );
+    assert!(matches!(match_box(&arena, slot), BoxMatch::Slot(_)));
+}
+
+#[test]
+fn eval_process_lowers_residual_case_to_symbolic_box() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+    let x = make_ident(&mut arena, "x");
+    let px = BoxBuilder::new(&mut arena).pattern_var(x);
+    let rule = make_rule1(&mut arena, px, x);
+    let rules = make_rules_parser_order(&mut arena, &[rule]);
+    let case_expr = BoxBuilder::new(&mut arena).case(rules);
+    let def_process = make_def(&mut arena, "process", nil, case_expr);
+    let defs = make_defs(&mut arena, &[def_process]);
+
+    let out = eval_process(&mut arena, defs).expect("residual case should lower via a2sb");
+    let BoxMatch::Symbolic(slot, body) = match_box(&arena, out) else {
+        panic!("expected symbolic box after case lowering");
+    };
+    assert_eq!(
+        body, slot,
+        "identity case should lower to symbolic(slot, slot)"
+    );
+    assert!(matches!(match_box(&arena, slot), BoxMatch::Slot(_)));
+}
+
+#[test]
+fn eval_process_modulation_without_matching_widget_leaves_body_unchanged() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+    let label = arena.string_lit("gain");
+    let modulation_var = arena.cons(label, nil);
+    let wire = make_wire(&mut arena);
+    let modulation = BoxBuilder::new(&mut arena).modulation(modulation_var, wire);
+    let def_process = make_def(&mut arena, "process", nil, modulation);
+    let defs = make_defs(&mut arena, &[def_process]);
+
+    let out = eval_process(&mut arena, defs).expect("modulation should evaluate");
+    assert!(matches!(match_box(&arena, out), BoxMatch::Wire));
+}
+
+#[test]
+fn eval_process_modulation_implants_default_mul_around_matching_slider() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+    let label = arena.string_lit("gain");
+    let modulation_var = arena.cons(label, nil);
+    let slider = {
+        let mut b = BoxBuilder::new(&mut arena);
+        let cur = b.real(0.5);
+        let min = b.real(0.0);
+        let max = b.real(1.0);
+        let step = b.real(0.01);
+        b.hslider(label, cur, min, max, step)
+    };
+    let modulation = BoxBuilder::new(&mut arena).modulation(modulation_var, slider);
+    let def_process = make_def(&mut arena, "process", nil, modulation);
+    let defs = make_defs(&mut arena, &[def_process]);
+
+    let out = eval_process(&mut arena, defs).expect("matching modulation should evaluate");
+    let BoxMatch::Symbolic(slot, body) = match_box(&arena, out) else {
+        panic!("default modulation should produce a symbolic wrapper");
+    };
+    let BoxMatch::Seq(pair, mul) = match_box(&arena, body) else {
+        panic!("matching modulation should sequence par(widget, slot) into mul");
+    };
+    assert!(matches!(match_box(&arena, mul), BoxMatch::Mul));
+    let BoxMatch::Par(widget, slot_ref) = match_box(&arena, pair) else {
+        panic!("modulated widget should be paired with slot");
+    };
+    assert_eq!(
+        slot_ref, slot,
+        "slot used in par(widget, slot) should match wrapper slot"
+    );
+    assert!(matches!(
+        match_box(&arena, widget),
+        BoxMatch::HSlider(_, _, _, _, _)
+    ));
+}

@@ -262,6 +262,24 @@ fn corpus_sine_phasor_lowers_to_gain_times_sin_of_feedback_phase() {
     ));
 }
 
+#[test]
+fn corpus_modulation_wrappers_without_matching_widgets_reduce_to_identity() {
+    for file in [
+        "rep_32_modulation_single.dsp",
+        "rep_33_modulation_chain.dsp",
+    ] {
+        let out = compile_corpus(file);
+        assert_eq!(out.process_arity.inputs, 1, "{file} should keep 1 input");
+        assert_eq!(out.process_arity.outputs, 1, "{file} should keep 1 output");
+        assert_eq!(out.signals.len(), 1, "{file} should lower to one signal");
+        assert_eq!(
+            match_sig(&out.parse.state.arena, out.signals[0]),
+            SigMatch::Input(0),
+            "{file} should reduce to input(0)"
+        );
+    }
+}
+
 fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i32) {
     let SigMatch::BinOp(BinOp::Mul, a, b) = match_sig(arena, sig) else {
         panic!("branch should be Mul");

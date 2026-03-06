@@ -473,7 +473,7 @@ impl ParseState {
             } else {
                 let nil = self.nil();
                 let rules = self.cons(first_payload, nil);
-                self.node_builder().case(rules)
+                self.node_case_checked(rules)
             }
         } else {
             let Some(expected_arity) = self.list_len_strict(first_args) else {
@@ -509,7 +509,7 @@ impl ParseState {
                 prev_body = body;
                 rules = self.cons(*payload, rules);
             }
-            self.node_builder().case(rules)
+            self.node_case_checked(rules)
         };
 
         let nil = self.nil();

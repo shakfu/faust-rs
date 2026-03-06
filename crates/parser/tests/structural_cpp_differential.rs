@@ -29,6 +29,18 @@ fn definition_name(arena: &TreeArena, def: TreeId) -> String {
     }
 }
 
+fn case_rules(arena: &TreeArena, expr: TreeId) -> TreeId {
+    match match_box(arena, expr) {
+        BoxMatch::Case(rules) => rules,
+        other => panic!("expected BOXCASE, got {:?}", other),
+    }
+}
+
+fn rule_first_pattern(arena: &TreeArena, rule: TreeId) -> TreeId {
+    let lhs = list_head(arena, rule);
+    list_head(arena, lhs)
+}
+
 fn find_definition_expr(arena: &TreeArena, mut defs: TreeId, expected: &str) -> Option<TreeId> {
     while !arena.is_nil(defs) {
         let def = arena.hd(defs)?;
@@ -264,5 +276,31 @@ fn production_parser_groups_patterned_and_multi_clause_definitions_like_cpp() {
             1,
             "foo should be grouped into one definition for {name}"
         );
+
+        let rules = case_rules(&output.state.arena, foo_expr);
+        let mut cursor = rules;
+        let mut saw_pattern_var = false;
+        let mut saw_zero_literal = false;
+        while !output.state.arena.is_nil(cursor) {
+            let rule = list_head(&output.state.arena, cursor);
+            let pattern = rule_first_pattern(&output.state.arena, rule);
+            saw_pattern_var |= matches!(
+                match_box(&output.state.arena, pattern),
+                BoxMatch::PatternVar(_)
+            );
+            saw_zero_literal |= matches!(output.state.arena.kind(pattern), Some(NodeKind::Int(0)));
+            cursor = list_tail(&output.state.arena, cursor);
+        }
+        assert!(
+            saw_pattern_var,
+            "at least one clause should be wrapped as BOXPATVAR for {name}"
+        );
+
+        if name == "patterned_constant_clause" {
+            assert!(
+                saw_zero_literal,
+                "constant clause should stay literal for {name}"
+            );
+        }
     }
 }
