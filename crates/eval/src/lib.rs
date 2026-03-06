@@ -108,7 +108,7 @@
 //!
 //! | Operation | C++ implementation | C++ cost | Rust implementation | Rust cost |
 //! |---|---|---|---|---|
-//! | **Scope push** | `tree(unique("ENV_LAYER"), lenv)` — alloc in hash-cons pool | O(1) amortized + hash | `Vec::new()` + `Box::new(parent.clone())` | O(parent_size) clone |
+//! | **Scope push** | `tree(unique("ENV_LAYER"), lenv)` — alloc in hash-cons pool | O(1) amortized + hash | arena layer allocation + `EnvId` handle clone | O(1) |
 //! | **Bind one symbol** | `setProperty(node, id, def)` — hash map insert on tree node | O(1) amortized | `Vec::push((sym, id))` | O(1) amortized |
 //! | **Lookup (found at depth d)** | Walk d layers, `getProperty` hash probe per layer | O(d) hash probes | Reverse `u32` scan per layer O(n_local), recurse O(d) | O(d × n_local) — O(1) per compare |
 //! | **Value size per binding** | `Tree*` pointer to closure node (~64 bytes closure) | Large | `(u32, u32)` — 8 bytes (`SymId` + `TreeId`) | Excellent |
@@ -120,9 +120,9 @@
 //! probes due to cache locality and SIMD-friendly layout. Each comparison is O(1) — two `u32`
 //! integer compares — matching the cost of C++ hash-cons pointer equality.
 //!
-//! **Remaining Rust opportunity**: the `push_scope()` clone cost is the most significant overhead
-//! for deep scope chains. Replacing `Option<Box<Environment>>` with an index into a scope arena
-//! would eliminate all cloning, at the cost of a more complex API.
+//! The current Rust representation already uses stable `EnvId` layer identities in a shared
+//! environment arena. This matches the next closure-porting requirement while keeping the public
+//! evaluator API unchanged.
 //!
 //! # Scope of this crate
 //! - Name resolution against definition environments with redefinition detection.
@@ -146,6 +146,7 @@
 //! (`propagate`, typing, signal transforms). It does not emit signals directly.
 
 use std::fmt::{Display, Formatter};
+use std::sync::{Arc, Mutex};
 
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::codes;
@@ -185,6 +186,14 @@ pub const CRATE_NAME: &str = "eval";
 /// | Name resolution | [`symbol_name(&self)`](TreeArena::symbol_name) | `&` | Diagnostics only |
 pub type SymId = u32;
 
+/// Stable identifier of one evaluator environment layer.
+///
+/// The C++ evaluator uses the `Tree` pointer identity of each `ENV_LAYER` node as the semantic
+/// environment identity. The Rust port uses a dense arena index instead. This is the first step
+/// toward the full captured-closure port because recursion tracking and closure forcing need a
+/// stable `(symbol, environment)` key, not just a raw expression id.
+pub type EnvId = usize;
+
 /// Lexical evaluation environment mapping symbol names to box-IR tree nodes.
 ///
 /// # Architecture
@@ -212,7 +221,7 @@ pub type SymId = u32;
 /// | Storage | Hash-consed tree nodes with property tables | `Vec<(u32, TreeId)>` — interned `SymId` |
 /// | Values stored | **Closures**: `closure(expr, genv, visited, lenv)` capturing the scope at definition time | **Bare `TreeId`** in the current adapted model |
 /// | Lookup | `searchIdDef`: walks layers calling `getProperty` (hash probe per layer) | `lookup`: reverse linear scan of `Vec`, then recurse to `parent` |
-/// | Scope push | `pushNewLayer(lenv)` — allocates a unique tree node | `push_scope()` — `Vec::new()` + `Box::new(parent.clone())` |
+/// | Scope push | `pushNewLayer(lenv)` — allocates a unique tree node | `push_scope()` — allocate one arena layer and return its `EnvId` handle |
 /// | Redefinition | `addLayerDef` throws `faustexception` on conflicting rebind | `bind_definitions` returns `EvalError::RedefinedSymbol` |
 /// | Barrier | `pushEnvBarrier` / `isEnvBarrier` — stops pattern-matcher lookup | `push_barrier_scope()` / `lookup_until_barrier()` |
 /// | Env copy/rewire | `copyEnvReplaceDefs` + `updateClosures` — for captured-env rewrites | Deferred in the current Rust model |
@@ -224,15 +233,25 @@ pub type SymId = u32;
 /// - **Lookup**: O(d × n) where d = depth, n = bindings/scope. Each compare is O(1) — `u32`
 ///   integer equality. In practice ~30–150 comparisons — fits entirely in L1 cache.
 /// - **Bind**: `Vec::push` — amortized O(1), no hashing, no pointer chasing.
-/// - **Push scope**: O(parent_size) due to `clone`. This is the dominant cost for deeply
-///   nested scopes. A scope-arena design would eliminate it entirely.
+/// - **Push scope**: O(1) one-layer allocation in the shared environment arena.
 /// - **Memory per binding**: **8 bytes** (`u32` SymId + `u32` TreeId) vs C++'s ~64 bytes per
 ///   closure node. SIMD-scannable `Vec<(u32, u32)>` layout — 4 bindings per 32-byte cache line.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Environment {
+    store: Arc<Mutex<EnvStore>>,
+    current: EnvId,
+}
+
+#[derive(Clone, Debug, Default)]
+struct EnvLayer {
     bindings: Vec<(SymId, TreeId)>,
-    parent: Option<Box<Environment>>,
+    parent: Option<EnvId>,
     barrier: bool,
+}
+
+#[derive(Debug, Default)]
+struct EnvStore {
+    layers: Vec<EnvLayer>,
 }
 
 impl Environment {
@@ -242,11 +261,25 @@ impl Environment {
     /// `pushMultiClosureDefs` call in `eval.cpp`.
     #[must_use]
     pub fn empty() -> Self {
+        let mut store = EnvStore::default();
+        store.layers.push(EnvLayer::default());
         Self {
-            bindings: Vec::new(),
-            parent: None,
-            barrier: false,
+            store: Arc::new(Mutex::new(store)),
+            current: 0,
         }
+    }
+
+    /// Returns the stable id of the current environment layer.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/evaluate/environment.cpp`
+    /// - `pushNewLayer`
+    ///
+    /// In C++, environment identity is carried by the `Tree` pointer of the `ENV_LAYER` node.
+    /// In Rust it is carried by this dense arena index.
+    #[must_use]
+    pub fn id(&self) -> EnvId {
+        self.current
     }
 
     /// Binds one symbol to a tree node in the **current scope** (not a parent).
@@ -261,7 +294,9 @@ impl Environment {
     ///
     /// `sym` must be obtained from [`TreeArena::intern_symbol`] before calling this method.
     pub fn bind(&mut self, sym: SymId, value: TreeId) {
-        self.bindings.push((sym, value));
+        self.with_store_mut(|store| {
+            store.layers[self.current].bindings.push((sym, value));
+        });
     }
 
     /// Looks up a symbol across the full scope chain (current scope and all parents).
@@ -286,12 +321,19 @@ impl Environment {
     /// [`TreeArena::get_symbol`].
     #[must_use]
     pub fn lookup(&self, sym: SymId) -> Option<TreeId> {
-        for (s, value) in self.bindings.iter().rev() {
-            if *s == sym {
-                return Some(*value);
+        self.with_store(|store| {
+            let mut env_id = Some(self.current);
+            while let Some(id) = env_id {
+                let layer = &store.layers[id];
+                for (s, value) in layer.bindings.iter().rev() {
+                    if *s == sym {
+                        return Some(*value);
+                    }
+                }
+                env_id = layer.parent;
             }
-        }
-        self.parent.as_ref().and_then(|p| p.lookup(sym))
+            None
+        })
     }
 
     /// Looks up a symbol across the current scope chain but stops when a barrier scope is reached.
@@ -307,17 +349,22 @@ impl Environment {
     /// [`lookup`](Self::lookup), but they must not participate in pattern-variable equality checks.
     #[must_use]
     pub fn lookup_until_barrier(&self, sym: SymId) -> Option<TreeId> {
-        for (s, value) in self.bindings.iter().rev() {
-            if *s == sym {
-                return Some(*value);
+        self.with_store(|store| {
+            let mut env_id = Some(self.current);
+            while let Some(id) = env_id {
+                let layer = &store.layers[id];
+                for (s, value) in layer.bindings.iter().rev() {
+                    if *s == sym {
+                        return Some(*value);
+                    }
+                }
+                if layer.barrier {
+                    return None;
+                }
+                env_id = layer.parent;
             }
-        }
-        if self.barrier {
-            return None;
-        }
-        self.parent
-            .as_ref()
-            .and_then(|p| p.lookup_until_barrier(sym))
+            None
+        })
     }
 
     /// Looks up a symbol in the **current scope only**, without consulting any parent.
@@ -341,12 +388,14 @@ impl Environment {
     /// [`TreeArena::get_symbol`].
     #[must_use]
     pub fn lookup_local(&self, sym: SymId) -> Option<TreeId> {
-        for (s, value) in self.bindings.iter().rev() {
-            if *s == sym {
-                return Some(*value);
+        self.with_store(|store| {
+            for (s, value) in store.layers[self.current].bindings.iter().rev() {
+                if *s == sym {
+                    return Some(*value);
+                }
             }
-        }
-        None
+            None
+        })
     }
 
     /// Creates a new child scope whose parent is `self`.
@@ -361,16 +410,10 @@ impl Environment {
     /// }
     /// ```
     ///
-    /// **Cost**: `O(parent_size)` due to cloning the parent environment. For deeply nested
-    /// scopes this is the dominant allocation cost. A scope-arena design (indexing into a
-    /// flat pool instead of boxing) would make this O(1).
+    /// **Cost**: `O(1)` layer allocation in the shared environment arena.
     #[must_use]
     pub fn push_scope(&self) -> Self {
-        Self {
-            bindings: Vec::new(),
-            parent: Some(Box::new(self.clone())),
-            barrier: false,
-        }
+        self.push_child(false)
     }
 
     /// Creates a new child scope that acts as a pattern-matching barrier.
@@ -385,10 +428,22 @@ impl Environment {
     /// `searchIdDef`.
     #[must_use]
     pub fn push_barrier_scope(&self) -> Self {
+        self.push_child(true)
+    }
+
+    fn push_child(&self, barrier: bool) -> Self {
+        let current = self.with_store_mut(|store| {
+            let next_id = store.layers.len();
+            store.layers.push(EnvLayer {
+                bindings: Vec::new(),
+                parent: Some(self.current),
+                barrier,
+            });
+            next_id
+        });
         Self {
-            bindings: Vec::new(),
-            parent: Some(Box::new(self.clone())),
-            barrier: true,
+            store: Arc::clone(&self.store),
+            current,
         }
     }
 
@@ -401,11 +456,13 @@ impl Environment {
     /// human-readable diagnostics.
     #[must_use]
     pub fn local_names(&self, arena: &TreeArena) -> Vec<String> {
-        let mut out = self
-            .bindings
-            .iter()
-            .filter_map(|(sym, _)| arena.symbol_name(*sym).map(str::to_owned))
-            .collect::<Vec<_>>();
+        let mut out = self.with_store(|store| {
+            store.layers[self.current]
+                .bindings
+                .iter()
+                .filter_map(|(sym, _)| arena.symbol_name(*sym).map(str::to_owned))
+                .collect::<Vec<_>>()
+        });
         out.sort();
         out.dedup();
         out
@@ -417,10 +474,21 @@ impl Environment {
     /// Names are sorted and deduplicated — a name shadowed in an inner scope appears only once.
     #[must_use]
     pub fn visible_names(&self, arena: &TreeArena) -> Vec<String> {
-        let mut out = self.local_names(arena);
-        if let Some(parent) = &self.parent {
-            out.extend(parent.visible_names(arena));
-        }
+        let mut out = self.with_store(|store| {
+            let mut names = Vec::new();
+            let mut env_id = Some(self.current);
+            while let Some(id) = env_id {
+                let layer = &store.layers[id];
+                names.extend(
+                    layer
+                        .bindings
+                        .iter()
+                        .filter_map(|(sym, _)| arena.symbol_name(*sym).map(str::to_owned)),
+                );
+                env_id = layer.parent;
+            }
+            names
+        });
         out.sort();
         out.dedup();
         out
@@ -432,10 +500,36 @@ impl Environment {
     /// helping users see what top-level definitions are available when a symbol is not found.
     #[must_use]
     pub fn top_level_names(&self, arena: &TreeArena) -> Vec<String> {
-        match &self.parent {
-            Some(parent) => parent.top_level_names(arena),
-            None => self.local_names(arena),
-        }
+        let mut out = self.with_store(|store| {
+            let mut env_id = self.current;
+            while let Some(parent) = store.layers[env_id].parent {
+                env_id = parent;
+            }
+            store.layers[env_id]
+                .bindings
+                .iter()
+                .filter_map(|(sym, _)| arena.symbol_name(*sym).map(str::to_owned))
+                .collect::<Vec<_>>()
+        });
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn with_store<R>(&self, f: impl FnOnce(&EnvStore) -> R) -> R {
+        let guard = self.store.lock().expect("environment store lock poisoned");
+        f(&guard)
+    }
+
+    fn with_store_mut<R>(&self, f: impl FnOnce(&mut EnvStore) -> R) -> R {
+        let mut guard = self.store.lock().expect("environment store lock poisoned");
+        f(&mut guard)
+    }
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        Self::empty()
     }
 }
 
@@ -570,9 +664,9 @@ impl Default for LoopDetector {
 /// - **`env_lookups / nodes_evaluated`**: average lookups per evaluated node. High values (> 3)
 ///   indicate deeply bound symbols that might benefit from flattening or interning.
 /// - **`env_lookup_total_depth / env_lookups`**: average scope depth traversed per lookup.
-///   Values > 3 indicate deep scope chains where caching or scope-arena would help.
+///   Values > 3 indicate deep scope chains where caching may help.
 /// - **`env_layers_pushed / nodes_evaluated`**: scope-push frequency. High values for iterative
-///   forms (`ipar`/`iseq`) are expected and can be reduced with a scope-arena.
+///   forms (`ipar`/`iseq`) are expected.
 #[derive(Clone, Debug, Default)]
 pub struct EvalStats {
     /// Number of child scopes created via `push_scope()`.

@@ -114,6 +114,35 @@ fn eval_box_resolves_with_local_scope() {
 }
 
 #[test]
+fn environment_push_scope_assigns_stable_ids_and_preserves_parent_lookup() {
+    let mut arena = TreeArena::new();
+    let sym_x = arena.intern_symbol("x");
+    let wire = make_wire(&mut arena);
+
+    let mut root = Environment::empty();
+    let root_id = root.id();
+    root.bind(sym_x, wire);
+
+    let child = root.push_scope();
+    let child_id = child.id();
+    let barrier = child.push_barrier_scope();
+    let barrier_id = barrier.id();
+
+    assert_ne!(root_id, child_id, "child scope should get a fresh EnvId");
+    assert_ne!(
+        child_id, barrier_id,
+        "barrier scope should get its own stable EnvId"
+    );
+    assert_eq!(child.lookup(sym_x), Some(wire));
+    assert_eq!(barrier.lookup(sym_x), Some(wire));
+    assert_eq!(
+        barrier.lookup_until_barrier(sym_x),
+        None,
+        "barrier lookup should stop before reaching the parent binding"
+    );
+}
+
+#[test]
 fn eval_process_reports_missing_process() {
     let mut arena = TreeArena::new();
     let nil = arena.nil();
