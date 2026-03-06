@@ -288,6 +288,25 @@ fn eval_process_access_uses_captured_environment_scope() {
 }
 
 #[test]
+fn eval_box_access_on_non_closure_reports_error() {
+    let mut arena = TreeArena::new();
+    let wire = make_wire(&mut arena);
+    let ident = make_ident(&mut arena, "a");
+    let expr = BoxBuilder::new(&mut arena).access(wire, ident);
+
+    let mut loop_detector = LoopDetector::new();
+    let err = eval_box(&mut arena, expr, &Environment::empty(), &mut loop_detector)
+        .expect_err("access on plain box value should fail");
+    assert!(matches!(
+        err,
+        EvalError::ExpectedClosureValue {
+            context: "access",
+            ..
+        }
+    ));
+}
+
+#[test]
 fn eval_process_modif_local_def_rewrites_enclosed_closure_envs() {
     let mut arena = TreeArena::new();
     let nil = arena.nil();

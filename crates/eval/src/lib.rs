@@ -1580,10 +1580,10 @@ fn eval_access_value(
     if let EvalValue::Closure(closure) = &eval_body {
         return eval_value(arena, field, &closure.env, loop_detector);
     }
-    let eval_field = eval_box(arena, field, env, loop_detector)?;
-    let eval_body = force_value_to_box(arena, eval_body, loop_detector)?;
-    let mut b = BoxBuilder::new(arena);
-    Ok(EvalValue::Box(b.access(eval_body, eval_field)))
+    Err(EvalError::ExpectedClosureValue {
+        node: body,
+        context: "access",
+    })
 }
 
 /// Evaluates `expr [ defs ]` by copying the captured closure environment and replacing bindings.
