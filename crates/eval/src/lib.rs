@@ -51,7 +51,7 @@
 //! - **Performance stats** tracked in `gGlobal->gStats`: `fEnvLayersPushed`,
 //!   `fEnvLookups`, `fEnvLookupTotalDepth`.
 //!
-//! ## Rust model: imperative `Vec`-based scoped environment with direct bindings
+//! ## Current Rust model (adapted): imperative `Vec`-based scoped environment with direct bindings
 //!
 //! The Rust environment is an **imperative `Vec<(SymId, TreeId)>` with an optional parent
 //! pointer**. Definitions are stored as **bare `TreeId`s** (32-bit handles into the `TreeArena`),
@@ -69,34 +69,38 @@
 //!   Environment { bindings: [("process", id_expr_p)], parent: None }
 //! ```
 //!
-//! ## Why no closures are needed in Rust
+//! ## Why explicit closures were deferred in the current Rust port
 //!
-//! The C++ closure model is required because C++ evaluation is *demand-driven*: closures are
-//! evaluated lazily when their symbol is first looked up. The closure must carry the environment
-//! at definition time to ensure lexical scoping.
+//! The current Rust evaluator deferred explicit closure objects and instead relies on eager
+//! environment threading: `eval_box` always receives the current `env`, and `push_scope()`
+//! constructs the lexical scope visible to child evaluations.
 //!
-//! In Rust, evaluation is *eager and explicit*: `eval_box` always receives the current `env`
-//! parameter. When entering a `with` block, `push_scope()` creates a child scope containing the
-//! new bindings, and that child scope is passed to all recursive calls. This statically guarantees
-//! that every sub-expression sees exactly the bindings that were in scope at its definition site.
+//! This adaptation was sufficient to restore several important parity points:
+//! - grouped/patterned definitions,
+//! - evaluated `case` patterns before matcher construction,
+//! - barrier semantics for repeated pattern variables,
+//! - adapted `a2sb` lowering of residual `abstr` / `case` forms.
 //!
-//! **Semantic equivalence**: For any well-formed Faust program, `eval_cpp(P)` and `eval_rust(P)`
-//! produce identical box trees, because:
-//! 1. `push_scope()` is always called before introducing new bindings.
-//! 2. Faust has no imperative mutation of environments — scopes are always additive.
-//! 3. `with`/`letrec` bodies are evaluated in the scope that includes their own definitions
-//!    (enabling mutual reference), both in C++ and in Rust.
-//! 4. Pattern-matching bindings are collected in a barrier child scope, so repeated pattern
-//!    variables only see bindings introduced by the current rule while normal RHS evaluation
-//!    still sees the outer lexical environment.
+//! It is **not** a 1:1 port of the C++ closure model, however. The remaining structural gap is
+//! that C++ stores `closure(expr, genv, visited, lenv)` values in each environment layer, while
+//! Rust still stores bare `TreeId`s and reuses the caller environment when forcing a definition.
+//! This matters for the full semantics of:
+//! - `access` through captured environments,
+//! - `boxModifLocalDef` / `expr { defs }` environment rewriting,
+//! - recursion tracking keyed by `(id, env)`,
+//! - closure-driven `a2sb` lowering.
+//!
+//! Current mapping status: **adapted**. The preferred parity direction is now to port the true
+//! captured-closure model from `compiler/evaluate/environment.cpp` / `eval.cpp`; see
+//! `porting/eval-true-closure-model-port-plan-2026-03-06-en.md`.
 //!
 //! ## Divergences from C++ (intentional)
 //!
 //! | Feature | C++ | Rust | Notes |
 //! |---|---|---|---|
-//! | Value stored | `closure(expr, genv, visited, lenv)` | Bare `TreeId` | Not needed (eager eval) |
+//! | Value stored | `closure(expr, genv, visited, lenv)` | Bare `TreeId` | Current adapted model; true closure port still pending |
 //! | Barrier mechanism | `pushEnvBarrier` / `searchIdDef` | `push_barrier_scope()` + `lookup_until_barrier()` | Same semantics |
-//! | `copyEnvReplaceDefs` | Present (letrec env rewiring) | Not needed | Flat `push_scope` is equivalent |
+//! | `copyEnvReplaceDefs` | Present (env rewiring) | Deferred | Current eager model has no direct equivalent yet |
 //! | Redefinition check | `addLayerDef` throws on conflict | `bind_definitions` returns `EvalError::RedefinedSymbol` | Same semantics, typed error |
 //! | Profiling | `gGlobal->gStats` (global mutable) | `EvalStats` (returned value) | Safer, composable |
 //!
@@ -206,12 +210,12 @@ pub type SymId = u32;
 /// | Aspect | C++ (`environment.cpp`) | Rust (`Environment`) |
 /// |---|---|---|
 /// | Storage | Hash-consed tree nodes with property tables | `Vec<(u32, TreeId)>` — interned `SymId` |
-/// | Values stored | **Closures**: `closure(expr, genv, visited, lenv)` capturing the scope at definition time | **Bare `TreeId`** — no scope capture needed |
+/// | Values stored | **Closures**: `closure(expr, genv, visited, lenv)` capturing the scope at definition time | **Bare `TreeId`** in the current adapted model |
 /// | Lookup | `searchIdDef`: walks layers calling `getProperty` (hash probe per layer) | `lookup`: reverse linear scan of `Vec`, then recurse to `parent` |
 /// | Scope push | `pushNewLayer(lenv)` — allocates a unique tree node | `push_scope()` — `Vec::new()` + `Box::new(parent.clone())` |
 /// | Redefinition | `addLayerDef` throws `faustexception` on conflicting rebind | `bind_definitions` returns `EvalError::RedefinedSymbol` |
 /// | Barrier | `pushEnvBarrier` / `isEnvBarrier` — stops pattern-matcher lookup | `push_barrier_scope()` / `lookup_until_barrier()` |
-/// | Env copy/rewire | `copyEnvReplaceDefs` + `updateClosures` — for letrec env fixup | Not needed — `push_scope` + flat binding is equivalent |
+/// | Env copy/rewire | `copyEnvReplaceDefs` + `updateClosures` — for captured-env rewrites | Deferred in the current Rust model |
 /// | Profiling | `gGlobal->gStats.fEnvLayersPushed/fEnvLookups/fEnvLookupTotalDepth` | [`EvalStats`] returned from [`eval_process_with_stats`] |
 ///
 /// # Performance
@@ -1191,10 +1195,12 @@ fn fresh_slot(arena: &mut TreeArena, loop_detector: &mut LoopDetector) -> TreeId
 /// `apply_list` via `infer_box_arity` — the C++ counterpart threads arity through the
 /// evaluator for immediate wire-insertion decisions.
 ///
-/// The key structural difference: C++ `eval` calls `evalClosure(exp, …)` when it encounters a
-/// closure, which evaluates `expr` in the **captured** environment. Rust `eval_box` on `Ident`
-/// looks up the bare `TreeId` and evaluates it in the **current** `env` — semantically equivalent
-/// because `push_scope()` always establishes the correct lexical scope before any binding.
+/// The key structural difference today: C++ `eval` calls `evalClosure(exp, …)` when it
+/// encounters a closure, which evaluates `expr` in the **captured** environment. Rust
+/// `eval_box` on `Ident` still looks up the bare `TreeId` and evaluates it in the **current**
+/// `env`. This adapted model is sufficient for the currently-covered corpus, but it is not yet
+/// a 1:1 port of captured-environment semantics for `access`, `boxModifLocalDef`, and related
+/// environment-rewrite paths.
 pub fn eval_box(
     arena: &mut TreeArena,
     expr: TreeId,
@@ -1700,7 +1706,7 @@ fn map_children(
 ///
 /// | C++ call site | Rust equivalent |
 /// |---|---|
-/// | `pushMultiClosureDefs(ldefs, visited, lenv)` | `bind_definitions(arena, defs, &mut scoped)` |
+/// | `pushMultiClosureDefs(ldefs, visited, lenv)` | `bind_definitions(arena, defs, &mut scoped)` in the current adapted model |
 /// | `pushValueDef(id, def, lenv)` | `env.bind(name, value)` (single-binding fast path) |
 fn bind_definitions(
     arena: &mut TreeArena,

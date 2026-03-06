@@ -7,6 +7,14 @@
 > - `/Users/letz/Developpements/RUST/faust/compiler/parser`
 > - `/Users/letz/Developpements/RUST/faust/compiler/evaluate`
 > **Status**: semantic-gap analysis and correction plan
+>
+> **Update later on 2026-03-06**:
+> the parser grouped-definition parity, evaluated `case` patterns with barrier
+> semantics, and the adapted `a2sb` / `slot` / `symbolic` lowering path have
+> since been implemented in Rust. The main remaining structural evaluation gap
+> is now the absence of the true captured-closure environment model from C++.
+> The follow-up plan for that direction is documented in
+> `porting/eval-true-closure-model-port-plan-2026-03-06-en.md`.
 
 ---
 
