@@ -232,6 +232,62 @@ fn eval_process_forces_definitions_in_their_captured_scope() {
 }
 
 #[test]
+fn eval_process_applies_abstractions_in_their_captured_scope() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+
+    let one = BoxBuilder::new(&mut arena).int(1);
+    let root_y = make_def(&mut arena, "y", nil, one);
+
+    let x_ident = make_ident(&mut arena, "x");
+    let y_ident = make_ident(&mut arena, "y");
+    let params_rev = arena.cons(x_ident, nil);
+    let f = make_def(&mut arena, "f", params_rev, y_ident);
+
+    let zero = BoxBuilder::new(&mut arena).int(0);
+    let args = arena.cons(zero, nil);
+    let f_ident = make_ident(&mut arena, "f");
+    let app = BoxBuilder::new(&mut arena).appl(f_ident, args);
+    let two = BoxBuilder::new(&mut arena).int(2);
+    let local_y = make_def(&mut arena, "y", nil, two);
+    let locals = make_defs(&mut arena, &[local_y]);
+    let process_expr = BoxBuilder::new(&mut arena).with_local_def(app, locals);
+    let process = make_def(&mut arena, "process", nil, process_expr);
+
+    let root = make_defs(&mut arena, &[root_y, f, process]);
+    let out =
+        eval_process(&mut arena, root).expect("abstraction application should use captured scope");
+    expect_int(&arena, out, 1);
+}
+
+#[test]
+fn eval_process_access_uses_captured_environment_scope() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+
+    let env_box = BoxBuilder::new(&mut arena).environment();
+    let one = BoxBuilder::new(&mut arena).int(1);
+    let env_a = make_def(&mut arena, "a", nil, one);
+    let env_defs = make_defs(&mut arena, &[env_a]);
+    let env_value = BoxBuilder::new(&mut arena).with_local_def(env_box, env_defs);
+    let e = make_def(&mut arena, "e", nil, env_value);
+
+    let field = make_ident(&mut arena, "a");
+    let e_ident = make_ident(&mut arena, "e");
+    let access = BoxBuilder::new(&mut arena).access(e_ident, field);
+
+    let two = BoxBuilder::new(&mut arena).int(2);
+    let local_a = make_def(&mut arena, "a", nil, two);
+    let locals = make_defs(&mut arena, &[local_a]);
+    let process_expr = BoxBuilder::new(&mut arena).with_local_def(access, locals);
+    let process = make_def(&mut arena, "process", nil, process_expr);
+
+    let root = make_defs(&mut arena, &[e, process]);
+    let out = eval_process(&mut arena, root).expect("access should resolve through captured env");
+    expect_int(&arena, out, 1);
+}
+
+#[test]
 fn eval_box_non_closure_application_falls_back_to_seq_par() {
     let mut arena = TreeArena::new();
     let one = BoxBuilder::new(&mut arena).int(1);

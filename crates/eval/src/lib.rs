@@ -57,7 +57,8 @@
 //! `Vec<(SymId, EvalValue)>`, where a binding is currently either:
 //! - one plain box tree (`EvalValue::Box`) for immediate values such as pattern substitutions
 //!   or lambda-parameter shadowing sentinels,
-//! - one captured definition closure (`EvalValue::Closure`) for parser definitions.
+//! - one captured closure (`EvalValue::Closure`) for parser definitions and residual
+//!   abstraction/environment values.
 //!
 //! Lexical scoping is implemented explicitly by allocating a child layer (`push_scope()`) before
 //! evaluating any sub-expression that introduces new bindings, then threading that child scope
@@ -73,9 +74,10 @@
 //!
 //! ## Why explicit closures were deferred in the current Rust port
 //!
-//! The current Rust evaluator deferred explicit closure objects and instead relies on eager
-//! environment threading: `eval_box` always receives the current `env`, and `push_scope()`
-//! constructs the lexical scope visible to child evaluations.
+//! The initial Rust evaluator deferred explicit closure objects and instead relied entirely on
+//! eager environment threading. The current port has now introduced explicit closure values for
+//! parser definitions, abstractions, and environment-like access targets, while later lowering
+//! stages still consume box IR.
 //!
 //! This adaptation was sufficient to restore several important parity points:
 //! - grouped/patterned definitions,
@@ -101,7 +103,7 @@
 //!
 //! | Feature | C++ | Rust | Notes |
 //! |---|---|---|---|
-//! | Value stored | `closure(expr, genv, visited, lenv)` | `EvalValue::{Box, Closure}` | Definition capture is now explicit; abstraction/environment closures still pending |
+//! | Value stored | `closure(expr, genv, visited, lenv)` | `EvalValue::{Box, Closure}` | Definition, abstraction, and environment capture are explicit; pattern-matcher/env-rewrite closures still pending |
 //! | Barrier mechanism | `pushEnvBarrier` / `searchIdDef` | `push_barrier_scope()` + `lookup_until_barrier()` | Same semantics |
 //! | `copyEnvReplaceDefs` | Present (env rewiring) | Deferred | Current eager model has no direct equivalent yet |
 //! | Redefinition check | `addLayerDef` throws on conflict | `bind_definitions` returns `EvalError::RedefinedSymbol` | Same semantics, typed error |
@@ -112,10 +114,10 @@
 //! | Operation | C++ implementation | C++ cost | Rust implementation | Rust cost |
 //! |---|---|---|---|---|
 //! | **Scope push** | `tree(unique("ENV_LAYER"), lenv)` — alloc in hash-cons pool | O(1) amortized + hash | arena layer allocation + `EnvId` handle clone | O(1) |
-//! | **Bind one symbol** | `setProperty(node, id, def)` — hash map insert on tree node | O(1) amortized | `Vec::push((sym, id))` | O(1) amortized |
+//! | **Bind one symbol** | `setProperty(node, id, def)` — hash map insert on tree node | O(1) amortized | `Vec::push((sym, value))` | O(1) amortized |
 //! | **Lookup (found at depth d)** | Walk d layers, `getProperty` hash probe per layer | O(d) hash probes | Reverse `u32` scan per layer O(n_local), recurse O(d) | O(d × n_local) — O(1) per compare |
-//! | **Value size per binding** | `Tree*` pointer to closure node (~64 bytes closure) | Large | `(u32, u32)` — 8 bytes (`SymId` + `TreeId`) | Excellent |
-//! | **Cache locality** | Pointer-chased linked list through hash-cons pool | Poor (pointer indirection) | Contiguous `Vec<(u32,u32)>` — SIMD-scannable | Excellent (sequential) |
+//! | **Value size per binding** | `Tree*` pointer to closure node (~64 bytes closure) | Large | `SymId + EvalValue` in one arena layer | Moderate, but explicit and cache-friendly |
+//! | **Cache locality** | Pointer-chased linked list through hash-cons pool | Poor (pointer indirection) | Contiguous `Vec<(SymId, EvalValue)>` per layer | Good |
 //! | **Concurrency** | Global `gGlobal` state, not thread-safe | N/A | Fully `Send`/`Sync`, no global state | Thread-safe |
 //!
 //! **In practice**: for typical Faust programs (< 200 top-level definitions, scope depth ≤ 5,
@@ -1244,9 +1246,9 @@ pub fn eval_process_with_stats(
 /// - `real_a2sb`
 ///
 /// The C++ evaluator applies `a2sb(eval(...))` before the propagation phase so
-/// `propagate` never receives raw closures or pattern matchers. Rust does not
-/// materialize explicit closure nodes, so this helper operates directly on the
-/// residual evaluated `BoxMatch::Abstr` and `BoxMatch::Case` shapes:
+/// `propagate` never receives raw closures or pattern matchers. Rust now
+/// materializes closures internally, but this helper still lowers the residual
+/// evaluated `BoxMatch::Abstr` and `BoxMatch::Case` shapes:
 ///
 /// - `abstr(x, body)` becomes `symbolic(slot, lowered(body[x := slot]))`
 /// - `case { ... }` becomes one nested `symbolic(slot_i, ...)` per expected
@@ -1361,41 +1363,34 @@ fn fresh_slot(arena: &mut TreeArena, loop_detector: &mut LoopDetector) -> TreeId
     b.slot(loop_detector.next_slot_id)
 }
 
-/// Evaluates one box expression in the provided lexical environment.
+/// Evaluates one box expression in the provided lexical environment and forces it back to box IR.
 ///
-/// This is the core recursive evaluator. It dispatches on the `BoxMatch` of `expr` and:
-/// - **Resolves identifiers** (`Ident`) by lookup in `env` and recursive evaluation.
-/// - **Beta-reduces applications** (`Appl`) by evaluating function and arguments, then calling
-///   `apply_list`.
-/// - **Evaluates `with`/`letrec` scopes** (`WithLocalDef`, `WithRecDef`) by pushing a child
-///   scope, binding the local definitions, and evaluating the body in the new scope.
-/// - **Evaluates abstractions** (`Abstr`) by binding the parameter in a child scope and
-///   evaluating the body — effectively normalizing the abstraction body at eval time.
-/// - **Expands iterative forms** (`IPar`, `ISeq`, `ISum`, `IProd`) into equivalent box
-///   compositions, fully unrolled for the given count.
-/// - **Maps over children** for all other nodes (`Unknown`, structural primitives) without
-///   reducing the node itself.
-///
-/// # C++ correspondence
-///
-/// Corresponds to `eval(Tree exp, int numInputs, int numOutputs)` in `eval.cpp`. The Rust
-/// version does not carry `numInputs`/`numOutputs` because arity inference is done lazily in
-/// `apply_list` via `infer_box_arity` — the C++ counterpart threads arity through the
-/// evaluator for immediate wire-insertion decisions.
-///
-/// Current closure-port status:
-/// - top-level and local parser definitions now resolve through explicit captured closures and
-///   are forced in the environment where they were bound,
-/// - lambda abstractions and environment-like values are still handled by the adapted path and
-///   are not yet materialized as first-class evaluator closures.
+/// Internally the evaluator now produces [`EvalValue`] first, so closures can carry a captured
+/// environment before being lowered back to a `TreeId` for later passes.
 pub fn eval_box(
     arena: &mut TreeArena,
     expr: TreeId,
     env: &Environment,
     loop_detector: &mut LoopDetector,
 ) -> Result<TreeId, EvalError> {
+    let value = eval_value(arena, expr, env, loop_detector)?;
+    force_value_to_box(arena, value, loop_detector)
+}
+
+/// Evaluates one box expression to an intermediate evaluator value.
+fn eval_value(
+    arena: &mut TreeArena,
+    expr: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<EvalValue, EvalError> {
     match match_box(arena, expr) {
-        BoxMatch::Unknown => map_children(arena, expr, env, loop_detector),
+        BoxMatch::Unknown => Ok(EvalValue::Box(map_children(
+            arena,
+            expr,
+            env,
+            loop_detector,
+        )?)),
         BoxMatch::Ident(name) => {
             // get_symbol takes &self — safe to call while `name: &str` borrows `arena`.
             // If the name was never interned (never bound), it cannot be in the env.
@@ -1416,110 +1411,145 @@ pub fn eval_box(
                 EvalValue::Box(value) => {
                     if value == expr {
                         // Shadowing sentinel used for lambda parameters in lexical scopes.
-                        return Ok(expr);
+                        return Ok(EvalValue::Box(expr));
                     }
                     loop_detector.enter_tree(value)?;
-                    let out = eval_box(arena, value, env, loop_detector);
+                    let out = eval_value(arena, value, env, loop_detector);
                     loop_detector.leave();
                     out
                 }
                 EvalValue::Closure(closure) => {
+                    if matches!(
+                        match_box(arena, closure.expr),
+                        BoxMatch::Abstr(_, _) | BoxMatch::Environment
+                    ) {
+                        return Ok(EvalValue::Closure(closure));
+                    }
                     loop_detector.enter_symbol_env(binding_sym, binding_env_id, closure.expr)?;
-                    let out = eval_box(arena, closure.expr, &closure.env, loop_detector);
+                    let out = eval_value(arena, closure.expr, &closure.env, loop_detector);
                     loop_detector.leave();
                     out
                 }
             }
         }
         BoxMatch::Appl(fun, arg) => {
-            let efun = eval_box(arena, fun, env, loop_detector)?;
+            let efun = eval_value(arena, fun, env, loop_detector)?;
             let rev_args = rev_eval_list(arena, arg, env, loop_detector)?;
-            apply_list(arena, efun, rev_args, env, loop_detector, Some(fun))
+            Ok(EvalValue::Box(apply_value_list(
+                arena,
+                efun,
+                rev_args,
+                env,
+                loop_detector,
+                Some(fun),
+            )?))
         }
-        BoxMatch::Access(body, field) => eval_access(arena, body, field, env, loop_detector),
-        BoxMatch::Case(_) => Ok(expr),
-        BoxMatch::PatternVar(_) => Ok(expr),
+        BoxMatch::Access(body, field) => eval_access_value(arena, body, field, env, loop_detector),
+        BoxMatch::Case(_) => Ok(EvalValue::Box(expr)),
+        BoxMatch::PatternVar(_) => Ok(EvalValue::Box(expr)),
         BoxMatch::WithLocalDef(body, defs) => {
             let mut scoped = env.push_scope();
             bind_definitions(arena, defs, &mut scoped)?;
-            eval_box(arena, body, &scoped, loop_detector)
+            eval_value(arena, body, &scoped, loop_detector)
         }
         BoxMatch::WithRecDef(body, rec_defs, where_defs) => {
             let mut scoped = env.push_scope();
             bind_definitions(arena, rec_defs, &mut scoped)?;
             bind_definitions(arena, where_defs, &mut scoped)?;
-            eval_box(arena, body, &scoped, loop_detector)
+            eval_value(arena, body, &scoped, loop_detector)
         }
-        BoxMatch::Abstr(arg, body) => {
-            let mut scoped = env.push_scope();
-            let name = ident_name(arena, arg)?;
-            // intern_symbol is safe here: `name` is an owned String, not borrowed from arena.
-            let sym = arena.intern_symbol(&name);
-            // Parameter shadows outer binding in body capture.
-            scoped.bind(sym, arg);
-            let evaluated_body = eval_box(arena, body, &scoped, loop_detector)?;
-            let mut b = BoxBuilder::new(arena);
-            Ok(b.abstr(arg, evaluated_body))
-        }
-        BoxMatch::Modulation(var, body) => {
-            eval_modulation(arena, expr, var, body, env, loop_detector)
-        }
-        BoxMatch::IPar(index, count, body) => {
-            iterate_par(arena, index, count, body, env, loop_detector)
-        }
-        BoxMatch::ISeq(index, count, body) => {
-            iterate_seq(arena, index, count, body, env, loop_detector)
-        }
-        BoxMatch::ISum(index, count, body) => {
-            iterate_sum(arena, index, count, body, env, loop_detector)
-        }
-        BoxMatch::IProd(index, count, body) => {
-            iterate_prod(arena, index, count, body, env, loop_detector)
-        }
-        _ => map_children(arena, expr, env, loop_detector),
+        BoxMatch::Abstr(_, _) | BoxMatch::Environment => Ok(EvalValue::Closure(ClosureValue {
+            expr,
+            env: env.clone(),
+        })),
+        BoxMatch::Modulation(var, body) => Ok(EvalValue::Box(eval_modulation(
+            arena,
+            expr,
+            var,
+            body,
+            env,
+            loop_detector,
+        )?)),
+        BoxMatch::IPar(index, count, body) => Ok(EvalValue::Box(iterate_par(
+            arena,
+            index,
+            count,
+            body,
+            env,
+            loop_detector,
+        )?)),
+        BoxMatch::ISeq(index, count, body) => Ok(EvalValue::Box(iterate_seq(
+            arena,
+            index,
+            count,
+            body,
+            env,
+            loop_detector,
+        )?)),
+        BoxMatch::ISum(index, count, body) => Ok(EvalValue::Box(iterate_sum(
+            arena,
+            index,
+            count,
+            body,
+            env,
+            loop_detector,
+        )?)),
+        BoxMatch::IProd(index, count, body) => Ok(EvalValue::Box(iterate_prod(
+            arena,
+            index,
+            count,
+            body,
+            env,
+            loop_detector,
+        )?)),
+        _ => Ok(EvalValue::Box(map_children(
+            arena,
+            expr,
+            env,
+            loop_detector,
+        )?)),
     }
 }
 
-/// Evaluates `expr.ident` access with Faust environment semantics.
-///
-/// When `expr` evaluates to an environment-like form, `ident` is resolved inside
-/// this scoped environment. Otherwise the access node is reconstructed on evaluated
-/// children.
-fn eval_access(
+fn force_value_to_box(
+    arena: &mut TreeArena,
+    value: EvalValue,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    match value {
+        EvalValue::Box(id) => Ok(id),
+        EvalValue::Closure(closure) => match match_box(arena, closure.expr) {
+            BoxMatch::Abstr(arg, body) => {
+                let mut scoped = closure.env.push_scope();
+                let name = ident_name(arena, arg)?;
+                let sym = arena.intern_symbol(&name);
+                scoped.bind(sym, arg);
+                let evaluated_body = eval_box(arena, body, &scoped, loop_detector)?;
+                let mut b = BoxBuilder::new(arena);
+                Ok(b.abstr(arg, evaluated_body))
+            }
+            BoxMatch::Environment => Ok(closure.expr),
+            _ => eval_box(arena, closure.expr, &closure.env, loop_detector),
+        },
+    }
+}
+
+/// Evaluates `expr.ident` access with closure-aware Faust environment semantics.
+fn eval_access_value(
     arena: &mut TreeArena,
     body: TreeId,
     field: TreeId,
     env: &Environment,
     loop_detector: &mut LoopDetector,
-) -> Result<TreeId, EvalError> {
-    match match_box(arena, body) {
-        BoxMatch::WithLocalDef(inner, defs) => {
-            let mut scoped = env.push_scope();
-            bind_definitions(arena, defs, &mut scoped)?;
-            let inner_eval = eval_box(arena, inner, &scoped, loop_detector)?;
-            if matches!(match_box(arena, inner_eval), BoxMatch::Environment) {
-                return eval_box(arena, field, &scoped, loop_detector);
-            }
-        }
-        BoxMatch::WithRecDef(inner, rec_defs, where_defs) => {
-            let mut scoped = env.push_scope();
-            bind_definitions(arena, rec_defs, &mut scoped)?;
-            bind_definitions(arena, where_defs, &mut scoped)?;
-            let inner_eval = eval_box(arena, inner, &scoped, loop_detector)?;
-            if matches!(match_box(arena, inner_eval), BoxMatch::Environment) {
-                return eval_box(arena, field, &scoped, loop_detector);
-            }
-        }
-        _ => {}
-    }
-
-    let eval_body = eval_box(arena, body, env, loop_detector)?;
-    if matches!(match_box(arena, eval_body), BoxMatch::Environment) {
-        return eval_box(arena, field, env, loop_detector);
+) -> Result<EvalValue, EvalError> {
+    let eval_body = eval_value(arena, body, env, loop_detector)?;
+    if let EvalValue::Closure(closure) = &eval_body {
+        return eval_value(arena, field, &closure.env, loop_detector);
     }
     let eval_field = eval_box(arena, field, env, loop_detector)?;
+    let eval_body = force_value_to_box(arena, eval_body, loop_detector)?;
     let mut b = BoxBuilder::new(arena);
-    Ok(b.access(eval_body, eval_field))
+    Ok(EvalValue::Box(b.access(eval_body, eval_field)))
 }
 
 /// Evaluates one modulation form and rewrites matching widgets in the body.
@@ -2069,6 +2099,58 @@ fn rev_eval_list(
 ///   non-closure style `seq(par(args + implicit_wires), case)` for C++ parity.
 /// - other node families: C++-compatible non-closure lowering to `seq(par(args), fun)`,
 ///   including implicit wire insertion for partial applications.
+fn apply_value_list(
+    arena: &mut TreeArena,
+    fun: EvalValue,
+    larg: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+    call_site: Option<TreeId>,
+) -> Result<TreeId, EvalError> {
+    if arena.is_nil(larg) {
+        return force_value_to_box(arena, fun, loop_detector);
+    }
+
+    match fun {
+        EvalValue::Box(fun) => apply_list(arena, fun, larg, env, loop_detector, call_site),
+        EvalValue::Closure(closure) => match match_box(arena, closure.expr) {
+            BoxMatch::Ident(_) => {
+                let forced = eval_value(arena, closure.expr, &closure.env, loop_detector)?;
+                apply_value_list(arena, forced, larg, env, loop_detector, call_site)
+            }
+            BoxMatch::Environment => Err(EvalError::TooManyArguments {
+                node: call_site.unwrap_or(closure.expr),
+                expected: 0,
+                got: list_to_vec(arena, larg)?.len(),
+            }),
+            BoxMatch::Abstr(id, body) => {
+                let param_name = ident_name(arena, id)?;
+                let arg = arena
+                    .hd(larg)
+                    .ok_or(EvalError::MalformedListNode { node: larg })?;
+                let mut scoped = closure.env.push_scope();
+                let sym = arena.intern_symbol(&param_name);
+                scoped.bind_value(
+                    sym,
+                    EvalValue::Closure(ClosureValue {
+                        expr: arg,
+                        env: env.clone(),
+                    }),
+                );
+                let f = eval_value(arena, body, &scoped, loop_detector)?;
+                let tl = arena
+                    .tl(larg)
+                    .ok_or(EvalError::MalformedListNode { node: larg })?;
+                apply_value_list(arena, f, tl, env, loop_detector, call_site)
+            }
+            _ => {
+                let fun = force_value_to_box(arena, EvalValue::Closure(closure), loop_detector)?;
+                apply_list(arena, fun, larg, env, loop_detector, call_site)
+            }
+        },
+    }
+}
+
 fn apply_list(
     arena: &mut TreeArena,
     fun: TreeId,
