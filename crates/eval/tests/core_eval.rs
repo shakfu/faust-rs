@@ -288,6 +288,101 @@ fn eval_process_access_uses_captured_environment_scope() {
 }
 
 #[test]
+fn eval_process_modif_local_def_rewrites_enclosed_closure_envs() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+
+    let one = BoxBuilder::new(&mut arena).int(1);
+    let env_a = make_def(&mut arena, "a", nil, one);
+    let a_ident = make_ident(&mut arena, "a");
+    let env_b = make_def(&mut arena, "b", nil, a_ident);
+    let env_defs = make_defs(&mut arena, &[env_a, env_b]);
+    let env_box = BoxBuilder::new(&mut arena).environment();
+    let env_value = BoxBuilder::new(&mut arena).with_local_def(env_box, env_defs);
+    let e = make_def(&mut arena, "e", nil, env_value);
+
+    let two = BoxBuilder::new(&mut arena).int(2);
+    let replacement_a = make_def(&mut arena, "a", nil, two);
+    let replacements = make_defs(&mut arena, &[replacement_a]);
+    let e_ident = make_ident(&mut arena, "e");
+    let rewritten = BoxBuilder::new(&mut arena).modif_local_def(e_ident, replacements);
+    let b_ident = make_ident(&mut arena, "b");
+    let process_expr = BoxBuilder::new(&mut arena).access(rewritten, b_ident);
+    let process = make_def(&mut arena, "process", nil, process_expr);
+
+    let root = make_defs(&mut arena, &[e, process]);
+    let out =
+        eval_process(&mut arena, root).expect("rewritten env should update enclosed closures");
+    expect_int(&arena, out, 2);
+}
+
+#[test]
+fn eval_process_modif_local_def_rewrites_abstraction_capture() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+
+    let one = BoxBuilder::new(&mut arena).int(1);
+    let root_y = make_def(&mut arena, "y", nil, one);
+
+    let x_ident = make_ident(&mut arena, "x");
+    let y_ident = make_ident(&mut arena, "y");
+    let params_rev = arena.cons(x_ident, nil);
+    let f = make_def(&mut arena, "f", params_rev, y_ident);
+
+    let two = BoxBuilder::new(&mut arena).int(2);
+    let replacement_y = make_def(&mut arena, "y", nil, two);
+    let replacements = make_defs(&mut arena, &[replacement_y]);
+    let f_ident = make_ident(&mut arena, "f");
+    let rewritten = BoxBuilder::new(&mut arena).modif_local_def(f_ident, replacements);
+    let zero = BoxBuilder::new(&mut arena).int(0);
+    let args = arena.cons(zero, nil);
+    let process_expr = BoxBuilder::new(&mut arena).appl(rewritten, args);
+    let process = make_def(&mut arena, "process", nil, process_expr);
+
+    let root = make_defs(&mut arena, &[root_y, f, process]);
+    let out = eval_process(&mut arena, root)
+        .expect("rewritten abstraction should use the copied captured environment");
+    expect_int(&arena, out, 2);
+}
+
+#[test]
+fn eval_process_modif_local_def_replacement_defs_capture_current_scope() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+
+    let ten = BoxBuilder::new(&mut arena).int(10);
+    let root_a = make_def(&mut arena, "a", nil, ten);
+
+    let one = BoxBuilder::new(&mut arena).int(1);
+    let env_a = make_def(&mut arena, "a", nil, one);
+    let wire = make_wire(&mut arena);
+    let env_b = make_def(&mut arena, "b", nil, wire);
+    let env_defs = make_defs(&mut arena, &[env_a, env_b]);
+    let env_box = BoxBuilder::new(&mut arena).environment();
+    let env_value = BoxBuilder::new(&mut arena).with_local_def(env_box, env_defs);
+    let e = make_def(&mut arena, "e", nil, env_value);
+
+    let a_ident = make_ident(&mut arena, "a");
+    let replacement_b = make_def(&mut arena, "b", nil, a_ident);
+    let replacements = make_defs(&mut arena, &[replacement_b]);
+    let e_ident = make_ident(&mut arena, "e");
+    let rewritten = BoxBuilder::new(&mut arena).modif_local_def(e_ident, replacements);
+    let b_ident = make_ident(&mut arena, "b");
+    let access_b = BoxBuilder::new(&mut arena).access(rewritten, b_ident);
+
+    let twenty = BoxBuilder::new(&mut arena).int(20);
+    let local_a = make_def(&mut arena, "a", nil, twenty);
+    let locals = make_defs(&mut arena, &[local_a]);
+    let process_expr = BoxBuilder::new(&mut arena).with_local_def(access_b, locals);
+    let process = make_def(&mut arena, "process", nil, process_expr);
+
+    let root = make_defs(&mut arena, &[root_a, e, process]);
+    let out = eval_process(&mut arena, root)
+        .expect("replacement defs should capture the current rewrite scope");
+    expect_int(&arena, out, 20);
+}
+
+#[test]
 fn eval_box_non_closure_application_falls_back_to_seq_par() {
     let mut arena = TreeArena::new();
     let one = BoxBuilder::new(&mut arena).int(1);

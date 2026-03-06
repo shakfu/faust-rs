@@ -91,7 +91,7 @@
 //! pattern-matcher values, or environment-rewrite closures for `boxModifLocalDef`).
 //! This matters for the full semantics of:
 //! - `access` through captured environments,
-//! - `boxModifLocalDef` / `expr { defs }` environment rewriting,
+//! - `boxModifLocalDef` / `expr [ defs ]` environment rewriting,
 //! - recursion tracking keyed by `(id, env)`,
 //! - closure-driven `a2sb` lowering.
 //!
@@ -508,11 +508,15 @@ impl Environment {
     }
 
     fn push_child(&self, barrier: bool) -> Self {
+        self.spawn_child_with_parent(Some(self.current), barrier)
+    }
+
+    fn spawn_child_with_parent(&self, parent: Option<EnvId>, barrier: bool) -> Self {
         let current = self.with_store_mut(|store| {
             let next_id = store.layers.len();
             store.layers.push(EnvLayer {
                 bindings: Vec::new(),
-                parent: Some(self.current),
+                parent,
                 barrier,
             });
             next_id
@@ -521,6 +525,13 @@ impl Environment {
             store: Arc::clone(&self.store),
             current,
         }
+    }
+
+    fn layer_snapshot(&self) -> (Option<EnvId>, bool, Vec<(SymId, EvalValue)>) {
+        self.with_store(|store| {
+            let layer = &store.layers[self.current];
+            (layer.parent, layer.barrier, layer.bindings.clone())
+        })
     }
 
     /// Returns names bound in the **current scope layer only** (no parent traversal).
@@ -869,6 +880,10 @@ pub enum EvalError {
         node: TreeId,
         reason: &'static str,
     },
+    ExpectedClosureValue {
+        node: TreeId,
+        context: &'static str,
+    },
     /// A symbol is redefined with a **different** value within the same lexical scope layer.
     ///
     /// Identical redefinitions (same `first_def == second_def` by `TreeId` identity) are
@@ -949,6 +964,9 @@ impl Display for EvalError {
             }
             Self::InvalidModulationCircuit { reason, .. } => {
                 write!(f, "invalid modulation circuit: {reason}")
+            }
+            Self::ExpectedClosureValue { context, .. } => {
+                write!(f, "{context} requires a captured closure value")
             }
             Self::RedefinedSymbol { symbol, .. } => {
                 write!(
@@ -1093,6 +1111,19 @@ impl IntoDiagnostic for EvalError {
             .with_note("cause: modulation circuit violates Faust box-arity constraints")
             .with_note(format!("computed: {reason}"))
             .with_help("use a modulation circuit with at most 2 inputs and exactly 1 output"),
+            Self::ExpectedClosureValue { context, .. } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_GENERIC_FAILURE,
+                message,
+            )
+            .with_note(
+                "cause: evaluator expected a captured lexical environment but received a plain box value",
+            )
+            .with_note(format!(
+                "rule: `{context}` only applies to values that carry a captured environment"
+            ))
+            .with_help("apply the operator to an environment or abstraction value instead"),
             Self::RedefinedSymbol {
                 symbol,
                 first_def,
@@ -1452,6 +1483,9 @@ fn eval_value(
             bind_definitions(arena, defs, &mut scoped)?;
             eval_value(arena, body, &scoped, loop_detector)
         }
+        BoxMatch::ModifLocalDef(body, defs) => {
+            eval_modif_local_def_value(arena, body, defs, env, loop_detector)
+        }
         BoxMatch::WithRecDef(body, rec_defs, where_defs) => {
             let mut scoped = env.push_scope();
             bind_definitions(arena, rec_defs, &mut scoped)?;
@@ -1550,6 +1584,32 @@ fn eval_access_value(
     let eval_body = force_value_to_box(arena, eval_body, loop_detector)?;
     let mut b = BoxBuilder::new(arena);
     Ok(EvalValue::Box(b.access(eval_body, eval_field)))
+}
+
+/// Evaluates `expr [ defs ]` by copying the captured closure environment and replacing bindings.
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/eval.cpp`
+/// - `compiler/evaluate/environment.cpp`
+/// - `copyEnvReplaceDefs`
+/// - `updateClosures`
+fn eval_modif_local_def_value(
+    arena: &mut TreeArena,
+    body: TreeId,
+    defs: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<EvalValue, EvalError> {
+    match eval_value(arena, body, env, loop_detector)? {
+        EvalValue::Closure(closure) => {
+            let rewritten_env = copy_env_replace_defs(arena, &closure.env, defs, env)?;
+            eval_value(arena, closure.expr, &rewritten_env, loop_detector)
+        }
+        EvalValue::Box(_) => Err(EvalError::ExpectedClosureValue {
+            node: body,
+            context: "modif-local-def",
+        }),
+    }
 }
 
 /// Evaluates one modulation form and rewrites matching widgets in the body.
@@ -1980,6 +2040,75 @@ fn bind_definitions(
             .ok_or(EvalError::MalformedDefinitionNode { node: defs })?;
     }
     Ok(())
+}
+
+fn rewrite_captured_env(
+    value: EvalValue,
+    old_env: &Environment,
+    new_env: &Environment,
+) -> EvalValue {
+    match value {
+        EvalValue::Box(id) => EvalValue::Box(id),
+        EvalValue::Closure(closure) => {
+            if closure.env.same_identity(old_env) {
+                EvalValue::Closure(ClosureValue {
+                    expr: closure.expr,
+                    env: new_env.clone(),
+                })
+            } else {
+                EvalValue::Closure(closure)
+            }
+        }
+    }
+}
+
+/// Creates a modified copy of one captured environment layer and replaces selected definitions.
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/environment.cpp`
+/// - `copyEnvReplaceDefs`
+/// - `updateClosures`
+///
+/// The copied layer reuses the same parent stack as `source_env`, rewires any enclosed closure
+/// that previously captured `source_env` so it now captures the copied layer, then appends the
+/// replacement definitions as closures captured in `current_env`.
+fn copy_env_replace_defs(
+    arena: &mut TreeArena,
+    source_env: &Environment,
+    mut defs: TreeId,
+    current_env: &Environment,
+) -> Result<Environment, EvalError> {
+    let (parent, _barrier, bindings) = source_env.layer_snapshot();
+    let mut copy_env = source_env.spawn_child_with_parent(parent, false);
+
+    for (sym, value) in bindings {
+        copy_env.bind_value(sym, rewrite_captured_env(value, source_env, &copy_env));
+    }
+
+    while !arena.is_nil(defs) {
+        let def = arena
+            .hd(defs)
+            .ok_or(EvalError::MalformedDefinitionNode { node: defs })?;
+        let (name, args, value) = decode_definition(arena, def)?;
+        let bound = if arena.is_nil(args) {
+            value
+        } else {
+            build_abstr_from_parser_args(arena, args, value)?
+        };
+        let sym = arena.intern_symbol(&name);
+        copy_env.bind_value(
+            sym,
+            EvalValue::Closure(ClosureValue {
+                expr: bound,
+                env: current_env.clone(),
+            }),
+        );
+        defs = arena
+            .tl(defs)
+            .ok_or(EvalError::MalformedDefinitionNode { node: defs })?;
+    }
+
+    Ok(copy_env)
 }
 
 /// Decodes one parser definition node into `(name, args, expr)`.
