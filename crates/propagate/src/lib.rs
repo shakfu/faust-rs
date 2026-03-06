@@ -654,6 +654,10 @@ fn box_arity_inner(
             node: box_tree,
             kind: "withlocaldef",
         }),
+        BoxMatch::ModifLocalDef(_, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "modiflocaldef",
+        }),
         BoxMatch::WithRecDef(_, _, _) => Err(PropagateError::UnsupportedBox {
             node: box_tree,
             kind: "withrecdef",
@@ -1066,6 +1070,10 @@ fn propagate_inner(
         BoxMatch::WithLocalDef(_, _) => Err(PropagateError::UnsupportedBox {
             node: box_tree,
             kind: "withlocaldef",
+        }),
+        BoxMatch::ModifLocalDef(_, _) => Err(PropagateError::UnsupportedBox {
+            node: box_tree,
+            kind: "modiflocaldef",
         }),
         BoxMatch::WithRecDef(_, _, _) => Err(PropagateError::UnsupportedBox {
             node: box_tree,

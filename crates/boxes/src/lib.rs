@@ -98,6 +98,7 @@ const BOX_ISEQ_TAG: &str = "BOXISEQ";
 const BOX_ISUM_TAG: &str = "BOXISUM";
 const BOX_IPROD_TAG: &str = "BOXIPROD";
 const BOX_WITH_LOCAL_DEF_TAG: &str = "BOXWITHLOCALDEF";
+const BOX_MODIF_LOCAL_DEF_TAG: &str = "BOXMODIFLOCALDEF";
 const BOX_WITH_REC_DEF_TAG: &str = "BOXWITHRECDEF";
 const BOX_ENVIRONMENT_TAG: &str = "BOXENVIRONMENT";
 const BOX_COMPONENT_TAG: &str = "BOXCOMPONENT";
@@ -576,6 +577,12 @@ impl<'a> BoxBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one box node for `modif_local_def` and returns its `BoxId`.
+    pub fn modif_local_def(&mut self, body: BoxId, ldef: BoxId) -> BoxId {
+        node_modif_local_def(self.arena, body, ldef)
+    }
+
+    #[must_use]
     /// Builds one box node for `with_rec_def` and returns its `BoxId`.
     pub fn with_rec_def(&mut self, body: BoxId, ldef: BoxId, ldef2: BoxId) -> BoxId {
         node_with_rec_def(self.arena, body, ldef, ldef2)
@@ -864,6 +871,7 @@ pub enum BoxMatch<'a> {
     ISum(BoxId, BoxId, BoxId),
     IProd(BoxId, BoxId, BoxId),
     WithLocalDef(BoxId, BoxId),
+    ModifLocalDef(BoxId, BoxId),
     WithRecDef(BoxId, BoxId, BoxId),
     Environment,
     Component(BoxId),
@@ -1019,6 +1027,7 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
                         BOX_ACCESS_TAG => BoxMatch::Access(c0, c1),
                         BOX_SYMBOLIC_TAG => BoxMatch::Symbolic(c0, c1),
                         BOX_WITH_LOCAL_DEF_TAG => BoxMatch::WithLocalDef(c0, c1),
+                        BOX_MODIF_LOCAL_DEF_TAG => BoxMatch::ModifLocalDef(c0, c1),
                         BOX_ABSTR_TAG => BoxMatch::Abstr(c0, c1),
                         BOX_MODULATION_TAG => BoxMatch::Modulation(c0, c1),
                         BOX_VGROUP_TAG => BoxMatch::VGroup(c0, c1),
@@ -1672,6 +1681,24 @@ fn node_with_local_def(arena: &mut TreeArena, body: BoxId, ldef: BoxId) -> BoxId
 #[allow(dead_code)]
 fn is_node_with_local_def(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
     match_binary(arena, b, BOX_WITH_LOCAL_DEF_TAG)
+}
+
+/// Equivalent to C++ `boxModifLocalDef`.
+///
+/// Source provenance (C++):
+/// - `compiler/boxes/boxes.cpp`
+/// - `boxModifLocalDef`
+/// - `isBoxModifLocalDef`
+#[must_use]
+fn node_modif_local_def(arena: &mut TreeArena, body: BoxId, ldef: BoxId) -> BoxId {
+    intern_tag(arena, BOX_MODIF_LOCAL_DEF_TAG, &[body, ldef])
+}
+
+/// Returns `(body, ldef)` when `b` is `node_modif_local_def`.
+#[must_use]
+#[allow(dead_code)]
+fn is_node_modif_local_def(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
+    match_binary(arena, b, BOX_MODIF_LOCAL_DEF_TAG)
 }
 
 /// Adapted representation for C++ `boxWithRecDef`.

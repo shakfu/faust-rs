@@ -15,6 +15,7 @@
 %left DELAY1
 %left DOT
 %left LPAR
+%left LCROC
 
 %token PROCESS
 %token INT FLOAT IDENT STRING FSTRING EXTRA
@@ -404,6 +405,12 @@ InfixExp -> tlib::TreeId:
       }
     | InfixExp LPAR ArgList RPAR {
           crate::with_state(state, |state| state.apply_box($1, $3))
+      }
+    | InfixExp LCROC DefList RCROC {
+          crate::with_state(state, |state| {
+              let defs = state.format_definitions($3);
+              state.modif_local_def_box($1, defs)
+          })
       }
     | Primitive { $1 }
     ;

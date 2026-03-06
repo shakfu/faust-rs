@@ -871,6 +871,12 @@ impl ParseState {
         self.node_builder().access(expr, ident)
     }
 
+    /// Equivalent to C++ `boxModifLocalDef`.
+    #[must_use]
+    pub fn modif_local_def_box(&mut self, expr: TreeId, defs: TreeId) -> TreeId {
+        self.node_builder().modif_local_def(expr, defs)
+    }
+
     fn prim_box(&mut self, op: PrimitiveOp) -> TreeId {
         match op {
             PrimitiveOp::Add => self.node_builder().add(),

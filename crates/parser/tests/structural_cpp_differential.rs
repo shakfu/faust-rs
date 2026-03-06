@@ -304,3 +304,44 @@ fn production_parser_groups_patterned_and_multi_clause_definitions_like_cpp() {
         }
     }
 }
+
+#[test]
+fn production_parser_recognizes_modif_local_def_like_cpp() {
+    let source = "e = environment { a = _; };\nprocess = (e [ a = 1; ]).a;\n";
+
+    if let Some(cpp_bin) = cpp_bin() {
+        let cpp_ok = cpp_accepts_source(cpp_bin.as_path(), source, "modif_local_def")
+            .unwrap_or_else(|e| panic!("C++ run failed for modif_local_def: {e}"));
+        assert!(cpp_ok, "C++ should accept modif-local-def syntax");
+    }
+
+    let output = parse_program(source, "structural_modif_local_def.dsp");
+    assert!(
+        output.errors.is_empty(),
+        "unexpected parse errors for modif-local-def: {:?}",
+        output.errors
+    );
+    let root = output.root.expect("root should be present");
+    let process_expr = find_definition_expr(&output.state.arena, root, "process")
+        .expect("missing process definition");
+    let (modif_expr, field) = match match_box(&output.state.arena, process_expr) {
+        BoxMatch::Access(body, field) => (body, field),
+        other => panic!("expected BOXACCESS over BOXMODIFLOCALDEF, got {:?}", other),
+    };
+    assert!(
+        matches!(match_box(&output.state.arena, field), BoxMatch::Ident("a")),
+        "access field should remain `a`"
+    );
+    let (body, defs) = match match_box(&output.state.arena, modif_expr) {
+        BoxMatch::ModifLocalDef(body, defs) => (body, defs),
+        other => panic!("expected BOXMODIFLOCALDEF, got {:?}", other),
+    };
+    assert!(
+        matches!(match_box(&output.state.arena, body), BoxMatch::Ident("e")),
+        "modif-local-def body should remain the source expression"
+    );
+    assert!(
+        !output.state.arena.is_nil(defs),
+        "modif-local-def should carry formatted definitions"
+    );
+}
