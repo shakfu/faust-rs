@@ -209,6 +209,29 @@ fn eval_process_applies_function_arguments_in_cpp_order() {
 }
 
 #[test]
+fn eval_process_forces_definitions_in_their_captured_scope() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+
+    let one = BoxBuilder::new(&mut arena).int(1);
+    let root_x = make_def(&mut arena, "x", nil, one);
+
+    let x_ident = make_ident(&mut arena, "x");
+    let f = make_def(&mut arena, "f", nil, x_ident);
+
+    let two = BoxBuilder::new(&mut arena).int(2);
+    let local_x = make_def(&mut arena, "x", nil, two);
+    let locals = make_defs(&mut arena, &[local_x]);
+    let f_ident = make_ident(&mut arena, "f");
+    let process_expr = BoxBuilder::new(&mut arena).with_local_def(f_ident, locals);
+    let process = make_def(&mut arena, "process", nil, process_expr);
+
+    let root = make_defs(&mut arena, &[root_x, f, process]);
+    let out = eval_process(&mut arena, root).expect("captured definition should use outer scope");
+    expect_int(&arena, out, 1);
+}
+
+#[test]
 fn eval_box_non_closure_application_falls_back_to_seq_par() {
     let mut arena = TreeArena::new();
     let one = BoxBuilder::new(&mut arena).int(1);

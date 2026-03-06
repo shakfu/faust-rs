@@ -53,20 +53,22 @@
 //!
 //! ## Current Rust model (adapted): imperative `Vec`-based scoped environment with direct bindings
 //!
-//! The Rust environment is an **imperative `Vec<(SymId, TreeId)>` with an optional parent
-//! pointer**. Definitions are stored as **bare `TreeId`s** (32-bit handles into the `TreeArena`),
-//! with no closure wrapping. Lexical scoping is implemented explicitly by constructing a child
-//! scope (`push_scope()`) before evaluating any sub-expression that introduces new bindings, then
-//! threading the child scope down through recursive calls.
+//! The Rust environment is an arena of stable `EnvId` layers. Each layer stores
+//! `Vec<(SymId, EvalValue)>`, where a binding is currently either:
+//! - one plain box tree (`EvalValue::Box`) for immediate values such as pattern substitutions
+//!   or lambda-parameter shadowing sentinels,
+//! - one captured definition closure (`EvalValue::Closure`) for parser definitions.
+//!
+//! Lexical scoping is implemented explicitly by allocating a child layer (`push_scope()`) before
+//! evaluating any sub-expression that introduces new bindings, then threading that child scope
+//! down through recursive calls.
 //!
 //! ```text
 //! Rust env chain:
 //!
-//!   Environment { bindings: [("f", id_expr_f)], parent: Some(→) }
-//!        │ parent
-//!   Environment { bindings: [("x", id_expr_x)], parent: Some(→) }
-//!        │ parent
-//!   Environment { bindings: [("process", id_expr_p)], parent: None }
+//!   EnvId(2) ── bindings { "f" → Closure(expr_f, EnvId(2)) } ── parent = EnvId(1)
+//!   EnvId(1) ── bindings { "x" → Closure(expr_x, EnvId(1)) } ── parent = EnvId(0)
+//!   EnvId(0) ── bindings { "process" → Closure(expr_p, EnvId(0)) }
 //! ```
 //!
 //! ## Why explicit closures were deferred in the current Rust port
@@ -81,9 +83,10 @@
 //! - barrier semantics for repeated pattern variables,
 //! - adapted `a2sb` lowering of residual `abstr` / `case` forms.
 //!
-//! It is **not** a 1:1 port of the C++ closure model, however. The remaining structural gap is
-//! that C++ stores `closure(expr, genv, visited, lenv)` values in each environment layer, while
-//! Rust still stores bare `TreeId`s and reuses the caller environment when forcing a definition.
+//! It is **not** a 1:1 port of the full C++ closure model, however. Rust now stores captured
+//! definition closures in environment layers, but it still does not expose all evaluator values
+//! that C++ carries (`closure(expr, genv, visited, lenv)` for abstractions/environments,
+//! pattern-matcher values, or environment-rewrite closures for `boxModifLocalDef`).
 //! This matters for the full semantics of:
 //! - `access` through captured environments,
 //! - `boxModifLocalDef` / `expr { defs }` environment rewriting,
@@ -98,7 +101,7 @@
 //!
 //! | Feature | C++ | Rust | Notes |
 //! |---|---|---|---|
-//! | Value stored | `closure(expr, genv, visited, lenv)` | Bare `TreeId` | Current adapted model; true closure port still pending |
+//! | Value stored | `closure(expr, genv, visited, lenv)` | `EvalValue::{Box, Closure}` | Definition capture is now explicit; abstraction/environment closures still pending |
 //! | Barrier mechanism | `pushEnvBarrier` / `searchIdDef` | `push_barrier_scope()` + `lookup_until_barrier()` | Same semantics |
 //! | `copyEnvReplaceDefs` | Present (env rewiring) | Deferred | Current eager model has no direct equivalent yet |
 //! | Redefinition check | `addLayerDef` throws on conflict | `bind_definitions` returns `EvalError::RedefinedSymbol` | Same semantics, typed error |
@@ -194,6 +197,47 @@ pub type SymId = u32;
 /// stable `(symbol, environment)` key, not just a raw expression id.
 pub type EnvId = usize;
 
+#[derive(Clone, Debug)]
+enum EvalValue {
+    Box(TreeId),
+    Closure(ClosureValue),
+}
+
+impl EvalValue {
+    fn display_tree(&self) -> TreeId {
+        match self {
+            Self::Box(id) => *id,
+            Self::Closure(closure) => closure.expr,
+        }
+    }
+}
+
+impl PartialEq for EvalValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Box(lhs), Self::Box(rhs)) => lhs == rhs,
+            (Self::Closure(lhs), Self::Closure(rhs)) => lhs == rhs,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for EvalValue {}
+
+#[derive(Clone, Debug)]
+struct ClosureValue {
+    expr: TreeId,
+    env: Environment,
+}
+
+impl PartialEq for ClosureValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.expr == other.expr && self.env.same_identity(&other.env)
+    }
+}
+
+impl Eq for ClosureValue {}
+
 /// Lexical evaluation environment mapping symbol names to box-IR tree nodes.
 ///
 /// # Architecture
@@ -219,7 +263,7 @@ pub type EnvId = usize;
 /// | Aspect | C++ (`environment.cpp`) | Rust (`Environment`) |
 /// |---|---|---|
 /// | Storage | Hash-consed tree nodes with property tables | `Vec<(u32, TreeId)>` — interned `SymId` |
-/// | Values stored | **Closures**: `closure(expr, genv, visited, lenv)` capturing the scope at definition time | **Bare `TreeId`** in the current adapted model |
+/// | Values stored | **Closures**: `closure(expr, genv, visited, lenv)` capturing the scope at definition time | `EvalValue::{Box, Closure}` in the current adapted model |
 /// | Lookup | `searchIdDef`: walks layers calling `getProperty` (hash probe per layer) | `lookup`: reverse linear scan of `Vec`, then recurse to `parent` |
 /// | Scope push | `pushNewLayer(lenv)` — allocates a unique tree node | `push_scope()` — allocate one arena layer and return its `EnvId` handle |
 /// | Redefinition | `addLayerDef` throws `faustexception` on conflicting rebind | `bind_definitions` returns `EvalError::RedefinedSymbol` |
@@ -244,7 +288,7 @@ pub struct Environment {
 
 #[derive(Clone, Debug, Default)]
 struct EnvLayer {
-    bindings: Vec<(SymId, TreeId)>,
+    bindings: Vec<(SymId, EvalValue)>,
     parent: Option<EnvId>,
     barrier: bool,
 }
@@ -282,6 +326,10 @@ impl Environment {
         self.current
     }
 
+    fn same_identity(&self, other: &Self) -> bool {
+        self.current == other.current && Arc::ptr_eq(&self.store, &other.store)
+    }
+
     /// Binds one symbol to a tree node in the **current scope** (not a parent).
     ///
     /// This is the unchecked low-level binder. Multiple bindings for the same name in the same
@@ -294,6 +342,10 @@ impl Environment {
     ///
     /// `sym` must be obtained from [`TreeArena::intern_symbol`] before calling this method.
     pub fn bind(&mut self, sym: SymId, value: TreeId) {
+        self.bind_value(sym, EvalValue::Box(value));
+    }
+
+    fn bind_value(&mut self, sym: SymId, value: EvalValue) {
         self.with_store_mut(|store| {
             store.layers[self.current].bindings.push((sym, value));
         });
@@ -321,13 +373,20 @@ impl Environment {
     /// [`TreeArena::get_symbol`].
     #[must_use]
     pub fn lookup(&self, sym: SymId) -> Option<TreeId> {
+        self.lookup_value(sym).and_then(|(_, value)| match value {
+            EvalValue::Box(id) => Some(id),
+            EvalValue::Closure(_) => None,
+        })
+    }
+
+    fn lookup_value(&self, sym: SymId) -> Option<(EnvId, EvalValue)> {
         self.with_store(|store| {
             let mut env_id = Some(self.current);
             while let Some(id) = env_id {
                 let layer = &store.layers[id];
                 for (s, value) in layer.bindings.iter().rev() {
                     if *s == sym {
-                        return Some(*value);
+                        return Some((id, value.clone()));
                     }
                 }
                 env_id = layer.parent;
@@ -349,13 +408,21 @@ impl Environment {
     /// [`lookup`](Self::lookup), but they must not participate in pattern-variable equality checks.
     #[must_use]
     pub fn lookup_until_barrier(&self, sym: SymId) -> Option<TreeId> {
+        self.lookup_until_barrier_value(sym)
+            .and_then(|value| match value {
+                EvalValue::Box(id) => Some(id),
+                EvalValue::Closure(_) => None,
+            })
+    }
+
+    fn lookup_until_barrier_value(&self, sym: SymId) -> Option<EvalValue> {
         self.with_store(|store| {
             let mut env_id = Some(self.current);
             while let Some(id) = env_id {
                 let layer = &store.layers[id];
                 for (s, value) in layer.bindings.iter().rev() {
                     if *s == sym {
-                        return Some(*value);
+                        return Some(value.clone());
                     }
                 }
                 if layer.barrier {
@@ -388,10 +455,17 @@ impl Environment {
     /// [`TreeArena::get_symbol`].
     #[must_use]
     pub fn lookup_local(&self, sym: SymId) -> Option<TreeId> {
+        self.lookup_local_value(sym).and_then(|value| match value {
+            EvalValue::Box(id) => Some(id),
+            EvalValue::Closure(_) => None,
+        })
+    }
+
+    fn lookup_local_value(&self, sym: SymId) -> Option<EvalValue> {
         self.with_store(|store| {
             for (s, value) in store.layers[self.current].bindings.iter().rev() {
                 if *s == sym {
-                    return Some(*value);
+                    return Some(value.clone());
                 }
             }
             None
@@ -572,7 +646,7 @@ impl Default for Environment {
 ///   effective patterns under different lexical environments.
 #[derive(Clone, Debug)]
 pub struct LoopDetector {
-    call_stack: Vec<TreeId>,
+    call_stack: Vec<LoopFrame>,
     max_depth: usize,
     /// Compiled automata keyed by the `TreeId` of the evaluated `Case` rule-list.
     automaton_cache: pattern_matcher::AutomatonCache,
@@ -618,16 +692,29 @@ impl LoopDetector {
         }
     }
 
-    fn enter(&mut self, id: TreeId) -> Result<(), EvalError> {
-        if self.call_stack.contains(&id) {
-            return Err(EvalError::LoopDetected { node: id });
+    fn enter_tree(&mut self, id: TreeId) -> Result<(), EvalError> {
+        self.enter(LoopFrame::Tree(id), id)
+    }
+
+    fn enter_symbol_env(
+        &mut self,
+        sym: SymId,
+        env_id: EnvId,
+        node: TreeId,
+    ) -> Result<(), EvalError> {
+        self.enter(LoopFrame::SymbolEnv { sym, env_id }, node)
+    }
+
+    fn enter(&mut self, frame: LoopFrame, node: TreeId) -> Result<(), EvalError> {
+        if self.call_stack.contains(&frame) {
+            return Err(EvalError::LoopDetected { node });
         }
         if self.call_stack.len() >= self.max_depth {
             return Err(EvalError::RecursionDepthExceeded {
                 max_depth: self.max_depth,
             });
         }
-        self.call_stack.push(id);
+        self.call_stack.push(frame);
         Ok(())
     }
 
@@ -640,6 +727,12 @@ impl Default for LoopDetector {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LoopFrame {
+    Tree(TreeId),
+    SymbolEnv { sym: SymId, env_id: EnvId },
 }
 
 /// Performance statistics collected during evaluation.
@@ -1127,15 +1220,16 @@ pub fn eval_process_with_stats(
     stats.env_layers_pushed += 1; // root scope
     let available_defs = top_level_definition_names(arena, definitions)?;
     // Use get_symbol (no alloc, &self) — if "process" was never interned it was never bound.
-    let process = arena
+    arena
         .get_symbol("process")
-        .and_then(|sym| env.lookup(sym))
+        .filter(|sym| env.lookup_value(*sym).is_some())
         .ok_or(EvalError::MissingProcessDefinition {
             definitions,
             available_defs,
         })?;
     stats.env_lookups += 1;
     let mut loop_detector = LoopDetector::new();
+    let process = BoxBuilder::new(arena).ident("process");
     let result = eval_box(arena, process, &env, &mut loop_detector)?;
     let result = a2sb(arena, result, &mut loop_detector)?;
     stats.loop_detector_max_depth = loop_detector.call_stack.len();
@@ -1289,12 +1383,11 @@ fn fresh_slot(arena: &mut TreeArena, loop_detector: &mut LoopDetector) -> TreeId
 /// `apply_list` via `infer_box_arity` — the C++ counterpart threads arity through the
 /// evaluator for immediate wire-insertion decisions.
 ///
-/// The key structural difference today: C++ `eval` calls `evalClosure(exp, …)` when it
-/// encounters a closure, which evaluates `expr` in the **captured** environment. Rust
-/// `eval_box` on `Ident` still looks up the bare `TreeId` and evaluates it in the **current**
-/// `env`. This adapted model is sufficient for the currently-covered corpus, but it is not yet
-/// a 1:1 port of captured-environment semantics for `access`, `boxModifLocalDef`, and related
-/// environment-rewrite paths.
+/// Current closure-port status:
+/// - top-level and local parser definitions now resolve through explicit captured closures and
+///   are forced in the environment where they were bound,
+/// - lambda abstractions and environment-like values are still handled by the adapted path and
+///   are not yet materialized as first-class evaluator closures.
 pub fn eval_box(
     arena: &mut TreeArena,
     expr: TreeId,
@@ -1306,9 +1399,12 @@ pub fn eval_box(
         BoxMatch::Ident(name) => {
             // get_symbol takes &self — safe to call while `name: &str` borrows `arena`.
             // If the name was never interned (never bound), it cannot be in the env.
-            let value = arena
+            let ((binding_env_id, binding_sym), value) = arena
                 .get_symbol(name)
-                .and_then(|sym| env.lookup(sym))
+                .and_then(|sym| {
+                    env.lookup_value(sym)
+                        .map(|(env_id, value)| ((env_id, sym), value))
+                })
                 .ok_or_else(|| EvalError::UndefinedSymbol {
                     symbol: name.to_owned(),
                     node: expr,
@@ -1316,14 +1412,24 @@ pub fn eval_box(
                     visible_scope: env.visible_names(arena),
                     top_level_scope: env.top_level_names(arena),
                 })?;
-            if value == expr {
-                // Shadowing sentinel used for lambda parameters in lexical scopes.
-                return Ok(expr);
+            match value {
+                EvalValue::Box(value) => {
+                    if value == expr {
+                        // Shadowing sentinel used for lambda parameters in lexical scopes.
+                        return Ok(expr);
+                    }
+                    loop_detector.enter_tree(value)?;
+                    let out = eval_box(arena, value, env, loop_detector);
+                    loop_detector.leave();
+                    out
+                }
+                EvalValue::Closure(closure) => {
+                    loop_detector.enter_symbol_env(binding_sym, binding_env_id, closure.expr)?;
+                    let out = eval_box(arena, closure.expr, &closure.env, loop_detector);
+                    loop_detector.leave();
+                    out
+                }
             }
-            loop_detector.enter(value)?;
-            let out = eval_box(arena, value, env, loop_detector);
-            loop_detector.leave();
-            out
         }
         BoxMatch::Appl(fun, arg) => {
             let efun = eval_box(arena, fun, env, loop_detector)?;
@@ -1789,10 +1895,10 @@ fn map_children(
 /// ```
 ///
 /// In Rust:
-/// - If the same name is already bound in the **current scope** with the **same** `TreeId`,
-///   the new definition is silently skipped (structural identity via hash-consed `TreeId`).
-/// - If the same name is bound with a **different** `TreeId`, `EvalError::RedefinedSymbol`
-///   is returned.
+/// - If the same name is already bound in the **current scope** with the **same captured
+///   closure value** (`expr` + captured `EnvId`), the new definition is silently skipped.
+/// - If the same name is bound with a **different** captured value, `EvalError::RedefinedSymbol`
+///   is returned using the underlying expression nodes for diagnostics.
 /// - If the name is not yet in the current scope (including the case where it only exists
 ///   in a parent scope — shadowing), the binding proceeds normally.
 ///
@@ -1800,7 +1906,7 @@ fn map_children(
 ///
 /// | C++ call site | Rust equivalent |
 /// |---|---|
-/// | `pushMultiClosureDefs(ldefs, visited, lenv)` | `bind_definitions(arena, defs, &mut scoped)` in the current adapted model |
+/// | `pushMultiClosureDefs(ldefs, visited, lenv)` | `bind_definitions(arena, defs, &mut scoped)` with explicit captured definition closures |
 /// | `pushValueDef(id, def, lenv)` | `env.bind(name, value)` (single-binding fast path) |
 fn bind_definitions(
     arena: &mut TreeArena,
@@ -1819,21 +1925,25 @@ fn bind_definitions(
         };
         // Intern the name to get a SymId. This is the bind path — intern_symbol is correct.
         let sym = arena.intern_symbol(&name);
+        let captured = EvalValue::Closure(ClosureValue {
+            expr: bound,
+            env: env.clone(),
+        });
         // C++ parity: addLayerDef checks for conflicting redefinition within the current layer.
         // Identical bindings (same TreeId = same hash-consed expression) are silently accepted.
         // Conflicting bindings (different TreeId) are an error.
         // Parent-scope shadowing is allowed and is NOT checked here.
-        if let Some(existing) = env.lookup_local(sym) {
-            if existing != bound {
+        if let Some(existing) = env.lookup_local_value(sym) {
+            if existing != captured {
                 return Err(EvalError::RedefinedSymbol {
                     symbol: name,
-                    first_def: existing,
-                    second_def: bound,
+                    first_def: existing.display_tree(),
+                    second_def: captured.display_tree(),
                 });
             }
             // existing == bound: identical redefinition — silently skip (C++ parity)
         } else {
-            env.bind(sym, bound);
+            env.bind_value(sym, captured);
         }
         defs = arena
             .tl(defs)
