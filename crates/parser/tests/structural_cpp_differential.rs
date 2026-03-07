@@ -41,6 +41,16 @@ fn rule_first_pattern(arena: &TreeArena, rule: TreeId) -> TreeId {
     list_head(arena, lhs)
 }
 
+fn collect_rule_patterns(arena: &TreeArena, mut rules: TreeId) -> Vec<TreeId> {
+    let mut out = Vec::new();
+    while !arena.is_nil(rules) {
+        let rule = list_head(arena, rules);
+        out.push(rule_first_pattern(arena, rule));
+        rules = list_tail(arena, rules);
+    }
+    out
+}
+
 fn find_definition_expr(arena: &TreeArena, mut defs: TreeId, expected: &str) -> Option<TreeId> {
     while !arena.is_nil(defs) {
         let def = arena.hd(defs)?;
@@ -343,5 +353,179 @@ fn production_parser_recognizes_modif_local_def_like_cpp() {
     assert!(
         !output.state.arena.is_nil(defs),
         "modif-local-def should carry formatted definitions"
+    );
+}
+
+#[test]
+fn production_parser_prepare_pattern_keeps_access_component_and_environment_opaque_like_cpp() {
+    let cases = [(
+        "opaque_environment_pattern",
+        "foo = case { (environment { a = x; }) => _; (x) => x; };\nprocess = foo;\n",
+        "environment",
+    )];
+
+    let cpp = cpp_bin();
+    for (name, source, expected_kind) in cases {
+        if let Some(cpp_bin) = &cpp {
+            let cpp_ok = cpp_accepts_source(cpp_bin, source, name)
+                .unwrap_or_else(|e| panic!("C++ run failed for {name}: {e}"));
+            assert!(cpp_ok, "C++ should accept prepare-pattern case {name}");
+        }
+
+        let output = parse_program(source, &format!("structural_{name}.dsp"));
+        assert!(
+            output.errors.is_empty(),
+            "unexpected parse errors for {}: {:?}",
+            name,
+            output.errors
+        );
+        let root = output.root.expect("root should be present");
+        let foo_expr = find_definition_expr(&output.state.arena, root, "foo")
+            .unwrap_or_else(|| panic!("missing foo definition for {name}"));
+        let rules = case_rules(&output.state.arena, foo_expr);
+        let pattern = collect_rule_patterns(&output.state.arena, rules)
+            .into_iter()
+            .find(|pattern| {
+                matches!(
+                    match_box(&output.state.arena, *pattern),
+                    BoxMatch::WithLocalDef(_, _)
+                )
+            })
+            .unwrap_or_else(|| panic!("missing environment pattern for {name}"));
+
+        match expected_kind {
+            "environment" => {
+                let (body, defs) = match match_box(&output.state.arena, pattern) {
+                    BoxMatch::WithLocalDef(body, defs) => (body, defs),
+                    other => {
+                        panic!(
+                            "expected BOXWITHLOCALDEF environment wrapper for {name}, got {:?}",
+                            other
+                        )
+                    }
+                };
+                assert!(
+                    matches!(match_box(&output.state.arena, body), BoxMatch::Environment),
+                    "environment wrapper body should stay BOXENVIRONMENT for {name}"
+                );
+                let def = list_head(&output.state.arena, defs);
+                let expr = definition_expr(&output.state.arena, def);
+                assert!(
+                    matches!(match_box(&output.state.arena, expr), BoxMatch::Ident("x")),
+                    "environment local definition should keep raw ident payload for {name}"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn production_parser_prepare_pattern_keeps_component_opaque_like_cpp() {
+    let root = {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "faust_rs_parser_prepare_component_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should move forward")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).expect("temp root should be created");
+        path
+    };
+    let main = root.join("main.dsp");
+    let child = root.join("child.dsp");
+    fs::write(
+        &main,
+        "foo = case { (component(\"child.dsp\")) => _; (x) => x; };\nprocess = foo;\n",
+    )
+    .expect("main should be written");
+    fs::write(&child, "process = _;\n").expect("child should be written");
+
+    if let Some(cpp_bin) = cpp_bin() {
+        let out_c = root.join("out.c");
+        let output = Command::new(cpp_bin)
+            .arg(&main)
+            .arg("-lang")
+            .arg("c")
+            .arg("-o")
+            .arg(&out_c)
+            .output()
+            .expect("failed to run c++ reference parser");
+        assert!(
+            output.status.success(),
+            "C++ should accept opaque component pattern, status={:?}, stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = fs::remove_file(out_c);
+    }
+
+    let output =
+        parse_file_with_imports(&main, std::slice::from_ref(&root)).expect("parse should succeed");
+    assert!(
+        output.errors.is_empty(),
+        "unexpected parse errors for opaque component pattern: {:?}",
+        output.errors
+    );
+    let root_defs = output.root.expect("root should be present");
+    let foo_expr =
+        find_definition_expr(&output.state.arena, root_defs, "foo").expect("missing foo");
+    let rules = case_rules(&output.state.arena, foo_expr);
+    let pattern = collect_rule_patterns(&output.state.arena, rules)
+        .into_iter()
+        .find(|pattern| {
+            matches!(
+                match_box(&output.state.arena, *pattern),
+                BoxMatch::Component(_)
+            )
+        })
+        .expect("missing component pattern");
+    assert!(
+        matches!(
+            match_box(&output.state.arena, pattern),
+            BoxMatch::Component(_)
+        ),
+        "component pattern should stay opaque"
+    );
+
+    fs::remove_dir_all(root).expect("temp root should be removable");
+}
+
+#[test]
+fn production_parser_prepare_pattern_keeps_access_opaque_structurally() {
+    let source = "foo = case { (e.a) => e; (x) => x; };\nprocess = foo;\n";
+    let output = parse_program(source, "structural_access_pattern.dsp");
+    assert!(
+        output.errors.is_empty(),
+        "unexpected parse errors for structural access pattern: {:?}",
+        output.errors
+    );
+    let root = output.root.expect("root should be present");
+    let foo_expr =
+        find_definition_expr(&output.state.arena, root, "foo").expect("missing foo definition");
+    let rules = case_rules(&output.state.arena, foo_expr);
+    let pattern = collect_rule_patterns(&output.state.arena, rules)
+        .into_iter()
+        .find(|pattern| {
+            matches!(
+                match_box(&output.state.arena, *pattern),
+                BoxMatch::Access(_, _)
+            )
+        })
+        .expect("missing access pattern");
+    let (body, field) = match match_box(&output.state.arena, pattern) {
+        BoxMatch::Access(body, field) => (body, field),
+        other => panic!("expected BOXACCESS pattern, got {:?}", other),
+    };
+    assert!(
+        matches!(match_box(&output.state.arena, body), BoxMatch::Ident("e")),
+        "access body should remain raw ident after prepare_pattern"
+    );
+    assert!(
+        matches!(match_box(&output.state.arena, field), BoxMatch::Ident("a")),
+        "access field should remain raw ident after prepare_pattern"
     );
 }

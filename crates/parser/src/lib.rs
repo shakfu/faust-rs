@@ -17,7 +17,7 @@
 //! - Token parsing still uses `i64` as an intermediate and clamps to `i32`
 //!   bounds at the parser boundary for deterministic behavior.
 
-use boxes::match_box;
+use boxes::{BoxMatch, match_box};
 use cfgrammar::Span;
 use errors::codes;
 use errors::{
@@ -516,41 +516,105 @@ impl ParseState {
         self.make_definition(name, nil, formatted_expr)
     }
 
+    /// Prepares one parser-side pattern using the same opacity boundary as C++ `preparePattern()`.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/boxes/boxes.cpp`
+    /// - `preparePattern(Tree box)`
+    ///
+    /// Mapping status: `1:1` semantics.
+    ///
+    /// The important parity point is not merely turning identifiers into
+    /// `BOXPATVAR`, but doing so only through the same recursive subset as the
+    /// C++ parser helper. Forms such as `abstr`, `access`, `component`,
+    /// `environment`, `slot`, `symbolic`, and `case` stay opaque.
     fn prepare_pattern(&mut self, node: TreeId) -> TreeId {
-        match self.arena.kind(node) {
-            Some(NodeKind::Tag(tag_id)) if self.arena.tag_name(*tag_id) == Some("BOXIDENT") => {
-                self.node_builder().pattern_var(node)
-            }
-            Some(NodeKind::Tag(tag_id)) if self.arena.tag_name(*tag_id) == Some("BOXAPPL") => {
-                let Some(children) = self.arena.children(node) else {
-                    return node;
-                };
-                if children.len() != 2 {
-                    return node;
-                }
-                let fun = children[0];
-                let args = children[1];
+        if matches!(self.arena.kind(node), Some(NodeKind::Cons)) {
+            return self.map_list_with(node, |s, id| s.prepare_pattern(id));
+        }
+
+        match match_box(&self.arena, node) {
+            BoxMatch::Ident(_) => self.node_builder().pattern_var(node),
+            BoxMatch::Appl(fun, args) => {
                 let mapped_args = self.map_list_with(args, |s, id| s.prepare_pattern(id));
-                let mapped_fun = match self.arena.kind(fun) {
-                    Some(NodeKind::Tag(fun_tag_id))
-                        if self.arena.tag_name(*fun_tag_id) == Some("BOXIDENT") =>
-                    {
-                        fun
-                    }
+                let mapped_fun = match match_box(&self.arena, fun) {
+                    BoxMatch::Ident(_) => fun,
                     _ => self.prepare_pattern(fun),
                 };
                 self.node_builder().appl(mapped_fun, mapped_args)
             }
-            Some(NodeKind::Tag(tag_id)) => {
-                let tag_id = *tag_id;
-                let children = self.arena.children(node).unwrap_or(&[]).to_vec();
-                let mut mapped = Vec::with_capacity(children.len());
-                for child in children {
-                    mapped.push(self.prepare_pattern(child));
-                }
-                self.arena.intern(NodeKind::Tag(tag_id), &mapped)
+            BoxMatch::WithLocalDef(body, ldef) => {
+                let prepared_body = self.prepare_pattern(body);
+                self.node_builder().with_local_def(prepared_body, ldef)
             }
-            Some(NodeKind::Cons) => self.map_list_with(node, |s, id| s.prepare_pattern(id)),
+            BoxMatch::Seq(left, right) => {
+                let prepared_left = self.prepare_pattern(left);
+                let prepared_right = self.prepare_pattern(right);
+                self.node_builder().seq(prepared_left, prepared_right)
+            }
+            BoxMatch::Split(left, right) => {
+                let prepared_left = self.prepare_pattern(left);
+                let prepared_right = self.prepare_pattern(right);
+                self.node_builder().split(prepared_left, prepared_right)
+            }
+            BoxMatch::Merge(left, right) => {
+                let prepared_left = self.prepare_pattern(left);
+                let prepared_right = self.prepare_pattern(right);
+                self.node_builder().merge(prepared_left, prepared_right)
+            }
+            BoxMatch::Par(left, right) => {
+                let prepared_left = self.prepare_pattern(left);
+                let prepared_right = self.prepare_pattern(right);
+                self.node_builder().par(prepared_left, prepared_right)
+            }
+            BoxMatch::Rec(left, right) => {
+                let prepared_left = self.prepare_pattern(left);
+                let prepared_right = self.prepare_pattern(right);
+                self.node_builder().rec(prepared_left, prepared_right)
+            }
+            BoxMatch::Route(n, m, route_spec) => {
+                let prepared_n = self.prepare_pattern(n);
+                let prepared_m = self.prepare_pattern(m);
+                let prepared_route_spec = self.prepare_pattern(route_spec);
+                self.node_builder()
+                    .route(prepared_n, prepared_m, prepared_route_spec)
+            }
+            BoxMatch::IPar(index, count, body) => {
+                let prepared_body = self.prepare_pattern(body);
+                self.node_builder().ipar(index, count, prepared_body)
+            }
+            BoxMatch::ISeq(index, count, body) => {
+                let prepared_body = self.prepare_pattern(body);
+                self.node_builder().iseq(index, count, prepared_body)
+            }
+            BoxMatch::ISum(index, count, body) => {
+                let prepared_body = self.prepare_pattern(body);
+                self.node_builder().isum(index, count, prepared_body)
+            }
+            BoxMatch::IProd(index, count, body) => {
+                let prepared_body = self.prepare_pattern(body);
+                self.node_builder().iprod(index, count, prepared_body)
+            }
+            BoxMatch::Inputs(expr) => {
+                let prepared_expr = self.prepare_pattern(expr);
+                self.node_builder().inputs(prepared_expr)
+            }
+            BoxMatch::Outputs(expr) => {
+                let prepared_expr = self.prepare_pattern(expr);
+                self.node_builder().outputs(prepared_expr)
+            }
+            BoxMatch::VGroup(label, expr) => {
+                let prepared_expr = self.prepare_pattern(expr);
+                self.node_builder().vgroup(label, prepared_expr)
+            }
+            BoxMatch::HGroup(label, expr) => {
+                let prepared_expr = self.prepare_pattern(expr);
+                self.node_builder().hgroup(label, prepared_expr)
+            }
+            BoxMatch::TGroup(label, expr) => {
+                let prepared_expr = self.prepare_pattern(expr);
+                self.node_builder().tgroup(label, prepared_expr)
+            }
             _ => node,
         }
     }

@@ -15,10 +15,9 @@ The correction plan for these two items is tracked separately in
 
 ## 1. Remaining Gap Summary
 
-Two real gaps remain in this area:
+One real gap remains in this area:
 
-1. `prepare_pattern()` is still broader than C++ `preparePattern()`.
-2. parser-side `declare` / metadata recording is not yet carried through the
+1. parser-side `declare` / metadata recording is not yet carried through the
    same end-to-end box/eval semantics as C++ `boxMetadata`.
 
 Everything else from the original 2026-03-06 gap analysis is now implemented:
@@ -31,7 +30,9 @@ Everything else from the original 2026-03-06 gap analysis is now implemented:
 - `slot` / `symbolic` support,
 - `boxModifLocalDef`.
 
-## 2. Remaining Gap A: `prepare_pattern()` Opacity Parity
+## 2. Closed On 2026-03-07: `prepare_pattern()` Opacity Parity
+
+Status: implemented.
 
 ### Current Rust behavior
 
@@ -63,25 +64,24 @@ Notably, the C++ function treats forms such as:
 
 as explicit shape boundaries.
 
-### Why it still matters
+### Why it mattered
 
 The current corpus does not strongly constrain this area. That means the Rust
 parser can still diverge on complex or future pattern-heavy sources without the
 existing differential harness noticing.
 
-This is not known to break the current production corpus, but it remains a
+This was not known to break the current production corpus, but it remained a
 semantic parity risk because pattern preparation sits on the parser-side
 language surface.
 
-### Minimum closure condition
+Closure completed on 2026-03-07:
 
-This gap is closed only when:
+- Rust `prepare_pattern()` now follows the same opacity boundary strategy as
+  C++ `preparePattern()`
+- parser structural guardrails now cover opaque `access`, `component`, and
+  `environment` forms
 
-- Rust `prepare_pattern()` follows the same opacity boundaries as C++,
-- parser differentials include fixtures that would regress if those boundaries
-  drifted again.
-
-## 3. Remaining Gap B: Metadata / `declare` End-to-End Parity
+## 3. Remaining Gap: Metadata / `declare` End-to-End Parity
 
 ### Current Rust behavior
 

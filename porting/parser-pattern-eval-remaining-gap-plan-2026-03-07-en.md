@@ -15,14 +15,14 @@ It intentionally excludes the closure-model work already completed in
 
 ## 1. Scope
 
-The remaining parser/pattern/eval parity work is now limited to two items:
+The remaining parser/pattern/eval parity work is now limited to one item:
 
-1. `prepare_pattern()` opacity parity with C++ `preparePattern()`
-2. metadata / `declare` end-to-end parity through C++-equivalent box semantics
+1. metadata / `declare` end-to-end parity through C++-equivalent box semantics
 
-These should be treated as two adjacent but separate workstreams.
+`prepare_pattern()` opacity parity was completed on 2026-03-07 and is retained
+below only as implementation record.
 
-## 2. Gap A: `prepare_pattern()` Opacity Parity
+## 2. Completed On 2026-03-07: `prepare_pattern()` Opacity Parity
 
 ### C++ target
 
@@ -63,7 +63,7 @@ generic "walk everything" pattern-preparation rule.
 - targeted differentials stay green against the C++ reference,
 - no existing parser parity tests regress.
 
-## 3. Gap B: Metadata / `declare` End-to-End Parity
+## 3. Remaining Gap: Metadata / `declare` End-to-End Parity
 
 ### C++ target
 
@@ -105,22 +105,16 @@ language-pipeline semantics as the C++ compiler.
 
 ## 4. Recommended Execution Order
 
-The pragmatic order is:
+The next remaining implementation target is metadata reinjection.
 
-1. finish `prepare_pattern()` parity first,
-2. then implement metadata reinjection.
-
-Reason:
-
-- `prepare_pattern()` is narrower and lower-risk,
-- metadata reinjection touches representation and likely crosses parser/boxes
-  boundaries more broadly.
+The earlier `prepare_pattern()` step was completed first because it was
+narrower and lower-risk. The remaining metadata work touches representation and
+crosses parser/boxes boundaries more broadly.
 
 ## 5. Test Strategy
 
-Minimum additions expected in the same implementation series:
+Minimum additions still expected:
 
-- parser differential cases for opacity boundaries in `prepare_pattern()`,
 - one or more metadata structural tests at parser/boxes level,
 - if metadata is surfaced publicly, one compiler-facing regression as well.
 
@@ -134,7 +128,6 @@ Existing closure/eval regressions should remain green throughout:
 
 This area can be considered fully closed only when:
 
-- `prepare_pattern()` is aligned with the C++ opacity boundary,
 - metadata / `declare` semantics are carried through the Rust pipeline in a
   C++-equivalent way,
 - the remaining-gap snapshot in
