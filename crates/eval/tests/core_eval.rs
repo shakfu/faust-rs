@@ -4,9 +4,14 @@
 //! - Exercises public APIs and structural invariants for the targeted module.
 //! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
+use std::path::PathBuf;
+
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::{IntoDiagnostic, Severity, Stage, codes};
-use eval::{Environment, EvalError, LoopDetector, eval_box, eval_process, eval_process_with_stats};
+use eval::{
+    Environment, EvalError, EvalSourceContext, LoopDetector, eval_box, eval_process,
+    eval_process_with_stats,
+};
 use tlib::{TreeArena, TreeId};
 
 fn make_ident(arena: &mut TreeArena, name: &str) -> tlib::TreeId {
@@ -140,6 +145,21 @@ fn environment_push_scope_assigns_stable_ids_and_preserves_parent_lookup() {
         None,
         "barrier lookup should stop before reaching the parent binding"
     );
+}
+
+#[test]
+fn environment_child_scopes_preserve_source_context() {
+    let ctx = EvalSourceContext::for_file(
+        std::path::Path::new("/tmp/main.dsp"),
+        &[PathBuf::from("/tmp/imports")],
+    );
+    let root = Environment::empty_with_source_context(ctx.clone());
+    let child = root.push_scope();
+    let barrier = child.push_barrier_scope();
+
+    assert_eq!(root.source_context(), &ctx);
+    assert_eq!(child.source_context(), &ctx);
+    assert_eq!(barrier.source_context(), &ctx);
 }
 
 #[test]

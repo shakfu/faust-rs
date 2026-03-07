@@ -151,6 +151,7 @@
 //! (`propagate`, typing, signal transforms). It does not emit signals directly.
 
 use std::fmt::{Display, Formatter};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use boxes::{BoxBuilder, BoxMatch, match_box};
@@ -198,6 +199,80 @@ pub type SymId = u32;
 /// toward the full captured-closure port because recursion tracking and closure forcing need a
 /// stable `(symbol, environment)` key, not just a raw expression id.
 pub type EnvId = usize;
+
+/// Filesystem source-resolution context captured by evaluator environments.
+///
+/// # Source provenance (C++)
+/// - `compiler/global.cpp`
+/// - `compiler/parser/sourcereader.hh/.cpp`
+/// - `compiler/evaluate/eval.cpp` (`boxComponent` / `boxLibrary`)
+///
+/// The C++ evaluator loads `component("...")` and `library("...")` through the
+/// process-global `gReader`, whose search state is already configured from the
+/// active compile session. The Rust port has no global reader, so the evaluator
+/// carries the equivalent resolution context explicitly and captures it inside
+/// closures together with the lexical environment.
+///
+/// Mapping status: `adapted`.
+///
+/// # Invariants
+/// - `current_file` is the file relative to which nested source loads should be
+///   resolved when the evaluator is operating on file-backed Faust sources.
+/// - `search_paths` preserves deterministic lookup order after the current file.
+/// - in-memory evaluation uses [`EvalSourceContext::memory`], which intentionally
+///   carries no filesystem base.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EvalSourceContext {
+    current_file: Option<PathBuf>,
+    search_paths: Vec<PathBuf>,
+}
+
+impl EvalSourceContext {
+    /// Creates a context for in-memory evaluation with no filesystem base.
+    #[must_use]
+    pub fn memory() -> Self {
+        Self::default()
+    }
+
+    /// Creates a context rooted at one source file plus optional import search paths.
+    ///
+    /// The file parent directory is prepended ahead of explicit `search_paths`,
+    /// matching the effective C++/parser lookup contract for file-backed sessions.
+    #[must_use]
+    pub fn for_file(path: &Path, search_paths: &[PathBuf]) -> Self {
+        let mut ordered = Vec::with_capacity(search_paths.len() + 1);
+        if let Some(parent) = path.parent() {
+            ordered.push(parent.to_path_buf());
+        }
+        for candidate in search_paths {
+            if !ordered.iter().any(|existing| existing == candidate) {
+                ordered.push(candidate.clone());
+            }
+        }
+        Self {
+            current_file: Some(path.to_path_buf()),
+            search_paths: ordered,
+        }
+    }
+
+    /// Returns a context for a newly loaded file while preserving inherited search order.
+    #[must_use]
+    pub fn for_loaded_file(&self, path: &Path) -> Self {
+        Self::for_file(path, &self.search_paths)
+    }
+
+    /// Returns the current file used as the primary relative-resolution anchor.
+    #[must_use]
+    pub fn current_file(&self) -> Option<&Path> {
+        self.current_file.as_deref()
+    }
+
+    /// Returns the ordered import search paths used after the current-file base.
+    #[must_use]
+    pub fn search_paths(&self) -> &[PathBuf] {
+        &self.search_paths
+    }
+}
 
 #[derive(Clone, Debug)]
 enum EvalValue {
@@ -286,6 +361,7 @@ impl Eq for ClosureValue {}
 pub struct Environment {
     store: Arc<Mutex<EnvStore>>,
     current: EnvId,
+    source_context: Arc<EvalSourceContext>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -307,11 +383,23 @@ impl Environment {
     /// `pushMultiClosureDefs` call in `eval.cpp`.
     #[must_use]
     pub fn empty() -> Self {
+        Self::empty_with_source_context(EvalSourceContext::memory())
+    }
+
+    /// Creates an empty root environment with one captured source-resolution context.
+    ///
+    /// This is the Rust equivalent of initializing evaluation under one configured
+    /// `gReader` session in the C++ compiler. All child scopes and closures derived
+    /// from this environment inherit the same context unless a newly loaded file
+    /// installs a more specific one.
+    #[must_use]
+    pub fn empty_with_source_context(source_context: EvalSourceContext) -> Self {
         let mut store = EnvStore::default();
         store.layers.push(EnvLayer::default());
         Self {
             store: Arc::new(Mutex::new(store)),
             current: 0,
+            source_context: Arc::new(source_context),
         }
     }
 
@@ -329,7 +417,15 @@ impl Environment {
     }
 
     fn same_identity(&self, other: &Self) -> bool {
-        self.current == other.current && Arc::ptr_eq(&self.store, &other.store)
+        self.current == other.current
+            && Arc::ptr_eq(&self.store, &other.store)
+            && Arc::ptr_eq(&self.source_context, &other.source_context)
+    }
+
+    /// Returns the source-resolution context captured by this environment.
+    #[must_use]
+    pub fn source_context(&self) -> &EvalSourceContext {
+        self.source_context.as_ref()
     }
 
     /// Binds one symbol to a tree node in the **current scope** (not a parent).
@@ -524,6 +620,7 @@ impl Environment {
         Self {
             store: Arc::clone(&self.store),
             current,
+            source_context: Arc::clone(&self.source_context),
         }
     }
 
@@ -1229,6 +1326,19 @@ pub fn eval_process(arena: &mut TreeArena, definitions: TreeId) -> Result<TreeId
     Ok(eval_process_with_stats(arena, definitions)?.0)
 }
 
+/// Evaluates one Faust program root list using an explicit file-resolution context.
+///
+/// This is the file-backed counterpart of [`eval_process`]. It keeps the legacy
+/// API intact for in-memory callers while letting file-oriented frontends mirror
+/// the C++ contract where `eval.cpp` sees a configured source reader.
+pub fn eval_process_with_source_context(
+    arena: &mut TreeArena,
+    definitions: TreeId,
+    source_context: EvalSourceContext,
+) -> Result<TreeId, EvalError> {
+    Ok(eval_process_with_stats_and_source_context(arena, definitions, source_context)?.0)
+}
+
 /// Evaluates one Faust program root list and returns the resolved `process` expression together
 /// with performance statistics collected during evaluation.
 ///
@@ -1247,7 +1357,19 @@ pub fn eval_process_with_stats(
     arena: &mut TreeArena,
     definitions: TreeId,
 ) -> Result<(TreeId, EvalStats), EvalError> {
-    let mut env = Environment::empty();
+    eval_process_with_stats_and_source_context(arena, definitions, EvalSourceContext::memory())
+}
+
+/// Instrumented variant of [`eval_process_with_source_context`].
+///
+/// File-backed callers should prefer this entry point when they need both
+/// profile counters and evaluator-level source loading semantics.
+pub fn eval_process_with_stats_and_source_context(
+    arena: &mut TreeArena,
+    definitions: TreeId,
+    source_context: EvalSourceContext,
+) -> Result<(TreeId, EvalStats), EvalError> {
+    let mut env = Environment::empty_with_source_context(source_context);
     let mut stats = EvalStats::default();
     bind_definitions(arena, definitions, &mut env)?;
     stats.env_layers_pushed += 1; // root scope

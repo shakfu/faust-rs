@@ -166,7 +166,7 @@ impl Compiler {
         source: &str,
     ) -> Result<SignalCompileOutput, CompilerError> {
         let output = self.compile_source(source_name, source)?;
-        self.pipeline_to_signals(source_name, output)
+        self.pipeline_to_signals(source_name, output, None)
     }
 
     /// Parses one file, evaluates `process`, then propagates boxes to output signals.
@@ -176,7 +176,12 @@ impl Compiler {
         search_paths: &[PathBuf],
     ) -> Result<SignalCompileOutput, CompilerError> {
         let output = self.compile_file(path, search_paths)?;
-        self.pipeline_to_signals(&path.display().to_string(), output)
+        let eval_source_context = eval::EvalSourceContext::for_file(path, search_paths);
+        self.pipeline_to_signals(
+            &path.display().to_string(),
+            output,
+            Some(eval_source_context),
+        )
     }
 
     /// Parses one file with default import search path, then runs eval+propagate.
@@ -196,7 +201,7 @@ impl Compiler {
         source_name: &str,
         output: ParseOutput,
     ) -> Result<SignalCompileOutput, CompilerError> {
-        self.pipeline_to_signals(source_name, output)
+        self.pipeline_to_signals(source_name, output, None)
     }
 
     /// Parses + evaluates + propagates one source, then lowers to a temporary
@@ -485,12 +490,21 @@ impl Compiler {
         &self,
         source: &str,
         mut output: ParseOutput,
+        eval_source_context: Option<eval::EvalSourceContext>,
     ) -> Result<SignalCompileOutput, CompilerError> {
         let root = output.root.ok_or_else(|| CompilerError::MissingRoot {
             source: source.into(),
         })?;
 
-        let process_box = eval::eval_process(&mut output.state.arena, root).map_err(|error| {
+        let process_result = match eval_source_context {
+            Some(source_context) => eval::eval_process_with_source_context(
+                &mut output.state.arena,
+                root,
+                source_context,
+            ),
+            None => eval::eval_process(&mut output.state.arena, root),
+        };
+        let process_box = process_result.map_err(|error| {
             let node = eval_error_node(&error);
             let owner =
                 node.and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
