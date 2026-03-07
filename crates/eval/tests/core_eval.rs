@@ -14,6 +14,7 @@ use eval::{
     Environment, EvalError, EvalSourceContext, LoopDetector, eval_box, eval_process,
     eval_process_with_source_context, eval_process_with_stats,
 };
+use parser::CompilationMetadataKey;
 use tlib::{TreeArena, TreeId};
 
 fn make_ident(arena: &mut TreeArena, name: &str) -> tlib::TreeId {
@@ -217,6 +218,42 @@ fn eval_process_library_loads_environment_from_file() {
     let out =
         eval_process_with_source_context(&mut arena, root, ctx).expect("library should load child");
     assert!(matches!(match_box(&arena, out), BoxMatch::Wire));
+}
+
+#[test]
+fn eval_source_context_collects_top_level_metadata_from_loaded_component() {
+    let root_dir = temp_root("component_metadata");
+    let entry = root_dir.join("main.dsp");
+    let child = root_dir.join("child.dsp");
+    fs::write(&entry, "process = component(\"child.dsp\");\n").expect("write entry");
+    fs::write(&child, "declare author \"child-author\";\nprocess = _;\n").expect("write child");
+
+    let mut arena = TreeArena::new();
+    let child_name = arena.string_lit("child.dsp");
+    let component = BoxBuilder::new(&mut arena).component(child_name);
+    let nil = arena.nil();
+    let process = make_def(&mut arena, "process", nil, component);
+    let root = make_defs(&mut arena, &[process]);
+    let ctx = EvalSourceContext::for_file(&entry, std::slice::from_ref(&root_dir));
+
+    let out = eval_process_with_source_context(&mut arena, root, ctx.clone())
+        .expect("component should load child and collect metadata");
+    assert!(matches!(match_box(&arena, out), BoxMatch::Wire));
+
+    let key = CompilationMetadataKey::scoped(
+        child
+            .canonicalize()
+            .expect("child should canonicalize")
+            .to_string_lossy()
+            .into_owned(),
+        "author",
+    );
+    let snapshot = ctx.metadata_snapshot();
+    let values = snapshot
+        .entries()
+        .get(&key)
+        .expect("loaded component metadata should be aggregated");
+    assert!(values.contains("child-author"));
 }
 
 #[test]

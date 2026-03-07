@@ -154,6 +154,7 @@ use std::sync::{Arc, Mutex};
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::codes;
 use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
+use parser::{CompilationMetadataSnapshot, CompilationMetadataStore};
 use tlib::{NodeKind, TreeArena, TreeId};
 
 mod pattern_matcher;
@@ -220,11 +221,14 @@ pub type EnvId = usize;
 ///   carries no filesystem base.
 /// - one context instance also acts as a per-session cache for already loaded
 ///   Faust source files, mirroring the role of C++ `SourceReader::fFileCache`.
+/// - top-level `declare key "value";` metadata for file-backed loads is written
+///   into the shared [`CompilationMetadataStore`] captured by the context.
 #[derive(Clone, Debug, Default)]
 pub struct EvalSourceContext {
     current_file: Option<PathBuf>,
     search_paths: Vec<PathBuf>,
     cache: Arc<Mutex<HashMap<PathBuf, CachedLoadedSource>>>,
+    metadata_store: Option<CompilationMetadataStore>,
 }
 
 impl EvalSourceContext {
@@ -232,6 +236,16 @@ impl EvalSourceContext {
     #[must_use]
     pub fn memory() -> Self {
         Self::default()
+    }
+
+    /// Creates a context for in-memory evaluation with one shared top-level
+    /// metadata store.
+    #[must_use]
+    pub fn memory_with_metadata(metadata_store: CompilationMetadataStore) -> Self {
+        Self {
+            metadata_store: Some(metadata_store),
+            ..Self::default()
+        }
     }
 
     /// Creates a context rooted at one source file plus optional import search paths.
@@ -242,6 +256,20 @@ impl EvalSourceContext {
     /// also reuses the same loaded-source cache.
     #[must_use]
     pub fn for_file(path: &Path, search_paths: &[PathBuf]) -> Self {
+        Self::for_file_with_metadata(
+            path,
+            search_paths,
+            CompilationMetadataStore::new(&path.to_string_lossy()),
+        )
+    }
+
+    /// Creates a file-backed context with one shared top-level metadata store.
+    #[must_use]
+    pub fn for_file_with_metadata(
+        path: &Path,
+        search_paths: &[PathBuf],
+        metadata_store: CompilationMetadataStore,
+    ) -> Self {
         let mut ordered = Vec::with_capacity(search_paths.len() + 1);
         if let Some(parent) = path.parent() {
             ordered.push(parent.to_path_buf());
@@ -255,13 +283,19 @@ impl EvalSourceContext {
             current_file: Some(path.to_path_buf()),
             search_paths: ordered,
             cache: Arc::default(),
+            metadata_store: Some(metadata_store),
         }
     }
 
     /// Returns a context for a newly loaded file while preserving inherited search order.
     #[must_use]
     pub fn for_loaded_file(&self, path: &Path) -> Self {
-        Self::for_file(path, &self.search_paths)
+        match &self.metadata_store {
+            Some(metadata_store) => {
+                Self::for_file_with_metadata(path, &self.search_paths, metadata_store.clone())
+            }
+            None => Self::for_file(path, &self.search_paths),
+        }
     }
 
     /// Returns the current file used as the primary relative-resolution anchor.
@@ -274,6 +308,21 @@ impl EvalSourceContext {
     #[must_use]
     pub fn search_paths(&self) -> &[PathBuf] {
         &self.search_paths
+    }
+
+    /// Returns the shared top-level metadata store captured by this context, if any.
+    #[must_use]
+    pub fn metadata_store(&self) -> Option<&CompilationMetadataStore> {
+        self.metadata_store.as_ref()
+    }
+
+    /// Returns a snapshot of the aggregated top-level metadata visible in this session.
+    #[must_use]
+    pub fn metadata_snapshot(&self) -> CompilationMetadataSnapshot {
+        self.metadata_store.as_ref().map_or_else(
+            CompilationMetadataSnapshot::default,
+            CompilationMetadataStore::snapshot,
+        )
     }
 
     fn cached_loaded_source_hits<R>(
@@ -298,7 +347,9 @@ impl EvalSourceContext {
 
 impl PartialEq for EvalSourceContext {
     fn eq(&self, other: &Self) -> bool {
-        self.current_file == other.current_file && self.search_paths == other.search_paths
+        self.current_file == other.current_file
+            && self.search_paths == other.search_paths
+            && self.metadata_snapshot() == other.metadata_snapshot()
     }
 }
 
@@ -2009,14 +2060,22 @@ fn eval_loaded_source_value(
                     current_file: source_context.current_file().map(Path::to_path_buf),
                     search_paths: source_context.search_paths().to_vec(),
                 })?;
-            let parse_output =
-                parser::parse_file_with_imports(&resolved_path, source_context.search_paths())
-                    .map_err(|error| EvalError::SourceReaderFailure {
-                        node,
-                        construct,
-                        target: target.clone(),
-                        message: error.to_string(),
-                    })?;
+            let parse = match source_context.metadata_store() {
+                Some(metadata_store) => parser::parse_file_with_imports_and_metadata(
+                    &resolved_path,
+                    source_context.search_paths(),
+                    metadata_store.clone(),
+                ),
+                None => {
+                    parser::parse_file_with_imports(&resolved_path, source_context.search_paths())
+                }
+            };
+            let parse_output = parse.map_err(|error| EvalError::SourceReaderFailure {
+                node,
+                construct,
+                target: target.clone(),
+                message: error.to_string(),
+            })?;
             let loaded_root = parse_output
                 .root
                 .ok_or_else(|| EvalError::SourceParseFailure {

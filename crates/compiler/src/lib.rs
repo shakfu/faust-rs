@@ -58,6 +58,9 @@ use transform::signal_fir::{
 pub struct SignalCompileOutput {
     /// Full parser output (arena + metadata + diagnostics from parse stage).
     pub parse: ParseOutput,
+    /// Aggregated top-level `declare key "value";` metadata visible after the
+    /// whole parse + eval file-loading session.
+    pub compilation_metadata: parser::CompilationMetadataSnapshot,
     /// Evaluated `process` box expression after `eval`.
     pub process_box: BoxId,
     /// Inferred process arity (`inputs`/`outputs`) from `propagate::box_arity`.
@@ -165,8 +168,13 @@ impl Compiler {
         source_name: &str,
         source: &str,
     ) -> Result<SignalCompileOutput, CompilerError> {
-        let output = self.compile_source(source_name, source)?;
-        self.pipeline_to_signals(source_name, output, None)
+        let metadata_store = parser::CompilationMetadataStore::new(source_name);
+        let output = ensure_parse_success(
+            source_name,
+            parser::parse_program_with_metadata(source, source_name, metadata_store.clone()),
+        )?;
+        let eval_source_context = eval::EvalSourceContext::memory_with_metadata(metadata_store);
+        self.pipeline_to_signals(source_name, output, Some(eval_source_context))
     }
 
     /// Parses one file, evaluates `process`, then propagates boxes to output signals.
@@ -180,8 +188,23 @@ impl Compiler {
         path: &Path,
         search_paths: &[PathBuf],
     ) -> Result<SignalCompileOutput, CompilerError> {
-        let output = self.compile_file(path, search_paths)?;
-        let eval_source_context = eval::EvalSourceContext::for_file(path, search_paths);
+        let metadata_store = parser::CompilationMetadataStore::new(
+            &path
+                .canonicalize()
+                .unwrap_or_else(|_| path.to_path_buf())
+                .to_string_lossy(),
+        );
+        let output = ensure_parse_success(
+            &path.display().to_string(),
+            parser::parse_file_with_imports_and_metadata(
+                path,
+                search_paths,
+                metadata_store.clone(),
+            )
+            .map_err(CompilerError::Import)?,
+        )?;
+        let eval_source_context =
+            eval::EvalSourceContext::for_file_with_metadata(path, search_paths, metadata_store);
         self.pipeline_to_signals(
             &path.display().to_string(),
             output,
@@ -505,11 +528,11 @@ impl Compiler {
             source: source.into(),
         })?;
 
-        let process_result = match eval_source_context {
+        let process_result = match &eval_source_context {
             Some(source_context) => eval::eval_process_with_source_context(
                 &mut output.state.arena,
                 root,
-                source_context,
+                source_context.clone(),
             ),
             None => eval::eval_process(&mut output.state.arena, root),
         };
@@ -615,6 +638,10 @@ impl Compiler {
         })?;
 
         Ok(SignalCompileOutput {
+            compilation_metadata: eval_source_context.as_ref().map_or_else(
+                || output.compilation_metadata.clone(),
+                eval::EvalSourceContext::metadata_snapshot,
+            ),
             parse: output,
             process_box,
             process_arity,
@@ -2322,5 +2349,34 @@ mod tests {
 
         assert_eq!(output.process_arity.inputs, 1);
         assert_eq!(output.process_arity.outputs, 1);
+    }
+
+    #[test]
+    fn compiler_compile_file_to_signals_aggregates_component_metadata() {
+        let root = temp_root("component_metadata");
+        let entry = root.join("main.dsp");
+        let child = root.join("child.dsp");
+        fs::write(&entry, "process = component(\"child.dsp\");\n").expect("write entry");
+        fs::write(&child, "declare author \"child-author\";\nprocess = _;\n").expect("write child");
+
+        let compiler = Compiler::new();
+        let output = compiler
+            .compile_file_default_to_signals(&entry)
+            .expect("file-backed compile should aggregate metadata");
+
+        let key = parser::CompilationMetadataKey::scoped(
+            child
+                .canonicalize()
+                .expect("child should canonicalize")
+                .to_string_lossy()
+                .into_owned(),
+            "author",
+        );
+        let values = output
+            .compilation_metadata
+            .entries()
+            .get(&key)
+            .expect("component metadata should exist in final compiler output");
+        assert!(values.contains("child-author"));
     }
 }
