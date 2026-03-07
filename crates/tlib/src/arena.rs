@@ -10,6 +10,7 @@
 //! - `TreeId` values are arena-local and stable for the arena lifetime.
 //! - List API preserves C++ list semantics (`Cons` node of arity 2 + canonical `Nil`).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ahash::AHashMap;
@@ -413,6 +414,55 @@ impl TreeArena {
     #[must_use]
     pub fn float(&mut self, value: f64) -> TreeId {
         self.intern(NodeKind::FloatBits(value.to_bits()), &[])
+    }
+
+    /// Clones one subtree from another arena into this arena.
+    ///
+    /// Source provenance (C++):
+    /// - adapted helper; the C++ compiler uses one global hash-cons pool and therefore
+    ///   does not need an explicit cross-arena clone primitive
+    ///
+    /// Rust keeps independent [`TreeArena`] instances per parser/evaluator session, so later
+    /// phases that load external Faust sources sometimes need to re-intern a parsed subtree
+    /// into the current destination arena. This helper preserves:
+    /// - source node kind,
+    /// - ordered child structure,
+    /// - destination-side hash-consing,
+    /// - repeated-subtree sharing through a local memo table.
+    #[must_use]
+    pub fn clone_subtree_from(&mut self, src: &TreeArena, root: TreeId) -> TreeId {
+        fn clone_rec(
+            dst: &mut TreeArena,
+            src: &TreeArena,
+            id: TreeId,
+            memo: &mut HashMap<TreeId, TreeId>,
+        ) -> TreeId {
+            if let Some(existing) = memo.get(&id) {
+                return *existing;
+            }
+            let cloned = match src.node(id) {
+                Some(node) => {
+                    let mut cloned_children = Vec::with_capacity(node.children.len());
+                    for child in node.children.as_slice() {
+                        cloned_children.push(clone_rec(dst, src, *child, memo));
+                    }
+                    let cloned_kind = match &node.kind {
+                        NodeKind::Tag(tag_id) => match src.tag_name(*tag_id) {
+                            Some(tag_name) => NodeKind::Tag(dst.intern_tag(tag_name)),
+                            None => NodeKind::Tag(*tag_id),
+                        },
+                        other => other.clone(),
+                    };
+                    dst.intern(cloned_kind, &cloned_children)
+                }
+                None => dst.nil(),
+            };
+            memo.insert(id, cloned);
+            cloned
+        }
+
+        let mut memo = HashMap::new();
+        clone_rec(self, src, root, &mut memo)
     }
 
     /// Interns a tag string and returns its numeric tag id.

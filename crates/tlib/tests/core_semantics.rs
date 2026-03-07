@@ -134,3 +134,31 @@ fn property_store_reserve_slots_does_not_set_values() {
     assert_eq!(props.get_with_key(b, key), None);
     assert!(props.is_empty());
 }
+
+#[test]
+fn clone_subtree_from_reinterns_nodes_into_destination_arena() {
+    let mut src = TreeArena::new();
+    let sym = src.symbol("x");
+    let one = src.int(1);
+    let pair_tag = src.intern_tag("pair");
+    let pair = src.intern(NodeKind::Tag(pair_tag), &[sym, one]);
+    let tail = src.cons(pair, src.nil());
+    let list = src.cons(pair, tail);
+
+    let mut dst = TreeArena::new();
+    let cloned = dst.clone_subtree_from(&src, list);
+
+    assert!(dst.is_list(cloned));
+    let head = dst.hd(cloned).expect("cloned list head");
+    let tail = dst.tl(cloned).expect("cloned list tail");
+    let second = dst.hd(tail).expect("cloned list second");
+    assert_eq!(
+        head, second,
+        "repeated subtrees should remain shared after inter-arena cloning"
+    );
+
+    let NodeKind::Tag(dst_tag) = dst.node(head).expect("pair node").kind.clone() else {
+        panic!("expected cloned tag node");
+    };
+    assert_eq!(dst.tag_name(dst_tag), Some("pair"));
+}
