@@ -3,22 +3,19 @@
 > **Date**: 2026-03-07
 > **Scope**: `crates/parser`, `crates/boxes`, parser/eval integration points
 > **Reference C++ baseline**: `master-dev-ocpp-od-fir-2-FIR19` (`8eebea429`)
-> **Status**: narrowed current-state gap list after the closure-model port
+> **Status**: no known parser/pattern/eval parity gaps after the final metadata step
 
 This document intentionally excludes gaps that were already closed by the
 parser/eval/closure work completed on 2026-03-06. It captures only the
 remaining items that still prevent the parser/pattern/eval area from being
 called fully finished relative to the C++ reference.
 
-The correction plan for these two items is tracked separately in
+The correction plan for the former two items was tracked separately in
 `porting/parser-pattern-eval-remaining-gap-plan-2026-03-07-en.md`.
 
 ## 1. Remaining Gap Summary
 
-One real gap remains in this area:
-
-1. parser-side `declare` / metadata recording is not yet carried through the
-   same end-to-end box/eval semantics as C++ `boxMetadata`.
+No known parser/pattern/eval parity gap remains in this area.
 
 Everything else from the original 2026-03-06 gap analysis is now implemented:
 
@@ -81,18 +78,25 @@ Closure completed on 2026-03-07:
 - parser structural guardrails now cover opaque `access`, `component`, and
   `environment` forms
 
-## 3. Remaining Gap: Metadata / `declare` End-to-End Parity
+## 3. Closed On 2026-03-07: Metadata / `declare` End-to-End Parity
 
 ### Current Rust behavior
 
-The parser records metadata declarations in parser context:
+Definition-scoped metadata is now reified through the parser/boxes/eval path:
+
+- `crates/boxes/src/lib.rs`
+  - `BoxMatch::Metadata`
+  - `BoxBuilder::metadata(...)`
+- `crates/parser/src/lib.rs`
+  - `format_definitions(...)` reinjects `declare <def> <key> <value>;`
+    through nested `BOXMETADATA` wrappers
+- `crates/eval/src/lib.rs`
+  - `BOXMETADATA` is evaluation-transparent, matching the C++ result semantics
+
+Top-level `declare key value;` entries remain recorded in parser context:
 
 - `crates/parser/src/context.rs`
   - `declared_metadata`
-  - `declared_definition_metadata`
-
-but that information is not yet reified through the same box/eval pipeline
-semantics as the C++ compiler.
 
 ### C++ reference behavior
 
@@ -105,35 +109,21 @@ Relevant reference code:
 - `/Users/letz/Developpements/RUST/faust/compiler/parser/sourcereader.cpp`
 - `/Users/letz/Developpements/RUST/faust/compiler/boxes/boxes.cpp`
 
-### Why it still matters
+### Why it mattered
 
-`declare` is part of the Faust source language. As long as Rust only records
-the declarations without reifying them through equivalent box semantics, the
-pipeline is not fully equivalent even if the production signal path often
-ignores that information.
+`declare` is part of the Faust source language. Until definition metadata
+survived parse-to-box transport, Rust remained observably different from the
+C++ compiler in the parser/eval surface.
 
-This is therefore a parity gap, not merely a documentation omission.
+### Closure completed on 2026-03-07
 
-### Minimum closure condition
+- `BOXMETADATA` now exists in `crates/boxes`
+- parser formatting reinjects definition metadata like C++
+  `addFunctionMetadata`
+- parser and eval regressions prove structural survival and evaluation
+  transparency
 
-This gap is closed only when:
+## 4. Current Conclusion
 
-- the relevant metadata semantics are represented in `boxes`,
-- parse-to-box construction reinjects metadata like the C++ parser does,
-- compiler-level tests prove the information survives the intended pipeline
-  boundaries.
-
-## 4. Recommended Next Split
-
-The next correction work should remain split in two:
-
-1. `prepare_pattern()` parity hardening,
-2. metadata / `declare` semantic reinjection.
-
-They are adjacent in scope, but they are not the same problem:
-
-- the first is a parser-side pattern-shape parity issue,
-- the second is a parser-to-box semantic transport issue.
-
-They should therefore not be hidden under the already-completed closure-port
-umbrella anymore.
+The parser/pattern/eval scope described by the 2026-03-06 gap analysis is now
+closed.

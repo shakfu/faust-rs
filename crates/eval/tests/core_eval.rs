@@ -119,6 +119,24 @@ fn eval_process_resolves_named_definition() {
 }
 
 #[test]
+fn eval_process_treats_metadata_wrapper_as_evaluation_transparent() {
+    let mut arena = TreeArena::new();
+    let wire = make_wire(&mut arena);
+    let md_key = arena.symbol("test/foo:author");
+    let md_value = arena.string_lit("Alice");
+    let md_pair = arena.cons(md_key, md_value);
+    let foo_expr = BoxBuilder::new(&mut arena).metadata(wire, md_pair);
+    let nil = arena.nil();
+    let foo = make_def(&mut arena, "foo", nil, foo_expr);
+    let foo_ident = make_ident(&mut arena, "foo");
+    let process = make_def(&mut arena, "process", nil, foo_ident);
+    let root = make_defs(&mut arena, &[foo, process]);
+
+    let out = eval_process(&mut arena, root).expect("metadata wrapper should not block eval");
+    assert!(matches!(match_box(&arena, out), BoxMatch::Wire));
+}
+
+#[test]
 fn eval_process_component_loads_file_in_captured_source_context() {
     let root_dir = temp_root("component_source_context");
     let entry = root_dir.join("main.dsp");

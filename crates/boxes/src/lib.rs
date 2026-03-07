@@ -100,6 +100,7 @@ const BOX_IPROD_TAG: &str = "BOXIPROD";
 const BOX_WITH_LOCAL_DEF_TAG: &str = "BOXWITHLOCALDEF";
 const BOX_MODIF_LOCAL_DEF_TAG: &str = "BOXMODIFLOCALDEF";
 const BOX_WITH_REC_DEF_TAG: &str = "BOXWITHRECDEF";
+const BOX_METADATA_TAG: &str = "BOXMETADATA";
 const BOX_ENVIRONMENT_TAG: &str = "BOXENVIRONMENT";
 const BOX_COMPONENT_TAG: &str = "BOXCOMPONENT";
 const BOX_LIBRARY_TAG: &str = "BOXLIBRARY";
@@ -589,6 +590,22 @@ impl<'a> BoxBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one box node for `metadata` and returns its `BoxId`.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/boxes/boxes.cpp`
+    /// - `boxMetadata`
+    /// - `isBoxMetadata`
+    ///
+    /// Mapping status: `1:1` semantics.
+    ///
+    /// `mdlist` keeps the C++ pair encoding used by the parser/evaluator stack:
+    /// `cons(key, value)`.
+    pub fn metadata(&mut self, expr: BoxId, mdlist: BoxId) -> BoxId {
+        node_metadata(self.arena, expr, mdlist)
+    }
+
+    #[must_use]
     /// Builds one box node for `environment` and returns its `BoxId`.
     pub fn environment(&mut self) -> BoxId {
         node_environment(self.arena)
@@ -873,6 +890,7 @@ pub enum BoxMatch<'a> {
     WithLocalDef(BoxId, BoxId),
     ModifLocalDef(BoxId, BoxId),
     WithRecDef(BoxId, BoxId, BoxId),
+    Metadata(BoxId, BoxId),
     Environment,
     Component(BoxId),
     Library(BoxId),
@@ -1028,6 +1046,7 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
                         BOX_SYMBOLIC_TAG => BoxMatch::Symbolic(c0, c1),
                         BOX_WITH_LOCAL_DEF_TAG => BoxMatch::WithLocalDef(c0, c1),
                         BOX_MODIF_LOCAL_DEF_TAG => BoxMatch::ModifLocalDef(c0, c1),
+                        BOX_METADATA_TAG => BoxMatch::Metadata(c0, c1),
                         BOX_ABSTR_TAG => BoxMatch::Abstr(c0, c1),
                         BOX_MODULATION_TAG => BoxMatch::Modulation(c0, c1),
                         BOX_VGROUP_TAG => BoxMatch::VGroup(c0, c1),
@@ -1720,6 +1739,22 @@ fn is_node_with_rec_def(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, Bo
         return None;
     };
     Some((*body, *ldef, *ldef2))
+}
+
+/// Equivalent to C++ `boxMetadata`.
+///
+/// The metadata payload keeps the tree-pair convention used by the C++ parser:
+/// `cons(key, value)`.
+#[must_use]
+fn node_metadata(arena: &mut TreeArena, expr: BoxId, mdlist: BoxId) -> BoxId {
+    intern_tag(arena, BOX_METADATA_TAG, &[expr, mdlist])
+}
+
+/// Returns `(expr, mdlist)` when `b` is `node_metadata`.
+#[must_use]
+#[allow(dead_code)]
+fn is_node_metadata(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
+    match_binary(arena, b, BOX_METADATA_TAG)
 }
 
 /// Equivalent to C++ `boxEnvironment`.

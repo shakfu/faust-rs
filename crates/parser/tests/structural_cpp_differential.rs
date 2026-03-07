@@ -36,6 +36,14 @@ fn case_rules(arena: &TreeArena, expr: TreeId) -> TreeId {
     }
 }
 
+fn string_like_text(arena: &TreeArena, id: TreeId) -> Option<&str> {
+    match arena.kind(id) {
+        Some(NodeKind::Symbol(text)) => Some(text.as_ref()),
+        Some(NodeKind::StringLiteral(text)) => Some(text.as_ref()),
+        _ => None,
+    }
+}
+
 fn rule_first_pattern(arena: &TreeArena, rule: TreeId) -> TreeId {
     let lhs = list_head(arena, rule);
     list_head(arena, lhs)
@@ -184,6 +192,42 @@ fn production_parser_structural_shapes_align_with_cpp_acceptance() {
             _ => unreachable!(),
         }
     }
+}
+
+#[test]
+fn production_parser_reinjects_definition_metadata_like_cpp() {
+    let source = r#"
+        declare foo author "Alice";
+        foo = _;
+        process = foo;
+    "#;
+
+    let output = parse_program(source, "metadata_definition.dsp");
+    assert!(
+        output.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        output.errors
+    );
+
+    let root = output.root.expect("root should be present");
+    let foo_expr = find_definition_expr(&output.state.arena, root, "foo")
+        .expect("foo definition should exist");
+    let (body, md_pair) = match match_box(&output.state.arena, foo_expr) {
+        BoxMatch::Metadata(body, md_pair) => (body, md_pair),
+        other => panic!("expected BOXMETADATA wrapper on foo, got {:?}", other),
+    };
+    assert!(matches!(
+        match_box(&output.state.arena, body),
+        BoxMatch::Wire
+    ));
+
+    let key = list_head(&output.state.arena, md_pair);
+    let value = list_tail(&output.state.arena, md_pair);
+    assert_eq!(
+        string_like_text(&output.state.arena, key),
+        Some("metadata_definition.dsp/foo:author")
+    );
+    assert_eq!(string_like_text(&output.state.arena, value), Some("Alice"));
 }
 
 #[test]

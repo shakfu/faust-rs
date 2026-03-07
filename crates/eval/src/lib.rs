@@ -1848,6 +1848,17 @@ fn eval_value(
             bind_definitions(arena, where_defs, &mut scoped)?;
             eval_value(arena, body, &scoped, loop_detector)
         }
+        BoxMatch::Metadata(body, _mdlist) => {
+            // Source provenance (C++):
+            // - `compiler/evaluate/eval.cpp`
+            // - `isBoxMetadata(exp, e1, e2) -> eval(e1, ...)`
+            //
+            // Mapping status: `adapted`.
+            // Rust keeps the metadata wrapper in the box layer for parser parity,
+            // but `eval` has no runtime-global metadata set yet, so evaluation is
+            // transparent for the wrapped expression.
+            eval_value(arena, body, env, loop_detector)
+        }
         BoxMatch::Abstr(_, _) | BoxMatch::Environment => Ok(EvalValue::Closure(ClosureValue {
             expr,
             env: env.clone(),

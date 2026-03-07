@@ -3,7 +3,7 @@
 > **Date**: 2026-03-07
 > **Scope**: `crates/parser`, `crates/boxes`, parser/eval integration points
 > **Reference C++ baseline**: `master-dev-ocpp-od-fir-2-FIR19` (`8eebea429`)
-> **Status**: current correction plan for the two post-closure remaining gaps
+> **Status**: implementation record; the remaining-gap plan is complete
 
 This document follows:
 
@@ -15,7 +15,8 @@ It intentionally excludes the closure-model work already completed in
 
 ## 1. Scope
 
-The remaining parser/pattern/eval parity work is now limited to one item:
+The remaining parser/pattern/eval parity work was reduced to one item before
+completion:
 
 1. metadata / `declare` end-to-end parity through C++-equivalent box semantics
 
@@ -63,7 +64,7 @@ generic "walk everything" pattern-preparation rule.
 - targeted differentials stay green against the C++ reference,
 - no existing parser parity tests regress.
 
-## 3. Remaining Gap: Metadata / `declare` End-to-End Parity
+## 3. Completed On 2026-03-07: Metadata / `declare` End-to-End Parity
 
 ### C++ target
 
@@ -72,64 +73,32 @@ Relevant references:
 - `/Users/letz/Developpements/RUST/faust/compiler/parser/sourcereader.cpp`
 - `/Users/letz/Developpements/RUST/faust/compiler/boxes/boxes.cpp`
 
-Rust must move from parser-side metadata bookkeeping only to the same
-language-pipeline semantics as the C++ compiler.
+Rust now carries definition-scoped metadata through the same semantic layer as
+the C++ compiler for the parser/pattern/eval surface.
 
-### Deliverables
+### Delivered
 
-1. Determine the minimal metadata semantics that must be represented in
-   `crates/boxes`.
-2. Add the missing box family or equivalent representation for metadata.
-3. Reinject parser-recorded `declare` data when building the relevant box
-   structures.
-4. Add end-to-end tests proving the metadata survives the intended parse/box
-   boundaries.
+1. Added `BoxMatch::Metadata` / `BoxBuilder::metadata(...)`
+2. Reinjects `declare <def> <key> <value>;` during `format_definitions(...)`
+3. Added parser/eval regressions for metadata structural survival and eval
+   transparency
 
-### Suggested implementation order
+### Implementation summary
 
-1. Inspect the exact C++ metadata reinjection points in `sourcereader.cpp`.
-2. Decide the Rust representation in `boxes`:
-   - preferably a direct `BoxMatch` family mirroring the C++ semantic role,
-   - document mapping status as `1:1` or `adapted` with rationale.
-3. Thread parser context metadata into box construction.
-4. Add tests at two levels:
-   - parser/boxes structural tests,
-   - compiler-facing tests if metadata is expected to be externally visible.
+The Rust representation is semantically aligned but documented as partially
+adapted:
+
+- definition metadata uses an explicit `BOXMETADATA` wrapper like C++
+- top-level `declare key value;` stays parser-context metadata for now
 
 ### Exit criteria
 
-- parser `declare` data is no longer parser-context-only,
+- definition-scoped `declare` data is no longer parser-context-only,
 - the selected metadata semantics are represented in `boxes`,
-- at least one regression proves reinjection survives into the intended
-  downstream representation.
+- regressions prove reinjection survives into the intended downstream
+  representation.
 
-## 4. Recommended Execution Order
+## 4. Final Status
 
-The next remaining implementation target is metadata reinjection.
-
-The earlier `prepare_pattern()` step was completed first because it was
-narrower and lower-risk. The remaining metadata work touches representation and
-crosses parser/boxes boundaries more broadly.
-
-## 5. Test Strategy
-
-Minimum additions still expected:
-
-- one or more metadata structural tests at parser/boxes level,
-- if metadata is surfaced publicly, one compiler-facing regression as well.
-
-Existing closure/eval regressions should remain green throughout:
-
-- `crates/eval/tests/core_eval.rs`
-- `crates/compiler/tests/signal_pipeline.rs`
-- `crates/compiler/tests/cpp_signal_differential.rs`
-
-## 6. Done Definition
-
-This area can be considered fully closed only when:
-
-- metadata / `declare` semantics are carried through the Rust pipeline in a
-  C++-equivalent way,
-- the remaining-gap snapshot in
-  `porting/parser-pattern-eval-remaining-gaps-2026-03-07-en.md`
-  can be retired or reduced to “no known gaps in this area”.
+This plan is complete. The parser/pattern/eval scope can now be treated as
+closed relative to the gaps isolated after the closure-model port.

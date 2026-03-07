@@ -413,6 +413,7 @@ fn box_arity_inner(
             inputs: 0,
             outputs: 1,
         }),
+        BoxMatch::Metadata(body, _) => box_arity(arena, body, cache),
         BoxMatch::Wire => Ok(BoxArity {
             inputs: 1,
             outputs: 1,
@@ -771,6 +772,7 @@ fn propagate_inner(
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.real(value)])
         }
+        BoxMatch::Metadata(body, _) => propagate_inner(arena, body, inputs, cache, slot_env),
         BoxMatch::Slot(id) => {
             expect_input_arity(box_tree, inputs, 0)?;
             if let Some(sig) = slot_env.get(&box_tree).copied() {

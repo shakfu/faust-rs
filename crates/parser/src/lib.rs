@@ -115,6 +115,7 @@ impl ParseState {
     /// - `standardArgList`
     /// - `makeDefinition`
     /// - `formatDefinitions`
+    /// - `addFunctionMetadata`
     ///
     /// Raw parser definitions are stored as `cons(name, cons(args, body))`, where:
     /// - `args == nil` means plain `name = body;`
@@ -512,8 +513,46 @@ impl ParseState {
             self.node_case_checked(rules)
         };
 
+        let with_metadata = self.apply_declared_definition_metadata(name, formatted_expr);
         let nil = self.nil();
-        self.make_definition(name, nil, formatted_expr)
+        self.make_definition(name, nil, with_metadata)
+    }
+
+    /// Reinjects parser-recorded `declare <def> <key> <value>;` entries like C++
+    /// `addFunctionMetadata`.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/parser/sourcereader.cpp`
+    /// - `declareDefinitionMetadata`
+    /// - `addFunctionMetadata`
+    ///
+    /// Mapping status: `adapted`.
+    ///
+    /// Rust keeps top-level `declare key value;` entries in [`ParserCtx`] for now,
+    /// but definition-scoped metadata is lowered into explicit `BOXMETADATA`
+    /// wrappers so it survives parser-to-eval transport like the C++ pipeline.
+    fn apply_declared_definition_metadata(&mut self, name: TreeId, expr: TreeId) -> TreeId {
+        let Some(def_name) = self.definition_name_key(name) else {
+            return expr;
+        };
+
+        let mut out = expr;
+        let source_file = self.source_file.to_string();
+        let entries: Vec<(String, String)> = self
+            .ctx
+            .declared_definition_metadata()
+            .iter()
+            .filter(|(target, _, _)| target.as_ref() == def_name)
+            .map(|(_, key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        for (key, value) in entries {
+            let full_key = format!("{source_file}/{def_name}:{key}");
+            let key_node = self.arena.symbol(full_key);
+            let value_node = self.arena.string_lit(value);
+            let md_pair = self.cons(key_node, value_node);
+            out = self.node_builder().metadata(out, md_pair);
+        }
+        out
     }
 
     /// Prepares one parser-side pattern using the same opacity boundary as C++ `preparePattern()`.
