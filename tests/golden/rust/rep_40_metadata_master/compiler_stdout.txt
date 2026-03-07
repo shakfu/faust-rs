@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_40_metadata_master.dsp
+bytes=34
+lines=2
+fnv1a64=0b405fb4431b19cc
