@@ -181,11 +181,24 @@ impl SourceReader {
             return canonicalize_path(raw).ok();
         }
 
-        let mut candidates = Vec::new();
+        // Mirror the C++ gImportDirList search order: -I paths (embedded at the head of
+        // search_paths by the compiler) are checked before the local directory of the
+        // currently-importing file.  In C++, `-I` entries are inserted at the front of
+        // gImportDirList via `insert(begin())`, while the importing file's directory is
+        // appended dynamically by `fopenSearch` only after the file is opened — i.e. it
+        // ends up at the back, after the system paths already present in the list.
+        // Reproducing that order: search_paths first, local_dir last (deduplicated).
+        let mut candidates: Vec<PathBuf> = self
+            .search_paths
+            .iter()
+            .map(|base| base.join(name))
+            .collect();
         if let Some(base) = local_dir {
-            candidates.push(base.join(name));
+            let local_candidate = base.join(name);
+            if !candidates.iter().any(|c| c == &local_candidate) {
+                candidates.push(local_candidate);
+            }
         }
-        candidates.extend(self.search_paths.iter().map(|base| base.join(name)));
 
         for candidate in candidates {
             if candidate.exists() {
@@ -219,7 +232,45 @@ fn parse_import_line(line: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_import_line;
+    use std::path::PathBuf;
+
+    use super::{SourceReader, parse_import_line};
+
+    /// Search paths (-I) must be checked before the local directory of the importing
+    /// file, mirroring the C++ gImportDirList ordering where `-I` entries are inserted
+    /// at the front via `insert(begin())` while the importing file's dir is only appended
+    /// dynamically at the back by `fopenSearch`.
+    #[test]
+    fn search_paths_take_precedence_over_local_dir_matching_cpp_import_order() {
+        // Create two directories, each containing foo.lib with different content.
+        // The override directory goes into search_paths (-I equivalent).
+        // The local directory simulates the importing file's parent.
+        // After the fix, search_paths must win.
+        use std::env;
+        let tmp = env::temp_dir();
+        let override_dir = tmp.join("faust_rs_order_test_override");
+        let local_dir = tmp.join("faust_rs_order_test_local");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::create_dir_all(&local_dir).unwrap();
+        std::fs::write(override_dir.join("foo.lib"), "// override").unwrap();
+        std::fs::write(local_dir.join("foo.lib"), "// local").unwrap();
+
+        let reader = SourceReader::new(vec![override_dir.clone()]);
+        let resolved = reader
+            .resolve_import_from("foo.lib", Some(&local_dir))
+            .expect("should resolve");
+
+        // The override (search_paths) must win over local_dir.
+        let expected = override_dir.join("foo.lib").canonicalize().unwrap();
+        assert_eq!(
+            resolved, expected,
+            "search_paths (-I) must take precedence over local_dir to match C++ gImportDirList order"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&override_dir);
+        let _ = std::fs::remove_dir_all(&local_dir);
+    }
 
     #[test]
     fn parses_import_line_variants() {
