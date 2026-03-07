@@ -10,6 +10,9 @@ parser/eval/closure work completed on 2026-03-06. It captures only the
 remaining items that still prevent the parser/pattern/eval area from being
 called fully finished relative to the C++ reference.
 
+The correction plan for these two items is tracked separately in
+`porting/parser-pattern-eval-remaining-gap-plan-2026-03-07-en.md`.
+
 ## 1. Remaining Gap Summary
 
 Two real gaps remain in this area:
