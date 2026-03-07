@@ -31,6 +31,7 @@
 pub mod enrobage;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use boxes::{BoxId, BoxMatch, dump_box, match_box};
@@ -146,20 +147,27 @@ impl Compiler {
 
     /// Parses one source file and expands local imports using `search_paths`.
     ///
+    /// `search_paths` are treated like C++ `-I/--import-dir` entries: they are
+    /// searched before the built-in file-backed defaults (`master` directory,
+    /// `FAUST_LIB_PATH`, executable-relative `share/faust`, and the usual
+    /// system install roots).
+    ///
     /// Returns [`CompilerError::Import`] for import resolution/cycle failures.
     pub fn compile_file(
         &self,
         path: &Path,
         search_paths: &[PathBuf],
     ) -> Result<ParseOutput, CompilerError> {
-        let output =
-            parser::parse_file_with_imports(path, search_paths).map_err(CompilerError::Import)?;
+        let import_search_paths = merge_import_search_paths(path, search_paths);
+        let output = parser::parse_file_with_imports(path, &import_search_paths)
+            .map_err(CompilerError::Import)?;
         ensure_parse_success(&path.display().to_string(), output)
     }
 
-    /// Parses one source file using its parent directory as default import search path.
+    /// Parses one source file using the same default library search model as the
+    /// C++ compiler frontend.
     pub fn compile_file_default(&self, path: &Path) -> Result<ParseOutput, CompilerError> {
-        self.compile_file(path, &[default_search_base(path)])
+        self.compile_file(path, &[])
     }
 
     /// Parses, evaluates `process`, then propagates boxes to output signals.
@@ -194,6 +202,7 @@ impl Compiler {
         path: &Path,
         search_paths: &[PathBuf],
     ) -> Result<SignalCompileOutput, CompilerError> {
+        let import_search_paths = merge_import_search_paths(path, search_paths);
         let metadata_store = parser::CompilationMetadataStore::new(
             &path
                 .canonicalize()
@@ -204,13 +213,16 @@ impl Compiler {
             &path.display().to_string(),
             parser::parse_file_with_imports_and_metadata(
                 path,
-                search_paths,
+                &import_search_paths,
                 metadata_store.clone(),
             )
             .map_err(CompilerError::Import)?,
         )?;
-        let eval_source_context =
-            eval::EvalSourceContext::for_file_with_metadata(path, search_paths, metadata_store);
+        let eval_source_context = eval::EvalSourceContext::for_file_with_metadata(
+            path,
+            &import_search_paths,
+            metadata_store,
+        );
         self.pipeline_to_signals(
             &path.display().to_string(),
             output,
@@ -220,14 +232,14 @@ impl Compiler {
 
     /// Parses one file with default import search path, then runs eval+propagate.
     ///
-    /// The default search base is the file parent directory when present, which
-    /// also becomes the root evaluator source context for nested
-    /// `component("...")` / `library("...")` loads.
+    /// The default search set follows the C++ frontend model:
+    /// current file directory, `FAUST_LIB_PATH`, executable-relative
+    /// `share/faust`, then standard system install roots.
     pub fn compile_file_default_to_signals(
         &self,
         path: &Path,
     ) -> Result<SignalCompileOutput, CompilerError> {
-        self.compile_file_to_signals(path, &[default_search_base(path)])
+        self.compile_file_to_signals(path, &[])
     }
 
     /// Runs eval+propagate on an already parsed Faust program.
@@ -421,7 +433,7 @@ impl Compiler {
         options: &COptions,
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
-        self.compile_file_to_c_with_lane(path, &[default_search_base(path)], options, lane)
+        self.compile_file_to_c_with_lane(path, &[], options, lane)
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -432,7 +444,7 @@ impl Compiler {
         options: &CppOptions,
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
-        self.compile_file_to_cpp_with_lane(path, &[default_search_base(path)], options, lane)
+        self.compile_file_to_cpp_with_lane(path, &[], options, lane)
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -442,7 +454,7 @@ impl Compiler {
         path: &Path,
         lane: SignalFirLane,
     ) -> Result<FirCompileOutput, CompilerError> {
-        self.compile_file_to_fir_with_lane(path, &[default_search_base(path)], lane)
+        self.compile_file_to_fir_with_lane(path, &[], lane)
     }
 
     /// Parses + evaluates + propagates one source, then emits `.fbc` bytecode
@@ -524,7 +536,7 @@ impl Compiler {
         options: &InterpOptions,
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
-        self.compile_file_to_interp_with_lane(path, &[default_search_base(path)], options, lane)
+        self.compile_file_to_interp_with_lane(path, &[], options, lane)
     }
 
     /// Runs the shared `parse output -> eval -> arity -> propagate` pipeline.
@@ -797,18 +809,81 @@ impl CompilerError {
 
 // ─── Helpers: path resolution ─────────────────────────────────────────────────
 
-/// Resolves the default import search base for a path (parent directory or ".").
+/// Resolves the default built-in import search paths for one file-backed
+/// compilation session.
 ///
-/// Public helper used by external integration crates (e.g. FFI frontends) to
-/// mirror the facade's file-import search-path behavior.
-pub fn default_import_search_base(path: &Path) -> PathBuf {
-    path.parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
+/// # Source provenance (C++)
+/// - `global::initDocumentNames()` / `global::initDirectories()` in
+///   `compiler/global.cpp`
+///
+/// # Effective order
+/// 1. current file parent directory (or `"."` for a bare filename)
+/// 2. `FAUST_LIB_PATH` when present
+/// 3. executable-relative `../share/faust`
+/// 4. `/usr/local/share/faust`
+/// 5. `/usr/share/faust`
+///
+/// This mirrors the C++ hardcoded library-search model as closely as possible
+/// in a standalone Rust binary.
+#[must_use]
+pub fn default_import_search_paths(path: &Path) -> Vec<PathBuf> {
+    build_import_search_paths(
+        path,
+        &[],
+        std::env::var_os("FAUST_LIB_PATH"),
+        std::env::current_exe().ok(),
+    )
 }
 
-fn default_search_base(path: &Path) -> PathBuf {
-    default_import_search_base(path)
+fn merge_import_search_paths(path: &Path, extra_paths: &[PathBuf]) -> Vec<PathBuf> {
+    build_import_search_paths(
+        path,
+        extra_paths,
+        std::env::var_os("FAUST_LIB_PATH"),
+        std::env::current_exe().ok(),
+    )
+}
+
+fn build_import_search_paths(
+    path: &Path,
+    extra_paths: &[PathBuf],
+    faust_lib_path: Option<OsString>,
+    current_exe: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    fn push_unique(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
+        if !paths.iter().any(|existing| existing == &candidate) {
+            paths.push(candidate);
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(extra_paths.len() + 5);
+    for path in extra_paths {
+        push_unique(&mut ordered, path.clone());
+    }
+
+    push_unique(
+        &mut ordered,
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+    );
+
+    if let Some(env_path) = faust_lib_path {
+        push_unique(&mut ordered, PathBuf::from(env_path));
+    }
+
+    if let Some(share_root) = current_exe
+        .as_deref()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(|root| root.join("share").join("faust"))
+    {
+        push_unique(&mut ordered, share_root);
+    }
+
+    push_unique(&mut ordered, PathBuf::from("/usr/local/share/faust"));
+    push_unique(&mut ordered, PathBuf::from("/usr/share/faust"));
+    ordered
 }
 
 // ─── Helpers: parse validation ────────────────────────────────────────────────
@@ -2254,13 +2329,14 @@ fn normalize_newlines(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        Compiler, CompilerError, default_search_base, golden_snapshot, make_compute_fir_signature,
-        resolve_module_name,
+        Compiler, CompilerError, build_import_search_paths, default_import_search_paths,
+        golden_snapshot, make_compute_fir_signature, resolve_module_name,
     };
 
     fn temp_root(test_name: &str) -> PathBuf {
@@ -2289,22 +2365,81 @@ mod tests {
         );
     }
 
-    // ── default_search_base ───────────────────────────────────────────────────
+    // ── default_import_search_paths ───────────────────────────────────────────
 
     #[test]
-    fn default_search_base_returns_parent_when_present() {
+    fn default_import_search_paths_starts_with_parent_directory() {
         let path = PathBuf::from("/some/dir/file.dsp");
-        assert_eq!(default_search_base(&path), PathBuf::from("/some/dir"));
+        let paths = build_import_search_paths(&path, &[], None, None);
+        assert_eq!(paths.first(), Some(&PathBuf::from("/some/dir")));
+        assert!(paths.contains(&PathBuf::from("/usr/local/share/faust")));
+        assert!(paths.contains(&PathBuf::from("/usr/share/faust")));
     }
 
     #[test]
-    fn default_search_base_returns_dot_for_bare_filename() {
+    fn default_import_search_paths_use_dot_for_bare_filename() {
         let path = PathBuf::from("file.dsp");
-        // A bare filename has an empty parent; we fall back to ".".
-        let base = default_search_base(&path);
-        // Either "" or "." is acceptable depending on the platform; we just
-        // check we get a valid path back rather than panicking.
-        let _ = base;
+        let paths = build_import_search_paths(&path, &[], None, None);
+        assert!(
+            matches!(paths.first(), Some(first) if first == &PathBuf::from(".") || first == &PathBuf::from("")),
+            "expected first search path to stay local for bare filename, got {paths:?}"
+        );
+    }
+
+    #[test]
+    fn import_search_paths_place_explicit_dirs_before_cpp_defaults() {
+        let path = PathBuf::from("/project/main.dsp");
+        let explicit = [PathBuf::from("/custom/a"), PathBuf::from("/custom/b")];
+        let paths = build_import_search_paths(
+            &path,
+            &explicit,
+            Some(OsString::from("/env/faust")),
+            Some(PathBuf::from("/opt/faust/bin/faust-rs")),
+        );
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/custom/a"),
+                PathBuf::from("/custom/b"),
+                PathBuf::from("/project"),
+                PathBuf::from("/env/faust"),
+                PathBuf::from("/opt/faust/share/faust"),
+                PathBuf::from("/usr/local/share/faust"),
+                PathBuf::from("/usr/share/faust"),
+            ]
+        );
+    }
+
+    #[test]
+    fn import_search_paths_deduplicate_repeated_entries() {
+        let path = PathBuf::from("/project/main.dsp");
+        let explicit = [
+            PathBuf::from("/project"),
+            PathBuf::from("/usr/local/share/faust"),
+        ];
+        let paths = build_import_search_paths(
+            &path,
+            &explicit,
+            Some(OsString::from("/usr/local/share/faust")),
+            Some(PathBuf::from("/usr/local/bin/faust-rs")),
+        );
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/project"),
+                PathBuf::from("/usr/local/share/faust"),
+                PathBuf::from("/usr/share/faust"),
+            ]
+        );
+    }
+
+    #[test]
+    fn public_default_import_search_paths_never_return_empty() {
+        let path = PathBuf::from("file.dsp");
+        let paths = default_import_search_paths(&path);
+        assert!(!paths.is_empty());
     }
 
     // ── resolve_module_name ───────────────────────────────────────────────────

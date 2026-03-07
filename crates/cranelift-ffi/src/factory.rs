@@ -23,7 +23,7 @@ use codegen::backends::cranelift::{
     CraneliftOptLevel, CraneliftOptions, JitDspModule, generate_cranelift_module,
 };
 use codegen::backends::interp::{FbcDspFactory, InterpOptions, generate_interp_module, read_fbc};
-use compiler::{Compiler as FaustCompiler, SignalFirLane, default_import_search_base};
+use compiler::{Compiler as FaustCompiler, SignalFirLane, default_import_search_paths};
 use faust_box::{BoxFfiFirModule, export_fir_from_box_handle, export_fir_from_signal_array_handle};
 use utils::{
     decode_c_argv as decode_c_argv_shared, free_c_memory_c_string_only, null_c_string_array,
@@ -884,7 +884,7 @@ fn map_c_opt_level(level: c_int) -> CraneliftOptLevel {
 
 /// Builds import search paths for file compilation from default base + `-I` args.
 fn collect_search_paths_for_file(path: &Path, argv: &[String]) -> Vec<PathBuf> {
-    let mut paths = vec![default_import_search_base(path)];
+    let mut paths = default_import_search_paths(path);
     if let Ok(parsed) = parse_ffi_compile_args(argv) {
         paths.extend(parsed.search_paths);
     }

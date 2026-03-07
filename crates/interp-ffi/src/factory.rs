@@ -18,7 +18,7 @@ use std::io::BufReader;
 use std::path::Path;
 
 use codegen::backends::interp::{FAUST_VERSION, read_fbc, write_fbc};
-use compiler::{Compiler as FaustCompiler, SignalFirLane, default_import_search_base};
+use compiler::{Compiler as FaustCompiler, SignalFirLane, default_import_search_paths};
 use utils::{
     FfiCompileArgs, decode_c_argv as decode_c_argv_shared, free_c_memory_c_string_only,
     null_c_string_array, optional_c_str_arg,
@@ -437,7 +437,7 @@ unsafe fn write_error(buf: *mut c_char, msg: &str) {
 /// - final opaque pointer allocation.
 ///
 /// File and string constructors still keep distinct compile paths so file-based
-/// import resolution semantics (`default_import_search_base`) remain intact.
+/// import resolution semantics (`default_import_search_paths`) remain intact.
 unsafe fn create_interp_factory_with_argv<F>(
     argv: &[String],
     error_msg: *mut c_char,
@@ -545,7 +545,7 @@ fn compile_factory_from_file_fastlane(
         ..codegen::backends::interp::InterpOptions::default()
     };
 
-    let mut search_paths = vec![default_import_search_base(path)];
+    let mut search_paths = default_import_search_paths(path);
     search_paths.extend(parsed.search_paths);
 
     let compiler = FaustCompiler::new();
