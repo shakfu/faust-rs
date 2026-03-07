@@ -2155,12 +2155,28 @@ fn normalize_newlines(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
         Compiler, CompilerError, default_search_base, golden_snapshot, make_compute_fir_signature,
         resolve_module_name,
     };
+
+    fn temp_root(test_name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock drift")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "faust_rs_compiler_{test_name}_{}_{}",
+            std::process::id(),
+            stamp
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        root
+    }
 
     // ── golden helpers ────────────────────────────────────────────────────────
 
@@ -2280,5 +2296,22 @@ mod tests {
             }
             other => panic!("expected CompilerError::Parse, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn compiler_compile_file_to_signals_loads_component_through_eval_context() {
+        let root = temp_root("component_eval_context");
+        let entry = root.join("main.dsp");
+        let child = root.join("child.dsp");
+        fs::write(&entry, "process = component(\"child.dsp\");\n").expect("write entry");
+        fs::write(&child, "process = _;\n").expect("write child");
+
+        let compiler = Compiler::new();
+        let output = compiler
+            .compile_file_default_to_signals(&entry)
+            .expect("file-backed compile should load component");
+
+        assert_eq!(output.process_arity.inputs, 1);
+        assert_eq!(output.process_arity.outputs, 1);
     }
 }

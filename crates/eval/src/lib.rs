@@ -977,6 +977,29 @@ pub enum EvalError {
         node: TreeId,
         reason: &'static str,
     },
+    InvalidSourceReference {
+        node: TreeId,
+        construct: &'static str,
+    },
+    SourceFileNotFound {
+        node: TreeId,
+        construct: &'static str,
+        target: String,
+        current_file: Option<PathBuf>,
+        search_paths: Vec<PathBuf>,
+    },
+    SourceReaderFailure {
+        node: TreeId,
+        construct: &'static str,
+        target: String,
+        message: String,
+    },
+    SourceParseFailure {
+        node: TreeId,
+        construct: &'static str,
+        path: PathBuf,
+        errors: Vec<String>,
+    },
     ExpectedClosureValue {
         node: TreeId,
         context: &'static str,
@@ -1061,6 +1084,31 @@ impl Display for EvalError {
             }
             Self::InvalidModulationCircuit { reason, .. } => {
                 write!(f, "invalid modulation circuit: {reason}")
+            }
+            Self::InvalidSourceReference { construct, .. } => {
+                write!(
+                    f,
+                    "{construct} requires a string-like source filename literal"
+                )
+            }
+            Self::SourceFileNotFound {
+                construct, target, ..
+            } => {
+                write!(f, "{construct} could not resolve source file `{target}`")
+            }
+            Self::SourceReaderFailure {
+                construct, target, ..
+            } => {
+                write!(f, "{construct} failed while reading source file `{target}`")
+            }
+            Self::SourceParseFailure {
+                construct, path, ..
+            } => {
+                write!(
+                    f,
+                    "{construct} loaded `{}` but parsing failed",
+                    path.display()
+                )
             }
             Self::ExpectedClosureValue { context, .. } => {
                 write!(f, "{context} requires a captured closure value")
@@ -1208,6 +1256,70 @@ impl IntoDiagnostic for EvalError {
             .with_note("cause: modulation circuit violates Faust box-arity constraints")
             .with_note(format!("computed: {reason}"))
             .with_help("use a modulation circuit with at most 2 inputs and exactly 1 output"),
+            Self::InvalidSourceReference { construct, .. } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_GENERIC_FAILURE,
+                message,
+            )
+            .with_note(format!(
+                "cause: `{construct}` expects a literal source filename carried directly by the box tree"
+            ))
+            .with_help("template: component(\"file.dsp\") or library(\"file.dsp\")"),
+            Self::SourceFileNotFound {
+                target,
+                current_file,
+                search_paths,
+                ..
+            } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_GENERIC_FAILURE,
+                message,
+            )
+            .with_note(format!(
+                "current file: {}",
+                current_file
+                    .as_deref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<memory>".to_owned())
+            ))
+            .with_note(format!(
+                "search paths: {}",
+                if search_paths.is_empty() {
+                    "<none>".to_owned()
+                } else {
+                    search_paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ))
+            .with_help(format!("check that `{target}` exists in the active import path")),
+            Self::SourceReaderFailure {
+                construct,
+                message: detail,
+                ..
+            } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_GENERIC_FAILURE,
+                message,
+            )
+            .with_note(format!("source reader failure in `{construct}`: {detail}")),
+            Self::SourceParseFailure { errors, .. } => {
+                let mut diagnostic = Diagnostic::new(
+                    Severity::Error,
+                    Stage::Eval,
+                    codes::EVAL_GENERIC_FAILURE,
+                    message,
+                );
+                for parse_error in errors {
+                    diagnostic = diagnostic.with_note(format!("loaded parse error: {parse_error}"));
+                }
+                diagnostic
+            }
             Self::ExpectedClosureValue { context, .. } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
@@ -1597,6 +1709,12 @@ fn eval_value(
                 Some(fun),
             )?))
         }
+        BoxMatch::Component(filename) => {
+            eval_loaded_source_value(arena, expr, filename, "component", env)
+        }
+        BoxMatch::Library(filename) => {
+            eval_loaded_source_value(arena, expr, filename, "library", env)
+        }
         BoxMatch::Access(body, field) => eval_access_value(arena, body, field, env, loop_detector),
         BoxMatch::Case(_) => Ok(EvalValue::Box(expr)),
         BoxMatch::PatternVar(_) => Ok(EvalValue::Box(expr)),
@@ -1706,6 +1824,120 @@ fn eval_access_value(
         node: body,
         context: "access",
     })
+}
+
+/// Evaluates `component("...")` / `library("...")` by loading a file through the parser crate.
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/eval.cpp`
+/// - `isBoxComponent`
+/// - `isBoxLibrary`
+/// - `gGlobal->gReader.getList`
+/// - `gGlobal->gReader.expandList`
+///
+/// Mapping status: `adapted`.
+///
+/// The C++ evaluator reads extra Faust sources through the process-global source
+/// reader and wraps the resulting definitions in a closure over either
+/// `boxIdent("process")` (`component`) or `boxEnvironment()` (`library`).
+/// Rust reproduces the same semantic contract by:
+/// - resolving the target against the captured [`EvalSourceContext`],
+/// - parsing the loaded file through `parser::parse_file_with_imports(...)`,
+/// - cloning the resulting definition subtree into the current evaluation arena,
+/// - binding the loaded definitions in a fresh environment whose source context
+///   is rooted at the loaded file.
+fn eval_loaded_source_value(
+    arena: &mut TreeArena,
+    node: TreeId,
+    filename: TreeId,
+    construct: &'static str,
+    env: &Environment,
+) -> Result<EvalValue, EvalError> {
+    let target = source_reference_name(arena, filename)
+        .ok_or(EvalError::InvalidSourceReference { node, construct })?;
+    let source_context = env.source_context();
+    let resolved_path = resolve_loaded_source_path(source_context, &target).ok_or_else(|| {
+        EvalError::SourceFileNotFound {
+            node,
+            construct,
+            target: target.clone(),
+            current_file: source_context.current_file().map(Path::to_path_buf),
+            search_paths: source_context.search_paths().to_vec(),
+        }
+    })?;
+    let parse_output =
+        parser::parse_file_with_imports(&resolved_path, source_context.search_paths()).map_err(
+            |error| EvalError::SourceReaderFailure {
+                node,
+                construct,
+                target: target.clone(),
+                message: error.to_string(),
+            },
+        )?;
+    let loaded_root = parse_output
+        .root
+        .ok_or_else(|| EvalError::SourceParseFailure {
+            node,
+            construct,
+            path: resolved_path.clone(),
+            errors: parse_output.errors.clone(),
+        })?;
+    if !parse_output.errors.is_empty() {
+        return Err(EvalError::SourceParseFailure {
+            node,
+            construct,
+            path: resolved_path.clone(),
+            errors: parse_output.errors,
+        });
+    }
+
+    let cloned_defs = arena.clone_subtree_from(&parse_output.state.arena, loaded_root);
+    let mut loaded_env =
+        Environment::empty_with_source_context(source_context.for_loaded_file(&resolved_path));
+    bind_definitions(arena, cloned_defs, &mut loaded_env)?;
+
+    let closure_expr = match construct {
+        "component" => BoxBuilder::new(arena).ident("process"),
+        "library" => BoxBuilder::new(arena).environment(),
+        _ => unreachable!("unsupported source-loading construct"),
+    };
+    Ok(EvalValue::Closure(ClosureValue {
+        expr: closure_expr,
+        env: loaded_env,
+    }))
+}
+
+fn source_reference_name(arena: &TreeArena, filename: TreeId) -> Option<String> {
+    match arena.kind(filename) {
+        Some(NodeKind::StringLiteral(value)) | Some(NodeKind::Symbol(value)) => {
+            Some(value.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn resolve_loaded_source_path(source_context: &EvalSourceContext, target: &str) -> Option<PathBuf> {
+    let target_path = PathBuf::from(target);
+    if target_path.is_absolute() && target_path.exists() {
+        return Some(target_path);
+    }
+    if let Some(current_file) = source_context.current_file() {
+        let base = current_file.parent().unwrap_or_else(|| Path::new("."));
+        let candidate = base.join(target);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    if target_path.exists() {
+        return Some(target_path);
+    }
+    for base in source_context.search_paths() {
+        let candidate = base.join(target);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Evaluates `expr [ defs ]` by copying the captured closure environment and replacing bindings.

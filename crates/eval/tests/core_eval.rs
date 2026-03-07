@@ -4,13 +4,15 @@
 //! - Exercises public APIs and structural invariants for the targeted module.
 //! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
+use std::fs;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::{IntoDiagnostic, Severity, Stage, codes};
 use eval::{
     Environment, EvalError, EvalSourceContext, LoopDetector, eval_box, eval_process,
-    eval_process_with_stats,
+    eval_process_with_source_context, eval_process_with_stats,
 };
 use tlib::{TreeArena, TreeId};
 
@@ -88,6 +90,20 @@ fn make_rules_parser_order(arena: &mut TreeArena, source_rules: &[TreeId]) -> Tr
     out
 }
 
+fn temp_root(test_name: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock drift")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "faust_rs_eval_{test_name}_{}_{}",
+        std::process::id(),
+        stamp
+    ));
+    fs::create_dir_all(&root).expect("create temp root");
+    root
+}
+
 #[test]
 fn eval_process_resolves_named_definition() {
     let mut arena = TreeArena::new();
@@ -99,6 +115,56 @@ fn eval_process_resolves_named_definition() {
     let root = make_defs(&mut arena, &[foo, process]);
 
     let out = eval_process(&mut arena, root).expect("evaluation should succeed");
+    assert!(matches!(match_box(&arena, out), BoxMatch::Wire));
+}
+
+#[test]
+fn eval_process_component_loads_file_in_captured_source_context() {
+    let root_dir = temp_root("component_source_context");
+    let entry = root_dir.join("main.dsp");
+    let child = root_dir.join("child.dsp");
+    fs::write(&entry, "process = component(\"child.dsp\");\n").expect("write entry");
+    fs::write(&child, "process = _;\n").expect("write child");
+
+    let mut arena = TreeArena::new();
+    let child_name = arena.string_lit("child.dsp");
+    let component = BoxBuilder::new(&mut arena).component(child_name);
+    let nil = arena.nil();
+    let process = make_def(&mut arena, "process", nil, component);
+    let root = make_defs(&mut arena, &[process]);
+    let ctx = EvalSourceContext::for_file(&entry, std::slice::from_ref(&root_dir));
+
+    let out = eval_process_with_source_context(&mut arena, root, ctx)
+        .expect("component should load child file");
+    assert!(matches!(match_box(&arena, out), BoxMatch::Wire));
+}
+
+#[test]
+fn eval_process_library_loads_environment_from_file() {
+    let root_dir = temp_root("library_source_context");
+    let entry = root_dir.join("main.dsp");
+    let child = root_dir.join("child_lib.dsp");
+    fs::write(
+        &entry,
+        "lib = library(\"child_lib.dsp\"); process = lib.a;\n",
+    )
+    .expect("write entry");
+    fs::write(&child, "a = _;\n").expect("write child");
+
+    let mut arena = TreeArena::new();
+    let child_name = arena.string_lit("child_lib.dsp");
+    let library = BoxBuilder::new(&mut arena).library(child_name);
+    let nil = arena.nil();
+    let lib_def = make_def(&mut arena, "lib", nil, library);
+    let lib_ident = make_ident(&mut arena, "lib");
+    let a_ident = make_ident(&mut arena, "a");
+    let access = BoxBuilder::new(&mut arena).access(lib_ident, a_ident);
+    let process = make_def(&mut arena, "process", nil, access);
+    let root = make_defs(&mut arena, &[lib_def, process]);
+    let ctx = EvalSourceContext::for_file(&entry, std::slice::from_ref(&root_dir));
+
+    let out =
+        eval_process_with_source_context(&mut arena, root, ctx).expect("library should load child");
     assert!(matches!(match_box(&arena, out), BoxMatch::Wire));
 }
 
