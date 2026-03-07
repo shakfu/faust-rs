@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_54_scientific_notation_float.dsp
+bytes=847
+lines=21
+fnv1a64=dbea677d77543080
