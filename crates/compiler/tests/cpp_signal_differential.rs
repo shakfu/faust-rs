@@ -187,6 +187,21 @@ fn differential_signal_pipeline_status_against_cpp_reference() {
             expect_valid: true,
         },
         Case {
+            name: "rep_51_eval_label_widget_subst",
+            input: CaseInput::CorpusFile("rep_51_eval_label_widget_subst.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_52_eval_label_group_path_subst",
+            input: CaseInput::CorpusFile("rep_52_eval_label_group_path_subst.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_53_eval_label_modulation_target_subst",
+            input: CaseInput::CorpusFile("rep_53_eval_label_modulation_target_subst.dsp"),
+            expect_valid: true,
+        },
+        Case {
             name: "rep_22_parallel_mix",
             input: CaseInput::CorpusFile("rep_22_parallel_mix.dsp"),
             expect_valid: true,

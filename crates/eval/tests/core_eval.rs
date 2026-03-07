@@ -1276,6 +1276,25 @@ fn eval_process_widget_label_undefined_placeholder_surfaces_eval_error() {
 }
 
 #[test]
+fn eval_process_group_label_substitutes_ident_placeholders() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+    let three = BoxBuilder::new(&mut arena).int(3);
+    let n_def = make_def(&mut arena, "n", nil, three);
+    let group_label = arena.string_lit("main%n");
+    let inner = make_wire(&mut arena);
+    let group = BoxBuilder::new(&mut arena).vgroup(group_label, inner);
+    let process_def = make_def(&mut arena, "process", nil, group);
+    let defs = make_defs(&mut arena, &[n_def, process_def]);
+
+    let out = eval_process(&mut arena, defs).expect("group label interpolation should evaluate");
+    let BoxMatch::VGroup(label, _) = match_box(&arena, out) else {
+        panic!("process should evaluate to vgroup");
+    };
+    expect_label(&arena, label, "main3");
+}
+
+#[test]
 fn eval_process_modulation_target_label_substitutes_placeholders() {
     let mut arena = TreeArena::new();
     let nil = arena.nil();

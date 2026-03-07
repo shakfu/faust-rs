@@ -1951,30 +1951,21 @@ fn eval_value(
         BoxMatch::VSlider(label, cur, min, max, step) => Ok(EvalValue::Box(eval_vslider(
             arena,
             label,
-            cur,
-            min,
-            max,
-            step,
+            [cur, min, max, step],
             env,
             loop_detector,
         )?)),
         BoxMatch::HSlider(label, cur, min, max, step) => Ok(EvalValue::Box(eval_hslider(
             arena,
             label,
-            cur,
-            min,
-            max,
-            step,
+            [cur, min, max, step],
             env,
             loop_detector,
         )?)),
         BoxMatch::NumEntry(label, cur, min, max, step) => Ok(EvalValue::Box(eval_num_entry(
             arena,
             label,
-            cur,
-            min,
-            max,
-            step,
+            [cur, min, max, step],
             env,
             loop_detector,
         )?)),
@@ -2691,55 +2682,80 @@ fn eval_checkbox(
 fn eval_vslider(
     arena: &mut TreeArena,
     label: TreeId,
-    cur: TreeId,
-    min: TreeId,
-    max: TreeId,
-    step: TreeId,
+    params: [TreeId; 4],
     env: &Environment,
     loop_detector: &mut LoopDetector,
 ) -> Result<TreeId, EvalError> {
-    let label = evaluated_label_node(arena, label, env, loop_detector)?;
-    let cur = eval_box(arena, cur, env, loop_detector)?;
-    let min = eval_box(arena, min, env, loop_detector)?;
-    let max = eval_box(arena, max, env, loop_detector)?;
-    let step = eval_box(arena, step, env, loop_detector)?;
-    Ok(BoxBuilder::new(arena).vslider(label, cur, min, max, step))
+    eval_slider_like(
+        arena,
+        SliderKind::VSlider,
+        label,
+        params,
+        env,
+        loop_detector,
+    )
 }
 
 fn eval_hslider(
     arena: &mut TreeArena,
     label: TreeId,
-    cur: TreeId,
-    min: TreeId,
-    max: TreeId,
-    step: TreeId,
+    params: [TreeId; 4],
     env: &Environment,
     loop_detector: &mut LoopDetector,
 ) -> Result<TreeId, EvalError> {
-    let label = evaluated_label_node(arena, label, env, loop_detector)?;
-    let cur = eval_box(arena, cur, env, loop_detector)?;
-    let min = eval_box(arena, min, env, loop_detector)?;
-    let max = eval_box(arena, max, env, loop_detector)?;
-    let step = eval_box(arena, step, env, loop_detector)?;
-    Ok(BoxBuilder::new(arena).hslider(label, cur, min, max, step))
+    eval_slider_like(
+        arena,
+        SliderKind::HSlider,
+        label,
+        params,
+        env,
+        loop_detector,
+    )
 }
 
 fn eval_num_entry(
     arena: &mut TreeArena,
     label: TreeId,
-    cur: TreeId,
-    min: TreeId,
-    max: TreeId,
-    step: TreeId,
+    params: [TreeId; 4],
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    eval_slider_like(
+        arena,
+        SliderKind::NumEntry,
+        label,
+        params,
+        env,
+        loop_detector,
+    )
+}
+
+enum SliderKind {
+    VSlider,
+    HSlider,
+    NumEntry,
+}
+
+fn eval_slider_like(
+    arena: &mut TreeArena,
+    kind: SliderKind,
+    label: TreeId,
+    params: [TreeId; 4],
     env: &Environment,
     loop_detector: &mut LoopDetector,
 ) -> Result<TreeId, EvalError> {
     let label = evaluated_label_node(arena, label, env, loop_detector)?;
+    let [cur, min, max, step] = params;
     let cur = eval_box(arena, cur, env, loop_detector)?;
     let min = eval_box(arena, min, env, loop_detector)?;
     let max = eval_box(arena, max, env, loop_detector)?;
     let step = eval_box(arena, step, env, loop_detector)?;
-    Ok(BoxBuilder::new(arena).num_entry(label, cur, min, max, step))
+    let mut b = BoxBuilder::new(arena);
+    Ok(match kind {
+        SliderKind::VSlider => b.vslider(label, cur, min, max, step),
+        SliderKind::HSlider => b.hslider(label, cur, min, max, step),
+        SliderKind::NumEntry => b.num_entry(label, cur, min, max, step),
+    })
 }
 
 fn eval_soundfile(

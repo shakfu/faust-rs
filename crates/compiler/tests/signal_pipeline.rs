@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use compiler::Compiler;
 use parser::CompilationMetadataKey;
-use signals::{BinOp, SigMatch, match_sig};
+use signals::{BinOp, SigMatch, dump_sig_readable, match_sig};
 use tlib::{TreeArena, TreeId};
 
 fn corpus_path(file: &str) -> PathBuf {
@@ -32,6 +32,20 @@ fn compile_inline(name: &str, source: &str) -> compiler::SignalCompileOutput {
     Compiler::new()
         .compile_source_to_signals(name, source)
         .unwrap_or_else(|e| panic!("failed to compile {name} to signals: {e}"))
+}
+
+fn dump_signals_readable(out: &compiler::SignalCompileOutput) -> String {
+    out.signals
+        .iter()
+        .enumerate()
+        .map(|(idx, sig)| {
+            format!(
+                "[{idx}] {}",
+                dump_sig_readable(&out.parse.state.arena, *sig)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -374,6 +388,36 @@ process = make(1)(0) + make(2)(0);
         match_sig(&out.parse.state.arena, rhs),
         SigMatch::Int(2)
     ));
+}
+
+#[test]
+fn corpus_eval_label_widget_substitution_reaches_signal_paths() {
+    let out = compile_corpus("rep_51_eval_label_widget_subst.dsp");
+    let dump = dump_signals_readable(&out);
+    assert!(
+        dump.contains("gain3"),
+        "signal dump should contain interpolated widget label, got:\n{dump}"
+    );
+}
+
+#[test]
+fn corpus_eval_label_group_path_substitution_compiles_cleanly() {
+    let out = compile_corpus("rep_52_eval_label_group_path_subst.dsp");
+    let dump = dump_signals_readable(&out);
+    assert!(
+        dump.contains("gain"),
+        "signal dump should still contain the widget leaf label after interpolated group evaluation, got:\n{dump}"
+    );
+}
+
+#[test]
+fn corpus_eval_label_modulation_target_substitution_matches_widget() {
+    let out = compile_corpus("rep_53_eval_label_modulation_target_subst.dsp");
+    let dump = dump_signals_readable(&out);
+    assert!(
+        dump.contains("gain3"),
+        "signal dump should contain interpolated modulation target/widget label, got:\n{dump}"
+    );
 }
 
 fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i32) {

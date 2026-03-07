@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_52_eval_label_group_path_subst.dsp
+bytes=73
+lines=2
+fnv1a64=f8562d467a6990ad
