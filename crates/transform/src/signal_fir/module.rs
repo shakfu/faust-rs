@@ -805,11 +805,9 @@ impl<'a> SignalToFirLower<'a> {
                 ButtonType::Checkbox => "fCheckbox",
             },
         );
-        // UI zone initializer is also a FaustFloat constant (init value = 0.0).
-        let init = {
-            let mut b = FirBuilder::new(&mut self.store);
-            b.float32(0.0_f32)
-        };
+        // UI zone initializer: use internal real precision so that the constant
+        // type matches `real_ty` (Float32 or Float64 with `--double`).
+        let init = self.float_const(0.0);
         self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init));
         let label = self.label_text(label);
         {
@@ -853,12 +851,10 @@ impl<'a> SignalToFirLower<'a> {
         let min_v = self.constant_f64(min).unwrap_or(0.0);
         let max_v = self.constant_f64(max).unwrap_or(1.0);
         let step_v = self.constant_f64(step).unwrap_or(0.01);
-        // UI zone initializer is a FaustFloat constant (the external host writes
-        // this value); the range metadata stays f64 for precision.
-        let init_id = {
-            let mut b = FirBuilder::new(&mut self.store);
-            b.float32(init_v as f32)
-        };
+        // UI zone initializer: use internal real precision so that the constant
+        // type matches `real_ty` (Float32 or Float64 with `--double`).
+        // The range metadata stays f64 for precision.
+        let init_id = self.float_const(init_v);
         self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init_id));
         let label = self.label_text(label);
         let range = SliderRange {
@@ -899,11 +895,9 @@ impl<'a> SignalToFirLower<'a> {
                     BargraphType::Vertical => "fVbargraph",
                 },
             );
-            // Bargraph zone is FaustFloat (the host reads it); initializer is 0.0.
-            let init = {
-                let mut b = FirBuilder::new(&mut self.store);
-                b.float32(0.0_f32)
-            };
+            // Bargraph zone is FaustFloat (the host reads it); initializer uses
+            // internal real precision so the constant type matches `real_ty`.
+            let init = self.float_const(0.0);
             self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init));
             let label = self.label_text(label);
             let min_v = self.constant_f64(min).unwrap_or(0.0);
