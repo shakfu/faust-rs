@@ -6,15 +6,26 @@
 > **Reference C++ source roots**:
 > - `/Users/letz/Developpements/RUST/faust/compiler/parser`
 > - `/Users/letz/Developpements/RUST/faust/compiler/evaluate`
-> **Status**: semantic-gap analysis and correction plan
->
-> **Update later on 2026-03-06**:
-> the parser grouped-definition parity, evaluated `case` patterns with barrier
-> semantics, and the adapted `a2sb` / `slot` / `symbolic` lowering path have
-> since been implemented in Rust. The main remaining structural evaluation gap
-> is now the absence of the true captured-closure environment model from C++.
-> The follow-up plan for that direction is documented in
-> `porting/eval-true-closure-model-port-plan-2026-03-06-en.md`.
+> **Status**: historical gap analysis, updated on 2026-03-07 with current implementation status
+
+This document was written as the initial parity-gap analysis on 2026-03-06.
+Several items identified here have since been implemented.
+
+Current status summary on 2026-03-07:
+
+- parser grouped/patterned definitions: implemented
+- evaluated `case` patterns + barrier semantics: implemented
+- closure-valued evaluation model in `eval`: implemented
+- `a2sb` lowering through evaluator values: implemented
+- `slot` / `symbolic` / `modifLocalDef` support: implemented
+- remaining real gaps from the original list:
+  - `prepare_pattern()` opacity parity against C++ `preparePattern()`
+  - metadata / `declare` end-to-end parity (`boxMetadata`-level semantics)
+
+The closure follow-up described here is now completed and documented in
+`porting/eval-true-closure-model-port-plan-2026-03-06-en.md`. The remaining
+non-closure work is split out into
+`porting/parser-pattern-eval-remaining-gap-plan-2026-03-07-en.md`.
 
 ---
 
@@ -54,9 +65,11 @@ evaluation-to-box lowering path.
 
 ---
 
-## 2. Confirmed Semantic Gaps
+## 2. Originally Confirmed Semantic Gaps On 2026-03-06
 
-## 2.1 Patterned and multi-clause definitions are not parser/eval equivalent
+## 2.1 Patterned and multi-clause definitions were not parser/eval equivalent
+
+Status on 2026-03-07: implemented.
 
 Rust currently parses function definitions with identifier-only parameter lists,
 while C++ accepts full argument patterns and later normalizes grouped
@@ -90,7 +103,9 @@ Observed consequences:
 This is a hard parity blocker because Faust pattern-based function definitions
 are part of the language surface, not an edge case.
 
-## 2.2 `case` rules are compiled from raw patterns instead of evaluated patterns
+## 2.2 `case` rules were compiled from raw patterns instead of evaluated patterns
+
+Status on 2026-03-07: implemented.
 
 Rust currently builds the automaton directly from the stored rule list. C++
 first evaluates and simplifies pattern expressions before automaton
@@ -116,7 +131,9 @@ Observed consequence:
 Any rule whose left-hand side depends on compile-time simplification can drift
 from C++ until this stage is ported.
 
-## 2.3 Pattern-variable scope barriers are incorrect
+## 2.3 Pattern-variable scope barriers were incorrect
+
+Status on 2026-03-07: implemented.
 
 Rust rule matching currently checks existing bindings through full environment
 lookup. C++ inserts an environment barrier so that a pattern variable only
@@ -144,7 +161,9 @@ Observed consequence:
 This is a semantic bug in variable capture and non-linearity handling, not just
 an implementation detail.
 
-## 2.4 The Rust pipeline still lacks the C++ `a2sb()` stage
+## 2.4 The Rust pipeline still lacked the C++ `a2sb()` stage
+
+Status on 2026-03-07: implemented.
 
 C++ does not expose raw abstractions, pattern matchers, or modulation nodes to
 the rest of the pipeline. `evalprocess` always runs the result through `a2sb()`
@@ -169,7 +188,11 @@ Observed consequences:
 This is the main structural reason parser/eval parity is still incomplete even
 when local parser/eval unit tests pass.
 
-## 2.5 Required box families for parity are still missing
+## 2.5 Required box families for parity were still missing
+
+Status on 2026-03-07: partially implemented to the level needed for the
+closure/evaluation port. `slot`, `symbolic`, and `modifLocalDef` are now
+present; metadata-specific parity remains open.
 
 Porting `a2sb()` requires box families that exist in C++ but are not yet
 represented in the Rust `boxes` crate.
@@ -192,6 +215,8 @@ lowering and metadata behavior of the C++ compiler.
 
 ## 2.6 `prepare_pattern()` is broader than the C++ implementation
 
+Status on 2026-03-07: still open.
+
 Rust recursively rewrites patterns across the generic tree shape. C++ keeps a
 whitelist/blacklist boundary and leaves several box families opaque during
 pattern preparation.
@@ -212,6 +237,11 @@ Impact:
 - current tests do not meaningfully constrain this area.
 
 ## 2.7 Metadata and local-definition modifiers are not yet end-to-end equivalent
+
+Status on 2026-03-07:
+
+- `boxModifLocalDef` / `expr [ defs ]`: implemented
+- metadata / `declare` reinjection parity: still open
 
 Rust currently records declaration metadata in parser-side context but does not
 reinject it through equivalent box nodes and evaluation semantics.
@@ -235,7 +265,11 @@ Impact:
 - metadata semantics remain partial,
 - local-definition modifier forms are not yet fully aligned with C++.
 
-## 2.8 Differential coverage is too narrow to guard the missing semantics
+## 2.8 Differential coverage was too narrow to guard the missing semantics
+
+Status on 2026-03-07: improved substantially for closure semantics, but still
+needs dedicated guardrails for the remaining `prepare_pattern()` and metadata
+gaps.
 
 The current parser differential harness does not cover the cases above, and the
 compiler corpus still tolerates known `case`/closure failures.

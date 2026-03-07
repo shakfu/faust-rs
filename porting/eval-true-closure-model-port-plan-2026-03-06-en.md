@@ -10,9 +10,21 @@
 > - `/Users/letz/Developpements/RUST/faust/compiler/boxes/boxes.cpp`
 > **Status**: implemented in `crates/eval` with adapted Rust-side representation and parity guardrails
 
+Implementation note on 2026-03-07:
+
+- the closure port described in this plan is now implemented,
+- the current evaluator status is `1:1` semantics with adapted Rust-side
+  runtime representation,
+- the remaining parser/pattern/eval gaps are now outside the closure model and
+  are tracked separately in
+  `porting/parser-pattern-eval-remaining-gap-plan-2026-03-07-en.md`.
+
+Sections 2 through 8 are preserved primarily as an implementation record of
+the C++ semantics that were ported and of the staged plan used to port them.
+
 ---
 
-## 1. Goal
+## 1. Goal And Outcome
 
 The Rust port has already restored several important parity points:
 
@@ -22,15 +34,19 @@ The Rust port has already restored several important parity points:
 - adapted `a2sb` lowering for residual `abstr` / `case` forms,
 - `slot` / `symbolic` propagation support.
 
-The main structural mismatch that remains is the evaluator environment model.
-The current Rust implementation still stores bare `TreeId` definitions in a
-scoped environment and reuses the caller environment during identifier forcing.
-The C++ compiler, by contrast, stores **captured closures** in each environment
-layer and evaluates them later in the environment captured at definition time.
+On 2026-03-06 this document identified the evaluator environment model as the
+main structural mismatch and proposed porting the true captured-closure model
+instead of extending the eager adaptation further.
 
-If the objective is full semantic parity, the next major evaluator task should
-be to port that closure model instead of extending the current eager
-adaptation.
+That port is now completed:
+
+- environment bindings store explicit evaluator values,
+- identifier forcing uses captured environments,
+- abstractions / environments / loaded sources evaluate as closures,
+- `boxAccess` and `boxModifLocalDef` operate on captured environments,
+- `case` is represented as an explicit evaluator pattern-matcher value,
+- `a2sb` lowers those evaluator values rather than relying on a parallel
+  syntax-only path.
 
 ---
 
@@ -126,10 +142,11 @@ not the same representation contract.
 
 ---
 
-## 3. Current Rust State
+## 3. Historical Pre-Port Rust State
 
-The current Rust evaluator is still an **adapted** model, not a 1:1 closure
-port.
+This section records the Rust state that motivated the closure port on
+2026-03-06. It is kept as provenance, not as the current implementation
+description.
 
 ## 3.1 Environment contents
 
