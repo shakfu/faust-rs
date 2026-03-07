@@ -8,7 +8,7 @@
 > - `/Users/letz/Developpements/RUST/faust/compiler/evaluate/environment.cpp`
 > - `/Users/letz/Developpements/RUST/faust/compiler/evaluate/environment.hh`
 > - `/Users/letz/Developpements/RUST/faust/compiler/boxes/boxes.cpp`
-> **Status**: architectural parity analysis and staged correction plan
+> **Status**: implemented in `crates/eval` with adapted Rust-side representation and parity guardrails
 
 ---
 
@@ -470,11 +470,13 @@ and rewrite captured environments explicitly.
 
 ## 9. Mapping Status Summary
 
-- Public `eval_process(...)` API: `adapted`, planned to stay source-compatible.
-- Internal environment representation: `adapted`, planned to change.
-- Identifier forcing semantics: `adapted`, not yet 1:1.
-- `access` semantics: `adapted`, not yet 1:1.
-- `expr { defs }` / `boxModifLocalDef`: `deferred`.
-- Captured pattern-matcher environment model: `adapted`, not yet 1:1.
-- `a2sb` lowering contract: externally close enough for current fixtures, but
-  still internally `adapted`.
+- Public `eval_process(...)` API: `adapted`, intentionally source-compatible.
+- Internal environment representation: `adapted representation`, `1:1` semantics through
+  explicit [`EvalValue`] closures and stable `EnvId`.
+- Identifier forcing semantics: `1:1`.
+- `access` semantics: `1:1`.
+- `expr { defs }` / `boxModifLocalDef`: `1:1`.
+- Captured pattern-matcher environment model: `1:1` semantics with adapted Rust
+  `EvalValue::PatternMatcher(...)`.
+- `a2sb` lowering contract: `1:1` semantics through `a2sb_value(...)`, with
+  first-order box output preserved for later passes.

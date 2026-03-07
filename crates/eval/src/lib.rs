@@ -85,27 +85,23 @@
 //! - barrier semantics for repeated pattern variables,
 //! - adapted `a2sb` lowering of residual `abstr` / `case` forms.
 //!
-//! It is **not** a 1:1 port of the full C++ closure model, however. Rust now stores captured
-//! definition closures in environment layers, but it still does not expose all evaluator values
-//! that C++ carries (`closure(expr, genv, visited, lenv)` for abstractions/environments,
-//! pattern-matcher values, or environment-rewrite closures for `boxModifLocalDef`).
-//! This matters for the full semantics of:
-//! - `access` through captured environments,
-//! - `boxModifLocalDef` / `expr [ defs ]` environment rewriting,
-//! - recursion tracking keyed by `(id, env)`,
-//! - closure-driven `a2sb` lowering.
+//! It is still not a byte-for-byte port of the C++ closure node layout: Rust keeps the same
+//! semantics in explicit evaluator values instead of tree-encoded `closure(...)` /
+//! `boxPatternMatcher(...)` nodes. The remaining differences are therefore representational,
+//! not semantic:
+//! - source loading uses [`EvalSourceContext`] instead of the process-global `gReader`,
+//! - closures and pattern matchers are explicit Rust values instead of tree nodes,
+//! - later passes still consume first-order box IR after [`a2sb_value`] lowers those values.
 //!
-//! Current mapping status: **adapted**. The preferred parity direction is now to port the true
-//! captured-closure model from `compiler/evaluate/environment.cpp` / `eval.cpp`; see
-//! `porting/eval-true-closure-model-port-plan-2026-03-06-en.md`.
+//! Current mapping status: **1:1 semantics, adapted representation**.
 //!
 //! ## Divergences from C++ (intentional)
 //!
 //! | Feature | C++ | Rust | Notes |
 //! |---|---|---|---|
-//! | Value stored | `closure(expr, genv, visited, lenv)` | `EvalValue::{Box, Closure}` | Definition, abstraction, and environment capture are explicit; pattern-matcher/env-rewrite closures still pending |
+//! | Value stored | `closure(expr, genv, visited, lenv)` / `boxPatternMatcher(...)` | `EvalValue::{Box, Closure, PatternMatcher}` | Same semantics, adapted host-side representation |
 //! | Barrier mechanism | `pushEnvBarrier` / `searchIdDef` | `push_barrier_scope()` + `lookup_until_barrier()` | Same semantics |
-//! | `copyEnvReplaceDefs` | Present (env rewiring) | Deferred | Current eager model has no direct equivalent yet |
+//! | `copyEnvReplaceDefs` | Present (env rewiring) | Present | `copy_env_replace_defs(...)` + `rewrite_captured_env(...)` |
 //! | Redefinition check | `addLayerDef` throws on conflict | `bind_definitions` returns `EvalError::RedefinedSymbol` | Same semantics, typed error |
 //! | Profiling | `gGlobal->gStats` (global mutable) | `EvalStats` (returned value) | Safer, composable |
 //!
@@ -1637,8 +1633,8 @@ fn a2sb_value(
 /// - `case { ... }` becomes one nested `symbolic(slot_i, ...)` per expected
 ///   argument, after fully applying the case node to fresh slots
 ///
-/// This is an **adapted** internal representation, not a byte-for-byte port of
-/// C++ closure objects. The semantic contract is the same: later passes observe
+/// This is an adapted host-side representation, not a byte-for-byte port of
+/// C++ closure nodes. The semantic contract is the same: later passes observe
 /// only first-order symbolic boxes, never unapplied evaluator-only forms.
 fn a2sb(
     arena: &mut TreeArena,
@@ -1646,8 +1642,18 @@ fn a2sb(
     loop_detector: &mut LoopDetector,
 ) -> Result<TreeId, EvalError> {
     match match_box(arena, expr) {
-        BoxMatch::Abstr(_, _) => lower_abstraction_to_symbolic(arena, expr, loop_detector),
-        BoxMatch::Case(_) => lower_case_to_symbolic(arena, expr, loop_detector),
+        BoxMatch::Abstr(_, _) => a2sb_value(
+            arena,
+            EvalValue::Closure(ClosureValue {
+                expr,
+                env: Environment::empty(),
+            }),
+            loop_detector,
+        ),
+        BoxMatch::Case(rules) => {
+            let value = eval_case_value(arena, expr, rules, &Environment::empty(), loop_detector)?;
+            a2sb_value(arena, value, loop_detector)
+        }
         _ => {
             let Some(node) = arena.node(expr).cloned() else {
                 return Ok(expr);
@@ -1675,30 +1681,6 @@ fn a2sb(
     }
 }
 
-/// Adapts one residual `abstr` closure into a first-order symbolic box.
-///
-/// The abstraction is applied to a fresh `boxSlot` using the same evaluator
-/// machinery as C++ `a2sb`, then the resulting body is recursively lowered.
-fn lower_abstraction_to_symbolic(
-    arena: &mut TreeArena,
-    abstraction: TreeId,
-    loop_detector: &mut LoopDetector,
-) -> Result<TreeId, EvalError> {
-    let slot = fresh_slot(arena, loop_detector);
-    let args = vec_to_list(arena, &[slot]);
-    let applied = apply_list(
-        arena,
-        abstraction,
-        args,
-        &Environment::empty(),
-        loop_detector,
-        Some(abstraction),
-    )?;
-    let lowered_body = a2sb(arena, applied, loop_detector)?;
-    let mut b = BoxBuilder::new(arena);
-    Ok(b.symbolic(slot, lowered_body))
-}
-
 fn lower_abstraction_to_symbolic_value(
     arena: &mut TreeArena,
     abstraction: ClosureValue,
@@ -1717,43 +1699,6 @@ fn lower_abstraction_to_symbolic_value(
     let lowered_body = a2sb(arena, applied, loop_detector)?;
     let mut b = BoxBuilder::new(arena);
     Ok(b.symbolic(slot, lowered_body))
-}
-
-/// Adapts one residual `case` node into nested symbolic boxes.
-///
-/// C++ lowers pattern matchers by applying them to fresh slots one argument at a
-/// time. Rust keeps raw `case` nodes until this point, so the adapted lowering
-/// applies the case to **all** required slots in one step, then wraps the
-/// resulting body in nested `symbolic` nodes. This preserves the same external
-/// meaning while avoiding the under-application placeholder path of
-/// [`apply_list`].
-fn lower_case_to_symbolic(
-    arena: &mut TreeArena,
-    case_expr: TreeId,
-    loop_detector: &mut LoopDetector,
-) -> Result<TreeId, EvalError> {
-    let BoxMatch::Case(rules) = match_box(arena, case_expr) else {
-        return Ok(case_expr);
-    };
-    let arity = case_expected_arity(arena, rules)?;
-    let slots: Vec<_> = (0..arity)
-        .map(|_| fresh_slot(arena, loop_detector))
-        .collect();
-    let slot_args = vec_to_list(arena, &slots);
-    let applied = apply_list(
-        arena,
-        case_expr,
-        slot_args,
-        &Environment::empty(),
-        loop_detector,
-        Some(case_expr),
-    )?;
-    let mut result = a2sb(arena, applied, loop_detector)?;
-    for slot in slots.into_iter().rev() {
-        let mut b = BoxBuilder::new(arena);
-        result = b.symbolic(slot, result);
-    }
-    Ok(result)
 }
 
 fn lower_pattern_matcher_to_symbolic(
@@ -2110,7 +2055,7 @@ fn eval_loaded_source_value(
 /// - `evalCase`
 /// - `boxPatternMatcher`
 ///
-/// Mapping status: `adapted` internal value model.
+/// Mapping status: `1:1` semantics with an adapted Rust value representation.
 ///
 /// The C++ evaluator returns a `boxPatternMatcher(...)` closure-like runtime
 /// value. Rust stores the equivalent state in [`EvalValue::PatternMatcher`]:
@@ -3000,7 +2945,9 @@ fn apply_list(
                 let mut b = BoxBuilder::new(arena);
                 return Ok(b.seq(args_par, fun));
             }
-            apply_case_rules(arena, rules, larg, env, loop_detector, call_site)
+            let pm = eval_case_value(arena, fun, rules, env, loop_detector)?;
+            let applied = apply_value_list_value(arena, pm, larg, env, loop_detector, call_site)?;
+            force_value_to_box(arena, applied, loop_detector)
         }
         _ => {
             // C++ parity (`applyList`): for non-closures, insert implicit wires when
@@ -3745,98 +3692,6 @@ fn numeric_as_f64(value: NumericValue) -> f64 {
         NumericValue::Int(v) => f64::from(v),
         NumericValue::Real(v) => v,
     }
-}
-
-/// Applies case rules to a given argument list using the compiled tree automaton.
-///
-/// # Algorithm
-///
-/// 1. Evaluate and simplify all rule LHS patterns in the current environment.
-/// 2. Determine expected arity from the first evaluated rule's LHS pattern count.
-/// 3. Compile all evaluated rules into a [`pattern_matcher::Automaton`] via
-///    [`pattern_matcher::make_pattern_matcher`] (Graef incremental algorithm).
-/// 4. Initialise one barrier child [`Environment`] per rule.
-/// 5. Feed each consumed argument through the automaton one at a time via
-///    [`pattern_matcher::apply_pattern_matcher`], which advances the state machine
-///    and accumulates variable bindings into per-rule environments.
-/// 6. In the final state, pick the first rule whose environment survived all
-///    nonlinearity checks, evaluate its RHS, and apply any remaining arguments.
-///
-/// # C++ correspondence
-///
-/// `evalCase()` in `compiler/evaluate/eval.cpp`.
-fn apply_case_rules(
-    arena: &mut TreeArena,
-    rules_rev: TreeId,
-    larg: TreeId,
-    env: &Environment,
-    loop_detector: &mut LoopDetector,
-    call_site: Option<TreeId>,
-) -> Result<TreeId, EvalError> {
-    let args = list_to_vec(arena, larg)?;
-    let evaluated_rules = eval_rule_list(arena, rules_rev, env, loop_detector)?;
-
-    // Determine expected arity from the first rule's LHS.
-    let mut probe = list_to_vec(arena, evaluated_rules)?;
-    probe.reverse();
-    let Some(first_rule) = probe.first().copied() else {
-        return Err(EvalError::MalformedCaseNode { node: rules_rev });
-    };
-    let (first_lhs, _) = rule_parts(arena, first_rule)?;
-    let expected = list_to_vec(arena, first_lhs)?.len();
-    if args.len() < expected {
-        return Err(EvalError::PatternArityMismatch {
-            node: rules_rev,
-            expected,
-            got: args.len(),
-        });
-    }
-    let consumed = args[..expected].to_vec();
-    let rest = args[expected..].to_vec();
-
-    // Compile evaluated rules into a tree automaton — or retrieve a cached copy.
-    if !loop_detector.automaton_cache.contains_key(&evaluated_rules) {
-        let automaton = pattern_matcher::make_pattern_matcher(arena, evaluated_rules);
-        loop_detector
-            .automaton_cache
-            .insert(evaluated_rules, automaton);
-    }
-    let automaton = loop_detector.automaton_cache.get(&evaluated_rules).unwrap();
-    let n = automaton.n_rules();
-
-    // Per-rule environments: each starts as a barrier child scope of the current env.
-    let mut envs: Vec<Option<Environment>> =
-        (0..n).map(|_| Some(env.push_barrier_scope())).collect();
-
-    // Feed each consumed argument through the automaton state machine, one at a time.
-    // C++ parallel: `for each arg: s = apply_pattern_matcher(A, s, arg, C, E)`.
-    let mut state: usize = 0;
-    for arg in &consumed {
-        let (new_state, _) =
-            pattern_matcher::apply_pattern_matcher(arena, automaton, state, *arg, &mut envs);
-        let Some(new_state) = new_state else {
-            return Err(EvalError::PatternMatchFailed { node: rules_rev });
-        };
-        state = new_state;
-    }
-
-    // Final state: pick the first rule whose environment survived nonlinearity checks.
-    if !automaton.final_state(state) {
-        return Err(EvalError::PatternMatchFailed { node: rules_rev });
-    }
-    for rule_marker in &automaton.states[state].rules {
-        if let Some(rule_env) = envs[rule_marker.r].take() {
-            let rhs = automaton.rhs[rule_marker.r];
-            let result = eval_box(arena, rhs, &rule_env, loop_detector)?;
-            if rest.is_empty() {
-                return Ok(result);
-            }
-            let rest_list = vec_to_list(arena, &rest);
-            return apply_list(arena, result, rest_list, env, loop_detector, call_site);
-        }
-    }
-
-    Err(EvalError::PatternMatchFailed { node: rules_rev })
 }
 
 /// Stable crate identifier used in workspace-level tooling and diagnostics.
