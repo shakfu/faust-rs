@@ -50,7 +50,7 @@ That port is now completed:
 
 ---
 
-## 2. C++ Target Semantics That Must Be Preserved
+## 2. C++ Target Semantics That Were Preserved
 
 ## 2.1 Definitions are stored as closures, not raw expressions
 
@@ -204,7 +204,7 @@ symbolic caches become more robust when keyed by stable environment identity.
 
 ---
 
-## 4. Why The True Closure Port Is Worth Doing
+## 4. Why The True Closure Port Was Worth Doing
 
 ## 4.1 It closes the remaining semantic hole instead of adding more special cases
 
@@ -241,7 +241,7 @@ A true closure/environment model naturally provides stable `EnvId` handles for:
 
 ---
 
-## 5. Recommended Rust Internal Design
+## 5. Rust Internal Design Chosen For The Port
 
 ## 5.1 Introduce explicit evaluator values
 
@@ -279,7 +279,7 @@ distinguish:
 The current clone-based `Environment` type is convenient, but it does not give
 stable environment identity. A true closure port needs that identity.
 
-Recommended direction:
+Chosen direction:
 
 - introduce `EnvId`,
 - store environment layers in an arena owned by the evaluator context,
@@ -288,7 +288,7 @@ Recommended direction:
   - parent `EnvId`,
   - barrier bit.
 
-This is the recommended design choice for implementation because it solves both
+This design choice solved both
 parity and performance concerns:
 
 - stable ids for `(id, env)` recursion checks,
@@ -306,35 +306,35 @@ then become direct semantic ports rather than approximations.
 
 ---
 
-## 6. Staged Correction Plan
+## 6. Historical Staged Correction Plan
 
 ## Stage 0. Documentation and invariants
 
-Deliverables:
+Delivered:
 
 - Rustdoc in `crates/eval` states clearly that the current environment model is
   `adapted`, not a 1:1 closure port.
 - This plan document becomes the reference for the closure migration.
 
-Exit criteria:
+Exit criteria used:
 
 - no Rustdoc still claims that explicit closures are unnecessary for full
   parity.
 
 ## Stage 1. Introduce stable environment identity
 
-Deliverables:
+Delivered:
 
 - evaluator-owned environment arena with `EnvId`,
 - parity-preserving `lookup`, `lookup_local`, `lookup_until_barrier`,
 - unchanged public API and unchanged compiler outputs.
 
-Recommended first implementation step:
+First implementation step used:
 
 - keep storing raw `TreeId` temporarily inside the new environment arena so the
   representation migration can be split from the semantic migration.
 
-Exit criteria:
+Exit criteria used:
 
 - current tests stay green,
 - environment push/lookup semantics stay unchanged,
@@ -342,19 +342,19 @@ Exit criteria:
 
 ## Stage 2. Introduce explicit closure values
 
-Deliverables:
+Delivered:
 
 - new internal `EvalValue` representation,
 - `pushMultiClosureDefs(...)` equivalent that binds closures capturing the new
   `EnvId`,
 - value forcing helper equivalent to C++ `evalClosure(...)`.
 
-Required follow-up:
+Follow-up that was performed:
 
 - split current `eval_box(...)` into a "produce evaluator value" path and a
   "force/lower to box tree" path.
 
-Exit criteria:
+Exit criteria used:
 
 - identifier resolution no longer reuses the caller environment for captured
   definitions,
@@ -362,20 +362,20 @@ Exit criteria:
 
 ## Stage 3. Port identifier forcing and recursion detection
 
-Deliverables:
+Delivered:
 
 - Rust equivalent of `evalIdDef(...)`,
 - visited-key tracking based on `(SymId, EnvId)` rather than raw tree identity,
 - loop detector updated for closure forcing.
 
-Exit criteria:
+Exit criteria used:
 
 - recursive definition diagnostics stay stable,
 - mutually recursive and shadowed definition tests match the C++ reference.
 
 ## Stage 4. Port closure-valued forms
 
-Deliverables:
+Delivered:
 
 - `Abstr` returns closures internally,
 - `Environment`, `Component`, and `Library` return closure-like evaluator
@@ -397,10 +397,10 @@ Deliverables:
 - Rust equivalent of `updateClosures(...)`,
 - `boxModifLocalDef` node family plus parser/eval integration if still absent.
 
-This stage is where the true closure port pays off: the C++ semantics can be
+This stage is where the true closure port paid off: the C++ semantics could be
 ported directly instead of approximated by eager rebinding.
 
-Exit criteria:
+Exit criteria used:
 
 - `expr { defs }` behaves like C++ on targeted differential fixtures,
 - modified closures preserve references to the rewritten environment and not the
@@ -408,13 +408,13 @@ Exit criteria:
 
 ## Stage 6. Port pattern-matcher capture to the same value model
 
-Deliverables:
+Delivered:
 
 - explicit pattern-matcher runtime value or `boxPatternMatcher` equivalent,
 - per-rule captured barrier environments stored by stable id,
 - cache keys based on rule tree plus captured environment identity.
 
-Exit criteria:
+Exit criteria used:
 
 - repeated compilation of the same `case` under different captured environments
   cannot cross-contaminate matcher state,
@@ -422,20 +422,20 @@ Exit criteria:
 
 ## Stage 7. Simplify `a2sb()` around real evaluator values
 
-Deliverables:
+Delivered:
 
 - remove or reduce the current adapted lowering shortcuts,
 - lower residual closures and pattern matchers from `EvalValue`,
 - preserve `slot` / `symbolic` output contract for `propagate`.
 
-Exit criteria:
+Exit criteria used:
 
 - `a2sb` shape and control flow are explainable directly from C++ `real_a2sb`,
 - current lambda / case / modulation fixtures remain green.
 
 ## Stage 8. Expand differential coverage
 
-Deliverables:
+Delivered:
 
 - builder-level tests in `crates/eval/tests/core_eval.rs` for:
   - captured abstraction shadowing,
@@ -446,14 +446,14 @@ Deliverables:
   - case-rule environment capture.
 - compiler-level differentials against the C++ reference for the same families.
 
-Exit criteria:
+Exit criteria used:
 
 - the closure model is guarded both structurally and end-to-end,
 - known-gap documentation for environment capture can be retired.
 
 ---
 
-## 7. Files Likely To Change
+## 7. Files Touched By The Port
 
 - `crates/eval/src/lib.rs`
 - `crates/eval/src/pattern_matcher.rs`
@@ -466,7 +466,7 @@ Exit criteria:
 
 ---
 
-## 8. Recommended Order
+## 8. Order Used
 
 The pragmatic order is:
 

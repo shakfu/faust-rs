@@ -18,9 +18,10 @@ Current status summary on 2026-03-07:
 - closure-valued evaluation model in `eval`: implemented
 - `a2sb` lowering through evaluator values: implemented
 - `slot` / `symbolic` / `modifLocalDef` support: implemented
-- remaining real gaps from the original list:
-  - `prepare_pattern()` opacity parity against C++ `preparePattern()`
-  - metadata / `declare` end-to-end parity (`boxMetadata`-level semantics)
+- `prepare_pattern()` opacity parity against C++ `preparePattern()`: implemented
+- definition-scoped metadata / `declare` parity (`boxMetadata`-level semantics): implemented
+- no remaining parser/pattern/eval gap from the original list is still open in
+  this scope
 
 The closure follow-up described here is now completed and documented in
 `porting/eval-true-closure-model-port-plan-2026-03-06-en.md`. The remaining
@@ -59,9 +60,9 @@ Source inspection covered:
 - `/Users/letz/Developpements/RUST/faust/compiler/patternmatcher/patternmatcher.cpp`
 - `/Users/letz/Developpements/RUST/faust/compiler/boxes/boxes.cpp`
 
-The current targeted Rust test suites are green, but they do not yet cover all
-semantic cases needed for C++ parity in parser definitions, `case`, and the
-evaluation-to-box lowering path.
+The original targeted Rust test suites were green on 2026-03-06, but they did
+not yet cover all semantic cases needed for C++ parity in parser definitions,
+`case`, and the evaluation-to-box lowering path.
 
 ---
 
@@ -190,9 +191,9 @@ when local parser/eval unit tests pass.
 
 ## 2.5 Required box families for parity were still missing
 
-Status on 2026-03-07: partially implemented to the level needed for the
-closure/evaluation port. `slot`, `symbolic`, and `modifLocalDef` are now
-present; metadata-specific parity remains open.
+Status on 2026-03-07: implemented to the level required by the parser/pattern/eval
+parity scope. `slot`, `symbolic`, `modifLocalDef`, and definition-scoped
+`Metadata` support are now present.
 
 Porting `a2sb()` requires box families that exist in C++ but are not yet
 represented in the Rust `boxes` crate.
@@ -210,12 +211,11 @@ Rust evidence:
 - `crates/boxes/src/lib.rs` does not expose equivalent node families in
   `BoxMatch`.
 
-Without these node kinds, the Rust evaluator cannot faithfully reproduce the
-lowering and metadata behavior of the C++ compiler.
+This gap is now closed in the parser/pattern/eval scope covered by this report.
 
 ## 2.6 `prepare_pattern()` is broader than the C++ implementation
 
-Status on 2026-03-07: still open.
+Status on 2026-03-07: implemented.
 
 Rust recursively rewrites patterns across the generic tree shape. C++ keeps a
 whitelist/blacklist boundary and leaves several box families opaque during
@@ -231,25 +231,28 @@ C++ reference behavior:
   explicitly preserves `abstr`, `access`, `component`, `environment`, `slot`,
   `symbolic`, `case`, and related forms as opaque in `preparePattern()`.
 
-Impact:
+Historical impact on 2026-03-06:
 
-- this is a likely source of future mismatches on complex patterns,
-- current tests do not meaningfully constrain this area.
+- this was a likely source of future mismatches on complex patterns,
+- current tests did not meaningfully constrain this area.
 
 ## 2.7 Metadata and local-definition modifiers are not yet end-to-end equivalent
 
 Status on 2026-03-07:
 
 - `boxModifLocalDef` / `expr [ defs ]`: implemented
-- metadata / `declare` reinjection parity: still open
+- definition-scoped metadata / `declare` reinjection parity: implemented
+- top-level `declare key value;` remains an explicitly documented `adapted`
+  parser-context representation rather than a runtime-global metadata store
 
-Rust currently records declaration metadata in parser-side context but does not
-reinject it through equivalent box nodes and evaluation semantics.
+On 2026-03-06 Rust recorded declaration metadata in parser-side context but did
+not yet reinject definition-scoped metadata through equivalent box nodes and
+evaluation semantics.
 
 Rust evidence:
 
-- `crates/parser/src/lib.rs` stores metadata in `ParserCtx`.
-- no equivalent of C++ `boxMetadata` / `boxModifLocalDef` exists in
+- `crates/parser/src/lib.rs` stored metadata in `ParserCtx`.
+- no equivalent of C++ `boxMetadata` / `boxModifLocalDef` existed in
   `crates/boxes`.
 
 C++ reference behavior:
@@ -260,19 +263,19 @@ C++ reference behavior:
   `/Users/letz/Developpements/RUST/faust/compiler/evaluate/eval.cpp` support
   `expr { defs }` via `boxModifLocalDef`.
 
-Impact:
+Historical impact on 2026-03-06:
 
-- metadata semantics remain partial,
-- local-definition modifier forms are not yet fully aligned with C++.
+- metadata semantics remained partial,
+- local-definition modifier forms were not yet fully aligned with C++.
 
 ## 2.8 Differential coverage was too narrow to guard the missing semantics
 
-Status on 2026-03-07: improved substantially for closure semantics, but still
-needs dedicated guardrails for the remaining `prepare_pattern()` and metadata
-gaps.
+Status on 2026-03-07: improved substantially and now covers the previously
+open `prepare_pattern()` and definition-metadata parity gaps with dedicated
+regressions.
 
-The current parser differential harness does not cover the cases above, and the
-compiler corpus still tolerates known `case`/closure failures.
+On 2026-03-06 the parser differential harness did not cover the cases above,
+and the compiler corpus still tolerated known `case`/closure failures.
 
 Rust evidence:
 
@@ -288,7 +291,7 @@ Impact:
 
 ---
 
-## 3. Recommended Correction Plan
+## 3. Historical Correction Plan Used
 
 The correction order below is designed to minimize rework and to recover C++
 parity in the same order the language surface is actually consumed.
@@ -451,7 +454,7 @@ Pass criteria:
 
 ---
 
-## 4. Recommended Closure Order
+## 4. Historical Closure Order
 
 1. Definition grammar and normalization parity.
 2. `case` rule evaluation parity.
@@ -468,14 +471,12 @@ flows.
 
 ---
 
-## 5. Short Conclusion
+## 5. Historical Conclusion And Current Outcome
 
-The Rust parser/eval stack is operational but not yet semantically equivalent to
-the C++ compiler for patterned definitions, `case` matching, rule-local
-variable binding, and closure-to-symbolic lowering.
+On 2026-03-06 the Rust parser/eval stack was operational but not yet
+semantically equivalent to the C++ compiler for patterned definitions, `case`
+matching, rule-local variable binding, and closure-to-symbolic lowering.
 
-The most important point is that current green tests are not sufficient proof of
-parity. Full parity requires fixing definition normalization, evaluated-pattern
-`case` semantics, barrier-aware pattern-variable lookup, and the missing
-`a2sb()` lowering stage before downstream compiler stages can be considered
-aligned with C++.
+That historical conclusion has now been retired for this scope. The identified
+parser/pattern/eval items have since been implemented, guarded by dedicated
+tests, and split from any remaining out-of-scope adapted representations.

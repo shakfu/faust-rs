@@ -528,8 +528,9 @@ impl ParseState {
     ///
     /// Mapping status: `adapted`.
     ///
-    /// Rust keeps top-level `declare key value;` entries in [`ParserCtx`] for now,
-    /// but definition-scoped metadata is lowered into explicit `BOXMETADATA`
+    /// Rust intentionally keeps top-level `declare key value;` entries as
+    /// parser-context metadata (`adapted` representation), while
+    /// definition-scoped metadata is lowered into explicit `BOXMETADATA`
     /// wrappers so it survives parser-to-eval transport like the C++ pipeline.
     fn apply_declared_definition_metadata(&mut self, name: TreeId, expr: TreeId) -> TreeId {
         let Some(def_name) = self.definition_name_key(name) else {
