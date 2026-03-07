@@ -202,6 +202,32 @@ fn eval_process_library_loads_environment_from_file() {
 }
 
 #[test]
+fn eval_process_case_supports_incremental_partial_application() {
+    let mut arena = TreeArena::new();
+    let one = BoxBuilder::new(&mut arena).int(1);
+    let two = BoxBuilder::new(&mut arena).int(2);
+    let x = make_ident(&mut arena, "x");
+    let y = make_ident(&mut arena, "y");
+    let px = BoxBuilder::new(&mut arena).pattern_var(x);
+    let py = BoxBuilder::new(&mut arena).pattern_var(y);
+    let lhs = make_rev_list2(&mut arena, px, py);
+    let rule = arena.cons(lhs, y);
+    let rules = make_rules_parser_order(&mut arena, &[rule]);
+    let case_expr = BoxBuilder::new(&mut arena).case(rules);
+
+    let arg1 = arena.cons(one, arena.nil());
+    let partial = BoxBuilder::new(&mut arena).appl(case_expr, arg1);
+    let arg2 = arena.cons(two, arena.nil());
+    let process_expr = BoxBuilder::new(&mut arena).appl(partial, arg2);
+    let nil = arena.nil();
+    let process = make_def(&mut arena, "process", nil, process_expr);
+    let root = make_defs(&mut arena, &[process]);
+
+    let out = eval_process(&mut arena, root).expect("curried case application should succeed");
+    expect_int(&arena, out, 2);
+}
+
+#[test]
 fn eval_box_resolves_with_local_scope() {
     let mut arena = TreeArena::new();
     let wire = make_wire(&mut arena);
@@ -765,7 +791,7 @@ fn eval_case_pattern_var_lookup_stops_at_barrier_scope() {
 }
 
 #[test]
-fn eval_case_under_application_lowers_and_no_match_still_errors() {
+fn eval_case_under_application_preserves_residual_case_and_no_match_still_errors() {
     let mut arena = TreeArena::new();
     let x_ident = make_ident(&mut arena, "x");
     let y_ident = make_ident(&mut arena, "y");
@@ -788,23 +814,10 @@ fn eval_case_under_application_lowers_and_no_match_still_errors() {
         &Environment::empty(),
         &mut loop_detector,
     )
-    .expect("under-applied case should lower to seq(par(args+wires), case)");
-    let (lhs, rhs) = match match_box(&arena, lowered) {
-        BoxMatch::Seq(lhs, rhs) => (lhs, rhs),
-        other => panic!("expected BOXSEQ, got {other:?}"),
-    };
+    .expect("under-applied case should preserve a residual case value");
     assert_eq!(
-        rhs, case_expr,
-        "lowered function should keep original case node"
-    );
-    let (a, b) = match match_box(&arena, lhs) {
-        BoxMatch::Par(a, b) => (a, b),
-        other => panic!("expected BOXPAR, got {other:?}"),
-    };
-    expect_int(&arena, a, 1);
-    assert!(
-        matches!(match_box(&arena, b), BoxMatch::Wire),
-        "under-application should append one implicit wire"
+        lowered, case_expr,
+        "eval_box should force a partial pattern matcher back to the original case syntax"
     );
 
     // No-match branch: (0) => 1 applied to 2.

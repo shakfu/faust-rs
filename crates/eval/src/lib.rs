@@ -319,6 +319,7 @@ struct CachedLoadedSource {
 enum EvalValue {
     Box(TreeId),
     Closure(ClosureValue),
+    PatternMatcher(PatternMatcherValue),
 }
 
 impl EvalValue {
@@ -326,6 +327,7 @@ impl EvalValue {
         match self {
             Self::Box(id) => *id,
             Self::Closure(closure) => closure.expr,
+            Self::PatternMatcher(pm) => pm.case_expr,
         }
     }
 }
@@ -335,6 +337,7 @@ impl PartialEq for EvalValue {
         match (self, other) {
             (Self::Box(lhs), Self::Box(rhs)) => lhs == rhs,
             (Self::Closure(lhs), Self::Closure(rhs)) => lhs == rhs,
+            (Self::PatternMatcher(lhs), Self::PatternMatcher(rhs)) => lhs == rhs,
             _ => false,
         }
     }
@@ -355,6 +358,38 @@ impl PartialEq for ClosureValue {
 }
 
 impl Eq for ClosureValue {}
+
+#[derive(Clone, Debug)]
+struct PatternMatcherValue {
+    automaton: pattern_matcher::Automaton,
+    state: usize,
+    envs: Vec<Option<Environment>>,
+    original_rules: TreeId,
+    rev_param_list: Vec<TreeId>,
+    case_expr: TreeId,
+}
+
+impl PartialEq for PatternMatcherValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.state == other.state
+            && self.original_rules == other.original_rules
+            && self.rev_param_list == other.rev_param_list
+            && self.case_expr == other.case_expr
+            && self.automaton.rhs == other.automaton.rhs
+            && self
+                .envs
+                .iter()
+                .zip(other.envs.iter())
+                .all(|(lhs, rhs)| match (lhs, rhs) {
+                    (Some(lhs), Some(rhs)) => lhs.same_identity(rhs),
+                    (None, None) => true,
+                    _ => false,
+                })
+            && self.envs.len() == other.envs.len()
+    }
+}
+
+impl Eq for PatternMatcherValue {}
 
 /// Lexical evaluation environment mapping symbol names to box-IR tree nodes.
 ///
@@ -523,6 +558,7 @@ impl Environment {
         self.lookup_value(sym).and_then(|(_, value)| match value {
             EvalValue::Box(id) => Some(id),
             EvalValue::Closure(_) => None,
+            EvalValue::PatternMatcher(_) => None,
         })
     }
 
@@ -559,6 +595,7 @@ impl Environment {
             .and_then(|value| match value {
                 EvalValue::Box(id) => Some(id),
                 EvalValue::Closure(_) => None,
+                EvalValue::PatternMatcher(_) => None,
             })
     }
 
@@ -605,6 +642,7 @@ impl Environment {
         self.lookup_local_value(sym).and_then(|value| match value {
             EvalValue::Box(id) => Some(id),
             EvalValue::Closure(_) => None,
+            EvalValue::PatternMatcher(_) => None,
         })
     }
 
@@ -1554,10 +1592,33 @@ pub fn eval_process_with_stats_and_source_context(
     stats.env_lookups += 1;
     let mut loop_detector = LoopDetector::new();
     let process = BoxBuilder::new(arena).ident("process");
-    let result = eval_box(arena, process, &env, &mut loop_detector)?;
-    let result = a2sb(arena, result, &mut loop_detector)?;
+    let result = eval_value(arena, process, &env, &mut loop_detector)?;
+    let result = a2sb_value(arena, result, &mut loop_detector)?;
     stats.loop_detector_max_depth = loop_detector.call_stack.len();
     Ok((result, stats))
+}
+
+fn a2sb_value(
+    arena: &mut TreeArena,
+    value: EvalValue,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    match value {
+        EvalValue::Box(expr) => a2sb(arena, expr, loop_detector),
+        EvalValue::Closure(closure) => match match_box(arena, closure.expr) {
+            BoxMatch::Abstr(_, _) => {
+                lower_abstraction_to_symbolic_value(arena, closure, loop_detector)
+            }
+            BoxMatch::Environment => Ok(closure.expr),
+            _ => {
+                let forced = eval_value(arena, closure.expr, &closure.env, loop_detector)?;
+                a2sb_value(arena, forced, loop_detector)
+            }
+        },
+        EvalValue::PatternMatcher(pm) => {
+            lower_pattern_matcher_to_symbolic(arena, pm, loop_detector)
+        }
+    }
 }
 
 /// Lowers residual abstractions and case closures into symbolic boxes.
@@ -1638,6 +1699,26 @@ fn lower_abstraction_to_symbolic(
     Ok(b.symbolic(slot, lowered_body))
 }
 
+fn lower_abstraction_to_symbolic_value(
+    arena: &mut TreeArena,
+    abstraction: ClosureValue,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let slot = fresh_slot(arena, loop_detector);
+    let args = vec_to_list(arena, &[slot]);
+    let applied = apply_value_list(
+        arena,
+        EvalValue::Closure(abstraction),
+        args,
+        &Environment::empty(),
+        loop_detector,
+        None,
+    )?;
+    let lowered_body = a2sb(arena, applied, loop_detector)?;
+    let mut b = BoxBuilder::new(arena);
+    Ok(b.symbolic(slot, lowered_body))
+}
+
 /// Adapts one residual `case` node into nested symbolic boxes.
 ///
 /// C++ lowers pattern matchers by applying them to fresh slots one argument at a
@@ -1666,6 +1747,45 @@ fn lower_case_to_symbolic(
         &Environment::empty(),
         loop_detector,
         Some(case_expr),
+    )?;
+    let mut result = a2sb(arena, applied, loop_detector)?;
+    for slot in slots.into_iter().rev() {
+        let mut b = BoxBuilder::new(arena);
+        result = b.symbolic(slot, result);
+    }
+    Ok(result)
+}
+
+fn lower_pattern_matcher_to_symbolic(
+    arena: &mut TreeArena,
+    mut pm: PatternMatcherValue,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    if pm.automaton.final_state(pm.state) {
+        for rule_marker in &pm.automaton.states[pm.state].rules {
+            if let Some(rule_env) = pm.envs[rule_marker.r].take() {
+                let rhs = pm.automaton.rhs[rule_marker.r];
+                let value = eval_value(arena, rhs, &rule_env, loop_detector)?;
+                return a2sb_value(arena, value, loop_detector);
+            }
+        }
+        return Err(EvalError::PatternMatchFailed {
+            node: pm.original_rules,
+        });
+    }
+    let total = case_expected_arity(arena, pm.original_rules)?;
+    let slots_needed = total.saturating_sub(pm.rev_param_list.len());
+    let slots: Vec<_> = (0..slots_needed)
+        .map(|_| fresh_slot(arena, loop_detector))
+        .collect();
+    let slot_args = vec_to_list(arena, &slots);
+    let applied = apply_value_list(
+        arena,
+        EvalValue::PatternMatcher(pm),
+        slot_args,
+        &Environment::empty(),
+        loop_detector,
+        None,
     )?;
     let mut result = a2sb(arena, applied, loop_detector)?;
     for slot in slots.into_iter().rev() {
@@ -1752,19 +1872,13 @@ fn eval_value(
                     loop_detector.leave();
                     out
                 }
+                EvalValue::PatternMatcher(pm) => Ok(EvalValue::PatternMatcher(pm)),
             }
         }
         BoxMatch::Appl(fun, arg) => {
             let efun = eval_value(arena, fun, env, loop_detector)?;
             let rev_args = rev_eval_list(arena, arg, env, loop_detector)?;
-            Ok(EvalValue::Box(apply_value_list(
-                arena,
-                efun,
-                rev_args,
-                env,
-                loop_detector,
-                Some(fun),
-            )?))
+            apply_value_list_value(arena, efun, rev_args, env, loop_detector, Some(fun))
         }
         BoxMatch::Component(filename) => {
             eval_loaded_source_value(arena, expr, filename, "component", env)
@@ -1773,7 +1887,7 @@ fn eval_value(
             eval_loaded_source_value(arena, expr, filename, "library", env)
         }
         BoxMatch::Access(body, field) => eval_access_value(arena, body, field, env, loop_detector),
-        BoxMatch::Case(_) => Ok(EvalValue::Box(expr)),
+        BoxMatch::Case(rules) => eval_case_value(arena, expr, rules, env, loop_detector),
         BoxMatch::PatternVar(_) => Ok(EvalValue::Box(expr)),
         BoxMatch::WithLocalDef(body, defs) => {
             let mut scoped = env.push_scope();
@@ -1862,6 +1976,7 @@ fn force_value_to_box(
             BoxMatch::Environment => Ok(closure.expr),
             _ => eval_box(arena, closure.expr, &closure.env, loop_detector),
         },
+        EvalValue::PatternMatcher(pm) => Ok(pm.case_expr),
     }
 }
 
@@ -1988,6 +2103,51 @@ fn eval_loaded_source_value(
     }))
 }
 
+/// Evaluates one `case` node into an explicit pattern-matcher runtime value.
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/eval.cpp`
+/// - `evalCase`
+/// - `boxPatternMatcher`
+///
+/// Mapping status: `adapted` internal value model.
+///
+/// The C++ evaluator returns a `boxPatternMatcher(...)` closure-like runtime
+/// value. Rust stores the equivalent state in [`EvalValue::PatternMatcher`]:
+/// compiled automaton, current automaton state, per-rule barrier environments,
+/// original rule list, and already-consumed arguments.
+fn eval_case_value(
+    arena: &mut TreeArena,
+    case_expr: TreeId,
+    rules_rev: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<EvalValue, EvalError> {
+    let evaluated_rules = eval_rule_list(arena, rules_rev, env, loop_detector)?;
+    if !loop_detector.automaton_cache.contains_key(&evaluated_rules) {
+        let automaton = pattern_matcher::make_pattern_matcher(arena, evaluated_rules);
+        loop_detector
+            .automaton_cache
+            .insert(evaluated_rules, automaton);
+    }
+    let automaton = loop_detector
+        .automaton_cache
+        .get(&evaluated_rules)
+        .expect("automaton cache populated")
+        .clone();
+    let envs = (0..automaton.n_rules())
+        .map(|_| Some(env.push_barrier_scope()))
+        .collect();
+    Ok(EvalValue::PatternMatcher(PatternMatcherValue {
+        automaton,
+        state: 0,
+        envs,
+        original_rules: rules_rev,
+        rev_param_list: Vec::new(),
+        case_expr,
+    }))
+}
+
 fn source_reference_name(arena: &TreeArena, filename: TreeId) -> Option<String> {
     match arena.kind(filename) {
         Some(NodeKind::StringLiteral(value)) | Some(NodeKind::Symbol(value)) => {
@@ -2042,7 +2202,7 @@ fn eval_modif_local_def_value(
             let rewritten_env = copy_env_replace_defs(arena, &closure.env, defs, env)?;
             eval_value(arena, closure.expr, &rewritten_env, loop_detector)
         }
-        EvalValue::Box(_) => Err(EvalError::ExpectedClosureValue {
+        EvalValue::Box(_) | EvalValue::PatternMatcher(_) => Err(EvalError::ExpectedClosureValue {
             node: body,
             context: "modif-local-def",
         }),
@@ -2496,6 +2656,7 @@ fn rewrite_captured_env(
                 EvalValue::Closure(closure)
             }
         }
+        EvalValue::PatternMatcher(pm) => EvalValue::PatternMatcher(pm),
     }
 }
 
@@ -2673,16 +2834,35 @@ fn apply_value_list(
     loop_detector: &mut LoopDetector,
     call_site: Option<TreeId>,
 ) -> Result<TreeId, EvalError> {
+    let value = apply_value_list_value(arena, fun, larg, env, loop_detector, call_site)?;
+    force_value_to_box(arena, value, loop_detector)
+}
+
+fn apply_value_list_value(
+    arena: &mut TreeArena,
+    fun: EvalValue,
+    larg: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+    call_site: Option<TreeId>,
+) -> Result<EvalValue, EvalError> {
     if arena.is_nil(larg) {
-        return force_value_to_box(arena, fun, loop_detector);
+        return Ok(fun);
     }
 
     match fun {
-        EvalValue::Box(fun) => apply_list(arena, fun, larg, env, loop_detector, call_site),
+        EvalValue::Box(fun) => Ok(EvalValue::Box(apply_list(
+            arena,
+            fun,
+            larg,
+            env,
+            loop_detector,
+            call_site,
+        )?)),
         EvalValue::Closure(closure) => match match_box(arena, closure.expr) {
             BoxMatch::Ident(_) => {
                 let forced = eval_value(arena, closure.expr, &closure.env, loop_detector)?;
-                apply_value_list(arena, forced, larg, env, loop_detector, call_site)
+                apply_value_list_value(arena, forced, larg, env, loop_detector, call_site)
             }
             BoxMatch::Environment => Err(EvalError::TooManyArguments {
                 node: call_site.unwrap_or(closure.expr),
@@ -2707,14 +2887,76 @@ fn apply_value_list(
                 let tl = arena
                     .tl(larg)
                     .ok_or(EvalError::MalformedListNode { node: larg })?;
-                apply_value_list(arena, f, tl, env, loop_detector, call_site)
+                apply_value_list_value(arena, f, tl, env, loop_detector, call_site)
             }
             _ => {
                 let fun = force_value_to_box(arena, EvalValue::Closure(closure), loop_detector)?;
-                apply_list(arena, fun, larg, env, loop_detector, call_site)
+                Ok(EvalValue::Box(apply_list(
+                    arena,
+                    fun,
+                    larg,
+                    env,
+                    loop_detector,
+                    call_site,
+                )?))
             }
         },
+        EvalValue::PatternMatcher(pm) => {
+            apply_pattern_matcher_value(arena, pm, larg, env, loop_detector, call_site)
+        }
     }
+}
+
+fn apply_pattern_matcher_value(
+    arena: &mut TreeArena,
+    mut pm: PatternMatcherValue,
+    larg: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+    call_site: Option<TreeId>,
+) -> Result<EvalValue, EvalError> {
+    if arena.is_nil(larg) {
+        return Ok(EvalValue::PatternMatcher(pm));
+    }
+
+    let arg = arena
+        .hd(larg)
+        .ok_or(EvalError::MalformedListNode { node: larg })?;
+    let (new_state, _) =
+        pattern_matcher::apply_pattern_matcher(arena, &pm.automaton, pm.state, arg, &mut pm.envs);
+    let Some(new_state) = new_state else {
+        return Err(EvalError::PatternMatchFailed {
+            node: pm.original_rules,
+        });
+    };
+    pm.state = new_state;
+    pm.rev_param_list.push(arg);
+    let tl = arena
+        .tl(larg)
+        .ok_or(EvalError::MalformedListNode { node: larg })?;
+
+    if !pm.automaton.final_state(pm.state) {
+        return apply_value_list_value(
+            arena,
+            EvalValue::PatternMatcher(pm),
+            tl,
+            env,
+            loop_detector,
+            call_site,
+        );
+    }
+
+    for rule_marker in &pm.automaton.states[pm.state].rules {
+        if let Some(rule_env) = pm.envs[rule_marker.r].take() {
+            let rhs = pm.automaton.rhs[rule_marker.r];
+            let result = eval_value(arena, rhs, &rule_env, loop_detector)?;
+            return apply_value_list_value(arena, result, tl, env, loop_detector, call_site);
+        }
+    }
+
+    Err(EvalError::PatternMatchFailed {
+        node: pm.original_rules,
+    })
 }
 
 fn apply_list(
