@@ -1,0 +1,1 @@
+declare author "imported-author";

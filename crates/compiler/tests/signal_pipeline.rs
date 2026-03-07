@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use compiler::Compiler;
+use parser::CompilationMetadataKey;
 use signals::{BinOp, SigMatch, match_sig};
 use tlib::{TreeArena, TreeId};
 
@@ -266,6 +267,68 @@ fn corpus_sine_phasor_lowers_to_gain_times_sin_of_feedback_phase() {
         match_sig(&out.parse.state.arena, carrier),
         SigMatch::Sin(_)
     ));
+}
+
+#[test]
+fn corpus_metadata_master_is_exposed_in_compilation_output() {
+    let out = compile_corpus("rep_40_metadata_master.dsp");
+    let values = out
+        .compilation_metadata
+        .entries()
+        .get(&CompilationMetadataKey::global("name"))
+        .expect("master metadata key should exist");
+    assert!(values.contains("main"));
+}
+
+#[test]
+fn corpus_metadata_import_is_prefixed_like_cpp() {
+    let out = compile_corpus("rep_41_metadata_import.dsp");
+    let imported = corpus_path("metadata/imported_meta.dsp")
+        .canonicalize()
+        .expect("imported metadata file should canonicalize");
+    let values = out
+        .compilation_metadata
+        .entries()
+        .get(&CompilationMetadataKey::scoped(
+            imported.to_string_lossy().into_owned(),
+            "author",
+        ))
+        .expect("imported metadata key should exist");
+    assert!(values.contains("imported-author"));
+}
+
+#[test]
+fn corpus_component_metadata_is_aggregated_through_eval_loading() {
+    let out = compile_corpus("rep_42_component_metadata.dsp");
+    let child = corpus_path("metadata/component_child.dsp")
+        .canonicalize()
+        .expect("component child should canonicalize");
+    let values = out
+        .compilation_metadata
+        .entries()
+        .get(&CompilationMetadataKey::scoped(
+            child.to_string_lossy().into_owned(),
+            "author",
+        ))
+        .expect("component metadata key should exist");
+    assert!(values.contains("component-author"));
+}
+
+#[test]
+fn corpus_library_metadata_is_aggregated_through_eval_loading() {
+    let out = compile_corpus("rep_43_library_metadata.dsp");
+    let child = corpus_path("metadata/library_child.dsp")
+        .canonicalize()
+        .expect("library child should canonicalize");
+    let values = out
+        .compilation_metadata
+        .entries()
+        .get(&CompilationMetadataKey::scoped(
+            child.to_string_lossy().into_owned(),
+            "author",
+        ))
+        .expect("library metadata key should exist");
+    assert!(values.contains("library-author"));
 }
 
 #[test]
