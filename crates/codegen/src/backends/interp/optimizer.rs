@@ -34,6 +34,9 @@ use super::opcode::FbcOpcode;
 use super::real::FbcReal;
 
 /// Maximum optimization level supported.
+///
+/// Levels are cumulative: requesting level `N` enables all rewrite families
+/// from `1..=N`.
 pub const MAX_OPT_LEVEL: u8 = 6;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -41,6 +44,10 @@ pub const MAX_OPT_LEVEL: u8 = 6;
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Result of a single rewrite attempt at a cursor position.
+///
+/// Rewrites are purely local peephole decisions: they can emit one fused
+/// instruction replacing `advance` source instructions, or request a verbatim
+/// copy of the next `advance` instructions.
 enum RewriteResult<R: FbcReal> {
     /// Replace `advance` instructions with the given instruction.
     Emit(FbcInstruction<R>, usize),
@@ -52,6 +59,9 @@ enum RewriteResult<R: FbcReal> {
 ///
 /// The rewriter inspects instructions starting at `cursor` and returns either
 /// a fused instruction (replacing N) or a copy signal.
+///
+/// The output block preserves instruction order modulo the requested local
+/// rewrites; no global control-flow restructuring happens here.
 fn apply_rewriter<R: FbcReal>(
     block: &FbcBlock<R>,
     rewrite: impl Fn(&[FbcInstruction<R>], usize) -> RewriteResult<R>,
@@ -80,6 +90,10 @@ fn apply_rewriter<R: FbcReal>(
 }
 
 /// Repeat a rewrite pass until the block stops shrinking (fixed-point).
+///
+/// The shrink-based stop criterion matches the historical interpreter optimizer:
+/// current rewrites only justify another pass when they reduce instruction
+/// count and may expose a new adjacent peephole opportunity.
 fn optimize_until_fixpoint<R: FbcReal>(
     mut block: FbcBlock<R>,
     rewrite: impl Fn(&[FbcInstruction<R>], usize) -> RewriteResult<R>,
@@ -99,6 +113,9 @@ fn optimize_until_fixpoint<R: FbcReal>(
 /// This is the equivalent of C++ `optimize_aux`: it traverses the block,
 /// recursively optimizing sub-blocks of control-flow instructions, then
 /// applies the rewrite pass on the current block.
+///
+/// Only bytecode sub-block references are traversed here. Factory-level block
+/// slots are optimized by the caller (`FbcDspFactory::optimize`).
 fn optimize_recursive<R: FbcReal>(
     arena: &mut FbcBlockArena<R>,
     block_id: BlockId,

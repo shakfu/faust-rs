@@ -132,6 +132,8 @@ impl std::error::Error for CodegenError {}
 ///
 /// This is the interpreter backend's entry point, parallel to
 /// `generate_cpp_module` and `generate_c_module` in the C/C++ backends.
+/// It is also the assembly boundary between FIR lifecycle sections and the
+/// interpreter runtime layout expected by [`FbcDspFactory`].
 ///
 /// # Function-to-block mapping
 ///
@@ -150,6 +152,12 @@ impl std::error::Error for CodegenError {}
 /// `kReturn`). The Rust FIR fast-lane uses a single explicit-loop `compute`
 /// function as the DSP block; `computeThread` is no longer part of the FIR
 /// contract for this backend.
+///
+/// The current adaptation keeps both runtime compute slots for parity with the
+/// interpreter runtime:
+/// - `compute_block` hosts the control prefix when `compute` can be split;
+/// - `compute_dsp_block` hosts the sample loop body or the whole `compute`
+///   function when no split is possible.
 ///
 /// # Source provenance (C++)
 /// - `InterpreterInstVisitor<REAL>` + `interpreter_dsp_factory_aux` in

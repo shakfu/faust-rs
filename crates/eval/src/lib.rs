@@ -117,9 +117,15 @@
 //! | **Concurrency** | Global `gGlobal` state, not thread-safe | N/A | Fully `Send`/`Sync`, no global state | Thread-safe |
 //!
 //! **In practice**: for typical Faust programs (< 200 top-level definitions, scope depth ≤ 5,
-//! ≤ 30 bindings per scope), the Rust `Vec<(u32,u32)>` scan is **faster** than C++ hash-table
-//! probes due to cache locality and SIMD-friendly layout. Each comparison is O(1) — two `u32`
-//! integer compares — matching the cost of C++ hash-cons pointer equality.
+//! ≤ 30 bindings per scope), the Rust reverse scan over one compact per-layer vector is expected
+//! to be competitive with, and often faster than, the C++ hash-probe walk because the working set
+//! stays tiny and contiguous. The important point is not the asymptotic notation alone, but that
+//! the common Rust case pays a handful of integer comparisons inside one hot cache line instead of
+//! multiple pointer-chased table probes.
+//!
+//! This remains a workload claim, not a semantic guarantee. It is representative for the current
+//! evaluator design and local release micro-benchmarks, but it is not enforced by a CI benchmark
+//! gate and should be re-validated if environment representation changes materially.
 //!
 //! The current Rust representation already uses stable `EnvId` layer identities in a shared
 //! environment arena. This matches the next closure-porting requirement while keeping the public
@@ -477,11 +483,15 @@ impl Eq for PatternMatcherValue {}
 ///
 /// For typical Faust programs (scope depth ≤ 5, ≤ 30 bindings/scope):
 /// - **Lookup**: O(d × n) where d = depth, n = bindings/scope. Each compare is O(1) — `u32`
-///   integer equality. In practice ~30–150 comparisons — fits entirely in L1 cache.
+///   integer equality. In practice the common hit/miss patterns stay in the low tens to low
+///   hundreds of comparisons and therefore in one tiny hot working set.
 /// - **Bind**: `Vec::push` — amortized O(1), no hashing, no pointer chasing.
 /// - **Push scope**: O(1) one-layer allocation in the shared environment arena.
-/// - **Memory per binding**: **8 bytes** (`u32` SymId + `u32` TreeId) vs C++'s ~64 bytes per
-///   closure node. SIMD-scannable `Vec<(u32, u32)>` layout — 4 bindings per 32-byte cache line.
+/// - **Memory per binding**: one inline `(SymId, EvalValue)` pair in the current layer vector.
+///   The frequently-hit plain-box case stores only one symbol id plus one small tagged payload and
+///   avoids per-binding heap allocation; closure and pattern-matcher bindings carry larger inline
+///   state. The earlier `8 bytes` rule of thumb applies only to the narrow `SymId + TreeId` box
+///   payload shape and should not be read as the size of every binding variant.
 #[derive(Clone, Debug)]
 pub struct Environment {
     store: Arc<Mutex<EnvStore>>,
@@ -873,8 +883,9 @@ impl Default for Environment {
 /// | Check cost | O(log depth) tree-pointer comparison | O(depth) u32 comparison — cache-friendly |
 ///
 /// For evaluation stacks typical of Faust programs (depth < 100), the Rust O(n) scan over a
-/// `Vec<u32>` is **faster** than the C++ O(log n) set probe due to SIMD-friendly contiguous
-/// memory layout. The `set` approach would be preferable only for depths > 1000.
+/// compact vector is expected to be competitive with, and often faster than, the C++ O(log n)
+/// set probe because the stack stays shallow and contiguous. The tree/set approach becomes more
+/// attractive only when recursion depth grows far beyond the intended Faust range.
 ///
 /// # Performance
 /// - `enter`: O(depth) scan — the entire call stack fits in L1 cache for depth < 256.
@@ -1000,12 +1011,18 @@ enum LoopFrame {
 ///
 /// # Interpretation
 ///
+/// These ratios describe the intended interpretation once all counters are wired:
+///
 /// - **`env_lookups / nodes_evaluated`**: average lookups per evaluated node. High values (> 3)
 ///   indicate deeply bound symbols that might benefit from flattening or interning.
 /// - **`env_lookup_total_depth / env_lookups`**: average scope depth traversed per lookup.
 ///   Values > 3 indicate deep scope chains where caching may help.
 /// - **`env_layers_pushed / nodes_evaluated`**: scope-push frequency. High values for iterative
 ///   forms (`ipar`/`iseq`) are expected.
+///
+/// As of the current port, instrumentation is still incremental: the field meanings are stable,
+/// but not every evaluator path updates every counter yet. Consumers should therefore treat these
+/// values as progressively improving telemetry, not as a fully complete profiling contract.
 #[derive(Clone, Debug, Default)]
 pub struct EvalStats {
     /// Number of child scopes created via `push_scope()`.
@@ -1842,6 +1859,20 @@ pub fn eval_box(
 }
 
 /// Evaluates one box expression to an intermediate evaluator value.
+///
+/// This is the semantic core of the Rust evaluator. Unlike the legacy C++
+/// `eval(...)` API, which mostly traffics in `Tree` values plus ad hoc closure
+/// nodes, Rust evaluates into [`EvalValue`] first so it can keep captured
+/// lexical environments explicit until the result must be lowered back to box
+/// IR for later passes.
+///
+/// The main split is:
+/// - `EvalValue::Box`: first-order box value already safe to reinsert in IR,
+/// - `EvalValue::Closure`: residual value carrying one lexical environment,
+/// - `EvalValue::PatternMatcher`: partially-applied `case` automaton state.
+///
+/// Most box families stay in the `Box` lane. Only abstractions, environment
+/// objects, and `case` applications need the richer host-side representation.
 fn eval_value(
     arena: &mut TreeArena,
     expr: TreeId,
@@ -2066,6 +2097,23 @@ fn eval_value(
     }
 }
 
+/// Reifies one evaluator value back into box IR.
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/eval.cpp`
+/// - `eval(...)`
+/// - `closure(...)` forcing sites
+///
+/// Rust keeps closures as host-side values during evaluation, but subsequent
+/// phases (`propagate`, lowering, golden dumps) still consume box trees. This
+/// helper performs that boundary conversion:
+/// - plain box values pass through unchanged,
+/// - abstractions are rebuilt with one scope-local shadowing sentinel for the
+///   bound parameter,
+/// - other closures are forced under their captured environment,
+/// - pattern matchers collapse to their original `case` carrier when still
+///   unapplied.
+///
 fn force_value_to_box(
     arena: &mut TreeArena,
     value: EvalValue,
@@ -2129,6 +2177,11 @@ fn eval_access_value(
 /// - caching the parsed source in the context for later loads in the same session,
 /// - binding the loaded definitions in a fresh environment whose source context
 ///   is rooted at the loaded file.
+///
+/// The returned value is intentionally a closure/environment pair instead of a
+/// fully forced box. That preserves the C++ semantics where `component(...)`
+/// and `library(...)` introduce a new lexical source-resolution root and expose
+/// their loaded definitions lazily through normal evaluator lookup.
 fn eval_loaded_source_value(
     arena: &mut TreeArena,
     node: TreeId,
@@ -2234,6 +2287,11 @@ fn eval_loaded_source_value(
 /// value. Rust stores the equivalent state in [`EvalValue::PatternMatcher`]:
 /// compiled automaton, current automaton state, per-rule barrier environments,
 /// original rule list, and already-consumed arguments.
+/// Rust compiles the evaluated rule list into an automaton cached in the
+/// [`LoopDetector`], then returns a host-side [`EvalValue::PatternMatcher`]
+/// instead of immediately forcing the whole dispatch to a box. This mirrors the
+/// C++ strategy where `case` evaluation yields an applicative matcher that may
+/// later be partially or fully applied.
 fn eval_case_value(
     arena: &mut TreeArena,
     case_expr: TreeId,
@@ -2266,6 +2324,11 @@ fn eval_case_value(
     }))
 }
 
+/// Extracts the textual file reference from `component(...)` / `library(...)`.
+///
+/// The parser normally produces string literals here, but Rust also accepts a
+/// symbol node to stay compatible with historical tree shapes built in tests or
+/// imported from transitional code.
 fn source_reference_name(arena: &TreeArena, filename: TreeId) -> Option<String> {
     match arena.kind(filename) {
         Some(NodeKind::StringLiteral(value)) | Some(NodeKind::Symbol(value)) => {
@@ -2275,6 +2338,16 @@ fn source_reference_name(arena: &TreeArena, filename: TreeId) -> Option<String> 
     }
 }
 
+/// Builds the ordered candidate path list for one source reference.
+///
+/// Resolution order intentionally mirrors Faust file loading:
+/// 1. exact absolute path when `target` is already absolute,
+/// 2. path relative to the current source file,
+/// 3. raw `target` as given,
+/// 4. each configured import search path joined with `target`.
+///
+/// Duplicates are removed while preserving first-hit priority so the loaded
+/// source cache can key lookups deterministically.
 fn candidate_loaded_source_paths(source_context: &EvalSourceContext, target: &str) -> Vec<PathBuf> {
     let target_path = PathBuf::from(target);
     let mut candidates = Vec::new();
@@ -2308,6 +2381,16 @@ fn candidate_loaded_source_paths(source_context: &EvalSourceContext, target: &st
 /// - `compiler/evaluate/environment.cpp`
 /// - `copyEnvReplaceDefs`
 /// - `updateClosures`
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/eval.cpp`
+/// - `copyEnvReplaceDefs(...)`
+///
+/// `boxModifLocalDef` is not a plain nested lexical scope: existing captured
+/// closures reachable from the current environment must see the replacement
+/// definitions as well. Rust implements that by cloning the visible
+/// environment, rewriting captured environments transitively, then evaluating
+/// the body under the rewritten copy.
 fn eval_modif_local_def_value(
     arena: &mut TreeArena,
     body: TreeId,
@@ -2342,6 +2425,10 @@ fn eval_modif_local_def_value(
 /// The current implementation supports literal/group-path matching, which is
 /// sufficient for the production corpus and the parity fixtures in this
 /// repository.
+///
+/// One important adaptation from C++ is that Rust performs the full rewrite on
+/// the already-evaluated and `a2sb`-lowered body. This keeps `propagate` free of
+/// residual closures while still preserving the observable modulation behavior.
 fn eval_modulation(
     arena: &mut TreeArena,
     modulation_node: TreeId,
@@ -2418,6 +2505,14 @@ struct ModulationRewrite<'a> {
 /// Source provenance (C++):
 /// - `compiler/evaluate/eval.cpp`
 /// - `evalLabel(...)`
+///
+/// C++ accepts richer label syntax than plain string literals. Rust currently
+/// routes target labels through the same `%ident` interpolation engine used for
+/// UI labels and then strips metadata wrappers so later matching operates only
+/// on the path-bearing label text.
+///
+/// The returned string is therefore not the raw label source but the
+/// post-interpolation, metadata-free target used by the modulation implanter.
 fn eval_modulation_label(
     arena: &mut TreeArena,
     var: TreeId,
@@ -2551,10 +2646,19 @@ fn eval_label(
     Ok(dst)
 }
 
+/// Returns `true` for identifier characters accepted by `%ident` label syntax.
+///
+/// This intentionally follows the conservative subset used by the current Rust
+/// port of `evalLabel(...)`: ASCII alphanumerics plus `_`.
 fn is_eval_label_ident_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
 }
 
+/// Renders one `%ident` or `%{ident}` placeholder into the destination label.
+///
+/// Width formatting follows the C++ `evalLabel(...)` convention implemented by
+/// the active corpus: the optional decimal field width is clamped to `0..=4`
+/// before rendering the resolved integer value.
 fn write_label_ident_value(
     arena: &mut TreeArena,
     dst: &mut String,
@@ -2574,6 +2678,11 @@ fn write_label_ident_value(
     Ok(())
 }
 
+/// Evaluates one identifier used in a label placeholder to an integer constant.
+///
+/// The lookup goes through the full evaluator and symbolic lowering pipeline so
+/// `%i`, `%{n}`, and similar placeholders observe the same lexical environment
+/// and constant-folding behavior as normal Faust expressions.
 fn eval_ident_to_constant_int(
     arena: &mut TreeArena,
     ident: &str,
@@ -2642,6 +2751,11 @@ fn eval_box_to_scalar_signal(
     }
 }
 
+/// Returns a human-readable identifier for interpolation diagnostics.
+///
+/// If `expr` is not an identifier node, diagnostics still need a stable name;
+/// the fallback `node_<id>` keeps error messages auditable without pretending a
+/// symbolic name exists.
 fn ident_name_or_fallback(arena: &TreeArena, expr: TreeId) -> String {
     match match_box(arena, expr) {
         BoxMatch::Ident(name) => name.to_owned(),
@@ -2649,6 +2763,11 @@ fn ident_name_or_fallback(arena: &TreeArena, expr: TreeId) -> String {
     }
 }
 
+/// Evaluates one label node and re-interns the resulting string literal in the arena.
+///
+/// Widget/group constructors in box IR still store labels as tree nodes, so the
+/// string returned by [`eval_label_node`] must be converted back into a canonical
+/// literal node before rebuilding the enclosing widget.
 fn evaluated_label_node(
     arena: &mut TreeArena,
     label: TreeId,
@@ -2659,6 +2778,7 @@ fn evaluated_label_node(
     Ok(arena.string_lit(&text))
 }
 
+/// Evaluates one `button` label and rebuilds the widget node.
 fn eval_button(
     arena: &mut TreeArena,
     label: TreeId,
@@ -2669,6 +2789,7 @@ fn eval_button(
     Ok(BoxBuilder::new(arena).button(label))
 }
 
+/// Evaluates one `checkbox` label and rebuilds the widget node.
 fn eval_checkbox(
     arena: &mut TreeArena,
     label: TreeId,
@@ -2758,6 +2879,11 @@ fn eval_slider_like(
     })
 }
 
+/// Evaluates one `soundfile` widget.
+///
+/// Only label interpolation and channel expression evaluation happen here. Full
+/// runtime/path semantics are still handled later in `propagate`, just like in
+/// the C++ split between evaluation and box-to-signal lowering.
 fn eval_soundfile(
     arena: &mut TreeArena,
     label: TreeId,
@@ -2770,6 +2896,7 @@ fn eval_soundfile(
     Ok(BoxBuilder::new(arena).soundfile(label, chan))
 }
 
+/// Evaluates one vertical UI group by interpolating its label and body.
 fn eval_vgroup(
     arena: &mut TreeArena,
     label: TreeId,
@@ -2782,6 +2909,7 @@ fn eval_vgroup(
     Ok(BoxBuilder::new(arena).vgroup(label, body))
 }
 
+/// Evaluates one horizontal UI group by interpolating its label and body.
 fn eval_hgroup(
     arena: &mut TreeArena,
     label: TreeId,
@@ -2794,6 +2922,7 @@ fn eval_hgroup(
     Ok(BoxBuilder::new(arena).hgroup(label, body))
 }
 
+/// Evaluates one tab UI group by interpolating its label and body.
 fn eval_tgroup(
     arena: &mut TreeArena,
     label: TreeId,
@@ -2806,6 +2935,7 @@ fn eval_tgroup(
     Ok(BoxBuilder::new(arena).tgroup(label, body))
 }
 
+/// Evaluates one vertical bargraph node.
 fn eval_vbargraph(
     arena: &mut TreeArena,
     label: TreeId,
@@ -2820,6 +2950,7 @@ fn eval_vbargraph(
     Ok(BoxBuilder::new(arena).vbargraph(label, min, max))
 }
 
+/// Evaluates one horizontal bargraph node.
 fn eval_hbargraph(
     arena: &mut TreeArena,
     label: TreeId,
@@ -2835,6 +2966,11 @@ fn eval_hbargraph(
 }
 
 /// Evaluates the optional modulation circuit, defaulting to multiplication.
+///
+/// Faust modulation syntax allows the circuit part to be omitted; the default is
+/// multiplication. When a circuit is present, Rust evaluates it like an ordinary
+/// box expression, lowers residual closures through [`a2sb`], and then checks
+/// only the lightweight local arity constraints needed by modulation rewriting.
 fn eval_modulation_circuit(
     arena: &mut TreeArena,
     modulation_node: TreeId,
@@ -2861,6 +2997,11 @@ fn eval_modulation_circuit(
 }
 
 /// Recursively implants one modulation circuit into matching widgets.
+///
+/// The traversal keeps an explicit `group_stack` of already-entered UI labels so
+/// widget matching can reconstruct the effective path seen by the user. Only
+/// widget/group families receive modulation-specific treatment; every other node
+/// is rebuilt structurally if any child changes.
 fn implant_modulation(
     arena: &mut TreeArena,
     expr: TreeId,
@@ -2971,6 +3112,11 @@ fn implant_modulation(
 }
 
 /// Applies the modulation circuit around one widget when its path matches.
+///
+/// The three supported arities mirror the C++ implanter:
+/// - 0 inputs: the modulation circuit fully replaces the widget,
+/// - 1 input: the widget output is piped through the modulation circuit,
+/// - 2 inputs: the widget is paired with the modulation slot/carry signal.
 fn implant_widget_if_match(
     arena: &mut TreeArena,
     widget: TreeId,
@@ -2994,6 +3140,12 @@ fn implant_widget_if_match(
     }
 }
 
+/// Returns `true` when the effective widget path matches the modulation target.
+///
+/// Matching is done on metadata-free path segments. Rust currently uses
+/// subsequence matching on the normalized textual path representation, which is
+/// sufficient for the active corpus and mirrors the practical C++ behavior for
+/// the supported subset.
 fn widget_matches_modulation_target(
     arena: &TreeArena,
     label: TreeId,
@@ -3011,6 +3163,10 @@ fn widget_matches_modulation_target(
     is_subsequence(target_path, &widget_path)
 }
 
+/// Normalizes one modulation target label string into path segments.
+///
+/// Empty segments are discarded so both `a/b` and `/a//b/` normalize to the
+/// same semantic path vector.
 fn modulation_target_path(label: &str) -> Vec<String> {
     label
         .split('/')
@@ -3022,6 +3178,10 @@ fn modulation_target_path(label: &str) -> Vec<String> {
         .collect()
 }
 
+/// Extracts the plain-text label content from one label node.
+///
+/// Missing/invalid label nodes degrade to an empty string so modulation path
+/// reconstruction stays total during recursive traversal.
 fn strip_label_node(arena: &TreeArena, label: TreeId) -> String {
     label_node_text(arena, label)
         .map(strip_label_metadata)
@@ -3029,6 +3189,11 @@ fn strip_label_node(arena: &TreeArena, label: TreeId) -> String {
         .to_owned()
 }
 
+/// Removes Faust metadata suffixes from one textual label.
+///
+/// For example `gain [unit:dB]` becomes `gain`. The returned slice borrows from
+/// the original string and is intended for path matching, not for user-facing
+/// pretty-printing.
 fn strip_label_metadata(label: &str) -> &str {
     label
         .split_once('[')
@@ -3036,6 +3201,10 @@ fn strip_label_metadata(label: &str) -> &str {
         .trim()
 }
 
+/// Returns the raw textual payload of a label node, if any.
+///
+/// Both string literals and interned symbols are accepted to stay compatible
+/// with transitional tree encodings.
 fn label_node_text(arena: &TreeArena, label: TreeId) -> Option<&str> {
     match arena.kind(label) {
         Some(NodeKind::StringLiteral(label)) => Some(label.as_ref()),
@@ -3044,6 +3213,11 @@ fn label_node_text(arena: &TreeArena, label: TreeId) -> Option<&str> {
     }
 }
 
+/// Returns `true` when `needle` appears in-order inside `haystack`.
+///
+/// This relaxed path relation is used by the current modulation implementation
+/// so target paths can match inside nested UI groups without requiring exact
+/// absolute-path equality.
 fn is_subsequence(needle: &[String], haystack: &[String]) -> bool {
     let mut haystack_iter = haystack.iter();
     needle
@@ -3052,6 +3226,12 @@ fn is_subsequence(needle: &[String], haystack: &[String]) -> bool {
 }
 
 /// Structural fallback: evaluate all children, then rebuild the node unchanged in kind.
+/// Recursively evaluates every child of one box node and rebuilds the parent.
+///
+/// This is the structural fallback used for box families whose semantics in
+/// `eval` are "evaluate children, keep outer constructor". It preserves the
+/// original node when no child changes, matching the hash-consing-friendly
+/// behavior of the C++ tree layer.
 fn map_children(
     arena: &mut TreeArena,
     expr: TreeId,
@@ -3114,6 +3294,16 @@ fn map_children(
 /// |---|---|
 /// | `pushMultiClosureDefs(ldefs, visited, lenv)` | `bind_definitions(arena, defs, &mut scoped)` with explicit captured definition closures |
 /// | `pushValueDef(id, def, lenv)` | `env.bind(name, value)` (single-binding fast path) |
+/// Binds a top-level or local definition list into the current environment.
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/environment.cpp`
+/// - `pushMultiClosureDefs(...)`
+/// - `addLayerDef(...)`
+///
+/// Each definition is captured as needed so later lookups evaluate under the
+/// lexical environment visible at definition time. Duplicate names in the same
+/// scope are rejected here to preserve the C++ no-redefinition rule.
 fn bind_definitions(
     arena: &mut TreeArena,
     mut defs: TreeId,
@@ -3158,6 +3348,12 @@ fn bind_definitions(
     Ok(())
 }
 
+/// Rewrites every captured environment reachable from `value` from `source_env`
+/// to `copy_env`.
+///
+/// This helper exists for `boxModifLocalDef` parity: copied environments cannot
+/// just duplicate direct bindings, they must also retarget any nested closures
+/// so future lookups see the rewritten layer chain instead of the original.
 fn rewrite_captured_env(
     value: EvalValue,
     old_env: &Environment,
@@ -3189,6 +3385,11 @@ fn rewrite_captured_env(
 /// The copied layer reuses the same parent stack as `source_env`, rewires any enclosed closure
 /// that previously captured `source_env` so it now captures the copied layer, then appends the
 /// replacement definitions as closures captured in `current_env`.
+/// Clones the visible environment chain and replaces selected definitions.
+///
+/// The copy preserves lexical parent ordering while rebasing closure captures
+/// onto the duplicated chain. This is the Rust equivalent of the C++
+/// `copyEnvReplaceDefs(...)` family used by modifier definitions.
 fn copy_env_replace_defs(
     arena: &mut TreeArena,
     source_env: &Environment,
@@ -3317,6 +3518,11 @@ fn build_abstr_from_parser_args(
 ///
 /// This mirrors the C++ parser/evaluator list convention where argument lists are
 /// accumulated in reverse order.
+/// Evaluates one application argument list into reverse order.
+///
+/// Application in Faust stores arguments as a cons-list. Evaluating in reverse
+/// order lets later application helpers consume the list head-first without an
+/// extra full reversal step, mirroring the C++ `revEvalList(...)` contract.
 fn rev_eval_list(
     arena: &mut TreeArena,
     mut list: TreeId,
@@ -3345,6 +3551,10 @@ fn rev_eval_list(
 ///   non-closure style `seq(par(args + implicit_wires), case)` for C++ parity.
 /// - other node families: C++-compatible non-closure lowering to `seq(par(args), fun)`,
 ///   including implicit wire insertion for partial applications.
+///
+/// This is the box-returning wrapper around [`apply_value_list_value`]. It is
+/// used by evaluation paths that must stay in box IR even though intermediate
+/// application may produce closures or pattern matchers.
 fn apply_value_list(
     arena: &mut TreeArena,
     fun: EvalValue,
@@ -3357,6 +3567,14 @@ fn apply_value_list(
     force_value_to_box(arena, value, loop_detector)
 }
 
+/// Applies an evaluator value to zero or more arguments.
+///
+/// This is the host-side equivalent of the C++ `applyList(...)` family after
+/// closure materialization. It handles:
+/// - plain box application,
+/// - abstraction beta-reduction with captured environments,
+/// - partial application of closures,
+/// - pattern-matcher progression for `case`.
 fn apply_value_list_value(
     arena: &mut TreeArena,
     fun: EvalValue,
@@ -3426,6 +3644,11 @@ fn apply_value_list_value(
     }
 }
 
+/// Advances a partially-applied pattern matcher with one or more arguments.
+///
+/// The matcher keeps one per-rule environment vector. Every successful step may
+/// refine those environments until a final state is reached, at which point the
+/// selected RHS is evaluated under the captured rule-local environment.
 fn apply_pattern_matcher_value(
     arena: &mut TreeArena,
     mut pm: PatternMatcherValue,
@@ -3478,6 +3701,12 @@ fn apply_pattern_matcher_value(
     })
 }
 
+/// Applies a first-order box expression to an argument list.
+///
+/// This helper implements the non-closure application rules that still exist in
+/// Faust after parser lowering, including implicit wire insertion for
+/// under-applied non-prefix primitives. When the callee is not directly
+/// first-order, callers should use [`apply_value_list_value`] instead.
 fn apply_list(
     arena: &mut TreeArena,
     fun: TreeId,
@@ -3619,6 +3848,12 @@ fn list_outputs(arena: &TreeArena, mut list: TreeId) -> Option<usize> {
 ///
 /// Returns `(inputs, outputs)` for the subset needed in `apply_list`.
 /// `None` means arity is unknown or invalid for this fast-path inference.
+/// Infers `(inputs, outputs)` for the evaluator-supported first-order box subset.
+///
+/// This lightweight arity oracle is intentionally narrower than the dedicated
+/// `propagate::box_arity(...)` contract. It exists for local evaluator tasks
+/// such as under-application handling and label-placeholder constant checks
+/// where pulling the full propagate error surface would be unnecessarily heavy.
 fn infer_box_arity(arena: &TreeArena, id: TreeId) -> Option<(usize, usize)> {
     match match_box(arena, id) {
         BoxMatch::Int(_) | BoxMatch::Real(_) => Some((0, 1)),
@@ -3787,6 +4022,11 @@ fn is_binary_primitive_non_prefix(arena: &TreeArena, id: TreeId) -> bool {
     )
 }
 
+/// Returns the identifier name used as iterative binder in `ipar/iseq/isum/iprod`.
+///
+/// The parser should already enforce identifier syntax here, but `eval` keeps
+/// the check local so malformed trees created programmatically still fail with a
+/// typed evaluator error instead of panicking.
 fn iteration_var_name(arena: &TreeArena, id: TreeId) -> Result<String, EvalError> {
     match match_box(arena, id) {
         BoxMatch::Ident(name) => Ok(name.to_owned()),
@@ -3814,6 +4054,12 @@ fn eval_non_negative_count(
 }
 
 /// Evaluates iterative body with one bound loop index (`i`).
+///
+/// Each expansion step pushes one child lexical scope, binds the iteration
+/// variable to the current integer index, and then evaluates the body under that
+/// scope. The binding uses a normal environment entry so iteration variables are
+/// visible to all evaluator features that consult lexical scope, including
+/// label interpolation.
 fn eval_iter_body(
     arena: &mut TreeArena,
     var_name: &str,
@@ -3842,6 +4088,10 @@ fn empty_iteration_route(arena: &mut TreeArena) -> TreeId {
 }
 
 /// Expands `ipar(i,n,body)` into nested `par` composition.
+///
+/// Expansion order matches the C++ evaluator: the rightmost branch (`n - 1`) is
+/// built first, then earlier iterations are prepended so the final tree keeps
+/// the observable left-to-right bus order expected by later passes.
 fn iterate_par(
     arena: &mut TreeArena,
     index: TreeId,
@@ -3867,6 +4117,9 @@ fn iterate_par(
 }
 
 /// Expands `iseq(i,n,body)` into nested `seq` composition.
+///
+/// Like [`iterate_par`], this preserves the source iteration order by building
+/// the tail first and prepending earlier bodies during the fold.
 fn iterate_seq(
     arena: &mut TreeArena,
     index: TreeId,
@@ -3892,6 +4145,9 @@ fn iterate_seq(
 }
 
 /// Expands `isum(i,n,body)` into a fold using `add` primitive.
+///
+/// The sum starts at iteration `0` and folds left using the primitive `+`
+/// wiring convention (`par(lhs, rhs) : add`).
 fn iterate_sum(
     arena: &mut TreeArena,
     index: TreeId,
@@ -3925,6 +4181,9 @@ fn iterate_sum(
 }
 
 /// Expands `iprod(i,n,body)` into a fold using `mul` primitive.
+/// Expands `iprod(i,n,body)` into a fold using `mul` primitive.
+///
+/// This mirrors [`iterate_sum`] but uses multiplicative composition.
 fn iterate_prod(
     arena: &mut TreeArena,
     index: TreeId,
@@ -4015,6 +4274,11 @@ fn case_expected_arity(arena: &TreeArena, rules_rev: TreeId) -> Result<usize, Ev
 /// Only the left-hand side patterns are evaluated and simplified. The right-hand
 /// side remains unchanged so it can later be evaluated in the chosen rule
 /// environment.
+/// Evaluates every rule of a `case` expression under the current lexical environment.
+///
+/// Rule evaluation is split from matcher construction so patterns can first be
+/// simplified and normalized exactly once, after which the resulting rule list
+/// is suitable for automaton caching.
 fn eval_rule_list(
     arena: &mut TreeArena,
     rules_rev: TreeId,
@@ -4032,6 +4296,11 @@ fn eval_rule_list(
 }
 
 /// Evaluates each pattern of one rule, preserving parser list order.
+/// Evaluates a list of case-pattern nodes left-to-right.
+///
+/// Each pattern goes through [`eval_pattern`] so compile-time numeric
+/// simplification and scope-barrier-sensitive behavior are applied uniformly
+/// before the matcher sees the rule.
 fn eval_pattern_list(
     arena: &mut TreeArena,
     patterns: TreeId,
@@ -4051,6 +4320,11 @@ fn eval_pattern_list(
 /// This restores the C++ `evalPattern` behavior: lexical identifiers are resolved
 /// in the current environment, then constant-only numeric subgraphs are folded so
 /// patterns like `(1+1)` match the same way they do in the C++ compiler.
+/// Evaluates one pattern expression in the current lexical environment.
+///
+/// Pattern evaluation is stricter than ordinary RHS evaluation: after normal
+/// evaluation the result is passed through [`pattern_simplification`] so numeric
+/// constant expressions such as `(1+1)` can match literal values at runtime.
 fn eval_pattern(
     arena: &mut TreeArena,
     pattern: TreeId,
@@ -4066,6 +4340,11 @@ fn eval_pattern(
 /// Source provenance (C++):
 /// - `compiler/evaluate/eval.cpp`
 /// - `patternSimplification`
+///
+/// Today this mainly performs local numeric constant folding while preserving
+/// structural pattern shapes. The helper is intentionally separate from generic
+/// expression evaluation so future pattern-only canonicalizations remain
+/// localized.
 fn pattern_simplification(arena: &mut TreeArena, pattern: TreeId) -> TreeId {
     let simplified = match match_box(arena, pattern) {
         BoxMatch::Seq(a, b) => {
@@ -4135,6 +4414,11 @@ enum NumericValue {
     Real(f64),
 }
 
+/// Attempts to reduce one pattern expression to an `int` or `real` constant box.
+///
+/// This is the narrow Rust equivalent of the C++ pattern simplification used by
+/// `evalPattern(...)`: only numerically pure subexpressions are folded, and
+/// failure to fold simply leaves the original pattern unchanged.
 fn simplify_numeric_pattern(arena: &mut TreeArena, pattern: TreeId) -> Option<TreeId> {
     let value = eval_numeric_pattern_value(arena, pattern)?;
     let mut b = BoxBuilder::new(arena);

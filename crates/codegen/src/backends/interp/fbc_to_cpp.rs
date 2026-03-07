@@ -26,6 +26,11 @@
 //! - `<REAL> fVec[real_heap_size]` — real heap
 //! - `int fSampleRate` — sample rate shadow (`iVec[sr_offset]` alias)
 //!
+//! # Role in the Rust port
+//! This path is an ahead-of-time backend over already compiled interpreter
+//! bytecode. It is therefore useful for validating interpreter semantics and
+//! producing native artifacts without depending on FIR/C++ backend parity.
+//!
 //! # Usage example
 //!
 //! ```rust,ignore
@@ -47,6 +52,9 @@ use super::real::FbcReal;
 // ── Public API ──────────────────────────────────────────────────────────────
 
 /// Options for the FBC → native C++ code generator.
+///
+/// These options only affect the generated wrapper/header surface; they do not
+/// alter interpreter semantics encoded in the source bytecode factory.
 #[derive(Clone, Debug)]
 pub struct FbcCppOptions {
     /// Class name override.
@@ -130,6 +138,10 @@ impl std::error::Error for FbcCppError {}
 /// The class extends `dsp` from `faust/dsp/dsp.h` and implements the full
 /// Faust DSP lifecycle without any interpreter runtime.
 ///
+/// This is a semantic re-emission pass over FBC, not a pretty-printer for FIR:
+/// if the produced C++ diverges from interpreter behavior, the bug is in this
+/// lowering layer, not in earlier FIR backends.
+///
 /// # Errors
 ///
 /// Returns [`FbcCppError`] if the bytecode contains unsupported opcodes
@@ -143,6 +155,12 @@ pub fn generate_cpp_from_fbc<R: FbcReal>(
 
 // ── Internal: class-level generator ─────────────────────────────────────────
 
+/// Class-level generator state shared across all emitted lifecycle methods.
+///
+/// Per-block temporary stacks/counters are intentionally delegated to
+/// [`BlockComp`] so temporaries can be either isolated or shared depending on
+/// the method being generated (`compute` shares one instance across both
+/// interpreter compute blocks).
 struct CppGen<'a, R: FbcReal> {
     factory: &'a FbcDspFactory<R>,
     options: &'a FbcCppOptions,
@@ -362,6 +380,11 @@ impl<'a, R: FbcReal> CppGen<'a, R> {
 
 // ── Internal: block-level compiler ──────────────────────────────────────────
 
+/// Block-level compiler from linear FBC instructions to structured C++ code.
+///
+/// The compiler simulates the interpreter operand stacks with temporary C++
+/// variable names. This keeps code generation close to bytecode semantics while
+/// still emitting readable native code.
 struct BlockComp {
     real_ctype: &'static str,
     /// Counter for real temporaries (fRN).

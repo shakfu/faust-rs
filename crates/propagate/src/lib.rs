@@ -727,6 +727,10 @@ pub fn propagate(
 /// `boxSymbolic(slot, body)` can bind the first input bus to `boxSlot(slot)`.
 /// Rust keeps the same semantic mechanism but uses a local hash map keyed by the
 /// canonical `BoxId` of each slot node instead of global tree properties.
+///
+/// This helper is also the point where Rust enforces the public
+/// `propagate(...)` contract: callers may only enter `propagate_inner(...)`
+/// through a path that has already checked both input and output bus widths.
 fn propagate_in_slot_env(
     arena: &mut TreeArena,
     box_tree: BoxId,
@@ -754,6 +758,11 @@ fn propagate_in_slot_env(
 }
 
 /// Internal propagation dispatcher once input arity has been validated.
+///
+/// Unlike `box_arity(...)`, this function is intentionally operational rather
+/// than declarative: it builds actual signal nodes, threads slot bindings, and
+/// recursively performs composition rewrites. Unsupported box families here are
+/// therefore genuine lowering gaps, not just missing arity metadata.
 fn propagate_inner(
     arena: &mut TreeArena,
     box_tree: BoxId,

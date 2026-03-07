@@ -41,12 +41,19 @@ use fir::{FirId, FirStore};
 use signals::SigId;
 use tlib::TreeArena;
 
-/// Options for `compile_signals_to_fir_fastlane`.
+/// Options for [`compile_signals_to_fir_fastlane`].
+///
+/// These options currently describe only the externally visible module contract.
+/// Resource planning and lowering policies stay internal to the fast-lane until
+/// more slices are promoted to stable configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalFirOptions {
     /// FIR module name to emit.
     pub module_name: String,
     /// Reserved for Step 2+ strictness/profile toggles.
+    ///
+    /// The current implementation keeps this field for forward-compatible CLI
+    /// plumbing even though the active slices still use one conservative policy.
     pub strict_mode: bool,
 }
 
@@ -60,6 +67,10 @@ impl Default for SignalFirOptions {
 }
 
 /// Output package of the fast-lane compiler.
+///
+/// The fast-lane returns ownership of the FIR store together with the module
+/// root so downstream backends can keep using normal `fir` builder/matcher APIs
+/// without relying on hidden global state.
 #[derive(Debug)]
 pub struct SignalFirOutput {
     /// FIR storage arena.
@@ -72,6 +83,7 @@ pub struct SignalFirOutput {
 ///
 /// # Current behavior (Step 2A/2B/2C/2D/2E/2F/2G/2H)
 /// - validates options and top-level signal/arity contract,
+/// - builds a deterministic planning snapshot,
 /// - lowers one executable bootstrap signal slice to FIR.
 ///
 /// # Errors

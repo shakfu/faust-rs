@@ -17,6 +17,13 @@
 //!   (`quote1`/`unquote1`).
 //! - Real values use max precision via `{:.digits$}` formatting where `digits`
 //!   is `std::mem::size_of::<R>() * 3 + 1` (matching C++ `digits10 + 1`).
+//!
+//! # Compatibility notes
+//! - The Rust reader/writer targets the historical interpreter text format so
+//!   `.fbc` artifacts remain inspectable and diffable.
+//! - Stability is format-level, not byte-for-byte source-level: whitespace and
+//!   quoting stay human-oriented, while semantic round-tripping is the primary
+//!   compatibility goal.
 
 use std::fmt::Write as FmtWrite;
 use std::io::{self, BufRead, Write};
@@ -40,6 +47,10 @@ pub const FAUST_VERSION: &str = "2.84.5-rust";
 // ── Error type ─────────────────────────────────────────────────────────────
 
 /// Errors that can occur during `.fbc` deserialization.
+///
+/// The error set stays intentionally parse-oriented: once a factory is rebuilt
+/// successfully, deeper runtime validation is handled by the interpreter
+/// execution layer rather than by the serializer.
 #[derive(Clone, Debug)]
 pub enum FbcSerialError {
     /// Unexpected token in the input stream.
@@ -147,6 +158,10 @@ fn fmt_real<R: FbcReal>(v: R) -> String {
 /// - `factory`: the factory to serialize.
 /// - `writer`: output stream.
 /// - `small`: if `true`, use compact (small) format; otherwise, normal format.
+///
+/// Both modes encode the same semantic content. `small=true` keeps tokens short
+/// for compact fixtures, while normal mode favors readability and parity with
+/// the traditional C++ textual dumps.
 ///
 /// # Source provenance (C++)
 /// - `interpreter_dsp_factory_aux::write()` in `interpreter_dsp_aux.hh`.
@@ -340,10 +355,14 @@ fn write_ui_instruction<R: FbcReal>(
     }
 }
 
-/// Writes a code block (block_size + instructions, with recursive sub-blocks).
+/// Writes a code block (`block_size` + instructions, with recursive sub-blocks).
 ///
 /// # Source provenance (C++)
 /// - `FBCBlockInstruction::write()` in `interpreter_bytecode.hh`.
+///
+/// Branch targets are serialized structurally rather than by raw block id so
+/// the file stays self-contained even though the in-memory model uses arena
+/// indices.
 fn write_code_block<R: FbcReal>(
     arena: &FbcBlockArena<R>,
     block_id: BlockId,

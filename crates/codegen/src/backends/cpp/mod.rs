@@ -117,6 +117,10 @@ impl std::fmt::Display for CodegenError {
 
 impl std::error::Error for CodegenError {}
 
+/// Decoded FIR module header used by the text emitter.
+///
+/// Like the C backend equivalent, this is a short-lived view whose ids still
+/// point back into the FIR store for actual section emission.
 #[derive(Debug, Clone)]
 struct ModuleView {
     name: String,
@@ -127,6 +131,10 @@ struct ModuleView {
     num_outputs: usize,
 }
 
+/// Borrowed function declaration view used while stitching the C++ class body.
+///
+/// The emitter only needs structural information here: name, type, arguments,
+/// optional body, and whether the FIR declaration requested inline emission.
 struct DeclareFunView<'a> {
     name: &'a str,
     typ: &'a FirType,
@@ -136,6 +144,10 @@ struct DeclareFunView<'a> {
     is_inline: bool,
 }
 
+/// Rendering mode for statement/expression emission.
+///
+/// `Compute` enables the subset of formatting rules that are specific to the
+/// sample loop and output buffer writes.
 #[derive(Debug, Clone, Copy)]
 enum EmitMode {
     Default,
@@ -228,6 +240,12 @@ pub fn generate_cpp_module(
     Ok(out)
 }
 
+/// Emits the standard Faust `dsp` API surface expected from generated C++.
+///
+/// Methods are synthesized even when the FIR module omitted some sections so
+/// that the generated class still satisfies the stable backend ABI. When a
+/// section is absent, the emitted method falls back to the same neutral/default
+/// behavior as the C++ backend.
 fn emit_dsp_contract_methods(
     out: &mut String,
     num_inputs: usize,

@@ -429,6 +429,10 @@ impl TreeArena {
     /// - ordered child structure,
     /// - destination-side hash-consing,
     /// - repeated-subtree sharing through a local memo table.
+    ///
+    /// Tags require one extra adaptation step: their numeric payload is only
+    /// meaningful inside the source arena, so tag nodes are re-interned by name
+    /// in the destination arena before rebuilding the enclosing node.
     #[must_use]
     pub fn clone_subtree_from(&mut self, src: &TreeArena, root: TreeId) -> TreeId {
         fn clone_rec(

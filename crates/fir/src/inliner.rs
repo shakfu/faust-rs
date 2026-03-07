@@ -24,6 +24,11 @@
 //! - `adapted`: the C++ code exposes inlining as visitor-side rewriting helpers.
 //!   Rust starts with a module-level analysis API to make legality/profitability
 //!   decisions explicit and testable before implementing rewriting.
+//!
+//! # Current policy
+//! The pass intentionally prefers deterministic, conservative rewrites over
+//! aggressive size reduction: reserved DSP API entry points, recursive SCCs,
+//! and non-canonical helper bodies are excluded unless explicitly supported.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -48,6 +53,8 @@ const RESERVED_DSP_API_FUNCTIONS: &[&str] = &[
 ///
 /// These options are used by [`analyze_fir_inliner`] to classify module
 /// functions as "eligible" or "skipped" candidates without rewriting code yet.
+/// They also define the public policy knobs that later rewrite phases are
+/// expected to respect.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FirInlineOptions {
     /// Master switch for candidate selection.
@@ -145,6 +152,10 @@ pub enum FirFunctionSection {
 }
 
 /// Per-function summary extracted during module analysis.
+///
+/// This is the stable analysis record used for candidate decisions and tests.
+/// It intentionally separates raw module facts (body exists, direct callees,
+/// reserved API name) from the final eligible/skipped decision.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FirFunctionSummary {
     /// Function name.
@@ -189,6 +200,9 @@ pub enum FirInlineSkipReason {
 }
 
 /// Candidate decision produced for each analyzed function.
+///
+/// Decisions are recorded for every function, not just eligible callees, so
+/// tests and journaling can explain why a candidate was rejected.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FirInlineCandidateDecision {
     /// Function name the decision applies to.
@@ -210,7 +224,11 @@ pub struct FirInlineScc {
     pub is_recursive: bool,
 }
 
-/// Result of Milestone-1 FIR inliner analysis.
+/// Result of FIR inliner analysis and conservative rewrite preparation.
+///
+/// This structure is designed to be stable enough for differential tests and
+/// journaling: it exposes the call graph, SCCs, summaries, and final candidate
+/// decisions in deterministic maps/vectors.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FirInlineAnalysis {
     /// Options used to compute candidate decisions.
@@ -256,6 +274,10 @@ struct BodyMetrics {
 /// This function performs **no rewrites**. It builds a function index and call
 /// graph, computes SCCs, collects body-size metrics, and classifies callee
 /// candidates using [`FirInlineOptions`].
+///
+/// Keeping analysis separate from rewriting is deliberate: parity-sensitive
+/// ports can inspect and test legality/profitability decisions before any code
+/// transformation is applied.
 ///
 /// # Errors
 /// Returns [`FirInlineAnalysisError`] when the input is not a valid FIR module

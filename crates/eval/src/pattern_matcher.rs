@@ -408,6 +408,12 @@ fn make_state(
 /// the variable must propagate into every existing successor state (for operators, one
 /// `Var` transition per child).
 ///
+/// Intuition: if a rule contains a variable where another rule contains an
+/// operator of arity `n`, then the variable must remain compatible with the full
+/// `n`-child descent taken by that operator rule. The cloned prefix therefore
+/// acts as a synthetic "match anything for the next `n` structural steps"
+/// scaffold before control rejoins the original template state.
+///
 /// # C++ correspondence
 /// `static State* make_var_state(int n, State*)`.
 fn make_var_state(automaton: &mut Automaton, n: usize, template_state_idx: usize) -> usize {
@@ -452,6 +458,11 @@ fn make_var_state(automaton: &mut Automaton, n: usize, template_state_idx: usize
 /// After merging, `state1_idx` contains the union of all rules and transitions from both
 /// states. Delegates to `merge_trans_*` for the transition-kind-specific logic.
 ///
+/// This is the determinization step of the construction algorithm: instead of
+/// keeping one trie per rule, Rust mutates the shared automaton so identical
+/// prefixes share states and divergent prefixes become ordered outgoing
+/// transitions of one deterministic state.
+///
 /// # C++ correspondence
 /// `static void merge_state(State* s1, State* s2)`.
 fn merge_state(automaton: &mut Automaton, state1_idx: usize, state2_idx: usize) {
@@ -479,6 +490,11 @@ fn merge_state(automaton: &mut Automaton, state1_idx: usize, state2_idx: usize) 
 /// A variable pattern subsumes all existing transitions: the target state must
 /// be merged into every successor of `state1_idx` so that rules using this variable
 /// remain active regardless of the concrete value taken by the argument.
+///
+/// If `state1_idx` already has operator transitions, the variable path cannot be
+/// merged directly into the operator successor because the operator rule will
+/// still descend through child positions. [`make_var_state`] is therefore used
+/// to manufacture a compatible number of `Var` hops before merging.
 fn merge_trans_var(automaton: &mut Automaton, state1_idx: usize, target_state_idx: usize) {
     // Ensure a Var transition exists at position 0.
     if !automaton.states[state1_idx].trans[0].is_var() {
@@ -517,6 +533,10 @@ fn merge_trans_var(automaton: &mut Automaton, state1_idx: usize, target_state_id
 /// Otherwise creates a new successor (cloned from `target_state_idx`) and inserts it
 /// at the correct sorted position, then propagates any existing Var transition into
 /// the new successor.
+///
+/// The post-condition is that constant transitions remain strictly sorted by
+/// `TreeId`, and any catch-all variable rule that was already active in
+/// `state1_idx` also remains active after taking the new constant branch.
 fn merge_trans_cst(
     automaton: &mut Automaton,
     state1_idx: usize,
@@ -577,6 +597,11 @@ fn merge_trans_cst(
 }
 
 /// Merges an `Op { tag: op, arity }` transition into `state1_idx`, inserting sorted by `(arity, tag)`.
+///
+/// As with constants, an existing variable transition at `state1_idx` must keep
+/// matching this new operator branch as well. The merge therefore expands the
+/// variable continuation through `arity` synthetic `Var` edges before joining
+/// the new operator successor.
 fn merge_trans_op(
     automaton: &mut Automaton,
     state1_idx: usize,
@@ -647,7 +672,8 @@ fn merge_trans_op(
 ///
 /// A state's `match_num` is `true` if any of its outgoing constant transitions
 /// targets a numeric literal. This mirrors the C++ `build()` / `match_num` logic
-/// and is reserved for a future numeric-fast-path optimisation.
+/// and is reserved for a future numeric-fast-path optimisation. It is metadata
+/// only in the current Rust port and does not alter matching behavior yet.
 fn build_automaton_metadata(arena: &TreeArena, automaton: &mut Automaton, state_idx: usize) {
     // Collect indices first to avoid borrow aliasing.
     let trans_indices: Vec<usize> = (0..automaton.states[state_idx].trans.len()).collect();
@@ -747,6 +773,9 @@ type Subst = Vec<Assoc>;
 ///
 /// Called at each step of `apply_pattern_matcher_internal` when a transition succeeds,
 /// so that all still-active rules accumulate their variable paths.
+/// The actual matched subtree is not extracted here; only `(identifier, path)`
+/// metadata is recorded. Extraction happens later in [`apply_pattern_matcher`]
+/// once the whole top-level argument has been accepted.
 fn add_subst(automaton: &Automaton, s: usize, substs: &mut [Subst]) {
     for r in &automaton.states[s].rules {
         if let Some(id) = r.id {
@@ -759,6 +788,12 @@ fn add_subst(automaton: &Automaton, s: usize, substs: &mut [Subst]) {
 ///
 /// Non-variable transitions are tried first (constant, then operator). If none match, the
 /// variable transition at position 0 is used as a catch-all. Returns `None` on failure.
+///
+/// On every successful step, [`add_subst`] records the variable-path
+/// associations attached to the *current* state before descending further. This
+/// mirrors the C++ matcher, where substitution information is accumulated during
+/// traversal and only materialized into environment bindings once the top-level
+/// argument has been fully processed.
 ///
 /// # C++ correspondence
 /// `static int apply_pattern_matcher_internal(Automaton*, int s, Tree X, vector<Subst>&)`.
@@ -819,6 +854,13 @@ fn apply_pattern_matcher_internal(
 /// `apply_case_rules`. The `env_out` vector accumulates per-rule variable bindings
 /// across calls (each call modifies `env_out` in-place; `env_out[r]` is set to `None`
 /// when rule `r` fails a nonlinearity check).
+///
+/// Operationally, one call does three things:
+/// 1. traverse the argument tree with [`apply_pattern_matcher_internal`],
+/// 2. replay recorded paths to extract concrete matched subtrees,
+/// 3. bind those subtrees into each surviving rule environment, rejecting
+///    nonlinear matches where the same variable name would receive two distinct
+///    values.
 ///
 /// # Arguments
 ///

@@ -149,6 +149,12 @@ impl ParseState {
     /// - one standard identifier arglist -> nested `abstr`
     /// - one non-standard arglist -> `case` with one rule
     /// - multiple clauses -> `case` (all clauses must have the same arity and arity > 0)
+    ///
+    /// The grouping key is the textual definition name, so repeated parser
+    /// clauses for the same function are intentionally merged even if they were
+    /// not adjacent in the raw parser list. This mirrors the C++ post-parse
+    /// normalization stage rather than preserving raw syntactic order one node
+    /// at a time.
     #[must_use]
     pub fn format_definitions(&mut self, defs: TreeId) -> TreeId {
         let mut grouped: BTreeMap<String, (TreeId, Vec<TreeId>)> = BTreeMap::new();
@@ -212,6 +218,10 @@ impl ParseState {
     }
 
     /// Builds one definition node shape compatible with C++ parser (`cons(name, cons(args, expr))`).
+    ///
+    /// This raw shape is the parser-side interchange format consumed later by
+    /// [`format_definitions`](Self::format_definitions). It is intentionally not
+    /// the final semantic definition representation used by `eval`.
     #[must_use]
     pub fn make_definition(&mut self, name: TreeId, args: TreeId, expr: TreeId) -> TreeId {
         let pair = self.arena.cons(args, expr);
@@ -1129,6 +1139,10 @@ pub struct ParseOutput {
     /// The parser still keeps local `ParserCtx` bookkeeping for diagnostics and
     /// structural tests, but this snapshot is the canonical session-wide view
     /// of top-level `declare key "value";` statements seen so far.
+    ///
+    /// Later compilation stages must prefer this snapshot over ad hoc parser
+    /// cursor state when they need the aggregate metadata result of one whole
+    /// parse/import session.
     pub compilation_metadata: CompilationMetadataSnapshot,
     /// Canonical source files consumed by parser input resolution.
     ///
@@ -1136,6 +1150,9 @@ pub struct ParseOutput {
     ///   resolution occurs in-memory.
     /// - For `parse_file_with_imports(...)`, this list contains the deterministic
     ///   recursive import expansion order from [`SourceReader`], including the entry file.
+    ///
+    /// This list is primarily an audit/debugging artifact: it records which
+    /// concrete files contributed text to the parse and in which stable order.
     pub used_files: Vec<std::path::PathBuf>,
     pub state: ParseState,
 }
@@ -1246,6 +1263,11 @@ pub fn parse_minimal(input: &str) -> bool {
 }
 
 /// Reads a source file through [`SourceReader`] import expansion, then parses it.
+///
+/// This convenience entry point creates a fresh top-level metadata store whose
+/// master source is the canonicalized entry path. Imported files encountered
+/// during expansion will therefore contribute scoped metadata entries relative
+/// to that master.
 pub fn parse_file_with_imports(
     path: &std::path::Path,
     search_paths: &[std::path::PathBuf],
@@ -1264,6 +1286,11 @@ pub fn parse_file_with_imports(
 
 /// Reads a source file through [`SourceReader`] import expansion, then parses it
 /// using the provided shared top-level metadata store.
+///
+/// This is the file-backed parser entry point used by later compilation stages
+/// that need top-level metadata continuity across parse/eval boundaries. The
+/// returned [`ParseOutput::used_files`] preserves the deterministic recursive
+/// import expansion order reported by [`SourceReader`].
 pub fn parse_file_with_imports_and_metadata(
     path: &std::path::Path,
     search_paths: &[std::path::PathBuf],

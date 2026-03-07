@@ -31,12 +31,20 @@ pub enum CompilationMetadataKey {
 
 impl CompilationMetadataKey {
     /// Returns a master-document key.
+    ///
+    /// This corresponds to the C++ case where `declare key "value";` is seen in
+    /// the entry source itself and therefore contributes directly under `key`
+    /// without any filename prefixing.
     #[must_use]
     pub fn global(key: impl Into<Box<str>>) -> Self {
         Self::Global { key: key.into() }
     }
 
     /// Returns an imported-file-scoped key.
+    ///
+    /// This corresponds to the C++ rule where metadata emitted by imported
+    /// files is keyed under `filename/key` rather than merged into the master's
+    /// plain key namespace.
     #[must_use]
     pub fn scoped(source_file: impl Into<Box<str>>, key: impl Into<Box<str>>) -> Self {
         Self::Scoped {
@@ -54,6 +62,12 @@ pub struct CompilationMetadataSnapshot {
 
 impl CompilationMetadataSnapshot {
     /// Returns the underlying deterministic key/value map.
+    ///
+    /// Determinism matters for:
+    /// - golden snapshots,
+    /// - differential parser/eval tests,
+    /// - compiler frontends that want a stable serialized view of top-level
+    ///   metadata independent from insertion order.
     #[must_use]
     pub fn entries(&self) -> &BTreeMap<CompilationMetadataKey, BTreeSet<Box<str>>> {
         &self.entries
@@ -69,6 +83,11 @@ struct CompilationMetadataStoreInner {
 /// Shared compilation-session metadata store for top-level `declare key "value";`.
 ///
 /// This is the Rust equivalent of the C++ `gMetaDataSet` semantic role.
+///
+/// The store is intentionally shared across parser and evaluator file-loading
+/// boundaries so `component(...)` / `library(...)` keep contributing to one
+/// compilation-global metadata view even though Rust no longer uses one process-
+/// global singleton.
 #[derive(Clone, Debug)]
 pub struct CompilationMetadataStore {
     inner: Arc<Mutex<CompilationMetadataStoreInner>>,
@@ -76,6 +95,10 @@ pub struct CompilationMetadataStore {
 
 impl CompilationMetadataStore {
     /// Creates one metadata store bound to the current master source.
+    ///
+    /// `master_source` defines which file gets the unscoped key treatment. All
+    /// other files contributing metadata through the same store are recorded as
+    /// imported/scoped entries.
     #[must_use]
     pub fn new(master_source: &str) -> Self {
         Self {
@@ -95,6 +118,9 @@ impl CompilationMetadataStore {
     /// C++ writes plain `key` in the master document and `filename/key` in
     /// imported documents. Rust preserves that distinction structurally through
     /// [`CompilationMetadataKey`] rather than flattening it into one string.
+    ///
+    /// Repeated declarations of the same `(key, value)` pair are idempotent:
+    /// values are stored in a [`BTreeSet`] so duplicates do not accumulate.
     pub fn declare_top_level(&self, current_source: &str, key: &str, value: &str) {
         let mut guard = self.inner.lock().expect("metadata store lock poisoned");
         let key = if current_source == guard.master_source.as_ref() {
@@ -106,6 +132,10 @@ impl CompilationMetadataStore {
     }
 
     /// Returns a deterministic snapshot of the currently aggregated metadata.
+    ///
+    /// The snapshot is a deep clone of the current store contents, so callers
+    /// can hold onto it for diagnostics, code generation, or tests without
+    /// keeping the store lock alive.
     #[must_use]
     pub fn snapshot(&self) -> CompilationMetadataSnapshot {
         let guard = self.inner.lock().expect("metadata store lock poisoned");

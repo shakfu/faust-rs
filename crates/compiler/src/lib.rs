@@ -163,6 +163,12 @@ impl Compiler {
     }
 
     /// Parses, evaluates `process`, then propagates boxes to output signals.
+    ///
+    /// This in-memory entry point is the closest Rust equivalent of compiling a
+    /// standalone Faust string in the C++ frontend. It still installs a shared
+    /// top-level metadata store so parser-stage `declare` metadata and any
+    /// evaluator-driven loads performed later in the same session contribute to
+    /// one coherent compilation snapshot.
     pub fn compile_source_to_signals(
         &self,
         source_name: &str,
@@ -228,6 +234,9 @@ impl Compiler {
     ///
     /// This is an advanced entry point used by tooling/tests that need to alter
     /// parse metadata before Phase 4 (for example diagnostics fallback checks).
+    /// No file-backed evaluator source context is installed here, so nested
+    /// `component(...)` / `library(...)` resolution keeps the in-memory
+    /// semantics of [`eval::EvalSourceContext::memory`].
     pub fn compile_parsed_to_signals(
         &self,
         source_name: &str,
@@ -518,6 +527,15 @@ impl Compiler {
         self.compile_file_to_interp_with_lane(path, &[default_search_base(path)], options, lane)
     }
 
+    /// Runs the shared `parse output -> eval -> arity -> propagate` pipeline.
+    ///
+    /// This is the semantic heart of the facade. All higher-level helpers
+    /// (`compile_*_to_signals`, backend emitters, FIR dump paths) eventually
+    /// flow through this function so they observe the same:
+    /// - evaluator source-loading semantics,
+    /// - top-level metadata aggregation rules,
+    /// - diagnostic enrichment policy,
+    /// - process arity inference and signal propagation contract.
     fn pipeline_to_signals(
         &self,
         source: &str,
@@ -795,6 +813,12 @@ fn default_search_base(path: &Path) -> PathBuf {
 
 // ─── Helpers: parse validation ────────────────────────────────────────────────
 
+/// Converts raw parser output into the facade-level success/error contract.
+///
+/// The parser may return a root node even when recoveries or hard errors were
+/// recorded. The compiler facade treats any non-zero parse error or recovery
+/// count as a stage failure, matching the stricter "ready for later phases"
+/// contract expected by `eval` and `propagate`.
 fn ensure_parse_success(source: &str, output: ParseOutput) -> Result<ParseOutput, CompilerError> {
     let parse_errors = usize::try_from(output.state.ctx.parse_error_count()).unwrap_or(usize::MAX);
     let recoveries = output.state.ctx.recovery_count();
@@ -814,6 +838,9 @@ fn ensure_parse_success(source: &str, output: ParseOutput) -> Result<ParseOutput
 // ─── Helpers: error mapping ───────────────────────────────────────────────────
 
 /// Maps a `LowerToCppError` into a `CompilerError`, attaching the source name.
+///
+/// This keeps the backend-specific lower pipeline internal while exposing one
+/// stable facade error surface to callers.
 fn lower_cpp_error_to_compiler(source: &str, error: LowerToCppError) -> CompilerError {
     match error {
         LowerToCppError::Transform(error) => transform_error_to_compiler(source, error),
@@ -838,6 +865,10 @@ fn lower_c_error_to_compiler(source: &str, error: LowerToCError) -> CompilerErro
 }
 
 /// Maps a `LowerToInterpError` into a `CompilerError`, attaching the source name.
+///
+/// The serialization failure arm is normalized into the interpreter backend
+/// error surface so CLI and library callers do not need a fourth dedicated
+/// interpreter-specific error branch.
 fn lower_interp_error_to_compiler(source: &str, error: LowerToInterpError) -> CompilerError {
     match error {
         LowerToInterpError::Transform(error) => transform_error_to_compiler(source, error),
@@ -874,6 +905,11 @@ fn transform_error_to_compiler(source: &str, error: SignalFirError) -> CompilerE
     }
 }
 
+/// Wraps a FIR verifier report into the facade error surface.
+///
+/// `strict` is recorded only for the warning-only case promoted to a failure by
+/// compiler policy. Reports containing real verifier errors are always fatal,
+/// independent from the strictness flag.
 fn fir_verify_error_to_compiler(source: &str, report: FirVerifyReport) -> CompilerError {
     let strict = report.warnings().next().is_some() && !report.has_errors();
     CompilerError::FirVerify {
@@ -947,6 +983,10 @@ enum LowerToFirError {
 
 // ─── Signal-to-FIR lower functions ───────────────────────────────────────────
 
+/// Dispatches C++ lowering through the selected signal->FIR lane.
+///
+/// The backend itself always consumes FIR; the lane choice controls only how
+/// the intermediate FIR module is produced from the propagated signal list.
 fn lower_signals_to_cpp(
     source_name: &str,
     output: &SignalCompileOutput,
@@ -964,6 +1004,7 @@ fn lower_signals_to_cpp(
     }
 }
 
+/// Dispatches C lowering through the selected signal->FIR lane.
 fn lower_signals_to_c(
     source_name: &str,
     output: &SignalCompileOutput,
@@ -981,6 +1022,7 @@ fn lower_signals_to_c(
     }
 }
 
+/// Dispatches interpreter lowering through the selected signal->FIR lane.
 fn lower_signals_to_interp(
     source_name: &str,
     output: &SignalCompileOutput,
@@ -1036,6 +1078,10 @@ fn serialize_factory(factory: &FbcDspFactory<f32>) -> Result<String, String> {
     String::from_utf8(buf).map_err(|e| e.to_string())
 }
 
+/// Lowers propagated signals to FIR without invoking a backend emitter.
+///
+/// This is the shared implementation behind FIR dump/verification flows and is
+/// also used as the backend-independent boundary for lane comparisons.
 fn lower_signals_to_fir(
     source_name: &str,
     output: &SignalCompileOutput,
@@ -1640,6 +1686,12 @@ fn prim_readable_name(arena: &tlib::TreeArena, node: BoxId) -> Option<&'static s
 // ─── Propagate diagnostic enrichment ─────────────────────────────────────────
 
 /// Enriches arity-mismatch diagnostics with explicit paired A/B expression context.
+///
+/// The paired notes make propagate failures easier to read when the offending
+/// node is a composed expression (`A:B`, `A<:B`, `A:>B`, `A~B`) rather than a
+/// leaf. They are intentionally additive: if arity inference for either side
+/// fails, the original diagnostic is kept and only the successfully computed
+/// side notes are attached.
 fn add_paired_propagate_context(
     mut diagnostic: Diagnostic,
     error: &PropagateError,
@@ -1689,6 +1741,9 @@ fn add_paired_propagate_context(
 ///
 /// When the owning definition is known, this prefers that origin as primary and
 /// keeps process call-site as secondary to improve alias-chain readability.
+/// This policy reflects the common Faust failure mode where the concrete bad
+/// composition is inside a helper definition but only becomes observable once
+/// referenced by `process`.
 fn maybe_add_source_label(
     mut diagnostic: Diagnostic,
     ctx: &parser::ParserCtx,
@@ -1738,6 +1793,10 @@ fn maybe_add_source_label(
 /// - alias-chain mode (`owner_definition` known): primary origin definition,
 ///   secondary process call-site.
 /// - fallback mode: primary nearest call/use site, secondary owning definition.
+///
+/// This differs slightly from propagate labeling because eval failures often
+/// arise during symbol resolution or application, where the use-site can be
+/// more actionable than the eventual enclosing composition site.
 fn maybe_add_eval_source_labels(
     mut diagnostic: Diagnostic,
     ctx: &parser::ParserCtx,
@@ -1999,6 +2058,10 @@ fn subtree_contains_node(arena: &tlib::TreeArena, root: BoxId, needle: BoxId) ->
 // ─── Definition graph helpers ─────────────────────────────────────────────────
 
 /// Returns the owning definition name for one offending expression node.
+///
+/// The search is structural and bounded. It is used only for diagnostics, so a
+/// conservative `None` fallback is preferable to panicking on malformed or
+/// unusually deep definition lists.
 fn owner_definition_name_for_node(
     arena: &tlib::TreeArena,
     defs_root: BoxId,

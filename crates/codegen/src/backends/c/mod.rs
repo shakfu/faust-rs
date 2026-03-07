@@ -115,6 +115,11 @@ impl std::fmt::Display for CodegenError {
 
 impl std::error::Error for CodegenError {}
 
+/// Decoded FIR module header used to keep emission helpers independent from the
+/// exact `FirMatch::Module` shape.
+///
+/// This is an internal normalization step, not a long-lived IR: helpers treat
+/// these ids as section roots that must still be re-decoded before emission.
 #[derive(Debug, Clone)]
 struct ModuleView {
     name: String,
@@ -125,6 +130,12 @@ struct ModuleView {
     num_outputs: usize,
 }
 
+/// One state field initialization that must be replayed during DSP lifecycle
+/// emission.
+///
+/// The C backend emits declarations in the struct definition first, then uses
+/// this decoded view to synthesize `instanceConstants` / reset code with stable
+/// ordering.
 #[derive(Debug, Clone)]
 struct StructInit {
     name: String,
@@ -132,6 +143,10 @@ struct StructInit {
     init: FirId,
 }
 
+/// One table declaration plus its initializer payload.
+///
+/// Table lowering is split from scalar storage because the C backend may need
+/// dedicated helper syntax for array declarations and per-element initialization.
 #[derive(Clone, Debug)]
 struct TableInit {
     name: String,
@@ -140,12 +155,20 @@ struct TableInit {
     values: Vec<FirId>,
 }
 
+/// Rendering mode for expression/statement emission.
+///
+/// `Compute` enables compute-loop specific conventions such as sample-indexed
+/// table accesses and output-store formatting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmitMode {
     Default,
     Compute,
 }
 
+/// Normalized function declaration extracted from FIR before textual emission.
+///
+/// Keeping an owned view here avoids repeatedly borrowing through the FIR store
+/// while the emitter walks several lifecycle/API synthesis passes.
 #[derive(Debug, Clone)]
 struct DeclareFunView {
     name: String,
@@ -335,6 +358,11 @@ struct CApiEmitInput<'a> {
     table_inits: &'a [TableInit],
 }
 
+/// Emits the public Faust C API wrappers around the lowered FIR sections.
+///
+/// This function is where the module-first FIR contract is adapted back to the
+/// legacy C backend surface: constructor/destructor functions, lifecycle hooks,
+/// UI builder, and `compute`.
 fn emit_c_api(
     store: &FirStore,
     out: &mut String,

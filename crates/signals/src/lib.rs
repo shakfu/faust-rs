@@ -195,6 +195,10 @@ impl BinOp {
 }
 
 /// Canonical builder API for constructing signal nodes.
+///
+/// Builder methods preserve the canonical surface expected by `eval`,
+/// `propagate`, dumps, and fast-lane lowering. They normalize only local
+/// encodings such as slider parameter lists and obvious cast no-ops.
 pub struct SigBuilder<'a> {
     arena: &'a mut TreeArena,
 }
@@ -753,6 +757,10 @@ impl<'a> SigBuilder<'a> {
 }
 
 /// Signal structural matcher result.
+///
+/// This enum is the canonical decoded view over signal trees. It exposes child
+/// references directly so analysis and lowering passes can recurse without
+/// rebuilding temporary wrapper nodes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SigMatch<'a> {
     Unknown,
@@ -820,6 +828,9 @@ pub enum SigMatch<'a> {
 }
 
 /// Decodes one `SigId` into canonical `SigMatch` shape.
+///
+/// The matcher accepts the canonical encodings produced by this crate and by
+/// C++-parity passes. Malformed trees fall back to [`SigMatch::Unknown`].
 #[must_use]
 pub fn match_sig<'a>(arena: &'a TreeArena, id: SigId) -> SigMatch<'a> {
     let Some(node) = arena.node(id) else {

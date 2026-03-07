@@ -8,6 +8,10 @@ use super::error::{SignalFirError, SignalFirErrorCode};
 use signals::SigId;
 
 /// Minimal deterministic planning output for Step 1A.
+///
+/// This intentionally records only top-level facts that are cheap to validate
+/// and stable across lowering strategies. Later planning slices can extend this
+/// struct without changing the basic contract consumed by `module.rs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalFirPlan {
     /// Number of output signals requested for compilation.
@@ -27,6 +31,10 @@ pub struct SignalFirPlan {
 /// - `signal_count == signals.len()`
 /// - `num_outputs == signals.len()` (strict top-level output contract)
 /// - `options.module_name` is non-empty after trim
+///
+/// In other words, this planner is the contract gate for the fast-lane, not an
+/// optimizer: it rejects malformed entry conditions early and leaves all
+/// lowering choices to subsequent stages.
 pub fn plan_signals(
     signals: &[SigId],
     num_inputs: usize,

@@ -23,6 +23,11 @@ use super::real::FbcReal;
 /// # Lifetime
 /// The instance borrows the factory for the duration of its lifetime.
 /// The factory must outlive all its instances.
+///
+/// The split between [`FbcDspFactory`] and [`FbcExecutor`] mirrors the C++
+/// interpreter design:
+/// - the factory owns immutable bytecode and metadata,
+/// - the instance owns mutable heaps and lifecycle state.
 pub struct FbcDspInstance<'a, R: FbcReal> {
     factory: &'a FbcDspFactory<R>,
     executor: FbcExecutor<R>,
@@ -30,7 +35,11 @@ pub struct FbcDspInstance<'a, R: FbcReal> {
     cycle: usize,
 }
 
-/// Structured runtime error returned by `FbcDspInstance::try_compute`.
+/// Structured runtime error returned by [`FbcDspInstance::try_compute`].
+///
+/// This currently wraps executor failures only, but keeping a dedicated
+/// instance-level error type leaves room for future lifecycle or host-I/O
+/// validation errors without changing the public compute signature.
 #[derive(Debug)]
 pub enum FbcDspRuntimeError {
     /// Bytecode executor reported a structured execution failure.
@@ -59,6 +68,9 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
     /// The factory is optimized (if not already) before the instance is created.
     /// The executor is allocated with heap sizes from the factory.
     ///
+    /// Requiring `&mut FbcDspFactory` preserves the one-shot optimization
+    /// contract before instances start borrowing immutable factory state.
+    ///
     /// # Source provenance (C++)
     /// - `interpreter_dsp_aux(interpreter_dsp_factory_aux*)` constructor
     ///   in `interpreter_dsp_aux.hh` (lines 536–545).
@@ -80,8 +92,10 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
         }
     }
 
-    /// Full initialization: sets `initialized`, compiles DSP block, calls
-    /// [`instance_init`](Self::instance_init).
+    /// Full initialization entrypoint used by the public DSP lifecycle.
+    ///
+    /// This marks the instance initialized, then runs the canonical
+    /// `instance_init` sequence (`classInit`, constants, UI reset, clear).
     ///
     /// # Source provenance (C++)
     /// - `interpreter_dsp_aux::init()` in `interpreter_dsp_aux.hh` (lines 653–668).
@@ -90,7 +104,11 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
         self.instance_init(sample_rate);
     }
 
-    /// Instance initialization: class_init + constants + reset UI + clear.
+    /// Instance initialization: `class_init + constants + reset UI + clear`.
+    ///
+    /// This matches the Faust DSP lifecycle contract rather than merely setting
+    /// heap defaults: stateful tables, controls, and delay memory are all
+    /// re-established here.
     ///
     /// # Source provenance (C++)
     /// - `interpreter_dsp_aux::instanceInit()` in `interpreter_dsp_aux.hh`
@@ -157,6 +175,10 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
     /// # Source provenance (C++)
     /// - `interpreter_dsp_aux::compute()` in `interpreter_dsp_aux.hh`
     ///   (lines 706–790).
+    ///
+    /// The interpreter keeps the historical two-stage compute split:
+    /// - a per-buffer control block,
+    /// - then the DSP/sample-loop block with actual audio I/O.
     pub fn compute(&mut self, count: i32, inputs: &[&[R]], outputs: &mut [&mut [R]]) {
         if count == 0 {
             return; // Beware: compiled loop does not work with an index of 0.
@@ -181,7 +203,10 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
     }
 
     /// Processes one buffer of audio samples and returns a structured runtime
-    /// error for detected execution failures (for example stack underflow).
+    /// error for detected execution failures.
+    ///
+    /// Unlike [`Self::compute`], this surface is intended for tests and hosts
+    /// that want to handle malformed/generated-invalid bytecode without panic.
     pub fn try_compute(
         &mut self,
         count: i32,

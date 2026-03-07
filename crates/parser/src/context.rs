@@ -101,6 +101,11 @@ pub struct ParserDiagnostic {
 }
 
 /// Parser-local context replacing the parser-relevant subset of `gGlobal`.
+///
+/// This context is intentionally per-parse and owns all mutable parser state
+/// that used to be spread across C++ globals: cursor, diagnostics, waveform
+/// accumulation, definition/use properties, metadata declarations, and
+/// documentation counters.
 #[derive(Debug)]
 pub struct ParserCtx {
     cursor: SourceLocation,
@@ -238,11 +243,17 @@ impl ParserCtx {
     }
 
     /// Records `declare key value;`.
+    ///
+    /// These entries preserve parse order so later metadata aggregation can
+    /// replay the same override order as the C++ parser session.
     pub fn note_declared_metadata(&mut self, key: &str, value: &str) {
         self.declared_metadata.push((key.into(), value.into()));
     }
 
     /// Records `declare def key value;`.
+    ///
+    /// The definition name is kept as parsed text here; later stages resolve it
+    /// against grouped definitions once the full file/import set is available.
     pub fn note_declared_definition_metadata(&mut self, def: &str, key: &str, value: &str) {
         self.declared_definition_metadata
             .push((def.into(), key.into(), value.into()));
@@ -380,6 +391,10 @@ impl ParserCtx {
     }
 
     /// Equivalent to C++ `setDefProp(sym, file, line)`.
+    ///
+    /// Only one definition location is stored per symbol key; later writes
+    /// intentionally replace earlier ones, matching the property-store behavior
+    /// used by the historical parser utilities.
     pub fn set_def_prop(&mut self, sym: TreeId, file: &str, line: u32) {
         let _ = self
             .props
@@ -387,6 +402,9 @@ impl ParserCtx {
     }
 
     /// Sets definition property with full source span precision.
+    ///
+    /// Rust extends the C++ file/line payload with range information so later
+    /// diagnostics can preserve `lrpar` span precision when available.
     pub fn set_def_prop_location(&mut self, sym: TreeId, location: SourceLocation) {
         let _ = self.props.set_with_key(sym, self.def_prop_key, location);
     }

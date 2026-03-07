@@ -32,6 +32,10 @@ use super::real::FbcReal;
 /// - `meta_block`, `ui_block`: metadata and UI instruction lists.
 /// - 6 `BlockId`s referencing code blocks in the arena.
 ///
+/// The factory is intentionally immutable after construction except for the
+/// optional one-shot optimizer pass. Runtime heaps and DSP execution state live
+/// in `FbcDspInstance`, not here.
+///
 /// [`INTERP_FILE_VERSION`]: super::opcode::INTERP_FILE_VERSION
 #[derive(Debug)]
 pub struct FbcDspFactory<R: FbcReal> {
@@ -131,6 +135,8 @@ impl<R: FbcReal> FbcDspFactory<R> {
     /// Applies bytecode optimization (levels 1..opt_level) to all 6 code blocks.
     ///
     /// This is idempotent: the first call optimizes, subsequent calls are no-ops.
+    /// Optimization is factory-wide on purpose so every instance created from
+    /// the same factory sees the same stabilized bytecode layout.
     ///
     /// # Source provenance (C++)
     /// - `interpreter_dsp_factory_aux::optimize()` in `interpreter_dsp.hh`

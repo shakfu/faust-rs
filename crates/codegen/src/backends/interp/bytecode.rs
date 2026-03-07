@@ -313,6 +313,10 @@ impl<R: FbcReal> Default for FbcBlock<R> {
 /// # Source provenance (C++)
 /// - Implicit in `interpreter_dsp_aux.hh` (blocks are owned by the factory
 ///   and referenced by pointer).
+///
+/// Allocation order matters for a few compiler-side patterns such as predicted
+/// loop-back targets, so the arena should be treated as append-only once block
+/// ids have escaped to instructions or factories.
 #[derive(Clone, Debug)]
 pub struct FbcBlockArena<R: FbcReal> {
     blocks: Vec<FbcBlock<R>>,
@@ -387,6 +391,12 @@ impl<R: FbcReal> Default for FbcBlockArena<R> {
 /// # API mapping status
 /// - adapted: C++ overloaded constructors are replaced by a single struct
 ///   with `Option` / default fields.
+///
+/// The opcode determines which subset of fields is meaningful:
+/// - `label` for boxes/widgets,
+/// - `offset` for widget/bargraph zone bindings,
+/// - `key`/`value` for `Declare`,
+/// - `init/min/max/step` for ranged controls.
 #[derive(Clone, Debug)]
 pub struct FbcUiInstruction<R: FbcReal> {
     pub opcode: FbcOpcode,
@@ -500,6 +510,9 @@ impl<R: FbcReal> FbcUiInstruction<R> {
 ///
 /// # Source provenance (C++)
 /// - `FIRMetaInstruction` in `interpreter_bytecode.hh`
+///
+/// Kept separate from [`FbcUiInstruction`] because metadata is replayed through
+/// the factory metadata callback, not through the UI builder stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FbcMetaInstruction {
     pub key: String,

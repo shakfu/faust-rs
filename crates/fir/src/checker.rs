@@ -141,6 +141,9 @@ pub struct DiagContext {
 // ─── Verify report ─────────────────────────────────────────────────────────────
 
 /// Result of a FIR verification run.
+///
+/// The verifier is diagnostic-first: callers receive the full report and can
+/// decide whether warnings are acceptable for their pipeline stage.
 #[derive(Debug, Default)]
 pub struct FirVerifyReport {
     /// All diagnostics emitted during the verification run.
@@ -188,6 +191,10 @@ impl FirVerifyReport {
 // ─── Module symbol tables ──────────────────────────────────────────────────────
 
 /// Signature of a function declared in the module.
+///
+/// This is the distilled function view used by later phases; it intentionally
+/// stores only the information needed for scope/type checks, not the full FIR
+/// declaration node.
 #[derive(Clone, Debug)]
 pub struct FunctionSig {
     /// Ordered list of `(param_name, param_type)` pairs.
@@ -201,6 +208,7 @@ pub struct FunctionSig {
 /// Symbol tables populated during Phase 1 (module-level pass).
 ///
 /// These tables feed into Phase 2 (scope analysis) and Phase 3 (type checking).
+/// They form the verifier's canonical summary of module-level declarations.
 #[derive(Clone, Debug, Default)]
 pub struct ModuleSymbols {
     /// Logical DSP struct name (currently sourced from `Module.name`).
@@ -241,6 +249,10 @@ pub const DSP_API_FUNCTIONS: &[&str] = &[
 // ─── Phase 2 — scope analysis types ───────────────────────────────────────────
 
 /// Initialization status of a local variable.
+///
+/// This is a lightweight definite-initialization lattice used by the scope/type
+/// traversal. It is intentionally coarse: the verifier tracks obvious missing
+/// writes without attempting full dataflow precision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InitStatus {
     /// Variable declared but not yet assigned.
@@ -276,6 +288,9 @@ enum FrameKind {
 }
 
 /// One level of the lexical scope stack.
+///
+/// Frames are intentionally minimal and only store bindings; higher-level
+/// traversal context (loop/function meaning) stays with the caller.
 #[derive(Clone, Debug)]
 struct ScopeFrame {
     /// Variables declared in this lexical frame.
@@ -283,6 +298,9 @@ struct ScopeFrame {
 }
 
 /// Lexical scope stack for Phase 2 traversal.
+///
+/// Lookup walks from innermost to outermost frame, matching the shadowing rules
+/// expected by FIR function bodies after earlier lowering passes.
 struct ScopeStack {
     /// Stack of lexical frames from outermost to innermost.
     frames: Vec<ScopeFrame>,

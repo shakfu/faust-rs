@@ -65,6 +65,10 @@ const MATH_PROTO_ORDER: &[FirMathOp] = &[
 ];
 
 /// Emits a FIR module from validated planning data and propagated signals.
+///
+/// This is the main fast-lane lowering boundary: callers provide already
+/// propagated signals plus a checked [`SignalFirPlan`], and receive a complete
+/// FIR module with Faust lifecycle sections assembled in deterministic order.
 pub fn build_module(
     plan: &SignalFirPlan,
     module_name: &str,
@@ -417,6 +421,11 @@ fn maybe_wrap_ui_in_root_group(
 /// - splits statements by lifecycle section (`constants/reset/clear/compute`);
 /// - tracks emitted state/UI/table declarations to keep output deterministic and
 ///   avoid duplicate declarations.
+///
+/// This struct is deliberately stateful instead of purely recursive because the
+/// target FIR module has to be assembled from several side channels at once:
+/// value expressions, persistent state declarations, UI declarations, waveform
+/// tables, and scheduled compute-time updates.
 struct SignalToFirLower<'a> {
     arena: &'a TreeArena,
     num_inputs: usize,
@@ -446,6 +455,9 @@ struct SignalToFirLower<'a> {
 
 impl<'a> SignalToFirLower<'a> {
     /// Creates one fresh lowering state for a module build.
+    ///
+    /// Each `build_module` call gets its own lowerer so caches and section
+    /// accumulators cannot leak across compilations.
     fn new(arena: &'a TreeArena, num_inputs: usize) -> Self {
         Self {
             arena,
@@ -478,6 +490,12 @@ impl<'a> SignalToFirLower<'a> {
     /// Lowers one signal node to a FIR value expression.
     ///
     /// This function is the central dispatcher over [`signals::SigMatch`].
+    ///
+    /// Successful lowering may also append statements to lifecycle sections as a
+    /// side effect. For example, a returned FIR expression for a delay node is
+    /// coupled with state declarations and deferred update stores recorded in
+    /// [`Self::clear_statements`] / [`Self::compute_updates`].
+    ///
     /// Unsupported families return typed `FRS-SFIR-*` errors.
     fn lower_signal(&mut self, sig: SigId) -> Result<FirId, SignalFirError> {
         if let Some(id) = self.cache.get(&sig).copied() {

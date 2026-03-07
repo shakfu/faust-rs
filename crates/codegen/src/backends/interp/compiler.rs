@@ -37,6 +37,10 @@ use super::real::FbcReal;
 // ---------------------------------------------------------------------------
 
 /// Return type of [`FirToFbcCompiler::into_parts`].
+///
+/// This mirrors the pieces that the surrounding module-level emitter needs to
+/// assemble an interpreter factory: finalized blocks, heap sizes, collected UI
+/// side effects, and the stable variable-to-heap layout.
 pub type CompilerParts<R> = (
     FbcBlockArena<R>,
     i32,
@@ -121,6 +125,12 @@ impl std::error::Error for CompileError {}
 // ---------------------------------------------------------------------------
 
 /// Result of a successful FIR → FBC compilation.
+///
+/// The interpreter backend has two usage modes:
+/// - [`FirToFbcCompiler::finalize`] for a single entry block;
+/// - [`FirToFbcCompiler::into_parts`] when the caller compiles several named FIR
+///   sections into separate arena blocks and assembles the final factory
+///   metadata outside this file.
 pub struct FbcCompileResult<R: FbcReal> {
     /// The block arena containing all compiled blocks.
     pub arena: FbcBlockArena<R>,
@@ -206,6 +216,10 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
 
     /// Compiles a single FIR node (and its transitive children) into
     /// FBC bytecode in the current block.
+    ///
+    /// Dispatch is intentionally exhaustive over [`FirMatch`]: unlike the C++
+    /// visitor hierarchy, unsupported nodes are surfaced as typed Rust errors
+    /// instead of falling through to `faustassert(false)`.
     pub fn compile_node(&mut self, store: &FirStore, id: FirId) -> Result<(), CompileError> {
         match match_fir(store, id) {
             // --- Values ---
@@ -365,6 +379,10 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
 
     /// Finalizes compilation: seals the current block with `kReturn`,
     /// allocates it in the arena, and returns the result.
+    ///
+    /// Use this entrypoint only when the whole FIR program is intentionally
+    /// compiled into one FBC block. Module-oriented interpreter generation uses
+    /// [`Self::compile_fir_block`] and [`Self::into_parts`] instead.
     pub fn finalize(mut self) -> Result<FbcCompileResult<R>, CompileError> {
         self.current_block
             .push(FbcInstruction::new(FbcOpcode::Return));
@@ -471,8 +489,9 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
     /// and field table without sealing the outermost block.
     ///
     /// Call this after all function bodies have been compiled via
-    /// [`Self::compile_fir_block`].  The outermost (current) block, which should be
-    /// empty at that point, is discarded.
+    /// [`Self::compile_fir_block`]. The outermost (current) block is expected to
+    /// be empty at that point and is discarded on purpose: the section entry
+    /// points live in the returned arena, not in `current_block`.
     pub fn into_parts(self) -> CompilerParts<R> {
         (
             self.arena,

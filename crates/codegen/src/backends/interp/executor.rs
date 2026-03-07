@@ -47,6 +47,13 @@ pub enum FbcStackKind {
 }
 
 /// Structured runtime execution error for bytecode interpreter failures.
+///
+/// Errors are intentionally normalized into a small stable taxonomy so tests and
+/// higher-level runtime wrappers can distinguish:
+/// - bytecode bugs (`stack_underflow`, `missing_branch_target`),
+/// - malformed factory/block references (`invalid_block_id`, `invalid_block_pc`),
+/// - memory/runtime access failures (`heap_oob`, `io_oob`),
+/// - and residual trapped panics (`panic_trapped`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FbcExecError {
     /// Human-readable stable error category.
@@ -198,6 +205,8 @@ impl std::fmt::Display for FbcExecError {
 
 impl std::error::Error for FbcExecError {}
 
+/// Pops one REAL value from the execution stack with structured underflow
+/// reporting.
 fn pop_real_stack<R: FbcReal>(
     real_stack: &mut Vec<R>,
     opcode: FbcOpcode,
@@ -209,6 +218,8 @@ fn pop_real_stack<R: FbcReal>(
         .ok_or_else(|| FbcExecError::stack_underflow(opcode, block_id, pc, FbcStackKind::Real))
 }
 
+/// Pops one integer value from the execution stack with structured underflow
+/// reporting.
 fn pop_int_stack(
     int_stack: &mut Vec<i32>,
     opcode: FbcOpcode,
@@ -220,6 +231,11 @@ fn pop_int_stack(
         .ok_or_else(|| FbcExecError::stack_underflow(opcode, block_id, pc, FbcStackKind::Int))
 }
 
+/// Extracts a mandatory branch target from an instruction field.
+///
+/// The bytecode compiler is expected to provide all control-flow targets, so a
+/// `None` here indicates malformed/generated-invalid bytecode rather than a
+/// recoverable user error.
 fn require_branch_target(
     target: Option<BlockId>,
     opcode: FbcOpcode,
@@ -239,6 +255,10 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> Option<&str> {
     }
 }
 
+/// Maps a trapped Rust panic back into the closest structured runtime category.
+///
+/// This keeps the public executor API deterministic even when an internal
+/// bounds check or slice panic escaped an unchecked helper.
 fn classify_trapped_panic(payload: &(dyn std::any::Any + Send), site: ExecSite) -> FbcExecError {
     if let Some(msg) = panic_payload_message(payload)
         && (msg.contains("index out of bounds")
@@ -271,6 +291,9 @@ struct ExecSite {
 /// - **Int heap** (`int_heap`): counters, indices, loop variables.
 /// - **Real heap** (`real_heap`): state variables, filter memory, UI zones.
 /// - **Execution stacks**: local to each `execute_block_io` call.
+///
+/// Heap vectors are instance-owned and reused across block executions; only the
+/// transient evaluation stacks are reset per call.
 pub struct FbcExecutor<R: FbcReal> {
     /// Integer heap (counters, indices, loop variables).
     pub int_heap: Vec<i32>,
@@ -289,6 +312,9 @@ impl<R: FbcReal> FbcExecutor<R> {
     }
 
     /// Executes a block without audio I/O (for init, clear, control blocks).
+    ///
+    /// This convenience wrapper preserves the historical panic-on-bug behavior
+    /// of the C++ interpreter.
     pub fn execute_block(&mut self, arena: &FbcBlockArena<R>, block_id: BlockId) {
         self.execute_block_io(arena, block_id, &[], &mut []);
     }
@@ -332,7 +358,10 @@ impl<R: FbcReal> FbcExecutor<R> {
     }
 
     /// Executes a block with audio I/O and returns a structured runtime error
-    /// for detected stack-discipline failures instead of panicking.
+    /// instead of panicking.
+    ///
+    /// This is the preferred surface for tests and differential harnesses that
+    /// want to classify interpreter failures without aborting the process.
     pub fn try_execute_block_io(
         &mut self,
         arena: &FbcBlockArena<R>,

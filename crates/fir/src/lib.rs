@@ -50,6 +50,10 @@ pub fn crate_id() -> &'static str {
 pub type FirId = TreeId;
 
 /// Memory-access class for FIR variable nodes.
+///
+/// This is a semantic storage class, not a target-specific address space:
+/// backends may map these categories to different concrete layouts as long as
+/// lifetime/visibility semantics remain equivalent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AccessType {
     Stack,
@@ -61,6 +65,9 @@ pub enum AccessType {
 }
 
 /// FIR primitive type model.
+///
+/// FIR keeps result types explicit on value nodes so backend passes can emit
+/// code without reconstructing types from context.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FirType {
     Int32,
@@ -258,6 +265,9 @@ pub struct NamedType {
 }
 
 /// FIR storage using `tlib::TreeArena` hash-consing.
+///
+/// `FirId`s are store-local handles. They must not be mixed across stores
+/// without explicit rebuilding or cloning through a dedicated helper.
 #[derive(Debug)]
 pub struct FirStore {
     arena: TreeArena,
@@ -307,6 +317,10 @@ impl FirStore {
 }
 
 /// Canonical builder API for constructing FIR nodes.
+///
+/// Builder methods create the normalized node shapes expected by `match_fir`
+/// and downstream backends, including explicit types on value nodes and stable
+/// encodings for lists and declarations.
 pub struct FirBuilder<'a> {
     store: &'a mut FirStore,
 }
@@ -1316,6 +1330,9 @@ pub enum FirMatch {
 }
 
 /// Decodes one [`FirId`] into canonical [`FirMatch`] shape.
+///
+/// This is the only structural decoder other crates should need. Malformed or
+/// partially built trees degrade to [`FirMatch::Unknown`] instead of panicking.
 #[must_use]
 pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
     let Some(node) = store.arena.node(id) else {
