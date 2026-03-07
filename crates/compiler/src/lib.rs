@@ -170,6 +170,11 @@ impl Compiler {
     }
 
     /// Parses one file, evaluates `process`, then propagates boxes to output signals.
+    ///
+    /// Unlike [`compile_source_to_signals`](Self::compile_source_to_signals),
+    /// this file-backed entry point also installs an [`eval::EvalSourceContext`]
+    /// so Phase 4 can resolve `component("...")` and `library("...")` with the
+    /// same relative-file/import-search semantics as the C++ compiler.
     pub fn compile_file_to_signals(
         &self,
         path: &Path,
@@ -185,6 +190,10 @@ impl Compiler {
     }
 
     /// Parses one file with default import search path, then runs eval+propagate.
+    ///
+    /// The default search base is the file parent directory when present, which
+    /// also becomes the root evaluator source context for nested
+    /// `component("...")` / `library("...")` loads.
     pub fn compile_file_default_to_signals(
         &self,
         path: &Path,

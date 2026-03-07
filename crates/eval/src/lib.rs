@@ -392,6 +392,10 @@ impl Environment {
     /// `gReader` session in the C++ compiler. All child scopes and closures derived
     /// from this environment inherit the same context unless a newly loaded file
     /// installs a more specific one.
+    ///
+    /// Typical callers:
+    /// - [`eval_process_with_source_context`] for file-backed compilation,
+    /// - targeted tests exercising `component("...")` / `library("...")` parity.
     #[must_use]
     pub fn empty_with_source_context(source_context: EvalSourceContext) -> Self {
         let mut store = EnvStore::default();
@@ -423,6 +427,10 @@ impl Environment {
     }
 
     /// Returns the source-resolution context captured by this environment.
+    ///
+    /// This is the context inherited by closures created while evaluating in
+    /// this environment. For file-backed sessions it identifies the file and
+    /// import-search roots that `component("...")` / `library("...")` will use.
     #[must_use]
     pub fn source_context(&self) -> &EvalSourceContext {
         self.source_context.as_ref()
@@ -1443,6 +1451,10 @@ pub fn eval_process(arena: &mut TreeArena, definitions: TreeId) -> Result<TreeId
 /// This is the file-backed counterpart of [`eval_process`]. It keeps the legacy
 /// API intact for in-memory callers while letting file-oriented frontends mirror
 /// the C++ contract where `eval.cpp` sees a configured source reader.
+///
+/// Use this entry point when the evaluated program may contain
+/// `component("...")` or `library("...")` forms that must resolve relative to
+/// an on-disk Faust source file.
 pub fn eval_process_with_source_context(
     arena: &mut TreeArena,
     definitions: TreeId,
@@ -1476,6 +1488,10 @@ pub fn eval_process_with_stats(
 ///
 /// File-backed callers should prefer this entry point when they need both
 /// profile counters and evaluator-level source loading semantics.
+///
+/// The passed [`EvalSourceContext`] becomes part of the root evaluation
+/// environment and is subsequently captured by any closure value created while
+/// evaluating the loaded program.
 pub fn eval_process_with_stats_and_source_context(
     arena: &mut TreeArena,
     definitions: TreeId,
