@@ -27,6 +27,12 @@ fn compile_corpus(file: &str) -> compiler::SignalCompileOutput {
         .unwrap_or_else(|e| panic!("failed to compile {} to signals: {e}", path.display()))
 }
 
+fn compile_inline(name: &str, source: &str) -> compiler::SignalCompileOutput {
+    Compiler::new()
+        .compile_source_to_signals(name, source)
+        .unwrap_or_else(|e| panic!("failed to compile {name} to signals: {e}"))
+}
+
 #[test]
 fn corpus_passthrough_maps_to_input_signal() {
     let out = compile_corpus("rep_01_passthrough.dsp");
@@ -278,6 +284,33 @@ fn corpus_modulation_wrappers_without_matching_widgets_reduce_to_identity() {
             "{file} should reduce to input(0)"
         );
     }
+}
+
+#[test]
+fn closure_captured_case_results_keep_distinct_environments() {
+    let source = r#"
+make(x) = case { (0) => x; };
+process = make(1)(0) + make(2)(0);
+"#;
+    let out = compile_inline(
+        "closure_captured_case_results_keep_distinct_environments.dsp",
+        source,
+    );
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+    let SigMatch::BinOp(BinOp::Add, lhs, rhs) = match_sig(&out.parse.state.arena, out.signals[0])
+    else {
+        panic!("captured case results should stay as one add signal");
+    };
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, lhs),
+        SigMatch::Int(1)
+    ));
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, rhs),
+        SigMatch::Int(2)
+    ));
 }
 
 fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i32) {

@@ -206,6 +206,13 @@ fn differential_signal_pipeline_status_against_cpp_reference() {
             input: CaseInput::Inline("process = ;\n"),
             expect_valid: false,
         },
+        Case {
+            name: "closure_captured_case_results_keep_distinct_environments",
+            input: CaseInput::Inline(
+                "make(x) = case { (0) => x; };\nprocess = make(1)(0) + make(2)(0);\n",
+            ),
+            expect_valid: true,
+        },
     ];
 
     let mut mismatches = Vec::new();
