@@ -105,7 +105,7 @@ fn load_fixture_factory(which: &str) -> Result<(String, FbcDspFactory<f32>), Str
             ));
         }
     };
-    let factory = generate_interp_module(&store, module, &InterpOptions::default())
+    let factory = generate_interp_module::<f32>(&store, module, &InterpOptions::default())
         .map_err(|e| e.to_string())?;
     Ok((format!("fixture:{which}"), factory))
 }

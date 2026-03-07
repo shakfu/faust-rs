@@ -835,7 +835,7 @@ fn compile_interp_sidecar_from_fir(
     module_name: &str,
     fir: &BoxFfiFirModule,
 ) -> Result<FbcDspFactory<f32>, String> {
-    generate_interp_module(
+    generate_interp_module::<f32>(
         &fir.store,
         fir.module,
         &InterpOptions {

@@ -162,11 +162,11 @@ impl std::error::Error for CodegenError {}
 /// # Source provenance (C++)
 /// - `InterpreterInstVisitor<REAL>` + `interpreter_dsp_factory_aux` in
 ///   `interpreter_instructions.hh` / `interpreter_dsp_aux.hh`.
-pub fn generate_interp_module(
+pub fn generate_interp_module<R: real::FbcReal>(
     store: &fir::FirStore,
     module: fir::FirId,
     options: &InterpOptions,
-) -> Result<FbcDspFactory<f32>, CodegenError> {
+) -> Result<FbcDspFactory<R>, CodegenError> {
     use fir::match_fir;
     use std::collections::HashMap;
 
@@ -210,7 +210,7 @@ pub fn generate_interp_module(
     };
 
     // 3. Compile each function body using a shared FirToFbcCompiler.
-    let mut compiler: compiler::FirToFbcCompiler<f32> = compiler::FirToFbcCompiler::new();
+    let mut compiler: compiler::FirToFbcCompiler<R> = compiler::FirToFbcCompiler::new();
     compiler
         .predeclare_storage_block(store, dsp_struct)
         .map_err(|e| {
@@ -444,7 +444,7 @@ mod tests {
     #[test]
     fn generate_interp_module_reserves_sr_and_count_slots_when_missing() {
         let (store, module) = make_minimal_legacy_like_module();
-        let factory = generate_interp_module(
+        let factory = generate_interp_module::<f32>(
             &store,
             module,
             &InterpOptions {

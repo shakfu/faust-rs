@@ -39,7 +39,7 @@ use codegen::backends::c::{COptions, CodegenError as CCodegenError, generate_c_m
 use codegen::backends::cpp::{CodegenError, CppOptions, generate_cpp_module};
 use codegen::backends::interp::{
     CodegenError as InterpCodegenError, CodegenErrorCode as InterpCodegenErrorCode, FbcDspFactory,
-    InterpOptions, generate_interp_module, write_fbc,
+    FbcReal, InterpOptions, generate_interp_module, write_fbc,
 };
 use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, SourceSpan};
 use fir::{
@@ -1124,7 +1124,7 @@ fn lower_signals_to_interp(
 ) -> Result<String, LowerToInterpError> {
     match lane {
         SignalFirLane::LegacyBridge => {
-            lower_signals_to_interp_legacy_bridge(source_name, output, options, fir_verify)
+            lower_signals_to_interp_legacy_bridge(source_name, output, options, fir_verify, real_type)
         }
         SignalFirLane::TransformFastLane => {
             lower_signals_to_interp_transform_fastlane(source_name, output, options, fir_verify, real_type)
@@ -1137,14 +1137,25 @@ fn lower_signals_to_interp_legacy_bridge(
     output: &SignalCompileOutput,
     options: &InterpOptions,
     fir_verify: FirVerifyOptions,
+    real_type: RealType,
 ) -> Result<String, LowerToInterpError> {
     let module_name = resolve_module_name(options.module_name.as_deref(), source_name);
     let lowered = lower_signals_to_fir_legacy_bridge(source_name, output, module_name);
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToInterpError::Verify)?;
-    let factory: FbcDspFactory<f32> =
-        generate_interp_module(&lowered.store, lowered.module, options)
-            .map_err(LowerToInterpError::Codegen)?;
-    serialize_factory(&factory).map_err(LowerToInterpError::Serialize)
+    match real_type {
+        RealType::Float32 => {
+            let factory: FbcDspFactory<f32> =
+                generate_interp_module(&lowered.store, lowered.module, options)
+                    .map_err(LowerToInterpError::Codegen)?;
+            serialize_factory(&factory).map_err(LowerToInterpError::Serialize)
+        }
+        RealType::Float64 => {
+            let factory: FbcDspFactory<f64> =
+                generate_interp_module(&lowered.store, lowered.module, options)
+                    .map_err(LowerToInterpError::Codegen)?;
+            serialize_factory(&factory).map_err(LowerToInterpError::Serialize)
+        }
+    }
 }
 
 fn lower_signals_to_interp_transform_fastlane(
@@ -1158,14 +1169,24 @@ fn lower_signals_to_interp_transform_fastlane(
     let lowered = lower_signals_to_fir_transform_fastlane(output, module_name, real_type)
         .map_err(LowerToInterpError::Transform)?;
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToInterpError::Verify)?;
-    let factory: FbcDspFactory<f32> =
-        generate_interp_module(&lowered.store, lowered.module, options)
-            .map_err(LowerToInterpError::Codegen)?;
-    serialize_factory(&factory).map_err(LowerToInterpError::Serialize)
+    match real_type {
+        RealType::Float32 => {
+            let factory: FbcDspFactory<f32> =
+                generate_interp_module(&lowered.store, lowered.module, options)
+                    .map_err(LowerToInterpError::Codegen)?;
+            serialize_factory(&factory).map_err(LowerToInterpError::Serialize)
+        }
+        RealType::Float64 => {
+            let factory: FbcDspFactory<f64> =
+                generate_interp_module(&lowered.store, lowered.module, options)
+                    .map_err(LowerToInterpError::Codegen)?;
+            serialize_factory(&factory).map_err(LowerToInterpError::Serialize)
+        }
+    }
 }
 
 /// Serializes a [`FbcDspFactory`] to `.fbc` text format.
-fn serialize_factory(factory: &FbcDspFactory<f32>) -> Result<String, String> {
+fn serialize_factory<R: FbcReal>(factory: &FbcDspFactory<R>) -> Result<String, String> {
     let mut buf = Vec::new();
     write_fbc(factory, &mut buf, false).map_err(|e| e.to_string())?;
     String::from_utf8(buf).map_err(|e| e.to_string())

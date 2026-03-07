@@ -2579,7 +2579,7 @@ pub unsafe extern "C" fn CcreateSourceFromBoxes(
             .map_err(|e| e.to_string()),
             "fir" => Ok(fir::dump_fir(&fir.store, fir.module)),
             "interp" => {
-                let factory = generate_interp_module(
+                let factory = generate_interp_module::<f32>(
                     &fir.store,
                     fir.module,
                     &InterpOptions {

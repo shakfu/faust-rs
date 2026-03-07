@@ -182,7 +182,7 @@ fn run_interp_file(case: &Path) -> Result<(Duration, f64), String> {
 fn run_interp_fixture_sine_phasor() -> Result<(Duration, f64), String> {
     let (store, module) = build_sine_phasor_test_module();
     let options = InterpOptions::default();
-    let factory = generate_interp_module(&store, module, &options).map_err(|e| e.to_string())?;
+    let factory = generate_interp_module::<f32>(&store, module, &options).map_err(|e| e.to_string())?;
     let mut fbc_bytes = Vec::<u8>::new();
     write_fbc(&factory, &mut fbc_bytes, false).map_err(|e| e.to_string())?;
     let fbc_text = String::from_utf8(fbc_bytes).map_err(|e| format!("utf8 FBC: {e}"))?;
@@ -240,7 +240,7 @@ fn run_interp_fixture_sine_phasor() -> Result<(Duration, f64), String> {
 fn run_interp_fixture_heavy_bench() -> Result<(Duration, f64), String> {
     let (store, module) = build_heavy_bench_test_module();
     let options = InterpOptions::default();
-    let factory = generate_interp_module(&store, module, &options).map_err(|e| e.to_string())?;
+    let factory = generate_interp_module::<f32>(&store, module, &options).map_err(|e| e.to_string())?;
     let mut fbc_bytes = Vec::<u8>::new();
     write_fbc(&factory, &mut fbc_bytes, false).map_err(|e| e.to_string())?;
     let fbc_text = String::from_utf8(fbc_bytes).map_err(|e| format!("utf8 FBC: {e}"))?;

@@ -1531,7 +1531,7 @@ fn run_interp_trace_case(
         module_name: None,
     };
     let mut factory =
-        codegen::backends::interp::generate_interp_module(&fir.store, fir.module, &interp_options)?;
+        codegen::backends::interp::generate_interp_module::<f32>(&fir.store, fir.module, &interp_options)?;
     let mut instance = codegen::backends::interp::FbcDspInstance::new(&mut factory);
     instance.init(options.sample_rate as i32);
 
