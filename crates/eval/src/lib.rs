@@ -206,6 +206,29 @@ pub type SymId = u32;
 /// stable `(symbol, environment)` key, not just a raw expression id.
 pub type EnvId = usize;
 
+/// Internal DSP sample computation precision.
+///
+/// This mirrors Faust's `-double` flag: [`SamplePrecision::Float32`] selects
+/// `float` as the internal computation type (the default), while
+/// [`SamplePrecision::Float64`] selects `double`.
+///
+/// **Note**: this setting has no effect on compile-time constant folding inside
+/// the evaluator — pattern-matching numeric constants are always folded at
+/// `f64` precision. It is an output annotation for downstream code-generation
+/// backends (e.g. FIR lowering) that consume the evaluated box tree.
+///
+/// The type is attached to [`EvalSourceContext`] so it travels with the
+/// evaluation session and can be forwarded to backends without requiring a
+/// separate channel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SamplePrecision {
+    /// 32-bit single-precision float (`float` in C++). Default.
+    #[default]
+    Float32,
+    /// 64-bit double-precision float (`double` in C++).
+    Float64,
+}
+
 /// Filesystem source-resolution context captured by evaluator environments.
 ///
 /// # Source provenance (C++)
@@ -237,6 +260,12 @@ pub struct EvalSourceContext {
     search_paths: Vec<PathBuf>,
     cache: Arc<Mutex<HashMap<PathBuf, CachedLoadedSource>>>,
     metadata_store: Option<CompilationMetadataStore>,
+    /// Internal DSP computation precision forwarded to code-generation backends.
+    ///
+    /// Defaults to [`SamplePrecision::Float32`] (C++ `float`).
+    /// Set to [`SamplePrecision::Float64`] to request `double`-precision
+    /// internal computation, equivalent to passing `-double` to `faust`.
+    pub sample_precision: SamplePrecision,
 }
 
 impl EvalSourceContext {
@@ -292,18 +321,25 @@ impl EvalSourceContext {
             search_paths: ordered,
             cache: Arc::default(),
             metadata_store: Some(metadata_store),
+            sample_precision: SamplePrecision::default(),
         }
     }
 
     /// Returns a context for a newly loaded file while preserving inherited search order.
+    ///
+    /// The [`SamplePrecision`] of the parent context is propagated to the child
+    /// so that sub-files loaded via `component`/`library` share the same
+    /// precision setting as the root evaluation session.
     #[must_use]
     pub fn for_loaded_file(&self, path: &Path) -> Self {
-        match &self.metadata_store {
+        let mut child = match &self.metadata_store {
             Some(metadata_store) => {
                 Self::for_file_with_metadata(path, &self.search_paths, metadata_store.clone())
             }
             None => Self::for_file(path, &self.search_paths),
-        }
+        };
+        child.sample_precision = self.sample_precision;
+        child
     }
 
     /// Returns the current file used as the primary relative-resolution anchor.

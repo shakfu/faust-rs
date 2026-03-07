@@ -42,7 +42,7 @@ use propagate::{ArityCache, box_arity, make_sig_input_list, propagate};
 use tlib::{
     NodeKind, TreeArena, TreeId, de_bruijn_to_sym, tree_to_double, tree_to_int, tree_to_str,
 };
-use transform::signal_fir::{SignalFirOptions, compile_signals_to_fir_fastlane};
+use transform::signal_fir::{RealType, SignalFirOptions, compile_signals_to_fir_fastlane};
 
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -231,6 +231,7 @@ fn lower_signal_roots_to_fir(
         &SignalFirOptions {
             module_name: module_name.to_owned(),
             strict_mode: true,
+            real_type: RealType::Float32,
         },
     )
     .map_err(|e| e.to_string())?;

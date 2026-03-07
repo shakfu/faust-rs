@@ -37,9 +37,42 @@ mod planner;
 
 pub use error::{SignalFirError, SignalFirErrorCode};
 
-use fir::{FirId, FirStore};
+use fir::{FirId, FirStore, FirType};
 use signals::SigId;
 use tlib::TreeArena;
+
+/// Internal DSP computation precision.
+///
+/// Controls the type of internal state variables, arithmetic results, math
+/// function signatures, waveform table element types, and real-constant nodes
+/// in the generated FIR module.
+///
+/// **External interface types are not affected**: audio buffer samples
+/// (`FAUSTFLOAT**` in `compute`) and UI zone variables (sliders, bargraphs,
+/// buttons) always use `FirType::FaustFloat` regardless of this setting.
+///
+/// Corresponds to Faust's `-double` compilation flag and `gFLoatSize`:
+/// - `Float32` → C++ `float` (default),
+/// - `Float64` → C++ `double`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum RealType {
+    /// 32-bit single-precision float (`float` in C++). Default.
+    #[default]
+    Float32,
+    /// 64-bit double-precision float (`double` in C++).
+    Float64,
+}
+
+impl RealType {
+    /// Returns the [`FirType`] that represents this precision in FIR lowering.
+    #[must_use]
+    pub fn as_fir_type(self) -> FirType {
+        match self {
+            Self::Float32 => FirType::Float32,
+            Self::Float64 => FirType::Float64,
+        }
+    }
+}
 
 /// Options for [`compile_signals_to_fir_fastlane`].
 ///
@@ -55,6 +88,19 @@ pub struct SignalFirOptions {
     /// The current implementation keeps this field for forward-compatible CLI
     /// plumbing even though the active slices still use one conservative policy.
     pub strict_mode: bool,
+    /// Internal DSP computation precision (default: [`RealType::Float32`]).
+    ///
+    /// Controls the FIR type used for internal arithmetic, state variables,
+    /// math calls, waveform table elements, and real constants.
+    ///
+    /// External interface types (`FaustFloat`) are **not** affected: audio
+    /// buffers (`FAUSTFLOAT** inputs/outputs` in `compute`) and UI zone
+    /// variables (sliders, bargraphs, buttons) always use `FaustFloat`.
+    ///
+    /// Implicit casts between the internal real type and `FaustFloat` are
+    /// emitted automatically at the DSP boundary (input sample load and output
+    /// sample store) and at UI zone reads/writes.
+    pub real_type: RealType,
 }
 
 impl Default for SignalFirOptions {
@@ -62,6 +108,7 @@ impl Default for SignalFirOptions {
         Self {
             module_name: "mydsp".to_owned(),
             strict_mode: true,
+            real_type: RealType::Float32,
         }
     }
 }
@@ -97,15 +144,36 @@ pub fn compile_signals_to_fir_fastlane(
     options: &SignalFirOptions,
 ) -> Result<SignalFirOutput, SignalFirError> {
     let plan = planner::plan_signals(signals, num_inputs, num_outputs, options)?;
-    module::build_module(&plan, options.module_name.as_str(), _arena, signals)
+    module::build_module(
+        &plan,
+        options.module_name.as_str(),
+        _arena,
+        signals,
+        options.real_type.as_fir_type(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane};
-    use fir::{FirBinOp, FirMatch, match_fir};
+    use super::{RealType, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane};
+    use fir::{FirBinOp, FirMatch, FirType, match_fir};
     use signals::{BinOp, SigBuilder};
     use tlib::TreeArena;
+
+    /// Peels off a `Cast(FaustFloat, inner)` wrapper if present.
+    ///
+    /// Since the output sample store now always emits an explicit cast from the
+    /// internal real type to `FaustFloat`, tests that inspect the *computation*
+    /// node (not the cast itself) should call this helper before matching.
+    fn unwrap_output_cast(store: &fir::FirStore, id: fir::FirId) -> fir::FirId {
+        match match_fir(store, id) {
+            FirMatch::Cast {
+                typ: FirType::FaustFloat,
+                value,
+            } => value,
+            _ => id,
+        }
+    }
 
     fn find_decl_fun_body(
         store: &fir::FirStore,
@@ -200,8 +268,11 @@ mod tests {
                 _ => None,
             })
             .expect("compute should include one output store");
+        // The output store emits an explicit FaustFloat cast around the internal
+        // computation node; unwrap it to reach the actual BinOp.
+        let inner = unwrap_output_cast(&out.store, stored_value);
         assert!(matches!(
-            match_fir(&out.store, stored_value),
+            match_fir(&out.store, inner),
             FirMatch::BinOp {
                 op: FirBinOp::Mul,
                 ..
@@ -224,6 +295,7 @@ mod tests {
             &SignalFirOptions {
                 module_name: "".to_owned(),
                 strict_mode: true,
+                real_type: RealType::Float32,
             },
         )
         .expect_err("empty module name should fail option validation");
@@ -447,6 +519,8 @@ mod tests {
                 _ => None,
             })
             .expect("compute should include one output store");
+        // Unwrap the FaustFloat cast wrapping the output to reach the computation.
+        let store_value = unwrap_output_cast(&out.store, store_value);
         let FirMatch::FunCall { name, args, .. } = match_fir(&out.store, store_value) else {
             panic!("top-level pow should lower to FIR fun call");
         };
@@ -529,11 +603,10 @@ mod tests {
                 _ => None,
             })
             .expect("compute should include one output store");
+        // Unwrap the FaustFloat cast wrapping the output to reach the LoadTable.
+        let inner = unwrap_output_cast(&out.store, stored_value);
         assert!(
-            matches!(
-                match_fir(&out.store, stored_value),
-                FirMatch::LoadTable { .. }
-            ),
+            matches!(match_fir(&out.store, inner), FirMatch::LoadTable { .. }),
             "rdtbl output should lower to FIR table read"
         );
     }

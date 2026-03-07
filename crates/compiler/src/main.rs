@@ -32,7 +32,7 @@ use codegen::backends::interp::{
 };
 use codegen::fixtures::backend_test_fixtures;
 use compiler::{
-    Compiler, CompilerError, FirVerifyOptions, SignalFirLane,
+    Compiler, CompilerError, FirVerifyOptions, RealType, SignalFirLane,
     enrobage::{EnrobageOptions, wrap_cpp_with_architecture},
     golden_snapshot_from_file,
 };
@@ -183,6 +183,16 @@ struct CliArgs {
     /// Treat FIR verifier warnings as fatal.
     #[arg(long = "fir-verify-strict", action = ArgAction::SetTrue)]
     fir_verify_strict: bool,
+    /// Use double-precision (64-bit) floating-point for internal DSP computation.
+    ///
+    /// By default, single-precision (32-bit) `float` is used for internal
+    /// calculations while the external DSP interface (`FAUSTFLOAT` audio
+    /// buffers and UI zones) always stays at the type declared by the
+    /// architecture file.  Passing `--double` switches internal arithmetic
+    /// to `double`, matching the `-double` option of the reference Faust
+    /// compiler.  Only effective with `--signal-fir-lane fast`.
+    #[arg(long = "double", action = ArgAction::SetTrue)]
+    double: bool,
 }
 
 fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -679,8 +689,14 @@ fn selected_fir_verify_options(cli: &CliArgs) -> FirVerifyOptions {
     }
 }
 
+fn selected_real_type(cli: &CliArgs) -> RealType {
+    if cli.double { RealType::Float64 } else { RealType::Float32 }
+}
+
 fn compiler_from_cli(cli: &CliArgs) -> Compiler {
-    Compiler::new().with_fir_verify_options(selected_fir_verify_options(cli))
+    Compiler::new()
+        .with_fir_verify_options(selected_fir_verify_options(cli))
+        .with_real_type(selected_real_type(cli))
 }
 
 fn render_fir_fixture_list() -> String {

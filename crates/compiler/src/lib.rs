@@ -53,6 +53,7 @@ use tlib::NodeKind;
 use transform::signal_fir::{
     SignalFirError, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane,
 };
+pub use transform::signal_fir::RealType;
 
 /// Parse + eval + propagate output package.
 #[derive(Debug)]
@@ -94,6 +95,10 @@ pub struct FirVerifyOptions {
 /// `parse -> eval -> propagate -> (optional signal->FIR lowering) -> codegen`.
 pub struct Compiler {
     fir_verify: FirVerifyOptions,
+    /// Floating-point precision used for internal DSP computation in the
+    /// transform fast lane.  `Float32` (single precision) is the default;
+    /// set to `Float64` to activate double-precision mode (`--double`).
+    real_type: RealType,
 }
 
 /// Selects which signal->FIR lowering lane is used before C++ emission.
@@ -117,6 +122,7 @@ impl Compiler {
     pub fn new() -> Self {
         Self {
             fir_verify: FirVerifyOptions::default(),
+            real_type: RealType::default(),
         }
     }
 
@@ -124,6 +130,14 @@ impl Compiler {
     #[must_use]
     pub fn with_fir_verify_options(mut self, fir_verify: FirVerifyOptions) -> Self {
         self.fir_verify = fir_verify;
+        self
+    }
+
+    /// Returns a compiler facade configured to use the given floating-point
+    /// precision for internal DSP computation (transform fast lane only).
+    #[must_use]
+    pub fn with_real_type(mut self, real_type: RealType) -> Self {
+        self.real_type = real_type;
         self
     }
 
@@ -308,7 +322,7 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_c(source_name, &signals, options, lane, self.fir_verify)
+        lower_signals_to_c(source_name, &signals, options, lane, self.fir_verify, self.real_type)
             .map_err(|e| lower_c_error_to_compiler(source_name, e))
     }
 
@@ -322,7 +336,7 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_cpp(source_name, &signals, options, lane, self.fir_verify)
+        lower_signals_to_cpp(source_name, &signals, options, lane, self.fir_verify, self.real_type)
             .map_err(|e| lower_cpp_error_to_compiler(source_name, e))
     }
 
@@ -335,7 +349,7 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<FirCompileOutput, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_fir(source_name, &signals, lane, self.fir_verify)
+        lower_signals_to_fir(source_name, &signals, lane, self.fir_verify, self.real_type)
             .map_err(|e| lower_fir_error_to_compiler(source_name, e))
     }
 
@@ -372,7 +386,7 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_c(&source, &signals, options, lane, self.fir_verify)
+        lower_signals_to_c(&source, &signals, options, lane, self.fir_verify, self.real_type)
             .map_err(|e| lower_c_error_to_compiler(&source, e))
     }
 
@@ -387,7 +401,7 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_cpp(&source, &signals, options, lane, self.fir_verify)
+        lower_signals_to_cpp(&source, &signals, options, lane, self.fir_verify, self.real_type)
             .map_err(|e| lower_cpp_error_to_compiler(&source, e))
     }
 
@@ -401,7 +415,7 @@ impl Compiler {
     ) -> Result<FirCompileOutput, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_fir(&source, &signals, lane, self.fir_verify)
+        lower_signals_to_fir(&source, &signals, lane, self.fir_verify, self.real_type)
             .map_err(|e| lower_fir_error_to_compiler(&source, e))
     }
 
@@ -483,7 +497,7 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_interp(source_name, &signals, options, lane, self.fir_verify)
+        lower_signals_to_interp(source_name, &signals, options, lane, self.fir_verify, self.real_type)
             .map_err(|e| lower_interp_error_to_compiler(source_name, e))
     }
 
@@ -514,7 +528,7 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_interp(&source, &signals, options, lane, self.fir_verify)
+        lower_signals_to_interp(&source, &signals, options, lane, self.fir_verify, self.real_type)
             .map_err(|e| lower_interp_error_to_compiler(&source, e))
     }
 
@@ -1068,13 +1082,14 @@ fn lower_signals_to_cpp(
     options: &CppOptions,
     lane: SignalFirLane,
     fir_verify: FirVerifyOptions,
+    real_type: RealType,
 ) -> Result<String, LowerToCppError> {
     match lane {
         SignalFirLane::LegacyBridge => {
             lower_signals_to_cpp_legacy_bridge(source_name, output, options, fir_verify)
         }
         SignalFirLane::TransformFastLane => {
-            lower_signals_to_cpp_transform_fastlane(source_name, output, options, fir_verify)
+            lower_signals_to_cpp_transform_fastlane(source_name, output, options, fir_verify, real_type)
         }
     }
 }
@@ -1086,13 +1101,14 @@ fn lower_signals_to_c(
     options: &COptions,
     lane: SignalFirLane,
     fir_verify: FirVerifyOptions,
+    real_type: RealType,
 ) -> Result<String, LowerToCError> {
     match lane {
         SignalFirLane::LegacyBridge => {
             lower_signals_to_c_legacy_bridge(source_name, output, options, fir_verify)
         }
         SignalFirLane::TransformFastLane => {
-            lower_signals_to_c_transform_fastlane(source_name, output, options, fir_verify)
+            lower_signals_to_c_transform_fastlane(source_name, output, options, fir_verify, real_type)
         }
     }
 }
@@ -1104,13 +1120,14 @@ fn lower_signals_to_interp(
     options: &InterpOptions,
     lane: SignalFirLane,
     fir_verify: FirVerifyOptions,
+    real_type: RealType,
 ) -> Result<String, LowerToInterpError> {
     match lane {
         SignalFirLane::LegacyBridge => {
             lower_signals_to_interp_legacy_bridge(source_name, output, options, fir_verify)
         }
         SignalFirLane::TransformFastLane => {
-            lower_signals_to_interp_transform_fastlane(source_name, output, options, fir_verify)
+            lower_signals_to_interp_transform_fastlane(source_name, output, options, fir_verify, real_type)
         }
     }
 }
@@ -1135,9 +1152,10 @@ fn lower_signals_to_interp_transform_fastlane(
     output: &SignalCompileOutput,
     options: &InterpOptions,
     fir_verify: FirVerifyOptions,
+    real_type: RealType,
 ) -> Result<String, LowerToInterpError> {
     let module_name = resolve_module_name(options.module_name.as_deref(), source_name);
-    let lowered = lower_signals_to_fir_transform_fastlane(output, module_name)
+    let lowered = lower_signals_to_fir_transform_fastlane(output, module_name, real_type)
         .map_err(LowerToInterpError::Transform)?;
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToInterpError::Verify)?;
     let factory: FbcDspFactory<f32> =
@@ -1162,6 +1180,7 @@ fn lower_signals_to_fir(
     output: &SignalCompileOutput,
     lane: SignalFirLane,
     fir_verify: FirVerifyOptions,
+    real_type: RealType,
 ) -> Result<FirCompileOutput, LowerToFirError> {
     let module_name = sanitize_cpp_ident(source_name_to_class(source_name).as_str());
     let lowered = match lane {
@@ -1171,7 +1190,7 @@ fn lower_signals_to_fir(
             module_name,
         )),
         SignalFirLane::TransformFastLane => {
-            lower_signals_to_fir_transform_fastlane(output, module_name)
+            lower_signals_to_fir_transform_fastlane(output, module_name, real_type)
         }
     }
     .map_err(LowerToFirError::Transform)?;
@@ -1266,10 +1285,12 @@ fn lower_signals_to_fir_legacy_bridge(
 fn lower_signals_to_fir_transform_fastlane(
     output: &SignalCompileOutput,
     module_name: String,
+    real_type: RealType,
 ) -> Result<FirCompileOutput, SignalFirError> {
     let signal_fir_options = SignalFirOptions {
         module_name,
         strict_mode: true,
+        real_type,
     };
     let lowered = compile_signals_to_fir_fastlane(
         &output.parse.state.arena,
@@ -1301,9 +1322,10 @@ fn lower_signals_to_cpp_transform_fastlane(
     output: &SignalCompileOutput,
     options: &CppOptions,
     fir_verify: FirVerifyOptions,
+    real_type: RealType,
 ) -> Result<String, LowerToCppError> {
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
-    let lowered = lower_signals_to_fir_transform_fastlane(output, module_name)
+    let lowered = lower_signals_to_fir_transform_fastlane(output, module_name, real_type)
         .map_err(LowerToCppError::Transform)?;
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToCppError::Verify)?;
     generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerToCppError::Codegen)
@@ -1337,11 +1359,13 @@ fn lower_signals_to_c_transform_fastlane(
     output: &SignalCompileOutput,
     options: &COptions,
     fir_verify: FirVerifyOptions,
+    real_type: RealType,
 ) -> Result<String, LowerToCError> {
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let signal_fir_options = SignalFirOptions {
         module_name,
         strict_mode: true,
+        real_type,
     };
     let lowered = compile_signals_to_fir_fastlane(
         &output.parse.state.arena,
