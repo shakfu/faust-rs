@@ -150,6 +150,7 @@
 //! The evaluator returns a normalized box tree consumed by later passes
 //! (`propagate`, typing, signal transforms). It does not emit signals directly.
 
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -221,10 +222,13 @@ pub type EnvId = usize;
 /// - `search_paths` preserves deterministic lookup order after the current file.
 /// - in-memory evaluation uses [`EvalSourceContext::memory`], which intentionally
 ///   carries no filesystem base.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// - one context instance also acts as a per-session cache for already loaded
+///   Faust source files, mirroring the role of C++ `SourceReader::fFileCache`.
+#[derive(Clone, Debug, Default)]
 pub struct EvalSourceContext {
     current_file: Option<PathBuf>,
     search_paths: Vec<PathBuf>,
+    cache: Arc<Mutex<HashMap<PathBuf, CachedLoadedSource>>>,
 }
 
 impl EvalSourceContext {
@@ -238,6 +242,8 @@ impl EvalSourceContext {
     ///
     /// The file parent directory is prepended ahead of explicit `search_paths`,
     /// matching the effective C++/parser lookup contract for file-backed sessions.
+    /// Reusing the same returned context across multiple `eval_process_*` calls
+    /// also reuses the same loaded-source cache.
     #[must_use]
     pub fn for_file(path: &Path, search_paths: &[PathBuf]) -> Self {
         let mut ordered = Vec::with_capacity(search_paths.len() + 1);
@@ -252,6 +258,7 @@ impl EvalSourceContext {
         Self {
             current_file: Some(path.to_path_buf()),
             search_paths: ordered,
+            cache: Arc::default(),
         }
     }
 
@@ -272,6 +279,40 @@ impl EvalSourceContext {
     pub fn search_paths(&self) -> &[PathBuf] {
         &self.search_paths
     }
+
+    fn cached_loaded_source_hits<R>(
+        &self,
+        paths: &[PathBuf],
+        f: impl FnOnce(Option<&CachedLoadedSource>, &Path) -> R,
+    ) -> R {
+        let guard = self.cache.lock().expect("source cache lock poisoned");
+        for path in paths {
+            if let Some(loaded) = guard.get(path) {
+                return f(Some(loaded), path);
+            }
+        }
+        f(None, Path::new(""))
+    }
+
+    fn insert_loaded_source(&self, path: PathBuf, source: CachedLoadedSource) {
+        let mut guard = self.cache.lock().expect("source cache lock poisoned");
+        guard.insert(path, source);
+    }
+}
+
+impl PartialEq for EvalSourceContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.current_file == other.current_file && self.search_paths == other.search_paths
+    }
+}
+
+impl Eq for EvalSourceContext {}
+
+#[derive(Debug)]
+struct CachedLoadedSource {
+    root: TreeId,
+    arena: TreeArena,
+    parse_errors: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1860,6 +1901,7 @@ fn eval_access_value(
 /// - resolving the target against the captured [`EvalSourceContext`],
 /// - parsing the loaded file through `parser::parse_file_with_imports(...)`,
 /// - cloning the resulting definition subtree into the current evaluation arena,
+/// - caching the parsed source in the context for later loads in the same session,
 /// - binding the loaded definitions in a fresh environment whose source context
 ///   is rooted at the loaded file.
 fn eval_loaded_source_value(
@@ -1872,42 +1914,65 @@ fn eval_loaded_source_value(
     let target = source_reference_name(arena, filename)
         .ok_or(EvalError::InvalidSourceReference { node, construct })?;
     let source_context = env.source_context();
-    let resolved_path = resolve_loaded_source_path(source_context, &target).ok_or_else(|| {
-        EvalError::SourceFileNotFound {
-            node,
-            construct,
-            target: target.clone(),
-            current_file: source_context.current_file().map(Path::to_path_buf),
-            search_paths: source_context.search_paths().to_vec(),
+    let candidate_paths = candidate_loaded_source_paths(source_context, &target);
+    let cached = source_context.cached_loaded_source_hits(&candidate_paths, |cached, path| {
+        cached.map(|loaded| {
+            (
+                path.to_path_buf(),
+                arena.clone_subtree_from(&loaded.arena, loaded.root),
+                loaded.parse_errors.clone(),
+            )
+        })
+    });
+    let (resolved_path, cloned_defs, parse_errors) = match cached {
+        Some(hit) => hit,
+        None => {
+            let resolved_path = candidate_paths
+                .iter()
+                .find(|path| path.exists())
+                .cloned()
+                .ok_or_else(|| EvalError::SourceFileNotFound {
+                    node,
+                    construct,
+                    target: target.clone(),
+                    current_file: source_context.current_file().map(Path::to_path_buf),
+                    search_paths: source_context.search_paths().to_vec(),
+                })?;
+            let parse_output =
+                parser::parse_file_with_imports(&resolved_path, source_context.search_paths())
+                    .map_err(|error| EvalError::SourceReaderFailure {
+                        node,
+                        construct,
+                        target: target.clone(),
+                        message: error.to_string(),
+                    })?;
+            let loaded_root = parse_output
+                .root
+                .ok_or_else(|| EvalError::SourceParseFailure {
+                    node,
+                    construct,
+                    path: resolved_path.clone(),
+                    errors: parse_output.errors.clone(),
+                })?;
+            let cached_source = CachedLoadedSource {
+                root: loaded_root,
+                arena: parse_output.state.arena,
+                parse_errors: parse_output.errors,
+            };
+            let cloned_defs = arena.clone_subtree_from(&cached_source.arena, cached_source.root);
+            let parse_errors = cached_source.parse_errors.clone();
+            source_context.insert_loaded_source(resolved_path.clone(), cached_source);
+            (resolved_path, cloned_defs, parse_errors)
         }
-    })?;
-    let parse_output =
-        parser::parse_file_with_imports(&resolved_path, source_context.search_paths()).map_err(
-            |error| EvalError::SourceReaderFailure {
-                node,
-                construct,
-                target: target.clone(),
-                message: error.to_string(),
-            },
-        )?;
-    let loaded_root = parse_output
-        .root
-        .ok_or_else(|| EvalError::SourceParseFailure {
-            node,
-            construct,
-            path: resolved_path.clone(),
-            errors: parse_output.errors.clone(),
-        })?;
-    if !parse_output.errors.is_empty() {
+    };
+    if !parse_errors.is_empty() {
         return Err(EvalError::SourceParseFailure {
             node,
             construct,
             path: resolved_path.clone(),
-            errors: parse_output.errors,
+            errors: parse_errors,
         });
     }
-
-    let cloned_defs = arena.clone_subtree_from(&parse_output.state.arena, loaded_root);
     let mut loaded_env =
         Environment::empty_with_source_context(source_context.for_loaded_file(&resolved_path));
     bind_definitions(arena, cloned_defs, &mut loaded_env)?;
@@ -1932,28 +1997,30 @@ fn source_reference_name(arena: &TreeArena, filename: TreeId) -> Option<String> 
     }
 }
 
-fn resolve_loaded_source_path(source_context: &EvalSourceContext, target: &str) -> Option<PathBuf> {
+fn candidate_loaded_source_paths(source_context: &EvalSourceContext, target: &str) -> Vec<PathBuf> {
     let target_path = PathBuf::from(target);
-    if target_path.is_absolute() && target_path.exists() {
-        return Some(target_path);
+    let mut candidates = Vec::new();
+    if target_path.is_absolute() {
+        candidates.push(target_path);
+        return candidates;
     }
     if let Some(current_file) = source_context.current_file() {
         let base = current_file.parent().unwrap_or_else(|| Path::new("."));
         let candidate = base.join(target);
-        if candidate.exists() {
-            return Some(candidate);
+        if !candidates.iter().any(|existing| existing == &candidate) {
+            candidates.push(candidate);
         }
     }
-    if target_path.exists() {
-        return Some(target_path);
+    if !candidates.iter().any(|existing| existing == &target_path) {
+        candidates.push(target_path);
     }
     for base in source_context.search_paths() {
         let candidate = base.join(target);
-        if candidate.exists() {
-            return Some(candidate);
+        if !candidates.iter().any(|existing| existing == &candidate) {
+            candidates.push(candidate);
         }
     }
-    None
+    candidates
 }
 
 /// Evaluates `expr [ defs ]` by copying the captured closure environment and replacing bindings.

@@ -140,6 +140,39 @@ fn eval_process_component_loads_file_in_captured_source_context() {
 }
 
 #[test]
+fn eval_process_component_reuses_cached_loaded_source_in_same_context() {
+    let root_dir = temp_root("component_source_cache");
+    let entry = root_dir.join("main.dsp");
+    let child = root_dir.join("child_cached.dsp");
+    fs::write(&entry, "process = component(\"child_cached.dsp\");\n").expect("write entry");
+    fs::write(&child, "process = _;\n").expect("write child");
+
+    let ctx = EvalSourceContext::for_file(&entry, std::slice::from_ref(&root_dir));
+
+    let mut arena_first = TreeArena::new();
+    let child_name = arena_first.string_lit("child_cached.dsp");
+    let component = BoxBuilder::new(&mut arena_first).component(child_name);
+    let nil = arena_first.nil();
+    let process = make_def(&mut arena_first, "process", nil, component);
+    let root = make_defs(&mut arena_first, &[process]);
+    let first = eval_process_with_source_context(&mut arena_first, root, ctx.clone())
+        .expect("first component load should succeed");
+    assert!(matches!(match_box(&arena_first, first), BoxMatch::Wire));
+
+    fs::remove_file(&child).expect("remove cached child file");
+
+    let mut arena_second = TreeArena::new();
+    let child_name = arena_second.string_lit("child_cached.dsp");
+    let component = BoxBuilder::new(&mut arena_second).component(child_name);
+    let nil = arena_second.nil();
+    let process = make_def(&mut arena_second, "process", nil, component);
+    let root = make_defs(&mut arena_second, &[process]);
+    let second = eval_process_with_source_context(&mut arena_second, root, ctx)
+        .expect("second component load should reuse cached source");
+    assert!(matches!(match_box(&arena_second, second), BoxMatch::Wire));
+}
+
+#[test]
 fn eval_process_library_loads_environment_from_file() {
     let root_dir = temp_root("library_source_context");
     let entry = root_dir.join("main.dsp");
