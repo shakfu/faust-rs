@@ -451,6 +451,8 @@ dependencies = [
  "boxes",
  "errors",
  "parser",
+ "propagate",
+ "signals",
  "tlib",
 ]
 

@@ -15,7 +15,7 @@ use eval::{
     eval_process_with_source_context, eval_process_with_stats,
 };
 use parser::CompilationMetadataKey;
-use tlib::{TreeArena, TreeId};
+use tlib::{NodeKind, TreeArena, TreeId};
 
 fn make_ident(arena: &mut TreeArena, name: &str) -> tlib::TreeId {
     BoxBuilder::new(arena).ident(name)
@@ -59,6 +59,15 @@ fn make_rev_list3(arena: &mut TreeArena, a: TreeId, b: TreeId, c: TreeId) -> Tre
 
 fn expect_int(arena: &TreeArena, id: TreeId, expected: i32) {
     assert_eq!(match_box(arena, id), BoxMatch::Int(expected));
+}
+
+fn expect_label(arena: &TreeArena, id: TreeId, expected: &str) {
+    match arena.kind(id) {
+        Some(NodeKind::StringLiteral(text)) | Some(NodeKind::Symbol(text)) => {
+            assert_eq!(text.as_ref(), expected)
+        }
+        other => panic!("expected string-like label, got {other:?}"),
+    }
 }
 
 fn count_add_nodes(arena: &TreeArena, root: TreeId) -> usize {
@@ -1171,4 +1180,134 @@ fn eval_process_modulation_implants_default_mul_around_matching_slider() {
         match_box(&arena, widget),
         BoxMatch::HSlider(_, _, _, _, _)
     ));
+}
+
+#[test]
+fn eval_process_widget_label_substitutes_ident_placeholders() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+    let three = BoxBuilder::new(&mut arena).int(3);
+    let n_def = make_def(&mut arena, "n", nil, three);
+    let label = arena.string_lit("gain%n");
+    let slider = {
+        let mut b = BoxBuilder::new(&mut arena);
+        let cur = b.real(0.5);
+        let min = b.real(0.0);
+        let max = b.real(1.0);
+        let step = b.real(0.01);
+        b.hslider(label, cur, min, max, step)
+    };
+    let process_def = make_def(&mut arena, "process", nil, slider);
+    let defs = make_defs(&mut arena, &[n_def, process_def]);
+
+    let out = eval_process(&mut arena, defs).expect("label interpolation should evaluate");
+    let BoxMatch::HSlider(label, _, _, _, _) = match_box(&arena, out) else {
+        panic!("process should evaluate to hslider");
+    };
+    expect_label(&arena, label, "gain3");
+}
+
+#[test]
+fn eval_process_widget_label_applies_clamped_field_width() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+    let three = BoxBuilder::new(&mut arena).int(3);
+    let n_def = make_def(&mut arena, "n", nil, three);
+    let label = arena.string_lit("gain%9n");
+    let slider = {
+        let mut b = BoxBuilder::new(&mut arena);
+        let cur = b.real(0.5);
+        let min = b.real(0.0);
+        let max = b.real(1.0);
+        let step = b.real(0.01);
+        b.hslider(label, cur, min, max, step)
+    };
+    let process_def = make_def(&mut arena, "process", nil, slider);
+    let defs = make_defs(&mut arena, &[n_def, process_def]);
+
+    let out = eval_process(&mut arena, defs).expect("label interpolation should evaluate");
+    let BoxMatch::HSlider(label, _, _, _, _) = match_box(&arena, out) else {
+        panic!("process should evaluate to hslider");
+    };
+    expect_label(&arena, label, "gain   3");
+}
+
+#[test]
+fn eval_process_widget_label_keeps_malformed_percent_sequence_literal() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+    let label = arena.string_lit("gain%/");
+    let slider = {
+        let mut b = BoxBuilder::new(&mut arena);
+        let cur = b.real(0.5);
+        let min = b.real(0.0);
+        let max = b.real(1.0);
+        let step = b.real(0.01);
+        b.hslider(label, cur, min, max, step)
+    };
+    let process_def = make_def(&mut arena, "process", nil, slider);
+    let defs = make_defs(&mut arena, &[process_def]);
+
+    let out = eval_process(&mut arena, defs).expect("malformed placeholder should stay literal");
+    let BoxMatch::HSlider(label, _, _, _, _) = match_box(&arena, out) else {
+        panic!("process should evaluate to hslider");
+    };
+    expect_label(&arena, label, "gain%/");
+}
+
+#[test]
+fn eval_process_widget_label_undefined_placeholder_surfaces_eval_error() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+    let label = arena.string_lit("gain%n");
+    let slider = {
+        let mut b = BoxBuilder::new(&mut arena);
+        let cur = b.real(0.5);
+        let min = b.real(0.0);
+        let max = b.real(1.0);
+        let step = b.real(0.01);
+        b.hslider(label, cur, min, max, step)
+    };
+    let process_def = make_def(&mut arena, "process", nil, slider);
+    let defs = make_defs(&mut arena, &[process_def]);
+
+    let err = eval_process(&mut arena, defs).expect_err("undefined label placeholder should fail");
+    assert!(matches!(err, EvalError::UndefinedSymbol { .. }));
+}
+
+#[test]
+fn eval_process_modulation_target_label_substitutes_placeholders() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+    let three = BoxBuilder::new(&mut arena).int(3);
+    let n_def = make_def(&mut arena, "n", nil, three);
+    let mod_label = arena.string_lit("gain%n");
+    let modulation_var = arena.cons(mod_label, nil);
+    let slider_label = arena.string_lit("gain3");
+    let slider = {
+        let mut b = BoxBuilder::new(&mut arena);
+        let cur = b.real(0.5);
+        let min = b.real(0.0);
+        let max = b.real(1.0);
+        let step = b.real(0.01);
+        b.hslider(slider_label, cur, min, max, step)
+    };
+    let modulation = BoxBuilder::new(&mut arena).modulation(modulation_var, slider);
+    let process_def = make_def(&mut arena, "process", nil, modulation);
+    let defs = make_defs(&mut arena, &[n_def, process_def]);
+
+    let out = eval_process(&mut arena, defs).expect("matching modulation should evaluate");
+    let BoxMatch::Symbolic(_, body) = match_box(&arena, out) else {
+        panic!("default modulation should produce a symbolic wrapper");
+    };
+    let BoxMatch::Seq(pair, _) = match_box(&arena, body) else {
+        panic!("modulated widget should sequence into mul");
+    };
+    let BoxMatch::Par(widget, _) = match_box(&arena, pair) else {
+        panic!("modulated widget should be paired with slot");
+    };
+    let BoxMatch::HSlider(label, _, _, _, _) = match_box(&arena, widget) else {
+        panic!("expected modulated hslider");
+    };
+    expect_label(&arena, label, "gain3");
 }

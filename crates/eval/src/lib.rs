@@ -155,7 +155,9 @@ use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::codes;
 use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
 use parser::{CompilationMetadataSnapshot, CompilationMetadataStore};
-use tlib::{NodeKind, TreeArena, TreeId};
+use propagate::{ArityCache, propagate};
+use signals::{SigMatch, match_sig};
+use tlib::{NodeKind, TreeArena, TreeId, tree_to_int};
 
 mod pattern_matcher;
 
@@ -1107,6 +1109,11 @@ pub enum EvalError {
     InvalidModulationLabel {
         node: TreeId,
     },
+    InvalidLabelInterpolation {
+        node: TreeId,
+        ident: String,
+        reason: &'static str,
+    },
     InvalidModulationCircuit {
         node: TreeId,
         reason: &'static str,
@@ -1215,6 +1222,12 @@ impl Display for EvalError {
             }
             Self::InvalidModulationLabel { node } => {
                 write!(f, "invalid modulation label at node {}", node.as_u32())
+            }
+            Self::InvalidLabelInterpolation { ident, reason, .. } => {
+                write!(
+                    f,
+                    "cannot interpolate label placeholder `%{ident}`: {reason}"
+                )
             }
             Self::InvalidModulationCircuit { reason, .. } => {
                 write!(f, "invalid modulation circuit: {reason}")
@@ -1381,6 +1394,19 @@ impl IntoDiagnostic for EvalError {
             .with_note("cause: modulation target did not resolve to a valid label string")
             .with_note("rule: modulation target must be a string-like Faust label")
             .with_help("use a literal label such as [\"gain\" : _ -> expr]"),
+            Self::InvalidLabelInterpolation { ident, reason, .. } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_GENERIC_FAILURE,
+                message,
+            )
+            .with_note(format!(
+                "cause: label placeholder `{ident}` did not resolve to an integer constant"
+            ))
+            .with_note(format!("computed: {reason}"))
+            .with_help(
+                "bind the placeholder name to an integer constant expression before using it in a label",
+            ),
             Self::InvalidModulationCircuit { reason, .. } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
@@ -1910,6 +1936,92 @@ fn eval_value(
             // transparent for the wrapped expression.
             eval_value(arena, body, env, loop_detector)
         }
+        BoxMatch::Button(label) => Ok(EvalValue::Box(eval_button(
+            arena,
+            label,
+            env,
+            loop_detector,
+        )?)),
+        BoxMatch::Checkbox(label) => Ok(EvalValue::Box(eval_checkbox(
+            arena,
+            label,
+            env,
+            loop_detector,
+        )?)),
+        BoxMatch::VSlider(label, cur, min, max, step) => Ok(EvalValue::Box(eval_vslider(
+            arena,
+            label,
+            cur,
+            min,
+            max,
+            step,
+            env,
+            loop_detector,
+        )?)),
+        BoxMatch::HSlider(label, cur, min, max, step) => Ok(EvalValue::Box(eval_hslider(
+            arena,
+            label,
+            cur,
+            min,
+            max,
+            step,
+            env,
+            loop_detector,
+        )?)),
+        BoxMatch::NumEntry(label, cur, min, max, step) => Ok(EvalValue::Box(eval_num_entry(
+            arena,
+            label,
+            cur,
+            min,
+            max,
+            step,
+            env,
+            loop_detector,
+        )?)),
+        BoxMatch::Soundfile(label, chan) => Ok(EvalValue::Box(eval_soundfile(
+            arena,
+            label,
+            chan,
+            env,
+            loop_detector,
+        )?)),
+        BoxMatch::VGroup(label, body) => Ok(EvalValue::Box(eval_vgroup(
+            arena,
+            label,
+            body,
+            env,
+            loop_detector,
+        )?)),
+        BoxMatch::HGroup(label, body) => Ok(EvalValue::Box(eval_hgroup(
+            arena,
+            label,
+            body,
+            env,
+            loop_detector,
+        )?)),
+        BoxMatch::TGroup(label, body) => Ok(EvalValue::Box(eval_tgroup(
+            arena,
+            label,
+            body,
+            env,
+            loop_detector,
+        )?)),
+        BoxMatch::VBargraph(label, min, max) => Ok(EvalValue::Box(eval_vbargraph(
+            arena,
+            label,
+            min,
+            max,
+            env,
+            loop_detector,
+        )?)),
+        BoxMatch::HBargraph(label, min, max) => Ok(EvalValue::Box(eval_hbargraph(
+            arena,
+            label,
+            min,
+            max,
+            env,
+            loop_detector,
+        )?)),
         BoxMatch::Abstr(_, _) | BoxMatch::Environment => Ok(EvalValue::Closure(ClosureValue {
             expr,
             env: env.clone(),
@@ -2312,8 +2424,9 @@ struct ModulationRewrite<'a> {
 
 /// Evaluates the modulation target to a plain label string.
 ///
-/// C++ supports richer `%` substitutions via `evalLabel(...)`. The Rust port
-/// currently implements the literal-label subset required by the active corpus.
+/// Source provenance (C++):
+/// - `compiler/evaluate/eval.cpp`
+/// - `evalLabel(...)`
 fn eval_modulation_label(
     arena: &mut TreeArena,
     var: TreeId,
@@ -2323,11 +2436,386 @@ fn eval_modulation_label(
     let label_node = arena
         .hd(var)
         .ok_or(EvalError::MalformedListNode { node: var })?;
-    let evaluated = eval_box(arena, label_node, env, loop_detector)?;
-    let Some(label) = label_node_text(arena, evaluated) else {
-        return Err(EvalError::InvalidModulationLabel { node: evaluated });
+    let label = eval_label_node(arena, label_node, env, loop_detector)?;
+    Ok(strip_label_metadata(&label).to_owned())
+}
+
+/// Evaluates one UI/modulation label node using the C++ `evalLabel(...)`
+/// placeholder semantics.
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/eval.cpp`
+/// - `evalLabel(...)`
+/// - `writeIdentValue(...)`
+///
+/// Mapping status: `adapted`.
+/// Rust mirrors the C++ label substitution state machine while resolving
+/// placeholder values through explicit evaluator helpers instead of global tree
+/// properties.
+fn eval_label_node(
+    arena: &mut TreeArena,
+    label_node: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<String, EvalError> {
+    let Some(src) = label_node_text(arena, label_node) else {
+        return Err(EvalError::InvalidModulationLabel { node: label_node });
     };
-    Ok(strip_label_metadata(label).to_owned())
+    let src = src.to_owned();
+    eval_label(arena, &src, env, loop_detector)
+}
+
+/// Port of the C++ `evalLabel(...)` mini-parser used for dynamic UI labels.
+fn eval_label(
+    arena: &mut TreeArena,
+    src: &str,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<String, EvalError> {
+    #[derive(Clone, Copy)]
+    enum State {
+        Text,
+        AfterPercent,
+        Ident,
+        BracedIdent,
+    }
+
+    let chars: Vec<char> = src.chars().collect();
+    let mut idx = 0usize;
+    let mut state = State::Text;
+    let mut dst = String::new();
+    let mut ident = String::new();
+    let mut format = String::new();
+
+    while idx <= chars.len() {
+        let cur = chars.get(idx).copied();
+        match state {
+            State::Text => match cur {
+                None => break,
+                Some('%') => {
+                    ident.clear();
+                    format.clear();
+                    state = State::AfterPercent;
+                    idx += 1;
+                }
+                Some(ch) => {
+                    dst.push(ch);
+                    idx += 1;
+                }
+            },
+            State::AfterPercent => match cur {
+                None => {
+                    dst.push('%');
+                    dst.push_str(&format);
+                    break;
+                }
+                Some(ch) if ch.is_ascii_digit() => {
+                    format.push(ch);
+                    idx += 1;
+                }
+                Some(ch) if is_eval_label_ident_char(ch) => {
+                    ident.push(ch);
+                    state = State::Ident;
+                    idx += 1;
+                }
+                Some('{') => {
+                    state = State::BracedIdent;
+                    idx += 1;
+                }
+                Some(_) => {
+                    dst.push('%');
+                    dst.push_str(&format);
+                    state = State::Text;
+                }
+            },
+            State::Ident => match cur {
+                Some(ch) if is_eval_label_ident_char(ch) => {
+                    ident.push(ch);
+                    idx += 1;
+                }
+                _ => {
+                    write_label_ident_value(arena, &mut dst, &format, &ident, env, loop_detector)?;
+                    state = State::Text;
+                }
+            },
+            State::BracedIdent => match cur {
+                Some(ch) if is_eval_label_ident_char(ch) => {
+                    ident.push(ch);
+                    idx += 1;
+                }
+                Some('}') => {
+                    write_label_ident_value(arena, &mut dst, &format, &ident, env, loop_detector)?;
+                    idx += 1;
+                    state = State::Text;
+                }
+                _ => {
+                    dst.push('%');
+                    dst.push_str(&format);
+                    break;
+                }
+            },
+        }
+    }
+
+    Ok(dst)
+}
+
+fn is_eval_label_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn write_label_ident_value(
+    arena: &mut TreeArena,
+    dst: &mut String,
+    format: &str,
+    ident: &str,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<(), EvalError> {
+    let width = format.parse::<usize>().unwrap_or(0).clamp(0, 4);
+    let value = eval_ident_to_constant_int(arena, ident, env, loop_detector)?;
+    let rendered = if width == 0 {
+        value.to_string()
+    } else {
+        format!("{value:>width$}")
+    };
+    dst.push_str(&rendered);
+    Ok(())
+}
+
+fn eval_ident_to_constant_int(
+    arena: &mut TreeArena,
+    ident: &str,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<i64, EvalError> {
+    let expr = BoxBuilder::new(arena).ident(ident);
+    let signal = eval_box_to_scalar_signal(arena, expr, env, loop_detector)?;
+    tree_to_int(arena, signal).ok_or_else(|| EvalError::InvalidLabelInterpolation {
+        node: expr,
+        ident: ident.to_owned(),
+        reason: "expression did not reduce to an integer constant",
+    })
+}
+
+/// Evaluates one box expression to a scalar constant signal atom.
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/eval.cpp`
+/// - `eval2int(...)`
+/// - `eval2double(...)`
+fn eval_box_to_scalar_signal(
+    arena: &mut TreeArena,
+    expr: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let evaluated = eval_box(arena, expr, env, loop_detector)?;
+    let lowered = a2sb(arena, evaluated, loop_detector)?;
+    let Some((inputs, outputs)) = infer_box_arity(arena, lowered) else {
+        return Err(EvalError::InvalidLabelInterpolation {
+            node: expr,
+            ident: ident_name_or_fallback(arena, expr),
+            reason: "expression did not evaluate to a scalar box",
+        });
+    };
+    if inputs != 0 || outputs != 1 {
+        return Err(EvalError::InvalidLabelInterpolation {
+            node: expr,
+            ident: ident_name_or_fallback(arena, expr),
+            reason: "expression is not a constant scalar of type (0 -> 1)",
+        });
+    }
+    let mut cache = ArityCache::default();
+    let signals = propagate(arena, lowered, &[], &mut cache).map_err(|_| {
+        EvalError::InvalidLabelInterpolation {
+            node: expr,
+            ident: ident_name_or_fallback(arena, expr),
+            reason: "expression could not be propagated to a constant signal",
+        }
+    })?;
+    if signals.len() != 1 {
+        return Err(EvalError::InvalidLabelInterpolation {
+            node: expr,
+            ident: ident_name_or_fallback(arena, expr),
+            reason: "expression did not produce exactly one output signal",
+        });
+    }
+    match match_sig(arena, signals[0]) {
+        SigMatch::Int(_) | SigMatch::Real(_) => Ok(signals[0]),
+        _ => Err(EvalError::InvalidLabelInterpolation {
+            node: expr,
+            ident: ident_name_or_fallback(arena, expr),
+            reason: "expression did not simplify to a numeric constant",
+        }),
+    }
+}
+
+fn ident_name_or_fallback(arena: &TreeArena, expr: TreeId) -> String {
+    match match_box(arena, expr) {
+        BoxMatch::Ident(name) => name.to_owned(),
+        _ => format!("node_{}", expr.as_u32()),
+    }
+}
+
+fn evaluated_label_node(
+    arena: &mut TreeArena,
+    label: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let text = eval_label_node(arena, label, env, loop_detector)?;
+    Ok(arena.string_lit(&text))
+}
+
+fn eval_button(
+    arena: &mut TreeArena,
+    label: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let label = evaluated_label_node(arena, label, env, loop_detector)?;
+    Ok(BoxBuilder::new(arena).button(label))
+}
+
+fn eval_checkbox(
+    arena: &mut TreeArena,
+    label: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let label = evaluated_label_node(arena, label, env, loop_detector)?;
+    Ok(BoxBuilder::new(arena).checkbox(label))
+}
+
+fn eval_vslider(
+    arena: &mut TreeArena,
+    label: TreeId,
+    cur: TreeId,
+    min: TreeId,
+    max: TreeId,
+    step: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let label = evaluated_label_node(arena, label, env, loop_detector)?;
+    let cur = eval_box(arena, cur, env, loop_detector)?;
+    let min = eval_box(arena, min, env, loop_detector)?;
+    let max = eval_box(arena, max, env, loop_detector)?;
+    let step = eval_box(arena, step, env, loop_detector)?;
+    Ok(BoxBuilder::new(arena).vslider(label, cur, min, max, step))
+}
+
+fn eval_hslider(
+    arena: &mut TreeArena,
+    label: TreeId,
+    cur: TreeId,
+    min: TreeId,
+    max: TreeId,
+    step: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let label = evaluated_label_node(arena, label, env, loop_detector)?;
+    let cur = eval_box(arena, cur, env, loop_detector)?;
+    let min = eval_box(arena, min, env, loop_detector)?;
+    let max = eval_box(arena, max, env, loop_detector)?;
+    let step = eval_box(arena, step, env, loop_detector)?;
+    Ok(BoxBuilder::new(arena).hslider(label, cur, min, max, step))
+}
+
+fn eval_num_entry(
+    arena: &mut TreeArena,
+    label: TreeId,
+    cur: TreeId,
+    min: TreeId,
+    max: TreeId,
+    step: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let label = evaluated_label_node(arena, label, env, loop_detector)?;
+    let cur = eval_box(arena, cur, env, loop_detector)?;
+    let min = eval_box(arena, min, env, loop_detector)?;
+    let max = eval_box(arena, max, env, loop_detector)?;
+    let step = eval_box(arena, step, env, loop_detector)?;
+    Ok(BoxBuilder::new(arena).num_entry(label, cur, min, max, step))
+}
+
+fn eval_soundfile(
+    arena: &mut TreeArena,
+    label: TreeId,
+    chan: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let label = evaluated_label_node(arena, label, env, loop_detector)?;
+    let chan = eval_box(arena, chan, env, loop_detector)?;
+    Ok(BoxBuilder::new(arena).soundfile(label, chan))
+}
+
+fn eval_vgroup(
+    arena: &mut TreeArena,
+    label: TreeId,
+    body: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let label = evaluated_label_node(arena, label, env, loop_detector)?;
+    let body = eval_box(arena, body, env, loop_detector)?;
+    Ok(BoxBuilder::new(arena).vgroup(label, body))
+}
+
+fn eval_hgroup(
+    arena: &mut TreeArena,
+    label: TreeId,
+    body: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let label = evaluated_label_node(arena, label, env, loop_detector)?;
+    let body = eval_box(arena, body, env, loop_detector)?;
+    Ok(BoxBuilder::new(arena).hgroup(label, body))
+}
+
+fn eval_tgroup(
+    arena: &mut TreeArena,
+    label: TreeId,
+    body: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let label = evaluated_label_node(arena, label, env, loop_detector)?;
+    let body = eval_box(arena, body, env, loop_detector)?;
+    Ok(BoxBuilder::new(arena).tgroup(label, body))
+}
+
+fn eval_vbargraph(
+    arena: &mut TreeArena,
+    label: TreeId,
+    min: TreeId,
+    max: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let label = evaluated_label_node(arena, label, env, loop_detector)?;
+    let min = eval_box(arena, min, env, loop_detector)?;
+    let max = eval_box(arena, max, env, loop_detector)?;
+    Ok(BoxBuilder::new(arena).vbargraph(label, min, max))
+}
+
+fn eval_hbargraph(
+    arena: &mut TreeArena,
+    label: TreeId,
+    min: TreeId,
+    max: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let label = evaluated_label_node(arena, label, env, loop_detector)?;
+    let min = eval_box(arena, min, env, loop_detector)?;
+    let max = eval_box(arena, max, env, loop_detector)?;
+    Ok(BoxBuilder::new(arena).hbargraph(label, min, max))
 }
 
 /// Evaluates the optional modulation circuit, defaulting to multiplication.

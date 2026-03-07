@@ -10,6 +10,8 @@ ahash = "0.8"
 boxes = { path = "../boxes" }
 errors = { path = "../errors" }
 parser = { path = "../parser" }
+propagate = { path = "../propagate" }
+signals = { path = "../signals" }
 tlib = { path = "../tlib" }
 
 [lints]
