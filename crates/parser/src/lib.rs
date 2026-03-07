@@ -32,9 +32,11 @@ use std::collections::{BTreeMap, HashSet};
 use tlib::{NodeKind, TreeArena, TreeId};
 
 pub mod context;
+pub mod metadata;
 pub mod source_reader;
 
 pub use context::{DiagnosticSeverity, ParserCtx, ParserDiagnostic, SourceLocation};
+pub use metadata::{CompilationMetadataKey, CompilationMetadataSnapshot, CompilationMetadataStore};
 pub use source_reader::{ExpandedSource, SourceLineOrigin, SourceReader, SourceReaderError};
 
 /// Primitive operator subset used by parser Slice 2.
@@ -68,13 +70,18 @@ pub struct ParseState {
     pub ctx: ParserCtx,
     source_file: Box<str>,
     source_origins: Option<Vec<SourceLineOrigin>>,
+    metadata_store: CompilationMetadataStore,
 }
 
 impl ParseState {
     /// Creates parser state bound to one source file name/path.
     #[must_use]
     pub fn new(source_file: &str) -> Self {
-        Self::new_with_origins(source_file, None)
+        Self::new_with_origins_and_metadata(
+            source_file,
+            None,
+            CompilationMetadataStore::new(source_file),
+        )
     }
 
     /// Creates parser state bound to one source file and optional expanded-source origin map.
@@ -83,11 +90,27 @@ impl ParseState {
         source_file: &str,
         source_origins: Option<Vec<SourceLineOrigin>>,
     ) -> Self {
+        Self::new_with_origins_and_metadata(
+            source_file,
+            source_origins,
+            CompilationMetadataStore::new(source_file),
+        )
+    }
+
+    /// Creates parser state bound to one source file, optional origin map, and
+    /// one shared compilation-global metadata store.
+    #[must_use]
+    pub fn new_with_origins_and_metadata(
+        source_file: &str,
+        source_origins: Option<Vec<SourceLineOrigin>>,
+        metadata_store: CompilationMetadataStore,
+    ) -> Self {
         Self {
             arena: TreeArena::new(),
             ctx: ParserCtx::new(),
             source_file: source_file.into(),
             source_origins,
+            metadata_store,
         }
     }
 
@@ -745,7 +768,12 @@ impl ParseState {
         self.update_cursor_from_span(lexer, key_span);
         let key = lexer.span_str(key_span);
         match self.string_node_text(value_node).map(str::to_owned) {
-            Some(value) => self.ctx.note_declared_metadata(key, &value),
+            Some(value) => {
+                self.ctx.note_declared_metadata(key, &value);
+                let current_source = self.ctx.cursor().file().to_owned();
+                self.metadata_store
+                    .declare_top_level(&current_source, key, &value);
+            }
             None => self.ctx.error("invalid declare metadata value"),
         }
         self.nil()
@@ -1089,6 +1117,19 @@ pub struct ParseOutput {
     pub root: Option<TreeId>,
     pub errors: Vec<String>,
     pub diagnostics: DiagnosticBundle,
+    /// Deterministic snapshot of the compilation-global top-level metadata set.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/parser/sourcereader.cpp`
+    /// - `declareMetadata(Tree key, Tree value)`
+    /// - `gGlobal->gMetaDataSet`
+    ///
+    /// Mapping status: `1:1` semantics, adapted representation.
+    ///
+    /// The parser still keeps local `ParserCtx` bookkeeping for diagnostics and
+    /// structural tests, but this snapshot is the canonical session-wide view
+    /// of top-level `declare key "value";` statements seen so far.
+    pub compilation_metadata: CompilationMetadataSnapshot,
     /// Canonical source files consumed by parser input resolution.
     ///
     /// - For `parse_program(...)`, this list is empty because no filesystem import
@@ -1129,17 +1170,35 @@ pub fn lex_tokens(input: &str) -> Result<Vec<LexedToken>, String> {
 /// Parses one input with Slice-1 grammar and returns parser state.
 #[must_use]
 pub fn parse_program(input: &str, source_file: &str) -> ParseOutput {
-    parse_program_with_origins(input, source_file, None)
+    parse_program_with_metadata(
+        input,
+        source_file,
+        CompilationMetadataStore::new(source_file),
+    )
+}
+
+/// Parses one in-memory source using the provided shared metadata store.
+pub fn parse_program_with_metadata(
+    input: &str,
+    source_file: &str,
+    metadata_store: CompilationMetadataStore,
+) -> ParseOutput {
+    parse_program_with_origins(input, source_file, None, metadata_store)
 }
 
 fn parse_program_with_origins(
     input: &str,
     source_file: &str,
     source_origins: Option<Vec<SourceLineOrigin>>,
+    metadata_store: CompilationMetadataStore,
 ) -> ParseOutput {
     let lexerdef = lexerdef();
     let lexer = lexerdef.lexer(input);
-    let state = RefCell::new(ParseState::new_with_origins(source_file, source_origins));
+    let state = RefCell::new(ParseState::new_with_origins_and_metadata(
+        source_file,
+        source_origins,
+        metadata_store,
+    ));
     let (root, errors) = faustparser_y::parse(&lexer, &state);
     let mut state = state.into_inner();
 
@@ -1173,6 +1232,7 @@ fn parse_program_with_origins(
         root,
         errors: rendered_errors,
         diagnostics,
+        compilation_metadata: state.metadata_store.snapshot(),
         used_files: Vec::new(),
         state,
     }
@@ -1190,12 +1250,40 @@ pub fn parse_file_with_imports(
     path: &std::path::Path,
     search_paths: &[std::path::PathBuf],
 ) -> Result<ParseOutput, SourceReaderError> {
+    parse_file_with_imports_and_metadata(
+        path,
+        search_paths,
+        CompilationMetadataStore::new(
+            &path
+                .canonicalize()
+                .unwrap_or_else(|_| path.to_path_buf())
+                .to_string_lossy(),
+        ),
+    )
+}
+
+/// Reads a source file through [`SourceReader`] import expansion, then parses it
+/// using the provided shared top-level metadata store.
+pub fn parse_file_with_imports_and_metadata(
+    path: &std::path::Path,
+    search_paths: &[std::path::PathBuf],
+    metadata_store: CompilationMetadataStore,
+) -> Result<ParseOutput, SourceReaderError> {
     let mut reader = SourceReader::new(search_paths.to_vec());
     let expanded = reader.read_file_with_origins(path)?;
     let used_files = reader.used_files().to_vec();
-    let source_name = path.to_string_lossy();
-    let mut output =
-        parse_program_with_origins(&expanded.text, &source_name, Some(expanded.line_origins));
+    let source_name = used_files
+        .first()
+        .cloned()
+        .unwrap_or_else(|| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    let mut output = parse_program_with_origins(
+        &expanded.text,
+        &source_name,
+        Some(expanded.line_origins),
+        metadata_store,
+    );
     output.used_files = used_files;
     Ok(output)
 }

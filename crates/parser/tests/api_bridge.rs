@@ -7,7 +7,10 @@
 use std::fs;
 use std::path::PathBuf;
 
-use parser::{SourceReaderError, parse_file_with_imports, parse_minimal, parse_program};
+use parser::{
+    CompilationMetadataKey, SourceReaderError, parse_file_with_imports, parse_minimal,
+    parse_program,
+};
 
 fn make_temp_root(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -41,6 +44,25 @@ fn bridge_exposes_parse_program() {
 }
 
 #[test]
+fn parse_program_exposes_master_document_metadata_snapshot() {
+    let out = parse_program(
+        "declare name \"main\";\nprocess = _;\n",
+        "bridge_metadata_program.dsp",
+    );
+    assert!(
+        out.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        out.errors
+    );
+    let values = out
+        .compilation_metadata
+        .entries()
+        .get(&CompilationMetadataKey::global("name"))
+        .expect("master metadata key should exist");
+    assert!(values.contains("main"));
+}
+
+#[test]
 fn bridge_exposes_file_import_parsing() {
     let root = make_temp_root("imports");
     let main = root.join("main.dsp");
@@ -70,6 +92,51 @@ fn bridge_exposes_file_import_parsing() {
         out.used_files[1],
         lib.canonicalize().expect("lib should canonicalize")
     );
+
+    fs::remove_dir_all(root).expect("temp root should be removable");
+}
+
+#[test]
+fn parse_file_with_imports_scopes_top_level_metadata_like_cpp() {
+    let root = make_temp_root("metadata_imports");
+    let main = root.join("main.dsp");
+    let lib = root.join("ops.lib");
+
+    fs::write(
+        &main,
+        "declare name \"main\";\nimport(\"ops.lib\");\nprocess = gain;\n",
+    )
+    .expect("main should be written");
+    fs::write(&lib, "declare author \"lib-author\";\ngain = _;\n").expect("lib should be written");
+
+    let out =
+        parse_file_with_imports(&main, std::slice::from_ref(&root)).expect("parse should succeed");
+    assert!(
+        out.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        out.errors
+    );
+
+    let master = out
+        .compilation_metadata
+        .entries()
+        .get(&CompilationMetadataKey::global("name"))
+        .expect("master metadata key should exist");
+    assert!(master.contains("main"));
+
+    let lib_key = CompilationMetadataKey::scoped(
+        lib.canonicalize()
+            .expect("lib should canonicalize")
+            .to_string_lossy()
+            .into_owned(),
+        "author",
+    );
+    let imported = out
+        .compilation_metadata
+        .entries()
+        .get(&lib_key)
+        .expect("imported metadata key should exist");
+    assert!(imported.contains("lib-author"));
 
     fs::remove_dir_all(root).expect("temp root should be removable");
 }
