@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_44_pattern_def_constant_clause.dsp
+bytes=39
+lines=3
+fnv1a64=0bab0a4a549c56d7

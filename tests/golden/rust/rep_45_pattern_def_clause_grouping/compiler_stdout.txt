@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_45_pattern_def_clause_grouping.dsp
+bytes=39
+lines=3
+fnv1a64=1a423160ec88676e

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_49_case_closure_capture.dsp
+bytes=67
+lines=4
+fnv1a64=3bf05e8faaecb67e

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_48_case_two_args_full_apply.dsp
+bytes=56
+lines=4
+fnv1a64=9dea57206fb0d20e

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_46_case_pattern_constant_folding.dsp
+bytes=48
+lines=4
+fnv1a64=db003763e2e19b00

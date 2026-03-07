@@ -1,18 +1,20 @@
 # C++ Parity Known Gaps Corpus
 
-This folder contains small `.dsp` fixtures that are intentionally kept outside
-the default `tests/corpus/*.dsp` scans.
+This folder contains small `.dsp` fixtures that were introduced as focused
+parity reproducers before promotion into the default `tests/corpus/*.dsp`
+scans.
 
 Purpose:
 
 - preserve minimal reproducers for known Rust vs C++ front-end parity gaps,
-- keep those reproducers visible without freezing current Rust behavior into the
-  default golden snapshots,
-- provide focused inputs for manual differential runs and future parity gates.
+- keep the original focused inputs available for manual differential runs even
+  after equivalent fixtures are promoted into `tests/corpus/`,
+- provide auditable provenance for parity fixes and future gate promotions.
 
 These files were added as focused C++ parity reproducers. The parser/eval
-pipeline now accepts all current entries; they are kept here until they are
-promoted into the regular parity guardrails.
+pipeline now accepts all current entries. Equivalent fixtures have now been
+promoted into the regular parity guardrails under `tests/corpus/`, while the
+original reproducers remain here as historical/parity references.
 
 ## Current entries
 
@@ -22,8 +24,8 @@ promoted into the regular parity guardrails.
   - current status:
     - C++: accepted
     - Rust: fixed through parser `prepare_pattern` + eval `a2sb`
-  - next step:
-    - promote this fixture into the regular parity guardrails
+  - promoted corpus fixture:
+    - `tests/corpus/rep_44_pattern_def_constant_clause.dsp`
 
 - `gap_02_pattern_def_clause_grouping.dsp`
   - purpose: repeated same-name definition clauses that should be grouped into a
@@ -31,17 +33,16 @@ promoted into the regular parity guardrails.
   - current status:
     - C++: accepted
     - Rust: fixed through parser `prepare_pattern` + eval `a2sb`
-  - next step:
-    - promote this fixture into the regular parity guardrails
+  - promoted corpus fixture:
+    - `tests/corpus/rep_45_pattern_def_clause_grouping.dsp`
 
 - `gap_03_case_pattern_constant_folding.dsp`
   - purpose: `case` pattern requiring compile-time pattern evaluation
   - current status:
     - C++: accepted
     - Rust: fixed in the eval phase; the folded pattern now matches correctly
-  - next step:
-    - promote this fixture into the regular parity guardrails instead of keeping
-      it only in the known-gap corpus
+  - promoted corpus fixture:
+    - `tests/corpus/rep_46_case_pattern_constant_folding.dsp`
 
 - `gap_04_case_pattern_scope_barrier.dsp`
   - purpose: rule-local pattern variable that must not capture an outer binding
@@ -49,9 +50,8 @@ promoted into the regular parity guardrails.
     - C++: accepted
     - Rust: fixed in the eval phase; pattern-variable lookup now stops at the
       barrier for nonlinearity checks while RHS evaluation still sees outer scope
-  - next step:
-    - promote this fixture into the regular parity guardrails instead of keeping
-      it only in the known-gap corpus
+  - promoted corpus fixture:
+    - `tests/corpus/rep_47_case_pattern_scope_barrier.dsp`
 
 ## Suggested manual differential commands
 
