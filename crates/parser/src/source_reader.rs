@@ -232,8 +232,6 @@ fn parse_import_line(line: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::{SourceReader, parse_import_line};
 
     /// Search paths (-I) must be checked before the local directory of the importing
