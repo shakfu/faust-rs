@@ -260,7 +260,7 @@ impl FbcDspFactoryAny {
         unsafe {
             match (self, exec) {
                 (Self::Float32(f), FbcExecutorAny::Float32(e)) => {
-                    crate::ui::dispatch_ui(&f.ui_block, &mut e.real_heap, glue);
+                    crate::ui::dispatch_ui_f32(&f.ui_block, &mut e.real_heap, glue);
                 }
                 (Self::Float64(f), FbcExecutorAny::Float64(e)) => {
                     crate::ui::dispatch_ui_f64(&f.ui_block, &mut e.real_heap, glue);

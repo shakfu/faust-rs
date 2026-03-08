@@ -4,7 +4,7 @@
 //! corresponding C callbacks in `UIGlue` / `MetaGlue`.
 //!
 //! # Float/Double dispatch
-//! - `dispatch_ui` — float mode (`f32` heap, `f32` scalars, `*mut f32` zones).
+//! - `dispatch_ui_f32` — float mode (`f32` heap, `f32` scalars, `*mut f32` zones).
 //! - `dispatch_ui_f64` — double mode: `f64` heap; scalar parameters narrowed to
 //!   `f32` for callbacks; zone pointers are `*mut f64` reinterpreted as
 //!   `*mut f32` (application must use `FAUSTFLOAT=double`).
@@ -23,7 +23,7 @@ use crate::types::{FaustFloat, MetaGlue, UIGlue};
 /// # Safety
 /// - `glue` must be non-null and point to a valid `UIGlue`.
 /// - `real_heap` must have at least `instr.offset + 1` elements for widget instructions.
-pub(crate) unsafe fn dispatch_ui(
+pub(crate) unsafe fn dispatch_ui_f32(
     ui: &[FbcUiInstruction<FaustFloat>],
     real_heap: &mut [FaustFloat],
     glue: *mut UIGlue,
