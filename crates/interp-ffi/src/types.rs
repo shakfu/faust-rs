@@ -243,7 +243,15 @@ impl FbcDspFactoryAny {
                     }
                 }
             }
-            _ => {}
+            _ => {
+                // Precision mismatch between factory and executor — indicates a
+                // bug in the calling code. Asserts in debug, silent in release
+                // (no audio produced for this call).
+                debug_assert!(
+                    false,
+                    "execute_block_io_f32: factory/executor precision mismatch"
+                );
+            }
         }
     }
 

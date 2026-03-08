@@ -1379,6 +1379,10 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 desc.offset,
                 0,
             ));
+        // Condition: `var < upper`.
+        // Stack convention: LHS on TOS → push upper (RHS) first, then var (LHS).
+        // LTInt pops v1=TOS=var, v2=upper, computes v1 < v2 = var < upper.
+        self.compile_node(store, upper)?;
         self.current_block
             .push(FbcInstruction::with_values_and_offsets(
                 FbcOpcode::LoadInt,
@@ -1387,7 +1391,6 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 desc.offset,
                 0,
             ));
-        self.compile_node(store, upper)?;
         self.current_block
             .push(FbcInstruction::new(FbcOpcode::LTInt));
 

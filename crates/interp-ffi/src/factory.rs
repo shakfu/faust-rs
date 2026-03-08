@@ -687,4 +687,125 @@ mod tests {
         assert_eq!(factory.name(), "UnitTestDSPDouble");
         assert!(factory.is_double(), "expected double factory");
     }
+
+    /// Verify that an f32 factory can actually execute and produce non-zero
+    /// audio output.  Uses `process = _;` (passthrough) and feeds a non-zero
+    /// f32 buffer; all output samples must be non-zero.
+    #[test]
+    fn float_factory_execute_produces_nonzero_output() {
+        use crate::instance::{
+            computeCInterpreterDSPInstance, createCInterpreterDSPInstance,
+            deleteCInterpreterDSPInstance, initCInterpreterDSPInstance,
+        };
+        use crate::types::alloc_factory;
+
+        let factory_any = compile_factory_from_string_fastlane(
+            "ExecFloat",
+            "process = _;",
+            &["-cn".to_owned(), "ExecFloat".to_owned()],
+        )
+        .expect("float passthrough compilation should succeed");
+
+        assert!(!factory_any.is_double(), "must be an f32 factory");
+
+        // Box the factory and create an instance.
+        let factory_ptr = alloc_factory(factory_any);
+        let dsp = unsafe { createCInterpreterDSPInstance(factory_ptr) };
+        assert!(!dsp.is_null(), "instance creation must succeed");
+
+        unsafe { initCInterpreterDSPInstance(dsp, 44100) };
+
+        // Prepare input buffer with non-zero samples and zeroed output buffer.
+        const FRAMES: usize = 64;
+        let input_data: Vec<f32> = (0..FRAMES).map(|i| (i as f32) * 0.01 + 0.1).collect();
+        let mut output_data = vec![0.0_f32; FRAMES];
+
+        let mut input_ptr: *mut f32 = input_data.as_ptr() as *mut f32;
+        let mut output_ptr: *mut f32 = output_data.as_mut_ptr();
+
+        unsafe {
+            computeCInterpreterDSPInstance(
+                dsp,
+                FRAMES as i32,
+                &mut input_ptr as *mut *mut f32,
+                &mut output_ptr as *mut *mut f32,
+            );
+        }
+
+        // For a passthrough DSP the output must exactly equal the input.
+        // All values should be non-zero (input starts at 0.1).
+        let all_nonzero = output_data.iter().all(|&s| s.abs() > 1e-6);
+        assert!(
+            all_nonzero,
+            "float passthrough produced silence: first samples = {:?}",
+            &output_data[..8]
+        );
+
+        // Cleanup.
+        unsafe { deleteCInterpreterDSPInstance(dsp) };
+        unsafe { crate::types::free_factory(factory_ptr) };
+    }
+
+    /// Verify that a f64 factory can actually execute and produce non-zero
+    /// audio output.  Uses `process = _;` (passthrough) and feeds a constant
+    /// non-zero f32 buffer; the output must round-trip correctly through the
+    /// f32→f64→f32 conversion path.
+    #[test]
+    fn double_factory_execute_produces_nonzero_output() {
+        use crate::instance::{
+            computeCInterpreterDSPInstance, createCInterpreterDSPInstance,
+            deleteCInterpreterDSPInstance, initCInterpreterDSPInstance,
+        };
+        use crate::types::alloc_factory;
+
+        let factory_any = compile_factory_from_string_fastlane(
+            "ExecDouble",
+            "process = _;",
+            &[
+                "-cn".to_owned(),
+                "ExecDouble".to_owned(),
+                "-double".to_owned(),
+            ],
+        )
+        .expect("double passthrough compilation should succeed");
+
+        assert!(factory_any.is_double(), "must be a double factory");
+
+        // Box the factory and create an instance.
+        let factory_ptr = alloc_factory(factory_any);
+        let dsp = unsafe { createCInterpreterDSPInstance(factory_ptr) };
+        assert!(!dsp.is_null(), "instance creation must succeed");
+
+        unsafe { initCInterpreterDSPInstance(dsp, 44100) };
+
+        // Prepare input buffer with non-zero samples and zeroed output buffer.
+        const FRAMES: usize = 64;
+        let input_data: Vec<f32> = (0..FRAMES).map(|i| (i as f32) * 0.01 + 0.1).collect();
+        let mut output_data = vec![0.0_f32; FRAMES];
+
+        let mut input_ptr: *mut f32 = input_data.as_ptr() as *mut f32;
+        let mut output_ptr: *mut f32 = output_data.as_mut_ptr();
+
+        unsafe {
+            computeCInterpreterDSPInstance(
+                dsp,
+                FRAMES as i32,
+                &mut input_ptr as *mut *mut f32,
+                &mut output_ptr as *mut *mut f32,
+            );
+        }
+
+        // For a passthrough DSP the output must match the input after f32→f64→f32.
+        // All values should be non-zero (input starts at 0.1).
+        let all_nonzero = output_data.iter().all(|&s| s.abs() > 1e-6);
+        assert!(
+            all_nonzero,
+            "double passthrough produced silence: first samples = {:?}",
+            &output_data[..8]
+        );
+
+        // Cleanup.
+        unsafe { deleteCInterpreterDSPInstance(dsp) };
+        unsafe { crate::types::free_factory(factory_ptr) };
+    }
 }

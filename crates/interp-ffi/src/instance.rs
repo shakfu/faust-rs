@@ -322,14 +322,31 @@ pub unsafe extern "C" fn computeCInterpreterDSPInstance(
             .collect();
 
         // Store frame count in the 'count' heap slot.
-        let count_off = factory.count_offset() as usize;
-        if let Some(slot) = (*dsp).executor.int_heap_mut().get_mut(count_off) {
-            *slot = count;
+        // count_offset == -1 means the factory has no dedicated count slot
+        // (uncommon but valid for DSPs without audio loops).  Casting -1_i32
+        // to usize gives usize::MAX so get_mut safely returns None.
+        let count_off_raw = factory.count_offset();
+        if count_off_raw >= 0 {
+            let count_off = count_off_raw as usize;
+            if let Some(slot) = (*dsp).executor.int_heap_mut().get_mut(count_off) {
+                *slot = count;
+            } else {
+                debug_assert!(
+                    false,
+                    "computeCInterpreterDSPInstance: count_offset {count_off} out of int_heap bounds"
+                );
+            }
+        } else {
+            debug_assert!(
+                count_off_raw == -1,
+                "computeCInterpreterDSPInstance: unexpected negative count_offset {count_off_raw}"
+            );
         }
 
         // Execute control block then DSP block with audio I/O.
         let compute_block = factory.compute_block();
         let compute_dsp_block = factory.compute_dsp_block();
+
         factory.execute_block_on(&mut (*dsp).executor, compute_block);
         factory.execute_block_io_f32(
             &mut (*dsp).executor,
