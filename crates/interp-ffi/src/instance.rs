@@ -7,21 +7,21 @@
 //! The factory passed to `createCInterpreterDSPInstance` must outlive all
 //! instances created from it.  This mirrors the C++ API contract.
 //!
-//! # Implementation notes
-//! `InterpreterDspInstance` holds a raw `*const InterpreterDspFactory` (non-owning).
-//! The instance execution logic replicates the semantics of `FbcDspInstance`
-//! without using its borrow-based lifetime (which is incompatible with FFI).
+//! # Float/Double dispatch
+//! All operations delegate to `FbcDspFactoryAny` / `FbcExecutorAny` helpers
+//! so that a single shared library handles both `float` and `double` factories
+//! transparently.  Audio I/O buffers remain `f32*` at the C ABI boundary;
+//! in double mode, samples are converted `f32 → f64` on entry and
+//! `f64 → f32` on exit inside `computeCInterpreterDSPInstance`.
 
 use std::ffi::c_char;
 use std::os::raw::c_int;
 
-use codegen::backends::interp::FbcExecutor;
-
 use crate::types::{
-    FaustFloat, InterpreterDspFactory, InterpreterDspInstance, MetaGlue, UIGlue, alloc_instance,
-    free_instance,
+    FaustFloat, FbcExecutorAny, InterpreterDspFactory, InterpreterDspInstance, MetaGlue, UIGlue,
+    alloc_instance, free_instance,
 };
-use crate::ui::{dispatch_meta, dispatch_ui};
+use crate::ui::dispatch_meta;
 
 // ── Instance creation / deletion ─────────────────────────────────────────────
 
@@ -43,11 +43,7 @@ pub unsafe extern "C" fn createCInterpreterDSPInstance(
         // Trigger one-shot optimization (idempotent after first call).
         (*factory).inner.optimize();
 
-        let executor = FbcExecutor::new(
-            (*factory).inner.int_heap_size as usize,
-            (*factory).inner.real_heap_size as usize,
-        );
-
+        let executor = FbcExecutorAny::new_for_factory(&(*factory).inner);
         alloc_instance(factory as *const _, executor)
     }
 }
@@ -66,7 +62,7 @@ pub unsafe extern "C" fn deleteCInterpreterDSPInstance(dsp: *mut InterpreterDspI
     }
 }
 
-// ── Audio layout ─────────────────────────────────────────────────────────────
+// ── Audio layout ──────────────────────────────────────────────────────────────
 
 /// Return the number of audio inputs.
 ///
@@ -80,7 +76,7 @@ pub unsafe extern "C" fn getNumInputsCInterpreterDSPInstance(
         if dsp.is_null() {
             return 0;
         }
-        (*(*dsp).factory).inner.num_inputs
+        (*(*dsp).factory).inner.num_inputs()
     }
 }
 
@@ -96,7 +92,7 @@ pub unsafe extern "C" fn getNumOutputsCInterpreterDSPInstance(
         if dsp.is_null() {
             return 0;
         }
-        (*(*dsp).factory).inner.num_outputs
+        (*(*dsp).factory).inner.num_outputs()
     }
 }
 
@@ -112,22 +108,14 @@ pub unsafe extern "C" fn getSampleRateCInterpreterDSPInstance(
         if dsp.is_null() {
             return 0;
         }
-        let sr_off = (*(*dsp).factory).inner.sr_offset as usize;
-        // explicit &-ref required to silence `dangerous_implicit_autorefs` (edition 2024)
-        #[allow(clippy::needless_borrow)]
-        let result = (&(*dsp).executor.int_heap)
-            .get(sr_off)
-            .copied()
-            .unwrap_or(0);
-        result
+        let sr_off = (*(*dsp).factory).inner.sr_offset() as usize;
+        (*dsp).executor.int_heap().get(sr_off).copied().unwrap_or(0)
     }
 }
 
-// ── Initialization lifecycle ──────────────────────────────────────────────────
+// ── Initialization lifecycle ───────────────────────────────────────────────────
 
 /// Full initialization: sets sample rate, runs all init sub-steps.
-///
-/// Equivalent to `init()` in the C++ API.
 ///
 /// # Safety
 /// `dsp` must be a valid non-null instance pointer.
@@ -158,7 +146,6 @@ pub unsafe extern "C" fn instanceInitCInterpreterDSPInstance(
         if dsp.is_null() {
             return;
         }
-        // classInit has to be called per instance (tables are not shared).
         class_init_instance(dsp, sample_rate);
         instanceConstantsCInterpreterDSPInstance(dsp, sample_rate);
         instanceResetUserInterfaceCInterpreterDSPInstance(dsp);
@@ -180,15 +167,12 @@ pub unsafe extern "C" fn instanceConstantsCInterpreterDSPInstance(
             return;
         }
         let factory = &(*(*dsp).factory).inner;
-        let sr_off = factory.sr_offset as usize;
-        // explicit &mut ref required to silence `dangerous_implicit_autorefs` (edition 2024)
-        #[allow(clippy::needless_borrow)]
-        if let Some(slot) = (&mut (*dsp).executor.int_heap).get_mut(sr_off) {
+        let sr_off = factory.sr_offset() as usize;
+        if let Some(slot) = (*dsp).executor.int_heap_mut().get_mut(sr_off) {
             *slot = sample_rate;
         }
-        (*dsp)
-            .executor
-            .execute_block(&factory.arena, factory.init_block);
+        let init_block = factory.init_block();
+        factory.execute_block_on(&mut (*dsp).executor, init_block);
     }
 }
 
@@ -205,9 +189,8 @@ pub unsafe extern "C" fn instanceResetUserInterfaceCInterpreterDSPInstance(
             return;
         }
         let factory = &(*(*dsp).factory).inner;
-        (*dsp)
-            .executor
-            .execute_block(&factory.arena, factory.reset_ui_block);
+        let block = factory.reset_ui_block();
+        factory.execute_block_on(&mut (*dsp).executor, block);
     }
 }
 
@@ -222,13 +205,12 @@ pub unsafe extern "C" fn instanceClearCInterpreterDSPInstance(dsp: *mut Interpre
             return;
         }
         let factory = &(*(*dsp).factory).inner;
-        (*dsp)
-            .executor
-            .execute_block(&factory.arena, factory.clear_block);
+        let block = factory.clear_block();
+        factory.execute_block_on(&mut (*dsp).executor, block);
     }
 }
 
-// ── Clone ────────────────────────────────────────────────────────────────────
+// ── Clone ─────────────────────────────────────────────────────────────────────
 
 /// Clone a DSP instance.
 ///
@@ -247,30 +229,22 @@ pub unsafe extern "C" fn cloneCInterpreterDSPInstance(
         let factory_ptr = (*dsp).factory;
         let factory = &(*factory_ptr).inner;
 
-        let mut new_executor = FbcExecutor::new(
-            factory.int_heap_size as usize,
-            factory.real_heap_size as usize,
-        );
-        // Copy heap state from the original.
-        new_executor
-            .int_heap
-            .copy_from_slice(&(*dsp).executor.int_heap);
-        new_executor
-            .real_heap
-            .copy_from_slice(&(*dsp).executor.real_heap);
+        let mut new_executor = FbcExecutorAny::new_for_factory(factory);
+        new_executor.copy_from(&(*dsp).executor);
 
         let clone = alloc_instance(factory_ptr, new_executor);
         (*clone).initialized = (*dsp).initialized;
-        (*clone).cycle = 0; // new instance starts fresh cycle count
+        (*clone).cycle = 0;
         clone
     }
 }
 
-// ── User interface ────────────────────────────────────────────────────────────
+// ── User interface ─────────────────────────────────────────────────────────────
 
 /// Traverse the UI instruction list and invoke `UIGlue` callbacks.
 ///
-/// `zone` pointers in the callbacks reference the instance's `real_heap`.
+/// In double mode, scalar params are narrowed `f64 → f32`; zone pointers
+/// are `*mut f64` reinterpreted as `*mut f32` (app must use `FAUSTFLOAT=double`).
 ///
 /// # Safety
 /// - `dsp` must be a valid non-null instance pointer.
@@ -284,9 +258,8 @@ pub unsafe extern "C" fn buildUserInterfaceCInterpreterDSPInstance(
         if dsp.is_null() || glue.is_null() {
             return;
         }
-        let ui_block = &(*(*dsp).factory).inner.ui_block;
-        #[allow(clippy::needless_borrow)]
-        dispatch_ui(ui_block, &mut (&mut (*dsp).executor.real_heap)[..], glue);
+        let factory = &(*(*dsp).factory).inner;
+        factory.dispatch_ui_glue(&mut (*dsp).executor, glue);
     }
 }
 
@@ -304,18 +277,21 @@ pub unsafe extern "C" fn metadataCInterpreterDSPInstance(
         if dsp.is_null() || meta.is_null() {
             return;
         }
-        let meta_block = &(*(*dsp).factory).inner.meta_block;
+        let meta_block = (*(*dsp).factory).inner.meta_block();
         dispatch_meta(meta_block, meta);
     }
 }
 
-// ── Audio computation ─────────────────────────────────────────────────────────
+// ── Audio computation ──────────────────────────────────────────────────────────
 
 /// Process one buffer of audio samples.
 ///
-/// - `count` — number of frames.
-/// - `inputs` — array of `num_inputs` non-interleaved `float*` buffers.
+/// - `count`   — number of frames.
+/// - `inputs`  — array of `num_inputs` non-interleaved `float*` buffers.
 /// - `outputs` — array of `num_outputs` non-interleaved `float*` buffers.
+///
+/// In double mode, samples are converted `f32 → f64` on input and
+/// `f64 → f32` on output transparently.
 ///
 /// # Safety
 /// - `dsp` must be a valid non-null instance pointer.
@@ -334,40 +310,30 @@ pub unsafe extern "C" fn computeCInterpreterDSPInstance(
 
         let factory = &(*(*dsp).factory).inner;
         let n = count as usize;
-        let num_in = factory.num_inputs as usize;
-        let num_out = factory.num_outputs as usize;
+        let num_in = factory.num_inputs() as usize;
+        let num_out = factory.num_outputs() as usize;
 
         // Build input/output slice views.
         let input_slices: Vec<&[FaustFloat]> = (0..num_in)
-            .map(|i| {
-                let ptr = *inputs.add(i);
-                std::slice::from_raw_parts(ptr, n)
-            })
+            .map(|i| std::slice::from_raw_parts(*inputs.add(i), n))
             .collect();
-
         let mut output_slices: Vec<&mut [FaustFloat]> = (0..num_out)
-            .map(|i| {
-                let ptr = *outputs.add(i);
-                std::slice::from_raw_parts_mut(ptr, n)
-            })
+            .map(|i| std::slice::from_raw_parts_mut(*outputs.add(i), n))
             .collect();
 
         // Store frame count in the 'count' heap slot.
-        // explicit &mut ref required to silence `dangerous_implicit_autorefs` (edition 2024)
-        #[allow(clippy::needless_borrow)]
-        if let Some(slot) = (&mut (*dsp).executor.int_heap).get_mut(factory.count_offset as usize) {
+        let count_off = factory.count_offset() as usize;
+        if let Some(slot) = (*dsp).executor.int_heap_mut().get_mut(count_off) {
             *slot = count;
         }
 
-        // Execute the control block.
-        (*dsp)
-            .executor
-            .execute_block(&factory.arena, factory.compute_block);
-
-        // Execute the DSP block with audio I/O.
-        (*dsp).executor.execute_block_io(
-            &factory.arena,
-            factory.compute_dsp_block,
+        // Execute control block then DSP block with audio I/O.
+        let compute_block = factory.compute_block();
+        let compute_dsp_block = factory.compute_dsp_block();
+        factory.execute_block_on(&mut (*dsp).executor, compute_block);
+        factory.execute_block_io_f32(
+            &mut (*dsp).executor,
+            compute_dsp_block,
             &input_slices,
             &mut output_slices,
         );
@@ -382,9 +348,8 @@ pub unsafe extern "C" fn computeCInterpreterDSPInstance(
 unsafe fn class_init_instance(dsp: *mut InterpreterDspInstance, _sample_rate: c_int) {
     unsafe {
         let factory = &(*(*dsp).factory).inner;
-        (*dsp)
-            .executor
-            .execute_block(&factory.arena, factory.static_init_block);
+        let block = factory.static_init_block();
+        factory.execute_block_on(&mut (*dsp).executor, block);
     }
 }
 
@@ -396,6 +361,5 @@ unsafe fn class_init_instance(dsp: *mut InterpreterDspInstance, _sample_rate: c_
 /// The returned pointer is process-static and must not be freed or mutated.
 #[unsafe(no_mangle)]
 pub extern "C" fn getInterpreterDSPInstanceVersion() -> *const c_char {
-    // Returns the same version as getCLibFaustVersion.
     crate::factory::getCLibFaustVersion()
 }

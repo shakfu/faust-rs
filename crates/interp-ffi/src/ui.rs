@@ -2,6 +2,12 @@
 //!
 //! Iterates `FbcUiInstruction` and `FbcMetaInstruction` lists and calls the
 //! corresponding C callbacks in `UIGlue` / `MetaGlue`.
+//!
+//! # Float/Double dispatch
+//! - `dispatch_ui` — float mode (`f32` heap, `f32` scalars, `*mut f32` zones).
+//! - `dispatch_ui_f64` — double mode: `f64` heap; scalar parameters narrowed to
+//!   `f32` for callbacks; zone pointers are `*mut f64` reinterpreted as
+//!   `*mut f32` (application must use `FAUSTFLOAT=double`).
 
 use std::ffi::CString;
 
@@ -163,6 +169,146 @@ pub(crate) unsafe fn dispatch_meta(meta_block: &[FbcMetaInstruction], glue: *mut
                 let key = c_str(&instr.key);
                 let val = c_str(&instr.value);
                 declare(glue.meta_interface, key.as_ptr(), val.as_ptr());
+            }
+        }
+    }
+}
+
+/// Dispatch a slice of `FbcUiInstruction<f64>` to a `UIGlue` callback table.
+///
+/// Used in double mode (`--double`).  Scalar parameters (`init`, `min`, `max`,
+/// `step`) are narrowed `f64 → f32` before being passed to the callbacks.
+/// Zone pointers are `*mut f64` elements of the `f64` real_heap, cast to
+/// `*mut f32` so the `UIGlue` signatures remain unchanged — the application
+/// must be compiled with `FAUSTFLOAT=double` to interpret them correctly.
+///
+/// # Safety
+/// - `glue` must be non-null and point to a valid `UIGlue`.
+/// - `real_heap` must have at least `instr.offset + 1` elements for widget instructions.
+pub(crate) unsafe fn dispatch_ui_f64(
+    ui: &[FbcUiInstruction<f64>],
+    real_heap: &mut [f64],
+    glue: *mut UIGlue,
+) {
+    unsafe {
+        let glue = &*glue;
+        for instr in ui {
+            let label = c_str(&instr.label);
+            // Zone pointer: *mut f64 reinterpreted as *mut f32 for UIGlue ABI.
+            // Applications compiled with FAUSTFLOAT=double read this as double*.
+            let zone: *mut FaustFloat = if instr.offset >= 0 {
+                real_heap
+                    .get_mut(instr.offset as usize)
+                    .map_or(std::ptr::null_mut(), |r| r as *mut f64 as *mut FaustFloat)
+            } else {
+                std::ptr::null_mut()
+            };
+
+            // Scalar params narrowed f64 → f32 for UIGlue callback signatures.
+            let init = instr.init as FaustFloat;
+            let min = instr.min as FaustFloat;
+            let max = instr.max as FaustFloat;
+            let step = instr.step as FaustFloat;
+
+            match instr.opcode {
+                FbcOpcode::OpenTabBox => {
+                    if let Some(f) = glue.open_tab_box {
+                        f(glue.ui_interface, label.as_ptr());
+                    }
+                }
+                FbcOpcode::OpenHorizontalBox => {
+                    if let Some(f) = glue.open_horizontal_box {
+                        f(glue.ui_interface, label.as_ptr());
+                    }
+                }
+                FbcOpcode::OpenVerticalBox => {
+                    if let Some(f) = glue.open_vertical_box {
+                        f(glue.ui_interface, label.as_ptr());
+                    }
+                }
+                FbcOpcode::CloseBox => {
+                    if let Some(f) = glue.close_box {
+                        f(glue.ui_interface);
+                    }
+                }
+                FbcOpcode::AddButton => {
+                    if let Some(f) = glue.add_button {
+                        f(glue.ui_interface, label.as_ptr(), zone);
+                    }
+                }
+                FbcOpcode::AddCheckButton => {
+                    if let Some(f) = glue.add_check_button {
+                        f(glue.ui_interface, label.as_ptr(), zone);
+                    }
+                }
+                FbcOpcode::AddVerticalSlider => {
+                    if let Some(f) = glue.add_vertical_slider {
+                        f(
+                            glue.ui_interface,
+                            label.as_ptr(),
+                            zone,
+                            init,
+                            min,
+                            max,
+                            step,
+                        );
+                    }
+                }
+                FbcOpcode::AddHorizontalSlider => {
+                    if let Some(f) = glue.add_horizontal_slider {
+                        f(
+                            glue.ui_interface,
+                            label.as_ptr(),
+                            zone,
+                            init,
+                            min,
+                            max,
+                            step,
+                        );
+                    }
+                }
+                FbcOpcode::AddNumEntry => {
+                    if let Some(f) = glue.add_num_entry {
+                        f(
+                            glue.ui_interface,
+                            label.as_ptr(),
+                            zone,
+                            init,
+                            min,
+                            max,
+                            step,
+                        );
+                    }
+                }
+                FbcOpcode::AddHorizontalBargraph => {
+                    if let Some(f) = glue.add_horizontal_bargraph {
+                        f(glue.ui_interface, label.as_ptr(), zone, min, max);
+                    }
+                }
+                FbcOpcode::AddVerticalBargraph => {
+                    if let Some(f) = glue.add_vertical_bargraph {
+                        f(glue.ui_interface, label.as_ptr(), zone, min, max);
+                    }
+                }
+                FbcOpcode::AddSoundfile => {
+                    if let Some(f) = glue.add_soundfile {
+                        let url = c_str(&instr.key);
+                        f(
+                            glue.ui_interface,
+                            label.as_ptr(),
+                            url.as_ptr(),
+                            std::ptr::null_mut(),
+                        );
+                    }
+                }
+                FbcOpcode::Declare => {
+                    if let Some(f) = glue.declare {
+                        let key = c_str(&instr.key);
+                        let val = c_str(&instr.value);
+                        f(glue.ui_interface, zone, key.as_ptr(), val.as_ptr());
+                    }
+                }
+                _ => {}
             }
         }
     }

@@ -690,7 +690,11 @@ fn selected_fir_verify_options(cli: &CliArgs) -> FirVerifyOptions {
 }
 
 fn selected_real_type(cli: &CliArgs) -> RealType {
-    if cli.double { RealType::Float64 } else { RealType::Float32 }
+    if cli.double {
+        RealType::Float64
+    } else {
+        RealType::Float32
+    }
 }
 
 fn compiler_from_cli(cli: &CliArgs) -> Compiler {
@@ -720,7 +724,8 @@ fn compile_fixture_to_interp_text(
     module: fir::FirId,
     options: &InterpOptions,
 ) -> Result<String, String> {
-    let factory = generate_interp_module::<f32>(store, module, options).map_err(|e| e.to_string())?;
+    let factory =
+        generate_interp_module::<f32>(store, module, options).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
     write_fbc(&factory, &mut buf, false).map_err(|e| e.to_string())?;
     String::from_utf8(buf).map_err(|e| e.to_string())

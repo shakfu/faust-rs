@@ -281,9 +281,14 @@ pub struct FfiCompileArgs {
     pub search_paths: Vec<PathBuf>,
     /// Optional class/module name override from `-cn`.
     pub module_name: Option<String>,
+    /// Use double-precision (64-bit) floating-point for internal DSP arithmetic.
+    ///
+    /// Set by the `-double` flag in the `argv` vector passed to FFI factory
+    /// constructors.  Mirrors the reference Faust compiler's `-double` option.
+    pub double: bool,
 }
 
-/// Parses the shared FFI option subset (`-I`, `-cn`) from an argv vector.
+/// Parses the shared FFI option subset (`-I`, `-cn`, `-double`) from an argv vector.
 pub fn parse_ffi_compile_args(argv: &[String]) -> Result<FfiCompileArgs, String> {
     let mut parsed = FfiCompileArgs::default();
     let mut i = 0usize;
@@ -303,6 +308,11 @@ pub fn parse_ffi_compile_args(argv: &[String]) -> Result<FfiCompileArgs, String>
             };
             parsed.module_name = Some(value.clone());
             i += 2;
+            continue;
+        }
+        if arg == "-double" {
+            parsed.double = true;
+            i += 1;
             continue;
         }
         i += 1;

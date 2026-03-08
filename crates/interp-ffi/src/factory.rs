@@ -4,21 +4,20 @@
 //! bitcode serialization, and the global factory cache.
 //!
 //! # Scope
-//! - `readCInterpreterDSPFactoryFromBitcode[File]` — fully implemented via
-//!   `codegen::backends::interp::serial::read_fbc`.
-//! - `writeCInterpreterDSPFactoryToBitcode[File]` — fully implemented via
-//!   `codegen::backends::interp::serial::write_fbc`.
-//! - `createCInterpreterDSPFactoryFromFile/String` — implemented through the
-//!   top-level `compiler` crate wired to the interpreter backend fast-lane.
+//! - `readCInterpreterDSPFactoryFromBitcode[File]` — auto-detects `float`/`double`
+//!   from the `.fbc` header and deserializes the matching variant.
+//! - `writeCInterpreterDSPFactoryToBitcode[File]` — dispatches on the factory variant.
+//! - `createCInterpreterDSPFactoryFromFile/String` — compiled through the
+//!   top-level `compiler` crate; recognizes `-double` in `argv`.
 //! - `createCInterpreterDSPFactoryFromSignals/Boxes` — return `null`.
 //! - Cache management functions — fully implemented.
 
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::io::BufReader;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use codegen::backends::interp::{FAUST_VERSION, read_fbc, write_fbc};
-use compiler::{Compiler as FaustCompiler, SignalFirLane, default_import_search_paths};
+use codegen::backends::interp::{FAUST_VERSION, read_fbc};
+use compiler::{Compiler as FaustCompiler, RealType, SignalFirLane, default_import_search_paths};
 use utils::{
     FfiCompileArgs, decode_c_argv as decode_c_argv_shared, free_c_memory_c_string_only,
     null_c_string_array, optional_c_str_arg,
@@ -29,9 +28,12 @@ use crate::cache::{
     cache_all_sha_keys, cache_drain, cache_insert, cache_lookup, cache_remove_by_ptr, start_mt,
     stop_mt,
 };
-use crate::types::{InterpreterDspFactory, alloc_c_string, alloc_factory, free_factory};
+use crate::types::{
+    FbcDspFactoryAny, InterpreterDspFactory, alloc_c_string, alloc_factory, free_factory,
+    write_fbc_any,
+};
 
-// ── Version ──────────────────────────────────────────────────────────────────
+// ── Version ───────────────────────────────────────────────────────────────────
 
 /// Returns the Faust library version string.
 ///
@@ -51,6 +53,8 @@ pub extern "C" fn getCLibFaustVersion() -> *const c_char {
 // ── Bitcode serialization ─────────────────────────────────────────────────────
 
 /// Create a DSP factory from a bitcode string in memory.
+///
+/// The precision (`float` or `double`) is auto-detected from the `.fbc` header.
 ///
 /// # Safety
 /// - `bitcode` must be a valid null-terminated C string.
@@ -75,15 +79,15 @@ pub unsafe extern "C" fn readCInterpreterDSPFactoryFromBitcode(
             }
         };
         let mut reader = BufReader::new(s.as_bytes());
-        match read_fbc::<f32>(&mut reader) {
+        match read_fbc_any(&mut reader) {
             Ok(factory) => {
-                let sha = factory.sha_key.clone();
+                let sha = factory.sha_key().to_owned();
                 let ptr = alloc_factory(factory);
                 cache_insert(&sha, ptr);
                 ptr
             }
             Err(e) => {
-                write_error(error_msg, &format!("{e}"));
+                write_error(error_msg, &e.to_string());
                 std::ptr::null_mut()
             }
         }
@@ -95,8 +99,7 @@ pub unsafe extern "C" fn readCInterpreterDSPFactoryFromBitcode(
 /// # Safety
 /// `factory` must be a valid non-null factory pointer.
 ///
-/// Returns a heap-allocated C string.  The caller must free it with
-/// `freeCMemory`.
+/// Returns a heap-allocated C string.  The caller must free it with `freeCMemory`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn writeCInterpreterDSPFactoryToBitcode(
     factory: *mut InterpreterDspFactory,
@@ -106,7 +109,7 @@ pub unsafe extern "C" fn writeCInterpreterDSPFactoryToBitcode(
             return std::ptr::null_mut();
         }
         let mut buf: Vec<u8> = Vec::new();
-        match write_fbc(&(*factory).inner, &mut buf, false) {
+        match write_fbc_any(&(*factory).inner, &mut buf) {
             Ok(()) => {
                 let s = String::from_utf8_lossy(&buf);
                 alloc_c_string(&s)
@@ -117,6 +120,8 @@ pub unsafe extern "C" fn writeCInterpreterDSPFactoryToBitcode(
 }
 
 /// Create a DSP factory from a bitcode file on disk.
+///
+/// The precision (`float` or `double`) is auto-detected from the `.fbc` header.
 ///
 /// # Safety
 /// - `bit_code_path` must be a valid null-terminated C string.
@@ -142,15 +147,15 @@ pub unsafe extern "C" fn readCInterpreterDSPFactoryFromBitcodeFile(
             }
         };
         let mut reader = BufReader::new(file);
-        match read_fbc::<f32>(&mut reader) {
+        match read_fbc_any(&mut reader) {
             Ok(factory) => {
-                let sha = factory.sha_key.clone();
+                let sha = factory.sha_key().to_owned();
                 let ptr = alloc_factory(factory);
                 cache_insert(&sha, ptr);
                 ptr
             }
             Err(e) => {
-                write_error(error_msg, &format!("{e}"));
+                write_error(error_msg, &e.to_string());
                 std::ptr::null_mut()
             }
         }
@@ -182,13 +187,15 @@ pub unsafe extern "C" fn writeCInterpreterDSPFactoryToBitcodeFile(
             Err(_) => return false,
         };
         let mut writer = std::io::BufWriter::new(file);
-        write_fbc(&(*factory).inner, &mut writer, false).is_ok()
+        write_fbc_any(&(*factory).inner, &mut writer).is_ok()
     }
 }
 
-// ── Factory constructors (compiler pipeline) ─────────────────────────────────
+// ── Factory constructors (compiler pipeline) ──────────────────────────────────
 
 /// Create a DSP factory from a Faust source file using the compiler fast-lane.
+///
+/// Accepts `-double` in `argv` to produce a double-precision factory.
 ///
 /// # Safety
 /// Pointer arguments must follow the C API contract (null-terminated strings).
@@ -221,6 +228,8 @@ pub unsafe extern "C" fn createCInterpreterDSPFactoryFromFile(
 }
 
 /// Create a DSP factory from a Faust source string using the compiler fast-lane.
+///
+/// Accepts `-double` in `argv` to produce a double-precision factory.
 ///
 /// # Safety
 /// Pointer arguments must follow the C API contract (null-terminated strings).
@@ -269,9 +278,6 @@ pub unsafe extern "C" fn createCInterpreterDSPFactoryFromString(
 
 /// Look up a factory in the cache by SHA key.
 ///
-/// Increments the conceptual reference count (currently just returns the cached
-/// pointer — reference counting is deferred to a future implementation).
-///
 /// # Safety
 /// `sha_key` must be a valid null-terminated C string.
 #[unsafe(no_mangle)]
@@ -288,9 +294,6 @@ pub unsafe extern "C" fn getCInterpreterDSPFactoryFromSHAKey(
 }
 
 /// Delete a DSP factory (frees the Rust allocation).
-///
-/// Removes the factory from the global cache and drops it.
-/// Returns `true` if the memory was actually freed.
 ///
 /// # Safety
 /// `factory` must be a valid non-null factory pointer or null.
@@ -321,11 +324,6 @@ pub extern "C" fn deleteAllCInterpreterDSPFactories() {
 
 /// Return all factory SHA keys as a null-terminated array of C strings.
 ///
-/// Each string in the returned array must be freed with `freeCMemory`.
-/// The outer array pointer itself must also be freed with `freeCMemory`.
-///
-/// Returns null if the cache is empty.
-///
 /// # Safety
 /// The caller owns the returned allocation and must free each string element,
 /// then free the outer array pointer using `freeCMemory`.
@@ -335,19 +333,14 @@ pub extern "C" fn getAllCInterpreterDSPFactories() -> *mut *mut c_char {
     if keys.is_empty() {
         return std::ptr::null_mut();
     }
-    // Allocate an array of (keys.len() + 1) pointers (null-terminated).
     let mut ptrs: Vec<*mut c_char> = keys.into_iter().map(|k| alloc_c_string(&k)).collect();
-    ptrs.push(std::ptr::null_mut()); // null terminator
-
+    ptrs.push(std::ptr::null_mut());
     let boxed: Box<[*mut c_char]> = ptrs.into_boxed_slice();
-    // SAFETY: box raw ptr to the first element of the slice.
     let raw = Box::into_raw(boxed);
     raw.cast::<*mut c_char>()
 }
 
 /// Return the JSON description of a factory's UI and metadata.
-///
-/// The returned string must be freed with `freeCMemory`.
 ///
 /// # Safety
 /// `factory` must be a valid non-null factory pointer.
@@ -359,16 +352,12 @@ pub unsafe extern "C" fn getCInterpreterDSPFactoryJSON(
         if factory.is_null() {
             return std::ptr::null_mut();
         }
-        let inner = &(*factory).inner;
-        let json = build_json(inner);
+        let json = build_json(&(*factory).inner);
         alloc_c_string(&json)
     }
 }
 
 /// Return library dependencies of a factory (always empty for the interpreter).
-///
-/// The returned null-terminated array must be freed by the caller using
-/// `freeCMemory` on each element and then on the array itself.
 ///
 /// # Safety
 /// `factory` must be a valid non-null factory pointer.
@@ -376,28 +365,18 @@ pub unsafe extern "C" fn getCInterpreterDSPFactoryJSON(
 pub unsafe extern "C" fn getCInterpreterDSPFactoryLibraryList(
     _factory: *mut InterpreterDspFactory,
 ) -> *const *const c_char {
-    // The interpreter backend has no external library dependencies.
     null_c_string_array()
 }
 
 // ── Multi-thread mode ─────────────────────────────────────────────────────────
 
 /// Enable multi-thread safe access mode.
-///
-/// Returns `true` if multi-thread access was successfully started.
-///
-/// # Safety
-/// Enabling MT mode concurrently with non-MT cache access from foreign code is
-/// undefined at the C ABI contract level.
 #[unsafe(no_mangle)]
 pub extern "C" fn startMTDSPFactories() -> bool {
     start_mt()
 }
 
 /// Disable multi-thread safe access mode.
-///
-/// # Safety
-/// Callers must coordinate with all threads currently using factory pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn stopMTDSPFactories() {
     stop_mt();
@@ -410,10 +389,6 @@ pub extern "C" fn stopMTDSPFactories() {
 /// # Safety
 /// `ptr` must be a valid pointer previously returned by one of the `write*`,
 /// `getAll*`, or `get*JSON` functions — or null.
-///
-/// For null-terminated `char**` arrays returned by `getAllCInterpreterDSPFactories`:
-/// first call `freeCMemory` on each individual string element, then on the
-/// outer array pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn freeCMemory(ptr: *mut c_void) {
     unsafe { free_c_memory_c_string_only(ptr) }
@@ -429,26 +404,51 @@ unsafe fn write_error(buf: *mut c_char, msg: &str) {
     unsafe { write_error_4096(buf, msg) }
 }
 
-/// Runs the shared post-`argv` FFI factory creation flow for interpreter backend.
+/// Auto-detect precision from the `.fbc` header and deserialize the factory.
 ///
-/// This helper centralizes:
-/// - backend-agnostic C error-buffer wiring,
-/// - common cache insertion,
+/// The first line of a `.fbc` file is `interpreter_dsp_factory float` or
+/// `interpreter_dsp_factory double`.  We peek at that line (without consuming
+/// the rest of the reader) to select the correct `read_fbc` instantiation.
+fn read_fbc_any(reader: &mut dyn BufRead) -> Result<FbcDspFactoryAny, String> {
+    // Buffer the entire content first so we can re-read after peeking.
+    let mut content = String::new();
+    reader
+        .read_to_string(&mut content)
+        .map_err(|e| format!("I/O error reading .fbc content: {e}"))?;
+
+    let first_line = content.lines().next().unwrap_or("");
+    let is_double = first_line.trim_end().ends_with("double");
+
+    if is_double {
+        let mut cursor = std::io::Cursor::new(content.as_bytes());
+        read_fbc::<f64>(&mut cursor)
+            .map(FbcDspFactoryAny::Float64)
+            .map_err(|e| e.to_string())
+    } else {
+        let mut cursor = std::io::Cursor::new(content.as_bytes());
+        read_fbc::<f32>(&mut cursor)
+            .map(FbcDspFactoryAny::Float32)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Central post-`argv` FFI factory creation flow.
+///
+/// All file and string constructors funnel through here to share:
+/// - C error-buffer wiring,
+/// - cache insertion,
 /// - final opaque pointer allocation.
-///
-/// File and string constructors still keep distinct compile paths so file-based
-/// import resolution semantics (`default_import_search_paths`) remain intact.
-unsafe fn create_interp_factory_with_argv<F>(
+fn create_interp_factory_with_argv<F>(
     argv: &[String],
     error_msg: *mut c_char,
     compile: F,
 ) -> *mut InterpreterDspFactory
 where
-    F: FnOnce(&[String]) -> Result<codegen::backends::interp::FbcDspFactory<f32>, String>,
+    F: FnOnce(&[String]) -> Result<FbcDspFactoryAny, String>,
 {
     match compile(argv) {
         Ok(factory) => {
-            let sha = factory.sha_key.clone();
+            let sha = factory.sha_key().to_owned();
             let ptr = alloc_factory(factory);
             cache_insert(&sha, ptr);
             ptr
@@ -460,86 +460,16 @@ where
     }
 }
 
-/// Build a minimal JSON description of a factory's UI and metadata.
-fn build_json(inner: &codegen::backends::interp::FbcDspFactory<f32>) -> String {
-    use std::fmt::Write;
-
-    let mut s = String::new();
-    let _ = writeln!(s, "{{");
-    let _ = writeln!(s, r#"  "name": "{}","#, json_escape(&inner.name));
-    let _ = writeln!(s, r#"  "sha_key": "{}","#, json_escape(&inner.sha_key));
-    let _ = writeln!(
-        s,
-        r#"  "compile_options": "{}","#,
-        json_escape(&inner.compile_options)
-    );
-    let _ = writeln!(s, r#"  "version": "{}","#, FAUST_VERSION);
-    let _ = writeln!(s, r#"  "inputs": {},"#, inner.num_inputs);
-    let _ = writeln!(s, r#"  "outputs": {},"#, inner.num_outputs);
-
-    // Meta block
-    let _ = write!(s, r#"  "meta": ["#);
-    for (i, m) in inner.meta_block.iter().enumerate() {
-        if i > 0 {
-            let _ = write!(s, ", ");
-        }
-        let _ = write!(
-            s,
-            r#"{{ "{}": "{}" }}"#,
-            json_escape(&m.key),
-            json_escape(&m.value)
-        );
-    }
-    let _ = writeln!(s, r"],");
-
-    // UI block (simplified — just list widgets)
-    let _ = write!(s, r#"  "ui": ["#);
-    for (i, u) in inner.ui_block.iter().enumerate() {
-        if i > 0 {
-            let _ = write!(s, ", ");
-        }
-        let _ = write!(
-            s,
-            r#"{{ "type": "{}", "label": "{}", "address": {} }}"#,
-            json_escape(&format!("{:?}", u.opcode)),
-            json_escape(&u.label),
-            u.offset
-        );
-    }
-    let _ = writeln!(s, "]");
-
-    let _ = write!(s, "}}");
-    s
-}
-
-/// Escape a string for JSON output.
-fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
-}
-
-/// Minimal subset of Faust CLI-like arguments interpreted by `interp-ffi`
-/// factory constructors.
-///
-/// This intentionally supports only the options needed to exercise the full
-/// parser/eval/propagate -> signal->FIR (fast-lane) -> interp backend chain
-/// from the C API during parity testing.
 /// Compile a Faust source file to an interpreter factory via the compiler
 /// facade using the transform fast-lane.
 ///
-/// Pipeline used:
-/// `parse -> eval -> propagate -> transform::signal_fir -> codegen::interp`
-///
-/// The resulting `.fbc` text is immediately re-read with `read_fbc` so this
-/// FFI layer reuses the same factory construction path as bitcode import.
+/// Respects `-double` in `argv`.
 fn compile_factory_from_file_fastlane(
     path: &Path,
     argv: &[String],
-) -> Result<codegen::backends::interp::FbcDspFactory<f32>, String> {
+) -> Result<FbcDspFactoryAny, String> {
     let parsed = parse_ffi_compile_args(argv)?;
+    let real_type = ffi_real_type(&parsed);
     let interp_options = codegen::backends::interp::InterpOptions {
         module_name: parsed.module_name,
         ..codegen::backends::interp::InterpOptions::default()
@@ -548,7 +478,7 @@ fn compile_factory_from_file_fastlane(
     let mut search_paths = default_import_search_paths(path);
     search_paths.extend(parsed.search_paths);
 
-    let compiler = FaustCompiler::new();
+    let compiler = FaustCompiler::new().with_real_type(real_type);
     let fbc = compiler
         .compile_file_to_interp_with_lane(
             path,
@@ -563,20 +493,20 @@ fn compile_factory_from_file_fastlane(
 /// Compile a Faust source string to an interpreter factory via the compiler
 /// facade using the transform fast-lane.
 ///
-/// Unlike the file-based constructor, this path does not resolve imports from a
-/// source-file parent directory; only the supported parsed options are applied.
+/// Respects `-double` in `argv`.
 fn compile_factory_from_string_fastlane(
     source_name: &str,
     source: &str,
     argv: &[String],
-) -> Result<codegen::backends::interp::FbcDspFactory<f32>, String> {
+) -> Result<FbcDspFactoryAny, String> {
     let parsed = parse_ffi_compile_args(argv)?;
+    let real_type = ffi_real_type(&parsed);
     let interp_options = codegen::backends::interp::InterpOptions {
         module_name: parsed.module_name.or_else(|| Some(source_name.to_owned())),
         ..codegen::backends::interp::InterpOptions::default()
     };
 
-    let compiler = FaustCompiler::new();
+    let compiler = FaustCompiler::new().with_real_type(real_type);
     let fbc = compiler
         .compile_source_to_interp_with_lane(
             source_name,
@@ -588,24 +518,109 @@ fn compile_factory_from_string_fastlane(
     compile_factory_from_fbc_text(&fbc)
 }
 
-/// Parse in-memory `.fbc` text emitted by the compiler facade back into an
-/// owned interpreter factory.
-///
-/// This keeps the exported FFI factory allocation path identical regardless of
-/// whether the source came from direct bitcode import or source compilation.
-fn compile_factory_from_fbc_text(
-    fbc: &str,
-) -> Result<codegen::backends::interp::FbcDspFactory<f32>, String> {
-    let mut reader = BufReader::new(fbc.as_bytes());
-    read_fbc::<f32>(&mut reader).map_err(|e| format!("{e}"))
+/// Parse in-memory `.fbc` text back into an owned factory of the appropriate
+/// precision (auto-detected from the header).
+fn compile_factory_from_fbc_text(fbc: &str) -> Result<FbcDspFactoryAny, String> {
+    let mut cursor = std::io::Cursor::new(fbc.as_bytes());
+    read_fbc_any(&mut cursor)
+}
+
+/// Map `FfiCompileArgs.double` to a `RealType` for the compiler.
+fn ffi_real_type(parsed: &FfiCompileArgs) -> RealType {
+    if parsed.double {
+        RealType::Float64
+    } else {
+        RealType::Float32
+    }
+}
+
+/// Build a minimal JSON description of a factory's UI and metadata.
+fn build_json(inner: &FbcDspFactoryAny) -> String {
+    use std::fmt::Write;
+
+    let mut s = String::new();
+    let _ = writeln!(s, "{{");
+    let _ = writeln!(s, r#"  "name": "{}","#, json_escape(inner.name()));
+    let _ = writeln!(s, r#"  "sha_key": "{}","#, json_escape(inner.sha_key()));
+    let _ = writeln!(
+        s,
+        r#"  "compile_options": "{}","#,
+        json_escape(inner.compile_options())
+    );
+    let _ = writeln!(s, r#"  "version": "{}","#, FAUST_VERSION);
+    let _ = writeln!(s, r#"  "inputs": {},"#, inner.num_inputs());
+    let _ = writeln!(s, r#"  "outputs": {},"#, inner.num_outputs());
+    let _ = writeln!(
+        s,
+        r#"  "precision": "{}","#,
+        if inner.is_double() { "double" } else { "float" }
+    );
+
+    // Meta block
+    let _ = write!(s, r#"  "meta": ["#);
+    for (i, m) in inner.meta_block().iter().enumerate() {
+        if i > 0 {
+            let _ = write!(s, ", ");
+        }
+        let _ = write!(
+            s,
+            r#"{{ "{}": "{}" }}"#,
+            json_escape(&m.key),
+            json_escape(&m.value)
+        );
+    }
+    let _ = writeln!(s, r"],");
+
+    // UI block — widget listing; type-erased via `FbcDspFactoryAny` helpers.
+    let _ = write!(s, r#"  "ui": ["#);
+    match inner {
+        FbcDspFactoryAny::Float32(f) => {
+            for (i, u) in f.ui_block.iter().enumerate() {
+                if i > 0 {
+                    let _ = write!(s, ", ");
+                }
+                let _ = write!(
+                    s,
+                    r#"{{ "type": "{}", "label": "{}", "address": {} }}"#,
+                    json_escape(&format!("{:?}", u.opcode)),
+                    json_escape(&u.label),
+                    u.offset
+                );
+            }
+        }
+        FbcDspFactoryAny::Float64(f) => {
+            for (i, u) in f.ui_block.iter().enumerate() {
+                if i > 0 {
+                    let _ = write!(s, ", ");
+                }
+                let _ = write!(
+                    s,
+                    r#"{{ "type": "{}", "label": "{}", "address": {} }}"#,
+                    json_escape(&format!("{:?}", u.opcode)),
+                    json_escape(&u.label),
+                    u.offset
+                );
+            }
+        }
+    }
+    let _ = writeln!(s, "]");
+    let _ = write!(s, "}}");
+    s
+}
+
+/// Escape a string for JSON output.
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 /// Decode the `argc`/`argv` pair from the C API into owned UTF-8 Rust strings.
 ///
 /// # Safety
-/// - When `argc > 0`, `argv` must be non-null and point to at least `argc`
-///   entries.
-/// - Each entry must be a valid null-terminated C string.
+/// Each entry must be a valid null-terminated C string.
 unsafe fn decode_c_argv(argc: i32, argv: *const *const c_char) -> Result<Vec<String>, String> {
     if argc <= 0 {
         return Ok(Vec::new());
@@ -614,13 +629,6 @@ unsafe fn decode_c_argv(argc: i32, argv: *const *const c_char) -> Result<Vec<Str
 }
 
 /// Parse the FFI-supported subset of Faust CLI options.
-///
-/// Currently recognized:
-/// - `-I <path>`
-/// - `-cn <name>`
-///
-/// Unknown options are ignored so callers can pass broader option vectors while
-/// the FFI implementation incrementally grows coverage.
 fn parse_ffi_compile_args(argv: &[String]) -> Result<FfiCompileArgs, String> {
     parse_ffi_compile_args_shared(argv)
 }
@@ -630,7 +638,7 @@ mod tests {
     use super::{compile_factory_from_string_fastlane, parse_ffi_compile_args};
 
     #[test]
-    fn parse_ffi_compile_args_accepts_i_and_cn() {
+    fn parse_ffi_compile_args_accepts_i_cn_and_double() {
         let argv = vec![
             "-I".to_owned(),
             "lib1".to_owned(),
@@ -638,24 +646,45 @@ mod tests {
             "lib2".to_owned(),
             "-cn".to_owned(),
             "MyDSP".to_owned(),
+            "-double".to_owned(),
         ];
         let parsed = parse_ffi_compile_args(&argv).expect("ffi args should parse");
         assert_eq!(parsed.search_paths.len(), 2);
         assert_eq!(parsed.search_paths[0], std::path::PathBuf::from("lib1"));
         assert_eq!(parsed.search_paths[1], std::path::PathBuf::from("lib2"));
         assert_eq!(parsed.module_name.as_deref(), Some("MyDSP"));
+        assert!(parsed.double);
     }
 
     #[test]
-    fn create_factory_from_string_wires_interp_fastlane() {
+    fn create_factory_from_string_float_wires_interp_fastlane() {
         let factory = compile_factory_from_string_fastlane(
             "UnitTestDSP",
             "process = _;",
             &["-cn".to_owned(), "UnitTestDSP".to_owned()],
         )
-        .expect("fast-lane interp compilation should succeed");
-        assert_eq!(factory.num_inputs, 1);
-        assert_eq!(factory.num_outputs, 1);
-        assert_eq!(factory.name, "UnitTestDSP");
+        .expect("fast-lane interp float compilation should succeed");
+        assert_eq!(factory.num_inputs(), 1);
+        assert_eq!(factory.num_outputs(), 1);
+        assert_eq!(factory.name(), "UnitTestDSP");
+        assert!(!factory.is_double());
+    }
+
+    #[test]
+    fn create_factory_from_string_double_produces_double_factory() {
+        let factory = compile_factory_from_string_fastlane(
+            "UnitTestDSPDouble",
+            "process = _;",
+            &[
+                "-cn".to_owned(),
+                "UnitTestDSPDouble".to_owned(),
+                "-double".to_owned(),
+            ],
+        )
+        .expect("fast-lane interp double compilation should succeed");
+        assert_eq!(factory.num_inputs(), 1);
+        assert_eq!(factory.num_outputs(), 1);
+        assert_eq!(factory.name(), "UnitTestDSPDouble");
+        assert!(factory.is_double(), "expected double factory");
     }
 }
