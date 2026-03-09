@@ -2,7 +2,7 @@
 
 Date: 2026-03-09
 
-Status: in progress
+Status: completed
 
 ## Progress
 
@@ -11,7 +11,7 @@ Status: in progress
 - [x] Step 2: add simple signal typing for the pre-FIR subset
 - [x] Step 3: port the reduced `SignalPromotion` cast insertion rules
 - [x] Step 4: make `signal_fir` consume prepared types for delay/recursion/table lowering
-- [ ] Step 5: run differential validation on parity-critical DSP families
+- [x] Step 5: run differential validation on parity-critical DSP families
 
 ## 1. Goal
 
