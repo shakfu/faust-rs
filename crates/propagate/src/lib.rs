@@ -168,10 +168,7 @@ enum FlatNodeKind {
 /// This is a structural contract check only. It does not evaluate, simplify, or
 /// normalize the tree. Callers should use it at the `eval/a2sb -> propagate`
 /// boundary to guarantee that propagation never sees residual evaluator syntax.
-pub fn try_build_flat_box(
-    arena: &TreeArena,
-    root: BoxId,
-) -> Result<FlatBoxId, FlatBoxBuildError> {
+pub fn try_build_flat_box(arena: &TreeArena, root: BoxId) -> Result<FlatBoxId, FlatBoxBuildError> {
     validate_flat_box(arena, root)
 }
 
@@ -293,9 +290,7 @@ fn flat_node_kind(arena: &TreeArena, node: FlatBoxId) -> Result<FlatNodeKind, Fl
         BoxMatch::Inputs(_) => Ok(FlatNodeKind::Inputs),
         BoxMatch::Outputs(_) => Ok(FlatNodeKind::Outputs),
         BoxMatch::Ondemand(body) => Ok(FlatNodeKind::Ondemand(validate_flat_box(arena, body)?)),
-        BoxMatch::Upsampling(body) => {
-            Ok(FlatNodeKind::Upsampling(validate_flat_box(arena, body)?))
-        }
+        BoxMatch::Upsampling(body) => Ok(FlatNodeKind::Upsampling(validate_flat_box(arena, body)?)),
         BoxMatch::Downsampling(body) => {
             Ok(FlatNodeKind::Downsampling(validate_flat_box(arena, body)?))
         }
@@ -1024,77 +1019,180 @@ fn propagate_inner(
         FlatNodeKind::Prim2 => {
             let op = match_box(arena, box_tree.as_tree_id());
             match op {
-                BoxMatch::Add => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.add(x, y)),
-                BoxMatch::Sub => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.sub(x, y)),
-                BoxMatch::Mul => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.mul(x, y)),
-                BoxMatch::Div => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.div(x, y)),
-                BoxMatch::Rem => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.rem(x, y)),
-                BoxMatch::And => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.and(x, y)),
-                BoxMatch::Or => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.or(x, y)),
-                BoxMatch::Xor => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.xor(x, y)),
-                BoxMatch::Lsh => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.lsh(x, y)),
-                BoxMatch::Rsh => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.arsh(x, y)),
-                BoxMatch::Lt => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.lt(x, y)),
-                BoxMatch::Le => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.le(x, y)),
-                BoxMatch::Gt => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.gt(x, y)),
-                BoxMatch::Ge => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.ge(x, y)),
-                BoxMatch::Eq => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.eq(x, y)),
-                BoxMatch::Ne => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.ne(x, y)),
-                BoxMatch::Pow => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.pow(x, y)),
-                BoxMatch::Atan2 => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.atan2(x, y)),
-                BoxMatch::Fmod => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.fmod(x, y)),
-                BoxMatch::Remainder => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.remainder(x, y)),
-                BoxMatch::Min => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.min(x, y)),
-                BoxMatch::Max => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.max(x, y)),
-                BoxMatch::Delay => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.delay(x, y)),
-                BoxMatch::Prefix => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.prefix(x, y)),
-                BoxMatch::Attach => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.attach(x, y)),
-                BoxMatch::Enable => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.enable(x, y)),
-                BoxMatch::Control => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.control(x, y)),
+                BoxMatch::Add => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.add(x, y))
+                }
+                BoxMatch::Sub => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.sub(x, y))
+                }
+                BoxMatch::Mul => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.mul(x, y))
+                }
+                BoxMatch::Div => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.div(x, y))
+                }
+                BoxMatch::Rem => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.rem(x, y))
+                }
+                BoxMatch::And => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.and(x, y))
+                }
+                BoxMatch::Or => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.or(x, y))
+                }
+                BoxMatch::Xor => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.xor(x, y))
+                }
+                BoxMatch::Lsh => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.lsh(x, y))
+                }
+                BoxMatch::Rsh => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.arsh(x, y))
+                }
+                BoxMatch::Lt => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.lt(x, y))
+                }
+                BoxMatch::Le => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.le(x, y))
+                }
+                BoxMatch::Gt => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.gt(x, y))
+                }
+                BoxMatch::Ge => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.ge(x, y))
+                }
+                BoxMatch::Eq => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.eq(x, y))
+                }
+                BoxMatch::Ne => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.ne(x, y))
+                }
+                BoxMatch::Pow => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.pow(x, y))
+                }
+                BoxMatch::Atan2 => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| {
+                    b.atan2(x, y)
+                }),
+                BoxMatch::Fmod => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.fmod(x, y))
+                }
+                BoxMatch::Remainder => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| {
+                        b.remainder(x, y)
+                    })
+                }
+                BoxMatch::Min => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.min(x, y))
+                }
+                BoxMatch::Max => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.max(x, y))
+                }
+                BoxMatch::Delay => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| {
+                    b.delay(x, y)
+                }),
+                BoxMatch::Prefix => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| {
+                    b.prefix(x, y)
+                }),
+                BoxMatch::Attach => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| {
+                    b.attach(x, y)
+                }),
+                BoxMatch::Enable => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| {
+                    b.enable(x, y)
+                }),
+                BoxMatch::Control => {
+                    binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| {
+                        b.control(x, y)
+                    })
+                }
                 _ => unreachable!("flat prim2 node must decode to a binary primitive"),
             }
         }
         FlatNodeKind::Prim1 => {
             let op = match_box(arena, box_tree.as_tree_id());
             match op {
-                BoxMatch::Delay1 => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.delay1(x)),
-                BoxMatch::IntCast => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.int_cast(x)),
-                BoxMatch::FloatCast => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.float_cast(x)),
-                BoxMatch::Acos => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.acos(x)),
-                BoxMatch::Asin => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.asin(x)),
-                BoxMatch::Atan => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.atan(x)),
+                BoxMatch::Delay1 => {
+                    unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.delay1(x))
+                }
+                BoxMatch::IntCast => {
+                    unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.int_cast(x))
+                }
+                BoxMatch::FloatCast => {
+                    unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.float_cast(x))
+                }
+                BoxMatch::Acos => {
+                    unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.acos(x))
+                }
+                BoxMatch::Asin => {
+                    unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.asin(x))
+                }
+                BoxMatch::Atan => {
+                    unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.atan(x))
+                }
                 BoxMatch::Cos => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.cos(x)),
                 BoxMatch::Sin => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.sin(x)),
                 BoxMatch::Tan => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.tan(x)),
                 BoxMatch::Exp => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.exp(x)),
                 BoxMatch::Log => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.log(x)),
-                BoxMatch::Log10 => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.log10(x)),
-                BoxMatch::Sqrt => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.sqrt(x)),
+                BoxMatch::Log10 => {
+                    unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.log10(x))
+                }
+                BoxMatch::Sqrt => {
+                    unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.sqrt(x))
+                }
                 BoxMatch::Abs => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.abs(x)),
-                BoxMatch::Floor => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.floor(x)),
-                BoxMatch::Ceil => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.ceil(x)),
-                BoxMatch::Rint => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.rint(x)),
-                BoxMatch::Round => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.round(x)),
-                BoxMatch::Lowest => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.lowest(x)),
-                BoxMatch::Highest => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.highest(x)),
+                BoxMatch::Floor => {
+                    unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.floor(x))
+                }
+                BoxMatch::Ceil => {
+                    unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.ceil(x))
+                }
+                BoxMatch::Rint => {
+                    unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.rint(x))
+                }
+                BoxMatch::Round => {
+                    unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.round(x))
+                }
+                BoxMatch::Lowest => {
+                    unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.lowest(x))
+                }
+                BoxMatch::Highest => {
+                    unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.highest(x))
+                }
                 _ => unreachable!("flat prim1 node must decode to a unary primitive"),
             }
         }
         FlatNodeKind::Prim3 => {
             let op = match_box(arena, box_tree.as_tree_id());
             match op {
-                BoxMatch::ReadOnlyTable => ternary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y, z| b.read_only_table(x, y, z)),
-                BoxMatch::Select2 => ternary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y, z| b.select2(x, y, z)),
-                BoxMatch::AssertBounds => ternary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y, z| b.assert_bounds(x, y, z)),
+                BoxMatch::ReadOnlyTable => {
+                    ternary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y, z| {
+                        b.read_only_table(x, y, z)
+                    })
+                }
+                BoxMatch::Select2 => {
+                    ternary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y, z| {
+                        b.select2(x, y, z)
+                    })
+                }
+                BoxMatch::AssertBounds => {
+                    ternary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y, z| {
+                        b.assert_bounds(x, y, z)
+                    })
+                }
                 _ => unreachable!("flat prim3 node must decode to a ternary primitive"),
             }
         }
-        FlatNodeKind::Prim4 => quaternary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y, z, w| {
-            b.select3(x, y, z, w)
-        }),
-        FlatNodeKind::Prim5 => quinary_prim(arena, box_tree.as_tree_id(), inputs, |b, s, i, wi, ws, ri| {
-            b.write_read_table(s, i, wi, ws, ri)
-        }),
+        FlatNodeKind::Prim4 => {
+            quaternary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y, z, w| {
+                b.select3(x, y, z, w)
+            })
+        }
+        FlatNodeKind::Prim5 => quinary_prim(
+            arena,
+            box_tree.as_tree_id(),
+            inputs,
+            |b, s, i, wi, ws, ri| b.write_read_table(s, i, wi, ws, ri),
+        ),
         FlatNodeKind::FConst => {
             let BoxMatch::FConst(ty, name, file) = match_box(arena, box_tree.as_tree_id()) else {
                 unreachable!("flat fconst node must decode to BoxMatch::FConst")
@@ -1232,15 +1330,14 @@ fn propagate_inner(
         FlatNodeKind::Par(left, right) => {
             let left_arity = box_arity_flat(arena, left, cache)?;
             let right_arity = box_arity_flat(arena, right, cache)?;
-            let left_out =
-                propagate_in_slot_env(
-                    arena,
-                    left,
-                    &inputs[..left_arity.inputs],
-                    cache,
-                    slot_env,
-                    clock_env,
-                )?;
+            let left_out = propagate_in_slot_env(
+                arena,
+                left,
+                &inputs[..left_arity.inputs],
+                cache,
+                slot_env,
+                clock_env,
+            )?;
             let mut right_out = propagate_in_slot_env(
                 arena,
                 right,
@@ -1341,7 +1438,8 @@ fn propagate_inner(
             Ok(Vec::new())
         }
         FlatNodeKind::Route => {
-            let BoxMatch::Route(ins, outs, route_spec) = match_box(arena, box_tree.as_tree_id()) else {
+            let BoxMatch::Route(ins, outs, route_spec) = match_box(arena, box_tree.as_tree_id())
+            else {
                 unreachable!("flat route node must decode to BoxMatch::Route")
             };
             let input_count = usize_from_int_node(arena, ins, "route inputs")?;
@@ -1412,15 +1510,42 @@ fn propagate_inner(
             }
             Ok(outputs)
         }
-        FlatNodeKind::Ondemand(body) => {
-            propagate_clocked_wrapper(arena, box_tree, body, inputs, cache, slot_env, clock_env, ClockedWrapperKind::Ondemand)
-        }
-        FlatNodeKind::Upsampling(body) => {
-            propagate_clocked_wrapper(arena, box_tree, body, inputs, cache, slot_env, clock_env, ClockedWrapperKind::Upsampling)
-        }
-        FlatNodeKind::Downsampling(body) => {
-            propagate_clocked_wrapper(arena, box_tree, body, inputs, cache, slot_env, clock_env, ClockedWrapperKind::Downsampling)
-        }
+        FlatNodeKind::Ondemand(body) => propagate_clocked_wrapper(
+            arena,
+            box_tree,
+            body,
+            inputs,
+            ClockedWrapperCtx {
+                cache,
+                slot_env,
+                clock_env,
+            },
+            ClockedWrapperKind::Ondemand,
+        ),
+        FlatNodeKind::Upsampling(body) => propagate_clocked_wrapper(
+            arena,
+            box_tree,
+            body,
+            inputs,
+            ClockedWrapperCtx {
+                cache,
+                slot_env,
+                clock_env,
+            },
+            ClockedWrapperKind::Upsampling,
+        ),
+        FlatNodeKind::Downsampling(body) => propagate_clocked_wrapper(
+            arena,
+            box_tree,
+            body,
+            inputs,
+            ClockedWrapperCtx {
+                cache,
+                slot_env,
+                clock_env,
+            },
+            ClockedWrapperKind::Downsampling,
+        ),
     }
 }
 
@@ -1431,14 +1556,18 @@ enum ClockedWrapperKind {
     Downsampling,
 }
 
+struct ClockedWrapperCtx<'a> {
+    cache: &'a mut ArityCache,
+    slot_env: &'a mut SlotEnv,
+    clock_env: TreeId,
+}
+
 fn propagate_clocked_wrapper(
     arena: &mut TreeArena,
     wrapper_node: FlatBoxId,
     body: FlatBoxId,
     inputs: &[SigId],
-    cache: &mut ArityCache,
-    slot_env: &mut SlotEnv,
-    clock_env: TreeId,
+    ctx: ClockedWrapperCtx<'_>,
     kind: ClockedWrapperKind,
 ) -> Result<Vec<SigId>, PropagateError> {
     let Some((&clock, tail)) = inputs.split_first() else {
@@ -1449,6 +1578,11 @@ fn propagate_clocked_wrapper(
         });
     };
 
+    let ClockedWrapperCtx {
+        cache,
+        slot_env,
+        clock_env,
+    } = ctx;
     let body_arity = box_arity_flat(arena, body, cache)?;
     if is_const_zero(arena, clock) {
         let mut b = SigBuilder::new(arena);
@@ -1761,10 +1895,12 @@ fn ffunction_arity(arena: &TreeArena, ff: TreeId) -> Result<usize, PropagateErro
         node: signature,
         kind: "ffunction-signature",
     })?;
-    signature_len.checked_sub(2).ok_or(PropagateError::UnsupportedBox {
-        node: signature,
-        kind: "ffunction-signature",
-    })
+    signature_len
+        .checked_sub(2)
+        .ok_or(PropagateError::UnsupportedBox {
+            node: signature,
+            kind: "ffunction-signature",
+        })
 }
 
 /// Fallible `usize -> i32` conversion used for stable signal-index nodes.

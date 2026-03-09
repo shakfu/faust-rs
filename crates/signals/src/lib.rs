@@ -811,17 +811,22 @@ impl<'a> SigBuilder<'a> {
     /// returning the inner node unchanged when both clocks are structurally
     /// identical.
     pub fn clocked(&mut self, clock: SigId, sig: SigId) -> SigId {
-        if let SigMatch::Clocked(existing_clock, _) = match_sig(self.arena, sig) {
-            if existing_clock == clock {
-                return sig;
-            }
+        if let SigMatch::Clocked(existing_clock, _) = match_sig(self.arena, sig)
+            && existing_clock == clock
+        {
+            return sig;
         }
         intern_tag(self.arena, SIG_CLOCKED_TAG, &[clock, sig])
     }
 
     #[must_use]
     /// Builds the C++ `sigDoubleClocked(inside, outside, y)` nested shape.
-    pub fn double_clocked(&mut self, inside_clock: SigId, outside_clock: SigId, sig: SigId) -> SigId {
+    pub fn double_clocked(
+        &mut self,
+        inside_clock: SigId,
+        outside_clock: SigId,
+        sig: SigId,
+    ) -> SigId {
         let outer = self.clocked(outside_clock, sig);
         self.clocked(inside_clock, outer)
     }

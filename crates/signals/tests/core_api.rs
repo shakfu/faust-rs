@@ -152,8 +152,14 @@ fn ui_shapes_decode_with_list4_payload_order() {
         SigMatch::HBargraph(label, min, max, sig)
     );
     assert_eq!(match_sig(&arena, sf), SigMatch::Soundfile(label));
-    assert_eq!(match_sig(&arena, sf_len), SigMatch::SoundfileLength(sf, sf_part));
-    assert_eq!(match_sig(&arena, sf_rate), SigMatch::SoundfileRate(sf, sf_part));
+    assert_eq!(
+        match_sig(&arena, sf_len),
+        SigMatch::SoundfileLength(sf, sf_part)
+    );
+    assert_eq!(
+        match_sig(&arena, sf_rate),
+        SigMatch::SoundfileRate(sf, sf_part)
+    );
     assert_eq!(
         match_sig(&arena, sf_buf),
         SigMatch::SoundfileBuffer(sf, sf_chan, sf_part, sf_ridx)

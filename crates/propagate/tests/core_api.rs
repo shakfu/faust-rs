@@ -266,7 +266,10 @@ fn soundfile_box_lowers_to_length_rate_and_channel_buffers() {
         }
         other => panic!("expected SoundfileLength, got {other:?}"),
     };
-    assert_eq!(match_sig(&arena, out[1]), SigMatch::SoundfileRate(sf_sig, inputs[0]));
+    assert_eq!(
+        match_sig(&arena, out[1]),
+        SigMatch::SoundfileRate(sf_sig, inputs[0])
+    );
 
     let SigMatch::SoundfileBuffer(sf0, chan0, part0, ridx0) = match_sig(&arena, out[2]) else {
         panic!("first channel should be SoundfileBuffer");
@@ -317,24 +320,42 @@ fn clocked_wrapper_boxes_port_trivial_and_structural_cases() {
     let SigMatch::Seq(od_wrapper, od_payload) = match_sig(&arena, od[0]) else {
         panic!("ondemand output should be seq(wrapper, payload)");
     };
-    assert!(matches!(match_sig(&arena, od_wrapper), SigMatch::OnDemand(_)));
-    assert!(matches!(match_sig(&arena, od_payload), SigMatch::PermVar(_)));
+    assert!(matches!(
+        match_sig(&arena, od_wrapper),
+        SigMatch::OnDemand(_)
+    ));
+    assert!(matches!(
+        match_sig(&arena, od_payload),
+        SigMatch::PermVar(_)
+    ));
 
     let us = propagate(&mut arena, upsampling, &[h, x], &mut ArityCache::new())
         .expect("upsampling dynamic clock should propagate");
     let SigMatch::Seq(us_wrapper, us_payload) = match_sig(&arena, us[0]) else {
         panic!("upsampling output should be seq(wrapper, payload)");
     };
-    assert!(matches!(match_sig(&arena, us_wrapper), SigMatch::Upsampling(_)));
-    assert!(matches!(match_sig(&arena, us_payload), SigMatch::PermVar(_)));
+    assert!(matches!(
+        match_sig(&arena, us_wrapper),
+        SigMatch::Upsampling(_)
+    ));
+    assert!(matches!(
+        match_sig(&arena, us_payload),
+        SigMatch::PermVar(_)
+    ));
 
     let ds = propagate(&mut arena, downsampling, &[h, x], &mut ArityCache::new())
         .expect("downsampling dynamic clock should propagate");
     let SigMatch::Seq(ds_wrapper, ds_payload) = match_sig(&arena, ds[0]) else {
         panic!("downsampling output should be seq(wrapper, payload)");
     };
-    assert!(matches!(match_sig(&arena, ds_wrapper), SigMatch::Downsampling(_)));
-    assert!(matches!(match_sig(&arena, ds_payload), SigMatch::PermVar(_)));
+    assert!(matches!(
+        match_sig(&arena, ds_wrapper),
+        SigMatch::Downsampling(_)
+    ));
+    assert!(matches!(
+        match_sig(&arena, ds_payload),
+        SigMatch::PermVar(_)
+    ));
 }
 
 #[test]
@@ -366,7 +387,10 @@ fn route_box_propagates_by_mixing_selected_inputs() {
         panic!("first route output should be an add");
     };
     assert_eq!(rhs, inputs[1]);
-    assert_eq!(match_sig(&arena, partial), SigMatch::BinOp(BinOp::Add, zero, inputs[0]));
+    assert_eq!(
+        match_sig(&arena, partial),
+        SigMatch::BinOp(BinOp::Add, zero, inputs[0])
+    );
     assert_eq!(match_sig(&arena, out[1]), SigMatch::Int(0));
 }
 
@@ -392,7 +416,8 @@ fn ffun_box_arity_and_propagation_follow_signature() {
     };
     let inputs = make_sig_input_list(&mut arena, 1);
 
-    let arity = box_arity(&arena, wrapped, &mut ArityCache::new()).expect("ffun arity should infer");
+    let arity =
+        box_arity(&arena, wrapped, &mut ArityCache::new()).expect("ffun arity should infer");
     assert_eq!(arity.inputs, 1);
     assert_eq!(arity.outputs, 1);
 
@@ -404,9 +429,7 @@ fn ffun_box_arity_and_propagation_follow_signature() {
     };
     assert_eq!(sig_ff, ff);
     assert_eq!(arena.hd(largs), Some(inputs[0]));
-    assert!(arena
-        .tl(largs)
-        .is_some_and(|tail| arena.is_nil(tail)));
+    assert!(arena.tl(largs).is_some_and(|tail| arena.is_nil(tail)));
 }
 
 #[test]
@@ -491,7 +514,10 @@ fn flat_box_builder_rejects_evaluator_only_families() {
             (bb.modulation(ident, modulation_body), "modulation"),
             (bb.with_local_def(with_lhs, with_rhs), "withlocaldef"),
             (bb.modif_local_def(modif_lhs, modif_rhs), "modiflocaldef"),
-            (bb.with_rec_def(withrec_a, withrec_b, withrec_c), "withrecdef"),
+            (
+                bb.with_rec_def(withrec_a, withrec_b, withrec_c),
+                "withrecdef",
+            ),
             (bb.component(ident), "component"),
             (bb.library(ident), "library"),
             (bb.appl(appl_fun, appl_arg), "appl"),
@@ -506,10 +532,7 @@ fn flat_box_builder_rejects_evaluator_only_families() {
 
     for (node, kind) in bad {
         let err = try_build_flat_box(&arena, node).expect_err("node must be rejected");
-        assert_eq!(
-            err,
-            FlatBoxBuildError::UnexpectedPostEvalBox { node, kind }
-        );
+        assert_eq!(err, FlatBoxBuildError::UnexpectedPostEvalBox { node, kind });
     }
 }
 
@@ -555,11 +578,13 @@ fn box_arity_flat_uses_validated_flat_boundary() {
     };
 
     let flat = try_build_flat_box(&arena, seq).expect("seq should validate as flat");
-    let arity = box_arity_flat(&arena, flat, &mut ArityCache::new()).expect("typed arity should work");
+    let arity =
+        box_arity_flat(&arena, flat, &mut ArityCache::new()).expect("typed arity should work");
     assert_eq!(arity.inputs, 2);
     assert_eq!(arity.outputs, 1);
 
-    let err = box_arity(&arena, bad_case, &mut ArityCache::new()).expect_err("case should be rejected before arity inference");
+    let err = box_arity(&arena, bad_case, &mut ArityCache::new())
+        .expect_err("case should be rejected before arity inference");
     assert_eq!(
         err,
         PropagateError::UnsupportedBox {
@@ -591,8 +616,8 @@ fn propagate_typed_uses_flat_boundary_and_matches_wrapper() {
     let inputs = make_sig_input_list(&mut arena, 2);
     let typed_out = propagate_typed(&mut arena, flat, &inputs, &mut ArityCache::new())
         .expect("typed propagation should succeed");
-    let raw_out =
-        propagate(&mut arena, seq, &inputs, &mut ArityCache::new()).expect("wrapper should succeed");
+    let raw_out = propagate(&mut arena, seq, &inputs, &mut ArityCache::new())
+        .expect("wrapper should succeed");
     assert_eq!(typed_out, raw_out);
 
     let err = propagate(&mut arena, bad_case, &[], &mut ArityCache::new())
