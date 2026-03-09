@@ -17,6 +17,8 @@
 //!   `SIGWAVEFORM` / `SIGRDTBL` / `SIGWRTBL`,
 //! - non-trivial table slice (`Step 2H`) for `SIGWRTBL(size, gen(..), ..)` with
 //!   constant size and deterministic generator expansion.
+//! - pre-lowering staging (`Preparation Step 1`): clone the output forest into a
+//!   private arena and run forest-wide `de_bruijn_to_sym` before FIR emission.
 //!
 //! Current `Step 2H` scope still excludes complex generator forms depending on
 //! runtime context/loop variables; those are reported as typed
@@ -40,6 +42,8 @@ pub use error::{SignalFirError, SignalFirErrorCode};
 use fir::{FirId, FirStore, FirType};
 use signals::SigId;
 use tlib::TreeArena;
+
+use crate::signal_prepare::prepare_signals_for_fir;
 
 /// Internal DSP computation precision.
 ///
@@ -131,6 +135,7 @@ pub struct SignalFirOutput {
 /// # Current behavior (Step 2A/2B/2C/2D/2E/2F/2G/2H)
 /// - validates options and top-level signal/arity contract,
 /// - builds a deterministic planning snapshot,
+/// - prepares the whole output forest in a private staging arena,
 /// - lowers one executable bootstrap signal slice to FIR.
 ///
 /// # Errors
@@ -144,11 +149,17 @@ pub fn compile_signals_to_fir_fastlane(
     options: &SignalFirOptions,
 ) -> Result<SignalFirOutput, SignalFirError> {
     let plan = planner::plan_signals(signals, num_inputs, num_outputs, options)?;
+    let prepared = prepare_signals_for_fir(_arena, signals).map_err(|err| {
+        SignalFirError::new(
+            SignalFirErrorCode::UnsupportedSignalNode,
+            format!("signal preparation failed: {err}"),
+        )
+    })?;
     module::build_module(
         &plan,
         options.module_name.as_str(),
-        _arena,
-        signals,
+        &prepared.arena,
+        &prepared.outputs,
         options.real_type.as_fir_type(),
     )
 }

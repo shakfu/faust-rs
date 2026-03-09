@@ -162,3 +162,25 @@ fn clone_subtree_from_reinterns_nodes_into_destination_arena() {
     };
     assert_eq!(dst.tag_name(dst_tag), Some("pair"));
 }
+
+#[test]
+fn clone_forest_from_preserves_cross_root_sharing() {
+    let mut src = TreeArena::new();
+    let sym = src.symbol("x");
+    let one = src.int(1);
+    let pair_tag = src.intern_tag("pair");
+    let shared = src.intern(NodeKind::Tag(pair_tag), &[sym, one]);
+    let left = src.cons(shared, src.nil());
+    let right = src.cons(shared, src.nil());
+
+    let mut dst = TreeArena::new();
+    let cloned = dst.clone_forest_from(&src, &[left, right]);
+
+    assert_eq!(cloned.len(), 2);
+    let left_head = dst.hd(cloned[0]).expect("left head");
+    let right_head = dst.hd(cloned[1]).expect("right head");
+    assert_eq!(
+        left_head, right_head,
+        "shared source subtrees should remain shared across cloned roots"
+    );
+}

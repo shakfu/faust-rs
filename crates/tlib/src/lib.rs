@@ -24,8 +24,10 @@
 //!   [`RecursionError`] returns instead of process-global assertions.
 //!
 //! Pipeline contract note:
-//! - current fast-lane (`transform::signal_fir`) still consumes de Bruijn recursion directly;
-//!   normalization-level symbolic conversion remains opt-in at call-site boundaries.
+//! - the fast-lane now clones the whole signal forest into a private staging arena
+//!   and applies [`de_bruijn_to_sym`] before FIR lowering.
+//! - normalization-level symbolic conversion remains opt-in at other call-site
+//!   boundaries that expose signal trees directly.
 
 mod arena;
 mod property;

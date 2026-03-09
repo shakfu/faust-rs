@@ -12,6 +12,8 @@
 //! # Current status
 //! - [`signal_fir`] is implemented for the fast-lane prototype and exercised by
 //!   integration tests/golden checks.
+//! - [`signal_prepare`] now owns the pre-FIR staging boundary used to clone the
+//!   output forest and run forest-wide `de_bruijn_to_sym` conversion.
 //! - Additional transform families (scheduling/vectorization/rewrites) are
 //!   planned but not yet exposed as stable public APIs.
 //!
@@ -20,6 +22,7 @@
 //!   Rust typed errors/options.
 
 pub mod signal_fir;
+pub mod signal_prepare;
 
 pub const CRATE_NAME: &str = "transform";
 

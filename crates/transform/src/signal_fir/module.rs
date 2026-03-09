@@ -7,7 +7,8 @@
 //! - core unary math nodes (`sin/cos/tan/exp/log/log10/sqrt/abs`),
 //! - `SIGDELAY1`/`SIGDELAY`/`SIGPREFIX`,
 //! - `SIGSELECT2`, `SIGINTCAST`/`SIGFLOATCAST`/`SIGBITCAST`,
-//! - `SIGPROJ`/`SIGREC` (real lowering for canonical `DEBRUIJN`/`DEBRUIJNREF` recursion).
+//! - `SIGPROJ`/`SIGREC` (real lowering for canonical recursion groups in de
+//!   Bruijn or symbolic form).
 //! - `SIGWAVEFORM`/`SIGRDTBL`/`SIGWRTBL` for direct waveform tables.
 //! - `SIGOUTPUT` passthrough nodes.
 //! - sectioned FIR module assembly (`metadata`, `instanceConstants`,
@@ -46,7 +47,7 @@ use fir::{
     FirStore, FirType, NamedType, SliderRange, SliderType, UiBoxType, match_fir,
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
-use tlib::{NodeKind, TreeArena, tree_to_int};
+use tlib::{NodeKind, TreeArena, match_sym_rec, match_sym_ref, tree_to_int};
 
 use super::SignalFirOutput;
 use super::error::{SignalFirError, SignalFirErrorCode};
@@ -473,6 +474,7 @@ struct SignalToFirLower<'a> {
     state_name_by_node: HashMap<SigId, String>,
     scheduled_state_updates: HashSet<SigId>,
     recursion_stack: Vec<String>,
+    recursion_vars: Vec<SigId>,
     ui_controls: HashMap<SigId, String>,
     soundfiles: HashMap<SigId, String>,
     waveform_tables: HashMap<SigId, String>,
@@ -507,6 +509,7 @@ impl<'a> SignalToFirLower<'a> {
             state_name_by_node: HashMap::new(),
             scheduled_state_updates: HashSet::new(),
             recursion_stack: Vec::new(),
+            recursion_vars: Vec::new(),
             ui_controls: HashMap::new(),
             soundfiles: HashMap::new(),
             waveform_tables: HashMap::new(),
@@ -1330,8 +1333,8 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.select2(cond, then_value, else_value, real_ty))
     }
 
-    /// Lowers recursion projection nodes by decoding de Bruijn references and
-    /// recursively lowering the resolved group body.
+    /// Lowers recursion projection nodes by decoding recursive groups in de
+    /// Bruijn or symbolic form and recursively lowering the resolved group body.
     fn lower_proj(
         &mut self,
         node: SigId,
@@ -1359,7 +1362,27 @@ impl<'a> SignalToFirLower<'a> {
             return Ok(b.load_var(name, AccessType::Struct, real_ty));
         }
 
+        if let Some(var) = match_sym_ref(self.arena, group) {
+            let depth = self
+                .recursion_vars
+                .iter()
+                .rposition(|bound| *bound == var)
+                .map(|slot| self.recursion_vars.len() - slot)
+                .ok_or_else(|| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::UnsupportedSignalNode,
+                        format!("unbound symbolic recursion variable {}", var.as_u32()),
+                    )
+                })?;
+            let name = self.recursion_stack[self.recursion_stack.len() - depth].clone();
+            let real_ty = self.real_ty();
+            let mut b = FirBuilder::new(&mut self.store);
+            return Ok(b.load_var(name, AccessType::Struct, real_ty));
+        }
+
         let body = if let Some(body) = self.decode_debruijn_group(group) {
+            body
+        } else if let Some(body) = self.decode_symbolic_group(group) {
             body
         } else if let SigMatch::Rec(body) = match_sig(self.arena, group) {
             body
@@ -1367,7 +1390,7 @@ impl<'a> SignalToFirLower<'a> {
             return Err(SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
                 format!(
-                    "SIGPROJ group must be DEBRUIJN/DEBRUIJNREF/SIGREC in Step 2C.2 (expr={})",
+                    "SIGPROJ group must be DEBRUIJN/DEBRUIJNREF/SYMREC/SYMREF/SIGREC in Step 2C.2 (expr={})",
                     dump_sig_readable(self.arena, node)
                 ),
             ));
@@ -1382,9 +1405,15 @@ impl<'a> SignalToFirLower<'a> {
             b.load_var(name.clone(), AccessType::Struct, real_ty)
         };
         if self.scheduled_state_updates.insert(node) {
+            if let Some((var, _)) = match_sym_rec(self.arena, group) {
+                self.recursion_vars.push(var);
+            }
             self.recursion_stack.push(name.clone());
             let rhs = self.lower_signal(body)?;
             self.recursion_stack.pop();
+            if match_sym_rec(self.arena, group).is_some() {
+                self.recursion_vars.pop();
+            }
             let mut b = FirBuilder::new(&mut self.store);
             self.compute_updates
                 .push(b.store_var(name, AccessType::Struct, rhs));
@@ -1405,6 +1434,16 @@ impl<'a> SignalToFirLower<'a> {
             return None;
         };
         self.arena.hd(*list)
+    }
+
+    /// Decodes one `SYMREC(var, body_list)` group to its first payload signal.
+    ///
+    /// `de_bruijn_to_sym` preserves the list-shaped recursive payload used by
+    /// propagated signal groups, so the FIR lowerer must keep decoding the first
+    /// element instead of assuming one direct body child.
+    fn decode_symbolic_group(&self, group: SigId) -> Option<SigId> {
+        let (_, body_list) = match_sym_rec(self.arena, group)?;
+        self.arena.hd(body_list)
     }
 
     /// Decodes one `DEBRUIJNREF(level)` index from a recursion group payload.

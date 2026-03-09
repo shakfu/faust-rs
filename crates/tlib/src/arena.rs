@@ -435,38 +435,22 @@ impl TreeArena {
     /// in the destination arena before rebuilding the enclosing node.
     #[must_use]
     pub fn clone_subtree_from(&mut self, src: &TreeArena, root: TreeId) -> TreeId {
-        fn clone_rec(
-            dst: &mut TreeArena,
-            src: &TreeArena,
-            id: TreeId,
-            memo: &mut HashMap<TreeId, TreeId>,
-        ) -> TreeId {
-            if let Some(existing) = memo.get(&id) {
-                return *existing;
-            }
-            let cloned = match src.node(id) {
-                Some(node) => {
-                    let mut cloned_children = Vec::with_capacity(node.children.len());
-                    for child in node.children.as_slice() {
-                        cloned_children.push(clone_rec(dst, src, *child, memo));
-                    }
-                    let cloned_kind = match &node.kind {
-                        NodeKind::Tag(tag_id) => match src.tag_name(*tag_id) {
-                            Some(tag_name) => NodeKind::Tag(dst.intern_tag(tag_name)),
-                            None => NodeKind::Tag(*tag_id),
-                        },
-                        other => other.clone(),
-                    };
-                    dst.intern(cloned_kind, &cloned_children)
-                }
-                None => dst.nil(),
-            };
-            memo.insert(id, cloned);
-            cloned
-        }
-
         let mut memo = HashMap::new();
         clone_rec(self, src, root, &mut memo)
+    }
+
+    /// Clones multiple roots from another arena while preserving cross-root sharing.
+    ///
+    /// This is the staging helper needed by transforms that must rebuild a whole
+    /// signal forest into a private mutable arena before running rewriting passes
+    /// such as `de_bruijn_to_sym`.
+    #[must_use]
+    pub fn clone_forest_from(&mut self, src: &TreeArena, roots: &[TreeId]) -> Vec<TreeId> {
+        let mut memo = HashMap::new();
+        roots
+            .iter()
+            .map(|root| clone_rec(self, src, *root, &mut memo))
+            .collect()
     }
 
     /// Interns a tag string and returns its numeric tag id.
@@ -560,4 +544,34 @@ impl TreeArena {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
+}
+
+fn clone_rec(
+    dst: &mut TreeArena,
+    src: &TreeArena,
+    id: TreeId,
+    memo: &mut HashMap<TreeId, TreeId>,
+) -> TreeId {
+    if let Some(existing) = memo.get(&id) {
+        return *existing;
+    }
+    let cloned = match src.node(id) {
+        Some(node) => {
+            let mut cloned_children = Vec::with_capacity(node.children.len());
+            for child in node.children.as_slice() {
+                cloned_children.push(clone_rec(dst, src, *child, memo));
+            }
+            let cloned_kind = match &node.kind {
+                NodeKind::Tag(tag_id) => match src.tag_name(*tag_id) {
+                    Some(tag_name) => NodeKind::Tag(dst.intern_tag(tag_name)),
+                    None => NodeKind::Tag(*tag_id),
+                },
+                other => other.clone(),
+            };
+            dst.intern(cloned_kind, &cloned_children)
+        }
+        None => dst.nil(),
+    };
+    memo.insert(id, cloned);
+    cloned
 }
