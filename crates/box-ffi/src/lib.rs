@@ -38,7 +38,9 @@ use codegen::backends::cpp::{CppOptions, generate_cpp_module};
 use codegen::backends::interp::{InterpOptions, generate_interp_module, write_fbc};
 use compiler::Compiler;
 use fir::{FirId, FirStore};
-use propagate::{ArityCache, box_arity, make_sig_input_list, propagate};
+use propagate::{
+    ArityCache, box_arity_typed, make_sig_input_list, propagate_typed, try_build_flat_box,
+};
 use tlib::{
     NodeKind, TreeArena, TreeId, de_bruijn_to_sym, tree_to_double, tree_to_int, tree_to_str,
 };
@@ -286,11 +288,12 @@ pub unsafe fn export_fir_from_box_handle(
         let Some(box_id) = ctx.decode(box_ptr) else {
             return Err("null or unknown box pointer".to_owned());
         };
+        let flat = try_build_flat_box(&ctx.arena, box_id).map_err(|e| e.to_string())?;
         let mut cache = ArityCache::default();
-        let arity = box_arity(&ctx.arena, box_id, &mut cache).map_err(|e| e.to_string())?;
+        let arity = box_arity_typed(&ctx.arena, flat, &mut cache).map_err(|e| e.to_string())?;
         let inputs = make_sig_input_list(&mut ctx.arena, arity.inputs);
-        let outputs =
-            propagate(&mut ctx.arena, box_id, &inputs, &mut cache).map_err(|e| e.to_string())?;
+        let outputs = propagate_typed(&mut ctx.arena, flat, &inputs, &mut cache)
+            .map_err(|e| e.to_string())?;
         lower_signal_roots_to_fir(&ctx.arena, &outputs, module_name)
     })
 }
@@ -2384,8 +2387,16 @@ pub extern "C" fn CgetBoxType(
             write_out_int(outputs, 0);
             return false;
         };
+        let flat = match try_build_flat_box(&ctx.arena, box_id) {
+            Ok(flat) => flat,
+            Err(_) => {
+                write_out_int(inputs, 0);
+                write_out_int(outputs, 0);
+                return false;
+            }
+        };
         let mut cache = ArityCache::default();
-        match box_arity(&ctx.arena, box_id, &mut cache) {
+        match box_arity_typed(&ctx.arena, flat, &mut cache) {
             Ok(arity) => {
                 write_out_int(inputs, c_int::try_from(arity.inputs).unwrap_or_default());
                 write_out_int(outputs, c_int::try_from(arity.outputs).unwrap_or_default());
@@ -2414,8 +2425,15 @@ pub unsafe extern "C" fn CboxesToSignals(
             unsafe { utils::write_error_4096(error_msg, "null or unknown box pointer") };
             return std::ptr::null_mut();
         };
+        let flat = match try_build_flat_box(&ctx.arena, box_id) {
+            Ok(flat) => flat,
+            Err(e) => {
+                unsafe { utils::write_error_4096(error_msg, &e.to_string()) };
+                return std::ptr::null_mut();
+            }
+        };
         let mut cache = ArityCache::default();
-        let arity = match box_arity(&ctx.arena, box_id, &mut cache) {
+        let arity = match box_arity_typed(&ctx.arena, flat, &mut cache) {
             Ok(a) => a,
             Err(e) => {
                 unsafe { utils::write_error_4096(error_msg, &e.to_string()) };
@@ -2423,7 +2441,7 @@ pub unsafe extern "C" fn CboxesToSignals(
             }
         };
         let inputs = make_sig_input_list(&mut ctx.arena, arity.inputs);
-        let outputs = match propagate(&mut ctx.arena, box_id, &inputs, &mut cache) {
+        let outputs = match propagate_typed(&mut ctx.arena, flat, &inputs, &mut cache) {
             Ok(sigs) => sigs,
             Err(e) => {
                 unsafe { utils::write_error_4096(error_msg, &e.to_string()) };
@@ -2449,8 +2467,15 @@ pub unsafe extern "C" fn CboxesToSignals2(
             unsafe { utils::write_error_4096(error_msg, "null or unknown box pointer") };
             return std::ptr::null_mut();
         };
+        let flat = match try_build_flat_box(&ctx.arena, box_id) {
+            Ok(flat) => flat,
+            Err(e) => {
+                unsafe { utils::write_error_4096(error_msg, &e.to_string()) };
+                return std::ptr::null_mut();
+            }
+        };
         let mut cache = ArityCache::default();
-        let arity = match box_arity(&ctx.arena, box_id, &mut cache) {
+        let arity = match box_arity_typed(&ctx.arena, flat, &mut cache) {
             Ok(a) => a,
             Err(e) => {
                 unsafe { utils::write_error_4096(error_msg, &e.to_string()) };
@@ -2458,7 +2483,7 @@ pub unsafe extern "C" fn CboxesToSignals2(
             }
         };
         let inputs = make_sig_input_list(&mut ctx.arena, arity.inputs);
-        let outputs = match propagate(&mut ctx.arena, box_id, &inputs, &mut cache) {
+        let outputs = match propagate_typed(&mut ctx.arena, flat, &inputs, &mut cache) {
             Ok(sigs) => sigs,
             Err(e) => {
                 unsafe { utils::write_error_4096(error_msg, &e.to_string()) };
@@ -2529,8 +2554,15 @@ pub unsafe extern "C" fn CcreateSourceFromBoxes(
             return std::ptr::null_mut();
         };
 
+        let flat = match try_build_flat_box(&ctx.arena, box_id) {
+            Ok(flat) => flat,
+            Err(e) => {
+                unsafe { utils::write_error_4096(error_msg, &e.to_string()) };
+                return std::ptr::null_mut();
+            }
+        };
         let mut cache = ArityCache::default();
-        let arity = match box_arity(&ctx.arena, box_id, &mut cache) {
+        let arity = match box_arity_typed(&ctx.arena, flat, &mut cache) {
             Ok(a) => a,
             Err(e) => {
                 unsafe { utils::write_error_4096(error_msg, &e.to_string()) };
@@ -2538,7 +2570,7 @@ pub unsafe extern "C" fn CcreateSourceFromBoxes(
             }
         };
         let inputs = make_sig_input_list(&mut ctx.arena, arity.inputs);
-        let signals = match propagate(&mut ctx.arena, box_id, &inputs, &mut cache) {
+        let signals = match propagate_typed(&mut ctx.arena, flat, &inputs, &mut cache) {
             Ok(sigs) => sigs,
             Err(e) => {
                 unsafe { utils::write_error_4096(error_msg, &e.to_string()) };

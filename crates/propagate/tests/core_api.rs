@@ -7,7 +7,7 @@
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::{IntoDiagnostic, Severity, Stage, codes};
 use propagate::{
-    ArityCache, FlatBoxBuildError, PropagateError, box_arity, box_arity_flat, make_sig_input_list,
+    ArityCache, FlatBoxBuildError, PropagateError, box_arity, box_arity_typed, make_sig_input_list,
     propagate, propagate_typed, try_build_flat_box,
 };
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
@@ -560,7 +560,7 @@ fn flat_box_builder_rejects_nested_non_flat_subtrees() {
 }
 
 #[test]
-fn box_arity_flat_uses_validated_flat_boundary() {
+fn box_arity_typed_uses_validated_flat_boundary() {
     let mut arena = TreeArena::new();
     let (seq, bad_case) = {
         let mut bb = BoxBuilder::new(&mut arena);
@@ -579,7 +579,7 @@ fn box_arity_flat_uses_validated_flat_boundary() {
 
     let flat = try_build_flat_box(&arena, seq).expect("seq should validate as flat");
     let arity =
-        box_arity_flat(&arena, flat, &mut ArityCache::new()).expect("typed arity should work");
+        box_arity_typed(&arena, flat, &mut ArityCache::new()).expect("typed arity should work");
     assert_eq!(arity.inputs, 2);
     assert_eq!(arity.outputs, 1);
 

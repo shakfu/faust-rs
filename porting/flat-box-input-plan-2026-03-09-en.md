@@ -1,6 +1,6 @@
 # Typed `FlatBoxId` Input Plan (2026-03-09)
 
-Status: in progress
+Status: completed
 
 Scope: define a typed Rust input contract for `crates/propagate` that matches
 the C++ post-`evalprocess -> a2sb -> propagate` boundary instead of accepting a
@@ -596,6 +596,28 @@ Interpretation:
 Pass criterion:
 
 - pipeline boundary is explicit in API docs and tests.
+
+Current status on 2026-03-09:
+
+- completed:
+  - `box_arity_typed(...)` is now the primary typed arity entry point
+  - `propagate_typed(...)` is the primary typed propagation entry point
+  - crate RustDoc now documents the raw `BoxId` APIs as compatibility wrappers
+  - workspace callers that naturally cross the post-`eval/a2sb` boundary now
+    build `FlatBoxId` explicitly before using propagation:
+    - `compiler`
+    - `eval`
+    - `box-ffi`
+- intentionally kept:
+  - raw `box_arity(...)` / `propagate(...)` wrappers remain public for
+    compatibility and convenience at box-handle boundaries
+
+Interpretation:
+
+- the plan is considered closed without deprecating the raw wrapper APIs,
+- because stage 5 explicitly allowed that as an optional tightening step,
+- and the important contract change is now visible both in the public API docs
+  and in the main workspace call sites.
 
 ## 12. Mapping status
 

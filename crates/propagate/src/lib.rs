@@ -14,8 +14,10 @@
 //! - Typed `FlatBoxId` boundary that validates the post-`eval/a2sb` flat box subset.
 //!
 //! # Public API mapping status
-//! - `box_arity(...)` mirrors the C++ `getBoxType(...)` role for the supported subset.
-//! - `propagate(...)` mirrors C++ `propagate(...)` on the supported subset.
+//! - [`box_arity_typed`] and [`propagate_typed`] are the primary Rust entry
+//!   points for the post-`eval/a2sb` flat-box contract.
+//! - [`box_arity`] and [`propagate`] remain compatibility wrappers for callers
+//!   that still hold a raw `BoxId`.
 //! - `make_sig_input_list(...)` mirrors C++ `makeSigInputList(...)`.
 //! - `FlatBoxId` / [`try_build_flat_box`] are an adapted Rust boundary: they make the
 //!   C++ post-`evalprocess -> a2sb -> propagate` flat-box contract explicit while
@@ -37,7 +39,7 @@ use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
 use signals::{SigBuilder, SigId, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId, tree_to_int};
 
-/// Memoization cache for [`box_arity`] / [`box_arity_flat`] results, keyed by validated flat boxes.
+/// Memoization cache for [`box_arity`] / [`box_arity_typed`] results, keyed by validated flat boxes.
 pub type ArityCache = AHashMap<FlatBoxId, Result<BoxArity, PropagateError>>;
 type SlotEnv = AHashMap<BoxId, SigId>;
 
@@ -657,7 +659,7 @@ pub fn make_sig_input_list(arena: &mut TreeArena, n: usize) -> Vec<SigId> {
 ///
 /// This is the typed entry point for post-`eval/a2sb` callers that already
 /// hold a validated [`FlatBoxId`].
-pub fn box_arity_flat(
+pub fn box_arity_typed(
     arena: &TreeArena,
     box_tree: FlatBoxId,
     cache: &mut ArityCache,
@@ -670,10 +672,19 @@ pub fn box_arity_flat(
     result
 }
 
+#[doc(hidden)]
+pub fn box_arity_flat(
+    arena: &TreeArena,
+    box_tree: FlatBoxId,
+    cache: &mut ArityCache,
+) -> Result<BoxArity, PropagateError> {
+    box_arity_typed(arena, box_tree, cache)
+}
+
 /// Infers input/output arity of one box expression (memoized).
 ///
-/// This mirrors C++ `getBoxType(...)` behavior for the currently supported subset.
-/// Unsupported box families return [`PropagateError::UnsupportedBox`].
+/// Compatibility wrapper for callers that still hold a raw [`BoxId`].
+/// New post-`eval/a2sb` callers should prefer [`box_arity_typed`].
 ///
 /// Callers should create one [`ArityCache`] and pass it through to amortise
 /// repeated sub-expression visits across multiple calls.
@@ -683,7 +694,7 @@ pub fn box_arity(
     cache: &mut ArityCache,
 ) -> Result<BoxArity, PropagateError> {
     let flat = try_build_flat_box(arena, box_tree)?;
-    box_arity_flat(arena, flat, cache)
+    box_arity_typed(arena, flat, cache)
 }
 
 /// Core arity inference logic, called only on cache miss.
@@ -701,7 +712,7 @@ fn box_arity_flat_inner(
             inputs: 0,
             outputs: 1,
         }),
-        FlatNodeKind::Metadata { body } => box_arity_flat(arena, body, cache),
+        FlatNodeKind::Metadata { body } => box_arity_typed(arena, body, cache),
         FlatNodeKind::Wire => Ok(BoxArity {
             inputs: 1,
             outputs: 1,
@@ -780,17 +791,17 @@ fn box_arity_flat_inner(
         }
         FlatNodeKind::VGroup { body }
         | FlatNodeKind::HGroup { body }
-        | FlatNodeKind::TGroup { body } => box_arity_flat(arena, body, cache),
+        | FlatNodeKind::TGroup { body } => box_arity_typed(arena, body, cache),
         FlatNodeKind::Symbolic { body } => {
-            let inner = box_arity_flat(arena, body, cache)?;
+            let inner = box_arity_typed(arena, body, cache)?;
             Ok(BoxArity {
                 inputs: inner.inputs + 1,
                 outputs: inner.outputs,
             })
         }
         FlatNodeKind::Seq(left, right) => {
-            let left_arity = box_arity_flat(arena, left, cache)?;
-            let right_arity = box_arity_flat(arena, right, cache)?;
+            let left_arity = box_arity_typed(arena, left, cache)?;
+            let right_arity = box_arity_typed(arena, right, cache)?;
             if left_arity.outputs != right_arity.inputs {
                 return Err(PropagateError::SeqArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -804,16 +815,16 @@ fn box_arity_flat_inner(
             })
         }
         FlatNodeKind::Par(left, right) => {
-            let left_arity = box_arity_flat(arena, left, cache)?;
-            let right_arity = box_arity_flat(arena, right, cache)?;
+            let left_arity = box_arity_typed(arena, left, cache)?;
+            let right_arity = box_arity_typed(arena, right, cache)?;
             Ok(BoxArity {
                 inputs: left_arity.inputs + right_arity.inputs,
                 outputs: left_arity.outputs + right_arity.outputs,
             })
         }
         FlatNodeKind::Split(left, right) => {
-            let left_arity = box_arity_flat(arena, left, cache)?;
-            let right_arity = box_arity_flat(arena, right, cache)?;
+            let left_arity = box_arity_typed(arena, left, cache)?;
+            let right_arity = box_arity_typed(arena, right, cache)?;
             if !split_compatible(left_arity.outputs, right_arity.inputs) {
                 return Err(PropagateError::SplitArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -827,8 +838,8 @@ fn box_arity_flat_inner(
             })
         }
         FlatNodeKind::Merge(left, right) => {
-            let left_arity = box_arity_flat(arena, left, cache)?;
-            let right_arity = box_arity_flat(arena, right, cache)?;
+            let left_arity = box_arity_typed(arena, left, cache)?;
+            let right_arity = box_arity_typed(arena, right, cache)?;
             if !merge_compatible(left_arity.outputs, right_arity.inputs) {
                 return Err(PropagateError::MergeArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -842,8 +853,8 @@ fn box_arity_flat_inner(
             })
         }
         FlatNodeKind::Rec(left, right) => {
-            let left_arity = box_arity_flat(arena, left, cache)?;
-            let right_arity = box_arity_flat(arena, right, cache)?;
+            let left_arity = box_arity_typed(arena, left, cache)?;
+            let right_arity = box_arity_typed(arena, right, cache)?;
             if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
                 return Err(PropagateError::RecArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -878,7 +889,7 @@ fn box_arity_flat_inner(
         FlatNodeKind::Ondemand(expr)
         | FlatNodeKind::Upsampling(expr)
         | FlatNodeKind::Downsampling(expr) => {
-            let inner = box_arity_flat(arena, expr, cache)?;
+            let inner = box_arity_typed(arena, expr, cache)?;
             Ok(BoxArity {
                 inputs: inner.inputs + 1,
                 outputs: inner.outputs,
@@ -904,13 +915,8 @@ pub fn propagate_typed(
 
 /// Propagates input signals through one evaluated box expression (memoized arity).
 ///
-/// This function validates input/output arity using [`box_arity`].
-///
-/// Precondition: `box_tree` should already be in the evaluated box domain
-/// (typically output of `eval::eval_process` / `eval::eval_box`).
-///
-/// Callers should create one [`ArityCache`] and pass it through to amortise
-/// repeated sub-expression arity lookups.
+/// Compatibility wrapper for callers that still hold a raw [`BoxId`]. New
+/// post-`eval/a2sb` callers should prefer [`propagate_typed`].
 pub fn propagate(
     arena: &mut TreeArena,
     box_tree: BoxId,
@@ -943,7 +949,7 @@ fn propagate_in_slot_env(
     slot_env: &mut SlotEnv,
     clock_env: TreeId,
 ) -> Result<Vec<SigId>, PropagateError> {
-    let arity = box_arity_flat(arena, box_tree, cache)?;
+    let arity = box_arity_typed(arena, box_tree, cache)?;
     if inputs.len() != arity.inputs {
         return Err(PropagateError::InputArityMismatch {
             node: box_tree.as_tree_id(),
@@ -964,7 +970,7 @@ fn propagate_in_slot_env(
 
 /// Internal propagation dispatcher once input arity has been validated.
 ///
-/// Unlike `box_arity(...)`, this function is intentionally operational rather
+/// Unlike [`box_arity_typed`], this function is intentionally operational rather
 /// than declarative: it builds actual signal nodes, threads slot bindings, and
 /// recursively performs composition rewrites. Unsupported box families here are
 /// therefore genuine lowering gaps, not just missing arity metadata.
@@ -1315,8 +1321,8 @@ fn propagate_inner(
             result
         }
         FlatNodeKind::Seq(left, right) => {
-            let left_arity = box_arity_flat(arena, left, cache)?;
-            let right_arity = box_arity_flat(arena, right, cache)?;
+            let left_arity = box_arity_typed(arena, left, cache)?;
+            let right_arity = box_arity_typed(arena, right, cache)?;
             if left_arity.outputs != right_arity.inputs {
                 return Err(PropagateError::SeqArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -1328,8 +1334,8 @@ fn propagate_inner(
             propagate_in_slot_env(arena, right, &mid, cache, slot_env, clock_env)
         }
         FlatNodeKind::Par(left, right) => {
-            let left_arity = box_arity_flat(arena, left, cache)?;
-            let right_arity = box_arity_flat(arena, right, cache)?;
+            let left_arity = box_arity_typed(arena, left, cache)?;
+            let right_arity = box_arity_typed(arena, right, cache)?;
             let left_out = propagate_in_slot_env(
                 arena,
                 left,
@@ -1351,8 +1357,8 @@ fn propagate_inner(
             Ok(out)
         }
         FlatNodeKind::Split(left, right) => {
-            let left_arity = box_arity_flat(arena, left, cache)?;
-            let right_arity = box_arity_flat(arena, right, cache)?;
+            let left_arity = box_arity_typed(arena, left, cache)?;
+            let right_arity = box_arity_typed(arena, right, cache)?;
             if !split_compatible(left_arity.outputs, right_arity.inputs) {
                 return Err(PropagateError::SplitArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -1365,8 +1371,8 @@ fn propagate_inner(
             propagate_in_slot_env(arena, right, &split_in, cache, slot_env, clock_env)
         }
         FlatNodeKind::Merge(left, right) => {
-            let left_arity = box_arity_flat(arena, left, cache)?;
-            let right_arity = box_arity_flat(arena, right, cache)?;
+            let left_arity = box_arity_typed(arena, left, cache)?;
+            let right_arity = box_arity_typed(arena, right, cache)?;
             if !merge_compatible(left_arity.outputs, right_arity.inputs) {
                 return Err(PropagateError::MergeArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -1379,8 +1385,8 @@ fn propagate_inner(
             propagate_in_slot_env(arena, right, &merge_in, cache, slot_env, clock_env)
         }
         FlatNodeKind::Rec(left, right) => {
-            let left_arity = box_arity_flat(arena, left, cache)?;
-            let right_arity = box_arity_flat(arena, right, cache)?;
+            let left_arity = box_arity_typed(arena, left, cache)?;
+            let right_arity = box_arity_typed(arena, right, cache)?;
             if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
                 return Err(PropagateError::RecArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -1583,7 +1589,7 @@ fn propagate_clocked_wrapper(
         slot_env,
         clock_env,
     } = ctx;
-    let body_arity = box_arity_flat(arena, body, cache)?;
+    let body_arity = box_arity_typed(arena, body, cache)?;
     if is_const_zero(arena, clock) {
         let mut b = SigBuilder::new(arena);
         let zero = b.int(0);

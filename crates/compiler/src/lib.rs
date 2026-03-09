@@ -651,10 +651,41 @@ impl Compiler {
             }
         })?;
 
+        let process_flat = propagate::try_build_flat_box(&output.state.arena, process_box)
+            .map_err(|error| {
+                let error: propagate::PropagateError = error.into();
+                let node = propagate_error_node(&error);
+                let owner =
+                    node.and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
+                let mut diagnostic = error.clone().into_diagnostic();
+                if let Some(n) = node {
+                    diagnostic = enrich_diagnostic_with_node(
+                        diagnostic,
+                        &output.state.arena,
+                        root,
+                        n,
+                        owner.as_deref(),
+                    );
+                    diagnostic = maybe_add_source_label(
+                        diagnostic,
+                        &output.state.ctx,
+                        &output.state.arena,
+                        root,
+                        n,
+                        owner.as_deref(),
+                    );
+                }
+                CompilerError::Propagate {
+                    source: source.into(),
+                    error,
+                    diagnostics: bundle_from_diagnostic(diagnostic),
+                }
+            })?;
+
         let mut arity_cache = ArityCache::new();
         let process_arity =
-            propagate::box_arity(&output.state.arena, process_box, &mut arity_cache).map_err(
-                |error| {
+            propagate::box_arity_typed(&output.state.arena, process_flat, &mut arity_cache)
+                .map_err(|error| {
                     let node = propagate_error_node(&error);
                     let owner = node
                         .and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
@@ -683,13 +714,12 @@ impl Compiler {
                         error,
                         diagnostics: bundle_from_diagnostic(diagnostic),
                     }
-                },
-            )?;
+                })?;
 
         let inputs = propagate::make_sig_input_list(&mut output.state.arena, process_arity.inputs);
-        let signals = propagate::propagate(
+        let signals = propagate::propagate_typed(
             &mut output.state.arena,
-            process_box,
+            process_flat,
             &inputs,
             &mut arity_cache,
         )
@@ -1897,13 +1927,17 @@ fn add_paired_propagate_context(
     diagnostic = diagnostic.with_note(format!("B ({op_name} right) = {right_expr}"));
 
     let mut arity_cache = ArityCache::new();
-    if let Ok(a) = propagate::box_arity(arena, left, &mut arity_cache) {
+    if let Ok(left_flat) = propagate::try_build_flat_box(arena, left)
+        && let Ok(a) = propagate::box_arity_typed(arena, left_flat, &mut arity_cache)
+    {
         diagnostic = diagnostic.with_note(format!(
             "A arity: inputs={} outputs={}",
             a.inputs, a.outputs
         ));
     }
-    if let Ok(b) = propagate::box_arity(arena, right, &mut arity_cache) {
+    if let Ok(right_flat) = propagate::try_build_flat_box(arena, right)
+        && let Ok(b) = propagate::box_arity_typed(arena, right_flat, &mut arity_cache)
+    {
         diagnostic = diagnostic.with_note(format!(
             "B arity: inputs={} outputs={}",
             b.inputs, b.outputs

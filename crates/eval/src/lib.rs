@@ -161,7 +161,7 @@ use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::codes;
 use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
 use parser::{CompilationMetadataSnapshot, CompilationMetadataStore};
-use propagate::{ArityCache, propagate};
+use propagate::{ArityCache, propagate_typed, try_build_flat_box};
 use signals::{SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId, tree_to_int};
 
@@ -2763,7 +2763,13 @@ fn eval_box_to_scalar_signal(
         });
     }
     let mut cache = ArityCache::default();
-    let signals = propagate(arena, lowered, &[], &mut cache).map_err(|_| {
+    let flat =
+        try_build_flat_box(arena, lowered).map_err(|_| EvalError::InvalidLabelInterpolation {
+            node: expr,
+            ident: ident_name_or_fallback(arena, expr),
+            reason: "expression did not lower to a valid flat post-eval box",
+        })?;
+    let signals = propagate_typed(arena, flat, &[], &mut cache).map_err(|_| {
         EvalError::InvalidLabelInterpolation {
             node: expr,
             ident: ident_name_or_fallback(arena, expr),
