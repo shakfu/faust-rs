@@ -17,13 +17,6 @@ fn corpus_path(file: &str) -> PathBuf {
         .join(file)
 }
 
-fn workspace_path(file: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join(file)
-}
-
 #[test]
 fn dump_cpp_fastlane_compiles_fixture() {
     let compiler = Compiler::new();
@@ -448,38 +441,34 @@ fn legacy_and_fastlane_both_compile_c_table_fixtures_without_shims() {
 }
 
 #[test]
-fn fastlane_cpp_compiles_repo_noise_dsp() {
-    let compiler = Compiler::new();
-    let path = workspace_path("noise.dsp");
-    let cpp = compiler
-        .compile_file_default_to_cpp_with_lane(
-            &path,
-            &codegen::backends::cpp::CppOptions::default(),
-            SignalFirLane::TransformFastLane,
-        )
-        .unwrap_or_else(|e| panic!("noise.dsp fast-lane C++ compilation failed: {e}"));
+fn fastlane_cpp_compiles_noise_smoo_slider_fixture() {
+    let cpp = compile_cpp_with_lane(
+        "rep_56_noise_smoo_slider.dsp",
+        SignalFirLane::TransformFastLane,
+    );
     assert!(cpp.contains("class mydsp : public dsp"));
     assert!(cpp.contains("void compute("));
     assert!(cpp.contains("int iRec"));
     assert!(cpp.contains("iRec"));
     assert!(cpp.contains("fSampleRate"));
-    assert!(!cpp.contains("float fRec34"));
 }
 
 #[test]
-fn fastlane_interp_compiles_repo_noise_dsp() {
+fn fastlane_interp_compiles_noise_smoo_slider_fixture() {
     let compiler = Compiler::new();
-    let path = workspace_path("noise.dsp");
+    let path = corpus_path("rep_56_noise_smoo_slider.dsp");
     let fbc = compiler
         .compile_file_default_to_interp_with_lane(
             &path,
             &InterpOptions::default(),
             SignalFirLane::TransformFastLane,
         )
-        .unwrap_or_else(|e| panic!("noise.dsp fast-lane interp compilation failed: {e}"));
+        .unwrap_or_else(|e| {
+            panic!("rep_56_noise_smoo_slider.dsp fast-lane interp compilation failed: {e}")
+        });
     assert!(
         !fbc.is_empty(),
-        "noise.dsp fast-lane interp compilation should produce bytecode"
+        "rep_56_noise_smoo_slider.dsp fast-lane interp compilation should produce bytecode"
     );
 }
 
