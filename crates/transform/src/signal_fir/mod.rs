@@ -904,6 +904,30 @@ mod tests {
             )),
             "compute loop should write the current sample into the delay line"
         );
+        let write_index = stmts
+            .iter()
+            .find_map(|id| match match_fir(&out.store, *id) {
+                FirMatch::StoreTable { name, index, .. } if name == delay_name => Some(index),
+                _ => None,
+            })
+            .expect("compute loop should include one delay-line write");
+        let FirMatch::BinOp {
+            op: FirBinOp::And,
+            lhs,
+            rhs,
+            ..
+        } = match_fir(&out.store, write_index)
+        else {
+            panic!("delay write index should be masked");
+        };
+        assert!(matches!(
+            match_fir(&out.store, lhs),
+            FirMatch::LoadVar { ref name, .. } if name == "fIOTA"
+        ));
+        assert!(matches!(
+            match_fir(&out.store, rhs),
+            FirMatch::Int32 { value: 3, .. }
+        ));
         assert!(
             stmts.iter().any(|id| matches!(
                 match_fir(&out.store, *id),

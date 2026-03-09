@@ -906,7 +906,10 @@ impl<'a> SignalToFirLower<'a> {
         let line = self.ensure_delay_line_decl(value, delay)?;
         let current = self.lower_signal(value)?;
         if self.scheduled_delay_writes.insert(value) {
-            let write_index = self.current_iota_index();
+            let write_index = {
+                let raw = self.current_iota_index();
+                self.masked_delay_index(raw, line.size)
+            };
             let mut b = FirBuilder::new(&mut self.store);
             self.sample_statements.push(b.store_table(
                 line.name.clone(),

@@ -4,6 +4,7 @@
 //! - Exercises public APIs and structural invariants for the targeted module.
 //! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
+use codegen::backends::interp::{FbcDspInstance, InterpOptions, read_fbc};
 use compiler::{Compiler, RealType, SignalFirLane};
 use std::path::PathBuf;
 
@@ -111,8 +112,8 @@ fn fastlane_delay_echo_uses_circular_delay_line_and_iota_in_c_and_cpp() {
     assert!(fast_cpp.contains("int fIOTA;"));
     assert!(fast_cpp.contains("fDelay"));
     assert!(
-        fast_cpp.contains("fDelay4[fIOTA] = fState4;"),
-        "C++ fast-lane should write the delay line at the current iota index"
+        fast_cpp.contains("fDelay4[(fIOTA & 4095)] = fState4;"),
+        "C++ fast-lane should mask the delay-line write index"
     );
     assert!(
         fast_cpp.contains("fDelay4[((fIOTA - 2205) & 4095)]"),
@@ -131,8 +132,8 @@ fn fastlane_delay_echo_uses_circular_delay_line_and_iota_in_c_and_cpp() {
     assert!(fast_c.contains("int fIOTA;"));
     assert!(fast_c.contains("fDelay4"));
     assert!(
-        fast_c.contains("dsp->fDelay4[dsp->fIOTA] = dsp->fState4;"),
-        "C fast-lane should write the delay line at the current iota index"
+        fast_c.contains("dsp->fDelay4[(dsp->fIOTA & 4095)] = dsp->fState4;"),
+        "C fast-lane should mask the delay-line write index"
     );
     assert!(
         fast_c.contains("dsp->fDelay4[((dsp->fIOTA - 2205) & 4095)]"),
@@ -145,6 +146,43 @@ fn fastlane_delay_echo_uses_circular_delay_line_and_iota_in_c_and_cpp() {
     assert!(
         fast_c.contains("for (int lDelay0 = 0; lDelay0 < 4096; lDelay0 = lDelay0 + 1)"),
         "C fast-lane should zero the fixed-size delay line in instanceClear"
+    );
+}
+
+#[test]
+fn fastlane_interp_delay_lines_do_not_overrun_after_ring_wrap() {
+    let compiler = Compiler::new();
+    let path = corpus_path("rep_55_sine_phasor_echo_feedback.dsp");
+    let fbc = compiler
+        .compile_file_default_to_interp_with_lane(
+            &path,
+            &InterpOptions::default(),
+            SignalFirLane::TransformFastLane,
+        )
+        .unwrap_or_else(|e| panic!("fast-lane interp compilation failed: {e}"));
+
+    let mut reader = std::io::Cursor::new(fbc);
+    let mut factory = read_fbc::<f32>(&mut reader)
+        .unwrap_or_else(|e| panic!("interp bytecode parse failed: {e}"));
+    let mut instance = FbcDspInstance::new(&mut factory);
+    instance.init(48_000);
+
+    let frame_count = 5_000;
+    let mut out0 = vec![0.0_f32; frame_count];
+    let mut out1 = vec![0.0_f32; frame_count];
+    let mut outputs: [&mut [f32]; 2] = [&mut out0, &mut out1];
+
+    instance
+        .try_compute(frame_count as i32, &[], &mut outputs)
+        .unwrap_or_else(|e| panic!("interp execution should survive delay-ring wrap: {e}"));
+
+    assert!(
+        outputs[0].iter().all(|sample| sample.is_finite()),
+        "output0 should stay finite across the delay-ring wrap"
+    );
+    assert!(
+        outputs[1].iter().all(|sample| sample.is_finite()),
+        "output1 should stay finite across the delay-ring wrap"
     );
 }
 
