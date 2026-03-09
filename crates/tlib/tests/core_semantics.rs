@@ -4,7 +4,7 @@
 //! - Exercises public APIs and structural invariants for the targeted module.
 //! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
-use tlib::{NodeKind, PropertyStore, TreeArena};
+use tlib::{NodeKind, PropertyStore, TreeArena, list_to_vec, vec_to_list};
 
 #[test]
 fn interning_reuses_structurally_identical_nodes() {
@@ -38,6 +38,25 @@ fn list_operations_preserve_head_and_tail_order() {
     assert_eq!(arena.hd(next), Some(two));
     assert_eq!(arena.tl(next), Some(nil));
     assert!(arena.is_nil(nil));
+}
+
+#[test]
+fn vec_to_list_and_back_preserves_order() {
+    let mut arena = TreeArena::new();
+    let values = [arena.int(1), arena.int(2), arena.int(3)];
+    let list = vec_to_list(&mut arena, &values);
+
+    assert_eq!(list_to_vec(&arena, list), Some(values.to_vec()));
+}
+
+#[test]
+fn list_to_vec_rejects_malformed_cons_chain() {
+    let mut arena = TreeArena::new();
+    let head = arena.int(1);
+    let tail = arena.int(2);
+    let malformed = arena.cons(head, tail);
+
+    assert_eq!(list_to_vec(&arena, malformed), None);
 }
 
 #[test]

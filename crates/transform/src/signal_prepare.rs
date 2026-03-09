@@ -45,7 +45,8 @@ use std::fmt;
 
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use tlib::{
-    RecursionError, TreeArena, match_sym_rec, match_sym_ref, sym_rec, sym_ref, tree_to_int,
+    RecursionError, TreeArena, list_to_vec, match_sym_rec, match_sym_ref, sym_rec, sym_ref,
+    tree_to_int, vec_to_list,
 };
 
 /// Reduced signal type used by the pre-FIR preparation stage.
@@ -157,23 +158,6 @@ fn infer_simple_types(
         typer.infer_sig(*output)?;
     }
     Ok(typer.finish())
-}
-
-fn vec_to_list(arena: &mut TreeArena, values: &[SigId]) -> SigId {
-    let mut out = arena.nil();
-    for value in values.iter().rev() {
-        out = arena.cons(*value, out);
-    }
-    out
-}
-
-fn list_to_vec(arena: &TreeArena, mut list: SigId) -> Option<Vec<SigId>> {
-    let mut out = Vec::new();
-    while !arena.is_nil(list) {
-        out.push(arena.hd(list)?);
-        list = arena.tl(list)?;
-    }
-    Some(out)
 }
 
 /// Applies the reduced promotion pass to all prepared outputs.

@@ -37,7 +37,7 @@ use boxes::{BoxId, BoxMatch, match_box};
 use errors::codes;
 use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
 use signals::{SigBuilder, SigId, SigMatch, match_sig};
-use tlib::{NodeKind, TreeArena, TreeId, tree_to_int};
+use tlib::{NodeKind, TreeArena, TreeId, list_to_vec, tree_to_int, vec_to_list};
 
 /// Memoization cache for [`box_arity`] / [`box_arity_typed`] results, keyed by validated flat boxes.
 pub type ArityCache = AHashMap<FlatBoxId, Result<BoxArity, PropagateError>>;
@@ -1810,16 +1810,6 @@ fn list_length(arena: &TreeArena, mut list: TreeId) -> Option<usize> {
     Some(len)
 }
 
-/// Converts a `cons`/`nil` list into a vector preserving order.
-fn list_to_vec(arena: &TreeArena, mut list: TreeId) -> Option<Vec<TreeId>> {
-    let mut out = Vec::new();
-    while !arena.is_nil(list) {
-        out.push(arena.hd(list)?);
-        list = arena.tl(list)?;
-    }
-    Some(out)
-}
-
 /// Builds the adapted Rust clock-environment payload threaded through clocked wrappers.
 ///
 /// C++ stores `(parent, slotenv, path, box, inputs...)` as a tree list. Rust
@@ -1934,15 +1924,6 @@ fn lift_signals(arena: &mut TreeArena, inputs: &[SigId]) -> Vec<SigId> {
         out.push(liftn(arena, sig, 1));
     }
     out
-}
-
-/// Converts a vector to a `cons`/`nil` list preserving order.
-fn vec_to_list(arena: &mut TreeArena, values: &[TreeId]) -> TreeId {
-    let mut list = arena.nil();
-    for value in values.iter().rev().copied() {
-        list = arena.cons(value, list);
-    }
-    list
 }
 
 /// Builds one recursive signal group wrapper (`DEBRUIJN(body)`).

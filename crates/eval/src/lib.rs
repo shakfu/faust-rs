@@ -4259,27 +4259,13 @@ fn iterate_prod(
 }
 
 /// Converts a parser-style list into a vector in traversal order.
-fn list_to_vec(arena: &TreeArena, mut list: TreeId) -> Result<Vec<TreeId>, EvalError> {
-    let mut out = Vec::new();
-    while !arena.is_nil(list) {
-        let head = arena
-            .hd(list)
-            .ok_or(EvalError::MalformedListNode { node: list })?;
-        out.push(head);
-        list = arena
-            .tl(list)
-            .ok_or(EvalError::MalformedListNode { node: list })?;
-    }
-    Ok(out)
+fn list_to_vec(arena: &TreeArena, list: TreeId) -> Result<Vec<TreeId>, EvalError> {
+    tlib::list_to_vec(arena, list).ok_or(EvalError::MalformedListNode { node: list })
 }
 
 /// Converts a vector into a parser-style list preserving order.
 fn vec_to_list(arena: &mut TreeArena, items: &[TreeId]) -> TreeId {
-    let mut out = arena.nil();
-    for id in items.iter().rev() {
-        out = arena.cons(*id, out);
-    }
-    out
+    tlib::vec_to_list(arena, items)
 }
 
 /// Decodes a case rule node into `(lhs_patterns, rhs_expr)`.
