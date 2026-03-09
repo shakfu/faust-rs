@@ -10,6 +10,8 @@
 //! - clone the output forest into a private staging arena,
 //! - run forest-wide `de_bruijn_to_sym`,
 //! - infer one reduced `Int / Real / Sound` type for the prepared signals.
+//! - insert the reduced `SignalPromotion` cast subset needed by the fast-lane
+//!   and re-type the promoted forest
 //!
 //! Reduced typing deliberately stops short of the full C++ type lattice. The
 //! goal is only to support the upcoming promotion pass and to feed `signal_fir`
@@ -19,8 +21,10 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 
-use signals::{BinOp, SigId, SigMatch, match_sig};
-use tlib::{RecursionError, TreeArena, match_sym_rec, match_sym_ref, tree_to_int};
+use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
+use tlib::{
+    RecursionError, TreeArena, match_sym_rec, match_sym_ref, sym_rec, sym_ref, tree_to_int,
+};
 
 /// Reduced signal type used by the pre-FIR preparation stage.
 ///
@@ -90,7 +94,8 @@ impl From<RecursionError> for SignalPrepareError {
 
 /// Clones one output forest into a private arena, converts de Bruijn recursion
 /// to symbolic recursion with forest-wide sharing preserved, then infers one
-/// reduced type per prepared signal node.
+/// reduced type per prepared signal node, applies the reduced promotion pass,
+/// and re-types the promoted forest.
 ///
 /// C++ parity note: both `deBruijn2Sym(...)` and the later type/promotion flow
 /// conceptually operate on the whole output list, not independently per root.
@@ -106,6 +111,8 @@ pub fn prepare_signals_for_fir(
     let symbolic_list = tlib::de_bruijn_to_sym(&mut arena, cloned_list)?;
     let outputs = list_to_vec(&arena, symbolic_list)
         .expect("prepare_signals_for_fir rebuilds a proper cons list");
+    let typed_before_promotion = infer_simple_types(&arena, &outputs)?;
+    let outputs = promote_signals_for_fir(&mut arena, &outputs, &typed_before_promotion)?;
     let types = infer_simple_types(&arena, &outputs)?;
     Ok(PreparedSignals {
         arena,
@@ -140,6 +147,18 @@ fn list_to_vec(arena: &TreeArena, mut list: SigId) -> Option<Vec<SigId>> {
         list = arena.tl(list)?;
     }
     Some(out)
+}
+
+fn promote_signals_for_fir(
+    arena: &mut TreeArena,
+    outputs: &[SigId],
+    types: &HashMap<SigId, SimpleSigType>,
+) -> Result<Vec<SigId>, SignalPrepareError> {
+    let mut promoter = SignalPromoter::new(arena, types);
+    outputs
+        .iter()
+        .map(|output| promoter.promote(*output))
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -591,6 +610,583 @@ fn merge_group_slots(
         .collect()
 }
 
+struct SignalPromoter<'a> {
+    arena: &'a mut TreeArena,
+    types: &'a HashMap<SigId, SimpleSigType>,
+    memo: HashMap<SigId, SigId>,
+}
+
+impl<'a> SignalPromoter<'a> {
+    fn new(arena: &'a mut TreeArena, types: &'a HashMap<SigId, SimpleSigType>) -> Self {
+        Self {
+            arena,
+            types,
+            memo: HashMap::new(),
+        }
+    }
+
+    fn promote(&mut self, sig: SigId) -> Result<SigId, SignalPrepareError> {
+        if let Some(promoted) = self.memo.get(&sig) {
+            return Ok(*promoted);
+        }
+
+        let promoted = if self.arena.is_nil(sig) {
+            sig
+        } else if self.arena.is_list(sig) {
+            let head = self.arena.hd(sig).ok_or_else(|| {
+                SignalPrepareError::Typing("malformed list during signal promotion".to_owned())
+            })?;
+            let tail = self.arena.tl(sig).ok_or_else(|| {
+                SignalPrepareError::Typing("malformed list during signal promotion".to_owned())
+            })?;
+            let promoted_head = self.promote(head)?;
+            let promoted_tail = self.promote(tail)?;
+            self.arena.cons(promoted_head, promoted_tail)
+        } else if let Some((var, body_list)) = match_sym_rec(self.arena, sig) {
+            let promoted_body = self.promote(body_list)?;
+            sym_rec(self.arena, var, promoted_body)
+        } else if let Some(var) = match_sym_ref(self.arena, sig) {
+            sym_ref(self.arena, var)
+        } else {
+            self.promote_signal(sig)?
+        };
+
+        self.memo.insert(sig, promoted);
+        Ok(promoted)
+    }
+
+    fn promote_signal(&mut self, sig: SigId) -> Result<SigId, SignalPrepareError> {
+        let promoted = match match_sig(self.arena, sig) {
+            SigMatch::Unknown => self.clone_generic(sig)?,
+            SigMatch::Int(_)
+            | SigMatch::Real(_)
+            | SigMatch::Input(_)
+            | SigMatch::Button(_)
+            | SigMatch::Checkbox(_) => sig,
+            SigMatch::Output(index, inner) => {
+                let inner = self.promote(inner)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.output(index, inner)
+            }
+            SigMatch::Delay1(value) => {
+                let value = self.promote(value)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.delay1(value)
+            }
+            SigMatch::Delay(value, amount) => {
+                let value = self.promote(value)?;
+                let amount_promoted = self.promote(amount)?;
+                let amount_promoted = self.smart_int_cast(amount, amount_promoted)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.delay(value, amount_promoted)
+            }
+            SigMatch::Prefix(init, value) => {
+                let init_promoted = self.promote(init)?;
+                let value_promoted = self.promote(value)?;
+                let (init_promoted, value_promoted) = if self.same_type(init, value) {
+                    (init_promoted, value_promoted)
+                } else {
+                    (
+                        self.smart_float_cast(init, init_promoted)?,
+                        self.smart_float_cast(value, value_promoted)?,
+                    )
+                };
+                let mut b = SigBuilder::new(self.arena);
+                b.prefix(init_promoted, value_promoted)
+            }
+            SigMatch::IntCast(inner) => {
+                let inner_promoted = self.promote(inner)?;
+                self.smart_int_cast(inner, inner_promoted)?
+            }
+            SigMatch::BitCast(inner) => {
+                let inner = self.promote(inner)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.bit_cast(inner)
+            }
+            SigMatch::FloatCast(inner) => {
+                let inner_promoted = self.promote(inner)?;
+                self.smart_float_cast(inner, inner_promoted)?
+            }
+            SigMatch::Gen(inner) => {
+                let inner = self.promote(inner)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.generate(inner)
+            }
+            SigMatch::RdTbl(table, index) => {
+                let table = self.promote(table)?;
+                let index_promoted = self.promote(index)?;
+                let index_promoted = self.smart_int_cast(index, index_promoted)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.rdtbl(table, index_promoted)
+            }
+            SigMatch::WrTbl(size, generator, write_index, write_signal) => {
+                let size = self.promote(size)?;
+                let generator_promoted = self.promote(generator)?;
+                if self.arena.is_nil(write_index) && self.arena.is_nil(write_signal) {
+                    let mut b = SigBuilder::new(self.arena);
+                    b.wrtbl_readonly(size, generator_promoted)
+                } else {
+                    let write_index_promoted = self.promote(write_index)?;
+                    let write_index_promoted =
+                        self.smart_int_cast(write_index, write_index_promoted)?;
+                    let write_signal_promoted = self.promote(write_signal)?;
+                    let write_signal_promoted =
+                        self.smart_cast(generator, write_signal, write_signal_promoted)?;
+                    let mut b = SigBuilder::new(self.arena);
+                    b.wrtbl(
+                        size,
+                        generator_promoted,
+                        write_index_promoted,
+                        write_signal_promoted,
+                    )
+                }
+            }
+            SigMatch::Select2(selector, then_value, else_value) => {
+                let selector_promoted = self.promote(selector)?;
+                let selector_promoted = self.smart_int_cast(selector, selector_promoted)?;
+                let then_promoted = self.promote(then_value)?;
+                let else_promoted = self.promote(else_value)?;
+                let (then_promoted, else_promoted) = if self.same_type(then_value, else_value) {
+                    (then_promoted, else_promoted)
+                } else {
+                    (
+                        self.smart_float_cast(then_value, then_promoted)?,
+                        self.smart_float_cast(else_value, else_promoted)?,
+                    )
+                };
+                let mut b = SigBuilder::new(self.arena);
+                b.select2(selector_promoted, then_promoted, else_promoted)
+            }
+            SigMatch::AssertBounds(min, max, current) => {
+                let min = self.promote(min)?;
+                let max = self.promote(max)?;
+                let current = self.promote(current)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.assert_bounds(min, max, current)
+            }
+            SigMatch::Lowest(inner) => {
+                let inner = self.promote(inner)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.lowest(inner)
+            }
+            SigMatch::Highest(inner) => {
+                let inner = self.promote(inner)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.highest(inner)
+            }
+            SigMatch::BinOp(op, left, right) => self.promote_binop(sig, op, left, right)?,
+            SigMatch::Pow(left, right) => {
+                self.promote_real_binary(|b, l, r| b.pow(l, r), left, right)?
+            }
+            SigMatch::Min(left, right) => {
+                self.promote_real_binary(|b, l, r| b.min(l, r), left, right)?
+            }
+            SigMatch::Max(left, right) => {
+                self.promote_real_binary(|b, l, r| b.max(l, r), left, right)?
+            }
+            SigMatch::Acos(inner) => self.promote_real_unary(|b, x| b.acos(x), inner)?,
+            SigMatch::Asin(inner) => self.promote_real_unary(|b, x| b.asin(x), inner)?,
+            SigMatch::Atan(inner) => self.promote_real_unary(|b, x| b.atan(x), inner)?,
+            SigMatch::Atan2(left, right) => {
+                self.promote_real_binary(|b, l, r| b.atan2(l, r), left, right)?
+            }
+            SigMatch::Cos(inner) => self.promote_real_unary(|b, x| b.cos(x), inner)?,
+            SigMatch::Sin(inner) => self.promote_real_unary(|b, x| b.sin(x), inner)?,
+            SigMatch::Tan(inner) => self.promote_real_unary(|b, x| b.tan(x), inner)?,
+            SigMatch::Exp(inner) => self.promote_real_unary(|b, x| b.exp(x), inner)?,
+            SigMatch::Log(inner) => self.promote_real_unary(|b, x| b.log(x), inner)?,
+            SigMatch::Log10(inner) => self.promote_real_unary(|b, x| b.log10(x), inner)?,
+            SigMatch::Sqrt(inner) => self.promote_real_unary(|b, x| b.sqrt(x), inner)?,
+            SigMatch::Abs(inner) => self.promote_real_unary(|b, x| b.abs(x), inner)?,
+            SigMatch::Fmod(left, right) => {
+                self.promote_real_binary(|b, l, r| b.fmod(l, r), left, right)?
+            }
+            SigMatch::Remainder(left, right) => {
+                self.promote_real_binary(|b, l, r| b.remainder(l, r), left, right)?
+            }
+            SigMatch::Floor(inner) => self.promote_real_unary(|b, x| b.floor(x), inner)?,
+            SigMatch::Ceil(inner) => self.promote_real_unary(|b, x| b.ceil(x), inner)?,
+            SigMatch::Rint(inner) => self.promote_real_unary(|b, x| b.rint(x), inner)?,
+            SigMatch::Round(inner) => self.promote_real_unary(|b, x| b.round(x), inner)?,
+            SigMatch::FFun(ff, largs) => {
+                let largs = self.promote(largs)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.ffun(ff, largs)
+            }
+            SigMatch::FConst(ty, name, file) => {
+                let mut b = SigBuilder::new(self.arena);
+                b.fconst(ty, name, file)
+            }
+            SigMatch::FVar(ty, name, file) => {
+                let mut b = SigBuilder::new(self.arena);
+                b.fvar(ty, name, file)
+            }
+            SigMatch::Proj(index, group) => {
+                let group = self.promote(group)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.proj(index, group)
+            }
+            SigMatch::Rec(body) => {
+                let body = self.promote(body)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.rec(body)
+            }
+            SigMatch::VSlider(label, init, min, max, step) => {
+                let init = self.promote(init)?;
+                let min = self.promote(min)?;
+                let max = self.promote(max)?;
+                let step = self.promote(step)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.vslider(label, init, min, max, step)
+            }
+            SigMatch::HSlider(label, init, min, max, step) => {
+                let init = self.promote(init)?;
+                let min = self.promote(min)?;
+                let max = self.promote(max)?;
+                let step = self.promote(step)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.hslider(label, init, min, max, step)
+            }
+            SigMatch::NumEntry(label, init, min, max, step) => {
+                let init = self.promote(init)?;
+                let min = self.promote(min)?;
+                let max = self.promote(max)?;
+                let step = self.promote(step)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.numentry(label, init, min, max, step)
+            }
+            SigMatch::VBargraph(label, min, max, value) => {
+                let min = self.promote(min)?;
+                let max = self.promote(max)?;
+                let value_promoted = self.promote(value)?;
+                let value_promoted = self.smart_float_cast(value, value_promoted)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.vbargraph(label, min, max, value_promoted)
+            }
+            SigMatch::HBargraph(label, min, max, value) => {
+                let min = self.promote(min)?;
+                let max = self.promote(max)?;
+                let value_promoted = self.promote(value)?;
+                let value_promoted = self.smart_float_cast(value, value_promoted)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.hbargraph(label, min, max, value_promoted)
+            }
+            SigMatch::Attach(left, right) => {
+                let left = self.promote(left)?;
+                let right = self.promote(right)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.attach(left, right)
+            }
+            SigMatch::Enable(left, right) => {
+                let left = self.promote(left)?;
+                let right = self.promote(right)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.enable(left, right)
+            }
+            SigMatch::Control(left, right) => {
+                let left = self.promote(left)?;
+                let right = self.promote(right)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.control(left, right)
+            }
+            SigMatch::Waveform(values) => {
+                let values = values.to_vec();
+                self.promote_waveform(&values)?
+            }
+            SigMatch::Soundfile(label) => {
+                let mut b = SigBuilder::new(self.arena);
+                b.soundfile(label)
+            }
+            SigMatch::SoundfileLength(soundfile, part) => {
+                let soundfile = self.promote(soundfile)?;
+                let part_promoted = self.promote(part)?;
+                let part_promoted = self.smart_int_cast(part, part_promoted)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.soundfile_length(soundfile, part_promoted)
+            }
+            SigMatch::SoundfileRate(soundfile, part) => {
+                let soundfile = self.promote(soundfile)?;
+                let part_promoted = self.promote(part)?;
+                let part_promoted = self.smart_int_cast(part, part_promoted)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.soundfile_rate(soundfile, part_promoted)
+            }
+            SigMatch::SoundfileBuffer(soundfile, chan, part, index) => {
+                let soundfile = self.promote(soundfile)?;
+                let chan = self.promote(chan)?;
+                let part_promoted = self.promote(part)?;
+                let part_promoted = self.smart_int_cast(part, part_promoted)?;
+                let index_promoted = self.promote(index)?;
+                let index_promoted = self.smart_int_cast(index, index_promoted)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.soundfile_buffer(soundfile, chan, part_promoted, index_promoted)
+            }
+            SigMatch::TempVar(value) => {
+                let value = self.promote(value)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.temp_var(value)
+            }
+            SigMatch::PermVar(value) => {
+                let value = self.promote(value)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.perm_var(value)
+            }
+            SigMatch::Seq(left, right) => {
+                let left = self.promote(left)?;
+                let right = self.promote(right)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.seq(left, right)
+            }
+            SigMatch::ZeroPad(value, amount) => {
+                let value = self.promote(value)?;
+                let amount_promoted = self.promote(amount)?;
+                let amount_promoted = self.smart_int_cast(amount, amount_promoted)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.zero_pad(value, amount_promoted)
+            }
+            SigMatch::OnDemand(items) => {
+                let items = items.to_vec();
+                self.promote_clocked_family(&items, |b, items| b.on_demand(items))?
+            }
+            SigMatch::Upsampling(items) => {
+                let items = items.to_vec();
+                self.promote_clocked_family(&items, |b, items| b.upsampling(items))?
+            }
+            SigMatch::Downsampling(items) => {
+                let items = items.to_vec();
+                self.promote_clocked_family(&items, |b, items| b.downsampling(items))?
+            }
+            SigMatch::Clocked(clock_env, value) => {
+                let clock_env = self.promote(clock_env)?;
+                let value = self.promote(value)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.clocked(clock_env, value)
+            }
+        };
+        Ok(promoted)
+    }
+
+    fn promote_binop(
+        &mut self,
+        node: SigId,
+        op: BinOp,
+        left: SigId,
+        right: SigId,
+    ) -> Result<SigId, SignalPrepareError> {
+        let left_promoted = self.promote(left)?;
+        let right_promoted = self.promote(right)?;
+        let out = match op {
+            BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Gt
+            | BinOp::Lt
+            | BinOp::Ge
+            | BinOp::Le
+            | BinOp::Eq
+            | BinOp::Ne => {
+                if self.same_type(left, right) {
+                    let mut b = SigBuilder::new(self.arena);
+                    b.binop(op, left_promoted, right_promoted)
+                } else {
+                    let left_promoted = self.smart_float_cast(left, left_promoted)?;
+                    let right_promoted = self.smart_float_cast(right, right_promoted)?;
+                    let mut b = SigBuilder::new(self.arena);
+                    b.binop(op, left_promoted, right_promoted)
+                }
+            }
+            BinOp::Rem => {
+                if self.same_type(left, right)
+                    && self.ty(left)? == SimpleSigType::Int
+                    && self.ty(right)? == SimpleSigType::Int
+                {
+                    let mut b = SigBuilder::new(self.arena);
+                    b.binop(op, left_promoted, right_promoted)
+                } else {
+                    let left_promoted = self.smart_float_cast(left, left_promoted)?;
+                    let right_promoted = self.smart_float_cast(right, right_promoted)?;
+                    let mut b = SigBuilder::new(self.arena);
+                    b.fmod(left_promoted, right_promoted)
+                }
+            }
+            BinOp::Div => {
+                let left_promoted = self.smart_float_cast(left, left_promoted)?;
+                let right_promoted = self.smart_float_cast(right, right_promoted)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.binop(op, left_promoted, right_promoted)
+            }
+            BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Lsh | BinOp::ARsh | BinOp::LRsh => {
+                let left_promoted = self.smart_int_cast(left, left_promoted)?;
+                let right_promoted = self.smart_int_cast(right, right_promoted)?;
+                let mut b = SigBuilder::new(self.arena);
+                b.binop(op, left_promoted, right_promoted)
+            }
+        };
+        self.memo.insert(node, out);
+        Ok(out)
+    }
+
+    fn promote_real_unary(
+        &mut self,
+        build: impl FnOnce(&mut SigBuilder<'_>, SigId) -> SigId,
+        inner: SigId,
+    ) -> Result<SigId, SignalPrepareError> {
+        let inner_promoted = self.promote(inner)?;
+        let inner_promoted = self.smart_float_cast(inner, inner_promoted)?;
+        let mut b = SigBuilder::new(self.arena);
+        Ok(build(&mut b, inner_promoted))
+    }
+
+    fn promote_real_binary(
+        &mut self,
+        build: impl FnOnce(&mut SigBuilder<'_>, SigId, SigId) -> SigId,
+        left: SigId,
+        right: SigId,
+    ) -> Result<SigId, SignalPrepareError> {
+        let left_promoted = self.promote(left)?;
+        let right_promoted = self.promote(right)?;
+        let left_promoted = self.smart_float_cast(left, left_promoted)?;
+        let right_promoted = self.smart_float_cast(right, right_promoted)?;
+        let mut b = SigBuilder::new(self.arena);
+        Ok(build(&mut b, left_promoted, right_promoted))
+    }
+
+    fn promote_waveform(&mut self, values: &[SigId]) -> Result<SigId, SignalPrepareError> {
+        let all_int = values
+            .iter()
+            .all(|value| self.ty(*value).is_ok_and(|ty| ty == SimpleSigType::Int));
+        let mut promoted = Vec::with_capacity(values.len());
+        for value in values {
+            let promoted_value = self.promote(*value)?;
+            let promoted_value = if all_int {
+                promoted_value
+            } else {
+                self.smart_float_cast_preserving_clocked(*value, promoted_value)?
+            };
+            promoted.push(promoted_value);
+        }
+        let mut b = SigBuilder::new(self.arena);
+        Ok(b.waveform(&promoted))
+    }
+
+    fn promote_clocked_family(
+        &mut self,
+        items: &[SigId],
+        build: impl FnOnce(&mut SigBuilder<'_>, &[SigId]) -> SigId,
+    ) -> Result<SigId, SignalPrepareError> {
+        let mut promoted = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().copied().enumerate() {
+            let promoted_item = self.promote(item)?;
+            let promoted_item = if index == 0 {
+                self.smart_clock_cast(item, promoted_item)?
+            } else {
+                promoted_item
+            };
+            promoted.push(promoted_item);
+        }
+        let mut b = SigBuilder::new(self.arena);
+        Ok(build(&mut b, &promoted))
+    }
+
+    fn smart_clock_cast(
+        &mut self,
+        original: SigId,
+        promoted: SigId,
+    ) -> Result<SigId, SignalPrepareError> {
+        if self.ty(original)? == SimpleSigType::Int {
+            return Ok(promoted);
+        }
+        if let SigMatch::Clocked(clock_env, clock) = match_sig(self.arena, promoted) {
+            let mut b = SigBuilder::new(self.arena);
+            let clock = b.int_cast(clock);
+            return Ok(b.clocked(clock_env, clock));
+        }
+        let mut b = SigBuilder::new(self.arena);
+        Ok(b.int_cast(promoted))
+    }
+
+    fn smart_int_cast(
+        &mut self,
+        original: SigId,
+        promoted: SigId,
+    ) -> Result<SigId, SignalPrepareError> {
+        if self.ty(original)? == SimpleSigType::Real {
+            let mut b = SigBuilder::new(self.arena);
+            Ok(b.int_cast(promoted))
+        } else {
+            Ok(promoted)
+        }
+    }
+
+    fn smart_float_cast(
+        &mut self,
+        original: SigId,
+        promoted: SigId,
+    ) -> Result<SigId, SignalPrepareError> {
+        self.smart_float_cast_preserving_clocked(original, promoted)
+    }
+
+    fn smart_float_cast_preserving_clocked(
+        &mut self,
+        original: SigId,
+        promoted: SigId,
+    ) -> Result<SigId, SignalPrepareError> {
+        if self.ty(original)? != SimpleSigType::Int {
+            return Ok(promoted);
+        }
+        if let SigMatch::Clocked(clock_env, value) = match_sig(self.arena, promoted) {
+            let mut b = SigBuilder::new(self.arena);
+            let value = b.float_cast(value);
+            return Ok(b.clocked(clock_env, value));
+        }
+        let mut b = SigBuilder::new(self.arena);
+        Ok(b.float_cast(promoted))
+    }
+
+    fn smart_cast(
+        &mut self,
+        target: SigId,
+        source: SigId,
+        promoted_source: SigId,
+    ) -> Result<SigId, SignalPrepareError> {
+        let target_ty = self.ty(target)?;
+        let source_ty = self.ty(source)?;
+        if target_ty == source_ty {
+            Ok(promoted_source)
+        } else if target_ty == SimpleSigType::Real && source_ty == SimpleSigType::Int {
+            self.smart_float_cast(source, promoted_source)
+        } else if target_ty == SimpleSigType::Int && source_ty == SimpleSigType::Real {
+            self.smart_int_cast(source, promoted_source)
+        } else {
+            Ok(promoted_source)
+        }
+    }
+
+    fn same_type(&self, left: SigId, right: SigId) -> bool {
+        self.ty(left).ok() == self.ty(right).ok()
+    }
+
+    fn ty(&self, sig: SigId) -> Result<SimpleSigType, SignalPrepareError> {
+        self.types.get(&sig).copied().ok_or_else(|| {
+            SignalPrepareError::Typing(format!(
+                "missing reduced type for signal {} during promotion",
+                sig.as_u32()
+            ))
+        })
+    }
+
+    fn clone_generic(&mut self, sig: SigId) -> Result<SigId, SignalPrepareError> {
+        let node = self.arena.node(sig).cloned().ok_or_else(|| {
+            SignalPrepareError::Typing(format!("missing node {} during promotion", sig.as_u32()))
+        })?;
+        let mut promoted_children = Vec::with_capacity(node.children.len());
+        for child in node.children.as_slice() {
+            promoted_children.push(self.promote(*child)?);
+        }
+        Ok(self.arena.intern(node.kind, &promoted_children))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use signals::{SigBuilder, SigMatch, match_sig};
@@ -693,5 +1289,86 @@ mod tests {
             prepare_signals_for_fir(&arena, &[output]).expect("recursive typing should converge");
 
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Real));
+    }
+
+    #[test]
+    fn prepare_signals_for_fir_promotes_delay_amounts_to_int() {
+        let mut arena = tlib::TreeArena::new();
+        let output = {
+            let mut b = SigBuilder::new(&mut arena);
+            let input = b.input(0);
+            let amount = b.real(1.5);
+            b.delay(input, amount)
+        };
+
+        let prepared =
+            prepare_signals_for_fir(&arena, &[output]).expect("delay promotion should succeed");
+
+        let SigMatch::Delay(_, amount) = match_sig(&prepared.arena, prepared.outputs[0]) else {
+            panic!("promoted output should stay SIGDELAY");
+        };
+        let SigMatch::IntCast(inner) = match_sig(&prepared.arena, amount) else {
+            panic!("delay amount should be promoted to SIGINTCAST");
+        };
+        assert_eq!(match_sig(&prepared.arena, inner), SigMatch::Real(1.5));
+    }
+
+    #[test]
+    fn prepare_signals_for_fir_promotes_select2_selector_and_mixed_branches() {
+        let mut arena = tlib::TreeArena::new();
+        let output = {
+            let mut b = SigBuilder::new(&mut arena);
+            let selector = b.input(0);
+            let then_value = b.int(1);
+            let else_value = b.input(1);
+            b.select2(selector, then_value, else_value)
+        };
+
+        let prepared =
+            prepare_signals_for_fir(&arena, &[output]).expect("select2 promotion should succeed");
+
+        let SigMatch::Select2(selector, then_value, else_value) =
+            match_sig(&prepared.arena, prepared.outputs[0])
+        else {
+            panic!("promoted output should stay SIGSELECT2");
+        };
+        let SigMatch::IntCast(selector_inner) = match_sig(&prepared.arena, selector) else {
+            panic!("select2 selector should be promoted to SIGINTCAST");
+        };
+        assert_eq!(
+            match_sig(&prepared.arena, selector_inner),
+            SigMatch::Input(0)
+        );
+        assert_eq!(
+            match_sig(&prepared.arena, then_value),
+            SigMatch::Real(1.0),
+            "mixed-typed branch should be promoted to real"
+        );
+        assert_eq!(match_sig(&prepared.arena, else_value), SigMatch::Input(1));
+        assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Real));
+    }
+
+    #[test]
+    fn prepare_signals_for_fir_promotes_table_read_index_to_int() {
+        let mut arena = tlib::TreeArena::new();
+        let output = {
+            let mut b = SigBuilder::new(&mut arena);
+            let v0 = b.real(0.0);
+            let v1 = b.real(1.0);
+            let waveform = b.waveform(&[v0, v1]);
+            let index = b.input(0);
+            b.rdtbl(waveform, index)
+        };
+
+        let prepared =
+            prepare_signals_for_fir(&arena, &[output]).expect("table promotion should succeed");
+
+        let SigMatch::RdTbl(_, index) = match_sig(&prepared.arena, prepared.outputs[0]) else {
+            panic!("promoted output should stay SIGRDTBL");
+        };
+        let SigMatch::IntCast(inner) = match_sig(&prepared.arena, index) else {
+            panic!("table read index should be promoted to SIGINTCAST");
+        };
+        assert_eq!(match_sig(&prepared.arena, inner), SigMatch::Input(0));
     }
 }
