@@ -10,7 +10,7 @@ Status: in progress
   `de_bruijn_to_sym`
 - [x] Step 2: add simple signal typing for the pre-FIR subset
 - [x] Step 3: port the reduced `SignalPromotion` cast insertion rules
-- [ ] Step 4: make `signal_fir` consume prepared types for delay/recursion/table lowering
+- [x] Step 4: make `signal_fir` consume prepared types for delay/recursion/table lowering
 - [ ] Step 5: run differential validation on parity-critical DSP families
 
 ## 1. Goal

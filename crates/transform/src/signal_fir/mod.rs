@@ -19,6 +19,9 @@
 //!   constant size and deterministic generator expansion.
 //! - pre-lowering staging (`Preparation Step 1`): clone the output forest into a
 //!   private arena and run forest-wide `de_bruijn_to_sym` before FIR emission.
+//! - prepared typing/promotion (`Preparation Step 2/3/4`): consume the reduced
+//!   `signal_prepare` type map so FIR lowering keeps integer delay/recursion/table
+//!   carriers instead of defaulting every internal value to `real_ty`.
 //!
 //! Current `Step 2H` scope still excludes complex generator forms depending on
 //! runtime context/loop variables; those are reported as typed
@@ -136,7 +139,8 @@ pub struct SignalFirOutput {
 /// - validates options and top-level signal/arity contract,
 /// - builds a deterministic planning snapshot,
 /// - prepares the whole output forest in a private staging arena,
-/// - lowers one executable bootstrap signal slice to FIR.
+/// - lowers one executable bootstrap signal slice to FIR using the prepared
+///   reduced type annotations for state/table/result type selection.
 ///
 /// # Errors
 /// Returns [`SignalFirError`] when options are invalid or the top-level
@@ -160,6 +164,7 @@ pub fn compile_signals_to_fir_fastlane(
         options.module_name.as_str(),
         &prepared.arena,
         &prepared.outputs,
+        &prepared.types,
         options.real_type.as_fir_type(),
     )
 }
@@ -768,6 +773,70 @@ mod tests {
                 .iter()
                 .any(|id| matches!(match_fir(&out.store, *id), FirMatch::StoreVar { .. })),
             "delay state should create compute update store"
+        );
+    }
+
+    #[test]
+    fn int_delay1_uses_int32_state_slot() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let one = b.int(1);
+            b.delay1(one)
+        };
+        let out =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 0, 1, &SignalFirOptions::default())
+                .expect("integer delay1 should lower");
+
+        let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+            panic!("module expected");
+        };
+        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+            panic!("dsp_struct block expected");
+        };
+        assert!(
+            struct_items.iter().any(|id| matches!(
+                match_fir(&out.store, *id),
+                FirMatch::DeclareVar {
+                    typ: FirType::Int32,
+                    ..
+                }
+            )),
+            "integer delay state should allocate an Int32 slot"
+        );
+    }
+
+    #[test]
+    fn int_waveform_declares_int32_table() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let v0 = b.int(1);
+            let v1 = b.int(2);
+            let v2 = b.int(3);
+            let table = b.waveform(&[v0, v1, v2]);
+            let idx = b.int(0);
+            b.rdtbl(table, idx)
+        };
+        let out =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 0, 1, &SignalFirOptions::default())
+                .expect("integer waveform should lower");
+
+        let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+            panic!("module expected");
+        };
+        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+            panic!("dsp_struct block expected");
+        };
+        assert!(
+            struct_items.iter().any(|id| matches!(
+                match_fir(&out.store, *id),
+                FirMatch::DeclareTable {
+                    elem_type: FirType::Int32,
+                    ..
+                }
+            )),
+            "integer waveform tables should declare Int32 element type"
         );
     }
 }

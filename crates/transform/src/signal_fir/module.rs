@@ -28,6 +28,10 @@
 //!   all internal DSP computation — state variables, arithmetic results, math
 //!   call signatures, waveform table element types, and real constants.
 //!   Configurable at module build time via [`super::RealType`].
+//! - **Prepared reduced type map** (`signal_prepare::SimpleSigType`): used to
+//!   keep integer delay/recursion/table carriers and integer arithmetic results
+//!   in FIR when the prepared signal forest proves they stay integer after the
+//!   reduced promotion pass.
 //! - **External type** (`FirType::FaustFloat`): used exclusively for the
 //!   `FAUSTFLOAT**` audio buffer parameters in `compute`, and for UI zone
 //!   struct variables (sliders, bargraphs, buttons) that are read/written by
@@ -48,6 +52,8 @@ use fir::{
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{NodeKind, TreeArena, match_sym_rec, match_sym_ref, tree_to_int};
+
+use crate::signal_prepare::SimpleSigType;
 
 use super::SignalFirOutput;
 use super::error::{SignalFirError, SignalFirErrorCode};
@@ -83,16 +89,21 @@ const MATH_PROTO_ORDER: &[FirMathOp] = &[
 /// Emits a FIR module from validated planning data and propagated signals.
 ///
 /// This is the main fast-lane lowering boundary: callers provide already
-/// propagated signals plus a checked [`SignalFirPlan`], and receive a complete
+/// prepared signals plus a checked [`SignalFirPlan`], and receive a complete
 /// FIR module with Faust lifecycle sections assembled in deterministic order.
+///
+/// The `types` map comes from `transform::signal_prepare` and is the reduced
+/// contract used to choose FIR result/state/table element types without pulling
+/// in the full C++ signal type lattice.
 pub fn build_module(
     plan: &SignalFirPlan,
     module_name: &str,
     arena: &TreeArena,
     signals: &[SigId],
+    types: &HashMap<SigId, SimpleSigType>,
     real_ty: FirType,
 ) -> Result<SignalFirOutput, SignalFirError> {
-    let mut lower = SignalToFirLower::new(arena, plan.num_inputs, real_ty);
+    let mut lower = SignalToFirLower::new(arena, types, plan.num_inputs, real_ty);
     let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
     let dsp_arg = NamedType {
         name: "dsp".to_string(),
@@ -452,6 +463,7 @@ fn maybe_wrap_ui_in_root_group(
 /// tables, and scheduled compute-time updates.
 struct SignalToFirLower<'a> {
     arena: &'a TreeArena,
+    types: &'a HashMap<SigId, SimpleSigType>,
     num_inputs: usize,
     /// Internal DSP computation type (e.g. `Float32` or `Float64`).
     ///
@@ -492,9 +504,15 @@ impl<'a> SignalToFirLower<'a> {
     ///
     /// Each `build_module` call gets its own lowerer so caches and section
     /// accumulators cannot leak across compilations.
-    fn new(arena: &'a TreeArena, num_inputs: usize, real_ty: FirType) -> Self {
+    fn new(
+        arena: &'a TreeArena,
+        types: &'a HashMap<SigId, SimpleSigType>,
+        num_inputs: usize,
+        real_ty: FirType,
+    ) -> Self {
         Self {
             arena,
+            types,
             num_inputs,
             real_ty,
             store: FirStore::new(),
@@ -533,6 +551,46 @@ impl<'a> SignalToFirLower<'a> {
         self.real_ty.clone()
     }
 
+    /// Returns the reduced prepared signal type attached to one signal node.
+    ///
+    /// The fast-lane relies on the pre-FIR `signal_prepare` boundary to decide
+    /// whether one value/state/table should stay integer or use the internal
+    /// real computation type, mirroring the reduced
+    /// `deBruijn2Sym -> typeAnnotation -> signalPromote` contract.
+    fn simple_type(&self, sig: SigId) -> Result<SimpleSigType, SignalFirError> {
+        self.types.get(&sig).copied().ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("missing prepared type for signal {}", sig.as_u32()),
+            )
+        })
+    }
+
+    /// Maps one prepared signal type to the FIR value type used by lowering.
+    fn signal_fir_type(&self, sig: SigId) -> Result<FirType, SignalFirError> {
+        match self.simple_type(sig)? {
+            SimpleSigType::Int => Ok(FirType::Int32),
+            SimpleSigType::Real => Ok(self.real_ty()),
+            SimpleSigType::Sound => Ok(FirType::Sound),
+        }
+    }
+
+    /// Returns the typed zero initializer used for state slots and table
+    /// declarations.
+    fn zero_value_for_signal(&mut self, sig: SigId) -> Result<FirId, SignalFirError> {
+        match self.simple_type(sig)? {
+            SimpleSigType::Int => Ok(self.lower_int32_const(0)),
+            SimpleSigType::Real => Ok(self.float_const(0.0)),
+            SimpleSigType::Sound => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "signal {} cannot use a soundfile handle as delay/table state",
+                    sig.as_u32()
+                ),
+            )),
+        }
+    }
+
     /// Lowers one signal node to a FIR value expression.
     ///
     /// This function is the central dispatcher over [`signals::SigMatch`].
@@ -555,7 +613,7 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Input(index) => self.lower_input(index)?,
             SigMatch::Output(_, inner) => self.lower_signal(inner)?,
             SigMatch::Delay1(value) => {
-                let init = self.float_const(0.0);
+                let init = self.zero_value_for_signal(sig)?;
                 self.lower_delay_state(sig, value, init)?
             }
             SigMatch::Delay(value, amount) => self.lower_delay(sig, value, amount)?,
@@ -570,11 +628,11 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::BitCast(value) => self.lower_bitcast(self.real_ty(), value)?,
             SigMatch::FloatCast(value) => self.lower_cast(self.real_ty(), value)?,
             SigMatch::Select2(cond, then_value, else_value) => {
-                self.lower_select2(cond, then_value, else_value)?
+                self.lower_select2(sig, cond, then_value, else_value)?
             }
             SigMatch::Proj(index, group) => self.lower_proj(sig, index, group)?,
             SigMatch::Rec(body) => self.lower_signal(body)?,
-            SigMatch::BinOp(op, lhs, rhs) => self.lower_binop(op, lhs, rhs)?,
+            SigMatch::BinOp(op, lhs, rhs) => self.lower_binop(sig, op, lhs, rhs)?,
             SigMatch::Pow(lhs, rhs) => self.lower_math2(FirMathOp::Pow, lhs, rhs)?,
             SigMatch::Min(lhs, rhs) => self.lower_math2(FirMathOp::Min, lhs, rhs)?,
             SigMatch::Max(lhs, rhs) => self.lower_math2(FirMathOp::Max, lhs, rhs)?,
@@ -625,10 +683,10 @@ impl<'a> SignalToFirLower<'a> {
                 self.lower_signal(lhs)?
             }
             SigMatch::Enable(lhs, rhs) => {
-                let zero = self.float_const(0.0);
+                let zero = self.zero_value_for_signal(sig)?;
                 let lhs = self.lower_signal(lhs)?;
                 let cond = self.lower_signal(rhs)?;
-                let real_ty = self.real_ty();
+                let real_ty = self.signal_fir_type(sig)?;
                 let mut b = FirBuilder::new(&mut self.store);
                 b.select2(cond, lhs, zero, real_ty)
             }
@@ -709,7 +767,7 @@ impl<'a> SignalToFirLower<'a> {
     ) -> Result<FirId, SignalFirError> {
         match match_sig(self.arena, amount) {
             SigMatch::Int(1) => {
-                let init = self.float_const(0.0);
+                let init = self.zero_value_for_signal(node)?;
                 self.lower_delay_state(node, value, init)
             }
             SigMatch::Int(other) => Err(SignalFirError::new(
@@ -734,8 +792,7 @@ impl<'a> SignalToFirLower<'a> {
     ) -> Result<FirId, SignalFirError> {
         let name = self.ensure_state_slot(node, init);
         let out = {
-            // State slot holds internal-precision samples.
-            let real_ty = self.real_ty();
+            let real_ty = self.signal_fir_type(node)?;
             let mut b = FirBuilder::new(&mut self.store);
             b.load_var(name.clone(), AccessType::Struct, real_ty)
         };
@@ -755,8 +812,9 @@ impl<'a> SignalToFirLower<'a> {
             return name.clone();
         }
         let name = format!("state_n{}", node.as_u32());
-        // State slots are internal-precision variables, not FaustFloat.
-        let real_ty = self.real_ty();
+        let real_ty = self
+            .signal_fir_type(node)
+            .expect("prepared state node should have a FIR type");
         let mut b = FirBuilder::new(&mut self.store);
         let dec = b.declare_var(name.clone(), real_ty, AccessType::Struct, None);
         self.struct_declarations.push(dec);
@@ -949,8 +1007,7 @@ impl<'a> SignalToFirLower<'a> {
             let mut b = FirBuilder::new(&mut self.store);
             b.int32(0)
         };
-        // Waveform table elements are internal-precision.
-        let real_ty = self.real_ty();
+        let real_ty = self.signal_fir_type(node)?;
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.load_table(table_name, AccessType::Struct, index, real_ty))
     }
@@ -972,8 +1029,7 @@ impl<'a> SignalToFirLower<'a> {
         }
         let ridx = self.lower_signal(ridx)?;
         let index = self.normalized_table_index(ridx, table_len);
-        // Table elements are internal-precision.
-        let real_ty = self.real_ty();
+        let real_ty = self.signal_fir_type(node)?;
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.load_table(table_name, AccessType::Struct, index, real_ty))
     }
@@ -996,7 +1052,7 @@ impl<'a> SignalToFirLower<'a> {
         }
         if self.arena.is_nil(widx) {
             if self.arena.is_nil(wsig) {
-                return Ok(self.float_const(0.0));
+                return self.zero_value_for_signal(node);
             }
             return self.lower_signal(wsig);
         }
@@ -1044,10 +1100,9 @@ impl<'a> SignalToFirLower<'a> {
         for value in values {
             lowered_values.push(self.lower_signal(*value)?);
         }
-        let declared_zeros = self.zero_table_values(values.len());
+        let declared_zeros = self.zero_table_values(sig, values.len())?;
         let name = format!("table_n{}", sig.as_u32());
-        // Waveform tables hold internal-precision samples, not FaustFloat.
-        let real_ty = self.real_ty();
+        let real_ty = self.signal_fir_type(sig)?;
         let mut b = FirBuilder::new(&mut self.store);
         let decl = b.declare_table(name.clone(), AccessType::Struct, real_ty, &declared_zeros);
         self.struct_declarations.push(decl);
@@ -1079,10 +1134,9 @@ impl<'a> SignalToFirLower<'a> {
     ) -> Result<(String, usize), SignalFirError> {
         let size = self.table_size_from_sig(size_sig)?;
         let generated = self.expand_generator_values(generator_sig, size)?;
-        let declared_zeros = self.zero_table_values(size);
+        let declared_zeros = self.zero_table_values(sig, size)?;
         let name = format!("table_n{}", sig.as_u32());
-        // Writable DSP tables hold internal-precision samples, not FaustFloat.
-        let real_ty = self.real_ty();
+        let real_ty = self.signal_fir_type(sig)?;
         let mut b = FirBuilder::new(&mut self.store);
         let decl = b.declare_table(name.clone(), AccessType::Struct, real_ty, &declared_zeros);
         self.struct_declarations.push(decl);
@@ -1105,9 +1159,9 @@ impl<'a> SignalToFirLower<'a> {
     }
 
     /// Creates a zero-filled table initializer fallback.
-    fn zero_table_values(&mut self, size: usize) -> Vec<FirId> {
-        let zero = self.float_const(0.0);
-        vec![zero; size]
+    fn zero_table_values(&mut self, sig: SigId, size: usize) -> Result<Vec<FirId>, SignalFirError> {
+        let zero = self.zero_value_for_signal(sig)?;
+        Ok(vec![zero; size])
     }
 
     /// Evaluates table-size signal to a positive `usize`.
@@ -1263,11 +1317,17 @@ impl<'a> SignalToFirLower<'a> {
     }
 
     /// Lowers one binary signal operator to FIR binop.
-    fn lower_binop(&mut self, op: BinOp, lhs: SigId, rhs: SigId) -> Result<FirId, SignalFirError> {
+    fn lower_binop(
+        &mut self,
+        node: SigId,
+        op: BinOp,
+        lhs: SigId,
+        rhs: SigId,
+    ) -> Result<FirId, SignalFirError> {
         let lhs = self.lower_signal(lhs)?;
         let rhs = self.lower_signal(rhs)?;
-        let real_ty = self.real_ty();
-        let (fir_op, typ) = map_binop(op, real_ty).ok_or_else(|| {
+        let result_ty = self.signal_fir_type(node)?;
+        let (fir_op, typ) = map_binop(op, result_ty).ok_or_else(|| {
             SignalFirError::new(
                 SignalFirErrorCode::UnsupportedBinOp,
                 format!("unsupported SIGBINOP operator `{}` in Step 2A", op.name()),
@@ -1320,6 +1380,7 @@ impl<'a> SignalToFirLower<'a> {
     /// Lowers `select2` with explicit result-type selection.
     fn lower_select2(
         &mut self,
+        node: SigId,
         cond: SigId,
         then_value: SigId,
         else_value: SigId,
@@ -1327,8 +1388,7 @@ impl<'a> SignalToFirLower<'a> {
         let cond = self.lower_signal(cond)?;
         let then_value = self.lower_signal(then_value)?;
         let else_value = self.lower_signal(else_value)?;
-        // select2 result is internal-precision.
-        let real_ty = self.real_ty();
+        let real_ty = self.signal_fir_type(node)?;
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.select2(cond, then_value, else_value, real_ty))
     }
@@ -1357,7 +1417,7 @@ impl<'a> SignalToFirLower<'a> {
             }
             let name = self.recursion_stack[self.recursion_stack.len() - depth].clone();
             // Recursion state slots hold internal-precision samples.
-            let real_ty = self.real_ty();
+            let real_ty = self.signal_fir_type(node)?;
             let mut b = FirBuilder::new(&mut self.store);
             return Ok(b.load_var(name, AccessType::Struct, real_ty));
         }
@@ -1375,7 +1435,7 @@ impl<'a> SignalToFirLower<'a> {
                     )
                 })?;
             let name = self.recursion_stack[self.recursion_stack.len() - depth].clone();
-            let real_ty = self.real_ty();
+            let real_ty = self.signal_fir_type(node)?;
             let mut b = FirBuilder::new(&mut self.store);
             return Ok(b.load_var(name, AccessType::Struct, real_ty));
         }
@@ -1399,8 +1459,7 @@ impl<'a> SignalToFirLower<'a> {
         let init = self.float_const(0.0);
         let name = self.ensure_state_slot(node, init);
         let out = {
-            // Recursion projection reads from an internal-precision state slot.
-            let real_ty = self.real_ty();
+            let real_ty = self.signal_fir_type(node)?;
             let mut b = FirBuilder::new(&mut self.store);
             b.load_var(name.clone(), AccessType::Struct, real_ty)
         };
