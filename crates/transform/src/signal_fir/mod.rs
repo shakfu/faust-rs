@@ -6,7 +6,8 @@
 //! - lowering for `SIGINPUT`, numeric constants, `SIGBINOP`, and `SIGOUTPUT`
 //!   passthrough (`Step 2A`),
 //! - core math and control/state bootstrap nodes (`Step 2B`),
-//! - explicit state lowering for `delay`-family nodes (`Step 2C` first slice),
+//! - explicit state lowering for `delay`-family nodes, including fixed-size
+//!   circular FIR delay lines for constant `SIGDELAY` amounts (`Step 2C` slice),
 //! - first breadth coverage for extended primitives, waveform/table/UI families
 //!   (`Step 2D`),
 //! - first shim-reduction pass replacing several `frs_*` calls with native FIR
@@ -26,6 +27,11 @@
 //! Current `Step 2H` scope still excludes complex generator forms depending on
 //! runtime context/loop variables; those are reported as typed
 //! `UnsupportedSignalNode` errors.
+//!
+//! General `SIGDELAY` parity remains intentionally partial: the fast-lane now
+//! supports constant integer delay amounts through fixed-size circular buffers,
+//! but still rejects variable delays until a static delay-bound analysis is
+//! available.
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors until the
 //! remaining lowering slices are implemented.
@@ -367,7 +373,7 @@ mod tests {
         assert!(
             clear_stmts.iter().any(|id| matches!(
                 match_fir(&out.store, *id),
-                FirMatch::StoreVar { ref name, .. } if name.starts_with("state_n")
+                FirMatch::StoreVar { ref name, .. } if name.starts_with("fState")
             )),
             "signal state init should be emitted in instanceClear"
         );
@@ -803,6 +809,219 @@ mod tests {
                 }
             )),
             "integer delay state should allocate an Int32 slot"
+        );
+    }
+
+    #[test]
+    fn fixed_delay_lowers_to_struct_array_and_iota_updates() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let in0 = b.input(0);
+            let n3 = b.int(3);
+            b.delay(in0, n3)
+        };
+        let out =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+                .expect("constant fixed delay should lower");
+
+        let FirMatch::Module {
+            dsp_struct,
+            functions,
+            ..
+        } = match_fir(&out.store, out.module)
+        else {
+            panic!("module expected");
+        };
+        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+            panic!("dsp_struct block expected");
+        };
+
+        let delay_decl = struct_items
+            .iter()
+            .find(|id| {
+                matches!(
+                    match_fir(&out.store, **id),
+                    FirMatch::DeclareVar {
+                        ref name,
+                        typ: FirType::Array(_, 4),
+                        ..
+                    } if name.starts_with("fDelay")
+                )
+            })
+            .copied()
+            .expect("constant delay should allocate a size-4 delay line");
+        let FirMatch::DeclareVar {
+            name: delay_name,
+            typ,
+            ..
+        } = match_fir(&out.store, delay_decl)
+        else {
+            panic!("delay declaration expected");
+        };
+        match typ {
+            FirType::Array(inner, 4) => assert_eq!(*inner, FirType::Float32),
+            other => panic!("unexpected delay declaration type: {other:?}"),
+        }
+        assert!(
+            struct_items.iter().any(|id| matches!(
+                match_fir(&out.store, *id),
+                FirMatch::DeclareVar {
+                    ref name,
+                    typ: FirType::Int32,
+                    ..
+                } if name == "fIOTA"
+            )),
+            "fixed delay should declare persistent fIOTA state"
+        );
+
+        let clear_body = find_decl_fun_body(&out.store, functions, "instanceClear");
+        let FirMatch::Block(clear_stmts) = match_fir(&out.store, clear_body) else {
+            panic!("instanceClear block expected");
+        };
+        assert!(
+            clear_stmts.iter().any(|id| matches!(
+                match_fir(&out.store, *id),
+                FirMatch::StoreVar { ref name, .. } if name == "fIOTA"
+            )),
+            "instanceClear should reset fIOTA"
+        );
+        assert!(
+            clear_stmts
+                .iter()
+                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::SimpleForLoop { .. })),
+            "instanceClear should zero the delay-line array"
+        );
+
+        let loop_body = find_compute_loop_body(&out.store, functions);
+        let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+            panic!("compute loop body block expected");
+        };
+        assert!(
+            stmts.iter().any(|id| matches!(
+                match_fir(&out.store, *id),
+                FirMatch::StoreTable { ref name, .. } if name == &delay_name
+            )),
+            "compute loop should write the current sample into the delay line"
+        );
+        assert!(
+            stmts.iter().any(|id| matches!(
+                match_fir(&out.store, *id),
+                FirMatch::StoreVar { ref name, .. } if name == "fIOTA"
+            )),
+            "compute loop should increment fIOTA once per sample"
+        );
+
+        let stored_value = stmts
+            .iter()
+            .find_map(|id| match match_fir(&out.store, *id) {
+                FirMatch::StoreTable { name, value, .. } if name == "output0" => Some(value),
+                _ => None,
+            })
+            .expect("compute should include one output store");
+        let inner = unwrap_output_cast(&out.store, stored_value);
+        let FirMatch::LoadTable { name, index, .. } = match_fir(&out.store, inner) else {
+            panic!("fixed delay output should lower to a delay-line read");
+        };
+        assert_eq!(name, delay_name);
+        let FirMatch::BinOp {
+            op: FirBinOp::And,
+            lhs,
+            rhs,
+            ..
+        } = match_fir(&out.store, index)
+        else {
+            panic!("delay index should be masked");
+        };
+        assert!(matches!(
+            match_fir(&out.store, rhs),
+            FirMatch::Int32 { value: 3, .. }
+        ));
+        assert!(matches!(
+            match_fir(&out.store, lhs),
+            FirMatch::BinOp {
+                op: FirBinOp::Sub,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn zero_delay_uses_fast_path_without_delay_resources() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let in0 = b.input(0);
+            let n0 = b.int(0);
+            b.delay(in0, n0)
+        };
+        let out =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+                .expect("zero delay should lower through fast path");
+
+        let FirMatch::Module {
+            dsp_struct,
+            functions,
+            ..
+        } = match_fir(&out.store, out.module)
+        else {
+            panic!("module expected");
+        };
+        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+            panic!("dsp_struct block expected");
+        };
+        assert!(
+            !struct_items.iter().any(|id| matches!(
+                match_fir(&out.store, *id),
+                FirMatch::DeclareVar { ref name, .. } if name == "fIOTA"
+            )),
+            "zero delay should not allocate fIOTA"
+        );
+        assert!(
+            !struct_items.iter().any(|id| matches!(
+                match_fir(&out.store, *id),
+                FirMatch::DeclareVar { ref name, .. } if name.starts_with("fDelay")
+            )),
+            "zero delay should not allocate a delay line"
+        );
+
+        let loop_body = find_compute_loop_body(&out.store, functions);
+        let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+            panic!("compute loop body block expected");
+        };
+        let stored_value = stmts
+            .iter()
+            .find_map(|id| match match_fir(&out.store, *id) {
+                FirMatch::StoreTable { name, value, .. } if name == "output0" => Some(value),
+                _ => None,
+            })
+            .expect("compute should include one output store");
+        let inner = unwrap_output_cast(&out.store, stored_value);
+        assert!(
+            matches!(
+                match_fir(&out.store, inner),
+                FirMatch::Cast { .. } | FirMatch::LoadTable { .. }
+            ),
+            "zero delay should lower to the carried value without delay-line readback"
+        );
+    }
+
+    #[test]
+    fn variable_delay_is_rejected_explicitly() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let in0 = b.input(0);
+            let amount = b.input(1);
+            b.delay(in0, amount)
+        };
+        let err =
+            compile_signals_to_fir_fastlane(&arena, &[sig0], 2, 1, &SignalFirOptions::default())
+                .expect_err("variable delay must stay unsupported");
+        assert_eq!(err.code(), SignalFirErrorCode::UnsupportedSignalNode);
+        assert!(
+            err.to_string().contains("constant integer amount"),
+            "error should explain the current fixed-delay restriction"
         );
     }
 

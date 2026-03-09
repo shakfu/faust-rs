@@ -1,5 +1,5 @@
 faust-rs-golden-v1
 source=rep_38_sine_phasor.dsp
-bytes=176
-lines=5
-fnv1a64=d0fd44b752e90ae3
+bytes=485
+lines=15
+fnv1a64=c7484df0f642af14

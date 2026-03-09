@@ -105,6 +105,50 @@ fn legacy_and_fastlane_both_compile_lowpass_feedback_fixture() {
 }
 
 #[test]
+fn fastlane_delay_echo_uses_circular_delay_line_and_iota_in_c_and_cpp() {
+    let fast_cpp = compile_cpp_with_lane("rep_04_delay_echo.dsp", SignalFirLane::TransformFastLane);
+    assert!(fast_cpp.contains("class mydsp : public dsp"));
+    assert!(fast_cpp.contains("int fIOTA;"));
+    assert!(fast_cpp.contains("fDelay"));
+    assert!(
+        fast_cpp.contains("fDelay4[fIOTA] = fState4;"),
+        "C++ fast-lane should write the delay line at the current iota index"
+    );
+    assert!(
+        fast_cpp.contains("fDelay4[((fIOTA - 2205) & 4095)]"),
+        "C++ fast-lane should read the delay line through a masked circular index"
+    );
+    assert!(
+        fast_cpp.contains("fIOTA = (fIOTA + 1);"),
+        "C++ fast-lane should increment fIOTA once per sample"
+    );
+    assert!(
+        fast_cpp.contains("for (int lDelay0 = 0; lDelay0 < 4096; ++lDelay0)"),
+        "C++ fast-lane should zero the fixed-size delay line in instanceClear"
+    );
+
+    let fast_c = compile_c_with_lane("rep_04_delay_echo.dsp", SignalFirLane::TransformFastLane);
+    assert!(fast_c.contains("int fIOTA;"));
+    assert!(fast_c.contains("fDelay4"));
+    assert!(
+        fast_c.contains("dsp->fDelay4[dsp->fIOTA] = dsp->fState4;"),
+        "C fast-lane should write the delay line at the current iota index"
+    );
+    assert!(
+        fast_c.contains("dsp->fDelay4[((dsp->fIOTA - 2205) & 4095)]"),
+        "C fast-lane should read the delay line through a masked circular index"
+    );
+    assert!(
+        fast_c.contains("dsp->fIOTA = (dsp->fIOTA + 1);"),
+        "C fast-lane should increment fIOTA once per sample"
+    );
+    assert!(
+        fast_c.contains("for (int lDelay0 = 0; lDelay0 < 4096; lDelay0 = lDelay0 + 1)"),
+        "C fast-lane should zero the fixed-size delay line in instanceClear"
+    );
+}
+
+#[test]
 fn legacy_and_fastlane_both_compile_feedback_projection_fixture() {
     let legacy = compile_cpp_with_lane("rep_23_feedback_simple.dsp", SignalFirLane::LegacyBridge);
     let fast = compile_cpp_with_lane(

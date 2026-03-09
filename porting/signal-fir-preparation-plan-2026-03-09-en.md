@@ -16,7 +16,10 @@ parity slice remains open in the fast-lane:
 Current implementation status:
 
 - `SIGDELAY1` and `SIGPREFIX` are lowered through typed scalar state slots.
-- general `SIGDELAY` is not yet in C++-style delay-line parity.
+- general `SIGDELAY` now supports constant integer amounts through typed
+  fixed-size circular delay lines.
+- variable `SIGDELAY` amounts are still deferred until Rust grows a proper
+  static delay-bound analysis.
 
 Explicit scope decision for the next slice:
 
@@ -33,6 +36,7 @@ Explicit scope decision for the next slice:
 - [x] Step 3: port the reduced `SignalPromotion` cast insertion rules
 - [x] Step 4: make `signal_fir` consume prepared types for delay/recursion/table lowering
 - [x] Step 5: run differential validation on parity-critical DSP families
+- [x] Step 6: add fixed-size FIR delay lines for constant `SIGDELAY`
 
 ## 1. Goal
 
@@ -596,7 +600,7 @@ Pass criterion:
 - variable-delay fixtures still fail explicitly instead of silently compiling
 - delay/recursion/table fixtures still lower correctly and keep their current behavioral shape
 
-### Step 6 - Differential closure and doc cleanup
+### Step 7 - Differential closure and doc cleanup
 
 - update outdated recursion-policy docs
 - add targeted C++ differential tests

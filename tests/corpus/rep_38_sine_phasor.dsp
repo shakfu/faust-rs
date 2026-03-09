@@ -1,5 +1,15 @@
-freq = hslider("freq", 440.0, 20.0, 3000.0, 1.0);
+freq1 = hslider("freq1", 440.0, 20.0, 3000.0, 1.0);
+freq2 = hslider("freq2", 440.0, 20.0, 3000.0, 1.0);
+
+freq(i) = hslider("freq%i", 440.0, 20.0, 3000.0, 1.0);
+
 gain = hslider("gain", 0.2, 0.0, 1.0, 0.01);
 
-phase = +(freq / 48000.0) ~ _;
-process = gain * sin(6.283185307179586 * phase);
+phase1 = +(freq1 / 48000.0) ~ _;
+phase2 = +(freq2 / 48000.0) ~ _;
+
+phase(i) = +(freq(i) / 48000.0) ~ _;
+
+//process = gain * sin(6.283185307179586 * phase1), gain * sin(6.283185307179586 * phase2) ;
+
+process = par(i, 4, gain * sin(6.283185307179586 * phase(i) : @(1000))) :> _,_;

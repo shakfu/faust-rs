@@ -5,7 +5,7 @@
 //! - `SIGBINOP` (arithmetic/comparison/bitwise subset),
 //! - `SIGPOW`/`SIGMIN`/`SIGMAX`,
 //! - core unary math nodes (`sin/cos/tan/exp/log/log10/sqrt/abs`),
-//! - `SIGDELAY1`/`SIGDELAY`/`SIGPREFIX`,
+//! - `SIGDELAY1`/fixed-size `SIGDELAY`/`SIGPREFIX`,
 //! - `SIGSELECT2`, `SIGINTCAST`/`SIGFLOATCAST`/`SIGBITCAST`,
 //! - `SIGPROJ`/`SIGREC` (real lowering for canonical recursion groups in de
 //!   Bruijn or symbolic form).
@@ -51,13 +51,30 @@ use fir::{
     FirStore, FirType, NamedType, SliderRange, SliderType, UiBoxType, match_fir,
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
-use tlib::{NodeKind, TreeArena, match_sym_rec, match_sym_ref, tree_to_int};
+use tlib::{NodeKind, TreeArena, match_sym_rec, match_sym_ref};
 
 use crate::signal_prepare::SimpleSigType;
 
 use super::SignalFirOutput;
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::planner::SignalFirPlan;
+
+/// Fixed-size circular delay line resource used by fast-lane `SIGDELAY`.
+///
+/// Source provenance (C++):
+/// - `compiler/transform/signalFIRCompiler.hh` (`DelayLine`, `allocateDelayLineAux`)
+/// - `compiler/transform/signalFIRCompiler.cpp` (`compileSigDelay`, `writeReadDelay`)
+///
+/// Rust adapts the representation to the current FIR builder by storing the
+/// delay line as one DSP-struct array field plus an explicit `instanceClear`
+/// zeroing loop. The semantic contract stays the same for the active subset:
+/// constant integer delay amount, power-of-two size, and masked circular
+/// indexing driven by `fIOTA`.
+#[derive(Clone, Debug)]
+struct DelayLineInfo {
+    name: String,
+    size: usize,
+}
 
 /// Deterministic prototype emission order for math helper functions.
 ///
@@ -104,6 +121,7 @@ pub fn build_module(
     real_ty: FirType,
 ) -> Result<SignalFirOutput, SignalFirError> {
     let mut lower = SignalToFirLower::new(arena, types, plan.num_inputs, real_ty);
+    lower.prepare_delay_lines(signals)?;
     let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
     let dsp_arg = NamedType {
         name: "dsp".to_string(),
@@ -163,6 +181,10 @@ pub fn build_module(
     lower
         .sample_statements
         .extend(lower.compute_updates.iter().copied());
+    if lower.uses_iota {
+        let bump_iota = lower.bump_iota();
+        lower.sample_statements.push(bump_iota);
+    }
 
     let metadata_body = {
         let mut b = FirBuilder::new(&mut lower.store);
@@ -485,6 +507,9 @@ struct SignalToFirLower<'a> {
     compute_updates: Vec<FirId>,
     state_name_by_node: HashMap<SigId, String>,
     scheduled_state_updates: HashSet<SigId>,
+    delay_lines: HashMap<SigId, DelayLineInfo>,
+    scheduled_delay_writes: HashSet<SigId>,
+    uses_iota: bool,
     recursion_stack: Vec<String>,
     recursion_vars: Vec<SigId>,
     ui_controls: HashMap<SigId, String>,
@@ -497,6 +522,7 @@ struct SignalToFirLower<'a> {
     clear_init_seen: HashSet<String>,
     input_ptr_aliases: HashMap<usize, String>,
     used_math_ops: HashSet<FirMathOp>,
+    next_loop_var_id: usize,
 }
 
 impl<'a> SignalToFirLower<'a> {
@@ -526,6 +552,9 @@ impl<'a> SignalToFirLower<'a> {
             compute_updates: Vec::new(),
             state_name_by_node: HashMap::new(),
             scheduled_state_updates: HashSet::new(),
+            delay_lines: HashMap::new(),
+            scheduled_delay_writes: HashSet::new(),
+            uses_iota: false,
             recursion_stack: Vec::new(),
             recursion_vars: Vec::new(),
             ui_controls: HashMap::new(),
@@ -538,6 +567,84 @@ impl<'a> SignalToFirLower<'a> {
             clear_init_seen: HashSet::new(),
             input_ptr_aliases: HashMap::new(),
             used_math_ops: HashSet::new(),
+            next_loop_var_id: 0,
+        }
+    }
+
+    /// Pre-scans the prepared signal forest to allocate constant-delay line
+    /// resources before lowering starts.
+    ///
+    /// C++ `SignalBuilder` allocates/resizes delay lines before `compile()`.
+    /// The Rust fast-lane mirrors that boundary so repeated `SIGDELAY(x, n)`
+    /// uses sharing the same carried signal `x` can reuse one delay line sized
+    /// to the maximum constant delay seen in the current prepared forest.
+    fn prepare_delay_lines(&mut self, outputs: &[SigId]) -> Result<(), SignalFirError> {
+        let mut seen = HashSet::new();
+        for output in outputs {
+            self.scan_delay_lines(*output, &mut seen)?;
+        }
+        Ok(())
+    }
+
+    fn scan_delay_lines(
+        &mut self,
+        sig: SigId,
+        seen: &mut HashSet<SigId>,
+    ) -> Result<(), SignalFirError> {
+        if !seen.insert(sig) {
+            return Ok(());
+        }
+        if let SigMatch::Delay(value, amount) = match_sig(self.arena, sig) {
+            match self.constant_delay_amount(amount)? {
+                Some(0) => {}
+                Some(delay) => {
+                    self.ensure_delay_line_decl(value, delay)?;
+                }
+                None => {
+                    return self.unsupported_node(
+                        sig,
+                        "SIGDELAY currently requires a constant integer amount in the fast-lane",
+                    );
+                }
+            }
+        }
+        let node = self.arena.node(sig).ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("missing prepared signal node {}", sig.as_u32()),
+            )
+        })?;
+        for child in node.children.as_slice() {
+            self.scan_delay_child(*child, seen)?;
+        }
+        Ok(())
+    }
+
+    fn scan_delay_child(
+        &mut self,
+        child: SigId,
+        seen: &mut HashSet<SigId>,
+    ) -> Result<(), SignalFirError> {
+        if self.arena.is_list(child) {
+            let mut list = child;
+            while !self.arena.is_nil(list) {
+                let head = self.arena.hd(list).ok_or_else(|| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::UnsupportedSignalNode,
+                        "malformed prepared signal list while scanning delay lines",
+                    )
+                })?;
+                self.scan_delay_lines(head, seen)?;
+                list = self.arena.tl(list).ok_or_else(|| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::UnsupportedSignalNode,
+                        "malformed prepared signal list while scanning delay lines",
+                    )
+                })?;
+            }
+            Ok(())
+        } else {
+            self.scan_delay_lines(child, seen)
         }
     }
 
@@ -756,29 +863,63 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.cast(real_ty, raw))
     }
 
-    /// Lowers general `SIGDELAY` currently restricted to integer amount `1`.
+    /// Lowers general `SIGDELAY` using a fixed-size circular delay line.
     ///
-    /// Non-unit delays are explicitly rejected in the current fast-lane slice.
+    /// Source provenance (C++):
+    /// - `signalFIRCompiler.cpp::compileSigDelay(...)`
+    /// - `signalFIRCompiler.hh::writeReadDelay(...)`
+    ///
+    /// Active Rust parity slice:
+    /// - constant integer amount only,
+    /// - zero-delay fast path,
+    /// - one typed DSP-struct array per delayed carried signal,
+    /// - masked circular indexing driven by persistent `fIOTA`.
+    ///
+    /// Variable delays remain explicitly unsupported until the fast-lane grows
+    /// a static delay-bound analysis comparable to the C++ interval contract.
     fn lower_delay(
         &mut self,
         node: SigId,
         value: SigId,
         amount: SigId,
     ) -> Result<FirId, SignalFirError> {
-        match match_sig(self.arena, amount) {
-            SigMatch::Int(1) => {
-                let init = self.zero_value_for_signal(node)?;
-                self.lower_delay_state(node, value, init)
-            }
-            SigMatch::Int(other) => Err(SignalFirError::new(
+        match self.constant_delay_amount(amount)? {
+            Some(0) => self.lower_signal(value),
+            Some(delay) => self.lower_fixed_delay(node, value, amount, delay),
+            None => Err(SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
-                format!("SIGDELAY amount {other} unsupported in Step 2C (only 1)"),
-            )),
-            _ => Err(SignalFirError::new(
-                SignalFirErrorCode::UnsupportedSignalNode,
-                "SIGDELAY amount must be integer in Step 2C",
+                format!(
+                    "SIGDELAY amount must be a constant integer in the current fast-lane (expr={})",
+                    dump_sig_readable(self.arena, amount)
+                ),
             )),
         }
+    }
+
+    fn lower_fixed_delay(
+        &mut self,
+        node: SigId,
+        value: SigId,
+        amount: SigId,
+        delay: i32,
+    ) -> Result<FirId, SignalFirError> {
+        let line = self.ensure_delay_line_decl(value, delay)?;
+        let current = self.lower_signal(value)?;
+        if self.scheduled_delay_writes.insert(value) {
+            let write_index = self.current_iota_index();
+            let mut b = FirBuilder::new(&mut self.store);
+            self.sample_statements.push(b.store_table(
+                line.name.clone(),
+                AccessType::Struct,
+                write_index,
+                current,
+            ));
+        }
+        let amount_value = self.lower_signal(amount)?;
+        let read_index = self.delayed_iota_index(amount_value, line.size);
+        let read_ty = self.signal_fir_type(node)?;
+        let mut b = FirBuilder::new(&mut self.store);
+        Ok(b.load_table(line.name.clone(), AccessType::Struct, read_index, read_ty))
     }
 
     /// Lowers one single-sample state edge (`delay1`/`prefix`) as:
@@ -811,7 +952,7 @@ impl<'a> SignalToFirLower<'a> {
         if let Some(name) = self.state_name_by_node.get(&node) {
             return name.clone();
         }
-        let name = format!("state_n{}", node.as_u32());
+        let name = format!("fState{}", node.as_u32());
         let real_ty = self
             .signal_fir_type(node)
             .expect("prepared state node should have a FIR type");
@@ -821,6 +962,181 @@ impl<'a> SignalToFirLower<'a> {
         self.register_clear_init(name.clone(), init);
         self.state_name_by_node.insert(node, name.clone());
         name
+    }
+
+    fn ensure_delay_line_decl(
+        &mut self,
+        carried: SigId,
+        delay: i32,
+    ) -> Result<DelayLineInfo, SignalFirError> {
+        if delay < 0 {
+            return Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("SIGDELAY amount must be >= 0, got {delay}"),
+            ));
+        }
+        let elem_type = self.signal_fir_type(carried)?;
+        let required_size = self.pow2limit_for_delay(delay)?;
+        if let Some(existing) = self.delay_lines.get(&carried) {
+            if existing.size < required_size {
+                return Err(SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!(
+                        "internal fast-lane delay-line sizing mismatch for signal {}: existing size {} < required {}",
+                        carried.as_u32(),
+                        existing.size,
+                        required_size
+                    ),
+                ));
+            }
+            return Ok(existing.clone());
+        }
+
+        self.ensure_iota_state();
+        let name = format!("fDelay{}", carried.as_u32());
+        let array_ty = FirType::Array(Box::new(elem_type.clone()), required_size);
+        let mut b = FirBuilder::new(&mut self.store);
+        let decl = b.declare_var(name.clone(), array_ty, AccessType::Struct, None);
+        self.struct_declarations.push(decl);
+        self.register_clear_table(name.clone(), elem_type.clone(), required_size, carried)?;
+        let info = DelayLineInfo {
+            name,
+            size: required_size,
+        };
+        self.delay_lines.insert(carried, info.clone());
+        Ok(info)
+    }
+
+    fn ensure_iota_state(&mut self) {
+        if self.uses_iota {
+            return;
+        }
+        self.uses_iota = true;
+        let zero = self.lower_int32_const(0);
+        let mut b = FirBuilder::new(&mut self.store);
+        let decl = b.declare_var("fIOTA", FirType::Int32, AccessType::Struct, None);
+        self.struct_declarations.push(decl);
+        self.register_clear_init("fIOTA".to_owned(), zero);
+    }
+
+    fn current_iota_index(&mut self) -> FirId {
+        let mut b = FirBuilder::new(&mut self.store);
+        b.load_var("fIOTA", AccessType::Struct, FirType::Int32)
+    }
+
+    fn delayed_iota_index(&mut self, amount: FirId, size: usize) -> FirId {
+        let iota = self.current_iota_index();
+        let raw = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.binop(FirBinOp::Sub, iota, amount, FirType::Int32)
+        };
+        self.masked_delay_index(raw, size)
+    }
+
+    fn masked_delay_index(&mut self, index: FirId, size: usize) -> FirId {
+        let mask = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.int32(i32::try_from(size.saturating_sub(1)).unwrap_or(i32::MAX))
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        b.binop(FirBinOp::And, index, mask, FirType::Int32)
+    }
+
+    fn bump_iota(&mut self) -> FirId {
+        let next = {
+            let iota = self.current_iota_index();
+            let one = self.lower_int32_const(1);
+            let mut b = FirBuilder::new(&mut self.store);
+            b.binop(FirBinOp::Add, iota, one, FirType::Int32)
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        b.store_var("fIOTA", AccessType::Struct, next)
+    }
+
+    fn register_clear_table(
+        &mut self,
+        name: String,
+        elem_type: FirType,
+        size: usize,
+        sig: SigId,
+    ) -> Result<(), SignalFirError> {
+        if !self.clear_init_seen.insert(name.clone()) {
+            return Ok(());
+        }
+        let loop_var = self.fresh_loop_var("lDelay");
+        let upper = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.int32(i32::try_from(size).map_err(|_| {
+                SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!("delay line size conversion overflow: {size}"),
+                )
+            })?)
+        };
+        let zero = match self.simple_type(sig)? {
+            SimpleSigType::Int => self.lower_int32_const(0),
+            SimpleSigType::Real => self.float_const(0.0),
+            SimpleSigType::Sound => {
+                return Err(SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!(
+                        "signal {} cannot use a soundfile handle as delay-line element type",
+                        sig.as_u32()
+                    ),
+                ));
+            }
+        };
+        let body = {
+            let index = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+            };
+            let store = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.store_table(name, AccessType::Struct, index, zero)
+            };
+            let mut b = FirBuilder::new(&mut self.store);
+            b.block(&[store])
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        self.clear_statements
+            .push(b.simple_for_loop(loop_var, upper, body, false));
+        let _ = elem_type;
+        Ok(())
+    }
+
+    fn fresh_loop_var(&mut self, prefix: &str) -> String {
+        let name = format!("{prefix}{}", self.next_loop_var_id);
+        self.next_loop_var_id += 1;
+        name
+    }
+
+    fn constant_delay_amount(&self, sig: SigId) -> Result<Option<i32>, SignalFirError> {
+        match match_sig(self.arena, sig) {
+            SigMatch::Int(value) => Ok(Some(value)),
+            _ => Ok(None),
+        }
+    }
+
+    fn pow2limit_for_delay(&self, delay: i32) -> Result<usize, SignalFirError> {
+        let delay = usize::try_from(delay).map_err(|_| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("SIGDELAY amount must be >= 0, got {delay}"),
+            )
+        })?;
+        let requested = delay.checked_add(1).ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                "SIGDELAY amount overflow while sizing delay line",
+            )
+        })?;
+        requested.checked_next_power_of_two().ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("SIGDELAY amount too large to size delay line: {delay}"),
+            )
+        })
     }
 
     /// Emits one floating-point constant at the internal real precision.
@@ -1393,8 +1709,14 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.select2(cond, then_value, else_value, real_ty))
     }
 
-    /// Lowers recursion projection nodes by decoding recursive groups in de
-    /// Bruijn or symbolic form and recursively lowering the resolved group body.
+    /// Lowers recursion projection nodes after the mandatory
+    /// `de_bruijn_to_sym` preparation step.
+    ///
+    /// Active contract:
+    /// - symbolic recursion payloads (`SYMREC` / `SYMREF`) are the normal
+    ///   fast-lane input form,
+    /// - `SIGREC` is still accepted as a legacy adapter shape,
+    /// - raw `DEBRUIJN` / `DEBRUIJNREF` payloads are no longer accepted here.
     fn lower_proj(
         &mut self,
         node: SigId,
@@ -1406,20 +1728,6 @@ impl<'a> SignalToFirLower<'a> {
                 SignalFirErrorCode::UnsupportedSignalNode,
                 format!("SIGPROJ index {index} unsupported in Step 2C.2 (only 0)"),
             ));
-        }
-
-        if let Some(depth) = self.decode_debruijn_ref(group) {
-            if depth == 0 || depth > self.recursion_stack.len() {
-                return Err(SignalFirError::new(
-                    SignalFirErrorCode::UnsupportedSignalNode,
-                    format!("invalid DEBRUIJNREF depth {depth}"),
-                ));
-            }
-            let name = self.recursion_stack[self.recursion_stack.len() - depth].clone();
-            // Recursion state slots hold internal-precision samples.
-            let real_ty = self.signal_fir_type(node)?;
-            let mut b = FirBuilder::new(&mut self.store);
-            return Ok(b.load_var(name, AccessType::Struct, real_ty));
         }
 
         if let Some(var) = match_sym_ref(self.arena, group) {
@@ -1440,9 +1748,7 @@ impl<'a> SignalToFirLower<'a> {
             return Ok(b.load_var(name, AccessType::Struct, real_ty));
         }
 
-        let body = if let Some(body) = self.decode_debruijn_group(group) {
-            body
-        } else if let Some(body) = self.decode_symbolic_group(group) {
+        let body = if let Some(body) = self.decode_symbolic_group(group) {
             body
         } else if let SigMatch::Rec(body) = match_sig(self.arena, group) {
             body
@@ -1450,7 +1756,7 @@ impl<'a> SignalToFirLower<'a> {
             return Err(SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
                 format!(
-                    "SIGPROJ group must be DEBRUIJN/DEBRUIJNREF/SYMREC/SYMREF/SIGREC in Step 2C.2 (expr={})",
+                    "SIGPROJ group must be SYMREC/SYMREF/SIGREC after de_bruijn_to_sym in Step 2C.2 (expr={})",
                     dump_sig_readable(self.arena, node)
                 ),
             ));
@@ -1480,21 +1786,6 @@ impl<'a> SignalToFirLower<'a> {
         Ok(out)
     }
 
-    /// Decodes one `SIGREC`/legacy recursion wrapper to its body signal.
-    fn decode_debruijn_group(&self, group: SigId) -> Option<SigId> {
-        let node = self.arena.node(group)?;
-        let NodeKind::Tag(tag_id) = node.kind else {
-            return None;
-        };
-        if self.arena.tag_name(tag_id)? != "DEBRUIJN" {
-            return None;
-        }
-        let [list] = node.children.as_slice() else {
-            return None;
-        };
-        self.arena.hd(*list)
-    }
-
     /// Decodes one `SYMREC(var, body_list)` group to its first payload signal.
     ///
     /// `de_bruijn_to_sym` preserves the list-shaped recursive payload used by
@@ -1503,21 +1794,6 @@ impl<'a> SignalToFirLower<'a> {
     fn decode_symbolic_group(&self, group: SigId) -> Option<SigId> {
         let (_, body_list) = match_sym_rec(self.arena, group)?;
         self.arena.hd(body_list)
-    }
-
-    /// Decodes one `DEBRUIJNREF(level)` index from a recursion group payload.
-    fn decode_debruijn_ref(&self, group: SigId) -> Option<usize> {
-        let node = self.arena.node(group)?;
-        let NodeKind::Tag(tag_id) = node.kind else {
-            return None;
-        };
-        if self.arena.tag_name(tag_id)? != "DEBRUIJNREF" {
-            return None;
-        }
-        let [depth] = node.children.as_slice() else {
-            return None;
-        };
-        usize::try_from(tree_to_int(self.arena, *depth)?).ok()
     }
 }
 
