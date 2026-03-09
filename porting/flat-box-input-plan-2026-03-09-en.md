@@ -1,6 +1,6 @@
 # Typed `FlatBoxId` Input Plan (2026-03-09)
 
-Status: proposed specification and migration plan
+Status: in progress
 
 Scope: define a typed Rust input contract for `crates/propagate` that matches
 the C++ post-`evalprocess -> a2sb -> propagate` boundary instead of accepting a
@@ -555,6 +555,7 @@ Pass criterion:
 ### Stage 4: close known propagation-family gaps
 
 - implement typed `Route`
+- implement typed `FFun`
 - implement typed `Ondemand`
 - implement typed `Upsampling`
 - implement typed `Downsampling`
@@ -563,6 +564,36 @@ Pass criterion:
 Pass criterion:
 
 - these families are no longer represented as builder-valid but lowering-invalid.
+
+Current status on 2026-03-09:
+
+- completed:
+  - typed `Route`
+  - typed `FFun`
+- remaining:
+  - `Soundfile`
+  - `Ondemand`
+  - `Upsampling`
+  - `Downsampling`
+
+Blocked-until-ported signal IR support:
+
+- `sigSoundfileLength(sf, part)`
+- `sigSoundfileRate(sf, part)`
+- `sigSoundfileBuffer(sf, chan, part, ridx)`
+- `sigTempVar(s)`
+- `sigPermVar(s)`
+- `sigClocked(clock, y)`
+- `sigDoubleClocked(inside, outside, y)` represented in Rust through the same
+  nested `sigClocked` shape as C++
+
+Interpretation:
+
+- the remaining `FlatBoxId` stage-4 work is no longer primarily a
+  `crates/propagate` refactor,
+- it is a parity extension of `crates/signals`,
+- only after those signal families exist can `propagate` port the remaining
+  C++ lowering paths without inventing surrogate semantics.
 
 ### Stage 5: tighten public contract
 
