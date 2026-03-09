@@ -252,10 +252,10 @@ impl<'a> SimpleTyper<'a> {
     /// reduced domain `Int / Real / Sound`. Unsupported or malformed nodes are
     /// reported as typed preparation errors so the fast-lane fails explicitly.
     fn infer_sig(&mut self, sig: SigId) -> Result<TypeSlot, SignalPrepareError> {
-        if let Some(ty) = self.node_types.get(&sig) {
-            if *ty != TypeSlot::Unknown {
-                return Ok(*ty);
-            }
+        if let Some(ty) = self.node_types.get(&sig)
+            && *ty != TypeSlot::Unknown
+        {
+            return Ok(*ty);
         }
         let ty = match match_sig(self.arena, sig) {
             SigMatch::Unknown => {

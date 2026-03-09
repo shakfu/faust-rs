@@ -462,6 +462,7 @@ fn fastlane_cpp_compiles_repo_noise_dsp() {
     assert!(cpp.contains("void compute("));
     assert!(cpp.contains("int iRec"));
     assert!(cpp.contains("iRec"));
+    assert!(cpp.contains("fSampleRate"));
     assert!(!cpp.contains("float fRec34"));
 }
 

@@ -535,6 +535,12 @@ pub struct Environment {
     source_context: Arc<EvalSourceContext>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EnvFrameKey {
+    store_ptr: usize,
+    env_id: EnvId,
+}
+
 #[derive(Clone, Debug, Default)]
 struct EnvLayer {
     bindings: Vec<(SymId, EvalValue)>,
@@ -595,6 +601,17 @@ impl Environment {
         self.current == other.current
             && Arc::ptr_eq(&self.store, &other.store)
             && Arc::ptr_eq(&self.source_context, &other.source_context)
+    }
+
+    fn frame_key(&self) -> EnvFrameKey {
+        self.frame_key_for(self.current)
+    }
+
+    fn frame_key_for(&self, env_id: EnvId) -> EnvFrameKey {
+        EnvFrameKey {
+            store_ptr: Arc::as_ptr(&self.store) as usize,
+            env_id,
+        }
     }
 
     /// Returns the source-resolution context captured by this environment.
@@ -985,17 +1002,17 @@ impl LoopDetector {
         }
     }
 
-    fn enter_tree(&mut self, id: TreeId) -> Result<(), EvalError> {
-        self.enter(LoopFrame::Tree(id), id)
+    fn enter_tree(&mut self, id: TreeId, env_key: EnvFrameKey) -> Result<(), EvalError> {
+        self.enter(LoopFrame::TreeEnv { id, env_key }, id)
     }
 
     fn enter_symbol_env(
         &mut self,
         sym: SymId,
-        env_id: EnvId,
+        env_key: EnvFrameKey,
         node: TreeId,
     ) -> Result<(), EvalError> {
-        self.enter(LoopFrame::SymbolEnv { sym, env_id }, node)
+        self.enter(LoopFrame::SymbolEnv { sym, env_key }, node)
     }
 
     fn enter(&mut self, frame: LoopFrame, node: TreeId) -> Result<(), EvalError> {
@@ -1024,8 +1041,8 @@ impl Default for LoopDetector {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum LoopFrame {
-    Tree(TreeId),
-    SymbolEnv { sym: SymId, env_id: EnvId },
+    TreeEnv { id: TreeId, env_key: EnvFrameKey },
+    SymbolEnv { sym: SymId, env_key: EnvFrameKey },
 }
 
 /// Performance statistics collected during evaluation.
@@ -1944,7 +1961,7 @@ fn eval_value(
                         // Shadowing sentinel used for lambda parameters in lexical scopes.
                         return Ok(EvalValue::Box(expr));
                     }
-                    loop_detector.enter_tree(value)?;
+                    loop_detector.enter_tree(value, env.frame_key())?;
                     let out = eval_value(arena, value, env, loop_detector);
                     loop_detector.leave();
                     out
@@ -1956,7 +1973,11 @@ fn eval_value(
                     ) {
                         return Ok(EvalValue::Closure(closure));
                     }
-                    loop_detector.enter_symbol_env(binding_sym, binding_env_id, closure.expr)?;
+                    loop_detector.enter_symbol_env(
+                        binding_sym,
+                        env.frame_key_for(binding_env_id),
+                        closure.expr,
+                    )?;
                     let out = eval_value(arena, closure.expr, &closure.env, loop_detector);
                     loop_detector.leave();
                     out

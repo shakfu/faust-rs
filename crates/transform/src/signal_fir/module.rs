@@ -763,6 +763,7 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Round(value) => self.lower_math1(FirMathOp::Round, value)?,
             SigMatch::Lowest(value) => self.lower_signal(value)?,
             SigMatch::Highest(value) => self.lower_signal(value)?,
+            SigMatch::FConst(_, name, _) => self.lower_fconst(sig, name)?,
             SigMatch::RdTbl(tbl, ridx) => self.lower_rdtbl(sig, tbl, ridx)?,
             SigMatch::WrTbl(size, generator, widx, wsig) => {
                 self.lower_wrtbl(sig, size, generator, widx, wsig)?
@@ -815,6 +816,28 @@ impl<'a> SignalToFirLower<'a> {
 
         self.cache.insert(sig, lowered);
         Ok(lowered)
+    }
+
+    /// Lowers supported foreign constants.
+    ///
+    /// Active parity slice mirrors the C++ fast-lane special-case for
+    /// `fSamplingFreq`, which loads the persistent `fSampleRate` struct field.
+    fn lower_fconst(&mut self, sig: SigId, name: SigId) -> Result<FirId, SignalFirError> {
+        let name = self.label_text(name);
+        if name == "fSamplingFreq" || name == "fSamplingRate" {
+            let out_ty = self.signal_fir_type(sig)?;
+            let mut b = FirBuilder::new(&mut self.store);
+            let rate = b.load_var("fSampleRate", AccessType::Struct, FirType::Int32);
+            return Ok(if out_ty == FirType::Int32 {
+                rate
+            } else {
+                b.cast(out_ty, rate)
+            });
+        }
+        self.unsupported_node(
+            sig,
+            &format!("unsupported foreign constant `{name}` in Step 2C"),
+        )
     }
 
     /// Lowers one input signal by materializing channel-pointer aliases once
