@@ -11,11 +11,15 @@
 //! - Composition algebra: `seq`, `par`, `split`, `merge`.
 //! - Explicit typed errors for unsupported nodes and arity mismatches.
 //! - Recursive composition lowering with De Bruijn-style placeholders (`sigRec/sigProj` shape).
+//! - Typed `FlatBoxId` boundary that validates the post-`eval/a2sb` flat box subset.
 //!
 //! # Public API mapping status
 //! - `box_arity(...)` mirrors the C++ `getBoxType(...)` role for the supported subset.
 //! - `propagate(...)` mirrors C++ `propagate(...)` on the supported subset.
 //! - `make_sig_input_list(...)` mirrors C++ `makeSigInputList(...)`.
+//! - `FlatBoxId` / [`try_build_flat_box`] are an adapted Rust boundary: they make the
+//!   C++ post-`evalprocess -> a2sb -> propagate` flat-box contract explicit while
+//!   preserving `TreeArena` node sharing through `TreeId`.
 //!
 //! # Integer convention
 //! - Integer signals emitted by this pass are `i32`-semantic.
@@ -52,6 +56,270 @@ pub struct BoxArity {
     pub inputs: usize,
     /// Number of produced output signals.
     pub outputs: usize,
+}
+
+/// Typed handle for the flat post-eval box subset accepted at the propagation boundary.
+///
+/// # Source provenance (C++)
+/// - `compiler/evaluate/eval.cpp`
+/// - `evalprocess(...)`
+/// - `a2sb(...)`
+/// - `compiler/propagate/propagate.cpp`
+/// - `realPropagate(...)`
+///
+/// The C++ production pipeline does not feed arbitrary box syntax into
+/// propagation. It first evaluates the program and lowers residual
+/// lambda/pattern forms through `a2sb(...)`, then propagates the resulting
+/// first-order box tree.
+///
+/// Rust keeps the same tree arena and structural sharing model: `FlatBoxId` is
+/// a validated `TreeId` wrapper, not a copied owned IR. Its role is to make the
+/// post-eval contract explicit:
+///
+/// - accepted: flat first-order box families such as primitives, symbolic
+///   slots, widgets, groups, route, and composition algebra,
+/// - rejected: evaluator-only syntax that must have disappeared before
+///   propagation, such as `abstr`, `case`, `pattern_var`, and local-definition
+///   shells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FlatBoxId(TreeId);
+
+impl FlatBoxId {
+    #[must_use]
+    pub fn as_tree_id(self) -> TreeId {
+        self.0
+    }
+
+    fn from_tree_id(id: TreeId) -> Self {
+        Self(id)
+    }
+}
+
+/// Boundary validation error while converting a generic `BoxId` into a [`FlatBoxId`].
+///
+/// This error means the caller attempted to feed propagation a box family that
+/// is not valid after the C++ `evalprocess -> a2sb` lowering boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FlatBoxBuildError {
+    UnexpectedPostEvalBox { node: TreeId, kind: &'static str },
+}
+
+impl Display for FlatBoxBuildError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnexpectedPostEvalBox { node, kind } => write!(
+                f,
+                "box node {} ({kind}) is not valid in the post-eval flat box subset",
+                node.as_u32()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FlatBoxBuildError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlatNodeKind {
+    Int,
+    Real,
+    Wire,
+    Cut,
+    Slot,
+    Symbolic { body: FlatBoxId },
+    Metadata { body: FlatBoxId },
+    Prim1,
+    Prim2,
+    Prim3,
+    Prim4,
+    Prim5,
+    FFun,
+    FConst,
+    FVar,
+    Button,
+    Checkbox,
+    VSlider,
+    HSlider,
+    NumEntry,
+    VBargraph,
+    HBargraph,
+    Soundfile,
+    Waveform,
+    VGroup { body: FlatBoxId },
+    HGroup { body: FlatBoxId },
+    TGroup { body: FlatBoxId },
+    Seq(FlatBoxId, FlatBoxId),
+    Par(FlatBoxId, FlatBoxId),
+    Split(FlatBoxId, FlatBoxId),
+    Merge(FlatBoxId, FlatBoxId),
+    Rec(FlatBoxId, FlatBoxId),
+    Environment,
+    Route,
+    Inputs,
+    Outputs,
+    Ondemand(FlatBoxId),
+    Upsampling(FlatBoxId),
+    Downsampling(FlatBoxId),
+}
+
+/// Validates that `root` belongs to the flat post-eval box subset and returns a typed handle.
+///
+/// This is a structural contract check only. It does not evaluate, simplify, or
+/// normalize the tree. Callers should use it at the `eval/a2sb -> propagate`
+/// boundary to guarantee that propagation never sees residual evaluator syntax.
+pub fn try_build_flat_box(
+    arena: &TreeArena,
+    root: BoxId,
+) -> Result<FlatBoxId, FlatBoxBuildError> {
+    validate_flat_box(arena, root)
+}
+
+fn validate_flat_box(arena: &TreeArena, node: BoxId) -> Result<FlatBoxId, FlatBoxBuildError> {
+    let flat = FlatBoxId::from_tree_id(node);
+    let _ = flat_node_kind(arena, flat)?;
+    Ok(flat)
+}
+
+fn flat_node_kind(arena: &TreeArena, node: FlatBoxId) -> Result<FlatNodeKind, FlatBoxBuildError> {
+    let node_id = node.as_tree_id();
+    match match_box(arena, node_id) {
+        BoxMatch::Int(_) => Ok(FlatNodeKind::Int),
+        BoxMatch::Real(_) => Ok(FlatNodeKind::Real),
+        BoxMatch::Wire => Ok(FlatNodeKind::Wire),
+        BoxMatch::Cut => Ok(FlatNodeKind::Cut),
+        BoxMatch::Slot(_) => Ok(FlatNodeKind::Slot),
+        BoxMatch::Symbolic(_, body) => Ok(FlatNodeKind::Symbolic {
+            body: validate_flat_box(arena, body)?,
+        }),
+        BoxMatch::Metadata(body, _) => Ok(FlatNodeKind::Metadata {
+            body: validate_flat_box(arena, body)?,
+        }),
+        BoxMatch::Add
+        | BoxMatch::Sub
+        | BoxMatch::Mul
+        | BoxMatch::Div
+        | BoxMatch::Rem
+        | BoxMatch::And
+        | BoxMatch::Or
+        | BoxMatch::Xor
+        | BoxMatch::Lsh
+        | BoxMatch::Rsh
+        | BoxMatch::Lt
+        | BoxMatch::Le
+        | BoxMatch::Gt
+        | BoxMatch::Ge
+        | BoxMatch::Eq
+        | BoxMatch::Ne
+        | BoxMatch::Pow
+        | BoxMatch::Atan2
+        | BoxMatch::Fmod
+        | BoxMatch::Remainder
+        | BoxMatch::Delay
+        | BoxMatch::Min
+        | BoxMatch::Max
+        | BoxMatch::Prefix
+        | BoxMatch::Attach
+        | BoxMatch::Enable
+        | BoxMatch::Control => Ok(FlatNodeKind::Prim2),
+        BoxMatch::Delay1
+        | BoxMatch::IntCast
+        | BoxMatch::FloatCast
+        | BoxMatch::Acos
+        | BoxMatch::Asin
+        | BoxMatch::Atan
+        | BoxMatch::Cos
+        | BoxMatch::Sin
+        | BoxMatch::Tan
+        | BoxMatch::Exp
+        | BoxMatch::Log
+        | BoxMatch::Log10
+        | BoxMatch::Sqrt
+        | BoxMatch::Abs
+        | BoxMatch::Floor
+        | BoxMatch::Ceil
+        | BoxMatch::Rint
+        | BoxMatch::Round
+        | BoxMatch::Lowest
+        | BoxMatch::Highest => Ok(FlatNodeKind::Prim1),
+        BoxMatch::ReadOnlyTable | BoxMatch::Select2 | BoxMatch::AssertBounds => {
+            Ok(FlatNodeKind::Prim3)
+        }
+        BoxMatch::Select3 => Ok(FlatNodeKind::Prim4),
+        BoxMatch::WriteReadTable => Ok(FlatNodeKind::Prim5),
+        BoxMatch::FFun(_) => Ok(FlatNodeKind::FFun),
+        BoxMatch::FConst(_, _, _) => Ok(FlatNodeKind::FConst),
+        BoxMatch::FVar(_, _, _) => Ok(FlatNodeKind::FVar),
+        BoxMatch::Button(_) => Ok(FlatNodeKind::Button),
+        BoxMatch::Checkbox(_) => Ok(FlatNodeKind::Checkbox),
+        BoxMatch::VSlider(_, _, _, _, _) => Ok(FlatNodeKind::VSlider),
+        BoxMatch::HSlider(_, _, _, _, _) => Ok(FlatNodeKind::HSlider),
+        BoxMatch::NumEntry(_, _, _, _, _) => Ok(FlatNodeKind::NumEntry),
+        BoxMatch::VBargraph(_, _, _) => Ok(FlatNodeKind::VBargraph),
+        BoxMatch::HBargraph(_, _, _) => Ok(FlatNodeKind::HBargraph),
+        BoxMatch::Soundfile(_, _) => Ok(FlatNodeKind::Soundfile),
+        BoxMatch::Waveform(_) => Ok(FlatNodeKind::Waveform),
+        BoxMatch::VGroup(_, body) => Ok(FlatNodeKind::VGroup {
+            body: validate_flat_box(arena, body)?,
+        }),
+        BoxMatch::HGroup(_, body) => Ok(FlatNodeKind::HGroup {
+            body: validate_flat_box(arena, body)?,
+        }),
+        BoxMatch::TGroup(_, body) => Ok(FlatNodeKind::TGroup {
+            body: validate_flat_box(arena, body)?,
+        }),
+        BoxMatch::Seq(left, right) => Ok(FlatNodeKind::Seq(
+            validate_flat_box(arena, left)?,
+            validate_flat_box(arena, right)?,
+        )),
+        BoxMatch::Par(left, right) => Ok(FlatNodeKind::Par(
+            validate_flat_box(arena, left)?,
+            validate_flat_box(arena, right)?,
+        )),
+        BoxMatch::Split(left, right) => Ok(FlatNodeKind::Split(
+            validate_flat_box(arena, left)?,
+            validate_flat_box(arena, right)?,
+        )),
+        BoxMatch::Merge(left, right) => Ok(FlatNodeKind::Merge(
+            validate_flat_box(arena, left)?,
+            validate_flat_box(arena, right)?,
+        )),
+        BoxMatch::Rec(left, right) => Ok(FlatNodeKind::Rec(
+            validate_flat_box(arena, left)?,
+            validate_flat_box(arena, right)?,
+        )),
+        BoxMatch::Environment => Ok(FlatNodeKind::Environment),
+        BoxMatch::Route(_, _, _) => Ok(FlatNodeKind::Route),
+        BoxMatch::Inputs(_) => Ok(FlatNodeKind::Inputs),
+        BoxMatch::Outputs(_) => Ok(FlatNodeKind::Outputs),
+        BoxMatch::Ondemand(body) => Ok(FlatNodeKind::Ondemand(validate_flat_box(arena, body)?)),
+        BoxMatch::Upsampling(body) => {
+            Ok(FlatNodeKind::Upsampling(validate_flat_box(arena, body)?))
+        }
+        BoxMatch::Downsampling(body) => {
+            Ok(FlatNodeKind::Downsampling(validate_flat_box(arena, body)?))
+        }
+        BoxMatch::Ffunction(_, _, _) => Err(flat_box_unexpected(node_id, "ffunction")),
+        BoxMatch::Unknown => Err(flat_box_unexpected(node_id, "unknown")),
+        BoxMatch::Ident(_) => Err(flat_box_unexpected(node_id, "ident")),
+        BoxMatch::Appl(_, _) => Err(flat_box_unexpected(node_id, "appl")),
+        BoxMatch::Access(_, _) => Err(flat_box_unexpected(node_id, "access")),
+        BoxMatch::IPar(_, _, _) => Err(flat_box_unexpected(node_id, "ipar")),
+        BoxMatch::ISeq(_, _, _) => Err(flat_box_unexpected(node_id, "iseq")),
+        BoxMatch::ISum(_, _, _) => Err(flat_box_unexpected(node_id, "isum")),
+        BoxMatch::IProd(_, _, _) => Err(flat_box_unexpected(node_id, "iprod")),
+        BoxMatch::WithLocalDef(_, _) => Err(flat_box_unexpected(node_id, "withlocaldef")),
+        BoxMatch::ModifLocalDef(_, _) => Err(flat_box_unexpected(node_id, "modiflocaldef")),
+        BoxMatch::WithRecDef(_, _, _) => Err(flat_box_unexpected(node_id, "withrecdef")),
+        BoxMatch::Component(_) => Err(flat_box_unexpected(node_id, "component")),
+        BoxMatch::Library(_) => Err(flat_box_unexpected(node_id, "library")),
+        BoxMatch::Case(_) => Err(flat_box_unexpected(node_id, "case")),
+        BoxMatch::PatternVar(_) => Err(flat_box_unexpected(node_id, "patternvar")),
+        BoxMatch::Abstr(_, _) => Err(flat_box_unexpected(node_id, "abstr")),
+        BoxMatch::Modulation(_, _) => Err(flat_box_unexpected(node_id, "modulation")),
+    }
+}
+
+fn flat_box_unexpected(node: TreeId, kind: &'static str) -> FlatBoxBuildError {
+    FlatBoxBuildError::UnexpectedPostEvalBox { node, kind }
 }
 
 /// Propagation/arity inference error.

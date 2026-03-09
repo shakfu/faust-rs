@@ -6,7 +6,10 @@
 
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::{IntoDiagnostic, Severity, Stage, codes};
-use propagate::{ArityCache, PropagateError, box_arity, make_sig_input_list, propagate};
+use propagate::{
+    ArityCache, FlatBoxBuildError, PropagateError, box_arity, make_sig_input_list, propagate,
+    try_build_flat_box,
+};
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId};
 
@@ -239,6 +242,133 @@ fn waveform_box_lowers_to_size_and_waveform_signal() {
     assert!(matches!(match_sig(&arena, values[0]), SigMatch::Int(1)));
     assert!(matches!(match_sig(&arena, values[1]), SigMatch::Int(-2)));
     assert!(matches!(match_sig(&arena, values[2]), SigMatch::Real(_)));
+}
+
+#[test]
+fn flat_box_builder_accepts_valid_post_eval_families() {
+    let mut arena = TreeArena::new();
+    let valid = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let slot = bb.slot(0);
+        let wire_for_symbolic = bb.wire();
+        let symbolic = bb.symbolic(slot, wire_for_symbolic);
+        let route_in = bb.int(1);
+        let route_out = bb.int(1);
+        let route_src = bb.int(1);
+        let route_dst = bb.int(1);
+        let route_spec = bb.par(route_src, route_dst);
+        let route = bb.route(route_in, route_out, route_spec);
+        let ondemand_body = bb.wire();
+        let ondemand = bb.ondemand(ondemand_body);
+        let upsampling_body = bb.wire();
+        let upsampling = bb.upsampling(upsampling_body);
+        let downsampling_body = bb.wire();
+        let downsampling = bb.downsampling(downsampling_body);
+        let sf_label = bb.ident("sf");
+        let sf_chan = bb.int(2);
+        let soundfile = bb.soundfile(sf_label, sf_chan);
+        let environment = bb.environment();
+        let md_key = bb.ident("k");
+        let md_value = bb.ident("v");
+        let md_list = bb.par(md_key, md_value);
+        vec![
+            bb.metadata(symbolic, md_list),
+            route,
+            ondemand,
+            upsampling,
+            downsampling,
+            soundfile,
+            environment,
+        ]
+    };
+
+    for node in valid {
+        try_build_flat_box(&arena, node).expect("node should belong to flat post-eval subset");
+    }
+}
+
+#[test]
+fn flat_box_builder_rejects_evaluator_only_families() {
+    let mut arena = TreeArena::new();
+    let bad = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let ident = bb.ident("x");
+        let rule_l = bb.wire();
+        let rule_r = bb.wire();
+        let rules = bb.par(rule_l, rule_r);
+        let abstr_body = bb.wire();
+        let modulation_body = bb.wire();
+        let with_lhs = bb.wire();
+        let with_rhs = bb.wire();
+        let modif_lhs = bb.wire();
+        let modif_rhs = bb.wire();
+        let withrec_a = bb.wire();
+        let withrec_b = bb.wire();
+        let withrec_c = bb.wire();
+        let appl_fun = bb.wire();
+        let appl_arg = bb.wire();
+        let access_expr = bb.wire();
+        let ipar_count = bb.int(2);
+        let ipar_body = bb.wire();
+        let iseq_count = bb.int(2);
+        let iseq_body = bb.wire();
+        let isum_count = bb.int(2);
+        let isum_body = bb.wire();
+        let iprod_count = bb.int(2);
+        let iprod_body = bb.wire();
+        let ff_sig = bb.wire();
+        let ff_inc = bb.wire();
+        let ff_lib = bb.wire();
+        vec![
+            (bb.case(rules), "case"),
+            (bb.pattern_var(ident), "patternvar"),
+            (bb.abstr(ident, abstr_body), "abstr"),
+            (bb.modulation(ident, modulation_body), "modulation"),
+            (bb.with_local_def(with_lhs, with_rhs), "withlocaldef"),
+            (bb.modif_local_def(modif_lhs, modif_rhs), "modiflocaldef"),
+            (bb.with_rec_def(withrec_a, withrec_b, withrec_c), "withrecdef"),
+            (bb.component(ident), "component"),
+            (bb.library(ident), "library"),
+            (bb.appl(appl_fun, appl_arg), "appl"),
+            (bb.access(access_expr, ident), "access"),
+            (bb.ipar(ident, ipar_count, ipar_body), "ipar"),
+            (bb.iseq(ident, iseq_count, iseq_body), "iseq"),
+            (bb.isum(ident, isum_count, isum_body), "isum"),
+            (bb.iprod(ident, iprod_count, iprod_body), "iprod"),
+            (bb.ffunction(ff_sig, ff_inc, ff_lib), "ffunction"),
+        ]
+    };
+
+    for (node, kind) in bad {
+        let err = try_build_flat_box(&arena, node).expect_err("node must be rejected");
+        assert_eq!(
+            err,
+            FlatBoxBuildError::UnexpectedPostEvalBox { node, kind }
+        );
+    }
+}
+
+#[test]
+fn flat_box_builder_rejects_nested_non_flat_subtrees() {
+    let mut arena = TreeArena::new();
+    let (seq, nested_bad) = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let bad_l = bb.wire();
+        let bad_r = bb.wire();
+        let bad_rules = bb.par(bad_l, bad_r);
+        let nested_bad = bb.case(bad_rules);
+        let rhs = bb.wire();
+        (bb.seq(nested_bad, rhs), nested_bad)
+    };
+
+    let err = try_build_flat_box(&arena, seq).expect_err("nested case must be rejected");
+    assert_eq!(
+        err,
+        FlatBoxBuildError::UnexpectedPostEvalBox {
+            node: nested_bad,
+            kind: "case",
+        }
+    );
 }
 
 #[test]
