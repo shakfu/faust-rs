@@ -885,6 +885,20 @@ fn box_arity_flat_inner(
     }
 }
 
+/// Propagates input signals through one validated flat box expression (memoized arity).
+///
+/// This is the typed entry point for callers that already crossed the
+/// `eval/a2sb` flat-box boundary.
+pub fn propagate_typed(
+    arena: &mut TreeArena,
+    box_tree: FlatBoxId,
+    inputs: &[SigId],
+    cache: &mut ArityCache,
+) -> Result<Vec<SigId>, PropagateError> {
+    let mut slot_env = SlotEnv::default();
+    propagate_in_slot_env(arena, box_tree, inputs, cache, &mut slot_env)
+}
+
 /// Propagates input signals through one evaluated box expression (memoized arity).
 ///
 /// This function validates input/output arity using [`box_arity`].
@@ -900,8 +914,8 @@ pub fn propagate(
     inputs: &[SigId],
     cache: &mut ArityCache,
 ) -> Result<Vec<SigId>, PropagateError> {
-    let mut slot_env = SlotEnv::default();
-    propagate_in_slot_env(arena, box_tree, inputs, cache, &mut slot_env)
+    let flat = try_build_flat_box(arena, box_tree)?;
+    propagate_typed(arena, flat, inputs, cache)
 }
 
 /// Propagates one box tree with an explicit slot environment.
@@ -920,15 +934,15 @@ pub fn propagate(
 /// through a path that has already checked both input and output bus widths.
 fn propagate_in_slot_env(
     arena: &mut TreeArena,
-    box_tree: BoxId,
+    box_tree: FlatBoxId,
     inputs: &[SigId],
     cache: &mut ArityCache,
     slot_env: &mut SlotEnv,
 ) -> Result<Vec<SigId>, PropagateError> {
-    let arity = box_arity(arena, box_tree, cache)?;
+    let arity = box_arity_flat(arena, box_tree, cache)?;
     if inputs.len() != arity.inputs {
         return Err(PropagateError::InputArityMismatch {
-            node: box_tree,
+            node: box_tree.as_tree_id(),
             expected: arity.inputs,
             got: inputs.len(),
         });
@@ -936,7 +950,7 @@ fn propagate_in_slot_env(
     let outputs = propagate_inner(arena, box_tree, inputs, cache, slot_env)?;
     if outputs.len() != arity.outputs {
         return Err(PropagateError::OutputArityMismatch {
-            node: box_tree,
+            node: box_tree.as_tree_id(),
             expected: arity.outputs,
             got: outputs.len(),
         });
@@ -952,149 +966,210 @@ fn propagate_in_slot_env(
 /// therefore genuine lowering gaps, not just missing arity metadata.
 fn propagate_inner(
     arena: &mut TreeArena,
-    box_tree: BoxId,
+    box_tree: FlatBoxId,
     inputs: &[SigId],
     cache: &mut ArityCache,
     slot_env: &mut SlotEnv,
 ) -> Result<Vec<SigId>, PropagateError> {
-    match match_box(arena, box_tree) {
-        BoxMatch::Int(value) => {
-            expect_input_arity(box_tree, inputs, 0)?;
+    match flat_node_kind(arena, box_tree)? {
+        FlatNodeKind::Int => {
+            let BoxMatch::Int(value) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat int node must decode to BoxMatch::Int")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.int(value)])
         }
-        BoxMatch::Real(value) => {
-            expect_input_arity(box_tree, inputs, 0)?;
+        FlatNodeKind::Real => {
+            let BoxMatch::Real(value) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat real node must decode to BoxMatch::Real")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.real(value)])
         }
-        BoxMatch::Metadata(body, _) => propagate_inner(arena, body, inputs, cache, slot_env),
-        BoxMatch::Slot(id) => {
-            expect_input_arity(box_tree, inputs, 0)?;
-            if let Some(sig) = slot_env.get(&box_tree).copied() {
+        FlatNodeKind::Metadata { body } => propagate_inner(arena, body, inputs, cache, slot_env),
+        FlatNodeKind::Slot => {
+            let BoxMatch::Slot(id) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat slot node must decode to BoxMatch::Slot")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
+            if let Some(sig) = slot_env.get(&box_tree.as_tree_id()).copied() {
                 Ok(vec![sig])
             } else {
                 let mut b = SigBuilder::new(arena);
                 Ok(vec![b.input(id)])
             }
         }
-        BoxMatch::Wire => {
-            expect_input_arity(box_tree, inputs, 1)?;
+        FlatNodeKind::Wire => {
+            expect_input_arity(box_tree.as_tree_id(), inputs, 1)?;
             Ok(vec![inputs[0]])
         }
-        BoxMatch::Cut => {
-            expect_input_arity(box_tree, inputs, 1)?;
+        FlatNodeKind::Cut => {
+            expect_input_arity(box_tree.as_tree_id(), inputs, 1)?;
             Ok(Vec::new())
         }
-        BoxMatch::Add => binary_prim(arena, box_tree, inputs, |b, x, y| b.add(x, y)),
-        BoxMatch::Sub => binary_prim(arena, box_tree, inputs, |b, x, y| b.sub(x, y)),
-        BoxMatch::Mul => binary_prim(arena, box_tree, inputs, |b, x, y| b.mul(x, y)),
-        BoxMatch::Div => binary_prim(arena, box_tree, inputs, |b, x, y| b.div(x, y)),
-        BoxMatch::Rem => binary_prim(arena, box_tree, inputs, |b, x, y| b.rem(x, y)),
-        BoxMatch::And => binary_prim(arena, box_tree, inputs, |b, x, y| b.and(x, y)),
-        BoxMatch::Or => binary_prim(arena, box_tree, inputs, |b, x, y| b.or(x, y)),
-        BoxMatch::Xor => binary_prim(arena, box_tree, inputs, |b, x, y| b.xor(x, y)),
-        BoxMatch::Lsh => binary_prim(arena, box_tree, inputs, |b, x, y| b.lsh(x, y)),
-        BoxMatch::Rsh => binary_prim(arena, box_tree, inputs, |b, x, y| b.arsh(x, y)),
-        BoxMatch::Lt => binary_prim(arena, box_tree, inputs, |b, x, y| b.lt(x, y)),
-        BoxMatch::Le => binary_prim(arena, box_tree, inputs, |b, x, y| b.le(x, y)),
-        BoxMatch::Gt => binary_prim(arena, box_tree, inputs, |b, x, y| b.gt(x, y)),
-        BoxMatch::Ge => binary_prim(arena, box_tree, inputs, |b, x, y| b.ge(x, y)),
-        BoxMatch::Eq => binary_prim(arena, box_tree, inputs, |b, x, y| b.eq(x, y)),
-        BoxMatch::Ne => binary_prim(arena, box_tree, inputs, |b, x, y| b.ne(x, y)),
-        BoxMatch::Pow => binary_prim(arena, box_tree, inputs, |b, x, y| b.pow(x, y)),
-        BoxMatch::Atan2 => binary_prim(arena, box_tree, inputs, |b, x, y| b.atan2(x, y)),
-        BoxMatch::Fmod => binary_prim(arena, box_tree, inputs, |b, x, y| b.fmod(x, y)),
-        BoxMatch::Remainder => binary_prim(arena, box_tree, inputs, |b, x, y| b.remainder(x, y)),
-        BoxMatch::Min => binary_prim(arena, box_tree, inputs, |b, x, y| b.min(x, y)),
-        BoxMatch::Max => binary_prim(arena, box_tree, inputs, |b, x, y| b.max(x, y)),
-        BoxMatch::Delay => binary_prim(arena, box_tree, inputs, |b, x, y| b.delay(x, y)),
-        BoxMatch::Delay1 => unary_prim(arena, box_tree, inputs, |b, x| b.delay1(x)),
-        BoxMatch::Acos => unary_prim(arena, box_tree, inputs, |b, x| b.acos(x)),
-        BoxMatch::Asin => unary_prim(arena, box_tree, inputs, |b, x| b.asin(x)),
-        BoxMatch::Atan => unary_prim(arena, box_tree, inputs, |b, x| b.atan(x)),
-        BoxMatch::Cos => unary_prim(arena, box_tree, inputs, |b, x| b.cos(x)),
-        BoxMatch::Sin => unary_prim(arena, box_tree, inputs, |b, x| b.sin(x)),
-        BoxMatch::Tan => unary_prim(arena, box_tree, inputs, |b, x| b.tan(x)),
-        BoxMatch::Exp => unary_prim(arena, box_tree, inputs, |b, x| b.exp(x)),
-        BoxMatch::Log => unary_prim(arena, box_tree, inputs, |b, x| b.log(x)),
-        BoxMatch::Log10 => unary_prim(arena, box_tree, inputs, |b, x| b.log10(x)),
-        BoxMatch::Sqrt => unary_prim(arena, box_tree, inputs, |b, x| b.sqrt(x)),
-        BoxMatch::Abs => unary_prim(arena, box_tree, inputs, |b, x| b.abs(x)),
-        BoxMatch::Floor => unary_prim(arena, box_tree, inputs, |b, x| b.floor(x)),
-        BoxMatch::Ceil => unary_prim(arena, box_tree, inputs, |b, x| b.ceil(x)),
-        BoxMatch::Rint => unary_prim(arena, box_tree, inputs, |b, x| b.rint(x)),
-        BoxMatch::Round => unary_prim(arena, box_tree, inputs, |b, x| b.round(x)),
-        BoxMatch::Prefix => binary_prim(arena, box_tree, inputs, |b, x, y| b.prefix(x, y)),
-        BoxMatch::IntCast => unary_prim(arena, box_tree, inputs, |b, x| b.int_cast(x)),
-        BoxMatch::FloatCast => unary_prim(arena, box_tree, inputs, |b, x| b.float_cast(x)),
-        BoxMatch::ReadOnlyTable => ternary_prim(arena, box_tree, inputs, |b, x, y, z| {
-            b.read_only_table(x, y, z)
-        }),
-        BoxMatch::WriteReadTable => quinary_prim(arena, box_tree, inputs, |b, s, i, wi, ws, ri| {
-            b.write_read_table(s, i, wi, ws, ri)
-        }),
-        BoxMatch::Select2 => ternary_prim(arena, box_tree, inputs, |b, x, y, z| b.select2(x, y, z)),
-        BoxMatch::Select3 => quaternary_prim(arena, box_tree, inputs, |b, x, y, z, w| {
+        FlatNodeKind::Prim2 => {
+            let op = match_box(arena, box_tree.as_tree_id());
+            match op {
+                BoxMatch::Add => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.add(x, y)),
+                BoxMatch::Sub => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.sub(x, y)),
+                BoxMatch::Mul => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.mul(x, y)),
+                BoxMatch::Div => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.div(x, y)),
+                BoxMatch::Rem => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.rem(x, y)),
+                BoxMatch::And => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.and(x, y)),
+                BoxMatch::Or => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.or(x, y)),
+                BoxMatch::Xor => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.xor(x, y)),
+                BoxMatch::Lsh => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.lsh(x, y)),
+                BoxMatch::Rsh => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.arsh(x, y)),
+                BoxMatch::Lt => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.lt(x, y)),
+                BoxMatch::Le => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.le(x, y)),
+                BoxMatch::Gt => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.gt(x, y)),
+                BoxMatch::Ge => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.ge(x, y)),
+                BoxMatch::Eq => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.eq(x, y)),
+                BoxMatch::Ne => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.ne(x, y)),
+                BoxMatch::Pow => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.pow(x, y)),
+                BoxMatch::Atan2 => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.atan2(x, y)),
+                BoxMatch::Fmod => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.fmod(x, y)),
+                BoxMatch::Remainder => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.remainder(x, y)),
+                BoxMatch::Min => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.min(x, y)),
+                BoxMatch::Max => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.max(x, y)),
+                BoxMatch::Delay => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.delay(x, y)),
+                BoxMatch::Prefix => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.prefix(x, y)),
+                BoxMatch::Attach => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.attach(x, y)),
+                BoxMatch::Enable => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.enable(x, y)),
+                BoxMatch::Control => binary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y| b.control(x, y)),
+                _ => unreachable!("flat prim2 node must decode to a binary primitive"),
+            }
+        }
+        FlatNodeKind::Prim1 => {
+            let op = match_box(arena, box_tree.as_tree_id());
+            match op {
+                BoxMatch::Delay1 => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.delay1(x)),
+                BoxMatch::IntCast => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.int_cast(x)),
+                BoxMatch::FloatCast => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.float_cast(x)),
+                BoxMatch::Acos => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.acos(x)),
+                BoxMatch::Asin => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.asin(x)),
+                BoxMatch::Atan => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.atan(x)),
+                BoxMatch::Cos => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.cos(x)),
+                BoxMatch::Sin => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.sin(x)),
+                BoxMatch::Tan => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.tan(x)),
+                BoxMatch::Exp => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.exp(x)),
+                BoxMatch::Log => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.log(x)),
+                BoxMatch::Log10 => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.log10(x)),
+                BoxMatch::Sqrt => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.sqrt(x)),
+                BoxMatch::Abs => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.abs(x)),
+                BoxMatch::Floor => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.floor(x)),
+                BoxMatch::Ceil => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.ceil(x)),
+                BoxMatch::Rint => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.rint(x)),
+                BoxMatch::Round => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.round(x)),
+                BoxMatch::Lowest => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.lowest(x)),
+                BoxMatch::Highest => unary_prim(arena, box_tree.as_tree_id(), inputs, |b, x| b.highest(x)),
+                _ => unreachable!("flat prim1 node must decode to a unary primitive"),
+            }
+        }
+        FlatNodeKind::Prim3 => {
+            let op = match_box(arena, box_tree.as_tree_id());
+            match op {
+                BoxMatch::ReadOnlyTable => ternary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y, z| b.read_only_table(x, y, z)),
+                BoxMatch::Select2 => ternary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y, z| b.select2(x, y, z)),
+                BoxMatch::AssertBounds => ternary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y, z| b.assert_bounds(x, y, z)),
+                _ => unreachable!("flat prim3 node must decode to a ternary primitive"),
+            }
+        }
+        FlatNodeKind::Prim4 => quaternary_prim(arena, box_tree.as_tree_id(), inputs, |b, x, y, z, w| {
             b.select3(x, y, z, w)
         }),
-        BoxMatch::AssertBounds => ternary_prim(arena, box_tree, inputs, |b, x, y, z| {
-            b.assert_bounds(x, y, z)
+        FlatNodeKind::Prim5 => quinary_prim(arena, box_tree.as_tree_id(), inputs, |b, s, i, wi, ws, ri| {
+            b.write_read_table(s, i, wi, ws, ri)
         }),
-        BoxMatch::Lowest => unary_prim(arena, box_tree, inputs, |b, x| b.lowest(x)),
-        BoxMatch::Highest => unary_prim(arena, box_tree, inputs, |b, x| b.highest(x)),
-        BoxMatch::Attach => binary_prim(arena, box_tree, inputs, |b, x, y| b.attach(x, y)),
-        BoxMatch::Enable => binary_prim(arena, box_tree, inputs, |b, x, y| b.enable(x, y)),
-        BoxMatch::Control => binary_prim(arena, box_tree, inputs, |b, x, y| b.control(x, y)),
-        BoxMatch::FConst(ty, name, file) => {
-            expect_input_arity(box_tree, inputs, 0)?;
+        FlatNodeKind::FConst => {
+            let BoxMatch::FConst(ty, name, file) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat fconst node must decode to BoxMatch::FConst")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.fconst(ty, name, file)])
         }
-        BoxMatch::FVar(ty, name, file) => {
-            expect_input_arity(box_tree, inputs, 0)?;
+        FlatNodeKind::FVar => {
+            let BoxMatch::FVar(ty, name, file) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat fvar node must decode to BoxMatch::FVar")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.fvar(ty, name, file)])
         }
-        BoxMatch::Button(label) => {
-            expect_input_arity(box_tree, inputs, 0)?;
+        FlatNodeKind::Button => {
+            let BoxMatch::Button(label) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat button node must decode to BoxMatch::Button")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.button(label)])
         }
-        BoxMatch::Checkbox(label) => {
-            expect_input_arity(box_tree, inputs, 0)?;
+        FlatNodeKind::Checkbox => {
+            let BoxMatch::Checkbox(label) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat checkbox node must decode to BoxMatch::Checkbox")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.checkbox(label)])
         }
-        BoxMatch::VSlider(label, cur, min, max, step) => {
-            expect_input_arity(box_tree, inputs, 0)?;
+        FlatNodeKind::VSlider => {
+            let BoxMatch::VSlider(label, cur, min, max, step) =
+                match_box(arena, box_tree.as_tree_id())
+            else {
+                unreachable!("flat vslider node must decode to BoxMatch::VSlider")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.vslider(label, cur, min, max, step)])
         }
-        BoxMatch::HSlider(label, cur, min, max, step) => {
-            expect_input_arity(box_tree, inputs, 0)?;
+        FlatNodeKind::HSlider => {
+            let BoxMatch::HSlider(label, cur, min, max, step) =
+                match_box(arena, box_tree.as_tree_id())
+            else {
+                unreachable!("flat hslider node must decode to BoxMatch::HSlider")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.hslider(label, cur, min, max, step)])
         }
-        BoxMatch::NumEntry(label, cur, min, max, step) => {
-            expect_input_arity(box_tree, inputs, 0)?;
+        FlatNodeKind::NumEntry => {
+            let BoxMatch::NumEntry(label, cur, min, max, step) =
+                match_box(arena, box_tree.as_tree_id())
+            else {
+                unreachable!("flat numentry node must decode to BoxMatch::NumEntry")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.numentry(label, cur, min, max, step)])
         }
-        BoxMatch::VBargraph(label, min, max) => {
-            expect_input_arity(box_tree, inputs, 1)?;
+        FlatNodeKind::VBargraph => {
+            let BoxMatch::VBargraph(label, min, max) = match_box(arena, box_tree.as_tree_id())
+            else {
+                unreachable!("flat vbargraph node must decode to BoxMatch::VBargraph")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 1)?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.vbargraph(label, min, max, inputs[0])])
         }
-        BoxMatch::HBargraph(label, min, max) => {
-            expect_input_arity(box_tree, inputs, 1)?;
+        FlatNodeKind::HBargraph => {
+            let BoxMatch::HBargraph(label, min, max) = match_box(arena, box_tree.as_tree_id())
+            else {
+                unreachable!("flat hbargraph node must decode to BoxMatch::HBargraph")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 1)?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.hbargraph(label, min, max, inputs[0])])
         }
-        BoxMatch::Waveform(values) => {
-            expect_input_arity(box_tree, inputs, 0)?;
+        FlatNodeKind::Waveform => {
+            let BoxMatch::Waveform(values) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat waveform node must decode to BoxMatch::Waveform")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             let values = list_to_vec(arena, values).ok_or(PropagateError::UnsupportedBox {
-                node: box_tree,
+                node: box_tree.as_tree_id(),
                 kind: "waveform-list",
             })?;
             let mut b = SigBuilder::new(arena);
@@ -1103,13 +1178,16 @@ fn propagate_inner(
             let waveform = b.waveform(&values);
             Ok(vec![size, waveform])
         }
-        BoxMatch::VGroup(_, expr) | BoxMatch::HGroup(_, expr) | BoxMatch::TGroup(_, expr) => {
-            propagate_in_slot_env(arena, expr, inputs, cache, slot_env)
-        }
-        BoxMatch::Symbolic(slot, body) => {
+        FlatNodeKind::VGroup { body }
+        | FlatNodeKind::HGroup { body }
+        | FlatNodeKind::TGroup { body } => propagate_in_slot_env(arena, body, inputs, cache, slot_env),
+        FlatNodeKind::Symbolic { body } => {
+            let BoxMatch::Symbolic(slot, _) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat symbolic node must decode to BoxMatch::Symbolic")
+            };
             if inputs.is_empty() {
                 return Err(PropagateError::InputArityMismatch {
-                    node: box_tree,
+                    node: box_tree.as_tree_id(),
                     expected: 1,
                     got: 0,
                 });
@@ -1123,12 +1201,12 @@ fn propagate_inner(
             }
             result
         }
-        BoxMatch::Seq(left, right) => {
-            let left_arity = box_arity(arena, left, cache)?;
-            let right_arity = box_arity(arena, right, cache)?;
+        FlatNodeKind::Seq(left, right) => {
+            let left_arity = box_arity_flat(arena, left, cache)?;
+            let right_arity = box_arity_flat(arena, right, cache)?;
             if left_arity.outputs != right_arity.inputs {
                 return Err(PropagateError::SeqArityMismatch {
-                    node: box_tree,
+                    node: box_tree.as_tree_id(),
                     left_outputs: left_arity.outputs,
                     right_inputs: right_arity.inputs,
                 });
@@ -1136,9 +1214,9 @@ fn propagate_inner(
             let mid = propagate_in_slot_env(arena, left, inputs, cache, slot_env)?;
             propagate_in_slot_env(arena, right, &mid, cache, slot_env)
         }
-        BoxMatch::Par(left, right) => {
-            let left_arity = box_arity(arena, left, cache)?;
-            let right_arity = box_arity(arena, right, cache)?;
+        FlatNodeKind::Par(left, right) => {
+            let left_arity = box_arity_flat(arena, left, cache)?;
+            let right_arity = box_arity_flat(arena, right, cache)?;
             let left_out =
                 propagate_in_slot_env(arena, left, &inputs[..left_arity.inputs], cache, slot_env)?;
             let mut right_out = propagate_in_slot_env(
@@ -1152,12 +1230,12 @@ fn propagate_inner(
             out.append(&mut right_out);
             Ok(out)
         }
-        BoxMatch::Split(left, right) => {
-            let left_arity = box_arity(arena, left, cache)?;
-            let right_arity = box_arity(arena, right, cache)?;
+        FlatNodeKind::Split(left, right) => {
+            let left_arity = box_arity_flat(arena, left, cache)?;
+            let right_arity = box_arity_flat(arena, right, cache)?;
             if !split_compatible(left_arity.outputs, right_arity.inputs) {
                 return Err(PropagateError::SplitArityMismatch {
-                    node: box_tree,
+                    node: box_tree.as_tree_id(),
                     left_outputs: left_arity.outputs,
                     right_inputs: right_arity.inputs,
                 });
@@ -1166,12 +1244,12 @@ fn propagate_inner(
             let split_in = split_signals(&left_out, right_arity.inputs);
             propagate_in_slot_env(arena, right, &split_in, cache, slot_env)
         }
-        BoxMatch::Merge(left, right) => {
-            let left_arity = box_arity(arena, left, cache)?;
-            let right_arity = box_arity(arena, right, cache)?;
+        FlatNodeKind::Merge(left, right) => {
+            let left_arity = box_arity_flat(arena, left, cache)?;
+            let right_arity = box_arity_flat(arena, right, cache)?;
             if !merge_compatible(left_arity.outputs, right_arity.inputs) {
                 return Err(PropagateError::MergeArityMismatch {
-                    node: box_tree,
+                    node: box_tree.as_tree_id(),
                     left_outputs: left_arity.outputs,
                     right_inputs: right_arity.inputs,
                 });
@@ -1180,12 +1258,12 @@ fn propagate_inner(
             let merge_in = mix_signals(arena, &left_out, right_arity.inputs);
             propagate_in_slot_env(arena, right, &merge_in, cache, slot_env)
         }
-        BoxMatch::Rec(left, right) => {
-            let left_arity = box_arity(arena, left, cache)?;
-            let right_arity = box_arity(arena, right, cache)?;
+        FlatNodeKind::Rec(left, right) => {
+            let left_arity = box_arity_flat(arena, left, cache)?;
+            let right_arity = box_arity_flat(arena, right, cache)?;
             if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
                 return Err(PropagateError::RecArityMismatch {
-                    node: box_tree,
+                    node: box_tree.as_tree_id(),
                     left_inputs: left_arity.inputs,
                     left_outputs: left_arity.outputs,
                     right_inputs: right_arity.inputs,
@@ -1215,118 +1293,52 @@ fn propagate_inner(
             }
             Ok(outputs)
         }
-        BoxMatch::Inputs(expr) => {
-            expect_input_arity(box_tree, inputs, 0)?;
+        FlatNodeKind::Inputs => {
+            let BoxMatch::Inputs(expr) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat inputs node must decode to BoxMatch::Inputs")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             let arity = box_arity(arena, expr, cache)?;
             let value = i32_from_usize(arity.inputs, "inputs")?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.int(value)])
         }
-        BoxMatch::Outputs(expr) => {
-            expect_input_arity(box_tree, inputs, 0)?;
+        FlatNodeKind::Outputs => {
+            let BoxMatch::Outputs(expr) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat outputs node must decode to BoxMatch::Outputs")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             let arity = box_arity(arena, expr, cache)?;
             let value = i32_from_usize(arity.outputs, "outputs")?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.int(value)])
         }
-        BoxMatch::Environment => {
-            expect_input_arity(box_tree, inputs, 0)?;
+        FlatNodeKind::Environment => {
+            expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             Ok(Vec::new())
         }
-        BoxMatch::Unknown => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "unknown",
-        }),
-        BoxMatch::Ident(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "ident",
-        }),
-        BoxMatch::Appl(_, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "appl",
-        }),
-        BoxMatch::Access(_, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "access",
-        }),
-        BoxMatch::IPar(_, _, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "ipar",
-        }),
-        BoxMatch::ISeq(_, _, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "iseq",
-        }),
-        BoxMatch::ISum(_, _, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "isum",
-        }),
-        BoxMatch::IProd(_, _, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "iprod",
-        }),
-        BoxMatch::WithLocalDef(_, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "withlocaldef",
-        }),
-        BoxMatch::ModifLocalDef(_, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "modiflocaldef",
-        }),
-        BoxMatch::WithRecDef(_, _, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "withrecdef",
-        }),
-        BoxMatch::Component(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "component",
-        }),
-        BoxMatch::Library(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "library",
-        }),
-        BoxMatch::Route(_, _, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
+        FlatNodeKind::Route => Err(PropagateError::UnsupportedBox {
+            node: box_tree.as_tree_id(),
             kind: "route",
         }),
-        BoxMatch::Ffunction(_, _, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "ffunction",
-        }),
-        BoxMatch::FFun(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
+        FlatNodeKind::FFun => Err(PropagateError::UnsupportedBox {
+            node: box_tree.as_tree_id(),
             kind: "ffun",
         }),
-        BoxMatch::Case(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "case",
-        }),
-        BoxMatch::PatternVar(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "patternvar",
-        }),
-        BoxMatch::Abstr(_, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "abstr",
-        }),
-        BoxMatch::Modulation(_, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "modulation",
-        }),
-        BoxMatch::Ondemand(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
+        FlatNodeKind::Ondemand(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree.as_tree_id(),
             kind: "ondemand",
         }),
-        BoxMatch::Upsampling(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
+        FlatNodeKind::Upsampling(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree.as_tree_id(),
             kind: "upsampling",
         }),
-        BoxMatch::Downsampling(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
+        FlatNodeKind::Downsampling(_) => Err(PropagateError::UnsupportedBox {
+            node: box_tree.as_tree_id(),
             kind: "downsampling",
         }),
-        BoxMatch::Soundfile(_, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
+        FlatNodeKind::Soundfile => Err(PropagateError::UnsupportedBox {
+            node: box_tree.as_tree_id(),
             kind: "soundfile",
         }),
     }

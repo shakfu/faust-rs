@@ -8,7 +8,7 @@ use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::{IntoDiagnostic, Severity, Stage, codes};
 use propagate::{
     ArityCache, FlatBoxBuildError, PropagateError, box_arity, box_arity_flat, make_sig_input_list,
-    propagate, try_build_flat_box,
+    propagate, propagate_typed, try_build_flat_box,
 };
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId};
@@ -395,6 +395,43 @@ fn box_arity_flat_uses_validated_flat_boundary() {
     assert_eq!(arity.outputs, 1);
 
     let err = box_arity(&arena, bad_case, &mut ArityCache::new()).expect_err("case should be rejected before arity inference");
+    assert_eq!(
+        err,
+        PropagateError::UnsupportedBox {
+            node: bad_case,
+            kind: "case",
+        }
+    );
+}
+
+#[test]
+fn propagate_typed_uses_flat_boundary_and_matches_wrapper() {
+    let mut arena = TreeArena::new();
+    let (seq, bad_case) = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let wire_l = bb.wire();
+        let wire_r = bb.wire();
+        let pair = bb.par(wire_l, wire_r);
+        let add = bb.add();
+        let seq = bb.seq(pair, add);
+
+        let case_l = bb.wire();
+        let case_r = bb.wire();
+        let rules = bb.par(case_l, case_r);
+        let bad_case = bb.case(rules);
+        (seq, bad_case)
+    };
+
+    let flat = try_build_flat_box(&arena, seq).expect("seq should validate as flat");
+    let inputs = make_sig_input_list(&mut arena, 2);
+    let typed_out = propagate_typed(&mut arena, flat, &inputs, &mut ArityCache::new())
+        .expect("typed propagation should succeed");
+    let raw_out =
+        propagate(&mut arena, seq, &inputs, &mut ArityCache::new()).expect("wrapper should succeed");
+    assert_eq!(typed_out, raw_out);
+
+    let err = propagate(&mut arena, bad_case, &[], &mut ArityCache::new())
+        .expect_err("case should be rejected before propagation");
     assert_eq!(
         err,
         PropagateError::UnsupportedBox {
