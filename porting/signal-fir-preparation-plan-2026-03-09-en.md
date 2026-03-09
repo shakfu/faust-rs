@@ -4,6 +4,27 @@ Date: 2026-03-09
 
 Status: completed
 
+## Follow-up note (2026-03-09)
+
+The preparation pipeline in this plan is implemented, but one `signalFIRCompiler`
+parity slice remains open in the fast-lane:
+
+- `SIGDELAY` should eventually lower like C++ `compileSigDelay(...)`, using a
+  dedicated circular delay line, a persistent `IOTA` counter, and
+  power-of-two masked indexing.
+
+Current implementation status:
+
+- `SIGDELAY1` and `SIGPREFIX` are lowered through typed scalar state slots.
+- general `SIGDELAY` is not yet in C++-style delay-line parity.
+
+Explicit scope decision for the next slice:
+
+- implement parity first for **statically bounded simple delays only**
+  (constant integer delay amount after preparation/promotion),
+- explicitly defer **variable delays** until Rust has a proper delay-bound
+  analysis comparable to the C++ interval-driven sizing contract.
+
 ## Progress
 
 - [x] Step 1: clone the whole output forest into a staging arena and run list-wide
@@ -29,6 +50,13 @@ appropriate:
 - delays and prefixes
 - recursive signals
 - tables (`waveform`, `rdtbl`, `wrtbl`)
+
+Additional restriction for the active delay slice:
+
+- `SIGDELAY` parity is currently targeted only for statically bounded simple
+  delays
+- variable delay amounts remain out of scope until a separate bound-analysis
+  step exists
 
 ## 2. C++ reference points
 
@@ -127,6 +155,8 @@ enough information to preserve:
 - correct recursive-group identity and projection semantics
 - correct table element type and index typing
 - correct initialization/update ordering for stateful nodes
+- correct delay-line element type and fixed-size circular buffer behavior for
+  statically bounded delays
 
 ## 5. Key design decisions
 
@@ -202,6 +232,13 @@ It should not try to reproduce:
 - computability
 - vector/scalar distinctions
 - detailed UI algebra typing
+
+Consequence for delays:
+
+- the preparation phase may promote delay amounts to `Int`,
+- but it does **not** yet compute general delay bounds,
+- so only constant integer delay amounts can currently drive C++-style delay
+  line allocation in the fast-lane.
 
 ## 6. Proposed Rust architecture
 
@@ -374,6 +411,15 @@ Adding preparation is not sufficient by itself.
 - arithmetic result FIR types come from `SimpleSigType`
 - `select2` result type comes from the prepared branch type
 - delay state slots use the carried signal type
+- statically bounded `SIGDELAY` nodes lower to typed circular delay lines
+  instead of scalar state slots
+- `SIGDELAY` amount `0` keeps the C++ zero-delay fast path
+- a persistent struct `fIOTA: Int32` is added and incremented once per sample
+- delay-line access uses masked indices:
+  - write at `fIOTA & (size - 1)`
+  - read at `(fIOTA - amount) & (size - 1)`
+- delay-line struct arrays are sized with `pow2limit(delay + 1)` for constant
+  integer delays
 - table element types use the prepared generator/waveform type
 - waveform declarations use the prepared element type
 - recursion state slots use the prepared carried type
@@ -385,6 +431,12 @@ Adding preparation is not sufficient by itself.
   - internal `Int` or `Real` -> external `FaustFloat`
 - input loads remain:
   - external `FaustFloat` -> internal carried type
+
+Explicitly deferred from this slice:
+
+- non-constant `SIGDELAY` amounts
+- interval-driven buffer sizing parity
+- any attempt to emulate variable-delay sizing without a proved static bound
 
 ### 9.2 Recursion decoding update
 
@@ -443,6 +495,16 @@ Extend `crates/transform/src/signal_fir/mod.rs` tests to assert:
 - integer arithmetic lowers to FIR `Int32` when promotion keeps it integer
 - mixed arithmetic lowers to FIR `Float32/Float64` only after explicit float promotion
 - delay/prefix state slots use integer type when the carried signal is integer
+- constant `SIGDELAY(n)` allocates a struct delay-line array with the carried
+  FIR element type
+- constant `SIGDELAY(n)` reads/writes through masked circular indices derived
+  from `fIOTA`
+- `fIOTA` is declared in the DSP struct, cleared to zero, and incremented in
+  the sample loop
+- `SIGDELAY(0)` lowers through the zero-delay fast path with no delay-line
+  allocation
+- non-constant `SIGDELAY` is still rejected with an explicit deferred-parity
+  error
 - table element types follow prepared waveform/generator type
 - symbolic recursion payloads are accepted by `lower_proj(...)`
 - recursive multi-output groups preserve coherent state/projection behavior
@@ -518,6 +580,20 @@ Pass criterion:
 Pass criterion:
 
 - integer-vs-real FIR node typing is correct on unit and integration tests
+
+### Step 6 - Add constant-delay FIR delay lines
+
+- add a typed delay-line resource map keyed by the carried delayed signal
+- allocate struct arrays for constant integer delay amounts only
+- add persistent `fIOTA` state mirroring the C++ delay-line access model
+- keep `SIGDELAY1`/`SIGPREFIX` on scalar state slots unless/until unified later
+- reject non-constant delay amounts with an explicit deferred-parity error
+
+Pass criterion:
+
+- constant-delay fixtures lower with C++-style circular buffers and pass local
+  FIR, compiler, and corpus checks
+- variable-delay fixtures still fail explicitly instead of silently compiling
 - delay/recursion/table fixtures still lower correctly and keep their current behavioral shape
 
 ### Step 6 - Differential closure and doc cleanup
