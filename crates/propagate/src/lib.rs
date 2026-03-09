@@ -20,9 +20,8 @@
 //! - `FlatBoxId` / [`try_build_flat_box`] are an adapted Rust boundary: they make the
 //!   C++ post-`evalprocess -> a2sb -> propagate` flat-box contract explicit while
 //!   preserving `TreeArena` node sharing through `TreeId`.
-//! - `route` and `ffun` now lower through the typed flat boundary; `soundfile`,
-//!   `ondemand`, `upsampling`, and `downsampling` remain deferred until the
-//!   missing signal-node support is ported.
+//! - `route`, `ffun`, `soundfile`, `ondemand`, `upsampling`, and
+//!   `downsampling` now lower through the typed flat boundary.
 //!
 //! # Integer convention
 //! - Integer signals emitted by this pass are `i32`-semantic.
@@ -35,7 +34,7 @@ use ahash::AHashMap;
 use boxes::{BoxId, BoxMatch, match_box};
 use errors::codes;
 use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
-use signals::{SigBuilder, SigId};
+use signals::{SigBuilder, SigId, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId, tree_to_int};
 
 /// Memoization cache for [`box_arity`] / [`box_arity_flat`] results, keyed by validated flat boxes.
@@ -904,7 +903,8 @@ pub fn propagate_typed(
     cache: &mut ArityCache,
 ) -> Result<Vec<SigId>, PropagateError> {
     let mut slot_env = SlotEnv::default();
-    propagate_in_slot_env(arena, box_tree, inputs, cache, &mut slot_env)
+    let clock_env = arena.nil();
+    propagate_in_slot_env(arena, box_tree, inputs, cache, &mut slot_env, clock_env)
 }
 
 /// Propagates input signals through one evaluated box expression (memoized arity).
@@ -946,6 +946,7 @@ fn propagate_in_slot_env(
     inputs: &[SigId],
     cache: &mut ArityCache,
     slot_env: &mut SlotEnv,
+    clock_env: TreeId,
 ) -> Result<Vec<SigId>, PropagateError> {
     let arity = box_arity_flat(arena, box_tree, cache)?;
     if inputs.len() != arity.inputs {
@@ -955,7 +956,7 @@ fn propagate_in_slot_env(
             got: inputs.len(),
         });
     }
-    let outputs = propagate_inner(arena, box_tree, inputs, cache, slot_env)?;
+    let outputs = propagate_inner(arena, box_tree, inputs, cache, slot_env, clock_env)?;
     if outputs.len() != arity.outputs {
         return Err(PropagateError::OutputArityMismatch {
             node: box_tree.as_tree_id(),
@@ -978,6 +979,7 @@ fn propagate_inner(
     inputs: &[SigId],
     cache: &mut ArityCache,
     slot_env: &mut SlotEnv,
+    clock_env: TreeId,
 ) -> Result<Vec<SigId>, PropagateError> {
     match flat_node_kind(arena, box_tree)? {
         FlatNodeKind::Int => {
@@ -996,7 +998,9 @@ fn propagate_inner(
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.real(value)])
         }
-        FlatNodeKind::Metadata { body } => propagate_inner(arena, body, inputs, cache, slot_env),
+        FlatNodeKind::Metadata { body } => {
+            propagate_inner(arena, body, inputs, cache, slot_env, clock_env)
+        }
         FlatNodeKind::Slot => {
             let BoxMatch::Slot(id) = match_box(arena, box_tree.as_tree_id()) else {
                 unreachable!("flat slot node must decode to BoxMatch::Slot")
@@ -1188,7 +1192,9 @@ fn propagate_inner(
         }
         FlatNodeKind::VGroup { body }
         | FlatNodeKind::HGroup { body }
-        | FlatNodeKind::TGroup { body } => propagate_in_slot_env(arena, body, inputs, cache, slot_env),
+        | FlatNodeKind::TGroup { body } => {
+            propagate_in_slot_env(arena, body, inputs, cache, slot_env, clock_env)
+        }
         FlatNodeKind::Symbolic { body } => {
             let BoxMatch::Symbolic(slot, _) = match_box(arena, box_tree.as_tree_id()) else {
                 unreachable!("flat symbolic node must decode to BoxMatch::Symbolic")
@@ -1201,7 +1207,8 @@ fn propagate_inner(
                 });
             }
             let previous = slot_env.insert(slot, inputs[0]);
-            let result = propagate_in_slot_env(arena, body, &inputs[1..], cache, slot_env);
+            let result =
+                propagate_in_slot_env(arena, body, &inputs[1..], cache, slot_env, clock_env);
             if let Some(sig) = previous {
                 slot_env.insert(slot, sig);
             } else {
@@ -1219,20 +1226,28 @@ fn propagate_inner(
                     right_inputs: right_arity.inputs,
                 });
             }
-            let mid = propagate_in_slot_env(arena, left, inputs, cache, slot_env)?;
-            propagate_in_slot_env(arena, right, &mid, cache, slot_env)
+            let mid = propagate_in_slot_env(arena, left, inputs, cache, slot_env, clock_env)?;
+            propagate_in_slot_env(arena, right, &mid, cache, slot_env, clock_env)
         }
         FlatNodeKind::Par(left, right) => {
             let left_arity = box_arity_flat(arena, left, cache)?;
             let right_arity = box_arity_flat(arena, right, cache)?;
             let left_out =
-                propagate_in_slot_env(arena, left, &inputs[..left_arity.inputs], cache, slot_env)?;
+                propagate_in_slot_env(
+                    arena,
+                    left,
+                    &inputs[..left_arity.inputs],
+                    cache,
+                    slot_env,
+                    clock_env,
+                )?;
             let mut right_out = propagate_in_slot_env(
                 arena,
                 right,
                 &inputs[left_arity.inputs..left_arity.inputs + right_arity.inputs],
                 cache,
                 slot_env,
+                clock_env,
             )?;
             let mut out = left_out;
             out.append(&mut right_out);
@@ -1248,9 +1263,9 @@ fn propagate_inner(
                     right_inputs: right_arity.inputs,
                 });
             }
-            let left_out = propagate_in_slot_env(arena, left, inputs, cache, slot_env)?;
+            let left_out = propagate_in_slot_env(arena, left, inputs, cache, slot_env, clock_env)?;
             let split_in = split_signals(&left_out, right_arity.inputs);
-            propagate_in_slot_env(arena, right, &split_in, cache, slot_env)
+            propagate_in_slot_env(arena, right, &split_in, cache, slot_env, clock_env)
         }
         FlatNodeKind::Merge(left, right) => {
             let left_arity = box_arity_flat(arena, left, cache)?;
@@ -1262,9 +1277,9 @@ fn propagate_inner(
                     right_inputs: right_arity.inputs,
                 });
             }
-            let left_out = propagate_in_slot_env(arena, left, inputs, cache, slot_env)?;
+            let left_out = propagate_in_slot_env(arena, left, inputs, cache, slot_env, clock_env)?;
             let merge_in = mix_signals(arena, &left_out, right_arity.inputs);
-            propagate_in_slot_env(arena, right, &merge_in, cache, slot_env)
+            propagate_in_slot_env(arena, right, &merge_in, cache, slot_env, clock_env)
         }
         FlatNodeKind::Rec(left, right) => {
             let left_arity = box_arity_flat(arena, left, cache)?;
@@ -1280,12 +1295,12 @@ fn propagate_inner(
             }
 
             let l0 = make_mem_sig_proj_list(arena, right_arity.inputs)?;
-            let l1 = propagate_in_slot_env(arena, right, &l0, cache, slot_env)?;
+            let l1 = propagate_in_slot_env(arena, right, &l0, cache, slot_env, clock_env)?;
 
             let mut rec_inputs = l1;
             rec_inputs.extend(lift_signals(arena, inputs));
 
-            let l2 = propagate_in_slot_env(arena, left, &rec_inputs, cache, slot_env)?;
+            let l2 = propagate_in_slot_env(arena, left, &rec_inputs, cache, slot_env, clock_env)?;
             let group_body = vec_to_list(arena, &l2);
             let group = debruijn_rec(arena, group_body);
 
@@ -1371,22 +1386,139 @@ fn propagate_inner(
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.ffun(ff, args)])
         }
-        FlatNodeKind::Ondemand(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree.as_tree_id(),
-            kind: "ondemand",
-        }),
-        FlatNodeKind::Upsampling(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree.as_tree_id(),
-            kind: "upsampling",
-        }),
-        FlatNodeKind::Downsampling(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree.as_tree_id(),
-            kind: "downsampling",
-        }),
-        FlatNodeKind::Soundfile => Err(PropagateError::UnsupportedBox {
-            node: box_tree.as_tree_id(),
-            kind: "soundfile",
-        }),
+        FlatNodeKind::Soundfile => {
+            let BoxMatch::Soundfile(label, chan) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat soundfile node must decode to BoxMatch::Soundfile")
+            };
+            expect_input_arity(box_tree.as_tree_id(), inputs, 2)?;
+            let chan_count = usize_from_int_node(arena, chan, "soundfile channels")?;
+            let mut b = SigBuilder::new(arena);
+            let soundfile = b.soundfile(label);
+            let part = inputs[0];
+            let length = b.soundfile_length(soundfile, part);
+            let rate = b.soundfile_rate(soundfile, part);
+            let one = b.int(1);
+            let zero = b.int(0);
+            let upper = b.sub(length, one);
+            let limited = b.min(inputs[1], upper);
+            let clamped = b.max(zero, limited);
+
+            let mut outputs = Vec::with_capacity(chan_count + 2);
+            outputs.push(length);
+            outputs.push(rate);
+            for chan_index in 0..chan_count {
+                let chan_sig = b.int(i32_from_usize(chan_index, "soundfile buffer channel")?);
+                outputs.push(b.soundfile_buffer(soundfile, chan_sig, part, clamped));
+            }
+            Ok(outputs)
+        }
+        FlatNodeKind::Ondemand(body) => {
+            propagate_clocked_wrapper(arena, box_tree, body, inputs, cache, slot_env, clock_env, ClockedWrapperKind::Ondemand)
+        }
+        FlatNodeKind::Upsampling(body) => {
+            propagate_clocked_wrapper(arena, box_tree, body, inputs, cache, slot_env, clock_env, ClockedWrapperKind::Upsampling)
+        }
+        FlatNodeKind::Downsampling(body) => {
+            propagate_clocked_wrapper(arena, box_tree, body, inputs, cache, slot_env, clock_env, ClockedWrapperKind::Downsampling)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ClockedWrapperKind {
+    Ondemand,
+    Upsampling,
+    Downsampling,
+}
+
+fn propagate_clocked_wrapper(
+    arena: &mut TreeArena,
+    wrapper_node: FlatBoxId,
+    body: FlatBoxId,
+    inputs: &[SigId],
+    cache: &mut ArityCache,
+    slot_env: &mut SlotEnv,
+    clock_env: TreeId,
+    kind: ClockedWrapperKind,
+) -> Result<Vec<SigId>, PropagateError> {
+    let Some((&clock, tail)) = inputs.split_first() else {
+        return Err(PropagateError::InputArityMismatch {
+            node: wrapper_node.as_tree_id(),
+            expected: 1,
+            got: 0,
+        });
+    };
+
+    let body_arity = box_arity_flat(arena, body, cache)?;
+    if is_const_zero(arena, clock) {
+        let mut b = SigBuilder::new(arena);
+        let zero = b.int(0);
+        return Ok(vec![zero; body_arity.outputs]);
+    }
+    if is_const_one(arena, clock) {
+        return propagate_in_slot_env(arena, body, tail, cache, slot_env, clock_env);
+    }
+
+    let clock_env2 = make_clock_env(arena, clock_env, wrapper_node.as_tree_id(), inputs);
+    let x1: Vec<_> = {
+        let mut b = SigBuilder::new(arena);
+        tail.iter().copied().map(|sig| b.temp_var(sig)).collect()
+    };
+    let x2: Vec<_> = {
+        let mut b = SigBuilder::new(arena);
+        x1.iter()
+            .copied()
+            .map(|sig| {
+                let clocked = b.double_clocked(clock_env2, clock_env, sig);
+                match kind {
+                    ClockedWrapperKind::Ondemand | ClockedWrapperKind::Downsampling => clocked,
+                    ClockedWrapperKind::Upsampling => b.zero_pad(clocked, clock),
+                }
+            })
+            .collect()
+    };
+    let y0 = propagate_in_slot_env(arena, body, &x2, cache, slot_env, clock_env2)?;
+
+    let y1: Vec<_> = {
+        let mut b = SigBuilder::new(arena);
+        y0.iter()
+            .copied()
+            .map(|sig| {
+                let clocked_sig = b.clocked(clock_env2, sig);
+                b.perm_var(clocked_sig)
+            })
+            .collect()
+    };
+    let wrapper = {
+        let mut b = SigBuilder::new(arena);
+        let clocked_clock = b.clocked(clock_env2, clock);
+        let mut wrapper_payload = Vec::with_capacity(y1.len() + 1);
+        wrapper_payload.push(clocked_clock);
+        wrapper_payload.extend(y1.iter().copied());
+        match kind {
+            ClockedWrapperKind::Ondemand => b.on_demand(&wrapper_payload),
+            ClockedWrapperKind::Upsampling => b.upsampling(&wrapper_payload),
+            ClockedWrapperKind::Downsampling => b.downsampling(&wrapper_payload),
+        }
+    };
+
+    let mut b = SigBuilder::new(arena);
+    Ok(y1.into_iter().map(|sig| b.seq(wrapper, sig)).collect())
+}
+
+fn is_const_zero(arena: &TreeArena, sig: SigId) -> bool {
+    match match_sig(arena, sig) {
+        SigMatch::Int(value) => value == 0,
+        SigMatch::Real(value) => value == 0.0,
+        _ => false,
+    }
+}
+
+fn is_const_one(arena: &TreeArena, sig: SigId) -> bool {
+    match match_sig(arena, sig) {
+        SigMatch::Int(value) => value == 1,
+        SigMatch::Real(value) => value == 1.0,
+        _ => false,
     }
 }
 
@@ -1546,6 +1678,25 @@ fn list_to_vec(arena: &TreeArena, mut list: TreeId) -> Option<Vec<TreeId>> {
         list = arena.tl(list)?;
     }
     Some(out)
+}
+
+/// Builds the adapted Rust clock-environment payload threaded through clocked wrappers.
+///
+/// C++ stores `(parent, slotenv, path, box, inputs...)` as a tree list. Rust
+/// currently mirrors the same child ordering but leaves `slotenv` and `path`
+/// empty because `crates/propagate` has not yet ported those lookup layers.
+fn make_clock_env(
+    arena: &mut TreeArena,
+    parent: TreeId,
+    box_node: TreeId,
+    inputs: &[SigId],
+) -> TreeId {
+    let nil = arena.nil();
+    let input_list = vec_to_list(arena, inputs);
+    let tail3 = arena.cons(box_node, input_list);
+    let tail2 = arena.cons(nil, tail3);
+    let tail1 = arena.cons(nil, tail2);
+    arena.cons(parent, tail1)
 }
 
 /// Flattens a route specification encoded as nested `par(...)` pairs into integer endpoints.

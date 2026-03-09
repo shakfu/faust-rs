@@ -570,30 +570,23 @@ Current status on 2026-03-09:
 - completed:
   - typed `Route`
   - typed `FFun`
-- remaining:
+- completed after the `signals` extension:
   - `Soundfile`
   - `Ondemand`
   - `Upsampling`
   - `Downsampling`
 
-Blocked-until-ported signal IR support:
-
-- `sigSoundfileLength(sf, part)`
-- `sigSoundfileRate(sf, part)`
-- `sigSoundfileBuffer(sf, chan, part, ridx)`
-- `sigTempVar(s)`
-- `sigPermVar(s)`
-- `sigClocked(clock, y)`
-- `sigDoubleClocked(inside, outside, y)` represented in Rust through the same
-  nested `sigClocked` shape as C++
-
 Interpretation:
 
-- the remaining `FlatBoxId` stage-4 work is no longer primarily a
-  `crates/propagate` refactor,
-- it is a parity extension of `crates/signals`,
-- only after those signal families exist can `propagate` port the remaining
-  C++ lowering paths without inventing surrogate semantics.
+- stage 4 is now closed at the typed flat-boundary level,
+- the remaining notable adaptation is internal:
+  - Rust currently represents propagated clock environments with the same list
+    field ordering as C++, but still leaves the `slotenv` / `path` payloads
+    empty in this first pass,
+  - this is sufficient for the newly-ported `soundfile` / `ondemand` /
+    `upsampling` / `downsampling` lowering paths, but it is still an adapted
+    internal representation rather than a complete 1:1 port of all C++
+    clock-environment helpers.
 
 ### Stage 5: tighten public contract
 

@@ -245,6 +245,99 @@ fn waveform_box_lowers_to_size_and_waveform_signal() {
 }
 
 #[test]
+fn soundfile_box_lowers_to_length_rate_and_channel_buffers() {
+    let mut arena = TreeArena::new();
+    let soundfile = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let label = bb.ident("sf");
+        let chan = bb.int(2);
+        bb.soundfile(label, chan)
+    };
+    let inputs = make_sig_input_list(&mut arena, 2);
+
+    let out = propagate(&mut arena, soundfile, &inputs, &mut ArityCache::new())
+        .expect("soundfile should propagate");
+    assert_eq!(out.len(), 4);
+
+    let sf_sig = match match_sig(&arena, out[0]) {
+        SigMatch::SoundfileLength(soundfile, part) => {
+            assert_eq!(part, inputs[0]);
+            soundfile
+        }
+        other => panic!("expected SoundfileLength, got {other:?}"),
+    };
+    assert_eq!(match_sig(&arena, out[1]), SigMatch::SoundfileRate(sf_sig, inputs[0]));
+
+    let SigMatch::SoundfileBuffer(sf0, chan0, part0, ridx0) = match_sig(&arena, out[2]) else {
+        panic!("first channel should be SoundfileBuffer");
+    };
+    assert_eq!(sf0, sf_sig);
+    assert_eq!(part0, inputs[0]);
+    assert_eq!(match_sig(&arena, chan0), SigMatch::Int(0));
+    assert!(matches!(match_sig(&arena, ridx0), SigMatch::Max(_, _)));
+
+    let SigMatch::SoundfileBuffer(sf1, chan1, part1, ridx1) = match_sig(&arena, out[3]) else {
+        panic!("second channel should be SoundfileBuffer");
+    };
+    assert_eq!(sf1, sf_sig);
+    assert_eq!(part1, inputs[0]);
+    assert_eq!(ridx1, ridx0);
+    assert_eq!(match_sig(&arena, chan1), SigMatch::Int(1));
+}
+
+#[test]
+fn clocked_wrapper_boxes_port_trivial_and_structural_cases() {
+    let mut arena = TreeArena::new();
+    let (ondemand, upsampling, downsampling) = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let wire0 = bb.wire();
+        let ondemand = bb.ondemand(wire0);
+        let wire1 = bb.wire();
+        let upsampling = bb.upsampling(wire1);
+        let wire2 = bb.wire();
+        let downsampling = bb.downsampling(wire2);
+        (ondemand, upsampling, downsampling)
+    };
+
+    let zero = SigBuilder::new(&mut arena).int(0);
+    let one = SigBuilder::new(&mut arena).int(1);
+    let x = SigBuilder::new(&mut arena).input(7);
+    let h = SigBuilder::new(&mut arena).input(3);
+
+    let od_zero = propagate(&mut arena, ondemand, &[zero, x], &mut ArityCache::new())
+        .expect("ondemand zero clock should propagate");
+    assert_eq!(od_zero, vec![zero]);
+
+    let od_one = propagate(&mut arena, ondemand, &[one, x], &mut ArityCache::new())
+        .expect("ondemand one clock should bypass wrapper");
+    assert_eq!(od_one, vec![x]);
+
+    let od = propagate(&mut arena, ondemand, &[h, x], &mut ArityCache::new())
+        .expect("ondemand dynamic clock should propagate");
+    let SigMatch::Seq(od_wrapper, od_payload) = match_sig(&arena, od[0]) else {
+        panic!("ondemand output should be seq(wrapper, payload)");
+    };
+    assert!(matches!(match_sig(&arena, od_wrapper), SigMatch::OnDemand(_)));
+    assert!(matches!(match_sig(&arena, od_payload), SigMatch::PermVar(_)));
+
+    let us = propagate(&mut arena, upsampling, &[h, x], &mut ArityCache::new())
+        .expect("upsampling dynamic clock should propagate");
+    let SigMatch::Seq(us_wrapper, us_payload) = match_sig(&arena, us[0]) else {
+        panic!("upsampling output should be seq(wrapper, payload)");
+    };
+    assert!(matches!(match_sig(&arena, us_wrapper), SigMatch::Upsampling(_)));
+    assert!(matches!(match_sig(&arena, us_payload), SigMatch::PermVar(_)));
+
+    let ds = propagate(&mut arena, downsampling, &[h, x], &mut ArityCache::new())
+        .expect("downsampling dynamic clock should propagate");
+    let SigMatch::Seq(ds_wrapper, ds_payload) = match_sig(&arena, ds[0]) else {
+        panic!("downsampling output should be seq(wrapper, payload)");
+    };
+    assert!(matches!(match_sig(&arena, ds_wrapper), SigMatch::Downsampling(_)));
+    assert!(matches!(match_sig(&arena, ds_payload), SigMatch::PermVar(_)));
+}
+
+#[test]
 fn route_box_propagates_by_mixing_selected_inputs() {
     let mut arena = TreeArena::new();
     let route = {
