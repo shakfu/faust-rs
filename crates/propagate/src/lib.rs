@@ -20,6 +20,9 @@
 //! - `FlatBoxId` / [`try_build_flat_box`] are an adapted Rust boundary: they make the
 //!   C++ post-`evalprocess -> a2sb -> propagate` flat-box contract explicit while
 //!   preserving `TreeArena` node sharing through `TreeId`.
+//! - `route` and `ffun` now lower through the typed flat boundary; `soundfile`,
+//!   `ondemand`, `upsampling`, and `downsampling` remain deferred until the
+//!   missing signal-node support is ported.
 //!
 //! # Integer convention
 //! - Integer signals emitted by this pass are `i32`-semantic.
@@ -737,10 +740,15 @@ fn box_arity_flat_inner(
             inputs: 0,
             outputs: 1,
         }),
-        FlatNodeKind::FFun => Err(PropagateError::UnsupportedBox {
-            node: box_tree.as_tree_id(),
-            kind: "ffun",
-        }),
+        FlatNodeKind::FFun => {
+            let BoxMatch::FFun(ff) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat ffun node must decode to BoxMatch::FFun")
+            };
+            Ok(BoxArity {
+                inputs: ffunction_arity(arena, ff)?,
+                outputs: 1,
+            })
+        }
         FlatNodeKind::Button
         | FlatNodeKind::Checkbox
         | FlatNodeKind::VSlider
@@ -1317,14 +1325,52 @@ fn propagate_inner(
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             Ok(Vec::new())
         }
-        FlatNodeKind::Route => Err(PropagateError::UnsupportedBox {
-            node: box_tree.as_tree_id(),
-            kind: "route",
-        }),
-        FlatNodeKind::FFun => Err(PropagateError::UnsupportedBox {
-            node: box_tree.as_tree_id(),
-            kind: "ffun",
-        }),
+        FlatNodeKind::Route => {
+            let BoxMatch::Route(ins, outs, route_spec) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat route node must decode to BoxMatch::Route")
+            };
+            let input_count = usize_from_int_node(arena, ins, "route inputs")?;
+            let output_count = usize_from_int_node(arena, outs, "route outputs")?;
+            expect_input_arity(box_tree.as_tree_id(), inputs, input_count)?;
+
+            let route = flatten_route_ints(arena, route_spec)?;
+            let mut b = SigBuilder::new(arena);
+            let zero = b.int(0);
+            let mut outputs = vec![zero; output_count];
+
+            for pair in route.chunks_exact(2) {
+                let src = pair[0];
+                let dst = pair[1];
+                if dst <= 0 {
+                    continue;
+                }
+                let Ok(dst_index) = usize::try_from(dst - 1) else {
+                    continue;
+                };
+                if dst_index >= output_count || src <= 0 {
+                    continue;
+                }
+                let Ok(src_index) = usize::try_from(src - 1) else {
+                    continue;
+                };
+                if src_index >= input_count {
+                    continue;
+                }
+                outputs[dst_index] = b.add(outputs[dst_index], inputs[src_index]);
+            }
+
+            Ok(outputs)
+        }
+        FlatNodeKind::FFun => {
+            let BoxMatch::FFun(ff) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat ffun node must decode to BoxMatch::FFun")
+            };
+            let expected = ffunction_arity(arena, ff)?;
+            expect_input_arity(box_tree.as_tree_id(), inputs, expected)?;
+            let args = vec_to_list(arena, inputs);
+            let mut b = SigBuilder::new(arena);
+            Ok(vec![b.ffun(ff, args)])
+        }
         FlatNodeKind::Ondemand(_) => Err(PropagateError::UnsupportedBox {
             node: box_tree.as_tree_id(),
             kind: "ondemand",
@@ -1502,6 +1548,41 @@ fn list_to_vec(arena: &TreeArena, mut list: TreeId) -> Option<Vec<TreeId>> {
     Some(out)
 }
 
+/// Flattens a route specification encoded as nested `par(...)` pairs into integer endpoints.
+///
+/// This mirrors the C++ `flattenRouteList(...)` helper used before `route`
+/// propagation. The function only validates the already-built structural
+/// payload; it does not normalize or evaluate the route expression.
+fn flatten_route_ints(arena: &TreeArena, route_spec: TreeId) -> Result<Vec<i64>, PropagateError> {
+    let mut out = Vec::new();
+    flatten_route_ints_into(arena, route_spec, &mut out)?;
+    Ok(out)
+}
+
+fn flatten_route_ints_into(
+    arena: &TreeArena,
+    node: TreeId,
+    out: &mut Vec<i64>,
+) -> Result<(), PropagateError> {
+    match match_box(arena, node) {
+        BoxMatch::Par(left, right) => {
+            flatten_route_ints_into(arena, left, out)?;
+            flatten_route_ints_into(arena, right, out)?;
+            Ok(())
+        }
+        _ => {
+            let Some(value) = tree_to_int(arena, node) else {
+                return Err(PropagateError::UnsupportedBox {
+                    node,
+                    kind: "route-spec",
+                });
+            };
+            out.push(value);
+            Ok(())
+        }
+    }
+}
+
 /// Reads a non-negative integer node and converts it to `usize`.
 fn usize_from_int_node(
     arena: &TreeArena,
@@ -1515,6 +1596,24 @@ fn usize_from_int_node(
         return Err(PropagateError::NegativeIntegerValue { field, value });
     }
     usize::try_from(value).map_err(|_| PropagateError::InvalidIntegerValue { node, field })
+}
+
+/// Returns the C++ `ffarity(...)` for one wrapped foreign function descriptor.
+fn ffunction_arity(arena: &TreeArena, ff: TreeId) -> Result<usize, PropagateError> {
+    let BoxMatch::Ffunction(signature, _, _) = match_box(arena, ff) else {
+        return Err(PropagateError::UnsupportedBox {
+            node: ff,
+            kind: "ffunction",
+        });
+    };
+    let signature_len = list_length(arena, signature).ok_or(PropagateError::UnsupportedBox {
+        node: signature,
+        kind: "ffunction-signature",
+    })?;
+    signature_len.checked_sub(2).ok_or(PropagateError::UnsupportedBox {
+        node: signature,
+        kind: "ffunction-signature",
+    })
 }
 
 /// Fallible `usize -> i32` conversion used for stable signal-index nodes.

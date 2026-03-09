@@ -245,6 +245,78 @@ fn waveform_box_lowers_to_size_and_waveform_signal() {
 }
 
 #[test]
+fn route_box_propagates_by_mixing_selected_inputs() {
+    let mut arena = TreeArena::new();
+    let route = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let two = bb.int(2);
+        let one_a = bb.int(1);
+        let one_b = bb.int(1);
+        let two_a = bb.int(2);
+        let one_c = bb.int(1);
+        let left_pair = bb.par(one_a, one_b);
+        let right_pair = bb.par(two_a, one_c);
+        let spec = bb.par(left_pair, right_pair);
+        bb.route(two, two, spec)
+    };
+    let inputs = make_sig_input_list(&mut arena, 2);
+
+    let arity = box_arity(&arena, route, &mut ArityCache::new()).expect("route arity should infer");
+    assert_eq!(arity.inputs, 2);
+    assert_eq!(arity.outputs, 2);
+
+    let out = propagate(&mut arena, route, &inputs, &mut ArityCache::new())
+        .expect("route should propagate");
+    assert_eq!(out.len(), 2);
+    let zero = SigBuilder::new(&mut arena).int(0);
+    let SigMatch::BinOp(BinOp::Add, partial, rhs) = match_sig(&arena, out[0]) else {
+        panic!("first route output should be an add");
+    };
+    assert_eq!(rhs, inputs[1]);
+    assert_eq!(match_sig(&arena, partial), SigMatch::BinOp(BinOp::Add, zero, inputs[0]));
+    assert_eq!(match_sig(&arena, out[1]), SigMatch::Int(0));
+}
+
+#[test]
+fn ffun_box_arity_and_propagation_follow_signature() {
+    let mut arena = TreeArena::new();
+    let (wrapped, ff) = {
+        let ty = arena.int(1);
+        let incfile = arena.symbol("<math.h>");
+        let libfile = arena.symbol("\"\"");
+        let cname = arena.symbol("myfun");
+        let nil = arena.nil();
+        let names_tail = arena.cons(cname, nil);
+        let names_mid = arena.cons(cname, names_tail);
+        let names_mid2 = arena.cons(cname, names_mid);
+        let names = arena.cons(cname, names_mid2);
+        let arg_types = arena.cons(ty, nil);
+        let payload = arena.cons(names, arg_types);
+        let signature = arena.cons(ty, payload);
+        let mut bb = BoxBuilder::new(&mut arena);
+        let ff = bb.ffunction(signature, incfile, libfile);
+        (bb.ffun(ff), ff)
+    };
+    let inputs = make_sig_input_list(&mut arena, 1);
+
+    let arity = box_arity(&arena, wrapped, &mut ArityCache::new()).expect("ffun arity should infer");
+    assert_eq!(arity.inputs, 1);
+    assert_eq!(arity.outputs, 1);
+
+    let out = propagate(&mut arena, wrapped, &inputs, &mut ArityCache::new())
+        .expect("ffun should propagate");
+    assert_eq!(out.len(), 1);
+    let SigMatch::FFun(sig_ff, largs) = match_sig(&arena, out[0]) else {
+        panic!("ffun output should be SIGFFUN");
+    };
+    assert_eq!(sig_ff, ff);
+    assert_eq!(arena.hd(largs), Some(inputs[0]));
+    assert!(arena
+        .tl(largs)
+        .is_some_and(|tail| arena.is_nil(tail)));
+}
+
+#[test]
 fn flat_box_builder_accepts_valid_post_eval_families() {
     let mut arena = TreeArena::new();
     let valid = {
