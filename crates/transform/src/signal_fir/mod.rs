@@ -373,7 +373,7 @@ mod tests {
         assert!(
             clear_stmts.iter().any(|id| matches!(
                 match_fir(&out.store, *id),
-                FirMatch::StoreVar { ref name, .. } if name.starts_with("fState")
+                FirMatch::StoreVar { ref name, .. } if name.starts_with("fRec")
             )),
             "signal state init should be emitted in instanceClear"
         );
@@ -846,7 +846,7 @@ mod tests {
                         ref name,
                         typ: FirType::Array(_, 4),
                         ..
-                    } if name.starts_with("fDelay")
+                    } if name.starts_with("fVec")
                 )
             })
             .copied()
@@ -1004,7 +1004,7 @@ mod tests {
         assert!(
             !struct_items.iter().any(|id| matches!(
                 match_fir(&out.store, *id),
-                FirMatch::DeclareVar { ref name, .. } if name.starts_with("fDelay")
+                FirMatch::DeclareVar { ref name, .. } if name.starts_with("fVec")
             )),
             "zero delay should not allocate a delay line"
         );

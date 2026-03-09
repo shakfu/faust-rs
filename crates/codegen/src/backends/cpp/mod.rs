@@ -497,17 +497,12 @@ fn emit_stmt_with_mode(
             values,
             ..
         } => {
-            let mut rendered = Vec::with_capacity(values.len());
-            for value in &values {
-                rendered.push(emit_value(store, options, *value)?);
-            }
             let _ = writeln!(
                 out,
-                "{tab}{} {}[{}] = {{{}}};",
+                "{tab}{} {}[{}];",
                 emit_type(&elem_type, options),
                 name,
-                values.len(),
-                rendered.join(", ")
+                values.len()
             );
             Ok(())
         }

@@ -955,7 +955,7 @@ impl<'a> SignalToFirLower<'a> {
         if let Some(name) = self.state_name_by_node.get(&node) {
             return name.clone();
         }
-        let name = format!("fState{}", node.as_u32());
+        let name = format!("fRec{}", node.as_u32());
         let real_ty = self
             .signal_fir_type(node)
             .expect("prepared state node should have a FIR type");
@@ -996,7 +996,7 @@ impl<'a> SignalToFirLower<'a> {
         }
 
         self.ensure_iota_state();
-        let name = format!("fDelay{}", carried.as_u32());
+        let name = format!("fVec{}", carried.as_u32());
         let array_ty = FirType::Array(Box::new(elem_type.clone()), required_size);
         let mut b = FirBuilder::new(&mut self.store);
         let decl = b.declare_var(name.clone(), array_ty, AccessType::Struct, None);
@@ -1420,7 +1420,7 @@ impl<'a> SignalToFirLower<'a> {
             lowered_values.push(self.lower_signal(*value)?);
         }
         let declared_zeros = self.zero_table_values(sig, values.len())?;
-        let name = format!("table_n{}", sig.as_u32());
+        let name = format!("fTbl{}", sig.as_u32());
         let real_ty = self.signal_fir_type(sig)?;
         let mut b = FirBuilder::new(&mut self.store);
         let decl = b.declare_table(name.clone(), AccessType::Struct, real_ty, &declared_zeros);
@@ -1454,7 +1454,7 @@ impl<'a> SignalToFirLower<'a> {
         let size = self.table_size_from_sig(size_sig)?;
         let generated = self.expand_generator_values(generator_sig, size)?;
         let declared_zeros = self.zero_table_values(sig, size)?;
-        let name = format!("table_n{}", sig.as_u32());
+        let name = format!("fTbl{}", sig.as_u32());
         let real_ty = self.signal_fir_type(sig)?;
         let mut b = FirBuilder::new(&mut self.store);
         let decl = b.declare_table(name.clone(), AccessType::Struct, real_ty, &declared_zeros);

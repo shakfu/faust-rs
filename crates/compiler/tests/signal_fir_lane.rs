@@ -110,13 +110,13 @@ fn fastlane_delay_echo_uses_circular_delay_line_and_iota_in_c_and_cpp() {
     let fast_cpp = compile_cpp_with_lane("rep_04_delay_echo.dsp", SignalFirLane::TransformFastLane);
     assert!(fast_cpp.contains("class mydsp : public dsp"));
     assert!(fast_cpp.contains("int fIOTA;"));
-    assert!(fast_cpp.contains("fDelay"));
+    assert!(fast_cpp.contains("fVec"));
     assert!(
-        fast_cpp.contains("fDelay4[(fIOTA & 4095)] = fState4;"),
+        fast_cpp.contains("fVec4[(fIOTA & 4095)] = fRec4;"),
         "C++ fast-lane should mask the delay-line write index"
     );
     assert!(
-        fast_cpp.contains("fDelay4[((fIOTA - 2205) & 4095)]"),
+        fast_cpp.contains("fVec4[((fIOTA - 2205) & 4095)]"),
         "C++ fast-lane should read the delay line through a masked circular index"
     );
     assert!(
@@ -130,13 +130,13 @@ fn fastlane_delay_echo_uses_circular_delay_line_and_iota_in_c_and_cpp() {
 
     let fast_c = compile_c_with_lane("rep_04_delay_echo.dsp", SignalFirLane::TransformFastLane);
     assert!(fast_c.contains("int fIOTA;"));
-    assert!(fast_c.contains("fDelay4"));
+    assert!(fast_c.contains("fVec4"));
     assert!(
-        fast_c.contains("dsp->fDelay4[(dsp->fIOTA & 4095)] = dsp->fState4;"),
+        fast_c.contains("dsp->fVec4[(dsp->fIOTA & 4095)] = dsp->fRec4;"),
         "C fast-lane should mask the delay-line write index"
     );
     assert!(
-        fast_c.contains("dsp->fDelay4[((dsp->fIOTA - 2205) & 4095)]"),
+        fast_c.contains("dsp->fVec4[((dsp->fIOTA - 2205) & 4095)]"),
         "C fast-lane should read the delay line through a masked circular index"
     );
     assert!(
