@@ -16,6 +16,28 @@
 //! Reduced typing deliberately stops short of the full C++ type lattice. The
 //! goal is only to support the upcoming promotion pass and to feed `signal_fir`
 //! with enough information for delay/recursion/table lowering.
+//!
+//! # Boundary contract
+//! Input signals may still contain:
+//! - de Bruijn recursion groups,
+//! - mixed integer/real numeric expressions,
+//! - table and clock-family nodes emitted by propagation.
+//!
+//! Output signals returned by [`prepare_signals_for_fir`] satisfy these
+//! fast-lane invariants:
+//! - recursion is rewritten to symbolic `SYMREC` / `SYMREF`,
+//! - one reduced prepared type is available for each reachable node,
+//! - casts needed by the current FIR lowerer have already been inserted,
+//! - the original source arena is left untouched.
+//!
+//! # Adaptation status
+//! This is an adapted Rust staging phase rather than a 1:1 copy of one single
+//! C++ class:
+//! - `deBruijn2Sym(...)` is applied forest-wide like the C++ normalization path,
+//! - reduced typing keeps only the distinctions currently needed by the
+//!   fast-lane instead of the full C++ signal type lattice,
+//! - the promotion pass ports only the `SignalPromotion` subset required before
+//!   `signal_fir`, without additional simplification or normalization.
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -121,6 +143,11 @@ pub fn prepare_signals_for_fir(
     })
 }
 
+/// Runs the reduced simple typer on the prepared output forest.
+///
+/// This pass is executed twice by [`prepare_signals_for_fir`]:
+/// - before promotion, to drive cast insertion,
+/// - after promotion, to expose final prepared types to the FIR lowerer.
 fn infer_simple_types(
     arena: &TreeArena,
     outputs: &[SigId],
@@ -149,6 +176,11 @@ fn list_to_vec(arena: &TreeArena, mut list: SigId) -> Option<Vec<SigId>> {
     Some(out)
 }
 
+/// Applies the reduced promotion pass to all prepared outputs.
+///
+/// Promotion preserves graph sharing through memoization inside
+/// [`SignalPromoter`], so repeated subtrees stay interned once in the staging
+/// arena.
 fn promote_signals_for_fir(
     arena: &mut TreeArena,
     outputs: &[SigId],
@@ -161,6 +193,11 @@ fn promote_signals_for_fir(
         .collect()
 }
 
+/// Internal fixpoint slot used while inferring reduced signal types.
+///
+/// `Unknown` only exists during recursive-group convergence. Final exported
+/// types always map unresolved slots to [`SimpleSigType::Real`], matching the
+/// current fast-lane fallback policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TypeSlot {
     Unknown,
@@ -170,6 +207,7 @@ enum TypeSlot {
 }
 
 impl TypeSlot {
+    /// Converts one internal slot to the public reduced type domain.
     fn finalize(self) -> SimpleSigType {
         match self {
             Self::Unknown => SimpleSigType::Real,
@@ -180,6 +218,19 @@ impl TypeSlot {
     }
 }
 
+/// Reduced signal typer run after forest-wide symbolic recursion conversion.
+///
+/// This is intentionally smaller than the C++ `sigtyperules` engine. It only
+/// tracks the distinctions currently required by:
+/// - delay and prefix state typing,
+/// - recursion-group convergence,
+/// - table element/index typing,
+/// - the reduced promotion rules applied before FIR lowering.
+///
+/// The typer memoizes:
+/// - one slot per visited node,
+/// - one vector of slots per symbolic recursion group,
+/// - one temporary active-group state while computing recursive fixpoints.
 struct SimpleTyper<'a> {
     arena: &'a TreeArena,
     node_types: HashMap<SigId, TypeSlot>,
@@ -189,6 +240,7 @@ struct SimpleTyper<'a> {
 }
 
 impl<'a> SimpleTyper<'a> {
+    /// Creates one reduced typer over the prepared staging arena.
     fn new(arena: &'a TreeArena) -> Self {
         Self {
             arena,
@@ -199,6 +251,7 @@ impl<'a> SimpleTyper<'a> {
         }
     }
 
+    /// Finalizes the memoized slot map into exported reduced types.
     fn finish(self) -> HashMap<SigId, SimpleSigType> {
         self.node_types
             .into_iter()
@@ -206,6 +259,11 @@ impl<'a> SimpleTyper<'a> {
             .collect()
     }
 
+    /// Infers one reduced type slot for one signal node.
+    ///
+    /// Most cases mirror the type intent of the C++ signal rules, but in the
+    /// reduced domain `Int / Real / Sound`. Unsupported or malformed nodes are
+    /// reported as typed preparation errors so the fast-lane fails explicitly.
     fn infer_sig(&mut self, sig: SigId) -> Result<TypeSlot, SignalPrepareError> {
         if let Some(ty) = self.node_types.get(&sig) {
             return Ok(*ty);
@@ -405,6 +463,10 @@ impl<'a> SimpleTyper<'a> {
         Ok(ty)
     }
 
+    /// Visits all children of a generic signal node.
+    ///
+    /// Tree children that are parser-style lists are traversed structurally
+    /// rather than treated as standalone signal nodes.
     fn visit_children(&mut self, sig: SigId) -> Result<(), SignalPrepareError> {
         let node = self.arena.node(sig).ok_or_else(|| {
             SignalPrepareError::Typing(format!(
@@ -422,6 +484,7 @@ impl<'a> SimpleTyper<'a> {
         Ok(())
     }
 
+    /// Visits a `cons`/`nil`-encoded child list used by some signal payloads.
     fn visit_list_like_children(&mut self, mut list: SigId) -> Result<(), SignalPrepareError> {
         while !self.arena.is_nil(list) {
             let head = self.arena.hd(list).ok_or_else(|| {
@@ -435,6 +498,13 @@ impl<'a> SimpleTyper<'a> {
         Ok(())
     }
 
+    /// Infers the type of one projection out of a symbolic recursion group.
+    ///
+    /// This method is the key post-`de_bruijn_to_sym` recursion hook used by
+    /// the fast-lane. It accepts:
+    /// - `proj(i, sym_ref(var))` during active group inference,
+    /// - `proj(i, sym_rec(...))` when visiting a fully materialized group,
+    /// - `SIGREC` as a compatibility fallback for remaining pre-symbolic users.
     fn infer_proj(&mut self, index: i32, group: SigId) -> Result<TypeSlot, SignalPrepareError> {
         let index = usize::try_from(index).map_err(|_| {
             SignalPrepareError::Typing(format!("negative projection index {index}"))
@@ -483,6 +553,16 @@ impl<'a> SimpleTyper<'a> {
         )))
     }
 
+    /// Solves one symbolic recursion group to a reduced vector of slot types.
+    ///
+    /// The algorithm uses a monotone fixpoint on [`TypeSlot`] vectors:
+    /// - start with all outputs as `Unknown`,
+    /// - re-infer all bodies under the current approximation,
+    /// - merge the old and new vectors,
+    /// - stop when the vector stabilizes.
+    ///
+    /// Remaining `Unknown` slots collapse to `Real`, which is the current
+    /// parity-preserving fallback for unconstrained recursive numeric signals.
     fn infer_group(&mut self, group: SigId) -> Result<Vec<TypeSlot>, SignalPrepareError> {
         if let Some(types) = self.group_types.get(&group) {
             return Ok(types.clone());
@@ -527,6 +607,7 @@ impl<'a> SimpleTyper<'a> {
         }
     }
 
+    /// Infers the aggregate type of one waveform literal payload.
     fn infer_waveform(&mut self, values: &[SigId]) -> Result<TypeSlot, SignalPrepareError> {
         let mut out = TypeSlot::Int;
         for value in values {
@@ -540,6 +621,7 @@ impl<'a> SimpleTyper<'a> {
         Ok(out)
     }
 
+    /// Decodes the reduced type tag used by foreign constants and variables.
     fn foreign_type(&self, ty: SigId) -> TypeSlot {
         match tree_to_int(self.arena, ty) {
             Some(0) => TypeSlot::Int,
@@ -548,6 +630,7 @@ impl<'a> SimpleTyper<'a> {
         }
     }
 
+    /// Rejects non-numeric payloads in contexts that require arithmetic values.
     fn numeric_type(&self, slot: TypeSlot, context: &str) -> Result<TypeSlot, SignalPrepareError> {
         match slot {
             TypeSlot::Sound => Err(SignalPrepareError::Typing(format!(
@@ -557,10 +640,15 @@ impl<'a> SimpleTyper<'a> {
         }
     }
 
+    /// Alias used by stateful sample operators such as delays and prefixes.
     fn sample_type(&self, slot: TypeSlot, context: &str) -> Result<TypeSlot, SignalPrepareError> {
         self.numeric_type(slot, context)
     }
 
+    /// Merges two reduced slots according to the current fast-lane promotion rules.
+    ///
+    /// Integer/real combinations widen to `Real`. Soundfile handles only unify
+    /// with themselves.
     fn unify_slots(
         &self,
         left: TypeSlot,
@@ -583,6 +671,7 @@ impl<'a> SimpleTyper<'a> {
     }
 }
 
+/// Merges two recursion-group slot vectors during fixpoint iteration.
 fn merge_group_slots(
     current: &[TypeSlot],
     next: &[TypeSlot],
@@ -610,6 +699,17 @@ fn merge_group_slots(
         .collect()
 }
 
+/// Reduced `SignalPromotion` pass run after simple typing and before FIR lowering.
+///
+/// This pass mirrors the subset of C++ `sigPromotion.cpp` currently required by
+/// the fast-lane:
+/// - delay amounts, table indices, and clock selectors are forced to integer,
+/// - mixed arithmetic operands are widened to real when needed,
+/// - branch/table/write operands are cast to compatible element types,
+/// - clocked wrappers preserve their clock/value split when casts are inserted.
+///
+/// The pass is memoized so shared prepared subtrees remain shared in the staged
+/// arena.
 struct SignalPromoter<'a> {
     arena: &'a mut TreeArena,
     types: &'a HashMap<SigId, SimpleSigType>,
@@ -617,6 +717,7 @@ struct SignalPromoter<'a> {
 }
 
 impl<'a> SignalPromoter<'a> {
+    /// Creates one promotion pass over the prepared staging arena.
     fn new(arena: &'a mut TreeArena, types: &'a HashMap<SigId, SimpleSigType>) -> Self {
         Self {
             arena,
@@ -625,6 +726,7 @@ impl<'a> SignalPromoter<'a> {
         }
     }
 
+    /// Promotes one signal tree or list node, preserving structural sharing.
     fn promote(&mut self, sig: SigId) -> Result<SigId, SignalPrepareError> {
         if let Some(promoted) = self.memo.get(&sig) {
             return Ok(*promoted);
@@ -655,6 +757,7 @@ impl<'a> SignalPromoter<'a> {
         Ok(promoted)
     }
 
+    /// Promotes one non-list, non-recursion signal node.
     fn promote_signal(&mut self, sig: SigId) -> Result<SigId, SignalPrepareError> {
         let promoted = match match_sig(self.arena, sig) {
             SigMatch::Unknown => self.clone_generic(sig)?,
@@ -966,6 +1069,7 @@ impl<'a> SignalPromoter<'a> {
         Ok(promoted)
     }
 
+    /// Applies the reduced promotion policy for binary operators.
     fn promote_binop(
         &mut self,
         node: SigId,
@@ -1026,6 +1130,7 @@ impl<'a> SignalPromoter<'a> {
         Ok(out)
     }
 
+    /// Promotes one unary operator that always expects a real operand.
     fn promote_real_unary(
         &mut self,
         build: impl FnOnce(&mut SigBuilder<'_>, SigId) -> SigId,
@@ -1037,6 +1142,7 @@ impl<'a> SignalPromoter<'a> {
         Ok(build(&mut b, inner_promoted))
     }
 
+    /// Promotes one binary operator that always expects real operands.
     fn promote_real_binary(
         &mut self,
         build: impl FnOnce(&mut SigBuilder<'_>, SigId, SigId) -> SigId,
@@ -1051,6 +1157,7 @@ impl<'a> SignalPromoter<'a> {
         Ok(build(&mut b, left_promoted, right_promoted))
     }
 
+    /// Promotes one waveform payload, preserving all-int literals when possible.
     fn promote_waveform(&mut self, values: &[SigId]) -> Result<SigId, SignalPrepareError> {
         let all_int = values
             .iter()
@@ -1069,6 +1176,10 @@ impl<'a> SignalPromoter<'a> {
         Ok(b.waveform(&promoted))
     }
 
+    /// Promotes `ondemand` / `upsampling` / `downsampling` payload lists.
+    ///
+    /// The first item is the clock expression and may therefore require the
+    /// dedicated clock cast logic.
     fn promote_clocked_family(
         &mut self,
         items: &[SigId],
@@ -1088,6 +1199,7 @@ impl<'a> SignalPromoter<'a> {
         Ok(build(&mut b, &promoted))
     }
 
+    /// Forces one clock expression to integer while preserving clock wrappers.
     fn smart_clock_cast(
         &mut self,
         original: SigId,
@@ -1105,6 +1217,7 @@ impl<'a> SignalPromoter<'a> {
         Ok(b.int_cast(promoted))
     }
 
+    /// Inserts an integer cast only when the original reduced type is real.
     fn smart_int_cast(
         &mut self,
         original: SigId,
@@ -1118,6 +1231,7 @@ impl<'a> SignalPromoter<'a> {
         }
     }
 
+    /// Inserts a float cast while preserving clocked wrapper structure.
     fn smart_float_cast(
         &mut self,
         original: SigId,
@@ -1126,6 +1240,7 @@ impl<'a> SignalPromoter<'a> {
         self.smart_float_cast_preserving_clocked(original, promoted)
     }
 
+    /// Inserts a float cast, but keeps `clocked(env, value)` as a clocked node.
     fn smart_float_cast_preserving_clocked(
         &mut self,
         original: SigId,
@@ -1143,6 +1258,7 @@ impl<'a> SignalPromoter<'a> {
         Ok(b.float_cast(promoted))
     }
 
+    /// Casts one promoted source signal to the reduced type expected by a target.
     fn smart_cast(
         &mut self,
         target: SigId,
@@ -1162,10 +1278,12 @@ impl<'a> SignalPromoter<'a> {
         }
     }
 
+    /// Returns whether two source signals share the same reduced prepared type.
     fn same_type(&self, left: SigId, right: SigId) -> bool {
         self.ty(left).ok() == self.ty(right).ok()
     }
 
+    /// Looks up the reduced prepared type of one source signal.
     fn ty(&self, sig: SigId) -> Result<SimpleSigType, SignalPrepareError> {
         self.types.get(&sig).copied().ok_or_else(|| {
             SignalPrepareError::Typing(format!(
@@ -1175,6 +1293,7 @@ impl<'a> SignalPromoter<'a> {
         })
     }
 
+    /// Generic structural clone fallback for signal nodes without dedicated promotion logic.
     fn clone_generic(&mut self, sig: SigId) -> Result<SigId, SignalPrepareError> {
         let node = self.arena.node(sig).cloned().ok_or_else(|| {
             SignalPrepareError::Typing(format!("missing node {} during promotion", sig.as_u32()))
