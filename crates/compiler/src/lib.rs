@@ -1381,12 +1381,7 @@ fn lower_signals_to_fir_legacy_bridge(
     }
 
     let body = b.block(&body);
-    let f_sample_rate = b.declare_var(
-        "fSampleRate",
-        FirType::Int32,
-        fir::AccessType::Struct,
-        None,
-    );
+    let f_sample_rate = b.declare_var("fSampleRate", FirType::Int32, fir::AccessType::Struct, None);
     let dsp_struct = b.block(&[f_sample_rate]);
     let instance_constants_type = FirType::Fun {
         args: vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::Int32],
@@ -1488,12 +1483,7 @@ fn lower_signals_to_c_legacy_bridge(
     // Keep legacy C bridge intentionally minimal: C backend currently does not
     // emit FIR label statements, so we avoid `Label` nodes here.
     let body = b.block(&[]);
-    let f_sample_rate = b.declare_var(
-        "fSampleRate",
-        FirType::Int32,
-        fir::AccessType::Struct,
-        None,
-    );
+    let f_sample_rate = b.declare_var("fSampleRate", FirType::Int32, fir::AccessType::Struct, None);
     let dsp_struct = b.block(&[f_sample_rate]);
     let instance_constants_type = FirType::Fun {
         args: vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::Int32],
