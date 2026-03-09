@@ -451,6 +451,10 @@ fn fastlane_cpp_compiles_noise_smoo_slider_fixture() {
     assert!(cpp.contains("int iRec"));
     assert!(cpp.contains("iRec"));
     assert!(cpp.contains("fSampleRate"));
+    assert!(
+        !cpp.contains("float fRec"),
+        "fast-lane C++ should keep the recursive noise carrier in integer state"
+    );
 }
 
 #[test]
