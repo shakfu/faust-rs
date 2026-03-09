@@ -296,10 +296,14 @@ fn emit_struct_definition(
     dsp_struct: FirId,
     globals: FirId,
 ) -> Result<(), CodegenError> {
+    let has_sample_rate_field = block_declares_var(store, dsp_struct, "fSampleRate")
+        || block_declares_var(store, globals, "fSampleRate");
     let _ = writeln!(out, "typedef struct {{");
     emit_struct_fields(store, out, options, dsp_struct)?;
     emit_struct_fields(store, out, options, globals)?;
-    let _ = writeln!(out, "    int fSampleRate;");
+    if !has_sample_rate_field {
+        let _ = writeln!(out, "    int fSampleRate;");
+    }
     let _ = writeln!(out, "}} {class_name};");
     let _ = writeln!(out);
     Ok(())
@@ -346,6 +350,30 @@ fn emit_struct_fields(
         }
     }
     Ok(())
+}
+
+fn block_declares_var(store: &FirStore, block_id: FirId, name: &str) -> bool {
+    let FirMatch::Block(items) = match_fir(store, block_id) else {
+        return false;
+    };
+    items.iter().any(|id| {
+        matches!(
+            match_fir(store, *id),
+            FirMatch::DeclareVar { name: var_name, .. } if var_name == name
+        )
+    })
+}
+
+fn block_stores_var(store: &FirStore, block_id: FirId, name: &str) -> bool {
+    let FirMatch::Block(items) = match_fir(store, block_id) else {
+        return false;
+    };
+    items.iter().any(|id| {
+        matches!(
+            match_fir(store, *id),
+            FirMatch::StoreVar { name: var_name, .. } if var_name == name
+        )
+    })
 }
 
 struct CApiEmitInput<'a> {
@@ -617,7 +645,7 @@ fn emit_named_fun(
         .body
         .expect("emit_named_fun called with prototype-only DeclareFunView");
     let _ = writeln!(out, "{signature} {{");
-    if decl.name == "instanceConstants" {
+    if decl.name == "instanceConstants" && !block_stores_var(store, body, "fSampleRate") {
         let _ = writeln!(out, "    dsp->fSampleRate = sample_rate;");
     }
     if decl.name == "compute" {

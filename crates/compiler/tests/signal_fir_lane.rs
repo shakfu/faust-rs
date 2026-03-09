@@ -467,6 +467,23 @@ fn fastlane_cpp_compiles_repo_noise_dsp() {
 }
 
 #[test]
+fn fastlane_interp_compiles_repo_noise_dsp() {
+    let compiler = Compiler::new();
+    let path = workspace_path("noise.dsp");
+    let fbc = compiler
+        .compile_file_default_to_interp_with_lane(
+            &path,
+            &InterpOptions::default(),
+            SignalFirLane::TransformFastLane,
+        )
+        .unwrap_or_else(|e| panic!("noise.dsp fast-lane interp compilation failed: {e}"));
+    assert!(
+        !fbc.is_empty(),
+        "noise.dsp fast-lane interp compilation should produce bytecode"
+    );
+}
+
+#[test]
 fn fastlane_c_lifecycle_order_matches_faust_instance_init_flow() {
     let fast = compile_c_with_lane(
         "rep_10_two_in_two_out_ui.dsp",

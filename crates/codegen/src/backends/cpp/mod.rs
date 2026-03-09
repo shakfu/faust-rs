@@ -177,6 +177,8 @@ pub fn generate_cpp_module(
     let module_name = module.name.clone();
     let effective_options = options.clone();
     let declared_functions = collect_module_function_names(store, module.functions)?;
+    let has_sample_rate_field = block_declares_var(store, module.dsp_struct, "fSampleRate")
+        || block_declares_var(store, module.globals, "fSampleRate");
     let class_name = options
         .class_name
         .as_deref()
@@ -191,7 +193,9 @@ pub fn generate_cpp_module(
 
     let _ = writeln!(out, "class {class_name} : public dsp {{");
     let _ = writeln!(out, "private:");
-    let _ = writeln!(out, "    int fSampleRate;");
+    if !has_sample_rate_field {
+        let _ = writeln!(out, "    int fSampleRate;");
+    }
     emit_section(
         store,
         &mut out,
@@ -834,6 +838,30 @@ fn emit_block_with_mode(
     Ok(())
 }
 
+fn block_declares_var(store: &FirStore, block: FirId, name: &str) -> bool {
+    let FirMatch::Block(items) = match_fir(store, block) else {
+        return false;
+    };
+    items.iter().any(|id| {
+        matches!(
+            match_fir(store, *id),
+            FirMatch::DeclareVar { name: var_name, .. } if var_name == name
+        )
+    })
+}
+
+fn block_stores_var(store: &FirStore, block: FirId, name: &str) -> bool {
+    let FirMatch::Block(items) = match_fir(store, block) else {
+        return false;
+    };
+    items.iter().any(|id| {
+        matches!(
+            match_fir(store, *id),
+            FirMatch::StoreVar { name: var_name, .. } if var_name == name
+        )
+    })
+}
+
 fn emit_declare_fun(
     store: &FirStore,
     out: &mut String,
@@ -906,7 +934,9 @@ fn emit_declare_fun(
         decl.name
     );
     if decl.name == "instanceConstants" {
-        let _ = writeln!(out, "{tab}    fSampleRate = sample_rate;");
+        if !block_stores_var(store, body, "fSampleRate") {
+            let _ = writeln!(out, "{tab}    fSampleRate = sample_rate;");
+        }
         emit_block(store, out, options, module_name, body, indent + 1)?;
     } else if decl.name == "compute" {
         emit_compute_body(store, out, options, body, indent + 1)?;

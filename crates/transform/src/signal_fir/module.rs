@@ -121,6 +121,7 @@ pub fn build_module(
     real_ty: FirType,
 ) -> Result<SignalFirOutput, SignalFirError> {
     let mut lower = SignalToFirLower::new(arena, types, plan.num_inputs, real_ty);
+    lower.ensure_sample_rate_var();
     lower.prepare_delay_lines(signals)?;
     let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
     let dsp_arg = NamedType {
@@ -212,6 +213,12 @@ pub fn build_module(
     };
 
     let constants_body = {
+        let sample_rate_store = {
+            let mut b = FirBuilder::new(&mut lower.store);
+            let sample_rate = b.load_var("sample_rate", AccessType::FunArgs, FirType::Int32);
+            b.store_var("fSampleRate", AccessType::Struct, sample_rate)
+        };
+        lower.constants_statements.insert(0, sample_rate_store);
         let mut b = FirBuilder::new(&mut lower.store);
         b.block(&lower.constants_statements)
     };
@@ -569,6 +576,14 @@ impl<'a> SignalToFirLower<'a> {
             used_math_ops: HashSet::new(),
             next_loop_var_id: 0,
         }
+    }
+
+    /// Ensures the canonical DSP sample-rate field is present in the FIR struct.
+    ///
+    /// Backends should consume this field directly instead of synthesizing their
+    /// own `fSampleRate` side channel.
+    fn ensure_sample_rate_var(&mut self) {
+        self.ensure_named_struct_var("fSampleRate", FirType::Int32, None);
     }
 
     /// Pre-scans the prepared signal forest to allocate constant-delay line

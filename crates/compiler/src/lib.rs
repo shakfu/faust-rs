@@ -1381,10 +1381,40 @@ fn lower_signals_to_fir_legacy_bridge(
     }
 
     let body = b.block(&body);
+    let f_sample_rate = b.declare_var(
+        "fSampleRate",
+        FirType::Int32,
+        fir::AccessType::Struct,
+        None,
+    );
+    let dsp_struct = b.block(&[f_sample_rate]);
+    let instance_constants_type = FirType::Fun {
+        args: vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::Int32],
+        ret: Box::new(FirType::Void),
+    };
+    let instance_constants_args = [
+        NamedType {
+            name: "dsp".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "sample_rate".to_string(),
+            typ: FirType::Int32,
+        },
+    ];
+    let sample_rate = b.load_var("sample_rate", fir::AccessType::FunArgs, FirType::Int32);
+    let sample_rate_store = b.store_var("fSampleRate", fir::AccessType::Struct, sample_rate);
+    let instance_constants_body = b.block(&[sample_rate_store]);
+    let instance_constants = b.declare_fun(
+        "instanceConstants",
+        instance_constants_type,
+        &instance_constants_args,
+        Some(instance_constants_body),
+        false,
+    );
     let (compute_type, compute_args) = make_compute_fir_signature();
     let compute = b.declare_fun("compute", compute_type, &compute_args, Some(body), false);
-    let functions = b.block(&[compute]);
-    let dsp_struct = b.block(&[]);
+    let functions = b.block(&[instance_constants, compute]);
     let globals = b.block(&[]);
     let module = b.module(
         output.process_arity.inputs,
@@ -1458,10 +1488,40 @@ fn lower_signals_to_c_legacy_bridge(
     // Keep legacy C bridge intentionally minimal: C backend currently does not
     // emit FIR label statements, so we avoid `Label` nodes here.
     let body = b.block(&[]);
+    let f_sample_rate = b.declare_var(
+        "fSampleRate",
+        FirType::Int32,
+        fir::AccessType::Struct,
+        None,
+    );
+    let dsp_struct = b.block(&[f_sample_rate]);
+    let instance_constants_type = FirType::Fun {
+        args: vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::Int32],
+        ret: Box::new(FirType::Void),
+    };
+    let instance_constants_args = [
+        NamedType {
+            name: "dsp".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "sample_rate".to_string(),
+            typ: FirType::Int32,
+        },
+    ];
+    let sample_rate = b.load_var("sample_rate", fir::AccessType::FunArgs, FirType::Int32);
+    let sample_rate_store = b.store_var("fSampleRate", fir::AccessType::Struct, sample_rate);
+    let instance_constants_body = b.block(&[sample_rate_store]);
+    let instance_constants = b.declare_fun(
+        "instanceConstants",
+        instance_constants_type,
+        &instance_constants_args,
+        Some(instance_constants_body),
+        false,
+    );
     let (compute_type, compute_args) = make_compute_fir_signature();
     let compute = b.declare_fun("compute", compute_type, &compute_args, Some(body), false);
-    let functions = b.block(&[compute]);
-    let dsp_struct = b.block(&[]);
+    let functions = b.block(&[instance_constants, compute]);
     let globals = b.block(&[]);
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let module = b.module(0, 0, module_name, dsp_struct, globals, functions);

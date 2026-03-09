@@ -594,6 +594,27 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         access: AccessType,
         _typ: &FirType,
     ) -> Result<(), CompileError> {
+        if access == AccessType::FunArgs
+            && name == "sample_rate"
+            && !self.field_table.contains_key(name)
+        {
+            let desc = self
+                .field_table
+                .get("fSampleRate")
+                .or_else(|| self.field_table.get("fSamplingFreq"))
+                .or_else(|| self.field_table.get("fSamplingRate"))
+                .cloned()
+                .unwrap_or_else(|| {
+                    let offset = self.int_heap_offset;
+                    self.int_heap_offset += 1;
+                    MemoryDesc {
+                        offset,
+                        size: 1,
+                        heap_type: HeapType::Int,
+                    }
+                });
+            self.field_table.insert(name.to_string(), desc);
+        }
         if access == AccessType::FunArgs && name == "count" && !self.field_table.contains_key(name)
         {
             // Reserve a stable int heap slot for the runtime-set `count` pseudo argument.
