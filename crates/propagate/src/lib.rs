@@ -35,8 +35,8 @@ use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
 use signals::{SigBuilder, SigId};
 use tlib::{NodeKind, TreeArena, TreeId, tree_to_int};
 
-/// Memoization cache for [`box_arity`] results, keyed by `BoxId`.
-pub type ArityCache = AHashMap<BoxId, Result<BoxArity, PropagateError>>;
+/// Memoization cache for [`box_arity`] / [`box_arity_flat`] results, keyed by validated flat boxes.
+pub type ArityCache = AHashMap<FlatBoxId, Result<BoxArity, PropagateError>>;
 type SlotEnv = AHashMap<BoxId, SigId>;
 
 pub const CRATE_NAME: &str = "propagate";
@@ -456,6 +456,16 @@ impl Display for PropagateError {
 
 impl std::error::Error for PropagateError {}
 
+impl From<FlatBoxBuildError> for PropagateError {
+    fn from(value: FlatBoxBuildError) -> Self {
+        match value {
+            FlatBoxBuildError::UnexpectedPostEvalBox { node, kind } => {
+                Self::UnsupportedBox { node, kind }
+            }
+        }
+    }
+}
+
 /// Converts propagation errors into structured diagnostics used by the compiler facade.
 impl IntoDiagnostic for PropagateError {
     fn into_diagnostic(self) -> Diagnostic {
@@ -646,6 +656,23 @@ pub fn make_sig_input_list(arena: &mut TreeArena, n: usize) -> Vec<SigId> {
     out
 }
 
+/// Infers input/output arity of one flat post-eval box expression (memoized).
+///
+/// This is the typed entry point for post-`eval/a2sb` callers that already
+/// hold a validated [`FlatBoxId`].
+pub fn box_arity_flat(
+    arena: &TreeArena,
+    box_tree: FlatBoxId,
+    cache: &mut ArityCache,
+) -> Result<BoxArity, PropagateError> {
+    if let Some(cached) = cache.get(&box_tree) {
+        return cached.clone();
+    }
+    let result = box_arity_flat_inner(arena, box_tree, cache);
+    cache.insert(box_tree, result.clone());
+    result
+}
+
 /// Infers input/output arity of one box expression (memoized).
 ///
 /// This mirrors C++ `getBoxType(...)` behavior for the currently supported subset.
@@ -658,129 +685,90 @@ pub fn box_arity(
     box_tree: BoxId,
     cache: &mut ArityCache,
 ) -> Result<BoxArity, PropagateError> {
-    if let Some(cached) = cache.get(&box_tree) {
-        return cached.clone();
-    }
-    let result = box_arity_inner(arena, box_tree, cache);
-    cache.insert(box_tree, result.clone());
-    result
+    let flat = try_build_flat_box(arena, box_tree)?;
+    box_arity_flat(arena, flat, cache)
 }
 
 /// Core arity inference logic, called only on cache miss.
-fn box_arity_inner(
+fn box_arity_flat_inner(
     arena: &TreeArena,
-    box_tree: BoxId,
+    box_tree: FlatBoxId,
     cache: &mut ArityCache,
 ) -> Result<BoxArity, PropagateError> {
-    match match_box(arena, box_tree) {
-        BoxMatch::Int(_) | BoxMatch::Real(_) => Ok(BoxArity {
+    match flat_node_kind(arena, box_tree)? {
+        FlatNodeKind::Int | FlatNodeKind::Real => Ok(BoxArity {
             inputs: 0,
             outputs: 1,
         }),
-        BoxMatch::Slot(_) => Ok(BoxArity {
+        FlatNodeKind::Slot => Ok(BoxArity {
             inputs: 0,
             outputs: 1,
         }),
-        BoxMatch::Metadata(body, _) => box_arity(arena, body, cache),
-        BoxMatch::Wire => Ok(BoxArity {
+        FlatNodeKind::Metadata { body } => box_arity_flat(arena, body, cache),
+        FlatNodeKind::Wire => Ok(BoxArity {
             inputs: 1,
             outputs: 1,
         }),
-        BoxMatch::Cut => Ok(BoxArity {
+        FlatNodeKind::Cut => Ok(BoxArity {
             inputs: 1,
             outputs: 0,
         }),
-        BoxMatch::Add
-        | BoxMatch::Sub
-        | BoxMatch::Mul
-        | BoxMatch::Div
-        | BoxMatch::Rem
-        | BoxMatch::And
-        | BoxMatch::Or
-        | BoxMatch::Xor
-        | BoxMatch::Lsh
-        | BoxMatch::Rsh
-        | BoxMatch::Lt
-        | BoxMatch::Le
-        | BoxMatch::Gt
-        | BoxMatch::Ge
-        | BoxMatch::Eq
-        | BoxMatch::Ne
-        | BoxMatch::Pow
-        | BoxMatch::Atan2
-        | BoxMatch::Fmod
-        | BoxMatch::Remainder
-        | BoxMatch::Delay
-        | BoxMatch::Min
-        | BoxMatch::Max
-        | BoxMatch::Prefix
-        | BoxMatch::Attach
-        | BoxMatch::Enable
-        | BoxMatch::Control => Ok(BoxArity {
+        FlatNodeKind::Prim2 => Ok(BoxArity {
             inputs: 2,
             outputs: 1,
         }),
-        BoxMatch::Delay1
-        | BoxMatch::IntCast
-        | BoxMatch::FloatCast
-        | BoxMatch::Acos
-        | BoxMatch::Asin
-        | BoxMatch::Atan
-        | BoxMatch::Cos
-        | BoxMatch::Sin
-        | BoxMatch::Tan
-        | BoxMatch::Exp
-        | BoxMatch::Log
-        | BoxMatch::Log10
-        | BoxMatch::Sqrt
-        | BoxMatch::Abs
-        | BoxMatch::Floor
-        | BoxMatch::Ceil
-        | BoxMatch::Rint
-        | BoxMatch::Round
-        | BoxMatch::Lowest
-        | BoxMatch::Highest => Ok(BoxArity {
+        FlatNodeKind::Prim1 => Ok(BoxArity {
             inputs: 1,
             outputs: 1,
         }),
-        BoxMatch::ReadOnlyTable | BoxMatch::Select2 | BoxMatch::AssertBounds => Ok(BoxArity {
+        FlatNodeKind::Prim3 => Ok(BoxArity {
             inputs: 3,
             outputs: 1,
         }),
-        BoxMatch::Select3 => Ok(BoxArity {
+        FlatNodeKind::Prim4 => Ok(BoxArity {
             inputs: 4,
             outputs: 1,
         }),
-        BoxMatch::WriteReadTable => Ok(BoxArity {
+        FlatNodeKind::Prim5 => Ok(BoxArity {
             inputs: 5,
             outputs: 1,
         }),
-        BoxMatch::FConst(_, _, _) | BoxMatch::FVar(_, _, _) => Ok(BoxArity {
+        FlatNodeKind::FConst | FlatNodeKind::FVar => Ok(BoxArity {
             inputs: 0,
             outputs: 1,
         }),
-        BoxMatch::Button(_)
-        | BoxMatch::Checkbox(_)
-        | BoxMatch::VSlider(_, _, _, _, _)
-        | BoxMatch::HSlider(_, _, _, _, _)
-        | BoxMatch::NumEntry(_, _, _, _, _) => Ok(BoxArity {
+        FlatNodeKind::FFun => Err(PropagateError::UnsupportedBox {
+            node: box_tree.as_tree_id(),
+            kind: "ffun",
+        }),
+        FlatNodeKind::Button
+        | FlatNodeKind::Checkbox
+        | FlatNodeKind::VSlider
+        | FlatNodeKind::HSlider
+        | FlatNodeKind::NumEntry => Ok(BoxArity {
             inputs: 0,
             outputs: 1,
         }),
-        BoxMatch::VBargraph(_, _, _) | BoxMatch::HBargraph(_, _, _) => Ok(BoxArity {
+        FlatNodeKind::VBargraph | FlatNodeKind::HBargraph => Ok(BoxArity {
             inputs: 1,
             outputs: 1,
         }),
-        BoxMatch::Soundfile(_, chan) => {
+        FlatNodeKind::Soundfile => {
+            let BoxMatch::Soundfile(_, chan) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat soundfile node must decode to BoxMatch::Soundfile")
+            };
             let chan = usize_from_int_node(arena, chan, "soundfile channels")?;
             Ok(BoxArity {
                 inputs: 2,
                 outputs: 2 + chan,
             })
         }
-        BoxMatch::Waveform(values) => {
+        FlatNodeKind::Waveform => {
+            let BoxMatch::Waveform(values) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat waveform node must decode to BoxMatch::Waveform")
+            };
             let _ = list_length(arena, values).ok_or(PropagateError::UnsupportedBox {
-                node: box_tree,
+                node: box_tree.as_tree_id(),
                 kind: "waveform-list",
             })?;
             Ok(BoxArity {
@@ -788,22 +776,22 @@ fn box_arity_inner(
                 outputs: 2,
             })
         }
-        BoxMatch::VGroup(_, expr) | BoxMatch::HGroup(_, expr) | BoxMatch::TGroup(_, expr) => {
-            box_arity(arena, expr, cache)
-        }
-        BoxMatch::Symbolic(_, body) => {
-            let inner = box_arity(arena, body, cache)?;
+        FlatNodeKind::VGroup { body }
+        | FlatNodeKind::HGroup { body }
+        | FlatNodeKind::TGroup { body } => box_arity_flat(arena, body, cache),
+        FlatNodeKind::Symbolic { body } => {
+            let inner = box_arity_flat(arena, body, cache)?;
             Ok(BoxArity {
                 inputs: inner.inputs + 1,
                 outputs: inner.outputs,
             })
         }
-        BoxMatch::Seq(left, right) => {
-            let left_arity = box_arity(arena, left, cache)?;
-            let right_arity = box_arity(arena, right, cache)?;
+        FlatNodeKind::Seq(left, right) => {
+            let left_arity = box_arity_flat(arena, left, cache)?;
+            let right_arity = box_arity_flat(arena, right, cache)?;
             if left_arity.outputs != right_arity.inputs {
                 return Err(PropagateError::SeqArityMismatch {
-                    node: box_tree,
+                    node: box_tree.as_tree_id(),
                     left_outputs: left_arity.outputs,
                     right_inputs: right_arity.inputs,
                 });
@@ -813,20 +801,20 @@ fn box_arity_inner(
                 outputs: right_arity.outputs,
             })
         }
-        BoxMatch::Par(left, right) => {
-            let left_arity = box_arity(arena, left, cache)?;
-            let right_arity = box_arity(arena, right, cache)?;
+        FlatNodeKind::Par(left, right) => {
+            let left_arity = box_arity_flat(arena, left, cache)?;
+            let right_arity = box_arity_flat(arena, right, cache)?;
             Ok(BoxArity {
                 inputs: left_arity.inputs + right_arity.inputs,
                 outputs: left_arity.outputs + right_arity.outputs,
             })
         }
-        BoxMatch::Split(left, right) => {
-            let left_arity = box_arity(arena, left, cache)?;
-            let right_arity = box_arity(arena, right, cache)?;
+        FlatNodeKind::Split(left, right) => {
+            let left_arity = box_arity_flat(arena, left, cache)?;
+            let right_arity = box_arity_flat(arena, right, cache)?;
             if !split_compatible(left_arity.outputs, right_arity.inputs) {
                 return Err(PropagateError::SplitArityMismatch {
-                    node: box_tree,
+                    node: box_tree.as_tree_id(),
                     left_outputs: left_arity.outputs,
                     right_inputs: right_arity.inputs,
                 });
@@ -836,12 +824,12 @@ fn box_arity_inner(
                 outputs: right_arity.outputs,
             })
         }
-        BoxMatch::Merge(left, right) => {
-            let left_arity = box_arity(arena, left, cache)?;
-            let right_arity = box_arity(arena, right, cache)?;
+        FlatNodeKind::Merge(left, right) => {
+            let left_arity = box_arity_flat(arena, left, cache)?;
+            let right_arity = box_arity_flat(arena, right, cache)?;
             if !merge_compatible(left_arity.outputs, right_arity.inputs) {
                 return Err(PropagateError::MergeArityMismatch {
-                    node: box_tree,
+                    node: box_tree.as_tree_id(),
                     left_outputs: left_arity.outputs,
                     right_inputs: right_arity.inputs,
                 });
@@ -851,12 +839,12 @@ fn box_arity_inner(
                 outputs: right_arity.outputs,
             })
         }
-        BoxMatch::Rec(left, right) => {
-            let left_arity = box_arity(arena, left, cache)?;
-            let right_arity = box_arity(arena, right, cache)?;
+        FlatNodeKind::Rec(left, right) => {
+            let left_arity = box_arity_flat(arena, left, cache)?;
+            let right_arity = box_arity_flat(arena, right, cache)?;
             if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
                 return Err(PropagateError::RecArityMismatch {
-                    node: box_tree,
+                    node: box_tree.as_tree_id(),
                     left_inputs: left_arity.inputs,
                     left_outputs: left_arity.outputs,
                     right_inputs: right_arity.inputs,
@@ -868,101 +856,32 @@ fn box_arity_inner(
                 outputs: left_arity.outputs,
             })
         }
-        BoxMatch::Environment => Ok(BoxArity {
+        FlatNodeKind::Environment => Ok(BoxArity {
             inputs: 0,
             outputs: 0,
         }),
-        BoxMatch::Route(ins, outs, _) => Ok(BoxArity {
-            inputs: usize_from_int_node(arena, ins, "route inputs")?,
-            outputs: usize_from_int_node(arena, outs, "route outputs")?,
-        }),
-        BoxMatch::Inputs(_) | BoxMatch::Outputs(_) => Ok(BoxArity {
+        FlatNodeKind::Route => {
+            let BoxMatch::Route(ins, outs, _) = match_box(arena, box_tree.as_tree_id()) else {
+                unreachable!("flat route node must decode to BoxMatch::Route")
+            };
+            Ok(BoxArity {
+                inputs: usize_from_int_node(arena, ins, "route inputs")?,
+                outputs: usize_from_int_node(arena, outs, "route outputs")?,
+            })
+        }
+        FlatNodeKind::Inputs | FlatNodeKind::Outputs => Ok(BoxArity {
             inputs: 0,
             outputs: 1,
         }),
-        BoxMatch::Ondemand(expr) | BoxMatch::Upsampling(expr) | BoxMatch::Downsampling(expr) => {
-            let inner = box_arity(arena, expr, cache)?;
+        FlatNodeKind::Ondemand(expr)
+        | FlatNodeKind::Upsampling(expr)
+        | FlatNodeKind::Downsampling(expr) => {
+            let inner = box_arity_flat(arena, expr, cache)?;
             Ok(BoxArity {
                 inputs: inner.inputs + 1,
                 outputs: inner.outputs,
             })
         }
-        BoxMatch::Unknown => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "unknown",
-        }),
-        BoxMatch::Ident(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "ident",
-        }),
-        BoxMatch::Appl(_, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "appl",
-        }),
-        BoxMatch::Access(_, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "access",
-        }),
-        BoxMatch::IPar(_, _, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "ipar",
-        }),
-        BoxMatch::ISeq(_, _, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "iseq",
-        }),
-        BoxMatch::ISum(_, _, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "isum",
-        }),
-        BoxMatch::IProd(_, _, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "iprod",
-        }),
-        BoxMatch::WithLocalDef(_, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "withlocaldef",
-        }),
-        BoxMatch::ModifLocalDef(_, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "modiflocaldef",
-        }),
-        BoxMatch::WithRecDef(_, _, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "withrecdef",
-        }),
-        BoxMatch::Component(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "component",
-        }),
-        BoxMatch::Library(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "library",
-        }),
-        BoxMatch::Ffunction(_, _, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "ffunction",
-        }),
-        BoxMatch::FFun(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "ffun",
-        }),
-        BoxMatch::Case(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "case",
-        }),
-        BoxMatch::PatternVar(_) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "patternvar",
-        }),
-        BoxMatch::Abstr(_, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "abstr",
-        }),
-        BoxMatch::Modulation(_, _) => Err(PropagateError::UnsupportedBox {
-            node: box_tree,
-            kind: "modulation",
-        }),
     }
 }
 

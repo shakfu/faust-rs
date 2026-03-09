@@ -7,8 +7,8 @@
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::{IntoDiagnostic, Severity, Stage, codes};
 use propagate::{
-    ArityCache, FlatBoxBuildError, PropagateError, box_arity, make_sig_input_list, propagate,
-    try_build_flat_box,
+    ArityCache, FlatBoxBuildError, PropagateError, box_arity, box_arity_flat, make_sig_input_list,
+    propagate, try_build_flat_box,
 };
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId};
@@ -366,6 +366,39 @@ fn flat_box_builder_rejects_nested_non_flat_subtrees() {
         err,
         FlatBoxBuildError::UnexpectedPostEvalBox {
             node: nested_bad,
+            kind: "case",
+        }
+    );
+}
+
+#[test]
+fn box_arity_flat_uses_validated_flat_boundary() {
+    let mut arena = TreeArena::new();
+    let (seq, bad_case) = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let wire_l = bb.wire();
+        let wire_r = bb.wire();
+        let pair = bb.par(wire_l, wire_r);
+        let add = bb.add();
+        let seq = bb.seq(pair, add);
+
+        let case_l = bb.wire();
+        let case_r = bb.wire();
+        let rules = bb.par(case_l, case_r);
+        let bad_case = bb.case(rules);
+        (seq, bad_case)
+    };
+
+    let flat = try_build_flat_box(&arena, seq).expect("seq should validate as flat");
+    let arity = box_arity_flat(&arena, flat, &mut ArityCache::new()).expect("typed arity should work");
+    assert_eq!(arity.inputs, 2);
+    assert_eq!(arity.outputs, 1);
+
+    let err = box_arity(&arena, bad_case, &mut ArityCache::new()).expect_err("case should be rejected before arity inference");
+    assert_eq!(
+        err,
+        PropagateError::UnsupportedBox {
+            node: bad_case,
             kind: "case",
         }
     );
