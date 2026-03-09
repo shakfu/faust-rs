@@ -17,6 +17,13 @@ fn corpus_path(file: &str) -> PathBuf {
         .join(file)
 }
 
+fn workspace_path(file: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join(file)
+}
+
 #[test]
 fn dump_cpp_fastlane_compiles_fixture() {
     let compiler = Compiler::new();
@@ -438,6 +445,24 @@ fn legacy_and_fastlane_both_compile_c_table_fixtures_without_shims() {
             "fast lane C output should not contain frs_* shim names for {file}"
         );
     }
+}
+
+#[test]
+fn fastlane_cpp_compiles_repo_noise_dsp() {
+    let compiler = Compiler::new();
+    let path = workspace_path("noise.dsp");
+    let cpp = compiler
+        .compile_file_default_to_cpp_with_lane(
+            &path,
+            &codegen::backends::cpp::CppOptions::default(),
+            SignalFirLane::TransformFastLane,
+        )
+        .unwrap_or_else(|e| panic!("noise.dsp fast-lane C++ compilation failed: {e}"));
+    assert!(cpp.contains("class mydsp : public dsp"));
+    assert!(cpp.contains("void compute("));
+    assert!(cpp.contains("int iRec"));
+    assert!(cpp.contains("iRec"));
+    assert!(!cpp.contains("float fRec34"));
 }
 
 #[test]

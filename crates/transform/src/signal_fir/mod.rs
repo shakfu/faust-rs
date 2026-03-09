@@ -373,7 +373,8 @@ mod tests {
         assert!(
             clear_stmts.iter().any(|id| matches!(
                 match_fir(&out.store, *id),
-                FirMatch::StoreVar { ref name, .. } if name.starts_with("fRec")
+                FirMatch::StoreVar { ref name, .. }
+                    if name.starts_with("fRec") || name.starts_with("iRec")
             )),
             "signal state init should be emitted in instanceClear"
         );
@@ -846,7 +847,7 @@ mod tests {
                         ref name,
                         typ: FirType::Array(_, 4),
                         ..
-                    } if name.starts_with("fVec")
+                    } if name.starts_with("fVec") || name.starts_with("iVec")
                 )
             })
             .copied()
@@ -1004,7 +1005,8 @@ mod tests {
         assert!(
             !struct_items.iter().any(|id| matches!(
                 match_fir(&out.store, *id),
-                FirMatch::DeclareVar { ref name, .. } if name.starts_with("fVec")
+                FirMatch::DeclareVar { ref name, .. }
+                    if name.starts_with("fVec") || name.starts_with("iVec")
             )),
             "zero delay should not allocate a delay line"
         );
@@ -1075,11 +1077,12 @@ mod tests {
             struct_items.iter().any(|id| matches!(
                 match_fir(&out.store, *id),
                 FirMatch::DeclareTable {
+                    name,
                     elem_type: FirType::Int32,
                     ..
-                }
+                } if name.starts_with("iTbl")
             )),
-            "integer waveform tables should declare Int32 element type"
+            "integer waveform tables should declare Int32 element type and use the iTbl prefix"
         );
     }
 }

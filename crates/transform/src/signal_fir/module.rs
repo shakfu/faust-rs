@@ -934,11 +934,17 @@ impl<'a> SignalToFirLower<'a> {
         value: SigId,
         init: FirId,
     ) -> Result<FirId, SignalFirError> {
-        let name = self.ensure_state_slot(node, init);
+        let state_ty = self.signal_fir_type(value)?;
+        let out_ty = self.signal_fir_type(node)?;
+        let name = self.ensure_state_slot(node, state_ty.clone(), init);
         let out = {
-            let real_ty = self.signal_fir_type(node)?;
             let mut b = FirBuilder::new(&mut self.store);
-            b.load_var(name.clone(), AccessType::Struct, real_ty)
+            let load = b.load_var(name.clone(), AccessType::Struct, state_ty.clone());
+            if state_ty == out_ty {
+                load
+            } else {
+                b.cast(out_ty.clone(), load)
+            }
         };
         if self.scheduled_state_updates.insert(node) {
             let next = self.lower_signal(value)?;
@@ -951,16 +957,18 @@ impl<'a> SignalToFirLower<'a> {
 
     /// Ensures one struct state slot exists for `node`, creating declaration
     /// and `instanceClear` initialization on first use.
-    fn ensure_state_slot(&mut self, node: SigId, init: FirId) -> String {
+    fn ensure_state_slot(&mut self, node: SigId, typ: FirType, init: FirId) -> String {
         if let Some(name) = self.state_name_by_node.get(&node) {
             return name.clone();
         }
-        let name = format!("fRec{}", node.as_u32());
-        let real_ty = self
-            .signal_fir_type(node)
-            .expect("prepared state node should have a FIR type");
+        let prefix = if typ == FirType::Int32 {
+            "iRec"
+        } else {
+            "fRec"
+        };
+        let name = format!("{prefix}{}", node.as_u32());
         let mut b = FirBuilder::new(&mut self.store);
-        let dec = b.declare_var(name.clone(), real_ty, AccessType::Struct, None);
+        let dec = b.declare_var(name.clone(), typ, AccessType::Struct, None);
         self.struct_declarations.push(dec);
         self.register_clear_init(name.clone(), init);
         self.state_name_by_node.insert(node, name.clone());
@@ -996,7 +1004,12 @@ impl<'a> SignalToFirLower<'a> {
         }
 
         self.ensure_iota_state();
-        let name = format!("fVec{}", carried.as_u32());
+        let prefix = if elem_type == FirType::Int32 {
+            "iVec"
+        } else {
+            "fVec"
+        };
+        let name = format!("{prefix}{}", carried.as_u32());
         let array_ty = FirType::Array(Box::new(elem_type.clone()), required_size);
         let mut b = FirBuilder::new(&mut self.store);
         let decl = b.declare_var(name.clone(), array_ty, AccessType::Struct, None);
@@ -1420,10 +1433,15 @@ impl<'a> SignalToFirLower<'a> {
             lowered_values.push(self.lower_signal(*value)?);
         }
         let declared_zeros = self.zero_table_values(sig, values.len())?;
-        let name = format!("fTbl{}", sig.as_u32());
-        let real_ty = self.signal_fir_type(sig)?;
+        let elem_ty = self.signal_fir_type(sig)?;
+        let prefix = if elem_ty == FirType::Int32 {
+            "iTbl"
+        } else {
+            "fTbl"
+        };
+        let name = format!("{prefix}{}", sig.as_u32());
         let mut b = FirBuilder::new(&mut self.store);
-        let decl = b.declare_table(name.clone(), AccessType::Struct, real_ty, &declared_zeros);
+        let decl = b.declare_table(name.clone(), AccessType::Struct, elem_ty, &declared_zeros);
         self.struct_declarations.push(decl);
         for (index, value) in lowered_values.iter().copied().enumerate() {
             let index = {
@@ -1454,10 +1472,15 @@ impl<'a> SignalToFirLower<'a> {
         let size = self.table_size_from_sig(size_sig)?;
         let generated = self.expand_generator_values(generator_sig, size)?;
         let declared_zeros = self.zero_table_values(sig, size)?;
-        let name = format!("fTbl{}", sig.as_u32());
-        let real_ty = self.signal_fir_type(sig)?;
+        let elem_ty = self.signal_fir_type(sig)?;
+        let prefix = if elem_ty == FirType::Int32 {
+            "iTbl"
+        } else {
+            "fTbl"
+        };
+        let name = format!("{prefix}{}", sig.as_u32());
         let mut b = FirBuilder::new(&mut self.store);
-        let decl = b.declare_table(name.clone(), AccessType::Struct, real_ty, &declared_zeros);
+        let decl = b.declare_table(name.clone(), AccessType::Struct, elem_ty, &declared_zeros);
         self.struct_declarations.push(decl);
         for (index, value) in generated.iter().copied().enumerate() {
             let index = {
@@ -1640,18 +1663,30 @@ impl<'a> SignalToFirLower<'a> {
         &mut self,
         node: SigId,
         op: BinOp,
-        lhs: SigId,
-        rhs: SigId,
+        lhs_sig: SigId,
+        rhs_sig: SigId,
     ) -> Result<FirId, SignalFirError> {
-        let lhs = self.lower_signal(lhs)?;
-        let rhs = self.lower_signal(rhs)?;
         let result_ty = self.signal_fir_type(node)?;
+        let lhs = self.lower_signal(lhs_sig)?;
+        let rhs = self.lower_signal(rhs_sig)?;
         let (fir_op, typ) = map_binop(op, result_ty).ok_or_else(|| {
             SignalFirError::new(
                 SignalFirErrorCode::UnsupportedBinOp,
                 format!("unsupported SIGBINOP operator `{}` in Step 2A", op.name()),
             )
         })?;
+        let lhs = if typ == self.real_ty() && self.simple_type(lhs_sig)? == SimpleSigType::Int {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.cast(typ.clone(), lhs)
+        } else {
+            lhs
+        };
+        let rhs = if typ == self.real_ty() && self.simple_type(rhs_sig)? == SimpleSigType::Int {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.cast(typ.clone(), rhs)
+        } else {
+            rhs
+        };
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.binop(fir_op, lhs, rhs, typ))
     }
@@ -1765,12 +1800,27 @@ impl<'a> SignalToFirLower<'a> {
             ));
         };
 
-        let init = self.float_const(0.0);
-        let name = self.ensure_state_slot(node, init);
+        let state_ty = self.signal_fir_type(body)?;
+        let out_ty = self.signal_fir_type(node)?;
+        let init = match state_ty {
+            FirType::Int32 => self.lower_int32_const(0),
+            FirType::Float32 | FirType::Float64 | FirType::FaustFloat => self.float_const(0.0),
+            other => {
+                return Err(SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!("unsupported recursive state type in Step 2C.2: {other:?}"),
+                ));
+            }
+        };
+        let name = self.ensure_state_slot(node, state_ty.clone(), init);
         let out = {
-            let real_ty = self.signal_fir_type(node)?;
             let mut b = FirBuilder::new(&mut self.store);
-            b.load_var(name.clone(), AccessType::Struct, real_ty)
+            let load = b.load_var(name.clone(), AccessType::Struct, state_ty.clone());
+            if state_ty == out_ty {
+                load
+            } else {
+                b.cast(out_ty, load)
+            }
         };
         if self.scheduled_state_updates.insert(node) {
             if let Some((var, _)) = match_sym_rec(self.arena, group) {

@@ -43,7 +43,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 
-use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
+use signals::{BinOp, SigBuilder, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{
     RecursionError, TreeArena, list_to_vec, match_sym_rec, match_sym_ref, sym_rec, sym_ref,
     tree_to_int, vec_to_list,
@@ -157,6 +157,7 @@ fn infer_simple_types(
     for output in outputs {
         typer.infer_sig(*output)?;
     }
+    typer.resolve_unknowns(outputs)?;
     Ok(typer.finish())
 }
 
@@ -221,6 +222,7 @@ struct SimpleTyper<'a> {
     group_types: HashMap<SigId, Vec<TypeSlot>>,
     active_groups: HashMap<SigId, Vec<TypeSlot>>,
     active_vars: HashMap<SigId, SigId>,
+    group_vars: HashMap<SigId, SigId>,
 }
 
 impl<'a> SimpleTyper<'a> {
@@ -232,6 +234,7 @@ impl<'a> SimpleTyper<'a> {
             group_types: HashMap::new(),
             active_groups: HashMap::new(),
             active_vars: HashMap::new(),
+            group_vars: HashMap::new(),
         }
     }
 
@@ -250,7 +253,9 @@ impl<'a> SimpleTyper<'a> {
     /// reported as typed preparation errors so the fast-lane fails explicitly.
     fn infer_sig(&mut self, sig: SigId) -> Result<TypeSlot, SignalPrepareError> {
         if let Some(ty) = self.node_types.get(&sig) {
-            return Ok(*ty);
+            if *ty != TypeSlot::Unknown {
+                return Ok(*ty);
+            }
         }
         let ty = match match_sig(self.arena, sig) {
             SigMatch::Unknown => {
@@ -447,6 +452,45 @@ impl<'a> SimpleTyper<'a> {
         Ok(ty)
     }
 
+    /// Re-runs inference for nodes left as `Unknown` after recursion-group
+    /// fixpoint convergence so exported reduced types reflect the finalized
+    /// group slots rather than the intermediate approximation.
+    fn resolve_unknowns(&mut self, outputs: &[SigId]) -> Result<(), SignalPrepareError> {
+        loop {
+            let unknown_ids: Vec<SigId> = self
+                .node_types
+                .iter()
+                .filter_map(|(id, ty)| (*ty == TypeSlot::Unknown).then_some(*id))
+                .collect();
+            if unknown_ids.is_empty() {
+                return Ok(());
+            }
+            for id in &unknown_ids {
+                self.node_types.remove(id);
+            }
+            for id in &unknown_ids {
+                self.infer_sig(*id)?;
+            }
+            for output in outputs {
+                self.infer_sig(*output)?;
+            }
+            let remaining_unknowns = self
+                .node_types
+                .values()
+                .filter(|ty| **ty == TypeSlot::Unknown)
+                .count();
+            if remaining_unknowns == 0 {
+                return Ok(());
+            }
+            if remaining_unknowns >= unknown_ids.len() {
+                return Err(SignalPrepareError::Typing(
+                    "recursive reduced typing did not converge after unknown-slot refresh"
+                        .to_owned(),
+                ));
+            }
+        }
+    }
+
     /// Visits all children of a generic signal node.
     ///
     /// Tree children that are parser-style lists are traversed structurally
@@ -494,18 +538,27 @@ impl<'a> SimpleTyper<'a> {
             SignalPrepareError::Typing(format!("negative projection index {index}"))
         })?;
         if let Some(var) = match_sym_ref(self.arena, group) {
-            let active_group = self.active_vars.get(&var).copied().ok_or_else(|| {
-                SignalPrepareError::Typing(format!(
-                    "unbound symbolic recursion variable {} during simple typing",
-                    var.as_u32()
-                ))
-            })?;
-            let slots = self.active_groups.get(&active_group).ok_or_else(|| {
-                SignalPrepareError::Typing(format!(
-                    "missing active recursion state for group {}",
-                    active_group.as_u32()
-                ))
-            })?;
+            let active_group = self
+                .active_vars
+                .get(&var)
+                .copied()
+                .or_else(|| self.group_vars.get(&var).copied())
+                .ok_or_else(|| {
+                    SignalPrepareError::Typing(format!(
+                        "unbound symbolic recursion variable {} during simple typing",
+                        var.as_u32()
+                    ))
+                })?;
+            let slots = if let Some(slots) = self.active_groups.get(&active_group) {
+                slots
+            } else {
+                self.group_types.get(&active_group).ok_or_else(|| {
+                    SignalPrepareError::Typing(format!(
+                        "missing recursion state for group {}",
+                        active_group.as_u32()
+                    ))
+                })?
+            };
             return slots.get(index).copied().ok_or_else(|| {
                 SignalPrepareError::Typing(format!(
                     "projection index {index} out of bounds for symbolic recursion group"
@@ -564,6 +617,7 @@ impl<'a> SimpleTyper<'a> {
             ))
         })?;
         let mut current = vec![TypeSlot::Unknown; bodies.len()];
+        self.group_vars.insert(var, group);
         self.active_vars.insert(var, group);
 
         loop {
@@ -1271,8 +1325,9 @@ impl<'a> SignalPromoter<'a> {
     fn ty(&self, sig: SigId) -> Result<SimpleSigType, SignalPrepareError> {
         self.types.get(&sig).copied().ok_or_else(|| {
             SignalPrepareError::Typing(format!(
-                "missing reduced type for signal {} during promotion",
-                sig.as_u32()
+                "missing reduced type for signal {} during promotion: {}",
+                sig.as_u32(),
+                dump_sig_readable(self.arena, sig)
             ))
         })
     }
