@@ -4,7 +4,7 @@
 //! - Exercises public APIs and structural invariants for the targeted module.
 //! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
-use compiler::{Compiler, SignalFirLane};
+use compiler::{Compiler, RealType, SignalFirLane};
 use std::path::PathBuf;
 
 fn corpus_path(file: &str) -> PathBuf {
@@ -52,6 +52,44 @@ fn compile_c_with_lane(file: &str, lane: SignalFirLane) -> String {
             lane,
         )
         .unwrap_or_else(|e| panic!("{file} C compilation failed for lane {lane:?}: {e}"))
+}
+
+fn compile_cpp_with_lane_and_real_type(
+    file: &str,
+    lane: SignalFirLane,
+    real_type: RealType,
+) -> String {
+    let compiler = Compiler::new().with_real_type(real_type);
+    let path = corpus_path(file);
+    compiler
+        .compile_file_default_to_cpp_with_lane(
+            &path,
+            &codegen::backends::cpp::CppOptions::default(),
+            lane,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "{file} C++ compilation failed for lane {lane:?} and real type {real_type:?}: {e}"
+            )
+        })
+}
+
+fn compile_c_with_lane_and_real_type(
+    file: &str,
+    lane: SignalFirLane,
+    real_type: RealType,
+) -> String {
+    let compiler = Compiler::new().with_real_type(real_type);
+    let path = corpus_path(file);
+    compiler
+        .compile_file_default_to_c_with_lane(
+            &path,
+            &codegen::backends::c::COptions::default(),
+            lane,
+        )
+        .unwrap_or_else(|e| {
+            panic!("{file} C compilation failed for lane {lane:?} and real type {real_type:?}: {e}")
+        })
 }
 
 #[test]
@@ -255,6 +293,44 @@ fn dump_c_fastlane_compiles_fixture() {
     let fast = compile_c_with_lane("rep_01_passthrough.dsp", SignalFirLane::TransformFastLane);
     assert!(fast.contains("typedef struct {"));
     assert!(fast.contains("void computemydsp("));
+}
+
+#[test]
+fn fastlane_cpp_double_keeps_faustfloat_interface_and_uses_double_internal_ops() {
+    let single = compile_cpp_with_lane_and_real_type(
+        "rep_01_passthrough.dsp",
+        SignalFirLane::TransformFastLane,
+        RealType::Float32,
+    );
+    let double = compile_cpp_with_lane_and_real_type(
+        "rep_01_passthrough.dsp",
+        SignalFirLane::TransformFastLane,
+        RealType::Float64,
+    );
+
+    assert!(single.contains("#define FAUSTFLOAT float"));
+    assert!(double.contains("#define FAUSTFLOAT float"));
+    assert!(single.contains("output0[i0] = ((FAUSTFLOAT)(((float)(input0[i0]))));"));
+    assert!(double.contains("output0[i0] = ((FAUSTFLOAT)(((double)(input0[i0]))));"));
+}
+
+#[test]
+fn fastlane_c_double_keeps_faustfloat_interface_and_uses_double_internal_ops() {
+    let single = compile_c_with_lane_and_real_type(
+        "rep_01_passthrough.dsp",
+        SignalFirLane::TransformFastLane,
+        RealType::Float32,
+    );
+    let double = compile_c_with_lane_and_real_type(
+        "rep_01_passthrough.dsp",
+        SignalFirLane::TransformFastLane,
+        RealType::Float64,
+    );
+
+    assert!(single.contains("#define FAUSTFLOAT float"));
+    assert!(double.contains("#define FAUSTFLOAT float"));
+    assert!(single.contains("output0[i0] = ((FAUSTFLOAT)(((float)(input0[i0]))));"));
+    assert!(double.contains("output0[i0] = ((FAUSTFLOAT)(((double)(input0[i0]))));"));
 }
 
 #[test]

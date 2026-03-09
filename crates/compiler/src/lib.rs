@@ -96,8 +96,11 @@ pub struct FirVerifyOptions {
 pub struct Compiler {
     fir_verify: FirVerifyOptions,
     /// Floating-point precision used for internal DSP computation in the
-    /// transform fast lane.  `Float32` (single precision) is the default;
+    /// transform fast lane. `Float32` (single precision) is the default;
     /// set to `Float64` to activate double-precision mode (`--double`).
+    ///
+    /// This controls the internal FIR real type only. Backend interface types
+    /// such as C/C++ `FAUSTFLOAT` remain architecture-controlled.
     real_type: RealType,
 }
 
@@ -135,6 +138,10 @@ impl Compiler {
 
     /// Returns a compiler facade configured to use the given floating-point
     /// precision for internal DSP computation (transform fast lane only).
+    ///
+    /// This mirrors Faust `-double` semantics for the C/C++ backends: the
+    /// generated DSP core uses `double`, while the external `FAUSTFLOAT`
+    /// interface remains controlled by the architecture layer.
     #[must_use]
     pub fn with_real_type(mut self, real_type: RealType) -> Self {
         self.real_type = real_type;
