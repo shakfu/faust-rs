@@ -14,6 +14,9 @@
 //! - Signal nodes are represented as tagged trees with deterministic child order.
 //! - Numeric constants are direct `Int` / `FloatBits` nodes.
 //! - Slider parameter payload keeps Faust list encoding (`list4(init,min,max,step)`).
+//! - `sigDoubleClocked(inside, outside, y)` keeps the C++ nested representation
+//!   `sigClocked(inside, sigClocked(outside, y))` instead of introducing a
+//!   separate Rust-only node family.
 //!
 //! # Integer convention
 //! - Public signal integer surface (`SigBuilder::int`, `SigMatch::Int`, and
@@ -83,11 +86,17 @@ const SIG_ENABLE_TAG: &str = "SIGENABLE";
 const SIG_CONTROL_TAG: &str = "SIGCONTROL";
 const SIG_WAVEFORM_TAG: &str = "SIGWAVEFORM";
 const SIG_SOUNDFILE_TAG: &str = "SIGSOUNDFILE";
+const SIG_SOUNDFILE_LENGTH_TAG: &str = "SIGSOUNDFILELENGTH";
+const SIG_SOUNDFILE_RATE_TAG: &str = "SIGSOUNDFILERATE";
+const SIG_SOUNDFILE_BUFFER_TAG: &str = "SIGSOUNDFILEBUFFER";
+const SIG_TEMPVAR_TAG: &str = "SIGTEMPVAR";
+const SIG_PERMVAR_TAG: &str = "SIGPERMVAR";
 const SIG_SEQ_TAG: &str = "SIGSEQ";
 const SIG_ZEROPAD_TAG: &str = "SIGZEROPAD";
 const SIG_OD_TAG: &str = "SIGOD";
 const SIG_US_TAG: &str = "SIGUS";
 const SIG_DS_TAG: &str = "SIGDS";
+const SIG_CLOCKED_TAG: &str = "SIGCLOCKED";
 const SIG_REC_TAG: &str = "SIGREC";
 
 /// Stable crate identifier used in workspace-level tooling and diagnostics.
@@ -708,6 +717,46 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one signal node for `soundfile_length` and returns its `SigId`.
+    pub fn soundfile_length(&mut self, soundfile: SigId, part: SigId) -> SigId {
+        intern_tag(self.arena, SIG_SOUNDFILE_LENGTH_TAG, &[soundfile, part])
+    }
+
+    #[must_use]
+    /// Builds one signal node for `soundfile_rate` and returns its `SigId`.
+    pub fn soundfile_rate(&mut self, soundfile: SigId, part: SigId) -> SigId {
+        intern_tag(self.arena, SIG_SOUNDFILE_RATE_TAG, &[soundfile, part])
+    }
+
+    #[must_use]
+    /// Builds one signal node for `soundfile_buffer` and returns its `SigId`.
+    pub fn soundfile_buffer(
+        &mut self,
+        soundfile: SigId,
+        chan: SigId,
+        part: SigId,
+        ridx: SigId,
+    ) -> SigId {
+        intern_tag(
+            self.arena,
+            SIG_SOUNDFILE_BUFFER_TAG,
+            &[soundfile, chan, part, ridx],
+        )
+    }
+
+    #[must_use]
+    /// Builds one signal node for `tempvar` and returns its `SigId`.
+    pub fn temp_var(&mut self, sig: SigId) -> SigId {
+        intern_tag(self.arena, SIG_TEMPVAR_TAG, &[sig])
+    }
+
+    #[must_use]
+    /// Builds one signal node for `permvar` and returns its `SigId`.
+    pub fn perm_var(&mut self, sig: SigId) -> SigId {
+        intern_tag(self.arena, SIG_PERMVAR_TAG, &[sig])
+    }
+
+    #[must_use]
     /// Builds one signal node for `attach` and returns its `SigId`.
     pub fn attach(&mut self, x: SigId, y: SigId) -> SigId {
         intern_tag(self.arena, SIG_ATTACH_TAG, &[x, y])
@@ -753,6 +802,28 @@ impl<'a> SigBuilder<'a> {
     /// Builds one signal node for `downsampling` and returns its `SigId`.
     pub fn downsampling(&mut self, sigs: &[SigId]) -> SigId {
         intern_tag(self.arena, SIG_DS_TAG, sigs)
+    }
+
+    #[must_use]
+    /// Builds one signal node for `clocked` and returns its `SigId`.
+    ///
+    /// Like C++, this keeps `clocked(clock, clocked(clock, y))` canonical by
+    /// returning the inner node unchanged when both clocks are structurally
+    /// identical.
+    pub fn clocked(&mut self, clock: SigId, sig: SigId) -> SigId {
+        if let SigMatch::Clocked(existing_clock, _) = match_sig(self.arena, sig) {
+            if existing_clock == clock {
+                return sig;
+            }
+        }
+        intern_tag(self.arena, SIG_CLOCKED_TAG, &[clock, sig])
+    }
+
+    #[must_use]
+    /// Builds the C++ `sigDoubleClocked(inside, outside, y)` nested shape.
+    pub fn double_clocked(&mut self, inside_clock: SigId, outside_clock: SigId, sig: SigId) -> SigId {
+        let outer = self.clocked(outside_clock, sig);
+        self.clocked(inside_clock, outer)
     }
 }
 
@@ -820,11 +891,17 @@ pub enum SigMatch<'a> {
     Control(SigId, SigId),
     Waveform(&'a [SigId]),
     Soundfile(SigId),
+    SoundfileLength(SigId, SigId),
+    SoundfileRate(SigId, SigId),
+    SoundfileBuffer(SigId, SigId, SigId, SigId),
+    TempVar(SigId),
+    PermVar(SigId),
     Seq(SigId, SigId),
     ZeroPad(SigId, SigId),
     OnDemand(&'a [SigId]),
     Upsampling(&'a [SigId]),
     Downsampling(&'a [SigId]),
+    Clocked(SigId, SigId),
 }
 
 /// Decodes one `SigId` into canonical `SigMatch` shape.
@@ -945,11 +1022,23 @@ pub fn match_sig<'a>(arena: &'a TreeArena, id: SigId) -> SigMatch<'a> {
                 (SIG_CONTROL_TAG, [x, y]) => SigMatch::Control(*x, *y),
                 (SIG_WAVEFORM_TAG, values) => SigMatch::Waveform(values),
                 (SIG_SOUNDFILE_TAG, [label]) => SigMatch::Soundfile(*label),
+                (SIG_SOUNDFILE_LENGTH_TAG, [soundfile, part]) => {
+                    SigMatch::SoundfileLength(*soundfile, *part)
+                }
+                (SIG_SOUNDFILE_RATE_TAG, [soundfile, part]) => {
+                    SigMatch::SoundfileRate(*soundfile, *part)
+                }
+                (SIG_SOUNDFILE_BUFFER_TAG, [soundfile, chan, part, ridx]) => {
+                    SigMatch::SoundfileBuffer(*soundfile, *chan, *part, *ridx)
+                }
+                (SIG_TEMPVAR_TAG, [x]) => SigMatch::TempVar(*x),
+                (SIG_PERMVAR_TAG, [x]) => SigMatch::PermVar(*x),
                 (SIG_SEQ_TAG, [x, y]) => SigMatch::Seq(*x, *y),
                 (SIG_ZEROPAD_TAG, [x, y]) => SigMatch::ZeroPad(*x, *y),
                 (SIG_OD_TAG, sigsubs) => SigMatch::OnDemand(sigsubs),
                 (SIG_US_TAG, sigsubs) => SigMatch::Upsampling(sigsubs),
                 (SIG_DS_TAG, sigsubs) => SigMatch::Downsampling(sigsubs),
+                (SIG_CLOCKED_TAG, [clock, y]) => SigMatch::Clocked(*clock, *y),
                 _ => SigMatch::Unknown,
             }
         }

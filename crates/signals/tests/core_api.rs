@@ -124,6 +124,12 @@ fn ui_shapes_decode_with_list4_payload_order() {
     let vb = b.vbargraph(label, min, max, sig);
     let hb = b.hbargraph(label, min, max, sig);
     let sf = b.soundfile(label);
+    let sf_part = b.int(2);
+    let sf_chan = b.int(1);
+    let sf_ridx = b.input(3);
+    let sf_len = b.soundfile_length(sf, sf_part);
+    let sf_rate = b.soundfile_rate(sf, sf_part);
+    let sf_buf = b.soundfile_buffer(sf, sf_chan, sf_part, sf_ridx);
 
     assert_eq!(
         match_sig(&arena, vs),
@@ -146,6 +152,12 @@ fn ui_shapes_decode_with_list4_payload_order() {
         SigMatch::HBargraph(label, min, max, sig)
     );
     assert_eq!(match_sig(&arena, sf), SigMatch::Soundfile(label));
+    assert_eq!(match_sig(&arena, sf_len), SigMatch::SoundfileLength(sf, sf_part));
+    assert_eq!(match_sig(&arena, sf_rate), SigMatch::SoundfileRate(sf, sf_part));
+    assert_eq!(
+        match_sig(&arena, sf_buf),
+        SigMatch::SoundfileBuffer(sf, sf_chan, sf_part, sf_ridx)
+    );
 }
 
 #[test]
@@ -158,6 +170,11 @@ fn stream_wrappers_and_recursion_shapes_are_stable() {
     let od = b.on_demand(&[x, y]);
     let us = b.upsampling(&[x, y]);
     let ds = b.downsampling(&[x, y]);
+    let tv = b.temp_var(x);
+    let pv = b.perm_var(y);
+    let clk = b.int(7);
+    let clocked = b.clocked(clk, x);
+    let double_clocked = b.double_clocked(clk, y, x);
     let rec = b.rec(x);
     let proj = b.proj(2, rec);
     let seq = b.seq(x, y);
@@ -166,6 +183,14 @@ fn stream_wrappers_and_recursion_shapes_are_stable() {
     assert!(matches!(match_sig(&arena, od), SigMatch::OnDemand(v) if v == [x, y]));
     assert!(matches!(match_sig(&arena, us), SigMatch::Upsampling(v) if v == [x, y]));
     assert!(matches!(match_sig(&arena, ds), SigMatch::Downsampling(v) if v == [x, y]));
+    assert_eq!(match_sig(&arena, tv), SigMatch::TempVar(x));
+    assert_eq!(match_sig(&arena, pv), SigMatch::PermVar(y));
+    assert_eq!(match_sig(&arena, clocked), SigMatch::Clocked(clk, x));
+    let SigMatch::Clocked(inner_clk, nested) = match_sig(&arena, double_clocked) else {
+        panic!("double_clocked should decode as outer clocked");
+    };
+    assert_eq!(inner_clk, clk);
+    assert_eq!(match_sig(&arena, nested), SigMatch::Clocked(y, x));
     assert_eq!(match_sig(&arena, rec), SigMatch::Rec(x));
     assert_eq!(match_sig(&arena, proj), SigMatch::Proj(2, rec));
     assert_eq!(match_sig(&arena, seq), SigMatch::Seq(x, y));
