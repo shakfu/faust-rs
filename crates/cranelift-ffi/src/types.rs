@@ -16,7 +16,8 @@ use std::ffi::c_char;
 use std::ptr::NonNull;
 
 use codegen::backends::cranelift::JitDspModule;
-use codegen::backends::interp::{FbcDspFactory, FbcExecutor};
+
+use crate::runtime::RuntimeDescriptor;
 
 /// `FAUSTFLOAT` used by the exported C API (v1 planned default).
 pub type FaustFloat = f32;
@@ -56,11 +57,8 @@ pub struct CraneliftDspFactory {
     pub(crate) opt_level: i32,
     /// Compiled Cranelift JIT module (present for real file/string compilation paths).
     pub(crate) compiled_jit: Option<JitDspModule>,
-    /// Optional interpreter sidecar used to dispatch UI/meta callback instructions.
-    ///
-    /// This keeps callback semantics aligned with existing backend behavior while
-    /// Cranelift lowering currently focuses on executable DSP paths.
-    pub(crate) interp_sidecar: Option<FbcDspFactory<FaustFloat>>,
+    /// Native runtime descriptor derived from FIR for UI/meta/state handling.
+    pub(crate) runtime: RuntimeDescriptor,
     /// Whether the backend lowered the FIR `compute` body (vs stub fallback).
     pub(crate) compute_body_lowered: bool,
     /// Audio input count.
@@ -82,8 +80,6 @@ pub struct CraneliftDspInstance {
     pub(crate) cycle: usize,
     /// Owned backend `dsp*` state allocation passed to the JIT `compute` entry.
     pub(crate) dsp_state: DspStateBuffer,
-    /// Optional interpreter-side executor used for UI/meta callback state.
-    pub(crate) sidecar_executor: Option<FbcExecutor<FaustFloat>>,
 }
 
 // SAFETY: Instances are opaque and not internally synchronized. The C API
@@ -134,13 +130,9 @@ impl DspStateBuffer {
         self.ptr.map_or(std::ptr::null_mut(), NonNull::as_ptr)
     }
 
-    /// Clears the state buffer to zero.
-    pub(crate) fn zero(&mut self) {
-        let (Some(ptr), Some(layout)) = (self.ptr, self.layout) else {
-            return;
-        };
-        // SAFETY: pointer/layout are paired from allocation and valid for writes.
-        unsafe { std::ptr::write_bytes(ptr.as_ptr(), 0_u8, layout.size()) };
+    #[must_use]
+    pub(crate) fn ptr_at(&self, offset: usize) -> *mut u8 {
+        self.as_mut_ptr().wrapping_add(offset)
     }
 
     /// Clones the allocation and bytes into a new owned buffer.
@@ -191,7 +183,6 @@ pub(crate) fn alloc_instance(
     factory: *const CraneliftDspFactory,
     sample_rate: i32,
     dsp_state: DspStateBuffer,
-    sidecar_executor: Option<FbcExecutor<FaustFloat>>,
 ) -> *mut CraneliftDspInstance {
     utils::alloc_opaque(CraneliftDspInstance {
         factory,
@@ -199,7 +190,6 @@ pub(crate) fn alloc_instance(
         initialized: false,
         cycle: 0,
         dsp_state,
-        sidecar_executor,
     })
 }
 
@@ -222,6 +212,8 @@ pub(crate) fn alloc_c_string(s: &str) -> *mut c_char {
 
 #[cfg(test)]
 mod tests {
+    use crate::runtime::RuntimeDescriptor;
+
     use super::{
         CraneliftDspFactory, CraneliftDspInstance, DspStateBuffer, MetaGlue, UIGlue,
         alloc_c_string, alloc_factory, alloc_instance, free_factory, free_instance,
@@ -248,7 +240,7 @@ mod tests {
             compile_argv: vec!["-vec".into()],
             opt_level: 0,
             compiled_jit: None,
-            interp_sidecar: None,
+            runtime: RuntimeDescriptor::default(),
             compute_body_lowered: false,
             num_inputs: 1,
             num_outputs: 1,
@@ -257,7 +249,6 @@ mod tests {
             factory,
             48_000,
             DspStateBuffer::new(32, 8).expect("test allocation"),
-            None,
         );
         let s = alloc_c_string("ok");
         unsafe {

@@ -15,16 +15,15 @@
 
 use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
-use std::io::BufReader;
 use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
 
 use codegen::backends::cranelift::{
     CraneliftOptLevel, CraneliftOptions, JitDspModule, generate_cranelift_module,
 };
-use codegen::backends::interp::{FbcDspFactory, InterpOptions, generate_interp_module, read_fbc};
 use compiler::{Compiler as FaustCompiler, SignalFirLane, default_import_search_paths};
 use faust_box::{BoxFfiFirModule, export_fir_from_box_handle, export_fir_from_signal_array_handle};
+use fir::{FirMatch, match_fir};
 use utils::{
     decode_c_argv as decode_c_argv_shared, free_c_memory_c_string_only, null_c_string_array,
     optional_c_str_arg, parse_ffi_compile_args, required_c_str_arg, write_error_4096,
@@ -35,6 +34,7 @@ use crate::cache::{
     stop_mt,
 };
 use crate::clif::{CLIF_MAGIC, decode_factory_clif, encode_factory_clif};
+use crate::runtime::build_runtime_descriptor;
 use crate::types::{CraneliftDspFactory, alloc_c_string, alloc_factory, free_factory};
 
 /// Stable version string returned by [`getCLibFaustVersion`].
@@ -87,7 +87,6 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
             let compiled =
                 preflight_compile_file_to_cranelift(Path::new(filename), args, opt_level)?;
-            let sidecar = compile_interp_sidecar_from_file(Path::new(filename), args)?;
             let dsp_source = std::fs::read_to_string(filename)
                 .map_err(|e| format!("cannot read DSP source '{filename}': {e}"))?;
             build_scaffold_factory_from_file(
@@ -95,8 +94,8 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
                 &dsp_source,
                 args,
                 opt_level,
+                &compiled.fir,
                 Some(compiled.jit),
-                Some(sidecar),
                 &compiled.fir_dump,
             )
         })
@@ -144,7 +143,6 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
         };
         create_cranelift_factory_with_argv(&args, error_msg, |args| {
             let compiled = preflight_compile_source_to_cranelift(name_app, dsp_content, opt_level)?;
-            let sidecar = compile_interp_sidecar_from_source(name_app, dsp_content, args)?;
             build_scaffold_factory_common(
                 FactoryBuildSpec {
                     name: name_app,
@@ -154,8 +152,8 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
                     semantic_fingerprint: &compiled.fir_dump,
                     source_is_faust: true,
                 },
+                &compiled.fir,
                 Some(compiled.jit),
-                Some(sidecar),
             )
         })
     }
@@ -205,7 +203,6 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromSignals(
             let fir = export_fir_from_signal_array_handle(source_name, signals)?;
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
             let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
-            let sidecar = compile_interp_sidecar_from_fir(source_name, &fir)?;
             build_scaffold_factory_common(
                 FactoryBuildSpec {
                     name: source_name,
@@ -215,8 +212,8 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromSignals(
                     semantic_fingerprint: &fir_dump,
                     source_is_faust: false,
                 },
+                &fir,
                 Some(jit),
-                Some(sidecar),
             )
         })
     }
@@ -262,7 +259,6 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
             let fir = export_fir_from_box_handle(source_name, box_expr)?;
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
             let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
-            let sidecar = compile_interp_sidecar_from_fir(source_name, &fir)?;
             build_scaffold_factory_common(
                 FactoryBuildSpec {
                     name: source_name,
@@ -272,8 +268,8 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
                     semantic_fingerprint: &fir_dump,
                     source_is_faust: false,
                 },
+                &fir,
                 Some(jit),
-                Some(sidecar),
             )
         })
     }
@@ -639,8 +635,8 @@ fn build_scaffold_factory_from_file(
     dsp_source: &str,
     argv: &[String],
     opt_level: c_int,
+    fir: &BoxFfiFirModule,
     jit: Option<JitDspModule>,
-    sidecar: Option<FbcDspFactory<f32>>,
     semantic_fingerprint: &str,
 ) -> Result<CraneliftDspFactory, String> {
     let source_name = Path::new(filename)
@@ -657,16 +653,16 @@ fn build_scaffold_factory_from_file(
             semantic_fingerprint,
             source_is_faust: true,
         },
+        fir,
         jit,
-        sidecar,
     )
 }
 
 /// Shared factory object builder.
 fn build_scaffold_factory_common(
     spec: FactoryBuildSpec<'_>,
+    fir: &BoxFfiFirModule,
     jit: Option<JitDspModule>,
-    sidecar: Option<FbcDspFactory<f32>>,
 ) -> Result<CraneliftDspFactory, String> {
     let FactoryBuildSpec {
         name,
@@ -693,21 +689,9 @@ fn build_scaffold_factory_common(
         argv.join("\x1f"),
         semantic_fingerprint
     );
-    let sidecar = sidecar.ok_or_else(|| {
-        "internal error: missing interpreter sidecar; FIR module arity must be explicit and propagated to factory metadata".to_owned()
-    })?;
-    let num_inputs = usize::try_from(sidecar.num_inputs).map_err(|_| {
-        format!(
-            "invalid negative input arity from sidecar factory: {}",
-            sidecar.num_inputs
-        )
-    })?;
-    let num_outputs = usize::try_from(sidecar.num_outputs).map_err(|_| {
-        format!(
-            "invalid negative output arity from sidecar factory: {}",
-            sidecar.num_outputs
-        )
-    })?;
+    let runtime = build_runtime_descriptor(&fir.store, fir.module)?;
+    let num_inputs = fir.num_inputs;
+    let num_outputs = fir.num_outputs;
     Ok(CraneliftDspFactory {
         name: name.to_owned(),
         sha_key,
@@ -728,7 +712,7 @@ fn build_scaffold_factory_common(
         compile_argv: argv.to_vec(),
         opt_level,
         compiled_jit: jit,
-        interp_sidecar: Some(sidecar),
+        runtime,
         compute_body_lowered,
         num_inputs,
         num_outputs,
@@ -742,6 +726,7 @@ fn decode_c_argv(argc: c_int, argv: *const *const c_char) -> Result<Vec<String>,
 
 #[derive(Debug)]
 struct CompiledCraneliftFactory {
+    fir: BoxFfiFirModule,
     jit: JitDspModule,
     fir_dump: String,
 }
@@ -758,8 +743,16 @@ fn preflight_compile_file_to_cranelift(
         .compile_file_to_fir_with_lane(path, &search_paths, SignalFirLane::TransformFastLane)
         .map_err(|e| e.to_string())?;
     let fir_dump = fir::dump_fir(&fir.store, fir.module);
-    let jit = compile_with_cranelift_backend(fir, opt_level)?;
-    Ok(CompiledCraneliftFactory { jit, fir_dump })
+    let num_inputs = fir_module_num_inputs(&fir.store, fir.module)?;
+    let num_outputs = fir_module_num_outputs(&fir.store, fir.module)?;
+    let fir = BoxFfiFirModule {
+        store: fir.store,
+        module: fir.module,
+        num_inputs,
+        num_outputs,
+    };
+    let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
+    Ok(CompiledCraneliftFactory { fir, jit, fir_dump })
 }
 
 /// Runs the real compiler pipeline on inline source to FIR, then compiles one
@@ -774,76 +767,16 @@ fn preflight_compile_source_to_cranelift(
         .compile_source_to_fir_with_lane(source_name, source, SignalFirLane::TransformFastLane)
         .map_err(|e| e.to_string())?;
     let fir_dump = fir::dump_fir(&fir.store, fir.module);
-    let jit = compile_with_cranelift_backend(fir, opt_level)?;
-    Ok(CompiledCraneliftFactory { jit, fir_dump })
-}
-
-/// Compiles one Faust file to an interpreter sidecar factory used for UI/meta dispatch.
-fn compile_interp_sidecar_from_file(
-    path: &Path,
-    argv: &[String],
-) -> Result<FbcDspFactory<f32>, String> {
-    let compiler = FaustCompiler::new();
-    let parsed = parse_ffi_compile_args(argv).map_err(|e| e.to_string())?;
-    let options = InterpOptions {
-        module_name: parsed.module_name,
-        ..InterpOptions::default()
+    let num_inputs = fir_module_num_inputs(&fir.store, fir.module)?;
+    let num_outputs = fir_module_num_outputs(&fir.store, fir.module)?;
+    let fir = BoxFfiFirModule {
+        store: fir.store,
+        module: fir.module,
+        num_inputs,
+        num_outputs,
     };
-    let search_paths = collect_search_paths_for_file(path, argv);
-    let fbc = compiler
-        .compile_file_to_interp_with_lane(
-            path,
-            &search_paths,
-            &options,
-            SignalFirLane::TransformFastLane,
-        )
-        .map_err(|e| e.to_string())?;
-    parse_interp_factory_from_fbc_text(&fbc)
-}
-
-/// Compiles inline Faust source to an interpreter sidecar factory used for UI/meta dispatch.
-fn compile_interp_sidecar_from_source(
-    source_name: &str,
-    source: &str,
-    argv: &[String],
-) -> Result<FbcDspFactory<f32>, String> {
-    let compiler = FaustCompiler::new();
-    let parsed = parse_ffi_compile_args(argv).map_err(|e| e.to_string())?;
-    let options = InterpOptions {
-        module_name: parsed.module_name.or_else(|| Some(source_name.to_owned())),
-        ..InterpOptions::default()
-    };
-    let fbc = compiler
-        .compile_source_to_interp_with_lane(
-            source_name,
-            source,
-            &options,
-            SignalFirLane::TransformFastLane,
-        )
-        .map_err(|e| e.to_string())?;
-    parse_interp_factory_from_fbc_text(&fbc)
-}
-
-/// Parses textual `.fbc` into a typed interpreter factory.
-fn parse_interp_factory_from_fbc_text(fbc: &str) -> Result<FbcDspFactory<f32>, String> {
-    let mut reader = BufReader::new(fbc.as_bytes());
-    read_fbc::<f32>(&mut reader).map_err(|e| e.to_string())
-}
-
-/// Compiles one FIR module into an interpreter sidecar factory.
-fn compile_interp_sidecar_from_fir(
-    module_name: &str,
-    fir: &BoxFfiFirModule,
-) -> Result<FbcDspFactory<f32>, String> {
-    generate_interp_module::<f32>(
-        &fir.store,
-        fir.module,
-        &InterpOptions {
-            module_name: Some(module_name.to_owned()),
-            ..InterpOptions::default()
-        },
-    )
-    .map_err(|e| e.to_string())
+    let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
+    Ok(CompiledCraneliftFactory { fir, jit, fir_dump })
 }
 
 /// Compiles one FIR module to Cranelift using one C ABI opt-level request.
@@ -856,21 +789,6 @@ fn compile_fir_module_to_cranelift(
         ..CraneliftOptions::default()
     };
     generate_cranelift_module(&fir.store, fir.module, &options).map_err(|e| e.to_string())
-}
-
-/// Calls the Cranelift backend and returns the compiled JIT module.
-fn compile_with_cranelift_backend(
-    fir: compiler::FirCompileOutput,
-    opt_level: c_int,
-) -> Result<JitDspModule, String> {
-    let options = CraneliftOptions {
-        opt_level: map_c_opt_level(opt_level),
-        ..CraneliftOptions::default()
-    };
-    match generate_cranelift_module(&fir.store, fir.module, &options) {
-        Ok(jit) => Ok(jit),
-        Err(err) => Err(err.to_string()),
-    }
 }
 
 /// Maps C integer optimization levels to the current Cranelift backend scaffold enum.
@@ -889,6 +807,20 @@ fn collect_search_paths_for_file(path: &Path, argv: &[String]) -> Vec<PathBuf> {
         paths.extend(parsed.search_paths);
     }
     paths
+}
+
+fn fir_module_num_inputs(store: &fir::FirStore, module: fir::FirId) -> Result<usize, String> {
+    match match_fir(store, module) {
+        FirMatch::Module { num_inputs, .. } => Ok(num_inputs),
+        other => Err(format!("expected FIR Module when extracting input arity, got {other:?}")),
+    }
+}
+
+fn fir_module_num_outputs(store: &fir::FirStore, module: fir::FirId) -> Result<usize, String> {
+    match match_fir(store, module) {
+        FirMatch::Module { num_outputs, .. } => Ok(num_outputs),
+        other => Err(format!("expected FIR Module when extracting output arity, got {other:?}")),
+    }
 }
 
 fn esc_bitcode_field(s: &str) -> String {
@@ -1054,7 +986,6 @@ fn rebuild_factory_from_source(
     expected_compile_options: &str,
 ) -> Result<CraneliftDspFactory, String> {
     let compiled = preflight_compile_source_to_cranelift(name, source, opt_level)?;
-    let sidecar = compile_interp_sidecar_from_source(name, source, argv)?;
     let rebuilt = build_scaffold_factory_common(
         FactoryBuildSpec {
             name,
@@ -1064,8 +995,8 @@ fn rebuild_factory_from_source(
             semantic_fingerprint: &compiled.fir_dump,
             source_is_faust: true,
         },
+        &compiled.fir,
         Some(compiled.jit),
-        Some(sidecar),
     )?;
     if rebuilt.sha_key != expected_sha {
         return Err(format!(
@@ -1448,8 +1379,19 @@ mod tests {
     }
 
     #[test]
-    fn shared_factory_builder_rejects_missing_sidecar_arity_metadata() {
+    fn shared_factory_builder_rejects_non_module_runtime_descriptor() {
         let _guard = crate::test_serial_guard();
+        let mut store = fir::FirStore::new();
+        let bad_root = {
+            let mut b = fir::FirBuilder::new(&mut store);
+            b.int32(0)
+        };
+        let bad_fir = faust_box::BoxFfiFirModule {
+            store,
+            module: bad_root,
+            num_inputs: 0,
+            num_outputs: 0,
+        };
         let result = super::build_scaffold_factory_common(
             super::FactoryBuildSpec {
                 name: "dsp",
@@ -1459,12 +1401,12 @@ mod tests {
                 semantic_fingerprint: "fingerprint",
                 source_is_faust: true,
             },
-            None,
+            &bad_fir,
             None,
         );
         assert!(
             result.is_err(),
-            "builder must fail instead of silently defaulting arity to 0/0"
+            "builder must fail on non-module FIR runtime descriptors"
         );
     }
 

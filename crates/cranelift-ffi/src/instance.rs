@@ -11,11 +11,14 @@
 use std::ffi::c_void;
 use std::os::raw::c_int;
 
+use codegen::backends::cranelift::{StructFieldKind, StructFieldLayout, StructLayoutPlan};
+use fir::FirType;
+
+use crate::runtime::{RuntimeDescriptor, RuntimeFieldInit, RuntimeUiItem};
 use crate::types::{
     CraneliftDspFactory, CraneliftDspInstance, DspStateBuffer, FaustFloat, MetaGlue, UIGlue,
     alloc_instance, free_instance,
 };
-use crate::ui::{dispatch_meta, dispatch_ui};
 
 type ComputeFn =
     unsafe extern "C" fn(*mut c_void, c_int, *mut *mut FaustFloat, *mut *mut FaustFloat);
@@ -48,14 +51,7 @@ pub unsafe extern "C" fn createCCraneliftDSPInstance(
             Ok(s) => s,
             Err(_) => return std::ptr::null_mut(),
         };
-        let sidecar_executor = (*factory).interp_sidecar.as_ref().map(|sidecar| {
-            codegen::backends::interp::FbcExecutor::new(
-                sidecar.int_heap_size as usize,
-                sidecar.real_heap_size as usize,
-            )
-        });
-
-        alloc_instance(factory.cast_const(), 0, state, sidecar_executor)
+        alloc_instance(factory.cast_const(), 0, state)
     }
 }
 
@@ -73,7 +69,7 @@ pub unsafe extern "C" fn deleteCCraneliftDSPInstance(dsp: *mut CraneliftDspInsta
     }
 }
 
-/// Clone a Cranelift DSP instance (state + sidecar heaps).
+/// Clone a Cranelift DSP instance.
 ///
 /// # Safety
 /// `dsp` must be a valid non-null instance pointer.
@@ -89,22 +85,12 @@ pub unsafe extern "C" fn cloneCCraneliftDSPInstance(
             Ok(s) => s,
             Err(_) => return std::ptr::null_mut(),
         };
-        let sidecar_executor = (*dsp).sidecar_executor.as_ref().map(|exec| {
-            let mut cloned = codegen::backends::interp::FbcExecutor::new(
-                exec.int_heap.len(),
-                exec.real_heap.len(),
-            );
-            cloned.int_heap.copy_from_slice(&exec.int_heap);
-            cloned.real_heap.copy_from_slice(&exec.real_heap);
-            cloned
-        });
         let clone = CraneliftDspInstance {
             factory: (*dsp).factory,
             sample_rate: (*dsp).sample_rate,
             initialized: (*dsp).initialized,
             cycle: (*dsp).cycle,
             dsp_state: state,
-            sidecar_executor,
         };
         Box::into_raw(Box::new(clone))
     }
@@ -213,16 +199,49 @@ pub unsafe extern "C" fn instanceConstantsCCraneliftDSPInstance(
         let Some(factory) = (*dsp).factory.as_ref() else {
             return;
         };
-        let Some(sidecar) = factory.interp_sidecar.as_ref() else {
+        let Some(jit) = factory.compiled_jit.as_ref() else {
             return;
         };
-        let Some(exec) = (*dsp).sidecar_executor.as_mut() else {
-            return;
+        apply_constant_inits(&mut (*dsp).dsp_state, jit.struct_layout(), &factory.runtime);
+        apply_sample_rate(&mut (*dsp).dsp_state, jit.struct_layout(), &factory.runtime, sample_rate);
+    }
+}
+
+fn apply_constant_inits(
+    dsp_state: &mut DspStateBuffer,
+    layout: &StructLayoutPlan,
+    runtime: &RuntimeDescriptor,
+) {
+    for (name, init) in &runtime.field_inits {
+        let Some(field) = layout.field(name) else {
+            continue;
         };
-        if let Some(slot) = exec.int_heap.get_mut(sidecar.sr_offset as usize) {
-            *slot = sample_rate;
+        write_field_init(dsp_state, field, init);
+    }
+}
+
+fn apply_sample_rate(
+    dsp_state: &mut DspStateBuffer,
+    layout: &StructLayoutPlan,
+    runtime: &RuntimeDescriptor,
+    sample_rate: c_int,
+) {
+    for name in &runtime.sample_rate_fields {
+        let Some(field) = layout.field(name) else {
+            continue;
+        };
+        match &field.kind {
+            StructFieldKind::Scalar(FirType::Int32) => {
+                write_i32(dsp_state, field.offset_bytes as usize, sample_rate);
+            }
+            StructFieldKind::Scalar(FirType::Float32 | FirType::FaustFloat) => {
+                write_f32(dsp_state, field.offset_bytes as usize, sample_rate as f32);
+            }
+            StructFieldKind::Scalar(FirType::Float64) => {
+                write_f64(dsp_state, field.offset_bytes as usize, sample_rate as f64);
+            }
+            _ => {}
         }
-        exec.execute_block(&sidecar.arena, sidecar.init_block);
     }
 }
 
@@ -241,13 +260,10 @@ pub unsafe extern "C" fn instanceResetUserInterfaceCCraneliftDSPInstance(
         let Some(factory) = dsp.factory.as_ref() else {
             return;
         };
-        let Some(sidecar) = factory.interp_sidecar.as_ref() else {
+        let Some(jit) = factory.compiled_jit.as_ref() else {
             return;
         };
-        let Some(exec) = dsp.sidecar_executor.as_mut() else {
-            return;
-        };
-        exec.execute_block(&sidecar.arena, sidecar.reset_ui_block);
+        apply_control_defaults(&mut dsp.dsp_state, jit.struct_layout(), &factory.runtime);
     }
 }
 
@@ -261,12 +277,36 @@ pub unsafe extern "C" fn instanceClearCCraneliftDSPInstance(dsp: *mut CraneliftD
         if dsp.is_null() {
             return;
         }
-        (*dsp).dsp_state.zero();
-        if let Some(factory) = (*dsp).factory.as_ref()
-            && let Some(sidecar) = factory.interp_sidecar.as_ref()
-            && let Some(exec) = (*dsp).sidecar_executor.as_mut()
-        {
-            exec.execute_block(&sidecar.arena, sidecar.clear_block);
+        let Some(factory) = (*dsp).factory.as_ref() else {
+            return;
+        };
+        let Some(jit) = factory.compiled_jit.as_ref() else {
+            return;
+        };
+        clear_runtime_state(&mut (*dsp).dsp_state, jit.struct_layout(), &factory.runtime);
+        for name in &factory.runtime.sample_rate_fields {
+            if let Some(field) = jit.struct_layout().field(name) {
+                match &field.kind {
+                    StructFieldKind::Scalar(FirType::Int32) => {
+                        write_i32(&mut (*dsp).dsp_state, field.offset_bytes as usize, (*dsp).sample_rate);
+                    }
+                    StructFieldKind::Scalar(FirType::Float32 | FirType::FaustFloat) => {
+                        write_f32(
+                            &mut (*dsp).dsp_state,
+                            field.offset_bytes as usize,
+                            (*dsp).sample_rate as f32,
+                        );
+                    }
+                    StructFieldKind::Scalar(FirType::Float64) => {
+                        write_f64(
+                            &mut (*dsp).dsp_state,
+                            field.offset_bytes as usize,
+                            (*dsp).sample_rate as f64,
+                        );
+                    }
+                    _ => {}
+                }
+            }
         }
         (*dsp).cycle = 0;
     }
@@ -288,13 +328,15 @@ pub unsafe extern "C" fn buildUserInterfaceCCraneliftDSPInstance(
         let Some(factory) = (*dsp).factory.as_ref() else {
             return;
         };
-        let Some(sidecar) = factory.interp_sidecar.as_ref() else {
+        let Some(jit) = factory.compiled_jit.as_ref() else {
             return;
         };
-        let Some(exec) = (*dsp).sidecar_executor.as_mut() else {
-            return;
-        };
-        dispatch_ui(&sidecar.ui_block, &mut exec.real_heap, ui);
+        dispatch_ui_runtime(
+            &factory.runtime,
+            jit.struct_layout(),
+            &mut (*dsp).dsp_state,
+            ui,
+        );
     }
 }
 
@@ -318,8 +360,12 @@ pub unsafe extern "C" fn metadataCCraneliftDSPInstance(
         let Some(declare) = (*meta).declare else {
             return;
         };
-        if let Some(sidecar) = factory.interp_sidecar.as_ref() {
-            dispatch_meta(&sidecar.meta_block, meta);
+        for (key, value) in &factory.runtime.meta_entries {
+            let key = std::ffi::CString::new(key.as_str()).ok();
+            let value = std::ffi::CString::new(value.as_str()).ok();
+            if let (Some(key), Some(value)) = (key, value) {
+                declare((*meta).meta_interface, key.as_ptr(), value.as_ptr());
+            }
         }
         let key = c"backend";
         let value = c"cranelift";
@@ -382,19 +428,257 @@ pub fn instance_status() -> &'static str {
     "cranelift-ffi instance runtime"
 }
 
-unsafe fn class_init_instance(dsp: *mut CraneliftDspInstance) {
+unsafe fn class_init_instance(_dsp: *mut CraneliftDspInstance) {}
+
+fn dispatch_ui_runtime(
+    runtime: &RuntimeDescriptor,
+    layout: &StructLayoutPlan,
+    dsp_state: &mut DspStateBuffer,
+    ui: *mut UIGlue,
+) {
     unsafe {
-        let Some(factory) = (*dsp).factory.as_ref() else {
-            return;
-        };
-        let Some(sidecar) = factory.interp_sidecar.as_ref() else {
-            return;
-        };
-        let Some(exec) = (*dsp).sidecar_executor.as_mut() else {
-            return;
-        };
-        exec.execute_block(&sidecar.arena, sidecar.static_init_block);
+        let ui = &*ui;
+        for item in &runtime.ui_items {
+            match item {
+                RuntimeUiItem::OpenTabBox { label } => {
+                    if let Some(f) = ui.open_tab_box
+                        && let Ok(label) = std::ffi::CString::new(label.as_str())
+                    {
+                        f(ui.ui_interface, label.as_ptr());
+                    }
+                }
+                RuntimeUiItem::OpenHorizontalBox { label } => {
+                    if let Some(f) = ui.open_horizontal_box
+                        && let Ok(label) = std::ffi::CString::new(label.as_str())
+                    {
+                        f(ui.ui_interface, label.as_ptr());
+                    }
+                }
+                RuntimeUiItem::OpenVerticalBox { label } => {
+                    if let Some(f) = ui.open_vertical_box
+                        && let Ok(label) = std::ffi::CString::new(label.as_str())
+                    {
+                        f(ui.ui_interface, label.as_ptr());
+                    }
+                }
+                RuntimeUiItem::CloseBox => {
+                    if let Some(f) = ui.close_box {
+                        f(ui.ui_interface);
+                    }
+                }
+                RuntimeUiItem::Button { label, zone } => {
+                    if let Some(f) = ui.add_button
+                        && let (Ok(label), Some(zone)) = (
+                            std::ffi::CString::new(label.as_str()),
+                            zone_ptr(dsp_state, layout, zone),
+                        )
+                    {
+                        f(ui.ui_interface, label.as_ptr(), zone);
+                    }
+                }
+                RuntimeUiItem::CheckButton { label, zone } => {
+                    if let Some(f) = ui.add_check_button
+                        && let (Ok(label), Some(zone)) = (
+                            std::ffi::CString::new(label.as_str()),
+                            zone_ptr(dsp_state, layout, zone),
+                        )
+                    {
+                        f(ui.ui_interface, label.as_ptr(), zone);
+                    }
+                }
+                RuntimeUiItem::VerticalSlider {
+                    label,
+                    zone,
+                    init,
+                    lo,
+                    hi,
+                    step,
+                } => {
+                    if let Some(f) = ui.add_vertical_slider
+                        && let (Ok(label), Some(zone)) = (
+                            std::ffi::CString::new(label.as_str()),
+                            zone_ptr(dsp_state, layout, zone),
+                        )
+                    {
+                        f(ui.ui_interface, label.as_ptr(), zone, *init, *lo, *hi, *step);
+                    }
+                }
+                RuntimeUiItem::HorizontalSlider {
+                    label,
+                    zone,
+                    init,
+                    lo,
+                    hi,
+                    step,
+                } => {
+                    if let Some(f) = ui.add_horizontal_slider
+                        && let (Ok(label), Some(zone)) = (
+                            std::ffi::CString::new(label.as_str()),
+                            zone_ptr(dsp_state, layout, zone),
+                        )
+                    {
+                        f(ui.ui_interface, label.as_ptr(), zone, *init, *lo, *hi, *step);
+                    }
+                }
+                RuntimeUiItem::NumEntry {
+                    label,
+                    zone,
+                    init,
+                    lo,
+                    hi,
+                    step,
+                } => {
+                    if let Some(f) = ui.add_num_entry
+                        && let (Ok(label), Some(zone)) = (
+                            std::ffi::CString::new(label.as_str()),
+                            zone_ptr(dsp_state, layout, zone),
+                        )
+                    {
+                        f(ui.ui_interface, label.as_ptr(), zone, *init, *lo, *hi, *step);
+                    }
+                }
+                RuntimeUiItem::HorizontalBargraph { label, zone, lo, hi } => {
+                    if let Some(f) = ui.add_horizontal_bargraph
+                        && let (Ok(label), Some(zone)) = (
+                            std::ffi::CString::new(label.as_str()),
+                            zone_ptr(dsp_state, layout, zone),
+                        )
+                    {
+                        f(ui.ui_interface, label.as_ptr(), zone, *lo, *hi);
+                    }
+                }
+                RuntimeUiItem::VerticalBargraph { label, zone, lo, hi } => {
+                    if let Some(f) = ui.add_vertical_bargraph
+                        && let (Ok(label), Some(zone)) = (
+                            std::ffi::CString::new(label.as_str()),
+                            zone_ptr(dsp_state, layout, zone),
+                        )
+                    {
+                        f(ui.ui_interface, label.as_ptr(), zone, *lo, *hi);
+                    }
+                }
+                RuntimeUiItem::Soundfile { label, url, zone } => {
+                    if let Some(f) = ui.add_soundfile
+                        && let (Ok(label), Ok(url)) = (
+                            std::ffi::CString::new(label.as_str()),
+                            std::ffi::CString::new(url.as_str()),
+                        )
+                    {
+                        let zone = zone_ptr(dsp_state, layout, zone).map_or(std::ptr::null_mut(), |p| p.cast());
+                        f(ui.ui_interface, label.as_ptr(), url.as_ptr(), zone);
+                    }
+                }
+            }
+        }
     }
+}
+
+fn zone_ptr(
+    dsp_state: &mut DspStateBuffer,
+    layout: &StructLayoutPlan,
+    name: &str,
+) -> Option<*mut FaustFloat> {
+    let field = layout.field(name)?;
+    match &field.kind {
+        StructFieldKind::Scalar(FirType::Float32 | FirType::FaustFloat)
+        | StructFieldKind::Scalar(FirType::Int32)
+        | StructFieldKind::Scalar(FirType::Bool) => {
+            Some(dsp_state.ptr_at(field.offset_bytes as usize).cast::<FaustFloat>())
+        }
+        _ => None,
+    }
+}
+
+fn clear_runtime_state(
+    dsp_state: &mut DspStateBuffer,
+    layout: &StructLayoutPlan,
+    runtime: &RuntimeDescriptor,
+) {
+    for name in &runtime.clear_fields {
+        let Some(field) = layout.field(name) else {
+            continue;
+        };
+        unsafe {
+            std::ptr::write_bytes(
+                dsp_state.ptr_at(field.offset_bytes as usize),
+                0_u8,
+                field.size_bytes as usize,
+            );
+        }
+    }
+}
+
+fn apply_control_defaults(
+    dsp_state: &mut DspStateBuffer,
+    layout: &StructLayoutPlan,
+    runtime: &RuntimeDescriptor,
+) {
+    for (name, value) in &runtime.control_defaults {
+        let Some(field) = layout.field(name) else {
+            continue;
+        };
+        match &field.kind {
+            StructFieldKind::Scalar(FirType::Float32 | FirType::FaustFloat) => {
+                write_f32(dsp_state, field.offset_bytes as usize, *value);
+            }
+            StructFieldKind::Scalar(FirType::Float64) => {
+                write_f64(dsp_state, field.offset_bytes as usize, *value as f64);
+            }
+            StructFieldKind::Scalar(FirType::Int32) => {
+                write_i32(dsp_state, field.offset_bytes as usize, *value as i32);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn write_field_init(
+    dsp_state: &mut DspStateBuffer,
+    field: &StructFieldLayout,
+    init: &RuntimeFieldInit,
+) {
+    match init {
+        RuntimeFieldInit::I32(v) => write_i32(dsp_state, field.offset_bytes as usize, *v),
+        RuntimeFieldInit::I64(v) => write_i64(dsp_state, field.offset_bytes as usize, *v),
+        RuntimeFieldInit::F32(v) => write_f32(dsp_state, field.offset_bytes as usize, *v),
+        RuntimeFieldInit::F64(v) => write_f64(dsp_state, field.offset_bytes as usize, *v),
+        RuntimeFieldInit::Bool(v) => write_bool(dsp_state, field.offset_bytes as usize, *v),
+        RuntimeFieldInit::I32Array(values) => {
+            for (i, v) in values.iter().enumerate() {
+                write_i32(dsp_state, field.offset_bytes as usize + i * 4, *v);
+            }
+        }
+        RuntimeFieldInit::F32Array(values) => {
+            for (i, v) in values.iter().enumerate() {
+                write_f32(dsp_state, field.offset_bytes as usize + i * 4, *v);
+            }
+        }
+        RuntimeFieldInit::F64Array(values) => {
+            for (i, v) in values.iter().enumerate() {
+                write_f64(dsp_state, field.offset_bytes as usize + i * 8, *v);
+            }
+        }
+    }
+}
+
+fn write_i32(dsp_state: &mut DspStateBuffer, offset: usize, value: i32) {
+    unsafe { std::ptr::write_unaligned(dsp_state.ptr_at(offset).cast::<i32>(), value) };
+}
+
+fn write_i64(dsp_state: &mut DspStateBuffer, offset: usize, value: i64) {
+    unsafe { std::ptr::write_unaligned(dsp_state.ptr_at(offset).cast::<i64>(), value) };
+}
+
+fn write_f32(dsp_state: &mut DspStateBuffer, offset: usize, value: f32) {
+    unsafe { std::ptr::write_unaligned(dsp_state.ptr_at(offset).cast::<f32>(), value) };
+}
+
+fn write_f64(dsp_state: &mut DspStateBuffer, offset: usize, value: f64) {
+    unsafe { std::ptr::write_unaligned(dsp_state.ptr_at(offset).cast::<f64>(), value) };
+}
+
+fn write_bool(dsp_state: &mut DspStateBuffer, offset: usize, value: bool) {
+    unsafe { std::ptr::write_unaligned(dsp_state.ptr_at(offset).cast::<u8>(), u8::from(value)) };
 }
 
 fn compute_fn_from_addr(addr: usize) -> Option<ComputeFn> {
@@ -418,8 +702,18 @@ mod tests {
         getSampleRateCCraneliftDSPInstance, initCCraneliftDSPInstance, instance_status,
         metadataCCraneliftDSPInstance,
     };
-    use crate::factory::{createCCraneliftDSPFactoryFromString, deleteCCraneliftDSPFactory};
+    use crate::factory::{
+        createCCraneliftDSPFactoryFromFile, createCCraneliftDSPFactoryFromString,
+        deleteCCraneliftDSPFactory,
+    };
     use crate::types::{FaustFloat, MetaGlue, UIGlue};
+
+    fn workspace_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root")
+    }
 
     #[test]
     fn instance_status_is_stable() {
@@ -504,6 +798,75 @@ mod tests {
 
         unsafe {
             deleteCCraneliftDSPInstance(clone);
+            deleteCCraneliftDSPInstance(dsp);
+            assert!(deleteCCraneliftDSPFactory(factory));
+        }
+    }
+
+    #[test]
+    fn runtime_rep38_produces_non_silent_output() {
+        let _guard = crate::test_serial_guard();
+        let case = workspace_root().join("tests/corpus/rep_38_sine_phasor.dsp");
+        assert_runtime_case_non_silent(&case);
+    }
+
+    #[test]
+    fn runtime_rep55_produces_non_silent_output() {
+        let _guard = crate::test_serial_guard();
+        let case = workspace_root().join("tests/corpus/rep_55_sine_phasor_echo_feedback.dsp");
+        assert_runtime_case_non_silent(&case);
+    }
+
+    fn assert_runtime_case_non_silent(case: &std::path::Path) {
+        let case_c = CString::new(case.to_string_lossy().as_bytes()).expect("path CString");
+        let mut err = [0_i8; 4096];
+        let factory = unsafe {
+            createCCraneliftDSPFactoryFromFile(
+                case_c.as_ptr(),
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+                1,
+            )
+        };
+        assert!(!factory.is_null(), "factory failed: {:?}", unsafe {
+            CStr::from_ptr(err.as_ptr()).to_str().ok()
+        });
+
+        let dsp = unsafe { createCCraneliftDSPInstance(factory) };
+        assert!(!dsp.is_null());
+        unsafe { initCCraneliftDSPInstance(dsp, 48_000) };
+
+        let num_inputs = unsafe { getNumInputsCCraneliftDSPInstance(dsp) }.max(0) as usize;
+        let num_outputs = unsafe { getNumOutputsCCraneliftDSPInstance(dsp) }.max(0) as usize;
+        let frames = 256usize;
+        let mut input_buffers = vec![vec![0.0_f32; frames]; num_inputs];
+        let mut output_buffers = vec![vec![0.0_f32; frames]; num_outputs.max(1)];
+        let mut input_ptrs: Vec<*mut FaustFloat> =
+            input_buffers.iter_mut().map(|buf| buf.as_mut_ptr()).collect();
+        let mut output_ptrs: Vec<*mut FaustFloat> =
+            output_buffers.iter_mut().map(|buf| buf.as_mut_ptr()).collect();
+
+        unsafe {
+            computeCCraneliftDSPInstance(
+                dsp,
+                frames as i32,
+                if input_ptrs.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    input_ptrs.as_mut_ptr()
+                },
+                output_ptrs.as_mut_ptr(),
+            );
+        }
+
+        let non_silent = output_buffers
+            .iter()
+            .flat_map(|buf| buf.iter())
+            .any(|sample| sample.abs() > 1.0e-6);
+        assert!(non_silent, "{} output stayed silent", case.display());
+
+        unsafe {
             deleteCCraneliftDSPInstance(dsp);
             assert!(deleteCCraneliftDSPFactory(factory));
         }

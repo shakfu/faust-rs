@@ -488,6 +488,8 @@ fn fir_type_layout_scalar(
 ///
 /// # Inclusion rules (current contract)
 /// - includes `DeclareVar { access: Struct, .. }` as scalar fields
+/// - includes `DeclareVar { access: Struct, typ: Array(..), .. }` as inline
+///   array payload fields
 /// - includes `DeclareTable { access: Struct, .. }` as inline table fields
 /// - ignores helper function prototypes (`DeclareFun { body: None, .. }`)
 /// - ignores helper declarations/prototypes that are not `dsp*` state
@@ -543,23 +545,53 @@ fn build_struct_layout_for_module(
                 typ,
                 access: AccessType::Struct,
                 ..
-            } => {
-                let scalar = fir_type_layout_scalar(ptr_size, &typ)?;
-                offset = align_up(offset, scalar.align);
-                fields.push(StructFieldLayout {
-                    name,
-                    kind: StructFieldKind::Scalar(typ),
-                    offset_bytes: offset,
-                    size_bytes: scalar.size,
-                    align_bytes: scalar.align,
-                });
-                offset = offset.checked_add(scalar.size).ok_or_else(|| {
-                    CraneliftBackendError::unsupported_module_shape(
-                        "Cranelift dsp* layout size overflow",
-                    )
-                })?;
-                struct_align = struct_align.max(scalar.align);
-            }
+            } => match typ {
+                FirType::Array(inner, len) => {
+                    let elem_type = *inner;
+                    let scalar = fir_type_layout_scalar(ptr_size, &elem_type)?;
+                    let len = u32::try_from(len).map_err(|_| {
+                        CraneliftBackendError::unsupported_module_shape(
+                            "Cranelift dsp* array field length does not fit in u32",
+                        )
+                    })?;
+                    let size = scalar.size.checked_mul(len).ok_or_else(|| {
+                        CraneliftBackendError::unsupported_module_shape(
+                            "Cranelift dsp* array field size overflow",
+                        )
+                    })?;
+                    offset = align_up(offset, scalar.align);
+                    fields.push(StructFieldLayout {
+                        name,
+                        kind: StructFieldKind::Table { elem_type, len },
+                        offset_bytes: offset,
+                        size_bytes: size,
+                        align_bytes: scalar.align,
+                    });
+                    offset = offset.checked_add(size).ok_or_else(|| {
+                        CraneliftBackendError::unsupported_module_shape(
+                            "Cranelift dsp* layout size overflow",
+                        )
+                    })?;
+                    struct_align = struct_align.max(scalar.align);
+                }
+                scalar_ty => {
+                    let scalar = fir_type_layout_scalar(ptr_size, &scalar_ty)?;
+                    offset = align_up(offset, scalar.align);
+                    fields.push(StructFieldLayout {
+                        name,
+                        kind: StructFieldKind::Scalar(scalar_ty),
+                        offset_bytes: offset,
+                        size_bytes: scalar.size,
+                        align_bytes: scalar.align,
+                    });
+                    offset = offset.checked_add(scalar.size).ok_or_else(|| {
+                        CraneliftBackendError::unsupported_module_shape(
+                            "Cranelift dsp* layout size overflow",
+                        )
+                    })?;
+                    struct_align = struct_align.max(scalar.align);
+                }
+            },
             FirMatch::DeclareVar { access, name, .. } => {
                 return Err(CraneliftBackendError::unsupported_module_shape(format!(
                     "unsupported global variable access class for Cranelift dsp* layout: {name} ({access:?})"
@@ -1915,17 +1947,16 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 FirBinOp::Sub => self.fb.ins().isub(l, r),
                 FirBinOp::Mul => self.fb.ins().imul(l, r),
                 FirBinOp::Div => self.fb.ins().sdiv(l, r),
+                FirBinOp::Rem => self.fb.ins().srem(l, r),
+                FirBinOp::And => self.fb.ins().band(l, r),
+                FirBinOp::Or => self.fb.ins().bor(l, r),
+                FirBinOp::Xor => self.fb.ins().bxor(l, r),
                 FirBinOp::Eq => self.int_cmp_to_i8(IntCC::Equal, l, r),
                 FirBinOp::Ne => self.int_cmp_to_i8(IntCC::NotEqual, l, r),
                 FirBinOp::Lt => self.int_cmp_to_i8(IntCC::SignedLessThan, l, r),
                 FirBinOp::Le => self.int_cmp_to_i8(IntCC::SignedLessThanOrEqual, l, r),
                 FirBinOp::Gt => self.int_cmp_to_i8(IntCC::SignedGreaterThan, l, r),
                 FirBinOp::Ge => self.int_cmp_to_i8(IntCC::SignedGreaterThanOrEqual, l, r),
-                _ => {
-                    return Err(LoweringError::Unsupported(format!(
-                        "unsupported Int32 binop in subset lowering: {op:?}"
-                    )));
-                }
             },
             FirType::Float32 | FirType::FaustFloat => match op {
                 FirBinOp::Add => self.fb.ins().fadd(l, r),
@@ -3390,6 +3421,144 @@ mod tests {
         (store, module)
     }
 
+    fn build_struct_array_var_subset_module() -> (fir::FirStore, FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let z0 = b.float32(0.0);
+        let z1 = b.float32(0.0);
+        let init = b.value_array(&[z0, z1], FirType::Array(Box::new(FirType::Float32), 2));
+        let rec = b.declare_var(
+            "fRec0",
+            FirType::Array(Box::new(FirType::Float32), 2),
+            AccessType::Struct,
+            Some(init),
+        );
+        let globals = b.block(&[]);
+        let dsp_struct = b.block(&[rec]);
+
+        let out_chan = b.int32(0);
+        let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+        let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let zero = b.int32(0);
+        let one = b.int32(1);
+        let prev = b.load_table("fRec0", AccessType::Struct, one, FirType::Float32);
+        let write_cur = b.store_table("fRec0", AccessType::Struct, zero, prev);
+        let outv = b.load_table("fRec0", AccessType::Struct, zero, FirType::FaustFloat);
+        let store_out = b.store_table("output0", AccessType::Stack, i0, outv);
+        let loop_body = b.block(&[write_cur, store_out]);
+        let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+        let compute_body = b.block(&[out_alias, sample_loop]);
+        let compute_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        );
+        let functions = b.block(&[compute]);
+        let module = b.module(
+            0,
+            0,
+            "struct_array_var_subset",
+            dsp_struct,
+            globals,
+            functions,
+        );
+        (store, module)
+    }
+
+    fn build_int32_and_subset_module() -> (fir::FirStore, FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let iota_init = b.int32(0);
+        let iota = b.declare_var("fIOTA", FirType::Int32, AccessType::Struct, Some(iota_init));
+        let globals = b.block(&[]);
+        let dsp_struct = b.block(&[iota]);
+
+        let out_chan = b.int32(0);
+        let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+        let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let cur = b.load_var("fIOTA", AccessType::Struct, FirType::Int32);
+        let mask = b.int32(16383);
+        let masked = b.binop(FirBinOp::And, cur, mask, FirType::Int32);
+        let store_iota = b.store_var("fIOTA", AccessType::Struct, masked);
+        let zero = b.float32(0.0);
+        let store_out = b.store_table("output0", AccessType::Stack, i0, zero);
+        let loop_body = b.block(&[store_iota, store_out]);
+        let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+        let compute_body = b.block(&[out_alias, sample_loop]);
+        let compute_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        );
+        let functions = b.block(&[compute]);
+        let module = b.module(0, 0, "int32_and_subset", dsp_struct, globals, functions);
+        (store, module)
+    }
+
     #[test]
     fn compile_module_lowers_global_struct_table_subset_body() {
         let (store, module) = build_global_table_subset_module();
@@ -3408,6 +3577,35 @@ mod tests {
                 len: 3
             }
         ));
+    }
+
+    #[test]
+    fn compile_module_lowers_struct_array_var_subset_body() {
+        let (store, module) = build_struct_array_var_subset_module();
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
+            .expect("struct-array var subset fixture should compile with body lowering");
+        assert!(compiled.has_compute_entry());
+        assert!(compiled.compute_body_lowered());
+        let field = compiled
+            .struct_layout()
+            .field("fRec0")
+            .expect("array-backed struct field in layout");
+        assert!(matches!(
+            &field.kind,
+            StructFieldKind::Table {
+                elem_type: FirType::Float32,
+                len: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn compile_module_lowers_int32_and_subset_body() {
+        let (store, module) = build_int32_and_subset_module();
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
+            .expect("int32-and subset fixture should compile with body lowering");
+        assert!(compiled.has_compute_entry());
+        assert!(compiled.compute_body_lowered());
     }
 
     fn build_globals_with_helper_prototype_subset_module() -> (fir::FirStore, FirId) {

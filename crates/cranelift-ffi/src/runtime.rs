@@ -1,0 +1,389 @@
+//! Native runtime descriptor derived from FIR for standalone Cranelift instances.
+//!
+//! This replaces the previous interpreter-sidecar dependency for UI/metadata
+//! dispatch and basic instance initialization/reset behavior.
+
+use std::collections::{HashMap, HashSet};
+
+use codegen::backends::cranelift::StructFieldKind;
+use fir::{AccessType, FirId, FirMatch, FirStore, FirType, match_fir};
+
+#[derive(Clone, Debug)]
+pub(crate) enum RuntimeFieldInit {
+    I32(i32),
+    I64(i64),
+    F32(f32),
+    F64(f64),
+    Bool(bool),
+    I32Array(Vec<i32>),
+    F32Array(Vec<f32>),
+    F64Array(Vec<f64>),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum RuntimeUiItem {
+    OpenTabBox { label: String },
+    OpenHorizontalBox { label: String },
+    OpenVerticalBox { label: String },
+    CloseBox,
+    Button { label: String, zone: String },
+    CheckButton { label: String, zone: String },
+    VerticalSlider {
+        label: String,
+        zone: String,
+        init: f32,
+        lo: f32,
+        hi: f32,
+        step: f32,
+    },
+    HorizontalSlider {
+        label: String,
+        zone: String,
+        init: f32,
+        lo: f32,
+        hi: f32,
+        step: f32,
+    },
+    NumEntry {
+        label: String,
+        zone: String,
+        init: f32,
+        lo: f32,
+        hi: f32,
+        step: f32,
+    },
+    HorizontalBargraph {
+        label: String,
+        zone: String,
+        lo: f32,
+        hi: f32,
+    },
+    VerticalBargraph {
+        label: String,
+        zone: String,
+        lo: f32,
+        hi: f32,
+    },
+    Soundfile {
+        label: String,
+        url: String,
+        zone: String,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RuntimeDescriptor {
+    pub(crate) field_inits: HashMap<String, RuntimeFieldInit>,
+    pub(crate) clear_fields: HashSet<String>,
+    pub(crate) control_defaults: HashMap<String, f32>,
+    pub(crate) ui_items: Vec<RuntimeUiItem>,
+    pub(crate) meta_entries: Vec<(String, String)>,
+    pub(crate) sample_rate_fields: Vec<String>,
+}
+
+pub(crate) fn build_runtime_descriptor(
+    store: &FirStore,
+    module: FirId,
+) -> Result<RuntimeDescriptor, String> {
+    let (dsp_struct, globals, functions) = match match_fir(store, module) {
+        FirMatch::Module {
+            dsp_struct,
+            globals,
+            functions,
+            ..
+        } => (dsp_struct, globals, functions),
+        other => return Err(format!("expected FIR Module for runtime descriptor, got {other:?}")),
+    };
+
+    let mut desc = RuntimeDescriptor::default();
+    for block in [dsp_struct, globals] {
+        let items = match match_fir(store, block) {
+            FirMatch::Block(items) => items,
+            other => {
+                return Err(format!(
+                    "runtime descriptor expects FIR Block for module section, got {other:?}"
+                ));
+            }
+        };
+        for item in items {
+            match match_fir(store, item) {
+                FirMatch::DeclareVar {
+                    name,
+                    typ,
+                    access: AccessType::Struct,
+                    init,
+                } => {
+                    if let Some(value) = init.and_then(|id| decode_init_value(store, id, &typ)) {
+                        desc.field_inits.insert(name.clone(), value);
+                    }
+                    if name == "fSampleRate" || name == "fSamplingFreq" {
+                        desc.sample_rate_fields.push(name.clone());
+                    }
+                    if should_clear_field(&name, &StructFieldKind::Scalar(typ)) {
+                        desc.clear_fields.insert(name);
+                    }
+                }
+                FirMatch::DeclareTable {
+                    name,
+                    access: AccessType::Struct,
+                    elem_type,
+                    values,
+                } => {
+                    if let Some(init) = decode_table_values(store, &elem_type, &values) {
+                        desc.field_inits.insert(name.clone(), init);
+                    }
+                    if should_clear_field(
+                        &name,
+                        &StructFieldKind::Table {
+                            elem_type,
+                            len: values.len() as u32,
+                        },
+                    ) {
+                        desc.clear_fields.insert(name);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let function_items = match match_fir(store, functions) {
+        FirMatch::Block(items) => items,
+        other => {
+            return Err(format!(
+                "runtime descriptor expects functions block, got {other:?}"
+            ));
+        }
+    };
+    for fun in function_items {
+        match match_fir(store, fun) {
+            FirMatch::DeclareFun {
+                name,
+                body: Some(body),
+                ..
+            } if name == "buildUserInterface" => {
+                collect_ui_items(store, body, &mut desc)?;
+            }
+            FirMatch::DeclareFun {
+                name,
+                body: Some(body),
+                ..
+            } if name == "metadata" => {
+                collect_meta_items(store, body, &mut desc)?;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(desc)
+}
+
+fn should_clear_field(name: &str, kind: &StructFieldKind) -> bool {
+    if name == "fSampleRate" || name == "fSamplingFreq" {
+        return false;
+    }
+    if matches!(kind, StructFieldKind::Table { .. }) {
+        return true;
+    }
+    name == "IOTA"
+        || name == "fIOTA"
+        || name.starts_with("fRec")
+        || name.starts_with("iRec")
+        || name.starts_with("fVec")
+        || name.starts_with("iVec")
+}
+
+fn collect_ui_items(
+    store: &FirStore,
+    body: FirId,
+    desc: &mut RuntimeDescriptor,
+) -> Result<(), String> {
+    let items = flatten_block(store, body)?;
+    for item in items {
+        match match_fir(store, item) {
+            FirMatch::OpenBox { typ, label } => {
+                desc.ui_items.push(match typ {
+                    fir::UiBoxType::Tab => RuntimeUiItem::OpenTabBox { label },
+                    fir::UiBoxType::Horizontal => RuntimeUiItem::OpenHorizontalBox { label },
+                    fir::UiBoxType::Vertical => RuntimeUiItem::OpenVerticalBox { label },
+                });
+            }
+            FirMatch::CloseBox => desc.ui_items.push(RuntimeUiItem::CloseBox),
+            FirMatch::AddButton { typ, label, var } => {
+                desc.ui_items.push(match typ {
+                    fir::ButtonType::Button => RuntimeUiItem::Button {
+                        label,
+                        zone: var.clone(),
+                    },
+                    fir::ButtonType::Checkbox => RuntimeUiItem::CheckButton {
+                        label,
+                        zone: var.clone(),
+                    },
+                });
+                desc.control_defaults.entry(var).or_insert(0.0);
+            }
+            FirMatch::AddSlider {
+                typ,
+                label,
+                var,
+                init,
+                lo,
+                hi,
+                step,
+            } => {
+                let init = init as f32;
+                desc.control_defaults.insert(var.clone(), init);
+                desc.ui_items.push(match typ {
+                    fir::SliderType::Horizontal => RuntimeUiItem::HorizontalSlider {
+                        label,
+                        zone: var,
+                        init,
+                        lo: lo as f32,
+                        hi: hi as f32,
+                        step: step as f32,
+                    },
+                    fir::SliderType::Vertical => RuntimeUiItem::VerticalSlider {
+                        label,
+                        zone: var,
+                        init,
+                        lo: lo as f32,
+                        hi: hi as f32,
+                        step: step as f32,
+                    },
+                    fir::SliderType::NumEntry => RuntimeUiItem::NumEntry {
+                        label,
+                        zone: var,
+                        init,
+                        lo: lo as f32,
+                        hi: hi as f32,
+                        step: step as f32,
+                    },
+                });
+            }
+            FirMatch::AddBargraph {
+                typ,
+                label,
+                var,
+                lo,
+                hi,
+            } => {
+                desc.ui_items.push(match typ {
+                    fir::BargraphType::Horizontal => RuntimeUiItem::HorizontalBargraph {
+                        label,
+                        zone: var,
+                        lo: lo as f32,
+                        hi: hi as f32,
+                    },
+                    fir::BargraphType::Vertical => RuntimeUiItem::VerticalBargraph {
+                        label,
+                        zone: var,
+                        lo: lo as f32,
+                        hi: hi as f32,
+                    },
+                });
+            }
+            FirMatch::AddSoundfile { label, url, var } => {
+                desc.ui_items.push(RuntimeUiItem::Soundfile {
+                    label,
+                    url,
+                    zone: var,
+                });
+            }
+            FirMatch::AddMetaDeclare { key, value, .. } => {
+                desc.meta_entries.push((key, value));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn collect_meta_items(
+    store: &FirStore,
+    body: FirId,
+    desc: &mut RuntimeDescriptor,
+) -> Result<(), String> {
+    let items = flatten_block(store, body)?;
+    for item in items {
+        if let FirMatch::AddMetaDeclare { key, value, .. } = match_fir(store, item) {
+            desc.meta_entries.push((key, value));
+        }
+    }
+    Ok(())
+}
+
+fn flatten_block(store: &FirStore, body: FirId) -> Result<Vec<FirId>, String> {
+    match match_fir(store, body) {
+        FirMatch::Block(items) => Ok(items),
+        other => Err(format!("expected FIR Block body, got {other:?}")),
+    }
+}
+
+fn decode_init_value(store: &FirStore, id: FirId, typ: &FirType) -> Option<RuntimeFieldInit> {
+    match (typ, match_fir(store, id)) {
+        (_, FirMatch::Cast { value, .. }) => decode_init_value(store, value, typ),
+        (FirType::Int32, FirMatch::Int32 { value, .. }) => Some(RuntimeFieldInit::I32(value)),
+        (FirType::Int64, FirMatch::Int32 { value, .. }) => Some(RuntimeFieldInit::I64(value as i64)),
+        (FirType::Int64, FirMatch::Int64 { value, .. }) => Some(RuntimeFieldInit::I64(value)),
+        (FirType::Float32 | FirType::FaustFloat, FirMatch::Float32 { value, .. }) => {
+            Some(RuntimeFieldInit::F32(value))
+        }
+        (FirType::Float32 | FirType::FaustFloat, FirMatch::Float64 { value, .. }) => {
+            Some(RuntimeFieldInit::F32(value as f32))
+        }
+        (FirType::Float64, FirMatch::Float64 { value, .. }) => Some(RuntimeFieldInit::F64(value)),
+        (FirType::Float64, FirMatch::Float32 { value, .. }) => Some(RuntimeFieldInit::F64(value as f64)),
+        (FirType::Bool, FirMatch::Bool { value, .. }) => Some(RuntimeFieldInit::Bool(value)),
+        (FirType::Array(inner, _), FirMatch::ValueArray { values, .. }) => {
+            decode_array_values(store, inner, &values)
+        }
+        _ => None,
+    }
+}
+
+fn decode_table_values(
+    store: &FirStore,
+    elem_type: &FirType,
+    values: &[FirId],
+) -> Option<RuntimeFieldInit> {
+    decode_array_values(store, elem_type, values)
+}
+
+fn decode_array_values(
+    store: &FirStore,
+    elem_type: &FirType,
+    values: &[FirId],
+) -> Option<RuntimeFieldInit> {
+    match elem_type {
+        FirType::Int32 => values
+            .iter()
+            .map(|id| match match_fir(store, *id) {
+                FirMatch::Int32 { value, .. } => Some(value),
+                FirMatch::Bool { value, .. } => Some(i32::from(value)),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(RuntimeFieldInit::I32Array),
+        FirType::Float32 | FirType::FaustFloat => values
+            .iter()
+            .map(|id| match match_fir(store, *id) {
+                FirMatch::Float32 { value, .. } => Some(value),
+                FirMatch::Float64 { value, .. } => Some(value as f32),
+                FirMatch::Int32 { value, .. } => Some(value as f32),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(RuntimeFieldInit::F32Array),
+        FirType::Float64 => values
+            .iter()
+            .map(|id| match match_fir(store, *id) {
+                FirMatch::Float64 { value, .. } => Some(value),
+                FirMatch::Float32 { value, .. } => Some(value as f64),
+                FirMatch::Int32 { value, .. } => Some(value as f64),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(RuntimeFieldInit::F64Array),
+        _ => None,
+    }
+}
