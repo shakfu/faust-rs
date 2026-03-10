@@ -329,6 +329,18 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
         1,
         "instanceClear should be emitted once"
     );
+    assert!(
+        fast.contains("float[2] fRec"),
+        "fast lane should lower phasor recursion to a 2-slot float array"
+    );
+    assert!(
+        fast.contains("[0] = (fRec") && fast.contains("[1] +"),
+        "fast lane should materialize the current-slot recursion write from the previous slot"
+    );
+    assert!(
+        fast.contains("[1] = fRec") && fast.contains("[0];"),
+        "fast lane should shift the current recursion slot into the previous slot"
+    );
 
     let legacy_c = compile_c_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::LegacyBridge);
     let fast_c = compile_c_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::TransformFastLane);
@@ -337,6 +349,10 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
     assert!(!fast_c.contains("frs_"));
     assert!(fast_c.contains("fHslider"));
     assert!(!fast_c.contains("fUiCtl"));
+    assert!(
+        fast_c.contains("float[2] fRec"),
+        "fast lane C backend should keep recursion as a 2-slot array"
+    );
     assert!(
         fast_c.contains("ui_interface->openVerticalBox(ui_interface->uiInterface, \"mydsp\");")
     );
@@ -448,8 +464,7 @@ fn fastlane_cpp_compiles_noise_smoo_slider_fixture() {
     );
     assert!(cpp.contains("class mydsp : public dsp"));
     assert!(cpp.contains("void compute("));
-    assert!(cpp.contains("int iRec"));
-    assert!(cpp.contains("iRec"));
+    assert!(cpp.contains("int[2] iRec"));
     assert!(cpp.contains("fSampleRate"));
     assert!(
         !cpp.contains("float fRec"),

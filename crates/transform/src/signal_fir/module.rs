@@ -517,7 +517,7 @@ struct SignalToFirLower<'a> {
     delay_lines: HashMap<SigId, DelayLineInfo>,
     scheduled_delay_writes: HashSet<SigId>,
     uses_iota: bool,
-    recursion_stack: Vec<String>,
+    recursion_stack: Vec<RecArrayInfo>,
     recursion_vars: Vec<SigId>,
     ui_controls: HashMap<SigId, String>,
     soundfiles: HashMap<SigId, String>,
@@ -530,6 +530,23 @@ struct SignalToFirLower<'a> {
     input_ptr_aliases: HashMap<usize, String>,
     used_math_ops: HashSet<FirMathOp>,
     next_loop_var_id: usize,
+}
+
+/// Two-slot recursion carrier used by `SIGREC`/`SIGPROJ`.
+///
+/// Source provenance (C++):
+/// - `compiler/transform/signalFIRCompiler.cpp`
+///   (`generateRecProj`, `generateRec`, emitted `fRecN[2]` / `iRecN[2]`)
+///
+/// Semantic contract:
+/// - slot `[1]` stores the previous-sample value seen by recursive references,
+/// - slot `[0]` stores the current-sample value computed for this iteration,
+/// - the lowering emits the trailing `state[1] = state[0]` shift after outputs,
+///   matching Faust's generated C++ update order.
+#[derive(Clone, Debug)]
+struct RecArrayInfo {
+    name: String,
+    typ: FirType,
 }
 
 impl<'a> SignalToFirLower<'a> {
@@ -972,6 +989,22 @@ impl<'a> SignalToFirLower<'a> {
         value: SigId,
         init: FirId,
     ) -> Result<FirId, SignalFirError> {
+        if let Some(rec_info) = self.recursion_feedback_info(value)? {
+            let out_ty = self.signal_fir_type(node)?;
+            let prev_index = self.lower_int32_const(1);
+            let mut b = FirBuilder::new(&mut self.store);
+            let load = b.load_table(
+                rec_info.name,
+                AccessType::Struct,
+                prev_index,
+                rec_info.typ.clone(),
+            );
+            return if rec_info.typ == out_ty {
+                Ok(load)
+            } else {
+                Ok(b.cast(out_ty, load))
+            };
+        }
         let state_ty = self.signal_fir_type(value)?;
         let out_ty = self.signal_fir_type(node)?;
         let name = self.ensure_state_slot(node, state_ty.clone(), init);
@@ -991,6 +1024,39 @@ impl<'a> SignalToFirLower<'a> {
                 .push(b.store_var(name, AccessType::Struct, next));
         }
         Ok(out)
+    }
+
+    fn recursion_feedback_info(
+        &mut self,
+        value: SigId,
+    ) -> Result<Option<RecArrayInfo>, SignalFirError> {
+        let SigMatch::Proj(index, group) = match_sig(self.arena, value) else {
+            return Ok(None);
+        };
+        if index != 0 {
+            return Ok(None);
+        }
+        self.active_recursion_info(group)
+    }
+
+    fn active_recursion_info(&self, group: SigId) -> Result<Option<RecArrayInfo>, SignalFirError> {
+        let Some(var) = match_sym_ref(self.arena, group) else {
+            return Ok(None);
+        };
+        let depth = self
+            .recursion_vars
+            .iter()
+            .rposition(|bound| *bound == var)
+            .map(|slot| self.recursion_vars.len() - slot)
+            .ok_or_else(|| {
+                SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!("unbound symbolic recursion variable {}", var.as_u32()),
+                )
+            })?;
+        Ok(Some(
+            self.recursion_stack[self.recursion_stack.len() - depth].clone(),
+        ))
     }
 
     /// Ensures one struct state slot exists for `node`, creating declaration
@@ -1157,6 +1223,32 @@ impl<'a> SignalToFirLower<'a> {
             .push(b.simple_for_loop(loop_var, upper, body, false));
         let _ = elem_type;
         Ok(())
+    }
+
+    fn register_clear_recursion_array(&mut self, name: String, init: FirId) {
+        if !self.clear_init_seen.insert(name.clone()) {
+            return;
+        }
+        let loop_var = self.fresh_loop_var("lRec");
+        let upper = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.int32(2)
+        };
+        let body = {
+            let index = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+            };
+            let store = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.store_table(name, AccessType::Struct, index, init)
+            };
+            let mut b = FirBuilder::new(&mut self.store);
+            b.block(&[store])
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        self.clear_statements
+            .push(b.simple_for_loop(loop_var, upper, body, false));
     }
 
     fn fresh_loop_var(&mut self, prefix: &str) -> String {
@@ -1806,22 +1898,17 @@ impl<'a> SignalToFirLower<'a> {
             ));
         }
 
-        if let Some(var) = match_sym_ref(self.arena, group) {
-            let depth = self
-                .recursion_vars
-                .iter()
-                .rposition(|bound| *bound == var)
-                .map(|slot| self.recursion_vars.len() - slot)
-                .ok_or_else(|| {
-                    SignalFirError::new(
-                        SignalFirErrorCode::UnsupportedSignalNode,
-                        format!("unbound symbolic recursion variable {}", var.as_u32()),
-                    )
-                })?;
-            let name = self.recursion_stack[self.recursion_stack.len() - depth].clone();
+        if let Some(info) = self.active_recursion_info(group)? {
             let real_ty = self.signal_fir_type(node)?;
+            let current_index = self.lower_int32_const(0);
+            let rec_ty = info.typ.clone();
             let mut b = FirBuilder::new(&mut self.store);
-            return Ok(b.load_var(name, AccessType::Struct, real_ty));
+            let load = b.load_table(info.name, AccessType::Struct, current_index, rec_ty.clone());
+            return if real_ty == rec_ty {
+                Ok(load)
+            } else {
+                Ok(b.cast(real_ty, load))
+            };
         }
 
         let body = if let Some(body) = self.decode_symbolic_group(group) {
@@ -1850,31 +1937,77 @@ impl<'a> SignalToFirLower<'a> {
                 ));
             }
         };
-        let name = self.ensure_state_slot(node, state_ty.clone(), init);
+        let info = self.ensure_recursion_array(node, state_ty.clone(), init)?;
+        if self.scheduled_state_updates.insert(node) {
+            if let Some((var, _)) = match_sym_rec(self.arena, group) {
+                self.recursion_vars.push(var);
+            }
+            self.recursion_stack.push(info.clone());
+            let rhs = self.lower_signal(body)?;
+            self.recursion_stack.pop();
+            if match_sym_rec(self.arena, group).is_some() {
+                self.recursion_vars.pop();
+            }
+            let zero = self.lower_int32_const(0);
+            let one = self.lower_int32_const(1);
+            let current_store = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.store_table(info.name.clone(), AccessType::Struct, zero, rhs)
+            };
+            self.sample_statements.push(current_store);
+            let current_load = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.load_table(
+                    info.name.clone(),
+                    AccessType::Struct,
+                    zero,
+                    info.typ.clone(),
+                )
+            };
+            let shift_store = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.store_table(info.name.clone(), AccessType::Struct, one, current_load)
+            };
+            self.compute_updates.push(shift_store);
+        }
+        let zero = self.lower_int32_const(0);
         let out = {
             let mut b = FirBuilder::new(&mut self.store);
-            let load = b.load_var(name.clone(), AccessType::Struct, state_ty.clone());
+            let load = b.load_table(info.name, AccessType::Struct, zero, state_ty.clone());
             if state_ty == out_ty {
                 load
             } else {
                 b.cast(out_ty, load)
             }
         };
-        if self.scheduled_state_updates.insert(node) {
-            if let Some((var, _)) = match_sym_rec(self.arena, group) {
-                self.recursion_vars.push(var);
-            }
-            self.recursion_stack.push(name.clone());
-            let rhs = self.lower_signal(body)?;
-            self.recursion_stack.pop();
-            if match_sym_rec(self.arena, group).is_some() {
-                self.recursion_vars.pop();
-            }
-            let mut b = FirBuilder::new(&mut self.store);
-            self.compute_updates
-                .push(b.store_var(name, AccessType::Struct, rhs));
-        }
         Ok(out)
+    }
+
+    fn ensure_recursion_array(
+        &mut self,
+        node: SigId,
+        typ: FirType,
+        init: FirId,
+    ) -> Result<RecArrayInfo, SignalFirError> {
+        if let Some(name) = self.state_name_by_node.get(&node) {
+            return Ok(RecArrayInfo {
+                name: name.clone(),
+                typ,
+            });
+        }
+        let prefix = if typ == FirType::Int32 {
+            "iRec"
+        } else {
+            "fRec"
+        };
+        let name = format!("{prefix}{}", node.as_u32());
+        let array_ty = FirType::Array(Box::new(typ.clone()), 2);
+        let mut b = FirBuilder::new(&mut self.store);
+        let decl = b.declare_var(name.clone(), array_ty, AccessType::Struct, None);
+        self.struct_declarations.push(decl);
+        self.register_clear_recursion_array(name.clone(), init);
+        self.state_name_by_node.insert(node, name.clone());
+        Ok(RecArrayInfo { name, typ })
     }
 
     /// Decodes one `SYMREC(var, body_list)` group to its first payload signal.

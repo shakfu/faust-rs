@@ -180,7 +180,10 @@ mod tests {
     use super::{RealType, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane};
     use fir::{FirBinOp, FirMatch, FirType, match_fir};
     use signals::{BinOp, SigBuilder};
-    use tlib::TreeArena;
+    use std::collections::HashSet;
+    use tlib::{TreeArena, de_bruijn_rec, de_bruijn_ref};
+
+    use crate::signal_prepare::prepare_signals_for_fir;
 
     /// Peels off a `Cast(FaustFloat, inner)` wrapper if present.
     ///
@@ -724,10 +727,14 @@ mod tests {
             panic!("dsp_struct block expected");
         };
         assert!(
-            struct_items
-                .iter()
-                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareVar { .. })),
-            "rec/proj should allocate explicit state slot"
+            struct_items.iter().any(|id| matches!(
+                match_fir(&out.store, *id),
+                FirMatch::DeclareVar {
+                    typ: FirType::Array(_, 2),
+                    ..
+                }
+            )),
+            "rec/proj should allocate a 2-slot recursion array"
         );
         let loop_body = find_compute_loop_body(&out.store, functions);
         let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
@@ -736,9 +743,88 @@ mod tests {
         assert!(
             stmts
                 .iter()
-                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::StoreVar { .. })),
-            "rec/proj should schedule state update in compute"
+                .filter(|id| matches!(match_fir(&out.store, **id), FirMatch::StoreTable { .. }))
+                .count()
+                >= 2,
+            "rec/proj should write the current recursion slot and shift it to the previous slot"
         );
+    }
+
+    #[test]
+    fn recursive_feedback_delay1_reuses_two_slot_recursion_array() {
+        let mut arena = TreeArena::new();
+        let self_ref = de_bruijn_ref(&mut arena, 1);
+        let body = {
+            let mut b = SigBuilder::new(&mut arena);
+            let feedback = b.proj(0, self_ref);
+            let prev = b.delay1(feedback);
+            let inc = b.real(0.25);
+            b.add(prev, inc)
+        };
+        let body_list = arena.cons(body, arena.nil());
+        let group = de_bruijn_rec(&mut arena, body_list);
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            b.proj(0, group)
+        };
+
+        let prepared =
+            prepare_signals_for_fir(&arena, &[sig0]).expect("feedback group should prepare");
+        let out = compile_signals_to_fir_fastlane(
+            &prepared.arena,
+            &prepared.outputs,
+            0,
+            1,
+            &SignalFirOptions::default(),
+        )
+        .expect("feedback delay1 should lower through recursion array slots");
+
+        let FirMatch::Module {
+            dsp_struct,
+            functions,
+            ..
+        } = match_fir(&out.store, out.module)
+        else {
+            panic!("module expected");
+        };
+        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+            panic!("dsp_struct block expected");
+        };
+        let mut array_rec_fields = 0usize;
+        for item in struct_items {
+            if let FirMatch::DeclareVar { name, typ, .. } = match_fir(&out.store, item)
+                && name.starts_with("fRec")
+                && matches!(typ, FirType::Array(_, 2))
+            {
+                array_rec_fields += 1;
+            }
+        }
+        assert_eq!(
+            array_rec_fields, 1,
+            "feedback recurrence should use one 2-slot recursion array without shadow scalar state"
+        );
+
+        let loop_body = find_compute_loop_body(&out.store, functions);
+        let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+            panic!("compute loop body block expected");
+        };
+        let mut rec_store_count = 0usize;
+        let mut rec_indices = HashSet::new();
+        for stmt in stmts {
+            if let FirMatch::StoreTable { name, index, .. } = match_fir(&out.store, stmt)
+                && name.starts_with("fRec")
+            {
+                rec_store_count += 1;
+                if let FirMatch::Int32 { value, .. } = match_fir(&out.store, index) {
+                    rec_indices.insert(value);
+                }
+            }
+        }
+        assert_eq!(
+            rec_store_count, 2,
+            "feedback recurrence should write only the current and previous recursion array slots"
+        );
+        assert_eq!(rec_indices, HashSet::from([0, 1]));
     }
 
     #[test]
