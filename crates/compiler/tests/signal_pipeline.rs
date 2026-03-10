@@ -128,6 +128,32 @@ fn corpus_feedback_simple_exposes_recursive_projection() {
 }
 
 #[test]
+fn inline_partial_mul_with_trigger_argument_compiles_to_signal_mul() {
+    let source = r#"
+upfront(x) = (x-x') > 0.0;
+decay(n,x) = x - (x>0.0)/n;
+release(n) = + ~ decay(n);
+trigger(n) = upfront : release(n) : >(0.0);
+process = *(button("play") : trigger(128));
+"#;
+
+    let out = compile_inline("partial_mul_trigger.dsp", source);
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+
+    let SigMatch::BinOp(BinOp::Mul, lhs, rhs) = match_sig(&out.parse.state.arena, out.signals[0])
+    else {
+        panic!("partial mul trigger repro should lower to one mul signal");
+    };
+    assert!(
+        matches!(match_sig(&out.parse.state.arena, lhs), SigMatch::Input(0))
+            || matches!(match_sig(&out.parse.state.arena, rhs), SigMatch::Input(0)),
+        "one mul operand should be the implicit input wire"
+    );
+}
+
+#[test]
 fn corpus_two_in_two_out_ui_lowers_to_input_slider_muls() {
     let out = compile_corpus("rep_10_two_in_two_out_ui.dsp");
     assert_eq!(out.process_arity.inputs, 2);

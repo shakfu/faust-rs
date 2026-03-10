@@ -3895,12 +3895,28 @@ fn nwires(arena: &mut TreeArena, n: usize) -> TreeId {
     out
 }
 
-/// Computes total output arity for a list of argument boxes.
+/// Computes total output arity for a list of application arguments.
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/eval.cpp`
+/// - `boxlistOutputs(...)`
+///
+/// C++ is intentionally permissive here. During non-closure partial
+/// application, arguments have already been evaluated, but some residual
+/// symbolic/recursive forms may still defeat the lightweight local arity probe.
+/// In that situation `boxlistOutputs(...)` falls back to counting the argument
+/// as a single output so `applyList(...)` can still insert the missing implicit
+/// wire for under-applied binary primitives.
+///
+/// Rust needs the same fallback for parity. Without it, expressions such as
+/// `*(button("play") : trigger(n))` keep the raw `arg : *` shape instead of
+/// being rewritten to `(_, arg) : *`, which later fails in `propagate` with a
+/// spurious `1 != 2` sequential composition mismatch.
 fn list_outputs(arena: &TreeArena, mut list: TreeId) -> Option<usize> {
     let mut total = 0usize;
     while !arena.is_nil(list) {
         let head = arena.hd(list)?;
-        let (_, outs) = infer_box_arity(arena, head)?;
+        let outs = infer_box_arity(arena, head).map_or(1, |(_, outs)| outs);
         total = total.checked_add(outs)?;
         list = arena.tl(list)?;
     }

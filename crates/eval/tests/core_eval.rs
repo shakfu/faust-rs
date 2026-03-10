@@ -15,6 +15,7 @@ use eval::{
     eval_process_with_source_context, eval_process_with_stats,
 };
 use parser::CompilationMetadataKey;
+use parser::parse_program;
 use tlib::{NodeKind, TreeArena, TreeId};
 
 fn make_ident(arena: &mut TreeArena, name: &str) -> tlib::TreeId {
@@ -658,6 +659,47 @@ fn eval_box_non_closure_partial_binary_primitive_prepends_missing_wire() {
     };
     assert!(matches!(match_box(&arena, a), BoxMatch::Wire));
     assert!(matches!(match_box(&arena, b), BoxMatch::Real(v) if (v - 0.5).abs() < f64::EPSILON));
+}
+
+#[test]
+fn eval_box_partial_binary_primitive_uses_single_output_fallback_for_symbolic_argument() {
+    let source = r#"
+upfront(x) = (x-x') > 0.0;
+decay(n,x) = x - (x>0.0)/n;
+release(n) = + ~ decay(n);
+trigger(n) = upfront : release(n) : >(0.0);
+process = *(button("play") : trigger(128));
+"#;
+
+    let parsed = parse_program(source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept trigger partial-application repro: {:?}",
+        parsed.errors
+    );
+
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+    let out = eval_process(&mut arena, root)
+        .expect("partial mul with symbolic trigger argument should evaluate");
+
+    let (lhs, rhs) = match match_box(&arena, out) {
+        BoxMatch::Seq(lhs, rhs) => (lhs, rhs),
+        other => panic!("expected BOXSEQ, got {other:?}"),
+    };
+    assert!(matches!(match_box(&arena, rhs), BoxMatch::Mul));
+    let (a, b) = match match_box(&arena, lhs) {
+        BoxMatch::Par(a, b) => (a, b),
+        other => panic!("expected BOXPAR, got {other:?}"),
+    };
+    assert!(
+        matches!(match_box(&arena, a), BoxMatch::Wire),
+        "under-applied mul should prepend an implicit wire"
+    );
+    assert!(
+        matches!(match_box(&arena, b), BoxMatch::Seq(_, _)),
+        "the explicit trigger argument should remain the second mul operand"
+    );
 }
 
 #[test]
