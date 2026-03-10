@@ -22,12 +22,24 @@ pub(crate) enum RuntimeFieldInit {
 
 #[derive(Clone, Debug)]
 pub(crate) enum RuntimeUiItem {
-    OpenTabBox { label: String },
-    OpenHorizontalBox { label: String },
-    OpenVerticalBox { label: String },
+    OpenTabBox {
+        label: String,
+    },
+    OpenHorizontalBox {
+        label: String,
+    },
+    OpenVerticalBox {
+        label: String,
+    },
     CloseBox,
-    Button { label: String, zone: String },
-    CheckButton { label: String, zone: String },
+    Button {
+        label: String,
+        zone: String,
+    },
+    CheckButton {
+        label: String,
+        zone: String,
+    },
     VerticalSlider {
         label: String,
         zone: String,
@@ -92,7 +104,11 @@ pub(crate) fn build_runtime_descriptor(
             functions,
             ..
         } => (dsp_struct, globals, functions),
-        other => return Err(format!("expected FIR Module for runtime descriptor, got {other:?}")),
+        other => {
+            return Err(format!(
+                "expected FIR Module for runtime descriptor, got {other:?}"
+            ));
+        }
     };
 
     let mut desc = RuntimeDescriptor::default();
@@ -323,7 +339,9 @@ fn decode_init_value(store: &FirStore, id: FirId, typ: &FirType) -> Option<Runti
     match (typ, match_fir(store, id)) {
         (_, FirMatch::Cast { value, .. }) => decode_init_value(store, value, typ),
         (FirType::Int32, FirMatch::Int32 { value, .. }) => Some(RuntimeFieldInit::I32(value)),
-        (FirType::Int64, FirMatch::Int32 { value, .. }) => Some(RuntimeFieldInit::I64(value as i64)),
+        (FirType::Int64, FirMatch::Int32 { value, .. }) => {
+            Some(RuntimeFieldInit::I64(value as i64))
+        }
         (FirType::Int64, FirMatch::Int64 { value, .. }) => Some(RuntimeFieldInit::I64(value)),
         (FirType::Float32 | FirType::FaustFloat, FirMatch::Float32 { value, .. }) => {
             Some(RuntimeFieldInit::F32(value))
@@ -332,7 +350,9 @@ fn decode_init_value(store: &FirStore, id: FirId, typ: &FirType) -> Option<Runti
             Some(RuntimeFieldInit::F32(value as f32))
         }
         (FirType::Float64, FirMatch::Float64 { value, .. }) => Some(RuntimeFieldInit::F64(value)),
-        (FirType::Float64, FirMatch::Float32 { value, .. }) => Some(RuntimeFieldInit::F64(value as f64)),
+        (FirType::Float64, FirMatch::Float32 { value, .. }) => {
+            Some(RuntimeFieldInit::F64(value as f64))
+        }
         (FirType::Bool, FirMatch::Bool { value, .. }) => Some(RuntimeFieldInit::Bool(value)),
         (FirType::Array(inner, _), FirMatch::ValueArray { values, .. }) => {
             decode_array_values(store, inner, &values)

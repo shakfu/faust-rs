@@ -203,7 +203,12 @@ pub unsafe extern "C" fn instanceConstantsCCraneliftDSPInstance(
             return;
         };
         apply_constant_inits(&mut (*dsp).dsp_state, jit.struct_layout(), &factory.runtime);
-        apply_sample_rate(&mut (*dsp).dsp_state, jit.struct_layout(), &factory.runtime, sample_rate);
+        apply_sample_rate(
+            &mut (*dsp).dsp_state,
+            jit.struct_layout(),
+            &factory.runtime,
+            sample_rate,
+        );
     }
 }
 
@@ -288,7 +293,11 @@ pub unsafe extern "C" fn instanceClearCCraneliftDSPInstance(dsp: *mut CraneliftD
             if let Some(field) = jit.struct_layout().field(name) {
                 match &field.kind {
                     StructFieldKind::Scalar(FirType::Int32) => {
-                        write_i32(&mut (*dsp).dsp_state, field.offset_bytes as usize, (*dsp).sample_rate);
+                        write_i32(
+                            &mut (*dsp).dsp_state,
+                            field.offset_bytes as usize,
+                            (*dsp).sample_rate,
+                        );
                     }
                     StructFieldKind::Scalar(FirType::Float32 | FirType::FaustFloat) => {
                         write_f32(
@@ -500,7 +509,15 @@ fn dispatch_ui_runtime(
                             zone_ptr(dsp_state, layout, zone),
                         )
                     {
-                        f(ui.ui_interface, label.as_ptr(), zone, *init, *lo, *hi, *step);
+                        f(
+                            ui.ui_interface,
+                            label.as_ptr(),
+                            zone,
+                            *init,
+                            *lo,
+                            *hi,
+                            *step,
+                        );
                     }
                 }
                 RuntimeUiItem::HorizontalSlider {
@@ -517,7 +534,15 @@ fn dispatch_ui_runtime(
                             zone_ptr(dsp_state, layout, zone),
                         )
                     {
-                        f(ui.ui_interface, label.as_ptr(), zone, *init, *lo, *hi, *step);
+                        f(
+                            ui.ui_interface,
+                            label.as_ptr(),
+                            zone,
+                            *init,
+                            *lo,
+                            *hi,
+                            *step,
+                        );
                     }
                 }
                 RuntimeUiItem::NumEntry {
@@ -534,10 +559,23 @@ fn dispatch_ui_runtime(
                             zone_ptr(dsp_state, layout, zone),
                         )
                     {
-                        f(ui.ui_interface, label.as_ptr(), zone, *init, *lo, *hi, *step);
+                        f(
+                            ui.ui_interface,
+                            label.as_ptr(),
+                            zone,
+                            *init,
+                            *lo,
+                            *hi,
+                            *step,
+                        );
                     }
                 }
-                RuntimeUiItem::HorizontalBargraph { label, zone, lo, hi } => {
+                RuntimeUiItem::HorizontalBargraph {
+                    label,
+                    zone,
+                    lo,
+                    hi,
+                } => {
                     if let Some(f) = ui.add_horizontal_bargraph
                         && let (Ok(label), Some(zone)) = (
                             std::ffi::CString::new(label.as_str()),
@@ -547,7 +585,12 @@ fn dispatch_ui_runtime(
                         f(ui.ui_interface, label.as_ptr(), zone, *lo, *hi);
                     }
                 }
-                RuntimeUiItem::VerticalBargraph { label, zone, lo, hi } => {
+                RuntimeUiItem::VerticalBargraph {
+                    label,
+                    zone,
+                    lo,
+                    hi,
+                } => {
                     if let Some(f) = ui.add_vertical_bargraph
                         && let (Ok(label), Some(zone)) = (
                             std::ffi::CString::new(label.as_str()),
@@ -564,7 +607,8 @@ fn dispatch_ui_runtime(
                             std::ffi::CString::new(url.as_str()),
                         )
                     {
-                        let zone = zone_ptr(dsp_state, layout, zone).map_or(std::ptr::null_mut(), |p| p.cast());
+                        let zone = zone_ptr(dsp_state, layout, zone)
+                            .map_or(std::ptr::null_mut(), |p| p.cast());
                         f(ui.ui_interface, label.as_ptr(), url.as_ptr(), zone);
                     }
                 }
@@ -582,9 +626,11 @@ fn zone_ptr(
     match &field.kind {
         StructFieldKind::Scalar(FirType::Float32 | FirType::FaustFloat)
         | StructFieldKind::Scalar(FirType::Int32)
-        | StructFieldKind::Scalar(FirType::Bool) => {
-            Some(dsp_state.ptr_at(field.offset_bytes as usize).cast::<FaustFloat>())
-        }
+        | StructFieldKind::Scalar(FirType::Bool) => Some(
+            dsp_state
+                .ptr_at(field.offset_bytes as usize)
+                .cast::<FaustFloat>(),
+        ),
         _ => None,
     }
 }
@@ -842,10 +888,14 @@ mod tests {
         let frames = 256usize;
         let mut input_buffers = vec![vec![0.0_f32; frames]; num_inputs];
         let mut output_buffers = vec![vec![0.0_f32; frames]; num_outputs.max(1)];
-        let mut input_ptrs: Vec<*mut FaustFloat> =
-            input_buffers.iter_mut().map(|buf| buf.as_mut_ptr()).collect();
-        let mut output_ptrs: Vec<*mut FaustFloat> =
-            output_buffers.iter_mut().map(|buf| buf.as_mut_ptr()).collect();
+        let mut input_ptrs: Vec<*mut FaustFloat> = input_buffers
+            .iter_mut()
+            .map(|buf| buf.as_mut_ptr())
+            .collect();
+        let mut output_ptrs: Vec<*mut FaustFloat> = output_buffers
+            .iter_mut()
+            .map(|buf| buf.as_mut_ptr())
+            .collect();
 
         unsafe {
             computeCCraneliftDSPInstance(

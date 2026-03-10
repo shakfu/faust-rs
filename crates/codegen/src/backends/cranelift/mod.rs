@@ -847,6 +847,22 @@ extern "C" fn host_fmod(a: f64, b: f64) -> f64 {
     a % b
 }
 
+extern "C" fn host_rintf(a: f32) -> f32 {
+    a.round_ties_even()
+}
+
+extern "C" fn host_rint(a: f64) -> f64 {
+    a.round_ties_even()
+}
+
+extern "C" fn host_remainderf(a: f32, b: f32) -> f32 {
+    a - (a / b).round_ties_even() * b
+}
+
+extern "C" fn host_remainder(a: f64, b: f64) -> f64 {
+    a - (a / b).round_ties_even() * b
+}
+
 /// Registers Rust host math functions as JIT-importable symbols.
 ///
 /// The Cranelift lowering emits imported calls for many FIR math operations
@@ -882,6 +898,8 @@ fn register_host_symbols(jit_builder: &mut JITBuilder) {
     jit_builder.symbol("asin", host_asin as *const u8);
     jit_builder.symbol("acosf", host_acosf as *const u8);
     jit_builder.symbol("acos", host_acos as *const u8);
+    jit_builder.symbol("rintf", host_rintf as *const u8);
+    jit_builder.symbol("rint", host_rint as *const u8);
     jit_builder.symbol("roundf", host_roundf as *const u8);
     jit_builder.symbol("round", host_round as *const u8);
     jit_builder.symbol("fminf", host_fminf as *const u8);
@@ -894,6 +912,8 @@ fn register_host_symbols(jit_builder: &mut JITBuilder) {
     jit_builder.symbol("atan2", host_atan2 as *const u8);
     jit_builder.symbol("fmodf", host_fmodf as *const u8);
     jit_builder.symbol("fmod", host_fmod as *const u8);
+    jit_builder.symbol("remainderf", host_remainderf as *const u8);
+    jit_builder.symbol("remainder", host_remainder as *const u8);
 }
 
 /// Lowered expression value tracked in the local Cranelift lowering environment.
@@ -1109,6 +1129,12 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
     /// This is a small, explicit conversion set used by current subset lowering
     /// (not a general FIR coercion engine). Unsupported conversions are surfaced
     /// as subset-lowering failures.
+    ///
+    /// Numeric FIR `Cast` nodes are inserted upstream by signal/FIR preparation,
+    /// for example when integer expressions feed float arithmetic or when float
+    /// indices are truncated before table access. The subset matcher already
+    /// accepts those `Cast` nodes, so the backend must lower the same signed
+    /// int/real coercions explicitly to avoid matcher/lowerer drift.
     fn coerce_value_to_fir_type(
         &mut self,
         value: Value,
@@ -1124,6 +1150,18 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
             (types::F64, types::F32) => Ok(self.fb.ins().fdemote(types::F32, value)),
             (types::I8, types::I32) => Ok(self.fb.ins().uextend(types::I32, value)),
             (types::I8, types::I64) => Ok(self.fb.ins().uextend(types::I64, value)),
+            (types::I32, types::F32) | (types::I64, types::F32) => {
+                Ok(self.fb.ins().fcvt_from_sint(types::F32, value))
+            }
+            (types::I32, types::F64) | (types::I64, types::F64) => {
+                Ok(self.fb.ins().fcvt_from_sint(types::F64, value))
+            }
+            (types::F32, types::I32) | (types::F64, types::I32) => {
+                Ok(self.fb.ins().fcvt_to_sint(types::I32, value))
+            }
+            (types::F32, types::I64) | (types::F64, types::I64) => {
+                Ok(self.fb.ins().fcvt_to_sint(types::I64, value))
+            }
             _ => Err(LoweringError::Unsupported(format!(
                 "unsupported Cranelift coercion {src_ty} -> {dst_ty} for FIR target {target:?}"
             ))),
@@ -2172,6 +2210,7 @@ fn unary_math_symbol_f32(math: fir::FirMathOp) -> Option<&'static str> {
         fir::FirMathOp::Abs => "fabsf",
         fir::FirMathOp::Floor => "floorf",
         fir::FirMathOp::Ceil => "ceilf",
+        fir::FirMathOp::Rint => "rintf",
         fir::FirMathOp::Round => "roundf",
         _ => return None,
     })
@@ -2196,6 +2235,7 @@ fn unary_math_symbol_f64(math: fir::FirMathOp) -> Option<&'static str> {
         fir::FirMathOp::Abs => "fabs",
         fir::FirMathOp::Floor => "floor",
         fir::FirMathOp::Ceil => "ceil",
+        fir::FirMathOp::Rint => "rint",
         fir::FirMathOp::Round => "round",
         _ => return None,
     })
@@ -2209,6 +2249,7 @@ fn binary_math_symbol_f32(math: fir::FirMathOp) -> Option<&'static str> {
         fir::FirMathOp::Max => "fmaxf",
         fir::FirMathOp::Atan2 => "atan2f",
         fir::FirMathOp::Fmod => "fmodf",
+        fir::FirMathOp::Remainder => "remainderf",
         _ => return None,
     })
 }
@@ -2221,6 +2262,7 @@ fn binary_math_symbol_f64(math: fir::FirMathOp) -> Option<&'static str> {
         fir::FirMathOp::Max => "fmax",
         fir::FirMathOp::Atan2 => "atan2",
         fir::FirMathOp::Fmod => "fmod",
+        fir::FirMathOp::Remainder => "remainder",
         _ => return None,
     })
 }
@@ -2976,7 +3018,9 @@ mod tests {
         let m = b.fun_call("std::fmax", &[cosx, sqrt_ex], FirType::FaustFloat);
         let p = b.fun_call("std::pow", &[m, y], FirType::FaustFloat);
         let z = b.fun_call("std::fmod", &[p, y], FirType::FaustFloat);
-        let store_out = b.store_table("output0", AccessType::Stack, i0, z);
+        let r = b.fun_call("std::remainder", &[p, y], FirType::FaustFloat);
+        let out = b.binop(FirBinOp::Add, z, r, FirType::FaustFloat);
+        let store_out = b.store_table("output0", AccessType::Stack, i0, out);
         let loop_body = b.block(&[store_out]);
         let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
         let compute_body = b.block(&[out_alias, sample_loop]);
@@ -3776,6 +3820,145 @@ mod tests {
         (store, module)
     }
 
+    fn build_int_to_float_cast_subset_module() -> (fir::FirStore, FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let dsp_struct = b.block(&[]);
+        let globals = b.block(&[]);
+
+        let out_chan = b.int32(0);
+        let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+        let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let one = b.int32(1);
+        let sum = b.binop(FirBinOp::Add, i0, one, FirType::Int32);
+        let sample = b.cast(FirType::Float32, sum);
+        let store_out = b.store_table("output0", AccessType::Stack, i0, sample);
+        let loop_body = b.block(&[store_out]);
+        let loop_ = b.simple_for_loop("i0", count, loop_body, false);
+        let compute_body = b.block(&[out_alias, loop_]);
+        let compute_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        );
+        let functions = b.block(&[compute]);
+        let module = b.module(
+            0,
+            0,
+            "int_to_float_cast_subset",
+            dsp_struct,
+            globals,
+            functions,
+        );
+        (store, module)
+    }
+
+    fn build_float_to_int_cast_subset_module() -> (fir::FirStore, FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let zero = b.float32(10.0);
+        let one = b.float32(20.0);
+        let two = b.float32(30.0);
+        let table = b.declare_table(
+            "fTbl0",
+            AccessType::Struct,
+            FirType::Float32,
+            &[zero, one, two],
+        );
+        let globals = b.block(&[table]);
+        let dsp_struct = b.block(&[]);
+
+        let out_chan = b.int32(0);
+        let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+        let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let idx_f = b.float32(1.75);
+        let idx_i = b.cast(FirType::Int32, idx_f);
+        let sample = b.load_table("fTbl0", AccessType::Struct, idx_i, FirType::Float32);
+        let store_out = b.store_table("output0", AccessType::Stack, i0, sample);
+        let loop_body = b.block(&[store_out]);
+        let loop_ = b.simple_for_loop("i0", count, loop_body, false);
+        let compute_body = b.block(&[out_alias, loop_]);
+        let compute_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        );
+        let functions = b.block(&[compute]);
+        let module = b.module(
+            0,
+            0,
+            "float_to_int_cast_subset",
+            dsp_struct,
+            globals,
+            functions,
+        );
+        (store, module)
+    }
+
     #[test]
     fn compile_module_lowers_shift_array_var_struct_subset_body() {
         let (store, module) = build_shift_array_var_struct_subset_module();
@@ -3783,5 +3966,33 @@ mod tests {
             .expect("shift-array-var struct subset fixture should compile with body lowering");
         assert!(compiled.has_compute_entry());
         assert!(compiled.compute_body_lowered());
+    }
+
+    #[test]
+    fn compile_module_lowers_int_to_float_cast_subset_body() {
+        let (store, module) = build_int_to_float_cast_subset_module();
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
+            .expect("int-to-float cast subset fixture should compile with body lowering");
+        assert!(compiled.has_compute_entry());
+        assert!(compiled.compute_body_lowered());
+        let compute_clif = &compiled.generated_functions_clif()[0].1;
+        assert!(
+            compute_clif.contains("fcvt_from_sint"),
+            "expected int-to-float cast lowering in CLIF, got:\n{compute_clif}"
+        );
+    }
+
+    #[test]
+    fn compile_module_lowers_float_to_int_cast_subset_body() {
+        let (store, module) = build_float_to_int_cast_subset_module();
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
+            .expect("float-to-int cast subset fixture should compile with body lowering");
+        assert!(compiled.has_compute_entry());
+        assert!(compiled.compute_body_lowered());
+        let compute_clif = &compiled.generated_functions_clif()[0].1;
+        assert!(
+            compute_clif.contains("fcvt_to_sint"),
+            "expected float-to-int cast lowering in CLIF, got:\n{compute_clif}"
+        );
     }
 }

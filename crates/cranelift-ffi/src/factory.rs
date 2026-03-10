@@ -812,14 +812,18 @@ fn collect_search_paths_for_file(path: &Path, argv: &[String]) -> Vec<PathBuf> {
 fn fir_module_num_inputs(store: &fir::FirStore, module: fir::FirId) -> Result<usize, String> {
     match match_fir(store, module) {
         FirMatch::Module { num_inputs, .. } => Ok(num_inputs),
-        other => Err(format!("expected FIR Module when extracting input arity, got {other:?}")),
+        other => Err(format!(
+            "expected FIR Module when extracting input arity, got {other:?}"
+        )),
     }
 }
 
 fn fir_module_num_outputs(store: &fir::FirStore, module: fir::FirId) -> Result<usize, String> {
     match match_fir(store, module) {
         FirMatch::Module { num_outputs, .. } => Ok(num_outputs),
-        other => Err(format!("expected FIR Module when extracting output arity, got {other:?}")),
+        other => Err(format!(
+            "expected FIR Module when extracting output arity, got {other:?}"
+        )),
     }
 }
 
