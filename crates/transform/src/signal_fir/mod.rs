@@ -748,6 +748,13 @@ mod tests {
                 >= 2,
             "rec/proj should write the current recursion slot and shift it to the previous slot"
         );
+        assert!(
+            stmts.iter().all(|id| !matches!(
+                match_fir(&out.store, *id),
+                FirMatch::Cast { .. }
+            )),
+            "rec/proj lowering should not need cast wrappers around recursive array accesses"
+        );
     }
 
     #[test]
@@ -810,8 +817,8 @@ mod tests {
         };
         let mut rec_store_count = 0usize;
         let mut rec_indices = HashSet::new();
-        for stmt in stmts {
-            if let FirMatch::StoreTable { name, index, .. } = match_fir(&out.store, stmt)
+        for stmt in &stmts {
+            if let FirMatch::StoreTable { name, index, .. } = match_fir(&out.store, *stmt)
                 && name.starts_with("fRec")
             {
                 rec_store_count += 1;
@@ -825,6 +832,13 @@ mod tests {
             "feedback recurrence should write only the current and previous recursion array slots"
         );
         assert_eq!(rec_indices, HashSet::from([0, 1]));
+        assert!(
+            stmts.iter().all(|id| !matches!(
+                match_fir(&out.store, *id),
+                FirMatch::Cast { .. }
+            )),
+            "feedback delay1 recursion reuse should not insert cast wrappers"
+        );
     }
 
     #[test]

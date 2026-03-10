@@ -991,19 +991,18 @@ impl<'a> SignalToFirLower<'a> {
     ) -> Result<FirId, SignalFirError> {
         if let Some(rec_info) = self.recursion_feedback_info(value)? {
             let out_ty = self.signal_fir_type(node)?;
+            debug_assert_eq!(
+                rec_info.typ, out_ty,
+                "prepared recursion feedback type should match delay1 output type"
+            );
             let prev_index = self.lower_int32_const(1);
             let mut b = FirBuilder::new(&mut self.store);
-            let load = b.load_table(
+            return Ok(b.load_table(
                 rec_info.name,
                 AccessType::Struct,
                 prev_index,
                 rec_info.typ.clone(),
-            );
-            return if rec_info.typ == out_ty {
-                Ok(load)
-            } else {
-                Ok(b.cast(out_ty, load))
-            };
+            ));
         }
         let state_ty = self.signal_fir_type(value)?;
         let out_ty = self.signal_fir_type(node)?;
@@ -1900,15 +1899,13 @@ impl<'a> SignalToFirLower<'a> {
 
         if let Some(info) = self.active_recursion_info(group)? {
             let real_ty = self.signal_fir_type(node)?;
+            debug_assert_eq!(
+                info.typ, real_ty,
+                "prepared recursion projection type should match recursion array element type"
+            );
             let current_index = self.lower_int32_const(0);
-            let rec_ty = info.typ.clone();
             let mut b = FirBuilder::new(&mut self.store);
-            let load = b.load_table(info.name, AccessType::Struct, current_index, rec_ty.clone());
-            return if real_ty == rec_ty {
-                Ok(load)
-            } else {
-                Ok(b.cast(real_ty, load))
-            };
+            return Ok(b.load_table(info.name, AccessType::Struct, current_index, real_ty));
         }
 
         let body = if let Some(body) = self.decode_symbolic_group(group) {
