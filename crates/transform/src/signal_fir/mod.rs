@@ -749,10 +749,9 @@ mod tests {
             "rec/proj should write the current recursion slot and shift it to the previous slot"
         );
         assert!(
-            stmts.iter().all(|id| !matches!(
-                match_fir(&out.store, *id),
-                FirMatch::Cast { .. }
-            )),
+            stmts
+                .iter()
+                .all(|id| !matches!(match_fir(&out.store, *id), FirMatch::Cast { .. })),
             "rec/proj lowering should not need cast wrappers around recursive array accesses"
         );
     }
@@ -833,10 +832,9 @@ mod tests {
         );
         assert_eq!(rec_indices, HashSet::from([0, 1]));
         assert!(
-            stmts.iter().all(|id| !matches!(
-                match_fir(&out.store, *id),
-                FirMatch::Cast { .. }
-            )),
+            stmts
+                .iter()
+                .all(|id| !matches!(match_fir(&out.store, *id), FirMatch::Cast { .. })),
             "feedback delay1 recursion reuse should not insert cast wrappers"
         );
     }

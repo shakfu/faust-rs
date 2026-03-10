@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_57_additive_synth.dsp
+bytes=563
+lines=20
+fnv1a64=649c9eb64a5ccf92
