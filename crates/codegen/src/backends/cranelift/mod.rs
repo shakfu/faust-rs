@@ -375,12 +375,16 @@ impl StructFieldLayout {
     }
 }
 
+/// Concrete size/alignment pair for one scalar storage type in the layout plan.
 #[derive(Clone, Copy, Debug)]
 struct LayoutScalar {
     size: u32,
     align: u32,
 }
 
+/// Rounds `value` up to the next multiple of `align`.
+///
+/// `align <= 1` is treated as already aligned.
 fn align_up(value: u32, align: u32) -> u32 {
     if align <= 1 {
         return value;
@@ -870,7 +874,9 @@ extern "C" fn host_remainder(a: f64, b: f64) -> f64 {
 /// implementations so the JIT can resolve them during finalization.
 ///
 /// Both `f32` (`*f`) and `f64` symbol variants are registered where the subset
-/// lowering supports both result types.
+/// lowering supports both result types. The `host_*` helpers immediately above
+/// are intentionally tiny wrappers whose semantics match the interpreter/C++
+/// path (notably `rint` and `remainder`).
 fn register_host_symbols(jit_builder: &mut JITBuilder) {
     jit_builder.symbol("sinf", host_sinf as *const u8);
     jit_builder.symbol("sin", host_sin as *const u8);
@@ -945,6 +951,9 @@ impl LoweredExpr {
     }
 
     /// Returns the pointer CLIF value when this expression represents a pointer.
+    ///
+    /// This is mainly used by table alias lowering on stack/function-argument
+    /// pointers.
     fn ptr(self) -> Option<Value> {
         match self {
             Self::Ptr { value, .. } => Some(value),

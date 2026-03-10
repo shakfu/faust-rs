@@ -3,7 +3,7 @@
 //! This module owns the runtime DSP instance contract:
 //! - allocate one backend `dsp*` state buffer per instance,
 //! - invoke finalized Cranelift `compute` entry points,
-//! - dispatch UI/meta callbacks through interpreter sidecar instruction blocks.
+//! - dispatch UI/meta callbacks from the native FIR-derived runtime descriptor.
 //!
 //! The design keeps one factory -> multiple instances semantics and isolates all
 //! function pointer invocation in documented `unsafe` boundaries.
@@ -20,9 +20,14 @@ use crate::types::{
     alloc_instance, free_instance,
 };
 
+/// Typed JIT `compute` signature used by the standalone Cranelift runtime.
+///
+/// This matches the standard Faust DSP ABI:
+/// `compute(dsp*, count, inputs**, outputs**)`.
 type ComputeFn =
     unsafe extern "C" fn(*mut c_void, c_int, *mut *mut FaustFloat, *mut *mut FaustFloat);
 
+/// Converts a Rust channel count to the C ABI integer type with saturation.
 fn arity_to_c_int(value: usize) -> c_int {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
@@ -212,6 +217,7 @@ pub unsafe extern "C" fn instanceConstantsCCraneliftDSPInstance(
     }
 }
 
+/// Applies all constant/global initializers recorded in the runtime descriptor.
 fn apply_constant_inits(
     dsp_state: &mut DspStateBuffer,
     layout: &StructLayoutPlan,
@@ -225,6 +231,11 @@ fn apply_constant_inits(
     }
 }
 
+/// Writes the current sample rate into all FIR-recognized sample-rate fields.
+///
+/// Faust DSP modules may expose the rate through differently typed struct
+/// fields (`Int32`, `Float32`, `Float64`, `FaustFloat`), so this helper
+/// normalizes one external `c_int` request across those storage forms.
 fn apply_sample_rate(
     dsp_state: &mut DspStateBuffer,
     layout: &StructLayoutPlan,
@@ -437,8 +448,16 @@ pub fn instance_status() -> &'static str {
     "cranelift-ffi instance runtime"
 }
 
+/// Placeholder for the Faust `classInit` family in the current standalone runtime.
+///
+/// The FIR-to-runtime descriptor path does not yet materialize a separate
+/// Cranelift-lowered `classInit`, so this stays as an explicit no-op hook.
 unsafe fn class_init_instance(_dsp: *mut CraneliftDspInstance) {}
 
+/// Replays FIR-derived UI items through the exported `UIGlue` callback table.
+///
+/// Zone pointers are resolved directly against the native `dsp_state` buffer so
+/// controls and bargraphs share the same storage seen by JIT `compute`.
 fn dispatch_ui_runtime(
     runtime: &RuntimeDescriptor,
     layout: &StructLayoutPlan,
@@ -617,6 +636,11 @@ fn dispatch_ui_runtime(
     }
 }
 
+/// Resolves one UI zone name to a mutable `FAUSTFLOAT*` pointer.
+///
+/// The V1 C API glue expects all zones to be presented as `FAUSTFLOAT*`, even
+/// when the underlying field is stored as `Int32` or `Bool`. This matches the
+/// existing Faust C ABI convention used by other backends.
 fn zone_ptr(
     dsp_state: &mut DspStateBuffer,
     layout: &StructLayoutPlan,
@@ -635,6 +659,10 @@ fn zone_ptr(
     }
 }
 
+/// Clears the runtime-managed subset of the `dsp*` state buffer.
+///
+/// The exact clear set is precomputed in [`RuntimeDescriptor`] so instance code
+/// does not need to infer policy from field names repeatedly.
 fn clear_runtime_state(
     dsp_state: &mut DspStateBuffer,
     layout: &StructLayoutPlan,
@@ -654,6 +682,7 @@ fn clear_runtime_state(
     }
 }
 
+/// Restores UI control defaults recorded from FIR `buildUserInterface`.
 fn apply_control_defaults(
     dsp_state: &mut DspStateBuffer,
     layout: &StructLayoutPlan,
@@ -678,6 +707,11 @@ fn apply_control_defaults(
     }
 }
 
+/// Writes one decoded runtime initializer payload into a concrete struct field.
+///
+/// Scalar and array payloads both use unaligned stores because the backend
+/// layout contract is byte-addressed and may not align every field to the host
+/// native alignment of the Rust scalar type.
 fn write_field_init(
     dsp_state: &mut DspStateBuffer,
     field: &StructFieldLayout,
@@ -707,26 +741,36 @@ fn write_field_init(
     }
 }
 
+/// Writes one `i32` at byte offset `offset` inside the `dsp*` state buffer.
 fn write_i32(dsp_state: &mut DspStateBuffer, offset: usize, value: i32) {
     unsafe { std::ptr::write_unaligned(dsp_state.ptr_at(offset).cast::<i32>(), value) };
 }
 
+/// Writes one `i64` at byte offset `offset` inside the `dsp*` state buffer.
 fn write_i64(dsp_state: &mut DspStateBuffer, offset: usize, value: i64) {
     unsafe { std::ptr::write_unaligned(dsp_state.ptr_at(offset).cast::<i64>(), value) };
 }
 
+/// Writes one `f32` at byte offset `offset` inside the `dsp*` state buffer.
 fn write_f32(dsp_state: &mut DspStateBuffer, offset: usize, value: f32) {
     unsafe { std::ptr::write_unaligned(dsp_state.ptr_at(offset).cast::<f32>(), value) };
 }
 
+/// Writes one `f64` at byte offset `offset` inside the `dsp*` state buffer.
 fn write_f64(dsp_state: &mut DspStateBuffer, offset: usize, value: f64) {
     unsafe { std::ptr::write_unaligned(dsp_state.ptr_at(offset).cast::<f64>(), value) };
 }
 
+/// Writes one boolean as the backend's byte-sized `0/1` storage convention.
 fn write_bool(dsp_state: &mut DspStateBuffer, offset: usize, value: bool) {
     unsafe { std::ptr::write_unaligned(dsp_state.ptr_at(offset).cast::<u8>(), u8::from(value)) };
 }
 
+/// Reconstructs a typed callable `compute` function pointer from one finalized address.
+///
+/// The address originates from [`codegen::backends::cranelift::JitDspModule`]
+/// after Cranelift finalization, so the transmute is sound as long as factory
+/// and instance code keep the ABI contract in sync.
 fn compute_fn_from_addr(addr: usize) -> Option<ComputeFn> {
     if addr == 0 {
         None

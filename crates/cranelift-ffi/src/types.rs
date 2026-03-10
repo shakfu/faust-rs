@@ -68,6 +68,9 @@ pub struct CraneliftDspFactory {
 }
 
 /// Opaque Cranelift DSP instance wrapper exported as `cranelift_dsp*`.
+///
+/// The instance owns exactly one backend `dsp*` memory block and reuses the
+/// parent factory's compiled JIT module/runtime descriptor.
 pub struct CraneliftDspInstance {
     /// Non-owning pointer to the parent factory (same C API lifetime contract
     /// as `llvm_dsp`/`interpreter_dsp`).
@@ -131,6 +134,10 @@ impl DspStateBuffer {
     }
 
     #[must_use]
+    /// Returns a typed offset pointer inside the allocated `dsp*` state block.
+    ///
+    /// The caller is responsible for keeping accesses within bounds dictated by
+    /// the matching [`StructLayoutPlan`](codegen::backends::cranelift::StructLayoutPlan).
     pub(crate) fn ptr_at(&self, offset: usize) -> *mut u8 {
         self.as_mut_ptr().wrapping_add(offset)
     }

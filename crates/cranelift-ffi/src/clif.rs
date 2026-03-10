@@ -10,11 +10,17 @@ use crate::types::CraneliftDspFactory;
 pub(crate) const CLIF_MAGIC: &str = "FAUST_CLIF_V1";
 
 /// Escapes one textual field for key/value line serialization.
+///
+/// The format is intentionally tiny and line-oriented, so only backslashes and
+/// newlines are escaped.
 fn esc_field(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\n', "\\n")
 }
 
 /// Unescapes one textual field from key/value line serialization.
+///
+/// Unknown escape sequences are preserved literally so the parser remains
+/// forward-compatible with future extensions.
 fn unesc_field(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars();
@@ -37,6 +43,9 @@ fn unesc_field(s: &str) -> String {
 }
 
 /// Parsed `.clif` payload fields needed to rebuild a runnable factory.
+///
+/// This is the decoded intermediate form used by the FFI bitcode read path
+/// before recompiling the embedded Faust source into a fresh Cranelift module.
 pub(crate) struct DecodedClifPayload {
     pub(crate) name: String,
     pub(crate) expected_sha: String,
@@ -121,6 +130,10 @@ pub(crate) fn encode_factory_clif(factory: &CraneliftDspFactory) -> Result<Strin
 }
 
 /// Decodes one textual `.clif` container payload.
+///
+/// Validation is intentionally strict for host-dependent fields such as
+/// pointer width and endianness so incompatible payloads fail early with a
+/// plain string diagnostic rather than later during JIT/runtime use.
 pub(crate) fn decode_factory_clif(text: &str) -> Result<DecodedClifPayload, String> {
     let mut lines = text.lines();
     match lines.next() {

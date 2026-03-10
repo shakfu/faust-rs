@@ -9,8 +9,9 @@
 //! # Current status
 //! - Runtime compute path is wired for file/string constructors:
 //!   FIR -> Cranelift JIT -> callable instance `compute`.
-//! - UI/meta callback dispatch is provided through interpreter sidecar
-//!   instruction blocks.
+//! - UI/meta/sample-rate/reset behavior is derived from FIR into a native
+//!   runtime descriptor; no interpreter sidecar is used in the normal
+//!   Cranelift factory/instance path anymore.
 //! - Remaining deferred families are tracked in the Cranelift backend plan
 //!   and parity matrix.
 //!
@@ -19,7 +20,8 @@
 //! - [`cache`] — global factory cache.
 //! - [`factory`] — factory lifecycle and source compilation entry points.
 //! - [`instance`] — instance lifecycle and `compute`/UI/meta dispatch entry points.
-//! - [`ui`] — UI/meta callback dispatch helpers.
+//! - `clif` — textual `.clif` container helpers used by V1 bitcode APIs.
+//! - `runtime` — native runtime descriptor builder shared by factories/instances.
 
 #![allow(unsafe_code)] // Future FFI implementation will require raw pointers.
 #![allow(non_snake_case)] // FFI parity requires preserving C API symbol names.
@@ -35,6 +37,12 @@ pub mod types;
 mod diff;
 
 #[cfg(test)]
+/// Serializes integration-style tests that exercise global caches/JIT state.
+///
+/// Several `cranelift-ffi` tests mutate process-global state such as the
+/// factory cache or imported JIT symbol tables. This helper provides one
+/// coarse mutex so those tests can opt into serialized execution without
+/// exposing test-only synchronization in the public API.
 pub(crate) fn test_serial_guard() -> std::sync::MutexGuard<'static, ()> {
     use std::sync::{Mutex, OnceLock};
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

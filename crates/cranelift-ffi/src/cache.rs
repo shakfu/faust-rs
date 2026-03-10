@@ -17,17 +17,24 @@ static FACTORY_CACHE: LazyLock<FactoryCache<CraneliftDspFactory>> =
     LazyLock::new(FactoryCache::new);
 
 /// Insert or replace a factory pointer under a SHA key.
+///
+/// The cache owns only the key mapping, not the pointed factory allocation.
+/// Callers remain responsible for eventual `free_factory` after removal/drain.
 pub(crate) fn cache_insert(sha: &str, ptr: *mut CraneliftDspFactory) {
     FACTORY_CACHE.insert(sha, ptr);
 }
 
 /// Look up a factory pointer by SHA key.
+///
+/// Returns null when the key is absent.
 #[must_use]
 pub(crate) fn cache_lookup(sha: &str) -> *mut CraneliftDspFactory {
     FACTORY_CACHE.lookup(sha)
 }
 
 /// Remove a factory from the cache by pointer value.
+///
+/// This is used by delete paths that do not necessarily know the SHA key.
 pub(crate) fn cache_remove_by_ptr(ptr: *mut CraneliftDspFactory) {
     FACTORY_CACHE.remove_by_ptr(ptr);
 }
@@ -45,12 +52,18 @@ pub(crate) fn cache_all_sha_keys() -> Vec<String> {
 }
 
 /// Enable multi-thread mode (compatibility flag only in the scaffold).
+///
+/// The underlying `utils::FactoryCache` keeps this flag for API parity with
+/// the classic Faust C API families, even though the Rust implementation is
+/// already guarded by synchronization primitives.
 #[must_use]
 pub(crate) fn start_mt() -> bool {
     FACTORY_CACHE.start_mt()
 }
 
 /// Disable multi-thread mode (compatibility flag only in the scaffold).
+///
+/// No teardown is required beyond forwarding to the shared cache helper.
 pub(crate) fn stop_mt() {
     FACTORY_CACHE.stop_mt();
 }

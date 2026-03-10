@@ -8,6 +8,10 @@ use std::collections::{HashMap, HashSet};
 use codegen::backends::cranelift::StructFieldKind;
 use fir::{AccessType, FirId, FirMatch, FirStore, FirType, match_fir};
 
+/// Concrete initializer payload extracted from FIR globals/struct fields.
+///
+/// The descriptor keeps values in a Rust-native form so instance init/clear
+/// can replay them directly into the backend `dsp*` state buffer.
 #[derive(Clone, Debug)]
 pub(crate) enum RuntimeFieldInit {
     I32(i32),
@@ -20,6 +24,11 @@ pub(crate) enum RuntimeFieldInit {
     F64Array(Vec<f64>),
 }
 
+/// UI declaration item replayed by the Cranelift instance wrapper.
+///
+/// This enum mirrors the FIR-side UI instructions closely enough for the FFI
+/// runtime to rebuild `buildUserInterface` callbacks without reinterpreting FIR
+/// at instance-construction time.
 #[derive(Clone, Debug)]
 pub(crate) enum RuntimeUiItem {
     OpenTabBox {
@@ -83,6 +92,15 @@ pub(crate) enum RuntimeUiItem {
     },
 }
 
+/// FIR-derived runtime metadata shared by Cranelift factories and instances.
+///
+/// The descriptor is computed once per compiled factory and then reused by each
+/// instance for:
+/// - constant/global initialization,
+/// - clear/reset decisions,
+/// - UI callback replay,
+/// - metadata callback replay,
+/// - sample-rate field updates.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RuntimeDescriptor {
     pub(crate) field_inits: HashMap<String, RuntimeFieldInit>,
@@ -93,6 +111,13 @@ pub(crate) struct RuntimeDescriptor {
     pub(crate) sample_rate_fields: Vec<String>,
 }
 
+/// Builds one native runtime descriptor from a FIR module.
+///
+/// The expected FIR source is the same module fed to the Cranelift backend
+/// proper. This helper walks:
+/// - `dsp_struct` and `globals` for field defaults and clear policy,
+/// - `buildUserInterface` for UI declarations,
+/// - `metadata` for free-form metadata key/value pairs.
 pub(crate) fn build_runtime_descriptor(
     store: &FirStore,
     module: FirId,
@@ -194,6 +219,10 @@ pub(crate) fn build_runtime_descriptor(
     Ok(desc)
 }
 
+/// Returns whether one struct field should be zero/reset during `instanceClear`.
+///
+/// The policy deliberately preserves host-controlled state such as sample rate
+/// while clearing recursive carriers, delay buffers, and explicit tables.
 fn should_clear_field(name: &str, kind: &StructFieldKind) -> bool {
     if name == "fSampleRate" || name == "fSamplingFreq" {
         return false;
@@ -209,6 +238,10 @@ fn should_clear_field(name: &str, kind: &StructFieldKind) -> bool {
         || name.starts_with("iVec")
 }
 
+/// Collects UI declaration items from FIR `buildUserInterface`.
+///
+/// This also records default control values for active widgets so
+/// `instanceResetUserInterface` can restore them without re-running FIR.
 fn collect_ui_items(
     store: &FirStore,
     body: FirId,
@@ -314,6 +347,7 @@ fn collect_ui_items(
     Ok(())
 }
 
+/// Collects metadata key/value declarations from FIR `metadata`.
 fn collect_meta_items(
     store: &FirStore,
     body: FirId,
@@ -328,6 +362,10 @@ fn collect_meta_items(
     Ok(())
 }
 
+/// Normalizes one FIR body to a flat statement vector.
+///
+/// Runtime descriptor extraction expects `buildUserInterface` and `metadata`
+/// bodies to be plain FIR blocks.
 fn flatten_block(store: &FirStore, body: FirId) -> Result<Vec<FirId>, String> {
     match match_fir(store, body) {
         FirMatch::Block(items) => Ok(items),
@@ -335,6 +373,11 @@ fn flatten_block(store: &FirStore, body: FirId) -> Result<Vec<FirId>, String> {
     }
 }
 
+/// Decodes one FIR initializer into a native runtime field initializer.
+///
+/// This helper intentionally peels simple FIR `Cast(...)` wrappers so the
+/// runtime descriptor records the target field value rather than the exact FIR
+/// syntactic shape.
 fn decode_init_value(store: &FirStore, id: FirId, typ: &FirType) -> Option<RuntimeFieldInit> {
     match (typ, match_fir(store, id)) {
         (_, FirMatch::Cast { value, .. }) => decode_init_value(store, value, typ),
@@ -361,6 +404,7 @@ fn decode_init_value(store: &FirStore, id: FirId, typ: &FirType) -> Option<Runti
     }
 }
 
+/// Decodes FIR table initializers into one array-style runtime payload.
 fn decode_table_values(
     store: &FirStore,
     elem_type: &FirType,
@@ -369,6 +413,8 @@ fn decode_table_values(
     decode_array_values(store, elem_type, values)
 }
 
+/// Decodes FIR array literals for the subset of scalar element types used by
+/// the current Cranelift runtime descriptor.
 fn decode_array_values(
     store: &FirStore,
     elem_type: &FirType,

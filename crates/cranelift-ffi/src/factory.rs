@@ -620,6 +620,10 @@ pub fn factory_status() -> &'static str {
     "cranelift-ffi factory runtime"
 }
 
+/// Internal normalized inputs used by the common factory builder.
+///
+/// The external C API exposes several constructors (file/string/boxes/signals)
+/// that eventually converge to the same `CraneliftDspFactory` structure.
 struct FactoryBuildSpec<'a> {
     name: &'a str,
     dsp_code: &'a str,
@@ -659,6 +663,10 @@ fn build_scaffold_factory_from_file(
 }
 
 /// Shared factory object builder.
+///
+/// This is the point where FIR-derived runtime metadata, cache identity, JSON
+/// summary text, and optional compiled JIT payload are assembled into the
+/// exported opaque factory object.
 fn build_scaffold_factory_common(
     spec: FactoryBuildSpec<'_>,
     fir: &BoxFfiFirModule,
@@ -720,10 +728,14 @@ fn build_scaffold_factory_common(
 }
 
 /// Decode a conventional `argc`/`argv` C array into owned Rust strings.
+///
+/// This thin wrapper keeps the `unsafe` boundary local to the FFI layer while
+/// reusing the shared utility implementation.
 fn decode_c_argv(argc: c_int, argv: *const *const c_char) -> Result<Vec<String>, String> {
     unsafe { decode_c_argv_shared(argc, argv) }
 }
 
+/// Result of running the Faust compiler pipeline plus Cranelift JIT compilation.
 #[derive(Debug)]
 struct CompiledCraneliftFactory {
     fir: BoxFfiFirModule,
@@ -801,6 +813,10 @@ fn map_c_opt_level(level: c_int) -> CraneliftOptLevel {
 }
 
 /// Builds import search paths for file compilation from default base + `-I` args.
+///
+/// Path-based compilation must keep source-directory-relative import semantics,
+/// so file constructors start from the compiler defaults and then append FFI
+/// `-I...` overrides.
 fn collect_search_paths_for_file(path: &Path, argv: &[String]) -> Vec<PathBuf> {
     let mut paths = default_import_search_paths(path);
     if let Ok(parsed) = parse_ffi_compile_args(argv) {
@@ -809,6 +825,7 @@ fn collect_search_paths_for_file(path: &Path, argv: &[String]) -> Vec<PathBuf> {
     paths
 }
 
+/// Reads the FIR module input arity from one boxed FIR export.
 fn fir_module_num_inputs(store: &fir::FirStore, module: fir::FirId) -> Result<usize, String> {
     match match_fir(store, module) {
         FirMatch::Module { num_inputs, .. } => Ok(num_inputs),
@@ -818,6 +835,7 @@ fn fir_module_num_inputs(store: &fir::FirStore, module: fir::FirId) -> Result<us
     }
 }
 
+/// Reads the FIR module output arity from one boxed FIR export.
 fn fir_module_num_outputs(store: &fir::FirStore, module: fir::FirId) -> Result<usize, String> {
     match match_fir(store, module) {
         FirMatch::Module { num_outputs, .. } => Ok(num_outputs),
@@ -827,10 +845,12 @@ fn fir_module_num_outputs(store: &fir::FirStore, module: fir::FirId) -> Result<u
     }
 }
 
+/// Escapes one field in the legacy textual bitcode container.
 fn esc_bitcode_field(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\n', "\\n")
 }
 
+/// Unescapes one field in the legacy textual bitcode container.
 fn unesc_bitcode_field(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut it = s.chars();
@@ -887,6 +907,10 @@ fn encode_legacy_source_backed_bitcode(factory: &CraneliftDspFactory) -> Result<
 
 /// Decodes a Cranelift source-backed bitcode payload and rebuilds a runnable
 /// JIT factory.
+///
+/// Both legacy `CRANELIFT_FFI_V2_SOURCE` and current `FAUST_CLIF_V1` payloads
+/// are accepted here so the read path can remain backwards-compatible during
+/// the transition to the richer `.clif` container.
 fn decode_factory_bitcode(text: &str) -> Result<CraneliftDspFactory, String> {
     if text.lines().next() == Some(CLIF_MAGIC) {
         let decoded = decode_factory_clif(text)?;
@@ -1027,6 +1051,9 @@ unsafe fn write_error(buf: *mut c_char, msg: &str) {
 /// This centralizes common FFI mechanics (error buffer + cache insertion +
 /// final allocation) while keeping file-vs-string compilation/preflight paths
 /// separate so path-based import semantics remain backend-correct.
+///
+/// The callback builds a fully initialized Rust factory value; this helper then
+/// performs the final opaque allocation and cache registration.
 unsafe fn create_cranelift_factory_with_argv<F>(
     argv: &[String],
     error_msg: *mut c_char,
