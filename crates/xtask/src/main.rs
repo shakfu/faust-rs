@@ -151,10 +151,10 @@ fn workspace_relative_path(path: &Path) -> String {
     if let Ok(relative) = path.strip_prefix(&root) {
         return relative.display().to_string();
     }
-    if let Ok(canonical) = path.canonicalize() {
-        if let Ok(relative) = canonical.strip_prefix(&root) {
-            return relative.display().to_string();
-        }
+    if let Ok(canonical) = path.canonicalize()
+        && let Ok(relative) = canonical.strip_prefix(&root)
+    {
+        return relative.display().to_string();
     }
     path.display().to_string()
 }
