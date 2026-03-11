@@ -282,6 +282,15 @@ fn emit_c_header(out: &mut String, class_name: &str) {
     let _ = writeln!(out, "#define exp10 __exp10");
     let _ = writeln!(out, "#endif");
     let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "static inline int faustmini(int a, int b) {{ return (a < b) ? a : b; }}"
+    );
+    let _ = writeln!(
+        out,
+        "static inline int faustmaxi(int a, int b) {{ return (a > b) ? a : b; }}"
+    );
+    let _ = writeln!(out);
 }
 
 /// Emits the closing `extern "C"` / include-guard footer.
@@ -1194,7 +1203,11 @@ fn emit_value(store: &FirStore, options: &COptions, value: FirId) -> Result<Stri
             for arg in args {
                 rendered.push(emit_value(store, options, arg)?);
             }
-            let c_name = name.strip_prefix("std::").unwrap_or(name.as_str());
+            let c_name = match name.as_str() {
+                "min_i" => "faustmini",
+                "max_i" => "faustmaxi",
+                _ => name.strip_prefix("std::").unwrap_or(name.as_str()),
+            };
             Ok(format!("{c_name}({})", rendered.join(", ")))
         }
         FirMatch::NullValue { .. } => Ok("NULL".to_owned()),

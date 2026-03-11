@@ -43,6 +43,18 @@ fn compile_cpp_with_lane(file: &str, lane: SignalFirLane) -> String {
         .unwrap_or_else(|e| panic!("{file} C++ compilation failed for lane {lane:?}: {e}"))
 }
 
+fn compile_cpp_source_with_lane(source_name: &str, source: &str, lane: SignalFirLane) -> String {
+    let compiler = Compiler::new();
+    compiler
+        .compile_source_to_cpp_with_lane(
+            source_name,
+            source,
+            &codegen::backends::cpp::CppOptions::default(),
+            lane,
+        )
+        .unwrap_or_else(|e| panic!("{source_name} C++ compilation failed for lane {lane:?}: {e}"))
+}
+
 fn compile_c_with_lane(file: &str, lane: SignalFirLane) -> String {
     let compiler = Compiler::new();
     let path = corpus_path(file);
@@ -469,6 +481,44 @@ fn fastlane_cpp_compiles_noise_smoo_slider_fixture() {
     assert!(
         !cpp.contains("float fRec"),
         "fast-lane C++ should keep the recursive noise carrier in integer state"
+    );
+}
+
+#[test]
+fn fastlane_cpp_keeps_integer_recursive_min_feedback_in_int_state() {
+    let cpp = compile_cpp_source_with_lane(
+        "rec_int_min.dsp",
+        "process = 1 : (+ : min(3)) ~ _;",
+        SignalFirLane::TransformFastLane,
+    );
+    assert!(cpp.contains("class mydsp : public dsp"));
+    assert!(cpp.contains("int[2] iRec"));
+    assert!(
+        !cpp.contains("float[2] fRec") && !cpp.contains("double[2] fRec"),
+        "integer recursive min should keep recursion state in integer arrays"
+    );
+    assert!(
+        cpp.contains("std::min<int>("),
+        "integer recursive min should stay an explicit integer min function call"
+    );
+}
+
+#[test]
+fn fastlane_cpp_keeps_integer_recursive_abs_feedback_in_int_state() {
+    let cpp = compile_cpp_source_with_lane(
+        "rec_int_abs.dsp",
+        "process = 1 : (+ : abs) ~ _;",
+        SignalFirLane::TransformFastLane,
+    );
+    assert!(cpp.contains("class mydsp : public dsp"));
+    assert!(cpp.contains("int[2] iRec"));
+    assert!(
+        !cpp.contains("float[2] fRec") && !cpp.contains("double[2] fRec"),
+        "integer recursive abs should keep recursion state in integer arrays"
+    );
+    assert!(
+        cpp.contains("std::abs("),
+        "integer recursive abs should stay an explicit integer abs function call"
     );
 }
 

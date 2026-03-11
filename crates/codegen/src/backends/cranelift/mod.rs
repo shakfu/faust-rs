@@ -765,6 +765,18 @@ extern "C" fn host_fabs(x: f64) -> f64 {
     x.abs()
 }
 
+extern "C" fn host_abs(a: i32) -> i32 {
+    a.checked_abs().unwrap_or(a)
+}
+
+extern "C" fn host_min_i(a: i32, b: i32) -> i32 {
+    a.min(b)
+}
+
+extern "C" fn host_max_i(a: i32, b: i32) -> i32 {
+    a.max(b)
+}
+
 extern "C" fn host_floorf(x: f32) -> f32 {
     x.floor()
 }
@@ -902,6 +914,7 @@ fn register_host_symbols(jit_builder: &mut JITBuilder) {
     jit_builder.symbol("sqrt", host_sqrt as *const u8);
     jit_builder.symbol("fabsf", host_fabsf as *const u8);
     jit_builder.symbol("fabs", host_fabs as *const u8);
+    jit_builder.symbol("abs", host_abs as *const u8);
     jit_builder.symbol("floorf", host_floorf as *const u8);
     jit_builder.symbol("floor", host_floor as *const u8);
     jit_builder.symbol("ceilf", host_ceilf as *const u8);
@@ -918,6 +931,8 @@ fn register_host_symbols(jit_builder: &mut JITBuilder) {
     jit_builder.symbol("rint", host_rint as *const u8);
     jit_builder.symbol("roundf", host_roundf as *const u8);
     jit_builder.symbol("round", host_round as *const u8);
+    jit_builder.symbol("min_i", host_min_i as *const u8);
+    jit_builder.symbol("max_i", host_max_i as *const u8);
     jit_builder.symbol("fminf", host_fminf as *const u8);
     jit_builder.symbol("fmin", host_fmin as *const u8);
     jit_builder.symbol("fmaxf", host_fmaxf as *const u8);
@@ -2117,6 +2132,25 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         args: &[FirId],
         typ: &FirType,
     ) -> Result<LoweredExpr, LoweringError> {
+        match (name, typ, args) {
+            ("abs", FirType::Int32, [x]) => {
+                let xv = self.lower_expr(*x, Some(typ))?.value();
+                let xv = self.coerce_value_to_fir_type(xv, typ)?;
+                let fref = self.ensure_import("abs", &[types::I32], types::I32)?;
+                let call = self.fb.ins().call(fref, &[xv]);
+                return Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]));
+            }
+            ("min_i", FirType::Int32, [x, y]) | ("max_i", FirType::Int32, [x, y]) => {
+                let xv = self.lower_expr(*x, Some(typ))?.value();
+                let xv = self.coerce_value_to_fir_type(xv, typ)?;
+                let yv = self.lower_expr(*y, Some(typ))?.value();
+                let yv = self.coerce_value_to_fir_type(yv, typ)?;
+                let fref = self.ensure_import(name, &[types::I32, types::I32], types::I32)?;
+                let call = self.fb.ins().call(fref, &[xv, yv]);
+                return Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]));
+            }
+            _ => {}
+        }
         let math = fir::FirMathOp::from_symbol(name).ok_or_else(|| {
             LoweringError::Unsupported(format!("unsupported function call `{name}`"))
         })?;
@@ -2543,7 +2577,9 @@ fn subset_expr_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
             .or_else(|| subset_expr_gap_reason(store, else_value)),
         FirMatch::Neg { value, .. } => subset_expr_gap_reason(store, value),
         FirMatch::FunCall { name, args, .. } => {
-            if fir::FirMathOp::from_symbol(&name).is_none() {
+            if fir::FirMathOp::from_symbol(&name).is_none()
+                && !matches!(name.as_str(), "abs" | "min_i" | "max_i")
+            {
                 Some(format!("unsupported math call in subset: {name}"))
             } else {
                 args.into_iter()

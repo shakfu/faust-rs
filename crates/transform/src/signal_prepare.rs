@@ -352,8 +352,6 @@ impl<'a> SimpleTyper<'a> {
                 }
             }
             SigMatch::Pow(_, _)
-            | SigMatch::Min(_, _)
-            | SigMatch::Max(_, _)
             | SigMatch::Acos(_)
             | SigMatch::Asin(_)
             | SigMatch::Atan(_)
@@ -365,7 +363,6 @@ impl<'a> SimpleTyper<'a> {
             | SigMatch::Log(_)
             | SigMatch::Log10(_)
             | SigMatch::Sqrt(_)
-            | SigMatch::Abs(_)
             | SigMatch::Fmod(_, _)
             | SigMatch::Remainder(_, _)
             | SigMatch::Floor(_)
@@ -374,6 +371,19 @@ impl<'a> SimpleTyper<'a> {
             | SigMatch::Round(_) => {
                 self.visit_children(sig)?;
                 TypeSlot::Real
+            }
+            SigMatch::Abs(inner) => {
+                let inner_ty = self.infer_sig(inner)?;
+                self.numeric_type(inner_ty, "SIGABS operand")?
+            }
+            SigMatch::Min(left, right) | SigMatch::Max(left, right) => {
+                let left_ty = self.infer_sig(left)?;
+                let right_ty = self.infer_sig(right)?;
+                self.unify_slots(
+                    self.numeric_type(left_ty, "SIGMINMAX left operand")?,
+                    self.numeric_type(right_ty, "SIGMINMAX right operand")?,
+                    "SIGMINMAX",
+                )?
             }
             SigMatch::FFun(_, largs) => {
                 self.visit_list_like_children(largs)?;
@@ -924,10 +934,10 @@ impl<'a> SignalPromoter<'a> {
                 self.promote_real_binary(|b, l, r| b.pow(l, r), left, right)?
             }
             SigMatch::Min(left, right) => {
-                self.promote_real_binary(|b, l, r| b.min(l, r), left, right)?
+                self.promote_minmax(|b, l, r| b.min(l, r), left, right)?
             }
             SigMatch::Max(left, right) => {
-                self.promote_real_binary(|b, l, r| b.max(l, r), left, right)?
+                self.promote_minmax(|b, l, r| b.max(l, r), left, right)?
             }
             SigMatch::Acos(inner) => self.promote_real_unary(|b, x| b.acos(x), inner)?,
             SigMatch::Asin(inner) => self.promote_real_unary(|b, x| b.asin(x), inner)?,
@@ -942,7 +952,7 @@ impl<'a> SignalPromoter<'a> {
             SigMatch::Log(inner) => self.promote_real_unary(|b, x| b.log(x), inner)?,
             SigMatch::Log10(inner) => self.promote_real_unary(|b, x| b.log10(x), inner)?,
             SigMatch::Sqrt(inner) => self.promote_real_unary(|b, x| b.sqrt(x), inner)?,
-            SigMatch::Abs(inner) => self.promote_real_unary(|b, x| b.abs(x), inner)?,
+            SigMatch::Abs(inner) => self.promote_abs(inner)?,
             SigMatch::Fmod(left, right) => {
                 self.promote_real_binary(|b, l, r| b.fmod(l, r), left, right)?
             }
@@ -1199,6 +1209,39 @@ impl<'a> SignalPromoter<'a> {
         Ok(build(&mut b, left_promoted, right_promoted))
     }
 
+    /// Promotes `min`/`max`, preserving all-int operands when possible.
+    fn promote_minmax(
+        &mut self,
+        build: impl FnOnce(&mut SigBuilder<'_>, SigId, SigId) -> SigId,
+        left: SigId,
+        right: SigId,
+    ) -> Result<SigId, SignalPrepareError> {
+        let left_promoted = self.promote(left)?;
+        let right_promoted = self.promote(right)?;
+        let (left_promoted, right_promoted) = if self.same_type(left, right) {
+            (left_promoted, right_promoted)
+        } else {
+            (
+                self.smart_float_cast(left, left_promoted)?,
+                self.smart_float_cast(right, right_promoted)?,
+            )
+        };
+        let mut b = SigBuilder::new(self.arena);
+        Ok(build(&mut b, left_promoted, right_promoted))
+    }
+
+    /// Promotes `abs`, preserving integer operands when possible.
+    fn promote_abs(&mut self, inner: SigId) -> Result<SigId, SignalPrepareError> {
+        let inner_promoted = self.promote(inner)?;
+        let inner_promoted = if self.ty(inner)? == SimpleSigType::Int {
+            inner_promoted
+        } else {
+            self.smart_float_cast(inner, inner_promoted)?
+        };
+        let mut b = SigBuilder::new(self.arena);
+        Ok(b.abs(inner_promoted))
+    }
+
     /// Promotes one waveform payload, preserving all-int literals when possible.
     fn promote_waveform(&mut self, values: &[SigId]) -> Result<SigId, SignalPrepareError> {
         let all_int = values
@@ -1451,6 +1494,100 @@ mod tests {
             prepare_signals_for_fir(&arena, &[output]).expect("recursive typing should converge");
 
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Real));
+    }
+
+    #[test]
+    fn prepare_signals_for_fir_keeps_integer_recursive_min_feedback_int() {
+        let mut arena = tlib::TreeArena::new();
+        let self_ref = de_bruijn_ref(&mut arena, 1);
+        let body = {
+            let mut b = SigBuilder::new(&mut arena);
+            let feedback = b.proj(0, self_ref);
+            let prev = b.delay1(feedback);
+            let inc = b.int(1);
+            let sum = b.add(prev, inc);
+            let cap = b.int(3);
+            b.min(sum, cap)
+        };
+        let body_list = arena.cons(body, arena.nil());
+        let group = de_bruijn_rec(&mut arena, body_list);
+        let output = {
+            let mut b = SigBuilder::new(&mut arena);
+            b.proj(0, group)
+        };
+
+        let prepared =
+            prepare_signals_for_fir(&arena, &[output]).expect("recursive int min should prepare");
+
+        assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
+        let SigMatch::Proj(_, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0])
+        else {
+            panic!("prepared output should stay a projection");
+        };
+        let (_, prepared_body_list) =
+            match_sym_rec(&prepared.arena, prepared_group).expect("symbolic recursion expected");
+        let prepared_body = prepared
+            .arena
+            .hd(prepared_body_list)
+            .expect("prepared recursion body head");
+        let SigMatch::Min(sum, cap) = match_sig(&prepared.arena, prepared_body) else {
+            panic!("prepared body should stay SIGMIN");
+        };
+        assert_eq!(match_sig(&prepared.arena, cap), SigMatch::Int(3));
+        let SigMatch::BinOp(_, prev, inc) = match_sig(&prepared.arena, sum) else {
+            panic!("prepared min lhs should stay integer addition");
+        };
+        assert!(
+            !matches!(match_sig(&prepared.arena, prev), SigMatch::FloatCast(_)),
+            "integer recursive feedback should not be promoted to float before SIGMIN"
+        );
+        assert_eq!(match_sig(&prepared.arena, inc), SigMatch::Int(1));
+    }
+
+    #[test]
+    fn prepare_signals_for_fir_keeps_integer_recursive_abs_feedback_int() {
+        let mut arena = tlib::TreeArena::new();
+        let self_ref = de_bruijn_ref(&mut arena, 1);
+        let body = {
+            let mut b = SigBuilder::new(&mut arena);
+            let feedback = b.proj(0, self_ref);
+            let prev = b.delay1(feedback);
+            let inc = b.int(1);
+            let sum = b.add(prev, inc);
+            b.abs(sum)
+        };
+        let body_list = arena.cons(body, arena.nil());
+        let group = de_bruijn_rec(&mut arena, body_list);
+        let output = {
+            let mut b = SigBuilder::new(&mut arena);
+            b.proj(0, group)
+        };
+
+        let prepared =
+            prepare_signals_for_fir(&arena, &[output]).expect("recursive int abs should prepare");
+
+        assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
+        let SigMatch::Proj(_, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0])
+        else {
+            panic!("prepared output should stay a projection");
+        };
+        let (_, prepared_body_list) =
+            match_sym_rec(&prepared.arena, prepared_group).expect("symbolic recursion expected");
+        let prepared_body = prepared
+            .arena
+            .hd(prepared_body_list)
+            .expect("prepared recursion body head");
+        let SigMatch::Abs(sum) = match_sig(&prepared.arena, prepared_body) else {
+            panic!("prepared body should stay SIGABS");
+        };
+        let SigMatch::BinOp(_, prev, inc) = match_sig(&prepared.arena, sum) else {
+            panic!("prepared abs operand should stay integer addition");
+        };
+        assert!(
+            !matches!(match_sig(&prepared.arena, prev), SigMatch::FloatCast(_)),
+            "integer recursive feedback should not be promoted to float before SIGABS"
+        );
+        assert_eq!(match_sig(&prepared.arena, inc), SigMatch::Int(1));
     }
 
     #[test]

@@ -104,6 +104,9 @@ const MATH_PROTO_ORDER: &[FirMathOp] = &[
     FirMathOp::Round,
 ];
 
+/// Deterministic prototype emission order for polymorphic integer helper calls.
+const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
+
 /// Emits a FIR module from validated planning data and propagated signals.
 ///
 /// This is the main fast-lane lowering boundary: callers provide already
@@ -397,7 +400,32 @@ pub fn build_module(
         };
         math_prototypes.push(proto);
     }
-
+    for name in INT_FUN_PROTO_ORDER {
+        if !lower.used_int_fun_names.contains(name) {
+            continue;
+        }
+        let arity = if *name == "abs" { 1 } else { 2 };
+        let proto_args: Vec<NamedType> = (0..arity)
+            .map(|i| NamedType {
+                name: format!("arg{i}"),
+                typ: FirType::Int32,
+            })
+            .collect();
+        let proto = {
+            let mut b = FirBuilder::new(&mut lower.store);
+            b.declare_fun(
+                *name,
+                FirType::Fun {
+                    args: vec![FirType::Int32; arity],
+                    ret: Box::new(FirType::Int32),
+                },
+                &proto_args,
+                None,
+                false,
+            )
+        };
+        math_prototypes.push(proto);
+    }
     let functions = {
         let mut b = FirBuilder::new(&mut lower.store);
         let function_items = [
@@ -530,6 +558,7 @@ struct SignalToFirLower<'a> {
     clear_init_seen: HashSet<String>,
     input_ptr_aliases: HashMap<usize, String>,
     used_math_ops: HashSet<FirMathOp>,
+    used_int_fun_names: HashSet<&'static str>,
     next_loop_var_id: usize,
 }
 
@@ -594,6 +623,7 @@ impl<'a> SignalToFirLower<'a> {
             clear_init_seen: HashSet::new(),
             input_ptr_aliases: HashMap::new(),
             used_math_ops: HashSet::new(),
+            used_int_fun_names: HashSet::new(),
             next_loop_var_id: 0,
         }
     }
@@ -776,8 +806,8 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Rec(body) => self.lower_signal(body)?,
             SigMatch::BinOp(op, lhs, rhs) => self.lower_binop(sig, op, lhs, rhs)?,
             SigMatch::Pow(lhs, rhs) => self.lower_math2(FirMathOp::Pow, lhs, rhs)?,
-            SigMatch::Min(lhs, rhs) => self.lower_math2(FirMathOp::Min, lhs, rhs)?,
-            SigMatch::Max(lhs, rhs) => self.lower_math2(FirMathOp::Max, lhs, rhs)?,
+            SigMatch::Min(lhs, rhs) => self.lower_minmax(sig, lhs, rhs, true)?,
+            SigMatch::Max(lhs, rhs) => self.lower_minmax(sig, lhs, rhs, false)?,
             SigMatch::Sin(value) => self.lower_math1(FirMathOp::Sin, value)?,
             SigMatch::Cos(value) => self.lower_math1(FirMathOp::Cos, value)?,
             SigMatch::Acos(value) => self.lower_math1(FirMathOp::Acos, value)?,
@@ -789,7 +819,7 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Log(value) => self.lower_math1(FirMathOp::Log, value)?,
             SigMatch::Log10(value) => self.lower_math1(FirMathOp::Log10, value)?,
             SigMatch::Sqrt(value) => self.lower_math1(FirMathOp::Sqrt, value)?,
-            SigMatch::Abs(value) => self.lower_math1(FirMathOp::Abs, value)?,
+            SigMatch::Abs(value) => self.lower_abs(sig, value)?,
             SigMatch::Fmod(lhs, rhs) => self.lower_math2(FirMathOp::Fmod, lhs, rhs)?,
             SigMatch::Remainder(lhs, rhs) => self.lower_math2(FirMathOp::Remainder, lhs, rhs)?,
             SigMatch::Floor(value) => self.lower_math1(FirMathOp::Floor, value)?,
@@ -1847,6 +1877,66 @@ impl<'a> SignalToFirLower<'a> {
         let real_ty = self.real_ty();
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.math_call(op, &[lhs, rhs], real_ty))
+    }
+
+    /// Lowers `min`/`max`, preserving integer recursion/state when the reduced
+    /// typer kept both operands in the integer domain.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/extended/minprim.hh`
+    /// - `compiler/extended/maxprim.hh`
+    ///
+    /// Integer `min/max` remain explicit FIR function calls (`min_i` / `max_i`)
+    /// so backends can apply the same target-local renaming policy as the C++
+    /// compiler instead of hardwiring a branch synthesis here.
+    fn lower_minmax(
+        &mut self,
+        node: SigId,
+        lhs_sig: SigId,
+        rhs_sig: SigId,
+        is_min: bool,
+    ) -> Result<FirId, SignalFirError> {
+        let result_ty = self.signal_fir_type(node)?;
+        if result_ty == FirType::Int32 {
+            let lhs = self.lower_signal(lhs_sig)?;
+            let rhs = self.lower_signal(rhs_sig)?;
+            self.used_int_fun_names
+                .insert(if is_min { "min_i" } else { "max_i" });
+            let mut b = FirBuilder::new(&mut self.store);
+            return Ok(b.fun_call(
+                if is_min { "min_i" } else { "max_i" },
+                &[lhs, rhs],
+                FirType::Int32,
+            ));
+        }
+        self.lower_math2(
+            if is_min {
+                FirMathOp::Min
+            } else {
+                FirMathOp::Max
+            },
+            lhs_sig,
+            rhs_sig,
+        )
+    }
+
+    /// Lowers `abs`, preserving integer recursion/state when the reduced typer
+    /// kept the operand in the integer domain.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/extended/absprim.hh`
+    ///
+    /// Integer `abs` stays an explicit function call so backends can preserve
+    /// the target-local parity spelling and overflow contract.
+    fn lower_abs(&mut self, node: SigId, value_sig: SigId) -> Result<FirId, SignalFirError> {
+        let result_ty = self.signal_fir_type(node)?;
+        if result_ty == FirType::Int32 {
+            let value = self.lower_signal(value_sig)?;
+            self.used_int_fun_names.insert("abs");
+            let mut b = FirBuilder::new(&mut self.store);
+            return Ok(b.fun_call("abs", &[value], FirType::Int32));
+        }
+        self.lower_math1(FirMathOp::Abs, value_sig)
     }
 
     /// Lowers one numeric cast.

@@ -187,7 +187,7 @@ mod tests {
     use std::collections::HashSet;
     use tlib::{TreeArena, de_bruijn_rec, de_bruijn_ref};
 
-    use crate::signal_prepare::prepare_signals_for_fir;
+    use crate::signal_prepare::{SimpleSigType, prepare_signals_for_fir};
 
     /// Peels off a `Cast(FaustFloat, inner)` wrapper if present.
     ///
@@ -912,6 +912,110 @@ mod tests {
                 }
             )),
             "integer delay state should allocate an Int32 slot"
+        );
+    }
+
+    #[test]
+    fn integer_recursive_min_lowers_to_int_recursion_and_min_i_call() {
+        let mut arena = TreeArena::new();
+        let self_ref = de_bruijn_ref(&mut arena, 1);
+        let body = {
+            let mut b = SigBuilder::new(&mut arena);
+            let feedback = b.proj(0, self_ref);
+            let prev = b.delay1(feedback);
+            let one = b.int(1);
+            let sum = b.add(prev, one);
+            let three = b.int(3);
+            b.min(sum, three)
+        };
+        let body_list = arena.cons(body, arena.nil());
+        let group = de_bruijn_rec(&mut arena, body_list);
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            b.proj(0, group)
+        };
+
+        let prepared =
+            prepare_signals_for_fir(&arena, &[sig0]).expect("integer recursion should prepare");
+        assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
+
+        let out = compile_signals_to_fir_fastlane(
+            &prepared.arena,
+            &prepared.outputs,
+            0,
+            1,
+            &SignalFirOptions::default(),
+        )
+        .expect("integer min recursion should lower");
+
+        let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+            panic!("module expected");
+        };
+        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+            panic!("dsp_struct block expected");
+        };
+        assert!(
+            struct_items.iter().any(|id| matches!(
+                match_fir(&out.store, *id),
+                FirMatch::DeclareVar {
+                    typ: FirType::Array(inner, 2),
+                    ..
+                } if *inner == FirType::Int32
+            )),
+            "integer recursive min should allocate a 2-slot Int32 recursion array"
+        );
+
+        let dump = fir::dump_fir(&out.store, out.module);
+        assert!(
+            !dump.contains("name=fmin") && !dump.contains("name=fminf"),
+            "integer min recursion should not call floating-point fmin helpers"
+        );
+        assert!(
+            dump.contains("min_i"),
+            "integer min recursion should stay an explicit integer min_i function call"
+        );
+    }
+
+    #[test]
+    fn integer_recursive_abs_lowers_to_int_recursion_and_abs_call() {
+        let mut arena = TreeArena::new();
+        let self_ref = de_bruijn_ref(&mut arena, 1);
+        let body = {
+            let mut b = SigBuilder::new(&mut arena);
+            let feedback = b.proj(0, self_ref);
+            let prev = b.delay1(feedback);
+            let one = b.int(1);
+            let sum = b.add(prev, one);
+            b.abs(sum)
+        };
+        let body_list = arena.cons(body, arena.nil());
+        let group = de_bruijn_rec(&mut arena, body_list);
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            b.proj(0, group)
+        };
+
+        let prepared =
+            prepare_signals_for_fir(&arena, &[sig0]).expect("integer abs recursion should prepare");
+        assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
+
+        let out = compile_signals_to_fir_fastlane(
+            &prepared.arena,
+            &prepared.outputs,
+            0,
+            1,
+            &SignalFirOptions::default(),
+        )
+        .expect("integer abs recursion should lower");
+
+        let dump = fir::dump_fir(&out.store, out.module);
+        assert!(
+            !dump.contains("name=fabs") && !dump.contains("name=fabsf"),
+            "integer abs recursion should not call floating-point fabs helpers"
+        );
+        assert!(
+            dump.contains("abs"),
+            "integer abs recursion should stay an explicit integer abs function call"
         );
     }
 

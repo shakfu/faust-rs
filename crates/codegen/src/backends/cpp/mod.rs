@@ -1122,6 +1122,12 @@ fn emit_cpp_fun_name(name: &str) -> String {
     if name.contains("::") {
         return name.to_owned();
     }
+    match name {
+        "abs" => return "std::abs".to_owned(),
+        "min_i" => return "std::min<int>".to_owned(),
+        "max_i" => return "std::max<int>".to_owned(),
+        _ => {}
+    }
     match FirMathOp::from_symbol(name) {
         Some(op) => format!("std::{}", op.symbol()),
         None => name.to_owned(),
