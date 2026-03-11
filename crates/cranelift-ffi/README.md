@@ -25,6 +25,8 @@ What is already implemented:
 - minimal factory cache
 - source factory creation preflight through `compiler -> FIR -> codegen::cranelift`
 - bitcode family scaffold (temporary text format, for API-path validation)
+- FIR-derived native runtime descriptor for state/UI/meta handling
+- native JIT-backed `compute` path for file/string factory constructors
 - header smoke tests (C and C++)
 
 What is not final yet:
@@ -39,12 +41,15 @@ What is not final yet:
 `Cargo.toml` currently builds:
 
 - `rlib` (needed for Rust examples/tests)
-- `cdylib`
-- `staticlib`
 
 Library name:
 
 - Rust lib target name: `faust_cranelift`
+
+Distribution note:
+
+- final `cdylib` / `staticlib` artifacts are produced by `crates/faust-ffi`,
+  which links `cranelift-ffi` alongside the other FFI backend crates.
 
 ## Headers
 
@@ -73,9 +78,11 @@ V1-deferred families where relevant.
   - compiler/FIR preflight
   - scaffold bitcode family
 - `src/instance.rs`
-  - instance lifecycle / UI / metadata / compute scaffold exports
-- `src/ui.rs`
-  - UI/meta callback helpers
+  - instance lifecycle / UI / metadata / compute exports
+- `src/runtime.rs`
+  - FIR-derived native runtime descriptor builder shared by factories/instances
+- `src/clif.rs`
+  - textual `.clif` container helpers used by the current bitcode scaffold
 
 ## Shared FFI helpers (factorized)
 
@@ -137,4 +144,3 @@ c++ -std=c++11 -fsyntax-only -I crates/cranelift-ffi/include -I /path/to/faust/a
 
 - `porting/cranelift-backend-plan-en.md`
 - `porting/cranelift-dsp-ffi-parity-matrix-en.md`
-

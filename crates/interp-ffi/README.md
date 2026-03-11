@@ -21,12 +21,16 @@ surface:
 
 `Cargo.toml` currently builds:
 
-- `cdylib`
-- `staticlib`
+- `rlib`
 
 Library name:
 
-- Rust lib target name: `faust`
+- Rust lib target name: `faust_interp`
+
+Distribution note:
+
+- final `cdylib` / `staticlib` artifacts are produced by `crates/faust-ffi`,
+  which links `interp-ffi` alongside the other FFI backend crates.
 
 ## Headers
 
@@ -37,7 +41,7 @@ Headers are kept in `include/`:
 
 Notes:
 
-- `build.rs` currently **does not** generate headers.
+- `build.rs` exists, but currently **does not** generate headers.
 - `cbindgen` generation is temporarily disabled because of Rust 2024
   `#[unsafe(no_mangle)]` support limitations.
 - The headers are maintained manually for now.
@@ -107,4 +111,3 @@ cargo test --workspace --all-targets
   interpreter backend integration path.
 - The C/C++ compatibility surface is parity-driven but still evolving as the
   Rust port progresses.
-

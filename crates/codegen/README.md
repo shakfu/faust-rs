@@ -9,13 +9,14 @@ live here.
 
 ## Position in the pipeline
 
-```
-parser → boxes → signals → fir → transform → [codegen] → C source
-                                                        → C++ source
-                                                        → .fbc bytecode
-                                                        → native C++ (AOT from .fbc)
-                                                        → Cranelift JIT
-                                                        → … (scaffolded)
+``` 
+parser → boxes → eval → propagate → signals → transform → fir → [codegen]
+                                                                → C source
+                                                                → C++ source
+                                                                → .fbc bytecode
+                                                                → native C++ (AOT from .fbc)
+                                                                → Cranelift JIT
+                                                                → … (scaffolded)
 ```
 
 ## C++ provenance
@@ -114,8 +115,9 @@ emitter (see below).
 
 1. `FirToFbcCompiler<R>` — compiles each FIR function body into a shared
    `FbcBlockArena`.
-2. `generate_interp_module` — maps the 6 known DSP function names to the 6
-   `FbcDspFactory` block slots.
+2. `generate_interp_module` — maps the FIR DSP lifecycle functions into
+   `FbcDspFactory` code blocks, splitting `compute` into `compute_block` and
+   `compute_dsp_block` when possible.
 3. `FbcDspFactory::optimize(level)` — runs peephole bytecode optimizer
    (levels 0–6; `MAX_OPT_LEVEL = 6`).
 4. `write_fbc` / `read_fbc` — serialize/deserialize to/from `.fbc` text.
@@ -138,7 +140,7 @@ write_fbc(&factory, &mut buf)?;
 | `"instanceConstants"` | `init_block` |
 | `"instanceResetUserInterface"` | `reset_ui_block` |
 | `"instanceClear"` | `clear_block` |
-| `"compute"` | `compute_dsp_block` |
+| `"compute"` | `compute_dsp_block` or `compute_block` + `compute_dsp_block` |
 
 #### Key re-exports
 
@@ -146,7 +148,7 @@ write_fbc(&factory, &mut buf)?;
 |---|---|
 | `InterpOptions` | `opt_level: i32`, `module_name: Option<String>` |
 | `generate_interp_module` | `(&FirStore, FirId, &InterpOptions) → Result<FbcDspFactory<f32>, CodegenError>` |
-| `FbcDspFactory<R>` | Compiled bytecode program with 6 block slots |
+| `FbcDspFactory<R>` | Compiled bytecode program with lifecycle/data blocks |
 | `FbcDspInstance` | Runtime DSP state; provides `init` and `compute` |
 | `FbcBlockArena` | Arena of `FbcBlock`s indexed by `BlockId` |
 | `FbcInstruction<R>` | Single FBC instruction (`opcode + offsets + branches`) |
@@ -230,7 +232,7 @@ Or directly from the CLI:
 
 ```sh
 # Step 1 — compile .dsp to .fbc
-cargo run -p compiler -- --lang fir my.dsp -o my.fbc
+cargo run -p compiler -- --lang interp my.dsp -o my.fbc
 
 # Step 2 — emit native C++ from .fbc
 cargo run -p compiler -- --dump-cpp-from-fbc my.fbc -o my.h
