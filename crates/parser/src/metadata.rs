@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 
 /// One metadata key in the compilation-global top-level `declare` store.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// Key category for top-level compilation metadata declarations.
 pub enum CompilationMetadataKey {
     /// Key emitted by the master document with no file prefix.
     Global { key: Box<str> },
@@ -56,6 +57,7 @@ impl CompilationMetadataKey {
 
 /// Deterministic snapshot of the compilation-global top-level metadata store.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Immutable snapshot of all metadata collected during one parse session.
 pub struct CompilationMetadataSnapshot {
     entries: BTreeMap<CompilationMetadataKey, BTreeSet<Box<str>>>,
 }
@@ -75,6 +77,7 @@ impl CompilationMetadataSnapshot {
 }
 
 #[derive(Debug)]
+/// Interior mutable storage backing [`CompilationMetadataStore`] snapshots.
 struct CompilationMetadataStoreInner {
     master_source: Box<str>,
     entries: BTreeMap<CompilationMetadataKey, BTreeSet<Box<str>>>,
@@ -89,6 +92,7 @@ struct CompilationMetadataStoreInner {
 /// compilation-global metadata view even though Rust no longer uses one process-
 /// global singleton.
 #[derive(Clone, Debug)]
+/// Shared compilation-metadata store carried across file imports and evaluation.
 pub struct CompilationMetadataStore {
     inner: Arc<Mutex<CompilationMetadataStoreInner>>,
 }

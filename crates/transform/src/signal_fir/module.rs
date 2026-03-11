@@ -71,6 +71,7 @@ use super::planner::SignalFirPlan;
 /// constant integer delay amount, power-of-two size, and masked circular
 /// indexing driven by `fIOTA`.
 #[derive(Clone, Debug)]
+/// Planned storage information for one lowered fixed-delay line.
 struct DelayLineInfo {
     name: String,
     size: usize,
@@ -543,6 +544,8 @@ struct SignalToFirLower<'a> {
 /// - slot `[0]` stores the current-sample value computed for this iteration,
 /// - the lowering emits the trailing `state[1] = state[0]` shift after outputs,
 ///   matching Faust's generated C++ update order.
+///
+/// Planned storage information for one lowered recursive 2-slot array carrier.
 #[derive(Clone, Debug)]
 struct RecArrayInfo {
     name: String,

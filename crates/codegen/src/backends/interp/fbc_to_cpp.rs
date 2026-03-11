@@ -69,6 +69,7 @@ pub struct FbcCppOptions {
 }
 
 impl Default for FbcCppOptions {
+    /// Returns the default C++ wrapper-generation options.
     fn default() -> Self {
         Self {
             class_name: None,
@@ -101,6 +102,7 @@ pub enum FbcCppError {
 }
 
 impl std::fmt::Display for FbcCppError {
+    /// Formats the code-generation error as a human-readable diagnostic.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingBranchTarget {
@@ -169,6 +171,7 @@ struct CppGen<'a, R: FbcReal> {
 }
 
 impl<'a, R: FbcReal> CppGen<'a, R> {
+    /// Creates a class-level generator from one factory/options pair.
     fn new(factory: &'a FbcDspFactory<R>, options: &'a FbcCppOptions) -> Self {
         let class_name = options
             .class_name
@@ -196,6 +199,7 @@ impl<'a, R: FbcReal> CppGen<'a, R> {
         }
     }
 
+    /// Generates the full self-contained C++ header for this FBC factory.
     fn generate(&self) -> Result<String, FbcCppError> {
         let mut out = String::new();
         let f = self.factory;
@@ -400,6 +404,7 @@ struct BlockComp {
 }
 
 impl BlockComp {
+    /// Creates a fresh block compiler with empty virtual stacks and counters.
     fn new(real_ctype: &'static str) -> Self {
         Self {
             real_ctype,
@@ -413,6 +418,7 @@ impl BlockComp {
 
     // ── Stack helpers ────────────────────────────────────────────────────────
 
+    /// Declares one REAL temporary, pushes it onto the virtual stack, and returns its name.
     fn push_r(&mut self, out: &mut String, t: usize, expr: &str) -> String {
         let name = format!("fR{}", self.rc);
         self.rc += 1;
@@ -421,6 +427,7 @@ impl BlockComp {
         name
     }
 
+    /// Declares one integer temporary, pushes it onto the virtual stack, and returns its name.
     fn push_i(&mut self, out: &mut String, t: usize, expr: &str) -> String {
         let name = format!("iI{}", self.ic);
         self.ic += 1;
@@ -429,16 +436,19 @@ impl BlockComp {
         name
     }
 
+    /// Pops one REAL temporary name, falling back to `0.0` on malformed bytecode.
     fn pop_r(&mut self) -> String {
         self.rstack.pop().unwrap_or_else(|| "0.0".to_owned())
     }
 
+    /// Pops one integer temporary name, falling back to `0` on malformed bytecode.
     fn pop_i(&mut self) -> String {
         self.istack.pop().unwrap_or_else(|| "0".to_owned())
     }
 
     // ── Block compilation ────────────────────────────────────────────────────
 
+    /// Compiles one linear FBC block into native C++ statements.
     fn compile_block<R: FbcReal>(
         &mut self,
         arena: &FbcBlockArena<R>,
@@ -466,6 +476,7 @@ impl BlockComp {
     // ── Instruction dispatch ─────────────────────────────────────────────────
 
     #[allow(clippy::too_many_lines)]
+    /// Compiles one FBC instruction into its native C++ equivalent.
     fn compile_instr<R: FbcReal>(
         &mut self,
         arena: &FbcBlockArena<R>,
@@ -1910,6 +1921,7 @@ impl BlockComp {
 
 // ── UI block emitter ─────────────────────────────────────────────────────────
 
+/// Emits the checked-in UI callback block as native C++ UI method calls.
 fn emit_ui_block<R: FbcReal>(
     out: &mut String,
     ui: &[FbcUiInstruction<R>],
@@ -2083,6 +2095,7 @@ fn emit_ui_block<R: FbcReal>(
 
 // ── Meta block emitter ───────────────────────────────────────────────────────
 
+/// Emits the metadata callback block as `Meta::declare` calls.
 fn emit_meta_block(out: &mut String, meta: &[FbcMetaInstruction], t: usize) {
     for m in meta {
         writeln!(

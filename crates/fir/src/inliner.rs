@@ -254,6 +254,10 @@ impl FirInlineAnalysis {
     }
 }
 
+/// Raw function facts gathered before metrics, SCCs, and policy decisions.
+///
+/// This is kept separate from [`FirFunctionSummary`] so analysis can first
+/// collect module facts, then derive deterministic summaries and decisions.
 #[derive(Clone, Debug)]
 struct RawFunctionInfo {
     decl_id: FirId,
@@ -263,6 +267,11 @@ struct RawFunctionInfo {
     is_inline: bool,
 }
 
+/// Minimal body metrics used by candidate selection.
+///
+/// These metrics deliberately stay cheap and structural: they are computed in a
+/// single traversal and avoid any semantic modeling beyond direct `FunCall`
+/// collection.
 #[derive(Default)]
 struct BodyMetrics {
     node_count: usize,
@@ -557,6 +566,7 @@ fn child_ids(node: &FirMatch) -> Vec<FirId> {
 fn tarjan_sccs(
     graph: &BTreeMap<String, BTreeSet<String>>,
 ) -> (Vec<FirInlineScc>, BTreeMap<String, usize>) {
+    /// Working set for Tarjan SCC discovery.
     struct TarjanState {
         index: usize,
         stack: Vec<String>,
@@ -566,6 +576,10 @@ fn tarjan_sccs(
         components: Vec<Vec<String>>,
     }
 
+    /// Standard Tarjan DFS step for one graph node.
+    ///
+    /// The implementation operates on function names instead of numeric indices
+    /// to keep the resulting SCCs deterministic and directly testable.
     fn strong_connect(
         node: &str,
         graph: &BTreeMap<String, BTreeSet<String>>,
@@ -1521,6 +1535,14 @@ fn rewrite_function_body_once(
     rw.rewrite_stmt_root(body)
 }
 
+/// Recognizes the canonical inlineable body shape produced by preparation.
+///
+/// The current rewrite stage only knows how to splice callee bodies that are:
+/// 1. a `Block`,
+/// 2. with no early `Return` in the prefix,
+/// 3. ending in `Return(Some(value))`.
+///
+/// The returned pair is `(prefix_statements, returned_value)`.
 fn canonical_inline_body_from_prepared(
     store: &FirStore,
     body: FirId,
@@ -1541,6 +1563,10 @@ fn canonical_inline_body_from_prepared(
     Some((prefix.to_vec(), ret_value))
 }
 
+/// Root rewriter for one function body in one inline pass.
+///
+/// This wrapper owns the cross-callsite analysis and statistics references and
+/// creates a fresh statement/value rewriter rooted in one hygienic clone state.
 struct InlineBodyRewriter<'a, 'b> {
     src: &'a FirStore,
     dst: &'b mut FirStore,
@@ -1551,6 +1577,7 @@ struct InlineBodyRewriter<'a, 'b> {
 }
 
 impl<'a, 'b> InlineBodyRewriter<'a, 'b> {
+    /// Rewrites one function body root as a statement tree.
     fn rewrite_stmt_root(&mut self, root: FirId) -> Result<FirId, FirInlineRewriteError> {
         let mut inner = InlineStmtCloner {
             cloner: HygienicCloner::new(self.src, self.dst, self.state),
@@ -1562,6 +1589,11 @@ impl<'a, 'b> InlineBodyRewriter<'a, 'b> {
     }
 }
 
+/// Statement/value rewriter used by one inline pass on one function body.
+///
+/// It interleaves hygienic cloning with conservative callsite expansion:
+/// statements may expand to multiple statements (argument materialization plus
+/// inlined callee prefix), while values return `(prefix_stmts, rewritten_value)`.
 struct InlineStmtCloner<'a, 'b, 'c> {
     cloner: HygienicCloner<'a, 'b>,
     analysis: &'c FirInlineAnalysis,
@@ -1570,6 +1602,7 @@ struct InlineStmtCloner<'a, 'b, 'c> {
 }
 
 impl<'a, 'b, 'c> InlineStmtCloner<'a, 'b, 'c> {
+    /// Rewrites one statement root, normalizing multi-statement expansions into a `Block`.
     fn rewrite_stmt_as_stmt(&mut self, id: FirId) -> Result<FirId, FirInlineRewriteError> {
         let stmts = self.rewrite_stmt_to_vec(id)?;
         if stmts.len() == 1 {
@@ -1580,6 +1613,7 @@ impl<'a, 'b, 'c> InlineStmtCloner<'a, 'b, 'c> {
         }
     }
 
+    /// Rewrites a lexical block with a fresh local-rename scope.
     fn rewrite_block(&mut self, stmts: Vec<FirId>) -> Result<FirId, FirInlineRewriteError> {
         self.cloner.push_scope();
         let mut out = Vec::new();
@@ -1591,6 +1625,7 @@ impl<'a, 'b, 'c> InlineStmtCloner<'a, 'b, 'c> {
         Ok(b.block(&out))
     }
 
+    /// Rewrites one statement and returns the flattened emitted statement sequence.
     fn rewrite_stmt_to_vec(&mut self, id: FirId) -> Result<Vec<FirId>, FirInlineRewriteError> {
         let out = match match_fir(self.cloner.src, id) {
             FirMatch::Block(stmts) => vec![self.rewrite_block(stmts)?],
@@ -1747,6 +1782,11 @@ impl<'a, 'b, 'c> InlineStmtCloner<'a, 'b, 'c> {
         Ok(out)
     }
 
+    /// Rewrites one value expression, returning any required prefix statements.
+    ///
+    /// Prefix statements preserve evaluation order for side-effecting argument
+    /// materialization before the final value is consumed by the surrounding
+    /// statement or expression node.
     fn rewrite_value(&mut self, id: FirId) -> Result<(Vec<FirId>, FirId), FirInlineRewriteError> {
         let node = match_fir(self.cloner.src, id);
         let out = match node {
@@ -1911,6 +1951,11 @@ impl<'a, 'b, 'c> InlineStmtCloner<'a, 'b, 'c> {
     }
 }
 
+/// Hygienic subtree cloner shared by the preparation and rewrite stages.
+///
+/// The cloner preserves FIR semantics while renaming stack/loop locals to avoid
+/// capture, and can additionally remap `kFunArgs` references to materialized
+/// temporary stack slots during inline preparation.
 struct HygienicCloner<'a, 'b> {
     src: &'a FirStore,
     dst: &'b mut FirStore,
@@ -1921,6 +1966,7 @@ struct HygienicCloner<'a, 'b> {
 }
 
 impl<'a, 'b> HygienicCloner<'a, 'b> {
+    /// Creates a new cloner with empty lexical scopes and no parameter substitutions.
     fn new(src: &'a FirStore, dst: &'b mut FirStore, state: &'b mut FirHygienicCloneState) -> Self {
         Self {
             src,
@@ -1936,10 +1982,12 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
         self.scopes.push(HashMap::new());
     }
 
+    /// Pops the innermost lexical rename scope.
     fn pop_scope(&mut self) {
         let _ = self.scopes.pop();
     }
 
+    /// Clones a subtree under one temporary lexical scope.
     fn clone_in_new_scope(&mut self, id: FirId) -> Result<FirId, FirHygienicCloneError> {
         self.push_scope();
         let out = self.clone_node(id);
@@ -1947,6 +1995,7 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
         out
     }
 
+    /// Looks up the innermost active rename for a stack/loop local.
     fn lookup_local_rename(&self, name: &str) -> Option<&str> {
         self.scopes
             .iter()
@@ -1954,12 +2003,14 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
             .find_map(|scope| scope.get(name).map(String::as_str))
     }
 
+    /// Returns `name` or its currently active local rename.
     fn maybe_renamed_unqualified(&self, name: &str) -> String {
         self.lookup_local_rename(name)
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| name.to_string())
     }
 
+    /// Applies access-sensitive symbol remapping for cloned references.
     fn remap_name_by_access(&self, name: &str, access: AccessType) -> String {
         if access == AccessType::FunArgs {
             return self
@@ -1981,6 +2032,7 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
         state_fresh_local_name(self.state, original)
     }
 
+    /// Adjusts the access class when a `kFunArgs` reference is materialized to a stack temp.
     fn remap_access(&self, access: AccessType, name: &str) -> AccessType {
         if access == AccessType::FunArgs && self.fun_arg_subst.contains_key(name) {
             AccessType::Stack
@@ -1989,6 +2041,7 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
         }
     }
 
+    /// Binds one newly declared local name in the innermost scope.
     fn bind_local_decl(
         &mut self,
         origin_node: FirId,
@@ -2019,6 +2072,7 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
         renamed
     }
 
+    /// Clones one FIR node, recursively renaming locals and remapping parameters as needed.
     fn clone_node(&mut self, id: FirId) -> Result<FirId, FirHygienicCloneError> {
         let node = match_fir(self.src, id);
         let out = match node {

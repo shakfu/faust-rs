@@ -39,6 +39,7 @@ pub type FfiFaustFloat = f32;
 /// Backend FFI crates re-export this type so the external C ABI remains stable
 /// while the callback-table definition is maintained in a single place.
 #[repr(C)]
+/// C-ABI UI callback table used by generated/runtime DSP code.
 pub struct UIGlue {
     pub ui_interface: *mut c_void,
     pub open_tab_box: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
@@ -107,6 +108,7 @@ pub struct UIGlue {
 
 /// Shared C callback table for metadata collection (mirrors Faust `MetaGlue`).
 #[repr(C)]
+/// C-ABI metadata callback table used by generated/runtime DSP code.
 pub struct MetaGlue {
     pub meta_interface: *mut c_void,
     pub declare: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
@@ -116,6 +118,7 @@ pub struct MetaGlue {
 ///
 /// Embedded NUL bytes are replaced with the textual sequence `\\0`.
 #[must_use]
+/// Allocates an owned C string for FFI callers/bridges.
 pub fn alloc_c_string(s: &str) -> *mut c_char {
     let safe = s.replace('\0', "\\0");
     match CString::new(safe) {
@@ -129,6 +132,7 @@ pub fn alloc_c_string(s: &str) -> *mut c_char {
 /// Backend FFI crates should keep backend-specific wrapper functions around
 /// this helper so public docs and ownership contracts remain explicit.
 #[must_use]
+/// Allocates one opaque heap value and returns its raw pointer for FFI transfer.
 pub fn alloc_opaque<T>(value: T) -> *mut T {
     Box::into_raw(Box::new(value))
 }
@@ -259,6 +263,7 @@ pub unsafe fn optional_c_str_arg<'a>(
 
 /// Returns a process-lifetime static null-terminated empty `char**` array.
 #[must_use]
+/// Returns a canonical null-terminated empty C string-array pointer.
 pub fn null_c_string_array() -> *const *const c_char {
     struct SyncNullArray([*const c_char; 1]);
     // SAFETY: Immutable static null pointer array.
@@ -276,6 +281,7 @@ pub fn null_c_string_array() -> *const *const c_char {
 /// Unknown options are ignored so backend FFI crates can accept broader argv
 /// vectors while incrementally extending support.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+/// Flat FFI argument bundle used by C-facing compile entry points.
 pub struct FfiCompileArgs {
     /// Extra import search paths collected from `-I`.
     pub search_paths: Vec<PathBuf>,

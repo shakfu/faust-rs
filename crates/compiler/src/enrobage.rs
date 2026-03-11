@@ -64,6 +64,7 @@ pub fn file_dirname(name: &str) -> String {
 /// This intentionally mirrors the C++ guard `name.length() >= 4` before suffix
 /// stripping, because this helper is historically used for extension-style
 /// suffixes.
+/// Removes the trailing `ext` suffix when present.
 #[must_use]
 pub fn strip_end(name: &str, ext: &str) -> String {
     if name.len() >= 4 && name.ends_with(ext) {
@@ -87,6 +88,7 @@ pub fn make_output_file(output_dir: Option<&Path>, file_name: &str) -> PathBuf {
 }
 
 /// Result returned by [`fopen_search`].
+/// Result of one include or helper file lookup during wrapping.
 #[derive(Debug)]
 pub struct FileSearchResult {
     /// Opened file handle.
@@ -158,6 +160,7 @@ pub fn fopen_search(
 /// Stream-copy configuration used by [`stream_copy_until`] and
 /// [`stream_copy_until_end`].
 #[derive(Debug, Clone)]
+/// Configuration for line-oriented stream copying and include injection.
 pub struct StreamCopyConfig {
     /// Replacement target for `mydsp` occurrences (forced replacement).
     pub class_name: String,
@@ -182,6 +185,7 @@ impl Default for StreamCopyConfig {
 
 /// Mutable stream-copy state shared across nested include injections.
 #[derive(Debug, Default)]
+/// Mutable state accumulated while copying/wrapping one generated stream.
 pub struct StreamCopyState {
     /// Tracks architecture includes already injected.
     pub already_included: HashSet<String>,
@@ -303,6 +307,7 @@ pub fn stream_copy_until_end<R: BufRead, W: Write>(
 /// Top-level options used to wrap generated C++ class text with an
 /// architecture template.
 #[derive(Debug, Clone)]
+/// Options controlling the C++ wrapper/enrobage step.
 pub struct EnrobageOptions {
     /// Architecture template filename/path.
     pub architecture_file: PathBuf,
@@ -332,6 +337,7 @@ impl EnrobageOptions {
 
 /// Result of [`wrap_cpp_with_architecture`].
 #[derive(Debug)]
+/// Result of wrapping raw generated C++ into the requested outer scaffold.
 pub struct WrappedCppCode {
     /// Final wrapped C++ output text.
     pub code: String,

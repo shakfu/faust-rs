@@ -277,6 +277,10 @@ struct VarEntry {
 }
 
 /// Kind of a scope frame.
+///
+/// The kind is carried at push sites to keep scope-manipulation call sites
+/// self-documenting and to leave room for future kind-specific checks even
+/// though the current stack stores bindings only.
 #[derive(Clone, Debug)]
 enum FrameKind {
     /// Ordinary `Block`.
@@ -532,6 +536,11 @@ pub fn verify_fir_function(
 // ─── Internal context ──────────────────────────────────────────────────────────
 
 /// Mutable verifier state shared by all verification phases.
+///
+/// This context intentionally centralizes diagnostics, symbol tables, and the
+/// per-function scope/type state so phase ordering remains explicit and tests
+/// can exercise the same engine through both module-level and function-level
+/// entry points.
 struct VerifyCtx<'s> {
     /// FIR storage containing all nodes referenced by the verifier.
     store: &'s FirStore,

@@ -104,6 +104,10 @@ pub fn vec_to_list(arena: &mut TreeArena, values: &[TreeId]) -> TreeId {
 ///
 /// Returns `None` when the input is not a well-formed Faust list encoded as a
 /// chain of `cons(head, tail)` cells terminated by `nil`.
+///
+/// This is intentionally strict: malformed list-shaped trees are rejected
+/// rather than partially traversed, which keeps callers from silently
+/// accepting non-canonical encodings.
 #[must_use]
 pub fn list_to_vec(arena: &TreeArena, mut list: TreeId) -> Option<Vec<TreeId>> {
     let mut out = Vec::new();

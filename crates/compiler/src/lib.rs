@@ -56,6 +56,9 @@ use transform::signal_fir::{
 };
 
 /// Parse + eval + propagate output package.
+///
+/// This is the highest-level structural output of the box/signal pipeline
+/// before any FIR lowering or backend selection happens.
 #[derive(Debug)]
 pub struct SignalCompileOutput {
     /// Full parser output (arena + metadata + diagnostics from parse stage).
@@ -72,6 +75,8 @@ pub struct SignalCompileOutput {
 }
 
 /// Parse + eval + propagate + FIR lowering output package.
+///
+/// This bundle is used by FIR-oriented backends and verifier integration.
 #[derive(Debug)]
 pub struct FirCompileOutput {
     /// FIR storage arena.
@@ -81,6 +86,10 @@ pub struct FirCompileOutput {
 }
 
 /// FIR verifier configuration used at the compiler facade / CLI integration layer.
+///
+/// The facade keeps verifier policy explicit because different workflows need
+/// different failure semantics: local exploration may allow warnings, while CI
+/// or strict lane validation should fail on them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FirVerifyOptions {
     /// Run FIR verifier after FIR generation and before backend codegen.
@@ -780,6 +789,7 @@ impl Default for Compiler {
 }
 
 /// Compiler facade errors for parser-stage orchestration.
+/// Top-level compiler error surface aggregating all stage failures.
 #[derive(Debug)]
 pub enum CompilerError {
     /// Import resolution/read failure before parse completion.
@@ -919,6 +929,7 @@ impl CompilerError {
 /// This mirrors the C++ hardcoded library-search model as closely as possible
 /// in a standalone Rust binary.
 #[must_use]
+/// Returns the default Faust import search paths for `path`.
 pub fn default_import_search_paths(path: &Path) -> Vec<PathBuf> {
     build_import_search_paths(
         path,
@@ -1129,15 +1140,21 @@ enum LowerToCppError {
 
 #[derive(Debug)]
 enum LowerToCError {
+    /// Fast-lane signal-to-FIR lowering failed.
     Transform(SignalFirError),
+    /// Optional FIR verification rejected the lowered module.
     Verify(FirVerifyReport),
+    /// C backend emission failed after successful lowering.
     Codegen(CCodegenError),
 }
 
 #[derive(Debug)]
 enum LowerToInterpError {
+    /// Fast-lane signal-to-FIR lowering failed.
     Transform(SignalFirError),
+    /// Optional FIR verification rejected the lowered module.
     Verify(FirVerifyReport),
+    /// Interpreter backend emission failed after successful lowering.
     Codegen(InterpCodegenError),
     /// Serialization of the factory to `.fbc` text failed.
     Serialize(String),
@@ -1145,7 +1162,9 @@ enum LowerToInterpError {
 
 #[derive(Debug)]
 enum LowerToFirError {
+    /// Fast-lane signal-to-FIR lowering failed.
     Transform(SignalFirError),
+    /// Optional FIR verification rejected the lowered module.
     Verify(FirVerifyReport),
 }
 
@@ -1227,6 +1246,7 @@ fn lower_signals_to_interp(
     }
 }
 
+/// Lowers signals through the legacy bridge then serializes an interpreter `.fbc`.
 fn lower_signals_to_interp_legacy_bridge(
     source_name: &str,
     output: &SignalCompileOutput,
@@ -1253,6 +1273,7 @@ fn lower_signals_to_interp_legacy_bridge(
     }
 }
 
+/// Lowers signals through the transform fast lane then serializes an interpreter `.fbc`.
 fn lower_signals_to_interp_transform_fastlane(
     source_name: &str,
     output: &SignalCompileOutput,
@@ -1359,6 +1380,11 @@ fn resolve_module_name(class_name: Option<&str>, source_name: &str) -> String {
 
 // ─── Legacy bridge implementations ───────────────────────────────────────────
 
+/// Legacy bridge FIR lowering for the current C++ emitter path.
+///
+/// This bridge intentionally emits a label-heavy placeholder `compute` body so
+/// compiler/front-end integration can be exercised before production lowering
+/// is fully routed through `transform::signal_fir`.
 fn lower_signals_to_fir_legacy_bridge(
     source_name: &str,
     output: &SignalCompileOutput,
@@ -1423,6 +1449,7 @@ fn lower_signals_to_fir_legacy_bridge(
     FirCompileOutput { store, module }
 }
 
+/// Transform fast-lane FIR lowering used by native backends and FIR dumps.
 fn lower_signals_to_fir_transform_fastlane(
     output: &SignalCompileOutput,
     module_name: String,
@@ -1446,6 +1473,7 @@ fn lower_signals_to_fir_transform_fastlane(
     })
 }
 
+/// Lowers signals through the legacy bridge, verifies FIR, then emits C++.
 fn lower_signals_to_cpp_legacy_bridge(
     source_name: &str,
     output: &SignalCompileOutput,
@@ -1458,6 +1486,7 @@ fn lower_signals_to_cpp_legacy_bridge(
     generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerToCppError::Codegen)
 }
 
+/// Lowers signals through the transform fast lane, verifies FIR, then emits C++.
 fn lower_signals_to_cpp_transform_fastlane(
     source_name: &str,
     output: &SignalCompileOutput,
@@ -1472,6 +1501,10 @@ fn lower_signals_to_cpp_transform_fastlane(
     generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerToCppError::Codegen)
 }
 
+/// Emits the intentionally minimal legacy-bridge C placeholder module.
+///
+/// Unlike the C++ legacy bridge, this path avoids label statements because the
+/// C backend slice does not render FIR `Label` nodes.
 fn lower_signals_to_c_legacy_bridge(
     source_name: &str,
     _output: &SignalCompileOutput,
@@ -1520,6 +1553,7 @@ fn lower_signals_to_c_legacy_bridge(
     generate_c_module(&lowered.store, lowered.module, options).map_err(LowerToCError::Codegen)
 }
 
+/// Lowers signals through the transform fast lane, verifies FIR, then emits C.
 fn lower_signals_to_c_transform_fastlane(
     source_name: &str,
     output: &SignalCompileOutput,
@@ -1549,6 +1583,10 @@ fn lower_signals_to_c_transform_fastlane(
     generate_c_module(&lowered.store, lowered.module, options).map_err(LowerToCError::Codegen)
 }
 
+/// Runs optional FIR verification according to the compiler facade policy.
+///
+/// In strict mode, warnings are promoted to fatal errors to support CI and
+/// parity-audit workflows that want a clean FIR module before backend lowering.
 fn maybe_verify_fir_module(
     lowered: &FirCompileOutput,
     options: FirVerifyOptions,
@@ -1563,6 +1601,7 @@ fn maybe_verify_fir_module(
 
 // ─── Diagnostic helpers ───────────────────────────────────────────────────────
 
+/// Converts a FIR verifier report into the workspace diagnostic bundle format.
 fn fir_verify_bundle_from_report(report: &FirVerifyReport) -> DiagnosticBundle {
     let mut bundle = DiagnosticBundle::new();
     for d in &report.diagnostics {
@@ -1588,6 +1627,7 @@ fn fir_verify_bundle_from_report(report: &FirVerifyReport) -> DiagnosticBundle {
     bundle
 }
 
+/// Converts a `signal_fir` lowering error into a structured compiler diagnostic.
 fn signal_fir_diagnostic(error: &SignalFirError) -> Diagnostic {
     let code = match error.code() {
         SignalFirErrorCode::InvalidOptions => errors::codes::SFIR_INVALID_OPTIONS,
@@ -1607,6 +1647,7 @@ fn signal_fir_diagnostic(error: &SignalFirError) -> Diagnostic {
 
 // ─── Name utilities ───────────────────────────────────────────────────────────
 
+/// Derives the base class/module name from a source filename.
 fn source_name_to_class(source_name: &str) -> String {
     Path::new(source_name)
         .file_stem()
@@ -1616,6 +1657,7 @@ fn source_name_to_class(source_name: &str) -> String {
         .to_owned()
 }
 
+/// Sanitizes arbitrary text into a conservative C/C++ identifier.
 fn sanitize_cpp_ident(input: &str) -> String {
     let mut out = String::with_capacity(input.len().max(8));
     for ch in input.chars() {
@@ -1634,6 +1676,7 @@ fn sanitize_cpp_ident(input: &str) -> String {
     out
 }
 
+/// Wraps a single diagnostic into a one-item bundle.
 fn bundle_from_diagnostic(diagnostic: Diagnostic) -> DiagnosticBundle {
     let mut diagnostics = DiagnosticBundle::new();
     diagnostics.push(diagnostic);

@@ -400,6 +400,7 @@ impl PartialEq for EvalSourceContext {
 impl Eq for EvalSourceContext {}
 
 #[derive(Debug)]
+/// One file loaded through the evaluator source-loading cache.
 struct CachedLoadedSource {
     root: TreeId,
     arena: TreeArena,
@@ -407,6 +408,10 @@ struct CachedLoadedSource {
 }
 
 #[derive(Clone, Debug)]
+/// Evaluator value domain used during Phase 4.
+///
+/// Rust keeps closures and pattern matchers as explicit evaluator values rather
+/// than as tree-encoded host nodes, then lowers residual values back to boxes.
 enum EvalValue {
     Box(TreeId),
     Closure(ClosureValue),
@@ -437,6 +442,7 @@ impl PartialEq for EvalValue {
 impl Eq for EvalValue {}
 
 #[derive(Clone, Debug)]
+/// Captured closure value for delayed evaluation in one lexical environment.
 struct ClosureValue {
     expr: TreeId,
     env: Environment,
@@ -451,6 +457,7 @@ impl PartialEq for ClosureValue {
 impl Eq for ClosureValue {}
 
 #[derive(Clone, Debug)]
+/// Captured pattern-matcher automaton value used by residual `case` handling.
 struct PatternMatcherValue {
     automaton: pattern_matcher::Automaton,
     state: usize,
@@ -536,12 +543,14 @@ pub struct Environment {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Stable environment identity paired with one symbol for recursion tracking.
 struct EnvFrameKey {
     store_ptr: usize,
     env_id: EnvId,
 }
 
 #[derive(Clone, Debug, Default)]
+/// One lexical environment layer.
 struct EnvLayer {
     bindings: Vec<(SymId, EvalValue)>,
     parent: Option<EnvId>,
@@ -549,6 +558,7 @@ struct EnvLayer {
 }
 
 #[derive(Debug, Default)]
+/// Arena of lexical environment layers.
 struct EnvStore {
     layers: Vec<EnvLayer>,
 }
@@ -1040,6 +1050,7 @@ impl Default for LoopDetector {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// One recursion stack frame recorded by [`LoopDetector`].
 enum LoopFrame {
     TreeEnv { id: TreeId, env_key: EnvFrameKey },
     SymbolEnv { sym: SymId, env_key: EnvFrameKey },
@@ -1077,6 +1088,7 @@ enum LoopFrame {
 /// but not every evaluator path updates every counter yet. Consumers should therefore treat these
 /// values as progressively improving telemetry, not as a fully complete profiling contract.
 #[derive(Clone, Debug, Default)]
+/// Lightweight evaluator statistics returned by opt-in entry points.
 pub struct EvalStats {
     /// Number of child scopes created via `push_scope()`.
     /// C++ equivalent: `gStats.fEnvLayersPushed`.
@@ -1113,6 +1125,7 @@ pub struct EvalStats {
 /// | `LoopDetected` | `faustassert` in C++ loop detector (aborts rather than throws) |
 /// | `RecursionDepthExceeded` | Implicit stack overflow in C++ (no explicit guard) |
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Typed evaluator failure surface.
 pub enum EvalError {
     MissingProcessDefinition {
         /// Parser root definitions list used for fallback source-label resolution.

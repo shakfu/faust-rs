@@ -251,16 +251,22 @@ pub enum BargraphType {
 /// Slider range/value payload used by FIR UI slider instructions.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SliderRange {
+    /// Initial widget value.
     pub init: f64,
+    /// Lower bound.
     pub lo: f64,
+    /// Upper bound.
     pub hi: f64,
+    /// Step increment.
     pub step: f64,
 }
 
 /// Named type used for function signatures.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NamedType {
+    /// Source-level or ABI-level item name.
     pub name: String,
+    /// Declared FIR type for the named item.
     pub typ: FirType,
 }
 
@@ -280,16 +286,16 @@ impl Default for FirStore {
 }
 
 impl FirStore {
-    #[must_use]
     /// Creates a new instance of this type.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             arena: TreeArena::new(),
         }
     }
 
-    #[must_use]
     /// Returns the number of elements currently stored.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.arena.len()
     }
@@ -1981,6 +1987,11 @@ fn dump_node(
     }
 }
 
+/// Returns the immediate FIR children that should be traversed structurally.
+///
+/// This is the canonical edge list used by [`dump_fir`] and similar internal
+/// walkers. It follows semantic children only; encoded type/access atoms remain
+/// implicit because they are reconstructed by [`match_fir`].
 fn child_ids(node: &FirMatch) -> Vec<FirId> {
     match node {
         FirMatch::Unknown
@@ -2151,6 +2162,10 @@ const FIR_MODULE_TAG: &str = "FIRST_MODULE";
 const FIR_NAMED_TYPE_TAG: &str = "FIR_NAMEDTYPE";
 const FIR_SWITCH_CASE_TAG: &str = "FIR_SWITCHCASE";
 
+/// Returns `true` when `tag` names a FIR value-producing node.
+///
+/// [`FirStore::value_type`] relies on this whitelist to decide whether the
+/// first encoded child stores a result type.
 fn is_value_tag(tag: &str) -> bool {
     matches!(
         tag,
@@ -2182,11 +2197,20 @@ fn is_value_tag(tag: &str) -> bool {
     )
 }
 
+/// Interns one tag node in the underlying [`TreeArena`].
+///
+/// This is the one place where FIR tag spelling meets TreeArena hash-consing.
+/// All builder-side encoders route through it so identical tag/child shapes are
+/// structurally shared automatically.
 fn intern_tag(arena: &mut TreeArena, tag: &str, children: &[FirId]) -> FirId {
     let tag_id = arena.intern_tag(tag);
     arena.intern(NodeKind::Tag(tag_id), children)
 }
 
+/// Encodes an ordered FIR id slice as a canonical `cons`/`nil` list.
+///
+/// FIR keeps list structure explicit in the TreeArena representation so it can
+/// round-trip through hash-consing without side tables.
 fn encode_list(arena: &mut TreeArena, values: &[FirId]) -> FirId {
     let mut out = arena.nil();
     for value in values.iter().rev() {
@@ -2195,6 +2219,9 @@ fn encode_list(arena: &mut TreeArena, values: &[FirId]) -> FirId {
     out
 }
 
+/// Decodes a canonical `cons`/`nil` list back into a flat FIR id vector.
+///
+/// Returns `None` if `list` is not a well-formed canonical list.
 fn decode_list(arena: &TreeArena, mut list: FirId) -> Option<Vec<FirId>> {
     let mut out = Vec::new();
     while !arena.is_nil(list) {
@@ -2205,6 +2232,7 @@ fn decode_list(arena: &TreeArena, mut list: FirId) -> Option<Vec<FirId>> {
     Some(out)
 }
 
+/// Decodes a FIR list whose payload nodes must all be `i32` literals.
 fn decode_i32_list(arena: &TreeArena, list: FirId) -> Option<Vec<i32>> {
     let ids = decode_list(arena, list)?;
     let mut out = Vec::with_capacity(ids.len());
@@ -2214,6 +2242,7 @@ fn decode_i32_list(arena: &TreeArena, list: FirId) -> Option<Vec<i32>> {
     Some(out)
 }
 
+/// Decodes a FIR list whose payload nodes store `f32` values as bit patterns.
 fn decode_f32_bits_list(arena: &TreeArena, list: FirId) -> Option<Vec<f32>> {
     let ids = decode_list(arena, list)?;
     let mut out = Vec::with_capacity(ids.len());
@@ -2223,6 +2252,7 @@ fn decode_f32_bits_list(arena: &TreeArena, list: FirId) -> Option<Vec<f32>> {
     Some(out)
 }
 
+/// Decodes a FIR list whose payload nodes must all be `f64`-compatible scalars.
 fn decode_f64_list(arena: &TreeArena, list: FirId) -> Option<Vec<f64>> {
     let ids = decode_list(arena, list)?;
     let mut out = Vec::with_capacity(ids.len());
@@ -2232,6 +2262,7 @@ fn decode_f64_list(arena: &TreeArena, list: FirId) -> Option<Vec<f64>> {
     Some(out)
 }
 
+/// Decodes a FIR list whose payload nodes must all be symbols/string literals.
 fn decode_symbols_list(arena: &TreeArena, list: FirId) -> Option<Vec<String>> {
     let ids = decode_list(arena, list)?;
     let mut out = Vec::with_capacity(ids.len());
@@ -2241,17 +2272,20 @@ fn decode_symbols_list(arena: &TreeArena, list: FirId) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// Encodes one `(name, type)` pair for function signatures and similar payloads.
 fn encode_named_type(arena: &mut TreeArena, value: &NamedType) -> FirId {
     let name_id = arena.symbol(value.name.clone());
     let type_id = encode_type(arena, &value.typ);
     intern_tag(arena, FIR_NAMED_TYPE_TAG, &[name_id, type_id])
 }
 
+/// Encodes a stable ordered list of [`NamedType`] values.
 fn encode_named_types(arena: &mut TreeArena, values: &[NamedType]) -> FirId {
     let ids: Vec<_> = values.iter().map(|v| encode_named_type(arena, v)).collect();
     encode_list(arena, &ids)
 }
 
+/// Decodes one encoded [`NamedType`] pair.
 fn decode_named_type(arena: &TreeArena, id: FirId) -> Option<NamedType> {
     let node = arena.node(id)?;
     let NodeKind::Tag(tag_id) = &node.kind else {
@@ -2270,6 +2304,7 @@ fn decode_named_type(arena: &TreeArena, id: FirId) -> Option<NamedType> {
     })
 }
 
+/// Decodes a canonical list of encoded [`NamedType`] nodes.
 fn decode_named_types(arena: &TreeArena, list: FirId) -> Option<Vec<NamedType>> {
     let ids = decode_list(arena, list)?;
     let mut out = Vec::with_capacity(ids.len());
@@ -2279,11 +2314,13 @@ fn decode_named_types(arena: &TreeArena, list: FirId) -> Option<Vec<NamedType>> 
     Some(out)
 }
 
+/// Encodes one `switch` case pair `(constant_value, block_id)`.
 fn encode_switch_case(arena: &mut TreeArena, value: i64, block: FirId) -> FirId {
     let value_id = arena.int(value);
     intern_tag(arena, FIR_SWITCH_CASE_TAG, &[value_id, block])
 }
 
+/// Encodes all `switch` cases as a canonical ordered list.
 fn encode_switch_cases(arena: &mut TreeArena, cases: &[(i64, FirId)]) -> FirId {
     let ids: Vec<_> = cases
         .iter()
@@ -2292,6 +2329,7 @@ fn encode_switch_cases(arena: &mut TreeArena, cases: &[(i64, FirId)]) -> FirId {
     encode_list(arena, &ids)
 }
 
+/// Decodes one encoded `switch` case node.
 fn decode_switch_case(arena: &TreeArena, id: FirId) -> Option<(i64, FirId)> {
     let node = arena.node(id)?;
     let NodeKind::Tag(tag_id) = &node.kind else {
@@ -2307,6 +2345,7 @@ fn decode_switch_case(arena: &TreeArena, id: FirId) -> Option<(i64, FirId)> {
     Some((decode_i64(arena, *value)?, *block))
 }
 
+/// Decodes a canonical ordered list of encoded `switch` cases.
 fn decode_switch_cases(arena: &TreeArena, list: FirId) -> Option<Vec<(i64, FirId)>> {
     let ids = decode_list(arena, list)?;
     let mut out = Vec::with_capacity(ids.len());
@@ -2316,6 +2355,10 @@ fn decode_switch_cases(arena: &TreeArena, list: FirId) -> Option<Vec<(i64, FirId
     Some(out)
 }
 
+/// Encodes the explicit FIR type model into its canonical tree representation.
+///
+/// The representation is intentionally self-describing and recursive so value
+/// nodes can carry types inline with no auxiliary type table.
 fn encode_type(arena: &mut TreeArena, typ: &FirType) -> FirId {
     match typ {
         FirType::Int32 => intern_tag(arena, FIR_TYPE_INT32_TAG, &[]),
@@ -2360,6 +2403,7 @@ fn encode_type(arena: &mut TreeArena, typ: &FirType) -> FirId {
     }
 }
 
+/// Decodes a canonical tree-encoded FIR type.
 fn decode_type(arena: &TreeArena, id: FirId) -> Option<FirType> {
     let node = arena.node(id)?;
     let NodeKind::Tag(tag_id) = &node.kind else {
@@ -2418,6 +2462,10 @@ fn decode_type(arena: &TreeArena, id: FirId) -> Option<FirType> {
     }
 }
 
+/// Encodes one [`AccessType`] as its stable small integer code.
+///
+/// The numeric mapping is an internal representation contract and must remain
+/// synchronized with [`decode_access`].
 fn encode_access(arena: &mut TreeArena, access: AccessType) -> FirId {
     arena.int(match access {
         AccessType::Stack => 0,
@@ -2429,6 +2477,7 @@ fn encode_access(arena: &mut TreeArena, access: AccessType) -> FirId {
     })
 }
 
+/// Decodes one small integer access-code back into [`AccessType`].
 fn decode_access(arena: &TreeArena, id: FirId) -> Option<AccessType> {
     match decode_i64(arena, id)? {
         0 => Some(AccessType::Stack),
@@ -2441,6 +2490,7 @@ fn decode_access(arena: &TreeArena, id: FirId) -> Option<AccessType> {
     }
 }
 
+/// Encodes one [`FirBinOp`] as its stable small integer code.
 fn encode_binop(arena: &mut TreeArena, op: FirBinOp) -> FirId {
     arena.int(match op {
         FirBinOp::Add => 0,
@@ -2460,6 +2510,7 @@ fn encode_binop(arena: &mut TreeArena, op: FirBinOp) -> FirId {
     })
 }
 
+/// Decodes one small integer opcode back into [`FirBinOp`].
 fn decode_binop(arena: &TreeArena, id: FirId) -> Option<FirBinOp> {
     match decode_i64(arena, id)? {
         0 => Some(FirBinOp::Add),
@@ -2480,6 +2531,7 @@ fn decode_binop(arena: &TreeArena, id: FirId) -> Option<FirBinOp> {
     }
 }
 
+/// Encodes one UI container orientation as a compact integer atom.
 fn encode_ui_box_type(arena: &mut TreeArena, typ: UiBoxType) -> FirId {
     arena.int(match typ {
         UiBoxType::Vertical => 0,
@@ -2488,6 +2540,7 @@ fn encode_ui_box_type(arena: &mut TreeArena, typ: UiBoxType) -> FirId {
     })
 }
 
+/// Decodes one encoded UI container orientation.
 fn decode_ui_box_type(arena: &TreeArena, id: FirId) -> Option<UiBoxType> {
     match decode_i64(arena, id)? {
         0 => Some(UiBoxType::Vertical),
@@ -2497,6 +2550,7 @@ fn decode_ui_box_type(arena: &TreeArena, id: FirId) -> Option<UiBoxType> {
     }
 }
 
+/// Encodes one UI button kind as a compact integer atom.
 fn encode_button_type(arena: &mut TreeArena, typ: ButtonType) -> FirId {
     arena.int(match typ {
         ButtonType::Button => 0,
@@ -2504,6 +2558,7 @@ fn encode_button_type(arena: &mut TreeArena, typ: ButtonType) -> FirId {
     })
 }
 
+/// Decodes one encoded UI button kind.
 fn decode_button_type(arena: &TreeArena, id: FirId) -> Option<ButtonType> {
     match decode_i64(arena, id)? {
         0 => Some(ButtonType::Button),
@@ -2512,6 +2567,7 @@ fn decode_button_type(arena: &TreeArena, id: FirId) -> Option<ButtonType> {
     }
 }
 
+/// Encodes one UI slider kind as a compact integer atom.
 fn encode_slider_type(arena: &mut TreeArena, typ: SliderType) -> FirId {
     arena.int(match typ {
         SliderType::Horizontal => 0,
@@ -2520,6 +2576,7 @@ fn encode_slider_type(arena: &mut TreeArena, typ: SliderType) -> FirId {
     })
 }
 
+/// Decodes one encoded UI slider kind.
 fn decode_slider_type(arena: &TreeArena, id: FirId) -> Option<SliderType> {
     match decode_i64(arena, id)? {
         0 => Some(SliderType::Horizontal),
@@ -2529,6 +2586,7 @@ fn decode_slider_type(arena: &TreeArena, id: FirId) -> Option<SliderType> {
     }
 }
 
+/// Encodes one UI bargraph kind as a compact integer atom.
 fn encode_bargraph_type(arena: &mut TreeArena, typ: BargraphType) -> FirId {
     arena.int(match typ {
         BargraphType::Horizontal => 0,
@@ -2536,6 +2594,7 @@ fn encode_bargraph_type(arena: &mut TreeArena, typ: BargraphType) -> FirId {
     })
 }
 
+/// Decodes one encoded UI bargraph kind.
 fn decode_bargraph_type(arena: &TreeArena, id: FirId) -> Option<BargraphType> {
     match decode_i64(arena, id)? {
         0 => Some(BargraphType::Horizontal),
@@ -2544,6 +2603,10 @@ fn decode_bargraph_type(arena: &TreeArena, id: FirId) -> Option<BargraphType> {
     }
 }
 
+/// Decodes a symbol-bearing atom.
+///
+/// FIR accepts both interned symbols and string literals here because some UI
+/// payloads are stored as string literals in the TreeArena.
 fn decode_symbol(arena: &TreeArena, id: FirId) -> Option<String> {
     match arena.kind(id)? {
         NodeKind::Symbol(s) => Some(s.to_string()),
@@ -2552,23 +2615,31 @@ fn decode_symbol(arena: &TreeArena, id: FirId) -> Option<String> {
     }
 }
 
+/// Decodes one integer atom as `i64`.
 fn decode_i64(arena: &TreeArena, id: FirId) -> Option<i64> {
     tree_to_int(arena, id)
 }
 
+/// Decodes one integer atom as `i32`, failing on out-of-range values.
 fn decode_i32(arena: &TreeArena, id: FirId) -> Option<i32> {
     i32::try_from(decode_i64(arena, id)?).ok()
 }
 
+/// Decodes one integer atom as the raw IEEE-754 bits of an `f32`.
 fn decode_f32_bits(arena: &TreeArena, id: FirId) -> Option<f32> {
     let bits = u32::try_from(decode_i64(arena, id)?).ok()?;
     Some(f32::from_bits(bits))
 }
 
+/// Decodes one numeric atom as `f64`.
+///
+/// The fallback from integer to float preserves the permissive literal handling
+/// historically used by the C++ FIR printers/builders.
 fn decode_f64(arena: &TreeArena, id: FirId) -> Option<f64> {
     tree_to_double(arena, id).or_else(|| tree_to_int(arena, id).map(|v| v as f64))
 }
 
+/// Decodes one integer atom as a canonical boolean (`0`/`1` only).
 fn decode_bool(arena: &TreeArena, id: FirId) -> Option<bool> {
     match decode_i64(arena, id)? {
         0 => Some(false),

@@ -68,6 +68,9 @@ pub(crate) fn validate_canonical_dsp_api_signature(
     Ok(())
 }
 
+/// Returns the canonical DSP API signature expected for a reserved method name.
+///
+/// The returned tuple is `(arg_types, return_type, human_readable_signature)`.
 fn expected_signature(name: &str) -> Option<(Vec<FirType>, FirType, &'static str)> {
     match name {
         "metadata" => Some((

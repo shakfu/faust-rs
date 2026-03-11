@@ -192,6 +192,18 @@ pub fn de_bruijn_to_sym(arena: &mut TreeArena, root: TreeId) -> Result<TreeId, R
     converter.convert(root)
 }
 
+/// Stateful de Bruijn-to-symbolic converter.
+///
+/// This helper mirrors the staged C++ algorithm:
+/// 1. allocate one fresh symbolic variable per encountered `DEBRUIJN(...)`
+///    binder,
+/// 2. substitute `DEBRUIJNREF(1)` in the binder body with `SYMREF(var)`,
+/// 3. recursively rebuild the result while preserving sharing via memoization.
+///
+/// Separate memos are kept for:
+/// - full-node conversion,
+/// - substitution at `(node, level, replacement)`,
+/// - aperture queries used to prune substitution work.
 struct Converter<'a> {
     arena: &'a mut TreeArena,
     next_var_index: u64,
@@ -201,6 +213,7 @@ struct Converter<'a> {
 }
 
 impl<'a> Converter<'a> {
+    /// Creates one converter scoped to a single output arena/root conversion.
     fn new(arena: &'a mut TreeArena) -> Self {
         Self {
             arena,
@@ -211,12 +224,21 @@ impl<'a> Converter<'a> {
         }
     }
 
+    /// Allocates one deterministic fresh symbolic variable name (`W0`, `W1`, ...).
+    ///
+    /// The exact prefix is an implementation detail, but the sequence is stable
+    /// for a given traversal order, which keeps converted trees deterministic.
     fn fresh_var(&mut self) -> TreeId {
         let name = format!("W{}", self.next_var_index);
         self.next_var_index += 1;
         self.arena.symbol(name)
     }
 
+    /// Converts one node from de Bruijn form to symbolic form.
+    ///
+    /// Non-recursive nodes are rebuilt recursively with converted children.
+    /// `DEBRUIJN(...)` binders trigger the fresh-variable/substitute/rebuild
+    /// sequence described on [`Converter`].
     fn convert(&mut self, id: TreeId) -> Result<TreeId, RecursionError> {
         if let Some(mapped) = self.convert_memo.get(&id) {
             return Ok(*mapped);
@@ -264,6 +286,12 @@ impl<'a> Converter<'a> {
         Ok(out)
     }
 
+    /// Substitutes the de Bruijn reference at exact `level` with `replacement`.
+    ///
+    /// This mirrors the C++ `substitute` helper:
+    /// - `DEBRUIJNREF(level)` matching the requested level is replaced,
+    /// - binder bodies recurse with `level + 1`,
+    /// - nodes whose aperture is already below `level` are reused unchanged.
     fn substitute(
         &mut self,
         id: TreeId,
@@ -308,6 +336,11 @@ impl<'a> Converter<'a> {
         Ok(out)
     }
 
+    /// Computes aperture with error reporting for malformed references/invalid nodes.
+    ///
+    /// Unlike the public [`de_bruijn_aperture`], this variant participates in
+    /// conversion and therefore reports malformed trees instead of silently
+    /// treating missing payloads as ordinary nodes.
     fn aperture(&mut self, id: TreeId) -> Result<i64, RecursionError> {
         if let Some(value) = self.aperture_memo.get(&id) {
             return Ok(*value);
@@ -342,12 +375,17 @@ impl<'a> Converter<'a> {
     }
 }
 
+/// Stateful helper implementing `liftn`.
+///
+/// `threshold` tracks how many binders must be crossed before a reference is
+/// considered free and therefore needs to be incremented.
 struct Lifter<'a> {
     arena: &'a mut TreeArena,
     memo: AHashMap<(TreeId, i64), TreeId>,
 }
 
 impl<'a> Lifter<'a> {
+    /// Creates one memoizing lifter scoped to a single arena/root call.
     fn new(arena: &'a mut TreeArena) -> Self {
         Self {
             arena,
@@ -355,6 +393,10 @@ impl<'a> Lifter<'a> {
         }
     }
 
+    /// Lifts all free references with `level >= threshold` by one.
+    ///
+    /// Binder bodies recurse with `threshold + 1`, which preserves binding for
+    /// locally bound references while shifting only the free part of the tree.
     fn lift(&mut self, id: TreeId, threshold: i64) -> TreeId {
         let key = (id, threshold);
         if let Some(mapped) = self.memo.get(&key) {
@@ -385,6 +427,11 @@ impl<'a> Lifter<'a> {
     }
 }
 
+/// Memoized aperture worker used by the public read-only aperture query.
+///
+/// This variant is deliberately permissive: malformed `DEBRUIJNREF` payloads
+/// simply behave like ordinary nodes because the public helper returns only an
+/// integer aperture, not a `Result`.
 fn aperture(arena: &TreeArena, root: TreeId, memo: &mut AHashMap<TreeId, i64>) -> i64 {
     if let Some(value) = memo.get(&root) {
         return *value;
@@ -411,6 +458,10 @@ fn aperture(arena: &TreeArena, root: TreeId, memo: &mut AHashMap<TreeId, i64>) -
     value
 }
 
+/// Returns children when `id` is a tag node with the exact expected tag name.
+///
+/// This small matcher centralizes the "tag name + arity checked by caller"
+/// pattern shared by all public recursion matchers.
 fn tag_children<'a>(arena: &'a TreeArena, id: TreeId, expected_tag: &str) -> Option<&'a [TreeId]> {
     let node = arena.node(id)?;
     let NodeKind::Tag(tag_id) = &node.kind else {
@@ -422,6 +473,10 @@ fn tag_children<'a>(arena: &'a TreeArena, id: TreeId, expected_tag: &str) -> Opt
     Some(node.children.as_slice())
 }
 
+/// Returns whether `id` is tagged as `DEBRUIJNREF`, regardless of payload shape.
+///
+/// This is used to distinguish a malformed reference payload from a completely
+/// unrelated node kind when producing structured errors.
 fn is_de_bruijn_ref_tag(arena: &TreeArena, id: TreeId) -> bool {
     let Some(node) = arena.node(id) else {
         return false;
@@ -432,6 +487,10 @@ fn is_de_bruijn_ref_tag(arena: &TreeArena, id: TreeId) -> bool {
     arena.tag_name(*tag_id) == Some(DEBRUIJNREF_TAG)
 }
 
+/// Interns one tag node by tag name plus ordered children.
+///
+/// This keeps all recursion-specific builders on the same hash-consing path as
+/// the rest of `TreeArena`.
 fn intern_tag(arena: &mut TreeArena, tag: &str, children: &[TreeId]) -> TreeId {
     let tag_id = arena.intern_tag(tag);
     arena.intern(NodeKind::Tag(tag_id), children)

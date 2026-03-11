@@ -71,18 +71,26 @@ impl BlockId {
 /// - `branch2`: branch 2 (if-false / loop-body block).
 #[derive(Clone, Debug)]
 pub struct FbcInstruction<R: FbcReal> {
+    /// Operation code selecting the instruction semantics.
     pub opcode: FbcOpcode,
+    /// Optional symbolic payload (variable name, UI label, etc.).
     pub name: String,
+    /// Integer immediate payload.
     pub int_value: i32,
+    /// Real immediate payload.
     pub real_value: R,
+    /// First heap offset / aux integer slot.
     pub offset1: i32,
+    /// Second heap offset / aux integer slot.
     pub offset2: i32,
     /// Optional inline payload for `BlockStoreReal` / `BlockStoreInt`.
     ///
     /// This keeps block-store table ownership attached to the instruction
     /// itself, mirroring C++ specialized instruction objects.
     pub block_store: Option<BlockStoreData<R>>,
+    /// Optional first branch target.
     pub branch1: Option<BlockId>,
+    /// Optional second branch target.
     pub branch2: Option<BlockId>,
 }
 
@@ -226,7 +234,9 @@ impl<R: FbcReal> FbcInstruction<R> {
 /// them as an auxiliary enum stored inline on the instruction.
 #[derive(Clone, Debug)]
 pub enum BlockStoreData<R: FbcReal> {
+    /// Bulk real payload for `BlockStoreReal`.
     Real(Vec<R>),
+    /// Bulk integer payload for `BlockStoreInt`.
     Int(Vec<i32>),
 }
 
@@ -240,6 +250,7 @@ pub enum BlockStoreData<R: FbcReal> {
 /// [`FbcOpcode::Return`].
 #[derive(Clone, Debug)]
 pub struct FbcBlock<R: FbcReal> {
+    /// Linear bytecode sequence for this block.
     pub instructions: Vec<FbcInstruction<R>>,
 }
 
@@ -399,14 +410,23 @@ impl<R: FbcReal> Default for FbcBlockArena<R> {
 /// - `init/min/max/step` for ranged controls.
 #[derive(Clone, Debug)]
 pub struct FbcUiInstruction<R: FbcReal> {
+    /// UI opcode selecting the widget/box operation.
     pub opcode: FbcOpcode,
+    /// Bound zone offset when the instruction targets one heap slot.
     pub offset: i32,
+    /// Primary label payload.
     pub label: String,
+    /// Metadata key payload for `Declare`.
     pub key: String,
+    /// Metadata value or URL payload.
     pub value: String,
+    /// Initial control value.
     pub init: R,
+    /// Minimum control value.
     pub min: R,
+    /// Maximum control value.
     pub max: R,
+    /// Control step size.
     pub step: R,
 }
 
@@ -535,6 +555,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Verifies that block arena allocation preserves ids and instruction payloads.
     fn block_arena_alloc_and_get() {
         let mut arena = FbcBlockArena::<f32>::new();
         assert!(arena.is_empty());
@@ -555,6 +576,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies the minimal well-formedness rule (`Return` must terminate the block).
     fn block_well_formed() {
         let mut block = FbcBlock::<f64>::new();
         assert!(!block.is_well_formed());
@@ -567,6 +589,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies `with_values` fills the numeric payload fields only.
     fn instruction_with_values() {
         let instr = FbcInstruction::<f32>::with_values(FbcOpcode::RealValue, 0, 3.125);
         assert_eq!(instr.opcode, FbcOpcode::RealValue);
@@ -579,6 +602,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies `with_values_and_offsets` fills both payload and offset fields.
     fn instruction_with_values_and_offsets() {
         let instr =
             FbcInstruction::<f64>::with_values_and_offsets(FbcOpcode::LoadReal, 0, 0.0, 42, -1);
@@ -588,6 +612,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies the fully-specified constructor preserves both branch targets.
     fn instruction_full() {
         let instr = FbcInstruction::<f32>::full(
             FbcOpcode::If,
@@ -605,6 +630,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies `CondBranch` hides its loop-back pointer from `get_branch1`.
     fn get_branch1_cond_branch_returns_none() {
         let instr = FbcInstruction::<f32>::full(
             FbcOpcode::CondBranch,
@@ -621,6 +647,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies `is_real_inst` reflects the first instruction family.
     fn block_is_real_inst() {
         let mut block = FbcBlock::<f32>::new();
         block.push(FbcInstruction::new(FbcOpcode::AddReal));
@@ -632,6 +659,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies block-store payloads stay attached to the owning instruction.
     fn block_store_data() {
         let mut block = FbcBlock::<f32>::new();
         let instr =
@@ -648,6 +676,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies the UI helper constructors populate the expected fields.
     fn ui_instruction_constructors() {
         let open = FbcUiInstruction::<f32>::open_box(FbcOpcode::OpenVerticalBox, "main");
         assert_eq!(open.opcode, FbcOpcode::OpenVerticalBox);
@@ -674,6 +703,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies metadata instructions preserve key/value pairs.
     fn meta_instruction() {
         let meta = FbcMetaInstruction::new("name", "sine");
         assert_eq!(meta.key, "name");
@@ -681,6 +711,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies multiple allocated blocks remain independently addressable.
     fn multiple_blocks_in_arena() {
         let mut arena = FbcBlockArena::<f32>::new();
 

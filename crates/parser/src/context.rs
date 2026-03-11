@@ -19,6 +19,7 @@ use tlib::{PropertyKey, PropertyStore, TreeId};
 /// Parser source location equivalent to `(filename, lineno)` in C++ parser globals,
 /// extended with optional column/range precision from `lrpar` spans.
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Parser source location tracked during lexing and grammar actions.
 pub struct SourceLocation {
     file: Box<str>,
     line: u32,
@@ -85,6 +86,7 @@ impl SourceLocation {
 
 /// Diagnostic severity levels used during parsing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Diagnostic severity levels used during parsing.
 pub enum DiagnosticSeverity {
     Error,
     Warning,
@@ -93,6 +95,7 @@ pub enum DiagnosticSeverity {
 
 /// Parser diagnostic message with optional source location.
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// One parser diagnostic with optional location.
 pub struct ParserDiagnostic {
     pub severity: DiagnosticSeverity,
     pub code: Option<DiagnosticCode>,
@@ -107,6 +110,7 @@ pub struct ParserDiagnostic {
 /// accumulation, definition/use properties, metadata declarations, and
 /// documentation counters.
 #[derive(Debug)]
+/// Parser-local mutable context replacing the parser-relevant subset of `gGlobal`.
 pub struct ParserCtx {
     cursor: SourceLocation,
     diagnostics: Vec<ParserDiagnostic>,

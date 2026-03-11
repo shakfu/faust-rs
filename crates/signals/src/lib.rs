@@ -108,6 +108,7 @@ pub fn crate_id() -> &'static str {
 /// Binary signal operators (aligned with C++ `SOperator` order).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(i64)]
+/// Stable binary-operator family for signal nodes.
 pub enum BinOp {
     Add = 0,
     Sub = 1,
@@ -838,6 +839,7 @@ impl<'a> SigBuilder<'a> {
 /// references directly so analysis and lowering passes can recurse without
 /// rebuilding temporary wrapper nodes.
 #[derive(Clone, Copy, Debug, PartialEq)]
+/// Decoded signal node view returned by [`match_sig`].
 pub enum SigMatch<'a> {
     Unknown,
     Int(i32),
@@ -914,6 +916,7 @@ pub enum SigMatch<'a> {
 /// The matcher accepts the canonical encodings produced by this crate and by
 /// C++-parity passes. Malformed trees fall back to [`SigMatch::Unknown`].
 #[must_use]
+/// Decodes one canonical signal node from the shared TreeArena representation.
 pub fn match_sig<'a>(arena: &'a TreeArena, id: SigId) -> SigMatch<'a> {
     let Some(node) = arena.node(id) else {
         return SigMatch::Unknown;
@@ -1055,6 +1058,7 @@ pub fn match_sig<'a>(arena: &'a TreeArena, id: SigId) -> SigMatch<'a> {
 ///
 /// Output is shape-and-label based and intentionally excludes arena addresses.
 #[must_use]
+/// Dumps the structural signal tree using debug-style formatting.
 pub fn dump_sig(arena: &TreeArena, root: SigId) -> String {
     let mut out = String::new();
     dump_node(arena, root, &mut out);
@@ -1066,6 +1070,7 @@ pub fn dump_sig(arena: &TreeArena, root: SigId) -> String {
 /// This keeps the stable dump shape and only augments binary-operator nodes
 /// with `op=<name> (<symbol>)` metadata.
 #[must_use]
+/// Dumps the signal tree in a more readable Faust-oriented textual form.
 pub fn dump_sig_readable(arena: &TreeArena, root: SigId) -> String {
     let mut out = String::new();
     dump_node_readable(arena, root, &mut out);

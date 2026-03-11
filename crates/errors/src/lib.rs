@@ -37,6 +37,10 @@ pub fn crate_id() -> &'static str {
 }
 
 /// Diagnostic severity level.
+/// Diagnostic severity level.
+///
+/// Severity is intentionally orthogonal to stage/code so callers can sort or
+/// filter diagnostics independently from their origin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Severity {
     /// A blocking problem that prevents successful compilation.
@@ -48,6 +52,10 @@ pub enum Severity {
 }
 
 /// Compiler stage producing one diagnostic.
+/// Compiler stage producing one diagnostic.
+///
+/// This stage taxonomy is stable enough for CI reports and user-facing grouped
+/// rendering, even if exact wording changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Stage {
     /// Source loading and import resolution.
@@ -73,10 +81,14 @@ pub enum Stage {
 }
 
 /// Stable diagnostic code identifier (for tests, CI, and tooling integrations).
+/// Stable diagnostic code identifier used across crates and CI tooling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DiagnosticCode(pub &'static str);
 
 /// File-local source span.
+/// File-local source span.
+///
+/// Spans are 1-based and inclusive in the same spirit as Faust diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SourceSpan {
     /// File where this span originates.
@@ -106,6 +118,9 @@ impl SourceSpan {
 }
 
 /// Source label style.
+/// Source label style.
+///
+/// Labels distinguish the main blame location from related context locations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LabelStyle {
     /// Main location that should be highlighted first.
@@ -114,6 +129,7 @@ pub enum LabelStyle {
     Secondary,
 }
 
+/// One labeled source span attached to a diagnostic.
 /// One labeled source span attached to a diagnostic.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Label {
@@ -138,6 +154,7 @@ impl Label {
 }
 
 /// Structured diagnostic payload.
+/// Structured diagnostic payload shared across compiler stages.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
     /// Severity level of the diagnostic.
@@ -198,6 +215,7 @@ impl Diagnostic {
     }
 }
 
+/// Aggregated diagnostics for one stage/session outcome.
 /// Aggregated diagnostics for one stage/session outcome.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DiagnosticBundle {

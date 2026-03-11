@@ -86,6 +86,7 @@ impl CodegenErrorCode {
 }
 
 /// Typed backend error for C++ generation.
+/// Typed backend error returned by the C++ emitter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodegenError {
     code: CodegenErrorCode,
@@ -135,6 +136,10 @@ struct ModuleView {
 ///
 /// The emitter only needs structural information here: name, type, arguments,
 /// optional body, and whether the FIR declaration requested inline emission.
+/// Borrowed function declaration view used while stitching the C++ class body.
+///
+/// This avoids repeated FIR decoding while preserving access to borrowed names
+/// and signature components.
 struct DeclareFunView<'a> {
     name: &'a str,
     typ: &'a FirType,
@@ -363,6 +368,7 @@ fn emit_dsp_contract_methods(
     }
 }
 
+/// Collects declared function names to decide which DSP API stubs to synthesize.
 fn collect_module_function_names(
     store: &FirStore,
     functions: FirId,
@@ -387,6 +393,7 @@ fn collect_module_function_names(
     Ok(names)
 }
 
+/// Emits the generated-file prologue and platform macros.
 fn emit_cpp_header(out: &mut String, class_name: &str, module_name: &str) {
     let _ = writeln!(
         out,
@@ -427,6 +434,7 @@ fn emit_cpp_header(out: &mut String, class_name: &str, module_name: &str) {
     let _ = writeln!(out);
 }
 
+/// Emits one FIR module section (`dsp_struct`, `globals`, or `functions`).
 fn emit_section(
     store: &FirStore,
     out: &mut String,
@@ -458,6 +466,7 @@ fn emit_section(
     Ok(())
 }
 
+/// Emits one FIR statement in default rendering mode.
 fn emit_stmt(
     store: &FirStore,
     out: &mut String,
@@ -470,6 +479,7 @@ fn emit_stmt(
     emit_stmt_with_mode(store, out, options, module_name, stmt, indent, &mut mode)
 }
 
+/// Emits one FIR statement using the active rendering mode.
 fn emit_stmt_with_mode(
     store: &FirStore,
     out: &mut String,
@@ -808,6 +818,7 @@ fn emit_stmt_with_mode(
     }
 }
 
+/// Emits a FIR block in default rendering mode.
 fn emit_block(
     store: &FirStore,
     out: &mut String,
@@ -820,6 +831,7 @@ fn emit_block(
     emit_block_with_mode(store, out, options, module_name, block, indent, &mut mode)
 }
 
+/// Emits every statement in a FIR block under the active rendering mode.
 fn emit_block_with_mode(
     store: &FirStore,
     out: &mut String,
@@ -838,6 +850,7 @@ fn emit_block_with_mode(
     Ok(())
 }
 
+/// Returns `true` when `block` declares a variable named `name`.
 fn block_declares_var(store: &FirStore, block: FirId, name: &str) -> bool {
     let FirMatch::Block(items) = match_fir(store, block) else {
         return false;
@@ -850,6 +863,7 @@ fn block_declares_var(store: &FirStore, block: FirId, name: &str) -> bool {
     })
 }
 
+/// Returns `true` when `block` stores to a variable named `name`.
 fn block_stores_var(store: &FirStore, block: FirId, name: &str) -> bool {
     let FirMatch::Block(items) = match_fir(store, block) else {
         return false;
@@ -862,6 +876,7 @@ fn block_stores_var(store: &FirStore, block: FirId, name: &str) -> bool {
     })
 }
 
+/// Emits one FIR function declaration or method definition into the generated class.
 fn emit_declare_fun(
     store: &FirStore,
     out: &mut String,
@@ -977,6 +992,7 @@ fn emit_compute_body(
     emit_block_with_mode(store, out, options, "", body, indent, &mut mode)
 }
 
+/// Returns `true` when `name` belongs to the canonical Faust DSP API surface.
 fn is_dsp_api_method(name: &str) -> bool {
     matches!(
         name,
@@ -989,6 +1005,7 @@ fn is_dsp_api_method(name: &str) -> bool {
     )
 }
 
+/// Returns `true` when `body` is an empty FIR block.
 fn is_empty_block(store: &FirStore, body: FirId) -> bool {
     match match_fir(store, body) {
         FirMatch::Block(items) => items.is_empty(),
@@ -996,6 +1013,7 @@ fn is_empty_block(store: &FirStore, body: FirId) -> bool {
     }
 }
 
+/// Emits one FIR value expression into a C++ expression string.
 fn emit_value(
     store: &FirStore,
     options: &CppOptions,
@@ -1099,6 +1117,7 @@ fn emit_value(
     }
 }
 
+/// Maps bare FIR math names to the appropriate C++ symbol spelling.
 fn emit_cpp_fun_name(name: &str) -> String {
     if name.contains("::") {
         return name.to_owned();
@@ -1109,6 +1128,7 @@ fn emit_cpp_fun_name(name: &str) -> String {
     }
 }
 
+/// Maps one FIR binary operator to its C++ token spelling.
 fn emit_binop(op: FirBinOp) -> &'static str {
     match op {
         FirBinOp::Add => "+",
@@ -1128,6 +1148,7 @@ fn emit_binop(op: FirBinOp) -> &'static str {
     }
 }
 
+/// Renders a FIR type into the current C++ backend spelling.
 fn emit_type(typ: &FirType, options: &CppOptions) -> String {
     match typ {
         FirType::Int32 => "int".to_owned(),
@@ -1160,6 +1181,7 @@ fn emit_type(typ: &FirType, options: &CppOptions) -> String {
     }
 }
 
+/// Builds a stable unsupported-node diagnostic for the C++ emitter.
 fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
     CodegenError::new(
         CodegenErrorCode::UnsupportedNode,
@@ -1171,6 +1193,7 @@ fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
     )
 }
 
+/// Formats a floating-point literal with stable C++ syntax.
 fn trim_float(value: f64) -> String {
     let mut text = format!("{value}");
     if !text.contains(['.', 'e', 'E']) {
@@ -1179,10 +1202,12 @@ fn trim_float(value: f64) -> String {
     text
 }
 
+/// Renders an initializer-list literal from already-rendered elements.
 fn format_array(values: impl Iterator<Item = String>) -> String {
     format!("{{{}}}", values.collect::<Vec<_>>().join(", "))
 }
 
+/// Escapes a Rust string into a C++ string literal.
 fn cpp_string_literal(value: &str) -> String {
     let escaped = value
         .replace('\\', "\\\\")
@@ -1191,6 +1216,7 @@ fn cpp_string_literal(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+/// Decodes the FIR module header expected by the C++ emitter.
 fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
     match match_fir(store, module) {
         FirMatch::Module {
@@ -1231,6 +1257,7 @@ mod tests {
     use fir::FirBuilder;
 
     #[test]
+    /// Verifies the backend rejects non-module FIR roots with the stable error code.
     fn rejects_non_module_root() {
         let mut store = FirStore::new();
         let mut b = FirBuilder::new(&mut store);
@@ -1242,6 +1269,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies a minimal FIR module emits the expected C++ shell.
     fn accepts_module_root() {
         let mut store = FirStore::new();
         let mut b = FirBuilder::new(&mut store);
@@ -1267,6 +1295,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies malformed module sections are rejected before emission.
     fn rejects_non_block_module_section() {
         let mut store = FirStore::new();
         let mut b = FirBuilder::new(&mut store);
@@ -1281,6 +1310,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies the current statement/value slice emits the expected control constructs.
     fn emits_core_statement_and_value_slice() {
         let mut store = FirStore::new();
         let mut b = FirBuilder::new(&mut store);
@@ -1336,6 +1366,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies canonical `buildUserInterface` signature checking stays enforced.
     fn rejects_invalid_canonical_build_ui_signature() {
         let mut store = FirStore::new();
         let mut b = FirBuilder::new(&mut store);
@@ -1364,6 +1395,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies UI and metadata FIR nodes lower to the expected C++ callback calls.
     fn emits_ui_and_metadata_nodes() {
         let mut store = FirStore::new();
         let mut b = FirBuilder::new(&mut store);
@@ -1417,6 +1449,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies type rendering covers the currently supported compound forms.
     fn type_mapping_covers_pointer_array_vector_and_function_forms() {
         let options = CppOptions::default();
         assert_eq!(
@@ -1445,6 +1478,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies target spelling overrides are used for `Quad` and `FixedPoint`.
     fn type_mapping_supports_quad_and_fixed_spelling_overrides() {
         let options = CppOptions {
             quad_type_name: "long double".to_owned(),

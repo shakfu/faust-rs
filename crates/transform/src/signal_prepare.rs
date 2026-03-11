@@ -55,6 +55,7 @@ use tlib::{
 /// only the distinctions required by the reduced `SignalPromotion` subset and
 /// by FIR type selection in the fast-lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Reduced signal type domain used by the FIR-preparation pass.
 pub enum SimpleSigType {
     /// Integer-valued signal.
     Int,
@@ -69,6 +70,7 @@ pub enum SimpleSigType {
 /// The package owns a private staging arena so preparation passes can rewrite
 /// the signal forest without mutating the original parse/eval arena.
 #[derive(Debug)]
+/// Result of preparing a propagated signal list for FIR lowering.
 pub struct PreparedSignals {
     /// Private staging arena containing the prepared signal forest.
     pub arena: TreeArena,
@@ -88,6 +90,7 @@ impl PreparedSignals {
 
 /// Errors returned while preparing signals for FIR lowering.
 #[derive(Debug)]
+/// Typed failures returned by the signal-preparation pass.
 pub enum SignalPrepareError {
     /// The output forest contains malformed or open de Bruijn recursion.
     Recursion(RecursionError),
@@ -184,6 +187,7 @@ fn promote_signals_for_fir(
 /// types always map unresolved slots to [`SimpleSigType::Real`], matching the
 /// current fast-lane fallback policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One slot in the recursive-group fixpoint lattice.
 enum TypeSlot {
     Unknown,
     Int,

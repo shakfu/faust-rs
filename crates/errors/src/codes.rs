@@ -74,6 +74,7 @@ pub const COMP_PROPAGATE_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0003"
 
 /// Returns all built-in stable diagnostic codes.
 #[must_use]
+/// Returns the full stable registry of known diagnostic codes.
 pub fn all_codes() -> &'static [DiagnosticCode] {
     &[
         SRC_IO_ERROR,

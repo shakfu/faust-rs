@@ -43,6 +43,7 @@ use signals::dump_sig_readable;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+/// Code generation language/backend selected from the CLI.
 enum CliLang {
     #[value(alias = "c99")]
     C,
@@ -56,6 +57,7 @@ enum CliLang {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+/// Structured error rendering format for CLI diagnostics.
 enum ErrorFormat {
     #[default]
     Human,
@@ -63,6 +65,7 @@ enum ErrorFormat {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+/// Diagnostic verbosity level for CLI rendering.
 enum ErrorVerbosity {
     #[default]
     Standard,
@@ -70,6 +73,7 @@ enum ErrorVerbosity {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+/// Signal->FIR lane selected from the CLI.
 enum CliSignalFirLane {
     #[default]
     Legacy,
@@ -92,6 +96,7 @@ impl CliSignalFirLane {
 /// parsing and help generation.
 #[derive(Debug, Parser)]
 #[command(name = "faust-rs", disable_version_flag = true)]
+/// Parsed CLI arguments for the `compiler` binary.
 struct CliArgs {
     /// Generate the golden snapshot output for one DSP file.
     #[arg(long, action = ArgAction::SetTrue)]
@@ -195,6 +200,7 @@ struct CliArgs {
     double: bool,
 }
 
+/// Normalizes legacy Faust-style flags to the current `clap` surface.
 fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut normalized = Vec::new();
     let mut it = args.into_iter();
@@ -218,6 +224,7 @@ fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> 
     normalized
 }
 
+/// Prints structured diagnostics according to the selected CLI format.
 fn print_structured_diagnostics(
     err: &CompilerError,
     format: ErrorFormat,
@@ -312,6 +319,7 @@ fn format_diagnostics_human_with_verbosity(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Pairing between a rendered diagnostic and its relevant source context.
 struct PairedContext {
     a_expr: String,
     b_expr: String,
@@ -567,6 +575,7 @@ fn diagnostic_debug_from_notes(notes: &[Box<str>]) -> serde_json::Value {
     })
 }
 
+/// Prints top-level usage and exits the process.
 fn print_global_usage_and_exit() -> ! {
     eprintln!("Usage:");
     eprintln!(
@@ -601,6 +610,7 @@ fn print_global_usage_and_exit() -> ! {
     std::process::exit(2);
 }
 
+/// Emits the on-demand error-format help footer.
 fn maybe_print_error_format_help(enabled: bool) {
     if enabled {
         println!("--error-format human|json");
@@ -613,6 +623,7 @@ fn maybe_print_error_format_help(enabled: bool) {
     }
 }
 
+/// Writes generated output either to stdout or to the requested file.
 fn emit_output(content: &str, output: Option<&PathBuf>) {
     if let Some(path) = output {
         if let Some(parent) = path.parent()
@@ -634,6 +645,7 @@ fn emit_output(content: &str, output: Option<&PathBuf>) {
     }
 }
 
+/// Renders a short Cranelift backend status report for the CLI.
 fn render_cranelift_report(
     compiled: &codegen::backends::cranelift::JitDspModule,
     subset_gap: Option<&str>,
@@ -678,10 +690,12 @@ fn render_cranelift_report(
     out
 }
 
+/// Maps CLI backend selection to the signal->FIR lane used internally.
 fn selected_codegen_lane(cli: &CliArgs) -> CliSignalFirLane {
     cli.signal_fir_lane.unwrap_or(CliSignalFirLane::Fast)
 }
 
+/// Maps CLI switches to FIR verifier behavior.
 fn selected_fir_verify_options(cli: &CliArgs) -> FirVerifyOptions {
     FirVerifyOptions {
         enabled: !cli.no_fir_verify,
@@ -689,6 +703,7 @@ fn selected_fir_verify_options(cli: &CliArgs) -> FirVerifyOptions {
     }
 }
 
+/// Maps CLI precision switches to the internal DSP real type.
 fn selected_real_type(cli: &CliArgs) -> RealType {
     if cli.double {
         RealType::Float64
@@ -697,12 +712,14 @@ fn selected_real_type(cli: &CliArgs) -> RealType {
     }
 }
 
+/// Builds one configured [`Compiler`] instance from parsed CLI arguments.
 fn compiler_from_cli(cli: &CliArgs) -> Compiler {
     Compiler::new()
         .with_fir_verify_options(selected_fir_verify_options(cli))
         .with_real_type(selected_real_type(cli))
 }
 
+/// Renders the list of built-in FIR backend fixtures for `--fir-fixture`.
 fn render_fir_fixture_list() -> String {
     let mut out = String::from("Built-in FIR fixtures:\n");
     for (name, _) in backend_test_fixtures() {
@@ -713,12 +730,14 @@ fn render_fir_fixture_list() -> String {
     out
 }
 
+/// Looks up one named FIR backend fixture builder.
 fn find_fir_fixture(name: &str) -> Option<codegen::fixtures::FirFixtureBuilder> {
     backend_test_fixtures()
         .iter()
         .find_map(|(n, build)| (*n == name).then_some(*build))
 }
 
+/// Compiles a named FIR fixture through the interpreter backend and renders summary text.
 fn compile_fixture_to_interp_text(
     store: &fir::FirStore,
     module: fir::FirId,
@@ -731,6 +750,7 @@ fn compile_fixture_to_interp_text(
     String::from_utf8(buf).map_err(|e| e.to_string())
 }
 
+/// Renders a FIR verifier report in CLI-friendly text form.
 fn render_fir_verify_report(store: &fir::FirStore, module: fir::FirId, strict: bool) -> String {
     let report = verify_fir_module(store, module);
     let errors = report.errors().count();

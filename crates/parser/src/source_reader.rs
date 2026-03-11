@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 /// One source-origin marker for a line in expanded source text.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Origin information for one expanded source line.
 pub struct SourceLineOrigin {
     /// Canonical file path where this expanded line originates.
     pub file: PathBuf,
@@ -28,6 +29,7 @@ pub struct SourceLineOrigin {
 
 /// Expanded source payload returned by [`SourceReader`], including per-line origin mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Result of recursively expanding one Faust source file with imports.
 pub struct ExpandedSource {
     /// Expanded source text after recursive import substitution.
     pub text: Box<str>,
@@ -37,6 +39,7 @@ pub struct ExpandedSource {
 
 /// Errors returned by [`SourceReader`].
 #[derive(Debug)]
+/// Errors returned by the source reader/import expander.
 pub enum SourceReaderError {
     Io { path: PathBuf, message: Box<str> },
     UnresolvedImport { name: Box<str>, from: PathBuf },
@@ -63,6 +66,7 @@ impl std::error::Error for SourceReaderError {}
 
 /// Reads Faust sources and expands `import("...");` directives recursively.
 #[derive(Debug, Default)]
+/// File-backed source reader with import expansion and caching.
 pub struct SourceReader {
     file_cache: HashMap<PathBuf, ExpandedSource>,
     search_paths: Vec<PathBuf>,

@@ -67,6 +67,8 @@ use crate::signal_prepare::prepare_signals_for_fir;
 /// Corresponds to Faust's `-double` compilation flag and `gFLoatSize`:
 /// - `Float32` → C++ `float` (default),
 /// - `Float64` → C++ `double`.
+///
+/// Internal DSP real type used when lowering signals to FIR.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum RealType {
     /// 32-bit single-precision float (`float` in C++). Default.
@@ -92,6 +94,7 @@ impl RealType {
 /// These options currently describe only the externally visible module contract.
 /// Resource planning and lowering policies stay internal to the fast-lane until
 /// more slices are promoted to stable configuration.
+/// Configuration options for signal->FIR lowering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalFirOptions {
     /// FIR module name to emit.
@@ -132,6 +135,7 @@ impl Default for SignalFirOptions {
 /// root so downstream backends can keep using normal `fir` builder/matcher APIs
 /// without relying on hidden global state.
 #[derive(Debug)]
+/// Output bundle produced by the signal->FIR lowering entry point.
 pub struct SignalFirOutput {
     /// FIR storage arena.
     pub store: FirStore,

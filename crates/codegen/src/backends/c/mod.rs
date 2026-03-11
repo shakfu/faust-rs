@@ -62,6 +62,7 @@ impl Default for COptions {
     }
 }
 
+/// Stable machine-readable error codes for the C backend emitter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodegenErrorCode {
     /// Root FIR node is not a module (`FirMatch::Module`).
@@ -73,6 +74,7 @@ pub enum CodegenErrorCode {
 }
 
 impl CodegenErrorCode {
+    /// Returns the stable machine-readable error code string.
     /// Stable textual code used in diagnostics and tests.
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -84,6 +86,7 @@ impl CodegenErrorCode {
     }
 }
 
+/// Typed backend error returned by the C emitter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodegenError {
     code: CodegenErrorCode,
@@ -108,6 +111,7 @@ impl CodegenError {
 }
 
 impl std::fmt::Display for CodegenError {
+    /// Formats the typed error as `[CODE] message`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[{}] {}", self.code.as_str(), self.message)
     }
@@ -245,6 +249,7 @@ pub fn generate_c_module(
     Ok(out)
 }
 
+/// Emits the prologue/header guard and platform macros for the generated unit.
 fn emit_c_header(out: &mut String, class_name: &str) {
     let guard = format!("__{}_H__", class_name);
     let _ = writeln!(out, "#ifndef  {guard}");
@@ -279,6 +284,7 @@ fn emit_c_header(out: &mut String, class_name: &str) {
     let _ = writeln!(out);
 }
 
+/// Emits the closing `extern "C"` / include-guard footer.
 fn emit_c_footer(out: &mut String) {
     let _ = writeln!(out);
     let _ = writeln!(out, "#ifdef __cplusplus");
@@ -288,6 +294,7 @@ fn emit_c_footer(out: &mut String) {
     let _ = writeln!(out, "#endif");
 }
 
+/// Emits the DSP state `struct` definition from FIR state declarations.
 fn emit_struct_definition(
     store: &FirStore,
     out: &mut String,
@@ -309,6 +316,10 @@ fn emit_struct_definition(
     Ok(())
 }
 
+/// Emits one FIR block worth of struct fields.
+///
+/// Only `DeclareVar` and `DeclareTable` entries contribute concrete state
+/// fields; helper declarations are ignored.
 fn emit_struct_fields(
     store: &FirStore,
     out: &mut String,
@@ -352,6 +363,7 @@ fn emit_struct_fields(
     Ok(())
 }
 
+/// Returns `true` when `block_id` declares a variable named `name`.
 fn block_declares_var(store: &FirStore, block_id: FirId, name: &str) -> bool {
     let FirMatch::Block(items) = match_fir(store, block_id) else {
         return false;
@@ -364,6 +376,7 @@ fn block_declares_var(store: &FirStore, block_id: FirId, name: &str) -> bool {
     })
 }
 
+/// Returns `true` when `block_id` stores to a variable named `name`.
 fn block_stores_var(store: &FirStore, block_id: FirId, name: &str) -> bool {
     let FirMatch::Block(items) = match_fir(store, block_id) else {
         return false;
@@ -376,6 +389,7 @@ fn block_stores_var(store: &FirStore, block_id: FirId, name: &str) -> bool {
     })
 }
 
+/// Aggregated inputs required to synthesize the public Faust C API surface.
 struct CApiEmitInput<'a> {
     options: &'a COptions,
     class_name: &'a str,
@@ -589,6 +603,7 @@ fn emit_c_api(
     Ok(())
 }
 
+/// Emits the `metadata` function or a canonical default stub.
 fn emit_metadata(
     store: &FirStore,
     out: &mut String,
@@ -610,6 +625,7 @@ fn emit_metadata(
     }
 }
 
+/// Emits one named DSP API method using the legacy C wrapper signature.
 fn emit_named_fun(
     store: &FirStore,
     out: &mut String,
@@ -658,6 +674,7 @@ fn emit_named_fun(
     Ok(())
 }
 
+/// Emits one non-DSP helper function as a `static` C function.
 fn emit_helper_function(
     store: &FirStore,
     out: &mut String,
@@ -693,6 +710,7 @@ fn emit_helper_function(
     Ok(())
 }
 
+/// Returns the rendered C return type for a FIR type or function signature.
 fn emit_return_type(typ: &FirType, options: &COptions) -> String {
     match typ {
         FirType::Fun { ret, .. } => emit_type(ret, options),
@@ -700,6 +718,7 @@ fn emit_return_type(typ: &FirType, options: &COptions) -> String {
     }
 }
 
+/// Emits the FIR `compute` body in compute-specific rendering mode.
 fn emit_compute_body(
     store: &FirStore,
     out: &mut String,
@@ -711,6 +730,7 @@ fn emit_compute_body(
     emit_block_with_mode(store, out, options, body, indent, &mut mode)
 }
 
+/// Collects scalar struct/global initializers used by reset lifecycle methods.
 fn collect_struct_initializers(
     store: &FirStore,
     dsp_struct: FirId,
@@ -743,6 +763,7 @@ fn collect_struct_initializers(
     Ok(out)
 }
 
+/// Collects table initializers from FIR state declarations.
 fn collect_table_initializers(
     store: &FirStore,
     dsp_struct: FirId,
@@ -780,6 +801,7 @@ fn collect_table_initializers(
     Ok(out)
 }
 
+/// Extracts all body-bearing helper/function definitions from the module.
 fn collect_module_functions(
     store: &FirStore,
     functions: FirId,
@@ -819,6 +841,7 @@ fn collect_module_functions(
     Ok(names)
 }
 
+/// Emits a FIR block in default rendering mode.
 fn emit_block(
     store: &FirStore,
     out: &mut String,
@@ -830,6 +853,7 @@ fn emit_block(
     emit_block_with_mode(store, out, options, block, indent, &mut mode)
 }
 
+/// Emits every statement in a FIR block under the active rendering mode.
 fn emit_block_with_mode(
     store: &FirStore,
     out: &mut String,
@@ -847,6 +871,7 @@ fn emit_block_with_mode(
     Ok(())
 }
 
+/// Emits one FIR statement into C syntax.
 fn emit_stmt(
     store: &FirStore,
     out: &mut String,
@@ -1111,6 +1136,7 @@ fn emit_stmt(
     }
 }
 
+/// Emits one FIR value expression into a C expression string.
 fn emit_value(store: &FirStore, options: &COptions, value: FirId) -> Result<String, CodegenError> {
     match match_fir(store, value) {
         FirMatch::Int32 { value, .. } => Ok(value.to_string()),
@@ -1176,6 +1202,7 @@ fn emit_value(store: &FirStore, options: &COptions, value: FirId) -> Result<Stri
     }
 }
 
+/// Maps one FIR binary operator to its C token spelling.
 fn emit_binop(op: FirBinOp) -> &'static str {
     match op {
         FirBinOp::Add => "+",
@@ -1195,6 +1222,7 @@ fn emit_binop(op: FirBinOp) -> &'static str {
     }
 }
 
+/// Renders a variable reference according to its storage class.
 fn emit_var_ref(name: &str, access: AccessType) -> String {
     match access {
         AccessType::Struct => format!("dsp->{name}"),
@@ -1202,6 +1230,7 @@ fn emit_var_ref(name: &str, access: AccessType) -> String {
     }
 }
 
+/// Renders a FIR type into the current C backend spelling.
 fn emit_type(typ: &FirType, options: &COptions) -> String {
     match typ {
         FirType::Int32 => "int".to_owned(),
@@ -1234,6 +1263,7 @@ fn emit_type(typ: &FirType, options: &COptions) -> String {
     }
 }
 
+/// Decodes the FIR module header expected by the C emitter.
 fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
     if let FirMatch::Module {
         num_inputs,
@@ -1264,6 +1294,7 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
     }
 }
 
+/// Builds a stable unsupported-node diagnostic for the C emitter.
 fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
     CodegenError::new(
         CodegenErrorCode::UnsupportedNode,
@@ -1275,6 +1306,7 @@ fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
     )
 }
 
+/// Formats a floating-point literal with stable trimmed C syntax.
 fn trim_float(value: f64) -> String {
     let mut s = format!("{value:.15}");
     while s.contains('.') && s.ends_with('0') {
@@ -1286,6 +1318,7 @@ fn trim_float(value: f64) -> String {
     if s == "-0.0" { "0.0".to_owned() } else { s }
 }
 
+/// Escapes a Rust string into a C string literal.
 fn c_string_literal(input: &str) -> String {
     let escaped = input
         .chars()

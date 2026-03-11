@@ -30,18 +30,22 @@ pub fn backend_test_fixtures() -> &'static [(&'static str, FirFixtureBuilder)] {
     ]
 }
 
+/// Returns the canonical `dsp` pointer type used by backend test modules.
 fn obj_ptr_type() -> FirType {
     FirType::Ptr(Box::new(FirType::Obj))
 }
 
+/// Returns `FAUSTFLOAT*`.
 fn faustfloat_ptr_type() -> FirType {
     FirType::Ptr(Box::new(FirType::FaustFloat))
 }
 
+/// Returns `FAUSTFLOAT**`.
 fn faustfloat_ptr_ptr_type() -> FirType {
     FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat))))
 }
 
+/// Canonical named-argument list for the DSP `compute` method.
 fn compute_fun_args() -> [NamedType; 4] {
     [
         NamedType {
@@ -63,6 +67,7 @@ fn compute_fun_args() -> [NamedType; 4] {
     ]
 }
 
+/// Canonical FIR type for the DSP `compute` method.
 fn compute_fun_type() -> FirType {
     FirType::Fun {
         args: vec![
@@ -75,6 +80,7 @@ fn compute_fun_type() -> FirType {
     }
 }
 
+/// Canonical named-argument list for `buildUserInterface`.
 fn build_ui_fun_args() -> [NamedType; 2] {
     [
         NamedType {
@@ -88,6 +94,7 @@ fn build_ui_fun_args() -> [NamedType; 2] {
     ]
 }
 
+/// Canonical FIR type for `buildUserInterface`.
 fn build_ui_fun_type() -> FirType {
     FirType::Fun {
         args: vec![obj_ptr_type(), FirType::UI],
@@ -95,6 +102,7 @@ fn build_ui_fun_type() -> FirType {
     }
 }
 
+/// Canonical named-argument list for `metadata`.
 fn metadata_fun_args() -> [NamedType; 2] {
     [
         NamedType {
@@ -108,6 +116,7 @@ fn metadata_fun_args() -> [NamedType; 2] {
     ]
 }
 
+/// Canonical FIR type for `metadata`.
 fn metadata_fun_type() -> FirType {
     FirType::Fun {
         args: vec![obj_ptr_type(), FirType::Meta],
@@ -115,6 +124,7 @@ fn metadata_fun_type() -> FirType {
     }
 }
 
+/// Wraps globals/functions into a complete FIR `Module`.
 fn module_with_functions(
     b: &mut FirBuilder<'_>,
     name: &str,
@@ -136,11 +146,13 @@ fn module_with_functions(
     )
 }
 
+/// Declares the canonical `compute` function around `body`.
 fn declare_compute_fn(b: &mut FirBuilder<'_>, body: FirId) -> FirId {
     let args = compute_fun_args();
     b.declare_fun("compute", compute_fun_type(), &args, Some(body), false)
 }
 
+/// Creates `input0`/`output0` stack aliases for mono `compute` fixtures.
 fn io_aliases_for_mono_compute(b: &mut FirBuilder<'_>) -> (FirId, FirId) {
     let chan0 = b.int32(0);
     let ptr_ty = faustfloat_ptr_type();
@@ -267,6 +279,10 @@ pub fn build_sine_phasor_test_module() -> (FirStore, FirId) {
 /// ```faust
 /// process = _;
 /// ```
+/// Builds a minimal mono passthrough FIR module (`output0[i] = input0[i]`).
+///
+/// This is the lowest-friction backend smoke fixture: simple I/O aliases and
+/// no state, UI, or helper functions beyond `compute`.
 #[must_use]
 pub fn build_passthrough_test_module() -> (FirStore, FirId) {
     let mut store = FirStore::new();
@@ -573,6 +589,7 @@ pub fn build_control_flow_test_module() -> (FirStore, FirId) {
 /// f(x) = (max(-1.0, min(pow(abs(x), 0.5), 1.0)) * 0.5) - atan2(sin(x), cos(x));
 /// process = f;
 /// ```
+/// Builds a FIR module covering unary/binary math intrinsic lowering.
 #[must_use]
 pub fn build_math_intrinsics_test_module() -> (FirStore, FirId) {
     let mut store = FirStore::new();
@@ -634,6 +651,7 @@ pub fn build_math_intrinsics_test_module() -> (FirStore, FirId) {
 ///   };
 /// };
 /// ```
+/// Builds a denser FIR module used for backend throughput/benchmark smoke checks.
 #[must_use]
 pub fn build_heavy_bench_test_module() -> (FirStore, FirId) {
     const STAGES: usize = 12;
@@ -713,6 +731,7 @@ pub fn build_heavy_bench_test_module() -> (FirStore, FirId) {
 /// ```faust
 /// process = _; // runtime behavior is intentionally not the point of this fixture
 /// ```
+/// Builds a wide FIR module intended to touch many rarely used instruction families.
 #[must_use]
 pub fn build_ir_coverage_test_module() -> (FirStore, FirId) {
     let mut store = FirStore::new();

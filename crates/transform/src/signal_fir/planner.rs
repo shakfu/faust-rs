@@ -13,6 +13,7 @@ use signals::SigId;
 /// and stable across lowering strategies. Later planning slices can extend this
 /// struct without changing the basic contract consumed by `module.rs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// High-level plan summary produced before signal->FIR module lowering.
 pub struct SignalFirPlan {
     /// Number of output signals requested for compilation.
     pub signal_count: usize,

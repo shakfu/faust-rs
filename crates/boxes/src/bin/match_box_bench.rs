@@ -12,6 +12,7 @@ use std::time::Instant;
 use boxes::{BoxBuilder, BoxId, match_box};
 use tlib::TreeArena;
 
+/// Runs one named `match_box` throughput benchmark case.
 fn bench_case(name: &str, arena: &TreeArena, nodes: &[BoxId], rounds: usize) {
     let start = Instant::now();
     let mut sink: u64 = 0;
@@ -28,11 +29,14 @@ fn bench_case(name: &str, arena: &TreeArena, nodes: &[BoxId], rounds: usize) {
     println!("{name:16}  ops={ops:.0}  ns/op={ns_per_op:.2}  Mops/s={mops:.2}  sink={sink}");
 }
 
+/// Small helper trait to fold enum discriminants into the benchmark sink.
 trait DiscriminantHash64 {
+    /// Hashes the discriminant to a stable `u64` sink value.
     fn hash64(&self) -> u64;
 }
 
 impl<T> DiscriminantHash64 for std::mem::Discriminant<T> {
+    /// Hashes the discriminant with the default hasher.
     fn hash64(&self) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hash::hash(self, &mut h);
@@ -40,6 +44,7 @@ impl<T> DiscriminantHash64 for std::mem::Discriminant<T> {
     }
 }
 
+/// Builds representative box families and prints local throughput timings.
 fn main() {
     let mut arena = TreeArena::new();
     let i0 = arena.int(0);

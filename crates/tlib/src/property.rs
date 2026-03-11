@@ -44,6 +44,9 @@ impl<T> PropertyStore<T> {
     }
 
     /// Creates an empty property store with expected key capacity.
+    ///
+    /// The capacity only affects the key-interner hashmap; value-slot vectors
+    /// still grow on demand per key.
     #[must_use]
     pub fn with_key_capacity(key_capacity: usize) -> Self {
         Self {
@@ -55,6 +58,9 @@ impl<T> PropertyStore<T> {
     }
 
     /// Interns `key` (or reuses an existing key) and returns its [`PropertyKey`].
+    ///
+    /// This is the intended bind-time API for callers that perform many lookups
+    /// on the same property name and want to switch to the numeric fast path.
     pub fn key(&mut self, key: impl AsRef<str>) -> PropertyKey {
         self.intern_key(key.as_ref())
     }
@@ -171,6 +177,10 @@ impl<T> PropertyStore<T> {
         self.len == 0
     }
 
+    /// Interns one property name and returns its stable store-local key id.
+    ///
+    /// New keys append one empty slot vector to [`values`](Self::values), so
+    /// future `(key, TreeId)` accesses can index directly by node id.
     fn intern_key(&mut self, key: &str) -> PropertyKey {
         if let Some(id) = self.key_intern.get(key) {
             return *id;

@@ -73,6 +73,7 @@ pub struct FbcExecError {
 }
 
 impl FbcExecError {
+    /// Creates a `stack_underflow` runtime error.
     fn stack_underflow(
         opcode: FbcOpcode,
         block_id: BlockId,
@@ -90,6 +91,7 @@ impl FbcExecError {
         }
     }
 
+    /// Creates a `missing_branch_target` runtime error.
     fn missing_branch_target(opcode: FbcOpcode, block_id: BlockId, pc: usize) -> Self {
         Self {
             kind: "missing_branch_target",
@@ -102,6 +104,7 @@ impl FbcExecError {
         }
     }
 
+    /// Creates an `unsupported_runtime_feature` runtime error.
     fn unsupported_runtime_feature(opcode: FbcOpcode, block_id: BlockId, pc: usize) -> Self {
         Self {
             kind: "unsupported_runtime_feature",
@@ -114,6 +117,7 @@ impl FbcExecError {
         }
     }
 
+    /// Creates an `invalid_block_id` runtime error.
     fn invalid_block_id(opcode: FbcOpcode, block_id: BlockId, pc: usize) -> Self {
         Self {
             kind: "invalid_block_id",
@@ -126,6 +130,7 @@ impl FbcExecError {
         }
     }
 
+    /// Creates an `invalid_block_pc` runtime error.
     fn invalid_block_pc(opcode: FbcOpcode, block_id: BlockId, pc: usize) -> Self {
         Self {
             kind: "invalid_block_pc",
@@ -138,6 +143,7 @@ impl FbcExecError {
         }
     }
 
+    /// Creates a `heap_oob` runtime error.
     fn heap_oob(opcode: FbcOpcode, block_id: BlockId, pc: usize) -> Self {
         Self {
             kind: "heap_oob",
@@ -150,6 +156,7 @@ impl FbcExecError {
         }
     }
 
+    /// Creates a `panic_trapped` runtime error.
     fn panic_trapped(opcode: FbcOpcode, block_id: BlockId, pc: usize) -> Self {
         Self {
             kind: "panic_trapped",
@@ -162,6 +169,7 @@ impl FbcExecError {
         }
     }
 
+    /// Creates an `io_oob` runtime error.
     fn io_oob(
         opcode: FbcOpcode,
         block_id: BlockId,
@@ -182,6 +190,7 @@ impl FbcExecError {
 }
 
 impl std::fmt::Display for FbcExecError {
+    /// Formats the execution error as a compact runtime diagnostic line.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match (self.stack, self.channel, self.sample) {
             (Some(stack), _, _) => write!(
@@ -245,6 +254,7 @@ fn require_branch_target(
     target.ok_or_else(|| FbcExecError::missing_branch_target(opcode, block_id, pc))
 }
 
+/// Extracts a string message from a caught panic payload when possible.
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> Option<&str> {
     if let Some(msg) = payload.downcast_ref::<&'static str>() {
         Some(msg)
@@ -272,6 +282,7 @@ fn classify_trapped_panic(payload: &(dyn std::any::Any + Send), site: ExecSite) 
 }
 
 #[derive(Clone, Copy, Debug)]
+/// Last interpreter execution site used to classify trapped panics.
 struct ExecSite {
     opcode: FbcOpcode,
     block_id: BlockId,
@@ -383,6 +394,7 @@ impl<R: FbcReal> FbcExecutor<R> {
     }
 
     #[allow(clippy::too_many_lines)]
+    /// Core dispatch loop shared by panic-on-error and structured-error entry points.
     fn try_execute_block_io_inner(
         &mut self,
         arena: &FbcBlockArena<R>,

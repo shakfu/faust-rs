@@ -189,153 +189,189 @@ macro_rules! impl_fbc_real {
         impl FbcReal for $ty {
             const TYPE_NAME: &'static str = $type_name;
 
+            /// Converts from `i32` using Rust's primitive cast semantics.
             #[inline]
             fn from_i32(v: i32) -> Self {
                 v as Self
             }
+            /// Converts to `i32` using Rust's primitive cast semantics.
             #[inline]
             fn to_i32(self) -> i32 {
                 self as i32
             }
+            /// Converts from `f64` using Rust's primitive cast semantics.
             #[inline]
             fn from_f64(v: f64) -> Self {
                 v as Self
             }
+            /// Converts to `f64` using Rust's primitive cast semantics.
             #[inline]
             fn to_f64(self) -> f64 {
                 self as f64
             }
 
             // ── Unary math ───────────────────────────────────────────────
+            /// Implements Faust `kAbs` integer-style absolute value.
             #[inline]
             fn fbc_abs(self) -> Self {
                 // C++ kAbs: truncate to int, abs, cast back.
                 (self as i32).unsigned_abs() as Self
             }
+            /// Implements Faust `kAbsf` floating absolute value.
             #[inline]
             fn fbc_absf(self) -> Self {
                 self.abs()
             }
+            /// Computes arc cosine.
             #[inline]
             fn fbc_acos(self) -> Self {
                 self.acos()
             }
+            /// Computes hyperbolic arc cosine.
             #[inline]
             fn fbc_acosh(self) -> Self {
                 self.acosh()
             }
+            /// Computes arc sine.
             #[inline]
             fn fbc_asin(self) -> Self {
                 self.asin()
             }
+            /// Computes hyperbolic arc sine.
             #[inline]
             fn fbc_asinh(self) -> Self {
                 self.asinh()
             }
+            /// Computes arc tangent.
             #[inline]
             fn fbc_atan(self) -> Self {
                 self.atan()
             }
+            /// Computes hyperbolic arc tangent.
             #[inline]
             fn fbc_atanh(self) -> Self {
                 self.atanh()
             }
+            /// Rounds toward positive infinity.
             #[inline]
             fn fbc_ceil(self) -> Self {
                 self.ceil()
             }
+            /// Computes cosine.
             #[inline]
             fn fbc_cos(self) -> Self {
                 self.cos()
             }
+            /// Computes hyperbolic cosine.
             #[inline]
             fn fbc_cosh(self) -> Self {
                 self.cosh()
             }
+            /// Computes the natural exponential.
             #[inline]
             fn fbc_exp(self) -> Self {
                 self.exp()
             }
+            /// Rounds toward negative infinity.
             #[inline]
             fn fbc_floor(self) -> Self {
                 self.floor()
             }
+            /// Computes the natural logarithm.
             #[inline]
             fn fbc_log(self) -> Self {
                 self.ln()
             }
+            /// Computes the base-10 logarithm.
             #[inline]
             fn fbc_log10(self) -> Self {
                 self.log10()
             }
+            /// Rounds to nearest with ties to even.
             #[inline]
             fn fbc_rint(self) -> Self {
                 self.round_ties_even()
             }
+            /// Rounds to nearest using the primitive `round` behavior.
             #[inline]
             fn fbc_round(self) -> Self {
                 self.round()
             }
+            /// Computes sine.
             #[inline]
             fn fbc_sin(self) -> Self {
                 self.sin()
             }
+            /// Computes hyperbolic sine.
             #[inline]
             fn fbc_sinh(self) -> Self {
                 self.sinh()
             }
+            /// Computes square root.
             #[inline]
             fn fbc_sqrt(self) -> Self {
                 self.sqrt()
             }
+            /// Computes tangent.
             #[inline]
             fn fbc_tan(self) -> Self {
                 self.tan()
             }
+            /// Computes hyperbolic tangent.
             #[inline]
             fn fbc_tanh(self) -> Self {
                 self.tanh()
             }
+            /// Returns whether the value is NaN.
             #[inline]
             fn fbc_is_nan(self) -> bool {
                 self.is_nan()
             }
+            /// Returns whether the value is infinite.
             #[inline]
             fn fbc_is_infinite(self) -> bool {
                 self.is_infinite()
             }
 
             // ── Binary math ──────────────────────────────────────────────
+            /// Computes two-argument arc tangent.
             #[inline]
             fn fbc_atan2(self, other: Self) -> Self {
                 self.atan2(other)
             }
+            /// Computes floating modulus using primitive remainder.
             #[inline]
             fn fbc_fmod(self, other: Self) -> Self {
                 self % other
             }
+            /// Computes exponentiation.
             #[inline]
             fn fbc_pow(self, exp: Self) -> Self {
                 self.powf(exp)
             }
+            /// Computes the numeric minimum.
             #[inline]
             fn fbc_min(self, other: Self) -> Self {
                 self.min(other)
             }
+            /// Computes the numeric maximum.
             #[inline]
             fn fbc_max(self, other: Self) -> Self {
                 self.max(other)
             }
+            /// Copies the sign bit from `sign`.
             #[inline]
             fn fbc_copysign(self, sign: Self) -> Self {
                 self.copysign(sign)
             }
 
             // ── Bitcast (type-specific) ──────────────────────────────────
+            /// Reinterprets the REAL bits as an `i32` according to the implementation hook.
             #[inline]
             fn to_bits_i32(self) -> i32 {
                 ($bitcast_to)(self)
             }
+            /// Reinterprets `i32` bits as a REAL according to the implementation hook.
             #[inline]
             fn from_bits_i32(v: i32) -> Self {
                 ($bitcast_from)(v)

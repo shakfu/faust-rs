@@ -99,6 +99,7 @@ pub enum CraneliftBackendErrorCode {
 }
 
 impl CraneliftBackendErrorCode {
+    /// Returns the stable machine-readable error code string.
     fn as_str(self) -> &'static str {
         match self {
             Self::NotImplemented => "FRS-CGEN-CLIF-0001",
@@ -128,6 +129,7 @@ pub struct CraneliftBackendError {
 }
 
 impl CraneliftBackendError {
+    /// Builds an `UnsupportedModuleShape` backend error.
     fn unsupported_module_shape(message: impl Into<String>) -> Self {
         Self {
             code: CraneliftBackendErrorCode::UnsupportedModuleShape,
@@ -135,6 +137,7 @@ impl CraneliftBackendError {
         }
     }
 
+    /// Builds a `MissingCompute` backend error.
     fn missing_compute(message: impl Into<String>) -> Self {
         Self {
             code: CraneliftBackendErrorCode::MissingCompute,
@@ -142,6 +145,7 @@ impl CraneliftBackendError {
         }
     }
 
+    /// Builds a `JitFailure` backend error.
     fn jit_failure(message: impl Into<String>) -> Self {
         Self {
             code: CraneliftBackendErrorCode::JitFailure,
@@ -151,6 +155,7 @@ impl CraneliftBackendError {
 }
 
 impl std::fmt::Display for CraneliftBackendError {
+    /// Formats the typed error as `[CODE] message`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[{}] {}", self.code.as_str(), self.message)
     }
@@ -189,6 +194,7 @@ pub struct JitDspModule {
 }
 
 impl std::fmt::Debug for JitDspModule {
+    /// Renders a compact debug view that avoids dumping the owned `JITModule`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JitDspModule")
             .field("module_name", &self.module_name)
@@ -376,6 +382,10 @@ impl StructFieldLayout {
 }
 
 /// Concrete size/alignment pair for one scalar storage type in the layout plan.
+/// Concrete size/alignment pair for one scalar storage type in the layout plan.
+///
+/// This is internal because only the finalized [`StructLayoutPlan`] is part of
+/// the backend contract exposed to callers.
 #[derive(Clone, Copy, Debug)]
 struct LayoutScalar {
     size: u32,
@@ -931,6 +941,10 @@ fn register_host_symbols(jit_builder: &mut JITBuilder) {
 /// This enum preserves that distinction so statement lowering can reject invalid
 /// uses early (for example writing a scalar as if it were a pointer table base).
 #[derive(Clone, Copy, Debug)]
+/// Lowered expression value tracked in the local Cranelift lowering environment.
+///
+/// FIR names in the current subset can denote either scalar SSA values or
+/// pointer aliases. This enum preserves that distinction for later loads/stores.
 enum LoweredExpr {
     Scalar(Value),
     Ptr {
@@ -979,6 +993,10 @@ impl LoweredExpr {
 /// pointer aliases (`LoweredExpr::Ptr`) with enough information to safely lower
 /// `LoadTable`/`StoreTable` on stack aliases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Lightweight FIR type classifier used in local lowering metadata.
+///
+/// This reduced classifier is intentionally coarser than [`FirType`]; it only
+/// carries the information needed by pointer alias lowering.
 enum FirTypeRef {
     Bool,
     Int32,
@@ -1021,6 +1039,7 @@ impl FirTypeRef {
 /// `Unsupported` means "valid FIR, but outside current subset"; callers may
 /// convert this into a stub fallback. `Jit` represents structural/codegen
 /// failures that should surface as backend errors.
+/// Internal lowering failure used while emitting one Cranelift function body.
 #[derive(Debug)]
 enum LoweringError {
     Unsupported(String),
@@ -1061,6 +1080,10 @@ fn is_return_terminated(fb: &FunctionBuilder<'_>) -> bool {
 /// - cached imported function refs for math calls.
 ///
 /// It is intentionally function-scoped: one instance per `compute` lowering.
+/// Stateful FIR -> Cranelift lowering context for one `compute` function.
+///
+/// The context owns the CLIF builder-side environment, imported function cache,
+/// and local FIR variable bindings required during subset lowering.
 struct ComputeLowering<'a, 'b, 'c> {
     store: &'a FirStore,
     jit: &'a mut JITModule,
@@ -2739,12 +2762,14 @@ mod tests {
     use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirType, NamedType};
 
     #[test]
+    /// Verifies the public backend identifier remains stable.
     fn backend_id_is_stable() {
         assert_eq!(BACKEND_NAME, "cranelift");
         assert_eq!(backend_id(), "cranelift");
     }
 
     #[test]
+    /// Verifies non-module FIR roots are rejected with the stable error code.
     fn compile_rejects_non_module_root() {
         let mut store = fir::FirStore::new();
         let root = {
@@ -2758,6 +2783,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies a representative fixture produces a live finalized compute symbol.
     fn compile_module_emits_real_cranelift_compute_stub() {
         let (store, module) = build_sine_phasor_test_module();
         let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
@@ -2780,6 +2806,7 @@ mod tests {
         assert!(compiled.jit_module_is_alive());
     }
 
+    /// Builds a module whose `compute` body intentionally exceeds the current lowering subset.
     fn build_subset_gap_fun_call_module() -> (fir::FirStore, FirId) {
         let mut store = fir::FirStore::new();
         let mut b = FirBuilder::new(&mut store);
@@ -2839,6 +2866,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies non-strict mode falls back to the no-op compute stub on subset gaps.
     fn compile_module_falls_back_to_stub_without_strict_subset_mode() {
         let (store, module) = build_subset_gap_fun_call_module();
         let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
@@ -2847,6 +2875,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies strict mode rejects subset-gap fallback.
     fn compile_module_fails_on_subset_gap_with_strict_mode() {
         let (store, module) = build_subset_gap_fun_call_module();
         let options = CraneliftOptions {
@@ -2859,6 +2888,7 @@ mod tests {
         assert!(err.message.contains("strict mode rejected fallback"));
     }
 
+    /// Builds a minimal `compute` body that should lower fully through the subset path.
     fn build_subset_lowerable_compute_module() -> (fir::FirStore, FirId) {
         let mut store = fir::FirStore::new();
         let mut b = FirBuilder::new(&mut store);
@@ -2922,6 +2952,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies the current arithmetic/control subset lowers without fallback.
     fn compile_module_lowers_requested_compute_subset_body() {
         let (store, module) = build_subset_lowerable_compute_module();
         let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
@@ -2930,6 +2961,7 @@ mod tests {
         assert!(compiled.compute_body_lowered());
     }
 
+    /// Builds a subset fixture covering stack aliases over input/output tables.
     fn build_stack_input_load_subset_module() -> (fir::FirStore, FirId) {
         let mut store = fir::FirStore::new();
         let mut b = FirBuilder::new(&mut store);
@@ -2998,6 +3030,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies stack-local input/output alias lowering works in the subset path.
     fn compile_module_lowers_stack_input_load_subset_body() {
         let (store, module) = build_stack_input_load_subset_module();
         let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
@@ -3006,6 +3039,7 @@ mod tests {
         assert!(compiled.compute_body_lowered());
     }
 
+    /// Builds a subset fixture covering the currently supported math intrinsics.
     fn build_math_intrinsics_subset_module() -> (fir::FirStore, FirId) {
         let mut store = fir::FirStore::new();
         let mut b = FirBuilder::new(&mut store);
@@ -3079,6 +3113,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies the supported math intrinsic family lowers without fallback.
     fn compile_module_lowers_common_math_intrinsics_subset() {
         let (store, module) = build_math_intrinsics_subset_module();
         let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())

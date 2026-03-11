@@ -41,6 +41,7 @@ pub use source_reader::{ExpandedSource, SourceLineOrigin, SourceReader, SourceRe
 
 /// Primitive operator subset used by parser Slice 2.
 #[derive(Clone, Copy, Debug)]
+/// Primitive operator family recognized directly by the parser.
 pub enum PrimitiveOp {
     Add,
     Sub,
@@ -65,6 +66,7 @@ pub enum PrimitiveOp {
 
 /// Parser state shared with grammar actions via `%parse-param`.
 #[derive(Debug)]
+/// Mutable parser state threaded through grammar actions.
 pub struct ParseState {
     pub arena: TreeArena,
     pub ctx: ParserCtx,
@@ -1086,12 +1088,14 @@ impl ParseState {
     }
 }
 
+/// Maps one lexer token (or lexer error token) to its raw span.
 fn token_span(tok: &Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>) -> Span {
     match tok {
         Ok(lexeme) | Err(lexeme) => lexeme.span(),
     }
 }
 
+/// Converts an `i64` to `i32` with Faust-style saturation.
 fn i32_saturating_from_i64(value: i64) -> i32 {
     i32::try_from(value).unwrap_or_else(|_| {
         if value.is_negative() {
@@ -1112,6 +1116,7 @@ lrlex_mod!("grammar/faustlexer.l");
 lrpar_mod!("grammar/faustparser.y");
 
 /// One lexed token with normalized name/text/location information.
+/// One lexed token with normalized name/text/location information.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LexedToken {
     pub name: Box<str>,
@@ -1122,6 +1127,10 @@ pub struct LexedToken {
 }
 
 /// Parse output containing parser state for structural checks.
+/// Full output of one parse invocation.
+///
+/// The output keeps both structural parse artifacts and diagnostics so later
+/// compiler stages can reuse one parse session without recomputing metadata.
 #[derive(Debug)]
 pub struct ParseOutput {
     pub root: Option<TreeId>,
@@ -1157,7 +1166,6 @@ pub struct ParseOutput {
     pub state: ParseState,
 }
 
-/// Returns the generated lexer definition for the Faust parser prototype.
 #[must_use]
 pub fn lexerdef() -> LRNonStreamingLexerDef<DefaultLexerTypes<u32>> {
     faustlexer_l::lexerdef()
@@ -1186,6 +1194,7 @@ pub fn lex_tokens(input: &str) -> Result<Vec<LexedToken>, String> {
 
 /// Parses one input with Slice-1 grammar and returns parser state.
 #[must_use]
+/// Parses one Faust source string into a [`ParseOutput`].
 pub fn parse_program(input: &str, source_file: &str) -> ParseOutput {
     parse_program_with_metadata(
         input,
@@ -1203,6 +1212,7 @@ pub fn parse_program_with_metadata(
     parse_program_with_origins(input, source_file, None, metadata_store)
 }
 
+/// Parses one in-memory source while preserving external line origins.
 fn parse_program_with_origins(
     input: &str,
     source_file: &str,
@@ -1257,6 +1267,7 @@ fn parse_program_with_origins(
 
 /// Parses the minimal prototype sentence `process = _;`.
 #[must_use]
+/// Minimal parser smoke-check used by tests and tooling.
 pub fn parse_minimal(input: &str) -> bool {
     let output = parse_program(input, "<memory>");
     output.root.is_some() && output.errors.is_empty()
@@ -1321,6 +1332,7 @@ pub fn set_use_prop_from_token(ctx: &mut ParserCtx, sym: TreeId, file: &str, tok
     ctx.set_use_prop_at_cursor(sym);
 }
 
+/// Converts parser-local diagnostics to the shared workspace diagnostic model.
 fn parser_ctx_to_bundle(ctx: &ParserCtx) -> DiagnosticBundle {
     let diagnostics = ctx
         .diagnostics()
@@ -1351,6 +1363,7 @@ fn parser_ctx_to_bundle(ctx: &ParserCtx) -> DiagnosticBundle {
     DiagnosticBundle::from(diagnostics)
 }
 
+/// Chooses a stable parser diagnostic code from one rendered parser message.
 fn parser_code_for_message(message: &str, severity: DiagnosticSeverity) -> DiagnosticCode {
     if matches!(
         severity,
@@ -1364,6 +1377,7 @@ fn parser_code_for_message(message: &str, severity: DiagnosticSeverity) -> Diagn
     }
 }
 
+/// Maps lexer/parser engine errors to stable diagnostic codes.
 fn parser_code_for_lex_parse_error(
     err: &lrpar::LexParseError<u32, lrlex::DefaultLexerTypes<u32>>,
 ) -> DiagnosticCode {

@@ -41,6 +41,7 @@ use tlib::{NodeKind, TreeArena, TreeId, list_to_vec, tree_to_int, vec_to_list};
 
 /// Memoization cache for [`box_arity`] / [`box_arity_typed`] results, keyed by validated flat boxes.
 pub type ArityCache = AHashMap<FlatBoxId, Result<BoxArity, PropagateError>>;
+/// Environment mapping route/slot placeholders to propagated signals.
 type SlotEnv = AHashMap<BoxId, SigId>;
 
 pub const CRATE_NAME: &str = "propagate";
@@ -55,6 +56,7 @@ pub fn crate_id() -> &'static str {
 
 /// Input/output arity of one box expression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Input/output arity summary for one box expression.
 pub struct BoxArity {
     /// Number of required input signals.
     pub inputs: usize,
@@ -85,6 +87,8 @@ pub struct BoxArity {
 /// - rejected: evaluator-only syntax that must have disappeared before
 ///   propagation, such as `abstr`, `case`, `pattern_var`, and local-definition
 ///   shells.
+///
+/// Validated flat-box handle used by the route-aware propagation fast path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FlatBoxId(TreeId);
 
@@ -104,6 +108,7 @@ impl FlatBoxId {
 /// This error means the caller attempted to feed propagation a box family that
 /// is not valid after the C++ `evalprocess -> a2sb` lowering boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Errors returned while validating or decoding the flat-box subset.
 pub enum FlatBoxBuildError {
     UnexpectedPostEvalBox { node: TreeId, kind: &'static str },
 }
@@ -123,6 +128,7 @@ impl Display for FlatBoxBuildError {
 impl std::error::Error for FlatBoxBuildError {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Internal flat-box node classification used by the propagation fast path.
 enum FlatNodeKind {
     Int,
     Real,
@@ -323,6 +329,7 @@ fn flat_box_unexpected(node: TreeId, kind: &'static str) -> FlatBoxBuildError {
 
 /// Propagation/arity inference error.
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Errors returned by box-to-signal propagation.
 pub enum PropagateError {
     UnsupportedBox {
         node: TreeId,
@@ -645,6 +652,7 @@ impl IntoDiagnostic for PropagateError {
 ///
 /// Output order is stable and follows input bus index order: `0..n-1`.
 #[must_use]
+/// Builds the canonical list of `input(i)` signals for a given input arity.
 pub fn make_sig_input_list(arena: &mut TreeArena, n: usize) -> Vec<SigId> {
     let mut b = SigBuilder::new(arena);
     let mut out = Vec::with_capacity(n);
@@ -673,6 +681,7 @@ pub fn box_arity_typed(
 }
 
 #[doc(hidden)]
+/// Computes box arity using the validated flat-box subset.
 pub fn box_arity_flat(
     arena: &TreeArena,
     box_tree: FlatBoxId,
@@ -1556,12 +1565,14 @@ fn propagate_inner(
 }
 
 #[derive(Clone, Copy)]
+/// Clocked-wrapper categories recognized during propagation.
 enum ClockedWrapperKind {
     Ondemand,
     Upsampling,
     Downsampling,
 }
 
+/// Context carried while lowering clocked wrapper patterns.
 struct ClockedWrapperCtx<'a> {
     cache: &'a mut ArityCache,
     slot_env: &'a mut SlotEnv,

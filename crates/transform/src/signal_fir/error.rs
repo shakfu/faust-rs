@@ -7,6 +7,7 @@ use std::fmt::{Display, Formatter};
 
 /// Stable error-code namespace for the signal->FIR fast-lane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Stable error-code namespace for the signal->FIR fast-lane.
 pub enum SignalFirErrorCode {
     /// Configuration is invalid for the requested compilation.
     InvalidOptions,
@@ -39,6 +40,7 @@ impl SignalFirErrorCode {
 
 /// Error returned by `transform::signal_fir` APIs.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Typed error returned by `transform::signal_fir` APIs.
 pub struct SignalFirError {
     code: SignalFirErrorCode,
     /// Human-readable detail intended for logs and terminal diagnostics.

@@ -136,6 +136,11 @@ impl ChildList {
     }
 }
 
+/// Hash-consing key used for arity `>= 3` nodes.
+///
+/// Small arities use dedicated intern tables in [`TreeArena`] to avoid heap
+/// allocation in the common `0/1/2`-children cases, so this key exists only
+/// for the generic fallback path.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct NodeKey {
     kind: NodeKind,
@@ -159,6 +164,7 @@ struct SymbolTable {
 }
 
 impl SymbolTable {
+    /// Creates an empty string interner.
     fn new() -> Self {
         Self::default()
     }
@@ -294,6 +300,11 @@ impl TreeArena {
     /// Interns a node and returns its canonical [`TreeId`].
     ///
     /// If an identical node already exists, returns the existing id.
+    ///
+    /// Implementation note:
+    /// - arity `0`, `1`, and `2` use specialized hash tables keyed without an
+    ///   intermediate heap allocation,
+    /// - arity `>= 3` falls back to [`NodeKey`].
     #[must_use]
     pub fn intern(&mut self, kind: NodeKind, children: &[TreeId]) -> TreeId {
         match children {
@@ -393,12 +404,19 @@ impl TreeArena {
     }
 
     /// Interns a symbol atom.
+    ///
+    /// Unlike [`intern_symbol`](Self::intern_symbol), this creates a real tree
+    /// node carrying the symbol payload, which is what parser/evaluator trees
+    /// store structurally.
     #[must_use]
     pub fn symbol(&mut self, value: impl Into<String>) -> TreeId {
         self.intern(NodeKind::Symbol(Arc::<str>::from(value.into())), &[])
     }
 
     /// Interns a string literal atom.
+    ///
+    /// This is distinct from [`symbol`](Self::symbol): string literals and
+    /// identifiers have different semantic roles in later compiler stages.
     #[must_use]
     pub fn string_lit(&mut self, value: impl Into<String>) -> TreeId {
         self.intern(NodeKind::StringLiteral(Arc::<str>::from(value.into())), &[])
@@ -520,12 +538,18 @@ impl TreeArena {
     }
 
     /// Returns node kind by id.
+    ///
+    /// This is a convenience accessor for read-only pattern matching without
+    /// exposing the whole [`TreeNode`].
     #[must_use]
     pub fn kind(&self, id: TreeId) -> Option<&NodeKind> {
         self.node(id).map(|node| &node.kind)
     }
 
     /// Returns children slice by id.
+    ///
+    /// Child order is the structural order used by interning and all matching
+    /// helpers; it is never reordered by the arena.
     #[must_use]
     pub fn children(&self, id: TreeId) -> Option<&[TreeId]> {
         self.node(id).map(|node| node.children.as_slice())
@@ -546,6 +570,13 @@ impl TreeArena {
     }
 }
 
+/// Recursive worker for cross-arena subtree cloning.
+///
+/// The memo table preserves sharing when the source subtree is a DAG, so the
+/// destination arena receives one canonical clone per distinct source node.
+///
+/// Missing source ids currently degrade to destination `nil`; this keeps the
+/// helper total for callers that operate on partially validated external roots.
 fn clone_rec(
     dst: &mut TreeArena,
     src: &TreeArena,

@@ -813,7 +813,12 @@ impl<'a> BoxBuilder<'a> {
     }
 }
 
-/// Box structural matcher result.
+/// Canonical structural view returned by [`match_box`].
+///
+/// This enum is the box-layer counterpart of the signal/FIR match enums used in
+/// later phases: it decodes the raw tree-encoded representation into one
+/// stable shape vocabulary that callers can pattern-match on without depending
+/// on tag strings or child ordering.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BoxMatch<'a> {
     Unknown,
@@ -922,7 +927,7 @@ pub enum BoxMatch<'a> {
     Soundfile(BoxId, BoxId),
 }
 
-/// Decodes one `BoxId` into canonical `BoxMatch` shape.
+/// Decodes one `BoxId` into canonical [`BoxMatch`] shape.
 ///
 /// Performance note:
 /// - The current hot path uses arity-first dispatch (`children.len()`) then tag matching.

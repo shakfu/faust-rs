@@ -78,6 +78,7 @@ const BACKEND_FULL_CORPUS_DIFF_REPORT_REL_PATH: &str =
 const TABLE_FASTLANE_DIFF_REPORT_REL_PATH: &str =
     "porting/phases/phase-6-table-fastlane-diff-report-en.md";
 
+/// `xtask` process entry point.
 fn main() {
     if let Err(err) = run() {
         eprintln!("xtask error: {err}");
@@ -85,6 +86,7 @@ fn main() {
     }
 }
 
+/// Dispatches one `xtask` subcommand.
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let Some(command) = args.next() else {
@@ -131,6 +133,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Returns the canonical workspace root path.
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -142,6 +145,7 @@ fn workspace_root() -> PathBuf {
         })
 }
 
+/// Enumerates all compile corpus `.dsp` files in deterministic order.
 fn corpus_files() -> Result<Vec<PathBuf>, io::Error> {
     let root = workspace_root();
     let corpus_dir = root.join("tests/corpus");
@@ -159,6 +163,7 @@ fn corpus_files() -> Result<Vec<PathBuf>, io::Error> {
     Ok(files)
 }
 
+/// Enumerates all runtime corpus `.dsp` files in deterministic order.
 fn runtime_corpus_files() -> Result<Vec<PathBuf>, io::Error> {
     let root = workspace_root();
     let dir = root.join("tests/runtime_corpus");
@@ -177,6 +182,7 @@ fn runtime_corpus_files() -> Result<Vec<PathBuf>, io::Error> {
     Ok(files)
 }
 
+/// Returns the root directory for persisted runtime trace snapshots.
 fn runtime_trace_snapshot_root() -> PathBuf {
     workspace_root().join("tests/runtime_traces").join("rust")
 }
@@ -192,6 +198,7 @@ const BACKEND_ALIGN_SMOKE_FIR_CASES: &[&str] = &[
     "tests/corpus/rep_38_sine_phasor.dsp",
 ];
 
+/// Returns the stable case identifier derived from a corpus path.
 fn case_name(path: &Path) -> Result<String, io::Error> {
     path.file_stem()
         .and_then(std::ffi::OsStr::to_str)
@@ -200,6 +207,7 @@ fn case_name(path: &Path) -> Result<String, io::Error> {
 }
 
 #[derive(Debug, Default)]
+/// Parsed options for the CI-friendly backend alignment smoke workflow.
 struct BackendAlignSmokeOptions {
     cases: Vec<PathBuf>,
     strict_fir_types: bool,
@@ -208,6 +216,7 @@ struct BackendAlignSmokeOptions {
     skip_fir_dump_scan: bool,
 }
 
+/// Runs the reduced backend-alignment smoke workflow used in CI.
 fn backend_align_smoke(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -286,6 +295,7 @@ fn backend_align_smoke(
     Ok(())
 }
 
+/// Parses CLI flags for `backend-align-smoke`.
 fn parse_backend_align_smoke_options(
     args: &mut impl Iterator<Item = String>,
 ) -> Result<BackendAlignSmokeOptions, Box<dyn std::error::Error>> {
@@ -312,6 +322,10 @@ fn parse_backend_align_smoke_options(
     Ok(options)
 }
 
+/// Resolves the runtime corpus subset used by `backend-align-smoke`.
+///
+/// When explicit `--case` flags are present they win; otherwise the baked-in
+/// smoke subset is materialized under the workspace root and existence-checked.
 fn backend_align_smoke_cases(
     options: &BackendAlignSmokeOptions,
 ) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
@@ -334,6 +348,10 @@ fn backend_align_smoke_cases(
     Ok(cases)
 }
 
+/// Resolves the FIR corpus subset scanned by `backend-align-smoke`.
+///
+/// This list stays separate from the runtime-trace subset because it targets
+/// `dump_fir` structural coverage rather than runtime execution coverage.
 fn backend_align_smoke_fir_cases() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let root = workspace_root();
     let mut cases = Vec::new();
@@ -351,6 +369,10 @@ fn backend_align_smoke_fir_cases() -> Result<Vec<PathBuf>, Box<dyn std::error::E
     Ok(cases)
 }
 
+/// Verifies that each case lowers through the strict Cranelift subset path.
+///
+/// This intentionally enables `fail_on_subset_gap` so the nightly/smoke flows
+/// catch matcher/lowerer drift instead of silently falling back.
 fn cranelift_subset_strict_check_cases(
     cases: &[PathBuf],
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -383,6 +405,7 @@ fn cranelift_subset_strict_check_cases(
     Ok(())
 }
 
+/// Runs the standalone `cranelift-ffi` smoke tests used by backend alignment.
 fn run_cranelift_ffi_runtime_diff_smoke() -> Result<(), Box<dyn std::error::Error>> {
     const TESTS: [&str; 2] = [
         "cranelift_interp_runtime_diff_smoke_corpus",
@@ -405,6 +428,7 @@ fn run_cranelift_ffi_runtime_diff_smoke() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[derive(Debug, Default)]
+/// Parsed options for the broader nightly backend-alignment workflow.
 struct BackendAlignNightlyOptions {
     strict_fir_types: bool,
     skip_golden: bool,
@@ -412,6 +436,7 @@ struct BackendAlignNightlyOptions {
     skip_fir_dump_scan: bool,
 }
 
+/// Runs the broader nightly backend-alignment workflow.
 fn backend_align_nightly(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -466,6 +491,7 @@ fn backend_align_nightly(
     Ok(())
 }
 
+/// Parses CLI flags for `backend-align-nightly`.
 fn parse_backend_align_nightly_options(
     args: &mut impl Iterator<Item = String>,
 ) -> Result<BackendAlignNightlyOptions, Box<dyn std::error::Error>> {
@@ -486,12 +512,17 @@ fn parse_backend_align_nightly_options(
 }
 
 #[derive(Debug)]
+/// Parsed options for `fir-dump-scan`.
 struct FirDumpScanOptions {
     cases: Vec<PathBuf>,
     lane: TraceLane,
 }
 
 impl Default for FirDumpScanOptions {
+    /// Returns the default `fir-dump-scan` settings.
+    ///
+    /// The fast lane is the default because it is the active parity target for
+    /// the structural loop-expansion checks in this workflow.
     fn default() -> Self {
         Self {
             cases: Vec::new(),
@@ -500,6 +531,7 @@ impl Default for FirDumpScanOptions {
     }
 }
 
+/// Scans `dump_fir` output for unexpanded loop-body placeholders.
 fn fir_dump_scan(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn std::error::Error>> {
     let options = parse_fir_dump_scan_options(&mut args)?;
     let cases = if options.cases.is_empty() {
@@ -567,6 +599,7 @@ fn fir_dump_scan(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn s
     Ok(())
 }
 
+/// Parses `fir-dump-scan` command-line flags into [`FirDumpScanOptions`].
 fn parse_fir_dump_scan_options(
     args: &mut impl Iterator<Item = String>,
 ) -> Result<FirDumpScanOptions, Box<dyn std::error::Error>> {
@@ -595,12 +628,17 @@ fn parse_fir_dump_scan_options(
     Ok(options)
 }
 
+/// Counts loop statements rendered by `dump_fir`.
+///
+/// The scanner uses string matching instead of reparsing FIR because the goal
+/// is specifically to validate the textual dumper's body expansion behavior.
 fn count_loop_nodes_in_dump(rendered: &str) -> usize {
     rendered.matches("SimpleForLoop {").count()
         + rendered.matches("ForLoop {").count()
         + rendered.matches("IteratorForLoop {").count()
 }
 
+/// Finds loop entries whose referenced body ids never appear as expanded nodes.
 fn find_unexpanded_loop_bodies(rendered: &str) -> Vec<(&'static str, u32, u32)> {
     let mut issues = Vec::new();
     for line in rendered.lines() {
@@ -615,6 +653,10 @@ fn find_unexpanded_loop_bodies(rendered: &str) -> Vec<(&'static str, u32, u32)> 
     issues
 }
 
+/// Parses one `dump_fir` line to extract `(loop_kind, loop_id, body_id)`.
+///
+/// Returns `None` for non-loop lines or if the textual shape does not match the
+/// current dumper contract.
 fn parse_loop_line_body_ids(line: &str) -> Option<(&'static str, u32, u32)> {
     let trimmed = line.trim_start();
     let rest = trimmed.strip_prefix('#')?;
@@ -640,6 +682,11 @@ fn parse_loop_line_body_ids(line: &str) -> Option<(&'static str, u32, u32)> {
     Some((loop_kind, loop_id, body_id))
 }
 
+/// Enumerates the corpus/golden pairs checked by `golden-check`.
+///
+/// Rust references enumerate directly from `tests/corpus`, while C++ references
+/// enumerate the snapshot directories so missing snapshots are reported as
+/// absent corpus sources instead of silently skipped.
 fn golden_cases_for_check(golden_ref: GoldenRef) -> Result<Vec<(String, PathBuf)>, io::Error> {
     let root = workspace_root();
     match golden_ref {
@@ -681,12 +728,14 @@ fn golden_cases_for_check(golden_ref: GoldenRef) -> Result<Vec<(String, PathBuf)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Golden reference family used by snapshot workflows.
 enum GoldenRef {
     Rust,
     Cpp,
 }
 
 impl GoldenRef {
+    /// Returns the snapshot subdirectory name for this reference family.
     fn as_dir_name(self) -> &'static str {
         match self {
             Self::Rust => "rust",
@@ -695,6 +744,7 @@ impl GoldenRef {
     }
 }
 
+/// Returns the on-disk golden snapshot path for one case/reference family.
 fn golden_file_for_ref(case: &str, golden_ref: GoldenRef) -> PathBuf {
     workspace_root()
         .join("tests/golden")
@@ -703,6 +753,7 @@ fn golden_file_for_ref(case: &str, golden_ref: GoldenRef) -> PathBuf {
         .join("compiler_stdout.txt")
 }
 
+/// Normalizes generated text before snapshot comparison.
 fn normalize(text: &str) -> String {
     let mut normalized = text.replace("\r\n", "\n");
     let mut lines: Vec<String> = normalized
@@ -720,6 +771,7 @@ fn normalize(text: &str) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Input scenario used by runtime-trace generation.
 enum TraceScenario {
     Zeros,
     Impulse,
@@ -728,6 +780,7 @@ enum TraceScenario {
 }
 
 impl TraceScenario {
+    /// Returns the stable CLI / snapshot string for this scenario.
     fn as_str(self) -> &'static str {
         match self {
             Self::Zeros => "zeros",
@@ -737,6 +790,7 @@ impl TraceScenario {
         }
     }
 
+    /// Parses a CLI/runtime-trace scenario name.
     fn parse(s: &str) -> Result<Self, String> {
         match s {
             "zeros" => Ok(Self::Zeros),
@@ -751,12 +805,14 @@ impl TraceScenario {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Interpreter lane used by runtime-trace workflows.
 enum TraceLane {
     Legacy,
     Fast,
 }
 
 impl TraceLane {
+    /// Returns the stable textual label used in logs and snapshots.
     fn as_str(self) -> &'static str {
         match self {
             Self::Legacy => "legacy",
@@ -764,6 +820,7 @@ impl TraceLane {
         }
     }
 
+    /// Parses the accepted CLI aliases for one interpreter lane.
     fn parse(s: &str) -> Result<Self, String> {
         match s {
             "legacy" => Ok(Self::Legacy),
@@ -772,6 +829,7 @@ impl TraceLane {
         }
     }
 
+    /// Maps the CLI/runtime-trace lane to the compiler's signal-to-FIR lane.
     fn to_signal_fir_lane(self) -> compiler::SignalFirLane {
         match self {
             Self::Legacy => compiler::SignalFirLane::LegacyBridge,
@@ -781,6 +839,7 @@ impl TraceLane {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Parsed options for `interp-trace-dump`.
 struct InterpTraceDumpOptions {
     case: PathBuf,
     scenario: TraceScenario,
@@ -793,12 +852,14 @@ struct InterpTraceDumpOptions {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Parsed options for `interp-trace-dump-cppfbc`.
 struct InterpTraceCppFbcDumpOptions {
     trace: InterpTraceDumpOptions,
     faust_bin: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Parsed options for batch generation from C++ `.fbc` files.
 struct InterpTraceCppFbcBatchOptions {
     case: Option<PathBuf>,
     scenario: TraceScenario,
@@ -810,6 +871,7 @@ struct InterpTraceCppFbcBatchOptions {
 }
 
 impl Default for InterpTraceCppFbcBatchOptions {
+    /// Returns default batch settings for generating C++ `.fbc` traces.
     fn default() -> Self {
         Self {
             case: None,
@@ -824,6 +886,7 @@ impl Default for InterpTraceCppFbcBatchOptions {
 }
 
 impl Default for InterpTraceDumpOptions {
+    /// Returns default options for one interpreter trace run.
     fn default() -> Self {
         Self {
             case: PathBuf::new(),
@@ -839,6 +902,7 @@ impl Default for InterpTraceDumpOptions {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+/// Persisted runtime trace payload used by snapshot workflows.
 struct RuntimeTrace {
     dsp_path: String,
     lane: String,
@@ -852,12 +916,14 @@ struct RuntimeTrace {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+/// Numeric tolerances used when comparing runtime traces.
 struct TraceCompareTolerances {
     abs_tol: f32,
     rel_tol: f32,
 }
 
 impl Default for TraceCompareTolerances {
+    /// Returns the default absolute/relative float tolerances for trace diffing.
     fn default() -> Self {
         Self {
             abs_tol: 1.0e-6,
@@ -867,6 +933,7 @@ impl Default for TraceCompareTolerances {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// One concrete runtime-trace mismatch entry.
 struct TraceMismatch {
     field: String,
     channel: Option<usize>,
@@ -876,6 +943,7 @@ struct TraceMismatch {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Shared batch options for runtime-trace generation/checking flows.
 struct InterpTraceBatchOptions {
     case: Option<PathBuf>,
     lane: TraceLane,
@@ -886,6 +954,7 @@ struct InterpTraceBatchOptions {
 }
 
 impl Default for InterpTraceBatchOptions {
+    /// Returns default options for runtime-trace batch generation/checking.
     fn default() -> Self {
         Self {
             case: None,
@@ -898,6 +967,7 @@ impl Default for InterpTraceBatchOptions {
     }
 }
 
+/// Executes one Rust interpreter trace run and writes/prints the JSON payload.
 fn interp_trace_dump(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -912,6 +982,7 @@ fn interp_trace_dump(
     Ok(())
 }
 
+/// Executes one C++ `.fbc`-backed trace run and writes/prints the JSON payload.
 fn interp_trace_dump_cppfbc(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -926,6 +997,7 @@ fn interp_trace_dump_cppfbc(
     Ok(())
 }
 
+/// Generates C++ `.fbc` trace snapshots for one case or the default corpus.
 fn interp_trace_gen_cppfbc(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -977,6 +1049,7 @@ fn interp_trace_gen_cppfbc(
     Ok(())
 }
 
+/// Parses CLI options for `interp-trace-dump`.
 fn parse_interp_trace_dump_options(
     args: &mut impl Iterator<Item = String>,
 ) -> Result<InterpTraceDumpOptions, Box<dyn std::error::Error>> {
@@ -1048,6 +1121,10 @@ fn parse_interp_trace_dump_options(
     Ok(options)
 }
 
+/// Parses CLI options for `interp-trace-dump-cppfbc`.
+///
+/// The lane is fixed to the C++ `.fbc` runtime path, so flags that would alter
+/// FIR-lane semantics are rejected here instead of ignored.
 fn parse_interp_trace_dump_cppfbc_options(
     args: &mut impl Iterator<Item = String>,
 ) -> Result<InterpTraceCppFbcDumpOptions, Box<dyn std::error::Error>> {
@@ -1129,6 +1206,7 @@ fn parse_interp_trace_dump_cppfbc_options(
     Ok(options)
 }
 
+/// Parses CLI options for `interp-trace-gen-cppfbc`.
 fn parse_interp_trace_gen_cppfbc_options(
     args: &mut impl Iterator<Item = String>,
 ) -> Result<InterpTraceCppFbcBatchOptions, Box<dyn std::error::Error>> {
@@ -1190,6 +1268,7 @@ fn parse_interp_trace_gen_cppfbc_options(
     Ok(options)
 }
 
+/// Generates Rust runtime-trace snapshots for the selected runtime corpus cases.
 fn interp_trace_gen(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1228,6 +1307,7 @@ fn interp_trace_gen(
     Ok(())
 }
 
+/// Recomputes Rust runtime traces and compares them against checked-in snapshots.
 fn interp_trace_check(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1287,6 +1367,10 @@ fn interp_trace_check(
     Ok(())
 }
 
+/// Compares legacy and fast interpreter lanes directly without using snapshots.
+///
+/// This is used to detect semantic drift between the old FIR bridge and the
+/// transform fast lane while normalizing non-semantic lane labels.
 fn interp_trace_diff_lanes(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1379,6 +1463,10 @@ fn interp_trace_diff_lanes(
     Ok(())
 }
 
+/// Detects legacy bridge outputs that are still label-only non-semantic stubs.
+///
+/// Such cases are skipped by lane-diff workflows because comparing them against
+/// the fast lane would only produce false mismatches.
 fn legacy_interp_bridge_is_nonsemantic_stub(
     case: &Path,
 ) -> Result<bool, Box<dyn std::error::Error>> {
@@ -1417,6 +1505,7 @@ fn legacy_interp_bridge_is_nonsemantic_stub(
             .all(|id| matches!(match_fir(&fir_out.store, *id), FirMatch::Label(_))))
 }
 
+/// Parses shared batch options for `interp-trace-gen`, `check`, and lane diff.
 fn parse_interp_trace_batch_options(
     args: &mut impl Iterator<Item = String>,
 ) -> Result<InterpTraceBatchOptions, Box<dyn std::error::Error>> {
@@ -1469,6 +1558,7 @@ fn parse_interp_trace_batch_options(
     Ok(options)
 }
 
+/// Resolves the case list for a batch runtime-trace workflow.
 fn runtime_trace_cases(
     options: &InterpTraceBatchOptions,
 ) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
@@ -1482,6 +1572,10 @@ fn runtime_trace_cases(
     Ok(cases)
 }
 
+/// Returns the enabled runtime-trace scenarios for one runtime corpus case.
+///
+/// The mapping is intentionally explicit so newly added runtime cases must opt
+/// in with scenario choices instead of silently inheriting an arbitrary default.
 fn trace_scenarios_for_runtime_case(
     case: &Path,
 ) -> Result<Vec<TraceScenario>, Box<dyn std::error::Error>> {
@@ -1505,12 +1599,14 @@ fn trace_scenarios_for_runtime_case(
     Ok(scenarios)
 }
 
+/// Returns the checked-in snapshot path for one runtime trace case/scenario.
 fn runtime_trace_snapshot_path(case_id: &str, scenario: TraceScenario) -> PathBuf {
     runtime_trace_snapshot_root()
         .join(case_id)
         .join(format!("{}.json", scenario.as_str()))
 }
 
+/// Runs one DSP through the Rust interpreter backend and captures the outputs.
 fn run_interp_trace_case(
     options: &InterpTraceDumpOptions,
 ) -> Result<RuntimeTrace, Box<dyn std::error::Error>> {
@@ -1578,6 +1674,7 @@ fn run_interp_trace_case(
     })
 }
 
+/// Resolves the Faust C++ compiler binary used to generate `.fbc` fixtures.
 fn resolve_faust_cpp_bin(explicit: Option<&Path>) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if let Some(path) = explicit {
         return Ok(path.to_path_buf());
@@ -1588,6 +1685,7 @@ fn resolve_faust_cpp_bin(explicit: Option<&Path>) -> Result<PathBuf, Box<dyn std
     Ok(PathBuf::from("faust"))
 }
 
+/// Invokes the Faust C++ compiler to produce an interpreter `.fbc` file.
 fn compile_dsp_to_cpp_fbc(
     faust_bin: &Path,
     dsp_case: &Path,
@@ -1633,6 +1731,7 @@ fn compile_dsp_to_cpp_fbc(
     Ok(())
 }
 
+/// Runs one trace case by first compiling the DSP through the C++ `.fbc` path.
 fn run_interp_trace_case_from_cpp_fbc(
     options: &InterpTraceCppFbcDumpOptions,
 ) -> Result<RuntimeTrace, Box<dyn std::error::Error>> {
@@ -1709,6 +1808,7 @@ fn run_interp_trace_case_from_cpp_fbc(
     trace_result
 }
 
+/// Runs one Rust interpreter trace while converting panics into skip-friendly text.
 fn run_interp_trace_case_catching_panic(
     options: &InterpTraceDumpOptions,
 ) -> Result<RuntimeTrace, String> {
@@ -1719,6 +1819,11 @@ fn run_interp_trace_case_catching_panic(
     }
 }
 
+/// Rejects traces when FIR verification reported type-focused diagnostics.
+///
+/// The filter intentionally keeps only typing/layout families so runtime-trace
+/// workflows can opt into stronger type hygiene without failing on unrelated
+/// structural warnings.
 fn enforce_strict_fir_type_diagnostics(
     store: &fir::FirStore,
     module: fir::FirId,
@@ -1758,6 +1863,7 @@ fn enforce_strict_fir_type_diagnostics(
     Err(msg.into())
 }
 
+/// Returns `true` when a FIR diagnostic code belongs to the strict type subset.
 fn is_fir_type_diagnostic_code(code: &str) -> bool {
     code.starts_with("FIR-B")
         || code.starts_with("FIR-U")
@@ -1768,6 +1874,7 @@ fn is_fir_type_diagnostic_code(code: &str) -> bool {
         || matches!(code, "FIR-R01" | "FIR-L03" | "FIR-SW01")
 }
 
+/// Best-effort stringification for panic payloads captured by `catch_unwind`.
 fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
@@ -1778,6 +1885,7 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+/// Generates deterministic numeric input channels for one trace scenario.
 fn generate_trace_inputs(
     scenario: TraceScenario,
     num_inputs: usize,
@@ -1820,6 +1928,10 @@ fn generate_trace_inputs(
     inputs
 }
 
+/// Renders a checked-in runtime-trace JSON payload.
+///
+/// The structure is kept stable and explicit instead of deriving `Serialize`
+/// directly from [`RuntimeTrace`] so snapshot formatting stays deterministic.
 fn render_runtime_trace_json(trace: &RuntimeTrace) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "{{");
@@ -1863,6 +1975,7 @@ fn render_runtime_trace_json(trace: &RuntimeTrace) -> String {
     out
 }
 
+/// Escapes a string for inclusion in the hand-written runtime-trace JSON output.
 fn json_escape(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -1881,6 +1994,7 @@ fn json_escape(input: &str) -> String {
     out
 }
 
+/// Serde-facing schema used to parse persisted runtime-trace snapshots.
 #[derive(Debug, Deserialize)]
 struct RuntimeTraceJson {
     dsp: String,
@@ -1890,11 +2004,13 @@ struct RuntimeTraceJson {
     outputs: Vec<Vec<f32>>,
 }
 
+/// Nested `pipeline` section of a persisted runtime-trace snapshot.
 #[derive(Debug, Deserialize)]
 struct RuntimeTracePipelineJson {
     signal_fir_lane: String,
 }
 
+/// Nested `runtime` section of a persisted runtime-trace snapshot.
 #[derive(Debug, Deserialize)]
 struct RuntimeTraceRuntimeJson {
     sample_rate: usize,
@@ -1902,6 +2018,7 @@ struct RuntimeTraceRuntimeJson {
     num_blocks: usize,
 }
 
+/// Nested `scenario` section of a persisted runtime-trace snapshot.
 #[derive(Debug, Deserialize)]
 struct RuntimeTraceScenarioJson {
     name: String,
@@ -1909,6 +2026,7 @@ struct RuntimeTraceScenarioJson {
     outputs: usize,
 }
 
+/// Parses one runtime-trace snapshot JSON payload into [`RuntimeTrace`].
 fn parse_runtime_trace_json(text: &str) -> Result<RuntimeTrace, Box<dyn std::error::Error>> {
     let parsed: RuntimeTraceJson = serde_json::from_str(text)?;
     Ok(RuntimeTrace {
@@ -1924,6 +2042,7 @@ fn parse_runtime_trace_json(text: &str) -> Result<RuntimeTrace, Box<dyn std::err
     })
 }
 
+/// Compares two runtime traces field-by-field with float tolerances on samples.
 fn compare_runtime_traces(
     expected: &RuntimeTrace,
     actual: &RuntimeTrace,
@@ -2035,6 +2154,7 @@ fn compare_runtime_traces(
     Ok(())
 }
 
+/// Compares two floating-point samples using mixed absolute/relative tolerance.
 fn trace_sample_equal(expected: f32, actual: f32, tol: TraceCompareTolerances) -> bool {
     if expected.is_nan() || actual.is_nan() {
         return expected.is_nan() && actual.is_nan();
@@ -2047,6 +2167,7 @@ fn trace_sample_equal(expected: f32, actual: f32, tol: TraceCompareTolerances) -
     diff <= tol.abs_tol + tol.rel_tol * scale
 }
 
+/// Renders the Rust golden snapshot text for one corpus input.
 fn render_rust_snapshot(input: &Path) -> Result<String, io::Error> {
     let source = fs::read_to_string(input)?;
     let name = input
@@ -2056,6 +2177,7 @@ fn render_rust_snapshot(input: &Path) -> Result<String, io::Error> {
     Ok(compiler::golden_snapshot(name, &source))
 }
 
+/// Returns the default import search paths used for corpus/golden compilation.
 fn default_import_search_paths(input: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(parent) = input.parent() {
@@ -2070,6 +2192,7 @@ fn default_import_search_paths(input: &Path) -> Vec<PathBuf> {
     paths
 }
 
+/// Compiles one DSP through the Rust C++ backend and returns the rendered source.
 fn render_rust_cpp_output(input: &Path) -> Result<String, compiler::CompilerError> {
     let compiler = compiler::Compiler::new();
     let options = codegen::backends::cpp::CppOptions::default();
@@ -2077,6 +2200,7 @@ fn render_rust_cpp_output(input: &Path) -> Result<String, compiler::CompilerErro
     compiler.compile_file_to_cpp(input, &search_paths, &options)
 }
 
+/// Regenerates all Rust golden snapshots from `tests/corpus`.
 fn golden_gen_rust() -> Result<(), Box<dyn std::error::Error>> {
     let files = corpus_files()?;
     for file in files {
@@ -2092,6 +2216,7 @@ fn golden_gen_rust() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Regenerates C++ golden snapshots using the external Faust reference binary.
 fn golden_gen_cpp(extra_args: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
     let cpp_bin = std::env::var_os("FAUST_CPP_BIN").ok_or_else(|| {
         io::Error::new(
@@ -2132,6 +2257,7 @@ fn golden_gen_cpp(extra_args: &[OsString]) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+/// Resolves the active golden reference family from `GOLDEN_REF` or defaults.
 fn golden_ref_from_env() -> Result<GoldenRef, Box<dyn std::error::Error>> {
     let Some(raw) = std::env::var_os("GOLDEN_REF") else {
         return Ok(GoldenRef::Rust);
@@ -2146,6 +2272,7 @@ fn golden_ref_from_env() -> Result<GoldenRef, Box<dyn std::error::Error>> {
     }
 }
 
+/// Validates generated snapshots against the selected Rust or C++ golden family.
 fn golden_check(forced: Option<GoldenRef>) -> Result<(), Box<dyn std::error::Error>> {
     let golden_ref = match forced {
         Some(value) => value,
@@ -2208,6 +2335,7 @@ fn golden_check(forced: Option<GoldenRef>) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+/// Prints the first differing line between two normalized snapshot texts.
 fn print_first_diff(expected: &str, actual: &str) {
     let expected_lines: Vec<&str> = expected.lines().collect();
     let actual_lines: Vec<&str> = actual.lines().collect();
@@ -2225,6 +2353,7 @@ fn print_first_diff(expected: &str, actual: &str) {
     }
 }
 
+/// Regenerates the parser/lexer parity coverage report under `porting/`.
 fn parser_parity_report() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root();
     let cpp_root = PathBuf::from(CPP_SOURCE_ROOT);
@@ -2441,12 +2570,14 @@ fn parser_parity_report() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[derive(Clone, Debug)]
+/// Normalized success/failure summary for one compiler/reference case run.
 struct CaseStatus {
     ok: bool,
     stage: &'static str,
     reason: String,
 }
 
+/// Regenerates the C++ vs Rust corpus status report for the parser/signal path.
 fn corpus_status_report() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root();
     let report_path = root.join(CORPUS_STATUS_REPORT_REL_PATH);
@@ -2577,6 +2708,10 @@ fn corpus_status_report() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Reduced shell signature extracted from generated C++ backend text.
+///
+/// The report uses this instead of full-text diffing so parity checks stay
+/// stable while inner statement lowering is still evolving.
 struct ShellSignature {
     faustclass: Option<String>,
     class_decl: Option<String>,
@@ -2585,6 +2720,7 @@ struct ShellSignature {
 }
 
 #[derive(Clone, Debug)]
+/// One row in a backend differential report table.
 struct CppDiffRow {
     case: String,
     class: &'static str,
@@ -2593,6 +2729,7 @@ struct CppDiffRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Reduced shell signature extracted from generated C backend text.
 struct CShellSignature {
     has_typedef_struct: bool,
     has_faustfloat_define: bool,
@@ -2606,6 +2743,7 @@ struct CShellSignature {
     has_instance_init_ordered_calls: bool,
 }
 
+/// Regenerates the representative C++ backend shell-signature diff report.
 fn cpp_backend_diff_report() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root();
     let report_path = root.join(CPP_BACKEND_DIFF_REPORT_REL_PATH);
@@ -2785,6 +2923,7 @@ fn cpp_backend_diff_report() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Regenerates the representative table fast-lane parity report.
 fn table_fastlane_diff_report() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root();
     let report_path = root.join(TABLE_FASTLANE_DIFF_REPORT_REL_PATH);
@@ -2960,6 +3099,7 @@ fn table_fastlane_diff_report() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Regenerates the representative C fast-lane shell-signature diff report.
 fn c_fastlane_diff_report() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root();
     let report_path = root.join(C_FASTLANE_DIFF_REPORT_REL_PATH);
@@ -3155,6 +3295,7 @@ fn c_fastlane_diff_report() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Regenerates the full-corpus C/C++ backend fast-lane differential report.
 fn backend_full_corpus_diff_report() -> Result<(), Box<dyn std::error::Error>> {
     let root = workspace_root();
     let report_path = root.join(BACKEND_FULL_CORPUS_DIFF_REPORT_REL_PATH);
@@ -3453,6 +3594,7 @@ fn backend_full_corpus_diff_report() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Extracts the normalized C++ backend shell signature from emitted source text.
 fn extract_shell_signature(text: &str) -> ShellSignature {
     let mut faustclass = None::<String>;
     let mut class_decl = None::<String>;
@@ -3489,6 +3631,7 @@ fn extract_shell_signature(text: &str) -> ShellSignature {
     }
 }
 
+/// Extracts the normalized C backend shell signature from emitted source text.
 fn extract_c_shell_signature(text: &str) -> CShellSignature {
     let has_typedef_struct = text.contains("typedef struct {");
     let has_faustfloat_define = text.contains("#ifndef FAUSTFLOAT");
@@ -3516,6 +3659,7 @@ fn extract_c_shell_signature(text: &str) -> CShellSignature {
     }
 }
 
+/// Detects the canonical `instanceInit` call ordering in generated C output.
 fn has_ordered_instance_init_calls(text: &str) -> bool {
     let mut search_from = 0usize;
     while let Some(rel) = text[search_from..].find("void instanceInit") {
@@ -3534,6 +3678,10 @@ fn has_ordered_instance_init_calls(text: &str) -> bool {
     false
 }
 
+/// Resolves the preferred C++ reference compiler path for report workflows.
+///
+/// Returns `(path, used_fallback)` where `used_fallback` records whether the
+/// helper had to fall back to `faust` from `PATH`.
 fn resolve_cpp_faust_bin() -> (PathBuf, bool) {
     if let Some(path) = std::env::var_os("FAUST_CPP_BIN") {
         return (PathBuf::from(path), false);
@@ -3545,6 +3693,7 @@ fn resolve_cpp_faust_bin() -> (PathBuf, bool) {
     (PathBuf::from("faust"), true)
 }
 
+/// Runs one DSP through the C++ reference compiler and summarizes the outcome.
 fn cpp_case_status(cpp_bin: &Path, input: &Path) -> Result<CaseStatus, Box<dyn std::error::Error>> {
     let status = Command::new(cpp_bin)
         .arg(input)
@@ -3570,6 +3719,7 @@ fn cpp_case_status(cpp_bin: &Path, input: &Path) -> Result<CaseStatus, Box<dyn s
     })
 }
 
+/// Runs one DSP through the Rust compile-to-signals path and summarizes the outcome.
 fn rust_case_status(compiler: &compiler::Compiler, input: &Path) -> CaseStatus {
     match compiler.compile_file_default_to_signals(input) {
         Ok(_) => CaseStatus {
@@ -3599,10 +3749,12 @@ fn rust_case_status(compiler: &compiler::Compiler, input: &Path) -> CaseStatus {
     }
 }
 
+/// Returns the compact `OK` / `ERR` cell text used in Markdown tables.
 fn status_cell(status: &CaseStatus) -> &'static str {
     if status.ok { "OK" } else { "ERR" }
 }
 
+/// Returns the first non-empty trimmed line from command output.
 fn first_non_empty_line(text: &str) -> Option<String> {
     text.lines()
         .map(str::trim)
@@ -3610,10 +3762,12 @@ fn first_non_empty_line(text: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// Escapes a string for safe embedding in one-cell Markdown tables.
 fn markdown_escape(value: &str) -> String {
     value.replace('|', "\\|").replace(['\n', '\r'], " ")
 }
 
+/// Extracts declared token names from a yacc-style parser grammar.
 fn extract_parser_tokens(source: &str) -> BTreeSet<String> {
     let mut set = BTreeSet::new();
     for line in source.lines() {
@@ -3643,6 +3797,7 @@ fn extract_parser_tokens(source: &str) -> BTreeSet<String> {
     set
 }
 
+/// Extracts nonterminal heads from the C++ yacc grammar body.
 fn extract_cpp_nonterminals(source: &str) -> BTreeSet<String> {
     let mut set = BTreeSet::new();
     for line in grammar_section(source).lines() {
@@ -3661,6 +3816,7 @@ fn extract_cpp_nonterminals(source: &str) -> BTreeSet<String> {
     set
 }
 
+/// Extracts nonterminal heads from the Rust grammar prototype body.
 fn extract_rust_nonterminals(source: &str) -> BTreeSet<String> {
     let mut set = BTreeSet::new();
     for line in grammar_section(source).lines() {
@@ -3676,6 +3832,7 @@ fn extract_rust_nonterminals(source: &str) -> BTreeSet<String> {
     set
 }
 
+/// Extracts declared lexer start states from a lex/flex source file.
 fn extract_lexer_states(source: &str) -> BTreeSet<String> {
     let mut set = BTreeSet::new();
     for line in source.lines() {
@@ -3697,6 +3854,7 @@ fn extract_lexer_states(source: &str) -> BTreeSet<String> {
     set
 }
 
+/// Extracts token names emitted by the C++ lexer implementation.
 fn extract_cpp_lexer_emitted_tokens(source: &str) -> BTreeSet<String> {
     let mut set = BTreeSet::new();
     for line in source.lines() {
@@ -3712,6 +3870,7 @@ fn extract_cpp_lexer_emitted_tokens(source: &str) -> BTreeSet<String> {
     set
 }
 
+/// Extracts token names emitted by the Rust lexer prototype.
 fn extract_rust_lexer_emitted_tokens(source: &str) -> BTreeSet<String> {
     let mut set = BTreeSet::new();
     for line in source.lines() {
@@ -3740,6 +3899,7 @@ fn extract_rust_lexer_emitted_tokens(source: &str) -> BTreeSet<String> {
     set
 }
 
+/// Returns the grammar body between the first two yacc `%%` markers.
 fn grammar_section(source: &str) -> &str {
     let mut marks = source.match_indices("%%");
     let Some((first, _)) = marks.next() else {
@@ -3751,6 +3911,7 @@ fn grammar_section(source: &str) -> &str {
     &source[first + 2..second]
 }
 
+/// Returns `true` when `s` matches the token naming convention used in reports.
 fn is_token_name(s: &str) -> bool {
     let mut has_upper = false;
     for c in s.chars() {
@@ -3763,6 +3924,7 @@ fn is_token_name(s: &str) -> bool {
     has_upper
 }
 
+/// Returns `true` when `s` is a simple ASCII identifier.
 fn is_ident_name(s: &str) -> bool {
     let mut chars = s.chars();
     let Some(first) = chars.next() else {
@@ -3774,6 +3936,7 @@ fn is_ident_name(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Scans the first token-like identifier from a lexer `return ...` fragment.
 fn scan_token_name(source: &str) -> Option<String> {
     let mut start = None;
     for (idx, c) in source.char_indices() {
@@ -3794,10 +3957,12 @@ fn scan_token_name(source: &str) -> Option<String> {
     }
 }
 
+/// Returns `left - right` as a sorted vector.
 fn diff_sorted(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Vec<String> {
     left.difference(right).cloned().collect()
 }
 
+/// Returns accepted Rust alias names for one C++ token name.
 fn token_aliases(cpp_name: &str) -> &'static [&'static str] {
     match cpp_name {
         "VIRG" => &["PAR"],
@@ -3806,6 +3971,7 @@ fn token_aliases(cpp_name: &str) -> &'static [&'static str] {
     }
 }
 
+/// Returns accepted Rust alias names for one C++ nonterminal head.
 fn nonterminal_aliases(cpp_name: &str) -> &'static [&'static str] {
     match cpp_name {
         "params" => &["paramlist"],
@@ -3825,6 +3991,7 @@ fn nonterminal_aliases(cpp_name: &str) -> &'static [&'static str] {
     }
 }
 
+/// Splits missing names into alias-covered and unresolved subsets.
 fn partition_with_aliases(
     missing_exact: &[String],
     rust_set: &BTreeSet<String>,
@@ -3849,6 +4016,7 @@ fn partition_with_aliases(
     (covered, unresolved)
 }
 
+/// Renders one Markdown bullet section for a report.
 fn render_list(out: &mut String, title: &str, items: &[String]) -> Result<(), std::fmt::Error> {
     writeln!(out, "### {title}")?;
     if items.is_empty() {
@@ -3861,6 +4029,7 @@ fn render_list(out: &mut String, title: &str, items: &[String]) -> Result<(), st
     Ok(())
 }
 
+/// Renders one Markdown section describing alias-covered mismatches.
 fn render_alias_list(
     out: &mut String,
     title: &str,

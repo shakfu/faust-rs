@@ -77,6 +77,7 @@ pub enum SOperator {
     kXOR = 16,
 }
 
+/// Global mutable context used by the C FFI bridge for box compilation.
 struct BoxContext {
     arena: TreeArena,
     by_handle: HashMap<usize, TreeId>,
@@ -87,6 +88,7 @@ struct BoxContext {
 }
 
 impl BoxContext {
+    /// Creates a fresh FFI box context with the canonical `nil` handle reserved.
     fn new() -> Self {
         let mut ctx = Self {
             arena: TreeArena::new(),
@@ -101,6 +103,11 @@ impl BoxContext {
         ctx
     }
 
+    /// Encodes one arena tree id as a stable opaque FFI handle.
+    ///
+    /// Handles are memoized so repeated exports of the same interned tree reuse
+    /// the same opaque pointer value for the lifetime of the process-global
+    /// context.
     fn encode(&mut self, id: TreeId) -> *mut c_void {
         if let Some(handle) = self.by_tree.get(&id.as_u32()).copied() {
             return handle as *mut c_void;
@@ -112,6 +119,7 @@ impl BoxContext {
         handle as *mut c_void
     }
 
+    /// Decodes one opaque FFI handle back into the corresponding arena tree id.
     fn decode(&self, ptr: *mut c_void) -> Option<TreeId> {
         if ptr.is_null() {
             return None;
@@ -120,6 +128,7 @@ impl BoxContext {
         self.by_handle.get(&handle).copied()
     }
 
+    /// Interns a label C string as an arena symbol node for box builders.
     fn label_box(&mut self, label: *const c_char) -> Option<TreeId> {
         if label.is_null() {
             return None;
@@ -128,6 +137,7 @@ impl BoxContext {
         Some(self.arena.symbol(txt))
     }
 
+    /// Interns a Rust string in the context-owned C string pool and returns its pointer.
     fn intern_c_str_ptr(&mut self, s: &str) -> *const c_char {
         let safe = s.replace('\0', "\\0");
         match CString::new(safe) {
@@ -141,6 +151,7 @@ impl BoxContext {
         }
     }
 
+    /// Allocates a null-terminated array of opaque signal pointers owned by the context.
     fn alloc_signal_ptr_array(&mut self, mut values: Vec<*mut c_void>) -> *mut *mut c_void {
         values.push(std::ptr::null_mut());
         let len = values.len();
@@ -151,6 +162,10 @@ impl BoxContext {
         raw
     }
 
+    /// Frees a pointer previously returned by [`Self::alloc_signal_ptr_array`].
+    ///
+    /// Returns `false` when the pointer does not belong to the tracked array
+    /// allocation set.
     fn free_if_signal_ptr_array(&mut self, ptr: *mut c_void) -> bool {
         let key = ptr as usize;
         let Some(len) = self.signal_array_allocs.remove(&key) else {
@@ -165,6 +180,7 @@ impl BoxContext {
 
 static BOX_CONTEXT: OnceLock<Mutex<BoxContext>> = OnceLock::new();
 
+/// Returns the lazily initialized global FFI box context.
 fn context() -> &'static Mutex<BoxContext> {
     BOX_CONTEXT.get_or_init(|| Mutex::new(BoxContext::new()))
 }
@@ -181,6 +197,7 @@ fn with_ctx<R>(f: impl FnOnce(&mut BoxContext) -> R) -> R {
 /// `cranelift-ffi`) so they can reuse the exact same tree decoding and
 /// signal->FIR lowering path as `box-ffi` APIs.
 #[derive(Debug)]
+/// Opaque FIR module handle returned by the box FFI bridge.
 pub struct BoxFfiFirModule {
     /// Lowered FIR arena.
     pub store: FirStore,
@@ -192,6 +209,7 @@ pub struct BoxFfiFirModule {
     pub num_outputs: usize,
 }
 
+/// Infers the number of DSP inputs referenced by a propagated signal list.
 fn infer_num_inputs_from_signals(arena: &TreeArena, outputs: &[TreeId]) -> usize {
     let mut max_input = None::<usize>;
     let mut stack = outputs.to_vec();
@@ -215,6 +233,7 @@ fn infer_num_inputs_from_signals(arena: &TreeArena, outputs: &[TreeId]) -> usize
     max_input.map_or(0, |idx| idx.saturating_add(1))
 }
 
+/// Lowers a propagated signal root list to a standalone FIR module for FFI callers.
 fn lower_signal_roots_to_fir(
     arena: &TreeArena,
     signal_roots: &[TreeId],
@@ -245,6 +264,7 @@ fn lower_signal_roots_to_fir(
     })
 }
 
+/// Decodes a raw C array of signal handles into Rust `TreeId`s.
 fn decode_signal_handle_array(
     ctx: &BoxContext,
     signals: *mut c_void,

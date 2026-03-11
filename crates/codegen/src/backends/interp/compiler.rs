@@ -127,10 +127,13 @@ impl std::error::Error for CompileError {}
 /// Result of a successful FIR → FBC compilation.
 ///
 /// The interpreter backend has two usage modes:
-/// - [`FirToFbcCompiler::finalize`] for a single entry block;
+/// - [`FirToFbcCompiler::finalize`] for a single entry block.
 /// - [`FirToFbcCompiler::into_parts`] when the caller compiles several named FIR
 ///   sections into separate arena blocks and assembles the final factory
 ///   metadata outside this file.
+///
+/// This owned bundle is the single-entry variant returned by
+/// [`FirToFbcCompiler::finalize`].
 pub struct FbcCompileResult<R: FbcReal> {
     /// The block arena containing all compiled blocks.
     pub arena: FbcBlockArena<R>,
@@ -157,6 +160,9 @@ pub struct FbcCompileResult<R: FbcReal> {
 ///
 /// Translates FIR nodes (stored in a [`FirStore`]) into FBC bytecode
 /// blocks stored in an [`FbcBlockArena`].
+///
+/// The compiler owns temporary block-switching state and the growing dual-heap
+/// layout while lowering one or more FIR functions into bytecode.
 pub struct FirToFbcCompiler<R: FbcReal> {
     /// Block arena — all compiled blocks live here.
     arena: FbcBlockArena<R>,
@@ -1234,6 +1240,7 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         self.compile_switch_cases(store, cond, cases, default)
     }
 
+    /// Lowers one `switch` case list recursively as a right-nested `if` chain.
     fn compile_switch_cases(
         &mut self,
         store: &FirStore,

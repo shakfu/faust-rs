@@ -91,6 +91,7 @@ pub enum CodegenErrorCode {
 }
 
 impl CodegenErrorCode {
+    /// Returns the stable machine-readable error code string.
     fn as_str(self) -> &'static str {
         match self {
             Self::RootNotModule => "FRS-CGEN-INTERP-0001",
@@ -110,6 +111,7 @@ pub struct CodegenError {
 }
 
 impl CodegenError {
+    /// Creates a typed interpreter backend error.
     fn new(code: CodegenErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -119,6 +121,7 @@ impl CodegenError {
 }
 
 impl std::fmt::Display for CodegenError {
+    /// Formats the typed error as `[CODE] message`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[{}] {}", self.code.as_str(), self.message)
     }
