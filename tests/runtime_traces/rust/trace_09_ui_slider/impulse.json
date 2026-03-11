@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "dsp": "/Users/letz/Developpements/RUST/faust-rs/tests/runtime_corpus/trace_09_ui_slider.dsp",
+  "dsp": "tests/runtime_corpus/trace_09_ui_slider.dsp",
   "backend": "interp",
   "pipeline": {
     "signal_fir_lane": "fast-lane"

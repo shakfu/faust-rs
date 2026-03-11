@@ -145,6 +145,20 @@ fn workspace_root() -> PathBuf {
         })
 }
 
+/// Formats a path relative to the workspace root when possible.
+fn workspace_relative_path(path: &Path) -> String {
+    let root = workspace_root();
+    if let Ok(relative) = path.strip_prefix(&root) {
+        return relative.display().to_string();
+    }
+    if let Ok(canonical) = path.canonicalize() {
+        if let Ok(relative) = canonical.strip_prefix(&root) {
+            return relative.display().to_string();
+        }
+    }
+    path.display().to_string()
+}
+
 /// Enumerates all compile corpus `.dsp` files in deterministic order.
 fn corpus_files() -> Result<Vec<PathBuf>, io::Error> {
     let root = workspace_root();
@@ -1662,7 +1676,7 @@ fn run_interp_trace_case(
     }
 
     Ok(RuntimeTrace {
-        dsp_path: options.case.display().to_string(),
+        dsp_path: workspace_relative_path(&options.case),
         lane: options.lane.as_str().to_string(),
         scenario: options.scenario.as_str().to_string(),
         sample_rate: options.sample_rate,
@@ -1792,7 +1806,7 @@ fn run_interp_trace_case_from_cpp_fbc(
         }
 
         Ok(RuntimeTrace {
-            dsp_path: options.trace.case.display().to_string(),
+            dsp_path: workspace_relative_path(&options.trace.case),
             lane: "cpp-fbc".to_string(),
             scenario: options.trace.scenario.as_str().to_string(),
             sample_rate: options.trace.sample_rate,

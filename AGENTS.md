@@ -40,6 +40,9 @@ Guidelines for contributors and coding agents working on `faust-rs`.
 - For filesystem path assertions in tests, compare `Path`/`PathBuf` values (or
   components) instead of stringified paths; avoid hardcoded `/` separators
   because CI runs on Windows.
+- In versioned documentation, generated reports, and stored test artifacts,
+  prefer repository-relative paths over absolute local checkout paths so the
+  content stays portable on GitHub and across contributor machines.
 
 ## 5. Porting Discipline
 
