@@ -255,6 +255,7 @@ fn expect_ui_group(
     let UiMatch::Group {
         kind,
         label,
+        metadata: _,
         children,
     } = match_ui(&program.arena, node)
     else {
@@ -306,6 +307,49 @@ fn propagate_with_ui_collects_nested_groups_and_control_specs() {
     assert_eq!(range.min, 0.0);
     assert_eq!(range.max, 1.0);
     assert_eq!(range.step, 0.01);
+}
+
+#[test]
+fn propagate_with_ui_extracts_group_and_widget_label_metadata() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let root_label = bb.ident("main [tooltip: use me]");
+        let slider_label = bb.ident("gain [style:knob]");
+        let init = bb.real(0.5);
+        let min = bb.real(0.0);
+        let max = bb.real(1.0);
+        let step = bb.real(0.01);
+        let slider = bb.hslider(slider_label, init, min, max, step);
+        bb.vgroup(root_label, slider)
+    };
+
+    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+        .expect("metadata-bearing grouped slider should propagate");
+
+    let UiMatch::Group {
+        kind,
+        label,
+        metadata,
+        children,
+    } = match_ui(&out.ui.arena, out.ui.root)
+    else {
+        panic!("expected root UI group");
+    };
+    assert_eq!(kind, UiGroupKind::Vertical);
+    assert_eq!(label, "main");
+    assert_eq!(metadata, vec![("tooltip".to_owned(), "use me".to_owned())]);
+    assert_eq!(children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, children[0]),
+        UiMatch::InputControl(0)
+    );
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].label, "gain");
+    assert_eq!(
+        out.ui.controls[0].metadata,
+        vec![("style".to_owned(), "knob".to_owned())]
+    );
 }
 
 #[test]
@@ -459,9 +503,10 @@ fn propagate_with_ui_collects_soundfile_control_spec() {
     );
     assert_eq!(out.ui.controls.len(), 1);
     assert_eq!(out.ui.controls[0].kind, ControlKind::Soundfile);
+    assert_eq!(out.ui.controls[0].label, "sample");
     assert_eq!(
-        out.ui.controls[0].label,
-        "sample[url:{'tests/assets/silence.wav'}]"
+        out.ui.controls[0].metadata,
+        vec![("url".to_owned(), "{'tests/assets/silence.wav'}".to_owned())]
     );
 }
 

@@ -44,6 +44,7 @@ fn expect_ui_group(
     let UiMatch::Group {
         kind,
         label,
+        metadata: _,
         children,
     } = match_ui(&out.ui.arena, node)
     else {
@@ -527,6 +528,42 @@ fn corpus_eval_label_modulation_target_substitution_matches_ui_control() {
     let out = compile_corpus("rep_53_eval_label_modulation_target_subst.dsp");
     assert_eq!(out.ui.controls.len(), 1);
     assert_eq!(out.ui.controls[0].label, "gain3");
+}
+
+#[test]
+fn corpus_metadata_bearing_widget_label_splits_display_label_and_ui_metadata() {
+    let out = compile_corpus("rep_56_noise_smoo_slider.dsp");
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].label, "gain");
+    assert_eq!(
+        out.ui.controls[0].metadata,
+        vec![("style".to_owned(), "knob".to_owned())]
+    );
+}
+
+#[test]
+fn inline_group_label_metadata_splits_display_label_and_group_metadata() {
+    let out = compile_inline(
+        "group_metadata",
+        "process = hgroup(\"top [tooltip:hello]\", checkbox(\"c\"));\n",
+    );
+    let UiMatch::Group {
+        kind,
+        label,
+        metadata,
+        children,
+    } = match_ui(&out.ui.arena, out.ui.root)
+    else {
+        panic!("expected root grouped UI");
+    };
+    assert_eq!(kind, UiGroupKind::Horizontal);
+    assert_eq!(label, "top");
+    assert_eq!(metadata, vec![("tooltip".to_owned(), "hello".to_owned())]);
+    assert_eq!(children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, children[0]),
+        UiMatch::InputControl(0)
+    );
 }
 
 fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i32) {

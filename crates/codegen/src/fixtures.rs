@@ -110,7 +110,7 @@ fn metadata_fun_args() -> [NamedType; 2] {
             typ: obj_ptr_type(),
         },
         NamedType {
-            name: "meta".to_string(),
+            name: "m".to_string(),
             typ: FirType::Meta,
         },
     ]

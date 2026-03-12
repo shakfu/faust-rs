@@ -152,10 +152,14 @@ struct DeclareFunView<'a> {
 /// Rendering mode for statement/expression emission.
 ///
 /// `Compute` enables the subset of formatting rules that are specific to the
-/// sample loop and output buffer writes.
+/// sample loop and output buffer writes. `Metadata` and `Ui` preserve the C++
+/// split between `m->declare(...)` in `metadata()` and
+/// `ui_interface->declare(...)` in `buildUserInterface()`.
 #[derive(Debug, Clone, Copy)]
 enum EmitMode {
     Default,
+    Metadata,
+    Ui,
     Compute,
 }
 
@@ -806,12 +810,38 @@ fn emit_stmt_with_mode(
             Ok(())
         }
         FirMatch::AddMetaDeclare { var, key, value } => {
-            let _ = writeln!(
-                out,
-                "{tab}m->declare(&{var}, {}, {});",
-                cpp_string_literal(&key),
-                cpp_string_literal(&value)
-            );
+            match mode {
+                EmitMode::Ui => {
+                    let zone = if var == "0" {
+                        "0".to_owned()
+                    } else {
+                        format!("&{var}")
+                    };
+                    let _ = writeln!(
+                        out,
+                        "{tab}ui_interface->declare({zone}, {}, {});",
+                        cpp_string_literal(&key),
+                        cpp_string_literal(&value)
+                    );
+                }
+                EmitMode::Default | EmitMode::Metadata | EmitMode::Compute => {
+                    if var == "0" {
+                        let _ = writeln!(
+                            out,
+                            "{tab}m->declare({}, {});",
+                            cpp_string_literal(&key),
+                            cpp_string_literal(&value)
+                        );
+                    } else {
+                        let _ = writeln!(
+                            out,
+                            "{tab}m->declare(&{var}, {}, {});",
+                            cpp_string_literal(&key),
+                            cpp_string_literal(&value)
+                        );
+                    }
+                }
+            }
             Ok(())
         }
         _ => Err(unsupported_node("statement", stmt, store)),
@@ -971,7 +1001,20 @@ fn emit_declare_fun(
         );
         let _ = writeln!(out, "{tab}    ui_interface->closeBox();");
     } else {
-        emit_block(store, out, options, module_name, body, indent + 1)?;
+        let mut mode = match decl.name {
+            "metadata" => EmitMode::Metadata,
+            "buildUserInterface" => EmitMode::Ui,
+            _ => EmitMode::Default,
+        };
+        emit_block_with_mode(
+            store,
+            out,
+            options,
+            module_name,
+            body,
+            indent + 1,
+            &mut mode,
+        )?;
     }
     let _ = writeln!(out, "{tab}}}");
     Ok(())
@@ -1401,12 +1444,15 @@ mod tests {
     }
 
     #[test]
-    /// Verifies UI and metadata FIR nodes lower to the expected C++ callback calls.
+    /// Verifies UI and metadata FIR nodes lower to the correct C++ callback
+    /// families for `buildUserInterface` and `metadata`.
     fn emits_ui_and_metadata_nodes() {
         let mut store = FirStore::new();
         let mut b = FirBuilder::new(&mut store);
+        let group_meta = b.add_meta_declare("0", "tooltip", "hello");
         let open = b.open_box(fir::UiBoxType::Vertical, "group");
         let button = b.add_button(fir::ButtonType::Button, "gate", "fGate");
+        let slider_meta = b.add_meta_declare("fGain", "unit", "dB");
         let slider = b.add_slider(
             fir::SliderType::Horizontal,
             "gain",
@@ -1420,23 +1466,73 @@ mod tests {
         );
         let bargraph = b.add_bargraph(fir::BargraphType::Horizontal, "level", "fLevel", -60.0, 6.0);
         let soundfile = b.add_soundfile_with_url("sample", "samples/piano.wav", "fSample");
-        let meta = b.add_meta_declare("fGain", "unit", "dB");
         let close = b.close_box();
-        let body = b.block(&[open, button, slider, bargraph, soundfile, meta, close]);
-        let fun_ty = FirType::Fun {
-            args: Vec::new(),
+        let body = b.block(&[
+            group_meta,
+            open,
+            button,
+            slider_meta,
+            slider,
+            bargraph,
+            soundfile,
+            close,
+        ]);
+        let build_ui_ty = FirType::Fun {
+            args: vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::UI],
             ret: Box::new(FirType::Void),
         };
-        let fun = b.declare_fun("ui", fun_ty, &[], Some(body), false);
+        let build_ui_args = [
+            NamedType {
+                name: "dsp".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "ui_interface".to_owned(),
+                typ: FirType::UI,
+            },
+        ];
+        let ui = b.declare_fun(
+            "buildUserInterface",
+            build_ui_ty,
+            &build_ui_args,
+            Some(body),
+            false,
+        );
+        let module_meta = b.add_meta_declare("0", "author", "faust-rs");
+        let meta_body = b.block(&[module_meta]);
+        let metadata_ty = FirType::Fun {
+            args: vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::Meta],
+            ret: Box::new(FirType::Void),
+        };
+        let metadata_args = [
+            NamedType {
+                name: "dsp".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "m".to_owned(),
+                typ: FirType::Meta,
+            },
+        ];
+        let metadata = b.declare_fun(
+            "metadata",
+            metadata_ty,
+            &metadata_args,
+            Some(meta_body),
+            false,
+        );
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
-        let functions = b.block(&[fun]);
+        let functions = b.block(&[ui, metadata]);
         let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
 
         let out =
             generate_cpp_module(&store, module, &CppOptions::default()).expect("UI nodes emit");
+        assert!(out.contains("virtual void buildUserInterface(UI* ui_interface)"));
+        assert!(out.contains("ui_interface->declare(0, \"tooltip\", \"hello\");"));
         assert!(out.contains("ui_interface->openVerticalBox(\"group\");"));
         assert!(out.contains("ui_interface->addButton(\"gate\", &fGate);"));
+        assert!(out.contains("ui_interface->declare(&fGain, \"unit\", \"dB\");"));
         assert!(
             out.contains(
                 "ui_interface->addHorizontalSlider(\"gain\", &fGain, 0.5, 0.0, 1.0, 0.01);"
@@ -1450,8 +1546,9 @@ mod tests {
                 "ui_interface->addSoundfile(\"sample\", \"samples/piano.wav\", &fSample);"
             )
         );
-        assert!(out.contains("m->declare(&fGain, \"unit\", \"dB\");"));
         assert!(out.contains("ui_interface->closeBox();"));
+        assert!(out.contains("virtual void metadata(Meta* m)"));
+        assert!(out.contains("m->declare(\"author\", \"faust-rs\");"));
     }
 
     #[test]

@@ -387,7 +387,8 @@ fn fastlane_cpp_preserves_metadata_bearing_ui_labels() {
         SignalFirLane::TransformFastLane,
     );
     assert!(fast.contains("ui_interface->openVerticalBox(\"rep_56_noise_smoo_slider\");"));
-    assert!(fast.contains("ui_interface->addHorizontalSlider(\"gain [style:knob]\""));
+    assert!(fast.contains("ui_interface->declare(&fHslider0, \"style\", \"knob\");"));
+    assert!(fast.contains("ui_interface->addHorizontalSlider(\"gain\", &fHslider0"));
     assert!(fast.contains("ui_interface->closeBox();"));
 }
 
@@ -401,7 +402,10 @@ fn fastlane_c_preserves_metadata_bearing_ui_labels() {
         "ui_interface->openVerticalBox(ui_interface->uiInterface, \"rep_56_noise_smoo_slider\");"
     ));
     assert!(fast.contains(
-        "ui_interface->addHorizontalSlider(ui_interface->uiInterface, \"gain [style:knob]\""
+        "ui_interface->declare(ui_interface->uiInterface, &dsp->fHslider0, \"style\", \"knob\");"
+    ));
+    assert!(fast.contains(
+        "ui_interface->addHorizontalSlider(ui_interface->uiInterface, \"gain\", &dsp->fHslider0"
     ));
     assert!(fast.contains("ui_interface->closeBox(ui_interface->uiInterface);"));
 }

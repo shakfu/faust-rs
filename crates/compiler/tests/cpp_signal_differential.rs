@@ -149,6 +149,30 @@ fn extract_first_label_arg(line: &str, method: &str) -> Option<String> {
     Some(rest[..end].to_owned())
 }
 
+fn extract_ui_declare_event(line: &str) -> Option<String> {
+    let start = line.find("ui_interface->declare(")?;
+    let rest = &line[start + "ui_interface->declare(".len()..];
+    let root = if rest.starts_with("0, ") {
+        true
+    } else if rest.starts_with('&') {
+        false
+    } else {
+        return None;
+    };
+    let key_start = rest.find('"')?;
+    let key_rest = &rest[key_start + 1..];
+    let key_end = key_rest.find('"')?;
+    let key = &key_rest[..key_end];
+    let value_start = key_rest[key_end + 1..].find('"')?;
+    let value_rest = &key_rest[key_end + 1 + value_start + 1..];
+    let value_end = value_rest.find('"')?;
+    let value = &value_rest[..value_end];
+    Some(format!(
+        "{}:{key}={value}",
+        if root { "declare0" } else { "declare" }
+    ))
+}
+
 fn extract_ui_events(cpp: &str) -> Vec<String> {
     const LABEL_METHODS: &[&str] = &[
         "openVerticalBox",
@@ -171,6 +195,10 @@ fn extract_ui_events(cpp: &str) -> Vec<String> {
         }
         if line.contains("ui_interface->closeBox();") {
             events.push("closeBox".to_owned());
+            continue;
+        }
+        if let Some(event) = extract_ui_declare_event(line) {
+            events.push(event);
             continue;
         }
         for method in LABEL_METHODS {
@@ -410,6 +438,13 @@ fn differential_ui_root_labels_against_cpp_reference() {
             name: "declared_empty_root_group.dsp",
             input: CaseInput::Inline(
                 "declare name \"main\";\nprocess = vgroup(\"\", checkbox(\"c\"));\n",
+            ),
+            expect_valid: true,
+        },
+        Case {
+            name: "group_metadata_root.dsp",
+            input: CaseInput::Inline(
+                "process = hgroup(\"top [tooltip:hello]\", checkbox(\"c\"));\n",
             ),
             expect_valid: true,
         },

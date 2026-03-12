@@ -1745,6 +1745,36 @@ impl<'a> SignalToFirLower<'a> {
         })
     }
 
+    fn emit_ui_metadata_for_target(&mut self, var: &str, metadata: &[(String, String)]) {
+        for (key, value) in metadata {
+            let mut b = FirBuilder::new(&mut self.store);
+            self.ui_statements
+                .push(b.add_meta_declare(var, key.clone(), value.clone()));
+        }
+    }
+
+    fn control_metadata_value(
+        &self,
+        control: ControlId,
+        key: &str,
+    ) -> Result<Option<String>, SignalFirError> {
+        Ok(self
+            .control_spec(control)?
+            .metadata
+            .iter()
+            .find_map(|(entry_key, entry_value)| (entry_key == key).then(|| entry_value.clone())))
+    }
+
+    fn emit_control_ui_metadata(
+        &mut self,
+        control: ControlId,
+        var: &str,
+    ) -> Result<(), SignalFirError> {
+        let metadata = self.control_spec(control)?.metadata.clone();
+        self.emit_ui_metadata_for_target(var, &metadata);
+        Ok(())
+    }
+
     fn ensure_slider_zone(
         &mut self,
         control: ControlId,
@@ -1860,6 +1890,7 @@ impl<'a> SignalToFirLower<'a> {
             UiMatch::Group {
                 kind,
                 label,
+                metadata,
                 children,
             } => {
                 let typ = match kind {
@@ -1867,6 +1898,7 @@ impl<'a> SignalToFirLower<'a> {
                     UiGroupKind::Horizontal => UiBoxType::Horizontal,
                     UiGroupKind::Tab => UiBoxType::Tab,
                 };
+                self.emit_ui_metadata_for_target("0", &metadata);
                 let mut b = FirBuilder::new(&mut self.store);
                 self.ui_statements.push(b.open_box(typ, label));
                 for child in children {
@@ -1883,12 +1915,14 @@ impl<'a> SignalToFirLower<'a> {
                 match kind {
                     ControlKind::Button => {
                         let var = self.ensure_button_zone(control, ButtonType::Button)?;
+                        self.emit_control_ui_metadata(control, &var)?;
                         let mut b = FirBuilder::new(&mut self.store);
                         self.ui_statements
                             .push(b.add_button(ButtonType::Button, label, var));
                     }
                     ControlKind::Checkbox => {
                         let var = self.ensure_button_zone(control, ButtonType::Checkbox)?;
+                        self.emit_control_ui_metadata(control, &var)?;
                         let mut b = FirBuilder::new(&mut self.store);
                         self.ui_statements
                             .push(b.add_button(ButtonType::Checkbox, label, var));
@@ -1896,6 +1930,7 @@ impl<'a> SignalToFirLower<'a> {
                     ControlKind::VSlider => {
                         let range = self.control_range(control, "vslider")?;
                         let var = self.ensure_slider_zone(control, SliderType::Vertical)?;
+                        self.emit_control_ui_metadata(control, &var)?;
                         let mut b = FirBuilder::new(&mut self.store);
                         self.ui_statements.push(b.add_slider(
                             SliderType::Vertical,
@@ -1912,6 +1947,7 @@ impl<'a> SignalToFirLower<'a> {
                     ControlKind::HSlider => {
                         let range = self.control_range(control, "hslider")?;
                         let var = self.ensure_slider_zone(control, SliderType::Horizontal)?;
+                        self.emit_control_ui_metadata(control, &var)?;
                         let mut b = FirBuilder::new(&mut self.store);
                         self.ui_statements.push(b.add_slider(
                             SliderType::Horizontal,
@@ -1928,6 +1964,7 @@ impl<'a> SignalToFirLower<'a> {
                     ControlKind::NumEntry => {
                         let range = self.control_range(control, "numentry")?;
                         let var = self.ensure_slider_zone(control, SliderType::NumEntry)?;
+                        self.emit_control_ui_metadata(control, &var)?;
                         let mut b = FirBuilder::new(&mut self.store);
                         self.ui_statements.push(b.add_slider(
                             SliderType::NumEntry,
@@ -1958,6 +1995,7 @@ impl<'a> SignalToFirLower<'a> {
                     ControlKind::VBargraph => {
                         let range = self.control_range(control, "vbargraph")?;
                         let var = self.ensure_bargraph_zone(control, BargraphType::Vertical)?;
+                        self.emit_control_ui_metadata(control, &var)?;
                         let mut b = FirBuilder::new(&mut self.store);
                         self.ui_statements.push(b.add_bargraph(
                             BargraphType::Vertical,
@@ -1970,6 +2008,7 @@ impl<'a> SignalToFirLower<'a> {
                     ControlKind::HBargraph => {
                         let range = self.control_range(control, "hbargraph")?;
                         let var = self.ensure_bargraph_zone(control, BargraphType::Horizontal)?;
+                        self.emit_control_ui_metadata(control, &var)?;
                         let mut b = FirBuilder::new(&mut self.store);
                         self.ui_statements.push(b.add_bargraph(
                             BargraphType::Horizontal,
@@ -1990,9 +2029,13 @@ impl<'a> SignalToFirLower<'a> {
             }
             UiMatch::Soundfile(control) => {
                 let label = self.control_spec(control)?.label.clone();
+                let url = self
+                    .control_metadata_value(control, "url")?
+                    .unwrap_or_default();
                 let var = self.ensure_soundfile_zone(control)?;
                 let mut b = FirBuilder::new(&mut self.store);
-                self.ui_statements.push(b.add_soundfile(label, var));
+                self.ui_statements
+                    .push(b.add_soundfile_with_url(label, url, var));
                 Ok(())
             }
             UiMatch::Unknown => Err(SignalFirError::new(

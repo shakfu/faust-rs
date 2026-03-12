@@ -42,7 +42,7 @@ use signals::{SigBuilder, SigId, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId, list_to_vec, tree_to_int, vec_to_list};
 use ui::{
     ControlId, ControlKind, ControlRange, ControlSpec, UiBuilder, UiGroupKind, UiId, UiMatch,
-    UiProgram, UiRootOrigin, match_ui,
+    UiMetadata, UiProgram, UiRootOrigin, match_ui, split_label_metadata,
 };
 
 /// Memoization cache for [`box_arity`] / [`box_arity_typed`] results, keyed by validated flat boxes.
@@ -1096,10 +1096,16 @@ impl UiCollector {
             UiMatch::Group {
                 kind,
                 label,
+                metadata,
                 children,
             } if label.is_empty() && !options.synthesized_root_label.is_empty() => {
                 let mut builder = UiBuilder::new(&mut self.arena);
-                builder.group(kind, &options.synthesized_root_label, &children)
+                builder.group_with_metadata(
+                    kind,
+                    &options.synthesized_root_label,
+                    &metadata,
+                    &children,
+                )
             }
             _ => root,
         }
@@ -1110,6 +1116,7 @@ impl UiCollector {
         source_node: BoxId,
         kind: ControlKind,
         label: String,
+        metadata: UiMetadata,
         range: Option<ControlRange>,
     ) -> ControlId {
         let id =
@@ -1118,7 +1125,7 @@ impl UiCollector {
             id,
             kind,
             label,
-            metadata: Vec::new(),
+            metadata,
             range,
         });
         self.control_ids.insert(source_node, id);
@@ -1130,9 +1137,10 @@ impl UiCollector {
         source_node: BoxId,
         kind: ControlKind,
         label: String,
+        metadata: UiMetadata,
         range: Option<ControlRange>,
     ) -> UiId {
-        let id = self.register_control(source_node, kind, label, range);
+        let id = self.register_control(source_node, kind, label, metadata, range);
         UiBuilder::new(&mut self.arena).input_control(id)
     }
 
@@ -1141,24 +1149,27 @@ impl UiCollector {
         source_node: BoxId,
         kind: ControlKind,
         label: String,
+        metadata: UiMetadata,
         range: Option<ControlRange>,
     ) -> UiId {
-        let id = self.register_control(source_node, kind, label, range);
+        let id = self.register_control(source_node, kind, label, metadata, range);
         UiBuilder::new(&mut self.arena).output_control(id)
     }
 
-    fn soundfile(&mut self, source_node: BoxId, label: String) -> UiId {
-        let id = self.register_control(source_node, ControlKind::Soundfile, label, None);
+    fn soundfile(&mut self, source_node: BoxId, label: String, metadata: UiMetadata) -> UiId {
+        let id = self.register_control(source_node, ControlKind::Soundfile, label, metadata, None);
         UiBuilder::new(&mut self.arena).soundfile(id)
     }
 
-    fn group(&mut self, kind: UiGroupKind, label: &str, children: &[UiId]) -> UiId {
+    fn group(
+        &mut self,
+        kind: UiGroupKind,
+        label: &str,
+        metadata: &[(String, String)],
+        children: &[UiId],
+    ) -> UiId {
         let mut b = UiBuilder::new(&mut self.arena);
-        match kind {
-            UiGroupKind::Vertical => b.vgroup(label, children),
-            UiGroupKind::Horizontal => b.hgroup(label, children),
-            UiGroupKind::Tab => b.tgroup(label, children),
-        }
+        b.group_with_metadata(kind, label, metadata, children)
     }
 }
 
@@ -1188,10 +1199,12 @@ fn collect_ui_nodes(
             let BoxMatch::Button(label) = match_box(source_arena, box_tree.as_tree_id()) else {
                 unreachable!("flat button node must decode to BoxMatch::Button")
             };
+            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
             vec![collector.input_control(
                 box_tree.as_tree_id(),
                 ControlKind::Button,
-                decode_box_label(source_arena, label),
+                label,
+                metadata,
                 None,
             )]
         }
@@ -1199,10 +1212,12 @@ fn collect_ui_nodes(
             let BoxMatch::Checkbox(label) = match_box(source_arena, box_tree.as_tree_id()) else {
                 unreachable!("flat checkbox node must decode to BoxMatch::Checkbox")
             };
+            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
             vec![collector.input_control(
                 box_tree.as_tree_id(),
                 ControlKind::Checkbox,
-                decode_box_label(source_arena, label),
+                label,
+                metadata,
                 None,
             )]
         }
@@ -1212,10 +1227,12 @@ fn collect_ui_nodes(
             else {
                 unreachable!("flat vslider node must decode to BoxMatch::VSlider")
             };
+            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
             vec![collector.input_control(
                 box_tree.as_tree_id(),
                 ControlKind::VSlider,
-                decode_box_label(source_arena, label),
+                label,
+                metadata,
                 Some(ControlRange {
                     init: decode_box_scalar(source_arena, init),
                     min: decode_box_scalar(source_arena, min),
@@ -1230,10 +1247,12 @@ fn collect_ui_nodes(
             else {
                 unreachable!("flat hslider node must decode to BoxMatch::HSlider")
             };
+            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
             vec![collector.input_control(
                 box_tree.as_tree_id(),
                 ControlKind::HSlider,
-                decode_box_label(source_arena, label),
+                label,
+                metadata,
                 Some(ControlRange {
                     init: decode_box_scalar(source_arena, init),
                     min: decode_box_scalar(source_arena, min),
@@ -1248,10 +1267,12 @@ fn collect_ui_nodes(
             else {
                 unreachable!("flat numentry node must decode to BoxMatch::NumEntry")
             };
+            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
             vec![collector.input_control(
                 box_tree.as_tree_id(),
                 ControlKind::NumEntry,
-                decode_box_label(source_arena, label),
+                label,
+                metadata,
                 Some(ControlRange {
                     init: decode_box_scalar(source_arena, init),
                     min: decode_box_scalar(source_arena, min),
@@ -1266,10 +1287,12 @@ fn collect_ui_nodes(
             else {
                 unreachable!("flat vbargraph node must decode to BoxMatch::VBargraph")
             };
+            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
             vec![collector.output_control(
                 box_tree.as_tree_id(),
                 ControlKind::VBargraph,
-                decode_box_label(source_arena, label),
+                label,
+                metadata,
                 Some(ControlRange {
                     init: 0.0,
                     min: decode_box_scalar(source_arena, min),
@@ -1284,10 +1307,12 @@ fn collect_ui_nodes(
             else {
                 unreachable!("flat hbargraph node must decode to BoxMatch::HBargraph")
             };
+            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
             vec![collector.output_control(
                 box_tree.as_tree_id(),
                 ControlKind::HBargraph,
-                decode_box_label(source_arena, label),
+                label,
+                metadata,
                 Some(ControlRange {
                     init: 0.0,
                     min: decode_box_scalar(source_arena, min),
@@ -1301,7 +1326,8 @@ fn collect_ui_nodes(
             else {
                 unreachable!("flat soundfile node must decode to BoxMatch::Soundfile")
             };
-            vec![collector.soundfile(box_tree.as_tree_id(), decode_box_label(source_arena, label))]
+            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
+            vec![collector.soundfile(box_tree.as_tree_id(), label, metadata)]
         }
         FlatNodeKind::VGroup { body } => collect_group_ui(
             source_arena,
@@ -1378,7 +1404,8 @@ fn collect_group_ui(
         }
         _ => unreachable!("flat group node must decode to a group box"),
     };
-    vec![collector.group(kind, &label, &children)]
+    let (label, metadata) = split_label_metadata(&label);
+    vec![collector.group(kind, &label, &metadata, &children)]
 }
 
 fn decode_box_label(arena: &TreeArena, node: BoxId) -> String {

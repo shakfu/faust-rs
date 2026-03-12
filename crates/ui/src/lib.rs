@@ -22,6 +22,8 @@
 //! - Controls are referenced by deterministic [`ControlId`] values rather than
 //!   owning layout in DSP signal nodes.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use tlib::{NodeKind, TreeArena, TreeId, list_to_vec, vec_to_list};
 
 pub const CRATE_NAME: &str = "ui";
@@ -33,6 +35,7 @@ pub type UiId = TreeId;
 pub type ControlId = u32;
 
 const UI_GROUP_TAG: &str = "UIGROUP";
+const UI_METADATA_ENTRY_TAG: &str = "UIMETADATAENTRY";
 const UI_INPUT_CONTROL_TAG: &str = "UIINPUTCONTROL";
 const UI_OUTPUT_CONTROL_TAG: &str = "UIOUTPUTCONTROL";
 const UI_SOUNDFILE_TAG: &str = "UISOUNDFILE";
@@ -88,6 +91,9 @@ pub enum ControlKind {
     Soundfile,
 }
 
+/// Canonical metadata entry list used by grouped UI labels and controls.
+pub type UiMetadata = Vec<(String, String)>;
+
 /// Numeric range metadata for slider-like controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ControlRange {
@@ -104,7 +110,7 @@ pub struct ControlSpec {
     pub id: ControlId,
     pub kind: ControlKind,
     pub label: String,
-    pub metadata: Vec<(String, String)>,
+    pub metadata: UiMetadata,
     pub range: Option<ControlRange>,
 }
 
@@ -160,6 +166,117 @@ impl UiProgram {
     }
 }
 
+/// Splits one Faust UI label into its simplified display label and extracted
+/// metadata declarations.
+///
+/// # Source provenance (C++)
+/// - `compiler/generator/description.cpp`
+/// - `extractMetadata(...)`
+///
+/// Parity rules:
+/// - strips leading/trailing spaces and tabs from the final display label,
+/// - strips leading/trailing spaces and tabs from metadata keys and values,
+/// - preserves nested `[` / `]` inside metadata values,
+/// - preserves escaped characters by removing the escape marker and keeping the
+///   escaped byte in the corresponding output string,
+/// - returns metadata in deterministic key/value-sorted order like the C++
+///   `map<string, set<string>>` accumulation.
+#[must_use]
+pub fn split_label_metadata(full_label: &str) -> (String, UiMetadata) {
+    #[derive(Clone, Copy)]
+    enum State {
+        Label,
+        EscapeLabel,
+        EscapeKey,
+        EscapeValue,
+        Key,
+        Value,
+    }
+
+    let mut state = State::Label;
+    let mut depth = 0_i32;
+    let mut label = String::new();
+    let mut key = String::new();
+    let mut value = String::new();
+    let mut metadata = BTreeMap::<String, BTreeSet<String>>::new();
+
+    for ch in full_label.chars() {
+        match state {
+            State::Label => match ch {
+                '\\' => state = State::EscapeLabel,
+                '[' => {
+                    state = State::Key;
+                    depth += 1;
+                }
+                _ => label.push(ch),
+            },
+            State::EscapeLabel => {
+                label.push(ch);
+                state = State::Label;
+            }
+            State::EscapeKey => {
+                key.push(ch);
+                state = State::Key;
+            }
+            State::EscapeValue => {
+                value.push(ch);
+                state = State::Value;
+            }
+            State::Key => match ch {
+                '\\' => state = State::EscapeKey,
+                '[' => {
+                    depth += 1;
+                    key.push(ch);
+                }
+                ':' if depth == 1 => state = State::Value,
+                ']' => {
+                    depth -= 1;
+                    if depth < 1 {
+                        metadata
+                            .entry(trim_space_tab(&key).to_owned())
+                            .or_default()
+                            .insert(String::new());
+                        state = State::Label;
+                        key.clear();
+                        value.clear();
+                    } else {
+                        key.push(ch);
+                    }
+                }
+                _ => key.push(ch),
+            },
+            State::Value => match ch {
+                '\\' => state = State::EscapeValue,
+                '[' => {
+                    depth += 1;
+                    value.push(ch);
+                }
+                ']' => {
+                    depth -= 1;
+                    if depth < 1 {
+                        metadata
+                            .entry(trim_space_tab(&key).to_owned())
+                            .or_default()
+                            .insert(trim_space_tab(&value).to_owned());
+                        state = State::Label;
+                        key.clear();
+                        value.clear();
+                    } else {
+                        value.push(ch);
+                    }
+                }
+                _ => value.push(ch),
+            },
+        }
+    }
+
+    let metadata = metadata
+        .into_iter()
+        .flat_map(|(key, values)| values.into_iter().map(move |value| (key.clone(), value)))
+        .collect();
+    (trim_space_tab(&label).to_owned(), metadata)
+}
+
 /// Canonical builder API for constructing UI IR nodes.
 pub struct UiBuilder<'a> {
     arena: &'a mut TreeArena,
@@ -175,10 +292,23 @@ impl<'a> UiBuilder<'a> {
     #[must_use]
     /// Builds one grouped UI node with the provided ordered child list.
     pub fn group(&mut self, kind: UiGroupKind, label: &str, children: &[UiId]) -> UiId {
+        self.group_with_metadata(kind, label, &UiMetadata::new(), children)
+    }
+
+    #[must_use]
+    /// Builds one grouped UI node plus already-extracted label metadata.
+    pub fn group_with_metadata(
+        &mut self,
+        kind: UiGroupKind,
+        label: &str,
+        metadata: &[(String, String)],
+        children: &[UiId],
+    ) -> UiId {
         let kind = self.arena.int(kind as i64);
         let label = self.arena.string_lit(label);
+        let metadata = encode_metadata_list(self.arena, metadata);
         let children = vec_to_list(self.arena, children);
-        intern_tag(self.arena, UI_GROUP_TAG, &[kind, label, children])
+        intern_tag(self.arena, UI_GROUP_TAG, &[kind, label, metadata, children])
     }
 
     #[must_use]
@@ -227,6 +357,7 @@ pub enum UiMatch<'a> {
     Group {
         kind: UiGroupKind,
         label: &'a str,
+        metadata: UiMetadata,
         children: Vec<UiId>,
     },
     InputControl(ControlId),
@@ -242,7 +373,7 @@ pub fn match_ui(arena: &TreeArena, id: UiId) -> UiMatch<'_> {
         return UiMatch::Unknown;
     };
     match (&node.kind, node.children.as_slice()) {
-        (NodeKind::Tag(tag), [kind, label, children])
+        (NodeKind::Tag(tag), [kind, label, metadata, children])
             if arena.tag_name(*tag).unwrap_or("") == UI_GROUP_TAG =>
         {
             let Some(kind) = decode_group_kind(arena, *kind) else {
@@ -251,12 +382,16 @@ pub fn match_ui(arena: &TreeArena, id: UiId) -> UiMatch<'_> {
             let Some(label) = decode_label(arena, *label) else {
                 return UiMatch::Unknown;
             };
+            let Some(metadata) = decode_metadata_list(arena, *metadata) else {
+                return UiMatch::Unknown;
+            };
             let Some(children) = list_to_vec(arena, *children) else {
                 return UiMatch::Unknown;
             };
             UiMatch::Group {
                 kind,
                 label,
+                metadata,
                 children,
             }
         }
@@ -304,4 +439,37 @@ fn decode_label(arena: &TreeArena, id: UiId) -> Option<&str> {
         Some(NodeKind::Symbol(value)) => Some(value),
         _ => None,
     }
+}
+
+fn trim_space_tab(value: &str) -> &str {
+    value.trim_matches(|ch| matches!(ch, ' ' | '\t'))
+}
+
+fn encode_metadata_list(arena: &mut TreeArena, metadata: &[(String, String)]) -> UiId {
+    let mut entries = Vec::with_capacity(metadata.len());
+    for (key, value) in metadata {
+        let key = arena.string_lit(key);
+        let value = arena.string_lit(value);
+        entries.push(intern_tag(arena, UI_METADATA_ENTRY_TAG, &[key, value]));
+    }
+    vec_to_list(arena, &entries)
+}
+
+fn decode_metadata_list(arena: &TreeArena, id: UiId) -> Option<UiMetadata> {
+    let entries = list_to_vec(arena, id)?;
+    let mut metadata = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let node = arena.node(entry)?;
+        let (NodeKind::Tag(tag), [key, value]) = (&node.kind, node.children.as_slice()) else {
+            return None;
+        };
+        if arena.tag_name(*tag).unwrap_or("") != UI_METADATA_ENTRY_TAG {
+            return None;
+        }
+        metadata.push((
+            decode_label(arena, *key)?.to_owned(),
+            decode_label(arena, *value)?.to_owned(),
+        ));
+    }
+    Some(metadata)
 }

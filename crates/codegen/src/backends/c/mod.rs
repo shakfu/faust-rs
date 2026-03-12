@@ -162,10 +162,14 @@ struct TableInit {
 /// Rendering mode for expression/statement emission.
 ///
 /// `Compute` enables compute-loop specific conventions such as sample-indexed
-/// table accesses and output-store formatting.
+/// table accesses and output-store formatting. `Metadata` and `Ui` preserve
+/// the C++ split between `m->declare(...)` in `metadata()` and
+/// `ui_interface->declare(...)` in `buildUserInterface()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmitMode {
     Default,
+    Metadata,
+    Ui,
     Compute,
 }
 
@@ -676,7 +680,12 @@ fn emit_named_fun(
     if decl.name == "compute" {
         emit_compute_body(store, out, options, body, 1)?;
     } else {
-        emit_block(store, out, options, body, 1)?;
+        let mut mode = match decl.name.as_str() {
+            "metadata" => EmitMode::Metadata,
+            "buildUserInterface" => EmitMode::Ui,
+            _ => EmitMode::Default,
+        };
+        emit_block_with_mode(store, out, options, body, 1, &mut mode)?;
     }
     let _ = writeln!(out, "}}");
     let _ = writeln!(out);
@@ -1120,17 +1129,34 @@ fn emit_stmt(
             Ok(())
         }
         FirMatch::AddMetaDeclare { var, key, value } => {
-            let zone = if var == "0" {
-                "0".to_owned()
-            } else {
-                format!("&dsp->{var}")
-            };
-            let _ = writeln!(
-                out,
-                "{tab}m->declare(m->metaInterface, {zone}, {}, {});",
-                c_string_literal(&key),
-                c_string_literal(&value)
-            );
+            match mode {
+                EmitMode::Ui => {
+                    let zone = if var == "0" {
+                        "0".to_owned()
+                    } else {
+                        format!("&dsp->{var}")
+                    };
+                    let _ = writeln!(
+                        out,
+                        "{tab}ui_interface->declare(ui_interface->uiInterface, {zone}, {}, {});",
+                        c_string_literal(&key),
+                        c_string_literal(&value)
+                    );
+                }
+                EmitMode::Default | EmitMode::Metadata | EmitMode::Compute => {
+                    let zone = if var == "0" {
+                        "0".to_owned()
+                    } else {
+                        format!("&dsp->{var}")
+                    };
+                    let _ = writeln!(
+                        out,
+                        "{tab}m->declare(m->metaInterface, {zone}, {}, {});",
+                        c_string_literal(&key),
+                        c_string_literal(&value)
+                    );
+                }
+            }
             Ok(())
         }
         FirMatch::NullStatement => {
@@ -1421,5 +1447,91 @@ mod tests {
             err.to_string()
                 .contains("invalid FIR signature for metadata")
         );
+    }
+
+    #[test]
+    fn emits_ui_and_metadata_nodes_in_distinct_callbacks() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let group_meta = b.add_meta_declare("0", "tooltip", "hello");
+        let open = b.open_box(fir::UiBoxType::Vertical, "group");
+        let slider_meta = b.add_meta_declare("fGain", "unit", "dB");
+        let slider = b.add_slider(
+            fir::SliderType::Horizontal,
+            "gain",
+            "fGain",
+            fir::SliderRange {
+                init: 0.5,
+                lo: 0.0,
+                hi: 1.0,
+                step: 0.01,
+            },
+        );
+        let close = b.close_box();
+        let ui_body = b.block(&[group_meta, open, slider_meta, slider, close]);
+        let build_ui_ty = FirType::Fun {
+            args: vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::UI],
+            ret: Box::new(FirType::Void),
+        };
+        let build_ui_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "ui_interface".to_string(),
+                typ: FirType::UI,
+            },
+        ];
+        let ui = b.declare_fun(
+            "buildUserInterface",
+            build_ui_ty,
+            &build_ui_args,
+            Some(ui_body),
+            false,
+        );
+        let module_meta = b.add_meta_declare("0", "author", "faust-rs");
+        let metadata_body = b.block(&[module_meta]);
+        let metadata_ty = FirType::Fun {
+            args: vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::Meta],
+            ret: Box::new(FirType::Void),
+        };
+        let metadata_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "meta".to_string(),
+                typ: FirType::Meta,
+            },
+        ];
+        let metadata = b.declare_fun(
+            "metadata",
+            metadata_ty,
+            &metadata_args,
+            Some(metadata_body),
+            false,
+        );
+        let dsp_struct = b.block(&[]);
+        let globals = b.block(&[]);
+        let functions = b.block(&[ui, metadata]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
+
+        let out = generate_c_module(&store, module, &COptions::default())
+            .expect("C UI nodes emit in the correct callback family");
+
+        assert!(out.contains("void buildUserInterfacemydsp(mydsp* dsp, UIGlue* ui_interface)"));
+        assert!(out.contains(
+            "ui_interface->declare(ui_interface->uiInterface, 0, \"tooltip\", \"hello\");"
+        ));
+        assert!(out.contains(
+            "ui_interface->declare(ui_interface->uiInterface, &dsp->fGain, \"unit\", \"dB\");"
+        ));
+        assert!(out.contains(
+            "ui_interface->addHorizontalSlider(ui_interface->uiInterface, \"gain\", &dsp->fGain, (FAUSTFLOAT)0.5, (FAUSTFLOAT)0.0, (FAUSTFLOAT)1.0, (FAUSTFLOAT)0.01);"
+        ));
+        assert!(out.contains("void metadatamydsp(MetaGlue* m)"));
+        assert!(out.contains("m->declare(m->metaInterface, 0, \"author\", \"faust-rs\");"));
     }
 }

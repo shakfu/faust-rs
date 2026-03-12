@@ -3,7 +3,7 @@
 use tlib::TreeArena;
 use ui::{
     ControlKind, ControlRange, ControlSpec, UiBuilder, UiGroupKind, UiMatch, UiProgram,
-    UiRootOrigin, match_ui,
+    UiRootOrigin, match_ui, split_label_metadata,
 };
 
 #[test]
@@ -26,6 +26,7 @@ fn builder_and_match_cover_grouped_ui_shapes() {
         UiMatch::Group {
             kind: UiGroupKind::Vertical,
             label: "root",
+            metadata: vec![],
             children: vec![input, output, soundfile],
         }
     );
@@ -34,6 +35,7 @@ fn builder_and_match_cover_grouped_ui_shapes() {
         UiMatch::Group {
             kind: UiGroupKind::Horizontal,
             label: "row",
+            metadata: vec![],
             children: vec![input],
         }
     );
@@ -42,6 +44,7 @@ fn builder_and_match_cover_grouped_ui_shapes() {
         UiMatch::Group {
             kind: UiGroupKind::Tab,
             label: "tabs",
+            metadata: vec![],
             children: vec![output],
         }
     );
@@ -61,6 +64,36 @@ fn group_children_preserve_source_order() {
         panic!("group expected");
     };
     assert_eq!(children, vec![c0, c1, c2]);
+}
+
+#[test]
+fn group_metadata_round_trips_through_builder_and_matcher() {
+    let mut arena = TreeArena::new();
+    let mut b = UiBuilder::new(&mut arena);
+
+    let control = b.input_control(1);
+    let root = b.group_with_metadata(
+        UiGroupKind::Horizontal,
+        "top",
+        &[
+            ("style".to_owned(), "tabbed".to_owned()),
+            ("tooltip".to_owned(), "hello".to_owned()),
+        ],
+        &[control],
+    );
+
+    assert_eq!(
+        match_ui(&arena, root),
+        UiMatch::Group {
+            kind: UiGroupKind::Horizontal,
+            label: "top",
+            metadata: vec![
+                ("style".to_owned(), "tabbed".to_owned()),
+                ("tooltip".to_owned(), "hello".to_owned()),
+            ],
+            children: vec![control],
+        }
+    );
 }
 
 #[test]
@@ -98,6 +131,7 @@ fn ui_program_keeps_root_and_control_registry() {
         UiMatch::Group {
             kind: UiGroupKind::Horizontal,
             label: "top",
+            metadata: vec![],
             children: vec![checkbox],
         }
     );
@@ -119,6 +153,7 @@ fn ui_program_empty_is_non_emitting_placeholder_with_empty_vertical_root() {
         UiMatch::Group {
             kind: UiGroupKind::Vertical,
             label: "",
+            metadata: vec![],
             children: vec![],
         }
     );
@@ -159,8 +194,8 @@ fn control_lookup_uses_stable_ids_across_input_output_and_soundfile_controls() {
             ControlSpec {
                 id: 2,
                 kind: ControlKind::Soundfile,
-                label: "sample[url:{'tests/assets/silence.wav'}]".to_owned(),
-                metadata: Vec::new(),
+                label: "sample".to_owned(),
+                metadata: vec![("url".to_owned(), "{'tests/assets/silence.wav'}".to_owned())],
                 range: None,
             },
         ],
@@ -181,4 +216,27 @@ fn control_lookup_uses_stable_ids_across_input_output_and_soundfile_controls() {
         Some(ControlKind::Soundfile)
     );
     assert!(program.control(3).is_none());
+}
+
+#[test]
+fn split_label_metadata_matches_cpp_style_widget_metadata_extraction() {
+    let (label, metadata) = split_label_metadata("gain [style:knob]");
+
+    assert_eq!(label, "gain");
+    assert_eq!(metadata, vec![("style".to_owned(), "knob".to_owned())]);
+}
+
+#[test]
+fn split_label_metadata_handles_nested_brackets_and_escapes() {
+    let (label, metadata) =
+        split_label_metadata(r#"tab \[main\] [tooltip: use [fast\:slow]] [unit: dB]"#);
+
+    assert_eq!(label, "tab [main]");
+    assert_eq!(
+        metadata,
+        vec![
+            ("tooltip".to_owned(), "use [fast:slow]".to_owned()),
+            ("unit".to_owned(), "dB".to_owned()),
+        ]
+    );
 }
