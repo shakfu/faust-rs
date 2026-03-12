@@ -952,6 +952,7 @@ fn eval_case_under_application_preserves_residual_case_and_no_match_still_errors
 fn eval_error_converts_to_structured_diagnostic_codes() {
     let arena = TreeArena::new();
     let missing = EvalError::MissingProcessDefinition {
+        entrypoint: "process".to_owned(),
         definitions: arena.nil(),
         available_defs: vec!["foo".to_owned()],
     }
@@ -960,6 +961,17 @@ fn eval_error_converts_to_structured_diagnostic_codes() {
     assert_eq!(missing.stage, Stage::Eval);
     assert_eq!(missing.code, codes::EVAL_MISSING_PROCESS);
     assert!(!missing.help.is_empty());
+
+    let missing_custom = EvalError::MissingProcessDefinition {
+        entrypoint: "dsp".to_owned(),
+        definitions: arena.nil(),
+        available_defs: vec!["foo".to_owned()],
+    }
+    .into_diagnostic();
+    assert!(
+        missing_custom.message.contains("missing `dsp` definition"),
+        "custom entrypoint message should mention the requested name"
+    );
 
     let undef = EvalError::UndefinedSymbol {
         symbol: "foo".to_owned(),

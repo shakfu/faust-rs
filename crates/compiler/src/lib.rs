@@ -104,6 +104,7 @@ pub struct FirVerifyOptions {
 /// `parse -> eval -> propagate -> (optional signal->FIR lowering) -> codegen`.
 pub struct Compiler {
     fir_verify: FirVerifyOptions,
+    entrypoint_name: Box<str>,
     /// Floating-point precision used for internal DSP computation in the
     /// transform fast lane. `Float32` (single precision) is the default;
     /// set to `Float64` to activate double-precision mode (`--double`).
@@ -134,6 +135,7 @@ impl Compiler {
     pub fn new() -> Self {
         Self {
             fir_verify: FirVerifyOptions::default(),
+            entrypoint_name: "process".into(),
             real_type: RealType::default(),
         }
     }
@@ -142,6 +144,14 @@ impl Compiler {
     #[must_use]
     pub fn with_fir_verify_options(mut self, fir_verify: FirVerifyOptions) -> Self {
         self.fir_verify = fir_verify;
+        self
+    }
+
+    /// Returns a compiler facade configured to use a custom top-level DSP
+    /// entry-point name instead of the default `process`.
+    #[must_use]
+    pub fn with_process_name(mut self, entrypoint_name: impl Into<Box<str>>) -> Self {
+        self.entrypoint_name = entrypoint_name.into();
         self
     }
 
@@ -631,12 +641,15 @@ impl Compiler {
         })?;
 
         let process_result = match &eval_source_context {
-            Some(source_context) => eval::eval_process_with_source_context(
+            Some(source_context) => eval::eval_entrypoint_with_source_context(
                 &mut output.state.arena,
                 root,
+                self.entrypoint_name.as_ref(),
                 source_context.clone(),
             ),
-            None => eval::eval_process(&mut output.state.arena, root),
+            None => {
+                eval::eval_entrypoint(&mut output.state.arena, root, self.entrypoint_name.as_ref())
+            }
         };
         let process_box = process_result.map_err(|error| {
             let node = eval_error_node(&error);
@@ -650,6 +663,7 @@ impl Compiler {
                     root,
                     n,
                     owner.as_deref(),
+                    self.entrypoint_name.as_ref(),
                 );
                 diagnostic = maybe_add_eval_source_labels(
                     diagnostic,
@@ -658,6 +672,7 @@ impl Compiler {
                     root,
                     n,
                     owner.as_deref(),
+                    self.entrypoint_name.as_ref(),
                 );
             }
             CompilerError::Eval {
@@ -681,6 +696,7 @@ impl Compiler {
                         root,
                         n,
                         owner.as_deref(),
+                        self.entrypoint_name.as_ref(),
                     );
                     diagnostic = maybe_add_source_label(
                         diagnostic,
@@ -689,6 +705,7 @@ impl Compiler {
                         root,
                         n,
                         owner.as_deref(),
+                        self.entrypoint_name.as_ref(),
                     );
                 }
                 CompilerError::Propagate {
@@ -713,6 +730,7 @@ impl Compiler {
                             root,
                             n,
                             owner.as_deref(),
+                            self.entrypoint_name.as_ref(),
                         );
                         diagnostic =
                             add_paired_propagate_context(diagnostic, &error, &output.state.arena);
@@ -723,6 +741,7 @@ impl Compiler {
                             root,
                             n,
                             owner.as_deref(),
+                            self.entrypoint_name.as_ref(),
                         );
                     }
                     CompilerError::Propagate {
@@ -751,6 +770,7 @@ impl Compiler {
                     root,
                     n,
                     owner.as_deref(),
+                    self.entrypoint_name.as_ref(),
                 );
                 diagnostic = add_paired_propagate_context(diagnostic, &error, &output.state.arena);
                 diagnostic = maybe_add_source_label(
@@ -760,6 +780,7 @@ impl Compiler {
                     root,
                     n,
                     owner.as_deref(),
+                    self.entrypoint_name.as_ref(),
                 );
             }
             CompilerError::Propagate {
@@ -1111,6 +1132,7 @@ fn enrich_diagnostic_with_node(
     root: BoxId,
     node: BoxId,
     owner: Option<&str>,
+    entrypoint_name: &str,
 ) -> Diagnostic {
     diagnostic = diagnostic
         .with_note(format!("node_id={}", node.as_u32()))
@@ -1119,7 +1141,7 @@ fn enrich_diagnostic_with_node(
     if let Some(owner) = owner {
         diagnostic = diagnostic.with_note(format!("error originates from definition '{owner}'"));
     }
-    if let Some(trace) = alias_binding_trace_for_node(arena, root, node) {
+    if let Some(trace) = alias_binding_trace_for_node(arena, root, node, entrypoint_name) {
         diagnostic = diagnostic.with_note(format!("binding_trace={trace}"));
     }
     diagnostic
@@ -2063,11 +2085,15 @@ fn maybe_add_source_label(
     defs_root: BoxId,
     node: BoxId,
     owner_definition: Option<&str>,
+    entrypoint_name: &str,
 ) -> Diagnostic {
     if let Some(owner) = owner_definition {
         let owner_span = source_span_for_definition_name(ctx, arena, defs_root, owner);
-        let call_span = source_span_for_process_binding_target(ctx, arena, defs_root)
-            .or_else(|| source_span_for_process_definition(ctx, arena, defs_root));
+        let call_span =
+            source_span_for_entrypoint_binding_target(ctx, arena, defs_root, entrypoint_name)
+                .or_else(|| {
+                    source_span_for_entrypoint_definition(ctx, arena, defs_root, entrypoint_name)
+                });
         if let Some(primary_span) = owner_span {
             diagnostic = diagnostic.with_label(Label::new(
                 LabelStyle::Primary,
@@ -2091,8 +2117,10 @@ fn maybe_add_source_label(
 
     let span = source_span_from_node_or_descendant(ctx, arena, node)
         .or_else(|| source_span_for_definition_of_expr(ctx, arena, defs_root, node))
-        .or_else(|| source_span_for_process_binding_target(ctx, arena, defs_root))
-        .or_else(|| source_span_for_process_definition(ctx, arena, defs_root));
+        .or_else(|| {
+            source_span_for_entrypoint_binding_target(ctx, arena, defs_root, entrypoint_name)
+        })
+        .or_else(|| source_span_for_entrypoint_definition(ctx, arena, defs_root, entrypoint_name));
     if let Some(span) = span {
         diagnostic = diagnostic.with_label(Label::new(LabelStyle::Primary, span, "related source"));
     }
@@ -2116,10 +2144,12 @@ fn maybe_add_eval_source_labels(
     defs_root: BoxId,
     node: BoxId,
     owner_definition: Option<&str>,
+    entrypoint_name: &str,
 ) -> Diagnostic {
     if let Some(owner) = owner_definition {
         let origin_span = source_span_for_definition_name(ctx, arena, defs_root, owner);
-        let call_span = source_span_for_process_definition(ctx, arena, defs_root);
+        let call_span =
+            source_span_for_entrypoint_definition(ctx, arena, defs_root, entrypoint_name);
         if let Some(primary_span) = origin_span {
             diagnostic = diagnostic.with_label(Label::new(
                 LabelStyle::Primary,
@@ -2143,8 +2173,10 @@ fn maybe_add_eval_source_labels(
 
     let primary = source_span_from_node_or_descendant(ctx, arena, node)
         .or_else(|| source_span_for_definition_of_expr(ctx, arena, defs_root, node))
-        .or_else(|| source_span_for_process_binding_target(ctx, arena, defs_root))
-        .or_else(|| source_span_for_process_definition(ctx, arena, defs_root));
+        .or_else(|| {
+            source_span_for_entrypoint_binding_target(ctx, arena, defs_root, entrypoint_name)
+        })
+        .or_else(|| source_span_for_entrypoint_definition(ctx, arena, defs_root, entrypoint_name));
     let Some(primary_span) = primary else {
         return diagnostic;
     };
@@ -2154,7 +2186,7 @@ fn maybe_add_eval_source_labels(
         "call site",
     ));
     let secondary = source_span_for_definition_of_expr(ctx, arena, defs_root, node)
-        .or_else(|| source_span_for_process_definition(ctx, arena, defs_root));
+        .or_else(|| source_span_for_entrypoint_definition(ctx, arena, defs_root, entrypoint_name));
     if let Some(secondary_span) = secondary
         && secondary_span != primary_span
     {
@@ -2227,14 +2259,15 @@ fn source_span_for_definition_node(ctx: &parser::ParserCtx, node: BoxId) -> Opti
     ))
 }
 
-/// Fallback source span for the `process` definition identifier.
+/// Fallback source span for the configured entry-point definition identifier.
 ///
 /// Used when the offending propagated/evaluated node cannot be mapped to a more
 /// specific source location.
-fn source_span_for_process_definition(
+fn source_span_for_entrypoint_definition(
     ctx: &parser::ParserCtx,
     arena: &tlib::TreeArena,
     defs_root: BoxId,
+    entrypoint_name: &str,
 ) -> Option<SourceSpan> {
     let mut defs = defs_root;
     let mut visited = 0usize;
@@ -2245,7 +2278,9 @@ fn source_span_for_process_definition(
         }
         let def = arena.hd(defs)?;
         let name = arena.hd(def)?;
-        if let BoxMatch::Ident("process") = match_box(arena, name) {
+        if let BoxMatch::Ident(name_str) = match_box(arena, name)
+            && name_str == entrypoint_name
+        {
             return source_span_for_node(ctx, name);
         }
         defs = arena.tl(defs)?;
@@ -2253,17 +2288,20 @@ fn source_span_for_process_definition(
     None
 }
 
-/// Fallback source span for direct process aliases (`process = <ident>;`).
+/// Fallback source span for direct entry-point aliases (`entry = <ident>;`).
 ///
-/// When `process` is a direct identifier alias, this resolves the target definition
-/// location (for example `foo = ...; process = foo;` -> label on `foo = ...`).
-fn source_span_for_process_binding_target(
+/// When the configured entry-point is a direct identifier alias, this resolves
+/// the target definition location (for example `foo = ...; synth = foo;` ->
+/// label on `foo = ...`).
+fn source_span_for_entrypoint_binding_target(
     ctx: &parser::ParserCtx,
     arena: &tlib::TreeArena,
     defs_root: BoxId,
+    entrypoint_name: &str,
 ) -> Option<SourceSpan> {
-    let (_process_name, process_expr) = find_definition_name_and_expr(arena, defs_root, "process")?;
-    let BoxMatch::Ident(target_name) = match_box(arena, process_expr) else {
+    let (_entry_name, entry_expr) =
+        find_definition_name_and_expr(arena, defs_root, entrypoint_name)?;
+    let BoxMatch::Ident(target_name) = match_box(arena, entry_expr) else {
         return None;
     };
     let (target_def_name, _target_expr) =
@@ -2479,7 +2517,7 @@ fn collect_definition_refs(
     refs
 }
 
-/// Finds one alias/binding trace from `process` to the owner of `node`.
+/// Finds one alias/binding trace from the configured entry-point to the owner of `node`.
 ///
 /// The trace is expression-reference based (not only direct aliases), allowing contextual chains
 /// such as `process = bar,bar; bar = foo; foo = ...` -> `process -> bar -> foo`.
@@ -2487,21 +2525,22 @@ fn alias_binding_trace_for_node(
     arena: &tlib::TreeArena,
     defs_root: BoxId,
     node: BoxId,
+    entrypoint_name: &str,
 ) -> Option<String> {
     let owner = owner_definition_name_for_node(arena, defs_root, node)?;
-    if owner.as_ref() == "process" {
-        return Some("process".to_owned());
+    if owner.as_ref() == entrypoint_name {
+        return Some(entrypoint_name.to_owned());
     }
 
     let edges = definition_reference_edges(arena, defs_root);
-    if !edges.contains_key("process") {
+    if !edges.contains_key(entrypoint_name) {
         return None;
     }
 
     let mut queue: VecDeque<Vec<Box<str>>> = VecDeque::new();
     let mut seen: HashSet<Box<str>> = HashSet::new();
-    queue.push_back(vec!["process".into()]);
-    seen.insert("process".into());
+    queue.push_back(vec![entrypoint_name.into()]);
+    seen.insert(entrypoint_name.into());
 
     while let Some(path) = queue.pop_front() {
         let Some(last) = path.last() else {
@@ -2767,6 +2806,16 @@ mod tests {
             }
             other => panic!("expected CompilerError::Parse, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn compiler_compile_source_to_signals_accepts_custom_entrypoint_name() {
+        let compiler = Compiler::new().with_process_name("dsp");
+        let out = compiler
+            .compile_source_to_signals("custom_entry.dsp", "dsp = _;")
+            .expect("custom entrypoint should evaluate and propagate");
+        assert_eq!(out.process_arity.inputs, 1);
+        assert_eq!(out.process_arity.outputs, 1);
     }
 
     #[test]

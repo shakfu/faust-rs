@@ -160,6 +160,12 @@ struct CliArgs {
     /// Extra import search directories.
     #[arg(short = 'I', long = "import-dir")]
     import_dir: Vec<PathBuf>,
+    /// Specify the top-level DSP entry-point name instead of `process`.
+    ///
+    /// Faust C++ compatibility note: the legacy `-pn <name>` form is accepted
+    /// and normalized to this option.
+    #[arg(long = "process-name", default_value = "process")]
+    process_name: String,
     /// Wrapper architecture file (`-a` compatibility).
     #[arg(short = 'a', long = "architecture")]
     architecture: Option<PathBuf>,
@@ -216,6 +222,13 @@ fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> 
                     _ => value,
                 };
                 normalized.push(mapped);
+            }
+            continue;
+        }
+        if arg == "-pn" {
+            normalized.push("--process-name".to_owned());
+            if let Some(value) = it.next() {
+                normalized.push(value);
             }
             continue;
         }
@@ -716,6 +729,7 @@ fn selected_real_type(cli: &CliArgs) -> RealType {
 fn compiler_from_cli(cli: &CliArgs) -> Compiler {
     Compiler::new()
         .with_fir_verify_options(selected_fir_verify_options(cli))
+        .with_process_name(cli.process_name.clone())
         .with_real_type(selected_real_type(cli))
 }
 
@@ -1160,6 +1174,7 @@ fn main() {
                 enabled: false,
                 strict: false,
             })
+            .with_process_name(cli.process_name.clone())
             .with_real_type(selected_real_type(&cli));
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_fir_with_lane(
@@ -1442,6 +1457,26 @@ mod tests {
     }
 
     #[test]
+    fn normalize_legacy_args_maps_dash_pn_to_process_name() {
+        let args = vec![
+            "faust-rs".to_owned(),
+            "-pn".to_owned(),
+            "dsp".to_owned(),
+            "foo.dsp".to_owned(),
+        ];
+        let normalized = normalize_legacy_args(args);
+        assert_eq!(
+            normalized,
+            vec![
+                "faust-rs".to_owned(),
+                "--process-name".to_owned(),
+                "dsp".to_owned(),
+                "foo.dsp".to_owned()
+            ]
+        );
+    }
+
+    #[test]
     fn cli_parse_accepts_lang_fir() {
         let cli = CliArgs::parse_from(["faust-rs", "--lang", "fir", "foo.dsp"]);
         assert!(matches!(cli.lang, Some(CliLang::Fir)));
@@ -1457,6 +1492,12 @@ mod tests {
     fn cli_parse_accepts_dump_cranelift() {
         let cli = CliArgs::parse_from(["faust-rs", "--dump-cranelift", "foo.dsp"]);
         assert!(cli.dump_cranelift);
+    }
+
+    #[test]
+    fn cli_parse_accepts_process_name() {
+        let cli = CliArgs::parse_from(["faust-rs", "--process-name", "dsp", "foo.dsp"]);
+        assert_eq!(cli.process_name, "dsp");
     }
 
     #[test]

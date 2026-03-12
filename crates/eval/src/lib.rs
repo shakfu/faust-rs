@@ -1128,6 +1128,8 @@ pub struct EvalStats {
 /// Typed evaluator failure surface.
 pub enum EvalError {
     MissingProcessDefinition {
+        /// Requested top-level DSP entry-point name.
+        entrypoint: String,
         /// Parser root definitions list used for fallback source-label resolution.
         definitions: TreeId,
         /// Deterministic list of top-level definition names available in this program.
@@ -1258,7 +1260,9 @@ pub enum EvalError {
 impl Display for EvalError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingProcessDefinition { .. } => write!(f, "missing `process` definition"),
+            Self::MissingProcessDefinition { entrypoint, .. } => {
+                write!(f, "missing `{entrypoint}` definition")
+            }
             Self::UndefinedSymbol { symbol, .. } => write!(f, "undefined symbol `{symbol}`"),
             Self::MalformedDefinitionNode { node } => {
                 write!(f, "malformed definition node {}", node.as_u32())
@@ -1369,14 +1373,22 @@ impl IntoDiagnostic for EvalError {
     fn into_diagnostic(self) -> Diagnostic {
         let message = self.to_string();
         match self {
-            Self::MissingProcessDefinition { available_defs, .. } => Diagnostic::new(
+            Self::MissingProcessDefinition {
+                entrypoint,
+                available_defs,
+                ..
+            } => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,
                 codes::EVAL_MISSING_PROCESS,
                 message,
             )
-            .with_note("cause: required top-level `process` definition is missing")
-            .with_note("entrypoint contract: one top-level `process = ...;` definition is required")
+            .with_note(format!(
+                "cause: required top-level `{entrypoint}` definition is missing"
+            ))
+            .with_note(format!(
+                "entrypoint contract: one top-level `{entrypoint} = ...;` definition is required"
+            ))
             .with_note(format!(
                 "available top-level definitions: {}",
                 if available_defs.is_empty() {
@@ -1385,8 +1397,10 @@ impl IntoDiagnostic for EvalError {
                     available_defs.join(", ")
                 }
             ))
-            .with_help("define `process = ...;` in the top-level definitions")
-            .with_help("template: process = _;"),
+            .with_help(format!(
+                "define `{entrypoint} = ...;` in the top-level definitions"
+            ))
+            .with_help(format!("template: {entrypoint} = _;")),
             Self::UndefinedSymbol {
                 symbol,
                 local_scope,
@@ -1681,6 +1695,16 @@ pub fn eval_process(arena: &mut TreeArena, definitions: TreeId) -> Result<TreeId
     Ok(eval_process_with_stats(arena, definitions)?.0)
 }
 
+/// Evaluates one Faust program root list using a custom top-level DSP
+/// entry-point name instead of the default `process`.
+pub fn eval_entrypoint(
+    arena: &mut TreeArena,
+    definitions: TreeId,
+    entrypoint: &str,
+) -> Result<TreeId, EvalError> {
+    Ok(eval_entrypoint_with_stats(arena, definitions, entrypoint)?.0)
+}
+
 /// Evaluates one Faust program root list using an explicit file-resolution context.
 ///
 /// This is the file-backed counterpart of [`eval_process`]. It keeps the legacy
@@ -1696,6 +1720,22 @@ pub fn eval_process_with_source_context(
     source_context: EvalSourceContext,
 ) -> Result<TreeId, EvalError> {
     Ok(eval_process_with_stats_and_source_context(arena, definitions, source_context)?.0)
+}
+
+/// File-backed counterpart of [`eval_entrypoint`].
+pub fn eval_entrypoint_with_source_context(
+    arena: &mut TreeArena,
+    definitions: TreeId,
+    entrypoint: &str,
+    source_context: EvalSourceContext,
+) -> Result<TreeId, EvalError> {
+    Ok(eval_entrypoint_with_stats_and_source_context(
+        arena,
+        definitions,
+        entrypoint,
+        source_context,
+    )?
+    .0)
 }
 
 /// Evaluates one Faust program root list and returns the resolved `process` expression together
@@ -1716,7 +1756,21 @@ pub fn eval_process_with_stats(
     arena: &mut TreeArena,
     definitions: TreeId,
 ) -> Result<(TreeId, EvalStats), EvalError> {
-    eval_process_with_stats_and_source_context(arena, definitions, EvalSourceContext::memory())
+    eval_entrypoint_with_stats(arena, definitions, "process")
+}
+
+/// Instrumented variant of [`eval_entrypoint`].
+pub fn eval_entrypoint_with_stats(
+    arena: &mut TreeArena,
+    definitions: TreeId,
+    entrypoint: &str,
+) -> Result<(TreeId, EvalStats), EvalError> {
+    eval_entrypoint_with_stats_and_source_context(
+        arena,
+        definitions,
+        entrypoint,
+        EvalSourceContext::memory(),
+    )
 }
 
 /// Instrumented variant of [`eval_process_with_source_context`].
@@ -1732,23 +1786,35 @@ pub fn eval_process_with_stats_and_source_context(
     definitions: TreeId,
     source_context: EvalSourceContext,
 ) -> Result<(TreeId, EvalStats), EvalError> {
+    eval_entrypoint_with_stats_and_source_context(arena, definitions, "process", source_context)
+}
+
+/// Instrumented variant of [`eval_entrypoint_with_source_context`].
+pub fn eval_entrypoint_with_stats_and_source_context(
+    arena: &mut TreeArena,
+    definitions: TreeId,
+    entrypoint: &str,
+    source_context: EvalSourceContext,
+) -> Result<(TreeId, EvalStats), EvalError> {
     let mut env = Environment::empty_with_source_context(source_context);
     let mut stats = EvalStats::default();
     bind_definitions(arena, definitions, &mut env)?;
     stats.env_layers_pushed += 1; // root scope
     let available_defs = top_level_definition_names(arena, definitions)?;
-    // Use get_symbol (no alloc, &self) — if "process" was never interned it was never bound.
+    // Use get_symbol (no alloc, &self) — if the requested entry-point name was
+    // never interned it was never bound.
     arena
-        .get_symbol("process")
+        .get_symbol(entrypoint)
         .filter(|sym| env.lookup_value(*sym).is_some())
         .ok_or(EvalError::MissingProcessDefinition {
+            entrypoint: entrypoint.to_owned(),
             definitions,
             available_defs,
         })?;
     stats.env_lookups += 1;
     let mut loop_detector = LoopDetector::new();
-    let process = BoxBuilder::new(arena).ident("process");
-    let result = eval_value(arena, process, &env, &mut loop_detector)?;
+    let entry = BoxBuilder::new(arena).ident(entrypoint);
+    let result = eval_value(arena, entry, &env, &mut loop_detector)?;
     let result = a2sb_value(arena, result, &mut loop_detector)?;
     stats.loop_detector_max_depth = loop_detector.call_stack.len();
     Ok((result, stats))
