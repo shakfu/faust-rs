@@ -8,6 +8,7 @@ members = [
   "crates/boxes",
   "crates/parser",
   "crates/signals",
+  "crates/ui",
   "crates/eval",
   "crates/propagate",
   "crates/normalize",
