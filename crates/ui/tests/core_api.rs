@@ -101,4 +101,84 @@ fn ui_program_keeps_root_and_control_registry() {
             children: vec![checkbox],
         }
     );
+    assert_eq!(
+        program.control(0).map(|control| control.label.as_str()),
+        Some("c")
+    );
+}
+
+#[test]
+fn ui_program_empty_is_non_emitting_placeholder_with_empty_vertical_root() {
+    let program = UiProgram::empty();
+
+    assert!(program.is_empty());
+    assert!(program.controls.is_empty());
+    assert_eq!(program.root_origin, UiRootOrigin::Synthesized);
+    assert_eq!(
+        match_ui(&program.arena, program.root),
+        UiMatch::Group {
+            kind: UiGroupKind::Vertical,
+            label: "",
+            children: vec![],
+        }
+    );
+}
+
+#[test]
+fn control_lookup_uses_stable_ids_across_input_output_and_soundfile_controls() {
+    let mut arena = TreeArena::new();
+    let mut b = UiBuilder::new(&mut arena);
+    let checkbox = b.input_control(0);
+    let meter = b.output_control(1);
+    let soundfile = b.soundfile(2);
+    let root = b.vgroup("root", &[checkbox, meter, soundfile]);
+
+    let program = UiProgram {
+        arena,
+        root,
+        controls: vec![
+            ControlSpec {
+                id: 0,
+                kind: ControlKind::Checkbox,
+                label: "gate".to_owned(),
+                metadata: Vec::new(),
+                range: None,
+            },
+            ControlSpec {
+                id: 1,
+                kind: ControlKind::HBargraph,
+                label: "level".to_owned(),
+                metadata: Vec::new(),
+                range: Some(ControlRange {
+                    init: 0.0,
+                    min: -60.0,
+                    max: 6.0,
+                    step: 0.0,
+                }),
+            },
+            ControlSpec {
+                id: 2,
+                kind: ControlKind::Soundfile,
+                label: "sample[url:{'tests/assets/silence.wav'}]".to_owned(),
+                metadata: Vec::new(),
+                range: None,
+            },
+        ],
+        root_origin: UiRootOrigin::Explicit,
+        emit_ui: true,
+    };
+
+    assert_eq!(
+        program.control(0).map(|control| control.kind),
+        Some(ControlKind::Checkbox)
+    );
+    assert_eq!(
+        program.control(1).map(|control| control.kind),
+        Some(ControlKind::HBargraph)
+    );
+    assert_eq!(
+        program.control(2).map(|control| control.kind),
+        Some(ControlKind::Soundfile)
+    );
+    assert!(program.control(3).is_none());
 }

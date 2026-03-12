@@ -380,6 +380,92 @@ fn propagate_with_ui_options_assigns_canonical_root_label() {
 }
 
 #[test]
+fn propagate_with_ui_keeps_deterministic_control_order_across_mixed_nested_controls() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let root_label = bb.ident("root");
+        let left_label = bb.ident("left");
+        let gate_label = bb.ident("gate");
+        let level_label = bb.ident("level");
+        let level_init = bb.real(0.0);
+        let level_min = bb.real(0.0);
+        let level_max = bb.real(1.0);
+        let level_step = bb.real(0.01);
+        let tabs_label = bb.ident("tabs");
+        let trigger_label = bb.ident("trigger");
+
+        let gate = bb.checkbox(gate_label);
+        let left = bb.hgroup(left_label, gate);
+        let level = bb.hslider(level_label, level_init, level_min, level_max, level_step);
+        let trigger = bb.button(trigger_label);
+        let tabs = bb.tgroup(tabs_label, trigger);
+        let row = bb.par(left, level);
+        let content = bb.par(row, tabs);
+        bb.vgroup(root_label, content)
+    };
+    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+        .expect("mixed grouped UI should propagate");
+
+    let root_children = expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Vertical, "root");
+    assert_eq!(root_children.len(), 3);
+    let left_children = expect_ui_group(&out.ui, root_children[0], UiGroupKind::Horizontal, "left");
+    assert_eq!(left_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, left_children[0]),
+        UiMatch::InputControl(0)
+    );
+    assert_eq!(
+        match_ui(&out.ui.arena, root_children[1]),
+        UiMatch::InputControl(1)
+    );
+    let tabs_children = expect_ui_group(&out.ui, root_children[2], UiGroupKind::Tab, "tabs");
+    assert_eq!(tabs_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, tabs_children[0]),
+        UiMatch::InputControl(2)
+    );
+
+    assert_eq!(out.ui.controls.len(), 3);
+    assert_eq!(out.ui.controls[0].kind, ControlKind::Checkbox);
+    assert_eq!(out.ui.controls[0].label, "gate");
+    assert_eq!(out.ui.controls[1].kind, ControlKind::HSlider);
+    assert_eq!(out.ui.controls[1].label, "level");
+    assert_eq!(out.ui.controls[2].kind, ControlKind::Button);
+    assert_eq!(out.ui.controls[2].label, "trigger");
+}
+
+#[test]
+fn propagate_with_ui_collects_soundfile_control_spec() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let root_label = bb.ident("files");
+        let sound_label = bb.ident("sample[url:{'tests/assets/silence.wav'}]");
+        let chan = bb.int(1);
+        let sound = bb.soundfile(sound_label, chan);
+        bb.vgroup(root_label, sound)
+    };
+    let inputs = make_sig_input_list(&mut arena, 2);
+
+    let out = propagate_with_ui(&mut arena, process, &inputs, &mut ArityCache::new())
+        .expect("soundfile grouped UI should propagate");
+
+    let root_children = expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Vertical, "files");
+    assert_eq!(root_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, root_children[0]),
+        UiMatch::Soundfile(0)
+    );
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].kind, ControlKind::Soundfile);
+    assert_eq!(
+        out.ui.controls[0].label,
+        "sample[url:{'tests/assets/silence.wav'}]"
+    );
+}
+
+#[test]
 fn soundfile_box_lowers_to_length_rate_and_channel_buffers() {
     let mut arena = TreeArena::new();
     let soundfile = {
