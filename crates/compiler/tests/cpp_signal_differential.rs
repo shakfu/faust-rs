@@ -406,6 +406,13 @@ fn differential_ui_root_labels_against_cpp_reference() {
             input: CaseInput::Inline("process = vgroup(\"\", checkbox(\"c\"));\n"),
             expect_valid: true,
         },
+        Case {
+            name: "declared_empty_root_group.dsp",
+            input: CaseInput::Inline(
+                "declare name \"main\";\nprocess = vgroup(\"\", checkbox(\"c\"));\n",
+            ),
+            expect_valid: true,
+        },
     ];
 
     let mut mismatches = Vec::new();
@@ -455,8 +462,33 @@ fn differential_ui_event_order_against_cpp_reference() {
             expect_valid: true,
         },
         Case {
+            name: "rep_09_ui_slider",
+            input: CaseInput::CorpusFile("rep_09_ui_slider.dsp"),
+            expect_valid: true,
+        },
+        Case {
             name: "rep_28_nested_ui_groups",
             input: CaseInput::CorpusFile("rep_28_nested_ui_groups.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_39_bargraph",
+            input: CaseInput::CorpusFile("rep_39_bargraph.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_51_eval_label_widget_subst",
+            input: CaseInput::CorpusFile("rep_51_eval_label_widget_subst.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_52_eval_label_group_path_subst",
+            input: CaseInput::CorpusFile("rep_52_eval_label_group_path_subst.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_53_eval_label_modulation_target_subst",
+            input: CaseInput::CorpusFile("rep_53_eval_label_modulation_target_subst.dsp"),
             expect_valid: true,
         },
         Case {
@@ -467,6 +499,18 @@ fn differential_ui_event_order_against_cpp_reference() {
         Case {
             name: "rep_59_higher_order_named_argument_apply",
             input: CaseInput::CorpusFile("rep_59_higher_order_named_argument_apply.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "empty_root_group.dsp",
+            input: CaseInput::Inline("process = vgroup(\"\", checkbox(\"c\"));\n"),
+            expect_valid: true,
+        },
+        Case {
+            name: "declared_empty_root_group.dsp",
+            input: CaseInput::Inline(
+                "declare name \"main\";\nprocess = vgroup(\"\", checkbox(\"c\"));\n",
+            ),
             expect_valid: true,
         },
     ];
