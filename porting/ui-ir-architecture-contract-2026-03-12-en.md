@@ -125,6 +125,10 @@ Important C++ observations:
 - `signalFIRCompiler.hh` consumes widget signals together with path context,
 - `instructions_compiler.cpp` / `compile.cpp` emit explicit open/close box
   instructions,
+- `description.cpp` / `compile.cpp` split widget labels into:
+  - simplified display label,
+  - extracted UI metadata such as `style:knob`,
+  - explicit `declare(...)` UI statements attached to the target zone,
 - at root level, empty labels are resolved with C++ root naming rules, not by a
   generic module-name fallback.
 
@@ -396,6 +400,15 @@ UI IR stores:
 - extracted metadata declarations,
 - no raw unevaluated label template.
 
+Concrete parity rule for labels carrying UI metadata:
+
+- source label: `gain [style:knob]`
+- canonical UI IR label: `gain`
+- canonical UI IR metadata: `("style", "knob")`
+
+The full raw label string is not the canonical display label after UI IR
+construction.
+
 ### 8.3 Forbidden downstream behavior
 
 Forbidden after UI IR construction:
@@ -403,6 +416,35 @@ Forbidden after UI IR construction:
 - reparsing `%...` substitutions,
 - reparsing `[key:value]`-style metadata from labels,
 - inferring group path from slash-split labels alone.
+
+### 8.4 Correction path for the current Rust parity gap
+
+The known Rust parity gap is:
+
+- `ControlSpec.label` still carries raw strings such as `gain [style:knob]`,
+- `ControlSpec.metadata` is left empty for UI-label metadata,
+- FIR/UI lowering therefore emits only `add*("gain [style:knob]", ...)`,
+- and no backend-visible `declare(..., "style", "knob")` is produced.
+
+The required correction is frozen as follows:
+
+1. add a Rust equivalent of the C++ `extractMetadata(...)` behavior during UI
+   IR construction in `propagate`
+2. store the simplified label in `ControlSpec.label`
+3. store extracted UI metadata key/value pairs in `ControlSpec.metadata`
+4. keep this information canonical in `UiProgram` rather than reparsing it
+   later
+5. lower `ControlSpec.metadata` to explicit FIR `AddMetaDeclare` instructions
+   attached to the same control zone/group
+6. emit backend `declare(...)` calls from FIR before or alongside the
+   corresponding `addButton` / `addSlider` / `addBargraph` / `addSoundfile`
+   instruction sequence
+
+End-state parity requirement for the example above:
+
+- C++/C backends emit `declare(..., "style", "knob")`
+- C++/C backends emit `addHorizontalSlider("gain", ...)`
+- they do not expose `gain [style:knob]` as the final display label
 
 ## 9. Transform and FIR contract
 
@@ -470,6 +512,7 @@ Minimum corpus cases:
 - `tests/corpus/rep_59_higher_order_named_argument_apply.dsp`
 - `tests/corpus/rep_17_ui_groups.dsp`
 - `tests/corpus/rep_28_nested_ui_groups.dsp`
+- `tests/corpus/rep_56_noise_smoo_slider.dsp`
 
 ## 12. Recommended implementation slices
 
