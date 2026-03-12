@@ -90,7 +90,7 @@ impl RealType {
     }
 }
 
-/// Options for [`compile_signals_to_fir_fastlane`].
+/// Options for [`compile_signals_to_fir_fastlane_with_ui`].
 ///
 /// These options currently describe only the externally visible module contract.
 /// Resource planning and lowering policies stay internal to the fast-lane until
@@ -144,7 +144,14 @@ pub struct SignalFirOutput {
     pub module: FirId,
 }
 
-/// Compiles propagated signals into a FIR module using the experimental fast-lane.
+/// Compiles propagated signals plus canonical grouped UI into a FIR module.
+///
+/// This is the grouped-UI-aware fast-lane entry point used by the compiler
+/// facade once `propagate` owns explicit `UiProgram` output.
+///
+/// Callers that intentionally compile UI-free signal forests must pass an
+/// explicit placeholder [`UiProgram`] such as [`UiProgram::empty()`] or a
+/// root-only synthetic program constructed by the owning integration layer.
 ///
 /// # Current behavior (Step 2A/2B/2C/2D/2E/2F/2G/2H)
 /// - validates options and top-level signal/arity contract,
@@ -156,28 +163,6 @@ pub struct SignalFirOutput {
 /// # Errors
 /// Returns [`SignalFirError`] when options are invalid or the top-level
 /// signal/arity contract is inconsistent.
-pub fn compile_signals_to_fir_fastlane(
-    _arena: &TreeArena,
-    signals: &[SigId],
-    num_inputs: usize,
-    num_outputs: usize,
-    options: &SignalFirOptions,
-) -> Result<SignalFirOutput, SignalFirError> {
-    let empty_ui = UiProgram::empty();
-    compile_signals_to_fir_fastlane_with_ui(
-        _arena,
-        signals,
-        num_inputs,
-        num_outputs,
-        &empty_ui,
-        options,
-    )
-}
-
-/// Compiles propagated signals plus canonical grouped UI into a FIR module.
-///
-/// This is the grouped-UI-aware fast-lane entry point used by the compiler
-/// facade once `propagate` owns explicit `UiProgram` output.
 pub fn compile_signals_to_fir_fastlane_with_ui(
     _arena: &TreeArena,
     signals: &[SigId],
@@ -207,8 +192,7 @@ pub fn compile_signals_to_fir_fastlane_with_ui(
 #[cfg(test)]
 mod tests {
     use super::{
-        RealType, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane,
-        compile_signals_to_fir_fastlane_with_ui,
+        RealType, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui,
     };
     use fir::{FirBinOp, FirMatch, FirType, match_fir};
     use signals::{BinOp, SigBuilder};
@@ -258,6 +242,24 @@ mod tests {
             panic!("declare fun with body expected for `{target}`");
         };
         body
+    }
+
+    fn compile_fastlane_without_ui(
+        arena: &TreeArena,
+        signals: &[signals::SigId],
+        num_inputs: usize,
+        num_outputs: usize,
+        options: &SignalFirOptions,
+    ) -> Result<super::SignalFirOutput, super::SignalFirError> {
+        let empty_ui = UiProgram::empty();
+        compile_signals_to_fir_fastlane_with_ui(
+            arena,
+            signals,
+            num_inputs,
+            num_outputs,
+            &empty_ui,
+            options,
+        )
     }
 
     fn find_compute_loop_body(store: &fir::FirStore, functions: fir::FirId) -> fir::FirId {
@@ -317,9 +319,8 @@ mod tests {
             let c0 = b.real(0.5);
             b.binop(BinOp::Mul, i0, c0)
         };
-        let out =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-                .expect("Step 1A should emit a module for valid top-level inputs");
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect("Step 1A should emit a module for valid top-level inputs");
 
         assert!(matches!(
             match_fir(&out.store, out.module),
@@ -379,7 +380,7 @@ mod tests {
             let mut b = SigBuilder::new(&mut arena);
             b.input(0)
         };
-        let err = compile_signals_to_fir_fastlane(
+        let err = compile_fastlane_without_ui(
             &arena,
             &[sig0],
             1,
@@ -473,9 +474,8 @@ mod tests {
             let ridx = b.input(0);
             b.read_only_table(size, init, ridx)
         };
-        let out =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-                .expect("table section routing should compile");
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect("table section routing should compile");
 
         let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
             panic!("module root expected");
@@ -570,9 +570,8 @@ mod tests {
             let i0 = b.input(0);
             b.upsampling(&[i0])
         };
-        let err =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-                .expect_err("upsampling is outside current lowering slice");
+        let err = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect_err("upsampling is outside current lowering slice");
 
         assert_eq!(err.code(), SignalFirErrorCode::UnsupportedSignalNode);
         assert_eq!(err.code().as_str(), "FRS-SFIR-0004");
@@ -585,9 +584,8 @@ mod tests {
             let mut b = SigBuilder::new(&mut arena);
             b.input(1)
         };
-        let err =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-                .expect_err("input(1) is invalid when num_inputs=1");
+        let err = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect_err("input(1) is invalid when num_inputs=1");
 
         assert_eq!(err.code(), SignalFirErrorCode::InputIndexOutOfRange);
         assert_eq!(err.code().as_str(), "FRS-SFIR-0006");
@@ -605,9 +603,8 @@ mod tests {
             let mx = b.max(c0, c1);
             b.pow(s0, mx)
         };
-        let out =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-                .expect("pow/min/max/unary should be supported in Step 2B.1");
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect("pow/min/max/unary should be supported in Step 2B.1");
 
         let FirMatch::Module {
             globals, functions, ..
@@ -676,7 +673,7 @@ mod tests {
             b.select2(c1, as_float, c0)
         };
 
-        compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+        compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
             .expect("Step 2B.2 should support delay/prefix/select/casts slice");
     }
 
@@ -692,9 +689,8 @@ mod tests {
             let idx = b.input(0);
             b.rdtbl(table, idx)
         };
-        let out =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-                .expect("Step 2G should support waveform+rdtbl table lowering");
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect("Step 2G should support waveform+rdtbl table lowering");
 
         let FirMatch::Module {
             dsp_struct,
@@ -742,9 +738,8 @@ mod tests {
             let ridx = b.input(0);
             b.read_only_table(size, init, ridx)
         };
-        let out =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-                .expect("Step 2H should support readonly wrtbl with constant generator");
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect("Step 2H should support readonly wrtbl with constant generator");
 
         let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
             panic!("module expected");
@@ -775,9 +770,8 @@ mod tests {
             let ridx = b.input(0);
             b.write_read_table(size, init, widx, wsig, ridx)
         };
-        let out =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 2, 1, &SignalFirOptions::default())
-                .expect("Step 2H should support wrtbl runtime write/read shape");
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 2, 1, &SignalFirOptions::default())
+            .expect("Step 2H should support wrtbl runtime write/read shape");
 
         let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
             panic!("module expected");
@@ -806,9 +800,8 @@ mod tests {
             b.proj(0, rec)
         };
 
-        let out =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-                .expect("Step 2C.2 should support rec/proj real lowering");
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect("Step 2C.2 should support rec/proj real lowering");
 
         let FirMatch::Module {
             dsp_struct,
@@ -871,7 +864,7 @@ mod tests {
 
         let prepared =
             prepare_signals_for_fir(&arena, &[sig0]).expect("feedback group should prepare");
-        let out = compile_signals_to_fir_fastlane(
+        let out = compile_fastlane_without_ui(
             &prepared.arena,
             &prepared.outputs,
             0,
@@ -942,9 +935,8 @@ mod tests {
             let i0 = b.input(0);
             b.delay1(i0)
         };
-        let out =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-                .expect("delay1 should lower with explicit state");
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect("delay1 should lower with explicit state");
 
         let FirMatch::Module {
             dsp_struct,
@@ -984,9 +976,8 @@ mod tests {
             let one = b.int(1);
             b.delay1(one)
         };
-        let out =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 0, 1, &SignalFirOptions::default())
-                .expect("integer delay1 should lower");
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 0, 1, &SignalFirOptions::default())
+            .expect("integer delay1 should lower");
 
         let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
             panic!("module expected");
@@ -1030,7 +1021,7 @@ mod tests {
             prepare_signals_for_fir(&arena, &[sig0]).expect("integer recursion should prepare");
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
 
-        let out = compile_signals_to_fir_fastlane(
+        let out = compile_fastlane_without_ui(
             &prepared.arena,
             &prepared.outputs,
             0,
@@ -1090,7 +1081,7 @@ mod tests {
             prepare_signals_for_fir(&arena, &[sig0]).expect("integer abs recursion should prepare");
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
 
-        let out = compile_signals_to_fir_fastlane(
+        let out = compile_fastlane_without_ui(
             &prepared.arena,
             &prepared.outputs,
             0,
@@ -1119,9 +1110,8 @@ mod tests {
             let n3 = b.int(3);
             b.delay(in0, n3)
         };
-        let out =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-                .expect("constant fixed delay should lower");
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect("constant fixed delay should lower");
 
         let FirMatch::Module {
             dsp_struct,
@@ -1277,9 +1267,8 @@ mod tests {
             let n0 = b.int(0);
             b.delay(in0, n0)
         };
-        let out =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-                .expect("zero delay should lower through fast path");
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect("zero delay should lower through fast path");
 
         let FirMatch::Module {
             dsp_struct,
@@ -1338,9 +1327,8 @@ mod tests {
             let amount = b.input(1);
             b.delay(in0, amount)
         };
-        let err =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 2, 1, &SignalFirOptions::default())
-                .expect_err("variable delay must stay unsupported");
+        let err = compile_fastlane_without_ui(&arena, &[sig0], 2, 1, &SignalFirOptions::default())
+            .expect_err("variable delay must stay unsupported");
         assert_eq!(err.code(), SignalFirErrorCode::UnsupportedSignalNode);
         assert!(
             err.to_string().contains("constant integer amount"),
@@ -1360,9 +1348,8 @@ mod tests {
             let idx = b.int(0);
             b.rdtbl(table, idx)
         };
-        let out =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 0, 1, &SignalFirOptions::default())
-                .expect("integer waveform should lower");
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 0, 1, &SignalFirOptions::default())
+            .expect("integer waveform should lower");
 
         let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
             panic!("module expected");
