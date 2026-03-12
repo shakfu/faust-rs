@@ -72,6 +72,7 @@ pub struct SourceReader {
     search_paths: Vec<PathBuf>,
     used_files: Vec<PathBuf>,
     visiting: HashSet<PathBuf>,
+    expanded_files: HashSet<PathBuf>,
 }
 
 impl SourceReader {
@@ -83,6 +84,7 @@ impl SourceReader {
             search_paths,
             used_files: Vec::new(),
             visiting: HashSet::new(),
+            expanded_files: HashSet::new(),
         }
     }
 
@@ -107,6 +109,7 @@ impl SourceReader {
     /// Reads one source file and recursively expands imports.
     pub fn read_file(&mut self, path: &Path) -> Result<String, SourceReaderError> {
         let canonical = canonicalize_path(path)?;
+        self.expanded_files.clear();
         self.read_file_impl(&canonical)
             .map(|expanded| expanded.text.into())
     }
@@ -117,6 +120,7 @@ impl SourceReader {
         path: &Path,
     ) -> Result<ExpandedSource, SourceReaderError> {
         let canonical = canonicalize_path(path)?;
+        self.expanded_files.clear();
         self.read_file_impl(&canonical)
     }
 
@@ -153,11 +157,13 @@ impl SourceReader {
                         from: path.to_path_buf(),
                     });
                 };
-                let imported = self.read_file_impl(&import_path)?;
-                expanded.push_str(&imported.text);
-                line_origins.extend(imported.line_origins);
-                if !expanded.ends_with('\n') {
-                    expanded.push('\n');
+                if !self.expanded_files.contains(&import_path) {
+                    let imported = self.read_file_impl(&import_path)?;
+                    expanded.push_str(&imported.text);
+                    line_origins.extend(imported.line_origins);
+                    if !expanded.ends_with('\n') {
+                        expanded.push('\n');
+                    }
                 }
             } else {
                 expanded.push_str(line);
@@ -175,6 +181,7 @@ impl SourceReader {
             text: expanded.into_boxed_str(),
             line_origins,
         };
+        self.expanded_files.insert(path.to_path_buf());
         self.file_cache.insert(path.to_path_buf(), expanded.clone());
         Ok(expanded)
     }
@@ -237,6 +244,7 @@ fn parse_import_line(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{SourceReader, parse_import_line};
+    use std::path::Path;
 
     /// Search paths (-I) must be checked before the local directory of the importing
     /// file, mirroring the C++ gImportDirList ordering where `-I` entries are inserted
@@ -285,5 +293,38 @@ mod tests {
             Some("foo/bar.lib")
         );
         assert!(parse_import_line(r#"process = _;"#).is_none());
+    }
+
+    #[test]
+    fn transitively_reimported_file_is_expanded_only_once() {
+        use std::env;
+
+        let tmp = env::temp_dir().join("faust_rs_source_reader_transitive_reimport");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let math = tmp.join("math.lib");
+        let music = tmp.join("music.lib");
+        let main = tmp.join("main.dsp");
+
+        std::fs::write(&math, "SR = 48000;\n").unwrap();
+        std::fs::write(&music, "import(\"math.lib\");\nmel = SR;\n").unwrap();
+        std::fs::write(
+            &main,
+            "import(\"math.lib\");\nimport(\"music.lib\");\nprocess = SR;\n",
+        )
+        .unwrap();
+
+        let mut reader = SourceReader::new(vec![tmp.clone()]);
+        let expanded = reader.read_file_with_origins(Path::new(&main)).unwrap();
+
+        assert_eq!(expanded.text.matches("SR = 48000;").count(), 1);
+        assert_eq!(
+            expanded.text,
+            "SR = 48000;\nmel = SR;\nprocess = SR;\n".into(),
+            "transitively re-imported files should be expanded only once, matching C++ visited-set behavior"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
