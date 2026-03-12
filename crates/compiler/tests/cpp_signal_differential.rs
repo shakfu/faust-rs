@@ -141,6 +141,48 @@ fn extract_root_ui_label(cpp: &str) -> Option<&str> {
     })
 }
 
+fn extract_first_label_arg(line: &str, method: &str) -> Option<String> {
+    let needle = format!("{method}(\"");
+    let start = line.find(&needle)?;
+    let rest = &line[start + needle.len()..];
+    let end = rest.find("\")")?;
+    Some(rest[..end].to_owned())
+}
+
+fn extract_ui_events(cpp: &str) -> Vec<String> {
+    const LABEL_METHODS: &[&str] = &[
+        "openVerticalBox",
+        "openHorizontalBox",
+        "openTabBox",
+        "addButton",
+        "addCheckButton",
+        "addVerticalSlider",
+        "addHorizontalSlider",
+        "addNumEntry",
+        "addVerticalBargraph",
+        "addHorizontalBargraph",
+        "addSoundfile",
+    ];
+
+    let mut events = Vec::new();
+    for line in cpp.lines().map(str::trim) {
+        if !line.contains("ui_interface->") {
+            continue;
+        }
+        if line.contains("ui_interface->closeBox();") {
+            events.push("closeBox".to_owned());
+            continue;
+        }
+        for method in LABEL_METHODS {
+            if let Some(label) = extract_first_label_arg(line, method) {
+                events.push(format!("{method}:{label}"));
+                break;
+            }
+        }
+    }
+    events
+}
+
 fn rust_cpp_for_case(compiler: &Compiler, case: &Case) -> Result<String, String> {
     match case.input {
         CaseInput::CorpusFile(file) => {
@@ -385,6 +427,69 @@ fn differential_ui_root_labels_against_cpp_reference() {
     assert!(
         mismatches.is_empty(),
         "UI root label mismatches:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+#[test]
+fn differential_ui_event_order_against_cpp_reference() {
+    let Some(cpp_bin) = cpp_bin() else {
+        eprintln!(
+            "Skipping UI event differential test: FAUST_CPP_BIN not set and /usr/local/bin/faust not found"
+        );
+        return;
+    };
+    if !cpp_bin.exists() {
+        eprintln!(
+            "Skipping UI event differential test: C++ binary not found at {}",
+            cpp_bin.display()
+        );
+        return;
+    }
+
+    let compiler = Compiler::new();
+    let cases = [
+        Case {
+            name: "rep_17_ui_groups",
+            input: CaseInput::CorpusFile("rep_17_ui_groups.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_28_nested_ui_groups",
+            input: CaseInput::CorpusFile("rep_28_nested_ui_groups.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_58_higher_order_named_direct_apply",
+            input: CaseInput::CorpusFile("rep_58_higher_order_named_direct_apply.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_59_higher_order_named_argument_apply",
+            input: CaseInput::CorpusFile("rep_59_higher_order_named_argument_apply.dsp"),
+            expect_valid: true,
+        },
+    ];
+
+    let mut mismatches = Vec::new();
+    for case in &cases {
+        let rust_cpp =
+            rust_cpp_for_case(&compiler, case).unwrap_or_else(|e| panic!("{}: {e}", case.name));
+        let cpp_cpp =
+            cpp_cpp_for_case(&cpp_bin, case).unwrap_or_else(|e| panic!("{}: {e}", case.name));
+        let rust_events = extract_ui_events(&rust_cpp);
+        let cpp_events = extract_ui_events(&cpp_cpp);
+        if rust_events != cpp_events {
+            mismatches.push(format!(
+                "{} UI events mismatch:\n  rust={rust_events:?}\n  cpp={cpp_events:?}",
+                case.name
+            ));
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "UI event mismatches:\n{}",
         mismatches.join("\n")
     );
 }
