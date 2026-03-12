@@ -13,7 +13,8 @@
 //! # Parity invariants
 //! - Signal nodes are represented as tagged trees with deterministic child order.
 //! - Numeric constants are direct `Int` / `FloatBits` nodes.
-//! - Slider parameter payload keeps Faust list encoding (`list4(init,min,max,step)`).
+//! - UI control signals carry stable [`ui::ControlId`] references only; grouped
+//!   labels/ranges/layout live in `crates/ui`.
 //! - `sigDoubleClocked(inside, outside, y)` keeps the C++ nested representation
 //!   `sigClocked(inside, sigClocked(outside, y))` instead of introducing a
 //!   separate Rust-only node family.
@@ -27,6 +28,7 @@
 use std::fmt::Write;
 
 use tlib::{NodeKind, TreeArena, TreeId};
+use ui::ControlId;
 
 pub const CRATE_NAME: &str = "signals";
 
@@ -641,68 +643,51 @@ impl<'a> SigBuilder<'a> {
 
     #[must_use]
     /// Builds one signal node for `button` and returns its `SigId`.
-    pub fn button(&mut self, label: SigId) -> SigId {
-        intern_tag(self.arena, SIG_BUTTON_TAG, &[label])
+    pub fn button(&mut self, control: ControlId) -> SigId {
+        let control = self.arena.int(i64::from(control));
+        intern_tag(self.arena, SIG_BUTTON_TAG, &[control])
     }
 
     #[must_use]
     /// Builds one signal node for `checkbox` and returns its `SigId`.
-    pub fn checkbox(&mut self, label: SigId) -> SigId {
-        intern_tag(self.arena, SIG_CHECKBOX_TAG, &[label])
+    pub fn checkbox(&mut self, control: ControlId) -> SigId {
+        let control = self.arena.int(i64::from(control));
+        intern_tag(self.arena, SIG_CHECKBOX_TAG, &[control])
     }
 
     #[must_use]
     /// Builds one signal node for `vslider` and returns its `SigId`.
-    pub fn vslider(
-        &mut self,
-        label: SigId,
-        init: SigId,
-        min: SigId,
-        max: SigId,
-        step: SigId,
-    ) -> SigId {
-        let params = list4(self.arena, init, min, max, step);
-        intern_tag(self.arena, SIG_VSLIDER_TAG, &[label, params])
+    pub fn vslider(&mut self, control: ControlId) -> SigId {
+        let control = self.arena.int(i64::from(control));
+        intern_tag(self.arena, SIG_VSLIDER_TAG, &[control])
     }
 
     #[must_use]
     /// Builds one signal node for `hslider` and returns its `SigId`.
-    pub fn hslider(
-        &mut self,
-        label: SigId,
-        init: SigId,
-        min: SigId,
-        max: SigId,
-        step: SigId,
-    ) -> SigId {
-        let params = list4(self.arena, init, min, max, step);
-        intern_tag(self.arena, SIG_HSLIDER_TAG, &[label, params])
+    pub fn hslider(&mut self, control: ControlId) -> SigId {
+        let control = self.arena.int(i64::from(control));
+        intern_tag(self.arena, SIG_HSLIDER_TAG, &[control])
     }
 
     #[must_use]
     /// Builds one signal node for `numentry` and returns its `SigId`.
-    pub fn numentry(
-        &mut self,
-        label: SigId,
-        init: SigId,
-        min: SigId,
-        max: SigId,
-        step: SigId,
-    ) -> SigId {
-        let params = list4(self.arena, init, min, max, step);
-        intern_tag(self.arena, SIG_NUMENTRY_TAG, &[label, params])
+    pub fn numentry(&mut self, control: ControlId) -> SigId {
+        let control = self.arena.int(i64::from(control));
+        intern_tag(self.arena, SIG_NUMENTRY_TAG, &[control])
     }
 
     #[must_use]
     /// Builds one signal node for `vbargraph` and returns its `SigId`.
-    pub fn vbargraph(&mut self, label: SigId, min: SigId, max: SigId, sig: SigId) -> SigId {
-        intern_tag(self.arena, SIG_VBARGRAPH_TAG, &[label, min, max, sig])
+    pub fn vbargraph(&mut self, control: ControlId, sig: SigId) -> SigId {
+        let control = self.arena.int(i64::from(control));
+        intern_tag(self.arena, SIG_VBARGRAPH_TAG, &[control, sig])
     }
 
     #[must_use]
     /// Builds one signal node for `hbargraph` and returns its `SigId`.
-    pub fn hbargraph(&mut self, label: SigId, min: SigId, max: SigId, sig: SigId) -> SigId {
-        intern_tag(self.arena, SIG_HBARGRAPH_TAG, &[label, min, max, sig])
+    pub fn hbargraph(&mut self, control: ControlId, sig: SigId) -> SigId {
+        let control = self.arena.int(i64::from(control));
+        intern_tag(self.arena, SIG_HBARGRAPH_TAG, &[control, sig])
     }
 
     #[must_use]
@@ -713,8 +698,9 @@ impl<'a> SigBuilder<'a> {
 
     #[must_use]
     /// Builds one signal node for `soundfile` and returns its `SigId`.
-    pub fn soundfile(&mut self, label: SigId) -> SigId {
-        intern_tag(self.arena, SIG_SOUNDFILE_TAG, &[label])
+    pub fn soundfile(&mut self, control: ControlId) -> SigId {
+        let control = self.arena.int(i64::from(control));
+        intern_tag(self.arena, SIG_SOUNDFILE_TAG, &[control])
     }
 
     #[must_use]
@@ -886,18 +872,18 @@ pub enum SigMatch<'a> {
     FVar(SigId, SigId, SigId),
     Proj(i32, SigId),
     Rec(SigId),
-    Button(SigId),
-    Checkbox(SigId),
-    VSlider(SigId, SigId, SigId, SigId, SigId),
-    HSlider(SigId, SigId, SigId, SigId, SigId),
-    NumEntry(SigId, SigId, SigId, SigId, SigId),
-    VBargraph(SigId, SigId, SigId, SigId),
-    HBargraph(SigId, SigId, SigId, SigId),
+    Button(ControlId),
+    Checkbox(ControlId),
+    VSlider(ControlId),
+    HSlider(ControlId),
+    NumEntry(ControlId),
+    VBargraph(ControlId, SigId),
+    HBargraph(ControlId, SigId),
     Attach(SigId, SigId),
     Enable(SigId, SigId),
     Control(SigId, SigId),
     Waveform(&'a [SigId]),
-    Soundfile(SigId),
+    Soundfile(ControlId),
     SoundfileLength(SigId, SigId),
     SoundfileRate(SigId, SigId),
     SoundfileBuffer(SigId, SigId, SigId, SigId),
@@ -999,37 +985,35 @@ pub fn match_sig<'a>(arena: &'a TreeArena, id: SigId) -> SigMatch<'a> {
                     _ => SigMatch::Unknown,
                 },
                 (SIG_REC_TAG, [body]) => SigMatch::Rec(*body),
-                (SIG_BUTTON_TAG, [lbl]) => SigMatch::Button(*lbl),
-                (SIG_CHECKBOX_TAG, [lbl]) => SigMatch::Checkbox(*lbl),
-                (SIG_VSLIDER_TAG, [lbl, params]) => {
-                    let Some((init, min, max, step)) = slider_params4(arena, *params) else {
-                        return SigMatch::Unknown;
-                    };
-                    SigMatch::VSlider(*lbl, init, min, max, step)
+                (SIG_BUTTON_TAG, [control]) => {
+                    decode_control_id(arena, *control).map_or(SigMatch::Unknown, SigMatch::Button)
                 }
-                (SIG_HSLIDER_TAG, [lbl, params]) => {
-                    let Some((init, min, max, step)) = slider_params4(arena, *params) else {
-                        return SigMatch::Unknown;
-                    };
-                    SigMatch::HSlider(*lbl, init, min, max, step)
+                (SIG_CHECKBOX_TAG, [control]) => {
+                    decode_control_id(arena, *control).map_or(SigMatch::Unknown, SigMatch::Checkbox)
                 }
-                (SIG_NUMENTRY_TAG, [lbl, params]) => {
-                    let Some((init, min, max, step)) = slider_params4(arena, *params) else {
-                        return SigMatch::Unknown;
-                    };
-                    SigMatch::NumEntry(*lbl, init, min, max, step)
+                (SIG_VSLIDER_TAG, [control]) => {
+                    decode_control_id(arena, *control).map_or(SigMatch::Unknown, SigMatch::VSlider)
                 }
-                (SIG_VBARGRAPH_TAG, [lbl, min, max, x]) => {
-                    SigMatch::VBargraph(*lbl, *min, *max, *x)
+                (SIG_HSLIDER_TAG, [control]) => {
+                    decode_control_id(arena, *control).map_or(SigMatch::Unknown, SigMatch::HSlider)
                 }
-                (SIG_HBARGRAPH_TAG, [lbl, min, max, x]) => {
-                    SigMatch::HBargraph(*lbl, *min, *max, *x)
+                (SIG_NUMENTRY_TAG, [control]) => {
+                    decode_control_id(arena, *control).map_or(SigMatch::Unknown, SigMatch::NumEntry)
                 }
+                (SIG_VBARGRAPH_TAG, [control, x]) => decode_control_id(arena, *control)
+                    .map_or(SigMatch::Unknown, |control| {
+                        SigMatch::VBargraph(control, *x)
+                    }),
+                (SIG_HBARGRAPH_TAG, [control, x]) => decode_control_id(arena, *control)
+                    .map_or(SigMatch::Unknown, |control| {
+                        SigMatch::HBargraph(control, *x)
+                    }),
                 (SIG_ATTACH_TAG, [x, y]) => SigMatch::Attach(*x, *y),
                 (SIG_ENABLE_TAG, [x, y]) => SigMatch::Enable(*x, *y),
                 (SIG_CONTROL_TAG, [x, y]) => SigMatch::Control(*x, *y),
                 (SIG_WAVEFORM_TAG, values) => SigMatch::Waveform(values),
-                (SIG_SOUNDFILE_TAG, [label]) => SigMatch::Soundfile(*label),
+                (SIG_SOUNDFILE_TAG, [control]) => decode_control_id(arena, *control)
+                    .map_or(SigMatch::Unknown, SigMatch::Soundfile),
                 (SIG_SOUNDFILE_LENGTH_TAG, [soundfile, part]) => {
                     SigMatch::SoundfileLength(*soundfile, *part)
                 }
@@ -1088,51 +1072,11 @@ fn intern_tag(arena: &mut TreeArena, tag: &str, children: &[SigId]) -> SigId {
     arena.intern(NodeKind::Tag(tag_id), children)
 }
 
-/// Builds a canonical 4-element Faust list payload (`cons(a, cons(b, ...)))`.
-///
-/// Signal UI slider parameters keep the historical Faust list encoding, so this
-/// helper centralizes the exact shape used by builder methods and tests.
-fn list4(arena: &mut TreeArena, a: SigId, b: SigId, c: SigId, d: SigId) -> SigId {
-    let nil = arena.nil();
-    let l3 = arena.cons(d, nil);
-    let l2 = arena.cons(c, l3);
-    let l1 = arena.cons(b, l2);
-    arena.cons(a, l1)
-}
-
-/// Decodes a canonical 4-element slider parameter list.
-///
-/// Returns `(init, min, max, step)` when `params` matches the expected
-/// `cons(x0, cons(x1, cons(x2, cons(x3, _))))` shape.
-///
-/// The matcher is intentionally strict on `Cons` arity to keep malformed arena
-/// shapes from silently decoding as valid slider payloads.
-fn slider_params4(arena: &TreeArena, params: SigId) -> Option<(SigId, SigId, SigId, SigId)> {
-    let n0 = arena.node(params)?;
-    if !matches!(n0.kind, NodeKind::Cons) || n0.children.len() != 2 {
-        return None;
+fn decode_control_id(arena: &TreeArena, node: SigId) -> Option<ControlId> {
+    match arena.kind(node) {
+        Some(NodeKind::Int(value)) => ControlId::try_from(*value).ok(),
+        _ => None,
     }
-    let init = n0.children.get(0)?;
-
-    let n1 = arena.node(n0.children.get(1)?)?;
-    if !matches!(n1.kind, NodeKind::Cons) || n1.children.len() != 2 {
-        return None;
-    }
-    let min = n1.children.get(0)?;
-
-    let n2 = arena.node(n1.children.get(1)?)?;
-    if !matches!(n2.kind, NodeKind::Cons) || n2.children.len() != 2 {
-        return None;
-    }
-    let max = n2.children.get(0)?;
-
-    let n3 = arena.node(n2.children.get(1)?)?;
-    if !matches!(n3.kind, NodeKind::Cons) || n3.children.len() != 2 {
-        return None;
-    }
-    let step = n3.children.get(0)?;
-
-    Some((init, min, max, step))
 }
 
 enum DumpTask {

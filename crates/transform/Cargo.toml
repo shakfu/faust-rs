@@ -12,3 +12,4 @@ workspace = true
 fir = { path = "../fir" }
 signals = { path = "../signals" }
 tlib = { path = "../tlib" }
+ui = { path = "../ui" }

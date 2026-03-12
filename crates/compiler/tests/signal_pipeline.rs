@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use compiler::Compiler;
 use parser::CompilationMetadataKey;
-use signals::{BinOp, SigMatch, dump_sig_readable, match_sig};
+use signals::{BinOp, SigMatch, match_sig};
 use tlib::{TreeArena, TreeId};
 use ui::{ControlKind, UiGroupKind, UiMatch, match_ui};
 
@@ -33,20 +33,6 @@ fn compile_inline(name: &str, source: &str) -> compiler::SignalCompileOutput {
     Compiler::new()
         .compile_source_to_signals(name, source)
         .unwrap_or_else(|e| panic!("failed to compile {name} to signals: {e}"))
-}
-
-fn dump_signals_readable(out: &compiler::SignalCompileOutput) -> String {
-    out.signals
-        .iter()
-        .enumerate()
-        .map(|(idx, sig)| {
-            format!(
-                "[{idx}] {}",
-                dump_sig_readable(&out.parse.state.arena, *sig)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn expect_ui_group(
@@ -377,10 +363,7 @@ fn corpus_sine_phasor_lowers_to_gain_times_sin_of_feedback_phase() {
         };
         assert!(matches!(
             match_sig(&out.parse.state.arena, gain),
-            SigMatch::HSlider(_, _, _, _, _)
-                | SigMatch::VSlider(_, _, _, _, _)
-                | SigMatch::NumEntry(_, _, _, _, _)
-                | SigMatch::Real(_)
+            SigMatch::HSlider(_) | SigMatch::VSlider(_) | SigMatch::NumEntry(_) | SigMatch::Real(_)
         ));
         assert!(matches!(
             match_sig(&out.parse.state.arena, carrier),
@@ -497,33 +480,24 @@ process = make(1)(0) + make(2)(0);
 }
 
 #[test]
-fn corpus_eval_label_widget_substitution_reaches_signal_paths() {
+fn corpus_eval_label_widget_substitution_reaches_ui_controls() {
     let out = compile_corpus("rep_51_eval_label_widget_subst.dsp");
-    let dump = dump_signals_readable(&out);
-    assert!(
-        dump.contains("gain3"),
-        "signal dump should contain interpolated widget label, got:\n{dump}"
-    );
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].label, "gain3");
 }
 
 #[test]
-fn corpus_eval_label_group_path_substitution_compiles_cleanly() {
+fn corpus_eval_label_group_path_substitution_reaches_ui_controls() {
     let out = compile_corpus("rep_52_eval_label_group_path_subst.dsp");
-    let dump = dump_signals_readable(&out);
-    assert!(
-        dump.contains("gain"),
-        "signal dump should still contain the widget leaf label after interpolated group evaluation, got:\n{dump}"
-    );
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].label, "gain");
 }
 
 #[test]
-fn corpus_eval_label_modulation_target_substitution_matches_widget() {
+fn corpus_eval_label_modulation_target_substitution_matches_ui_control() {
     let out = compile_corpus("rep_53_eval_label_modulation_target_subst.dsp");
-    let dump = dump_signals_readable(&out);
-    assert!(
-        dump.contains("gain3"),
-        "signal dump should contain interpolated modulation target/widget label, got:\n{dump}"
-    );
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].label, "gain3");
 }
 
 fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i32) {
@@ -554,8 +528,8 @@ fn assert_mul_input_ui(arena: &TreeArena, sig: TreeId, expected_input: i32) {
     let bm = match_sig(arena, b);
     let ok = matches!(
         (am, bm),
-        (SigMatch::Input(i), SigMatch::HSlider(_, _, _, _, _))
-            | (SigMatch::HSlider(_, _, _, _, _), SigMatch::Input(i))
+        (SigMatch::Input(i), SigMatch::HSlider(_))
+            | (SigMatch::HSlider(_), SigMatch::Input(i))
             if i == expected_input
     );
     assert!(

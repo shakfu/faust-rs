@@ -47,11 +47,12 @@
 use std::collections::{HashMap, HashSet};
 
 use fir::{
-    AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirMatch, FirMathOp,
-    FirStore, FirType, NamedType, SliderRange, SliderType, UiBoxType, match_fir,
+    AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirMathOp, FirStore,
+    FirType, NamedType, SliderRange, SliderType, UiBoxType,
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{NodeKind, TreeArena, match_sym_rec, match_sym_ref};
+use ui::{ControlId, ControlKind, UiGroupKind, UiMatch, UiProgram, UiRootOrigin, match_ui};
 
 use crate::signal_prepare::SimpleSigType;
 
@@ -121,10 +122,11 @@ pub fn build_module(
     module_name: &str,
     arena: &TreeArena,
     signals: &[SigId],
+    ui: &UiProgram,
     types: &HashMap<SigId, SimpleSigType>,
     real_ty: FirType,
 ) -> Result<SignalFirOutput, SignalFirError> {
-    let mut lower = SignalToFirLower::new(arena, types, plan.num_inputs, real_ty);
+    let mut lower = SignalToFirLower::new(arena, module_name, ui, types, plan.num_inputs, real_ty);
     lower.ensure_sample_rate_var();
     lower.prepare_delay_lines(signals)?;
     let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
@@ -283,8 +285,8 @@ pub fn build_module(
         )
     };
 
-    let ui_statements =
-        maybe_wrap_ui_in_root_group(&mut lower.store, module_name, &lower.ui_statements);
+    lower.emit_ui_program()?;
+    let ui_statements = lower.ui_statements.clone();
     let ui_body = {
         let mut b = FirBuilder::new(&mut lower.store);
         b.block(&ui_statements)
@@ -464,49 +466,6 @@ pub fn build_module(
     })
 }
 
-/// Wraps top-level UI widgets in an implicit root vertical box when needed.
-///
-/// Parity policy:
-/// - if explicit groups (`OpenBox`/`CloseBox`) are already present, keep UI as-is;
-/// - if widgets exist but no group exists, inject:
-///   `openVerticalBox(module_name) ... closeBox`.
-///
-/// This mirrors Faust behavior where a root group is synthesized to keep UI
-/// hierarchy valid for consumers expecting balanced open/close group events.
-fn maybe_wrap_ui_in_root_group(
-    store: &mut FirStore,
-    module_name: &str,
-    ui_statements: &[FirId],
-) -> Vec<FirId> {
-    if ui_statements.is_empty() {
-        return Vec::new();
-    }
-
-    let mut has_group = false;
-    let mut has_widget = false;
-    for stmt in ui_statements {
-        match match_fir(store, *stmt) {
-            FirMatch::OpenBox { .. } | FirMatch::CloseBox => has_group = true,
-            FirMatch::AddButton { .. }
-            | FirMatch::AddSlider { .. }
-            | FirMatch::AddBargraph { .. }
-            | FirMatch::AddSoundfile { .. } => has_widget = true,
-            _ => {}
-        }
-    }
-
-    if has_group || !has_widget {
-        return ui_statements.to_vec();
-    }
-
-    let mut wrapped = Vec::with_capacity(ui_statements.len() + 2);
-    let mut b = FirBuilder::new(store);
-    wrapped.push(b.open_box(UiBoxType::Vertical, module_name));
-    wrapped.extend(ui_statements.iter().copied());
-    wrapped.push(b.close_box());
-    wrapped
-}
-
 /// Stateful lowering engine from propagated signals to FIR.
 ///
 /// Design notes:
@@ -521,6 +480,8 @@ fn maybe_wrap_ui_in_root_group(
 /// tables, and scheduled compute-time updates.
 struct SignalToFirLower<'a> {
     arena: &'a TreeArena,
+    module_name: &'a str,
+    ui_program: &'a UiProgram,
     types: &'a HashMap<SigId, SimpleSigType>,
     num_inputs: usize,
     /// Internal DSP computation type (e.g. `Float32` or `Float64`).
@@ -548,8 +509,8 @@ struct SignalToFirLower<'a> {
     uses_iota: bool,
     recursion_stack: Vec<RecArrayInfo>,
     recursion_vars: Vec<SigId>,
-    ui_controls: HashMap<SigId, String>,
-    soundfiles: HashMap<SigId, String>,
+    ui_controls: HashMap<ControlId, String>,
+    soundfiles: HashMap<ControlId, String>,
     waveform_tables: HashMap<SigId, String>,
     waveform_table_len: HashMap<SigId, usize>,
     ui_statements: Vec<FirId>,
@@ -588,12 +549,16 @@ impl<'a> SignalToFirLower<'a> {
     /// accumulators cannot leak across compilations.
     fn new(
         arena: &'a TreeArena,
+        module_name: &'a str,
+        ui_program: &'a UiProgram,
         types: &'a HashMap<SigId, SimpleSigType>,
         num_inputs: usize,
         real_ty: FirType,
     ) -> Self {
         Self {
             arena,
+            module_name,
+            ui_program,
             types,
             num_inputs,
             real_ty,
@@ -834,22 +799,16 @@ impl<'a> SignalToFirLower<'a> {
                 self.lower_wrtbl(sig, size, generator, widx, wsig)?
             }
             SigMatch::Waveform(values) => self.lower_waveform(sig, values)?,
-            SigMatch::Button(label) => self.lower_button(sig, label, ButtonType::Button),
-            SigMatch::Checkbox(label) => self.lower_button(sig, label, ButtonType::Checkbox),
-            SigMatch::VSlider(label, init, min, max, step) => {
-                self.lower_slider(sig, [label, init, min, max, step], SliderType::Vertical)?
+            SigMatch::Button(control) => self.lower_button(control, ButtonType::Button)?,
+            SigMatch::Checkbox(control) => self.lower_button(control, ButtonType::Checkbox)?,
+            SigMatch::VSlider(control) => self.lower_slider(control, SliderType::Vertical)?,
+            SigMatch::HSlider(control) => self.lower_slider(control, SliderType::Horizontal)?,
+            SigMatch::NumEntry(control) => self.lower_slider(control, SliderType::NumEntry)?,
+            SigMatch::VBargraph(control, value) => {
+                self.lower_bargraph(control, value, BargraphType::Vertical)?
             }
-            SigMatch::HSlider(label, init, min, max, step) => {
-                self.lower_slider(sig, [label, init, min, max, step], SliderType::Horizontal)?
-            }
-            SigMatch::NumEntry(label, init, min, max, step) => {
-                self.lower_slider(sig, [label, init, min, max, step], SliderType::NumEntry)?
-            }
-            SigMatch::VBargraph(label, min, max, value) => {
-                self.lower_bargraph(sig, label, min, max, value, BargraphType::Vertical)?
-            }
-            SigMatch::HBargraph(label, min, max, value) => {
-                self.lower_bargraph(sig, label, min, max, value, BargraphType::Horizontal)?
+            SigMatch::HBargraph(control, value) => {
+                self.lower_bargraph(control, value, BargraphType::Horizontal)?
             }
             SigMatch::Attach(lhs, rhs) => {
                 let _ = self.lower_signal(rhs)?;
@@ -867,7 +826,7 @@ impl<'a> SignalToFirLower<'a> {
                 let _ = self.lower_signal(rhs)?;
                 self.lower_signal(lhs)?
             }
-            SigMatch::Soundfile(label) => self.lower_soundfile(sig, label),
+            SigMatch::Soundfile(control) => self.lower_soundfile(control)?,
             other => {
                 return Err(SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
@@ -1344,130 +1303,91 @@ impl<'a> SignalToFirLower<'a> {
         b.int32(value)
     }
 
-    /// Lowers button/checkbox UI controls as zone-backed struct variables.
-    fn lower_button(&mut self, node: SigId, label: SigId, typ: ButtonType) -> FirId {
-        if let Some(var) = self.ui_controls.get(&node).cloned() {
-            // UI zone variable is FaustFloat (external); cast to real_ty for computation.
-            let real_ty = self.real_ty();
-            let mut b = FirBuilder::new(&mut self.store);
-            let load = b.load_var(var, AccessType::Struct, FirType::FaustFloat);
-            return b.cast(real_ty, load);
+    fn ensure_button_zone(
+        &mut self,
+        control: ControlId,
+        typ: ButtonType,
+    ) -> Result<String, SignalFirError> {
+        if let Some(var) = self.ui_controls.get(&control).cloned() {
+            return Ok(var);
+        }
+        let spec = self.control_spec(control)?;
+        let expected_kind = match typ {
+            ButtonType::Button => ControlKind::Button,
+            ButtonType::Checkbox => ControlKind::Checkbox,
+        };
+        if spec.kind != expected_kind {
+            return Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "control id {control} kind mismatch: expected {expected_kind:?}, got {:?}",
+                    spec.kind
+                ),
+            ));
         }
         let var = self.ui_control_var_name(
-            node,
+            control,
             match typ {
                 ButtonType::Button => "fButton",
                 ButtonType::Checkbox => "fCheckbox",
             },
         );
-        // UI zone initializer: use internal real precision so that the constant
-        // type matches `real_ty` (Float32 or Float64 with `--double`).
         let init = self.float_const(0.0);
         self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init));
-        let label = self.label_text(label);
-        {
-            let mut b = FirBuilder::new(&mut self.store);
-            self.ui_statements
-                .push(b.add_button(typ, label, var.clone()));
-        }
-        self.ui_controls.insert(node, var.clone());
-        // Load the FaustFloat zone and cast to internal real type for computation.
-        let real_ty = self.real_ty();
-        let mut b = FirBuilder::new(&mut self.store);
-        let load = b.load_var(var, AccessType::Struct, FirType::FaustFloat);
-        b.cast(real_ty, load)
+        self.ui_controls.insert(control, var.clone());
+        Ok(var)
     }
 
-    /// Lowers slider-style UI controls and records metadata in
-    /// `buildUserInterface`.
-    fn lower_slider(
+    /// Lowers button/checkbox UI controls as zone-backed struct variables.
+    fn lower_button(
         &mut self,
-        node: SigId,
-        params: [SigId; 5],
-        typ: SliderType,
+        control: ControlId,
+        typ: ButtonType,
     ) -> Result<FirId, SignalFirError> {
-        let [label, init, min, max, step] = params;
-        if let Some(var) = self.ui_controls.get(&node).cloned() {
+        let var = self.ensure_button_zone(control, typ)?;
+        if self.ui_controls.contains_key(&control) {
             // UI zone variable is FaustFloat (external); cast to real_ty for computation.
             let real_ty = self.real_ty();
             let mut b = FirBuilder::new(&mut self.store);
             let load = b.load_var(var, AccessType::Struct, FirType::FaustFloat);
             return Ok(b.cast(real_ty, load));
         }
-        let var = self.ui_control_var_name(
-            node,
-            match typ {
-                SliderType::Horizontal => "fHslider",
-                SliderType::Vertical => "fVslider",
-                SliderType::NumEntry => "fEntry",
-            },
-        );
-        let init_v = self.constant_f64(init).unwrap_or(0.0);
-        let min_v = self.constant_f64(min).unwrap_or(0.0);
-        let max_v = self.constant_f64(max).unwrap_or(1.0);
-        let step_v = self.constant_f64(step).unwrap_or(0.01);
-        // UI zone initializer: use internal real precision so that the constant
-        // type matches `real_ty` (Float32 or Float64 with `--double`).
-        // The range metadata stays f64 for precision.
-        let init_id = self.float_const(init_v);
-        self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init_id));
-        let label = self.label_text(label);
-        let range = SliderRange {
-            init: init_v,
-            lo: min_v,
-            hi: max_v,
-            step: step_v,
-        };
-        {
+        unreachable!("button zone should be inserted before loading")
+    }
+
+    /// Lowers slider-style UI controls and records metadata in
+    /// `buildUserInterface`.
+    fn lower_slider(
+        &mut self,
+        control: ControlId,
+        typ: SliderType,
+    ) -> Result<FirId, SignalFirError> {
+        let var = self.ensure_slider_zone(control, typ)?;
+        if self.ui_controls.contains_key(&control) {
+            // UI zone variable is FaustFloat (external); cast to real_ty for computation.
+            let real_ty = self.real_ty();
             let mut b = FirBuilder::new(&mut self.store);
-            self.ui_statements
-                .push(b.add_slider(typ, label, var.clone(), range));
+            let load = b.load_var(var, AccessType::Struct, FirType::FaustFloat);
+            return Ok(b.cast(real_ty, load));
         }
-        self.ui_controls.insert(node, var.clone());
-        // Load the FaustFloat zone and cast to internal real type for computation.
-        let real_ty = self.real_ty();
-        let mut b = FirBuilder::new(&mut self.store);
-        let load = b.load_var(var, AccessType::Struct, FirType::FaustFloat);
-        Ok(b.cast(real_ty, load))
+        unreachable!("slider zone should be inserted before loading")
     }
 
     /// Lowers bargraph UI nodes by creating UI descriptors and storing incoming
     /// runtime value in a dedicated control zone.
     fn lower_bargraph(
         &mut self,
-        node: SigId,
-        label: SigId,
-        min: SigId,
-        max: SigId,
+        control: ControlId,
         value: SigId,
         typ: BargraphType,
     ) -> Result<FirId, SignalFirError> {
-        if !self.ui_controls.contains_key(&node) {
-            let var = self.ui_control_var_name(
-                node,
-                match typ {
-                    BargraphType::Horizontal => "fHbargraph",
-                    BargraphType::Vertical => "fVbargraph",
-                },
-            );
-            // Bargraph zone is FaustFloat (the host reads it); initializer uses
-            // internal real precision so the constant type matches `real_ty`.
-            let init = self.float_const(0.0);
-            self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init));
-            let label = self.label_text(label);
-            let min_v = self.constant_f64(min).unwrap_or(0.0);
-            let max_v = self.constant_f64(max).unwrap_or(1.0);
-            let mut b = FirBuilder::new(&mut self.store);
-            self.ui_statements
-                .push(b.add_bargraph(typ, label, var.clone(), min_v, max_v));
-            self.ui_controls.insert(node, var);
-        }
+        let _ = self.ensure_bargraph_zone(control, typ)?;
         // The incoming signal value is computed at internal real precision; cast
         // it to FaustFloat before writing to the external zone variable.
         let value = self.lower_signal(value)?;
         let var = self
             .ui_controls
-            .get(&node)
+            .get(&control)
             .cloned()
             .expect("bargraph variable should exist after declaration");
         let mut b = FirBuilder::new(&mut self.store);
@@ -1479,18 +1399,13 @@ impl<'a> SignalToFirLower<'a> {
 
     /// Lowers a soundfile declaration into UI-only registration and an opaque
     /// struct-backed runtime handle.
-    fn lower_soundfile(&mut self, node: SigId, label: SigId) -> FirId {
-        if let Some(var) = self.soundfiles.get(&node).cloned() {
+    fn lower_soundfile(&mut self, control: ControlId) -> Result<FirId, SignalFirError> {
+        let var = self.ensure_soundfile_zone(control)?;
+        if self.soundfiles.contains_key(&control) {
             let mut b = FirBuilder::new(&mut self.store);
-            return b.load_var(var, AccessType::Struct, FirType::Sound);
+            return Ok(b.load_var(var, AccessType::Struct, FirType::Sound));
         }
-        let var = format!("fSound{}", node.as_u32());
-        self.ensure_named_struct_var(&var, FirType::Sound, None);
-        let label = self.label_text(label);
-        let mut b = FirBuilder::new(&mut self.store);
-        self.ui_statements.push(b.add_soundfile(label, var.clone()));
-        self.soundfiles.insert(node, var.clone());
-        b.load_var(var, AccessType::Struct, FirType::Sound)
+        unreachable!("soundfile zone should be inserted before loading")
     }
 
     /// Lowers waveform literals into constant FIR tables and returns a pointer
@@ -1795,7 +1710,7 @@ impl<'a> SignalToFirLower<'a> {
         ))
     }
 
-    /// Converts a label signal node to UTF-8 text fallback used by UI emit.
+    /// Converts a label signal node to UTF-8 text fallback used by foreign refs.
     fn label_text(&self, label: SigId) -> String {
         match self.arena.kind(label) {
             Some(NodeKind::Symbol(s)) => s.to_string(),
@@ -1807,16 +1722,294 @@ impl<'a> SignalToFirLower<'a> {
     }
 
     /// Stable generated UI zone variable naming policy.
-    fn ui_control_var_name(&self, node: SigId, prefix: &str) -> String {
-        format!("{prefix}{}", node.as_u32())
+    fn ui_control_var_name(&self, control: ControlId, prefix: &str) -> String {
+        format!("{prefix}{control}")
     }
 
-    /// Extracts a compile-time floating constant when possible.
-    fn constant_f64(&self, sig: SigId) -> Option<f64> {
-        match match_sig(self.arena, sig) {
-            SigMatch::Int(v) => Some(v as f64),
-            SigMatch::Real(v) => Some(v),
-            _ => None,
+    fn control_spec(&self, control: ControlId) -> Result<&ui::ControlSpec, SignalFirError> {
+        self.ui_program.control(control).ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("missing UiProgram control spec for control id {control}"),
+            )
+        })
+    }
+
+    fn control_range(
+        &self,
+        control: ControlId,
+        kind_name: &str,
+    ) -> Result<ui::ControlRange, SignalFirError> {
+        self.control_spec(control)?.range.ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("missing UI range for {kind_name} control id {control}"),
+            )
+        })
+    }
+
+    fn ensure_slider_zone(
+        &mut self,
+        control: ControlId,
+        typ: SliderType,
+    ) -> Result<String, SignalFirError> {
+        if let Some(var) = self.ui_controls.get(&control).cloned() {
+            return Ok(var);
+        }
+        let spec = self.control_spec(control)?;
+        let expected_kind = match typ {
+            SliderType::Horizontal => ControlKind::HSlider,
+            SliderType::Vertical => ControlKind::VSlider,
+            SliderType::NumEntry => ControlKind::NumEntry,
+        };
+        if spec.kind != expected_kind {
+            return Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "control id {control} kind mismatch: expected {expected_kind:?}, got {:?}",
+                    spec.kind
+                ),
+            ));
+        }
+        let var = self.ui_control_var_name(
+            control,
+            match typ {
+                SliderType::Horizontal => "fHslider",
+                SliderType::Vertical => "fVslider",
+                SliderType::NumEntry => "fEntry",
+            },
+        );
+        let range = self.control_range(
+            control,
+            match typ {
+                SliderType::Horizontal => "hslider",
+                SliderType::Vertical => "vslider",
+                SliderType::NumEntry => "numentry",
+            },
+        )?;
+        let init = self.float_const(range.init);
+        self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init));
+        self.ui_controls.insert(control, var.clone());
+        Ok(var)
+    }
+
+    fn ensure_bargraph_zone(
+        &mut self,
+        control: ControlId,
+        typ: BargraphType,
+    ) -> Result<String, SignalFirError> {
+        if let Some(var) = self.ui_controls.get(&control).cloned() {
+            return Ok(var);
+        }
+        let spec = self.control_spec(control)?;
+        let expected_kind = match typ {
+            BargraphType::Horizontal => ControlKind::HBargraph,
+            BargraphType::Vertical => ControlKind::VBargraph,
+        };
+        if spec.kind != expected_kind {
+            return Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "control id {control} kind mismatch: expected {expected_kind:?}, got {:?}",
+                    spec.kind
+                ),
+            ));
+        }
+        let var = self.ui_control_var_name(
+            control,
+            match typ {
+                BargraphType::Horizontal => "fHbargraph",
+                BargraphType::Vertical => "fVbargraph",
+            },
+        );
+        let init = self.float_const(0.0);
+        self.ensure_named_struct_var(&var, FirType::FaustFloat, Some(init));
+        self.ui_controls.insert(control, var.clone());
+        Ok(var)
+    }
+
+    fn ensure_soundfile_zone(&mut self, control: ControlId) -> Result<String, SignalFirError> {
+        if let Some(var) = self.soundfiles.get(&control).cloned() {
+            return Ok(var);
+        }
+        let spec = self.control_spec(control)?;
+        if spec.kind != ControlKind::Soundfile {
+            return Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "control id {control} kind mismatch: expected {:?}, got {:?}",
+                    ControlKind::Soundfile,
+                    spec.kind
+                ),
+            ));
+        }
+        let var = format!("fSound{control}");
+        self.ensure_named_struct_var(&var, FirType::Sound, None);
+        self.soundfiles.insert(control, var.clone());
+        Ok(var)
+    }
+
+    fn emit_ui_program(&mut self) -> Result<(), SignalFirError> {
+        if self.ui_program.is_empty() {
+            self.ui_statements.clear();
+            return Ok(());
+        }
+        self.ui_statements.clear();
+        self.emit_ui_node(self.ui_program.root, true)
+    }
+
+    fn emit_ui_node(&mut self, node: ui::UiId, is_root: bool) -> Result<(), SignalFirError> {
+        match match_ui(&self.ui_program.arena, node) {
+            UiMatch::Group {
+                kind,
+                label,
+                children,
+            } => {
+                let typ = match kind {
+                    UiGroupKind::Vertical => UiBoxType::Vertical,
+                    UiGroupKind::Horizontal => UiBoxType::Horizontal,
+                    UiGroupKind::Tab => UiBoxType::Tab,
+                };
+                let label = if is_root
+                    && self.ui_program.root_origin == UiRootOrigin::Synthesized
+                    && label.is_empty()
+                {
+                    self.module_name
+                } else {
+                    label
+                };
+                let mut b = FirBuilder::new(&mut self.store);
+                self.ui_statements.push(b.open_box(typ, label));
+                for child in children {
+                    self.emit_ui_node(child, false)?;
+                }
+                let mut b = FirBuilder::new(&mut self.store);
+                self.ui_statements.push(b.close_box());
+                Ok(())
+            }
+            UiMatch::InputControl(control) => {
+                let spec = self.control_spec(control)?;
+                let kind = spec.kind;
+                let label = spec.label.clone();
+                match kind {
+                    ControlKind::Button => {
+                        let var = self.ensure_button_zone(control, ButtonType::Button)?;
+                        let mut b = FirBuilder::new(&mut self.store);
+                        self.ui_statements
+                            .push(b.add_button(ButtonType::Button, label, var));
+                    }
+                    ControlKind::Checkbox => {
+                        let var = self.ensure_button_zone(control, ButtonType::Checkbox)?;
+                        let mut b = FirBuilder::new(&mut self.store);
+                        self.ui_statements
+                            .push(b.add_button(ButtonType::Checkbox, label, var));
+                    }
+                    ControlKind::VSlider => {
+                        let range = self.control_range(control, "vslider")?;
+                        let var = self.ensure_slider_zone(control, SliderType::Vertical)?;
+                        let mut b = FirBuilder::new(&mut self.store);
+                        self.ui_statements.push(b.add_slider(
+                            SliderType::Vertical,
+                            label,
+                            var,
+                            SliderRange {
+                                init: range.init,
+                                lo: range.min,
+                                hi: range.max,
+                                step: range.step,
+                            },
+                        ));
+                    }
+                    ControlKind::HSlider => {
+                        let range = self.control_range(control, "hslider")?;
+                        let var = self.ensure_slider_zone(control, SliderType::Horizontal)?;
+                        let mut b = FirBuilder::new(&mut self.store);
+                        self.ui_statements.push(b.add_slider(
+                            SliderType::Horizontal,
+                            label,
+                            var,
+                            SliderRange {
+                                init: range.init,
+                                lo: range.min,
+                                hi: range.max,
+                                step: range.step,
+                            },
+                        ));
+                    }
+                    ControlKind::NumEntry => {
+                        let range = self.control_range(control, "numentry")?;
+                        let var = self.ensure_slider_zone(control, SliderType::NumEntry)?;
+                        let mut b = FirBuilder::new(&mut self.store);
+                        self.ui_statements.push(b.add_slider(
+                            SliderType::NumEntry,
+                            label,
+                            var,
+                            SliderRange {
+                                init: range.init,
+                                lo: range.min,
+                                hi: range.max,
+                                step: range.step,
+                            },
+                        ));
+                    }
+                    other => {
+                        return Err(SignalFirError::new(
+                            SignalFirErrorCode::UnsupportedSignalNode,
+                            format!("input UI leaf points to non-input control kind {other:?}"),
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            UiMatch::OutputControl(control) => {
+                let spec = self.control_spec(control)?;
+                let kind = spec.kind;
+                let label = spec.label.clone();
+                match kind {
+                    ControlKind::VBargraph => {
+                        let range = self.control_range(control, "vbargraph")?;
+                        let var = self.ensure_bargraph_zone(control, BargraphType::Vertical)?;
+                        let mut b = FirBuilder::new(&mut self.store);
+                        self.ui_statements.push(b.add_bargraph(
+                            BargraphType::Vertical,
+                            label,
+                            var,
+                            range.min,
+                            range.max,
+                        ));
+                    }
+                    ControlKind::HBargraph => {
+                        let range = self.control_range(control, "hbargraph")?;
+                        let var = self.ensure_bargraph_zone(control, BargraphType::Horizontal)?;
+                        let mut b = FirBuilder::new(&mut self.store);
+                        self.ui_statements.push(b.add_bargraph(
+                            BargraphType::Horizontal,
+                            label,
+                            var,
+                            range.min,
+                            range.max,
+                        ));
+                    }
+                    other => {
+                        return Err(SignalFirError::new(
+                            SignalFirErrorCode::UnsupportedSignalNode,
+                            format!("output UI leaf points to non-bargraph control kind {other:?}"),
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            UiMatch::Soundfile(control) => {
+                let label = self.control_spec(control)?.label.clone();
+                let var = self.ensure_soundfile_zone(control)?;
+                let mut b = FirBuilder::new(&mut self.store);
+                self.ui_statements.push(b.add_soundfile(label, var));
+                Ok(())
+            }
+            UiMatch::Unknown => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                "malformed UiProgram node".to_owned(),
+            )),
         }
     }
 

@@ -911,6 +911,7 @@ name = "signals"
 version = "0.1.0"
 dependencies = [
  "tlib",
+ "ui",
 ]
 
 [[package]]
@@ -1013,6 +1014,7 @@ dependencies = [
  "fir",
  "signals",
  "tlib",
+ "ui",
 ]
 
 [[package]]

@@ -42,13 +42,15 @@ use signals::{SigBuilder, SigId, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId, list_to_vec, tree_to_int, vec_to_list};
 use ui::{
     ControlId, ControlKind, ControlRange, ControlSpec, UiBuilder, UiGroupKind, UiId, UiMatch,
-    UiProgram, match_ui,
+    UiProgram, UiRootOrigin, match_ui,
 };
 
 /// Memoization cache for [`box_arity`] / [`box_arity_typed`] results, keyed by validated flat boxes.
 pub type ArityCache = AHashMap<FlatBoxId, Result<BoxArity, PropagateError>>;
 /// Environment mapping route/slot placeholders to propagated signals.
 type SlotEnv = AHashMap<BoxId, SigId>;
+/// Deterministic mapping from source widget/soundfile box nodes to stable control ids.
+type ControlIds = AHashMap<BoxId, ControlId>;
 
 pub const CRATE_NAME: &str = "propagate";
 const DEBRUIJN_TAG: &str = "DEBRUIJN";
@@ -943,11 +945,22 @@ pub fn propagate_typed_with_ui(
     inputs: &[SigId],
     cache: &mut ArityCache,
 ) -> Result<PropagateOutput, PropagateError> {
+    let ui = build_ui_program(arena, box_tree);
     let mut slot_env = SlotEnv::default();
     let clock_env = arena.nil();
-    let signals = propagate_in_slot_env(arena, box_tree, inputs, cache, &mut slot_env, clock_env)?;
-    let ui = build_ui_program(arena, box_tree);
-    Ok(PropagateOutput { signals, ui })
+    let signals = propagate_in_slot_env(
+        arena,
+        box_tree,
+        inputs,
+        cache,
+        &ui.control_ids,
+        &mut slot_env,
+        clock_env,
+    )?;
+    Ok(PropagateOutput {
+        signals,
+        ui: ui.program,
+    })
 }
 
 /// Propagates input signals through one validated flat box expression (memoized arity).
@@ -995,6 +1008,7 @@ pub fn propagate(
 struct UiCollector {
     arena: TreeArena,
     controls: Vec<ControlSpec>,
+    control_ids: ControlIds,
 }
 
 impl UiCollector {
@@ -1002,25 +1016,34 @@ impl UiCollector {
         Self {
             arena: TreeArena::new(),
             controls: Vec::new(),
+            control_ids: ControlIds::default(),
         }
     }
 
-    fn finish(mut self, roots: &[UiId]) -> UiProgram {
+    fn finish(mut self, roots: &[UiId]) -> UiBuildOutput {
         let keep_existing_root = matches!(roots, [only] if matches!(match_ui(&self.arena, *only), UiMatch::Group { .. }));
-        let root = if keep_existing_root {
-            roots[0]
+        let (root, root_origin) = if keep_existing_root {
+            (roots[0], UiRootOrigin::Explicit)
         } else {
-            UiBuilder::new(&mut self.arena).vgroup("", roots)
+            (
+                UiBuilder::new(&mut self.arena).vgroup("", roots),
+                UiRootOrigin::Synthesized,
+            )
         };
-        UiProgram {
-            arena: self.arena,
-            root,
-            controls: self.controls,
+        UiBuildOutput {
+            program: UiProgram {
+                arena: self.arena,
+                root,
+                controls: self.controls,
+                root_origin,
+            },
+            control_ids: self.control_ids,
         }
     }
 
     fn register_control(
         &mut self,
+        source_node: BoxId,
         kind: ControlKind,
         label: String,
         range: Option<ControlRange>,
@@ -1034,31 +1057,34 @@ impl UiCollector {
             metadata: Vec::new(),
             range,
         });
+        self.control_ids.insert(source_node, id);
         id
     }
 
     fn input_control(
         &mut self,
+        source_node: BoxId,
         kind: ControlKind,
         label: String,
         range: Option<ControlRange>,
     ) -> UiId {
-        let id = self.register_control(kind, label, range);
+        let id = self.register_control(source_node, kind, label, range);
         UiBuilder::new(&mut self.arena).input_control(id)
     }
 
     fn output_control(
         &mut self,
+        source_node: BoxId,
         kind: ControlKind,
         label: String,
         range: Option<ControlRange>,
     ) -> UiId {
-        let id = self.register_control(kind, label, range);
+        let id = self.register_control(source_node, kind, label, range);
         UiBuilder::new(&mut self.arena).output_control(id)
     }
 
-    fn soundfile(&mut self, label: String) -> UiId {
-        let id = self.register_control(ControlKind::Soundfile, label, None);
+    fn soundfile(&mut self, source_node: BoxId, label: String) -> UiId {
+        let id = self.register_control(source_node, ControlKind::Soundfile, label, None);
         UiBuilder::new(&mut self.arena).soundfile(id)
     }
 
@@ -1072,7 +1098,12 @@ impl UiCollector {
     }
 }
 
-fn build_ui_program(source_arena: &TreeArena, box_tree: FlatBoxId) -> UiProgram {
+struct UiBuildOutput {
+    program: UiProgram,
+    control_ids: ControlIds,
+}
+
+fn build_ui_program(source_arena: &TreeArena, box_tree: FlatBoxId) -> UiBuildOutput {
     let mut collector = UiCollector::new();
     let roots = collect_ui_nodes(source_arena, box_tree, &mut collector);
     collector.finish(&roots)
@@ -1090,6 +1121,7 @@ fn collect_ui_nodes(
                 unreachable!("flat button node must decode to BoxMatch::Button")
             };
             vec![collector.input_control(
+                box_tree.as_tree_id(),
                 ControlKind::Button,
                 decode_box_label(source_arena, label),
                 None,
@@ -1100,6 +1132,7 @@ fn collect_ui_nodes(
                 unreachable!("flat checkbox node must decode to BoxMatch::Checkbox")
             };
             vec![collector.input_control(
+                box_tree.as_tree_id(),
                 ControlKind::Checkbox,
                 decode_box_label(source_arena, label),
                 None,
@@ -1112,6 +1145,7 @@ fn collect_ui_nodes(
                 unreachable!("flat vslider node must decode to BoxMatch::VSlider")
             };
             vec![collector.input_control(
+                box_tree.as_tree_id(),
                 ControlKind::VSlider,
                 decode_box_label(source_arena, label),
                 Some(ControlRange {
@@ -1129,6 +1163,7 @@ fn collect_ui_nodes(
                 unreachable!("flat hslider node must decode to BoxMatch::HSlider")
             };
             vec![collector.input_control(
+                box_tree.as_tree_id(),
                 ControlKind::HSlider,
                 decode_box_label(source_arena, label),
                 Some(ControlRange {
@@ -1146,6 +1181,7 @@ fn collect_ui_nodes(
                 unreachable!("flat numentry node must decode to BoxMatch::NumEntry")
             };
             vec![collector.input_control(
+                box_tree.as_tree_id(),
                 ControlKind::NumEntry,
                 decode_box_label(source_arena, label),
                 Some(ControlRange {
@@ -1157,25 +1193,39 @@ fn collect_ui_nodes(
             )]
         }
         FlatNodeKind::VBargraph => {
-            let BoxMatch::VBargraph(label, _, _) = match_box(source_arena, box_tree.as_tree_id())
+            let BoxMatch::VBargraph(label, min, max) =
+                match_box(source_arena, box_tree.as_tree_id())
             else {
                 unreachable!("flat vbargraph node must decode to BoxMatch::VBargraph")
             };
             vec![collector.output_control(
+                box_tree.as_tree_id(),
                 ControlKind::VBargraph,
                 decode_box_label(source_arena, label),
-                None,
+                Some(ControlRange {
+                    init: 0.0,
+                    min: decode_box_scalar(source_arena, min),
+                    max: decode_box_scalar(source_arena, max),
+                    step: 0.0,
+                }),
             )]
         }
         FlatNodeKind::HBargraph => {
-            let BoxMatch::HBargraph(label, _, _) = match_box(source_arena, box_tree.as_tree_id())
+            let BoxMatch::HBargraph(label, min, max) =
+                match_box(source_arena, box_tree.as_tree_id())
             else {
                 unreachable!("flat hbargraph node must decode to BoxMatch::HBargraph")
             };
             vec![collector.output_control(
+                box_tree.as_tree_id(),
                 ControlKind::HBargraph,
                 decode_box_label(source_arena, label),
-                None,
+                Some(ControlRange {
+                    init: 0.0,
+                    min: decode_box_scalar(source_arena, min),
+                    max: decode_box_scalar(source_arena, max),
+                    step: 0.0,
+                }),
             )]
         }
         FlatNodeKind::Soundfile => {
@@ -1183,7 +1233,7 @@ fn collect_ui_nodes(
             else {
                 unreachable!("flat soundfile node must decode to BoxMatch::Soundfile")
             };
-            vec![collector.soundfile(decode_box_label(source_arena, label))]
+            vec![collector.soundfile(box_tree.as_tree_id(), decode_box_label(source_arena, label))]
         }
         FlatNodeKind::VGroup { body } => collect_group_ui(
             source_arena,
@@ -1300,6 +1350,7 @@ fn propagate_in_slot_env(
     box_tree: FlatBoxId,
     inputs: &[SigId],
     cache: &mut ArityCache,
+    control_ids: &ControlIds,
     slot_env: &mut SlotEnv,
     clock_env: TreeId,
 ) -> Result<Vec<SigId>, PropagateError> {
@@ -1311,7 +1362,15 @@ fn propagate_in_slot_env(
             got: inputs.len(),
         });
     }
-    let outputs = propagate_inner(arena, box_tree, inputs, cache, slot_env, clock_env)?;
+    let outputs = propagate_inner(
+        arena,
+        box_tree,
+        inputs,
+        cache,
+        control_ids,
+        slot_env,
+        clock_env,
+    )?;
     if outputs.len() != arity.outputs {
         return Err(PropagateError::OutputArityMismatch {
             node: box_tree.as_tree_id(),
@@ -1333,6 +1392,7 @@ fn propagate_inner(
     box_tree: FlatBoxId,
     inputs: &[SigId],
     cache: &mut ArityCache,
+    control_ids: &ControlIds,
     slot_env: &mut SlotEnv,
     clock_env: TreeId,
 ) -> Result<Vec<SigId>, PropagateError> {
@@ -1354,7 +1414,7 @@ fn propagate_inner(
             Ok(vec![b.real(value)])
         }
         FlatNodeKind::Metadata { body } => {
-            propagate_inner(arena, body, inputs, cache, slot_env, clock_env)
+            propagate_inner(arena, body, inputs, cache, control_ids, slot_env, clock_env)
         }
         FlatNodeKind::Slot => {
             let BoxMatch::Slot(id) = match_box(arena, box_tree.as_tree_id()) else {
@@ -1570,68 +1630,81 @@ fn propagate_inner(
             Ok(vec![b.fvar(ty, name, file)])
         }
         FlatNodeKind::Button => {
-            let BoxMatch::Button(label) = match_box(arena, box_tree.as_tree_id()) else {
+            let BoxMatch::Button(_) = match_box(arena, box_tree.as_tree_id()) else {
                 unreachable!("flat button node must decode to BoxMatch::Button")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
+            let control = *control_ids
+                .get(&box_tree.as_tree_id())
+                .expect("button control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
-            Ok(vec![b.button(label)])
+            Ok(vec![b.button(control)])
         }
         FlatNodeKind::Checkbox => {
-            let BoxMatch::Checkbox(label) = match_box(arena, box_tree.as_tree_id()) else {
+            let BoxMatch::Checkbox(_) = match_box(arena, box_tree.as_tree_id()) else {
                 unreachable!("flat checkbox node must decode to BoxMatch::Checkbox")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
+            let control = *control_ids
+                .get(&box_tree.as_tree_id())
+                .expect("checkbox control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
-            Ok(vec![b.checkbox(label)])
+            Ok(vec![b.checkbox(control)])
         }
         FlatNodeKind::VSlider => {
-            let BoxMatch::VSlider(label, cur, min, max, step) =
-                match_box(arena, box_tree.as_tree_id())
-            else {
+            let BoxMatch::VSlider(_, _, _, _, _) = match_box(arena, box_tree.as_tree_id()) else {
                 unreachable!("flat vslider node must decode to BoxMatch::VSlider")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
+            let control = *control_ids
+                .get(&box_tree.as_tree_id())
+                .expect("vslider control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
-            Ok(vec![b.vslider(label, cur, min, max, step)])
+            Ok(vec![b.vslider(control)])
         }
         FlatNodeKind::HSlider => {
-            let BoxMatch::HSlider(label, cur, min, max, step) =
-                match_box(arena, box_tree.as_tree_id())
-            else {
+            let BoxMatch::HSlider(_, _, _, _, _) = match_box(arena, box_tree.as_tree_id()) else {
                 unreachable!("flat hslider node must decode to BoxMatch::HSlider")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
+            let control = *control_ids
+                .get(&box_tree.as_tree_id())
+                .expect("hslider control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
-            Ok(vec![b.hslider(label, cur, min, max, step)])
+            Ok(vec![b.hslider(control)])
         }
         FlatNodeKind::NumEntry => {
-            let BoxMatch::NumEntry(label, cur, min, max, step) =
-                match_box(arena, box_tree.as_tree_id())
-            else {
+            let BoxMatch::NumEntry(_, _, _, _, _) = match_box(arena, box_tree.as_tree_id()) else {
                 unreachable!("flat numentry node must decode to BoxMatch::NumEntry")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
+            let control = *control_ids
+                .get(&box_tree.as_tree_id())
+                .expect("numentry control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
-            Ok(vec![b.numentry(label, cur, min, max, step)])
+            Ok(vec![b.numentry(control)])
         }
         FlatNodeKind::VBargraph => {
-            let BoxMatch::VBargraph(label, min, max) = match_box(arena, box_tree.as_tree_id())
-            else {
+            let BoxMatch::VBargraph(_, _, _) = match_box(arena, box_tree.as_tree_id()) else {
                 unreachable!("flat vbargraph node must decode to BoxMatch::VBargraph")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 1)?;
+            let control = *control_ids
+                .get(&box_tree.as_tree_id())
+                .expect("vbargraph control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
-            Ok(vec![b.vbargraph(label, min, max, inputs[0])])
+            Ok(vec![b.vbargraph(control, inputs[0])])
         }
         FlatNodeKind::HBargraph => {
-            let BoxMatch::HBargraph(label, min, max) = match_box(arena, box_tree.as_tree_id())
-            else {
+            let BoxMatch::HBargraph(_, _, _) = match_box(arena, box_tree.as_tree_id()) else {
                 unreachable!("flat hbargraph node must decode to BoxMatch::HBargraph")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 1)?;
+            let control = *control_ids
+                .get(&box_tree.as_tree_id())
+                .expect("hbargraph control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
-            Ok(vec![b.hbargraph(label, min, max, inputs[0])])
+            Ok(vec![b.hbargraph(control, inputs[0])])
         }
         FlatNodeKind::Waveform => {
             let BoxMatch::Waveform(values) = match_box(arena, box_tree.as_tree_id()) else {
@@ -1651,7 +1724,7 @@ fn propagate_inner(
         FlatNodeKind::VGroup { body }
         | FlatNodeKind::HGroup { body }
         | FlatNodeKind::TGroup { body } => {
-            propagate_in_slot_env(arena, body, inputs, cache, slot_env, clock_env)
+            propagate_in_slot_env(arena, body, inputs, cache, control_ids, slot_env, clock_env)
         }
         FlatNodeKind::Symbolic { body } => {
             let BoxMatch::Symbolic(slot, _) = match_box(arena, box_tree.as_tree_id()) else {
@@ -1665,8 +1738,15 @@ fn propagate_inner(
                 });
             }
             let previous = slot_env.insert(slot, inputs[0]);
-            let result =
-                propagate_in_slot_env(arena, body, &inputs[1..], cache, slot_env, clock_env);
+            let result = propagate_in_slot_env(
+                arena,
+                body,
+                &inputs[1..],
+                cache,
+                control_ids,
+                slot_env,
+                clock_env,
+            );
             if let Some(sig) = previous {
                 slot_env.insert(slot, sig);
             } else {
@@ -1684,8 +1764,16 @@ fn propagate_inner(
                     right_inputs: right_arity.inputs,
                 });
             }
-            let mid = propagate_in_slot_env(arena, left, inputs, cache, slot_env, clock_env)?;
-            propagate_in_slot_env(arena, right, &mid, cache, slot_env, clock_env)
+            let mid = propagate_in_slot_env(
+                arena,
+                left,
+                inputs,
+                cache,
+                control_ids,
+                slot_env,
+                clock_env,
+            )?;
+            propagate_in_slot_env(arena, right, &mid, cache, control_ids, slot_env, clock_env)
         }
         FlatNodeKind::Par(left, right) => {
             let left_arity = box_arity_typed(arena, left, cache)?;
@@ -1695,6 +1783,7 @@ fn propagate_inner(
                 left,
                 &inputs[..left_arity.inputs],
                 cache,
+                control_ids,
                 slot_env,
                 clock_env,
             )?;
@@ -1703,6 +1792,7 @@ fn propagate_inner(
                 right,
                 &inputs[left_arity.inputs..left_arity.inputs + right_arity.inputs],
                 cache,
+                control_ids,
                 slot_env,
                 clock_env,
             )?;
@@ -1720,9 +1810,25 @@ fn propagate_inner(
                     right_inputs: right_arity.inputs,
                 });
             }
-            let left_out = propagate_in_slot_env(arena, left, inputs, cache, slot_env, clock_env)?;
+            let left_out = propagate_in_slot_env(
+                arena,
+                left,
+                inputs,
+                cache,
+                control_ids,
+                slot_env,
+                clock_env,
+            )?;
             let split_in = split_signals(&left_out, right_arity.inputs);
-            propagate_in_slot_env(arena, right, &split_in, cache, slot_env, clock_env)
+            propagate_in_slot_env(
+                arena,
+                right,
+                &split_in,
+                cache,
+                control_ids,
+                slot_env,
+                clock_env,
+            )
         }
         FlatNodeKind::Merge(left, right) => {
             let left_arity = box_arity_typed(arena, left, cache)?;
@@ -1734,9 +1840,25 @@ fn propagate_inner(
                     right_inputs: right_arity.inputs,
                 });
             }
-            let left_out = propagate_in_slot_env(arena, left, inputs, cache, slot_env, clock_env)?;
+            let left_out = propagate_in_slot_env(
+                arena,
+                left,
+                inputs,
+                cache,
+                control_ids,
+                slot_env,
+                clock_env,
+            )?;
             let merge_in = mix_signals(arena, &left_out, right_arity.inputs);
-            propagate_in_slot_env(arena, right, &merge_in, cache, slot_env, clock_env)
+            propagate_in_slot_env(
+                arena,
+                right,
+                &merge_in,
+                cache,
+                control_ids,
+                slot_env,
+                clock_env,
+            )
         }
         FlatNodeKind::Rec(left, right) => {
             let left_arity = box_arity_typed(arena, left, cache)?;
@@ -1752,12 +1874,21 @@ fn propagate_inner(
             }
 
             let l0 = make_mem_sig_proj_list(arena, right_arity.inputs)?;
-            let l1 = propagate_in_slot_env(arena, right, &l0, cache, slot_env, clock_env)?;
+            let l1 =
+                propagate_in_slot_env(arena, right, &l0, cache, control_ids, slot_env, clock_env)?;
 
             let mut rec_inputs = l1;
             rec_inputs.extend(lift_signals(arena, inputs));
 
-            let l2 = propagate_in_slot_env(arena, left, &rec_inputs, cache, slot_env, clock_env)?;
+            let l2 = propagate_in_slot_env(
+                arena,
+                left,
+                &rec_inputs,
+                cache,
+                control_ids,
+                slot_env,
+                clock_env,
+            )?;
             let group_body = vec_to_list(arena, &l2);
             let group = debruijn_rec(arena, group_body);
 
@@ -1845,13 +1976,16 @@ fn propagate_inner(
             Ok(vec![b.ffun(ff, args)])
         }
         FlatNodeKind::Soundfile => {
-            let BoxMatch::Soundfile(label, chan) = match_box(arena, box_tree.as_tree_id()) else {
+            let BoxMatch::Soundfile(_, chan) = match_box(arena, box_tree.as_tree_id()) else {
                 unreachable!("flat soundfile node must decode to BoxMatch::Soundfile")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 2)?;
             let chan_count = usize_from_int_node(arena, chan, "soundfile channels")?;
             let mut b = SigBuilder::new(arena);
-            let soundfile = b.soundfile(label);
+            let control = *control_ids
+                .get(&box_tree.as_tree_id())
+                .expect("soundfile control id must be registered during UI extraction");
+            let soundfile = b.soundfile(control);
             let part = inputs[0];
             let length = b.soundfile_length(soundfile, part);
             let rate = b.soundfile_rate(soundfile, part);
@@ -1877,6 +2011,7 @@ fn propagate_inner(
             inputs,
             ClockedWrapperCtx {
                 cache,
+                control_ids,
                 slot_env,
                 clock_env,
             },
@@ -1889,6 +2024,7 @@ fn propagate_inner(
             inputs,
             ClockedWrapperCtx {
                 cache,
+                control_ids,
                 slot_env,
                 clock_env,
             },
@@ -1901,6 +2037,7 @@ fn propagate_inner(
             inputs,
             ClockedWrapperCtx {
                 cache,
+                control_ids,
                 slot_env,
                 clock_env,
             },
@@ -1920,6 +2057,7 @@ enum ClockedWrapperKind {
 /// Context carried while lowering clocked wrapper patterns.
 struct ClockedWrapperCtx<'a> {
     cache: &'a mut ArityCache,
+    control_ids: &'a ControlIds,
     slot_env: &'a mut SlotEnv,
     clock_env: TreeId,
 }
@@ -1942,6 +2080,7 @@ fn propagate_clocked_wrapper(
 
     let ClockedWrapperCtx {
         cache,
+        control_ids,
         slot_env,
         clock_env,
     } = ctx;
@@ -1952,7 +2091,7 @@ fn propagate_clocked_wrapper(
         return Ok(vec![zero; body_arity.outputs]);
     }
     if is_const_one(arena, clock) {
-        return propagate_in_slot_env(arena, body, tail, cache, slot_env, clock_env);
+        return propagate_in_slot_env(arena, body, tail, cache, control_ids, slot_env, clock_env);
     }
 
     let clock_env2 = make_clock_env(arena, clock_env, wrapper_node.as_tree_id(), inputs);
@@ -1973,7 +2112,7 @@ fn propagate_clocked_wrapper(
             })
             .collect()
     };
-    let y0 = propagate_in_slot_env(arena, body, &x2, cache, slot_env, clock_env2)?;
+    let y0 = propagate_in_slot_env(arena, body, &x2, cache, control_ids, slot_env, clock_env2)?;
 
     let y1: Vec<_> = {
         let mut b = SigBuilder::new(arena);

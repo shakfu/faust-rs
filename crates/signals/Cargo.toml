@@ -10,3 +10,4 @@ workspace = true
 
 [dependencies]
 tlib = { path = "../tlib" }
+ui = { path = "../ui" }

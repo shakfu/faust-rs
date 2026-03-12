@@ -51,6 +51,7 @@ pub use error::{SignalFirError, SignalFirErrorCode};
 use fir::{FirId, FirStore, FirType};
 use signals::SigId;
 use tlib::TreeArena;
+use ui::UiProgram;
 
 use crate::signal_prepare::prepare_signals_for_fir;
 
@@ -162,6 +163,29 @@ pub fn compile_signals_to_fir_fastlane(
     num_outputs: usize,
     options: &SignalFirOptions,
 ) -> Result<SignalFirOutput, SignalFirError> {
+    let empty_ui = UiProgram::empty();
+    compile_signals_to_fir_fastlane_with_ui(
+        _arena,
+        signals,
+        num_inputs,
+        num_outputs,
+        &empty_ui,
+        options,
+    )
+}
+
+/// Compiles propagated signals plus canonical grouped UI into a FIR module.
+///
+/// This is the grouped-UI-aware fast-lane entry point used by the compiler
+/// facade once `propagate` owns explicit `UiProgram` output.
+pub fn compile_signals_to_fir_fastlane_with_ui(
+    _arena: &TreeArena,
+    signals: &[SigId],
+    num_inputs: usize,
+    num_outputs: usize,
+    ui: &UiProgram,
+    options: &SignalFirOptions,
+) -> Result<SignalFirOutput, SignalFirError> {
     let plan = planner::plan_signals(signals, num_inputs, num_outputs, options)?;
     let prepared = prepare_signals_for_fir(_arena, signals).map_err(|err| {
         SignalFirError::new(
@@ -174,6 +198,7 @@ pub fn compile_signals_to_fir_fastlane(
         options.module_name.as_str(),
         &prepared.arena,
         &prepared.outputs,
+        ui,
         &prepared.types,
         options.real_type.as_fir_type(),
     )
@@ -181,11 +206,15 @@ pub fn compile_signals_to_fir_fastlane(
 
 #[cfg(test)]
 mod tests {
-    use super::{RealType, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane};
+    use super::{
+        RealType, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane,
+        compile_signals_to_fir_fastlane_with_ui,
+    };
     use fir::{FirBinOp, FirMatch, FirType, match_fir};
     use signals::{BinOp, SigBuilder};
     use std::collections::HashSet;
     use tlib::{TreeArena, de_bruijn_rec, de_bruijn_ref};
+    use ui::{ControlKind, ControlRange, ControlSpec, UiBuilder, UiProgram, UiRootOrigin};
 
     use crate::signal_prepare::{SimpleSigType, prepare_signals_for_fir};
 
@@ -243,6 +272,39 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("compute should contain an explicit sample loop"))
+    }
+
+    fn one_control_ui(
+        kind: ControlKind,
+        label: &str,
+        range: Option<ControlRange>,
+        output: bool,
+        soundfile: bool,
+    ) -> UiProgram {
+        let mut arena = TreeArena::new();
+        let leaf = {
+            let mut b = UiBuilder::new(&mut arena);
+            if soundfile {
+                b.soundfile(0)
+            } else if output {
+                b.output_control(0)
+            } else {
+                b.input_control(0)
+            }
+        };
+        let root = UiBuilder::new(&mut arena).vgroup("", &[leaf]);
+        UiProgram {
+            arena,
+            root,
+            controls: vec![ControlSpec {
+                id: 0,
+                kind,
+                label: label.to_owned(),
+                metadata: Vec::new(),
+                range,
+            }],
+            root_origin: UiRootOrigin::Synthesized,
+        }
     }
 
     #[test]
@@ -336,21 +398,34 @@ mod tests {
     #[test]
     fn section_routing_places_ui_and_state_resets_in_distinct_functions() {
         let mut arena = TreeArena::new();
-        let gain = arena.symbol("gain");
+        let ui = one_control_ui(
+            ControlKind::HSlider,
+            "gain",
+            Some(ControlRange {
+                init: 0.2,
+                min: 0.0,
+                max: 1.0,
+                step: 0.01,
+            }),
+            false,
+            false,
+        );
         let sig0 = {
             let mut b = SigBuilder::new(&mut arena);
-            let init = b.real(0.2);
-            let min = b.real(0.0);
-            let max = b.real(1.0);
-            let step = b.real(0.01);
-            let slider = b.hslider(gain, init, min, max, step);
+            let slider = b.hslider(0);
             let delayed = b.delay1(slider);
             let in0 = b.input(0);
             b.binop(BinOp::Add, delayed, in0)
         };
-        let out =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-                .expect("sectioned module should compile");
+        let out = compile_signals_to_fir_fastlane_with_ui(
+            &arena,
+            &[sig0],
+            1,
+            1,
+            &ui,
+            &SignalFirOptions::default(),
+        )
+        .expect("sectioned module should compile");
 
         let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
             panic!("module root expected");
@@ -431,17 +506,32 @@ mod tests {
     #[test]
     fn bargraph_emits_runtime_zone_store_in_compute() {
         let mut arena = TreeArena::new();
-        let level = arena.symbol("level");
+        let ui = one_control_ui(
+            ControlKind::HBargraph,
+            "level",
+            Some(ControlRange {
+                init: 0.0,
+                min: -60.0,
+                max: 6.0,
+                step: 0.0,
+            }),
+            true,
+            false,
+        );
         let sig0 = {
             let mut b = SigBuilder::new(&mut arena);
-            let min = b.real(-60.0);
-            let max = b.real(6.0);
             let in0 = b.input(0);
-            b.hbargraph(level, min, max, in0)
+            b.hbargraph(0, in0)
         };
-        let out =
-            compile_signals_to_fir_fastlane(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-                .expect("bargraph signal should compile");
+        let out = compile_signals_to_fir_fastlane_with_ui(
+            &arena,
+            &[sig0],
+            1,
+            1,
+            &ui,
+            &SignalFirOptions::default(),
+        )
+        .expect("bargraph signal should compile");
 
         let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
             panic!("module root expected");

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_59_higher_order_named_argument_apply.dsp
+bytes=96
+lines=3
+fnv1a64=2323840925ce315e

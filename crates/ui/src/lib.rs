@@ -108,6 +108,13 @@ pub struct ControlSpec {
     pub range: Option<ControlRange>,
 }
 
+/// Source of the canonical root group stored in [`UiProgram`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiRootOrigin {
+    Explicit,
+    Synthesized,
+}
+
 /// Canonical grouped-UI artifact owned after the `propagate` boundary.
 ///
 /// Rust architecture note:
@@ -121,6 +128,34 @@ pub struct UiProgram {
     pub arena: TreeArena,
     pub root: UiId,
     pub controls: Vec<ControlSpec>,
+    pub root_origin: UiRootOrigin,
+}
+
+impl UiProgram {
+    #[must_use]
+    /// Builds one empty grouped-UI program with a canonical empty vertical root.
+    pub fn empty() -> Self {
+        let mut arena = TreeArena::new();
+        let root = UiBuilder::new(&mut arena).vgroup("", &[]);
+        Self {
+            arena,
+            root,
+            controls: Vec::new(),
+            root_origin: UiRootOrigin::Synthesized,
+        }
+    }
+
+    #[must_use]
+    /// Returns one control specification by stable [`ControlId`].
+    pub fn control(&self, id: ControlId) -> Option<&ControlSpec> {
+        self.controls.get(usize::try_from(id).ok()?)
+    }
+
+    #[must_use]
+    /// Returns `true` when this program has no registered UI controls.
+    pub fn is_empty(&self) -> bool {
+        self.controls.is_empty()
+    }
 }
 
 /// Canonical builder API for constructing UI IR nodes.

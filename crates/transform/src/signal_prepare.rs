@@ -393,24 +393,8 @@ impl<'a> SimpleTyper<'a> {
             SigMatch::Proj(index, group) => self.infer_proj(index, group)?,
             SigMatch::Rec(body) => self.infer_sig(body)?,
             SigMatch::Button(_) | SigMatch::Checkbox(_) => TypeSlot::Real,
-            SigMatch::VSlider(_, init, min, max, step)
-            | SigMatch::HSlider(_, init, min, max, step)
-            | SigMatch::NumEntry(_, init, min, max, step) => {
-                let init_ty = self.infer_sig(init)?;
-                let min_ty = self.infer_sig(min)?;
-                let max_ty = self.infer_sig(max)?;
-                let step_ty = self.infer_sig(step)?;
-                let init_ty = self.numeric_type(init_ty, "slider init")?;
-                let min_ty = self.numeric_type(min_ty, "slider min")?;
-                let max_ty = self.numeric_type(max_ty, "slider max")?;
-                let step_ty = self.numeric_type(step_ty, "slider step")?;
-                let _ = self.unify_slots(init_ty, min_ty, "slider range")?;
-                let _ = self.unify_slots(max_ty, step_ty, "slider range")?;
-                TypeSlot::Real
-            }
-            SigMatch::VBargraph(_, min, max, value) | SigMatch::HBargraph(_, min, max, value) => {
-                let _ = self.infer_sig(min)?;
-                let _ = self.infer_sig(max)?;
+            SigMatch::VSlider(_) | SigMatch::HSlider(_) | SigMatch::NumEntry(_) => TypeSlot::Real,
+            SigMatch::VBargraph(_, value) | SigMatch::HBargraph(_, value) => {
                 self.infer_sig(value)?
             }
             SigMatch::Attach(left, right)
@@ -986,45 +970,29 @@ impl<'a> SignalPromoter<'a> {
                 let mut b = SigBuilder::new(self.arena);
                 b.rec(body)
             }
-            SigMatch::VSlider(label, init, min, max, step) => {
-                let init = self.promote(init)?;
-                let min = self.promote(min)?;
-                let max = self.promote(max)?;
-                let step = self.promote(step)?;
+            SigMatch::VSlider(control) => {
                 let mut b = SigBuilder::new(self.arena);
-                b.vslider(label, init, min, max, step)
+                b.vslider(control)
             }
-            SigMatch::HSlider(label, init, min, max, step) => {
-                let init = self.promote(init)?;
-                let min = self.promote(min)?;
-                let max = self.promote(max)?;
-                let step = self.promote(step)?;
+            SigMatch::HSlider(control) => {
                 let mut b = SigBuilder::new(self.arena);
-                b.hslider(label, init, min, max, step)
+                b.hslider(control)
             }
-            SigMatch::NumEntry(label, init, min, max, step) => {
-                let init = self.promote(init)?;
-                let min = self.promote(min)?;
-                let max = self.promote(max)?;
-                let step = self.promote(step)?;
+            SigMatch::NumEntry(control) => {
                 let mut b = SigBuilder::new(self.arena);
-                b.numentry(label, init, min, max, step)
+                b.numentry(control)
             }
-            SigMatch::VBargraph(label, min, max, value) => {
-                let min = self.promote(min)?;
-                let max = self.promote(max)?;
+            SigMatch::VBargraph(control, value) => {
                 let value_promoted = self.promote(value)?;
                 let value_promoted = self.smart_float_cast(value, value_promoted)?;
                 let mut b = SigBuilder::new(self.arena);
-                b.vbargraph(label, min, max, value_promoted)
+                b.vbargraph(control, value_promoted)
             }
-            SigMatch::HBargraph(label, min, max, value) => {
-                let min = self.promote(min)?;
-                let max = self.promote(max)?;
+            SigMatch::HBargraph(control, value) => {
                 let value_promoted = self.promote(value)?;
                 let value_promoted = self.smart_float_cast(value, value_promoted)?;
                 let mut b = SigBuilder::new(self.arena);
-                b.hbargraph(label, min, max, value_promoted)
+                b.hbargraph(control, value_promoted)
             }
             SigMatch::Attach(left, right) => {
                 let left = self.promote(left)?;
@@ -1048,9 +1016,9 @@ impl<'a> SignalPromoter<'a> {
                 let values = values.to_vec();
                 self.promote_waveform(&values)?
             }
-            SigMatch::Soundfile(label) => {
+            SigMatch::Soundfile(control) => {
                 let mut b = SigBuilder::new(self.arena);
-                b.soundfile(label)
+                b.soundfile(control)
             }
             SigMatch::SoundfileLength(soundfile, part) => {
                 let soundfile = self.promote(soundfile)?;

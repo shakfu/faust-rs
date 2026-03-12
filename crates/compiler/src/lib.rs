@@ -52,7 +52,7 @@ use signals::{SigId, dump_sig_readable};
 use tlib::NodeKind;
 pub use transform::signal_fir::RealType;
 use transform::signal_fir::{
-    SignalFirError, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane,
+    SignalFirError, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui,
 };
 use ui::UiProgram;
 
@@ -1486,11 +1486,12 @@ fn lower_signals_to_fir_transform_fastlane(
         strict_mode: true,
         real_type,
     };
-    let lowered = compile_signals_to_fir_fastlane(
+    let lowered = compile_signals_to_fir_fastlane_with_ui(
         &output.parse.state.arena,
         &output.signals,
         output.process_arity.inputs,
         output.process_arity.outputs,
+        &output.ui,
         &signal_fir_options,
     )?;
     Ok(FirCompileOutput {
@@ -1593,11 +1594,12 @@ fn lower_signals_to_c_transform_fastlane(
         strict_mode: true,
         real_type,
     };
-    let lowered = compile_signals_to_fir_fastlane(
+    let lowered = compile_signals_to_fir_fastlane_with_ui(
         &output.parse.state.arena,
         &output.signals,
         output.process_arity.inputs,
         output.process_arity.outputs,
+        &output.ui,
         &signal_fir_options,
     )
     .map_err(LowerToCError::Transform)?;

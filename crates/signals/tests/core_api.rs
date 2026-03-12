@@ -108,22 +108,20 @@ fn table_wrappers_and_select3_follow_cpp_shape() {
 }
 
 #[test]
-fn ui_shapes_decode_with_list4_payload_order() {
+fn ui_shapes_decode_with_control_ids() {
     let mut arena = TreeArena::new();
     let mut b = SigBuilder::new(&mut arena);
-    let label = b.int(123);
-    let init = b.real(0.5);
-    let min = b.int(0);
-    let max = b.int(1);
-    let step = b.real(0.01);
     let sig = b.input(0);
+    let slider = 7;
+    let bargraph = 8;
+    let soundfile = 9;
 
-    let vs = b.vslider(label, init, min, max, step);
-    let hs = b.hslider(label, init, min, max, step);
-    let ne = b.numentry(label, init, min, max, step);
-    let vb = b.vbargraph(label, min, max, sig);
-    let hb = b.hbargraph(label, min, max, sig);
-    let sf = b.soundfile(label);
+    let vs = b.vslider(slider);
+    let hs = b.hslider(slider);
+    let ne = b.numentry(slider);
+    let vb = b.vbargraph(bargraph, sig);
+    let hb = b.hbargraph(bargraph, sig);
+    let sf = b.soundfile(soundfile);
     let sf_part = b.int(2);
     let sf_chan = b.int(1);
     let sf_ridx = b.input(3);
@@ -131,27 +129,12 @@ fn ui_shapes_decode_with_list4_payload_order() {
     let sf_rate = b.soundfile_rate(sf, sf_part);
     let sf_buf = b.soundfile_buffer(sf, sf_chan, sf_part, sf_ridx);
 
-    assert_eq!(
-        match_sig(&arena, vs),
-        SigMatch::VSlider(label, init, min, max, step)
-    );
-    assert_eq!(
-        match_sig(&arena, hs),
-        SigMatch::HSlider(label, init, min, max, step)
-    );
-    assert_eq!(
-        match_sig(&arena, ne),
-        SigMatch::NumEntry(label, init, min, max, step)
-    );
-    assert_eq!(
-        match_sig(&arena, vb),
-        SigMatch::VBargraph(label, min, max, sig)
-    );
-    assert_eq!(
-        match_sig(&arena, hb),
-        SigMatch::HBargraph(label, min, max, sig)
-    );
-    assert_eq!(match_sig(&arena, sf), SigMatch::Soundfile(label));
+    assert_eq!(match_sig(&arena, vs), SigMatch::VSlider(slider));
+    assert_eq!(match_sig(&arena, hs), SigMatch::HSlider(slider));
+    assert_eq!(match_sig(&arena, ne), SigMatch::NumEntry(slider));
+    assert_eq!(match_sig(&arena, vb), SigMatch::VBargraph(bargraph, sig));
+    assert_eq!(match_sig(&arena, hb), SigMatch::HBargraph(bargraph, sig));
+    assert_eq!(match_sig(&arena, sf), SigMatch::Soundfile(soundfile));
     assert_eq!(
         match_sig(&arena, sf_len),
         SigMatch::SoundfileLength(sf, sf_part)
@@ -207,8 +190,7 @@ fn stream_wrappers_and_recursion_shapes_are_stable() {
 fn dump_is_deterministic() {
     let mut arena = TreeArena::new();
     let mut b = SigBuilder::new(&mut arena);
-    let one = b.int(1);
-    let btn = b.button(one);
+    let btn = b.button(1);
     let inp = b.input(0);
     let d1 = b.delay1(inp);
     let sig = b.attach(btn, d1);

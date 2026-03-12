@@ -2,7 +2,8 @@
 
 use tlib::TreeArena;
 use ui::{
-    ControlKind, ControlRange, ControlSpec, UiBuilder, UiGroupKind, UiMatch, UiProgram, match_ui,
+    ControlKind, ControlRange, ControlSpec, UiBuilder, UiGroupKind, UiMatch, UiProgram,
+    UiRootOrigin, match_ui,
 };
 
 #[test]
@@ -85,6 +86,7 @@ fn ui_program_keeps_root_and_control_registry() {
         arena,
         root,
         controls,
+        root_origin: UiRootOrigin::Explicit,
     };
 
     assert_eq!(program.controls.len(), 1);

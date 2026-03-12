@@ -12,7 +12,7 @@ use propagate::{
 };
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId};
-use ui::{ControlKind, UiGroupKind, UiMatch, match_ui};
+use ui::{ControlKind, UiGroupKind, UiMatch, UiRootOrigin, match_ui};
 
 #[test]
 fn make_sig_input_list_builds_ordered_inputs() {
@@ -285,9 +285,10 @@ fn propagate_with_ui_collects_nested_groups_and_control_specs() {
         .expect("grouped slider should propagate with UI");
 
     assert_eq!(out.signals.len(), 1);
+    assert_eq!(out.ui.root_origin, UiRootOrigin::Explicit);
     assert!(matches!(
         match_sig(&arena, out.signals[0]),
-        SigMatch::HSlider(_, _, _, _, _)
+        SigMatch::HSlider(_)
     ));
     let outer = expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Vertical, "main");
     assert_eq!(outer.len(), 1);
@@ -325,6 +326,7 @@ fn propagate_with_ui_synthesizes_root_group_for_multiple_ui_roots() {
     let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
         .expect("multiple grouped UI roots should propagate");
 
+    assert_eq!(out.ui.root_origin, UiRootOrigin::Synthesized);
     let root_children = expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Vertical, "");
     assert_eq!(root_children.len(), 2);
     let left_children = expect_ui_group(&out.ui, root_children[0], UiGroupKind::Vertical, "main");
