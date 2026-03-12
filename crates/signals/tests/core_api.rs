@@ -227,3 +227,18 @@ fn dump_readable_prints_binop_opcode_name() {
     let got = dump_sig_readable(&arena, add);
     assert!(got.contains("SIGBINOP(op=add (+),"));
 }
+
+#[test]
+fn dump_readable_handles_deep_left_spines_without_recursing() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let mut sig = b.input(0);
+    for _ in 0..20_000 {
+        let zero = b.int(0);
+        sig = b.add(sig, zero);
+    }
+
+    let got = dump_sig_readable(&arena, sig);
+    assert!(got.starts_with("SIGBINOP(op=add (+),"));
+    assert!(got.contains("SIGINPUT(int(0))"));
+}

@@ -1061,7 +1061,7 @@ pub fn match_sig<'a>(arena: &'a TreeArena, id: SigId) -> SigMatch<'a> {
 /// Dumps the structural signal tree using debug-style formatting.
 pub fn dump_sig(arena: &TreeArena, root: SigId) -> String {
     let mut out = String::new();
-    dump_node(arena, root, &mut out);
+    dump_node_iter(arena, root, &mut out, false);
     out
 }
 
@@ -1073,7 +1073,7 @@ pub fn dump_sig(arena: &TreeArena, root: SigId) -> String {
 /// Dumps the signal tree in a more readable Faust-oriented textual form.
 pub fn dump_sig_readable(arena: &TreeArena, root: SigId) -> String {
     let mut out = String::new();
-    dump_node_readable(arena, root, &mut out);
+    dump_node_iter(arena, root, &mut out, true);
     out
 }
 
@@ -1135,134 +1135,83 @@ fn slider_params4(arena: &TreeArena, params: SigId) -> Option<(SigId, SigId, Sig
     Some((init, min, max, step))
 }
 
-/// Recursive structural dumper used by [`dump_sig`].
-///
-/// This function intentionally emits:
-/// - stable tag names,
-/// - explicit primitive payloads (`int`, `float_bits`, `sym`, `str`),
-/// - no arena addresses or hash-consing identities.
-///
-/// The output is therefore suitable for differential snapshots across runs.
-fn dump_node(arena: &TreeArena, id: SigId, out: &mut String) {
-    let Some(node) = arena.node(id) else {
-        write!(out, "<invalid:{}>", id.as_u32()).expect("String write cannot fail");
-        return;
-    };
-
-    match &node.kind {
-        NodeKind::Nil => out.push_str("nil"),
-        NodeKind::Cons => {
-            out.push_str("cons(");
-            if let Some(head) = node.children.get(0) {
-                dump_node(arena, head, out);
-            } else {
-                out.push_str("<missing>");
-            }
-            out.push_str(", ");
-            if let Some(tail) = node.children.get(1) {
-                dump_node(arena, tail, out);
-            } else {
-                out.push_str("<missing>");
-            }
-            out.push(')');
-        }
-        NodeKind::Symbol(name) => {
-            write!(out, "sym({name:?})").expect("String write cannot fail");
-        }
-        NodeKind::StringLiteral(value) => {
-            write!(out, "str({value:?})").expect("String write cannot fail");
-        }
-        NodeKind::Int(value) => {
-            write!(out, "int({value})").expect("String write cannot fail");
-        }
-        NodeKind::FloatBits(bits) => {
-            write!(out, "float_bits(0x{bits:016x})").expect("String write cannot fail");
-        }
-        NodeKind::Tag(tag_id) => {
-            let tag_name = arena.tag_name(*tag_id).unwrap_or("<unknown-tag>");
-            write!(out, "{tag_name}(").expect("String write cannot fail");
-            for (idx, child) in node.children.as_slice().iter().enumerate() {
-                if idx > 0 {
-                    out.push_str(", ");
-                }
-                dump_node(arena, *child, out);
-            }
-            out.push(')');
-        }
-    }
+enum DumpTask {
+    Node(SigId),
+    Static(&'static str),
+    Owned(String),
 }
 
-/// Recursive structural dumper used by [`dump_sig_readable`].
-///
-/// Same shape guarantees as [`dump_node`], but augments binary-operator tag
-/// nodes with a readable `SIGBINOP` opcode annotation when possible.
-fn dump_node_readable(arena: &TreeArena, id: SigId, out: &mut String) {
-    let Some(node) = arena.node(id) else {
-        write!(out, "<invalid:{}>", id.as_u32()).expect("String write cannot fail");
-        return;
-    };
-
-    match &node.kind {
-        NodeKind::Nil => out.push_str("nil"),
-        NodeKind::Cons => {
-            out.push_str("cons(");
-            if let Some(head) = node.children.get(0) {
-                dump_node_readable(arena, head, out);
-            } else {
-                out.push_str("<missing>");
-            }
-            out.push_str(", ");
-            if let Some(tail) = node.children.get(1) {
-                dump_node_readable(arena, tail, out);
-            } else {
-                out.push_str("<missing>");
-            }
-            out.push(')');
-        }
-        NodeKind::Symbol(name) => {
-            write!(out, "sym({name:?})").expect("String write cannot fail");
-        }
-        NodeKind::StringLiteral(value) => {
-            write!(out, "str({value:?})").expect("String write cannot fail");
-        }
-        NodeKind::Int(value) => {
-            write!(out, "int({value})").expect("String write cannot fail");
-        }
-        NodeKind::FloatBits(bits) => {
-            write!(out, "float_bits(0x{bits:016x})").expect("String write cannot fail");
-        }
-        NodeKind::Tag(tag_id) => {
-            let tag_name = arena.tag_name(*tag_id).unwrap_or("<unknown-tag>");
-            if tag_name == SIG_BINOP_TAG && node.children.len() == 3 {
-                let op_id = node.children.get(0).unwrap_or_else(|| arena.nil());
-                let x_id = node.children.get(1).unwrap_or_else(|| arena.nil());
-                let y_id = node.children.get(2).unwrap_or_else(|| arena.nil());
-                out.push_str(SIG_BINOP_TAG);
-                out.push_str("(op=");
-                let op_desc = match arena.kind(op_id) {
-                    Some(NodeKind::Int(raw)) => match BinOp::from_raw(*raw) {
-                        Some(op) => format!("{} ({})", op.name(), op.symbol()),
-                        None => format!("unknown({raw})"),
-                    },
-                    _ => "unknown".to_owned(),
+fn dump_node_iter(arena: &TreeArena, id: SigId, out: &mut String, readable: bool) {
+    let mut stack = vec![DumpTask::Node(id)];
+    while let Some(task) = stack.pop() {
+        match task {
+            DumpTask::Node(id) => {
+                let Some(node) = arena.node(id) else {
+                    write!(out, "<invalid:{}>", id.as_u32()).expect("String write cannot fail");
+                    continue;
                 };
-                out.push_str(&op_desc);
-                out.push_str(", ");
-                dump_node_readable(arena, x_id, out);
-                out.push_str(", ");
-                dump_node_readable(arena, y_id, out);
-                out.push(')');
-                return;
-            }
 
-            write!(out, "{tag_name}(").expect("String write cannot fail");
-            for (idx, child) in node.children.as_slice().iter().enumerate() {
-                if idx > 0 {
-                    out.push_str(", ");
+                match &node.kind {
+                    NodeKind::Nil => out.push_str("nil"),
+                    NodeKind::Cons => {
+                        stack.push(DumpTask::Static(")"));
+                        match node.children.get(1) {
+                            Some(tail) => stack.push(DumpTask::Node(tail)),
+                            None => stack.push(DumpTask::Static("<missing>")),
+                        }
+                        stack.push(DumpTask::Static(", "));
+                        match node.children.get(0) {
+                            Some(head) => stack.push(DumpTask::Node(head)),
+                            None => stack.push(DumpTask::Static("<missing>")),
+                        }
+                        stack.push(DumpTask::Static("cons("));
+                    }
+                    NodeKind::Symbol(name) => {
+                        write!(out, "sym({name:?})").expect("String write cannot fail");
+                    }
+                    NodeKind::StringLiteral(value) => {
+                        write!(out, "str({value:?})").expect("String write cannot fail");
+                    }
+                    NodeKind::Int(value) => {
+                        write!(out, "int({value})").expect("String write cannot fail");
+                    }
+                    NodeKind::FloatBits(bits) => {
+                        write!(out, "float_bits(0x{bits:016x})").expect("String write cannot fail");
+                    }
+                    NodeKind::Tag(tag_id) => {
+                        let tag_name = arena.tag_name(*tag_id).unwrap_or("<unknown-tag>");
+                        if readable && tag_name == SIG_BINOP_TAG && node.children.len() == 3 {
+                            let op_id = node.children.get(0).unwrap_or_else(|| arena.nil());
+                            let x_id = node.children.get(1).unwrap_or_else(|| arena.nil());
+                            let y_id = node.children.get(2).unwrap_or_else(|| arena.nil());
+                            let op_desc = match arena.kind(op_id) {
+                                Some(NodeKind::Int(raw)) => match BinOp::from_raw(*raw) {
+                                    Some(op) => format!("{} ({})", op.name(), op.symbol()),
+                                    None => format!("unknown({raw})"),
+                                },
+                                _ => "unknown".to_owned(),
+                            };
+                            stack.push(DumpTask::Static(")"));
+                            stack.push(DumpTask::Node(y_id));
+                            stack.push(DumpTask::Static(", "));
+                            stack.push(DumpTask::Node(x_id));
+                            stack.push(DumpTask::Owned(format!("{SIG_BINOP_TAG}(op={op_desc}, ")));
+                            continue;
+                        }
+
+                        stack.push(DumpTask::Static(")"));
+                        for (idx, child) in node.children.as_slice().iter().enumerate().rev() {
+                            stack.push(DumpTask::Node(*child));
+                            if idx > 0 {
+                                stack.push(DumpTask::Static(", "));
+                            }
+                        }
+                        stack.push(DumpTask::Owned(format!("{tag_name}(")));
+                    }
                 }
-                dump_node_readable(arena, *child, out);
             }
-            out.push(')');
+            DumpTask::Static(text) => out.push_str(text),
+            DumpTask::Owned(text) => out.push_str(&text),
         }
     }
 }

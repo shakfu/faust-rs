@@ -235,7 +235,12 @@ fn parse_import_line(line: &str) -> Option<String> {
     let end_quote = suffix.find('"')?;
     let import_name = &suffix[..end_quote];
     let rest = suffix[end_quote + 1..].trim();
-    if rest != ");" {
+    if !matches!(rest, ");")
+        && !rest.starts_with(");//")
+        && !rest.starts_with("); //")
+        && !rest.starts_with(");/*")
+        && !rest.starts_with("); /*")
+    {
         return None;
     }
     Some(import_name.to_owned())
@@ -291,6 +296,10 @@ mod tests {
         assert_eq!(
             parse_import_line(r#"  import( "foo/bar.lib" ); "#).as_deref(),
             Some("foo/bar.lib")
+        );
+        assert_eq!(
+            parse_import_line(r#"import("music.lib"); // transitive dependency"#).as_deref(),
+            Some("music.lib")
         );
         assert!(parse_import_line(r#"process = _;"#).is_none());
     }

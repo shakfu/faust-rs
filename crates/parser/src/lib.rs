@@ -72,6 +72,7 @@ pub struct ParseState {
     pub ctx: ParserCtx,
     source_file: Box<str>,
     source_origins: Option<Vec<SourceLineOrigin>>,
+    source_line_starts: Vec<usize>,
     metadata_store: CompilationMetadataStore,
 }
 
@@ -81,6 +82,7 @@ impl ParseState {
     pub fn new(source_file: &str) -> Self {
         Self::new_with_origins_and_metadata(
             source_file,
+            "",
             None,
             CompilationMetadataStore::new(source_file),
         )
@@ -90,10 +92,12 @@ impl ParseState {
     #[must_use]
     pub fn new_with_origins(
         source_file: &str,
+        input: &str,
         source_origins: Option<Vec<SourceLineOrigin>>,
     ) -> Self {
         Self::new_with_origins_and_metadata(
             source_file,
+            input,
             source_origins,
             CompilationMetadataStore::new(source_file),
         )
@@ -104,6 +108,7 @@ impl ParseState {
     #[must_use]
     pub fn new_with_origins_and_metadata(
         source_file: &str,
+        input: &str,
         source_origins: Option<Vec<SourceLineOrigin>>,
         metadata_store: CompilationMetadataStore,
     ) -> Self {
@@ -112,6 +117,7 @@ impl ParseState {
             ctx: ParserCtx::new(),
             source_file: source_file.into(),
             source_origins,
+            source_line_starts: compute_line_starts(input),
             metadata_store,
         }
     }
@@ -1059,10 +1065,21 @@ impl ParseState {
 
     fn update_cursor_from_span<'lexer, 'input: 'lexer>(
         &mut self,
-        lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
+        _lexer: &'lexer dyn NonStreamingLexer<'input, DefaultLexerTypes<u32>>,
         span: Span,
     ) {
-        let ((line, col), (end_line, end_col)) = lexer.line_col(span);
+        let ((line, col), (end_line, end_col)) = self.span_line_col(span);
+        if self.source_origins.is_none() {
+            self.ctx.set_cursor_span(
+                &self.source_file,
+                u32::try_from(line).unwrap_or(u32::MAX),
+                u32::try_from(col).unwrap_or(u32::MAX),
+                u32::try_from(end_line).unwrap_or(u32::MAX),
+                u32::try_from(end_col).unwrap_or(u32::MAX),
+            );
+            return;
+        }
+
         let (file, mapped_line) = self.resolve_source_location(line);
         let (_, mapped_end_line) = self.resolve_source_location(end_line);
         let file_owned = file.to_string_lossy().into_owned();
@@ -1086,6 +1103,36 @@ impl ParseState {
             u32::try_from(line).unwrap_or(u32::MAX),
         )
     }
+
+    fn span_line_col(&self, span: Span) -> ((usize, usize), (usize, usize)) {
+        (
+            self.offset_line_col(span.start()),
+            self.offset_line_col(span.end()),
+        )
+    }
+
+    fn offset_line_col(&self, offset: usize) -> (usize, usize) {
+        let line_idx = match self.source_line_starts.binary_search(&offset) {
+            Ok(idx) => idx,
+            Err(0) => 0,
+            Err(idx) => idx.saturating_sub(1),
+        };
+        let line_start = self.source_line_starts[line_idx];
+        (
+            line_idx.saturating_add(1),
+            offset.saturating_sub(line_start).saturating_add(1),
+        )
+    }
+}
+
+fn compute_line_starts(input: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (idx, byte) in input.bytes().enumerate() {
+        if byte == b'\n' {
+            starts.push(idx.saturating_add(1));
+        }
+    }
+    starts
 }
 
 /// Maps one lexer token (or lexer error token) to its raw span.
@@ -1223,6 +1270,7 @@ fn parse_program_with_origins(
     let lexer = lexerdef.lexer(input);
     let state = RefCell::new(ParseState::new_with_origins_and_metadata(
         source_file,
+        input,
         source_origins,
         metadata_store,
     ));
@@ -1235,17 +1283,27 @@ fn parse_program_with_origins(
             lrpar::LexParseError::LexError(e) => e.span(),
             lrpar::LexParseError::ParseError(e) => e.lexeme().span(),
         };
-        let ((line, col), (end_line, end_col)) = lexer.line_col(span);
-        let (file, mapped_line) = state.resolve_source_location(line);
-        let (_, mapped_end_line) = state.resolve_source_location(end_line);
-        let file_owned = file.to_string_lossy().into_owned();
-        state.ctx.set_cursor_span(
-            &file_owned,
-            mapped_line,
-            u32::try_from(col).unwrap_or(u32::MAX),
-            mapped_end_line,
-            u32::try_from(end_col).unwrap_or(u32::MAX),
-        );
+        let ((line, col), (end_line, end_col)) = state.span_line_col(span);
+        if state.source_origins.is_none() {
+            state.ctx.set_cursor_span(
+                &state.source_file,
+                u32::try_from(line).unwrap_or(u32::MAX),
+                u32::try_from(col).unwrap_or(u32::MAX),
+                u32::try_from(end_line).unwrap_or(u32::MAX),
+                u32::try_from(end_col).unwrap_or(u32::MAX),
+            );
+        } else {
+            let (file, mapped_line) = state.resolve_source_location(line);
+            let (_, mapped_end_line) = state.resolve_source_location(end_line);
+            let file_owned = file.to_string_lossy().into_owned();
+            state.ctx.set_cursor_span(
+                &file_owned,
+                mapped_line,
+                u32::try_from(col).unwrap_or(u32::MAX),
+                mapped_end_line,
+                u32::try_from(end_col).unwrap_or(u32::MAX),
+            );
+        }
         let message = err.pp(&lexer, &faustparser_y::token_epp).to_string();
         state
             .ctx
