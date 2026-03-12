@@ -3385,7 +3385,8 @@ fn map_children(
     };
     let mut children = Vec::with_capacity(node.children.len());
     for child in node.children.as_slice() {
-        children.push(eval_box(arena, *child, env, loop_detector)?);
+        let value = eval_value(arena, *child, env, loop_detector)?;
+        children.push(a2sb_value(arena, value, loop_detector)?);
     }
     Ok(arena.intern(node.kind, &children))
 }
