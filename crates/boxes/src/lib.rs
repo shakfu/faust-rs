@@ -1952,8 +1952,8 @@ fn build_box_abstr(arena: &mut TreeArena, args: BoxId, body: BoxId) -> BoxId {
     let Some(tail) = arena.tl(args) else {
         return body;
     };
-    let nested = build_box_abstr(arena, tail, body);
-    node_abstr(arena, head, nested)
+    let nested = node_abstr(arena, head, body);
+    build_box_abstr(arena, tail, nested)
 }
 
 /// Equivalent to C++ `buildBoxModulation(largs, body)` using parser-built arg list.

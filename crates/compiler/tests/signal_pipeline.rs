@@ -285,6 +285,30 @@ fn corpus_extended_primitives_cover_unary_and_binary_signal_nodes() {
 }
 
 #[test]
+fn corpus_higher_order_named_direct_apply_lowers_checkbox_ui() {
+    let out = compile_corpus("rep_58_higher_order_named_direct_apply.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Checkbox(_)
+    ));
+}
+
+#[test]
+fn corpus_higher_order_named_argument_apply_lowers_checkbox_ui() {
+    let out = compile_corpus("rep_59_higher_order_named_argument_apply.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Checkbox(_)
+    ));
+}
+
+#[test]
 fn corpus_sine_phasor_lowers_to_gain_times_sin_of_feedback_phase() {
     let out = compile_corpus("rep_38_sine_phasor.dsp");
     assert_eq!(out.process_arity.inputs, 0);

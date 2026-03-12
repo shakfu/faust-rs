@@ -321,8 +321,9 @@ fn build_abstr_and_modulation_order_match_cpp_and_dump_is_deterministic() {
         let x = arena.symbol("x");
         let y = arena.symbol("y");
         let nil = arena.nil();
-        let tail = arena.cons(y, nil);
-        let args = arena.cons(x, tail);
+        // Parser-style reversed arglist for source `(x, y)`: [y, x].
+        let tail = arena.cons(x, nil);
+        let args = arena.cons(y, tail);
         let mut b = BoxBuilder::new(&mut arena);
         let body = b.wire();
         let abstr = b.build_abstr(args, body);
@@ -333,14 +334,29 @@ fn build_abstr_and_modulation_order_match_cpp_and_dump_is_deterministic() {
     let dump_a = dump_box(&arena, abstr);
     let dump_b = dump_box(&arena, abstr);
     assert_eq!(dump_a, dump_b);
-    assert!(matches!(
-        match_box(&arena, abstr),
-        BoxMatch::Abstr(_, _) | BoxMatch::Wire
-    ));
-    assert!(matches!(
-        match_box(&arena, modulation),
-        BoxMatch::Modulation(_, _) | BoxMatch::Wire
-    ));
+    let (outer_arg, outer_body) = match match_box(&arena, abstr) {
+        BoxMatch::Abstr(arg, body) => (arg, body),
+        other => panic!("expected outer abstraction, got {other:?}"),
+    };
+    assert_eq!(outer_arg, arena.symbol("x"));
+    let (inner_arg, inner_body) = match match_box(&arena, outer_body) {
+        BoxMatch::Abstr(arg, body) => (arg, body),
+        other => panic!("expected inner abstraction, got {other:?}"),
+    };
+    assert_eq!(inner_arg, arena.symbol("y"));
+    assert!(matches!(match_box(&arena, inner_body), BoxMatch::Wire));
+
+    let (outer_mod_arg, outer_mod_body) = match match_box(&arena, modulation) {
+        BoxMatch::Modulation(arg, body) => (arg, body),
+        other => panic!("expected outer modulation, got {other:?}"),
+    };
+    assert_eq!(outer_mod_arg, arena.symbol("x"));
+    let (inner_mod_arg, inner_mod_body) = match match_box(&arena, outer_mod_body) {
+        BoxMatch::Modulation(arg, body) => (arg, body),
+        other => panic!("expected inner modulation, got {other:?}"),
+    };
+    assert_eq!(inner_mod_arg, arena.symbol("y"));
+    assert!(matches!(match_box(&arena, inner_mod_body), BoxMatch::Wire));
 }
 
 #[test]
