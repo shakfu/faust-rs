@@ -477,6 +477,11 @@ fn differential_ui_event_order_against_cpp_reference() {
             expect_valid: true,
         },
         Case {
+            name: "rep_56_noise_smoo_slider",
+            input: CaseInput::CorpusFile("rep_56_noise_smoo_slider.dsp"),
+            expect_valid: true,
+        },
+        Case {
             name: "rep_51_eval_label_widget_subst",
             input: CaseInput::CorpusFile("rep_51_eval_label_widget_subst.dsp"),
             expect_valid: true,

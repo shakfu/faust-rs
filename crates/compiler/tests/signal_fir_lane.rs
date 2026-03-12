@@ -381,6 +381,32 @@ fn fastlane_cpp_root_group_prefers_declared_name_metadata() {
 }
 
 #[test]
+fn fastlane_cpp_preserves_metadata_bearing_ui_labels() {
+    let fast = compile_cpp_with_lane(
+        "rep_56_noise_smoo_slider.dsp",
+        SignalFirLane::TransformFastLane,
+    );
+    assert!(fast.contains("ui_interface->openVerticalBox(\"rep_56_noise_smoo_slider\");"));
+    assert!(fast.contains("ui_interface->addHorizontalSlider(\"gain [style:knob]\""));
+    assert!(fast.contains("ui_interface->closeBox();"));
+}
+
+#[test]
+fn fastlane_c_preserves_metadata_bearing_ui_labels() {
+    let fast = compile_c_with_lane(
+        "rep_56_noise_smoo_slider.dsp",
+        SignalFirLane::TransformFastLane,
+    );
+    assert!(fast.contains(
+        "ui_interface->openVerticalBox(ui_interface->uiInterface, \"rep_56_noise_smoo_slider\");"
+    ));
+    assert!(fast.contains(
+        "ui_interface->addHorizontalSlider(ui_interface->uiInterface, \"gain [style:knob]\""
+    ));
+    assert!(fast.contains("ui_interface->closeBox(ui_interface->uiInterface);"));
+}
+
+#[test]
 fn fastlane_cpp_lifecycle_order_matches_faust_instance_init_flow() {
     let fast = compile_cpp_with_lane(
         "rep_10_two_in_two_out_ui.dsp",
