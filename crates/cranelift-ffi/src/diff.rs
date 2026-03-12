@@ -198,6 +198,13 @@ mod tests {
         calls: usize,
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct UiDeclareEvent {
+        zone_is_null: bool,
+        key: String,
+        value: String,
+    }
+
     unsafe extern "C" fn count_ui_slider(
         ui: *mut c_void,
         _label: *const c_char,
@@ -229,6 +236,36 @@ mod tests {
         unsafe {
             let count = &mut *(meta.cast::<usize>());
             *count += 1;
+        }
+    }
+
+    unsafe extern "C" fn capture_ui_declare(
+        ui: *mut c_void,
+        zone: *mut FaustFloat,
+        key: *const c_char,
+        value: *const c_char,
+    ) {
+        unsafe {
+            let events = &mut *(ui.cast::<Vec<UiDeclareEvent>>());
+            events.push(UiDeclareEvent {
+                zone_is_null: zone.is_null(),
+                key: CStr::from_ptr(key).to_string_lossy().into_owned(),
+                value: CStr::from_ptr(value).to_string_lossy().into_owned(),
+            });
+        }
+    }
+
+    unsafe extern "C" fn capture_meta_entry(
+        meta: *mut c_void,
+        key: *const c_char,
+        value: *const c_char,
+    ) {
+        unsafe {
+            let entries = &mut *(meta.cast::<Vec<(String, String)>>());
+            entries.push((
+                CStr::from_ptr(key).to_string_lossy().into_owned(),
+                CStr::from_ptr(value).to_string_lossy().into_owned(),
+            ));
         }
     }
 
@@ -315,6 +352,78 @@ mod tests {
         assert!(
             meta_events > 0,
             "expected metadata callbacks for {}",
+            case.display()
+        );
+
+        unsafe {
+            deleteCCraneliftDSPInstance(dsp);
+            let _ = deleteCCraneliftDSPFactory(factory);
+        }
+    }
+
+    #[test]
+    fn cranelift_replays_ui_declares_separately_from_metadata_callback() {
+        let _guard = crate::test_serial_guard();
+        let case = workspace_root().join("tests/corpus/rep_56_noise_smoo_slider.dsp");
+        let c_path = CString::new(case.to_string_lossy().as_bytes()).expect("path CString");
+        let mut err = [0_i8; 4096];
+        let factory = unsafe {
+            createCCraneliftDSPFactoryFromFile(
+                c_path.as_ptr(),
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+                1,
+            )
+        };
+        assert!(
+            !factory.is_null(),
+            "Cranelift factory creation failed for {}: {}",
+            case.display(),
+            unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy()
+        );
+
+        let dsp = unsafe { createCCraneliftDSPInstance(factory) };
+        assert!(!dsp.is_null(), "Cranelift instance creation failed");
+        unsafe { initCCraneliftDSPInstance(dsp, SAMPLE_RATE as i32) };
+
+        let mut ui_declares = Vec::<UiDeclareEvent>::new();
+        let mut ui = UIGlue {
+            ui_interface: (&mut ui_declares as *mut Vec<UiDeclareEvent>).cast::<c_void>(),
+            open_tab_box: None,
+            open_horizontal_box: None,
+            open_vertical_box: None,
+            close_box: None,
+            add_button: None,
+            add_check_button: None,
+            add_vertical_slider: None,
+            add_horizontal_slider: None,
+            add_num_entry: None,
+            add_horizontal_bargraph: None,
+            add_vertical_bargraph: None,
+            add_soundfile: None,
+            declare: Some(capture_ui_declare),
+        };
+        unsafe { buildUserInterfaceCCraneliftDSPInstance(dsp, &mut ui) };
+        assert!(
+            ui_declares
+                .iter()
+                .any(|event| event.key == "style" && event.value == "knob" && !event.zone_is_null),
+            "expected style=knob UI declare with a control zone for {} but saw {ui_declares:?}",
+            case.display()
+        );
+
+        let mut meta_entries = Vec::<(String, String)>::new();
+        let mut meta = MetaGlue {
+            meta_interface: (&mut meta_entries as *mut Vec<(String, String)>).cast::<c_void>(),
+            declare: Some(capture_meta_entry),
+        };
+        unsafe { metadataCCraneliftDSPInstance(dsp, &mut meta) };
+        assert!(
+            !meta_entries
+                .iter()
+                .any(|(key, value)| key == "style" && value == "knob"),
+            "UI-only metadata should not leak into metadata() for {} but saw {meta_entries:?}",
             case.display()
         );
 

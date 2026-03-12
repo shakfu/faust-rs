@@ -631,6 +631,20 @@ fn dispatch_ui_runtime(
                         f(ui.ui_interface, label.as_ptr(), url.as_ptr(), zone);
                     }
                 }
+                RuntimeUiItem::Declare { zone, key, value } => {
+                    if let Some(f) = ui.declare
+                        && let (Ok(key), Ok(value)) = (
+                            std::ffi::CString::new(key.as_str()),
+                            std::ffi::CString::new(value.as_str()),
+                        )
+                    {
+                        let zone = zone
+                            .as_deref()
+                            .and_then(|name| zone_ptr(dsp_state, layout, name))
+                            .unwrap_or(std::ptr::null_mut());
+                        f(ui.ui_interface, zone, key.as_ptr(), value.as_ptr());
+                    }
+                }
             }
         }
     }

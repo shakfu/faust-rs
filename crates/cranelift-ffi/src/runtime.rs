@@ -90,6 +90,13 @@ pub(crate) enum RuntimeUiItem {
         url: String,
         zone: String,
     },
+    /// C++ parity: UI-scoped `declare(zone, key, value)` callback replay from
+    /// FIR `AddMetaDeclare` inside `buildUserInterface`.
+    Declare {
+        zone: Option<String>,
+        key: String,
+        value: String,
+    },
 }
 
 /// FIR-derived runtime metadata shared by Cranelift factories and instances.
@@ -338,8 +345,12 @@ fn collect_ui_items(
                     zone: var,
                 });
             }
-            FirMatch::AddMetaDeclare { key, value, .. } => {
-                desc.meta_entries.push((key, value));
+            FirMatch::AddMetaDeclare { var, key, value } => {
+                desc.ui_items.push(RuntimeUiItem::Declare {
+                    zone: (var != "0").then_some(var),
+                    key,
+                    value,
+                });
             }
             _ => {}
         }
