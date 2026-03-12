@@ -333,6 +333,35 @@ fn corpus_higher_order_named_argument_apply_lowers_checkbox_ui() {
 }
 
 #[test]
+fn inline_empty_root_group_uses_source_stem_in_ui_program() {
+    let out = compile_inline(
+        "empty_root_group.dsp",
+        r#"process = vgroup("", checkbox("c"));"#,
+    );
+    let root_children =
+        expect_ui_group(&out, out.ui.root, UiGroupKind::Vertical, "empty_root_group");
+    assert_eq!(root_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, root_children[0]),
+        UiMatch::InputControl(0)
+    );
+}
+
+#[test]
+fn inline_empty_root_group_prefers_declared_name_metadata() {
+    let out = compile_inline(
+        "ignored_root_name.dsp",
+        "declare name \"main\";\nprocess = vgroup(\"\", checkbox(\"c\"));\n",
+    );
+    let root_children = expect_ui_group(&out, out.ui.root, UiGroupKind::Vertical, "main");
+    assert_eq!(root_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, root_children[0]),
+        UiMatch::InputControl(0)
+    );
+}
+
+#[test]
 fn corpus_group_label_substitution_reaches_compiler_ui_output() {
     let out = compile_corpus("rep_52_eval_label_group_path_subst.dsp");
     let root_children = expect_ui_group(&out, out.ui.root, UiGroupKind::Vertical, "main3");

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use compiler::Compiler;
+use compiler::SignalFirLane;
 
 const CPP_SOURCE_ROOT: &str = "/Users/letz/Developpements/RUST/faust";
 
@@ -129,6 +130,70 @@ fn cpp_status_for_case(cpp_bin: &Path, case: &Case) -> Result<StatusClass, Strin
     } else {
         StatusClass::Error
     })
+}
+
+fn extract_root_ui_label(cpp: &str) -> Option<&str> {
+    cpp.lines().find_map(|line| {
+        let start = line.find("openVerticalBox(\"")?;
+        let rest = &line[start + "openVerticalBox(\"".len()..];
+        let end = rest.find("\")")?;
+        Some(&rest[..end])
+    })
+}
+
+fn rust_cpp_for_case(compiler: &Compiler, case: &Case) -> Result<String, String> {
+    match case.input {
+        CaseInput::CorpusFile(file) => {
+            let path = corpus_path(file);
+            compiler
+                .compile_file_default_to_cpp_with_lane(
+                    &path,
+                    &codegen::backends::cpp::CppOptions::default(),
+                    SignalFirLane::TransformFastLane,
+                )
+                .map_err(|e| format!("Rust fast-lane C++ compile failed: {e}"))
+        }
+        CaseInput::Inline(source) => {
+            let path = temp_input_path(case.name);
+            fs::write(&path, source).map_err(|e| format!("cannot write temp input: {e}"))?;
+            let result = compiler
+                .compile_file_default_to_cpp_with_lane(
+                    &path,
+                    &codegen::backends::cpp::CppOptions::default(),
+                    SignalFirLane::TransformFastLane,
+                )
+                .map_err(|e| format!("Rust fast-lane C++ compile failed: {e}"));
+            let _ = fs::remove_file(&path);
+            result
+        }
+    }
+}
+
+fn cpp_cpp_for_case(cpp_bin: &Path, case: &Case) -> Result<String, String> {
+    let input_path = match case.input {
+        CaseInput::CorpusFile(file) => corpus_path(file),
+        CaseInput::Inline(source) => {
+            let path = temp_input_path(case.name);
+            fs::write(&path, source).map_err(|e| format!("cannot write temp input: {e}"))?;
+            path
+        }
+    };
+
+    let output = Command::new(cpp_bin)
+        .arg(&input_path)
+        .arg("-lang")
+        .arg("cpp")
+        .output()
+        .map_err(|e| format!("failed to run {}: {e}", cpp_bin.display()))?;
+
+    if matches!(case.input, CaseInput::Inline(_)) {
+        let _ = fs::remove_file(&input_path);
+    }
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[test]
@@ -262,6 +327,64 @@ fn differential_signal_pipeline_status_against_cpp_reference() {
     assert!(
         mismatches.is_empty(),
         "Signal differential mismatches:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+#[test]
+fn differential_ui_root_labels_against_cpp_reference() {
+    let Some(cpp_bin) = cpp_bin() else {
+        eprintln!(
+            "Skipping UI root differential test: FAUST_CPP_BIN not set and /usr/local/bin/faust not found"
+        );
+        return;
+    };
+    if !cpp_bin.exists() {
+        eprintln!(
+            "Skipping UI root differential test: C++ binary not found at {}",
+            cpp_bin.display()
+        );
+        return;
+    }
+
+    let compiler = Compiler::new();
+    let cases = [
+        Case {
+            name: "rep_38_sine_phasor",
+            input: CaseInput::CorpusFile("rep_38_sine_phasor.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_40_metadata_master",
+            input: CaseInput::CorpusFile("rep_40_metadata_master.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "empty_root_group.dsp",
+            input: CaseInput::Inline("process = vgroup(\"\", checkbox(\"c\"));\n"),
+            expect_valid: true,
+        },
+    ];
+
+    let mut mismatches = Vec::new();
+    for case in &cases {
+        let rust_cpp =
+            rust_cpp_for_case(&compiler, case).unwrap_or_else(|e| panic!("{}: {e}", case.name));
+        let cpp_cpp =
+            cpp_cpp_for_case(&cpp_bin, case).unwrap_or_else(|e| panic!("{}: {e}", case.name));
+        let rust_label = extract_root_ui_label(&rust_cpp);
+        let cpp_label = extract_root_ui_label(&cpp_cpp);
+        if rust_label != cpp_label {
+            mismatches.push(format!(
+                "{} root label mismatch: rust={rust_label:?} cpp={cpp_label:?}",
+                case.name
+            ));
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "UI root label mismatches:\n{}",
         mismatches.join("\n")
     );
 }

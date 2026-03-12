@@ -87,6 +87,7 @@ fn ui_program_keeps_root_and_control_registry() {
         root,
         controls,
         root_origin: UiRootOrigin::Explicit,
+        emit_ui: true,
     };
 
     assert_eq!(program.controls.len(), 1);

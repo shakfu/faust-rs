@@ -329,7 +329,7 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
     assert!(!fast.contains("frs_"));
     assert!(fast.contains("fHslider"));
     assert!(!fast.contains("fUiCtl"));
-    assert!(fast.contains("ui_interface->openVerticalBox(\"mydsp\");"));
+    assert!(fast.contains("ui_interface->openVerticalBox(\"rep_38_sine_phasor\");"));
     assert!(fast.contains("ui_interface->closeBox();"));
     assert_eq!(
         fast.matches("void instanceResetUserInterface() {").count(),
@@ -365,10 +365,19 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
         fast_c.contains("float[2] fRec"),
         "fast lane C backend should keep recursion as a 2-slot array"
     );
-    assert!(
-        fast_c.contains("ui_interface->openVerticalBox(ui_interface->uiInterface, \"mydsp\");")
-    );
+    assert!(fast_c.contains(
+        "ui_interface->openVerticalBox(ui_interface->uiInterface, \"rep_38_sine_phasor\");"
+    ));
     assert!(fast_c.contains("ui_interface->closeBox(ui_interface->uiInterface);"));
+}
+
+#[test]
+fn fastlane_cpp_root_group_prefers_declared_name_metadata() {
+    let fast = compile_cpp_with_lane(
+        "rep_40_metadata_master.dsp",
+        SignalFirLane::TransformFastLane,
+    );
+    assert!(fast.contains("ui_interface->openVerticalBox(\"main\");"));
 }
 
 #[test]

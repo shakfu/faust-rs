@@ -7,8 +7,9 @@
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::{IntoDiagnostic, Severity, Stage, codes};
 use propagate::{
-    ArityCache, FlatBoxBuildError, PropagateError, box_arity, box_arity_typed, make_sig_input_list,
-    propagate, propagate_typed, propagate_typed_with_ui, propagate_with_ui, try_build_flat_box,
+    ArityCache, FlatBoxBuildError, PropagateError, PropagateUiOptions, box_arity, box_arity_typed,
+    make_sig_input_list, propagate, propagate_typed, propagate_typed_with_ui,
+    propagate_typed_with_ui_options, propagate_with_ui, try_build_flat_box,
 };
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId};
@@ -346,6 +347,36 @@ fn propagate_with_ui_synthesizes_root_group_for_multiple_ui_roots() {
     assert_eq!(out.ui.controls[0].label, "a");
     assert_eq!(out.ui.controls[1].kind, ControlKind::Button);
     assert_eq!(out.ui.controls[1].label, "b");
+}
+
+#[test]
+fn propagate_with_ui_options_assigns_canonical_root_label() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let root_label = bb.ident("");
+        let checkbox_label = bb.ident("c");
+        let checkbox = bb.checkbox(checkbox_label);
+        let group = bb.vgroup(root_label, checkbox);
+        try_build_flat_box(&arena, group).expect("root group should be flat")
+    };
+
+    let out = propagate_typed_with_ui_options(
+        &mut arena,
+        process,
+        &[],
+        &mut ArityCache::new(),
+        &PropagateUiOptions::new("named-root"),
+    )
+    .expect("root-labeled grouped UI should propagate");
+
+    assert_eq!(out.ui.root_origin, UiRootOrigin::Explicit);
+    let root_children = expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Vertical, "named-root");
+    assert_eq!(root_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, root_children[0]),
+        UiMatch::InputControl(0)
+    );
 }
 
 #[test]

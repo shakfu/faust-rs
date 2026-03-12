@@ -91,6 +91,34 @@ pub struct PropagateOutput {
     pub ui: UiProgram,
 }
 
+/// Canonical grouped-UI construction policy applied during propagation.
+///
+/// Source provenance (C++):
+/// - `compiler/generator/compile.cpp`
+/// - `compiler/generator/instructions_compiler.cpp`
+///
+/// Parity note:
+/// - when the root UI group has an empty label, C++ rewrites it to the
+///   canonical compilation name (top-level `declare name` or source stem)
+///   before backend emission.
+/// - Rust threads that canonical root label into grouped UI construction so
+///   `UiProgram` is already the source of truth before FIR/backend lowering.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PropagateUiOptions {
+    /// Canonical label used when propagation must synthesize or rename the root group.
+    pub synthesized_root_label: Box<str>,
+}
+
+impl PropagateUiOptions {
+    #[must_use]
+    /// Creates one grouped-UI construction policy with the provided root label.
+    pub fn new(synthesized_root_label: impl Into<Box<str>>) -> Self {
+        Self {
+            synthesized_root_label: synthesized_root_label.into(),
+        }
+    }
+}
+
 /// Typed handle for the flat post-eval box subset accepted at the propagation boundary.
 ///
 /// # Source provenance (C++)
@@ -945,7 +973,25 @@ pub fn propagate_typed_with_ui(
     inputs: &[SigId],
     cache: &mut ArityCache,
 ) -> Result<PropagateOutput, PropagateError> {
-    let ui = build_ui_program(arena, box_tree);
+    propagate_typed_with_ui_options(
+        arena,
+        box_tree,
+        inputs,
+        cache,
+        &PropagateUiOptions::default(),
+    )
+}
+
+/// Propagates input signals and grouped UI through one validated flat box expression
+/// using explicit grouped-UI construction options.
+pub fn propagate_typed_with_ui_options(
+    arena: &mut TreeArena,
+    box_tree: FlatBoxId,
+    inputs: &[SigId],
+    cache: &mut ArityCache,
+    ui_options: &PropagateUiOptions,
+) -> Result<PropagateOutput, PropagateError> {
+    let ui = build_ui_program(arena, box_tree, ui_options);
     let mut slot_env = SlotEnv::default();
     let clock_env = arena.nil();
     let signals = propagate_in_slot_env(
@@ -1020,13 +1066,16 @@ impl UiCollector {
         }
     }
 
-    fn finish(mut self, roots: &[UiId]) -> UiBuildOutput {
+    fn finish(mut self, roots: &[UiId], options: &PropagateUiOptions) -> UiBuildOutput {
         let keep_existing_root = matches!(roots, [only] if matches!(match_ui(&self.arena, *only), UiMatch::Group { .. }));
         let (root, root_origin) = if keep_existing_root {
-            (roots[0], UiRootOrigin::Explicit)
+            (
+                self.rewrite_root_group_label(roots[0], options),
+                UiRootOrigin::Explicit,
+            )
         } else {
             (
-                UiBuilder::new(&mut self.arena).vgroup("", roots),
+                UiBuilder::new(&mut self.arena).vgroup(&options.synthesized_root_label, roots),
                 UiRootOrigin::Synthesized,
             )
         };
@@ -1036,8 +1085,23 @@ impl UiCollector {
                 root,
                 controls: self.controls,
                 root_origin,
+                emit_ui: true,
             },
             control_ids: self.control_ids,
+        }
+    }
+
+    fn rewrite_root_group_label(&mut self, root: UiId, options: &PropagateUiOptions) -> UiId {
+        match match_ui(&self.arena, root) {
+            UiMatch::Group {
+                kind,
+                label,
+                children,
+            } if label.is_empty() && !options.synthesized_root_label.is_empty() => {
+                let mut builder = UiBuilder::new(&mut self.arena);
+                builder.group(kind, &options.synthesized_root_label, &children)
+            }
+            _ => root,
         }
     }
 
@@ -1103,10 +1167,14 @@ struct UiBuildOutput {
     control_ids: ControlIds,
 }
 
-fn build_ui_program(source_arena: &TreeArena, box_tree: FlatBoxId) -> UiBuildOutput {
+fn build_ui_program(
+    source_arena: &TreeArena,
+    box_tree: FlatBoxId,
+    options: &PropagateUiOptions,
+) -> UiBuildOutput {
     let mut collector = UiCollector::new();
     let roots = collect_ui_nodes(source_arena, box_tree, &mut collector);
-    collector.finish(&roots)
+    collector.finish(&roots, options)
 }
 
 fn collect_ui_nodes(

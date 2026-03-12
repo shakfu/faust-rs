@@ -129,6 +129,7 @@ pub struct UiProgram {
     pub root: UiId,
     pub controls: Vec<ControlSpec>,
     pub root_origin: UiRootOrigin,
+    pub emit_ui: bool,
 }
 
 impl UiProgram {
@@ -142,6 +143,7 @@ impl UiProgram {
             root,
             controls: Vec::new(),
             root_origin: UiRootOrigin::Synthesized,
+            emit_ui: false,
         }
     }
 
@@ -152,9 +154,9 @@ impl UiProgram {
     }
 
     #[must_use]
-    /// Returns `true` when this program has no registered UI controls.
+    /// Returns `true` when this program is the compatibility placeholder with no UI emission.
     pub fn is_empty(&self) -> bool {
-        self.controls.is_empty()
+        !self.emit_ui
     }
 }
 

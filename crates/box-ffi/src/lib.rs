@@ -39,12 +39,16 @@ use codegen::backends::interp::{InterpOptions, generate_interp_module, write_fbc
 use compiler::Compiler;
 use fir::{FirId, FirStore};
 use propagate::{
-    ArityCache, box_arity_typed, make_sig_input_list, propagate_typed, try_build_flat_box,
+    ArityCache, PropagateUiOptions, box_arity_typed, make_sig_input_list, propagate_typed,
+    propagate_typed_with_ui_options, try_build_flat_box,
 };
 use tlib::{
     NodeKind, TreeArena, TreeId, de_bruijn_to_sym, tree_to_double, tree_to_int, tree_to_str,
 };
-use transform::signal_fir::{RealType, SignalFirOptions, compile_signals_to_fir_fastlane};
+use transform::signal_fir::{
+    RealType, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui,
+};
+use ui::{UiBuilder, UiProgram, UiRootOrigin};
 
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -234,6 +238,18 @@ fn infer_num_inputs_from_signals(arena: &TreeArena, outputs: &[TreeId]) -> usize
 }
 
 /// Lowers a propagated signal root list to a standalone FIR module for FFI callers.
+fn signal_only_root_ui(module_name: &str) -> UiProgram {
+    let mut arena = TreeArena::new();
+    let root = UiBuilder::new(&mut arena).vgroup(module_name, &[]);
+    UiProgram {
+        arena,
+        root,
+        controls: Vec::new(),
+        root_origin: UiRootOrigin::Synthesized,
+        emit_ui: true,
+    }
+}
+
 fn lower_signal_roots_to_fir(
     arena: &TreeArena,
     signal_roots: &[TreeId],
@@ -244,11 +260,13 @@ fn lower_signal_roots_to_fir(
     }
     let num_inputs = infer_num_inputs_from_signals(arena, signal_roots);
     let num_outputs = signal_roots.len();
-    let lowered = compile_signals_to_fir_fastlane(
+    let ui = signal_only_root_ui(module_name);
+    let lowered = compile_signals_to_fir_fastlane_with_ui(
         arena,
         signal_roots,
         num_inputs,
         num_outputs,
+        &ui,
         &SignalFirOptions {
             module_name: module_name.to_owned(),
             strict_mode: true,
@@ -312,9 +330,33 @@ pub unsafe fn export_fir_from_box_handle(
         let mut cache = ArityCache::default();
         let arity = box_arity_typed(&ctx.arena, flat, &mut cache).map_err(|e| e.to_string())?;
         let inputs = make_sig_input_list(&mut ctx.arena, arity.inputs);
-        let outputs = propagate_typed(&mut ctx.arena, flat, &inputs, &mut cache)
-            .map_err(|e| e.to_string())?;
-        lower_signal_roots_to_fir(&ctx.arena, &outputs, module_name)
+        let propagated = propagate_typed_with_ui_options(
+            &mut ctx.arena,
+            flat,
+            &inputs,
+            &mut cache,
+            &PropagateUiOptions::new(module_name),
+        )
+        .map_err(|e| e.to_string())?;
+        let lowered = compile_signals_to_fir_fastlane_with_ui(
+            &ctx.arena,
+            &propagated.signals,
+            arity.inputs,
+            arity.outputs,
+            &propagated.ui,
+            &SignalFirOptions {
+                module_name: module_name.to_owned(),
+                strict_mode: true,
+                real_type: RealType::Float32,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(BoxFfiFirModule {
+            store: lowered.store,
+            module: lowered.module,
+            num_inputs: arity.inputs,
+            num_outputs: arity.outputs,
+        })
     })
 }
 

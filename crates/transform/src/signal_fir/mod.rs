@@ -304,6 +304,7 @@ mod tests {
                 range,
             }],
             root_origin: UiRootOrigin::Synthesized,
+            emit_ui: true,
         }
     }
 

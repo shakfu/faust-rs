@@ -52,7 +52,7 @@ use fir::{
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{NodeKind, TreeArena, match_sym_rec, match_sym_ref};
-use ui::{ControlId, ControlKind, UiGroupKind, UiMatch, UiProgram, UiRootOrigin, match_ui};
+use ui::{ControlId, ControlKind, UiGroupKind, UiMatch, UiProgram, match_ui};
 
 use crate::signal_prepare::SimpleSigType;
 
@@ -126,7 +126,7 @@ pub fn build_module(
     types: &HashMap<SigId, SimpleSigType>,
     real_ty: FirType,
 ) -> Result<SignalFirOutput, SignalFirError> {
-    let mut lower = SignalToFirLower::new(arena, module_name, ui, types, plan.num_inputs, real_ty);
+    let mut lower = SignalToFirLower::new(arena, ui, types, plan.num_inputs, real_ty);
     lower.ensure_sample_rate_var();
     lower.prepare_delay_lines(signals)?;
     let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
@@ -480,7 +480,6 @@ pub fn build_module(
 /// tables, and scheduled compute-time updates.
 struct SignalToFirLower<'a> {
     arena: &'a TreeArena,
-    module_name: &'a str,
     ui_program: &'a UiProgram,
     types: &'a HashMap<SigId, SimpleSigType>,
     num_inputs: usize,
@@ -549,7 +548,6 @@ impl<'a> SignalToFirLower<'a> {
     /// accumulators cannot leak across compilations.
     fn new(
         arena: &'a TreeArena,
-        module_name: &'a str,
         ui_program: &'a UiProgram,
         types: &'a HashMap<SigId, SimpleSigType>,
         num_inputs: usize,
@@ -557,7 +555,6 @@ impl<'a> SignalToFirLower<'a> {
     ) -> Self {
         Self {
             arena,
-            module_name,
             ui_program,
             types,
             num_inputs,
@@ -1855,10 +1852,10 @@ impl<'a> SignalToFirLower<'a> {
             return Ok(());
         }
         self.ui_statements.clear();
-        self.emit_ui_node(self.ui_program.root, true)
+        self.emit_ui_node(self.ui_program.root)
     }
 
-    fn emit_ui_node(&mut self, node: ui::UiId, is_root: bool) -> Result<(), SignalFirError> {
+    fn emit_ui_node(&mut self, node: ui::UiId) -> Result<(), SignalFirError> {
         match match_ui(&self.ui_program.arena, node) {
             UiMatch::Group {
                 kind,
@@ -1870,18 +1867,10 @@ impl<'a> SignalToFirLower<'a> {
                     UiGroupKind::Horizontal => UiBoxType::Horizontal,
                     UiGroupKind::Tab => UiBoxType::Tab,
                 };
-                let label = if is_root
-                    && self.ui_program.root_origin == UiRootOrigin::Synthesized
-                    && label.is_empty()
-                {
-                    self.module_name
-                } else {
-                    label
-                };
                 let mut b = FirBuilder::new(&mut self.store);
                 self.ui_statements.push(b.open_box(typ, label));
                 for child in children {
-                    self.emit_ui_node(child, false)?;
+                    self.emit_ui_node(child)?;
                 }
                 let mut b = FirBuilder::new(&mut self.store);
                 self.ui_statements.push(b.close_box());

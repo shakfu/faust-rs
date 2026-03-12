@@ -46,8 +46,8 @@ use fir::{
     FirBuilder, FirId, FirStore, FirType, NamedType,
     checker::{FirVerifyReport, Severity as FirVerifySeverity, verify_fir_module},
 };
-use parser::{ParseOutput, SourceReaderError};
-use propagate::{ArityCache, BoxArity, PropagateError};
+use parser::{CompilationMetadataKey, CompilationMetadataSnapshot, ParseOutput, SourceReaderError};
+use propagate::{ArityCache, BoxArity, PropagateError, PropagateUiOptions};
 use signals::{SigId, dump_sig_readable};
 use tlib::NodeKind;
 pub use transform::signal_fir::RealType;
@@ -754,12 +754,19 @@ impl Compiler {
                     }
                 })?;
 
+        let compilation_metadata = eval_source_context.as_ref().map_or_else(
+            || output.compilation_metadata.clone(),
+            eval::EvalSourceContext::metadata_snapshot,
+        );
+        let ui_options =
+            PropagateUiOptions::new(resolve_ui_root_label(source, &compilation_metadata));
         let inputs = propagate::make_sig_input_list(&mut output.state.arena, process_arity.inputs);
-        let propagated = propagate::propagate_typed_with_ui(
+        let propagated = propagate::propagate_typed_with_ui_options(
             &mut output.state.arena,
             process_flat,
             &inputs,
             &mut arity_cache,
+            &ui_options,
         )
         .map_err(|error| {
             let node = propagate_error_node(&error);
@@ -794,10 +801,7 @@ impl Compiler {
         })?;
 
         Ok(SignalCompileOutput {
-            compilation_metadata: eval_source_context.as_ref().map_or_else(
-                || output.compilation_metadata.clone(),
-                eval::EvalSourceContext::metadata_snapshot,
-            ),
+            compilation_metadata,
             parse: output,
             process_box,
             process_arity,
@@ -1683,6 +1687,25 @@ fn source_name_to_class(source_name: &str) -> String {
         .filter(|stem| !stem.is_empty())
         .unwrap_or("faust_dsp")
         .to_owned()
+}
+
+/// Resolves the canonical root UI label used when the top-level UI group is unnamed.
+///
+/// Source provenance (C++):
+/// - `compiler/generator/compile.cpp`
+/// - `compiler/generator/instructions_compiler.cpp`
+///
+/// Parity rule:
+/// - prefer top-level `declare name "..."` metadata from the master document,
+/// - otherwise fall back to the source filename stem,
+/// - never use the backend class name for UI root labeling.
+fn resolve_ui_root_label(source_name: &str, metadata: &CompilationMetadataSnapshot) -> String {
+    metadata
+        .entries()
+        .get(&CompilationMetadataKey::global("name"))
+        .and_then(|values| values.iter().next())
+        .map(|value| value.as_ref().to_owned())
+        .unwrap_or_else(|| source_name_to_class(source_name))
 }
 
 /// Sanitizes arbitrary text into a conservative C/C++ identifier.
@@ -2618,7 +2641,7 @@ mod tests {
 
     use super::{
         Compiler, CompilerError, build_import_search_paths, default_import_search_paths,
-        golden_snapshot, make_compute_fir_signature, resolve_module_name,
+        golden_snapshot, make_compute_fir_signature, resolve_module_name, resolve_ui_root_label,
     };
 
     fn temp_root(test_name: &str) -> PathBuf {
@@ -2752,6 +2775,23 @@ mod tests {
             name.starts_with('_'),
             "expected leading underscore, got {name}"
         );
+    }
+
+    #[test]
+    fn resolve_ui_root_label_prefers_declared_name_metadata() {
+        let store = parser::CompilationMetadataStore::new("root.dsp");
+        store.declare_top_level("root.dsp", "name", "main");
+        let name = resolve_ui_root_label("root.dsp", &store.snapshot());
+        assert_eq!(name, "main");
+    }
+
+    #[test]
+    fn resolve_ui_root_label_falls_back_to_source_stem() {
+        let name = resolve_ui_root_label(
+            "nested/path/sine_phasor.dsp",
+            &parser::CompilationMetadataSnapshot::default(),
+        );
+        assert_eq!(name, "sine_phasor");
     }
 
     // ── make_compute_fir_signature ────────────────────────────────────────────

@@ -30,3 +30,4 @@ propagate = { path = "../propagate" }
 codegen = { path = "../codegen" }
 transform = { path = "../transform" }
 fir = { path = "../fir" }
+ui = { path = "../ui" }
