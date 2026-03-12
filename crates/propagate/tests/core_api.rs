@@ -8,10 +8,11 @@ use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::{IntoDiagnostic, Severity, Stage, codes};
 use propagate::{
     ArityCache, FlatBoxBuildError, PropagateError, box_arity, box_arity_typed, make_sig_input_list,
-    propagate, propagate_typed, try_build_flat_box,
+    propagate, propagate_typed, propagate_typed_with_ui, propagate_with_ui, try_build_flat_box,
 };
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId};
+use ui::{ControlKind, UiGroupKind, UiMatch, match_ui};
 
 #[test]
 fn make_sig_input_list_builds_ordered_inputs() {
@@ -242,6 +243,107 @@ fn waveform_box_lowers_to_size_and_waveform_signal() {
     assert!(matches!(match_sig(&arena, values[0]), SigMatch::Int(1)));
     assert!(matches!(match_sig(&arena, values[1]), SigMatch::Int(-2)));
     assert!(matches!(match_sig(&arena, values[2]), SigMatch::Real(_)));
+}
+
+fn expect_ui_group(
+    program: &ui::UiProgram,
+    node: ui::UiId,
+    expected_kind: UiGroupKind,
+    expected_label: &str,
+) -> Vec<ui::UiId> {
+    let UiMatch::Group {
+        kind,
+        label,
+        children,
+    } = match_ui(&program.arena, node)
+    else {
+        panic!("expected UI group node");
+    };
+    assert_eq!(kind, expected_kind);
+    assert_eq!(label, expected_label);
+    children
+}
+
+#[test]
+fn propagate_with_ui_collects_nested_groups_and_control_specs() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let label_main = bb.ident("main");
+        let label_mix = bb.ident("mix");
+        let label_gain = bb.ident("gain");
+        let init = bb.real(0.5);
+        let min = bb.real(0.0);
+        let max = bb.real(1.0);
+        let step = bb.real(0.01);
+        let slider = bb.hslider(label_gain, init, min, max, step);
+        let grouped = bb.hgroup(label_mix, slider);
+        bb.vgroup(label_main, grouped)
+    };
+
+    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+        .expect("grouped slider should propagate with UI");
+
+    assert_eq!(out.signals.len(), 1);
+    assert!(matches!(
+        match_sig(&arena, out.signals[0]),
+        SigMatch::HSlider(_, _, _, _, _)
+    ));
+    let outer = expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Vertical, "main");
+    assert_eq!(outer.len(), 1);
+    let inner = expect_ui_group(&out.ui, outer[0], UiGroupKind::Horizontal, "mix");
+    assert_eq!(inner.len(), 1);
+    assert_eq!(match_ui(&out.ui.arena, inner[0]), UiMatch::InputControl(0));
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].kind, ControlKind::HSlider);
+    assert_eq!(out.ui.controls[0].label, "gain");
+    let range = out.ui.controls[0]
+        .range
+        .expect("slider range should be preserved");
+    assert_eq!(range.init, 0.5);
+    assert_eq!(range.min, 0.0);
+    assert_eq!(range.max, 1.0);
+    assert_eq!(range.step, 0.01);
+}
+
+#[test]
+fn propagate_with_ui_synthesizes_root_group_for_multiple_ui_roots() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let left_label = bb.ident("main");
+        let left_control_label = bb.ident("a");
+        let left_control = bb.checkbox(left_control_label);
+        let left = bb.vgroup(left_label, left_control);
+        let right_label = bb.ident("top");
+        let right_control_label = bb.ident("b");
+        let right_control = bb.button(right_control_label);
+        let right = bb.hgroup(right_label, right_control);
+        bb.par(left, right)
+    };
+
+    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+        .expect("multiple grouped UI roots should propagate");
+
+    let root_children = expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Vertical, "");
+    assert_eq!(root_children.len(), 2);
+    let left_children = expect_ui_group(&out.ui, root_children[0], UiGroupKind::Vertical, "main");
+    let right_children = expect_ui_group(&out.ui, root_children[1], UiGroupKind::Horizontal, "top");
+    assert_eq!(left_children.len(), 1);
+    assert_eq!(right_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, left_children[0]),
+        UiMatch::InputControl(0)
+    );
+    assert_eq!(
+        match_ui(&out.ui.arena, right_children[0]),
+        UiMatch::InputControl(1)
+    );
+    assert_eq!(out.ui.controls.len(), 2);
+    assert_eq!(out.ui.controls[0].kind, ControlKind::Checkbox);
+    assert_eq!(out.ui.controls[0].label, "a");
+    assert_eq!(out.ui.controls[1].kind, ControlKind::Button);
+    assert_eq!(out.ui.controls[1].label, "b");
 }
 
 #[test]
@@ -616,9 +718,12 @@ fn propagate_typed_uses_flat_boundary_and_matches_wrapper() {
     let inputs = make_sig_input_list(&mut arena, 2);
     let typed_out = propagate_typed(&mut arena, flat, &inputs, &mut ArityCache::new())
         .expect("typed propagation should succeed");
+    let typed_with_ui = propagate_typed_with_ui(&mut arena, flat, &inputs, &mut ArityCache::new())
+        .expect("typed propagation with UI should succeed");
     let raw_out = propagate(&mut arena, seq, &inputs, &mut ArityCache::new())
         .expect("wrapper should succeed");
     assert_eq!(typed_out, raw_out);
+    assert_eq!(typed_with_ui.signals, raw_out);
 
     let err = propagate(&mut arena, bad_case, &[], &mut ArityCache::new())
         .expect_err("case should be rejected before propagation");

@@ -18,6 +18,8 @@
 //!   points for the post-`eval/a2sb` flat-box contract.
 //! - [`box_arity`] and [`propagate`] remain compatibility wrappers for callers
 //!   that still hold a raw `BoxId`.
+//! - [`PropagateOutput`] and [`propagate_typed_with_ui`] are the grouped-UI
+//!   ownership extensions introduced by the UI IR rewrite.
 //! - `make_sig_input_list(...)` mirrors C++ `makeSigInputList(...)`.
 //! - `FlatBoxId` / [`try_build_flat_box`] are an adapted Rust boundary: they make the
 //!   C++ post-`evalprocess -> a2sb -> propagate` flat-box contract explicit while
@@ -38,6 +40,10 @@ use errors::codes;
 use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
 use signals::{SigBuilder, SigId, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId, list_to_vec, tree_to_int, vec_to_list};
+use ui::{
+    ControlId, ControlKind, ControlRange, ControlSpec, UiBuilder, UiGroupKind, UiId, UiMatch,
+    UiProgram, match_ui,
+};
 
 /// Memoization cache for [`box_arity`] / [`box_arity_typed`] results, keyed by validated flat boxes.
 pub type ArityCache = AHashMap<FlatBoxId, Result<BoxArity, PropagateError>>;
@@ -62,6 +68,25 @@ pub struct BoxArity {
     pub inputs: usize,
     /// Number of produced output signals.
     pub outputs: usize,
+}
+
+/// Explicit products of the post-`eval/a2sb` propagation boundary.
+///
+/// # Source provenance (C++)
+/// - `compiler/propagate/propagate.cpp`
+/// - `compiler/signals/signals.hh`
+/// - `compiler/signals/signals.cpp`
+///
+/// Mapping status:
+/// - `adapted` relative to the C++ clock-environment/path ownership.
+/// - Behaviorally equivalent target: DSP signals and grouped UI become
+///   explicit products of propagation instead of backend-local heuristics.
+#[derive(Debug)]
+pub struct PropagateOutput {
+    /// Final propagated output signal list (`box_arity.outputs` items).
+    pub signals: Vec<SigId>,
+    /// Canonical grouped UI artifact extracted from the same propagated box tree.
+    pub ui: UiProgram,
 }
 
 /// Typed handle for the flat post-eval box subset accepted at the propagation boundary.
@@ -907,19 +932,50 @@ fn box_arity_flat_inner(
     }
 }
 
-/// Propagates input signals through one validated flat box expression (memoized arity).
+/// Propagates input signals and grouped UI through one validated flat box expression.
 ///
 /// This is the typed entry point for callers that already crossed the
-/// `eval/a2sb` flat-box boundary.
+/// `eval/a2sb` flat-box boundary and want the full propagation products:
+/// propagated DSP signals plus canonical grouped UI ownership.
+pub fn propagate_typed_with_ui(
+    arena: &mut TreeArena,
+    box_tree: FlatBoxId,
+    inputs: &[SigId],
+    cache: &mut ArityCache,
+) -> Result<PropagateOutput, PropagateError> {
+    let mut slot_env = SlotEnv::default();
+    let clock_env = arena.nil();
+    let signals = propagate_in_slot_env(arena, box_tree, inputs, cache, &mut slot_env, clock_env)?;
+    let ui = build_ui_program(arena, box_tree);
+    Ok(PropagateOutput { signals, ui })
+}
+
+/// Propagates input signals through one validated flat box expression (memoized arity).
+///
+/// Compatibility wrapper for callers that only consume DSP signal outputs. New
+/// post-`eval/a2sb` callers that own grouped UI should prefer
+/// [`propagate_typed_with_ui`].
 pub fn propagate_typed(
     arena: &mut TreeArena,
     box_tree: FlatBoxId,
     inputs: &[SigId],
     cache: &mut ArityCache,
 ) -> Result<Vec<SigId>, PropagateError> {
-    let mut slot_env = SlotEnv::default();
-    let clock_env = arena.nil();
-    propagate_in_slot_env(arena, box_tree, inputs, cache, &mut slot_env, clock_env)
+    propagate_typed_with_ui(arena, box_tree, inputs, cache).map(|output| output.signals)
+}
+
+/// Propagates input signals and grouped UI through one evaluated box expression.
+///
+/// Compatibility adapter for callers that still hold a raw [`BoxId`] but want
+/// the explicit grouped UI artifact owned after propagation.
+pub fn propagate_with_ui(
+    arena: &mut TreeArena,
+    box_tree: BoxId,
+    inputs: &[SigId],
+    cache: &mut ArityCache,
+) -> Result<PropagateOutput, PropagateError> {
+    let flat = try_build_flat_box(arena, box_tree)?;
+    propagate_typed_with_ui(arena, flat, inputs, cache)
 }
 
 /// Propagates input signals through one evaluated box expression (memoized arity).
@@ -934,6 +990,295 @@ pub fn propagate(
 ) -> Result<Vec<SigId>, PropagateError> {
     let flat = try_build_flat_box(arena, box_tree)?;
     propagate_typed(arena, flat, inputs, cache)
+}
+
+struct UiCollector {
+    arena: TreeArena,
+    controls: Vec<ControlSpec>,
+}
+
+impl UiCollector {
+    fn new() -> Self {
+        Self {
+            arena: TreeArena::new(),
+            controls: Vec::new(),
+        }
+    }
+
+    fn finish(mut self, roots: &[UiId]) -> UiProgram {
+        let keep_existing_root = matches!(roots, [only] if matches!(match_ui(&self.arena, *only), UiMatch::Group { .. }));
+        let root = if keep_existing_root {
+            roots[0]
+        } else {
+            UiBuilder::new(&mut self.arena).vgroup("", roots)
+        };
+        UiProgram {
+            arena: self.arena,
+            root,
+            controls: self.controls,
+        }
+    }
+
+    fn register_control(
+        &mut self,
+        kind: ControlKind,
+        label: String,
+        range: Option<ControlRange>,
+    ) -> ControlId {
+        let id =
+            ControlId::try_from(self.controls.len()).expect("control registry index fits in u32");
+        self.controls.push(ControlSpec {
+            id,
+            kind,
+            label,
+            metadata: Vec::new(),
+            range,
+        });
+        id
+    }
+
+    fn input_control(
+        &mut self,
+        kind: ControlKind,
+        label: String,
+        range: Option<ControlRange>,
+    ) -> UiId {
+        let id = self.register_control(kind, label, range);
+        UiBuilder::new(&mut self.arena).input_control(id)
+    }
+
+    fn output_control(
+        &mut self,
+        kind: ControlKind,
+        label: String,
+        range: Option<ControlRange>,
+    ) -> UiId {
+        let id = self.register_control(kind, label, range);
+        UiBuilder::new(&mut self.arena).output_control(id)
+    }
+
+    fn soundfile(&mut self, label: String) -> UiId {
+        let id = self.register_control(ControlKind::Soundfile, label, None);
+        UiBuilder::new(&mut self.arena).soundfile(id)
+    }
+
+    fn group(&mut self, kind: UiGroupKind, label: &str, children: &[UiId]) -> UiId {
+        let mut b = UiBuilder::new(&mut self.arena);
+        match kind {
+            UiGroupKind::Vertical => b.vgroup(label, children),
+            UiGroupKind::Horizontal => b.hgroup(label, children),
+            UiGroupKind::Tab => b.tgroup(label, children),
+        }
+    }
+}
+
+fn build_ui_program(source_arena: &TreeArena, box_tree: FlatBoxId) -> UiProgram {
+    let mut collector = UiCollector::new();
+    let roots = collect_ui_nodes(source_arena, box_tree, &mut collector);
+    collector.finish(&roots)
+}
+
+fn collect_ui_nodes(
+    source_arena: &TreeArena,
+    box_tree: FlatBoxId,
+    collector: &mut UiCollector,
+) -> Vec<UiId> {
+    let kind = flat_node_kind(source_arena, box_tree).expect("validated flat box must decode");
+    match kind {
+        FlatNodeKind::Button => {
+            let BoxMatch::Button(label) = match_box(source_arena, box_tree.as_tree_id()) else {
+                unreachable!("flat button node must decode to BoxMatch::Button")
+            };
+            vec![collector.input_control(
+                ControlKind::Button,
+                decode_box_label(source_arena, label),
+                None,
+            )]
+        }
+        FlatNodeKind::Checkbox => {
+            let BoxMatch::Checkbox(label) = match_box(source_arena, box_tree.as_tree_id()) else {
+                unreachable!("flat checkbox node must decode to BoxMatch::Checkbox")
+            };
+            vec![collector.input_control(
+                ControlKind::Checkbox,
+                decode_box_label(source_arena, label),
+                None,
+            )]
+        }
+        FlatNodeKind::VSlider => {
+            let BoxMatch::VSlider(label, init, min, max, step) =
+                match_box(source_arena, box_tree.as_tree_id())
+            else {
+                unreachable!("flat vslider node must decode to BoxMatch::VSlider")
+            };
+            vec![collector.input_control(
+                ControlKind::VSlider,
+                decode_box_label(source_arena, label),
+                Some(ControlRange {
+                    init: decode_box_scalar(source_arena, init),
+                    min: decode_box_scalar(source_arena, min),
+                    max: decode_box_scalar(source_arena, max),
+                    step: decode_box_scalar(source_arena, step),
+                }),
+            )]
+        }
+        FlatNodeKind::HSlider => {
+            let BoxMatch::HSlider(label, init, min, max, step) =
+                match_box(source_arena, box_tree.as_tree_id())
+            else {
+                unreachable!("flat hslider node must decode to BoxMatch::HSlider")
+            };
+            vec![collector.input_control(
+                ControlKind::HSlider,
+                decode_box_label(source_arena, label),
+                Some(ControlRange {
+                    init: decode_box_scalar(source_arena, init),
+                    min: decode_box_scalar(source_arena, min),
+                    max: decode_box_scalar(source_arena, max),
+                    step: decode_box_scalar(source_arena, step),
+                }),
+            )]
+        }
+        FlatNodeKind::NumEntry => {
+            let BoxMatch::NumEntry(label, init, min, max, step) =
+                match_box(source_arena, box_tree.as_tree_id())
+            else {
+                unreachable!("flat numentry node must decode to BoxMatch::NumEntry")
+            };
+            vec![collector.input_control(
+                ControlKind::NumEntry,
+                decode_box_label(source_arena, label),
+                Some(ControlRange {
+                    init: decode_box_scalar(source_arena, init),
+                    min: decode_box_scalar(source_arena, min),
+                    max: decode_box_scalar(source_arena, max),
+                    step: decode_box_scalar(source_arena, step),
+                }),
+            )]
+        }
+        FlatNodeKind::VBargraph => {
+            let BoxMatch::VBargraph(label, _, _) = match_box(source_arena, box_tree.as_tree_id())
+            else {
+                unreachable!("flat vbargraph node must decode to BoxMatch::VBargraph")
+            };
+            vec![collector.output_control(
+                ControlKind::VBargraph,
+                decode_box_label(source_arena, label),
+                None,
+            )]
+        }
+        FlatNodeKind::HBargraph => {
+            let BoxMatch::HBargraph(label, _, _) = match_box(source_arena, box_tree.as_tree_id())
+            else {
+                unreachable!("flat hbargraph node must decode to BoxMatch::HBargraph")
+            };
+            vec![collector.output_control(
+                ControlKind::HBargraph,
+                decode_box_label(source_arena, label),
+                None,
+            )]
+        }
+        FlatNodeKind::Soundfile => {
+            let BoxMatch::Soundfile(label, _) = match_box(source_arena, box_tree.as_tree_id())
+            else {
+                unreachable!("flat soundfile node must decode to BoxMatch::Soundfile")
+            };
+            vec![collector.soundfile(decode_box_label(source_arena, label))]
+        }
+        FlatNodeKind::VGroup { body } => collect_group_ui(
+            source_arena,
+            body,
+            collector,
+            UiGroupKind::Vertical,
+            box_tree.as_tree_id(),
+        ),
+        FlatNodeKind::HGroup { body } => collect_group_ui(
+            source_arena,
+            body,
+            collector,
+            UiGroupKind::Horizontal,
+            box_tree.as_tree_id(),
+        ),
+        FlatNodeKind::TGroup { body } => collect_group_ui(
+            source_arena,
+            body,
+            collector,
+            UiGroupKind::Tab,
+            box_tree.as_tree_id(),
+        ),
+        FlatNodeKind::Symbolic { body }
+        | FlatNodeKind::Metadata { body }
+        | FlatNodeKind::Ondemand(body)
+        | FlatNodeKind::Upsampling(body)
+        | FlatNodeKind::Downsampling(body) => collect_ui_nodes(source_arena, body, collector),
+        FlatNodeKind::Seq(left, right)
+        | FlatNodeKind::Par(left, right)
+        | FlatNodeKind::Split(left, right)
+        | FlatNodeKind::Merge(left, right)
+        | FlatNodeKind::Rec(left, right) => {
+            let mut left_nodes = collect_ui_nodes(source_arena, left, collector);
+            let mut right_nodes = collect_ui_nodes(source_arena, right, collector);
+            left_nodes.append(&mut right_nodes);
+            left_nodes
+        }
+        FlatNodeKind::Int
+        | FlatNodeKind::Real
+        | FlatNodeKind::Wire
+        | FlatNodeKind::Cut
+        | FlatNodeKind::Slot
+        | FlatNodeKind::Prim1
+        | FlatNodeKind::Prim2
+        | FlatNodeKind::Prim3
+        | FlatNodeKind::Prim4
+        | FlatNodeKind::Prim5
+        | FlatNodeKind::FFun
+        | FlatNodeKind::FConst
+        | FlatNodeKind::FVar
+        | FlatNodeKind::Waveform
+        | FlatNodeKind::Environment
+        | FlatNodeKind::Route
+        | FlatNodeKind::Inputs
+        | FlatNodeKind::Outputs => Vec::new(),
+    }
+}
+
+fn collect_group_ui(
+    source_arena: &TreeArena,
+    body: FlatBoxId,
+    collector: &mut UiCollector,
+    kind: UiGroupKind,
+    group_node: BoxId,
+) -> Vec<UiId> {
+    let children = collect_ui_nodes(source_arena, body, collector);
+    if children.is_empty() {
+        return Vec::new();
+    }
+
+    let label = match match_box(source_arena, group_node) {
+        BoxMatch::VGroup(label, _) | BoxMatch::HGroup(label, _) | BoxMatch::TGroup(label, _) => {
+            decode_box_label(source_arena, label)
+        }
+        _ => unreachable!("flat group node must decode to a group box"),
+    };
+    vec![collector.group(kind, &label, &children)]
+}
+
+fn decode_box_label(arena: &TreeArena, node: BoxId) -> String {
+    if let BoxMatch::Ident(value) = match_box(arena, node) {
+        return value.to_string();
+    }
+    match arena.kind(node) {
+        Some(NodeKind::StringLiteral(value)) | Some(NodeKind::Symbol(value)) => value.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn decode_box_scalar(arena: &TreeArena, node: BoxId) -> f64 {
+    match match_box(arena, node) {
+        BoxMatch::Int(value) => f64::from(value),
+        BoxMatch::Real(value) => value,
+        _ => 0.0,
+    }
 }
 
 /// Propagates one box tree with an explicit slot environment.

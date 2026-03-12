@@ -253,6 +253,7 @@ dependencies = [
  "signals",
  "tlib",
  "transform",
+ "ui",
 ]
 
 [[package]]
@@ -768,6 +769,7 @@ dependencies = [
  "errors",
  "signals",
  "tlib",
+ "ui",
 ]
 
 [[package]]

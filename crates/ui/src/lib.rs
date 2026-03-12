@@ -99,6 +99,7 @@ pub struct ControlRange {
 
 /// Canonical control-registry entry referenced by grouped UI layout and later
 /// DSP/FIR lowering.
+#[derive(Debug)]
 pub struct ControlSpec {
     pub id: ControlId,
     pub kind: ControlKind,
@@ -115,6 +116,7 @@ pub struct ControlSpec {
 /// Mapping status:
 /// - `adapted` relative to the C++ internal clock-environment/path encoding.
 /// - `1:1` behaviorally for grouped `buildUserInterface` ownership.
+#[derive(Debug)]
 pub struct UiProgram {
     pub arena: TreeArena,
     pub root: UiId,

@@ -54,6 +54,7 @@ pub use transform::signal_fir::RealType;
 use transform::signal_fir::{
     SignalFirError, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane,
 };
+use ui::UiProgram;
 
 /// Parse + eval + propagate output package.
 ///
@@ -72,6 +73,8 @@ pub struct SignalCompileOutput {
     pub process_arity: BoxArity,
     /// Final propagated output signal list (`process_arity.outputs` items).
     pub signals: Vec<SigId>,
+    /// Canonical grouped UI artifact owned after the propagation boundary.
+    pub ui: UiProgram,
 }
 
 /// Parse + eval + propagate + FIR lowering output package.
@@ -752,7 +755,7 @@ impl Compiler {
                 })?;
 
         let inputs = propagate::make_sig_input_list(&mut output.state.arena, process_arity.inputs);
-        let signals = propagate::propagate_typed(
+        let propagated = propagate::propagate_typed_with_ui(
             &mut output.state.arena,
             process_flat,
             &inputs,
@@ -798,7 +801,8 @@ impl Compiler {
             parse: output,
             process_box,
             process_arity,
-            signals,
+            signals: propagated.signals,
+            ui: propagated.ui,
         })
     }
 }

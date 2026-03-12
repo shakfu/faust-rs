@@ -10,6 +10,7 @@ use compiler::Compiler;
 use parser::CompilationMetadataKey;
 use signals::{BinOp, SigMatch, dump_sig_readable, match_sig};
 use tlib::{TreeArena, TreeId};
+use ui::{ControlKind, UiGroupKind, UiMatch, match_ui};
 
 fn corpus_path(file: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -46,6 +47,25 @@ fn dump_signals_readable(out: &compiler::SignalCompileOutput) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn expect_ui_group(
+    out: &compiler::SignalCompileOutput,
+    node: ui::UiId,
+    expected_kind: UiGroupKind,
+    expected_label: &str,
+) -> Vec<ui::UiId> {
+    let UiMatch::Group {
+        kind,
+        label,
+        children,
+    } = match_ui(&out.ui.arena, node)
+    else {
+        panic!("expected UI group node");
+    };
+    assert_eq!(kind, expected_kind);
+    assert_eq!(label, expected_label);
+    children
 }
 
 #[test]
@@ -294,6 +314,15 @@ fn corpus_higher_order_named_direct_apply_lowers_checkbox_ui() {
         match_sig(&out.parse.state.arena, out.signals[0]),
         SigMatch::Checkbox(_)
     ));
+    let root_children = expect_ui_group(&out, out.ui.root, UiGroupKind::Horizontal, "top");
+    assert_eq!(root_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, root_children[0]),
+        UiMatch::InputControl(0)
+    );
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].kind, ControlKind::Checkbox);
+    assert_eq!(out.ui.controls[0].label, "c");
 }
 
 #[test]
@@ -306,6 +335,29 @@ fn corpus_higher_order_named_argument_apply_lowers_checkbox_ui() {
         match_sig(&out.parse.state.arena, out.signals[0]),
         SigMatch::Checkbox(_)
     ));
+    let root_children = expect_ui_group(&out, out.ui.root, UiGroupKind::Horizontal, "top");
+    assert_eq!(root_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, root_children[0]),
+        UiMatch::InputControl(0)
+    );
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].kind, ControlKind::Checkbox);
+    assert_eq!(out.ui.controls[0].label, "c");
+}
+
+#[test]
+fn corpus_group_label_substitution_reaches_compiler_ui_output() {
+    let out = compile_corpus("rep_52_eval_label_group_path_subst.dsp");
+    let root_children = expect_ui_group(&out, out.ui.root, UiGroupKind::Vertical, "main3");
+    assert_eq!(root_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, root_children[0]),
+        UiMatch::InputControl(0)
+    );
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].kind, ControlKind::HSlider);
+    assert_eq!(out.ui.controls[0].label, "gain");
 }
 
 #[test]
