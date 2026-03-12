@@ -45,9 +45,7 @@ use propagate::{
 use tlib::{
     NodeKind, TreeArena, TreeId, de_bruijn_to_sym, tree_to_double, tree_to_int, tree_to_str,
 };
-use transform::signal_fir::{
-    RealType, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui,
-};
+use transform::signal_fir::{RealType, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui};
 use ui::{UiBuilder, UiProgram, UiRootOrigin};
 
 #[repr(C)]
