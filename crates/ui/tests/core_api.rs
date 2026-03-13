@@ -384,3 +384,49 @@ fn ui_program_builder_merges_group_paths_and_preserves_leaf_order() {
     assert_eq!(match_ui(&arena, children[1]), UiMatch::OutputControl(1));
     assert_eq!(match_ui(&arena, children[2]), UiMatch::Soundfile(2));
 }
+
+#[test]
+fn ui_program_builder_can_drop_empty_group_placeholders() {
+    let mut builder = UiProgramBuilder::new();
+    let foo = vec![UiGroupSpec {
+        kind: UiGroupKind::Horizontal,
+        label: "Foo".to_owned(),
+        metadata: Vec::new(),
+    }];
+    let bar = vec![
+        UiGroupSpec {
+            kind: UiGroupKind::Horizontal,
+            label: "Foo".to_owned(),
+            metadata: Vec::new(),
+        },
+        UiGroupSpec {
+            kind: UiGroupKind::Vertical,
+            label: "Bar".to_owned(),
+            metadata: Vec::new(),
+        },
+    ];
+
+    let foo_id = builder
+        .ensure_group_path(&foo)
+        .expect("terminal Foo placeholder should exist");
+    let bar_id = builder
+        .ensure_group_path(&bar)
+        .expect("terminal Bar placeholder should exist");
+    builder.insert_input_control(&bar, 0);
+
+    assert!(builder.group_has_children(foo_id));
+    assert!(builder.group_has_children(bar_id));
+    assert!(!builder.remove_group_if_empty(foo_id));
+    assert!(!builder.remove_group_if_empty(bar_id));
+
+    let empty = vec![UiGroupSpec {
+        kind: UiGroupKind::Tab,
+        label: "Empty".to_owned(),
+        metadata: Vec::new(),
+    }];
+    let empty_id = builder
+        .ensure_group_path(&empty)
+        .expect("empty placeholder should exist");
+    assert!(builder.remove_group_if_empty(empty_id));
+    assert!(builder.find_group_path(&empty).is_none());
+}

@@ -601,6 +601,47 @@ impl UiProgramBuilder {
         parent
     }
 
+    #[must_use]
+    /// Looks up the terminal group id for one canonical path without creating
+    /// missing ancestors.
+    pub fn find_group_path(&self, path: &[UiGroupSpec]) -> Option<usize> {
+        let mut parent = None;
+        for spec in path {
+            let child = self.find_child_group(parent, spec)?;
+            parent = Some(child);
+        }
+        parent
+    }
+
+    #[must_use]
+    /// Returns whether one draft group already has child nodes attached.
+    pub fn group_has_children(&self, group: usize) -> bool {
+        match &self.nodes[group] {
+            UiDraftNode::Group { children, .. } => !children.is_empty(),
+            UiDraftNode::InputControl(_)
+            | UiDraftNode::OutputControl(_)
+            | UiDraftNode::Soundfile(_) => false,
+        }
+    }
+
+    /// Removes one empty draft group from its parent/root list.
+    ///
+    /// This is used by `propagate` to reserve source-order placeholders for
+    /// explicit groups, then drop placeholders whose subtree ended up emitting
+    /// no UI at all.
+    pub fn remove_group_if_empty(&mut self, group: usize) -> bool {
+        if self.group_has_children(group) {
+            return false;
+        }
+        if let Some(parent) = self.find_parent(group) {
+            self.children_mut(Some(parent))
+                .retain(|child| *child != group);
+            return true;
+        }
+        self.roots.retain(|root| *root != group);
+        true
+    }
+
     /// Inserts one input control under the provided canonical group path.
     pub fn insert_input_control(&mut self, path: &[UiGroupSpec], control: ControlId) {
         self.insert_leaf(path, UiDraftNode::InputControl(control));
@@ -659,6 +700,19 @@ impl UiProgramBuilder {
                 UiDraftNode::InputControl(_)
                 | UiDraftNode::OutputControl(_)
                 | UiDraftNode::Soundfile(_) => false,
+            })
+    }
+
+    fn find_parent(&self, needle: usize) -> Option<usize> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .find_map(|(id, node)| match node {
+                UiDraftNode::Group { children, .. } if children.contains(&needle) => Some(id),
+                UiDraftNode::Group { .. }
+                | UiDraftNode::InputControl(_)
+                | UiDraftNode::OutputControl(_)
+                | UiDraftNode::Soundfile(_) => None,
             })
     }
 

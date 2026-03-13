@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_64_ui_relative_group_root_clamp.dsp
+bytes=90
+lines=1
+fnv1a64=fc258703de3e4cbd

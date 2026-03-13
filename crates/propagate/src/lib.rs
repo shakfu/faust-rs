@@ -43,7 +43,8 @@ use tlib::{NodeKind, TreeArena, TreeId, list_to_vec, tree_to_int, vec_to_list};
 use ui::{
     ControlId, ControlKind, ControlRange, ControlSpec, UiGroupKind, UiGroupPathSegment,
     UiGroupSpec, UiMatch, UiMetadata, UiProgram, UiProgramBuilder, UiRootOrigin,
-    canonicalize_group_spec, match_ui, normalize_widget_label_path, split_label_metadata,
+    canonicalize_group_spec, match_ui, normalize_group_label_navigation,
+    normalize_widget_label_path, split_label_metadata,
 };
 
 /// Memoization cache for [`box_arity`] / [`box_arity_typed`] results, keyed by validated flat boxes.
@@ -1200,6 +1201,12 @@ struct UiBuildOutput {
     control_ids: ControlIds,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct UiCollectSummary {
+    has_ui: bool,
+    preserve_ancestor_chain: bool,
+}
+
 /// Builds the canonical grouped-UI artifact for one validated flat box tree.
 ///
 /// The returned [`UiProgram`] is already normalized for later phases:
@@ -1215,7 +1222,7 @@ fn build_ui_program(
     options: &PropagateUiOptions,
 ) -> UiBuildOutput {
     let mut collector = UiCollector::new();
-    collect_ui_nodes(source_arena, box_tree, &[], &mut collector);
+    let _ = collect_ui_nodes(source_arena, box_tree, &[], &mut collector);
     collector.finish(options)
 }
 
@@ -1226,17 +1233,18 @@ fn build_ui_program(
 /// widgets, bargraphs, soundfiles, and grouping wrappers. Composition-only DSP
 /// nodes recurse structurally in deterministic source order.
 ///
-/// Parity note:
-/// - for this widget-pathname stage, explicit groups only contribute the
-///   current path context used to normalize descendant widget labels,
-/// - empty groups and intermediate groups that all descendants escape through
-///   `../` are therefore omitted, matching current Faust C++ behavior.
+/// Parity/adaptation note:
+/// - widget labels still follow current C++ pathname rebasing,
+/// - Rust additionally allows relative navigation on explicit group labels,
+/// - placeholder explicit groups are kept only when their subtree contributes
+///   UI or when a rebased explicit descendant needs the ancestor chain to stay
+///   visible.
 fn collect_ui_nodes(
     source_arena: &TreeArena,
     box_tree: FlatBoxId,
     current_groups: &[UiGroupPathSegment],
     collector: &mut UiCollector,
-) {
+) -> UiCollectSummary {
     let kind = flat_node_kind(source_arena, box_tree).expect("validated flat box must decode");
     match kind {
         FlatNodeKind::Button => {
@@ -1255,6 +1263,10 @@ fn collect_ui_nodes(
                 metadata,
                 None,
             );
+            UiCollectSummary {
+                has_ui: true,
+                preserve_ancestor_chain: false,
+            }
         }
         FlatNodeKind::Checkbox => {
             let BoxMatch::Checkbox(label) = match_box(source_arena, box_tree.as_tree_id()) else {
@@ -1272,6 +1284,10 @@ fn collect_ui_nodes(
                 metadata,
                 None,
             );
+            UiCollectSummary {
+                has_ui: true,
+                preserve_ancestor_chain: false,
+            }
         }
         FlatNodeKind::VSlider => {
             let BoxMatch::VSlider(label, init, min, max, step) =
@@ -1296,6 +1312,10 @@ fn collect_ui_nodes(
                     step: decode_box_scalar(source_arena, step),
                 }),
             );
+            UiCollectSummary {
+                has_ui: true,
+                preserve_ancestor_chain: false,
+            }
         }
         FlatNodeKind::HSlider => {
             let BoxMatch::HSlider(label, init, min, max, step) =
@@ -1320,6 +1340,10 @@ fn collect_ui_nodes(
                     step: decode_box_scalar(source_arena, step),
                 }),
             );
+            UiCollectSummary {
+                has_ui: true,
+                preserve_ancestor_chain: false,
+            }
         }
         FlatNodeKind::NumEntry => {
             let BoxMatch::NumEntry(label, init, min, max, step) =
@@ -1344,6 +1368,10 @@ fn collect_ui_nodes(
                     step: decode_box_scalar(source_arena, step),
                 }),
             );
+            UiCollectSummary {
+                has_ui: true,
+                preserve_ancestor_chain: false,
+            }
         }
         FlatNodeKind::VBargraph => {
             let BoxMatch::VBargraph(label, min, max) =
@@ -1368,6 +1396,10 @@ fn collect_ui_nodes(
                     step: 0.0,
                 }),
             );
+            UiCollectSummary {
+                has_ui: true,
+                preserve_ancestor_chain: false,
+            }
         }
         FlatNodeKind::HBargraph => {
             let BoxMatch::HBargraph(label, min, max) =
@@ -1392,6 +1424,10 @@ fn collect_ui_nodes(
                     step: 0.0,
                 }),
             );
+            UiCollectSummary {
+                has_ui: true,
+                preserve_ancestor_chain: false,
+            }
         }
         FlatNodeKind::Soundfile => {
             let BoxMatch::Soundfile(label, _) = match_box(source_arena, box_tree.as_tree_id())
@@ -1403,6 +1439,10 @@ fn collect_ui_nodes(
             let path = canonical_group_path(&normalized.groups);
             let (label, metadata) = split_label_metadata(&normalized.raw_label);
             collector.soundfile(box_tree.as_tree_id(), &path, label, metadata);
+            UiCollectSummary {
+                has_ui: true,
+                preserve_ancestor_chain: false,
+            }
         }
         FlatNodeKind::VGroup { body } => collect_group_ui(
             source_arena,
@@ -1440,8 +1480,13 @@ fn collect_ui_nodes(
         | FlatNodeKind::Split(left, right)
         | FlatNodeKind::Merge(left, right)
         | FlatNodeKind::Rec(left, right) => {
-            collect_ui_nodes(source_arena, left, current_groups, collector);
-            collect_ui_nodes(source_arena, right, current_groups, collector);
+            let left_summary = collect_ui_nodes(source_arena, left, current_groups, collector);
+            let right_summary = collect_ui_nodes(source_arena, right, current_groups, collector);
+            UiCollectSummary {
+                has_ui: left_summary.has_ui || right_summary.has_ui,
+                preserve_ancestor_chain: left_summary.preserve_ancestor_chain
+                    || right_summary.preserve_ancestor_chain,
+            }
         }
         FlatNodeKind::Int
         | FlatNodeKind::Real
@@ -1460,7 +1505,7 @@ fn collect_ui_nodes(
         | FlatNodeKind::Environment
         | FlatNodeKind::Route
         | FlatNodeKind::Inputs
-        | FlatNodeKind::Outputs => {}
+        | FlatNodeKind::Outputs => UiCollectSummary::default(),
     }
 }
 
@@ -1471,19 +1516,39 @@ fn collect_group_ui(
     collector: &mut UiCollector,
     kind: UiGroupKind,
     group_node: BoxId,
-) {
+) -> UiCollectSummary {
     let label = match match_box(source_arena, group_node) {
         BoxMatch::VGroup(label, _) | BoxMatch::HGroup(label, _) | BoxMatch::TGroup(label, _) => {
             decode_box_label(source_arena, label)
         }
         _ => unreachable!("flat group node must decode to a group box"),
     };
-    let mut nested_groups = current_groups.to_vec();
-    nested_groups.push(UiGroupPathSegment {
-        kind,
-        raw_label: label,
-    });
-    collect_ui_nodes(source_arena, body, &nested_groups, collector);
+    let normalized = normalize_group_label_navigation(&label, current_groups, kind);
+    let mut nested_groups = normalized.parent_groups;
+    nested_groups.push(normalized.group);
+
+    let path = canonical_group_path(&nested_groups);
+    let terminal_preexisting = collector.builder.find_group_path(&path);
+    let terminal = collector
+        .builder
+        .ensure_group_path(&path)
+        .expect("explicit group path must yield a terminal group");
+
+    let summary = collect_ui_nodes(source_arena, body, &nested_groups, collector);
+    let keep_group =
+        collector.builder.group_has_children(terminal) || summary.preserve_ancestor_chain;
+    if !keep_group && terminal_preexisting.is_none() {
+        let removed = collector.builder.remove_group_if_empty(terminal);
+        debug_assert!(
+            removed,
+            "fresh explicit group placeholder should be removable"
+        );
+    }
+
+    UiCollectSummary {
+        has_ui: summary.has_ui,
+        preserve_ancestor_chain: keep_group,
+    }
 }
 
 /// Converts one raw explicit-group stack into its canonical stored UI path.

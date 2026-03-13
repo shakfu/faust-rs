@@ -601,6 +601,71 @@ fn propagate_with_ui_extracts_metadata_after_relative_widget_rebase() {
 }
 
 #[test]
+fn propagate_with_ui_rebases_explicit_group_label_to_parent() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let foo = bb.ident("Foo");
+        let bar = bb.ident("../Bar");
+        let gain = bb.ident("gain");
+        let init = bb.real(0.5);
+        let min = bb.real(0.0);
+        let max = bb.real(1.0);
+        let step = bb.real(0.01);
+        let slider = bb.hslider(gain, init, min, max, step);
+        let rebased = bb.vgroup(bar, slider);
+        bb.hgroup(foo, rebased)
+    };
+
+    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+        .expect("relative group label should propagate");
+
+    assert_eq!(out.ui.root_origin, UiRootOrigin::Synthesized);
+    let root_children = expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Vertical, "");
+    assert_eq!(root_children.len(), 2);
+    assert!(expect_ui_group(&out.ui, root_children[0], UiGroupKind::Horizontal, "Foo").is_empty());
+    let bar_children = expect_ui_group(&out.ui, root_children[1], UiGroupKind::Vertical, "Bar");
+    assert_eq!(bar_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, bar_children[0]),
+        UiMatch::InputControl(0)
+    );
+    assert_eq!(out.ui.controls[0].label, "gain");
+}
+
+#[test]
+fn propagate_with_ui_clamps_relative_group_label_navigation_at_root() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let foo = bb.ident("Foo");
+        let bar = bb.ident("../../../../Bar");
+        let gain = bb.ident("gain");
+        let init = bb.real(0.5);
+        let min = bb.real(0.0);
+        let max = bb.real(1.0);
+        let step = bb.real(0.01);
+        let slider = bb.hslider(gain, init, min, max, step);
+        let rebased = bb.vgroup(bar, slider);
+        bb.hgroup(foo, rebased)
+    };
+
+    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+        .expect("clamped relative group label should propagate");
+
+    assert_eq!(out.ui.root_origin, UiRootOrigin::Synthesized);
+    let root_children = expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Vertical, "");
+    assert_eq!(root_children.len(), 2);
+    assert!(expect_ui_group(&out.ui, root_children[0], UiGroupKind::Horizontal, "Foo").is_empty());
+    let bar_children = expect_ui_group(&out.ui, root_children[1], UiGroupKind::Vertical, "Bar");
+    assert_eq!(bar_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, bar_children[0]),
+        UiMatch::InputControl(0)
+    );
+}
+
+#[test]
 fn soundfile_box_lowers_to_length_rate_and_channel_buffers() {
     let mut arena = TreeArena::new();
     let soundfile = {
