@@ -154,6 +154,12 @@ struct CliArgs {
     /// Optional output file. When omitted, generated text is written to stdout.
     #[arg(short = 'o', long = "output")]
     output: Option<PathBuf>,
+    /// Specify the DSP class name used instead of `mydsp`.
+    ///
+    /// Faust C++ compatibility note: the legacy `-cn <name>` form is accepted
+    /// and normalized to this option.
+    #[arg(long = "class-name")]
+    class_name: Option<String>,
     /// Override generated C++ class base name for `--dump-cpp-from-fbc`.
     #[arg(long = "cpp-class-name")]
     cpp_class_name: Option<String>,
@@ -227,6 +233,13 @@ fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> 
         }
         if arg == "-pn" {
             normalized.push("--process-name".to_owned());
+            if let Some(value) = it.next() {
+                normalized.push(value);
+            }
+            continue;
+        }
+        if arg == "-cn" {
+            normalized.push("--class-name".to_owned());
             if let Some(value) = it.next() {
                 normalized.push(value);
             }
@@ -592,7 +605,7 @@ fn diagnostic_debug_from_notes(notes: &[Box<str>]) -> serde_json::Value {
 fn print_global_usage_and_exit() -> ! {
     eprintln!("Usage:");
     eprintln!(
-        "  cargo run -p compiler -- -lang c|cpp|fir <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- -lang c|cpp|fir <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!("                           [--no-fir-verify] [--fir-verify-strict]");
     eprintln!("  cargo run -p compiler -- --golden <input.dsp>");
@@ -612,13 +625,13 @@ fn print_global_usage_and_exit() -> ! {
         "  cargo run -p compiler -- --dump-fir-verify <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--fir-verify-strict]"
     );
     eprintln!(
-        "  cargo run -p compiler -- --dump-cpp <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- --dump-cpp <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!(
         "  cargo run -p compiler -- --dump-cpp-from-fbc <input.fbc> [-o <file>] [--cpp-class-name <name>]"
     );
     eprintln!(
-        "  cargo run -p compiler -- --dump-c <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- --dump-c <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     std::process::exit(2);
 }
@@ -733,6 +746,13 @@ fn compiler_from_cli(cli: &CliArgs) -> Compiler {
         .with_real_type(selected_real_type(cli))
 }
 
+fn selected_class_name(cli: &CliArgs) -> Option<String> {
+    cli.class_name
+        .as_ref()
+        .filter(|name| !name.is_empty())
+        .cloned()
+}
+
 /// Renders the list of built-in FIR backend fixtures for `--fir-fixture`.
 fn render_fir_fixture_list() -> String {
     let mut out = String::from("Built-in FIR fixtures:\n");
@@ -835,6 +855,10 @@ fn main() {
 
     if cli.fir_fixture.is_some() && cli.input.is_some() {
         eprintln!("--fir-fixture is incompatible with a DSP input file");
+        std::process::exit(2);
+    }
+    if matches!(cli.class_name.as_deref(), Some("")) {
+        eprintln!("--class-name cannot be empty");
         std::process::exit(2);
     }
 
@@ -965,12 +989,19 @@ fn main() {
         }
 
         if cli.dump_cpp || matches!(cli.lang, Some(CliLang::Cpp)) || mode_count == 0 {
-            match generate_cpp_module(&store, module, &CppOptions::default()) {
+            let options = CppOptions {
+                class_name: selected_class_name(&cli),
+                ..CppOptions::default()
+            };
+            match generate_cpp_module(&store, module, &options) {
                 Ok(cpp) => {
                     let rendered = if let Some(architecture_file) = cli.architecture.as_ref() {
                         let mut options = EnrobageOptions::new(architecture_file.clone());
                         options.architecture_dirs = cli.architecture_dir.clone();
                         options.inline_arch_files = cli.inline_architecture_files;
+                        if let Some(class_name) = selected_class_name(&cli) {
+                            options.class_name = class_name;
+                        }
                         let wrapped = match wrap_cpp_with_architecture(&cpp, &options) {
                             Ok(wrapped) => wrapped,
                             Err(err) => {
@@ -997,12 +1028,19 @@ fn main() {
         }
 
         if cli.dump_c || matches!(cli.lang, Some(CliLang::C)) {
-            match generate_c_module(&store, module, &COptions::default()) {
+            let options = COptions {
+                class_name: selected_class_name(&cli),
+                ..COptions::default()
+            };
+            match generate_c_module(&store, module, &options) {
                 Ok(c_code) => {
                     let rendered = if let Some(architecture_file) = cli.architecture.as_ref() {
                         let mut options = EnrobageOptions::new(architecture_file.clone());
                         options.architecture_dirs = cli.architecture_dir.clone();
                         options.inline_arch_files = cli.inline_architecture_files;
+                        if let Some(class_name) = selected_class_name(&cli) {
+                            options.class_name = class_name;
+                        }
                         let wrapped = match wrap_cpp_with_architecture(&c_code, &options) {
                             Ok(wrapped) => wrapped,
                             Err(err) => {
@@ -1318,7 +1356,10 @@ fn main() {
 
     if cli.dump_cpp || matches!(cli.lang, Some(CliLang::Cpp)) || mode_count == 0 {
         let compiler = compiler_from_cli(&cli);
-        let options = CppOptions::default();
+        let options = CppOptions {
+            class_name: selected_class_name(&cli),
+            ..CppOptions::default()
+        };
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_cpp_with_lane(
                 input_path,
@@ -1340,6 +1381,9 @@ fn main() {
                     let mut options = EnrobageOptions::new(architecture_file.clone());
                     options.architecture_dirs = cli.architecture_dir.clone();
                     options.inline_arch_files = cli.inline_architecture_files;
+                    if let Some(class_name) = selected_class_name(&cli) {
+                        options.class_name = class_name;
+                    }
                     let wrapped = match wrap_cpp_with_architecture(&cpp, &options) {
                         Ok(wrapped) => wrapped,
                         Err(err) => {
@@ -1368,7 +1412,10 @@ fn main() {
 
     if cli.dump_c || matches!(cli.lang, Some(CliLang::C)) {
         let compiler = compiler_from_cli(&cli);
-        let options = COptions::default();
+        let options = COptions {
+            class_name: selected_class_name(&cli),
+            ..COptions::default()
+        };
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_c_with_lane(
                 input_path,
@@ -1390,6 +1437,9 @@ fn main() {
                     let mut options = EnrobageOptions::new(architecture_file.clone());
                     options.architecture_dirs = cli.architecture_dir.clone();
                     options.inline_arch_files = cli.inline_architecture_files;
+                    if let Some(class_name) = selected_class_name(&cli) {
+                        options.class_name = class_name;
+                    }
                     let wrapped = match wrap_cpp_with_architecture(&c_code, &options) {
                         Ok(wrapped) => wrapped,
                         Err(err) => {
@@ -1498,6 +1548,31 @@ mod tests {
     fn cli_parse_accepts_process_name() {
         let cli = CliArgs::parse_from(["faust-rs", "--process-name", "dsp", "foo.dsp"]);
         assert_eq!(cli.process_name, "dsp");
+    }
+
+    #[test]
+    fn cli_parse_accepts_class_name() {
+        let cli = CliArgs::parse_from(["faust-rs", "--class-name", "customdsp", "foo.dsp"]);
+        assert_eq!(cli.class_name.as_deref(), Some("customdsp"));
+    }
+
+    #[test]
+    fn normalize_legacy_args_maps_dash_cn_to_class_name() {
+        let normalized = normalize_legacy_args(vec![
+            "faust-rs".to_owned(),
+            "-cn".to_owned(),
+            "customdsp".to_owned(),
+            "foo.dsp".to_owned(),
+        ]);
+        assert_eq!(
+            normalized,
+            vec![
+                "faust-rs".to_owned(),
+                "--class-name".to_owned(),
+                "customdsp".to_owned(),
+                "foo.dsp".to_owned(),
+            ]
+        );
     }
 
     #[test]

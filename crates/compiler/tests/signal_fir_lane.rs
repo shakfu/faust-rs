@@ -31,6 +31,30 @@ fn dump_cpp_fastlane_compiles_fixture() {
     assert!(cpp.contains("class mydsp : public dsp"));
 }
 
+#[test]
+fn fastlane_cpp_honors_explicit_class_name_option() {
+    let cpp = compile_cpp_with_class_name(
+        "rep_56_noise_smoo_slider.dsp",
+        SignalFirLane::TransformFastLane,
+        "customdsp",
+    );
+    assert!(cpp.contains("class customdsp : public dsp"));
+    assert!(cpp.contains("#define FAUSTCLASS customdsp"));
+    assert!(!cpp.contains("class mydsp : public dsp"));
+}
+
+#[test]
+fn fastlane_c_honors_explicit_class_name_option() {
+    let c_code = compile_c_with_class_name(
+        "rep_56_noise_smoo_slider.dsp",
+        SignalFirLane::TransformFastLane,
+        "customdsp",
+    );
+    assert!(c_code.contains("} customdsp;"));
+    assert!(c_code.contains("void computecustomdsp(customdsp* dsp"));
+    assert!(!c_code.contains("} mydsp;"));
+}
+
 fn compile_cpp_with_lane(file: &str, lane: SignalFirLane) -> String {
     let compiler = Compiler::new();
     let path = corpus_path(file);
@@ -65,6 +89,36 @@ fn compile_c_with_lane(file: &str, lane: SignalFirLane) -> String {
             lane,
         )
         .unwrap_or_else(|e| panic!("{file} C compilation failed for lane {lane:?}: {e}"))
+}
+
+fn compile_cpp_with_class_name(file: &str, lane: SignalFirLane, class_name: &str) -> String {
+    let compiler = Compiler::new();
+    let path = corpus_path(file);
+    let options = codegen::backends::cpp::CppOptions {
+        class_name: Some(class_name.to_owned()),
+        ..codegen::backends::cpp::CppOptions::default()
+    };
+    compiler
+        .compile_file_default_to_cpp_with_lane(&path, &options, lane)
+        .unwrap_or_else(|e| {
+            panic!(
+                "{file} C++ compilation failed for lane {lane:?} and class name {class_name}: {e}"
+            )
+        })
+}
+
+fn compile_c_with_class_name(file: &str, lane: SignalFirLane, class_name: &str) -> String {
+    let compiler = Compiler::new();
+    let path = corpus_path(file);
+    let options = codegen::backends::c::COptions {
+        class_name: Some(class_name.to_owned()),
+        ..codegen::backends::c::COptions::default()
+    };
+    compiler
+        .compile_file_default_to_c_with_lane(&path, &options, lane)
+        .unwrap_or_else(|e| {
+            panic!("{file} C compilation failed for lane {lane:?} and class name {class_name}: {e}")
+        })
 }
 
 fn compile_cpp_with_lane_and_real_type(
