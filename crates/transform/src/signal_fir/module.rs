@@ -54,6 +54,8 @@ use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{NodeKind, TreeArena, match_sym_rec, match_sym_ref};
 use ui::{ControlId, ControlKind, UiGroupKind, UiMatch, UiProgram, match_ui};
 
+use sigtype::{SigType, Variability, check_delay_interval};
+
 use crate::signal_prepare::SimpleSigType;
 
 use super::SignalFirOutput;
@@ -124,9 +126,10 @@ pub fn build_module(
     signals: &[SigId],
     ui: &UiProgram,
     types: &HashMap<SigId, SimpleSigType>,
+    sig_types: &HashMap<SigId, SigType>,
     real_ty: FirType,
 ) -> Result<SignalFirOutput, SignalFirError> {
-    let mut lower = SignalToFirLower::new(arena, ui, types, plan.num_inputs, real_ty);
+    let mut lower = SignalToFirLower::new(arena, ui, types, sig_types, plan.num_inputs, real_ty);
     lower.ensure_sample_rate_var();
     lower.prepare_delay_lines(signals)?;
     let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
@@ -482,6 +485,7 @@ struct SignalToFirLower<'a> {
     arena: &'a TreeArena,
     ui_program: &'a UiProgram,
     types: &'a HashMap<SigId, SimpleSigType>,
+    sig_types: &'a HashMap<SigId, SigType>,
     num_inputs: usize,
     /// Internal DSP computation type (e.g. `Float32` or `Float64`).
     ///
@@ -550,6 +554,7 @@ impl<'a> SignalToFirLower<'a> {
         arena: &'a TreeArena,
         ui_program: &'a UiProgram,
         types: &'a HashMap<SigId, SimpleSigType>,
+        sig_types: &'a HashMap<SigId, SigType>,
         num_inputs: usize,
         real_ty: FirType,
     ) -> Self {
@@ -557,6 +562,7 @@ impl<'a> SignalToFirLower<'a> {
             arena,
             ui_program,
             types,
+            sig_types,
             num_inputs,
             real_ty,
             store: FirStore::new(),
@@ -622,7 +628,7 @@ impl<'a> SignalToFirLower<'a> {
             return Ok(());
         }
         if let SigMatch::Delay(value, amount) = match_sig(self.arena, sig) {
-            match self.constant_delay_amount(amount)? {
+            match self.delay_size_for_amount(amount)? {
                 Some(0) => {}
                 Some(delay) => {
                     self.ensure_delay_line_decl(value, delay)?;
@@ -630,7 +636,7 @@ impl<'a> SignalToFirLower<'a> {
                 None => {
                     return self.unsupported_node(
                         sig,
-                        "SIGDELAY currently requires a constant integer amount in the fast-lane",
+                        "SIGDELAY requires a constant integer amount or a UI parameter with a bounded interval",
                     );
                 }
             }
@@ -919,21 +925,23 @@ impl<'a> SignalToFirLower<'a> {
     /// - one typed DSP-struct array per delayed carried signal,
     /// - masked circular indexing driven by persistent `fIOTA`.
     ///
-    /// Variable delays remain explicitly unsupported until the fast-lane grows
-    /// a static delay-bound analysis comparable to the C++ interval contract.
+    /// For variable-rate amounts (e.g., UI sliders), the delay line is sized to
+    /// the interval upper bound from `sig_types`; the runtime index expression
+    /// is the lowered amount signal evaluated each sample.
     fn lower_delay(
         &mut self,
         node: SigId,
         value: SigId,
         amount: SigId,
     ) -> Result<FirId, SignalFirError> {
-        match self.constant_delay_amount(amount)? {
+        match self.delay_size_for_amount(amount)? {
             Some(0) => self.lower_signal(value),
             Some(delay) => self.lower_fixed_delay(node, value, amount, delay),
             None => Err(SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
                 format!(
-                    "SIGDELAY amount must be a constant integer in the current fast-lane (expr={})",
+                    "SIGDELAY requires a constant integer amount or a UI parameter \
+                     with a bounded interval (expr={})",
                     dump_sig_readable(self.arena, amount)
                 ),
             )),
@@ -1250,6 +1258,39 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Int(value) => Ok(Some(value)),
             _ => Ok(None),
         }
+    }
+
+    /// Returns the interval-derived maximum delay bound for a variable-rate
+    /// delay amount signal.
+    ///
+    /// Only succeeds when `sig_types` carries a `Block`-or-slower-variability
+    /// type (i.e. a UI control such as slider/numentry) with an explicitly
+    /// positive upper bound.  Audio-rate (`Samp`) signals are rejected even if
+    /// they happen to carry a finite `hi()`, because their interval is the
+    /// fallback `[f64::MIN, f64::MAX]` placeholder — not a real constraint.
+    fn variable_delay_max_bound(&self, sig: SigId) -> Option<i32> {
+        let ty = self.sig_types.get(&sig)?;
+        // Reject sample-rate signals — their interval is an uninformative
+        // placeholder, not a host-controlled parameter bound.
+        if ty.variability() == Variability::Samp {
+            return None;
+        }
+        let hi = ty.interval().hi();
+        if hi <= 0.0 {
+            return None;
+        }
+        check_delay_interval(ty).ok()
+    }
+
+    /// Resolve the delay line allocation size for `amount`:
+    /// - literal `Int` → exact constant
+    /// - slider / bounded UI control → interval upper bound
+    /// - unbounded / audio inputs → `None` (caller must reject)
+    fn delay_size_for_amount(&self, amount: SigId) -> Result<Option<i32>, SignalFirError> {
+        if let Some(c) = self.constant_delay_amount(amount)? {
+            return Ok(Some(c));
+        }
+        Ok(self.variable_delay_max_bound(amount))
     }
 
     fn pow2limit_for_delay(&self, delay: i32) -> Result<usize, SignalFirError> {

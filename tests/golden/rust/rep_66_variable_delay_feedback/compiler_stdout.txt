@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_66_variable_delay_feedback.dsp
+bytes=418
+lines=7
+fnv1a64=227b36ff30ef6d99

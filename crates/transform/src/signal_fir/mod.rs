@@ -30,7 +30,8 @@
 //!
 //! General `SIGDELAY` parity remains intentionally partial: the fast-lane now
 //! supports constant integer delay amounts through fixed-size circular buffers,
-//! but still rejects variable delays until a static delay-bound analysis is
+//! and variable delays where the amount comes from a UI control with a bounded
+//! interval (slider/numentry). Delays with unbounded intervals are
 //! available.
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors until the
@@ -193,6 +194,7 @@ pub fn compile_signals_to_fir_fastlane_with_ui(
         &prepared.outputs,
         ui,
         &prepared.types,
+        &prepared.sig_types,
         options.real_type.as_fir_type(),
     )
 }
@@ -1328,6 +1330,9 @@ mod tests {
 
     #[test]
     fn variable_delay_is_rejected_explicitly() {
+        // An audio input used as delay amount has no bounded interval in sig_types
+        // (placeholder interval(0) → hi=0, not strictly positive) so it is
+        // still rejected after the interval-based variable delay support.
         let mut arena = TreeArena::new();
         let sig0 = {
             let mut b = SigBuilder::new(&mut arena);
@@ -1336,11 +1341,82 @@ mod tests {
             b.delay(in0, amount)
         };
         let err = compile_fastlane_without_ui(&arena, &[sig0], 2, 1, &SignalFirOptions::default())
-            .expect_err("variable delay must stay unsupported");
+            .expect_err("audio-input delay amount must still be rejected");
         assert_eq!(err.code(), SignalFirErrorCode::UnsupportedSignalNode);
         assert!(
-            err.to_string().contains("constant integer amount"),
-            "error should explain the current fixed-delay restriction"
+            err.to_string().contains("bounded interval"),
+            "error should mention the bounded-interval requirement"
+        );
+    }
+
+    #[test]
+    fn variable_delay_with_slider_bound_lowers_to_interval_sized_delay_line() {
+        // process = @(100) : @(hslider("Delay",10,0,100,1));
+        // The outer @(100) is constant; the inner @(hslider(...)) is variable
+        // with interval [0,100].  Both should lower: the slider delay uses a
+        // delay line sized to next_power_of_two(101) = 128.
+        let ui = one_control_ui(
+            ControlKind::HSlider,
+            "Delay",
+            Some(ControlRange {
+                init: 10.0,
+                min: 0.0,
+                max: 100.0,
+                step: 1.0,
+            }),
+            false,
+            false,
+        );
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let in0 = b.input(0);
+            let n100 = b.int(100);
+            let delayed_fixed = b.delay(in0, n100);
+            let raw_slider = b.hslider(0);
+            let slider_amount = b.int_cast(raw_slider);
+            b.delay(delayed_fixed, slider_amount)
+        };
+        let out = compile_signals_to_fir_fastlane_with_ui(
+            &arena,
+            &[sig0],
+            1,
+            1,
+            &ui,
+            &SignalFirOptions::default(),
+        )
+        .expect("variable delay with bounded slider should lower successfully");
+
+        let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+            panic!("module expected");
+        };
+        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+            panic!("dsp_struct block expected");
+        };
+        // Expect two delay-line DeclareVar(Array) entries: one for @(100)
+        // (size=128) and one for the slider-bounded @(hslider) (size=128 too,
+        // since next_power_of_two(101)=128).
+        let delay_line_sizes: Vec<usize> = struct_items
+            .iter()
+            .filter_map(|id| match match_fir(&out.store, *id) {
+                FirMatch::DeclareVar {
+                    ref name,
+                    typ: FirType::Array(_, size),
+                    ..
+                } if name.starts_with("fVec") || name.starts_with("iVec") => Some(size),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            delay_line_sizes.len(),
+            2,
+            "expected two delay-line arrays (one fixed @100, one slider-bounded), got {:?}",
+            delay_line_sizes
+        );
+        let max_size = delay_line_sizes.iter().copied().max().unwrap_or(0);
+        assert!(
+            max_size >= 128,
+            "slider delay line must be >= 128 samples (next_power_of_two(101)), got {max_size}"
         );
     }
 
