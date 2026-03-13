@@ -1,0 +1,15 @@
+[package]
+name = "sigtype"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interval = { path = "../interval" }
+signals  = { path = "../signals" }
+tlib     = { path = "../tlib" }
+ui       = { path = "../ui" }

@@ -12,6 +12,7 @@ members = [
   "crates/eval",
   "crates/propagate",
   "crates/normalize",
+  "crates/sigtype",
   "crates/transform",
   "crates/fir",
   "crates/codegen",

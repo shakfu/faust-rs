@@ -180,7 +180,7 @@ pub fn compile_signals_to_fir_fastlane_with_ui(
     options: &SignalFirOptions,
 ) -> Result<SignalFirOutput, SignalFirError> {
     let plan = planner::plan_signals(signals, num_inputs, num_outputs, options)?;
-    let prepared = prepare_signals_for_fir(_arena, signals).map_err(|err| {
+    let prepared = prepare_signals_for_fir(_arena, signals, ui).map_err(|err| {
         SignalFirError::new(
             SignalFirErrorCode::UnsupportedSignalNode,
             format!("signal preparation failed: {err}"),
@@ -871,7 +871,7 @@ mod tests {
         };
 
         let prepared =
-            prepare_signals_for_fir(&arena, &[sig0]).expect("feedback group should prepare");
+            prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty()).expect("feedback group should prepare");
         let out = compile_fastlane_without_ui(
             &prepared.arena,
             &prepared.outputs,
@@ -1026,7 +1026,7 @@ mod tests {
         };
 
         let prepared =
-            prepare_signals_for_fir(&arena, &[sig0]).expect("integer recursion should prepare");
+            prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty()).expect("integer recursion should prepare");
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
 
         let out = compile_fastlane_without_ui(
@@ -1086,7 +1086,7 @@ mod tests {
         };
 
         let prepared =
-            prepare_signals_for_fir(&arena, &[sig0]).expect("integer abs recursion should prepare");
+            prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty()).expect("integer abs recursion should prepare");
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
 
         let out = compile_fastlane_without_ui(

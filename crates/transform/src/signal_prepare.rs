@@ -44,10 +44,12 @@ use std::error::Error;
 use std::fmt;
 
 use signals::{BinOp, SigBuilder, SigId, SigMatch, dump_sig_readable, match_sig};
+use sigtype::{SigType, TypeAnnotator};
 use tlib::{
     RecursionError, TreeArena, list_to_vec, match_sym_rec, match_sym_ref, sym_rec, sym_ref,
     tree_to_int, vec_to_list,
 };
+use ui::UiProgram;
 
 /// Reduced signal type used by the pre-FIR preparation stage.
 ///
@@ -76,8 +78,11 @@ pub struct PreparedSignals {
     pub arena: TreeArena,
     /// Prepared output roots interned in [`Self::arena`].
     pub outputs: Vec<SigId>,
-    /// Reduced type annotation for prepared signal nodes.
+    /// Reduced type annotation for prepared signal nodes (for promoter + FIR lowerer).
     pub types: HashMap<SigId, SimpleSigType>,
+    /// Full signal type annotation from the `sigtype` type system.
+    /// Carries interval bounds, variability, and all other lattice qualifiers.
+    pub sig_types: HashMap<SigId, SigType>,
 }
 
 impl PreparedSignals {
@@ -85,6 +90,12 @@ impl PreparedSignals {
     #[must_use]
     pub fn ty(&self, sig: SigId) -> Option<SimpleSigType> {
         self.types.get(&sig).copied()
+    }
+
+    /// Returns the full `SigType` (with interval) for one signal node.
+    #[must_use]
+    pub fn sig_ty(&self, sig: SigId) -> Option<&SigType> {
+        self.sig_types.get(&sig)
     }
 }
 
@@ -130,6 +141,7 @@ impl From<RecursionError> for SignalPrepareError {
 pub fn prepare_signals_for_fir(
     src_arena: &TreeArena,
     outputs: &[SigId],
+    ui: &UiProgram,
 ) -> Result<PreparedSignals, SignalPrepareError> {
     let mut arena = TreeArena::new();
     let cloned_outputs = arena.clone_forest_from(src_arena, outputs);
@@ -140,11 +152,30 @@ pub fn prepare_signals_for_fir(
     let typed_before_promotion = infer_simple_types(&arena, &outputs)?;
     let outputs = promote_signals_for_fir(&mut arena, &outputs, &typed_before_promotion)?;
     let types = infer_simple_types(&arena, &outputs)?;
+    // Full type annotation with interval bounds via the sigtype system.
+    let sig_types = infer_full_types(&arena, &outputs, ui)?;
     Ok(PreparedSignals {
         arena,
         outputs,
         types,
+        sig_types,
     })
+}
+
+/// Runs the full `TypeAnnotator` (sigtype crate) on the prepared output forest.
+///
+/// This produces interval bounds, variability, and all lattice qualifiers for
+/// each node.  The resulting map is stored alongside the reduced `SimpleSigType`
+/// map so that downstream consumers (e.g. `signal_fir`) can read either.
+fn infer_full_types(
+    arena: &TreeArena,
+    outputs: &[SigId],
+    ui: &UiProgram,
+) -> Result<HashMap<SigId, SigType>, SignalPrepareError> {
+    let mut annotator = TypeAnnotator::new(arena, ui);
+    annotator
+        .annotate(outputs)
+        .map_err(|e| SignalPrepareError::Typing(e.0))
 }
 
 /// Runs the reduced simple typer on the prepared output forest.
@@ -1387,7 +1418,7 @@ mod tests {
         };
 
         let prepared =
-            prepare_signals_for_fir(&arena, &[proj0, proj1]).expect("closed recursion group");
+            prepare_signals_for_fir(&arena, &[proj0, proj1], &ui::UiProgram::empty()).expect("closed recursion group");
 
         assert_eq!(prepared.outputs.len(), 2);
         let SigMatch::Proj(_, left_group) = match_sig(&prepared.arena, prepared.outputs[0]) else {
@@ -1436,7 +1467,7 @@ mod tests {
         };
 
         let prepared =
-            prepare_signals_for_fir(&arena, &outputs).expect("simple numeric typing should work");
+            prepare_signals_for_fir(&arena, &outputs, &ui::UiProgram::empty()).expect("simple numeric typing should work");
 
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
         assert_eq!(prepared.ty(prepared.outputs[1]), Some(SimpleSigType::Int));
@@ -1459,7 +1490,7 @@ mod tests {
         };
 
         let prepared =
-            prepare_signals_for_fir(&arena, &[output]).expect("recursive typing should converge");
+            prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty()).expect("recursive typing should converge");
 
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Real));
     }
@@ -1485,7 +1516,7 @@ mod tests {
         };
 
         let prepared =
-            prepare_signals_for_fir(&arena, &[output]).expect("recursive int min should prepare");
+            prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty()).expect("recursive int min should prepare");
 
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
         let SigMatch::Proj(_, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0])
@@ -1532,7 +1563,7 @@ mod tests {
         };
 
         let prepared =
-            prepare_signals_for_fir(&arena, &[output]).expect("recursive int abs should prepare");
+            prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty()).expect("recursive int abs should prepare");
 
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
         let SigMatch::Proj(_, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0])
@@ -1569,7 +1600,7 @@ mod tests {
         };
 
         let prepared =
-            prepare_signals_for_fir(&arena, &[output]).expect("delay promotion should succeed");
+            prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty()).expect("delay promotion should succeed");
 
         let SigMatch::Delay(_, amount) = match_sig(&prepared.arena, prepared.outputs[0]) else {
             panic!("promoted output should stay SIGDELAY");
@@ -1592,7 +1623,7 @@ mod tests {
         };
 
         let prepared =
-            prepare_signals_for_fir(&arena, &[output]).expect("select2 promotion should succeed");
+            prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty()).expect("select2 promotion should succeed");
 
         let SigMatch::Select2(selector, then_value, else_value) =
             match_sig(&prepared.arena, prepared.outputs[0])
@@ -1628,7 +1659,7 @@ mod tests {
         };
 
         let prepared =
-            prepare_signals_for_fir(&arena, &[output]).expect("table promotion should succeed");
+            prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty()).expect("table promotion should succeed");
 
         let SigMatch::RdTbl(_, index) = match_sig(&prepared.arena, prepared.outputs[0]) else {
             panic!("promoted output should stay SIGRDTBL");
