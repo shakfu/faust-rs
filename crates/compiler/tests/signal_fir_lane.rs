@@ -44,6 +44,18 @@ fn fastlane_cpp_honors_explicit_class_name_option() {
 }
 
 #[test]
+fn fastlane_cpp_honors_explicit_super_class_name_option() {
+    let cpp = compile_cpp_with_names(
+        "rep_56_noise_smoo_slider.dsp",
+        SignalFirLane::TransformFastLane,
+        "customdsp",
+        "faust_dsp",
+    );
+    assert!(cpp.contains("class customdsp : public faust_dsp"));
+    assert!(!cpp.contains("class customdsp : public dsp"));
+}
+
+#[test]
 fn fastlane_c_honors_explicit_class_name_option() {
     let c_code = compile_c_with_class_name(
         "rep_56_noise_smoo_slider.dsp",
@@ -92,17 +104,27 @@ fn compile_c_with_lane(file: &str, lane: SignalFirLane) -> String {
 }
 
 fn compile_cpp_with_class_name(file: &str, lane: SignalFirLane, class_name: &str) -> String {
+    compile_cpp_with_names(file, lane, class_name, "dsp")
+}
+
+fn compile_cpp_with_names(
+    file: &str,
+    lane: SignalFirLane,
+    class_name: &str,
+    super_class_name: &str,
+) -> String {
     let compiler = Compiler::new();
     let path = corpus_path(file);
     let options = codegen::backends::cpp::CppOptions {
         class_name: Some(class_name.to_owned()),
+        super_class_name: Some(super_class_name.to_owned()),
         ..codegen::backends::cpp::CppOptions::default()
     };
     compiler
         .compile_file_default_to_cpp_with_lane(&path, &options, lane)
         .unwrap_or_else(|e| {
             panic!(
-                "{file} C++ compilation failed for lane {lane:?} and class name {class_name}: {e}"
+                "{file} C++ compilation failed for lane {lane:?}, class name {class_name}, super class name {super_class_name}: {e}"
             )
         })
 }

@@ -11,7 +11,7 @@
 //! `match_fir` only.
 //!
 //! # Output contract
-//! - Emits `class <name> : public dsp`.
+//! - Emits `class <name> : public <super-class>`.
 //! - Emits Faust `dsp` lifecycle/API methods (`init`, `instance*`,
 //!   `buildUserInterface`, `compute`, `getNumInputs/Outputs`, `metadata`).
 //! - Emits `compute(int count, FAUSTFLOAT** RESTRICT, FAUSTFLOAT** RESTRICT)`
@@ -35,6 +35,10 @@ pub struct CppOptions {
     pub namespace: Option<String>,
     /// Optional class name override for the FIR module name.
     pub class_name: Option<String>,
+    /// Optional superclass override for the generated DSP class.
+    ///
+    /// Mirrors Faust `-scn/--super-class-name` and defaults to `dsp`.
+    pub super_class_name: Option<String>,
     /// C++ spelling used for FIR `Quad` values.
     ///
     /// C++ uses target-dependent `quad` spellings; Rust backend keeps this
@@ -56,6 +60,7 @@ impl Default for CppOptions {
         Self {
             namespace: None,
             class_name: Some("mydsp".to_owned()),
+            super_class_name: Some("dsp".to_owned()),
             quad_type_name: "quad".to_owned(),
             fixed_type_name: "fixed".to_owned(),
         }
@@ -171,6 +176,7 @@ enum EmitMode {
 ///
 /// # Options behavior
 /// - `class_name`: overrides FIR module name.
+/// - `super_class_name`: overrides the generated DSP superclass.
 /// - `namespace`: wraps the generated class in `namespace <name>`.
 /// - input/output arity is taken from FIR module metadata.
 ///
@@ -192,6 +198,7 @@ pub fn generate_cpp_module(
         .class_name
         .as_deref()
         .unwrap_or(module.name.as_str());
+    let super_class_name = options.super_class_name.as_deref().unwrap_or("dsp");
 
     let mut out = String::new();
     emit_cpp_header(&mut out, class_name, &module_name);
@@ -200,7 +207,7 @@ pub fn generate_cpp_module(
         let _ = writeln!(out);
     }
 
-    let _ = writeln!(out, "class {class_name} : public dsp {{");
+    let _ = writeln!(out, "class {class_name} : public {super_class_name} {{");
     let _ = writeln!(out, "private:");
     if !has_sample_rate_field {
         let _ = writeln!(out, "    int fSampleRate;");
@@ -1357,6 +1364,25 @@ mod tests {
         assert!(out.contains("#include <cmath>"));
         assert!(out.contains("Code generated with Faust (https://faust.grame.fr)"));
         assert!(out.contains("\n#endif\n"));
+    }
+
+    #[test]
+    fn custom_super_class_name_overrides_public_base() {
+        let mut store = FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+        let dsp_struct = b.block(&[]);
+        let globals = b.block(&[]);
+        let functions = b.block(&[]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
+        let options = CppOptions {
+            super_class_name: Some("faust_dsp".to_owned()),
+            ..CppOptions::default()
+        };
+
+        let out =
+            generate_cpp_module(&store, module, &options).expect("module root should generate");
+        assert!(out.contains("class mydsp : public faust_dsp"));
+        assert!(!out.contains("class mydsp : public dsp"));
     }
 
     #[test]

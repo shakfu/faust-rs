@@ -154,22 +154,25 @@ struct CliArgs {
     /// Optional output file. When omitted, generated text is written to stdout.
     #[arg(short = 'o', long = "output")]
     output: Option<PathBuf>,
-    /// Specify the DSP class name used instead of `mydsp`.
-    ///
-    /// Faust C++ compatibility note: the legacy `-cn <name>` form is accepted
-    /// and normalized to this option.
+    /// Specify the DSP class name used instead of `mydsp` (`-cn <name>`,
+    /// `--class-name <name>`).
     #[arg(long = "class-name")]
     class_name: Option<String>,
+    /// Specify the DSP superclass name used instead of `dsp`
+    /// (`-scn <name>`, `--super-class-name <name>`).
+    #[arg(long = "super-class-name")]
+    super_class_name: Option<String>,
     /// Override generated C++ class base name for `--dump-cpp-from-fbc`.
+    ///
+    /// This is an FBC-wrapper option, distinct from DSP generation
+    /// `-cn/--class-name`.
     #[arg(long = "cpp-class-name")]
     cpp_class_name: Option<String>,
     /// Extra import search directories.
     #[arg(short = 'I', long = "import-dir")]
     import_dir: Vec<PathBuf>,
-    /// Specify the top-level DSP entry-point name instead of `process`.
-    ///
-    /// Faust C++ compatibility note: the legacy `-pn <name>` form is accepted
-    /// and normalized to this option.
+    /// Specify the top-level DSP entry-point name instead of `process`
+    /// (`-pn <name>`, `--process-name <name>`).
     #[arg(long = "process-name", default_value = "process")]
     process_name: String,
     /// Wrapper architecture file (`-a` compatibility).
@@ -240,6 +243,13 @@ fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> 
         }
         if arg == "-cn" {
             normalized.push("--class-name".to_owned());
+            if let Some(value) = it.next() {
+                normalized.push(value);
+            }
+            continue;
+        }
+        if arg == "-scn" {
+            normalized.push("--super-class-name".to_owned());
             if let Some(value) = it.next() {
                 normalized.push(value);
             }
@@ -605,7 +615,7 @@ fn diagnostic_debug_from_notes(notes: &[Box<str>]) -> serde_json::Value {
 fn print_global_usage_and_exit() -> ! {
     eprintln!("Usage:");
     eprintln!(
-        "  cargo run -p compiler -- -lang c|cpp|fir <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- -lang c|cpp|fir <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--super-class-name <name>] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!("                           [--no-fir-verify] [--fir-verify-strict]");
     eprintln!("  cargo run -p compiler -- --golden <input.dsp>");
@@ -625,7 +635,7 @@ fn print_global_usage_and_exit() -> ! {
         "  cargo run -p compiler -- --dump-fir-verify <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--fir-verify-strict]"
     );
     eprintln!(
-        "  cargo run -p compiler -- --dump-cpp <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- --dump-cpp <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--super-class-name <name>] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!(
         "  cargo run -p compiler -- --dump-cpp-from-fbc <input.fbc> [-o <file>] [--cpp-class-name <name>]"
@@ -753,6 +763,13 @@ fn selected_class_name(cli: &CliArgs) -> Option<String> {
         .cloned()
 }
 
+fn selected_super_class_name(cli: &CliArgs) -> Option<String> {
+    cli.super_class_name
+        .as_ref()
+        .filter(|name| !name.is_empty())
+        .cloned()
+}
+
 /// Renders the list of built-in FIR backend fixtures for `--fir-fixture`.
 fn render_fir_fixture_list() -> String {
     let mut out = String::from("Built-in FIR fixtures:\n");
@@ -861,6 +878,10 @@ fn main() {
         eprintln!("--class-name cannot be empty");
         std::process::exit(2);
     }
+    if matches!(cli.super_class_name.as_deref(), Some("")) {
+        eprintln!("--super-class-name cannot be empty");
+        std::process::exit(2);
+    }
 
     if (cli.dump_box || cli.dump_sig || cli.parse || cli.golden) && cli.signal_fir_lane.is_some() {
         eprintln!(
@@ -875,9 +896,10 @@ fn main() {
             || !cli.architecture_dir.is_empty()
             || cli.inline_architecture_files
             || cli.fir_fixture.is_some()
+            || cli.super_class_name.is_some()
         {
             eprintln!(
-                "--dump-cpp-from-fbc is incompatible with --signal-fir-lane/--import-dir/architecture/--fir-fixture"
+                "--dump-cpp-from-fbc is incompatible with --signal-fir-lane/--import-dir/architecture/--fir-fixture/--super-class-name"
             );
             std::process::exit(2);
         }
@@ -889,6 +911,13 @@ fn main() {
         }
     } else if cli.cpp_class_name.is_some() {
         eprintln!("--cpp-class-name is only valid with --dump-cpp-from-fbc");
+        std::process::exit(2);
+    }
+    if cli.super_class_name.is_some()
+        && (cli.dump_c || matches!(cli.lang, Some(CliLang::C)))
+        && cli.architecture.is_none()
+    {
+        eprintln!("--super-class-name is only meaningful for C++ output or architecture wrapping");
         std::process::exit(2);
     }
     if (cli.dump_fir || cli.dump_fir_verify || matches!(cli.lang, Some(CliLang::Fir)))
@@ -991,6 +1020,7 @@ fn main() {
         if cli.dump_cpp || matches!(cli.lang, Some(CliLang::Cpp)) || mode_count == 0 {
             let options = CppOptions {
                 class_name: selected_class_name(&cli),
+                super_class_name: selected_super_class_name(&cli),
                 ..CppOptions::default()
             };
             match generate_cpp_module(&store, module, &options) {
@@ -1001,6 +1031,9 @@ fn main() {
                         options.inline_arch_files = cli.inline_architecture_files;
                         if let Some(class_name) = selected_class_name(&cli) {
                             options.class_name = class_name;
+                        }
+                        if let Some(super_class_name) = selected_super_class_name(&cli) {
+                            options.super_class_name = super_class_name;
                         }
                         let wrapped = match wrap_cpp_with_architecture(&cpp, &options) {
                             Ok(wrapped) => wrapped,
@@ -1358,6 +1391,7 @@ fn main() {
         let compiler = compiler_from_cli(&cli);
         let options = CppOptions {
             class_name: selected_class_name(&cli),
+            super_class_name: selected_super_class_name(&cli),
             ..CppOptions::default()
         };
         let result = if cli.import_dir.is_empty() {
@@ -1383,6 +1417,9 @@ fn main() {
                     options.inline_arch_files = cli.inline_architecture_files;
                     if let Some(class_name) = selected_class_name(&cli) {
                         options.class_name = class_name;
+                    }
+                    if let Some(super_class_name) = selected_super_class_name(&cli) {
+                        options.super_class_name = super_class_name;
                     }
                     let wrapped = match wrap_cpp_with_architecture(&cpp, &options) {
                         Ok(wrapped) => wrapped,
@@ -1474,7 +1511,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use compiler::Compiler;
     use errors::{Diagnostic, DiagnosticBundle, DiagnosticCode, Severity, SourceSpan, Stage};
     use serde_json::Value;
@@ -1557,6 +1594,12 @@ mod tests {
     }
 
     #[test]
+    fn cli_parse_accepts_super_class_name() {
+        let cli = CliArgs::parse_from(["faust-rs", "--super-class-name", "faust_dsp", "foo.dsp"]);
+        assert_eq!(cli.super_class_name.as_deref(), Some("faust_dsp"));
+    }
+
+    #[test]
     fn normalize_legacy_args_maps_dash_cn_to_class_name() {
         let normalized = normalize_legacy_args(vec![
             "faust-rs".to_owned(),
@@ -1570,6 +1613,25 @@ mod tests {
                 "faust-rs".to_owned(),
                 "--class-name".to_owned(),
                 "customdsp".to_owned(),
+                "foo.dsp".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_legacy_args_maps_dash_scn_to_super_class_name() {
+        let normalized = normalize_legacy_args(vec![
+            "faust-rs".to_owned(),
+            "-scn".to_owned(),
+            "faust_dsp".to_owned(),
+            "foo.dsp".to_owned(),
+        ]);
+        assert_eq!(
+            normalized,
+            vec![
+                "faust-rs".to_owned(),
+                "--super-class-name".to_owned(),
+                "faust_dsp".to_owned(),
                 "foo.dsp".to_owned(),
             ]
         );
@@ -1606,6 +1668,15 @@ mod tests {
             "foo.fbc",
         ]);
         assert_eq!(cli.cpp_class_name.as_deref(), Some("my_dsp"));
+    }
+
+    #[test]
+    fn help_mentions_faust_naming_aliases() {
+        let mut command = CliArgs::command();
+        let rendered = command.render_long_help().to_string();
+        assert!(rendered.contains("-cn <name>"));
+        assert!(rendered.contains("-scn <name>"));
+        assert!(rendered.contains("-pn <name>"));
     }
 
     #[test]
