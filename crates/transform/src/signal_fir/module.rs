@@ -1264,10 +1264,16 @@ impl<'a> SignalToFirLower<'a> {
     /// delay amount signal.
     ///
     /// Only succeeds when `sig_types` carries a `Block`-or-slower-variability
-    /// type (i.e. a UI control such as slider/numentry) with an explicitly
-    /// positive upper bound.  Audio-rate (`Samp`) signals are rejected even if
-    /// they happen to carry a finite `hi()`, because their interval is the
+    /// type (i.e. a UI control such as slider/numentry) whose interval has a
+    /// non-negative upper bound.  Audio-rate (`Samp`) signals are rejected
+    /// regardless of their `hi()` value, because their interval is the
     /// fallback `[f64::MIN, f64::MAX]` placeholder — not a real constraint.
+    ///
+    /// A `hi()` of exactly `0.0` is accepted: `check_delay_interval` returns
+    /// `0` → `delay_size_for_amount` returns `Some(0)` → zero-delay fast
+    /// path (passthrough), matching C++ `checkDelayInterval` semantics which
+    /// only rejects `hi() < 0`.  This handles expressions like
+    /// `@(hslider("d",0,0,100,1) - 100)` whose interval is `[-100, 0]`.
     fn variable_delay_max_bound(&self, sig: SigId) -> Option<i32> {
         let ty = self.sig_types.get(&sig)?;
         // Reject sample-rate signals — their interval is an uninformative
@@ -1275,8 +1281,9 @@ impl<'a> SignalToFirLower<'a> {
         if ty.variability() == Variability::Samp {
             return None;
         }
-        let hi = ty.interval().hi();
-        if hi <= 0.0 {
+        // Mirror C++ checkDelayInterval: reject only strictly-negative hi().
+        // hi() == 0 → zero-delay passthrough (size-1 ring buffer, mask = 0).
+        if ty.interval().hi() < 0.0 {
             return None;
         }
         check_delay_interval(ty).ok()

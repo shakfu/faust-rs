@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_67_variable_delay_shifted_slider.dsp
+bytes=361
+lines=5
+fnv1a64=2cb7801a46d63480

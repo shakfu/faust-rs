@@ -1421,6 +1421,47 @@ mod tests {
     }
 
     #[test]
+    fn variable_delay_with_zero_hi_interval_uses_zero_delay_passthrough() {
+        // @(hslider("Delay1",10,0,100,1) - 100) → interval [-100, 0], hi=0.
+        // C++ checkDelayInterval rejects only hi < 0, so hi==0 is accepted
+        // and produces a zero-delay (passthrough).  Regression for the
+        // `<= 0.0` vs `< 0.0` boundary condition in variable_delay_max_bound.
+        let ui = one_control_ui(
+            ControlKind::HSlider,
+            "Delay1",
+            Some(ControlRange {
+                init: 10.0,
+                min: 0.0,
+                max: 100.0,
+                step: 1.0,
+            }),
+            false,
+            false,
+        );
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let in0 = b.input(0);
+            let n100_fixed = b.int(100);
+            let stage1 = b.delay(in0, n100_fixed);
+            // hslider - 100  → interval [0,100] - 100 = [-100, 0], hi == 0
+            let slider = b.hslider(0);
+            let offset = b.real(100.0);
+            let shifted = b.binop(BinOp::Sub, slider, offset);
+            b.delay(stage1, shifted)
+        };
+        compile_signals_to_fir_fastlane_with_ui(
+            &arena,
+            &[sig0],
+            1,
+            1,
+            &ui,
+            &SignalFirOptions::default(),
+        )
+        .expect("delay with hi=0 interval should lower as zero-delay (passthrough)");
+    }
+
+    #[test]
     fn int_waveform_declares_int32_table() {
         let mut arena = TreeArena::new();
         let sig0 = {
