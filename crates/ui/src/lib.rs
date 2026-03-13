@@ -87,6 +87,63 @@ impl UiGroupKind {
     }
 }
 
+/// Raw grouped-UI path segment used while normalizing Faust pathname labels.
+///
+/// This is intentionally earlier than [`UiGroupSpec`]:
+/// - `raw_label` still preserves inline metadata text,
+/// - pathname normalization happens before metadata extraction,
+/// - later `split_label_metadata(...)` turns this raw segment into a canonical
+///   [`UiGroupSpec`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct UiGroupPathSegment {
+    pub kind: UiGroupKind,
+    pub raw_label: String,
+}
+
+/// Canonical grouped-UI path segment stored after metadata extraction.
+///
+/// Mapping status:
+/// - `adapted` relative to the C++ cons-list path representation.
+/// - Canonical Rust carrier for path-aware `UiProgram` insertion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiGroupSpec {
+    pub kind: UiGroupKind,
+    pub label: String,
+    pub metadata: UiMetadata,
+}
+
+/// Normalized widget-style pathname after rebasing against the current group
+/// context.
+///
+/// # Source provenance (C++)
+/// - `compiler/propagate/labels.cpp`
+/// - `label2path(...)`
+/// - `normalizePath(...)`
+///
+/// Parity rules:
+/// - widget pathnames may rebase against the current explicit group stack,
+/// - typed path segments such as `h:` / `v:` / `t:` become explicit grouped UI
+///   ancestors,
+/// - metadata is preserved in raw segment labels until later extraction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiNormalizedWidgetPath {
+    pub groups: Vec<UiGroupPathSegment>,
+    pub raw_label: String,
+}
+
+/// Normalized explicit-group placement after applying the Rust-only relative
+/// navigation extension.
+///
+/// This is intentionally narrower than widget pathname normalization:
+/// - only leading navigation operators are interpreted,
+/// - the explicit source group still owns the final orientation,
+/// - arbitrary intermediate `foo/bar` synthesis is out of scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiNormalizedGroupPath {
+    pub parent_groups: Vec<UiGroupPathSegment>,
+    pub group: UiGroupPathSegment,
+}
+
 /// Stable UI control family shared by layout and DSP control references.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ControlKind {
@@ -211,6 +268,100 @@ impl UiProgram {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UiPathOp {
+    Root,
+    Current,
+    Parent,
+    Group(UiGroupPathSegment),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ParsedUiLabelPath {
+    Widget {
+        ops: Vec<UiPathOp>,
+        raw_label: String,
+    },
+    GroupNavigation {
+        absolute: bool,
+        parents: usize,
+        raw_label: String,
+    },
+}
+
+/// Normalizes one Faust widget label pathname against the current explicit
+/// group stack.
+///
+/// Examples:
+/// - `../volume`
+/// - `/gain`
+/// - `h:Oscillator/freq`
+/// - `../gain [style:knob]`
+#[must_use]
+pub fn normalize_widget_label_path(
+    full_label: &str,
+    current_groups: &[UiGroupPathSegment],
+) -> UiNormalizedWidgetPath {
+    let ParsedUiLabelPath::Widget { ops, raw_label } = parse_widget_label_path(full_label) else {
+        unreachable!("widget label parser always yields widget paths");
+    };
+
+    let mut normalized = current_groups.to_vec();
+    for op in ops {
+        match op {
+            UiPathOp::Root => normalized.clear(),
+            UiPathOp::Current => {}
+            UiPathOp::Parent => {
+                let _ = normalized.pop();
+            }
+            UiPathOp::Group(group) => normalized.push(group),
+        }
+    }
+
+    UiNormalizedWidgetPath {
+        groups: normalized,
+        raw_label,
+    }
+}
+
+/// Normalizes one explicit group label using the Rust-only relative navigation
+/// extension.
+///
+/// Supported prefixes:
+/// - `./`
+/// - one or more `../`
+/// - `/`
+///
+/// The final explicit group still keeps the orientation supplied by the source
+/// `vgroup` / `hgroup` / `tgroup` node.
+#[must_use]
+pub fn normalize_group_label_navigation(
+    full_label: &str,
+    current_groups: &[UiGroupPathSegment],
+    kind: UiGroupKind,
+) -> UiNormalizedGroupPath {
+    let ParsedUiLabelPath::GroupNavigation {
+        absolute,
+        parents,
+        raw_label,
+    } = parse_group_label_navigation(full_label)
+    else {
+        unreachable!("group label parser always yields group-navigation paths");
+    };
+
+    let mut parent_groups = if absolute {
+        Vec::new()
+    } else {
+        current_groups.to_vec()
+    };
+    clamp_pop_groups(&mut parent_groups, parents);
+
+    UiNormalizedGroupPath {
+        parent_groups,
+        group: UiGroupPathSegment { kind, raw_label },
+    }
+}
+
 /// Splits one Faust UI label into its simplified display label and extracted
 /// metadata declarations.
 ///
@@ -322,6 +473,17 @@ pub fn split_label_metadata(full_label: &str) -> (String, UiMetadata) {
     (trim_space_tab(&label).to_owned(), metadata)
 }
 
+#[must_use]
+/// Converts one raw grouped-UI pathname segment into its canonical stored form.
+pub fn canonicalize_group_spec(segment: &UiGroupPathSegment) -> UiGroupSpec {
+    let (label, metadata) = split_label_metadata(&segment.raw_label);
+    UiGroupSpec {
+        kind: segment.kind,
+        label,
+        metadata,
+    }
+}
+
 /// Canonical builder API for constructing UI IR nodes.
 ///
 /// Builder methods preserve source child order and encode grouped layout in the
@@ -396,6 +558,158 @@ impl<'a> UiBuilder<'a> {
     pub fn soundfile(&mut self, control: ControlId) -> UiId {
         let control = self.arena.int(i64::from(control));
         intern_tag(self.arena, UI_SOUNDFILE_TAG, &[control])
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UiDraftNode {
+    Group {
+        spec: UiGroupSpec,
+        children: Vec<usize>,
+    },
+    InputControl(ControlId),
+    OutputControl(ControlId),
+    Soundfile(ControlId),
+}
+
+/// Path-aware grouped UI builder that incrementally assembles canonical layout
+/// before TreeArena materialization.
+///
+/// Rust uses this builder instead of trying to mutate `TreeArena` groups in
+/// place. This is an `adapted` representation, but it makes pathname rebasing,
+/// group merging, and deterministic insertion order explicit and testable.
+#[derive(Default)]
+pub struct UiProgramBuilder {
+    roots: Vec<usize>,
+    nodes: Vec<UiDraftNode>,
+}
+
+impl UiProgramBuilder {
+    #[must_use]
+    /// Creates one empty path-aware UI builder.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ensures that the full canonical group path exists and returns the last
+    /// group node id.
+    pub fn ensure_group_path(&mut self, path: &[UiGroupSpec]) -> Option<usize> {
+        let mut parent = None;
+        for spec in path {
+            parent = Some(self.find_or_create_group(parent, spec.clone()));
+        }
+        parent
+    }
+
+    /// Inserts one input control under the provided canonical group path.
+    pub fn insert_input_control(&mut self, path: &[UiGroupSpec], control: ControlId) {
+        self.insert_leaf(path, UiDraftNode::InputControl(control));
+    }
+
+    /// Inserts one output control under the provided canonical group path.
+    pub fn insert_output_control(&mut self, path: &[UiGroupSpec], control: ControlId) {
+        self.insert_leaf(path, UiDraftNode::OutputControl(control));
+    }
+
+    /// Inserts one soundfile control under the provided canonical group path.
+    pub fn insert_soundfile(&mut self, path: &[UiGroupSpec], control: ControlId) {
+        self.insert_leaf(path, UiDraftNode::Soundfile(control));
+    }
+
+    #[must_use]
+    /// Materializes the currently accumulated grouped UI forest into
+    /// `TreeArena`-backed nodes and returns the top-level roots in insertion
+    /// order.
+    pub fn finish(self) -> (TreeArena, Vec<UiId>) {
+        let mut arena = TreeArena::new();
+        let mut roots = Vec::with_capacity(self.roots.len());
+        for root in &self.roots {
+            roots.push(self.materialize_node(*root, &mut arena));
+        }
+        (arena, roots)
+    }
+
+    fn insert_leaf(&mut self, path: &[UiGroupSpec], leaf: UiDraftNode) {
+        let parent = self.ensure_group_path(path);
+        let id = self.push_node(leaf);
+        self.children_mut(parent).push(id);
+    }
+
+    fn find_or_create_group(&mut self, parent: Option<usize>, spec: UiGroupSpec) -> usize {
+        if let Some(existing) = self.find_child_group(parent, &spec) {
+            return existing;
+        }
+        let id = self.push_node(UiDraftNode::Group {
+            spec,
+            children: Vec::new(),
+        });
+        self.children_mut(parent).push(id);
+        id
+    }
+
+    fn find_child_group(&self, parent: Option<usize>, spec: &UiGroupSpec) -> Option<usize> {
+        let children = self.children(parent);
+        children
+            .iter()
+            .copied()
+            .find(|child| match &self.nodes[*child] {
+                UiDraftNode::Group {
+                    spec: child_spec, ..
+                } => child_spec == spec,
+                UiDraftNode::InputControl(_)
+                | UiDraftNode::OutputControl(_)
+                | UiDraftNode::Soundfile(_) => false,
+            })
+    }
+
+    fn push_node(&mut self, node: UiDraftNode) -> usize {
+        let id = self.nodes.len();
+        self.nodes.push(node);
+        id
+    }
+
+    fn children(&self, parent: Option<usize>) -> &[usize] {
+        match parent {
+            Some(id) => match &self.nodes[id] {
+                UiDraftNode::Group { children, .. } => children,
+                UiDraftNode::InputControl(_)
+                | UiDraftNode::OutputControl(_)
+                | UiDraftNode::Soundfile(_) => panic!("parent must be a group"),
+            },
+            None => &self.roots,
+        }
+    }
+
+    fn children_mut(&mut self, parent: Option<usize>) -> &mut Vec<usize> {
+        match parent {
+            Some(id) => match &mut self.nodes[id] {
+                UiDraftNode::Group { children, .. } => children,
+                UiDraftNode::InputControl(_)
+                | UiDraftNode::OutputControl(_)
+                | UiDraftNode::Soundfile(_) => panic!("parent must be a group"),
+            },
+            None => &mut self.roots,
+        }
+    }
+
+    fn materialize_node(&self, id: usize, arena: &mut TreeArena) -> UiId {
+        match &self.nodes[id] {
+            UiDraftNode::Group { spec, children } => {
+                let children = children
+                    .iter()
+                    .map(|child| self.materialize_node(*child, arena))
+                    .collect::<Vec<_>>();
+                UiBuilder::new(arena).group_with_metadata(
+                    spec.kind,
+                    &spec.label,
+                    &spec.metadata,
+                    &children,
+                )
+            }
+            UiDraftNode::InputControl(control) => UiBuilder::new(arena).input_control(*control),
+            UiDraftNode::OutputControl(control) => UiBuilder::new(arena).output_control(*control),
+            UiDraftNode::Soundfile(control) => UiBuilder::new(arena).soundfile(*control),
+        }
     }
 }
 
@@ -494,6 +808,105 @@ fn decode_label(arena: &TreeArena, id: UiId) -> Option<&str> {
 
 fn trim_space_tab(value: &str) -> &str {
     value.trim_matches(|ch| matches!(ch, ' ' | '\t'))
+}
+
+fn clamp_pop_groups(groups: &mut Vec<UiGroupPathSegment>, count: usize) {
+    for _ in 0..count {
+        if groups.pop().is_none() {
+            break;
+        }
+    }
+}
+
+fn parse_widget_label_path(full_label: &str) -> ParsedUiLabelPath {
+    let (ops, raw_label) = parse_widget_path_ops(full_label);
+    ParsedUiLabelPath::Widget { ops, raw_label }
+}
+
+fn parse_group_label_navigation(full_label: &str) -> ParsedUiLabelPath {
+    let (absolute, parents, raw_label) = parse_group_navigation_prefix(full_label);
+    ParsedUiLabelPath::GroupNavigation {
+        absolute,
+        parents,
+        raw_label,
+    }
+}
+
+fn parse_group_navigation_prefix(full_label: &str) -> (bool, usize, String) {
+    let mut rest = full_label;
+    let mut absolute = false;
+    while rest.starts_with('/') {
+        absolute = true;
+        rest = &rest[1..];
+    }
+
+    let mut parents = 0_usize;
+    loop {
+        if let Some(next) = rest.strip_prefix("./") {
+            rest = next;
+            continue;
+        }
+        if let Some(next) = rest.strip_prefix("../") {
+            parents += 1;
+            rest = next;
+            continue;
+        }
+        break;
+    }
+
+    (absolute, parents, rest.to_owned())
+}
+
+fn parse_widget_path_ops(full_label: &str) -> (Vec<UiPathOp>, String) {
+    let mut rest = full_label;
+    let mut ops = Vec::new();
+
+    while rest.starts_with('/') {
+        ops.push(UiPathOp::Root);
+        rest = &rest[1..];
+    }
+
+    loop {
+        if let Some(next) = rest.strip_prefix("./") {
+            ops.push(UiPathOp::Current);
+            rest = next;
+            continue;
+        }
+        if let Some(next) = rest.strip_prefix("../") {
+            ops.push(UiPathOp::Parent);
+            rest = next;
+            continue;
+        }
+        if let Some((kind, next_rest, raw_label)) = parse_typed_group_prefix(rest) {
+            ops.push(UiPathOp::Group(UiGroupPathSegment {
+                kind,
+                raw_label: raw_label.to_owned(),
+            }));
+            rest = next_rest;
+            continue;
+        }
+        break;
+    }
+
+    (ops, rest.to_owned())
+}
+
+fn parse_typed_group_prefix(rest: &str) -> Option<(UiGroupKind, &str, &str)> {
+    let bytes = rest.as_bytes();
+    if bytes.len() < 4 || bytes.get(1) != Some(&b':') {
+        return None;
+    }
+    let kind = match bytes[0] {
+        b'v' | b'V' => UiGroupKind::Vertical,
+        b'h' | b'H' => UiGroupKind::Horizontal,
+        b't' | b'T' => UiGroupKind::Tab,
+        _ => return None,
+    };
+    let slash = rest[2..].find('/')?;
+    let label_end = 2 + slash;
+    let raw_label = &rest[2..label_end];
+    let next_rest = &rest[label_end + 1..];
+    Some((kind, next_rest, raw_label))
 }
 
 fn encode_metadata_list(arena: &mut TreeArena, metadata: &[(String, String)]) -> UiId {

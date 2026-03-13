@@ -2,8 +2,9 @@
 
 use tlib::TreeArena;
 use ui::{
-    ControlKind, ControlRange, ControlSpec, UiBuilder, UiGroupKind, UiMatch, UiProgram,
-    UiRootOrigin, match_ui, split_label_metadata,
+    ControlKind, ControlRange, ControlSpec, UiBuilder, UiGroupKind, UiGroupPathSegment,
+    UiGroupSpec, UiMatch, UiProgram, UiProgramBuilder, UiRootOrigin, canonicalize_group_spec,
+    match_ui, normalize_group_label_navigation, normalize_widget_label_path, split_label_metadata,
 };
 
 #[test]
@@ -239,4 +240,147 @@ fn split_label_metadata_handles_nested_brackets_and_escapes() {
             ("unit".to_owned(), "dB".to_owned()),
         ]
     );
+}
+
+#[test]
+fn normalize_widget_label_path_rebases_relative_groups() {
+    let current = vec![
+        UiGroupPathSegment {
+            kind: UiGroupKind::Horizontal,
+            raw_label: "Foo".to_owned(),
+        },
+        UiGroupPathSegment {
+            kind: UiGroupKind::Vertical,
+            raw_label: "Faa".to_owned(),
+        },
+    ];
+
+    let normalized = normalize_widget_label_path("../volume", &current);
+
+    assert_eq!(
+        normalized.groups,
+        vec![UiGroupPathSegment {
+            kind: UiGroupKind::Horizontal,
+            raw_label: "Foo".to_owned(),
+        }]
+    );
+    assert_eq!(normalized.raw_label, "volume");
+}
+
+#[test]
+fn normalize_widget_label_path_preserves_typed_segments_and_metadata() {
+    let normalized = normalize_widget_label_path("h:Oscillator/../v:Main/gain [style:knob]", &[]);
+
+    assert_eq!(
+        normalized.groups,
+        vec![UiGroupPathSegment {
+            kind: UiGroupKind::Vertical,
+            raw_label: "Main".to_owned(),
+        }]
+    );
+    assert_eq!(normalized.raw_label, "gain [style:knob]");
+}
+
+#[test]
+fn normalize_group_label_navigation_rebases_and_clamps_root() {
+    let current = vec![
+        UiGroupPathSegment {
+            kind: UiGroupKind::Horizontal,
+            raw_label: "Foo".to_owned(),
+        },
+        UiGroupPathSegment {
+            kind: UiGroupKind::Vertical,
+            raw_label: "Bar".to_owned(),
+        },
+    ];
+
+    let rebased = normalize_group_label_navigation("../Baz", &current, UiGroupKind::Tab);
+    assert_eq!(
+        rebased.parent_groups,
+        vec![UiGroupPathSegment {
+            kind: UiGroupKind::Horizontal,
+            raw_label: "Foo".to_owned(),
+        }]
+    );
+    assert_eq!(
+        rebased.group,
+        UiGroupPathSegment {
+            kind: UiGroupKind::Tab,
+            raw_label: "Baz".to_owned(),
+        }
+    );
+
+    let clamped =
+        normalize_group_label_navigation("../../../../Rooted", &current, UiGroupKind::Vertical);
+    assert!(clamped.parent_groups.is_empty());
+    assert_eq!(clamped.group.raw_label, "Rooted");
+}
+
+#[test]
+fn canonicalize_group_spec_splits_metadata_after_path_normalization() {
+    let spec = canonicalize_group_spec(&UiGroupPathSegment {
+        kind: UiGroupKind::Horizontal,
+        raw_label: "Main [style:tabbed]".to_owned(),
+    });
+
+    assert_eq!(
+        spec,
+        UiGroupSpec {
+            kind: UiGroupKind::Horizontal,
+            label: "Main".to_owned(),
+            metadata: vec![("style".to_owned(), "tabbed".to_owned())],
+        }
+    );
+}
+
+#[test]
+fn ui_program_builder_merges_group_paths_and_preserves_leaf_order() {
+    let mut builder = UiProgramBuilder::new();
+    let path = vec![
+        UiGroupSpec {
+            kind: UiGroupKind::Horizontal,
+            label: "Foo".to_owned(),
+            metadata: Vec::new(),
+        },
+        UiGroupSpec {
+            kind: UiGroupKind::Vertical,
+            label: "Bar".to_owned(),
+            metadata: Vec::new(),
+        },
+    ];
+    builder.insert_input_control(&path, 0);
+    builder.insert_output_control(&path, 1);
+    builder.insert_soundfile(&path, 2);
+
+    let (arena, roots) = builder.finish();
+    assert_eq!(roots.len(), 1);
+
+    let UiMatch::Group {
+        kind,
+        label,
+        children,
+        ..
+    } = match_ui(&arena, roots[0])
+    else {
+        panic!("root group expected");
+    };
+    assert_eq!(kind, UiGroupKind::Horizontal);
+    assert_eq!(label, "Foo");
+    assert_eq!(children.len(), 1);
+
+    let UiMatch::Group {
+        kind,
+        label,
+        children,
+        ..
+    } = match_ui(&arena, children[0])
+    else {
+        panic!("nested group expected");
+    };
+    assert_eq!(kind, UiGroupKind::Vertical);
+    assert_eq!(label, "Bar");
+    assert_eq!(children.len(), 3);
+    assert_eq!(match_ui(&arena, children[0]), UiMatch::InputControl(0));
+    assert_eq!(match_ui(&arena, children[1]), UiMatch::OutputControl(1));
+    assert_eq!(match_ui(&arena, children[2]), UiMatch::Soundfile(2));
 }
