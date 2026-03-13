@@ -1,6 +1,6 @@
 # Current Faust Source Subset Supported by `faust-rs`
 
-Last updated: 2026-03-12
+Last updated: 2026-03-13
 
 Status: living document
 
@@ -43,7 +43,7 @@ This snapshot is based on:
   - `crates/transform/src/signal_prepare.rs`
   - `crates/transform/src/signal_fir/mod.rs`
   - `crates/transform/src/signal_fir/module.rs`
-- fresh local status scans run on 2026-03-12:
+- fresh local status scans run on 2026-03-13:
   - `cargo run -p xtask -- corpus-status-report`
   - `cargo run -p xtask -- backend-full-corpus-diff-report`
 
@@ -59,8 +59,8 @@ The corresponding generated reports are:
 At the front-end level, the active corpus currently shows **full status parity**
 with the C++ compiler:
 
-- total corpus cases: `75`
-- valid cases accepted by both Rust and C++: `60`
+- total corpus cases: `84`
+- valid cases accepted by both Rust and C++: `69`
 - invalid cases rejected by both Rust and C++: `15`
 - `OK/ERR` mismatches: `0`
 - `ERR/OK` mismatches: `0`
@@ -76,9 +76,9 @@ In other words:
 At the current backend route (`TransformFastLane`), the supported subset is
 still narrower:
 
-- total corpus cases: `75`
-- end-to-end C backend parity: `OK=59`, `DIFF=0`, `UNSUPPORTED=16`
-- end-to-end C++ backend parity: `OK=59`, `DIFF=0`, `UNSUPPORTED=16`
+- total corpus cases: `84`
+- end-to-end C backend parity: `OK=68`, `DIFF=0`, `UNSUPPORTED=16`
+- end-to-end C++ backend parity: `OK=68`, `DIFF=0`, `UNSUPPORTED=16`
 
 The `16` unsupported cases are:
 
@@ -88,8 +88,8 @@ The `16` unsupported cases are:
 
 So for **valid** corpus programs, the current backend route compiles:
 
-- `59 / 60` valid corpus cases,
-- and misses `1 / 60`, currently in the non-trivial stream-wrapper family.
+- `68 / 69` valid corpus cases,
+- and misses `1 / 69`, currently in the non-trivial stream-wrapper family.
 
 ## 5. Synthetic Characterization of the Supported Subset
 
@@ -135,7 +135,11 @@ That slice currently includes, in broad terms:
 - `select2`, `min`, `max`, `abs`,
 - `delay1`, `prefix`, and recursive feedback forms covered by the active
   recursion lowering,
-- fixed-size `SIGDELAY` with constant integer amount,
+- `SIGDELAY` with:
+  - constant integer amounts (fixed-size circular buffer),
+  - **variable amounts from UI parameters** (slider, numentry) with a bounded
+    interval — the buffer is allocated to `next_power_of_two(max + 1)` using
+    the interval upper bound from `crates/sigtype`,
 - waveform/table forms:
   - `SIGWAVEFORM`
   - `SIGRDTBL`
@@ -160,6 +164,8 @@ This is why corpus cases such as:
 - `rep_46_case_pattern_constant_folding`
 - `rep_55_sine_phasor_echo_feedback`
 - `rep_56_noise_smoo_slider`
+- `rep_65_variable_delay_slider`
+- `rep_66_variable_delay_feedback`
 
 now compile end-to-end through the Rust backends.
 
@@ -169,15 +175,14 @@ The backend subset is **not** “all front-end-accepted Faust programs”.
 
 The most important current exclusions are:
 
-- **Variable delays**
-  - explicitly rejected in the fast-lane today
-  - see:
-    - `crates/transform/src/signal_fir/mod.rs`
-    - `crates/transform/src/signal_fir/module.rs`
-  - current contract:
-    - fixed integer delays are supported,
-    - variable `SIGDELAY` remains deferred until Rust gains interval-driven
-      delay-bound analysis comparable to the C++ compiler.
+- **Audio-rate variable delays**
+  - `SIGDELAY` with a `Variability::Samp` amount (audio input or computed
+    from audio inputs) is still rejected.
+  - UI-parameterized variable delays (`@(hslider(...))`, `@(numentry(...))`)
+    are now **supported** when the slider carries a positive upper bound.
+  - Remaining rejection criterion: `Variability::Samp` amounts have no
+    reliable static bound — their type interval is the uninformative
+    placeholder `[f64::MIN, f64::MAX]`, not a real constraint.
 
 - **Non-trivial stream wrappers**
   - the current valid backend corpus gap is
@@ -217,35 +222,45 @@ Relative to the tracked corpus and the current production-oriented route:
   - modulation
   - local imports
   - metadata
+- UI-parameterized variable delays (`@(hslider(...))`) now compile
+  end-to-end, matching the most common practical use of variable delays in
+  C++ Faust programs,
+- the full C++ interval algebra is now available in Rust through
+  `crates/interval`, and the signal type lattice is fully modeled in
+  `crates/sigtype`.
 
 ## 6.2 Where C++ is still broader
 
 Faust C++ still supports a broader end-to-end language/runtime envelope.
 
-Most importantly, the C++ compiler already has:
+Most importantly, the C++ compiler still has:
 
-- interval analysis used by signal typing and backend decisions,
-- variable-delay support sized from static delay bounds,
 - fuller support for stream-wrapper lowering,
 - broader mature transform/backend coverage on long-tail signal families,
 - the historical production path beyond the active Rust fast-lane slice.
 
-The variable-delay difference is representative:
+The variable-delay gap is now **partially closed**:
 
 - **C++**:
   - accepts variable `delay(x, d)` when the delay amount has a valid, bounded,
     non-negative interval
   - sizes the ring buffer from the interval upper bound
-- **Rust today**:
-  - supports only constant integer delay amounts in the current fast-lane
-  - rejects variable delays explicitly because the interval/bound contract does
-    not exist yet in Rust
+- **Rust (as of 2026-03-13)**:
+  - accepts constant integer delays (unchanged),
+  - accepts UI-parameterized delays where the slider/numentry carries a
+    bounded interval with a strictly positive upper bound — same contract as
+    C++, implemented via `crates/sigtype`'s `TypeAnnotator`,
+  - still rejects audio-rate (`Variability::Samp`) delay amounts, which have
+    no meaningful static bound.
+
+In practice, the most common variable-delay idiom in Faust user code
+(`@(hslider(...))`) now works identically to C++.
 
 So the current Rust compiler is best seen as:
 
 - **front-end language coverage: broad on the tracked corpus**
-- **backend lowering coverage: still a restricted but now fairly practical
-  subset**
+- **backend lowering coverage: practical subset with interval-driven variable
+  delay now enabled for UI-parameterized cases**
 
 ## 7. Historical Progression
 
@@ -303,16 +318,77 @@ This was also the point where the project explicitly chose to:
 - reject variable delays explicitly,
 - defer interval-driven variable-delay parity to later work.
 
-### 7.5 March 10 onward: remaining valid backend gap shrank to a very small tail
+### 7.5 March 10–12, 2026: remaining valid backend gap shrank to a very small tail
 
 Subsequent work tightened integer typing, recursive state reuse, noise/sample
-rate cases, and other backend details.
+rate cases, UI pathname normalisation, relative group label rebasing,
+class-name CLI parity, and other backend details.
 
-By the current 2026-03-12 snapshot:
+By the 2026-03-12 snapshot:
 
-- the front-end corpus mismatch count is `0`,
-- the backend valid-case gap has shrunk to one tracked corpus case:
+- the front-end corpus mismatch count was `0` (`75` cases, `60` valid),
+- the backend valid-case gap had shrunk to one tracked corpus case:
   `rep_18_stream_wrappers.dsp`.
+
+### 7.6 March 13, 2026: interval algebra, signal type lattice, variable delay
+
+Three interlinked architectural layers landed on 2026-03-13:
+
+#### `crates/interval` — full C++ interval library ported
+
+The complete interval arithmetic library from `compiler/intervals/` was ported
+to a native Rust crate:
+
+- `Interval { lo: f64, hi: f64, lsb: i32 }` value type with IEEE-aware
+  bounds arithmetic,
+- all four arithmetic operators, comparisons, math functions
+  (`sin`, `cos`, `exp`, `log`, `pow`, …), cast helpers, and UI constructors
+  (`vslider`, `hslider`, `nentry`, `button`, `checkbox`, `bargraph`),
+- `saturated_int_cast` for safe conversion to delay-line sizes,
+- 62 unit tests all passing.
+
+A precision overflow in `ipow_scalar` (`lsb * k` → `lsb.saturating_mul(k)`)
+was also fixed during this session; the fix prevents a panic when a signal
+with an extreme interval (e.g., audio input placeholder `[f64::MIN, f64::MAX]`)
+is raised to a power.
+
+#### `crates/sigtype` — full C++ signal type system ported
+
+The complete `AudioType` class hierarchy from `compiler/signals/sigtype.hh/cpp`
+and the inference rules from `sigtyperules.cpp` were ported to a new Rust
+crate:
+
+- `SigType` enum: `Simple(SimpleType) | Table(TableType) | Tuplet(TupletType)`,
+  each carrying `fInterval : Interval` directly as a member (faithful to C++),
+- lattice enums with bitwise-OR join semantics: `Nature`, `Variability`,
+  `Computability`, `Vectorability`, `Boolean`,
+- `TypeAnnotator`: bottom-up memoized inference with a fixed-point loop for
+  recursive types (seeded with `make_maximal()` = Real/Samp/Exec),
+- full merge/cast/check helpers (`union_types`, `int_cast`, `float_cast`,
+  `check_delay_interval`, …),
+- `PreparedSignals` extended with a dual `sig_types: HashMap<SigId, SigType>`
+  map so FIR lowering can access full interval data without breaking existing
+  callers,
+- 25 unit tests all passing.
+
+#### Variable delay support via interval upper bound
+
+With the interval contract in place, `SIGDELAY` now accepts UI-parameterized
+amounts:
+
+- `variable_delay_max_bound(sig)` looks up `sig_types[sig]`, rejects
+  `Variability::Samp` (audio-rate signals whose interval is an uninformative
+  placeholder), and calls `check_delay_interval(ty)` for Block-or-slower
+  signals with a strictly positive `hi()`,
+- the delay line is allocated to `next_power_of_two(hi + 1)`, matching C++,
+- the runtime read index uses `(fIOTA - amount) & mask` where `amount` is the
+  lowered slider signal evaluated each sample — identical to C++ circular
+  buffer semantics,
+- two new corpus entries validate this: `rep_65_variable_delay_slider.dsp` and
+  `rep_66_variable_delay_feedback.dsp`.
+
+This raised the end-to-end backend corpus score from `59 / 60` to `68 / 69`
+valid cases, with the same single remaining gap (`rep_18_stream_wrappers.dsp`).
 
 ## 8. Practical Reading Rule
 
@@ -321,9 +397,10 @@ Today, the simplest accurate rule is:
 - If a Faust program stays within the language families already exercised by
   the tracked corpus, `faust-rs` front-end support is likely good.
 - If that program also lowers to the current fast-lane signal subset
-  (especially no variable delays, no non-trivial stream wrappers, no
-  interval-dependent backend requirement), end-to-end C/C++ generation is
-  likely to work.
+  (especially no audio-rate variable delays, no non-trivial stream wrappers),
+  end-to-end C/C++ generation is likely to work.
+- Variable delays driven by a UI slider or numentry (`@(hslider(...))`)
+  **are** now supported end-to-end — that is no longer a blocking restriction.
 
 The most common mistake is to assume:
 

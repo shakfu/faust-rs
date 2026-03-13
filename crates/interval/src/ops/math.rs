@@ -182,7 +182,7 @@ fn ipow_scalar(x: Interval, k: i32) -> Interval {
     debug_assert!(k >= 0);
     if k == 0 { return Interval::new(1.0, 1.0, 0); }
 
-    let precision = x.lsb() * k;
+    let precision = x.lsb().saturating_mul(k);
     // Even exponent: result is always non-negative.
     if k % 2 == 0 {
         let z0 = x.lo().powi(k);
