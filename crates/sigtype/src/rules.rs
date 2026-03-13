@@ -23,7 +23,7 @@ use tlib::{TreeArena, match_sym_rec, match_sym_ref};
 use ui::{ControlId, ControlKind, UiProgram};
 
 use crate::enums::{Boolean, Computability, Nature, Variability, Vectorability};
-use crate::factory::{make_maximal, make_simple, make_table_type, make_tuplet};
+use crate::factory::{make_maximal, make_simple, make_table_type};
 use crate::ops::{
     check_delay_interval, float_cast, int_cast, samp_cast, union_types,
 };
@@ -122,10 +122,13 @@ impl<'a> TypeAnnotator<'a> {
             )),
 
             // ── Inputs / Outputs ────────────────────────────────────────────
+            // C++: TINPUT = makeSimpleType(kReal, kSamp, kExec, kVect, kNum, interval(-1, 1))
+            // Audio inputs carry the normalised audio range [-1, 1], not an
+            // uninformative placeholder.  The lsb=-24 matches 24-bit precision.
             SigMatch::Input(_) => Ok(make_simple(
                 Nature::Real, Variability::Samp, Computability::Exec,
                 Vectorability::Vect, Boolean::Num,
-                interval::Interval::new_default(),
+                interval::Interval::new(-1.0, 1.0, -24),
             )),
 
             SigMatch::Output(_, s) => {
@@ -134,9 +137,12 @@ impl<'a> TypeAnnotator<'a> {
             }
 
             // ── Delays ──────────────────────────────────────────────────────
+            // C++: castInterval(sampCast(t), itv::reunion(t->getInterval(), interval(0)))
+            // The first sample of a delay1 is 0, so the interval must include 0.
             SigMatch::Delay1(x) => {
                 let tx = self.infer(x)?;
-                Ok(samp_cast(tx))
+                let itv = interval::reunion(tx.interval(), interval::singleton(0.0));
+                Ok(samp_cast(tx).promote_interval(itv))
             }
 
             SigMatch::Delay(x, n) => {
@@ -144,12 +150,17 @@ impl<'a> TypeAnnotator<'a> {
                 // Validate that the delay amount has a bounded non-negative interval.
                 check_delay_interval(&tn).map_err(|e| TypeError(e.0))?;
                 let tx = self.infer(x)?;
-                Ok(samp_cast(tx))
+                // C++: castInterval(sampCast(t1), itv::reunion(t1->getInterval(), interval(0)))
+                let itv = interval::reunion(tx.interval(), interval::singleton(0.0));
+                Ok(samp_cast(tx).promote_interval(itv))
             }
 
             SigMatch::Prefix(init, s) => {
                 let ti = self.infer(init)?;
                 let ts = self.infer(s)?;
+                // C++: castInterval(sampCast(t1|t2), reunion(t1, t2))
+                // union_types already computes reunion(a.interval(), b.interval()), so this
+                // matches the C++ behaviour.
                 Ok(samp_cast(union_types(ti, ts)))
             }
 
@@ -240,11 +251,19 @@ impl<'a> TypeAnnotator<'a> {
             }
 
             // ── Select ───────────────────────────────────────────────────────
+            // C++: makeSimpleType(st1|st2 nature, st1|st2|stsel variability,
+            //                     st1|st2|stsel computability, ..., reunion(st1, st2) interval)
+            // Note: NO samp_cast — if all inputs are Konst, the result can be Konst.
             SigMatch::Select2(cond, s1, s2) => {
-                let _tc = self.infer(cond)?;
+                let tc = self.infer(cond)?;
                 let t1 = self.infer(s1)?;
                 let t2 = self.infer(s2)?;
-                Ok(samp_cast(union_types(t1, t2)))
+                let itv = interval::reunion(t1.interval(), t2.interval());
+                let t = union_types(t1, t2)
+                    .promote_variability(tc.variability())
+                    .promote_computability(tc.computability())
+                    .promote_vectorability(tc.vectorability());
+                Ok(t.promote_interval(itv))
             }
 
             // ── Tables ───────────────────────────────────────────────────────
@@ -292,19 +311,46 @@ impl<'a> TypeAnnotator<'a> {
             SigMatch::HBargraph(id, x) => Ok(self.infer_bargraph(id, x)?),
 
             // ── Soundfile ────────────────────────────────────────────────────
-            SigMatch::Soundfile(_) => Ok(make_maximal()),
-            SigMatch::SoundfileLength(_, _) => Ok(make_simple(
-                Nature::Int, Variability::Konst, Computability::Init,
-                Vectorability::Vect, Boolean::Num, interval::Interval::new_default(),
+            // C++: makeSimpleType(kInt, kBlock, kInit, kVect, kNum, interval(0, INT32_MAX))
+            SigMatch::Soundfile(_) => Ok(make_simple(
+                Nature::Int, Variability::Block, Computability::Init,
+                Vectorability::Vect, Boolean::Num,
+                interval::Interval::new(0.0, i32::MAX as f64, 0),
             )),
-            SigMatch::SoundfileRate(_, _) => Ok(make_simple(
-                Nature::Int, Variability::Konst, Computability::Init,
-                Vectorability::Vect, Boolean::Num, interval::Interval::new_default(),
-            )),
-            SigMatch::SoundfileBuffer(_, _, _, _) => Ok(make_simple(
-                Nature::Real, Variability::Konst, Computability::Init,
-                Vectorability::Vect, Boolean::Num, interval::Interval::new_default(),
-            )),
+            // C++: makeSimpleType(kInt, max(kBlock, t2->variability()), kInit, kVect, kNum, interval(0, INT32_MAX))
+            SigMatch::SoundfileLength(sf, part) => {
+                self.infer(sf)?;
+                let t_part = self.infer(part)?;
+                let var = Variability::Block.join(t_part.variability());
+                Ok(make_simple(
+                    Nature::Int, var, Computability::Init,
+                    Vectorability::Vect, Boolean::Num,
+                    interval::Interval::new(0.0, i32::MAX as f64, 0),
+                ))
+            }
+            SigMatch::SoundfileRate(sf, part) => {
+                self.infer(sf)?;
+                let t_part = self.infer(part)?;
+                let var = Variability::Block.join(t_part.variability());
+                Ok(make_simple(
+                    Nature::Int, var, Computability::Init,
+                    Vectorability::Vect, Boolean::Num,
+                    interval::Interval::new(0.0, i32::MAX as f64, 0),
+                ))
+            }
+            // C++: makeSimpleType(kReal, kSamp, kInit, kVect, kNum, interval(-1, 1))
+            SigMatch::SoundfileBuffer(sf, x, part, z) => {
+                self.infer(sf)?;
+                self.infer(x)?;
+                let t_part = self.infer(part)?;
+                self.infer(z)?;
+                let _ = t_part;
+                Ok(make_simple(
+                    Nature::Real, Variability::Samp, Computability::Init,
+                    Vectorability::Vect, Boolean::Num,
+                    interval::Interval::new(-1.0, 1.0, -24),
+                ))
+            }
 
             // ── Attach / Enable / Control ────────────────────────────────────
             SigMatch::Attach(x, _y) => self.infer(x),
@@ -331,37 +377,81 @@ impl<'a> TypeAnnotator<'a> {
 
             // ── Foreign ─────────────────────────────────────────────────────
             SigMatch::FFun(_, _) => Ok(make_maximal()),
-            SigMatch::FConst(kind, _, _) => self.infer_foreign_type(kind),
-            SigMatch::FVar(kind, _, _)   => self.infer_foreign_type(kind),
+            // C++: makeSimpleType(tree2int(type), kKonst, kInit, kVect, kNum, interval())
+            SigMatch::FConst(kind, _, _) => self.infer_foreign_const_type(kind),
+            // C++: makeSimpleType(tree2int(type), kBlock, kExec, kVect, kNum, interval())
+            SigMatch::FVar(kind, _, _)   => self.infer_foreign_var_type(kind),
 
             // ── Misc / conservative ──────────────────────────────────────────
-            SigMatch::AssertBounds(_, lo, hi) => {
-                let tlo = self.infer(lo)?;
-                let thi = self.infer(hi)?;
-                let itv = interval::reunion(tlo.interval(), thi.interval());
+            // C++: isSigAssertBounds(sig, min, max, cur)
+            // Returns cur's type with interval clamped to [max(cur.lo, min), min(cur.hi, max)].
+            SigMatch::AssertBounds(min_sig, max_sig, cur_sig) => {
+                let t_min = self.infer(min_sig)?;
+                let t_max = self.infer(max_sig)?;
+                let t_cur = self.infer(cur_sig)?;
+                let i_cur = t_cur.interval();
+                let lo_bound = t_min.interval().lo();
+                let hi_bound = t_max.interval().hi();
+                let iend = if !i_cur.is_empty() {
+                    interval::Interval::new(lo_bound.max(i_cur.lo()), hi_bound.min(i_cur.hi()), -24)
+                } else {
+                    interval::Interval::new(lo_bound, hi_bound, -24)
+                };
+                Ok(t_cur.promote_interval(iend))
+            }
+
+            // C++: makeSimpleType(kReal, kKonst, kComp, kVect, kNum, interval(i1.lo()))
+            SigMatch::Lowest(x) => {
+                let tx = self.infer(x)?;
                 Ok(make_simple(
-                    Nature::Real, Variability::Samp, Computability::Exec,
-                    Vectorability::Vect, Boolean::Num, itv,
+                    Nature::Real, Variability::Konst, Computability::Comp,
+                    Vectorability::Vect, Boolean::Num,
+                    interval::singleton(tx.interval().lo()),
+                ))
+            }
+            // C++: makeSimpleType(kReal, kKonst, kComp, kVect, kNum, interval(i1.hi()))
+            SigMatch::Highest(x) => {
+                let tx = self.infer(x)?;
+                Ok(make_simple(
+                    Nature::Real, Variability::Konst, Computability::Comp,
+                    Vectorability::Vect, Boolean::Num,
+                    interval::singleton(tx.interval().hi()),
                 ))
             }
 
-            SigMatch::Lowest(x) | SigMatch::Highest(x) => {
+            SigMatch::TempVar(x) => self.infer(x),
+            // C++: castInterval(sampCast(t1), reunion(t1.interval, interval(0)))
+            SigMatch::PermVar(x) => {
                 let tx = self.infer(x)?;
-                Ok(int_cast(tx))
+                let itv = interval::reunion(tx.interval(), interval::singleton(0.0));
+                Ok(samp_cast(tx).promote_interval(itv))
             }
-
-            SigMatch::TempVar(x) | SigMatch::PermVar(x) => self.infer(x),
+            // C++: T(x, env); return T(y, env)  — return type is y's type only
             SigMatch::Seq(x, y) => {
-                let tx = self.infer(x)?;
-                let ty = self.infer(y)?;
-                Ok(union_types(tx, ty))
+                self.infer(x)?;
+                self.infer(y)
             }
-            SigMatch::ZeroPad(x, _) => self.infer(x),
+            // C++: castInterval(sampCast(t1), reunion(t1.interval, interval(0)))
+            SigMatch::ZeroPad(x, _) => {
+                let tx = self.infer(x)?;
+                let itv = interval::reunion(tx.interval(), interval::singleton(0.0));
+                Ok(samp_cast(tx).promote_interval(itv))
+            }
             SigMatch::Clocked(_, x)  => self.infer(x),
 
+            // C++: type each sub for side effects, then return
+            //   makeSimpleType(kReal, kSamp, kExec, kScal, kNum, interval(-1, 1))
+            // The block lacks a proper type but must not be kKonst (avoids constant propagation).
             SigMatch::OnDemand(subs) | SigMatch::Upsampling(subs)
             | SigMatch::Downsampling(subs) => {
-                self.infer_array(subs)
+                for &s in subs {
+                    self.infer(s)?;
+                }
+                Ok(make_simple(
+                    Nature::Real, Variability::Samp, Computability::Exec,
+                    Vectorability::Scal, Boolean::Num,
+                    interval::Interval::new(-1.0, 1.0, -24),
+                ))
             }
 
             // Unknown / unhandled — conservative.
@@ -421,18 +511,21 @@ impl<'a> TypeAnnotator<'a> {
     // ── UI controls ──────────────────────────────────────────────────────────
 
     fn infer_button(&self, _id: ControlId) -> SigType {
-        // Button: boolean Int, block, [0,1]
+        // C++: castInterval(TGUI, gAlgebra.Button(interval(0)))
+        // TGUI = makeSimpleType(kReal, kBlock, kExec, kVect, kNum, interval(0,1))
+        // castInterval keeps kReal/kVect/kNum — it does NOT set kBool or kScal.
         make_simple(
-            Nature::Int, Variability::Block, Computability::Exec,
-            Vectorability::Scal, Boolean::Bool,
+            Nature::Real, Variability::Block, Computability::Exec,
+            Vectorability::Vect, Boolean::Num,
             interval::Interval::new(0.0, 1.0, 0),
         )
     }
 
     fn infer_checkbox(&self, _id: ControlId) -> SigType {
+        // C++: same as Button — castInterval(TGUI, gAlgebra.Checkbox(interval(0)))
         make_simple(
-            Nature::Int, Variability::Block, Computability::Exec,
-            Vectorability::Scal, Boolean::Bool,
+            Nature::Real, Variability::Block, Computability::Exec,
+            Vectorability::Vect, Boolean::Num,
             interval::Interval::new(0.0, 1.0, 0),
         )
     }
@@ -458,19 +551,22 @@ impl<'a> TypeAnnotator<'a> {
             })
             .unwrap_or_else(interval::Interval::new_default);
 
+        // C++: castInterval(TGUI, vslider_interval(...))
+        // TGUI = makeSimpleType(kReal, kBlock, kExec, kVect, kNum, interval())
+        // castInterval replaces only the interval → Computability is kExec, not kInit.
         make_simple(
-            Nature::Real, Variability::Block, Computability::Init,
+            Nature::Real, Variability::Block, Computability::Exec,
             Vectorability::Vect, Boolean::Num, itv,
         )
     }
 
-    fn infer_bargraph(&mut self, id: ControlId, x: SigId) -> Result<SigType, TypeError> {
+    fn infer_bargraph(&mut self, _id: ControlId, x: SigId) -> Result<SigType, TypeError> {
+        // C++: T(s1, env)->promoteVariability(kBlock)
+        // The lo/hi bound signals are computed for side effects in C++ but their
+        // values are NOT reflected in the returned type.  The returned type is the
+        // input signal's type with variability promoted to at least kBlock.
         let tx = self.infer(x)?;
-        let itv = self.ui_program.control(id)
-            .and_then(|spec| spec.range)
-            .map(|r| interval::Interval::new(r.min, r.max, -24))
-            .unwrap_or_else(|| tx.interval());
-        Ok(samp_cast(tx).promote_interval(itv))
+        Ok(tx.promote_variability(Variability::Block))
     }
 
     // ── Tables ───────────────────────────────────────────────────────────────
@@ -487,16 +583,36 @@ impl<'a> TypeAnnotator<'a> {
 
     // ── Foreign type annotation ───────────────────────────────────────────────
 
-    fn infer_foreign_type(&mut self, kind: SigId) -> Result<SigType, TypeError> {
+    fn foreign_nature(&self, kind: SigId) -> Nature {
         // The kind node encodes the C type via a tree integer.
         // 0 = int (kInt), 1 = float/double (kReal), default = Real.
-        let nature = match tlib::tree_to_int(self.arena, kind) {
+        match tlib::tree_to_int(self.arena, kind) {
             Some(0) => Nature::Int,
             _ => Nature::Real,
-        };
+        }
+    }
+
+    /// `inferFConstType`: constant, evaluated at init, no dynamic range.
+    ///
+    /// C++: makeSimpleType(tree2int(type), kKonst, kInit, kVect, kNum, interval())
+    fn infer_foreign_const_type(&self, kind: SigId) -> Result<SigType, TypeError> {
         Ok(make_simple(
-            nature, Variability::Konst, Computability::Init,
-            Vectorability::Vect, Boolean::Num, interval::Interval::new_default(),
+            self.foreign_nature(kind),
+            Variability::Konst, Computability::Init,
+            Vectorability::Vect, Boolean::Num,
+            interval::empty(),   // C++: interval() — no static range known
+        ))
+    }
+
+    /// `inferFVarType`: varies by block like a UI element, executed each block.
+    ///
+    /// C++: makeSimpleType(tree2int(type), kBlock, kExec, kVect, kNum, interval())
+    fn infer_foreign_var_type(&self, kind: SigId) -> Result<SigType, TypeError> {
+        Ok(make_simple(
+            self.foreign_nature(kind),
+            Variability::Block, Computability::Exec,
+            Vectorability::Vect, Boolean::Num,
+            interval::empty(),   // C++: interval() — no static range known
         ))
     }
 
@@ -529,26 +645,25 @@ impl<'a> TypeAnnotator<'a> {
     /// Infer the type of projection from a tuplet recursion group.
     ///
     /// # C++ source
-    /// `inferProjType`
+    /// `inferProjType(Type t, int i, int vec)` — called with `vec = kScal`.
+    /// Each component is promoted by the group's variability/computability, and
+    /// vectorability is promoted to kScal (the more conservative of the two).
     fn infer_proj(&mut self, idx: i32, group: SigId) -> Result<SigType, TypeError> {
         let tg = self.infer(group)?;
-        match &tg {
+        let (gv, gc) = (tg.variability(), tg.computability());
+        let comp = match &tg {
             SigType::Tuplet(tt) => {
                 let i = usize::try_from(idx).unwrap_or(0);
-                Ok(tt.components.get(i).cloned().unwrap_or_else(make_maximal))
+                tt.components.get(i).cloned().unwrap_or_else(make_maximal)
             }
-            other => Ok(other.clone()),
-        }
+            other => other.clone(),
+        };
+        Ok(comp
+            .promote_variability(gv)
+            .promote_computability(gc)
+            .promote_vectorability(Vectorability::Scal))
     }
 
-    fn infer_array(&mut self, subs: &[SigId]) -> Result<SigType, TypeError> {
-        if subs.is_empty() {
-            return Ok(make_maximal());
-        }
-        let types: Result<Vec<_>, _> = subs.iter().map(|&s| self.infer(s)).collect();
-        let types = types?;
-        Ok(make_tuplet(types))
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -639,8 +754,104 @@ mod tests {
         let s = b.input(0);
         let types = annotate(&arena, &[s]);
         let ty = &types[&s];
+        // C++: TINPUT = makeSimpleType(kReal, kSamp, kExec, kVect, kNum, interval(-1,1))
         assert_eq!(ty.nature(), Nature::Real);
         assert_eq!(ty.variability(), Variability::Samp);
+        assert_eq!(ty.computability(), Computability::Exec);
+        assert_eq!(ty.vectorability(), Vectorability::Vect);
+        assert_eq!(ty.boolean(), Boolean::Num);
+        // Interval must be the audio range [-1, 1], not the uninformative placeholder.
+        let itv = ty.interval();
+        assert_eq!(itv.lo(), -1.0);
+        assert_eq!(itv.hi(),  1.0);
+    }
+
+    #[test]
+    fn button_is_real_block_vect_num() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let s = b.button(0);
+        let types = annotate(&arena, &[s]);
+        let ty = &types[&s];
+        // C++: castInterval(TGUI, ...) → kReal, kBlock, kExec, kVect, kNum, [0,1]
+        assert_eq!(ty.nature(),        Nature::Real);
+        assert_eq!(ty.variability(),   Variability::Block);
+        assert_eq!(ty.computability(), Computability::Exec);
+        assert_eq!(ty.vectorability(), Vectorability::Vect);
+        assert_eq!(ty.boolean(),       Boolean::Num);
+        assert_eq!(ty.interval().lo(), 0.0);
+        assert_eq!(ty.interval().hi(), 1.0);
+    }
+
+    #[test]
+    fn select2_includes_cond_variability() {
+        // If the cond is Samp, the result must be at least Samp even if branches are Konst.
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let cond = b.input(0);          // Samp
+        let s1   = b.int(0);            // Konst
+        let s2   = b.int(1);            // Konst
+        let s = b.select2(cond, s1, s2);
+        let types = annotate(&arena, &[s]);
+        // C++: variability = st1|st2|stsel = Konst|Konst|Samp = Samp
+        assert_eq!(types[&s].variability(), Variability::Samp);
+    }
+
+    #[test]
+    fn select2_all_konst_stays_konst() {
+        // If all three (cond and both branches) are Konst, result should be Konst, NOT Samp.
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let cond = b.int(1);   // Konst
+        let s1   = b.int(0);   // Konst
+        let s2   = b.real(3.0);// Konst
+        let s = b.select2(cond, s1, s2);
+        let types = annotate(&arena, &[s]);
+        // Without the samp_cast bug, a fully-constant select2 stays Konst.
+        assert_eq!(types[&s].variability(), Variability::Konst);
+    }
+
+    #[test]
+    fn slider_computability_is_exec() {
+        // C++: TGUI = kExec → castInterval(TGUI, ...) → kExec
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let s = b.hslider(0);
+        let ui = UiProgram::empty();
+        let mut ann = TypeAnnotator::new(&arena, &ui);
+        let types = ann.annotate(&[s]).expect("annotation failed");
+        assert_eq!(types[&s].computability(), Computability::Exec);
+    }
+
+    #[test]
+    fn seq_returns_type_of_second_signal() {
+        // C++: T(x, env); return T(y, env)
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let x = b.int(42);          // Konst Int
+        let y = b.input(0);         // Samp Real
+        let s = b.seq(x, y);
+        let types = annotate(&arena, &[s]);
+        // Must be the type of y, not the union of x and y.
+        assert_eq!(types[&s].nature(),      Nature::Real);
+        assert_eq!(types[&s].variability(), Variability::Samp);
+    }
+
+    #[test]
+    fn checkbox_is_real_block_vect_num() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let s = b.checkbox(0);
+        let types = annotate(&arena, &[s]);
+        let ty = &types[&s];
+        // C++: same contract as Button
+        assert_eq!(ty.nature(),        Nature::Real);
+        assert_eq!(ty.variability(),   Variability::Block);
+        assert_eq!(ty.computability(), Computability::Exec);
+        assert_eq!(ty.vectorability(), Vectorability::Vect);
+        assert_eq!(ty.boolean(),       Boolean::Num);
+        assert_eq!(ty.interval().lo(), 0.0);
+        assert_eq!(ty.interval().hi(), 1.0);
     }
 
     #[test]
@@ -668,13 +879,32 @@ mod tests {
     }
 
     #[test]
-    fn delay1_is_samp() {
+    fn delay1_is_samp_and_interval_includes_zero() {
         let mut arena = TreeArena::new();
         let mut b = SigBuilder::new(&mut arena);
-        let c = b.int(0);
+        // delay1 of a real constant 0.5: the result must include 0 (initial sample).
+        let c = b.real(0.5);
         let s = b.delay1(c);
         let types = annotate(&arena, &[s]);
-        assert_eq!(types[&s].variability(), Variability::Samp);
+        let ty = &types[&s];
+        assert_eq!(ty.variability(), Variability::Samp);
+        // C++: castInterval(sampCast(t), reunion(t.interval, interval(0)))
+        // singleton(0.5) ∪ singleton(0) = [0, 0.5]
+        assert!(ty.interval().lo() <= 0.0, "interval lo must be ≤ 0");
+        assert!(ty.interval().hi() >= 0.5, "interval hi must be ≥ 0.5");
+    }
+
+    #[test]
+    fn delay1_of_negative_constant_interval_includes_zero() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let c = b.real(-1.0);
+        let s = b.delay1(c);
+        let types = annotate(&arena, &[s]);
+        let ty = &types[&s];
+        // singleton(-1) ∪ singleton(0) = [-1, 0]
+        assert!(ty.interval().lo() <= -1.0);
+        assert!(ty.interval().hi() >= 0.0);
     }
 
     #[test]
