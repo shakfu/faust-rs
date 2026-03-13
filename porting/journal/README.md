@@ -30,4 +30,5 @@ Files are listed chronologically (oldest day first). Inside each file, entries a
 - [2026-03-09](./2026-03-09.md) (22 entries)
 - [2026-03-10](./2026-03-10.md) (2 entries)
 - [2026-03-11](./2026-03-11.md) (1 entry)
-- [2026-03-12](./2026-03-12.md) (1 entry)
+- [2026-03-12](./2026-03-12.md) (25 entries)
+- [2026-03-13](./2026-03-13.md) (1 entry)

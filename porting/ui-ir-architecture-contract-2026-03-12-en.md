@@ -78,17 +78,21 @@ This means the current fallback in
 `crates/transform/src/signal_fir/module.rs` is transitional and must be removed
 or reduced to an adapter during migration.
 
-### 2.5 UI labels and metadata are owned by UI IR
+### 2.5 UI labels, pathnames, and metadata are owned by UI IR
 
 By the time UI IR is created:
 
 - labels have already been evaluated/interpolated,
-- metadata embedded in labels has already been extracted,
+- pathname-bearing labels have already been normalized into structural UI
+  placement plus terminal label text,
+- metadata embedded in labels has already been extracted from the normalized
+  terminal labels,
 - UI IR stores:
   - simplified display labels,
   - metadata declarations attached to the owning group/widget node.
 
-No later phase may reparse raw label strings to rediscover metadata.
+No later phase may reparse raw label strings to rediscover path structure or
+metadata.
 
 ### 2.6 FIR consumes explicit UI IR, not flat widget side-effects
 
@@ -383,19 +387,20 @@ implemented. The end state is:
 - root-group synthesis belongs to UI IR construction,
 - FIR lowering and backends do not synthesize root groups.
 
-## 8. Label and metadata policy
+## 8. Label, metadata, and pathname policy
 
 ### 8.1 Ownership point
 
 Label interpolation stays in `eval`.
 
-Metadata extraction for UI labels is completed before or during UI IR
-construction in `propagate`.
+Pathname normalization and metadata extraction for UI labels are completed
+before or during UI IR construction in `propagate`.
 
 ### 8.2 Canonical storage rule
 
 UI IR stores:
 
+- canonical structural placement for pathname-bearing labels,
 - simplified display label,
 - extracted metadata declarations,
 - no raw unevaluated label template.
@@ -415,28 +420,24 @@ Forbidden after UI IR construction:
 
 - reparsing `%...` substitutions,
 - reparsing `[key:value]`-style metadata from labels,
-- inferring group path from slash-split labels alone.
+- inferring group path from slash-split labels alone,
+- late pathname normalization in FIR or backend code.
 
-### 8.4 Correction path for the current Rust parity gap
+### 8.4 Canonical rule for metadata-bearing UI labels
 
-The known Rust parity gap is:
+The grouped-UI rewrite already closed the previous Rust metadata gap.
 
-- `ControlSpec.label` still carries raw strings such as `gain [style:knob]`,
-- `ControlSpec.metadata` is left empty for UI-label metadata,
-- FIR/UI lowering therefore emits only `add*("gain [style:knob]", ...)`,
-- and no backend-visible `declare(..., "style", "knob")` is produced.
+The frozen canonical rule is now:
 
-The required correction is frozen as follows:
-
-1. add a Rust equivalent of the C++ `extractMetadata(...)` behavior during UI
-   IR construction in `propagate`
-2. store the simplified label in `ControlSpec.label`
-3. store extracted UI metadata key/value pairs in `ControlSpec.metadata`
-4. keep this information canonical in `UiProgram` rather than reparsing it
+1. Rust applies a C++-equivalent of `extractMetadata(...)` during UI IR
+   construction in `propagate`
+2. `ControlSpec.label` stores the simplified display label
+3. `ControlSpec.metadata` stores the extracted UI metadata key/value pairs
+4. `UiProgram` keeps that information canonical rather than reparsing labels
    later
-5. lower `ControlSpec.metadata` to explicit FIR `AddMetaDeclare` instructions
-   attached to the same control zone/group
-6. emit backend `declare(...)` calls from FIR before or alongside the
+5. FIR/UI lowering emits explicit `AddMetaDeclare` instructions attached to the
+   same control zone/group
+6. backends emit `declare(...)` calls from FIR before or alongside the
    corresponding `addButton` / `addSlider` / `addBargraph` / `addSoundfile`
    instruction sequence
 
@@ -445,6 +446,203 @@ End-state parity requirement for the example above:
 - C++/C backends emit `declare(..., "style", "knob")`
 - C++/C backends emit `addHorizontalSlider("gain", ...)`
 - they do not expose `gain [style:knob]` as the final display label
+
+### 8.5 C++ pathname baseline to preserve
+
+The Faust language also allows UI labels to behave as pathnames rather than
+pure display strings. The specification is documented in:
+
+- <https://faustdoc.grame.fr/manual/syntax/#labels-as-pathnames>
+
+Relevant C++ provenance:
+
+- `compiler/propagate/labels.cpp`
+- `compiler/propagate/propagate.cpp`
+- `compiler/generator/uitree.cpp`
+- `compiler/generator/compile.cpp`
+
+Observed C++ behavior to preserve:
+
+- widget labels are normalized during `propagate` with
+  `normalizePath(cons(label, path))`
+- the pathname grammar includes:
+  - absolute reset with `/`
+  - current-directory prefix `./`
+  - parent-directory prefix `../`
+  - typed path segments such as `h:`, `v:`, and `t:`
+- metadata is not stripped during pathname normalization; it remains attached
+  to the terminal segment and is extracted later during UI tree/code
+  generation
+- the grouped UI tree is then built from the normalized widget path, so a
+  label such as `../volume` can reparent a widget out of the immediately
+  enclosing source group
+
+Concrete C++ example:
+
+```faust
+process = hgroup("Foo",
+    vgroup("Faa",
+        hslider("../volume", 0.5, 0, 1, 0.01)
+    )
+);
+```
+
+Faust C++ emits:
+
+- `openHorizontalBox("Foo")`
+- `addHorizontalSlider("volume", ...)`
+
+and does not keep the widget inside `Faa`.
+
+Important current C++ limitation:
+
+- explicit group labels themselves are still treated as direct folder labels in
+  grouped UI construction and UI code generation
+- C++ does not currently interpret group labels such as `../Foo` as relative
+  pathname navigation for the group node itself
+
+This limitation is part of the current C++ baseline and must be documented
+explicitly before any Rust extension is added on top of it.
+
+### 8.6 Current Rust pathname parity gap
+
+Current Rust grouped UI construction in `crates/propagate/src/lib.rs` does:
+
+- `decode_box_label(...)`
+- immediately `split_label_metadata(...)`
+- direct recursive group/widget construction in source-tree order
+
+It does not yet:
+
+- parse pathname grammar from widget labels,
+- normalize `./`, `../`, `/`, or typed path segments against the current group
+  stack,
+- reparent widgets or soundfiles according to the normalized path.
+
+Therefore Rust currently emits the previous example as:
+
+- `openHorizontalBox("Foo")`
+- `openVerticalBox("Faa")`
+- `addHorizontalSlider("../volume", ...)`
+
+This is a true parity bug relative to Faust C++.
+
+There is also an architectural consequence:
+
+- the current `collect_ui_nodes(...) -> Vec<UiId>` model is sufficient for
+  direct recursive nesting,
+- but it is not sufficient for pathname-aware insertion because widgets may
+  need to be attached under a different ancestor than their immediate source
+  parent.
+
+### 8.7 Frozen correction path for C++ widget pathname parity
+
+Widget pathname parity must be implemented before any Rust-only extension for
+group labels.
+
+The canonical Rust correction path is frozen as follows:
+
+1. treat one raw evaluated UI label as going through three logical stages:
+   - raw evaluated label string,
+   - pathname-normalized structural placement,
+   - terminal display label plus extracted metadata
+2. add a dedicated pathname parser/normalizer in `ui` or `propagate`
+3. keep pathname normalization separate from `split_label_metadata(...)`
+4. preserve raw segment text during pathname parsing so metadata extraction can
+   still run on the normalized terminal segment afterward
+5. make grouped UI construction path-aware:
+   - widgets, bargraphs, and soundfiles are inserted at a normalized target
+     path
+   - direct recursive source nesting is no longer the sole placement rule
+6. keep FIR and backend phases unchanged:
+   - they consume only canonical `UiProgram`
+   - they never normalize pathname labels themselves
+
+The canonical ordering is therefore:
+
+`eval label string -> pathname normalization -> metadata extraction -> UiProgram`
+
+and not:
+
+`eval label string -> metadata extraction -> late slash splitting`
+
+### 8.8 Rust extension: relative pathname navigation in explicit group labels
+
+Rust may deliberately extend the C++ baseline by allowing relative pathname
+navigation in explicit group labels themselves.
+
+This is an `adapted` behavior, not a `1:1` C++ parity rule.
+
+Motivation:
+
+- widget labels already admit relative pathname navigation in Faust
+- extending that navigation model to explicit group labels makes grouped UI
+  placement more coherent and easier to reason about in the Rust architecture
+
+This extension is frozen with the following scope for the first iteration:
+
+- supported navigation prefixes on group labels:
+  - `./`
+  - one or more `../`
+  - `/` to reset to the canonical UI root
+- the explicit group constructor (`vgroup`, `hgroup`, `tgroup`) remains the
+  owner of the emitted group's orientation
+- the initial extension does **not** infer orientation from typed pathname
+  segments embedded inside a group label
+- the initial extension does **not** synthesize arbitrary intermediate groups
+  from a multi-segment group pathname such as `foo/bar`
+
+In other words, the initial Rust extension is navigation-only for group
+labels, not full arbitrary path construction.
+
+Canonical semantics for the extension:
+
+- relative navigation changes the parent insertion site of the explicit group
+  node before its children are attached
+- the terminal group label still goes through metadata extraction and empty
+  label handling like any other group label
+- navigation that climbs above the canonical root clamps at the canonical root
+- the source `vgroup` / `hgroup` / `tgroup` node still determines the
+  orientation of the inserted group
+
+Example desired Rust-only behavior:
+
+```faust
+process = hgroup("Foo",
+    vgroup("../Bar",
+        hslider("gain", 0.5, 0, 1, 0.01)
+    )
+);
+```
+
+Target Rust UI structure:
+
+- `Foo` remains an explicit group under the root
+- `Bar` becomes a sibling group rebased to the parent of `Foo`
+- `gain` is emitted inside `Bar`
+
+This behavior is intentionally beyond current C++ semantics and must be tested
+as a Rust-specific extension, not as a differential C++ parity case.
+
+### 8.9 Consequences for internal APIs and invariants
+
+Pathname support changes the grouped UI construction contract in three ways:
+
+1. `split_label_metadata(...)` cannot be the first and only normalization step
+   for pathname-bearing UI labels
+2. `collect_ui_nodes(...)` needs explicit current-path context plus a path-aware
+   insertion API, rather than only returning immediate child `UiId` lists
+3. `UiProgram` construction must support deterministic insertion/merging at a
+   target group path while preserving stable source order for siblings emitted
+   at the same structural location
+
+Recommended internal direction:
+
+- keep pathname parsing/normalization near `ui` / `propagate`
+- add an insertion-oriented grouped UI builder rather than pushing pathname
+  handling into FIR
+- keep canonical root synthesis and label/metadata extraction in the same UI IR
+  construction phase so all layout decisions remain frozen before `transform`
 
 ## 9. Transform and FIR contract
 
@@ -487,6 +685,8 @@ The following mapping statuses are frozen.
 | `eval` explicit group/widget preservation | `1:1` behaviorally | already matches C++ intent |
 | `propagate` returning UI as explicit parallel artifact | `adapted` | Rust uses explicit IR rather than C++ clockenv representation |
 | `signals` owning only control references | `adapted` | cleaner Rust ownership split, same external behavior target |
+| widget label pathname normalization | `1:1` behaviorally | must match C++ `normalizePath(...)` semantics for widgets/soundfiles/bargraphs |
+| group-label relative pathname navigation | `adapted` | deliberate Rust extension for coherent relative rebasing of explicit groups |
 | FIR explicit UI instructions | `1:1` behaviorally | same backend-visible contract |
 | backend UI emission from FIR only | `1:1` behaviorally | same output contract as C++ |
 
@@ -504,6 +704,8 @@ Required validation for the rewrite:
 - nested-group parity checks,
 - empty-label root-group parity checks,
 - metadata-on-group/widget parity checks,
+- widget-pathname parity checks against C++,
+- Rust-only group-path rebasing checks for the explicit extension,
 - deterministic `ControlId` and emission-order tests.
 
 Minimum corpus cases:
@@ -513,6 +715,26 @@ Minimum corpus cases:
 - `tests/corpus/rep_17_ui_groups.dsp`
 - `tests/corpus/rep_28_nested_ui_groups.dsp`
 - `tests/corpus/rep_56_noise_smoo_slider.dsp`
+
+Additional targeted cases required for pathname work:
+
+- one nested-group widget case using `../volume`
+- one absolute pathname widget case using a typed segment such as
+  `h:Oscillator/freq`
+- one widget case combining relative pathname navigation with inline metadata,
+  for example `../gain [style:knob]`
+- one Rust-only extension case rebasing an explicit group with `../Bar`
+- one Rust-only extension case proving root-clamp behavior for repeated
+  `../../..` group navigation
+
+These pathname cases should be added as dedicated DSP fixtures under
+`tests/corpus/` rather than staying inline-only in test sources, so they can
+participate in:
+
+- Rust golden coverage,
+- future C++ golden refreshes,
+- direct CLI/manual inspection during debugging,
+- reuse across `signal_pipeline`, FIR-lane, and differential test suites.
 
 ## 12. Recommended implementation slices
 
@@ -526,6 +748,233 @@ Implementation should follow this order:
 6. lower `UiProgram` to FIR explicit UI statements
 7. remove backend/root-group fallback heuristics
 8. widen C++ differential coverage
+
+### 12.1 Additional pathname follow-up slices
+
+The baseline grouped-UI rewrite above is already complete. Pathname support is
+the next follow-up slice on top of that baseline.
+
+Pathname work should proceed in this order:
+
+1. add failing C++ differential tests for widget pathname semantics
+2. add failing Rust-only tests for relative group-label rebasing
+3. introduce a dedicated pathname parser/normalizer with Rustdoc provenance to
+   `labels.cpp`
+4. refactor grouped UI construction from direct recursive assembly to
+   path-aware insertion into canonical `UiProgram`
+5. close widget-path parity first and keep it green against C++
+6. then add the Rust-only group-label navigation extension
+7. widen coverage for metadata-bearing pathname labels and mixed nested groups
+
+### 12.2 Concrete implementation plan by file
+
+The following concrete plan is the recommended execution order for the Rust
+implementation.
+
+#### Step A. Freeze failing tests before refactoring
+
+Files to touch:
+
+- `crates/compiler/tests/cpp_signal_differential.rs`
+- `crates/compiler/tests/signal_pipeline.rs`
+- `tests/corpus/`
+
+Work:
+
+- add dedicated DSP corpus fixtures under `tests/corpus/` for:
+  - relative widget rebasing with `../volume`
+  - absolute/typed widget pathname such as `h:Oscillator/freq`
+  - relative widget pathname plus inline metadata
+  - explicit group-label rebasing with `../Bar`
+  - explicit group-label root clamp with repeated `../../..`
+- add one C++ differential asserting widget pathname parity for each C++-owned
+  corpus fixture
+- add Rust-only regressions in `signal_pipeline.rs` for the group-rebasing
+  corpus fixtures
+- assign stable `rep_*` names when adding these corpus files so they can join
+  the existing golden and differential workflow cleanly
+
+Exit criteria:
+
+- the new tests fail on current Rust for pathname behavior
+- existing grouped-UI tests stay green
+
+#### Step B. Introduce canonical pathname parsing and normalization helpers
+
+Files to touch:
+
+- `crates/ui/src/lib.rs`
+- optionally `crates/ui/tests/core_api.rs`
+
+Work:
+
+- add a dedicated pathname model, for example:
+  - `UiPathStep`
+  - `UiPathAnchor`
+  - `UiLabelPath`
+- add a parser for Faust pathname grammar modeled after `labels.cpp`
+- keep this helper separate from `split_label_metadata(...)`
+- document the exact ordering and provenance with Rustdoc
+- add structural tests covering:
+  - `/`
+  - `./`
+  - `../`
+  - typed segments for widgets
+  - metadata preserved on the terminal segment
+
+Recommended rule split:
+
+- `split_label_metadata(...)` remains responsible only for
+  label/metadata extraction
+- new pathname helpers become responsible only for path parsing and
+  normalization
+
+Exit criteria:
+
+- pathname parsing/normalization is testable in isolation from `propagate`
+- no FIR/backend code changes are needed yet
+
+#### Step C. Add path-aware grouped UI insertion primitives
+
+Files to touch:
+
+- `crates/ui/src/lib.rs`
+- `crates/ui/tests/core_api.rs`
+
+Work:
+
+- add an insertion-oriented builder layer on top of the current tree matcher,
+  for example:
+  - `UiProgramBuilder`
+  - `insert_group_at_path(...)`
+  - `insert_control_at_path(...)`
+- preserve deterministic sibling ordering for multiple insertions into the same
+  target group
+- preserve existing root synthesis and metadata invariants
+- do not leak raw pathname strings into stored `UiProgram`
+
+Important design constraint:
+
+- this builder must support inserting a node under an ancestor other than the
+  immediate syntactic parent
+- that is the core requirement the current `Vec<UiId>` recursion model does not
+  satisfy
+
+Exit criteria:
+
+- `UiProgram` can be assembled by normalized target path, not only by direct
+  recursive nesting
+- builder-level tests prove deterministic order and root-clamp behavior
+
+#### Step D. Refactor `propagate` grouped UI construction onto the path-aware builder
+
+Files to touch:
+
+- `crates/propagate/src/lib.rs`
+- `crates/propagate/tests/core_api.rs`
+
+Work:
+
+- split the current grouped UI collection flow into explicit stages:
+  1. decode evaluated label string
+  2. normalize pathname relative to current UI group path
+  3. extract metadata from the terminal segment
+  4. insert canonical group/control into the UI builder
+- replace the current `collect_ui_nodes(...) -> Vec<UiId>` direct assembly for
+  UI-bearing families with insertion through the path-aware builder
+- keep `ControlId` allocation deterministic and unchanged
+- keep DSP signal propagation behavior unchanged
+
+Recommended helper split inside `propagate`:
+
+- one helper to track the current explicit source group stack
+- one helper to normalize a widget pathname against that stack
+- one helper to normalize a group label for the Rust extension path
+- one helper to insert the resulting canonical node into the UI builder
+
+Exit criteria:
+
+- widget pathname tests pass at the `propagate` / `signal_pipeline` level
+- no grouped UI reconstruction is reintroduced in later phases
+
+#### Step E. Close C++ widget pathname parity first
+
+Files to touch:
+
+- `crates/compiler/tests/cpp_signal_differential.rs`
+- `crates/compiler/tests/signal_pipeline.rs`
+- possibly `crates/transform/src/signal_fir/module.rs` only if test fixtures
+  need additional inspection helpers
+
+Work:
+
+- keep the Rust-only group-label extension disabled while widget-path parity is
+  being closed
+- make all C++ differentials pass for:
+  - relative widget rebasing with `../`
+  - absolute reset with `/`
+  - typed path segments on widgets
+  - pathname + metadata interaction
+
+Exit criteria:
+
+- widget pathname semantics match C++ in ordered UI event output
+- no Rust-only behavior is yet visible in the C++ differential suite
+
+#### Step F. Enable the Rust-only extension for explicit group labels
+
+Files to touch:
+
+- `crates/ui/src/lib.rs`
+- `crates/propagate/src/lib.rs`
+- `crates/propagate/tests/core_api.rs`
+- `crates/compiler/tests/signal_pipeline.rs`
+
+Work:
+
+- add navigation-only handling for group labels:
+  - `./`
+  - `../`
+  - `/`
+- keep orientation owned by the source `vgroup` / `hgroup` / `tgroup`
+- clamp above-root group navigation at the canonical root
+- keep typed segments and arbitrary `foo/bar` group paths out of scope for the
+  first iteration
+
+Exit criteria:
+
+- Rust-only rebasing tests for explicit group labels pass
+- existing C++ differential tests remain unchanged because this extension is
+  tested only on Rust-owned cases
+
+#### Step G. Harden and document the final behavior
+
+Files to touch:
+
+- `crates/ui/src/lib.rs`
+- `crates/propagate/src/lib.rs`
+- `crates/compiler/tests/cpp_signal_differential.rs`
+- `crates/compiler/tests/signal_pipeline.rs`
+- `porting/journal/YYYY-MM-DD.md`
+
+Work:
+
+- add Rustdoc on the final pathname helper types and insertion invariants
+- add mixed nested-group cases combining:
+  - pathname rebasing
+  - inline metadata
+  - explicit root synthesis
+- add explicit regression coverage for soundfile pathnames
+- journal the implementation slices as they land
+
+Recommended commit slicing:
+
+1. failing tests plus new corpus DSP fixtures
+2. pathname parser/normalizer in `ui`
+3. path-aware `UiProgram` builder
+4. `propagate` refactor for widget parity
+5. Rust-only group-label extension
+6. hardening/doc pass
 
 ## 13. Non-goals
 
