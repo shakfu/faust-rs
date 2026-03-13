@@ -342,7 +342,7 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
         "instanceClear should be emitted once"
     );
     assert!(
-        fast.contains("float[2] fRec"),
+        fast.contains("float fRec") && fast.contains("[2];"),
         "fast lane should lower phasor recursion to a 2-slot float array"
     );
     assert!(
@@ -362,7 +362,7 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
     assert!(fast_c.contains("fHslider"));
     assert!(!fast_c.contains("fUiCtl"));
     assert!(
-        fast_c.contains("float[2] fRec"),
+        fast_c.contains("float fRec") && fast_c.contains("[2];"),
         "fast lane C backend should keep recursion as a 2-slot array"
     );
     assert!(fast_c.contains(
@@ -515,7 +515,7 @@ fn fastlane_cpp_compiles_noise_smoo_slider_fixture() {
     );
     assert!(cpp.contains("class mydsp : public dsp"));
     assert!(cpp.contains("void compute("));
-    assert!(cpp.contains("int[2] iRec"));
+    assert!(cpp.contains("int iRec") && cpp.contains("[2];"));
     assert!(cpp.contains("fSampleRate"));
     assert!(
         !cpp.contains("float fRec"),
@@ -531,7 +531,7 @@ fn fastlane_cpp_keeps_integer_recursive_min_feedback_in_int_state() {
         SignalFirLane::TransformFastLane,
     );
     assert!(cpp.contains("class mydsp : public dsp"));
-    assert!(cpp.contains("int[2] iRec"));
+    assert!(cpp.contains("int iRec") && cpp.contains("[2];"));
     assert!(
         !cpp.contains("float[2] fRec") && !cpp.contains("double[2] fRec"),
         "integer recursive min should keep recursion state in integer arrays"
@@ -550,7 +550,7 @@ fn fastlane_cpp_keeps_integer_recursive_abs_feedback_in_int_state() {
         SignalFirLane::TransformFastLane,
     );
     assert!(cpp.contains("class mydsp : public dsp"));
-    assert!(cpp.contains("int[2] iRec"));
+    assert!(cpp.contains("int iRec") && cpp.contains("[2];"));
     assert!(
         !cpp.contains("float[2] fRec") && !cpp.contains("double[2] fRec"),
         "integer recursive abs should keep recursion state in integer arrays"

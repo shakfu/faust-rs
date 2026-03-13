@@ -501,7 +501,7 @@ fn emit_stmt_with_mode(
             access: _,
             init,
         } => {
-            let _ = write!(out, "{tab}{} {name}", emit_type(&typ, options));
+            let _ = write!(out, "{tab}{}", emit_named_type(&typ, &name, options));
             if let Some(init) = init {
                 let init = emit_value(store, options, init)?;
                 let _ = write!(out, " = {init}");
@@ -941,7 +941,7 @@ fn emit_declare_fun(
                     .named_args
                     .get(named_index)
                     .map_or_else(|| format!("arg{named_index}"), |named| named.name.clone());
-                rendered.push(format!("{} {}", emit_type(arg_type, options), name));
+                rendered.push(emit_named_type(arg_type, &name, options));
             }
             (ret, rendered.join(", "))
         }
@@ -1157,6 +1157,22 @@ fn emit_value(
         FirMatch::NullValue { .. } => Ok("nullptr".to_owned()),
         FirMatch::NewDsp { name, .. } => Ok(format!("new {name}()")),
         _ => Err(unsupported_node("value", value, store)),
+    }
+}
+
+fn emit_named_type(typ: &FirType, name: &str, options: &CppOptions) -> String {
+    let mut suffix = String::new();
+    let base = emit_type_base_and_suffix(typ, options, &mut suffix);
+    format!("{base} {name}{suffix}")
+}
+
+fn emit_type_base_and_suffix(typ: &FirType, options: &CppOptions, suffix: &mut String) -> String {
+    match typ {
+        FirType::Array(inner, size) => {
+            suffix.push_str(&format!("[{size}]"));
+            emit_type_base_and_suffix(inner, options, suffix)
+        }
+        _ => emit_type(typ, options),
     }
 }
 

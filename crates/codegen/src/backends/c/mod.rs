@@ -353,7 +353,7 @@ fn emit_struct_fields(
     for item in items {
         match match_fir(store, item) {
             FirMatch::DeclareVar { name, typ, .. } => {
-                let _ = write!(out, "    {} {name}", emit_type(&typ, options));
+                let _ = write!(out, "    {}", emit_named_type(&typ, &name, options));
                 let _ = writeln!(out, ";");
             }
             FirMatch::DeclareTable {
@@ -715,7 +715,7 @@ fn emit_helper_function(
                     .named_args
                     .get(index)
                     .map_or_else(|| format!("arg{index}"), |named| named.name.clone());
-                rendered.push(format!("{} {}", emit_type(arg_type, options), name));
+                rendered.push(emit_named_type(arg_type, &name, options));
             }
             (ret, rendered.join(", "))
         }
@@ -906,7 +906,7 @@ fn emit_stmt(
             access: _,
             init,
         } => {
-            let _ = write!(out, "{tab}{} {name}", emit_type(&typ, options));
+            let _ = write!(out, "{tab}{}", emit_named_type(&typ, &name, options));
             if let Some(init) = init {
                 let init = emit_value(store, options, init)?;
                 let _ = write!(out, " = {init}");
@@ -1299,6 +1299,22 @@ fn emit_type(typ: &FirType, options: &COptions) -> String {
                 .join(", ");
             format!("{}({args})", emit_type(ret, options))
         }
+    }
+}
+
+fn emit_named_type(typ: &FirType, name: &str, options: &COptions) -> String {
+    let mut suffix = String::new();
+    let base = emit_type_base_and_suffix(typ, options, &mut suffix);
+    format!("{base} {name}{suffix}")
+}
+
+fn emit_type_base_and_suffix(typ: &FirType, options: &COptions, suffix: &mut String) -> String {
+    match typ {
+        FirType::Array(inner, size) => {
+            suffix.push_str(&format!("[{size}]"));
+            emit_type_base_and_suffix(inner, options, suffix)
+        }
+        _ => emit_type(typ, options),
     }
 }
 
