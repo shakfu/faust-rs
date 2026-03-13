@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_62_ui_relative_widget_path_metadata.dsp
+bytes=94
+lines=1
+fnv1a64=98e88a5ba2946804

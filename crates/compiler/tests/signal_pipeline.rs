@@ -542,6 +542,51 @@ fn corpus_metadata_bearing_widget_label_splits_display_label_and_ui_metadata() {
 }
 
 #[test]
+fn corpus_relative_widget_path_rebases_to_parent_group() {
+    let out = compile_corpus("rep_60_ui_relative_widget_path.dsp");
+    let root_children = expect_ui_group(&out, out.ui.root, UiGroupKind::Horizontal, "Foo");
+    assert_eq!(root_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, root_children[0]),
+        UiMatch::InputControl(0)
+    );
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].kind, ControlKind::HSlider);
+    assert_eq!(out.ui.controls[0].label, "volume");
+}
+
+#[test]
+fn corpus_typed_widget_path_creates_typed_group() {
+    let out = compile_corpus("rep_61_ui_typed_widget_path.dsp");
+    let root_children = expect_ui_group(&out, out.ui.root, UiGroupKind::Horizontal, "Oscillator");
+    assert_eq!(root_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, root_children[0]),
+        UiMatch::InputControl(0)
+    );
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].kind, ControlKind::HSlider);
+    assert_eq!(out.ui.controls[0].label, "freq");
+}
+
+#[test]
+fn corpus_relative_widget_path_metadata_survives_rebase() {
+    let out = compile_corpus("rep_62_ui_relative_widget_path_metadata.dsp");
+    let root_children = expect_ui_group(&out, out.ui.root, UiGroupKind::Horizontal, "Foo");
+    assert_eq!(root_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, root_children[0]),
+        UiMatch::InputControl(0)
+    );
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].label, "gain");
+    assert_eq!(
+        out.ui.controls[0].metadata,
+        vec![("style".to_owned(), "knob".to_owned())]
+    );
+}
+
+#[test]
 fn inline_group_label_metadata_splits_display_label_and_group_metadata() {
     let out = compile_inline(
         "group_metadata",

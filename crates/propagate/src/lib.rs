@@ -41,8 +41,9 @@ use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
 use signals::{SigBuilder, SigId, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId, list_to_vec, tree_to_int, vec_to_list};
 use ui::{
-    ControlId, ControlKind, ControlRange, ControlSpec, UiBuilder, UiGroupKind, UiId, UiMatch,
-    UiMetadata, UiProgram, UiRootOrigin, match_ui, split_label_metadata,
+    ControlId, ControlKind, ControlRange, ControlSpec, UiGroupKind, UiGroupPathSegment,
+    UiGroupSpec, UiMatch, UiMetadata, UiProgram, UiProgramBuilder, UiRootOrigin,
+    canonicalize_group_spec, match_ui, normalize_widget_label_path, split_label_metadata,
 };
 
 /// Memoization cache for [`box_arity`] / [`box_arity_typed`] results, keyed by validated flat boxes.
@@ -1068,7 +1069,7 @@ pub fn propagate(
 /// - controls are registered exactly once and assigned dense [`ControlId`]s,
 /// - source widget/group labels are decoded before FIR/backend stages.
 struct UiCollector {
-    arena: TreeArena,
+    builder: UiProgramBuilder,
     controls: Vec<ControlSpec>,
     control_ids: ControlIds,
 }
@@ -1076,54 +1077,35 @@ struct UiCollector {
 impl UiCollector {
     fn new() -> Self {
         Self {
-            arena: TreeArena::new(),
+            builder: UiProgramBuilder::new(),
             controls: Vec::new(),
             control_ids: ControlIds::default(),
         }
     }
 
-    fn finish(mut self, roots: &[UiId], options: &PropagateUiOptions) -> UiBuildOutput {
-        let keep_existing_root = matches!(roots, [only] if matches!(match_ui(&self.arena, *only), UiMatch::Group { .. }));
+    fn finish(self, options: &PropagateUiOptions) -> UiBuildOutput {
+        let (mut arena, roots) = self.builder.finish();
+        let keep_existing_root = matches!(roots.as_slice(), [only] if matches!(match_ui(&arena, *only), UiMatch::Group { .. }));
         let (root, root_origin) = if keep_existing_root {
             (
-                self.rewrite_root_group_label(roots[0], options),
+                rewrite_root_group_label(&mut arena, roots[0], options),
                 UiRootOrigin::Explicit,
             )
         } else {
             (
-                UiBuilder::new(&mut self.arena).vgroup(&options.synthesized_root_label, roots),
+                synthesize_ui_root_group(&mut arena, &options.synthesized_root_label, &roots),
                 UiRootOrigin::Synthesized,
             )
         };
         UiBuildOutput {
             program: UiProgram {
-                arena: self.arena,
+                arena,
                 root,
                 controls: self.controls,
                 root_origin,
                 emit_ui: true,
             },
             control_ids: self.control_ids,
-        }
-    }
-
-    fn rewrite_root_group_label(&mut self, root: UiId, options: &PropagateUiOptions) -> UiId {
-        match match_ui(&self.arena, root) {
-            UiMatch::Group {
-                kind,
-                label,
-                metadata,
-                children,
-            } if label.is_empty() && !options.synthesized_root_label.is_empty() => {
-                let mut builder = UiBuilder::new(&mut self.arena);
-                builder.group_with_metadata(
-                    kind,
-                    &options.synthesized_root_label,
-                    &metadata,
-                    &children,
-                )
-            }
-            _ => root,
         }
     }
 
@@ -1151,41 +1133,61 @@ impl UiCollector {
     fn input_control(
         &mut self,
         source_node: BoxId,
+        path: &[UiGroupSpec],
         kind: ControlKind,
         label: String,
         metadata: UiMetadata,
         range: Option<ControlRange>,
-    ) -> UiId {
+    ) {
         let id = self.register_control(source_node, kind, label, metadata, range);
-        UiBuilder::new(&mut self.arena).input_control(id)
+        self.builder.insert_input_control(path, id);
     }
 
     fn output_control(
         &mut self,
         source_node: BoxId,
+        path: &[UiGroupSpec],
         kind: ControlKind,
         label: String,
         metadata: UiMetadata,
         range: Option<ControlRange>,
-    ) -> UiId {
+    ) {
         let id = self.register_control(source_node, kind, label, metadata, range);
-        UiBuilder::new(&mut self.arena).output_control(id)
+        self.builder.insert_output_control(path, id);
     }
 
-    fn soundfile(&mut self, source_node: BoxId, label: String, metadata: UiMetadata) -> UiId {
-        let id = self.register_control(source_node, ControlKind::Soundfile, label, metadata, None);
-        UiBuilder::new(&mut self.arena).soundfile(id)
-    }
-
-    fn group(
+    fn soundfile(
         &mut self,
-        kind: UiGroupKind,
-        label: &str,
-        metadata: &[(String, String)],
-        children: &[UiId],
-    ) -> UiId {
-        let mut b = UiBuilder::new(&mut self.arena);
-        b.group_with_metadata(kind, label, metadata, children)
+        source_node: BoxId,
+        path: &[UiGroupSpec],
+        label: String,
+        metadata: UiMetadata,
+    ) {
+        let id = self.register_control(source_node, ControlKind::Soundfile, label, metadata, None);
+        self.builder.insert_soundfile(path, id);
+    }
+}
+
+fn synthesize_ui_root_group(arena: &mut TreeArena, label: &str, children: &[TreeId]) -> TreeId {
+    ui::UiBuilder::new(arena).vgroup(label, children)
+}
+
+fn rewrite_root_group_label(
+    arena: &mut TreeArena,
+    root: TreeId,
+    options: &PropagateUiOptions,
+) -> TreeId {
+    match match_ui(arena, root) {
+        UiMatch::Group {
+            kind,
+            label,
+            metadata,
+            children,
+        } if label.is_empty() && !options.synthesized_root_label.is_empty() => ui::UiBuilder::new(
+            arena,
+        )
+        .group_with_metadata(kind, &options.synthesized_root_label, &metadata, &children),
+        _ => root,
     }
 }
 
@@ -1201,6 +1203,8 @@ struct UiBuildOutput {
 /// Builds the canonical grouped-UI artifact for one validated flat box tree.
 ///
 /// The returned [`UiProgram`] is already normalized for later phases:
+/// - widget pathname labels have been rebased against the explicit group stack
+///   like C++ `normalizePath(...)`,
 /// - inline label metadata has been extracted,
 /// - the root group has been synthesized or renamed according to
 ///   [`PropagateUiOptions`],
@@ -1211,8 +1215,8 @@ fn build_ui_program(
     options: &PropagateUiOptions,
 ) -> UiBuildOutput {
     let mut collector = UiCollector::new();
-    let roots = collect_ui_nodes(source_arena, box_tree, &mut collector);
-    collector.finish(&roots, options)
+    collect_ui_nodes(source_arena, box_tree, &[], &mut collector);
+    collector.finish(options)
 }
 
 /// Collects grouped UI nodes reachable from one validated flat box subtree.
@@ -1220,40 +1224,54 @@ fn build_ui_program(
 /// Traversal follows the same semantic source tree used for DSP propagation,
 /// but only UI-bearing families contribute concrete UI nodes:
 /// widgets, bargraphs, soundfiles, and grouping wrappers. Composition-only DSP
-/// nodes recurse structurally and concatenate results in deterministic source
-/// order.
+/// nodes recurse structurally in deterministic source order.
+///
+/// Parity note:
+/// - for this widget-pathname stage, explicit groups only contribute the
+///   current path context used to normalize descendant widget labels,
+/// - empty groups and intermediate groups that all descendants escape through
+///   `../` are therefore omitted, matching current Faust C++ behavior.
 fn collect_ui_nodes(
     source_arena: &TreeArena,
     box_tree: FlatBoxId,
+    current_groups: &[UiGroupPathSegment],
     collector: &mut UiCollector,
-) -> Vec<UiId> {
+) {
     let kind = flat_node_kind(source_arena, box_tree).expect("validated flat box must decode");
     match kind {
         FlatNodeKind::Button => {
             let BoxMatch::Button(label) = match_box(source_arena, box_tree.as_tree_id()) else {
                 unreachable!("flat button node must decode to BoxMatch::Button")
             };
-            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
-            vec![collector.input_control(
+            let normalized =
+                normalize_widget_label_path(&decode_box_label(source_arena, label), current_groups);
+            let path = canonical_group_path(&normalized.groups);
+            let (label, metadata) = split_label_metadata(&normalized.raw_label);
+            collector.input_control(
                 box_tree.as_tree_id(),
+                &path,
                 ControlKind::Button,
                 label,
                 metadata,
                 None,
-            )]
+            );
         }
         FlatNodeKind::Checkbox => {
             let BoxMatch::Checkbox(label) = match_box(source_arena, box_tree.as_tree_id()) else {
                 unreachable!("flat checkbox node must decode to BoxMatch::Checkbox")
             };
-            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
-            vec![collector.input_control(
+            let normalized =
+                normalize_widget_label_path(&decode_box_label(source_arena, label), current_groups);
+            let path = canonical_group_path(&normalized.groups);
+            let (label, metadata) = split_label_metadata(&normalized.raw_label);
+            collector.input_control(
                 box_tree.as_tree_id(),
+                &path,
                 ControlKind::Checkbox,
                 label,
                 metadata,
                 None,
-            )]
+            );
         }
         FlatNodeKind::VSlider => {
             let BoxMatch::VSlider(label, init, min, max, step) =
@@ -1261,9 +1279,13 @@ fn collect_ui_nodes(
             else {
                 unreachable!("flat vslider node must decode to BoxMatch::VSlider")
             };
-            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
-            vec![collector.input_control(
+            let normalized =
+                normalize_widget_label_path(&decode_box_label(source_arena, label), current_groups);
+            let path = canonical_group_path(&normalized.groups);
+            let (label, metadata) = split_label_metadata(&normalized.raw_label);
+            collector.input_control(
                 box_tree.as_tree_id(),
+                &path,
                 ControlKind::VSlider,
                 label,
                 metadata,
@@ -1273,7 +1295,7 @@ fn collect_ui_nodes(
                     max: decode_box_scalar(source_arena, max),
                     step: decode_box_scalar(source_arena, step),
                 }),
-            )]
+            );
         }
         FlatNodeKind::HSlider => {
             let BoxMatch::HSlider(label, init, min, max, step) =
@@ -1281,9 +1303,13 @@ fn collect_ui_nodes(
             else {
                 unreachable!("flat hslider node must decode to BoxMatch::HSlider")
             };
-            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
-            vec![collector.input_control(
+            let normalized =
+                normalize_widget_label_path(&decode_box_label(source_arena, label), current_groups);
+            let path = canonical_group_path(&normalized.groups);
+            let (label, metadata) = split_label_metadata(&normalized.raw_label);
+            collector.input_control(
                 box_tree.as_tree_id(),
+                &path,
                 ControlKind::HSlider,
                 label,
                 metadata,
@@ -1293,7 +1319,7 @@ fn collect_ui_nodes(
                     max: decode_box_scalar(source_arena, max),
                     step: decode_box_scalar(source_arena, step),
                 }),
-            )]
+            );
         }
         FlatNodeKind::NumEntry => {
             let BoxMatch::NumEntry(label, init, min, max, step) =
@@ -1301,9 +1327,13 @@ fn collect_ui_nodes(
             else {
                 unreachable!("flat numentry node must decode to BoxMatch::NumEntry")
             };
-            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
-            vec![collector.input_control(
+            let normalized =
+                normalize_widget_label_path(&decode_box_label(source_arena, label), current_groups);
+            let path = canonical_group_path(&normalized.groups);
+            let (label, metadata) = split_label_metadata(&normalized.raw_label);
+            collector.input_control(
                 box_tree.as_tree_id(),
+                &path,
                 ControlKind::NumEntry,
                 label,
                 metadata,
@@ -1313,7 +1343,7 @@ fn collect_ui_nodes(
                     max: decode_box_scalar(source_arena, max),
                     step: decode_box_scalar(source_arena, step),
                 }),
-            )]
+            );
         }
         FlatNodeKind::VBargraph => {
             let BoxMatch::VBargraph(label, min, max) =
@@ -1321,9 +1351,13 @@ fn collect_ui_nodes(
             else {
                 unreachable!("flat vbargraph node must decode to BoxMatch::VBargraph")
             };
-            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
-            vec![collector.output_control(
+            let normalized =
+                normalize_widget_label_path(&decode_box_label(source_arena, label), current_groups);
+            let path = canonical_group_path(&normalized.groups);
+            let (label, metadata) = split_label_metadata(&normalized.raw_label);
+            collector.output_control(
                 box_tree.as_tree_id(),
+                &path,
                 ControlKind::VBargraph,
                 label,
                 metadata,
@@ -1333,7 +1367,7 @@ fn collect_ui_nodes(
                     max: decode_box_scalar(source_arena, max),
                     step: 0.0,
                 }),
-            )]
+            );
         }
         FlatNodeKind::HBargraph => {
             let BoxMatch::HBargraph(label, min, max) =
@@ -1341,9 +1375,13 @@ fn collect_ui_nodes(
             else {
                 unreachable!("flat hbargraph node must decode to BoxMatch::HBargraph")
             };
-            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
-            vec![collector.output_control(
+            let normalized =
+                normalize_widget_label_path(&decode_box_label(source_arena, label), current_groups);
+            let path = canonical_group_path(&normalized.groups);
+            let (label, metadata) = split_label_metadata(&normalized.raw_label);
+            collector.output_control(
                 box_tree.as_tree_id(),
+                &path,
                 ControlKind::HBargraph,
                 label,
                 metadata,
@@ -1353,19 +1391,23 @@ fn collect_ui_nodes(
                     max: decode_box_scalar(source_arena, max),
                     step: 0.0,
                 }),
-            )]
+            );
         }
         FlatNodeKind::Soundfile => {
             let BoxMatch::Soundfile(label, _) = match_box(source_arena, box_tree.as_tree_id())
             else {
                 unreachable!("flat soundfile node must decode to BoxMatch::Soundfile")
             };
-            let (label, metadata) = split_label_metadata(&decode_box_label(source_arena, label));
-            vec![collector.soundfile(box_tree.as_tree_id(), label, metadata)]
+            let normalized =
+                normalize_widget_label_path(&decode_box_label(source_arena, label), current_groups);
+            let path = canonical_group_path(&normalized.groups);
+            let (label, metadata) = split_label_metadata(&normalized.raw_label);
+            collector.soundfile(box_tree.as_tree_id(), &path, label, metadata);
         }
         FlatNodeKind::VGroup { body } => collect_group_ui(
             source_arena,
             body,
+            current_groups,
             collector,
             UiGroupKind::Vertical,
             box_tree.as_tree_id(),
@@ -1373,6 +1415,7 @@ fn collect_ui_nodes(
         FlatNodeKind::HGroup { body } => collect_group_ui(
             source_arena,
             body,
+            current_groups,
             collector,
             UiGroupKind::Horizontal,
             box_tree.as_tree_id(),
@@ -1380,6 +1423,7 @@ fn collect_ui_nodes(
         FlatNodeKind::TGroup { body } => collect_group_ui(
             source_arena,
             body,
+            current_groups,
             collector,
             UiGroupKind::Tab,
             box_tree.as_tree_id(),
@@ -1388,16 +1432,16 @@ fn collect_ui_nodes(
         | FlatNodeKind::Metadata { body }
         | FlatNodeKind::Ondemand(body)
         | FlatNodeKind::Upsampling(body)
-        | FlatNodeKind::Downsampling(body) => collect_ui_nodes(source_arena, body, collector),
+        | FlatNodeKind::Downsampling(body) => {
+            collect_ui_nodes(source_arena, body, current_groups, collector)
+        }
         FlatNodeKind::Seq(left, right)
         | FlatNodeKind::Par(left, right)
         | FlatNodeKind::Split(left, right)
         | FlatNodeKind::Merge(left, right)
         | FlatNodeKind::Rec(left, right) => {
-            let mut left_nodes = collect_ui_nodes(source_arena, left, collector);
-            let mut right_nodes = collect_ui_nodes(source_arena, right, collector);
-            left_nodes.append(&mut right_nodes);
-            left_nodes
+            collect_ui_nodes(source_arena, left, current_groups, collector);
+            collect_ui_nodes(source_arena, right, current_groups, collector);
         }
         FlatNodeKind::Int
         | FlatNodeKind::Real
@@ -1416,30 +1460,39 @@ fn collect_ui_nodes(
         | FlatNodeKind::Environment
         | FlatNodeKind::Route
         | FlatNodeKind::Inputs
-        | FlatNodeKind::Outputs => Vec::new(),
+        | FlatNodeKind::Outputs => {}
     }
 }
 
 fn collect_group_ui(
     source_arena: &TreeArena,
     body: FlatBoxId,
+    current_groups: &[UiGroupPathSegment],
     collector: &mut UiCollector,
     kind: UiGroupKind,
     group_node: BoxId,
-) -> Vec<UiId> {
-    let children = collect_ui_nodes(source_arena, body, collector);
-    if children.is_empty() {
-        return Vec::new();
-    }
-
+) {
     let label = match match_box(source_arena, group_node) {
         BoxMatch::VGroup(label, _) | BoxMatch::HGroup(label, _) | BoxMatch::TGroup(label, _) => {
             decode_box_label(source_arena, label)
         }
         _ => unreachable!("flat group node must decode to a group box"),
     };
-    let (label, metadata) = split_label_metadata(&label);
-    vec![collector.group(kind, &label, &metadata, &children)]
+    let mut nested_groups = current_groups.to_vec();
+    nested_groups.push(UiGroupPathSegment {
+        kind,
+        raw_label: label,
+    });
+    collect_ui_nodes(source_arena, body, &nested_groups, collector);
+}
+
+/// Converts one raw explicit-group stack into its canonical stored UI path.
+///
+/// Metadata extraction happens after pathname normalization so segments such as
+/// `../gain [style:knob]` first rebase to the correct group and only then split
+/// the final widget label and group metadata.
+fn canonical_group_path(path: &[UiGroupPathSegment]) -> Vec<UiGroupSpec> {
+    path.iter().map(canonicalize_group_spec).collect()
 }
 
 fn decode_box_label(arena: &TreeArena, node: BoxId) -> String {

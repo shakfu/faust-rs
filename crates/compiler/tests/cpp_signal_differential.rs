@@ -517,6 +517,21 @@ fn differential_ui_event_order_against_cpp_reference() {
             expect_valid: true,
         },
         Case {
+            name: "rep_60_ui_relative_widget_path",
+            input: CaseInput::CorpusFile("rep_60_ui_relative_widget_path.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_61_ui_typed_widget_path",
+            input: CaseInput::CorpusFile("rep_61_ui_typed_widget_path.dsp"),
+            expect_valid: true,
+        },
+        Case {
+            name: "rep_62_ui_relative_widget_path_metadata",
+            input: CaseInput::CorpusFile("rep_62_ui_relative_widget_path_metadata.dsp"),
+            expect_valid: true,
+        },
+        Case {
             name: "rep_51_eval_label_widget_subst",
             input: CaseInput::CorpusFile("rep_51_eval_label_widget_subst.dsp"),
             expect_valid: true,

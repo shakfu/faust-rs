@@ -511,6 +511,96 @@ fn propagate_with_ui_collects_soundfile_control_spec() {
 }
 
 #[test]
+fn propagate_with_ui_rebases_relative_widget_path_to_parent_group() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let foo = bb.ident("Foo");
+        let faa = bb.ident("Faa");
+        let volume = bb.ident("../volume");
+        let init = bb.real(0.5);
+        let min = bb.real(0.0);
+        let max = bb.real(1.0);
+        let step = bb.real(0.01);
+        let slider = bb.hslider(volume, init, min, max, step);
+        let inner = bb.vgroup(faa, slider);
+        bb.hgroup(foo, inner)
+    };
+
+    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+        .expect("relative widget path should propagate");
+
+    let root_children = expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Horizontal, "Foo");
+    assert_eq!(root_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, root_children[0]),
+        UiMatch::InputControl(0)
+    );
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].label, "volume");
+}
+
+#[test]
+fn propagate_with_ui_lowers_typed_widget_path_into_canonical_group() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let freq = bb.ident("h:Oscillator/freq");
+        let init = bb.real(440.0);
+        let min = bb.real(20.0);
+        let max = bb.real(20_000.0);
+        let step = bb.real(1.0);
+        bb.hslider(freq, init, min, max, step)
+    };
+
+    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+        .expect("typed widget path should propagate");
+
+    let root_children =
+        expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Horizontal, "Oscillator");
+    assert_eq!(root_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, root_children[0]),
+        UiMatch::InputControl(0)
+    );
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].label, "freq");
+}
+
+#[test]
+fn propagate_with_ui_extracts_metadata_after_relative_widget_rebase() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let foo = bb.ident("Foo");
+        let faa = bb.ident("Faa");
+        let gain = bb.ident("../gain [style:knob]");
+        let init = bb.real(0.5);
+        let min = bb.real(0.0);
+        let max = bb.real(1.0);
+        let step = bb.real(0.01);
+        let slider = bb.hslider(gain, init, min, max, step);
+        let inner = bb.vgroup(faa, slider);
+        bb.hgroup(foo, inner)
+    };
+
+    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+        .expect("relative widget path with metadata should propagate");
+
+    let root_children = expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Horizontal, "Foo");
+    assert_eq!(root_children.len(), 1);
+    assert_eq!(
+        match_ui(&out.ui.arena, root_children[0]),
+        UiMatch::InputControl(0)
+    );
+    assert_eq!(out.ui.controls[0].label, "gain");
+    assert_eq!(
+        out.ui.controls[0].metadata,
+        vec![("style".to_owned(), "knob".to_owned())]
+    );
+}
+
+#[test]
 fn soundfile_box_lowers_to_length_rate_and_channel_buffers() {
     let mut arena = TreeArena::new();
     let soundfile = {
