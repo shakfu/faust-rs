@@ -87,7 +87,12 @@ pub struct BoxArity {
 pub struct PropagateOutput {
     /// Final propagated output signal list (`box_arity.outputs` items).
     pub signals: Vec<SigId>,
-    /// Canonical grouped UI artifact extracted from the same propagated box tree.
+    /// Canonical grouped UI artifact extracted from the same propagated box
+    /// tree.
+    ///
+    /// This is the Rust ownership split that replaces the earlier
+    /// backend-local UI reconstruction heuristic: signals carry only control
+    /// references, while grouped layout and metadata are owned here.
     pub ui: UiProgram,
 }
 
@@ -105,7 +110,12 @@ pub struct PropagateOutput {
 ///   `UiProgram` is already the source of truth before FIR/backend lowering.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PropagateUiOptions {
-    /// Canonical label used when propagation must synthesize or rename the root group.
+    /// Canonical label used when propagation must synthesize or rename the root
+    /// group.
+    ///
+    /// This should already reflect the C++ root-label policy:
+    /// `declare name` from the master document when present, otherwise source
+    /// filename stem.
     pub synthesized_root_label: Box<str>,
 }
 
@@ -1051,6 +1061,12 @@ pub fn propagate(
     propagate_typed(arena, flat, inputs, cache)
 }
 
+/// Internal grouped-UI collector used while traversing a validated flat box.
+///
+/// This keeps UI ownership local to propagation:
+/// - the UI tree is built in its own arena,
+/// - controls are registered exactly once and assigned dense [`ControlId`]s,
+/// - source widget/group labels are decoded before FIR/backend stages.
 struct UiCollector {
     arena: TreeArena,
     controls: Vec<ControlSpec>,
@@ -1173,11 +1189,22 @@ impl UiCollector {
     }
 }
 
+/// Final products of grouped-UI extraction before signal lowering resumes.
+///
+/// `control_ids` is the bridge from source widget box nodes to stable
+/// [`ControlId`]s embedded later in signal UI leaves.
 struct UiBuildOutput {
     program: UiProgram,
     control_ids: ControlIds,
 }
 
+/// Builds the canonical grouped-UI artifact for one validated flat box tree.
+///
+/// The returned [`UiProgram`] is already normalized for later phases:
+/// - inline label metadata has been extracted,
+/// - the root group has been synthesized or renamed according to
+///   [`PropagateUiOptions`],
+/// - every referenced control has a stable dense [`ControlId`].
 fn build_ui_program(
     source_arena: &TreeArena,
     box_tree: FlatBoxId,
@@ -1188,6 +1215,13 @@ fn build_ui_program(
     collector.finish(&roots, options)
 }
 
+/// Collects grouped UI nodes reachable from one validated flat box subtree.
+///
+/// Traversal follows the same semantic source tree used for DSP propagation,
+/// but only UI-bearing families contribute concrete UI nodes:
+/// widgets, bargraphs, soundfiles, and grouping wrappers. Composition-only DSP
+/// nodes recurse structurally and concatenate results in deterministic source
+/// order.
 fn collect_ui_nodes(
     source_arena: &TreeArena,
     box_tree: FlatBoxId,

@@ -643,6 +643,9 @@ impl<'a> SigBuilder<'a> {
 
     #[must_use]
     /// Builds one signal node for `button` and returns its `SigId`.
+    ///
+    /// The signal node stores only a stable [`ui::ControlId`]; display label,
+    /// metadata, and grouped layout live in the paired `UiProgram`.
     pub fn button(&mut self, control: ControlId) -> SigId {
         let control = self.arena.int(i64::from(control));
         intern_tag(self.arena, SIG_BUTTON_TAG, &[control])
@@ -678,6 +681,9 @@ impl<'a> SigBuilder<'a> {
 
     #[must_use]
     /// Builds one signal node for `vbargraph` and returns its `SigId`.
+    ///
+    /// The bargraph range and metadata are resolved later through the paired
+    /// `UiProgram` control registry.
     pub fn vbargraph(&mut self, control: ControlId, sig: SigId) -> SigId {
         let control = self.arena.int(i64::from(control));
         intern_tag(self.arena, SIG_VBARGRAPH_TAG, &[control, sig])
@@ -698,6 +704,9 @@ impl<'a> SigBuilder<'a> {
 
     #[must_use]
     /// Builds one signal node for `soundfile` and returns its `SigId`.
+    ///
+    /// The associated path/url metadata is owned by `UiProgram`, not by this
+    /// signal leaf.
     pub fn soundfile(&mut self, control: ControlId) -> SigId {
         let control = self.arena.int(i64::from(control));
         intern_tag(self.arena, SIG_SOUNDFILE_TAG, &[control])

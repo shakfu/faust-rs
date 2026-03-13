@@ -113,7 +113,15 @@ pub(crate) struct RuntimeDescriptor {
     pub(crate) field_inits: HashMap<String, RuntimeFieldInit>,
     pub(crate) clear_fields: HashSet<String>,
     pub(crate) control_defaults: HashMap<String, f32>,
+    /// Ordered `buildUserInterface` callback stream reconstructed from FIR.
+    ///
+    /// This is the Cranelift-side consumer of the grouped-UI rewrite: runtime
+    /// instances no longer need to infer layout from signal widgets.
     pub(crate) ui_items: Vec<RuntimeUiItem>,
+    /// Free-form `metadata()` callback entries only.
+    ///
+    /// UI-scoped `declare(zone, key, value)` belongs in [`Self::ui_items`], not
+    /// here.
     pub(crate) meta_entries: Vec<(String, String)>,
     pub(crate) sample_rate_fields: Vec<String>,
 }
@@ -249,6 +257,11 @@ fn should_clear_field(name: &str, kind: &StructFieldKind) -> bool {
 ///
 /// This also records default control values for active widgets so
 /// `instanceResetUserInterface` can restore them without re-running FIR.
+///
+/// Parity rule:
+/// - FIR `AddMetaDeclare` inside `buildUserInterface` becomes
+///   [`RuntimeUiItem::Declare`],
+/// - it must not leak into the `metadata()` callback stream.
 fn collect_ui_items(
     store: &FirStore,
     body: FirId,

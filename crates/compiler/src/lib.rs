@@ -60,6 +60,11 @@ use ui::UiProgram;
 ///
 /// This is the highest-level structural output of the box/signal pipeline
 /// before any FIR lowering or backend selection happens.
+///
+/// Since the grouped-UI rewrite, this facade boundary owns both semantic
+/// products of propagation:
+/// - propagated DSP signals,
+/// - canonical grouped UI layout/metadata.
 #[derive(Debug)]
 pub struct SignalCompileOutput {
     /// Full parser output (arena + metadata + diagnostics from parse stage).
@@ -74,6 +79,10 @@ pub struct SignalCompileOutput {
     /// Final propagated output signal list (`process_arity.outputs` items).
     pub signals: Vec<SigId>,
     /// Canonical grouped UI artifact owned after the propagation boundary.
+    ///
+    /// Downstream FIR lowering/backends must treat this as the source of truth
+    /// for `buildUserInterface`, rather than reconstructing groups from signal
+    /// leaf widgets.
     pub ui: UiProgram,
 }
 

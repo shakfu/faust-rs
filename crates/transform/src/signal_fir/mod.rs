@@ -163,6 +163,14 @@ pub struct SignalFirOutput {
 /// # Errors
 /// Returns [`SignalFirError`] when options are invalid or the top-level
 /// signal/arity contract is inconsistent.
+///
+/// # Ownership contract
+/// - `signals` must already be the propagated DSP outputs for the same source
+///   program that produced `ui`,
+/// - `ui` is the sole source of truth for grouped layout, labels, and UI
+///   metadata,
+/// - signal leaf widgets are expected to carry only stable `ControlId`
+///   references back into `ui`.
 pub fn compile_signals_to_fir_fastlane_with_ui(
     _arena: &TreeArena,
     signals: &[SigId],

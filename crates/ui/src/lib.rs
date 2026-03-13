@@ -31,7 +31,16 @@ pub const CRATE_NAME: &str = "ui";
 /// UI node identifier in `TreeArena`.
 pub type UiId = TreeId;
 
-/// Stable control identifier joining DSP control references with UI layout.
+/// Stable control identifier joining DSP control references with grouped UI
+/// layout.
+///
+/// Contract:
+/// - allocated densely from `0..controls.len()` by `propagate`,
+/// - stable for the lifetime of one [`UiProgram`],
+/// - embedded in signal leaf widgets instead of duplicating labels/ranges in
+///   signal IR,
+/// - resolved later through [`UiProgram::control`] during FIR lowering and
+///   runtime UI callback replay.
 pub type ControlId = u32;
 
 const UI_GROUP_TAG: &str = "UIGROUP";
@@ -92,9 +101,16 @@ pub enum ControlKind {
 }
 
 /// Canonical metadata entry list used by grouped UI labels and controls.
+///
+/// Entries are already normalized by [`split_label_metadata`]:
+/// deterministic ordering, trimmed keys/values, and duplicate coalescing.
 pub type UiMetadata = Vec<(String, String)>;
 
 /// Numeric range metadata for slider-like controls.
+///
+/// This is the canonical UI-side carrier for widget default/range semantics
+/// before FIR lowering translates them into backend-specific slider/bargraph
+/// instructions.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ControlRange {
     pub init: f64,
@@ -105,19 +121,31 @@ pub struct ControlRange {
 
 /// Canonical control-registry entry referenced by grouped UI layout and later
 /// DSP/FIR lowering.
+///
+/// Rust keeps control semantics in this dedicated registry instead of
+/// duplicating them in every grouped layout node. This is an `adapted`
+/// representation versus the C++ path encoding, but it preserves behavior
+/// while making later FIR/runtime lookup explicit and testable.
 #[derive(Debug)]
 pub struct ControlSpec {
+    /// Stable registry key also embedded in signal UI leaf nodes.
     pub id: ControlId,
+    /// Widget/bargraph family.
     pub kind: ControlKind,
+    /// Final display label after inline metadata extraction.
     pub label: String,
+    /// Canonical metadata extracted from the original Faust label.
     pub metadata: UiMetadata,
+    /// Numeric range only for slider-like controls.
     pub range: Option<ControlRange>,
 }
 
 /// Source of the canonical root group stored in [`UiProgram`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiRootOrigin {
+    /// The root came from an explicit Faust group in source.
     Explicit,
+    /// The root was synthesized by grouped-UI construction in Rust.
     Synthesized,
 }
 
@@ -129,12 +157,25 @@ pub enum UiRootOrigin {
 /// Mapping status:
 /// - `adapted` relative to the C++ internal clock-environment/path encoding.
 /// - `1:1` behaviorally for grouped `buildUserInterface` ownership.
+///
+/// Main invariants:
+/// - `root` always points at a group node,
+/// - `controls[id as usize].id == id` for all registered controls,
+/// - `emit_ui == false` designates the placeholder/no-emission program used by
+///   UI-free signal compilation paths,
+/// - root naming has already been canonicalized before this struct reaches FIR
+///   lowering.
 #[derive(Debug)]
 pub struct UiProgram {
+    /// Tree arena owning the grouped UI layout.
     pub arena: TreeArena,
+    /// Canonical root group node.
     pub root: UiId,
+    /// Dense registry of all referenced controls.
     pub controls: Vec<ControlSpec>,
+    /// Whether the root group came from source or from synthesis.
     pub root_origin: UiRootOrigin,
+    /// Whether downstream lowering should emit `buildUserInterface`.
     pub emit_ui: bool,
 }
 
@@ -160,7 +201,11 @@ impl UiProgram {
     }
 
     #[must_use]
-    /// Returns `true` when this program is the compatibility placeholder with no UI emission.
+    /// Returns `true` when this program is the compatibility placeholder with
+    /// no UI emission.
+    ///
+    /// [`UiProgram::empty`] still carries a canonical vertical root so
+    /// downstream code can keep a simple "always has a root" invariant.
     pub fn is_empty(&self) -> bool {
         !self.emit_ui
     }
@@ -278,6 +323,9 @@ pub fn split_label_metadata(full_label: &str) -> (String, UiMetadata) {
 }
 
 /// Canonical builder API for constructing UI IR nodes.
+///
+/// Builder methods preserve source child order and encode grouped layout in the
+/// tree representation consumed by [`match_ui`] and [`UiProgram`].
 pub struct UiBuilder<'a> {
     arena: &'a mut TreeArena,
 }
@@ -352,6 +400,9 @@ impl<'a> UiBuilder<'a> {
 }
 
 /// Canonical matcher view for one UI IR node.
+///
+/// This is the stable decoding surface for grouped UI trees. Callers should
+/// prefer it over depending on raw `TreeArena` tags.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UiMatch<'a> {
     Group {
