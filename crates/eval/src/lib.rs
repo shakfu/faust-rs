@@ -3153,9 +3153,7 @@ fn normalize_route_spec(arena: &mut TreeArena, spec: TreeId) -> TreeId {
 fn is_numerical_tuple_box(arena: &TreeArena, box_id: TreeId) -> bool {
     match match_box(arena, box_id) {
         BoxMatch::Int(_) | BoxMatch::Real(_) => true,
-        BoxMatch::Par(l, r) => {
-            is_numerical_tuple_box(arena, l) && is_numerical_tuple_box(arena, r)
-        }
+        BoxMatch::Par(l, r) => is_numerical_tuple_box(arena, l) && is_numerical_tuple_box(arena, r),
         _ => false,
     }
 }
@@ -5424,7 +5422,10 @@ mod simplify_helpers_tests {
         let add = BoxBuilder::new(&mut arena).add();
         let result = try_fold_seq_numeric(&mut arena, par, add);
         assert!(result.is_some(), "should fold");
-        assert!(matches!(match_box(&arena, result.unwrap()), BoxMatch::Int(5)));
+        assert!(matches!(
+            match_box(&arena, result.unwrap()),
+            BoxMatch::Int(5)
+        ));
     }
 
     /// `seq(par(real(1.5), real(2.5)), add)` folds to `real(4.0)`.

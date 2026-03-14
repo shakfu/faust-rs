@@ -59,8 +59,8 @@ The corresponding generated reports are:
 At the front-end level, the active corpus currently shows **full status parity**
 with the C++ compiler:
 
-- total corpus cases: `87`
-- valid cases accepted by both Rust and C++: `72`
+- total corpus cases: `88`
+- valid cases accepted by both Rust and C++: `73`
 - invalid cases rejected by both Rust and C++: `15`
 - `OK/ERR` mismatches: `0`
 - `ERR/OK` mismatches: `0`
@@ -76,9 +76,9 @@ In other words:
 At the current backend route (`TransformFastLane`), the supported subset is
 still narrower:
 
-- total corpus cases: `87`
-- end-to-end C backend parity: `OK=71`, `DIFF=0`, `UNSUPPORTED=16`
-- end-to-end C++ backend parity: `OK=71`, `DIFF=0`, `UNSUPPORTED=16`
+- total corpus cases: `88`
+- end-to-end C backend parity: `OK=72`, `DIFF=0`, `UNSUPPORTED=16`
+- end-to-end C++ backend parity: `OK=72`, `DIFF=0`, `UNSUPPORTED=16`
 
 The `16` unsupported cases are:
 
@@ -88,8 +88,8 @@ The `16` unsupported cases are:
 
 So for **valid** corpus programs, the current backend route compiles:
 
-- `71 / 72` valid corpus cases,
-- and misses `1 / 72`, currently in the non-trivial stream-wrapper family.
+- `72 / 73` valid corpus cases,
+- and misses `1 / 73`, currently in the non-trivial stream-wrapper family.
 
 ## 5. Synthetic Characterization of the Supported Subset
 
@@ -181,6 +181,7 @@ This is why corpus cases such as:
 - `rep_67_variable_delay_shifted_slider`
 - `rep_68_variable_delay_audio_rate`
 - `rep_69_variable_delay_sr_millisec`
+- `rep_70_route_arithmetic_params`
 
 now compile end-to-end through the Rust backends.
 
@@ -497,6 +498,103 @@ Three new corpus entries:
   — exercises the `ma.SR` interval chain, accepted.
 
 End-to-end backend corpus: `71 / 72` valid cases, same single gap.
+
+### 7.8 March 14, 2026 (continued): eval×normalize parity — constant folding at eval time
+
+Six C++ call sites (`CS-1` through `CS-6`) that invoke `boxPropagateSig` +
+`simplify` in the C++ evaluator (`eval.cpp`) were ported to Rust.  The work
+connects `normalize::simplify_const` into `crates/eval` so that the Rust
+evaluator folds constants at the same points as C++.
+
+#### Background: C++ `boxPropagateSig` + `simplify` pattern
+
+In C++ `eval.cpp`, several evaluation paths finish with:
+
+```cpp
+// e.g. in evalSeq, evalRoute, evalWidgetParams …
+Tree sig = boxPropagateSig(sig_env, box, {});   // 0 inputs → extract scalar
+return simplify(sig);                            // algebraic simplification
+```
+
+The Rust equivalent is `propagate_box_and_simplify(arena, box_id)`: builds a
+flat box, propagates with 0 inputs, then calls `simplify_const` (which calls
+`normalize::simplify` with an empty type map).
+
+#### CS-1 / CS-7 — `BoxSeq` numeric folding
+
+When both sides of a `BoxSeq` are fully numeric (integer/real literals or
+parallel compositions thereof), `try_fold_seq_numeric` propagates and simplifies
+the whole expression into a single scalar node.  This matches C++ `evalSeq`
+which short-circuits to `boxPropagateSig` when `isNumericalTuple(e1)`.
+
+Helper: `is_numerical_tuple_box` recursively checks that a box is a Par-spine
+of Int/Real leaves, matching C++ `isNumericalTuple`.
+
+#### CS-2 — Route arithmetic parameter normalization
+
+`BoxMatch::Route` now has a dedicated arm in `eval_value` that evaluates all
+three children (`ins`, `outs`, `routes`) with `eval_box` and then:
+
+- converts `ins`/`outs` to a literal `boxInt(n)` via `eval_box_to_int_node`,
+- normalises the route specification through `normalize_route_spec`:
+  flattens the Par spine, reduces each leaf to a `boxInt`, and rebuilds a
+  right-spine Par.
+
+This matches C++ `evalRoute` which calls `normalizeRouteList` and
+`boxPropagateSig` for `ins`/`outs`.  It fixes the
+`PropagateError::InvalidIntegerValue` that occurred when `ins`/`outs` were
+arithmetic expressions (e.g. `1+1`) rather than literal integers.
+
+#### CS-4, CS-5, CS-6 — UI widget parameter reduction
+
+`eval_slider_like`, `eval_vbargraph`, `eval_hbargraph`, and `eval_soundfile`
+now reduce each numeric parameter (cur/min/max/step, chan) with
+`simplify_slider_param`:
+
+- evaluate the parameter expression with `eval_box`,
+- if reducible to a floating-point constant, replace with `boxReal(x)`,
+- otherwise keep as-is.
+
+This matches C++ `evalSlider` / `evalBargraph` / `evalSoundfile` which call
+`boxPropagateSig` on each parameter before embedding it in the UI node.
+
+#### Box simplification family
+
+A general memoised pass `box_simplification` was added:
+
+- `numeric_box_simplification`: for any box that is not already a literal,
+  tries `propagate_box_and_simplify`; if it reduces to a scalar Int/Real,
+  rebuilds a `boxInt`/`boxReal`; otherwise recurses structurally via
+  `inside_box_simplification`.
+- `inside_box_simplification`: recursively simplifies all children, then
+  rebuilds the same node kind.
+
+This corresponds to C++ `simplifyToNormalForm` wired inside `propagateSignals`
+at the box level.
+
+#### `normalize::simplify_const` public API
+
+`crates/normalize/src/simplify.rs` exposes `simplify_const(arena, sig)` as a
+public entry-point: runs the full `simplify` rewriter with an empty type-map
+cache, sufficient for compile-time constant folding without requiring a
+`TypeAnnotator` pass.
+
+#### Corpus addition
+
+- `rep_70_route_arithmetic_params`: a `route(2, 2, 1+0, 1, 1+1, 2)` program
+  that requires route spec normalisation to compile correctly.
+
+#### Test coverage
+
+26 unit tests were added to `crates/eval/src/lib.rs` in
+`simplify_helpers_tests`, covering:
+- `propagate_box_and_simplify` for constants and signal expressions,
+- `is_numerical_tuple_box` for various box shapes,
+- `try_fold_seq_numeric` for Int/Real Seq folding,
+- `eval_box_to_f64` / `eval_box_to_i32` for literal extraction,
+- `box_simplification` for compound boxes.
+
+End-to-end backend corpus: `72 / 73` valid cases, same single gap.
 
 ## 8. Practical Reading Rule
 
