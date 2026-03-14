@@ -304,7 +304,9 @@ mod tests {
         let x = SigBuilder::new(&mut a).input(0);
         let y = SigBuilder::new(&mut a).input(1);
         let add = SigBuilder::new(&mut a).add(x, y);
-        let opts = NormalFormOpts { skip_promotion: true };
+        let opts = NormalFormOpts {
+            skip_promotion: true,
+        };
         let (_r, types) = prepare_signals(&mut a, &u, add, &opts).unwrap();
         // At minimum, the de-Bruijn-converted form should be typed.
         assert!(!types.is_empty());
@@ -318,7 +320,9 @@ mod tests {
         let u = ui();
         let x = SigBuilder::new(&mut a).input(0);
         let y = SigBuilder::new(&mut a).input(1);
-        let opts = NormalFormOpts { skip_promotion: true };
+        let opts = NormalFormOpts {
+            skip_promotion: true,
+        };
         let (rs, _types) = prepare_signals_multi(&mut a, &u, &[x, y], &opts).unwrap();
         assert_eq!(rs.len(), 2);
     }
@@ -333,7 +337,9 @@ mod tests {
         let i3 = SigBuilder::new(&mut a).int(3);
         let i4 = SigBuilder::new(&mut a).int(4);
         let add = SigBuilder::new(&mut a).add(i3, i4);
-        let opts = NormalFormOpts { skip_promotion: true };
+        let opts = NormalFormOpts {
+            skip_promotion: true,
+        };
         let (_r, types) = prepare_signals(&mut a, &u, add, &opts).unwrap();
         let promoted = promote_signals(&mut a, &types, &[add]);
         // With same-type operands, the promoted result should not wrap in a cast.

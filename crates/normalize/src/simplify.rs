@@ -230,7 +230,8 @@ fn match_simplification(
     };
     if let Some((op, t1, t2)) = binop_fields {
         // Constant folding: both numeric.
-        if is_num(arena, t1) && is_num(arena, t2)
+        if is_num(arena, t1)
+            && is_num(arena, t2)
             && let Some(r) = fold_binop(op, t1, t2, arena)
         {
             return r;

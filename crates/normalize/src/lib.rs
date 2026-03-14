@@ -21,11 +21,11 @@
 //! # API mapping status
 //! - `crate_id()` is `adapted` utility metadata (no direct C++ counterpart).
 
-pub(crate) mod mterm;
 pub(crate) mod aterm;
+pub(crate) mod mterm;
+pub mod normalform;
 pub(crate) mod normalize;
 pub(crate) mod simplify;
-pub mod normalform;
 
 pub const CRATE_NAME: &str = "normalize";
 
