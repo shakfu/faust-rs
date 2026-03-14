@@ -1197,6 +1197,15 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
             (types::F64, types::F32) => Ok(self.fb.ins().fdemote(types::F32, value)),
             (types::I8, types::I32) => Ok(self.fb.ins().uextend(types::I32, value)),
             (types::I8, types::I64) => Ok(self.fb.ins().uextend(types::I64, value)),
+            // Bool (i8) → float: widen to i32 first, then convert to float.
+            (types::I8, types::F32) => {
+                let wide = self.fb.ins().uextend(types::I32, value);
+                Ok(self.fb.ins().fcvt_from_sint(types::F32, wide))
+            }
+            (types::I8, types::F64) => {
+                let wide = self.fb.ins().uextend(types::I32, value);
+                Ok(self.fb.ins().fcvt_from_sint(types::F64, wide))
+            }
             (types::I32, types::F32) | (types::I64, types::F32) => {
                 Ok(self.fb.ins().fcvt_from_sint(types::F32, value))
             }
