@@ -23,7 +23,7 @@ use std::fmt;
 #[inline]
 #[must_use]
 pub fn saturated_int_cast(d: f64) -> i32 {
-    d.min(2_147_483_647.0).max(-2_147_483_648.0) as i32
+    d.clamp(-2_147_483_648.0, 2_147_483_647.0) as i32
 }
 
 /// Interval value `[lo, hi]` with LSB precision field.

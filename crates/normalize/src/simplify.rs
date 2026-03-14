@@ -1,6 +1,8 @@
 //! Signal simplification: memoized rewrite engine + local algebraic rules.
 //!
 //! Ported from C++ `compiler/normalize/simplify.cpp`.
+// Internal module — wired into the normalform pipeline in Phase 2.
+#![allow(dead_code)]
 //!
 //! # Architecture
 //!
@@ -24,10 +26,8 @@ use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use sigtype::SigType;
 use tlib::TreeArena;
 
-use crate::mterm::{
-    is_minus_one, is_negative_num, is_num, is_one, is_zero, minus_num, mul_nums,
-};
-use crate::normalize::{normalize_add_term, normalize_delay1_term, normalize_delay_term};
+use crate::mterm::{is_minus_one, is_negative_num, is_num, is_one, is_zero, minus_num, mul_nums};
+use crate::normalize::{normalize_add_term, normalize_delay_term, normalize_delay1_term};
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
@@ -117,11 +117,7 @@ fn sig_map(
 /// applies).
 ///
 /// C++: `static Tree simplification(Tree sig)`.
-fn simplification(
-    arena: &mut TreeArena,
-    types: &HashMap<SigId, SigType>,
-    sig: SigId,
-) -> SigId {
+fn simplification(arena: &mut TreeArena, types: &HashMap<SigId, SigType>, sig: SigId) -> SigId {
     match_simplification(arena, types, sig)
 }
 
@@ -234,10 +230,10 @@ fn match_simplification(
     };
     if let Some((op, t1, t2)) = binop_fields {
         // Constant folding: both numeric.
-        if is_num(arena, t1) && is_num(arena, t2) {
-            if let Some(r) = fold_binop(op, t1, t2, arena) {
-                return r;
-            }
+        if is_num(arena, t1) && is_num(arena, t2)
+            && let Some(r) = fold_binop(op, t1, t2, arena)
+        {
+            return r;
         }
 
         // Negation rewrite rules.
@@ -246,26 +242,26 @@ fn match_simplification(
         //   (x - y) * -n  →  n * (y - x)
         //   (x - y) * -1  →  y - x
         if op == BinOp::Mul {
-            if is_negative_num(arena, t1) {
-                if let SigMatch::BinOp(BinOp::Sub, v1, v2) = match_sig(arena, t2) {
-                    if is_minus_one(arena, t1) {
-                        return SigBuilder::new(arena).sub(v2, v1);
-                    } else {
-                        let pos_n = minus_num(arena, t1);
-                        let sub = SigBuilder::new(arena).sub(v2, v1);
-                        return SigBuilder::new(arena).mul(pos_n, sub);
-                    }
+            if is_negative_num(arena, t1)
+                && let SigMatch::BinOp(BinOp::Sub, v1, v2) = match_sig(arena, t2)
+            {
+                if is_minus_one(arena, t1) {
+                    return SigBuilder::new(arena).sub(v2, v1);
+                } else {
+                    let pos_n = minus_num(arena, t1);
+                    let sub = SigBuilder::new(arena).sub(v2, v1);
+                    return SigBuilder::new(arena).mul(pos_n, sub);
                 }
             }
-            if is_negative_num(arena, t2) {
-                if let SigMatch::BinOp(BinOp::Sub, v1, v2) = match_sig(arena, t1) {
-                    if is_minus_one(arena, t2) {
-                        return SigBuilder::new(arena).sub(v2, v1);
-                    } else {
-                        let pos_n = minus_num(arena, t2);
-                        let sub = SigBuilder::new(arena).sub(v2, v1);
-                        return SigBuilder::new(arena).mul(pos_n, sub);
-                    }
+            if is_negative_num(arena, t2)
+                && let SigMatch::BinOp(BinOp::Sub, v1, v2) = match_sig(arena, t1)
+            {
+                if is_minus_one(arena, t2) {
+                    return SigBuilder::new(arena).sub(v2, v1);
+                } else {
+                    let pos_n = minus_num(arena, t2);
+                    let sub = SigBuilder::new(arena).sub(v2, v1);
+                    return SigBuilder::new(arena).mul(pos_n, sub);
                 }
             }
 
@@ -316,11 +312,9 @@ fn match_simplification(
         if t1 == t2 {
             match op {
                 BinOp::And | BinOp::Or => return t1,
-                BinOp::Ge | BinOp::Le | BinOp::Eq => {
-                    return SigBuilder::new(arena).int(1)
-                }
+                BinOp::Ge | BinOp::Le | BinOp::Eq => return SigBuilder::new(arena).int(1),
                 BinOp::Gt | BinOp::Lt | BinOp::Ne | BinOp::Rem | BinOp::Xor => {
-                    return SigBuilder::new(arena).int(0)
+                    return SigBuilder::new(arena).int(0);
                 }
                 _ => {}
             }
@@ -329,10 +323,18 @@ fn match_simplification(
         // AND/OR with a boolean expression and literal 1.
         if matches!(op, BinOp::And | BinOp::Or) {
             if is_one(arena, t1) && is_sig_bool(arena, t2) {
-                return if op == BinOp::And { t2 } else { SigBuilder::new(arena).int(1) };
+                return if op == BinOp::And {
+                    t2
+                } else {
+                    SigBuilder::new(arena).int(1)
+                };
             }
             if is_one(arena, t2) && is_sig_bool(arena, t1) {
-                return if op == BinOp::And { t1 } else { SigBuilder::new(arena).int(1) };
+                return if op == BinOp::And {
+                    t1
+                } else {
+                    SigBuilder::new(arena).int(1)
+                };
             }
         }
 
@@ -476,7 +478,7 @@ fn fold_binop(op: BinOp, t1: SigId, t2: SigId, arena: &mut TreeArena) -> Option<
             BinOp::Lsh => return Some(SigBuilder::new(arena).int(a << (b & 31))),
             BinOp::ARsh => return Some(SigBuilder::new(arena).int(a >> (b & 31))),
             BinOp::LRsh => {
-                return Some(SigBuilder::new(arena).int(((a as u32) >> (b as u32 & 31)) as i32))
+                return Some(SigBuilder::new(arena).int(((a as u32) >> (b as u32 & 31)) as i32));
             }
             BinOp::Gt => return Some(SigBuilder::new(arena).int(i32::from(a > b))),
             BinOp::Lt => return Some(SigBuilder::new(arena).int(i32::from(a < b))),
@@ -588,7 +590,10 @@ fn is_sig_bool(arena: &TreeArena, sig: SigId) -> bool {
 }
 
 fn is_bool_op(op: BinOp) -> bool {
-    matches!(op, BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne)
+    matches!(
+        op,
+        BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne
+    )
 }
 
 fn is_logical_op(op: BinOp) -> bool {

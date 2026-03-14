@@ -98,6 +98,7 @@ pub fn truncate(x: f64, lsb: i32) -> f64 {
 #[must_use]
 pub fn lsb_number(x: f64) -> i32 {
     let mut precision: i32 = -24;
+    #[allow(clippy::while_immutable_condition)] // x is not mutated; loop exits via break/return
     while x != 0.0 {
         let factor = (2.0_f64).powi(-precision - 1);
         if (x * factor).floor() == x * factor {

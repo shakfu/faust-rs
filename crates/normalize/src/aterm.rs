@@ -1,6 +1,8 @@
 //! Additive term: a sum of [`Mterm`]s — `m₁ + m₂ + m₃ + …`
 //!
 //! Ported from C++ `compiler/normalize/aterm.cpp`.
+// Internal module — wired into the simplify/normalform pipeline in Phase 2.
+#![allow(dead_code)]
 //!
 //! An [`Aterm`] decomposes an additive signal expression into its canonical
 //! multiplicative fragments.  Terms with the same *signature* (i.e. the same
@@ -45,7 +47,9 @@ impl Aterm {
     ///
     /// C++: `aterm()`.
     pub(crate) fn zero() -> Self {
-        Self { terms: BTreeMap::new() }
+        Self {
+            terms: BTreeMap::new(),
+        }
     }
 
     /// Decompose a signal tree `t` into an additive term.
@@ -76,7 +80,11 @@ impl Aterm {
         t: SigId,
     ) {
         // Extract classification before borrowing arena mutably again.
-        enum Op { Plus(SigId, SigId), Minus(SigId, SigId), Leaf }
+        enum Op {
+            Plus(SigId, SigId),
+            Minus(SigId, SigId),
+            Leaf,
+        }
         let op = match match_sig(arena, t) {
             SigMatch::BinOp(BinOp::Add, x, y) => Op::Plus(x, y),
             SigMatch::BinOp(BinOp::Sub, x, y) => Op::Minus(x, y),
@@ -109,7 +117,11 @@ impl Aterm {
         types: &HashMap<SigId, SigType>,
         t: SigId,
     ) {
-        enum Op { Plus(SigId, SigId), Minus(SigId, SigId), Leaf }
+        enum Op {
+            Plus(SigId, SigId),
+            Minus(SigId, SigId),
+            Leaf,
+        }
         let op = match match_sig(arena, t) {
             SigMatch::BinOp(BinOp::Add, x, y) => Op::Plus(x, y),
             SigMatch::BinOp(BinOp::Sub, x, y) => Op::Minus(x, y),

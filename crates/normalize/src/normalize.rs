@@ -1,6 +1,8 @@
 //! Add-term and delay-term normalization.
 //!
 //! Ported from C++ `compiler/normalize/normalize.cpp`.
+// Internal module — wired into the simplify/normalform pipeline in Phase 2.
+#![allow(dead_code)]
 //!
 //! # Functions
 //!

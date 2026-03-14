@@ -182,19 +182,10 @@ impl Boolean {
 ///
 /// `valid = false` means the resolution has not been computed yet.
 /// `index` is the LSB bit position (may be negative for fractional bits).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Res {
     pub valid: bool,
     pub index: i32,
-}
-
-impl Default for Res {
-    fn default() -> Self {
-        Self {
-            valid: false,
-            index: 0,
-        }
-    }
 }
 
 impl Res {

@@ -1,6 +1,8 @@
 //! Multiplicative term: `k · x₁^n₁ · x₂^n₂ · ... / (y₁^m₁ · y₂^m₂ · ...)`
 //!
 //! Ported from C++ `compiler/normalize/mterm.cpp`.
+// Internal module — functions will be wired into the simplify/normalform pipeline in Phase 2.
+#![allow(dead_code)]
 //!
 //! # Invariant
 //! - The constant coefficient is always in `coef` (a numeric `SigId`).
@@ -239,10 +241,10 @@ pub(crate) fn div_nums(arena: &mut TreeArena, a: SigId, b: SigId) -> SigId {
 ///
 /// C++ equivalent: `isSigPow(sig, x, n)`.
 pub(crate) fn is_sig_pow(arena: &TreeArena, sig: SigId) -> Option<(SigId, i32)> {
-    if let SigMatch::Pow(x, y) = match_sig(arena, sig) {
-        if let SigMatch::Int(n) = match_sig(arena, y) {
-            return Some((x, n));
-        }
+    if let SigMatch::Pow(x, y) = match_sig(arena, sig)
+        && let SigMatch::Int(n) = match_sig(arena, y)
+    {
+        return Some((x, n));
     }
     None
 }
@@ -280,7 +282,13 @@ fn combine_div_left(arena: &mut TreeArena, r: &mut Option<SigId>, a: SigId) {
 }
 
 /// Dispatch `f^q` into the numerator (`q>0`) or denominator (`q<0`) of `m`/`d`.
-fn combine_mul_div(arena: &mut TreeArena, m: &mut Option<SigId>, d: &mut Option<SigId>, f: SigId, q: i32) {
+fn combine_mul_div(
+    arena: &mut TreeArena,
+    m: &mut Option<SigId>,
+    d: &mut Option<SigId>,
+    f: SigId,
+    q: i32,
+) {
     debug_assert!(q != 0);
     if q > 0 {
         let pow_term = build_pow_term(arena, f, q);
@@ -321,19 +329,28 @@ impl Mterm {
     /// Create the zero mterm (`k = 0`, no factors).  C++ `mterm()`.
     pub(crate) fn zero(arena: &mut TreeArena) -> Self {
         let coef = SigBuilder::new(arena).int(0);
-        Self { coef, factors: BTreeMap::new() }
+        Self {
+            coef,
+            factors: BTreeMap::new(),
+        }
     }
 
     /// Create a constant integer mterm.  C++ `mterm(int k)`.
     pub(crate) fn from_int(arena: &mut TreeArena, k: i32) -> Self {
         let coef = SigBuilder::new(arena).int(k);
-        Self { coef, factors: BTreeMap::new() }
+        Self {
+            coef,
+            factors: BTreeMap::new(),
+        }
     }
 
     /// Create a constant real mterm.  C++ `mterm(double k)`.
     pub(crate) fn from_real(arena: &mut TreeArena, k: f64) -> Self {
         let coef = SigBuilder::new(arena).real(k);
-        Self { coef, factors: BTreeMap::new() }
+        Self {
+            coef,
+            factors: BTreeMap::new(),
+        }
     }
 
     /// Create a mterm by decomposing a multiplicative signal expression.
@@ -492,7 +509,11 @@ impl Mterm {
     ///
     /// Used to compare GCDs.  C++ `complexity()`.
     pub(crate) fn complexity(&self, arena: &TreeArena, types: &HashMap<SigId, SigType>) -> i32 {
-        let c_coef = if is_one(arena, self.coef) || is_minus_one(arena, self.coef) { 0 } else { 1 };
+        let c_coef = if is_one(arena, self.coef) || is_minus_one(arena, self.coef) {
+            0
+        } else {
+            1
+        };
         let c_factors: i32 = self
             .factors
             .iter()
@@ -644,7 +665,10 @@ pub(crate) fn gcd(arena: &mut TreeArena, m1: &Mterm, m2: &Mterm) -> Mterm {
     } else {
         SigBuilder::new(arena).int(1)
     };
-    let mut r = Mterm { coef, factors: BTreeMap::new() };
+    let mut r = Mterm {
+        coef,
+        factors: BTreeMap::new(),
+    };
 
     for (&t, &v1) in &m1.factors {
         if let Some(&v2) = m2.factors.get(&t) {
@@ -833,10 +857,10 @@ mod tests {
 
     #[test]
     fn contains_rules() {
-        assert!(contains(3, 2));   // 3/2 = 1 > 0
+        assert!(contains(3, 2)); // 3/2 = 1 > 0
         assert!(contains(-4, -2)); // -4/-2 = 2 > 0
         assert!(!contains(3, -2));
         assert!(!contains(-3, 1));
-        assert!(contains(5, 0));   // b==0 => true
+        assert!(contains(5, 0)); // b==0 => true
     }
 }

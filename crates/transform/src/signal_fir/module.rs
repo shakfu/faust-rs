@@ -128,6 +128,7 @@ const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
 /// - `sig_types` – full type-annotator map; used only for interval-based
 ///   variable delay sizing via [`sigtype::check_delay_interval`].
 /// - `real_ty` – internal computation type (`Float32` or `Float64`).
+#[allow(clippy::too_many_arguments)]
 pub fn build_module(
     plan: &SignalFirPlan,
     module_name: &str,
@@ -1358,10 +1359,10 @@ impl<'a> SignalToFirLower<'a> {
             return None;
         };
         let as_nonneg_int = |id: SigId| -> Option<i32> {
-            if let SigMatch::Int(n) = match_sig(self.arena, id) {
-                if n >= 0 {
-                    return Some(n);
-                }
+            if let SigMatch::Int(n) = match_sig(self.arena, id)
+                && n >= 0
+            {
+                return Some(n);
             }
             None
         };
