@@ -1339,15 +1339,44 @@ impl<'a> SignalToFirLower<'a> {
         check_delay_interval(ty).ok()
     }
 
+    /// Returns a structural upper bound for a delay expression when interval
+    /// analysis cannot determine a finite bound.
+    ///
+    /// If `sig` is `SIGMIN(SigInt(n), _)` or `SIGMIN(_, SigInt(n))` with
+    /// `n >= 0`, returns `n` as a conservative upper bound.  This covers the
+    /// standard `de.delay(n, d, x) = x @ min(n, max(0, d))` pattern, where
+    /// the first argument to `min` is an explicit compile-time ceiling even
+    /// when `d`'s interval is unknowable (e.g., because it involves the
+    /// `fSamplingFreq` foreign constant, which carries an empty interval).
+    fn min_const_upper_bound(&self, sig: SigId) -> Option<i32> {
+        let SigMatch::Min(lhs, rhs) = match_sig(self.arena, sig) else {
+            return None;
+        };
+        let as_nonneg_int = |id: SigId| -> Option<i32> {
+            if let SigMatch::Int(n) = match_sig(self.arena, id) {
+                if n >= 0 { return Some(n); }
+            }
+            None
+        };
+        as_nonneg_int(lhs).or_else(|| as_nonneg_int(rhs))
+    }
+
     /// Resolve the delay line allocation size for `amount`:
-    /// - literal `Int` → exact constant
-    /// - bounded interval → interval upper bound
-    /// - unbounded or empty interval → `None` (caller must reject)
+    ///
+    /// 1. Literal `Int` → exact constant.
+    /// 2. Bounded interval → interval upper bound.
+    /// 3. `SIGMIN(SigInt(n), _)` or `SIGMIN(_, SigInt(n))` → `n` (structural
+    ///    fallback for cases where interval analysis yields empty, such as
+    ///    expressions involving `fSamplingFreq`).
+    /// 4. Otherwise → `None` (caller emits an error).
     fn delay_size_for_amount(&self, amount: SigId) -> Result<Option<i32>, SignalFirError> {
         if let Some(c) = self.constant_delay_amount(amount)? {
             return Ok(Some(c));
         }
-        Ok(self.variable_delay_max_bound(amount))
+        if let Some(b) = self.variable_delay_max_bound(amount) {
+            return Ok(Some(b));
+        }
+        Ok(self.min_const_upper_bound(amount))
     }
 
     /// Computes `next_power_of_two(delay + 1)` — the circular buffer size for
