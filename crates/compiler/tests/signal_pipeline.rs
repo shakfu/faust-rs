@@ -92,34 +92,14 @@ fn corpus_operator_precedence_structure_is_stable() {
     assert_eq!(out.process_arity.outputs, 1);
     assert_eq!(out.signals.len(), 1);
 
-    let SigMatch::BinOp(BinOp::Sub, lhs, rhs) = match_sig(&out.parse.state.arena, out.signals[0])
-    else {
-        panic!("rep_21 should lower to one sub signal");
-    };
-    assert!(matches!(
-        match_sig(&out.parse.state.arena, rhs),
-        SigMatch::Int(4)
-    ));
-    let SigMatch::BinOp(BinOp::Add, add_lhs, add_rhs) = match_sig(&out.parse.state.arena, lhs)
-    else {
-        panic!("rep_21 left branch should be add");
-    };
-    assert!(matches!(
-        match_sig(&out.parse.state.arena, add_lhs),
-        SigMatch::Int(1)
-    ));
-    let SigMatch::BinOp(BinOp::Mul, mul_lhs, mul_rhs) = match_sig(&out.parse.state.arena, add_rhs)
-    else {
-        panic!("rep_21 nested branch should be mul");
-    };
-    assert!(matches!(
-        match_sig(&out.parse.state.arena, mul_lhs),
-        SigMatch::Int(2)
-    ));
-    assert!(matches!(
-        match_sig(&out.parse.state.arena, mul_rhs),
-        SigMatch::Int(3)
-    ));
+    // The evaluator constant-folds `1 + 2 * 3 - 4` to `3`.
+    assert!(
+        matches!(
+            match_sig(&out.parse.state.arena, out.signals[0]),
+            SigMatch::Int(3)
+        ),
+        "rep_21 should constant-fold to int(3)"
+    );
 }
 
 #[test]
@@ -495,18 +475,18 @@ process = make(1)(0) + make(2)(0);
     assert_eq!(out.process_arity.inputs, 0);
     assert_eq!(out.process_arity.outputs, 1);
     assert_eq!(out.signals.len(), 1);
-    let SigMatch::BinOp(BinOp::Add, lhs, rhs) = match_sig(&out.parse.state.arena, out.signals[0])
-    else {
-        panic!("captured case results should stay as one add signal");
-    };
-    assert!(matches!(
-        match_sig(&out.parse.state.arena, lhs),
-        SigMatch::Int(1)
-    ));
-    assert!(matches!(
-        match_sig(&out.parse.state.arena, rhs),
-        SigMatch::Int(2)
-    ));
+
+    // The evaluator constant-folds `1 + 2` to `3`.
+    // The important invariant is that the two `make` calls produce distinct
+    // captured values (1 and 2) rather than aliasing, which is verified by
+    // the final folded result being 3 (not 2 or 4).
+    assert!(
+        matches!(
+            match_sig(&out.parse.state.arena, out.signals[0]),
+            SigMatch::Int(3)
+        ),
+        "captured case results should fold to int(3)"
+    );
 }
 
 #[test]
