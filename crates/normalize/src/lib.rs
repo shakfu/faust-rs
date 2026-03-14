@@ -22,6 +22,7 @@
 //! - `crate_id()` is `adapted` utility metadata (no direct C++ counterpart).
 
 pub(crate) mod mterm;
+pub(crate) mod aterm;
 
 pub const CRATE_NAME: &str = "normalize";
 
