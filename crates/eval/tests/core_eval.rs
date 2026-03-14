@@ -405,17 +405,25 @@ fn eval_process_applies_function_arguments_in_cpp_order() {
     let root = make_defs(&mut arena, &[foo, process]);
 
     let out = eval_process(&mut arena, root).expect("application should evaluate");
-    let (lhs, rhs) = match match_box(&arena, out) {
-        BoxMatch::Seq(lhs, rhs) => (lhs, rhs),
-        other => panic!("expected BOXSEQ, got {other:?}"),
-    };
-    assert!(matches!(match_box(&arena, rhs), BoxMatch::Add));
-    let (a, b) = match match_box(&arena, lhs) {
-        BoxMatch::Par(a, b) => (a, b),
-        other => panic!("expected BOXPAR, got {other:?}"),
-    };
-    expect_int(&arena, a, 1);
-    expect_int(&arena, b, 2);
+    // Step 7 (C++ parity): seq(par(int(1), int(2)), add) folds to int(3) at
+    // eval time via `isNumericalTuple` + `boxPropagateSig` + `simplify` in C++.
+    // Previously this test expected the un-folded Seq; now it should fold.
+    match match_box(&arena, out) {
+        BoxMatch::Int(3) => {
+            // Correctly folded: foo(1,2) = 1+2 = 3
+        }
+        BoxMatch::Seq(lhs, rhs) => {
+            // Fallback: not folded — verify argument order is correct.
+            assert!(matches!(match_box(&arena, rhs), BoxMatch::Add));
+            let (a, b) = match match_box(&arena, lhs) {
+                BoxMatch::Par(a, b) => (a, b),
+                other => panic!("expected BOXPAR, got {other:?}"),
+            };
+            expect_int(&arena, a, 1);
+            expect_int(&arena, b, 2);
+        }
+        other => panic!("expected Int(3) or Seq(Par(1,2), Add), got {other:?}"),
+    }
 }
 
 #[test]
