@@ -592,27 +592,36 @@ impl<'a> TypeAnnotator<'a> {
         }
     }
 
-    /// `inferFConstType`: constant, evaluated at init, no dynamic range.
+    /// `inferFConstType`: constant, evaluated at init, no static range known.
     ///
-    /// C++: makeSimpleType(tree2int(type), kKonst, kInit, kVect, kNum, interval())
+    /// # C++ source
+    /// `makeSimpleType(tree2int(type), kKonst, kInit, kVect, kNum, interval())`
+    ///
+    /// `interval()` in C++ uses the default member initializers:
+    /// `fLo = std::numeric_limits<double>::lowest()`, `fHi = std::numeric_limits<double>::max()`.
+    /// This is the fully-open interval `[f64::MIN, f64::MAX]` — not NaN/empty.
+    /// Rust equivalent: `Interval::new_default()`.
     fn infer_foreign_const_type(&self, kind: SigId) -> Result<SigType, TypeError> {
         Ok(make_simple(
             self.foreign_nature(kind),
             Variability::Konst, Computability::Init,
             Vectorability::Vect, Boolean::Num,
-            interval::empty(),   // C++: interval() — no static range known
+            interval::Interval::new_default(),
         ))
     }
 
     /// `inferFVarType`: varies by block like a UI element, executed each block.
     ///
-    /// C++: makeSimpleType(tree2int(type), kBlock, kExec, kVect, kNum, interval())
+    /// # C++ source
+    /// `makeSimpleType(tree2int(type), kBlock, kExec, kVect, kNum, interval())`
+    ///
+    /// Same interval semantics as `inferFConstType` — see that method's doc.
     fn infer_foreign_var_type(&self, kind: SigId) -> Result<SigType, TypeError> {
         Ok(make_simple(
             self.foreign_nature(kind),
             Variability::Block, Computability::Exec,
             Vectorability::Vect, Boolean::Num,
-            interval::empty(),   // C++: interval() — no static range known
+            interval::Interval::new_default(),
         ))
     }
 

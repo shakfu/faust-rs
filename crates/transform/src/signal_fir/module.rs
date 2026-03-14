@@ -1345,9 +1345,14 @@ impl<'a> SignalToFirLower<'a> {
     /// If `sig` is `SIGMIN(SigInt(n), _)` or `SIGMIN(_, SigInt(n))` with
     /// `n >= 0`, returns `n` as a conservative upper bound.  This covers the
     /// standard `de.delay(n, d, x) = x @ min(n, max(0, d))` pattern, where
-    /// the first argument to `min` is an explicit compile-time ceiling even
-    /// when `d`'s interval is unknowable (e.g., because it involves the
-    /// `fSamplingFreq` foreign constant, which carries an empty interval).
+    /// the first argument to `min` is an explicit compile-time ceiling.
+    ///
+    /// Note: with correct `FConst` typing (`Interval::new_default()` rather
+    /// than `empty()`), `fSamplingFreq`-based expressions like `ma.SR`
+    /// produce a finite bounded interval through standard interval algebra
+    /// and do not reach this fallback.  This method acts as defence-in-depth
+    /// for any remaining case where interval analysis yields an empty or
+    /// unbounded result.
     fn min_const_upper_bound(&self, sig: SigId) -> Option<i32> {
         let SigMatch::Min(lhs, rhs) = match_sig(self.arena, sig) else {
             return None;
