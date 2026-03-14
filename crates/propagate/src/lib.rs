@@ -1069,10 +1069,21 @@ pub fn propagate(
 /// - the UI tree is built in its own arena,
 /// - controls are registered exactly once and assigned dense [`ControlId`]s,
 /// - source widget/group labels are decoded before FIR/backend stages.
+///
+/// The `visited` cache deduplicates DAG traversal: the flat box tree after
+/// `eval` is a **DAG** (the same `FlatBoxId` may be reachable via multiple
+/// composition paths when the same variable/slider is used in several
+/// positions).  Without deduplication each occurrence would create a ghost
+/// `ControlSpec` entry while overwriting the `control_ids` mapping — producing
+/// spurious slider fields in `buildUserInterface` that are never referenced
+/// in the compute loop.  The cache is indexed by `FlatBoxId` so that any
+/// subtree (not just widget leaves) is processed at most once.
 struct UiCollector {
     builder: UiProgramBuilder,
     controls: Vec<ControlSpec>,
     control_ids: ControlIds,
+    /// Memoisation table for the DAG walk — prevents re-visiting shared nodes.
+    visited: AHashMap<FlatBoxId, UiCollectSummary>,
 }
 
 impl UiCollector {
@@ -1081,6 +1092,7 @@ impl UiCollector {
             builder: UiProgramBuilder::new(),
             controls: Vec::new(),
             control_ids: ControlIds::default(),
+            visited: AHashMap::default(),
         }
     }
 
@@ -1245,8 +1257,17 @@ fn collect_ui_nodes(
     current_groups: &[UiGroupPathSegment],
     collector: &mut UiCollector,
 ) -> UiCollectSummary {
+    // DAG deduplication: the flat box tree after `eval` is a structural DAG —
+    // the same arena node (e.g. a slider passed as a function argument) can be
+    // reached from multiple composition paths.  Return the cached summary for
+    // any node already processed; this prevents ghost ControlSpec registrations
+    // and ensures each logical widget appears exactly once in the UI program.
+    if let Some(&cached) = collector.visited.get(&box_tree) {
+        return cached;
+    }
+
     let kind = flat_node_kind(source_arena, box_tree).expect("validated flat box must decode");
-    match kind {
+    let result = match kind {
         FlatNodeKind::Button => {
             let BoxMatch::Button(label) = match_box(source_arena, box_tree.as_tree_id()) else {
                 unreachable!("flat button node must decode to BoxMatch::Button")
@@ -1506,7 +1527,9 @@ fn collect_ui_nodes(
         | FlatNodeKind::Route
         | FlatNodeKind::Inputs
         | FlatNodeKind::Outputs => UiCollectSummary::default(),
-    }
+    };
+    collector.visited.insert(box_tree, result);
+    result
 }
 
 fn collect_group_ui(
