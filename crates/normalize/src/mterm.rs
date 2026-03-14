@@ -756,9 +756,9 @@ mod tests {
         let mut m1 = Mterm::from_sig(&mut a, x);
         let two = SigBuilder::new(&mut a).int(2);
         m1.coef = mul_nums(&mut a, m1.coef, two);
-        let m2 = Mterm::from_sig(&mut a, x);
+        let _m2 = Mterm::from_sig(&mut a, x);
         let mut m3 = m1.clone();
-        let three = Mterm::from_int(&mut a, 3);
+        let _three = Mterm::from_int(&mut a, 3);
         let mut m_3x = Mterm::from_sig(&mut a, x);
         m_3x.coef = SigBuilder::new(&mut a).int(3);
         m3.add_mterm(&mut a, &m_3x);
