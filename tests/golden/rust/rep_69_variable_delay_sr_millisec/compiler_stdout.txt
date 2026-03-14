@@ -1,5 +1,5 @@
 faust-rs-golden-v1
 source=rep_69_variable_delay_sr_millisec.dsp
-bytes=634
-lines=9
-fnv1a64=c1a3d5366fdf6f6f
+bytes=726
+lines=11
+fnv1a64=c7f25cc6455e4dde
