@@ -126,6 +126,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is a test value, not an approximation of PI
     fn float_num_basic() {
         let r = float_num(3.14);
         assert!(r.is_const());

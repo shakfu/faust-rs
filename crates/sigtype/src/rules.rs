@@ -790,6 +790,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is the test value, not an approximation of PI
     fn real_literal_is_real_konst() {
         let mut arena = TreeArena::new();
         let mut b = SigBuilder::new(&mut arena);
