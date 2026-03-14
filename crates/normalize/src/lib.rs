@@ -25,6 +25,7 @@ pub(crate) mod mterm;
 pub(crate) mod aterm;
 pub(crate) mod normalize;
 pub(crate) mod simplify;
+pub mod normalform;
 
 pub const CRATE_NAME: &str = "normalize";
 

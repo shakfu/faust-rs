@@ -13,3 +13,4 @@ tlib     = { path = "../tlib" }
 signals  = { path = "../signals" }
 sigtype  = { path = "../sigtype" }
 interval = { path = "../interval" }
+ui       = { path = "../ui" }
