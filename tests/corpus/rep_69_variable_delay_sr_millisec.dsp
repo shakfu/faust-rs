@@ -1,9 +1,11 @@
 // Variable delay whose amount involves `ma.SR` (= min(192000, max(1, fSamplingFreq))).
-// `fSamplingFreq` carries an empty interval in the type system, which poisons
-// the entire `hslider * SR / 1000` chain via interval algebra.
-// The delay amount is `min(65536, max(0, int(hslider * SR/1000) - 1))`.
-// Since interval analysis yields empty for this expression, the compiler must
-// fall back to the structural `SIGMIN(const, _)` upper bound (65536) to size
-// the delay line — matching the C++ output: `fVec[IOTA & 131071]`.
+// `fSamplingFreq` carries interval [f64::MIN, f64::MAX] (the C++ `interval()` default),
+// so the interval algebra produces a concrete bound:
+//   max(1, fSamplingFreq)          ∈ [1, MAX]
+//   min(192000, …)                 ∈ [1, 192000]
+//   hslider[0,1000] * … / 1000    ∈ [0, 192000]
+//   int_cast − 1 → max(0,…)       ∈ [0, 191999]
+//   min(65536, …)                  ∈ [0, 65536]   ← check_delay_interval returns 65536
+// Delay line size = next_pow2(65537) = 131072, matching C++: `fVec[IOTA & 131071]`.
 import("stdfaust.lib");
 process = de.delay(65536, int(hslider("ms", 0, 0, 1000, 1) * ma.SR / 1000.0));

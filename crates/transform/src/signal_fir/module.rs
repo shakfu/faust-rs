@@ -666,7 +666,7 @@ impl<'a> SignalToFirLower<'a> {
                 None => {
                     return self.unsupported_node(
                         sig,
-                        "SIGDELAY requires a constant integer amount or a UI parameter with a bounded interval",
+                        "SIGDELAY requires a constant integer amount or a signal with a bounded non-negative interval",
                     );
                 }
             }
@@ -970,8 +970,8 @@ impl<'a> SignalToFirLower<'a> {
             None => Err(SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
                 format!(
-                    "SIGDELAY requires a constant integer amount or a UI parameter \
-                     with a bounded interval (expr={})",
+                    "SIGDELAY requires a constant integer amount or a signal with a \
+                     bounded non-negative interval (expr={})",
                     dump_sig_readable(self.arena, amount)
                 ),
             )),
