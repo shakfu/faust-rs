@@ -54,7 +54,7 @@ use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{NodeKind, TreeArena, match_sym_rec, match_sym_ref};
 use ui::{ControlId, ControlKind, UiGroupKind, UiMatch, UiProgram, match_ui};
 
-use sigtype::{SigType, Variability, check_delay_interval};
+use sigtype::{SigType, check_delay_interval};
 
 use crate::signal_prepare::SimpleSigType;
 
@@ -73,10 +73,12 @@ use super::planner::SignalFirPlan;
 /// zeroing loop. The semantic contract stays the same for the active subset:
 /// constant integer delay amount, power-of-two size, and masked circular
 /// indexing driven by `fIOTA`.
+/// Planned storage for one lowered fixed-size circular delay line.
 #[derive(Clone, Debug)]
-/// Planned storage information for one lowered fixed-delay line.
 struct DelayLineInfo {
+    /// Generated DSP-struct array variable name (e.g. `fVec42`).
     name: String,
+    /// Allocated size in elements (always a power of two ≥ 1).
     size: usize,
 }
 
@@ -110,15 +112,22 @@ const MATH_PROTO_ORDER: &[FirMathOp] = &[
 /// Deterministic prototype emission order for polymorphic integer helper calls.
 const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
 
-/// Emits a FIR module from validated planning data and propagated signals.
+/// Lowers a prepared signal forest into a complete FIR module.
 ///
-/// This is the main fast-lane lowering boundary: callers provide already
-/// prepared signals plus a checked [`SignalFirPlan`], and receive a complete
-/// FIR module with Faust lifecycle sections assembled in deterministic order.
+/// Entry point for the fast-lane Step 2A–2G boundary: accepts pre-validated
+/// planning data and a prepared signal forest, returns a [`SignalFirOutput`]
+/// with all Faust lifecycle sections (`metadata`, `instanceConstants`,
+/// `instanceResetUserInterface`, `instanceClear`, `buildUserInterface`,
+/// `compute`) assembled in deterministic order.
 ///
-/// The `types` map comes from `transform::signal_prepare` and is the reduced
-/// contract used to choose FIR result/state/table element types without pulling
-/// in the full C++ signal type lattice.
+/// # Parameters
+///
+/// - `plan` – pre-checked I/O counts and signal statistics.
+/// - `types` – per-signal [`SimpleSigType`] from `signal_prepare`; drives
+///   integer-vs-real decisions for state/table element types.
+/// - `sig_types` – full type-annotator map; used only for interval-based
+///   variable delay sizing via [`sigtype::check_delay_interval`].
+/// - `real_ty` – internal computation type (`Float32` or `Float64`).
 pub fn build_module(
     plan: &SignalFirPlan,
     module_name: &str,
@@ -469,87 +478,106 @@ pub fn build_module(
     })
 }
 
-/// Stateful lowering engine from propagated signals to FIR.
+/// Stateful lowering engine that converts a propagated signal forest into FIR.
 ///
-/// Design notes:
-/// - memoizes lowered signal nodes in [`Self::cache`] for DAG sharing;
-/// - splits statements by lifecycle section (`constants/reset/clear/compute`);
-/// - tracks emitted state/UI/table declarations to keep output deterministic and
-///   avoid duplicate declarations.
-///
-/// This struct is deliberately stateful instead of purely recursive because the
-/// target FIR module has to be assembled from several side channels at once:
-/// value expressions, persistent state declarations, UI declarations, waveform
-/// tables, and scheduled compute-time updates.
+/// Stateful rather than purely recursive because the FIR output has multiple
+/// side channels: value expressions, per-lifecycle-section statement lists,
+/// persistent state and UI declarations, waveform tables, and deferred
+/// compute-time updates.  All are accumulated in the fields below and
+/// assembled into a [`SignalFirOutput`] by [`build_module`].
 struct SignalToFirLower<'a> {
+    /// Read-only signal tree arena shared with the caller.
     arena: &'a TreeArena,
+    /// UI descriptor tree used to resolve control ids and emit `buildUserInterface`.
     ui_program: &'a UiProgram,
+    /// Reduced per-signal type map from `signal_prepare` (integer vs real vs sound).
     types: &'a HashMap<SigId, SimpleSigType>,
+    /// Full type-annotator map used for interval-based variable delay sizing.
     sig_types: &'a HashMap<SigId, SigType>,
+    /// Number of audio input channels for the module being compiled.
     num_inputs: usize,
-    /// Internal DSP computation type (e.g. `Float32` or `Float64`).
+    /// Internal DSP computation type (`Float32` or `Float64`).
     ///
-    /// This is the type used for all internal signal computation: arithmetic
-    /// results, state variable declarations, math call return types, waveform
-    /// table element types, and real constants.
-    ///
-    /// **Never** used for external interface points: audio buffer samples and
-    /// UI zone variables always use `FirType::FaustFloat`.
+    /// Used for arithmetic results, state variables, math call signatures,
+    /// waveform table elements, and real constants.  External interface points
+    /// (audio buffers, UI zones) always use [`FirType::FaustFloat`] instead.
     real_ty: FirType,
+    /// FIR node store being built; owned by this lowerer and returned in the output.
     store: FirStore,
+    /// Memoization cache: maps a `SigId` to its already-lowered `FirId` for DAG sharing.
     cache: HashMap<SigId, FirId>,
+    /// DSP struct field declarations (arrays, scalars, UI zones).
     struct_declarations: Vec<FirId>,
+    /// `instanceConstants` body: table initializations and compile-time constants.
     constants_statements: Vec<FirId>,
+    /// `instanceResetUserInterface` body: UI zone reset assignments.
     reset_statements: Vec<FirId>,
+    /// `instanceClear` body: delay-line and recursion-state zero-init loops.
     clear_statements: Vec<FirId>,
+    /// `compute` preamble: channel-pointer aliases and diagnostic labels.
     control_statements: Vec<FirId>,
+    /// Per-sample loop body: reads, arithmetic, output stores, deferred updates.
     sample_statements: Vec<FirId>,
+    /// State-update stores appended after the per-sample body (delay writes, rec shifts).
     compute_updates: Vec<FirId>,
+    /// Maps each signal node to its generated state-variable name.
     state_name_by_node: HashMap<SigId, String>,
+    /// Guards against emitting duplicate state-update stores for shared nodes.
     scheduled_state_updates: HashSet<SigId>,
+    /// Allocated delay lines keyed by carried-signal id.
     delay_lines: HashMap<SigId, DelayLineInfo>,
+    /// Guards against emitting duplicate delay-write stores for shared carried signals.
     scheduled_delay_writes: HashSet<SigId>,
+    /// `true` once `fIOTA` has been declared; prevents duplicate declarations.
     uses_iota: bool,
+    /// Stack of active recursion carriers, innermost last; used by `SIGPROJ` resolution.
     recursion_stack: Vec<RecArrayInfo>,
+    /// Stack of active symbolic recursion variables matching `recursion_stack`.
     recursion_vars: Vec<SigId>,
+    /// Maps each `ControlId` to its generated `FaustFloat` zone variable name.
     ui_controls: HashMap<ControlId, String>,
+    /// Maps each soundfile `ControlId` to its generated opaque zone variable name.
     soundfiles: HashMap<ControlId, String>,
+    /// Maps each waveform/table signal to its generated table variable name.
     waveform_tables: HashMap<SigId, String>,
+    /// Maps each waveform/table signal to its element count.
     waveform_table_len: HashMap<SigId, usize>,
+    /// `buildUserInterface` body: open/close box and add-control calls.
     ui_statements: Vec<FirId>,
+    /// Dedup guard for named struct-var declarations (prevents double-emit).
     named_struct_vars: HashSet<String>,
+    /// Dedup guard for `instanceResetUserInterface` assignments.
     reset_init_seen: HashSet<String>,
+    /// Dedup guard for `instanceClear` assignments and loops.
     clear_init_seen: HashSet<String>,
+    /// Maps input channel index to its generated stack pointer-alias name.
     input_ptr_aliases: HashMap<usize, String>,
+    /// Set of math operations used; drives prototype emission order.
     used_math_ops: HashSet<FirMathOp>,
+    /// Set of integer helper function names used (`abs`, `min_i`, `max_i`).
     used_int_fun_names: HashSet<&'static str>,
+    /// Monotonic counter for generating unique loop-variable names.
     next_loop_var_id: usize,
 }
 
-/// Two-slot recursion carrier used by `SIGREC`/`SIGPROJ`.
+/// Two-slot carrier for one lowered recursive signal (`SIGREC`/`SIGPROJ`).
 ///
-/// Source provenance (C++):
-/// - `compiler/transform/signalFIRCompiler.cpp`
-///   (`generateRecProj`, `generateRec`, emitted `fRecN[2]` / `iRecN[2]`)
+/// Slot `[1]` holds the previous-sample value; slot `[0]` holds the
+/// current-sample value.  After outputs are stored, the lowering emits
+/// `state[1] = state[0]` to shift the window forward.
 ///
-/// Semantic contract:
-/// - slot `[1]` stores the previous-sample value seen by recursive references,
-/// - slot `[0]` stores the current-sample value computed for this iteration,
-/// - the lowering emits the trailing `state[1] = state[0]` shift after outputs,
-///   matching Faust's generated C++ update order.
-///
-/// Planned storage information for one lowered recursive 2-slot array carrier.
+/// Source provenance (C++): `signalFIRCompiler.cpp` (`generateRecProj`,
+/// `generateRec`), emitted as `fRecN[2]` / `iRecN[2]`.
 #[derive(Clone, Debug)]
 struct RecArrayInfo {
+    /// Generated DSP-struct array variable name (e.g. `fRec7`).
     name: String,
+    /// Element type (`Int32` for integer recursion, `Float32`/`Float64` otherwise).
     typ: FirType,
 }
 
 impl<'a> SignalToFirLower<'a> {
-    /// Creates one fresh lowering state for a module build.
-    ///
-    /// Each `build_module` call gets its own lowerer so caches and section
-    /// accumulators cannot leak across compilations.
+    /// Creates a fresh lowering state for one [`build_module`] call.
     fn new(
         arena: &'a TreeArena,
         ui_program: &'a UiProgram,
@@ -604,13 +632,12 @@ impl<'a> SignalToFirLower<'a> {
         self.ensure_named_struct_var("fSampleRate", FirType::Int32, None);
     }
 
-    /// Pre-scans the prepared signal forest to allocate constant-delay line
-    /// resources before lowering starts.
+    /// Pre-scans the output signal forest and allocates all delay lines before
+    /// lowering begins.
     ///
-    /// C++ `SignalBuilder` allocates/resizes delay lines before `compile()`.
-    /// The Rust fast-lane mirrors that boundary so repeated `SIGDELAY(x, n)`
-    /// uses sharing the same carried signal `x` can reuse one delay line sized
-    /// to the maximum constant delay seen in the current prepared forest.
+    /// Multiple `SIGDELAY(x, n)` nodes sharing the same carried signal `x`
+    /// reuse one delay line sized to the largest delay seen.  This pre-pass
+    /// ensures all writes are registered before any reads are emitted.
     fn prepare_delay_lines(&mut self, outputs: &[SigId]) -> Result<(), SignalFirError> {
         let mut seen = HashSet::new();
         for output in outputs {
@@ -619,6 +646,9 @@ impl<'a> SignalToFirLower<'a> {
         Ok(())
     }
 
+    /// Visits one signal node, allocating a delay line if it is `SIGDELAY`.
+    ///
+    /// Skips already-visited nodes (DAG sharing) via `seen`.
     fn scan_delay_lines(
         &mut self,
         sig: SigId,
@@ -653,6 +683,7 @@ impl<'a> SignalToFirLower<'a> {
         Ok(())
     }
 
+    /// Recurses into one child node, transparently unwrapping list spines.
     fn scan_delay_child(
         &mut self,
         child: SigId,
@@ -731,16 +762,15 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
-    /// Lowers one signal node to a FIR value expression.
+    /// Central dispatcher: lowers one signal node to a FIR value expression.
     ///
-    /// This function is the central dispatcher over [`signals::SigMatch`].
+    /// Results are memoized in [`Self::cache`] for DAG sharing.  As a side
+    /// effect, successful lowering may append declarations and assignments to
+    /// lifecycle section accumulators (e.g. delay writes to
+    /// [`Self::compute_updates`], state declarations to
+    /// [`Self::struct_declarations`]).
     ///
-    /// Successful lowering may also append statements to lifecycle sections as a
-    /// side effect. For example, a returned FIR expression for a delay node is
-    /// coupled with state declarations and deferred update stores recorded in
-    /// [`Self::clear_statements`] / [`Self::compute_updates`].
-    ///
-    /// Unsupported families return typed `FRS-SFIR-*` errors.
+    /// Returns a typed `FRS-SFIR-*` error for unsupported signal families.
     fn lower_signal(&mut self, sig: SigId) -> Result<FirId, SignalFirError> {
         if let Some(id) = self.cache.get(&sig).copied() {
             return Ok(id);
@@ -948,6 +978,11 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
+    /// Emits the circular-buffer read for a delay whose line was pre-allocated
+    /// by [`Self::prepare_delay_lines`].
+    ///
+    /// Schedules a write of the current sample into the ring buffer (once per
+    /// carried signal) and returns a masked-index load at `fIOTA - amount`.
     fn lower_fixed_delay(
         &mut self,
         node: SigId,
@@ -1022,6 +1057,12 @@ impl<'a> SignalToFirLower<'a> {
         Ok(out)
     }
 
+    /// Returns the active recursion carrier if `value` is `SIGPROJ(0, group)`
+    /// pointing into the current recursion context, otherwise `None`.
+    ///
+    /// Used by `lower_delay_state` to detect the canonical feedback pattern
+    /// and reuse the existing recursion array slot instead of creating a
+    /// separate state variable.
     fn recursion_feedback_info(
         &mut self,
         value: SigId,
@@ -1035,6 +1076,10 @@ impl<'a> SignalToFirLower<'a> {
         self.active_recursion_info(group)
     }
 
+    /// Resolves a symbolic recursion group reference to its active carrier.
+    ///
+    /// Walks [`Self::recursion_stack`] from innermost outward; returns `None`
+    /// if `group` is not a `SYMREF` bound in the current lowering context.
     fn active_recursion_info(&self, group: SigId) -> Result<Option<RecArrayInfo>, SignalFirError> {
         let Some(var) = match_sym_ref(self.arena, group) else {
             return Ok(None);
@@ -1075,6 +1120,12 @@ impl<'a> SignalToFirLower<'a> {
         name
     }
 
+    /// Declares the struct array for one circular delay line, idempotent.
+    ///
+    /// On first call for `carried`, allocates `next_power_of_two(delay + 1)`
+    /// elements, emits the struct declaration, and registers an `instanceClear`
+    /// zeroing loop.  Subsequent calls for the same `carried` return the cached
+    /// info; an error is returned if the cached size is smaller than required.
     fn ensure_delay_line_decl(
         &mut self,
         carried: SigId,
@@ -1123,6 +1174,7 @@ impl<'a> SignalToFirLower<'a> {
         Ok(info)
     }
 
+    /// Declares the `fIOTA` circular-buffer position counter, idempotent.
     fn ensure_iota_state(&mut self) {
         if self.uses_iota {
             return;
@@ -1135,11 +1187,13 @@ impl<'a> SignalToFirLower<'a> {
         self.register_clear_init("fIOTA".to_owned(), zero);
     }
 
+    /// Emits a struct load of `fIOTA` (current write position in delay lines).
     fn current_iota_index(&mut self) -> FirId {
         let mut b = FirBuilder::new(&mut self.store);
         b.load_var("fIOTA", AccessType::Struct, FirType::Int32)
     }
 
+    /// Computes the masked read index `(fIOTA - amount) & (size - 1)`.
     fn delayed_iota_index(&mut self, amount: FirId, size: usize) -> FirId {
         let iota = self.current_iota_index();
         let raw = {
@@ -1149,6 +1203,7 @@ impl<'a> SignalToFirLower<'a> {
         self.masked_delay_index(raw, size)
     }
 
+    /// Applies the power-of-two ring-buffer mask: `index & (size - 1)`.
     fn masked_delay_index(&mut self, index: FirId, size: usize) -> FirId {
         let mask = {
             let mut b = FirBuilder::new(&mut self.store);
@@ -1158,6 +1213,7 @@ impl<'a> SignalToFirLower<'a> {
         b.binop(FirBinOp::And, index, mask, FirType::Int32)
     }
 
+    /// Emits `fIOTA = fIOTA + 1` to advance the delay-line write pointer.
     fn bump_iota(&mut self) -> FirId {
         let next = {
             let iota = self.current_iota_index();
@@ -1169,6 +1225,9 @@ impl<'a> SignalToFirLower<'a> {
         b.store_var("fIOTA", AccessType::Struct, next)
     }
 
+    /// Emits an `instanceClear` zeroing loop for a delay-line or table array.
+    ///
+    /// Idempotent: subsequent calls for the same `name` are silently ignored.
     fn register_clear_table(
         &mut self,
         name: String,
@@ -1221,6 +1280,9 @@ impl<'a> SignalToFirLower<'a> {
         Ok(())
     }
 
+    /// Emits an `instanceClear` zeroing loop for a two-slot recursion array.
+    ///
+    /// Idempotent: subsequent calls for the same `name` are silently ignored.
     fn register_clear_recursion_array(&mut self, name: String, init: FirId) {
         if !self.clear_init_seen.insert(name.clone()) {
             return;
@@ -1247,12 +1309,14 @@ impl<'a> SignalToFirLower<'a> {
             .push(b.simple_for_loop(loop_var, upper, body, false));
     }
 
+    /// Generates a unique loop variable name using a monotonic counter.
     fn fresh_loop_var(&mut self, prefix: &str) -> String {
         let name = format!("{prefix}{}", self.next_loop_var_id);
         self.next_loop_var_id += 1;
         name
     }
 
+    /// Returns the constant integer value of `sig` if it is `SIGINT`, otherwise `None`.
     fn constant_delay_amount(&self, sig: SigId) -> Result<Option<i32>, SignalFirError> {
         match match_sig(self.arena, sig) {
             SigMatch::Int(value) => Ok(Some(value)),
@@ -1260,29 +1324,15 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
-    /// Returns the interval-derived maximum delay bound for a variable-rate
-    /// delay amount signal.
+    /// Returns the interval upper-bound used to size the delay line for a
+    /// variable delay amount, mirroring C++ `checkDelayInterval`.
     ///
-    /// Only succeeds when `sig_types` carries a `Block`-or-slower-variability
-    /// type (i.e. a UI control such as slider/numentry) whose interval has a
-    /// non-negative upper bound.  Audio-rate (`Samp`) signals are rejected
-    /// regardless of their `hi()` value, because their interval is the
-    /// fallback `[f64::MIN, f64::MAX]` placeholder — not a real constraint.
-    ///
-    /// A `hi()` of exactly `0.0` is accepted: `check_delay_interval` returns
-    /// `0` → `delay_size_for_amount` returns `Some(0)` → zero-delay fast
-    /// path (passthrough), matching C++ `checkDelayInterval` semantics which
-    /// only rejects `hi() < 0`.  This handles expressions like
-    /// `@(hslider("d",0,0,100,1) - 100)` whose interval is `[-100, 0]`.
+    /// Accepts any signal whose interval is non-empty, bounded (finite `hi`),
+    /// and has `hi >= 0`.  `hi == 0` is the zero-delay passthrough case.
+    /// Returns `None` for signals with no type entry, unbounded or empty
+    /// intervals, or strictly-negative `hi`.
     fn variable_delay_max_bound(&self, sig: SigId) -> Option<i32> {
         let ty = self.sig_types.get(&sig)?;
-        // Reject sample-rate signals — their interval is an uninformative
-        // placeholder, not a host-controlled parameter bound.
-        if ty.variability() == Variability::Samp {
-            return None;
-        }
-        // Mirror C++ checkDelayInterval: reject only strictly-negative hi().
-        // hi() == 0 → zero-delay passthrough (size-1 ring buffer, mask = 0).
         if ty.interval().hi() < 0.0 {
             return None;
         }
@@ -1291,8 +1341,8 @@ impl<'a> SignalToFirLower<'a> {
 
     /// Resolve the delay line allocation size for `amount`:
     /// - literal `Int` → exact constant
-    /// - slider / bounded UI control → interval upper bound
-    /// - unbounded / audio inputs → `None` (caller must reject)
+    /// - bounded interval → interval upper bound
+    /// - unbounded or empty interval → `None` (caller must reject)
     fn delay_size_for_amount(&self, amount: SigId) -> Result<Option<i32>, SignalFirError> {
         if let Some(c) = self.constant_delay_amount(amount)? {
             return Ok(Some(c));
@@ -1300,6 +1350,8 @@ impl<'a> SignalToFirLower<'a> {
         Ok(self.variable_delay_max_bound(amount))
     }
 
+    /// Computes `next_power_of_two(delay + 1)` — the circular buffer size for
+    /// a given maximum delay in samples.  Errors on negative or overflowing input.
     fn pow2limit_for_delay(&self, delay: i32) -> Result<usize, SignalFirError> {
         let delay = usize::try_from(delay).map_err(|_| {
             SignalFirError::new(
@@ -1348,6 +1400,7 @@ impl<'a> SignalToFirLower<'a> {
         b.int32(value)
     }
 
+    /// Declares the `FaustFloat` struct zone variable for a button or checkbox, idempotent.
     fn ensure_button_zone(
         &mut self,
         control: ControlId,
@@ -1771,6 +1824,7 @@ impl<'a> SignalToFirLower<'a> {
         format!("{prefix}{control}")
     }
 
+    /// Looks up the `ControlSpec` for `control`, returning an error if missing.
     fn control_spec(&self, control: ControlId) -> Result<&ui::ControlSpec, SignalFirError> {
         self.ui_program.control(control).ok_or_else(|| {
             SignalFirError::new(
@@ -1780,6 +1834,9 @@ impl<'a> SignalToFirLower<'a> {
         })
     }
 
+    /// Returns the numeric range for `control`, returning an error if absent.
+    ///
+    /// `kind_name` is included in the error message for diagnostics only.
     fn control_range(
         &self,
         control: ControlId,
@@ -1793,6 +1850,7 @@ impl<'a> SignalToFirLower<'a> {
         })
     }
 
+    /// Emits `addMetaDeclare(var, key, value)` calls for each metadata pair.
     fn emit_ui_metadata_for_target(&mut self, var: &str, metadata: &[(String, String)]) {
         for (key, value) in metadata {
             let mut b = FirBuilder::new(&mut self.store);
@@ -1813,6 +1871,7 @@ impl<'a> SignalToFirLower<'a> {
             .find_map(|(entry_key, entry_value)| (entry_key == key).then(|| entry_value.clone())))
     }
 
+    /// Emits `addMetaDeclare` calls for every metadata entry attached to `control`.
     fn emit_control_ui_metadata(
         &mut self,
         control: ControlId,
@@ -1823,6 +1882,7 @@ impl<'a> SignalToFirLower<'a> {
         Ok(())
     }
 
+    /// Declares the `FaustFloat` struct zone variable for a slider or numentry, idempotent.
     fn ensure_slider_zone(
         &mut self,
         control: ControlId,
@@ -1868,6 +1928,7 @@ impl<'a> SignalToFirLower<'a> {
         Ok(var)
     }
 
+    /// Declares the `FaustFloat` struct zone variable for a bargraph, idempotent.
     fn ensure_bargraph_zone(
         &mut self,
         control: ControlId,
@@ -1903,6 +1964,7 @@ impl<'a> SignalToFirLower<'a> {
         Ok(var)
     }
 
+    /// Declares the opaque `Sound` struct zone variable for a soundfile, idempotent.
     fn ensure_soundfile_zone(&mut self, control: ControlId) -> Result<String, SignalFirError> {
         if let Some(var) = self.soundfiles.get(&control).cloned() {
             return Ok(var);
@@ -1924,6 +1986,9 @@ impl<'a> SignalToFirLower<'a> {
         Ok(var)
     }
 
+    /// Drives emission of the entire `buildUserInterface` body from the root UI node.
+    ///
+    /// Clears any previous `ui_statements` accumulator before walking the tree.
     fn emit_ui_program(&mut self) -> Result<(), SignalFirError> {
         if self.ui_program.is_empty() {
             self.ui_statements.clear();
@@ -1933,6 +1998,11 @@ impl<'a> SignalToFirLower<'a> {
         self.emit_ui_node(self.ui_program.root)
     }
 
+    /// Recursively emits FIR UI calls for one UI tree node.
+    ///
+    /// Dispatches on group containers (open/close box), input controls
+    /// (button, checkbox, slider, numentry), output controls (bargraph),
+    /// and soundfile declarations.
     fn emit_ui_node(&mut self, node: ui::UiId) -> Result<(), SignalFirError> {
         match match_ui(&self.ui_program.arena, node) {
             UiMatch::Group {
@@ -2346,6 +2416,10 @@ impl<'a> SignalToFirLower<'a> {
         Ok(out)
     }
 
+    /// Declares a two-slot `[typ; 2]` recursion array for `node`, idempotent.
+    ///
+    /// Emits the struct declaration and an `instanceClear` initialization loop
+    /// on first call; returns the cached [`RecArrayInfo`] on subsequent calls.
     fn ensure_recursion_array(
         &mut self,
         node: SigId,

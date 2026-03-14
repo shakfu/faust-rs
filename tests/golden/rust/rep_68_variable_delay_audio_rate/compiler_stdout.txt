@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_68_variable_delay_audio_rate.dsp
+bytes=399
+lines=6
+fnv1a64=d23d2e4efac0c27b

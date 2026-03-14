@@ -1329,10 +1329,9 @@ mod tests {
     }
 
     #[test]
-    fn variable_delay_is_rejected_explicitly() {
-        // An audio input used as delay amount has no bounded interval in sig_types
-        // (placeholder interval(0) → hi=0, not strictly positive) so it is
-        // still rejected after the interval-based variable delay support.
+    fn variable_delay_with_audio_input_amount_uses_tinput_interval() {
+        // `process = _ : @(_)` — audio input as delay amount.
+        // TINPUT has interval(-1, 1), so hi=1 → delay line next_pow2(2) = 2.
         let mut arena = TreeArena::new();
         let sig0 = {
             let mut b = SigBuilder::new(&mut arena);
@@ -1340,13 +1339,65 @@ mod tests {
             let amount = b.input(1);
             b.delay(in0, amount)
         };
-        let err = compile_fastlane_without_ui(&arena, &[sig0], 2, 1, &SignalFirOptions::default())
-            .expect_err("audio-input delay amount must still be rejected");
-        assert_eq!(err.code(), SignalFirErrorCode::UnsupportedSignalNode);
-        assert!(
-            err.to_string().contains("bounded interval"),
-            "error should mention the bounded-interval requirement"
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 2, 1, &SignalFirOptions::default())
+            .expect("audio-input delay amount must be accepted");
+        // Verify a 2-sample delay line was allocated.
+        let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+            panic!("expected Module");
+        };
+        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+            panic!("dsp_struct block expected");
+        };
+        let delay_sizes: Vec<usize> = struct_items
+            .iter()
+            .filter_map(|id| match match_fir(&out.store, *id) {
+                FirMatch::DeclareVar {
+                    ref name,
+                    typ: FirType::Array(_, size),
+                    ..
+                } if name.starts_with("fVec") || name.starts_with("iVec") => Some(size),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(delay_sizes, [2], "expected a single 2-sample delay line");
+    }
+
+    #[test]
+    fn variable_delay_with_strictly_negative_hi_is_rejected() {
+        // A slider shifted so that its interval is entirely negative (hi < 0)
+        // must be rejected — C++ `checkDelayInterval` rejects `hi() < 0`.
+        // e.g. hslider("d",10,0,100,1) - 200  →  interval [-200, -100], hi=-100.
+        let ui = one_control_ui(
+            ControlKind::HSlider,
+            "d",
+            Some(ControlRange {
+                init: 10.0,
+                min: 0.0,
+                max: 100.0,
+                step: 1.0,
+            }),
+            false,
+            false,
         );
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let in0 = b.input(0);
+            let slider = b.hslider(0);
+            let offset = b.real(200.0);
+            let shifted = b.binop(BinOp::Sub, slider, offset);
+            b.delay(in0, shifted)
+        };
+        let err = compile_signals_to_fir_fastlane_with_ui(
+            &arena,
+            &[sig0],
+            1,
+            1,
+            &ui,
+            &SignalFirOptions::default(),
+        )
+        .expect_err("slider with hi<0 interval must be rejected as delay amount");
+        assert_eq!(err.code(), SignalFirErrorCode::UnsupportedSignalNode);
     }
 
     #[test]
