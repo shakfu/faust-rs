@@ -3409,18 +3409,48 @@ fn eval_slider_like(
     env: &Environment,
     loop_detector: &mut LoopDetector,
 ) -> Result<TreeId, EvalError> {
+    // C++ eval.cpp: each numeric parameter is reduced via eval2double(…)
+    // which calls boxPropagateSig + simplify internally.  We do the same by
+    // calling eval_box then simplifying the result to a boxReal literal when
+    // possible, matching C++ `tree(eval2double(param, …))`.
     let label = evaluated_label_node(arena, label, env, loop_detector)?;
     let [cur, min, max, step] = params;
-    let cur = eval_box(arena, cur, env, loop_detector)?;
-    let min = eval_box(arena, min, env, loop_detector)?;
-    let max = eval_box(arena, max, env, loop_detector)?;
-    let step = eval_box(arena, step, env, loop_detector)?;
+    let cur = simplify_slider_param(arena, cur, env, loop_detector)?;
+    let min = simplify_slider_param(arena, min, env, loop_detector)?;
+    let max = simplify_slider_param(arena, max, env, loop_detector)?;
+    let step = simplify_slider_param(arena, step, env, loop_detector)?;
     let mut b = BoxBuilder::new(arena);
     Ok(match kind {
         SliderKind::VSlider => b.vslider(label, cur, min, max, step),
         SliderKind::HSlider => b.hslider(label, cur, min, max, step),
         SliderKind::NumEntry => b.num_entry(label, cur, min, max, step),
     })
+}
+
+/// Evaluates a slider/bargraph numeric parameter with the same semantics as
+/// C++ `eval2double`: `eval_box` followed by `propagate + simplify → boxReal`.
+///
+/// If the expression cannot be reduced to a numeric constant at evaluation
+/// time, the evaluated (but not simplified) box is returned unchanged so that
+/// later passes can still handle it.
+///
+/// # C++ equivalent
+///
+/// `tree(eval2double(param, visited, localValEnv))` for slider/bargraph params
+/// in `compiler/evaluate/eval.cpp`.
+fn simplify_slider_param(
+    arena: &mut TreeArena,
+    param: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let evaled = eval_box(arena, param, env, loop_detector)?;
+    // Try to reduce to f64 constant → boxReal(x).
+    if let Ok(x) = eval_box_to_f64(arena, evaled) {
+        return Ok(BoxBuilder::new(arena).real(x));
+    }
+    // Fallback: return the evaluated box as-is (e.g. pattern var, slot).
+    Ok(evaled)
 }
 
 /// Evaluates one `soundfile` widget.
@@ -3435,8 +3465,14 @@ fn eval_soundfile(
     env: &Environment,
     loop_detector: &mut LoopDetector,
 ) -> Result<TreeId, EvalError> {
+    // C++ eval.cpp: `tree(eval2int(chan, visited, localValEnv))`.
     let label = evaluated_label_node(arena, label, env, loop_detector)?;
-    let chan = eval_box(arena, chan, env, loop_detector)?;
+    let evaled_chan = eval_box(arena, chan, env, loop_detector)?;
+    let chan = if let Ok(n) = eval_box_to_i32(arena, evaled_chan) {
+        BoxBuilder::new(arena).int(n)
+    } else {
+        evaled_chan
+    };
     Ok(BoxBuilder::new(arena).soundfile(label, chan))
 }
 
@@ -3489,8 +3525,9 @@ fn eval_vbargraph(
     loop_detector: &mut LoopDetector,
 ) -> Result<TreeId, EvalError> {
     let label = evaluated_label_node(arena, label, env, loop_detector)?;
-    let min = eval_box(arena, min, env, loop_detector)?;
-    let max = eval_box(arena, max, env, loop_detector)?;
+    // C++ uses eval2double for bargraph min/max.
+    let min = simplify_slider_param(arena, min, env, loop_detector)?;
+    let max = simplify_slider_param(arena, max, env, loop_detector)?;
     Ok(BoxBuilder::new(arena).vbargraph(label, min, max))
 }
 
@@ -3504,8 +3541,9 @@ fn eval_hbargraph(
     loop_detector: &mut LoopDetector,
 ) -> Result<TreeId, EvalError> {
     let label = evaluated_label_node(arena, label, env, loop_detector)?;
-    let min = eval_box(arena, min, env, loop_detector)?;
-    let max = eval_box(arena, max, env, loop_detector)?;
+    // C++ uses eval2double for bargraph min/max.
+    let min = simplify_slider_param(arena, min, env, loop_detector)?;
+    let max = simplify_slider_param(arena, max, env, loop_detector)?;
     Ok(BoxBuilder::new(arena).hbargraph(label, min, max))
 }
 
