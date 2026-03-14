@@ -3114,6 +3114,197 @@ fn normalize_route_spec(arena: &mut TreeArena, spec: TreeId) -> TreeId {
     result
 }
 
+// ─── Box simplification ────────────────────────────────────────────────────────
+
+/// Memoised entry point: simplify `box_id` by replacing any 0→1 sub-expression
+/// that propagates to a compile-time constant with the corresponding
+/// `boxInt(n)` or `boxReal(x)` literal.
+///
+/// The result is stored in `cache` so that shared sub-trees are only visited
+/// once (matching the C++ `gSimplifiedBoxProperty` property cache).
+///
+/// # C++ equivalent
+///
+/// `static Tree boxSimplification(Tree box)` in
+/// `compiler/evaluate/eval.cpp`.
+#[allow(dead_code)] // promoted to production in Step 6a
+fn box_simplification(
+    arena: &mut TreeArena,
+    cache: &mut ahash::HashMap<TreeId, TreeId>,
+    box_id: TreeId,
+) -> TreeId {
+    if let Some(&cached) = cache.get(&box_id) {
+        return cached;
+    }
+    let result = numeric_box_simplification(arena, cache, box_id);
+    cache.insert(box_id, result);
+    result
+}
+
+/// Tries to reduce a 0→1 box to a numeric literal; recurses into composite
+/// boxes otherwise.
+///
+/// # C++ equivalent
+///
+/// `static Tree numericBoxSimplification(Tree box)` in
+/// `compiler/evaluate/eval.cpp`.
+fn numeric_box_simplification(
+    arena: &mut TreeArena,
+    cache: &mut ahash::HashMap<TreeId, TreeId>,
+    box_id: TreeId,
+) -> TreeId {
+    // Fast path: already a numeric literal.
+    match match_box(arena, box_id) {
+        BoxMatch::Int(_) | BoxMatch::Real(_) => return box_id,
+        _ => {}
+    }
+    // General path: propagate + simplify → try to extract a numeric constant.
+    if let Some(sig) = propagate_box_and_simplify(arena, box_id) {
+        match match_sig(arena, sig) {
+            SigMatch::Real(x) => {
+                return BoxBuilder::new(arena).real(x);
+            }
+            SigMatch::Int(i) => {
+                return BoxBuilder::new(arena).int(i);
+            }
+            _ => {}
+        }
+    }
+    // Not a numeric constant: simplify children recursively.
+    inside_box_simplification(arena, cache, box_id)
+}
+
+/// Recurses into composite boxes, calling [`box_simplification`] on each
+/// child sub-diagram.
+///
+/// Leaf nodes (primitives, UI widgets, slots, waveforms, …) are returned
+/// unchanged.
+///
+/// # C++ equivalent
+///
+/// `static Tree insideBoxSimplification(Tree box)` in
+/// `compiler/evaluate/eval.cpp`.
+fn inside_box_simplification(
+    arena: &mut TreeArena,
+    cache: &mut ahash::HashMap<TreeId, TreeId>,
+    box_id: TreeId,
+) -> TreeId {
+    match match_box(arena, box_id) {
+        // ── Leaves — return unchanged ──────────────────────────────────────
+        BoxMatch::Int(_)
+        | BoxMatch::Real(_)
+        | BoxMatch::Cut
+        | BoxMatch::Wire
+        // Primitive operators (Prim0–Prim5 in C++ — operator boxes in Rust)
+        | BoxMatch::Add | BoxMatch::Sub | BoxMatch::Mul | BoxMatch::Div | BoxMatch::Rem
+        | BoxMatch::Pow | BoxMatch::Fmod | BoxMatch::Remainder
+        | BoxMatch::And | BoxMatch::Or | BoxMatch::Xor | BoxMatch::Lsh | BoxMatch::Rsh
+        | BoxMatch::Lt  | BoxMatch::Le  | BoxMatch::Gt  | BoxMatch::Ge
+        | BoxMatch::Eq  | BoxMatch::Ne  | BoxMatch::Atan2
+        | BoxMatch::Floor | BoxMatch::Ceil | BoxMatch::Round | BoxMatch::Rint
+        | BoxMatch::Abs | BoxMatch::Min | BoxMatch::Max
+        | BoxMatch::IntCast | BoxMatch::FloatCast
+        | BoxMatch::Delay | BoxMatch::Delay1 | BoxMatch::Prefix
+        | BoxMatch::ReadOnlyTable | BoxMatch::WriteReadTable
+        | BoxMatch::Select2 | BoxMatch::Select3 | BoxMatch::AssertBounds
+        | BoxMatch::Lowest | BoxMatch::Highest
+        | BoxMatch::Attach | BoxMatch::Enable | BoxMatch::Control
+        | BoxMatch::Acos | BoxMatch::Asin | BoxMatch::Atan
+        | BoxMatch::Cos  | BoxMatch::Sin  | BoxMatch::Tan
+        | BoxMatch::Exp  | BoxMatch::Log  | BoxMatch::Log10 | BoxMatch::Sqrt
+        // Foreign function / constant / variable
+        | BoxMatch::FFun(_)
+        | BoxMatch::FConst(_, _, _)
+        | BoxMatch::FVar(_, _, _)
+        // UI widgets (C++ isBoxVSlider / HSlider / NumEntry / Bargraph …)
+        | BoxMatch::Button(_)
+        | BoxMatch::Checkbox(_)
+        | BoxMatch::VSlider(_, _, _, _, _)
+        | BoxMatch::HSlider(_, _, _, _, _)
+        | BoxMatch::NumEntry(_, _, _, _, _)
+        | BoxMatch::VBargraph(_, _, _)
+        | BoxMatch::HBargraph(_, _, _)
+        // Slot (pattern variable in symbolic boxes)
+        | BoxMatch::Slot(_)
+        // Waveform: always in normal form (has 1 child = size)
+        | BoxMatch::Waveform(_)
+        // Sound file
+        | BoxMatch::Soundfile(_, _) => box_id,
+
+        // ── Recursive on 1 child ──────────────────────────────────────────
+        BoxMatch::VGroup(label, body) => {
+            let sb = box_simplification(arena, cache, body);
+            let mut bld = BoxBuilder::new(arena);
+            bld.vgroup(label, sb)
+        }
+        BoxMatch::HGroup(label, body) => {
+            let sb = box_simplification(arena, cache, body);
+            let mut bld = BoxBuilder::new(arena);
+            bld.hgroup(label, sb)
+        }
+        BoxMatch::TGroup(label, body) => {
+            let sb = box_simplification(arena, cache, body);
+            let mut bld = BoxBuilder::new(arena);
+            bld.tgroup(label, sb)
+        }
+        BoxMatch::Symbolic(slot, body) => {
+            let sb = box_simplification(arena, cache, body);
+            let mut bld = BoxBuilder::new(arena);
+            bld.symbolic(slot, sb)
+        }
+
+        // ── Recursive on 2 children ───────────────────────────────────────
+        BoxMatch::Seq(a, b) => {
+            let sa = box_simplification(arena, cache, a);
+            let sb = box_simplification(arena, cache, b);
+            let mut bld = BoxBuilder::new(arena);
+            bld.seq(sa, sb)
+        }
+        BoxMatch::Par(a, b) => {
+            let sa = box_simplification(arena, cache, a);
+            let sb = box_simplification(arena, cache, b);
+            let mut bld = BoxBuilder::new(arena);
+            bld.par(sa, sb)
+        }
+        BoxMatch::Split(a, b) => {
+            let sa = box_simplification(arena, cache, a);
+            let sb = box_simplification(arena, cache, b);
+            let mut bld = BoxBuilder::new(arena);
+            bld.split(sa, sb)
+        }
+        BoxMatch::Merge(a, b) => {
+            let sa = box_simplification(arena, cache, a);
+            let sb = box_simplification(arena, cache, b);
+            let mut bld = BoxBuilder::new(arena);
+            bld.merge(sa, sb)
+        }
+        BoxMatch::Rec(a, b) => {
+            let sa = box_simplification(arena, cache, a);
+            let sb = box_simplification(arena, cache, b);
+            let mut bld = BoxBuilder::new(arena);
+            bld.rec(sa, sb)
+        }
+
+        // ── Metadata: simplify body, keep metadata list ───────────────────
+        BoxMatch::Metadata(body, meta) => {
+            let sb = box_simplification(arena, cache, body);
+            let mut bld = BoxBuilder::new(arena);
+            bld.metadata(sb, meta)
+        }
+
+        // ── Route: simplify ins/outs, keep spec ──────────────────────────
+        BoxMatch::Route(ins, outs, routes) => {
+            let si = box_simplification(arena, cache, ins);
+            let so = box_simplification(arena, cache, outs);
+            let mut bld = BoxBuilder::new(arena);
+            bld.route(si, so, routes)
+        }
+
+        // ── Unknown / not yet handled: return unchanged ───────────────────
+        _ => box_id,
+    }
+}
+
 // ─── Evaluate label node ───────────────────────────────────────────────────────
 
 /// Evaluates one label node and re-interns the resulting string literal in the arena.
@@ -4921,9 +5112,9 @@ mod simplify_helpers_tests {
     use tlib::TreeArena;
 
     use super::{
-        eval_box, eval_box_to_f64, eval_box_to_i32, eval_box_to_int_node, flatten_route_spec,
-        is_box_numeric, normalize_route_spec, propagate_box_and_simplify, Environment,
-        LoopDetector,
+        box_simplification, eval_box, eval_box_to_f64, eval_box_to_i32, eval_box_to_int_node,
+        flatten_route_spec, is_box_numeric, normalize_route_spec, propagate_box_and_simplify,
+        Environment, LoopDetector,
     };
 
     /// Build `Seq(Par(Int(a), Int(b)), Add)` — the box-calculus encoding of `a + b`.
@@ -5091,6 +5282,38 @@ mod simplify_helpers_tests {
         let sum = sb.add(two, three);
         let result = simplify_const(&mut arena, sum);
         assert!(matches!(match_sig(&arena, result), SigMatch::Int(5)));
+    }
+
+    // ── box_simplification ────────────────────────────────────────────────────
+
+    /// `box_simplification(boxInt(5))` → `boxInt(5)` (literal pass-through).
+    #[test]
+    fn box_simplification_int_literal_passthrough() {
+        let mut arena = TreeArena::default();
+        let five = BoxBuilder::new(&mut arena).int(5);
+        let mut cache = ahash::HashMap::default();
+        let result = box_simplification(&mut arena, &mut cache, five);
+        assert!(matches!(match_box(&arena, result), BoxMatch::Int(5)));
+    }
+
+    /// `box_simplification(seq(par(int(2), int(3)), add))` → `boxInt(5)`.
+    #[test]
+    fn box_simplification_folds_arithmetic() {
+        let mut arena = TreeArena::default();
+        let expr = make_int_add(&mut arena, 2, 3);
+        let mut cache = ahash::HashMap::default();
+        let result = box_simplification(&mut arena, &mut cache, expr);
+        assert!(matches!(match_box(&arena, result), BoxMatch::Int(5)), "expected Int(5)");
+    }
+
+    /// `box_simplification(wire)` → `wire` (wire is a leaf that cannot denote a number).
+    #[test]
+    fn box_simplification_wire_passthrough() {
+        let mut arena = TreeArena::default();
+        let wire = BoxBuilder::new(&mut arena).wire();
+        let mut cache = ahash::HashMap::default();
+        let result = box_simplification(&mut arena, &mut cache, wire);
+        assert!(matches!(match_box(&arena, result), BoxMatch::Wire));
     }
 
     // ── route normalization ────────────────────────────────────────────────────
