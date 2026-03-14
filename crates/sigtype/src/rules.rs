@@ -23,7 +23,7 @@ use tlib::{TreeArena, match_sym_rec, match_sym_ref};
 use ui::{ControlId, ControlKind, UiProgram};
 
 use crate::enums::{Boolean, Computability, Nature, Variability, Vectorability};
-use crate::factory::{make_maximal, make_simple, make_table_type};
+use crate::factory::{make_maximal, make_simple, make_table_type, make_tuplet};
 use crate::ops::{check_delay_interval, float_cast, int_cast, samp_cast, union_types};
 use crate::types::SigType;
 
@@ -479,6 +479,26 @@ impl<'a> TypeAnnotator<'a> {
                     Boolean::Num,
                     interval::Interval::new(-1.0, 1.0, -24),
                 ))
+            }
+
+            // Unknown / unhandled — check for cons lists first (recursion bodies).
+            //
+            // C++ `T(sig, env)` handles list nodes by iterating with hd/tl and
+            // building a `TupletType` from the element types.  The signal arena
+            // represents recursion bodies as `cons(signal, … cons(signal, nil))`.
+            SigMatch::Unknown if self.arena.is_list(sig) => {
+                let mut components = Vec::new();
+                let mut cur = sig;
+                while !self.arena.is_nil(cur) {
+                    let head = self.arena.hd(cur).ok_or_else(|| {
+                        TypeError("malformed cons list during type inference".into())
+                    })?;
+                    components.push(self.infer(head)?);
+                    cur = self.arena.tl(cur).ok_or_else(|| {
+                        TypeError("malformed cons list during type inference".into())
+                    })?;
+                }
+                Ok(make_tuplet(components))
             }
 
             // Unknown / unhandled — conservative.
