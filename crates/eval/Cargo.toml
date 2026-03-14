@@ -9,6 +9,7 @@ authors.workspace = true
 ahash = "0.8"
 boxes = { path = "../boxes" }
 errors = { path = "../errors" }
+normalize = { path = "../normalize" }
 parser = { path = "../parser" }
 propagate = { path = "../propagate" }
 signals = { path = "../signals" }

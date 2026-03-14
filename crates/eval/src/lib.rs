@@ -160,9 +160,10 @@ use std::sync::{Arc, Mutex};
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::codes;
 use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
+use normalize::simplify_const;
 use parser::{CompilationMetadataSnapshot, CompilationMetadataStore};
 use propagate::{ArityCache, propagate_typed, try_build_flat_box};
-use signals::{SigMatch, match_sig};
+use signals::{SigId, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId, tree_to_int};
 
 mod pattern_matcher;
@@ -1255,6 +1256,17 @@ pub enum EvalError {
     RecursionDepthExceeded {
         max_depth: usize,
     },
+    /// A box expression was expected to evaluate to a compile-time numeric
+    /// constant (type 0→1 with a numeric value), but did not.
+    ///
+    /// Occurs in slider parameter evaluation, table-size expressions, and
+    /// similar contexts where the C++ compiler calls `eval2int` / `eval2double`.
+    ///
+    /// C++ equivalent: `evalerror("not a constant expression of type: (0->1)", …)`
+    /// thrown by `eval2double` / `eval2int` in `eval.cpp`.
+    NotAConstantExpression {
+        node: TreeId,
+    },
 }
 
 impl Display for EvalError {
@@ -1358,6 +1370,13 @@ impl Display for EvalError {
             }
             Self::RecursionDepthExceeded { max_depth } => {
                 write!(f, "evaluation recursion depth exceeded ({max_depth})")
+            }
+            Self::NotAConstantExpression { node } => {
+                write!(
+                    f,
+                    "expression is not a compile-time numeric constant (type 0→1): node {}",
+                    node.as_u32()
+                )
             }
         }
     }
@@ -2883,8 +2902,11 @@ fn eval_box_to_scalar_signal(
             reason: "expression did not produce exactly one output signal",
         });
     }
-    match match_sig(arena, signals[0]) {
-        SigMatch::Int(_) | SigMatch::Real(_) => Ok(signals[0]),
+    // Algebraically simplify the propagated signal (e.g. sin(0) → 0.0).
+    // C++ equivalent: `simplify(hd(lsignals))` in eval.cpp `eval2double`/`eval2int`.
+    let simplified = simplify_const(arena, signals[0]);
+    match match_sig(arena, simplified) {
+        SigMatch::Int(_) | SigMatch::Real(_) => Ok(simplified),
         _ => Err(EvalError::InvalidLabelInterpolation {
             node: expr,
             ident: ident_name_or_fallback(arena, expr),
@@ -2904,6 +2926,113 @@ fn ident_name_or_fallback(arena: &TreeArena, expr: TreeId) -> String {
         _ => format!("node_{}", expr.as_u32()),
     }
 }
+
+// ─── Propagation + simplification helpers ─────────────────────────────────────
+
+/// Tagged numeric literal — used to split borrow-checker lifetimes between
+/// reading a signal's value and writing a new box into the arena.
+#[allow(dead_code)] // used in tests; will be promoted to production in Step 6a/6b/7
+#[derive(Clone, Copy)]
+enum NumericLit {
+    Int(i32),
+    Real(f64),
+}
+
+/// Propagates a 0→1 box with no inputs, then algebraically simplifies the
+/// resulting signal.
+///
+/// Returns `None` if the box cannot be flattened or has the wrong arity.
+///
+/// This is the building block for all compile-time constant extraction in the
+/// evaluator.
+///
+/// # C++ equivalent
+///
+/// ```cpp
+/// Tree lsignals = boxPropagateSig(gGlobal->nil, box, makeSigInputList(0));
+/// Tree s        = simplify(hd(lsignals));
+/// ```
+///
+/// Called by `isBoxNumeric`, `eval2double`, `eval2int`, and
+/// `numericBoxSimplification` in `compiler/evaluate/eval.cpp`.
+#[allow(dead_code)] // used in tests; will be promoted to production in Step 6a/6b/7
+fn propagate_box_and_simplify(arena: &mut TreeArena, box_id: TreeId) -> Option<SigId> {
+    let flat = try_build_flat_box(arena, box_id).ok()?;
+    let mut cache = ArityCache::default();
+    let signals = propagate_typed(arena, flat, &[], &mut cache).ok()?;
+    let sig = *signals.first()?;
+    Some(simplify_const(arena, sig))
+}
+
+/// Returns `Some(boxInt(n))` or `Some(boxReal(x))` if `box_id` is a 0→1 box
+/// that reduces to a compile-time numeric constant.
+///
+/// # C++ equivalent
+///
+/// `static bool isBoxNumeric(Tree in, Tree& out)` in `compiler/evaluate/eval.cpp`.
+#[allow(dead_code)] // used in tests; will be promoted to production in Step 6a/6b/7
+fn is_box_numeric(arena: &mut TreeArena, box_id: TreeId) -> Option<TreeId> {
+    // Fast path: already a literal.
+    match match_box(arena, box_id) {
+        BoxMatch::Int(_) | BoxMatch::Real(_) => return Some(box_id),
+        _ => {}
+    }
+    // General path: propagate + simplify, then test.
+    let sig = propagate_box_and_simplify(arena, box_id)?;
+    // Extract value before taking another borrow on arena.
+    let value = match match_sig(arena, sig) {
+        SigMatch::Int(i) => Some(NumericLit::Int(i)),
+        SigMatch::Real(x) => Some(NumericLit::Real(x)),
+        _ => None,
+    }?;
+    let mut b = BoxBuilder::new(arena);
+    Some(match value {
+        NumericLit::Int(i) => b.int(i),
+        NumericLit::Real(x) => b.real(x),
+    })
+}
+
+/// Converts a 0→1 box to an `f64` compile-time constant.
+///
+/// Returns [`EvalError::NotAConstantExpression`] if the box is not a scalar
+/// constant of type (0→1) or cannot be reduced to a numeric value.
+///
+/// # C++ equivalent
+///
+/// `static double eval2double(Tree exp, Tree visited, Tree localValEnv)` in
+/// `compiler/evaluate/eval.cpp`.
+#[allow(dead_code)] // used in tests; will be promoted to production in Step 4/6a/6b
+fn eval_box_to_f64(arena: &mut TreeArena, box_id: TreeId) -> Result<f64, EvalError> {
+    let sig = propagate_box_and_simplify(arena, box_id)
+        .ok_or(EvalError::NotAConstantExpression { node: box_id })?;
+    match match_sig(arena, sig) {
+        SigMatch::Real(x) => Ok(x),
+        SigMatch::Int(i) => Ok(f64::from(i)),
+        _ => Err(EvalError::NotAConstantExpression { node: box_id }),
+    }
+}
+
+/// Converts a 0→1 box to an `i32` compile-time constant.
+///
+/// Returns [`EvalError::NotAConstantExpression`] if the box is not a scalar
+/// constant of type (0→1) or cannot be reduced to a numeric value.
+///
+/// # C++ equivalent
+///
+/// `static int eval2int(Tree exp, Tree visited, Tree localValEnv)` in
+/// `compiler/evaluate/eval.cpp`.
+#[allow(dead_code)] // used in tests; will be promoted to production in Step 5/6b
+fn eval_box_to_i32(arena: &mut TreeArena, box_id: TreeId) -> Result<i32, EvalError> {
+    let sig = propagate_box_and_simplify(arena, box_id)
+        .ok_or(EvalError::NotAConstantExpression { node: box_id })?;
+    match match_sig(arena, sig) {
+        SigMatch::Int(i) => Ok(i),
+        SigMatch::Real(x) => Ok(x as i32),
+        _ => Err(EvalError::NotAConstantExpression { node: box_id }),
+    }
+}
+
+// ─── Evaluate label node ───────────────────────────────────────────────────────
 
 /// Evaluates one label node and re-interns the resulting string literal in the arena.
 ///
@@ -4701,4 +4830,180 @@ fn numeric_as_f64(value: NumericValue) -> f64 {
 #[must_use]
 pub fn crate_id() -> &'static str {
     CRATE_NAME
+}
+
+#[cfg(test)]
+mod simplify_helpers_tests {
+    use boxes::{BoxBuilder, BoxMatch, match_box};
+    use signals::{SigMatch, match_sig};
+    use tlib::TreeArena;
+
+    use super::{eval_box_to_f64, eval_box_to_i32, is_box_numeric, propagate_box_and_simplify};
+
+    /// Build `Seq(Par(Int(a), Int(b)), Add)` — the box-calculus encoding of `a + b`.
+    fn make_int_add(arena: &mut TreeArena, a: i32, b: i32) -> tlib::TreeId {
+        let mut bld = BoxBuilder::new(arena);
+        let la = bld.int(a);
+        let lb = bld.int(b);
+        let par = bld.par(la, lb);
+        let add = bld.add();
+        bld.seq(par, add)
+    }
+
+    /// Build `Seq(Par(Real(a), Real(b)), Mul)`.
+    fn make_real_mul(arena: &mut TreeArena, a: f64, b: f64) -> tlib::TreeId {
+        let mut bld = BoxBuilder::new(arena);
+        let la = bld.real(a);
+        let lb = bld.real(b);
+        let par = bld.par(la, lb);
+        let mul = bld.mul();
+        bld.seq(par, mul)
+    }
+
+    // ── propagate_box_and_simplify ─────────────────────────────────────────────
+
+    /// 0→1 box `Seq(Par(Int(2), Int(3)), Add)` → `SigInt(5)`.
+    ///
+    /// C++ equivalent: `boxPropagateSig(nil, box(2+3), [])` + `simplify` → `sigInt(5)`.
+    #[test]
+    fn propagate_box_and_simplify_int_add() {
+        let mut arena = TreeArena::default();
+        let box_add = make_int_add(&mut arena, 2, 3);
+        let result = propagate_box_and_simplify(&mut arena, box_add);
+        assert!(result.is_some(), "expected Some(sig), got None");
+        assert!(
+            matches!(match_sig(&arena, result.unwrap()), SigMatch::Int(5)),
+            "expected SigInt(5)"
+        );
+    }
+
+    /// `Seq(Par(Real(0.5), Real(2.0)), Mul)` → `SigReal(1.0)`.
+    #[test]
+    fn propagate_box_and_simplify_float_mul() {
+        let mut arena = TreeArena::default();
+        let box_mul = make_real_mul(&mut arena, 0.5, 2.0);
+        let result = propagate_box_and_simplify(&mut arena, box_mul);
+        assert!(result.is_some(), "expected Some(sig), got None");
+        let SigMatch::Real(v) = match_sig(&arena, result.unwrap()) else {
+            panic!("expected SigReal");
+        };
+        assert!((v - 1.0).abs() < 1e-12, "expected 1.0, got {v}");
+    }
+
+    /// Wire (1→1) has inputs — `propagate_box_and_simplify` returns `None`.
+    #[test]
+    fn propagate_box_and_simplify_wire_is_none() {
+        let mut arena = TreeArena::default();
+        let wire = BoxBuilder::new(&mut arena).wire();
+        assert!(
+            propagate_box_and_simplify(&mut arena, wire).is_none(),
+            "Wire (1→1) should return None"
+        );
+    }
+
+    // ── is_box_numeric ─────────────────────────────────────────────────────────
+
+    /// Literal `boxInt(7)` is already numeric — fast path returns `Some(boxInt(7))`.
+    #[test]
+    fn is_box_numeric_literal_int() {
+        let mut arena = TreeArena::default();
+        let b7 = BoxBuilder::new(&mut arena).int(7);
+        let result = is_box_numeric(&mut arena, b7);
+        assert!(result.is_some());
+        assert!(matches!(match_box(&arena, result.unwrap()), BoxMatch::Int(7)));
+    }
+
+    /// Arithmetic `Seq(Par(Int(2), Int(3)), Add)` → `Some(boxInt(5))` via propagation.
+    ///
+    /// C++ equivalent: `isBoxNumeric(box(2+3), out)` → `out = boxInt(5)`.
+    #[test]
+    fn is_box_numeric_arithmetic_expression() {
+        let mut arena = TreeArena::default();
+        let box_add = make_int_add(&mut arena, 2, 3);
+        let result = is_box_numeric(&mut arena, box_add);
+        assert!(result.is_some(), "expected Some");
+        assert!(
+            matches!(match_box(&arena, result.unwrap()), BoxMatch::Int(5)),
+            "expected boxInt(5)"
+        );
+    }
+
+    /// Wire (1 input) is not a 0-input box — `is_box_numeric` returns `None`.
+    #[test]
+    fn is_box_numeric_wire_is_none() {
+        let mut arena = TreeArena::default();
+        let wire = BoxBuilder::new(&mut arena).wire();
+        assert!(is_box_numeric(&mut arena, wire).is_none());
+    }
+
+    // ── eval_box_to_f64 ────────────────────────────────────────────────────────
+
+    /// `boxReal(3.14)` → `Ok(3.14)`.
+    ///
+    /// C++ equivalent: `eval2double(boxReal(3.14), …)` → `3.14`.
+    #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is deliberately chosen test data, not an approximation of PI
+    fn eval_box_to_f64_literal() {
+        let mut arena = TreeArena::default();
+        let b = BoxBuilder::new(&mut arena).real(3.14);
+        let result = eval_box_to_f64(&mut arena, b);
+        assert!(result.is_ok());
+        assert!((result.unwrap() - 3.14).abs() < 1e-12);
+    }
+
+    /// `boxInt(4)` → `Ok(4.0)` (integer promoted to f64).
+    #[test]
+    fn eval_box_to_f64_from_int() {
+        let mut arena = TreeArena::default();
+        let b = BoxBuilder::new(&mut arena).int(4);
+        let result = eval_box_to_f64(&mut arena, b);
+        assert!(result.is_ok());
+        assert!((result.unwrap() - 4.0).abs() < 1e-12);
+    }
+
+    // ── eval_box_to_i32 ────────────────────────────────────────────────────────
+
+    /// `boxInt(5)` → `Ok(5)`.
+    ///
+    /// C++ equivalent: `eval2int(boxInt(5), …)` → `5`.
+    #[test]
+    fn eval_box_to_i32_literal() {
+        let mut arena = TreeArena::default();
+        let b = BoxBuilder::new(&mut arena).int(5);
+        assert_eq!(eval_box_to_i32(&mut arena, b).unwrap(), 5);
+    }
+
+    /// Arithmetic `Seq(Par(Int(1), Int(1)), Add)` → `Ok(2)`.
+    ///
+    /// C++ equivalent: `eval2int(box(1+1), …)` → `2`.
+    #[test]
+    fn eval_box_to_i32_arithmetic() {
+        let mut arena = TreeArena::default();
+        let box_add = make_int_add(&mut arena, 1, 1);
+        assert_eq!(eval_box_to_i32(&mut arena, box_add).unwrap(), 2);
+    }
+
+    /// Wire (not a constant 0→1 box) → `Err(NotAConstantExpression)`.
+    #[test]
+    fn eval_box_to_i32_wire_is_err() {
+        let mut arena = TreeArena::default();
+        let wire = BoxBuilder::new(&mut arena).wire();
+        assert!(eval_box_to_i32(&mut arena, wire).is_err());
+    }
+
+    // ── simplify_const integration ─────────────────────────────────────────────
+
+    /// `sigAdd(sigInt(2), sigInt(3))` simplifies to `SigInt(5)` via `normalize::simplify_const`.
+    #[test]
+    fn simplify_const_folds_int_add() {
+        use normalize::simplify_const;
+        use signals::SigBuilder;
+        let mut arena = TreeArena::default();
+        let mut sb = SigBuilder::new(&mut arena);
+        let two = sb.int(2);
+        let three = sb.int(3);
+        let sum = sb.add(two, three);
+        let result = simplify_const(&mut arena, sum);
+        assert!(matches!(match_sig(&arena, result), SigMatch::Int(5)));
+    }
 }

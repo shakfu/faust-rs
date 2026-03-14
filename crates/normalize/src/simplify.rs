@@ -29,9 +29,9 @@ use tlib::TreeArena;
 use crate::mterm::{is_minus_one, is_negative_num, is_num, is_one, is_zero, minus_num, mul_nums};
 use crate::normalize::{normalize_add_term, normalize_delay_term, normalize_delay1_term};
 
-// ─── Public entry point ───────────────────────────────────────────────────────
+// ─── Public entry points ──────────────────────────────────────────────────────
 
-/// Simplify a signal tree.
+/// Simplify a signal tree with full type context.
 ///
 /// Recursively maps [`simplification`] over the graph using a memoised
 /// depth-first traversal.  Each unique signal node is simplified at most once
@@ -45,6 +45,34 @@ pub(crate) fn simplify(
 ) -> SigId {
     let mut cache: HashMap<SigId, Option<SigId>> = HashMap::new();
     sig_map(arena, &mut cache, types, sig)
+}
+
+/// Simplify a signal tree without type context.
+///
+/// Equivalent to [`simplify`] with an empty type map.  Sufficient for
+/// compile-time constant folding at evaluation time, before type annotation
+/// has been performed (e.g. slider bounds, route parameters, numeric boxing).
+///
+/// # Example
+///
+/// ```rust
+/// # use normalize::simplify_const;
+/// # use signals::{SigBuilder, SigMatch, match_sig};
+/// # use tlib::TreeArena;
+/// # let mut arena = TreeArena::default();
+/// # let mut b = SigBuilder::new(&mut arena);
+/// # let two   = b.int(2);
+/// # let three  = b.int(3);
+/// # let sum    = b.add(two, three);
+/// let result = simplify_const(&mut arena, sum);
+/// assert!(matches!(match_sig(&arena, result), SigMatch::Int(5)));
+/// ```
+///
+/// C++ equivalent: `simplify(sig)` — called inside `eval.cpp` for constant
+/// box expressions, using a global `SIMPLIFIED` cache as key.
+pub fn simplify_const(arena: &mut TreeArena, sig: SigId) -> SigId {
+    let types = HashMap::new();
+    simplify(arena, &types, sig)
 }
 
 // ─── Graph traversal ──────────────────────────────────────────────────────────

@@ -27,6 +27,8 @@ pub mod normalform;
 pub(crate) mod normalize;
 pub(crate) mod simplify;
 
+pub use simplify::simplify_const;
+
 pub const CRATE_NAME: &str = "normalize";
 
 #[must_use]
