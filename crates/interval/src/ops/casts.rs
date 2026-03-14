@@ -4,7 +4,7 @@
 //! `intervalIntCast.cpp`, `intervalFloatCast.cpp`, `intervalIntNum.cpp`,
 //! `intervalFloatNum.cpp`, `intervalLabel.cpp`
 
-use crate::{empty, singleton, saturated_int_cast, Interval};
+use crate::{Interval, empty, saturated_int_cast, singleton};
 
 // -------------------------------------------------------------------------
 // IntCast
@@ -16,7 +16,9 @@ use crate::{empty, singleton, saturated_int_cast, Interval};
 /// `intervalIntCast.cpp`
 #[must_use]
 pub fn int_cast(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
     Interval::new(
         saturated_int_cast(x.lo()) as f64,
         saturated_int_cast(x.hi()) as f64,
@@ -34,7 +36,9 @@ pub fn int_cast(x: Interval) -> Interval {
 /// `intervalFloatCast.cpp`
 #[must_use]
 pub fn float_cast(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
     Interval::new(x.lo(), x.hi(), x.lsb().min(-1))
 }
 

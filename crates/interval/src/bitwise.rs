@@ -29,35 +29,59 @@ pub struct UInterval {
 }
 
 /// Empty unsigned interval sentinel. C++ `UEMPTY = {UINT_MAX, 0}`.
-pub const UEMPTY: UInterval = UInterval { lo: u32::MAX, hi: 0 };
+pub const UEMPTY: UInterval = UInterval {
+    lo: u32::MAX,
+    hi: 0,
+};
 
 /// Empty signed interval sentinel. C++ `SEMPTY = {INT_MAX, INT_MIN}`.
-pub const SEMPTY: SInterval = SInterval { lo: i32::MAX, hi: i32::MIN };
+pub const SEMPTY: SInterval = SInterval {
+    lo: i32::MAX,
+    hi: i32::MIN,
+};
 
 /// Test emptiness: lo > hi.
 #[inline]
 #[must_use]
-pub fn is_empty_u(i: UInterval) -> bool { i.lo > i.hi }
+pub fn is_empty_u(i: UInterval) -> bool {
+    i.lo > i.hi
+}
 
 #[inline]
 #[must_use]
-pub fn is_empty_s(i: SInterval) -> bool { i.lo > i.hi }
+pub fn is_empty_s(i: SInterval) -> bool {
+    i.lo > i.hi
+}
 
 // -------------------------------------------------------------------------
 // Union (operator+ for BitwiseInterval in C++)
 // -------------------------------------------------------------------------
 
 fn union_u(a: UInterval, b: UInterval) -> UInterval {
-    if is_empty_u(a) { return b; }
-    if is_empty_u(b) { return a; }
-    UInterval { lo: a.lo.min(b.lo), hi: a.hi.max(b.hi) }
+    if is_empty_u(a) {
+        return b;
+    }
+    if is_empty_u(b) {
+        return a;
+    }
+    UInterval {
+        lo: a.lo.min(b.lo),
+        hi: a.hi.max(b.hi),
+    }
 }
 
 #[allow(dead_code)]
 fn union_s(a: SInterval, b: SInterval) -> SInterval {
-    if is_empty_s(a) { return b; }
-    if is_empty_s(b) { return a; }
-    SInterval { lo: a.lo.min(b.lo), hi: a.hi.max(b.hi) }
+    if is_empty_s(a) {
+        return b;
+    }
+    if is_empty_s(b) {
+        return a;
+    }
+    SInterval {
+        lo: a.lo.min(b.lo),
+        hi: a.hi.max(b.hi),
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -68,18 +92,38 @@ fn union_s(a: SInterval, b: SInterval) -> SInterval {
 ///
 /// C++ `signSplit`.
 pub fn sign_split(x: SInterval) -> (UInterval, UInterval) {
-    if is_empty_s(x) { return (UEMPTY, UEMPTY); }
+    if is_empty_s(x) {
+        return (UEMPTY, UEMPTY);
+    }
     if x.hi < 0 {
         // All negative: treat bit-pattern as unsigned.
-        return (UInterval { lo: x.lo as u32, hi: x.hi as u32 }, UEMPTY);
+        return (
+            UInterval {
+                lo: x.lo as u32,
+                hi: x.hi as u32,
+            },
+            UEMPTY,
+        );
     }
     if x.lo >= 0 {
-        return (UEMPTY, UInterval { lo: x.lo as u32, hi: x.hi as u32 });
+        return (
+            UEMPTY,
+            UInterval {
+                lo: x.lo as u32,
+                hi: x.hi as u32,
+            },
+        );
     }
     // Straddles zero.
     (
-        UInterval { lo: x.lo as u32, hi: u32::MAX },
-        UInterval { lo: 0, hi: x.hi as u32 },
+        UInterval {
+            lo: x.lo as u32,
+            hi: u32::MAX,
+        },
+        UInterval {
+            lo: 0,
+            hi: x.hi as u32,
+        },
     )
 }
 
@@ -88,13 +132,24 @@ pub fn sign_split(x: SInterval) -> (UInterval, UInterval) {
 /// C++ `signMerge`.
 pub fn sign_merge(np: UInterval, pp: UInterval) -> SInterval {
     if is_empty_u(np) {
-        if is_empty_u(pp) { return SEMPTY; }
-        return SInterval { lo: pp.lo as i32, hi: pp.hi as i32 };
+        if is_empty_u(pp) {
+            return SEMPTY;
+        }
+        return SInterval {
+            lo: pp.lo as i32,
+            hi: pp.hi as i32,
+        };
     }
     if is_empty_u(pp) {
-        return SInterval { lo: np.lo as i32, hi: np.hi as i32 };
+        return SInterval {
+            lo: np.lo as i32,
+            hi: np.hi as i32,
+        };
     }
-    SInterval { lo: np.lo as i32, hi: pp.hi as i32 }
+    SInterval {
+        lo: np.lo as i32,
+        hi: pp.hi as i32,
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -102,11 +157,17 @@ pub fn sign_merge(np: UInterval, pp: UInterval) -> SInterval {
 // -------------------------------------------------------------------------
 
 pub fn bitwise_unsigned_not(a: UInterval) -> UInterval {
-    UInterval { lo: !a.hi, hi: !a.lo }
+    UInterval {
+        lo: !a.hi,
+        hi: !a.lo,
+    }
 }
 
 pub fn bitwise_signed_not(a: SInterval) -> SInterval {
-    SInterval { lo: !a.hi, hi: !a.lo }
+    SInterval {
+        lo: !a.hi,
+        hi: !a.lo,
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -114,11 +175,17 @@ pub fn bitwise_signed_not(a: SInterval) -> SInterval {
 // -------------------------------------------------------------------------
 
 fn msb32(mut x: u32) -> u32 {
-    x |= x >> 1; x |= x >> 2; x |= x >> 4; x |= x >> 8; x |= x >> 16;
+    x |= x >> 1;
+    x |= x >> 2;
+    x |= x >> 4;
+    x |= x >> 8;
+    x |= x >> 16;
     x & !(x >> 1)
 }
 
-fn contains_u(i: UInterval, x: u32) -> bool { i.lo <= x && x <= i.hi }
+fn contains_u(i: UInterval, x: u32) -> bool {
+    i.lo <= x && x <= i.hi
+}
 
 fn split_interval(x: UInterval) -> (u32, UInterval, UInterval) {
     if x.lo == 0 && x.hi == 0 {
@@ -129,12 +196,23 @@ fn split_interval(x: UInterval) -> (u32, UInterval, UInterval) {
     if m <= x.lo {
         return (m, UInterval { lo: 1, hi: 0 }, x); // no split needed
     }
-    (m, UInterval { lo: x.lo, hi: m - 1 }, UInterval { lo: m, hi: x.hi })
+    (
+        m,
+        UInterval {
+            lo: x.lo,
+            hi: m - 1,
+        },
+        UInterval { lo: m, hi: x.hi },
+    )
 }
 
 fn hi_or2(a: UInterval, b: UInterval) -> u32 {
-    if a.lo == 0 && a.hi == 0 { return b.hi; }
-    if b.lo == 0 && b.hi == 0 { return a.hi; }
+    if a.lo == 0 && a.hi == 0 {
+        return b.hi;
+    }
+    if b.lo == 0 && b.hi == 0 {
+        return a.hi;
+    }
 
     let (ma, a0, a1) = split_interval(a);
     let (mb, b0, b1) = split_interval(b);
@@ -145,16 +223,38 @@ fn hi_or2(a: UInterval, b: UInterval) -> u32 {
     }
 
     if mb > ma {
-        if contains_u(a, mb - 1) { return 2 * mb - 1; }
-        return hi_or2(UInterval { lo: b1.lo - mb, hi: b1.hi - mb }, a) + mb;
+        if contains_u(a, mb - 1) {
+            return 2 * mb - 1;
+        }
+        return hi_or2(
+            UInterval {
+                lo: b1.lo - mb,
+                hi: b1.hi - mb,
+            },
+            a,
+        ) + mb;
     }
     if ma > mb {
-        if contains_u(b, ma - 1) { return 2 * ma - 1; }
-        return hi_or2(UInterval { lo: a1.lo - ma, hi: a1.hi - ma }, b) + ma;
+        if contains_u(b, ma - 1) {
+            return 2 * ma - 1;
+        }
+        return hi_or2(
+            UInterval {
+                lo: a1.lo - ma,
+                hi: a1.hi - ma,
+            },
+            b,
+        ) + ma;
     }
     // ma == mb != 0
-    let a1s = UInterval { lo: a1.lo - ma, hi: a1.hi - ma };
-    let b1s = UInterval { lo: b1.lo - mb, hi: b1.hi - mb };
+    let a1s = UInterval {
+        lo: a1.lo - ma,
+        hi: a1.hi - ma,
+    };
+    let b1s = UInterval {
+        lo: b1.lo - mb,
+        hi: b1.hi - mb,
+    };
     if is_empty_u(a0) && is_empty_u(b0) {
         return hi_or2(a1s, b1s) + ma;
     }
@@ -168,28 +268,48 @@ fn hi_or2(a: UInterval, b: UInterval) -> u32 {
 }
 
 fn lo_or2(a: UInterval, b: UInterval) -> u32 {
-    if is_empty_u(a) || is_empty_u(b) { return 0; }
-    if a.lo == 0 { return b.lo; }
-    if b.lo == 0 { return a.lo; }
+    if is_empty_u(a) || is_empty_u(b) {
+        return 0;
+    }
+    if a.lo == 0 {
+        return b.lo;
+    }
+    if b.lo == 0 {
+        return a.lo;
+    }
 
     let (ma, a0, a1) = split_interval(a);
     let (mb, b0, b1) = split_interval(b);
     debug_assert!(ma != 0 && mb != 0);
 
-    let a1s = UInterval { lo: a1.lo - ma, hi: a1.hi - ma };
-    let b1s = UInterval { lo: b1.lo - mb, hi: b1.hi - mb };
+    let a1s = UInterval {
+        lo: a1.lo - ma,
+        hi: a1.hi - ma,
+    };
+    let b1s = UInterval {
+        lo: b1.lo - mb,
+        hi: b1.hi - mb,
+    };
 
     if ma > mb {
-        if is_empty_u(a0) { return lo_or2(a1s, b) | ma; }
+        if is_empty_u(a0) {
+            return lo_or2(a1s, b) | ma;
+        }
         return lo_or2(a0, b);
     }
     if mb > ma {
-        if is_empty_u(b0) { return lo_or2(a, b1s) | mb; }
+        if is_empty_u(b0) {
+            return lo_or2(a, b1s) | mb;
+        }
         return lo_or2(a, b0);
     }
     // ma == mb
-    if !is_empty_u(a0) && !is_empty_u(b0) { return lo_or2(a0, b0); }
-    if is_empty_u(a0) && is_empty_u(b0) { return lo_or2(a1s, b1s) | ma; }
+    if !is_empty_u(a0) && !is_empty_u(b0) {
+        return lo_or2(a0, b0);
+    }
+    if is_empty_u(a0) && is_empty_u(b0) {
+        return lo_or2(a1s, b1s) | ma;
+    }
     if is_empty_u(a0) {
         return (lo_or2(a1s, b0) | ma).min(lo_or2(a1s, b1s) | ma);
     }
@@ -197,11 +317,22 @@ fn lo_or2(a: UInterval, b: UInterval) -> u32 {
 }
 
 pub fn bitwise_unsigned_or(a: UInterval, b: UInterval) -> UInterval {
-    if a == (UInterval { lo: 0, hi: 0 }) { return b; }
-    if b == (UInterval { lo: 0, hi: 0 }) { return a; }
-    if is_empty_u(a) { return a; }
-    if is_empty_u(b) { return b; }
-    UInterval { lo: lo_or2(a, b), hi: hi_or2(a, b) }
+    if a == (UInterval { lo: 0, hi: 0 }) {
+        return b;
+    }
+    if b == (UInterval { lo: 0, hi: 0 }) {
+        return a;
+    }
+    if is_empty_u(a) {
+        return a;
+    }
+    if is_empty_u(b) {
+        return b;
+    }
+    UInterval {
+        lo: lo_or2(a, b),
+        hi: hi_or2(a, b),
+    }
 }
 
 pub fn bitwise_signed_or(a: SInterval, b: SInterval) -> SInterval {
@@ -219,11 +350,17 @@ pub fn bitwise_signed_or(a: SInterval, b: SInterval) -> SInterval {
 // -------------------------------------------------------------------------
 
 pub fn bitwise_unsigned_and(a: UInterval, b: UInterval) -> UInterval {
-    bitwise_unsigned_not(bitwise_unsigned_or(bitwise_unsigned_not(a), bitwise_unsigned_not(b)))
+    bitwise_unsigned_not(bitwise_unsigned_or(
+        bitwise_unsigned_not(a),
+        bitwise_unsigned_not(b),
+    ))
 }
 
 pub fn bitwise_signed_and(a: SInterval, b: SInterval) -> SInterval {
-    bitwise_signed_not(bitwise_signed_or(bitwise_signed_not(a), bitwise_signed_not(b)))
+    bitwise_signed_not(bitwise_signed_or(
+        bitwise_signed_not(a),
+        bitwise_signed_not(b),
+    ))
 }
 
 // -------------------------------------------------------------------------

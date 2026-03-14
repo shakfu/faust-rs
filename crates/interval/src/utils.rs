@@ -26,7 +26,11 @@ pub fn max4(a: f64, b: f64, c: f64, d: f64) -> f64 {
 #[inline]
 #[must_use]
 pub fn min_val_abs(x: Interval) -> f64 {
-    if x.lo().abs() < x.hi().abs() { x.lo() } else { x.hi() }
+    if x.lo().abs() < x.hi().abs() {
+        x.lo()
+    } else {
+        x.hi()
+    }
 }
 
 /// The bound of `x` with the largest absolute value.
@@ -35,7 +39,11 @@ pub fn min_val_abs(x: Interval) -> f64 {
 #[inline]
 #[must_use]
 pub fn max_val_abs(x: Interval) -> f64 {
-    if x.lo().abs() < x.hi().abs() { x.hi() } else { x.lo() }
+    if x.lo().abs() < x.hi().abs() {
+        x.hi()
+    } else {
+        x.lo()
+    }
 }
 
 /// Direction of the interior at the minimum absolute value bound.

@@ -42,7 +42,9 @@ impl std::error::Error for TypeError {}
 /// `mergenature(ConstTypes v)`
 #[must_use]
 pub fn merge_nature(types: &[SigType]) -> Nature {
-    types.iter().fold(Nature::Int, |acc, t| acc.join(t.nature()))
+    types
+        .iter()
+        .fold(Nature::Int, |acc, t| acc.join(t.nature()))
 }
 
 /// Join all variabilities.
@@ -51,25 +53,33 @@ pub fn merge_nature(types: &[SigType]) -> Nature {
 /// `mergevariability(ConstTypes v)`
 #[must_use]
 pub fn merge_variability(types: &[SigType]) -> Variability {
-    types.iter().fold(Variability::Konst, |acc, t| acc.join(t.variability()))
+    types
+        .iter()
+        .fold(Variability::Konst, |acc, t| acc.join(t.variability()))
 }
 
 /// Join all computabilities.
 #[must_use]
 pub fn merge_computability(types: &[SigType]) -> Computability {
-    types.iter().fold(Computability::Comp, |acc, t| acc.join(t.computability()))
+    types
+        .iter()
+        .fold(Computability::Comp, |acc, t| acc.join(t.computability()))
 }
 
 /// Join all vectorabilities.
 #[must_use]
 pub fn merge_vectorability(types: &[SigType]) -> Vectorability {
-    types.iter().fold(Vectorability::Vect, |acc, t| acc.join(t.vectorability()))
+    types
+        .iter()
+        .fold(Vectorability::Vect, |acc, t| acc.join(t.vectorability()))
 }
 
 /// Join all booleans.
 #[must_use]
 pub fn merge_boolean(types: &[SigType]) -> Boolean {
-    types.iter().fold(Boolean::Num, |acc, t| acc.join(t.boolean()))
+    types
+        .iter()
+        .fold(Boolean::Num, |acc, t| acc.join(t.boolean()))
 }
 
 /// Reunion of all intervals.
@@ -78,7 +88,9 @@ pub fn merge_boolean(types: &[SigType]) -> Boolean {
 /// `mergeinterval(ConstTypes v)`
 #[must_use]
 pub fn merge_interval(types: &[SigType]) -> Interval {
-    types.iter().fold(interval::empty(), |acc, t| interval::reunion(acc, t.interval()))
+    types.iter().fold(interval::empty(), |acc, t| {
+        interval::reunion(acc, t.interval())
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -97,7 +109,9 @@ pub fn union_types(a: SigType, b: SigType) -> SigType {
     match (a, b) {
         (SigType::Tuplet(ta), SigType::Tuplet(tb)) => {
             let len = ta.components.len().min(tb.components.len());
-            let components: Vec<SigType> = ta.components.into_iter()
+            let components: Vec<SigType> = ta
+                .components
+                .into_iter()
                 .zip(tb.components)
                 .take(len)
                 .map(|(ca, cb)| union_types(ca, cb))
@@ -109,13 +123,20 @@ pub fn union_types(a: SigType, b: SigType) -> SigType {
             make_table_type(content)
         }
         (a, b) => {
-            let nature        = a.nature().join(b.nature());
-            let variability   = a.variability().join(b.variability());
+            let nature = a.nature().join(b.nature());
+            let variability = a.variability().join(b.variability());
             let computability = a.computability().join(b.computability());
             let vectorability = a.vectorability().join(b.vectorability());
-            let boolean       = a.boolean().join(b.boolean());
-            let itv           = interval::reunion(a.interval(), b.interval());
-            make_simple(nature, variability, computability, vectorability, boolean, itv)
+            let boolean = a.boolean().join(b.boolean());
+            let itv = interval::reunion(a.interval(), b.interval());
+            make_simple(
+                nature,
+                variability,
+                computability,
+                vectorability,
+                boolean,
+                itv,
+            )
         }
     }
 }
@@ -154,7 +175,7 @@ fn flatten_tuplet(t: SigType) -> Vec<SigType> {
 #[must_use]
 pub fn int_cast(t: SigType) -> SigType {
     let itv = interval::ops::casts::int_cast(t.interval());
-    let t   = t.with_nature(Nature::Int);
+    let t = t.with_nature(Nature::Int);
     t.with_interval(itv)
 }
 
@@ -235,7 +256,10 @@ pub fn check_int(t: &SigType) -> Result<(), TypeError> {
 /// `Type checkKonst(Type t)`
 pub fn check_konst(t: &SigType) -> Result<(), TypeError> {
     if t.variability() != Variability::Konst {
-        Err(TypeError(format!("expected constant signal, got {}: {t}", variability_name(t.variability()))))
+        Err(TypeError(format!(
+            "expected constant signal, got {}: {t}",
+            variability_name(t.variability())
+        )))
     } else {
         Ok(())
     }
@@ -247,7 +271,9 @@ pub fn check_konst(t: &SigType) -> Result<(), TypeError> {
 /// `Type checkInit(Type t)`
 pub fn check_init(t: &SigType) -> Result<(), TypeError> {
     if t.computability() == Computability::Exec {
-        Err(TypeError(format!("expected init-time signal, got exec: {t}")))
+        Err(TypeError(format!(
+            "expected init-time signal, got exec: {t}"
+        )))
     } else {
         Ok(())
     }
@@ -292,7 +318,7 @@ fn variability_name(v: Variability) -> &'static str {
     match v {
         Variability::Konst => "konst",
         Variability::Block => "block",
-        Variability::Samp  => "samp",
+        Variability::Samp => "samp",
     }
 }
 
@@ -303,19 +329,29 @@ fn variability_name(v: Variability) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factory::make_simple;
     use crate::enums::*;
+    use crate::factory::make_simple;
 
     fn simple_int() -> SigType {
-        make_simple(Nature::Int, Variability::Konst, Computability::Comp,
-                    Vectorability::Vect, Boolean::Num,
-                    interval::singleton(42.0))
+        make_simple(
+            Nature::Int,
+            Variability::Konst,
+            Computability::Comp,
+            Vectorability::Vect,
+            Boolean::Num,
+            interval::singleton(42.0),
+        )
     }
 
     fn simple_real() -> SigType {
-        make_simple(Nature::Real, Variability::Samp, Computability::Exec,
-                    Vectorability::Vect, Boolean::Num,
-                    interval::Interval::new_default())
+        make_simple(
+            Nature::Real,
+            Variability::Samp,
+            Computability::Exec,
+            Vectorability::Vect,
+            Boolean::Num,
+            interval::Interval::new_default(),
+        )
     }
 
     #[test]
@@ -350,18 +386,28 @@ mod tests {
 
     #[test]
     fn check_delay_interval_bounded() {
-        let t = make_simple(Nature::Int, Variability::Block, Computability::Init,
-                            Vectorability::Vect, Boolean::Num,
-                            interval::Interval::new(0.0, 1000.0, 0));
+        let t = make_simple(
+            Nature::Int,
+            Variability::Block,
+            Computability::Init,
+            Vectorability::Vect,
+            Boolean::Num,
+            interval::Interval::new(0.0, 1000.0, 0),
+        );
         assert_eq!(check_delay_interval(&t), Ok(1000));
     }
 
     #[test]
     fn check_delay_interval_unbounded_fails() {
         // Use a truly unbounded interval (infinite bound).
-        let t = make_simple(Nature::Real, Variability::Samp, Computability::Exec,
-                            Vectorability::Vect, Boolean::Num,
-                            interval::Interval::new(f64::NEG_INFINITY, f64::INFINITY, -24));
+        let t = make_simple(
+            Nature::Real,
+            Variability::Samp,
+            Computability::Exec,
+            Vectorability::Vect,
+            Boolean::Num,
+            interval::Interval::new(f64::NEG_INFINITY, f64::INFINITY, -24),
+        );
         assert!(check_delay_interval(&t).is_err());
     }
 

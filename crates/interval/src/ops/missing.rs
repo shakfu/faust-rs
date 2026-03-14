@@ -14,94 +14,159 @@
 
 use crate::Interval;
 
-fn zero() -> Interval { Interval::new(0.0, 0.0, 0) }
+fn zero() -> Interval {
+    Interval::new(0.0, 0.0, 0)
+}
 
 // -------------------------------------------------------------------------
 // Fix-point / IO family
 // -------------------------------------------------------------------------
 
 /// C++ `Nil()` → `interval(0)`.
-#[must_use] pub fn nil() -> Interval { zero() }
+#[must_use]
+pub fn nil() -> Interval {
+    zero()
+}
 
 /// C++ `FixPointUpdate` → `interval(0)`.
-#[must_use] pub fn fix_point_update(_x: Interval, _y: Interval) -> Interval { zero() }
+#[must_use]
+pub fn fix_point_update(_x: Interval, _y: Interval) -> Interval {
+    zero()
+}
 
 /// C++ `Input` → `interval(0)`.
-#[must_use] pub fn input(_c: Interval) -> Interval { zero() }
+#[must_use]
+pub fn input(_c: Interval) -> Interval {
+    zero()
+}
 
 /// C++ `Output` → `interval(0)`.
-#[must_use] pub fn output(_c: Interval, _y: Interval) -> Interval { zero() }
+#[must_use]
+pub fn output(_c: Interval, _y: Interval) -> Interval {
+    zero()
+}
 
 // -------------------------------------------------------------------------
 // Structural
 // -------------------------------------------------------------------------
 
 /// C++ `Attach` → `interval(0)`.
-#[must_use] pub fn attach(_x: Interval, _y: Interval) -> Interval { zero() }
+#[must_use]
+pub fn attach(_x: Interval, _y: Interval) -> Interval {
+    zero()
+}
 
 /// C++ `Highest` → `interval(0)`.
-#[must_use] pub fn highest(_x: Interval) -> Interval { zero() }
+#[must_use]
+pub fn highest(_x: Interval) -> Interval {
+    zero()
+}
 
 /// C++ `Lowest` → `interval(0)`.
-#[must_use] pub fn lowest(_x: Interval) -> Interval { zero() }
+#[must_use]
+pub fn lowest(_x: Interval) -> Interval {
+    zero()
+}
 
 /// C++ `BitCast` → `interval(0)`.
-#[must_use] pub fn bit_cast(_x: Interval) -> Interval { zero() }
+#[must_use]
+pub fn bit_cast(_x: Interval) -> Interval {
+    zero()
+}
 
 /// C++ `Select2` → `interval(0)`.
-#[must_use] pub fn select2(_sel: Interval, _on_false: Interval, _on_true: Interval) -> Interval { zero() }
+#[must_use]
+pub fn select2(_sel: Interval, _on_false: Interval, _on_true: Interval) -> Interval {
+    zero()
+}
 
 /// C++ `Prefix` → `interval(0)`.
-#[must_use] pub fn prefix(_x: Interval, _y: Interval) -> Interval { zero() }
+#[must_use]
+pub fn prefix(_x: Interval, _y: Interval) -> Interval {
+    zero()
+}
 
 // -------------------------------------------------------------------------
 // Table family
 // -------------------------------------------------------------------------
 
 /// C++ `RDTbl` → `interval(0)`.
-#[must_use] pub fn rd_tbl(_wtbl: Interval, _ri: Interval) -> Interval { zero() }
+#[must_use]
+pub fn rd_tbl(_wtbl: Interval, _ri: Interval) -> Interval {
+    zero()
+}
 
 /// C++ `WRTbl` → `interval(0)`.
-#[must_use] pub fn wr_tbl(_n: Interval, _g: Interval, _wi: Interval, _ws: Interval) -> Interval { zero() }
+#[must_use]
+pub fn wr_tbl(_n: Interval, _g: Interval, _wi: Interval, _ws: Interval) -> Interval {
+    zero()
+}
 
 /// C++ `Gen` → `interval(0)`.
-#[must_use] pub fn r#gen(_x: Interval) -> Interval { zero() }
+#[must_use]
+pub fn r#gen(_x: Interval) -> Interval {
+    zero()
+}
 
 // -------------------------------------------------------------------------
 // Soundfile family
 // -------------------------------------------------------------------------
 
 /// C++ `SoundFile` → `interval(0)`.
-#[must_use] pub fn sound_file(_label: Interval) -> Interval { zero() }
+#[must_use]
+pub fn sound_file(_label: Interval) -> Interval {
+    zero()
+}
 
 /// C++ `SoundFileRate` → `interval(0)`.
-#[must_use] pub fn sound_file_rate(_sf: Interval, _x: Interval) -> Interval { zero() }
+#[must_use]
+pub fn sound_file_rate(_sf: Interval, _x: Interval) -> Interval {
+    zero()
+}
 
 /// C++ `SoundFileLength` → `interval(0)`.
-#[must_use] pub fn sound_file_length(_sf: Interval, _x: Interval) -> Interval { zero() }
+#[must_use]
+pub fn sound_file_length(_sf: Interval, _x: Interval) -> Interval {
+    zero()
+}
 
 /// C++ `SoundFileBuffer` → `interval(0)`.
-#[must_use] pub fn sound_file_buffer(_sf: Interval, _x: Interval, _y: Interval, _z: Interval) -> Interval { zero() }
+#[must_use]
+pub fn sound_file_buffer(_sf: Interval, _x: Interval, _y: Interval, _z: Interval) -> Interval {
+    zero()
+}
 
 // -------------------------------------------------------------------------
 // Waveform
 // -------------------------------------------------------------------------
 
 /// C++ `Waveform` → `interval(0)`.
-#[must_use] pub fn waveform(_w: &[Interval]) -> Interval { zero() }
+#[must_use]
+pub fn waveform(_w: &[Interval]) -> Interval {
+    zero()
+}
 
 // -------------------------------------------------------------------------
 // Foreign function family
 // -------------------------------------------------------------------------
 
 /// C++ `ForeignFunction` → `interval(0)`.
-#[must_use] pub fn foreign_function(_ff: &[Interval]) -> Interval { zero() }
+#[must_use]
+pub fn foreign_function(_ff: &[Interval]) -> Interval {
+    zero()
+}
 
 /// C++ `ForeignVar` → `interval(0)`.
-#[must_use] pub fn foreign_var(_type_: Interval, _name: Interval, _file: Interval) -> Interval { zero() }
+#[must_use]
+pub fn foreign_var(_type_: Interval, _name: Interval, _file: Interval) -> Interval {
+    zero()
+}
 
 /// C++ `ForeignConst` → `interval(0)`.
-#[must_use] pub fn foreign_const(_type_: Interval, _name: Interval, _file: Interval) -> Interval { zero() }
+#[must_use]
+pub fn foreign_const(_type_: Interval, _name: Interval, _file: Interval) -> Interval {
+    zero()
+}
 
 // -------------------------------------------------------------------------
 // Tests

@@ -6,9 +6,9 @@
 //! `intervalLog10.cpp`, `intervalSqrt.cpp`, `intervalPow.cpp`,
 //! `intervalRemainder.cpp`
 
-use crate::{empty, intersection, reunion, Interval};
-use crate::utils::exact_precision_unary;
 use crate::saturated_int_cast;
+use crate::utils::exact_precision_unary;
+use crate::{Interval, empty, intersection, reunion};
 
 // -------------------------------------------------------------------------
 // Ceil
@@ -20,7 +20,9 @@ use crate::saturated_int_cast;
 /// `intervalCeil.cpp`
 #[must_use]
 pub fn ceil(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
     Interval::new(x.lo().ceil(), x.hi().ceil(), -1)
 }
 
@@ -34,7 +36,9 @@ pub fn ceil(x: Interval) -> Interval {
 /// `intervalFloor.cpp`
 #[must_use]
 pub fn floor(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
     Interval::new(x.lo().floor(), x.hi().floor(), -1)
 }
 
@@ -48,7 +52,9 @@ pub fn floor(x: Interval) -> Interval {
 /// `intervalRound.cpp`
 #[must_use]
 pub fn round(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
     Interval::new(x.lo().round(), x.hi().round(), 0i32.max(x.lsb()))
 }
 
@@ -63,9 +69,15 @@ pub fn round(x: Interval) -> Interval {
 /// `intervalRint.cpp`
 #[must_use]
 pub fn rint(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
     // rint rounds to nearest, ties to even.
-    Interval::new(x.lo().round_ties_even(), x.hi().round_ties_even(), 0i32.max(x.lsb()))
+    Interval::new(
+        x.lo().round_ties_even(),
+        x.hi().round_ties_even(),
+        0i32.max(x.lsb()),
+    )
 }
 
 // -------------------------------------------------------------------------
@@ -78,7 +90,9 @@ pub fn rint(x: Interval) -> Interval {
 /// `intervalExp.cpp`
 #[must_use]
 pub fn exp(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
 
     let u = (2.0_f64).powi(x.lsb());
     // Precision is worst at the lowest bound (smallest exp value → smallest
@@ -103,9 +117,13 @@ pub fn exp(x: Interval) -> Interval {
 /// `intervalLog.cpp`
 #[must_use]
 pub fn log(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
     let lo = x.lo().max(f64::MIN_POSITIVE);
-    if lo > x.hi() { return empty(); }
+    if lo > x.hi() {
+        return empty();
+    }
 
     let u = (2.0_f64).powi(x.lsb());
     // Precision worst at the highest bound where slope = 1/x is smallest.
@@ -129,15 +147,20 @@ pub fn log(x: Interval) -> Interval {
 /// `intervalLog10.cpp`
 #[must_use]
 pub fn log10(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
     let lo = x.lo().max(f64::MIN_POSITIVE);
-    if lo > x.hi() { return empty(); }
+    if lo > x.hi() {
+        return empty();
+    }
 
     let u = (2.0_f64).powi(x.lsb());
     let v = x.hi();
     let mut precision = exact_precision_unary(f64::log10, v, u);
     if precision == i32::MIN {
-        precision = (x.lsb() as f64 - v.abs().log2() - std::f64::consts::LOG2_10.log2()).floor() as i32;
+        precision =
+            (x.lsb() as f64 - v.abs().log2() - std::f64::consts::LOG2_10.log2()).floor() as i32;
     }
 
     Interval::new(lo.log10(), x.hi().log10(), precision)
@@ -153,9 +176,13 @@ pub fn log10(x: Interval) -> Interval {
 /// `intervalSqrt.cpp`
 #[must_use]
 pub fn sqrt(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
     let lo = x.lo().max(0.0);
-    if lo > x.hi() { return empty(); }
+    if lo > x.hi() {
+        return empty();
+    }
 
     let u = (2.0_f64).powi(x.lsb());
     // Precision worst at the highest bound.
@@ -180,7 +207,9 @@ pub fn sqrt(x: Interval) -> Interval {
 
 fn ipow_scalar(x: Interval, k: i32) -> Interval {
     debug_assert!(k >= 0);
-    if k == 0 { return Interval::new(1.0, 1.0, 0); }
+    if k == 0 {
+        return Interval::new(1.0, 1.0, 0);
+    }
 
     let precision = x.lsb().saturating_mul(k);
     // Even exponent: result is always non-negative.
@@ -195,7 +224,9 @@ fn ipow_scalar(x: Interval, k: i32) -> Interval {
 }
 
 fn i_pow(x: Interval, y: Interval) -> Interval {
-    if x.is_empty() || y.is_empty() { return empty(); }
+    if x.is_empty() || y.is_empty() {
+        return empty();
+    }
     let y0 = 0i32.max(saturated_int_cast(y.lo()));
     let y1 = 0i32.max(saturated_int_cast(y.hi()));
     let mut z = ipow_scalar(x, y0);
@@ -208,10 +239,12 @@ fn i_pow(x: Interval, y: Interval) -> Interval {
 }
 
 fn f_pow(x: Interval, y: Interval) -> Interval {
-    if x.is_empty() || y.is_empty() { return empty(); }
+    if x.is_empty() || y.is_empty() {
+        return empty();
+    }
     // x > 0: x^y = exp(y * log(x))
-    use crate::ops::arithmetic::mul as amul;
     use super::math::{exp as aexp, log as alog};
+    use crate::ops::arithmetic::mul as amul;
     aexp(amul(y, alog(x)))
 }
 

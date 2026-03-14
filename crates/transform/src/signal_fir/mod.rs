@@ -872,8 +872,8 @@ mod tests {
             b.proj(0, group)
         };
 
-        let prepared =
-            prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty()).expect("feedback group should prepare");
+        let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
+            .expect("feedback group should prepare");
         let out = compile_fastlane_without_ui(
             &prepared.arena,
             &prepared.outputs,
@@ -1027,8 +1027,8 @@ mod tests {
             b.proj(0, group)
         };
 
-        let prepared =
-            prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty()).expect("integer recursion should prepare");
+        let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
+            .expect("integer recursion should prepare");
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
 
         let out = compile_fastlane_without_ui(
@@ -1087,8 +1087,8 @@ mod tests {
             b.proj(0, group)
         };
 
-        let prepared =
-            prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty()).expect("integer abs recursion should prepare");
+        let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
+            .expect("integer abs recursion should prepare");
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
 
         let out = compile_fastlane_without_ui(

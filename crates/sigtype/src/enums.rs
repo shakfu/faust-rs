@@ -21,9 +21,9 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum Nature {
-    Int  = 0,
+    Int = 0,
     Real = 1,
-    Any  = 2,
+    Any = 2,
 }
 
 impl Nature {
@@ -59,7 +59,7 @@ impl Nature {
 pub enum Variability {
     Konst = 0,
     Block = 1,
-    Samp  = 3,
+    Samp = 3,
 }
 
 impl Variability {
@@ -123,8 +123,8 @@ impl Computability {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum Vectorability {
-    Vect     = 0,
-    Scal     = 1,
+    Vect = 0,
+    Scal = 1,
     TrueScal = 3,
 }
 
@@ -155,7 +155,7 @@ impl Vectorability {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum Boolean {
-    Num  = 0,
+    Num = 0,
     Bool = 1,
 }
 
@@ -163,7 +163,11 @@ impl Boolean {
     #[inline]
     #[must_use]
     pub fn join(self, other: Self) -> Self {
-        if (self as u8) | (other as u8) == 0 { Self::Num } else { Self::Bool }
+        if (self as u8) | (other as u8) == 0 {
+            Self::Num
+        } else {
+            Self::Bool
+        }
     }
 }
 
@@ -186,7 +190,10 @@ pub struct Res {
 
 impl Default for Res {
     fn default() -> Self {
-        Self { valid: false, index: 0 }
+        Self {
+            valid: false,
+            index: 0,
+        }
     }
 }
 
@@ -215,30 +222,57 @@ mod tests {
 
     #[test]
     fn variability_join() {
-        assert_eq!(Variability::Konst.join(Variability::Block), Variability::Block);
-        assert_eq!(Variability::Block.join(Variability::Samp),  Variability::Samp);
-        assert_eq!(Variability::Konst.join(Variability::Samp),  Variability::Samp);
-        assert_eq!(Variability::Samp.join(Variability::Samp),   Variability::Samp);
+        assert_eq!(
+            Variability::Konst.join(Variability::Block),
+            Variability::Block
+        );
+        assert_eq!(
+            Variability::Block.join(Variability::Samp),
+            Variability::Samp
+        );
+        assert_eq!(
+            Variability::Konst.join(Variability::Samp),
+            Variability::Samp
+        );
+        assert_eq!(Variability::Samp.join(Variability::Samp), Variability::Samp);
     }
 
     #[test]
     fn computability_join() {
-        assert_eq!(Computability::Comp.join(Computability::Init), Computability::Init);
-        assert_eq!(Computability::Init.join(Computability::Exec), Computability::Exec);
-        assert_eq!(Computability::Comp.join(Computability::Exec), Computability::Exec);
+        assert_eq!(
+            Computability::Comp.join(Computability::Init),
+            Computability::Init
+        );
+        assert_eq!(
+            Computability::Init.join(Computability::Exec),
+            Computability::Exec
+        );
+        assert_eq!(
+            Computability::Comp.join(Computability::Exec),
+            Computability::Exec
+        );
     }
 
     #[test]
     fn vectorability_join() {
-        assert_eq!(Vectorability::Vect.join(Vectorability::Scal),     Vectorability::Scal);
-        assert_eq!(Vectorability::Scal.join(Vectorability::TrueScal), Vectorability::TrueScal);
-        assert_eq!(Vectorability::Vect.join(Vectorability::TrueScal), Vectorability::TrueScal);
+        assert_eq!(
+            Vectorability::Vect.join(Vectorability::Scal),
+            Vectorability::Scal
+        );
+        assert_eq!(
+            Vectorability::Scal.join(Vectorability::TrueScal),
+            Vectorability::TrueScal
+        );
+        assert_eq!(
+            Vectorability::Vect.join(Vectorability::TrueScal),
+            Vectorability::TrueScal
+        );
     }
 
     #[test]
     fn boolean_join() {
         assert_eq!(Boolean::Num.join(Boolean::Bool), Boolean::Bool);
-        assert_eq!(Boolean::Num.join(Boolean::Num),  Boolean::Num);
+        assert_eq!(Boolean::Num.join(Boolean::Num), Boolean::Num);
     }
 
     #[test]

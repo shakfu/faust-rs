@@ -1417,8 +1417,8 @@ mod tests {
             (proj0, proj1)
         };
 
-        let prepared =
-            prepare_signals_for_fir(&arena, &[proj0, proj1], &ui::UiProgram::empty()).expect("closed recursion group");
+        let prepared = prepare_signals_for_fir(&arena, &[proj0, proj1], &ui::UiProgram::empty())
+            .expect("closed recursion group");
 
         assert_eq!(prepared.outputs.len(), 2);
         let SigMatch::Proj(_, left_group) = match_sig(&prepared.arena, prepared.outputs[0]) else {
@@ -1466,8 +1466,8 @@ mod tests {
             vec![waveform, read, mix]
         };
 
-        let prepared =
-            prepare_signals_for_fir(&arena, &outputs, &ui::UiProgram::empty()).expect("simple numeric typing should work");
+        let prepared = prepare_signals_for_fir(&arena, &outputs, &ui::UiProgram::empty())
+            .expect("simple numeric typing should work");
 
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
         assert_eq!(prepared.ty(prepared.outputs[1]), Some(SimpleSigType::Int));
@@ -1489,8 +1489,8 @@ mod tests {
             b.proj(0, group)
         };
 
-        let prepared =
-            prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty()).expect("recursive typing should converge");
+        let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
+            .expect("recursive typing should converge");
 
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Real));
     }
@@ -1515,8 +1515,8 @@ mod tests {
             b.proj(0, group)
         };
 
-        let prepared =
-            prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty()).expect("recursive int min should prepare");
+        let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
+            .expect("recursive int min should prepare");
 
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
         let SigMatch::Proj(_, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0])
@@ -1562,8 +1562,8 @@ mod tests {
             b.proj(0, group)
         };
 
-        let prepared =
-            prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty()).expect("recursive int abs should prepare");
+        let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
+            .expect("recursive int abs should prepare");
 
         assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
         let SigMatch::Proj(_, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0])
@@ -1599,8 +1599,8 @@ mod tests {
             b.delay(input, amount)
         };
 
-        let prepared =
-            prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty()).expect("delay promotion should succeed");
+        let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
+            .expect("delay promotion should succeed");
 
         let SigMatch::Delay(_, amount) = match_sig(&prepared.arena, prepared.outputs[0]) else {
             panic!("promoted output should stay SIGDELAY");
@@ -1622,8 +1622,8 @@ mod tests {
             b.select2(selector, then_value, else_value)
         };
 
-        let prepared =
-            prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty()).expect("select2 promotion should succeed");
+        let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
+            .expect("select2 promotion should succeed");
 
         let SigMatch::Select2(selector, then_value, else_value) =
             match_sig(&prepared.arena, prepared.outputs[0])
@@ -1658,8 +1658,8 @@ mod tests {
             b.rdtbl(waveform, index)
         };
 
-        let prepared =
-            prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty()).expect("table promotion should succeed");
+        let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
+            .expect("table promotion should succeed");
 
         let SigMatch::RdTbl(_, index) = match_sig(&prepared.arena, prepared.outputs[0]) else {
             panic!("promoted output should stay SIGRDTBL");

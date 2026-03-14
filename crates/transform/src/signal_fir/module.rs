@@ -1359,7 +1359,9 @@ impl<'a> SignalToFirLower<'a> {
         };
         let as_nonneg_int = |id: SigId| -> Option<i32> {
             if let SigMatch::Int(n) = match_sig(self.arena, id) {
-                if n >= 0 { return Some(n); }
+                if n >= 0 {
+                    return Some(n);
+                }
             }
             None
         };

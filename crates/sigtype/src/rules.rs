@@ -24,9 +24,7 @@ use ui::{ControlId, ControlKind, UiProgram};
 
 use crate::enums::{Boolean, Computability, Nature, Variability, Vectorability};
 use crate::factory::{make_maximal, make_simple, make_table_type};
-use crate::ops::{
-    check_delay_interval, float_cast, int_cast, samp_cast, union_types,
-};
+use crate::ops::{check_delay_interval, float_cast, int_cast, samp_cast, union_types};
 use crate::types::SigType;
 
 /// Typed failures returned by the type inference pass.
@@ -46,10 +44,10 @@ impl std::error::Error for TypeError {}
 /// Carries memoised results in `env`; recursive group heads are seeded with
 /// `make_maximal()` to break cycles before the fixed-point loop refines them.
 pub struct TypeAnnotator<'a> {
-    arena:      &'a TreeArena,
+    arena: &'a TreeArena,
     ui_program: &'a UiProgram,
     /// Memoised type results.
-    env:        HashMap<SigId, SigType>,
+    env: HashMap<SigId, SigType>,
     /// Nodes whose type is currently being computed (cycle guard).
     in_progress: HashSet<SigId>,
 }
@@ -70,10 +68,7 @@ impl<'a> TypeAnnotator<'a> {
     ///
     /// # C++ source
     /// `typeAnnotation(Tree sig, bool causality)` entry point.
-    pub fn annotate(
-        &mut self,
-        outputs: &[SigId],
-    ) -> Result<HashMap<SigId, SigType>, TypeError> {
+    pub fn annotate(&mut self, outputs: &[SigId]) -> Result<HashMap<SigId, SigType>, TypeError> {
         for &out in outputs {
             self.infer(out)?;
         }
@@ -110,14 +105,20 @@ impl<'a> TypeAnnotator<'a> {
         match match_sig(self.arena, sig) {
             // ── Literals ────────────────────────────────────────────────────
             SigMatch::Int(n) => Ok(make_simple(
-                Nature::Int, Variability::Konst, Computability::Comp,
-                Vectorability::Vect, Boolean::Num,
+                Nature::Int,
+                Variability::Konst,
+                Computability::Comp,
+                Vectorability::Vect,
+                Boolean::Num,
                 interval::singleton(f64::from(n)),
             )),
 
             SigMatch::Real(r) => Ok(make_simple(
-                Nature::Real, Variability::Konst, Computability::Comp,
-                Vectorability::Vect, Boolean::Num,
+                Nature::Real,
+                Variability::Konst,
+                Computability::Comp,
+                Vectorability::Vect,
+                Boolean::Num,
                 interval::singleton(r),
             )),
 
@@ -126,8 +127,11 @@ impl<'a> TypeAnnotator<'a> {
             // Audio inputs carry the normalised audio range [-1, 1], not an
             // uninformative placeholder.  The lsb=-24 matches 24-bit precision.
             SigMatch::Input(_) => Ok(make_simple(
-                Nature::Real, Variability::Samp, Computability::Exec,
-                Vectorability::Vect, Boolean::Num,
+                Nature::Real,
+                Variability::Samp,
+                Computability::Exec,
+                Vectorability::Vect,
+                Boolean::Num,
                 interval::Interval::new(-1.0, 1.0, -24),
             )),
 
@@ -213,19 +217,19 @@ impl<'a> TypeAnnotator<'a> {
             // ── Unary math (always Real) ─────────────────────────────────────
             SigMatch::Abs(x) => self.infer_unary_math(x, interval::ops::arithmetic::abs),
             SigMatch::Sqrt(x) => self.infer_unary_math(x, interval::ops::math::sqrt),
-            SigMatch::Exp(x)  => self.infer_unary_math(x, interval::ops::math::exp),
-            SigMatch::Log(x)  => self.infer_unary_math(x, interval::ops::math::log),
+            SigMatch::Exp(x) => self.infer_unary_math(x, interval::ops::math::exp),
+            SigMatch::Log(x) => self.infer_unary_math(x, interval::ops::math::log),
             SigMatch::Log10(x) => self.infer_unary_math(x, interval::ops::math::log10),
             SigMatch::Floor(x) => self.infer_unary_math(x, interval::ops::math::floor),
-            SigMatch::Ceil(x)  => self.infer_unary_math(x, interval::ops::math::ceil),
-            SigMatch::Rint(x)  => self.infer_unary_math(x, interval::ops::math::rint),
+            SigMatch::Ceil(x) => self.infer_unary_math(x, interval::ops::math::ceil),
+            SigMatch::Rint(x) => self.infer_unary_math(x, interval::ops::math::rint),
             SigMatch::Round(x) => self.infer_unary_math(x, interval::ops::math::round),
-            SigMatch::Sin(x)   => self.infer_unary_math(x, interval::ops::trig::sin),
-            SigMatch::Cos(x)   => self.infer_unary_math(x, interval::ops::trig::cos),
-            SigMatch::Tan(x)   => self.infer_unary_math(x, interval::ops::trig::tan),
-            SigMatch::Asin(x)  => self.infer_unary_math(x, interval::ops::trig::asin),
-            SigMatch::Acos(x)  => self.infer_unary_math(x, interval::ops::trig::acos),
-            SigMatch::Atan(x)  => self.infer_unary_math(x, interval::ops::trig::atan),
+            SigMatch::Sin(x) => self.infer_unary_math(x, interval::ops::trig::sin),
+            SigMatch::Cos(x) => self.infer_unary_math(x, interval::ops::trig::cos),
+            SigMatch::Tan(x) => self.infer_unary_math(x, interval::ops::trig::tan),
+            SigMatch::Asin(x) => self.infer_unary_math(x, interval::ops::trig::asin),
+            SigMatch::Acos(x) => self.infer_unary_math(x, interval::ops::trig::acos),
+            SigMatch::Atan(x) => self.infer_unary_math(x, interval::ops::trig::atan),
 
             SigMatch::Atan2(y, x) => {
                 let ty = self.infer(y)?;
@@ -275,8 +279,8 @@ impl<'a> TypeAnnotator<'a> {
 
             SigMatch::WrTbl(size, generator, wi, ws) => {
                 let ttbl = self.infer_write_table(size, generator)?;
-                let twi  = self.infer(wi)?;
-                let tws  = self.infer(ws)?;
+                let twi = self.infer(wi)?;
+                let tws = self.infer(ws)?;
                 infer_write_table_type(ttbl, twi, tws)
             }
 
@@ -286,8 +290,11 @@ impl<'a> TypeAnnotator<'a> {
             SigMatch::Waveform(elems) => {
                 if elems.is_empty() {
                     return Ok(make_simple(
-                        Nature::Real, Variability::Konst, Computability::Comp,
-                        Vectorability::Vect, Boolean::Num,
+                        Nature::Real,
+                        Variability::Konst,
+                        Computability::Comp,
+                        Vectorability::Vect,
+                        Boolean::Num,
                         interval::empty(),
                     ));
                 }
@@ -313,8 +320,11 @@ impl<'a> TypeAnnotator<'a> {
             // ── Soundfile ────────────────────────────────────────────────────
             // C++: makeSimpleType(kInt, kBlock, kInit, kVect, kNum, interval(0, INT32_MAX))
             SigMatch::Soundfile(_) => Ok(make_simple(
-                Nature::Int, Variability::Block, Computability::Init,
-                Vectorability::Vect, Boolean::Num,
+                Nature::Int,
+                Variability::Block,
+                Computability::Init,
+                Vectorability::Vect,
+                Boolean::Num,
                 interval::Interval::new(0.0, i32::MAX as f64, 0),
             )),
             // C++: makeSimpleType(kInt, max(kBlock, t2->variability()), kInit, kVect, kNum, interval(0, INT32_MAX))
@@ -323,8 +333,11 @@ impl<'a> TypeAnnotator<'a> {
                 let t_part = self.infer(part)?;
                 let var = Variability::Block.join(t_part.variability());
                 Ok(make_simple(
-                    Nature::Int, var, Computability::Init,
-                    Vectorability::Vect, Boolean::Num,
+                    Nature::Int,
+                    var,
+                    Computability::Init,
+                    Vectorability::Vect,
+                    Boolean::Num,
                     interval::Interval::new(0.0, i32::MAX as f64, 0),
                 ))
             }
@@ -333,8 +346,11 @@ impl<'a> TypeAnnotator<'a> {
                 let t_part = self.infer(part)?;
                 let var = Variability::Block.join(t_part.variability());
                 Ok(make_simple(
-                    Nature::Int, var, Computability::Init,
-                    Vectorability::Vect, Boolean::Num,
+                    Nature::Int,
+                    var,
+                    Computability::Init,
+                    Vectorability::Vect,
+                    Boolean::Num,
                     interval::Interval::new(0.0, i32::MAX as f64, 0),
                 ))
             }
@@ -346,8 +362,11 @@ impl<'a> TypeAnnotator<'a> {
                 self.infer(z)?;
                 let _ = t_part;
                 Ok(make_simple(
-                    Nature::Real, Variability::Samp, Computability::Init,
-                    Vectorability::Vect, Boolean::Num,
+                    Nature::Real,
+                    Variability::Samp,
+                    Computability::Init,
+                    Vectorability::Vect,
+                    Boolean::Num,
                     interval::Interval::new(-1.0, 1.0, -24),
                 ))
             }
@@ -359,9 +378,7 @@ impl<'a> TypeAnnotator<'a> {
 
             // ── Recursion ────────────────────────────────────────────────────
             // Symbolic recursion (after de_bruijn_to_sym).
-            _ if match_sym_rec(self.arena, sig).is_some() => {
-                self.infer_sym_rec(sig)
-            }
+            _ if match_sym_rec(self.arena, sig).is_some() => self.infer_sym_rec(sig),
             _ if match_sym_ref(self.arena, sig).is_some() => {
                 // Reference to the recursive variable — return current approx.
                 Ok(self.env.get(&sig).cloned().unwrap_or_else(make_maximal))
@@ -380,7 +397,7 @@ impl<'a> TypeAnnotator<'a> {
             // C++: makeSimpleType(tree2int(type), kKonst, kInit, kVect, kNum, interval())
             SigMatch::FConst(kind, _, _) => self.infer_foreign_const_type(kind),
             // C++: makeSimpleType(tree2int(type), kBlock, kExec, kVect, kNum, interval())
-            SigMatch::FVar(kind, _, _)   => self.infer_foreign_var_type(kind),
+            SigMatch::FVar(kind, _, _) => self.infer_foreign_var_type(kind),
 
             // ── Misc / conservative ──────────────────────────────────────────
             // C++: isSigAssertBounds(sig, min, max, cur)
@@ -404,8 +421,11 @@ impl<'a> TypeAnnotator<'a> {
             SigMatch::Lowest(x) => {
                 let tx = self.infer(x)?;
                 Ok(make_simple(
-                    Nature::Real, Variability::Konst, Computability::Comp,
-                    Vectorability::Vect, Boolean::Num,
+                    Nature::Real,
+                    Variability::Konst,
+                    Computability::Comp,
+                    Vectorability::Vect,
+                    Boolean::Num,
                     interval::singleton(tx.interval().lo()),
                 ))
             }
@@ -413,8 +433,11 @@ impl<'a> TypeAnnotator<'a> {
             SigMatch::Highest(x) => {
                 let tx = self.infer(x)?;
                 Ok(make_simple(
-                    Nature::Real, Variability::Konst, Computability::Comp,
-                    Vectorability::Vect, Boolean::Num,
+                    Nature::Real,
+                    Variability::Konst,
+                    Computability::Comp,
+                    Vectorability::Vect,
+                    Boolean::Num,
                     interval::singleton(tx.interval().hi()),
                 ))
             }
@@ -437,19 +460,23 @@ impl<'a> TypeAnnotator<'a> {
                 let itv = interval::reunion(tx.interval(), interval::singleton(0.0));
                 Ok(samp_cast(tx).promote_interval(itv))
             }
-            SigMatch::Clocked(_, x)  => self.infer(x),
+            SigMatch::Clocked(_, x) => self.infer(x),
 
             // C++: type each sub for side effects, then return
             //   makeSimpleType(kReal, kSamp, kExec, kScal, kNum, interval(-1, 1))
             // The block lacks a proper type but must not be kKonst (avoids constant propagation).
-            SigMatch::OnDemand(subs) | SigMatch::Upsampling(subs)
+            SigMatch::OnDemand(subs)
+            | SigMatch::Upsampling(subs)
             | SigMatch::Downsampling(subs) => {
                 for &s in subs {
                     self.infer(s)?;
                 }
                 Ok(make_simple(
-                    Nature::Real, Variability::Samp, Computability::Exec,
-                    Vectorability::Scal, Boolean::Num,
+                    Nature::Real,
+                    Variability::Samp,
+                    Computability::Exec,
+                    Vectorability::Scal,
+                    Boolean::Num,
                     interval::Interval::new(-1.0, 1.0, -24),
                 ))
             }
@@ -468,9 +495,9 @@ impl<'a> TypeAnnotator<'a> {
         x: SigId,
         f: fn(Interval) -> Interval,
     ) -> Result<SigType, TypeError> {
-        let tx  = self.infer(x)?;
+        let tx = self.infer(x)?;
         let itv = f(tx.interval());
-        let t   = samp_cast(tx);
+        let t = samp_cast(tx);
         Ok(float_cast(t).promote_interval(itv))
     }
 
@@ -480,32 +507,38 @@ impl<'a> TypeAnnotator<'a> {
         let il = tl.interval();
         let ir = tr.interval();
         let (itv, nature) = match op {
-            BinOp::Add  => (ar::add(il, ir),        tl.nature().join(tr.nature())),
-            BinOp::Sub  => (ar::sub(il, ir),        tl.nature().join(tr.nature())),
-            BinOp::Mul  => (ar::mul(il, ir),        tl.nature().join(tr.nature())),
-            BinOp::Div  => (ar::div(il, ir),        Nature::Real),
-            BinOp::Rem  => (ar::mod_interval(il, ir), tl.nature().join(tr.nature())),
-            BinOp::Lsh  => (lg::lsh(il, ir),        Nature::Int),
+            BinOp::Add => (ar::add(il, ir), tl.nature().join(tr.nature())),
+            BinOp::Sub => (ar::sub(il, ir), tl.nature().join(tr.nature())),
+            BinOp::Mul => (ar::mul(il, ir), tl.nature().join(tr.nature())),
+            BinOp::Div => (ar::div(il, ir), Nature::Real),
+            BinOp::Rem => (ar::mod_interval(il, ir), tl.nature().join(tr.nature())),
+            BinOp::Lsh => (lg::lsh(il, ir), Nature::Int),
             BinOp::ARsh | BinOp::LRsh => (lg::rsh(il, ir), Nature::Int),
-            BinOp::Gt   => (lg::gt(il, ir),         Nature::Int),
-            BinOp::Lt   => (lg::lt(il, ir),         Nature::Int),
-            BinOp::Ge   => (lg::ge(il, ir),         Nature::Int),
-            BinOp::Le   => (lg::le(il, ir),         Nature::Int),
-            BinOp::Eq   => (lg::eq(il, ir),         Nature::Int),
-            BinOp::Ne   => (lg::ne(il, ir),         Nature::Int),
-            BinOp::And  => (lg::and(il, ir),        Nature::Int),
-            BinOp::Or   => (lg::or(il, ir),         Nature::Int),
-            BinOp::Xor  => (lg::xor(il, ir),        Nature::Int),
+            BinOp::Gt => (lg::gt(il, ir), Nature::Int),
+            BinOp::Lt => (lg::lt(il, ir), Nature::Int),
+            BinOp::Ge => (lg::ge(il, ir), Nature::Int),
+            BinOp::Le => (lg::le(il, ir), Nature::Int),
+            BinOp::Eq => (lg::eq(il, ir), Nature::Int),
+            BinOp::Ne => (lg::ne(il, ir), Nature::Int),
+            BinOp::And => (lg::and(il, ir), Nature::Int),
+            BinOp::Or => (lg::or(il, ir), Nature::Int),
+            BinOp::Xor => (lg::xor(il, ir), Nature::Int),
         };
-        let variability   = tl.variability().join(tr.variability());
+        let variability = tl.variability().join(tr.variability());
         let computability = tl.computability().join(tr.computability());
         let vectorability = tl.vectorability().join(tr.vectorability());
-        let boolean       = match op {
-            BinOp::Gt | BinOp::Lt | BinOp::Ge |
-            BinOp::Le | BinOp::Eq | BinOp::Ne => Boolean::Bool,
+        let boolean = match op {
+            BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne => Boolean::Bool,
             _ => Boolean::Num,
         };
-        make_simple(nature, variability, computability, vectorability, boolean, itv)
+        make_simple(
+            nature,
+            variability,
+            computability,
+            vectorability,
+            boolean,
+            itv,
+        )
     }
 
     // ── UI controls ──────────────────────────────────────────────────────────
@@ -515,8 +548,11 @@ impl<'a> TypeAnnotator<'a> {
         // TGUI = makeSimpleType(kReal, kBlock, kExec, kVect, kNum, interval(0,1))
         // castInterval keeps kReal/kVect/kNum — it does NOT set kBool or kScal.
         make_simple(
-            Nature::Real, Variability::Block, Computability::Exec,
-            Vectorability::Vect, Boolean::Num,
+            Nature::Real,
+            Variability::Block,
+            Computability::Exec,
+            Vectorability::Vect,
+            Boolean::Num,
             interval::Interval::new(0.0, 1.0, 0),
         )
     }
@@ -524,17 +560,25 @@ impl<'a> TypeAnnotator<'a> {
     fn infer_checkbox(&self, _id: ControlId) -> SigType {
         // C++: same as Button — castInterval(TGUI, gAlgebra.Checkbox(interval(0)))
         make_simple(
-            Nature::Real, Variability::Block, Computability::Exec,
-            Vectorability::Vect, Boolean::Num,
+            Nature::Real,
+            Variability::Block,
+            Computability::Exec,
+            Vectorability::Vect,
+            Boolean::Num,
             interval::Interval::new(0.0, 1.0, 0),
         )
     }
 
     fn infer_slider(&self, id: ControlId) -> SigType {
-        let itv = self.ui_program.control(id)
+        let itv = self
+            .ui_program
+            .control(id)
             .and_then(|spec| {
                 // Only slider-family controls have ranges.
-                if !matches!(spec.kind, ControlKind::VSlider | ControlKind::HSlider | ControlKind::NumEntry) {
+                if !matches!(
+                    spec.kind,
+                    ControlKind::VSlider | ControlKind::HSlider | ControlKind::NumEntry
+                ) {
                     return None;
                 }
                 spec.range
@@ -542,7 +586,7 @@ impl<'a> TypeAnnotator<'a> {
             .map(|r| {
                 // vslider(_name, _init, lo, hi, step)
                 interval::ops::ui::vslider(
-                    interval::empty(),                  // _name (unused)
+                    interval::empty(), // _name (unused)
                     interval::singleton(r.init),
                     interval::singleton(r.min),
                     interval::singleton(r.max),
@@ -555,8 +599,12 @@ impl<'a> TypeAnnotator<'a> {
         // TGUI = makeSimpleType(kReal, kBlock, kExec, kVect, kNum, interval())
         // castInterval replaces only the interval → Computability is kExec, not kInit.
         make_simple(
-            Nature::Real, Variability::Block, Computability::Exec,
-            Vectorability::Vect, Boolean::Num, itv,
+            Nature::Real,
+            Variability::Block,
+            Computability::Exec,
+            Vectorability::Vect,
+            Boolean::Num,
+            itv,
         )
     }
 
@@ -571,13 +619,9 @@ impl<'a> TypeAnnotator<'a> {
 
     // ── Tables ───────────────────────────────────────────────────────────────
 
-    fn infer_write_table(
-        &mut self,
-        size: SigId,
-        generator: SigId,
-    ) -> Result<SigType, TypeError> {
+    fn infer_write_table(&mut self, size: SigId, generator: SigId) -> Result<SigType, TypeError> {
         let _tsize = self.infer(size)?;
-        let tgen   = self.infer(generator)?;
+        let tgen = self.infer(generator)?;
         Ok(make_table_type(tgen))
     }
 
@@ -604,8 +648,10 @@ impl<'a> TypeAnnotator<'a> {
     fn infer_foreign_const_type(&self, kind: SigId) -> Result<SigType, TypeError> {
         Ok(make_simple(
             self.foreign_nature(kind),
-            Variability::Konst, Computability::Init,
-            Vectorability::Vect, Boolean::Num,
+            Variability::Konst,
+            Computability::Init,
+            Vectorability::Vect,
+            Boolean::Num,
             interval::Interval::new_default(),
         ))
     }
@@ -619,8 +665,10 @@ impl<'a> TypeAnnotator<'a> {
     fn infer_foreign_var_type(&self, kind: SigId) -> Result<SigType, TypeError> {
         Ok(make_simple(
             self.foreign_nature(kind),
-            Variability::Block, Computability::Exec,
-            Vectorability::Vect, Boolean::Num,
+            Variability::Block,
+            Computability::Exec,
+            Vectorability::Vect,
+            Boolean::Num,
             interval::Interval::new_default(),
         ))
     }
@@ -643,9 +691,11 @@ impl<'a> TypeAnnotator<'a> {
         // Fixed-point iteration: refine until stable.
         loop {
             let prev = self.env.get(&var).cloned().unwrap_or_else(make_maximal);
-            let new  = self.infer(body)?;
+            let new = self.infer(body)?;
             self.env.insert(var, new.clone());
-            if new == prev { break; }
+            if new == prev {
+                break;
+            }
         }
 
         Ok(self.env.get(&var).cloned().unwrap_or_else(make_maximal))
@@ -672,7 +722,6 @@ impl<'a> TypeAnnotator<'a> {
             .promote_computability(gc)
             .promote_vectorability(Vectorability::Scal))
     }
-
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -699,11 +748,7 @@ fn infer_read_table(tbl: SigType, idx: SigType) -> Result<SigType, TypeError> {
 ///
 /// # C++ source
 /// `inferWriteTableType(Type tbl, Type wi, Type ws)`
-fn infer_write_table_type(
-    tbl: SigType,
-    _wi: SigType,
-    _ws: SigType,
-) -> Result<SigType, TypeError> {
+fn infer_write_table_type(tbl: SigType, _wi: SigType, _ws: SigType) -> Result<SigType, TypeError> {
     // Return the table type unchanged — writes don't change the table's type.
     Ok(tbl)
 }
@@ -772,7 +817,7 @@ mod tests {
         // Interval must be the audio range [-1, 1], not the uninformative placeholder.
         let itv = ty.interval();
         assert_eq!(itv.lo(), -1.0);
-        assert_eq!(itv.hi(),  1.0);
+        assert_eq!(itv.hi(), 1.0);
     }
 
     #[test]
@@ -783,11 +828,11 @@ mod tests {
         let types = annotate(&arena, &[s]);
         let ty = &types[&s];
         // C++: castInterval(TGUI, ...) → kReal, kBlock, kExec, kVect, kNum, [0,1]
-        assert_eq!(ty.nature(),        Nature::Real);
-        assert_eq!(ty.variability(),   Variability::Block);
+        assert_eq!(ty.nature(), Nature::Real);
+        assert_eq!(ty.variability(), Variability::Block);
         assert_eq!(ty.computability(), Computability::Exec);
         assert_eq!(ty.vectorability(), Vectorability::Vect);
-        assert_eq!(ty.boolean(),       Boolean::Num);
+        assert_eq!(ty.boolean(), Boolean::Num);
         assert_eq!(ty.interval().lo(), 0.0);
         assert_eq!(ty.interval().hi(), 1.0);
     }
@@ -797,9 +842,9 @@ mod tests {
         // If the cond is Samp, the result must be at least Samp even if branches are Konst.
         let mut arena = TreeArena::new();
         let mut b = SigBuilder::new(&mut arena);
-        let cond = b.input(0);          // Samp
-        let s1   = b.int(0);            // Konst
-        let s2   = b.int(1);            // Konst
+        let cond = b.input(0); // Samp
+        let s1 = b.int(0); // Konst
+        let s2 = b.int(1); // Konst
         let s = b.select2(cond, s1, s2);
         let types = annotate(&arena, &[s]);
         // C++: variability = st1|st2|stsel = Konst|Konst|Samp = Samp
@@ -811,9 +856,9 @@ mod tests {
         // If all three (cond and both branches) are Konst, result should be Konst, NOT Samp.
         let mut arena = TreeArena::new();
         let mut b = SigBuilder::new(&mut arena);
-        let cond = b.int(1);   // Konst
-        let s1   = b.int(0);   // Konst
-        let s2   = b.real(3.0);// Konst
+        let cond = b.int(1); // Konst
+        let s1 = b.int(0); // Konst
+        let s2 = b.real(3.0); // Konst
         let s = b.select2(cond, s1, s2);
         let types = annotate(&arena, &[s]);
         // Without the samp_cast bug, a fully-constant select2 stays Konst.
@@ -837,12 +882,12 @@ mod tests {
         // C++: T(x, env); return T(y, env)
         let mut arena = TreeArena::new();
         let mut b = SigBuilder::new(&mut arena);
-        let x = b.int(42);          // Konst Int
-        let y = b.input(0);         // Samp Real
+        let x = b.int(42); // Konst Int
+        let y = b.input(0); // Samp Real
         let s = b.seq(x, y);
         let types = annotate(&arena, &[s]);
         // Must be the type of y, not the union of x and y.
-        assert_eq!(types[&s].nature(),      Nature::Real);
+        assert_eq!(types[&s].nature(), Nature::Real);
         assert_eq!(types[&s].variability(), Variability::Samp);
     }
 
@@ -854,11 +899,11 @@ mod tests {
         let types = annotate(&arena, &[s]);
         let ty = &types[&s];
         // C++: same contract as Button
-        assert_eq!(ty.nature(),        Nature::Real);
-        assert_eq!(ty.variability(),   Variability::Block);
+        assert_eq!(ty.nature(), Nature::Real);
+        assert_eq!(ty.variability(), Variability::Block);
         assert_eq!(ty.computability(), Computability::Exec);
         assert_eq!(ty.vectorability(), Vectorability::Vect);
-        assert_eq!(ty.boolean(),       Boolean::Num);
+        assert_eq!(ty.boolean(), Boolean::Num);
         assert_eq!(ty.interval().lo(), 0.0);
         assert_eq!(ty.interval().hi(), 1.0);
     }
@@ -867,9 +912,9 @@ mod tests {
     fn add_ints_stays_int() {
         let mut arena = TreeArena::new();
         let mut b = SigBuilder::new(&mut arena);
-        let a  = b.int(1);
+        let a = b.int(1);
         let bv = b.int(2);
-        let s  = b.binop(signals::BinOp::Add, a, bv);
+        let s = b.binop(signals::BinOp::Add, a, bv);
         let types = annotate(&arena, &[s]);
         let ty = &types[&s];
         assert_eq!(ty.nature(), Nature::Int);
@@ -880,9 +925,9 @@ mod tests {
     fn add_int_real_promotes_to_real() {
         let mut arena = TreeArena::new();
         let mut b = SigBuilder::new(&mut arena);
-        let a  = b.int(1);
+        let a = b.int(1);
         let bv = b.real(0.5);
-        let s  = b.binop(signals::BinOp::Add, a, bv);
+        let s = b.binop(signals::BinOp::Add, a, bv);
         let types = annotate(&arena, &[s]);
         assert_eq!(types[&s].nature(), Nature::Real);
     }

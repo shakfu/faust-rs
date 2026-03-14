@@ -38,12 +38,12 @@ pub struct SimpleType {
 
 impl PartialEq for SimpleType {
     fn eq(&self, other: &Self) -> bool {
-        self.nature       == other.nature
-            && self.variability   == other.variability
+        self.nature == other.nature
+            && self.variability == other.variability
             && self.computability == other.computability
             && self.vectorability == other.vectorability
-            && self.boolean       == other.boolean
-            && self.interval      == other.interval
+            && self.boolean == other.boolean
+            && self.interval == other.interval
         // res intentionally excluded
     }
 }
@@ -75,13 +75,13 @@ pub struct TableType {
 
 impl PartialEq for TableType {
     fn eq(&self, other: &Self) -> bool {
-        self.content      == other.content
-            && self.nature        == other.nature
-            && self.variability   == other.variability
+        self.content == other.content
+            && self.nature == other.nature
+            && self.variability == other.variability
             && self.computability == other.computability
             && self.vectorability == other.vectorability
-            && self.boolean       == other.boolean
-            && self.interval      == other.interval
+            && self.boolean == other.boolean
+            && self.interval == other.interval
     }
 }
 
@@ -117,13 +117,13 @@ pub struct TupletType {
 
 impl PartialEq for TupletType {
     fn eq(&self, other: &Self) -> bool {
-        self.components   == other.components
-            && self.nature        == other.nature
-            && self.variability   == other.variability
+        self.components == other.components
+            && self.nature == other.nature
+            && self.variability == other.variability
             && self.computability == other.computability
             && self.vectorability == other.vectorability
-            && self.boolean       == other.boolean
-            && self.interval      == other.interval
+            && self.boolean == other.boolean
+            && self.interval == other.interval
     }
 }
 

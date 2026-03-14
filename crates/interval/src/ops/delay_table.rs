@@ -3,7 +3,7 @@
 //! # C++ source
 //! `intervalDelay.cpp`, `intervalMem.cpp`, `intervalMissing.cpp`
 
-use crate::{reunion, Interval};
+use crate::{Interval, reunion};
 
 // -------------------------------------------------------------------------
 // Delay / Mem
@@ -37,7 +37,7 @@ pub fn mem(x: Interval) -> Interval {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{empty, Interval};
+    use crate::{Interval, empty};
 
     #[test]
     fn delay_positive_interval() {

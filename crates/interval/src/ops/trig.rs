@@ -7,9 +7,9 @@
 //! `intervalAtanh.cpp`, `intervalCosh.cpp`, `intervalSinh.cpp`,
 //! `intervalTanh.cpp`
 
-use std::f64::consts::{PI, FRAC_PI_2};
-use crate::{empty, Interval};
 use crate::utils::exact_precision_unary;
+use crate::{Interval, empty};
+use std::f64::consts::{FRAC_PI_2, PI};
 
 // -------------------------------------------------------------------------
 // Sin
@@ -21,7 +21,9 @@ use crate::utils::exact_precision_unary;
 /// `intervalSin.cpp`
 #[must_use]
 pub fn sin(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
 
     // Initial precision estimate at x = π/2 (half-integer).
     let u = (2.0_f64).powi(x.lsb());
@@ -36,7 +38,9 @@ pub fn sin(x: Interval) -> Interval {
 
     // Normalise lo to [0, 2π).
     let mut l = x.lo() % (2.0 * PI);
-    if l < 0.0 { l += 2.0 * PI; }
+    if l < 0.0 {
+        l += 2.0 * PI;
+    }
     let i = Interval::new(l, l + x.size(), x.lsb());
 
     let a = i.lo().sin();
@@ -45,19 +49,27 @@ pub fn sin(x: Interval) -> Interval {
     let mut hi = a.max(b);
 
     // Critical points: sin peaks at π/2 + 2kπ, troughs at 3π/2 + 2kπ.
-    if i.has(FRAC_PI_2) || i.has(5.0 * FRAC_PI_2) { hi = 1.0; }
-    if i.has(3.0 * FRAC_PI_2) || i.has(7.0 * FRAC_PI_2) { lo = -1.0; }
+    if i.has(FRAC_PI_2) || i.has(5.0 * FRAC_PI_2) {
+        hi = 1.0;
+    }
+    if i.has(3.0 * FRAC_PI_2) || i.has(7.0 * FRAC_PI_2) {
+        lo = -1.0;
+    }
 
     // Refine precision at the bound closest to a half-integer.
     let mut v = FRAC_PI_2;
     if i.hi() < FRAC_PI_2 {
         v = x.hi();
     } else if (i.lo() > FRAC_PI_2 && i.hi() < 3.0 * FRAC_PI_2)
-           || (i.lo() > 3.0 * FRAC_PI_2 && i.hi() < 5.0 * FRAC_PI_2)
+        || (i.lo() > 3.0 * FRAC_PI_2 && i.hi() < 5.0 * FRAC_PI_2)
     {
         let delta_hi = (i.hi() / PI + 0.5).ceil() - i.hi() / PI;
         let delta_lo = i.lo() / PI - (i.lo() / PI - 0.5).floor();
-        if delta_lo > delta_hi { v = x.hi(); } else { v = x.lo(); }
+        if delta_lo > delta_hi {
+            v = x.hi();
+        } else {
+            v = x.lo();
+        }
     }
 
     precision = exact_precision_unary(f64::sin, v, u);
@@ -82,18 +94,24 @@ pub fn sin(x: Interval) -> Interval {
 /// `intervalCos.cpp`
 #[must_use]
 pub fn cos(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
 
     let u = (2.0_f64).powi(x.lsb());
     let mut precision = exact_precision_unary(f64::cos, 0.0, u);
-    if precision == i32::MIN { precision = 2 * x.lsb() - 1; }
+    if precision == i32::MIN {
+        precision = 2 * x.lsb() - 1;
+    }
 
     if x.size() >= 2.0 * PI {
         return Interval::new(-1.0, 1.0, precision);
     }
 
     let mut l = x.lo() % (2.0 * PI);
-    if l < 0.0 { l += 2.0 * PI; }
+    if l < 0.0 {
+        l += 2.0 * PI;
+    }
     let i = Interval::new(l, l + x.size(), x.lsb());
 
     let a = i.lo().cos();
@@ -102,14 +120,22 @@ pub fn cos(x: Interval) -> Interval {
     let mut hi = a.max(b);
 
     // Critical points: cos peaks at 0 + 2kπ, troughs at π + 2kπ.
-    if i.has(0.0) || i.has(2.0 * PI) { hi = 1.0; }
-    if i.has(PI) || i.has(3.0 * PI) { lo = -1.0; }
+    if i.has(0.0) || i.has(2.0 * PI) {
+        hi = 1.0;
+    }
+    if i.has(PI) || i.has(3.0 * PI) {
+        lo = -1.0;
+    }
 
     let mut v = 0.0_f64;
     if i.hi() < PI || (i.lo() > PI && i.hi() < 2.0 * PI) {
         let delta_hi = (x.hi() / PI).ceil() - x.hi() / PI;
         let delta_lo = x.lo() / PI - (x.lo() / PI).floor();
-        if delta_hi < delta_lo { v = x.hi(); } else { v = x.lo(); }
+        if delta_hi < delta_lo {
+            v = x.hi();
+        } else {
+            v = x.lo();
+        }
     }
 
     precision = exact_precision_unary(f64::cos, v, u);
@@ -136,7 +162,9 @@ pub fn cos(x: Interval) -> Interval {
 /// `intervalTan.cpp`
 #[must_use]
 pub fn tan(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
 
     let u = (2.0_f64).powi(x.lsb());
     let v = x.hi(); // worst-case precision near π/2
@@ -157,7 +185,9 @@ pub fn tan(x: Interval) -> Interval {
 
     // Normalise lo to [0, π).
     let mut l = x.lo() % PI;
-    if l < 0.0 { l += PI; }
+    if l < 0.0 {
+        l += PI;
+    }
     let hi_n = l + x.size();
 
     // If the interval contains π/2 (asymptote), result is unbounded.
@@ -178,14 +208,22 @@ pub fn tan(x: Interval) -> Interval {
 /// `intervalAcos.cpp`
 #[must_use]
 pub fn acos(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
     let lo = x.lo().max(-1.0);
     let hi = x.hi().min(1.0);
-    if lo > hi { return empty(); }
+    if lo > hi {
+        return empty();
+    }
 
     let u = (2.0_f64).powi(x.lsb());
     // Worst precision is at |x| closest to 1 where slope is steepest.
-    let v = if x.lo().abs() > x.hi().abs() { x.lo() } else { x.hi() };
+    let v = if x.lo().abs() > x.hi().abs() {
+        x.lo()
+    } else {
+        x.hi()
+    };
     let mut precision = exact_precision_unary(f64::acos, v, u);
     if precision == i32::MIN {
         // acos'(x) = -1/sqrt(1-x²)
@@ -211,9 +249,13 @@ pub fn acos(x: Interval) -> Interval {
 /// `intervalAcosh.cpp`
 #[must_use]
 pub fn acosh(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
     let lo = x.lo().max(1.0);
-    if lo > x.hi() { return empty(); }
+    if lo > x.hi() {
+        return empty();
+    }
 
     let u = (2.0_f64).powi(x.lsb());
     let v = lo; // precision is worst near the lower bound
@@ -240,10 +282,14 @@ pub fn acosh(x: Interval) -> Interval {
 /// `intervalAsin.cpp`
 #[must_use]
 pub fn asin(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
     let lo = x.lo().max(-1.0);
     let hi = x.hi().min(1.0);
-    if lo > hi { return empty(); }
+    if lo > hi {
+        return empty();
+    }
 
     let u = (2.0_f64).powi(x.lsb());
     let v = if lo.abs() > hi.abs() { lo } else { hi };
@@ -270,10 +316,16 @@ pub fn asin(x: Interval) -> Interval {
 /// `intervalAsinh.cpp`
 #[must_use]
 pub fn asinh(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
 
     let u = (2.0_f64).powi(x.lsb());
-    let v = if x.lo().abs() > x.hi().abs() { x.lo() } else { x.hi() };
+    let v = if x.lo().abs() > x.hi().abs() {
+        x.lo()
+    } else {
+        x.hi()
+    };
     let mut precision = exact_precision_unary(f64::asinh, v, u);
     if precision == i32::MIN {
         let denom = (1.0 + v * v).sqrt();
@@ -293,11 +345,17 @@ pub fn asinh(x: Interval) -> Interval {
 /// `intervalAtan.cpp`
 #[must_use]
 pub fn atan(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
 
     let u = (2.0_f64).powi(x.lsb());
     // Precision is worst at the smallest |x| (steepest slope 1/(1+x²)).
-    let v = if x.lo().abs() < x.hi().abs() { x.lo() } else { x.hi() };
+    let v = if x.lo().abs() < x.hi().abs() {
+        x.lo()
+    } else {
+        x.hi()
+    };
     let mut precision = exact_precision_unary(f64::atan, v, u);
     if precision == i32::MIN {
         // atan'(x) = 1/(1+x²)
@@ -321,7 +379,9 @@ pub fn atan(x: Interval) -> Interval {
 /// `intervalAtan2.cpp`
 #[must_use]
 pub fn atan2(y: Interval, x: Interval) -> Interval {
-    if y.is_empty() || x.is_empty() { return empty(); }
+    if y.is_empty() || x.is_empty() {
+        return empty();
+    }
 
     // atan2 ranges [-π, π]; if x can be negative and y straddles 0,
     // the result can jump discontinuously.
@@ -341,7 +401,11 @@ pub fn atan2(y: Interval, x: Interval) -> Interval {
     let u = (2.0_f64).powi(y.lsb().min(x.lsb()));
     // Cannot pass a capturing closure to exact_precision_unary; compute inline.
     let diff = ((y.lo() + u).atan2(x.lo()) - y.lo().atan2(x.lo())).abs();
-    let mut precision = if diff == 0.0 { i32::MIN } else { diff.log2().floor() as i32 };
+    let mut precision = if diff == 0.0 {
+        i32::MIN
+    } else {
+        diff.log2().floor() as i32
+    };
     if precision == i32::MIN {
         precision = y.lsb().min(x.lsb()) - 1;
     }
@@ -359,10 +423,14 @@ pub fn atan2(y: Interval, x: Interval) -> Interval {
 /// `intervalAtanh.cpp`
 #[must_use]
 pub fn atanh(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
     let lo = x.lo().max(-1.0 + f64::EPSILON);
     let hi = x.hi().min(1.0 - f64::EPSILON);
-    if lo > hi { return empty(); }
+    if lo > hi {
+        return empty();
+    }
 
     let u = (2.0_f64).powi(x.lsb());
     let v = if lo.abs() > hi.abs() { lo } else { hi };
@@ -389,11 +457,17 @@ pub fn atanh(x: Interval) -> Interval {
 /// `intervalCosh.cpp`
 #[must_use]
 pub fn cosh(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
 
     let u = (2.0_f64).powi(x.lsb());
     // cosh'(x) = sinh(x); worst at |x| max.
-    let v = if x.lo().abs() > x.hi().abs() { x.lo() } else { x.hi() };
+    let v = if x.lo().abs() > x.hi().abs() {
+        x.lo()
+    } else {
+        x.hi()
+    };
     let mut precision = exact_precision_unary(f64::cosh, v, u);
     if precision == i32::MIN {
         precision = (x.lsb() as f64 + v.sinh().abs().log2()).floor() as i32;
@@ -403,7 +477,11 @@ pub fn cosh(x: Interval) -> Interval {
     if x.has_zero() {
         return Interval::new(1.0, x.lo().cosh().max(x.hi().cosh()), precision);
     }
-    Interval::new(x.lo().cosh().min(x.hi().cosh()), x.lo().cosh().max(x.hi().cosh()), precision)
+    Interval::new(
+        x.lo().cosh().min(x.hi().cosh()),
+        x.lo().cosh().max(x.hi().cosh()),
+        precision,
+    )
 }
 
 // -------------------------------------------------------------------------
@@ -416,11 +494,17 @@ pub fn cosh(x: Interval) -> Interval {
 /// `intervalSinh.cpp`
 #[must_use]
 pub fn sinh(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
 
     // sinh is monotone; precision same as cosh at the same bound.
     let u = (2.0_f64).powi(x.lsb());
-    let v = if x.lo().abs() > x.hi().abs() { x.lo() } else { x.hi() };
+    let v = if x.lo().abs() > x.hi().abs() {
+        x.lo()
+    } else {
+        x.hi()
+    };
     let mut precision = exact_precision_unary(f64::sinh, v, u);
     if precision == i32::MIN {
         precision = (x.lsb() as f64 + v.cosh().log2()).floor() as i32;
@@ -439,11 +523,17 @@ pub fn sinh(x: Interval) -> Interval {
 /// `intervalTanh.cpp`
 #[must_use]
 pub fn tanh(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
 
     let u = (2.0_f64).powi(x.lsb());
     // tanh'(x) = 1/cosh²(x); worst at smallest |x|.
-    let v = if x.lo().abs() < x.hi().abs() { x.lo() } else { x.hi() };
+    let v = if x.lo().abs() < x.hi().abs() {
+        x.lo()
+    } else {
+        x.hi()
+    };
     let mut precision = exact_precision_unary(f64::tanh, v, u);
     if precision == i32::MIN {
         let c = v.cosh();
@@ -460,8 +550,8 @@ pub fn tanh(x: Interval) -> Interval {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::f64::consts::PI;
     use crate::Interval;
+    use std::f64::consts::PI;
 
     #[test]
     fn sin_full_period() {

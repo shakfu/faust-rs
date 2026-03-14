@@ -22,16 +22,14 @@ pub mod types;
 
 pub use enums::{Boolean, Computability, Nature, Res, Variability, Vectorability};
 pub use factory::{
-    make_maximal, make_simple, make_simple_with_res, make_table_type,
-    make_table_type_with, make_tuplet,
+    make_maximal, make_simple, make_simple_with_res, make_table_type, make_table_type_with,
+    make_tuplet,
 };
 pub use ops::{
-    TypeError,
-    bit_cast, bool_cast, cast_interval, check_delay_interval, check_init,
-    check_int, check_int_param, check_konst, float_cast, int_cast,
-    merge_boolean, merge_computability, merge_interval, merge_nature,
-    merge_variability, merge_vectorability, num_cast, product_types, samp_cast,
-    union_types,
+    TypeError, bit_cast, bool_cast, cast_interval, check_delay_interval, check_init, check_int,
+    check_int_param, check_konst, float_cast, int_cast, merge_boolean, merge_computability,
+    merge_interval, merge_nature, merge_variability, merge_vectorability, num_cast, product_types,
+    samp_cast, union_types,
 };
 pub use rules::TypeAnnotator;
 pub use types::{SigType, SimpleType, TableType, TupletType};

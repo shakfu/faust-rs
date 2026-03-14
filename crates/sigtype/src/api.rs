@@ -21,7 +21,7 @@ impl SigType {
     pub fn nature(&self) -> Nature {
         match self {
             SigType::Simple(t) => t.nature,
-            SigType::Table(t)  => t.nature,
+            SigType::Table(t) => t.nature,
             SigType::Tuplet(t) => t.nature,
         }
     }
@@ -32,7 +32,7 @@ impl SigType {
     pub fn variability(&self) -> Variability {
         match self {
             SigType::Simple(t) => t.variability,
-            SigType::Table(t)  => t.variability,
+            SigType::Table(t) => t.variability,
             SigType::Tuplet(t) => t.variability,
         }
     }
@@ -43,7 +43,7 @@ impl SigType {
     pub fn computability(&self) -> Computability {
         match self {
             SigType::Simple(t) => t.computability,
-            SigType::Table(t)  => t.computability,
+            SigType::Table(t) => t.computability,
             SigType::Tuplet(t) => t.computability,
         }
     }
@@ -54,7 +54,7 @@ impl SigType {
     pub fn vectorability(&self) -> Vectorability {
         match self {
             SigType::Simple(t) => t.vectorability,
-            SigType::Table(t)  => t.vectorability,
+            SigType::Table(t) => t.vectorability,
             SigType::Tuplet(t) => t.vectorability,
         }
     }
@@ -65,7 +65,7 @@ impl SigType {
     pub fn boolean(&self) -> Boolean {
         match self {
             SigType::Simple(t) => t.boolean,
-            SigType::Table(t)  => t.boolean,
+            SigType::Table(t) => t.boolean,
             SigType::Tuplet(t) => t.boolean,
         }
     }
@@ -76,7 +76,7 @@ impl SigType {
     pub fn interval(&self) -> Interval {
         match self {
             SigType::Simple(t) => t.interval,
-            SigType::Table(t)  => t.interval,
+            SigType::Table(t) => t.interval,
             SigType::Tuplet(t) => t.interval,
         }
     }
@@ -104,9 +104,7 @@ impl SigType {
                     && t.variability == Variability::Samp
                     && t.computability == Computability::Exec
             }
-            SigType::Table(t) => {
-                t.nature == Nature::Real && t.variability == Variability::Samp
-            }
+            SigType::Table(t) => t.nature == Nature::Real && t.variability == Variability::Samp,
             SigType::Tuplet(t) => t.components.iter().all(SigType::is_maximal),
         }
     }
@@ -124,7 +122,7 @@ impl SigType {
     #[must_use]
     pub fn promote_nature(self, n: Nature) -> Self {
         let current = self.nature();
-        let joined  = current.join(n);
+        let joined = current.join(n);
         self.with_nature(joined)
     }
 
@@ -132,7 +130,7 @@ impl SigType {
     #[must_use]
     pub fn promote_variability(self, v: Variability) -> Self {
         let current = self.variability();
-        let joined  = current.join(v);
+        let joined = current.join(v);
         self.with_variability(joined)
     }
 
@@ -140,7 +138,7 @@ impl SigType {
     #[must_use]
     pub fn promote_computability(self, c: Computability) -> Self {
         let current = self.computability();
-        let joined  = current.join(c);
+        let joined = current.join(c);
         self.with_computability(joined)
     }
 
@@ -148,7 +146,7 @@ impl SigType {
     #[must_use]
     pub fn promote_vectorability(self, v: Vectorability) -> Self {
         let current = self.vectorability();
-        let joined  = current.join(v);
+        let joined = current.join(v);
         self.with_vectorability(joined)
     }
 
@@ -156,7 +154,7 @@ impl SigType {
     #[must_use]
     pub fn promote_boolean(self, b: Boolean) -> Self {
         let current = self.boolean();
-        let joined  = current.join(b);
+        let joined = current.join(b);
         self.with_boolean(joined)
     }
 
@@ -179,7 +177,7 @@ impl SigType {
     pub(crate) fn with_nature(self, nature: Nature) -> Self {
         match self {
             SigType::Simple(t) => SigType::Simple(SimpleType { nature, ..t }),
-            SigType::Table(t)  => SigType::Table(TableType  { nature, ..t }),
+            SigType::Table(t) => SigType::Table(TableType { nature, ..t }),
             SigType::Tuplet(t) => SigType::Tuplet(TupletType { nature, ..t }),
         }
     }
@@ -188,7 +186,7 @@ impl SigType {
     pub(crate) fn with_variability(self, variability: Variability) -> Self {
         match self {
             SigType::Simple(t) => SigType::Simple(SimpleType { variability, ..t }),
-            SigType::Table(t)  => SigType::Table(TableType  { variability, ..t }),
+            SigType::Table(t) => SigType::Table(TableType { variability, ..t }),
             SigType::Tuplet(t) => SigType::Tuplet(TupletType { variability, ..t }),
         }
     }
@@ -197,7 +195,7 @@ impl SigType {
     pub(crate) fn with_computability(self, computability: Computability) -> Self {
         match self {
             SigType::Simple(t) => SigType::Simple(SimpleType { computability, ..t }),
-            SigType::Table(t)  => SigType::Table(TableType  { computability, ..t }),
+            SigType::Table(t) => SigType::Table(TableType { computability, ..t }),
             SigType::Tuplet(t) => SigType::Tuplet(TupletType { computability, ..t }),
         }
     }
@@ -206,7 +204,7 @@ impl SigType {
     pub(crate) fn with_vectorability(self, vectorability: Vectorability) -> Self {
         match self {
             SigType::Simple(t) => SigType::Simple(SimpleType { vectorability, ..t }),
-            SigType::Table(t)  => SigType::Table(TableType  { vectorability, ..t }),
+            SigType::Table(t) => SigType::Table(TableType { vectorability, ..t }),
             SigType::Tuplet(t) => SigType::Tuplet(TupletType { vectorability, ..t }),
         }
     }
@@ -215,7 +213,7 @@ impl SigType {
     pub(crate) fn with_boolean(self, boolean: Boolean) -> Self {
         match self {
             SigType::Simple(t) => SigType::Simple(SimpleType { boolean, ..t }),
-            SigType::Table(t)  => SigType::Table(TableType  { boolean, ..t }),
+            SigType::Table(t) => SigType::Table(TableType { boolean, ..t }),
             SigType::Tuplet(t) => SigType::Tuplet(TupletType { boolean, ..t }),
         }
     }
@@ -224,7 +222,7 @@ impl SigType {
     pub(crate) fn with_interval(self, interval: Interval) -> Self {
         match self {
             SigType::Simple(t) => SigType::Simple(SimpleType { interval, ..t }),
-            SigType::Table(t)  => SigType::Table(TableType  { interval, ..t }),
+            SigType::Table(t) => SigType::Table(TableType { interval, ..t }),
             SigType::Tuplet(t) => SigType::Tuplet(TupletType { interval, ..t }),
         }
     }
@@ -238,14 +236,14 @@ impl std::fmt::Display for SigType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Format matches C++ print: nature, variability, computability, boolean, interval
         let nature_ch = match self.nature() {
-            Nature::Int  => 'N',
+            Nature::Int => 'N',
             Nature::Real => 'R',
-            Nature::Any  => 'A',
+            Nature::Any => 'A',
         };
         let var_ch = match self.variability() {
             Variability::Konst => 'K',
             Variability::Block => 'B',
-            Variability::Samp  => 'S',
+            Variability::Samp => 'S',
         };
         let comp_ch = match self.computability() {
             Computability::Comp => 'C',
@@ -253,12 +251,12 @@ impl std::fmt::Display for SigType {
             Computability::Exec => 'E',
         };
         let vec_ch = match self.vectorability() {
-            Vectorability::Vect     => 'V',
-            Vectorability::Scal     => 'S',
+            Vectorability::Vect => 'V',
+            Vectorability::Scal => 'S',
             Vectorability::TrueScal => 'T',
         };
         let bool_ch = match self.boolean() {
-            Boolean::Num  => 'N',
+            Boolean::Num => 'N',
             Boolean::Bool => 'B',
         };
         write!(
@@ -272,7 +270,9 @@ impl std::fmt::Display for SigType {
         if let SigType::Tuplet(t) = self {
             write!(f, ":Tuplet(")?;
             for (i, c) in t.components.iter().enumerate() {
-                if i > 0 { write!(f, "*")?; }
+                if i > 0 {
+                    write!(f, "*")?;
+                }
                 write!(f, "{c}")?;
             }
             write!(f, ")")?;

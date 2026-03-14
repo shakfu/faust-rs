@@ -4,8 +4,8 @@
 //! `intervalAdd.cpp`, `intervalSub.cpp`, `intervalMul.cpp`, `intervalDiv.cpp`,
 //! `intervalInv.cpp`, `intervalNeg.cpp`, `intervalAbs.cpp`, `intervalMod.cpp`
 
-use crate::{empty, singleton, Interval};
-use crate::utils::{min4, max4, max_val_abs, sign_max_val_abs, exact_precision_unary};
+use crate::utils::{exact_precision_unary, max_val_abs, max4, min4, sign_max_val_abs};
+use crate::{Interval, empty, singleton};
 
 // -------------------------------------------------------------------------
 // Add
@@ -20,7 +20,9 @@ use crate::utils::{min4, max4, max_val_abs, sign_max_val_abs, exact_precision_un
 /// `intervalAdd.cpp`
 #[must_use]
 pub fn add(x: Interval, y: Interval) -> Interval {
-    if x.is_empty() || y.is_empty() { return empty(); }
+    if x.is_empty() || y.is_empty() {
+        return empty();
+    }
 
     let lsb = x.lsb().min(y.lsb());
 
@@ -64,7 +66,9 @@ pub fn add(x: Interval, y: Interval) -> Interval {
 /// `intervalSub.cpp`
 #[must_use]
 pub fn sub(x: Interval, y: Interval) -> Interval {
-    if x.is_empty() || y.is_empty() { return empty(); }
+    if x.is_empty() || y.is_empty() {
+        return empty();
+    }
     Interval::new(x.lo() - y.hi(), x.hi() - y.lo(), x.lsb().min(y.lsb()))
 }
 
@@ -78,7 +82,9 @@ pub fn sub(x: Interval, y: Interval) -> Interval {
 /// `intervalNeg.cpp`
 #[must_use]
 pub fn neg(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
     Interval::new(-x.hi(), -x.lo(), x.lsb())
 }
 
@@ -94,16 +100,24 @@ pub fn neg(x: Interval) -> Interval {
 /// `intervalAbs.cpp`
 #[must_use]
 pub fn abs(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
 
-    if x.lo() >= 0.0 { return x; }
+    if x.lo() >= 0.0 {
+        return x;
+    }
 
     let int_min = i32::MIN as f64;
     let int_max = i32::MAX as f64;
 
     // Integer overflow: abs(INT_MIN) overflows.
     if x.lsb() >= 0 && x.lo() <= int_min {
-        let lo = if x.hi() >= 0.0 { 0.0 } else { x.hi().abs().min(int_max) };
+        let lo = if x.hi() >= 0.0 {
+            0.0
+        } else {
+            x.hi().abs().min(int_max)
+        };
         return Interval::new(lo, int_max, x.lsb());
     }
 
@@ -133,7 +147,9 @@ fn special_mult(a: f64, b: f64) -> f64 {
 /// `intervalMul.cpp`
 #[must_use]
 pub fn mul(x: Interval, y: Interval) -> Interval {
-    if x.is_empty() || y.is_empty() { return empty(); }
+    if x.is_empty() || y.is_empty() {
+        return empty();
+    }
 
     let a = special_mult(x.lo(), y.lo());
     let b = special_mult(x.lo(), y.hi());
@@ -167,7 +183,9 @@ pub fn mul(x: Interval, y: Interval) -> Interval {
 /// `intervalInv.cpp`
 #[must_use]
 pub fn inv(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
 
     let inv_fn: fn(f64) -> f64 = |v| if v == 0.0 { f64::INFINITY } else { 1.0 / v };
 
@@ -176,7 +194,11 @@ pub fn inv(x: Interval) -> Interval {
 
     // If v is infinite, snap to a large-but-finite integer bound.
     if v.is_infinite() {
-        v = if sign == -1 { i32::MAX as f64 } else { i32::MIN as f64 };
+        v = if sign == -1 {
+            i32::MAX as f64
+        } else {
+            i32::MIN as f64
+        };
     }
 
     let u = (2.0_f64).powi(x.lsb());
@@ -221,14 +243,20 @@ pub fn div(x: Interval, y: Interval) -> Interval {
 
 /// Interval union helper used locally in Mod.
 fn union_interval(a: Interval, b: Interval) -> Interval {
-    if a.is_empty() { return b; }
-    if b.is_empty() { return a; }
+    if a.is_empty() {
+        return b;
+    }
+    if b.is_empty() {
+        return a;
+    }
     Interval::new(a.lo().min(b.lo()), a.hi().max(b.hi()), a.lsb().min(b.lsb()))
 }
 
 /// `fmod(x, y)` for positive x > 0 and positive y > 0.
 fn positive_fmod(x: Interval, y: Interval) -> Interval {
-    if x.is_empty() || y.is_empty() { return empty(); }
+    if x.is_empty() || y.is_empty() {
+        return empty();
+    }
     let n = (x.lo() / y.hi()) as i32;
     let precision = x.lsb().min(y.lsb());
 
@@ -239,13 +267,21 @@ fn positive_fmod(x: Interval, y: Interval) -> Interval {
     if y.lo() <= hi {
         return Interval::new(0.0, hi.next_down(), precision);
     }
-    Interval::new(x.lo() - n as f64 * y.hi(), x.hi() - n as f64 * y.lo(), precision)
+    Interval::new(
+        x.lo() - n as f64 * y.hi(),
+        x.hi() - n as f64 * y.lo(),
+        precision,
+    )
 }
 
 /// Split a positive interval into (negative part, positive part).
 fn split_interval(x: Interval) -> (Interval, Interval) {
-    if x.lo() >= 0.0 { return (empty(), x); }
-    if x.hi() < 0.0  { return (x, empty()); }
+    if x.lo() >= 0.0 {
+        return (empty(), x);
+    }
+    if x.hi() < 0.0 {
+        return (x, empty());
+    }
     (
         Interval::new(x.lo(), f64::NEG_INFINITY.next_up(), x.lsb()),
         Interval::new(0.0, x.hi(), x.lsb()),
@@ -254,8 +290,12 @@ fn split_interval(x: Interval) -> (Interval, Interval) {
 
 /// Split excluding zero.
 fn split_nz(x: Interval) -> (Interval, Interval) {
-    if x.lo() >= 0.0 { return (empty(), x); }
-    if x.hi() < 0.0  { return (x, empty()); }
+    if x.lo() >= 0.0 {
+        return (empty(), x);
+    }
+    if x.hi() < 0.0 {
+        return (x, empty());
+    }
     (
         Interval::new(x.lo(), f64::NEG_INFINITY.next_up(), x.lsb()),
         Interval::new(f64::INFINITY.next_down(), x.hi(), x.lsb()),
@@ -279,13 +319,22 @@ pub fn mod_interval(x: Interval, y: Interval) -> Interval {
     let precision = x.lsb().min(y.lsb());
     let bb = {
         let bb = union_interval(
-            union_interval(singleton(x.hi().rem_euclid(y.hi())), singleton(x.lo().rem_euclid(y.hi()))),
-            union_interval(singleton(x.hi().rem_euclid(y.lo())), singleton(x.lo().rem_euclid(y.lo()))),
+            union_interval(
+                singleton(x.hi().rem_euclid(y.hi())),
+                singleton(x.lo().rem_euclid(y.hi())),
+            ),
+            union_interval(
+                singleton(x.hi().rem_euclid(y.lo())),
+                singleton(x.lo().rem_euclid(y.lo())),
+            ),
         );
         Interval::new(bb.lo(), bb.hi(), precision)
     };
 
-    union_interval(union_interval(union_interval(union_interval(bb, xnyn), xnyp), xpyn), xpyp)
+    union_interval(
+        union_interval(union_interval(union_interval(bb, xnyn), xnyp), xpyn),
+        xpyp,
+    )
 }
 
 // -------------------------------------------------------------------------
@@ -298,7 +347,10 @@ mod tests {
 
     #[test]
     fn add_basic() {
-        let r = add(Interval::new(0.0, 100.0, -5), Interval::new(10.0, 500.0, -5));
+        let r = add(
+            Interval::new(0.0, 100.0, -5),
+            Interval::new(10.0, 500.0, -5),
+        );
         assert_eq!(r.lo(), 10.0);
         assert_eq!(r.hi(), 600.0);
     }

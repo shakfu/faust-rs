@@ -7,11 +7,9 @@
 //! `intervalGt.cpp`, `intervalGe.cpp`,
 //! `intervalMin.cpp`, `intervalMax.cpp`
 
-use crate::{empty, saturated_int_cast, Interval};
-use crate::bitwise::{
-    SInterval, bitwise_signed_and, bitwise_signed_or, bitwise_signed_xor,
-};
+use crate::bitwise::{SInterval, bitwise_signed_and, bitwise_signed_or, bitwise_signed_xor};
 use crate::ops::arithmetic::mul;
+use crate::{Interval, empty, saturated_int_cast};
 
 // -------------------------------------------------------------------------
 // Bitwise AND
@@ -23,7 +21,9 @@ use crate::ops::arithmetic::mul;
 /// `intervalAnd.cpp`
 #[must_use]
 pub fn and(x: Interval, y: Interval) -> Interval {
-    if x.is_empty() || y.is_empty() { return empty(); }
+    if x.is_empty() || y.is_empty() {
+        return empty();
+    }
     let x0 = saturated_int_cast(x.lo());
     let x1 = saturated_int_cast(x.hi());
     let y0 = saturated_int_cast(y.lo());
@@ -42,7 +42,9 @@ pub fn and(x: Interval, y: Interval) -> Interval {
 /// `intervalOr.cpp`
 #[must_use]
 pub fn or(x: Interval, y: Interval) -> Interval {
-    if x.is_empty() || y.is_empty() { return empty(); }
+    if x.is_empty() || y.is_empty() {
+        return empty();
+    }
     let x0 = saturated_int_cast(x.lo());
     let x1 = saturated_int_cast(x.hi());
     let y0 = saturated_int_cast(y.lo());
@@ -64,7 +66,9 @@ pub fn or(x: Interval, y: Interval) -> Interval {
 /// `intervalXor.cpp`
 #[must_use]
 pub fn xor(x: Interval, y: Interval) -> Interval {
-    if x.is_empty() || y.is_empty() { return empty(); }
+    if x.is_empty() || y.is_empty() {
+        return empty();
+    }
     let x0 = saturated_int_cast(x.lo());
     let x1 = saturated_int_cast(x.hi());
     let y0 = saturated_int_cast(y.lo());
@@ -102,7 +106,9 @@ pub fn xor(x: Interval, y: Interval) -> Interval {
 /// `intervalNot.cpp`
 #[must_use]
 pub fn not(x: Interval) -> Interval {
-    if x.is_empty() { return empty(); }
+    if x.is_empty() {
+        return empty();
+    }
     let x0 = saturated_int_cast(x.lo());
     let x1 = saturated_int_cast(x.hi());
     let z0 = !x1;
@@ -120,7 +126,9 @@ pub fn not(x: Interval) -> Interval {
 /// `intervalLsh.cpp`
 #[must_use]
 pub fn lsh(x: Interval, k: Interval) -> Interval {
-    if x.is_empty() || k.is_empty() { return empty(); }
+    if x.is_empty() || k.is_empty() {
+        return empty();
+    }
     let j = Interval::new(2.0_f64.powf(k.lo()), 2.0_f64.powf(k.hi()), 0);
     let z = mul(x, j);
     Interval::new(z.lo(), z.hi(), x.lsb() + k.lo() as i32)
@@ -136,7 +144,9 @@ pub fn lsh(x: Interval, k: Interval) -> Interval {
 /// `intervalRsh.cpp`
 #[must_use]
 pub fn rsh(x: Interval, k: Interval) -> Interval {
-    if x.is_empty() || k.is_empty() { return empty(); }
+    if x.is_empty() || k.is_empty() {
+        return empty();
+    }
     let j = Interval::new(2.0_f64.powf(-k.hi()), 2.0_f64.powf(-k.lo()), 0);
     let z = mul(x, j);
     Interval::new(z.lo(), z.hi(), x.lsb() - k.lo() as i32)
@@ -155,7 +165,9 @@ pub fn rsh(x: Interval, k: Interval) -> Interval {
 /// `intervalEq.cpp`
 #[must_use]
 pub fn eq(x: Interval, y: Interval) -> Interval {
-    if x.is_empty() || y.is_empty() { return empty(); }
+    if x.is_empty() || y.is_empty() {
+        return empty();
+    }
     if x.is_const() && y.is_const() && x == y {
         return Interval::new(1.0, 1.0, 0);
     }
@@ -171,7 +183,9 @@ pub fn eq(x: Interval, y: Interval) -> Interval {
 /// `intervalNe.cpp`
 #[must_use]
 pub fn ne(x: Interval, y: Interval) -> Interval {
-    if x.is_empty() || y.is_empty() { return empty(); }
+    if x.is_empty() || y.is_empty() {
+        return empty();
+    }
     if x.is_const() && y.is_const() && x != y {
         return Interval::new(1.0, 1.0, 0);
     }
@@ -190,9 +204,15 @@ pub fn ne(x: Interval, y: Interval) -> Interval {
 /// `intervalGe.cpp`
 #[must_use]
 pub fn ge(x: Interval, y: Interval) -> Interval {
-    if x.is_empty() || y.is_empty() { return empty(); }
-    if x.lo() >= y.hi() { return Interval::new(1.0, 1.0, 0); }
-    if x.hi() < y.lo()  { return Interval::new(0.0, 0.0, 0); }
+    if x.is_empty() || y.is_empty() {
+        return empty();
+    }
+    if x.lo() >= y.hi() {
+        return Interval::new(1.0, 1.0, 0);
+    }
+    if x.hi() < y.lo() {
+        return Interval::new(0.0, 0.0, 0);
+    }
     Interval::new(0.0, 1.0, 0)
 }
 
@@ -202,9 +222,15 @@ pub fn ge(x: Interval, y: Interval) -> Interval {
 /// `intervalGt.cpp`
 #[must_use]
 pub fn gt(x: Interval, y: Interval) -> Interval {
-    if x.is_empty() || y.is_empty() { return empty(); }
-    if x.lo() > y.hi()  { return Interval::new(1.0, 1.0, 0); }
-    if x.hi() <= y.lo() { return Interval::new(0.0, 0.0, 0); }
+    if x.is_empty() || y.is_empty() {
+        return empty();
+    }
+    if x.lo() > y.hi() {
+        return Interval::new(1.0, 1.0, 0);
+    }
+    if x.hi() <= y.lo() {
+        return Interval::new(0.0, 0.0, 0);
+    }
     Interval::new(0.0, 1.0, 0)
 }
 
@@ -233,23 +259,19 @@ pub fn lt(x: Interval, y: Interval) -> Interval {
 /// Pointwise minimum. C++ `intervalMin.cpp`.
 #[must_use]
 pub fn min(x: Interval, y: Interval) -> Interval {
-    if x.is_empty() || y.is_empty() { return empty(); }
-    Interval::new(
-        x.lo().min(y.lo()),
-        x.hi().min(y.hi()),
-        x.lsb().min(y.lsb()),
-    )
+    if x.is_empty() || y.is_empty() {
+        return empty();
+    }
+    Interval::new(x.lo().min(y.lo()), x.hi().min(y.hi()), x.lsb().min(y.lsb()))
 }
 
 /// Pointwise maximum. C++ `intervalMax.cpp`.
 #[must_use]
 pub fn max(x: Interval, y: Interval) -> Interval {
-    if x.is_empty() || y.is_empty() { return empty(); }
-    Interval::new(
-        x.lo().max(y.lo()),
-        x.hi().max(y.hi()),
-        x.lsb().min(y.lsb()),
-    )
+    if x.is_empty() || y.is_empty() {
+        return empty();
+    }
+    Interval::new(x.lo().max(y.lo()), x.hi().max(y.hi()), x.lsb().min(y.lsb()))
 }
 
 // -------------------------------------------------------------------------
@@ -305,10 +327,7 @@ mod tests {
     #[test]
     fn lsh_basic() {
         // [0, 1] << [4,4] = [0, 16]
-        let r = lsh(
-            Interval::new(0.0, 1.0, 0),
-            Interval::new(4.0, 4.0, 0),
-        );
+        let r = lsh(Interval::new(0.0, 1.0, 0), Interval::new(4.0, 4.0, 0));
         assert_eq!(r.lo(), 0.0);
         assert_eq!(r.hi(), 16.0);
     }

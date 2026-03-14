@@ -5,7 +5,7 @@
 //! `intervalVSlider.cpp`, `intervalHSlider.cpp`, `intervalNumEntry.cpp`,
 //! `intervalMissing.cpp` (HBargraph, VBargraph)
 
-use crate::{empty, Interval};
+use crate::{Interval, empty};
 
 // -------------------------------------------------------------------------
 // Button / Checkbox
@@ -122,7 +122,7 @@ pub fn vbargraph(_name: Interval, _lo: Interval, _hi: Interval) -> Interval {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{empty, Interval};
+    use crate::{Interval, empty};
 
     #[test]
     fn button_range() {
@@ -136,8 +136,8 @@ mod tests {
     fn vslider_range() {
         let name = empty();
         let init = Interval::new(0.5, 0.5, -10);
-        let lo   = Interval::new(0.0, 0.0, -10);
-        let hi   = Interval::new(1.0, 1.0, -10);
+        let lo = Interval::new(0.0, 0.0, -10);
+        let hi = Interval::new(1.0, 1.0, -10);
         let step = Interval::new(0.1, 0.1, -10);
         let r = vslider(name, init, lo, hi, step);
         assert_eq!(r.lo(), 0.0);
@@ -147,7 +147,13 @@ mod tests {
     #[test]
     fn vslider_empty_lo() {
         let name = empty();
-        let r = vslider(name, empty(), empty(), Interval::new(1.0, 1.0, 0), Interval::new(0.1, 0.1, 0));
+        let r = vslider(
+            name,
+            empty(),
+            empty(),
+            Interval::new(1.0, 1.0, 0),
+            Interval::new(0.1, 0.1, 0),
+        );
         assert!(r.is_empty());
     }
 }
