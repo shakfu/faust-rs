@@ -2243,6 +2243,29 @@ fn eval_value(
             env,
             loop_detector,
         )?)),
+        BoxMatch::Route(ins, outs, routes) => {
+            // C++ eval.cpp (isBoxRoute branch):
+            //   v1 = a2sb(eval(ins, …))
+            //   v2 = a2sb(eval(outs, …))
+            //   vr = a2sb(eval(routes, …))
+            //   sigList2vecInt(boxPropagateSig(nil, v1, []), w1) → boxInt(w1[0])
+            //   sigList2vecInt(boxPropagateSig(nil, v2, []), w2) → boxInt(w2[0])
+            //   normalizeRouteList(vr) → canonical Par tree of boxInt pairs
+            //   return boxRoute(boxInt(ins_n), boxInt(outs_n), normalized_spec)
+            //
+            // Rust uses eval_box_to_int_node (propagate + simplify → i32 → boxInt)
+            // and normalize_route_spec to match the same behaviour.
+            let eval_ins = eval_box(arena, ins, env, loop_detector)?;
+            let eval_outs = eval_box(arena, outs, env, loop_detector)?;
+            let eval_routes = eval_box(arena, routes, env, loop_detector)?;
+
+            let ins_node = eval_box_to_int_node(arena, eval_ins).unwrap_or(eval_ins);
+            let outs_node = eval_box_to_int_node(arena, eval_outs).unwrap_or(eval_outs);
+            let spec_node = normalize_route_spec(arena, eval_routes);
+
+            let mut bld = BoxBuilder::new(arena);
+            Ok(EvalValue::Box(bld.route(ins_node, outs_node, spec_node)))
+        }
         _ => Ok(EvalValue::Box(map_children(
             arena,
             expr,
@@ -3030,6 +3053,65 @@ fn eval_box_to_i32(arena: &mut TreeArena, box_id: TreeId) -> Result<i32, EvalErr
         SigMatch::Real(x) => Ok(x as i32),
         _ => Err(EvalError::NotAConstantExpression { node: box_id }),
     }
+}
+
+// ─── Route parameter normalization ─────────────────────────────────────────────
+
+/// Converts a 0→1 box to a `boxInt(n)` node.
+///
+/// Used to normalise the `ins` and `outs` arguments of a `route` at
+/// evaluation time, mirroring the C++ `boxPropagateSig` + `sigList2vecInt`
+/// pattern used in `compiler/evaluate/eval.cpp` for the `isBoxRoute` branch.
+fn eval_box_to_int_node(arena: &mut TreeArena, box_id: TreeId) -> Result<TreeId, EvalError> {
+    let n = eval_box_to_i32(arena, box_id)?;
+    Ok(BoxBuilder::new(arena).int(n))
+}
+
+/// Recursively collects the leaves of a right-spine `Par` tree.
+///
+/// `route(2,2, 1,1, 2,2)` stores the wire pairs as
+/// `par(int(1), par(int(1), par(int(2), int(2))))`.  Flattening extracts
+/// `[int(1), int(1), int(2), int(2)]` in order.
+fn flatten_route_spec(arena: &TreeArena, spec: TreeId, out: &mut Vec<TreeId>) {
+    match match_box(arena, spec) {
+        BoxMatch::Par(a, b) => {
+            flatten_route_spec(arena, a, out);
+            flatten_route_spec(arena, b, out);
+        }
+        _ => out.push(spec),
+    }
+}
+
+/// Re-evaluates the route wire-pair spec to ensure every leaf is a `boxInt`
+/// and rebuilds the tree in the canonical right-spine form.
+///
+/// # C++ equivalent
+///
+/// `static Tree normalizeRouteList(Tree routes)` in
+/// `compiler/evaluate/eval.cpp`.
+fn normalize_route_spec(arena: &mut TreeArena, spec: TreeId) -> TreeId {
+    // Phase 1: collect leaves with an immutable borrow.
+    let mut leaves: Vec<TreeId> = Vec::new();
+    flatten_route_spec(arena, spec, &mut leaves);
+    let n = leaves.len();
+    if n == 0 {
+        return spec;
+    }
+    // Phase 2: convert each leaf to i32 → boxInt (mutable borrow).
+    let mut int_leaves: Vec<TreeId> = Vec::with_capacity(n);
+    for leaf in leaves {
+        if let Ok(i) = eval_box_to_i32(arena, leaf) {
+            int_leaves.push(BoxBuilder::new(arena).int(i));
+        } else {
+            int_leaves.push(leaf); // pattern var / wire / slot — keep as-is
+        }
+    }
+    // Phase 3: rebuild right-spine Par (C++ normalizeRouteList order).
+    let mut result = int_leaves[n - 1];
+    for i in (0..n - 1).rev() {
+        result = BoxBuilder::new(arena).par(int_leaves[i], result);
+    }
+    result
 }
 
 // ─── Evaluate label node ───────────────────────────────────────────────────────
@@ -4838,7 +4920,11 @@ mod simplify_helpers_tests {
     use signals::{SigMatch, match_sig};
     use tlib::TreeArena;
 
-    use super::{eval_box_to_f64, eval_box_to_i32, is_box_numeric, propagate_box_and_simplify};
+    use super::{
+        eval_box, eval_box_to_f64, eval_box_to_i32, eval_box_to_int_node, flatten_route_spec,
+        is_box_numeric, normalize_route_spec, propagate_box_and_simplify, Environment,
+        LoopDetector,
+    };
 
     /// Build `Seq(Par(Int(a), Int(b)), Add)` — the box-calculus encoding of `a + b`.
     fn make_int_add(arena: &mut TreeArena, a: i32, b: i32) -> tlib::TreeId {
@@ -5005,5 +5091,80 @@ mod simplify_helpers_tests {
         let sum = sb.add(two, three);
         let result = simplify_const(&mut arena, sum);
         assert!(matches!(match_sig(&arena, result), SigMatch::Int(5)));
+    }
+
+    // ── route normalization ────────────────────────────────────────────────────
+
+    /// `eval_box_to_int_node(boxInt(3))` → `boxInt(3)`.
+    #[test]
+    fn eval_box_to_int_node_literal() {
+        let mut arena = TreeArena::default();
+        let three = BoxBuilder::new(&mut arena).int(3);
+        let result = eval_box_to_int_node(&mut arena, three).unwrap();
+        assert!(matches!(match_box(&arena, result), BoxMatch::Int(3)));
+    }
+
+    /// `eval_box_to_int_node(boxSeq(boxPar(boxInt(1),boxInt(1)), boxAdd()))` → `boxInt(2)`.
+    #[test]
+    fn eval_box_to_int_node_arithmetic() {
+        let mut arena = TreeArena::default();
+        let expr = make_int_add(&mut arena, 1, 1);
+        let result = eval_box_to_int_node(&mut arena, expr).unwrap();
+        assert!(matches!(match_box(&arena, result), BoxMatch::Int(2)));
+    }
+
+    /// `normalize_route_spec(par(int(1), par(int(2), par(int(3), int(4)))))` →
+    /// same right-spine Par tree with all-boxInt leaves.
+    #[test]
+    fn normalize_route_spec_preserves_int_leaves() {
+        let mut arena = TreeArena::default();
+        // Build par(int(1), par(int(2), par(int(3), int(4))))
+        let i1 = BoxBuilder::new(&mut arena).int(1);
+        let i2 = BoxBuilder::new(&mut arena).int(2);
+        let i3 = BoxBuilder::new(&mut arena).int(3);
+        let i4 = BoxBuilder::new(&mut arena).int(4);
+        let inner = BoxBuilder::new(&mut arena).par(i3, i4);
+        let mid = BoxBuilder::new(&mut arena).par(i2, inner);
+        let spec = BoxBuilder::new(&mut arena).par(i1, mid);
+        let result = normalize_route_spec(&mut arena, spec);
+        // Flatten and collect leaves
+        let mut leaves = Vec::new();
+        flatten_route_spec(&arena, result, &mut leaves);
+        assert_eq!(leaves.len(), 4);
+        let vals: Vec<i32> = leaves
+            .iter()
+            .map(|&l| match match_box(&arena, l) {
+                BoxMatch::Int(n) => n,
+                _ => panic!("expected Int leaf"),
+            })
+            .collect();
+        assert_eq!(vals, [1, 2, 3, 4]);
+    }
+
+    /// `route(1+1, 1+1, spec)` evaluated in an empty env → `route(int(2), int(2), spec)`.
+    #[test]
+    fn eval_route_arithmetic_ins_outs() {
+        let mut arena = TreeArena::default();
+        // Build route(1+1, 1+1, par(par(int(1),int(1)), par(int(2),int(2))))
+        let ins = make_int_add(&mut arena, 1, 1);
+        let outs = make_int_add(&mut arena, 1, 1);
+        let i1a = BoxBuilder::new(&mut arena).int(1);
+        let i1b = BoxBuilder::new(&mut arena).int(1);
+        let i2a = BoxBuilder::new(&mut arena).int(2);
+        let i2b = BoxBuilder::new(&mut arena).int(2);
+        let p1 = BoxBuilder::new(&mut arena).par(i1a, i1b);
+        let p2 = BoxBuilder::new(&mut arena).par(i2a, i2b);
+        let spec = BoxBuilder::new(&mut arena).par(p1, p2);
+        let route_box = BoxBuilder::new(&mut arena).route(ins, outs, spec);
+        let env = Environment::empty();
+        let mut ld = LoopDetector::new();
+        let result = eval_box(&mut arena, route_box, &env, &mut ld).unwrap();
+        match match_box(&arena, result) {
+            BoxMatch::Route(ri, ro, _) => {
+                assert!(matches!(match_box(&arena, ri), BoxMatch::Int(2)), "ins not 2");
+                assert!(matches!(match_box(&arena, ro), BoxMatch::Int(2)), "outs not 2");
+            }
+            other => panic!("expected Route, got {other:?}"),
+        }
     }
 }

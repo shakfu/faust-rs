@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_70_route_arithmetic_params.dsp
+bytes=517
+lines=9
+fnv1a64=771a2de048df653f
