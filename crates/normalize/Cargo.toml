@@ -7,3 +7,9 @@ authors.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+tlib     = { path = "../tlib" }
+signals  = { path = "../signals" }
+sigtype  = { path = "../sigtype" }
+interval = { path = "../interval" }
