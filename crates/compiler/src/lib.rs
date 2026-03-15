@@ -124,6 +124,13 @@ pub struct Compiler {
     /// This controls the internal FIR real type only. Backend interface types
     /// such as C/C++ `FAUSTFLOAT` remain architecture-controlled.
     real_type: RealType,
+    /// Optional cooperative cancellation flag.
+    ///
+    /// When set, the evaluator checks this flag on every recursive call and
+    /// returns `EvalError::Cancelled` if it has been set to `true`. The CLI
+    /// uses this with a watchdog thread for `--timeout`; libfaust hosts can
+    /// set it from any thread to abort compilation without killing the process.
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Selects which signal->FIR lowering lane is used before C++ emission.
@@ -149,6 +156,7 @@ impl Compiler {
             fir_verify: FirVerifyOptions::default(),
             entrypoint_name: "process".into(),
             real_type: RealType::default(),
+            cancel: None,
         }
     }
 
@@ -176,6 +184,21 @@ impl Compiler {
     #[must_use]
     pub fn with_real_type(mut self, real_type: RealType) -> Self {
         self.real_type = real_type;
+        self
+    }
+
+    /// Returns a compiler facade with a cooperative cancellation flag.
+    ///
+    /// The caller retains an `Arc<AtomicBool>` clone and can set it to `true`
+    /// from any thread to request cancellation. The evaluator checks the flag
+    /// on every recursive call and returns a `Cancelled` error.
+    ///
+    /// This is the library-safe alternative to `process::exit`: the CLI uses
+    /// a watchdog thread for `--timeout`; libfaust hosts can set the flag on
+    /// user abort without killing the process.
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.cancel = Some(cancel);
         self
     }
 
@@ -652,14 +675,24 @@ impl Compiler {
             source: source.into(),
         })?;
 
-        let process_result = match &eval_source_context {
-            Some(source_context) => eval::eval_entrypoint_with_source_context(
+        let process_result = match (&eval_source_context, &self.cancel) {
+            (Some(source_context), Some(cancel)) => {
+                eval::eval_entrypoint_with_source_context_and_cancel(
+                    &mut output.state.arena,
+                    root,
+                    self.entrypoint_name.as_ref(),
+                    source_context.clone(),
+                    std::sync::Arc::clone(cancel),
+                )
+                .map(|(tree, _stats)| tree)
+            }
+            (Some(source_context), None) => eval::eval_entrypoint_with_source_context(
                 &mut output.state.arena,
                 root,
                 self.entrypoint_name.as_ref(),
                 source_context.clone(),
             ),
-            None => {
+            (None, _) => {
                 eval::eval_entrypoint(&mut output.state.arena, root, self.entrypoint_name.as_ref())
             }
         };

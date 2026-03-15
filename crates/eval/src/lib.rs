@@ -155,6 +155,7 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use boxes::{BoxBuilder, BoxMatch, match_box};
@@ -969,6 +970,14 @@ impl Default for Environment {
 pub struct LoopDetector {
     call_stack: Vec<LoopFrame>,
     max_depth: usize,
+    /// Cooperative cancellation flag.
+    ///
+    /// When set to `true`, the next `eval_value` call returns
+    /// `EvalError::Cancelled`. This is the library-safe alternative to
+    /// `process::exit`: the CLI sets this from a watchdog thread after the
+    /// configured `--timeout`, and libfaust hosts can set it from any thread
+    /// (e.g. on user abort).
+    cancel: Arc<AtomicBool>,
     /// Compiled automata keyed by the `TreeId` of the evaluated `Case` rule-list.
     automaton_cache: pattern_matcher::AutomatonCache,
     /// Dense store of `PatternMatcherValue` referenced by `boxPatternMatcher` nodes.
@@ -1005,6 +1014,28 @@ impl LoopDetector {
         Self {
             call_stack: Vec::new(),
             max_depth: 1024,
+            cancel: Arc::new(AtomicBool::new(false)),
+            automaton_cache: pattern_matcher::AutomatonCache::default(),
+            pm_store: Vec::new(),
+            next_slot_id: 0,
+        }
+    }
+
+    /// Creates a detector with a pre-existing cooperative cancellation flag.
+    ///
+    /// The caller retains an `Arc<AtomicBool>` clone and can set it to `true`
+    /// from any thread to request cancellation.  The next `eval_value` call
+    /// will return `EvalError::Cancelled`.
+    ///
+    /// This is the library-safe alternative to `process::exit`: the CLI spawns
+    /// a watchdog thread that sets the flag after `--timeout`, and libfaust
+    /// hosts can set it on user abort without killing the process.
+    #[must_use]
+    pub fn with_cancel(cancel: Arc<AtomicBool>) -> Self {
+        Self {
+            call_stack: Vec::new(),
+            max_depth: 1024,
+            cancel,
             automaton_cache: pattern_matcher::AutomatonCache::default(),
             pm_store: Vec::new(),
             next_slot_id: 0,
@@ -1020,9 +1051,25 @@ impl LoopDetector {
         Self {
             call_stack: Vec::new(),
             max_depth,
+            cancel: Arc::new(AtomicBool::new(false)),
             automaton_cache: pattern_matcher::AutomatonCache::default(),
             pm_store: Vec::new(),
             next_slot_id: 0,
+        }
+    }
+
+    /// Returns a clone of the cancellation flag for external threads to signal abort.
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel)
+    }
+
+    /// Returns `Err(EvalError::Cancelled)` if the cancel flag has been set.
+    #[inline]
+    fn check_cancel(&self) -> Result<(), EvalError> {
+        if self.cancel.load(Ordering::Relaxed) {
+            Err(EvalError::Cancelled)
+        } else {
+            Ok(())
         }
     }
 
@@ -1298,6 +1345,8 @@ pub enum EvalError {
     InternalError {
         message: String,
     },
+    /// Cooperative cancellation: the external cancel flag was set (e.g., timeout).
+    Cancelled,
 }
 
 impl Display for EvalError {
@@ -1412,6 +1461,7 @@ impl Display for EvalError {
             Self::InternalError { message } => {
                 write!(f, "internal evaluator error: {message}")
             }
+            Self::Cancelled => write!(f, "evaluation cancelled (timeout or abort)"),
         }
     }
 }
@@ -1849,6 +1899,33 @@ pub fn eval_entrypoint_with_stats_and_source_context(
     entrypoint: &str,
     source_context: EvalSourceContext,
 ) -> Result<(TreeId, EvalStats), EvalError> {
+    eval_entrypoint_full(arena, definitions, entrypoint, source_context, None)
+}
+
+/// Full entry point with cooperative cancellation support.
+///
+/// When `cancel` is `Some`, the evaluator checks the flag on every recursive
+/// `eval_value` call and returns `EvalError::Cancelled` if it has been set.
+/// This is the library-safe timeout mechanism: the CLI spawns a watchdog
+/// thread that sets the flag after `--timeout`, and libfaust hosts can set
+/// it from any thread (e.g. on user abort) without killing the process.
+pub fn eval_entrypoint_with_source_context_and_cancel(
+    arena: &mut TreeArena,
+    definitions: TreeId,
+    entrypoint: &str,
+    source_context: EvalSourceContext,
+    cancel: Arc<AtomicBool>,
+) -> Result<(TreeId, EvalStats), EvalError> {
+    eval_entrypoint_full(arena, definitions, entrypoint, source_context, Some(cancel))
+}
+
+fn eval_entrypoint_full(
+    arena: &mut TreeArena,
+    definitions: TreeId,
+    entrypoint: &str,
+    source_context: EvalSourceContext,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<(TreeId, EvalStats), EvalError> {
     let mut env = Environment::empty_with_source_context(source_context);
     let mut stats = EvalStats::default();
     bind_definitions(arena, definitions, &mut env)?;
@@ -1865,7 +1942,10 @@ pub fn eval_entrypoint_with_stats_and_source_context(
             available_defs,
         })?;
     stats.env_lookups += 1;
-    let mut loop_detector = LoopDetector::new();
+    let mut loop_detector = match cancel {
+        Some(flag) => LoopDetector::with_cancel(flag),
+        None => LoopDetector::new(),
+    };
     let entry = BoxBuilder::new(arena).ident(entrypoint);
     let result = eval_value(arena, entry, &env, &mut loop_detector)?;
     let result = a2sb_value(arena, result, &mut loop_detector)?;
@@ -2081,6 +2161,7 @@ fn eval_value(
     env: &Environment,
     loop_detector: &mut LoopDetector,
 ) -> Result<EvalValue, EvalError> {
+    loop_detector.check_cancel()?;
     match match_box(arena, expr) {
         BoxMatch::Unknown => Ok(EvalValue::Box(map_children(
             arena,
@@ -5340,8 +5421,8 @@ mod simplify_helpers_tests {
 
     use super::{
         Environment, LoopDetector, box_simplification, eval_box, eval_box_to_f64, eval_box_to_i32,
-        eval_box_to_int_node, flatten_route_spec, is_box_numeric, is_numerical_tuple_box,
-        normalize_route_spec, propagate_box_and_simplify, try_fold_seq_numeric,
+        eval_box_to_int_node, flatten_route_spec, is_numerical_tuple_box, normalize_route_spec,
+        propagate_box_and_simplify, try_fold_seq_numeric,
     };
 
     /// Build `Seq(Par(Int(a), Int(b)), Add)` — the box-calculus encoding of `a + b`.
@@ -5405,42 +5486,38 @@ mod simplify_helpers_tests {
         );
     }
 
-    // ── is_box_numeric ─────────────────────────────────────────────────────────
+    // ── simplify_pattern ───────────────────────────────────────────────────────
 
-    /// Literal `boxInt(7)` is already numeric — fast path returns `Some(boxInt(7))`.
+    /// Literal `boxInt(7)` is already numeric — `simplify_pattern` returns it unchanged.
     #[test]
-    fn is_box_numeric_literal_int() {
+    fn simplify_pattern_literal_int() {
         let mut arena = TreeArena::default();
         let b7 = BoxBuilder::new(&mut arena).int(7);
-        let result = is_box_numeric(&mut arena, b7);
-        assert!(result.is_some());
-        assert!(matches!(
-            match_box(&arena, result.unwrap()),
-            BoxMatch::Int(7)
-        ));
+        let result = super::simplify_pattern(&mut arena, b7);
+        assert!(matches!(match_box(&arena, result), BoxMatch::Int(7)));
     }
 
-    /// Arithmetic `Seq(Par(Int(2), Int(3)), Add)` → `Some(boxInt(5))` via propagation.
+    /// Arithmetic `Seq(Par(Int(2), Int(3)), Add)` → `boxInt(5)` via propagation.
     ///
-    /// C++ equivalent: `isBoxNumeric(box(2+3), out)` → `out = boxInt(5)`.
+    /// C++ equivalent: `simplifyPattern(box(2+3))` → `boxInt(5)`.
     #[test]
-    fn is_box_numeric_arithmetic_expression() {
+    fn simplify_pattern_arithmetic_expression() {
         let mut arena = TreeArena::default();
         let box_add = make_int_add(&mut arena, 2, 3);
-        let result = is_box_numeric(&mut arena, box_add);
-        assert!(result.is_some(), "expected Some");
+        let result = super::simplify_pattern(&mut arena, box_add);
         assert!(
-            matches!(match_box(&arena, result.unwrap()), BoxMatch::Int(5)),
+            matches!(match_box(&arena, result), BoxMatch::Int(5)),
             "expected boxInt(5)"
         );
     }
 
-    /// Wire (1 input) is not a 0-input box — `is_box_numeric` returns `None`.
+    /// Wire (1 input) is not a 0-input box — `simplify_pattern` returns it unchanged.
     #[test]
-    fn is_box_numeric_wire_is_none() {
+    fn simplify_pattern_wire_unchanged() {
         let mut arena = TreeArena::default();
         let wire = BoxBuilder::new(&mut arena).wire();
-        assert!(is_box_numeric(&mut arena, wire).is_none());
+        let result = super::simplify_pattern(&mut arena, wire);
+        assert_eq!(result, wire, "Wire should be returned unchanged");
     }
 
     // ── eval_box_to_f64 ────────────────────────────────────────────────────────

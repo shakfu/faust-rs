@@ -820,11 +820,18 @@ fn selected_real_type(cli: &CliArgs) -> RealType {
 }
 
 /// Builds one configured [`Compiler`] instance from parsed CLI arguments.
-fn compiler_from_cli(cli: &CliArgs) -> Compiler {
-    Compiler::new()
+fn compiler_from_cli(
+    cli: &CliArgs,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Compiler {
+    let mut compiler = Compiler::new()
         .with_fir_verify_options(selected_fir_verify_options(cli))
         .with_process_name(cli.process_name.clone())
-        .with_real_type(selected_real_type(cli))
+        .with_real_type(selected_real_type(cli));
+    if let Some(flag) = cancel {
+        compiler = compiler.with_cancel(flag);
+    }
+    compiler
 }
 
 fn selected_class_name(cli: &CliArgs) -> Option<String> {
@@ -902,14 +909,28 @@ fn main() {
     let cli = CliArgs::parse_from(args);
     maybe_print_error_format_help(cli.help_error_format);
 
-    // Spawn a watchdog thread that enforces the global timeout.
-    // The previous approach (checking elapsed time between phases) could not
-    // catch hangs *inside* a phase (e.g., infinite recursion in evaluation).
+    // Cooperative cancellation flag + CLI watchdog.
+    //
+    // Two-pronged timeout approach:
+    // 1. The cooperative cancel flag is checked by the evaluator on every
+    //    recursive call and returns `EvalError::Cancelled`. This is safe for
+    //    library (libfaust) usage because it never calls `process::exit`.
+    // 2. The CLI watchdog calls `process::exit(1)` as a last resort if the
+    //    cancel flag didn't abort in time (e.g. hang in propagation phase
+    //    where cancel checks are not yet wired). This is CLI-only and
+    //    acceptable for a standalone process.
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let timeout_secs = cli.timeout;
         if timeout_secs > 0 {
+            let cancel_clone = std::sync::Arc::clone(&cancel);
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(timeout_secs));
+                // First, try cooperative cancellation (for eval phase).
+                cancel_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+                // Give the cooperative path a grace period to take effect.
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                // If still alive, force exit (for non-eval phase hangs).
                 eprintln!(
                     "ERROR: compilation timeout ({}s limit exceeded)",
                     timeout_secs,
@@ -1244,7 +1265,7 @@ fn main() {
 
     if cli.parse {
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
-        let compiler = compiler_from_cli(&cli);
+        let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default(input_path)
         } else {
@@ -1273,7 +1294,7 @@ fn main() {
 
     if cli.dump_box {
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
-        let compiler = compiler_from_cli(&cli);
+        let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default(input_path)
         } else {
@@ -1303,7 +1324,7 @@ fn main() {
 
     if cli.dump_sig {
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
-        let compiler = compiler_from_cli(&cli);
+        let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_signals(input_path)
         } else {
@@ -1345,7 +1366,8 @@ fn main() {
                 strict: false,
             })
             .with_process_name(cli.process_name.clone())
-            .with_real_type(selected_real_type(&cli));
+            .with_real_type(selected_real_type(&cli))
+            .with_cancel(std::sync::Arc::clone(&cancel));
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_fir_with_lane(
                 input_path,
@@ -1385,7 +1407,7 @@ fn main() {
 
     if cli.dump_fir || matches!(cli.lang, Some(CliLang::Fir)) {
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
-        let compiler = compiler_from_cli(&cli);
+        let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_fir_with_lane(
                 input_path,
@@ -1420,7 +1442,7 @@ fn main() {
 
     if cli.dump_interp || matches!(cli.lang, Some(CliLang::Interp)) {
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
-        let compiler = compiler_from_cli(&cli);
+        let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
         let options = InterpOptions::default();
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_interp_with_lane(
@@ -1454,7 +1476,7 @@ fn main() {
 
     if cli.dump_cranelift || matches!(cli.lang, Some(CliLang::Cranelift)) {
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
-        let compiler = compiler_from_cli(&cli);
+        let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_fir_with_lane(
                 input_path,
@@ -1501,7 +1523,7 @@ fn main() {
 
     if cli.dump_cpp || matches!(cli.lang, Some(CliLang::Cpp)) || mode_count == 0 {
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
-        let compiler = compiler_from_cli(&cli);
+        let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
         let options = CppOptions {
             class_name: selected_class_name(&cli),
             super_class_name: selected_super_class_name(&cli),
@@ -1564,7 +1586,7 @@ fn main() {
 
     if cli.dump_c || matches!(cli.lang, Some(CliLang::C)) {
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
-        let compiler = compiler_from_cli(&cli);
+        let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
         let options = COptions {
             class_name: selected_class_name(&cli),
             ..COptions::default()
