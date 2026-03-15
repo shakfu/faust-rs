@@ -5238,65 +5238,40 @@ fn eval_pattern(
 /// localized.
 fn pattern_simplification(arena: &mut TreeArena, pattern: TreeId) -> TreeId {
     let simplified = match match_box(arena, pattern) {
-        BoxMatch::Seq(a, b) => {
-            let sa = pattern_simplification(arena, a);
-            let sb = pattern_simplification(arena, b);
-            let mut bld = BoxBuilder::new(arena);
-            bld.seq(sa, sb)
-        }
-        BoxMatch::Par(a, b) => {
-            let sa = pattern_simplification(arena, a);
-            let sb = pattern_simplification(arena, b);
-            let mut bld = BoxBuilder::new(arena);
-            bld.par(sa, sb)
-        }
-        BoxMatch::Split(a, b) => {
-            let sa = pattern_simplification(arena, a);
-            let sb = pattern_simplification(arena, b);
-            let mut bld = BoxBuilder::new(arena);
-            bld.split(sa, sb)
-        }
-        BoxMatch::Merge(a, b) => {
-            let sa = pattern_simplification(arena, a);
-            let sb = pattern_simplification(arena, b);
-            let mut bld = BoxBuilder::new(arena);
-            bld.merge(sa, sb)
-        }
-        BoxMatch::Rec(a, b) => {
-            let sa = pattern_simplification(arena, a);
-            let sb = pattern_simplification(arena, b);
-            let mut bld = BoxBuilder::new(arena);
-            bld.rec(sa, sb)
-        }
-        BoxMatch::HGroup(a, b) => {
-            let sa = pattern_simplification(arena, a);
-            let sb = pattern_simplification(arena, b);
-            let mut bld = BoxBuilder::new(arena);
-            bld.hgroup(sa, sb)
-        }
-        BoxMatch::VGroup(a, b) => {
-            let sa = pattern_simplification(arena, a);
-            let sb = pattern_simplification(arena, b);
-            let mut bld = BoxBuilder::new(arena);
-            bld.vgroup(sa, sb)
-        }
-        BoxMatch::TGroup(a, b) => {
-            let sa = pattern_simplification(arena, a);
-            let sb = pattern_simplification(arena, b);
-            let mut bld = BoxBuilder::new(arena);
-            bld.tgroup(sa, sb)
-        }
-        BoxMatch::Route(a, b, c) => {
-            let sa = pattern_simplification(arena, a);
-            let sb = pattern_simplification(arena, b);
-            let sc = pattern_simplification(arena, c);
-            let mut bld = BoxBuilder::new(arena);
-            bld.route(sa, sb, sc)
-        }
+        BoxMatch::Seq(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.seq(x, y)),
+        BoxMatch::Par(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.par(x, y)),
+        BoxMatch::Split(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.split(x, y)),
+        BoxMatch::Merge(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.merge(x, y)),
+        BoxMatch::Rec(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.rec(x, y)),
+        BoxMatch::HGroup(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.hgroup(x, y)),
+        BoxMatch::VGroup(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.vgroup(x, y)),
+        BoxMatch::TGroup(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.tgroup(x, y)),
+        BoxMatch::Route(a, b, c) => rebuild3(arena, a, b, c, |bld, x, y, z| bld.route(x, y, z)),
         _ => pattern,
     };
 
     simplify_numeric_pattern(arena, simplified).unwrap_or(simplified)
+}
+
+fn rebuild2<F>(arena: &mut TreeArena, a: TreeId, b: TreeId, f: F) -> TreeId
+where
+    F: FnOnce(&mut BoxBuilder<'_>, TreeId, TreeId) -> TreeId,
+{
+    let sa = pattern_simplification(arena, a);
+    let sb = pattern_simplification(arena, b);
+    let mut bld = BoxBuilder::new(arena);
+    f(&mut bld, sa, sb)
+}
+
+fn rebuild3<F>(arena: &mut TreeArena, a: TreeId, b: TreeId, c: TreeId, f: F) -> TreeId
+where
+    F: FnOnce(&mut BoxBuilder<'_>, TreeId, TreeId, TreeId) -> TreeId,
+{
+    let sa = pattern_simplification(arena, a);
+    let sb = pattern_simplification(arena, b);
+    let sc = pattern_simplification(arena, c);
+    let mut bld = BoxBuilder::new(arena);
+    f(&mut bld, sa, sb, sc)
 }
 
 #[derive(Clone, Copy)]
