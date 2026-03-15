@@ -1943,9 +1943,11 @@ fn a2sb(
                     });
                 }
             };
-            let pm = loop_detector.get_pm(key).ok_or_else(|| EvalError::InternalError {
-                message: format!("boxPatternMatcher key {} not found in PM store", key),
-            })?;
+            let pm = loop_detector
+                .get_pm(key)
+                .ok_or_else(|| EvalError::InternalError {
+                    message: format!("boxPatternMatcher key {} not found in PM store", key),
+                })?;
             a2sb_value(arena, EvalValue::PatternMatcher(pm), loop_detector)
         }
         _ => {
@@ -3075,33 +3077,6 @@ fn propagate_box_and_simplify(arena: &mut TreeArena, box_id: TreeId) -> Option<S
     let signals = propagate_typed(arena, flat, &[], &mut cache).ok()?;
     let sig = *signals.first()?;
     Some(simplify_const(arena, sig))
-}
-
-/// Returns `Some(boxInt(n))` or `Some(boxReal(x))` if `box_id` is a 0→1 box
-/// that reduces to a compile-time numeric constant.
-///
-/// # C++ equivalent
-///
-/// `static bool isBoxNumeric(Tree in, Tree& out)` in `compiler/evaluate/eval.cpp`.
-fn is_box_numeric(arena: &mut TreeArena, box_id: TreeId) -> Option<TreeId> {
-    // Fast path: already a literal.
-    match match_box(arena, box_id) {
-        BoxMatch::Int(_) | BoxMatch::Real(_) => return Some(box_id),
-        _ => {}
-    }
-    // General path: propagate + simplify, then test.
-    let sig = propagate_box_and_simplify(arena, box_id)?;
-    // Extract value before taking another borrow on arena.
-    let value = match match_sig(arena, sig) {
-        SigMatch::Int(i) => Some(NumericLit::Int(i)),
-        SigMatch::Real(x) => Some(NumericLit::Real(x)),
-        _ => None,
-    }?;
-    let mut b = BoxBuilder::new(arena);
-    Some(match value {
-        NumericLit::Int(i) => b.int(i),
-        NumericLit::Real(x) => b.real(x),
-    })
 }
 
 /// Tries to reduce a box to a numeric literal for pattern matching.
@@ -4530,9 +4505,11 @@ fn apply_list(
                     });
                 }
             };
-            let pm = loop_detector.get_pm(key).ok_or_else(|| EvalError::InternalError {
-                message: format!("boxPatternMatcher key {} not found in PM store", key),
-            })?;
+            let pm = loop_detector
+                .get_pm(key)
+                .ok_or_else(|| EvalError::InternalError {
+                    message: format!("boxPatternMatcher key {} not found in PM store", key),
+                })?;
             let applied =
                 apply_pattern_matcher_value(arena, pm, larg, env, loop_detector, call_site)?;
             force_value_to_box(arena, applied, loop_detector)
