@@ -806,10 +806,10 @@ fn apply_pattern_matcher_internal(
 ) -> Option<usize> {
     let state = &automaton.states[s];
 
-    // C++ parity: when the state has a numeric constant transition, try to
-    // reduce the argument to a literal before matching. This handles cases
-    // like `poly(max(1,min(6,4)))` where the argument is a compile-time
-    // constant hidden behind arithmetic.
+    // Top-level simplification is in `apply_pattern_matcher` (so variable
+    // bindings also receive the simplified value). This second check handles
+    // recursive sub-tree matching inside Op patterns — e.g., matching the `2`
+    // inside `seq(max(1,min(2,4)), x)` against a constant transition.
     let x = if state.match_num {
         crate::simplify_pattern(arena, x)
     } else {
