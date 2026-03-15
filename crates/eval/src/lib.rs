@@ -971,6 +971,17 @@ pub struct LoopDetector {
     max_depth: usize,
     /// Compiled automata keyed by the `TreeId` of the evaluated `Case` rule-list.
     automaton_cache: pattern_matcher::AutomatonCache,
+    /// Dense store of `PatternMatcherValue` referenced by `boxPatternMatcher` nodes.
+    ///
+    /// Each `boxPatternMatcher` tree node carries a `boxInt(key)` child that
+    /// indexes into this vector. The indirection is necessary because PM values
+    /// contain environments and automatons that cannot be hash-consed.
+    ///
+    /// # C++ equivalent
+    /// In C++, `boxPatternMatcher` inlines all PM state (automaton pointer,
+    /// state index, environments, consumed args) in the tree. Rust keeps the
+    /// complex data here and stores only a handle in the tree.
+    pm_store: Vec<PatternMatcherValue>,
     /// Monotonic slot id source used by [`a2sb`] when lowering residual closures.
     ///
     /// Source provenance (C++):
@@ -995,6 +1006,7 @@ impl LoopDetector {
             call_stack: Vec::new(),
             max_depth: 1024,
             automaton_cache: pattern_matcher::AutomatonCache::default(),
+            pm_store: Vec::new(),
             next_slot_id: 0,
         }
     }
@@ -1009,8 +1021,23 @@ impl LoopDetector {
             call_stack: Vec::new(),
             max_depth,
             automaton_cache: pattern_matcher::AutomatonCache::default(),
+            pm_store: Vec::new(),
             next_slot_id: 0,
         }
+    }
+
+    /// Stores a `PatternMatcherValue` and returns its dense key for `boxPatternMatcher` nodes.
+    fn store_pm(&mut self, pm: PatternMatcherValue) -> i32 {
+        let key = self.pm_store.len() as i32;
+        self.pm_store.push(pm);
+        key
+    }
+
+    /// Retrieves a stored `PatternMatcherValue` by cloning it out.
+    ///
+    /// Returns `None` if the key is out of range.
+    fn get_pm(&self, key: i32) -> Option<PatternMatcherValue> {
+        self.pm_store.get(key as usize).cloned()
     }
 
     fn enter_tree(&mut self, id: TreeId, env_key: EnvFrameKey) -> Result<(), EvalError> {
@@ -1267,6 +1294,10 @@ pub enum EvalError {
     NotAConstantExpression {
         node: TreeId,
     },
+    /// Internal evaluator error — indicates a bug in the evaluator, not a user error.
+    InternalError {
+        message: String,
+    },
 }
 
 impl Display for EvalError {
@@ -1377,6 +1408,9 @@ impl Display for EvalError {
                     "expression is not a compile-time numeric constant (type 0→1): node {}",
                     node.as_u32()
                 )
+            }
+            Self::InternalError { message } => {
+                write!(f, "internal evaluator error: {message}")
             }
         }
     }
@@ -1899,6 +1933,21 @@ fn a2sb(
             let value = eval_case_value(arena, expr, rules, &Environment::empty(), loop_detector)?;
             a2sb_value(arena, value, loop_detector)
         }
+        BoxMatch::PatternMatcher(key_node) => {
+            // Retrieve the PM from the side-table and lower it via a2sb_value.
+            let key = match match_box(arena, key_node) {
+                BoxMatch::Int(k) => k,
+                _ => {
+                    return Err(EvalError::InternalError {
+                        message: "boxPatternMatcher key is not an integer".to_owned(),
+                    });
+                }
+            };
+            let pm = loop_detector.get_pm(key).ok_or_else(|| EvalError::InternalError {
+                message: format!("boxPatternMatcher key {} not found in PM store", key),
+            })?;
+            a2sb_value(arena, EvalValue::PatternMatcher(pm), loop_detector)
+        }
         _ => {
             let Some(node) = arena.node(expr).cloned() else {
                 return Ok(expr);
@@ -2096,6 +2145,9 @@ fn eval_value(
         }
         BoxMatch::Access(body, field) => eval_access_value(arena, body, field, env, loop_detector),
         BoxMatch::Case(rules) => eval_case_value(arena, expr, rules, env, loop_detector),
+        // boxPatternMatcher is already in normal form — return as-is.
+        // (Mirrors C++ eval.cpp line 638: `isBoxPatternMatcher(box) => box`)
+        BoxMatch::PatternMatcher(_) => Ok(EvalValue::Box(expr)),
         BoxMatch::PatternVar(_) => Ok(EvalValue::Box(expr)),
         BoxMatch::WithLocalDef(body, defs) => {
             let mut scoped = env.push_scope();
@@ -2337,7 +2389,22 @@ fn force_value_to_box(
             BoxMatch::Environment => Ok(closure.expr),
             _ => eval_box(arena, closure.expr, &closure.env, loop_detector),
         },
-        EvalValue::PatternMatcher(pm) => Ok(pm.case_expr),
+        EvalValue::PatternMatcher(pm) => {
+            if pm.state == 0 && pm.rev_param_list.is_empty() {
+                // Unapplied: return the original case box for later a2sb.
+                Ok(pm.case_expr)
+            } else {
+                // Partially applied: store in PM side-table and return a
+                // boxPatternMatcher(key) tree node. This avoids re-entering
+                // the evaluator (which would cause stack overflow via
+                // lower_pattern_matcher_to_symbolic → apply_value_list →
+                // eval_value → force_value_to_box cycle).
+                let key = loop_detector.store_pm(pm);
+                let mut b = BoxBuilder::new(arena);
+                let key_node = b.int(key);
+                Ok(b.pattern_matcher(key_node))
+            }
+        }
     }
 }
 
@@ -2979,7 +3046,6 @@ fn ident_name_or_fallback(arena: &TreeArena, expr: TreeId) -> String {
 
 /// Tagged numeric literal — used to split borrow-checker lifetimes between
 /// reading a signal's value and writing a new box into the arena.
-#[allow(dead_code)] // used in tests; will be promoted to production in Step 6a/6b/7
 #[derive(Clone, Copy)]
 enum NumericLit {
     Int(i32),
@@ -3003,7 +3069,6 @@ enum NumericLit {
 ///
 /// Called by `isBoxNumeric`, `eval2double`, `eval2int`, and
 /// `numericBoxSimplification` in `compiler/evaluate/eval.cpp`.
-#[allow(dead_code)] // used in tests; will be promoted to production in Step 6a/6b/7
 fn propagate_box_and_simplify(arena: &mut TreeArena, box_id: TreeId) -> Option<SigId> {
     let flat = try_build_flat_box(arena, box_id).ok()?;
     let mut cache = ArityCache::default();
@@ -3018,7 +3083,6 @@ fn propagate_box_and_simplify(arena: &mut TreeArena, box_id: TreeId) -> Option<S
 /// # C++ equivalent
 ///
 /// `static bool isBoxNumeric(Tree in, Tree& out)` in `compiler/evaluate/eval.cpp`.
-#[allow(dead_code)] // used in tests; will be promoted to production in Step 6a/6b/7
 fn is_box_numeric(arena: &mut TreeArena, box_id: TreeId) -> Option<TreeId> {
     // Fast path: already a literal.
     match match_box(arena, box_id) {
@@ -3038,6 +3102,51 @@ fn is_box_numeric(arena: &mut TreeArena, box_id: TreeId) -> Option<TreeId> {
         NumericLit::Int(i) => b.int(i),
         NumericLit::Real(x) => b.real(x),
     })
+}
+
+/// Tries to reduce a box to a numeric literal for pattern matching.
+///
+/// If `box_id` represents a compile-time numeric constant (possibly hidden
+/// behind arithmetic like `max(1, min(6, 4))`), returns the corresponding
+/// `boxInt(n)` or `boxReal(x)`.  Otherwise returns `box_id` unchanged.
+///
+/// When the propagation yields `sigReal(x)` but `x` is an exact integer
+/// (e.g. `2.0`), we return `boxInt(x as i32)` so that the pattern matcher's
+/// tree-identity check succeeds against integer pattern constants like
+/// `poly(2, x)`.  This mirrors the C++ pipeline where `max/min` on integers
+/// stays in the integer domain.
+///
+/// # C++ equivalent
+///
+/// `Tree simplifyPattern(Tree value)` in `compiler/evaluate/eval.cpp`.
+pub(crate) fn simplify_pattern(arena: &mut TreeArena, box_id: TreeId) -> TreeId {
+    // Fast path: already a literal.
+    match match_box(arena, box_id) {
+        BoxMatch::Int(_) | BoxMatch::Real(_) => return box_id,
+        _ => {}
+    }
+    let Some(sig) = propagate_box_and_simplify(arena, box_id) else {
+        return box_id;
+    };
+    // Extract value before taking &mut borrow for BoxBuilder.
+    let value = match match_sig(arena, sig) {
+        SigMatch::Int(i) => Some(NumericLit::Int(i)),
+        SigMatch::Real(x) => {
+            // If the real value is an exact integer, prefer boxInt for pattern matching.
+            let i = x as i32;
+            if (i as f64) == x {
+                Some(NumericLit::Int(i))
+            } else {
+                Some(NumericLit::Real(x))
+            }
+        }
+        _ => None,
+    };
+    match value {
+        Some(NumericLit::Int(i)) => BoxBuilder::new(arena).int(i),
+        Some(NumericLit::Real(x)) => BoxBuilder::new(arena).real(x),
+        None => box_id,
+    }
 }
 
 /// Converts a 0→1 box to an `f64` compile-time constant.
@@ -4410,6 +4519,24 @@ fn apply_list(
             let applied = apply_value_list_value(arena, pm, larg, env, loop_detector, call_site)?;
             force_value_to_box(arena, applied, loop_detector)
         }
+        BoxMatch::PatternMatcher(key_node) => {
+            // Retrieve the partially-applied PM from the side-table and
+            // continue matching via the standard PM application path.
+            let key = match match_box(arena, key_node) {
+                BoxMatch::Int(k) => k,
+                _ => {
+                    return Err(EvalError::InternalError {
+                        message: "boxPatternMatcher key is not an integer".to_owned(),
+                    });
+                }
+            };
+            let pm = loop_detector.get_pm(key).ok_or_else(|| EvalError::InternalError {
+                message: format!("boxPatternMatcher key {} not found in PM store", key),
+            })?;
+            let applied =
+                apply_pattern_matcher_value(arena, pm, larg, env, loop_detector, call_site)?;
+            force_value_to_box(arena, applied, loop_detector)
+        }
         _ => {
             // C++ parity (`applyList`): for non-closures, insert implicit wires when
             // partially applying a function, and reject over-application.
@@ -4723,6 +4850,16 @@ fn eval_non_negative_count(
         BoxMatch::Int(v) => usize::try_from(v).map_err(|_| EvalError::IterationCountTooLarge {
             value: i64::from(v),
         }),
+        BoxMatch::Real(x) => {
+            let i = x as i64;
+            if (i as f64) == x && i >= 0 {
+                usize::try_from(i).map_err(|_| EvalError::IterationCountTooLarge { value: i })
+            } else if x < 0.0 {
+                Err(EvalError::NegativeIterationCount { value: x as i64 })
+            } else {
+                Err(EvalError::IterationCountNotInt { node: count })
+            }
+        }
         _ => Err(EvalError::IterationCountNotInt { node: count }),
     }
 }

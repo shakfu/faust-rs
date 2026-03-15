@@ -384,6 +384,7 @@ fn flat_node_kind(arena: &TreeArena, node: FlatBoxId) -> Result<FlatNodeKind, Fl
         BoxMatch::Component(_) => Err(flat_box_unexpected(node_id, "component")),
         BoxMatch::Library(_) => Err(flat_box_unexpected(node_id, "library")),
         BoxMatch::Case(_) => Err(flat_box_unexpected(node_id, "case")),
+        BoxMatch::PatternMatcher(_) => Err(flat_box_unexpected(node_id, "patternmatcher")),
         BoxMatch::PatternVar(_) => Err(flat_box_unexpected(node_id, "patternvar")),
         BoxMatch::Abstr(_, _) => Err(flat_box_unexpected(node_id, "abstr")),
         BoxMatch::Modulation(_, _) => Err(flat_box_unexpected(node_id, "modulation")),

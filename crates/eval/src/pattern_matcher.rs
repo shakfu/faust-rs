@@ -798,13 +798,23 @@ fn add_subst(automaton: &Automaton, s: usize, substs: &mut [Subst]) {
 /// # C++ correspondence
 /// `static int apply_pattern_matcher_internal(Automaton*, int s, Tree X, vector<Subst>&)`.
 fn apply_pattern_matcher_internal(
-    arena: &TreeArena,
+    arena: &mut TreeArena,
     automaton: &Automaton,
     s: usize,
     x: TreeId,
     substs: &mut [Subst],
 ) -> Option<usize> {
     let state = &automaton.states[s];
+
+    // C++ parity: when the state has a numeric constant transition, try to
+    // reduce the argument to a literal before matching. This handles cases
+    // like `poly(max(1,min(6,4)))` where the argument is a compile-time
+    // constant hidden behind arithmetic.
+    let x = if state.match_num {
+        crate::simplify_pattern(arena, x)
+    } else {
+        x
+    };
 
     for trans in &state.trans {
         if trans.is_var() {
@@ -890,6 +900,18 @@ pub fn apply_pattern_matcher(
 ) -> (Option<usize>, Option<TreeId>) {
     let n = automaton.n_rules();
     let mut substs: Vec<Subst> = vec![Vec::new(); n];
+
+    // C++ parity: simplify the argument to a numeric literal when the current
+    // state has numeric constant transitions. This must happen HERE (not just
+    // inside `apply_pattern_matcher_internal`) so that variable bindings also
+    // receive the simplified value. Without this, a variable `i` matched against
+    // `sub(max(1,min(2,4)),1)` would bind the unsimplified expression, causing
+    // infinite recursion in recursive case rules like `factorial(i-1)`.
+    let x = if automaton.states[s].match_num {
+        crate::simplify_pattern(arena, x)
+    } else {
+        x
+    };
 
     let s_idx = match apply_pattern_matcher_internal(arena, automaton, s, x, &mut substs) {
         None => return (None, None),

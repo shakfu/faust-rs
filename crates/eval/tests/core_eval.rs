@@ -928,10 +928,12 @@ fn eval_case_under_application_preserves_residual_case_and_no_match_still_errors
         &Environment::empty(),
         &mut loop_detector,
     )
-    .expect("under-applied case should preserve a residual case value");
-    assert_eq!(
-        lowered, case_expr,
-        "eval_box should force a partial pattern matcher back to the original case syntax"
+    .expect("under-applied case should preserve a residual value");
+    // After the boxPatternMatcher side-table change, a partially-applied PM
+    // is stored as a boxPatternMatcher(key) node (not the original case_expr).
+    assert!(
+        matches!(match_box(&arena, lowered), BoxMatch::PatternMatcher(_)),
+        "eval_box should produce a boxPatternMatcher for a partially-applied case"
     );
 
     // No-match branch: (0) => 1 applied to 2.

@@ -111,6 +111,7 @@ const BOX_FFUN_TAG: &str = "BOXFFUN";
 const BOX_FCONST_TAG: &str = "BOXFCONST";
 const BOX_FVAR_TAG: &str = "BOXFVAR";
 const BOX_CASE_TAG: &str = "BOXCASE";
+const BOX_PATTERN_MATCHER_TAG: &str = "BOXPATMATCHER";
 const BOX_PATTERN_VAR_TAG: &str = "BOXPATVAR";
 const BOX_ABSTR_TAG: &str = "BOXABSTR";
 const BOX_MODULATION_TAG: &str = "BOXMODULATION";
@@ -666,6 +667,15 @@ impl<'a> BoxBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds a `boxPatternMatcher` node — a handle to a partially-applied PM in
+    /// the evaluator's side-table.
+    ///
+    /// `key` is a `boxInt(index)` referencing the evaluator's PM store.
+    pub fn pattern_matcher(&mut self, key: BoxId) -> BoxId {
+        node_pattern_matcher(self.arena, key)
+    }
+
+    #[must_use]
     /// Builds one box node for `pattern_var` and returns its `BoxId`.
     pub fn pattern_var(&mut self, ident: BoxId) -> BoxId {
         node_pattern_var(self.arena, ident)
@@ -906,6 +916,16 @@ pub enum BoxMatch<'a> {
     FConst(BoxId, BoxId, BoxId),
     FVar(BoxId, BoxId, BoxId),
     Case(BoxId),
+    /// Partially-applied pattern matcher stored in an evaluator side-table.
+    ///
+    /// The single child is a `boxInt(key)` indexing into the evaluator's PM store.
+    /// This node exists so that `force_value_to_box` can return a `TreeId` for a
+    /// partially-applied `case` expression without re-entering the evaluator.
+    ///
+    /// # C++ equivalent
+    /// `boxPatternMatcher(Automaton*, int state, Tree env, Tree orig, Tree revParList)`
+    /// — C++ stores all PM state inline in the tree; Rust keeps it in a side-table.
+    PatternMatcher(BoxId),
     PatternVar(BoxId),
     Abstr(BoxId, BoxId),
     Modulation(BoxId, BoxId),
@@ -1026,6 +1046,7 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
                         BOX_WAVEFORM_TAG => BoxMatch::Waveform(c0),
                         BOX_FFUN_TAG => BoxMatch::FFun(c0),
                         BOX_CASE_TAG => BoxMatch::Case(c0),
+                        BOX_PATTERN_MATCHER_TAG => BoxMatch::PatternMatcher(c0),
                         BOX_PATTERN_VAR_TAG => BoxMatch::PatternVar(c0),
                         BOX_INPUTS_TAG => BoxMatch::Inputs(c0),
                         BOX_OUTPUTS_TAG => BoxMatch::Outputs(c0),
@@ -1890,6 +1911,12 @@ fn is_node_fvar(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
 #[must_use]
 fn node_case(arena: &mut TreeArena, rules: BoxId) -> BoxId {
     intern_tag(arena, BOX_CASE_TAG, &[rules])
+}
+
+/// Builds a `boxPatternMatcher(key)` node referencing the evaluator PM store.
+#[must_use]
+fn node_pattern_matcher(arena: &mut TreeArena, key: BoxId) -> BoxId {
+    intern_tag(arena, BOX_PATTERN_MATCHER_TAG, &[key])
 }
 
 /// Returns `rules` when `b` is `node_case`.
