@@ -41,6 +41,7 @@ use fir::{checker::verify_fir_module, dump_fir};
 use serde_json::json;
 use signals::dump_sig_readable;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 /// Code generation language/backend selected from the CLI.
@@ -85,6 +86,59 @@ impl CliSignalFirLane {
         match self {
             Self::Legacy => SignalFirLane::LegacyBridge,
             Self::Fast => SignalFirLane::TransformFastLane,
+        }
+    }
+}
+
+/// Tracks elapsed time across compilation phases and enforces a global timeout.
+struct CompilationTimer {
+    start: Instant,
+    last_phase: Instant,
+    timeout: Duration,
+    display: bool,
+}
+
+impl CompilationTimer {
+    fn new(timeout_secs: u64, display: bool) -> Self {
+        let now = Instant::now();
+        Self {
+            start: now,
+            last_phase: now,
+            timeout: Duration::from_secs(timeout_secs),
+            display,
+        }
+    }
+
+    /// Mark the end of a compilation phase.  Prints elapsed time if
+    /// `--compilation-time` was requested and aborts if the global timeout
+    /// has been exceeded.
+    fn phase(&mut self, name: &str) {
+        let now = Instant::now();
+        let phase_elapsed = now.duration_since(self.last_phase);
+        let total_elapsed = now.duration_since(self.start);
+        if self.display {
+            eprintln!(
+                "[{name}] {:.1}ms (total {:.1}ms)",
+                phase_elapsed.as_secs_f64() * 1000.0,
+                total_elapsed.as_secs_f64() * 1000.0,
+            );
+        }
+        self.last_phase = now;
+        if total_elapsed > self.timeout {
+            eprintln!(
+                "ERROR: compilation timeout ({:.1}s > {}s limit) after phase '{name}'",
+                total_elapsed.as_secs_f64(),
+                self.timeout.as_secs(),
+            );
+            std::process::exit(1);
+        }
+    }
+
+    /// Print the total compilation time (only when `--compilation-time` is active).
+    fn total(&self) {
+        if self.display {
+            let elapsed = self.start.elapsed();
+            eprintln!("[total] {:.1}ms", elapsed.as_secs_f64() * 1000.0);
         }
     }
 }
@@ -213,6 +267,12 @@ struct CliArgs {
     /// compiler.  Only effective with `--signal-fir-lane fast`.
     #[arg(long = "double", action = ArgAction::SetTrue)]
     double: bool,
+    /// Display compilation phases timing information (`-time`).
+    #[arg(long = "compilation-time", action = ArgAction::SetTrue)]
+    compilation_time: bool,
+    /// Maximum compilation time in seconds (default: 120).
+    #[arg(long = "timeout", default_value_t = 120)]
+    timeout: u64,
 }
 
 /// Normalizes legacy Faust-style flags to the current `clap` surface.
@@ -250,6 +310,17 @@ fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> 
         }
         if arg == "-scn" {
             normalized.push("--super-class-name".to_owned());
+            if let Some(value) = it.next() {
+                normalized.push(value);
+            }
+            continue;
+        }
+        if arg == "-time" {
+            normalized.push("--compilation-time".to_owned());
+            continue;
+        }
+        if arg == "-timeout" {
+            normalized.push("--timeout".to_owned());
             if let Some(value) = it.next() {
                 normalized.push(value);
             }
@@ -1155,12 +1226,14 @@ fn main() {
     }
 
     if cli.parse {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(&cli);
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default(input_path)
         } else {
             compiler.compile_file(input_path, &cli.import_dir)
         };
+        timer.phase("parse");
 
         match result {
             Ok(out) => {
@@ -1177,16 +1250,19 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        timer.total();
         return;
     }
 
     if cli.dump_box {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(&cli);
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default(input_path)
         } else {
             compiler.compile_file(input_path, &cli.import_dir)
         };
+        timer.phase("parse");
 
         match result {
             Ok(out) => {
@@ -1195,6 +1271,7 @@ fn main() {
                     std::process::exit(1);
                 };
                 let rendered = format!("{}\n", dump_box(&out.state.arena, root));
+                timer.phase("dump-box");
                 emit_output(&rendered, cli.output.as_ref());
             }
             Err(err) => {
@@ -1203,16 +1280,19 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        timer.total();
         return;
     }
 
     if cli.dump_sig {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(&cli);
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_signals(input_path)
         } else {
             compiler.compile_file_to_signals(input_path, &cli.import_dir)
         };
+        timer.phase("signals");
 
         match result {
             Ok(out) => {
@@ -1236,10 +1316,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        timer.total();
         return;
     }
 
     if cli.dump_fir_verify {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = Compiler::new()
             .with_fir_verify_options(FirVerifyOptions {
                 enabled: false,
@@ -1259,6 +1341,7 @@ fn main() {
                 selected_codegen_lane(&cli).into_compiler_lane(),
             )
         };
+        timer.phase("FIR");
 
         match result {
             Ok(out) => {
@@ -1267,6 +1350,7 @@ fn main() {
                 let report = verify_fir_module(&out.store, out.module);
                 let fatal = report.has_errors()
                     || (cli.fir_verify_strict && report.warnings().next().is_some());
+                timer.phase("verify");
                 emit_output(&rendered, cli.output.as_ref());
                 if fatal {
                     std::process::exit(1);
@@ -1278,10 +1362,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        timer.total();
         return;
     }
 
     if cli.dump_fir || matches!(cli.lang, Some(CliLang::Fir)) {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(&cli);
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_fir_with_lane(
@@ -1295,6 +1381,7 @@ fn main() {
                 selected_codegen_lane(&cli).into_compiler_lane(),
             )
         };
+        timer.phase("FIR");
 
         match result {
             Ok(out) => {
@@ -1310,10 +1397,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        timer.total();
         return;
     }
 
     if cli.dump_interp || matches!(cli.lang, Some(CliLang::Interp)) {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(&cli);
         let options = InterpOptions::default();
         let result = if cli.import_dir.is_empty() {
@@ -1330,6 +1419,7 @@ fn main() {
                 selected_codegen_lane(&cli).into_compiler_lane(),
             )
         };
+        timer.phase("interp");
 
         match result {
             Ok(fbc_text) => {
@@ -1341,10 +1431,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        timer.total();
         return;
     }
 
     if cli.dump_cranelift || matches!(cli.lang, Some(CliLang::Cranelift)) {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(&cli);
         let result = if cli.import_dir.is_empty() {
             compiler.compile_file_default_to_fir_with_lane(
@@ -1358,6 +1450,7 @@ fn main() {
                 selected_codegen_lane(&cli).into_compiler_lane(),
             )
         };
+        timer.phase("FIR");
 
         match result {
             Ok(out) => {
@@ -1374,6 +1467,7 @@ fn main() {
                         std::process::exit(1);
                     }
                 };
+                timer.phase("cranelift-codegen");
                 let rendered =
                     render_cranelift_report(&compiled, subset_gap.ok().flatten().as_deref());
                 emit_output(&rendered, cli.output.as_ref());
@@ -1384,10 +1478,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        timer.total();
         return;
     }
 
     if cli.dump_cpp || matches!(cli.lang, Some(CliLang::Cpp)) || mode_count == 0 {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(&cli);
         let options = CppOptions {
             class_name: selected_class_name(&cli),
@@ -1408,6 +1504,7 @@ fn main() {
                 selected_codegen_lane(&cli).into_compiler_lane(),
             )
         };
+        timer.phase("cpp-codegen");
 
         match result {
             Ok(cpp) => {
@@ -1444,10 +1541,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        timer.total();
         return;
     }
 
     if cli.dump_c || matches!(cli.lang, Some(CliLang::C)) {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(&cli);
         let options = COptions {
             class_name: selected_class_name(&cli),
@@ -1467,6 +1566,7 @@ fn main() {
                 selected_codegen_lane(&cli).into_compiler_lane(),
             )
         };
+        timer.phase("c-codegen");
 
         match result {
             Ok(c_code) => {
@@ -1500,6 +1600,7 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        timer.total();
         return;
     }
 
