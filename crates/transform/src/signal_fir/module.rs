@@ -51,7 +51,7 @@ use fir::{
     FirType, NamedType, SliderRange, SliderType, UiBoxType,
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
-use tlib::{NodeKind, TreeArena, match_sym_rec, match_sym_ref};
+use tlib::{NodeKind, TreeArena, list_to_vec, match_sym_rec, match_sym_ref};
 use ui::{ControlId, ControlKind, UiGroupKind, UiMatch, UiProgram, match_ui};
 
 use sigtype::{SigType, check_delay_interval};
@@ -531,8 +531,11 @@ struct SignalToFirLower<'a> {
     scheduled_delay_writes: HashSet<SigId>,
     /// `true` once `fIOTA` has been declared; prevents duplicate declarations.
     uses_iota: bool,
-    /// Stack of active recursion carriers, innermost last; used by `SIGPROJ` resolution.
-    recursion_stack: Vec<RecArrayInfo>,
+    /// Stack of active recursion carrier groups, innermost last; used by `SIGPROJ` resolution.
+    ///
+    /// Each entry is a group of `RecArrayInfo`s — one per output body in a
+    /// multi-output recursion group.  Single-output groups store `vec![info]`.
+    recursion_stack: Vec<Vec<RecArrayInfo>>,
     /// Stack of active symbolic recursion variables matching `recursion_stack`.
     recursion_vars: Vec<SigId>,
     /// Maps each `ControlId` to its generated `FaustFloat` zone variable name.
@@ -1058,7 +1061,7 @@ impl<'a> SignalToFirLower<'a> {
         Ok(out)
     }
 
-    /// Returns the active recursion carrier if `value` is `SIGPROJ(0, group)`
+    /// Returns the active recursion carrier if `value` is `SIGPROJ(i, group)`
     /// pointing into the current recursion context, otherwise `None`.
     ///
     /// Used by `lower_delay_state` to detect the canonical feedback pattern
@@ -1071,17 +1074,19 @@ impl<'a> SignalToFirLower<'a> {
         let SigMatch::Proj(index, group) = match_sig(self.arena, value) else {
             return Ok(None);
         };
-        if index != 0 {
-            return Ok(None);
-        }
-        self.active_recursion_info(group)
+        self.active_recursion_info(group, index as usize)
     }
 
-    /// Resolves a symbolic recursion group reference to its active carrier.
+    /// Resolves a symbolic recursion group reference to its active carrier
+    /// at a given projection index.
     ///
     /// Walks [`Self::recursion_stack`] from innermost outward; returns `None`
     /// if `group` is not a `SYMREF` bound in the current lowering context.
-    fn active_recursion_info(&self, group: SigId) -> Result<Option<RecArrayInfo>, SignalFirError> {
+    fn active_recursion_info(
+        &self,
+        group: SigId,
+        proj_index: usize,
+    ) -> Result<Option<RecArrayInfo>, SignalFirError> {
         let Some(var) = match_sym_ref(self.arena, group) else {
             return Ok(None);
         };
@@ -1096,9 +1101,16 @@ impl<'a> SignalToFirLower<'a> {
                     format!("unbound symbolic recursion variable {}", var.as_u32()),
                 )
             })?;
-        Ok(Some(
-            self.recursion_stack[self.recursion_stack.len() - depth].clone(),
-        ))
+        let group_arrays = &self.recursion_stack[self.recursion_stack.len() - depth];
+        group_arrays.get(proj_index).cloned().ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "projection index {proj_index} out of bounds for recursion group with {} outputs",
+                    group_arrays.len()
+                ),
+            )
+        }).map(Some)
     }
 
     /// Ensures one struct state slot exists for `node`, creating declaration
@@ -2363,28 +2375,37 @@ impl<'a> SignalToFirLower<'a> {
         index: i32,
         group: SigId,
     ) -> Result<FirId, SignalFirError> {
-        if index != 0 {
-            return Err(SignalFirError::new(
+        let index_usize = usize::try_from(index).map_err(|_| {
+            SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
-                format!("SIGPROJ index {index} unsupported in Step 2C.2 (only 0)"),
-            ));
-        }
+                format!("negative SIGPROJ index {index} in Step 2C.2"),
+            )
+        })?;
 
-        if let Some(info) = self.active_recursion_info(group)? {
+        // ── Fast path: active reference inside a body being lowered ──
+        if let Some(info) = self.active_recursion_info(group, index_usize)? {
             let real_ty = self.signal_fir_type(node)?;
-            debug_assert_eq!(
-                info.typ, real_ty,
-                "prepared recursion projection type should match recursion array element type"
-            );
             let current_index = self.lower_int32_const(0);
             let mut b = FirBuilder::new(&mut self.store);
             return Ok(b.load_table(info.name, AccessType::Struct, current_index, real_ty));
         }
 
-        let body = if let Some(body) = self.decode_symbolic_group(group) {
-            body
+        // ── Decode all body signals from the group ──
+        let (var, bodies) = if let Some(pair) = self.decode_symbolic_group_bodies(group) {
+            pair
         } else if let SigMatch::Rec(body) = match_sig(self.arena, group) {
-            body
+            // Legacy SIGREC fallback: single-body group, no symbolic variable.
+            if index != 0 {
+                return Err(SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!(
+                        "SIGPROJ index {index} unsupported for legacy SIGREC in Step 2C.2"
+                    ),
+                ));
+            }
+            // Wrap in a one-element vector; use a sentinel `var` (unused).
+            let sentinel_var = group; // won't be matched as SYMREF
+            (sentinel_var, vec![body])
         } else {
             return Err(SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
@@ -2395,56 +2416,91 @@ impl<'a> SignalToFirLower<'a> {
             ));
         };
 
-        let state_ty = self.signal_fir_type(body)?;
-        let out_ty = self.signal_fir_type(node)?;
-        let init = match state_ty {
-            FirType::Int32 => self.lower_int32_const(0),
-            FirType::Float32 | FirType::Float64 | FirType::FaustFloat => self.float_const(0.0),
-            other => {
-                return Err(SignalFirError::new(
-                    SignalFirErrorCode::UnsupportedSignalNode,
-                    format!("unsupported recursive state type in Step 2C.2: {other:?}"),
-                ));
-            }
-        };
-        let info = self.ensure_recursion_array(node, state_ty.clone(), init)?;
-        if self.scheduled_state_updates.insert(node) {
-            if let Some((var, _)) = match_sym_rec(self.arena, group) {
+        if index_usize >= bodies.len() {
+            return Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "SIGPROJ index {index} out of bounds for recursion group with {} bodies",
+                    bodies.len()
+                ),
+            ));
+        }
+
+        // ── Allocate recursion arrays for ALL bodies ──
+        let mut group_arrays = Vec::with_capacity(bodies.len());
+        for body in &bodies {
+            let state_ty = self.signal_fir_type(*body)?;
+            let init = match state_ty {
+                FirType::Int32 => self.lower_int32_const(0),
+                FirType::Float32 | FirType::Float64 | FirType::FaustFloat => {
+                    self.float_const(0.0)
+                }
+                other => {
+                    return Err(SignalFirError::new(
+                        SignalFirErrorCode::UnsupportedSignalNode,
+                        format!("unsupported recursive state type in Step 2C.2: {other:?}"),
+                    ));
+                }
+            };
+            let info = self.ensure_recursion_array(*body, state_ty, init)?;
+            group_arrays.push(info);
+        }
+
+        // ── Push group context, lower ALL bodies, emit stores ──
+        // Use `group` as the dedup key: if we've already scheduled this group,
+        // skip the body-lowering pass (another proj of the same group triggered it).
+        if self.scheduled_state_updates.insert(group) {
+            let is_symbolic = match_sym_rec(self.arena, group).is_some();
+            if is_symbolic {
                 self.recursion_vars.push(var);
             }
-            self.recursion_stack.push(info.clone());
-            let rhs = self.lower_signal(body)?;
+            self.recursion_stack.push(group_arrays.clone());
+
+            for (i, body) in bodies.iter().enumerate() {
+                let rhs = self.lower_signal(*body)?;
+                let info = &group_arrays[i];
+                let zero = self.lower_int32_const(0);
+                let one = self.lower_int32_const(1);
+                let current_store = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.store_table(info.name.clone(), AccessType::Struct, zero, rhs)
+                };
+                self.sample_statements.push(current_store);
+                let current_load = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.load_table(
+                        info.name.clone(),
+                        AccessType::Struct,
+                        zero,
+                        info.typ.clone(),
+                    )
+                };
+                let shift_store = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.store_table(info.name.clone(), AccessType::Struct, one, current_load)
+                };
+                self.compute_updates.push(shift_store);
+            }
+
             self.recursion_stack.pop();
-            if match_sym_rec(self.arena, group).is_some() {
+            if is_symbolic {
                 self.recursion_vars.pop();
             }
-            let zero = self.lower_int32_const(0);
-            let one = self.lower_int32_const(1);
-            let current_store = {
-                let mut b = FirBuilder::new(&mut self.store);
-                b.store_table(info.name.clone(), AccessType::Struct, zero, rhs)
-            };
-            self.sample_statements.push(current_store);
-            let current_load = {
-                let mut b = FirBuilder::new(&mut self.store);
-                b.load_table(
-                    info.name.clone(),
-                    AccessType::Struct,
-                    zero,
-                    info.typ.clone(),
-                )
-            };
-            let shift_store = {
-                let mut b = FirBuilder::new(&mut self.store);
-                b.store_table(info.name.clone(), AccessType::Struct, one, current_load)
-            };
-            self.compute_updates.push(shift_store);
         }
+
+        // ── Return the result for the requested index ──
+        let info = &group_arrays[index_usize];
+        let out_ty = self.signal_fir_type(node)?;
         let zero = self.lower_int32_const(0);
         let out = {
             let mut b = FirBuilder::new(&mut self.store);
-            let load = b.load_table(info.name, AccessType::Struct, zero, state_ty.clone());
-            if state_ty == out_ty {
+            let load = b.load_table(
+                info.name.clone(),
+                AccessType::Struct,
+                zero,
+                info.typ.clone(),
+            );
+            if info.typ == out_ty {
                 load
             } else {
                 b.cast(out_ty, load)
@@ -2484,14 +2540,15 @@ impl<'a> SignalToFirLower<'a> {
         Ok(RecArrayInfo { name, typ })
     }
 
-    /// Decodes one `SYMREC(var, body_list)` group to its first payload signal.
+    /// Decodes a `SYMREC(var, body_list)` group to all its payload body signals.
     ///
     /// `de_bruijn_to_sym` preserves the list-shaped recursive payload used by
-    /// propagated signal groups, so the FIR lowerer must keep decoding the first
-    /// element instead of assuming one direct body child.
-    fn decode_symbolic_group(&self, group: SigId) -> Option<SigId> {
-        let (_, body_list) = match_sym_rec(self.arena, group)?;
-        self.arena.hd(body_list)
+    /// propagated signal groups.  Returns the variable node and a `Vec` of
+    /// body signals extracted via `list_to_vec`.
+    fn decode_symbolic_group_bodies(&self, group: SigId) -> Option<(SigId, Vec<SigId>)> {
+        let (var, body_list) = match_sym_rec(self.arena, group)?;
+        let bodies = list_to_vec(self.arena, body_list)?;
+        Some((var, bodies))
     }
 }
 
