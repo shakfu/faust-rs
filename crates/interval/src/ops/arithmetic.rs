@@ -257,10 +257,10 @@ fn positive_fmod(x: Interval, y: Interval) -> Interval {
     if x.is_empty() || y.is_empty() {
         return empty();
     }
-    let n = (x.lo() / y.hi()) as i32;
+    let n = (x.lo() / y.hi()) as i64;
     let precision = x.lsb().min(y.lsb());
 
-    let hi = x.hi() / (n + 1) as f64;
+    let hi = x.hi() / (n.saturating_add(1)) as f64;
     if y.hi() <= hi {
         return Interval::new(0.0, y.hi().next_down(), precision);
     }
