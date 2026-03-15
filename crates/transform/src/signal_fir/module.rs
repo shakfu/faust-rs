@@ -2682,20 +2682,32 @@ impl<'a> GeneratorInterpreter<'a> {
             SigMatch::Remainder(x, y) => {
                 let lhs = self.eval(x)?;
                 let rhs = self.eval(y)?;
-                Ok(if rhs == 0.0 { 0.0 } else { lhs - (lhs / rhs).round() * rhs })
+                Ok(if rhs == 0.0 {
+                    0.0
+                } else {
+                    lhs - (lhs / rhs).round() * rhs
+                })
             }
 
             // --- Selection ---
             SigMatch::Select2(sel, s1, s2) => {
                 let cond = self.eval(sel)?;
-                if cond != 0.0 { self.eval(s2) } else { self.eval(s1) }
+                if cond != 0.0 {
+                    self.eval(s2)
+                } else {
+                    self.eval(s1)
+                }
             }
 
             // --- Delays ---
             SigMatch::Delay1(x) => self.eval_delay1(x),
             SigMatch::Delay(value, amount) => self.eval_delay(sig, value, amount),
             SigMatch::Prefix(init, value) => {
-                if self.step == 0 { self.eval(init) } else { self.eval(value) }
+                if self.step == 0 {
+                    self.eval(init)
+                } else {
+                    self.eval(value)
+                }
             }
 
             // --- Recursion ---
@@ -2726,8 +2738,11 @@ impl<'a> GeneratorInterpreter<'a> {
                 SignalFirErrorCode::UnsupportedSignalNode,
                 "SIGGEN interpreter: Input not allowed (generators are 0-input)",
             )),
-            SigMatch::Button(_) | SigMatch::Checkbox(_) | SigMatch::VSlider(_)
-            | SigMatch::HSlider(_) | SigMatch::NumEntry(_) => Err(SignalFirError::new(
+            SigMatch::Button(_)
+            | SigMatch::Checkbox(_)
+            | SigMatch::VSlider(_)
+            | SigMatch::HSlider(_)
+            | SigMatch::NumEntry(_) => Err(SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
                 "SIGGEN interpreter: UI controls not allowed in generators",
             )),
@@ -2735,13 +2750,13 @@ impl<'a> GeneratorInterpreter<'a> {
                 SignalFirErrorCode::UnsupportedSignalNode,
                 "SIGGEN interpreter: bargraphs not allowed in generators",
             )),
-            SigMatch::Soundfile(_) | SigMatch::SoundfileLength(_, _)
-            | SigMatch::SoundfileRate(_, _) | SigMatch::SoundfileBuffer(_, _, _, _) => {
-                Err(SignalFirError::new(
-                    SignalFirErrorCode::UnsupportedSignalNode,
-                    "SIGGEN interpreter: soundfile access not allowed in generators",
-                ))
-            }
+            SigMatch::Soundfile(_)
+            | SigMatch::SoundfileLength(_, _)
+            | SigMatch::SoundfileRate(_, _)
+            | SigMatch::SoundfileBuffer(_, _, _, _) => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                "SIGGEN interpreter: soundfile access not allowed in generators",
+            )),
             SigMatch::FConst(_, _, _) | SigMatch::FVar(_, _, _) | SigMatch::FFun(_, _) => {
                 Err(SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
@@ -2827,7 +2842,8 @@ impl<'a> GeneratorInterpreter<'a> {
                 SignalFirErrorCode::UnsupportedSignalNode,
                 format!(
                     "SIGGEN interpreter: Proj index {} out of range (group has {} outputs)",
-                    idx, cur.len()
+                    idx,
+                    cur.len()
                 ),
             ))
         }
@@ -2884,7 +2900,12 @@ impl<'a> GeneratorInterpreter<'a> {
     }
 
     /// Evaluate Delay(value, amount) — multi-sample delay with history buffer.
-    fn eval_delay(&mut self, sig: SigId, value: SigId, amount: SigId) -> Result<f64, SignalFirError> {
+    fn eval_delay(
+        &mut self,
+        sig: SigId,
+        value: SigId,
+        amount: SigId,
+    ) -> Result<f64, SignalFirError> {
         let n = self.eval(amount)? as usize;
         // Evaluate the current value and store in history
         let current = self.eval(value)?;
@@ -2951,17 +2972,65 @@ fn eval_binop(op: BinOp, lhs: f64, rhs: f64) -> f64 {
         BinOp::Add => lhs + rhs,
         BinOp::Sub => lhs - rhs,
         BinOp::Mul => lhs * rhs,
-        BinOp::Div => if rhs == 0.0 { 0.0 } else { lhs / rhs },
-        BinOp::Rem => if rhs == 0.0 { 0.0 } else { lhs % rhs },
+        BinOp::Div => {
+            if rhs == 0.0 {
+                0.0
+            } else {
+                lhs / rhs
+            }
+        }
+        BinOp::Rem => {
+            if rhs == 0.0 {
+                0.0
+            } else {
+                lhs % rhs
+            }
+        }
         BinOp::Lsh => ((lhs as i32) << (rhs as i32)) as f64,
         BinOp::ARsh => ((lhs as i32) >> (rhs as i32)) as f64,
         BinOp::LRsh => ((lhs as u32) >> (rhs as u32)) as f64,
-        BinOp::Gt => if lhs > rhs { 1.0 } else { 0.0 },
-        BinOp::Lt => if lhs < rhs { 1.0 } else { 0.0 },
-        BinOp::Ge => if lhs >= rhs { 1.0 } else { 0.0 },
-        BinOp::Le => if lhs <= rhs { 1.0 } else { 0.0 },
-        BinOp::Eq => if lhs == rhs { 1.0 } else { 0.0 },
-        BinOp::Ne => if lhs != rhs { 1.0 } else { 0.0 },
+        BinOp::Gt => {
+            if lhs > rhs {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        BinOp::Lt => {
+            if lhs < rhs {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        BinOp::Ge => {
+            if lhs >= rhs {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        BinOp::Le => {
+            if lhs <= rhs {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        BinOp::Eq => {
+            if lhs == rhs {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        BinOp::Ne => {
+            if lhs != rhs {
+                1.0
+            } else {
+                0.0
+            }
+        }
         BinOp::And => ((lhs as i32) & (rhs as i32)) as f64,
         BinOp::Or => ((lhs as i32) | (rhs as i32)) as f64,
         BinOp::Xor => ((lhs as i32) ^ (rhs as i32)) as f64,
