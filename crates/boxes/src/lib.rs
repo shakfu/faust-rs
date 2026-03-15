@@ -112,6 +112,7 @@ const BOX_FCONST_TAG: &str = "BOXFCONST";
 const BOX_FVAR_TAG: &str = "BOXFVAR";
 const BOX_CASE_TAG: &str = "BOXCASE";
 const BOX_PATTERN_MATCHER_TAG: &str = "BOXPATMATCHER";
+const BOX_CLOSURE_TAG: &str = "BOXCLOSURE";
 const BOX_PATTERN_VAR_TAG: &str = "BOXPATVAR";
 const BOX_ABSTR_TAG: &str = "BOXABSTR";
 const BOX_MODULATION_TAG: &str = "BOXMODULATION";
@@ -675,6 +676,14 @@ impl<'a> BoxBuilder<'a> {
         node_pattern_matcher(self.arena, key)
     }
 
+    /// Builds a `boxClosure` node — a handle to a closure in the evaluator's
+    /// side-table.
+    ///
+    /// `key` is a `boxInt(index)` referencing the evaluator's closure store.
+    pub fn closure_node(&mut self, key: BoxId) -> BoxId {
+        node_closure(self.arena, key)
+    }
+
     #[must_use]
     /// Builds one box node for `pattern_var` and returns its `BoxId`.
     pub fn pattern_var(&mut self, ident: BoxId) -> BoxId {
@@ -926,6 +935,16 @@ pub enum BoxMatch<'a> {
     /// `boxPatternMatcher(Automaton*, int state, Tree env, Tree orig, Tree revParList)`
     /// — C++ stores all PM state inline in the tree; Rust keeps it in a side-table.
     PatternMatcher(BoxId),
+    /// Closure stored in an evaluator side-table.
+    ///
+    /// The single child is a `boxInt(key)` indexing into the evaluator's closure store.
+    /// This node exists so that `force_value_to_box` can return a `TreeId` for a
+    /// closure (abstraction + captured environment) without losing the environment.
+    ///
+    /// # C++ equivalent
+    /// `closure(expr, genv, visited, lenv)` — C++ stores closures inline in the
+    /// tree; Rust keeps them in a side-table.
+    Closure(BoxId),
     PatternVar(BoxId),
     Abstr(BoxId, BoxId),
     Modulation(BoxId, BoxId),
@@ -1047,6 +1066,7 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
                         BOX_FFUN_TAG => BoxMatch::FFun(c0),
                         BOX_CASE_TAG => BoxMatch::Case(c0),
                         BOX_PATTERN_MATCHER_TAG => BoxMatch::PatternMatcher(c0),
+                        BOX_CLOSURE_TAG => BoxMatch::Closure(c0),
                         BOX_PATTERN_VAR_TAG => BoxMatch::PatternVar(c0),
                         BOX_INPUTS_TAG => BoxMatch::Inputs(c0),
                         BOX_OUTPUTS_TAG => BoxMatch::Outputs(c0),
@@ -1917,6 +1937,12 @@ fn node_case(arena: &mut TreeArena, rules: BoxId) -> BoxId {
 #[must_use]
 fn node_pattern_matcher(arena: &mut TreeArena, key: BoxId) -> BoxId {
     intern_tag(arena, BOX_PATTERN_MATCHER_TAG, &[key])
+}
+
+/// Builds a `boxClosure(key)` node referencing the evaluator closure store.
+#[must_use]
+fn node_closure(arena: &mut TreeArena, key: BoxId) -> BoxId {
+    intern_tag(arena, BOX_CLOSURE_TAG, &[key])
 }
 
 /// Returns `rules` when `b` is `node_case`.

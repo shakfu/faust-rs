@@ -991,6 +991,15 @@ pub struct LoopDetector {
     /// state index, environments, consumed args) in the tree. Rust keeps the
     /// complex data here and stores only a handle in the tree.
     pm_store: Vec<PatternMatcherValue>,
+    /// Dense store of `ClosureValue` referenced by `boxClosure` nodes.
+    ///
+    /// Each `boxClosure` tree node carries a `boxInt(key)` child that indexes
+    /// into this vector. This parallels `pm_store` for pattern matchers.
+    ///
+    /// # C++ equivalent
+    /// In C++, `closure(expr, genv, visited, lenv)` is a tree node. Rust keeps
+    /// the closure data here and stores only a handle in the tree.
+    closure_store: Vec<ClosureValue>,
     /// Monotonic slot id source used by [`a2sb`] when lowering residual closures.
     ///
     /// Source provenance (C++):
@@ -1017,6 +1026,7 @@ impl LoopDetector {
             cancel: Arc::new(AtomicBool::new(false)),
             automaton_cache: pattern_matcher::AutomatonCache::default(),
             pm_store: Vec::new(),
+            closure_store: Vec::new(),
             next_slot_id: 0,
         }
     }
@@ -1038,6 +1048,7 @@ impl LoopDetector {
             cancel,
             automaton_cache: pattern_matcher::AutomatonCache::default(),
             pm_store: Vec::new(),
+            closure_store: Vec::new(),
             next_slot_id: 0,
         }
     }
@@ -1054,6 +1065,7 @@ impl LoopDetector {
             cancel: Arc::new(AtomicBool::new(false)),
             automaton_cache: pattern_matcher::AutomatonCache::default(),
             pm_store: Vec::new(),
+            closure_store: Vec::new(),
             next_slot_id: 0,
         }
     }
@@ -1085,6 +1097,20 @@ impl LoopDetector {
     /// Returns `None` if the key is out of range.
     fn get_pm(&self, key: i32) -> Option<PatternMatcherValue> {
         self.pm_store.get(key as usize).cloned()
+    }
+
+    /// Stores a `ClosureValue` and returns its dense key for `boxClosure` nodes.
+    fn store_closure(&mut self, cv: ClosureValue) -> i32 {
+        let key = self.closure_store.len() as i32;
+        self.closure_store.push(cv);
+        key
+    }
+
+    /// Retrieves a stored `ClosureValue` by cloning it out.
+    ///
+    /// Returns `None` if the key is out of range.
+    fn get_closure(&self, key: i32) -> Option<ClosureValue> {
+        self.closure_store.get(key as usize).cloned()
     }
 
     fn enter_tree(&mut self, id: TreeId, env_key: EnvFrameKey) -> Result<(), EvalError> {
@@ -2030,6 +2056,23 @@ fn a2sb(
                 })?;
             a2sb_value(arena, EvalValue::PatternMatcher(pm), loop_detector)
         }
+        BoxMatch::Closure(key_node) => {
+            // Retrieve the closure from the side-table and lower it via a2sb_value.
+            let key = match match_box(arena, key_node) {
+                BoxMatch::Int(k) => k,
+                _ => {
+                    return Err(EvalError::InternalError {
+                        message: "boxClosure key is not an integer".to_owned(),
+                    });
+                }
+            };
+            let cv = loop_detector
+                .get_closure(key)
+                .ok_or_else(|| EvalError::InternalError {
+                    message: format!("boxClosure key {} not found in closure store", key),
+                })?;
+            a2sb_value(arena, EvalValue::Closure(cv), loop_detector)
+        }
         _ => {
             let Some(node) = arena.node(expr).cloned() else {
                 return Ok(expr);
@@ -2231,6 +2274,25 @@ fn eval_value(
         // boxPatternMatcher is already in normal form — return as-is.
         // (Mirrors C++ eval.cpp line 638: `isBoxPatternMatcher(box) => box`)
         BoxMatch::PatternMatcher(_) => Ok(EvalValue::Box(expr)),
+        // boxClosure: extract the stored ClosureValue from the side-table.
+        // (Mirrors C++ eval.cpp: `isClosure(box, ...) => box` — closures
+        // are already in normal form as tree nodes.)
+        BoxMatch::Closure(key_node) => {
+            let key = match match_box(arena, key_node) {
+                BoxMatch::Int(k) => k,
+                _ => {
+                    return Err(EvalError::InternalError {
+                        message: "boxClosure key is not an integer".to_owned(),
+                    });
+                }
+            };
+            let cv = loop_detector
+                .get_closure(key)
+                .ok_or_else(|| EvalError::InternalError {
+                    message: format!("boxClosure key {} not found in closure store", key),
+                })?;
+            Ok(EvalValue::Closure(cv))
+        }
         BoxMatch::PatternVar(_) => Ok(EvalValue::Box(expr)),
         BoxMatch::WithLocalDef(body, defs) => {
             let mut scoped = env.push_scope();
@@ -2496,14 +2558,15 @@ fn force_value_to_box(
     match value {
         EvalValue::Box(id) => Ok(id),
         EvalValue::Closure(closure) => match match_box(arena, closure.expr) {
-            BoxMatch::Abstr(arg, body) => {
-                let mut scoped = closure.env.push_scope();
-                let name = ident_name(arena, arg)?;
-                let sym = arena.intern_symbol(&name);
-                scoped.bind(sym, arg);
-                let evaluated_body = eval_box(arena, body, &scoped, loop_detector)?;
+            BoxMatch::Abstr(_, _) => {
+                // Store the closure (abstraction + captured env) in the
+                // side-table and return a boxClosure(key) tree node.
+                // This mirrors the boxPatternMatcher pattern and matches
+                // C++ where closure(expr, genv, visited, lenv) is a tree node.
+                let key = loop_detector.store_closure(closure);
                 let mut b = BoxBuilder::new(arena);
-                Ok(b.abstr(arg, evaluated_body))
+                let key_node = b.int(key);
+                Ok(b.closure_node(key_node))
             }
             BoxMatch::Environment => Ok(closure.expr),
             _ => eval_box(arena, closure.expr, &closure.env, loop_detector),
@@ -4629,6 +4692,32 @@ fn apply_list(
                 })?;
             let applied =
                 apply_pattern_matcher_value(arena, pm, larg, env, loop_detector, call_site)?;
+            force_value_to_box(arena, applied, loop_detector)
+        }
+        BoxMatch::Closure(key_node) => {
+            // Retrieve the closure from the side-table and apply it via the
+            // standard closure application path.
+            let key = match match_box(arena, key_node) {
+                BoxMatch::Int(k) => k,
+                _ => {
+                    return Err(EvalError::InternalError {
+                        message: "boxClosure key is not an integer".to_owned(),
+                    });
+                }
+            };
+            let cv = loop_detector
+                .get_closure(key)
+                .ok_or_else(|| EvalError::InternalError {
+                    message: format!("boxClosure key {} not found in closure store", key),
+                })?;
+            let applied = apply_value_list_value(
+                arena,
+                EvalValue::Closure(cv),
+                larg,
+                env,
+                loop_detector,
+                call_site,
+            )?;
             force_value_to_box(arena, applied, loop_detector)
         }
         _ => {
