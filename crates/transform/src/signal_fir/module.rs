@@ -7,8 +7,8 @@
 //! - core unary math nodes (`sin/cos/tan/exp/log/log10/sqrt/abs`),
 //! - `SIGDELAY1`/fixed-size `SIGDELAY`/`SIGPREFIX`,
 //! - `SIGSELECT2`, `SIGINTCAST`/`SIGFLOATCAST`/`SIGBITCAST`,
-//! - `SIGPROJ`/`SIGREC` (real lowering for canonical recursion groups in de
-//!   Bruijn or symbolic form).
+//! - `SIGPROJ`/`SYMREC`/`SYMREF` (real lowering for canonical recursion groups
+//!   after `de_bruijn_to_sym` conversion).
 //! - `SIGWAVEFORM`/`SIGRDTBL`/`SIGWRTBL` for direct waveform tables.
 //! - `SIGOUTPUT` passthrough nodes.
 //! - sectioned FIR module assembly (`metadata`, `instanceConstants`,
@@ -564,8 +564,9 @@ struct SignalToFirLower<'a> {
     next_loop_var_id: usize,
 }
 
-/// Two-slot carrier for one lowered recursive signal (`SIGREC`/`SIGPROJ`).
+/// Two-slot carrier for one output of a recursive group (`SIGPROJ(i, SYMREC(…))`).
 ///
+/// Each output body in a multi-output recursion group gets its own array.
 /// Slot `[1]` holds the previous-sample value; slot `[0]` holds the
 /// current-sample value.  After outputs are stored, the lowering emits
 /// `state[1] = state[0]` to shift the window forward.
@@ -805,7 +806,6 @@ impl<'a> SignalToFirLower<'a> {
                 self.lower_select2(sig, cond, then_value, else_value)?
             }
             SigMatch::Proj(index, group) => self.lower_proj(sig, index, group)?,
-            SigMatch::Rec(body) => self.lower_signal(body)?,
             SigMatch::BinOp(op, lhs, rhs) => self.lower_binop(sig, op, lhs, rhs)?,
             SigMatch::Pow(lhs, rhs) => self.lower_math2(FirMathOp::Pow, lhs, rhs)?,
             SigMatch::Min(lhs, rhs) => self.lower_minmax(sig, lhs, rhs, true)?,
@@ -2364,11 +2364,8 @@ impl<'a> SignalToFirLower<'a> {
     /// Lowers recursion projection nodes after the mandatory
     /// `de_bruijn_to_sym` preparation step.
     ///
-    /// Active contract:
-    /// - symbolic recursion payloads (`SYMREC` / `SYMREF`) are the normal
-    ///   fast-lane input form,
-    /// - `SIGREC` is still accepted as a legacy adapter shape,
-    /// - raw `DEBRUIJN` / `DEBRUIJNREF` payloads are no longer accepted here.
+    /// Expects symbolic recursion payloads (`SYMREC` / `SYMREF`) — the normal
+    /// fast-lane input form produced by `signal_prepare`.
     fn lower_proj(
         &mut self,
         node: SigId,
@@ -2391,30 +2388,15 @@ impl<'a> SignalToFirLower<'a> {
         }
 
         // ── Decode all body signals from the group ──
-        let (var, bodies) = if let Some(pair) = self.decode_symbolic_group_bodies(group) {
-            pair
-        } else if let SigMatch::Rec(body) = match_sig(self.arena, group) {
-            // Legacy SIGREC fallback: single-body group, no symbolic variable.
-            if index != 0 {
-                return Err(SignalFirError::new(
-                    SignalFirErrorCode::UnsupportedSignalNode,
-                    format!(
-                        "SIGPROJ index {index} unsupported for legacy SIGREC in Step 2C.2"
-                    ),
-                ));
-            }
-            // Wrap in a one-element vector; use a sentinel `var` (unused).
-            let sentinel_var = group; // won't be matched as SYMREF
-            (sentinel_var, vec![body])
-        } else {
-            return Err(SignalFirError::new(
+        let (var, bodies) = self.decode_symbolic_group_bodies(group).ok_or_else(|| {
+            SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
                 format!(
-                    "SIGPROJ group must be SYMREC/SYMREF/SIGREC after de_bruijn_to_sym in Step 2C.2 (expr={})",
+                    "SIGPROJ group must be SYMREC/SYMREF after de_bruijn_to_sym in Step 2C.2 (expr={})",
                     dump_sig_readable(self.arena, node)
                 ),
-            ));
-        };
+            )
+        })?;
 
         if index_usize >= bodies.len() {
             return Err(SignalFirError::new(
@@ -2432,9 +2414,7 @@ impl<'a> SignalToFirLower<'a> {
             let state_ty = self.signal_fir_type(*body)?;
             let init = match state_ty {
                 FirType::Int32 => self.lower_int32_const(0),
-                FirType::Float32 | FirType::Float64 | FirType::FaustFloat => {
-                    self.float_const(0.0)
-                }
+                FirType::Float32 | FirType::Float64 | FirType::FaustFloat => self.float_const(0.0),
                 other => {
                     return Err(SignalFirError::new(
                         SignalFirErrorCode::UnsupportedSignalNode,
@@ -2450,10 +2430,7 @@ impl<'a> SignalToFirLower<'a> {
         // Use `group` as the dedup key: if we've already scheduled this group,
         // skip the body-lowering pass (another proj of the same group triggered it).
         if self.scheduled_state_updates.insert(group) {
-            let is_symbolic = match_sym_rec(self.arena, group).is_some();
-            if is_symbolic {
-                self.recursion_vars.push(var);
-            }
+            self.recursion_vars.push(var);
             self.recursion_stack.push(group_arrays.clone());
 
             for (i, body) in bodies.iter().enumerate() {
@@ -2483,9 +2460,7 @@ impl<'a> SignalToFirLower<'a> {
             }
 
             self.recursion_stack.pop();
-            if is_symbolic {
-                self.recursion_vars.pop();
-            }
+            self.recursion_vars.pop();
         }
 
         // ── Return the result for the requested index ──

@@ -801,17 +801,33 @@ mod tests {
     #[test]
     fn rec_proj_lowers_without_placeholder_nodes() {
         let mut arena = TreeArena::new();
-        let sig0 = {
+        let self_ref = de_bruijn_ref(&mut arena, 1);
+        let body = {
             let mut b = SigBuilder::new(&mut arena);
             let in0 = b.input(0);
             let c0 = b.real(0.1);
-            let body = b.binop(BinOp::Add, in0, c0);
-            let rec = b.rec(body);
-            b.proj(0, rec)
+            let feedback = b.proj(0, self_ref);
+            // body = input(0) + 0.1 + feedback  (uses recursion so proj is emitted)
+            let sum = b.binop(BinOp::Add, in0, c0);
+            b.add(sum, feedback)
+        };
+        let body_list = arena.cons(body, arena.nil());
+        let group = de_bruijn_rec(&mut arena, body_list);
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            b.proj(0, group)
         };
 
-        let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-            .expect("Step 2C.2 should support rec/proj real lowering");
+        let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
+            .expect("rec/proj signal should prepare");
+        let out = compile_fastlane_without_ui(
+            &prepared.arena,
+            &prepared.outputs,
+            1,
+            1,
+            &SignalFirOptions::default(),
+        )
+        .expect("Step 2C.2 should support rec/proj real lowering");
 
         let FirMatch::Module {
             dsp_struct,
