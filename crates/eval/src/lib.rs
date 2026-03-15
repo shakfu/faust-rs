@@ -2426,6 +2426,42 @@ fn eval_value(
             let mut bld = BoxBuilder::new(arena);
             Ok(EvalValue::Box(bld.seq(a1, a2)))
         }
+        // ── outputs(expr) / inputs(expr) ────────────────────────────────────
+        // C++: eval.cpp handles `isBoxOutputs`/`isBoxInputs` by evaluating the
+        // inner box, calling `getBoxType` to obtain the arity, then returning a
+        // `boxInt(n)` so the result can be used as a numeric constant (e.g. as
+        // an iteration count for `par`/`ipar`).
+        //
+        // Without this arm, `outputs(…)` reaches the `_` catch-all and is
+        // kept as a `BOXOUTPUTS(…)` node.  When that node is later used as
+        // the iteration count of an `ipar`/`par`, `eval_non_negative_count`
+        // fails with "iteration count is not an int node".
+        //
+        // Example failure (softclipQuadratic1 in aanl.lib):
+        //   pickN(N,O) = route(N,outputs(O), par(o,outputs(O), …))
+        //   → outputs((0,1,2,3,4)) must reduce to boxInt(5) at eval time.
+        BoxMatch::Outputs(inner) => {
+            let inner_val = eval_box(arena, inner, env, loop_detector)?;
+            if let Some((_ins, outs)) = infer_box_arity(arena, inner_val) {
+                let n = i32::try_from(outs).unwrap_or(i32::MAX);
+                let mut bld = BoxBuilder::new(arena);
+                Ok(EvalValue::Box(bld.int(n)))
+            } else {
+                let mut bld = BoxBuilder::new(arena);
+                Ok(EvalValue::Box(bld.outputs(inner_val)))
+            }
+        }
+        BoxMatch::Inputs(inner) => {
+            let inner_val = eval_box(arena, inner, env, loop_detector)?;
+            if let Some((ins, _outs)) = infer_box_arity(arena, inner_val) {
+                let n = i32::try_from(ins).unwrap_or(i32::MAX);
+                let mut bld = BoxBuilder::new(arena);
+                Ok(EvalValue::Box(bld.int(n)))
+            } else {
+                let mut bld = BoxBuilder::new(arena);
+                Ok(EvalValue::Box(bld.inputs(inner_val)))
+            }
+        }
         _ => Ok(EvalValue::Box(map_children(
             arena,
             expr,
