@@ -1783,13 +1783,19 @@ impl<'a> SignalToFirLower<'a> {
                 let v = self.lower_signal(init_sig)?;
                 Ok(vec![v; size])
             }
-            _ => Err(SignalFirError::new(
-                SignalFirErrorCode::UnsupportedSignalNode,
-                format!(
-                    "SIGGEN table init unsupported in Step 2H (expr={})",
-                    dump_sig_readable(self.arena, init_sig)
-                ),
-            )),
+            _ => {
+                // Computed generator: interpret at compile time.
+                // This is the compile-time equivalent of C++'s signal2Container
+                // approach — since SIGGEN generators are always 0-input
+                // deterministic DSP, we can evaluate them directly.
+                let values = interpret_generator(self.arena, init_sig, size)?;
+                let mut out = Vec::with_capacity(size);
+                for v in values {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    out.push(b.float64(v));
+                }
+                Ok(out)
+            }
         }
     }
 
@@ -2553,5 +2559,411 @@ fn map_binop(op: BinOp, real_ty: FirType) -> Option<(FirBinOp, FirType)> {
         BinOp::Or => Some((FirBinOp::Or, FirType::Int32)),
         BinOp::Xor => Some((FirBinOp::Xor, FirType::Int32)),
         BinOp::Lsh | BinOp::ARsh | BinOp::LRsh => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compile-time signal interpreter for computed table generators (SIGGEN).
+//
+// This is the compile-time equivalent of C++'s `signal2Container()` approach:
+// since SIGGEN generators are always 0-input deterministic DSP, we can
+// evaluate them directly rather than generating runtime init code.
+// ---------------------------------------------------------------------------
+
+/// Interprets a generator signal for `size` steps, returning f64 values.
+fn interpret_generator(
+    arena: &TreeArena,
+    sig: SigId,
+    size: usize,
+) -> Result<Vec<f64>, SignalFirError> {
+    let mut interp = GeneratorInterpreter::new(arena);
+    let mut results = Vec::with_capacity(size);
+    for _ in 0..size {
+        let val = interp.eval(sig)?;
+        results.push(val);
+        interp.advance();
+    }
+    Ok(results)
+}
+
+struct GeneratorInterpreter<'a> {
+    arena: &'a TreeArena,
+    /// Recursion group state: maps SYMREC var → (current_values, prev_values).
+    rec_state: HashMap<SigId, (Vec<f64>, Vec<f64>)>,
+    /// Groups currently being evaluated this step (prevent infinite recursion).
+    evaluating: HashSet<SigId>,
+    /// Current step number (0-based), used for delay1/prefix of non-recursive signals.
+    step: usize,
+    /// Per-signal history buffer for multi-sample Delay(sig, amount).
+    /// Maps signal SigId → ring buffer of past values (index 0 = most recent).
+    delay_history: HashMap<SigId, Vec<f64>>,
+}
+
+impl<'a> GeneratorInterpreter<'a> {
+    fn new(arena: &'a TreeArena) -> Self {
+        Self {
+            arena,
+            rec_state: HashMap::new(),
+            evaluating: HashSet::new(),
+            step: 0,
+            delay_history: HashMap::new(),
+        }
+    }
+
+    /// Advance one time step: current → prev for all recursion groups.
+    fn advance(&mut self) {
+        for (_var, (cur, prev)) in &mut self.rec_state {
+            prev.clone_from(cur);
+        }
+        self.evaluating.clear();
+        self.step += 1;
+    }
+
+    /// Evaluate one signal node, returning its f64 value for the current step.
+    fn eval(&mut self, sig: SigId) -> Result<f64, SignalFirError> {
+        // Check for SYMREC(var, body) — symbolic recursion binder
+        if let Some((var, body)) = match_sym_rec(self.arena, sig) {
+            return self.eval_rec_and_project(var, Some(body), 0);
+        }
+        // Check for SYMREF(var) — symbolic recursion reference
+        if let Some(var) = match_sym_ref(self.arena, sig) {
+            return self.read_rec_current(var, 0);
+        }
+
+        match match_sig(self.arena, sig) {
+            // --- Constants ---
+            SigMatch::Int(v) => Ok(v as f64),
+            SigMatch::Real(v) => Ok(v),
+
+            // --- Arithmetic / logic ---
+            SigMatch::BinOp(op, x, y) => {
+                let lhs = self.eval(x)?;
+                let rhs = self.eval(y)?;
+                Ok(eval_binop(op, lhs, rhs))
+            }
+            SigMatch::Pow(x, y) => Ok(self.eval(x)?.powf(self.eval(y)?)),
+            SigMatch::Min(x, y) => Ok(self.eval(x)?.min(self.eval(y)?)),
+            SigMatch::Max(x, y) => Ok(self.eval(x)?.max(self.eval(y)?)),
+
+            // --- Casts ---
+            SigMatch::FloatCast(x) => self.eval(x),
+            SigMatch::IntCast(x) => Ok((self.eval(x)? as i32) as f64),
+            SigMatch::BitCast(x) => {
+                let v = self.eval(x)?;
+                // Reinterpret f32 bits as i32 (C++ bitcast semantics)
+                let bits = (v as f32).to_bits();
+                Ok((bits as i32) as f64)
+            }
+
+            // --- Unary math ---
+            SigMatch::Sin(x) => Ok(self.eval(x)?.sin()),
+            SigMatch::Cos(x) => Ok(self.eval(x)?.cos()),
+            SigMatch::Tan(x) => Ok(self.eval(x)?.tan()),
+            SigMatch::Asin(x) => Ok(self.eval(x)?.asin()),
+            SigMatch::Acos(x) => Ok(self.eval(x)?.acos()),
+            SigMatch::Atan(x) => Ok(self.eval(x)?.atan()),
+            SigMatch::Exp(x) => Ok(self.eval(x)?.exp()),
+            SigMatch::Log(x) => Ok(self.eval(x)?.ln()),
+            SigMatch::Log10(x) => Ok(self.eval(x)?.log10()),
+            SigMatch::Sqrt(x) => Ok(self.eval(x)?.sqrt()),
+            SigMatch::Abs(x) => Ok(self.eval(x)?.abs()),
+            SigMatch::Floor(x) => Ok(self.eval(x)?.floor()),
+            SigMatch::Ceil(x) => Ok(self.eval(x)?.ceil()),
+            SigMatch::Rint(x) => Ok(self.eval(x)?.round_ties_even()),
+            SigMatch::Round(x) => Ok(self.eval(x)?.round()),
+
+            // --- Binary math ---
+            SigMatch::Atan2(x, y) => Ok(self.eval(x)?.atan2(self.eval(y)?)),
+            SigMatch::Fmod(x, y) => {
+                let lhs = self.eval(x)?;
+                let rhs = self.eval(y)?;
+                Ok(if rhs == 0.0 { 0.0 } else { lhs % rhs })
+            }
+            SigMatch::Remainder(x, y) => {
+                let lhs = self.eval(x)?;
+                let rhs = self.eval(y)?;
+                Ok(if rhs == 0.0 { 0.0 } else { lhs - (lhs / rhs).round() * rhs })
+            }
+
+            // --- Selection ---
+            SigMatch::Select2(sel, s1, s2) => {
+                let cond = self.eval(sel)?;
+                if cond != 0.0 { self.eval(s2) } else { self.eval(s1) }
+            }
+
+            // --- Delays ---
+            SigMatch::Delay1(x) => self.eval_delay1(x),
+            SigMatch::Delay(value, amount) => self.eval_delay(sig, value, amount),
+            SigMatch::Prefix(init, value) => {
+                if self.step == 0 { self.eval(init) } else { self.eval(value) }
+            }
+
+            // --- Recursion ---
+            SigMatch::Proj(idx, group) => self.eval_proj(idx, group),
+            SigMatch::Rec(_body) => self.eval_proj(0, sig),
+
+            // --- Passthrough / wrapper nodes ---
+            SigMatch::Gen(inner) => self.eval(inner),
+            SigMatch::Output(_, inner) => self.eval(inner),
+            SigMatch::Lowest(x) | SigMatch::Highest(x) => self.eval(x),
+            SigMatch::Attach(x, _) => self.eval(x),
+            SigMatch::Enable(x, _) => self.eval(x),
+            SigMatch::Control(x, _) => self.eval(x),
+
+            // --- Table access ---
+            SigMatch::RdTbl(tbl, idx) => self.eval_rdtbl(tbl, idx),
+            SigMatch::Waveform(values) => {
+                // Waveform as a signal: return value at current step index
+                if values.is_empty() {
+                    Ok(0.0)
+                } else {
+                    self.eval(values[self.step % values.len()])
+                }
+            }
+
+            // --- Nodes that should never appear in a SIGGEN generator ---
+            SigMatch::Input(_) => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                "SIGGEN interpreter: Input not allowed (generators are 0-input)",
+            )),
+            SigMatch::Button(_) | SigMatch::Checkbox(_) | SigMatch::VSlider(_)
+            | SigMatch::HSlider(_) | SigMatch::NumEntry(_) => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                "SIGGEN interpreter: UI controls not allowed in generators",
+            )),
+            SigMatch::VBargraph(_, _) | SigMatch::HBargraph(_, _) => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                "SIGGEN interpreter: bargraphs not allowed in generators",
+            )),
+            SigMatch::Soundfile(_) | SigMatch::SoundfileLength(_, _)
+            | SigMatch::SoundfileRate(_, _) | SigMatch::SoundfileBuffer(_, _, _, _) => {
+                Err(SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    "SIGGEN interpreter: soundfile access not allowed in generators",
+                ))
+            }
+            SigMatch::FConst(_, _, _) | SigMatch::FVar(_, _, _) | SigMatch::FFun(_, _) => {
+                Err(SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    "SIGGEN interpreter: foreign functions/constants/variables not supported",
+                ))
+            }
+
+            _ => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "SIGGEN interpreter: unsupported signal node (expr={})",
+                    dump_sig_readable(self.arena, sig)
+                ),
+            )),
+        }
+    }
+
+    /// Evaluate Proj(idx, group) — project the idx-th output of a recursion group.
+    fn eval_proj(&mut self, idx: i32, group: SigId) -> Result<f64, SignalFirError> {
+        let i = idx as usize;
+
+        // SYMREC(var, body) — recursion group definition
+        if let Some((var, body)) = match_sym_rec(self.arena, group) {
+            return self.eval_rec_and_project(var, Some(body), i);
+        }
+
+        // SYMREF(var) — reference to a previously registered recursion group
+        if let Some(var) = match_sym_ref(self.arena, group) {
+            return self.read_rec_current(var, i);
+        }
+
+        // Non-symbolic Rec(body) — use group SigId as key
+        if let SigMatch::Rec(body) = match_sig(self.arena, group) {
+            return self.eval_rec_and_project(group, Some(body), i);
+        }
+
+        Err(SignalFirError::new(
+            SignalFirErrorCode::UnsupportedSignalNode,
+            format!(
+                "SIGGEN interpreter: Proj target is not a recursion group (expr={})",
+                dump_sig_readable(self.arena, group)
+            ),
+        ))
+    }
+
+    /// Evaluate a recursion group (if not yet done this step) and return output `idx`.
+    fn eval_rec_and_project(
+        &mut self,
+        var: SigId,
+        body: Option<SigId>,
+        idx: usize,
+    ) -> Result<f64, SignalFirError> {
+        // Initialize state if first encounter
+        if !self.rec_state.contains_key(&var) {
+            let n = if let Some(body) = body {
+                self.collect_cons_list(body).len().max(1)
+            } else {
+                1
+            };
+            self.rec_state.insert(var, (vec![0.0; n], vec![0.0; n]));
+        }
+
+        // If not yet evaluated this step, evaluate the full group
+        if !self.evaluating.contains(&var) {
+            if let Some(body) = body {
+                self.evaluating.insert(var);
+                let body_signals = self.collect_cons_list(body);
+                let mut new_values = Vec::with_capacity(body_signals.len());
+                for sig in &body_signals {
+                    new_values.push(self.eval(*sig)?);
+                }
+                if let Some((cur, _)) = self.rec_state.get_mut(&var) {
+                    *cur = new_values;
+                }
+            }
+        }
+
+        let (cur, _) = &self.rec_state[&var];
+        if idx < cur.len() {
+            Ok(cur[idx])
+        } else {
+            Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "SIGGEN interpreter: Proj index {} out of range (group has {} outputs)",
+                    idx, cur.len()
+                ),
+            ))
+        }
+    }
+
+    /// Evaluate Delay1(x) — read the previous-step value.
+    /// x is typically Proj(idx, group) or SYMREF(var).
+    fn eval_delay1(&mut self, x: SigId) -> Result<f64, SignalFirError> {
+        // SYMREF(var) → read prev[0]
+        if let Some(var) = match_sym_ref(self.arena, x) {
+            return self.read_rec_prev(var, 0);
+        }
+        // Proj(idx, group) → read prev[idx] from group
+        if let SigMatch::Proj(idx, group) = match_sig(self.arena, x) {
+            if let Some((var, _body)) = match_sym_rec(self.arena, group) {
+                return self.read_rec_prev(var, idx as usize);
+            }
+            if let Some(var) = match_sym_ref(self.arena, group) {
+                return self.read_rec_prev(var, idx as usize);
+            }
+            if let SigMatch::Rec(_) = match_sig(self.arena, group) {
+                return self.read_rec_prev(group, idx as usize);
+            }
+        }
+        // Fallback: non-recursive delay1 — returns 0 at step 0 (initial state),
+        // current value of x at subsequent steps (x evaluated at previous step).
+        if self.step == 0 {
+            Ok(0.0)
+        } else {
+            self.eval(x)
+        }
+    }
+
+    /// Read the current-step value of recursion group output `idx`.
+    fn read_rec_current(&self, var: SigId, idx: usize) -> Result<f64, SignalFirError> {
+        if let Some((cur, _)) = self.rec_state.get(&var) {
+            if idx < cur.len() {
+                return Ok(cur[idx]);
+            }
+        }
+        // Not yet initialized — return 0.0 (initial state)
+        Ok(0.0)
+    }
+
+    /// Read the previous-step value of recursion group output `idx`.
+    fn read_rec_prev(&self, var: SigId, idx: usize) -> Result<f64, SignalFirError> {
+        if let Some((_, prev)) = self.rec_state.get(&var) {
+            if idx < prev.len() {
+                return Ok(prev[idx]);
+            }
+        }
+        // Not yet initialized — return 0.0 (initial state)
+        Ok(0.0)
+    }
+
+    /// Evaluate Delay(value, amount) — multi-sample delay with history buffer.
+    fn eval_delay(&mut self, sig: SigId, value: SigId, amount: SigId) -> Result<f64, SignalFirError> {
+        let n = self.eval(amount)? as usize;
+        // Evaluate the current value and store in history
+        let current = self.eval(value)?;
+        let history = self.delay_history.entry(sig).or_insert_with(Vec::new);
+        history.push(current);
+        // Read value from n steps ago (0 if not enough history)
+        if n == 0 {
+            Ok(current)
+        } else if history.len() > n {
+            Ok(history[history.len() - 1 - n])
+        } else {
+            Ok(0.0)
+        }
+    }
+
+    /// Evaluate RdTbl(tbl, idx) — read from a table defined as WrTbl or Waveform.
+    fn eval_rdtbl(&mut self, tbl: SigId, idx: SigId) -> Result<f64, SignalFirError> {
+        let index = self.eval(idx)? as i32;
+        // tbl is typically WrTbl(size, generator, nil, nil) or a waveform
+        match match_sig(self.arena, tbl) {
+            SigMatch::WrTbl(size_sig, gen_sig, _, _) => {
+                let size = self.eval(size_sig)? as usize;
+                if size == 0 {
+                    return Ok(0.0);
+                }
+                // Interpret the generator to build the table
+                let table = interpret_generator(self.arena, gen_sig, size)?;
+                let i = ((index % size as i32) + size as i32) as usize % size;
+                Ok(table[i])
+            }
+            SigMatch::Waveform(values) => {
+                if values.is_empty() {
+                    return Ok(0.0);
+                }
+                let len = values.len();
+                let i = ((index % len as i32) + len as i32) as usize % len;
+                self.eval(values[i])
+            }
+            _ => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "SIGGEN interpreter: RdTbl source not supported (expr={})",
+                    dump_sig_readable(self.arena, tbl)
+                ),
+            )),
+        }
+    }
+
+    /// Extract elements from a cons-list body into a Vec.
+    fn collect_cons_list(&self, body: SigId) -> Vec<SigId> {
+        if let Some(elements) = list_to_vec(self.arena, body) {
+            if !elements.is_empty() {
+                return elements;
+            }
+        }
+        // Single element (not a cons-list)
+        vec![body]
+    }
+}
+
+/// Evaluate a binary operator on f64 values.
+fn eval_binop(op: BinOp, lhs: f64, rhs: f64) -> f64 {
+    match op {
+        BinOp::Add => lhs + rhs,
+        BinOp::Sub => lhs - rhs,
+        BinOp::Mul => lhs * rhs,
+        BinOp::Div => if rhs == 0.0 { 0.0 } else { lhs / rhs },
+        BinOp::Rem => if rhs == 0.0 { 0.0 } else { lhs % rhs },
+        BinOp::Lsh => ((lhs as i32) << (rhs as i32)) as f64,
+        BinOp::ARsh => ((lhs as i32) >> (rhs as i32)) as f64,
+        BinOp::LRsh => ((lhs as u32) >> (rhs as u32)) as f64,
+        BinOp::Gt => if lhs > rhs { 1.0 } else { 0.0 },
+        BinOp::Lt => if lhs < rhs { 1.0 } else { 0.0 },
+        BinOp::Ge => if lhs >= rhs { 1.0 } else { 0.0 },
+        BinOp::Le => if lhs <= rhs { 1.0 } else { 0.0 },
+        BinOp::Eq => if lhs == rhs { 1.0 } else { 0.0 },
+        BinOp::Ne => if lhs != rhs { 1.0 } else { 0.0 },
+        BinOp::And => ((lhs as i32) & (rhs as i32)) as f64,
+        BinOp::Or => ((lhs as i32) | (rhs as i32)) as f64,
+        BinOp::Xor => ((lhs as i32) ^ (rhs as i32)) as f64,
     }
 }
