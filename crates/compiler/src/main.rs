@@ -902,6 +902,23 @@ fn main() {
     let cli = CliArgs::parse_from(args);
     maybe_print_error_format_help(cli.help_error_format);
 
+    // Spawn a watchdog thread that enforces the global timeout.
+    // The previous approach (checking elapsed time between phases) could not
+    // catch hangs *inside* a phase (e.g., infinite recursion in evaluation).
+    {
+        let timeout_secs = cli.timeout;
+        if timeout_secs > 0 {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(timeout_secs));
+                eprintln!(
+                    "ERROR: compilation timeout ({}s limit exceeded)",
+                    timeout_secs,
+                );
+                std::process::exit(1);
+            });
+        }
+    }
+
     if cli.list_fir_fixtures {
         if cli.fir_fixture.is_some() || cli.input.is_some() {
             eprintln!("--list-fir-fixtures does not accept --fir-fixture or input file");
