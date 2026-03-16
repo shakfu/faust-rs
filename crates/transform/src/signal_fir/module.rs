@@ -2612,7 +2612,7 @@ impl<'a> GeneratorInterpreter<'a> {
 
     /// Advance one time step: current → prev for all recursion groups.
     fn advance(&mut self) {
-        for (_var, (cur, prev)) in &mut self.rec_state {
+        for (cur, prev) in self.rec_state.values_mut() {
             prev.clone_from(cur);
         }
         self.evaluating.clear();
@@ -2820,17 +2820,17 @@ impl<'a> GeneratorInterpreter<'a> {
         }
 
         // If not yet evaluated this step, evaluate the full group
-        if !self.evaluating.contains(&var) {
-            if let Some(body) = body {
-                self.evaluating.insert(var);
-                let body_signals = self.collect_cons_list(body);
-                let mut new_values = Vec::with_capacity(body_signals.len());
-                for sig in &body_signals {
-                    new_values.push(self.eval(*sig)?);
-                }
-                if let Some((cur, _)) = self.rec_state.get_mut(&var) {
-                    *cur = new_values;
-                }
+        if !self.evaluating.contains(&var)
+            && let Some(body) = body
+        {
+            self.evaluating.insert(var);
+            let body_signals = self.collect_cons_list(body);
+            let mut new_values = Vec::with_capacity(body_signals.len());
+            for sig in &body_signals {
+                new_values.push(self.eval(*sig)?);
+            }
+            if let Some((cur, _)) = self.rec_state.get_mut(&var) {
+                *cur = new_values;
             }
         }
 
@@ -2879,10 +2879,10 @@ impl<'a> GeneratorInterpreter<'a> {
 
     /// Read the current-step value of recursion group output `idx`.
     fn read_rec_current(&self, var: SigId, idx: usize) -> Result<f64, SignalFirError> {
-        if let Some((cur, _)) = self.rec_state.get(&var) {
-            if idx < cur.len() {
-                return Ok(cur[idx]);
-            }
+        if let Some((cur, _)) = self.rec_state.get(&var)
+            && idx < cur.len()
+        {
+            return Ok(cur[idx]);
         }
         // Not yet initialized — return 0.0 (initial state)
         Ok(0.0)
@@ -2890,10 +2890,10 @@ impl<'a> GeneratorInterpreter<'a> {
 
     /// Read the previous-step value of recursion group output `idx`.
     fn read_rec_prev(&self, var: SigId, idx: usize) -> Result<f64, SignalFirError> {
-        if let Some((_, prev)) = self.rec_state.get(&var) {
-            if idx < prev.len() {
-                return Ok(prev[idx]);
-            }
+        if let Some((_, prev)) = self.rec_state.get(&var)
+            && idx < prev.len()
+        {
+            return Ok(prev[idx]);
         }
         // Not yet initialized — return 0.0 (initial state)
         Ok(0.0)
@@ -2909,7 +2909,7 @@ impl<'a> GeneratorInterpreter<'a> {
         let n = self.eval(amount)? as usize;
         // Evaluate the current value and store in history
         let current = self.eval(value)?;
-        let history = self.delay_history.entry(sig).or_insert_with(Vec::new);
+        let history = self.delay_history.entry(sig).or_default();
         history.push(current);
         // Read value from n steps ago (0 if not enough history)
         if n == 0 {
@@ -2956,10 +2956,10 @@ impl<'a> GeneratorInterpreter<'a> {
 
     /// Extract elements from a cons-list body into a Vec.
     fn collect_cons_list(&self, body: SigId) -> Vec<SigId> {
-        if let Some(elements) = list_to_vec(self.arena, body) {
-            if !elements.is_empty() {
-                return elements;
-            }
+        if let Some(elements) = list_to_vec(self.arena, body)
+            && !elements.is_empty()
+        {
+            return elements;
         }
         // Single element (not a cons-list)
         vec![body]
