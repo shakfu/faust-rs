@@ -174,31 +174,39 @@ pub fn generate_interp_module<R: real::FbcReal>(
     use std::collections::HashMap;
 
     // 1. Decode module root.
-    let (module_num_inputs, module_num_outputs, module_name_fir, dsp_struct, globals, functions) =
-        match match_fir(store, module) {
-            fir::FirMatch::Module {
-                num_inputs,
-                num_outputs,
-                name,
-                dsp_struct,
-                globals,
-                functions,
-                ..
-            } => (
-                num_inputs,
-                num_outputs,
-                name,
-                dsp_struct,
-                globals,
-                functions,
-            ),
-            _ => {
-                return Err(CodegenError::new(
-                    CodegenErrorCode::RootNotModule,
-                    "FIR root is not a Module",
-                ));
-            }
-        };
+    let (
+        module_num_inputs,
+        module_num_outputs,
+        module_name_fir,
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    ) = match match_fir(store, module) {
+        fir::FirMatch::Module {
+            num_inputs,
+            num_outputs,
+            name,
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+        } => (
+            num_inputs,
+            num_outputs,
+            name,
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+        ),
+        _ => {
+            return Err(CodegenError::new(
+                CodegenErrorCode::RootNotModule,
+                "FIR root is not a Module",
+            ));
+        }
+    };
 
     let module_name = options.module_name.clone().unwrap_or(module_name_fir);
 
@@ -229,6 +237,15 @@ pub fn generate_interp_module<R: real::FbcReal>(
             CodegenError::new(
                 CodegenErrorCode::CompilationFailed,
                 format!("in module globals predeclare: {e}"),
+            )
+        })?;
+    // Pre-declare static tables so function bodies can reference them by name.
+    compiler
+        .predeclare_storage_block(store, static_decls)
+        .map_err(|e| {
+            CodegenError::new(
+                CodegenErrorCode::CompilationFailed,
+                format!("in module static_decls predeclare: {e}"),
             )
         })?;
     let mut fn_blocks: HashMap<String, BlockId> = HashMap::new();
@@ -275,7 +292,20 @@ pub fn generate_interp_module<R: real::FbcReal>(
         }
     }
 
-    // 4. Map function names to factory block slots.
+    // 4a. Compile static table initializer block.  Static tables are emitted as
+    //     `const static` arrays in the C/C++ backends; in the interpreter they
+    //     live on the heap and must be bulk-initialised via BlockStoreInt /
+    //     BlockStoreReal instructions before the first `compute()` call.
+    let static_tbl_init_block = compiler
+        .compile_static_decls_init_block(store, static_decls)
+        .map_err(|e| {
+            CodegenError::new(
+                CodegenErrorCode::CompilationFailed,
+                format!("in static_decls init: {e}"),
+            )
+        })?;
+
+    // 4b. Map function names to factory block slots.
     //    The interpreter runtime still has separate control/DSP slots, but the
     //    FIR contract now provides a single `compute` body used as DSP block.
     //    We keep `compute_block` empty and ignore legacy `computeThread`.
@@ -308,7 +338,32 @@ pub fn generate_interp_module<R: real::FbcReal>(
     };
 
     // 5. Extract arena, heap layout, UI instructions, and field table.
-    let (arena, mut int_heap_size, real_heap_size, ui_block, field_table) = compiler.into_parts();
+    let (mut arena, mut int_heap_size, real_heap_size, ui_block, field_table) =
+        compiler.into_parts();
+
+    // 5a. Merge static table init into the front of static_init_block.
+    //     The static table data must be present in the heap before any user
+    //     `staticInit` code and before `compute()`.  We prepend the
+    //     BlockStoreInt/BlockStoreReal instructions from `static_tbl_init_block`
+    //     (stripping its trailing Return) to the beginning of `static_init_block`.
+    {
+        use opcode::FbcOpcode;
+        let tbl_instrs: Vec<_> = arena
+            .get(static_tbl_init_block)
+            .instructions
+            .iter()
+            .filter(|i| i.opcode != FbcOpcode::Return)
+            .cloned()
+            .collect();
+        if !tbl_instrs.is_empty() {
+            let si = arena.get_mut(static_init_block);
+            let existing: Vec<_> = si.instructions.drain(..).collect();
+            si.instructions = tbl_instrs;
+            si.instructions.extend(existing);
+        }
+    }
+    // Rebind as immutable now that mutation is done.
+    let arena = arena;
 
     // 6. Resolve well-known heap offsets from the field table.
     let sr_offset_existing = field_table

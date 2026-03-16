@@ -481,6 +481,101 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         Ok(())
     }
 
+    /// Compiles bulk-initialization bytecode for file-scope `const static`
+    /// tables declared in the `static_decls` FIR module block.
+    ///
+    /// In the C/C++ backends these tables are emitted as file-scope arrays with
+    /// inline initialisers (`const static float fTbl[N] = {…}`) and require no
+    /// runtime initialization. In the interpreter every value lives on the int
+    /// or real heap, so the constant data must be written there before
+    /// `compute()` runs.
+    ///
+    /// This method walks the `static_decls` block, allocates heap storage for
+    /// each `DeclareTable` (idempotent — `predeclare_storage_block` may have
+    /// already done it), and emits one `BlockStoreInt` or `BlockStoreReal`
+    /// instruction per table that bulk-copies the constant element values.
+    ///
+    /// The returned block should be prepended to (or used as) the
+    /// `staticInit` factory block so the data is in place before the first
+    /// call to `compute()`.
+    pub fn compile_static_decls_init_block(
+        &mut self,
+        store: &FirStore,
+        block_id: FirId,
+    ) -> Result<BlockId, CompileError> {
+        let nodes = match match_fir(store, block_id) {
+            FirMatch::Block(ids) => ids,
+            _ => return Ok(self.alloc_empty_block()),
+        };
+        self.begin_sub_block();
+        for id in nodes {
+            if let FirMatch::DeclareTable {
+                ref name,
+                ref elem_type,
+                ref values,
+                ..
+            } = match_fir(store, id)
+            {
+                if values.is_empty() {
+                    continue;
+                }
+                // Ensure the table is registered in the heap layout.
+                self.predeclare_table_storage(name, elem_type, values.len() as i32);
+                let desc = self.field_table[name.as_str()].clone();
+                if desc.heap_type == HeapType::Int {
+                    let data: Vec<i32> = values
+                        .iter()
+                        .filter_map(|&v| {
+                            if let FirMatch::Int32 { value, .. } = match_fir(store, v) {
+                                Some(value)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if data.len() == values.len() {
+                        let len = data.len() as i32;
+                        self.current_block.push_block_store(
+                            FbcInstruction::with_values_and_offsets(
+                                FbcOpcode::BlockStoreInt,
+                                0,
+                                R::default(),
+                                desc.offset,
+                                len,
+                            ),
+                            BlockStoreData::Int(data),
+                        );
+                    }
+                } else {
+                    let data: Vec<R> = values
+                        .iter()
+                        .filter_map(|&v| match match_fir(store, v) {
+                            FirMatch::Float32 { value, .. } => {
+                                Some(R::from_f64(f64::from(value)))
+                            }
+                            FirMatch::Float64 { value, .. } => Some(R::from_f64(value)),
+                            _ => None,
+                        })
+                        .collect();
+                    if data.len() == values.len() {
+                        let len = data.len() as i32;
+                        self.current_block.push_block_store(
+                            FbcInstruction::with_values_and_offsets(
+                                FbcOpcode::BlockStoreReal,
+                                0,
+                                R::default(),
+                                desc.offset,
+                                len,
+                            ),
+                            BlockStoreData::Real(data),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(self.end_sub_block())
+    }
+
     /// Allocates an empty block (containing only `kReturn`) in the arena.
     ///
     /// Used by [`super::generate_interp_module`] to fill factory slots for DSP
