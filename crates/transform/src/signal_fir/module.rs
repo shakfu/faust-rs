@@ -681,20 +681,29 @@ impl<'a> SignalToFirLower<'a> {
     /// reuse one delay line sized to the largest delay seen.  This pre-pass
     /// ensures all writes are registered before any reads are emitted.
     fn prepare_delay_lines(&mut self, outputs: &[SigId]) -> Result<(), SignalFirError> {
+        // Two-pass approach: first collect the maximum delay per carried signal,
+        // then allocate once with the correct (max) size.  This avoids the
+        // sizing-mismatch error when the same carried signal appears in multiple
+        // SIGDELAY nodes with different delay amounts.
+        let mut max_delays: HashMap<SigId, i32> = HashMap::new();
         let mut seen = HashSet::new();
         for output in outputs {
-            self.scan_delay_lines(*output, &mut seen)?;
+            self.scan_delay_lines(*output, &mut seen, &mut max_delays)?;
+        }
+        for (carried, delay) in max_delays {
+            self.ensure_delay_line_decl(carried, delay)?;
         }
         Ok(())
     }
 
-    /// Visits one signal node, allocating a delay line if it is `SIGDELAY`.
+    /// Visits one signal node, recording the maximum delay per carried signal.
     ///
     /// Skips already-visited nodes (DAG sharing) via `seen`.
     fn scan_delay_lines(
         &mut self,
         sig: SigId,
         seen: &mut HashSet<SigId>,
+        max_delays: &mut HashMap<SigId, i32>,
     ) -> Result<(), SignalFirError> {
         if !seen.insert(sig) {
             return Ok(());
@@ -703,7 +712,10 @@ impl<'a> SignalToFirLower<'a> {
             match self.delay_size_for_amount(amount)? {
                 Some(0) => {}
                 Some(delay) => {
-                    self.ensure_delay_line_decl(value, delay)?;
+                    let entry = max_delays.entry(value).or_insert(0);
+                    if delay > *entry {
+                        *entry = delay;
+                    }
                 }
                 None => {
                     return self.unsupported_node(
@@ -720,7 +732,7 @@ impl<'a> SignalToFirLower<'a> {
             )
         })?;
         for child in node.children.as_slice() {
-            self.scan_delay_child(*child, seen)?;
+            self.scan_delay_child(*child, seen, max_delays)?;
         }
         Ok(())
     }
@@ -730,6 +742,7 @@ impl<'a> SignalToFirLower<'a> {
         &mut self,
         child: SigId,
         seen: &mut HashSet<SigId>,
+        max_delays: &mut HashMap<SigId, i32>,
     ) -> Result<(), SignalFirError> {
         if self.arena.is_list(child) {
             let mut list = child;
@@ -740,7 +753,7 @@ impl<'a> SignalToFirLower<'a> {
                         "malformed prepared signal list while scanning delay lines",
                     )
                 })?;
-                self.scan_delay_lines(head, seen)?;
+                self.scan_delay_lines(head, seen, max_delays)?;
                 list = self.arena.tl(list).ok_or_else(|| {
                     SignalFirError::new(
                         SignalFirErrorCode::UnsupportedSignalNode,
@@ -750,7 +763,7 @@ impl<'a> SignalToFirLower<'a> {
             }
             Ok(())
         } else {
-            self.scan_delay_lines(child, seen)
+            self.scan_delay_lines(child, seen, max_delays)
         }
     }
 
