@@ -120,6 +120,26 @@ const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
 /// `instanceResetUserInterface`, `instanceClear`, `buildUserInterface`,
 /// `compute`) assembled in deterministic order.
 ///
+/// # Promotion invariant
+///
+/// The `signals` forest **must** have been processed by
+/// `signal_prepare::promote_signals_for_fir` (and optionally
+/// `normalize::simplify`) before being passed here.  That pass guarantees:
+///
+/// - Every `BinOp(op, lhs, rhs)` node has operands whose signal domain
+///   types are already consistent with `op`: mixed Int/Real operands are
+///   wrapped in explicit `FloatCast` nodes; bitwise/shift operands in
+///   `IntCast` nodes; `Div` operands are always Real.
+/// - Every `Delay(_, amount)`, `RdTbl(_, index)`, `WrTbl(…, widx, _)`, and
+///   `Select2(selector, …)` has its integer operand wrapped in `IntCast`.
+/// - `Delay1(x)` and `Prefix(init, x)` have `type(init) == type(x)`.
+///
+/// **Consequence for the lowerer**: no implicit coercion is needed inside
+/// `lower_binop`, `lower_delay_state`, or `normalized_table_index`.  All
+/// necessary casts appear as explicit signal-tree nodes and are handled by
+/// `lower_cast` when the lowerer dispatches on `SigMatch::IntCast /
+/// FloatCast`.
+///
 /// # Parameters
 ///
 /// - `plan` – pre-checked I/O counts and signal statistics.
@@ -486,6 +506,12 @@ pub fn build_module(
 /// persistent state and UI declarations, waveform tables, and deferred
 /// compute-time updates.  All are accumulated in the fields below and
 /// assembled into a [`SignalFirOutput`] by [`build_module`].
+///
+/// The forest must satisfy the **promotion invariant** documented on
+/// [`build_module`]: all type coercions are represented as explicit
+/// `IntCast`/`FloatCast` signal-tree nodes inserted by
+/// `promote_signals_for_fir`.  The lowering methods therefore never insert
+/// implicit casts themselves.
 struct SignalToFirLower<'a> {
     /// Read-only signal tree arena shared with the caller.
     arena: &'a TreeArena,
@@ -883,17 +909,16 @@ impl<'a> SignalToFirLower<'a> {
     ///
     /// Active parity slice mirrors the C++ fast-lane special-case for
     /// `fSamplingFreq`, which loads the persistent `fSampleRate` struct field.
+    ///
+    /// `fSamplingFreq` is typed as Int in the signal domain, so its FIR type is
+    /// always `Int32`.  If it appears in a Real context the promoter wraps it in a
+    /// `FloatCast` node, which is lowered separately by `lower_cast`.  No implicit
+    /// cast is needed here.
     fn lower_fconst(&mut self, sig: SigId, name: SigId) -> Result<FirId, SignalFirError> {
         let name = self.label_text(name);
         if name == "fSamplingFreq" || name == "fSamplingRate" {
-            let out_ty = self.signal_fir_type(sig)?;
             let mut b = FirBuilder::new(&mut self.store);
-            let rate = b.load_var("fSampleRate", AccessType::Struct, FirType::Int32);
-            return Ok(if out_ty == FirType::Int32 {
-                rate
-            } else {
-                b.cast(out_ty, rate)
-            });
+            return Ok(b.load_var("fSampleRate", AccessType::Struct, FirType::Int32));
         }
         self.unsupported_node(
             sig,
@@ -1040,17 +1065,15 @@ impl<'a> SignalToFirLower<'a> {
                 rec_info.typ.clone(),
             ));
         }
+        // The promoter guarantees type(Delay1(x)) == type(x) and that Prefix
+        // init/value types are unified: state_ty and the node's output type are
+        // always identical.  No cast is needed between the stored value and the
+        // loaded result.
         let state_ty = self.signal_fir_type(value)?;
-        let out_ty = self.signal_fir_type(node)?;
         let name = self.ensure_state_slot(node, state_ty.clone(), init);
         let out = {
             let mut b = FirBuilder::new(&mut self.store);
-            let load = b.load_var(name.clone(), AccessType::Struct, state_ty.clone());
-            if state_ty == out_ty {
-                load
-            } else {
-                b.cast(out_ty.clone(), load)
-            }
+            b.load_var(name.clone(), AccessType::Struct, state_ty)
         };
         if self.scheduled_state_updates.insert(node) {
             let next = self.lower_signal(value)?;
@@ -1800,18 +1823,20 @@ impl<'a> SignalToFirLower<'a> {
     }
 
     /// Normalizes one table index to `[0, table_len)` with integer modulo.
+    /// Wraps a table index with `((index % size) + size) % size` to produce a
+    /// non-negative in-bounds `Int32` offset.
+    ///
+    /// The promoter guarantees that all table index signals are Int-typed
+    /// (wrapped in `IntCast` if necessary), so `index` is already `Int32` at the
+    /// FIR level when this function is called.  No cast is needed.
     fn normalized_table_index(&mut self, index: FirId, table_len: usize) -> FirId {
-        let idx_i32 = {
-            let mut b = FirBuilder::new(&mut self.store);
-            b.cast(FirType::Int32, index)
-        };
         let size = {
             let mut b = FirBuilder::new(&mut self.store);
             b.int32(i32::try_from(table_len).unwrap_or(i32::MAX))
         };
         let rem = {
             let mut b = FirBuilder::new(&mut self.store);
-            b.binop(FirBinOp::Rem, idx_i32, size, FirType::Int32)
+            b.binop(FirBinOp::Rem, index, size, FirType::Int32)
         };
         let rem_plus_size = {
             let mut b = FirBuilder::new(&mut self.store);
@@ -2226,6 +2251,10 @@ impl<'a> SignalToFirLower<'a> {
         lhs_sig: SigId,
         rhs_sig: SigId,
     ) -> Result<FirId, SignalFirError> {
+        // The promoter guarantees that every BinOp operand already has the
+        // correct domain type: mixed Int/Real pairs are wrapped in FloatCast
+        // nodes, bitwise/shift operands in IntCast nodes, and Div operands are
+        // always Real.  No implicit coercion is needed here.
         let result_ty = self.signal_fir_type(node)?;
         let lhs = self.lower_signal(lhs_sig)?;
         let rhs = self.lower_signal(rhs_sig)?;
@@ -2235,18 +2264,6 @@ impl<'a> SignalToFirLower<'a> {
                 format!("unsupported SIGBINOP operator `{}` in Step 2A", op.name()),
             )
         })?;
-        let lhs = if typ == self.real_ty() && self.simple_type(lhs_sig)? == SimpleSigType::Int {
-            let mut b = FirBuilder::new(&mut self.store);
-            b.cast(typ.clone(), lhs)
-        } else {
-            lhs
-        };
-        let rhs = if typ == self.real_ty() && self.simple_type(rhs_sig)? == SimpleSigType::Int {
-            let mut b = FirBuilder::new(&mut self.store);
-            b.cast(typ.clone(), rhs)
-        } else {
-            rhs
-        };
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.binop(fir_op, lhs, rhs, typ))
     }
