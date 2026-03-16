@@ -35,7 +35,7 @@ use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{Linkage, Module, default_libcall_names};
+use cranelift_module::{DataDescription, DataId, Init, Linkage, Module, default_libcall_names};
 use fir::{AccessType, FirBinOp, FirId, FirMatch, FirStore, FirType, match_fir};
 use std::collections::HashMap;
 
@@ -643,6 +643,13 @@ fn build_struct_layout_for_module(
                 })?;
                 struct_align = struct_align.max(scalar.align);
             }
+            FirMatch::DeclareTable {
+                access: AccessType::Static | AccessType::Global,
+                ..
+            } => {
+                // File-scope constant tables — not part of the per-instance dsp* struct.
+                // They are handled separately by `define_static_tables_in_jit`.
+            }
             FirMatch::DeclareTable { access, name, .. } => {
                 return Err(CraneliftBackendError::unsupported_module_shape(format!(
                     "unsupported global table access class for Cranelift dsp* layout: {name} ({access:?})"
@@ -1107,6 +1114,8 @@ struct ComputeLowering<'a, 'b, 'c> {
     ptr_ty: Type,
     vars: HashMap<String, LoweredExpr>,
     import_refs: HashMap<String, FuncRef>,
+    /// Pre-declared JIT data IDs for `AccessType::Static` tables.
+    static_data_ids: &'a HashMap<String, DataId>,
     _marker: std::marker::PhantomData<&'c ()>,
 }
 
@@ -1920,6 +1929,30 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 let coerced = self.coerce_value_to_fir_type(raw, &typ)?;
                 Ok(LoweredExpr::Scalar(coerced))
             }
+            FirMatch::LoadTable {
+                name,
+                access: AccessType::Static,
+                index,
+                typ,
+            } => {
+                let data_id =
+                    self.static_data_ids
+                        .get(&name)
+                        .copied()
+                        .ok_or_else(|| {
+                            LoweringError::Unsupported(format!(
+                                "static table `{name}` not found in pre-declared JIT data"
+                            ))
+                        })?;
+                let gv = self.jit.declare_data_in_func(data_id, self.fb.func);
+                let base = self.fb.ins().global_value(self.ptr_ty, gv);
+                let index_v = self.lower_expr(index, Some(&FirType::Int32))?.value();
+                let elem_clif = self.fir_type_to_clif(&typ)?;
+                let addr = self.indexed_addr(base, index_v, i64::from(elem_clif.bytes()));
+                let raw = self.fb.ins().load(elem_clif, MemFlags::new(), addr, 0);
+                let coerced = self.coerce_value_to_fir_type(raw, &typ)?;
+                Ok(LoweredExpr::Scalar(coerced))
+            }
             FirMatch::Select2 {
                 cond,
                 then_value,
@@ -2360,6 +2393,7 @@ fn try_lower_compute_body(
     struct_layout: &StructLayoutPlan,
     ptr_ty: Type,
     compute_decl: FirId,
+    static_data_ids: &HashMap<String, DataId>,
 ) -> Result<bool, LoweringError> {
     let (args, body) = match match_fir(store, compute_decl) {
         FirMatch::DeclareFun {
@@ -2409,6 +2443,7 @@ fn try_lower_compute_body(
         ptr_ty,
         vars,
         import_refs: HashMap::new(),
+        static_data_ids,
         _marker: std::marker::PhantomData,
     };
     lowering.lower_stmt(body)?;
@@ -2573,6 +2608,11 @@ fn subset_expr_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
             index,
             ..
         } => subset_expr_gap_reason(store, index),
+        FirMatch::LoadTable {
+            access: AccessType::Static,
+            index,
+            ..
+        } => subset_expr_gap_reason(store, index),
         FirMatch::BinOp { lhs, rhs, .. } => {
             subset_expr_gap_reason(store, lhs).or_else(|| subset_expr_gap_reason(store, rhs))
         }
@@ -2600,6 +2640,119 @@ fn subset_expr_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
     }
 }
 
+/// Declares and defines every `AccessType::Static` table from the FIR
+/// `static_decls` block as a JIT read-only data object.
+///
+/// Static (file-scope constant) tables are emitted as `const static` arrays in
+/// the C/C++ backends.  In the Cranelift JIT they must be materialized as named
+/// data sections before the `compute` function is compiled, because function
+/// bodies reference them via `GlobalValue` handles obtained from the `DataId`.
+///
+/// Returns a map `name → DataId` that `LoadTable { access: Static }` lowering
+/// uses inside `ComputeLowering::lower_expr`.
+fn define_static_tables_in_jit(
+    store: &FirStore,
+    module: FirId,
+    jit: &mut JITModule,
+) -> Result<HashMap<String, DataId>, CraneliftBackendError> {
+    let static_decls_block = match match_fir(store, module) {
+        FirMatch::Module { static_decls, .. } => static_decls,
+        _ => return Ok(HashMap::new()),
+    };
+    let items = match match_fir(store, static_decls_block) {
+        FirMatch::Block(ids) => ids,
+        _ => return Ok(HashMap::new()),
+    };
+
+    let mut result = HashMap::new();
+    for id in items {
+        let FirMatch::DeclareTable {
+            name,
+            elem_type,
+            values,
+            ..
+        } = match_fir(store, id)
+        else {
+            continue;
+        };
+        if values.is_empty() {
+            continue;
+        }
+
+        // Serialise element values to little-endian bytes.
+        let bytes: Box<[u8]> = match &elem_type {
+            FirType::Int32 => {
+                let mut buf = Vec::with_capacity(values.len() * 4);
+                for &v in &values {
+                    if let FirMatch::Int32 { value, .. } = match_fir(store, v) {
+                        buf.extend_from_slice(&value.to_le_bytes());
+                    }
+                }
+                buf.into_boxed_slice()
+            }
+            FirType::Float32 | FirType::FaustFloat => {
+                let mut buf = Vec::with_capacity(values.len() * 4);
+                for &v in &values {
+                    match match_fir(store, v) {
+                        FirMatch::Float32 { value, .. } => {
+                            buf.extend_from_slice(&value.to_le_bytes());
+                        }
+                        FirMatch::Float64 { value, .. } => {
+                            buf.extend_from_slice(&(value as f32).to_le_bytes());
+                        }
+                        _ => {}
+                    }
+                }
+                buf.into_boxed_slice()
+            }
+            FirType::Float64 => {
+                let mut buf = Vec::with_capacity(values.len() * 8);
+                for &v in &values {
+                    match match_fir(store, v) {
+                        FirMatch::Float64 { value, .. } => {
+                            buf.extend_from_slice(&value.to_le_bytes());
+                        }
+                        FirMatch::Float32 { value, .. } => {
+                            buf.extend_from_slice(&(value as f64).to_le_bytes());
+                        }
+                        _ => {}
+                    }
+                }
+                buf.into_boxed_slice()
+            }
+            other => {
+                return Err(CraneliftBackendError::unsupported_module_shape(format!(
+                    "static table `{name}` has unsupported element type for JIT data: {other:?}"
+                )));
+            }
+        };
+
+        let align: u64 = match &elem_type {
+            FirType::Float64 | FirType::Int64 => 8,
+            _ => 4,
+        };
+
+        // Declare as local (not exported), read-only, not thread-local.
+        let data_id = jit
+            .declare_data(&name, Linkage::Local, false, false)
+            .map_err(|e| {
+                CraneliftBackendError::jit_failure(format!(
+                    "declare_data `{name}` failed: {e}"
+                ))
+            })?;
+
+        let mut desc = DataDescription::new();
+        desc.init = Init::Bytes { contents: bytes };
+        desc.align = Some(align);
+        jit.define_data(data_id, &desc).map_err(|e| {
+            CraneliftBackendError::jit_failure(format!("define_data `{name}` failed: {e}"))
+        })?;
+
+        result.insert(name, data_id);
+    }
+    Ok(result)
+}
+
 /// Declares, defines and finalizes the exported `compute` function in the JIT.
 ///
 /// # Behavior
@@ -2623,6 +2776,7 @@ fn declare_compute_stub(
     struct_layout: &StructLayoutPlan,
     fail_on_subset_gap: bool,
     jit: &mut JITModule,
+    static_data_ids: &HashMap<String, DataId>,
 ) -> Result<(String, usize, bool, String), CraneliftBackendError> {
     let ptr_ty = jit.target_config().pointer_type();
     let compute_symbol_name = format!("{module_name}::compute");
@@ -2653,7 +2807,7 @@ fn declare_compute_stub(
         fb.switch_to_block(entry);
         fb.seal_block(entry);
         if compute_body_matches_current_subset(store, compute_decl) {
-            match try_lower_compute_body(store, jit, &mut fb, struct_layout, ptr_ty, compute_decl) {
+            match try_lower_compute_body(store, jit, &mut fb, struct_layout, ptr_ty, compute_decl, static_data_ids) {
                 Ok(lowered) => compute_body_lowered = lowered,
                 Err(LoweringError::Unsupported(reason)) => {
                     return Err(CraneliftBackendError::unsupported_module_shape(format!(
@@ -2745,6 +2899,9 @@ pub fn generate_cranelift_module(
     let mut jit = JITModule::new(jit_builder);
     let ptr_size = jit.target_config().pointer_type().bytes();
     let struct_layout = build_struct_layout_for_module(store, module, ptr_size)?;
+    // Define file-scope static tables as JIT read-only data objects before
+    // compiling `compute`, so function bodies can reference them by DataId.
+    let static_data_ids = define_static_tables_in_jit(store, module, &mut jit)?;
     let (compute_symbol_name, compute_entry_addr, compute_body_lowered, compute_clif_text) =
         declare_compute_stub(
             &module_name,
@@ -2753,6 +2910,7 @@ pub fn generate_cranelift_module(
             &struct_layout,
             options.fail_on_subset_gap,
             &mut jit,
+            &static_data_ids,
         )?;
     if compute_entry_addr == 0 {
         return Err(CraneliftBackendError::jit_failure(
