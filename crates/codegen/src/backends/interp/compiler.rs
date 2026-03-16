@@ -550,9 +550,7 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                     let data: Vec<R> = values
                         .iter()
                         .filter_map(|&v| match match_fir(store, v) {
-                            FirMatch::Float32 { value, .. } => {
-                                Some(R::from_f64(f64::from(value)))
-                            }
+                            FirMatch::Float32 { value, .. } => Some(R::from_f64(f64::from(value))),
                             FirMatch::Float64 { value, .. } => Some(R::from_f64(value)),
                             _ => None,
                         })

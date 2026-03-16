@@ -1394,7 +1394,8 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[]);
-        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
+        let static_decls = b.block(&[]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
 
         let out = generate_cpp_module(&store, module, &CppOptions::default())
             .expect("module root should generate");
@@ -1419,7 +1420,8 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[]);
-        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
+        let static_decls = b.block(&[]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
         let options = CppOptions {
             super_class_name: Some("faust_dsp".to_owned()),
             ..CppOptions::default()
@@ -1439,7 +1441,8 @@ mod tests {
         let dsp_struct = b.int32(1);
         let globals = b.block(&[]);
         let functions = b.block(&[]);
-        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
+        let static_decls = b.block(&[]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
         let err = generate_cpp_module(&store, module, &CppOptions::default())
             .expect_err("non-block section must fail");
         assert_eq!(err.code(), CodegenErrorCode::InvalidModuleSection);
@@ -1490,7 +1493,8 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[fun]);
-        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
+        let static_decls = b.block(&[]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
         let out = generate_cpp_module(&store, module, &CppOptions::default())
             .expect("core statement/value slice should generate");
 
@@ -1520,7 +1524,8 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[build_ui]);
-        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
+        let static_decls = b.block(&[]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
 
         let err = generate_cpp_module(&store, module, &CppOptions::default())
             .expect_err("invalid canonical buildUserInterface signature must fail");
@@ -1612,7 +1617,8 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[ui, metadata]);
-        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
+        let static_decls = b.block(&[]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
 
         let out =
             generate_cpp_module(&store, module, &CppOptions::default()).expect("UI nodes emit");

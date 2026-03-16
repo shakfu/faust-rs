@@ -1498,7 +1498,8 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[metadata]);
-        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
+        let static_decls = b.block(&[]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
 
         let err = generate_c_module(&store, module, &COptions::default())
             .expect_err("invalid canonical metadata signature must fail");
@@ -1576,7 +1577,8 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[ui, metadata]);
-        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
+        let static_decls = b.block(&[]);
+        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
 
         let out = generate_c_module(&store, module, &COptions::default())
             .expect("C UI nodes emit in the correct callback family");

@@ -496,7 +496,16 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[compute]);
-        let static_decls = b.block(&[]); let module = b.module(0, 0, "legacy_like", dsp_struct, globals, functions, static_decls);
+        let static_decls = b.block(&[]);
+        let module = b.module(
+            0,
+            0,
+            "legacy_like",
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+        );
         (store, module)
     }
 

@@ -1935,15 +1935,11 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 index,
                 typ,
             } => {
-                let data_id =
-                    self.static_data_ids
-                        .get(&name)
-                        .copied()
-                        .ok_or_else(|| {
-                            LoweringError::Unsupported(format!(
-                                "static table `{name}` not found in pre-declared JIT data"
-                            ))
-                        })?;
+                let data_id = self.static_data_ids.get(&name).copied().ok_or_else(|| {
+                    LoweringError::Unsupported(format!(
+                        "static table `{name}` not found in pre-declared JIT data"
+                    ))
+                })?;
                 let gv = self.jit.declare_data_in_func(data_id, self.fb.func);
                 let base = self.fb.ins().global_value(self.ptr_ty, gv);
                 let index_v = self.lower_expr(index, Some(&FirType::Int32))?.value();
@@ -2736,9 +2732,7 @@ fn define_static_tables_in_jit(
         let data_id = jit
             .declare_data(&name, Linkage::Local, false, false)
             .map_err(|e| {
-                CraneliftBackendError::jit_failure(format!(
-                    "declare_data `{name}` failed: {e}"
-                ))
+                CraneliftBackendError::jit_failure(format!("declare_data `{name}` failed: {e}"))
             })?;
 
         let mut desc = DataDescription::new();
@@ -2807,7 +2801,15 @@ fn declare_compute_stub(
         fb.switch_to_block(entry);
         fb.seal_block(entry);
         if compute_body_matches_current_subset(store, compute_decl) {
-            match try_lower_compute_body(store, jit, &mut fb, struct_layout, ptr_ty, compute_decl, static_data_ids) {
+            match try_lower_compute_body(
+                store,
+                jit,
+                &mut fb,
+                struct_layout,
+                ptr_ty,
+                compute_decl,
+                static_data_ids,
+            ) {
                 Ok(lowered) => compute_body_lowered = lowered,
                 Err(LoweringError::Unsupported(reason)) => {
                     return Err(CraneliftBackendError::unsupported_module_shape(format!(
@@ -3064,7 +3066,16 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
-        let static_decls = b.block(&[]); let module = b.module(0, 0, "subset_gap_fun_call", dsp_struct, globals, functions, static_decls);
+        let static_decls = b.block(&[]);
+        let module = b.module(
+            0,
+            0,
+            "subset_gap_fun_call",
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+        );
         (store, module)
     }
 
@@ -3150,7 +3161,16 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
-        let static_decls = b.block(&[]); let module = b.module(0, 0, "subset_lowerable", dsp_struct, globals, functions, static_decls);
+        let static_decls = b.block(&[]);
+        let module = b.module(
+            0,
+            0,
+            "subset_lowerable",
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+        );
         (store, module)
     }
 
@@ -3475,7 +3495,16 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
-        let static_decls = b.block(&[]); let module = b.module(0, 0, "switch_subset", dsp_struct, globals, functions, static_decls);
+        let static_decls = b.block(&[]);
+        let module = b.module(
+            0,
+            0,
+            "switch_subset",
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+        );
         (store, module)
     }
 
@@ -3718,7 +3747,16 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
-        let static_decls = b.block(&[]); let module = b.module(0, 0, "global_table_subset", dsp_struct, globals, functions, static_decls);
+        let static_decls = b.block(&[]);
+        let module = b.module(
+            0,
+            0,
+            "global_table_subset",
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+        );
         (store, module)
     }
 
@@ -3858,7 +3896,16 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
-        let static_decls = b.block(&[]); let module = b.module(0, 0, "int32_and_subset", dsp_struct, globals, functions, static_decls);
+        let static_decls = b.block(&[]);
+        let module = b.module(
+            0,
+            0,
+            "int32_and_subset",
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+        );
         (store, module)
     }
 

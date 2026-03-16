@@ -1623,7 +1623,15 @@ fn lower_signals_to_c_legacy_bridge(
     let globals = b.block(&[]);
     let static_decls = b.block(&[]);
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
-    let module = b.module(0, 0, module_name, dsp_struct, globals, functions, static_decls);
+    let module = b.module(
+        0,
+        0,
+        module_name,
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
     let lowered = FirCompileOutput { store, module };
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToCError::Verify)?;
     generate_c_module(&lowered.store, lowered.module, options).map_err(LowerToCError::Codegen)
