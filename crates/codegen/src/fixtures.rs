@@ -136,6 +136,7 @@ fn module_with_functions(
     let dsp_struct = b.block(&[]);
     let globals = b.block(globals);
     let functions = b.block(functions);
+    let static_decls = b.block(&[]);
     b.module(
         num_inputs,
         num_outputs,
@@ -143,6 +144,7 @@ fn module_with_functions(
         dsp_struct,
         globals,
         functions,
+        static_decls,
     )
 }
 
@@ -843,7 +845,8 @@ pub fn build_ir_coverage_test_module() -> (FirStore, FirId) {
     let dsp_struct = b.block(&[struct_decl]);
     let globals_block = b.block(&globals);
     let functions = b.block(&[helper, compute]);
-    let module = b.module(1, 1, "ir_coverage", dsp_struct, globals_block, functions);
+    let static_decls = b.block(&[]);
+    let module = b.module(1, 1, "ir_coverage", dsp_struct, globals_block, functions, static_decls);
     (store, module)
 }
 

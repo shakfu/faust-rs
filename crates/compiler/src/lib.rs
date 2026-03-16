@@ -1509,6 +1509,7 @@ fn lower_signals_to_fir_legacy_bridge(
     let compute = b.declare_fun("compute", compute_type, &compute_args, Some(body), false);
     let functions = b.block(&[instance_constants, compute]);
     let globals = b.block(&[]);
+    let static_decls = b.block(&[]);
     let module = b.module(
         output.process_arity.inputs,
         output.process_arity.outputs,
@@ -1516,6 +1517,7 @@ fn lower_signals_to_fir_legacy_bridge(
         dsp_struct,
         globals,
         functions,
+        static_decls,
     );
 
     FirCompileOutput { store, module }
@@ -1619,8 +1621,9 @@ fn lower_signals_to_c_legacy_bridge(
     let compute = b.declare_fun("compute", compute_type, &compute_args, Some(body), false);
     let functions = b.block(&[instance_constants, compute]);
     let globals = b.block(&[]);
+    let static_decls = b.block(&[]);
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
-    let module = b.module(0, 0, module_name, dsp_struct, globals, functions);
+    let module = b.module(0, 0, module_name, dsp_struct, globals, functions, static_decls);
     let lowered = FirCompileOutput { store, module };
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToCError::Verify)?;
     generate_c_module(&lowered.store, lowered.module, options).map_err(LowerToCError::Codegen)

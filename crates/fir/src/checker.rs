@@ -629,6 +629,7 @@ impl<'s> VerifyCtx<'s> {
             dsp_struct,
             globals,
             functions,
+            static_decls,
         } = match_fir(self.store, id)
         else {
             self.error("FIR-M01", "root node is not a FirMatch::Module", id);
@@ -654,6 +655,19 @@ impl<'s> VerifyCtx<'s> {
                 self.check_compute_io_arity_contract(functions, num_inputs, num_outputs);
             }
             _ => self.error("FIR-M04", "functions is not a Block", functions),
+        }
+
+        // M05: static_decls must be a Block of Static/Global table declarations.
+        // Reuse check_globals — it already validates AccessType::Static and
+        // registers names into symbols.globals so that load_table(Static)
+        // accesses in compute resolve correctly.
+        match match_fir(self.store, static_decls) {
+            FirMatch::Block(stmts) => self.check_globals(static_decls, stmts),
+            _ => self.error(
+                "FIR-M05",
+                "static_decls is not a Block",
+                static_decls,
+            ),
         }
     }
 
@@ -2583,7 +2597,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let functions = make_full_functions(&mut b);
-        b.module(0, 0, "dsp", dsp_struct, globals, functions)
+        { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) }
     }
 
     // ── Helper: build a minimal module with one custom function ───────────────
@@ -2594,7 +2608,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let functions = b.block(&[fun_id]);
-        b.module(0, 0, "dsp", dsp_struct, globals, functions)
+        { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) }
     }
 
     // ══ Phase 1 tests (unchanged) ═════════════════════════════════════════════
@@ -2622,7 +2636,7 @@ mod tests {
         let bad_struct = b.int32(0);
         let globals = make_empty_block(&mut b);
         let functions = make_full_functions(&mut b);
-        let module_id = b.module(0, 0, "dsp", bad_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", bad_struct, globals, functions, sd) };
         let report = verify_fir_module(&store, module_id);
         assert!(report.diagnostics.iter().any(|d| d.code == "FIR-M02"));
     }
@@ -2634,7 +2648,7 @@ mod tests {
         let bad_struct = b.declare_struct_type(FirType::Int32);
         let globals = make_empty_block(&mut b);
         let functions = make_full_functions(&mut b);
-        let module_id = b.module(0, 0, "dsp", bad_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", bad_struct, globals, functions, sd) };
         let report = verify_fir_module(&store, module_id);
         assert!(report.diagnostics.iter().any(|d| d.code == "FIR-M02"));
     }
@@ -2646,7 +2660,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let bad_globals = b.int32(0);
         let functions = make_full_functions(&mut b);
-        let module_id = b.module(0, 0, "dsp", dsp_struct, bad_globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, bad_globals, functions, sd) };
         assert!(
             verify_fir_module(&store, module_id)
                 .diagnostics
@@ -2662,7 +2676,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let bad_decls = b.int32(0);
-        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, bad_decls);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, bad_decls, sd) };
         assert!(
             verify_fir_module(&store, module_id)
                 .diagnostics
@@ -2679,7 +2693,7 @@ mod tests {
         let globals = make_empty_block(&mut b);
         let intruder = b.int32(99);
         let functions = b.block(&[intruder]);
-        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) };
         assert!(
             verify_fir_module(&store, module_id)
                 .diagnostics
@@ -2697,7 +2711,7 @@ mod tests {
         let f1 = make_void_fun(&mut b, "myFun");
         let f2 = make_void_fun(&mut b, "myFun");
         let functions = b.block(&[f1, f2]);
-        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) };
         let report = verify_fir_module(&store, module_id);
         assert!(!report.has_errors());
         assert!(report.diagnostics.iter().any(|d| d.code == "FIR-M06"));
@@ -2710,7 +2724,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let functions = make_empty_block(&mut b);
-        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) };
         let report = verify_fir_module(&store, module_id);
         assert!(!report.has_errors());
         assert_eq!(
@@ -2731,7 +2745,7 @@ mod tests {
         let bad_struct = b.block(&[bad_field]);
         let globals = make_empty_block(&mut b);
         let functions = make_full_functions(&mut b);
-        let module_id = b.module(0, 0, "dsp", bad_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", bad_struct, globals, functions, sd) };
         assert!(
             verify_fir_module(&store, module_id)
                 .diagnostics
@@ -2753,7 +2767,7 @@ mod tests {
         let bad_struct = b.block(&[bad_field]);
         let globals = make_empty_block(&mut b);
         let functions = make_full_functions(&mut b);
-        let module_id = b.module(0, 0, "dsp", bad_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", bad_struct, globals, functions, sd) };
         let report = verify_fir_module(&store, module_id);
         assert!(!report.has_errors());
         assert!(report.diagnostics.iter().any(|d| d.code == "FIR-S04"));
@@ -2769,7 +2783,7 @@ mod tests {
         let dsp_struct = b.block(&[f0, f1]);
         let globals = make_empty_block(&mut b);
         let functions = make_full_functions(&mut b);
-        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) };
         let (_report, symbols) = verify_module_structure(&store, module_id);
         assert_eq!(symbols.struct_name.as_deref(), Some("dsp"));
         assert_eq!(symbols.struct_fields, fields);
@@ -2785,7 +2799,7 @@ mod tests {
         let dsp_struct = b.block(&[bad_field]);
         let globals = make_empty_block(&mut b);
         let functions = make_full_functions(&mut b);
-        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) };
         let report = verify_fir_module(&store, module_id);
         assert!(report.has_errors());
         assert!(
@@ -2803,7 +2817,7 @@ mod tests {
         let dsp_struct = b.block(&[f1, f2]);
         let globals = make_empty_block(&mut b);
         let functions = make_full_functions(&mut b);
-        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) };
         let report = verify_fir_module(&store, module_id);
         assert!(report.has_errors());
         assert!(
@@ -2820,7 +2834,7 @@ mod tests {
         let intruder = b.int32(0);
         let globals = b.block(&[intruder]);
         let functions = make_full_functions(&mut b);
-        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) };
         assert!(
             verify_fir_module(&store, module_id)
                 .diagnostics
@@ -2837,7 +2851,7 @@ mod tests {
         let bad_var = b.declare_var("x", FirType::Int32, AccessType::Stack, None);
         let globals = b.block(&[bad_var]);
         let functions = make_full_functions(&mut b);
-        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) };
         assert!(
             verify_fir_module(&store, module_id)
                 .diagnostics
@@ -2855,7 +2869,7 @@ mod tests {
         let v2 = b.declare_var("g", FirType::Int32, AccessType::Global, None);
         let globals = b.block(&[v1, v2]);
         let functions = make_full_functions(&mut b);
-        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) };
         assert!(
             verify_fir_module(&store, module_id)
                 .diagnostics
@@ -2872,7 +2886,7 @@ mod tests {
         let var = b.declare_var("gRate", FirType::Int32, AccessType::Global, None);
         let globals = b.block(&[var]);
         let functions = make_full_functions(&mut b);
-        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) };
         let (_report, symbols) = verify_module_structure(&store, module_id);
         assert!(symbols.globals.contains_key("gRate"));
     }
@@ -3015,7 +3029,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let functions = b.block(&[fun]);
-        b.module(0, 0, "dsp", dsp_struct, globals, functions)
+        { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) }
     }
 
     /// Build a single-function module that returns an Int32 value.
@@ -3030,7 +3044,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let functions = b.block(&[fun]);
-        b.module(0, 0, "dsp", dsp_struct, globals, functions)
+        { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) }
     }
 
     // ══ Phase 2 — SC checks ═══════════════════════════════════════════════════
@@ -3235,7 +3249,7 @@ mod tests {
         };
         let fun = b.declare_fun("f", typ, &[], Some(body), false);
         let functions = b.block(&[fun]);
-        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) };
         let report = verify_fir_module(&store, module_id);
         assert!(
             !report.diagnostics.iter().any(|d| d.code == "FIR-SC01"),
@@ -3617,7 +3631,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let functions = b.block(&[callee, caller]);
-        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) };
         let report = verify_fir_module(&store, module_id);
         assert!(
             report.diagnostics.iter().any(|d| d.code == "FIR-FC02"),
@@ -3741,7 +3755,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let functions = b.block(&[sin_decl, fabs_decl, caller]);
-        let module_id = b.module(0, 0, "dsp", dsp_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 0, "dsp", dsp_struct, globals, functions, sd) };
         let report = verify_fir_module(&store, module_id);
         assert!(
             report.diagnostics.iter().any(|d| d.code == "FIR-MA03"),
@@ -3772,7 +3786,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let functions = b.block(&[compute]);
-        let module_id = b.module(0, 1, "dsp", dsp_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(0, 1, "dsp", dsp_struct, globals, functions, sd) };
         let report = verify_fir_module(&store, module_id);
         assert!(
             report.diagnostics.iter().any(|d| d.code == "FIR-M08"),
@@ -3799,7 +3813,7 @@ mod tests {
         let dsp_struct = make_dsp_struct(&mut b);
         let globals = make_empty_block(&mut b);
         let functions = b.block(&[compute]);
-        let module_id = b.module(1, 1, "dsp", dsp_struct, globals, functions);
+        let module_id = { let sd = b.block(&[]); b.module(1, 1, "dsp", dsp_struct, globals, functions, sd) };
         let report = verify_fir_module(&store, module_id);
         assert!(
             report.diagnostics.iter().any(|d| d.code == "FIR-M09"),

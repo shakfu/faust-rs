@@ -487,24 +487,30 @@ mod tests {
         let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
             .expect("table section routing should compile");
 
-        let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+        let FirMatch::Module {
+            functions,
+            static_decls,
+            ..
+        } = match_fir(&out.store, out.module)
+        else {
             panic!("module root expected");
         };
-        let constants_body = find_decl_fun_body(&out.store, functions, "instanceConstants");
         let clear_body = find_decl_fun_body(&out.store, functions, "instanceClear");
 
-        let FirMatch::Block(constants_stmts) = match_fir(&out.store, constants_body) else {
-            panic!("constants body block expected");
-        };
         let FirMatch::Block(clear_stmts) = match_fir(&out.store, clear_body) else {
             panic!("clear body block expected");
         };
 
+        // With static table declarations, table data is embedded inline at file scope
+        // rather than initialized via StoreTable in instanceConstants.
+        let FirMatch::Block(static_items) = match_fir(&out.store, static_decls) else {
+            panic!("static_decls block expected");
+        };
         assert!(
-            constants_stmts
+            static_items
                 .iter()
-                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::StoreTable { .. })),
-            "table initialization should be emitted in instanceConstants"
+                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareTable { .. })),
+            "table declaration should be emitted in static_decls (compile-time constant)"
         );
         assert!(
             !clear_stmts
@@ -703,21 +709,21 @@ mod tests {
             .expect("Step 2G should support waveform+rdtbl table lowering");
 
         let FirMatch::Module {
-            dsp_struct,
+            static_decls,
             functions,
             ..
         } = match_fir(&out.store, out.module)
         else {
             panic!("module expected");
         };
-        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
-            panic!("dsp_struct block expected");
+        let FirMatch::Block(static_items) = match_fir(&out.store, static_decls) else {
+            panic!("static_decls block expected");
         };
         assert!(
-            struct_items
+            static_items
                 .iter()
                 .any(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareTable { .. })),
-            "Step 2G should allocate waveform table in DSP struct"
+            "Step 2G should allocate waveform table in static_decls (file-scope constant)"
         );
         let loop_body = find_compute_loop_body(&out.store, functions);
         let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
@@ -751,13 +757,13 @@ mod tests {
         let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
             .expect("Step 2H should support readonly wrtbl with constant generator");
 
-        let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+        let FirMatch::Module { static_decls, .. } = match_fir(&out.store, out.module) else {
             panic!("module expected");
         };
-        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
-            panic!("dsp_struct block expected");
+        let FirMatch::Block(static_items) = match_fir(&out.store, static_decls) else {
+            panic!("static_decls block expected");
         };
-        let table = struct_items
+        let table = static_items
             .iter()
             .copied()
             .find(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareTable { .. }))
@@ -1543,14 +1549,14 @@ mod tests {
         let out = compile_fastlane_without_ui(&arena, &[sig0], 0, 1, &SignalFirOptions::default())
             .expect("integer waveform should lower");
 
-        let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+        let FirMatch::Module { static_decls, .. } = match_fir(&out.store, out.module) else {
             panic!("module expected");
         };
-        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
-            panic!("dsp_struct block expected");
+        let FirMatch::Block(static_items) = match_fir(&out.store, static_decls) else {
+            panic!("static_decls block expected");
         };
         assert!(
-            struct_items.iter().any(|id| matches!(
+            static_items.iter().any(|id| matches!(
                 match_fir(&out.store, *id),
                 FirMatch::DeclareTable {
                     name,

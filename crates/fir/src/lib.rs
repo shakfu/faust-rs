@@ -933,6 +933,7 @@ impl<'a> FirBuilder<'a> {
 
     /// C++ parity: `ModuleInst`.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn module(
         &mut self,
         num_inputs: usize,
@@ -941,6 +942,7 @@ impl<'a> FirBuilder<'a> {
         dsp_struct: FirId,
         globals: FirId,
         functions: FirId,
+        static_decls: FirId,
     ) -> FirId {
         let name_id = self.store.arena.symbol(name);
         let num_inputs_id = self.store.arena.int(num_inputs as i64);
@@ -955,6 +957,7 @@ impl<'a> FirBuilder<'a> {
                 dsp_struct,
                 globals,
                 functions,
+                static_decls,
             ],
         )
     }
@@ -1332,6 +1335,7 @@ pub enum FirMatch {
         dsp_struct: FirId,
         globals: FirId,
         functions: FirId,
+        static_decls: FirId,
     },
 }
 
@@ -1928,6 +1932,7 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 dsp_struct,
                 globals,
                 functions,
+                static_decls,
             ],
         ) => {
             let Some(name) = decode_symbol(&store.arena, *name) else {
@@ -1952,6 +1957,7 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 dsp_struct: *dsp_struct,
                 globals: *globals,
                 functions: *functions,
+                static_decls: *static_decls,
             }
         }
         _ => FirMatch::Unknown,
@@ -2080,8 +2086,9 @@ fn child_ids(node: &FirMatch) -> Vec<FirId> {
             dsp_struct,
             globals,
             functions,
+            static_decls,
             ..
-        } => vec![*dsp_struct, *globals, *functions],
+        } => vec![*dsp_struct, *globals, *functions, *static_decls],
     }
 }
 

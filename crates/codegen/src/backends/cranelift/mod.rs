@@ -2906,7 +2906,7 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
-        let module = b.module(0, 0, "subset_gap_fun_call", dsp_struct, globals, functions);
+        let static_decls = b.block(&[]); let module = b.module(0, 0, "subset_gap_fun_call", dsp_struct, globals, functions, static_decls);
         (store, module)
     }
 
@@ -2992,7 +2992,7 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
-        let module = b.module(0, 0, "subset_lowerable", dsp_struct, globals, functions);
+        let static_decls = b.block(&[]); let module = b.module(0, 0, "subset_lowerable", dsp_struct, globals, functions, static_decls);
         (store, module)
     }
 
@@ -3063,6 +3063,7 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
+        let sd = b.block(&[]);
         let module = b.module(
             0,
             0,
@@ -3070,6 +3071,7 @@ mod tests {
             dsp_struct,
             globals,
             functions,
+            sd,
         );
         (store, module)
     }
@@ -3146,6 +3148,7 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
+        let sd = b.block(&[]);
         let module = b.module(
             0,
             0,
@@ -3153,6 +3156,7 @@ mod tests {
             dsp_struct,
             globals,
             functions,
+            sd,
         );
         (store, module)
     }
@@ -3224,6 +3228,7 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
+        let sd = b.block(&[]);
         let module = b.module(
             0,
             0,
@@ -3231,6 +3236,7 @@ mod tests {
             dsp_struct,
             globals,
             functions,
+            sd,
         );
         (store, module)
     }
@@ -3311,7 +3317,7 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
-        let module = b.module(0, 0, "switch_subset", dsp_struct, globals, functions);
+        let static_decls = b.block(&[]); let module = b.module(0, 0, "switch_subset", dsp_struct, globals, functions, static_decls);
         (store, module)
     }
 
@@ -3383,6 +3389,7 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
+        let sd = b.block(&[]);
         let module = b.module(
             0,
             0,
@@ -3390,6 +3397,7 @@ mod tests {
             dsp_struct,
             globals,
             functions,
+            sd,
         );
         (store, module)
     }
@@ -3466,6 +3474,7 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
+        let sd = b.block(&[]);
         let module = b.module(
             0,
             0,
@@ -3473,6 +3482,7 @@ mod tests {
             dsp_struct,
             globals,
             functions,
+            sd,
         );
         (store, module)
     }
@@ -3550,7 +3560,7 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
-        let module = b.module(0, 0, "global_table_subset", dsp_struct, globals, functions);
+        let static_decls = b.block(&[]); let module = b.module(0, 0, "global_table_subset", dsp_struct, globals, functions, static_decls);
         (store, module)
     }
 
@@ -3619,6 +3629,7 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
+        let sd = b.block(&[]);
         let module = b.module(
             0,
             0,
@@ -3626,6 +3637,7 @@ mod tests {
             dsp_struct,
             globals,
             functions,
+            sd,
         );
         (store, module)
     }
@@ -3688,7 +3700,7 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
-        let module = b.module(0, 0, "int32_and_subset", dsp_struct, globals, functions);
+        let static_decls = b.block(&[]); let module = b.module(0, 0, "int32_and_subset", dsp_struct, globals, functions, static_decls);
         (store, module)
     }
 
@@ -3815,6 +3827,7 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
+        let sd = b.block(&[]);
         let module = b.module(
             0,
             0,
@@ -3822,6 +3835,7 @@ mod tests {
             dsp_struct,
             globals,
             functions,
+            sd,
         );
         (store, module)
     }
@@ -3898,6 +3912,7 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
+        let sd = b.block(&[]);
         let module = b.module(
             0,
             0,
@@ -3905,6 +3920,7 @@ mod tests {
             dsp_struct,
             globals,
             functions,
+            sd,
         );
         (store, module)
     }
@@ -3963,6 +3979,7 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
+        let sd = b.block(&[]);
         let module = b.module(
             0,
             0,
@@ -3970,6 +3987,7 @@ mod tests {
             dsp_struct,
             globals,
             functions,
+            sd,
         );
         (store, module)
     }
@@ -4037,6 +4055,7 @@ mod tests {
             false,
         );
         let functions = b.block(&[compute]);
+        let sd = b.block(&[]);
         let module = b.module(
             0,
             0,
@@ -4044,6 +4063,7 @@ mod tests {
             dsp_struct,
             globals,
             functions,
+            sd,
         );
         (store, module)
     }

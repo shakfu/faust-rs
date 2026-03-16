@@ -183,6 +183,7 @@ pub fn generate_interp_module<R: real::FbcReal>(
                 dsp_struct,
                 globals,
                 functions,
+                ..
             } => (
                 num_inputs,
                 num_outputs,
@@ -440,7 +441,7 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[compute]);
-        let module = b.module(0, 0, "legacy_like", dsp_struct, globals, functions);
+        let static_decls = b.block(&[]); let module = b.module(0, 0, "legacy_like", dsp_struct, globals, functions, static_decls);
         (store, module)
     }
 

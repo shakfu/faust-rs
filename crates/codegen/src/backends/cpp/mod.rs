@@ -135,6 +135,7 @@ struct ModuleView {
     functions: FirId,
     num_inputs: usize,
     num_outputs: usize,
+    static_decls: FirId,
 }
 
 /// Borrowed function declaration view used while stitching the C++ class body.
@@ -206,6 +207,10 @@ pub fn generate_cpp_module(
         let _ = writeln!(out, "namespace {namespace} {{");
         let _ = writeln!(out);
     }
+
+    // Emit compile-time constant waveform tables at file scope.
+    emit_static_tables(store, &mut out, &effective_options, module.static_decls)?;
+    let _ = writeln!(out);
 
     let _ = writeln!(out, "class {class_name} : public {super_class_name} {{");
     let _ = writeln!(out, "private:");
@@ -1288,6 +1293,45 @@ fn cpp_string_literal(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+/// Emits `DeclareTable(AccessType::Static)` nodes as `const static` arrays
+/// with inline initializers, placed before the class definition.
+fn emit_static_tables(
+    store: &FirStore,
+    out: &mut String,
+    options: &CppOptions,
+    block: FirId,
+) -> Result<(), CodegenError> {
+    let FirMatch::Block(stmts) = match_fir(store, block) else {
+        return Ok(());
+    };
+    for stmt in stmts {
+        if let FirMatch::DeclareTable {
+            name,
+            elem_type,
+            values,
+            ..
+        } = match_fir(store, stmt)
+        {
+            let type_str = emit_type(&elem_type, options);
+            let n = values.len();
+            if n == 0 {
+                let _ = writeln!(out, "const static {type_str} {name}[0] = {{}};");
+            } else {
+                let _ = write!(out, "const static {type_str} {name}[{n}] = {{");
+                for (i, v) in values.iter().enumerate() {
+                    if i > 0 {
+                        let _ = write!(out, ", ");
+                    }
+                    let rendered = emit_value(store, options, *v)?;
+                    let _ = write!(out, "{rendered}");
+                }
+                let _ = writeln!(out, "}};");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Decodes the FIR module header expected by the C++ emitter.
 fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
     match match_fir(store, module) {
@@ -1298,6 +1342,7 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
             dsp_struct,
             globals,
             functions,
+            static_decls,
         } => Ok(ModuleView {
             name,
             dsp_struct,
@@ -1305,6 +1350,7 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
             functions,
             num_inputs,
             num_outputs,
+            static_decls,
         }),
         _ => Err(CodegenError::new(
             CodegenErrorCode::RootNotModule,
@@ -1348,7 +1394,7 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[]);
-        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
+        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
 
         let out = generate_cpp_module(&store, module, &CppOptions::default())
             .expect("module root should generate");
@@ -1373,7 +1419,7 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[]);
-        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
+        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
         let options = CppOptions {
             super_class_name: Some("faust_dsp".to_owned()),
             ..CppOptions::default()
@@ -1393,7 +1439,7 @@ mod tests {
         let dsp_struct = b.int32(1);
         let globals = b.block(&[]);
         let functions = b.block(&[]);
-        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
+        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
         let err = generate_cpp_module(&store, module, &CppOptions::default())
             .expect_err("non-block section must fail");
         assert_eq!(err.code(), CodegenErrorCode::InvalidModuleSection);
@@ -1444,7 +1490,7 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[fun]);
-        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
+        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
         let out = generate_cpp_module(&store, module, &CppOptions::default())
             .expect("core statement/value slice should generate");
 
@@ -1474,7 +1520,7 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[build_ui]);
-        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
+        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
 
         let err = generate_cpp_module(&store, module, &CppOptions::default())
             .expect_err("invalid canonical buildUserInterface signature must fail");
@@ -1566,7 +1612,7 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[ui, metadata]);
-        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
+        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
 
         let out =
             generate_cpp_module(&store, module, &CppOptions::default()).expect("UI nodes emit");

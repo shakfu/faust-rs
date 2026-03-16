@@ -481,6 +481,10 @@ pub fn build_module(
         let mut b = FirBuilder::new(&mut lower.store);
         b.block(&math_prototypes)
     };
+    let static_decls_block = {
+        let mut b = FirBuilder::new(&mut lower.store);
+        b.block(&lower.static_declarations)
+    };
     let module: FirId = {
         let mut b = FirBuilder::new(&mut lower.store);
         b.module(
@@ -490,6 +494,7 @@ pub fn build_module(
             dsp_struct,
             globals,
             functions,
+            static_decls_block,
         )
     };
 
@@ -535,6 +540,11 @@ struct SignalToFirLower<'a> {
     cache: HashMap<SigId, FirId>,
     /// DSP struct field declarations (arrays, scalars, UI zones).
     struct_declarations: Vec<FirId>,
+    /// Constant waveform table declarations emitted at file scope (`const static`
+    /// in C++/C) rather than inside the DSP struct.  These are tables whose
+    /// content is fully determined at compile time (waveform literals) and is
+    /// shared across all DSP instances.
+    static_declarations: Vec<FirId>,
     /// `instanceConstants` body: table initializations and compile-time constants.
     constants_statements: Vec<FirId>,
     /// `instanceResetUserInterface` body: UI zone reset assignments.
@@ -627,6 +637,7 @@ impl<'a> SignalToFirLower<'a> {
             store: FirStore::new(),
             cache: HashMap::new(),
             struct_declarations: Vec::new(),
+            static_declarations: Vec::new(),
             constants_statements: Vec::new(),
             reset_statements: Vec::new(),
             clear_statements: Vec::new(),
@@ -1578,17 +1589,53 @@ impl<'a> SignalToFirLower<'a> {
         unreachable!("soundfile zone should be inserted before loading")
     }
 
-    /// Lowers waveform literals into constant FIR tables and returns a pointer
-    /// alias to the declared table.
+    /// Lowers a `SIGWAVEFORM` node used as a direct signal output.
+    ///
+    /// Emits a cycling integer state slot `iWave{N}` (cleared to 0 in
+    /// `instanceClear`) that advances by 1 mod `len` each sample, producing the
+    /// correct sequential value from the waveform table.
+    ///
+    /// Contrast with `lower_rdtbl`: when a waveform is used as a read-table
+    /// source (via `SIGWRTBL`/`SIGGEN`), the table is filled once in
+    /// `ensure_wrtbl_table` and accessed with an arbitrary external index.
     fn lower_waveform(&mut self, node: SigId, values: &[SigId]) -> Result<FirId, SignalFirError> {
         let table_name = self.ensure_waveform_table(node, values)?;
+        if values.is_empty() {
+            return self.unsupported_node(node, "SIGWAVEFORM cannot be empty");
+        }
+        let n = i32::try_from(values.len()).unwrap_or(i32::MAX);
+        let idx_name = format!("iWave{}", node.as_u32());
+        if self.named_struct_vars.insert(idx_name.clone()) {
+            let mut b = FirBuilder::new(&mut self.store);
+            let dec = b.declare_var(idx_name.clone(), FirType::Int32, AccessType::Struct, None);
+            self.struct_declarations.push(dec);
+            let zero = self.lower_int32_const(0);
+            self.register_clear_init(idx_name.clone(), zero);
+            // Compute update: iWave = (iWave + 1) % N
+            let iwave_load = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.load_var(idx_name.clone(), AccessType::Struct, FirType::Int32)
+            };
+            let one = self.lower_int32_const(1);
+            let size = self.lower_int32_const(n);
+            let next = {
+                let mut b = FirBuilder::new(&mut self.store);
+                let sum = b.binop(FirBinOp::Add, iwave_load, one, FirType::Int32);
+                b.binop(FirBinOp::Rem, sum, size, FirType::Int32)
+            };
+            let update = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.store_var(idx_name.clone(), AccessType::Struct, next)
+            };
+            self.compute_updates.push(update);
+        }
         let index = {
             let mut b = FirBuilder::new(&mut self.store);
-            b.int32(0)
+            b.load_var(idx_name, AccessType::Struct, FirType::Int32)
         };
         let real_ty = self.signal_fir_type(node)?;
         let mut b = FirBuilder::new(&mut self.store);
-        Ok(b.load_table(table_name, AccessType::Struct, index, real_ty))
+        Ok(b.load_table(table_name, AccessType::Static, index, real_ty))
     }
 
     /// Lowers one table read by resolving the table producer and normalizing
@@ -1606,11 +1653,12 @@ impl<'a> SignalToFirLower<'a> {
         if table_len == 0 {
             return self.unsupported_node(node, "SIGRDTBL cannot read an empty table");
         }
+        let ridx_sig = ridx;
         let ridx = self.lower_signal(ridx)?;
-        let index = self.normalized_table_index(ridx, table_len);
+        let index = self.table_index_with_bounds(ridx, ridx_sig, table_len);
         let real_ty = self.signal_fir_type(node)?;
         let mut b = FirBuilder::new(&mut self.store);
-        Ok(b.load_table(table_name, AccessType::Struct, index, real_ty))
+        Ok(b.load_table(table_name, AccessType::Static, index, real_ty))
     }
 
     /// Lowers one table write producer (`SIGWRTBL`) and returns the table alias.
@@ -1643,7 +1691,7 @@ impl<'a> SignalToFirLower<'a> {
         let index = self.normalized_table_index(widx, table_len);
         let mut b = FirBuilder::new(&mut self.store);
         self.compute_updates
-            .push(b.store_table(table_name, AccessType::Struct, index, wsig_value));
+            .push(b.store_table(table_name, AccessType::Static, index, wsig_value));
         Ok(wsig_value)
     }
 
@@ -1679,7 +1727,6 @@ impl<'a> SignalToFirLower<'a> {
         for value in values {
             lowered_values.push(self.lower_signal(*value)?);
         }
-        let declared_zeros = self.zero_table_values(sig, values.len())?;
         let elem_ty = self.signal_fir_type(sig)?;
         let prefix = if elem_ty == FirType::Int32 {
             "iTbl"
@@ -1688,21 +1735,8 @@ impl<'a> SignalToFirLower<'a> {
         };
         let name = format!("{prefix}{}", sig.as_u32());
         let mut b = FirBuilder::new(&mut self.store);
-        let decl = b.declare_table(name.clone(), AccessType::Struct, elem_ty, &declared_zeros);
-        self.struct_declarations.push(decl);
-        for (index, value) in lowered_values.iter().copied().enumerate() {
-            let index = {
-                let mut b = FirBuilder::new(&mut self.store);
-                b.int32(i32::try_from(index).unwrap_or(i32::MAX))
-            };
-            let mut b = FirBuilder::new(&mut self.store);
-            self.constants_statements.push(b.store_table(
-                name.clone(),
-                AccessType::Struct,
-                index,
-                value,
-            ));
-        }
+        let decl = b.declare_table(name.clone(), AccessType::Static, elem_ty, &lowered_values);
+        self.static_declarations.push(decl);
         self.waveform_tables.insert(sig, name.clone());
         self.waveform_table_len.insert(sig, values.len());
         Ok(name)
@@ -1718,7 +1752,6 @@ impl<'a> SignalToFirLower<'a> {
     ) -> Result<(String, usize), SignalFirError> {
         let size = self.table_size_from_sig(size_sig)?;
         let generated = self.expand_generator_values(generator_sig, size)?;
-        let declared_zeros = self.zero_table_values(sig, size)?;
         let elem_ty = self.signal_fir_type(sig)?;
         let prefix = if elem_ty == FirType::Int32 {
             "iTbl"
@@ -1727,30 +1760,11 @@ impl<'a> SignalToFirLower<'a> {
         };
         let name = format!("{prefix}{}", sig.as_u32());
         let mut b = FirBuilder::new(&mut self.store);
-        let decl = b.declare_table(name.clone(), AccessType::Struct, elem_ty, &declared_zeros);
-        self.struct_declarations.push(decl);
-        for (index, value) in generated.iter().copied().enumerate() {
-            let index = {
-                let mut b = FirBuilder::new(&mut self.store);
-                b.int32(i32::try_from(index).unwrap_or(i32::MAX))
-            };
-            let mut b = FirBuilder::new(&mut self.store);
-            self.constants_statements.push(b.store_table(
-                name.clone(),
-                AccessType::Struct,
-                index,
-                value,
-            ));
-        }
+        let decl = b.declare_table(name.clone(), AccessType::Static, elem_ty, &generated);
+        self.static_declarations.push(decl);
         self.waveform_tables.insert(sig, name.clone());
         self.waveform_table_len.insert(sig, size);
         Ok((name, size))
-    }
-
-    /// Creates a zero-filled table initializer fallback.
-    fn zero_table_values(&mut self, sig: SigId, size: usize) -> Result<Vec<FirId>, SignalFirError> {
-        let zero = self.zero_value_for_signal(sig)?;
-        Ok(vec![zero; size])
     }
 
     /// Evaluates table-size signal to a positive `usize`.
@@ -1844,6 +1858,65 @@ impl<'a> SignalToFirLower<'a> {
         };
         let mut b = FirBuilder::new(&mut self.store);
         b.binop(FirBinOp::Rem, rem_plus_size, size, FirType::Int32)
+    }
+
+    /// Selects the appropriate index bounds strategy based on the interval of
+    /// `index_sig`:
+    ///
+    /// - **[lo, hi] ⊆ [0, N-1]**: the interval proves the index is always
+    ///   in-bounds → emit direct access (no bounds check).
+    /// - **[lo, hi] with lo ≥ 0, hi finite but > N-1**: non-negative but may
+    ///   overflow → clamp to `min_i(N-1, index)`.
+    /// - **[lo, hi] finite with lo < 0**: signed bounds → full clamp
+    ///   `min_i(N-1, max_i(0, index))`.
+    /// - **Unknown / infinite interval**: fall back to modular wrapping
+    ///   `((index % N) + N) % N`.
+    ///
+    /// This mirrors the C++ reference compiler's interval-driven access
+    /// strategy and avoids the systematic over-conservatism of always applying
+    /// modular wrapping.
+    fn table_index_with_bounds(
+        &mut self,
+        index_fir: FirId,
+        index_sig: SigId,
+        table_len: usize,
+    ) -> FirId {
+        let n = i32::try_from(table_len).unwrap_or(i32::MAX);
+        let iv = self.sig_types.get(&index_sig).map(|ty| ty.interval());
+
+        if let Some(iv) = iv {
+            let lo = iv.lo();
+            let hi = iv.hi();
+            if lo.is_finite() && hi.is_finite() {
+                let lo_i = lo as i64;
+                let hi_i = hi as i64;
+                let n_i = n as i64;
+                if lo_i >= 0 && hi_i >= 0 && hi_i < n_i {
+                    // Index is already provably in [0, N-1] — direct access.
+                    return index_fir;
+                }
+                if lo_i >= 0 {
+                    // Non-negative but hi may exceed N-1 — upper clamp only.
+                    let upper = self.lower_int32_const(n - 1);
+                    self.used_int_fun_names.insert("min_i");
+                    let mut b = FirBuilder::new(&mut self.store);
+                    return b.fun_call("min_i", &[index_fir, upper], FirType::Int32);
+                }
+                // Signed bounds — full clamp max(0, min(N-1, x)).
+                let zero = self.lower_int32_const(0);
+                let upper = self.lower_int32_const(n - 1);
+                self.used_int_fun_names.insert("min_i");
+                self.used_int_fun_names.insert("max_i");
+                let clamped = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.fun_call("min_i", &[upper, index_fir], FirType::Int32)
+                };
+                let mut b = FirBuilder::new(&mut self.store);
+                return b.fun_call("max_i", &[clamped, zero], FirType::Int32);
+            }
+        }
+        // No interval info or infinite bounds — full modular wrapping.
+        self.normalized_table_index(index_fir, table_len)
     }
 
     /// Declares one named struct variable once.

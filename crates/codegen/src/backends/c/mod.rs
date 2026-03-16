@@ -132,6 +132,7 @@ struct ModuleView {
     functions: FirId,
     num_inputs: usize,
     num_outputs: usize,
+    static_decls: FirId,
 }
 
 /// One state field initialization that must be replayed during DSP lifecycle
@@ -228,6 +229,8 @@ pub fn generate_c_module(
     let table_inits = collect_table_initializers(store, module.dsp_struct, module.globals)?;
     let mut out = String::new();
     emit_c_header(&mut out, &class_name);
+    emit_static_tables(store, &mut out, &effective_options, module.static_decls)?;
+    let _ = writeln!(out);
     emit_struct_definition(
         store,
         &mut out,
@@ -1318,6 +1321,45 @@ fn emit_type_base_and_suffix(typ: &FirType, options: &COptions, suffix: &mut Str
     }
 }
 
+/// Emits `DeclareTable(AccessType::Static)` nodes as `static const` arrays
+/// with inline initializers, placed before the struct definition.
+fn emit_static_tables(
+    store: &FirStore,
+    out: &mut String,
+    options: &COptions,
+    block: FirId,
+) -> Result<(), CodegenError> {
+    let FirMatch::Block(stmts) = match_fir(store, block) else {
+        return Ok(());
+    };
+    for stmt in stmts {
+        if let FirMatch::DeclareTable {
+            name,
+            elem_type,
+            values,
+            ..
+        } = match_fir(store, stmt)
+        {
+            let type_str = emit_type(&elem_type, options);
+            let n = values.len();
+            if n == 0 {
+                let _ = writeln!(out, "static const {type_str} {name}[0] = {{}};");
+            } else {
+                let _ = write!(out, "static const {type_str} {name}[{n}] = {{");
+                for (i, v) in values.iter().enumerate() {
+                    if i > 0 {
+                        let _ = write!(out, ", ");
+                    }
+                    let rendered = emit_value(store, options, *v)?;
+                    let _ = write!(out, "{rendered}");
+                }
+                let _ = writeln!(out, "}};");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Decodes the FIR module header expected by the C emitter.
 fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenError> {
     if let FirMatch::Module {
@@ -1327,6 +1369,7 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
         dsp_struct,
         globals,
         functions,
+        static_decls,
     } = match_fir(store, module)
     {
         Ok(ModuleView {
@@ -1336,6 +1379,7 @@ fn decode_module(store: &FirStore, module: FirId) -> Result<ModuleView, CodegenE
             functions,
             num_inputs,
             num_outputs,
+            static_decls,
         })
     } else {
         Err(CodegenError::new(
@@ -1454,7 +1498,7 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[metadata]);
-        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
+        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
 
         let err = generate_c_module(&store, module, &COptions::default())
             .expect_err("invalid canonical metadata signature must fail");
@@ -1532,7 +1576,7 @@ mod tests {
         let dsp_struct = b.block(&[]);
         let globals = b.block(&[]);
         let functions = b.block(&[ui, metadata]);
-        let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions);
+        let static_decls = b.block(&[]); let module = b.module(0, 0, "mydsp", dsp_struct, globals, functions, static_decls);
 
         let out = generate_c_module(&store, module, &COptions::default())
             .expect("C UI nodes emit in the correct callback family");
