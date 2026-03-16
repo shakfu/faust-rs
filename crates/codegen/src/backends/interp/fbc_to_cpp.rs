@@ -13,7 +13,7 @@
 //!
 //! | FBC instruction | Generated C++ |
 //! |---|---|
-//! | `Loop(init, body)` | `{ <init>; while(true){ <body>; } }` |
+//! | `Loop(init, body)` | `<init>; while(true){ <body>; }` |
 //! | `CondBranch` | `if (!<cond>) { break; }` inside `while(true)` |
 //! | `If(b1, b2)` | `if (<cond>) { <b1> } else { <b2> }` |
 //! | `SelectReal/Int(b1, b2)` | pre-declared merge var + `if/else` |
@@ -1724,12 +1724,12 @@ impl BlockComp {
                     block_id,
                     pc,
                 })?;
-                writeln!(out, "{}{{", tab(t)).unwrap();
                 // Compile init block (no-return, just heap writes).
-                self.compile_block(arena, out, t + 1, init_id)?;
-                writeln!(out, "{}while (true) {{", tab(t + 1)).unwrap();
-                self.compile_block(arena, out, t + 2, body_id)?;
-                writeln!(out, "{}}}", tab(t + 1)).unwrap();
+                // No outer `{…}` needed: the shared ic/rc counters guarantee
+                // unique variable names across init and body blocks.
+                self.compile_block(arena, out, t, init_id)?;
+                writeln!(out, "{}while (true) {{", tab(t)).unwrap();
+                self.compile_block(arena, out, t + 1, body_id)?;
                 writeln!(out, "{}}}", tab(t)).unwrap();
             }
 
