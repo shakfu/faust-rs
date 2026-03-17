@@ -200,8 +200,12 @@ fn fastlane_delay_echo_uses_circular_delay_line_and_iota_in_c_and_cpp() {
     assert!(fast_cpp.contains("int fIOTA;"));
     assert!(fast_cpp.contains("fVec"));
     assert!(
-        fast_cpp.contains("fVec4[(fIOTA & 4095)] = fRec4;"),
+        fast_cpp.contains("fVec4[(fIOTA & 4095)]"),
         "C++ fast-lane should mask the delay-line write index"
+    );
+    assert!(
+        fast_cpp.contains("fRec4[(fIOTA & 1)]"),
+        "C++ fast-lane should use circular buffer for delay1 state"
     );
     assert!(
         fast_cpp.contains("fVec4[((fIOTA - 2205) & 4095)]"),
@@ -220,8 +224,12 @@ fn fastlane_delay_echo_uses_circular_delay_line_and_iota_in_c_and_cpp() {
     assert!(fast_c.contains("int fIOTA;"));
     assert!(fast_c.contains("fVec4"));
     assert!(
-        fast_c.contains("dsp->fVec4[(dsp->fIOTA & 4095)] = dsp->fRec4;"),
+        fast_c.contains("dsp->fVec4[(dsp->fIOTA & 4095)]"),
         "C fast-lane should mask the delay-line write index"
+    );
+    assert!(
+        fast_c.contains("dsp->fRec4[(dsp->fIOTA & 1)]"),
+        "C fast-lane should use circular buffer for delay1 state"
     );
     assert!(
         fast_c.contains("dsp->fVec4[((dsp->fIOTA - 2205) & 4095)]"),
@@ -422,12 +430,12 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
         "fast lane should lower phasor recursion to a 2-slot float array"
     );
     assert!(
-        fast.contains("[0] = (fRec") && fast.contains("[1] +"),
-        "fast lane should materialize the current-slot recursion write from the previous slot"
+        fast.contains("[(fIOTA & 1)] = (fRec") && fast.contains("[((fIOTA - 1) & 1)] +"),
+        "fast lane should use circular buffer indexing for recursion write and read"
     );
     assert!(
-        fast.contains("[1] = fRec") && fast.contains("[0];"),
-        "fast lane should shift the current recursion slot into the previous slot"
+        fast.contains("int fIOTA;"),
+        "fast lane should declare fIOTA for circular buffer indexing"
     );
 
     let legacy_c = compile_c_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::LegacyBridge);

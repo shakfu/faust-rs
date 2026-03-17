@@ -1065,9 +1065,12 @@ impl<'a> SignalToFirLower<'a> {
         Ok(b.load_table(line.name.clone(), AccessType::Struct, read_index, read_ty))
     }
 
-    /// Lowers one single-sample state edge (`delay1`/`prefix`) as:
-    /// `out = load(state); update(state, next)` with update deferred to the
-    /// compute-loop update list.
+    /// Lowers one single-sample state edge (`delay1`/`prefix`) using a
+    /// 2-element circular buffer indexed by `fIOTA`, matching the C++
+    /// `signalFIRCompiler::writeReadDelay` pattern.
+    ///
+    /// Write: `state[fIOTA & 1] = next` (immediate, in sample body)
+    /// Read:  `state[(fIOTA - 1) & 1]`   (returns previous sample)
     fn lower_delay_state(
         &mut self,
         node: SigId,
@@ -1080,7 +1083,10 @@ impl<'a> SignalToFirLower<'a> {
                 rec_info.typ, out_ty,
                 "prepared recursion feedback type should match delay1 output type"
             );
-            let prev_index = self.lower_int32_const(1);
+            // Read previous value from recursion array: state[(fIOTA - 1) & 1]
+            self.ensure_iota_state();
+            let one = self.lower_int32_const(1);
+            let prev_index = self.delayed_iota_index(one, 2);
             let mut b = FirBuilder::new(&mut self.store);
             return Ok(b.load_table(
                 rec_info.name,
@@ -1089,21 +1095,26 @@ impl<'a> SignalToFirLower<'a> {
                 rec_info.typ.clone(),
             ));
         }
-        // The promoter guarantees type(Delay1(x)) == type(x) and that Prefix
-        // init/value types are unified: state_ty and the node's output type are
-        // always identical.  No cast is needed between the stored value and the
-        // loaded result.
+        self.ensure_iota_state();
         let state_ty = self.signal_fir_type(value)?;
         let name = self.ensure_state_slot(node, state_ty.clone(), init);
+        // Read previous value: state[(fIOTA - 1) & 1]
+        let one = self.lower_int32_const(1);
+        let read_index = self.delayed_iota_index(one, 2);
         let out = {
             let mut b = FirBuilder::new(&mut self.store);
-            b.load_var(name.clone(), AccessType::Struct, state_ty)
+            b.load_table(name.clone(), AccessType::Struct, read_index, state_ty)
         };
+        // Write current value: state[fIOTA & 1] = next (immediate)
         if self.scheduled_state_updates.insert(node) {
             let next = self.lower_signal(value)?;
+            let write_index = {
+                let iota = self.current_iota_index();
+                self.masked_delay_index(iota, 2)
+            };
             let mut b = FirBuilder::new(&mut self.store);
-            self.compute_updates
-                .push(b.store_var(name, AccessType::Struct, next));
+            self.sample_statements
+                .push(b.store_table(name, AccessType::Struct, write_index, next));
         }
         Ok(out)
     }
@@ -1172,10 +1183,12 @@ impl<'a> SignalToFirLower<'a> {
             "fRec"
         };
         let name = format!("{prefix}{}", node.as_u32());
+        // Allocate a 2-element circular buffer (matching C++ signalFIRCompiler DelayLine).
+        let array_ty = FirType::Array(Box::new(typ), 2);
         let mut b = FirBuilder::new(&mut self.store);
-        let dec = b.declare_var(name.clone(), typ, AccessType::Struct, None);
+        let dec = b.declare_var(name.clone(), array_ty, AccessType::Struct, None);
         self.struct_declarations.push(dec);
-        self.register_clear_init(name.clone(), init);
+        self.register_clear_recursion_array(name.clone(), init);
         self.state_name_by_node.insert(node, name.clone());
         name
     }
@@ -2491,7 +2504,11 @@ impl<'a> SignalToFirLower<'a> {
         // ── Fast path: active reference inside a body being lowered ──
         if let Some(info) = self.active_recursion_info(group, index_usize)? {
             let real_ty = self.signal_fir_type(node)?;
-            let current_index = self.lower_int32_const(0);
+            self.ensure_iota_state();
+            let current_index = {
+                let iota = self.current_iota_index();
+                self.masked_delay_index(iota, 2)
+            };
             let mut b = FirBuilder::new(&mut self.store);
             return Ok(b.load_table(info.name, AccessType::Struct, current_index, real_ty));
         }
@@ -2545,27 +2562,18 @@ impl<'a> SignalToFirLower<'a> {
             for (i, body) in bodies.iter().enumerate() {
                 let rhs = self.lower_signal(*body)?;
                 let info = &group_arrays[i];
-                let zero = self.lower_int32_const(0);
-                let one = self.lower_int32_const(1);
+                // Write body value to circular buffer: state[fIOTA & 1] = rhs
+                self.ensure_iota_state();
+                let write_index = {
+                    let iota = self.current_iota_index();
+                    self.masked_delay_index(iota, 2)
+                };
                 let current_store = {
                     let mut b = FirBuilder::new(&mut self.store);
-                    b.store_table(info.name.clone(), AccessType::Struct, zero, rhs)
+                    b.store_table(info.name.clone(), AccessType::Struct, write_index, rhs)
                 };
                 self.sample_statements.push(current_store);
-                let current_load = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.load_table(
-                        info.name.clone(),
-                        AccessType::Struct,
-                        zero,
-                        info.typ.clone(),
-                    )
-                };
-                let shift_store = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.store_table(info.name.clone(), AccessType::Struct, one, current_load)
-                };
-                self.compute_updates.push(shift_store);
+                // No deferred shift needed — fIOTA rotation handles it.
             }
 
             self.recursion_stack.pop();
@@ -2575,13 +2583,17 @@ impl<'a> SignalToFirLower<'a> {
         // ── Return the result for the requested index ──
         let info = &group_arrays[index_usize];
         let out_ty = self.signal_fir_type(node)?;
-        let zero = self.lower_int32_const(0);
+        self.ensure_iota_state();
+        let current_index = {
+            let iota = self.current_iota_index();
+            self.masked_delay_index(iota, 2)
+        };
         let out = {
             let mut b = FirBuilder::new(&mut self.store);
             let load = b.load_table(
                 info.name.clone(),
                 AccessType::Struct,
-                zero,
+                current_index,
                 info.typ.clone(),
             );
             if info.typ == out_ty {

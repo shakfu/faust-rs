@@ -206,7 +206,7 @@ mod tests {
     };
     use fir::{FirBinOp, FirMatch, FirType, match_fir};
     use signals::{BinOp, SigBuilder};
-    use std::collections::HashSet;
+
     use tlib::{TreeArena, de_bruijn_rec, de_bruijn_ref};
     use ui::{ControlKind, ControlRange, ControlSpec, UiBuilder, UiProgram, UiRootOrigin};
 
@@ -465,11 +465,31 @@ mod tests {
             "UI zone init should be emitted in instanceResetUserInterface"
         );
         assert!(
-            clear_stmts.iter().any(|id| matches!(
-                match_fir(&out.store, *id),
-                FirMatch::StoreVar { ref name, .. }
-                    if name.starts_with("fRec") || name.starts_with("iRec")
-            )),
+            clear_stmts.iter().any(|id| {
+                let m = match_fir(&out.store, *id);
+                match m {
+                    FirMatch::StoreVar { ref name, .. }
+                        if name.starts_with("fRec") || name.starts_with("iRec") =>
+                    {
+                        true
+                    }
+                    FirMatch::SimpleForLoop { body, .. } => {
+                        // Circular-buffer state uses a loop to clear the 2-element array
+                        if let FirMatch::Block(inner) = match_fir(&out.store, body) {
+                            inner.iter().any(|sid| {
+                                matches!(
+                                    match_fir(&out.store, *sid),
+                                    FirMatch::StoreTable { ref name, .. }
+                                        if name.starts_with("fRec") || name.starts_with("iRec")
+                                )
+                            })
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                }
+            }),
             "signal state init should be emitted in instanceClear"
         );
     }
@@ -935,22 +955,17 @@ mod tests {
             panic!("compute loop body block expected");
         };
         let mut rec_store_count = 0usize;
-        let mut rec_indices = HashSet::new();
         for stmt in &stmts {
-            if let FirMatch::StoreTable { name, index, .. } = match_fir(&out.store, *stmt)
+            if let FirMatch::StoreTable { name, .. } = match_fir(&out.store, *stmt)
                 && name.starts_with("fRec")
             {
                 rec_store_count += 1;
-                if let FirMatch::Int32 { value, .. } = match_fir(&out.store, index) {
-                    rec_indices.insert(value);
-                }
             }
         }
         assert_eq!(
-            rec_store_count, 2,
-            "feedback recurrence should write only the current and previous recursion array slots"
+            rec_store_count, 1,
+            "circular-buffer recurrence should write one store per sample (at fIOTA & 1)"
         );
-        assert_eq!(rec_indices, HashSet::from([0, 1]));
         assert!(
             stmts
                 .iter()

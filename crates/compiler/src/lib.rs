@@ -1391,7 +1391,7 @@ fn lower_signals_to_fir(
     fir_verify: FirVerifyOptions,
     real_type: RealType,
 ) -> Result<FirCompileOutput, LowerToFirError> {
-    let module_name = "mydsp".to_owned();
+    let module_name = sanitize_cpp_ident(source_name_to_class(source_name).as_str());
     let lowered = match lane {
         SignalFirLane::LegacyBridge => Ok(lower_signals_to_fir_legacy_bridge(
             source_name,
@@ -1740,6 +1740,25 @@ fn source_name_to_class(source_name: &str) -> String {
         .filter(|stem| !stem.is_empty())
         .unwrap_or("faust_dsp")
         .to_owned()
+}
+
+/// Replaces non-identifier characters so the result is safe as a C/C++ identifier.
+fn sanitize_cpp_ident(input: &str) -> String {
+    let mut out = String::with_capacity(input.len().max(8));
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push_str("faust_dsp");
+    }
+    if out.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        out.insert(0, '_');
+    }
+    out
 }
 
 /// Resolves the canonical root UI label used when the top-level UI group is unnamed.
