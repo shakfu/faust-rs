@@ -710,12 +710,11 @@ impl ParseState {
         let span = token_span(&tok);
         self.update_cursor_from_span(lexer, span);
         let raw = lexer.span_str(span);
-        match raw.parse::<i64>() {
-            Ok(value) => self.node_builder().int(i32_saturating_from_i64(value)),
-            Err(_) => {
-                self.ctx.error("invalid INT literal");
-                self.node_builder().int(0)
-            }
+        if raw.bytes().all(|b| b.is_ascii_digit()) {
+            self.node_builder().int(i32_wrapping_from_str(raw))
+        } else {
+            self.ctx.error("invalid INT literal");
+            self.node_builder().int(0)
         }
     }
 
@@ -897,14 +896,18 @@ impl ParseState {
         let span = token_span(&tok);
         self.update_cursor_from_span(lexer, span);
         let raw = lexer.span_str(span);
-        match raw.parse::<i64>() {
-            Ok(value) => self
-                .node_builder()
-                .int(i32_saturating_from_i64(value.saturating_mul(sign))),
-            Err(_) => {
-                self.ctx.error("invalid signed INT literal");
-                self.node_builder().int(0)
-            }
+        if raw.bytes().all(|b| b.is_ascii_digit()) {
+            // C++ does `-str2int(text)`: wrapping-parse unsigned digits, then negate.
+            let unsigned_val = i32_wrapping_from_str(raw);
+            let val = if sign < 0 {
+                unsigned_val.wrapping_neg()
+            } else {
+                unsigned_val
+            };
+            self.node_builder().int(val)
+        } else {
+            self.ctx.error("invalid signed INT literal");
+            self.node_builder().int(0)
         }
     }
 
@@ -1142,15 +1145,19 @@ fn token_span(tok: &Result<lrlex::DefaultLexeme<u32>, lrlex::DefaultLexeme<u32>>
     }
 }
 
-/// Converts an `i64` to `i32` with Faust-style saturation.
-fn i32_saturating_from_i64(value: i64) -> i32 {
-    i32::try_from(value).unwrap_or_else(|_| {
-        if value.is_negative() {
-            i32::MIN
-        } else {
-            i32::MAX
-        }
-    })
+/// Converts an `i64` to `i32` with Faust-style wrapping.
+///
+/// The C++ Faust parser uses a manual `str2int` that accumulates digits into
+/// a 32-bit `int` via `result = result * 10 + digit`, which naturally wraps
+/// on overflow.  We replicate the same digit-by-digit wrapping so that
+/// literals like `2147483648` produce the same bit pattern (`-2147483648`).
+fn i32_wrapping_from_str(raw: &str) -> i32 {
+    let mut result: i32 = 0;
+    for b in raw.bytes() {
+        debug_assert!(b.is_ascii_digit(), "non-digit byte in integer literal");
+        result = result.wrapping_mul(10).wrapping_add((b - b'0') as i32);
+    }
+    result
 }
 
 /// Executes one mutable operation against parser state passed through `%parse-param`.
