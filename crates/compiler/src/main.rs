@@ -315,6 +315,10 @@ fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> 
             }
             continue;
         }
+        if arg == "-double" {
+            normalized.push("--double".to_owned());
+            continue;
+        }
         if arg == "-time" {
             normalized.push("--compilation-time".to_owned());
             continue;

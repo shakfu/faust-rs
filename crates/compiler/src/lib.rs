@@ -1391,7 +1391,7 @@ fn lower_signals_to_fir(
     fir_verify: FirVerifyOptions,
     real_type: RealType,
 ) -> Result<FirCompileOutput, LowerToFirError> {
-    let module_name = sanitize_cpp_ident(source_name_to_class(source_name).as_str());
+    let module_name = "mydsp".to_owned();
     let lowered = match lane {
         SignalFirLane::LegacyBridge => Ok(lower_signals_to_fir_legacy_bridge(
             source_name,
@@ -1444,10 +1444,10 @@ fn make_compute_fir_signature() -> (FirType, [NamedType; 4]) {
 }
 
 /// Resolves a module name from explicit class_name option or from the source name.
-fn resolve_module_name(class_name: Option<&str>, source_name: &str) -> String {
+fn resolve_module_name(class_name: Option<&str>, _source_name: &str) -> String {
     class_name
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| sanitize_cpp_ident(source_name_to_class(source_name).as_str()))
+        .unwrap_or_else(|| "mydsp".to_owned())
 }
 
 // ─── Legacy bridge implementations ───────────────────────────────────────────
@@ -1759,25 +1759,6 @@ fn resolve_ui_root_label(source_name: &str, metadata: &CompilationMetadataSnapsh
         .and_then(|values| values.iter().next())
         .map(|value| value.as_ref().to_owned())
         .unwrap_or_else(|| source_name_to_class(source_name))
-}
-
-/// Sanitizes arbitrary text into a conservative C/C++ identifier.
-fn sanitize_cpp_ident(input: &str) -> String {
-    let mut out = String::with_capacity(input.len().max(8));
-    for ch in input.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            out.push(ch);
-        } else {
-            out.push('_');
-        }
-    }
-    if out.is_empty() {
-        out.push_str("faust_dsp");
-    }
-    if out.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
-        out.insert(0, '_');
-    }
-    out
 }
 
 /// Wraps a single diagnostic into a one-item bundle.
@@ -2809,25 +2790,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_module_name_derives_from_source_name() {
+    fn resolve_module_name_defaults_to_mydsp() {
         let name = resolve_module_name(None, "sine_phasor.dsp");
-        assert_eq!(name, "sine_phasor");
-    }
-
-    #[test]
-    fn resolve_module_name_sanitizes_invalid_chars() {
-        let name = resolve_module_name(None, "my-dsp!.dsp");
-        // Hyphens and exclamation marks are replaced with underscores.
-        assert_eq!(name, "my_dsp_");
-    }
-
-    #[test]
-    fn resolve_module_name_prefixes_leading_digit() {
-        let name = resolve_module_name(None, "123dsp.dsp");
-        assert!(
-            name.starts_with('_'),
-            "expected leading underscore, got {name}"
-        );
+        assert_eq!(name, "mydsp");
     }
 
     #[test]
