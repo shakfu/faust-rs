@@ -852,7 +852,7 @@ impl<'a> SignalToFirLower<'a> {
             // operations used in internal DSP computation.
             SigMatch::BitCast(value) => self.lower_bitcast(self.real_ty(), value)?,
             SigMatch::FloatCast(value) => self.lower_cast(self.real_ty(), value)?,
-            SigMatch::Select2(cond, then_value, else_value) => {
+            SigMatch::Select2(cond, else_value, then_value) => {
                 self.lower_select2(sig, cond, then_value, else_value)?
             }
             SigMatch::Proj(index, group) => self.lower_proj(sig, index, group)?,
