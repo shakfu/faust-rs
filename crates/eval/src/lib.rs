@@ -4724,7 +4724,7 @@ fn apply_list(
             // C++ parity (`applyList`): for non-closures, insert implicit wires when
             // partially applying a function, and reject over-application.
             let maybe_fun_arity = infer_box_arity(arena, fun);
-            let maybe_larg_outputs = list_outputs(arena, larg);
+            let maybe_larg_outputs = list_outputs_for_apply(arena, larg, loop_detector);
             let mut lowered_larg = larg;
 
             if let (Some((ins, _outs)), Some(larg_outs)) = (maybe_fun_arity, maybe_larg_outputs) {
@@ -4817,15 +4817,34 @@ fn nwires(arena: &mut TreeArena, n: usize) -> TreeId {
 /// `*(button("play") : trigger(n))` keep the raw `arg : *` shape instead of
 /// being rewritten to `(_, arg) : *`, which later fails in `propagate` with a
 /// spurious `1 != 2` sequential composition mismatch.
-fn list_outputs(arena: &TreeArena, mut list: TreeId) -> Option<usize> {
+fn list_outputs_for_apply(
+    arena: &mut TreeArena,
+    mut list: TreeId,
+    loop_detector: &mut LoopDetector,
+) -> Option<usize> {
     let mut total = 0usize;
     while !arena.is_nil(list) {
         let head = arena.hd(list)?;
-        let outs = infer_box_arity(arena, head).map_or(1, |(_, outs)| outs);
+        let outs =
+            infer_box_arity_for_apply(arena, head, loop_detector).map_or(1, |(_, outs)| outs);
         total = total.checked_add(outs)?;
         list = arena.tl(list)?;
     }
     Some(total)
+}
+
+fn infer_box_arity_for_apply(
+    arena: &mut TreeArena,
+    id: TreeId,
+    loop_detector: &mut LoopDetector,
+) -> Option<(usize, usize)> {
+    match match_box(arena, id) {
+        BoxMatch::Closure(_) | BoxMatch::PatternMatcher(_) => {
+            let lowered = a2sb(arena, id, loop_detector).ok()?;
+            infer_box_arity(arena, lowered)
+        }
+        _ => infer_box_arity(arena, id),
+    }
 }
 
 /// Local arity inference used by non-closure application lowering.

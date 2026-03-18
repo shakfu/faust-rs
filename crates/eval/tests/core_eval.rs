@@ -16,6 +16,7 @@ use eval::{
 };
 use parser::CompilationMetadataKey;
 use parser::parse_program;
+use propagate::ArityCache;
 use tlib::{NodeKind, TreeArena, TreeId};
 
 fn make_ident(arena: &mut TreeArena, name: &str) -> tlib::TreeId {
@@ -708,6 +709,34 @@ process = *(button("play") : trigger(128));
         matches!(match_box(&arena, b), BoxMatch::Seq(_, _)),
         "the explicit trigger argument should remain the second mul operand"
     );
+}
+
+#[test]
+fn eval_box_non_closure_application_counts_residual_closure_outputs() {
+    let source = r#"
+compressor_stereo(ratio,thresh,att,rel,x,y) = cgm*x, cgm*y with {
+  cgm = abs(x) + abs(y);
+};
+displaygain = _,_ <: _,_,(abs,abs:+) : _,_,_ : _,attach;
+process = displaygain(compressor_stereo(5,-30,0.01,0.1));
+"#;
+
+    let parsed = parse_program(source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept closure-arity repro: {:?}",
+        parsed.errors
+    );
+
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+    let out = eval_process(&mut arena, root)
+        .expect("residual closure argument should not receive an extra implicit wire");
+
+    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+        .expect("evaluated process should remain well-typed");
+    assert_eq!(arity.inputs, 2);
+    assert_eq!(arity.outputs, 2);
 }
 
 #[test]
