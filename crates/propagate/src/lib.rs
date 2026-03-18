@@ -1007,16 +1007,15 @@ pub fn propagate_typed_with_ui_options(
 ) -> Result<PropagateOutput, PropagateError> {
     let ui = build_ui_program(arena, box_tree, ui_options);
     let mut slot_env = SlotEnv::default();
-    let clock_env = arena.nil();
-    let signals = propagate_in_slot_env(
-        arena,
-        box_tree,
-        inputs,
+    let mut memo = PropagateMemo::default();
+    let mut ctx = PropagateContext {
         cache,
-        &ui.control_ids,
-        &mut slot_env,
-        clock_env,
-    )?;
+        control_ids: &ui.control_ids,
+        slot_env: &mut slot_env,
+        memo: &mut memo,
+        clock_env: arena.nil(),
+    };
+    let signals = propagate_in_slot_env(arena, box_tree, inputs, &mut ctx)?;
     Ok(PropagateOutput {
         signals,
         ui: ui.program,
@@ -1621,12 +1620,9 @@ fn propagate_in_slot_env(
     arena: &mut TreeArena,
     box_tree: FlatBoxId,
     inputs: &[SigId],
-    cache: &mut ArityCache,
-    control_ids: &ControlIds,
-    slot_env: &mut SlotEnv,
-    clock_env: TreeId,
+    ctx: &mut PropagateContext<'_>,
 ) -> Result<Vec<SigId>, PropagateError> {
-    let arity = box_arity_typed(arena, box_tree, cache)?;
+    let arity = box_arity_typed(arena, box_tree, ctx.cache)?;
     if inputs.len() != arity.inputs {
         return Err(PropagateError::InputArityMismatch {
             node: box_tree.as_tree_id(),
@@ -1634,15 +1630,7 @@ fn propagate_in_slot_env(
             got: inputs.len(),
         });
     }
-    let outputs = propagate_inner(
-        arena,
-        box_tree,
-        inputs,
-        cache,
-        control_ids,
-        slot_env,
-        clock_env,
-    )?;
+    let outputs = propagate_inner(arena, box_tree, inputs, ctx)?;
     if outputs.len() != arity.outputs {
         return Err(PropagateError::OutputArityMismatch {
             node: box_tree.as_tree_id(),
@@ -1663,10 +1651,7 @@ fn propagate_inner(
     arena: &mut TreeArena,
     box_tree: FlatBoxId,
     inputs: &[SigId],
-    cache: &mut ArityCache,
-    control_ids: &ControlIds,
-    slot_env: &mut SlotEnv,
-    clock_env: TreeId,
+    ctx: &mut PropagateContext<'_>,
 ) -> Result<Vec<SigId>, PropagateError> {
     match flat_node_kind(arena, box_tree)? {
         FlatNodeKind::Int => {
@@ -1685,15 +1670,13 @@ fn propagate_inner(
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.real(value)])
         }
-        FlatNodeKind::Metadata { body } => {
-            propagate_inner(arena, body, inputs, cache, control_ids, slot_env, clock_env)
-        }
+        FlatNodeKind::Metadata { body } => propagate_inner(arena, body, inputs, ctx),
         FlatNodeKind::Slot => {
             let BoxMatch::Slot(id) = match_box(arena, box_tree.as_tree_id()) else {
                 unreachable!("flat slot node must decode to BoxMatch::Slot")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
-            if let Some(sig) = slot_env.get(&box_tree.as_tree_id()).copied() {
+            if let Some(sig) = ctx.slot_env.get(&box_tree.as_tree_id()).copied() {
                 Ok(vec![sig])
             } else {
                 let mut b = SigBuilder::new(arena);
@@ -1906,7 +1889,8 @@ fn propagate_inner(
                 unreachable!("flat button node must decode to BoxMatch::Button")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
-            let control = *control_ids
+            let control = *ctx
+                .control_ids
                 .get(&box_tree.as_tree_id())
                 .expect("button control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
@@ -1917,7 +1901,8 @@ fn propagate_inner(
                 unreachable!("flat checkbox node must decode to BoxMatch::Checkbox")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
-            let control = *control_ids
+            let control = *ctx
+                .control_ids
                 .get(&box_tree.as_tree_id())
                 .expect("checkbox control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
@@ -1928,7 +1913,8 @@ fn propagate_inner(
                 unreachable!("flat vslider node must decode to BoxMatch::VSlider")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
-            let control = *control_ids
+            let control = *ctx
+                .control_ids
                 .get(&box_tree.as_tree_id())
                 .expect("vslider control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
@@ -1939,7 +1925,8 @@ fn propagate_inner(
                 unreachable!("flat hslider node must decode to BoxMatch::HSlider")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
-            let control = *control_ids
+            let control = *ctx
+                .control_ids
                 .get(&box_tree.as_tree_id())
                 .expect("hslider control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
@@ -1950,7 +1937,8 @@ fn propagate_inner(
                 unreachable!("flat numentry node must decode to BoxMatch::NumEntry")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
-            let control = *control_ids
+            let control = *ctx
+                .control_ids
                 .get(&box_tree.as_tree_id())
                 .expect("numentry control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
@@ -1961,7 +1949,8 @@ fn propagate_inner(
                 unreachable!("flat vbargraph node must decode to BoxMatch::VBargraph")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 1)?;
-            let control = *control_ids
+            let control = *ctx
+                .control_ids
                 .get(&box_tree.as_tree_id())
                 .expect("vbargraph control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
@@ -1972,7 +1961,8 @@ fn propagate_inner(
                 unreachable!("flat hbargraph node must decode to BoxMatch::HBargraph")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 1)?;
-            let control = *control_ids
+            let control = *ctx
+                .control_ids
                 .get(&box_tree.as_tree_id())
                 .expect("hbargraph control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
@@ -1995,9 +1985,7 @@ fn propagate_inner(
         }
         FlatNodeKind::VGroup { body }
         | FlatNodeKind::HGroup { body }
-        | FlatNodeKind::TGroup { body } => {
-            propagate_in_slot_env(arena, body, inputs, cache, control_ids, slot_env, clock_env)
-        }
+        | FlatNodeKind::TGroup { body } => propagate_in_slot_env(arena, body, inputs, ctx),
         FlatNodeKind::Symbolic { body } => {
             let BoxMatch::Symbolic(slot, _) = match_box(arena, box_tree.as_tree_id()) else {
                 unreachable!("flat symbolic node must decode to BoxMatch::Symbolic")
@@ -2009,26 +1997,18 @@ fn propagate_inner(
                     got: 0,
                 });
             }
-            let previous = slot_env.insert(slot, inputs[0]);
-            let result = propagate_in_slot_env(
-                arena,
-                body,
-                &inputs[1..],
-                cache,
-                control_ids,
-                slot_env,
-                clock_env,
-            );
+            let previous = ctx.slot_env.insert(slot, inputs[0]);
+            let result = propagate_in_slot_env(arena, body, &inputs[1..], ctx);
             if let Some(sig) = previous {
-                slot_env.insert(slot, sig);
+                ctx.slot_env.insert(slot, sig);
             } else {
-                slot_env.remove(&slot);
+                ctx.slot_env.remove(&slot);
             }
             result
         }
         FlatNodeKind::Seq(left, right) => {
-            let left_arity = box_arity_typed(arena, left, cache)?;
-            let right_arity = box_arity_typed(arena, right, cache)?;
+            let left_arity = box_arity_typed(arena, left, ctx.cache)?;
+            let right_arity = box_arity_typed(arena, right, ctx.cache)?;
             if left_arity.outputs != right_arity.inputs {
                 return Err(PropagateError::SeqArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -2036,45 +2016,26 @@ fn propagate_inner(
                     right_inputs: right_arity.inputs,
                 });
             }
-            let mid = propagate_in_slot_env(
-                arena,
-                left,
-                inputs,
-                cache,
-                control_ids,
-                slot_env,
-                clock_env,
-            )?;
-            propagate_in_slot_env(arena, right, &mid, cache, control_ids, slot_env, clock_env)
+            let mid = propagate_in_slot_env(arena, left, inputs, ctx)?;
+            propagate_in_slot_env(arena, right, &mid, ctx)
         }
         FlatNodeKind::Par(left, right) => {
-            let left_arity = box_arity_typed(arena, left, cache)?;
-            let right_arity = box_arity_typed(arena, right, cache)?;
-            let left_out = propagate_in_slot_env(
-                arena,
-                left,
-                &inputs[..left_arity.inputs],
-                cache,
-                control_ids,
-                slot_env,
-                clock_env,
-            )?;
+            let left_arity = box_arity_typed(arena, left, ctx.cache)?;
+            let right_arity = box_arity_typed(arena, right, ctx.cache)?;
+            let left_out = propagate_in_slot_env(arena, left, &inputs[..left_arity.inputs], ctx)?;
             let mut right_out = propagate_in_slot_env(
                 arena,
                 right,
                 &inputs[left_arity.inputs..left_arity.inputs + right_arity.inputs],
-                cache,
-                control_ids,
-                slot_env,
-                clock_env,
+                ctx,
             )?;
             let mut out = left_out;
             out.append(&mut right_out);
             Ok(out)
         }
         FlatNodeKind::Split(left, right) => {
-            let left_arity = box_arity_typed(arena, left, cache)?;
-            let right_arity = box_arity_typed(arena, right, cache)?;
+            let left_arity = box_arity_typed(arena, left, ctx.cache)?;
+            let right_arity = box_arity_typed(arena, right, ctx.cache)?;
             if !split_compatible(left_arity.outputs, right_arity.inputs) {
                 return Err(PropagateError::SplitArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -2082,29 +2043,13 @@ fn propagate_inner(
                     right_inputs: right_arity.inputs,
                 });
             }
-            let left_out = propagate_in_slot_env(
-                arena,
-                left,
-                inputs,
-                cache,
-                control_ids,
-                slot_env,
-                clock_env,
-            )?;
+            let left_out = propagate_in_slot_env(arena, left, inputs, ctx)?;
             let split_in = split_signals(&left_out, right_arity.inputs);
-            propagate_in_slot_env(
-                arena,
-                right,
-                &split_in,
-                cache,
-                control_ids,
-                slot_env,
-                clock_env,
-            )
+            propagate_in_slot_env(arena, right, &split_in, ctx)
         }
         FlatNodeKind::Merge(left, right) => {
-            let left_arity = box_arity_typed(arena, left, cache)?;
-            let right_arity = box_arity_typed(arena, right, cache)?;
+            let left_arity = box_arity_typed(arena, left, ctx.cache)?;
+            let right_arity = box_arity_typed(arena, right, ctx.cache)?;
             if !merge_compatible(left_arity.outputs, right_arity.inputs) {
                 return Err(PropagateError::MergeArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -2112,29 +2057,13 @@ fn propagate_inner(
                     right_inputs: right_arity.inputs,
                 });
             }
-            let left_out = propagate_in_slot_env(
-                arena,
-                left,
-                inputs,
-                cache,
-                control_ids,
-                slot_env,
-                clock_env,
-            )?;
+            let left_out = propagate_in_slot_env(arena, left, inputs, ctx)?;
             let merge_in = mix_signals(arena, &left_out, right_arity.inputs);
-            propagate_in_slot_env(
-                arena,
-                right,
-                &merge_in,
-                cache,
-                control_ids,
-                slot_env,
-                clock_env,
-            )
+            propagate_in_slot_env(arena, right, &merge_in, ctx)
         }
         FlatNodeKind::Rec(left, right) => {
-            let left_arity = box_arity_typed(arena, left, cache)?;
-            let right_arity = box_arity_typed(arena, right, cache)?;
+            let left_arity = box_arity_typed(arena, left, ctx.cache)?;
+            let right_arity = box_arity_typed(arena, right, ctx.cache)?;
             if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
                 return Err(PropagateError::RecArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -2146,27 +2075,18 @@ fn propagate_inner(
             }
 
             let l0 = make_mem_sig_proj_list(arena, right_arity.inputs)?;
-            let l1 =
-                propagate_in_slot_env(arena, right, &l0, cache, control_ids, slot_env, clock_env)?;
+            let l1 = propagate_in_slot_env(arena, right, &l0, ctx)?;
 
             let mut rec_inputs = l1;
-            rec_inputs.extend(lift_signals(arena, inputs));
+            rec_inputs.extend(lift_signals(arena, inputs, ctx.memo));
 
-            let l2 = propagate_in_slot_env(
-                arena,
-                left,
-                &rec_inputs,
-                cache,
-                control_ids,
-                slot_env,
-                clock_env,
-            )?;
+            let l2 = propagate_in_slot_env(arena, left, &rec_inputs, ctx)?;
             let group_body = vec_to_list(arena, &l2);
             let group = debruijn_rec(arena, group_body);
 
             let mut outputs = Vec::with_capacity(l2.len());
             for (index, expr) in l2.iter().copied().enumerate() {
-                if aperture(arena, expr) > 0 {
+                if aperture(arena, expr, ctx.memo) > 0 {
                     let idx = i32_from_usize(index, "rec projection index")?;
                     let mut b = SigBuilder::new(arena);
                     outputs.push(b.proj(idx, group));
@@ -2181,7 +2101,7 @@ fn propagate_inner(
                 unreachable!("flat inputs node must decode to BoxMatch::Inputs")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
-            let arity = box_arity(arena, expr, cache)?;
+            let arity = box_arity(arena, expr, ctx.cache)?;
             let value = i32_from_usize(arity.inputs, "inputs")?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.int(value)])
@@ -2191,7 +2111,7 @@ fn propagate_inner(
                 unreachable!("flat outputs node must decode to BoxMatch::Outputs")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
-            let arity = box_arity(arena, expr, cache)?;
+            let arity = box_arity(arena, expr, ctx.cache)?;
             let value = i32_from_usize(arity.outputs, "outputs")?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.int(value)])
@@ -2254,7 +2174,8 @@ fn propagate_inner(
             expect_input_arity(box_tree.as_tree_id(), inputs, 2)?;
             let chan_count = usize_from_int_node(arena, chan, "soundfile channels")?;
             let mut b = SigBuilder::new(arena);
-            let control = *control_ids
+            let control = *ctx
+                .control_ids
                 .get(&box_tree.as_tree_id())
                 .expect("soundfile control id must be registered during UI extraction");
             let soundfile = b.soundfile(control);
@@ -2281,12 +2202,7 @@ fn propagate_inner(
             box_tree,
             body,
             inputs,
-            ClockedWrapperCtx {
-                cache,
-                control_ids,
-                slot_env,
-                clock_env,
-            },
+            ctx,
             ClockedWrapperKind::Ondemand,
         ),
         FlatNodeKind::Upsampling(body) => propagate_clocked_wrapper(
@@ -2294,12 +2210,7 @@ fn propagate_inner(
             box_tree,
             body,
             inputs,
-            ClockedWrapperCtx {
-                cache,
-                control_ids,
-                slot_env,
-                clock_env,
-            },
+            ctx,
             ClockedWrapperKind::Upsampling,
         ),
         FlatNodeKind::Downsampling(body) => propagate_clocked_wrapper(
@@ -2307,12 +2218,7 @@ fn propagate_inner(
             box_tree,
             body,
             inputs,
-            ClockedWrapperCtx {
-                cache,
-                control_ids,
-                slot_env,
-                clock_env,
-            },
+            ctx,
             ClockedWrapperKind::Downsampling,
         ),
     }
@@ -2326,20 +2232,12 @@ enum ClockedWrapperKind {
     Downsampling,
 }
 
-/// Context carried while lowering clocked wrapper patterns.
-struct ClockedWrapperCtx<'a> {
-    cache: &'a mut ArityCache,
-    control_ids: &'a ControlIds,
-    slot_env: &'a mut SlotEnv,
-    clock_env: TreeId,
-}
-
 fn propagate_clocked_wrapper(
     arena: &mut TreeArena,
     wrapper_node: FlatBoxId,
     body: FlatBoxId,
     inputs: &[SigId],
-    ctx: ClockedWrapperCtx<'_>,
+    ctx: &mut PropagateContext<'_>,
     kind: ClockedWrapperKind,
 ) -> Result<Vec<SigId>, PropagateError> {
     let Some((&clock, tail)) = inputs.split_first() else {
@@ -2350,22 +2248,17 @@ fn propagate_clocked_wrapper(
         });
     };
 
-    let ClockedWrapperCtx {
-        cache,
-        control_ids,
-        slot_env,
-        clock_env,
-    } = ctx;
-    let body_arity = box_arity_typed(arena, body, cache)?;
+    let body_arity = box_arity_typed(arena, body, ctx.cache)?;
     if is_const_zero(arena, clock) {
         let mut b = SigBuilder::new(arena);
         let zero = b.int(0);
         return Ok(vec![zero; body_arity.outputs]);
     }
     if is_const_one(arena, clock) {
-        return propagate_in_slot_env(arena, body, tail, cache, control_ids, slot_env, clock_env);
+        return propagate_in_slot_env(arena, body, tail, ctx);
     }
 
+    let clock_env = ctx.clock_env;
     let clock_env2 = make_clock_env(arena, clock_env, wrapper_node.as_tree_id(), inputs);
     let x1: Vec<_> = {
         let mut b = SigBuilder::new(arena);
@@ -2384,7 +2277,10 @@ fn propagate_clocked_wrapper(
             })
             .collect()
     };
-    let y0 = propagate_in_slot_env(arena, body, &x2, cache, control_ids, slot_env, clock_env2)?;
+    let parent_clock_env = ctx.clock_env;
+    ctx.clock_env = clock_env2;
+    let y0 = propagate_in_slot_env(arena, body, &x2, ctx)?;
+    ctx.clock_env = parent_clock_env;
 
     let y1: Vec<_> = {
         let mut b = SigBuilder::new(arena);
@@ -2684,11 +2580,36 @@ fn make_mem_sig_proj_list(arena: &mut TreeArena, n: usize) -> Result<Vec<SigId>,
     Ok(out)
 }
 
+/// Local memoization reused across one propagation traversal.
+///
+/// The post-`eval/a2sb` signal trees are DAGs, so recursive helpers that walk
+/// De Bruijn wrappers can revisit the same subtree many times from different
+/// composition paths. Caching by `(TreeId, threshold)` and `TreeId` keeps the
+/// operational lowering stable while avoiding repeated full-subtree rebuilds.
+#[derive(Default)]
+struct PropagateMemo {
+    liftn: AHashMap<(TreeId, i64), TreeId>,
+    aperture: AHashMap<TreeId, i64>,
+}
+
+/// Internal mutable context threaded through one propagation traversal.
+///
+/// This keeps analysis cache ownership (`ArityCache`) separate from local
+/// traversal memoization (`PropagateMemo`) while avoiding wide internal helper
+/// signatures.
+struct PropagateContext<'a> {
+    cache: &'a mut ArityCache,
+    control_ids: &'a ControlIds,
+    slot_env: &'a mut SlotEnv,
+    memo: &'a mut PropagateMemo,
+    clock_env: TreeId,
+}
+
 /// Lifts De Bruijn references of input signals by one recursion level.
-fn lift_signals(arena: &mut TreeArena, inputs: &[SigId]) -> Vec<SigId> {
+fn lift_signals(arena: &mut TreeArena, inputs: &[SigId], memo: &mut PropagateMemo) -> Vec<SigId> {
     let mut out = Vec::with_capacity(inputs.len());
     for sig in inputs.iter().copied() {
-        out.push(liftn(arena, sig, 1));
+        out.push(liftn(arena, sig, 1, memo));
     }
     out
 }
@@ -2705,23 +2626,35 @@ fn debruijn_ref(arena: &mut TreeArena, level: i64) -> TreeId {
 }
 
 /// Recursively lifts De Bruijn reference levels starting at `threshold`.
-fn liftn(arena: &mut TreeArena, root: TreeId, threshold: i64) -> TreeId {
+fn liftn(arena: &mut TreeArena, root: TreeId, threshold: i64, memo: &mut PropagateMemo) -> TreeId {
+    let key = (root, threshold);
+    if let Some(lifted) = memo.liftn.get(&key).copied() {
+        return lifted;
+    }
+
     if let Some(level) = debruijn_ref_level(arena, root) {
-        if level < threshold {
-            return root;
-        }
-        return debruijn_ref(arena, level + 1);
+        let lifted = if level < threshold {
+            root
+        } else {
+            debruijn_ref(arena, level + 1)
+        };
+        memo.liftn.insert(key, lifted);
+        return lifted;
     }
 
     if let Some(body) = debruijn_body(arena, root) {
-        let lifted_body = liftn(arena, body, threshold + 1);
-        return debruijn_rec(arena, lifted_body);
+        let lifted_body = liftn(arena, body, threshold + 1, memo);
+        let lifted = debruijn_rec(arena, lifted_body);
+        memo.liftn.insert(key, lifted);
+        return lifted;
     }
 
     let Some(node) = arena.node(root).cloned() else {
+        memo.liftn.insert(key, root);
         return root;
     };
     if node.children.is_empty() {
+        memo.liftn.insert(key, root);
         return root;
     }
 
@@ -2729,36 +2662,47 @@ fn liftn(arena: &mut TreeArena, root: TreeId, threshold: i64) -> TreeId {
     let mut rebuilt = Vec::with_capacity(original_children.len());
     let mut changed = false;
     for child in original_children.iter().copied() {
-        let lifted = liftn(arena, child, threshold);
+        let lifted = liftn(arena, child, threshold, memo);
         if lifted != child {
             changed = true;
         }
         rebuilt.push(lifted);
     }
-    if changed {
+    let lifted = if changed {
         arena.intern(node.kind, &rebuilt)
     } else {
         root
-    }
+    };
+    memo.liftn.insert(key, lifted);
+    lifted
 }
 
 /// Computes free-recursion aperture used to decide `sigProj` re-emission.
-fn aperture(arena: &TreeArena, root: TreeId) -> i64 {
+fn aperture(arena: &TreeArena, root: TreeId, memo: &mut PropagateMemo) -> i64 {
+    if let Some(value) = memo.aperture.get(&root).copied() {
+        return value;
+    }
+
     if let Some(level) = debruijn_ref_level(arena, root) {
+        memo.aperture.insert(root, level);
         return level;
     }
 
     if let Some(body) = debruijn_body(arena, root) {
-        return aperture(arena, body) - 1;
+        let value = aperture(arena, body, memo) - 1;
+        memo.aperture.insert(root, value);
+        return value;
     }
 
     let Some(children) = arena.children(root) else {
+        memo.aperture.insert(root, 0);
         return 0;
     };
     let mut max_aperture = 0;
     for child in children.iter().copied() {
-        max_aperture = max_aperture.max(aperture(arena, child));
+        max_aperture = max_aperture.max(aperture(arena, child, memo));
     }
+    memo.aperture.insert(root, max_aperture);
     max_aperture
 }
 
@@ -2800,4 +2744,52 @@ fn tag_and_children(arena: &TreeArena, root: TreeId) -> Option<(&str, &[TreeId])
 fn intern_tag(arena: &mut TreeArena, tag: &str, children: &[TreeId]) -> TreeId {
     let tag_id = arena.intern_tag(tag);
     arena.intern(NodeKind::Tag(tag_id), children)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use signals::SigBuilder;
+
+    #[test]
+    fn liftn_and_aperture_memoize_shared_debruijn_subtrees() {
+        let mut arena = TreeArena::new();
+        let shared = {
+            let rec_ref = debruijn_ref(&mut arena, 1);
+            let mut b = SigBuilder::new(&mut arena);
+            let proj = b.proj(0, rec_ref);
+            b.add(proj, proj)
+        };
+
+        let mut memo = PropagateMemo::default();
+        let lifted_once = liftn(&mut arena, shared, 1, &mut memo);
+        let liftn_cache_len = memo.liftn.len();
+        assert!(liftn_cache_len > 0, "liftn should populate its memo table");
+
+        let lifted_twice = liftn(&mut arena, shared, 1, &mut memo);
+        assert_eq!(
+            lifted_once, lifted_twice,
+            "memoized liftn must preserve structural output"
+        );
+        assert_eq!(
+            memo.liftn.len(),
+            liftn_cache_len,
+            "repeating liftn on the same subtree should hit the memo table"
+        );
+
+        let aperture_once = aperture(&arena, lifted_once, &mut memo);
+        let aperture_cache_len = memo.aperture.len();
+        assert!(
+            aperture_cache_len > 0,
+            "aperture should populate its memo table"
+        );
+
+        let aperture_twice = aperture(&arena, lifted_once, &mut memo);
+        assert_eq!(aperture_once, aperture_twice);
+        assert_eq!(
+            memo.aperture.len(),
+            aperture_cache_len,
+            "repeating aperture on the same subtree should hit the memo table"
+        );
+    }
 }
