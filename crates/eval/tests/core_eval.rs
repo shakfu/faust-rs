@@ -766,6 +766,30 @@ process = foo(poly(6))(3);
 }
 
 #[test]
+fn eval_process_accepts_numeric_seq_as_iterator_count() {
+    let source = r#"
+count = max(1, 0);
+process = par(i, count, _):>_;
+"#;
+
+    let parsed = parse_program(source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept iterator-count repro: {:?}",
+        parsed.errors
+    );
+
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+    let out = eval_process(&mut arena, root)
+        .expect("numeric iterator count should evaluate through eval2int-like folding");
+    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+        .expect("iterator-count repro should lower to a valid box");
+    assert_eq!(arity.inputs, 1);
+    assert_eq!(arity.outputs, 1);
+}
+
+#[test]
 fn eval_box_non_closure_partial_prefix_appends_missing_wire() {
     let mut arena = TreeArena::new();
     let zero = BoxBuilder::new(&mut arena).int(0);

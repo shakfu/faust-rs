@@ -5062,6 +5062,16 @@ fn eval_non_negative_count(
     loop_detector: &mut LoopDetector,
 ) -> Result<usize, EvalError> {
     let count = eval_box(arena, count_expr, env, loop_detector)?;
+    if let Ok(v) = eval_box_to_i32(arena, count) {
+        return match v {
+            v if v < 0 => Err(EvalError::NegativeIterationCount {
+                value: i64::from(v),
+            }),
+            v => usize::try_from(v).map_err(|_| EvalError::IterationCountTooLarge {
+                value: i64::from(v),
+            }),
+        };
+    }
     match match_box(arena, count) {
         BoxMatch::Int(v) if v < 0 => Err(EvalError::NegativeIterationCount {
             value: i64::from(v),
