@@ -582,6 +582,8 @@ struct SignalToFirLower<'a> {
     waveform_tables: HashMap<SigId, String>,
     /// Maps each waveform/table signal to its element count.
     waveform_table_len: HashMap<SigId, usize>,
+    /// Maps each waveform/table signal to the FIR storage class used for access.
+    table_access_by_sig: HashMap<SigId, AccessType>,
     /// `buildUserInterface` body: open/close box and add-control calls.
     ui_statements: Vec<FirId>,
     /// Dedup guard for named struct-var declarations (prevents double-emit).
@@ -655,6 +657,7 @@ impl<'a> SignalToFirLower<'a> {
             soundfiles: HashMap::new(),
             waveform_tables: HashMap::new(),
             waveform_table_len: HashMap::new(),
+            table_access_by_sig: HashMap::new(),
             ui_statements: Vec::new(),
             named_struct_vars: HashSet::new(),
             reset_init_seen: HashSet::new(),
@@ -1675,7 +1678,7 @@ impl<'a> SignalToFirLower<'a> {
         // Keep C++ `compileSigRDTbl` evaluation order: evaluate table first so
         // pending `wrtbl` side-effects are emitted before read access.
         let _ = self.lower_signal(tbl)?;
-        let (table_name, table_len) = self.resolve_table(tbl)?;
+        let (table_name, table_len, access) = self.resolve_table(tbl)?;
         if table_len == 0 {
             return self.unsupported_node(node, "SIGRDTBL cannot read an empty table");
         }
@@ -1684,7 +1687,7 @@ impl<'a> SignalToFirLower<'a> {
         let index = self.table_index_with_bounds(ridx, ridx_sig, table_len);
         let real_ty = self.signal_fir_type(node)?;
         let mut b = FirBuilder::new(&mut self.store);
-        Ok(b.load_table(table_name, AccessType::Static, index, real_ty))
+        Ok(b.load_table(table_name, access, index, real_ty))
     }
 
     /// Lowers one table write producer (`SIGWRTBL`) and returns the table alias.
@@ -1699,7 +1702,7 @@ impl<'a> SignalToFirLower<'a> {
         widx: SigId,
         wsig: SigId,
     ) -> Result<FirId, SignalFirError> {
-        let (table_name, table_len) = self.resolve_table(node)?;
+        let (table_name, table_len, access) = self.resolve_table(node)?;
         if table_len == 0 {
             return self.unsupported_node(generator, "SIGWRTBL cannot write an empty table");
         }
@@ -1716,23 +1719,36 @@ impl<'a> SignalToFirLower<'a> {
         let widx = self.lower_signal(widx)?;
         let index = self.normalized_table_index(widx, table_len);
         let mut b = FirBuilder::new(&mut self.store);
-        self.compute_updates
-            .push(b.store_table(table_name, AccessType::Static, index, wsig_value));
+        self.sample_statements
+            .push(b.store_table(table_name, access, index, wsig_value));
         Ok(wsig_value)
     }
 
-    /// Resolves a table-producing signal into `(table_name, table_len)`.
-    fn resolve_table(&mut self, sig: SigId) -> Result<(String, usize), SignalFirError> {
+    /// Resolves a table-producing signal into `(table_name, table_len, access)`.
+    fn resolve_table(&mut self, sig: SigId) -> Result<(String, usize, AccessType), SignalFirError> {
         if let Some(name) = self.waveform_tables.get(&sig).cloned() {
             let len = self.waveform_table_len.get(&sig).copied().unwrap_or(0);
-            return Ok((name, len));
+            let access = self
+                .table_access_by_sig
+                .get(&sig)
+                .copied()
+                .unwrap_or(AccessType::Static);
+            return Ok((name, len, access));
         }
         match match_sig(self.arena, sig) {
             SigMatch::Waveform(values) => {
                 let name = self.ensure_waveform_table(sig, values)?;
-                Ok((name, values.len()))
+                Ok((name, values.len(), AccessType::Static))
             }
-            SigMatch::WrTbl(size, generator, _, _) => self.ensure_wrtbl_table(sig, size, generator),
+            SigMatch::WrTbl(size, generator, widx, wsig) => {
+                if self.arena.is_nil(widx) && self.arena.is_nil(wsig) {
+                    let (name, len) = self.ensure_readonly_table(sig, size, generator)?;
+                    Ok((name, len, AccessType::Static))
+                } else {
+                    let (name, len) = self.ensure_wrtbl_table(sig, size, generator)?;
+                    Ok((name, len, AccessType::Struct))
+                }
+            }
             _ => self.unsupported_node(
                 sig,
                 "table access currently supports SIGWAVEFORM and SIGWRTBL forms in Step 2H",
@@ -1765,20 +1781,20 @@ impl<'a> SignalToFirLower<'a> {
         self.static_declarations.push(decl);
         self.waveform_tables.insert(sig, name.clone());
         self.waveform_table_len.insert(sig, values.len());
+        self.table_access_by_sig.insert(sig, AccessType::Static);
         Ok(name)
     }
 
-    /// Ensures one writable table declaration and initialization are emitted
-    /// exactly once.
-    fn ensure_wrtbl_table(
+    /// Ensures one read-only `rdtable`-style declaration is emitted exactly once.
+    fn ensure_readonly_table(
         &mut self,
         sig: SigId,
         size_sig: SigId,
         generator_sig: SigId,
     ) -> Result<(String, usize), SignalFirError> {
         let size = self.table_size_from_sig(size_sig)?;
-        let generated = self.expand_generator_values(generator_sig, size)?;
         let elem_ty = self.signal_fir_type(sig)?;
+        let generated = self.expand_generator_values(generator_sig, size, &elem_ty)?;
         let prefix = if elem_ty == FirType::Int32 {
             "iTbl"
         } else {
@@ -1790,6 +1806,39 @@ impl<'a> SignalToFirLower<'a> {
         self.static_declarations.push(decl);
         self.waveform_tables.insert(sig, name.clone());
         self.waveform_table_len.insert(sig, size);
+        self.table_access_by_sig.insert(sig, AccessType::Static);
+        Ok((name, size))
+    }
+
+    /// Ensures one writable `rwtable` declaration and per-instance
+    /// initialization are emitted exactly once.
+    fn ensure_wrtbl_table(
+        &mut self,
+        sig: SigId,
+        size_sig: SigId,
+        generator_sig: SigId,
+    ) -> Result<(String, usize), SignalFirError> {
+        let size = self.table_size_from_sig(size_sig)?;
+        let elem_ty = self.signal_fir_type(sig)?;
+        let generated = self.expand_generator_values(generator_sig, size, &elem_ty)?;
+        let prefix = if elem_ty == FirType::Int32 {
+            "iTbl"
+        } else {
+            "fTbl"
+        };
+        let name = format!("{prefix}{}", sig.as_u32());
+        let mut b = FirBuilder::new(&mut self.store);
+        let decl = b.declare_table(
+            name.clone(),
+            AccessType::Struct,
+            elem_ty.clone(),
+            &generated,
+        );
+        self.struct_declarations.push(decl);
+        self.register_constant_table_init(name.clone(), AccessType::Struct, &generated);
+        self.waveform_tables.insert(sig, name.clone());
+        self.waveform_table_len.insert(sig, size);
+        self.table_access_by_sig.insert(sig, AccessType::Struct);
         Ok((name, size))
     }
 
@@ -1821,6 +1870,7 @@ impl<'a> SignalToFirLower<'a> {
         &mut self,
         generator_sig: SigId,
         size: usize,
+        elem_ty: &FirType,
     ) -> Result<Vec<FirId>, SignalFirError> {
         let init_sig = if let SigMatch::Gen(inner) = match_sig(self.arena, generator_sig) {
             inner
@@ -1854,11 +1904,30 @@ impl<'a> SignalToFirLower<'a> {
                 let values = interpret_generator(self.arena, init_sig, size)?;
                 let mut out = Vec::with_capacity(size);
                 for v in values {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    out.push(b.float64(v));
+                    out.push(self.fir_const_for_table_value(v, elem_ty)?);
                 }
                 Ok(out)
             }
+        }
+    }
+
+    /// Converts one compile-time generator sample into the declared FIR table
+    /// element type, preserving integer tables as `Int32` and real tables at
+    /// the current internal precision.
+    fn fir_const_for_table_value(
+        &mut self,
+        value: f64,
+        elem_ty: &FirType,
+    ) -> Result<FirId, SignalFirError> {
+        let mut b = FirBuilder::new(&mut self.store);
+        match elem_ty {
+            FirType::Int32 => Ok(b.int32(value as i32)),
+            FirType::Float32 => Ok(b.float32(value as f32)),
+            FirType::Float64 => Ok(b.float64(value)),
+            other => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("unsupported table element type for generator expansion: {other:?}"),
+            )),
         }
     }
 
@@ -1977,6 +2046,28 @@ impl<'a> SignalToFirLower<'a> {
         let mut b = FirBuilder::new(&mut self.store);
         self.clear_statements
             .push(b.store_var(name, AccessType::Struct, init));
+    }
+
+    /// Registers one per-instance table initialization block for
+    /// `instanceConstants`.
+    fn register_constant_table_init(&mut self, name: String, access: AccessType, values: &[FirId]) {
+        if values.is_empty() {
+            return;
+        }
+        let mut stores = Vec::with_capacity(values.len());
+        for (index, value) in values.iter().enumerate() {
+            let idx = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.int32(i32::try_from(index).unwrap_or(i32::MAX))
+            };
+            let store = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.store_table(name.clone(), access, idx, *value)
+            };
+            stores.push(store);
+        }
+        let mut b = FirBuilder::new(&mut self.store);
+        self.constants_statements.push(b.block(&stores));
     }
 
     /// Helper to produce a typed unsupported-node error with readable dumped IR.
@@ -2691,10 +2782,24 @@ fn interpret_generator(
     sig: SigId,
     size: usize,
 ) -> Result<Vec<f64>, SignalFirError> {
-    let mut interp = GeneratorInterpreter::new(arena);
+    let prepared =
+        crate::signal_prepare::prepare_signals_for_fir(arena, &[sig], &UiProgram::empty())
+            .map_err(|err| {
+                SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!("SIGGEN interpreter preparation failed: {err}"),
+                )
+            })?;
+    let prepared_sig = prepared.outputs.first().copied().ok_or_else(|| {
+        SignalFirError::new(
+            SignalFirErrorCode::UnsupportedSignalNode,
+            "SIGGEN interpreter received empty prepared output list",
+        )
+    })?;
+    let mut interp = GeneratorInterpreter::new(&prepared.arena, &prepared.types);
     let mut results = Vec::with_capacity(size);
     for _ in 0..size {
-        let val = interp.eval(sig)?;
+        let val = interp.eval(prepared_sig)?;
         results.push(val);
         interp.advance();
     }
@@ -2703,6 +2808,7 @@ fn interpret_generator(
 
 struct GeneratorInterpreter<'a> {
     arena: &'a TreeArena,
+    types: &'a HashMap<SigId, SimpleSigType>,
     /// Recursion group state: maps SYMREC var → (current_values, prev_values).
     rec_state: HashMap<SigId, (Vec<f64>, Vec<f64>)>,
     /// Groups currently being evaluated this step (prevent infinite recursion).
@@ -2715,9 +2821,10 @@ struct GeneratorInterpreter<'a> {
 }
 
 impl<'a> GeneratorInterpreter<'a> {
-    fn new(arena: &'a TreeArena) -> Self {
+    fn new(arena: &'a TreeArena, types: &'a HashMap<SigId, SimpleSigType>) -> Self {
         Self {
             arena,
+            types,
             rec_state: HashMap::new(),
             evaluating: HashSet::new(),
             step: 0,
@@ -2732,6 +2839,10 @@ impl<'a> GeneratorInterpreter<'a> {
         }
         self.evaluating.clear();
         self.step += 1;
+    }
+
+    fn simple_type(&self, sig: SigId) -> Option<SimpleSigType> {
+        self.types.get(&sig).copied()
     }
 
     /// Evaluate one signal node, returning its f64 value for the current step.
@@ -2754,7 +2865,7 @@ impl<'a> GeneratorInterpreter<'a> {
             SigMatch::BinOp(op, x, y) => {
                 let lhs = self.eval(x)?;
                 let rhs = self.eval(y)?;
-                Ok(eval_binop(op, lhs, rhs))
+                Ok(self.eval_binop(sig, op, lhs, rhs))
             }
             SigMatch::Pow(x, y) => Ok(self.eval(x)?.powf(self.eval(y)?)),
             SigMatch::Min(x, y) => Ok(self.eval(x)?.min(self.eval(y)?)),
@@ -3078,6 +3189,32 @@ impl<'a> GeneratorInterpreter<'a> {
         }
         // Single element (not a cons-list)
         vec![body]
+    }
+
+    /// Evaluate one binary operator while preserving prepared integer
+    /// arithmetic semantics for generator nodes.
+    fn eval_binop(&self, sig: SigId, op: BinOp, lhs: f64, rhs: f64) -> f64 {
+        let result_ty = self.simple_type(sig);
+        match op {
+            BinOp::Add if result_ty == Some(SimpleSigType::Int) => {
+                (lhs as i32).wrapping_add(rhs as i32) as f64
+            }
+            BinOp::Sub if result_ty == Some(SimpleSigType::Int) => {
+                (lhs as i32).wrapping_sub(rhs as i32) as f64
+            }
+            BinOp::Mul if result_ty == Some(SimpleSigType::Int) => {
+                (lhs as i32).wrapping_mul(rhs as i32) as f64
+            }
+            BinOp::Rem if result_ty == Some(SimpleSigType::Int) => {
+                let rhs_i = rhs as i32;
+                if rhs_i == 0 {
+                    0.0
+                } else {
+                    ((lhs as i32) % rhs_i) as f64
+                }
+            }
+            _ => eval_binop(op, lhs, rhs),
+        }
     }
 }
 

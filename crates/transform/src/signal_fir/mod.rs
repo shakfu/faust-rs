@@ -204,7 +204,7 @@ mod tests {
     use super::{
         RealType, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui,
     };
-    use fir::{FirBinOp, FirMatch, FirType, match_fir};
+    use fir::{AccessType, FirBinOp, FirMatch, FirType, match_fir};
     use signals::{BinOp, SigBuilder};
 
     use tlib::{TreeArena, de_bruijn_rec, de_bruijn_ref};
@@ -809,18 +809,124 @@ mod tests {
         let out = compile_fastlane_without_ui(&arena, &[sig0], 2, 1, &SignalFirOptions::default())
             .expect("Step 2H should support wrtbl runtime write/read shape");
 
-        let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+        let FirMatch::Module {
+            dsp_struct,
+            functions,
+            static_decls,
+            ..
+        } = match_fir(&out.store, out.module)
+        else {
             panic!("module expected");
         };
+        let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+            panic!("dsp_struct block expected");
+        };
+        let struct_table = struct_items
+            .iter()
+            .copied()
+            .find(|id| {
+                matches!(
+                    match_fir(&out.store, *id),
+                    FirMatch::DeclareTable {
+                        access: AccessType::Struct,
+                        ..
+                    }
+                )
+            })
+            .expect("runtime wrtbl should allocate one mutable struct table");
+        let FirMatch::DeclareTable {
+            values, elem_type, ..
+        } = match_fir(&out.store, struct_table)
+        else {
+            panic!("struct table declaration expected");
+        };
+        assert_eq!(
+            values.len(),
+            4,
+            "mutable wrtbl table should keep requested size"
+        );
+        assert_eq!(
+            elem_type,
+            FirType::Float32,
+            "runtime wrtbl table should keep real element type"
+        );
+
+        let FirMatch::Block(static_items) = match_fir(&out.store, static_decls) else {
+            panic!("static_decls block expected");
+        };
+        assert!(
+            !static_items
+                .iter()
+                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareTable { .. })),
+            "runtime wrtbl should not be lowered as a static table"
+        );
+
         let loop_body = find_compute_loop_body(&out.store, functions);
         let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
             panic!("compute loop body block expected");
         };
         assert!(
-            stmts
-                .iter()
-                .any(|id| matches!(match_fir(&out.store, *id), FirMatch::StoreTable { .. })),
+            stmts.iter().any(|id| matches!(
+                match_fir(&out.store, *id),
+                FirMatch::StoreTable {
+                    access: AccessType::Struct,
+                    ..
+                }
+            )),
             "runtime wrtbl should emit FIR store_table update in compute body"
+        );
+    }
+
+    #[test]
+    fn wrtbl_generator_expansion_preserves_integer_table_types() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let size = {
+                let mut b = SigBuilder::new(&mut arena);
+                b.int(5)
+            };
+            let init = {
+                let mut b = SigBuilder::new(&mut arena);
+                let real = b.real(1.75);
+                b.int_cast(real)
+            };
+            let ridx = {
+                let mut b = SigBuilder::new(&mut arena);
+                b.input(0)
+            };
+            let mut b = SigBuilder::new(&mut arena);
+            b.read_only_table(size, init, ridx)
+        };
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect("readonly wrtbl with computed int generator should lower");
+
+        let FirMatch::Module { static_decls, .. } = match_fir(&out.store, out.module) else {
+            panic!("module expected");
+        };
+        let FirMatch::Block(static_items) = match_fir(&out.store, static_decls) else {
+            panic!("static_decls block expected");
+        };
+        let table = static_items
+            .iter()
+            .copied()
+            .find(|id| matches!(match_fir(&out.store, *id), FirMatch::DeclareTable { .. }))
+            .expect("readonly wrtbl should declare one static table");
+        let FirMatch::DeclareTable {
+            elem_type, values, ..
+        } = match_fir(&out.store, table)
+        else {
+            panic!("declare table expected");
+        };
+        assert_eq!(
+            elem_type,
+            FirType::Int32,
+            "computed integer generator should keep Int32 table type"
+        );
+        assert!(
+            values
+                .iter()
+                .all(|id| matches!(match_fir(&out.store, *id), FirMatch::Int32 { .. })),
+            "computed integer generator should lower to Int32 FIR literals"
         );
     }
 
