@@ -1011,6 +1011,18 @@ pub struct LoopDetector {
     /// debuggable slot label; semantic identity is carried by the unique `BoxId`
     /// of each `boxSlot(...)` node.
     next_slot_id: i32,
+    /// Memoized `a2sb` lowering results keyed by original box identity.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/evaluate/eval.cpp`
+    /// - `gGlobal->gSymbolicBoxProperty`
+    ///
+    /// This cache preserves sharing when the same residual closure or pattern
+    /// matcher appears multiple times in a diagram. Without it, each occurrence
+    /// would allocate a fresh symbolic slot during lowering, changing arity and
+    /// semantics for expressions such as `x-x` where both `x` uses must share
+    /// one future input.
+    symbolic_box_cache: ahash::HashMap<TreeId, TreeId>,
 }
 
 impl LoopDetector {
@@ -1028,6 +1040,7 @@ impl LoopDetector {
             pm_store: Vec::new(),
             closure_store: Vec::new(),
             next_slot_id: 0,
+            symbolic_box_cache: ahash::HashMap::default(),
         }
     }
 
@@ -1050,6 +1063,7 @@ impl LoopDetector {
             pm_store: Vec::new(),
             closure_store: Vec::new(),
             next_slot_id: 0,
+            symbolic_box_cache: ahash::HashMap::default(),
         }
     }
 
@@ -1067,6 +1081,7 @@ impl LoopDetector {
             pm_store: Vec::new(),
             closure_store: Vec::new(),
             next_slot_id: 0,
+            symbolic_box_cache: ahash::HashMap::default(),
         }
     }
 
@@ -2026,7 +2041,11 @@ fn a2sb(
     expr: TreeId,
     loop_detector: &mut LoopDetector,
 ) -> Result<TreeId, EvalError> {
-    match match_box(arena, expr) {
+    if let Some(&cached) = loop_detector.symbolic_box_cache.get(&expr) {
+        return Ok(cached);
+    }
+
+    let result = match match_box(arena, expr) {
         BoxMatch::Abstr(_, _) => a2sb_value(
             arena,
             EvalValue::Closure(ClosureValue {
@@ -2097,7 +2116,10 @@ fn a2sb(
                 Ok(expr)
             }
         }
-    }
+    }?;
+
+    loop_detector.symbolic_box_cache.insert(expr, result);
+    Ok(result)
 }
 
 fn lower_abstraction_to_symbolic_value(
@@ -4533,15 +4555,10 @@ fn apply_value_list_value(
                 let arg = arena
                     .hd(larg)
                     .ok_or(EvalError::MalformedListNode { node: larg })?;
+                let arg = eval_value(arena, arg, &closure.env, loop_detector)?;
                 let mut scoped = closure.env.push_scope();
                 let sym = arena.intern_symbol(&param_name);
-                scoped.bind_value(
-                    sym,
-                    EvalValue::Closure(ClosureValue {
-                        expr: arg,
-                        env: env.clone(),
-                    }),
-                );
+                scoped.bind_value(sym, arg);
                 let f = eval_value(arena, body, &scoped, loop_detector)?;
                 let tl = arena
                     .tl(larg)
@@ -4723,7 +4740,7 @@ fn apply_list(
         _ => {
             // C++ parity (`applyList`): for non-closures, insert implicit wires when
             // partially applying a function, and reject over-application.
-            let maybe_fun_arity = infer_box_arity(arena, fun);
+            let maybe_fun_arity = infer_box_arity_for_apply(arena, fun, loop_detector);
             let maybe_larg_outputs = list_outputs_for_apply(arena, larg, loop_detector);
             let mut lowered_larg = larg;
 

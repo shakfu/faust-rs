@@ -740,6 +740,32 @@ process = displaygain(compressor_stereo(5,-30,0.01,0.1));
 }
 
 #[test]
+fn eval_process_reuses_residual_case_argument_inside_local_abstraction() {
+    let source = r#"
+poly(1,x)=11;
+poly(6,x)=x*x;
+foo(v) = bar(v) with { bar(x)=x-x; };
+process = foo(poly(6))(3);
+"#;
+
+    let parsed = parse_program(source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept residual case reuse repro: {:?}",
+        parsed.errors
+    );
+
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+    let out = eval_process(&mut arena, root)
+        .expect("reused residual case argument should evaluate like Faust C++");
+    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+        .expect("shared residual argument should still lower to a valid box");
+    assert_eq!(arity.inputs, 1);
+    assert_eq!(arity.outputs, 1);
+}
+
+#[test]
 fn eval_box_non_closure_partial_prefix_appends_missing_wire() {
     let mut arena = TreeArena::new();
     let zero = BoxBuilder::new(&mut arena).int(0);

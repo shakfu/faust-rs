@@ -103,7 +103,37 @@ Constraint:
 - the key is the evaluated rule-list `TreeId`, not the raw syntax tree,
 - this is important because lexical evaluation can change the effective rules.
 
-### 2.4 `eval`: box simplification cache
+### 2.4 `eval`: symbolic `a2sb` lowering cache
+
+Status: implemented
+
+Location:
+
+- `crates/eval/src/lib.rs`
+
+Cache:
+
+- `LoopDetector.symbolic_box_cache: ahash::HashMap<TreeId, TreeId>`
+
+Purpose:
+
+- memoizes `a2sb(expr)` by original box identity,
+- preserves residual-value sharing when the same closure or pattern matcher is
+  lowered multiple times in one evaluator session,
+- matches Faust C++ `gSymbolicBoxProperty`, which ensures repeated uses of one
+  residual value lower to one shared symbolic-slot shape.
+
+Constraint:
+
+- the key is the original pre-lowered `TreeId`, not an arity signature or
+  normalized form,
+- the cache is session-local because the lowered result depends on the current
+  closure/PM side stores and slot-number stream,
+- this cache is semantic, not just a speed optimization: without it, repeated
+  occurrences of one residual node can allocate fresh slots and silently change
+  arity and behavior.
+
+### 2.5 `eval`: box simplification cache
 
 Status: implemented but not yet promoted to production path
 
@@ -126,7 +156,7 @@ Note:
   production step, so this cache exists even though the surrounding path is not
   yet a mainline hot path.
 
-### 2.5 `propagate`: box arity cache
+### 2.6 `propagate`: box arity cache
 
 Status: implemented
 
@@ -148,7 +178,7 @@ Notes:
 - this is an analysis cache,
 - it is intentionally kept separate from traversal/lowering memoization.
 
-### 2.6 `propagate`: grouped-UI DAG visitation cache
+### 2.7 `propagate`: grouped-UI DAG visitation cache
 
 Status: implemented
 
@@ -166,7 +196,7 @@ Purpose:
   extraction,
 - avoids ghost controls and duplicated UI ownership artifacts.
 
-### 2.7 `propagate`: De Bruijn lifting and aperture memoization
+### 2.8 `propagate`: De Bruijn lifting and aperture memoization
 
 Status: implemented
 
@@ -190,7 +220,7 @@ Context:
 - threaded through `PropagateContext`,
 - remains local to one propagation traversal.
 
-### 2.8 `normalize`: simplify traversal cache
+### 2.9 `normalize`: simplify traversal cache
 
 Status: implemented
 
@@ -208,7 +238,7 @@ Purpose:
 - uses `None` as a cycle-breaking sentinel for recursion groups,
 - ensures each shared signal node is simplified at most once per pass.
 
-### 2.9 `normalize`: promotion cache in normal-form pipeline
+### 2.10 `normalize`: promotion cache in normal-form pipeline
 
 Status: implemented
 
@@ -225,7 +255,7 @@ Purpose:
 - memoizes signal promotion during normal-form preparation,
 - preserves sharing while inserting only the required casts.
 
-### 2.10 `transform`: prepared-signal promotion memo
+### 2.11 `transform`: prepared-signal promotion memo
 
 Status: implemented
 
@@ -242,7 +272,7 @@ Purpose:
 - preserves sharing during the FIR-preparation promotion pass,
 - prevents repeated subtree promotion when the same prepared signal is reused.
 
-### 2.11 `transform`: reduced type inference state for prepared signals
+### 2.12 `transform`: reduced type inference state for prepared signals
 
 Status: implemented
 
@@ -267,7 +297,7 @@ Note:
 - this is not a simple lookup cache; it is still memoized analysis state and
   should be tracked as such.
 
-### 2.12 `transform`: signal-to-FIR lowering DAG cache
+### 2.13 `transform`: signal-to-FIR lowering DAG cache
 
 Status: implemented
 
@@ -285,7 +315,7 @@ Purpose:
 - prevents duplicate FIR subgraphs and keeps lowering linear in the shared
   graph size.
 
-### 2.13 `tlib`: de Bruijn recursion conversion memos
+### 2.14 `tlib`: de Bruijn recursion conversion memos
 
 Status: implemented
 
