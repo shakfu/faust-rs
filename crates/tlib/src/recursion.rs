@@ -228,10 +228,21 @@ impl<'a> Converter<'a> {
     ///
     /// The exact prefix is an implementation detail, but the sequence is stable
     /// for a given traversal order, which keeps converted trees deterministic.
+    ///
+    /// C++ parity note: this mirrors `unique("W")`, not a plain symbol lookup.
+    /// The arena may already contain user or intermediate symbols named `W0`,
+    /// `W1`, ... so this helper must skip pre-existing names and only return a
+    /// symbol node that was freshly interned for the current conversion.
     fn fresh_var(&mut self) -> TreeId {
-        let name = format!("W{}", self.next_var_index);
-        self.next_var_index += 1;
-        self.arena.symbol(name)
+        loop {
+            let name = format!("W{}", self.next_var_index);
+            self.next_var_index += 1;
+            let before = self.arena.len();
+            let var = self.arena.symbol(name);
+            if self.arena.len() > before {
+                return var;
+            }
+        }
     }
 
     /// Converts one node from de Bruijn form to symbolic form.
@@ -494,4 +505,31 @@ fn is_de_bruijn_ref_tag(arena: &TreeArena, id: TreeId) -> bool {
 fn intern_tag(arena: &mut TreeArena, tag: &str, children: &[TreeId]) -> TreeId {
     let tag_id = arena.intern_tag(tag);
     arena.intern(NodeKind::Tag(tag_id), children)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{de_bruijn_rec, de_bruijn_ref, de_bruijn_to_sym, match_sym_rec, sym_rec};
+    use crate::{TreeArena, list_to_vec};
+
+    #[test]
+    fn de_bruijn_to_sym_skips_preexisting_symbol_name_collisions() {
+        let mut arena = TreeArena::new();
+
+        let colliding_var = arena.symbol("W0");
+        let zero = arena.int(0);
+        let nil = arena.nil();
+        let preexisting_body = arena.cons(zero, nil);
+        let _preexisting = sym_rec(&mut arena, colliding_var, preexisting_body);
+
+        let ref1 = de_bruijn_ref(&mut arena, 1);
+        let nil = arena.nil();
+        let body = arena.cons(ref1, nil);
+        let rec = de_bruijn_rec(&mut arena, body);
+
+        let converted = de_bruijn_to_sym(&mut arena, rec).expect("closed de Bruijn tree");
+        let (fresh_var, body_list) = match_sym_rec(&arena, converted).expect("symbolic recursion");
+        assert_ne!(fresh_var, colliding_var);
+        assert_eq!(list_to_vec(&arena, body_list).expect("body list").len(), 1);
+    }
 }

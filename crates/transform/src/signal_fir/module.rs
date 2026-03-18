@@ -1163,7 +1163,12 @@ impl<'a> SignalToFirLower<'a> {
                 )
             })?;
         let group_arrays = &self.recursion_stack[self.recursion_stack.len() - depth];
-        group_arrays.get(proj_index).cloned().ok_or_else(|| {
+        let canonical_index = if group_arrays.len() == 1 {
+            0
+        } else {
+            proj_index
+        };
+        group_arrays.get(canonical_index).cloned().ok_or_else(|| {
             SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
                 format!(
@@ -2615,7 +2620,9 @@ impl<'a> SignalToFirLower<'a> {
             )
         })?;
 
-        if index_usize >= bodies.len() {
+        let canonical_index = if bodies.len() == 1 { 0 } else { index_usize };
+
+        if canonical_index >= bodies.len() {
             return Err(SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
                 format!(
@@ -2672,7 +2679,7 @@ impl<'a> SignalToFirLower<'a> {
         }
 
         // ── Return the result for the requested index ──
-        let info = &group_arrays[index_usize];
+        let info = &group_arrays[canonical_index];
         let out_ty = self.signal_fir_type(node)?;
         self.ensure_iota_state();
         let current_index = {
@@ -3063,8 +3070,9 @@ impl<'a> GeneratorInterpreter<'a> {
         }
 
         let (cur, _) = &self.rec_state[&var];
-        if idx < cur.len() {
-            Ok(cur[idx])
+        let canonical_index = if cur.len() == 1 { 0 } else { idx };
+        if canonical_index < cur.len() {
+            Ok(cur[canonical_index])
         } else {
             Err(SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
@@ -3107,10 +3115,11 @@ impl<'a> GeneratorInterpreter<'a> {
 
     /// Read the current-step value of recursion group output `idx`.
     fn read_rec_current(&self, var: SigId, idx: usize) -> Result<f64, SignalFirError> {
-        if let Some((cur, _)) = self.rec_state.get(&var)
-            && idx < cur.len()
-        {
-            return Ok(cur[idx]);
+        if let Some((cur, _)) = self.rec_state.get(&var) {
+            let canonical_index = if cur.len() == 1 { 0 } else { idx };
+            if canonical_index < cur.len() {
+                return Ok(cur[canonical_index]);
+            }
         }
         // Not yet initialized — return 0.0 (initial state)
         Ok(0.0)
@@ -3118,10 +3127,11 @@ impl<'a> GeneratorInterpreter<'a> {
 
     /// Read the previous-step value of recursion group output `idx`.
     fn read_rec_prev(&self, var: SigId, idx: usize) -> Result<f64, SignalFirError> {
-        if let Some((_, prev)) = self.rec_state.get(&var)
-            && idx < prev.len()
-        {
-            return Ok(prev[idx]);
+        if let Some((_, prev)) = self.rec_state.get(&var) {
+            let canonical_index = if prev.len() == 1 { 0 } else { idx };
+            if canonical_index < prev.len() {
+                return Ok(prev[canonical_index]);
+            }
         }
         // Not yet initialized — return 0.0 (initial state)
         Ok(0.0)

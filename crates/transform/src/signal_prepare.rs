@@ -38,6 +38,24 @@
 //!   fast-lane instead of the full C++ signal type lattice,
 //! - the promotion pass ports only the `SignalPromotion` subset required before
 //!   `signal_fir`, without additional simplification or normalization.
+//!
+//! # Explicit Limitation
+//! The unary-recursion canonicalization performed here is **not** a 1:1 port of
+//! the C++ `inlineDegenerateRecursions(...)` pass.
+//!
+//! Concretely, the Rust fast-lane currently does **not**:
+//! - build the recursive dependency graph,
+//! - detect degenerate recursive projections through the C++ graph analysis,
+//! - rewrite projections through `hasProjDefinition(...)` / `setProjDefinition(...)`,
+//! - or inline recursive projection definitions under delays the way the C++
+//!   rewrite rules do.
+//!
+//! Instead, this stage performs a smaller compatibility normalization tailored
+//! to the FIR preparation contract: when a symbolic recursion group has one
+//! physical slot, any logical projection index targeting that group is
+//! canonicalized to slot `0`. This is sufficient for the current fast-lane
+//! consumers, but it should not be mistaken for a full Rust port of the C++
+//! degenerate-recursion elimination machinery.
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -138,6 +156,20 @@ impl From<RecursionError> for SignalPrepareError {
 /// conceptually operate on the whole output list, not independently per root.
 /// This function mirrors that contract by cloning all outputs through one memo
 /// table, converting one list root, and then typing the prepared forest.
+///
+/// Additional fast-lane note: after `de_bruijn_to_sym`, the staging forest is
+/// normalized so degenerate symbolic recursion groups use a canonical physical
+/// projection index (`0`). This mirrors the intent of the classic C++ pipeline,
+/// where degenerate recursive projections are later normalized through
+/// projection-definition rewriting (`inlineDegenerateRecursions(...)`), but it
+/// does so earlier so the FIR preparer and lowerer can reason on dense slot
+/// vectors only.
+///
+/// Limitation: this is a narrower compatibility step, not a full Rust port of
+/// `inlineDegenerateRecursions(...)`. In particular, it does not analyze
+/// recursive dependency graphs or rewrite projection definitions under delay
+/// operators; it only canonicalizes logical projection indices once symbolic
+/// recursion has already been built.
 pub fn prepare_signals_for_fir(
     src_arena: &TreeArena,
     outputs: &[SigId],
@@ -147,6 +179,7 @@ pub fn prepare_signals_for_fir(
     let cloned_outputs = arena.clone_forest_from(src_arena, outputs);
     let cloned_list = vec_to_list(&mut arena, &cloned_outputs);
     let symbolic_list = tlib::de_bruijn_to_sym(&mut arena, cloned_list)?;
+    let symbolic_list = canonicalize_unary_rec_projections(&mut arena, symbolic_list)?;
     let outputs = list_to_vec(&arena, symbolic_list)
         .expect("prepare_signals_for_fir rebuilds a proper cons list");
     let typed_before_promotion = infer_simple_types(&arena, &outputs)?;
@@ -160,6 +193,162 @@ pub fn prepare_signals_for_fir(
         types,
         sig_types,
     })
+}
+
+/// Rewrites symbolic recursion projections so unary groups always use slot `0`.
+///
+/// C++ parity note: the classic pipeline can still carry logical projection
+/// indices on degenerate recursive groups and resolves them through projection
+/// identity later on. The fast-lane uses physical slot vectors, so it
+/// canonicalizes `proj(k, group)` to `proj(0, group)` when `group` has one body.
+///
+/// This is intentionally a preparation-level normalization:
+/// - downstream reduced typing only sees dense slot indices,
+/// - FIR lowering can keep using `Vec<slot>` recursion carriers,
+/// - the behavior stays stable even if different frontends expose the same
+///   degenerate recursive projection through different logical indices.
+///
+/// Explicit limitation: the pass does not decide whether a projection is
+/// degenerate from recursive dependency analysis. It only observes the already
+/// materialized symbolic shape and canonicalizes projections targeting groups
+/// whose body list has arity `1`.
+fn canonicalize_unary_rec_projections(
+    arena: &mut TreeArena,
+    root: SigId,
+) -> Result<SigId, SignalPrepareError> {
+    let mut unary_groups = HashMap::new();
+    collect_unary_sym_groups(arena, root, &mut unary_groups)?;
+    let mut memo = HashMap::new();
+    rewrite_unary_rec_projections(arena, root, &unary_groups, &mut memo)
+}
+
+/// Collects symbolic recursion variables whose body list has exactly one slot.
+///
+/// The collected set drives [`rewrite_unary_rec_projections`]. The traversal is
+/// structural and preserves list payload semantics, so `cons`-encoded child
+/// lists are expanded rather than treated as opaque signal nodes.
+fn collect_unary_sym_groups(
+    arena: &TreeArena,
+    sig: SigId,
+    unary_groups: &mut HashMap<SigId, usize>,
+) -> Result<(), SignalPrepareError> {
+    if let Some((var, body_list)) = match_sym_rec(arena, sig) {
+        let bodies = list_to_vec(arena, body_list).ok_or_else(|| {
+            SignalPrepareError::Typing("malformed symbolic recursion body list".to_owned())
+        })?;
+        if bodies.len() == 1 {
+            unary_groups.insert(var, 1);
+        }
+        for body in bodies {
+            collect_unary_sym_groups(arena, body, unary_groups)?;
+        }
+        return Ok(());
+    }
+
+    if arena.is_nil(sig) {
+        return Ok(());
+    }
+
+    let node = arena.node(sig).ok_or_else(|| {
+        SignalPrepareError::Typing(format!(
+            "missing node {} during unary recursion canonicalization",
+            sig.as_u32()
+        ))
+    })?;
+    for child in node.children.as_slice() {
+        if arena.is_list(*child) {
+            let items = list_to_vec(arena, *child).ok_or_else(|| {
+                SignalPrepareError::Typing(
+                    "malformed list during unary recursion canonicalization".to_owned(),
+                )
+            })?;
+            for item in items {
+                collect_unary_sym_groups(arena, item, unary_groups)?;
+            }
+        } else {
+            collect_unary_sym_groups(arena, *child, unary_groups)?;
+        }
+    }
+    Ok(())
+}
+
+/// Rebuilds one prepared signal/list tree with canonical unary recursion indices.
+///
+/// For every `proj(k, group)` where `group` resolves to a symbolic recursion
+/// binder with one body, the rebuilt node becomes `proj(0, group)`. The pass is
+/// memoized, so shared subtrees remain shared in the staging arena.
+fn rewrite_unary_rec_projections(
+    arena: &mut TreeArena,
+    sig: SigId,
+    unary_groups: &HashMap<SigId, usize>,
+    memo: &mut HashMap<SigId, SigId>,
+) -> Result<SigId, SignalPrepareError> {
+    if let Some(mapped) = memo.get(&sig) {
+        return Ok(*mapped);
+    }
+
+    let rewritten = if arena.is_nil(sig) {
+        sig
+    } else if arena.is_list(sig) {
+        let head = arena.hd(sig).ok_or_else(|| {
+            SignalPrepareError::Typing(
+                "malformed list during unary recursion canonicalization".to_owned(),
+            )
+        })?;
+        let tail = arena.tl(sig).ok_or_else(|| {
+            SignalPrepareError::Typing(
+                "malformed list during unary recursion canonicalization".to_owned(),
+            )
+        })?;
+        let head = rewrite_unary_rec_projections(arena, head, unary_groups, memo)?;
+        let tail = rewrite_unary_rec_projections(arena, tail, unary_groups, memo)?;
+        arena.cons(head, tail)
+    } else if let Some((var, body_list)) = match_sym_rec(arena, sig) {
+        let body_list = rewrite_unary_rec_projections(arena, body_list, unary_groups, memo)?;
+        sym_rec(arena, var, body_list)
+    } else if let SigMatch::Proj(index, group) = match_sig(arena, sig) {
+        let group = rewrite_unary_rec_projections(arena, group, unary_groups, memo)?;
+        let canonical_index = if let Some(var) = match_sym_ref(arena, group) {
+            if unary_groups.contains_key(&var) {
+                0
+            } else {
+                index
+            }
+        } else if let Some((var, body_list)) = match_sym_rec(arena, group) {
+            if unary_groups.contains_key(&var) {
+                0
+            } else {
+                let bodies = list_to_vec(arena, body_list).ok_or_else(|| {
+                    SignalPrepareError::Typing("malformed symbolic recursion body list".to_owned())
+                })?;
+                if bodies.len() == 1 { 0 } else { index }
+            }
+        } else {
+            index
+        };
+        let mut b = SigBuilder::new(arena);
+        b.proj(canonical_index, group)
+    } else {
+        let node = arena.node(sig).cloned().ok_or_else(|| {
+            SignalPrepareError::Typing(format!(
+                "missing node {} during unary recursion canonicalization",
+                sig.as_u32()
+            ))
+        })?;
+        let mut children = Vec::with_capacity(node.children.len());
+        for child in node.children.as_slice() {
+            children.push(rewrite_unary_rec_projections(
+                arena,
+                *child,
+                unary_groups,
+                memo,
+            )?);
+        }
+        arena.intern(node.kind, &children)
+    };
+
+    memo.insert(sig, rewritten);
+    Ok(rewritten)
 }
 
 /// Runs the full `TypeAnnotator` (sigtype crate) on the prepared output forest.
@@ -256,8 +445,6 @@ struct SimpleTyper<'a> {
     node_types: HashMap<SigId, TypeSlot>,
     group_types: HashMap<SigId, Vec<TypeSlot>>,
     active_groups: HashMap<SigId, Vec<TypeSlot>>,
-    active_vars: HashMap<SigId, SigId>,
-    group_vars: HashMap<SigId, SigId>,
 }
 
 impl<'a> SimpleTyper<'a> {
@@ -268,8 +455,6 @@ impl<'a> SimpleTyper<'a> {
             node_types: HashMap::new(),
             group_types: HashMap::new(),
             active_groups: HashMap::new(),
-            active_vars: HashMap::new(),
-            group_vars: HashMap::new(),
         }
     }
 
@@ -563,15 +748,26 @@ impl<'a> SimpleTyper<'a> {
     /// - `proj(i, sym_rec(...))` when visiting a fully materialized group,
     /// - `SIGREC` as a compatibility fallback for remaining pre-symbolic users.
     fn infer_proj(&mut self, index: i32, group: SigId) -> Result<TypeSlot, SignalPrepareError> {
-        let index = usize::try_from(index).map_err(|_| {
+        let requested_index = usize::try_from(index).map_err(|_| {
             SignalPrepareError::Typing(format!("negative projection index {index}"))
         })?;
         if let Some(var) = match_sym_ref(self.arena, group) {
             let active_group = self
-                .active_vars
-                .get(&var)
+                .active_groups
+                .keys()
                 .copied()
-                .or_else(|| self.group_vars.get(&var).copied())
+                .find(|group_id| {
+                    match_sym_rec(self.arena, *group_id)
+                        .map(|(group_var, _)| group_var == var)
+                        .unwrap_or(false)
+                })
+                .or_else(|| {
+                    self.group_types.keys().copied().find(|group_id| {
+                        match_sym_rec(self.arena, *group_id)
+                            .map(|(group_var, _)| group_var == var)
+                            .unwrap_or(false)
+                    })
+                })
                 .ok_or_else(|| {
                     SignalPrepareError::Typing(format!(
                         "unbound symbolic recursion variable {} during simple typing",
@@ -588,18 +784,24 @@ impl<'a> SimpleTyper<'a> {
                     ))
                 })?
             };
+            let index = if slots.len() == 1 { 0 } else { requested_index };
             return slots.get(index).copied().ok_or_else(|| {
                 SignalPrepareError::Typing(format!(
-                    "projection index {index} out of bounds for symbolic recursion group"
+                    "projection index {index} out of bounds for symbolic recursion group {} with {} slots",
+                    active_group.as_u32(),
+                    slots.len()
                 ))
             });
         }
 
         if match_sym_rec(self.arena, group).is_some() {
             let slots = self.infer_group(group)?;
+            let index = if slots.len() == 1 { 0 } else { requested_index };
             return slots.get(index).copied().ok_or_else(|| {
                 SignalPrepareError::Typing(format!(
-                    "projection index {index} out of bounds for symbolic recursion group"
+                    "projection index {index} out of bounds for symbolic recursion group {} with {} slots",
+                    group.as_u32(),
+                    slots.len()
                 ))
             });
         }
@@ -633,7 +835,7 @@ impl<'a> SimpleTyper<'a> {
         if let Some(types) = self.group_types.get(&group) {
             return Ok(types.clone());
         }
-        let (var, body_list) = match_sym_rec(self.arena, group).ok_or_else(|| {
+        let (_var, body_list) = match_sym_rec(self.arena, group).ok_or_else(|| {
             SignalPrepareError::Typing(format!(
                 "symbolic recursion group {} expected during simple typing",
                 group.as_u32()
@@ -646,8 +848,6 @@ impl<'a> SimpleTyper<'a> {
             ))
         })?;
         let mut current = vec![TypeSlot::Unknown; bodies.len()];
-        self.group_vars.insert(var, group);
-        self.active_vars.insert(var, group);
 
         loop {
             self.active_groups.insert(group, current.clone());
@@ -666,7 +866,6 @@ impl<'a> SimpleTyper<'a> {
                     })
                     .collect();
                 self.active_groups.remove(&group);
-                self.active_vars.remove(&var);
                 self.group_types.insert(group, finalized.clone());
                 return Ok(finalized);
             }
@@ -1668,5 +1867,45 @@ mod tests {
             panic!("table read index should be promoted to SIGINTCAST");
         };
         assert_eq!(match_sig(&prepared.arena, inner), SigMatch::Input(0));
+    }
+
+    #[test]
+    fn prepare_signals_for_fir_canonicalizes_unary_recursive_projection_indices() {
+        let mut arena = tlib::TreeArena::new();
+        let self_ref = de_bruijn_ref(&mut arena, 1);
+        let body = {
+            let mut b = SigBuilder::new(&mut arena);
+            let feedback = b.proj(7, self_ref);
+            b.delay1(feedback)
+        };
+        let body_list = arena.cons(body, arena.nil());
+        let group = de_bruijn_rec(&mut arena, body_list);
+        let output = {
+            let mut b = SigBuilder::new(&mut arena);
+            b.proj(7, group)
+        };
+
+        let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
+            .expect("degenerate recursive projection should prepare");
+
+        let SigMatch::Proj(0, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0])
+        else {
+            panic!("prepared output should canonicalize to proj(0, ...)");
+        };
+        let (_, prepared_body_list) =
+            match_sym_rec(&prepared.arena, prepared_group).expect("symbolic recursion expected");
+        let prepared_body = prepared
+            .arena
+            .hd(prepared_body_list)
+            .expect("prepared recursion body head");
+        let SigMatch::Delay1(feedback) = match_sig(&prepared.arena, prepared_body) else {
+            panic!("prepared body should stay SIGDELAY1");
+        };
+        let SigMatch::Proj(0, feedback_group) = match_sig(&prepared.arena, feedback) else {
+            panic!("feedback edge should canonicalize to proj(0, symref(var))");
+        };
+        let (var, _) =
+            match_sym_rec(&prepared.arena, prepared_group).expect("symbolic recursion expected");
+        assert_eq!(match_sym_ref(&prepared.arena, feedback_group), Some(var));
     }
 }
