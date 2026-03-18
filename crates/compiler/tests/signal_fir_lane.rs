@@ -665,6 +665,28 @@ fn fastlane_interp_compiles_noise_smoo_slider_fixture() {
 }
 
 #[test]
+fn default_interp_api_uses_fastlane_runtime_lowering() {
+    let compiler = Compiler::new();
+    let path = corpus_path("rep_56_noise_smoo_slider.dsp");
+
+    let default_fbc = compiler
+        .compile_file_default_to_interp(&path, &InterpOptions::default())
+        .unwrap_or_else(|e| panic!("default interp compilation failed: {e}"));
+    let explicit_fast_fbc = compiler
+        .compile_file_default_to_interp_with_lane(
+            &path,
+            &InterpOptions::default(),
+            SignalFirLane::TransformFastLane,
+        )
+        .unwrap_or_else(|e| panic!("explicit fast-lane interp compilation failed: {e}"));
+
+    assert_eq!(
+        default_fbc, explicit_fast_fbc,
+        "default interp API should follow the executable fast-lane lowering"
+    );
+}
+
+#[test]
 fn fastlane_c_lifecycle_order_matches_faust_instance_init_flow() {
     let fast = compile_c_with_lane(
         "rep_10_two_in_two_out_ui.dsp",

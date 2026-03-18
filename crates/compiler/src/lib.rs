@@ -561,7 +561,7 @@ impl Compiler {
     }
 
     /// Parses + evaluates + propagates one source, then emits `.fbc` bytecode
-    /// text via the interpreter backend using the legacy bridge lane.
+    /// text via the interpreter backend using the transform fast lane.
     pub fn compile_source_to_interp(
         &self,
         source_name: &str,
@@ -572,7 +572,7 @@ impl Compiler {
             source_name,
             source,
             options,
-            SignalFirLane::LegacyBridge,
+            SignalFirLane::TransformFastLane,
         )
     }
 
@@ -598,7 +598,7 @@ impl Compiler {
     }
 
     /// Parses + evaluates + propagates one file, then emits `.fbc` bytecode
-    /// text via the interpreter backend using the legacy bridge lane.
+    /// text via the interpreter backend using the transform fast lane.
     pub fn compile_file_to_interp(
         &self,
         path: &Path,
@@ -609,7 +609,7 @@ impl Compiler {
             path,
             search_paths,
             options,
-            SignalFirLane::LegacyBridge,
+            SignalFirLane::TransformFastLane,
         )
     }
 
@@ -642,7 +642,11 @@ impl Compiler {
         path: &Path,
         options: &InterpOptions,
     ) -> Result<String, CompilerError> {
-        self.compile_file_default_to_interp_with_lane(path, options, SignalFirLane::LegacyBridge)
+        self.compile_file_default_to_interp_with_lane(
+            path,
+            options,
+            SignalFirLane::TransformFastLane,
+        )
     }
 
     /// Parses + evaluates + propagates one file with default import search
