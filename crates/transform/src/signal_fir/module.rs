@@ -2764,7 +2764,9 @@ fn map_binop(op: BinOp, real_ty: FirType) -> Option<(FirBinOp, FirType)> {
         BinOp::And => Some((FirBinOp::And, FirType::Int32)),
         BinOp::Or => Some((FirBinOp::Or, FirType::Int32)),
         BinOp::Xor => Some((FirBinOp::Xor, FirType::Int32)),
-        BinOp::Lsh | BinOp::ARsh | BinOp::LRsh => None,
+        BinOp::Lsh => Some((FirBinOp::Lsh, FirType::Int32)),
+        BinOp::ARsh => Some((FirBinOp::ARsh, FirType::Int32)),
+        BinOp::LRsh => Some((FirBinOp::LRsh, FirType::Int32)),
     }
 }
 

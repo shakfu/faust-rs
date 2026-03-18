@@ -1206,7 +1206,7 @@ fn emit_value(store: &FirStore, options: &COptions, value: FirId) -> Result<Stri
         FirMatch::BinOp { op, lhs, rhs, .. } => {
             let lhs = emit_value(store, options, lhs)?;
             let rhs = emit_value(store, options, rhs)?;
-            Ok(format!("({lhs} {} {rhs})", emit_binop(op)))
+            Ok(emit_binop_expr(op, &lhs, &rhs))
         }
         FirMatch::Neg { value, .. } => {
             let value = emit_value(store, options, value)?;
@@ -1255,12 +1255,22 @@ fn emit_binop(op: FirBinOp) -> &'static str {
         FirBinOp::And => "&",
         FirBinOp::Or => "|",
         FirBinOp::Xor => "^",
+        FirBinOp::Lsh => "<<",
+        FirBinOp::ARsh => ">>",
+        FirBinOp::LRsh => ">>",
         FirBinOp::Eq => "==",
         FirBinOp::Ne => "!=",
         FirBinOp::Lt => "<",
         FirBinOp::Le => "<=",
         FirBinOp::Gt => ">",
         FirBinOp::Ge => ">=",
+    }
+}
+
+fn emit_binop_expr(op: FirBinOp, lhs: &str, rhs: &str) -> String {
+    match op {
+        FirBinOp::LRsh => format!("((int32_t)(((uint32_t)({lhs})) >> ({rhs})))"),
+        _ => format!("({lhs} {} {rhs})", emit_binop(op)),
     }
 }
 

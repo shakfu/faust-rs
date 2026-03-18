@@ -1688,4 +1688,63 @@ mod tests {
             "integer waveform tables should declare Int32 element type and use the iTbl prefix"
         );
     }
+
+    #[test]
+    fn left_shift_binop_lowers_to_int32_fir_shift() {
+        let mut arena = TreeArena::default();
+        let shifted = {
+            let mut b = SigBuilder::new(&mut arena);
+            let lhs = b.int(1);
+            let rhs = b.int(3);
+            b.binop(BinOp::Lsh, lhs, rhs)
+        };
+
+        let out = compile_signals_to_fir_fastlane_with_ui(
+            &arena,
+            &[shifted],
+            0,
+            1,
+            &UiProgram::empty(),
+            &SignalFirOptions::default(),
+        )
+        .expect("lsh should lower through the fast-lane");
+
+        let dump = fir::dump_fir(&out.store, out.module);
+        assert!(
+            dump.contains("BinOp { op: Lsh") && dump.contains("typ: Int32"),
+            "left shift should lower to an Int32 FIR Lsh binop"
+        );
+    }
+
+    #[test]
+    fn right_shift_binops_lower_to_int32_fir_shifts() {
+        for (source_op, expected_op) in
+            [(BinOp::ARsh, FirBinOp::ARsh), (BinOp::LRsh, FirBinOp::LRsh)]
+        {
+            let mut arena = TreeArena::default();
+            let shifted = {
+                let mut b = SigBuilder::new(&mut arena);
+                let lhs = b.int(16);
+                let rhs = b.int(2);
+                b.binop(source_op, lhs, rhs)
+            };
+
+            let out = compile_signals_to_fir_fastlane_with_ui(
+                &arena,
+                &[shifted],
+                0,
+                1,
+                &UiProgram::empty(),
+                &SignalFirOptions::default(),
+            )
+            .expect("right shift should lower through the fast-lane");
+
+            let dump = fir::dump_fir(&out.store, out.module);
+            let needle = format!("BinOp {{ op: {expected_op:?}");
+            assert!(
+                dump.contains(&needle) && dump.contains("typ: Int32"),
+                "right shift should lower to an Int32 FIR {expected_op:?} binop"
+            );
+        }
+    }
 }
