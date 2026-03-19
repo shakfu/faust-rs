@@ -3407,7 +3407,14 @@ fn propagate_box_and_simplify(arena: &mut TreeArena, box_id: TreeId) -> Option<S
 pub(crate) fn simplify_pattern(arena: &mut TreeArena, box_id: TreeId) -> TreeId {
     // Fast path: already a literal.
     match match_box(arena, box_id) {
-        BoxMatch::Int(_) | BoxMatch::Real(_) => return box_id,
+        BoxMatch::Int(_) => return box_id,
+        BoxMatch::Real(x) => {
+            let i = x as i32;
+            if (i as f64) == x {
+                return BoxBuilder::new(arena).int(i);
+            }
+            return box_id;
+        }
         _ => {}
     }
     let Some(sig) = propagate_box_and_simplify(arena, box_id) else {
@@ -3631,6 +3638,19 @@ fn numeric_box_simplification(
     if let Some(sig) = propagate_box_and_simplify(arena, box_id) {
         match match_sig(arena, sig) {
             SigMatch::Real(x) => {
+                // Observable C++ parity:
+                // compile-time boolean/integer expressions can sometimes reach
+                // box simplification as exact reals (`1.0`, `0.0`) after signal
+                // propagation. The C++ evaluator still treats these as integer
+                // constants in downstream contexts such as pattern matching for
+                // `case` dispatch. Collapse exact integer reals back to
+                // `boxInt` here so residual `case` applications see the same
+                // constant class on examples like `routes.lib`'s
+                // `comparatorDirections(...)`.
+                let i = x as i32;
+                if (i as f64) == x {
+                    return BoxBuilder::new(arena).int(i);
+                }
                 return BoxBuilder::new(arena).real(x);
             }
             SigMatch::Int(i) => {

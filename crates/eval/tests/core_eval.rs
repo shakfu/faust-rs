@@ -958,6 +958,35 @@ process = dot(2, selectbus(2,2,0), selectbus(2,2,1));
 }
 
 #[test]
+fn eval_process_matches_exact_integer_real_case_arguments_like_cpp() {
+    let source = r#"
+comparatorDes(x0, x1) = max(x0, x1) , min(x0, x1);
+comparatorAsc(x0, x1) = min(x0, x1) , max(x0, x1);
+comparator(0, x0, x1) = comparatorDes(x0, x1);
+comparator(1, x0, x1) = comparatorAsc(x0, x1);
+dir(i) = (i % (2 ^ 1) < (2 ^ 0));
+process = comparator(dir(0));
+"#;
+
+    let parsed = parse_program(source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept exact-integer-real case repro: {:?}",
+        parsed.errors
+    );
+
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+    let out = eval_process(&mut arena, root)
+        .expect("exact integer reals should match integer case constants like Faust C++");
+
+    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+        .expect("evaluated comparator should stay well-typed");
+    assert_eq!(arity.inputs, 2);
+    assert_eq!(arity.outputs, 2);
+}
+
+#[test]
 fn eval_process_accepts_numeric_seq_as_iterator_count() {
     let source = r#"
 count = max(1, 0);
