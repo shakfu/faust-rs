@@ -57,7 +57,7 @@
 //! consumers, but it should not be mistaken for a full Rust port of the C++
 //! degenerate-recursion elimination machinery.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 
@@ -217,7 +217,8 @@ fn canonicalize_unary_rec_projections(
     root: SigId,
 ) -> Result<SigId, SignalPrepareError> {
     let mut unary_groups = HashMap::new();
-    collect_unary_sym_groups(arena, root, &mut unary_groups)?;
+    let mut visited = HashSet::new();
+    collect_unary_sym_groups(arena, root, &mut unary_groups, &mut visited)?;
     let mut memo = HashMap::new();
     rewrite_unary_rec_projections(arena, root, &unary_groups, &mut memo)
 }
@@ -231,7 +232,12 @@ fn collect_unary_sym_groups(
     arena: &TreeArena,
     sig: SigId,
     unary_groups: &mut HashMap<SigId, usize>,
+    visited: &mut HashSet<SigId>,
 ) -> Result<(), SignalPrepareError> {
+    if !visited.insert(sig) {
+        return Ok(());
+    }
+
     if let Some((var, body_list)) = match_sym_rec(arena, sig) {
         let bodies = list_to_vec(arena, body_list).ok_or_else(|| {
             SignalPrepareError::Typing("malformed symbolic recursion body list".to_owned())
@@ -240,7 +246,7 @@ fn collect_unary_sym_groups(
             unary_groups.insert(var, 1);
         }
         for body in bodies {
-            collect_unary_sym_groups(arena, body, unary_groups)?;
+            collect_unary_sym_groups(arena, body, unary_groups, visited)?;
         }
         return Ok(());
     }
@@ -263,10 +269,10 @@ fn collect_unary_sym_groups(
                 )
             })?;
             for item in items {
-                collect_unary_sym_groups(arena, item, unary_groups)?;
+                collect_unary_sym_groups(arena, item, unary_groups, visited)?;
             }
         } else {
-            collect_unary_sym_groups(arena, *child, unary_groups)?;
+            collect_unary_sym_groups(arena, *child, unary_groups, visited)?;
         }
     }
     Ok(())
@@ -1907,5 +1913,35 @@ mod tests {
         let (var, _) =
             match_sym_rec(&prepared.arena, prepared_group).expect("symbolic recursion expected");
         assert_eq!(match_sym_ref(&prepared.arena, feedback_group), Some(var));
+    }
+
+    #[test]
+    fn prepare_signals_for_fir_handles_shared_unary_recursion_dag_linearly() {
+        let mut arena = tlib::TreeArena::new();
+        let self_ref = de_bruijn_ref(&mut arena, 1);
+        let body = {
+            let mut b = SigBuilder::new(&mut arena);
+            let feedback = b.proj(7, self_ref);
+            b.delay1(feedback)
+        };
+        let body_list = arena.cons(body, arena.nil());
+        let group = de_bruijn_rec(&mut arena, body_list);
+        let leaf = {
+            let mut b = SigBuilder::new(&mut arena);
+            b.proj(7, group)
+        };
+        let mut shared = leaf;
+        for _ in 0..24 {
+            let mut b = SigBuilder::new(&mut arena);
+            shared = b.add(shared, shared);
+        }
+
+        let prepared = prepare_signals_for_fir(&arena, &[shared], &ui::UiProgram::empty())
+            .expect("shared unary recursion dag should prepare");
+
+        assert!(
+            prepared.outputs[0].as_u32() != 0,
+            "preparation should produce a staged output"
+        );
     }
 }

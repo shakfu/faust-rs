@@ -315,7 +315,34 @@ Purpose:
 - prevents duplicate FIR subgraphs and keeps lowering linear in the shared
   graph size.
 
-### 2.14 `tlib`: de Bruijn recursion conversion memos
+### 2.14 `transform`: unary symbolic recursion discovery visitation set
+
+Status: implemented
+
+Location:
+
+- `crates/transform/src/signal_prepare.rs`
+
+Memoized state:
+
+- `HashSet<SigId>` threaded through `collect_unary_sym_groups(...)`
+
+Purpose:
+
+- memoizes traversal reachability while discovering unary symbolic recursion
+  groups during `prepare_signals_for_fir(...)`,
+- ensures each shared signal node is analyzed at most once for this discovery
+  phase,
+- prevents exponential revisitation on shared DAGs such as
+  `dsp/cubic_distortion.dsp`.
+
+Constraint:
+
+- this is traversal-state memoization, not a semantic result cache,
+- it is scoped to one preparation forest and only guards the read-only
+  discovery walk that populates the unary-group map.
+
+### 2.15 `tlib`: de Bruijn recursion conversion memos
 
 Status: implemented
 
