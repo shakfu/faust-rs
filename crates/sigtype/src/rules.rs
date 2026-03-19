@@ -87,6 +87,9 @@ struct RecTypingState {
     age_max: Vec<Vec<i32>>,
 }
 
+const RECURSIVE_NARROWING_LIMIT: usize = 0;
+const RECURSIVE_WIDENING_LIMIT: i32 = 0;
+
 impl RecTypingState {
     /// Builds one explicit recursive typing state from already-symbolic outputs.
     ///
@@ -241,6 +244,16 @@ impl<'a> TypeAnnotator<'a> {
     /// # C++ source
     /// `typeAnnotation(Tree sig, bool causality)` entry point.
     pub fn annotate(&mut self, outputs: &[SigId]) -> Result<HashMap<SigId, SigType>, TypeError> {
+        let mut rec_state = RecTypingState::discover(self.arena, outputs)?;
+        if !rec_state.groups.is_empty() {
+            self.solve_recursive_groups(&mut rec_state)?;
+            self.env.clear();
+            self.in_progress.clear();
+            self.seed_rec_groups(&rec_state.groups, &rec_state.current);
+            for group in &rec_state.groups {
+                self.infer(group.body_list)?;
+            }
+        }
         for &out in outputs {
             self.infer(out)?;
         }
@@ -683,6 +696,81 @@ impl<'a> TypeAnnotator<'a> {
         }
     }
 
+    fn solve_recursive_groups(&mut self, state: &mut RecTypingState) -> Result<(), TypeError> {
+        for _ in 0..RECURSIVE_NARROWING_LIMIT {
+            self.update_rec_types(&state.groups, &mut state.upper, true)?;
+        }
+
+        loop {
+            let prev = state.current.clone();
+            self.update_rec_types(&state.groups, &mut state.current, false)?;
+            let mut finished = true;
+
+            for g in 0..state.groups.len() {
+                if state.current[g] != prev[g] {
+                    finished = false;
+                    state.current[g] = apply_recursive_widening(
+                        prev[g].clone(),
+                        state.current[g].clone(),
+                        state.upper[g].clone(),
+                        &mut state.age_min[g],
+                        &mut state.age_max[g],
+                    )?;
+                }
+            }
+
+            if finished {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn update_rec_types(
+        &mut self,
+        groups: &[RecGroup],
+        approximations: &mut [SigType],
+        inter: bool,
+    ) -> Result<(), TypeError> {
+        self.env.clear();
+        self.in_progress.clear();
+        self.seed_rec_groups(groups, approximations);
+
+        let mut next = Vec::with_capacity(groups.len());
+        for (group, old) in groups.iter().zip(approximations.iter()) {
+            let old_tuplet = as_tuplet_type(old)?;
+            let inferred = self.infer(group.body_list)?;
+            let new_tuplet = as_tuplet_type(&inferred)?;
+            let mut items = Vec::with_capacity(group.arity);
+            for j in 0..group.arity {
+                let mut component = new_tuplet.components[j].clone();
+                let old_i = old_tuplet.components[j].interval();
+                let new_i = component.interval();
+                let merged_i = if inter {
+                    interval::intersection(new_i, old_i)
+                } else {
+                    interval::reunion(new_i, old_i)
+                };
+                component = component.promote_interval(merged_i);
+                items.push(component);
+            }
+            next.push(make_tuplet(items));
+        }
+
+        approximations.clone_from_slice(&next);
+        self.env.clear();
+        self.in_progress.clear();
+        Ok(())
+    }
+
+    fn seed_rec_groups(&mut self, groups: &[RecGroup], approximations: &[SigType]) {
+        for (group, ty) in groups.iter().zip(approximations.iter()) {
+            self.env.insert(group.rec_sig, ty.clone());
+            self.env.insert(group.var, ty.clone());
+        }
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
@@ -901,44 +989,18 @@ impl<'a> TypeAnnotator<'a> {
     /// `sigtyperules.cpp`.
     ///
     /// Adaptation status:
-    /// - aligned with C++ on the initial recursive approximation (`TREC`),
-    /// - aligned on iterative re-evaluation until stability,
-    /// - still adapted in mechanism: Rust invalidates memoised body subtrees
-    ///   between iterations instead of using the C++ vector-based global
-    ///   `updateRecTypes(...)` driver.
+    /// - active path now expects recursive groups to have been solved by the
+    ///   global `annotate(...)` driver before ordinary subtree typing runs,
+    /// - this method is therefore only a seeded lookup / conservative fallback,
+    ///   not a local recursive solver anymore.
     fn infer_sym_rec(&mut self, sig: SigId) -> Result<SigType, TypeError> {
         let Some((var, body)) = match_sym_rec(self.arena, sig) else {
             return Ok(make_maximal());
         };
-
-        // C++ parity: recursive groups start from `TREC` (integer sample/init,
-        // scalar, zero interval) with one component per body slot, not from a
-        // single maximal scalar.
-        self.env.insert(var, initial_rec_type(self.arena, body)?);
-        let upper = maximal_rec_type(self.arena, body)?;
-
-        // Fixed-point iteration: refine until stable.
-        loop {
-            let prev = self.env.get(&var).cloned().unwrap_or_else(|| {
-                initial_rec_type(self.arena, body).expect("body already validated")
-            });
-            let mut invalidated = HashSet::new();
-            self.invalidate_cached_subtree_types(body, &mut invalidated)?;
-            let raw = self.infer(body)?;
-            let next = widen_recursive_type(prev.clone(), raw, upper.clone())?;
-            self.env.insert(var, next.clone());
-            if next == prev {
-                break;
-            }
-        }
-
-        let mut invalidated = HashSet::new();
-        self.invalidate_cached_subtree_types(body, &mut invalidated)?;
-        let _ = self.infer(body)?;
-
         Ok(self
             .env
-            .get(&var)
+            .get(&sig)
+            .or_else(|| self.env.get(&var))
             .cloned()
             .unwrap_or_else(|| initial_rec_type(self.arena, body).expect("body already validated")))
     }
@@ -963,54 +1025,6 @@ impl<'a> TypeAnnotator<'a> {
             .promote_variability(gv)
             .promote_computability(gc)
             .promote_vectorability(Vectorability::Scal))
-    }
-
-    fn invalidate_cached_subtree_types(
-        &mut self,
-        sig: SigId,
-        visited: &mut HashSet<SigId>,
-    ) -> Result<(), TypeError> {
-        if !visited.insert(sig) {
-            return Ok(());
-        }
-
-        self.env.remove(&sig);
-
-        if self.arena.is_nil(sig) {
-            return Ok(());
-        }
-
-        if self.arena.is_list(sig) {
-            let head = self.arena.hd(sig).ok_or_else(|| {
-                TypeError("malformed list payload during recursive cache invalidation".to_owned())
-            })?;
-            let tail = self.arena.tl(sig).ok_or_else(|| {
-                TypeError("malformed list payload during recursive cache invalidation".to_owned())
-            })?;
-            self.invalidate_cached_subtree_types(head, visited)?;
-            self.invalidate_cached_subtree_types(tail, visited)?;
-            return Ok(());
-        }
-
-        if let Some((_var, body_list)) = match_sym_rec(self.arena, sig) {
-            self.invalidate_cached_subtree_types(body_list, visited)?;
-            return Ok(());
-        }
-
-        if match_sym_ref(self.arena, sig).is_some() {
-            return Ok(());
-        }
-
-        let node = self.arena.node(sig).ok_or_else(|| {
-            TypeError(format!(
-                "missing node {} during recursive cache invalidation",
-                sig.as_u32()
-            ))
-        })?;
-        for child in node.children.as_slice() {
-            self.invalidate_cached_subtree_types(*child, visited)?;
-        }
-        Ok(())
     }
 
     fn infer_list_items(&mut self, list: SigId) -> Result<Vec<SigType>, TypeError> {
@@ -1112,39 +1126,50 @@ fn maximal_rec_type(arena: &TreeArena, body: SigId) -> Result<SigType, TypeError
     Ok(make_tuplet(items))
 }
 
-/// Update one recursive-group approximation using the same interval strategy as
-/// C++ `updateRecTypes(..., inter = false)` followed by the default widening
-/// policy from `typeAnnotation()`.
-///
-/// Semantics:
-/// - type coordinates come from the newly inferred recursive body,
-/// - intervals are first reunited with the previous approximation,
-/// - with Faust's default `gWideningLimit = 0`, any drifting lower/upper bound
-///   is widened immediately to the corresponding `TRECMAX` bound.
-fn widen_recursive_type(prev: SigType, raw: SigType, upper: SigType) -> Result<SigType, TypeError> {
-    let (SigType::Tuplet(prev), SigType::Tuplet(raw), SigType::Tuplet(upper)) = (prev, raw, upper)
-    else {
+fn as_tuplet_type(ty: &SigType) -> Result<&crate::types::TupletType, TypeError> {
+    let SigType::Tuplet(tuplet) = ty else {
         return Err(TypeError(
             "recursive type update expected tuplet approximations".to_owned(),
         ));
     };
+    Ok(tuplet)
+}
 
-    let mut items = Vec::with_capacity(raw.components.len());
-    for ((new_comp, old_comp), upper_comp) in raw
-        .components
-        .iter()
-        .zip(prev.components.iter())
-        .zip(upper.components.iter())
+/// Apply the C++ widening logic from `typeAnnotation(...)` to one recursive
+/// group after `updateRecTypes(..., inter = false)` has produced a new
+/// approximation.
+fn apply_recursive_widening(
+    prev: SigType,
+    next: SigType,
+    upper: SigType,
+    age_min: &mut [i32],
+    age_max: &mut [i32],
+) -> Result<SigType, TypeError> {
+    let prev = as_tuplet_type(&prev)?;
+    let next = as_tuplet_type(&next)?;
+    let upper = as_tuplet_type(&upper)?;
+
+    let mut items = Vec::with_capacity(next.components.len());
+    for (index, (new_comp, old_comp)) in next.components.iter().zip(prev.components.iter()).enumerate()
     {
-        let mut widened = interval::reunion(new_comp.interval(), old_comp.interval());
-        if widened.lo() != old_comp.interval().lo() {
-            widened =
-                interval::Interval::new(upper_comp.interval().lo(), widened.hi(), widened.lsb());
+        let mut widened = new_comp.interval();
+        let old_i = old_comp.interval();
+
+        if widened.lo() != old_i.lo() {
+            age_min[index] += 1;
+            if age_min[index] > RECURSIVE_WIDENING_LIMIT {
+                widened =
+                    interval::Interval::new(upper.components[index].interval().lo(), widened.hi(), widened.lsb());
+            }
         }
-        if widened.hi() != old_comp.interval().hi() {
-            widened =
-                interval::Interval::new(widened.lo(), upper_comp.interval().hi(), widened.lsb());
+        if widened.hi() != old_i.hi() {
+            age_max[index] += 1;
+            if age_max[index] > RECURSIVE_WIDENING_LIMIT {
+                widened =
+                    interval::Interval::new(widened.lo(), upper.components[index].interval().hi(), widened.lsb());
+            }
         }
+
         items.push(new_comp.clone().promote_interval(widened));
     }
 
