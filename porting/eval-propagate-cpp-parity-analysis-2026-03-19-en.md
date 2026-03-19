@@ -328,6 +328,9 @@ Completed in:
 
 ### 8.3 Priority A: add a corpus of `eval` differential micro-fixtures
 
+Status:
+- completed on 2026-03-19
+
 Goal:
 - stop discovering `eval` parity bugs only through large library DSPs.
 
@@ -356,6 +359,10 @@ Suggested location:
 
 Expected parity gain:
 - moves the workflow from reactive debugging to stable differential guarding.
+
+Completed in:
+- `pending` current step: `tests/eval_micro_fixtures/` corpus and
+  `crates/compiler/tests/eval_cpp_micro_differential.rs`
 
 ### 8.4 Priority B: reduce `eval` adaptation around import/loading shape
 
