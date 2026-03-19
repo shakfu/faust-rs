@@ -785,6 +785,32 @@ process = displaygain(compressor_stereo(5,-30,0.01,0.1));
 }
 
 #[test]
+fn eval_process_iterative_count_accepts_inputs_of_residual_closure_like_cpp() {
+    let source = r#"
+f(n,x) = x,x;
+g = par(i, inputs(f(1)), _);
+process = g;
+"#;
+
+    let parsed = parse_program(source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept inputs(closure) iteration repro: {:?}",
+        parsed.errors
+    );
+
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+    let out = eval_process(&mut arena, root)
+        .expect("inputs(residual closure) should reduce through a2sb like C++");
+
+    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+        .expect("evaluated process should remain well-typed");
+    assert_eq!(arity.inputs, 1);
+    assert_eq!(arity.outputs, 1);
+}
+
+#[test]
 fn eval_process_reuses_residual_case_argument_inside_local_abstraction() {
     let source = r#"
 poly(1,x)=11;

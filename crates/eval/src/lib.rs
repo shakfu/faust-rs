@@ -2535,24 +2535,26 @@ fn eval_value(
         //   → outputs((0,1,2,3,4)) must reduce to boxInt(5) at eval time.
         BoxMatch::Outputs(inner) => {
             let inner_val = eval_box(arena, inner, env, loop_detector)?;
-            if let Some((_ins, outs)) = infer_box_arity(arena, inner_val) {
+            let lowered = a2sb(arena, inner_val, loop_detector)?;
+            if let Some((_ins, outs)) = infer_box_arity(arena, lowered) {
                 let n = i32::try_from(outs).unwrap_or(i32::MAX);
                 let mut bld = BoxBuilder::new(arena);
                 Ok(EvalValue::Box(bld.int(n)))
             } else {
                 let mut bld = BoxBuilder::new(arena);
-                Ok(EvalValue::Box(bld.outputs(inner_val)))
+                Ok(EvalValue::Box(bld.outputs(lowered)))
             }
         }
         BoxMatch::Inputs(inner) => {
             let inner_val = eval_box(arena, inner, env, loop_detector)?;
-            if let Some((ins, _outs)) = infer_box_arity(arena, inner_val) {
+            let lowered = a2sb(arena, inner_val, loop_detector)?;
+            if let Some((ins, _outs)) = infer_box_arity(arena, lowered) {
                 let n = i32::try_from(ins).unwrap_or(i32::MAX);
                 let mut bld = BoxBuilder::new(arena);
                 Ok(EvalValue::Box(bld.int(n)))
             } else {
                 let mut bld = BoxBuilder::new(arena);
-                Ok(EvalValue::Box(bld.inputs(inner_val)))
+                Ok(EvalValue::Box(bld.inputs(lowered)))
             }
         }
         _ => Ok(EvalValue::Box(map_children(
