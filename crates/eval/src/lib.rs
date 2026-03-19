@@ -5800,11 +5800,12 @@ mod simplify_helpers_tests {
     use tlib::TreeArena;
 
     use super::{
-        Environment, LoopDetector, box_simplification, eval_box, eval_box_to_f64, eval_box_to_i32,
-        eval_box_to_int_list_node, eval_box_to_int_node, flatten_route_spec,
-        is_numerical_tuple_box, normalize_route_spec, propagate_box_and_simplify,
-        try_fold_seq_numeric,
+        Environment, LoopDetector, a2sb, box_simplification, eval_box, eval_box_to_f64,
+        eval_box_to_i32, eval_box_to_int_list_node, eval_box_to_int_node, flatten_route_spec,
+        infer_box_arity_for_apply, is_numerical_tuple_box, normalize_route_spec,
+        propagate_box_and_simplify, try_fold_seq_numeric,
     };
+    use parser::parse_program;
 
     /// Build `Seq(Par(Int(a), Int(b)), Add)` — the box-calculus encoding of `a + b`.
     fn make_int_add(arena: &mut TreeArena, a: i32, b: i32) -> tlib::TreeId {
@@ -6308,5 +6309,134 @@ mod simplify_helpers_tests {
             })
             .collect();
         assert_eq!(vals, [1, 1, 2, 2]);
+    }
+
+    /// Reusing the same residual abstraction inside one evaluation session must
+    /// reuse one `a2sb(...)` lowering, like C++ `gSymbolicBoxProperty`.
+    #[test]
+    fn a2sb_reuses_residual_abstraction_within_one_loop_detector() {
+        let mut arena = TreeArena::default();
+        let x = arena.intern_symbol("x");
+        let ident = BoxBuilder::new(&mut arena).ident("x");
+        let lambda = BoxBuilder::new(&mut arena).abstr(ident, ident);
+        let mut ld = LoopDetector::new();
+
+        let first = a2sb(&mut arena, lambda, &mut ld).expect("first lowering should succeed");
+        let second = a2sb(&mut arena, lambda, &mut ld).expect("second lowering should succeed");
+
+        assert_eq!(
+            first, second,
+            "same residual abstraction should reuse one symbolic lowering"
+        );
+        assert!(
+            ld.symbolic_box_cache.contains_key(&lambda),
+            "a2sb cache should retain the residual abstraction key"
+        );
+        let BoxMatch::Symbolic(slot, body) = match_box(&arena, first) else {
+            panic!("expected symbolic lowering");
+        };
+        assert_eq!(slot, body);
+        assert_eq!(
+            x,
+            arena
+                .get_symbol("x")
+                .expect("symbol should remain interned")
+        );
+    }
+
+    /// `a2sb(...)` cache entries are per-session. Fresh `LoopDetector`s may
+    /// rebuild the same interned symbolic form, but they must not share cache
+    /// state across evaluation sessions.
+    #[test]
+    fn a2sb_does_not_reuse_residual_abstraction_across_loop_detectors() {
+        let mut arena = TreeArena::default();
+        let ident = BoxBuilder::new(&mut arena).ident("x");
+        let lambda = BoxBuilder::new(&mut arena).abstr(ident, ident);
+
+        let mut first_ld = LoopDetector::new();
+        let first = a2sb(&mut arena, lambda, &mut first_ld).expect("first lowering should succeed");
+        assert!(
+            first_ld.symbolic_box_cache.contains_key(&lambda),
+            "first session should populate its own symbolic cache"
+        );
+
+        let mut second_ld = LoopDetector::new();
+        assert!(
+            second_ld.symbolic_box_cache.is_empty(),
+            "fresh session should start with an empty symbolic cache"
+        );
+        let second =
+            a2sb(&mut arena, lambda, &mut second_ld).expect("second lowering should succeed");
+        assert_eq!(
+            first, second,
+            "independent sessions may still rebuild the same interned symbolic form"
+        );
+        assert!(
+            second_ld.symbolic_box_cache.contains_key(&lambda),
+            "second session should populate its own symbolic cache independently"
+        );
+    }
+
+    /// Residual `case` values should also reuse their symbolic lowering within
+    /// one evaluation session.
+    #[test]
+    fn a2sb_reuses_residual_case_within_one_loop_detector() {
+        let parsed = parse_program(
+            r#"
+process = case {
+  (x) => x;
+  (0) => _;
+};
+"#,
+            "<memory>",
+        );
+        assert!(
+            parsed.errors.is_empty(),
+            "unexpected parse errors: {:?}",
+            parsed.errors
+        );
+        let mut arena = parsed.state.arena;
+        let defs = parsed.root.expect("root should exist");
+        let def = arena.hd(defs).expect("process def");
+        let payload = arena.tl(def).expect("definition payload");
+        let expr = arena.tl(payload).expect("definition expr");
+        let mut ld = LoopDetector::new();
+
+        let first = a2sb(&mut arena, expr, &mut ld).expect("first case lowering should succeed");
+        let second = a2sb(&mut arena, expr, &mut ld).expect("second case lowering should succeed");
+
+        assert_eq!(
+            first, second,
+            "same residual case should reuse one symbolic lowering"
+        );
+        assert!(
+            ld.symbolic_box_cache.contains_key(&expr),
+            "a2sb cache should retain the residual case key"
+        );
+    }
+
+    /// Application-side arity probing should consume the same cached `a2sb`
+    /// lowering instead of rebuilding a fresh symbolic closure each time.
+    #[test]
+    fn infer_box_arity_for_apply_reuses_cached_a2sb_lowering() {
+        let mut arena = TreeArena::default();
+        let x = BoxBuilder::new(&mut arena).ident("x");
+        let xx = BoxBuilder::new(&mut arena).par(x, x);
+        let lambda = BoxBuilder::new(&mut arena).abstr(x, xx);
+        let mut ld = LoopDetector::new();
+
+        let first =
+            infer_box_arity_for_apply(&mut arena, lambda, &mut ld).expect("first arity probe");
+        let cached_len = ld.symbolic_box_cache.len();
+        let second =
+            infer_box_arity_for_apply(&mut arena, lambda, &mut ld).expect("second arity probe");
+
+        assert_eq!(first, (1, 2));
+        assert_eq!(second, (1, 2));
+        assert_eq!(
+            ld.symbolic_box_cache.len(),
+            cached_len,
+            "repeated apply-time arity probing should reuse cached a2sb lowering"
+        );
     }
 }

@@ -391,6 +391,9 @@ Started in:
 
 ### 8.5 Priority B: audit `a2sb(...)` memoization boundaries
 
+Status:
+- completed on 2026-03-19
+
 Goal:
 - ensure Rust memoization matches the observable C++ `gSymbolicBoxProperty` behavior without over-reusing lowered nodes across semantically distinct contexts.
 
@@ -410,6 +413,10 @@ Files:
 
 Expected parity gain:
 - lowers the risk of DAG-sharing regressions in the highest-leverage evaluator helper.
+
+Completed in:
+- `pending` current step: explicit `a2sb(...)` reuse/boundary regressions in
+  `crates/eval/src/lib.rs`
 
 ### 8.6 Priority C: continue shrinking the semantic surface of `propagate`
 
