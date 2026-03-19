@@ -468,7 +468,7 @@ fn match_simplification(
 /// Compute `op(t1, t2)` when both are numeric constants.
 ///
 /// Returns `None` for division/remainder by zero.
-/// Integer division truncates toward zero (C semantics).
+/// Faust `/` is real-valued even for integer literals, matching the C++ compiler.
 fn fold_binop(op: BinOp, t1: SigId, t2: SigId, arena: &mut TreeArena) -> Option<SigId> {
     enum V {
         I(i32),
@@ -492,12 +492,7 @@ fn fold_binop(op: BinOp, t1: SigId, t2: SigId, arena: &mut TreeArena) -> Option<
             BinOp::Add => return Some(SigBuilder::new(arena).int(a.wrapping_add(b))),
             BinOp::Sub => return Some(SigBuilder::new(arena).int(a.wrapping_sub(b))),
             BinOp::Mul => return Some(SigBuilder::new(arena).int(a.wrapping_mul(b))),
-            BinOp::Div => {
-                if b == 0 {
-                    return None;
-                }
-                return Some(SigBuilder::new(arena).int(a / b));
-            }
+            BinOp::Div => {}
             BinOp::Rem => {
                 if b == 0 {
                     return None;
@@ -702,6 +697,20 @@ mod tests {
         match match_sig(&a, r) {
             SigMatch::Real(v) => assert!((v - 4.0).abs() < 1e-10),
             other => panic!("expected Real(4.0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn simplify_int_division_to_real_like_cpp() {
+        let mut a = arena();
+        let t = types();
+        let i1 = SigBuilder::new(&mut a).int(1);
+        let i3 = SigBuilder::new(&mut a).int(3);
+        let div = SigBuilder::new(&mut a).div(i1, i3);
+        let r = simplify(&mut a, &t, div);
+        match match_sig(&a, r) {
+            SigMatch::Real(v) => assert!((v - (1.0 / 3.0)).abs() < 1e-12),
+            other => panic!("expected Real(1/3), got {other:?}"),
         }
     }
 

@@ -5752,7 +5752,6 @@ fn numeric_div(lhs: NumericValue, rhs: NumericValue) -> Option<NumericValue> {
     match (lhs, rhs) {
         (_, NumericValue::Int(0)) => None,
         (_, NumericValue::Real(0.0)) => None,
-        (NumericValue::Int(a), NumericValue::Int(b)) => Some(NumericValue::Int(a / b)),
         _ => Some(NumericValue::Real(
             numeric_as_f64(lhs) / numeric_as_f64(rhs),
         )),
@@ -5978,6 +5977,27 @@ mod simplify_helpers_tests {
             matches!(match_box(&arena, result), BoxMatch::Int(5)),
             "expected boxInt(5)"
         );
+    }
+
+    /// Faust `/` is real-valued even for integer literals: `1/3` stays a real constant.
+    ///
+    /// C++ equivalent: `simplifyPattern(box(1/3))` reduces to `boxReal(1.0/3.0)`.
+    #[test]
+    fn simplify_pattern_int_division_is_real_like_cpp() {
+        let mut arena = TreeArena::default();
+        let one = BoxBuilder::new(&mut arena).int(1);
+        let three = BoxBuilder::new(&mut arena).int(3);
+        let div = {
+            let mut b = BoxBuilder::new(&mut arena);
+            let args = b.par(one, three);
+            let op = b.div();
+            b.seq(args, op)
+        };
+        let result = super::simplify_pattern(&mut arena, div);
+        match match_box(&arena, result) {
+            BoxMatch::Real(v) => assert!((v - (1.0 / 3.0)).abs() < 1e-12),
+            other => panic!("expected boxReal(1/3), got {other:?}"),
+        }
     }
 
     /// Wire (1 input) is not a 0-input box — `simplify_pattern` returns it unchanged.

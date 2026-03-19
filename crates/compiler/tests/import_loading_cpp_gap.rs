@@ -33,7 +33,10 @@ fn cpp_accepts_file(cpp_bin: &Path, input: &Path, import_root: &Path) -> Result<
     out_path.push(format!(
         "faust_rs_import_gap_{}_{}.cpp",
         std::process::id(),
-        input.file_stem().and_then(|s| s.to_str()).unwrap_or("fixture")
+        input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("fixture")
     ));
     let output = Command::new(cpp_bin)
         .arg("-pn")
