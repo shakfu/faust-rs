@@ -26,6 +26,27 @@ pub fn saturated_int_cast(d: f64) -> i32 {
     d.clamp(-2_147_483_648.0, 2_147_483_647.0) as i32
 }
 
+/// Saturated addition on interval precision fields.
+///
+/// The C++ interval code uses unchecked `int` arithmetic on `lsb` values. In
+/// Rust debug builds that would panic on overflow, so the port clamps to the
+/// nearest representable precision instead. This preserves release/debug
+/// consistency while keeping the same "best effort" role for precision fields.
+#[inline]
+#[must_use]
+pub fn saturated_precision_add(lhs: i32, rhs: i32) -> i32 {
+    lhs.saturating_add(rhs)
+}
+
+/// Saturated subtraction on interval precision fields.
+///
+/// See [`saturated_precision_add`] for the rationale.
+#[inline]
+#[must_use]
+pub fn saturated_precision_sub(lhs: i32, rhs: i32) -> i32 {
+    lhs.saturating_sub(rhs)
+}
+
 /// Interval value `[lo, hi]` with LSB precision field.
 ///
 /// Empty when either bound is NaN.

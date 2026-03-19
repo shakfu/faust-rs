@@ -10,13 +10,13 @@
 //!    are seeded with the C++ `TREC`-style initial tuplet type, then refined
 //!    through the body until stabilisation.
 //!
-//! Explicit limitation: the current Rust implementation matches the C++
-//! starting approximation (`TREC`) and recursive re-evaluation intent, but it
-//! is not yet a structural port of `typeAnnotation(...)` / `updateRecTypes(...)`.
-//! Rust keeps a memoised `SigId -> SigType` map and invalidates the recursive
-//! body sub-DAG between fixpoint steps so the next iteration is re-inferred
-//! under the updated approximation. C++ instead orchestrates recursive groups
-//! more globally through explicit vectors of group types.
+//! Explicit limitation: the current Rust implementation now follows the same
+//! global recursive-group structure as C++ `typeAnnotation(...)`, but it still
+//! uses Rust value types and memoized maps instead of the C++ pointer-based
+//! `setSigType` / visited-node machinery. The stop condition is therefore
+//! driven by the widened approximation re-injected into the next iteration.
+//! This preserves parity on recursive typing outcomes while remaining an
+//! adapted, not 1:1, port of the C++ control flow.
 //!
 //! # C++ source
 //! `compiler/signals/sigtyperules.cpp` — `inferSigType`, `typeAnnotation`,
@@ -254,8 +254,9 @@ impl<'a> TypeAnnotator<'a> {
                 self.infer(group.body_list)?;
             }
         }
+        let mut visited = HashSet::new();
         for &out in outputs {
-            self.infer(out)?;
+            self.populate_reachable_types(out, &mut visited)?;
         }
         Ok(self.env.clone())
     }
@@ -707,16 +708,17 @@ impl<'a> TypeAnnotator<'a> {
             let mut finished = true;
 
             for g in 0..state.groups.len() {
-                if state.current[g] != prev[g] {
+                let widened = apply_recursive_widening(
+                    prev[g].clone(),
+                    state.current[g].clone(),
+                    state.upper[g].clone(),
+                    &mut state.age_min[g],
+                    &mut state.age_max[g],
+                )?;
+                if widened != prev[g] {
                     finished = false;
-                    state.current[g] = apply_recursive_widening(
-                        prev[g].clone(),
-                        state.current[g].clone(),
-                        state.upper[g].clone(),
-                        &mut state.age_min[g],
-                        &mut state.age_max[g],
-                    )?;
                 }
+                state.current[g] = widened;
             }
 
             if finished {
@@ -769,6 +771,50 @@ impl<'a> TypeAnnotator<'a> {
             self.env.insert(group.rec_sig, ty.clone());
             self.env.insert(group.var, ty.clone());
         }
+    }
+
+    fn populate_reachable_types(
+        &mut self,
+        sig: SigId,
+        visited: &mut HashSet<SigId>,
+    ) -> Result<(), TypeError> {
+        if !visited.insert(sig) {
+            return Ok(());
+        }
+
+        self.infer(sig)?;
+
+        if self.arena.is_nil(sig) {
+            return Ok(());
+        }
+
+        if self.arena.is_list(sig) {
+            let head = self.arena.hd(sig).ok_or_else(|| {
+                TypeError("malformed list during reachable type population".into())
+            })?;
+            let tail = self.arena.tl(sig).ok_or_else(|| {
+                TypeError("malformed list during reachable type population".into())
+            })?;
+            self.populate_reachable_types(head, visited)?;
+            self.populate_reachable_types(tail, visited)?;
+            return Ok(());
+        }
+
+        if let Some((_var, body_list)) = match_sym_rec(self.arena, sig) {
+            self.populate_reachable_types(body_list, visited)?;
+            return Ok(());
+        }
+
+        let node = self.arena.node(sig).ok_or_else(|| {
+            TypeError(format!(
+                "missing signal node {} during type population",
+                sig.as_u32()
+            ))
+        })?;
+        for child in node.children.as_slice() {
+            self.populate_reachable_types(*child, visited)?;
+        }
+        Ok(())
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1150,7 +1196,11 @@ fn apply_recursive_widening(
     let upper = as_tuplet_type(&upper)?;
 
     let mut items = Vec::with_capacity(next.components.len());
-    for (index, (new_comp, old_comp)) in next.components.iter().zip(prev.components.iter()).enumerate()
+    for (index, (new_comp, old_comp)) in next
+        .components
+        .iter()
+        .zip(prev.components.iter())
+        .enumerate()
     {
         let mut widened = new_comp.interval();
         let old_i = old_comp.interval();
@@ -1158,15 +1208,21 @@ fn apply_recursive_widening(
         if widened.lo() != old_i.lo() {
             age_min[index] += 1;
             if age_min[index] > RECURSIVE_WIDENING_LIMIT {
-                widened =
-                    interval::Interval::new(upper.components[index].interval().lo(), widened.hi(), widened.lsb());
+                widened = interval::Interval::new(
+                    upper.components[index].interval().lo(),
+                    widened.hi(),
+                    widened.lsb(),
+                );
             }
         }
         if widened.hi() != old_i.hi() {
             age_max[index] += 1;
             if age_max[index] > RECURSIVE_WIDENING_LIMIT {
-                widened =
-                    interval::Interval::new(widened.lo(), upper.components[index].interval().hi(), widened.lsb());
+                widened = interval::Interval::new(
+                    widened.lo(),
+                    upper.components[index].interval().hi(),
+                    widened.lsb(),
+                );
             }
         }
 
@@ -1212,7 +1268,7 @@ fn infer_write_table_type(tbl: SigType, _wi: SigType, _ws: SigType) -> Result<Si
 #[cfg(test)]
 mod tests {
     use signals::SigBuilder;
-    use tlib::{TreeArena, sym_rec, sym_ref};
+    use tlib::{TreeArena, list_to_vec, sym_rec, sym_ref};
     use ui::UiProgram;
 
     use super::*;
@@ -1297,6 +1353,34 @@ mod tests {
         assert_eq!(current.components[0].interval(), interval::singleton(0.0));
         assert!(upper.components[0].interval().lo().is_finite());
         assert!(upper.components[0].interval().hi().is_finite());
+    }
+
+    #[test]
+    fn recursive_multiplication_converges_and_populates_projection_types() {
+        let mut arena = TreeArena::new();
+        let var = arena.symbol("W0");
+        let body = {
+            let self_ref = sym_ref(&mut arena, var);
+            let left = SigBuilder::new(&mut arena).proj(0, self_ref);
+            let right = SigBuilder::new(&mut arena).proj(0, self_ref);
+            let product = SigBuilder::new(&mut arena).binop(BinOp::Mul, left, right);
+            arena.cons(product, arena.nil())
+        };
+        let rec = sym_rec(&mut arena, var, body);
+        let output = SigBuilder::new(&mut arena).proj(0, rec);
+
+        let types = annotate(&arena, &[output]);
+
+        assert!(
+            types.contains_key(&output),
+            "reachable recursive projection should receive a canonical type"
+        );
+        let body_items = list_to_vec(&arena, body).expect("body list");
+        let product = body_items[0];
+        assert!(
+            types.contains_key(&product),
+            "recursive body expression should also be typed"
+        );
     }
 
     #[test]

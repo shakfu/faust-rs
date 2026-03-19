@@ -9,7 +9,9 @@
 
 use crate::bitwise::{SInterval, bitwise_signed_and, bitwise_signed_or, bitwise_signed_xor};
 use crate::ops::arithmetic::mul;
-use crate::{Interval, empty, saturated_int_cast};
+use crate::{
+    Interval, empty, saturated_int_cast, saturated_precision_add, saturated_precision_sub,
+};
 
 // -------------------------------------------------------------------------
 // Bitwise AND
@@ -131,7 +133,11 @@ pub fn lsh(x: Interval, k: Interval) -> Interval {
     }
     let j = Interval::new(2.0_f64.powf(k.lo()), 2.0_f64.powf(k.hi()), 0);
     let z = mul(x, j);
-    Interval::new(z.lo(), z.hi(), x.lsb() + k.lo() as i32)
+    Interval::new(
+        z.lo(),
+        z.hi(),
+        saturated_precision_add(x.lsb(), k.lo() as i32),
+    )
 }
 
 // -------------------------------------------------------------------------
@@ -149,7 +155,11 @@ pub fn rsh(x: Interval, k: Interval) -> Interval {
     }
     let j = Interval::new(2.0_f64.powf(-k.hi()), 2.0_f64.powf(-k.lo()), 0);
     let z = mul(x, j);
-    Interval::new(z.lo(), z.hi(), x.lsb() - k.lo() as i32)
+    Interval::new(
+        z.lo(),
+        z.hi(),
+        saturated_precision_sub(x.lsb(), k.hi() as i32),
+    )
 }
 
 // -------------------------------------------------------------------------
@@ -330,5 +340,11 @@ mod tests {
         let r = lsh(Interval::new(0.0, 1.0, 0), Interval::new(4.0, 4.0, 0));
         assert_eq!(r.lo(), 0.0);
         assert_eq!(r.hi(), 16.0);
+    }
+
+    #[test]
+    fn rsh_uses_upper_shift_bound_for_precision() {
+        let r = rsh(Interval::new(8.0, 16.0, 2), Interval::new(-2.0, 4.0, 0));
+        assert_eq!(r.lsb(), -2);
     }
 }

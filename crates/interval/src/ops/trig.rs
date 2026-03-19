@@ -8,7 +8,7 @@
 //! `intervalTanh.cpp`
 
 use crate::utils::exact_precision_unary;
-use crate::{Interval, empty};
+use crate::{Interval, empty, saturated_precision_add, saturated_precision_sub};
 use std::f64::consts::{FRAC_PI_2, PI};
 
 // -------------------------------------------------------------------------
@@ -29,7 +29,7 @@ pub fn sin(x: Interval) -> Interval {
     let u = (2.0_f64).powi(x.lsb());
     let mut precision = exact_precision_unary(f64::sin, FRAC_PI_2, u);
     if precision == i32::MIN {
-        precision = 2 * x.lsb() - 1;
+        precision = saturated_precision_sub(x.lsb().saturating_mul(2), 1);
     }
 
     if x.size() >= 2.0 * PI {
@@ -75,9 +75,9 @@ pub fn sin(x: Interval) -> Interval {
     precision = exact_precision_unary(f64::sin, v, u);
     if precision == i32::MIN {
         if v != FRAC_PI_2 {
-            precision = x.lsb() + v.cos().abs().log2().floor() as i32;
+            precision = saturated_precision_add(x.lsb(), v.cos().abs().log2().floor() as i32);
         } else {
-            precision = 2 * x.lsb() - 1;
+            precision = saturated_precision_sub(x.lsb().saturating_mul(2), 1);
         }
     }
 
@@ -101,7 +101,7 @@ pub fn cos(x: Interval) -> Interval {
     let u = (2.0_f64).powi(x.lsb());
     let mut precision = exact_precision_unary(f64::cos, 0.0, u);
     if precision == i32::MIN {
-        precision = 2 * x.lsb() - 1;
+        precision = saturated_precision_sub(x.lsb().saturating_mul(2), 1);
     }
 
     if x.size() >= 2.0 * PI {
@@ -141,9 +141,9 @@ pub fn cos(x: Interval) -> Interval {
     precision = exact_precision_unary(f64::cos, v, u);
     if precision == i32::MIN {
         if v != 0.0 {
-            precision = x.lsb() + v.sin().abs().log2().floor() as i32;
+            precision = saturated_precision_add(x.lsb(), v.sin().abs().log2().floor() as i32);
         } else {
-            precision = 2 * x.lsb() - 1;
+            precision = saturated_precision_sub(x.lsb().saturating_mul(2), 1);
         }
     }
 

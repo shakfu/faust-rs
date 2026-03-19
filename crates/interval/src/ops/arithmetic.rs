@@ -5,7 +5,7 @@
 //! `intervalInv.cpp`, `intervalNeg.cpp`, `intervalAbs.cpp`, `intervalMod.cpp`
 
 use crate::utils::{exact_precision_unary, max_val_abs, max4, min4, sign_max_val_abs};
-use crate::{Interval, empty, singleton};
+use crate::{Interval, empty, saturated_precision_add, singleton};
 
 // -------------------------------------------------------------------------
 // Add
@@ -158,7 +158,7 @@ pub fn mul(x: Interval, y: Interval) -> Interval {
 
     let lo = min4(a, b, c, d);
     let hi = max4(a, b, c, d);
-    let lsb = x.lsb() + y.lsb();
+    let lsb = saturated_precision_add(x.lsb(), y.lsb());
 
     if x.lsb() >= 0 && y.lsb() >= 0 {
         let xmax = x.lo().abs().max(x.hi().abs());
@@ -400,6 +400,15 @@ mod tests {
         let r = mul(Interval::new(-1.0, 1.0, -5), Interval::new(0.0, 1.0, -5));
         assert_eq!(r.lo(), -1.0);
         assert_eq!(r.hi(), 1.0);
+    }
+
+    #[test]
+    fn mul_saturates_precision_overflow() {
+        let r = mul(
+            Interval::new(1.0, 1.0, i32::MAX),
+            Interval::new(1.0, 1.0, 1),
+        );
+        assert_eq!(r.lsb(), i32::MAX);
     }
 
     #[test]
