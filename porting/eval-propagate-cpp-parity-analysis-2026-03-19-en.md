@@ -366,6 +366,9 @@ Completed in:
 
 ### 8.4 Priority B: reduce `eval` adaptation around import/loading shape
 
+Status:
+- in progress on 2026-03-19
+
 Goal:
 - make `eval` receive source graphs closer to the ones C++ actually evaluates.
 
@@ -381,6 +384,10 @@ What to do now:
 
 Expected parity gain:
 - removes a whole class of Rust-only evaluator edge cases instead of patching them one by one.
+
+Started in:
+- `pending` current step: external differential tracker on `faustlibraries/tests/dx7_tests.dsp`
+  `operator_test`
 
 ### 8.5 Priority B: audit `a2sb(...)` memoization boundaries
 
