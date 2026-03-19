@@ -273,10 +273,7 @@ impl<'a> SignalPromoter<'a> {
                 let (init_promoted, value_promoted) = if self.same_type(init, value)? {
                     (init_promoted, value_promoted)
                 } else {
-                    (
-                        self.smart_float_cast(init_promoted, init)?,
-                        self.smart_float_cast(value_promoted, value)?,
-                    )
+                    (self.promote_as_float(init)?, self.promote_as_float(value)?)
                 };
                 SigBuilder::new(self.arena).prefix(init_promoted, value_promoted)
             }
@@ -288,10 +285,7 @@ impl<'a> SignalPromoter<'a> {
                 let inner = self.promote(inner)?;
                 SigBuilder::new(self.arena).bit_cast(inner)
             }
-            SigMatch::FloatCast(inner) => {
-                let inner_promoted = self.promote(inner)?;
-                self.smart_float_cast(inner_promoted, inner)?
-            }
+            SigMatch::FloatCast(inner) => self.promote_as_float(inner)?,
             SigMatch::Gen(inner) => {
                 let inner = self.promote(inner)?;
                 SigBuilder::new(self.arena).generate(inner)
@@ -327,8 +321,8 @@ impl<'a> SignalPromoter<'a> {
                     (then_promoted, else_promoted)
                 } else {
                     (
-                        self.smart_float_cast(then_promoted, then_value)?,
-                        self.smart_float_cast(else_promoted, else_value)?,
+                        self.promote_as_float(then_value)?,
+                        self.promote_as_float(else_value)?,
                     )
                 };
                 SigBuilder::new(self.arena).select2(selector_promoted, then_promoted, else_promoted)
@@ -399,13 +393,11 @@ impl<'a> SignalPromoter<'a> {
             SigMatch::HSlider(control) => SigBuilder::new(self.arena).hslider(control),
             SigMatch::NumEntry(control) => SigBuilder::new(self.arena).numentry(control),
             SigMatch::VBargraph(control, value) => {
-                let value_promoted = self.promote(value)?;
-                let value = self.smart_float_cast(value_promoted, value)?;
+                let value = self.promote_as_float(value)?;
                 SigBuilder::new(self.arena).vbargraph(control, value)
             }
             SigMatch::HBargraph(control, value) => {
-                let value_promoted = self.promote(value)?;
-                let value = self.smart_float_cast(value_promoted, value)?;
+                let value = self.promote_as_float(value)?;
                 SigBuilder::new(self.arena).hbargraph(control, value)
             }
             SigMatch::Attach(left, right) => {
@@ -504,8 +496,8 @@ impl<'a> SignalPromoter<'a> {
                 if node_ty == ReducedSigKind::Int {
                     SigBuilder::new(self.arena).binop(op, left_promoted, right_promoted)
                 } else {
-                    let left_promoted = self.smart_float_cast(left_promoted, left)?;
-                    let right_promoted = self.smart_float_cast(right_promoted, right)?;
+                    let left_promoted = self.promote_as_float(left)?;
+                    let right_promoted = self.promote_as_float(right)?;
                     SigBuilder::new(self.arena).binop(op, left_promoted, right_promoted)
                 }
             }
@@ -513,8 +505,8 @@ impl<'a> SignalPromoter<'a> {
                 if self.same_type(left, right)? {
                     SigBuilder::new(self.arena).binop(op, left_promoted, right_promoted)
                 } else {
-                    let left_promoted = self.smart_float_cast(left_promoted, left)?;
-                    let right_promoted = self.smart_float_cast(right_promoted, right)?;
+                    let left_promoted = self.promote_as_float(left)?;
+                    let right_promoted = self.promote_as_float(right)?;
                     SigBuilder::new(self.arena).binop(op, left_promoted, right_promoted)
                 }
             }
@@ -525,14 +517,14 @@ impl<'a> SignalPromoter<'a> {
                 {
                     SigBuilder::new(self.arena).binop(op, left_promoted, right_promoted)
                 } else {
-                    let left_promoted = self.smart_float_cast(left_promoted, left)?;
-                    let right_promoted = self.smart_float_cast(right_promoted, right)?;
+                    let left_promoted = self.promote_as_float(left)?;
+                    let right_promoted = self.promote_as_float(right)?;
                     SigBuilder::new(self.arena).fmod(left_promoted, right_promoted)
                 }
             }
             BinOp::Div => {
-                let left_promoted = self.smart_float_cast(left_promoted, left)?;
-                let right_promoted = self.smart_float_cast(right_promoted, right)?;
+                let left_promoted = self.promote_as_float(left)?;
+                let right_promoted = self.promote_as_float(right)?;
                 SigBuilder::new(self.arena).binop(op, left_promoted, right_promoted)
             }
             BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Lsh | BinOp::ARsh | BinOp::LRsh => {
@@ -550,8 +542,7 @@ impl<'a> SignalPromoter<'a> {
         build: impl FnOnce(&mut SigBuilder<'_>, SigId) -> SigId,
         inner: SigId,
     ) -> Result<SigId, NormalFormError> {
-        let inner_promoted = self.promote(inner)?;
-        let inner_promoted = self.smart_float_cast(inner_promoted, inner)?;
+        let inner_promoted = self.promote_as_float(inner)?;
         Ok(build(&mut SigBuilder::new(self.arena), inner_promoted))
     }
 
@@ -561,10 +552,8 @@ impl<'a> SignalPromoter<'a> {
         left: SigId,
         right: SigId,
     ) -> Result<SigId, NormalFormError> {
-        let left_promoted = self.promote(left)?;
-        let right_promoted = self.promote(right)?;
-        let left_promoted = self.smart_float_cast(left_promoted, left)?;
-        let right_promoted = self.smart_float_cast(right_promoted, right)?;
+        let left_promoted = self.promote_as_float(left)?;
+        let right_promoted = self.promote_as_float(right)?;
         Ok(build(
             &mut SigBuilder::new(self.arena),
             left_promoted,
@@ -583,10 +572,7 @@ impl<'a> SignalPromoter<'a> {
         let (left_promoted, right_promoted) = if self.same_type(left, right)? {
             (left_promoted, right_promoted)
         } else {
-            (
-                self.smart_float_cast(left_promoted, left)?,
-                self.smart_float_cast(right_promoted, right)?,
-            )
+            (self.promote_as_float(left)?, self.promote_as_float(right)?)
         };
         Ok(build(
             &mut SigBuilder::new(self.arena),
@@ -600,7 +586,7 @@ impl<'a> SignalPromoter<'a> {
         let inner_promoted = if self.kind(inner)? == ReducedSigKind::Int {
             inner_promoted
         } else {
-            self.smart_float_cast(inner_promoted, inner)?
+            self.promote_as_float(inner)?
         };
         Ok(SigBuilder::new(self.arena).abs(inner_promoted))
     }
@@ -684,6 +670,15 @@ impl<'a> SignalPromoter<'a> {
     fn promote_as_int(&mut self, original: SigId) -> Result<SigId, NormalFormError> {
         let promoted = self.promote(original)?;
         self.smart_int_cast(promoted, original)
+    }
+
+    /// Rebuilds one child for a parent that requires a real-domain input.
+    ///
+    /// This mirrors the C++ pattern where arithmetic and math parent rules
+    /// apply `smartFloatCast(...)` directly from the parent site.
+    fn promote_as_float(&mut self, original: SigId) -> Result<SigId, NormalFormError> {
+        let promoted = self.promote(original)?;
+        self.smart_float_cast(promoted, original)
     }
 
     fn smart_float_cast(

@@ -726,6 +726,42 @@ mod tests {
     }
 
     #[test]
+    fn prepare_signals_for_fir_recovers_shared_delay_amount_from_float_context() {
+        let mut arena = tlib::TreeArena::new();
+        let (arith_out, delay_out) = {
+            let mut b = SigBuilder::new(&mut arena);
+            let input0 = b.input(0);
+            let half = b.real(0.5);
+            let cmp = b.lt(input0, half);
+            let input1 = b.input(1);
+            let arith = b.add(cmp, input1);
+            let input2 = b.input(2);
+            let delay = b.delay(input2, cmp);
+            (arith, delay)
+        };
+
+        let prepared =
+            prepare_signals_for_fir(&arena, &[arith_out, delay_out], &ui::UiProgram::empty())
+                .expect("shared comparison should promote in both arithmetic and delay contexts");
+
+        let SigMatch::Delay(_, amount) = match_sig(&prepared.arena, prepared.outputs[1]) else {
+            panic!("second output should stay SIGDELAY");
+        };
+        assert!(
+            matches!(match_sig(&prepared.arena, amount), SigMatch::IntCast(_))
+                || matches!(
+                    match_sig(&prepared.arena, amount),
+                    SigMatch::BinOp(
+                        BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne,
+                        _,
+                        _
+                    )
+                ),
+            "shared delay amount should stay in an integer comparison domain"
+        );
+    }
+
+    #[test]
     fn prepare_signals_for_fir_promotes_table_read_index_to_int() {
         let mut arena = tlib::TreeArena::new();
         let output = {
