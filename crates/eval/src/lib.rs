@@ -4963,13 +4963,15 @@ fn infer_box_arity_for_apply(
     id: TreeId,
     loop_detector: &mut LoopDetector,
 ) -> Option<(usize, usize)> {
-    match match_box(arena, id) {
-        BoxMatch::Closure(_) | BoxMatch::PatternMatcher(_) => {
-            let lowered = a2sb(arena, id, loop_detector).ok()?;
-            infer_box_arity(arena, lowered)
-        }
-        _ => infer_box_arity(arena, id),
-    }
+    // C++ `applyList` / `boxlistOutputs` always run `a2sb(...)` before
+    // `getBoxType(...)` when probing local arity for application lowering.
+    // Doing the same here avoids under-counting residual symbolic boxes such as
+    // partially applied `selectbus(...)`, which otherwise fall back to
+    // "1 output" and trigger spurious implicit wires.
+    a2sb(arena, id, loop_detector)
+        .ok()
+        .and_then(|lowered| infer_box_arity(arena, lowered))
+        .or_else(|| infer_box_arity(arena, id))
 }
 
 /// Local arity inference used by non-closure application lowering.

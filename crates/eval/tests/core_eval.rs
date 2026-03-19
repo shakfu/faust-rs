@@ -918,6 +918,46 @@ process = foo(poly(6))(3);
 }
 
 #[test]
+fn eval_process_counts_residual_selectbus_outputs_via_a2sb_like_cpp() {
+    let source = r#"
+selectnX(N,i,sel) = S(N,0) with {
+  S(1,offset) = _;
+  S(n,offset) = S(left, offset), S(right, offset+left) : sel(i, offset+left)
+  with {
+    right = int(n/2);
+    left = n-right;
+  };
+};
+selectn(N,i) = selectnX(N,i,selector) with {
+  selector(i,j,x,y) = select2((i >= j), x, y);
+};
+interleave(1,2) = _,_;
+interleave(R,C) = route(R*C, R*C, par(i, R*C, (i+1, (i%R)*C + int(i/R) + 1)));
+selectbus(BUS_SIZE, NUM_BUSES, id) =
+  interleave(BUS_SIZE, NUM_BUSES) : par(j, BUS_SIZE, selectn(NUM_BUSES, id));
+dot(N) = interleave(N,2) : par(i,N,*) :> _;
+process = dot(2, selectbus(2,2,0), selectbus(2,2,1));
+"#;
+
+    let parsed = parse_program(source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept selectbus/dot repro: {:?}",
+        parsed.errors
+    );
+
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+    let out = eval_process(&mut arena, root)
+        .expect("residual symbolic selectbus arguments should count outputs via a2sb");
+
+    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+        .expect("evaluated process should remain well-typed");
+    assert_eq!(arity.inputs, 8);
+    assert_eq!(arity.outputs, 1);
+}
+
+#[test]
 fn eval_process_accepts_numeric_seq_as_iterator_count() {
     let source = r#"
 count = max(1, 0);
