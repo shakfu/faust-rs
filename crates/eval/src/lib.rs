@@ -2092,6 +2092,16 @@ fn a2sb(
                 })?;
             a2sb_value(arena, EvalValue::Closure(cv), loop_detector)
         }
+        // Source provenance (C++):
+        // - `compiler/evaluate/eval.cpp`
+        // - `a2sb`
+        //
+        // Mapping status: `1:1`.
+        // Waveform nodes are already first-order constants. Their child is the
+        // encoded `cons` list of samples, which is payload data rather than a
+        // box subtree that should be recursively lowered. Treating it as a
+        // generic child tree causes stack overflows on large tables.
+        BoxMatch::Waveform(_) => Ok(expr),
         _ => {
             let Some(node) = arena.node(expr).cloned() else {
                 return Ok(expr);
@@ -2296,6 +2306,17 @@ fn eval_value(
         // boxPatternMatcher is already in normal form — return as-is.
         // (Mirrors C++ eval.cpp line 638: `isBoxPatternMatcher(box) => box`)
         BoxMatch::PatternMatcher(_) => Ok(EvalValue::Box(expr)),
+        // Source provenance (C++):
+        // - `compiler/evaluate/eval.cpp`
+        // - `isBoxWaveform(box) => box`
+        //
+        // Mapping status: `1:1`.
+        // Waveform payload lists are already parser-normalized constants. The
+        // evaluator must treat the whole waveform node as a leaf normal form
+        // instead of recursively mapping over its internal `cons` list, or
+        // large tables overflow the host stack before `propagate` can lower
+        // them to `(size, waveform)` signals.
+        BoxMatch::Waveform(_) => Ok(EvalValue::Box(expr)),
         // boxClosure: extract the stored ClosureValue from the side-table.
         // (Mirrors C++ eval.cpp: `isClosure(box, ...) => box` — closures
         // are already in normal form as tree nodes.)
@@ -4959,6 +4980,7 @@ fn infer_box_arity(arena: &TreeArena, id: TreeId) -> Option<(usize, usize)> {
         | BoxMatch::VSlider(_, _, _, _, _)
         | BoxMatch::HSlider(_, _, _, _, _)
         | BoxMatch::NumEntry(_, _, _, _, _) => Some((0, 1)),
+        BoxMatch::Waveform(_) => Some((0, 2)),
         BoxMatch::VBargraph(_, _, _) | BoxMatch::HBargraph(_, _, _) => Some((1, 1)),
         BoxMatch::Soundfile(_, chan) => {
             let BoxMatch::Int(channels) = match_box(arena, chan) else {

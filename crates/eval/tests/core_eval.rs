@@ -806,7 +806,60 @@ process = g;
 
     let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
         .expect("evaluated process should remain well-typed");
-    assert_eq!(arity.inputs, 1);
+    assert_eq!(arity.inputs, 0);
+    assert_eq!(arity.outputs, 1);
+}
+
+#[test]
+fn eval_process_applies_rdtable_waveform_argument_without_extra_wire() {
+    let source = r#"
+process = rdtable(waveform{2,3,5,7}, 1);
+"#;
+
+    let parsed = parse_program(source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept rdtable waveform repro: {:?}",
+        parsed.errors
+    );
+
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+    let out = eval_process(&mut arena, root)
+        .expect("rdtable(waveform, x) should not receive an extra implicit wire");
+
+    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+        .expect("evaluated process should remain well-typed");
+    assert_eq!(arity.inputs, 0);
+    assert_eq!(arity.outputs, 1);
+}
+
+#[test]
+fn eval_process_keeps_large_waveform_nodes_as_leaf_values() {
+    let mut source = String::from("process = rdtable(waveform{");
+    for i in 0..2048 {
+        if i > 0 {
+            source.push(',');
+        }
+        source.push_str(&i.to_string());
+    }
+    source.push_str("}, 1);");
+
+    let parsed = parse_program(&source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept large waveform repro: {:?}",
+        parsed.errors
+    );
+
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+    let out = eval_process(&mut arena, root)
+        .expect("large waveform should stay in normal form during eval");
+
+    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+        .expect("evaluated large waveform process should remain well-typed");
+    assert_eq!(arity.inputs, 0);
     assert_eq!(arity.outputs, 1);
 }
 
