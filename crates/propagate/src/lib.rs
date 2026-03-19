@@ -34,7 +34,7 @@
 
 use std::fmt::{Display, Formatter};
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use boxes::{BoxId, BoxMatch, match_box};
 use errors::codes;
 use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
@@ -243,14 +243,48 @@ enum FlatNodeKind {
 /// This is a structural contract check only. It does not evaluate, simplify, or
 /// normalize the tree. Callers should use it at the `eval/a2sb -> propagate`
 /// boundary to guarantee that propagation never sees residual evaluator syntax.
+///
+/// Validation walks the reachable box DAG once with a `visited` set. This keeps
+/// the adapted Rust `FlatBoxId` boundary linear on shared post-eval graphs
+/// (common in large library combinators) instead of recursively re-validating
+/// the same subtrees at every parent decode.
 pub fn try_build_flat_box(arena: &TreeArena, root: BoxId) -> Result<FlatBoxId, FlatBoxBuildError> {
-    validate_flat_box(arena, root)
+    let flat = FlatBoxId::from_tree_id(root);
+    let mut visited = AHashSet::default();
+    validate_flat_box_recursive(arena, flat, &mut visited)?;
+    Ok(flat)
 }
 
-fn validate_flat_box(arena: &TreeArena, node: BoxId) -> Result<FlatBoxId, FlatBoxBuildError> {
-    let flat = FlatBoxId::from_tree_id(node);
-    let _ = flat_node_kind(arena, flat)?;
-    Ok(flat)
+fn validate_flat_box_recursive(
+    arena: &TreeArena,
+    node: FlatBoxId,
+    visited: &mut AHashSet<FlatBoxId>,
+) -> Result<(), FlatBoxBuildError> {
+    if !visited.insert(node) {
+        return Ok(());
+    }
+
+    match flat_node_kind(arena, node)? {
+        FlatNodeKind::Symbolic { body }
+        | FlatNodeKind::Metadata { body }
+        | FlatNodeKind::VGroup { body }
+        | FlatNodeKind::HGroup { body }
+        | FlatNodeKind::TGroup { body }
+        | FlatNodeKind::Ondemand(body)
+        | FlatNodeKind::Upsampling(body)
+        | FlatNodeKind::Downsampling(body) => validate_flat_box_recursive(arena, body, visited)?,
+        FlatNodeKind::Seq(left, right)
+        | FlatNodeKind::Par(left, right)
+        | FlatNodeKind::Split(left, right)
+        | FlatNodeKind::Merge(left, right)
+        | FlatNodeKind::Rec(left, right) => {
+            validate_flat_box_recursive(arena, left, visited)?;
+            validate_flat_box_recursive(arena, right, visited)?;
+        }
+        _ => {}
+    }
+
+    Ok(())
 }
 
 fn flat_node_kind(arena: &TreeArena, node: FlatBoxId) -> Result<FlatNodeKind, FlatBoxBuildError> {
@@ -262,10 +296,10 @@ fn flat_node_kind(arena: &TreeArena, node: FlatBoxId) -> Result<FlatNodeKind, Fl
         BoxMatch::Cut => Ok(FlatNodeKind::Cut),
         BoxMatch::Slot(_) => Ok(FlatNodeKind::Slot),
         BoxMatch::Symbolic(_, body) => Ok(FlatNodeKind::Symbolic {
-            body: validate_flat_box(arena, body)?,
+            body: FlatBoxId::from_tree_id(body),
         }),
         BoxMatch::Metadata(body, _) => Ok(FlatNodeKind::Metadata {
-            body: validate_flat_box(arena, body)?,
+            body: FlatBoxId::from_tree_id(body),
         }),
         BoxMatch::Add
         | BoxMatch::Sub
@@ -332,42 +366,42 @@ fn flat_node_kind(arena: &TreeArena, node: FlatBoxId) -> Result<FlatNodeKind, Fl
         BoxMatch::Soundfile(_, _) => Ok(FlatNodeKind::Soundfile),
         BoxMatch::Waveform(_) => Ok(FlatNodeKind::Waveform),
         BoxMatch::VGroup(_, body) => Ok(FlatNodeKind::VGroup {
-            body: validate_flat_box(arena, body)?,
+            body: FlatBoxId::from_tree_id(body),
         }),
         BoxMatch::HGroup(_, body) => Ok(FlatNodeKind::HGroup {
-            body: validate_flat_box(arena, body)?,
+            body: FlatBoxId::from_tree_id(body),
         }),
         BoxMatch::TGroup(_, body) => Ok(FlatNodeKind::TGroup {
-            body: validate_flat_box(arena, body)?,
+            body: FlatBoxId::from_tree_id(body),
         }),
         BoxMatch::Seq(left, right) => Ok(FlatNodeKind::Seq(
-            validate_flat_box(arena, left)?,
-            validate_flat_box(arena, right)?,
+            FlatBoxId::from_tree_id(left),
+            FlatBoxId::from_tree_id(right),
         )),
         BoxMatch::Par(left, right) => Ok(FlatNodeKind::Par(
-            validate_flat_box(arena, left)?,
-            validate_flat_box(arena, right)?,
+            FlatBoxId::from_tree_id(left),
+            FlatBoxId::from_tree_id(right),
         )),
         BoxMatch::Split(left, right) => Ok(FlatNodeKind::Split(
-            validate_flat_box(arena, left)?,
-            validate_flat_box(arena, right)?,
+            FlatBoxId::from_tree_id(left),
+            FlatBoxId::from_tree_id(right),
         )),
         BoxMatch::Merge(left, right) => Ok(FlatNodeKind::Merge(
-            validate_flat_box(arena, left)?,
-            validate_flat_box(arena, right)?,
+            FlatBoxId::from_tree_id(left),
+            FlatBoxId::from_tree_id(right),
         )),
         BoxMatch::Rec(left, right) => Ok(FlatNodeKind::Rec(
-            validate_flat_box(arena, left)?,
-            validate_flat_box(arena, right)?,
+            FlatBoxId::from_tree_id(left),
+            FlatBoxId::from_tree_id(right),
         )),
         BoxMatch::Environment => Ok(FlatNodeKind::Environment),
         BoxMatch::Route(_, _, _) => Ok(FlatNodeKind::Route),
         BoxMatch::Inputs(_) => Ok(FlatNodeKind::Inputs),
         BoxMatch::Outputs(_) => Ok(FlatNodeKind::Outputs),
-        BoxMatch::Ondemand(body) => Ok(FlatNodeKind::Ondemand(validate_flat_box(arena, body)?)),
-        BoxMatch::Upsampling(body) => Ok(FlatNodeKind::Upsampling(validate_flat_box(arena, body)?)),
+        BoxMatch::Ondemand(body) => Ok(FlatNodeKind::Ondemand(FlatBoxId::from_tree_id(body))),
+        BoxMatch::Upsampling(body) => Ok(FlatNodeKind::Upsampling(FlatBoxId::from_tree_id(body))),
         BoxMatch::Downsampling(body) => {
-            Ok(FlatNodeKind::Downsampling(validate_flat_box(arena, body)?))
+            Ok(FlatNodeKind::Downsampling(FlatBoxId::from_tree_id(body)))
         }
         BoxMatch::Ffunction(_, _, _) => Err(flat_box_unexpected(node_id, "ffunction")),
         BoxMatch::Unknown => Err(flat_box_unexpected(node_id, "unknown")),
@@ -2749,6 +2783,7 @@ fn intern_tag(arena: &mut TreeArena, tag: &str, children: &[TreeId]) -> TreeId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use boxes::BoxBuilder;
     use signals::SigBuilder;
 
     #[test]
@@ -2791,5 +2826,32 @@ mod tests {
             aperture_cache_len,
             "repeating aperture on the same subtree should hit the memo table"
         );
+    }
+
+    #[test]
+    fn try_build_flat_box_accepts_deep_shared_box_dag() {
+        let mut arena = TreeArena::new();
+        let shared = {
+            let mut b = BoxBuilder::new(&mut arena);
+            let left = b.wire();
+            let right = b.wire();
+            let pair = b.par(left, right);
+            let add = b.add();
+            b.seq(pair, add)
+        };
+
+        let mut root = shared;
+        for _ in 0..14 {
+            root = {
+                let mut b = BoxBuilder::new(&mut arena);
+                b.par(root, shared)
+            };
+        }
+
+        let flat = try_build_flat_box(&arena, root).expect("shared DAG should validate once");
+        let arity = box_arity_typed(&arena, flat, &mut ArityCache::new())
+            .expect("validated shared DAG should infer arity");
+        assert_eq!(arity.inputs, 30);
+        assert_eq!(arity.outputs, 15);
     }
 }

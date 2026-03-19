@@ -133,6 +133,38 @@ Constraint:
   occurrences of one residual node can allocate fresh slots and silently change
   arity and behavior.
 
+### 2.4b `eval`: expression/environment result cache
+
+Status: implemented
+
+Location:
+
+- `crates/eval/src/lib.rs`
+
+Cache:
+
+- `LoopDetector.eval_cache: ahash::HashMap<EvalCacheKey, EvalValue>`
+
+Purpose:
+
+- memoizes `eval(expr, env)` for one evaluator session,
+- mirrors the role of C++ `getEvalProperty(...)` / `setEvalProperty(...)`,
+- collapses repeated evaluation of shared higher-order box subgraphs such as
+  `jpverb` in `demos.lib`, where the same closure-heavy subtree is revisited
+  under the same lexical environment many times.
+
+Constraint:
+
+- the key is the original `TreeId` plus the full lexical environment identity
+  (`store`, `env_id`, `source_context`),
+- this cache is session-local and must not outlive one evaluation pass,
+- because Rust keeps partially applied pattern matchers as host-side values
+  with mutable rule-environment state, `EvalValue::PatternMatcher` is
+  intentionally not cached yet,
+- this is therefore a parity-oriented adapted cache: semantically aligned with
+  C++ for first-order boxes and closures, but still narrower than the C++
+  tree-property cache because of the current Rust value representation.
+
 ### 2.5 `eval`: box simplification cache
 
 Status: implemented but not yet promoted to production path

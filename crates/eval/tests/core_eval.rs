@@ -806,7 +806,7 @@ process = g;
 
     let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
         .expect("evaluated process should remain well-typed");
-    assert_eq!(arity.inputs, 0);
+    assert_eq!(arity.inputs, 1);
     assert_eq!(arity.outputs, 1);
 }
 

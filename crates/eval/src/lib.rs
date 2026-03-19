@@ -544,11 +544,19 @@ pub struct Environment {
     source_context: Arc<EvalSourceContext>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 /// Stable environment identity paired with one symbol for recursion tracking.
 struct EnvFrameKey {
     store_ptr: usize,
     env_id: EnvId,
+    source_context_ptr: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Memoization key for `eval(expr, env)` parity with C++ `getEvalProperty`.
+struct EvalCacheKey {
+    expr: TreeId,
+    env_key: EnvFrameKey,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -623,6 +631,7 @@ impl Environment {
         EnvFrameKey {
             store_ptr: Arc::as_ptr(&self.store) as usize,
             env_id,
+            source_context_ptr: Arc::as_ptr(&self.source_context) as usize,
         }
     }
 
@@ -1023,6 +1032,18 @@ pub struct LoopDetector {
     /// semantics for expressions such as `x-x` where both `x` uses must share
     /// one future input.
     symbolic_box_cache: ahash::HashMap<TreeId, TreeId>,
+    /// Memoized evaluator results keyed by source expression and lexical environment.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/evaluate/eval.cpp`
+    /// - `getEvalProperty`
+    /// - `setEvalProperty`
+    ///
+    /// Mapping status: `adapted`.
+    /// The C++ evaluator stores this property directly on the tree arena. Rust
+    /// keeps it inside the per-pass [`LoopDetector`] so one evaluation session
+    /// preserves sharing without requiring mutable properties on tree nodes.
+    eval_cache: ahash::HashMap<EvalCacheKey, EvalValue>,
 }
 
 impl LoopDetector {
@@ -1041,6 +1062,7 @@ impl LoopDetector {
             closure_store: Vec::new(),
             next_slot_id: 0,
             symbolic_box_cache: ahash::HashMap::default(),
+            eval_cache: ahash::HashMap::default(),
         }
     }
 
@@ -1064,6 +1086,7 @@ impl LoopDetector {
             closure_store: Vec::new(),
             next_slot_id: 0,
             symbolic_box_cache: ahash::HashMap::default(),
+            eval_cache: ahash::HashMap::default(),
         }
     }
 
@@ -1082,6 +1105,7 @@ impl LoopDetector {
             closure_store: Vec::new(),
             next_slot_id: 0,
             symbolic_box_cache: ahash::HashMap::default(),
+            eval_cache: ahash::HashMap::default(),
         }
     }
 
@@ -2231,6 +2255,46 @@ pub fn eval_box(
 /// Most box families stay in the `Box` lane. Only abstractions, environment
 /// objects, and `case` applications need the richer host-side representation.
 fn eval_value(
+    arena: &mut TreeArena,
+    expr: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<EvalValue, EvalError> {
+    let cache_key = EvalCacheKey {
+        expr,
+        env_key: env.frame_key(),
+    };
+    if let Some(cached) = loop_detector.eval_cache.get(&cache_key) {
+        return Ok(cached.clone());
+    }
+    let result = eval_value_uncached(arena, expr, env, loop_detector)?;
+    if should_cache_eval_value(&result) {
+        loop_detector.eval_cache.insert(cache_key, result.clone());
+    }
+    Ok(result)
+}
+
+#[inline]
+fn should_cache_eval_value(value: &EvalValue) -> bool {
+    match value {
+        EvalValue::Box(_) | EvalValue::Closure(_) => true,
+        EvalValue::PatternMatcher(_) => false,
+    }
+}
+
+/// Non-memoized evaluator core used behind [`eval_value`].
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/eval.cpp`
+/// - `realeval`
+///
+/// Mapping status: `adapted`.
+/// Rust keeps the memoization layer in [`LoopDetector::eval_cache`] instead of
+/// tree properties. Host-side pattern matchers keep mutable environment state
+/// in `pm.envs`, so only box/closure results are memoized for now; this
+/// function corresponds to the uncached evaluation body that C++ exposes as
+/// `realeval(...)`.
+fn eval_value_uncached(
     arena: &mut TreeArena,
     expr: TreeId,
     env: &Environment,

@@ -698,7 +698,7 @@ impl<'a> TypeAnnotator<'a> {
     }
 
     fn solve_recursive_groups(&mut self, state: &mut RecTypingState) -> Result<(), TypeError> {
-        for _ in 0..RECURSIVE_NARROWING_LIMIT {
+        for _ in std::iter::repeat_n((), RECURSIVE_NARROWING_LIMIT) {
             self.update_rec_types(&state.groups, &mut state.upper, true)?;
         }
 
@@ -707,15 +707,15 @@ impl<'a> TypeAnnotator<'a> {
             self.update_rec_types(&state.groups, &mut state.current, false)?;
             let mut finished = true;
 
-            for g in 0..state.groups.len() {
+            for (g, previous) in prev.iter().enumerate().take(state.groups.len()) {
                 let widened = apply_recursive_widening(
-                    prev[g].clone(),
+                    previous.clone(),
                     state.current[g].clone(),
                     state.upper[g].clone(),
                     &mut state.age_min[g],
                     &mut state.age_max[g],
                 )?;
-                if widened != prev[g] {
+                if widened != *previous {
                     finished = false;
                 }
                 state.current[g] = widened;
