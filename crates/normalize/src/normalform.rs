@@ -201,6 +201,32 @@ enum ReducedSigKind {
     Sound,
 }
 
+/// Replays the Phase-1 subset of C++ `SignalPromotion::transformation(...)`.
+///
+/// Provenance:
+/// - C++ `compiler/transform/sigPromotion.cpp`
+/// - C++ type source `compiler/signals/sigtyperules.cpp`
+///
+/// Parity contract:
+/// - `promote(...)` memoizes only the context-free reconstruction of one
+///   original `SigId`.
+/// - Parent rules own context-sensitive coercions through
+///   [`Self::promote_as_int`], [`Self::promote_as_float`], and
+///   [`Self::promote_like`].
+/// - The cached value for `promote(sig)` must therefore stay valid under any
+///   parent, and parent-specific wrappers apply casts exactly where the C++
+///   rule does.
+///
+/// Current rule inventory:
+/// - `1:1 enough for Phase 1`: arithmetic/binops, `select2`, delay/table
+///   indices, `enable`, bargraphs, waveform numeric homogenization, clocked
+///   family integer clocks.
+/// - `adapted but context-invariant`: list reconstruction, symbolic recursion,
+///   `output`, `attach`, `control`, `seq`, `temp_var`, `perm_var`,
+///   `assert_bounds`, `lowest`, `highest`, foreign-function argument lists.
+/// - `deferred to Phase 2`: passes outside the current normalization subset
+///   (`simplify`, FTZ wrapping, auto-diff, UI promotion beyond numeric casts,
+///   and the rest of full `simplifyToNormalForm`).
 struct SignalPromoter<'a> {
     arena: &'a mut TreeArena,
     types: &'a HashMap<SigId, SigType>,
@@ -216,6 +242,11 @@ impl<'a> SignalPromoter<'a> {
         }
     }
 
+    /// Rebuild one signal in a context-free way and memoize that result.
+    ///
+    /// This deliberately does not encode parent-owned integer/real coercions.
+    /// Those remain at the parent call site, mirroring C++
+    /// `SignalPromotion::transformation(...)`.
     fn promote(&mut self, sig: SigId) -> Result<SigId, NormalFormError> {
         if let Some(promoted) = self.memo.get(&sig) {
             return Ok(*promoted);

@@ -280,31 +280,25 @@ Location:
 
 Cache:
 
-- `HashMap<SigId, SigId>` threaded through `promote_one`
-
-Purpose:
-
-- memoizes signal promotion during normal-form preparation,
-- preserves sharing while inserting only the required casts.
-
-### 2.11 `transform`: prepared-signal promotion memo
-
-Status: implemented
-
-Location:
-
-- `crates/transform/src/signal_prepare.rs`
-
-Cache:
-
 - `SignalPromoter.memo: HashMap<SigId, SigId>`
 
 Purpose:
 
-- preserves sharing during the FIR-preparation promotion pass,
-- prevents repeated subtree promotion when the same prepared signal is reused.
+- memoizes only the context-free reconstruction `promote(sig)` during
+  normal-form preparation,
+- preserves sharing while inserting only the required casts,
+- stays sound because parent-owned integer/real coercions (`select2`,
+  delay/table indices, `enable`, `wrtbl` writes, mixed arithmetic) are applied
+  outside the cache via explicit helpers.
 
-### 2.12 `transform`: reduced type inference state for prepared signals
+Note:
+
+- this cache no longer lives in `transform::signal_prepare`; the fast-lane
+  consumes the shared promotion pass from `normalize`,
+- the cache is intentionally *not* context-tagged: remaining memoized results
+  are justified as context-invariant after the node-wise C++ parity refactor.
+
+### 2.11 `transform`: reduced type inference state for prepared signals
 
 Status: implemented
 
@@ -329,7 +323,7 @@ Note:
 - this is not a simple lookup cache; it is still memoized analysis state and
   should be tracked as such.
 
-### 2.13 `transform`: signal-to-FIR lowering DAG cache
+### 2.12 `transform`: signal-to-FIR lowering DAG cache
 
 Status: implemented
 
@@ -347,7 +341,7 @@ Purpose:
 - prevents duplicate FIR subgraphs and keeps lowering linear in the shared
   graph size.
 
-### 2.14 `transform`: unary symbolic recursion discovery visitation set
+### 2.13 `transform`: unary symbolic recursion discovery visitation set
 
 Status: implemented
 
@@ -374,7 +368,7 @@ Constraint:
 - it is scoped to one preparation forest and only guards the read-only
   discovery walk that populates the unary-group map.
 
-### 2.15 `tlib`: de Bruijn recursion conversion memos
+### 2.14 `tlib`: de Bruijn recursion conversion memos
 
 Status: implemented
 

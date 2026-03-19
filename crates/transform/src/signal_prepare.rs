@@ -762,6 +762,44 @@ mod tests {
     }
 
     #[test]
+    fn prepare_signals_for_fir_recovers_shared_rdtbl_index_from_float_context() {
+        let mut arena = tlib::TreeArena::new();
+        let (arith_out, table_out) = {
+            let mut b = SigBuilder::new(&mut arena);
+            let input0 = b.input(0);
+            let half = b.real(0.5);
+            let cmp = b.lt(input0, half);
+            let input1 = b.input(1);
+            let arith = b.add(cmp, input1);
+            let v0 = b.real(0.0);
+            let v1 = b.real(1.0);
+            let waveform = b.waveform(&[v0, v1]);
+            let table = b.rdtbl(waveform, cmp);
+            (arith, table)
+        };
+
+        let prepared =
+            prepare_signals_for_fir(&arena, &[arith_out, table_out], &ui::UiProgram::empty())
+                .expect("shared comparison should promote in both arithmetic and rdtbl contexts");
+
+        let SigMatch::RdTbl(_, index) = match_sig(&prepared.arena, prepared.outputs[1]) else {
+            panic!("second output should stay SIGRDTBL");
+        };
+        assert!(
+            matches!(match_sig(&prepared.arena, index), SigMatch::IntCast(_))
+                || matches!(
+                    match_sig(&prepared.arena, index),
+                    SigMatch::BinOp(
+                        BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne,
+                        _,
+                        _
+                    )
+                ),
+            "shared table-read index should stay in an integer comparison domain"
+        );
+    }
+
+    #[test]
     fn prepare_signals_for_fir_recovers_shared_wrtbl_write_signal_from_float_context() {
         let mut arena = tlib::TreeArena::new();
         let (arith_out, table_out) = {
@@ -800,6 +838,44 @@ mod tests {
                 )
             ),
             "shared wrtbl write signal should stay in an integer comparison domain"
+        );
+    }
+
+    #[test]
+    fn prepare_signals_for_fir_recovers_shared_zero_pad_amount_from_float_context() {
+        let mut arena = tlib::TreeArena::new();
+        let (arith_out, padded_out) = {
+            let mut b = SigBuilder::new(&mut arena);
+            let input0 = b.input(0);
+            let half = b.real(0.5);
+            let cmp = b.lt(input0, half);
+            let input1 = b.input(1);
+            let arith = b.add(cmp, input1);
+            let input2 = b.input(2);
+            let padded = b.zero_pad(input2, cmp);
+            (arith, padded)
+        };
+
+        let prepared =
+            prepare_signals_for_fir(&arena, &[arith_out, padded_out], &ui::UiProgram::empty())
+                .expect(
+                    "shared comparison should promote in both arithmetic and zero_pad contexts",
+                );
+
+        let SigMatch::ZeroPad(_, amount) = match_sig(&prepared.arena, prepared.outputs[1]) else {
+            panic!("second output should stay SIGZEROPAD");
+        };
+        assert!(
+            matches!(match_sig(&prepared.arena, amount), SigMatch::IntCast(_))
+                || matches!(
+                    match_sig(&prepared.arena, amount),
+                    SigMatch::BinOp(
+                        BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne,
+                        _,
+                        _
+                    )
+                ),
+            "shared zero-pad amount should stay in an integer comparison domain"
         );
     }
 
