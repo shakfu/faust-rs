@@ -864,6 +864,34 @@ fn eval_process_keeps_large_waveform_nodes_as_leaf_values() {
 }
 
 #[test]
+fn eval_process_seq_zero_iteration_uses_cpp_neutral_bus_identity() {
+    let source = r#"
+foo(O,N) = bar(O,N) with {
+  bar(N) = baz(1), _, *(-1.0);
+  baz(i) = seq(j,N-1-i,_);
+};
+process = foo(3,2);
+"#;
+
+    let parsed = parse_program(source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept seq-zero neutral repro: {:?}",
+        parsed.errors
+    );
+
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+    let out = eval_process(&mut arena, root)
+        .expect("seq(j,0,body) should lower to the C++ neutral identity bus");
+
+    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+        .expect("evaluated process should remain well-typed");
+    assert_eq!(arity.inputs, 2);
+    assert_eq!(arity.outputs, 3);
+}
+
+#[test]
 fn eval_process_reuses_residual_case_argument_inside_local_abstraction() {
     let source = r#"
 poly(1,x)=11;

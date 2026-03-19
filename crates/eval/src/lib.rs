@@ -5236,6 +5236,51 @@ fn empty_iteration_route(arena: &mut TreeArena) -> TreeId {
     b.route(z0, z1, spec)
 }
 
+/// Returns the neutral element for `iseq(i, 0, body)` following C++ `neutralExpSeq`.
+///
+/// Source provenance (C++):
+/// - `compiler/evaluate/eval.cpp`
+/// - `neutralExpSeq`
+///
+/// Mapping status: `adapted`.
+/// C++ evaluates the body once with `i = 0`, lowers the result with `a2sb`,
+/// and constructs an identity bus whose width matches the body outputs when the
+/// body has equal input/output arity. Only a real `0 -> 0` body uses the empty
+/// `route(0,0,par(0,0))` neutral element.
+fn neutral_seq_body(
+    arena: &mut TreeArena,
+    var_name: &str,
+    body: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    let evaluated = eval_iter_body(arena, var_name, 0, body, env, loop_detector)?;
+    let lowered = a2sb(arena, evaluated, loop_detector)?;
+    let Some((ins, outs)) = infer_box_arity(arena, lowered) else {
+        return Err(EvalError::InternalError {
+            message: "seq(i,0,body) neutral arity could not be inferred".to_owned(),
+        });
+    };
+    if ins != outs {
+        return Err(EvalError::InternalError {
+            message: format!(
+                "seq(i,0,body) requires matching input/output arity, got {ins} -> {outs}"
+            ),
+        });
+    }
+    if outs == 0 {
+        return Ok(empty_iteration_route(arena));
+    }
+    let mut b = BoxBuilder::new(arena);
+    let mut bus = b.wire();
+    for _ in 1..outs {
+        let mut b = BoxBuilder::new(arena);
+        let wire = b.wire();
+        bus = b.par(bus, wire);
+    }
+    Ok(bus)
+}
+
 /// Expands `ipar(i,n,body)` into nested `par` composition.
 ///
 /// Expansion order matches the C++ evaluator: the rightmost branch (`n - 1`) is
@@ -5252,7 +5297,7 @@ fn iterate_par(
     let var_name = iteration_var_name(arena, index)?;
     let n = eval_non_negative_count(arena, count, env, loop_detector)?;
     if n == 0 {
-        return Ok(empty_iteration_route(arena));
+        return neutral_seq_body(arena, &var_name, body, env, loop_detector);
     }
     let mut res = eval_iter_body(arena, &var_name, n - 1, body, env, loop_detector)?;
     for i in (0..(n - 1)).rev() {
@@ -5280,7 +5325,7 @@ fn iterate_seq(
     let var_name = iteration_var_name(arena, index)?;
     let n = eval_non_negative_count(arena, count, env, loop_detector)?;
     if n == 0 {
-        return Ok(empty_iteration_route(arena));
+        return neutral_seq_body(arena, &var_name, body, env, loop_detector);
     }
     let mut res = eval_iter_body(arena, &var_name, n - 1, body, env, loop_detector)?;
     for i in (0..(n - 1)).rev() {
