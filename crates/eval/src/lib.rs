@@ -165,7 +165,7 @@ use normalize::simplify_const;
 use parser::{CompilationMetadataSnapshot, CompilationMetadataStore};
 use propagate::{ArityCache, propagate_typed, try_build_flat_box};
 use signals::{SigId, SigMatch, match_sig};
-use tlib::{NodeKind, TreeArena, TreeId, tree_to_int};
+use tlib::{NodeKind, TreeArena, TreeId, tree_to_double, tree_to_int};
 
 mod pattern_matcher;
 
@@ -3166,6 +3166,12 @@ fn write_label_ident_value(
 /// The lookup goes through the full evaluator and symbolic lowering pipeline so
 /// `%i`, `%{n}`, and similar placeholders observe the same lexical environment
 /// and constant-folding behavior as normal Faust expressions.
+///
+/// C++ parity: `evalLabel(...)` calls `eval2int(...)`, which ends in
+/// `tree2int(...)`. That helper accepts both integer atoms and floating-point
+/// atoms, truncating real constants toward zero. Label placeholders therefore
+/// inherit the same permissive "integer constant numerical expression"
+/// semantics as the C++ evaluator.
 fn eval_ident_to_constant_int(
     arena: &mut TreeArena,
     ident: &str,
@@ -3174,7 +3180,13 @@ fn eval_ident_to_constant_int(
 ) -> Result<i64, EvalError> {
     let expr = BoxBuilder::new(arena).ident(ident);
     let signal = eval_box_to_scalar_signal(arena, expr, env, loop_detector)?;
-    tree_to_int(arena, signal).ok_or_else(|| EvalError::InvalidLabelInterpolation {
+    if let Some(value) = tree_to_int(arena, signal) {
+        return Ok(value);
+    }
+    if let Some(value) = tree_to_double(arena, signal) {
+        return Ok(value as i64);
+    }
+    Err(EvalError::InvalidLabelInterpolation {
         node: expr,
         ident: ident.to_owned(),
         reason: "expression did not reduce to an integer constant",

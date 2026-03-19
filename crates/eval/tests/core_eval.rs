@@ -1421,6 +1421,31 @@ fn eval_process_widget_label_applies_clamped_field_width() {
 }
 
 #[test]
+fn eval_process_widget_label_truncates_real_placeholder_like_cpp() {
+    let mut arena = TreeArena::new();
+    let nil = arena.nil();
+    let att = BoxBuilder::new(&mut arena).real(0.001);
+    let att_def = make_def(&mut arena, "att", nil, att);
+    let label = arena.string_lit("attack:%att");
+    let slider = {
+        let mut b = BoxBuilder::new(&mut arena);
+        let cur = b.real(0.5);
+        let min = b.real(0.0);
+        let max = b.real(1.0);
+        let step = b.real(0.01);
+        b.hslider(label, cur, min, max, step)
+    };
+    let process_def = make_def(&mut arena, "process", nil, slider);
+    let defs = make_defs(&mut arena, &[att_def, process_def]);
+
+    let out = eval_process(&mut arena, defs).expect("real placeholder should truncate like C++");
+    let BoxMatch::HSlider(label, _, _, _, _) = match_box(&arena, out) else {
+        panic!("process should evaluate to hslider");
+    };
+    expect_label(&arena, label, "attack:0");
+}
+
+#[test]
 fn eval_process_widget_label_keeps_malformed_percent_sequence_literal() {
     let mut arena = TreeArena::new();
     let nil = arena.nil();
