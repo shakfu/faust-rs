@@ -15,6 +15,12 @@
 //! 3. **Signal promotion** (see [`promote_signals`]): insert numeric casts
 //!    where the signal graph mixes integer and real computations.
 //!
+//! Parent nodes own context-sensitive promotion requirements, following the
+//! C++ `SignalPromotion::transformation(...)` rules. Integer-only contexts such
+//! as `select2` selectors, delay/table indices, and `enable` gates are rebuilt
+//! through explicit integer-context helpers instead of relying on backend-side
+//! repairs.
+//!
 //! # Phase 2 (deferred)
 //!
 //! The full C++ `simplifyToNormalForm` pipeline (UI promotion, FTZ wrapping,
@@ -258,8 +264,7 @@ impl<'a> SignalPromoter<'a> {
             }
             SigMatch::Delay(value, amount) => {
                 let value = self.promote(value)?;
-                let amount_promoted = self.promote(amount)?;
-                let amount_promoted = self.smart_int_cast(amount_promoted, amount)?;
+                let amount_promoted = self.promote_as_int(amount)?;
                 SigBuilder::new(self.arena).delay(value, amount_promoted)
             }
             SigMatch::Prefix(init, value) => {
@@ -293,8 +298,7 @@ impl<'a> SignalPromoter<'a> {
             }
             SigMatch::RdTbl(table, index) => {
                 let table = self.promote(table)?;
-                let index_promoted = self.promote(index)?;
-                let index_promoted = self.smart_int_cast(index_promoted, index)?;
+                let index_promoted = self.promote_as_int(index)?;
                 SigBuilder::new(self.arena).rdtbl(table, index_promoted)
             }
             SigMatch::WrTbl(size, generator, write_index, write_signal) => {
@@ -303,9 +307,7 @@ impl<'a> SignalPromoter<'a> {
                 if self.arena.is_nil(write_index) && self.arena.is_nil(write_signal) {
                     SigBuilder::new(self.arena).wrtbl_readonly(size, generator_promoted)
                 } else {
-                    let write_index_promoted = self.promote(write_index)?;
-                    let write_index_promoted =
-                        self.smart_int_cast(write_index_promoted, write_index)?;
+                    let write_index_promoted = self.promote_as_int(write_index)?;
                     let write_signal_promoted = self.promote(write_signal)?;
                     let write_signal_promoted =
                         self.smart_cast(generator, write_signal, write_signal_promoted)?;
@@ -318,8 +320,7 @@ impl<'a> SignalPromoter<'a> {
                 }
             }
             SigMatch::Select2(selector, then_value, else_value) => {
-                let selector_promoted = self.promote(selector)?;
-                let selector_promoted = self.smart_int_cast(selector_promoted, selector)?;
+                let selector_promoted = self.promote_as_int(selector)?;
                 let then_promoted = self.promote(then_value)?;
                 let else_promoted = self.promote(else_value)?;
                 let (then_promoted, else_promoted) = if self.same_type(then_value, else_value)? {
@@ -414,8 +415,8 @@ impl<'a> SignalPromoter<'a> {
             }
             SigMatch::Enable(left, right) => {
                 let left = self.promote(left)?;
-                let right = self.promote(right)?;
-                SigBuilder::new(self.arena).enable(left, right)
+                let right_promoted = self.promote_as_int(right)?;
+                SigBuilder::new(self.arena).enable(left, right_promoted)
             }
             SigMatch::Control(left, right) => {
                 let left = self.promote(left)?;
@@ -429,23 +430,19 @@ impl<'a> SignalPromoter<'a> {
             SigMatch::Soundfile(control) => SigBuilder::new(self.arena).soundfile(control),
             SigMatch::SoundfileLength(soundfile, part) => {
                 let soundfile = self.promote(soundfile)?;
-                let part_promoted = self.promote(part)?;
-                let part_promoted = self.smart_int_cast(part_promoted, part)?;
+                let part_promoted = self.promote_as_int(part)?;
                 SigBuilder::new(self.arena).soundfile_length(soundfile, part_promoted)
             }
             SigMatch::SoundfileRate(soundfile, part) => {
                 let soundfile = self.promote(soundfile)?;
-                let part_promoted = self.promote(part)?;
-                let part_promoted = self.smart_int_cast(part_promoted, part)?;
+                let part_promoted = self.promote_as_int(part)?;
                 SigBuilder::new(self.arena).soundfile_rate(soundfile, part_promoted)
             }
             SigMatch::SoundfileBuffer(soundfile, chan, part, index) => {
                 let soundfile = self.promote(soundfile)?;
                 let chan = self.promote(chan)?;
-                let part_promoted = self.promote(part)?;
-                let part_promoted = self.smart_int_cast(part_promoted, part)?;
-                let index_promoted = self.promote(index)?;
-                let index_promoted = self.smart_int_cast(index_promoted, index)?;
+                let part_promoted = self.promote_as_int(part)?;
+                let index_promoted = self.promote_as_int(index)?;
                 SigBuilder::new(self.arena).soundfile_buffer(
                     soundfile,
                     chan,
@@ -468,8 +465,7 @@ impl<'a> SignalPromoter<'a> {
             }
             SigMatch::ZeroPad(value, amount) => {
                 let value = self.promote(value)?;
-                let amount_promoted = self.promote(amount)?;
-                let amount_promoted = self.smart_int_cast(amount_promoted, amount)?;
+                let amount_promoted = self.promote_as_int(amount)?;
                 SigBuilder::new(self.arena).zero_pad(value, amount_promoted)
             }
             SigMatch::OnDemand(items) => {
@@ -664,11 +660,30 @@ impl<'a> SignalPromoter<'a> {
         promoted: SigId,
         original: SigId,
     ) -> Result<SigId, NormalFormError> {
-        if self.kind(original)? == ReducedSigKind::Real {
-            Ok(SigBuilder::new(self.arena).int_cast(promoted))
-        } else {
-            Ok(promoted)
+        let needs_int_cast = self.kind(original)? == ReducedSigKind::Real
+            || matches!(match_sig(self.arena, promoted), SigMatch::FloatCast(_))
+            || matches!(
+                match_sig(self.arena, promoted),
+                SigMatch::Clocked(_, value) if matches!(match_sig(self.arena, value), SigMatch::FloatCast(_))
+            );
+        if !needs_int_cast {
+            return Ok(promoted);
         }
+        if let SigMatch::Clocked(clock_env, clock) = match_sig(self.arena, promoted) {
+            let clock = SigBuilder::new(self.arena).int_cast(clock);
+            return Ok(SigBuilder::new(self.arena).clocked(clock_env, clock));
+        }
+        Ok(SigBuilder::new(self.arena).int_cast(promoted))
+    }
+
+    /// Rebuilds one child for a parent that requires an integer-domain input.
+    ///
+    /// This mirrors the C++ pattern where the parent rule applies
+    /// `smartIntCast(...)` directly at the call site, for example in
+    /// `select2`, delay/table indices, and `enable`.
+    fn promote_as_int(&mut self, original: SigId) -> Result<SigId, NormalFormError> {
+        let promoted = self.promote(original)?;
+        self.smart_int_cast(promoted, original)
     }
 
     fn smart_float_cast(

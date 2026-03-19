@@ -688,6 +688,44 @@ mod tests {
     }
 
     #[test]
+    fn prepare_signals_for_fir_recovers_shared_select2_selector_from_float_context() {
+        let mut arena = tlib::TreeArena::new();
+        let (arith_out, select_out) = {
+            let mut b = SigBuilder::new(&mut arena);
+            let input0 = b.input(0);
+            let half = b.real(0.5);
+            let cmp = b.lt(input0, half);
+            let input1 = b.input(1);
+            let arith = b.add(cmp, input1);
+            let one = b.int(1);
+            let zero = b.int(0);
+            let sel = b.select2(cmp, one, zero);
+            (arith, sel)
+        };
+
+        let prepared =
+            prepare_signals_for_fir(&arena, &[arith_out, select_out], &ui::UiProgram::empty())
+                .expect("shared comparison should promote in both arithmetic and select2 contexts");
+
+        let SigMatch::Select2(selector, _, _) = match_sig(&prepared.arena, prepared.outputs[1])
+        else {
+            panic!("second output should stay SIGSELECT2");
+        };
+        assert!(
+            matches!(match_sig(&prepared.arena, selector), SigMatch::IntCast(_))
+                || matches!(
+                    match_sig(&prepared.arena, selector),
+                    SigMatch::BinOp(
+                        BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne,
+                        _,
+                        _
+                    )
+                ),
+            "shared select2 selector should stay in an integer comparison domain"
+        );
+    }
+
+    #[test]
     fn prepare_signals_for_fir_promotes_table_read_index_to_int() {
         let mut arena = tlib::TreeArena::new();
         let output = {

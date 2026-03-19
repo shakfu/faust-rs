@@ -132,8 +132,9 @@ const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
 ///   types are already consistent with `op`: mixed Int/Real operands are
 ///   wrapped in explicit `FloatCast` nodes; bitwise/shift operands in
 ///   `IntCast` nodes; `Div` operands are always Real.
-/// - Every `Delay(_, amount)`, `RdTbl(_, index)`, `WrTbl(…, widx, _)`, and
-///   `Select2(selector, …)` has its integer operand wrapped in `IntCast`.
+/// - Every `Delay(_, amount)`, `RdTbl(_, index)`, `WrTbl(…, widx, _)`,
+///   `Select2(selector, …)`, and `Enable(_, gate)` has its integer-context
+///   operand wrapped in `IntCast`.
 /// - `Delay1(x)` and `Prefix(init, x)` have `type(init) == type(x)`.
 ///
 /// **Consequence for the lowerer**: no implicit coercion is needed inside

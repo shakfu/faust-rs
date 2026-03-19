@@ -421,6 +421,47 @@ mod tests {
     }
 
     #[test]
+    fn enable_with_checkbox_lowers_select2_condition_to_int32() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let input = b.input(0);
+            let gate = b.checkbox(0);
+            b.enable(input, gate)
+        };
+        let ui = one_control_ui(ControlKind::Checkbox, "gate", None, false, false);
+        let out = compile_signals_to_fir_fastlane_with_ui(
+            &arena,
+            &[sig0],
+            1,
+            1,
+            &ui,
+            &SignalFirOptions::default(),
+        )
+        .expect("checkbox-driven enable should lower through fast-lane");
+
+        let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+            panic!("module root expected");
+        };
+        let loop_body = find_compute_loop_body(&out.store, functions);
+        let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+            panic!("compute loop body block expected");
+        };
+        let stored_value = stmts
+            .iter()
+            .find_map(|id| match match_fir(&out.store, *id) {
+                FirMatch::StoreTable { name, value, .. } if name == "output0" => Some(value),
+                _ => None,
+            })
+            .expect("compute should include one output store");
+        let inner = unwrap_output_cast(&out.store, stored_value);
+        let FirMatch::Select2 { cond, .. } = match_fir(&out.store, inner) else {
+            panic!("enable should lower to FIR Select2");
+        };
+        assert_eq!(out.store.value_type(cond), Some(FirType::Int32));
+    }
+
+    #[test]
     fn invalid_options_return_typed_error_code() {
         let mut arena = TreeArena::new();
         let sig0 = {
