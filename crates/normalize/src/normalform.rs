@@ -302,9 +302,7 @@ impl<'a> SignalPromoter<'a> {
                     SigBuilder::new(self.arena).wrtbl_readonly(size, generator_promoted)
                 } else {
                     let write_index_promoted = self.promote_as_int(write_index)?;
-                    let write_signal_promoted = self.promote(write_signal)?;
-                    let write_signal_promoted =
-                        self.smart_cast(generator, write_signal, write_signal_promoted)?;
+                    let write_signal_promoted = self.promote_like(generator, write_signal)?;
                     SigBuilder::new(self.arena).wrtbl(
                         size,
                         generator_promoted,
@@ -528,8 +526,8 @@ impl<'a> SignalPromoter<'a> {
                 SigBuilder::new(self.arena).binop(op, left_promoted, right_promoted)
             }
             BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Lsh | BinOp::ARsh | BinOp::LRsh => {
-                let left_promoted = self.smart_int_cast(left_promoted, left)?;
-                let right_promoted = self.smart_int_cast(right_promoted, right)?;
+                let left_promoted = self.promote_as_int(left)?;
+                let right_promoted = self.promote_as_int(right)?;
                 SigBuilder::new(self.arena).binop(op, left_promoted, right_promoted)
             }
         };
@@ -721,6 +719,16 @@ impl<'a> SignalPromoter<'a> {
         } else {
             Ok(promoted_source)
         }
+    }
+
+    /// Rebuilds `source` in the numeric domain expected by `target`.
+    ///
+    /// This mirrors parent rules in the C++ promoter that coerce a child
+    /// according to another operand or declaration type, such as mutable table
+    /// writes matching the generator/table element domain.
+    fn promote_like(&mut self, target: SigId, source: SigId) -> Result<SigId, NormalFormError> {
+        let promoted_source = self.promote(source)?;
+        self.smart_cast(target, source, promoted_source)
     }
 
     fn same_type(&self, left: SigId, right: SigId) -> Result<bool, NormalFormError> {

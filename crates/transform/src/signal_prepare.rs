@@ -762,6 +762,48 @@ mod tests {
     }
 
     #[test]
+    fn prepare_signals_for_fir_recovers_shared_wrtbl_write_signal_from_float_context() {
+        let mut arena = tlib::TreeArena::new();
+        let (arith_out, table_out) = {
+            let mut b = SigBuilder::new(&mut arena);
+            let input0 = b.input(0);
+            let half = b.real(0.5);
+            let cmp = b.lt(input0, half);
+            let input1 = b.input(1);
+            let arith = b.add(cmp, input1);
+            let size = b.int(8);
+            let generator = b.int(0);
+            let write_index = b.int(1);
+            let table = b.wrtbl(size, generator, write_index, cmp);
+            (arith, table)
+        };
+
+        let prepared =
+            prepare_signals_for_fir(&arena, &[arith_out, table_out], &ui::UiProgram::empty())
+                .expect("shared comparison should promote in both arithmetic and wrtbl contexts");
+
+        let SigMatch::WrTbl(_, _, _, write_signal) =
+            match_sig(&prepared.arena, prepared.outputs[1])
+        else {
+            panic!("second output should stay SIGWRTBL");
+        };
+        assert!(
+            matches!(
+                match_sig(&prepared.arena, write_signal),
+                SigMatch::IntCast(_)
+            ) || matches!(
+                match_sig(&prepared.arena, write_signal),
+                SigMatch::BinOp(
+                    BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne,
+                    _,
+                    _
+                )
+            ),
+            "shared wrtbl write signal should stay in an integer comparison domain"
+        );
+    }
+
+    #[test]
     fn prepare_signals_for_fir_promotes_table_read_index_to_int() {
         let mut arena = tlib::TreeArena::new();
         let output = {
