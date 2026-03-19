@@ -1766,15 +1766,28 @@ fn is_node_modif_local_def(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)
     match_binary(arena, b, BOX_MODIF_LOCAL_DEF_TAG)
 }
 
-/// Adapted representation for C++ `boxWithRecDef`.
+/// Equivalent to C++ `boxWithRecDef`.
 ///
-/// C++ performs an immediate lowering/expansion into a local-definition structure.
-/// For the current parser prototype, Rust stores an explicit node preserving the three
-/// inputs `(body, ldef, ldef2)`. This keeps parser output deterministic and lets later
-/// phases choose where lowering happens.
+/// Source provenance (C++):
+/// - `compiler/boxes/boxes.cpp`
+/// - `boxWithRecDef`
+/// - `buildRecursiveBodyDef`
+/// - `makeRecProjectionsList`
+///
+/// Mapping status: `adapted` representation, `1:1` semantics.
+///
+/// Rust still exposes [`BoxMatch::WithRecDef`] for compatibility with manually
+/// constructed trees, but the builder now performs the same eager lowering as
+/// C++: `letrec` is expanded immediately into a `with_local_def(...)`
+/// containing one synthetic `LETRECBODY = rec(...)` definition followed by one
+/// projection definition per recursive name.
+///
+/// This is the production-path parity point for `letrec`:
+/// parser code calls this builder, so downstream phases should no longer see
+/// `BOXWITHRECDEF` for normal source programs.
 #[must_use]
 fn node_with_rec_def(arena: &mut TreeArena, body: BoxId, ldef: BoxId, ldef2: BoxId) -> BoxId {
-    intern_tag(arena, BOX_WITH_REC_DEF_TAG, &[body, ldef, ldef2])
+    box_with_rec_def_expanded(arena, body, ldef, ldef2)
 }
 
 /// Returns `(body, ldef, ldef2)` when `b` is `node_with_rec_def`.
@@ -1785,6 +1798,172 @@ fn is_node_with_rec_def(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, Bo
         return None;
     };
     Some((*body, *ldef, *ldef2))
+}
+
+/// Eagerly lowers parser-form `letrec` definitions to the same `with`-based
+/// structure as C++ `boxWithRecDef(...)`.
+///
+/// Rust parser definitions arrive here in normalized parser shape
+/// `cons(name, cons(args, expr))`, after `parser::ParseState::format_definitions`.
+/// This keeps parser/boxes parity with C++ while allowing [`BoxMatch::WithRecDef`]
+/// to remain decodable for manually constructed legacy trees.
+///
+/// Important limitation/invariant:
+/// this helper expects parser-normalized definition lists, not arbitrary
+/// internal box lists. In particular, each definition cell must follow the
+/// parser contract `cons(name, cons(args, expr))`.
+fn box_with_rec_def_expanded(
+    arena: &mut TreeArena,
+    body: BoxId,
+    ldef: BoxId,
+    ldef2: BoxId,
+) -> BoxId {
+    let names = def2names(arena, ldef);
+    let exprs = def2exp(arena, ldef);
+    let n = list_len(arena, ldef);
+    let recursive_body_def = make_recursive_body_def(arena, n, names, exprs, ldef2);
+    let projections = make_rec_projections_list(arena, n, 0, names, arena.nil());
+    let defs = arena.cons(recursive_body_def, projections);
+    node_with_local_def(arena, body, defs)
+}
+
+fn list_len(arena: &TreeArena, mut list: BoxId) -> usize {
+    let mut n = 0usize;
+    while !arena.is_nil(list) {
+        n += 1;
+        list = arena
+            .tl(list)
+            .expect("definition list should be a well-formed cons/nil list");
+    }
+    n
+}
+
+fn def2names(arena: &mut TreeArena, ldef: BoxId) -> BoxId {
+    if arena.is_nil(ldef) {
+        arena.nil()
+    } else {
+        let def = arena.hd(ldef).expect("definition list head");
+        let name = arena.hd(def).expect("definition name");
+        let rest = arena.tl(ldef).expect("definition list tail");
+        let tail = def2names(arena, rest);
+        arena.cons(name, tail)
+    }
+}
+
+fn def2exp(arena: &mut TreeArena, ldef: BoxId) -> BoxId {
+    if arena.is_nil(ldef) {
+        arena.nil()
+    } else {
+        let def = arena.hd(ldef).expect("definition list head");
+        let payload = arena.tl(def).expect("definition payload");
+        let args = arena.hd(payload).expect("definition args");
+        let body = arena.tl(payload).expect("definition body");
+        // Rust parser definitions are normalized as `cons(name, cons(args, expr))`.
+        // `boxWithRecDef` is called after `format_definitions`, so `args` is
+        // usually `nil` already. The fallback abstraction rebuild keeps the
+        // helper robust for manually constructed parser-shape nodes.
+        let expr = if arena.is_nil(args) {
+            body
+        } else {
+            build_box_abstr(arena, args, body)
+        };
+        let rest = arena.tl(ldef).expect("definition list tail");
+        let tail = def2exp(arena, rest);
+        arena.cons(expr, tail)
+    }
+}
+
+fn make_bus(arena: &mut TreeArena, n: usize) -> BoxId {
+    if n <= 1 {
+        node_wire(arena)
+    } else {
+        let left = node_wire(arena);
+        let right = make_bus(arena, n - 1);
+        node_par(arena, left, right)
+    }
+}
+
+fn make_par_list(arena: &mut TreeArena, lexp: BoxId) -> BoxId {
+    let l2 = arena.tl(lexp).expect("expression list tail");
+    if arena.is_nil(l2) {
+        arena.hd(lexp).expect("expression list head")
+    } else {
+        let head = arena.hd(lexp).expect("expression list head");
+        let tail = make_par_list(arena, l2);
+        node_par(arena, head, tail)
+    }
+}
+
+fn make_box_abstr(arena: &mut TreeArena, largs: BoxId, body: BoxId) -> BoxId {
+    if arena.is_nil(largs) {
+        body
+    } else {
+        let arg = arena.hd(largs).expect("abstraction arg");
+        let tail = arena.tl(largs).expect("abstraction arg tail");
+        let nested = make_box_abstr(arena, tail, body);
+        node_abstr(arena, arg, nested)
+    }
+}
+
+fn make_selector(arena: &mut TreeArena, n: usize, i: i32) -> BoxId {
+    let op = if i == 0 {
+        node_wire(arena)
+    } else {
+        node_cut(arena)
+    };
+    if n <= 1 {
+        op
+    } else {
+        let tail = make_selector(arena, n - 1, i - 1);
+        node_par(arena, op, tail)
+    }
+}
+
+fn make_rec_projections_list(
+    arena: &mut TreeArena,
+    n: usize,
+    i: usize,
+    lnames: BoxId,
+    ldef: BoxId,
+) -> BoxId {
+    if i == n {
+        ldef
+    } else {
+        let letrecbody = node_ident(arena, "LETRECBODY");
+        let selector = make_selector(arena, n, i as i32);
+        let sel = node_seq(arena, letrecbody, selector);
+        let name = arena.hd(lnames).expect("recursive projection name");
+        let def = make_parser_definition(arena, name, arena.nil(), sel);
+        let tail_names = arena.tl(lnames).expect("recursive projection name tail");
+        let tail_defs = make_rec_projections_list(arena, n, i + 1, tail_names, ldef);
+        arena.cons(def, tail_defs)
+    }
+}
+
+fn make_recursive_body_def(
+    arena: &mut TreeArena,
+    n: usize,
+    lnames: BoxId,
+    lexp: BoxId,
+    ldef2: BoxId,
+) -> BoxId {
+    let body = make_par_list(arena, lexp);
+    let body = if arena.is_nil(ldef2) {
+        body
+    } else {
+        node_with_local_def(arena, body, ldef2)
+    };
+    let abstr = make_box_abstr(arena, lnames, body);
+    let bus = make_bus(arena, n);
+    let rec = node_rec(arena, abstr, bus);
+    let letrecbody = node_ident(arena, "LETRECBODY");
+    let nil = arena.nil();
+    make_parser_definition(arena, letrecbody, nil, rec)
+}
+
+fn make_parser_definition(arena: &mut TreeArena, name: BoxId, args: BoxId, expr: BoxId) -> BoxId {
+    let payload = arena.cons(args, expr);
+    arena.cons(name, payload)
 }
 
 /// Equivalent to C++ `boxMetadata`.

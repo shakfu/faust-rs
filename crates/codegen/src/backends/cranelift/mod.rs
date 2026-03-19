@@ -2313,7 +2313,8 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 let mut yv = self.lower_expr(*y, Some(&FirType::Float32))?.value();
                 xv = self.coerce_value_to_fir_type(xv, &FirType::Float32)?;
                 yv = self.coerce_value_to_fir_type(yv, &FirType::Float32)?;
-                let fref = self.ensure_import("copysignf", &[types::F32, types::F32], types::F32)?;
+                let fref =
+                    self.ensure_import("copysignf", &[types::F32, types::F32], types::F32)?;
                 let call = self.fb.ins().call(fref, &[xv, yv]);
                 return Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]));
             }
@@ -2326,7 +2327,11 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 let call = self.fb.ins().call(fref, &[xv, yv]);
                 return Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]));
             }
-            ("acoshf" | "asinhf" | "atanhf" | "coshf" | "sinhf" | "tanhf", FirType::FaustFloat | FirType::Float32, [x]) => {
+            (
+                "acoshf" | "asinhf" | "atanhf" | "coshf" | "sinhf" | "tanhf",
+                FirType::FaustFloat | FirType::Float32,
+                [x],
+            ) => {
                 let xv = self.lower_expr(*x, Some(&FirType::Float32))?.value();
                 let xv = self.coerce_value_to_fir_type(xv, &FirType::Float32)?;
                 let fref = self.ensure_import(name, &[types::F32], types::F32)?;

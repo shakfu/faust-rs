@@ -149,6 +149,51 @@ fn eval_process_treats_metadata_wrapper_as_evaluation_transparent() {
 }
 
 #[test]
+fn eval_process_accepts_parser_lowered_letrec_without_eval_fallback() {
+    let source = r#"
+        process = y letrec {
+            'y = (x - s) * G + s;
+            's = 2 * (x - s) * G + s;
+        } with {
+            x = _;
+            G = 0.5;
+        };
+    "#;
+    let parsed = parse_program(source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept letrec fixture: {:?}",
+        parsed.errors
+    );
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+
+    let out = eval_process(&mut arena, root)
+        .expect("parser-lowered letrec should evaluate without eval fallback");
+    assert!(!matches!(
+        match_box(&arena, out),
+        BoxMatch::WithRecDef(_, _, _)
+    ));
+}
+
+#[test]
+fn eval_process_rejects_legacy_with_rec_def_nodes() {
+    let mut arena = TreeArena::new();
+    let wire = make_wire(&mut arena);
+    let nil = arena.nil();
+    let tag = arena.intern_tag("BOXWITHRECDEF");
+    let legacy = arena.intern(NodeKind::Tag(tag), &[wire, nil, nil]);
+    let process = make_def(&mut arena, "process", nil, legacy);
+    let root = make_defs(&mut arena, &[process]);
+
+    let err = eval_process(&mut arena, root).expect_err("legacy BOXWITHRECDEF should be rejected");
+    let EvalError::InternalError { message } = err else {
+        panic!("expected InternalError for legacy BOXWITHRECDEF");
+    };
+    assert!(message.contains("BOXWITHRECDEF"));
+}
+
+#[test]
 fn eval_process_component_loads_file_in_captured_source_context() {
     let root_dir = temp_root("component_source_context");
     let entry = root_dir.join("main.dsp");

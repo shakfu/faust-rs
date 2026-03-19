@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use boxes::{BoxMatch, match_box};
+use boxes::{BoxMatch, dump_box, match_box};
 use parser::{parse_file_with_imports, parse_program};
 use tlib::{NodeKind, TreeArena, TreeId};
 
@@ -228,6 +228,26 @@ fn production_parser_reinjects_definition_metadata_like_cpp() {
         Some("metadata_definition.dsp/foo:author")
     );
     assert_eq!(string_like_text(&output.state.arena, value), Some("Alice"));
+}
+
+#[test]
+fn production_parser_expands_letrec_to_with_local_def_like_cpp() {
+    let source = r#"
+        process = y letrec {
+            'y = (x - s) * G + s;
+            's = 2 * (x - s) * G + s;
+        } with {
+            x = _;
+            G = 0.5;
+        };
+    "#;
+
+    let (arena, expr) = parse_process_expr(source, "structural_letrec.dsp");
+    let dumped = dump_box(&arena, expr);
+    assert!(
+        !dumped.contains("BOXWITHRECDEF"),
+        "parser should not leave BOXWITHRECDEF on the production path: {dumped}"
+    );
 }
 
 #[test]

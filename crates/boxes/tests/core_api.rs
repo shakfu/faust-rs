@@ -22,6 +22,12 @@ fn list_nth(arena: &TreeArena, mut list: TreeId, mut n: usize) -> Option<TreeId>
     }
 }
 
+fn parser_definition(arena: &mut TreeArena, name: TreeId, expr: TreeId) -> TreeId {
+    let nil = arena.nil();
+    let payload = arena.cons(nil, expr);
+    arena.cons(name, payload)
+}
+
 #[test]
 fn builder_and_match_cover_core_shapes() {
     let mut arena = TreeArena::new();
@@ -140,24 +146,29 @@ fn builder_matches_iterative_scope_and_module_families() {
     let half = arena.float(0.5);
 
     let (ipar, iseq, isum, iprod, local, recdef, env, comp, lib, wave, route) = {
-        let mut b = BoxBuilder::new(&mut arena);
-        let wire = b.wire();
-        let ipar = b.ipar(idx, count, wire);
-        let iseq = b.iseq(idx, count, wire);
-        let isum = b.isum(idx, count, wire);
-        let iprod = b.iprod(idx, count, wire);
-        let a_ident = b.ident("a");
-        let defs = b.par(a_ident, one);
-        let b_ident = b.ident("b");
-        let defs2 = b.par(b_ident, one);
-        let local = b.with_local_def(wire, defs);
-        let recdef = b.with_rec_def(wire, defs, defs2);
-        let env = b.environment();
-        let comp = b.component(filename_component);
-        let lib = b.library(filename_library);
-        let wave = b.waveform(&[zero, one, half]);
-        let route_spec = b.par(zero, zero);
-        let route = b.route(one, one, route_spec);
+        let wire = BoxBuilder::new(&mut arena).wire();
+        let ipar = BoxBuilder::new(&mut arena).ipar(idx, count, wire);
+        let iseq = BoxBuilder::new(&mut arena).iseq(idx, count, wire);
+        let isum = BoxBuilder::new(&mut arena).isum(idx, count, wire);
+        let iprod = BoxBuilder::new(&mut arena).iprod(idx, count, wire);
+        let a_ident = BoxBuilder::new(&mut arena).ident("a");
+        let defs = {
+            let def = parser_definition(&mut arena, a_ident, one);
+            arena.cons(def, arena.nil())
+        };
+        let b_ident = BoxBuilder::new(&mut arena).ident("b");
+        let defs2 = {
+            let def = parser_definition(&mut arena, b_ident, one);
+            arena.cons(def, arena.nil())
+        };
+        let local = BoxBuilder::new(&mut arena).with_local_def(wire, defs);
+        let recdef = BoxBuilder::new(&mut arena).with_rec_def(wire, defs, defs2);
+        let env = BoxBuilder::new(&mut arena).environment();
+        let comp = BoxBuilder::new(&mut arena).component(filename_component);
+        let lib = BoxBuilder::new(&mut arena).library(filename_library);
+        let wave = BoxBuilder::new(&mut arena).waveform(&[zero, one, half]);
+        let route_spec = BoxBuilder::new(&mut arena).par(zero, zero);
+        let route = BoxBuilder::new(&mut arena).route(one, one, route_spec);
         (
             ipar, iseq, isum, iprod, local, recdef, env, comp, lib, wave, route,
         )
@@ -171,10 +182,15 @@ fn builder_matches_iterative_scope_and_module_families() {
         match_box(&arena, local),
         BoxMatch::WithLocalDef(_, _)
     ));
-    assert!(matches!(
-        match_box(&arena, recdef),
-        BoxMatch::WithRecDef(_, _, _)
-    ));
+    let BoxMatch::WithLocalDef(_, rec_defs) = match_box(&arena, recdef) else {
+        panic!("with_rec_def should expand eagerly to WithLocalDef");
+    };
+    let letrecbody_def = arena.hd(rec_defs).expect("LETRECBODY def");
+    let letrecbody_name = arena.hd(letrecbody_def).expect("LETRECBODY name");
+    assert_eq!(
+        match_box(&arena, letrecbody_name),
+        BoxMatch::Ident("LETRECBODY")
+    );
     assert_eq!(match_box(&arena, env), BoxMatch::Environment);
     assert!(matches!(match_box(&arena, comp), BoxMatch::Component(_)));
     assert!(matches!(match_box(&arena, lib), BoxMatch::Library(_)));

@@ -2324,11 +2324,20 @@ fn eval_value(
         BoxMatch::ModifLocalDef(body, defs) => {
             eval_modif_local_def_value(arena, body, defs, env, loop_detector)
         }
-        BoxMatch::WithRecDef(body, rec_defs, where_defs) => {
-            let mut scoped = env.push_scope();
-            bind_definitions(arena, rec_defs, &mut scoped)?;
-            bind_definitions(arena, where_defs, &mut scoped)?;
-            eval_value(arena, body, &scoped, loop_detector)
+        BoxMatch::WithRecDef(_, _, _) => {
+            // Source provenance (C++):
+            // - `compiler/boxes/boxes.cpp`
+            // - `boxWithRecDef`
+            //
+            // Mapping status: `1:1` production invariant.
+            // C++ expands `letrec` before evaluation. Rust now does the same in
+            // `boxes`, so reaching `BOXWITHRECDEF` here means a legacy or
+            // manually constructed tree bypassed the normal parser/boxes path.
+            Err(EvalError::InternalError {
+                message:
+                    "legacy BOXWITHRECDEF reached eval; parser/boxes should lower letrec eagerly"
+                        .to_owned(),
+            })
         }
         BoxMatch::Metadata(body, _mdlist) => {
             // Source provenance (C++):
