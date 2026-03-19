@@ -809,15 +809,11 @@ fn route_box_propagates_by_mixing_selected_inputs() {
     let out = propagate(&mut arena, route, &inputs, &mut ArityCache::new())
         .expect("route should propagate");
     assert_eq!(out.len(), 2);
-    let zero = SigBuilder::new(&mut arena).int(0);
-    let SigMatch::BinOp(BinOp::Add, partial, rhs) = match_sig(&arena, out[0]) else {
+    let SigMatch::BinOp(BinOp::Add, lhs, rhs) = match_sig(&arena, out[0]) else {
         panic!("first route output should be an add");
     };
+    assert_eq!(lhs, inputs[0]);
     assert_eq!(rhs, inputs[1]);
-    assert_eq!(
-        match_sig(&arena, partial),
-        SigMatch::BinOp(BinOp::Add, zero, inputs[0])
-    );
     assert_eq!(match_sig(&arena, out[1]), SigMatch::Int(0));
 }
 

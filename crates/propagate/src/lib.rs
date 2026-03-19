@@ -2165,8 +2165,7 @@ fn propagate_inner(
 
             let route = flatten_route_ints(arena, route_spec)?;
             let mut b = SigBuilder::new(arena);
-            let zero = b.int(0);
-            let mut outputs = vec![zero; output_count];
+            let mut outputs: Vec<Option<SigId>> = vec![None; output_count];
 
             for pair in route.chunks_exact(2) {
                 let src = pair[0];
@@ -2186,10 +2185,14 @@ fn propagate_inner(
                 if src_index >= input_count {
                     continue;
                 }
-                outputs[dst_index] = b.add(outputs[dst_index], inputs[src_index]);
+                outputs[dst_index] = Some(match outputs[dst_index] {
+                    Some(existing) => b.add(existing, inputs[src_index]),
+                    None => inputs[src_index],
+                });
             }
 
-            Ok(outputs)
+            let zero = b.int(0);
+            Ok(outputs.into_iter().map(|sig| sig.unwrap_or(zero)).collect())
         }
         FlatNodeKind::FFun => {
             let BoxMatch::FFun(ff) = match_box(arena, box_tree.as_tree_id()) else {
@@ -2853,5 +2856,56 @@ mod tests {
             .expect("validated shared DAG should infer arity");
         assert_eq!(arity.inputs, 30);
         assert_eq!(arity.outputs, 15);
+    }
+
+    #[test]
+    fn propagate_route_identity_preserves_all_inputs() {
+        let mut arena = TreeArena::new();
+        let route_spec = {
+            let one = BoxBuilder::new(&mut arena).int(1);
+            let one_b = BoxBuilder::new(&mut arena).int(1);
+            let two = BoxBuilder::new(&mut arena).int(2);
+            let two_b = BoxBuilder::new(&mut arena).int(2);
+            let three = BoxBuilder::new(&mut arena).int(3);
+            let three_b = BoxBuilder::new(&mut arena).int(3);
+            let four = BoxBuilder::new(&mut arena).int(4);
+            let four_b = BoxBuilder::new(&mut arena).int(4);
+            let p1 = BoxBuilder::new(&mut arena).par(one, one_b);
+            let p2 = BoxBuilder::new(&mut arena).par(two, two_b);
+            let p3 = BoxBuilder::new(&mut arena).par(three, three_b);
+            let p4 = BoxBuilder::new(&mut arena).par(four, four_b);
+            let left = BoxBuilder::new(&mut arena).par(p1, p2);
+            let right = BoxBuilder::new(&mut arena).par(p3, p4);
+            BoxBuilder::new(&mut arena).par(left, right)
+        };
+        let route = {
+            let ins = BoxBuilder::new(&mut arena).int(4);
+            let outs = BoxBuilder::new(&mut arena).int(4);
+            BoxBuilder::new(&mut arena).route(ins, outs, route_spec)
+        };
+        let inputs = {
+            let w0 = BoxBuilder::new(&mut arena).wire();
+            let w1 = BoxBuilder::new(&mut arena).wire();
+            let w2 = BoxBuilder::new(&mut arena).wire();
+            let w3 = BoxBuilder::new(&mut arena).wire();
+            let left = BoxBuilder::new(&mut arena).par(w0, w1);
+            let right = BoxBuilder::new(&mut arena).par(w2, w3);
+            BoxBuilder::new(&mut arena).par(left, right)
+        };
+        let expr = BoxBuilder::new(&mut arena).seq(inputs, route);
+
+        let flat = try_build_flat_box(&arena, expr).expect("flat route box");
+        let provided_inputs = {
+            let mut b = SigBuilder::new(&mut arena);
+            vec![b.input(0), b.input(1), b.input(2), b.input(3)]
+        };
+        let outputs = propagate_typed(&mut arena, flat, &provided_inputs, &mut ArityCache::new())
+            .expect("route propagate");
+
+        assert_eq!(outputs.len(), 4);
+        assert!(matches!(match_sig(&arena, outputs[0]), SigMatch::Input(0)));
+        assert!(matches!(match_sig(&arena, outputs[1]), SigMatch::Input(1)));
+        assert!(matches!(match_sig(&arena, outputs[2]), SigMatch::Input(2)));
+        assert!(matches!(match_sig(&arena, outputs[3]), SigMatch::Input(3)));
     }
 }

@@ -14,8 +14,7 @@ use eval::{
     Environment, EvalError, EvalSourceContext, LoopDetector, eval_box, eval_process,
     eval_process_with_source_context, eval_process_with_stats,
 };
-use parser::CompilationMetadataKey;
-use parser::parse_program;
+use parser::{CompilationMetadataKey, parse_program};
 use propagate::ArityCache;
 use tlib::{NodeKind, TreeArena, TreeId};
 
@@ -191,6 +190,52 @@ fn eval_process_rejects_legacy_with_rec_def_nodes() {
         panic!("expected InternalError for legacy BOXWITHRECDEF");
     };
     assert!(message.contains("BOXWITHRECDEF"));
+}
+
+#[test]
+fn eval_process_keeps_multi_output_parallel_add_network_structured() {
+    let source = r#"
+        process = (0,0,1,1) : par(i,2,+);
+    "#;
+    let parsed = parse_program(source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept multi-output fold fixture: {:?}",
+        parsed.errors
+    );
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+
+    let out =
+        eval_process(&mut arena, root).expect("multi-output seq/par composition should evaluate");
+    assert!(
+        !matches!(match_box(&arena, out), BoxMatch::Int(_) | BoxMatch::Real(_)),
+        "multi-output network must not collapse to a scalar constant"
+    );
+}
+
+#[test]
+fn eval_process_route_spec_lowers_computed_connections_like_cpp() {
+    let source = r#"
+        process = 0.3,-0.2,0.8,-0.5
+            : route(4,4, ((0,0,1,1,2,2,3,3),(1,1,1,1,1,1,1,1)) : par(i,8,+));
+    "#;
+    let parsed = parse_program(source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept route fixture: {:?}",
+        parsed.errors
+    );
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+    let ctx = EvalSourceContext::memory();
+
+    let out = eval_process_with_source_context(&mut arena, root, ctx)
+        .expect("route spec should evaluate after a2sb lowering");
+    assert!(
+        !matches!(match_box(&arena, out), BoxMatch::Int(_) | BoxMatch::Real(_)),
+        "computed route specifications must not collapse to a scalar constant"
+    );
 }
 
 #[test]

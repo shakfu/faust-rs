@@ -2574,7 +2574,12 @@ fn eval_value_uncached(
 
             let ins_node = eval_box_to_int_node(arena, eval_ins).unwrap_or(eval_ins);
             let outs_node = eval_box_to_int_node(arena, eval_outs).unwrap_or(eval_outs);
-            let spec_node = normalize_route_spec(arena, eval_routes);
+            let routes_node = a2sb(arena, eval_routes, loop_detector).unwrap_or(eval_routes);
+            let spec_node = eval_box_to_int_list_node(arena, routes_node).unwrap_or_else(|| {
+                let mut cache = ahash::HashMap::default();
+                let simplified_routes = box_simplification(arena, &mut cache, routes_node);
+                normalize_route_spec(arena, simplified_routes)
+            });
 
             let mut bld = BoxBuilder::new(arena);
             Ok(EvalValue::Box(bld.route(ins_node, outs_node, spec_node)))
@@ -3385,8 +3390,10 @@ fn propagate_box_and_simplify(arena: &mut TreeArena, box_id: TreeId) -> Option<S
     let flat = try_build_flat_box(arena, box_id).ok()?;
     let mut cache = ArityCache::default();
     let signals = propagate_typed(arena, flat, &[], &mut cache).ok()?;
-    let sig = *signals.first()?;
-    Some(simplify_const(arena, sig))
+    let [sig] = signals.as_slice() else {
+        return None;
+    };
+    Some(simplify_const(arena, *sig))
 }
 
 /// Tries to reduce a box to a numeric literal for pattern matching.
@@ -3493,6 +3500,48 @@ fn eval_box_to_int_node(arena: &mut TreeArena, box_id: TreeId) -> Result<TreeId,
     Ok(BoxBuilder::new(arena).int(n))
 }
 
+/// Converts a 0→N constant box into a canonical right-spine `Par` tree of
+/// `boxInt` leaves.
+///
+/// This follows the C++ `isBoxRoute` path in `eval.cpp`, where the route
+/// specification is propagated as a whole and then converted back from the
+/// resulting integer signal list.
+fn eval_box_to_int_list_node(arena: &mut TreeArena, box_id: TreeId) -> Option<TreeId> {
+    let (inputs, outputs) = infer_box_arity(arena, box_id)?;
+    if inputs != 0 || outputs == 0 {
+        return None;
+    }
+    let flat = try_build_flat_box(arena, box_id).ok()?;
+    let mut cache = ArityCache::default();
+    let signals = propagate_typed(arena, flat, &[], &mut cache).ok()?;
+    if signals.len() != outputs {
+        return None;
+    }
+
+    let mut ints = Vec::with_capacity(outputs);
+    for sig in signals {
+        let sig = simplify_const(arena, sig);
+        let value = match match_sig(arena, sig) {
+            SigMatch::Int(i) => i,
+            SigMatch::Real(x) => {
+                let i = x as i32;
+                if (i as f64) != x {
+                    return None;
+                }
+                i
+            }
+            _ => return None,
+        };
+        ints.push(BoxBuilder::new(arena).int(value));
+    }
+
+    let mut result = *ints.last()?;
+    for leaf in ints[..ints.len() - 1].iter().rev() {
+        result = BoxBuilder::new(arena).par(*leaf, result);
+    }
+    Some(result)
+}
+
 /// Recursively collects the leaves of a right-spine `Par` tree.
 ///
 /// `route(2,2, 1,1, 2,2)` stores the wire pairs as
@@ -3563,8 +3612,9 @@ fn is_numerical_tuple_box(arena: &TreeArena, box_id: TreeId) -> bool {
 ///
 /// Requires `a1` to be a numerical tuple (see [`is_numerical_tuple_box`]).
 /// Propagates `a2` with the signals from `a1` as its inputs and simplifies
-/// the result; if the simplified signal is a numeric constant, returns the
-/// corresponding `boxInt(n)` or `boxReal(x)`.
+/// the result; if propagation yields exactly one output signal and that
+/// simplified signal is a numeric constant, returns the corresponding
+/// `boxInt(n)` or `boxReal(x)`.
 ///
 /// Returns `None` if the expression cannot be reduced.
 ///
@@ -3579,9 +3629,17 @@ fn is_numerical_tuple_box(arena: &TreeArena, box_id: TreeId) -> bool {
 /// }
 /// ```
 fn try_fold_seq_numeric(arena: &mut TreeArena, a1: TreeId, a2: TreeId) -> Option<TreeId> {
-    // Build seq(a1, a2) and propagate it with 0 inputs.
+    // C++ folds only when propagation produces exactly one output. Multi-output
+    // sequences such as `(0,0,1,1) : par(i,2,+)` must remain structured graphs,
+    // not collapse to the first propagated constant.
     let seq = BoxBuilder::new(arena).seq(a1, a2);
-    let sig = propagate_box_and_simplify(arena, seq)?;
+    let flat = try_build_flat_box(arena, seq).ok()?;
+    let mut cache = ArityCache::default();
+    let signals = propagate_typed(arena, flat, &[], &mut cache).ok()?;
+    let [sig] = signals.as_slice() else {
+        return None;
+    };
+    let sig = simplify_const(arena, *sig);
     // Both SigInt/SigReal and BoxInt/BoxReal share the same underlying NodeKind
     // (NodeKind::Int / NodeKind::FloatBits), so the SigId IS the BoxId.
     match match_sig(arena, sig) {
@@ -5743,8 +5801,9 @@ mod simplify_helpers_tests {
 
     use super::{
         Environment, LoopDetector, box_simplification, eval_box, eval_box_to_f64, eval_box_to_i32,
-        eval_box_to_int_node, flatten_route_spec, is_numerical_tuple_box, normalize_route_spec,
-        propagate_box_and_simplify, try_fold_seq_numeric,
+        eval_box_to_int_list_node, eval_box_to_int_node, flatten_route_spec,
+        is_numerical_tuple_box, normalize_route_spec, propagate_box_and_simplify,
+        try_fold_seq_numeric,
     };
 
     /// Build `Seq(Par(Int(a), Int(b)), Add)` — the box-calculus encoding of `a + b`.
@@ -5806,6 +5865,93 @@ mod simplify_helpers_tests {
             propagate_box_and_simplify(&mut arena, wire).is_none(),
             "Wire (1→1) should return None"
         );
+    }
+
+    /// Multi-output boxes must not be simplified by taking the first output.
+    ///
+    /// C++ `boxPropagateSig(nil, box, [])` is only consumed as a scalar
+    /// simplification when the propagated list is a singleton. A pure route
+    /// network with four outputs must therefore stay structured.
+    #[test]
+    fn propagate_box_and_simplify_route_identity_is_none() {
+        let mut arena = TreeArena::default();
+        let mut b = BoxBuilder::new(&mut arena);
+        let a = b.real(0.3);
+        let bb = b.real(-0.2);
+        let c = b.real(0.8);
+        let d = b.real(-0.5);
+        let left = b.par(a, bb);
+        let right = b.par(c, d);
+        let inputs = b.par(left, right);
+        let i1a = b.int(1);
+        let i1b = b.int(1);
+        let i2a = b.int(2);
+        let i2b = b.int(2);
+        let i3a = b.int(3);
+        let i3b = b.int(3);
+        let i4a = b.int(4);
+        let i4b = b.int(4);
+        let p4 = b.par(i4a, i4b);
+        let p3 = b.par(i3b, p4);
+        let p2 = b.par(i3a, p3);
+        let p1 = b.par(i2b, p2);
+        let p0 = b.par(i2a, p1);
+        let q1 = b.par(i1b, p0);
+        let spec = b.par(i1a, q1);
+        let ins = b.int(4);
+        let outs = b.int(4);
+        let route = b.route(ins, outs, spec);
+        let expr = b.seq(inputs, route);
+        assert!(
+            propagate_box_and_simplify(&mut arena, expr).is_none(),
+            "multi-output route network should stay structured"
+        );
+    }
+
+    /// Route specifications computed as 0→N integer tuples must be rebuilt as
+    /// canonical `par(int, ...)` trees, like the C++ `isBoxRoute` evaluator.
+    #[test]
+    fn eval_box_to_int_list_node_rebuilds_computed_route_spec() {
+        let mut arena = TreeArena::default();
+        let mut b = BoxBuilder::new(&mut arena);
+
+        let base = [0, 0, 1, 1, 2, 2, 3, 3]
+            .into_iter()
+            .map(|i| b.int(i))
+            .collect::<Vec<_>>();
+        let ones = [1, 1, 1, 1, 1, 1, 1, 1]
+            .into_iter()
+            .map(|i| b.int(i))
+            .collect::<Vec<_>>();
+
+        let mut pairs = Vec::with_capacity(16);
+        for (lhs, rhs) in base.iter().copied().zip(ones.iter().copied()) {
+            pairs.push(lhs);
+            pairs.push(rhs);
+        }
+        let args = pairs
+            .into_iter()
+            .reduce(|acc, next| b.par(acc, next))
+            .expect("interleaved args");
+
+        let mut adds = b.add();
+        for _ in 1..8 {
+            let next = b.add();
+            adds = b.par(adds, next);
+        }
+        let expr = b.seq(args, adds);
+
+        let result = eval_box_to_int_list_node(&mut arena, expr).expect("route list");
+        let mut leaves = Vec::new();
+        flatten_route_spec(&arena, result, &mut leaves);
+        let ints = leaves
+            .into_iter()
+            .map(|leaf| match match_box(&arena, leaf) {
+                BoxMatch::Int(i) => i,
+                other => panic!("expected int leaf, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ints, vec![1, 1, 2, 2, 3, 3, 4, 4]);
     }
 
     // ── simplify_pattern ───────────────────────────────────────────────────────
@@ -5953,6 +6099,31 @@ mod simplify_helpers_tests {
         assert!(result.is_some(), "should fold");
         assert!(
             matches!(match_box(&arena, result.unwrap()), BoxMatch::Real(x) if (x - 4.0).abs() < 1e-12)
+        );
+    }
+
+    /// Multi-output propagated sequences must not fold to the first output.
+    ///
+    /// C++ only folds `seq(a1, a2)` in `eval.cpp` when `boxPropagateSig(...)`
+    /// returns a singleton list. This protects constructs such as
+    /// `(0,0,1,1) : par(i,2,+)` that semantically produce two outputs.
+    #[test]
+    fn try_fold_seq_multi_output_parallel_add_does_not_fold() {
+        let mut arena = TreeArena::default();
+        let zero_a = BoxBuilder::new(&mut arena).int(0);
+        let zero_b = BoxBuilder::new(&mut arena).int(0);
+        let one_a = BoxBuilder::new(&mut arena).int(1);
+        let one_b = BoxBuilder::new(&mut arena).int(1);
+        let left = BoxBuilder::new(&mut arena).par(zero_a, zero_b);
+        let right = BoxBuilder::new(&mut arena).par(one_a, one_b);
+        let inputs = BoxBuilder::new(&mut arena).par(left, right);
+        let add = BoxBuilder::new(&mut arena).add();
+        let adds = BoxBuilder::new(&mut arena).par(add, add);
+
+        let result = try_fold_seq_numeric(&mut arena, inputs, adds);
+        assert!(
+            result.is_none(),
+            "multi-output sequence should stay structured and not fold"
         );
     }
 
