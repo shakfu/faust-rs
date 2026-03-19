@@ -2601,7 +2601,9 @@ impl<'a> SignalToFirLower<'a> {
         // The promoter guarantees that every BinOp operand already has the
         // correct domain type: mixed Int/Real pairs are wrapped in FloatCast
         // nodes, bitwise/shift operands in IntCast nodes, and Div operands are
-        // always Real.  No implicit coercion is needed here.
+        // always Real. Comparisons keep same-typed numeric operands and lower
+        // to Int32 ("boolean int") results for C++ parity. No implicit
+        // coercion is needed here.
         let result_ty = self.signal_fir_type(node)?;
         let lhs = self.lower_signal(lhs_sig)?;
         let rhs = self.lower_signal(rhs_sig)?;
@@ -2611,6 +2613,46 @@ impl<'a> SignalToFirLower<'a> {
                 format!("unsupported SIGBINOP operator `{}` in Step 2A", op.name()),
             )
         })?;
+        let lhs_ty = self.store.value_type(lhs).ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedBinOp,
+                format!(
+                    "missing FIR type for left operand of `{}` in Step 2A",
+                    op.name()
+                ),
+            )
+        })?;
+        let rhs_ty = self.store.value_type(rhs).ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedBinOp,
+                format!(
+                    "missing FIR type for right operand of `{}` in Step 2A",
+                    op.name()
+                ),
+            )
+        })?;
+        let operands_ok = match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => {
+                lhs_ty == typ && rhs_ty == typ
+            }
+            BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Lsh | BinOp::ARsh | BinOp::LRsh => {
+                lhs_ty == FirType::Int32 && rhs_ty == FirType::Int32
+            }
+            BinOp::Gt | BinOp::Lt | BinOp::Ge | BinOp::Le | BinOp::Eq | BinOp::Ne => {
+                lhs_ty == rhs_ty
+                    && matches!(lhs_ty, FirType::Int32 | FirType::Float32 | FirType::Float64)
+            }
+        };
+        if !operands_ok {
+            return Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedBinOp,
+                format!(
+                    "prepared SIGBINOP operands for `{}` violate fast-lane typing contract: lhs={lhs_ty:?}, rhs={rhs_ty:?}, result={typ:?} (expr={})",
+                    op.name(),
+                    dump_sig_readable(self.arena, node)
+                ),
+            ));
+        }
         let mut b = FirBuilder::new(&mut self.store);
         Ok(b.binop(fir_op, lhs, rhs, typ))
     }
@@ -2902,8 +2944,11 @@ impl<'a> SignalToFirLower<'a> {
 ///
 /// `real_ty` is the internal DSP computation type (e.g. `Float32` / `Float64`).
 /// It is used for arithmetic operators whose result is a real-valued sample.
-/// Comparison operators always produce `Bool`; bitwise operators always produce
-/// `Int32` — both are independent of `real_ty`.
+/// Comparison operators produce `Int32` in the fast-lane, matching the normal
+/// C++ signal typing path where comparisons are "boolean int" values. This is
+/// distinct from the optional backend-specific `SignalBool2IntPromotion` pass:
+/// the fast-lane does not rely on that pass and must preserve the standard
+/// signal semantics directly. Bitwise operators also produce `Int32`.
 fn map_binop(op: BinOp, real_ty: FirType) -> Option<(FirBinOp, FirType)> {
     match op {
         // Arithmetic operators: result is the internal real type.
@@ -2912,13 +2957,14 @@ fn map_binop(op: BinOp, real_ty: FirType) -> Option<(FirBinOp, FirType)> {
         BinOp::Mul => Some((FirBinOp::Mul, real_ty)),
         BinOp::Div => Some((FirBinOp::Div, real_ty)),
         BinOp::Rem => Some((FirBinOp::Rem, real_ty)),
-        // Comparison operators: result is boolean — independent of real_ty.
-        BinOp::Gt => Some((FirBinOp::Gt, FirType::Bool)),
-        BinOp::Lt => Some((FirBinOp::Lt, FirType::Bool)),
-        BinOp::Ge => Some((FirBinOp::Ge, FirType::Bool)),
-        BinOp::Le => Some((FirBinOp::Le, FirType::Bool)),
-        BinOp::Eq => Some((FirBinOp::Eq, FirType::Bool)),
-        BinOp::Ne => Some((FirBinOp::Ne, FirType::Bool)),
+        // Comparison operators: result is Int32 ("boolean int") for parity
+        // with the standard C++ signal typing path.
+        BinOp::Gt => Some((FirBinOp::Gt, FirType::Int32)),
+        BinOp::Lt => Some((FirBinOp::Lt, FirType::Int32)),
+        BinOp::Ge => Some((FirBinOp::Ge, FirType::Int32)),
+        BinOp::Le => Some((FirBinOp::Le, FirType::Int32)),
+        BinOp::Eq => Some((FirBinOp::Eq, FirType::Int32)),
+        BinOp::Ne => Some((FirBinOp::Ne, FirType::Int32)),
         // Bitwise operators: result is Int32 — independent of real_ty.
         BinOp::And => Some((FirBinOp::And, FirType::Int32)),
         BinOp::Or => Some((FirBinOp::Or, FirType::Int32)),

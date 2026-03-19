@@ -15,6 +15,12 @@ use signals::{BinOp, SigBuilder, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId};
 use ui::{ControlKind, UiGroupKind, UiMatch, UiRootOrigin, match_ui};
 
+fn parser_definition(arena: &mut TreeArena, name: TreeId, expr: TreeId) -> TreeId {
+    let nil = arena.nil();
+    let payload = arena.cons(nil, expr);
+    arena.cons(name, payload)
+}
+
 #[test]
 fn make_sig_input_list_builds_ordered_inputs() {
     let mut arena = TreeArena::new();
@@ -900,34 +906,46 @@ fn flat_box_builder_accepts_valid_post_eval_families() {
 fn flat_box_builder_rejects_evaluator_only_families() {
     let mut arena = TreeArena::new();
     let bad = {
+        let ident = BoxBuilder::new(&mut arena).ident("x");
+        let rule_l = BoxBuilder::new(&mut arena).wire();
+        let rule_r = BoxBuilder::new(&mut arena).wire();
+        let rules = BoxBuilder::new(&mut arena).par(rule_l, rule_r);
+        let abstr_body = BoxBuilder::new(&mut arena).wire();
+        let modulation_body = BoxBuilder::new(&mut arena).wire();
+        let with_lhs = BoxBuilder::new(&mut arena).wire();
+        let with_rhs = BoxBuilder::new(&mut arena).wire();
+        let modif_lhs = BoxBuilder::new(&mut arena).wire();
+        let modif_rhs = BoxBuilder::new(&mut arena).wire();
+        let withrec_body = BoxBuilder::new(&mut arena).wire();
+        let withrec_name_a = BoxBuilder::new(&mut arena).ident("a");
+        let withrec_name_b = BoxBuilder::new(&mut arena).ident("b");
+        let withrec_expr_a = BoxBuilder::new(&mut arena).wire();
+        let withrec_expr_b = BoxBuilder::new(&mut arena).wire();
+        let withrec_defs = {
+            let def_a = parser_definition(&mut arena, withrec_name_a, withrec_expr_a);
+            let def_b = parser_definition(&mut arena, withrec_name_b, withrec_expr_b);
+            let tail = arena.cons(def_b, arena.nil());
+            arena.cons(def_a, tail)
+        };
+        let withrec_defs2 = {
+            let def = parser_definition(&mut arena, withrec_name_a, withrec_expr_a);
+            arena.cons(def, arena.nil())
+        };
+        let appl_fun = BoxBuilder::new(&mut arena).wire();
+        let appl_arg = BoxBuilder::new(&mut arena).wire();
+        let access_expr = BoxBuilder::new(&mut arena).wire();
+        let ipar_count = BoxBuilder::new(&mut arena).int(2);
+        let ipar_body = BoxBuilder::new(&mut arena).wire();
+        let iseq_count = BoxBuilder::new(&mut arena).int(2);
+        let iseq_body = BoxBuilder::new(&mut arena).wire();
+        let isum_count = BoxBuilder::new(&mut arena).int(2);
+        let isum_body = BoxBuilder::new(&mut arena).wire();
+        let iprod_count = BoxBuilder::new(&mut arena).int(2);
+        let iprod_body = BoxBuilder::new(&mut arena).wire();
+        let ff_sig = BoxBuilder::new(&mut arena).wire();
+        let ff_inc = BoxBuilder::new(&mut arena).wire();
+        let ff_lib = BoxBuilder::new(&mut arena).wire();
         let mut bb = BoxBuilder::new(&mut arena);
-        let ident = bb.ident("x");
-        let rule_l = bb.wire();
-        let rule_r = bb.wire();
-        let rules = bb.par(rule_l, rule_r);
-        let abstr_body = bb.wire();
-        let modulation_body = bb.wire();
-        let with_lhs = bb.wire();
-        let with_rhs = bb.wire();
-        let modif_lhs = bb.wire();
-        let modif_rhs = bb.wire();
-        let withrec_a = bb.wire();
-        let withrec_b = bb.wire();
-        let withrec_c = bb.wire();
-        let appl_fun = bb.wire();
-        let appl_arg = bb.wire();
-        let access_expr = bb.wire();
-        let ipar_count = bb.int(2);
-        let ipar_body = bb.wire();
-        let iseq_count = bb.int(2);
-        let iseq_body = bb.wire();
-        let isum_count = bb.int(2);
-        let isum_body = bb.wire();
-        let iprod_count = bb.int(2);
-        let iprod_body = bb.wire();
-        let ff_sig = bb.wire();
-        let ff_inc = bb.wire();
-        let ff_lib = bb.wire();
         vec![
             (bb.case(rules), "case"),
             (bb.pattern_var(ident), "patternvar"),
@@ -936,8 +954,8 @@ fn flat_box_builder_rejects_evaluator_only_families() {
             (bb.with_local_def(with_lhs, with_rhs), "withlocaldef"),
             (bb.modif_local_def(modif_lhs, modif_rhs), "modiflocaldef"),
             (
-                bb.with_rec_def(withrec_a, withrec_b, withrec_c),
-                "withrecdef",
+                bb.with_rec_def(withrec_body, withrec_defs, withrec_defs2),
+                "withlocaldef",
             ),
             (bb.component(ident), "component"),
             (bb.library(ident), "library"),

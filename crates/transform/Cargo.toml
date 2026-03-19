@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 fir     = { path = "../fir" }
+normalize = { path = "../normalize" }
 signals = { path = "../signals" }
 sigtype = { path = "../sigtype" }
 tlib    = { path = "../tlib" }

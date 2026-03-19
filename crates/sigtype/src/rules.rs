@@ -6,10 +6,17 @@
 //! 1. **Memoisation**: already-inferred types are stored in `env` to handle
 //!    DAG sharing without re-computing subtrees.
 //!
-//! 2. **Recursive fixed-point** for `SymRec`/`Proj` groups: types are
-//!    initialised to `make_maximal()` (top of the lattice), then refined
-//!    through the body until stabilisation.  Convergence is guaranteed because
-//!    the lattice is finite and `join` is monotone.
+//! 2. **Recursive fixed-point** for `SymRec`/`Proj` groups: recursive symbols
+//!    are seeded with the C++ `TREC`-style initial tuplet type, then refined
+//!    through the body until stabilisation.
+//!
+//! Explicit limitation: the current Rust implementation matches the C++
+//! starting approximation (`TREC`) and recursive re-evaluation intent, but it
+//! is not yet a structural port of `typeAnnotation(...)` / `updateRecTypes(...)`.
+//! Rust keeps a memoised `SigId -> SigType` map and invalidates the recursive
+//! body sub-DAG between fixpoint steps so the next iteration is re-inferred
+//! under the updated approximation. C++ instead orchestrates recursive groups
+//! more globally through explicit vectors of group types.
 //!
 //! # C++ source
 //! `compiler/signals/sigtyperules.cpp` — `inferSigType`, `typeAnnotation`,
@@ -19,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 
 use interval::Interval;
 use signals::{BinOp, SigId, SigMatch, match_sig};
-use tlib::{TreeArena, match_sym_rec, match_sym_ref};
+use tlib::{NodeKind, TreeArena, match_sym_rec, match_sym_ref};
 use ui::{ControlId, ControlKind, UiProgram};
 
 use crate::enums::{Boolean, Computability, Nature, Variability, Vectorability};
@@ -41,8 +48,15 @@ impl std::error::Error for TypeError {}
 
 /// Bottom-up signal type annotator.
 ///
-/// Carries memoised results in `env`; recursive group heads are seeded with
-/// `make_maximal()` to break cycles before the fixed-point loop refines them.
+/// Carries memoised results in `env`.
+///
+/// Recursive parity note:
+/// - scalar and tuple recursion are seeded from the C++ `TREC` approximation,
+/// - the body is re-inferred after invalidating memoised subtree entries so the
+///   next iteration observes the updated recursive approximation,
+/// - this preserves the intended recursive semantics for the current Rust
+///   architecture, but it is still an adapted implementation rather than a
+///   direct port of C++ `updateRecTypes(...)`.
 pub struct TypeAnnotator<'a> {
     arena: &'a TreeArena,
     ui_program: &'a UiProgram,
@@ -215,7 +229,11 @@ impl<'a> TypeAnnotator<'a> {
             }
 
             // ── Unary math (always Real) ─────────────────────────────────────
-            SigMatch::Abs(x) => self.infer_unary_math(x, interval::ops::arithmetic::abs),
+            SigMatch::Abs(x) => {
+                let tx = self.infer(x)?;
+                let itv = interval::ops::arithmetic::abs(tx.interval());
+                Ok(tx.promote_interval(itv))
+            }
             SigMatch::Sqrt(x) => self.infer_unary_math(x, interval::ops::math::sqrt),
             SigMatch::Exp(x) => self.infer_unary_math(x, interval::ops::math::exp),
             SigMatch::Log(x) => self.infer_unary_math(x, interval::ops::math::log),
@@ -380,8 +398,9 @@ impl<'a> TypeAnnotator<'a> {
             // Symbolic recursion (after de_bruijn_to_sym).
             _ if match_sym_rec(self.arena, sig).is_some() => self.infer_sym_rec(sig),
             _ if match_sym_ref(self.arena, sig).is_some() => {
+                let var = match_sym_ref(self.arena, sig).expect("guard checked sym ref");
                 // Reference to the recursive variable — return current approx.
-                Ok(self.env.get(&sig).cloned().unwrap_or_else(make_maximal))
+                Ok(self.env.get(&var).cloned().unwrap_or_else(make_maximal))
             }
 
             // `Rec` (de Bruijn form, should be converted before reaching here).
@@ -393,7 +412,7 @@ impl<'a> TypeAnnotator<'a> {
             SigMatch::Proj(idx, group) => self.infer_proj(idx, group),
 
             // ── Foreign ─────────────────────────────────────────────────────
-            SigMatch::FFun(_, _) => Ok(make_maximal()),
+            SigMatch::FFun(ff, args) => self.infer_foreign_fun_type(ff, args),
             // C++: makeSimpleType(tree2int(type), kKonst, kInit, kVect, kNum, interval())
             SigMatch::FConst(kind, _, _) => self.infer_foreign_const_type(kind),
             // C++: makeSimpleType(tree2int(type), kBlock, kExec, kVect, kNum, interval())
@@ -693,6 +712,28 @@ impl<'a> TypeAnnotator<'a> {
         ))
     }
 
+    fn infer_foreign_fun_type(&mut self, ff: SigId, args: SigId) -> Result<SigType, TypeError> {
+        let ret_nature = self.foreign_fun_return_nature(ff);
+        let arg_types = self.infer_list_items(args)?;
+        let variability = arg_types
+            .iter()
+            .fold(Variability::Konst, |acc, ty| acc.join(ty.variability()));
+        let computability = arg_types
+            .iter()
+            .fold(Computability::Comp, |acc, ty| acc.join(ty.computability()));
+        let vectorability = arg_types
+            .iter()
+            .fold(Vectorability::Vect, |acc, ty| acc.join(ty.vectorability()));
+        Ok(make_simple(
+            ret_nature,
+            variability,
+            computability,
+            vectorability,
+            Boolean::Num,
+            interval::Interval::new_default(),
+        ))
+    }
+
     // ── Recursive groups ─────────────────────────────────────────────────────
 
     /// Infer the type of a symbolic recursion head `(var, body)`.
@@ -700,25 +741,48 @@ impl<'a> TypeAnnotator<'a> {
     /// # C++ source
     /// `inferRecType` / `updateRecTypes` fixed-point loop in
     /// `sigtyperules.cpp`.
+    ///
+    /// Adaptation status:
+    /// - aligned with C++ on the initial recursive approximation (`TREC`),
+    /// - aligned on iterative re-evaluation until stability,
+    /// - still adapted in mechanism: Rust invalidates memoised body subtrees
+    ///   between iterations instead of using the C++ vector-based global
+    ///   `updateRecTypes(...)` driver.
     fn infer_sym_rec(&mut self, sig: SigId) -> Result<SigType, TypeError> {
         let Some((var, body)) = match_sym_rec(self.arena, sig) else {
             return Ok(make_maximal());
         };
 
-        // Seed with maximal type (top of lattice).
-        self.env.insert(var, make_maximal());
+        // C++ parity: recursive groups start from `TREC` (integer sample/init,
+        // scalar, zero interval) with one component per body slot, not from a
+        // single maximal scalar.
+        self.env.insert(var, initial_rec_type(self.arena, body)?);
+        let upper = maximal_rec_type(self.arena, body)?;
 
         // Fixed-point iteration: refine until stable.
         loop {
-            let prev = self.env.get(&var).cloned().unwrap_or_else(make_maximal);
-            let new = self.infer(body)?;
-            self.env.insert(var, new.clone());
-            if new == prev {
+            let prev = self.env.get(&var).cloned().unwrap_or_else(|| {
+                initial_rec_type(self.arena, body).expect("body already validated")
+            });
+            let mut invalidated = HashSet::new();
+            self.invalidate_cached_subtree_types(body, &mut invalidated)?;
+            let raw = self.infer(body)?;
+            let next = widen_recursive_type(prev.clone(), raw, upper.clone())?;
+            self.env.insert(var, next.clone());
+            if next == prev {
                 break;
             }
         }
 
-        Ok(self.env.get(&var).cloned().unwrap_or_else(make_maximal))
+        let mut invalidated = HashSet::new();
+        self.invalidate_cached_subtree_types(body, &mut invalidated)?;
+        let _ = self.infer(body)?;
+
+        Ok(self
+            .env
+            .get(&var)
+            .cloned()
+            .unwrap_or_else(|| initial_rec_type(self.arena, body).expect("body already validated")))
     }
 
     /// Infer the type of projection from a tuplet recursion group.
@@ -742,6 +806,191 @@ impl<'a> TypeAnnotator<'a> {
             .promote_computability(gc)
             .promote_vectorability(Vectorability::Scal))
     }
+
+    fn invalidate_cached_subtree_types(
+        &mut self,
+        sig: SigId,
+        visited: &mut HashSet<SigId>,
+    ) -> Result<(), TypeError> {
+        if !visited.insert(sig) {
+            return Ok(());
+        }
+
+        self.env.remove(&sig);
+
+        if self.arena.is_nil(sig) {
+            return Ok(());
+        }
+
+        if self.arena.is_list(sig) {
+            let head = self.arena.hd(sig).ok_or_else(|| {
+                TypeError("malformed list payload during recursive cache invalidation".to_owned())
+            })?;
+            let tail = self.arena.tl(sig).ok_or_else(|| {
+                TypeError("malformed list payload during recursive cache invalidation".to_owned())
+            })?;
+            self.invalidate_cached_subtree_types(head, visited)?;
+            self.invalidate_cached_subtree_types(tail, visited)?;
+            return Ok(());
+        }
+
+        if let Some((_var, body_list)) = match_sym_rec(self.arena, sig) {
+            self.invalidate_cached_subtree_types(body_list, visited)?;
+            return Ok(());
+        }
+
+        if match_sym_ref(self.arena, sig).is_some() {
+            return Ok(());
+        }
+
+        let node = self.arena.node(sig).ok_or_else(|| {
+            TypeError(format!(
+                "missing node {} during recursive cache invalidation",
+                sig.as_u32()
+            ))
+        })?;
+        for child in node.children.as_slice() {
+            self.invalidate_cached_subtree_types(*child, visited)?;
+        }
+        Ok(())
+    }
+
+    fn infer_list_items(&mut self, list: SigId) -> Result<Vec<SigType>, TypeError> {
+        let mut items = Vec::new();
+        let mut cursor = list;
+        while !self.arena.is_nil(cursor) {
+            let head = self.arena.hd(cursor).ok_or_else(|| {
+                TypeError("malformed list payload during foreign function typing".to_owned())
+            })?;
+            let tail = self.arena.tl(cursor).ok_or_else(|| {
+                TypeError("malformed list payload during foreign function typing".to_owned())
+            })?;
+            items.push(self.infer(head)?);
+            cursor = tail;
+        }
+        Ok(items)
+    }
+
+    fn foreign_fun_return_nature(&self, ff: SigId) -> Nature {
+        let Some((signature, _, _)) = match_ffunction_node(self.arena, ff) else {
+            return Nature::Real;
+        };
+        let Some(ret_ty) = self.arena.hd(signature) else {
+            return Nature::Real;
+        };
+        self.foreign_nature(ret_ty)
+    }
+}
+
+fn match_ffunction_node(arena: &TreeArena, id: SigId) -> Option<(SigId, SigId, SigId)> {
+    let node = arena.node(id)?;
+    let NodeKind::Tag(tag_id) = node.kind else {
+        return None;
+    };
+    if arena.tag_name(tag_id)? != "FFUN" {
+        return None;
+    }
+    let [signature, incfile, libfile] = node.children.as_slice() else {
+        return None;
+    };
+    Some((*signature, *incfile, *libfile))
+}
+
+/// C++ parity helper for the initial recursive-group approximation (`TREC`).
+///
+/// Each recursive component starts as an integer sample/init scalar with a
+/// zero interval. The group carrier itself is a tuplet with one such component
+/// per body slot.
+fn initial_rec_type(arena: &TreeArena, body: SigId) -> Result<SigType, TypeError> {
+    let mut items = Vec::new();
+    let mut list = body;
+    while !arena.is_nil(list) {
+        let _head = arena.hd(list).ok_or_else(|| {
+            TypeError("malformed symbolic recursion body list during type inference".to_owned())
+        })?;
+        let tail = arena.tl(list).ok_or_else(|| {
+            TypeError("malformed symbolic recursion body list during type inference".to_owned())
+        })?;
+        items.push(make_simple(
+            Nature::Int,
+            Variability::Samp,
+            Computability::Init,
+            Vectorability::Scal,
+            Boolean::Num,
+            interval::singleton(0.0),
+        ));
+        list = tail;
+    }
+    Ok(make_tuplet(items))
+}
+
+/// C++ parity helper for the maximal recursive-group interval carrier
+/// (`TRECMAX`).
+///
+/// This keeps the same lattice coordinates as `TREC` and only opens the
+/// interval to the default full range. In the C++ implementation this upper
+/// bound is used during recursive widening while all other type coordinates
+/// still come from the freshly inferred recursive body.
+fn maximal_rec_type(arena: &TreeArena, body: SigId) -> Result<SigType, TypeError> {
+    let mut items = Vec::new();
+    let mut list = body;
+    while !arena.is_nil(list) {
+        let _head = arena.hd(list).ok_or_else(|| {
+            TypeError("malformed symbolic recursion body list during type inference".to_owned())
+        })?;
+        let tail = arena.tl(list).ok_or_else(|| {
+            TypeError("malformed symbolic recursion body list during type inference".to_owned())
+        })?;
+        items.push(make_simple(
+            Nature::Int,
+            Variability::Samp,
+            Computability::Init,
+            Vectorability::Scal,
+            Boolean::Num,
+            interval::Interval::new_default(),
+        ));
+        list = tail;
+    }
+    Ok(make_tuplet(items))
+}
+
+/// Update one recursive-group approximation using the same interval strategy as
+/// C++ `updateRecTypes(..., inter = false)` followed by the default widening
+/// policy from `typeAnnotation()`.
+///
+/// Semantics:
+/// - type coordinates come from the newly inferred recursive body,
+/// - intervals are first reunited with the previous approximation,
+/// - with Faust's default `gWideningLimit = 0`, any drifting lower/upper bound
+///   is widened immediately to the corresponding `TRECMAX` bound.
+fn widen_recursive_type(prev: SigType, raw: SigType, upper: SigType) -> Result<SigType, TypeError> {
+    let (SigType::Tuplet(prev), SigType::Tuplet(raw), SigType::Tuplet(upper)) = (prev, raw, upper)
+    else {
+        return Err(TypeError(
+            "recursive type update expected tuplet approximations".to_owned(),
+        ));
+    };
+
+    let mut items = Vec::with_capacity(raw.components.len());
+    for ((new_comp, old_comp), upper_comp) in raw
+        .components
+        .iter()
+        .zip(prev.components.iter())
+        .zip(upper.components.iter())
+    {
+        let mut widened = interval::reunion(new_comp.interval(), old_comp.interval());
+        if widened.lo() != old_comp.interval().lo() {
+            widened =
+                interval::Interval::new(upper_comp.interval().lo(), widened.hi(), widened.lsb());
+        }
+        if widened.hi() != old_comp.interval().hi() {
+            widened =
+                interval::Interval::new(widened.lo(), upper_comp.interval().hi(), widened.lsb());
+        }
+        items.push(new_comp.clone().promote_interval(widened));
+    }
+
+    Ok(make_tuplet(items))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -384,6 +384,43 @@ mod tests {
     }
 
     #[test]
+    fn comparison_binops_lower_to_int32_boolean_values() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let mut b = SigBuilder::new(&mut arena);
+            let i0 = b.input(0);
+            let zero = b.real(0.0);
+            b.binop(BinOp::Eq, i0, zero)
+        };
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect("comparison should lower through fast-lane");
+
+        let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+            panic!("module root expected");
+        };
+        let loop_body = find_compute_loop_body(&out.store, functions);
+        let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+            panic!("compute loop body block expected");
+        };
+        let stored_value = stmts
+            .iter()
+            .find_map(|id| match match_fir(&out.store, *id) {
+                FirMatch::StoreTable { name, value, .. } if name == "output0" => Some(value),
+                _ => None,
+            })
+            .expect("compute should include one output store");
+        let inner = unwrap_output_cast(&out.store, stored_value);
+        assert!(matches!(
+            match_fir(&out.store, inner),
+            FirMatch::BinOp {
+                op: FirBinOp::Eq,
+                typ: FirType::Int32,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn invalid_options_return_typed_error_code() {
         let mut arena = TreeArena::new();
         let sig0 = {

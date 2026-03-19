@@ -1481,7 +1481,7 @@ impl<'s> VerifyCtx<'s> {
             | FirBinOp::Lt
             | FirBinOp::Le
             | FirBinOp::Gt
-            | FirBinOp::Ge => Some(FirType::Bool),
+            | FirBinOp::Ge => Some(FirType::Int32),
             FirBinOp::And | FirBinOp::Or | FirBinOp::Xor => {
                 if *lhs == FirType::Bool && *rhs == FirType::Bool {
                     Some(FirType::Bool)
