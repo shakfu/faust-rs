@@ -46,6 +46,164 @@ impl std::fmt::Display for TypeError {
 
 impl std::error::Error for TypeError {}
 
+/// One symbolic recursive group discovered before running the global recursive
+/// typing fixpoint.
+///
+/// This mirrors the C++ `typeAnnotation(...)` preparation step, which collects
+/// all recursive groups into explicit vectors before applying
+/// `updateRecTypes(...)`. Rust does not use this state as the active driver
+/// yet, but the scaffold is introduced first so the eventual algorithm switch
+/// can happen without relying on subtree invalidation as implicit state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecGroup {
+    /// The `SYMREC(var, body_list)` node representing the recursive group.
+    rec_sig: SigId,
+    /// The recursive variable symbol associated with `rec_sig`.
+    var: SigId,
+    /// The `cons(...)` body list stored inside the symbolic recursion node.
+    body_list: SigId,
+    /// Number of outputs/components in `body_list`.
+    arity: usize,
+}
+
+/// Explicit recursive typing state prepared for a future port of the C++
+/// `typeAnnotation(...)` / `updateRecTypes(...)` driver.
+///
+/// Design intent:
+/// - `groups` is the deterministic discovery order of recursive groups,
+/// - `current` will hold the current recursive approximation for each group,
+/// - `upper` will hold the corresponding `TRECMAX`-style upper bound,
+/// - `age_min` / `age_max` will track widening counters like the C++ vectors.
+///
+/// The current Rust implementation still drives recursion from `infer_sym_rec`,
+/// but this state object documents and reserves the shape of the explicit
+/// group-based algorithm required for parity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecTypingState {
+    groups: Vec<RecGroup>,
+    current: Vec<SigType>,
+    upper: Vec<SigType>,
+    age_min: Vec<Vec<i32>>,
+    age_max: Vec<Vec<i32>>,
+}
+
+impl RecTypingState {
+    /// Builds one explicit recursive typing state from already-symbolic outputs.
+    ///
+    /// Discovery order is deterministic DFS over the output list with DAG
+    /// sharing preserved by `visited`. This matches the kind of stable vector
+    /// ordering the C++ driver expects before running `updateRecTypes(...)`.
+    fn discover(arena: &TreeArena, outputs: &[SigId]) -> Result<Self, TypeError> {
+        let groups = discover_recursive_groups(arena, outputs)?;
+        let mut current = Vec::with_capacity(groups.len());
+        let mut upper = Vec::with_capacity(groups.len());
+        let mut age_min = Vec::with_capacity(groups.len());
+        let mut age_max = Vec::with_capacity(groups.len());
+
+        for group in &groups {
+            current.push(initial_rec_type(arena, group.body_list)?);
+            upper.push(maximal_rec_type(arena, group.body_list)?);
+            age_min.push(vec![0; group.arity]);
+            age_max.push(vec![0; group.arity]);
+        }
+
+        Ok(Self {
+            groups,
+            current,
+            upper,
+            age_min,
+            age_max,
+        })
+    }
+}
+
+/// Discover all symbolic recursive groups reachable from `outputs`.
+///
+/// This is the Rust scaffold for the C++ `typeAnnotation(...)` pre-pass that
+/// collects `vrec` / `vdef` / `vdefSizes` before running `updateRecTypes(...)`.
+fn discover_recursive_groups(
+    arena: &TreeArena,
+    outputs: &[SigId],
+) -> Result<Vec<RecGroup>, TypeError> {
+    let mut groups = Vec::new();
+    let mut visited = HashSet::new();
+    let mut seen_groups = HashSet::new();
+    for &out in outputs {
+        walk_collect_rec_groups(arena, out, &mut visited, &mut seen_groups, &mut groups)?;
+    }
+    Ok(groups)
+}
+
+fn walk_collect_rec_groups(
+    arena: &TreeArena,
+    sig: SigId,
+    visited: &mut HashSet<SigId>,
+    seen_groups: &mut HashSet<SigId>,
+    groups: &mut Vec<RecGroup>,
+) -> Result<(), TypeError> {
+    if !visited.insert(sig) {
+        return Ok(());
+    }
+
+    if arena.is_nil(sig) {
+        return Ok(());
+    }
+
+    if arena.is_list(sig) {
+        let head = arena.hd(sig).ok_or_else(|| {
+            TypeError("malformed list payload during recursive group discovery".to_owned())
+        })?;
+        let tail = arena.tl(sig).ok_or_else(|| {
+            TypeError("malformed list payload during recursive group discovery".to_owned())
+        })?;
+        walk_collect_rec_groups(arena, head, visited, seen_groups, groups)?;
+        walk_collect_rec_groups(arena, tail, visited, seen_groups, groups)?;
+        return Ok(());
+    }
+
+    if let Some((var, body_list)) = match_sym_rec(arena, sig) {
+        if seen_groups.insert(sig) {
+            groups.push(RecGroup {
+                rec_sig: sig,
+                var,
+                body_list,
+                arity: body_list_arity(arena, body_list)?,
+            });
+        }
+        walk_collect_rec_groups(arena, body_list, visited, seen_groups, groups)?;
+        return Ok(());
+    }
+
+    if match_sym_ref(arena, sig).is_some() {
+        return Ok(());
+    }
+
+    let node = arena.node(sig).ok_or_else(|| {
+        TypeError(format!(
+            "missing node {} during recursive group discovery",
+            sig.as_u32()
+        ))
+    })?;
+    for child in node.children.as_slice() {
+        walk_collect_rec_groups(arena, *child, visited, seen_groups, groups)?;
+    }
+    Ok(())
+}
+
+fn body_list_arity(arena: &TreeArena, mut body_list: SigId) -> Result<usize, TypeError> {
+    let mut n = 0usize;
+    while !arena.is_nil(body_list) {
+        let _head = arena.hd(body_list).ok_or_else(|| {
+            TypeError("malformed symbolic recursion body list during discovery".to_owned())
+        })?;
+        body_list = arena.tl(body_list).ok_or_else(|| {
+            TypeError("malformed symbolic recursion body list during discovery".to_owned())
+        })?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// Bottom-up signal type annotator.
 ///
 /// Carries memoised results in `env`.
@@ -1029,7 +1187,7 @@ fn infer_write_table_type(tbl: SigType, _wi: SigType, _ws: SigType) -> Result<Si
 #[cfg(test)]
 mod tests {
     use signals::SigBuilder;
-    use tlib::TreeArena;
+    use tlib::{TreeArena, sym_rec, sym_ref};
     use ui::UiProgram;
 
     use super::*;
@@ -1043,6 +1201,77 @@ mod tests {
         let ui = empty_ui();
         let mut ann = TypeAnnotator::new(arena, &ui);
         ann.annotate(outputs).expect("annotation failed")
+    }
+
+    #[test]
+    fn discover_recursive_groups_keeps_dfs_order_and_arity() {
+        let mut arena = TreeArena::new();
+        let var0 = arena.symbol("W0");
+        let var1 = arena.symbol("W1");
+
+        let body0 = {
+            let self_ref = sym_ref(&mut arena, var0);
+            let value = SigBuilder::new(&mut arena).delay1(self_ref);
+            arena.cons(value, arena.nil())
+        };
+        let rec0 = sym_rec(&mut arena, var0, body0);
+
+        let body1 = {
+            let self_ref = sym_ref(&mut arena, var1);
+            let first = SigBuilder::new(&mut arena).delay1(self_ref);
+            let second = SigBuilder::new(&mut arena).proj(0, rec0);
+            let tail = arena.cons(second, arena.nil());
+            arena.cons(first, tail)
+        };
+        let rec1 = sym_rec(&mut arena, var1, body1);
+        let out0 = SigBuilder::new(&mut arena).proj(0, rec1);
+        let out1 = SigBuilder::new(&mut arena).proj(0, rec0);
+
+        let groups = discover_recursive_groups(&arena, &[out0, out1]).expect("discovery succeeds");
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].rec_sig, rec1);
+        assert_eq!(groups[0].var, var1);
+        assert_eq!(groups[0].arity, 2);
+        assert_eq!(groups[1].rec_sig, rec0);
+        assert_eq!(groups[1].var, var0);
+        assert_eq!(groups[1].arity, 1);
+    }
+
+    #[test]
+    fn rec_typing_state_scaffold_matches_discovered_group_shapes() {
+        let mut arena = TreeArena::new();
+        let var = arena.symbol("W0");
+        let body = {
+            let self_ref = sym_ref(&mut arena, var);
+            let first = SigBuilder::new(&mut arena).delay1(self_ref);
+            let second = SigBuilder::new(&mut arena).int(1);
+            let tail = arena.cons(second, arena.nil());
+            arena.cons(first, tail)
+        };
+        let rec = sym_rec(&mut arena, var, body);
+        let output = SigBuilder::new(&mut arena).proj(0, rec);
+
+        let state = RecTypingState::discover(&arena, &[output]).expect("state builds");
+
+        assert_eq!(state.groups.len(), 1);
+        assert_eq!(state.groups[0].rec_sig, rec);
+        assert_eq!(state.groups[0].arity, 2);
+        assert_eq!(state.current.len(), 1);
+        assert_eq!(state.upper.len(), 1);
+        assert_eq!(state.age_min, vec![vec![0, 0]]);
+        assert_eq!(state.age_max, vec![vec![0, 0]]);
+        let SigType::Tuplet(current) = &state.current[0] else {
+            panic!("current recursion state should be a tuplet");
+        };
+        let SigType::Tuplet(upper) = &state.upper[0] else {
+            panic!("upper recursion state should be a tuplet");
+        };
+        assert_eq!(current.components.len(), 2);
+        assert_eq!(upper.components.len(), 2);
+        assert_eq!(current.components[0].interval(), interval::singleton(0.0));
+        assert!(upper.components[0].interval().lo().is_finite());
+        assert!(upper.components[0].interval().hi().is_finite());
     }
 
     #[test]
