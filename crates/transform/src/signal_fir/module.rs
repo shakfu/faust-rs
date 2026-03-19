@@ -44,14 +44,16 @@
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use fir::{
     AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirMathOp, FirStore,
     FirType, NamedType, SliderRange, SliderType, UiBoxType,
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
-use tlib::{NodeKind, TreeArena, list_to_vec, match_sym_rec, match_sym_ref};
+use tlib::{
+    NodeKind, TreeArena, list_to_vec, match_sym_rec, match_sym_ref, tree_to_int, tree_to_str,
+};
 use ui::{ControlId, ControlKind, UiGroupKind, UiMatch, UiProgram, match_ui};
 
 use sigtype::{SigType, check_delay_interval};
@@ -461,6 +463,31 @@ pub fn build_module(
         };
         math_prototypes.push(proto);
     }
+    for proto in lower.used_foreign_fun_protos.values() {
+        let proto_args: Vec<NamedType> = proto
+            .args
+            .iter()
+            .enumerate()
+            .map(|(i, typ)| NamedType {
+                name: format!("arg{i}"),
+                typ: typ.clone(),
+            })
+            .collect();
+        let decl = {
+            let mut b = FirBuilder::new(&mut lower.store);
+            b.declare_fun(
+                proto.name.clone(),
+                FirType::Fun {
+                    args: proto.args.clone(),
+                    ret: Box::new(proto.ret.clone()),
+                },
+                &proto_args,
+                None,
+                false,
+            )
+        };
+        math_prototypes.push(decl);
+    }
     let functions = {
         let mut b = FirBuilder::new(&mut lower.store);
         let function_items = [
@@ -598,6 +625,8 @@ struct SignalToFirLower<'a> {
     used_math_ops: HashSet<FirMathOp>,
     /// Set of integer helper function names used (`abs`, `min_i`, `max_i`).
     used_int_fun_names: HashSet<&'static str>,
+    /// Extern prototypes requested by `SIGFFUN` lowering, keyed by callee name.
+    used_foreign_fun_protos: BTreeMap<String, ForeignFunProto>,
     /// Monotonic counter for generating unique loop-variable names.
     next_loop_var_id: usize,
 }
@@ -617,6 +646,32 @@ struct RecArrayInfo {
     name: String,
     /// Element type (`Int32` for integer recursion, `Float32`/`Float64` otherwise).
     typ: FirType,
+}
+
+/// One extern prototype recovered from a Faust `FFUN(...)` descriptor.
+///
+/// Source provenance (C++):
+/// - `compiler/signals/prim2.cpp` (`ffname`, `ffrestype`, `ffargtype`)
+#[derive(Clone, Debug, PartialEq)]
+struct ForeignFunProto {
+    name: String,
+    ret: FirType,
+    args: Vec<FirType>,
+}
+
+/// Matches one raw Faust `FFUN(signature, incfile, libfile)` descriptor node.
+fn match_ffunction_node(arena: &TreeArena, id: SigId) -> Option<(SigId, SigId, SigId)> {
+    let node = arena.node(id)?;
+    let NodeKind::Tag(tag_id) = node.kind else {
+        return None;
+    };
+    if arena.tag_name(tag_id)? != "FFUN" {
+        return None;
+    }
+    let [signature, incfile, libfile] = node.children.as_slice() else {
+        return None;
+    };
+    Some((*signature, *incfile, *libfile))
 }
 
 impl<'a> SignalToFirLower<'a> {
@@ -665,6 +720,7 @@ impl<'a> SignalToFirLower<'a> {
             input_ptr_aliases: HashMap::new(),
             used_math_ops: HashSet::new(),
             used_int_fun_names: HashSet::new(),
+            used_foreign_fun_protos: BTreeMap::new(),
             next_loop_var_id: 0,
         }
     }
@@ -916,6 +972,7 @@ impl<'a> SignalToFirLower<'a> {
                 let _ = self.lower_signal(rhs)?;
                 self.lower_signal(lhs)?
             }
+            SigMatch::FFun(ff, largs) => self.lower_ffun(sig, ff, largs)?,
             SigMatch::Soundfile(control) => self.lower_soundfile(control)?,
             other => {
                 return Err(SignalFirError::new(
@@ -951,6 +1008,101 @@ impl<'a> SignalToFirLower<'a> {
             sig,
             &format!("unsupported foreign constant `{name}` in Step 2C"),
         )
+    }
+
+    /// Lowers one foreign function call to a FIR `FunCall` plus extern prototype.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/signals/prim2.cpp` (`ffname`, `ffrestype`, `ffargtype`)
+    /// - `compiler/generator/instructions_compiler.cpp` (`generateFFun`)
+    fn lower_ffun(&mut self, sig: SigId, ff: SigId, largs: SigId) -> Result<FirId, SignalFirError> {
+        let proto = self.decode_foreign_fun_proto(ff)?;
+        let args = list_to_vec(self.arena, largs).ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "malformed SIGFFUN argument list in Step 2C (expr={})",
+                    dump_sig_readable(self.arena, sig)
+                ),
+            )
+        })?;
+        if args.len() != proto.args.len() {
+            return Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "foreign function `{}` arity mismatch in Step 2C: expected {}, got {}",
+                    proto.name,
+                    proto.args.len(),
+                    args.len()
+                ),
+            ));
+        }
+
+        let mut lowered_args = Vec::with_capacity(args.len());
+        for arg in args {
+            lowered_args.push(self.lower_signal(arg)?);
+        }
+        self.used_foreign_fun_protos
+            .entry(proto.name.clone())
+            .or_insert_with(|| proto.clone());
+
+        let mut b = FirBuilder::new(&mut self.store);
+        Ok(b.fun_call(proto.name, &lowered_args, proto.ret))
+    }
+
+    /// Decodes one Faust `FFUN(signature, incfile, libfile)` descriptor.
+    fn decode_foreign_fun_proto(&self, ff: SigId) -> Result<ForeignFunProto, SignalFirError> {
+        let Some((signature, _, _)) = match_ffunction_node(self.arena, ff) else {
+            return self.unsupported_node(ff, "SIGFFUN descriptor is not an FFUNCTION node");
+        };
+        let items = list_to_vec(self.arena, signature).ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                "malformed foreign function signature list in Step 2C",
+            )
+        })?;
+        if items.len() < 2 {
+            return Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                "foreign function signature list must contain return type and names",
+            ));
+        }
+        let names = list_to_vec(self.arena, items[1]).ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                "malformed foreign function name list in Step 2C",
+            )
+        })?;
+        let name_index = match self.real_ty() {
+            FirType::Float32 => 0,
+            FirType::Float64 => 1,
+            _ => 0,
+        };
+        let name = names
+            .get(name_index)
+            .and_then(|id| tree_to_str(self.arena, *id))
+            .ok_or_else(|| {
+                SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    "foreign function name slot missing in Step 2C",
+                )
+            })?
+            .to_owned();
+        let ret = self.foreign_sig_type(items[0]);
+        let args = items[2..]
+            .iter()
+            .copied()
+            .map(|ty| self.foreign_sig_type(ty))
+            .collect();
+        Ok(ForeignFunProto { name, ret, args })
+    }
+
+    /// Decodes one Faust foreign signature type code (`0=int`, otherwise real).
+    fn foreign_sig_type(&self, ty: SigId) -> FirType {
+        match tree_to_int(self.arena, ty) {
+            Some(0) => FirType::Int32,
+            Some(_) | None => self.real_ty(),
+        }
     }
 
     /// Lowers one input signal by materializing channel-pointer aliases once

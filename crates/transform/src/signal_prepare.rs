@@ -64,8 +64,8 @@ use std::fmt;
 use signals::{BinOp, SigBuilder, SigId, SigMatch, dump_sig_readable, match_sig};
 use sigtype::{SigType, TypeAnnotator};
 use tlib::{
-    RecursionError, TreeArena, list_to_vec, match_sym_rec, match_sym_ref, sym_rec, sym_ref,
-    tree_to_int, vec_to_list,
+    NodeKind, RecursionError, TreeArena, list_to_vec, match_sym_rec, match_sym_ref, sym_rec,
+    sym_ref, tree_to_int, vec_to_list,
 };
 use ui::UiProgram;
 
@@ -221,6 +221,25 @@ fn canonicalize_unary_rec_projections(
     collect_unary_sym_groups(arena, root, &mut unary_groups, &mut visited)?;
     let mut memo = HashMap::new();
     rewrite_unary_rec_projections(arena, root, &unary_groups, &mut memo)
+}
+
+/// Matches one raw Faust `FFUN(signature, incfile, libfile)` node.
+///
+/// `transform` intentionally decodes this directly from `TreeArena` instead of
+/// depending on the `boxes` crate, because the prepared signal forest only
+/// needs the low-level descriptor payload.
+fn match_ffunction_node(arena: &TreeArena, id: SigId) -> Option<(SigId, SigId, SigId)> {
+    let node = arena.node(id)?;
+    let NodeKind::Tag(tag_id) = node.kind else {
+        return None;
+    };
+    if arena.tag_name(tag_id)? != "FFUN" {
+        return None;
+    }
+    let [signature, incfile, libfile] = node.children.as_slice() else {
+        return None;
+    };
+    Some((*signature, *incfile, *libfile))
 }
 
 /// Collects symbolic recursion variables whose body list has exactly one slot.
@@ -607,9 +626,9 @@ impl<'a> SimpleTyper<'a> {
                     "SIGMINMAX",
                 )?
             }
-            SigMatch::FFun(_, largs) => {
+            SigMatch::FFun(ff, largs) => {
                 self.visit_list_like_children(largs)?;
-                TypeSlot::Real
+                self.foreign_fun_result_type(ff)?
             }
             SigMatch::FConst(ty, _, _) | SigMatch::FVar(ty, _, _) => self.foreign_type(ty),
             SigMatch::Proj(index, group) => self.infer_proj(index, group)?,
@@ -900,6 +919,26 @@ impl<'a> SimpleTyper<'a> {
             Some(_) => TypeSlot::Real,
             None => TypeSlot::Real,
         }
+    }
+
+    /// Decodes one foreign function descriptor return type using the same
+    /// `FFUN(signature, incfile, libfile)` layout as Faust C++ `ffrestype(...)`.
+    fn foreign_fun_result_type(&self, ff: SigId) -> Result<TypeSlot, SignalPrepareError> {
+        let Some((signature, _, _)) = match_ffunction_node(self.arena, ff) else {
+            return Err(SignalPrepareError::Typing(format!(
+                "SIGFFUN descriptor is not an FFUNCTION node (expr={})",
+                dump_sig_readable(self.arena, ff)
+            )));
+        };
+        let items = list_to_vec(self.arena, signature).ok_or_else(|| {
+            SignalPrepareError::Typing("malformed foreign function signature list".to_owned())
+        })?;
+        let Some(restype) = items.first().copied() else {
+            return Err(SignalPrepareError::Typing(
+                "foreign function signature list is empty".to_owned(),
+            ));
+        };
+        Ok(self.foreign_type(restype))
     }
 
     /// Rejects non-numeric payloads in contexts that require arithmetic values.
@@ -1873,6 +1912,45 @@ mod tests {
             panic!("table read index should be promoted to SIGINTCAST");
         };
         assert_eq!(match_sig(&prepared.arena, inner), SigMatch::Input(0));
+    }
+
+    #[test]
+    fn prepare_signals_for_fir_uses_foreign_function_return_type() {
+        let mut arena = tlib::TreeArena::new();
+        let output = {
+            let ty_int = arena.int(0);
+            let ty_real = arena.int(1);
+            let incfile = arena.symbol("<math.h>");
+            let libfile = arena.symbol("\"\"");
+            let name_f32 = arena.symbol("isnanf");
+            let name_f64 = arena.symbol("isnan");
+            let name_f80 = arena.symbol("isnanl");
+            let name_fx = arena.symbol("isnanfx");
+            let nil = arena.nil();
+            let names = {
+                let tail0 = arena.cons(name_fx, nil);
+                let tail1 = arena.cons(name_f80, tail0);
+                let tail2 = arena.cons(name_f64, tail1);
+                arena.cons(name_f32, tail2)
+            };
+            let arg_types = arena.cons(ty_real, nil);
+            let payload = arena.cons(names, arg_types);
+            let signature = arena.cons(ty_int, payload);
+            let ff_tag = arena.intern_tag("FFUN");
+            let ff = arena.intern(tlib::NodeKind::Tag(ff_tag), &[signature, incfile, libfile]);
+            let input0 = {
+                let mut b = SigBuilder::new(&mut arena);
+                b.input(0)
+            };
+            let args = arena.cons(input0, nil);
+            let mut b = SigBuilder::new(&mut arena);
+            b.ffun(ff, args)
+        };
+
+        let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
+            .expect("foreign function result type should prepare");
+
+        assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
     }
 
     #[test]

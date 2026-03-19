@@ -692,6 +692,81 @@ mod tests {
     }
 
     #[test]
+    fn foreign_function_calls_lower_to_fir_fun_calls_and_prototypes() {
+        let mut arena = TreeArena::new();
+        let sig0 = {
+            let ty_int = arena.int(0);
+            let ty_real = arena.int(1);
+            let incfile = arena.symbol("<math.h>");
+            let libfile = arena.symbol("\"\"");
+            let name_f32 = arena.symbol("isnanf");
+            let name_f64 = arena.symbol("isnan");
+            let name_f80 = arena.symbol("isnanl");
+            let name_fx = arena.symbol("isnanfx");
+            let nil = arena.nil();
+            let names = {
+                let tail0 = arena.cons(name_fx, nil);
+                let tail1 = arena.cons(name_f80, tail0);
+                let tail2 = arena.cons(name_f64, tail1);
+                arena.cons(name_f32, tail2)
+            };
+            let arg_types = arena.cons(ty_real, nil);
+            let payload = arena.cons(names, arg_types);
+            let signature = arena.cons(ty_int, payload);
+            let ff_tag = arena.intern_tag("FFUN");
+            let ff = arena.intern(tlib::NodeKind::Tag(ff_tag), &[signature, incfile, libfile]);
+            let input0 = {
+                let mut b = SigBuilder::new(&mut arena);
+                b.input(0)
+            };
+            let args = arena.cons(input0, arena.nil());
+            let mut b = SigBuilder::new(&mut arena);
+            b.ffun(ff, args)
+        };
+
+        let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+            .expect("SIGFFUN should lower to FIR fun calls");
+
+        let FirMatch::Module {
+            globals, functions, ..
+        } = match_fir(&out.store, out.module)
+        else {
+            panic!("module root expected");
+        };
+        let FirMatch::Block(globals_items) = match_fir(&out.store, globals) else {
+            panic!("module globals block expected");
+        };
+        assert!(
+            globals_items.iter().any(|id| {
+                matches!(
+                    match_fir(&out.store, *id),
+                    FirMatch::DeclareFun { ref name, body: None, .. } if name == "isnanf"
+                )
+            }),
+            "globals should declare extern foreign prototype 'isnanf'"
+        );
+
+        let loop_body = find_compute_loop_body(&out.store, functions);
+        let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+            panic!("compute loop body block expected");
+        };
+        let store_value = stmts
+            .iter()
+            .find_map(|id| match match_fir(&out.store, *id) {
+                FirMatch::StoreTable { name, value, .. } if name == "output0" => Some(value),
+                _ => None,
+            })
+            .expect("compute should include one output store");
+        let store_value = unwrap_output_cast(&out.store, store_value);
+        let FirMatch::FunCall { name, args, typ } = match_fir(&out.store, store_value) else {
+            panic!("SIGFFUN should lower to a FIR fun call");
+        };
+        assert_eq!(name, "isnanf");
+        assert_eq!(args.len(), 1);
+        assert_eq!(typ, FirType::Int32);
+    }
+
+    #[test]
     fn delay_prefix_select_and_cast_nodes_are_supported() {
         let mut arena = TreeArena::new();
         let sig0 = {

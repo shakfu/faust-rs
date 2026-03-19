@@ -896,6 +896,78 @@ extern "C" fn host_remainder(a: f64, b: f64) -> f64 {
     a - (a / b).round_ties_even() * b
 }
 
+extern "C" fn host_isnanf(x: f32) -> i32 {
+    i32::from(x.is_nan())
+}
+
+extern "C" fn host_isnan(x: f64) -> i32 {
+    i32::from(x.is_nan())
+}
+
+extern "C" fn host_isinff(x: f32) -> i32 {
+    i32::from(x.is_infinite())
+}
+
+extern "C" fn host_isinf(x: f64) -> i32 {
+    i32::from(x.is_infinite())
+}
+
+extern "C" fn host_copysignf(a: f32, b: f32) -> f32 {
+    a.copysign(b)
+}
+
+extern "C" fn host_copysign(a: f64, b: f64) -> f64 {
+    a.copysign(b)
+}
+
+extern "C" fn host_acoshf(x: f32) -> f32 {
+    x.acosh()
+}
+
+extern "C" fn host_acosh(x: f64) -> f64 {
+    x.acosh()
+}
+
+extern "C" fn host_asinhf(x: f32) -> f32 {
+    x.asinh()
+}
+
+extern "C" fn host_asinh(x: f64) -> f64 {
+    x.asinh()
+}
+
+extern "C" fn host_atanhf(x: f32) -> f32 {
+    x.atanh()
+}
+
+extern "C" fn host_atanh(x: f64) -> f64 {
+    x.atanh()
+}
+
+extern "C" fn host_coshf(x: f32) -> f32 {
+    x.cosh()
+}
+
+extern "C" fn host_cosh(x: f64) -> f64 {
+    x.cosh()
+}
+
+extern "C" fn host_sinhf(x: f32) -> f32 {
+    x.sinh()
+}
+
+extern "C" fn host_sinh(x: f64) -> f64 {
+    x.sinh()
+}
+
+extern "C" fn host_tanhf(x: f32) -> f32 {
+    x.tanh()
+}
+
+extern "C" fn host_tanh(x: f64) -> f64 {
+    x.tanh()
+}
+
 /// Registers Rust host math functions as JIT-importable symbols.
 ///
 /// The Cranelift lowering emits imported calls for many FIR math operations
@@ -952,6 +1024,24 @@ fn register_host_symbols(jit_builder: &mut JITBuilder) {
     jit_builder.symbol("fmod", host_fmod as *const u8);
     jit_builder.symbol("remainderf", host_remainderf as *const u8);
     jit_builder.symbol("remainder", host_remainder as *const u8);
+    jit_builder.symbol("isnanf", host_isnanf as *const u8);
+    jit_builder.symbol("isnan", host_isnan as *const u8);
+    jit_builder.symbol("isinff", host_isinff as *const u8);
+    jit_builder.symbol("isinf", host_isinf as *const u8);
+    jit_builder.symbol("copysignf", host_copysignf as *const u8);
+    jit_builder.symbol("copysign", host_copysign as *const u8);
+    jit_builder.symbol("acoshf", host_acoshf as *const u8);
+    jit_builder.symbol("acosh", host_acosh as *const u8);
+    jit_builder.symbol("asinhf", host_asinhf as *const u8);
+    jit_builder.symbol("asinh", host_asinh as *const u8);
+    jit_builder.symbol("atanhf", host_atanhf as *const u8);
+    jit_builder.symbol("atanh", host_atanh as *const u8);
+    jit_builder.symbol("coshf", host_coshf as *const u8);
+    jit_builder.symbol("cosh", host_cosh as *const u8);
+    jit_builder.symbol("sinhf", host_sinhf as *const u8);
+    jit_builder.symbol("sinh", host_sinh as *const u8);
+    jit_builder.symbol("tanhf", host_tanhf as *const u8);
+    jit_builder.symbol("tanh", host_tanh as *const u8);
 }
 
 /// Lowered expression value tracked in the local Cranelift lowering environment.
@@ -2190,6 +2280,66 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 let call = self.fb.ins().call(fref, &[xv, yv]);
                 return Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]));
             }
+            ("isnanf", FirType::Int32, [x]) => {
+                let xv = self.lower_expr(*x, Some(&FirType::Float32))?.value();
+                let xv = self.coerce_value_to_fir_type(xv, &FirType::Float32)?;
+                let fref = self.ensure_import("isnanf", &[types::F32], types::I32)?;
+                let call = self.fb.ins().call(fref, &[xv]);
+                return Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]));
+            }
+            ("isnan", FirType::Int32, [x]) => {
+                let xv = self.lower_expr(*x, Some(&FirType::Float64))?.value();
+                let xv = self.coerce_value_to_fir_type(xv, &FirType::Float64)?;
+                let fref = self.ensure_import("isnan", &[types::F64], types::I32)?;
+                let call = self.fb.ins().call(fref, &[xv]);
+                return Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]));
+            }
+            ("isinff", FirType::Int32, [x]) => {
+                let xv = self.lower_expr(*x, Some(&FirType::Float32))?.value();
+                let xv = self.coerce_value_to_fir_type(xv, &FirType::Float32)?;
+                let fref = self.ensure_import("isinff", &[types::F32], types::I32)?;
+                let call = self.fb.ins().call(fref, &[xv]);
+                return Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]));
+            }
+            ("isinf", FirType::Int32, [x]) => {
+                let xv = self.lower_expr(*x, Some(&FirType::Float64))?.value();
+                let xv = self.coerce_value_to_fir_type(xv, &FirType::Float64)?;
+                let fref = self.ensure_import("isinf", &[types::F64], types::I32)?;
+                let call = self.fb.ins().call(fref, &[xv]);
+                return Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]));
+            }
+            ("copysignf", FirType::FaustFloat | FirType::Float32, [x, y]) => {
+                let mut xv = self.lower_expr(*x, Some(&FirType::Float32))?.value();
+                let mut yv = self.lower_expr(*y, Some(&FirType::Float32))?.value();
+                xv = self.coerce_value_to_fir_type(xv, &FirType::Float32)?;
+                yv = self.coerce_value_to_fir_type(yv, &FirType::Float32)?;
+                let fref = self.ensure_import("copysignf", &[types::F32, types::F32], types::F32)?;
+                let call = self.fb.ins().call(fref, &[xv, yv]);
+                return Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]));
+            }
+            ("copysign", FirType::Float64, [x, y]) => {
+                let mut xv = self.lower_expr(*x, Some(&FirType::Float64))?.value();
+                let mut yv = self.lower_expr(*y, Some(&FirType::Float64))?.value();
+                xv = self.coerce_value_to_fir_type(xv, &FirType::Float64)?;
+                yv = self.coerce_value_to_fir_type(yv, &FirType::Float64)?;
+                let fref = self.ensure_import("copysign", &[types::F64, types::F64], types::F64)?;
+                let call = self.fb.ins().call(fref, &[xv, yv]);
+                return Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]));
+            }
+            ("acoshf" | "asinhf" | "atanhf" | "coshf" | "sinhf" | "tanhf", FirType::FaustFloat | FirType::Float32, [x]) => {
+                let xv = self.lower_expr(*x, Some(&FirType::Float32))?.value();
+                let xv = self.coerce_value_to_fir_type(xv, &FirType::Float32)?;
+                let fref = self.ensure_import(name, &[types::F32], types::F32)?;
+                let call = self.fb.ins().call(fref, &[xv]);
+                return Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]));
+            }
+            ("acosh" | "asinh" | "atanh" | "cosh" | "sinh" | "tanh", FirType::Float64, [x]) => {
+                let xv = self.lower_expr(*x, Some(&FirType::Float64))?.value();
+                let xv = self.coerce_value_to_fir_type(xv, &FirType::Float64)?;
+                let fref = self.ensure_import(name, &[types::F64], types::F64)?;
+                let call = self.fb.ins().call(fref, &[xv]);
+                return Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]));
+            }
             _ => {}
         }
         let math = fir::FirMathOp::from_symbol(name).ok_or_else(|| {
@@ -2626,7 +2776,30 @@ fn subset_expr_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
         FirMatch::Neg { value, .. } => subset_expr_gap_reason(store, value),
         FirMatch::FunCall { name, args, .. } => {
             if fir::FirMathOp::from_symbol(&name).is_none()
-                && !matches!(name.as_str(), "abs" | "min_i" | "max_i")
+                && !matches!(
+                    name.as_str(),
+                    "abs"
+                        | "min_i"
+                        | "max_i"
+                        | "isnanf"
+                        | "isnan"
+                        | "isinff"
+                        | "isinf"
+                        | "copysignf"
+                        | "copysign"
+                        | "acoshf"
+                        | "acosh"
+                        | "asinhf"
+                        | "asinh"
+                        | "atanhf"
+                        | "atanh"
+                        | "coshf"
+                        | "cosh"
+                        | "sinhf"
+                        | "sinh"
+                        | "tanhf"
+                        | "tanh"
+                )
             {
                 Some(format!("unsupported math call in subset: {name}"))
             } else {
@@ -3082,6 +3255,74 @@ mod tests {
         (store, module)
     }
 
+    /// Builds a minimal `compute` body using one supported foreign math call.
+    fn build_subset_supported_foreign_fun_module() -> (fir::FirStore, FirId) {
+        let mut store = fir::FirStore::new();
+        let mut b = FirBuilder::new(&mut store);
+
+        let globals = b.block(&[]);
+        let dsp_struct = b.block(&[]);
+
+        let out_chan = b.int32(0);
+        let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+        let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+        let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+        let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let x = b.float32(0.25);
+        let y = b.fun_call("isnanf", &[x], FirType::Int32);
+        let y = b.cast(FirType::FaustFloat, y);
+        let store_out = b.store_table("output0", AccessType::Stack, i0, y);
+        let loop_body = b.block(&[store_out]);
+        let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+        let compute_body = b.block(&[out_alias, sample_loop]);
+        let compute_args = [
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_string(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ];
+        let compute = b.declare_fun(
+            "compute",
+            FirType::Fun {
+                args: vec![
+                    FirType::Ptr(Box::new(FirType::Obj)),
+                    FirType::Int32,
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                    FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                ],
+                ret: Box::new(FirType::Void),
+            },
+            &compute_args,
+            Some(compute_body),
+            false,
+        );
+        let functions = b.block(&[compute]);
+        let static_decls = b.block(&[]);
+        let module = b.module(
+            0,
+            0,
+            "subset_supported_foreign_fun",
+            dsp_struct,
+            globals,
+            functions,
+            static_decls,
+        );
+        (store, module)
+    }
+
     #[test]
     /// Verifies non-strict mode falls back to the no-op compute stub on subset gaps.
     fn compile_module_falls_back_to_stub_without_strict_subset_mode() {
@@ -3103,6 +3344,14 @@ mod tests {
             .expect_err("strict mode must reject subset-gap fallback");
         assert_eq!(err.code, CraneliftBackendErrorCode::UnsupportedModuleShape);
         assert!(err.message.contains("strict mode rejected fallback"));
+    }
+
+    #[test]
+    fn compile_module_lowers_supported_foreign_fun_subset_call() {
+        let (store, module) = build_subset_supported_foreign_fun_module();
+        let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
+            .expect("supported foreign subset call should lower");
+        assert!(compiled.compute_body_lowered());
     }
 
     /// Builds a minimal `compute` body that should lower fully through the subset path.
