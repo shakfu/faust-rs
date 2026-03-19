@@ -6276,4 +6276,37 @@ mod simplify_helpers_tests {
             other => panic!("expected Route, got {other:?}"),
         }
     }
+
+    /// Exact integer reals in route specs are canonicalized back to `boxInt`
+    /// leaves, like the C++ `sigList2vecInt(...)` path in `isBoxRoute`.
+    #[test]
+    fn eval_route_exact_integer_real_spec_leaves_become_ints() {
+        let mut arena = TreeArena::default();
+        let ins = BoxBuilder::new(&mut arena).int(2);
+        let outs = BoxBuilder::new(&mut arena).int(2);
+        let r1a = BoxBuilder::new(&mut arena).real(1.0);
+        let r1b = BoxBuilder::new(&mut arena).real(1.0);
+        let r2a = BoxBuilder::new(&mut arena).real(2.0);
+        let r2b = BoxBuilder::new(&mut arena).real(2.0);
+        let p1 = BoxBuilder::new(&mut arena).par(r1a, r1b);
+        let p2 = BoxBuilder::new(&mut arena).par(r2a, r2b);
+        let spec = BoxBuilder::new(&mut arena).par(p1, p2);
+        let route_box = BoxBuilder::new(&mut arena).route(ins, outs, spec);
+        let env = Environment::empty();
+        let mut ld = LoopDetector::new();
+        let result = eval_box(&mut arena, route_box, &env, &mut ld).unwrap();
+        let BoxMatch::Route(_, _, normalized_spec) = match_box(&arena, result) else {
+            panic!("expected Route");
+        };
+        let mut leaves = Vec::new();
+        flatten_route_spec(&arena, normalized_spec, &mut leaves);
+        let vals: Vec<i32> = leaves
+            .iter()
+            .map(|&leaf| match match_box(&arena, leaf) {
+                BoxMatch::Int(n) => n,
+                other => panic!("expected Int leaf, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(vals, [1, 1, 2, 2]);
+    }
 }

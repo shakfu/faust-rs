@@ -818,6 +818,37 @@ fn route_box_propagates_by_mixing_selected_inputs() {
 }
 
 #[test]
+fn route_box_ignores_out_of_range_endpoints_like_cpp() {
+    let mut arena = TreeArena::new();
+    let route = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let two = bb.int(2);
+        let zero = bb.int(0);
+        let one_a = bb.int(1);
+        let one_b = bb.int(1);
+        let two_a = bb.int(2);
+        let two_b = bb.int(2);
+        let three_a = bb.int(3);
+        let one_c = bb.int(1);
+        let p1 = bb.par(zero, one_a);
+        let p2 = bb.par(one_b, three_a);
+        let p3 = bb.par(two_a, two_b);
+        let p4 = bb.par(three_a, one_c);
+        let left = bb.par(p1, p2);
+        let right = bb.par(p3, p4);
+        let spec = bb.par(left, right);
+        bb.route(two, two, spec)
+    };
+    let inputs = make_sig_input_list(&mut arena, 2);
+
+    let out = propagate(&mut arena, route, &inputs, &mut ArityCache::new())
+        .expect("route should propagate");
+    assert_eq!(out.len(), 2);
+    assert_eq!(match_sig(&arena, out[0]), SigMatch::Int(0));
+    assert_eq!(match_sig(&arena, out[1]), SigMatch::Input(1));
+}
+
+#[test]
 fn ffun_box_arity_and_propagation_follow_signature() {
     let mut arena = TreeArena::new();
     let (wrapped, ff) = {

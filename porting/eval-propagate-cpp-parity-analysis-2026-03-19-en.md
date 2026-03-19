@@ -266,6 +266,9 @@ The following work can be done immediately, without reopening large architecture
 
 ### 8.1 Priority A: tighten `eval` scalar-vs-vector simplification rules
 
+Status:
+- completed on 2026-03-19
+
 Goal:
 - ensure every helper that uses propagation for constant folding obeys the same singleton-list rule as C++.
 
@@ -286,7 +289,13 @@ Files:
 Expected parity gain:
 - prevents new false constant collapses in `eval.cpp`-equivalent logic.
 
+Completed in:
+- `3ac60d8` `Align eval route-spec lowering with C++`
+
 ### 8.2 Priority A: expand differential `route(...)` coverage
+
+Status:
+- completed on 2026-03-19 for the currently identified edge cases
 
 Goal:
 - prove that Rust route evaluation matches the C++ `isBoxRoute` branch over more than one library reproducer.
@@ -312,6 +321,10 @@ Files:
 
 Expected parity gain:
 - closes the most recently active regression family at the right abstraction level.
+
+Completed in:
+- `3ac60d8` `Align eval route-spec lowering with C++`
+- `pending` current step: exact-int reals in route specs and out-of-range endpoints
 
 ### 8.3 Priority A: add a corpus of `eval` differential micro-fixtures
 
