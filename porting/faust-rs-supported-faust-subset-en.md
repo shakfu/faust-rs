@@ -1,6 +1,6 @@
 # Current Faust Source Subset Supported by `faust-rs`
 
-Last updated: 2026-03-14
+Last updated: 2026-03-21
 
 Status: living document
 
@@ -43,7 +43,8 @@ This snapshot is based on:
   - `crates/transform/src/signal_prepare.rs`
   - `crates/transform/src/signal_fir/mod.rs`
   - `crates/transform/src/signal_fir/module.rs`
-- fresh local status scans run on 2026-03-14:
+- fresh local status scans run on 2026-03-14 (last formal run; counts below reflect
+  subsequent journal evidence — re-run required for precise current numbers):
   - `cargo run -p xtask -- corpus-status-report`
   - `cargo run -p xtask -- backend-full-corpus-diff-report`
 
@@ -133,8 +134,8 @@ That slice currently includes, in broad terms:
 - numeric constants and audio inputs/outputs,
 - arithmetic, comparison, bitwise, and selected math operators,
 - `select2`, `min`, `max`, `abs`,
-- `delay1`, `prefix`, and recursive feedback forms covered by the active
-  recursion lowering,
+- `delay1`, `prefix`, and recursive feedback forms — including
+  **multi-output recursion groups** (`SIGPROJ index > 0`),
 - `SIGDELAY` with:
   - constant integer amounts (fixed-size circular buffer),
   - **variable amounts with a bounded non-negative interval** — the buffer is
@@ -210,9 +211,14 @@ The most important current exclusions are:
     not yet fully lowered end-to-end.
 
 - **Complex table generators in `SIGGEN`**
-  - the fast-lane supports the active table slice,
-    but still rejects more complex `SIGGEN` initializers depending on runtime
-    context or loop variables.
+  - the fast-lane now handles a broad class of computed `SIGGEN` generators
+    via the compile-time `GeneratorInterpreter` (oscillator sine tables,
+    recursive phasor-driven tables, etc.),
+  - the remaining gap is `tabulateNd`-style generators whose table-size
+    expression is non-constant arithmetic (e.g. `8*8` → `BinOp(Mul, Int(8), Int(8))`):
+    the signal-level constant-folding pass (`normalize/simplify`) is now wired
+    into `signal_prepare`, but the table-size extractor still requires a literal
+    `Int` node.  See `porting/missing.md` entry 1.
 
 - **Unproven long-tail families outside the tracked corpus**
   - even when a node family exists in Rust, if it is not exercised by the
@@ -230,11 +236,18 @@ Relative to the tracked corpus and the current production-oriented route:
   cases,
 - many language families that were earlier missing are no longer front-end
   blockers:
-  - `case`
-  - lambda/closure forms
+  - `case` and recursive pattern-matching with computed numeric arguments
+  - lambda/closure forms (first-class `boxClosure` node)
   - modulation
   - local imports
   - metadata
+- multi-output recursion groups (`SIGPROJ index > 0`) are now supported,
+  enabling `freeverb`, `Birds.dsp`, and any `~ _`-based multi-output feedback,
+- the algebraic `simplify` pass from `normalize/` is now wired into the
+  `signal_prepare` pipeline, folding constant arithmetic before FIR lowering,
+- computed `SIGGEN` table generators are now evaluated at compile time by
+  `GeneratorInterpreter`, enabling `os.osc`, `os.saw`, and other
+  oscillator-table patterns,
 - Variable delays driven by a UI slider, numentry, **or bounded audio-rate
   expression** now compile end-to-end — that restriction has been significantly
   relaxed,
@@ -250,6 +263,10 @@ Most importantly, the C++ compiler still has:
 
 - fuller support for stream-wrapper lowering,
 - broader mature transform/backend coverage on long-tail signal families,
+- the `simplify` constant-folding pass applied to table-size positions
+  (the Rust pipeline now runs `simplify` in `signal_prepare`, but the
+  table-size extractor in the FIR builder still requires a literal `Int` node;
+  multi-dimensional `tabulateNd` is therefore still unsupported),
 - the historical production path beyond the active Rust fast-lane slice.
 
 The variable-delay gap is now **substantially closed**:
@@ -595,6 +612,139 @@ cache, sufficient for compile-time constant folding without requiring a
 - `box_simplification` for compound boxes.
 
 End-to-end backend corpus: `72 / 73` valid cases, same single gap.
+
+### 7.9 March 15, 2026: SIGGEN interpreter, multi-output recursion, pattern-matcher parity
+
+A cluster of significant features landed together:
+
+#### Compile-time `GeneratorInterpreter` for SIGGEN
+
+Previously, `expand_generator_values` could only handle constant/waveform
+generators.  A computed generator such as the recursive phasor `+(1)~_`
+inside `sin()` used by `os.osc` was rejected.  A full compile-time signal
+interpreter (`GeneratorInterpreter`) was added: it evaluates 0-input
+deterministic signal trees step-by-step at compile time, covering all
+arithmetic operators, math functions, casts, `Delay1`, and symbolic
+recursion.  `os.osc(440)`, `os.saw`, and similar oscillator patterns now
+compile to correct 65536-entry sine tables.
+
+#### Multi-output recursion groups
+
+The FIR lowerer only handled single-output recursion (`SIGPROJ index 0`).
+`freeverb.dsp`, `Birds.dsp`, and any DSP using the `~ _` feedback pattern
+with 2-output groups failed.  `lower_proj`, `active_recursion_info`, and
+supporting helpers were extended to handle all projection indices.
+
+#### `boxClosure` first-class closure node
+
+Closures were previously host-side only (`EvalValue::Closure`).  A new
+`boxClosure` tree node carries the closure through the box evaluation chain,
+replacing the earlier `boxSlot + substitute_tree` workaround.  This fixes
+scoping for higher-order functions in `aanl.lib` and related patterns.
+
+#### Pattern matcher: `match_num` simplification
+
+`poly(max(1, min(6, 4)))` and similar computed numeric arguments previously
+failed pattern matching because `max(1, min(6,4)) ≠ Int(4)` by tree identity.
+`simplify_pattern` now reduces computed arguments to literals at match time,
+matching C++ `simplifyPattern`.  A `boxPatternMatcher` side-table prevents
+stack overflow in partially-applied case expressions.
+
+#### `sigtype`: cons-list recursion bodies typed
+
+The type annotator did not recurse into cons-list nodes, leaving all signals
+inside `SYMREC` bodies without type information.  `delays.dsp` failed because
+the `nentry("d1", 200, 0, 1000, 1)` interval was never propagated.  Fixed by
+adding a cons-list → `TupletType` path in `infer_inner`.
+
+#### `par(i, 0, X)` fixed
+
+`iterate_par(n=0)` now returns the empty block (0→0) instead of `X`.
+
+### 7.10 March 16, 2026: `simplify` wired into pipeline, waveform lowering overhaul
+
+#### `signal_prepare`: algebraic simplification pass
+
+`normalize::simplify` is now called inside `prepare_signals_for_fir`, between
+full-type annotation and FIR lowering — matching the C++ pipeline order.  This
+folds constant arithmetic (`max(0.25, 0.5)` → `Real(0.5)`, `IntCast(Real(1.5))`
+→ `Int(1)`, `Delay1(x)` → `Delay(x, Int(1))`) at the signal level before any
+backend sees the tree.  Both type maps are recomputed after simplification.
+
+**Note**: the `simplify` pass addresses most constant-folding gaps, but does
+not yet fold arithmetic in table-size positions (`BinOp(Mul, Int(8), Int(8))`
+is still not reduced to `Int(64)` when used as a `SIGWRTBL` size argument).
+This is documented in `porting/missing.md`.
+
+#### Waveform lowering overhaul (three bugs fixed)
+
+- **Cycling index**: bare `SIGWAVEFORM` outputs now advance with
+  `(iWave + 1) % N` per sample; previously read `table[0]` every sample.
+- **File-scope static tables**: waveform and rdtable-style tables are now
+  emitted as `const static` arrays at file scope, matching the reference
+  compiler; previously emitted as struct members with a fill loop.
+- **Interval-aware bounds**: `SIGRDTBL` reads with a provably in-bounds index
+  no longer emit redundant clamping — direct array access, matching C++.
+
+### 7.11 March 17, 2026: circular buffers for delay1/recursion, select2 fix, CLI parity
+
+#### Circular buffers with `fIOTA` for delay1 and recursion
+
+The fast-lane previously used a scalar state + deferred `compute_updates` shift
+for delay1 and recursion.  This caused ordering bugs when depth-first lowering
+pushed inner updates before outer ones (e.g. `APF.dsp` gave wrong output).
+All delays — SIGDELAY, delay1, and recursion — now uniformly use 2-element
+circular buffers indexed by `fIOTA`, matching the C++ `writeReadDelay`
+pattern.  The topological sort (`sort_compute_updates`) was removed as no
+longer needed.
+
+#### `select2` branch inversion fixed
+
+`select2(sel, x, y)` was emitting `sel ? x : y` instead of `sel ? y : x`.
+Fixed by swapping the destructuring of `(then, else)` arms.
+
+#### Two-pass delay-line scan
+
+`prepare_delay_lines` now does a collect pass (max per carried signal) then an
+allocate pass, preventing the sizing-mismatch error for signals carried at
+multiple different delay amounts (e.g. `frenchBell.dsp` modal synthesis).
+
+#### CLI: `-double`, default class name `mydsp`, wrapping integer literals
+
+- `-double` legacy flag recognized,
+- default generated class/struct name is now `mydsp` (matching C++),
+- integer literals that overflow 32 bits now use wrapping arithmetic (matching
+  C++ `str2int` behavior).
+
+### 7.12 March 18–21, 2026: eval correctness, signal-prepare canonicalization, physical models
+
+#### Unary recursion projection canonicalization (`signal_prepare`)
+
+After `de_bruijn_to_sym`, some symbolic recursion groups have physical arity 1
+but are referenced via non-zero logical projection indices.  A canonicalization
+step in `prepare_signals_for_fir` rewrites these to `proj(0, group)`, enabling
+`zita_rev1_stereo`, `Birds.dsp`, and similar DSPs to compile.
+
+#### Eval correctness fixes
+
+- `a2sb` memoization boundaries tightened: residual sharing preserved.
+- Residual closure arity computed correctly in non-closure application paths.
+- Exact integer reals (e.g. `Real(2.0)`) canonicalized to `Int(2)` for
+  case-matching parity with C++.
+- Route-spec normalization aligned with C++ for computed `ins`/`outs`
+  arguments.
+
+#### Physical model fixes (2026-03-21)
+
+- `lower_proj` spurious store eliminated: when a body signal was already
+  scheduled as a state update by `lower_delay_state`, `lower_proj` no longer
+  emits a second overwriting store.  Fixes `clarinetModel` and similar
+  waveguide DSPs outputting all zeros.
+- `GeneratorInterpreter::eval_delay1` now correctly advances recursive state
+  on each step.
+- `slot_env` de Bruijn lifting in `FlatNodeKind::Rec` corrected, fixing
+  incorrect sample output for `spectralCentroid` and similar recursive analyzers.
+- `eval` `FIR` shift binops added to backends.
 
 ## 8. Practical Reading Rule
 
