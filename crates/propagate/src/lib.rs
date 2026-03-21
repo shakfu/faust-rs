@@ -2114,13 +2114,30 @@ fn propagate_inner(
             let mut rec_inputs = l1;
             rec_inputs.extend(lift_signals(arena, inputs, ctx.memo));
 
+            // Lift all slot_env values by 1 de Bruijn level before entering this Rec scope.
+            // This mirrors C++ `lift(slotenv)` (propagate.cpp line 495): the C++ slotenv is a
+            // Tree cons-list so `lift` walks it structurally. Here we apply `liftn(..., 1)` to
+            // each value individually for the same effect. Without lifting, slot_env entries
+            // that contain DEBRUIJNREF nodes from an enclosing Rec would be captured by the
+            // inner DEBRUIJN binder instead of the intended outer one.
+            let lifted_slot_env: SlotEnv = ctx
+                .slot_env
+                .iter()
+                .map(|(k, v)| (*k, liftn(arena, *v, 1, ctx.memo)))
+                .collect();
+            let saved_slot_env = std::mem::replace(ctx.slot_env, lifted_slot_env);
+
             let l2 = propagate_in_slot_env(arena, left, &rec_inputs, ctx)?;
+
+            *ctx.slot_env = saved_slot_env;
+
             let group_body = vec_to_list(arena, &l2);
             let group = debruijn_rec(arena, group_body);
 
             let mut outputs = Vec::with_capacity(l2.len());
             for (index, expr) in l2.iter().copied().enumerate() {
-                if aperture(arena, expr, ctx.memo) > 0 {
+                let ap = aperture(arena, expr, ctx.memo);
+                if ap > 0 {
                     let idx = i32_from_usize(index, "rec projection index")?;
                     let mut b = SigBuilder::new(arena);
                     outputs.push(b.proj(idx, group));
