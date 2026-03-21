@@ -2854,6 +2854,13 @@ impl<'a> SignalToFirLower<'a> {
 
             for (i, body) in bodies.iter().enumerate() {
                 let rhs = self.lower_signal(*body)?;
+                // If lowering the body already scheduled a state update for this
+                // signal (e.g. `lower_delay_state` handled a `Delay1` that owns the
+                // same state array), skip emitting a second store — the earlier store
+                // is authoritative and a duplicate would clobber it.
+                if self.scheduled_state_updates.contains(body) {
+                    continue;
+                }
                 let info = &group_arrays[i];
                 // Write body value to circular buffer: state[fIOTA & 1] = rhs
                 self.ensure_iota_state();
