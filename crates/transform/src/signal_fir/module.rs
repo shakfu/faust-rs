@@ -3291,16 +3291,21 @@ impl<'a> GeneratorInterpreter<'a> {
         if let Some(var) = match_sym_ref(self.arena, x) {
             return self.read_rec_prev(var, 0);
         }
-        // Proj(idx, group) → read prev[idx] from group
+        // Proj(idx, group) → read prev[idx], then trigger rec body evaluation
+        // so that cur[] is updated and advance() propagates the correct value.
         if let SigMatch::Proj(idx, group) = match_sig(self.arena, x) {
-            if let Some((var, _body)) = match_sym_rec(self.arena, group) {
-                return self.read_rec_prev(var, idx as usize);
+            if let Some((var, body)) = match_sym_rec(self.arena, group) {
+                let prev_val = self.read_rec_prev(var, idx as usize)?;
+                let _ = self.eval_rec_and_project(var, Some(body), idx as usize);
+                return Ok(prev_val);
             }
             if let Some(var) = match_sym_ref(self.arena, group) {
                 return self.read_rec_prev(var, idx as usize);
             }
-            if let SigMatch::Rec(_) = match_sig(self.arena, group) {
-                return self.read_rec_prev(group, idx as usize);
+            if let SigMatch::Rec(body) = match_sig(self.arena, group) {
+                let prev_val = self.read_rec_prev(group, idx as usize)?;
+                let _ = self.eval_rec_and_project(group, Some(body), idx as usize);
+                return Ok(prev_val);
             }
         }
         // Fallback: non-recursive delay1 — returns 0 at step 0 (initial state),
