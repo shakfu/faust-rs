@@ -5377,7 +5377,9 @@ fn iterate_par(
     let var_name = iteration_var_name(arena, index)?;
     let n = eval_non_negative_count(arena, count, env, loop_detector)?;
     if n == 0 {
-        return neutral_seq_body(arena, &var_name, body, env, loop_detector);
+        // par(i, 0, X) = empty block (0 inputs, 0 outputs), not a neutral-seq identity.
+        // iterate_sum/prod use the same convention; only iseq uses neutral_seq_body.
+        return Ok(empty_iteration_route(arena));
     }
     let mut res = eval_iter_body(arena, &var_name, n - 1, body, env, loop_detector)?;
     for i in (0..(n - 1)).rev() {
