@@ -682,6 +682,22 @@ fn read_line(reader: &mut dyn BufRead) -> Result<String, FbcSerialError> {
     Ok(line)
 }
 
+/// Reads a "logical line" that may contain quoted strings with embedded
+/// newlines (e.g. `label "sustain\n"`).
+///
+/// Keeps appending physical lines (joined with `\n`) until all double-quote
+/// characters are balanced — i.e. the total count is even, meaning every
+/// opened `"` has a matching closing `"`.
+fn read_quoted_logical_line(reader: &mut dyn BufRead) -> Result<String, FbcSerialError> {
+    let mut line = read_line(reader)?;
+    while line.chars().filter(|&c| c == '"').count() % 2 != 0 {
+        let next = read_line(reader)?;
+        line.push('\n');
+        line.push_str(&next);
+    }
+    Ok(line)
+}
+
 /// Checks that a token matches the expected string.
 fn check_token(token: Option<&str>, expected: &str) -> Result<(), FbcSerialError> {
     match token {
@@ -747,7 +763,7 @@ fn read_meta_block(reader: &mut dyn BufRead) -> Result<Vec<FbcMetaInstruction>, 
 
     let mut result = Vec::with_capacity(size as usize);
     for _ in 0..size {
-        let line = read_line(reader)?;
+        let line = read_quoted_logical_line(reader)?;
         result.push(read_meta_instruction(&line)?);
     }
     Ok(result)
@@ -785,7 +801,7 @@ fn read_ui_block<R: FbcReal>(
 
     let mut result = Vec::with_capacity(size as usize);
     for _ in 0..size {
-        let line = read_line(reader)?;
+        let line = read_quoted_logical_line(reader)?;
         result.push(read_ui_instruction::<R>(&line)?);
     }
     Ok(result)
@@ -1514,5 +1530,32 @@ mod tests {
             "PI round-trip: got {val}, expected {}",
             std::f64::consts::PI
         );
+    }
+
+    /// A label that contains a literal embedded newline must parse correctly.
+    ///
+    /// Reproduces the failure seen with `elecGuitarMIDI.fbc` where
+    /// `label "sustain\n"` caused a parse error because `read_line` stopped
+    /// at the `\n` inside the quoted string, leaving the rest of the
+    /// instruction on the next physical line.
+    #[test]
+    fn test_ui_instruction_label_with_embedded_newline() {
+        // Simulate the exact layout from elecGuitarMIDI.fbc:
+        //   opcode 286 kAddHorizontalSlider offset 8272 label "sustain
+        //   " key "" value "" init 0.0 min 0.0 max 1.0 step 1.0
+        let input = concat!(
+            "block_size 1\n",
+            "opcode 286 kAddHorizontalSlider offset 8272 label \"sustain\n",
+            "\" key \"\" value \"\" init 0.0000000 min 0.0000000 max 1.0000000 step 1.0000000\n",
+        );
+        let mut cursor = io::Cursor::new(input.as_bytes());
+        let ui = read_ui_block::<f32>(&mut cursor).unwrap();
+        assert_eq!(ui.len(), 1);
+        assert_eq!(ui[0].label, "sustain\n");
+        assert_eq!(ui[0].key, "");
+        assert_eq!(ui[0].value, "");
+        assert!((ui[0].init - 0.0_f32).abs() < 1e-6);
+        assert!((ui[0].max - 1.0_f32).abs() < 1e-6);
+        assert!((ui[0].step - 1.0_f32).abs() < 1e-6);
     }
 }
