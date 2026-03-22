@@ -2958,6 +2958,9 @@ fn declare_compute_stub(
     store: &FirStore,
     struct_layout: &StructLayoutPlan,
     fail_on_subset_gap: bool,
+    // When `true`, skip subset lowering and always emit a `return` stub.
+    // Used by the JIT-panic fallback path in `generate_cranelift_module`.
+    force_stub: bool,
     jit: &mut JITModule,
     static_data_ids: &HashMap<String, DataId>,
 ) -> Result<(String, usize, bool, String), CraneliftBackendError> {
@@ -2989,7 +2992,7 @@ fn declare_compute_stub(
         fb.append_block_params_for_function_params(entry);
         fb.switch_to_block(entry);
         fb.seal_block(entry);
-        if compute_body_matches_current_subset(store, compute_decl) {
+        if !force_stub && compute_body_matches_current_subset(store, compute_decl) {
             match try_lower_compute_body(
                 store,
                 jit,
@@ -3010,15 +3013,16 @@ fn declare_compute_stub(
                 }
             }
         } else {
-            if fail_on_subset_gap {
+            // Emit a valid no-op `compute` stub when either:
+            // - the FIR body exceeds the currently supported lowering subset, or
+            // - `force_stub` was set by the JIT-panic fallback path.
+            if fail_on_subset_gap && !force_stub {
                 let reason = compute_body_subset_gap_reason_from_compute_decl(store, compute_decl)
                     .unwrap_or_else(|| "unknown subset-gap reason".to_owned());
                 return Err(CraneliftBackendError::unsupported_module_shape(format!(
                     "Cranelift strict mode rejected fallback to compute stub: {reason}"
                 )));
             }
-            // Early bring-up policy: emit a valid no-op `compute` stub when the
-            // FIR body exceeds the currently supported lowering subset.
             emit_return_stub(&mut fb);
             compute_body_lowered = false;
         }
@@ -3085,6 +3089,44 @@ pub fn generate_cranelift_module(
     options: &CraneliftOptions,
 ) -> Result<JitDspModule, CraneliftBackendError> {
     let (module_name, compute_decl) = find_module_and_compute(store, module)?;
+
+    // Attempt full JIT compilation.  On some targets (notably AArch64) Cranelift
+    // may panic when the generated function body is so large that conditional
+    // branch offsets exceed the ±1 MiB `B.cond` displacement limit and the
+    // island-emission logic fails to insert veneers in time.  We catch that
+    // panic here and retry with `force_stub=true` so the DSP can still run via
+    // the interpreter sidecar.
+    let first_attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        try_generate_cranelift_module(store, module, options, &module_name, compute_decl, false)
+    }));
+
+    match first_attempt {
+        Ok(result) => result,
+        Err(_panic) => {
+            // Cranelift JIT panicked (most likely AArch64 branch-range exceeded).
+            // The partial JIT module created in `try_generate_cranelift_module`
+            // was dropped during stack unwinding; create a fresh one with a stub.
+            eprintln!(
+                "warning: Cranelift JIT panicked while compiling `{module_name}::compute` \
+                 (branch-offset overflow?); falling back to interpreter stub"
+            );
+            try_generate_cranelift_module(store, module, options, &module_name, compute_decl, true)
+        }
+    }
+}
+
+/// Inner body of [`generate_cranelift_module`] with an optional `force_stub` flag.
+///
+/// Separated so that `generate_cranelift_module` can wrap the first attempt in
+/// `catch_unwind` and retry with `force_stub = true` when Cranelift panics.
+fn try_generate_cranelift_module(
+    store: &FirStore,
+    module: FirId,
+    options: &CraneliftOptions,
+    module_name: &str,
+    compute_decl: FirId,
+    force_stub: bool,
+) -> Result<JitDspModule, CraneliftBackendError> {
     let mut jit_builder = make_jit_builder(options)?;
     register_host_symbols(&mut jit_builder);
     let mut jit = JITModule::new(jit_builder);
@@ -3095,11 +3137,12 @@ pub fn generate_cranelift_module(
     let static_data_ids = define_static_tables_in_jit(store, module, &mut jit)?;
     let (compute_symbol_name, compute_entry_addr, compute_body_lowered, compute_clif_text) =
         declare_compute_stub(
-            &module_name,
+            module_name,
             compute_decl,
             store,
             &struct_layout,
             options.fail_on_subset_gap,
+            force_stub,
             &mut jit,
             &static_data_ids,
         )?;
@@ -3111,7 +3154,7 @@ pub fn generate_cranelift_module(
 
     let generated_functions_clif = vec![(compute_symbol_name.clone(), compute_clif_text)];
     Ok(JitDspModule {
-        module_name,
+        module_name: module_name.to_owned(),
         compute_symbol_name,
         compute_entry_addr,
         compute_body_lowered,
