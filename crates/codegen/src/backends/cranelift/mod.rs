@@ -2093,8 +2093,16 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
     ) -> Result<LoweredExpr, LoweringError> {
         let l = self.lower_expr(lhs, Some(typ))?.value();
         let r = self.lower_expr(rhs, Some(typ))?.value();
-        if matches!(typ, FirType::Bool) {
-            let lty = self.fb.func.dfg.value_type(l);
+        let lty = self.fb.func.dfg.value_type(l);
+        // Comparison ops must dispatch on the actual CLIF operand type, not the
+        // FIR result type.  A `BinOp { op: Lt, lhs: f32, rhs: f32, typ: Int32 }`
+        // (float comparison yielding an integer-boolean result) must use
+        // `float_cmp_to_i8`, not `int_cmp_to_i8` on truncated operands.
+        let is_cmp_op = matches!(
+            op,
+            FirBinOp::Eq | FirBinOp::Ne | FirBinOp::Lt | FirBinOp::Le | FirBinOp::Gt | FirBinOp::Ge
+        );
+        if matches!(typ, FirType::Bool) || (is_cmp_op && lty.is_float()) {
             let out = if lty.is_int() {
                 match op {
                     FirBinOp::Eq => self.int_cmp_to_i8(IntCC::Equal, l, r),

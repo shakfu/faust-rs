@@ -278,6 +278,12 @@ mod tests {
         let cases = [
             root.join("tests/corpus/rep_01_passthrough.dsp"),
             root.join("tests/corpus/rep_07_nonlinear_clip.dsp"),
+            root.join("tests/corpus/rep_60_counter_rem.dsp"),
+            root.join("tests/corpus/rep_61_fmin_sr.dsp"),
+            root.join("tests/corpus/rep_62_select2_trigger.dsp"),
+            root.join("tests/corpus/rep_63_rwtable.dsp"),
+            root.join("tests/corpus/rep_64_dynamic_rem.dsp"),
+            root.join("tests/corpus/rep_65_fabs_trigger.dsp"),
         ];
         for case in &cases {
             let interp = run_interp_outputs(case).unwrap_or_else(|e| {
