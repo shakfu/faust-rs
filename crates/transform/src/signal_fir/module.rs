@@ -587,6 +587,12 @@ struct SignalToFirLower<'a> {
     compute_updates: Vec<FirId>,
     /// Maps each signal node to its generated state-variable name.
     state_name_by_node: HashMap<SigId, String>,
+    /// Maps `(group_id, body_index)` to the recursion array allocated for that
+    /// output slot of a recursion group.  Separate from `state_name_by_node` so
+    /// that `ensure_state_slot` (keyed by the delay-node) and
+    /// `ensure_recursion_array_for_group` (keyed by the group + index) never
+    /// share the same entry even when the body signal node equals the delay node.
+    rec_array_by_group_index: HashMap<(u32, usize), RecArrayInfo>,
     /// Guards against emitting duplicate state-update stores for shared nodes.
     scheduled_state_updates: HashSet<SigId>,
     /// Allocated delay lines keyed by carried-signal id.
@@ -703,6 +709,7 @@ impl<'a> SignalToFirLower<'a> {
             sample_statements: Vec::new(),
             compute_updates: Vec::new(),
             state_name_by_node: HashMap::new(),
+            rec_array_by_group_index: HashMap::new(),
             scheduled_state_updates: HashSet::new(),
             delay_lines: HashMap::new(),
             scheduled_delay_writes: HashSet::new(),
@@ -2828,8 +2835,15 @@ impl<'a> SignalToFirLower<'a> {
         }
 
         // ── Allocate recursion arrays for ALL bodies ──
+        //
+        // Each output slot gets its own array keyed by `(group, index)` in
+        // `rec_array_by_group_index`.  This is intentionally separate from the
+        // `state_name_by_node` map used by `ensure_state_slot`, so that a
+        // `lower_delay_state` call inside the body expression never aliases the
+        // group's output carrier — even when the body signal node is the same
+        // Faust node as a delay1 input (the root cause of the tf22 bug).
         let mut group_arrays = Vec::with_capacity(bodies.len());
-        for body in &bodies {
+        for (i, body) in bodies.iter().enumerate() {
             let state_ty = self.signal_fir_type(*body)?;
             let init = match state_ty {
                 FirType::Int32 => self.lower_int32_const(0),
@@ -2841,7 +2855,7 @@ impl<'a> SignalToFirLower<'a> {
                     ));
                 }
             };
-            let info = self.ensure_recursion_array(*body, state_ty, init)?;
+            let info = self.ensure_recursion_array_for_group(group, i, state_ty, init)?;
             group_arrays.push(info);
         }
 
@@ -2854,13 +2868,12 @@ impl<'a> SignalToFirLower<'a> {
 
             for (i, body) in bodies.iter().enumerate() {
                 let rhs = self.lower_signal(*body)?;
-                // If lowering the body already scheduled a state update for this
-                // signal (e.g. `lower_delay_state` handled a `Delay1` that owns the
-                // same state array), skip emitting a second store — the earlier store
-                // is authoritative and a duplicate would clobber it.
-                if self.scheduled_state_updates.contains(body) {
-                    continue;
-                }
+                // Always emit the store for the group's output carrier array.
+                //
+                // With `rec_array_by_group_index` separate from `state_name_by_node`,
+                // any `lower_delay_state` call inside the body uses a *different* array
+                // (keyed by the delay node), so there is no aliasing and no risk of a
+                // double-write to the same slot.
                 let info = &group_arrays[i];
                 // Write body value to circular buffer: state[fIOTA & 1] = rhs
                 self.ensure_iota_state();
@@ -2905,35 +2918,42 @@ impl<'a> SignalToFirLower<'a> {
         Ok(out)
     }
 
-    /// Declares a two-slot `[typ; 2]` recursion array for `node`, idempotent.
+    /// Declares a two-slot `[typ; 2]` recursion array for output slot `index` of
+    /// recursion `group`, idempotent.
     ///
-    /// Emits the struct declaration and an `instanceClear` initialization loop
-    /// on first call; returns the cached [`RecArrayInfo`] on subsequent calls.
-    fn ensure_recursion_array(
+    /// Uses a `(group_id, index)` key — separate from the `state_name_by_node`
+    /// map used by `ensure_state_slot` — so that delay-state slots created
+    /// inside a body expression never alias the group's output carrier array.
+    fn ensure_recursion_array_for_group(
         &mut self,
-        node: SigId,
+        group: SigId,
+        index: usize,
         typ: FirType,
         init: FirId,
     ) -> Result<RecArrayInfo, SignalFirError> {
-        if let Some(name) = self.state_name_by_node.get(&node) {
-            return Ok(RecArrayInfo {
-                name: name.clone(),
-                typ,
-            });
+        let key = (group.as_u32(), index);
+        if let Some(info) = self.rec_array_by_group_index.get(&key) {
+            return Ok(info.clone());
         }
         let prefix = if typ == FirType::Int32 {
             "iRec"
         } else {
             "fRec"
         };
-        let name = format!("{prefix}{}", node.as_u32());
+        // Use group id (+ index suffix for multi-output groups) to form a unique name.
+        let name = if index == 0 {
+            format!("{prefix}{}", group.as_u32())
+        } else {
+            format!("{prefix}{}_{}", group.as_u32(), index)
+        };
         let array_ty = FirType::Array(Box::new(typ.clone()), 2);
         let mut b = FirBuilder::new(&mut self.store);
         let decl = b.declare_var(name.clone(), array_ty, AccessType::Struct, None);
         self.struct_declarations.push(decl);
         self.register_clear_recursion_array(name.clone(), init);
-        self.state_name_by_node.insert(node, name.clone());
-        Ok(RecArrayInfo { name, typ })
+        let info = RecArrayInfo { name, typ };
+        self.rec_array_by_group_index.insert(key, info.clone());
+        Ok(info)
     }
 
     /// Decodes a `SYMREC(var, body_list)` group to all its payload body signals.
