@@ -42,6 +42,24 @@ For each day file, entries are ordered from most recent commit to oldest using G
 
 See [`porting/journal/README.md`](porting/journal/README.md).
 
+## 2026-03-22 — fix(parser): stdfaust.lib + demos.lib triggers 19 "multiple definitions" parse errors
+
+### Problem
+`guitarEffectChain.dsp` (WAC 2017) failed with 19 parse errors ("multiple
+definitions of a zero-argument symbol are not allowed") when combining
+`import("stdfaust.lib")` and `import("demos.lib")`.
+
+Both libraries define the same 19 library-alias symbols (`ma`, `ba`, `de`,
+`si`, …).  `format_definitions` collected both as pattern-match variants and
+errored.  The C++ compiler silently shadows the earlier definition.
+
+### Fix — `crates/parser/src/lib.rs`
+In `make_definition_from_variants`, replaced the hard error for multiple
+zero-arity definitions with last-import-wins: use `first_body` (the newest
+definition from `variants_rev.iter().rev()`).
+
+---
+
 ## 2026-03-22 — fix(serial): UI labels with embedded newlines crash fbc parser
 
 ### Problem

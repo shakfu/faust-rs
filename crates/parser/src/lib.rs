@@ -523,9 +523,13 @@ impl ParseState {
                 return self.nil();
             };
             if expected_arity == 0 {
-                self.ctx
-                    .error("multiple definitions of a zero-argument symbol are not allowed");
-                return self.nil();
+                // Multiple definitions of the same zero-arity symbol arise when two libraries
+                // (e.g. stdfaust.lib and demos.lib) both define the same alias like
+                // `ma = library("maths.lib")`.  The C++ compiler resolves this silently via
+                // import-shadowing (later import wins).  Mirror that: use the newest definition
+                // (first_body, which comes from variants_rev.iter().rev() — newest first).
+                let nil = self.nil();
+                return self.make_definition(name, nil, first_body);
             }
 
             let mut rules = self.nil();
