@@ -217,8 +217,13 @@ fn hi_or2(a: UInterval, b: UInterval) -> u32 {
     let (ma, a0, a1) = split_interval(a);
     let (mb, b0, b1) = split_interval(b);
 
-    // mask rule
-    if (a.hi == 2 * ma.wrapping_sub(1)) || (b.hi == 2 * mb.wrapping_sub(1)) {
+    // mask rule: fires when a or b already covers a complete power-of-2 range
+    // [lo, 2*m - 1], meaning all bits below m's position are set.
+    // The condition is  hi == 2*m - 1,  i.e. `ma.wrapping_add(ma).wrapping_sub(1)`.
+    // Bug-note: do NOT write `2 * ma.wrapping_sub(1)` — that computes 2*(m-1) = 2m-2,
+    // which is off by one and prevents the short-circuit, causing exponential recursion
+    // on wide intervals such as [0, 2^n - 1].
+    if (a.hi == ma.wrapping_add(ma).wrapping_sub(1)) || (b.hi == mb.wrapping_add(mb).wrapping_sub(1)) {
         return a.hi | b.hi;
     }
 
@@ -428,6 +433,33 @@ mod tests {
         let z = UInterval { lo: 0, hi: 0 };
         assert_eq!(bitwise_unsigned_or(a, z), a);
         assert_eq!(bitwise_unsigned_or(z, a), a);
+    }
+
+    /// Regression: `hi_or2` mask rule used `2 * m.wrapping_sub(1)` (= 2m-2) instead of
+    /// `m.wrapping_add(m).wrapping_sub(1)` (= 2m-1), so [0, 2^n-1] intervals never
+    /// short-circuited the recursion and caused exponential blowup in the type annotator.
+    #[test]
+    fn hi_or2_mask_rule_terminates_on_full_power_of_two_range() {
+        // [0, 0x7FFFFFFF] is a complete [0, 2^31-1] range — must not recurse exponentially.
+        let full_lo = UInterval { lo: 0, hi: 0x7FFF_FFFF };
+        let r = bitwise_unsigned_or(full_lo, full_lo);
+        assert_eq!(r, full_lo);
+
+        // [0x80000000, 0xFFFFFFFF] — upper half
+        let full_hi = UInterval { lo: 0x8000_0000, hi: 0xFFFF_FFFF };
+        let r2 = bitwise_unsigned_or(full_hi, full_hi);
+        assert_eq!(r2, full_hi);
+
+        // Full u32 range
+        let full = UInterval { lo: 0, hi: 0xFFFF_FFFF };
+        let r3 = bitwise_unsigned_or(full, full);
+        assert_eq!(r3, full);
+
+        // Signed AND on wide intervals — this exercises the De Morgan path
+        // (bitwise_signed_and → NOT → signed_or → unsigned_or → hi_or2).
+        let wide = SInterval { lo: i32::MIN, hi: i32::MAX };
+        let ra = bitwise_signed_and(wide, wide);
+        assert!(ra.lo <= ra.hi);
     }
 
     #[test]
