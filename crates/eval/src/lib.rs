@@ -3634,6 +3634,19 @@ fn normalize_route_spec(arena: &mut TreeArena, spec: TreeId) -> TreeId {
 ///
 /// `static bool isNumericalTuple(Tree box, siglist& L)` in
 /// `compiler/evaluate/eval.cpp`.
+/// Returns `true` if `box_id` is a parallel composition of **integer** literals only.
+///
+/// Used to decide whether a Real result from seq folding should be
+/// cast back to Int (preserving integer semantics for pattern matching).
+fn all_inputs_are_int(arena: &TreeArena, box_id: TreeId) -> bool {
+    match match_box(arena, box_id) {
+        BoxMatch::Int(_) => true,
+        BoxMatch::Real(_) => false,
+        BoxMatch::Par(l, r) => all_inputs_are_int(arena, l) && all_inputs_are_int(arena, r),
+        _ => false,
+    }
+}
+
 fn is_numerical_tuple_box(arena: &TreeArena, box_id: TreeId) -> bool {
     match match_box(arena, box_id) {
         BoxMatch::Int(_) | BoxMatch::Real(_) => true,
@@ -3676,8 +3689,23 @@ fn try_fold_seq_numeric(arena: &mut TreeArena, a1: TreeId, a2: TreeId) -> Option
     let sig = simplify_const(arena, *sig);
     // Both SigInt/SigReal and BoxInt/BoxReal share the same underlying NodeKind
     // (NodeKind::Int / NodeKind::FloatBits), so the SigId IS the BoxId.
+    //
+    // When all inputs are Int and the result is a Real that happens to be an
+    // exact integer (e.g. `4/2 → Real(2.0)`), convert back to Int.  This is
+    // critical for pattern matching: `S(i,i)` compares tree nodes by identity,
+    // so `Real(2.0) != Int(2)` would cause the match to fail.
+    // C++ eval keeps integer semantics at the box level for this reason.
     match match_sig(arena, sig) {
-        SigMatch::Int(_) | SigMatch::Real(_) => Some(sig),
+        SigMatch::Int(_) => Some(sig),
+        SigMatch::Real(x)
+            if all_inputs_are_int(arena, a1)
+                && x.fract() == 0.0
+                && x >= f64::from(i32::MIN)
+                && x <= f64::from(i32::MAX) =>
+        {
+            Some(BoxBuilder::new(arena).int(x as i32))
+        }
+        SigMatch::Real(_) => Some(sig),
         _ => None,
     }
 }

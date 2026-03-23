@@ -43,6 +43,15 @@ For each day file, entries are ordered from most recent commit to oldest using G
 
 See [`porting/journal/README.md`](porting/journal/README.md).
 
+## 2026-03-23 — fix(eval): integer div folding — `4/2` must produce `Int(2)`, not `Real(2.0)`
+
+`zita_rev1.dsp` failed (`sequential composition mismatch: left outputs (0) !=
+right inputs (16)`).  `fold_binop` produced `Real(2.0)` for `4/2`; pattern
+matching in `selector` requires `Int(2)`.  Fix: `try_fold_seq_numeric`
+converts exact-integer `Real` back to `Int` when all inputs are `Int`.
+
+---
+
 ## 2026-03-23 — docs: parser-to-FIR parity analysis report
 
 Full-pipeline parity analysis (parser → FIR) of faust-rs vs Faust C++.

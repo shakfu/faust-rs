@@ -102,8 +102,6 @@ fn operator_test_import_loading_parity_is_closed() {
         Compiler::new()
             .with_process_name("operator_test")
             .compile_file_default_to_signals(&dsp)
-            .unwrap_or_else(|e| {
-                panic!("Rust should now match C++ and accept operator_test: {e}")
-            });
+            .unwrap_or_else(|e| panic!("Rust should now match C++ and accept operator_test: {e}"));
     });
 }
