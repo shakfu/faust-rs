@@ -1544,7 +1544,6 @@ fn node_control(arena: &mut TreeArena) -> BoxId {
     intern_tag(arena, BOX_CONTROL_TAG, &[])
 }
 
-
 /// Equivalent to C++ `boxIPar`.
 #[must_use]
 fn node_ipar(arena: &mut TreeArena, index: BoxId, count: BoxId, body: BoxId) -> BoxId {
@@ -2068,7 +2067,6 @@ fn intern_tag(arena: &mut TreeArena, tag: &str, children: &[BoxId]) -> BoxId {
     arena.intern(NodeKind::Tag(tag_id), children)
 }
 
-
 /// Builds a canonical 4-element Faust list payload (`cons(a, cons(b, ...)))`.
 ///
 /// Used for slider parameter encoding to preserve C++/Faust list shape exactly.
@@ -2110,7 +2108,6 @@ fn slider_params4(arena: &TreeArena, params: BoxId) -> Option<(BoxId, BoxId, Box
 
     Some((cur, min, max, step))
 }
-
 
 /// Recursive structural dumper used by [`dump_box`].
 ///

@@ -778,7 +778,6 @@ pub fn box_arity_typed(
     result
 }
 
-
 /// Core arity inference logic, called only on cache miss.
 fn box_arity_flat_inner(
     arena: &TreeArena,

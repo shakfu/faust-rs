@@ -1134,13 +1134,26 @@ fn make_propagate_compiler_error(
     let owner = node.and_then(|n| owner_definition_name_for_node(arena, root, n));
     let mut diagnostic = error.clone().into_diagnostic();
     if let Some(n) = node {
-        diagnostic =
-            enrich_diagnostic_with_node(diagnostic, arena, root, n, owner.as_deref(), entrypoint_name);
+        diagnostic = enrich_diagnostic_with_node(
+            diagnostic,
+            arena,
+            root,
+            n,
+            owner.as_deref(),
+            entrypoint_name,
+        );
         if add_paired {
             diagnostic = add_paired_propagate_context(diagnostic, &error, arena);
         }
-        diagnostic =
-            maybe_add_source_label(diagnostic, ctx, arena, root, n, owner.as_deref(), entrypoint_name);
+        diagnostic = maybe_add_source_label(
+            diagnostic,
+            ctx,
+            arena,
+            root,
+            n,
+            owner.as_deref(),
+            entrypoint_name,
+        );
     }
     CompilerError::Propagate {
         source: source.into(),

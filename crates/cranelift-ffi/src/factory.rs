@@ -867,7 +867,6 @@ fn unesc_bitcode_field(s: &str) -> String {
     out
 }
 
-
 /// Decodes a Cranelift source-backed bitcode payload and rebuilds a runnable
 /// JIT factory.
 ///

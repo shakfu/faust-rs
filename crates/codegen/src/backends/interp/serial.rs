@@ -733,7 +733,6 @@ fn parse_real<R: FbcReal>(token: Option<&str>) -> Result<R, FbcSerialError> {
     }
 }
 
-
 /// Reads a meta block: `block_size N` followed by N meta instructions.
 ///
 /// # Source provenance (C++)
