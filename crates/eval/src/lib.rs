@@ -376,7 +376,7 @@ impl EvalSourceContext {
         paths: &[PathBuf],
         f: impl FnOnce(Option<&CachedLoadedSource>, &Path) -> R,
     ) -> R {
-        let guard = self.cache.lock().expect("source cache lock poisoned");
+        let guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         for path in paths {
             if let Some(loaded) = guard.get(path) {
                 return f(Some(loaded), path);
@@ -386,7 +386,7 @@ impl EvalSourceContext {
     }
 
     fn insert_loaded_source(&self, path: PathBuf, source: CachedLoadedSource) {
-        let mut guard = self.cache.lock().expect("source cache lock poisoned");
+        let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(path, source);
     }
 }
@@ -921,12 +921,12 @@ impl Environment {
     }
 
     fn with_store<R>(&self, f: impl FnOnce(&EnvStore) -> R) -> R {
-        let guard = self.store.lock().expect("environment store lock poisoned");
+        let guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
         f(&guard)
     }
 
     fn with_store_mut<R>(&self, f: impl FnOnce(&mut EnvStore) -> R) -> R {
-        let mut guard = self.store.lock().expect("environment store lock poisoned");
+        let mut guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut guard)
     }
 }
@@ -2309,50 +2309,9 @@ fn eval_value_uncached(
             loop_detector,
         )?)),
         BoxMatch::Ident(name) => {
-            // get_symbol takes &self — safe to call while `name: &str` borrows `arena`.
-            // If the name was never interned (never bound), it cannot be in the env.
-            let ((binding_env_id, binding_sym), value) = arena
-                .get_symbol(name)
-                .and_then(|sym| {
-                    env.lookup_value(sym)
-                        .map(|(env_id, value)| ((env_id, sym), value))
-                })
-                .ok_or_else(|| EvalError::UndefinedSymbol {
-                    symbol: name.to_owned(),
-                    node: expr,
-                    local_scope: env.local_names(arena),
-                    visible_scope: env.visible_names(arena),
-                    top_level_scope: env.top_level_names(arena),
-                })?;
-            match value {
-                EvalValue::Box(value) => {
-                    if value == expr {
-                        // Shadowing sentinel used for lambda parameters in lexical scopes.
-                        return Ok(EvalValue::Box(expr));
-                    }
-                    loop_detector.enter_tree(value, env.frame_key())?;
-                    let out = eval_value(arena, value, env, loop_detector);
-                    loop_detector.leave();
-                    out
-                }
-                EvalValue::Closure(closure) => {
-                    if matches!(
-                        match_box(arena, closure.expr),
-                        BoxMatch::Abstr(_, _) | BoxMatch::Environment
-                    ) {
-                        return Ok(EvalValue::Closure(closure));
-                    }
-                    loop_detector.enter_symbol_env(
-                        binding_sym,
-                        env.frame_key_for(binding_env_id),
-                        closure.expr,
-                    )?;
-                    let out = eval_value(arena, closure.expr, &closure.env, loop_detector);
-                    loop_detector.leave();
-                    out
-                }
-                EvalValue::PatternMatcher(pm) => Ok(EvalValue::PatternMatcher(pm)),
-            }
+            // `name` borrows the arena; convert to owned before any mutable arena use.
+            let name = name.to_owned();
+            eval_ident_value(arena, expr, &name, env, loop_detector)
         }
         BoxMatch::Appl(fun, arg) => {
             let efun = eval_value(arena, fun, env, loop_detector)?;
@@ -2557,58 +2516,9 @@ fn eval_value_uncached(
             loop_detector,
         )?)),
         BoxMatch::Route(ins, outs, routes) => {
-            // C++ eval.cpp (isBoxRoute branch):
-            //   v1 = a2sb(eval(ins, …))
-            //   v2 = a2sb(eval(outs, …))
-            //   vr = a2sb(eval(routes, …))
-            //   sigList2vecInt(boxPropagateSig(nil, v1, []), w1) → boxInt(w1[0])
-            //   sigList2vecInt(boxPropagateSig(nil, v2, []), w2) → boxInt(w2[0])
-            //   normalizeRouteList(vr) → canonical Par tree of boxInt pairs
-            //   return boxRoute(boxInt(ins_n), boxInt(outs_n), normalized_spec)
-            //
-            // Rust uses eval_box_to_int_node (propagate + simplify → i32 → boxInt)
-            // and normalize_route_spec to match the same behaviour.
-            let eval_ins = eval_box(arena, ins, env, loop_detector)?;
-            let eval_outs = eval_box(arena, outs, env, loop_detector)?;
-            let eval_routes = eval_box(arena, routes, env, loop_detector)?;
-
-            let ins_node = eval_box_to_int_node(arena, eval_ins).unwrap_or(eval_ins);
-            let outs_node = eval_box_to_int_node(arena, eval_outs).unwrap_or(eval_outs);
-            let routes_node = a2sb(arena, eval_routes, loop_detector).unwrap_or(eval_routes);
-            let spec_node = eval_box_to_int_list_node(arena, routes_node).unwrap_or_else(|| {
-                let mut cache = ahash::HashMap::default();
-                let simplified_routes = box_simplification(arena, &mut cache, routes_node);
-                normalize_route_spec(arena, simplified_routes)
-            });
-
-            let mut bld = BoxBuilder::new(arena);
-            Ok(EvalValue::Box(bld.route(ins_node, outs_node, spec_node)))
+            eval_route_value(arena, ins, outs, routes, env, loop_detector)
         }
-        BoxMatch::Seq(e1, e2) => {
-            // C++ eval.cpp (isBoxSeq branch):
-            //   a1 = eval(e1, …)   a2 = eval(e2, …)
-            //   if (isNumericalTuple(a1, lsig) && …)
-            //       lres = boxPropagateSig(nil, a2, lsig)
-            //       r = simplify(hd(lres))
-            //       if (isNum(r)) return r
-            //   return boxSeq(a1, a2)
-            //
-            // Rust: if a1 is a parallel of Int/Real literals, try to fold
-            // seq(a1, a2) via propagate_box_and_simplify.  Both SigInt/SigReal
-            // and BoxInt/BoxReal share the same NodeKind in the arena, so the
-            // resulting SigId IS directly usable as a BoxId.
-            let a1 = eval_box(arena, e1, env, loop_detector)?;
-            let a2 = eval_box(arena, e2, env, loop_detector)?;
-
-            if is_numerical_tuple_box(arena, a1)
-                && let Some(folded) = try_fold_seq_numeric(arena, a1, a2)
-            {
-                return Ok(EvalValue::Box(folded));
-            }
-
-            let mut bld = BoxBuilder::new(arena);
-            Ok(EvalValue::Box(bld.seq(a1, a2)))
-        }
+        BoxMatch::Seq(e1, e2) => eval_seq_value(arena, e1, e2, env, loop_detector),
         // ── outputs(expr) / inputs(expr) ────────────────────────────────────
         // C++: eval.cpp handles `isBoxOutputs`/`isBoxInputs` by evaluating the
         // inner box, calling `getBoxType` to obtain the arity, then returning a
@@ -2654,6 +2564,130 @@ fn eval_value_uncached(
             loop_detector,
         )?)),
     }
+}
+
+/// Evaluates an identifier (`BoxMatch::Ident`) within the current environment.
+///
+/// Looks up `name` in the environment, then:
+/// - plain box: recurses under loop detection,
+/// - closure over an abstraction or environment block: returned as-is,
+/// - other closure: forced under its captured environment,
+/// - pattern matcher: returned as-is.
+///
+/// `name` must be an owned string so the arena borrow from the original
+/// `match_box` call has been released before any mutable arena access.
+fn eval_ident_value(
+    arena: &mut TreeArena,
+    expr: TreeId,
+    name: &str,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<EvalValue, EvalError> {
+    // get_symbol takes &self — safe while `name` no longer borrows `arena` mutably.
+    let ((binding_env_id, binding_sym), value) = arena
+        .get_symbol(name)
+        .and_then(|sym| {
+            env.lookup_value(sym)
+                .map(|(env_id, value)| ((env_id, sym), value))
+        })
+        .ok_or_else(|| EvalError::UndefinedSymbol {
+            symbol: name.to_owned(),
+            node: expr,
+            local_scope: env.local_names(arena),
+            visible_scope: env.visible_names(arena),
+            top_level_scope: env.top_level_names(arena),
+        })?;
+    match value {
+        EvalValue::Box(value) => {
+            if value == expr {
+                // Shadowing sentinel used for lambda parameters in lexical scopes.
+                return Ok(EvalValue::Box(expr));
+            }
+            loop_detector.enter_tree(value, env.frame_key())?;
+            let out = eval_value(arena, value, env, loop_detector);
+            loop_detector.leave();
+            out
+        }
+        EvalValue::Closure(closure) => {
+            if matches!(
+                match_box(arena, closure.expr),
+                BoxMatch::Abstr(_, _) | BoxMatch::Environment
+            ) {
+                return Ok(EvalValue::Closure(closure));
+            }
+            loop_detector.enter_symbol_env(
+                binding_sym,
+                env.frame_key_for(binding_env_id),
+                closure.expr,
+            )?;
+            let out = eval_value(arena, closure.expr, &closure.env, loop_detector);
+            loop_detector.leave();
+            out
+        }
+        EvalValue::PatternMatcher(pm) => Ok(EvalValue::PatternMatcher(pm)),
+    }
+}
+
+/// Evaluates a `route(ins, outs, routes)` box.
+///
+/// Source provenance (C++): `compiler/evaluate/eval.cpp`, `isBoxRoute` branch.
+///
+/// C++ evaluates ins/outs/routes, propagates each through a nil-input signal
+/// context to reduce them to integers (`sigList2vecInt`), then normalises the
+/// route spec (`normalizeRouteList`). Rust mirrors this with
+/// `eval_box_to_int_node` (propagate + simplify → `i32` → `boxInt`) and
+/// `normalize_route_spec`.
+fn eval_route_value(
+    arena: &mut TreeArena,
+    ins: TreeId,
+    outs: TreeId,
+    routes: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<EvalValue, EvalError> {
+    let eval_ins = eval_box(arena, ins, env, loop_detector)?;
+    let eval_outs = eval_box(arena, outs, env, loop_detector)?;
+    let eval_routes = eval_box(arena, routes, env, loop_detector)?;
+
+    let ins_node = eval_box_to_int_node(arena, eval_ins).unwrap_or(eval_ins);
+    let outs_node = eval_box_to_int_node(arena, eval_outs).unwrap_or(eval_outs);
+    let routes_node = a2sb(arena, eval_routes, loop_detector).unwrap_or(eval_routes);
+    let spec_node = eval_box_to_int_list_node(arena, routes_node).unwrap_or_else(|| {
+        let mut cache = ahash::HashMap::default();
+        let simplified_routes = box_simplification(arena, &mut cache, routes_node);
+        normalize_route_spec(arena, simplified_routes)
+    });
+
+    let mut bld = BoxBuilder::new(arena);
+    Ok(EvalValue::Box(bld.route(ins_node, outs_node, spec_node)))
+}
+
+/// Evaluates a `seq(e1, e2)` box, folding numeric tuples where possible.
+///
+/// Source provenance (C++): `compiler/evaluate/eval.cpp`, `isBoxSeq` branch.
+///
+/// If `e1` evaluates to a parallel of Int/Real literals, the composition is
+/// folded via propagation (`try_fold_seq_numeric`); otherwise `boxSeq(a1, a2)`
+/// is returned. Both `SigInt`/`SigReal` and `BoxInt`/`BoxReal` share the same
+/// `NodeKind`, so the folded `SigId` is directly usable as a `BoxId`.
+fn eval_seq_value(
+    arena: &mut TreeArena,
+    e1: TreeId,
+    e2: TreeId,
+    env: &Environment,
+    loop_detector: &mut LoopDetector,
+) -> Result<EvalValue, EvalError> {
+    let a1 = eval_box(arena, e1, env, loop_detector)?;
+    let a2 = eval_box(arena, e2, env, loop_detector)?;
+
+    if is_numerical_tuple_box(arena, a1)
+        && let Some(folded) = try_fold_seq_numeric(arena, a1, a2)
+    {
+        return Ok(EvalValue::Box(folded));
+    }
+
+    let mut bld = BoxBuilder::new(arena);
+    Ok(EvalValue::Box(bld.seq(a1, a2)))
 }
 
 /// Reifies one evaluator value back into box IR.

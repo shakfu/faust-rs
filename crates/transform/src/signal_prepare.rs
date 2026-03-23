@@ -61,7 +61,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 
-use normalize::normalform::promote_signals_fastlane;
+use normalize::normalform::{NormalFormError, promote_signals_fastlane};
 use signals::{SigBuilder, SigId, SigMatch, match_sig};
 use sigtype::{Nature, SigType, TypeAnnotator};
 use tlib::{
@@ -94,10 +94,10 @@ pub struct PreparedSignals {
     /// Prepared output roots interned in [`Self::arena`].
     pub outputs: Vec<SigId>,
     /// Reduced type annotation for prepared signal nodes (for promoter + FIR lowerer).
-    pub types: HashMap<SigId, SimpleSigType>,
+    pub(crate) types: HashMap<SigId, SimpleSigType>,
     /// Full signal type annotation from the `sigtype` type system.
     /// Carries interval bounds, variability, and all other lattice qualifiers.
-    pub sig_types: HashMap<SigId, SigType>,
+    pub(crate) sig_types: HashMap<SigId, SigType>,
 }
 
 impl PreparedSignals {
@@ -112,6 +112,18 @@ impl PreparedSignals {
     pub fn sig_ty(&self, sig: SigId) -> Option<&SigType> {
         self.sig_types.get(&sig)
     }
+
+    /// Read-only view of the reduced type map (for consumers that need to iterate or pass it wholesale).
+    #[must_use]
+    pub fn types_map(&self) -> &HashMap<SigId, SimpleSigType> {
+        &self.types
+    }
+
+    /// Read-only view of the full sig-type map (for consumers that need to iterate or pass it wholesale).
+    #[must_use]
+    pub fn sig_types_map(&self) -> &HashMap<SigId, SigType> {
+        &self.sig_types
+    }
 }
 
 /// Typed errors returned while preparing signals for FIR lowering.
@@ -119,8 +131,10 @@ impl PreparedSignals {
 pub enum SignalPrepareError {
     /// The output forest contains malformed or open de Bruijn recursion.
     Recursion(RecursionError),
-    /// Reduced type inference failed on the prepared signal forest.
+    /// Structural type-inference or validation error (e.g. malformed recursion body).
     Typing(String),
+    /// The signal promotion pass failed (type-driven cast insertion).
+    Promotion(NormalFormError),
 }
 
 impl fmt::Display for SignalPrepareError {
@@ -131,15 +145,30 @@ impl fmt::Display for SignalPrepareError {
                 "signal preparation failed during de_bruijn_to_sym: {err}"
             ),
             Self::Typing(msg) => write!(f, "signal preparation typing failed: {msg}"),
+            Self::Promotion(err) => write!(f, "signal preparation promotion failed: {err}"),
         }
     }
 }
 
-impl Error for SignalPrepareError {}
+impl Error for SignalPrepareError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Recursion(e) => Some(e),
+            Self::Promotion(e) => Some(e),
+            Self::Typing(_) => None,
+        }
+    }
+}
 
 impl From<RecursionError> for SignalPrepareError {
     fn from(value: RecursionError) -> Self {
         Self::Recursion(value)
+    }
+}
+
+impl From<NormalFormError> for SignalPrepareError {
+    fn from(value: NormalFormError) -> Self {
+        Self::Promotion(value)
     }
 }
 
@@ -186,7 +215,7 @@ pub fn prepare_signals_for_fir(
         .expect("prepare_signals_for_fir rebuilds a proper cons list");
     let sig_types_before = infer_full_types(&arena, &outputs, ui)?;
     let outputs = promote_signals_fastlane(&mut arena, &sig_types_before, &outputs)
-        .map_err(|err| SignalPrepareError::Typing(err.to_string()))?;
+        .map_err(SignalPrepareError::Promotion)?;
     let sig_types = infer_full_types(&arena, &outputs, ui)?;
     let types = derive_simple_types(&arena, &sig_types);
     Ok(PreparedSignals {

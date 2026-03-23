@@ -120,7 +120,7 @@ impl CompilationMetadataStore {
     /// Repeated declarations of the same `(key, value)` pair are idempotent:
     /// values are stored in a [`BTreeSet`] so duplicates do not accumulate.
     pub fn declare_top_level(&self, current_source: &str, key: &str, value: &str) {
-        let mut guard = self.inner.lock().expect("metadata store lock poisoned");
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let key = if current_source == guard.master_source.as_ref() {
             CompilationMetadataKey::global(key)
         } else {
@@ -136,7 +136,7 @@ impl CompilationMetadataStore {
     /// keeping the store lock alive.
     #[must_use]
     pub fn snapshot(&self) -> CompilationMetadataSnapshot {
-        let guard = self.inner.lock().expect("metadata store lock poisoned");
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         CompilationMetadataSnapshot {
             entries: guard.entries.clone(),
         }
