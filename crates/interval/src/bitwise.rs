@@ -70,19 +70,6 @@ fn union_u(a: UInterval, b: UInterval) -> UInterval {
     }
 }
 
-#[allow(dead_code)]
-fn union_s(a: SInterval, b: SInterval) -> SInterval {
-    if is_empty_s(a) {
-        return b;
-    }
-    if is_empty_s(b) {
-        return a;
-    }
-    SInterval {
-        lo: a.lo.min(b.lo),
-        hi: a.hi.max(b.hi),
-    }
-}
 
 // -------------------------------------------------------------------------
 // sign split / sign merge

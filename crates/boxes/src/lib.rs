@@ -1166,19 +1166,6 @@ fn node_symbolic(arena: &mut TreeArena, slot: BoxId, body: BoxId) -> BoxId {
     intern_tag(arena, BOX_SYMBOLIC_TAG, &[slot, body])
 }
 
-/// Returns identifier symbol name when `b` is `node_ident`.
-#[must_use]
-#[allow(dead_code)]
-fn node_ident_name(arena: &TreeArena, b: BoxId) -> Option<&str> {
-    let [sym] = match_tag_arity(arena, b, BOX_IDENT_TAG, 1)? else {
-        return None;
-    };
-    match arena.kind(*sym) {
-        Some(NodeKind::Symbol(name)) => Some(name.as_ref()),
-        _ => None,
-    }
-}
-
 /// Equivalent to C++ `boxInt`.
 #[must_use]
 fn node_int(arena: &mut TreeArena, value: i32) -> BoxId {
@@ -1201,20 +1188,6 @@ fn node_wire(arena: &mut TreeArena) -> BoxId {
 #[must_use]
 fn node_cut(arena: &mut TreeArena) -> BoxId {
     intern_tag(arena, BOX_CUT_TAG, &[])
-}
-
-/// Predicate equivalent to C++ `isBoxWire`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_wire(arena: &TreeArena, b: BoxId) -> bool {
-    match_tag_arity(arena, b, BOX_WIRE_TAG, 0).is_some()
-}
-
-/// Predicate equivalent to C++ `isBoxCut`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_cut(arena: &TreeArena, b: BoxId) -> bool {
-    match_tag_arity(arena, b, BOX_CUT_TAG, 0).is_some()
 }
 
 /// Equivalent to C++ `boxSeq`.
@@ -1253,59 +1226,10 @@ fn node_appl(arena: &mut TreeArena, fun: BoxId, arglist: BoxId) -> BoxId {
     intern_tag(arena, BOX_APPL_TAG, &[fun, arglist])
 }
 
-/// Returns `(fun, arglist)` when `b` is `node_appl`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_appl(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_APPL_TAG)
-}
-
 /// Equivalent to C++ `boxAccess`.
 #[must_use]
 fn node_access(arena: &mut TreeArena, expr: BoxId, ident: BoxId) -> BoxId {
     intern_tag(arena, BOX_ACCESS_TAG, &[expr, ident])
-}
-
-/// Returns `(expr, ident)` when `b` is `node_access`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_access(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_ACCESS_TAG)
-}
-
-/// Returns `(left, right)` when `b` is `node_seq`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_seq(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_SEQ_TAG)
-}
-
-/// Returns `(left, right)` when `b` is `node_par`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_par(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_PAR_TAG)
-}
-
-/// Returns `(left, right)` when `b` is `node_rec`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_rec(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_REC_TAG)
-}
-
-/// Returns `(left, right)` when `b` is `node_split`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_split(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_SPLIT_TAG)
-}
-
-/// Returns `(left, right)` when `b` is `node_merge`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_merge(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_MERGE_TAG)
 }
 
 /// Equivalent to C++ `boxAdd`.
@@ -1689,24 +1613,10 @@ fn node_ipar(arena: &mut TreeArena, index: BoxId, count: BoxId, body: BoxId) -> 
     intern_tag(arena, BOX_IPAR_TAG, &[index, count, body])
 }
 
-/// Returns `(index, count, body)` when `b` is `node_ipar`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_ipar(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
-    match_ternary(arena, b, BOX_IPAR_TAG)
-}
-
 /// Equivalent to C++ `boxISeq`.
 #[must_use]
 fn node_iseq(arena: &mut TreeArena, index: BoxId, count: BoxId, body: BoxId) -> BoxId {
     intern_tag(arena, BOX_ISEQ_TAG, &[index, count, body])
-}
-
-/// Returns `(index, count, body)` when `b` is `node_iseq`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_iseq(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
-    match_ternary(arena, b, BOX_ISEQ_TAG)
 }
 
 /// Equivalent to C++ `boxISum`.
@@ -1715,37 +1625,16 @@ fn node_isum(arena: &mut TreeArena, index: BoxId, count: BoxId, body: BoxId) -> 
     intern_tag(arena, BOX_ISUM_TAG, &[index, count, body])
 }
 
-/// Returns `(index, count, body)` when `b` is `node_isum`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_isum(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
-    match_ternary(arena, b, BOX_ISUM_TAG)
-}
-
 /// Equivalent to C++ `boxIProd`.
 #[must_use]
 fn node_iprod(arena: &mut TreeArena, index: BoxId, count: BoxId, body: BoxId) -> BoxId {
     intern_tag(arena, BOX_IPROD_TAG, &[index, count, body])
 }
 
-/// Returns `(index, count, body)` when `b` is `node_iprod`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_iprod(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
-    match_ternary(arena, b, BOX_IPROD_TAG)
-}
-
 /// Equivalent to C++ `boxWithLocalDef`.
 #[must_use]
 fn node_with_local_def(arena: &mut TreeArena, body: BoxId, ldef: BoxId) -> BoxId {
     intern_tag(arena, BOX_WITH_LOCAL_DEF_TAG, &[body, ldef])
-}
-
-/// Returns `(body, ldef)` when `b` is `node_with_local_def`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_with_local_def(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_WITH_LOCAL_DEF_TAG)
 }
 
 /// Equivalent to C++ `boxModifLocalDef`.
@@ -1757,13 +1646,6 @@ fn is_node_with_local_def(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)>
 #[must_use]
 fn node_modif_local_def(arena: &mut TreeArena, body: BoxId, ldef: BoxId) -> BoxId {
     intern_tag(arena, BOX_MODIF_LOCAL_DEF_TAG, &[body, ldef])
-}
-
-/// Returns `(body, ldef)` when `b` is `node_modif_local_def`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_modif_local_def(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_MODIF_LOCAL_DEF_TAG)
 }
 
 /// Equivalent to C++ `boxWithRecDef`.
@@ -1788,16 +1670,6 @@ fn is_node_modif_local_def(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)
 #[must_use]
 fn node_with_rec_def(arena: &mut TreeArena, body: BoxId, ldef: BoxId, ldef2: BoxId) -> BoxId {
     box_with_rec_def_expanded(arena, body, ldef, ldef2)
-}
-
-/// Returns `(body, ldef, ldef2)` when `b` is `node_with_rec_def`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_with_rec_def(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
-    let [body, ldef, ldef2] = match_tag_arity(arena, b, BOX_WITH_REC_DEF_TAG, 3)? else {
-        return None;
-    };
-    Some((*body, *ldef, *ldef2))
 }
 
 /// Eagerly lowers parser-form `letrec` definitions to the same `with`-based
@@ -1975,24 +1847,10 @@ fn node_metadata(arena: &mut TreeArena, expr: BoxId, mdlist: BoxId) -> BoxId {
     intern_tag(arena, BOX_METADATA_TAG, &[expr, mdlist])
 }
 
-/// Returns `(expr, mdlist)` when `b` is `node_metadata`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_metadata(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_METADATA_TAG)
-}
-
 /// Equivalent to C++ `boxEnvironment`.
 #[must_use]
 fn node_environment(arena: &mut TreeArena) -> BoxId {
     intern_tag(arena, BOX_ENVIRONMENT_TAG, &[])
-}
-
-/// Predicate equivalent to C++ `isBoxEnvironment`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_environment(arena: &TreeArena, b: BoxId) -> bool {
-    match_tag_arity(arena, b, BOX_ENVIRONMENT_TAG, 0).is_some()
 }
 
 /// Equivalent to C++ `boxComponent`.
@@ -2001,24 +1859,10 @@ fn node_component(arena: &mut TreeArena, filename: BoxId) -> BoxId {
     intern_tag(arena, BOX_COMPONENT_TAG, &[filename])
 }
 
-/// Returns `filename` when `b` is `node_component`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_component(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
-    match_unary(arena, b, BOX_COMPONENT_TAG)
-}
-
 /// Equivalent to C++ `boxLibrary`.
 #[must_use]
 fn node_library(arena: &mut TreeArena, filename: BoxId) -> BoxId {
     intern_tag(arena, BOX_LIBRARY_TAG, &[filename])
-}
-
-/// Returns `filename` when `b` is `node_library`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_library(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
-    match_unary(arena, b, BOX_LIBRARY_TAG)
 }
 
 /// Equivalent to C++ `boxWaveform`.
@@ -2034,24 +1878,10 @@ fn node_waveform(arena: &mut TreeArena, values: &[BoxId]) -> BoxId {
     intern_tag(arena, BOX_WAVEFORM_TAG, &[list])
 }
 
-/// Returns waveform list payload when `b` is `node_waveform`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_waveform(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
-    match_unary(arena, b, BOX_WAVEFORM_TAG)
-}
-
 /// Equivalent to C++ `boxRoute`.
 #[must_use]
 fn node_route(arena: &mut TreeArena, n: BoxId, m: BoxId, route_spec: BoxId) -> BoxId {
     intern_tag(arena, BOX_ROUTE_TAG, &[n, m, route_spec])
-}
-
-/// Returns `(n, m, route_spec)` when `b` is `node_route`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_route(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
-    match_ternary(arena, b, BOX_ROUTE_TAG)
 }
 
 /// Equivalent to C++ `ffunction(signature, incfile, libfile)`.
@@ -2060,24 +1890,10 @@ fn ffunction(arena: &mut TreeArena, signature: BoxId, incfile: BoxId, libfile: B
     intern_tag(arena, FFUN_TAG, &[signature, incfile, libfile])
 }
 
-/// Returns `(signature, incfile, libfile)` when `b` is `ffunction(...)`.
-#[must_use]
-#[allow(dead_code)]
-fn is_ffunction(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
-    match_ternary(arena, b, FFUN_TAG)
-}
-
 /// Equivalent to C++ `boxFFun`.
 #[must_use]
 fn node_ffun(arena: &mut TreeArena, ff: BoxId) -> BoxId {
     intern_tag(arena, BOX_FFUN_TAG, &[ff])
-}
-
-/// Returns wrapped foreign-function descriptor when `b` is `node_ffun`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_ffun(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
-    match_unary(arena, b, BOX_FFUN_TAG)
 }
 
 /// Equivalent to C++ `boxFConst`.
@@ -2086,24 +1902,10 @@ fn node_fconst(arena: &mut TreeArena, ty: BoxId, name: BoxId, file: BoxId) -> Bo
     intern_tag(arena, BOX_FCONST_TAG, &[ty, name, file])
 }
 
-/// Returns `(ty, name, file)` when `b` is `node_fconst`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_fconst(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
-    match_ternary(arena, b, BOX_FCONST_TAG)
-}
-
 /// Equivalent to C++ `boxFVar`.
 #[must_use]
 fn node_fvar(arena: &mut TreeArena, ty: BoxId, name: BoxId, file: BoxId) -> BoxId {
     intern_tag(arena, BOX_FVAR_TAG, &[ty, name, file])
-}
-
-/// Returns `(ty, name, file)` when `b` is `node_fvar`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_fvar(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
-    match_ternary(arena, b, BOX_FVAR_TAG)
 }
 
 /// Equivalent to C++ `boxCase`.
@@ -2124,24 +1926,10 @@ fn node_closure(arena: &mut TreeArena, key: BoxId) -> BoxId {
     intern_tag(arena, BOX_CLOSURE_TAG, &[key])
 }
 
-/// Returns `rules` when `b` is `node_case`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_case(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
-    match_unary(arena, b, BOX_CASE_TAG)
-}
-
 /// Equivalent to C++ `boxPatternVar`.
 #[must_use]
 fn node_pattern_var(arena: &mut TreeArena, ident: BoxId) -> BoxId {
     intern_tag(arena, BOX_PATTERN_VAR_TAG, &[ident])
-}
-
-/// Returns wrapped identifier when `b` is `node_pattern_var`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_pattern_var(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
-    match_unary(arena, b, BOX_PATTERN_VAR_TAG)
 }
 
 /// Equivalent to C++ `boxAbstr`.
@@ -2150,24 +1938,10 @@ fn node_abstr(arena: &mut TreeArena, arg: BoxId, body: BoxId) -> BoxId {
     intern_tag(arena, BOX_ABSTR_TAG, &[arg, body])
 }
 
-/// Returns `(arg, body)` when `b` is `node_abstr`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_abstr(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_ABSTR_TAG)
-}
-
 /// Equivalent to C++ `boxModulation`.
 #[must_use]
 fn node_modulation(arena: &mut TreeArena, arg: BoxId, body: BoxId) -> BoxId {
     intern_tag(arena, BOX_MODULATION_TAG, &[arg, body])
-}
-
-/// Returns `(arg, body)` when `b` is `node_modulation`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_modulation(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_MODULATION_TAG)
 }
 
 /// Equivalent to C++ `buildBoxAbstr(largs, body)` using parser-built arg list.
@@ -2213,24 +1987,10 @@ fn node_inputs(arena: &mut TreeArena, expr: BoxId) -> BoxId {
     intern_tag(arena, BOX_INPUTS_TAG, &[expr])
 }
 
-/// Returns wrapped expression when `b` is `node_inputs`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_inputs(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
-    match_unary(arena, b, BOX_INPUTS_TAG)
-}
-
 /// Equivalent to C++ `boxOutputs`.
 #[must_use]
 fn node_outputs(arena: &mut TreeArena, expr: BoxId) -> BoxId {
     intern_tag(arena, BOX_OUTPUTS_TAG, &[expr])
-}
-
-/// Returns wrapped expression when `b` is `node_outputs`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_outputs(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
-    match_unary(arena, b, BOX_OUTPUTS_TAG)
 }
 
 /// Equivalent to C++ `boxOndemand`.
@@ -2239,24 +1999,10 @@ fn node_ondemand(arena: &mut TreeArena, expr: BoxId) -> BoxId {
     intern_tag(arena, BOX_ONDEMAND_TAG, &[expr])
 }
 
-/// Returns wrapped expression when `b` is `node_ondemand`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_ondemand(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
-    match_unary(arena, b, BOX_ONDEMAND_TAG)
-}
-
 /// Equivalent to C++ `boxUpsampling`.
 #[must_use]
 fn node_upsampling(arena: &mut TreeArena, expr: BoxId) -> BoxId {
     intern_tag(arena, BOX_UPSAMPLING_TAG, &[expr])
-}
-
-/// Returns wrapped expression when `b` is `node_upsampling`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_upsampling(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
-    match_unary(arena, b, BOX_UPSAMPLING_TAG)
 }
 
 /// Equivalent to C++ `boxDownsampling`.
@@ -2265,37 +2011,16 @@ fn node_downsampling(arena: &mut TreeArena, expr: BoxId) -> BoxId {
     intern_tag(arena, BOX_DOWNSAMPLING_TAG, &[expr])
 }
 
-/// Returns wrapped expression when `b` is `node_downsampling`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_downsampling(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
-    match_unary(arena, b, BOX_DOWNSAMPLING_TAG)
-}
-
 /// Equivalent to C++ `boxButton`.
 #[must_use]
 fn node_button(arena: &mut TreeArena, label: BoxId) -> BoxId {
     intern_tag(arena, BOX_BUTTON_TAG, &[label])
 }
 
-/// Returns `label` when `b` is `node_button`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_button(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
-    match_unary(arena, b, BOX_BUTTON_TAG)
-}
-
 /// Equivalent to C++ `boxCheckbox`.
 #[must_use]
 fn node_checkbox(arena: &mut TreeArena, label: BoxId) -> BoxId {
     intern_tag(arena, BOX_CHECKBOX_TAG, &[label])
-}
-
-/// Returns `label` when `b` is `node_checkbox`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_checkbox(arena: &TreeArena, b: BoxId) -> Option<BoxId> {
-    match_unary(arena, b, BOX_CHECKBOX_TAG)
 }
 
 /// Equivalent to C++ `boxVSlider`.
@@ -2315,13 +2040,6 @@ fn node_vslider(
     intern_tag(arena, BOX_VSLIDER_TAG, &[label, params])
 }
 
-/// Returns `(label, cur, min, max, step)` when `b` is `node_vslider`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_vslider(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId, BoxId, BoxId)> {
-    match_slider(arena, b, BOX_VSLIDER_TAG)
-}
-
 /// Equivalent to C++ `boxHSlider`.
 ///
 /// C++ payload encoding is preserved:
@@ -2337,13 +2055,6 @@ fn node_hslider(
 ) -> BoxId {
     let params = list4(arena, cur, min, max, step);
     intern_tag(arena, BOX_HSLIDER_TAG, &[label, params])
-}
-
-/// Returns `(label, cur, min, max, step)` when `b` is `node_hslider`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_hslider(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId, BoxId, BoxId)> {
-    match_slider(arena, b, BOX_HSLIDER_TAG)
 }
 
 /// Equivalent to C++ `boxNumEntry`.
@@ -2363,24 +2074,10 @@ fn node_num_entry(
     intern_tag(arena, BOX_NUM_ENTRY_TAG, &[label, params])
 }
 
-/// Returns `(label, cur, min, max, step)` when `b` is `node_num_entry`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_num_entry(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId, BoxId, BoxId)> {
-    match_slider(arena, b, BOX_NUM_ENTRY_TAG)
-}
-
 /// Equivalent to C++ `boxVGroup`.
 #[must_use]
 fn node_vgroup(arena: &mut TreeArena, label: BoxId, expr: BoxId) -> BoxId {
     intern_tag(arena, BOX_VGROUP_TAG, &[label, expr])
-}
-
-/// Returns `(label, expr)` when `b` is `node_vgroup`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_vgroup(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_VGROUP_TAG)
 }
 
 /// Equivalent to C++ `boxHGroup`.
@@ -2389,24 +2086,10 @@ fn node_hgroup(arena: &mut TreeArena, label: BoxId, expr: BoxId) -> BoxId {
     intern_tag(arena, BOX_HGROUP_TAG, &[label, expr])
 }
 
-/// Returns `(label, expr)` when `b` is `node_hgroup`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_hgroup(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_HGROUP_TAG)
-}
-
 /// Equivalent to C++ `boxTGroup`.
 #[must_use]
 fn node_tgroup(arena: &mut TreeArena, label: BoxId, expr: BoxId) -> BoxId {
     intern_tag(arena, BOX_TGROUP_TAG, &[label, expr])
-}
-
-/// Returns `(label, expr)` when `b` is `node_tgroup`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_tgroup(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_TGROUP_TAG)
 }
 
 /// Equivalent to C++ `boxVBargraph`.
@@ -2415,37 +2098,16 @@ fn node_vbargraph(arena: &mut TreeArena, label: BoxId, min: BoxId, max: BoxId) -
     intern_tag(arena, BOX_VBARGRAPH_TAG, &[label, min, max])
 }
 
-/// Returns `(label, min, max)` when `b` is `node_vbargraph`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_vbargraph(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
-    match_ternary(arena, b, BOX_VBARGRAPH_TAG)
-}
-
 /// Equivalent to C++ `boxHBargraph`.
 #[must_use]
 fn node_hbargraph(arena: &mut TreeArena, label: BoxId, min: BoxId, max: BoxId) -> BoxId {
     intern_tag(arena, BOX_HBARGRAPH_TAG, &[label, min, max])
 }
 
-/// Returns `(label, min, max)` when `b` is `node_hbargraph`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_hbargraph(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId, BoxId)> {
-    match_ternary(arena, b, BOX_HBARGRAPH_TAG)
-}
-
 /// Equivalent to C++ `boxSoundfile`.
 #[must_use]
 fn node_soundfile(arena: &mut TreeArena, label: BoxId, chan: BoxId) -> BoxId {
     intern_tag(arena, BOX_SOUNDFILE_TAG, &[label, chan])
-}
-
-/// Returns `(label, chan)` when `b` is `node_soundfile`.
-#[must_use]
-#[allow(dead_code)]
-fn is_node_soundfile(arena: &TreeArena, b: BoxId) -> Option<(BoxId, BoxId)> {
-    match_binary(arena, b, BOX_SOUNDFILE_TAG)
 }
 
 /// Deterministic structural dump helper for parser differential checks.

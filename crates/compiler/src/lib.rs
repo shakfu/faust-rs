@@ -74,7 +74,7 @@ pub struct SignalCompileOutput {
     pub compilation_metadata: parser::CompilationMetadataSnapshot,
     /// Evaluated `process` box expression after `eval`.
     pub process_box: BoxId,
-    /// Inferred process arity (`inputs`/`outputs`) from `propagate::box_arity`.
+    /// Inferred process arity (`inputs`/`outputs`) from `propagate::box_arity_typed`.
     pub process_arity: BoxArity,
     /// Final propagated output signal list (`process_arity.outputs` items).
     pub signals: Vec<SigId>,
@@ -1176,7 +1176,7 @@ fn fir_verify_error_to_compiler(source: &str, report: FirVerifyReport) -> Compil
 // ─── DiagCtx: shared pipeline diagnostic enrichment ──────────────────────────
 
 /// Enriches a diagnostic with the standard node-level notes shared across
-/// eval, box_arity, and propagate error handlers.
+/// eval, arity, and propagate error handlers.
 ///
 /// Takes the arena and root by reference at call-site (not stored) so that
 /// mutable borrows of the arena remain possible between phase calls.

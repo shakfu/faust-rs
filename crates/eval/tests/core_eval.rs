@@ -823,7 +823,8 @@ process = displaygain(compressor_stereo(5,-30,0.01,0.1));
     let out = eval_process(&mut arena, root)
         .expect("residual closure argument should not receive an extra implicit wire");
 
-    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+    let flat_out = propagate::try_build_flat_box(&arena, out).expect("eval output should be flat");
+    let arity = propagate::box_arity_typed(&arena, flat_out, &mut ArityCache::new())
         .expect("evaluated process should remain well-typed");
     assert_eq!(arity.inputs, 2);
     assert_eq!(arity.outputs, 2);
@@ -849,7 +850,8 @@ process = g;
     let out = eval_process(&mut arena, root)
         .expect("inputs(residual closure) should reduce through a2sb like C++");
 
-    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+    let flat_out = propagate::try_build_flat_box(&arena, out).expect("eval output should be flat");
+    let arity = propagate::box_arity_typed(&arena, flat_out, &mut ArityCache::new())
         .expect("evaluated process should remain well-typed");
     assert_eq!(arity.inputs, 1);
     assert_eq!(arity.outputs, 1);
@@ -873,7 +875,8 @@ process = rdtable(waveform{2,3,5,7}, 1);
     let out = eval_process(&mut arena, root)
         .expect("rdtable(waveform, x) should not receive an extra implicit wire");
 
-    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+    let flat_out = propagate::try_build_flat_box(&arena, out).expect("eval output should be flat");
+    let arity = propagate::box_arity_typed(&arena, flat_out, &mut ArityCache::new())
         .expect("evaluated process should remain well-typed");
     assert_eq!(arity.inputs, 0);
     assert_eq!(arity.outputs, 1);
@@ -902,7 +905,8 @@ fn eval_process_keeps_large_waveform_nodes_as_leaf_values() {
     let out = eval_process(&mut arena, root)
         .expect("large waveform should stay in normal form during eval");
 
-    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+    let flat_out = propagate::try_build_flat_box(&arena, out).expect("eval output should be flat");
+    let arity = propagate::box_arity_typed(&arena, flat_out, &mut ArityCache::new())
         .expect("evaluated large waveform process should remain well-typed");
     assert_eq!(arity.inputs, 0);
     assert_eq!(arity.outputs, 1);
@@ -930,7 +934,8 @@ process = foo(3,2);
     let out = eval_process(&mut arena, root)
         .expect("seq(j,0,body) should lower to the C++ neutral identity bus");
 
-    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+    let flat_out = propagate::try_build_flat_box(&arena, out).expect("eval output should be flat");
+    let arity = propagate::box_arity_typed(&arena, flat_out, &mut ArityCache::new())
         .expect("evaluated process should remain well-typed");
     assert_eq!(arity.inputs, 2);
     assert_eq!(arity.outputs, 3);
@@ -956,7 +961,8 @@ process = foo(poly(6))(3);
     let root = parsed.root.expect("parse should return a root");
     let out = eval_process(&mut arena, root)
         .expect("reused residual case argument should evaluate like Faust C++");
-    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+    let flat_out = propagate::try_build_flat_box(&arena, out).expect("eval output should be flat");
+    let arity = propagate::box_arity_typed(&arena, flat_out, &mut ArityCache::new())
         .expect("shared residual argument should still lower to a valid box");
     assert_eq!(arity.inputs, 1);
     assert_eq!(arity.outputs, 1);
@@ -996,7 +1002,8 @@ process = dot(2, selectbus(2,2,0), selectbus(2,2,1));
     let out = eval_process(&mut arena, root)
         .expect("residual symbolic selectbus arguments should count outputs via a2sb");
 
-    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+    let flat_out = propagate::try_build_flat_box(&arena, out).expect("eval output should be flat");
+    let arity = propagate::box_arity_typed(&arena, flat_out, &mut ArityCache::new())
         .expect("evaluated process should remain well-typed");
     assert_eq!(arity.inputs, 8);
     assert_eq!(arity.outputs, 1);
@@ -1025,7 +1032,8 @@ process = comparator(dir(0));
     let out = eval_process(&mut arena, root)
         .expect("exact integer reals should match integer case constants like Faust C++");
 
-    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+    let flat_out = propagate::try_build_flat_box(&arena, out).expect("eval output should be flat");
+    let arity = propagate::box_arity_typed(&arena, flat_out, &mut ArityCache::new())
         .expect("evaluated comparator should stay well-typed");
     assert_eq!(arity.inputs, 2);
     assert_eq!(arity.outputs, 2);
@@ -1049,7 +1057,8 @@ process = par(i, count, _):>_;
     let root = parsed.root.expect("parse should return a root");
     let out = eval_process(&mut arena, root)
         .expect("numeric iterator count should evaluate through eval2int-like folding");
-    let arity = propagate::box_arity(&arena, out, &mut ArityCache::new())
+    let flat_out = propagate::try_build_flat_box(&arena, out).expect("eval output should be flat");
+    let arity = propagate::box_arity_typed(&arena, flat_out, &mut ArityCache::new())
         .expect("iterator-count repro should lower to a valid box");
     assert_eq!(arity.inputs, 1);
     assert_eq!(arity.outputs, 1);

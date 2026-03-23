@@ -43,6 +43,17 @@ For each day file, entries are ordered from most recent commit to oldest using G
 
 See [`porting/journal/README.md`](porting/journal/README.md).
 
+## 2026-03-23 — refactor: dead-code sweep — compatibility wrappers, unused predicates, orphaned utilities
+
+Removed four public `BoxId` compatibility wrappers from `propagate`
+(`box_arity`, `propagate`, `propagate_with_ui`, `box_arity_flat`); migrated all
+callers to the typed API (`try_build_flat_box` + typed entry point). Deleted 47
+private C++ parity predicates (`is_node_*`) from `boxes` — superseded by
+`BoxMatch` pattern matching. Removed `encode_legacy_source_backed_bitcode` +
+`esc_bitcode_field` from `cranelift-ffi` (V2 format abandoned),
+`parse_string_token` from `codegen/interp`, and `union_s` from `interval`.
+Net: −563/+151 lines, zero warnings, all tests pass.
+
 ## 2026-03-23 — fix(eval): integer div folding — `4/2` must produce `Int(2)`, not `Real(2.0)`
 
 `zita_rev1.dsp` failed (`sequential composition mismatch: left outputs (0) !=

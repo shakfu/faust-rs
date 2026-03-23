@@ -16,11 +16,8 @@
 //! # Public API mapping status
 //! - [`box_arity_typed`] and [`propagate_typed`] are the primary Rust entry
 //!   points for the post-`eval/a2sb` flat-box contract.
-//! - [`box_arity`] and [`propagate`] remain compatibility wrappers for callers
-//!   that still hold a raw `BoxId`.
-//! - [`PropagateOutput`], [`propagate_typed_with_ui`], [`propagate_typed_with_ui_options`],
-//!   and [`propagate_with_ui`] are the grouped-UI ownership extensions introduced by the
-//!   UI IR rewrite.
+//! - [`PropagateOutput`], [`propagate_typed_with_ui`], and [`propagate_typed_with_ui_options`]
+//!   are the grouped-UI ownership extensions introduced by the UI IR rewrite.
 //! - `make_sig_input_list(...)` mirrors C++ `makeSigInputList(...)`.
 //! - `FlatBoxId` / [`try_build_flat_box`] are an adapted Rust boundary: they make the
 //!   C++ post-`evalprocess -> a2sb -> propagate` flat-box contract explicit while
@@ -48,7 +45,7 @@ use ui::{
     normalize_widget_label_path, split_label_metadata,
 };
 
-/// Memoization cache for [`box_arity`] / [`box_arity_typed`] results, keyed by validated flat boxes.
+/// Memoization cache for [`box_arity_typed`] results, keyed by validated flat boxes.
 pub type ArityCache = AHashMap<FlatBoxId, Result<BoxArity, PropagateError>>;
 /// Environment mapping route/slot placeholders to propagated signals.
 type SlotEnv = AHashMap<BoxId, SigId>;
@@ -781,31 +778,6 @@ pub fn box_arity_typed(
     result
 }
 
-#[doc(hidden)]
-/// Computes box arity using the validated flat-box subset.
-pub fn box_arity_flat(
-    arena: &TreeArena,
-    box_tree: FlatBoxId,
-    cache: &mut ArityCache,
-) -> Result<BoxArity, PropagateError> {
-    box_arity_typed(arena, box_tree, cache)
-}
-
-/// Infers input/output arity of one box expression (memoized).
-///
-/// Compatibility wrapper for callers that still hold a raw [`BoxId`].
-/// New post-`eval/a2sb` callers should prefer [`box_arity_typed`].
-///
-/// Callers should create one [`ArityCache`] and pass it through to amortise
-/// repeated sub-expression visits across multiple calls.
-pub fn box_arity(
-    arena: &TreeArena,
-    box_tree: BoxId,
-    cache: &mut ArityCache,
-) -> Result<BoxArity, PropagateError> {
-    let flat = try_build_flat_box(arena, box_tree)?;
-    box_arity_typed(arena, flat, cache)
-}
 
 /// Core arity inference logic, called only on cache miss.
 fn box_arity_flat_inner(
@@ -1066,34 +1038,6 @@ pub fn propagate_typed(
     cache: &mut ArityCache,
 ) -> Result<Vec<SigId>, PropagateError> {
     propagate_typed_with_ui(arena, box_tree, inputs, cache).map(|output| output.signals)
-}
-
-/// Propagates input signals and grouped UI through one evaluated box expression.
-///
-/// Compatibility adapter for callers that still hold a raw [`BoxId`] but want
-/// the explicit grouped UI artifact owned after propagation.
-pub fn propagate_with_ui(
-    arena: &mut TreeArena,
-    box_tree: BoxId,
-    inputs: &[SigId],
-    cache: &mut ArityCache,
-) -> Result<PropagateOutput, PropagateError> {
-    let flat = try_build_flat_box(arena, box_tree)?;
-    propagate_typed_with_ui(arena, flat, inputs, cache)
-}
-
-/// Propagates input signals through one evaluated box expression (memoized arity).
-///
-/// Compatibility wrapper for callers that still hold a raw [`BoxId`]. New
-/// post-`eval/a2sb` callers should prefer [`propagate_typed`].
-pub fn propagate(
-    arena: &mut TreeArena,
-    box_tree: BoxId,
-    inputs: &[SigId],
-    cache: &mut ArityCache,
-) -> Result<Vec<SigId>, PropagateError> {
-    let flat = try_build_flat_box(arena, box_tree)?;
-    propagate_typed(arena, flat, inputs, cache)
 }
 
 /// Internal grouped-UI collector used while traversing a validated flat box.
@@ -2150,7 +2094,8 @@ fn propagate_inner(
                 unreachable!("flat inputs node must decode to BoxMatch::Inputs")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
-            let arity = box_arity(arena, expr, ctx.cache)?;
+            let flat_expr = try_build_flat_box(arena, expr)?;
+            let arity = box_arity_typed(arena, flat_expr, ctx.cache)?;
             let value = i32_from_usize(arity.inputs, "inputs")?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.int(value)])
@@ -2160,7 +2105,8 @@ fn propagate_inner(
                 unreachable!("flat outputs node must decode to BoxMatch::Outputs")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
-            let arity = box_arity(arena, expr, ctx.cache)?;
+            let flat_expr = try_build_flat_box(arena, expr)?;
+            let arity = box_arity_typed(arena, flat_expr, ctx.cache)?;
             let value = i32_from_usize(arity.outputs, "outputs")?;
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.int(value)])

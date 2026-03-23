@@ -733,23 +733,6 @@ fn parse_real<R: FbcReal>(token: Option<&str>) -> Result<R, FbcSerialError> {
     }
 }
 
-/// Parses a quoted string token from a line.
-///
-/// # Source provenance (C++)
-/// - `parseStringToken()` in `interpreter_dsp_aux.hh`.
-///
-/// The token is expected to be a double-quoted string. Returns the content
-/// without quotes.
-#[allow(dead_code)]
-fn parse_string_token(s: &str) -> String {
-    // Find the content between double quotes.
-    if let Some(start) = s.find('"')
-        && let Some(end) = s[start + 1..].find('"')
-    {
-        return s[start + 1..start + 1 + end].to_string();
-    }
-    s.to_string()
-}
 
 /// Reads a meta block: `block_size N` followed by N meta instructions.
 ///

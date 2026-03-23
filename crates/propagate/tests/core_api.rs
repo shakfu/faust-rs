@@ -7,9 +7,9 @@
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::{IntoDiagnostic, Severity, Stage, codes};
 use propagate::{
-    ArityCache, FlatBoxBuildError, PropagateError, PropagateUiOptions, box_arity, box_arity_typed,
-    make_sig_input_list, propagate, propagate_typed, propagate_typed_with_ui,
-    propagate_typed_with_ui_options, propagate_with_ui, try_build_flat_box,
+    ArityCache, FlatBoxBuildError, PropagateError, PropagateUiOptions, box_arity_typed,
+    make_sig_input_list, propagate_typed, propagate_typed_with_ui,
+    propagate_typed_with_ui_options, try_build_flat_box,
 };
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
 use tlib::{NodeKind, TreeArena, TreeId};
@@ -37,8 +37,9 @@ fn propagate_add_maps_to_signal_binop() {
     let mut arena = TreeArena::new();
     let add = BoxBuilder::new(&mut arena).add();
     let inputs = make_sig_input_list(&mut arena, 2);
-    let out =
-        propagate(&mut arena, add, &inputs, &mut ArityCache::new()).expect("add should propagate");
+    let flat_add = try_build_flat_box(&arena, add).unwrap();
+    let out = propagate_typed(&mut arena, flat_add, &inputs, &mut ArityCache::new())
+        .expect("add should propagate");
     assert_eq!(out.len(), 1);
     assert_eq!(
         match_sig(&arena, out[0]),
@@ -58,12 +59,13 @@ fn propagate_seq_par_and_split_composition() {
         let split = bb.split(wire, add);
         (seq, split)
     };
-    let arity_seq = box_arity(&arena, seq, &mut ArityCache::new()).expect("seq arity should infer");
+    let arity_seq = box_arity_typed(&arena, try_build_flat_box(&arena, seq).unwrap(), &mut ArityCache::new()).expect("seq arity should infer");
     assert_eq!(arity_seq.inputs, 2);
     assert_eq!(arity_seq.outputs, 1);
 
     let seq_inputs = make_sig_input_list(&mut arena, 2);
-    let seq_out = propagate(&mut arena, seq, &seq_inputs, &mut ArityCache::new())
+    let flat_seq = try_build_flat_box(&arena, seq).unwrap();
+    let seq_out = propagate_typed(&mut arena, flat_seq, &seq_inputs, &mut ArityCache::new())
         .expect("seq should propagate");
     assert_eq!(
         match_sig(&arena, seq_out[0]),
@@ -71,7 +73,8 @@ fn propagate_seq_par_and_split_composition() {
     );
 
     let split_inputs = make_sig_input_list(&mut arena, 1);
-    let split_out = propagate(&mut arena, split, &split_inputs, &mut ArityCache::new())
+    let flat_split = try_build_flat_box(&arena, split).unwrap();
+    let split_out = propagate_typed(&mut arena, flat_split, &split_inputs, &mut ArityCache::new())
         .expect("split should propagate");
     assert_eq!(
         match_sig(&arena, split_out[0]),
@@ -92,7 +95,8 @@ fn propagate_merge_mixes_buses_before_right_box() {
     };
     let inputs = make_sig_input_list(&mut arena, 4);
 
-    let out = propagate(&mut arena, merge, &inputs, &mut ArityCache::new())
+    let flat_merge = try_build_flat_box(&arena, merge).unwrap();
+    let out = propagate_typed(&mut arena, flat_merge, &inputs, &mut ArityCache::new())
         .expect("merge should propagate");
     assert_eq!(out.len(), 1);
 
@@ -119,7 +123,8 @@ fn propagate_reports_arity_mismatch_and_supports_rec() {
         bb.seq(wire, add)
     };
     let sig0 = SigBuilder::new(&mut arena).input(0);
-    let err = propagate(&mut arena, bad_seq, &[sig0], &mut ArityCache::new())
+    let flat_bad_seq = try_build_flat_box(&arena, bad_seq).unwrap();
+    let err = propagate_typed(&mut arena, flat_bad_seq, &[sig0], &mut ArityCache::new())
         .expect_err("bad seq must fail");
     assert!(matches!(err, PropagateError::SeqArityMismatch { .. }));
 
@@ -128,12 +133,13 @@ fn propagate_reports_arity_mismatch_and_supports_rec() {
         let wire = bb.wire();
         bb.rec(wire, wire)
     };
-    let rec_arity = box_arity(&arena, rec, &mut ArityCache::new()).expect("rec arity should infer");
+    let rec_arity = box_arity_typed(&arena, try_build_flat_box(&arena, rec).unwrap(), &mut ArityCache::new()).expect("rec arity should infer");
     assert_eq!(rec_arity.inputs, 0);
     assert_eq!(rec_arity.outputs, 1);
 
-    let rec_out =
-        propagate(&mut arena, rec, &[], &mut ArityCache::new()).expect("rec should propagate");
+    let flat_rec = try_build_flat_box(&arena, rec).unwrap();
+    let rec_out = propagate_typed(&mut arena, flat_rec, &[], &mut ArityCache::new())
+        .expect("rec should propagate");
     assert_eq!(rec_out.len(), 1);
     let SigMatch::Proj(0, group) = match_sig(&arena, rec_out[0]) else {
         panic!("rec output should be proj(0, group)");
@@ -151,7 +157,8 @@ fn propagate_rec_plus_tilde_wire_shape_is_stable() {
         bb.rec(add, wire)
     };
     let inputs = make_sig_input_list(&mut arena, 1);
-    let out = propagate(&mut arena, rec, &inputs, &mut ArityCache::new())
+    let flat_rec = try_build_flat_box(&arena, rec).unwrap();
+    let out = propagate_typed(&mut arena, flat_rec, &inputs, &mut ArityCache::new())
         .expect("rec +~_ should propagate");
     assert_eq!(out.len(), 1);
 
@@ -187,7 +194,8 @@ fn propagate_rec_keeps_closed_branches_outside_projection() {
         bb.rec(left, right)
     };
     let inputs = make_sig_input_list(&mut arena, 1);
-    let out = propagate(&mut arena, rec, &inputs, &mut ArityCache::new())
+    let flat_rec = try_build_flat_box(&arena, rec).unwrap();
+    let out = propagate_typed(&mut arena, flat_rec, &inputs, &mut ArityCache::new())
         .expect("mixed rec should propagate");
     assert_eq!(out.len(), 2);
     assert_eq!(match_sig(&arena, out[0]), SigMatch::Int(7));
@@ -207,9 +215,11 @@ fn inputs_outputs_boxes_lower_to_signal_ints() {
         (inputs_box, outputs_box)
     };
 
-    let iout = propagate(&mut arena, inputs_box, &[], &mut ArityCache::new())
+    let flat_inputs_box = try_build_flat_box(&arena, inputs_box).unwrap();
+    let iout = propagate_typed(&mut arena, flat_inputs_box, &[], &mut ArityCache::new())
         .expect("inputs(...) should propagate");
-    let oout = propagate(&mut arena, outputs_box, &[], &mut ArityCache::new())
+    let flat_outputs_box = try_build_flat_box(&arena, outputs_box).unwrap();
+    let oout = propagate_typed(&mut arena, flat_outputs_box, &[], &mut ArityCache::new())
         .expect("outputs(...) should propagate");
 
     assert_eq!(match_sig(&arena, iout[0]), SigMatch::Int(3));
@@ -233,12 +243,13 @@ fn waveform_box_lowers_to_size_and_waveform_signal() {
         bb.waveform(&[v0, v1, v2])
     };
 
-    let arity =
-        box_arity(&arena, waveform, &mut ArityCache::new()).expect("waveform arity should infer");
+    let flat_waveform = try_build_flat_box(&arena, waveform).unwrap();
+    let arity = box_arity_typed(&arena, flat_waveform, &mut ArityCache::new())
+        .expect("waveform arity should infer");
     assert_eq!(arity.inputs, 0);
     assert_eq!(arity.outputs, 2);
 
-    let out = propagate(&mut arena, waveform, &[], &mut ArityCache::new())
+    let out = propagate_typed(&mut arena, flat_waveform, &[], &mut ArityCache::new())
         .expect("waveform should propagate");
     assert_eq!(out.len(), 2);
     assert_eq!(match_sig(&arena, out[0]), SigMatch::Int(3));
@@ -289,7 +300,8 @@ fn propagate_with_ui_collects_nested_groups_and_control_specs() {
         bb.vgroup(label_main, grouped)
     };
 
-    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
         .expect("grouped slider should propagate with UI");
 
     assert_eq!(out.signals.len(), 1);
@@ -330,7 +342,8 @@ fn propagate_with_ui_extracts_group_and_widget_label_metadata() {
         bb.vgroup(root_label, slider)
     };
 
-    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
         .expect("metadata-bearing grouped slider should propagate");
 
     let UiMatch::Group {
@@ -374,7 +387,8 @@ fn propagate_with_ui_synthesizes_root_group_for_multiple_ui_roots() {
         bb.par(left, right)
     };
 
-    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
         .expect("multiple grouped UI roots should propagate");
 
     assert_eq!(out.ui.root_origin, UiRootOrigin::Synthesized);
@@ -454,7 +468,8 @@ fn propagate_with_ui_keeps_deterministic_control_order_across_mixed_nested_contr
         let content = bb.par(row, tabs);
         bb.vgroup(root_label, content)
     };
-    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
         .expect("mixed grouped UI should propagate");
 
     let root_children = expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Vertical, "root");
@@ -498,7 +513,8 @@ fn propagate_with_ui_collects_soundfile_control_spec() {
     };
     let inputs = make_sig_input_list(&mut arena, 2);
 
-    let out = propagate_with_ui(&mut arena, process, &inputs, &mut ArityCache::new())
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let out = propagate_typed_with_ui(&mut arena, flat_process, &inputs, &mut ArityCache::new())
         .expect("soundfile grouped UI should propagate");
 
     let root_children = expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Vertical, "files");
@@ -533,7 +549,8 @@ fn propagate_with_ui_rebases_relative_widget_path_to_parent_group() {
         bb.hgroup(foo, inner)
     };
 
-    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
         .expect("relative widget path should propagate");
 
     let root_children = expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Horizontal, "Foo");
@@ -559,7 +576,8 @@ fn propagate_with_ui_lowers_typed_widget_path_into_canonical_group() {
         bb.hslider(freq, init, min, max, step)
     };
 
-    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
         .expect("typed widget path should propagate");
 
     let root_children =
@@ -590,7 +608,8 @@ fn propagate_with_ui_extracts_metadata_after_relative_widget_rebase() {
         bb.hgroup(foo, inner)
     };
 
-    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
         .expect("relative widget path with metadata should propagate");
 
     let root_children = expect_ui_group(&out.ui, out.ui.root, UiGroupKind::Horizontal, "Foo");
@@ -623,7 +642,8 @@ fn propagate_with_ui_rebases_explicit_group_label_to_parent() {
         bb.hgroup(foo, rebased)
     };
 
-    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
         .expect("relative group label should propagate");
 
     assert_eq!(out.ui.root_origin, UiRootOrigin::Synthesized);
@@ -656,7 +676,8 @@ fn propagate_with_ui_clamps_relative_group_label_navigation_at_root() {
         bb.hgroup(foo, rebased)
     };
 
-    let out = propagate_with_ui(&mut arena, process, &[], &mut ArityCache::new())
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
         .expect("clamped relative group label should propagate");
 
     assert_eq!(out.ui.root_origin, UiRootOrigin::Synthesized);
@@ -682,7 +703,8 @@ fn soundfile_box_lowers_to_length_rate_and_channel_buffers() {
     };
     let inputs = make_sig_input_list(&mut arena, 2);
 
-    let out = propagate(&mut arena, soundfile, &inputs, &mut ArityCache::new())
+    let flat_soundfile = try_build_flat_box(&arena, soundfile).unwrap();
+    let out = propagate_typed(&mut arena, flat_soundfile, &inputs, &mut ArityCache::new())
         .expect("soundfile should propagate");
     assert_eq!(out.len(), 4);
 
@@ -734,15 +756,16 @@ fn clocked_wrapper_boxes_port_trivial_and_structural_cases() {
     let x = SigBuilder::new(&mut arena).input(7);
     let h = SigBuilder::new(&mut arena).input(3);
 
-    let od_zero = propagate(&mut arena, ondemand, &[zero, x], &mut ArityCache::new())
+    let flat_ondemand = try_build_flat_box(&arena, ondemand).unwrap();
+    let od_zero = propagate_typed(&mut arena, flat_ondemand, &[zero, x], &mut ArityCache::new())
         .expect("ondemand zero clock should propagate");
     assert_eq!(od_zero, vec![zero]);
 
-    let od_one = propagate(&mut arena, ondemand, &[one, x], &mut ArityCache::new())
+    let od_one = propagate_typed(&mut arena, flat_ondemand, &[one, x], &mut ArityCache::new())
         .expect("ondemand one clock should bypass wrapper");
     assert_eq!(od_one, vec![x]);
 
-    let od = propagate(&mut arena, ondemand, &[h, x], &mut ArityCache::new())
+    let od = propagate_typed(&mut arena, flat_ondemand, &[h, x], &mut ArityCache::new())
         .expect("ondemand dynamic clock should propagate");
     let SigMatch::Seq(od_wrapper, od_payload) = match_sig(&arena, od[0]) else {
         panic!("ondemand output should be seq(wrapper, payload)");
@@ -756,7 +779,8 @@ fn clocked_wrapper_boxes_port_trivial_and_structural_cases() {
         SigMatch::PermVar(_)
     ));
 
-    let us = propagate(&mut arena, upsampling, &[h, x], &mut ArityCache::new())
+    let flat_upsampling = try_build_flat_box(&arena, upsampling).unwrap();
+    let us = propagate_typed(&mut arena, flat_upsampling, &[h, x], &mut ArityCache::new())
         .expect("upsampling dynamic clock should propagate");
     let SigMatch::Seq(us_wrapper, us_payload) = match_sig(&arena, us[0]) else {
         panic!("upsampling output should be seq(wrapper, payload)");
@@ -770,7 +794,8 @@ fn clocked_wrapper_boxes_port_trivial_and_structural_cases() {
         SigMatch::PermVar(_)
     ));
 
-    let ds = propagate(&mut arena, downsampling, &[h, x], &mut ArityCache::new())
+    let flat_downsampling = try_build_flat_box(&arena, downsampling).unwrap();
+    let ds = propagate_typed(&mut arena, flat_downsampling, &[h, x], &mut ArityCache::new())
         .expect("downsampling dynamic clock should propagate");
     let SigMatch::Seq(ds_wrapper, ds_payload) = match_sig(&arena, ds[0]) else {
         panic!("downsampling output should be seq(wrapper, payload)");
@@ -802,11 +827,13 @@ fn route_box_propagates_by_mixing_selected_inputs() {
     };
     let inputs = make_sig_input_list(&mut arena, 2);
 
-    let arity = box_arity(&arena, route, &mut ArityCache::new()).expect("route arity should infer");
+    let flat_route = try_build_flat_box(&arena, route).unwrap();
+    let arity = box_arity_typed(&arena, flat_route, &mut ArityCache::new())
+        .expect("route arity should infer");
     assert_eq!(arity.inputs, 2);
     assert_eq!(arity.outputs, 2);
 
-    let out = propagate(&mut arena, route, &inputs, &mut ArityCache::new())
+    let out = propagate_typed(&mut arena, flat_route, &inputs, &mut ArityCache::new())
         .expect("route should propagate");
     assert_eq!(out.len(), 2);
     let SigMatch::BinOp(BinOp::Add, lhs, rhs) = match_sig(&arena, out[0]) else {
@@ -841,7 +868,8 @@ fn route_box_ignores_out_of_range_endpoints_like_cpp() {
     };
     let inputs = make_sig_input_list(&mut arena, 2);
 
-    let out = propagate(&mut arena, route, &inputs, &mut ArityCache::new())
+    let flat_route = try_build_flat_box(&arena, route).unwrap();
+    let out = propagate_typed(&mut arena, flat_route, &inputs, &mut ArityCache::new())
         .expect("route should propagate");
     assert_eq!(out.len(), 2);
     assert_eq!(match_sig(&arena, out[0]), SigMatch::Int(0));
@@ -870,12 +898,13 @@ fn ffun_box_arity_and_propagation_follow_signature() {
     };
     let inputs = make_sig_input_list(&mut arena, 1);
 
-    let arity =
-        box_arity(&arena, wrapped, &mut ArityCache::new()).expect("ffun arity should infer");
+    let flat_wrapped = try_build_flat_box(&arena, wrapped).unwrap();
+    let arity = box_arity_typed(&arena, flat_wrapped, &mut ArityCache::new())
+        .expect("ffun arity should infer");
     assert_eq!(arity.inputs, 1);
     assert_eq!(arity.outputs, 1);
 
-    let out = propagate(&mut arena, wrapped, &inputs, &mut ArityCache::new())
+    let out = propagate_typed(&mut arena, flat_wrapped, &inputs, &mut ArityCache::new())
         .expect("ffun should propagate");
     assert_eq!(out.len(), 1);
     let SigMatch::FFun(sig_ff, largs) = match_sig(&arena, out[0]) else {
@@ -1049,7 +1078,9 @@ fn box_arity_typed_uses_validated_flat_boundary() {
     assert_eq!(arity.inputs, 2);
     assert_eq!(arity.outputs, 1);
 
-    let err = box_arity(&arena, bad_case, &mut ArityCache::new())
+    let err = try_build_flat_box(&arena, bad_case)
+        .map_err(PropagateError::from)
+        .and_then(|f| box_arity_typed(&arena, f, &mut ArityCache::new()))
         .expect_err("case should be rejected before arity inference");
     assert_eq!(
         err,
@@ -1061,7 +1092,7 @@ fn box_arity_typed_uses_validated_flat_boundary() {
 }
 
 #[test]
-fn propagate_typed_uses_flat_boundary_and_matches_wrapper() {
+fn propagate_typed_enforces_flat_boundary() {
     let mut arena = TreeArena::new();
     let (seq, bad_case) = {
         let mut bb = BoxBuilder::new(&mut arena);
@@ -1084,12 +1115,11 @@ fn propagate_typed_uses_flat_boundary_and_matches_wrapper() {
         .expect("typed propagation should succeed");
     let typed_with_ui = propagate_typed_with_ui(&mut arena, flat, &inputs, &mut ArityCache::new())
         .expect("typed propagation with UI should succeed");
-    let raw_out = propagate(&mut arena, seq, &inputs, &mut ArityCache::new())
-        .expect("wrapper should succeed");
-    assert_eq!(typed_out, raw_out);
-    assert_eq!(typed_with_ui.signals, raw_out);
+    assert_eq!(typed_with_ui.signals, typed_out);
 
-    let err = propagate(&mut arena, bad_case, &[], &mut ArityCache::new())
+    let err = try_build_flat_box(&arena, bad_case)
+        .map_err(PropagateError::from)
+        .and_then(|f| propagate_typed(&mut arena, f, &[], &mut ArityCache::new()))
         .expect_err("case should be rejected before propagation");
     assert_eq!(
         err,
@@ -1109,12 +1139,15 @@ fn propagate_pow_min_max_map_to_signal_nodes() {
     };
     let inputs = make_sig_input_list(&mut arena, 2);
 
-    let pow_out =
-        propagate(&mut arena, pow, &inputs, &mut ArityCache::new()).expect("pow should propagate");
-    let min_out =
-        propagate(&mut arena, min, &inputs, &mut ArityCache::new()).expect("min should propagate");
-    let max_out =
-        propagate(&mut arena, max, &inputs, &mut ArityCache::new()).expect("max should propagate");
+    let flat_pow = try_build_flat_box(&arena, pow).unwrap();
+    let pow_out = propagate_typed(&mut arena, flat_pow, &inputs, &mut ArityCache::new())
+        .expect("pow should propagate");
+    let flat_min = try_build_flat_box(&arena, min).unwrap();
+    let min_out = propagate_typed(&mut arena, flat_min, &inputs, &mut ArityCache::new())
+        .expect("min should propagate");
+    let flat_max = try_build_flat_box(&arena, max).unwrap();
+    let max_out = propagate_typed(&mut arena, flat_max, &inputs, &mut ArityCache::new())
+        .expect("max should propagate");
 
     assert_eq!(
         match_sig(&arena, pow_out[0]),
@@ -1145,31 +1178,29 @@ fn slot_and_symbolic_boxes_propagate_like_cpp_placeholders() {
         (slot7, passthrough, pair)
     };
 
-    let slot_arity =
-        box_arity(&arena, slot7, &mut ArityCache::new()).expect("slot arity should infer");
+    let flat_slot7 = try_build_flat_box(&arena, slot7).unwrap();
+    let slot_arity = box_arity_typed(&arena, flat_slot7, &mut ArityCache::new())
+        .expect("slot arity should infer");
     assert_eq!(slot_arity.inputs, 0);
     assert_eq!(slot_arity.outputs, 1);
 
-    let fallback = propagate(&mut arena, slot7, &[], &mut ArityCache::new())
+    let fallback = propagate_typed(&mut arena, flat_slot7, &[], &mut ArityCache::new())
         .expect("raw slot should lower to deterministic dummy input");
     assert_eq!(match_sig(&arena, fallback[0]), SigMatch::Input(7));
 
     let inputs = make_sig_input_list(&mut arena, 2);
-    let passthrough_out = propagate(
-        &mut arena,
-        passthrough,
-        &inputs[..1],
-        &mut ArityCache::new(),
-    )
-    .expect("symbolic(slot, slot) should forward its bound input");
+    let flat_passthrough = try_build_flat_box(&arena, passthrough).unwrap();
+    let passthrough_out = propagate_typed(&mut arena, flat_passthrough, &inputs[..1], &mut ArityCache::new())
+        .expect("symbolic(slot, slot) should forward its bound input");
     assert_eq!(passthrough_out, vec![inputs[0]]);
 
-    let pair_arity = box_arity(&arena, pair, &mut ArityCache::new())
+    let flat_pair = try_build_flat_box(&arena, pair).unwrap();
+    let pair_arity = box_arity_typed(&arena, flat_pair, &mut ArityCache::new())
         .expect("nested symbolic arity should infer");
     assert_eq!(pair_arity.inputs, 2);
     assert_eq!(pair_arity.outputs, 2);
 
-    let pair_out = propagate(&mut arena, pair, &inputs, &mut ArityCache::new())
+    let pair_out = propagate_typed(&mut arena, flat_pair, &inputs, &mut ArityCache::new())
         .expect("nested symbolic should preserve remaining inputs");
     assert_eq!(pair_out, inputs);
 }
@@ -1222,41 +1253,48 @@ fn propagate_extended_math_primitives_map_to_signal_nodes() {
     let uinputs = make_sig_input_list(&mut arena, 1);
     let binputs = make_sig_input_list(&mut arena, 2);
 
-    let acos_sig = propagate(&mut arena, acos, &uinputs, &mut ArityCache::new())
+    let [flat_acos, flat_asin, flat_atan, flat_atan2, flat_cos, flat_sin, flat_tan, flat_exp,
+         flat_log, flat_log10, flat_sqrt, flat_abs, flat_fmod, flat_remainder, flat_floor,
+         flat_ceil, flat_rint, flat_round] =
+        [acos, asin, atan, atan2, cos, sin, tan, exp, log, log10, sqrt, abs, fmod, remainder,
+         floor, ceil, rint, round]
+            .map(|id| try_build_flat_box(&arena, id).unwrap());
+
+    let acos_sig = propagate_typed(&mut arena, flat_acos, &uinputs, &mut ArityCache::new())
         .expect("acos should propagate")[0];
-    let asin_sig = propagate(&mut arena, asin, &uinputs, &mut ArityCache::new())
+    let asin_sig = propagate_typed(&mut arena, flat_asin, &uinputs, &mut ArityCache::new())
         .expect("asin should propagate")[0];
-    let atan_sig = propagate(&mut arena, atan, &uinputs, &mut ArityCache::new())
+    let atan_sig = propagate_typed(&mut arena, flat_atan, &uinputs, &mut ArityCache::new())
         .expect("atan should propagate")[0];
-    let atan2_sig = propagate(&mut arena, atan2, &binputs, &mut ArityCache::new())
+    let atan2_sig = propagate_typed(&mut arena, flat_atan2, &binputs, &mut ArityCache::new())
         .expect("atan2 should propagate")[0];
-    let cos_sig = propagate(&mut arena, cos, &uinputs, &mut ArityCache::new())
+    let cos_sig = propagate_typed(&mut arena, flat_cos, &uinputs, &mut ArityCache::new())
         .expect("cos should propagate")[0];
-    let sin_sig = propagate(&mut arena, sin, &uinputs, &mut ArityCache::new())
+    let sin_sig = propagate_typed(&mut arena, flat_sin, &uinputs, &mut ArityCache::new())
         .expect("sin should propagate")[0];
-    let tan_sig = propagate(&mut arena, tan, &uinputs, &mut ArityCache::new())
+    let tan_sig = propagate_typed(&mut arena, flat_tan, &uinputs, &mut ArityCache::new())
         .expect("tan should propagate")[0];
-    let exp_sig = propagate(&mut arena, exp, &uinputs, &mut ArityCache::new())
+    let exp_sig = propagate_typed(&mut arena, flat_exp, &uinputs, &mut ArityCache::new())
         .expect("exp should propagate")[0];
-    let log_sig = propagate(&mut arena, log, &uinputs, &mut ArityCache::new())
+    let log_sig = propagate_typed(&mut arena, flat_log, &uinputs, &mut ArityCache::new())
         .expect("log should propagate")[0];
-    let log10_sig = propagate(&mut arena, log10, &uinputs, &mut ArityCache::new())
+    let log10_sig = propagate_typed(&mut arena, flat_log10, &uinputs, &mut ArityCache::new())
         .expect("log10 should propagate")[0];
-    let sqrt_sig = propagate(&mut arena, sqrt, &uinputs, &mut ArityCache::new())
+    let sqrt_sig = propagate_typed(&mut arena, flat_sqrt, &uinputs, &mut ArityCache::new())
         .expect("sqrt should propagate")[0];
-    let abs_sig = propagate(&mut arena, abs, &uinputs, &mut ArityCache::new())
+    let abs_sig = propagate_typed(&mut arena, flat_abs, &uinputs, &mut ArityCache::new())
         .expect("abs should propagate")[0];
-    let fmod_sig = propagate(&mut arena, fmod, &binputs, &mut ArityCache::new())
+    let fmod_sig = propagate_typed(&mut arena, flat_fmod, &binputs, &mut ArityCache::new())
         .expect("fmod should propagate")[0];
-    let remainder_sig = propagate(&mut arena, remainder, &binputs, &mut ArityCache::new())
+    let remainder_sig = propagate_typed(&mut arena, flat_remainder, &binputs, &mut ArityCache::new())
         .expect("remainder should propagate")[0];
-    let floor_sig = propagate(&mut arena, floor, &uinputs, &mut ArityCache::new())
+    let floor_sig = propagate_typed(&mut arena, flat_floor, &uinputs, &mut ArityCache::new())
         .expect("floor should propagate")[0];
-    let ceil_sig = propagate(&mut arena, ceil, &uinputs, &mut ArityCache::new())
+    let ceil_sig = propagate_typed(&mut arena, flat_ceil, &uinputs, &mut ArityCache::new())
         .expect("ceil should propagate")[0];
-    let rint_sig = propagate(&mut arena, rint, &uinputs, &mut ArityCache::new())
+    let rint_sig = propagate_typed(&mut arena, flat_rint, &uinputs, &mut ArityCache::new())
         .expect("rint should propagate")[0];
-    let round_sig = propagate(&mut arena, round, &uinputs, &mut ArityCache::new())
+    let round_sig = propagate_typed(&mut arena, flat_round, &uinputs, &mut ArityCache::new())
         .expect("round should propagate")[0];
 
     assert_eq!(match_sig(&arena, acos_sig), SigMatch::Acos(uinputs[0]));

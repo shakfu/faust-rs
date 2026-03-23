@@ -5121,7 +5121,7 @@ fn infer_box_arity_for_apply(
 /// Infers `(inputs, outputs)` for the evaluator-supported first-order box subset.
 ///
 /// This lightweight arity oracle is intentionally narrower than the dedicated
-/// `propagate::box_arity(...)` contract. It exists for local evaluator tasks
+/// `propagate::box_arity_typed(...)` contract. It exists for local evaluator tasks
 /// such as under-application handling and label-placeholder constant checks
 /// where pulling the full propagate error surface would be unnecessarily heavy.
 fn infer_box_arity(arena: &TreeArena, id: TreeId) -> Option<(usize, usize)> {

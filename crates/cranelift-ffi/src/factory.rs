@@ -845,11 +845,6 @@ fn fir_module_num_outputs(store: &fir::FirStore, module: fir::FirId) -> Result<u
     }
 }
 
-/// Escapes one field in the legacy textual bitcode container.
-fn esc_bitcode_field(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\n', "\\n")
-}
-
 /// Unescapes one field in the legacy textual bitcode container.
 fn unesc_bitcode_field(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -872,38 +867,6 @@ fn unesc_bitcode_field(s: &str) -> String {
     out
 }
 
-/// Legacy source-backed bitcode serializer (pre-`.clif` format).
-///
-/// Kept temporarily for migration tests while read-side format support is
-/// completed. New writes use `FAUST_CLIF_V1` via [`encode_factory_clif`].
-#[allow(dead_code)]
-fn encode_legacy_source_backed_bitcode(factory: &CraneliftDspFactory) -> Result<String, String> {
-    if !factory.source_is_faust {
-        return Err(
-            "bitcode write is currently supported only for source-backed factories".to_owned(),
-        );
-    }
-    let mut out = String::from("CRANELIFT_FFI_V2_SOURCE\n");
-    out.push_str(&format!(
-        "name={}\n",
-        esc_bitcode_field(&factory.source_name)
-    ));
-    out.push_str(&format!("sha={}\n", esc_bitcode_field(&factory.sha_key)));
-    out.push_str(&format!(
-        "compile_options={}\n",
-        esc_bitcode_field(&factory.compile_options)
-    ));
-    out.push_str(&format!("opt_level={}\n", factory.opt_level));
-    out.push_str(&format!("argc={}\n", factory.compile_argv.len()));
-    for (idx, arg) in factory.compile_argv.iter().enumerate() {
-        out.push_str(&format!("arg{idx}={}\n", esc_bitcode_field(arg)));
-    }
-    out.push_str(&format!(
-        "source={}\n",
-        esc_bitcode_field(&factory.dsp_code)
-    ));
-    Ok(out)
-}
 
 /// Decodes a Cranelift source-backed bitcode payload and rebuilds a runnable
 /// JIT factory.
