@@ -1,11 +1,20 @@
-//! Differential tracker for the current parser/import/loading parity gap.
+//! Parity test: `dx7_tests.dsp` / `operator_test` — formerly a known gap, now closed.
 //!
-//! This test is intentionally about a known divergence, not a closed parity
-//! case. It records the external reproducer that motivated the exact
-//! `formatDefinitions(...)` / loaded-source parity plan.
+//! Previously the Rust compiler failed on `operator_test` from `dx7_tests.dsp`
+//! with "undefined symbol `ba`".  Both `stdfaust.lib` and `demos.lib` define
+//! `ba = library("basics.lib")` (and 18 other library aliases).  The parser
+//! grouped these as pattern-match variants with arity 0 and errored.
+//!
+//! The gap was closed by the zero-arity last-import-wins fix (commit c5ffe67):
+//! duplicate zero-arity definitions are now silently resolved to the latest
+//! import, matching C++ behaviour.
+//!
+//! This test guards against regression of that fix.  It requires a large stack
+//! because `dx7_tests.dsp` drives deep evaluation.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
 
 use compiler::Compiler;
 
@@ -58,28 +67,43 @@ fn cpp_accepts_file(cpp_bin: &Path, input: &Path, import_root: &Path) -> Result<
     }
 }
 
+fn run_with_large_stack<T>(f: impl FnOnce() -> T + Send + 'static) -> T
+where
+    T: Send + 'static,
+{
+    thread::Builder::new()
+        .name("dx7-import-parity".to_owned())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn dx7 worker thread")
+        .join()
+        .expect("dx7 worker thread should not panic")
+}
+
+/// Rust now accepts `operator_test` from `dx7_tests.dsp`, matching C++.
+///
+/// Guards against regression of the zero-arity last-import-wins fix.
 #[test]
-fn operator_test_is_still_the_known_cpp_only_import_loading_reproducer() {
+fn operator_test_import_loading_parity_is_closed() {
     let Some(root) = faustlibraries_root() else {
-        eprintln!("Skipping import/loading differential: faustlibraries root unavailable");
+        eprintln!("Skipping import/loading parity: faustlibraries root unavailable");
         return;
     };
     let Some(cpp) = cpp_bin() else {
-        eprintln!("Skipping import/loading differential: Faust C++ binary unavailable");
+        eprintln!("Skipping import/loading parity: Faust C++ binary unavailable");
         return;
     };
 
     let dsp = root.join("tests").join("dx7_tests.dsp");
     cpp_accepts_file(&cpp, &dsp, &root)
-        .unwrap_or_else(|e| panic!("Faust C++ should still accept operator_test: {e}"));
+        .unwrap_or_else(|e| panic!("Faust C++ should accept operator_test: {e}"));
 
-    let err = Compiler::new()
-        .with_process_name("operator_test")
-        .compile_file_default_to_signals(&dsp)
-        .expect_err("Rust should still expose the known import/loading gap on operator_test");
-    let rendered = err.to_string();
-    assert!(
-        rendered.contains("undefined symbol `ba`"),
-        "gap tracker should still point at the loaded-source alias failure, got: {rendered}"
-    );
+    run_with_large_stack(move || {
+        Compiler::new()
+            .with_process_name("operator_test")
+            .compile_file_default_to_signals(&dsp)
+            .unwrap_or_else(|e| {
+                panic!("Rust should now match C++ and accept operator_test: {e}")
+            });
+    });
 }

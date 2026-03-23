@@ -2952,6 +2952,7 @@ fn define_static_tables_in_jit(
 /// Historically this helper started as pure stub emission during bring-up; it
 /// now owns both real subset lowering and stub fallback while keeping the same
 /// outer responsibility (emit/finalize `compute`).
+#[allow(clippy::too_many_arguments)]
 fn declare_compute_stub(
     module_name: &str,
     compute_decl: FirId,
