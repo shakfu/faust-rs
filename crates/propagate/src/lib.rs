@@ -1,9 +1,9 @@
 //! Box-to-signal propagation (Phase 4, section 2.4).
 //!
 //! # Source provenance (C++)
-//! - `/Users/letz/Developpements/RUST/faust/compiler/propagate/propagate.hh`
-//! - `/Users/letz/Developpements/RUST/faust/compiler/propagate/propagate.cpp`
-//! - `/Users/letz/Developpements/RUST/faust/compiler/boxes/boxtype.cpp`
+//! - `compiler/propagate/propagate.hh`
+//! - `compiler/propagate/propagate.cpp`
+//! - `compiler/boxes/boxtype.cpp`
 //!
 //! # Current scope
 //! - Core box arity inference for supported box families.
@@ -18,8 +18,9 @@
 //!   points for the post-`eval/a2sb` flat-box contract.
 //! - [`box_arity`] and [`propagate`] remain compatibility wrappers for callers
 //!   that still hold a raw `BoxId`.
-//! - [`PropagateOutput`] and [`propagate_typed_with_ui`] are the grouped-UI
-//!   ownership extensions introduced by the UI IR rewrite.
+//! - [`PropagateOutput`], [`propagate_typed_with_ui`], [`propagate_typed_with_ui_options`],
+//!   and [`propagate_with_ui`] are the grouped-UI ownership extensions introduced by the
+//!   UI IR rewrite.
 //! - `make_sig_input_list(...)` mirrors C++ `makeSigInputList(...)`.
 //! - `FlatBoxId` / [`try_build_flat_box`] are an adapted Rust boundary: they make the
 //!   C++ post-`evalprocess -> a2sb -> propagate` flat-box contract explicit while
@@ -66,7 +67,6 @@ pub fn crate_id() -> &'static str {
 
 /// Input/output arity of one box expression.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Input/output arity summary for one box expression.
 pub struct BoxArity {
     /// Number of required input signals.
     pub inputs: usize,
@@ -160,6 +160,7 @@ impl PropagateUiOptions {
 pub struct FlatBoxId(TreeId);
 
 impl FlatBoxId {
+    /// Returns the underlying [`TreeId`] for callers that need raw arena access.
     #[must_use]
     pub fn as_tree_id(self) -> TreeId {
         self.0
@@ -175,7 +176,6 @@ impl FlatBoxId {
 /// This error means the caller attempted to feed propagation a box family that
 /// is not valid after the C++ `evalprocess -> a2sb` lowering boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
-/// Errors returned while validating or decoding the flat-box subset.
 pub enum FlatBoxBuildError {
     UnexpectedPostEvalBox { node: TreeId, kind: &'static str },
 }
@@ -430,9 +430,8 @@ fn flat_box_unexpected(node: TreeId, kind: &'static str) -> FlatBoxBuildError {
     FlatBoxBuildError::UnexpectedPostEvalBox { node, kind }
 }
 
-/// Propagation/arity inference error.
+/// Errors returned by box-to-signal propagation and arity inference.
 #[derive(Clone, Debug, PartialEq, Eq)]
-/// Errors returned by box-to-signal propagation.
 pub enum PropagateError {
     UnsupportedBox {
         node: TreeId,
@@ -751,11 +750,10 @@ impl IntoDiagnostic for PropagateError {
     }
 }
 
-/// Creates `n` canonical `sigInput(i)` signals.
+/// Builds the canonical ordered list of `n` input bus signals (`sigInput(0)` … `sigInput(n-1)`).
 ///
 /// Output order is stable and follows input bus index order: `0..n-1`.
 #[must_use]
-/// Builds the canonical list of `input(i)` signals for a given input arity.
 pub fn make_sig_input_list(arena: &mut TreeArena, n: usize) -> Vec<SigId> {
     let mut b = SigBuilder::new(arena);
     let mut out = Vec::with_capacity(n);

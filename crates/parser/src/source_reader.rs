@@ -37,9 +37,8 @@ pub struct ExpandedSource {
     pub line_origins: Vec<SourceLineOrigin>,
 }
 
-/// Errors returned by [`SourceReader`].
+/// Errors returned by [`SourceReader`] during source loading and import expansion.
 #[derive(Debug)]
-/// Errors returned by the source reader/import expander.
 pub enum SourceReaderError {
     Io { path: PathBuf, message: Box<str> },
     UnresolvedImport { name: Box<str>, from: PathBuf },
@@ -64,9 +63,8 @@ impl fmt::Display for SourceReaderError {
 
 impl std::error::Error for SourceReaderError {}
 
-/// Reads Faust sources and expands `import("...");` directives recursively.
+/// File-backed source reader that expands `import("...");` directives recursively.
 #[derive(Debug, Default)]
-/// File-backed source reader with import expansion and caching.
 pub struct SourceReader {
     file_cache: HashMap<PathBuf, ExpandedSource>,
     search_paths: Vec<PathBuf>,

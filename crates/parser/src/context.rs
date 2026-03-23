@@ -86,31 +86,31 @@ impl SourceLocation {
 
 /// Diagnostic severity levels used during parsing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Diagnostic severity levels used during parsing.
 pub enum DiagnosticSeverity {
     Error,
     Warning,
     Remark,
 }
 
-/// Parser diagnostic message with optional source location.
+/// One parser diagnostic with optional source location.
 #[derive(Clone, Debug, PartialEq, Eq)]
-/// One parser diagnostic with optional location.
 pub struct ParserDiagnostic {
+    /// Severity of the diagnostic.
     pub severity: DiagnosticSeverity,
+    /// Optional stable diagnostic code for CI/tooling use.
     pub code: Option<DiagnosticCode>,
+    /// Human-readable diagnostic message.
     pub message: Box<str>,
+    /// Source location, when available.
     pub location: Option<SourceLocation>,
 }
 
-/// Parser-local context replacing the parser-relevant subset of `gGlobal`.
-///
-/// This context is intentionally per-parse and owns all mutable parser state
-/// that used to be spread across C++ globals: cursor, diagnostics, waveform
-/// accumulation, definition/use properties, metadata declarations, and
-/// documentation counters.
-#[derive(Debug)]
 /// Parser-local mutable context replacing the parser-relevant subset of `gGlobal`.
+///
+/// Intentionally per-parse; owns all mutable parser state that used to be
+/// spread across C++ globals: cursor, diagnostics, waveform accumulation,
+/// definition/use properties, metadata declarations, and documentation counters.
+#[derive(Debug)]
 pub struct ParserCtx {
     cursor: SourceLocation,
     diagnostics: Vec<ParserDiagnostic>,

@@ -69,13 +69,11 @@ use tlib::{
 };
 use ui::UiProgram;
 
-/// Reduced signal type used by the pre-FIR preparation stage.
-///
-/// This is intentionally smaller than the C++ `sigtyperules` lattice. It keeps
-/// only the distinctions required by the reduced `SignalPromotion` subset and
-/// by FIR type selection in the fast-lane.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 /// Reduced signal type domain used by the FIR-preparation pass.
+///
+/// Intentionally smaller than the C++ `sigtyperules` lattice: keeps only the
+/// distinctions required by the `SignalPromotion` subset and FIR type selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SimpleSigType {
     /// Integer-valued signal.
     Int,
@@ -85,12 +83,11 @@ pub enum SimpleSigType {
     Sound,
 }
 
-/// Prepared signal package consumed by the fast-lane FIR lowerer.
-///
-/// The package owns a private staging arena so preparation passes can rewrite
-/// the signal forest without mutating the original parse/eval arena.
-#[derive(Debug)]
 /// Result of preparing a propagated signal list for FIR lowering.
+///
+/// Owns a private staging arena so preparation passes can rewrite the signal
+/// forest without mutating the original parse/eval arena.
+#[derive(Debug)]
 pub struct PreparedSignals {
     /// Private staging arena containing the prepared signal forest.
     pub arena: TreeArena,
@@ -117,9 +114,8 @@ impl PreparedSignals {
     }
 }
 
-/// Errors returned while preparing signals for FIR lowering.
+/// Typed errors returned while preparing signals for FIR lowering.
 #[derive(Debug)]
-/// Typed failures returned by the signal-preparation pass.
 pub enum SignalPrepareError {
     /// The output forest contains malformed or open de Bruijn recursion.
     Recursion(RecursionError),

@@ -56,7 +56,7 @@ use ui::UiProgram;
 
 use crate::signal_prepare::prepare_signals_for_fir;
 
-/// Internal DSP computation precision.
+/// Internal DSP computation precision used when lowering signals to FIR.
 ///
 /// Controls the type of internal state variables, arithmetic results, math
 /// function signatures, waveform table element types, and real-constant nodes
@@ -69,8 +69,6 @@ use crate::signal_prepare::prepare_signals_for_fir;
 /// Corresponds to Faust's `-double` compilation flag and `gFLoatSize`:
 /// - `Float32` → C++ `float` (default),
 /// - `Float64` → C++ `double`.
-///
-/// Internal DSP real type used when lowering signals to FIR.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum RealType {
     /// 32-bit single-precision float (`float` in C++). Default.
@@ -91,12 +89,11 @@ impl RealType {
     }
 }
 
-/// Options for [`compile_signals_to_fir_fastlane_with_ui`].
+/// Configuration options for [`compile_signals_to_fir_fastlane_with_ui`].
 ///
-/// These options currently describe only the externally visible module contract.
+/// These options describe the externally visible module contract.
 /// Resource planning and lowering policies stay internal to the fast-lane until
 /// more slices are promoted to stable configuration.
-/// Configuration options for signal->FIR lowering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalFirOptions {
     /// FIR module name to emit.
@@ -131,13 +128,12 @@ impl Default for SignalFirOptions {
     }
 }
 
-/// Output package of the fast-lane compiler.
+/// Output bundle produced by [`compile_signals_to_fir_fastlane_with_ui`].
 ///
 /// The fast-lane returns ownership of the FIR store together with the module
 /// root so downstream backends can keep using normal `fir` builder/matcher APIs
 /// without relying on hidden global state.
 #[derive(Debug)]
-/// Output bundle produced by the signal->FIR lowering entry point.
 pub struct SignalFirOutput {
     /// FIR storage arena.
     pub store: FirStore,

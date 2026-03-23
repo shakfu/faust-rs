@@ -157,10 +157,10 @@ pub fn fopen_search(
     ))
 }
 
-/// Stream-copy configuration used by [`stream_copy_until`] and
-/// [`stream_copy_until_end`].
-#[derive(Debug, Clone)]
 /// Configuration for line-oriented stream copying and include injection.
+///
+/// Used by [`stream_copy_until`] and [`stream_copy_until_end`].
+#[derive(Debug, Clone)]
 pub struct StreamCopyConfig {
     /// Replacement target for `mydsp` occurrences (forced replacement).
     pub class_name: String,
@@ -183,9 +183,8 @@ impl Default for StreamCopyConfig {
     }
 }
 
-/// Mutable stream-copy state shared across nested include injections.
-#[derive(Debug, Default)]
 /// Mutable state accumulated while copying/wrapping one generated stream.
+#[derive(Debug, Default)]
 pub struct StreamCopyState {
     /// Tracks architecture includes already injected.
     pub already_included: HashSet<String>,
@@ -304,10 +303,10 @@ pub fn stream_copy_until_end<R: BufRead, W: Write>(
     )
 }
 
-/// Top-level options used to wrap generated C++ class text with an
-/// architecture template.
-#[derive(Debug, Clone)]
 /// Options controlling the C++ wrapper/enrobage step.
+///
+/// Used to wrap generated C++ class text with an architecture template.
+#[derive(Debug, Clone)]
 pub struct EnrobageOptions {
     /// Architecture template filename/path.
     pub architecture_file: PathBuf,
@@ -335,9 +334,8 @@ impl EnrobageOptions {
     }
 }
 
-/// Result of [`wrap_cpp_with_architecture`].
+/// Result of [`wrap_cpp_with_architecture`]: generated C++ wrapped in the architecture scaffold.
 #[derive(Debug)]
-/// Result of wrapping raw generated C++ into the requested outer scaffold.
 pub struct WrappedCppCode {
     /// Final wrapped C++ output text.
     pub code: String,

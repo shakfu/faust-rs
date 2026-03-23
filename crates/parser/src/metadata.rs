@@ -17,9 +17,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-/// One metadata key in the compilation-global top-level `declare` store.
+/// Key category for top-level compilation metadata declarations (`declare key "value";`).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-/// Key category for top-level compilation metadata declarations.
 pub enum CompilationMetadataKey {
     /// Key emitted by the master document with no file prefix.
     Global { key: Box<str> },
@@ -55,9 +54,8 @@ impl CompilationMetadataKey {
     }
 }
 
-/// Deterministic snapshot of the compilation-global top-level metadata store.
+/// Immutable deterministic snapshot of all top-level metadata collected during one parse session.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-/// Immutable snapshot of all metadata collected during one parse session.
 pub struct CompilationMetadataSnapshot {
     entries: BTreeMap<CompilationMetadataKey, BTreeSet<Box<str>>>,
 }
@@ -83,16 +81,12 @@ struct CompilationMetadataStoreInner {
     entries: BTreeMap<CompilationMetadataKey, BTreeSet<Box<str>>>,
 }
 
-/// Shared compilation-session metadata store for top-level `declare key "value";`.
-///
-/// This is the Rust equivalent of the C++ `gMetaDataSet` semantic role.
-///
-/// The store is intentionally shared across parser and evaluator file-loading
-/// boundaries so `component(...)` / `library(...)` keep contributing to one
-/// compilation-global metadata view even though Rust no longer uses one process-
-/// global singleton.
-#[derive(Clone, Debug)]
 /// Shared compilation-metadata store carried across file imports and evaluation.
+///
+/// Rust equivalent of the C++ `gMetaDataSet` semantic role. Intentionally shared
+/// across parser and evaluator file-loading boundaries so `component(...)` /
+/// `library(...)` keep contributing to one compilation-global metadata view.
+#[derive(Clone, Debug)]
 pub struct CompilationMetadataStore {
     inner: Arc<Mutex<CompilationMetadataStoreInner>>,
 }
