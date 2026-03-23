@@ -43,6 +43,15 @@ For each day file, entries are ordered from most recent commit to oldest using G
 
 See [`porting/journal/README.md`](porting/journal/README.md).
 
+## 2026-03-23 — docs: parser-to-FIR parity analysis report
+
+Full-pipeline parity analysis (parser → FIR) of faust-rs vs Faust C++.
+Front-end stages at 95–100%, signal→FIR lowering at 60–70% (main gap: no
+normalization in fast-lane, no occurrence analysis/CSE, no VectorCompiler).
+Report: `porting/parser-to-fir-parity-analysis-2026-03-23-en.md`.
+
+---
+
 ## 2026-03-23 — fix(interval): `hi_or2` mask rule off-by-one → exponential recursion in type annotator
 
 ### Problem
