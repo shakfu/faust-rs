@@ -1544,68 +1544,6 @@ fn node_control(arena: &mut TreeArena) -> BoxId {
     intern_tag(arena, BOX_CONTROL_TAG, &[])
 }
 
-macro_rules! define_is_prim {
-    ($fn_name:ident, $tag:ident) => {
-        #[allow(dead_code)]
-        #[must_use]
-        pub fn $fn_name(arena: &TreeArena, b: BoxId) -> bool {
-            match_tag_arity(arena, b, $tag, 0).is_some()
-        }
-    };
-}
-
-define_is_prim!(is_node_add, BOX_ADD_TAG);
-define_is_prim!(is_node_sub, BOX_SUB_TAG);
-define_is_prim!(is_node_mul, BOX_MUL_TAG);
-define_is_prim!(is_node_div, BOX_DIV_TAG);
-define_is_prim!(is_node_rem, BOX_REM_TAG);
-define_is_prim!(is_node_and, BOX_AND_TAG);
-define_is_prim!(is_node_or, BOX_OR_TAG);
-define_is_prim!(is_node_xor, BOX_XOR_TAG);
-define_is_prim!(is_node_lsh, BOX_LSH_TAG);
-define_is_prim!(is_node_rsh, BOX_RSH_TAG);
-define_is_prim!(is_node_lt, BOX_LT_TAG);
-define_is_prim!(is_node_le, BOX_LE_TAG);
-define_is_prim!(is_node_gt, BOX_GT_TAG);
-define_is_prim!(is_node_ge, BOX_GE_TAG);
-define_is_prim!(is_node_eq, BOX_EQ_TAG);
-define_is_prim!(is_node_ne, BOX_NE_TAG);
-define_is_prim!(is_node_pow, BOX_POW_TAG);
-define_is_prim!(is_node_acos, BOX_ACOS_TAG);
-define_is_prim!(is_node_asin, BOX_ASIN_TAG);
-define_is_prim!(is_node_atan, BOX_ATAN_TAG);
-define_is_prim!(is_node_atan2, BOX_ATAN2_TAG);
-define_is_prim!(is_node_cos, BOX_COS_TAG);
-define_is_prim!(is_node_sin, BOX_SIN_TAG);
-define_is_prim!(is_node_tan, BOX_TAN_TAG);
-define_is_prim!(is_node_exp, BOX_EXP_TAG);
-define_is_prim!(is_node_log, BOX_LOG_TAG);
-define_is_prim!(is_node_log10, BOX_LOG10_TAG);
-define_is_prim!(is_node_sqrt, BOX_SQRT_TAG);
-define_is_prim!(is_node_abs, BOX_ABS_TAG);
-define_is_prim!(is_node_fmod, BOX_FMOD_TAG);
-define_is_prim!(is_node_remainder, BOX_REMAINDER_TAG);
-define_is_prim!(is_node_floor, BOX_FLOOR_TAG);
-define_is_prim!(is_node_ceil, BOX_CEIL_TAG);
-define_is_prim!(is_node_rint, BOX_RINT_TAG);
-define_is_prim!(is_node_round, BOX_ROUND_TAG);
-define_is_prim!(is_node_delay, BOX_DELAY_TAG);
-define_is_prim!(is_node_delay1, BOX_DELAY1_TAG);
-define_is_prim!(is_node_min, BOX_MIN_TAG);
-define_is_prim!(is_node_max, BOX_MAX_TAG);
-define_is_prim!(is_node_prefix, BOX_PREFIX_TAG);
-define_is_prim!(is_node_int_cast, BOX_INT_CAST_TAG);
-define_is_prim!(is_node_float_cast, BOX_FLOAT_CAST_TAG);
-define_is_prim!(is_node_read_only_table, BOX_READ_ONLY_TABLE_TAG);
-define_is_prim!(is_node_write_read_table, BOX_WRITE_READ_TABLE_TAG);
-define_is_prim!(is_node_select2, BOX_SELECT2_TAG);
-define_is_prim!(is_node_select3, BOX_SELECT3_TAG);
-define_is_prim!(is_node_assert_bounds, BOX_ASSERT_BOUNDS_TAG);
-define_is_prim!(is_node_lowest, BOX_LOWEST_TAG);
-define_is_prim!(is_node_highest, BOX_HIGHEST_TAG);
-define_is_prim!(is_node_attach, BOX_ATTACH_TAG);
-define_is_prim!(is_node_enable, BOX_ENABLE_TAG);
-define_is_prim!(is_node_control, BOX_CONTROL_TAG);
 
 /// Equivalent to C++ `boxIPar`.
 #[must_use]
@@ -2130,77 +2068,6 @@ fn intern_tag(arena: &mut TreeArena, tag: &str, children: &[BoxId]) -> BoxId {
     arena.intern(NodeKind::Tag(tag_id), children)
 }
 
-/// Matches a tagged box node by exact tag name and exact arity.
-///
-/// Returns the child slice when:
-/// - `b` is a `NodeKind::Tag`,
-/// - the tag name equals `tag`,
-/// - the node has exactly `arity` children.
-///
-/// This helper centralizes the hot-path shape guard used by many internal
-/// `is_node_*` matchers.
-fn match_tag_arity<'a>(
-    arena: &'a TreeArena,
-    b: BoxId,
-    tag: &str,
-    arity: usize,
-) -> Option<&'a [BoxId]> {
-    let children = arena.children(b)?;
-    if children.len() != arity {
-        return None;
-    }
-    match arena.kind(b) {
-        Some(NodeKind::Tag(actual)) if arena.tag_name(*actual) == Some(tag) => Some(children),
-        _ => None,
-    }
-}
-
-/// Matches a binary tagged node and returns `(left, right)`.
-///
-/// Thin convenience wrapper over [`match_tag_arity`] used by many internal
-/// `is_node_*` helpers.
-#[allow(dead_code)]
-fn match_binary(arena: &TreeArena, b: BoxId, tag: &str) -> Option<(BoxId, BoxId)> {
-    let [left, right] = match_tag_arity(arena, b, tag, 2)? else {
-        return None;
-    };
-    Some((*left, *right))
-}
-
-/// Matches a ternary tagged node and returns its 3 children.
-#[allow(dead_code)]
-fn match_ternary(arena: &TreeArena, b: BoxId, tag: &str) -> Option<(BoxId, BoxId, BoxId)> {
-    let [a, b, c] = match_tag_arity(arena, b, tag, 3)? else {
-        return None;
-    };
-    Some((*a, *b, *c))
-}
-
-/// Matches a unary tagged node and returns its sole child.
-#[allow(dead_code)]
-fn match_unary(arena: &TreeArena, b: BoxId, tag: &str) -> Option<BoxId> {
-    let [child] = match_tag_arity(arena, b, tag, 1)? else {
-        return None;
-    };
-    Some(*child)
-}
-
-/// Matches a slider-like node with `(label, list4(cur,min,max,step))` payload.
-///
-/// Returns `(label, cur, min, max, step)` after validating the outer node tag
-/// and decoding the canonical Faust `list4` parameter encoding.
-#[allow(dead_code)]
-fn match_slider(
-    arena: &TreeArena,
-    b: BoxId,
-    tag: &str,
-) -> Option<(BoxId, BoxId, BoxId, BoxId, BoxId)> {
-    let [label, params] = match_tag_arity(arena, b, tag, 2)? else {
-        return None;
-    };
-    let (cur, min, max, step) = slider_params4(arena, *params)?;
-    Some((*label, cur, min, max, step))
-}
 
 /// Builds a canonical 4-element Faust list payload (`cons(a, cons(b, ...)))`.
 ///
@@ -2244,31 +2111,6 @@ fn slider_params4(arena: &TreeArena, params: BoxId) -> Option<(BoxId, BoxId, Box
     Some((cur, min, max, step))
 }
 
-/// Returns the `n`th element of a proper Faust list (`Cons` chain).
-///
-/// This is a strict structural helper:
-/// - returns `None` on `nil`,
-/// - returns `None` on malformed non-list nodes,
-/// - does not attempt implicit coercions.
-#[allow(dead_code)]
-fn list_nth(arena: &TreeArena, mut list: BoxId, mut n: usize) -> Option<BoxId> {
-    loop {
-        if arena.is_nil(list) {
-            return None;
-        }
-        let node = arena.node(list)?;
-        if !matches!(node.kind, NodeKind::Cons) || node.children.len() != 2 {
-            return None;
-        }
-        let head = node.children.get(0)?;
-        let tail = node.children.get(1)?;
-        if n == 0 {
-            return Some(head);
-        }
-        n -= 1;
-        list = tail;
-    }
-}
 
 /// Recursive structural dumper used by [`dump_box`].
 ///

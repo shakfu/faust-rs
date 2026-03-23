@@ -3491,7 +3491,6 @@ pub(crate) fn simplify_pattern(arena: &mut TreeArena, box_id: TreeId) -> TreeId 
 ///
 /// `static double eval2double(Tree exp, Tree visited, Tree localValEnv)` in
 /// `compiler/evaluate/eval.cpp`.
-#[allow(dead_code)] // used in tests; will be promoted to production in Step 4/6a/6b
 fn eval_box_to_f64(arena: &mut TreeArena, box_id: TreeId) -> Result<f64, EvalError> {
     let sig = propagate_box_and_simplify(arena, box_id)
         .ok_or(EvalError::NotAConstantExpression { node: box_id })?;
@@ -3511,7 +3510,6 @@ fn eval_box_to_f64(arena: &mut TreeArena, box_id: TreeId) -> Result<f64, EvalErr
 ///
 /// `static int eval2int(Tree exp, Tree visited, Tree localValEnv)` in
 /// `compiler/evaluate/eval.cpp`.
-#[allow(dead_code)] // used in tests; will be promoted to production in Step 5/6b
 fn eval_box_to_i32(arena: &mut TreeArena, box_id: TreeId) -> Result<i32, EvalError> {
     let sig = propagate_box_and_simplify(arena, box_id)
         .ok_or(EvalError::NotAConstantExpression { node: box_id })?;
@@ -3723,7 +3721,6 @@ fn try_fold_seq_numeric(arena: &mut TreeArena, a1: TreeId, a2: TreeId) -> Option
 ///
 /// `static Tree boxSimplification(Tree box)` in
 /// `compiler/evaluate/eval.cpp`.
-#[allow(dead_code)] // promoted to production in Step 6a
 fn box_simplification(
     arena: &mut TreeArena,
     cache: &mut ahash::HashMap<TreeId, TreeId>,

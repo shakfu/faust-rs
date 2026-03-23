@@ -731,73 +731,33 @@ impl Compiler {
             }
         })?;
 
+        let ep = self.entrypoint_name.as_ref();
         let process_flat = propagate::try_build_flat_box(&output.state.arena, process_box)
-            .map_err(|error| {
-                let error: propagate::PropagateError = error.into();
-                let node = propagate_error_node(&error);
-                let owner =
-                    node.and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
-                let mut diagnostic = error.clone().into_diagnostic();
-                if let Some(n) = node {
-                    diagnostic = enrich_diagnostic_with_node(
-                        diagnostic,
-                        &output.state.arena,
-                        root,
-                        n,
-                        owner.as_deref(),
-                        self.entrypoint_name.as_ref(),
-                    );
-                    diagnostic = maybe_add_source_label(
-                        diagnostic,
-                        &output.state.ctx,
-                        &output.state.arena,
-                        root,
-                        n,
-                        owner.as_deref(),
-                        self.entrypoint_name.as_ref(),
-                    );
-                }
-                CompilerError::Propagate {
-                    source: source.into(),
-                    error,
-                    diagnostics: bundle_from_diagnostic(diagnostic),
-                }
+            .map_err(|e| {
+                make_propagate_compiler_error(
+                    source,
+                    e.into(),
+                    &output.state.arena,
+                    &output.state.ctx,
+                    root,
+                    ep,
+                    false,
+                )
             })?;
 
         let mut arity_cache = ArityCache::new();
         let process_arity =
             propagate::box_arity_typed(&output.state.arena, process_flat, &mut arity_cache)
-                .map_err(|error| {
-                    let node = propagate_error_node(&error);
-                    let owner = node
-                        .and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
-                    let mut diagnostic = error.clone().into_diagnostic();
-                    if let Some(n) = node {
-                        diagnostic = enrich_diagnostic_with_node(
-                            diagnostic,
-                            &output.state.arena,
-                            root,
-                            n,
-                            owner.as_deref(),
-                            self.entrypoint_name.as_ref(),
-                        );
-                        diagnostic =
-                            add_paired_propagate_context(diagnostic, &error, &output.state.arena);
-                        diagnostic = maybe_add_source_label(
-                            diagnostic,
-                            &output.state.ctx,
-                            &output.state.arena,
-                            root,
-                            n,
-                            owner.as_deref(),
-                            self.entrypoint_name.as_ref(),
-                        );
-                    }
-                    CompilerError::Propagate {
-                        source: source.into(),
-                        error,
-                        diagnostics: bundle_from_diagnostic(diagnostic),
-                    }
+                .map_err(|e| {
+                    make_propagate_compiler_error(
+                        source,
+                        e,
+                        &output.state.arena,
+                        &output.state.ctx,
+                        root,
+                        ep,
+                        true,
+                    )
                 })?;
 
         let compilation_metadata = eval_source_context.as_ref().map_or_else(
@@ -814,36 +774,16 @@ impl Compiler {
             &mut arity_cache,
             &ui_options,
         )
-        .map_err(|error| {
-            let node = propagate_error_node(&error);
-            let owner =
-                node.and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
-            let mut diagnostic = error.clone().into_diagnostic();
-            if let Some(n) = node {
-                diagnostic = enrich_diagnostic_with_node(
-                    diagnostic,
-                    &output.state.arena,
-                    root,
-                    n,
-                    owner.as_deref(),
-                    self.entrypoint_name.as_ref(),
-                );
-                diagnostic = add_paired_propagate_context(diagnostic, &error, &output.state.arena);
-                diagnostic = maybe_add_source_label(
-                    diagnostic,
-                    &output.state.ctx,
-                    &output.state.arena,
-                    root,
-                    n,
-                    owner.as_deref(),
-                    self.entrypoint_name.as_ref(),
-                );
-            }
-            CompilerError::Propagate {
-                source: source.into(),
-                error,
-                diagnostics: bundle_from_diagnostic(diagnostic),
-            }
+        .map_err(|e| {
+            make_propagate_compiler_error(
+                source,
+                e,
+                &output.state.arena,
+                &output.state.ctx,
+                root,
+                ep,
+                true,
+            )
         })?;
 
         Ok(SignalCompileOutput {
@@ -1097,9 +1037,9 @@ fn ensure_parse_success(source: &str, output: ParseOutput) -> Result<ParseOutput
 /// stable facade error surface to callers.
 fn lower_cpp_error_to_compiler(source: &str, error: LowerToCppError) -> CompilerError {
     match error {
-        LowerToCppError::Transform(error) => transform_error_to_compiler(source, error),
-        LowerToCppError::Verify(report) => fir_verify_error_to_compiler(source, report),
-        LowerToCppError::Codegen(error) => CompilerError::Codegen {
+        LowerError::Transform(error) => transform_error_to_compiler(source, error),
+        LowerError::Verify(report) => fir_verify_error_to_compiler(source, report),
+        LowerError::Codegen(error) => CompilerError::Codegen {
             source: source.into(),
             error,
         },
@@ -1109,9 +1049,9 @@ fn lower_cpp_error_to_compiler(source: &str, error: LowerToCppError) -> Compiler
 /// Maps a `LowerToCError` into a `CompilerError`, attaching the source name.
 fn lower_c_error_to_compiler(source: &str, error: LowerToCError) -> CompilerError {
     match error {
-        LowerToCError::Transform(error) => transform_error_to_compiler(source, error),
-        LowerToCError::Verify(report) => fir_verify_error_to_compiler(source, report),
-        LowerToCError::Codegen(error) => CompilerError::CodegenC {
+        LowerError::Transform(error) => transform_error_to_compiler(source, error),
+        LowerError::Verify(report) => fir_verify_error_to_compiler(source, report),
+        LowerError::Codegen(error) => CompilerError::CodegenC {
             source: source.into(),
             error,
         },
@@ -1175,6 +1115,40 @@ fn fir_verify_error_to_compiler(source: &str, report: FirVerifyReport) -> Compil
 
 // ─── DiagCtx: shared pipeline diagnostic enrichment ──────────────────────────
 
+/// Builds a `CompilerError::Propagate` with standard node-level enrichment.
+///
+/// Used by the three propagate-stage steps in `pipeline_to_signals`
+/// (flat-box boundary, arity inference, signal propagation) which share the
+/// same enrichment policy.  Set `add_paired` for composition errors
+/// (seq/split/merge/rec) that benefit from paired A/B arity context.
+fn make_propagate_compiler_error(
+    source: &str,
+    error: propagate::PropagateError,
+    arena: &tlib::TreeArena,
+    ctx: &parser::ParserCtx,
+    root: BoxId,
+    entrypoint_name: &str,
+    add_paired: bool,
+) -> CompilerError {
+    let node = propagate_error_node(&error);
+    let owner = node.and_then(|n| owner_definition_name_for_node(arena, root, n));
+    let mut diagnostic = error.clone().into_diagnostic();
+    if let Some(n) = node {
+        diagnostic =
+            enrich_diagnostic_with_node(diagnostic, arena, root, n, owner.as_deref(), entrypoint_name);
+        if add_paired {
+            diagnostic = add_paired_propagate_context(diagnostic, &error, arena);
+        }
+        diagnostic =
+            maybe_add_source_label(diagnostic, ctx, arena, root, n, owner.as_deref(), entrypoint_name);
+    }
+    CompilerError::Propagate {
+        source: source.into(),
+        error,
+        diagnostics: bundle_from_diagnostic(diagnostic),
+    }
+}
+
 /// Enriches a diagnostic with the standard node-level notes shared across
 /// eval, arity, and propagate error handlers.
 ///
@@ -1203,26 +1177,25 @@ fn enrich_diagnostic_with_node(
 
 // ─── Signal-to-FIR lower errors ───────────────────────────────────────────────
 
-/// Lowers current signal output to a temporary FIR module, then emits C++ text.
+/// Generic lower-to-backend error for backends that follow the
+/// Transform → Verify → Codegen pattern.
 ///
-/// This bridge keeps one explicit integration point in `compiler` while the
-/// production signal->FIR lowering is still being implemented.
+/// `E` is the backend-specific codegen error type.
+/// Specialised as [`LowerToCppError`] and [`LowerToCError`].
 #[derive(Debug)]
-enum LowerToCppError {
-    Transform(SignalFirError),
-    Verify(FirVerifyReport),
-    Codegen(CodegenError),
-}
-
-#[derive(Debug)]
-enum LowerToCError {
+enum LowerError<E> {
     /// Fast-lane signal-to-FIR lowering failed.
     Transform(SignalFirError),
     /// Optional FIR verification rejected the lowered module.
     Verify(FirVerifyReport),
-    /// C backend emission failed after successful lowering.
-    Codegen(CCodegenError),
+    /// Backend emission failed after successful FIR lowering.
+    Codegen(E),
 }
+
+/// Lower error for the C++ backend.
+type LowerToCppError = LowerError<CodegenError>;
+/// Lower error for the C backend.
+type LowerToCError = LowerError<CCodegenError>;
 
 #[derive(Debug)]
 enum LowerToInterpError {
@@ -1350,6 +1323,9 @@ fn lower_signals_to_interp_legacy_bridge(
 }
 
 /// Lowers signals through the transform fast lane then serializes an interpreter `.fbc`.
+///
+/// This function reuses `lower_signals_to_fir_transform_fastlane` so that the
+/// C, C++, and interp transform paths share one FIR lowering implementation.
 fn lower_signals_to_interp_transform_fastlane(
     source_name: &str,
     output: &SignalCompileOutput,
@@ -1561,8 +1537,8 @@ fn lower_signals_to_cpp_legacy_bridge(
 ) -> Result<String, LowerToCppError> {
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let lowered = lower_signals_to_fir_legacy_bridge(source_name, output, module_name);
-    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToCppError::Verify)?;
-    generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerToCppError::Codegen)
+    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerError::Verify)?;
+    generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerError::Codegen)
 }
 
 /// Lowers signals through the transform fast lane, verifies FIR, then emits C++.
@@ -1575,9 +1551,9 @@ fn lower_signals_to_cpp_transform_fastlane(
 ) -> Result<String, LowerToCppError> {
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
     let lowered = lower_signals_to_fir_transform_fastlane(output, module_name, real_type)
-        .map_err(LowerToCppError::Transform)?;
-    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToCppError::Verify)?;
-    generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerToCppError::Codegen)
+        .map_err(LowerError::Transform)?;
+    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerError::Verify)?;
+    generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerError::Codegen)
 }
 
 /// Emits the intentionally minimal legacy-bridge C placeholder module.
@@ -1637,8 +1613,8 @@ fn lower_signals_to_c_legacy_bridge(
         static_decls,
     );
     let lowered = FirCompileOutput { store, module };
-    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToCError::Verify)?;
-    generate_c_module(&lowered.store, lowered.module, options).map_err(LowerToCError::Codegen)
+    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerError::Verify)?;
+    generate_c_module(&lowered.store, lowered.module, options).map_err(LowerError::Codegen)
 }
 
 /// Lowers signals through the transform fast lane, verifies FIR, then emits C.
@@ -1650,26 +1626,10 @@ fn lower_signals_to_c_transform_fastlane(
     real_type: RealType,
 ) -> Result<String, LowerToCError> {
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
-    let signal_fir_options = SignalFirOptions {
-        module_name,
-        strict_mode: true,
-        real_type,
-    };
-    let lowered = compile_signals_to_fir_fastlane_with_ui(
-        &output.parse.state.arena,
-        &output.signals,
-        output.process_arity.inputs,
-        output.process_arity.outputs,
-        &output.ui,
-        &signal_fir_options,
-    )
-    .map_err(LowerToCError::Transform)?;
-    let lowered = FirCompileOutput {
-        store: lowered.store,
-        module: lowered.module,
-    };
-    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToCError::Verify)?;
-    generate_c_module(&lowered.store, lowered.module, options).map_err(LowerToCError::Codegen)
+    let lowered = lower_signals_to_fir_transform_fastlane(output, module_name, real_type)
+        .map_err(LowerError::Transform)?;
+    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerError::Verify)?;
+    generate_c_module(&lowered.store, lowered.module, options).map_err(LowerError::Codegen)
 }
 
 /// Runs optional FIR verification according to the compiler facade policy.

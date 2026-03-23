@@ -43,6 +43,24 @@ For each day file, entries are ordered from most recent commit to oldest using G
 
 See [`porting/journal/README.md`](porting/journal/README.md).
 
+## 2026-03-23 — refactor(boxes,eval): dead-code sweep — macros, dead helpers, stale allow attributes
+
+Deleted `define_is_prim!` macro + 52 `is_node_prim_*` invocations from `boxes` (C++ parity
+stubs superseded by `BoxMatch`). Deleted four dead structural helpers (`match_binary`,
+`match_ternary`, `match_unary`, `match_slider`) and their now-orphaned internal helper
+`match_tag_arity`, plus `list_nth` (test file has its own copy). Removed 3 stale
+`#[allow(dead_code)]` attributes from `eval` on functions actively used in production.
+Net: −120/+0 lines; zero warnings; all tests pass.
+
+## 2026-03-23 — refactor(compiler): extract error helper + generic LowerError + de-dup C fastlane
+
+Three complexity hot-spots in `compiler/src/lib.rs`: (1) extracted
+`make_propagate_compiler_error` free function, replacing 3 near-identical ~30-line `map_err`
+closures in `pipeline_to_signals`; (2) unified `LowerToCppError` + `LowerToCError` into
+`LowerError<E>` generic type alias; (3) `lower_signals_to_c_transform_fastlane` now calls
+`lower_signals_to_fir_transform_fastlane` instead of duplicating it.
+Net: −40/+25 lines; zero warnings; all 52 compiler tests pass.
+
 ## 2026-03-23 — refactor: dead-code sweep — compatibility wrappers, unused predicates, orphaned utilities
 
 Removed four public `BoxId` compatibility wrappers from `propagate`
