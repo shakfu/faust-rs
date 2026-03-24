@@ -1,6 +1,6 @@
 # Current Faust Source Subset Supported by `faust-rs`
 
-Last updated: 2026-03-21
+Last updated: 2026-03-24
 
 Status: living document
 
@@ -43,8 +43,8 @@ This snapshot is based on:
   - `crates/transform/src/signal_prepare.rs`
   - `crates/transform/src/signal_fir/mod.rs`
   - `crates/transform/src/signal_fir/module.rs`
-- fresh local status scans run on 2026-03-14 (last formal run; counts below reflect
-  subsequent journal evidence — re-run required for precise current numbers):
+- fresh local status scans run on 2026-03-24 (re-run to reflect all corpus additions
+  through the current commit):
   - `cargo run -p xtask -- corpus-status-report`
   - `cargo run -p xtask -- backend-full-corpus-diff-report`
 
@@ -60,8 +60,8 @@ The corresponding generated reports are:
 At the front-end level, the active corpus currently shows **full status parity**
 with the C++ compiler:
 
-- total corpus cases: `88`
-- valid cases accepted by both Rust and C++: `73`
+- total corpus cases: `98`
+- valid cases accepted by both Rust and C++: `83`
 - invalid cases rejected by both Rust and C++: `15`
 - `OK/ERR` mismatches: `0`
 - `ERR/OK` mismatches: `0`
@@ -77,9 +77,9 @@ In other words:
 At the current backend route (`TransformFastLane`), the supported subset is
 still narrower:
 
-- total corpus cases: `88`
-- end-to-end C backend parity: `OK=72`, `DIFF=0`, `UNSUPPORTED=16`
-- end-to-end C++ backend parity: `OK=72`, `DIFF=0`, `UNSUPPORTED=16`
+- total corpus cases: `98`
+- end-to-end C backend parity: `OK=82`, `DIFF=0`, `UNSUPPORTED=16`
+- end-to-end C++ backend parity: `OK=82`, `DIFF=0`, `UNSUPPORTED=16`
 
 The `16` unsupported cases are:
 
@@ -89,8 +89,8 @@ The `16` unsupported cases are:
 
 So for **valid** corpus programs, the current backend route compiles:
 
-- `72 / 73` valid corpus cases,
-- and misses `1 / 73`, currently in the non-trivial stream-wrapper family.
+- `82 / 83` valid corpus cases,
+- and misses `1 / 83`, currently in the non-trivial stream-wrapper family.
 
 ## 5. Synthetic Characterization of the Supported Subset
 
@@ -183,6 +183,12 @@ This is why corpus cases such as:
 - `rep_68_variable_delay_audio_rate`
 - `rep_69_variable_delay_sr_millisec`
 - `rep_70_route_arithmetic_params`
+- `rep_71_degenerate_unary_recursion`
+- `rep_72_float_literal_pattern`
+- `rep_73_pattern_max_min_fold`
+- `rep_60_counter_rem`, `rep_61_fmin_sr`, `rep_62_select2_trigger`,
+  `rep_63_rwtable`, `rep_63_store_load_table`, `rep_64_dynamic_rem`,
+  `rep_65_fabs_trigger`
 
 now compile end-to-end through the Rust backends.
 
@@ -236,7 +242,10 @@ Relative to the tracked corpus and the current production-oriented route:
   cases,
 - many language families that were earlier missing are no longer front-end
   blockers:
-  - `case` and recursive pattern-matching with computed numeric arguments
+  - `case` and recursive pattern-matching with computed numeric arguments,
+    including xtended-function arguments such as `max`/`min` (full
+    `patternSimplification` port)
+  - float-literal patterns (`foo(1.0) = …`) now match correctly
   - lambda/closure forms (first-class `boxClosure` node)
   - modulation
   - local imports
@@ -745,6 +754,144 @@ step in `prepare_signals_for_fir` rewrites these to `proj(0, group)`, enabling
 - `slot_env` de Bruijn lifting in `FlatNodeKind::Rec` corrected, fixing
   incorrect sample output for `spectralCentroid` and similar recursive analyzers.
 - `eval` `FIR` shift binops added to backends.
+
+### 7.13 March 22–24, 2026: correctness fixes, pattern evaluation parity, cranelift robustness
+
+#### `lower_proj`: separate rec-array and state-slot maps (2026-03-22)
+
+Nested recursion groups (e.g. `tf22` biquad, `filters_direct_ladder_tests.dsp`)
+produced wrong audio because `ensure_recursion_array` and `ensure_state_slot`
+shared the same `state_name_by_node` map.  When the outer group body was itself
+the `Delay1` node, both paths resolved to the same array, causing the wrong
+value to be written.
+
+Fix: add a separate `rec_array_by_group_index: HashMap<(u32,usize), RecArrayInfo>`
+keyed by `(group_id, output_index)` that never aliases `state_name_by_node`.
+`lower_proj` now calls `ensure_recursion_array_for_group(group, i, …)` and the
+skip-guard from the previous commit was removed (it is no longer needed).
+
+#### Parser: `stdfaust.lib` + `demos.lib` duplicate zero-arity aliases (2026-03-22)
+
+Both libraries independently declare the same 19 library-alias symbols (`ma`,
+`ba`, `de`, `si`, …).  `make_definition_from_variants` previously errored with
+"multiple definitions of a zero-argument symbol are not allowed".  Fix: mirror
+C++ import-shadowing semantics — for zero-arity symbols with multiple variants,
+use the newest definition.  `guitarEffectChain.dsp` now parses and compiles.
+
+The `import_loading_cpp_gap` test was converted from a gap-tracker to a
+parity-success test (2026-03-23).
+
+#### Interval: `hi_or2` mask-rule off-by-one → exponential recursion (2026-03-23)
+
+The short-circuit in `hi_or2` checked `a.hi == 2 * m.wrapping_sub(1)` (= 2m−2),
+but the correct condition is `a.hi == 2m − 1` (all bits set below the MSB).
+The off-by-one prevented early exit for full power-of-2 ranges `[0, 2^n−1]`,
+causing 3 recursive sub-calls per level and O(3^32) ≈ 10^15 calls for any DSP
+with bitwise-AND signals.  Fix: `ma.wrapping_add(ma).wrapping_sub(1)`.
+
+`guitarEffectChain.dsp`: was hanging / 9.7 s → 2.0 s.
+`minimoog-novation.dsp`: type-annotation time 4.7 s (C++ reference: 8.7 s).
+
+#### Eval: integer div folding — `4/2` must produce `Int(2)` (2026-03-23)
+
+`try_fold_seq_numeric` always returned a `Real` for division results.
+Patterns from `math.lib` (`selector`, `butterfly`, `hadamard`) use tree identity
+where `Real(2.0) != Int(2)`.  Fix: when all inputs are `SigInt` and the result
+is an exact integer, produce `SigInt`.  Fixes `zita_rev1.dsp` sequential
+composition mismatch.
+
+#### Cranelift: float BinOp comparison type mismatch (2026-03-22)
+
+`BinOp { op: Lt/Le/Gt/Ge/Eq/Ne, lhs: Float32, rhs: Float32, typ: Int32 }` is a
+float comparison whose integer result was previously lowered via `fcvt_to_sint`,
+truncating the operands instead of performing a float compare.  Fix: detect
+comparison ops where the lowered CLIF operand type is float and emit `float_cmp`
+regardless of the result type.  `harpeautomation.dsp` (string trigger using
+`fabs(x) < 0.5`) now produces correct non-zero output.
+
+#### Cranelift: AArch64 branch-offset overflow → graceful fallback (2026-03-22)
+
+Cranelift's `MachBuffer` can panic (internal assertion) on AArch64 when a
+very large `compute` body exceeds the ±1 MiB B.cond displacement limit.  Fix:
+wrap JIT compilation in `catch_unwind`; on panic, retry with
+`force_stub = true` so the instance falls back to the interpreter sidecar.
+`minimoog-novation.dsp` now compiles without crashing the process.
+
+#### FBC serial: embedded newlines in quoted UI/meta labels (2026-03-22)
+
+`elecGuitarMIDI.fbc` contains a label with a literal `\n` byte inside a
+quoted string.  `read_ui_block` called `read_line` once per instruction,
+stopping at the embedded newline.  Fix: `read_quoted_logical_line` accumulates
+physical lines until all double-quote characters are balanced.
+
+#### Eval: float literal patterns match call-site arguments (2026-03-24)
+
+`simplify_pattern` was coercing integer-valued Real constants (e.g. `1.0`,
+`4.0/2.0`) to `Int` before the tree-identity check against the automaton's
+`Constant(float_bits(…))` transition.  Since `int(1) != float_bits(1.0)`, any
+function defined with a float-literal pattern always raised "no case rule
+matches".  Fix: align with C++ `simplifyPattern` — return `boxReal` literals
+unchanged without promoting integer-valued reals to `Int`.
+
+Corpus addition: `rep_72_float_literal_pattern.dsp`.
+
+#### Normalize: `min`/`max(Int, Int)` folds to `SigInt` (2026-03-24)
+
+`simplify_const` previously folded `min`/`max` to `SigReal` even when both
+operands were `SigInt`.  C++ parity: `sigMin`/`sigMax` return `sigInt` when
+both inputs are integers.  Without this fix, `poly(max(1,min(N,4)), x)`
+pattern matching failed — the argument simplified to `SigReal(2.0)` while
+the pattern stored `Constant(boxInt(2))`.
+
+#### Eval: `patternSimplification` — full C++ `isBoxNumeric` semantics (2026-03-24)
+
+The previous `pattern_simplification` (literal arithmetic only) was replaced
+with a complete port of C++ `patternSimplification` from `eval.cpp` line 773:
+
+1. Try to fold the whole expression via `simplify_pattern` (full signal
+   propagation + `simplify()` — equivalent to C++ `isBoxNumeric`).
+2. If that fails, recurse into `PatternOp` children (`Par/Seq/Split/Merge/Rec`
+   only — matches C++ `isBoxPatternOp`).  `HGroup/VGroup/TGroup/Route` are no
+   longer recursed into, matching C++ exactly.
+3. Otherwise return the pattern unchanged.
+
+This enables `patternSimplification` to fold xtended functions such as
+`max`/`min` at automaton construction time.  Example:
+`f(max(1, min(6, 4)))` now correctly matches `f(4) = 40`.
+
+~185 lines of superseded dead code removed (`simplify_numeric_pattern`,
+`eval_numeric_pattern_value`, `eval_numeric_binary_op`, `NumericValue`, and
+supporting helpers).
+
+Corpus addition: `rep_73_pattern_max_min_fold.dsp`.
+
+#### Structural refactors (2026-03-22–24, no semantic change)
+
+- Dead-code sweep: compatibility wrappers, unused predicates, orphaned
+  utilities removed from `crates/eval`, `crates/boxes`, `crates/compiler`.
+- `boxes` and `eval` crates split into focused submodules.
+- All embedded test suites extracted into standalone `tests.rs` files
+  (`signal_fir`, `signal_prepare`, `fir`, `interp`, `cranelift` backends).
+
+#### Corpus additions (net)
+
+Ten new fixtures added since March 21:
+
+| fixture | description |
+|---------|-------------|
+| `rep_60_counter_rem` | integer counter with `%` (rem) operator |
+| `rep_61_fmin_sr` | `fmin` driven by sampling-rate constant |
+| `rep_62_select2_trigger` | `select2`-based trigger |
+| `rep_63_rwtable` | read/write table |
+| `rep_63_store_load_table` | store-then-load table pattern |
+| `rep_64_dynamic_rem` | dynamic `%` with variable operands |
+| `rep_65_fabs_trigger` | `fabs(x) < 0.5` string trigger (Cranelift correctness) |
+| `rep_71_degenerate_unary_recursion` | docs corpus: degenerate proj(7,W) canonicalization |
+| `rep_72_float_literal_pattern` | float-literal pattern matching parity |
+| `rep_73_pattern_max_min_fold` | `patternSimplification` with `max`/`min` fold |
+
+End-to-end backend corpus: `82 / 83` valid cases, same single gap
+(`rep_18_stream_wrappers.dsp`).
 
 ## 8. Practical Reading Rule
 
