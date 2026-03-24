@@ -626,8 +626,11 @@ fn dispatch_ui_runtime(
                             std::ffi::CString::new(url.as_str()),
                         )
                     {
-                        let zone = zone_ptr(dsp_state, layout, zone)
-                            .map_or(std::ptr::null_mut(), |p| p.cast());
+                        // Pass the address of the fSoundN pointer field in the
+                        // DSP state buffer so SoundUI::addSoundfile can write
+                        // the loaded Soundfile* directly into the JIT struct.
+                        let zone = soundfile_zone_ptr(dsp_state, layout, zone)
+                            .unwrap_or(std::ptr::null_mut());
                         f(ui.ui_interface, label.as_ptr(), url.as_ptr(), zone);
                     }
                 }
@@ -668,6 +671,29 @@ fn zone_ptr(
             dsp_state
                 .ptr_at(field.offset_bytes as usize)
                 .cast::<FaustFloat>(),
+        ),
+        _ => None,
+    }
+}
+
+/// Resolves a soundfile zone name to a `Soundfile**` pointer.
+///
+/// Soundfile fields (`FirType::Sound`) occupy one pointer-sized slot in the
+/// `dsp*` state buffer.  The C API `add_soundfile` callback receives this
+/// address as `void**` so the host (e.g. `SoundUI::addSoundfile`) can write
+/// the loaded `Soundfile*` directly into the DSP state — exactly where the
+/// JIT-compiled `compute` code will read it from.
+fn soundfile_zone_ptr(
+    dsp_state: &mut DspStateBuffer,
+    layout: &StructLayoutPlan,
+    name: &str,
+) -> Option<*mut *mut c_void> {
+    let field = layout.field(name)?;
+    match &field.kind {
+        StructFieldKind::Scalar(FirType::Sound) => Some(
+            dsp_state
+                .ptr_at(field.offset_bytes as usize)
+                .cast::<*mut c_void>(),
         ),
         _ => None,
     }

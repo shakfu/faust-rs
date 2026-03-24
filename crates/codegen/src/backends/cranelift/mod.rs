@@ -2075,6 +2075,35 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
             }
             FirMatch::BinOp { op, lhs, rhs, typ } => self.lower_binop(op, lhs, rhs, &typ),
             FirMatch::FunCall { name, args, typ } => self.lower_fun_call(&name, &args, &typ),
+
+            // ── Soundfile field loads ─────────────────────────────────────────
+            //
+            // The C++ Soundfile struct layout (packed, host-allocated):
+            //   offset  0  void*  fBuffers   (float** or double**)
+            //   offset  8  int*   fLength    [MAX_SOUNDFILE_PARTS]
+            //   offset 16  int*   fSR        [MAX_SOUNDFILE_PARTS]
+            //   offset 24  int*   fOffset    [MAX_SOUNDFILE_PARTS]
+            //   offset 32  int    fChannels
+            //   offset 36  int    fParts
+            //   offset 40  bool   fIsDouble
+            //
+            // `dsp->fSoundN` is a pointer-sized field in the DSP struct that
+            // holds the Soundfile* written by `SoundUI::addSoundfile`.
+
+            FirMatch::LoadSoundfileLength { var, part } => {
+                self.lower_load_soundfile_length(&var, part)
+            }
+            FirMatch::LoadSoundfileRate { var, part } => {
+                self.lower_load_soundfile_rate(&var, part)
+            }
+            FirMatch::LoadSoundfileBuffer {
+                var,
+                chan,
+                part,
+                idx,
+                typ,
+            } => self.lower_load_soundfile_buffer(&var, chan, part, idx, &typ),
+
             other => Err(LoweringError::Unsupported(format!(
                 "unsupported FIR expression in Cranelift subset lowering: {other:?}; expected={expected:?}"
             ))),
@@ -2459,6 +2488,127 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         self.import_refs.insert(cache_key, fref);
         Ok(fref)
     }
+
+    // ── Soundfile field loads ─────────────────────────────────────────────────
+
+    /// Loads the `Soundfile*` stored in `dsp->fSoundN`.
+    ///
+    /// Helper shared by `lower_load_soundfile_{length,rate,buffer}`.
+    fn load_soundfile_ptr(&mut self, var: &str) -> Result<Value, LoweringError> {
+        let field = self.struct_field(var)?.clone();
+        let dsp = self.dsp_base_ptr()?;
+        let sf_addr = self.fb.ins().iadd_imm(dsp, i64::from(field.offset_bytes));
+        let sf_ptr = self
+            .fb
+            .ins()
+            .load(self.ptr_ty, MemFlags::new(), sf_addr, 0);
+        Ok(sf_ptr)
+    }
+
+    /// Lowers `LoadSoundfileLength { var, part }` → `fSoundN->fLength[part]`.
+    ///
+    /// Returns an `i32` scalar (FIR Int32).
+    fn lower_load_soundfile_length(
+        &mut self,
+        var: &str,
+        part: FirId,
+    ) -> Result<LoweredExpr, LoweringError> {
+        let sf_ptr = self.load_soundfile_ptr(var)?;
+        // fLength is an `int*` at byte offset 8 from the Soundfile*.
+        let len_ptr = self
+            .fb
+            .ins()
+            .load(self.ptr_ty, MemFlags::new(), sf_ptr, 8);
+        let part_v = self.lower_expr(part, Some(&FirType::Int32))?.value();
+        let addr = self.indexed_addr(len_ptr, part_v, 4);
+        let result = self.fb.ins().load(types::I32, MemFlags::new(), addr, 0);
+        Ok(LoweredExpr::Scalar(result))
+    }
+
+    /// Lowers `LoadSoundfileRate { var, part }` → `fSoundN->fSR[part]`.
+    ///
+    /// Returns an `i32` scalar (FIR Int32).
+    fn lower_load_soundfile_rate(
+        &mut self,
+        var: &str,
+        part: FirId,
+    ) -> Result<LoweredExpr, LoweringError> {
+        let sf_ptr = self.load_soundfile_ptr(var)?;
+        // fSR is an `int*` at byte offset 16 from the Soundfile*.
+        let sr_ptr = self
+            .fb
+            .ins()
+            .load(self.ptr_ty, MemFlags::new(), sf_ptr, 16);
+        let part_v = self.lower_expr(part, Some(&FirType::Int32))?.value();
+        let addr = self.indexed_addr(sr_ptr, part_v, 4);
+        let result = self.fb.ins().load(types::I32, MemFlags::new(), addr, 0);
+        Ok(LoweredExpr::Scalar(result))
+    }
+
+    /// Lowers `LoadSoundfileBuffer { var, chan, part, idx, typ }` →
+    /// `((FAUSTFLOAT**)fSoundN->fBuffers)[chan][fSoundN->fOffset[part] + idx]`.
+    ///
+    /// The element type is inferred from `typ` (typically `FaustFloat` = `f32`).
+    /// The buffer pointer array uses pointer-sized strides; individual samples
+    /// use the natural stride of the element type.
+    ///
+    /// # Note on double precision
+    /// When the host loads a soundfile with `fIsDouble=true`, the buffer
+    /// contains `f64` samples.  The current Cranelift bring-up targets
+    /// `FAUSTFLOAT=float` exclusively; a double-precision path can be added
+    /// when needed.
+    fn lower_load_soundfile_buffer(
+        &mut self,
+        var: &str,
+        chan: FirId,
+        part: FirId,
+        idx: FirId,
+        typ: &FirType,
+    ) -> Result<LoweredExpr, LoweringError> {
+        let sf_ptr = self.load_soundfile_ptr(var)?;
+
+        // fBuffers is a `void*` (= float** or double**) at byte offset 0.
+        let bufs = self
+            .fb
+            .ins()
+            .load(self.ptr_ty, MemFlags::new(), sf_ptr, 0);
+
+        // chan_buf = ((FAUSTFLOAT**)bufs)[chan]  — one pointer per channel.
+        let ptr_stride = i64::from(self.ptr_ty.bytes());
+        let chan_v = self.lower_expr(chan, Some(&FirType::Int32))?.value();
+        let chan_ptr_addr = self.indexed_addr(bufs, chan_v, ptr_stride);
+        let chan_buf = self
+            .fb
+            .ins()
+            .load(self.ptr_ty, MemFlags::new(), chan_ptr_addr, 0);
+
+        // part_offset = fOffset[part]  — fOffset is `int*` at byte offset 24.
+        let off_ptr = self
+            .fb
+            .ins()
+            .load(self.ptr_ty, MemFlags::new(), sf_ptr, 24);
+        let part_v = self.lower_expr(part, Some(&FirType::Int32))?.value();
+        let part_off_addr = self.indexed_addr(off_ptr, part_v, 4);
+        let part_off = self
+            .fb
+            .ins()
+            .load(types::I32, MemFlags::new(), part_off_addr, 0);
+
+        // actual_idx = fOffset[part] + idx
+        let idx_v = self.lower_expr(idx, Some(&FirType::Int32))?.value();
+        let actual_idx = self.fb.ins().iadd(part_off, idx_v);
+
+        // Load sample — stride is size of element type (f32=4 or f64=8).
+        let elem_clif = self.fir_type_to_clif(typ)?;
+        let elem_stride = i64::from(elem_clif.bytes());
+        let sample_addr = self.indexed_addr(chan_buf, actual_idx, elem_stride);
+        let raw = self
+            .fb
+            .ins()
+            .load(elem_clif, MemFlags::new(), sample_addr, 0);
+        let result = self.coerce_value_to_fir_type(raw, typ)?;
+        Ok(LoweredExpr::Scalar(result))
+    }
 }
 
 /// Maps a FIR unary math op to the imported `f32` host symbol used by lowering.
@@ -2536,6 +2686,7 @@ fn binary_math_symbol_f64(math: fir::FirMathOp) -> Option<&'static str> {
         _ => return None,
     })
 }
+
 
 /// Attempts to lower the FIR `compute` body into the current Cranelift subset.
 ///
@@ -2821,6 +2972,13 @@ fn subset_expr_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
             }
         }
         FirMatch::Cast { value, .. } => subset_expr_gap_reason(store, value),
+        FirMatch::LoadSoundfileLength { part, .. } => subset_expr_gap_reason(store, part),
+        FirMatch::LoadSoundfileRate { part, .. } => subset_expr_gap_reason(store, part),
+        FirMatch::LoadSoundfileBuffer { chan, part, idx, .. } => {
+            subset_expr_gap_reason(store, chan)
+                .or_else(|| subset_expr_gap_reason(store, part))
+                .or_else(|| subset_expr_gap_reason(store, idx))
+        }
         other => Some(format!("unsupported expr variant in subset: {other:?}")),
     }
 }
