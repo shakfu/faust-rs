@@ -497,6 +497,12 @@ fn child_ids(node: &FirMatch) -> Vec<FirId> {
         | FirMatch::AddSoundfile { .. }
         | FirMatch::AddMetaDeclare { .. }
         | FirMatch::Label(_) => Vec::new(),
+        FirMatch::LoadSoundfileLength { part, .. } | FirMatch::LoadSoundfileRate { part, .. } => {
+            vec![*part]
+        }
+        FirMatch::LoadSoundfileBuffer {
+            chan, part, idx, ..
+        } => vec![*chan, *part, *idx],
         FirMatch::ValueArray { values, .. }
         | FirMatch::FunCall { args: values, .. }
         | FirMatch::DeclareTable { values, .. }
@@ -2500,6 +2506,32 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
                 let var = self.maybe_renamed_unqualified(&var);
                 let mut b = FirBuilder::new(self.dst);
                 b.add_soundfile_with_url(label, url, var)
+            }
+            FirMatch::LoadSoundfileLength { var, part } => {
+                let var = self.maybe_renamed_unqualified(&var);
+                let part = self.clone_node(part)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.load_soundfile_length(var, part)
+            }
+            FirMatch::LoadSoundfileRate { var, part } => {
+                let var = self.maybe_renamed_unqualified(&var);
+                let part = self.clone_node(part)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.load_soundfile_rate(var, part)
+            }
+            FirMatch::LoadSoundfileBuffer {
+                var,
+                chan,
+                part,
+                idx,
+                typ,
+            } => {
+                let var = self.maybe_renamed_unqualified(&var);
+                let chan = self.clone_node(chan)?;
+                let part = self.clone_node(part)?;
+                let idx = self.clone_node(idx)?;
+                let mut b = FirBuilder::new(self.dst);
+                b.load_soundfile_buffer(var, chan, part, idx, typ)
             }
             FirMatch::AddMetaDeclare { var, key, value } => {
                 let var = self.maybe_renamed_unqualified(&var);

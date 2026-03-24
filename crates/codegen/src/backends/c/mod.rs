@@ -1162,6 +1162,15 @@ fn emit_stmt(
             }
             Ok(())
         }
+        FirMatch::AddSoundfile { label, url, var } => {
+            let _ = writeln!(
+                out,
+                "{tab}ui_interface->addSoundfile(ui_interface->uiInterface, {}, {}, &dsp->{var});",
+                c_string_literal(&label),
+                c_string_literal(&url)
+            );
+            Ok(())
+        }
         FirMatch::NullStatement => {
             let _ = writeln!(out, "{tab};");
             Ok(())
@@ -1240,6 +1249,28 @@ fn emit_value(store: &FirStore, options: &COptions, value: FirId) -> Result<Stri
             Ok(format!("{c_name}({})", rendered.join(", ")))
         }
         FirMatch::NullValue { .. } => Ok("NULL".to_owned()),
+        FirMatch::LoadSoundfileLength { var, part } => {
+            let part = emit_value(store, options, part)?;
+            Ok(format!("dsp->{var}->fLength[{part}]"))
+        }
+        FirMatch::LoadSoundfileRate { var, part } => {
+            let part = emit_value(store, options, part)?;
+            Ok(format!("dsp->{var}->fSR[{part}]"))
+        }
+        FirMatch::LoadSoundfileBuffer {
+            var,
+            chan,
+            part,
+            idx,
+            ..
+        } => {
+            let chan = emit_value(store, options, chan)?;
+            let part = emit_value(store, options, part)?;
+            let idx = emit_value(store, options, idx)?;
+            Ok(format!(
+                "((FAUSTFLOAT**)dsp->{var}->fBuffers)[{chan}][dsp->{var}->fOffset[{part}] + {idx}]"
+            ))
+        }
         _ => Err(unsupported_node("value", value, store)),
     }
 }

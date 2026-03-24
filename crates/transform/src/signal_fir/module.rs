@@ -982,6 +982,11 @@ impl<'a> SignalToFirLower<'a> {
             }
             SigMatch::FFun(ff, largs) => self.lower_ffun(sig, ff, largs)?,
             SigMatch::Soundfile(control) => self.lower_soundfile(control)?,
+            SigMatch::SoundfileLength(sf, part) => self.lower_soundfile_length(sf, part)?,
+            SigMatch::SoundfileRate(sf, part) => self.lower_soundfile_rate(sf, part)?,
+            SigMatch::SoundfileBuffer(sf, chan, part, ridx) => {
+                self.lower_soundfile_buffer(sig, sf, chan, part, ridx)?
+            }
             other => {
                 return Err(SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
@@ -1781,6 +1786,55 @@ impl<'a> SignalToFirLower<'a> {
             return Ok(b.load_var(var, AccessType::Struct, FirType::Sound));
         }
         unreachable!("soundfile zone should be inserted before loading")
+    }
+
+    /// Extracts the var name from a `SIGSOUNDFILE` signal node.
+    fn soundfile_var_from_signal(&mut self, sf: SigId) -> Result<String, SignalFirError> {
+        match match_sig(self.arena, sf) {
+            SigMatch::Soundfile(control) => self.ensure_soundfile_zone(control),
+            _ => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "expected SIGSOUNDFILE node, got {}",
+                    dump_sig_readable(self.arena, sf)
+                ),
+            )),
+        }
+    }
+
+    /// Lowers `SIGSOUNDFILELENGTH(sf, part)` → `fSoundN->fLength[part]`.
+    fn lower_soundfile_length(&mut self, sf: SigId, part: SigId) -> Result<FirId, SignalFirError> {
+        let var = self.soundfile_var_from_signal(sf)?;
+        let part = self.lower_signal(part)?;
+        let mut b = FirBuilder::new(&mut self.store);
+        Ok(b.load_soundfile_length(var, part))
+    }
+
+    /// Lowers `SIGSOUNDFILERATE(sf, part)` → `fSoundN->fSR[part]`.
+    fn lower_soundfile_rate(&mut self, sf: SigId, part: SigId) -> Result<FirId, SignalFirError> {
+        let var = self.soundfile_var_from_signal(sf)?;
+        let part = self.lower_signal(part)?;
+        let mut b = FirBuilder::new(&mut self.store);
+        Ok(b.load_soundfile_rate(var, part))
+    }
+
+    /// Lowers `SIGSOUNDFILEBUFFER(sf, chan, part, ridx)` →
+    /// `((FAUSTFLOAT**)fSoundN->fBuffers)[chan][fSoundN->fOffset[part] + ridx]`.
+    fn lower_soundfile_buffer(
+        &mut self,
+        node: SigId,
+        sf: SigId,
+        chan: SigId,
+        part: SigId,
+        ridx: SigId,
+    ) -> Result<FirId, SignalFirError> {
+        let var = self.soundfile_var_from_signal(sf)?;
+        let chan = self.lower_signal(chan)?;
+        let part = self.lower_signal(part)?;
+        let idx = self.lower_signal(ridx)?;
+        let typ = self.signal_fir_type(node)?;
+        let mut b = FirBuilder::new(&mut self.store);
+        Ok(b.load_soundfile_buffer(var, chan, part, idx, typ))
     }
 
     /// Lowers a `SIGWAVEFORM` node used as a direct signal output.

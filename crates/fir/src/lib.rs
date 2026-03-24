@@ -1066,6 +1066,51 @@ impl<'a> FirBuilder<'a> {
         )
     }
 
+    /// C++ parity: `LoadSoundfileInst` / `fSoundN->fLength[part]`.
+    /// Always returns `Int32` (length is stored as `int` in the Soundfile struct).
+    #[must_use]
+    pub fn load_soundfile_length(&mut self, var: impl Into<String>, part: FirId) -> FirId {
+        let typ_id = encode_type(&mut self.store.arena, &FirType::Int32);
+        let var_id = self.store.arena.symbol(var);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_V_LOAD_SOUNDFILE_LENGTH_TAG,
+            &[typ_id, var_id, part],
+        )
+    }
+
+    /// C++ parity: `LoadSoundfileInst` / `fSoundN->fSR[part]`.
+    /// Always returns `Int32` (sample-rate is stored as `int` in the Soundfile struct).
+    #[must_use]
+    pub fn load_soundfile_rate(&mut self, var: impl Into<String>, part: FirId) -> FirId {
+        let typ_id = encode_type(&mut self.store.arena, &FirType::Int32);
+        let var_id = self.store.arena.symbol(var);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_V_LOAD_SOUNDFILE_RATE_TAG,
+            &[typ_id, var_id, part],
+        )
+    }
+
+    /// C++ parity: `LoadSoundfileInst` / `((FAUSTFLOAT**)fSoundN->fBuffers)[chan][fSoundN->fOffset[part] + idx]`.
+    #[must_use]
+    pub fn load_soundfile_buffer(
+        &mut self,
+        var: impl Into<String>,
+        chan: FirId,
+        part: FirId,
+        idx: FirId,
+        typ: FirType,
+    ) -> FirId {
+        let typ_id = encode_type(&mut self.store.arena, &typ);
+        let var_id = self.store.arena.symbol(var);
+        intern_tag(
+            &mut self.store.arena,
+            FIR_V_LOAD_SOUNDFILE_BUFFER_TAG,
+            &[typ_id, var_id, chan, part, idx],
+        )
+    }
+
     /// C++ parity: `AddMetaDeclareInst`.
     #[must_use]
     pub fn add_meta_declare(
@@ -1324,6 +1369,24 @@ pub enum FirMatch {
         label: String,
         url: String,
         var: String,
+    },
+    /// C++ parity: `LoadSoundfileInst` / `fSoundN->fLength[part]`.
+    LoadSoundfileLength {
+        var: String,
+        part: FirId,
+    },
+    /// C++ parity: `LoadSoundfileInst` / `fSoundN->fSR[part]`.
+    LoadSoundfileRate {
+        var: String,
+        part: FirId,
+    },
+    /// C++ parity: `LoadSoundfileInst` / `((FAUSTFLOAT**)fSoundN->fBuffers)[chan][fSoundN->fOffset[part] + idx]`.
+    LoadSoundfileBuffer {
+        var: String,
+        chan: FirId,
+        part: FirId,
+        idx: FirId,
+        typ: FirType,
     },
     AddMetaDeclare {
         var: String,
@@ -1910,6 +1973,33 @@ pub fn match_fir(store: &FirStore, id: FirId) -> FirMatch {
                 var,
             }
         }
+        (FIR_V_LOAD_SOUNDFILE_LENGTH_TAG, [_typ, var, part]) => {
+            let Some(var) = decode_symbol(&store.arena, *var) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::LoadSoundfileLength { var, part: *part }
+        }
+        (FIR_V_LOAD_SOUNDFILE_RATE_TAG, [_typ, var, part]) => {
+            let Some(var) = decode_symbol(&store.arena, *var) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::LoadSoundfileRate { var, part: *part }
+        }
+        (FIR_V_LOAD_SOUNDFILE_BUFFER_TAG, [typ, var, chan, part, idx]) => {
+            let (Some(typ), Some(var)) = (
+                decode_type(&store.arena, *typ),
+                decode_symbol(&store.arena, *var),
+            ) else {
+                return FirMatch::Unknown;
+            };
+            FirMatch::LoadSoundfileBuffer {
+                var,
+                chan: *chan,
+                part: *part,
+                idx: *idx,
+                typ,
+            }
+        }
         (FIR_ADD_META_DECLARE_TAG, [var, key, value]) => {
             let (Some(var), Some(key), Some(value)) = (
                 decode_symbol(&store.arena, *var),
@@ -2032,6 +2122,12 @@ fn child_ids(node: &FirMatch) -> Vec<FirId> {
         | FirMatch::AddSoundfile { .. }
         | FirMatch::AddMetaDeclare { .. }
         | FirMatch::Label(_) => Vec::new(),
+        FirMatch::LoadSoundfileLength { part, .. } | FirMatch::LoadSoundfileRate { part, .. } => {
+            vec![*part]
+        }
+        FirMatch::LoadSoundfileBuffer {
+            chan, part, idx, ..
+        } => vec![*chan, *part, *idx],
         FirMatch::ValueArray { values, .. }
         | FirMatch::FunCall { args: values, .. }
         | FirMatch::DeclareTable { values, .. }
@@ -2166,6 +2262,9 @@ const FIR_ADD_BUTTON_TAG: &str = "FIRST_ADDBUTTON";
 const FIR_ADD_SLIDER_TAG: &str = "FIRST_ADDSLIDER";
 const FIR_ADD_BARGRAPH_TAG: &str = "FIRST_ADDBARGRAPH";
 const FIR_ADD_SOUNDFILE_TAG: &str = "FIRST_ADDSOUNDFILE";
+const FIR_V_LOAD_SOUNDFILE_LENGTH_TAG: &str = "FIRST_LOADSOUNDFILELEN";
+const FIR_V_LOAD_SOUNDFILE_RATE_TAG: &str = "FIRST_LOADSOUNDFILERATE";
+const FIR_V_LOAD_SOUNDFILE_BUFFER_TAG: &str = "FIRST_LOADSOUNDFILEBUF";
 const FIR_ADD_META_DECLARE_TAG: &str = "FIRST_ADDMETA";
 const FIR_LABEL_TAG: &str = "FIRST_LABEL";
 const FIR_MODULE_TAG: &str = "FIRST_MODULE";
@@ -2204,6 +2303,9 @@ fn is_value_tag(tag: &str) -> bool {
             | FIR_V_FUNCALL_TAG
             | FIR_V_NULL_TAG
             | FIR_V_NEW_DSP_TAG
+            | FIR_V_LOAD_SOUNDFILE_LENGTH_TAG
+            | FIR_V_LOAD_SOUNDFILE_RATE_TAG
+            | FIR_V_LOAD_SOUNDFILE_BUFFER_TAG
     )
 }
 

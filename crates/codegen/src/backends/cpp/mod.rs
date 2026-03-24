@@ -1168,6 +1168,28 @@ fn emit_value(
         }
         FirMatch::NullValue { .. } => Ok("nullptr".to_owned()),
         FirMatch::NewDsp { name, .. } => Ok(format!("new {name}()")),
+        FirMatch::LoadSoundfileLength { var, part } => {
+            let part = emit_value(store, options, part)?;
+            Ok(format!("{var}->fLength[{part}]"))
+        }
+        FirMatch::LoadSoundfileRate { var, part } => {
+            let part = emit_value(store, options, part)?;
+            Ok(format!("{var}->fSR[{part}]"))
+        }
+        FirMatch::LoadSoundfileBuffer {
+            var,
+            chan,
+            part,
+            idx,
+            ..
+        } => {
+            let chan = emit_value(store, options, chan)?;
+            let part = emit_value(store, options, part)?;
+            let idx = emit_value(store, options, idx)?;
+            Ok(format!(
+                "((FAUSTFLOAT**){var}->fBuffers)[{chan}][{var}->fOffset[{part}] + {idx}]"
+            ))
+        }
         _ => Err(unsupported_node("value", value, store)),
     }
 }
