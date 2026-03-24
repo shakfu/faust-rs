@@ -41,8 +41,72 @@ For each day file, entries are ordered from most recent commit to oldest using G
 - [`porting/journal/2026-03-22.md`](porting/journal/2026-03-22.md)
 - [`porting/journal/2026-03-23.md`](porting/journal/2026-03-23.md)
 - [`porting/journal/2026-03-24.md`](porting/journal/2026-03-24.md)
+- [`porting/journal/2026-03-25.md`](porting/journal/2026-03-25.md)
 
 See [`porting/journal/README.md`](porting/journal/README.md).
+
+## 2026-03-25 — feat(cranelift): add soundfile support in Cranelift backend
+
+`soundfile_zone_ptr()` added to `cranelift-ffi/src/instance.rs`: for `FirType::Sound` fields
+in the `dsp*` struct it returns the address cast as `*mut *mut c_void` — the `Soundfile**`
+expected by `SoundUI::addSoundfile`.  The `buildUserInterfaceCCraneliftDSPInstance` Soundfile
+arm now calls `soundfile_zone_ptr` so the host writes the loaded `Soundfile*` directly into
+the JIT struct field.  Three new `ComputeLowering` methods in `codegen/cranelift/mod.rs`
+implement `LoadSoundfileLength/Rate/Buffer` using the C++ packed-struct offsets (fBuffers=0,
+fLength=8, fSR=16, fOffset=24); `subset_expr_gap_reason` updated to accept all three variants.
+
+## 2026-03-25 — fix(interp-ffi): wire soundfile zones so loaded audio reaches executor
+
+After commit `5facc6a` the crash was gone but `compute()` played silence because
+`executor.soundfiles[slot]` still held `default_silence()` stubs.  Fix: `ui.rs` passes
+`&mut soundfile_zones[slot]` as the zone pointer; after `dispatch_ui_glue` returns,
+`sync_soundfiles_from_zones` reads each non-null C++ `Soundfile*` via a `#[repr(C, packed)]`
+mirror struct, copies `fLength`/`fSR`/`fOffset` arrays and per-channel audio buffers
+(handling both `fIsDouble=false` f32 and `fIsDouble=true` f64), then replaces the stubs via
+`set_soundfile()`.
+
+## 2026-03-25 — feat(interp): implement soundfile support in interpreter backend
+
+Full end-to-end soundfile pipeline for `faust-rs -lang interp`.  New module
+`codegen/backends/interp/soundfile.rs` defines `Soundfile` with `read_sample(chan,part,idx)`.
+Compiler: `soundfile_slots` map, `AddSoundfile` → slot + URL, three opcodes
+(`LoadSoundFieldInt` for length/rate, `LoadSoundFieldReal` for buffer).  Executor: pops
+`part`/`chan`/`idx` and dispatches to `sf.read_sample`.  Factory pre-populates with
+`default_silence()`.
+
+## 2026-03-24 — feat(signal_fir): lower SIGSOUNDFILELENGTH, SIGSOUNDFILERATE, SIGSOUNDFILEBUFFER
+
+End-to-end soundfile support for the fast-lane pipeline.  Three new `FirMatch` variants added
+to `crates/fir`.  Signal-FIR lowering maps the three Faust signal nodes to
+`fSoundN->fLength[part]`, `fSoundN->fSR[part]`, and the full buffer-index expression.  C and
+C++ backends emit the correct field-access expressions; C backend gains the missing
+`AddSoundfile` handler.  `tp0.dsp` compiles to correct output.
+
+## 2026-03-24 — feat(cli): add -v / -version / --version flag
+
+`faust-rs` now accepts `-v`, `-version`, and `--version`, printing `faust-rs <version>` and
+exiting.  Mirrors the reference Faust compiler `-version` option.  One file changed
+(`crates/compiler/src/main.rs`, +11 lines).
+
+## 2026-03-24 — fix(parser): block comment parsing and formatting
+
+`crates/parser/src/source_reader.rs` — improved handling of multi-line block comments
+(`/* … */`).  Also removed 14 stale `#[allow(unused_imports)]` / `#![allow(…)]` attributes
+across `codegen`, `fir`, `transform`, and `parser`.  24 files changed.
+
+## 2026-03-24 — refactor(boxes,eval): module splits
+
+`crates/boxes/src/lib.rs` (2169 lines) split into `tags.rs`, `internals.rs`, `builder.rs`,
+`matcher.rs`, `dump.rs`.  `crates/eval/src/lib.rs` (6523 lines) split into
+`source_context.rs`, `error.rs`, `environment.rs`, `loop_detector.rs`.  All public APIs
+re-exported unchanged from `lib.rs`.
+
+## 2026-03-24 — fix(eval): float literal pattern matching (`t8.dsp`)
+
+`simplify_pattern` illegally coerced integer-valued `Real` constants to `Int` before
+`TreeId` comparison, causing `foo2(1.0) = 456; process = foo2(1.0)` to fail.  Fix aligns
+with C++ `simplifyPattern`: literals are returned as-is with no Real→Int coercion.  Corpus
+entry `rep_72_float_literal_pattern.dsp` added.
 
 ## 2026-03-23 — refactor(boxes,eval): dead-code sweep — macros, dead helpers, stale allow attributes
 
