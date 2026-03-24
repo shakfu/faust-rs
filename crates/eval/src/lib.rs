@@ -1841,12 +1841,12 @@ fn propagate_box_and_simplify(arena: &mut TreeArena, box_id: TreeId) -> Option<S
 pub(crate) fn simplify_pattern(arena: &mut TreeArena, box_id: TreeId) -> TreeId {
     // Fast path: already a literal — return unchanged, no type coercion.
     //
-    // C++ `simplifyPattern` returns any `boxInt` / `boxReal` literal as-is,
-    // without converting integer-valued floats (e.g. `1.0`) to `boxInt(1)`.
-    // The Rust port must do the same: the automaton stores pattern constants as
-    // their original `TreeId` (e.g. `float_bits(0x3ff0000000000000)` for `1.0`),
-    // and the argument is matched by `TreeId` equality.  If we coerce `1.0` to
-    // `int(1)` here, `foo(1.0) = 456;` never matches the call `foo(1.0)`.
+    // C++ `isBoxNumeric` short-circuits on any `boxInt` / `boxReal` literal and
+    // returns it as-is, without converting integer-valued floats (`1.0`) to
+    // `boxInt(1)`.  The automaton stores pattern constants as their original
+    // `TreeId` (e.g. `float_bits(0x3ff0000000000000)` for `1.0`), and matching
+    // is a `TreeId` equality test.  Converting `1.0 → int(1)` here would make
+    // `foo(1.0) = 456;` never match the call `foo(1.0)`.
     match match_box(arena, box_id) {
         BoxMatch::Int(_) | BoxMatch::Real(_) => return box_id,
         _ => {}
@@ -1854,12 +1854,14 @@ pub(crate) fn simplify_pattern(arena: &mut TreeArena, box_id: TreeId) -> TreeId 
     let Some(sig) = propagate_box_and_simplify(arena, box_id) else {
         return box_id;
     };
-    // For arithmetic expressions the result type is determined by the signal
-    // type: `SigInt` for integer-only operations (e.g. `1+1`), `SigReal` for
-    // anything involving a float — including `4/2` which Faust evaluates as
-    // real-valued division.  We must NOT coerce `SigReal(2.0)` to `Int(2)`:
-    // the pattern `foo(4.0/2.0) = 789;` must store a `boxReal(2.0)` constant,
-    // not `boxInt(2)`, so that argument simplification produces the same form.
+    // For arithmetic expressions, the signal type determines the result type:
+    // - `SigInt` for integer-only operations (e.g. `1+1`, `max(int,int)`).
+    //   C++ xtended `computeSigOutput` for `min`/`max` preserves the integer
+    //   type when both operands are integers; `normalize/src/simplify.rs` now
+    //   mirrors this so `max(1, min(2, 4))` folds to `SigInt(2)`.
+    // - `SigReal` for anything involving a float or real-valued ops (e.g. `/`).
+    //   The pattern `foo(4.0/2.0) = 789;` stores `boxReal(2.0)` and the
+    //   argument simplifies to the same — no coercion needed.
     let value = match match_sig(arena, sig) {
         SigMatch::Int(i) => Some(NumericLit::Int(i)),
         SigMatch::Real(x) => Some(NumericLit::Real(x)),

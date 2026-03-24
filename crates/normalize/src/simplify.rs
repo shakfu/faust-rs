@@ -236,7 +236,18 @@ fn match_simplification(
                 'E' => a.max(b),
                 _ => unreachable!(),
             };
-            let folded = SigBuilder::new(arena).real(result);
+            // C++ parity: `min`/`max` are xtended primitives whose
+            // `computeSigOutput` preserves the integer type when both
+            // operands are `SigInt`.  All other two-arg math functions
+            // (atan2, fmod, remainder, pow) always produce `SigReal`.
+            let folded = if matches!(tag, 'D' | 'E')
+                && matches!(match_sig(arena, x), SigMatch::Int(_))
+                && matches!(match_sig(arena, y), SigMatch::Int(_))
+            {
+                SigBuilder::new(arena).int(result as i32)
+            } else {
+                SigBuilder::new(arena).real(result)
+            };
             return if tag == 'P' {
                 // Pow: apply normalize_add_term to the folded result (C++ special case).
                 normalize_add_term(arena, types, folded)
@@ -908,5 +919,58 @@ mod tests {
             }
             other => panic!("expected x+x or 2*x, got {other:?}"),
         }
+    }
+
+    /// `min(int, int)` must fold to `SigInt`, not `SigReal`.
+    ///
+    /// C++ parity: xtended `computeSigOutput` preserves the integer type when
+    /// both operands of `min`/`max` are integers.  A regression here caused
+    /// `poly(max(1,min(N,4)), x)` pattern matching to fail because the argument
+    /// `max(1,min(2,4))` simplified to `SigReal(2.0)` instead of `SigInt(2)`,
+    /// and the automaton stored `Constant(boxInt(2))` — so `boxReal(2.0) ≠
+    /// boxInt(2)` → "no case rule matches" (`carre_volterra.dsp` regression).
+    #[test]
+    fn simplify_min_int_int_preserves_int_type() {
+        let mut a = arena();
+        let t = types();
+        let i2 = SigBuilder::new(&mut a).int(2);
+        let i4 = SigBuilder::new(&mut a).int(4);
+        let m = SigBuilder::new(&mut a).min(i2, i4);
+        let r = simplify(&mut a, &t, m);
+        assert_eq!(
+            match_sig(&a, r),
+            SigMatch::Int(2),
+            "min(int(2), int(4)) should fold to SigInt(2), not SigReal"
+        );
+    }
+
+    #[test]
+    fn simplify_max_int_int_preserves_int_type() {
+        let mut a = arena();
+        let t = types();
+        let i1 = SigBuilder::new(&mut a).int(1);
+        let i2 = SigBuilder::new(&mut a).int(2);
+        let m = SigBuilder::new(&mut a).max(i1, i2);
+        let r = simplify(&mut a, &t, m);
+        assert_eq!(
+            match_sig(&a, r),
+            SigMatch::Int(2),
+            "max(int(1), int(2)) should fold to SigInt(2), not SigReal"
+        );
+    }
+
+    /// `min(real, real)` must still fold to `SigReal`.
+    #[test]
+    fn simplify_min_real_real_returns_real() {
+        let mut a = arena();
+        let t = types();
+        let r1 = SigBuilder::new(&mut a).real(1.5);
+        let r2 = SigBuilder::new(&mut a).real(3.0);
+        let m = SigBuilder::new(&mut a).min(r1, r2);
+        let result = simplify(&mut a, &t, m);
+        assert!(
+            matches!(match_sig(&a, result), SigMatch::Real(v) if (v - 1.5).abs() < 1e-12),
+            "min(real(1.5), real(3.0)) should fold to SigReal(1.5)"
+        );
     }
 }
