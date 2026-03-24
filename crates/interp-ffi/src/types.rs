@@ -26,9 +26,9 @@
 //! application must be compiled with `FAUSTFLOAT=double` to read them
 //! correctly, matching the upstream C++ contract.
 
-use std::ffi::c_char;
+use std::ffi::{c_char, c_void};
 
-use codegen::backends::interp::{BlockId, FbcDspFactory, FbcExecutor, FbcMetaInstruction};
+use codegen::backends::interp::{BlockId, FbcDspFactory, FbcExecutor, FbcMetaInstruction, Soundfile};
 
 /// `FAUSTFLOAT` type at the C ABI boundary (always `f32`).
 pub type FaustFloat = f32;
@@ -172,6 +172,14 @@ impl FbcDspFactoryAny {
         matches!(self, Self::Float64(_))
     }
 
+    /// Returns the number of soundfile slots required by this factory.
+    pub fn soundfile_count(&self) -> usize {
+        match self {
+            Self::Float32(f) => f.soundfile_count(),
+            Self::Float64(f) => f.soundfile_count(),
+        }
+    }
+
     /// Trigger one-shot bytecode optimization (idempotent).
     pub fn optimize(&mut self) {
         match self {
@@ -264,14 +272,19 @@ impl FbcDspFactoryAny {
     ///
     /// # Safety
     /// `glue` must be non-null and point to a valid `UIGlue`.
-    pub unsafe fn dispatch_ui_glue(&self, exec: &mut FbcExecutorAny, glue: *mut UIGlue) {
+    pub unsafe fn dispatch_ui_glue(
+        &self,
+        exec: &mut FbcExecutorAny,
+        soundfile_zones: &mut [*mut c_void],
+        glue: *mut UIGlue,
+    ) {
         unsafe {
             match (self, exec) {
                 (Self::Float32(f), FbcExecutorAny::Float32(e)) => {
-                    crate::ui::dispatch_ui_f32(&f.ui_block, &mut e.real_heap, glue);
+                    crate::ui::dispatch_ui_f32(&f.ui_block, &mut e.real_heap, soundfile_zones, glue);
                 }
                 (Self::Float64(f), FbcExecutorAny::Float64(e)) => {
-                    crate::ui::dispatch_ui_f64(&f.ui_block, &mut e.real_heap, glue);
+                    crate::ui::dispatch_ui_f64(&f.ui_block, &mut e.real_heap, soundfile_zones, glue);
                 }
                 _ => {}
             }
@@ -289,16 +302,27 @@ pub enum FbcExecutorAny {
 
 impl FbcExecutorAny {
     /// Allocate a new executor matching the precision of `factory`.
+    ///
+    /// Soundfile slots are pre-populated with default silence so that
+    /// `LoadSoundFieldInt`/`LoadSoundFieldReal` opcodes never index out-of-bounds
+    /// before real audio data is provided by the host.
     pub fn new_for_factory(factory: &FbcDspFactoryAny) -> Self {
+        let sf_count = factory.soundfile_count();
         match factory {
-            FbcDspFactoryAny::Float32(f) => Self::Float32(FbcExecutor::new(
-                f.int_heap_size as usize,
-                f.real_heap_size as usize,
-            )),
-            FbcDspFactoryAny::Float64(f) => Self::Float64(FbcExecutor::new(
-                f.int_heap_size as usize,
-                f.real_heap_size as usize,
-            )),
+            FbcDspFactoryAny::Float32(f) => {
+                let mut e = FbcExecutor::new(f.int_heap_size as usize, f.real_heap_size as usize);
+                e.soundfiles = (0..sf_count)
+                    .map(|_| Box::new(Soundfile::default_silence()))
+                    .collect();
+                Self::Float32(e)
+            }
+            FbcDspFactoryAny::Float64(f) => {
+                let mut e = FbcExecutor::new(f.int_heap_size as usize, f.real_heap_size as usize);
+                e.soundfiles = (0..sf_count)
+                    .map(|_| Box::new(Soundfile::default_silence()))
+                    .collect();
+                Self::Float64(e)
+            }
         }
     }
 
@@ -315,6 +339,19 @@ impl FbcExecutorAny {
         match self {
             Self::Float32(e) => &mut e.int_heap,
             Self::Float64(e) => &mut e.int_heap,
+        }
+    }
+
+    /// Replace the `Soundfile` at `slot` with new data.
+    ///
+    /// Used after `buildUserInterface` to swap in real audio loaded by the host.
+    pub fn set_soundfile(&mut self, slot: usize, sf: Soundfile) {
+        let entry = match self {
+            Self::Float32(e) => e.soundfiles.get_mut(slot),
+            Self::Float64(e) => e.soundfiles.get_mut(slot),
+        };
+        if let Some(entry) = entry {
+            *entry = Box::new(sf);
         }
     }
 
@@ -356,6 +393,13 @@ pub struct InterpreterDspInstance {
     pub(crate) factory: *const InterpreterDspFactory,
     /// Execution heaps (int + real) — precision matches the factory.
     pub(crate) executor: FbcExecutorAny,
+    /// One `*mut c_void` slot per soundfile, written by `SoundUI::addSoundfile`.
+    ///
+    /// Each element is the `Soundfile*` provided by the host audio layer after
+    /// `buildUserInterface` completes.  Allocated once at instance creation with
+    /// `null_mut()` sentinels so the vector's address is stable before the first
+    /// UI traversal.
+    pub(crate) soundfile_zones: Vec<*mut c_void>,
     /// Whether `init()` has been called.
     pub(crate) initialized: bool,
     /// Number of `compute()` cycles executed.
@@ -387,10 +431,12 @@ pub(crate) unsafe fn free_factory(ptr: *mut InterpreterDspFactory) {
 pub(crate) fn alloc_instance(
     factory: *const InterpreterDspFactory,
     executor: FbcExecutorAny,
+    soundfile_zones: Vec<*mut c_void>,
 ) -> *mut InterpreterDspInstance {
     utils::alloc_opaque(InterpreterDspInstance {
         factory,
         executor,
+        soundfile_zones,
         initialized: false,
         cycle: 0,
     })

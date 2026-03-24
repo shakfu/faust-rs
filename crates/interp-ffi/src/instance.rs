@@ -14,14 +14,105 @@
 //! in double mode, samples are converted `f32 → f64` on entry and
 //! `f64 → f32` on exit inside `computeCInterpreterDSPInstance`.
 
-use std::ffi::c_char;
+use std::ffi::{c_char, c_void};
 use std::os::raw::c_int;
+
+use codegen::backends::interp::Soundfile;
 
 use crate::types::{
     FaustFloat, FbcExecutorAny, InterpreterDspFactory, InterpreterDspInstance, MetaGlue, UIGlue,
     alloc_instance, free_instance,
 };
 use crate::ui::dispatch_meta;
+
+// ── C++ Soundfile struct mirror ───────────────────────────────────────────────
+
+/// Mirrors the packed C++ `Soundfile` struct from `<faust/gui/Soundfile.h>`.
+///
+/// Fields are laid out identically to `__attribute__((__packed__))` in C++,
+/// which on 64-bit targets matches natural alignment (no trailing padding is
+/// inserted between these particular types).
+#[repr(C, packed)]
+struct CSoundfile {
+    f_buffers:  *mut c_void, // float** or double** depending on f_is_double
+    f_length:   *mut i32,    // [MAX_SOUNDFILE_PARTS] — length in frames per part
+    f_sr:       *mut i32,    // [MAX_SOUNDFILE_PARTS] — sample rate per part
+    f_offset:   *mut i32,    // [MAX_SOUNDFILE_PARTS] — frame offset per part
+    f_channels: i32,         // number of channels
+    f_parts:    i32,         // number of parts
+    f_is_double: bool,       // true → buffers are f64, false → f32
+}
+
+/// After `buildUserInterface` the host (`SoundUI`) has written loaded
+/// `Soundfile*` pointers into `zones`.  This function reads each C++ struct
+/// and replaces the corresponding `default_silence` entry in the executor.
+///
+/// # Safety
+/// Every non-null element of `zones` must point to a valid `Soundfile`
+/// object whose lifetime extends at least until this function returns.
+unsafe fn sync_soundfiles_from_zones(exec: &mut FbcExecutorAny, zones: &[*mut c_void]) {
+    use std::ptr::addr_of;
+
+    for (slot, &zone) in zones.iter().enumerate() {
+        if zone.is_null() {
+            continue;
+        }
+
+        // SAFETY: non-null zone was written by SoundUI::addSoundfile with a
+        // valid heap-allocated Soundfile*.
+        let csf: *const CSoundfile = zone as *const CSoundfile;
+
+        // Use read_unaligned via addr_of! in case the compiler sees a packed ref.
+        let channels   = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_channels)) } as usize;
+        let parts      = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_parts)) } as usize;
+        let is_double  = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_is_double)) };
+        let len_ptr    = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_length)) };
+        let sr_ptr     = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_sr)) };
+        let off_ptr    = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_offset)) };
+        let buf_ptr    = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_buffers)) };
+
+        if parts == 0 || channels == 0 || len_ptr.is_null() || sr_ptr.is_null() || off_ptr.is_null() || buf_ptr.is_null() {
+            continue;
+        }
+
+        let lengths: Vec<i32>      = unsafe { std::slice::from_raw_parts(len_ptr, parts).to_vec() };
+        let sample_rates: Vec<i32> = unsafe { std::slice::from_raw_parts(sr_ptr,  parts).to_vec() };
+        let offsets: Vec<i32>      = unsafe { std::slice::from_raw_parts(off_ptr, parts).to_vec() };
+
+        // Total contiguous buffer length per channel.
+        let total_frames = (offsets[parts - 1] + lengths[parts - 1]).max(0) as usize;
+
+        let mut buffers: Vec<Vec<f64>> = Vec::with_capacity(channels);
+        for c in 0..channels {
+            let chan_buf: Vec<f64> = if is_double {
+                let ptrs = buf_ptr as *const *const f64;
+                let ptr = unsafe { *ptrs.add(c) };
+                unsafe { std::slice::from_raw_parts(ptr, total_frames) }
+                    .iter()
+                    .copied()
+                    .collect()
+            } else {
+                let ptrs = buf_ptr as *const *const f32;
+                let ptr = unsafe { *ptrs.add(c) };
+                unsafe { std::slice::from_raw_parts(ptr, total_frames) }
+                    .iter()
+                    .map(|&x| x as f64)
+                    .collect()
+            };
+            buffers.push(chan_buf);
+        }
+
+        let sf = Soundfile {
+            num_channels: channels,
+            num_parts:    parts,
+            lengths,
+            sample_rates,
+            offsets,
+            buffers,
+        };
+        exec.set_soundfile(slot, sf);
+    }
+}
 
 // ── Instance creation / deletion ─────────────────────────────────────────────
 
@@ -43,8 +134,10 @@ pub unsafe extern "C" fn createCInterpreterDSPInstance(
         // Trigger one-shot optimization (idempotent after first call).
         (*factory).inner.optimize();
 
+        let sf_count = (*factory).inner.soundfile_count();
+        let soundfile_zones = vec![std::ptr::null_mut(); sf_count];
         let executor = FbcExecutorAny::new_for_factory(&(*factory).inner);
-        alloc_instance(factory as *const _, executor)
+        alloc_instance(factory as *const _, executor, soundfile_zones)
     }
 }
 
@@ -232,7 +325,10 @@ pub unsafe extern "C" fn cloneCInterpreterDSPInstance(
         let mut new_executor = FbcExecutorAny::new_for_factory(factory);
         new_executor.copy_from(&(*dsp).executor);
 
-        let clone = alloc_instance(factory_ptr, new_executor);
+        // Clone soundfile zones: copy the pointers (same C++ Soundfile* targets).
+        let new_soundfile_zones = (*dsp).soundfile_zones.clone();
+
+        let clone = alloc_instance(factory_ptr, new_executor, new_soundfile_zones);
         (*clone).initialized = (*dsp).initialized;
         (*clone).cycle = 0;
         clone
@@ -259,7 +355,10 @@ pub unsafe extern "C" fn buildUserInterfaceCInterpreterDSPInstance(
             return;
         }
         let factory = &(*(*dsp).factory).inner;
-        factory.dispatch_ui_glue(&mut (*dsp).executor, glue);
+        factory.dispatch_ui_glue(&mut (*dsp).executor, &mut (*dsp).soundfile_zones, glue);
+        // Sync real audio data from the C++ Soundfile objects now that the
+        // host has finished populating soundfile_zones.
+        sync_soundfiles_from_zones(&mut (*dsp).executor, &(*dsp).soundfile_zones);
     }
 }
 

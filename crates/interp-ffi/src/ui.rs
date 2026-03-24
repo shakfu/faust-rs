@@ -9,7 +9,7 @@
 //!   `f32` for callbacks; zone pointers are `*mut f64` reinterpreted as
 //!   `*mut f32` (application must use `FAUSTFLOAT=double`).
 
-use std::ffi::CString;
+use std::ffi::{CString, c_void};
 
 use codegen::backends::interp::{FbcMetaInstruction, FbcOpcode, FbcUiInstruction};
 
@@ -20,12 +20,17 @@ use crate::types::{FaustFloat, MetaGlue, UIGlue};
 /// Each instruction maps to the corresponding `UIGlue` function pointer.
 /// The `zone` pointer for widgets points into `real_heap` at `instr.offset`.
 ///
+/// For `AddSoundfile` instructions, `soundfile_zones[instr.offset]` is passed
+/// as the `void**` zone so the host's `SoundUI::addSoundfile` can write the
+/// loaded `Soundfile*` to a stable address.
+///
 /// # Safety
 /// - `glue` must be non-null and point to a valid `UIGlue`.
 /// - `real_heap` must have at least `instr.offset + 1` elements for widget instructions.
 pub(crate) unsafe fn dispatch_ui_f32(
     ui: &[FbcUiInstruction<FaustFloat>],
     real_heap: &mut [FaustFloat],
+    soundfile_zones: &mut [*mut c_void],
     glue: *mut UIGlue,
 ) {
     unsafe {
@@ -133,14 +138,19 @@ pub(crate) unsafe fn dispatch_ui_f32(
                     }
                 }
                 FbcOpcode::AddSoundfile => {
-                    // Soundfile** zone — not supported in this port; pass null.
                     if let Some(f) = glue.add_soundfile {
                         let url = c_str(&instr.key);
+                        // Pass a pointer to the soundfile_zones slot so the host
+                        // (e.g. SoundUI::addSoundfile) can write the Soundfile* to it.
+                        let slot = instr.offset as usize;
+                        let zone_ptr: *mut *mut c_void = soundfile_zones
+                            .get_mut(slot)
+                            .map_or(std::ptr::null_mut(), |z| z as *mut *mut c_void);
                         f(
                             glue.ui_interface,
                             label.as_ptr(),
                             url.as_ptr(),
-                            std::ptr::null_mut(),
+                            zone_ptr,
                         );
                     }
                 }
@@ -182,12 +192,16 @@ pub(crate) unsafe fn dispatch_meta(meta_block: &[FbcMetaInstruction], glue: *mut
 /// `*mut f32` so the `UIGlue` signatures remain unchanged — the application
 /// must be compiled with `FAUSTFLOAT=double` to interpret them correctly.
 ///
+/// For `AddSoundfile` instructions, `soundfile_zones[instr.offset]` is passed
+/// as the `void**` zone (same as in `dispatch_ui_f32`).
+///
 /// # Safety
 /// - `glue` must be non-null and point to a valid `UIGlue`.
 /// - `real_heap` must have at least `instr.offset + 1` elements for widget instructions.
 pub(crate) unsafe fn dispatch_ui_f64(
     ui: &[FbcUiInstruction<f64>],
     real_heap: &mut [f64],
+    soundfile_zones: &mut [*mut c_void],
     glue: *mut UIGlue,
 ) {
     unsafe {
@@ -293,11 +307,15 @@ pub(crate) unsafe fn dispatch_ui_f64(
                 FbcOpcode::AddSoundfile => {
                     if let Some(f) = glue.add_soundfile {
                         let url = c_str(&instr.key);
+                        let slot = instr.offset as usize;
+                        let zone_ptr: *mut *mut c_void = soundfile_zones
+                            .get_mut(slot)
+                            .map_or(std::ptr::null_mut(), |z| z as *mut *mut c_void);
                         f(
                             glue.ui_interface,
                             label.as_ptr(),
                             url.as_ptr(),
-                            std::ptr::null_mut(),
+                            zone_ptr,
                         );
                     }
                 }
