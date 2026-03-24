@@ -191,6 +191,9 @@ struct CliArgs {
     /// / `--dump-interp` / `--dump-cranelift`.
     #[arg(long = "lang", value_enum, allow_hyphen_values = true)]
     lang: Option<CliLang>,
+    /// Print version information and exit.
+    #[arg(short = 'v', long = "version", action = ArgAction::SetTrue)]
+    version: bool,
     /// Print dedicated help for diagnostic output formats and exit.
     #[arg(long = "help-error-format", action = ArgAction::SetTrue)]
     help_error_format: bool,
@@ -317,6 +320,10 @@ fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> 
         }
         if arg == "-double" {
             normalized.push("--double".to_owned());
+            continue;
+        }
+        if arg == "-version" {
+            normalized.push("--version".to_owned());
             continue;
         }
         if arg == "-time" {
@@ -911,6 +918,10 @@ fn render_fir_verify_report(store: &fir::FirStore, module: fir::FirId, strict: b
 fn main() {
     let args = normalize_legacy_args(std::env::args());
     let cli = CliArgs::parse_from(args);
+    if cli.version {
+        println!("faust-rs {}", Compiler::version());
+        return;
+    }
     maybe_print_error_format_help(cli.help_error_format);
 
     // Cooperative cancellation flag + CLI watchdog.
