@@ -631,6 +631,31 @@ fn inline_group_label_metadata_splits_display_label_and_group_metadata() {
     );
 }
 
+/// Regression test for rep_72: float literal patterns must not be coerced to
+/// integers during argument simplification.
+///
+/// `foo2(1.0) = 456;` stores a `float_bits(1.0)` constant transition.
+/// The old `simplify_pattern` fast-path converted `Real(1.0)` → `Int(1)`,
+/// so the TreeId equality check `int(1) == float_bits(1.0)` failed.
+#[test]
+fn corpus_float_literal_pattern_matching_compiles_like_cpp() {
+    let out = compile_corpus("rep_72_float_literal_pattern.dsp");
+    // 4 outputs, 0 inputs — all four pattern functions are constants.
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 4);
+    // Every output must simplify to a numeric constant.
+    for sig in &out.signals {
+        assert!(
+            matches!(
+                match_sig(&out.parse.state.arena, *sig),
+                SigMatch::Int(_) | SigMatch::Real(_)
+            ),
+            "each output of rep_72 should be a numeric constant, got {:?}",
+            match_sig(&out.parse.state.arena, *sig)
+        );
+    }
+}
+
 fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i32) {
     let SigMatch::BinOp(BinOp::Mul, a, b) = match_sig(arena, sig) else {
         panic!("branch should be Mul");
