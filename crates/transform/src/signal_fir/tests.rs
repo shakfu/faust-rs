@@ -1,3 +1,22 @@
+//! Test suite for the `signal_fir` fast-lane lowering pass.
+//!
+//! # Structure
+//!
+//! Each `#[test]` function follows the same three-step pattern:
+//!
+//! 1. **Build a signal forest** — use [`SigBuilder`] and, where needed,
+//!    [`de_bruijn_rec`] / [`de_bruijn_ref`] to construct the input signal tree
+//!    directly in a [`TreeArena`].
+//! 2. **Lower to FIR** — call [`compile_fastlane_without_ui`] (or the full
+//!    entry point for UI tests) and unwrap the [`SignalFirOutput`].
+//! 3. **Assert on the FIR tree** — navigate to the relevant node with
+//!    [`find_compute_loop_body`] / [`find_decl_fun_body`], strip the mandatory
+//!    output cast with [`unwrap_output_cast`], then pattern-match with
+//!    [`match_fir`].
+//!
+//! The private helpers below form a minimal test DSL that keeps the
+//! assertion-focused body of each test free from boilerplate traversal code.
+
 use super::{
     RealType, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui,
 };
@@ -9,11 +28,19 @@ use ui::{ControlKind, ControlRange, ControlSpec, UiBuilder, UiProgram, UiRootOri
 
 use crate::signal_prepare::{SimpleSigType, prepare_signals_for_fir};
 
-/// Peels off a `Cast(FaustFloat, inner)` wrapper if present.
+// ── FIR tree navigation ──────────────────────────────────────────────────────
+
+/// Peels off a `Cast(FaustFloat, inner)` wrapper if present, returning the
+/// inner node unchanged if no such wrapper exists.
 ///
-/// Since the output sample store now always emits an explicit cast from the
-/// internal real type to `FaustFloat`, tests that inspect the *computation*
-/// node (not the cast itself) should call this helper before matching.
+/// The lowering pass always stores output samples through an explicit
+/// `Cast(FaustFloat, …)` regardless of the internal real type, so that
+/// the generated C always writes `float` (or `double`) to the output
+/// buffer regardless of the internal computation type.
+///
+/// Tests that want to assert on the *computation* result — rather than the
+/// cast that writes it to the buffer — should call this first to peel the
+/// wrapper and reach the actual expression node.
 fn unwrap_output_cast(store: &fir::FirStore, id: fir::FirId) -> fir::FirId {
     match match_fir(store, id) {
         FirMatch::Cast {
@@ -24,6 +51,16 @@ fn unwrap_output_cast(store: &fir::FirStore, id: fir::FirId) -> fir::FirId {
     }
 }
 
+/// Locates a named `DeclareFun` in a FIR functions block and returns its body.
+///
+/// `functions` must be a `FirMatch::Block` of `DeclareFun` nodes (the
+/// top-level functions block of a generated FIR module). Panics with a
+/// descriptive message if the block or the named function cannot be found,
+/// or if the matching declaration has no body.
+///
+/// Used by [`find_compute_loop_body`] and directly by tests that need to
+/// inspect generated functions other than `compute` (e.g. `init`,
+/// `instanceInit`, `getNumInputs`).
 fn find_decl_fun_body(
     store: &fir::FirStore,
     functions: fir::FirId,
@@ -51,6 +88,38 @@ fn find_decl_fun_body(
     body
 }
 
+/// Returns the body block of the sample loop inside the generated `compute`
+/// function.
+///
+/// Every compiled DSP produces a `compute(count, inputs, outputs)` function
+/// whose body contains exactly one sample-processing for-loop
+/// (`SimpleForLoop` or `ForLoop`). This helper navigates past the function
+/// declaration and loop header to return the loop body directly, so that
+/// tests can pattern-match on individual statements (assignments, stores,
+/// calls) without repeating the traversal.
+///
+/// Panics if the `compute` function or its sample loop is absent.
+fn find_compute_loop_body(store: &fir::FirStore, functions: fir::FirId) -> fir::FirId {
+    let compute_body = find_decl_fun_body(store, functions, "compute");
+    let FirMatch::Block(stmts) = match_fir(store, compute_body) else {
+        panic!("compute block expected");
+    };
+    stmts
+        .iter()
+        .find_map(|id| match match_fir(store, *id) {
+            FirMatch::SimpleForLoop { body, .. } | FirMatch::ForLoop { body, .. } => Some(body),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("compute should contain an explicit sample loop"))
+}
+
+// ── Compilation entry-point wrappers ─────────────────────────────────────────
+
+/// Runs the full fast-lane lowering pipeline with an empty UI program.
+///
+/// Most signal-level tests are not concerned with UI widget lowering.
+/// This wrapper passes an empty [`UiProgram`] so those tests do not need
+/// to construct one explicitly, reducing per-test boilerplate.
 fn compile_fastlane_without_ui(
     arena: &TreeArena,
     signals: &[signals::SigId],
@@ -69,20 +138,21 @@ fn compile_fastlane_without_ui(
     )
 }
 
-fn find_compute_loop_body(store: &fir::FirStore, functions: fir::FirId) -> fir::FirId {
-    let compute_body = find_decl_fun_body(store, functions, "compute");
-    let FirMatch::Block(stmts) = match_fir(store, compute_body) else {
-        panic!("compute block expected");
-    };
-    stmts
-        .iter()
-        .find_map(|id| match match_fir(store, *id) {
-            FirMatch::SimpleForLoop { body, .. } | FirMatch::ForLoop { body, .. } => Some(body),
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("compute should contain an explicit sample loop"))
-}
+// ── UI fixture builders ───────────────────────────────────────────────────────
 
+/// Builds a minimal [`UiProgram`] containing exactly one control.
+///
+/// The generated program has a single top-level `vgroup("")` containing one
+/// leaf node whose slot index is `0`. The `ControlSpec` at that slot is
+/// filled with `kind`, `label`, and `range` as provided.
+///
+/// The three boolean flags select the leaf node type:
+/// - `soundfile = true` → `UiBuilder::soundfile(0)` (takes precedence)
+/// - `output = true` → `UiBuilder::output_control(0)` (bargraph)
+/// - otherwise → `UiBuilder::input_control(0)` (slider / button / etc.)
+///
+/// Used by tests that exercise the UI lowering path (bargraphs, sliders,
+/// soundfiles) without needing a full hand-crafted `UiProgram`.
 fn one_control_ui(
     kind: ControlKind,
     label: &str,
