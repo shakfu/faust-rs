@@ -2532,6 +2532,5 @@ fn funargs_constant_index(store: &FirStore, id: FirId) -> Option<usize> {
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-
 #[cfg(test)]
 mod tests;

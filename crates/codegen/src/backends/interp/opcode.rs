@@ -1249,6 +1249,5 @@ pub static FBC_INSTRUCTION_NAMES: [&str; FBC_OPCODE_COUNT] = [
     "kNop", // 293
 ];
 
-
 #[cfg(test)]
 mod tests;

@@ -50,8 +50,7 @@ fn instruction_with_values() {
 #[test]
 /// Verifies `with_values_and_offsets` fills both payload and offset fields.
 fn instruction_with_values_and_offsets() {
-    let instr =
-        FbcInstruction::<f64>::with_values_and_offsets(FbcOpcode::LoadReal, 0, 0.0, 42, -1);
+    let instr = FbcInstruction::<f64>::with_values_and_offsets(FbcOpcode::LoadReal, 0, 0.0, 42, -1);
     assert_eq!(instr.opcode, FbcOpcode::LoadReal);
     assert_eq!(instr.offset1, 42);
     assert_eq!(instr.offset2, -1);
@@ -108,8 +107,7 @@ fn block_is_real_inst() {
 /// Verifies block-store payloads stay attached to the owning instruction.
 fn block_store_data() {
     let mut block = FbcBlock::<f32>::new();
-    let instr =
-        FbcInstruction::with_values_and_offsets(FbcOpcode::BlockStoreReal, 0, 0.0, 0, 4);
+    let instr = FbcInstruction::with_values_and_offsets(FbcOpcode::BlockStoreReal, 0, 0.0, 0, 4);
     let data = BlockStoreData::Real(vec![1.0, 2.0, 3.0, 4.0]);
     block.push_block_store(instr, data);
     block.push(FbcInstruction::new(FbcOpcode::Return));

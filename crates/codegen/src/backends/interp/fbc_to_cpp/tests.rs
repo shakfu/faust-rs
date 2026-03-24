@@ -65,9 +65,7 @@ fn generate_basic_structure() {
     assert!(cpp.contains("void instanceInit(int sample_rate)"), "{cpp}");
     assert!(cpp.contains("void init(int sample_rate) override"), "{cpp}");
     assert!(
-        cpp.contains(
-            "void compute(int count, FAUSTFLOAT** inputs, FAUSTFLOAT** outputs) override"
-        ),
+        cpp.contains("void compute(int count, FAUSTFLOAT** inputs, FAUSTFLOAT** outputs) override"),
         "{cpp}"
     );
     assert!(cpp.contains("dsp* clone() override"), "{cpp}");

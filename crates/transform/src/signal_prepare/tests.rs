@@ -124,8 +124,7 @@ fn prepare_signals_for_fir_keeps_integer_recursive_min_feedback_int() {
         .expect("recursive int min should prepare");
 
     assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
-    let SigMatch::Proj(_, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0])
-    else {
+    let SigMatch::Proj(_, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0]) else {
         panic!("prepared output should stay a projection");
     };
     let (_, prepared_body_list) =
@@ -171,8 +170,7 @@ fn prepare_signals_for_fir_keeps_integer_recursive_abs_feedback_int() {
         .expect("recursive int abs should prepare");
 
     assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
-    let SigMatch::Proj(_, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0])
-    else {
+    let SigMatch::Proj(_, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0]) else {
         panic!("prepared output should stay a projection");
     };
     let (_, prepared_body_list) =
@@ -271,8 +269,7 @@ fn prepare_signals_for_fir_recovers_shared_select2_selector_from_float_context()
         prepare_signals_for_fir(&arena, &[arith_out, select_out], &ui::UiProgram::empty())
             .expect("shared comparison should promote in both arithmetic and select2 contexts");
 
-    let SigMatch::Select2(selector, _, _) = match_sig(&prepared.arena, prepared.outputs[1])
-    else {
+    let SigMatch::Select2(selector, _, _) = match_sig(&prepared.arena, prepared.outputs[1]) else {
         panic!("second output should stay SIGSELECT2");
     };
     assert!(
@@ -384,8 +381,7 @@ fn prepare_signals_for_fir_recovers_shared_wrtbl_write_signal_from_float_context
         prepare_signals_for_fir(&arena, &[arith_out, table_out], &ui::UiProgram::empty())
             .expect("shared comparison should promote in both arithmetic and wrtbl contexts");
 
-    let SigMatch::WrTbl(_, _, _, write_signal) =
-        match_sig(&prepared.arena, prepared.outputs[1])
+    let SigMatch::WrTbl(_, _, _, write_signal) = match_sig(&prepared.arena, prepared.outputs[1])
     else {
         panic!("second output should stay SIGWRTBL");
     };
@@ -422,9 +418,7 @@ fn prepare_signals_for_fir_recovers_shared_zero_pad_amount_from_float_context() 
 
     let prepared =
         prepare_signals_for_fir(&arena, &[arith_out, padded_out], &ui::UiProgram::empty())
-            .expect(
-                "shared comparison should promote in both arithmetic and zero_pad contexts",
-            );
+            .expect("shared comparison should promote in both arithmetic and zero_pad contexts");
 
     let SigMatch::ZeroPad(_, amount) = match_sig(&prepared.arena, prepared.outputs[1]) else {
         panic!("second output should stay SIGZEROPAD");
@@ -485,8 +479,7 @@ fn prepare_signals_for_fir_promotes_real_mul_operands_before_binop() {
     let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
         .expect("mixed real/int multiplication should prepare");
 
-    let SigMatch::BinOp(BinOp::Mul, left, right) =
-        match_sig(&prepared.arena, prepared.outputs[0])
+    let SigMatch::BinOp(BinOp::Mul, left, right) = match_sig(&prepared.arena, prepared.outputs[0])
     else {
         panic!("prepared output should stay SIGBINOP(Mul, ...)");
     };
@@ -614,8 +607,7 @@ fn prepare_signals_for_fir_canonicalizes_unary_recursive_projection_indices() {
     let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
         .expect("degenerate recursive projection should prepare");
 
-    let SigMatch::Proj(0, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0])
-    else {
+    let SigMatch::Proj(0, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0]) else {
         panic!("prepared output should canonicalize to proj(0, ...)");
     };
     let (_, prepared_body_list) =

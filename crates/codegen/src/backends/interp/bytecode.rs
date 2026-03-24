@@ -550,6 +550,5 @@ impl FbcMetaInstruction {
     }
 }
 
-
 #[cfg(test)]
 mod tests;

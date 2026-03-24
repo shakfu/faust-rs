@@ -2571,6 +2571,5 @@ impl<'a, 'b> HygienicCloner<'a, 'b> {
     }
 }
 
-
 #[cfg(test)]
 mod tests;

@@ -388,8 +388,7 @@ fn test_optimize_block_all_levels() {
 #[test]
 fn test_block_store_payload_preserved_across_optimization() {
     let mut block = FbcBlock::new();
-    let store =
-        FbcInstruction::with_values_and_offsets(FbcOpcode::BlockStoreReal, 0, 0.0, 0, 3);
+    let store = FbcInstruction::with_values_and_offsets(FbcOpcode::BlockStoreReal, 0, 0.0, 0, 3);
     block.push_block_store(
         store,
         super::super::bytecode::BlockStoreData::Real(vec![0.5, 0.6, 0.7]),

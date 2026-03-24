@@ -2766,6 +2766,5 @@ fn decode_bool(arena: &TreeArena, id: FirId) -> Option<bool> {
     }
 }
 
-
 #[cfg(test)]
 mod tests;

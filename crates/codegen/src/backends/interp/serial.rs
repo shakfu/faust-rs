@@ -1042,6 +1042,5 @@ fn after_nth_quote_pair(s: &str, n: usize) -> &str {
 // TESTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-
 #[cfg(test)]
 mod tests;

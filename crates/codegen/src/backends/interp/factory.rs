@@ -167,6 +167,5 @@ impl<R: FbcReal> FbcDspFactory<R> {
     }
 }
 
-
 #[cfg(test)]
 mod tests;

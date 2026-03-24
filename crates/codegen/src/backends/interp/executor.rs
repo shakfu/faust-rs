@@ -1986,6 +1986,5 @@ impl<R: FbcReal> FbcExecutor<R> {
     }
 }
 
-
 #[cfg(test)]
 mod tests;

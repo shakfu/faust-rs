@@ -61,11 +61,7 @@ fn unwrap_output_cast(store: &fir::FirStore, id: fir::FirId) -> fir::FirId {
 /// Used by [`find_compute_loop_body`] and directly by tests that need to
 /// inspect generated functions other than `compute` (e.g. `init`,
 /// `instanceInit`, `getNumInputs`).
-fn find_decl_fun_body(
-    store: &fir::FirStore,
-    functions: fir::FirId,
-    target: &str,
-) -> fir::FirId {
+fn find_decl_fun_body(store: &fir::FirStore, functions: fir::FirId, target: &str) -> fir::FirId {
     let FirMatch::Block(decls) = match_fir(store, functions) else {
         panic!("functions block expected");
     };
@@ -1738,9 +1734,7 @@ fn left_shift_binop_lowers_to_int32_fir_shift() {
 
 #[test]
 fn right_shift_binops_lower_to_int32_fir_shifts() {
-    for (source_op, expected_op) in
-        [(BinOp::ARsh, FirBinOp::ARsh), (BinOp::LRsh, FirBinOp::LRsh)]
-    {
+    for (source_op, expected_op) in [(BinOp::ARsh, FirBinOp::ARsh), (BinOp::LRsh, FirBinOp::LRsh)] {
         let mut arena = TreeArena::default();
         let shifted = {
             let mut b = SigBuilder::new(&mut arena);

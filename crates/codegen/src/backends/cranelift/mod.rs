@@ -3190,6 +3190,5 @@ pub fn diagnose_cranelift_compute_subset_gap(
     ))
 }
 
-
 #[cfg(test)]
 mod tests;

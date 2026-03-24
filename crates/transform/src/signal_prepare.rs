@@ -457,6 +457,5 @@ fn is_unresolved_recursive_projection(arena: &TreeArena, sig: SigId) -> bool {
     matches!(match_sig(arena, body), SigMatch::Proj(_, target) if match_sym_ref(arena, target) == Some(var))
 }
 
-
 #[cfg(test)]
 mod tests;

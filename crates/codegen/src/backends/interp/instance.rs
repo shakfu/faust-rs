@@ -270,6 +270,5 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
     }
 }
 
-
 #[cfg(test)]
 mod tests;

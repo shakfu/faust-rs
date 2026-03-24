@@ -195,6 +195,5 @@ pub fn compile_signals_to_fir_fastlane_with_ui(
     )
 }
 
-
 #[cfg(test)]
 mod tests;

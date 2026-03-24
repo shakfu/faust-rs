@@ -588,12 +588,8 @@ fn sc02_access_type_mismatch_load() {
     let mut store = FirStore::new();
     // Declare as kStack, then load as kGlobal
     let zero = FirBuilder::new(&mut store).int32(0);
-    let decl = FirBuilder::new(&mut store).declare_var(
-        "v",
-        FirType::Int32,
-        AccessType::Stack,
-        Some(zero),
-    );
+    let decl =
+        FirBuilder::new(&mut store).declare_var("v", FirType::Int32, AccessType::Stack, Some(zero));
     let load = FirBuilder::new(&mut store).load_var("v", AccessType::Global, FirType::Int32);
     let drop = FirBuilder::new(&mut store).drop_(load);
     let module_id = module_with_body(&mut store, &[decl, drop]);

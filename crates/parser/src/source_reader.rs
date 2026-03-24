@@ -145,32 +145,41 @@ impl SourceReader {
 
         let mut expanded = String::new();
         let mut line_origins = Vec::new();
+        let mut in_block_comment = false;
         for (line_index, line) in source.lines().enumerate() {
-            if let Some(import_name) = parse_import_line(line) {
-                let from_dir = path.parent();
-                let Some(import_path) = self.resolve_import_from(&import_name, from_dir) else {
-                    self.visiting.remove(path);
-                    return Err(SourceReaderError::UnresolvedImport {
-                        name: import_name.into_boxed_str(),
-                        from: path.to_path_buf(),
-                    });
-                };
-                if !self.expanded_files.contains(&import_path) {
-                    let imported = self.read_file_impl(&import_path)?;
-                    expanded.push_str(&imported.text);
-                    line_origins.extend(imported.line_origins);
-                    if !expanded.ends_with('\n') {
-                        expanded.push('\n');
+            // Track block-comment state so that import(...) lines inside /* ... */
+            // blocks are not mistaken for real imports (C++ parity: the lexer sees
+            // the whole file so comments are handled transparently there).
+            let line_starts_in_comment = in_block_comment;
+            in_block_comment = Self::advance_block_comment_state(in_block_comment, line);
+
+            if !line_starts_in_comment {
+                if let Some(import_name) = parse_import_line(line) {
+                    let from_dir = path.parent();
+                    let Some(import_path) = self.resolve_import_from(&import_name, from_dir) else {
+                        self.visiting.remove(path);
+                        return Err(SourceReaderError::UnresolvedImport {
+                            name: import_name.into_boxed_str(),
+                            from: path.to_path_buf(),
+                        });
+                    };
+                    if !self.expanded_files.contains(&import_path) {
+                        let imported = self.read_file_impl(&import_path)?;
+                        expanded.push_str(&imported.text);
+                        line_origins.extend(imported.line_origins);
+                        if !expanded.ends_with('\n') {
+                            expanded.push('\n');
+                        }
                     }
+                    continue; // import line consumed — not appended as source text
                 }
-            } else {
-                expanded.push_str(line);
-                expanded.push('\n');
-                line_origins.push(SourceLineOrigin {
-                    file: path.to_path_buf(),
-                    line: u32::try_from(line_index + 1).unwrap_or(u32::MAX),
-                });
             }
+            expanded.push_str(line);
+            expanded.push('\n');
+            line_origins.push(SourceLineOrigin {
+                file: path.to_path_buf(),
+                line: u32::try_from(line_index + 1).unwrap_or(u32::MAX),
+            });
         }
 
         self.visiting.remove(path);
@@ -182,6 +191,31 @@ impl SourceReader {
         self.expanded_files.insert(path.to_path_buf());
         self.file_cache.insert(path.to_path_buf(), expanded.clone());
         Ok(expanded)
+    }
+
+    fn advance_block_comment_state(mut in_comment: bool, line: &str) -> bool {
+        let bytes = line.as_bytes();
+        let mut i = 0;
+
+        while i + 1 < bytes.len() {
+            match (bytes[i], bytes[i + 1]) {
+                (b'/', b'*') if !in_comment => {
+                    in_comment = true;
+                    i += 2;
+                    continue;
+                }
+                (b'*', b'/') if in_comment => {
+                    in_comment = false;
+                    i += 2;
+                    continue;
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+
+        in_comment
     }
 
     fn resolve_import_from(&self, name: &str, local_dir: Option<&Path>) -> Option<PathBuf> {

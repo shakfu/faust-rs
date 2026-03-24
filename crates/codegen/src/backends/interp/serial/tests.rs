@@ -108,9 +108,11 @@ fn test_write_normal_header() {
     assert!(output.contains("sha_key abc123\n"));
     assert!(output.contains("opt_level 4\n"));
     assert!(output.contains("inputs 2 outputs 2\n"));
-    assert!(output.contains(
-        "int_heap_size 32 real_heap_size 64 sr_offset 0 count_offset 1 iota_offset 2\n"
-    ));
+    assert!(
+        output.contains(
+            "int_heap_size 32 real_heap_size 64 sr_offset 0 count_offset 1 iota_offset 2\n"
+        )
+    );
     assert!(output.contains("meta_block\n"));
     assert!(output.contains("user_interface_block\n"));
     assert!(output.contains("static_init_block\n"));
@@ -336,8 +338,7 @@ fn test_roundtrip_block_store_real() {
     let mut arena = FbcBlockArena::<f32>::new();
 
     let mut block = FbcBlock::new();
-    let instr =
-        FbcInstruction::with_values_and_offsets(FbcOpcode::BlockStoreReal, 0, 0.0, 0, 4);
+    let instr = FbcInstruction::with_values_and_offsets(FbcOpcode::BlockStoreReal, 0, 0.0, 0, 4);
     let data = BlockStoreData::Real(vec![1.0, 2.0, 3.0, 4.0]);
     block.push_block_store(instr, data);
     block.push(FbcInstruction::new(FbcOpcode::Return));

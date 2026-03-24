@@ -454,6 +454,5 @@ fn detect_compute_control_dsp_split(
     }
 }
 
-
 #[cfg(test)]
 mod tests;
