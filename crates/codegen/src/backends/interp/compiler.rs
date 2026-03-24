@@ -178,6 +178,10 @@ pub struct FirToFbcCompiler<R: FbcReal> {
     field_table: HashMap<String, MemoryDesc>,
     /// UI instructions collected during compilation.
     ui_instructions: Vec<FbcUiInstruction<R>>,
+    /// Maps soundfile variable names to their executor slot indices.
+    soundfile_slots: HashMap<String, usize>,
+    /// Number of soundfile slots allocated so far.
+    num_soundfile_slots: usize,
 }
 
 impl<R: FbcReal> FirToFbcCompiler<R> {
@@ -199,6 +203,8 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
             int_heap_offset: 0,
             field_table: HashMap::new(),
             ui_instructions: Vec::new(),
+            soundfile_slots: HashMap::new(),
+            num_soundfile_slots: 0,
         }
     }
 
@@ -362,6 +368,27 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 ref url,
                 ref var,
             } => self.compile_add_soundfile(label, url, var),
+
+            // --- Soundfile access ---
+            FirMatch::LoadSoundfileLength { ref var, part } => {
+                let var = var.clone();
+                self.compile_load_soundfile_length(store, &var, part)
+            }
+            FirMatch::LoadSoundfileRate { ref var, part } => {
+                let var = var.clone();
+                self.compile_load_soundfile_rate(store, &var, part)
+            }
+            FirMatch::LoadSoundfileBuffer {
+                ref var,
+                chan,
+                part,
+                idx,
+                ..
+            } => {
+                let var = var.clone();
+                self.compile_load_soundfile_buffer(store, &var, chan, part, idx)
+            }
+
             FirMatch::AddMetaDeclare {
                 ref var,
                 ref key,
@@ -865,6 +892,13 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
             FirType::Array(elem, size) => (elem.as_ref(), *size as i32),
             _ => (typ, 1),
         };
+
+        // Soundfile handles get a slot index, not a heap slot.
+        if matches!(elem_type, FirType::Sound) {
+            self.alloc_soundfile_slot(name);
+            return Ok(());
+        }
+
         self.alloc_storage_desc(name, elem_type, array_size);
 
         // Compile initializer if present.
@@ -966,6 +1000,11 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
             FirType::Array(elem, size) => (elem.as_ref(), *size as i32),
             _ => (typ, 1),
         };
+        // Soundfile handles get a slot index, not a heap slot.
+        if matches!(elem_type, FirType::Sound) {
+            self.alloc_soundfile_slot(name);
+            return;
+        }
         let _ = self.alloc_storage_desc(name, elem_type, array_size);
     }
 
@@ -1687,13 +1726,127 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
     fn compile_add_soundfile(
         &mut self,
         label: &str,
-        _url: &str,
-        _var: &str,
+        url: &str,
+        var: &str,
     ) -> Result<(), CompileError> {
-        self.ui_instructions
-            .push(FbcUiInstruction::new(FbcOpcode::AddSoundfile));
-        // Soundfile label is stored but full soundfile support is deferred.
-        self.ui_instructions.last_mut().unwrap().label = label.to_string();
+        // Register (or look up) this variable's soundfile slot.
+        let slot = self.alloc_soundfile_slot(var);
+        let mut instr = FbcUiInstruction::new(FbcOpcode::AddSoundfile);
+        instr.label = label.to_string();
+        // Store URL in `key` field — mirrors how `dispatch_ui_*` passes it to the callback.
+        instr.key = url.to_string();
+        // Store slot index in `offset` so instances can populate the right soundfile slot.
+        instr.offset = slot as i32;
+        self.ui_instructions.push(instr);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Soundfile access
+    // -----------------------------------------------------------------------
+
+    /// Allocates (or reuses) a soundfile slot index for `name`.
+    ///
+    /// Soundfile variables (`fSoundN`) are tracked in a separate slot table
+    /// rather than in the int/real heap, because they are runtime object
+    /// references — not scalar values.
+    fn alloc_soundfile_slot(&mut self, name: &str) -> usize {
+        if let Some(&slot) = self.soundfile_slots.get(name) {
+            return slot;
+        }
+        let slot = self.num_soundfile_slots;
+        self.num_soundfile_slots += 1;
+        self.soundfile_slots.insert(name.to_string(), slot);
+        slot
+    }
+
+    /// Compiles `LoadSoundfileLength { var, part }` → `kLoadSoundFieldInt` (fLength).
+    ///
+    /// # Source provenance (C++)
+    /// - `visit(LoadSoundfileInst*)` — `kInt32` / fLength case.
+    fn compile_load_soundfile_length(
+        &mut self,
+        store: &FirStore,
+        var: &str,
+        part: FirId,
+    ) -> Result<(), CompileError> {
+        let slot = self.soundfile_slots.get(var).copied().ok_or_else(|| {
+            CompileError::UndeclaredVariable {
+                name: var.to_string(),
+            }
+        })?;
+        // Push part index onto int stack; executor pops it.
+        self.compile_node(store, part)?;
+        self.current_block
+            .push(FbcInstruction::with_values_and_offsets(
+                FbcOpcode::LoadSoundFieldInt,
+                0,            // int_value = 0 → fLength field selector
+                R::default(),
+                slot as i32,  // offset1 = soundfile slot index
+                0,
+            ));
+        Ok(())
+    }
+
+    /// Compiles `LoadSoundfileRate { var, part }` → `kLoadSoundFieldInt` (fSR).
+    ///
+    /// # Source provenance (C++)
+    /// - `visit(LoadSoundfileInst*)` — `kInt32` / fSR case.
+    fn compile_load_soundfile_rate(
+        &mut self,
+        store: &FirStore,
+        var: &str,
+        part: FirId,
+    ) -> Result<(), CompileError> {
+        let slot = self.soundfile_slots.get(var).copied().ok_or_else(|| {
+            CompileError::UndeclaredVariable {
+                name: var.to_string(),
+            }
+        })?;
+        self.compile_node(store, part)?;
+        self.current_block
+            .push(FbcInstruction::with_values_and_offsets(
+                FbcOpcode::LoadSoundFieldInt,
+                1,            // int_value = 1 → fSR field selector
+                R::default(),
+                slot as i32,
+                0,
+            ));
+        Ok(())
+    }
+
+    /// Compiles `LoadSoundfileBuffer { var, chan, part, idx }` → `kLoadSoundFieldReal`.
+    ///
+    /// # Source provenance (C++)
+    /// - `visit(LoadSoundfileInst*)` — FAUSTFLOAT buffer case.
+    ///
+    /// Pushes `chan`, `part`, `idx` onto the int stack; the executor pops them
+    /// in reverse order and computes `buffers[chan][offsets[part] + idx]`.
+    fn compile_load_soundfile_buffer(
+        &mut self,
+        store: &FirStore,
+        var: &str,
+        chan: FirId,
+        part: FirId,
+        idx: FirId,
+    ) -> Result<(), CompileError> {
+        let slot = self.soundfile_slots.get(var).copied().ok_or_else(|| {
+            CompileError::UndeclaredVariable {
+                name: var.to_string(),
+            }
+        })?;
+        // Push chan, part, idx — executor pops in LIFO order: idx first, then part, then chan.
+        self.compile_node(store, chan)?;
+        self.compile_node(store, part)?;
+        self.compile_node(store, idx)?;
+        self.current_block
+            .push(FbcInstruction::with_values_and_offsets(
+                FbcOpcode::LoadSoundFieldReal,
+                0,
+                R::default(),
+                slot as i32,  // offset1 = soundfile slot index
+                0,
+            ));
         Ok(())
     }
 

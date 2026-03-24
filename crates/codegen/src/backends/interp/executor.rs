@@ -31,6 +31,7 @@
 use super::bytecode::{BlockId, BlockStoreData, FbcBlockArena};
 use super::opcode::FbcOpcode;
 use super::real::FbcReal;
+use super::soundfile::Soundfile;
 
 /// Stack sizes matching the C++ interpreter constants.
 const REAL_STACK_CAPACITY: usize = 512;
@@ -105,6 +106,7 @@ impl FbcExecError {
     }
 
     /// Creates an `unsupported_runtime_feature` runtime error.
+    #[allow(dead_code)]
     fn unsupported_runtime_feature(opcode: FbcOpcode, block_id: BlockId, pc: usize) -> Self {
         Self {
             kind: "unsupported_runtime_feature",
@@ -310,6 +312,8 @@ pub struct FbcExecutor<R: FbcReal> {
     pub int_heap: Vec<i32>,
     /// Real heap (state variables, filters, UI zones).
     pub real_heap: Vec<R>,
+    /// Soundfile slots, indexed by the slot number assigned at compile time.
+    pub soundfiles: Vec<Box<Soundfile>>,
 }
 
 impl<R: FbcReal> FbcExecutor<R> {
@@ -319,6 +323,7 @@ impl<R: FbcReal> FbcExecutor<R> {
         Self {
             int_heap: vec![0; int_heap_size],
             real_heap: vec![R::default(); real_heap_size],
+            soundfiles: Vec::new(),
         }
     }
 
@@ -455,18 +460,38 @@ impl<R: FbcReal> FbcExecutor<R> {
                     pc += 1;
                 }
                 LoadSoundFieldInt => {
-                    return Err(FbcExecError::unsupported_runtime_feature(
-                        instr.opcode,
-                        cur_block,
-                        pc,
-                    ));
+                    // offset1 = soundfile slot index; int_value = field selector
+                    // (0 = fLength, 1 = fSR); pops part from int stack.
+                    let part = pop_int_stack(&mut int_stack, instr.opcode, cur_block, pc)?
+                        as usize;
+                    let sf = self
+                        .soundfiles
+                        .get(o1)
+                        .ok_or_else(|| FbcExecError::heap_oob(instr.opcode, cur_block, pc))?;
+                    let val = match iv {
+                        0 => sf.lengths.get(part).copied().unwrap_or(0),
+                        1 => sf.sample_rates.get(part).copied().unwrap_or(44100),
+                        _ => 0,
+                    };
+                    int_stack.push(val);
+                    pc += 1;
                 }
                 LoadSoundFieldReal => {
-                    return Err(FbcExecError::unsupported_runtime_feature(
-                        instr.opcode,
-                        cur_block,
-                        pc,
-                    ));
+                    // offset1 = soundfile slot index.
+                    // Pops idx, part, chan from int stack (LIFO: idx on top).
+                    let idx =
+                        pop_int_stack(&mut int_stack, instr.opcode, cur_block, pc)?;
+                    let part = pop_int_stack(&mut int_stack, instr.opcode, cur_block, pc)?
+                        as usize;
+                    let chan = pop_int_stack(&mut int_stack, instr.opcode, cur_block, pc)?
+                        as usize;
+                    let sf = self
+                        .soundfiles
+                        .get(o1)
+                        .ok_or_else(|| FbcExecError::heap_oob(instr.opcode, cur_block, pc))?;
+                    let sample = sf.read_sample(chan, part, idx);
+                    real_stack.push(R::from_f64(sample));
+                    pc += 1;
                 }
                 StoreReal => {
                     self.real_heap[o1] =

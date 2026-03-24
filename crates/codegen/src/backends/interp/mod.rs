@@ -39,6 +39,7 @@ pub mod opcode;
 pub mod optimizer;
 pub mod real;
 pub mod serial;
+pub mod soundfile;
 
 // Re-exports for convenient access.
 pub use bytecode::{
@@ -54,6 +55,7 @@ pub use opcode::{FBC_INSTRUCTION_NAMES, FBC_OPCODE_COUNT, FbcOpcode, INTERP_FILE
 pub use optimizer::{MAX_OPT_LEVEL, optimize_block};
 pub use real::FbcReal;
 pub use serial::{FAUST_VERSION, FbcSerialError, read_fbc, write_fbc};
+pub use soundfile::Soundfile;
 
 pub const BACKEND_NAME: &str = "interp";
 

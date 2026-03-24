@@ -14,6 +14,7 @@
 use super::executor::{FbcExecError, FbcExecutor};
 use super::factory::FbcDspFactory;
 use super::real::FbcReal;
+use super::soundfile::Soundfile;
 
 /// Runtime DSP instance with its own heaps.
 ///
@@ -79,10 +80,17 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
         // Done before createFBCExecutor that may compile blocks...
         factory.optimize();
 
-        let executor = FbcExecutor::new(
+        let mut executor = FbcExecutor::new(
             factory.int_heap_size as usize,
             factory.real_heap_size as usize,
         );
+
+        // Populate soundfile slots with default silence until the host provides
+        // real audio files via the UI callback.
+        let sf_count = factory.soundfile_count();
+        executor.soundfiles = (0..sf_count)
+            .map(|_| Box::new(Soundfile::default_silence()))
+            .collect();
 
         Self {
             factory,

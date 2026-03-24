@@ -165,6 +165,20 @@ impl<R: FbcReal> FbcDspFactory<R> {
     pub fn is_optimized(&self) -> bool {
         self.optimized
     }
+
+    /// Returns the number of soundfile slots required by this factory.
+    ///
+    /// Derived by counting `AddSoundfile` opcodes in the UI instruction list.
+    /// Used by [`super::instance::FbcDspInstance`] to pre-populate executor
+    /// soundfile slots with default silence.
+    #[must_use]
+    pub fn soundfile_count(&self) -> usize {
+        use super::opcode::FbcOpcode;
+        self.ui_block
+            .iter()
+            .filter(|i| i.opcode == FbcOpcode::AddSoundfile)
+            .count()
+    }
 }
 
 #[cfg(test)]
