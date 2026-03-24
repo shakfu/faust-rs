@@ -656,6 +656,28 @@ fn corpus_float_literal_pattern_matching_compiles_like_cpp() {
     }
 }
 
+/// Regression test for rep_73: `patternSimplification` must fold `max`/`min`
+/// expressions via full signal propagation, not just literal arithmetic.
+///
+/// `f(max(1, min(6, 4)))` — `max(1, min(6, 4))` must be reduced to `boxInt(4)`
+/// at automaton construction time so the rule `f(4) = 40` matches.
+/// The old `pattern_simplification` only handled direct literal arithmetic and
+/// could not fold xtended functions like `max`/`min`.
+#[test]
+fn corpus_pattern_max_min_fold_compiles_like_cpp() {
+    let out = compile_corpus("rep_73_pattern_max_min_fold.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert!(
+        matches!(
+            match_sig(&out.parse.state.arena, out.signals[0]),
+            SigMatch::Int(40)
+        ),
+        "process should be SigInt(40), got {:?}",
+        match_sig(&out.parse.state.arena, out.signals[0])
+    );
+}
+
 fn assert_mul_input_const(arena: &TreeArena, sig: TreeId, expected_input: i32) {
     let SigMatch::BinOp(BinOp::Mul, a, b) = match_sig(arena, sig) else {
         panic!("branch should be Mul");

@@ -4048,194 +4048,57 @@ fn eval_pattern(
     Ok(pattern_simplification(arena, evaluated))
 }
 
-/// Simplifies a pattern bottom-up after pattern evaluation.
+/// Simplifies a pattern after evaluation, mirroring C++ `patternSimplification`.
 ///
 /// Source provenance (C++):
-/// - `compiler/evaluate/eval.cpp`
-/// - `patternSimplification`
+/// - `compiler/evaluate/eval.cpp` — `patternSimplification` (line 773)
 ///
-/// Today this mainly performs local numeric constant folding while preserving
-/// structural pattern shapes. The helper is intentionally separate from generic
-/// expression evaluation so future pattern-only canonicalizations remain
-/// localized.
+/// Algorithm (exact C++ match):
+/// 1. Try to reduce the whole expression to a numeric literal via full
+///    signal propagation + `simplify()` (delegates to `simplify_pattern`,
+///    which is the Rust equivalent of C++ `isBoxNumeric`).
+/// 2. If that fails AND the node is a `PatternOp`
+///    (Par / Seq / Split / Merge / Rec only — matches C++ `isBoxPatternOp`),
+///    recurse into its two children.
+/// 3. Otherwise return the pattern unchanged.
+///
+/// Note: HGroup / VGroup / TGroup / Route are **not** PatternOps in C++ and
+/// are returned unchanged without recursion.
 fn pattern_simplification(arena: &mut TreeArena, pattern: TreeId) -> TreeId {
-    let simplified = match match_box(arena, pattern) {
-        BoxMatch::Seq(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.seq(x, y)),
-        BoxMatch::Par(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.par(x, y)),
-        BoxMatch::Split(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.split(x, y)),
-        BoxMatch::Merge(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.merge(x, y)),
-        BoxMatch::Rec(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.rec(x, y)),
-        BoxMatch::HGroup(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.hgroup(x, y)),
-        BoxMatch::VGroup(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.vgroup(x, y)),
-        BoxMatch::TGroup(a, b) => rebuild2(arena, a, b, |bld, x, y| bld.tgroup(x, y)),
-        BoxMatch::Route(a, b, c) => rebuild3(arena, a, b, c, |bld, x, y, z| bld.route(x, y, z)),
-        _ => pattern,
-    };
-
-    simplify_numeric_pattern(arena, simplified).unwrap_or(simplified)
-}
-
-fn rebuild2<F>(arena: &mut TreeArena, a: TreeId, b: TreeId, f: F) -> TreeId
-where
-    F: FnOnce(&mut BoxBuilder<'_>, TreeId, TreeId) -> TreeId,
-{
-    let sa = pattern_simplification(arena, a);
-    let sb = pattern_simplification(arena, b);
-    let mut bld = BoxBuilder::new(arena);
-    f(&mut bld, sa, sb)
-}
-
-fn rebuild3<F>(arena: &mut TreeArena, a: TreeId, b: TreeId, c: TreeId, f: F) -> TreeId
-where
-    F: FnOnce(&mut BoxBuilder<'_>, TreeId, TreeId, TreeId) -> TreeId,
-{
-    let sa = pattern_simplification(arena, a);
-    let sb = pattern_simplification(arena, b);
-    let sc = pattern_simplification(arena, c);
-    let mut bld = BoxBuilder::new(arena);
-    f(&mut bld, sa, sb, sc)
-}
-
-#[derive(Clone, Copy)]
-enum NumericValue {
-    Int(i32),
-    Real(f64),
-}
-
-/// Attempts to reduce one pattern expression to an `int` or `real` constant box.
-///
-/// This is the narrow Rust equivalent of the C++ pattern simplification used by
-/// `evalPattern(...)`: only numerically pure subexpressions are folded, and
-/// failure to fold simply leaves the original pattern unchanged.
-fn simplify_numeric_pattern(arena: &mut TreeArena, pattern: TreeId) -> Option<TreeId> {
-    let value = eval_numeric_pattern_value(arena, pattern)?;
-    let mut b = BoxBuilder::new(arena);
-    Some(match value {
-        NumericValue::Int(v) => b.int(v),
-        NumericValue::Real(v) => b.real(v),
-    })
-}
-
-fn eval_numeric_pattern_value(arena: &TreeArena, pattern: TreeId) -> Option<NumericValue> {
+    // (a) Try full constant folding on the whole expression first.
+    let folded = simplify_pattern(arena, pattern);
+    if folded != pattern {
+        return folded;
+    }
+    // (b) Recurse into PatternOp children (Par/Seq/Split/Merge/Rec only).
     match match_box(arena, pattern) {
-        BoxMatch::Int(v) => Some(NumericValue::Int(v)),
-        BoxMatch::Real(v) => Some(NumericValue::Real(v)),
-        BoxMatch::Seq(inputs, op) => {
-            let BoxMatch::Par(lhs, rhs) = match_box(arena, inputs) else {
-                return None;
-            };
-            let lhs = eval_numeric_pattern_value(arena, lhs)?;
-            let rhs = eval_numeric_pattern_value(arena, rhs)?;
-            eval_numeric_binary_op(arena, op, lhs, rhs)
+        BoxMatch::Par(a, b) => {
+            let sa = pattern_simplification(arena, a);
+            let sb = pattern_simplification(arena, b);
+            BoxBuilder::new(arena).par(sa, sb)
         }
-        _ => None,
-    }
-}
-
-fn eval_numeric_binary_op(
-    arena: &TreeArena,
-    op: TreeId,
-    lhs: NumericValue,
-    rhs: NumericValue,
-) -> Option<NumericValue> {
-    match match_box(arena, op) {
-        BoxMatch::Add => numeric_add(lhs, rhs),
-        BoxMatch::Sub => numeric_sub(lhs, rhs),
-        BoxMatch::Mul => numeric_mul(lhs, rhs),
-        BoxMatch::Div => numeric_div(lhs, rhs),
-        BoxMatch::Rem => numeric_rem(lhs, rhs),
-        BoxMatch::Pow => Some(NumericValue::Real(
-            numeric_as_f64(lhs).powf(numeric_as_f64(rhs)),
-        )),
-        BoxMatch::Lt => Some(NumericValue::Int(
-            (numeric_as_f64(lhs) < numeric_as_f64(rhs)) as i32,
-        )),
-        BoxMatch::Le => Some(NumericValue::Int(
-            (numeric_as_f64(lhs) <= numeric_as_f64(rhs)) as i32,
-        )),
-        BoxMatch::Gt => Some(NumericValue::Int(
-            (numeric_as_f64(lhs) > numeric_as_f64(rhs)) as i32,
-        )),
-        BoxMatch::Ge => Some(NumericValue::Int(
-            (numeric_as_f64(lhs) >= numeric_as_f64(rhs)) as i32,
-        )),
-        BoxMatch::Eq => Some(NumericValue::Int(
-            (numeric_as_f64(lhs) == numeric_as_f64(rhs)) as i32,
-        )),
-        BoxMatch::Ne => Some(NumericValue::Int(
-            (numeric_as_f64(lhs) != numeric_as_f64(rhs)) as i32,
-        )),
-        BoxMatch::And => numeric_int_binop(lhs, rhs, |a, b| a & b),
-        BoxMatch::Or => numeric_int_binop(lhs, rhs, |a, b| a | b),
-        BoxMatch::Xor => numeric_int_binop(lhs, rhs, |a, b| a ^ b),
-        BoxMatch::Lsh => numeric_int_binop(lhs, rhs, |a, b| a.wrapping_shl(b as u32)),
-        BoxMatch::Rsh => numeric_int_binop(lhs, rhs, |a, b| a.wrapping_shr(b as u32)),
-        _ => None,
-    }
-}
-
-fn numeric_add(lhs: NumericValue, rhs: NumericValue) -> Option<NumericValue> {
-    match (lhs, rhs) {
-        (NumericValue::Int(a), NumericValue::Int(b)) => Some(NumericValue::Int(a.wrapping_add(b))),
-        _ => Some(NumericValue::Real(
-            numeric_as_f64(lhs) + numeric_as_f64(rhs),
-        )),
-    }
-}
-
-fn numeric_sub(lhs: NumericValue, rhs: NumericValue) -> Option<NumericValue> {
-    match (lhs, rhs) {
-        (NumericValue::Int(a), NumericValue::Int(b)) => Some(NumericValue::Int(a.wrapping_sub(b))),
-        _ => Some(NumericValue::Real(
-            numeric_as_f64(lhs) - numeric_as_f64(rhs),
-        )),
-    }
-}
-
-fn numeric_mul(lhs: NumericValue, rhs: NumericValue) -> Option<NumericValue> {
-    match (lhs, rhs) {
-        (NumericValue::Int(a), NumericValue::Int(b)) => Some(NumericValue::Int(a.wrapping_mul(b))),
-        _ => Some(NumericValue::Real(
-            numeric_as_f64(lhs) * numeric_as_f64(rhs),
-        )),
-    }
-}
-
-fn numeric_div(lhs: NumericValue, rhs: NumericValue) -> Option<NumericValue> {
-    match (lhs, rhs) {
-        (_, NumericValue::Int(0)) => None,
-        (_, NumericValue::Real(0.0)) => None,
-        _ => Some(NumericValue::Real(
-            numeric_as_f64(lhs) / numeric_as_f64(rhs),
-        )),
-    }
-}
-
-fn numeric_rem(lhs: NumericValue, rhs: NumericValue) -> Option<NumericValue> {
-    match (lhs, rhs) {
-        (NumericValue::Int(_), NumericValue::Int(0)) => None,
-        (NumericValue::Int(a), NumericValue::Int(b)) => Some(NumericValue::Int(a % b)),
-        _ => Some(NumericValue::Real(
-            numeric_as_f64(lhs) % numeric_as_f64(rhs),
-        )),
-    }
-}
-
-fn numeric_int_binop(
-    lhs: NumericValue,
-    rhs: NumericValue,
-    op: impl FnOnce(i32, i32) -> i32,
-) -> Option<NumericValue> {
-    let (NumericValue::Int(a), NumericValue::Int(b)) = (lhs, rhs) else {
-        return None;
-    };
-    Some(NumericValue::Int(op(a, b)))
-}
-
-fn numeric_as_f64(value: NumericValue) -> f64 {
-    match value {
-        NumericValue::Int(v) => f64::from(v),
-        NumericValue::Real(v) => v,
+        BoxMatch::Seq(a, b) => {
+            let sa = pattern_simplification(arena, a);
+            let sb = pattern_simplification(arena, b);
+            BoxBuilder::new(arena).seq(sa, sb)
+        }
+        BoxMatch::Split(a, b) => {
+            let sa = pattern_simplification(arena, a);
+            let sb = pattern_simplification(arena, b);
+            BoxBuilder::new(arena).split(sa, sb)
+        }
+        BoxMatch::Merge(a, b) => {
+            let sa = pattern_simplification(arena, a);
+            let sb = pattern_simplification(arena, b);
+            BoxBuilder::new(arena).merge(sa, sb)
+        }
+        BoxMatch::Rec(a, b) => {
+            let sa = pattern_simplification(arena, a);
+            let sb = pattern_simplification(arena, b);
+            BoxBuilder::new(arena).rec(sa, sb)
+        }
+        // (c) Everything else (HGroup/VGroup/TGroup/Route/…) — unchanged.
+        _ => pattern,
     }
 }
 
