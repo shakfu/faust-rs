@@ -382,13 +382,15 @@ impl StructFieldLayout {
 }
 
 /// Concrete size/alignment pair for one scalar storage type in the layout plan.
-/// Concrete size/alignment pair for one scalar storage type in the layout plan.
 ///
 /// This is internal because only the finalized [`StructLayoutPlan`] is part of
 /// the backend contract exposed to callers.
 #[derive(Clone, Copy, Debug)]
 struct LayoutScalar {
+    /// Size of the scalar in bytes (e.g. 4 for `f32`/`i32`, 8 for `f64`/`i64`).
     size: u32,
+    /// Required alignment of the scalar in bytes.  Used by [`align_up`] when
+    /// packing consecutive fields into the `dsp*` struct layout.
     align: u32,
 }
 
@@ -678,8 +680,12 @@ fn build_struct_layout_for_module(
 /// # Current policy
 /// - Uses the host ISA via `cranelift_native`.
 /// - Applies backend options such as optimization level.
-/// - Disables a few relocation/libcall assumptions (`is_pic`,
-///   `use_colocated_libcalls`) to simplify early cross-platform bring-up.
+/// - Sets `is_pic=false` because the JIT allocates executable memory at
+///   absolute addresses; position-independent code is unnecessary and adds
+///   GOT-indirection overhead for a short-lived in-process JIT.
+/// - Sets `use_colocated_libcalls=false` to use the default ABI-compatible
+///   libcall symbols (`__udivti3`, etc.) rather than colocated stubs, which
+///   simplifies early cross-platform bring-up.
 /// - Registers default libcall names (Cranelift helper convention).
 ///
 /// Host math symbols used by FIR math lowering are registered later by
@@ -715,6 +721,16 @@ fn make_jit_builder(options: &CraneliftOptions) -> Result<JITBuilder, CraneliftB
         .map_err(|e| CraneliftBackendError::jit_failure(format!("native ISA init failed: {e}")))?;
     Ok(JITBuilder::with_isa(isa, default_libcall_names()))
 }
+
+// ── Host math wrappers ────────────────────────────────────────────────────────
+//
+// Thin `extern "C"` shims that delegate to the Rust standard library.  These
+// are registered by [`register_host_symbols`] so that the Cranelift JIT can
+// resolve imported math symbols at finalization time.
+//
+// Both `f32` (`*f`) and `f64` variants are provided.  The implementations are
+// intentionally minimal: no error handling, NaN propagation matches the
+// interpreter and C++ backend paths.
 
 extern "C" fn host_sinf(x: f32) -> f32 {
     x.sin()
@@ -1053,10 +1069,6 @@ fn register_host_symbols(jit_builder: &mut JITBuilder) {
 /// This enum preserves that distinction so statement lowering can reject invalid
 /// uses early (for example writing a scalar as if it were a pointer table base).
 #[derive(Clone, Copy, Debug)]
-/// Lowered expression value tracked in the local Cranelift lowering environment.
-///
-/// FIR names in the current subset can denote either scalar SSA values or
-/// pointer aliases. This enum preserves that distinction for later loads/stores.
 enum LoweredExpr {
     Scalar(Value),
     Ptr {
@@ -1105,10 +1117,6 @@ impl LoweredExpr {
 /// pointer aliases (`LoweredExpr::Ptr`) with enough information to safely lower
 /// `LoadTable`/`StoreTable` on stack aliases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-/// Lightweight FIR type classifier used in local lowering metadata.
-///
-/// This reduced classifier is intentionally coarser than [`FirType`]; it only
-/// carries the information needed by pointer alias lowering.
 enum FirTypeRef {
     Bool,
     Int32,
@@ -1151,7 +1159,6 @@ impl FirTypeRef {
 /// `Unsupported` means "valid FIR, but outside current subset"; callers may
 /// convert this into a stub fallback. `Jit` represents structural/codegen
 /// failures that should surface as backend errors.
-/// Internal lowering failure used while emitting one Cranelift function body.
 #[derive(Debug)]
 enum LoweringError {
     Unsupported(String),
@@ -1192,17 +1199,24 @@ fn is_return_terminated(fb: &FunctionBuilder<'_>) -> bool {
 /// - cached imported function refs for math calls.
 ///
 /// It is intentionally function-scoped: one instance per `compute` lowering.
-/// Stateful FIR -> Cranelift lowering context for one `compute` function.
-///
-/// The context owns the CLIF builder-side environment, imported function cache,
-/// and local FIR variable bindings required during subset lowering.
 struct ComputeLowering<'a, 'b, 'c> {
+    /// Read-only access to the full FIR node store.
     store: &'a FirStore,
+    /// Mutable JIT module used to declare/import functions and finalize code.
     jit: &'a mut JITModule,
+    /// Active CLIF function builder for the `compute` function body.
     fb: &'a mut FunctionBuilder<'b>,
+    /// Backend `dsp*` struct layout contract: field names → offsets/types.
     struct_layout: &'a StructLayoutPlan,
+    /// Native pointer width (`I32` on 32-bit targets, `I64` on 64-bit).
     ptr_ty: Type,
+    /// Local FIR variable → CLIF value mapping (built up during lowering).
     vars: HashMap<String, LoweredExpr>,
+    /// Cache of already-imported host function refs keyed by signature string.
+    ///
+    /// Cranelift requires explicit `declare_function` + `declare_func_in_func`
+    /// calls per import; this cache avoids re-declaring the same symbol twice
+    /// within the same function body.
     import_refs: HashMap<String, FuncRef>,
     /// Pre-declared JIT data IDs for `AccessType::Static` tables.
     static_data_ids: &'a HashMap<String, DataId>,
@@ -1878,7 +1892,10 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
 
     /// Computes an element address `base + index * elem_size`.
     ///
-    /// `index_i32` is widened to pointer width as needed (`I32`/`I64` target).
+    /// `index_i32` is always an `i32` integer (FIR index convention).  It is
+    /// widened to [`Self::ptr_ty`] width before the multiply so that the
+    /// arithmetic is consistent with the native pointer size — on 64-bit hosts
+    /// this prevents silent 32-bit overflow when indices are large.
     fn indexed_addr(&mut self, base_ptr: Value, index_i32: Value, elem_size: i64) -> Value {
         let idx_ptr = if self.ptr_ty == types::I64 {
             self.fb.ins().uextend(types::I64, index_i32)

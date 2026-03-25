@@ -45,11 +45,9 @@ For each day file, entries are ordered from most recent commit to oldest using G
 
 See [`porting/journal/README.md`](porting/journal/README.md).
 
-## 2026-03-25 — docs(codegen): targeted documentation improvements in cranelift and interp backends
+## 2026-03-25 — docs(codegen): documentation improvements in cranelift and interp backends
 
-After a full audit of all 13 non-test files in `backends/cranelift` and
-`backends/interp`, the documentation was found to be generally thorough.
-Three genuine gaps were fixed:
+**interp** — three targeted fixes:
 
 - `compiler.rs HeapType::Int/Real`: added per-variant docs explaining why two
   separate heaps exist (cache locality; counters/indices vs filter state).
@@ -57,6 +55,22 @@ Three genuine gaps were fixed:
   the field is used for heap allocation sizing only, not for stride calculations.
 - `real.rs FbcReal::fbc_abs`: defined what "integer-style" means (truncate to
   `i32`, apply `i32::abs()`, cast back) and contrasted with `fbc_absf`.
+
+**cranelift/mod.rs** — removed 4 duplicate doc blocks and added missing field/rationale docs:
+
+- `LayoutScalar`: removed duplicate struct doc; added per-field docs (`size` =
+  element byte count, `align` = alignment used by `align_up`).
+- `LoweredExpr`, `FirTypeRef`, `LoweringError`: removed duplicate doc blocks
+  that rustdoc concatenated with their primary doc comments.
+- `ComputeLowering`: removed duplicate doc; added per-field inline docs
+  (`store`, `jit`, `fb`, `struct_layout`, `ptr_ty`, `vars`, `import_refs`).
+- `indexed_addr`: added note that `i32` index is widened to pointer width to
+  prevent silent 32-bit overflow on 64-bit hosts.
+- `make_jit_builder`: expanded `is_pic=false` / `use_colocated_libcalls=false`
+  rationale (absolute-address JIT has no need for PIC; default ABI libcalls
+  simplify cross-platform bring-up).
+- Added `// ── Host math wrappers ──` section comment above `extern "C"` stubs
+  explaining their role as thin Rust-to-stdlib shims.
 
 ## 2026-03-25 — docs(transform): documentation pass on signal_fir/module.rs
 
