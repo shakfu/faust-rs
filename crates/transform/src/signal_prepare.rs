@@ -113,13 +113,19 @@ impl PreparedSignals {
         self.sig_types.get(&sig)
     }
 
-    /// Read-only view of the reduced type map (for consumers that need to iterate or pass it wholesale).
+    /// Read-only view of the reduced type map for consumers that need to
+    /// iterate or pass it wholesale (e.g. FIR builders).  Prefer [`Self::ty`]
+    /// for single-node lookups.
     #[must_use]
     pub fn types_map(&self) -> &HashMap<SigId, SimpleSigType> {
         &self.types
     }
 
-    /// Read-only view of the full sig-type map (for consumers that need to iterate or pass it wholesale).
+    /// Read-only view of the full sig-type map for consumers that need to
+    /// iterate or pass it wholesale.  Prefer [`Self::sig_ty`] for
+    /// single-node lookups.  Use this map (rather than `types_map`) when
+    /// interval bounds, variability, or other lattice qualifiers are needed —
+    /// it is a strict superset of the reduced type map.
     #[must_use]
     pub fn sig_types_map(&self) -> &HashMap<SigId, SigType> {
         &self.sig_types
@@ -256,9 +262,12 @@ fn canonicalize_unary_rec_projections(
 
 /// Collects symbolic recursion variables whose body list has exactly one slot.
 ///
-/// The collected set drives [`rewrite_unary_rec_projections`]. The traversal is
-/// structural and preserves list payload semantics, so `cons`-encoded child
-/// lists are expanded rather than treated as opaque signal nodes.
+/// The collected set drives [`rewrite_unary_rec_projections`].  The traversal
+/// uses a `visited` set to avoid re-visiting shared DAG nodes (signal forests
+/// use structural sharing so the same sub-tree can appear under multiple
+/// parents).  `cons`-encoded child lists are expanded explicitly rather than
+/// treated as opaque signal nodes, because the arena represents list spines as
+/// regular nodes and `match_sig` would not recurse into them otherwise.
 fn collect_unary_sym_groups(
     arena: &TreeArena,
     sig: SigId,
@@ -391,8 +400,11 @@ fn rewrite_unary_rec_projections(
 /// Runs the full `TypeAnnotator` (sigtype crate) on the prepared output forest.
 ///
 /// This produces interval bounds, variability, and all lattice qualifiers for
-/// each node.  The resulting map is stored alongside the reduced `SimpleSigType`
-/// map so that downstream consumers (e.g. `signal_fir`) can read either.
+/// each node.  Called **twice** in [`prepare_signals_for_fir`]: once before
+/// `promote_signals_fastlane` (to guide cast-insertion decisions) and once
+/// after (so the final map reflects the promoted forest, including the newly
+/// inserted `IntCast`/`FloatCast` nodes).  The second result is what ends up
+/// in [`PreparedSignals::sig_types`].
 fn infer_full_types(
     arena: &TreeArena,
     outputs: &[SigId],

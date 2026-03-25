@@ -143,6 +143,20 @@ const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
 /// `lower_cast` when the lowerer dispatches on `SigMatch::IntCast /
 /// FloatCast`.
 ///
+/// # Recursion and delay1 coupling
+///
+/// Every `~` recursion in Faust encodes feedback as `Delay1(Proj(i, group))`.
+/// The lowerer detects this pattern in `lower_delay_state` (via
+/// `recursion_feedback_info`) and **reuses the group's existing 2-slot
+/// recursion array** instead of allocating a separate state variable.  Reading
+/// `state[(fIOTA - 1) & 1]` from that array is sufficient — no extra write is
+/// needed.
+///
+/// This is why two separate maps exist: `state_name_by_node` (keyed by delay
+/// node) and `rec_array_by_group_index` (keyed by group + body index).  They
+/// must never alias, even when the body signal of a recursion group happens to
+/// be the same `SigId` as a `Delay1` node (the tf22 regression pattern).
+///
 /// # Parameters
 ///
 /// - `plan` – pre-checked I/O counts and signal statistics.
@@ -588,12 +602,18 @@ struct SignalToFirLower<'a> {
     /// Maps each signal node to its generated state-variable name.
     state_name_by_node: HashMap<SigId, String>,
     /// Maps `(group_id, body_index)` to the recursion array allocated for that
-    /// output slot of a recursion group.  Separate from `state_name_by_node` so
-    /// that `ensure_state_slot` (keyed by the delay-node) and
-    /// `ensure_recursion_array_for_group` (keyed by the group + index) never
-    /// share the same entry even when the body signal node equals the delay node.
+    /// output slot of a recursion group.  **Intentionally separate from
+    /// `state_name_by_node`** to prevent aliasing when `lower_delay_state`
+    /// detects a `Delay1(Proj(i, group))` feedback and reuses the group's
+    /// array slot instead of allocating a fresh variable.  The two maps use
+    /// disjoint keys so a delay-node `SigId` and a `(group, index)` pair can
+    /// coexist safely even when they refer to the same signal (tf22 pattern).
     rec_array_by_group_index: HashMap<(u32, usize), RecArrayInfo>,
     /// Guards against emitting duplicate state-update stores for shared nodes.
+    /// Also used as the dedup key for recursion groups (keyed by `group` SigId)
+    /// to ensure that body evaluation and the resulting state writes are
+    /// scheduled exactly once per sample regardless of how many `SIGPROJ` nodes
+    /// reference the same group.
     scheduled_state_updates: HashSet<SigId>,
     /// Allocated delay lines keyed by carried-signal id.
     delay_lines: HashMap<SigId, DelayLineInfo>,
@@ -765,7 +785,11 @@ impl<'a> SignalToFirLower<'a> {
 
     /// Visits one signal node, recording the maximum delay per carried signal.
     ///
-    /// Skips already-visited nodes (DAG sharing) via `seen`.
+    /// Skips already-visited nodes (DAG sharing) via `seen`.  The maximum is
+    /// tracked because several `SIGDELAY` nodes can share the same carried
+    /// signal `x` with different delay amounts; a single delay line is
+    /// allocated at the largest observed size so every read offset remains
+    /// in-bounds.
     fn scan_delay_lines(
         &mut self,
         sig: SigId,
@@ -1064,6 +1088,12 @@ impl<'a> SignalToFirLower<'a> {
     }
 
     /// Decodes one Faust `FFUN(signature, incfile, libfile)` descriptor.
+    /// Extracts a [`ForeignFunProto`] from a Faust `FFUN(signature, _, _)` descriptor.
+    ///
+    /// The `signature` list has the layout `[ret_type, [name_f32, name_f64], arg0_type, …]`:
+    /// index 0 is the return type code, index 1 is the name list (0=float32 name,
+    /// 1=float64 name), and indices 2+ are argument type codes.  Type codes follow
+    /// `foreign_sig_type`: `0` → `Int32`, any other value → `real_ty`.
     fn decode_foreign_fun_proto(&self, ff: SigId) -> Result<ForeignFunProto, SignalFirError> {
         let Some((signature, _, _)) = match_ffunction_node(self.arena, ff) else {
             return self.unsupported_node(ff, "SIGFFUN descriptor is not an FFUNCTION node");
@@ -1237,8 +1267,18 @@ impl<'a> SignalToFirLower<'a> {
     /// 2-element circular buffer indexed by `fIOTA`, matching the C++
     /// `signalFIRCompiler::writeReadDelay` pattern.
     ///
-    /// Write: `state[fIOTA & 1] = next` (immediate, in sample body)
-    /// Read:  `state[(fIOTA - 1) & 1]`   (returns previous sample)
+    /// **Recursion feedback optimization**: if the carried `value` is
+    /// `Proj(i, SYMREC/SYMREF)` pointing into the currently active recursion
+    /// context (detected by `recursion_feedback_info`), the group's existing
+    /// recursion array is reused directly — no separate state variable is
+    /// allocated and no extra write is emitted.  The previous-sample value is
+    /// read as `rec_array[(fIOTA - 1) & 1]`, which is always valid because the
+    /// recursion body writes `rec_array[fIOTA & 1]` earlier in the same sample.
+    ///
+    /// For all other `value` signals the normal path applies:
+    ///
+    /// - Write: `state[fIOTA & 1] = next` (immediate, in sample body)
+    /// - Read:  `state[(fIOTA - 1) & 1]`   (returns previous sample)
     fn lower_delay_state(
         &mut self,
         node: SigId,
@@ -1344,8 +1384,13 @@ impl<'a> SignalToFirLower<'a> {
         }).map(Some)
     }
 
-    /// Ensures one struct state slot exists for `node`, creating declaration
-    /// and `instanceClear` initialization on first use.
+    /// Ensures a 2-element circular buffer state slot exists for `node`,
+    /// idempotent.  On first call, declares `[typ; 2]` in the struct
+    /// (prefixed `iRec` for `Int32`, `fRec` otherwise) and registers an
+    /// `instanceClear` zeroing loop.  Returns the generated variable name.
+    ///
+    /// Keyed by `node` SigId in `state_name_by_node` — separate from
+    /// `rec_array_by_group_index` to avoid aliasing (see `build_module` doc).
     fn ensure_state_slot(&mut self, node: SigId, typ: FirType, init: FirId) -> String {
         if let Some(name) = self.state_name_by_node.get(&node) {
             return name.clone();
@@ -1944,6 +1989,13 @@ impl<'a> SignalToFirLower<'a> {
     }
 
     /// Resolves a table-producing signal into `(table_name, table_len, access)`.
+    ///
+    /// Three cases are handled:
+    /// - `SIGWAVEFORM`: static constant table (`AccessType::Static`).
+    /// - `SIGWRTBL(size, gen, nil, nil)`: read-only generated table, expanded
+    ///   at compile-time (`AccessType::Static`).
+    /// - `SIGWRTBL(size, gen, widx, wsig)`: writable runtime table; written
+    ///   per-sample and read with (`AccessType::Struct`).
     fn resolve_table(&mut self, sig: SigId) -> Result<(String, usize, AccessType), SignalFirError> {
         if let Some(name) = self.waveform_tables.get(&sig).cloned() {
             let len = self.waveform_table_len.get(&sig).copied().unwrap_or(0);
@@ -2005,6 +2057,10 @@ impl<'a> SignalToFirLower<'a> {
     }
 
     /// Ensures one read-only `rdtable`-style declaration is emitted exactly once.
+    ///
+    /// Unlike `ensure_waveform_table` (literal constant values), this expands
+    /// the generator at compile-time via `expand_generator_values`.  The
+    /// resulting array is declared `Static` — no per-instance write is needed.
     fn ensure_readonly_table(
         &mut self,
         sig: SigId,
@@ -2031,6 +2087,11 @@ impl<'a> SignalToFirLower<'a> {
 
     /// Ensures one writable `rwtable` declaration and per-instance
     /// initialization are emitted exactly once.
+    ///
+    /// The table lives in the DSP struct (`AccessType::Struct`) so it can be
+    /// written at runtime.  The generator is expanded at compile-time and
+    /// registered in `instanceConstants` to seed initial values; per-sample
+    /// writes are emitted by `lower_wrtbl` into `sample_statements`.
     fn ensure_wrtbl_table(
         &mut self,
         sig: SigId,
@@ -2653,6 +2714,12 @@ impl<'a> SignalToFirLower<'a> {
     }
 
     /// Lowers one binary signal operator to FIR binop.
+    ///
+    /// Relies on the promoter invariant: every `BinOp` operand already has the
+    /// correct domain type (mixed Int/Real pairs wrapped in `FloatCast`; bitwise
+    /// and shift operands in `IntCast`; `Div` operands always Real).
+    /// Comparisons keep same-typed numeric operands and produce `Int32` results
+    /// for C++ parity.  No implicit coercion is performed here.
     fn lower_binop(
         &mut self,
         node: SigId,
@@ -2660,12 +2727,6 @@ impl<'a> SignalToFirLower<'a> {
         lhs_sig: SigId,
         rhs_sig: SigId,
     ) -> Result<FirId, SignalFirError> {
-        // The promoter guarantees that every BinOp operand already has the
-        // correct domain type: mixed Int/Real pairs are wrapped in FloatCast
-        // nodes, bitwise/shift operands in IntCast nodes, and Div operands are
-        // always Real. Comparisons keep same-typed numeric operands and lower
-        // to Int32 ("boolean int") results for C++ parity. No implicit
-        // coercion is needed here.
         let result_ty = self.signal_fir_type(node)?;
         let lhs = self.lower_signal(lhs_sig)?;
         let rhs = self.lower_signal(rhs_sig)?;
@@ -2840,6 +2901,19 @@ impl<'a> SignalToFirLower<'a> {
     ///
     /// Expects symbolic recursion payloads (`SYMREC` / `SYMREF`) — the normal
     /// fast-lane input form produced by `signal_prepare`.
+    ///
+    /// **Deferred body evaluation**: on the first `SIGPROJ` encountered for a
+    /// group, this method allocates 2-slot arrays for all output bodies, pushes
+    /// the group onto `recursion_stack`, lowers every body signal (emitting
+    /// stores into `sample_statements`), then pops the stack.  Subsequent
+    /// `SIGPROJ` nodes for the same group skip body evaluation entirely (the
+    /// `scheduled_state_updates` dedup guard keyed by `group` SigId ensures
+    /// exactly one body-lowering pass per sample).
+    ///
+    /// **Fast path** (active reference inside a body being lowered): when
+    /// `active_recursion_info` finds the group on the stack, the current-slot
+    /// value is read directly — no recursion into `lower_signal` occurs, which
+    /// breaks the cycle.
     fn lower_proj(
         &mut self,
         node: SigId,
@@ -3137,7 +3211,12 @@ impl<'a> GeneratorInterpreter<'a> {
         self.types.get(&sig).copied()
     }
 
-    /// Evaluate one signal node, returning its f64 value for the current step.
+    /// Evaluate one signal node, returning its `f64` value for the current step.
+    ///
+    /// Dispatches over the full signal vocabulary: constants, arithmetic, casts,
+    /// unary/binary math, trig, delays, waveform/table reads, and recursion.
+    /// Recursion groups maintain `cur` and `prev` state arrays advanced by
+    /// `eval_rec_and_project` on each call to `advance`.
     fn eval(&mut self, sig: SigId) -> Result<f64, SignalFirError> {
         // Check for SYMREC(var, body) — symbolic recursion binder
         if let Some((var, body)) = match_sym_rec(self.arena, sig) {
@@ -3518,7 +3597,12 @@ impl<'a> GeneratorInterpreter<'a> {
     }
 }
 
-/// Evaluate a binary operator on f64 values.
+/// Evaluate a binary operator on `f64` values.
+///
+/// Division and remainder by zero return `0.0` (Faust-C++ semantics).
+/// Bitwise and shift operators truncate operands to `i32`/`u32` and widen
+/// the result back to `f64`.  Used by both the compile-time generator
+/// interpreter and `GeneratorInterpreter::eval_binop`.
 fn eval_binop(op: BinOp, lhs: f64, rhs: f64) -> f64 {
     match op {
         BinOp::Add => lhs + rhs,

@@ -45,6 +45,34 @@ For each day file, entries are ordered from most recent commit to oldest using G
 
 See [`porting/journal/README.md`](porting/journal/README.md).
 
+## 2026-03-25 — docs(transform): documentation pass on signal_fir/module.rs
+
+Comprehensive doc improvements across `signal_fir/module.rs` (~3 590 lines):
+
+- **`build_module`**: added `# Recursion and delay1 coupling` section explaining why
+  `Delay1(Proj(i, group))` reuses the recursion array slot, and why two separate state
+  maps (`state_name_by_node` / `rec_array_by_group_index`) exist.
+- **`lower_delay_state`**: documented the recursion-feedback optimization path (reuse of
+  the group array, no extra write emitted, reads `(fIOTA-1)&1`).
+- **`lower_proj`**: documented deferred body evaluation, the `scheduled_state_updates`
+  dedup guard, and the fast-path cycle-break via `active_recursion_info`.
+- **`lower_binop`**: moved the promoter-invariant explanation from an inline comment
+  into the doc comment; removed the now-redundant inline comment.
+- **`decode_foreign_fun_proto`**: added doc describing the `[ret, [name_f32, name_f64],
+  arg…]` signature-list layout.
+- **`rec_array_by_group_index` field**: clarified the aliasing risk and why the field
+  uses a disjoint key from `state_name_by_node`.
+- **`scheduled_state_updates` field**: mentioned its dual role (delay nodes + recursion
+  group dedup).
+- **`scan_delay_lines`**: explained why the maximum delay is tracked (multiple SIGDELAY
+  nodes on the same carried signal share one delay line).
+- **`ensure_state_slot`**: expanded doc to cover naming policy and cross-map isolation.
+- **`resolve_table`**: documented the three table cases (waveform, read-only, writable).
+- **`ensure_readonly_table` / `ensure_wrtbl_table`**: distinguished compile-time static
+  expansion from per-instance runtime writes.
+- **`GeneratorInterpreter::eval`**: added dispatch summary.
+- **`eval_binop` (free fn)**: documented zero-division semantics and bitwise truncation.
+
 ## 2026-03-25 — refactor(transform): replace dead cast branch in lower_proj with debug_assert
 
 In `signal_fir/module.rs::lower_proj`, the final `if info.typ == out_ty { load } else { b.cast(out_ty, load) }`
