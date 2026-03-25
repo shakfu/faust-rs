@@ -5,7 +5,8 @@
 //! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use boxes::{BoxBuilder, BoxMatch, match_box};
@@ -14,7 +15,7 @@ use eval::{
     Environment, EvalError, EvalSourceContext, LoopDetector, eval_box, eval_process,
     eval_process_with_source_context, eval_process_with_stats,
 };
-use parser::{CompilationMetadataKey, parse_program};
+use parser::{CompilationMetadataKey, parse_file_with_imports, parse_program};
 use propagate::ArityCache;
 use tlib::{NodeKind, TreeArena, TreeId};
 
@@ -113,6 +114,26 @@ fn temp_root(test_name: &str) -> PathBuf {
     ));
     fs::create_dir_all(&root).expect("create temp root");
     root
+}
+
+fn cpp_bin() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("FAUST_CPP_BIN") {
+        return Some(PathBuf::from(path));
+    }
+    let default = PathBuf::from("/usr/local/bin/faust");
+    default.exists().then_some(default)
+}
+
+fn cpp_compiles_file(cpp_bin: &Path, input_path: &Path, out_path: &Path) -> Result<bool, String> {
+    let output = Command::new(cpp_bin)
+        .arg(input_path)
+        .arg("-lang")
+        .arg("c")
+        .arg("-o")
+        .arg(out_path)
+        .output()
+        .map_err(|e| format!("failed to run {}: {e}", cpp_bin.display()))?;
+    Ok(output.status.success())
 }
 
 #[test]
@@ -1256,6 +1277,87 @@ fn eval_case_pattern_var_lookup_stops_at_barrier_scope() {
     let out = eval_box(&mut arena, expr, &env, &mut loop_detector)
         .expect("pattern-variable matching should ignore outer bindings");
     expect_int(&arena, out, 2);
+}
+
+#[test]
+fn eval_process_preserves_tupled_higher_order_locals_for_case_matching() {
+    let source = r#"
+        import("stdfaust.lib");
+        wd = library("wdmodels.lib");
+        foo((a, b)) = 123;
+        process = foo((res1, res2))
+        with {
+            res1(i) = wd.resistor(i, 1000);
+            res2(i) = wd.resistor(i, 2000);
+        };
+    "#;
+    let parsed = parse_program(source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept higher-order tuple fixture: {:?}",
+        parsed.errors
+    );
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+
+    let out = eval_process(&mut arena, root)
+        .expect("tupled higher-order locals should remain matchable in case patterns");
+    expect_int(&arena, out, 123);
+}
+
+#[test]
+fn eval_process_tupled_higher_order_locals_match_cpp_reference() {
+    let root_dir = temp_root("tupled_higher_order_cpp_parity");
+    let entry = root_dir.join("main.dsp");
+    let child = root_dir.join("child_lib.dsp");
+    fs::write(
+        &child,
+        r#"
+            resistor =
+            case {
+                (2, R) => R0
+                with {
+                    R0 = R;
+                };
+            };
+        "#,
+    )
+    .expect("write child library");
+    let source = r#"
+        wd = library("child_lib.dsp");
+        foo((a, b)) = 123;
+        process = foo((res1, res2))
+        with {
+            res1(i) = wd.resistor(i, 1000);
+            res2(i) = wd.resistor(i, 2000);
+        };
+    "#;
+    fs::write(&entry, source).expect("write entry");
+
+    if let Some(cpp) = cpp_bin() {
+        let out_path = root_dir.join("main.c");
+        let cpp_ok = cpp_compiles_file(&cpp, &entry, &out_path)
+            .unwrap_or_else(|e| panic!("C++ run failed for tupled higher-order eval parity: {e}"));
+        assert!(
+            cpp_ok,
+            "C++ reference should compile tupled higher-order local closure case"
+        );
+    }
+
+    let parsed = parse_file_with_imports(&entry, std::slice::from_ref(&root_dir))
+        .expect("file-backed parse should succeed");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept higher-order tuple parity fixture: {:?}",
+        parsed.errors
+    );
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+    let ctx = EvalSourceContext::for_file(&entry, std::slice::from_ref(&root_dir));
+
+    let out = eval_process_with_source_context(&mut arena, root, ctx)
+        .expect("Rust eval should accept same higher-order tuple case as C++");
+    expect_int(&arena, out, 123);
 }
 
 #[test]

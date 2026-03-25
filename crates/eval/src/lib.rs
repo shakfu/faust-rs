@@ -2824,7 +2824,11 @@ fn map_children(
     let mut children = Vec::with_capacity(node.children.len());
     for child in node.children.as_slice() {
         let value = eval_value(arena, *child, env, loop_detector)?;
-        children.push(a2sb_value(arena, value, loop_detector)?);
+        // Preserve residual closures/pattern matchers as box nodes here instead
+        // of symbolically forcing them. Generic parent nodes such as `par`
+        // must be able to carry higher-order children unchanged so later case
+        // matching can still see tupled functions the same way C++ does.
+        children.push(force_value_to_box(arena, value, loop_detector)?);
     }
     Ok(arena.intern(node.kind, &children))
 }
