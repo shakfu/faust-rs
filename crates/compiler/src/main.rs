@@ -82,6 +82,8 @@ enum CliSignalFirLane {
 }
 
 impl CliSignalFirLane {
+    /// Converts the CLI lane selection into the internal [`SignalFirLane`] used
+    /// by the compiler library.
     fn into_compiler_lane(self) -> SignalFirLane {
         match self {
             Self::Legacy => SignalFirLane::LegacyBridge,
@@ -92,13 +94,21 @@ impl CliSignalFirLane {
 
 /// Tracks elapsed time across compilation phases and enforces a global timeout.
 struct CompilationTimer {
+    /// Absolute start time of the compilation run.
     start: Instant,
+    /// Time at which the most recent phase started, used to compute per-phase
+    /// elapsed time in [`Self::phase`].
     last_phase: Instant,
+    /// Maximum total compilation duration.  Exceeded → `process::exit(1)`.
     timeout: Duration,
+    /// When `true`, phase and total timings are printed to stderr.
+    /// Controlled by the `--compilation-time` CLI flag.
     display: bool,
 }
 
 impl CompilationTimer {
+    /// Creates a new timer.  `timeout_secs` sets the hard limit; `display`
+    /// controls whether timings are printed to stderr after each phase.
     fn new(timeout_secs: u64, display: bool) -> Self {
         let now = Instant::now();
         Self {
@@ -436,12 +446,22 @@ fn format_diagnostics_human_with_verbosity(
     out
 }
 
+/// Rendered A/B sub-expressions extracted from a binary composition diagnostic.
+///
+/// Faust composition errors often involve two mismatched signal processes (e.g.
+/// `A : B` where A's output count ≠ B's input count).  `PairedContext` holds
+/// the human-readable rendering of both sides so the CLI can emit a C++-style
+/// "Here A ... / while B ..." message without baking that format into the
+/// structured diagnostic schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// Pairing between a rendered diagnostic and its relevant source context.
 struct PairedContext {
+    /// Human-readable rendering of the left-hand (A) sub-expression.
     a_expr: String,
+    /// Human-readable rendering of the right-hand (B) sub-expression.
     b_expr: String,
+    /// Signal arity of A (e.g. `"2→1"`), if available.
     a_arity: Option<String>,
+    /// Signal arity of B (e.g. `"1→2"`), if available.
     b_arity: Option<String>,
 }
 
@@ -845,6 +865,8 @@ fn compiler_from_cli(
     compiler
 }
 
+/// Returns the configured DSP class name, or `None` when the flag was not set
+/// or was set to an empty string.
 fn selected_class_name(cli: &CliArgs) -> Option<String> {
     cli.class_name
         .as_ref()
@@ -852,6 +874,8 @@ fn selected_class_name(cli: &CliArgs) -> Option<String> {
         .cloned()
 }
 
+/// Returns the configured DSP superclass name, or `None` when the flag was not
+/// set or was set to an empty string.
 fn selected_super_class_name(cli: &CliArgs) -> Option<String> {
     cli.super_class_name
         .as_ref()

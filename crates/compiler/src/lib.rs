@@ -954,6 +954,11 @@ pub fn default_import_search_paths(path: &Path) -> Vec<PathBuf> {
     )
 }
 
+/// Builds the import search path list for a given source file, merging user-supplied
+/// extra paths with the built-in defaults discovered from the environment.
+///
+/// This is a convenience wrapper over [`build_import_search_paths`] that reads
+/// `FAUST_LIB_PATH` and the current executable location automatically.
 fn merge_import_search_paths(path: &Path, extra_paths: &[PathBuf]) -> Vec<PathBuf> {
     build_import_search_paths(
         path,
@@ -963,12 +968,25 @@ fn merge_import_search_paths(path: &Path, extra_paths: &[PathBuf]) -> Vec<PathBu
     )
 }
 
+/// Core implementation of the import search path algorithm.
+///
+/// Produces an ordered, deduplicated list following the same priority rules as
+/// the C++ Faust compiler:
+///
+/// 1. User-supplied `extra_paths` (highest priority).
+/// 2. Directory containing the source file.
+/// 3. Paths from the `FAUST_LIB_PATH` environment variable (colon/semicolon-separated).
+/// 4. Standard library locations relative to the running executable.
+///
+/// Parameters are explicit so the function is pure and fully testable without
+/// touching the environment.
 fn build_import_search_paths(
     path: &Path,
     extra_paths: &[PathBuf],
     faust_lib_path: Option<OsString>,
     current_exe: Option<PathBuf>,
 ) -> Vec<PathBuf> {
+    /// Appends `candidate` only if it is not already present in `paths`.
     fn push_unique(paths: &mut Vec<PathBuf>, candidate: PathBuf) {
         if !paths.iter().any(|existing| existing == &candidate) {
             paths.push(candidate);
@@ -1047,6 +1065,9 @@ fn lower_cpp_error_to_compiler(source: &str, error: LowerToCppError) -> Compiler
 }
 
 /// Maps a `LowerToCError` into a `CompilerError`, attaching the source name.
+///
+/// Each backend-specific error variant is mapped to the matching `CompilerError`
+/// variant so callers never need to depend on the internal lower-pipeline types.
 fn lower_c_error_to_compiler(source: &str, error: LowerToCError) -> CompilerError {
     match error {
         LowerError::Transform(error) => transform_error_to_compiler(source, error),
@@ -1090,6 +1111,9 @@ fn lower_fir_error_to_compiler(source: &str, error: LowerToFirError) -> Compiler
 }
 
 /// Wraps a `SignalFirError` into a `CompilerError::Transform` with one diagnostic.
+///
+/// The diagnostic bundle is built by [`signal_fir_diagnostic`] which extracts
+/// source location and note information from the transform error.
 fn transform_error_to_compiler(source: &str, error: SignalFirError) -> CompilerError {
     let diagnostic = signal_fir_diagnostic(&error);
     CompilerError::Transform {
@@ -1827,6 +1851,13 @@ fn compact_human_box_preview(arena: &tlib::TreeArena, node: BoxId) -> String {
 }
 
 /// Renders one box subtree to a human-oriented Faust-like expression string.
+///
+/// The output intentionally trades completeness for readability: composite
+/// boxes are rendered as infix expressions when possible, and unknown shapes
+/// fall back to a compact [`compact_box_preview`].
+///
+/// Recursion is bounded at depth 96 to prevent stack overflow on pathological
+/// or cyclically-aliased box graphs; deeper sub-trees are replaced with `"..."`.
 fn render_human_box_expr(arena: &tlib::TreeArena, node: BoxId, depth: usize) -> String {
     if depth > 96 {
         return "...".to_owned();
@@ -2007,6 +2038,11 @@ fn render_human_box_expr(arena: &tlib::TreeArena, node: BoxId, depth: usize) -> 
     }
 }
 
+/// Maps a primitive box node to its Faust infix operator symbol.
+///
+/// Returns `None` for primitives that are not infix operators (e.g. prefix
+/// or postfix forms). Used by [`render_human_box_expr`] to produce readable
+/// `A + B`-style diagnostic strings rather than box-type names.
 fn prim_infix_symbol(arena: &tlib::TreeArena, node: BoxId) -> Option<&'static str> {
     match match_box(arena, node) {
         BoxMatch::Add => Some("+"),
@@ -2441,6 +2477,12 @@ fn source_span_for_definition_name(
         .or_else(|| source_span_from_node_or_descendant(ctx, arena, expr))
 }
 
+/// Returns `true` when the subtree rooted at `root` contains `needle`.
+///
+/// Uses iterative depth-first traversal bounded at 4096 visited nodes to avoid
+/// infinite loops on DAG-shared or aliased subtrees.  The conservative bound
+/// means very large subtrees may produce a false negative; callers that use
+/// this for ownership detection already tolerate that with a `None` fallback.
 fn subtree_contains_node(arena: &tlib::TreeArena, root: BoxId, needle: BoxId) -> bool {
     if root == needle {
         return true;
@@ -2625,8 +2667,22 @@ fn alias_binding_trace_for_node(
 
 // ─── Golden snapshot helpers ──────────────────────────────────────────────────
 
+/// Generates a stable source snapshot string for regression testing.
+///
+/// The snapshot encodes the source name, byte count, line count, and an
+/// FNV-1a 64-bit hash of the newline-normalized source text.  Comparing
+/// snapshots across compiler versions or platforms detects unintended changes
+/// to code generation output without storing full generated files.
+///
+/// The format is plain text, one key/value pair per line:
+/// ```text
+/// faust-rs-golden-v1
+/// source=<name>
+/// bytes=<n>
+/// lines=<n>
+/// fnv1a64=<hex>
+/// ```
 #[must_use]
-/// Executes this operation and returns its result.
 pub fn golden_snapshot(source_name: &str, source: &str) -> String {
     let normalized_source = normalize_newlines(source);
     let line_count = normalized_source.lines().count();
@@ -2638,7 +2694,10 @@ pub fn golden_snapshot(source_name: &str, source: &str) -> String {
     )
 }
 
-/// Executes this operation and returns its result.
+/// File-backed variant of [`golden_snapshot`]: reads `path`, then delegates.
+///
+/// Useful for comparing generated output files in CI by snapshotting their
+/// contents rather than storing full copies.
 pub fn golden_snapshot_from_file(path: &Path) -> Result<String, std::io::Error> {
     let source = std::fs::read_to_string(path)?;
     Ok(golden_snapshot(&path.display().to_string(), &source))
@@ -2647,6 +2706,11 @@ pub fn golden_snapshot_from_file(path: &Path) -> Result<String, std::io::Error> 
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0001_0000_01b3;
 
+/// Computes a FNV-1a 64-bit hash of `input`.
+///
+/// Used exclusively by [`golden_snapshot`] to produce a stable, portable
+/// fingerprint.  FNV-1a is chosen for simplicity and determinism across
+/// platforms (no endianness or SIMD dependency), not for cryptographic strength.
 fn fnv1a64(input: &[u8]) -> u64 {
     let mut hash = FNV_OFFSET_BASIS;
     for byte in input {
@@ -2656,6 +2720,10 @@ fn fnv1a64(input: &[u8]) -> u64 {
     hash
 }
 
+/// Normalizes Windows (`\r\n`) and old Mac (`\r`) line endings to Unix `\n`.
+///
+/// Applied before hashing in [`golden_snapshot`] so that snapshots are
+/// identical regardless of whether the source or generated file uses LF or CRLF.
 fn normalize_newlines(input: &str) -> String {
     input.replace("\r\n", "\n").replace('\r', "\n")
 }

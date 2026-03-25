@@ -59,12 +59,12 @@ pub fn file_dirname(name: &str) -> String {
     }
 }
 
-/// Removes `ext` when it is present as a trailing suffix.
+/// Removes the trailing `ext` suffix from `name` when present.
 ///
-/// This intentionally mirrors the C++ guard `name.length() >= 4` before suffix
-/// stripping, because this helper is historically used for extension-style
-/// suffixes.
-/// Removes the trailing `ext` suffix when present.
+/// The guard `name.len() >= 4` mirrors the C++ original: this helper is
+/// historically used for file extensions (`.dsp`, `.lib`, etc.) and the guard
+/// prevents stripping from very short names where the extension would consume
+/// the entire string.
 #[must_use]
 pub fn strip_end(name: &str, ext: &str) -> String {
     if name.len() >= 4 && name.ends_with(ext) {
@@ -381,6 +381,10 @@ pub fn wrap_cpp_with_architecture(
     })
 }
 
+/// Returns `true` when `filename` is an absolute path.
+///
+/// Handles both Unix-style leading `/` and Windows DOS drive prefixes
+/// (`C:\...`), then falls back to [`Path::is_absolute`] for other cases.
 fn is_absolute_pathname(filename: &str) -> bool {
     let bytes = filename.as_bytes();
     if bytes.len() > 1 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
@@ -392,6 +396,11 @@ fn is_absolute_pathname(filename: &str) -> bool {
     Path::new(filename).is_absolute()
 }
 
+/// Converts `filename` to an absolute path.
+///
+/// If already absolute (as determined by [`is_absolute_pathname`]), the path
+/// is returned unchanged; otherwise it is joined to the current working
+/// directory.
 fn build_full_pathname(filename: &str) -> io::Result<PathBuf> {
     if is_absolute_pathname(filename) {
         Ok(PathBuf::from(filename))
@@ -400,6 +409,11 @@ fn build_full_pathname(filename: &str) -> io::Result<PathBuf> {
     }
 }
 
+/// Removes a single trailing line ending (`\n` or `\r\n`) from `line` in place.
+///
+/// Only the outermost newline is stripped; embedded newlines are preserved.
+/// This matches the C++ `getline` behaviour used in the original `stream_copy_*`
+/// implementations.
 fn trim_single_newline(line: &mut String) {
     if line.ends_with('\n') {
         line.pop();
@@ -409,14 +423,23 @@ fn trim_single_newline(line: &mut String) {
     }
 }
 
+/// Returns `true` when `s` consists entirely of spaces and tabs.
 fn is_blank(s: &str) -> bool {
     s.chars().all(|c| c == ' ' || c == '\t')
 }
 
+/// Removes all space characters from `s`, preserving every other character.
 fn remove_spaces(s: &str) -> String {
     s.chars().filter(|c| *c != ' ').collect()
 }
 
+/// Returns `true` when the substring at `s[pos..pos+len]` is surrounded by
+/// word boundaries (i.e. not preceded or followed by an alphanumeric or `_`
+/// character).
+///
+/// Used by [`replace_occurrences`] to implement whole-word replacement semantics
+/// for the `dsp` → `super_class_name` rewrite without touching embedded
+/// occurrences like `mydsp`.
 fn word_boundaries(s: &str, pos: usize, len: usize) -> bool {
     let before = if pos == 0 {
         None
@@ -439,6 +462,12 @@ fn word_boundaries(s: &str, pos: usize, len: usize) -> bool {
     true
 }
 
+/// Replaces all occurrences of `old` with `new` in `s`.
+///
+/// When `force` is `true`, every occurrence is replaced regardless of context.
+/// When `force` is `false`, only whole-word occurrences (delimited by
+/// non-alphanumeric/non-`_` characters) are replaced; this is used for the
+/// `dsp` → superclass rewrite to leave `mydsp` untouched.
 fn replace_occurrences(mut s: String, old: &str, new: &str, force: bool) -> String {
     if old.is_empty() {
         return s;
@@ -457,11 +486,22 @@ fn replace_occurrences(mut s: String, old: &str, new: &str, force: bool) -> Stri
     s
 }
 
+/// Rewrites class name tokens in `line` to match the configured names.
+///
+/// - `"mydsp"` is replaced unconditionally (`force=true`) with `class_name`.
+/// - `"dsp"` is replaced with word-boundary protection (`force=false`) with
+///   `super_class_name`, leaving `mydsp` (or any embedding word) intact.
 fn replace_class_name(line: &str, class_name: &str, super_class_name: &str) -> String {
     let line = replace_occurrences(line.to_owned(), "mydsp", class_name, true);
     replace_occurrences(line, "dsp", super_class_name, false)
 }
 
+/// Extracts the filename from an angle-bracket (`<...>`) or quoted (`"..."`)
+/// include path.
+///
+/// Returns `None` when `s` does not start with `<` or `"`, or when no closing
+/// delimiter is found.  This covers both C/C++ `#include` syntax and Julia
+/// `include(...)` syntax used in the wrapping pipeline.
 fn parse_include_filename(s: &str) -> Option<String> {
     let mut chars = s.chars();
     let start = chars.next()?;
@@ -479,6 +519,15 @@ fn parse_include_filename(s: &str) -> Option<String> {
     None
 }
 
+/// Returns the included filename when `line` is a Faust-specific include
+/// directive, or `None` otherwise.
+///
+/// Recognised patterns:
+/// - C/C++: `#include <faust/...>`
+/// - Julia: `include("/usr/local/share/faust/julia/...")`
+///
+/// These are the directives that the wrapping pipeline must intercept and
+/// inject inline rather than leaving for the downstream compiler to resolve.
 fn is_faust_include(line: &str) -> Option<String> {
     let trimmed = line.trim_start();
     if let Some(rest) = trimmed.strip_prefix("#include") {
@@ -495,6 +544,12 @@ fn is_faust_include(line: &str) -> Option<String> {
     None
 }
 
+/// Injects the contents of an architecture sub-file into `dst`.
+///
+/// If `fname` was already injected in this pass (tracked in
+/// `state.already_included`), the call is a no-op to prevent duplicate
+/// injection of shared headers.  On first encounter the file is located via
+/// [`open_arch_stream`], copied into `dst`, and marked as injected.
 fn inject<W: Write>(
     dst: &mut W,
     fname: &str,
