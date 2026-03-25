@@ -45,6 +45,15 @@ For each day file, entries are ordered from most recent commit to oldest using G
 
 See [`porting/journal/README.md`](porting/journal/README.md).
 
+## 2026-03-25 — refactor(transform): replace dead cast branch in lower_proj with debug_assert
+
+In `signal_fir/module.rs::lower_proj`, the final `if info.typ == out_ty { load } else { b.cast(out_ty, load) }`
+branch was dead code: `SIGPROJ(i, group)` inherits the type of the i-th body by Faust's type
+system, so `signal_fir_type(body[i])` and `signal_fir_type(node)` are always equal after
+`signal_prepare`/`typeAnnotation`.  Replaced with a `debug_assert_eq!` that documents the
+invariant and will fire in debug builds if a future regression in type propagation introduces
+a divergence.
+
 ## 2026-03-25 — docs(porting): WebAssembly backend development plan with C++ parity constraints
 
 Created `porting/wasm-backend-plan-2026-03-25-en.md` — full plan for the Rust WASM backend

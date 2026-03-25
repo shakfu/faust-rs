@@ -2963,11 +2963,14 @@ impl<'a> SignalToFirLower<'a> {
                 current_index,
                 info.typ.clone(),
             );
-            if info.typ == out_ty {
-                load
-            } else {
-                b.cast(out_ty, load)
-            }
+            // SIGPROJ inherits the type of its body: the array type and the
+            // node type must always agree after signal_prepare/typeAnnotation.
+            debug_assert_eq!(
+                info.typ, out_ty,
+                "SIGPROJ type mismatch: array={:?}, node={:?}",
+                info.typ, out_ty
+            );
+            load
         };
         Ok(out)
     }
