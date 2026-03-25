@@ -146,12 +146,7 @@ pub(crate) unsafe fn dispatch_ui_f32(
                         let zone_ptr: *mut *mut c_void = soundfile_zones
                             .get_mut(slot)
                             .map_or(std::ptr::null_mut(), |z| z as *mut *mut c_void);
-                        f(
-                            glue.ui_interface,
-                            label.as_ptr(),
-                            url.as_ptr(),
-                            zone_ptr,
-                        );
+                        f(glue.ui_interface, label.as_ptr(), url.as_ptr(), zone_ptr);
                     }
                 }
                 FbcOpcode::Declare => {
@@ -311,12 +306,7 @@ pub(crate) unsafe fn dispatch_ui_f64(
                         let zone_ptr: *mut *mut c_void = soundfile_zones
                             .get_mut(slot)
                             .map_or(std::ptr::null_mut(), |z| z as *mut *mut c_void);
-                        f(
-                            glue.ui_interface,
-                            label.as_ptr(),
-                            url.as_ptr(),
-                            zone_ptr,
-                        );
+                        f(glue.ui_interface, label.as_ptr(), url.as_ptr(), zone_ptr);
                     }
                 }
                 FbcOpcode::Declare => {

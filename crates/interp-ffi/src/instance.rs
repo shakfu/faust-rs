@@ -34,13 +34,13 @@ use crate::ui::dispatch_meta;
 /// inserted between these particular types).
 #[repr(C, packed)]
 struct CSoundfile {
-    f_buffers:  *mut c_void, // float** or double** depending on f_is_double
-    f_length:   *mut i32,    // [MAX_SOUNDFILE_PARTS] — length in frames per part
-    f_sr:       *mut i32,    // [MAX_SOUNDFILE_PARTS] — sample rate per part
-    f_offset:   *mut i32,    // [MAX_SOUNDFILE_PARTS] — frame offset per part
-    f_channels: i32,         // number of channels
-    f_parts:    i32,         // number of parts
-    f_is_double: bool,       // true → buffers are f64, false → f32
+    f_buffers: *mut c_void, // float** or double** depending on f_is_double
+    f_length: *mut i32,     // [MAX_SOUNDFILE_PARTS] — length in frames per part
+    f_sr: *mut i32,         // [MAX_SOUNDFILE_PARTS] — sample rate per part
+    f_offset: *mut i32,     // [MAX_SOUNDFILE_PARTS] — frame offset per part
+    f_channels: i32,        // number of channels
+    f_parts: i32,           // number of parts
+    f_is_double: bool,      // true → buffers are f64, false → f32
 }
 
 /// After `buildUserInterface` the host (`SoundUI`) has written loaded
@@ -63,21 +63,27 @@ unsafe fn sync_soundfiles_from_zones(exec: &mut FbcExecutorAny, zones: &[*mut c_
         let csf: *const CSoundfile = zone as *const CSoundfile;
 
         // Use read_unaligned via addr_of! in case the compiler sees a packed ref.
-        let channels   = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_channels)) } as usize;
-        let parts      = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_parts)) } as usize;
-        let is_double  = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_is_double)) };
-        let len_ptr    = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_length)) };
-        let sr_ptr     = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_sr)) };
-        let off_ptr    = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_offset)) };
-        let buf_ptr    = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_buffers)) };
+        let channels = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_channels)) } as usize;
+        let parts = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_parts)) } as usize;
+        let is_double = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_is_double)) };
+        let len_ptr = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_length)) };
+        let sr_ptr = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_sr)) };
+        let off_ptr = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_offset)) };
+        let buf_ptr = unsafe { std::ptr::read_unaligned(addr_of!((*csf).f_buffers)) };
 
-        if parts == 0 || channels == 0 || len_ptr.is_null() || sr_ptr.is_null() || off_ptr.is_null() || buf_ptr.is_null() {
+        if parts == 0
+            || channels == 0
+            || len_ptr.is_null()
+            || sr_ptr.is_null()
+            || off_ptr.is_null()
+            || buf_ptr.is_null()
+        {
             continue;
         }
 
-        let lengths: Vec<i32>      = unsafe { std::slice::from_raw_parts(len_ptr, parts).to_vec() };
-        let sample_rates: Vec<i32> = unsafe { std::slice::from_raw_parts(sr_ptr,  parts).to_vec() };
-        let offsets: Vec<i32>      = unsafe { std::slice::from_raw_parts(off_ptr, parts).to_vec() };
+        let lengths: Vec<i32> = unsafe { std::slice::from_raw_parts(len_ptr, parts).to_vec() };
+        let sample_rates: Vec<i32> = unsafe { std::slice::from_raw_parts(sr_ptr, parts).to_vec() };
+        let offsets: Vec<i32> = unsafe { std::slice::from_raw_parts(off_ptr, parts).to_vec() };
 
         // Total contiguous buffer length per channel.
         let total_frames = (offsets[parts - 1] + lengths[parts - 1]).max(0) as usize;
@@ -104,7 +110,7 @@ unsafe fn sync_soundfiles_from_zones(exec: &mut FbcExecutorAny, zones: &[*mut c_
 
         let sf = Soundfile {
             num_channels: channels,
-            num_parts:    parts,
+            num_parts: parts,
             lengths,
             sample_rates,
             offsets,

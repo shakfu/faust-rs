@@ -51,12 +51,18 @@ pub type CompilerParts<R> = (
 
 /// Which heap a variable is allocated in.
 ///
+/// The interpreter uses two separate heaps for cache-locality and to avoid
+/// type-punning: integer counters/indices live apart from floating-point
+/// filter state and delay memory.
+///
 /// # Source provenance (C++)
 /// - `Typed::VarType` (only `kInt32` vs everything-else distinction matters
 ///   for the interpreter backend).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeapType {
+    /// Integer heap (`int_heap`): loop counters, indices, control booleans.
     Int,
+    /// Real heap (`real_heap`): filter state, delay lines, audio accumulation.
     Real,
 }
 
@@ -69,7 +75,11 @@ pub enum HeapType {
 pub struct MemoryDesc {
     /// Heap offset (index into `int_heap` or `real_heap`).
     pub offset: i32,
-    /// Number of elements (1 for scalars, >1 for arrays).
+    /// Element count (not byte count): 1 for scalars, >1 for arrays.
+    ///
+    /// Used only for heap allocation sizing during `DeclareVar` compilation.
+    /// Indexed access uses `offset` from the field table directly; there is no
+    /// runtime stride calculation.
     pub size: i32,
     /// Whether this variable lives in the int heap or the real heap.
     pub heap_type: HeapType,
@@ -1780,9 +1790,9 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         self.current_block
             .push(FbcInstruction::with_values_and_offsets(
                 FbcOpcode::LoadSoundFieldInt,
-                0,            // int_value = 0 → fLength field selector
+                0, // int_value = 0 → fLength field selector
                 R::default(),
-                slot as i32,  // offset1 = soundfile slot index
+                slot as i32, // offset1 = soundfile slot index
                 0,
             ));
         Ok(())
@@ -1807,7 +1817,7 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         self.current_block
             .push(FbcInstruction::with_values_and_offsets(
                 FbcOpcode::LoadSoundFieldInt,
-                1,            // int_value = 1 → fSR field selector
+                1, // int_value = 1 → fSR field selector
                 R::default(),
                 slot as i32,
                 0,
@@ -1844,7 +1854,7 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 FbcOpcode::LoadSoundFieldReal,
                 0,
                 R::default(),
-                slot as i32,  // offset1 = soundfile slot index
+                slot as i32, // offset1 = soundfile slot index
                 0,
             ));
         Ok(())

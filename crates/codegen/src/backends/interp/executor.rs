@@ -462,8 +462,7 @@ impl<R: FbcReal> FbcExecutor<R> {
                 LoadSoundFieldInt => {
                     // offset1 = soundfile slot index; int_value = field selector
                     // (0 = fLength, 1 = fSR); pops part from int stack.
-                    let part = pop_int_stack(&mut int_stack, instr.opcode, cur_block, pc)?
-                        as usize;
+                    let part = pop_int_stack(&mut int_stack, instr.opcode, cur_block, pc)? as usize;
                     let sf = self
                         .soundfiles
                         .get(o1)
@@ -479,12 +478,9 @@ impl<R: FbcReal> FbcExecutor<R> {
                 LoadSoundFieldReal => {
                     // offset1 = soundfile slot index.
                     // Pops idx, part, chan from int stack (LIFO: idx on top).
-                    let idx =
-                        pop_int_stack(&mut int_stack, instr.opcode, cur_block, pc)?;
-                    let part = pop_int_stack(&mut int_stack, instr.opcode, cur_block, pc)?
-                        as usize;
-                    let chan = pop_int_stack(&mut int_stack, instr.opcode, cur_block, pc)?
-                        as usize;
+                    let idx = pop_int_stack(&mut int_stack, instr.opcode, cur_block, pc)?;
+                    let part = pop_int_stack(&mut int_stack, instr.opcode, cur_block, pc)? as usize;
+                    let chan = pop_int_stack(&mut int_stack, instr.opcode, cur_block, pc)? as usize;
                     let sf = self
                         .soundfiles
                         .get(o1)

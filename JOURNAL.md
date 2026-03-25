@@ -45,6 +45,19 @@ For each day file, entries are ordered from most recent commit to oldest using G
 
 See [`porting/journal/README.md`](porting/journal/README.md).
 
+## 2026-03-25 — docs(codegen): targeted documentation improvements in cranelift and interp backends
+
+After a full audit of all 13 non-test files in `backends/cranelift` and
+`backends/interp`, the documentation was found to be generally thorough.
+Three genuine gaps were fixed:
+
+- `compiler.rs HeapType::Int/Real`: added per-variant docs explaining why two
+  separate heaps exist (cache locality; counters/indices vs filter state).
+- `compiler.rs MemoryDesc::size`: clarified "element count, not bytes" and that
+  the field is used for heap allocation sizing only, not for stride calculations.
+- `real.rs FbcReal::fbc_abs`: defined what "integer-style" means (truncate to
+  `i32`, apply `i32::abs()`, cast back) and contrasted with `fbc_absf`.
+
 ## 2026-03-25 — docs(transform): documentation pass on signal_fir/module.rs
 
 Comprehensive doc improvements across `signal_fir/module.rs` (~3 590 lines):

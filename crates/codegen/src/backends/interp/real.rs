@@ -70,7 +70,11 @@ pub trait FbcReal:
 
     // ── Unary math ───────────────────────────────────────────────────────
 
-    /// Absolute value (integer-style for `kAbs`).
+    /// Absolute value, integer-style (`kAbs` opcode).
+    ///
+    /// Truncates `self` to `i32`, applies `i32::abs()`, then casts the result
+    /// back to `Self`.  Differs from [`Self::fbc_absf`] which keeps full
+    /// floating-point precision.
     fn fbc_abs(self) -> Self;
 
     /// Absolute value (float-style for `kAbsf`).

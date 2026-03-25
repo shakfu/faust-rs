@@ -28,7 +28,9 @@
 
 use std::ffi::{c_char, c_void};
 
-use codegen::backends::interp::{BlockId, FbcDspFactory, FbcExecutor, FbcMetaInstruction, Soundfile};
+use codegen::backends::interp::{
+    BlockId, FbcDspFactory, FbcExecutor, FbcMetaInstruction, Soundfile,
+};
 
 /// `FAUSTFLOAT` type at the C ABI boundary (always `f32`).
 pub type FaustFloat = f32;
@@ -281,10 +283,20 @@ impl FbcDspFactoryAny {
         unsafe {
             match (self, exec) {
                 (Self::Float32(f), FbcExecutorAny::Float32(e)) => {
-                    crate::ui::dispatch_ui_f32(&f.ui_block, &mut e.real_heap, soundfile_zones, glue);
+                    crate::ui::dispatch_ui_f32(
+                        &f.ui_block,
+                        &mut e.real_heap,
+                        soundfile_zones,
+                        glue,
+                    );
                 }
                 (Self::Float64(f), FbcExecutorAny::Float64(e)) => {
-                    crate::ui::dispatch_ui_f64(&f.ui_block, &mut e.real_heap, soundfile_zones, glue);
+                    crate::ui::dispatch_ui_f64(
+                        &f.ui_block,
+                        &mut e.real_heap,
+                        soundfile_zones,
+                        glue,
+                    );
                 }
                 _ => {}
             }
