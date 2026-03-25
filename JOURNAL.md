@@ -45,6 +45,15 @@ For each day file, entries are ordered from most recent commit to oldest using G
 
 See [`porting/journal/README.md`](porting/journal/README.md).
 
+## 2026-03-25 — docs(porting): WebAssembly backend development plan with C++ parity constraints
+
+Created `porting/wasm-backend-plan-2026-03-25-en.md` — full plan for the Rust WASM backend
+port.  Section 3 documents 19 structural constraints from direct C++ source analysis (section
+ordering, 11 exports in fixed order, 14 function bodies in alphabetical order, field alignment
+= `audioSampleSize` for all types, JSON at offset 0 in data segment, math import naming with
+`_` prefix, `genMemSize()` formula with backpatching, etc.).  Sections 4–5 define the Rust
+architecture (using `wasm-encoder` crate) and 10-step implementation plan.
+
 ## 2026-03-25 — feat(cranelift): add soundfile support in Cranelift backend
 
 `soundfile_zone_ptr()` added to `cranelift-ffi/src/instance.rs`: for `FirType::Sound` fields
