@@ -93,10 +93,7 @@ unsafe fn sync_soundfiles_from_zones(exec: &mut FbcExecutorAny, zones: &[*mut c_
             let chan_buf: Vec<f64> = if is_double {
                 let ptrs = buf_ptr as *const *const f64;
                 let ptr = unsafe { *ptrs.add(c) };
-                unsafe { std::slice::from_raw_parts(ptr, total_frames) }
-                    .iter()
-                    .copied()
-                    .collect()
+                unsafe { std::slice::from_raw_parts(ptr, total_frames) }.to_vec()
             } else {
                 let ptrs = buf_ptr as *const *const f32;
                 let ptr = unsafe { *ptrs.add(c) };

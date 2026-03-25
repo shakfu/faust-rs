@@ -91,7 +91,7 @@
 //! not semantic:
 //! - source loading uses [`EvalSourceContext`] instead of the process-global `gReader`,
 //! - closures and pattern matchers are explicit Rust values instead of tree nodes,
-//! - later passes still consume first-order box IR after [`a2sb_value`] lowers those values.
+//! - later passes still consume first-order box IR after `a2sb_value` lowers those values.
 //!
 //! Current mapping status: **1:1 semantics, adapted representation**.
 //!
@@ -620,7 +620,7 @@ fn fresh_slot(arena: &mut TreeArena, loop_detector: &mut LoopDetector) -> TreeId
 
 /// Evaluates one box expression in the provided lexical environment and forces it back to box IR.
 ///
-/// Internally the evaluator now produces [`EvalValue`] first, so closures can carry a captured
+/// Internally the evaluator now produces `EvalValue` first, so closures can carry a captured
 /// environment before being lowered back to a `TreeId` for later passes.
 pub fn eval_box(
     arena: &mut TreeArena,

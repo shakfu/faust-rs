@@ -304,7 +304,7 @@ impl TreeArena {
     /// Implementation note:
     /// - arity `0`, `1`, and `2` use specialized hash tables keyed without an
     ///   intermediate heap allocation,
-    /// - arity `>= 3` falls back to [`NodeKey`].
+    /// - arity `>= 3` falls back to `NodeKey`.
     #[must_use]
     pub fn intern(&mut self, kind: NodeKind, children: &[TreeId]) -> TreeId {
         match children {

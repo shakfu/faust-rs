@@ -363,7 +363,7 @@ impl FbcExecutorAny {
             Self::Float64(e) => e.soundfiles.get_mut(slot),
         };
         if let Some(entry) = entry {
-            *entry = Box::new(sf);
+            **entry = sf;
         }
     }
 

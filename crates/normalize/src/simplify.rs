@@ -49,7 +49,7 @@ pub(crate) fn simplify(
 
 /// Simplify a signal tree without type context.
 ///
-/// Equivalent to [`simplify`] with an empty type map.  Sufficient for
+/// Equivalent to `simplify` with an empty type map.  Sufficient for
 /// compile-time constant folding at evaluation time, before type annotation
 /// has been performed (e.g. slider bounds, route parameters, numeric boxing).
 ///

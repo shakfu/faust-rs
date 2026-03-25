@@ -153,26 +153,24 @@ impl SourceReader {
             let line_starts_in_comment = in_block_comment;
             in_block_comment = Self::advance_block_comment_state(in_block_comment, line);
 
-            if !line_starts_in_comment {
-                if let Some(import_name) = parse_import_line(line) {
-                    let from_dir = path.parent();
-                    let Some(import_path) = self.resolve_import_from(&import_name, from_dir) else {
-                        self.visiting.remove(path);
-                        return Err(SourceReaderError::UnresolvedImport {
-                            name: import_name.into_boxed_str(),
-                            from: path.to_path_buf(),
-                        });
-                    };
-                    if !self.expanded_files.contains(&import_path) {
-                        let imported = self.read_file_impl(&import_path)?;
-                        expanded.push_str(&imported.text);
-                        line_origins.extend(imported.line_origins);
-                        if !expanded.ends_with('\n') {
-                            expanded.push('\n');
-                        }
+            if !line_starts_in_comment && let Some(import_name) = parse_import_line(line) {
+                let from_dir = path.parent();
+                let Some(import_path) = self.resolve_import_from(&import_name, from_dir) else {
+                    self.visiting.remove(path);
+                    return Err(SourceReaderError::UnresolvedImport {
+                        name: import_name.into_boxed_str(),
+                        from: path.to_path_buf(),
+                    });
+                };
+                if !self.expanded_files.contains(&import_path) {
+                    let imported = self.read_file_impl(&import_path)?;
+                    expanded.push_str(&imported.text);
+                    line_origins.extend(imported.line_origins);
+                    if !expanded.ends_with('\n') {
+                        expanded.push('\n');
                     }
-                    continue; // import line consumed — not appended as source text
                 }
+                continue; // import line consumed — not appended as source text
             }
             expanded.push_str(line);
             expanded.push('\n');

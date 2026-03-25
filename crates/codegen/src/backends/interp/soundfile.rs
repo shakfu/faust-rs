@@ -6,7 +6,7 @@
 //!   (`fBuffers[chan][sample_idx]`).
 //!
 //! In the Rust interpreter sample data is stored as `f64` regardless of the
-//! DSP precision mode; the executor converts on the fly via [`FbcReal::from_f64`].
+//! DSP precision mode; the executor converts on the fly via `FbcReal::from_f64`.
 
 /// Runtime soundfile data: per-part metadata and interleaved channel buffers.
 ///
