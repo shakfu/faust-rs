@@ -74,6 +74,7 @@ fn json_builder_replays_fir_ui_and_metadata() {
             compile_options: None,
             library_list: Vec::new(),
             include_pathnames: Vec::new(),
+            top_level_meta: Vec::new(),
             size: Some(16),
             inputs: num_inputs,
             outputs: num_outputs,
@@ -97,6 +98,7 @@ fn json_builder_replays_fir_ui_and_metadata() {
     assert!(rendered.contains("\"index\":0"));
     assert!(rendered.contains("\"address\":\"/GainBias/level\""));
     assert!(rendered.contains("\"index\":12"));
+    assert!(rendered.contains("\"name\":\"gain-bias-ui-meta\""));
 }
 
 #[test]
@@ -125,6 +127,7 @@ fn json_builder_emits_empty_ui_when_build_ui_function_is_missing() {
             compile_options: None,
             library_list: Vec::new(),
             include_pathnames: Vec::new(),
+            top_level_meta: Vec::new(),
             size: Some(0),
             inputs: num_inputs,
             outputs: num_outputs,

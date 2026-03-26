@@ -41,7 +41,10 @@ use codegen::backends::interp::{
     CodegenError as InterpCodegenError, CodegenErrorCode as InterpCodegenErrorCode, FbcDspFactory,
     FbcReal, InterpOptions, generate_interp_module, write_fbc,
 };
-use codegen::backends::wasm::{WasmBackendError, WasmModule, WasmOptions, generate_wasm_module};
+use codegen::backends::wasm::{
+    WasmBackendError, WasmJsonContext, WasmModule, WasmOptions, generate_wasm_module_with_context,
+};
+use codegen::json::JsonMetaEntry;
 use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, SourceSpan};
 use fir::{
     FirBuilder, FirId, FirStore, FirType, NamedType,
@@ -73,6 +76,9 @@ pub struct SignalCompileOutput {
     /// Aggregated top-level `declare key "value";` metadata visible after the
     /// whole parse + eval file-loading session.
     pub compilation_metadata: parser::CompilationMetadataSnapshot,
+    /// Additional Faust source files loaded through evaluator-side
+    /// `component(...)` / `library(...)` resolution during this session.
+    pub loaded_files: Vec<PathBuf>,
     /// Evaluated `process` box expression after `eval`.
     pub process_box: BoxId,
     /// Inferred process arity (`inputs`/`outputs`) from `propagate::box_arity_typed`.
@@ -454,13 +460,16 @@ impl Compiler {
         options: &WasmOptions,
         lane: SignalFirLane,
     ) -> Result<WasmModule, CompilerError> {
-        let lowered = self.compile_source_to_fir_with_lane(source_name, source, lane)?;
-        generate_wasm_module(&lowered.store, lowered.module, options).map_err(|error| {
-            CompilerError::CodegenWasm {
+        let signals = self.compile_source_to_signals(source_name, source)?;
+        let lowered =
+            lower_signals_to_fir(source_name, &signals, lane, self.fir_verify, self.real_type)
+                .map_err(|error| lower_fir_error_to_compiler(source_name, error))?;
+        let json_context = wasm_json_context_for_memory_source(source_name, &signals);
+        generate_wasm_module_with_context(&lowered.store, lowered.module, options, &json_context)
+            .map_err(|error| CompilerError::CodegenWasm {
                 source: source_name.into(),
                 error,
-            }
-        })
+            })
     }
 
     /// Parses + evaluates + propagates one file, then emits C++ text from
@@ -568,14 +577,17 @@ impl Compiler {
         options: &WasmOptions,
         lane: SignalFirLane,
     ) -> Result<WasmModule, CompilerError> {
-        let lowered = self.compile_file_to_fir_with_lane(path, search_paths, lane)?;
         let source = path.display().to_string();
-        generate_wasm_module(&lowered.store, lowered.module, options).map_err(|error| {
-            CompilerError::CodegenWasm {
+        let signals = self.compile_file_to_signals(path, search_paths)?;
+        let lowered =
+            lower_signals_to_fir(&source, &signals, lane, self.fir_verify, self.real_type)
+                .map_err(|error| lower_fir_error_to_compiler(&source, error))?;
+        let json_context = wasm_json_context_for_file(path, search_paths, &signals);
+        generate_wasm_module_with_context(&lowered.store, lowered.module, options, &json_context)
+            .map_err(|error| CompilerError::CodegenWasm {
                 source: source.into(),
                 error,
-            }
-        })
+            })
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -880,6 +892,9 @@ impl Compiler {
         Ok(SignalCompileOutput {
             compilation_metadata,
             parse: output,
+            loaded_files: eval_source_context
+                .as_ref()
+                .map_or_else(Vec::new, eval::EvalSourceContext::loaded_files),
             process_box,
             process_arity,
             signals: propagated.signals,
@@ -1841,6 +1856,101 @@ fn source_name_to_class(source_name: &str) -> String {
         .filter(|stem| !stem.is_empty())
         .unwrap_or("faust_dsp")
         .to_owned()
+}
+
+fn source_name_to_filename(source_name: &str) -> String {
+    Path::new(source_name)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(source_name)
+        .to_owned()
+}
+
+fn wasm_json_context_for_memory_source(
+    source_name: &str,
+    signals: &SignalCompileOutput,
+) -> WasmJsonContext {
+    WasmJsonContext {
+        filename: Some(source_name_to_filename(source_name)),
+        version: Some(Compiler::version().to_owned()),
+        compile_options: None,
+        library_list: Vec::new(),
+        include_pathnames: Vec::new(),
+        top_level_meta: json_meta_entries_from_snapshot(&signals.compilation_metadata),
+    }
+}
+
+fn wasm_json_context_for_file(
+    path: &Path,
+    search_paths: &[PathBuf],
+    signals: &SignalCompileOutput,
+) -> WasmJsonContext {
+    let filename = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    let mut library_list: Vec<String> = signals
+        .parse
+        .used_files
+        .iter()
+        .skip(1)
+        .map(|file| file.to_string_lossy().into_owned())
+        .collect();
+    for file in &signals.loaded_files {
+        let file = file.to_string_lossy().into_owned();
+        if !library_list.iter().any(|existing| existing == &file) {
+            library_list.push(file);
+        }
+    }
+    WasmJsonContext {
+        filename: Some(filename),
+        version: Some(Compiler::version().to_owned()),
+        compile_options: None,
+        library_list,
+        include_pathnames: merge_import_search_paths(path, search_paths)
+            .into_iter()
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .collect(),
+        top_level_meta: json_meta_entries_from_snapshot(&signals.compilation_metadata),
+    }
+}
+
+fn json_meta_entries_from_snapshot(snapshot: &CompilationMetadataSnapshot) -> Vec<JsonMetaEntry> {
+    let mut out = Vec::new();
+    for (key, values) in snapshot.entries() {
+        let mut values = values.iter();
+        let Some(first_value) = values.next() else {
+            continue;
+        };
+        let base_key = match key {
+            CompilationMetadataKey::Global { key } => key.as_ref().to_owned(),
+            CompilationMetadataKey::Scoped { source_file, key } => {
+                format!("{source_file}/{}", key.as_ref())
+            }
+        };
+        out.push(JsonMetaEntry {
+            key: base_key.clone(),
+            value: first_value.as_ref().to_owned(),
+        });
+        if base_key == "author" {
+            for value in values {
+                out.push(JsonMetaEntry {
+                    key: "contributor".to_owned(),
+                    value: value.as_ref().to_owned(),
+                });
+            }
+        } else {
+            for value in values {
+                out.push(JsonMetaEntry {
+                    key: base_key.clone(),
+                    value: value.as_ref().to_owned(),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Replaces non-identifier characters so the result is safe as a C/C++ identifier.
@@ -3102,5 +3212,43 @@ mod tests {
         assert!(out.wasm_binary.starts_with(b"\0asm"));
         assert!(out.dsp_json.contains("\"size\":"));
         assert!(out.dsp_json.contains("\"ui\":["));
+        assert!(out.dsp_json.contains("\"filename\":\"zero.dsp\""));
+        assert!(
+            out.dsp_json
+                .contains(&format!("\"version\":\"{}\"", Compiler::version()))
+        );
+    }
+
+    #[test]
+    fn compiler_compile_file_to_wasm_emits_file_provenance_fields() {
+        let root = temp_root("wasm_json_provenance");
+        let entry = root.join("main.dsp");
+        let child = root.join("child.lib");
+        fs::write(
+            &entry,
+            "declare name \"Main DSP\";\nprocess = component(\"child.lib\");\n",
+        )
+        .expect("write entry");
+        fs::write(&child, "process = _;\n").expect("write child");
+
+        let compiler = Compiler::new();
+        let out = compiler
+            .compile_file_default_to_wasm(&entry, &WasmOptions::default())
+            .expect("file-backed WASM compile should succeed");
+
+        assert!(out.dsp_json.contains("\"name\":\"Main DSP\""));
+        assert!(out.dsp_json.contains("\"filename\":\"main.dsp\""));
+        assert!(
+            out.dsp_json
+                .contains(&format!("\"version\":\"{}\"", Compiler::version()))
+        );
+        assert!(
+            out.dsp_json.contains("\"library_list\":[") && out.dsp_json.contains("child.lib"),
+            "library_list should include the imported file"
+        );
+        assert!(
+            out.dsp_json.contains(&root.display().to_string()),
+            "include_pathnames should include the source directory"
+        );
     }
 }

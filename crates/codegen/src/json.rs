@@ -125,6 +125,7 @@ pub struct JsonBuildOptions {
     pub compile_options: Option<String>,
     pub library_list: Vec<String>,
     pub include_pathnames: Vec<String>,
+    pub top_level_meta: Vec<JsonMetaEntry>,
     pub size: Option<u32>,
     pub inputs: usize,
     pub outputs: usize,
@@ -155,9 +156,21 @@ pub fn build_json_description_from_fir<F>(
 where
     F: FnMut(&str) -> Option<u32>,
 {
+    let metadata = parse_metadata(store, find_function_body(store, function_items, "metadata"))?;
+    let merged_meta = merge_top_level_and_fir_meta(options.top_level_meta, metadata.entries);
+    let declared_name = merged_meta
+        .iter()
+        .find(|entry| entry.key == "name")
+        .map(|entry| entry.value.clone())
+        .or(metadata.declared_name);
+    let declared_filename = merged_meta
+        .iter()
+        .find(|entry| entry.key == "filename")
+        .map(|entry| entry.value.clone())
+        .or(metadata.declared_filename);
     Ok(JsonDescription {
-        name: options.name,
-        filename: options.filename,
+        name: declared_name.unwrap_or(options.name),
+        filename: declared_filename.or(options.filename),
         version: options.version,
         compile_options: options.compile_options,
         library_list: options.library_list,
@@ -166,7 +179,7 @@ where
         inputs: options.inputs,
         outputs: options.outputs,
         sr_index: options.sr_index,
-        meta: parse_metadata(store, find_function_body(store, function_items, "metadata"))?,
+        meta: merged_meta,
         ui: parse_ui(
             store,
             find_function_body(store, function_items, "buildUserInterface"),
@@ -189,6 +202,15 @@ pub fn escape_json_string(input: &str) -> String {
         }
     }
     out
+}
+
+fn merge_top_level_and_fir_meta(
+    top_level_meta: Vec<JsonMetaEntry>,
+    fir_meta: Vec<JsonMetaEntry>,
+) -> Vec<JsonMetaEntry> {
+    let mut merged = top_level_meta;
+    merged.extend(fir_meta);
+    merged
 }
 
 fn push_json_field_string(out: &mut String, key: &str, value: &str) {
@@ -307,12 +329,19 @@ fn push_json_ui_item(out: &mut String, item: &JsonUiItem) {
     }
 }
 
-fn parse_metadata(
-    store: &FirStore,
-    body: Option<FirId>,
-) -> Result<Vec<JsonMetaEntry>, JsonBuildError> {
+struct ParsedMetadata {
+    entries: Vec<JsonMetaEntry>,
+    declared_name: Option<String>,
+    declared_filename: Option<String>,
+}
+
+fn parse_metadata(store: &FirStore, body: Option<FirId>) -> Result<ParsedMetadata, JsonBuildError> {
     let Some(body) = body else {
-        return Ok(Vec::new());
+        return Ok(ParsedMetadata {
+            entries: Vec::new(),
+            declared_name: None,
+            declared_filename: None,
+        });
     };
     let FirMatch::Block(items) = match_fir(store, body) else {
         return Err(JsonBuildError::UnsupportedFirNode(
@@ -320,9 +349,17 @@ fn parse_metadata(
         ));
     };
     let mut meta = Vec::with_capacity(items.len());
+    let mut declared_name = None;
+    let mut declared_filename = None;
     for item in items {
         match match_fir(store, item) {
             FirMatch::AddMetaDeclare { key, value, .. } => {
+                if key == "name" && declared_name.is_none() {
+                    declared_name = Some(value.clone());
+                }
+                if key == "filename" && declared_filename.is_none() {
+                    declared_filename = Some(value.clone());
+                }
                 meta.push(JsonMetaEntry { key, value });
             }
             FirMatch::Label(_) => {}
@@ -333,7 +370,11 @@ fn parse_metadata(
             }
         }
     }
-    Ok(meta)
+    Ok(ParsedMetadata {
+        entries: meta,
+        declared_name,
+        declared_filename,
+    })
 }
 
 fn parse_ui<F>(

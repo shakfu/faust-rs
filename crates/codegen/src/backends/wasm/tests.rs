@@ -1,8 +1,8 @@
 use super::{WasmJsonDescription, WasmMemoryLayout, WasmOptions, generate_wasm_module};
 use crate::fixtures::{
-    build_control_flow_test_module, build_math_intrinsics_test_module,
-    build_passthrough_test_module, build_sine_phasor_test_module,
-    build_table_state_delay_test_module,
+    build_control_flow_test_module, build_gain_bias_ui_meta_test_module,
+    build_math_intrinsics_test_module, build_passthrough_test_module,
+    build_sine_phasor_test_module, build_table_state_delay_test_module,
 };
 
 use fir::{AccessType, FirBuilder, FirId, FirMathOp, FirStore, FirType, NamedType};
@@ -20,24 +20,30 @@ fn wasm_scaffold_emits_valid_module_for_passthrough_fixture() {
         .expect("generated scaffold should validate as WASM");
     assert!(out.dsp_json.contains("\"inputs\":1"));
     assert!(out.dsp_json.contains("\"outputs\":1"));
+    assert!(out.dsp_json.contains("\"ui\":[]"));
 }
 
 #[test]
 fn wasm_json_description_renders_stable_scaffold_shape() {
     let json = WasmJsonDescription {
         name: "passthrough".to_owned(),
-        backend: "wasm",
-        scaffold: true,
-        double_precision: false,
-        internal_memory: true,
+        filename: None,
+        version: None,
+        compile_options: None,
+        library_list: Vec::new(),
+        include_pathnames: Vec::new(),
+        size: Some(4),
         inputs: 1,
         outputs: 2,
+        sr_index: None,
+        meta: Vec::new(),
+        ui: Vec::new(),
     }
     .render();
 
     assert_eq!(
         json,
-        "{\"name\":\"passthrough\",\"backend\":\"wasm\",\"scaffold\":true,\"double_precision\":false,\"internal_memory\":true,\"inputs\":1,\"outputs\":2}"
+        "{\"name\":\"passthrough\",\"size\":4,\"inputs\":1,\"outputs\":2,\"ui\":[]}"
     );
 }
 
@@ -45,12 +51,17 @@ fn wasm_json_description_renders_stable_scaffold_shape() {
 fn wasm_json_description_escapes_string_fields() {
     let json = WasmJsonDescription {
         name: "quote\"slash\\tab\tline\n".to_owned(),
-        backend: "wasm",
-        scaffold: true,
-        double_precision: true,
-        internal_memory: false,
+        filename: None,
+        version: None,
+        compile_options: None,
+        library_list: Vec::new(),
+        include_pathnames: Vec::new(),
+        size: Some(0),
         inputs: 0,
         outputs: 0,
+        sr_index: None,
+        meta: Vec::new(),
+        ui: Vec::new(),
     }
     .render();
 
@@ -58,6 +69,29 @@ fn wasm_json_description_escapes_string_fields() {
         json.contains("\"name\":\"quote\\\"slash\\\\tab\\tline\\n\""),
         "escaped JSON should preserve control characters and quotes: {json}"
     );
+}
+
+#[test]
+fn wasm_json_description_replays_fir_ui_and_metadata() {
+    let (store, module) = build_gain_bias_ui_meta_test_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM backend should emit FIR-derived UI and metadata JSON");
+
+    assert!(out.dsp_json.contains("\"size\":16"));
+    assert!(
+        out.dsp_json
+            .contains("\"meta\":[{\"name\":\"gain-bias-ui-meta\"},{\"author\":\"faust-rs\"}]")
+    );
+    assert!(out.dsp_json.contains("\"type\":\"vgroup\""));
+    assert!(out.dsp_json.contains("\"label\":\"GainBias\""));
+    assert!(out.dsp_json.contains("\"address\":\"/GainBias/gate\""));
+    assert!(out.dsp_json.contains("\"index\":8"));
+    assert!(out.dsp_json.contains("\"address\":\"/GainBias/gain\""));
+    assert!(out.dsp_json.contains("\"index\":0"));
+    assert!(out.dsp_json.contains("\"address\":\"/GainBias/bias\""));
+    assert!(out.dsp_json.contains("\"index\":4"));
+    assert!(out.dsp_json.contains("\"address\":\"/GainBias/level\""));
+    assert!(out.dsp_json.contains("\"index\":12"));
 }
 
 #[test]

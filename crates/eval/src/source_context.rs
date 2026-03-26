@@ -60,6 +60,7 @@ pub struct EvalSourceContext {
     pub(crate) current_file: Option<PathBuf>,
     pub(crate) search_paths: Vec<PathBuf>,
     pub(crate) cache: Arc<Mutex<HashMap<PathBuf, CachedLoadedSource>>>,
+    pub(crate) loaded_files: Arc<Mutex<Vec<PathBuf>>>,
     pub(crate) metadata_store: Option<CompilationMetadataStore>,
     /// Internal DSP computation precision forwarded to code-generation backends.
     ///
@@ -121,6 +122,7 @@ impl EvalSourceContext {
             current_file: Some(path.to_path_buf()),
             search_paths: ordered,
             cache: Arc::default(),
+            loaded_files: Arc::default(),
             metadata_store: Some(metadata_store),
             sample_precision: SamplePrecision::default(),
         }
@@ -139,6 +141,7 @@ impl EvalSourceContext {
             }
             None => Self::for_file(path, &self.search_paths),
         };
+        child.loaded_files = self.loaded_files.clone();
         child.sample_precision = self.sample_precision;
         child
     }
@@ -170,6 +173,14 @@ impl EvalSourceContext {
         )
     }
 
+    #[must_use]
+    pub fn loaded_files(&self) -> Vec<PathBuf> {
+        self.loaded_files
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     pub(crate) fn cached_loaded_source_hits<R>(
         &self,
         paths: &[PathBuf],
@@ -186,7 +197,12 @@ impl EvalSourceContext {
 
     pub(crate) fn insert_loaded_source(&self, path: PathBuf, source: CachedLoadedSource) {
         let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        guard.insert(path, source);
+        guard.insert(path.clone(), source);
+        drop(guard);
+        let mut loaded = self.loaded_files.lock().unwrap_or_else(|e| e.into_inner());
+        if !loaded.iter().any(|existing| existing == &path) {
+            loaded.push(path);
+        }
     }
 }
 

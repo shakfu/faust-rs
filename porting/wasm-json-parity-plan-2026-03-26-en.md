@@ -1,7 +1,7 @@
 # WASM JSON Parity Plan
 
 **Date:** 2026-03-26
-**Status:** Planning
+**Status:** In progress
 **Target crates:** `codegen`, `compiler`
 **Primary backend module:** `codegen::backends::wasm`
 **C++ provenance:** `architecture/faust/gui/JSONUI.h`, `compiler/generator/json_instructions.hh`, `compiler/generator/code_container.hh`, `compiler/generator/wasm/wasm_code_container.cpp`, `architecture/faust/gui/JSONUIDecoder.h`
@@ -241,6 +241,8 @@ This should be an explicit adapted API change, documented as such.
 
 ### Step 1. Introduce typed WASM JSON model
 
+Status: completed on 2026-03-26
+
 Deliverables:
 
 - backend-local Rust structs for JSON payload
@@ -253,6 +255,8 @@ Pass criteria:
 - no CLI behavior change yet beyond internal refactor
 
 ### Step 2. Build JSON from FIR metadata and UI instructions
+
+Status: completed on 2026-03-26
 
 Deliverables:
 
@@ -272,8 +276,11 @@ Pass criteria:
 
 - targeted tests using existing FIR fixtures with UI/meta
 - emitted `ui` tree matches expected structure, labels, ranges, and metadata
+- root `name` / `filename` honor top-level metadata declarations when present
 
 ### Step 3. Resolve widget `index` from WASM memory layout
+
+Status: mostly completed on 2026-03-26
 
 Deliverables:
 
@@ -286,8 +293,11 @@ Pass criteria:
 
 - tests asserting `index` offsets for slider/bargraph fixtures
 - `getParamValue` and `setParamValue` remain consistent with emitted JSON
+- `size` and `sr_index` are derived from the actual WASM memory layout
 
 ### Step 4. Extend compiler/backend API with compile context
+
+Status: in progress
 
 Deliverables:
 
@@ -305,7 +315,20 @@ Pass criteria:
 - compiler tests assert JSON contains provenance fields
 - no regression in `-lang wasm` binary emission
 
+Current implementation note:
+
+- a dedicated Rust JSON-context carrier now exists on the WASM backend boundary
+- file-backed compilation now feeds:
+  - `filename`
+  - `version`
+  - `include_pathnames`
+  - `library_list`
+- `compile_options` remains deferred until Rust has one explicit compiler-side
+  source of truth matching the C++ `printCompilationOptions1()` contract
+
 ### Step 5. Remove runtime-incompatible scaffold assumptions
+
+Status: in progress
 
 Deliverables:
 
@@ -319,6 +342,8 @@ Pass criteria:
   representative UI DSP
 
 ### Step 6. Differential validation against C++
+
+Status: not started
 
 Deliverables:
 

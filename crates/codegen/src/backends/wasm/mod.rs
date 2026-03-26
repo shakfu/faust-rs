@@ -20,7 +20,7 @@ use wasm_encoder::{
     Module, TypeSection, ValType,
 };
 
-use crate::json::{JsonBuildError, JsonBuildOptions, JsonDescription};
+use crate::json::{JsonBuildError, JsonBuildOptions, JsonDescription, JsonMetaEntry};
 
 pub mod layout;
 
@@ -55,6 +55,22 @@ impl Default for WasmOptions {
             internal_memory: true,
         }
     }
+}
+
+/// Compile-context metadata carried into WASM companion JSON emission.
+///
+/// Source provenance (C++):
+/// - `CodeContainer::generateJSON(...)` in `compiler/generator/code_container.hh`
+/// - `global::printCompilationOptions1()`
+/// - `SourceReader::listLibraryFiles()`
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WasmJsonContext {
+    pub filename: Option<String>,
+    pub version: Option<String>,
+    pub compile_options: Option<String>,
+    pub library_list: Vec<String>,
+    pub include_pathnames: Vec<String>,
+    pub top_level_meta: Vec<JsonMetaEntry>,
 }
 
 /// Compiled WASM module output.
@@ -198,6 +214,16 @@ pub fn generate_wasm_module(
     module: FirId,
     options: &WasmOptions,
 ) -> Result<WasmModule, WasmBackendError> {
+    generate_wasm_module_with_context(store, module, options, &WasmJsonContext::default())
+}
+
+/// Emits one valid WASM module for a FIR `Module` root with explicit JSON context.
+pub fn generate_wasm_module_with_context(
+    store: &FirStore,
+    module: FirId,
+    options: &WasmOptions,
+    json_context: &WasmJsonContext,
+) -> Result<WasmModule, WasmBackendError> {
     let FirMatch::Module {
         num_inputs,
         num_outputs,
@@ -249,6 +275,7 @@ pub fn generate_wasm_module(
         &memory_layout,
         num_inputs,
         num_outputs,
+        json_context,
     )?
     .render();
     memory_layout = WasmMemoryLayout::from_module(store, module, options, dsp_json.len())?;
@@ -435,17 +462,19 @@ fn build_wasm_json_description(
     memory_layout: &WasmMemoryLayout,
     num_inputs: usize,
     num_outputs: usize,
+    json_context: &WasmJsonContext,
 ) -> Result<WasmJsonDescription, WasmBackendError> {
     crate::json::build_json_description_from_fir(
         store,
         function_items,
         JsonBuildOptions {
             name: module_name.to_owned(),
-            filename: None,
-            version: None,
-            compile_options: None,
-            library_list: Vec::new(),
-            include_pathnames: Vec::new(),
+            filename: json_context.filename.clone(),
+            version: json_context.version.clone(),
+            compile_options: json_context.compile_options.clone(),
+            library_list: json_context.library_list.clone(),
+            include_pathnames: json_context.include_pathnames.clone(),
+            top_level_meta: json_context.top_level_meta.clone(),
             size: Some(memory_layout.struct_size),
             inputs: num_inputs,
             outputs: num_outputs,
