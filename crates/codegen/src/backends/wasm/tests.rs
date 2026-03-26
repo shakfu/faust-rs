@@ -1,7 +1,8 @@
 use super::{WasmMemoryLayout, WasmOptions, generate_wasm_module};
 use crate::fixtures::{
-    build_math_intrinsics_test_module, build_passthrough_test_module,
-    build_sine_phasor_test_module, build_table_state_delay_test_module,
+    build_control_flow_test_module, build_math_intrinsics_test_module,
+    build_passthrough_test_module, build_sine_phasor_test_module,
+    build_table_state_delay_test_module,
 };
 
 use fir::{AccessType, FirBuilder, FirId, FirMathOp, FirStore, FirType, NamedType};
@@ -161,6 +162,25 @@ fn wasm_compute_calls_imported_math_functions() {
             .count()
             >= 4
     );
+}
+
+#[test]
+fn wasm_compute_lowers_control_flow_statements() {
+    let (store, module) = build_control_flow_test_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM scaffold should emit control-flow compute body");
+
+    let body = code_body_at(&out.wasm_binary, 1);
+    let ops = decode_ops(body);
+    assert!(
+        ops.iter()
+            .filter(|op| matches!(op, Operator::If { .. }))
+            .count()
+            >= 2
+    );
+    assert!(ops.iter().any(|op| matches!(op, Operator::Else)));
+    assert!(ops.iter().any(|op| matches!(op, Operator::Drop)));
+    assert!(ops.iter().any(|op| matches!(op, Operator::I32Eq)));
 }
 
 #[test]

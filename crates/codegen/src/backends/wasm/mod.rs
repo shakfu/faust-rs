@@ -689,9 +689,31 @@ fn collect_compute_locals(
             }
             collect_compute_locals(store, body, out)
         }
+        FirMatch::If {
+            cond: _,
+            then_block,
+            else_block,
+        } => {
+            collect_compute_locals(store, then_block, out)?;
+            if let Some(else_block) = else_block {
+                collect_compute_locals(store, else_block, out)?;
+            }
+            Ok(())
+        }
+        FirMatch::Control { stmt, .. } => collect_compute_locals(store, stmt, out),
+        FirMatch::Switch { cases, default, .. } => {
+            for (_, case_stmt) in cases {
+                collect_compute_locals(store, case_stmt, out)?;
+            }
+            if let Some(default_stmt) = default {
+                collect_compute_locals(store, default_stmt, out)?;
+            }
+            Ok(())
+        }
         FirMatch::DeclareFun { .. }
         | FirMatch::StoreTable { .. }
         | FirMatch::StoreVar { .. }
+        | FirMatch::Drop(_)
         | FirMatch::NullStatement
         | FirMatch::Return(None) => Ok(()),
         other => Err(WasmBackendError::new(
@@ -765,9 +787,30 @@ impl ComputeSubsetLowerer<'_> {
             } => self.lower_store_table_struct(&name, index, value, function),
             FirMatch::StoreVar {
                 name,
+                access: AccessType::Stack | AccessType::Loop,
+                value,
+            } => self.lower_store_var_local(&name, value, function),
+            FirMatch::StoreVar {
+                name,
                 access: AccessType::Struct,
                 value,
             } => self.lower_store_var_struct(&name, value, function),
+            FirMatch::If {
+                cond,
+                then_block,
+                else_block,
+            } => self.lower_if_stmt(cond, then_block, else_block, function),
+            FirMatch::Control { cond, stmt } => self.lower_if_stmt(cond, stmt, None, function),
+            FirMatch::Switch {
+                cond,
+                cases,
+                default,
+            } => self.lower_switch_stmt(cond, &cases, default, function),
+            FirMatch::Drop(value) => {
+                self.lower_expr(value, function)?;
+                function.instruction(&Instruction::Drop);
+                Ok(())
+            }
             FirMatch::NullStatement | FirMatch::Return(None) => Ok(()),
             other => Err(WasmBackendError::new(
                 WasmBackendErrorCode::UnsupportedFirNode,
@@ -843,6 +886,18 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    fn lower_store_var_local(
+        &mut self,
+        name: &str,
+        value: FirId,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        let local = self.local(name)?.clone();
+        self.lower_expr(value, function)?;
+        function.instruction(&Instruction::LocalSet(local.index));
+        Ok(())
+    }
+
     fn lower_store_table_struct(
         &mut self,
         name: &str,
@@ -866,6 +921,68 @@ impl ComputeSubsetLowerer<'_> {
         })?;
         self.emit_cast_if_needed(&value_type, field_val_type, function)?;
         function.instruction(&store_instruction_for_valtype(field_val_type)?);
+        Ok(())
+    }
+
+    fn lower_if_stmt(
+        &mut self,
+        cond: FirId,
+        then_block: FirId,
+        else_block: Option<FirId>,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        self.lower_expr(cond, function)?;
+        self.emit_cast_if_needed(&FirType::Bool, ValType::I32, function)?;
+        function.instruction(&Instruction::If(BlockType::Empty));
+        self.lower_stmt(then_block, function)?;
+        if let Some(else_block) = else_block {
+            function.instruction(&Instruction::Else);
+            self.lower_stmt(else_block, function)?;
+        }
+        function.instruction(&Instruction::End);
+        Ok(())
+    }
+
+    fn lower_switch_stmt(
+        &mut self,
+        cond: FirId,
+        cases: &[(i64, FirId)],
+        default: Option<FirId>,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        let cond_ty = self.store.value_type(cond).ok_or_else(|| {
+            WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                "missing value type for WASM switch condition",
+            )
+        })?;
+        self.lower_switch_cases(cond, &cond_ty, cases, default, function)
+    }
+
+    fn lower_switch_cases(
+        &mut self,
+        cond: FirId,
+        cond_ty: &FirType,
+        cases: &[(i64, FirId)],
+        default: Option<FirId>,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        let Some(((case_value, case_stmt), rest)) = cases.split_first() else {
+            if let Some(default_stmt) = default {
+                self.lower_stmt(default_stmt, function)?;
+            }
+            return Ok(());
+        };
+        self.lower_expr(cond, function)?;
+        emit_switch_case_const(*case_value, cond_ty, function)?;
+        function.instruction(&switch_eq_instruction(cond_ty)?);
+        function.instruction(&Instruction::If(BlockType::Empty));
+        self.lower_stmt(*case_stmt, function)?;
+        if !rest.is_empty() || default.is_some() {
+            function.instruction(&Instruction::Else);
+            self.lower_switch_cases(cond, cond_ty, rest, default, function)?;
+        }
+        function.instruction(&Instruction::End);
         Ok(())
     }
 
@@ -1658,4 +1775,35 @@ fn binop_instruction(
             format!("unsupported WASM binop in compute subset: {op:?} / {val_ty:?}"),
         )),
     }
+}
+
+fn switch_eq_instruction(typ: &FirType) -> Result<Instruction<'static>, WasmBackendError> {
+    match typ {
+        FirType::Int32 | FirType::Bool => Ok(Instruction::I32Eq),
+        FirType::Int64 => Ok(Instruction::I64Eq),
+        other => Err(WasmBackendError::new(
+            WasmBackendErrorCode::UnsupportedFirNode,
+            format!("unsupported switch condition type in WASM subset: {other:?}"),
+        )),
+    }
+}
+
+fn emit_switch_case_const(
+    value: i64,
+    typ: &FirType,
+    function: &mut Function,
+) -> Result<(), WasmBackendError> {
+    match typ {
+        FirType::Int32 | FirType::Bool => {
+            function.instruction(&Instruction::I32Const(value as i32))
+        }
+        FirType::Int64 => function.instruction(&Instruction::I64Const(value)),
+        other => {
+            return Err(WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                format!("unsupported switch constant type in WASM subset: {other:?}"),
+            ));
+        }
+    };
+    Ok(())
 }
