@@ -227,17 +227,8 @@ pub fn generate_wasm_module(
         ));
     }
 
-    let compute_body = function_items
-        .iter()
-        .copied()
-        .find_map(|id| match match_fir(store, id) {
-            FirMatch::DeclareFun {
-                ref name,
-                body: Some(body),
-                ..
-            } if name == "compute" => Some(body),
-            _ => None,
-        });
+    let compute_body = find_function_body(store, &function_items, "compute");
+    let instance_clear_body = find_function_body(store, &function_items, "instanceClear");
 
     let real_ty = if options.double_precision {
         ValType::F64
@@ -390,6 +381,7 @@ pub fn generate_wasm_module(
             &math_imports,
             store,
             compute_body,
+            instance_clear_body,
             options,
         ));
     }
@@ -472,18 +464,24 @@ fn scaffold_function_body(
     math_imports: &[WasmMathImport],
     store: &FirStore,
     compute_body: Option<FirId>,
+    instance_clear_body: Option<FirId>,
     options: &WasmOptions,
 ) -> Function {
     let mut function = Function::new(Vec::new());
     match func {
-        WasmFunc::ClassInit
-        | WasmFunc::InstanceClear
-        | WasmFunc::InstanceResetUserInterface
-        | WasmFunc::SetParamValue => {}
+        WasmFunc::ClassInit | WasmFunc::InstanceResetUserInterface | WasmFunc::SetParamValue => {}
         WasmFunc::Compute => {
             if let Some(body) = compute_body
                 && let Ok(lowered) =
                     lower_compute_subset(store, body, memory_layout, math_imports, options)
+            {
+                return lowered;
+            }
+        }
+        WasmFunc::InstanceClear => {
+            if let Some(body) = instance_clear_body
+                && let Ok(lowered) =
+                    lower_instance_clear_subset(store, body, memory_layout, options)
             {
                 return lowered;
             }
@@ -627,12 +625,36 @@ fn lower_compute_subset(
     math_imports: &[WasmMathImport],
     options: &WasmOptions,
 ) -> Result<Function, WasmBackendError> {
+    lower_function_subset(store, body, memory_layout, math_imports, options, 4)
+}
+
+/// Partial `instanceClear` subset lowerer for the current WASM bring-up phase.
+///
+/// Reuses the same statement/value subset as `compute`, but with the
+/// `instanceClear(dsp)` ABI so stack locals start at local index 1.
+fn lower_instance_clear_subset(
+    store: &FirStore,
+    body: FirId,
+    memory_layout: &WasmMemoryLayout,
+    options: &WasmOptions,
+) -> Result<Function, WasmBackendError> {
+    lower_function_subset(store, body, memory_layout, &[], options, 1)
+}
+
+fn lower_function_subset(
+    store: &FirStore,
+    body: FirId,
+    memory_layout: &WasmMemoryLayout,
+    math_imports: &[WasmMathImport],
+    options: &WasmOptions,
+    param_count: u32,
+) -> Result<Function, WasmBackendError> {
     let mut local_specs = Vec::new();
     collect_compute_locals(store, body, &mut local_specs)?;
 
     let mut local_map = HashMap::with_capacity(local_specs.len());
     let mut wasm_locals = Vec::with_capacity(local_specs.len());
-    let mut next_local = 4u32;
+    let mut next_local = param_count;
     for (name, typ) in local_specs {
         local_map.insert(
             name,
@@ -1513,6 +1535,20 @@ fn collect_math_imports(
     let mut imports = std::collections::BTreeSet::new();
     collect_math_imports_in_node(store, body, options, &mut imports)?;
     Ok(imports.into_iter().collect())
+}
+
+fn find_function_body(store: &FirStore, function_items: &[FirId], name: &str) -> Option<FirId> {
+    function_items
+        .iter()
+        .copied()
+        .find_map(|id| match match_fir(store, id) {
+            FirMatch::DeclareFun {
+                name: ref fun_name,
+                body: Some(body),
+                ..
+            } if fun_name == name => Some(body),
+            _ => None,
+        })
 }
 
 fn collect_math_imports_in_node(

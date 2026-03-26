@@ -266,6 +266,20 @@ fn wasm_instance_constants_stores_sample_rate_when_field_exists() {
 }
 
 #[test]
+fn wasm_instance_clear_lowers_struct_state_reset_body() {
+    let (store, module) = build_instance_clear_state_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM scaffold should emit instanceClear body");
+
+    let body = code_body_at(&out.wasm_binary, 7);
+    let ops = decode_ops(body);
+    assert!(ops.iter().any(|op| matches!(op, Operator::Loop { .. })));
+    assert!(ops.iter().any(|op| matches!(op, Operator::BrIf { .. })));
+    assert!(ops.iter().any(|op| matches!(op, Operator::I32Store { .. })));
+    assert!(ops.iter().any(|op| matches!(op, Operator::F32Store { .. })));
+}
+
+#[test]
 fn wasm_layout_tracks_struct_offsets_for_sine_fixture() {
     let (store, module) = build_sine_phasor_test_module();
     let layout = WasmMemoryLayout::from_module(&store, module, &WasmOptions::default(), 64)
@@ -397,6 +411,60 @@ fn build_labeled_passthrough_module() -> (FirStore, FirId) {
         1,
         1,
         "labeled_passthrough",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
+    (store, module)
+}
+
+fn build_instance_clear_state_module() -> (FirStore, FirId) {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let zero_i = b.int32(0);
+    let scalar = b.declare_var("fIOTA", FirType::Int32, AccessType::Struct, Some(zero_i));
+    let delay = b.declare_var(
+        "fDelay",
+        FirType::Array(Box::new(FirType::FaustFloat), 4),
+        AccessType::Struct,
+        None,
+    );
+    let dsp_struct = b.block(&[scalar, delay]);
+    let globals = b.block(&[]);
+    let static_decls = b.block(&[]);
+
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+    let zero_f = b.float32(0.0);
+    let clear_scalar = b.store_var("fIOTA", AccessType::Struct, zero_i);
+    let clear_delay = b.store_table("fDelay", AccessType::Struct, i0, zero_f);
+    let clear_body = b.block(&[clear_delay]);
+    let four = b.int32(4);
+    let clear_loop = b.simple_for_loop("i0", four, clear_body, false);
+    let instance_clear_body = b.block(&[clear_scalar, clear_loop]);
+
+    let clear_args = [NamedType {
+        name: "dsp".to_owned(),
+        typ: FirType::Ptr(Box::new(FirType::Obj)),
+    }];
+    let instance_clear = b.declare_fun(
+        "instanceClear",
+        FirType::Fun {
+            args: vec![FirType::Ptr(Box::new(FirType::Obj))],
+            ret: Box::new(FirType::Void),
+        },
+        &clear_args,
+        Some(instance_clear_body),
+        false,
+    );
+
+    let compute = declare_trivial_compute(&mut b);
+    let functions = b.block(&[compute, instance_clear]);
+    let module = b.module(
+        0,
+        0,
+        "instance_clear_state",
         dsp_struct,
         globals,
         functions,
