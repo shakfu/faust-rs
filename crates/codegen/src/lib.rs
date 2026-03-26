@@ -26,6 +26,7 @@
 
 pub mod backends;
 pub mod fixtures;
+pub mod json;
 
 pub const CRATE_NAME: &str = "codegen";
 

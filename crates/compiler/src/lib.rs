@@ -3100,6 +3100,7 @@ mod tests {
             .compile_source_to_wasm("zero.dsp", "process = 0;", &WasmOptions::default())
             .expect("WASM scaffold should compile from source");
         assert!(out.wasm_binary.starts_with(b"\0asm"));
-        assert!(out.dsp_json.contains("\"backend\":\"wasm\""));
+        assert!(out.dsp_json.contains("\"size\":"));
+        assert!(out.dsp_json.contains("\"ui\":["));
     }
 }

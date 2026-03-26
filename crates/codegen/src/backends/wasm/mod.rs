@@ -14,12 +14,13 @@
 
 use fir::{AccessType, FirId, FirMatch, FirMathOp, FirStore, FirType, match_fir};
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection,
     Function, FunctionSection, ImportSection, Instruction, MemArg, MemorySection, MemoryType,
     Module, TypeSection, ValType,
 };
+
+use crate::json::{JsonBuildError, JsonBuildOptions, JsonDescription};
 
 pub mod layout;
 
@@ -189,38 +190,7 @@ struct WasmMathImport {
     result: ValType,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct WasmJsonDescription {
-    name: String,
-    backend: &'static str,
-    scaffold: bool,
-    double_precision: bool,
-    internal_memory: bool,
-    inputs: usize,
-    outputs: usize,
-}
-
-impl WasmJsonDescription {
-    fn render(&self) -> String {
-        let mut out = String::new();
-        out.push('{');
-        push_json_field_string(&mut out, "name", &self.name);
-        out.push(',');
-        push_json_field_string(&mut out, "backend", self.backend);
-        out.push(',');
-        push_json_field_bool(&mut out, "scaffold", self.scaffold);
-        out.push(',');
-        push_json_field_bool(&mut out, "double_precision", self.double_precision);
-        out.push(',');
-        push_json_field_bool(&mut out, "internal_memory", self.internal_memory);
-        out.push(',');
-        push_json_field_usize(&mut out, "inputs", self.inputs);
-        out.push(',');
-        push_json_field_usize(&mut out, "outputs", self.outputs);
-        out.push('}');
-        out
-    }
-}
+type WasmJsonDescription = JsonDescription;
 
 /// Emits one valid WASM scaffold module for a FIR `Module` root.
 pub fn generate_wasm_module(
@@ -271,17 +241,17 @@ pub fn generate_wasm_module(
         ValType::F32
     };
 
-    let dsp_json = WasmJsonDescription {
-        name: name.clone(),
-        backend: BACKEND_NAME,
-        scaffold: true,
-        double_precision: options.double_precision,
-        internal_memory: options.internal_memory,
-        inputs: num_inputs,
-        outputs: num_outputs,
-    }
+    let mut memory_layout = WasmMemoryLayout::from_module(store, module, options, 0)?;
+    let dsp_json = build_wasm_json_description(
+        store,
+        name,
+        &function_items,
+        &memory_layout,
+        num_inputs,
+        num_outputs,
+    )?
     .render();
-    let mut memory_layout = WasmMemoryLayout::from_module(store, module, options, dsp_json.len())?;
+    memory_layout = WasmMemoryLayout::from_module(store, module, options, dsp_json.len())?;
     let pages = if options.memory_pages == 0 {
         memory_layout.pages.max(DEFAULT_MEMORY_PAGES)
     } else {
@@ -458,37 +428,48 @@ fn function_index(imported_function_count: u32, func: WasmFunc) -> u32 {
             .expect("function present in static WASM function list") as u32
 }
 
-fn escape_json_string(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
+fn build_wasm_json_description(
+    store: &FirStore,
+    module_name: &str,
+    function_items: &[FirId],
+    memory_layout: &WasmMemoryLayout,
+    num_inputs: usize,
+    num_outputs: usize,
+) -> Result<WasmJsonDescription, WasmBackendError> {
+    crate::json::build_json_description_from_fir(
+        store,
+        function_items,
+        JsonBuildOptions {
+            name: module_name.to_owned(),
+            filename: None,
+            version: None,
+            compile_options: None,
+            library_list: Vec::new(),
+            include_pathnames: Vec::new(),
+            size: Some(memory_layout.struct_size),
+            inputs: num_inputs,
+            outputs: num_outputs,
+            sr_index: memory_layout
+                .field_offsets
+                .get("fSampleRate")
+                .map(|field| field.offset),
+        },
+        |var| {
+            memory_layout
+                .field_offsets
+                .get(var)
+                .map(|field| field.offset)
+        },
+    )
+    .map_err(map_json_build_error)
+}
+
+fn map_json_build_error(error: JsonBuildError) -> WasmBackendError {
+    match error {
+        JsonBuildError::UnsupportedFirNode(message) => {
+            WasmBackendError::new(WasmBackendErrorCode::UnsupportedFirNode, message)
         }
     }
-    out
-}
-
-fn push_json_field_string(out: &mut String, key: &str, value: &str) {
-    let _ = write!(
-        out,
-        "\"{}\":\"{}\"",
-        escape_json_string(key),
-        escape_json_string(value)
-    );
-}
-
-fn push_json_field_bool(out: &mut String, key: &str, value: bool) {
-    let _ = write!(out, "\"{}\":{}", escape_json_string(key), value);
-}
-
-fn push_json_field_usize(out: &mut String, key: &str, value: usize) {
-    let _ = write!(out, "\"{}\":{}", escape_json_string(key), value);
 }
 
 #[allow(clippy::too_many_arguments)]
