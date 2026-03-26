@@ -467,7 +467,8 @@ impl Compiler {
         let lowered =
             lower_signals_to_fir(source_name, &signals, lane, self.fir_verify, self.real_type)
                 .map_err(|error| lower_fir_error_to_compiler(source_name, error))?;
-        let json_context = wasm_json_context_for_memory_source(source_name, &signals);
+        let json_context =
+            wasm_json_context_for_memory_source(source_name, &signals, options.double_precision);
         generate_wasm_module_with_context(&lowered.store, lowered.module, options, &json_context)
             .map_err(|error| CompilerError::CodegenWasm {
                 source: source_name.into(),
@@ -622,7 +623,8 @@ impl Compiler {
         let lowered =
             lower_signals_to_fir(&source, &signals, lane, self.fir_verify, self.real_type)
                 .map_err(|error| lower_fir_error_to_compiler(&source, error))?;
-        let json_context = wasm_json_context_for_file(path, search_paths, &signals);
+        let json_context =
+            wasm_json_context_for_file(path, search_paths, &signals, options.double_precision);
         generate_wasm_module_with_context(&lowered.store, lowered.module, options, &json_context)
             .map_err(|error| CompilerError::CodegenWasm {
                 source: source.into(),
@@ -2014,7 +2016,7 @@ fn build_strict_json_description(
             name,
             filename: Some(filename),
             version: Some(Compiler::version().to_owned()),
-            compile_options: None,
+            compile_options: Some(wasm_compile_options_json_string(double_precision)),
             library_list,
             include_pathnames,
             top_level_meta,
@@ -2033,14 +2035,33 @@ fn build_strict_json_description(
     })
 }
 
+/// C++-parity baseline for `global::printCompilationOptions1()` in the current
+/// WASM slice.
+///
+/// Mapping status: `adapted`.
+/// - Included now: only the options that the Rust CLI actually exposes for the
+///   current WASM flow and that downstream runtimes consume (`-lang wasm` and
+///   the float mode).
+/// - Deferred: the rest of the C++ global option matrix until the
+///   corresponding CLI/compiler knobs exist here.
+pub fn wasm_compile_options_json_string(double_precision: bool) -> String {
+    let float_mode = if double_precision {
+        "-double"
+    } else {
+        "-single"
+    };
+    format!("-lang wasm {float_mode}")
+}
+
 fn wasm_json_context_for_memory_source(
     source_name: &str,
     signals: &SignalCompileOutput,
+    double_precision: bool,
 ) -> WasmJsonContext {
     WasmJsonContext {
         filename: Some(source_name_to_filename(source_name)),
         version: Some(Compiler::version().to_owned()),
-        compile_options: None,
+        compile_options: Some(wasm_compile_options_json_string(double_precision)),
         library_list: Vec::new(),
         include_pathnames: Vec::new(),
         top_level_meta: json_meta_entries_from_snapshot(&signals.compilation_metadata),
@@ -2051,6 +2072,7 @@ fn wasm_json_context_for_file(
     path: &Path,
     search_paths: &[PathBuf],
     signals: &SignalCompileOutput,
+    double_precision: bool,
 ) -> WasmJsonContext {
     let filename = path
         .file_name()
@@ -2073,7 +2095,7 @@ fn wasm_json_context_for_file(
     WasmJsonContext {
         filename: Some(filename),
         version: Some(Compiler::version().to_owned()),
-        compile_options: None,
+        compile_options: Some(wasm_compile_options_json_string(double_precision)),
         library_list,
         include_pathnames: merge_import_search_paths(path, search_paths)
             .into_iter()
@@ -3116,6 +3138,7 @@ mod tests {
     use super::{
         Compiler, CompilerError, build_import_search_paths, default_import_search_paths,
         golden_snapshot, make_compute_fir_signature, resolve_module_name, resolve_ui_root_label,
+        wasm_compile_options_json_string,
     };
     use codegen::backends::wasm::WasmOptions;
 
@@ -3383,6 +3406,10 @@ mod tests {
             out.dsp_json
                 .contains(&format!("\"version\":\"{}\"", Compiler::version()))
         );
+        assert!(out.dsp_json.contains(&format!(
+            "\"compile_options\":\"{}\"",
+            wasm_compile_options_json_string(false)
+        )));
     }
 
     #[test]
@@ -3431,6 +3458,19 @@ mod tests {
         assert!(json.contains("\"name\":\"Gain\""));
         assert!(json.contains("\"filename\":\"gain.dsp\""));
         assert!(json.contains("\"ui\":["));
+        assert!(json.contains(&format!(
+            "\"compile_options\":\"{}\"",
+            wasm_compile_options_json_string(false)
+        )));
         assert!(!json.contains("\"index\":"));
+    }
+
+    #[test]
+    fn wasm_compile_options_json_string_tracks_float_mode() {
+        assert_eq!(
+            wasm_compile_options_json_string(false),
+            "-lang wasm -single"
+        );
+        assert_eq!(wasm_compile_options_json_string(true), "-lang wasm -double");
     }
 }

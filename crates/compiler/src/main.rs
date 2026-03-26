@@ -35,7 +35,7 @@ use codegen::fixtures::backend_test_fixtures;
 use compiler::{
     Compiler, CompilerError, FirVerifyOptions, RealType, SignalFirLane,
     enrobage::{EnrobageOptions, wrap_cpp_with_architecture},
-    golden_snapshot_from_file,
+    golden_snapshot_from_file, wasm_compile_options_json_string,
 };
 use errors::{DiagnosticBundle, LabelStyle, Severity, Stage};
 use fir::{checker::verify_fir_module, dump_fir};
@@ -997,7 +997,7 @@ fn compile_fixture_to_json_text(
             name,
             filename: None,
             version: Some(Compiler::version().to_owned()),
-            compile_options: None,
+            compile_options: Some(wasm_compile_options_json_string(double_precision)),
             library_list: Vec::new(),
             include_pathnames: Vec::new(),
             top_level_meta: Vec::new(),
