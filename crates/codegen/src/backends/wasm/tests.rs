@@ -3,7 +3,7 @@ use crate::fixtures::{build_passthrough_test_module, build_sine_phasor_test_modu
 
 use fir::{AccessType, FirBuilder, FirId, FirStore, FirType, NamedType};
 
-use wasmparser::{Parser, Payload, Validator};
+use wasmparser::{Operator, Parser, Payload, Validator};
 
 #[test]
 fn wasm_scaffold_emits_valid_module_for_passthrough_fixture() {
@@ -55,6 +55,41 @@ fn wasm_scaffold_exports_canonical_faust_api_names() {
 }
 
 #[test]
+fn wasm_get_sample_rate_loads_struct_field_when_present() {
+    let (store, module) = build_sample_rate_state_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM scaffold should emit getSampleRate body");
+
+    let body = code_body_at(&out.wasm_binary, 5);
+    let ops = decode_ops(body);
+    assert!(matches!(ops.as_slice(),
+        [
+            Operator::LocalGet { local_index: 0 },
+            Operator::I32Load { memarg },
+            Operator::End
+        ] if memarg.offset == 0
+    ));
+}
+
+#[test]
+fn wasm_instance_constants_stores_sample_rate_when_field_exists() {
+    let (store, module) = build_sample_rate_state_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM scaffold should emit instanceConstants body");
+
+    let body = code_body_at(&out.wasm_binary, 8);
+    let ops = decode_ops(body);
+    assert!(matches!(ops.as_slice(),
+        [
+            Operator::LocalGet { local_index: 0 },
+            Operator::LocalGet { local_index: 1 },
+            Operator::I32Store { memarg },
+            Operator::End
+        ] if memarg.offset == 0
+    ));
+}
+
+#[test]
 fn wasm_layout_tracks_struct_offsets_for_sine_fixture() {
     let (store, module) = build_sine_phasor_test_module();
     let layout = WasmMemoryLayout::from_module(&store, module, &WasmOptions::default(), 64)
@@ -102,6 +137,26 @@ fn wasm_layout_places_static_tables_after_struct_region() {
     assert_eq!(layout.field_offsets["wav"].offset, 4);
     assert_eq!(layout.field_offsets["wav"].size, 12);
     assert_eq!(layout.io_zone_offset, 16);
+}
+
+fn build_sample_rate_state_module() -> (FirStore, FirId) {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let zero = b.int32(0);
+    let sample_rate = b.declare_var(
+        "fSampleRate",
+        FirType::Int32,
+        AccessType::Struct,
+        Some(zero),
+    );
+    let globals = b.block(&[sample_rate]);
+    let dsp_struct = b.block(&[]);
+    let compute = declare_trivial_compute(&mut b);
+    let functions = b.block(&[compute]);
+    let static_decls = b.block(&[]);
+    let module = b.module(0, 1, "sr_dsp", dsp_struct, globals, functions, static_decls);
+    (store, module)
 }
 
 fn build_single_i32_state_module() -> (FirStore, FirId) {
@@ -199,4 +254,26 @@ fn declare_trivial_compute(b: &mut FirBuilder<'_>) -> FirId {
         Some(body),
         false,
     )
+}
+
+fn code_body_at<'a>(wasm: &'a [u8], index: usize) -> wasmparser::FunctionBody<'a> {
+    let mut current = 0usize;
+    for payload in Parser::new(0).parse_all(wasm) {
+        let payload = payload.expect("payload should decode");
+        if let Payload::CodeSectionEntry(body) = payload {
+            if current == index {
+                return body;
+            }
+            current += 1;
+        }
+    }
+    panic!("code body index {index} not found");
+}
+
+fn decode_ops(body: wasmparser::FunctionBody<'_>) -> Vec<Operator<'_>> {
+    body.get_operators_reader()
+        .expect("operators reader")
+        .into_iter()
+        .map(|op| op.expect("operator should decode"))
+        .collect()
 }

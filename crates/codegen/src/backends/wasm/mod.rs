@@ -15,8 +15,8 @@
 use fir::{FirId, FirMatch, FirStore, match_fir};
 use wasm_encoder::{
     CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection, Function,
-    FunctionSection, ImportSection, Instruction, MemorySection, MemoryType, Module, TypeSection,
-    ValType,
+    FunctionSection, ImportSection, Instruction, MemArg, MemorySection, MemoryType, Module,
+    TypeSection, ValType,
 };
 
 pub mod layout;
@@ -345,6 +345,7 @@ pub fn generate_wasm_module(
             num_inputs as i32,
             num_outputs as i32,
             real_ty,
+            memory_layout.field_offsets.get("fSampleRate"),
         ));
     }
     wasm.section(&code);
@@ -421,15 +422,13 @@ fn scaffold_function_body(
     num_inputs: i32,
     num_outputs: i32,
     real_ty: ValType,
+    sample_rate_field: Option<&FieldLayout>,
 ) -> Function {
     let mut function = Function::new(Vec::new());
     match func {
         WasmFunc::ClassInit
         | WasmFunc::Compute
-        | WasmFunc::Init
         | WasmFunc::InstanceClear
-        | WasmFunc::InstanceConstants
-        | WasmFunc::InstanceInit
         | WasmFunc::InstanceResetUserInterface
         | WasmFunc::SetParamValue => {}
         WasmFunc::GetNumInputs => {
@@ -448,15 +447,79 @@ fn scaffold_function_body(
             _ => unreachable!("real type must be f32/f64"),
         },
         WasmFunc::GetSampleRate => {
-            function.instruction(&Instruction::I32Const(0));
+            if let Some(field) = sample_rate_field {
+                function.instruction(&Instruction::LocalGet(0));
+                function.instruction(&Instruction::I32Load(memarg(field.offset)));
+            } else {
+                function.instruction(&Instruction::I32Const(0));
+            }
+        }
+        WasmFunc::Init => {
+            function.instruction(&Instruction::LocalGet(0));
+            function.instruction(&Instruction::LocalGet(1));
+            function.instruction(&Instruction::Call(function_index_for_body(
+                WasmFunc::ClassInit,
+            )));
+            function.instruction(&Instruction::LocalGet(0));
+            function.instruction(&Instruction::LocalGet(1));
+            function.instruction(&Instruction::Call(function_index_for_body(
+                WasmFunc::InstanceInit,
+            )));
+        }
+        WasmFunc::InstanceConstants => {
+            if let Some(field) = sample_rate_field {
+                function.instruction(&Instruction::LocalGet(0));
+                function.instruction(&Instruction::LocalGet(1));
+                function.instruction(&Instruction::I32Store(memarg(field.offset)));
+            }
+        }
+        WasmFunc::InstanceInit => {
+            function.instruction(&Instruction::LocalGet(0));
+            function.instruction(&Instruction::LocalGet(1));
+            function.instruction(&Instruction::Call(function_index_for_body(
+                WasmFunc::InstanceConstants,
+            )));
+            function.instruction(&Instruction::LocalGet(0));
+            function.instruction(&Instruction::Call(function_index_for_body(
+                WasmFunc::InstanceResetUserInterface,
+            )));
+            function.instruction(&Instruction::LocalGet(0));
+            function.instruction(&Instruction::Call(function_index_for_body(
+                WasmFunc::InstanceClear,
+            )));
         }
         WasmFunc::MaxI => {
+            function.instruction(&Instruction::LocalGet(1));
             function.instruction(&Instruction::LocalGet(0));
+            function.instruction(&Instruction::LocalGet(0));
+            function.instruction(&Instruction::LocalGet(1));
+            function.instruction(&Instruction::I32LtS);
+            function.instruction(&Instruction::Select);
         }
         WasmFunc::MinI => {
             function.instruction(&Instruction::LocalGet(0));
+            function.instruction(&Instruction::LocalGet(1));
+            function.instruction(&Instruction::LocalGet(0));
+            function.instruction(&Instruction::LocalGet(1));
+            function.instruction(&Instruction::I32LtS);
+            function.instruction(&Instruction::Select);
         }
     }
     function.instruction(&Instruction::End);
     function
+}
+
+fn memarg(offset: u32) -> MemArg {
+    MemArg {
+        offset: u64::from(offset),
+        align: 2,
+        memory_index: 0,
+    }
+}
+
+fn function_index_for_body(func: WasmFunc) -> u32 {
+    WasmFunc::ALL
+        .iter()
+        .position(|item| *item == func)
+        .expect("function present in static WASM function list") as u32
 }
