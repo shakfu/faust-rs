@@ -1,6 +1,6 @@
 # Current Faust Source Subset Supported by `faust-rs`
 
-Last updated: 2026-03-24
+Last updated: 2026-03-26
 
 Status: living document
 
@@ -24,7 +24,7 @@ There are two materially different questions:
    - `parse -> eval -> propagate -> signals`
    - measured here by `compiler::Compiler::compile_file_default_to_signals`
 2. **End-to-end backend compilation**
-   - `parse -> eval -> propagate -> signal_prepare -> signal_fir -> C/C++ backend`
+   - `parse -> eval -> propagate -> signal_prepare -> signal_fir -> backend`
    - measured here by the current fast-lane route
      `compiler::SignalFirLane::TransformFastLane`
 
@@ -92,6 +92,43 @@ So for **valid** corpus programs, the current backend route compiles:
 - `82 / 83` valid corpus cases,
 - and misses `1 / 83`, currently in the non-trivial stream-wrapper family.
 
+### 4.3 WASM / JSON backend status
+
+The Rust backend now also has a real WebAssembly output path, but its maturity
+level differs from the C/C++ backend route described above.
+
+What is now true:
+
+- `-lang wasm` emits a matched pair:
+  - `<name>.wasm`
+  - companion `<name>.json`
+- the companion JSON now carries the main provenance/runtime fields expected by
+  current Faust web tooling:
+  - `filename`
+  - `version`
+  - `compile_options`
+  - `include_pathnames`
+  - `library_list`
+  - UI widget `index`
+  - `size`
+  - `sr_index`
+- strict `-json` is wired as a first-class CLI mode and can now also be used
+  alongside `-lang <backend>`, like in the C++ compiler workflow
+- for `-lang wasm`, the companion JSON and exported ABI are now coherent enough
+  to work with the standard `faustwasm` runtime on validated cases such as
+  `osc.dsp`
+
+What is not yet true:
+
+- the Rust WASM backend should not yet be described as full semantic parity
+  with the C++ WASM backend
+- lowering coverage is still an incremental subset and is currently being
+  extended from real-world DSP failures and wrapper/runtime tests
+- exact byte-for-byte parity of all public UI offsets/layout details against
+  the C++ backend is not yet claimed, even though the current ABI contract is
+  now much closer and is already functional with `faustwasm` on the validated
+  path
+
 ## 5. Synthetic Characterization of the Supported Subset
 
 ## 5.1 Source-level Faust subset currently supported
@@ -123,11 +160,15 @@ Stated differently:
 
 ## 5.2 End-to-end backend subset currently supported
 
-The backend subset is narrower and is better characterized structurally:
+The backend subset is narrower and is better characterized structurally.
 
-A Faust program currently compiles end-to-end when its post-eval/post-propagate
-signal forest stays within the active `signal_prepare + signal_fir` lowering
-slice.
+For the production C/C++ route, a Faust program currently compiles end-to-end
+when its post-eval/post-propagate signal forest stays within the active
+`signal_prepare + signal_fir` lowering slice.
+
+For the Rust WASM route, the same FIR preparation pipeline is reused, but the
+backend lowering itself is currently a separate, narrower bring-up slice with
+its own documented subset in `crates/codegen/src/backends/wasm/`.
 
 That slice currently includes, in broad terms:
 
@@ -240,6 +281,11 @@ Relative to the tracked corpus and the current production-oriented route:
 - front-end acceptance is now effectively at corpus parity,
 - C and C++ backend shell signatures match on all currently supported backend
   cases,
+- the Rust CLI now supports `-json` both as a standalone strict JSON mode and
+  alongside `-lang <backend>`, with truthful `compile_options` in the emitted
+  JSON,
+- the Rust WASM backend now emits a usable companion JSON contract for web
+  runtimes and writes the same `.wasm` + `.json` pair shape as the C++ CLI,
 - many language families that were earlier missing are no longer front-end
   blockers:
   - `case` and recursive pattern-matching with computed numeric arguments,

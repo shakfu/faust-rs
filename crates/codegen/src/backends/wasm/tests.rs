@@ -732,7 +732,12 @@ fn build_static_table_ui_module() -> (FirStore, FirId) {
     let zero = b.float32(0.0);
     let one = b.float32(1.0);
     let two = b.float32(2.0);
-    let wav = b.declare_table("wav", AccessType::Static, FirType::Float32, &[zero, one, two]);
+    let wav = b.declare_table(
+        "wav",
+        AccessType::Static,
+        FirType::Float32,
+        &[zero, one, two],
+    );
     let static_decls = b.block(&[wav]);
 
     let open = b.open_box(fir::UiBoxType::Vertical, "StaticTableUI");
@@ -771,7 +776,15 @@ fn build_static_table_ui_module() -> (FirStore, FirId) {
 
     let compute = declare_trivial_compute(&mut b);
     let functions = b.block(&[ui, compute]);
-    let module = b.module(0, 1, "static_table_ui", dsp_struct, globals, functions, static_decls);
+    let module = b.module(
+        0,
+        1,
+        "static_table_ui",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
     (store, module)
 }
 
