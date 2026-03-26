@@ -503,6 +503,7 @@ pub fn build_module(
         };
         math_prototypes.push(decl);
     }
+    math_prototypes.extend(lower.global_declarations.iter().copied());
     let functions = {
         let mut b = FirBuilder::new(&mut lower.store);
         let function_items = [
@@ -587,6 +588,8 @@ struct SignalToFirLower<'a> {
     /// content is fully determined at compile time (waveform literals) and is
     /// shared across all DSP instances.
     static_declarations: Vec<FirId>,
+    /// Extern global variable declarations requested by `SIGFVAR` lowering.
+    global_declarations: Vec<FirId>,
     /// `instanceConstants` body: table initializations and compile-time constants.
     constants_statements: Vec<FirId>,
     /// `instanceResetUserInterface` body: UI zone reset assignments.
@@ -654,6 +657,8 @@ struct SignalToFirLower<'a> {
     used_int_fun_names: HashSet<&'static str>,
     /// Extern prototypes requested by `SIGFFUN` lowering, keyed by callee name.
     used_foreign_fun_protos: BTreeMap<String, ForeignFunProto>,
+    /// Extern globals requested by `SIGFVAR` lowering, keyed by symbol name.
+    used_foreign_vars: BTreeMap<String, FirType>,
     /// Monotonic counter for generating unique loop-variable names.
     next_loop_var_id: usize,
 }
@@ -722,6 +727,7 @@ impl<'a> SignalToFirLower<'a> {
             cache: HashMap::new(),
             struct_declarations: Vec::new(),
             static_declarations: Vec::new(),
+            global_declarations: Vec::new(),
             constants_statements: Vec::new(),
             reset_statements: Vec::new(),
             clear_statements: Vec::new(),
@@ -749,6 +755,7 @@ impl<'a> SignalToFirLower<'a> {
             used_math_ops: HashSet::new(),
             used_int_fun_names: HashSet::new(),
             used_foreign_fun_protos: BTreeMap::new(),
+            used_foreign_vars: BTreeMap::new(),
             next_loop_var_id: 0,
         }
     }
@@ -1005,6 +1012,7 @@ impl<'a> SignalToFirLower<'a> {
                 self.lower_signal(lhs)?
             }
             SigMatch::FFun(ff, largs) => self.lower_ffun(sig, ff, largs)?,
+            SigMatch::FVar(kind, name, file) => self.lower_fvar(sig, kind, name, file)?,
             SigMatch::Soundfile(control) => self.lower_soundfile(control)?,
             SigMatch::SoundfileLength(sf, part) => self.lower_soundfile_length(sf, part)?,
             SigMatch::SoundfileRate(sf, part) => self.lower_soundfile_rate(sf, part)?,
@@ -1045,6 +1053,42 @@ impl<'a> SignalToFirLower<'a> {
             sig,
             &format!("unsupported foreign constant `{name}` in Step 2C"),
         )
+    }
+
+    /// Lowers one foreign variable load.
+    ///
+    /// Active parity slice mirrors `InstructionsCompiler::generateFVar`:
+    /// - `count` is a special Faust runtime symbol (`fFullCount` in the C++
+    ///   generator), not a normal extern. In scalar `compute(int count, ...)`
+    ///   codegen it denotes the current block size, so we must lower it to the
+    ///   existing FIR function argument rather than emitting a separate global.
+    /// - any other foreign variable is treated as an extern global and loaded
+    ///   through `AccessType::Global`, with one declaration emitted per symbol.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/generator/instructions_compiler.cpp` (`generateFVar`)
+    fn lower_fvar(
+        &mut self,
+        _sig: SigId,
+        kind: SigId,
+        name: SigId,
+        _file: SigId,
+    ) -> Result<FirId, SignalFirError> {
+        let name = self.label_text(name);
+        let typ = self.foreign_sig_type(kind);
+        let mut b = FirBuilder::new(&mut self.store);
+
+        if name == "count" {
+            return Ok(b.load_var(name, AccessType::FunArgs, typ));
+        }
+
+        if !self.used_foreign_vars.contains_key(&name) {
+            let decl = b.declare_var(name.to_owned(), typ.clone(), AccessType::Global, None);
+            self.global_declarations.push(decl);
+            self.used_foreign_vars.insert(name.to_owned(), typ.clone());
+        }
+
+        Ok(b.load_var(name, AccessType::Global, typ))
     }
 
     /// Lowers one foreign function call to a FIR `FunCall` plus extern prototype.

@@ -1097,6 +1097,46 @@ fn recursive_feedback_delay1_reuses_two_slot_recursion_array() {
 }
 
 #[test]
+fn foreign_var_count_lowers_to_compute_funarg() {
+    let mut arena = TreeArena::new();
+    let sig0 = {
+        let ty = arena.int(0);
+        let name = arena.symbol("count");
+        let file = arena.symbol("<math.h>");
+        SigBuilder::new(&mut arena).fvar(ty, name, file)
+    };
+
+    let out = compile_fastlane_without_ui(&arena, &[sig0], 0, 1, &SignalFirOptions::default())
+        .expect("foreign `count` variable should lower via compute fun args");
+
+    let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+        panic!("module expected");
+    };
+    let loop_body = find_compute_loop_body(&out.store, functions);
+    let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+        panic!("compute loop body block expected");
+    };
+    assert!(
+        stmts.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::StoreTable { value, .. }
+                if matches!(
+                    unwrap_output_cast(&out.store, value),
+                    inner if matches!(
+                        match_fir(&out.store, inner),
+                        FirMatch::LoadVar {
+                            ref name,
+                            access: AccessType::FunArgs,
+                            typ: FirType::Int32,
+                        } if name == "count"
+                    )
+                )
+        )),
+        "output should store a load of compute(count, ...) fun arg"
+    );
+}
+
+#[test]
 fn delay1_lowers_to_struct_state_declaration_and_update() {
     let mut arena = TreeArena::new();
     let sig0 = {
