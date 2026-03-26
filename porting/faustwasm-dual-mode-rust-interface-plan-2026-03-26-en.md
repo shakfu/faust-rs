@@ -80,7 +80,23 @@ The `faustwasm` product model must remain intact:
 - the same downstream DSP/runtime classes should work in both cases once a
   `FaustDspFactory`-like object has been obtained
 
-### 3.3 Compatibility constraints
+### 3.3 Embedded-library constraints
+
+The Rust embedded-compiler module should be self-contained for the standard
+Faust library set used by `import("stdfaust.lib")` and related imports.
+
+That means:
+
+- the shipped compiler-module `.wasm` should embed the standard Faust library
+  sources as read-only assets
+- import resolution inside the compiler-module should not depend on a host
+  filesystem being present
+- browser, worker, and Node use cases should all resolve the embedded library
+  set the same way
+- optional user-provided import roots may still be layered on top, but should
+  not be required for the standard library set
+
+### 3.4 Compatibility constraints
 
 Compatibility is required at the **behavioral level**, not necessarily as a
 1:1 copy of the current C++ binding API.
@@ -214,6 +230,7 @@ Add a Rust API that is independent of JS/WASM bindings:
 - expand DSP
 - generate auxiliary files
 - query compiler info
+- resolve standard Faust-library imports through an embedded read-only bundle
 
 This layer should live in Rust-native crates and be fully testable without any
 binding/runtime packaging.
@@ -236,6 +253,29 @@ This layer may be implemented through:
 
 The key point is that this layer should remain a thin adapter over Layer A, not
 the owner of compiler semantics.
+
+### 6.4 Embedded-library resolution model
+
+For the embedded Rust compiler path, standard Faust libraries should be bundled
+as source assets inside the compiler-module rather than exposed through a
+general-purpose virtual filesystem.
+
+Recommended model:
+
+- build a generated read-only bundle mapping logical import names to source
+  text, for example `stdfaust.lib`, `music.lib`, and related files
+- resolve `import(...)` requests against that embedded bundle first
+- allow optional user-provided import roots or explicit source assets to
+  override or extend the embedded bundle when `faustwasm` needs additional
+  libraries
+- keep this mechanism request/response oriented and independent of Emscripten
+  filesystem semantics
+
+Rejected as the primary design:
+
+- a general-purpose Emscripten-style virtual filesystem clone
+- dependence on host paths from inside the compiler-module
+- network fetching of library sources at compile time
 
 ### 6.3 Layer C: `faustwasm` integration adapter
 
@@ -339,11 +379,14 @@ Deliverables:
   - expand DSP
   - generate aux files
   - info queries
+  - embedded standard-library import resolution contract
 - unit/integration coverage at the Rust layer
 
 Pass criteria:
 
 - can compile `osc.dsp` to `{ wasm, json }`
+- can compile a representative `import("stdfaust.lib")` DSP through the
+  self-contained embedded-library path
 - can return structured errors without JS binding involvement
 
 ### Phase 2: binding layer
@@ -357,6 +400,8 @@ Deliverables:
   text-result helpers
 - binary payload transfer for WASM bytes
 - string payload transfer for JSON/diagnostics
+- embedded standard Faust libraries packaged into the shipped compiler-module
+  asset as read-only sources
 
 Pass criteria:
 
@@ -366,6 +411,8 @@ Pass criteria:
   `WebAssembly.instantiate(...)`
 - JSON/WASM artifact requests default to the transform fast lane so the
   returned FIR module keeps `metadata` and `buildUserInterface`
+- the compiler-module resolves `import("stdfaust.lib")` without requiring a
+  host filesystem
 
 ### Phase 3: `faustwasm` integration
 
@@ -377,6 +424,7 @@ Deliverables:
 - retained artifact-loading path
 - compiler-module asset packaging/distribution plan
 - shared convergence to one JS factory representation
+- documented override mechanism for optional user-supplied import roots/assets
 
 Pass criteria:
 
@@ -386,6 +434,7 @@ Pass criteria:
 - precompiled artifact mode still works unchanged at the product level
 - validated end-to-end with a Rust-produced compiler module loaded from
   `faustwasm`, including visible UI controls in the returned companion JSON
+- validated end-to-end on at least one DSP importing `stdfaust.lib`
 
 ### Phase 4: compatibility hardening
 
@@ -533,6 +582,19 @@ Mitigation:
 - validate the embedded-compiler mode end to end with the actual distributed
   compiler-module asset
 
+### 13.6 Embedded-library packaging drift
+
+The Rust compiler-module can be self-contained in principle while still
+shipping an incomplete or inconsistent embedded library set in practice.
+
+Mitigation:
+
+- generate the embedded library bundle from one explicit source of truth
+- test `import("stdfaust.lib")` end to end against the shipped compiler-module
+- keep the logical import names stable and documented
+- make user-provided overrides explicit instead of relying on hidden path
+  conventions
+
 ---
 
 ## 14. Recommended First Slice
@@ -567,6 +629,24 @@ path actually shippable:
    - run `createDSPFactory(...)` through to a usable `FaustDspFactory`
    - verify that precompiled artifact mode remains unchanged
 
+The next milestone after that should make the embedded compiler self-contained
+for Faust libraries:
+
+1. Embedded library bundle:
+   - generate a read-only bundle of standard Faust library sources for the
+     compiler-module
+   - keep logical import names aligned with Faust source imports
+2. Import resolution:
+   - resolve `import(...)` requests against the embedded bundle first
+   - define how optional user-provided import roots/assets override or extend
+     the embedded bundle
+3. Product packaging:
+   - ship the compiler-module with the matching embedded library set
+   - avoid dependence on host filesystem layout in browser/worker mode
+4. End-to-end validation:
+   - compile a representative `stdfaust.lib`-based DSP in embedded mode
+   - confirm artifact mode remains unchanged
+
 ---
 
 ## 15. Success Criteria
@@ -578,6 +658,8 @@ This plan is considered successful when all of the following are true:
   - precompiled artifact loading
 - the embedded compile path is backed by Rust, not the historical C++
   libfaust-wasm path
+- the shipped Rust compiler-module is self-contained for the standard Faust
+  library set used by `faustwasm`
 - the public/product workflow remains stable for users
 - the Rust integration no longer depends on public `cfactory`-style object
   ownership
