@@ -3236,9 +3236,17 @@ fn apply_pattern_matcher_value(
         return Ok(EvalValue::PatternMatcher(pm));
     }
 
-    let arg = arena
+    let raw_arg = arena
         .hd(larg)
         .ok_or(EvalError::MalformedListNode { node: larg })?;
+    // C++ parity: case dispatch sees numeric arguments after the same
+    // compile-time simplification pass used by pattern preparation. Without
+    // this, selector expressions like `((l != 0) & ...) * 2` remain residual
+    // box trees and only catch-all rules match.
+    let arg = {
+        let mut cache = ahash::HashMap::default();
+        box_simplification(arena, &mut cache, raw_arg)
+    };
     let (new_state, _) =
         pattern_matcher::apply_pattern_matcher(arena, &pm.automaton, pm.state, arg, &mut pm.envs);
     let Some(new_state) = new_state else {

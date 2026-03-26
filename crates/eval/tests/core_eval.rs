@@ -1061,6 +1061,85 @@ process = comparator(dir(0));
 }
 
 #[test]
+fn eval_process_preserves_parser_case_rule_priority_for_recursive_local_cases() {
+    let source = r#"
+process = p(0, 0, 0.0) with {
+  p(l, m, cphi) = pcalcul(
+      ((l != 0) & (l == abs(m)))
+    + ((l != 0) & (l == abs(m)+1)) * 2
+    + ((l != 0) & (l != abs(m)) & (l != abs(m)+1)) * 3,
+    l, m, cphi)
+  with {
+    pcalcul(0, l, m, cphi) = 1;
+    pcalcul(1, l, m, cphi) = -1 * (2 * (l-1) + 1) * sqrt(1 - cphi*cphi) * p(l-1, l-1, cphi);
+    pcalcul(2, l, m, cphi) = cphi * (2 * (l-1) + 1) * p(l-1, l-1, cphi);
+    pcalcul(s, l, m, cphi) = (cphi * (2 * (l-1) + 1) * p(l-1, abs(m), cphi) - ((l-1) + abs(m)) * p(l-2, abs(m), cphi)) / ((l-1) - abs(m) + 1);
+  };
+};
+"#;
+
+    let parsed = parse_program(source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept recursive local case priority fixture: {:?}",
+        parsed.errors
+    );
+
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+    let out = eval_process(&mut arena, root)
+        .expect("parser-lowered case rules should match in source order before catch-all rules");
+    expect_int(&arena, out, 1);
+}
+
+#[test]
+fn eval_process_parser_case_rule_priority_matches_cpp_reference() {
+    let root_dir = temp_root("parser_case_rule_priority_cpp_parity");
+    let entry = root_dir.join("main.dsp");
+    let source = r#"
+process = p(0, 0, 0.0) with {
+  p(l, m, cphi) = pcalcul(
+      ((l != 0) & (l == abs(m)))
+    + ((l != 0) & (l == abs(m)+1)) * 2
+    + ((l != 0) & (l != abs(m)) & (l != abs(m)+1)) * 3,
+    l, m, cphi)
+  with {
+    pcalcul(0, l, m, cphi) = 1;
+    pcalcul(1, l, m, cphi) = -1 * (2 * (l-1) + 1) * sqrt(1 - cphi*cphi) * p(l-1, l-1, cphi);
+    pcalcul(2, l, m, cphi) = cphi * (2 * (l-1) + 1) * p(l-1, l-1, cphi);
+    pcalcul(s, l, m, cphi) = (cphi * (2 * (l-1) + 1) * p(l-1, abs(m), cphi) - ((l-1) + abs(m)) * p(l-2, abs(m), cphi)) / ((l-1) - abs(m) + 1);
+  };
+};
+"#;
+    fs::write(&entry, source).expect("write entry");
+
+    if let Some(cpp) = cpp_bin() {
+        let out_path = root_dir.join("main.c");
+        let cpp_ok = cpp_compiles_file(&cpp, &entry, &out_path)
+            .unwrap_or_else(|e| panic!("C++ run failed for parser case rule priority parity: {e}"));
+        assert!(
+            cpp_ok,
+            "C++ reference should compile recursive local case priority fixture"
+        );
+    }
+
+    let parsed = parse_file_with_imports(&entry, std::slice::from_ref(&root_dir))
+        .expect("file-backed parse should succeed");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept recursive local case priority parity fixture: {:?}",
+        parsed.errors
+    );
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+    let ctx = EvalSourceContext::for_file(&entry, std::slice::from_ref(&root_dir));
+
+    let out = eval_process_with_source_context(&mut arena, root, ctx)
+        .expect("Rust eval should accept same recursive local case priority fixture as C++");
+    expect_int(&arena, out, 1);
+}
+
+#[test]
 fn eval_process_accepts_numeric_seq_as_iterator_count() {
     let source = r#"
 count = max(1, 0);
