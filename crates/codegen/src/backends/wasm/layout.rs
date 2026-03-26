@@ -348,7 +348,14 @@ fn expect_block(store: &FirStore, id: FirId, label: &str) -> Result<Vec<FirId>, 
 fn fir_type_storage(typ: FirType, audio_slot: u32) -> Result<(WasmValType, u32), WasmBackendError> {
     let (val_type, native_size) = match typ {
         FirType::Bool | FirType::Int32 => (WasmValType::I32, 4),
-        FirType::Float32 | FirType::FaustFloat => (WasmValType::F32, 4),
+        FirType::Float32 => (WasmValType::F32, 4),
+        FirType::FaustFloat => {
+            if audio_slot >= 8 {
+                (WasmValType::F64, 8)
+            } else {
+                (WasmValType::F32, 4)
+            }
+        }
         FirType::Int64 | FirType::Float64 => (WasmValType::F64, 8),
         FirType::Ptr(_) | FirType::Obj | FirType::UI | FirType::Meta | FirType::Sound => {
             (WasmValType::I32, WASM_PTR_BYTES)

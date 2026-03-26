@@ -197,6 +197,9 @@ struct CliArgs {
     /// Compile through the experimental Cranelift backend and print a backend report.
     #[arg(long = "dump-cranelift", action = ArgAction::SetTrue)]
     dump_cranelift: bool,
+    /// Emit strict C++-style JSON description.
+    #[arg(long = "json", action = ArgAction::SetTrue)]
+    dump_json: bool,
     /// Select backend language (Faust-style): `-lang c`, `-lang cpp`, `-lang cranelift`, `-lang fir`, `-lang interp`, or `-lang wasm`.
     ///
     /// This option is equivalent to `--dump-c` / `--dump-cpp` / `--dump-fir`
@@ -332,6 +335,10 @@ fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> 
         }
         if arg == "-double" {
             normalized.push("--double".to_owned());
+            continue;
+        }
+        if arg == "-json" {
+            normalized.push("--json".to_owned());
             continue;
         }
         if arg == "-version" {
@@ -736,6 +743,9 @@ fn print_global_usage_and_exit() -> ! {
         "  cargo run -p compiler -- --dump-fir <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!(
+        "  cargo run -p compiler -- --json <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast]"
+    );
+    eprintln!(
         "  cargo run -p compiler -- --dump-fir-verify <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--fir-verify-strict]"
     );
     eprintln!(
@@ -951,6 +961,57 @@ fn compile_fixture_to_interp_text(
     String::from_utf8(buf).map_err(|e| e.to_string())
 }
 
+/// Compiles a named FIR fixture to strict C++-style JSON text.
+fn compile_fixture_to_json_text(
+    store: &fir::FirStore,
+    module: fir::FirId,
+    double_precision: bool,
+) -> Result<String, String> {
+    let fir::FirMatch::Module {
+        name,
+        functions,
+        num_inputs,
+        num_outputs,
+        ..
+    } = fir::match_fir(store, module)
+    else {
+        return Err("JSON fixture generation expects a FIR Module root".to_owned());
+    };
+    let fir::FirMatch::Block(function_items) = fir::match_fir(store, functions) else {
+        return Err("JSON fixture generation expects a FIR function block".to_owned());
+    };
+    let layout = codegen::backends::wasm::layout::WasmMemoryLayout::from_module(
+        store,
+        module,
+        &WasmOptions {
+            double_precision,
+            ..WasmOptions::default()
+        },
+        0,
+    )
+    .map_err(|e| e.to_string())?;
+    let json = codegen::json::build_json_description_from_fir(
+        store,
+        &function_items,
+        codegen::json::JsonBuildOptions {
+            name,
+            filename: None,
+            version: Some(Compiler::version().to_owned()),
+            compile_options: None,
+            library_list: Vec::new(),
+            include_pathnames: Vec::new(),
+            top_level_meta: Vec::new(),
+            size: Some(layout.struct_size),
+            inputs: num_inputs,
+            outputs: num_outputs,
+            sr_index: None,
+        },
+        |_var| None,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(json.render())
+}
+
 /// Renders a FIR verifier report in CLI-friendly text form.
 fn render_fir_verify_report(store: &fir::FirStore, module: fir::FirId, strict: bool) -> String {
     let report = verify_fir_module(store, module);
@@ -1037,6 +1098,7 @@ fn main() {
         cli.dump_fir_verify,
         cli.dump_interp,
         cli.dump_cranelift,
+        cli.dump_json,
         cli.lang.is_some(),
     ]
     .into_iter()
@@ -1106,6 +1168,7 @@ fn main() {
         std::process::exit(2);
     }
     if (cli.dump_fir
+        || cli.dump_json
         || cli.dump_fir_verify
         || matches!(
             cli.lang,
@@ -1137,7 +1200,7 @@ fn main() {
     if cli.fir_fixture.is_some() {
         if cli.golden || cli.parse || cli.dump_box || cli.dump_sig {
             eprintln!(
-                "--fir-fixture supports only FIR/backend dump modes (fir/c/cpp/interp/cranelift/wasm)"
+                "--fir-fixture supports only FIR/backend dump modes (fir/c/cpp/interp/cranelift/wasm/json)"
             );
             std::process::exit(2);
         }
@@ -1219,6 +1282,17 @@ fn main() {
                 Ok(wasm) => emit_binary_output(&wasm.wasm_binary, cli.output.as_ref()),
                 Err(err) => {
                     eprintln!("WASM fixture codegen failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+
+        if cli.dump_json {
+            match compile_fixture_to_json_text(&store, module, cli.double) {
+                Ok(json) => emit_output(&json, cli.output.as_ref()),
+                Err(err) => {
+                    eprintln!("JSON fixture generation failed: {err}");
                     std::process::exit(1);
                 }
             }
@@ -1531,6 +1605,35 @@ fn main() {
             }
             Err(err) => {
                 eprintln!("FIR pipeline failed: {err}");
+                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
+                std::process::exit(1);
+            }
+        }
+        timer.total();
+        return;
+    }
+
+    if cli.dump_json {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
+        let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
+        let result = if cli.import_dir.is_empty() {
+            compiler.compile_file_default_to_json_with_lane(
+                input_path,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        } else {
+            compiler.compile_file_to_json(
+                input_path,
+                &cli.import_dir,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        };
+        timer.phase("json");
+
+        match result {
+            Ok(json) => emit_output(&json, cli.output.as_ref()),
+            Err(err) => {
+                eprintln!("JSON pipeline failed: {err}");
                 print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
                 std::process::exit(1);
             }
@@ -1854,6 +1957,30 @@ mod tests {
     fn cli_parse_accepts_lang_wasm() {
         let cli = CliArgs::parse_from(["faust-rs", "--lang", "wasm", "foo.dsp"]);
         assert!(matches!(cli.lang, Some(CliLang::Wasm)));
+    }
+
+    #[test]
+    fn cli_parse_accepts_json_flag() {
+        let cli = CliArgs::parse_from(["faust-rs", "--json", "foo.dsp"]);
+        assert!(cli.dump_json);
+    }
+
+    #[test]
+    fn normalize_legacy_args_maps_dash_json_to_json_flag() {
+        let args = vec![
+            "faust-rs".to_owned(),
+            "-json".to_owned(),
+            "foo.dsp".to_owned(),
+        ];
+        let normalized = normalize_legacy_args(args);
+        assert_eq!(
+            normalized,
+            vec![
+                "faust-rs".to_owned(),
+                "--json".to_owned(),
+                "foo.dsp".to_owned()
+            ]
+        );
     }
 
     #[test]

@@ -103,7 +103,7 @@ pub struct JsonWidget {
     pub varname: String,
     pub shortname: String,
     pub address: String,
-    pub index: u32,
+    pub index: Option<u32>,
     pub meta: Vec<JsonMetaEntry>,
     pub range: Option<JsonRange>,
     pub soundfile_url: Option<String>,
@@ -300,8 +300,10 @@ fn push_json_ui_item(out: &mut String, item: &JsonUiItem) {
             push_json_field_string(out, "shortname", &widget.shortname);
             out.push(',');
             push_json_field_string(out, "address", &widget.address);
-            out.push(',');
-            push_json_field_u32(out, "index", widget.index);
+            if let Some(index) = widget.index {
+                out.push(',');
+                push_json_field_u32(out, "index", index);
+            }
             if !widget.meta.is_empty() {
                 out.push(',');
                 push_json_field_meta_array(out, "meta", &widget.meta);
@@ -568,9 +570,7 @@ fn build_widget<F>(
 where
     F: FnMut(&str) -> Option<u32>,
 {
-    let index = resolve_index(&var).ok_or_else(|| {
-        JsonBuildError::UnsupportedFirNode(format!("missing JSON field offset for `{var}`"))
-    })?;
+    let index = resolve_index(&var);
     let mut address = String::new();
     for segment in path_stack {
         address.push('/');

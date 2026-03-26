@@ -41,10 +41,13 @@ use codegen::backends::interp::{
     CodegenError as InterpCodegenError, CodegenErrorCode as InterpCodegenErrorCode, FbcDspFactory,
     FbcReal, InterpOptions, generate_interp_module, write_fbc,
 };
+use codegen::backends::wasm::layout::WasmMemoryLayout;
 use codegen::backends::wasm::{
     WasmBackendError, WasmJsonContext, WasmModule, WasmOptions, generate_wasm_module_with_context,
 };
-use codegen::json::JsonMetaEntry;
+use codegen::json::{
+    JsonBuildOptions, JsonDescription, JsonMetaEntry, build_json_description_from_fir,
+};
 use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, SourceSpan};
 use fir::{
     FirBuilder, FirId, FirStore, FirType, NamedType,
@@ -472,6 +475,43 @@ impl Compiler {
             })
     }
 
+    /// Parses + evaluates + propagates one source, then emits strict C++-style JSON.
+    pub fn compile_source_to_json(
+        &self,
+        source_name: &str,
+        source: &str,
+    ) -> Result<String, CompilerError> {
+        self.compile_source_to_json_with_lane(source_name, source, SignalFirLane::LegacyBridge)
+    }
+
+    /// Parses + evaluates + propagates one source, then emits strict C++-style JSON
+    /// through the selected signal->FIR lane.
+    pub fn compile_source_to_json_with_lane(
+        &self,
+        source_name: &str,
+        source: &str,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        let signals = self.compile_source_to_signals(source_name, source)?;
+        let lowered =
+            lower_signals_to_fir(source_name, &signals, lane, self.fir_verify, self.real_type)
+                .map_err(|error| lower_fir_error_to_compiler(source_name, error))?;
+        let json = build_strict_json_description(
+            &lowered.store,
+            lowered.module,
+            source_name_to_filename(source_name),
+            Vec::new(),
+            Vec::new(),
+            json_meta_entries_from_snapshot(&signals.compilation_metadata),
+            self.real_type == RealType::Float64,
+        )
+        .map_err(|error| CompilerError::CodegenWasm {
+            source: source_name.into(),
+            error,
+        })?;
+        Ok(json.render())
+    }
+
     /// Parses + evaluates + propagates one file, then emits C++ text from
     /// the temporary module-first FIR bridge.
     pub fn compile_file_to_cpp(
@@ -590,6 +630,53 @@ impl Compiler {
             })
     }
 
+    /// Parses + evaluates + propagates one file, then emits strict C++-style JSON.
+    pub fn compile_file_to_json(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        let source = path.display().to_string();
+        let signals = self.compile_file_to_signals(path, search_paths)?;
+        let lowered =
+            lower_signals_to_fir(&source, &signals, lane, self.fir_verify, self.real_type)
+                .map_err(|error| lower_fir_error_to_compiler(&source, error))?;
+        let mut library_list: Vec<String> = signals
+            .parse
+            .used_files
+            .iter()
+            .skip(1)
+            .map(|file| file.to_string_lossy().into_owned())
+            .collect();
+        for file in &signals.loaded_files {
+            let file = file.to_string_lossy().into_owned();
+            if !library_list.iter().any(|existing| existing == &file) {
+                library_list.push(file);
+            }
+        }
+        let json = build_strict_json_description(
+            &lowered.store,
+            lowered.module,
+            path.file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+            merge_import_search_paths(path, search_paths)
+                .into_iter()
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .collect(),
+            library_list,
+            json_meta_entries_from_snapshot(&signals.compilation_metadata),
+            self.real_type == RealType::Float64,
+        )
+        .map_err(|error| CompilerError::CodegenWasm {
+            source: source.into(),
+            error,
+        })?;
+        Ok(json.render())
+    }
+
     /// Parses + evaluates + propagates one file with default import search path,
     /// then emits C++ text from the temporary module-first FIR bridge.
     pub fn compile_file_default_to_cpp(
@@ -661,6 +748,22 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<WasmModule, CompilerError> {
         self.compile_file_to_wasm_with_lane(path, &[], options, lane)
+    }
+
+    /// Parses + evaluates + propagates one file with default import search path,
+    /// then emits strict C++-style JSON.
+    pub fn compile_file_default_to_json(&self, path: &Path) -> Result<String, CompilerError> {
+        self.compile_file_default_to_json_with_lane(path, SignalFirLane::LegacyBridge)
+    }
+
+    /// Parses + evaluates + propagates one file with default import search path,
+    /// then emits strict C++-style JSON through the selected signal->FIR lane.
+    pub fn compile_file_default_to_json_with_lane(
+        &self,
+        path: &Path,
+        lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_to_json(path, &[], lane)
     }
 
     /// Parses + evaluates + propagates one source, then emits `.fbc` bytecode
@@ -1865,6 +1968,69 @@ fn source_name_to_filename(source_name: &str) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or(source_name)
         .to_owned()
+}
+
+fn build_strict_json_description(
+    store: &FirStore,
+    module: FirId,
+    filename: String,
+    include_pathnames: Vec<String>,
+    library_list: Vec<String>,
+    top_level_meta: Vec<JsonMetaEntry>,
+    double_precision: bool,
+) -> Result<JsonDescription, WasmBackendError> {
+    let fir::FirMatch::Module {
+        name,
+        functions,
+        num_inputs,
+        num_outputs,
+        ..
+    } = fir::match_fir(store, module)
+    else {
+        return Err(WasmBackendError::new(
+            codegen::backends::wasm::WasmBackendErrorCode::UnsupportedModuleShape,
+            "JSON generation expects a FIR Module root",
+        ));
+    };
+    let fir::FirMatch::Block(function_items) = fir::match_fir(store, functions) else {
+        return Err(WasmBackendError::new(
+            codegen::backends::wasm::WasmBackendErrorCode::UnsupportedFirNode,
+            "JSON generation expects the functions section to be a FIR Block",
+        ));
+    };
+    let layout = WasmMemoryLayout::from_module(
+        store,
+        module,
+        &WasmOptions {
+            double_precision,
+            ..WasmOptions::default()
+        },
+        0,
+    )?;
+    build_json_description_from_fir(
+        store,
+        &function_items,
+        JsonBuildOptions {
+            name,
+            filename: Some(filename),
+            version: Some(Compiler::version().to_owned()),
+            compile_options: None,
+            library_list,
+            include_pathnames,
+            top_level_meta,
+            size: Some(layout.struct_size),
+            inputs: num_inputs,
+            outputs: num_outputs,
+            sr_index: None,
+        },
+        |_var| None,
+    )
+    .map_err(|error| {
+        WasmBackendError::new(
+            codegen::backends::wasm::WasmBackendErrorCode::UnsupportedFirNode,
+            error.to_string(),
+        )
+    })
 }
 
 fn wasm_json_context_for_memory_source(
@@ -3250,5 +3416,21 @@ mod tests {
             out.dsp_json.contains(&root.display().to_string()),
             "include_pathnames should include the source directory"
         );
+    }
+
+    #[test]
+    fn compiler_compile_source_to_json_emits_strict_json_without_widget_indices() {
+        let compiler = Compiler::new();
+        let json = compiler
+            .compile_source_to_json(
+                "gain.dsp",
+                "declare name \"Gain\";\ngain = hslider(\"gain\", 0.5, 0, 1, 0.01);\nprocess = _ * gain;\n",
+            )
+            .expect("strict JSON should compile from source");
+
+        assert!(json.contains("\"name\":\"Gain\""));
+        assert!(json.contains("\"filename\":\"gain.dsp\""));
+        assert!(json.contains("\"ui\":["));
+        assert!(!json.contains("\"index\":"));
     }
 }

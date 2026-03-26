@@ -139,3 +139,44 @@ fn json_builder_emits_empty_ui_when_build_ui_function_is_missing() {
 
     assert_eq!(json.ui, Vec::new());
 }
+
+#[test]
+fn json_builder_omits_widget_index_when_no_offset_resolver_is_available() {
+    let (store, module) = build_gain_bias_ui_meta_test_module();
+    let FirMatch::Module {
+        functions,
+        num_inputs,
+        num_outputs,
+        ..
+    } = match_fir(&store, module)
+    else {
+        panic!("module root expected");
+    };
+    let FirMatch::Block(function_items) = match_fir(&store, functions) else {
+        panic!("function block expected");
+    };
+
+    let json = build_json_description_from_fir(
+        &store,
+        &function_items,
+        JsonBuildOptions {
+            name: "gain_bias_ui_meta".to_owned(),
+            filename: None,
+            version: None,
+            compile_options: None,
+            library_list: Vec::new(),
+            include_pathnames: Vec::new(),
+            top_level_meta: Vec::new(),
+            size: Some(16),
+            inputs: num_inputs,
+            outputs: num_outputs,
+            sr_index: None,
+        },
+        |_var| None,
+    )
+    .expect("builder should allow JSON without widget offsets");
+
+    let rendered = json.render();
+    assert!(rendered.contains("\"address\":\"/GainBias/gain\""));
+    assert!(!rendered.contains("\"index\":"));
+}

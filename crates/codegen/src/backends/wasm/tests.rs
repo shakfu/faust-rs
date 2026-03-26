@@ -178,6 +178,91 @@ fn wasm_compute_lowers_struct_state_and_casts() {
 }
 
 #[test]
+fn wasm_instance_reset_ui_lowers_control_reinitialization() {
+    let (store, module) = build_gain_bias_ui_meta_test_module();
+    let out = generate_wasm_module(
+        &store,
+        module,
+        &WasmOptions {
+            double_precision: true,
+            ..WasmOptions::default()
+        },
+    )
+    .expect("WASM backend should lower instanceResetUserInterface body");
+
+    let body = code_body_at(&out.wasm_binary, 10);
+    let ops = decode_ops(body);
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, Operator::F64Const { value } if *value == 0.5f64.into()))
+    );
+    assert!(
+        ops.iter()
+            .filter(|op| matches!(op, Operator::F64Store { .. }))
+            .count()
+            >= 3
+    );
+}
+
+#[test]
+fn wasm_get_and_set_param_value_use_f64_in_double_mode() {
+    let (store, module) = build_passthrough_test_module();
+    let out = generate_wasm_module(
+        &store,
+        module,
+        &WasmOptions {
+            double_precision: true,
+            ..WasmOptions::default()
+        },
+    )
+    .expect("WASM scaffold should emit double-precision param ABI");
+
+    let get_body = code_body_at(&out.wasm_binary, 4);
+    let get_ops = decode_ops(get_body);
+    assert!(matches!(get_ops.as_slice(),
+        [
+            Operator::LocalGet { local_index: 0 },
+            Operator::LocalGet { local_index: 1 },
+            Operator::I32Add,
+            Operator::F64Load { memarg },
+            Operator::End
+        ] if memarg.offset == 0
+    ));
+
+    let set_body = code_body_at(&out.wasm_binary, 13);
+    let set_ops = decode_ops(set_body);
+    assert!(matches!(set_ops.as_slice(),
+        [
+            Operator::LocalGet { local_index: 0 },
+            Operator::LocalGet { local_index: 1 },
+            Operator::I32Add,
+            Operator::LocalGet { local_index: 2 },
+            Operator::F64Store { memarg },
+            Operator::End
+        ] if memarg.offset == 0
+    ));
+}
+
+#[test]
+fn wasm_float_comparisons_follow_operand_type_even_when_result_type_is_int32() {
+    let (store, module) = build_float_compare_result_int32_module();
+    let out = generate_wasm_module(
+        &store,
+        module,
+        &WasmOptions {
+            double_precision: true,
+            ..WasmOptions::default()
+        },
+    )
+    .expect("WASM scaffold should lower float comparisons from operand type");
+
+    let body = code_body_at(&out.wasm_binary, 1);
+    let ops = decode_ops(body);
+    assert!(ops.iter().any(|op| matches!(op, Operator::F64Gt)));
+    assert!(!ops.iter().any(|op| matches!(op, Operator::I32GtS)));
+}
+
+#[test]
 fn wasm_compute_lowers_struct_tables_and_select2() {
     let (store, module) = build_table_state_delay_test_module();
     let out = generate_wasm_module(&store, module, &WasmOptions::default())
@@ -497,6 +582,29 @@ fn wasm_layout_pads_i32_fields_to_audio_slot_in_double_mode() {
 }
 
 #[test]
+fn wasm_layout_uses_f64_storage_for_faustfloat_in_double_mode() {
+    let (store, module) = build_sine_phasor_test_module();
+    let layout = WasmMemoryLayout::from_module(
+        &store,
+        module,
+        &WasmOptions {
+            double_precision: true,
+            ..WasmOptions::default()
+        },
+        64,
+    )
+    .expect("double-precision sine fixture layout should compute");
+
+    assert_eq!(layout.struct_size, 24);
+    assert_eq!(layout.field_offsets["fFreq"].offset, 0);
+    assert_eq!(layout.field_offsets["fFreq"].size, 8);
+    assert_eq!(layout.field_offsets["fGain"].offset, 8);
+    assert_eq!(layout.field_offsets["fGain"].size, 8);
+    assert_eq!(layout.field_offsets["fPhase"].offset, 16);
+    assert_eq!(layout.field_offsets["fPhase"].size, 8);
+}
+
+#[test]
 fn wasm_layout_places_static_tables_after_struct_region() {
     let (store, module) = build_static_table_layout_module();
     let layout = WasmMemoryLayout::from_module(&store, module, &WasmOptions::default(), 32)
@@ -527,6 +635,124 @@ fn build_sample_rate_state_module() -> (FirStore, FirId) {
     let functions = b.block(&[compute]);
     let static_decls = b.block(&[]);
     let module = b.module(0, 1, "sr_dsp", dsp_struct, globals, functions, static_decls);
+    (store, module)
+}
+
+fn build_float_compare_result_int32_module() -> (FirStore, FirId) {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let threshold_init = b.float64(0.25);
+    let threshold = b.declare_var(
+        "fThreshold",
+        FirType::Float64,
+        AccessType::Struct,
+        Some(threshold_init),
+    );
+    let globals = b.block(&[threshold]);
+    let dsp_struct = b.block(&[]);
+
+    let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+    let count_arg = NamedType {
+        name: "count".to_string(),
+        typ: FirType::Int32,
+    };
+    let inputs_arg = NamedType {
+        name: "inputs".to_string(),
+        typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+    };
+    let outputs_arg = NamedType {
+        name: "outputs".to_string(),
+        typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+    };
+    let input0 = NamedType {
+        name: "input0".to_string(),
+        typ: ptr_ty.clone(),
+    };
+    let output0 = NamedType {
+        name: "output0".to_string(),
+        typ: ptr_ty.clone(),
+    };
+
+    let inputs_ptr = b.load_var("inputs", AccessType::FunArgs, inputs_arg.typ.clone());
+    let zero_index = b.int32(0);
+    let input0_ptr = b.load_table(
+        "inputs",
+        AccessType::FunArgs,
+        zero_index,
+        input0.typ.clone(),
+    );
+    let in_alias = b.declare_var(
+        "input0",
+        input0.typ.clone(),
+        AccessType::Stack,
+        Some(input0_ptr),
+    );
+
+    let outputs_ptr = b.load_var("outputs", AccessType::FunArgs, outputs_arg.typ.clone());
+    let zero_out_index = b.int32(0);
+    let output0_ptr = b.load_table(
+        "outputs",
+        AccessType::FunArgs,
+        zero_out_index,
+        output0.typ.clone(),
+    );
+    let out_alias = b.declare_var(
+        "output0",
+        output0.typ.clone(),
+        AccessType::Stack,
+        Some(output0_ptr),
+    );
+
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+    let sample = b.load_table("input0", AccessType::Stack, i0, FirType::FaustFloat);
+    let sample_f64 = b.cast(FirType::Float64, sample);
+    let threshold_cur = b.load_var("fThreshold", AccessType::Struct, FirType::Float64);
+    let cmp = b.binop(fir::FirBinOp::Gt, sample_f64, threshold_cur, FirType::Int32);
+    let zero_sample = b.float64(0.0);
+    let gated = b.select2(cmp, sample, zero_sample, FirType::FaustFloat);
+    let store_out = b.store_table("output0", AccessType::Stack, i0, gated);
+    let loop_body = b.block(&[store_out]);
+    let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+    let compute_body = b.block(&[in_alias, out_alias, sample_loop]);
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                inputs_arg.typ.clone(),
+                outputs_arg.typ.clone(),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &[
+            NamedType {
+                name: "dsp".to_string(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            count_arg,
+            inputs_arg,
+            outputs_arg,
+        ],
+        Some(compute_body),
+        false,
+    );
+
+    let functions = b.block(&[compute]);
+    let static_decls = b.block(&[]);
+    let module = b.module(
+        0,
+        1,
+        "float_compare_result_int32",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
+    let _ = inputs_ptr;
+    let _ = outputs_ptr;
     (store, module)
 }
 

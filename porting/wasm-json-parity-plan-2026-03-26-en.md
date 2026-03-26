@@ -20,6 +20,13 @@ full JSON description matching the C++ compiler contract.
 This plan isolates the JSON/runtime compatibility work from the broader WASM
 backend bring-up so it can be implemented and validated as a dedicated track.
 
+Implementation note:
+
+- the extracted generic JSON builder is now also used by the strict CLI
+  `-json` / `--json` path
+- this keeps the C++-style global JSON contract separate from the WASM-enriched
+  companion JSON that carries runtime offsets
+
 ---
 
 ## 2. C++ Chain Summary
@@ -325,6 +332,9 @@ Current implementation note:
   - `library_list`
 - `compile_options` remains deferred until Rust has one explicit compiler-side
   source of truth matching the C++ `printCompilationOptions1()` contract
+- a strict C++-style CLI `-json` / `--json` path is now wired through the
+  compiler facade and reuses the generic FIR JSON builder without WASM widget
+  `index` offsets
 
 ### Step 5. Remove runtime-incompatible scaffold assumptions
 

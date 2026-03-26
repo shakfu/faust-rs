@@ -412,6 +412,24 @@ pub fn build_gain_bias_ui_meta_test_module() -> (FirStore, FirId) {
         false,
     );
 
+    let reset_gain = b.store_var("fGain", AccessType::Struct, f_gain_init);
+    let reset_bias = b.store_var("fBias", AccessType::Struct, f_bias_init);
+    let reset_gate = b.store_var("fGate", AccessType::Struct, f_gate_init);
+    let reset_ui_body = b.block(&[reset_gain, reset_bias, reset_gate]);
+    let reset_ui = b.declare_fun(
+        "instanceResetUserInterface",
+        FirType::Fun {
+            args: vec![obj_ptr_type()],
+            ret: Box::new(FirType::Void),
+        },
+        &[NamedType {
+            name: "dsp".to_string(),
+            typ: obj_ptr_type(),
+        }],
+        Some(reset_ui_body),
+        false,
+    );
+
     let (in_alias, out_alias) = io_aliases_for_mono_compute(&mut b);
     let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
     let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
@@ -437,7 +455,7 @@ pub fn build_gain_bias_ui_meta_test_module() -> (FirStore, FirId) {
         &mut b,
         "gain_bias_ui_meta",
         &globals,
-        &[build_ui, metadata, compute],
+        &[build_ui, metadata, reset_ui, compute],
         1,
         1,
     );

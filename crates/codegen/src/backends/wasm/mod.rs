@@ -260,6 +260,8 @@ pub fn generate_wasm_module_with_context(
 
     let compute_body = find_function_body(store, &function_items, "compute");
     let instance_clear_body = find_function_body(store, &function_items, "instanceClear");
+    let instance_reset_ui_body =
+        find_function_body(store, &function_items, "instanceResetUserInterface");
 
     let real_ty = if options.double_precision {
         ValType::F64
@@ -423,6 +425,7 @@ pub fn generate_wasm_module_with_context(
             store,
             compute_body,
             instance_clear_body,
+            instance_reset_ui_body,
             options,
         ));
     }
@@ -514,11 +517,12 @@ fn scaffold_function_body(
     store: &FirStore,
     compute_body: Option<FirId>,
     instance_clear_body: Option<FirId>,
+    instance_reset_ui_body: Option<FirId>,
     options: &WasmOptions,
 ) -> Function {
     let mut function = Function::new(Vec::new());
     match func {
-        WasmFunc::ClassInit | WasmFunc::InstanceResetUserInterface => {}
+        WasmFunc::ClassInit => {}
         WasmFunc::Compute => {
             if let Some(body) = compute_body
                 && let Ok(lowered) =
@@ -531,6 +535,14 @@ fn scaffold_function_body(
             if let Some(body) = instance_clear_body
                 && let Ok(lowered) =
                     lower_instance_clear_subset(store, body, memory_layout, options)
+            {
+                return lowered;
+            }
+        }
+        WasmFunc::InstanceResetUserInterface => {
+            if let Some(body) = instance_reset_ui_body
+                && let Ok(lowered) =
+                    lower_instance_reset_ui_subset(store, body, memory_layout, options)
             {
                 return lowered;
             }
@@ -691,6 +703,19 @@ fn lower_compute_subset(
 /// Reuses the same statement/value subset as `compute`, but with the
 /// `instanceClear(dsp)` ABI so stack locals start at local index 1.
 fn lower_instance_clear_subset(
+    store: &FirStore,
+    body: FirId,
+    memory_layout: &WasmMemoryLayout,
+    options: &WasmOptions,
+) -> Result<Function, WasmBackendError> {
+    lower_function_subset(store, body, memory_layout, &[], options, 1)
+}
+
+/// Partial `instanceResetUserInterface` subset lowerer for the current WASM bring-up phase.
+///
+/// Reuses the same statement/value subset as `instanceClear`, with the same
+/// single-parameter ABI: `instanceResetUserInterface(dsp)`.
+fn lower_instance_reset_ui_subset(
     store: &FirStore,
     body: FirId,
     memory_layout: &WasmMemoryLayout,
@@ -1329,7 +1354,28 @@ impl ComputeSubsetLowerer<'_> {
             FirMatch::BinOp { op, lhs, rhs, typ } => {
                 self.lower_expr(lhs, function)?;
                 self.lower_expr(rhs, function)?;
-                function.instruction(&binop_instruction(op, &typ, self.options)?);
+                let op_typ = if is_comparison_binop(op) {
+                    // C++ parity: FIR comparison binops produce an integer/bool-like
+                    // result, so the node result type describes the output on the
+                    // WASM stack, not the operand lane used by the comparison opcode.
+                    //
+                    // Example: `Gt(Float64, Float64) -> Int32` must still lower to
+                    // `f64.gt`; the resulting condition value is the `i32` that later
+                    // feeds `if`/`select`.
+                    //
+                    // The reference C++ WASM backend makes the same choice from
+                    // `TypingVisitor::getType(inst->fInst1/2)` in
+                    // `compiler/generator/wasm/wasm_instructions.hh`.
+                    self.store.value_type(lhs).ok_or_else(|| {
+                        WasmBackendError::new(
+                            WasmBackendErrorCode::UnsupportedFirNode,
+                            format!("missing lhs value type for WASM comparison binop: {op:?}"),
+                        )
+                    })?
+                } else {
+                    typ
+                };
+                function.instruction(&binop_instruction(op, &op_typ, self.options)?);
                 Ok(())
             }
             FirMatch::Select2 {
@@ -2146,6 +2192,18 @@ fn binop_instruction(
             format!("unsupported WASM binop in compute subset: {op:?} / {val_ty:?}"),
         )),
     }
+}
+
+fn is_comparison_binop(op: fir::FirBinOp) -> bool {
+    matches!(
+        op,
+        fir::FirBinOp::Eq
+            | fir::FirBinOp::Ne
+            | fir::FirBinOp::Lt
+            | fir::FirBinOp::Le
+            | fir::FirBinOp::Gt
+            | fir::FirBinOp::Ge
+    )
 }
 
 fn switch_eq_instruction(typ: &FirType) -> Result<Instruction<'static>, WasmBackendError> {
