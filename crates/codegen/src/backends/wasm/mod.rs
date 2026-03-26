@@ -58,8 +58,10 @@ pub use layout::{FieldLayout, WasmMemoryLayout, WasmValType};
 #[cfg(test)]
 mod tests;
 
+/// Stable backend identifier used by the compiler facade and CLI.
 pub const BACKEND_NAME: &str = "wasm";
 
+/// Fallback minimum page count when auto-sizing would otherwise pick zero.
 const DEFAULT_MEMORY_PAGES: u32 = 1;
 
 /// WASM backend compilation options.
@@ -178,6 +180,10 @@ impl std::fmt::Display for WasmBackendError {
 
 impl std::error::Error for WasmBackendError {}
 
+/// Canonical exported/runtime helper functions emitted by the backend.
+///
+/// The order in [`WasmFunc::ALL`] is ABI-relevant because type indices,
+/// function indices, and export bindings are derived from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WasmFunc {
     ClassInit,
@@ -197,6 +203,7 @@ enum WasmFunc {
 }
 
 impl WasmFunc {
+    /// Canonical function order used for type/function section emission.
     const ALL: [Self; 14] = [
         Self::ClassInit,
         Self::Compute,
@@ -215,6 +222,7 @@ impl WasmFunc {
     ];
 
     #[must_use]
+    /// Returns the WASM signature for one canonical Faust runtime function.
     fn signature(self, real_ty: ValType) -> (Vec<ValType>, Vec<ValType>) {
         match self {
             Self::ClassInit => (vec![ValType::I32, ValType::I32], vec![]),
@@ -238,6 +246,8 @@ impl WasmFunc {
     }
 }
 
+/// Descriptor for one imported host math/helper function referenced by lowered
+/// WASM bodies.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct WasmMathImport {
     field_name: String,
@@ -245,6 +255,8 @@ struct WasmMathImport {
     result: ValType,
 }
 
+/// Local alias used to emphasize when JSON objects are already in rendered
+/// companion-description form.
 type WasmJsonDescription = JsonDescription;
 
 /// Emits one valid WASM module for a FIR `Module` root.
@@ -500,6 +512,10 @@ pub fn generate_wasm_module_with_context(
     })
 }
 
+/// Maps one canonical backend function to its final module function index.
+///
+/// Imported math helpers occupy the leading function-index space, so emitted
+/// body functions start after `imported_function_count`.
 fn function_index(imported_function_count: u32, func: WasmFunc) -> u32 {
     imported_function_count
         + WasmFunc::ALL
@@ -508,6 +524,10 @@ fn function_index(imported_function_count: u32, func: WasmFunc) -> u32 {
             .expect("function present in static WASM function list") as u32
 }
 
+/// Builds the companion JSON object for one lowered WASM module.
+///
+/// This is the point where backend-specific layout facts become externally
+/// visible JSON fields such as `size`, `sr_index`, and widget `index` offsets.
 fn build_wasm_json_description(
     store: &FirStore,
     module_name: &str,
@@ -550,6 +570,7 @@ fn build_wasm_json_description(
     .map_err(map_json_build_error)
 }
 
+/// Recasts generic JSON-builder failures into backend-typed WASM diagnostics.
 fn map_json_build_error(error: JsonBuildError) -> WasmBackendError {
     match error {
         JsonBuildError::UnsupportedFirNode(message) => {
@@ -559,6 +580,11 @@ fn map_json_build_error(error: JsonBuildError) -> WasmBackendError {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Emits one canonical exported/runtime function body.
+///
+/// The backend keeps a valid scaffold implementation for every canonical Faust
+/// export and opportunistically replaces those stubs with subset-lowered FIR
+/// bodies when the relevant function is supported.
 fn scaffold_function_body(
     func: WasmFunc,
     num_inputs: i32,
@@ -698,6 +724,7 @@ fn scaffold_function_body(
     function
 }
 
+/// Builds a default memory operand for linear-memory accesses at `offset`.
 fn memarg(offset: u32) -> MemArg {
     MemArg {
         offset: u64::from(offset),
@@ -706,14 +733,12 @@ fn memarg(offset: u32) -> MemArg {
     }
 }
 
+/// Alias of [`function_index`] used from body-lowering helpers.
 fn function_index_for_body(func: WasmFunc, imported_function_count: u32) -> u32 {
-    imported_function_count
-        + WasmFunc::ALL
-            .iter()
-            .position(|item| *item == func)
-            .expect("function present in static WASM function list") as u32
+    function_index(imported_function_count, func)
 }
 
+/// One lowered local variable bound to a concrete WASM local index.
 #[derive(Clone, Debug)]
 struct WasmLocal {
     index: u32,
@@ -799,6 +824,10 @@ fn lower_instance_reset_ui_subset(
     lower_function_subset(store, body, memory_layout, &[], options, 1)
 }
 
+/// Shared lowering entry point for the currently supported non-UI FIR bodies.
+///
+/// `param_count` is the number of ABI parameters already occupying the leading
+/// local slots for the target exported function.
 fn lower_function_subset(
     store: &FirStore,
     body: FirId,
@@ -842,6 +871,10 @@ fn lower_function_subset(
     Ok(function)
 }
 
+/// Collects stack/loop locals that need explicit WASM local slots.
+///
+/// The traversal is intentionally conservative and only accepts FIR nodes that
+/// the current subset lowerer understands.
 fn collect_compute_locals(
     store: &FirStore,
     id: FirId,
@@ -923,6 +956,11 @@ fn collect_compute_locals(
     }
 }
 
+/// Stateful FIR-to-WASM subset lowerer for body emission.
+///
+/// The lowerer owns just enough contextual state to translate supported FIR
+/// statements/expressions into stack-machine instructions while preserving the
+/// runtime memory contract carried by [`WasmMemoryLayout`].
 struct ComputeSubsetLowerer<'a> {
     store: &'a FirStore,
     memory_layout: &'a WasmMemoryLayout,
@@ -932,6 +970,7 @@ struct ComputeSubsetLowerer<'a> {
 }
 
 impl ComputeSubsetLowerer<'_> {
+    /// Lowers one FIR `Block` into a sequence of WASM instructions.
     fn lower_block_into(
         &mut self,
         id: FirId,
@@ -949,6 +988,7 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    /// Lowers one FIR statement supported by the current subset.
     fn lower_stmt(&mut self, id: FirId, function: &mut Function) -> Result<(), WasmBackendError> {
         match match_fir(self.store, id) {
             FirMatch::Block(_) => self.lower_block_into(id, function),
@@ -1029,6 +1069,7 @@ impl ComputeSubsetLowerer<'_> {
         }
     }
 
+    /// Lowers a canonical `for (i = 0; i < upper; ++i)` loop shape.
     fn lower_simple_for(
         &mut self,
         var: String,
@@ -1057,6 +1098,7 @@ impl ComputeSubsetLowerer<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Lowers the more general FIR `ForLoop` shape.
     fn lower_for_loop(
         &mut self,
         var: String,
@@ -1091,6 +1133,7 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    /// Lowers a FIR `WhileLoop` into nested `block`/`loop` control flow.
     fn lower_while_loop(
         &mut self,
         cond: FirId,
@@ -1110,6 +1153,7 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    /// Lowers a store through one stack-local pointer alias.
     fn lower_store_table_stack(
         &mut self,
         name: &str,
@@ -1127,6 +1171,7 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    /// Lowers a scalar store into one struct/global runtime field.
     fn lower_store_var_struct(
         &mut self,
         name: &str,
@@ -1150,6 +1195,7 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    /// Lowers an assignment to a loop or stack local.
     fn lower_store_var_local(
         &mut self,
         name: &str,
@@ -1162,6 +1208,7 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    /// Lowers an indexed store into one struct/static table region.
     fn lower_store_table_struct(
         &mut self,
         name: &str,
@@ -1188,6 +1235,7 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    /// Lowers FIR `If`/`Control` statements to structured WASM control flow.
     fn lower_if_stmt(
         &mut self,
         cond: FirId,
@@ -1207,6 +1255,7 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    /// Dispatches FIR `Switch` lowering after resolving the condition type.
     fn lower_switch_stmt(
         &mut self,
         cond: FirId,
@@ -1250,6 +1299,7 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    /// Recursively lowers one FIR expression onto the WASM operand stack.
     fn lower_expr(&mut self, id: FirId, function: &mut Function) -> Result<(), WasmBackendError> {
         match match_fir(self.store, id) {
             FirMatch::Bool { value, .. } => {
@@ -1501,6 +1551,7 @@ impl ComputeSubsetLowerer<'_> {
         }
     }
 
+    /// Converts an element index expression into a byte offset.
     fn lower_index_offset(
         &mut self,
         index: FirId,
@@ -1516,6 +1567,7 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    /// Emits the zero/default literal for one local type.
     fn emit_default_value(
         &self,
         typ: &FirType,
@@ -1536,6 +1588,7 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    /// Resolves one named local allocated during subset lowering.
     fn local(&self, name: &str) -> Result<&WasmLocal, WasmBackendError> {
         self.locals.get(name).ok_or_else(|| {
             WasmBackendError::new(
@@ -1545,6 +1598,7 @@ impl ComputeSubsetLowerer<'_> {
         })
     }
 
+    /// Resolves one named runtime field from the computed memory layout.
     fn struct_field(&self, name: &str) -> Result<&FieldLayout, WasmBackendError> {
         self.memory_layout.field_offsets.get(name).ok_or_else(|| {
             WasmBackendError::new(
@@ -1554,6 +1608,7 @@ impl ComputeSubsetLowerer<'_> {
         })
     }
 
+    /// Emits an explicit numeric conversion when FIR and storage types differ.
     fn emit_cast_if_needed(
         &self,
         src: &FirType,
@@ -1584,6 +1639,8 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    /// Lowers a recognized math intrinsic, using native WASM opcodes when
+    /// available and host imports otherwise.
     fn lower_math_call(
         &mut self,
         math: FirMathOp,
@@ -1686,6 +1743,7 @@ impl ComputeSubsetLowerer<'_> {
         }
     }
 
+    /// Lowers backend-internal helper calls such as `max_i` / `min_i`.
     fn lower_internal_int_fun_call(
         &mut self,
         name: &str,
@@ -1745,6 +1803,7 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    /// Lowers a math intrinsic through the imported-helper path.
     fn lower_imported_math_call(
         &mut self,
         math: FirMathOp,
@@ -1764,6 +1823,7 @@ impl ComputeSubsetLowerer<'_> {
         self.lower_imported_call(&import, args, function)
     }
 
+    /// Emits one call to an already-registered imported host helper.
     fn lower_imported_call(
         &mut self,
         import: &WasmMathImport,
@@ -1802,6 +1862,8 @@ impl ComputeSubsetLowerer<'_> {
     }
 }
 
+/// Scans one lowered body for host helper imports that must be declared in the
+/// module import section.
 fn collect_math_imports(
     store: &FirStore,
     compute_body: Option<FirId>,
@@ -1815,6 +1877,7 @@ fn collect_math_imports(
     Ok(imports.into_iter().collect())
 }
 
+/// Finds the FIR body id for one named function declaration inside a module.
 fn find_function_body(store: &FirStore, function_items: &[FirId], name: &str) -> Option<FirId> {
     function_items
         .iter()
@@ -1829,6 +1892,7 @@ fn find_function_body(store: &FirStore, function_items: &[FirId], name: &str) ->
         })
 }
 
+/// Serializes FIR static tables into WASM data segments.
 fn static_table_segments(
     store: &FirStore,
     static_decls: FirId,
@@ -1868,6 +1932,7 @@ fn static_table_segments(
     Ok(segments)
 }
 
+/// Appends one scalar table initializer value to a raw data-segment buffer.
 fn append_static_scalar_bytes(
     store: &FirStore,
     value: FirId,
@@ -1907,6 +1972,8 @@ fn append_static_scalar_bytes(
     Ok(())
 }
 
+/// Recursive helper used by [`collect_math_imports`] to discover imported
+/// helpers in one FIR subtree.
 fn collect_math_imports_in_node(
     store: &FirStore,
     id: FirId,
@@ -1929,6 +1996,7 @@ fn collect_math_imports_in_node(
     Ok(())
 }
 
+/// Returns the direct child nodes visited by backend-local FIR traversals.
 fn fir_children(store: &FirStore, id: FirId) -> Vec<FirId> {
     match match_fir(store, id) {
         FirMatch::Block(items) => items,
@@ -1964,6 +2032,7 @@ fn fir_children(store: &FirStore, id: FirId) -> Vec<FirId> {
     }
 }
 
+/// Returns `true` when an intrinsic can map directly to a native WASM opcode.
 fn is_native_wasm_math(math: FirMathOp, typ: &FirType, options: &WasmOptions) -> bool {
     matches!(
         (math, wasm_val_type_for_fir(typ, options)),
@@ -1977,6 +2046,8 @@ fn is_native_wasm_math(math: FirMathOp, typ: &FirType, options: &WasmOptions) ->
     )
 }
 
+/// Maps one Faust math intrinsic to the host import expected by the standard
+/// JS/WASM runtime when no native WASM opcode exists.
 fn imported_math_signature(
     math: FirMathOp,
     typ: &FirType,
@@ -2129,6 +2200,10 @@ fn imported_math_signature(
     Ok(import)
 }
 
+/// Maps one foreign FIR helper call to the corresponding standard host import.
+///
+/// This covers helper names that appear in FIR exactly as C/C++ runtime names
+/// but are still expected to be provided by the surrounding Faust WASM host.
 fn imported_foreign_signature(
     name: &str,
     args: &[FirId],
@@ -2235,6 +2310,7 @@ fn imported_foreign_signature(
     Ok(import)
 }
 
+/// Converts one FIR scalar type to its emitted WASM stack type.
 fn wasm_val_type_for_fir(
     typ: &FirType,
     options: &WasmOptions,
@@ -2258,6 +2334,7 @@ fn wasm_val_type_for_fir(
     }
 }
 
+/// Returns the byte width of one scalar/table element type.
 fn elem_size_bytes(typ: &FirType, options: &WasmOptions) -> Result<i32, WasmBackendError> {
     match wasm_val_type_for_fir(typ, options)? {
         ValType::I32 | ValType::F32 => Ok(4),
@@ -2269,6 +2346,7 @@ fn elem_size_bytes(typ: &FirType, options: &WasmOptions) -> Result<i32, WasmBack
     }
 }
 
+/// Extracts the pointee type from a stack-local pointer alias.
 fn stack_alias_pointee(typ: &FirType) -> Result<FirType, WasmBackendError> {
     match typ {
         FirType::Ptr(inner) => Ok((**inner).clone()),
@@ -2279,6 +2357,7 @@ fn stack_alias_pointee(typ: &FirType) -> Result<FirType, WasmBackendError> {
     }
 }
 
+/// Returns the canonical WASM local index for function-argument tables.
 fn fun_arg_local_index(name: &str) -> u32 {
     match name {
         "inputs" => 2,
@@ -2287,6 +2366,7 @@ fn fun_arg_local_index(name: &str) -> u32 {
     }
 }
 
+/// Returns the scalar load instruction matching one FIR type.
 fn load_instruction_for_type(
     typ: &FirType,
     options: &WasmOptions,
@@ -2294,6 +2374,7 @@ fn load_instruction_for_type(
     load_instruction_for_valtype(wasm_val_type_for_fir(typ, options)?)
 }
 
+/// Returns the scalar store instruction matching one FIR type.
 fn store_instruction_for_type(
     typ: &FirType,
     options: &WasmOptions,
@@ -2301,6 +2382,7 @@ fn store_instruction_for_type(
     store_instruction_for_valtype(wasm_val_type_for_fir(typ, options)?)
 }
 
+/// Returns the scalar load instruction for one WASM value type.
 fn load_instruction_for_valtype(typ: ValType) -> Result<Instruction<'static>, WasmBackendError> {
     match typ {
         ValType::I32 => Ok(Instruction::I32Load(memarg(0))),
@@ -2314,6 +2396,7 @@ fn load_instruction_for_valtype(typ: ValType) -> Result<Instruction<'static>, Wa
     }
 }
 
+/// Returns the scalar store instruction for one WASM value type.
 fn store_instruction_for_valtype(typ: ValType) -> Result<Instruction<'static>, WasmBackendError> {
     match typ {
         ValType::I32 => Ok(Instruction::I32Store(memarg(0))),
@@ -2327,6 +2410,7 @@ fn store_instruction_for_valtype(typ: ValType) -> Result<Instruction<'static>, W
     }
 }
 
+/// Converts one computed field layout entry to its concrete storage type.
 fn wasm_val_type_for_field(field: &FieldLayout) -> ValType {
     match field.typ {
         layout::WasmValType::I32 => ValType::I32,
@@ -2335,6 +2419,10 @@ fn wasm_val_type_for_field(field: &FieldLayout) -> ValType {
     }
 }
 
+/// Reconstructs the FIR-side semantic type represented by one storage field.
+///
+/// This is mainly used when an expression must be cast between semantic FIR
+/// types and the physical storage type chosen by the runtime layout.
 fn field_fir_type(field: &FieldLayout, options: &WasmOptions) -> FirType {
     match field.typ {
         layout::WasmValType::I32 => FirType::Int32,
@@ -2349,6 +2437,7 @@ fn field_fir_type(field: &FieldLayout, options: &WasmOptions) -> FirType {
     }
 }
 
+/// Returns the arithmetic/comparison opcode for one FIR binary operator.
 fn binop_instruction(
     op: fir::FirBinOp,
     typ: &FirType,
@@ -2400,6 +2489,7 @@ fn binop_instruction(
     }
 }
 
+/// Returns `true` when the FIR binop is a comparison producing a condition.
 fn is_comparison_binop(op: fir::FirBinOp) -> bool {
     matches!(
         op,
@@ -2412,6 +2502,7 @@ fn is_comparison_binop(op: fir::FirBinOp) -> bool {
     )
 }
 
+/// Returns the equality opcode used by switch-case comparisons.
 fn switch_eq_instruction(typ: &FirType) -> Result<Instruction<'static>, WasmBackendError> {
     match typ {
         FirType::Int32 | FirType::Bool => Ok(Instruction::I32Eq),
@@ -2423,6 +2514,7 @@ fn switch_eq_instruction(typ: &FirType) -> Result<Instruction<'static>, WasmBack
     }
 }
 
+/// Emits one switch-case constant literal onto the operand stack.
 fn emit_switch_case_const(
     value: i64,
     typ: &FirType,

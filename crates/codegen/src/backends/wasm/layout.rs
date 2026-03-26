@@ -23,8 +23,14 @@ use fir::{AccessType, FirId, FirMatch, FirStore, FirType, match_fir};
 
 use super::{WasmBackendError, WasmBackendErrorCode, WasmOptions};
 
+/// WebAssembly linear-memory page size in bytes.
 const WASM_PAGE_BYTES: u32 = 65_536;
+/// Scratch capacity reserved per I/O channel before the embedded JSON segment.
+///
+/// This mirrors the current C++-parity sizing rule used by the Rust backend so
+/// host wrappers can place pointer tables and sample buffers after `json.size`.
 const IO_BUFFER_SCRATCH_SAMPLES: u32 = 8_192;
+/// Pointer width used by the MVP 32-bit WASM memory model.
 const WASM_PTR_BYTES: u32 = 4;
 
 /// Scalar value kinds used by the public WASM layout descriptor.
@@ -368,6 +374,10 @@ impl WasmMemoryLayout {
     }
 }
 
+/// Resolves one FIR node that must be a `Block` in module-layout positions.
+///
+/// The layout pass expects `dsp_struct`, `globals`, and `static_decls` to be
+/// normalized as FIR blocks before codegen begins.
 fn expect_block(store: &FirStore, id: FirId, label: &str) -> Result<Vec<FirId>, WasmBackendError> {
     match match_fir(store, id) {
         FirMatch::Block(items) => Ok(items),
@@ -378,6 +388,10 @@ fn expect_block(store: &FirStore, id: FirId, label: &str) -> Result<Vec<FirId>, 
     }
 }
 
+/// Returns the storage kind and aligned slot width used for one FIR field.
+///
+/// The returned byte width is widened to at least one audio slot so runtime
+/// offsets match the current Faust/C++ WASM alignment rule.
 fn fir_type_storage(typ: FirType, audio_slot: u32) -> Result<(WasmValType, u32), WasmBackendError> {
     let (val_type, native_size) = match typ {
         FirType::Bool | FirType::Int32 => (WasmValType::I32, 4),
@@ -403,6 +417,7 @@ fn fir_type_storage(typ: FirType, audio_slot: u32) -> Result<(WasmValType, u32),
     Ok((val_type, native_size.max(audio_slot)))
 }
 
+/// Aligns `value` upward to the next multiple of `align`.
 fn align_up(value: u32, align: u32) -> u32 {
     if align <= 1 {
         return value;
@@ -415,11 +430,16 @@ fn align_up(value: u32, align: u32) -> u32 {
     }
 }
 
+/// Converts a raw byte requirement into the page count used by the backend.
+///
+/// The Rust backend currently follows the same coarse sizing rule as the C++
+/// path: round up to the next power of two, then convert to 64 KiB pages.
 fn wasm_pages_required(total_bytes: u32) -> Result<u32, WasmBackendError> {
     let rounded = wasm_pow2limit(total_bytes.max(WASM_PAGE_BYTES))?;
     Ok(rounded / WASM_PAGE_BYTES)
 }
 
+/// Rounds a byte size up to the next power-of-two allocation bucket.
 fn wasm_pow2limit(value: u32) -> Result<u32, WasmBackendError> {
     if value <= 1 {
         return Ok(WASM_PAGE_BYTES);
