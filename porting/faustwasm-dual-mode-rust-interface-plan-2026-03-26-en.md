@@ -425,6 +425,8 @@ Deliverables:
 - compiler-module asset packaging/distribution plan
 - shared convergence to one JS factory representation
 - documented override mechanism for optional user-supplied import roots/assets
+- packaged internal mixer assets for the Rust polyphonic path when no compiler
+  filesystem is available
 
 Pass criteria:
 
@@ -435,6 +437,8 @@ Pass criteria:
 - validated end-to-end with a Rust-produced compiler module loaded from
   `faustwasm`, including visible UI controls in the returned companion JSON
 - validated end-to-end on at least one DSP importing `stdfaust.lib`
+- validated end-to-end on at least one polyphonic DSP using the packaged mixer
+  fallback instead of the historical compiler filesystem
 
 ### Phase 4: compatibility hardening
 
