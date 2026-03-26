@@ -1,8 +1,21 @@
 //! WASM linear-memory layout descriptors.
 //!
-//! This module implements the Step-2 memory-layout slice from the WASM backend
-//! plan: derive deterministic offsets from the FIR module shape before real
-//! instruction lowering.
+//! This module computes the linear-memory contract shared by:
+//! - generated WASM code,
+//! - companion JSON UI metadata,
+//! - host runtimes calling `getParamValue` / `setParamValue`.
+//!
+//! The key invariant is that exported JSON offsets are not abstract widget IDs:
+//! they are raw byte offsets into one contiguous runtime prefix. That prefix can
+//! contain, in order:
+//! - static tables,
+//! - mutable DSP/global fields,
+//! - the I/O zone / audio heap start,
+//! - the embedded JSON data segment after the runtime area.
+//!
+//! This matches the observable C++ WASM contract closely enough for web-facing
+//! runtimes such as `faustwasm`, which read widget `index` values from JSON and
+//! pass them back to exported parameter accessors.
 
 use std::collections::BTreeMap;
 
@@ -23,6 +36,8 @@ pub enum WasmValType {
 }
 
 /// One field offset/size entry inside the linear-memory layout.
+///
+/// `offset` is always expressed relative to the start of the runtime prefix.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldLayout {
     pub offset: u32,
@@ -62,7 +77,7 @@ pub struct WasmMemoryLayout {
 }
 
 impl WasmMemoryLayout {
-    /// Creates the placeholder layout used by the Step-1 scaffold.
+    /// Creates the placeholder layout used by the earliest scaffold path.
     #[must_use]
     pub fn scaffold(pages: u32, total_bytes: u32) -> Self {
         Self {
@@ -77,6 +92,16 @@ impl WasmMemoryLayout {
     }
 
     /// Derives the current WASM linear-memory layout from a FIR module.
+    ///
+    /// Layout policy:
+    /// - static tables are allocated first,
+    /// - mutable struct/global fields follow,
+    /// - `struct_size` therefore means "runtime prefix size" rather than
+    ///   "mutable struct size only",
+    /// - `io_zone_offset` is the first byte available to host-managed audio
+    ///   buffers,
+    /// - `json_offset` is placed after the runtime area so the embedded JSON
+    ///   data segment cannot alias DSP state.
     pub fn from_module(
         store: &FirStore,
         module: FirId,

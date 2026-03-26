@@ -4,13 +4,42 @@
 //! - `compiler/generator/wasm/wasm_code_container.cpp`
 //! - `compiler/generator/wasm/wasm_binary.hh`
 //! - `compiler/generator/wasm/wasm_instructions.hh`
+//! - `compiler/generator/code_container.hh` (`CodeContainer::generateJSON`)
+//!
+//! # Current role
+//! This backend is the Rust port of Faust's production WASM path:
+//! - lower one FIR `Module` into one valid `.wasm` binary,
+//! - emit the companion JSON metadata consumed by WebAudio/Web runtimes,
+//! - preserve the canonical Faust DSP export contract (`init`, `compute`,
+//!   `getParamValue`, `setParamValue`, `instance*`, `getNumInputs/Outputs`).
+//!
+//! # Runtime contract
+//! The emitted `.wasm` and companion JSON must be treated as one matched pair.
+//! Higher-level runtimes such as `faustwasm` rely on both artifacts:
+//! - JSON `ui[*].index` values are raw byte offsets inside the WASM runtime
+//!   prefix described by [`layout::WasmMemoryLayout`],
+//! - `getParamValue(dsp, index)` and `setParamValue(dsp, index, value)` consume
+//!   those exact offsets,
+//! - JSON `size` marks the start of the audio heap / I/O zone, not merely the
+//!   size of mutable DSP fields,
+//! - JSON `compile_options` only advertises options that are actually supported
+//!   by the Rust CLI/backend path.
+//!
+//! Mixing a Rust-generated `.wasm` with a C++-generated JSON companion, or the
+//! reverse, is not a supported configuration unless the two artifacts are known
+//! to be ABI-identical.
 //!
 //! # Current slice
-//! - Step-1 scaffold for the WASM backend plan.
-//! - Emits a valid `.wasm` module skeleton with the canonical Faust DSP export
-//!   names, memory section/import, and JSON metadata data segment.
-//! - Most function bodies started as trivial placeholders; the current step now
-//!   lowers a narrow but real `compute` subset for mono passthrough-style FIR.
+//! The backend now covers real production-facing pieces:
+//! - deterministic runtime memory layout,
+//! - embedded companion JSON data segment,
+//! - UI metadata extraction with runtime offsets,
+//! - lifecycle methods (`init`, `instanceInit`, `instanceConstants`,
+//!   `instanceResetUserInterface`, `instanceClear`),
+//! - a partial but growing `compute` lowering subset.
+//!
+//! Unsupported FIR shapes still fail fast with typed backend diagnostics rather
+//! than silently emitting a lossy module.
 
 use fir::{AccessType, FirId, FirMatch, FirMathOp, FirStore, FirType, match_fir};
 use std::collections::HashMap;
@@ -34,6 +63,10 @@ pub const BACKEND_NAME: &str = "wasm";
 const DEFAULT_MEMORY_PAGES: u32 = 1;
 
 /// WASM backend compilation options.
+///
+/// Mapping status: `adapted`.
+/// These options describe the Rust emitter/runtime surface, not the full set of
+/// historical C++ CLI flags.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WasmOptions {
     /// Emit `f64` (double) instead of `f32` for parameter/value APIs.
@@ -63,6 +96,9 @@ impl Default for WasmOptions {
 /// - `CodeContainer::generateJSON(...)` in `compiler/generator/code_container.hh`
 /// - `global::printCompilationOptions1()`
 /// - `SourceReader::listLibraryFiles()`
+///
+/// This struct intentionally keeps only metadata that is externally observable
+/// in the companion JSON. It is not a general backend configuration object.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WasmJsonContext {
     pub filename: Option<String>,
@@ -73,7 +109,10 @@ pub struct WasmJsonContext {
     pub top_level_meta: Vec<JsonMetaEntry>,
 }
 
-/// Compiled WASM module output.
+/// Compiled WASM backend output.
+///
+/// The `wasm_binary`, `dsp_json`, and [`WasmModule::memory_layout`] fields
+/// describe the same module instance and must remain coherent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WasmModule {
     /// WASM binary (valid `.wasm` file).
@@ -208,7 +247,11 @@ struct WasmMathImport {
 
 type WasmJsonDescription = JsonDescription;
 
-/// Emits one valid WASM scaffold module for a FIR `Module` root.
+/// Emits one valid WASM module for a FIR `Module` root.
+///
+/// The returned [`WasmModule`] contains both the binary module and its matched
+/// companion JSON. Callers that persist the `.wasm` should also persist the
+/// `.json` emitted from the same invocation.
 pub fn generate_wasm_module(
     store: &FirStore,
     module: FirId,
@@ -217,7 +260,12 @@ pub fn generate_wasm_module(
     generate_wasm_module_with_context(store, module, options, &WasmJsonContext::default())
 }
 
-/// Emits one valid WASM module for a FIR `Module` root with explicit JSON context.
+/// Emits one valid WASM module for a FIR `Module` root with explicit JSON
+/// context.
+///
+/// Use this entry point when the caller already knows source-level provenance
+/// that must appear in the companion JSON (`filename`, `compile_options`,
+/// library/include lists, top-level metadata).
 pub fn generate_wasm_module_with_context(
     store: &FirStore,
     module: FirId,
