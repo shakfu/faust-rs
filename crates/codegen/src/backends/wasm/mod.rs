@@ -219,17 +219,6 @@ pub fn generate_wasm_module(
         ));
     }
 
-    let pages = if options.memory_pages == 0 {
-        DEFAULT_MEMORY_PAGES
-    } else {
-        options.memory_pages
-    };
-    let total_bytes = pages.checked_mul(65_536).ok_or_else(|| {
-        WasmBackendError::new(
-            WasmBackendErrorCode::MemoryLayoutOverflow,
-            format!("WASM page count {pages} overflows 32-bit byte accounting"),
-        )
-    })?;
     let real_ty = if options.double_precision {
         ValType::F64
     } else {
@@ -237,7 +226,13 @@ pub fn generate_wasm_module(
     };
 
     let dsp_json = render_scaffold_json(name, num_inputs, num_outputs, options);
-    let memory_layout = WasmMemoryLayout::scaffold(pages, total_bytes);
+    let mut memory_layout = WasmMemoryLayout::from_module(store, module, options, dsp_json.len())?;
+    let pages = if options.memory_pages == 0 {
+        memory_layout.pages.max(DEFAULT_MEMORY_PAGES)
+    } else {
+        options.memory_pages
+    };
+    memory_layout.pages = pages;
 
     let mut wasm = Module::new();
 
