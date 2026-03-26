@@ -129,12 +129,12 @@ impl LoopDetector {
             call_stack: Vec::new(),
             max_depth: 1024,
             cancel: Arc::new(AtomicBool::new(false)),
-            automaton_cache: crate::pattern_matcher::AutomatonCache::default(),
+            automaton_cache: crate::pattern_matcher::AutomatonCache::new(),
             pm_store: Vec::new(),
             closure_store: Vec::new(),
             next_slot_id: 0,
-            symbolic_box_cache: ahash::HashMap::default(),
-            eval_cache: ahash::HashMap::default(),
+            symbolic_box_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
+            eval_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
         }
     }
 
@@ -153,12 +153,12 @@ impl LoopDetector {
             call_stack: Vec::new(),
             max_depth: 1024,
             cancel,
-            automaton_cache: crate::pattern_matcher::AutomatonCache::default(),
+            automaton_cache: crate::pattern_matcher::AutomatonCache::new(),
             pm_store: Vec::new(),
             closure_store: Vec::new(),
             next_slot_id: 0,
-            symbolic_box_cache: ahash::HashMap::default(),
-            eval_cache: ahash::HashMap::default(),
+            symbolic_box_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
+            eval_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
         }
     }
 
@@ -172,12 +172,12 @@ impl LoopDetector {
             call_stack: Vec::new(),
             max_depth,
             cancel: Arc::new(AtomicBool::new(false)),
-            automaton_cache: crate::pattern_matcher::AutomatonCache::default(),
+            automaton_cache: crate::pattern_matcher::AutomatonCache::new(),
             pm_store: Vec::new(),
             closure_store: Vec::new(),
             next_slot_id: 0,
-            symbolic_box_cache: ahash::HashMap::default(),
-            eval_cache: ahash::HashMap::default(),
+            symbolic_box_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
+            eval_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
         }
     }
 

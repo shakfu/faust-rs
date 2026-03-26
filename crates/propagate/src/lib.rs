@@ -247,7 +247,7 @@ enum FlatNodeKind {
 /// the same subtrees at every parent decode.
 pub fn try_build_flat_box(arena: &TreeArena, root: BoxId) -> Result<FlatBoxId, FlatBoxBuildError> {
     let flat = FlatBoxId::from_tree_id(root);
-    let mut visited = AHashSet::default();
+    let mut visited = AHashSet::new();
     validate_flat_box_recursive(arena, flat, &mut visited)?;
     Ok(flat)
 }
@@ -1009,7 +1009,7 @@ pub fn propagate_typed_with_ui_options(
     ui_options: &PropagateUiOptions,
 ) -> Result<PropagateOutput, PropagateError> {
     let ui = build_ui_program(arena, box_tree, ui_options);
-    let mut slot_env = SlotEnv::default();
+    let mut slot_env = SlotEnv::new();
     let mut memo = PropagateMemo::default();
     let mut ctx = PropagateContext {
         cache,
@@ -1067,8 +1067,8 @@ impl UiCollector {
         Self {
             builder: UiProgramBuilder::new(),
             controls: Vec::new(),
-            control_ids: ControlIds::default(),
-            visited: AHashMap::default(),
+            control_ids: ControlIds::new(),
+            visited: AHashMap::new(),
         }
     }
 
@@ -2583,10 +2583,18 @@ fn make_mem_sig_proj_list(arena: &mut TreeArena, n: usize) -> Result<Vec<SigId>,
 /// De Bruijn wrappers can revisit the same subtree many times from different
 /// composition paths. Caching by `(TreeId, threshold)` and `TreeId` keeps the
 /// operational lowering stable while avoiding repeated full-subtree rebuilds.
-#[derive(Default)]
 struct PropagateMemo {
     liftn: AHashMap<(TreeId, i64), TreeId>,
     aperture: AHashMap<TreeId, i64>,
+}
+
+impl Default for PropagateMemo {
+    fn default() -> Self {
+        Self {
+            liftn: AHashMap::new(),
+            aperture: AHashMap::new(),
+        }
+    }
 }
 
 /// Internal mutable context threaded through one propagation traversal.

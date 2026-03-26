@@ -137,7 +137,13 @@ pub struct WasmArtifactRequest {
 
 impl WasmArtifactRequest {
     /// Builds a source-backed request with default import search paths, default
-    /// WASM options, and the production default lowering lane.
+    /// WASM options, and the production JSON/WASM lowering lane.
+    ///
+    /// Mapping status: `adapted`.
+    /// The artifact-oriented faustwasm service needs the full FIR module shape
+    /// (`metadata`, `buildUserInterface`, lifecycle methods), so its default
+    /// lane follows the transform fast lane rather than the temporary legacy
+    /// summary bridge.
     #[must_use]
     pub fn new(source_name: impl Into<String>, source: impl Into<String>) -> Self {
         Self {
@@ -145,7 +151,7 @@ impl WasmArtifactRequest {
             source: source.into(),
             import_dirs: Vec::new(),
             wasm_options: WasmOptions::default(),
-            lane: SignalFirLane::LegacyBridge,
+            lane: SignalFirLane::TransformFastLane,
         }
     }
 }
@@ -640,7 +646,7 @@ impl Compiler {
             source_name,
             source,
             options,
-            SignalFirLane::LegacyBridge,
+            SignalFirLane::TransformFastLane,
         )
     }
 
@@ -733,7 +739,7 @@ impl Compiler {
         source_name: &str,
         source: &str,
     ) -> Result<String, CompilerError> {
-        self.compile_source_to_json_with_lane(source_name, source, SignalFirLane::LegacyBridge)
+        self.compile_source_to_json_with_lane(source_name, source, SignalFirLane::TransformFastLane)
     }
 
     /// Parses + evaluates + propagates one source, then emits strict C++-style JSON
@@ -876,7 +882,7 @@ impl Compiler {
             path,
             search_paths,
             options,
-            SignalFirLane::LegacyBridge,
+            SignalFirLane::TransformFastLane,
         )
     }
 
@@ -1071,7 +1077,7 @@ impl Compiler {
         path: &Path,
         options: &WasmOptions,
     ) -> Result<WasmModule, CompilerError> {
-        self.compile_file_default_to_wasm_with_lane(path, options, SignalFirLane::LegacyBridge)
+        self.compile_file_default_to_wasm_with_lane(path, options, SignalFirLane::TransformFastLane)
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -1144,7 +1150,7 @@ impl Compiler {
     /// Parses + evaluates + propagates one file with default import search path,
     /// then emits strict C++-style JSON.
     pub fn compile_file_default_to_json(&self, path: &Path) -> Result<String, CompilerError> {
-        self.compile_file_default_to_json_with_lane(path, SignalFirLane::LegacyBridge)
+        self.compile_file_default_to_json_with_lane(path, SignalFirLane::TransformFastLane)
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -3559,9 +3565,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        Compiler, CompilerError, ExpandDspRequest, GenerateAuxFilesRequest, WasmArtifactRequest,
-        build_import_search_paths, compile_options_json_string, default_import_search_paths,
-        golden_snapshot, make_compute_fir_signature, resolve_module_name, resolve_ui_root_label,
+        Compiler, CompilerError, ExpandDspRequest, GenerateAuxFilesRequest, SignalFirLane,
+        WasmArtifactRequest, build_import_search_paths, compile_options_json_string,
+        default_import_search_paths, golden_snapshot, make_compute_fir_signature,
+        resolve_module_name, resolve_ui_root_label,
     };
     use codegen::backends::wasm::WasmOptions;
 
@@ -3856,6 +3863,12 @@ mod tests {
     }
 
     #[test]
+    fn wasm_artifact_request_defaults_to_transform_fastlane() {
+        let request = WasmArtifactRequest::new("zero.dsp", "process = 0;");
+        assert_eq!(request.lane, SignalFirLane::TransformFastLane);
+    }
+
+    #[test]
     fn compiler_compile_wasm_artifact_supports_memory_source_import_dirs() {
         let root = temp_root("wasm_artifact_memory_import_dirs");
         let child = root.join("child.lib");
@@ -3872,6 +3885,64 @@ mod tests {
         assert!(out.wasm_bytes.starts_with(b"\0asm"));
         assert!(out.dsp_json.contains("child.lib"));
         assert!(out.dsp_json.contains(&root.display().to_string()));
+    }
+
+    #[test]
+    fn compiler_compile_wasm_artifact_keeps_ui_for_memory_source_without_extension() {
+        let compiler = Compiler::new();
+        let source = "process = *(hslider(\"gain\", 0.5, 0.0, 1.0, 0.01));";
+        let strict_json = compiler
+            .compile_source_to_json("gain", source)
+            .expect("strict JSON should preserve UI controls");
+        let request = WasmArtifactRequest::new("gain", source);
+        let out = compiler
+            .compile_wasm_artifact(&request)
+            .expect("artifact compile should preserve UI controls");
+
+        assert!(strict_json.contains("\"filename\":\"gain\""));
+        assert!(strict_json.contains("\"label\":\"gain\""));
+        assert!(strict_json.contains("\"type\":\"hslider\""));
+        assert!(strict_json.contains("\"address\":\"/gain/gain\""));
+        assert!(out.wasm_bytes.starts_with(b"\0asm"));
+        assert!(out.dsp_json.contains("\"filename\":\"gain\""));
+        assert!(out.dsp_json.contains("\"label\":\"gain\""));
+        assert!(out.dsp_json.contains("\"type\":\"hslider\""));
+        assert!(out.dsp_json.contains("\"address\":\"/gain/gain\""));
+    }
+
+    #[test]
+    fn compiler_memory_eval_source_context_preserves_ui_widgets() {
+        let compiler = Compiler::new();
+        let source = "process = *(hslider(\"gain\", 0.5, 0.0, 1.0, 0.01));";
+        let store_without_ctx = parser::CompilationMetadataStore::new("gain");
+        let store_with_ctx = parser::CompilationMetadataStore::new("gain");
+        let output_without_ctx =
+            parser::parse_program_with_metadata(source, "gain", store_without_ctx.clone());
+        let output_with_ctx =
+            parser::parse_program_with_metadata(source, "gain", store_with_ctx.clone());
+
+        let without_ctx = compiler
+            .pipeline_to_signals("gain", output_without_ctx, None)
+            .expect("pipeline without source context should succeed");
+        let with_ctx = compiler
+            .pipeline_to_signals(
+                "gain",
+                output_with_ctx,
+                Some(eval::EvalSourceContext::memory_with_metadata(
+                    store_with_ctx,
+                )),
+            )
+            .expect("pipeline with memory source context should succeed");
+
+        assert!(
+            !without_ctx.ui.controls.is_empty(),
+            "pipeline without source context should preserve widget UI"
+        );
+        assert_eq!(
+            with_ctx.ui.controls.len(),
+            without_ctx.ui.controls.len(),
+            "memory source context should not change widget UI extraction"
+        );
     }
 
     #[test]

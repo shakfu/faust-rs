@@ -1046,7 +1046,7 @@ fn eval_route_value(
     let outs_node = eval_box_to_int_node(arena, eval_outs).unwrap_or(eval_outs);
     let routes_node = a2sb(arena, eval_routes, loop_detector).unwrap_or(eval_routes);
     let spec_node = eval_box_to_int_list_node(arena, routes_node).unwrap_or_else(|| {
-        let mut cache = ahash::HashMap::default();
+        let mut cache = ahash::HashMap::with_hasher(ahash::RandomState::new());
         let simplified_routes = box_simplification(arena, &mut cache, routes_node);
         normalize_route_spec(arena, simplified_routes)
     });
@@ -1735,7 +1735,7 @@ fn eval_box_to_scalar_signal(
             reason: "expression is not a constant scalar of type (0 -> 1)",
         });
     }
-    let mut cache = ArityCache::default();
+    let mut cache = ArityCache::new();
     let flat =
         try_build_flat_box(arena, lowered).map_err(|_| EvalError::InvalidLabelInterpolation {
             node: expr,
@@ -1810,7 +1810,7 @@ enum NumericLit {
 /// `numericBoxSimplification` in `compiler/evaluate/eval.cpp`.
 fn propagate_box_and_simplify(arena: &mut TreeArena, box_id: TreeId) -> Option<SigId> {
     let flat = try_build_flat_box(arena, box_id).ok()?;
-    let mut cache = ArityCache::default();
+    let mut cache = ArityCache::new();
     let signals = propagate_typed(arena, flat, &[], &mut cache).ok()?;
     let [sig] = signals.as_slice() else {
         return None;
@@ -1931,7 +1931,7 @@ fn eval_box_to_int_list_node(arena: &mut TreeArena, box_id: TreeId) -> Option<Tr
         return None;
     }
     let flat = try_build_flat_box(arena, box_id).ok()?;
-    let mut cache = ArityCache::default();
+    let mut cache = ArityCache::new();
     let signals = propagate_typed(arena, flat, &[], &mut cache).ok()?;
     if signals.len() != outputs {
         return None;
@@ -2066,7 +2066,7 @@ fn try_fold_seq_numeric(arena: &mut TreeArena, a1: TreeId, a2: TreeId) -> Option
     // not collapse to the first propagated constant.
     let seq = BoxBuilder::new(arena).seq(a1, a2);
     let flat = try_build_flat_box(arena, seq).ok()?;
-    let mut cache = ArityCache::default();
+    let mut cache = ArityCache::new();
     let signals = propagate_typed(arena, flat, &[], &mut cache).ok()?;
     let [sig] = signals.as_slice() else {
         return None;
@@ -3244,7 +3244,7 @@ fn apply_pattern_matcher_value(
     // this, selector expressions like `((l != 0) & ...) * 2` remain residual
     // box trees and only catch-all rules match.
     let arg = {
-        let mut cache = ahash::HashMap::default();
+        let mut cache = ahash::HashMap::with_hasher(ahash::RandomState::new());
         box_simplification(arena, &mut cache, raw_arg)
     };
     let (new_state, _) =
@@ -4512,7 +4512,7 @@ mod simplify_helpers_tests {
     fn box_simplification_int_literal_passthrough() {
         let mut arena = TreeArena::default();
         let five = BoxBuilder::new(&mut arena).int(5);
-        let mut cache = ahash::HashMap::default();
+        let mut cache = ahash::HashMap::with_hasher(ahash::RandomState::new());
         let result = box_simplification(&mut arena, &mut cache, five);
         assert!(matches!(match_box(&arena, result), BoxMatch::Int(5)));
     }
@@ -4522,7 +4522,7 @@ mod simplify_helpers_tests {
     fn box_simplification_folds_arithmetic() {
         let mut arena = TreeArena::default();
         let expr = make_int_add(&mut arena, 2, 3);
-        let mut cache = ahash::HashMap::default();
+        let mut cache = ahash::HashMap::with_hasher(ahash::RandomState::new());
         let result = box_simplification(&mut arena, &mut cache, expr);
         assert!(
             matches!(match_box(&arena, result), BoxMatch::Int(5)),
@@ -4535,7 +4535,7 @@ mod simplify_helpers_tests {
     fn box_simplification_wire_passthrough() {
         let mut arena = TreeArena::default();
         let wire = BoxBuilder::new(&mut arena).wire();
-        let mut cache = ahash::HashMap::default();
+        let mut cache = ahash::HashMap::with_hasher(ahash::RandomState::new());
         let result = box_simplification(&mut arena, &mut cache, wire);
         assert!(matches!(match_box(&arena, result), BoxMatch::Wire));
     }

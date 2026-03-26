@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-ahash = "0.8"
+ahash = { version = "0.8", default-features = false, features = ["std"] }
 boxes = { path = "../boxes" }
 errors = { path = "../errors" }
 normalize = { path = "../normalize" }

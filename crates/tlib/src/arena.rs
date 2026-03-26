@@ -157,10 +157,19 @@ struct NodeKey {
 /// - **tag_registry**: interns IR node-type tags (`"ADD"`, `"SEQ"`, …) for `NodeKind::Tag(u32)`.
 /// - **symbol_interner**: interns user-defined Faust identifiers (`"process"`, `"f"`, …) for
 ///   O(1) evaluator environment lookups.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct SymbolTable {
     to_id: AHashMap<Arc<str>, u32>,
     to_str: Vec<Arc<str>>,
+}
+
+impl Default for SymbolTable {
+    fn default() -> Self {
+        Self {
+            to_id: AHashMap::new(),
+            to_str: Vec::new(),
+        }
+    }
 }
 
 impl SymbolTable {

@@ -26,6 +26,7 @@ pub mod c;
 pub mod cmajor;
 pub mod codebox;
 pub mod cpp;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod cranelift;
 pub mod csharp;
 pub mod dlang;

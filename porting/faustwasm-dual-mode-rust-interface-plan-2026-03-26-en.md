@@ -1,7 +1,7 @@
 # `faustwasm` Dual-Mode Rust Interface Plan
 
 **Date:** 2026-03-26
-**Status:** Planning
+**Status:** In progress
 **Target repos:** `faust-rs`, `faustwasm`
 **Target crates:** `compiler`, `codegen`, `wasm-ffi` (new, proposed)
 **C++ provenance:** `compiler/generator/wasm/`, `compiler/generator/wasm/bindings/`
@@ -364,6 +364,8 @@ Pass criteria:
 - no explicit factory pointer lifetime is required in the public API
 - the Rust compiler module can be instantiated directly with
   `WebAssembly.instantiate(...)`
+- JSON/WASM artifact requests default to the transform fast lane so the
+  returned FIR module keeps `metadata` and `buildUserInterface`
 
 ### Phase 3: `faustwasm` integration
 
@@ -382,6 +384,8 @@ Pass criteria:
 - `faustwasm` can load the Rust compiler module as a first-class alternative to
   the historical C++/Emscripten compiler package
 - precompiled artifact mode still works unchanged at the product level
+- validated end-to-end with a Rust-produced compiler module loaded from
+  `faustwasm`, including visible UI controls in the returned companion JSON
 
 ### Phase 4: compatibility hardening
 
