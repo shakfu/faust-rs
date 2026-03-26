@@ -107,6 +107,77 @@ pub struct FirCompileOutput {
     pub module: FirId,
 }
 
+/// Request payload for the artifact-centric WASM compile service used by the
+/// planned `faustwasm` Rust integration.
+///
+/// # Role
+/// This request intentionally avoids the historical C++ `cfactory` model.
+/// Callers provide one self-contained compilation request and receive one owned
+/// [`WasmArtifactBundle`] back. JS/host-side caches can then own the resulting
+/// `{ wasm, json }` pair directly.
+///
+/// # Mapping status
+/// `adapted` relative to the C++ `createDSPFactory(...)` entry point:
+/// - preserved semantics: DSP name/source, WASM backend options, and
+///   signal->FIR lane selection;
+/// - intentionally omitted: factory pointer lifetime and explicit deletion.
+#[derive(Debug, Clone)]
+pub struct WasmArtifactRequest {
+    /// Logical source name reported in diagnostics and JSON provenance.
+    pub source_name: String,
+    /// Faust DSP source text to compile.
+    pub source: String,
+    /// WASM backend configuration (`-double`, memory model, etc.).
+    pub wasm_options: WasmOptions,
+    /// Signal->FIR lowering lane used before WASM code generation.
+    pub lane: SignalFirLane,
+}
+
+impl WasmArtifactRequest {
+    /// Builds a source-backed request with default import search paths, default
+    /// WASM options, and the production default lowering lane.
+    #[must_use]
+    pub fn new(source_name: impl Into<String>, source: impl Into<String>) -> Self {
+        Self {
+            source_name: source_name.into(),
+            source: source.into(),
+            wasm_options: WasmOptions::default(),
+            lane: SignalFirLane::LegacyBridge,
+        }
+    }
+}
+
+/// Owned `{ wasm, json }` bundle returned by the Rust-side WASM compile service.
+///
+/// This is the first Phase 1 artifact contract from
+/// `porting/faustwasm-dual-mode-rust-interface-plan-2026-03-26-en.md`.
+/// The bundle is designed to be consumed directly by a future JS/WASM binding
+/// layer or by Rust-native tests without any factory-pointer semantics.
+///
+/// # ABI contract
+/// - [`Self::wasm_bytes`] and [`Self::dsp_json`] are a matched pair and must be
+///   consumed together.
+/// - [`Self::compile_options`] mirrors the JSON `compile_options` field so a
+///   binding layer does not need to re-parse the JSON merely to discover the
+///   emitted float/backend mode.
+///
+/// # Mapping status
+/// `adapted` relative to the C++ `FaustWasm { data, json, ... }` result:
+/// - preserved semantics: owned WASM bytes plus companion JSON;
+/// - adapted: compile provenance is exposed as a dedicated field in addition to
+///   the JSON payload;
+/// - deferred: warnings and aux files until the corresponding Rust services are
+///   ported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmArtifactBundle {
+    /// Binary WebAssembly module bytes.
+    pub wasm_bytes: Vec<u8>,
+    /// Companion Faust JSON description for the same module.
+    pub dsp_json: String,
+    /// High-level compilation provenance mirrored from the JSON payload.
+    pub compile_options: String,
+}
+
 /// FIR verifier configuration used at the compiler facade / CLI integration layer.
 ///
 /// The facade keeps verifier policy explicit because different workflows need
@@ -156,6 +227,16 @@ pub enum SignalFirLane {
     LegacyBridge,
     /// Experimental lowering lane owned by `crates/transform`.
     TransformFastLane,
+}
+
+impl WasmArtifactBundle {
+    fn from_wasm_module(module: WasmModule, compile_options: String) -> Self {
+        Self {
+            wasm_bytes: module.wasm_binary,
+            dsp_json: module.dsp_json,
+            compile_options,
+        }
+    }
 }
 
 impl Compiler {
@@ -467,13 +548,41 @@ impl Compiler {
         let lowered =
             lower_signals_to_fir(source_name, &signals, lane, self.fir_verify, self.real_type)
                 .map_err(|error| lower_fir_error_to_compiler(source_name, error))?;
-        let json_context =
-            wasm_json_context_for_memory_source(source_name, &signals, options.double_precision);
+        let json_context = wasm_json_context_for_memory_source(
+            source_name,
+            &signals,
+            compile_options_json_string(Some("wasm"), options.double_precision),
+        );
         generate_wasm_module_with_context(&lowered.store, lowered.module, options, &json_context)
             .map_err(|error| CompilerError::CodegenWasm {
                 source: source_name.into(),
                 error,
             })
+    }
+
+    /// Compiles one in-memory DSP source into an owned artifact bundle
+    /// containing both the WASM bytes and the companion JSON.
+    ///
+    /// This is the pure-Rust compile-service entry point intended for the
+    /// future `faustwasm` embedded-compiler mode. The returned
+    /// [`WasmArtifactBundle`] avoids any explicit compiler-side object lifetime
+    /// and can be cached directly by higher-level hosts.
+    pub fn compile_wasm_artifact(
+        &self,
+        request: &WasmArtifactRequest,
+    ) -> Result<WasmArtifactBundle, CompilerError> {
+        let compile_options =
+            compile_options_json_string(Some("wasm"), request.wasm_options.double_precision);
+        let module = self.compile_source_to_wasm_with_lane(
+            &request.source_name,
+            &request.source,
+            &request.wasm_options,
+            request.lane,
+        )?;
+        Ok(WasmArtifactBundle::from_wasm_module(
+            module,
+            compile_options,
+        ))
     }
 
     /// Parses + evaluates + propagates one source, then emits strict C++-style JSON.
@@ -493,6 +602,23 @@ impl Compiler {
         source: &str,
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
+        self.compile_source_to_json_with_lane_and_compile_options(
+            source_name,
+            source,
+            lane,
+            compile_options_json_string(None, self.real_type == RealType::Float64),
+        )
+    }
+
+    /// Parses + evaluates + propagates one source, then emits strict C++-style JSON
+    /// through the selected signal->FIR lane with explicit `compile_options`.
+    pub fn compile_source_to_json_with_lane_and_compile_options(
+        &self,
+        source_name: &str,
+        source: &str,
+        lane: SignalFirLane,
+        compile_options: String,
+    ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
         let lowered =
             lower_signals_to_fir(source_name, &signals, lane, self.fir_verify, self.real_type)
@@ -500,11 +626,14 @@ impl Compiler {
         let json = build_strict_json_description(
             &lowered.store,
             lowered.module,
-            source_name_to_filename(source_name),
-            Vec::new(),
-            Vec::new(),
-            json_meta_entries_from_snapshot(&signals.compilation_metadata),
-            self.real_type == RealType::Float64,
+            StrictJsonContext {
+                filename: source_name_to_filename(source_name),
+                include_pathnames: Vec::new(),
+                library_list: Vec::new(),
+                top_level_meta: json_meta_entries_from_snapshot(&signals.compilation_metadata),
+                compile_options,
+                double_precision: self.real_type == RealType::Float64,
+            },
         )
         .map_err(|error| CompilerError::CodegenWasm {
             source: source_name.into(),
@@ -623,13 +752,54 @@ impl Compiler {
         let lowered =
             lower_signals_to_fir(&source, &signals, lane, self.fir_verify, self.real_type)
                 .map_err(|error| lower_fir_error_to_compiler(&source, error))?;
-        let json_context =
-            wasm_json_context_for_file(path, search_paths, &signals, options.double_precision);
+        let json_context = wasm_json_context_for_file(
+            path,
+            search_paths,
+            &signals,
+            compile_options_json_string(Some("wasm"), options.double_precision),
+        );
         generate_wasm_module_with_context(&lowered.store, lowered.module, options, &json_context)
             .map_err(|error| CompilerError::CodegenWasm {
                 source: source.into(),
                 error,
             })
+    }
+
+    /// Compiles one file-backed DSP source into an owned artifact bundle.
+    ///
+    /// Compared with [`Self::compile_file_to_wasm_with_lane`], this packages the
+    /// result in the artifact-centric shape expected by the `faustwasm`
+    /// dual-mode integration plan, so downstream code can treat compile mode
+    /// and precompiled-artifact mode uniformly.
+    pub fn compile_file_to_wasm_artifact_with_lane(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        options: &WasmOptions,
+        lane: SignalFirLane,
+    ) -> Result<WasmArtifactBundle, CompilerError> {
+        let compile_options = compile_options_json_string(Some("wasm"), options.double_precision);
+        let module = self.compile_file_to_wasm_with_lane(path, search_paths, options, lane)?;
+        Ok(WasmArtifactBundle::from_wasm_module(
+            module,
+            compile_options,
+        ))
+    }
+
+    /// Compiles one file-backed DSP source into an owned artifact bundle using
+    /// the production default signal->FIR lane.
+    pub fn compile_file_to_wasm_artifact(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        options: &WasmOptions,
+    ) -> Result<WasmArtifactBundle, CompilerError> {
+        self.compile_file_to_wasm_artifact_with_lane(
+            path,
+            search_paths,
+            options,
+            SignalFirLane::LegacyBridge,
+        )
     }
 
     /// Parses + evaluates + propagates one file, then emits strict C++-style JSON.
@@ -638,6 +808,23 @@ impl Compiler {
         path: &Path,
         search_paths: &[PathBuf],
         lane: SignalFirLane,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_to_json_with_compile_options(
+            path,
+            search_paths,
+            lane,
+            compile_options_json_string(None, self.real_type == RealType::Float64),
+        )
+    }
+
+    /// Parses + evaluates + propagates one file, then emits strict C++-style JSON
+    /// with explicit `compile_options` provenance.
+    pub fn compile_file_to_json_with_compile_options(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        lane: SignalFirLane,
+        compile_options: String,
     ) -> Result<String, CompilerError> {
         let source = path.display().to_string();
         let signals = self.compile_file_to_signals(path, search_paths)?;
@@ -660,17 +847,21 @@ impl Compiler {
         let json = build_strict_json_description(
             &lowered.store,
             lowered.module,
-            path.file_name()
-                .and_then(std::ffi::OsStr::to_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
-            merge_import_search_paths(path, search_paths)
-                .into_iter()
-                .map(|dir| dir.to_string_lossy().into_owned())
-                .collect(),
-            library_list,
-            json_meta_entries_from_snapshot(&signals.compilation_metadata),
-            self.real_type == RealType::Float64,
+            StrictJsonContext {
+                filename: path
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+                include_pathnames: merge_import_search_paths(path, search_paths)
+                    .into_iter()
+                    .map(|dir| dir.to_string_lossy().into_owned())
+                    .collect(),
+                library_list,
+                top_level_meta: json_meta_entries_from_snapshot(&signals.compilation_metadata),
+                compile_options,
+                double_precision: self.real_type == RealType::Float64,
+            },
         )
         .map_err(|error| CompilerError::CodegenWasm {
             source: source.into(),
@@ -752,6 +943,16 @@ impl Compiler {
         self.compile_file_to_wasm_with_lane(path, &[], options, lane)
     }
 
+    /// Compiles one file-backed DSP source with the default import search model
+    /// into an owned artifact bundle.
+    pub fn compile_file_default_to_wasm_artifact(
+        &self,
+        path: &Path,
+        options: &WasmOptions,
+    ) -> Result<WasmArtifactBundle, CompilerError> {
+        self.compile_file_to_wasm_artifact(path, &[], options)
+    }
+
     /// Parses + evaluates + propagates one file with default import search path,
     /// then emits strict C++-style JSON.
     pub fn compile_file_default_to_json(&self, path: &Path) -> Result<String, CompilerError> {
@@ -766,6 +967,18 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         self.compile_file_to_json(path, &[], lane)
+    }
+
+    /// Parses + evaluates + propagates one file with default import search path,
+    /// then emits strict C++-style JSON through the selected signal->FIR lane
+    /// with explicit `compile_options` provenance.
+    pub fn compile_file_default_to_json_with_lane_and_compile_options(
+        &self,
+        path: &Path,
+        lane: SignalFirLane,
+        compile_options: String,
+    ) -> Result<String, CompilerError> {
+        self.compile_file_to_json_with_compile_options(path, &[], lane, compile_options)
     }
 
     /// Parses + evaluates + propagates one source, then emits `.fbc` bytecode
@@ -1972,14 +2185,19 @@ fn source_name_to_filename(source_name: &str) -> String {
         .to_owned()
 }
 
-fn build_strict_json_description(
-    store: &FirStore,
-    module: FirId,
+struct StrictJsonContext {
     filename: String,
     include_pathnames: Vec<String>,
     library_list: Vec<String>,
     top_level_meta: Vec<JsonMetaEntry>,
+    compile_options: String,
     double_precision: bool,
+}
+
+fn build_strict_json_description(
+    store: &FirStore,
+    module: FirId,
+    context: StrictJsonContext,
 ) -> Result<JsonDescription, WasmBackendError> {
     let fir::FirMatch::Module {
         name,
@@ -2004,7 +2222,7 @@ fn build_strict_json_description(
         store,
         module,
         &WasmOptions {
-            double_precision,
+            double_precision: context.double_precision,
             ..WasmOptions::default()
         },
         0,
@@ -2014,12 +2232,12 @@ fn build_strict_json_description(
         &function_items,
         JsonBuildOptions {
             name,
-            filename: Some(filename),
+            filename: Some(context.filename),
             version: Some(Compiler::version().to_owned()),
-            compile_options: Some(wasm_compile_options_json_string(double_precision)),
-            library_list,
-            include_pathnames,
-            top_level_meta,
+            compile_options: Some(context.compile_options),
+            library_list: context.library_list,
+            include_pathnames: context.include_pathnames,
+            top_level_meta: context.top_level_meta,
             size: Some(layout.struct_size),
             inputs: num_inputs,
             outputs: num_outputs,
@@ -2035,33 +2253,35 @@ fn build_strict_json_description(
     })
 }
 
-/// C++-parity baseline for `global::printCompilationOptions1()` in the current
-/// WASM slice.
+/// C++-parity baseline for the subset of `global::printCompilationOptions1()`
+/// currently exposed by the Rust CLI/compiler path.
 ///
 /// Mapping status: `adapted`.
 /// - Included now: only the options that the Rust CLI actually exposes for the
-///   current WASM flow and that downstream runtimes consume (`-lang wasm` and
-///   the float mode).
+///   selected flow (`-lang <backend>` when relevant, plus the float mode).
 /// - Deferred: the rest of the C++ global option matrix until the
 ///   corresponding CLI/compiler knobs exist here.
-pub fn wasm_compile_options_json_string(double_precision: bool) -> String {
+pub fn compile_options_json_string(lang: Option<&str>, double_precision: bool) -> String {
     let float_mode = if double_precision {
         "-double"
     } else {
         "-single"
     };
-    format!("-lang wasm {float_mode}")
+    match lang {
+        Some(lang) => format!("-lang {lang} {float_mode}"),
+        None => float_mode.to_owned(),
+    }
 }
 
 fn wasm_json_context_for_memory_source(
     source_name: &str,
     signals: &SignalCompileOutput,
-    double_precision: bool,
+    compile_options: String,
 ) -> WasmJsonContext {
     WasmJsonContext {
         filename: Some(source_name_to_filename(source_name)),
         version: Some(Compiler::version().to_owned()),
-        compile_options: Some(wasm_compile_options_json_string(double_precision)),
+        compile_options: Some(compile_options),
         library_list: Vec::new(),
         include_pathnames: Vec::new(),
         top_level_meta: json_meta_entries_from_snapshot(&signals.compilation_metadata),
@@ -2072,7 +2292,7 @@ fn wasm_json_context_for_file(
     path: &Path,
     search_paths: &[PathBuf],
     signals: &SignalCompileOutput,
-    double_precision: bool,
+    compile_options: String,
 ) -> WasmJsonContext {
     let filename = path
         .file_name()
@@ -2095,7 +2315,7 @@ fn wasm_json_context_for_file(
     WasmJsonContext {
         filename: Some(filename),
         version: Some(Compiler::version().to_owned()),
-        compile_options: Some(wasm_compile_options_json_string(double_precision)),
+        compile_options: Some(compile_options),
         library_list,
         include_pathnames: merge_import_search_paths(path, search_paths)
             .into_iter()
@@ -3136,9 +3356,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        Compiler, CompilerError, build_import_search_paths, default_import_search_paths,
-        golden_snapshot, make_compute_fir_signature, resolve_module_name, resolve_ui_root_label,
-        wasm_compile_options_json_string,
+        Compiler, CompilerError, WasmArtifactRequest, build_import_search_paths,
+        compile_options_json_string, default_import_search_paths, golden_snapshot,
+        make_compute_fir_signature, resolve_module_name, resolve_ui_root_label,
     };
     use codegen::backends::wasm::WasmOptions;
 
@@ -3408,8 +3628,28 @@ mod tests {
         );
         assert!(out.dsp_json.contains(&format!(
             "\"compile_options\":\"{}\"",
-            wasm_compile_options_json_string(false)
+            compile_options_json_string(Some("wasm"), false)
         )));
+    }
+
+    #[test]
+    fn compiler_compile_wasm_artifact_returns_matched_wasm_and_json_pair() {
+        let compiler = Compiler::new();
+        let request = WasmArtifactRequest::new("zero.dsp", "process = 0;");
+        let out = compiler
+            .compile_wasm_artifact(&request)
+            .expect("artifact compile should succeed");
+
+        assert!(out.wasm_bytes.starts_with(b"\0asm"));
+        assert!(out.dsp_json.contains("\"filename\":\"zero.dsp\""));
+        assert_eq!(
+            out.compile_options,
+            compile_options_json_string(Some("wasm"), false)
+        );
+        assert!(
+            out.dsp_json
+                .contains(&format!("\"compile_options\":\"{}\"", out.compile_options))
+        );
     }
 
     #[test]
@@ -3446,6 +3686,36 @@ mod tests {
     }
 
     #[test]
+    fn compiler_compile_file_to_wasm_artifact_preserves_file_provenance_and_options() {
+        let root = temp_root("wasm_artifact_file_provenance");
+        let entry = root.join("main.dsp");
+        let child = root.join("child.lib");
+        fs::write(
+            &entry,
+            "declare name \"Main DSP\";\nprocess = component(\"child.lib\");\n",
+        )
+        .expect("write entry");
+        fs::write(&child, "process = _;\n").expect("write child");
+
+        let compiler = Compiler::new();
+        let out = compiler
+            .compile_file_default_to_wasm_artifact(&entry, &WasmOptions::default())
+            .expect("file-backed artifact compile should succeed");
+
+        assert!(out.wasm_bytes.starts_with(b"\0asm"));
+        assert_eq!(
+            out.compile_options,
+            compile_options_json_string(Some("wasm"), false)
+        );
+        assert!(out.dsp_json.contains("\"filename\":\"main.dsp\""));
+        assert!(out.dsp_json.contains("child.lib"));
+        assert!(
+            out.dsp_json
+                .contains(&format!("\"compile_options\":\"{}\"", out.compile_options))
+        );
+    }
+
+    #[test]
     fn compiler_compile_source_to_json_emits_strict_json_without_widget_indices() {
         let compiler = Compiler::new();
         let json = compiler
@@ -3460,17 +3730,26 @@ mod tests {
         assert!(json.contains("\"ui\":["));
         assert!(json.contains(&format!(
             "\"compile_options\":\"{}\"",
-            wasm_compile_options_json_string(false)
+            compile_options_json_string(None, false)
         )));
         assert!(!json.contains("\"index\":"));
     }
 
     #[test]
-    fn wasm_compile_options_json_string_tracks_float_mode() {
+    fn compile_options_json_string_tracks_lang_and_float_mode() {
         assert_eq!(
-            wasm_compile_options_json_string(false),
+            compile_options_json_string(Some("wasm"), false),
             "-lang wasm -single"
         );
-        assert_eq!(wasm_compile_options_json_string(true), "-lang wasm -double");
+        assert_eq!(
+            compile_options_json_string(Some("wasm"), true),
+            "-lang wasm -double"
+        );
+        assert_eq!(
+            compile_options_json_string(Some("cpp"), false),
+            "-lang cpp -single"
+        );
+        assert_eq!(compile_options_json_string(None, false), "-single");
+        assert_eq!(compile_options_json_string(None, true), "-double");
     }
 }
