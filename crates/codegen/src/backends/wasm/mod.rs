@@ -606,6 +606,7 @@ struct WasmLocal {
 /// - `ForLoop`
 /// - `WhileLoop`
 /// - statement-level `If` / `Control` / `Switch` / `Drop`
+/// - `Label` markers as structural no-ops
 /// - `Bool` / `Int32` / `Float32` / `Float64`
 /// - `LoadVar(kFunArgs=count | kLoop | kStack)`
 /// - `LoadTable(kFunArgs=inputs/outputs | kStack aliases)`
@@ -613,6 +614,7 @@ struct WasmLocal {
 /// - `StoreVar(kLoop | kStack)`
 /// - `LoadTable/StoreTable(kStruct)`
 /// - `Select2`
+/// - internal integer helpers `max_i` / `min_i`
 /// - native WASM math `FunCall` subset (`fabs/fmin/fmax/sqrt/floor/ceil`)
 ///
 /// This is intentionally narrow so the backend can start executing the
@@ -727,7 +729,8 @@ fn collect_compute_locals(
             }
             Ok(())
         }
-        FirMatch::DeclareFun { .. }
+        FirMatch::Label(_)
+        | FirMatch::DeclareFun { .. }
         | FirMatch::StoreTable { .. }
         | FirMatch::StoreVar { .. }
         | FirMatch::Drop(_)
@@ -837,6 +840,7 @@ impl ComputeSubsetLowerer<'_> {
                 function.instruction(&Instruction::Drop);
                 Ok(())
             }
+            FirMatch::Label(_) => Ok(()),
             FirMatch::NullStatement | FirMatch::Return(None) => Ok(()),
             other => Err(WasmBackendError::new(
                 WasmBackendErrorCode::UnsupportedFirNode,
@@ -1241,6 +1245,9 @@ impl ComputeSubsetLowerer<'_> {
                 function.instruction(&Instruction::Select);
                 Ok(())
             }
+            FirMatch::FunCall { name, args, typ } if name == "max_i" || name == "min_i" => {
+                self.lower_internal_int_fun_call(&name, &args, &typ, function)
+            }
             FirMatch::FunCall { name, args, typ } => {
                 let math = FirMathOp::from_symbol(&name).ok_or_else(|| {
                     WasmBackendError::new(
@@ -1414,6 +1421,37 @@ impl ComputeSubsetLowerer<'_> {
             }
             _ => self.lower_imported_math_call(math, args, typ, function),
         }
+    }
+
+    fn lower_internal_int_fun_call(
+        &mut self,
+        name: &str,
+        args: &[FirId],
+        typ: &FirType,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        if !matches!(typ, FirType::Int32) || args.len() != 2 {
+            return Err(WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                format!(
+                    "unsupported internal WASM helper call in compute subset: `{name}` / {typ:?} / argc={}",
+                    args.len()
+                ),
+            ));
+        }
+        for arg in args {
+            self.lower_expr(*arg, function)?;
+        }
+        let callee = match name {
+            "max_i" => WasmFunc::MaxI,
+            "min_i" => WasmFunc::MinI,
+            _ => unreachable!("guarded by caller"),
+        };
+        function.instruction(&Instruction::Call(function_index_for_body(
+            callee,
+            self.math_imports.len() as u32,
+        )));
+        Ok(())
     }
 
     fn lower_imported_math_call(
