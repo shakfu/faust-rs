@@ -308,8 +308,12 @@ fn wasm_module_emits_static_table_data_segments() {
     let out = generate_wasm_module(&store, module, &WasmOptions::default())
         .expect("WASM scaffold should emit static table data segment");
 
+    assert!(out.dsp_json.contains("\"size\":16"));
+
     let mut saw_json = false;
     let mut saw_table = false;
+    let mut json_offset = None;
+    let mut table_offset = None;
     for payload in Parser::new(0).parse_all(&out.wasm_binary) {
         let payload = payload.expect("payload should decode");
         if let Payload::DataSection(section) = payload {
@@ -329,17 +333,24 @@ fn wasm_module_emits_static_table_data_segments() {
                     _ => continue,
                 };
                 let data = segment.data;
-                if offset == 0 && data.starts_with(b"{") {
+                if data.starts_with(b"{") {
                     saw_json = true;
+                    json_offset = Some(offset);
                 }
                 if offset == 4 && data == [0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 64] {
                     saw_table = true;
+                    table_offset = Some(offset);
                 }
             }
         }
     }
     assert!(saw_json);
     assert!(saw_table);
+    assert_eq!(table_offset, Some(4));
+    assert!(
+        json_offset.expect("json data segment offset should be recorded")
+            >= out.memory_layout.io_zone_offset as i32
+    );
 }
 
 #[test]
@@ -616,6 +627,7 @@ fn wasm_layout_places_static_tables_after_struct_region() {
     assert_eq!(layout.field_offsets["wav"].offset, 4);
     assert_eq!(layout.field_offsets["wav"].size, 12);
     assert_eq!(layout.io_zone_offset, 16);
+    assert!(layout.json_offset >= layout.io_zone_offset);
 }
 
 fn build_sample_rate_state_module() -> (FirStore, FirId) {

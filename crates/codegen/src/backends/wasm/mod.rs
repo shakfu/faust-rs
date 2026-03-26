@@ -434,7 +434,7 @@ pub fn generate_wasm_module_with_context(
     let mut data = DataSection::new();
     data.active(
         0,
-        &ConstExpr::i32_const(0),
+        &ConstExpr::i32_const(memory_layout.json_offset as i32),
         dsp_json.as_bytes().iter().copied(),
     );
     for (offset, bytes) in static_table_segments(store, static_decls, &memory_layout, options)? {
@@ -478,7 +478,11 @@ fn build_wasm_json_description(
             library_list: json_context.library_list.clone(),
             include_pathnames: json_context.include_pathnames.clone(),
             top_level_meta: json_context.top_level_meta.clone(),
-            size: Some(memory_layout.struct_size),
+            // C++ parity: the WASM companion JSON `size` is the start of the
+            // host audio heap, not just the raw DSP-struct byte size.
+            // Standard Faust wrappers place their input/output pointer tables
+            // and sample buffers immediately after this offset.
+            size: Some(memory_layout.io_zone_offset),
             inputs: num_inputs,
             outputs: num_outputs,
             sr_index: memory_layout

@@ -46,6 +46,8 @@ pub struct WasmMemoryLayout {
     pub tables_offset: u32,
     /// Offset where I/O zone begins.
     pub io_zone_offset: u32,
+    /// Offset where the embedded JSON data segment is placed.
+    pub json_offset: u32,
     /// Total memory required in bytes before page rounding.
     pub total_bytes: u32,
     /// WASM pages required by the C++-parity sizing rule.
@@ -61,6 +63,7 @@ impl WasmMemoryLayout {
             struct_size: 0,
             tables_offset: 0,
             io_zone_offset: 0,
+            json_offset: 0,
             total_bytes,
             pages,
         }
@@ -315,13 +318,19 @@ impl WasmMemoryLayout {
                 "WASM total memory requirement overflow",
             )
         })?;
+        let json_offset = align_up(raw_required, audio_slot);
         let json_len = u32::try_from(json_len).map_err(|_| {
             WasmBackendError::new(
                 WasmBackendErrorCode::MemoryLayoutOverflow,
                 "WASM JSON metadata length does not fit in u32",
             )
         })?;
-        let total_bytes = raw_required.max(json_len);
+        let total_bytes = json_offset.checked_add(json_len).ok_or_else(|| {
+            WasmBackendError::new(
+                WasmBackendErrorCode::MemoryLayoutOverflow,
+                "WASM total memory requirement overflow while placing JSON segment",
+            )
+        })?;
         let pages = wasm_pages_required(total_bytes)?;
 
         Ok(Self {
@@ -329,6 +338,7 @@ impl WasmMemoryLayout {
             struct_size,
             tables_offset,
             io_zone_offset,
+            json_offset,
             total_bytes,
             pages,
         })
