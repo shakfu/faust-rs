@@ -69,6 +69,25 @@ fn wasm_compute_passthrough_lowers_loop_and_sample_io() {
 }
 
 #[test]
+fn wasm_compute_lowers_struct_state_and_casts() {
+    let (store, module) = build_struct_state_cast_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM scaffold should emit struct-state compute body");
+
+    let body = code_body_at(&out.wasm_binary, 1);
+    let ops = decode_ops(body);
+    assert!(ops.iter().any(|op| matches!(op, Operator::F32Add)));
+    assert!(ops.iter().any(|op| matches!(op, Operator::F64PromoteF32)));
+    assert!(ops.iter().any(|op| matches!(op, Operator::F64Store { .. })));
+    assert!(
+        ops.iter()
+            .filter(|op| matches!(op, Operator::F32Load { .. }))
+            .count()
+            >= 2
+    );
+}
+
+#[test]
 fn wasm_get_sample_rate_loads_struct_field_when_present() {
     let (store, module) = build_sample_rate_state_module();
     let out = generate_wasm_module(&store, module, &WasmOptions::default())
@@ -170,6 +189,94 @@ fn build_sample_rate_state_module() -> (FirStore, FirId) {
     let functions = b.block(&[compute]);
     let static_decls = b.block(&[]);
     let module = b.module(0, 1, "sr_dsp", dsp_struct, globals, functions, static_decls);
+    (store, module)
+}
+
+fn build_struct_state_cast_module() -> (FirStore, FirId) {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let bias_init = b.float32(0.5);
+    let level_init = b.float64(0.0);
+    let bias = b.declare_var(
+        "fBias",
+        FirType::FaustFloat,
+        AccessType::Struct,
+        Some(bias_init),
+    );
+    let level = b.declare_var(
+        "fLevel",
+        FirType::Float64,
+        AccessType::Struct,
+        Some(level_init),
+    );
+    let globals = b.block(&[bias, level]);
+    let dsp_struct = b.block(&[]);
+
+    let chan0 = b.int32(0);
+    let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+    let in_ptr = b.load_table("inputs", AccessType::FunArgs, chan0, ptr_ty.clone());
+    let out_ptr = b.load_table("outputs", AccessType::FunArgs, chan0, ptr_ty.clone());
+    let in_alias = b.declare_var("input0", ptr_ty.clone(), AccessType::Stack, Some(in_ptr));
+    let out_alias = b.declare_var("output0", ptr_ty, AccessType::Stack, Some(out_ptr));
+
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+    let x = b.load_table("input0", AccessType::Stack, i0, FirType::FaustFloat);
+    let bias_cur = b.load_var("fBias", AccessType::Struct, FirType::FaustFloat);
+    let y = b.binop(fir::FirBinOp::Add, x, bias_cur, FirType::FaustFloat);
+    let y_f64 = b.cast(FirType::Float64, y);
+    let store_level = b.store_var("fLevel", AccessType::Struct, y_f64);
+    let store_bias = b.store_var("fBias", AccessType::Struct, y);
+    let store_out = b.store_table("output0", AccessType::Stack, i0, y);
+    let loop_body = b.block(&[store_level, store_bias, store_out]);
+    let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+    let compute_body = b.block(&[in_alias, out_alias, sample_loop]);
+
+    let args = [
+        NamedType {
+            name: "dsp".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "count".to_owned(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &args,
+        Some(compute_body),
+        false,
+    );
+    let functions = b.block(&[compute]);
+    let static_decls = b.block(&[]);
+    let module = b.module(
+        1,
+        1,
+        "state_cast_dsp",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
     (store, module)
 }
 

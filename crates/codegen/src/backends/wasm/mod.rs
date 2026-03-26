@@ -359,6 +359,7 @@ pub fn generate_wasm_module(
             num_outputs as i32,
             real_ty,
             memory_layout.field_offsets.get("fSampleRate"),
+            &memory_layout,
             import_count,
             store,
             compute_body,
@@ -440,6 +441,7 @@ fn scaffold_function_body(
     num_outputs: i32,
     real_ty: ValType,
     sample_rate_field: Option<&FieldLayout>,
+    memory_layout: &WasmMemoryLayout,
     _import_count: u32,
     store: &FirStore,
     compute_body: Option<FirId>,
@@ -453,7 +455,7 @@ fn scaffold_function_body(
         | WasmFunc::SetParamValue => {}
         WasmFunc::Compute => {
             if let Some(body) = compute_body
-                && let Ok(lowered) = lower_compute_subset(store, body, options)
+                && let Ok(lowered) = lower_compute_subset(store, body, memory_layout, options)
             {
                 return lowered;
             }
@@ -577,6 +579,7 @@ struct WasmLocal {
 fn lower_compute_subset(
     store: &FirStore,
     body: FirId,
+    memory_layout: &WasmMemoryLayout,
     options: &WasmOptions,
 ) -> Result<Function, WasmBackendError> {
     let mut local_specs = Vec::new();
@@ -600,6 +603,7 @@ fn lower_compute_subset(
     let mut function = Function::new(wasm_locals);
     let mut lowerer = ComputeSubsetLowerer {
         store,
+        memory_layout,
         options,
         locals: local_map,
     };
@@ -656,6 +660,7 @@ fn collect_compute_locals(
 
 struct ComputeSubsetLowerer<'a> {
     store: &'a FirStore,
+    memory_layout: &'a WasmMemoryLayout,
     options: &'a WasmOptions,
     locals: HashMap<String, WasmLocal>,
 }
@@ -708,6 +713,11 @@ impl ComputeSubsetLowerer<'_> {
                 index,
                 value,
             } => self.lower_store_table_stack(&name, index, value, function),
+            FirMatch::StoreVar {
+                name,
+                access: AccessType::Struct,
+                value,
+            } => self.lower_store_var_struct(&name, value, function),
             FirMatch::NullStatement | FirMatch::Return(None) => Ok(()),
             other => Err(WasmBackendError::new(
                 WasmBackendErrorCode::UnsupportedFirNode,
@@ -760,6 +770,29 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    fn lower_store_var_struct(
+        &mut self,
+        name: &str,
+        value: FirId,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        let field = self.struct_field(name)?.clone();
+        let field_val_type = wasm_val_type_for_field(&field);
+        function.instruction(&Instruction::LocalGet(0));
+        function.instruction(&Instruction::I32Const(field.offset as i32));
+        function.instruction(&Instruction::I32Add);
+        self.lower_expr(value, function)?;
+        let value_type = self.store.value_type(value).ok_or_else(|| {
+            WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                format!("missing value type for struct store `{name}`"),
+            )
+        })?;
+        self.emit_cast_if_needed(&value_type, field_val_type, function)?;
+        function.instruction(&store_instruction_for_valtype(field_val_type)?);
+        Ok(())
+    }
+
     fn lower_expr(&mut self, id: FirId, function: &mut Function) -> Result<(), WasmBackendError> {
         match match_fir(self.store, id) {
             FirMatch::Int32 { value, .. } => {
@@ -780,6 +813,24 @@ impl ComputeSubsetLowerer<'_> {
                 ..
             } if name == "count" => {
                 function.instruction(&Instruction::LocalGet(1));
+                Ok(())
+            }
+            FirMatch::LoadVar {
+                name,
+                access: AccessType::Struct,
+                typ,
+            } => {
+                let field = self.struct_field(&name)?;
+                function.instruction(&Instruction::LocalGet(0));
+                function.instruction(&Instruction::I32Const(field.offset as i32));
+                function.instruction(&Instruction::I32Add);
+                let storage_ty = wasm_val_type_for_field(field);
+                function.instruction(&load_instruction_for_valtype(storage_ty)?);
+                self.emit_cast_if_needed(
+                    &field_fir_type(field, self.options),
+                    wasm_val_type_for_fir(&typ, self.options)?,
+                    function,
+                )?;
                 Ok(())
             }
             FirMatch::LoadVar {
@@ -824,6 +875,27 @@ impl ComputeSubsetLowerer<'_> {
                 self.lower_index_offset(index, &elem_type, function)?;
                 function.instruction(&Instruction::I32Add);
                 function.instruction(&load_instruction_for_type(&typ, self.options)?);
+                Ok(())
+            }
+            FirMatch::Cast { typ, value } => {
+                let src_ty = self.store.value_type(value).ok_or_else(|| {
+                    WasmBackendError::new(
+                        WasmBackendErrorCode::UnsupportedFirNode,
+                        "missing value type for WASM cast",
+                    )
+                })?;
+                self.lower_expr(value, function)?;
+                self.emit_cast_if_needed(
+                    &src_ty,
+                    wasm_val_type_for_fir(&typ, self.options)?,
+                    function,
+                )?;
+                Ok(())
+            }
+            FirMatch::BinOp { op, lhs, rhs, typ } => {
+                self.lower_expr(lhs, function)?;
+                self.lower_expr(rhs, function)?;
+                function.instruction(&binop_instruction(op, &typ, self.options)?);
                 Ok(())
             }
             other => Err(WasmBackendError::new(
@@ -875,6 +947,45 @@ impl ComputeSubsetLowerer<'_> {
                 format!("compute subset local `{name}` not found"),
             )
         })
+    }
+
+    fn struct_field(&self, name: &str) -> Result<&FieldLayout, WasmBackendError> {
+        self.memory_layout.field_offsets.get(name).ok_or_else(|| {
+            WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                format!("compute subset struct field `{name}` not found in WASM layout"),
+            )
+        })
+    }
+
+    fn emit_cast_if_needed(
+        &self,
+        src: &FirType,
+        dst: ValType,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        let src = wasm_val_type_for_fir(src, self.options)?;
+        if src == dst {
+            return Ok(());
+        }
+        let instr = match (src, dst) {
+            (ValType::F32, ValType::F64) => Instruction::F64PromoteF32,
+            (ValType::F64, ValType::F32) => Instruction::F32DemoteF64,
+            (ValType::I32, ValType::F32) => Instruction::F32ConvertI32S,
+            (ValType::I32, ValType::F64) => Instruction::F64ConvertI32S,
+            (ValType::F32, ValType::I32) => Instruction::I32TruncSatF32S,
+            (ValType::F64, ValType::I32) => Instruction::I32TruncSatF64S,
+            (ValType::I32, ValType::I64) => Instruction::I64ExtendI32S,
+            (ValType::I64, ValType::I32) => Instruction::I32WrapI64,
+            _ => {
+                return Err(WasmBackendError::new(
+                    WasmBackendErrorCode::UnsupportedFirNode,
+                    format!("unsupported WASM cast in compute subset: {src:?} -> {dst:?}"),
+                ));
+            }
+        };
+        function.instruction(&instr);
+        Ok(())
     }
 }
 
@@ -934,7 +1045,18 @@ fn load_instruction_for_type(
     typ: &FirType,
     options: &WasmOptions,
 ) -> Result<Instruction<'static>, WasmBackendError> {
-    match wasm_val_type_for_fir(typ, options)? {
+    load_instruction_for_valtype(wasm_val_type_for_fir(typ, options)?)
+}
+
+fn store_instruction_for_type(
+    typ: &FirType,
+    options: &WasmOptions,
+) -> Result<Instruction<'static>, WasmBackendError> {
+    store_instruction_for_valtype(wasm_val_type_for_fir(typ, options)?)
+}
+
+fn load_instruction_for_valtype(typ: ValType) -> Result<Instruction<'static>, WasmBackendError> {
+    match typ {
         ValType::I32 => Ok(Instruction::I32Load(memarg(0))),
         ValType::I64 => Ok(Instruction::I64Load(memarg(0))),
         ValType::F32 => Ok(Instruction::F32Load(memarg(0))),
@@ -946,11 +1068,8 @@ fn load_instruction_for_type(
     }
 }
 
-fn store_instruction_for_type(
-    typ: &FirType,
-    options: &WasmOptions,
-) -> Result<Instruction<'static>, WasmBackendError> {
-    match wasm_val_type_for_fir(typ, options)? {
+fn store_instruction_for_valtype(typ: ValType) -> Result<Instruction<'static>, WasmBackendError> {
+    match typ {
         ValType::I32 => Ok(Instruction::I32Store(memarg(0))),
         ValType::I64 => Ok(Instruction::I64Store(memarg(0))),
         ValType::F32 => Ok(Instruction::F32Store(memarg(0))),
@@ -958,6 +1077,79 @@ fn store_instruction_for_type(
         other => Err(WasmBackendError::new(
             WasmBackendErrorCode::UnsupportedFirNode,
             format!("unsupported store type in WASM subset: {other:?}"),
+        )),
+    }
+}
+
+fn wasm_val_type_for_field(field: &FieldLayout) -> ValType {
+    match field.typ {
+        layout::WasmValType::I32 => ValType::I32,
+        layout::WasmValType::F32 => ValType::F32,
+        layout::WasmValType::F64 => ValType::F64,
+    }
+}
+
+fn field_fir_type(field: &FieldLayout, options: &WasmOptions) -> FirType {
+    match field.typ {
+        layout::WasmValType::I32 => FirType::Int32,
+        layout::WasmValType::F32 => {
+            if options.double_precision {
+                FirType::Float32
+            } else {
+                FirType::FaustFloat
+            }
+        }
+        layout::WasmValType::F64 => FirType::Float64,
+    }
+}
+
+fn binop_instruction(
+    op: fir::FirBinOp,
+    typ: &FirType,
+    options: &WasmOptions,
+) -> Result<Instruction<'static>, WasmBackendError> {
+    let val_ty = wasm_val_type_for_fir(typ, options)?;
+    match (op, val_ty) {
+        (fir::FirBinOp::Add, ValType::I32) => Ok(Instruction::I32Add),
+        (fir::FirBinOp::Sub, ValType::I32) => Ok(Instruction::I32Sub),
+        (fir::FirBinOp::Mul, ValType::I32) => Ok(Instruction::I32Mul),
+        (fir::FirBinOp::Div, ValType::I32) => Ok(Instruction::I32DivS),
+        (fir::FirBinOp::Rem, ValType::I32) => Ok(Instruction::I32RemS),
+        (fir::FirBinOp::And, ValType::I32) => Ok(Instruction::I32And),
+        (fir::FirBinOp::Or, ValType::I32) => Ok(Instruction::I32Or),
+        (fir::FirBinOp::Xor, ValType::I32) => Ok(Instruction::I32Xor),
+        (fir::FirBinOp::Lsh, ValType::I32) => Ok(Instruction::I32Shl),
+        (fir::FirBinOp::ARsh, ValType::I32) => Ok(Instruction::I32ShrS),
+        (fir::FirBinOp::LRsh, ValType::I32) => Ok(Instruction::I32ShrU),
+        (fir::FirBinOp::Eq, ValType::I32) => Ok(Instruction::I32Eq),
+        (fir::FirBinOp::Ne, ValType::I32) => Ok(Instruction::I32Ne),
+        (fir::FirBinOp::Lt, ValType::I32) => Ok(Instruction::I32LtS),
+        (fir::FirBinOp::Le, ValType::I32) => Ok(Instruction::I32LeS),
+        (fir::FirBinOp::Gt, ValType::I32) => Ok(Instruction::I32GtS),
+        (fir::FirBinOp::Ge, ValType::I32) => Ok(Instruction::I32GeS),
+        (fir::FirBinOp::Add, ValType::F32) => Ok(Instruction::F32Add),
+        (fir::FirBinOp::Sub, ValType::F32) => Ok(Instruction::F32Sub),
+        (fir::FirBinOp::Mul, ValType::F32) => Ok(Instruction::F32Mul),
+        (fir::FirBinOp::Div, ValType::F32) => Ok(Instruction::F32Div),
+        (fir::FirBinOp::Eq, ValType::F32) => Ok(Instruction::F32Eq),
+        (fir::FirBinOp::Ne, ValType::F32) => Ok(Instruction::F32Ne),
+        (fir::FirBinOp::Lt, ValType::F32) => Ok(Instruction::F32Lt),
+        (fir::FirBinOp::Le, ValType::F32) => Ok(Instruction::F32Le),
+        (fir::FirBinOp::Gt, ValType::F32) => Ok(Instruction::F32Gt),
+        (fir::FirBinOp::Ge, ValType::F32) => Ok(Instruction::F32Ge),
+        (fir::FirBinOp::Add, ValType::F64) => Ok(Instruction::F64Add),
+        (fir::FirBinOp::Sub, ValType::F64) => Ok(Instruction::F64Sub),
+        (fir::FirBinOp::Mul, ValType::F64) => Ok(Instruction::F64Mul),
+        (fir::FirBinOp::Div, ValType::F64) => Ok(Instruction::F64Div),
+        (fir::FirBinOp::Eq, ValType::F64) => Ok(Instruction::F64Eq),
+        (fir::FirBinOp::Ne, ValType::F64) => Ok(Instruction::F64Ne),
+        (fir::FirBinOp::Lt, ValType::F64) => Ok(Instruction::F64Lt),
+        (fir::FirBinOp::Le, ValType::F64) => Ok(Instruction::F64Le),
+        (fir::FirBinOp::Gt, ValType::F64) => Ok(Instruction::F64Gt),
+        (fir::FirBinOp::Ge, ValType::F64) => Ok(Instruction::F64Ge),
+        _ => Err(WasmBackendError::new(
+            WasmBackendErrorCode::UnsupportedFirNode,
+            format!("unsupported WASM binop in compute subset: {op:?} / {val_ty:?}"),
         )),
     }
 }
