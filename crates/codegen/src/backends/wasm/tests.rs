@@ -143,6 +143,19 @@ fn wasm_compute_lowers_native_math_fun_calls() {
 }
 
 #[test]
+fn wasm_compute_lowers_int_abs_inline() {
+    let (store, module) = build_int_abs_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM scaffold should emit inline int abs");
+
+    let body = code_body_at(&out.wasm_binary, 1);
+    let ops = decode_ops(body);
+    assert!(ops.iter().any(|op| matches!(op, Operator::I32Sub)));
+    assert!(ops.iter().any(|op| matches!(op, Operator::I32LtS)));
+    assert!(ops.iter().any(|op| matches!(op, Operator::Select)));
+}
+
+#[test]
 fn wasm_compute_calls_internal_max_i_helper() {
     let (store, module) = build_internal_max_i_module();
     let out = generate_wasm_module(&store, module, &WasmOptions::default())
@@ -734,6 +747,73 @@ fn build_internal_max_i_module() -> (FirStore, FirId) {
         0,
         1,
         "internal_max_i",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
+    (store, module)
+}
+
+fn build_int_abs_module() -> (FirStore, FirId) {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let dsp_struct = b.block(&[]);
+    let globals = b.block(&[]);
+    let static_decls = b.block(&[]);
+
+    let chan0 = b.int32(0);
+    let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+    let out_ptr = b.load_table("outputs", AccessType::FunArgs, chan0, ptr_ty.clone());
+    let out_alias = b.declare_var("output0", ptr_ty, AccessType::Stack, Some(out_ptr));
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+    let neg_i0 = b.neg(i0, FirType::Int32);
+    let abs_i0 = b.fun_call("abs", &[neg_i0], FirType::Int32);
+    let abs_f32 = b.cast(FirType::FaustFloat, abs_i0);
+    let write = b.store_table("output0", AccessType::Stack, i0, abs_f32);
+    let loop_body = b.block(&[write]);
+    let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+    let compute_body = b.block(&[out_alias, sample_loop]);
+    let args = [
+        NamedType {
+            name: "dsp".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "count".to_owned(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &args,
+        Some(compute_body),
+        false,
+    );
+    let functions = b.block(&[compute]);
+    let module = b.module(
+        0,
+        1,
+        "int_abs",
         dsp_struct,
         globals,
         functions,

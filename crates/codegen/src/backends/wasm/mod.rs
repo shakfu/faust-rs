@@ -620,7 +620,9 @@ struct WasmLocal {
 /// - `LoadTable/StoreTable(kStruct)`
 /// - `Select2`
 /// - internal integer helpers `max_i` / `min_i`
-/// - native WASM math `FunCall` subset (`fabs/fmin/fmax/sqrt/floor/ceil`)
+/// - math `FunCall` subset:
+///   - integer `abs` lowered inline
+///   - native WASM `fabs/fmin/fmax/sqrt/floor/ceil`
 ///
 /// This is intentionally narrow so the backend can start executing the
 /// canonical mono passthrough fixture while unsupported FIR still falls back to
@@ -1274,7 +1276,9 @@ impl ComputeSubsetLowerer<'_> {
                 function.instruction(&Instruction::Select);
                 Ok(())
             }
-            FirMatch::FunCall { name, args, typ } if name == "max_i" || name == "min_i" => {
+            FirMatch::FunCall { name, args, typ }
+                if name == "abs" || name == "max_i" || name == "min_i" =>
+            {
                 self.lower_internal_int_fun_call(&name, &args, &typ, function)
             }
             FirMatch::FunCall { name, args, typ } => {
@@ -1384,6 +1388,22 @@ impl ComputeSubsetLowerer<'_> {
         function: &mut Function,
     ) -> Result<(), WasmBackendError> {
         match (math, wasm_val_type_for_fir(typ, self.options)?, args) {
+            (FirMathOp::Abs, ValType::I32, [x]) => {
+                // Adapted from the C++ WASM backend: instead of importing host
+                // `abs(int)`, we lower directly to WASM using the existing
+                // subset expression machinery. FIR expressions are pure, so
+                // re-evaluating `x` to synthesize `select(0 - x, x, x < 0)` is
+                // semantically safe during this bring-up phase.
+                function.instruction(&Instruction::I32Const(0));
+                self.lower_expr(*x, function)?;
+                function.instruction(&Instruction::I32Sub);
+                self.lower_expr(*x, function)?;
+                self.lower_expr(*x, function)?;
+                function.instruction(&Instruction::I32Const(0));
+                function.instruction(&Instruction::I32LtS);
+                function.instruction(&Instruction::Select);
+                Ok(())
+            }
             (FirMathOp::Abs, ValType::F32, [x]) => {
                 self.lower_expr(*x, function)?;
                 function.instruction(&Instruction::F32Abs);
@@ -1459,7 +1479,35 @@ impl ComputeSubsetLowerer<'_> {
         typ: &FirType,
         function: &mut Function,
     ) -> Result<(), WasmBackendError> {
-        if !matches!(typ, FirType::Int32) || args.len() != 2 {
+        match (name, typ, args) {
+            ("abs", FirType::Int32, [x]) => {
+                // Adapted from the C++ WASM backend: instead of importing host
+                // `abs(int)`, lower directly to WASM using the existing subset
+                // expression machinery. FIR expressions are pure, so
+                // re-evaluating `x` to synthesize `select(0 - x, x, x < 0)` is
+                // semantically safe during this bring-up phase.
+                function.instruction(&Instruction::I32Const(0));
+                self.lower_expr(*x, function)?;
+                function.instruction(&Instruction::I32Sub);
+                self.lower_expr(*x, function)?;
+                self.lower_expr(*x, function)?;
+                function.instruction(&Instruction::I32Const(0));
+                function.instruction(&Instruction::I32LtS);
+                function.instruction(&Instruction::Select);
+                return Ok(());
+            }
+            ("min_i" | "max_i", FirType::Int32, [_, _]) => {}
+            _ => {
+                return Err(WasmBackendError::new(
+                    WasmBackendErrorCode::UnsupportedFirNode,
+                    format!(
+                        "unsupported internal WASM helper call in compute subset: `{name}` / {typ:?} / argc={}",
+                        args.len()
+                    ),
+                ));
+            }
+        }
+        if args.len() != 2 {
             return Err(WasmBackendError::new(
                 WasmBackendErrorCode::UnsupportedFirNode,
                 format!(
