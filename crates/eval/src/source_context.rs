@@ -87,6 +87,34 @@ impl EvalSourceContext {
         }
     }
 
+    /// Creates an in-memory evaluation context with explicit import search
+    /// paths and one shared top-level metadata store.
+    ///
+    /// This is the source-string counterpart of [`Self::for_file_with_metadata`]:
+    /// it preserves the "compile from string but still resolve `component` /
+    /// `library` through explicit `-I` entries" workflow used by bindings such
+    /// as `faustwasm`.
+    #[must_use]
+    pub fn memory_with_search_paths_and_metadata(
+        search_paths: &[PathBuf],
+        metadata_store: CompilationMetadataStore,
+    ) -> Self {
+        let mut ordered = Vec::with_capacity(search_paths.len());
+        for candidate in search_paths {
+            if !ordered.iter().any(|existing| existing == candidate) {
+                ordered.push(candidate.clone());
+            }
+        }
+        Self {
+            current_file: None,
+            search_paths: ordered,
+            cache: Arc::default(),
+            loaded_files: Arc::default(),
+            metadata_store: Some(metadata_store),
+            sample_precision: SamplePrecision::default(),
+        }
+    }
+
     /// Creates a context rooted at one source file plus optional import search paths.
     ///
     /// The file parent directory is prepended ahead of explicit `search_paths`,

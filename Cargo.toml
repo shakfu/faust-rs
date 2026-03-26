@@ -25,6 +25,7 @@ members = [
   "crates/cranelift-ffi",
   "crates/box-ffi",
   "crates/faust-ffi",
+  "crates/wasm-ffi",
 ]
 resolver = "2"
 

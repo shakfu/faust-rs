@@ -127,6 +127,8 @@ pub struct WasmArtifactRequest {
     pub source_name: String,
     /// Faust DSP source text to compile.
     pub source: String,
+    /// Extra import search directories, mirroring CLI/FFI `-I`.
+    pub import_dirs: Vec<PathBuf>,
     /// WASM backend configuration (`-double`, memory model, etc.).
     pub wasm_options: WasmOptions,
     /// Signal->FIR lowering lane used before WASM code generation.
@@ -141,6 +143,7 @@ impl WasmArtifactRequest {
         Self {
             source_name: source_name.into(),
             source: source.into(),
+            import_dirs: Vec::new(),
             wasm_options: WasmOptions::default(),
             lane: SignalFirLane::LegacyBridge,
         }
@@ -348,12 +351,34 @@ impl Compiler {
         source_name: &str,
         source: &str,
     ) -> Result<SignalCompileOutput, CompilerError> {
+        self.compile_source_to_signals_with_search_paths(source_name, source, &[])
+    }
+
+    /// Parses, evaluates `process`, then propagates boxes to output signals
+    /// using explicit evaluator import search paths.
+    ///
+    /// This is the string-backed counterpart of
+    /// [`Self::compile_file_to_signals`]. It exists so embedding/binding layers
+    /// can compile source strings while still honoring `-I` search paths.
+    pub fn compile_source_to_signals_with_search_paths(
+        &self,
+        source_name: &str,
+        source: &str,
+        search_paths: &[PathBuf],
+    ) -> Result<SignalCompileOutput, CompilerError> {
         let metadata_store = parser::CompilationMetadataStore::new(source_name);
         let output = ensure_parse_success(
             source_name,
             parser::parse_program_with_metadata(source, source_name, metadata_store.clone()),
         )?;
-        let eval_source_context = eval::EvalSourceContext::memory_with_metadata(metadata_store);
+        let eval_source_context = if search_paths.is_empty() {
+            eval::EvalSourceContext::memory_with_metadata(metadata_store)
+        } else {
+            eval::EvalSourceContext::memory_with_search_paths_and_metadata(
+                search_paths,
+                metadata_store,
+            )
+        };
         self.pipeline_to_signals(source_name, output, Some(eval_source_context))
     }
 
@@ -573,12 +598,45 @@ impl Compiler {
     ) -> Result<WasmArtifactBundle, CompilerError> {
         let compile_options =
             compile_options_json_string(Some("wasm"), request.wasm_options.double_precision);
-        let module = self.compile_source_to_wasm_with_lane(
+        let signals = self.compile_source_to_signals_with_search_paths(
             &request.source_name,
             &request.source,
-            &request.wasm_options,
-            request.lane,
+            &request.import_dirs,
         )?;
+        let lowered = lower_signals_to_fir(
+            &request.source_name,
+            &signals,
+            request.lane,
+            self.fir_verify,
+            self.real_type,
+        )
+        .map_err(|error| lower_fir_error_to_compiler(&request.source_name, error))?;
+        let json_context = wasm_json_context_for_memory_source(
+            &request.source_name,
+            &signals,
+            compile_options.clone(),
+        );
+        let mut json_context = json_context;
+        json_context.include_pathnames = request
+            .import_dirs
+            .iter()
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .collect();
+        json_context.library_list = signals
+            .loaded_files
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        let module = generate_wasm_module_with_context(
+            &lowered.store,
+            lowered.module,
+            &request.wasm_options,
+            &json_context,
+        )
+        .map_err(|error| CompilerError::CodegenWasm {
+            source: request.source_name.clone().into(),
+            error,
+        })?;
         Ok(WasmArtifactBundle::from_wasm_module(
             module,
             compile_options,
@@ -3650,6 +3708,25 @@ mod tests {
             out.dsp_json
                 .contains(&format!("\"compile_options\":\"{}\"", out.compile_options))
         );
+    }
+
+    #[test]
+    fn compiler_compile_wasm_artifact_supports_memory_source_import_dirs() {
+        let root = temp_root("wasm_artifact_memory_import_dirs");
+        let child = root.join("child.lib");
+        fs::write(&child, "process = _;\n").expect("write child");
+
+        let compiler = Compiler::new();
+        let mut request =
+            WasmArtifactRequest::new("main.dsp", "process = component(\"child.lib\");");
+        request.import_dirs.push(root.clone());
+        let out = compiler
+            .compile_wasm_artifact(&request)
+            .expect("artifact compile with import dirs should succeed");
+
+        assert!(out.wasm_bytes.starts_with(b"\0asm"));
+        assert!(out.dsp_json.contains("child.lib"));
+        assert!(out.dsp_json.contains(&root.display().to_string()));
     }
 
     #[test]

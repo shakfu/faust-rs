@@ -1,0 +1,23 @@
+[package]
+name = "wasm-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints.rust]
+unsafe_code = "allow"
+unused_attributes = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+all = "warn"
+
+[lib]
+name = "faust_wasm_ffi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+codegen = { path = "../codegen" }
+compiler = { path = "../compiler" }
+utils = { path = "../utils" }
