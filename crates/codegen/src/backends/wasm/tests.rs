@@ -138,6 +138,7 @@ fn wasm_compute_lowers_native_math_fun_calls() {
     let body = code_body_at(&out.wasm_binary, 1);
     let ops = decode_ops(body);
     assert!(ops.iter().any(|op| matches!(op, Operator::F64Abs)));
+    assert!(ops.iter().any(|op| matches!(op, Operator::F64Nearest)));
     assert!(ops.iter().any(|op| matches!(op, Operator::F64Min)));
     assert!(ops.iter().any(|op| matches!(op, Operator::F64Max)));
 }
@@ -636,7 +637,8 @@ fn build_native_math_module() -> (FirStore, FirId) {
     let zero = b.float64(0.0);
     let minv = b.math_call(FirMathOp::Min, &[absx, one], FirType::Float64);
     let maxv = b.math_call(FirMathOp::Max, &[minv, zero], FirType::Float64);
-    let y = b.cast(FirType::FaustFloat, maxv);
+    let rounded = b.math_call(FirMathOp::Rint, &[maxv], FirType::Float64);
+    let y = b.cast(FirType::FaustFloat, rounded);
     let store_out = b.store_table("output0", AccessType::Stack, i0, y);
     let loop_body = b.block(&[store_out]);
     let sample_loop = b.simple_for_loop("i0", count, loop_body, false);

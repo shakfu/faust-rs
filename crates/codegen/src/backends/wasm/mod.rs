@@ -622,7 +622,7 @@ struct WasmLocal {
 /// - internal integer helpers `max_i` / `min_i`
 /// - math `FunCall` subset:
 ///   - integer `abs` lowered inline
-///   - native WASM `fabs/fmin/fmax/sqrt/floor/ceil`
+///   - native WASM `fabs/fmin/fmax/sqrt/floor/ceil/rint`
 ///
 /// This is intentionally narrow so the backend can start executing the
 /// canonical mono passthrough fixture while unsupported FIR still falls back to
@@ -1444,6 +1444,16 @@ impl ComputeSubsetLowerer<'_> {
                 function.instruction(&Instruction::F64Ceil);
                 Ok(())
             }
+            (FirMathOp::Rint, ValType::F32, [x]) => {
+                self.lower_expr(*x, function)?;
+                function.instruction(&Instruction::F32Nearest);
+                Ok(())
+            }
+            (FirMathOp::Rint, ValType::F64, [x]) => {
+                self.lower_expr(*x, function)?;
+                function.instruction(&Instruction::F64Nearest);
+                Ok(())
+            }
             (FirMathOp::Min, ValType::F32, [x, y]) => {
                 self.lower_expr(*x, function)?;
                 self.lower_expr(*y, function)?;
@@ -1667,6 +1677,7 @@ fn is_native_wasm_math(math: FirMathOp, typ: &FirType, options: &WasmOptions) ->
             | (FirMathOp::Sqrt, Ok(ValType::F32 | ValType::F64))
             | (FirMathOp::Floor, Ok(ValType::F32 | ValType::F64))
             | (FirMathOp::Ceil, Ok(ValType::F32 | ValType::F64))
+            | (FirMathOp::Rint, Ok(ValType::F32 | ValType::F64))
             | (FirMathOp::Min, Ok(ValType::F32 | ValType::F64))
             | (FirMathOp::Max, Ok(ValType::F32 | ValType::F64))
     )
