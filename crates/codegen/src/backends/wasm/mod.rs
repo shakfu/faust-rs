@@ -259,6 +259,7 @@ pub fn generate_wasm_module_with_context(
     }
 
     let compute_body = find_function_body(store, &function_items, "compute");
+    let instance_constants_body = find_function_body(store, &function_items, "instanceConstants");
     let instance_clear_body = find_function_body(store, &function_items, "instanceClear");
     let instance_reset_ui_body =
         find_function_body(store, &function_items, "instanceResetUserInterface");
@@ -424,6 +425,7 @@ pub fn generate_wasm_module_with_context(
             &math_imports,
             store,
             compute_body,
+            instance_constants_body,
             instance_clear_body,
             instance_reset_ui_body,
             options,
@@ -520,6 +522,7 @@ fn scaffold_function_body(
     math_imports: &[WasmMathImport],
     store: &FirStore,
     compute_body: Option<FirId>,
+    instance_constants_body: Option<FirId>,
     instance_clear_body: Option<FirId>,
     instance_reset_ui_body: Option<FirId>,
     options: &WasmOptions,
@@ -541,6 +544,19 @@ fn scaffold_function_body(
                     lower_instance_clear_subset(store, body, memory_layout, options)
             {
                 return lowered;
+            }
+        }
+        WasmFunc::InstanceConstants => {
+            if let Some(body) = instance_constants_body
+                && let Ok(lowered) =
+                    lower_instance_constants_subset(store, body, memory_layout, options)
+            {
+                return lowered;
+            }
+            if let Some(field) = sample_rate_field {
+                function.instruction(&Instruction::LocalGet(0));
+                function.instruction(&Instruction::LocalGet(1));
+                function.instruction(&Instruction::I32Store(memarg(field.offset)));
             }
         }
         WasmFunc::InstanceResetUserInterface => {
@@ -586,13 +602,6 @@ fn scaffold_function_body(
                 WasmFunc::InstanceInit,
                 imported_function_count,
             )));
-        }
-        WasmFunc::InstanceConstants => {
-            if let Some(field) = sample_rate_field {
-                function.instruction(&Instruction::LocalGet(0));
-                function.instruction(&Instruction::LocalGet(1));
-                function.instruction(&Instruction::I32Store(memarg(field.offset)));
-            }
         }
         WasmFunc::InstanceInit => {
             function.instruction(&Instruction::LocalGet(0));
@@ -713,6 +722,20 @@ fn lower_instance_clear_subset(
     options: &WasmOptions,
 ) -> Result<Function, WasmBackendError> {
     lower_function_subset(store, body, memory_layout, &[], options, 1)
+}
+
+/// Partial `instanceConstants` subset lowerer for the current WASM bring-up phase.
+///
+/// Reuses the same statement/value subset as `compute`, but with the
+/// `instanceConstants(dsp, sample_rate)` ABI so stack locals start at local
+/// index 2.
+fn lower_instance_constants_subset(
+    store: &FirStore,
+    body: FirId,
+    memory_layout: &WasmMemoryLayout,
+    options: &WasmOptions,
+) -> Result<Function, WasmBackendError> {
+    lower_function_subset(store, body, memory_layout, &[], options, 2)
 }
 
 /// Partial `instanceResetUserInterface` subset lowerer for the current WASM bring-up phase.
@@ -1202,6 +1225,14 @@ impl ComputeSubsetLowerer<'_> {
                 access: AccessType::FunArgs,
                 ..
             } if name == "count" => {
+                function.instruction(&Instruction::LocalGet(1));
+                Ok(())
+            }
+            FirMatch::LoadVar {
+                name,
+                access: AccessType::FunArgs,
+                ..
+            } if name == "sample_rate" => {
                 function.instruction(&Instruction::LocalGet(1));
                 Ok(())
             }

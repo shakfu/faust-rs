@@ -205,6 +205,29 @@ fn wasm_instance_reset_ui_lowers_control_reinitialization() {
 }
 
 #[test]
+fn wasm_instance_constants_lowers_struct_table_initialization() {
+    let (store, module) = build_struct_table_instance_constants_module();
+    let out = generate_wasm_module(
+        &store,
+        module,
+        &WasmOptions {
+            double_precision: true,
+            ..WasmOptions::default()
+        },
+    )
+    .expect("WASM backend should lower instanceConstants table stores");
+
+    let body = code_body_at(&out.wasm_binary, 8);
+    let ops = decode_ops(body);
+    assert!(
+        ops.iter()
+            .filter(|op| matches!(op, Operator::I32Store { .. } | Operator::F64Store { .. }))
+            .count()
+            >= 3
+    );
+}
+
+#[test]
 fn wasm_get_and_set_param_value_use_f64_in_double_mode() {
     let (store, module) = build_passthrough_test_module();
     let out = generate_wasm_module(
@@ -1436,6 +1459,113 @@ fn build_static_table_compute_module() -> (FirStore, FirId) {
         0,
         1,
         "static_table_compute",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
+    (store, module)
+}
+
+fn build_struct_table_instance_constants_module() -> (FirStore, FirId) {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let dsp_struct = b.block(&[]);
+    let sample_rate = b.declare_var("fSampleRate", FirType::Int32, AccessType::Struct, None);
+    let zero0 = b.float32(0.0);
+    let zero1 = b.float32(0.0);
+    let table = b.declare_table(
+        "fTable",
+        AccessType::Struct,
+        FirType::FaustFloat,
+        &[zero0, zero1],
+    );
+    let globals = b.block(&[sample_rate, table]);
+    let static_decls = b.block(&[]);
+
+    let sample_rate_arg = b.load_var("sample_rate", AccessType::FunArgs, FirType::Int32);
+    let sr_store = b.store_var("fSampleRate", AccessType::Struct, sample_rate_arg);
+    let table_idx0 = b.int32(0);
+    let table_idx1 = b.int32(1);
+    let table_val0 = b.float32(4.0);
+    let table_val1 = b.float32(7.0);
+    let slot0 = b.store_table("fTable", AccessType::Struct, table_idx0, table_val0);
+    let slot1 = b.store_table("fTable", AccessType::Struct, table_idx1, table_val1);
+    let instance_constants_body = b.block(&[sr_store, slot0, slot1]);
+
+    let instance_constants = b.declare_fun(
+        "instanceConstants",
+        FirType::Fun {
+            args: vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::Int32],
+            ret: Box::new(FirType::Void),
+        },
+        &[
+            NamedType {
+                name: "dsp".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "sample_rate".to_owned(),
+                typ: FirType::Int32,
+            },
+        ],
+        Some(instance_constants_body),
+        false,
+    );
+
+    let chan0 = b.int32(0);
+    let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+    let out_ptr = b.load_table("outputs", AccessType::FunArgs, chan0, ptr_ty.clone());
+    let out_alias = b.declare_var("output0", ptr_ty, AccessType::Stack, Some(out_ptr));
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+    let one = b.int32(1);
+    let index = b.binop(fir::FirBinOp::And, i0, one, FirType::Int32);
+    let sample = b.load_table("fTable", AccessType::Struct, index, FirType::FaustFloat);
+    let write = b.store_table("output0", AccessType::Stack, i0, sample);
+    let loop_body = b.block(&[write]);
+    let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+    let compute_body = b.block(&[out_alias, sample_loop]);
+
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &[
+            NamedType {
+                name: "dsp".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "count".to_owned(),
+                typ: FirType::Int32,
+            },
+            NamedType {
+                name: "inputs".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+            NamedType {
+                name: "outputs".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            },
+        ],
+        Some(compute_body),
+        false,
+    );
+
+    let functions = b.block(&[instance_constants, compute]);
+    let module = b.module(
+        0,
+        1,
+        "instance_constants_struct_table",
         dsp_struct,
         globals,
         functions,
