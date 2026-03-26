@@ -181,6 +181,90 @@ pub struct WasmArtifactBundle {
     pub compile_options: String,
 }
 
+/// Auxiliary file payload planned for future `generateAuxFiles` support in the
+/// Rust `faustwasm` service surface.
+///
+/// Mapping status: `deferred`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuxFileArtifact {
+    /// Logical relative output path.
+    pub path: String,
+    /// Raw file contents. Text files use UTF-8 bytes.
+    pub content: Vec<u8>,
+    /// Whether the payload should be interpreted as binary.
+    pub binary: bool,
+}
+
+/// Request payload reserved for future `expandDSP(...)` parity support.
+///
+/// Mapping status: `deferred`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpandDspRequest {
+    /// Logical source name reported in diagnostics.
+    pub source_name: String,
+    /// Faust DSP source text to expand.
+    pub source: String,
+    /// Raw argument string as passed by `faustwasm`.
+    pub args: String,
+}
+
+/// Request payload reserved for future `generateAuxFiles(...)` parity support.
+///
+/// Mapping status: `deferred`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerateAuxFilesRequest {
+    /// Logical source name reported in diagnostics.
+    pub source_name: String,
+    /// Faust DSP source text used to generate the outputs.
+    pub source: String,
+    /// Raw argument string as passed by `faustwasm`.
+    pub args: String,
+}
+
+/// Structured error returned by the `faustwasm`-oriented compiler service
+/// methods when the requested helper surface is not implemented yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaustwasmServiceError {
+    /// Stable machine-readable reason code.
+    pub code: FaustwasmServiceErrorCode,
+    /// User-facing explanation intended for JS-side propagation.
+    pub message: String,
+}
+
+/// Stable error codes for the `faustwasm` helper-service surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaustwasmServiceErrorCode {
+    /// The requested operation/key exists conceptually but is not implemented
+    /// yet in the Rust service layer.
+    Unsupported,
+    /// The caller passed an unknown query key.
+    InvalidArgument,
+}
+
+impl FaustwasmServiceError {
+    fn unsupported(message: impl Into<String>) -> Self {
+        Self {
+            code: FaustwasmServiceErrorCode::Unsupported,
+            message: message.into(),
+        }
+    }
+
+    fn invalid_argument(message: impl Into<String>) -> Self {
+        Self {
+            code: FaustwasmServiceErrorCode::InvalidArgument,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for FaustwasmServiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for FaustwasmServiceError {}
+
 /// FIR verifier configuration used at the compiler facade / CLI integration layer.
 ///
 /// The facade keeps verifier policy explicit because different workflows need
@@ -1009,6 +1093,52 @@ impl Compiler {
         options: &WasmOptions,
     ) -> Result<WasmArtifactBundle, CompilerError> {
         self.compile_file_to_wasm_artifact(path, &[], options)
+    }
+
+    /// Returns one `faustwasm` helper-info string.
+    ///
+    /// Current compatibility policy is intentionally strict and explicit:
+    /// - supported now: `version`, `help`
+    /// - explicit stub: `libdir`, `includedir`, `archdir`, `dspdir`,
+    ///   `pathslist`
+    /// - invalid: any unknown key
+    pub fn get_faustwasm_info(&self, what: &str) -> Result<String, FaustwasmServiceError> {
+        match what {
+            "version" => Ok(Self::version().to_owned()),
+            "help" => Ok(faustwasm_info_help_text()),
+            "libdir" | "includedir" | "archdir" | "dspdir" | "pathslist" => {
+                Err(FaustwasmServiceError::unsupported(format!(
+                    "getInfos({what}) is not implemented yet in the Rust faustwasm service"
+                )))
+            }
+            _ => Err(FaustwasmServiceError::invalid_argument(format!(
+                "incorrect argument passed to getInfos: {what}"
+            ))),
+        }
+    }
+
+    /// Stub for the future `expandDSP(...)` helper service.
+    ///
+    /// The request/response contract is present so bindings can stabilize their
+    /// call flow now, while the actual expansion semantics remain deferred.
+    pub fn expand_dsp(&self, _request: &ExpandDspRequest) -> Result<String, FaustwasmServiceError> {
+        Err(FaustwasmServiceError::unsupported(
+            "expandDSP is not implemented yet in the Rust faustwasm service",
+        ))
+    }
+
+    /// Stub for the future `generateAuxFiles(...)` helper service.
+    ///
+    /// The request/response contract is present so bindings can stabilize their
+    /// call flow now, while the actual aux-file generation semantics remain
+    /// deferred.
+    pub fn generate_aux_files(
+        &self,
+        _request: &GenerateAuxFilesRequest,
+    ) -> Result<Vec<AuxFileArtifact>, FaustwasmServiceError> {
+        Err(FaustwasmServiceError::unsupported(
+            "generateAuxFiles is not implemented yet in the Rust faustwasm service",
+        ))
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -2243,6 +2373,21 @@ fn source_name_to_filename(source_name: &str) -> String {
         .to_owned()
 }
 
+fn faustwasm_info_help_text() -> String {
+    let mut out = String::new();
+    out.push_str("faust-rs faustwasm helper info\n");
+    out.push_str("supported keys:\n");
+    out.push_str("- version\n");
+    out.push_str("- help\n");
+    out.push_str("stubbed keys (unsupported for now):\n");
+    out.push_str("- libdir\n");
+    out.push_str("- includedir\n");
+    out.push_str("- archdir\n");
+    out.push_str("- dspdir\n");
+    out.push_str("- pathslist\n");
+    out
+}
+
 struct StrictJsonContext {
     filename: String,
     include_pathnames: Vec<String>,
@@ -3414,9 +3559,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        Compiler, CompilerError, WasmArtifactRequest, build_import_search_paths,
-        compile_options_json_string, default_import_search_paths, golden_snapshot,
-        make_compute_fir_signature, resolve_module_name, resolve_ui_root_label,
+        Compiler, CompilerError, ExpandDspRequest, GenerateAuxFilesRequest, WasmArtifactRequest,
+        build_import_search_paths, compile_options_json_string, default_import_search_paths,
+        golden_snapshot, make_compute_fir_signature, resolve_module_name, resolve_ui_root_label,
     };
     use codegen::backends::wasm::WasmOptions;
 
@@ -3828,5 +3973,55 @@ mod tests {
         );
         assert_eq!(compile_options_json_string(None, false), "-single");
         assert_eq!(compile_options_json_string(None, true), "-double");
+    }
+
+    #[test]
+    fn compiler_get_faustwasm_info_supports_version_and_help_only() {
+        let compiler = Compiler::new();
+
+        assert_eq!(
+            compiler
+                .get_faustwasm_info("version")
+                .expect("version should be supported"),
+            Compiler::version()
+        );
+        let help = compiler
+            .get_faustwasm_info("help")
+            .expect("help should be supported");
+        assert!(help.contains("supported keys"));
+        assert!(help.contains("stubbed keys"));
+
+        let unsupported = compiler
+            .get_faustwasm_info("libdir")
+            .expect_err("libdir should stay stubbed");
+        assert!(unsupported.message.contains("not implemented yet"));
+
+        let invalid = compiler
+            .get_faustwasm_info("wat")
+            .expect_err("unknown keys should be rejected");
+        assert!(invalid.message.contains("incorrect argument"));
+    }
+
+    #[test]
+    fn compiler_expand_dsp_and_generate_aux_files_are_explicit_stubs() {
+        let compiler = Compiler::new();
+
+        let expand = compiler
+            .expand_dsp(&ExpandDspRequest {
+                source_name: "osc.dsp".to_owned(),
+                source: "process = 0;".to_owned(),
+                args: String::new(),
+            })
+            .expect_err("expand_dsp should stay stubbed");
+        assert!(expand.message.contains("expandDSP"));
+
+        let generate = compiler
+            .generate_aux_files(&GenerateAuxFilesRequest {
+                source_name: "osc.dsp".to_owned(),
+                source: "process = 0;".to_owned(),
+                args: String::new(),
+            })
+            .expect_err("generate_aux_files should stay stubbed");
+        assert!(generate.message.contains("generateAuxFiles"));
     }
 }
