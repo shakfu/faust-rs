@@ -5,7 +5,7 @@ use crate::fixtures::{
     build_sine_phasor_test_module, build_table_state_delay_test_module,
 };
 
-use fir::{AccessType, FirBuilder, FirId, FirMathOp, FirStore, FirType, NamedType};
+use fir::{AccessType, FirBuilder, FirId, FirMathOp, FirStore, FirType, NamedType, SliderRange};
 
 use wasmparser::{Operator, Parser, Payload, Validator};
 
@@ -360,7 +360,7 @@ fn wasm_module_emits_static_table_data_segments() {
                     saw_json = true;
                     json_offset = Some(offset);
                 }
-                if offset == 4 && data == [0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 64] {
+                if offset == 0 && data == [0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 64] {
                     saw_table = true;
                     table_offset = Some(offset);
                 }
@@ -369,7 +369,7 @@ fn wasm_module_emits_static_table_data_segments() {
     }
     assert!(saw_json);
     assert!(saw_table);
-    assert_eq!(table_offset, Some(4));
+    assert_eq!(table_offset, Some(0));
     assert!(
         json_offset.expect("json data segment offset should be recorded")
             >= out.memory_layout.io_zone_offset as i32
@@ -624,7 +624,7 @@ fn wasm_layout_tracks_struct_offsets_for_sine_fixture() {
         .expect("sine fixture layout should compute");
 
     assert_eq!(layout.struct_size, 16);
-    assert_eq!(layout.tables_offset, 16);
+    assert_eq!(layout.tables_offset, 0);
     assert_eq!(layout.io_zone_offset, 16);
     assert_eq!(layout.field_offsets["fFreq"].offset, 0);
     assert_eq!(layout.field_offsets["fFreq"].size, 4);
@@ -682,13 +682,23 @@ fn wasm_layout_places_static_tables_after_struct_region() {
     let layout = WasmMemoryLayout::from_module(&store, module, &WasmOptions::default(), 32)
         .expect("layout with static table should compute");
 
-    assert_eq!(layout.struct_size, 4);
-    assert_eq!(layout.tables_offset, 4);
-    assert_eq!(layout.field_offsets["fGain"].offset, 0);
-    assert_eq!(layout.field_offsets["wav"].offset, 4);
+    assert_eq!(layout.struct_size, 16);
+    assert_eq!(layout.tables_offset, 0);
+    assert_eq!(layout.field_offsets["wav"].offset, 0);
     assert_eq!(layout.field_offsets["wav"].size, 12);
+    assert_eq!(layout.field_offsets["fGain"].offset, 12);
     assert_eq!(layout.io_zone_offset, 16);
     assert!(layout.json_offset >= layout.io_zone_offset);
+}
+
+#[test]
+fn wasm_json_indices_follow_runtime_offsets_after_static_tables() {
+    let (store, module) = build_static_table_ui_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM backend should expose UI indices as runtime byte offsets");
+
+    assert!(out.dsp_json.contains("\"address\":\"/StaticTableUI/gain\""));
+    assert!(out.dsp_json.contains("\"index\":12"));
 }
 
 fn build_sample_rate_state_module() -> (FirStore, FirId) {
@@ -708,6 +718,60 @@ fn build_sample_rate_state_module() -> (FirStore, FirId) {
     let functions = b.block(&[compute]);
     let static_decls = b.block(&[]);
     let module = b.module(0, 1, "sr_dsp", dsp_struct, globals, functions, static_decls);
+    (store, module)
+}
+
+fn build_static_table_ui_module() -> (FirStore, FirId) {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let gain = b.declare_var("fGain", FirType::FaustFloat, AccessType::Struct, None);
+    let dsp_struct = b.block(&[gain]);
+    let globals = b.block(&[]);
+
+    let zero = b.float32(0.0);
+    let one = b.float32(1.0);
+    let two = b.float32(2.0);
+    let wav = b.declare_table("wav", AccessType::Static, FirType::Float32, &[zero, one, two]);
+    let static_decls = b.block(&[wav]);
+
+    let open = b.open_box(fir::UiBoxType::Vertical, "StaticTableUI");
+    let add = b.add_slider(
+        fir::SliderType::Horizontal,
+        "gain",
+        "fGain",
+        SliderRange {
+            init: 0.5,
+            lo: 0.0,
+            hi: 1.0,
+            step: 0.01,
+        },
+    );
+    let close = b.close_box();
+    let ui_body = b.block(&[open, add, close]);
+    let ui = b.declare_fun(
+        "buildUserInterface",
+        FirType::Fun {
+            args: vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::UI],
+            ret: Box::new(FirType::Void),
+        },
+        &[
+            NamedType {
+                name: "dsp".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "ui_interface".to_owned(),
+                typ: FirType::UI,
+            },
+        ],
+        Some(ui_body),
+        false,
+    );
+
+    let compute = declare_trivial_compute(&mut b);
+    let functions = b.block(&[ui, compute]);
+    let module = b.module(0, 1, "static_table_ui", dsp_struct, globals, functions, static_decls);
     (store, module)
 }
 
