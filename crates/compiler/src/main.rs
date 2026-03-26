@@ -808,6 +808,18 @@ fn emit_binary_output(content: &[u8], output: Option<&PathBuf>) {
     }
 }
 
+/// Writes a WASM binary and, when writing to a file path, the companion JSON
+/// metadata file next to it using the same stem and a `.json` extension.
+fn emit_wasm_output(wasm_binary: &[u8], dsp_json: &str, output: Option<&PathBuf>) {
+    if let Some(path) = output {
+        emit_binary_output(wasm_binary, Some(path));
+        let json_path = path.with_extension("json");
+        emit_output(dsp_json, Some(&json_path));
+    } else {
+        emit_binary_output(wasm_binary, None);
+    }
+}
+
 /// Renders a short Cranelift backend status report for the CLI.
 fn render_cranelift_report(
     compiled: &codegen::backends::cranelift::JitDspModule,
@@ -1632,7 +1644,7 @@ fn main() {
         timer.phase("wasm-codegen");
 
         match result {
-            Ok(wasm) => emit_binary_output(&wasm.wasm_binary, cli.output.as_ref()),
+            Ok(wasm) => emit_wasm_output(&wasm.wasm_binary, &wasm.dsp_json, cli.output.as_ref()),
             Err(err) => {
                 eprintln!("WASM pipeline failed: {err}");
                 print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
@@ -1772,6 +1784,7 @@ fn main() {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use clap::{CommandFactory, Parser};
     use compiler::Compiler;
@@ -1780,7 +1793,7 @@ mod tests {
     use signals::{SigMatch, match_sig};
 
     use super::{
-        CliArgs, CliLang, ErrorVerbosity, format_diagnostics_human,
+        CliArgs, CliLang, ErrorVerbosity, emit_wasm_output, format_diagnostics_human,
         format_diagnostics_human_with_verbosity, format_diagnostics_json,
         format_diagnostics_json_with_verbosity, normalize_legacy_args,
     };
@@ -1841,6 +1854,39 @@ mod tests {
     fn cli_parse_accepts_lang_wasm() {
         let cli = CliArgs::parse_from(["faust-rs", "--lang", "wasm", "foo.dsp"]);
         assert!(matches!(cli.lang, Some(CliLang::Wasm)));
+    }
+
+    #[test]
+    fn emit_wasm_output_writes_companion_json_next_to_wasm_file() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "faust_rs_wasm_emit_test_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(&dir).expect("temp dir should be created");
+        let wasm_path = dir.join("voice.wasm");
+
+        emit_wasm_output(
+            b"\0asm\x01\0\0\0",
+            "{\"backend\":\"wasm\"}",
+            Some(&wasm_path),
+        );
+
+        let json_path = dir.join("voice.json");
+        assert_eq!(
+            fs::read(&wasm_path).expect("wasm output should exist"),
+            b"\0asm\x01\0\0\0"
+        );
+        assert_eq!(
+            fs::read_to_string(&json_path).expect("json output should exist"),
+            "{\"backend\":\"wasm\"}"
+        );
+
+        fs::remove_dir_all(&dir).expect("temp dir should be removed");
     }
 
     #[test]
