@@ -1,4 +1,4 @@
-use super::{WasmMemoryLayout, WasmOptions, generate_wasm_module};
+use super::{WasmJsonDescription, WasmMemoryLayout, WasmOptions, generate_wasm_module};
 use crate::fixtures::{
     build_control_flow_test_module, build_math_intrinsics_test_module,
     build_passthrough_test_module, build_sine_phasor_test_module,
@@ -20,6 +20,44 @@ fn wasm_scaffold_emits_valid_module_for_passthrough_fixture() {
         .expect("generated scaffold should validate as WASM");
     assert!(out.dsp_json.contains("\"inputs\":1"));
     assert!(out.dsp_json.contains("\"outputs\":1"));
+}
+
+#[test]
+fn wasm_json_description_renders_stable_scaffold_shape() {
+    let json = WasmJsonDescription {
+        name: "passthrough".to_owned(),
+        backend: "wasm",
+        scaffold: true,
+        double_precision: false,
+        internal_memory: true,
+        inputs: 1,
+        outputs: 2,
+    }
+    .render();
+
+    assert_eq!(
+        json,
+        "{\"name\":\"passthrough\",\"backend\":\"wasm\",\"scaffold\":true,\"double_precision\":false,\"internal_memory\":true,\"inputs\":1,\"outputs\":2}"
+    );
+}
+
+#[test]
+fn wasm_json_description_escapes_string_fields() {
+    let json = WasmJsonDescription {
+        name: "quote\"slash\\tab\tline\n".to_owned(),
+        backend: "wasm",
+        scaffold: true,
+        double_precision: true,
+        internal_memory: false,
+        inputs: 0,
+        outputs: 0,
+    }
+    .render();
+
+    assert!(
+        json.contains("\"name\":\"quote\\\"slash\\\\tab\\tline\\n\""),
+        "escaped JSON should preserve control characters and quotes: {json}"
+    );
 }
 
 #[test]
