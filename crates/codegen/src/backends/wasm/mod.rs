@@ -12,7 +12,7 @@
 //! - Most function bodies started as trivial placeholders; the current step now
 //!   lowers a narrow but real `compute` subset for mono passthrough-style FIR.
 
-use fir::{AccessType, FirId, FirMatch, FirStore, FirType, match_fir};
+use fir::{AccessType, FirId, FirMatch, FirMathOp, FirStore, FirType, match_fir};
 use std::collections::HashMap;
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection,
@@ -574,6 +574,7 @@ struct WasmLocal {
 /// - `StoreTable(kStack aliases)`
 /// - `LoadTable/StoreTable(kStruct)`
 /// - `Select2`
+/// - native WASM math `FunCall` subset (`fabs/fmin/fmax/sqrt/floor/ceil`)
 ///
 /// This is intentionally narrow so the backend can start executing the
 /// canonical mono passthrough fixture while unsupported FIR still falls back to
@@ -968,6 +969,15 @@ impl ComputeSubsetLowerer<'_> {
                 function.instruction(&Instruction::Select);
                 Ok(())
             }
+            FirMatch::FunCall { name, args, typ } => {
+                let math = FirMathOp::from_symbol(&name).ok_or_else(|| {
+                    WasmBackendError::new(
+                        WasmBackendErrorCode::UnsupportedFirNode,
+                        format!("unsupported function call in WASM subset: `{name}`"),
+                    )
+                })?;
+                self.lower_native_math_call(math, &args, &typ, function)
+            }
             other => Err(WasmBackendError::new(
                 WasmBackendErrorCode::UnsupportedFirNode,
                 format!("unsupported compute expression in WASM subset: {other:?}"),
@@ -1056,6 +1066,88 @@ impl ComputeSubsetLowerer<'_> {
         };
         function.instruction(&instr);
         Ok(())
+    }
+
+    fn lower_native_math_call(
+        &mut self,
+        math: FirMathOp,
+        args: &[FirId],
+        typ: &FirType,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        match (math, wasm_val_type_for_fir(typ, self.options)?, args) {
+            (FirMathOp::Abs, ValType::F32, [x]) => {
+                self.lower_expr(*x, function)?;
+                function.instruction(&Instruction::F32Abs);
+                Ok(())
+            }
+            (FirMathOp::Abs, ValType::F64, [x]) => {
+                self.lower_expr(*x, function)?;
+                function.instruction(&Instruction::F64Abs);
+                Ok(())
+            }
+            (FirMathOp::Sqrt, ValType::F32, [x]) => {
+                self.lower_expr(*x, function)?;
+                function.instruction(&Instruction::F32Sqrt);
+                Ok(())
+            }
+            (FirMathOp::Sqrt, ValType::F64, [x]) => {
+                self.lower_expr(*x, function)?;
+                function.instruction(&Instruction::F64Sqrt);
+                Ok(())
+            }
+            (FirMathOp::Floor, ValType::F32, [x]) => {
+                self.lower_expr(*x, function)?;
+                function.instruction(&Instruction::F32Floor);
+                Ok(())
+            }
+            (FirMathOp::Floor, ValType::F64, [x]) => {
+                self.lower_expr(*x, function)?;
+                function.instruction(&Instruction::F64Floor);
+                Ok(())
+            }
+            (FirMathOp::Ceil, ValType::F32, [x]) => {
+                self.lower_expr(*x, function)?;
+                function.instruction(&Instruction::F32Ceil);
+                Ok(())
+            }
+            (FirMathOp::Ceil, ValType::F64, [x]) => {
+                self.lower_expr(*x, function)?;
+                function.instruction(&Instruction::F64Ceil);
+                Ok(())
+            }
+            (FirMathOp::Min, ValType::F32, [x, y]) => {
+                self.lower_expr(*x, function)?;
+                self.lower_expr(*y, function)?;
+                function.instruction(&Instruction::F32Min);
+                Ok(())
+            }
+            (FirMathOp::Min, ValType::F64, [x, y]) => {
+                self.lower_expr(*x, function)?;
+                self.lower_expr(*y, function)?;
+                function.instruction(&Instruction::F64Min);
+                Ok(())
+            }
+            (FirMathOp::Max, ValType::F32, [x, y]) => {
+                self.lower_expr(*x, function)?;
+                self.lower_expr(*y, function)?;
+                function.instruction(&Instruction::F32Max);
+                Ok(())
+            }
+            (FirMathOp::Max, ValType::F64, [x, y]) => {
+                self.lower_expr(*x, function)?;
+                self.lower_expr(*y, function)?;
+                function.instruction(&Instruction::F64Max);
+                Ok(())
+            }
+            _ => Err(WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                format!(
+                    "unsupported native WASM math subset call: {math:?} / {typ:?} / argc={}",
+                    args.len()
+                ),
+            )),
+        }
     }
 }
 
