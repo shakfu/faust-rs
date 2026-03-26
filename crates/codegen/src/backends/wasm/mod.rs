@@ -9,14 +9,15 @@
 //! - Step-1 scaffold for the WASM backend plan.
 //! - Emits a valid `.wasm` module skeleton with the canonical Faust DSP export
 //!   names, memory section/import, and JSON metadata data segment.
-//! - Function bodies are intentionally trivial placeholders; FIR instruction
-//!   lowering is deferred to the next implementation steps.
+//! - Most function bodies started as trivial placeholders; the current step now
+//!   lowers a narrow but real `compute` subset for mono passthrough-style FIR.
 
-use fir::{FirId, FirMatch, FirStore, match_fir};
+use fir::{AccessType, FirId, FirMatch, FirStore, FirType, match_fir};
+use std::collections::HashMap;
 use wasm_encoder::{
-    CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection, Function,
-    FunctionSection, ImportSection, Instruction, MemArg, MemorySection, MemoryType, Module,
-    TypeSection, ValType,
+    BlockType, CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection,
+    Function, FunctionSection, ImportSection, Instruction, MemArg, MemorySection, MemoryType,
+    Module, TypeSection, ValType,
 };
 
 pub mod layout;
@@ -338,6 +339,18 @@ pub fn generate_wasm_module(
     }
     wasm.section(&exports);
 
+    let import_count = u32::from(!options.internal_memory);
+    let compute_body = function_items
+        .iter()
+        .copied()
+        .find_map(|id| match match_fir(store, id) {
+            FirMatch::DeclareFun {
+                ref name,
+                body: Some(body),
+                ..
+            } if name == "compute" => Some(body),
+            _ => None,
+        });
     let mut code = CodeSection::new();
     for func in WasmFunc::ALL {
         code.function(&scaffold_function_body(
@@ -346,6 +359,10 @@ pub fn generate_wasm_module(
             num_outputs as i32,
             real_ty,
             memory_layout.field_offsets.get("fSampleRate"),
+            import_count,
+            store,
+            compute_body,
+            options,
         ));
     }
     wasm.section(&code);
@@ -423,14 +440,24 @@ fn scaffold_function_body(
     num_outputs: i32,
     real_ty: ValType,
     sample_rate_field: Option<&FieldLayout>,
+    _import_count: u32,
+    store: &FirStore,
+    compute_body: Option<FirId>,
+    options: &WasmOptions,
 ) -> Function {
     let mut function = Function::new(Vec::new());
     match func {
         WasmFunc::ClassInit
-        | WasmFunc::Compute
         | WasmFunc::InstanceClear
         | WasmFunc::InstanceResetUserInterface
         | WasmFunc::SetParamValue => {}
+        WasmFunc::Compute => {
+            if let Some(body) = compute_body
+                && let Ok(lowered) = lower_compute_subset(store, body, options)
+            {
+                return lowered;
+            }
+        }
         WasmFunc::GetNumInputs => {
             function.instruction(&Instruction::I32Const(num_inputs));
         }
@@ -522,4 +549,415 @@ fn function_index_for_body(func: WasmFunc) -> u32 {
         .iter()
         .position(|item| *item == func)
         .expect("function present in static WASM function list") as u32
+}
+
+#[derive(Clone, Debug)]
+struct WasmLocal {
+    index: u32,
+    typ: FirType,
+}
+
+/// Partial `compute` subset lowerer for the current WASM bring-up phase.
+///
+/// # Source provenance (C++)
+/// - `compiler/generator/wasm/wasm_code_container.cpp`
+/// - `compiler/generator/wasm/wasm_instructions.hh`
+///
+/// # Supported subset
+/// - `Block`
+/// - local `DeclareVar(kStack)`
+/// - `SimpleForLoop` (forward only)
+/// - `LoadVar(kFunArgs=count | kLoop | kStack)`
+/// - `LoadTable(kFunArgs=inputs/outputs | kStack aliases)`
+/// - `StoreTable(kStack aliases)`
+///
+/// This is intentionally narrow so the backend can start executing the
+/// canonical mono passthrough fixture while unsupported FIR still falls back to
+/// the valid no-op body.
+fn lower_compute_subset(
+    store: &FirStore,
+    body: FirId,
+    options: &WasmOptions,
+) -> Result<Function, WasmBackendError> {
+    let mut local_specs = Vec::new();
+    collect_compute_locals(store, body, &mut local_specs)?;
+
+    let mut local_map = HashMap::with_capacity(local_specs.len());
+    let mut wasm_locals = Vec::with_capacity(local_specs.len());
+    let mut next_local = 4u32;
+    for (name, typ) in local_specs {
+        local_map.insert(
+            name,
+            WasmLocal {
+                index: next_local,
+                typ: typ.clone(),
+            },
+        );
+        wasm_locals.push((1, wasm_val_type_for_fir(&typ, options)?));
+        next_local += 1;
+    }
+
+    let mut function = Function::new(wasm_locals);
+    let mut lowerer = ComputeSubsetLowerer {
+        store,
+        options,
+        locals: local_map,
+    };
+    lowerer.lower_block_into(body, &mut function)?;
+    function.instruction(&Instruction::End);
+    Ok(function)
+}
+
+fn collect_compute_locals(
+    store: &FirStore,
+    id: FirId,
+    out: &mut Vec<(String, FirType)>,
+) -> Result<(), WasmBackendError> {
+    match match_fir(store, id) {
+        FirMatch::Block(items) => {
+            for item in items {
+                collect_compute_locals(store, item, out)?;
+            }
+            Ok(())
+        }
+        FirMatch::DeclareVar {
+            name,
+            typ,
+            access: AccessType::Stack,
+            ..
+        } => {
+            if !out.iter().any(|(known, _)| known == &name) {
+                out.push((name, typ));
+            }
+            Ok(())
+        }
+        FirMatch::SimpleForLoop {
+            var,
+            body,
+            is_reverse: false,
+            ..
+        } => {
+            if !out.iter().any(|(known, _)| known == &var) {
+                out.push((var, FirType::Int32));
+            }
+            collect_compute_locals(store, body, out)
+        }
+        FirMatch::DeclareFun { .. }
+        | FirMatch::StoreTable { .. }
+        | FirMatch::StoreVar { .. }
+        | FirMatch::NullStatement
+        | FirMatch::Return(None) => Ok(()),
+        other => Err(WasmBackendError::new(
+            WasmBackendErrorCode::UnsupportedFirNode,
+            format!("unsupported compute local collector node in WASM subset: {other:?}"),
+        )),
+    }
+}
+
+struct ComputeSubsetLowerer<'a> {
+    store: &'a FirStore,
+    options: &'a WasmOptions,
+    locals: HashMap<String, WasmLocal>,
+}
+
+impl ComputeSubsetLowerer<'_> {
+    fn lower_block_into(
+        &mut self,
+        id: FirId,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        let FirMatch::Block(items) = match_fir(self.store, id) else {
+            return Err(WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                "compute subset expected FIR Block body",
+            ));
+        };
+        for item in items {
+            self.lower_stmt(item, function)?;
+        }
+        Ok(())
+    }
+
+    fn lower_stmt(&mut self, id: FirId, function: &mut Function) -> Result<(), WasmBackendError> {
+        match match_fir(self.store, id) {
+            FirMatch::Block(_) => self.lower_block_into(id, function),
+            FirMatch::DeclareVar {
+                name,
+                access: AccessType::Stack,
+                init,
+                ..
+            } => {
+                let local = self.local(&name)?.clone();
+                if let Some(init) = init {
+                    self.lower_expr(init, function)?;
+                } else {
+                    self.emit_default_value(&local.typ, function)?;
+                }
+                function.instruction(&Instruction::LocalSet(local.index));
+                Ok(())
+            }
+            FirMatch::SimpleForLoop {
+                var,
+                upper,
+                body,
+                is_reverse: false,
+            } => self.lower_simple_for(var, upper, body, function),
+            FirMatch::StoreTable {
+                name,
+                access: AccessType::Stack,
+                index,
+                value,
+            } => self.lower_store_table_stack(&name, index, value, function),
+            FirMatch::NullStatement | FirMatch::Return(None) => Ok(()),
+            other => Err(WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                format!("unsupported compute statement in WASM subset: {other:?}"),
+            )),
+        }
+    }
+
+    fn lower_simple_for(
+        &mut self,
+        var: String,
+        upper: FirId,
+        body: FirId,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        let local = self.local(&var)?.clone();
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::LocalSet(local.index));
+        function.instruction(&Instruction::Block(BlockType::Empty));
+        function.instruction(&Instruction::Loop(BlockType::Empty));
+        function.instruction(&Instruction::LocalGet(local.index));
+        self.lower_expr(upper, function)?;
+        function.instruction(&Instruction::I32GeS);
+        function.instruction(&Instruction::BrIf(1));
+        self.lower_block_into(body, function)?;
+        function.instruction(&Instruction::LocalGet(local.index));
+        function.instruction(&Instruction::I32Const(1));
+        function.instruction(&Instruction::I32Add);
+        function.instruction(&Instruction::LocalSet(local.index));
+        function.instruction(&Instruction::Br(0));
+        function.instruction(&Instruction::End);
+        function.instruction(&Instruction::End);
+        Ok(())
+    }
+
+    fn lower_store_table_stack(
+        &mut self,
+        name: &str,
+        index: FirId,
+        value: FirId,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        let local = self.local(name)?;
+        let elem_type = stack_alias_pointee(&local.typ)?;
+        function.instruction(&Instruction::LocalGet(local.index));
+        self.lower_index_offset(index, &elem_type, function)?;
+        function.instruction(&Instruction::I32Add);
+        self.lower_expr(value, function)?;
+        function.instruction(&store_instruction_for_type(&elem_type, self.options)?);
+        Ok(())
+    }
+
+    fn lower_expr(&mut self, id: FirId, function: &mut Function) -> Result<(), WasmBackendError> {
+        match match_fir(self.store, id) {
+            FirMatch::Int32 { value, .. } => {
+                function.instruction(&Instruction::I32Const(value));
+                Ok(())
+            }
+            FirMatch::Float32 { value, .. } => {
+                function.instruction(&Instruction::F32Const(value));
+                Ok(())
+            }
+            FirMatch::Float64 { value, .. } => {
+                function.instruction(&Instruction::F64Const(value));
+                Ok(())
+            }
+            FirMatch::LoadVar {
+                name,
+                access: AccessType::FunArgs,
+                ..
+            } if name == "count" => {
+                function.instruction(&Instruction::LocalGet(1));
+                Ok(())
+            }
+            FirMatch::LoadVar {
+                name,
+                access: AccessType::Loop | AccessType::Stack,
+                ..
+            } => {
+                let local = self.local(&name)?;
+                function.instruction(&Instruction::LocalGet(local.index));
+                Ok(())
+            }
+            FirMatch::LoadTable {
+                name,
+                access: AccessType::FunArgs,
+                index,
+                typ,
+            } if name == "inputs" || name == "outputs" => {
+                function.instruction(&Instruction::LocalGet(fun_arg_local_index(&name)));
+                self.lower_index_offset(index, &FirType::Ptr(Box::new(FirType::Void)), function)?;
+                function.instruction(&Instruction::I32Add);
+                if matches!(typ, FirType::Ptr(_)) {
+                    function.instruction(&Instruction::I32Load(memarg(0)));
+                    Ok(())
+                } else {
+                    Err(WasmBackendError::new(
+                        WasmBackendErrorCode::UnsupportedFirNode,
+                        format!(
+                            "expected pointer type for function-arg table `{name}`, got {typ:?}"
+                        ),
+                    ))
+                }
+            }
+            FirMatch::LoadTable {
+                name,
+                access: AccessType::Stack,
+                index,
+                typ,
+            } => {
+                let local = self.local(&name)?;
+                let elem_type = stack_alias_pointee(&local.typ)?;
+                function.instruction(&Instruction::LocalGet(local.index));
+                self.lower_index_offset(index, &elem_type, function)?;
+                function.instruction(&Instruction::I32Add);
+                function.instruction(&load_instruction_for_type(&typ, self.options)?);
+                Ok(())
+            }
+            other => Err(WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                format!("unsupported compute expression in WASM subset: {other:?}"),
+            )),
+        }
+    }
+
+    fn lower_index_offset(
+        &mut self,
+        index: FirId,
+        elem_type: &FirType,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        self.lower_expr(index, function)?;
+        function.instruction(&Instruction::I32Const(elem_size_bytes(
+            elem_type,
+            self.options,
+        )?));
+        function.instruction(&Instruction::I32Mul);
+        Ok(())
+    }
+
+    fn emit_default_value(
+        &self,
+        typ: &FirType,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        match wasm_val_type_for_fir(typ, self.options)? {
+            ValType::I32 => function.instruction(&Instruction::I32Const(0)),
+            ValType::I64 => function.instruction(&Instruction::I64Const(0)),
+            ValType::F32 => function.instruction(&Instruction::F32Const(0.0)),
+            ValType::F64 => function.instruction(&Instruction::F64Const(0.0)),
+            other => {
+                return Err(WasmBackendError::new(
+                    WasmBackendErrorCode::UnsupportedFirNode,
+                    format!("unsupported WASM local default type: {other:?}"),
+                ));
+            }
+        };
+        Ok(())
+    }
+
+    fn local(&self, name: &str) -> Result<&WasmLocal, WasmBackendError> {
+        self.locals.get(name).ok_or_else(|| {
+            WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                format!("compute subset local `{name}` not found"),
+            )
+        })
+    }
+}
+
+fn wasm_val_type_for_fir(
+    typ: &FirType,
+    options: &WasmOptions,
+) -> Result<ValType, WasmBackendError> {
+    match typ {
+        FirType::Int32 | FirType::Bool | FirType::Ptr(_) | FirType::Obj | FirType::Sound => {
+            Ok(ValType::I32)
+        }
+        FirType::Int64 => Ok(ValType::I64),
+        FirType::Float32 => Ok(ValType::F32),
+        FirType::Float64 => Ok(ValType::F64),
+        FirType::FaustFloat => Ok(if options.double_precision {
+            ValType::F64
+        } else {
+            ValType::F32
+        }),
+        other => Err(WasmBackendError::new(
+            WasmBackendErrorCode::UnsupportedFirNode,
+            format!("unsupported FIR type in WASM subset: {other:?}"),
+        )),
+    }
+}
+
+fn elem_size_bytes(typ: &FirType, options: &WasmOptions) -> Result<i32, WasmBackendError> {
+    match wasm_val_type_for_fir(typ, options)? {
+        ValType::I32 | ValType::F32 => Ok(4),
+        ValType::I64 | ValType::F64 => Ok(8),
+        other => Err(WasmBackendError::new(
+            WasmBackendErrorCode::UnsupportedFirNode,
+            format!("unsupported element type width in WASM subset: {other:?}"),
+        )),
+    }
+}
+
+fn stack_alias_pointee(typ: &FirType) -> Result<FirType, WasmBackendError> {
+    match typ {
+        FirType::Ptr(inner) => Ok((**inner).clone()),
+        other => Err(WasmBackendError::new(
+            WasmBackendErrorCode::UnsupportedFirNode,
+            format!("expected stack alias pointer type, got {other:?}"),
+        )),
+    }
+}
+
+fn fun_arg_local_index(name: &str) -> u32 {
+    match name {
+        "inputs" => 2,
+        "outputs" => 3,
+        other => panic!("unexpected function-arg table local `{other}`"),
+    }
+}
+
+fn load_instruction_for_type(
+    typ: &FirType,
+    options: &WasmOptions,
+) -> Result<Instruction<'static>, WasmBackendError> {
+    match wasm_val_type_for_fir(typ, options)? {
+        ValType::I32 => Ok(Instruction::I32Load(memarg(0))),
+        ValType::I64 => Ok(Instruction::I64Load(memarg(0))),
+        ValType::F32 => Ok(Instruction::F32Load(memarg(0))),
+        ValType::F64 => Ok(Instruction::F64Load(memarg(0))),
+        other => Err(WasmBackendError::new(
+            WasmBackendErrorCode::UnsupportedFirNode,
+            format!("unsupported load type in WASM subset: {other:?}"),
+        )),
+    }
+}
+
+fn store_instruction_for_type(
+    typ: &FirType,
+    options: &WasmOptions,
+) -> Result<Instruction<'static>, WasmBackendError> {
+    match wasm_val_type_for_fir(typ, options)? {
+        ValType::I32 => Ok(Instruction::I32Store(memarg(0))),
+        ValType::I64 => Ok(Instruction::I64Store(memarg(0))),
+        ValType::F32 => Ok(Instruction::F32Store(memarg(0))),
+        ValType::F64 => Ok(Instruction::F64Store(memarg(0))),
+        other => Err(WasmBackendError::new(
+            WasmBackendErrorCode::UnsupportedFirNode,
+            format!("unsupported store type in WASM subset: {other:?}"),
+        )),
+    }
 }

@@ -55,6 +55,20 @@ fn wasm_scaffold_exports_canonical_faust_api_names() {
 }
 
 #[test]
+fn wasm_compute_passthrough_lowers_loop_and_sample_io() {
+    let (store, module) = build_passthrough_test_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM scaffold should emit lowered passthrough compute body");
+
+    let body = code_body_at(&out.wasm_binary, 1);
+    let ops = decode_ops(body);
+    assert!(ops.iter().any(|op| matches!(op, Operator::Loop { .. })));
+    assert!(ops.iter().any(|op| matches!(op, Operator::BrIf { .. })));
+    assert!(ops.iter().any(|op| matches!(op, Operator::F32Load { .. })));
+    assert!(ops.iter().any(|op| matches!(op, Operator::F32Store { .. })));
+}
+
+#[test]
 fn wasm_get_sample_rate_loads_struct_field_when_present() {
     let (store, module) = build_sample_rate_state_module();
     let out = generate_wasm_module(&store, module, &WasmOptions::default())
