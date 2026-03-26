@@ -1122,20 +1122,15 @@ fn force_value_to_box(
             _ => eval_box(arena, closure.expr, &closure.env, loop_detector),
         },
         EvalValue::PatternMatcher(pm) => {
-            if pm.state == 0 && pm.rev_param_list.is_empty() {
-                // Unapplied: return the original case box for later a2sb.
-                Ok(pm.case_expr)
-            } else {
-                // Partially applied: store in PM side-table and return a
-                // boxPatternMatcher(key) tree node. This avoids re-entering
-                // the evaluator (which would cause stack overflow via
-                // lower_pattern_matcher_to_symbolic → apply_value_list →
-                // eval_value → force_value_to_box cycle).
-                let key = loop_detector.store_pm(pm);
-                let mut b = BoxBuilder::new(arena);
-                let key_node = b.int(key);
-                Ok(b.pattern_matcher(key_node))
-            }
+            // Always preserve pattern matchers as explicit runtime nodes.
+            // Returning the original `case` tree for an unapplied matcher loses
+            // the captured lexical environment, which breaks higher-order uses
+            // like passing a local `case` function through another function
+            // before eventually applying it.
+            let key = loop_detector.store_pm(pm);
+            let mut b = BoxBuilder::new(arena);
+            let key_node = b.int(key);
+            Ok(b.pattern_matcher(key_node))
         }
     }
 }

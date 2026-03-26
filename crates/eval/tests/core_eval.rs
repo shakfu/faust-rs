@@ -1361,6 +1361,87 @@ fn eval_process_tupled_higher_order_locals_match_cpp_reference() {
 }
 
 #[test]
+fn eval_process_preserves_unapplied_local_case_environment_through_higher_order_call() {
+    let source = r#"
+        apply_twice(f) = f(1, 1);
+        process = apply_twice(transformer_scatter)
+        with {
+            n = 2;
+            transformer_scatter(R0, R1) = matrix(2, 2, s)
+            with {
+                s(1,1) = -1*(R0-n^2*R1)/(R0+n^2*R1);
+                s(1,2) = (2*n*R0*R1)/(R0+n^2*R1);
+                s(2,1) = (2*n*R0*R1)/(R0+n^2*R1);
+                s(2,2) = (R0-n^2*R1)/(R0+n^2*R1);
+                s(i,j) = 10;
+            };
+            matrix(M,N,f) = par(n, N, par(m, M, *(f(m+1, n+1))));
+        };
+    "#;
+    let parsed = parse_program(source, "<memory>");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept higher-order local case fixture: {:?}",
+        parsed.errors
+    );
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+
+    let out = eval_process(&mut arena, root)
+        .expect("unapplied local case values should keep captured env when passed higher-order");
+    assert!(matches!(match_box(&arena, out), BoxMatch::Par(_, _)));
+}
+
+#[test]
+fn eval_process_unapplied_local_case_higher_order_matches_cpp_reference() {
+    let root_dir = temp_root("local_case_higher_order_cpp_parity");
+    let entry = root_dir.join("main.dsp");
+    let source = r#"
+        apply_twice(f) = f(1, 1);
+        process = apply_twice(transformer_scatter)
+        with {
+            n = 2;
+            transformer_scatter(R0, R1) = matrix(2, 2, s)
+            with {
+                s(1,1) = -1*(R0-n^2*R1)/(R0+n^2*R1);
+                s(1,2) = (2*n*R0*R1)/(R0+n^2*R1);
+                s(2,1) = (2*n*R0*R1)/(R0+n^2*R1);
+                s(2,2) = (R0-n^2*R1)/(R0+n^2*R1);
+                s(i,j) = 10;
+            };
+            matrix(M,N,f) = par(n, N, par(m, M, *(f(m+1, n+1))));
+        };
+    "#;
+    fs::write(&entry, source).expect("write entry");
+
+    if let Some(cpp) = cpp_bin() {
+        let out_path = root_dir.join("main.c");
+        let cpp_ok = cpp_compiles_file(&cpp, &entry, &out_path).unwrap_or_else(|e| {
+            panic!("C++ run failed for local case higher-order eval parity: {e}")
+        });
+        assert!(
+            cpp_ok,
+            "C++ reference should compile higher-order local case closure case"
+        );
+    }
+
+    let parsed = parse_file_with_imports(&entry, std::slice::from_ref(&root_dir))
+        .expect("file-backed parse should succeed");
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept local case higher-order parity fixture: {:?}",
+        parsed.errors
+    );
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+    let ctx = EvalSourceContext::for_file(&entry, std::slice::from_ref(&root_dir));
+
+    let out = eval_process_with_source_context(&mut arena, root, ctx)
+        .expect("Rust eval should accept same higher-order local case as C++");
+    assert!(matches!(match_box(&arena, out), BoxMatch::Par(_, _)));
+}
+
+#[test]
 fn eval_case_under_application_preserves_residual_case_and_no_match_still_errors() {
     let mut arena = TreeArena::new();
     let x_ident = make_ident(&mut arena, "x");
