@@ -130,6 +130,62 @@ fn wasm_compute_lowers_struct_tables_and_select2() {
 }
 
 #[test]
+fn wasm_compute_loads_static_tables() {
+    let (store, module) = build_static_table_compute_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM scaffold should emit static-table compute body");
+
+    let body = code_body_at(&out.wasm_binary, 1);
+    let ops = decode_ops(body);
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, Operator::I32Const { value } if *value == 4))
+    );
+    assert!(ops.iter().any(|op| matches!(op, Operator::F32Load { .. })));
+    assert!(ops.iter().any(|op| matches!(op, Operator::F32Store { .. })));
+}
+
+#[test]
+fn wasm_module_emits_static_table_data_segments() {
+    let (store, module) = build_static_table_layout_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM scaffold should emit static table data segment");
+
+    let mut saw_json = false;
+    let mut saw_table = false;
+    for payload in Parser::new(0).parse_all(&out.wasm_binary) {
+        let payload = payload.expect("payload should decode");
+        if let Payload::DataSection(section) = payload {
+            for segment in section {
+                let segment = segment.expect("data segment should decode");
+                let wasmparser::DataKind::Active {
+                    memory_index: 0,
+                    offset_expr,
+                } = segment.kind
+                else {
+                    continue;
+                };
+                let mut ops = offset_expr.get_operators_reader();
+                let op = ops.read().expect("offset opcode");
+                let offset = match op {
+                    Operator::I32Const { value } => value,
+                    _ => continue,
+                };
+                let data = segment.data;
+                if offset == 0 && data.starts_with(b"{") {
+                    saw_json = true;
+                }
+                if offset == 4 && data == [0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 64] {
+                    saw_table = true;
+                }
+            }
+        }
+    }
+    assert!(saw_json);
+    assert!(saw_table);
+}
+
+#[test]
 fn wasm_compute_lowers_native_math_fun_calls() {
     let (store, module) = build_native_math_module();
     let out = generate_wasm_module(&store, module, &WasmOptions::default())
@@ -956,6 +1012,82 @@ fn build_static_table_layout_module() -> (FirStore, FirId) {
         0,
         1,
         "table_dsp",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
+    (store, module)
+}
+
+fn build_static_table_compute_module() -> (FirStore, FirId) {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let dsp_struct = b.block(&[]);
+    let globals = b.block(&[]);
+
+    let w0 = b.float32(0.0);
+    let w1 = b.float32(1.0);
+    let w2 = b.float32(2.0);
+    let wav = b.declare_table(
+        "wav",
+        AccessType::Static,
+        FirType::FaustFloat,
+        &[w0, w1, w2],
+    );
+    let static_decls = b.block(&[wav]);
+
+    let chan0 = b.int32(0);
+    let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+    let out_ptr = b.load_table("outputs", AccessType::FunArgs, chan0, ptr_ty.clone());
+    let out_alias = b.declare_var("output0", ptr_ty, AccessType::Stack, Some(out_ptr));
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+    let sample = b.load_table("wav", AccessType::Static, i0, FirType::FaustFloat);
+    let write = b.store_table("output0", AccessType::Stack, i0, sample);
+    let loop_body = b.block(&[write]);
+    let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+    let compute_body = b.block(&[out_alias, sample_loop]);
+
+    let args = [
+        NamedType {
+            name: "dsp".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "count".to_owned(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &args,
+        Some(compute_body),
+        false,
+    );
+    let functions = b.block(&[compute]);
+    let module = b.module(
+        0,
+        1,
+        "static_table_compute",
         dsp_struct,
         globals,
         functions,

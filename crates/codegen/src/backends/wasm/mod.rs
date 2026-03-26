@@ -199,6 +199,7 @@ pub fn generate_wasm_module(
         num_outputs,
         ref name,
         functions,
+        static_decls,
         ..
     } = match_fir(store, module)
     else {
@@ -393,6 +394,9 @@ pub fn generate_wasm_module(
         &ConstExpr::i32_const(0),
         dsp_json.as_bytes().iter().copied(),
     );
+    for (offset, bytes) in static_table_segments(store, static_decls, &memory_layout, options)? {
+        data.active(0, &ConstExpr::i32_const(offset as i32), bytes.into_iter());
+    }
     wasm.section(&data);
 
     Ok(WasmModule {
@@ -1176,6 +1180,26 @@ impl ComputeSubsetLowerer<'_> {
             }
             FirMatch::LoadTable {
                 name,
+                access: AccessType::Static,
+                index,
+                typ,
+            } => {
+                let field = self.struct_field(&name)?.clone();
+                let field_fir = field_fir_type(&field, self.options);
+                let storage_ty = wasm_val_type_for_field(&field);
+                function.instruction(&Instruction::I32Const(field.offset as i32));
+                self.lower_index_offset(index, &field_fir, function)?;
+                function.instruction(&Instruction::I32Add);
+                function.instruction(&load_instruction_for_valtype(storage_ty)?);
+                self.emit_cast_if_needed(
+                    &field_fir,
+                    wasm_val_type_for_fir(&typ, self.options)?,
+                    function,
+                )?;
+                Ok(())
+            }
+            FirMatch::LoadTable {
+                name,
                 access: AccessType::Stack,
                 index,
                 typ,
@@ -1614,6 +1638,84 @@ fn find_function_body(store: &FirStore, function_items: &[FirId], name: &str) ->
             } if fun_name == name => Some(body),
             _ => None,
         })
+}
+
+fn static_table_segments(
+    store: &FirStore,
+    static_decls: FirId,
+    memory_layout: &WasmMemoryLayout,
+    options: &WasmOptions,
+) -> Result<Vec<(u32, Vec<u8>)>, WasmBackendError> {
+    let FirMatch::Block(items) = match_fir(store, static_decls) else {
+        return Ok(Vec::new());
+    };
+    let mut segments = Vec::new();
+    for item in items {
+        let FirMatch::DeclareTable {
+            name,
+            access: AccessType::Static,
+            elem_type,
+            values,
+        } = match_fir(store, item)
+        else {
+            continue;
+        };
+        let offset = memory_layout
+            .field_offsets
+            .get(&name)
+            .ok_or_else(|| {
+                WasmBackendError::new(
+                    WasmBackendErrorCode::UnsupportedModuleShape,
+                    format!("missing WASM layout entry for static table `{name}`"),
+                )
+            })?
+            .offset;
+        let mut bytes = Vec::new();
+        for value in values {
+            append_static_scalar_bytes(store, value, &elem_type, options, &mut bytes)?;
+        }
+        segments.push((offset, bytes));
+    }
+    Ok(segments)
+}
+
+fn append_static_scalar_bytes(
+    store: &FirStore,
+    value: FirId,
+    elem_type: &FirType,
+    options: &WasmOptions,
+    out: &mut Vec<u8>,
+) -> Result<(), WasmBackendError> {
+    match (elem_type, match_fir(store, value)) {
+        (FirType::Bool, FirMatch::Bool { value, .. }) => {
+            out.extend_from_slice(&u32::from(value).to_le_bytes());
+        }
+        (FirType::Int32, FirMatch::Int32 { value, .. }) => {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        (FirType::Float32 | FirType::FaustFloat, FirMatch::Float32 { value, .. }) => {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        (FirType::Float64, FirMatch::Float64 { value, .. }) => {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        (FirType::FaustFloat, FirMatch::Float64 { value, .. }) if !options.double_precision => {
+            out.extend_from_slice(&(value as f32).to_le_bytes());
+        }
+        (FirType::FaustFloat, FirMatch::Float64 { value, .. }) if options.double_precision => {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        _ => {
+            return Err(WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedModuleShape,
+                format!(
+                    "unsupported static table initializer for WASM data segment: elem_type={elem_type:?}, value={:?}",
+                    match_fir(store, value)
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn collect_math_imports_in_node(
