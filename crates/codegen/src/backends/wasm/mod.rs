@@ -469,7 +469,7 @@ fn scaffold_function_body(
 ) -> Function {
     let mut function = Function::new(Vec::new());
     match func {
-        WasmFunc::ClassInit | WasmFunc::InstanceResetUserInterface | WasmFunc::SetParamValue => {}
+        WasmFunc::ClassInit | WasmFunc::InstanceResetUserInterface => {}
         WasmFunc::Compute => {
             if let Some(body) = compute_body
                 && let Ok(lowered) =
@@ -492,15 +492,14 @@ fn scaffold_function_body(
         WasmFunc::GetNumOutputs => {
             function.instruction(&Instruction::I32Const(num_outputs));
         }
-        WasmFunc::GetParamValue => match real_ty {
-            ValType::F32 => {
-                function.instruction(&Instruction::F32Const(0.0));
-            }
-            ValType::F64 => {
-                function.instruction(&Instruction::F64Const(0.0));
-            }
-            _ => unreachable!("real type must be f32/f64"),
-        },
+        WasmFunc::GetParamValue => {
+            // C++ parity: the WASM ABI still treats `index` as a byte offset
+            // inside the DSP struct, not as a UI ordinal that must be decoded.
+            function.instruction(&Instruction::LocalGet(0));
+            function.instruction(&Instruction::LocalGet(1));
+            function.instruction(&Instruction::I32Add);
+            function.instruction(&load_instruction_for_valtype(real_ty).expect("real type load"));
+        }
         WasmFunc::GetSampleRate => {
             if let Some(field) = sample_rate_field {
                 function.instruction(&Instruction::LocalGet(0));
@@ -563,6 +562,14 @@ fn scaffold_function_body(
             function.instruction(&Instruction::LocalGet(1));
             function.instruction(&Instruction::I32LtS);
             function.instruction(&Instruction::Select);
+        }
+        WasmFunc::SetParamValue => {
+            // C++ parity: `index` is the byte offset of the control zone field.
+            function.instruction(&Instruction::LocalGet(0));
+            function.instruction(&Instruction::LocalGet(1));
+            function.instruction(&Instruction::I32Add);
+            function.instruction(&Instruction::LocalGet(2));
+            function.instruction(&store_instruction_for_valtype(real_ty).expect("real type store"));
         }
     }
     function.instruction(&Instruction::End);

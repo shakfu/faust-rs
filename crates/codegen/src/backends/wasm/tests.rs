@@ -248,6 +248,45 @@ fn wasm_get_sample_rate_loads_struct_field_when_present() {
 }
 
 #[test]
+fn wasm_get_param_value_loads_real_from_dsp_plus_index() {
+    let (store, module) = build_passthrough_test_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM scaffold should emit getParamValue body");
+
+    let body = code_body_at(&out.wasm_binary, 4);
+    let ops = decode_ops(body);
+    assert!(matches!(ops.as_slice(),
+        [
+            Operator::LocalGet { local_index: 0 },
+            Operator::LocalGet { local_index: 1 },
+            Operator::I32Add,
+            Operator::F32Load { memarg },
+            Operator::End
+        ] if memarg.offset == 0
+    ));
+}
+
+#[test]
+fn wasm_set_param_value_stores_real_to_dsp_plus_index() {
+    let (store, module) = build_passthrough_test_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM scaffold should emit setParamValue body");
+
+    let body = code_body_at(&out.wasm_binary, 13);
+    let ops = decode_ops(body);
+    assert!(matches!(ops.as_slice(),
+        [
+            Operator::LocalGet { local_index: 0 },
+            Operator::LocalGet { local_index: 1 },
+            Operator::I32Add,
+            Operator::LocalGet { local_index: 2 },
+            Operator::F32Store { memarg },
+            Operator::End
+        ] if memarg.offset == 0
+    ));
+}
+
+#[test]
 fn wasm_instance_constants_stores_sample_rate_when_field_exists() {
     let (store, module) = build_sample_rate_state_module();
     let out = generate_wasm_module(&store, module, &WasmOptions::default())
