@@ -53,6 +53,7 @@ use fir::{
     FirBuilder, FirId, FirStore, FirType, NamedType,
     checker::{FirVerifyReport, Severity as FirVerifySeverity, verify_fir_module},
 };
+use parser::VirtualSourceMap;
 use parser::{CompilationMetadataKey, CompilationMetadataSnapshot, ParseOutput, SourceReaderError};
 use propagate::{ArityCache, BoxArity, PropagateError, PropagateUiOptions};
 use signals::{SigId, dump_sig_readable};
@@ -129,6 +130,10 @@ pub struct WasmArtifactRequest {
     pub source: String,
     /// Extra import search directories, mirroring CLI/FFI `-I`.
     pub import_dirs: Vec<PathBuf>,
+    /// Optional in-memory source bundle used to resolve `import("...")` and
+    /// evaluator-side `library(...)` / `component(...)` without a host
+    /// filesystem dependency.
+    pub virtual_sources: VirtualSourceMap,
     /// WASM backend configuration (`-double`, memory model, etc.).
     pub wasm_options: WasmOptions,
     /// Signal->FIR lowering lane used before WASM code generation.
@@ -150,6 +155,7 @@ impl WasmArtifactRequest {
             source_name: source_name.into(),
             source: source.into(),
             import_dirs: Vec::new(),
+            virtual_sources: VirtualSourceMap::default(),
             wasm_options: WasmOptions::default(),
             lane: SignalFirLane::TransformFastLane,
         }
@@ -456,16 +462,46 @@ impl Compiler {
         source: &str,
         search_paths: &[PathBuf],
     ) -> Result<SignalCompileOutput, CompilerError> {
-        let metadata_store = parser::CompilationMetadataStore::new(source_name);
-        let output = ensure_parse_success(
+        self.compile_source_to_signals_with_import_context(
             source_name,
-            parser::parse_program_with_metadata(source, source_name, metadata_store.clone()),
-        )?;
-        let eval_source_context = if search_paths.is_empty() {
+            source,
+            search_paths,
+            &VirtualSourceMap::default(),
+        )
+    }
+
+    fn compile_source_to_signals_with_import_context(
+        &self,
+        source_name: &str,
+        source: &str,
+        search_paths: &[PathBuf],
+        virtual_sources: &VirtualSourceMap,
+    ) -> Result<SignalCompileOutput, CompilerError> {
+        let metadata_store = parser::CompilationMetadataStore::new(source_name);
+        let output = if search_paths.is_empty() && virtual_sources.is_empty() {
+            ensure_parse_success(
+                source_name,
+                parser::parse_program_with_metadata(source, source_name, metadata_store.clone()),
+            )?
+        } else {
+            ensure_parse_success(
+                source_name,
+                parser::parse_program_with_imports_and_metadata(
+                    source,
+                    source_name,
+                    search_paths,
+                    virtual_sources,
+                    metadata_store.clone(),
+                )
+                .map_err(CompilerError::Import)?,
+            )?
+        };
+        let eval_source_context = if search_paths.is_empty() && virtual_sources.is_empty() {
             eval::EvalSourceContext::memory_with_metadata(metadata_store)
         } else {
-            eval::EvalSourceContext::memory_with_search_paths_and_metadata(
+            eval::EvalSourceContext::memory_with_search_paths_metadata_and_virtual_sources(
                 search_paths,
+                virtual_sources.clone(),
                 metadata_store,
             )
         };
@@ -688,10 +724,11 @@ impl Compiler {
     ) -> Result<WasmArtifactBundle, CompilerError> {
         let compile_options =
             compile_options_json_string(Some("wasm"), request.wasm_options.double_precision);
-        let signals = self.compile_source_to_signals_with_search_paths(
+        let signals = self.compile_source_to_signals_with_import_context(
             &request.source_name,
             &request.source,
             &request.import_dirs,
+            &request.virtual_sources,
         )?;
         let lowered = lower_signals_to_fir(
             &request.source_name,
@@ -712,11 +749,20 @@ impl Compiler {
             .iter()
             .map(|dir| dir.to_string_lossy().into_owned())
             .collect();
-        json_context.library_list = signals
-            .loaded_files
+        let mut library_list: Vec<String> = signals
+            .parse
+            .used_files
             .iter()
+            .skip(1)
             .map(|path| path.to_string_lossy().into_owned())
             .collect();
+        for file in &signals.loaded_files {
+            let file = file.to_string_lossy().into_owned();
+            if !library_list.iter().any(|existing| existing == &file) {
+                library_list.push(file);
+            }
+        }
+        json_context.library_list = library_list;
         let module = generate_wasm_module_with_context(
             &lowered.store,
             lowered.module,
@@ -3571,6 +3617,7 @@ mod tests {
         resolve_module_name, resolve_ui_root_label,
     };
     use codegen::backends::wasm::WasmOptions;
+    use parser::VirtualSourceMap;
 
     fn temp_root(test_name: &str) -> PathBuf {
         let stamp = SystemTime::now()
@@ -3885,6 +3932,30 @@ mod tests {
         assert!(out.wasm_bytes.starts_with(b"\0asm"));
         assert!(out.dsp_json.contains("child.lib"));
         assert!(out.dsp_json.contains(&root.display().to_string()));
+    }
+
+    #[test]
+    fn compiler_compile_wasm_artifact_supports_virtual_faust_library_bundle() {
+        let compiler = Compiler::new();
+        let mut request = WasmArtifactRequest::new(
+            "main.dsp",
+            "import(\"stdfaust.lib\");\nprocess = os.freq;\n",
+        );
+        request.virtual_sources = VirtualSourceMap::new([
+            (
+                PathBuf::from("stdfaust.lib"),
+                "os = library(\"osc.lib\");\n".to_owned(),
+            ),
+            (PathBuf::from("osc.lib"), "freq = 440;\n".to_owned()),
+        ]);
+        let out = compiler
+            .compile_wasm_artifact(&request)
+            .expect("artifact compile with virtual libraries should succeed");
+
+        assert!(out.wasm_bytes.starts_with(b"\0asm"));
+        assert!(out.dsp_json.contains("\"library_list\":["));
+        assert!(out.dsp_json.contains("stdfaust.lib"));
+        assert!(out.dsp_json.contains("osc.lib"));
     }
 
     #[test]

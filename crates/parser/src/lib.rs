@@ -37,7 +37,9 @@ pub mod source_reader;
 
 pub use context::{DiagnosticSeverity, ParserCtx, ParserDiagnostic, SourceLocation};
 pub use metadata::{CompilationMetadataKey, CompilationMetadataSnapshot, CompilationMetadataStore};
-pub use source_reader::{ExpandedSource, SourceLineOrigin, SourceReader, SourceReaderError};
+pub use source_reader::{
+    ExpandedSource, SourceLineOrigin, SourceReader, SourceReaderError, VirtualSourceMap,
+};
 
 /// Primitive operator family recognized directly by the parser.
 #[derive(Clone, Copy, Debug)]
@@ -1269,6 +1271,35 @@ pub fn parse_program_with_metadata(
     metadata_store: CompilationMetadataStore,
 ) -> ParseOutput {
     parse_program_with_origins(input, source_file, None, metadata_store)
+}
+
+/// Parses one in-memory source after recursively expanding `import("...")`
+/// against explicit search paths plus an optional in-memory source bundle.
+///
+/// This is the source-string counterpart of
+/// [`parse_file_with_imports_and_metadata`]. It is primarily used by embedded
+/// compiler services such as `faustwasm`, where the root DSP comes from a
+/// string but the standard library set may be embedded as logical assets
+/// rather than files on disk.
+pub fn parse_program_with_imports_and_metadata(
+    input: &str,
+    source_file: &str,
+    search_paths: &[std::path::PathBuf],
+    virtual_sources: &VirtualSourceMap,
+    metadata_store: CompilationMetadataStore,
+) -> Result<ParseOutput, SourceReaderError> {
+    let mut reader =
+        SourceReader::with_virtual_sources(search_paths.to_vec(), virtual_sources.clone());
+    let expanded = reader.read_memory_with_origins(source_file, input)?;
+    let used_files = reader.used_files().to_vec();
+    let mut output = parse_program_with_origins(
+        &expanded.text,
+        source_file,
+        Some(expanded.line_origins),
+        metadata_store,
+    );
+    output.used_files = used_files;
+    Ok(output)
 }
 
 /// Parses one in-memory source while preserving external line origins.

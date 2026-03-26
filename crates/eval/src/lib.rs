@@ -1204,7 +1204,7 @@ fn eval_loaded_source_value(
         None => {
             let resolved_path = candidate_paths
                 .iter()
-                .find(|path| path.exists())
+                .find(|path| source_context.virtual_sources().contains(path) || path.exists())
                 .cloned()
                 .ok_or_else(|| EvalError::SourceFileNotFound {
                     node,
@@ -1214,13 +1214,38 @@ fn eval_loaded_source_value(
                     search_paths: source_context.search_paths().to_vec(),
                 })?;
             let parse = match source_context.metadata_store() {
-                Some(metadata_store) => parser::parse_file_with_imports_and_metadata(
-                    &resolved_path,
-                    source_context.search_paths(),
-                    metadata_store.clone(),
-                ),
+                Some(metadata_store) => {
+                    if let Some(source) = source_context.virtual_sources().get(&resolved_path) {
+                        parser::parse_program_with_imports_and_metadata(
+                            source,
+                            &resolved_path.to_string_lossy(),
+                            source_context.search_paths(),
+                            source_context.virtual_sources(),
+                            metadata_store.clone(),
+                        )
+                    } else {
+                        parser::parse_file_with_imports_and_metadata(
+                            &resolved_path,
+                            source_context.search_paths(),
+                            metadata_store.clone(),
+                        )
+                    }
+                }
                 None => {
-                    parser::parse_file_with_imports(&resolved_path, source_context.search_paths())
+                    if let Some(source) = source_context.virtual_sources().get(&resolved_path) {
+                        parser::parse_program_with_imports_and_metadata(
+                            source,
+                            &resolved_path.to_string_lossy(),
+                            source_context.search_paths(),
+                            source_context.virtual_sources(),
+                            parser::CompilationMetadataStore::new(&resolved_path.to_string_lossy()),
+                        )
+                    } else {
+                        parser::parse_file_with_imports(
+                            &resolved_path,
+                            source_context.search_paths(),
+                        )
+                    }
                 }
             };
             let parse_output = parse.map_err(|error| EvalError::SourceReaderFailure {

@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// One source-origin marker for a line in expanded source text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +36,80 @@ pub struct ExpandedSource {
     pub text: Box<str>,
     /// Origin for each line in `text` (same ordering, 1:1 mapping).
     pub line_origins: Vec<SourceLineOrigin>,
+}
+
+/// Read-only in-memory source bundle used to resolve `import("...")` without
+/// relying on a host filesystem.
+///
+/// # Purpose
+/// This is the Rust-side transport for embedded Faust library sources used by
+/// the `faustwasm` compiler-module path. It keeps import resolution keyed by
+/// stable logical paths such as `stdfaust.lib` or `music.lib` while remaining
+/// usable in native tests.
+///
+/// # Invariants
+/// - keys are normalized logical paths with `.` segments removed;
+/// - relative logical paths are preserved as relative paths;
+/// - values are immutable UTF-8 source strings.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VirtualSourceMap {
+    entries: Arc<HashMap<PathBuf, Arc<str>>>,
+}
+
+impl VirtualSourceMap {
+    /// Builds one immutable source bundle from `(logical_path, source)` pairs.
+    #[must_use]
+    pub fn new(entries: impl IntoIterator<Item = (PathBuf, String)>) -> Self {
+        let mut out = HashMap::new();
+        for (path, source) in entries {
+            out.insert(normalize_logical_path(&path), Arc::<str>::from(source));
+        }
+        Self {
+            entries: Arc::new(out),
+        }
+    }
+
+    /// Returns `true` when the bundle has no registered logical sources.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Returns the normalized source text for one logical path, if present.
+    #[must_use]
+    pub fn get(&self, path: &Path) -> Option<&str> {
+        self.entries
+            .get(&normalize_logical_path(path))
+            .map(AsRef::as_ref)
+    }
+
+    /// Returns `true` when one logical path exists in the bundle.
+    #[must_use]
+    pub fn contains(&self, path: &Path) -> bool {
+        self.entries.contains_key(&normalize_logical_path(path))
+    }
+
+    /// Returns all logical source entries in deterministic path order.
+    pub fn iter(&self) -> impl Iterator<Item = (&Path, &str)> {
+        let mut ordered: Vec<_> = self.entries.iter().collect();
+        ordered.sort_by(|(left, _), (right, _)| left.cmp(right));
+        ordered
+            .into_iter()
+            .map(|(path, source)| (path.as_path(), source.as_ref()))
+    }
+
+    /// Returns a new bundle extended with one extra logical source.
+    #[must_use]
+    pub fn with_source(&self, path: impl Into<PathBuf>, source: impl Into<String>) -> Self {
+        let mut entries = (*self.entries).clone();
+        entries.insert(
+            normalize_logical_path(&path.into()),
+            Arc::<str>::from(source.into()),
+        );
+        Self {
+            entries: Arc::new(entries),
+        }
+    }
 }
 
 /// Errors returned by [`SourceReader`] during source loading and import expansion.
@@ -68,6 +143,7 @@ impl std::error::Error for SourceReaderError {}
 pub struct SourceReader {
     file_cache: HashMap<PathBuf, ExpandedSource>,
     search_paths: Vec<PathBuf>,
+    virtual_sources: VirtualSourceMap,
     used_files: Vec<PathBuf>,
     visiting: HashSet<PathBuf>,
     expanded_files: HashSet<PathBuf>,
@@ -77,9 +153,20 @@ impl SourceReader {
     /// Creates a source reader using the provided import search paths.
     #[must_use]
     pub fn new(search_paths: Vec<PathBuf>) -> Self {
+        Self::with_virtual_sources(search_paths, VirtualSourceMap::default())
+    }
+
+    /// Creates a source reader using the provided import search paths and
+    /// logical in-memory source bundle.
+    #[must_use]
+    pub fn with_virtual_sources(
+        search_paths: Vec<PathBuf>,
+        virtual_sources: VirtualSourceMap,
+    ) -> Self {
         Self {
             file_cache: HashMap::new(),
             search_paths,
+            virtual_sources,
             used_files: Vec::new(),
             visiting: HashSet::new(),
             expanded_files: HashSet::new(),
@@ -104,9 +191,24 @@ impl SourceReader {
         self.resolve_import_from(name, None)
     }
 
+    /// Reads one logical in-memory source and recursively expands imports.
+    pub fn read_memory_with_origins(
+        &mut self,
+        source_name: &str,
+        source: &str,
+    ) -> Result<ExpandedSource, SourceReaderError> {
+        let entry = normalize_logical_path(Path::new(source_name));
+        self.expanded_files.clear();
+        let prior = self.virtual_sources.clone();
+        self.virtual_sources = self.virtual_sources.with_source(&entry, source);
+        let out = self.read_file_impl(&entry);
+        self.virtual_sources = prior;
+        out
+    }
+
     /// Reads one source file and recursively expands imports.
     pub fn read_file(&mut self, path: &Path) -> Result<String, SourceReaderError> {
-        let canonical = canonicalize_path(path)?;
+        let canonical = self.resolve_entry_path(path)?;
         self.expanded_files.clear();
         self.read_file_impl(&canonical)
             .map(|expanded| expanded.text.into())
@@ -117,7 +219,7 @@ impl SourceReader {
         &mut self,
         path: &Path,
     ) -> Result<ExpandedSource, SourceReaderError> {
-        let canonical = canonicalize_path(path)?;
+        let canonical = self.resolve_entry_path(path)?;
         self.expanded_files.clear();
         self.read_file_impl(&canonical)
     }
@@ -138,10 +240,7 @@ impl SourceReader {
             self.used_files.push(path.to_path_buf());
         }
 
-        let source = fs::read_to_string(path).map_err(|err| SourceReaderError::Io {
-            path: path.to_path_buf(),
-            message: err.to_string().into_boxed_str(),
-        })?;
+        let source = self.read_source_text(path)?;
 
         let mut expanded = String::new();
         let mut line_origins = Vec::new();
@@ -219,6 +318,10 @@ impl SourceReader {
     fn resolve_import_from(&self, name: &str, local_dir: Option<&Path>) -> Option<PathBuf> {
         let raw = Path::new(name);
         if raw.is_absolute() {
+            let normalized = normalize_logical_path(raw);
+            if self.virtual_sources.contains(&normalized) {
+                return Some(normalized);
+            }
             return canonicalize_path(raw).ok();
         }
 
@@ -242,11 +345,34 @@ impl SourceReader {
         }
 
         for candidate in candidates {
+            let normalized = normalize_logical_path(&candidate);
+            if self.virtual_sources.contains(&normalized) {
+                return Some(normalized);
+            }
             if candidate.exists() {
                 return canonicalize_path(&candidate).ok();
             }
         }
         None
+    }
+
+    fn resolve_entry_path(&self, path: &Path) -> Result<PathBuf, SourceReaderError> {
+        let normalized = normalize_logical_path(path);
+        if self.virtual_sources.contains(&normalized) {
+            Ok(normalized)
+        } else {
+            canonicalize_path(path)
+        }
+    }
+
+    fn read_source_text(&self, path: &Path) -> Result<String, SourceReaderError> {
+        if let Some(source) = self.virtual_sources.get(path) {
+            return Ok(source.to_owned());
+        }
+        fs::read_to_string(path).map_err(|err| SourceReaderError::Io {
+            path: path.to_path_buf(),
+            message: err.to_string().into_boxed_str(),
+        })
     }
 }
 
@@ -255,6 +381,21 @@ fn canonicalize_path(path: &Path) -> Result<PathBuf, SourceReaderError> {
         path: path.to_path_buf(),
         message: err.to_string().into_boxed_str(),
     })
+}
+
+fn normalize_logical_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        path.to_path_buf()
+    } else {
+        out
+    }
 }
 
 fn parse_import_line(line: &str) -> Option<String> {
@@ -278,7 +419,7 @@ fn parse_import_line(line: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceReader, parse_import_line};
+    use super::{SourceReader, VirtualSourceMap, parse_import_line};
     use std::path::Path;
 
     /// Search paths (-I) must be checked before the local directory of the importing
@@ -365,5 +506,43 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn virtual_sources_expand_transitive_imports_without_filesystem_reads() {
+        let bundle = VirtualSourceMap::new([
+            (
+                Path::new("stdfaust.lib").to_path_buf(),
+                "import(\"maths.lib\");\nimport(\"osc.lib\");\n".to_owned(),
+            ),
+            (
+                Path::new("maths.lib").to_path_buf(),
+                "PI = 3.14;\n".to_owned(),
+            ),
+            (
+                Path::new("osc.lib").to_path_buf(),
+                "freq = 440;\n".to_owned(),
+            ),
+        ]);
+        let mut reader = SourceReader::with_virtual_sources(Vec::new(), bundle);
+        let expanded = reader
+            .read_memory_with_origins("main.dsp", "import(\"stdfaust.lib\");\nprocess = freq;\n")
+            .expect("virtual source expansion should succeed");
+
+        assert!(expanded.text.contains("PI = 3.14;"));
+        assert!(expanded.text.contains("freq = 440;"));
+        assert!(expanded.text.contains("process = freq;"));
+        assert!(
+            reader
+                .used_files()
+                .iter()
+                .any(|path| path == Path::new("stdfaust.lib"))
+        );
+        assert!(
+            reader
+                .used_files()
+                .iter()
+                .any(|path| path == Path::new("osc.lib"))
+        );
     }
 }

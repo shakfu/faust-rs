@@ -36,6 +36,27 @@ Use `--debug` to build the non-release artifact:
 cargo run -p xtask -- build-faustwasm-compiler-module --debug
 ```
 
+## Embedded Faust libraries
+
+At build time, `wasm-ffi` can discover and embed a read-only bundle of Faust
+`.lib` sources directly into the compiler-module. The current root discovery
+order is:
+
+- `FAUST_RS_EMBEDDED_LIB_ROOT`
+- `FAUST_RS_FAUSTLIBRARIES_ROOT`
+- first valid entry from `FAUST_LIB_PATH`
+- `/usr/local/share/faust`
+- `/usr/share/faust`
+
+The embedded bundle is used for the Rust raw compiler path only. It allows:
+
+- parser-side `import("stdfaust.lib")` from an in-memory DSP source
+- evaluator-side `library("...")` / `component("...")` resolution against the
+  same bundled logical sources
+
+This keeps the `faustwasm` compiler-module self-contained for the standard
+Faust libraries without recreating an Emscripten-style virtual filesystem.
+
 ## Current scope
 
 - implemented:

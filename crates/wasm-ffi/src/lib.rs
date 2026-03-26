@@ -34,6 +34,16 @@
 //! That workflow produces and validates the standalone
 //! `target/wasm32-unknown-unknown/release/faust_wasm_ffi.wasm` module consumed
 //! by the future `faustwasm` embedded-compiler loader.
+//!
+//! # Embedded Faust libraries
+//! The compiler-module can embed a read-only bundle of standard Faust library
+//! sources discovered at build time. The raw compile export installs that
+//! bundle into [`WasmArtifactRequest::virtual_sources`], so:
+//! - parser-side `import("stdfaust.lib")` works from a source string,
+//! - evaluator-side `library("maths.lib")` / `component("...")` can keep
+//!   resolving against the same in-memory bundle,
+//! - the shipped WASM compiler-module stays self-contained for the standard
+//!   library set without recreating an Emscripten-style virtual filesystem.
 
 #![allow(non_snake_case)]
 #![allow(unsafe_code)]
@@ -45,6 +55,9 @@ use std::sync::{Mutex, OnceLock};
 
 use codegen::backends::wasm::WasmOptions;
 use compiler::{Compiler, RealType, WasmArtifactBundle, WasmArtifactRequest};
+use parser::VirtualSourceMap;
+
+include!(concat!(env!("OUT_DIR"), "/embedded_faust_libraries.rs"));
 
 const WASM_FFI_VERSION: &str = concat!("faust-rs-wasm-ffi/", env!("CARGO_PKG_VERSION"));
 
@@ -126,16 +139,30 @@ fn parse_compile_request(
     args: &str,
     internal_memory: bool,
 ) -> Result<WasmArtifactRequest, String> {
+    let _embedded_root = embedded_standard_library_root();
     let argv = split_faustwasm_args(args);
     let parsed = utils::parse_ffi_compile_args(&argv)?;
     let mut request = WasmArtifactRequest::new(name, source);
     request.import_dirs = parsed.search_paths;
+    request.virtual_sources = embedded_standard_library_sources();
     request.wasm_options = WasmOptions {
         double_precision: parsed.double,
         internal_memory,
         ..WasmOptions::default()
     };
     Ok(request)
+}
+
+fn embedded_standard_library_sources() -> VirtualSourceMap {
+    VirtualSourceMap::new(
+        EMBEDDED_FAUST_LIBRARIES
+            .iter()
+            .map(|(path, source)| (std::path::PathBuf::from(path), (*source).to_owned())),
+    )
+}
+
+fn embedded_standard_library_root() -> Option<&'static str> {
+    EMBEDDED_FAUST_LIB_ROOT
 }
 
 fn compile_to_stored_result(
@@ -545,7 +572,7 @@ pub extern "C" fn faust_wasm_text_result_free(handle: u32) {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
@@ -621,6 +648,36 @@ mod tests {
 
         assert!(bundle.wasm_bytes.starts_with(b"\0asm"));
         assert!(bundle.dsp_json.contains("child.lib"));
+    }
+
+    #[test]
+    fn embedded_standard_library_bundle_exposes_stdfaust_when_available() {
+        let bundle = super::embedded_standard_library_sources();
+        if super::embedded_standard_library_root().is_none() {
+            assert!(bundle.is_empty());
+            return;
+        }
+        assert!(bundle.contains(Path::new("stdfaust.lib")));
+    }
+
+    #[test]
+    fn compile_to_stored_result_supports_embedded_stdfaust_when_available() {
+        if super::embedded_standard_library_root().is_none() {
+            return;
+        }
+
+        let result = compile_to_stored_result(
+            "probe.dsp",
+            "import(\"stdfaust.lib\");\nprocess = 0;\n",
+            "",
+            true,
+        );
+        let StoredCompileResult::Ok(bundle) = result else {
+            panic!("compile with embedded stdfaust should succeed when bundled");
+        };
+
+        assert!(bundle.wasm_bytes.starts_with(b"\0asm"));
+        assert!(bundle.dsp_json.contains("stdfaust.lib"));
     }
 
     #[test]

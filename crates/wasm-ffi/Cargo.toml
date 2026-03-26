@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+build = "build.rs"
 
 [lints.rust]
 unsafe_code = "allow"
@@ -20,4 +21,5 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 codegen = { path = "../codegen" }
 compiler = { path = "../compiler" }
+parser = { path = "../parser" }
 utils = { path = "../utils" }

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use parser::{CompilationMetadataSnapshot, CompilationMetadataStore};
+use parser::{CompilationMetadataSnapshot, CompilationMetadataStore, VirtualSourceMap};
 use tlib::{TreeArena, TreeId};
 
 /// Internal DSP sample computation precision.
@@ -59,6 +59,7 @@ pub enum SamplePrecision {
 pub struct EvalSourceContext {
     pub(crate) current_file: Option<PathBuf>,
     pub(crate) search_paths: Vec<PathBuf>,
+    pub(crate) virtual_sources: VirtualSourceMap,
     pub(crate) cache: Arc<Mutex<HashMap<PathBuf, CachedLoadedSource>>>,
     pub(crate) loaded_files: Arc<Mutex<Vec<PathBuf>>>,
     pub(crate) metadata_store: Option<CompilationMetadataStore>,
@@ -99,6 +100,25 @@ impl EvalSourceContext {
         search_paths: &[PathBuf],
         metadata_store: CompilationMetadataStore,
     ) -> Self {
+        Self::memory_with_search_paths_metadata_and_virtual_sources(
+            search_paths,
+            VirtualSourceMap::default(),
+            metadata_store,
+        )
+    }
+
+    /// Creates an in-memory evaluation context with explicit import search
+    /// paths, a shared metadata store, and one read-only logical source bundle.
+    ///
+    /// The embedded source bundle is used for `component(...)` / `library(...)`
+    /// resolution when the caller wants a self-contained compile session with
+    /// no host filesystem dependency for standard Faust libraries.
+    #[must_use]
+    pub fn memory_with_search_paths_metadata_and_virtual_sources(
+        search_paths: &[PathBuf],
+        virtual_sources: VirtualSourceMap,
+        metadata_store: CompilationMetadataStore,
+    ) -> Self {
         let mut ordered = Vec::with_capacity(search_paths.len());
         for candidate in search_paths {
             if !ordered.iter().any(|existing| existing == candidate) {
@@ -108,6 +128,7 @@ impl EvalSourceContext {
         Self {
             current_file: None,
             search_paths: ordered,
+            virtual_sources,
             cache: Arc::default(),
             loaded_files: Arc::default(),
             metadata_store: Some(metadata_store),
@@ -149,6 +170,7 @@ impl EvalSourceContext {
         Self {
             current_file: Some(path.to_path_buf()),
             search_paths: ordered,
+            virtual_sources: VirtualSourceMap::default(),
             cache: Arc::default(),
             loaded_files: Arc::default(),
             metadata_store: Some(metadata_store),
@@ -171,6 +193,7 @@ impl EvalSourceContext {
         };
         child.loaded_files = self.loaded_files.clone();
         child.sample_precision = self.sample_precision;
+        child.virtual_sources = self.virtual_sources.clone();
         child
     }
 
@@ -184,6 +207,13 @@ impl EvalSourceContext {
     #[must_use]
     pub fn search_paths(&self) -> &[PathBuf] {
         &self.search_paths
+    }
+
+    /// Returns the logical in-memory source bundle visible to this evaluation
+    /// session.
+    #[must_use]
+    pub fn virtual_sources(&self) -> &VirtualSourceMap {
+        &self.virtual_sources
     }
 
     /// Returns the shared top-level metadata store captured by this context, if any.
