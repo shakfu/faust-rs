@@ -572,6 +572,8 @@ struct WasmLocal {
 /// - `LoadVar(kFunArgs=count | kLoop | kStack)`
 /// - `LoadTable(kFunArgs=inputs/outputs | kStack aliases)`
 /// - `StoreTable(kStack aliases)`
+/// - `LoadTable/StoreTable(kStruct)`
+/// - `Select2`
 ///
 /// This is intentionally narrow so the backend can start executing the
 /// canonical mono passthrough fixture while unsupported FIR still falls back to
@@ -713,6 +715,12 @@ impl ComputeSubsetLowerer<'_> {
                 index,
                 value,
             } => self.lower_store_table_stack(&name, index, value, function),
+            FirMatch::StoreTable {
+                name,
+                access: AccessType::Struct,
+                index,
+                value,
+            } => self.lower_store_table_struct(&name, index, value, function),
             FirMatch::StoreVar {
                 name,
                 access: AccessType::Struct,
@@ -786,6 +794,32 @@ impl ComputeSubsetLowerer<'_> {
             WasmBackendError::new(
                 WasmBackendErrorCode::UnsupportedFirNode,
                 format!("missing value type for struct store `{name}`"),
+            )
+        })?;
+        self.emit_cast_if_needed(&value_type, field_val_type, function)?;
+        function.instruction(&store_instruction_for_valtype(field_val_type)?);
+        Ok(())
+    }
+
+    fn lower_store_table_struct(
+        &mut self,
+        name: &str,
+        index: FirId,
+        value: FirId,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        let field = self.struct_field(name)?.clone();
+        let field_val_type = wasm_val_type_for_field(&field);
+        function.instruction(&Instruction::LocalGet(0));
+        function.instruction(&Instruction::I32Const(field.offset as i32));
+        function.instruction(&Instruction::I32Add);
+        self.lower_index_offset(index, &field_fir_type(&field, self.options), function)?;
+        function.instruction(&Instruction::I32Add);
+        self.lower_expr(value, function)?;
+        let value_type = self.store.value_type(value).ok_or_else(|| {
+            WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                format!("missing value type for struct table store `{name}`"),
             )
         })?;
         self.emit_cast_if_needed(&value_type, field_val_type, function)?;
@@ -877,6 +911,28 @@ impl ComputeSubsetLowerer<'_> {
                 function.instruction(&load_instruction_for_type(&typ, self.options)?);
                 Ok(())
             }
+            FirMatch::LoadTable {
+                name,
+                access: AccessType::Struct,
+                index,
+                typ,
+            } => {
+                let field = self.struct_field(&name)?.clone();
+                let field_fir = field_fir_type(&field, self.options);
+                let storage_ty = wasm_val_type_for_field(&field);
+                function.instruction(&Instruction::LocalGet(0));
+                function.instruction(&Instruction::I32Const(field.offset as i32));
+                function.instruction(&Instruction::I32Add);
+                self.lower_index_offset(index, &field_fir, function)?;
+                function.instruction(&Instruction::I32Add);
+                function.instruction(&load_instruction_for_valtype(storage_ty)?);
+                self.emit_cast_if_needed(
+                    &field_fir,
+                    wasm_val_type_for_fir(&typ, self.options)?,
+                    function,
+                )?;
+                Ok(())
+            }
             FirMatch::Cast { typ, value } => {
                 let src_ty = self.store.value_type(value).ok_or_else(|| {
                     WasmBackendError::new(
@@ -896,6 +952,20 @@ impl ComputeSubsetLowerer<'_> {
                 self.lower_expr(lhs, function)?;
                 self.lower_expr(rhs, function)?;
                 function.instruction(&binop_instruction(op, &typ, self.options)?);
+                Ok(())
+            }
+            FirMatch::Select2 {
+                cond,
+                then_value,
+                else_value,
+                typ,
+            } => {
+                self.lower_expr(then_value, function)?;
+                self.lower_expr(else_value, function)?;
+                self.lower_expr(cond, function)?;
+                self.emit_cast_if_needed(&FirType::Bool, ValType::I32, function)?;
+                let _ = wasm_val_type_for_fir(&typ, self.options)?;
+                function.instruction(&Instruction::Select);
                 Ok(())
             }
             other => Err(WasmBackendError::new(

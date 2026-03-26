@@ -1,5 +1,8 @@
 use super::{WasmMemoryLayout, WasmOptions, generate_wasm_module};
-use crate::fixtures::{build_passthrough_test_module, build_sine_phasor_test_module};
+use crate::fixtures::{
+    build_passthrough_test_module, build_sine_phasor_test_module,
+    build_table_state_delay_test_module,
+};
 
 use fir::{AccessType, FirBuilder, FirId, FirStore, FirType, NamedType};
 
@@ -82,6 +85,30 @@ fn wasm_compute_lowers_struct_state_and_casts() {
     assert!(
         ops.iter()
             .filter(|op| matches!(op, Operator::F32Load { .. }))
+            .count()
+            >= 2
+    );
+}
+
+#[test]
+fn wasm_compute_lowers_struct_tables_and_select2() {
+    let (store, module) = build_table_state_delay_test_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM scaffold should emit struct-table compute body");
+
+    let body = code_body_at(&out.wasm_binary, 1);
+    let ops = decode_ops(body);
+    assert!(ops.iter().any(|op| matches!(op, Operator::Select)));
+    assert!(ops.iter().any(|op| matches!(op, Operator::I32GeS)));
+    assert!(
+        ops.iter()
+            .filter(|op| matches!(op, Operator::F32Load { .. }))
+            .count()
+            >= 2
+    );
+    assert!(
+        ops.iter()
+            .filter(|op| matches!(op, Operator::F32Store { .. }))
             .count()
             >= 2
     );
