@@ -1,7 +1,7 @@
 use super::{WasmMemoryLayout, WasmOptions, generate_wasm_module};
 use crate::fixtures::{
-    build_passthrough_test_module, build_sine_phasor_test_module,
-    build_table_state_delay_test_module,
+    build_math_intrinsics_test_module, build_passthrough_test_module,
+    build_sine_phasor_test_module, build_table_state_delay_test_module,
 };
 
 use fir::{AccessType, FirBuilder, FirId, FirMathOp, FirStore, FirType, NamedType};
@@ -125,6 +125,42 @@ fn wasm_compute_lowers_native_math_fun_calls() {
     assert!(ops.iter().any(|op| matches!(op, Operator::F64Abs)));
     assert!(ops.iter().any(|op| matches!(op, Operator::F64Min)));
     assert!(ops.iter().any(|op| matches!(op, Operator::F64Max)));
+}
+
+#[test]
+fn wasm_module_imports_external_math_functions_for_compute() {
+    let (store, module) = build_math_intrinsics_test_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM scaffold should emit imported math declarations");
+
+    let mut imports = Vec::new();
+    for payload in Parser::new(0).parse_all(&out.wasm_binary) {
+        let payload = payload.expect("payload should decode");
+        if let Payload::ImportSection(section) = payload {
+            for import in section {
+                let import = import.expect("import should decode");
+                imports.push(import.name.to_owned());
+            }
+        }
+    }
+
+    assert_eq!(imports, vec!["_atan2", "_cos", "_pow", "_sin"]);
+}
+
+#[test]
+fn wasm_compute_calls_imported_math_functions() {
+    let (store, module) = build_math_intrinsics_test_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM scaffold should emit imported math compute body");
+
+    let body = code_body_at(&out.wasm_binary, 1);
+    let ops = decode_ops(body);
+    assert!(
+        ops.iter()
+            .filter(|op| matches!(op, Operator::Call { function_index } if *function_index < 4))
+            .count()
+            >= 4
+    );
 }
 
 #[test]

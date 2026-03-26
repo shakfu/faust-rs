@@ -181,6 +181,13 @@ impl WasmFunc {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct WasmMathImport {
+    field_name: String,
+    params: Vec<ValType>,
+    result: ValType,
+}
+
 /// Emits one valid WASM scaffold module for a FIR `Module` root.
 pub fn generate_wasm_module(
     store: &FirStore,
@@ -220,6 +227,18 @@ pub fn generate_wasm_module(
         ));
     }
 
+    let compute_body = function_items
+        .iter()
+        .copied()
+        .find_map(|id| match match_fir(store, id) {
+            FirMatch::DeclareFun {
+                ref name,
+                body: Some(body),
+                ..
+            } if name == "compute" => Some(body),
+            _ => None,
+        });
+
     let real_ty = if options.double_precision {
         ValType::F64
     } else {
@@ -236,27 +255,43 @@ pub fn generate_wasm_module(
     memory_layout.pages = pages;
 
     let mut wasm = Module::new();
+    let math_imports = collect_math_imports(store, compute_body, options)?;
+    let imported_function_count = math_imports.len() as u32;
 
     let mut types = TypeSection::new();
     for func in WasmFunc::ALL {
         let (params, results) = func.signature(real_ty);
         types.ty().function(params, results);
     }
+    for import in &math_imports {
+        types
+            .ty()
+            .function(import.params.clone(), vec![import.result]);
+    }
     wasm.section(&types);
 
-    if !options.internal_memory {
+    if !options.internal_memory || !math_imports.is_empty() {
         let mut imports = ImportSection::new();
-        imports.import(
-            "env",
-            "memory",
-            EntityType::Memory(MemoryType {
-                minimum: u64::from(pages),
-                maximum: None,
-                memory64: false,
-                shared: false,
-                page_size_log2: None,
-            }),
-        );
+        if !options.internal_memory {
+            imports.import(
+                "env",
+                "memory",
+                EntityType::Memory(MemoryType {
+                    minimum: u64::from(pages),
+                    maximum: None,
+                    memory64: false,
+                    shared: false,
+                    page_size_log2: None,
+                }),
+            );
+        }
+        for (index, import) in math_imports.iter().enumerate() {
+            imports.import(
+                "env",
+                &import.field_name,
+                EntityType::Function(WasmFunc::ALL.len() as u32 + index as u32),
+            );
+        }
         wasm.section(&imports);
     }
 
@@ -282,75 +317,66 @@ pub fn generate_wasm_module(
     exports.export(
         "compute",
         ExportKind::Func,
-        function_index(options, WasmFunc::Compute),
+        function_index(imported_function_count, WasmFunc::Compute),
     );
     exports.export(
         "getNumInputs",
         ExportKind::Func,
-        function_index(options, WasmFunc::GetNumInputs),
+        function_index(imported_function_count, WasmFunc::GetNumInputs),
     );
     exports.export(
         "getNumOutputs",
         ExportKind::Func,
-        function_index(options, WasmFunc::GetNumOutputs),
+        function_index(imported_function_count, WasmFunc::GetNumOutputs),
     );
     exports.export(
         "getParamValue",
         ExportKind::Func,
-        function_index(options, WasmFunc::GetParamValue),
+        function_index(imported_function_count, WasmFunc::GetParamValue),
     );
     exports.export(
         "getSampleRate",
         ExportKind::Func,
-        function_index(options, WasmFunc::GetSampleRate),
+        function_index(imported_function_count, WasmFunc::GetSampleRate),
     );
     exports.export(
         "init",
         ExportKind::Func,
-        function_index(options, WasmFunc::Init),
+        function_index(imported_function_count, WasmFunc::Init),
     );
     exports.export(
         "instanceClear",
         ExportKind::Func,
-        function_index(options, WasmFunc::InstanceClear),
+        function_index(imported_function_count, WasmFunc::InstanceClear),
     );
     exports.export(
         "instanceConstants",
         ExportKind::Func,
-        function_index(options, WasmFunc::InstanceConstants),
+        function_index(imported_function_count, WasmFunc::InstanceConstants),
     );
     exports.export(
         "instanceInit",
         ExportKind::Func,
-        function_index(options, WasmFunc::InstanceInit),
+        function_index(imported_function_count, WasmFunc::InstanceInit),
     );
     exports.export(
         "instanceResetUserInterface",
         ExportKind::Func,
-        function_index(options, WasmFunc::InstanceResetUserInterface),
+        function_index(
+            imported_function_count,
+            WasmFunc::InstanceResetUserInterface,
+        ),
     );
     exports.export(
         "setParamValue",
         ExportKind::Func,
-        function_index(options, WasmFunc::SetParamValue),
+        function_index(imported_function_count, WasmFunc::SetParamValue),
     );
     if options.internal_memory {
         exports.export("memory", ExportKind::Memory, 0);
     }
     wasm.section(&exports);
 
-    let import_count = u32::from(!options.internal_memory);
-    let compute_body = function_items
-        .iter()
-        .copied()
-        .find_map(|id| match match_fir(store, id) {
-            FirMatch::DeclareFun {
-                ref name,
-                body: Some(body),
-                ..
-            } if name == "compute" => Some(body),
-            _ => None,
-        });
     let mut code = CodeSection::new();
     for func in WasmFunc::ALL {
         code.function(&scaffold_function_body(
@@ -360,7 +386,8 @@ pub fn generate_wasm_module(
             real_ty,
             memory_layout.field_offsets.get("fSampleRate"),
             &memory_layout,
-            import_count,
+            imported_function_count,
+            &math_imports,
             store,
             compute_body,
             options,
@@ -384,9 +411,8 @@ pub fn generate_wasm_module(
     })
 }
 
-fn function_index(options: &WasmOptions, func: WasmFunc) -> u32 {
-    let import_count = u32::from(!options.internal_memory);
-    import_count
+fn function_index(imported_function_count: u32, func: WasmFunc) -> u32 {
+    imported_function_count
         + WasmFunc::ALL
             .iter()
             .position(|item| *item == func)
@@ -442,7 +468,8 @@ fn scaffold_function_body(
     real_ty: ValType,
     sample_rate_field: Option<&FieldLayout>,
     memory_layout: &WasmMemoryLayout,
-    _import_count: u32,
+    imported_function_count: u32,
+    math_imports: &[WasmMathImport],
     store: &FirStore,
     compute_body: Option<FirId>,
     options: &WasmOptions,
@@ -455,7 +482,8 @@ fn scaffold_function_body(
         | WasmFunc::SetParamValue => {}
         WasmFunc::Compute => {
             if let Some(body) = compute_body
-                && let Ok(lowered) = lower_compute_subset(store, body, memory_layout, options)
+                && let Ok(lowered) =
+                    lower_compute_subset(store, body, memory_layout, math_imports, options)
             {
                 return lowered;
             }
@@ -488,11 +516,13 @@ fn scaffold_function_body(
             function.instruction(&Instruction::LocalGet(1));
             function.instruction(&Instruction::Call(function_index_for_body(
                 WasmFunc::ClassInit,
+                imported_function_count,
             )));
             function.instruction(&Instruction::LocalGet(0));
             function.instruction(&Instruction::LocalGet(1));
             function.instruction(&Instruction::Call(function_index_for_body(
                 WasmFunc::InstanceInit,
+                imported_function_count,
             )));
         }
         WasmFunc::InstanceConstants => {
@@ -507,14 +537,17 @@ fn scaffold_function_body(
             function.instruction(&Instruction::LocalGet(1));
             function.instruction(&Instruction::Call(function_index_for_body(
                 WasmFunc::InstanceConstants,
+                imported_function_count,
             )));
             function.instruction(&Instruction::LocalGet(0));
             function.instruction(&Instruction::Call(function_index_for_body(
                 WasmFunc::InstanceResetUserInterface,
+                imported_function_count,
             )));
             function.instruction(&Instruction::LocalGet(0));
             function.instruction(&Instruction::Call(function_index_for_body(
                 WasmFunc::InstanceClear,
+                imported_function_count,
             )));
         }
         WasmFunc::MaxI => {
@@ -546,11 +579,12 @@ fn memarg(offset: u32) -> MemArg {
     }
 }
 
-fn function_index_for_body(func: WasmFunc) -> u32 {
-    WasmFunc::ALL
-        .iter()
-        .position(|item| *item == func)
-        .expect("function present in static WASM function list") as u32
+fn function_index_for_body(func: WasmFunc, imported_function_count: u32) -> u32 {
+    imported_function_count
+        + WasmFunc::ALL
+            .iter()
+            .position(|item| *item == func)
+            .expect("function present in static WASM function list") as u32
 }
 
 #[derive(Clone, Debug)]
@@ -583,6 +617,7 @@ fn lower_compute_subset(
     store: &FirStore,
     body: FirId,
     memory_layout: &WasmMemoryLayout,
+    math_imports: &[WasmMathImport],
     options: &WasmOptions,
 ) -> Result<Function, WasmBackendError> {
     let mut local_specs = Vec::new();
@@ -609,6 +644,11 @@ fn lower_compute_subset(
         memory_layout,
         options,
         locals: local_map,
+        math_imports: math_imports
+            .iter()
+            .enumerate()
+            .map(|(index, import)| (import.field_name.clone(), index as u32))
+            .collect(),
     };
     lowerer.lower_block_into(body, &mut function)?;
     function.instruction(&Instruction::End);
@@ -666,6 +706,7 @@ struct ComputeSubsetLowerer<'a> {
     memory_layout: &'a WasmMemoryLayout,
     options: &'a WasmOptions,
     locals: HashMap<String, WasmLocal>,
+    math_imports: HashMap<String, u32>,
 }
 
 impl ComputeSubsetLowerer<'_> {
@@ -949,6 +990,37 @@ impl ComputeSubsetLowerer<'_> {
                 )?;
                 Ok(())
             }
+            FirMatch::Neg { value, typ } => {
+                match wasm_val_type_for_fir(&typ, self.options)? {
+                    ValType::I32 => {
+                        function.instruction(&Instruction::I32Const(0));
+                        self.lower_expr(value, function)?;
+                        function.instruction(&Instruction::I32Sub);
+                    }
+                    ValType::I64 => {
+                        function.instruction(&Instruction::I64Const(0));
+                        self.lower_expr(value, function)?;
+                        function.instruction(&Instruction::I64Sub);
+                    }
+                    ValType::F32 => {
+                        function.instruction(&Instruction::F32Const(0.0));
+                        self.lower_expr(value, function)?;
+                        function.instruction(&Instruction::F32Sub);
+                    }
+                    ValType::F64 => {
+                        function.instruction(&Instruction::F64Const(0.0));
+                        self.lower_expr(value, function)?;
+                        function.instruction(&Instruction::F64Sub);
+                    }
+                    other => {
+                        return Err(WasmBackendError::new(
+                            WasmBackendErrorCode::UnsupportedFirNode,
+                            format!("unsupported WASM neg type in compute subset: {other:?}"),
+                        ));
+                    }
+                }
+                Ok(())
+            }
             FirMatch::BinOp { op, lhs, rhs, typ } => {
                 self.lower_expr(lhs, function)?;
                 self.lower_expr(rhs, function)?;
@@ -976,7 +1048,7 @@ impl ComputeSubsetLowerer<'_> {
                         format!("unsupported function call in WASM subset: `{name}`"),
                     )
                 })?;
-                self.lower_native_math_call(math, &args, &typ, function)
+                self.lower_math_call(math, &args, &typ, function)
             }
             other => Err(WasmBackendError::new(
                 WasmBackendErrorCode::UnsupportedFirNode,
@@ -1068,7 +1140,7 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
-    fn lower_native_math_call(
+    fn lower_math_call(
         &mut self,
         math: FirMathOp,
         args: &[FirId],
@@ -1140,15 +1212,287 @@ impl ComputeSubsetLowerer<'_> {
                 function.instruction(&Instruction::F64Max);
                 Ok(())
             }
-            _ => Err(WasmBackendError::new(
-                WasmBackendErrorCode::UnsupportedFirNode,
-                format!(
-                    "unsupported native WASM math subset call: {math:?} / {typ:?} / argc={}",
-                    args.len()
-                ),
-            )),
+            _ => self.lower_imported_math_call(math, args, typ, function),
         }
     }
+
+    fn lower_imported_math_call(
+        &mut self,
+        math: FirMathOp,
+        args: &[FirId],
+        typ: &FirType,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        let import = imported_math_signature(math, typ, self.options)?.ok_or_else(|| {
+            WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                format!(
+                    "unsupported imported WASM math subset call: {math:?} / {typ:?} / argc={}",
+                    args.len()
+                ),
+            )
+        })?;
+        if import.params.len() != args.len() {
+            return Err(WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                format!(
+                    "imported WASM math arity mismatch: {} expects {}, got {}",
+                    import.field_name,
+                    import.params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        for arg in args {
+            self.lower_expr(*arg, function)?;
+        }
+        let func_index = self
+            .math_imports
+            .get(&import.field_name)
+            .copied()
+            .ok_or_else(|| {
+                WasmBackendError::new(
+                    WasmBackendErrorCode::UnsupportedFirNode,
+                    format!(
+                        "missing imported WASM math function index for `{}`",
+                        import.field_name
+                    ),
+                )
+            })?;
+        function.instruction(&Instruction::Call(func_index));
+        Ok(())
+    }
+}
+
+fn collect_math_imports(
+    store: &FirStore,
+    compute_body: Option<FirId>,
+    options: &WasmOptions,
+) -> Result<Vec<WasmMathImport>, WasmBackendError> {
+    let Some(body) = compute_body else {
+        return Ok(Vec::new());
+    };
+    let mut imports = std::collections::BTreeSet::new();
+    collect_math_imports_in_node(store, body, options, &mut imports)?;
+    Ok(imports.into_iter().collect())
+}
+
+fn collect_math_imports_in_node(
+    store: &FirStore,
+    id: FirId,
+    options: &WasmOptions,
+    out: &mut std::collections::BTreeSet<WasmMathImport>,
+) -> Result<(), WasmBackendError> {
+    if let FirMatch::FunCall { name, typ, .. } = match_fir(store, id)
+        && let Some(math) = FirMathOp::from_symbol(&name)
+        && !is_native_wasm_math(math, &typ, options)
+        && let Some(import) = imported_math_signature(math, &typ, options)?
+    {
+        out.insert(import);
+    }
+    for child in fir_children(store, id) {
+        collect_math_imports_in_node(store, child, options, out)?;
+    }
+    Ok(())
+}
+
+fn fir_children(store: &FirStore, id: FirId) -> Vec<FirId> {
+    match match_fir(store, id) {
+        FirMatch::Block(items) => items,
+        FirMatch::DeclareVar { init, .. } => init.into_iter().collect(),
+        FirMatch::StoreVar { value, .. } => vec![value],
+        FirMatch::StoreTable { index, value, .. } => vec![index, value],
+        FirMatch::LoadTable { index, .. } => vec![index],
+        FirMatch::SimpleForLoop { upper, body, .. } => vec![upper, body],
+        FirMatch::BinOp { lhs, rhs, .. } => vec![lhs, rhs],
+        FirMatch::Cast { value, .. } => vec![value],
+        FirMatch::Neg { value, .. } => vec![value],
+        FirMatch::Select2 {
+            cond,
+            then_value,
+            else_value,
+            ..
+        } => vec![cond, then_value, else_value],
+        FirMatch::FunCall { args, .. } => args,
+        FirMatch::Return(Some(value)) => vec![value],
+        FirMatch::Drop(value) => vec![value],
+        FirMatch::Control { cond, stmt } => vec![cond, stmt],
+        FirMatch::If {
+            cond,
+            then_block,
+            else_block,
+        } => else_block
+            .into_iter()
+            .fold(vec![cond, then_block], |mut acc, item| {
+                acc.push(item);
+                acc
+            }),
+        _ => Vec::new(),
+    }
+}
+
+fn is_native_wasm_math(math: FirMathOp, typ: &FirType, options: &WasmOptions) -> bool {
+    matches!(
+        (math, wasm_val_type_for_fir(typ, options)),
+        (FirMathOp::Abs, Ok(ValType::F32 | ValType::F64))
+            | (FirMathOp::Sqrt, Ok(ValType::F32 | ValType::F64))
+            | (FirMathOp::Floor, Ok(ValType::F32 | ValType::F64))
+            | (FirMathOp::Ceil, Ok(ValType::F32 | ValType::F64))
+            | (FirMathOp::Min, Ok(ValType::F32 | ValType::F64))
+            | (FirMathOp::Max, Ok(ValType::F32 | ValType::F64))
+    )
+}
+
+fn imported_math_signature(
+    math: FirMathOp,
+    typ: &FirType,
+    options: &WasmOptions,
+) -> Result<Option<WasmMathImport>, WasmBackendError> {
+    let val_ty = wasm_val_type_for_fir(typ, options)?;
+    let import = match (math, val_ty) {
+        (FirMathOp::Sin, ValType::F32) => Some(WasmMathImport {
+            field_name: "_sinf".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        (FirMathOp::Cos, ValType::F32) => Some(WasmMathImport {
+            field_name: "_cosf".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        (FirMathOp::Exp, ValType::F32) => Some(WasmMathImport {
+            field_name: "_expf".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        (FirMathOp::Log, ValType::F32) => Some(WasmMathImport {
+            field_name: "_logf".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        (FirMathOp::Log10, ValType::F32) => Some(WasmMathImport {
+            field_name: "_log10f".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        (FirMathOp::Tan, ValType::F32) => Some(WasmMathImport {
+            field_name: "_tanf".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        (FirMathOp::Atan, ValType::F32) => Some(WasmMathImport {
+            field_name: "_atanf".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        (FirMathOp::Asin, ValType::F32) => Some(WasmMathImport {
+            field_name: "_asinf".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        (FirMathOp::Acos, ValType::F32) => Some(WasmMathImport {
+            field_name: "_acosf".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        (FirMathOp::Round, ValType::F32) => Some(WasmMathImport {
+            field_name: "_roundf".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        (FirMathOp::Pow, ValType::F32) => Some(WasmMathImport {
+            field_name: "_powf".to_owned(),
+            params: vec![ValType::F32, ValType::F32],
+            result: ValType::F32,
+        }),
+        (FirMathOp::Atan2, ValType::F32) => Some(WasmMathImport {
+            field_name: "_atan2f".to_owned(),
+            params: vec![ValType::F32, ValType::F32],
+            result: ValType::F32,
+        }),
+        (FirMathOp::Fmod, ValType::F32) => Some(WasmMathImport {
+            field_name: "_fmodf".to_owned(),
+            params: vec![ValType::F32, ValType::F32],
+            result: ValType::F32,
+        }),
+        (FirMathOp::Remainder, ValType::F32) => Some(WasmMathImport {
+            field_name: "_remainderf".to_owned(),
+            params: vec![ValType::F32, ValType::F32],
+            result: ValType::F32,
+        }),
+        (FirMathOp::Sin, ValType::F64) => Some(WasmMathImport {
+            field_name: "_sin".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::F64,
+        }),
+        (FirMathOp::Cos, ValType::F64) => Some(WasmMathImport {
+            field_name: "_cos".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::F64,
+        }),
+        (FirMathOp::Exp, ValType::F64) => Some(WasmMathImport {
+            field_name: "_exp".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::F64,
+        }),
+        (FirMathOp::Log, ValType::F64) => Some(WasmMathImport {
+            field_name: "_log".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::F64,
+        }),
+        (FirMathOp::Log10, ValType::F64) => Some(WasmMathImport {
+            field_name: "_log10".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::F64,
+        }),
+        (FirMathOp::Tan, ValType::F64) => Some(WasmMathImport {
+            field_name: "_tan".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::F64,
+        }),
+        (FirMathOp::Atan, ValType::F64) => Some(WasmMathImport {
+            field_name: "_atan".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::F64,
+        }),
+        (FirMathOp::Asin, ValType::F64) => Some(WasmMathImport {
+            field_name: "_asin".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::F64,
+        }),
+        (FirMathOp::Acos, ValType::F64) => Some(WasmMathImport {
+            field_name: "_acos".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::F64,
+        }),
+        (FirMathOp::Round, ValType::F64) => Some(WasmMathImport {
+            field_name: "_round".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::F64,
+        }),
+        (FirMathOp::Pow, ValType::F64) => Some(WasmMathImport {
+            field_name: "_pow".to_owned(),
+            params: vec![ValType::F64, ValType::F64],
+            result: ValType::F64,
+        }),
+        (FirMathOp::Atan2, ValType::F64) => Some(WasmMathImport {
+            field_name: "_atan2".to_owned(),
+            params: vec![ValType::F64, ValType::F64],
+            result: ValType::F64,
+        }),
+        (FirMathOp::Fmod, ValType::F64) => Some(WasmMathImport {
+            field_name: "_fmod".to_owned(),
+            params: vec![ValType::F64, ValType::F64],
+            result: ValType::F64,
+        }),
+        (FirMathOp::Remainder, ValType::F64) => Some(WasmMathImport {
+            field_name: "_remainder".to_owned(),
+            params: vec![ValType::F64, ValType::F64],
+            result: ValType::F64,
+        }),
+        _ => None,
+    };
+    Ok(import)
 }
 
 fn wasm_val_type_for_fir(
