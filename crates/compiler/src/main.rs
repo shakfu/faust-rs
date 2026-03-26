@@ -30,6 +30,7 @@ use codegen::backends::interp::{
     FbcCppOptions, InterpOptions, generate_cpp_from_fbc, generate_interp_module, read_fbc,
     write_fbc,
 };
+use codegen::backends::wasm::{WasmOptions, generate_wasm_module};
 use codegen::fixtures::backend_test_fixtures;
 use compiler::{
     Compiler, CompilerError, FirVerifyOptions, RealType, SignalFirLane,
@@ -55,6 +56,7 @@ enum CliLang {
     Interp,
     #[value(alias = "clif")]
     Cranelift,
+    Wasm,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -195,10 +197,10 @@ struct CliArgs {
     /// Compile through the experimental Cranelift backend and print a backend report.
     #[arg(long = "dump-cranelift", action = ArgAction::SetTrue)]
     dump_cranelift: bool,
-    /// Select backend language (Faust-style): `-lang c`, `-lang cpp`, `-lang cranelift`, `-lang fir`, or `-lang interp`.
+    /// Select backend language (Faust-style): `-lang c`, `-lang cpp`, `-lang cranelift`, `-lang fir`, `-lang interp`, or `-lang wasm`.
     ///
     /// This option is equivalent to `--dump-c` / `--dump-cpp` / `--dump-fir`
-    /// / `--dump-interp` / `--dump-cranelift`.
+    /// / `--dump-interp` / `--dump-cranelift` / `-lang wasm`.
     #[arg(long = "lang", value_enum, allow_hyphen_values = true)]
     lang: Option<CliLang>,
     /// Print version information and exit.
@@ -783,6 +785,29 @@ fn emit_output(content: &str, output: Option<&PathBuf>) {
     }
 }
 
+/// Writes generated binary output either to stdout or to the requested file.
+fn emit_binary_output(content: &[u8], output: Option<&PathBuf>) {
+    if let Some(path) = output {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && let Err(err) = std::fs::create_dir_all(parent)
+        {
+            eprintln!(
+                "Failed to create output directory {}: {err}",
+                parent.display()
+            );
+            std::process::exit(1);
+        }
+        if let Err(err) = std::fs::write(path, content) {
+            eprintln!("Failed to write output file {}: {err}", path.display());
+            std::process::exit(1);
+        }
+    } else if let Err(err) = std::io::Write::write_all(&mut std::io::stdout(), content) {
+        eprintln!("Failed to write binary output to stdout: {err}");
+        std::process::exit(1);
+    }
+}
+
 /// Renders a short Cranelift backend status report for the CLI.
 fn render_cranelift_report(
     compiled: &codegen::backends::cranelift::JitDspModule,
@@ -1068,7 +1093,12 @@ fn main() {
         eprintln!("--super-class-name is only meaningful for C++ output or architecture wrapping");
         std::process::exit(2);
     }
-    if (cli.dump_fir || cli.dump_fir_verify || matches!(cli.lang, Some(CliLang::Fir)))
+    if (cli.dump_fir
+        || cli.dump_fir_verify
+        || matches!(
+            cli.lang,
+            Some(CliLang::Fir | CliLang::Interp | CliLang::Cranelift | CliLang::Wasm)
+        ))
         && cli.architecture.is_some()
     {
         eprintln!("--architecture is currently supported only for C/C++ output");
@@ -1095,7 +1125,7 @@ fn main() {
     if cli.fir_fixture.is_some() {
         if cli.golden || cli.parse || cli.dump_box || cli.dump_sig {
             eprintln!(
-                "--fir-fixture supports only FIR/backend dump modes (fir/c/cpp/interp/cranelift)"
+                "--fir-fixture supports only FIR/backend dump modes (fir/c/cpp/interp/cranelift/wasm)"
             );
             std::process::exit(2);
         }
@@ -1162,6 +1192,24 @@ fn main() {
                 };
             let rendered = render_cranelift_report(&compiled, subset_gap.ok().flatten().as_deref());
             emit_output(&rendered, cli.output.as_ref());
+            return;
+        }
+
+        if matches!(cli.lang, Some(CliLang::Wasm)) {
+            match generate_wasm_module(
+                &store,
+                module,
+                &WasmOptions {
+                    double_precision: cli.double,
+                    ..WasmOptions::default()
+                },
+            ) {
+                Ok(wasm) => emit_binary_output(&wasm.wasm_binary, cli.output.as_ref()),
+                Err(err) => {
+                    eprintln!("WASM fixture codegen failed: {err}");
+                    std::process::exit(1);
+                }
+            }
             return;
         }
 
@@ -1560,6 +1608,41 @@ fn main() {
         return;
     }
 
+    if matches!(cli.lang, Some(CliLang::Wasm)) {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
+        let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
+        let options = WasmOptions {
+            double_precision: cli.double,
+            ..WasmOptions::default()
+        };
+        let result = if cli.import_dir.is_empty() {
+            compiler.compile_file_default_to_wasm_with_lane(
+                input_path,
+                &options,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        } else {
+            compiler.compile_file_to_wasm_with_lane(
+                input_path,
+                &cli.import_dir,
+                &options,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        };
+        timer.phase("wasm-codegen");
+
+        match result {
+            Ok(wasm) => emit_binary_output(&wasm.wasm_binary, cli.output.as_ref()),
+            Err(err) => {
+                eprintln!("WASM pipeline failed: {err}");
+                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
+                std::process::exit(1);
+            }
+        }
+        timer.total();
+        return;
+    }
+
     if cli.dump_cpp || matches!(cli.lang, Some(CliLang::Cpp)) || mode_count == 0 {
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
@@ -1752,6 +1835,12 @@ mod tests {
     fn cli_parse_accepts_lang_cranelift() {
         let cli = CliArgs::parse_from(["faust-rs", "--lang", "cranelift", "foo.dsp"]);
         assert!(matches!(cli.lang, Some(CliLang::Cranelift)));
+    }
+
+    #[test]
+    fn cli_parse_accepts_lang_wasm() {
+        let cli = CliArgs::parse_from(["faust-rs", "--lang", "wasm", "foo.dsp"]);
+        assert!(matches!(cli.lang, Some(CliLang::Wasm)));
     }
 
     #[test]

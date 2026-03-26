@@ -41,6 +41,7 @@ use codegen::backends::interp::{
     CodegenError as InterpCodegenError, CodegenErrorCode as InterpCodegenErrorCode, FbcDspFactory,
     FbcReal, InterpOptions, generate_interp_module, write_fbc,
 };
+use codegen::backends::wasm::{WasmBackendError, WasmModule, WasmOptions, generate_wasm_module};
 use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, SourceSpan};
 use fir::{
     FirBuilder, FirId, FirStore, FirType, NamedType,
@@ -428,6 +429,40 @@ impl Compiler {
             .map_err(|e| lower_fir_error_to_compiler(source_name, e))
     }
 
+    /// Parses + evaluates + propagates one source, then emits a WASM module
+    /// scaffold through the selected signal->FIR lane.
+    pub fn compile_source_to_wasm(
+        &self,
+        source_name: &str,
+        source: &str,
+        options: &WasmOptions,
+    ) -> Result<WasmModule, CompilerError> {
+        self.compile_source_to_wasm_with_lane(
+            source_name,
+            source,
+            options,
+            SignalFirLane::LegacyBridge,
+        )
+    }
+
+    /// Parses + evaluates + propagates one source, then emits a WASM module
+    /// through the selected signal->FIR lane.
+    pub fn compile_source_to_wasm_with_lane(
+        &self,
+        source_name: &str,
+        source: &str,
+        options: &WasmOptions,
+        lane: SignalFirLane,
+    ) -> Result<WasmModule, CompilerError> {
+        let lowered = self.compile_source_to_fir_with_lane(source_name, source, lane)?;
+        generate_wasm_module(&lowered.store, lowered.module, options).map_err(|error| {
+            CompilerError::CodegenWasm {
+                source: source_name.into(),
+                error,
+            }
+        })
+    }
+
     /// Parses + evaluates + propagates one file, then emits C++ text from
     /// the temporary module-first FIR bridge.
     pub fn compile_file_to_cpp(
@@ -508,6 +543,41 @@ impl Compiler {
             .map_err(|e| lower_fir_error_to_compiler(&source, e))
     }
 
+    /// Parses + evaluates + propagates one file, then emits a WASM module
+    /// scaffold through the selected signal->FIR lane.
+    pub fn compile_file_to_wasm(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        options: &WasmOptions,
+    ) -> Result<WasmModule, CompilerError> {
+        self.compile_file_to_wasm_with_lane(
+            path,
+            search_paths,
+            options,
+            SignalFirLane::LegacyBridge,
+        )
+    }
+
+    /// Parses + evaluates + propagates one file, then emits a WASM module
+    /// through the selected signal->FIR lane.
+    pub fn compile_file_to_wasm_with_lane(
+        &self,
+        path: &Path,
+        search_paths: &[PathBuf],
+        options: &WasmOptions,
+        lane: SignalFirLane,
+    ) -> Result<WasmModule, CompilerError> {
+        let lowered = self.compile_file_to_fir_with_lane(path, search_paths, lane)?;
+        let source = path.display().to_string();
+        generate_wasm_module(&lowered.store, lowered.module, options).map_err(|error| {
+            CompilerError::CodegenWasm {
+                source: source.into(),
+                error,
+            }
+        })
+    }
+
     /// Parses + evaluates + propagates one file with default import search path,
     /// then emits C++ text from the temporary module-first FIR bridge.
     pub fn compile_file_default_to_cpp(
@@ -558,6 +628,27 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<FirCompileOutput, CompilerError> {
         self.compile_file_to_fir_with_lane(path, &[], lane)
+    }
+
+    /// Parses + evaluates + propagates one file with default import search path,
+    /// then emits a WASM module scaffold.
+    pub fn compile_file_default_to_wasm(
+        &self,
+        path: &Path,
+        options: &WasmOptions,
+    ) -> Result<WasmModule, CompilerError> {
+        self.compile_file_default_to_wasm_with_lane(path, options, SignalFirLane::LegacyBridge)
+    }
+
+    /// Parses + evaluates + propagates one file with default import search path,
+    /// then emits a WASM module through the selected signal->FIR lane.
+    pub fn compile_file_default_to_wasm_with_lane(
+        &self,
+        path: &Path,
+        options: &WasmOptions,
+        lane: SignalFirLane,
+    ) -> Result<WasmModule, CompilerError> {
+        self.compile_file_to_wasm_with_lane(path, &[], options, lane)
     }
 
     /// Parses + evaluates + propagates one source, then emits `.fbc` bytecode
@@ -857,6 +948,11 @@ pub enum CompilerError {
         source: Box<str>,
         error: InterpCodegenError,
     },
+    /// WASM backend emission failed from FIR.
+    CodegenWasm {
+        source: Box<str>,
+        error: WasmBackendError,
+    },
 }
 
 impl std::fmt::Display for CompilerError {
@@ -902,6 +998,9 @@ impl std::fmt::Display for CompilerError {
             Self::CodegenInterp { source, error } => {
                 write!(f, "code generation failed for {source}: {error}")
             }
+            Self::CodegenWasm { source, error } => {
+                write!(f, "code generation failed for {source}: {error}")
+            }
         }
     }
 }
@@ -920,6 +1019,7 @@ impl CompilerError {
             Self::FirVerify { diagnostics, .. } => Some(diagnostics),
             Self::Codegen { .. } => None,
             Self::CodegenC { .. } => None,
+            Self::CodegenWasm { .. } => None,
             _ => None,
         }
     }
@@ -2741,6 +2841,7 @@ mod tests {
         Compiler, CompilerError, build_import_search_paths, default_import_search_paths,
         golden_snapshot, make_compute_fir_signature, resolve_module_name, resolve_ui_root_label,
     };
+    use codegen::backends::wasm::WasmOptions;
 
     fn temp_root(test_name: &str) -> PathBuf {
         let stamp = SystemTime::now()
@@ -2990,5 +3091,15 @@ mod tests {
             .get(&key)
             .expect("component metadata should exist in final compiler output");
         assert!(values.contains("child-author"));
+    }
+
+    #[test]
+    fn compiler_compile_source_to_wasm_emits_magic_header() {
+        let compiler = Compiler::new();
+        let out = compiler
+            .compile_source_to_wasm("zero.dsp", "process = 0;", &WasmOptions::default())
+            .expect("WASM scaffold should compile from source");
+        assert!(out.wasm_binary.starts_with(b"\0asm"));
+        assert!(out.dsp_json.contains("\"backend\":\"wasm\""));
     }
 }

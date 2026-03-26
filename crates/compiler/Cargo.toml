@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+default = ["backend-wasm"]
+backend-wasm = ["codegen/backend-wasm"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 errors = { path = "../errors" }
