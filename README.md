@@ -18,6 +18,9 @@ cargo build -p compiler
 
 # Compiler binary crate only (release)
 cargo build -p compiler --release
+
+# Raw Rust compiler module for faustwasm embedded-compiler mode
+cargo run -p xtask -- build-faustwasm-compiler-module
 ```
 
 ## Install
@@ -106,6 +109,7 @@ cargo run -p compiler -- -lang fir foo.dsp
 - User CLI reference: `docs/user-cli-guide-en.md`
 - User diagnostics guide: `docs/user-diagnostics-guide-en.md`
 - Technical/developer workflows: `docs/developer-workflows-en.md`
+- Raw `faustwasm` compiler-module build notes: `crates/wasm-ffi/README.md`
 
 ## Generate API docs
 

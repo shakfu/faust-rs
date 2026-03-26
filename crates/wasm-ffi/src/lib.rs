@@ -26,6 +26,14 @@
 //!   - explicit stubs: `expandDSP`, `generateAuxFiles`, and the remaining
 //!     `getInfos(...)` keys
 //! - deferred: compatibility naming shim.
+//!
+//! # Packaging
+//! The intended compiler-module artifact is built with:
+//! `cargo run -p xtask -- build-faustwasm-compiler-module`
+//!
+//! That workflow produces and validates the standalone
+//! `target/wasm32-unknown-unknown/release/faust_wasm_ffi.wasm` module consumed
+//! by the future `faustwasm` embedded-compiler loader.
 
 #![allow(non_snake_case)]
 #![allow(unsafe_code)]

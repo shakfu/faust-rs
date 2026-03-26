@@ -26,6 +26,7 @@ cargo run -p xtask -- <command>
 | `interp-trace-gen` | Phase 2 scaffold: generate runtime trace snapshots for `tests/runtime_corpus/` |
 | `interp-trace-check` | Phase 2 scaffold: compare runtime traces against generated snapshots (tolerant float compare) |
 | `interp-trace-diff-lanes` | Phase 3 scaffold: compare `legacy` vs `fast-lane` runtime traces |
+| `build-faustwasm-compiler-module` | Build `wasm-ffi` for `wasm32-unknown-unknown` and verify the raw export ABI |
 | `parser-parity-report` | Write parser parity report vs C++ |
 | `corpus-status-report` | Write corpus status diff report |
 | `cpp-backend-diff-report` | Write C++ backend diff report |
@@ -45,6 +46,29 @@ cargo run -p xtask -- <command>
 - Deterministic corpus file ordering (sorted).
 - Normalized output text before snapshot comparison (CRLF → LF).
 - Fail-fast: first diverging case aborts the run to keep CI signal clean.
+
+## `build-faustwasm-compiler-module`
+
+Builds the raw Rust compiler module intended for the `faustwasm`
+embedded-compiler mode:
+
+```bash
+cargo run -p xtask -- build-faustwasm-compiler-module
+```
+
+What it does:
+- runs `cargo build -p wasm-ffi --target wasm32-unknown-unknown --release`
+- verifies the exported raw ABI expected by the `faustwasm` Rust adapter
+- prints the resulting module path
+
+Debug profile:
+
+```bash
+cargo run -p xtask -- build-faustwasm-compiler-module --debug
+```
+
+Expected default output:
+- `target/wasm32-unknown-unknown/release/faust_wasm_ffi.wasm`
 
 ## `interp-trace-dump` (Phase 1)
 

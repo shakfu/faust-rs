@@ -17,6 +17,7 @@
 //!   - `backend-align-smoke` (CI-friendly smoke alignment orchestration)
 //!   - `backend-align-nightly` (broader alignment orchestration)
 //!   - `fir-dump-scan` (structural scan of `dump_fir` loop body expansion)
+//!   - `build-faustwasm-compiler-module` (`wasm-ffi` -> verified `.wasm`)
 //! - Differential reports:
 //!   - parser parity report
 //!   - corpus status report
@@ -38,6 +39,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
+use wasmparser::{ExternalKind, Parser, Payload};
 
 const USAGE: &str = "\
 Usage:
@@ -52,6 +54,7 @@ Usage:
   cargo run -p xtask -- interp-trace-check [--case <tests/runtime_corpus/foo.dsp>] [--lane legacy|fast] [--strict-fir-types]
   cargo run -p xtask -- interp-trace-diff-lanes [--case <tests/runtime_corpus/foo.dsp>] [--strict-fir-types]
   cargo run -p xtask -- fir-dump-scan [--case <tests/corpus/foo.dsp> ...] [--lane legacy|fast]
+  cargo run -p xtask -- build-faustwasm-compiler-module [--debug]
   cargo run -p xtask -- backend-align-smoke [--case <tests/runtime_corpus/foo.dsp> ...] [--strict-fir-types] [--skip-golden] [--skip-diff-lanes] [--skip-fir-dump-scan]
   cargo run -p xtask -- backend-align-nightly [--strict-fir-types] [--skip-golden] [--skip-diff-lanes] [--skip-fir-dump-scan]
   cargo run -p xtask -- parser-parity-report
@@ -117,6 +120,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "interp-trace-check" => interp_trace_check(args)?,
         "interp-trace-diff-lanes" => interp_trace_diff_lanes(args)?,
         "fir-dump-scan" => fir_dump_scan(args)?,
+        "build-faustwasm-compiler-module" => build_faustwasm_compiler_module(args)?,
         "backend-align-smoke" => backend_align_smoke(args)?,
         "backend-align-nightly" => backend_align_nightly(args)?,
         "parser-parity-report" => parser_parity_report()?,
@@ -199,6 +203,158 @@ fn runtime_corpus_files() -> Result<Vec<PathBuf>, io::Error> {
 /// Returns the root directory for persisted runtime trace snapshots.
 fn runtime_trace_snapshot_root() -> PathBuf {
     workspace_root().join("tests/runtime_traces").join("rust")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FaustwasmCompilerModuleOptions {
+    release: bool,
+}
+
+impl Default for FaustwasmCompilerModuleOptions {
+    fn default() -> Self {
+        Self { release: true }
+    }
+}
+
+/// Parses flags for the `build-faustwasm-compiler-module` workflow.
+fn parse_faustwasm_compiler_module_options(
+    args: impl Iterator<Item = String>,
+) -> Result<FaustwasmCompilerModuleOptions, Box<dyn std::error::Error>> {
+    let mut options = FaustwasmCompilerModuleOptions::default();
+    for arg in args {
+        match arg.as_str() {
+            "--debug" => options.release = false,
+            other => {
+                return Err(format!(
+                    "usage: cargo run -p xtask -- build-faustwasm-compiler-module [--debug]\nunknown option: {other}"
+                )
+                .into());
+            }
+        }
+    }
+    Ok(options)
+}
+
+/// Builds the raw Rust compiler module consumed by the future embedded
+/// `faustwasm` path and verifies that its exported ABI matches the documented
+/// `wasm-ffi` contract.
+fn build_faustwasm_compiler_module(
+    args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let options = parse_faustwasm_compiler_module_options(args)?;
+    let root = workspace_root();
+    let profile = if options.release { "release" } else { "debug" };
+
+    let mut cargo = Command::new("cargo");
+    cargo
+        .current_dir(&root)
+        .arg("build")
+        .arg("-p")
+        .arg("wasm-ffi")
+        .arg("--target")
+        .arg("wasm32-unknown-unknown");
+    if options.release {
+        cargo.arg("--release");
+    }
+
+    let status = cargo.status()?;
+    if !status.success() {
+        return Err(
+            "failed to build `wasm-ffi` for `wasm32-unknown-unknown`; ensure the target is installed (for example with `rustup target add wasm32-unknown-unknown`) and try again"
+                .into(),
+        );
+    }
+
+    let module_path = root
+        .join("target")
+        .join("wasm32-unknown-unknown")
+        .join(profile)
+        .join("faust_wasm_ffi.wasm");
+    let bytes = fs::read(&module_path)?;
+    verify_wasm_ffi_exports(&bytes)?;
+    println!(
+        "faustwasm compiler module ready: {}",
+        workspace_relative_path(&module_path)
+    );
+    Ok(())
+}
+
+/// Lists the minimum export surface that the raw `wasm-ffi` compiler-module
+/// ABI exposes to the `faustwasm` TypeScript adapter.
+fn required_wasm_ffi_exports() -> &'static [&'static str] {
+    &[
+        "memory",
+        "faust_wasm_alloc",
+        "faust_wasm_dealloc",
+        "faust_wasm_version_ptr",
+        "faust_wasm_version_len",
+        "faust_wasm_compile_dsp",
+        "faust_wasm_result_is_ok",
+        "faust_wasm_result_wasm_ptr",
+        "faust_wasm_result_wasm_len",
+        "faust_wasm_result_json_ptr",
+        "faust_wasm_result_json_len",
+        "faust_wasm_result_compile_options_ptr",
+        "faust_wasm_result_compile_options_len",
+        "faust_wasm_result_error_ptr",
+        "faust_wasm_result_error_len",
+        "faust_wasm_result_free",
+        "faust_wasm_get_info",
+        "faust_wasm_expand_dsp",
+        "faust_wasm_generate_aux_files",
+        "faust_wasm_text_result_is_ok",
+        "faust_wasm_text_result_ptr",
+        "faust_wasm_text_result_len",
+        "faust_wasm_text_result_free",
+    ]
+}
+
+/// Verifies that a compiled `wasm-ffi` module exports the raw ABI expected by
+/// the `faustwasm` Rust adapter.
+fn verify_wasm_ffi_exports(bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut exported_functions = BTreeSet::new();
+    let mut has_memory_export = false;
+
+    for payload in Parser::new(0).parse_all(bytes) {
+        match payload? {
+            Payload::ExportSection(section) => {
+                for export in section {
+                    let export = export?;
+                    match export.kind {
+                        ExternalKind::Memory if export.name == "memory" => {
+                            has_memory_export = true;
+                        }
+                        ExternalKind::Func => {
+                            exported_functions.insert(export.name.to_owned());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Payload::End(_) => break,
+            _ => {}
+        }
+    }
+
+    let mut missing = Vec::new();
+    if !has_memory_export {
+        missing.push("memory".to_owned());
+    }
+    for export in required_wasm_ffi_exports() {
+        if *export != "memory" && !exported_functions.contains(*export) {
+            missing.push((*export).to_owned());
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "`wasm-ffi` module is missing required exports: {}",
+            missing.join(", ")
+        )
+        .into())
+    }
 }
 
 const BACKEND_ALIGN_SMOKE_DEFAULT_CASES: &[&str] = &[
@@ -4251,5 +4407,73 @@ mod tests {
         assert_eq!(mismatch.field, "outputs");
         assert_eq!(mismatch.channel, Some(0));
         assert_eq!(mismatch.sample, Some(0));
+    }
+
+    #[test]
+    fn parse_faustwasm_compiler_module_options_defaults_to_release() {
+        let options =
+            parse_faustwasm_compiler_module_options(std::iter::empty::<String>()).unwrap();
+        assert!(options.release);
+    }
+
+    #[test]
+    fn parse_faustwasm_compiler_module_options_accepts_debug_flag() {
+        let options =
+            parse_faustwasm_compiler_module_options(vec!["--debug".to_owned()].into_iter())
+                .unwrap();
+        assert!(!options.release);
+    }
+
+    #[test]
+    fn verify_wasm_ffi_exports_accepts_expected_surface() {
+        let bytes = wat::parse_str(
+            r#"
+            (module
+              (memory (export "memory") 1)
+              (func (export "faust_wasm_alloc"))
+              (func (export "faust_wasm_dealloc"))
+              (func (export "faust_wasm_version_ptr"))
+              (func (export "faust_wasm_version_len"))
+              (func (export "faust_wasm_compile_dsp"))
+              (func (export "faust_wasm_result_is_ok"))
+              (func (export "faust_wasm_result_wasm_ptr"))
+              (func (export "faust_wasm_result_wasm_len"))
+              (func (export "faust_wasm_result_json_ptr"))
+              (func (export "faust_wasm_result_json_len"))
+              (func (export "faust_wasm_result_compile_options_ptr"))
+              (func (export "faust_wasm_result_compile_options_len"))
+              (func (export "faust_wasm_result_error_ptr"))
+              (func (export "faust_wasm_result_error_len"))
+              (func (export "faust_wasm_result_free"))
+              (func (export "faust_wasm_get_info"))
+              (func (export "faust_wasm_expand_dsp"))
+              (func (export "faust_wasm_generate_aux_files"))
+              (func (export "faust_wasm_text_result_is_ok"))
+              (func (export "faust_wasm_text_result_ptr"))
+              (func (export "faust_wasm_text_result_len"))
+              (func (export "faust_wasm_text_result_free"))
+            )
+            "#,
+        )
+        .unwrap();
+
+        verify_wasm_ffi_exports(&bytes).unwrap();
+    }
+
+    #[test]
+    fn verify_wasm_ffi_exports_rejects_missing_exports() {
+        let bytes = wat::parse_str(
+            r#"
+            (module
+              (memory (export "memory") 1)
+              (func (export "faust_wasm_alloc"))
+            )
+            "#,
+        )
+        .unwrap();
+
+        let error = verify_wasm_ffi_exports(&bytes).unwrap_err().to_string();
+        assert!(error.contains("faust_wasm_compile_dsp"));
+        assert!(error.contains("faust_wasm_text_result_free"));
     }
 }
