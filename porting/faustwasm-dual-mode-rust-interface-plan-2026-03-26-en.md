@@ -351,6 +351,10 @@ Pass criteria:
 Deliverables:
 
 - minimal Rust->JS binding exposing the compile service
+- a real Rust compiler WASM module built from `wasm-ffi` for
+  `wasm32-unknown-unknown`
+- documented raw exports for memory allocation, compile requests, and
+  text-result helpers
 - binary payload transfer for WASM bytes
 - string payload transfer for JSON/diagnostics
 
@@ -358,6 +362,8 @@ Pass criteria:
 
 - JS can request compilation and receive a usable artifact bundle
 - no explicit factory pointer lifetime is required in the public API
+- the Rust compiler module can be instantiated directly with
+  `WebAssembly.instantiate(...)`
 
 ### Phase 3: `faustwasm` integration
 
@@ -365,12 +371,16 @@ Deliverables:
 
 - adapted `LibFaust.ts`
 - adapted `FaustCompiler.ts`
+- one dedicated loader for the raw Rust compiler module
 - retained artifact-loading path
+- compiler-module asset packaging/distribution plan
 - shared convergence to one JS factory representation
 
 Pass criteria:
 
 - embedded compile mode works through the Rust interface
+- `faustwasm` can load the Rust compiler module as a first-class alternative to
+  the historical C++/Emscripten compiler package
 - precompiled artifact mode still works unchanged at the product level
 
 ### Phase 4: compatibility hardening
@@ -506,6 +516,19 @@ Mitigation:
 - only reintroduce explicit persistent factory identities if a concrete runtime
   need appears
 
+### 13.5 Packaging drift between compiler and product integration
+
+The compile-service API can be correct while the shipped compiler-module asset
+and the `faustwasm` loader still fail to line up in practice.
+
+Mitigation:
+
+- treat the build of the `wasm-ffi` compiler module as an explicit project
+  deliverable, not an implicit local developer step
+- define one documented loader path in `faustwasm`
+- validate the embedded-compiler mode end to end with the actual distributed
+  compiler-module asset
+
 ---
 
 ## 14. Recommended First Slice
@@ -521,6 +544,24 @@ The first implementation slice should be deliberately small:
 4. Keep artifact-loading mode unchanged
 
 This gives immediate value while preserving the dual product model.
+
+The next milestone after that first slice should make the embedded-compiler
+path actually shippable:
+
+1. Compiler-module build:
+   - build `crates/wasm-ffi` as a real `wasm32-unknown-unknown` compiler
+     module
+   - document the expected exports and build command
+2. Compiler-module loader:
+   - add a dedicated `faustwasm` loader for the raw Rust compiler module
+   - return the typed raw-export surface expected by the Rust adapter
+3. Compiler-module asset distribution:
+   - decide how the compiler module is packaged for `faustwasm`
+   - ensure the embedded-compiler mode can obtain the matching `.wasm` asset
+4. End-to-end embedded validation:
+   - instantiate the Rust compiler module from `faustwasm`
+   - run `createDSPFactory(...)` through to a usable `FaustDspFactory`
+   - verify that precompiled artifact mode remains unchanged
 
 ---
 
@@ -538,4 +579,5 @@ This plan is considered successful when all of the following are true:
   ownership
 - the resulting interface is simpler to reason about than the current
   C++/Emscripten binding stack
-
+- the shipped Rust compiler-module asset and the `faustwasm` loader are tested
+  together end to end
