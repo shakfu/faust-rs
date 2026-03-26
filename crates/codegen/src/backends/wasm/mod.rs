@@ -457,6 +457,7 @@ fn escape_json_string(input: &str) -> String {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scaffold_function_body(
     func: WasmFunc,
     num_inputs: i32,
@@ -911,6 +912,7 @@ impl ComputeSubsetLowerer<'_> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lower_for_loop(
         &mut self,
         var: String,
