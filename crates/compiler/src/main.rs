@@ -34,8 +34,9 @@ use codegen::backends::wasm::{WasmOptions, generate_wasm_module};
 use codegen::fixtures::backend_test_fixtures;
 use compiler::{
     Compiler, CompilerError, FirVerifyOptions, RealType, SignalFirLane,
+    compile_options_json_string,
     enrobage::{EnrobageOptions, wrap_cpp_with_architecture},
-    golden_snapshot_from_file, wasm_compile_options_json_string,
+    golden_snapshot_from_file,
 };
 use errors::{DiagnosticBundle, LabelStyle, Severity, Stage};
 use fir::{checker::verify_fir_module, dump_fir};
@@ -57,6 +58,8 @@ enum CliLang {
     #[value(alias = "clif")]
     Cranelift,
     Wasm,
+    #[value(alias = "wat")]
+    Wast,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -200,10 +203,10 @@ struct CliArgs {
     /// Emit strict C++-style JSON description.
     #[arg(long = "json", action = ArgAction::SetTrue)]
     dump_json: bool,
-    /// Select backend language (Faust-style): `-lang c`, `-lang cpp`, `-lang cranelift`, `-lang fir`, `-lang interp`, or `-lang wasm`.
+    /// Select backend language (Faust-style): `-lang c`, `-lang cpp`, `-lang cranelift`, `-lang fir`, `-lang interp`, `-lang wasm`, or `-lang wast`.
     ///
     /// This option is equivalent to `--dump-c` / `--dump-cpp` / `--dump-fir`
-    /// / `--dump-interp` / `--dump-cranelift` / `-lang wasm`.
+    /// / `--dump-interp` / `--dump-cranelift` / `-lang wasm` / `-lang wast`.
     #[arg(long = "lang", value_enum, allow_hyphen_values = true)]
     lang: Option<CliLang>,
     /// Print version information and exit.
@@ -726,7 +729,7 @@ fn diagnostic_debug_from_notes(notes: &[Box<str>]) -> serde_json::Value {
 fn print_global_usage_and_exit() -> ! {
     eprintln!("Usage:");
     eprintln!(
-        "  cargo run -p compiler -- -lang c|cpp|fir <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--super-class-name <name>] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- -lang c|cpp|fir|wast <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--super-class-name <name>] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!("                           [--no-fir-verify] [--fir-verify-strict]");
     eprintln!("  cargo run -p compiler -- --golden <input.dsp>");
@@ -828,6 +831,42 @@ fn emit_wasm_output(wasm_binary: &[u8], dsp_json: &str, output: Option<&PathBuf>
     } else {
         emit_binary_output(wasm_binary, None);
     }
+}
+
+fn render_wast_output(wasm_binary: &[u8]) -> String {
+    match wasmprinter::print_bytes(wasm_binary) {
+        Ok(wast) => wast,
+        Err(err) => {
+            eprintln!("Failed to render WAST text from generated WASM: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Writes a JSON companion file next to an existing backend output file using
+/// the same stem and a `.json` extension.
+fn emit_json_companion_output(json_text: &str, output: &Path) {
+    let json_path = output.with_extension("json");
+    emit_output(json_text, Some(&json_path));
+}
+
+fn cli_lang_name(lang: CliLang) -> &'static str {
+    match lang {
+        CliLang::C => "c",
+        CliLang::Cpp => "cpp",
+        CliLang::Fir => "fir",
+        CliLang::Interp => "interp",
+        CliLang::Cranelift => "cranelift",
+        CliLang::Wasm => "wasm",
+        CliLang::Wast => "wast",
+    }
+}
+
+fn require_companion_output_path(cli: &CliArgs) -> &PathBuf {
+    cli.output.as_ref().unwrap_or_else(|| {
+        eprintln!("--json used with -lang requires -o <file> so the companion JSON has a path");
+        std::process::exit(2);
+    })
 }
 
 /// Renders a short Cranelift backend status report for the CLI.
@@ -965,6 +1004,7 @@ fn compile_fixture_to_interp_text(
 fn compile_fixture_to_json_text(
     store: &fir::FirStore,
     module: fir::FirId,
+    compile_options: String,
     double_precision: bool,
 ) -> Result<String, String> {
     let fir::FirMatch::Module {
@@ -997,7 +1037,7 @@ fn compile_fixture_to_json_text(
             name,
             filename: None,
             version: Some(Compiler::version().to_owned()),
-            compile_options: Some(wasm_compile_options_json_string(double_precision)),
+            compile_options: Some(compile_options),
             library_list: Vec::new(),
             include_pathnames: Vec::new(),
             top_level_meta: Vec::new(),
@@ -1010,6 +1050,39 @@ fn compile_fixture_to_json_text(
     )
     .map_err(|e| e.to_string())?;
     Ok(json.render())
+}
+
+fn emit_cli_json_companion_for_backend(
+    compiler: &Compiler,
+    cli: &CliArgs,
+    input_path: &Path,
+    backend_lang: CliLang,
+) {
+    let compile_options =
+        compile_options_json_string(Some(cli_lang_name(backend_lang)), cli.double);
+    let result = if cli.import_dir.is_empty() {
+        compiler.compile_file_default_to_json_with_lane_and_compile_options(
+            input_path,
+            selected_codegen_lane(cli).into_compiler_lane(),
+            compile_options,
+        )
+    } else {
+        compiler.compile_file_to_json_with_compile_options(
+            input_path,
+            &cli.import_dir,
+            selected_codegen_lane(cli).into_compiler_lane(),
+            compile_options,
+        )
+    };
+
+    match result {
+        Ok(json) => emit_json_companion_output(&json, require_companion_output_path(cli)),
+        Err(err) => {
+            eprintln!("JSON companion pipeline failed: {err}");
+            print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Renders a FIR verifier report in CLI-friendly text form.
@@ -1086,7 +1159,7 @@ fn main() {
         return;
     }
 
-    let mode_count = [
+    let backend_mode_count = [
         cli.golden,
         cli.parse,
         cli.dump_box,
@@ -1104,6 +1177,13 @@ fn main() {
     .into_iter()
     .filter(|v| *v)
     .count();
+
+    let json_plus_lang_only = cli.dump_json && cli.lang.is_some() && backend_mode_count == 2;
+    let mode_count = if json_plus_lang_only {
+        1
+    } else {
+        backend_mode_count
+    };
 
     if mode_count > 1 {
         print_global_usage_and_exit();
@@ -1172,7 +1252,9 @@ fn main() {
         || cli.dump_fir_verify
         || matches!(
             cli.lang,
-            Some(CliLang::Fir | CliLang::Interp | CliLang::Cranelift | CliLang::Wasm)
+            Some(
+                CliLang::Fir | CliLang::Interp | CliLang::Cranelift | CliLang::Wasm | CliLang::Wast
+            )
         ))
         && cli.architecture.is_some()
     {
@@ -1200,7 +1282,7 @@ fn main() {
     if cli.fir_fixture.is_some() {
         if cli.golden || cli.parse || cli.dump_box || cli.dump_sig {
             eprintln!(
-                "--fir-fixture supports only FIR/backend dump modes (fir/c/cpp/interp/cranelift/wasm/json)"
+                "--fir-fixture supports only FIR/backend dump modes (fir/c/cpp/interp/cranelift/wasm/wast/json)"
             );
             std::process::exit(2);
         }
@@ -1240,12 +1322,42 @@ fn main() {
                 rendered.push('\n');
             }
             emit_output(&rendered, cli.output.as_ref());
+            if cli.dump_json {
+                let output = require_companion_output_path(&cli);
+                let compile_options = compile_options_json_string(Some("fir"), cli.double);
+                match compile_fixture_to_json_text(&store, module, compile_options, cli.double) {
+                    Ok(json) => emit_json_companion_output(&json, output),
+                    Err(err) => {
+                        eprintln!("JSON fixture generation failed: {err}");
+                        std::process::exit(1);
+                    }
+                }
+            }
             return;
         }
 
         if cli.dump_interp || matches!(cli.lang, Some(CliLang::Interp)) {
             match compile_fixture_to_interp_text(&store, module, &InterpOptions::default()) {
-                Ok(fbc_text) => emit_output(&fbc_text, cli.output.as_ref()),
+                Ok(fbc_text) => {
+                    emit_output(&fbc_text, cli.output.as_ref());
+                    if cli.dump_json {
+                        let output = require_companion_output_path(&cli);
+                        let compile_options =
+                            compile_options_json_string(Some("interp"), cli.double);
+                        match compile_fixture_to_json_text(
+                            &store,
+                            module,
+                            compile_options,
+                            cli.double,
+                        ) {
+                            Ok(json) => emit_json_companion_output(&json, output),
+                            Err(err) => {
+                                eprintln!("JSON fixture generation failed: {err}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
                 Err(err) => {
                     eprintln!("Interp fixture codegen failed: {err}");
                     std::process::exit(1);
@@ -1267,6 +1379,17 @@ fn main() {
                 };
             let rendered = render_cranelift_report(&compiled, subset_gap.ok().flatten().as_deref());
             emit_output(&rendered, cli.output.as_ref());
+            if cli.dump_json {
+                let output = require_companion_output_path(&cli);
+                let compile_options = compile_options_json_string(Some("cranelift"), cli.double);
+                match compile_fixture_to_json_text(&store, module, compile_options, cli.double) {
+                    Ok(json) => emit_json_companion_output(&json, output),
+                    Err(err) => {
+                        eprintln!("JSON fixture generation failed: {err}");
+                        std::process::exit(1);
+                    }
+                }
+            }
             return;
         }
 
@@ -1279,7 +1402,14 @@ fn main() {
                     ..WasmOptions::default()
                 },
             ) {
-                Ok(wasm) => emit_binary_output(&wasm.wasm_binary, cli.output.as_ref()),
+                Ok(wasm) => {
+                    if cli.dump_json {
+                        let output = require_companion_output_path(&cli);
+                        emit_wasm_output(&wasm.wasm_binary, &wasm.dsp_json, Some(output));
+                    } else {
+                        emit_binary_output(&wasm.wasm_binary, cli.output.as_ref());
+                    }
+                }
                 Err(err) => {
                     eprintln!("WASM fixture codegen failed: {err}");
                     std::process::exit(1);
@@ -1288,9 +1418,55 @@ fn main() {
             return;
         }
 
+        if matches!(cli.lang, Some(CliLang::Wast)) {
+            match generate_wasm_module(
+                &store,
+                module,
+                &WasmOptions {
+                    double_precision: cli.double,
+                    ..WasmOptions::default()
+                },
+            ) {
+                Ok(wasm) => {
+                    let wast = render_wast_output(&wasm.wasm_binary);
+                    emit_output(&wast, cli.output.as_ref());
+                    if cli.dump_json {
+                        let output = require_companion_output_path(&cli);
+                        let compile_options = compile_options_json_string(Some("wast"), cli.double);
+                        match compile_fixture_to_json_text(
+                            &store,
+                            module,
+                            compile_options,
+                            cli.double,
+                        ) {
+                            Ok(json) => emit_json_companion_output(&json, output),
+                            Err(err) => {
+                                eprintln!("JSON fixture generation failed: {err}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("WAST fixture codegen failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+
         if cli.dump_json {
-            match compile_fixture_to_json_text(&store, module, cli.double) {
-                Ok(json) => emit_output(&json, cli.output.as_ref()),
+            let compile_options =
+                compile_options_json_string(cli.lang.map(cli_lang_name), cli.double);
+            match compile_fixture_to_json_text(&store, module, compile_options, cli.double) {
+                Ok(json) => {
+                    if cli.lang.is_some() {
+                        let output = require_companion_output_path(&cli);
+                        emit_json_companion_output(&json, output);
+                    } else {
+                        emit_output(&json, cli.output.as_ref());
+                    }
+                }
                 Err(err) => {
                     eprintln!("JSON fixture generation failed: {err}");
                     std::process::exit(1);
@@ -1333,6 +1509,22 @@ fn main() {
                         cpp
                     };
                     emit_output(&rendered, cli.output.as_ref());
+                    if cli.dump_json {
+                        let output = require_companion_output_path(&cli);
+                        let compile_options = compile_options_json_string(Some("cpp"), cli.double);
+                        match compile_fixture_to_json_text(
+                            &store,
+                            module,
+                            compile_options,
+                            cli.double,
+                        ) {
+                            Ok(json) => emit_json_companion_output(&json, output),
+                            Err(err) => {
+                                eprintln!("JSON fixture generation failed: {err}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
                 }
                 Err(err) => {
                     eprintln!("C++ fixture codegen failed: {err}");
@@ -1372,6 +1564,22 @@ fn main() {
                         c_code
                     };
                     emit_output(&rendered, cli.output.as_ref());
+                    if cli.dump_json {
+                        let output = require_companion_output_path(&cli);
+                        let compile_options = compile_options_json_string(Some("c"), cli.double);
+                        match compile_fixture_to_json_text(
+                            &store,
+                            module,
+                            compile_options,
+                            cli.double,
+                        ) {
+                            Ok(json) => emit_json_companion_output(&json, output),
+                            Err(err) => {
+                                eprintln!("JSON fixture generation failed: {err}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
                 }
                 Err(err) => {
                     eprintln!("C fixture codegen failed: {err}");
@@ -1602,6 +1810,9 @@ fn main() {
                     rendered.push('\n');
                 }
                 emit_output(&rendered, cli.output.as_ref());
+                if cli.dump_json {
+                    emit_cli_json_companion_for_backend(&compiler, &cli, input_path, CliLang::Fir);
+                }
             }
             Err(err) => {
                 eprintln!("FIR pipeline failed: {err}");
@@ -1613,19 +1824,21 @@ fn main() {
         return;
     }
 
-    if cli.dump_json {
+    if cli.dump_json && cli.lang.is_none() {
         let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
         let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
         let result = if cli.import_dir.is_empty() {
-            compiler.compile_file_default_to_json_with_lane(
+            compiler.compile_file_default_to_json_with_lane_and_compile_options(
                 input_path,
                 selected_codegen_lane(&cli).into_compiler_lane(),
+                compile_options_json_string(None, cli.double),
             )
         } else {
-            compiler.compile_file_to_json(
+            compiler.compile_file_to_json_with_compile_options(
                 input_path,
                 &cli.import_dir,
                 selected_codegen_lane(&cli).into_compiler_lane(),
+                compile_options_json_string(None, cli.double),
             )
         };
         timer.phase("json");
@@ -1665,6 +1878,14 @@ fn main() {
         match result {
             Ok(fbc_text) => {
                 emit_output(&fbc_text, cli.output.as_ref());
+                if cli.dump_json {
+                    emit_cli_json_companion_for_backend(
+                        &compiler,
+                        &cli,
+                        input_path,
+                        CliLang::Interp,
+                    );
+                }
             }
             Err(err) => {
                 eprintln!("Interp pipeline failed: {err}");
@@ -1712,6 +1933,14 @@ fn main() {
                 let rendered =
                     render_cranelift_report(&compiled, subset_gap.ok().flatten().as_deref());
                 emit_output(&rendered, cli.output.as_ref());
+                if cli.dump_json {
+                    emit_cli_json_companion_for_backend(
+                        &compiler,
+                        &cli,
+                        input_path,
+                        CliLang::Cranelift,
+                    );
+                }
             }
             Err(err) => {
                 eprintln!("Cranelift FIR pipeline failed: {err}");
@@ -1747,9 +1976,57 @@ fn main() {
         timer.phase("wasm-codegen");
 
         match result {
-            Ok(wasm) => emit_wasm_output(&wasm.wasm_binary, &wasm.dsp_json, cli.output.as_ref()),
+            Ok(wasm) => {
+                if cli.dump_json {
+                    let output = require_companion_output_path(&cli);
+                    emit_wasm_output(&wasm.wasm_binary, &wasm.dsp_json, Some(output));
+                } else {
+                    emit_wasm_output(&wasm.wasm_binary, &wasm.dsp_json, cli.output.as_ref());
+                }
+            }
             Err(err) => {
                 eprintln!("WASM pipeline failed: {err}");
+                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
+                std::process::exit(1);
+            }
+        }
+        timer.total();
+        return;
+    }
+
+    if matches!(cli.lang, Some(CliLang::Wast)) {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
+        let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
+        let options = WasmOptions {
+            double_precision: cli.double,
+            ..WasmOptions::default()
+        };
+        let result = if cli.import_dir.is_empty() {
+            compiler.compile_file_default_to_wasm_with_lane(
+                input_path,
+                &options,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        } else {
+            compiler.compile_file_to_wasm_with_lane(
+                input_path,
+                &cli.import_dir,
+                &options,
+                selected_codegen_lane(&cli).into_compiler_lane(),
+            )
+        };
+        timer.phase("wast-codegen");
+
+        match result {
+            Ok(wasm) => {
+                let wast = render_wast_output(&wasm.wasm_binary);
+                emit_output(&wast, cli.output.as_ref());
+                if cli.dump_json {
+                    emit_cli_json_companion_for_backend(&compiler, &cli, input_path, CliLang::Wast);
+                }
+            }
+            Err(err) => {
+                eprintln!("WAST pipeline failed: {err}");
                 print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
                 std::process::exit(1);
             }
@@ -1810,6 +2087,9 @@ fn main() {
                     cpp
                 };
                 emit_output(&rendered, cli.output.as_ref());
+                if cli.dump_json {
+                    emit_cli_json_companion_for_backend(&compiler, &cli, input_path, CliLang::Cpp);
+                }
             }
             Err(err) => {
                 eprintln!("C++ pipeline failed: {err}");
@@ -1869,6 +2149,9 @@ fn main() {
                     c_code
                 };
                 emit_output(&rendered, cli.output.as_ref());
+                if cli.dump_json {
+                    emit_cli_json_companion_for_backend(&compiler, &cli, input_path, CliLang::C);
+                }
             }
             Err(err) => {
                 eprintln!("C pipeline failed: {err}");
@@ -1898,7 +2181,7 @@ mod tests {
     use super::{
         CliArgs, CliLang, ErrorVerbosity, emit_wasm_output, format_diagnostics_human,
         format_diagnostics_human_with_verbosity, format_diagnostics_json,
-        format_diagnostics_json_with_verbosity, normalize_legacy_args,
+        format_diagnostics_json_with_verbosity, normalize_legacy_args, render_wast_output,
     };
 
     #[test]
@@ -1960,9 +2243,22 @@ mod tests {
     }
 
     #[test]
+    fn cli_parse_accepts_lang_wast() {
+        let cli = CliArgs::parse_from(["faust-rs", "--lang", "wast", "foo.dsp"]);
+        assert!(matches!(cli.lang, Some(CliLang::Wast)));
+    }
+
+    #[test]
     fn cli_parse_accepts_json_flag() {
         let cli = CliArgs::parse_from(["faust-rs", "--json", "foo.dsp"]);
         assert!(cli.dump_json);
+    }
+
+    #[test]
+    fn cli_parse_accepts_json_with_lang() {
+        let cli = CliArgs::parse_from(["faust-rs", "--json", "--lang", "cpp", "foo.dsp"]);
+        assert!(cli.dump_json);
+        assert!(matches!(cli.lang, Some(CliLang::Cpp)));
     }
 
     #[test]
@@ -2014,6 +2310,12 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn render_wast_output_prints_valid_text_module() {
+        let wast = render_wast_output(b"\0asm\x01\0\0\0");
+        assert!(wast.contains("(module"));
     }
 
     #[test]
