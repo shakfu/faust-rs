@@ -603,9 +603,14 @@ struct WasmLocal {
 /// - `Block`
 /// - local `DeclareVar(kStack)`
 /// - `SimpleForLoop` (forward only)
+/// - `ForLoop`
+/// - `WhileLoop`
+/// - statement-level `If` / `Control` / `Switch` / `Drop`
+/// - `Bool` / `Int32` / `Float32` / `Float64`
 /// - `LoadVar(kFunArgs=count | kLoop | kStack)`
 /// - `LoadTable(kFunArgs=inputs/outputs | kStack aliases)`
 /// - `StoreTable(kStack aliases)`
+/// - `StoreVar(kLoop | kStack)`
 /// - `LoadTable/StoreTable(kStruct)`
 /// - `Select2`
 /// - native WASM math `FunCall` subset (`fabs/fmin/fmax/sqrt/floor/ceil`)
@@ -689,6 +694,17 @@ fn collect_compute_locals(
             }
             collect_compute_locals(store, body, out)
         }
+        FirMatch::ForLoop {
+            var,
+            body,
+            is_reverse: false | true,
+            ..
+        } => {
+            if !out.iter().any(|(known, _)| known == &var) {
+                out.push((var, FirType::Int32));
+            }
+            collect_compute_locals(store, body, out)
+        }
         FirMatch::If {
             cond: _,
             then_block,
@@ -701,6 +717,7 @@ fn collect_compute_locals(
             Ok(())
         }
         FirMatch::Control { stmt, .. } => collect_compute_locals(store, stmt, out),
+        FirMatch::WhileLoop { body, .. } => collect_compute_locals(store, body, out),
         FirMatch::Switch { cases, default, .. } => {
             for (_, case_stmt) in cases {
                 collect_compute_locals(store, case_stmt, out)?;
@@ -773,6 +790,15 @@ impl ComputeSubsetLowerer<'_> {
                 body,
                 is_reverse: false,
             } => self.lower_simple_for(var, upper, body, function),
+            FirMatch::ForLoop {
+                var,
+                init,
+                end,
+                step,
+                body,
+                is_reverse,
+            } => self.lower_for_loop(var, init, end, step, body, is_reverse, function),
+            FirMatch::WhileLoop { cond, body } => self.lower_while_loop(cond, body, function),
             FirMatch::StoreTable {
                 name,
                 access: AccessType::Stack,
@@ -840,6 +866,59 @@ impl ComputeSubsetLowerer<'_> {
         function.instruction(&Instruction::I32Const(1));
         function.instruction(&Instruction::I32Add);
         function.instruction(&Instruction::LocalSet(local.index));
+        function.instruction(&Instruction::Br(0));
+        function.instruction(&Instruction::End);
+        function.instruction(&Instruction::End);
+        Ok(())
+    }
+
+    fn lower_for_loop(
+        &mut self,
+        var: String,
+        init: FirId,
+        end: FirId,
+        step: FirId,
+        body: FirId,
+        is_reverse: bool,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        let local = self.local(&var)?.clone();
+        self.lower_expr(init, function)?;
+        function.instruction(&Instruction::LocalSet(local.index));
+        function.instruction(&Instruction::Block(BlockType::Empty));
+        function.instruction(&Instruction::Loop(BlockType::Empty));
+        function.instruction(&Instruction::LocalGet(local.index));
+        self.lower_expr(end, function)?;
+        function.instruction(if is_reverse {
+            &Instruction::I32LeS
+        } else {
+            &Instruction::I32GeS
+        });
+        function.instruction(&Instruction::BrIf(1));
+        self.lower_block_into(body, function)?;
+        function.instruction(&Instruction::LocalGet(local.index));
+        self.lower_expr(step, function)?;
+        function.instruction(&Instruction::I32Add);
+        function.instruction(&Instruction::LocalSet(local.index));
+        function.instruction(&Instruction::Br(0));
+        function.instruction(&Instruction::End);
+        function.instruction(&Instruction::End);
+        Ok(())
+    }
+
+    fn lower_while_loop(
+        &mut self,
+        cond: FirId,
+        body: FirId,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        function.instruction(&Instruction::Block(BlockType::Empty));
+        function.instruction(&Instruction::Loop(BlockType::Empty));
+        self.lower_expr(cond, function)?;
+        self.emit_cast_if_needed(&FirType::Bool, ValType::I32, function)?;
+        function.instruction(&Instruction::I32Eqz);
+        function.instruction(&Instruction::BrIf(1));
+        self.lower_block_into(body, function)?;
         function.instruction(&Instruction::Br(0));
         function.instruction(&Instruction::End);
         function.instruction(&Instruction::End);
@@ -988,6 +1067,10 @@ impl ComputeSubsetLowerer<'_> {
 
     fn lower_expr(&mut self, id: FirId, function: &mut Function) -> Result<(), WasmBackendError> {
         match match_fir(self.store, id) {
+            FirMatch::Bool { value, .. } => {
+                function.instruction(&Instruction::I32Const(i32::from(value)));
+                Ok(())
+            }
             FirMatch::Int32 { value, .. } => {
                 function.instruction(&Instruction::I32Const(value));
                 Ok(())

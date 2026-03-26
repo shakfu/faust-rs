@@ -184,6 +184,25 @@ fn wasm_compute_lowers_control_flow_statements() {
 }
 
 #[test]
+fn wasm_compute_lowers_for_and_while_loops() {
+    let (store, module) = build_loop_statement_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM scaffold should emit for/while compute body");
+
+    let body = code_body_at(&out.wasm_binary, 1);
+    let ops = decode_ops(body);
+    assert!(
+        ops.iter()
+            .filter(|op| matches!(op, Operator::Loop { .. }))
+            .count()
+            >= 2
+    );
+    assert!(ops.iter().any(|op| matches!(op, Operator::I32Eqz)));
+    assert!(ops.iter().any(|op| matches!(op, Operator::I32GeS)));
+    assert!(ops.iter().any(|op| matches!(op, Operator::I32Add)));
+}
+
+#[test]
 fn wasm_get_sample_rate_loads_struct_field_when_present() {
     let (store, module) = build_sample_rate_state_module();
     let out = generate_wasm_module(&store, module, &WasmOptions::default())
@@ -444,6 +463,86 @@ fn build_native_math_module() -> (FirStore, FirId) {
         1,
         1,
         "native_math_dsp",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
+    (store, module)
+}
+
+fn build_loop_statement_module() -> (FirStore, FirId) {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let dsp_struct = b.block(&[]);
+    let globals = b.block(&[]);
+
+    let chan0 = b.int32(0);
+    let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+    let out_ptr = b.load_table("outputs", AccessType::FunArgs, chan0, ptr_ty.clone());
+    let out_alias = b.declare_var("output0", ptr_ty, AccessType::Stack, Some(out_ptr));
+
+    let acc_zero = b.int32(0);
+    let acc_decl = b.declare_var("acc", FirType::Int32, AccessType::Stack, Some(acc_zero));
+
+    let false_cond = b.bool_(false);
+    let drop_zero = b.drop_(acc_zero);
+    let while_body = b.block(&[drop_zero]);
+    let while_loop = b.while_loop(false_cond, while_body);
+
+    let init = b.int32(0);
+    let end = b.int32(4);
+    let step = b.int32(1);
+    let i = b.load_var("i", AccessType::Loop, FirType::Int32);
+    let acc_cur = b.load_var("acc", AccessType::Stack, FirType::Int32);
+    let acc_next = b.binop(fir::FirBinOp::Add, acc_cur, i, FirType::Int32);
+    let store_acc = b.store_var("acc", AccessType::Stack, acc_next);
+    let i_f32 = b.cast(FirType::FaustFloat, i);
+    let store_out = b.store_table("output0", AccessType::Stack, i, i_f32);
+    let for_body = b.block(&[store_acc, store_out]);
+    let for_loop = b.for_loop("i", init, end, step, for_body, false);
+
+    let compute_body = b.block(&[out_alias, acc_decl, while_loop, for_loop]);
+    let args = [
+        NamedType {
+            name: "dsp".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "count".to_owned(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &args,
+        Some(compute_body),
+        false,
+    );
+    let functions = b.block(&[compute]);
+    let static_decls = b.block(&[]);
+    let module = b.module(
+        0,
+        1,
+        "loop_stmt_dsp",
         dsp_struct,
         globals,
         functions,
