@@ -431,6 +431,44 @@ fn wasm_compute_calls_imported_math_functions() {
 }
 
 #[test]
+fn wasm_module_imports_foreign_float_helpers_without_falling_back_to_empty_compute() {
+    let (store, module) = build_foreign_float_helper_module();
+    let out = generate_wasm_module(
+        &store,
+        module,
+        &WasmOptions {
+            double_precision: true,
+            ..WasmOptions::default()
+        },
+    )
+    .expect("WASM backend should lower foreign float helpers in compute");
+
+    let mut imports = Vec::new();
+    for payload in Parser::new(0).parse_all(&out.wasm_binary) {
+        let payload = payload.expect("payload should decode");
+        if let Payload::ImportSection(section) = payload {
+            for import in section {
+                let import = import.expect("import should decode");
+                imports.push(import.name.to_owned());
+            }
+        }
+    }
+
+    assert_eq!(imports, vec!["_acosh", "_copysignf", "_isnanf"]);
+
+    let body = code_body_at(&out.wasm_binary, 1);
+    let ops = decode_ops(body);
+    assert!(
+        ops.iter()
+            .filter(|op| matches!(op, Operator::Call { function_index } if *function_index < 3))
+            .count()
+            >= 3
+    );
+    assert!(ops.iter().any(|op| matches!(op, Operator::Loop { .. })));
+    assert!(ops.iter().any(|op| matches!(op, Operator::F64Store { .. })));
+}
+
+#[test]
 fn wasm_compute_lowers_control_flow_statements() {
     let (store, module) = build_control_flow_test_module();
     let out = generate_wasm_module(&store, module, &WasmOptions::default())
@@ -1398,6 +1436,114 @@ fn build_static_table_compute_module() -> (FirStore, FirId) {
         0,
         1,
         "static_table_compute",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
+    (store, module)
+}
+
+fn build_foreign_float_helper_module() -> (FirStore, FirId) {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let dsp_struct = b.block(&[]);
+    let globals = b.block(&[]);
+    let static_decls = b.block(&[]);
+
+    let chan0 = b.int32(0);
+    let chan1 = b.int32(1);
+    let chan2 = b.int32(2);
+    let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+
+    let in0 = b.load_table("inputs", AccessType::FunArgs, chan0, ptr_ty.clone());
+    let in1 = b.load_table("inputs", AccessType::FunArgs, chan1, ptr_ty.clone());
+    let in2 = b.load_table("inputs", AccessType::FunArgs, chan2, ptr_ty.clone());
+    let out0 = b.load_table("outputs", AccessType::FunArgs, chan0, ptr_ty.clone());
+    let out1 = b.load_table("outputs", AccessType::FunArgs, chan1, ptr_ty.clone());
+    let out2 = b.load_table("outputs", AccessType::FunArgs, chan2, ptr_ty.clone());
+
+    let in0_alias = b.declare_var("input0", ptr_ty.clone(), AccessType::Stack, Some(in0));
+    let in1_alias = b.declare_var("input1", ptr_ty.clone(), AccessType::Stack, Some(in1));
+    let in2_alias = b.declare_var("input2", ptr_ty.clone(), AccessType::Stack, Some(in2));
+    let out0_alias = b.declare_var("output0", ptr_ty.clone(), AccessType::Stack, Some(out0));
+    let out1_alias = b.declare_var("output1", ptr_ty.clone(), AccessType::Stack, Some(out1));
+    let out2_alias = b.declare_var("output2", ptr_ty, AccessType::Stack, Some(out2));
+
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+
+    let input0_sample = b.load_table("input0", AccessType::Stack, i0, FirType::FaustFloat);
+    let input1_sample = b.load_table("input1", AccessType::Stack, i0, FirType::FaustFloat);
+    let input2_sample = b.load_table("input2", AccessType::Stack, i0, FirType::FaustFloat);
+
+    let input0_f32 = b.cast(FirType::Float32, input0_sample);
+    let input1_f32 = b.cast(FirType::Float32, input1_sample);
+    let input2_f32 = b.cast(FirType::Float32, input2_sample);
+    let ten = b.float32(10.0);
+
+    let isnanf = b.fun_call("isnanf", &[input0_f32], FirType::Int32);
+    let copysignf = b.fun_call("copysignf", &[input1_f32, input2_f32], FirType::Float32);
+    let shifted = b.binop(fir::FirBinOp::Add, input2_f32, ten, FirType::Float32);
+    let acoshf = b.fun_call("acoshf", &[shifted], FirType::Float32);
+    let isnanf_out = b.cast(FirType::FaustFloat, isnanf);
+    let copysignf_out = b.cast(FirType::FaustFloat, copysignf);
+    let acoshf_out = b.cast(FirType::FaustFloat, acoshf);
+
+    let out0_store = b.store_table("output0", AccessType::Stack, i0, isnanf_out);
+    let out1_store = b.store_table("output1", AccessType::Stack, i0, copysignf_out);
+    let out2_store = b.store_table("output2", AccessType::Stack, i0, acoshf_out);
+    let loop_body = b.block(&[out0_store, out1_store, out2_store]);
+    let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+    let compute_body = b.block(&[
+        in0_alias,
+        in1_alias,
+        in2_alias,
+        out0_alias,
+        out1_alias,
+        out2_alias,
+        sample_loop,
+    ]);
+
+    let args = [
+        NamedType {
+            name: "dsp".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "count".to_owned(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &args,
+        Some(compute_body),
+        false,
+    );
+    let functions = b.block(&[compute]);
+    let module = b.module(
+        3,
+        3,
+        "foreign_float_helpers",
         dsp_struct,
         globals,
         functions,

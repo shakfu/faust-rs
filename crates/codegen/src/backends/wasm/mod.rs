@@ -1402,13 +1402,18 @@ impl ComputeSubsetLowerer<'_> {
                 self.lower_internal_int_fun_call(&name, &args, &typ, function)
             }
             FirMatch::FunCall { name, args, typ } => {
-                let math = FirMathOp::from_symbol(&name).ok_or_else(|| {
-                    WasmBackendError::new(
+                if let Some(math) = FirMathOp::from_symbol(&name) {
+                    self.lower_math_call(math, &args, &typ, function)
+                } else if let Some(import) =
+                    imported_foreign_signature(&name, &args, &typ, self.options)?
+                {
+                    self.lower_imported_call(&import, &args, function)
+                } else {
+                    Err(WasmBackendError::new(
                         WasmBackendErrorCode::UnsupportedFirNode,
                         format!("unsupported function call in WASM subset: `{name}`"),
-                    )
-                })?;
-                self.lower_math_call(math, &args, &typ, function)
+                    ))
+                }
             }
             other => Err(WasmBackendError::new(
                 WasmBackendErrorCode::UnsupportedFirNode,
@@ -1677,6 +1682,15 @@ impl ComputeSubsetLowerer<'_> {
                 ),
             )
         })?;
+        self.lower_imported_call(&import, args, function)
+    }
+
+    fn lower_imported_call(
+        &mut self,
+        import: &WasmMathImport,
+        args: &[FirId],
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
         if import.params.len() != args.len() {
             return Err(WasmBackendError::new(
                 WasmBackendErrorCode::UnsupportedFirNode,
@@ -1820,12 +1834,15 @@ fn collect_math_imports_in_node(
     options: &WasmOptions,
     out: &mut std::collections::BTreeSet<WasmMathImport>,
 ) -> Result<(), WasmBackendError> {
-    if let FirMatch::FunCall { name, typ, .. } = match_fir(store, id)
-        && let Some(math) = FirMathOp::from_symbol(&name)
-        && !is_native_wasm_math(math, &typ, options)
-        && let Some(import) = imported_math_signature(math, &typ, options)?
-    {
-        out.insert(import);
+    if let FirMatch::FunCall { name, typ, args } = match_fir(store, id) {
+        if let Some(math) = FirMathOp::from_symbol(&name)
+            && !is_native_wasm_math(math, &typ, options)
+            && let Some(import) = imported_math_signature(math, &typ, options)?
+        {
+            out.insert(import);
+        } else if let Some(import) = imported_foreign_signature(&name, &args, &typ, options)? {
+            out.insert(import);
+        }
     }
     for child in fir_children(store, id) {
         collect_math_imports_in_node(store, child, options, out)?;
@@ -2026,6 +2043,112 @@ fn imported_math_signature(
         (FirMathOp::Remainder, ValType::F64) => Some(WasmMathImport {
             field_name: "_remainder".to_owned(),
             params: vec![ValType::F64, ValType::F64],
+            result: ValType::F64,
+        }),
+        _ => None,
+    };
+    Ok(import)
+}
+
+fn imported_foreign_signature(
+    name: &str,
+    args: &[FirId],
+    typ: &FirType,
+    options: &WasmOptions,
+) -> Result<Option<WasmMathImport>, WasmBackendError> {
+    let val_ty = wasm_val_type_for_fir(typ, options)?;
+    let import = match (name, val_ty, args.len()) {
+        // C++/wrapper parity: these foreign helpers are exported by the
+        // standard Faust JS wrappers under fixed `env` names, even when FIR
+        // keeps the original C float-suffixed symbol.
+        ("isnanf", ValType::I32, 1) => Some(WasmMathImport {
+            field_name: "_isnanf".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::I32,
+        }),
+        ("isinff", ValType::I32, 1) => Some(WasmMathImport {
+            field_name: "_isinff".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::I32,
+        }),
+        ("copysignf", ValType::F32, 2) => Some(WasmMathImport {
+            field_name: "_copysignf".to_owned(),
+            params: vec![ValType::F32, ValType::F32],
+            result: ValType::F32,
+        }),
+        ("acoshf", ValType::F32, 1) => Some(WasmMathImport {
+            field_name: "_acosh".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        ("asinhf", ValType::F32, 1) => Some(WasmMathImport {
+            field_name: "_asinh".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        ("atanhf", ValType::F32, 1) => Some(WasmMathImport {
+            field_name: "_atanh".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        ("coshf", ValType::F32, 1) => Some(WasmMathImport {
+            field_name: "_cosh".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        ("sinhf", ValType::F32, 1) => Some(WasmMathImport {
+            field_name: "_sinh".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        ("tanhf", ValType::F32, 1) => Some(WasmMathImport {
+            field_name: "_tanh".to_owned(),
+            params: vec![ValType::F32],
+            result: ValType::F32,
+        }),
+        ("isnan", ValType::I32, 1) => Some(WasmMathImport {
+            field_name: "_isnan".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::I32,
+        }),
+        ("isinf", ValType::I32, 1) => Some(WasmMathImport {
+            field_name: "_isinf".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::I32,
+        }),
+        ("copysign", ValType::F64, 2) => Some(WasmMathImport {
+            field_name: "_copysign".to_owned(),
+            params: vec![ValType::F64, ValType::F64],
+            result: ValType::F64,
+        }),
+        ("acosh", ValType::F64, 1) => Some(WasmMathImport {
+            field_name: "_acosh".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::F64,
+        }),
+        ("asinh", ValType::F64, 1) => Some(WasmMathImport {
+            field_name: "_asinh".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::F64,
+        }),
+        ("atanh", ValType::F64, 1) => Some(WasmMathImport {
+            field_name: "_atanh".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::F64,
+        }),
+        ("cosh", ValType::F64, 1) => Some(WasmMathImport {
+            field_name: "_cosh".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::F64,
+        }),
+        ("sinh", ValType::F64, 1) => Some(WasmMathImport {
+            field_name: "_sinh".to_owned(),
+            params: vec![ValType::F64],
+            result: ValType::F64,
+        }),
+        ("tanh", ValType::F64, 1) => Some(WasmMathImport {
+            field_name: "_tanh".to_owned(),
+            params: vec![ValType::F64],
             result: ValType::F64,
         }),
         _ => None,
