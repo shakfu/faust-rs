@@ -267,6 +267,20 @@ fn wasm_get_and_set_param_value_use_f64_in_double_mode() {
 }
 
 #[test]
+fn wasm_reports_clear_error_for_foreign_variable_access() {
+    let (store, module) = build_foreign_global_var_module();
+    let err = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect_err("foreign variables should be rejected in the current WASM mode");
+    assert!(err.to_string().contains("FRS-CGEN-WASM-0003"));
+    assert!(
+        err.to_string().contains(
+            "accessing foreign variable 'extvar' is not supported in this compilation mode"
+        ),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn wasm_float_comparisons_follow_operand_type_even_when_result_type_is_int32() {
     let (store, module) = build_float_compare_result_int32_module();
     let out = generate_wasm_module(
@@ -2036,6 +2050,73 @@ fn declare_trivial_compute(b: &mut FirBuilder<'_>) -> FirId {
         Some(body),
         false,
     )
+}
+
+fn build_foreign_global_var_module() -> (FirStore, FirId) {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let ext = b.declare_var("extvar", FirType::Float32, AccessType::Global, None);
+    let globals = b.block(&[ext]);
+    let dsp_struct = b.block(&[]);
+
+    let out_chan = b.int32(0);
+    let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+    let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+    let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+    let ext = b.load_var("extvar", AccessType::Global, FirType::Float32);
+    let ext = b.cast(FirType::FaustFloat, ext);
+    let store_out = b.store_table("output0", AccessType::Stack, i0, ext);
+    let loop_body = b.block(&[store_out]);
+    let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+    let compute_body = b.block(&[out_alias, sample_loop]);
+    let compute_args = [
+        NamedType {
+            name: "dsp".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "count".to_string(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &compute_args,
+        Some(compute_body),
+        false,
+    );
+    let functions = b.block(&[compute]);
+    let static_decls = b.block(&[]);
+    let module = b.module(
+        0,
+        1,
+        "foreign_global_var",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
+    (store, module)
 }
 
 fn declare_trivial_instance_clear(b: &mut FirBuilder<'_>) -> FirId {

@@ -1401,6 +1401,16 @@ impl ComputeSubsetLowerer<'_> {
                 function.instruction(&Instruction::LocalGet(local.index));
                 Ok(())
             }
+            FirMatch::LoadVar {
+                name,
+                access: AccessType::Global,
+                ..
+            } => Err(WasmBackendError::new(
+                WasmBackendErrorCode::UnsupportedFirNode,
+                format!(
+                    "accessing foreign variable '{name}' is not supported in this compilation mode"
+                ),
+            )),
             FirMatch::LoadTable {
                 name,
                 access: AccessType::FunArgs,
