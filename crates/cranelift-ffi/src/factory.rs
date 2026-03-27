@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_void};
 use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use codegen::backends::cranelift::{
     CraneliftOptLevel, CraneliftOptions, JitDspModule, generate_cranelift_module,
@@ -40,6 +41,39 @@ use crate::types::{CraneliftDspFactory, alloc_c_string, alloc_factory, free_fact
 /// Stable version string returned by [`getCLibFaustVersion`].
 const CRANELIFT_FFI_VERSION: &str = concat!("faust-rs-cranelift-ffi/", env!("CARGO_PKG_VERSION"));
 
+fn foreign_function_registry() -> &'static Mutex<HashMap<String, usize>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn snapshot_registered_foreign_functions() -> HashMap<String, *const c_void> {
+    foreign_function_registry()
+        .lock()
+        .expect("foreign function registry mutex")
+        .iter()
+        .map(|(name, addr)| (name.clone(), (*addr as *const c_void)))
+        .collect()
+}
+
+fn foreign_function_registry_fingerprint() -> String {
+    let mut entries: Vec<_> = foreign_function_registry()
+        .lock()
+        .expect("foreign function registry mutex")
+        .iter()
+        .map(|(name, addr)| format!("{name}=0x{addr:x}"))
+        .collect();
+    entries.sort();
+    entries.join(",")
+}
+
+#[cfg(test)]
+fn clear_registered_foreign_functions() {
+    foreign_function_registry()
+        .lock()
+        .expect("foreign function registry mutex")
+        .clear();
+}
+
 /// Returns the Faust library version string.
 ///
 /// This is a process-lifetime static C string.
@@ -53,6 +87,32 @@ pub extern "C" fn getCLibFaustVersion() -> *const c_char {
     VERSION_C
         .get_or_init(|| CString::new(CRANELIFT_FFI_VERSION).expect("version contains no NUL"))
         .as_ptr()
+}
+
+/// Register one host foreign function for subsequent Cranelift factory builds.
+///
+/// The registration is process-global and must happen before compiling the DSP
+/// factory that references the symbol through `ffunction(...)`.
+///
+/// # Safety
+/// - `name` must be a valid null-terminated C string.
+/// - `fn_ptr` must be a valid callable function address for the symbol.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn registerCCraneliftForeignFunction(
+    name: *const c_char,
+    fn_ptr: *mut c_void,
+) {
+    if name.is_null() || fn_ptr.is_null() {
+        return;
+    }
+    // SAFETY: caller provides a valid C string per the function contract.
+    let Ok(name) = unsafe { std::ffi::CStr::from_ptr(name) }.to_str() else {
+        return;
+    };
+    foreign_function_registry()
+        .lock()
+        .expect("foreign function registry mutex")
+        .insert(name.to_owned(), fn_ptr as usize);
 }
 
 /// Create a Cranelift DSP factory from a Faust source file.
@@ -97,6 +157,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
                 &compiled.fir,
                 Some(compiled.jit),
                 &compiled.fir_dump,
+                &compiled.foreign_function_fingerprint,
             )
         })
     }
@@ -150,6 +211,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromString(
                     argv: args,
                     opt_level,
                     semantic_fingerprint: &compiled.fir_dump,
+                    foreign_function_fingerprint: &compiled.foreign_function_fingerprint,
                     source_is_faust: true,
                 },
                 &compiled.fir,
@@ -203,6 +265,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromSignals(
             let fir = export_fir_from_signal_array_handle(source_name, signals)?;
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
             let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
+            let foreign_function_fingerprint = foreign_function_registry_fingerprint();
             build_scaffold_factory_common(
                 FactoryBuildSpec {
                     name: source_name,
@@ -210,6 +273,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromSignals(
                     argv: args,
                     opt_level,
                     semantic_fingerprint: &fir_dump,
+                    foreign_function_fingerprint: &foreign_function_fingerprint,
                     source_is_faust: false,
                 },
                 &fir,
@@ -259,6 +323,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
             let fir = export_fir_from_box_handle(source_name, box_expr)?;
             let fir_dump = fir::dump_fir(&fir.store, fir.module);
             let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
+            let foreign_function_fingerprint = foreign_function_registry_fingerprint();
             build_scaffold_factory_common(
                 FactoryBuildSpec {
                     name: source_name,
@@ -266,6 +331,7 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromBoxes(
                     argv: args,
                     opt_level,
                     semantic_fingerprint: &fir_dump,
+                    foreign_function_fingerprint: &foreign_function_fingerprint,
                     source_is_faust: false,
                 },
                 &fir,
@@ -630,6 +696,7 @@ struct FactoryBuildSpec<'a> {
     argv: &'a [String],
     opt_level: c_int,
     semantic_fingerprint: &'a str,
+    foreign_function_fingerprint: &'a str,
     source_is_faust: bool,
 }
 
@@ -642,6 +709,7 @@ fn build_scaffold_factory_from_file(
     fir: &BoxFfiFirModule,
     jit: Option<JitDspModule>,
     semantic_fingerprint: &str,
+    foreign_function_fingerprint: &str,
 ) -> Result<CraneliftDspFactory, String> {
     let source_name = Path::new(filename)
         .file_stem()
@@ -655,6 +723,7 @@ fn build_scaffold_factory_from_file(
             argv,
             opt_level,
             semantic_fingerprint,
+            foreign_function_fingerprint,
             source_is_faust: true,
         },
         fir,
@@ -678,23 +747,27 @@ fn build_scaffold_factory_common(
         argv,
         opt_level,
         semantic_fingerprint,
+        foreign_function_fingerprint,
         source_is_faust,
     } = spec;
     let compute_body_lowered = jit
         .as_ref()
         .is_some_and(codegen::backends::cranelift::JitDspModule::compute_body_lowered);
     let compile_options = if argv.is_empty() {
-        format!("opt_level={opt_level}; compute_body_lowered={compute_body_lowered}")
+        format!(
+            "opt_level={opt_level}; compute_body_lowered={compute_body_lowered}; foreign_functions={foreign_function_fingerprint}"
+        )
     } else {
         format!(
-            "opt_level={opt_level}; compute_body_lowered={compute_body_lowered}; argv={}",
+            "opt_level={opt_level}; compute_body_lowered={compute_body_lowered}; argv={}; foreign_functions={foreign_function_fingerprint}",
             argv.join(" ")
         )
     };
     let sha_key = format!(
-        "cranelift:{}:{}:{}",
+        "cranelift:{}:{}:{}:{}",
         opt_level,
         argv.join("\x1f"),
+        foreign_function_fingerprint,
         semantic_fingerprint
     );
     let runtime = build_runtime_descriptor(&fir.store, fir.module)?;
@@ -741,6 +814,7 @@ struct CompiledCraneliftFactory {
     fir: BoxFfiFirModule,
     jit: JitDspModule,
     fir_dump: String,
+    foreign_function_fingerprint: String,
 }
 
 /// Runs the real compiler pipeline to FIR, then compiles one Cranelift JIT module.
@@ -764,7 +838,12 @@ fn preflight_compile_file_to_cranelift(
         num_outputs,
     };
     let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
-    Ok(CompiledCraneliftFactory { fir, jit, fir_dump })
+    Ok(CompiledCraneliftFactory {
+        fir,
+        jit,
+        fir_dump,
+        foreign_function_fingerprint: foreign_function_registry_fingerprint(),
+    })
 }
 
 /// Runs the real compiler pipeline on inline source to FIR, then compiles one
@@ -788,7 +867,12 @@ fn preflight_compile_source_to_cranelift(
         num_outputs,
     };
     let jit = compile_fir_module_to_cranelift(&fir, opt_level)?;
-    Ok(CompiledCraneliftFactory { fir, jit, fir_dump })
+    Ok(CompiledCraneliftFactory {
+        fir,
+        jit,
+        fir_dump,
+        foreign_function_fingerprint: foreign_function_registry_fingerprint(),
+    })
 }
 
 /// Compiles one FIR module to Cranelift using one C ABI opt-level request.
@@ -796,8 +880,10 @@ fn compile_fir_module_to_cranelift(
     fir: &BoxFfiFirModule,
     opt_level: c_int,
 ) -> Result<JitDspModule, String> {
+    let extern_function_symbols = snapshot_registered_foreign_functions();
     let options = CraneliftOptions {
         opt_level: map_c_opt_level(opt_level),
+        extern_function_symbols,
         ..CraneliftOptions::default()
     };
     generate_cranelift_module(&fir.store, fir.module, &options).map_err(|e| e.to_string())
@@ -983,6 +1069,7 @@ fn rebuild_factory_from_source(
             argv,
             opt_level,
             semantic_fingerprint: &compiled.fir_dump,
+            foreign_function_fingerprint: &compiled.foreign_function_fingerprint,
             source_is_faust: true,
         },
         &compiled.fir,
@@ -1057,8 +1144,13 @@ mod tests {
         getCCraneliftDSPFactoryFromSHAKey, getCCraneliftDSPFactoryJSON,
         getCCraneliftDSPFactoryName, getCCraneliftDSPFactorySHAKey, getCLibFaustVersion,
         readCCraneliftDSPFactoryFromBitcode, readCCraneliftDSPFactoryFromBitcodeFile,
-        writeCCraneliftDSPFactoryToBitcode, writeCCraneliftDSPFactoryToBitcodeFile,
+        registerCCraneliftForeignFunction, writeCCraneliftDSPFactoryToBitcode,
+        writeCCraneliftDSPFactoryToBitcodeFile,
     };
+
+    extern "C" fn ffi_test_foreign_gain(x: f32) -> f32 {
+        x * 0.25
+    }
 
     #[test]
     fn factory_scaffold_status_is_stable() {
@@ -1078,6 +1170,7 @@ mod tests {
     #[test]
     fn create_factory_from_string_runtime_roundtrip_queries() {
         let _guard = crate::test_serial_guard();
+        super::clear_registered_foreign_functions();
         let name = c"mydsp";
         let src = c"process = _;";
         let args = [c"-vec"];
@@ -1167,6 +1260,7 @@ mod tests {
     #[test]
     fn cache_lookup_and_list_are_wired_to_created_factories() {
         let _guard = crate::test_serial_guard();
+        super::clear_registered_foreign_functions();
         let name = c"cachetest";
         let src = c"process = _;";
         let mut err = [0_i8; 4096];
@@ -1374,6 +1468,7 @@ mod tests {
     #[test]
     fn shared_factory_builder_rejects_non_module_runtime_descriptor() {
         let _guard = crate::test_serial_guard();
+        super::clear_registered_foreign_functions();
         let mut store = fir::FirStore::new();
         let bad_root = {
             let mut b = fir::FirBuilder::new(&mut store);
@@ -1392,6 +1487,7 @@ mod tests {
                 argv: &[],
                 opt_level: 1,
                 semantic_fingerprint: "fingerprint",
+                foreign_function_fingerprint: "",
                 source_is_faust: true,
             },
             &bad_fir,
@@ -1406,6 +1502,7 @@ mod tests {
     #[test]
     fn selected_runtime_corpus_cases_lower_compute_body() {
         let _guard = crate::test_serial_guard();
+        super::clear_registered_foreign_functions();
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -1455,6 +1552,7 @@ mod tests {
     #[test]
     fn clif_save_restore_selected_corpus_cases() {
         let _guard = crate::test_serial_guard();
+        super::clear_registered_foreign_functions();
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -1527,6 +1625,7 @@ mod tests {
     #[test]
     fn boxes_and_signals_constructor_match_string_constructor_sha() {
         let _guard = crate::test_serial_guard();
+        super::clear_registered_foreign_functions();
         faust_box::createLibContext();
         let box_root = faust_box::CboxWire();
         assert!(!box_root.is_null());
@@ -1596,5 +1695,43 @@ mod tests {
             assert!(deleteCCraneliftDSPFactory(from_string));
         }
         faust_box::destroyLibContext();
+    }
+
+    #[test]
+    fn registered_foreign_function_is_used_for_factory_build() {
+        let _guard = crate::test_serial_guard();
+        super::clear_registered_foreign_functions();
+        let name = c"foreign_fun";
+        let src = c"process = ffunction(float ffi_test_foreign_gain(float), <math.h>, \"\");";
+        let mut err = [0_i8; 4096];
+
+        unsafe {
+            registerCCraneliftForeignFunction(
+                c"ffi_test_foreign_gain".as_ptr(),
+                (ffi_test_foreign_gain as *const ()).cast_mut().cast(),
+            );
+        }
+
+        let factory = unsafe {
+            createCCraneliftDSPFactoryFromString(
+                name.as_ptr(),
+                src.as_ptr(),
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+                1,
+            )
+        };
+        assert!(
+            !factory.is_null(),
+            "factory creation failed: {}",
+            unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy()
+        );
+
+        unsafe {
+            assert!((*factory).compute_body_lowered);
+            assert!(deleteCCraneliftDSPFactory(factory));
+        }
+        super::clear_registered_foreign_functions();
     }
 }

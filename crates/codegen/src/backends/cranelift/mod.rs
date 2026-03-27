@@ -38,6 +38,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, Init, Linkage, Module, default_libcall_names};
 use fir::{AccessType, FirBinOp, FirId, FirMatch, FirStore, FirType, match_fir};
 use std::collections::HashMap;
+use std::ffi::c_void;
 
 /// Stable backend identifier used by tooling and future CLI wiring.
 pub const BACKEND_NAME: &str = "cranelift";
@@ -83,6 +84,19 @@ pub struct CraneliftOptions {
     /// This is intended for strict validation/CI workflows to prevent silent
     /// runtime acceptance with reduced behavior.
     pub fail_on_subset_gap: bool,
+    /// Optional host addresses for FIR `AccessType::Global` scalar symbols
+    /// (for example `fvariable(float extvar, ...)`).
+    ///
+    /// The backend imports these as external data symbols and loads them
+    /// directly from JIT-resolved storage during `compute` lowering.
+    pub extern_data_symbols: HashMap<String, *const c_void>,
+    /// Optional host addresses for foreign function symbols referenced by FIR
+    /// `FunCall` nodes that are not covered by the built-in math registry.
+    ///
+    /// This provides the Cranelift equivalent of LLVM's
+    /// `registerForeignFunction`, but uses an explicit name -> pointer map
+    /// rather than process-global symbol lookup.
+    pub extern_function_symbols: HashMap<String, *const c_void>,
 }
 
 /// Stable error codes for the Cranelift backend scaffold and future lowering.
@@ -608,6 +622,14 @@ fn build_struct_layout_for_module(
                     struct_align = struct_align.max(scalar.align);
                 }
             },
+            FirMatch::DeclareVar {
+                access: AccessType::Global,
+                ..
+            } => {
+                // File-scope extern/global scalar symbols are not part of the
+                // per-instance `dsp*` layout. They are resolved through
+                // `CraneliftOptions::extern_data_symbols`.
+            }
             FirMatch::DeclareVar { access, name, .. } => {
                 return Err(CraneliftBackendError::unsupported_module_shape(format!(
                     "unsupported global variable access class for Cranelift dsp* layout: {name} ({access:?})"
@@ -1220,6 +1242,11 @@ struct ComputeLowering<'a, 'b, 'c> {
     import_refs: HashMap<String, FuncRef>,
     /// Pre-declared JIT data IDs for `AccessType::Static` tables.
     static_data_ids: &'a HashMap<String, DataId>,
+    /// Imported JIT data IDs for FIR `AccessType::Global` scalar symbols.
+    extern_data_ids: &'a HashMap<String, DataId>,
+    /// Registered host addresses for foreign function symbols resolved through
+    /// `CraneliftOptions::extern_function_symbols`.
+    extern_function_symbols: &'a HashMap<String, *const c_void>,
     _marker: std::marker::PhantomData<&'c ()>,
 }
 
@@ -1950,6 +1977,23 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 let coerced = self.coerce_value_to_fir_type(raw, &typ)?;
                 Ok(LoweredExpr::Scalar(coerced))
             }
+            FirMatch::LoadVar {
+                name,
+                access: AccessType::Global,
+                typ,
+            } => {
+                let data_id = self.extern_data_ids.get(&name).copied().ok_or_else(|| {
+                    LoweringError::Unsupported(format!(
+                        "external data symbol `{name}` not found in Cranelift options"
+                    ))
+                })?;
+                let gv = self.jit.declare_data_in_func(data_id, self.fb.func);
+                let addr = self.fb.ins().global_value(self.ptr_ty, gv);
+                let elem_clif = self.fir_type_to_clif(&typ)?;
+                let raw = self.fb.ins().load(elem_clif, MemFlags::new(), addr, 0);
+                let coerced = self.coerce_value_to_fir_type(raw, &typ)?;
+                Ok(LoweredExpr::Scalar(coerced))
+            }
             FirMatch::LoadVar { name, .. } => self.vars.get(&name).copied().ok_or_else(|| {
                 LoweringError::Unsupported(format!("load of unknown variable `{name}`"))
             }),
@@ -2398,6 +2442,19 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
             }
             _ => {}
         }
+        if self.extern_function_symbols.contains_key(name) {
+            let mut lowered_args = Vec::with_capacity(args.len());
+            let mut param_types = Vec::with_capacity(args.len());
+            for arg in args {
+                let value = self.lower_expr(*arg, None)?.value();
+                param_types.push(self.fb.func.dfg.value_type(value));
+                lowered_args.push(value);
+            }
+            let ret = self.fir_type_to_clif(typ)?;
+            let fref = self.ensure_import(name, &param_types, ret)?;
+            let call = self.fb.ins().call(fref, &lowered_args);
+            return Ok(LoweredExpr::Scalar(self.fb.inst_results(call)[0]));
+        }
         let math = fir::FirMathOp::from_symbol(name).ok_or_else(|| {
             LoweringError::Unsupported(format!("unsupported function call `{name}`"))
         })?;
@@ -2705,6 +2762,8 @@ fn try_lower_compute_body(
     ptr_ty: Type,
     compute_decl: FirId,
     static_data_ids: &HashMap<String, DataId>,
+    extern_data_ids: &HashMap<String, DataId>,
+    extern_function_symbols: &HashMap<String, *const c_void>,
 ) -> Result<bool, LoweringError> {
     let (args, body) = match match_fir(store, compute_decl) {
         FirMatch::DeclareFun {
@@ -2755,6 +2814,8 @@ fn try_lower_compute_body(
         vars,
         import_refs: HashMap::new(),
         static_data_ids,
+        extern_data_ids,
+        extern_function_symbols,
         _marker: std::marker::PhantomData,
     };
     lowering.lower_stmt(body)?;
@@ -2770,8 +2831,19 @@ fn try_lower_compute_body(
 /// This is implemented as a thin wrapper over
 /// [`compute_body_subset_gap_reason_from_compute_decl`] so the backend can keep
 /// a cheap boolean decision while diagnostics tooling can request the reason.
-fn compute_body_matches_current_subset(store: &FirStore, compute_decl: FirId) -> bool {
-    compute_body_subset_gap_reason_from_compute_decl(store, compute_decl).is_none()
+fn compute_body_matches_current_subset(
+    store: &FirStore,
+    compute_decl: FirId,
+    extern_data_symbols: &HashMap<String, *const c_void>,
+    extern_function_symbols: &HashMap<String, *const c_void>,
+) -> bool {
+    compute_body_subset_gap_reason_from_compute_decl(
+        store,
+        compute_decl,
+        extern_data_symbols,
+        extern_function_symbols,
+    )
+    .is_none()
 }
 
 /// Returns the first subset-gap reason for a FIR `compute` declaration.
@@ -2785,6 +2857,8 @@ fn compute_body_matches_current_subset(store: &FirStore, compute_decl: FirId) ->
 fn compute_body_subset_gap_reason_from_compute_decl(
     store: &FirStore,
     compute_decl: FirId,
+    extern_data_symbols: &HashMap<String, *const c_void>,
+    extern_function_symbols: &HashMap<String, *const c_void>,
 ) -> Option<String> {
     let body = match match_fir(store, compute_decl) {
         FirMatch::DeclareFun {
@@ -2792,7 +2866,7 @@ fn compute_body_subset_gap_reason_from_compute_decl(
         } => body,
         other => return Some(format!("unsupported compute declaration shape: {other:?}")),
     };
-    subset_stmt_gap_reason(store, body)
+    subset_stmt_gap_reason(store, body, extern_data_symbols, extern_function_symbols)
 }
 
 /// Recursive subset matcher for FIR statements used by stub-fallback diagnostics.
@@ -2800,16 +2874,21 @@ fn compute_body_subset_gap_reason_from_compute_decl(
 /// The function returns the first unsupported statement/expression shape found
 /// in depth-first order. This "first gap" policy keeps diagnostics concise and
 /// deterministic, which is useful for corpus scans and progress tracking.
-fn subset_stmt_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
+fn subset_stmt_gap_reason(
+    store: &FirStore,
+    id: FirId,
+    extern_data_symbols: &HashMap<String, *const c_void>,
+    extern_function_symbols: &HashMap<String, *const c_void>,
+) -> Option<String> {
     match match_fir(store, id) {
-        FirMatch::Block(items) => items
-            .into_iter()
-            .find_map(|x| subset_stmt_gap_reason(store, x)),
+        FirMatch::Block(items) => items.into_iter().find_map(|x| {
+            subset_stmt_gap_reason(store, x, extern_data_symbols, extern_function_symbols)
+        }),
         FirMatch::DeclareVar {
             access: AccessType::Stack,
             init: Some(init),
             ..
-        } => subset_expr_gap_reason(store, init),
+        } => subset_expr_gap_reason(store, init, extern_data_symbols, extern_function_symbols),
         FirMatch::DeclareVar {
             access: AccessType::Stack,
             init: None,
@@ -2820,12 +2899,12 @@ fn subset_stmt_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
             access: AccessType::Struct,
             value,
             ..
-        } => subset_expr_gap_reason(store, value),
+        } => subset_expr_gap_reason(store, value, extern_data_symbols, extern_function_symbols),
         FirMatch::StoreVar {
             access: AccessType::Stack | AccessType::Loop,
             value,
             ..
-        } => subset_expr_gap_reason(store, value),
+        } => subset_expr_gap_reason(store, value, extern_data_symbols, extern_function_symbols),
         FirMatch::ShiftArrayVar {
             access: AccessType::Struct,
             ..
@@ -2834,55 +2913,113 @@ fn subset_stmt_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
             cond,
             then_block,
             else_block,
-        } => subset_expr_gap_reason(store, cond)
-            .or_else(|| subset_stmt_gap_reason(store, then_block))
-            .or_else(|| else_block.and_then(|b| subset_stmt_gap_reason(store, b))),
+        } => subset_expr_gap_reason(store, cond, extern_data_symbols, extern_function_symbols)
+            .or_else(|| {
+                subset_stmt_gap_reason(
+                    store,
+                    then_block,
+                    extern_data_symbols,
+                    extern_function_symbols,
+                )
+            })
+            .or_else(|| {
+                else_block.and_then(|b| {
+                    subset_stmt_gap_reason(store, b, extern_data_symbols, extern_function_symbols)
+                })
+            }),
         FirMatch::Control { cond, stmt } => {
-            subset_expr_gap_reason(store, cond).or_else(|| subset_stmt_gap_reason(store, stmt))
+            subset_expr_gap_reason(store, cond, extern_data_symbols, extern_function_symbols)
+                .or_else(|| {
+                    subset_stmt_gap_reason(
+                        store,
+                        stmt,
+                        extern_data_symbols,
+                        extern_function_symbols,
+                    )
+                })
         }
         FirMatch::Switch {
             cond,
             cases,
             default,
-        } => subset_expr_gap_reason(store, cond)
+        } => subset_expr_gap_reason(store, cond, extern_data_symbols, extern_function_symbols)
             .or_else(|| {
-                cases
-                    .into_iter()
-                    .find_map(|(_, stmt)| subset_stmt_gap_reason(store, stmt))
+                cases.into_iter().find_map(|(_, stmt)| {
+                    subset_stmt_gap_reason(
+                        store,
+                        stmt,
+                        extern_data_symbols,
+                        extern_function_symbols,
+                    )
+                })
             })
-            .or_else(|| default.and_then(|stmt| subset_stmt_gap_reason(store, stmt))),
+            .or_else(|| {
+                default.and_then(|stmt| {
+                    subset_stmt_gap_reason(
+                        store,
+                        stmt,
+                        extern_data_symbols,
+                        extern_function_symbols,
+                    )
+                })
+            }),
         FirMatch::SimpleForLoop {
             upper,
             body,
             is_reverse: false,
             ..
-        } => subset_expr_gap_reason(store, upper).or_else(|| subset_stmt_gap_reason(store, body)),
+        } => subset_expr_gap_reason(store, upper, extern_data_symbols, extern_function_symbols)
+            .or_else(|| {
+                subset_stmt_gap_reason(store, body, extern_data_symbols, extern_function_symbols)
+            }),
         FirMatch::ForLoop {
             init,
             end,
             step,
             body,
             ..
-        } => subset_expr_gap_reason(store, init)
-            .or_else(|| subset_expr_gap_reason(store, end))
-            .or_else(|| subset_expr_gap_reason(store, step))
-            .or_else(|| subset_stmt_gap_reason(store, body)),
+        } => subset_expr_gap_reason(store, init, extern_data_symbols, extern_function_symbols)
+            .or_else(|| {
+                subset_expr_gap_reason(store, end, extern_data_symbols, extern_function_symbols)
+            })
+            .or_else(|| {
+                subset_expr_gap_reason(store, step, extern_data_symbols, extern_function_symbols)
+            })
+            .or_else(|| {
+                subset_stmt_gap_reason(store, body, extern_data_symbols, extern_function_symbols)
+            }),
         FirMatch::WhileLoop { cond, body } => {
-            subset_expr_gap_reason(store, cond).or_else(|| subset_stmt_gap_reason(store, body))
+            subset_expr_gap_reason(store, cond, extern_data_symbols, extern_function_symbols)
+                .or_else(|| {
+                    subset_stmt_gap_reason(
+                        store,
+                        body,
+                        extern_data_symbols,
+                        extern_function_symbols,
+                    )
+                })
         }
         FirMatch::StoreTable {
             access: AccessType::Stack,
             index,
             value,
             ..
-        } => subset_expr_gap_reason(store, index).or_else(|| subset_expr_gap_reason(store, value)),
+        } => subset_expr_gap_reason(store, index, extern_data_symbols, extern_function_symbols)
+            .or_else(|| {
+                subset_expr_gap_reason(store, value, extern_data_symbols, extern_function_symbols)
+            }),
         FirMatch::StoreTable {
             access: AccessType::Struct,
             index,
             value,
             ..
-        } => subset_expr_gap_reason(store, index).or_else(|| subset_expr_gap_reason(store, value)),
-        FirMatch::Drop(v) => subset_expr_gap_reason(store, v),
+        } => subset_expr_gap_reason(store, index, extern_data_symbols, extern_function_symbols)
+            .or_else(|| {
+                subset_expr_gap_reason(store, value, extern_data_symbols, extern_function_symbols)
+            }),
+        FirMatch::Drop(v) => {
+            subset_expr_gap_reason(store, v, extern_data_symbols, extern_function_symbols)
+        }
         FirMatch::NullStatement | FirMatch::Return(None) => None,
         other => Some(format!("unsupported stmt variant in subset: {other:?}")),
     }
@@ -2894,12 +3031,30 @@ fn subset_stmt_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
 /// current lowering implementation (`ComputeLowering::lower_expr` and friends).
 /// When new lowering support is added, this function should be updated in the
 /// same change so subset pre-checks and diagnostics stay aligned.
-fn subset_expr_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
+fn subset_expr_gap_reason(
+    store: &FirStore,
+    id: FirId,
+    extern_data_symbols: &HashMap<String, *const c_void>,
+    extern_function_symbols: &HashMap<String, *const c_void>,
+) -> Option<String> {
     match match_fir(store, id) {
         FirMatch::Int32 { .. }
         | FirMatch::Bool { .. }
         | FirMatch::Float32 { .. }
         | FirMatch::Float64 { .. } => None,
+        FirMatch::LoadVar {
+            name,
+            access: AccessType::Global,
+            ..
+        } => {
+            if extern_data_symbols.contains_key(&name) {
+                None
+            } else {
+                Some(format!(
+                    "external data symbol `{name}` not found in Cranelift options"
+                ))
+            }
+        }
         FirMatch::LoadVar {
             access: AccessType::Stack | AccessType::FunArgs | AccessType::Loop | AccessType::Struct,
             ..
@@ -2908,36 +3063,59 @@ fn subset_expr_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
             access: AccessType::Stack,
             index,
             ..
-        } => subset_expr_gap_reason(store, index),
+        } => subset_expr_gap_reason(store, index, extern_data_symbols, extern_function_symbols),
         FirMatch::LoadTable {
             access: AccessType::FunArgs,
             index,
             ..
-        } => subset_expr_gap_reason(store, index),
+        } => subset_expr_gap_reason(store, index, extern_data_symbols, extern_function_symbols),
         FirMatch::LoadTable {
             access: AccessType::Struct,
             index,
             ..
-        } => subset_expr_gap_reason(store, index),
+        } => subset_expr_gap_reason(store, index, extern_data_symbols, extern_function_symbols),
         FirMatch::LoadTable {
             access: AccessType::Static,
             index,
             ..
-        } => subset_expr_gap_reason(store, index),
+        } => subset_expr_gap_reason(store, index, extern_data_symbols, extern_function_symbols),
         FirMatch::BinOp { lhs, rhs, .. } => {
-            subset_expr_gap_reason(store, lhs).or_else(|| subset_expr_gap_reason(store, rhs))
+            subset_expr_gap_reason(store, lhs, extern_data_symbols, extern_function_symbols)
+                .or_else(|| {
+                    subset_expr_gap_reason(store, rhs, extern_data_symbols, extern_function_symbols)
+                })
         }
         FirMatch::Select2 {
             cond,
             then_value,
             else_value,
             ..
-        } => subset_expr_gap_reason(store, cond)
-            .or_else(|| subset_expr_gap_reason(store, then_value))
-            .or_else(|| subset_expr_gap_reason(store, else_value)),
-        FirMatch::Neg { value, .. } => subset_expr_gap_reason(store, value),
+        } => subset_expr_gap_reason(store, cond, extern_data_symbols, extern_function_symbols)
+            .or_else(|| {
+                subset_expr_gap_reason(
+                    store,
+                    then_value,
+                    extern_data_symbols,
+                    extern_function_symbols,
+                )
+            })
+            .or_else(|| {
+                subset_expr_gap_reason(
+                    store,
+                    else_value,
+                    extern_data_symbols,
+                    extern_function_symbols,
+                )
+            }),
+        FirMatch::Neg { value, .. } => {
+            subset_expr_gap_reason(store, value, extern_data_symbols, extern_function_symbols)
+        }
         FirMatch::FunCall { name, args, .. } => {
-            if fir::FirMathOp::from_symbol(&name).is_none()
+            if extern_function_symbols.contains_key(&name) {
+                args.into_iter().find_map(|x| {
+                    subset_expr_gap_reason(store, x, extern_data_symbols, extern_function_symbols)
+                })
+            } else if fir::FirMathOp::from_symbol(&name).is_none()
                 && !matches!(
                     name.as_str(),
                     "abs"
@@ -2965,18 +3143,29 @@ fn subset_expr_gap_reason(store: &FirStore, id: FirId) -> Option<String> {
             {
                 Some(format!("unsupported math call in subset: {name}"))
             } else {
-                args.into_iter()
-                    .find_map(|x| subset_expr_gap_reason(store, x))
+                args.into_iter().find_map(|x| {
+                    subset_expr_gap_reason(store, x, extern_data_symbols, extern_function_symbols)
+                })
             }
         }
-        FirMatch::Cast { value, .. } => subset_expr_gap_reason(store, value),
-        FirMatch::LoadSoundfileLength { part, .. } => subset_expr_gap_reason(store, part),
-        FirMatch::LoadSoundfileRate { part, .. } => subset_expr_gap_reason(store, part),
+        FirMatch::Cast { value, .. } => {
+            subset_expr_gap_reason(store, value, extern_data_symbols, extern_function_symbols)
+        }
+        FirMatch::LoadSoundfileLength { part, .. } => {
+            subset_expr_gap_reason(store, part, extern_data_symbols, extern_function_symbols)
+        }
+        FirMatch::LoadSoundfileRate { part, .. } => {
+            subset_expr_gap_reason(store, part, extern_data_symbols, extern_function_symbols)
+        }
         FirMatch::LoadSoundfileBuffer {
             chan, part, idx, ..
-        } => subset_expr_gap_reason(store, chan)
-            .or_else(|| subset_expr_gap_reason(store, part))
-            .or_else(|| subset_expr_gap_reason(store, idx)),
+        } => subset_expr_gap_reason(store, chan, extern_data_symbols, extern_function_symbols)
+            .or_else(|| {
+                subset_expr_gap_reason(store, part, extern_data_symbols, extern_function_symbols)
+            })
+            .or_else(|| {
+                subset_expr_gap_reason(store, idx, extern_data_symbols, extern_function_symbols)
+            }),
         other => Some(format!("unsupported expr variant in subset: {other:?}")),
     }
 }
@@ -3092,6 +3281,29 @@ fn define_static_tables_in_jit(
     Ok(result)
 }
 
+/// Declares imported data symbols for FIR `AccessType::Global` scalar loads.
+///
+/// The actual addresses are provided by the caller through
+/// [`CraneliftOptions::extern_data_symbols`]. Cranelift resolves them via the
+/// JIT symbol table, mirroring how imported math functions are handled.
+fn declare_extern_data_symbols_in_jit(
+    jit: &mut JITModule,
+    extern_data_symbols: &HashMap<String, *const c_void>,
+) -> Result<HashMap<String, DataId>, CraneliftBackendError> {
+    let mut result = HashMap::new();
+    for name in extern_data_symbols.keys() {
+        let data_id = jit
+            .declare_data(name, Linkage::Import, false, false)
+            .map_err(|e| {
+                CraneliftBackendError::jit_failure(format!(
+                    "declare imported data `{name}` failed: {e}"
+                ))
+            })?;
+        result.insert(name.clone(), data_id);
+    }
+    Ok(result)
+}
+
 /// Declares, defines and finalizes the exported `compute` function in the JIT.
 ///
 /// # Behavior
@@ -3115,11 +3327,14 @@ fn declare_compute_stub(
     store: &FirStore,
     struct_layout: &StructLayoutPlan,
     fail_on_subset_gap: bool,
+    extern_data_symbols: &HashMap<String, *const c_void>,
+    extern_function_symbols: &HashMap<String, *const c_void>,
     // When `true`, skip subset lowering and always emit a `return` stub.
     // Used by the JIT-panic fallback path in `generate_cranelift_module`.
     force_stub: bool,
     jit: &mut JITModule,
     static_data_ids: &HashMap<String, DataId>,
+    extern_data_ids: &HashMap<String, DataId>,
 ) -> Result<(String, usize, bool, String), CraneliftBackendError> {
     let ptr_ty = jit.target_config().pointer_type();
     let compute_symbol_name = format!("{module_name}::compute");
@@ -3149,7 +3364,14 @@ fn declare_compute_stub(
         fb.append_block_params_for_function_params(entry);
         fb.switch_to_block(entry);
         fb.seal_block(entry);
-        if !force_stub && compute_body_matches_current_subset(store, compute_decl) {
+        if !force_stub
+            && compute_body_matches_current_subset(
+                store,
+                compute_decl,
+                extern_data_symbols,
+                extern_function_symbols,
+            )
+        {
             match try_lower_compute_body(
                 store,
                 jit,
@@ -3158,6 +3380,8 @@ fn declare_compute_stub(
                 ptr_ty,
                 compute_decl,
                 static_data_ids,
+                extern_data_ids,
+                extern_function_symbols,
             ) {
                 Ok(lowered) => compute_body_lowered = lowered,
                 Err(LoweringError::Unsupported(reason)) => {
@@ -3174,8 +3398,13 @@ fn declare_compute_stub(
             // - the FIR body exceeds the currently supported lowering subset, or
             // - `force_stub` was set by the JIT-panic fallback path.
             if fail_on_subset_gap && !force_stub {
-                let reason = compute_body_subset_gap_reason_from_compute_decl(store, compute_decl)
-                    .unwrap_or_else(|| "unknown subset-gap reason".to_owned());
+                let reason = compute_body_subset_gap_reason_from_compute_decl(
+                    store,
+                    compute_decl,
+                    extern_data_symbols,
+                    extern_function_symbols,
+                )
+                .unwrap_or_else(|| "unknown subset-gap reason".to_owned());
                 return Err(CraneliftBackendError::unsupported_module_shape(format!(
                     "Cranelift strict mode rejected fallback to compute stub: {reason}"
                 )));
@@ -3286,12 +3515,20 @@ fn try_generate_cranelift_module(
 ) -> Result<JitDspModule, CraneliftBackendError> {
     let mut jit_builder = make_jit_builder(options)?;
     register_host_symbols(&mut jit_builder);
+    for (name, addr) in &options.extern_data_symbols {
+        jit_builder.symbol(name, (*addr).cast::<u8>());
+    }
+    for (name, addr) in &options.extern_function_symbols {
+        jit_builder.symbol(name, (*addr).cast::<u8>());
+    }
     let mut jit = JITModule::new(jit_builder);
     let ptr_size = jit.target_config().pointer_type().bytes();
     let struct_layout = build_struct_layout_for_module(store, module, ptr_size)?;
     // Define file-scope static tables as JIT read-only data objects before
     // compiling `compute`, so function bodies can reference them by DataId.
     let static_data_ids = define_static_tables_in_jit(store, module, &mut jit)?;
+    let extern_data_ids =
+        declare_extern_data_symbols_in_jit(&mut jit, &options.extern_data_symbols)?;
     let (compute_symbol_name, compute_entry_addr, compute_body_lowered, compute_clif_text) =
         declare_compute_stub(
             module_name,
@@ -3299,9 +3536,12 @@ fn try_generate_cranelift_module(
             store,
             &struct_layout,
             options.fail_on_subset_gap,
+            &options.extern_data_symbols,
+            &options.extern_function_symbols,
             force_stub,
             &mut jit,
             &static_data_ids,
+            &extern_data_ids,
         )?;
     if compute_entry_addr == 0 {
         return Err(CraneliftBackendError::jit_failure(
@@ -3343,6 +3583,8 @@ pub fn diagnose_cranelift_compute_subset_gap(
     Ok(compute_body_subset_gap_reason_from_compute_decl(
         store,
         compute_decl,
+        &HashMap::new(),
+        &HashMap::new(),
     ))
 }
 

@@ -4,6 +4,7 @@ use super::{
 };
 use crate::fixtures::build_sine_phasor_test_module;
 use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirType, NamedType};
+use std::ffi::c_void;
 
 #[test]
 /// Verifies the public backend identifier remains stable.
@@ -215,6 +216,199 @@ fn compile_module_lowers_supported_foreign_fun_subset_call() {
     let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
         .expect("supported foreign subset call should lower");
     assert!(compiled.compute_body_lowered());
+}
+
+extern "C" fn test_foreign_gain(x: f32) -> f32 {
+    x * 0.5
+}
+
+/// Builds a minimal `compute` body using a non-built-in foreign function
+/// symbol so the extern-function registry path is exercised directly.
+fn build_subset_custom_foreign_fun_module() -> (fir::FirStore, FirId) {
+    let mut store = fir::FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let globals = b.block(&[]);
+    let dsp_struct = b.block(&[]);
+
+    let out_chan = b.int32(0);
+    let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+    let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+    let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+    let x = b.float32(0.25);
+    let y = b.fun_call("test_foreign_gain", &[x], FirType::Float32);
+    let y = b.cast(FirType::FaustFloat, y);
+    let store_out = b.store_table("output0", AccessType::Stack, i0, y);
+    let loop_body = b.block(&[store_out]);
+    let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+    let compute_body = b.block(&[out_alias, sample_loop]);
+    let compute_args = [
+        NamedType {
+            name: "dsp".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "count".to_string(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &compute_args,
+        Some(compute_body),
+        false,
+    );
+    let functions = b.block(&[compute]);
+    let static_decls = b.block(&[]);
+    let module = b.module(
+        0,
+        0,
+        "subset_custom_foreign_fun",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
+    (store, module)
+}
+
+#[test]
+fn compile_module_lowers_custom_foreign_fun_with_extern_function_symbol() {
+    let (store, module) = build_subset_custom_foreign_fun_module();
+    let options = CraneliftOptions {
+        extern_function_symbols: [(
+            "test_foreign_gain".to_string(),
+            (test_foreign_gain as *const ()).cast::<c_void>(),
+        )]
+        .into_iter()
+        .collect(),
+        ..CraneliftOptions::default()
+    };
+    let compiled = generate_cranelift_module(&store, module, &options)
+        .expect("custom foreign function fixture should compile with external function binding");
+    assert!(compiled.compute_body_lowered());
+}
+
+#[test]
+fn compile_module_falls_back_when_custom_foreign_fun_symbol_is_missing() {
+    let (store, module) = build_subset_custom_foreign_fun_module();
+    let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
+        .expect("missing foreign function binding should fall back to the stub in default mode");
+    assert!(!compiled.compute_body_lowered());
+}
+
+/// Builds a minimal `compute` body that reads one FIR `AccessType::Global`
+/// scalar and writes it to the output buffer.
+fn build_subset_global_scalar_load_module() -> (fir::FirStore, FirId) {
+    let mut store = fir::FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let ext = b.declare_var("extvar", FirType::Float32, AccessType::Global, None);
+    let globals = b.block(&[ext]);
+    let dsp_struct = b.block(&[]);
+
+    let out_chan = b.int32(0);
+    let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+    let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+    let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+    let ext = b.load_var("extvar", AccessType::Global, FirType::Float32);
+    let ext = b.cast(FirType::FaustFloat, ext);
+    let store_out = b.store_table("output0", AccessType::Stack, i0, ext);
+    let loop_body = b.block(&[store_out]);
+    let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+    let compute_body = b.block(&[out_alias, sample_loop]);
+    let compute_args = [
+        NamedType {
+            name: "dsp".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "count".to_string(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &compute_args,
+        Some(compute_body),
+        false,
+    );
+    let functions = b.block(&[compute]);
+    let static_decls = b.block(&[]);
+    let module = b.module(
+        0,
+        0,
+        "subset_global_scalar_load",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
+    (store, module)
+}
+
+#[test]
+fn compile_module_lowers_global_scalar_load_with_extern_data_symbol() {
+    let (store, module) = build_subset_global_scalar_load_module();
+    let extvar: f32 = 0.75;
+    let options = CraneliftOptions {
+        extern_data_symbols: [(
+            "extvar".to_string(),
+            (&extvar as *const f32).cast::<c_void>(),
+        )]
+        .into_iter()
+        .collect(),
+        ..CraneliftOptions::default()
+    };
+    let compiled = generate_cranelift_module(&store, module, &options)
+        .expect("global scalar fixture should compile with external data binding");
+    assert!(compiled.compute_body_lowered());
+}
+
+#[test]
+fn compile_module_falls_back_when_global_scalar_symbol_is_missing() {
+    let (store, module) = build_subset_global_scalar_load_module();
+    let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
+        .expect("missing global scalar binding should fall back to the stub in default mode");
+    assert!(!compiled.compute_body_lowered());
 }
 
 /// Builds a minimal `compute` body that should lower fully through the subset path.
