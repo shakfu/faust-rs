@@ -61,18 +61,33 @@ include!(concat!(env!("OUT_DIR"), "/embedded_faust_libraries.rs"));
 
 const WASM_FFI_VERSION: &str = concat!("faust-rs-wasm-ffi/", env!("CARGO_PKG_VERSION"));
 
+/// Stored compile-service outcome kept behind an integer handle.
+///
+/// The raw WASM ABI never returns owned Rust objects directly. Instead, the
+/// host gets a numeric handle, then reads the payload through the exported
+/// `ptr`/`len` accessors until it explicitly calls
+/// [`faust_wasm_result_free`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StoredCompileResult {
     Ok(WasmArtifactBundle),
     Err(String),
 }
 
+/// Stored text-helper outcome kept behind an integer handle.
+///
+/// This is used by helper APIs such as `get_info`, `expand_dsp`, and
+/// `generate_aux_files` so they can share the same explicit-lifetime pattern as
+/// compile results.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StoredTextResult {
     Ok(String),
     Err(String),
 }
 
+/// Registry for compile result handles exposed to the host.
+///
+/// Handles start at `1`; `0` is naturally reserved as an invalid/null-like
+/// value on the JS side.
 #[derive(Default)]
 struct ResultRegistry {
     next_handle: u32,
@@ -80,6 +95,7 @@ struct ResultRegistry {
 }
 
 impl ResultRegistry {
+    /// Store one compile result and return the exported handle.
     fn insert(&mut self, result: StoredCompileResult) -> u32 {
         let next = self.next_handle.saturating_add(1).max(1);
         self.next_handle = next;
@@ -87,29 +103,44 @@ impl ResultRegistry {
         next
     }
 
+    /// Borrow one stored compile result by handle.
     fn get(&self, handle: u32) -> Option<&StoredCompileResult> {
         self.entries.get(&handle)
     }
 
+    /// Drop one stored compile result and release its owned buffers.
     fn remove(&mut self, handle: u32) {
         self.entries.remove(&handle);
     }
 }
 
+/// Global compile-result registry used by the raw WASM ABI.
+///
+/// A process-global mutex is sufficient here because the compiler-module is
+/// instantiated as a single WASM module and the host drives requests through
+/// explicit handles.
 fn registry() -> &'static Mutex<ResultRegistry> {
     static REGISTRY: OnceLock<Mutex<ResultRegistry>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(ResultRegistry::default()))
 }
 
+/// Global text-result registry used by the raw helper APIs.
 fn text_registry() -> &'static Mutex<ResultRegistryText> {
     static REGISTRY: OnceLock<Mutex<ResultRegistryText>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(ResultRegistryText::default()))
 }
 
+/// Split `faustwasm`-style argument strings using the historical C++ binding
+/// convention.
+///
+/// This intentionally keeps empty tokens created by repeated spaces because the
+/// compatibility layer in `faustwasm` historically forwarded raw strings rather
+/// than a shell-escaped argv array.
 fn split_faustwasm_args(args: &str) -> Vec<String> {
     args.split(' ').map(str::to_owned).collect()
 }
 
+/// Registry for text-result handles exposed to the host.
 #[derive(Default)]
 struct ResultRegistryText {
     next_handle: u32,
@@ -117,6 +148,7 @@ struct ResultRegistryText {
 }
 
 impl ResultRegistryText {
+    /// Store one text result and return the exported handle.
     fn insert(&mut self, result: StoredTextResult) -> u32 {
         let next = self.next_handle.saturating_add(1).max(1);
         self.next_handle = next;
@@ -124,15 +156,23 @@ impl ResultRegistryText {
         next
     }
 
+    /// Borrow one stored text result by handle.
     fn get(&self, handle: u32) -> Option<&StoredTextResult> {
         self.entries.get(&handle)
     }
 
+    /// Drop one stored text result and release its owned payload.
     fn remove(&mut self, handle: u32) {
         self.entries.remove(&handle);
     }
 }
 
+/// Parse one raw compile request from host strings into the typed compiler
+/// service request.
+///
+/// Besides option parsing, this is where the embedded standard-library bundle
+/// is attached so source-string compilation can resolve `import("stdfaust.lib")`
+/// without a host filesystem.
 fn parse_compile_request(
     name: &str,
     source: &str,
@@ -153,6 +193,11 @@ fn parse_compile_request(
     Ok(request)
 }
 
+/// Materialize the build-time embedded standard-library bundle as a virtual
+/// source map.
+///
+/// The logical paths match the names used in Faust imports, for example
+/// `stdfaust.lib`, `maths.lib`, or `oscillators.lib`.
 fn embedded_standard_library_sources() -> VirtualSourceMap {
     VirtualSourceMap::new(
         EMBEDDED_FAUST_LIBRARIES
@@ -161,10 +206,20 @@ fn embedded_standard_library_sources() -> VirtualSourceMap {
     )
 }
 
+/// Return the filesystem root used at build time to assemble the embedded
+/// standard library bundle, when known.
+///
+/// This is retained mostly for diagnostics/tests; runtime resolution itself is
+/// done purely through [`embedded_standard_library_sources`].
 fn embedded_standard_library_root() -> Option<&'static str> {
     EMBEDDED_FAUST_LIB_ROOT
 }
 
+/// Compile one request into a stored success/error payload.
+///
+/// This is the bridge between the raw string ABI and the typed compiler crate.
+/// It chooses the compiler real type from the requested WASM float mode, then
+/// delegates to [`compiler::Compiler::compile_wasm_artifact`].
 fn compile_to_stored_result(
     name: &str,
     source: &str,
@@ -186,6 +241,10 @@ fn compile_to_stored_result(
     }
 }
 
+/// Decode one UTF-8 argument slice passed from the host.
+///
+/// All raw exports use `ptr + len` pairs so the ABI remains independent from
+/// C-string termination rules.
 unsafe fn decode_utf8_arg<'a>(ptr: *const u8, len: usize, label: &str) -> Result<&'a str, String> {
     if ptr.is_null() {
         return Err(format!("null {label} pointer"));
@@ -194,16 +253,19 @@ unsafe fn decode_utf8_arg<'a>(ptr: *const u8, len: usize, label: &str) -> Result
     str::from_utf8(bytes).map_err(|error| format!("invalid UTF-8 in {label}: {error}"))
 }
 
+/// Borrow one compile result handle for the duration of `f`.
 fn with_result<R>(handle: u32, f: impl FnOnce(Option<&StoredCompileResult>) -> R) -> R {
     let guard = registry().lock().expect("wasm-ffi registry poisoned");
     f(guard.get(handle))
 }
 
+/// Store one compile result and return its exported handle.
 fn store_result(result: StoredCompileResult) -> u32 {
     let mut guard = registry().lock().expect("wasm-ffi registry poisoned");
     guard.insert(result)
 }
 
+/// Borrow one text result handle for the duration of `f`.
 fn with_text_result<R>(handle: u32, f: impl FnOnce(Option<&StoredTextResult>) -> R) -> R {
     let guard = text_registry()
         .lock()
@@ -211,6 +273,7 @@ fn with_text_result<R>(handle: u32, f: impl FnOnce(Option<&StoredTextResult>) ->
     f(guard.get(handle))
 }
 
+/// Store one text result and return its exported handle.
 fn store_text_result(result: StoredTextResult) -> u32 {
     let mut guard = text_registry()
         .lock()
@@ -218,6 +281,10 @@ fn store_text_result(result: StoredTextResult) -> u32 {
     guard.insert(result)
 }
 
+/// Read the compiled WASM payload pointer for one stored compile result.
+///
+/// The returned pointer stays valid until [`faust_wasm_result_free`] is called
+/// for the same handle.
 fn result_bytes_ptr(handle: u32) -> *const u8 {
     with_result(handle, |result| match result {
         Some(StoredCompileResult::Ok(bundle)) => bundle.wasm_bytes.as_ptr(),
@@ -225,6 +292,7 @@ fn result_bytes_ptr(handle: u32) -> *const u8 {
     })
 }
 
+/// Read the compiled WASM payload length for one stored compile result.
 fn result_bytes_len(handle: u32) -> usize {
     with_result(handle, |result| match result {
         Some(StoredCompileResult::Ok(bundle)) => bundle.wasm_bytes.len(),
@@ -232,6 +300,7 @@ fn result_bytes_len(handle: u32) -> usize {
     })
 }
 
+/// Read the companion JSON payload pointer for one stored compile result.
 fn result_json_ptr(handle: u32) -> *const u8 {
     with_result(handle, |result| match result {
         Some(StoredCompileResult::Ok(bundle)) => bundle.dsp_json.as_ptr(),
@@ -239,6 +308,7 @@ fn result_json_ptr(handle: u32) -> *const u8 {
     })
 }
 
+/// Read the companion JSON payload length for one stored compile result.
 fn result_json_len(handle: u32) -> usize {
     with_result(handle, |result| match result {
         Some(StoredCompileResult::Ok(bundle)) => bundle.dsp_json.len(),
@@ -246,6 +316,7 @@ fn result_json_len(handle: u32) -> usize {
     })
 }
 
+/// Read the `compile_options` payload pointer for one stored compile result.
 fn result_compile_options_ptr(handle: u32) -> *const u8 {
     with_result(handle, |result| match result {
         Some(StoredCompileResult::Ok(bundle)) => bundle.compile_options.as_ptr(),
@@ -253,6 +324,7 @@ fn result_compile_options_ptr(handle: u32) -> *const u8 {
     })
 }
 
+/// Read the `compile_options` payload length for one stored compile result.
 fn result_compile_options_len(handle: u32) -> usize {
     with_result(handle, |result| match result {
         Some(StoredCompileResult::Ok(bundle)) => bundle.compile_options.len(),
@@ -260,6 +332,7 @@ fn result_compile_options_len(handle: u32) -> usize {
     })
 }
 
+/// Read the error payload pointer for one stored compile result.
 fn result_error_ptr(handle: u32) -> *const u8 {
     with_result(handle, |result| match result {
         Some(StoredCompileResult::Err(message)) => message.as_ptr(),
@@ -267,6 +340,7 @@ fn result_error_ptr(handle: u32) -> *const u8 {
     })
 }
 
+/// Read the error payload length for one stored compile result.
 fn result_error_len(handle: u32) -> usize {
     with_result(handle, |result| match result {
         Some(StoredCompileResult::Err(message)) => message.len(),
@@ -274,6 +348,7 @@ fn result_error_len(handle: u32) -> usize {
     })
 }
 
+/// Read the UTF-8 payload pointer for one stored text result.
 fn text_result_ptr(handle: u32) -> *const u8 {
     with_text_result(handle, |result| match result {
         Some(StoredTextResult::Ok(text)) | Some(StoredTextResult::Err(text)) => text.as_ptr(),
@@ -281,6 +356,7 @@ fn text_result_ptr(handle: u32) -> *const u8 {
     })
 }
 
+/// Read the UTF-8 payload length for one stored text result.
 fn text_result_len(handle: u32) -> usize {
     with_text_result(handle, |result| match result {
         Some(StoredTextResult::Ok(text)) | Some(StoredTextResult::Err(text)) => text.len(),
@@ -336,6 +412,10 @@ pub extern "C" fn faust_wasm_version_len() -> usize {
 /// The `args` string follows the current C++ `libFaustWasm` convention:
 /// it is split on plain spaces before parsing the shared Rust FFI option
 /// subset (`-I`, `-cn`, `-double`).
+///
+/// On success the returned handle exposes three independent byte payloads:
+/// compiled WASM bytes, companion JSON, and the backend-aware
+/// `compile_options` string.
 ///
 /// # Safety
 /// - `name_ptr`, `source_ptr`, and `args_ptr` must point to readable byte
@@ -459,7 +539,11 @@ pub unsafe extern "C" fn faust_wasm_get_info(what_ptr: *const u8, what_len: usiz
     store_text_result(result)
 }
 
-/// Stub export for the future `expandDSP(...)` helper service.
+/// Export for the `expandDSP(...)` helper service.
+///
+/// The raw ABI mirrors the text-result handle convention used elsewhere in the
+/// module. The underlying compiler service may still return `unsupported`
+/// errors for requests outside the currently implemented Rust subset.
 ///
 /// # Safety
 /// - `name_ptr`, `source_ptr`, and `args_ptr` must point to readable UTF-8 byte
@@ -499,9 +583,13 @@ pub unsafe extern "C" fn faust_wasm_expand_dsp(
     store_text_result(result)
 }
 
-/// Stub export for the future `generateAuxFiles(...)` helper service.
+/// Export for the `generateAuxFiles(...)` helper service.
 ///
-/// Returns `1` only when aux-file generation is implemented and succeeds.
+/// This API intentionally keeps the coarse historical success/failure shape
+/// used by `faustwasm`, even though the Rust compiler service underneath can
+/// represent richer aux-file payloads.
+///
+/// Returns `1` only when aux-file generation succeeds.
 ///
 /// # Safety
 /// - `name_ptr`, `source_ptr`, and `args_ptr` must point to readable UTF-8 byte

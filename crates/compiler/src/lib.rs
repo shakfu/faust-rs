@@ -671,7 +671,15 @@ impl Compiler {
     }
 
     /// Parses + evaluates + propagates one source, then emits a WASM module
-    /// scaffold through the selected signal->FIR lane.
+    /// scaffold.
+    ///
+    /// This API defaults to [`SignalFirLane::TransformFastLane`] rather than
+    /// [`SignalFirLane::LegacyBridge`], because the WASM/JSON-facing artifact
+    /// surfaces need the canonical lowered FIR module with working
+    /// `metadata`/`buildUserInterface` bodies. The older legacy bridge is still
+    /// available through [`Compiler::compile_source_to_wasm_with_lane`] for
+    /// explicit experimentation, but it is no longer the default for public
+    /// artifact-oriented WASM entry points.
     pub fn compile_source_to_wasm(
         &self,
         source_name: &str,
@@ -718,6 +726,11 @@ impl Compiler {
     /// future `faustwasm` embedded-compiler mode. The returned
     /// [`WasmArtifactBundle`] avoids any explicit compiler-side object lifetime
     /// and can be cached directly by higher-level hosts.
+    ///
+    /// Requests default to [`SignalFirLane::TransformFastLane`] for the same
+    /// reason as [`Compiler::compile_source_to_wasm`]: JSON/WASM artifact
+    /// consumers need preserved UI and metadata fidelity, which the temporary
+    /// legacy bridge does not provide.
     pub fn compile_wasm_artifact(
         &self,
         request: &WasmArtifactRequest,
@@ -780,6 +793,11 @@ impl Compiler {
     }
 
     /// Parses + evaluates + propagates one source, then emits strict C++-style JSON.
+    ///
+    /// Like the WASM artifact entry points, this API defaults to
+    /// [`SignalFirLane::TransformFastLane`] so the reconstructed JSON sees the
+    /// canonical FIR `metadata` and `buildUserInterface` bodies instead of the
+    /// temporary legacy summary bridge.
     pub fn compile_source_to_json(
         &self,
         source_name: &str,
@@ -1118,6 +1136,10 @@ impl Compiler {
 
     /// Parses + evaluates + propagates one file with default import search path,
     /// then emits a WASM module scaffold.
+    ///
+    /// This file-backed convenience wrapper follows the same default-lane
+    /// policy as [`Compiler::compile_source_to_wasm`]: artifact-oriented WASM
+    /// entry points default to [`SignalFirLane::TransformFastLane`].
     pub fn compile_file_default_to_wasm(
         &self,
         path: &Path,
@@ -1139,6 +1161,9 @@ impl Compiler {
 
     /// Compiles one file-backed DSP source with the default import search model
     /// into an owned artifact bundle.
+    ///
+    /// This is the file-backed companion to [`Compiler::compile_wasm_artifact`]
+    /// and therefore also defaults to [`SignalFirLane::TransformFastLane`].
     pub fn compile_file_default_to_wasm_artifact(
         &self,
         path: &Path,
@@ -1195,6 +1220,9 @@ impl Compiler {
 
     /// Parses + evaluates + propagates one file with default import search path,
     /// then emits strict C++-style JSON.
+    ///
+    /// This file-backed convenience wrapper follows the same default-lane
+    /// policy as [`Compiler::compile_source_to_json`].
     pub fn compile_file_default_to_json(&self, path: &Path) -> Result<String, CompilerError> {
         self.compile_file_default_to_json_with_lane(path, SignalFirLane::TransformFastLane)
     }

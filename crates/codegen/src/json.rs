@@ -15,23 +15,58 @@ use std::fmt::Write as _;
 
 use fir::{FirId, FirMatch, FirStore, match_fir};
 
+/// Backend-agnostic Faust JSON description reconstructed from FIR.
+///
+/// This mirrors the logical payload produced by the C++ JSON pipeline
+/// (`JSONUI`, `json_instructions.hh`) after the UI and metadata visitor passes
+/// have run. It is intentionally detached from any single backend so the same
+/// structure can back:
+///
+/// - strict `-json` output, where widget [`JsonWidget::index`] is absent,
+/// - companion backend JSON such as WASM, where runtime-specific fields like
+///   [`JsonDescription::size`], [`JsonDescription::sr_index`], and widget
+///   indexes are supplied by the caller.
+///
+/// The rendering order in [`JsonDescription::render`] is stable on purpose so
+/// differential tests can compare Rust output against C++ snapshots.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JsonDescription {
+    /// Root DSP name. FIR/UI metadata may override the initially requested
+    /// module name through `declare name`.
     pub name: String,
+    /// Optional source filename emitted by the CLI/compiler facade.
     pub filename: Option<String>,
+    /// Optional compiler version string.
     pub version: Option<String>,
+    /// Backend-aware compile flags string exposed for runtime consumers.
     pub compile_options: Option<String>,
+    /// Imported logical library names seen during compilation.
     pub library_list: Vec<String>,
+    /// Include roots preserved for parity with the C++ JSON schema.
     pub include_pathnames: Vec<String>,
+    /// Runtime prefix size when a backend needs one, notably WASM companion
+    /// JSON. Strict `-json` leaves this unset.
     pub size: Option<u32>,
+    /// DSP input arity.
     pub inputs: usize,
+    /// DSP output arity.
     pub outputs: usize,
+    /// Optional sample-rate slot offset for WASM-style runtime ABIs.
     pub sr_index: Option<u32>,
+    /// Root metadata declarations after top-level/compiler metadata and FIR
+    /// metadata have been merged.
     pub meta: Vec<JsonMetaEntry>,
+    /// Hierarchical UI description reconstructed from `buildUserInterface`.
     pub ui: Vec<JsonUiItem>,
 }
 
 impl JsonDescription {
+    /// Render the description as a compact JSON string.
+    ///
+    /// The serializer is intentionally local and deterministic rather than
+    /// delegating to `serde_json`, because parity work here cares about field
+    /// presence, ordering, and omission rules that mirror the existing Faust
+    /// JSON payloads.
     pub fn render(&self) -> String {
         let mut out = String::new();
         out.push('{');
@@ -79,12 +114,17 @@ impl JsonDescription {
     }
 }
 
+/// One Faust metadata declaration (`declare key "value"`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JsonMetaEntry {
     pub key: String,
     pub value: String,
 }
 
+/// One item in the JSON `ui` tree.
+///
+/// Groups preserve the nested `open*box`/`closeBox` structure found in
+/// `buildUserInterface`, while widgets carry the leaf control/bargraph payload.
 #[derive(Clone, Debug, PartialEq)]
 pub enum JsonUiItem {
     Group {
@@ -96,6 +136,12 @@ pub enum JsonUiItem {
     Widget(JsonWidget),
 }
 
+/// Leaf widget payload in the Faust JSON schema.
+///
+/// `index` is optional because only some backends expose a runtime memory ABI
+/// through the JSON. Strict `-json` keeps it unset, while the WASM companion
+/// JSON uses it as the public control address consumed by
+/// `getParamValue`/`setParamValue`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JsonWidget {
     pub typ: &'static str,
@@ -109,6 +155,7 @@ pub struct JsonWidget {
     pub soundfile_url: Option<String>,
 }
 
+/// Numeric range metadata for sliders, numeric entries, and bargraphs.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct JsonRange {
     pub init: Option<f64>,
@@ -117,21 +164,44 @@ pub struct JsonRange {
     pub step: Option<f64>,
 }
 
+/// Extra context required to turn FIR `metadata` and `buildUserInterface`
+/// bodies into a complete JSON description.
+///
+/// This structure carries the fields that do not live in FIR itself, such as
+/// CLI/compiler provenance and backend ABI data. The caller chooses whether to
+/// populate backend-specific fields like [`JsonBuildOptions::size`] and
+/// [`JsonBuildOptions::sr_index`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JsonBuildOptions {
+    /// Requested module name before any `declare name` override.
     pub name: String,
+    /// Optional source filename attached by the compiler facade.
     pub filename: Option<String>,
+    /// Optional compiler version string.
     pub version: Option<String>,
+    /// Backend-aware compile flags string.
     pub compile_options: Option<String>,
+    /// Imported logical library names.
     pub library_list: Vec<String>,
+    /// Include roots retained in the final JSON.
     pub include_pathnames: Vec<String>,
+    /// Compiler-provided metadata that sits alongside FIR metadata.
     pub top_level_meta: Vec<JsonMetaEntry>,
+    /// Backend-specific runtime prefix size.
     pub size: Option<u32>,
+    /// DSP input arity.
     pub inputs: usize,
+    /// DSP output arity.
     pub outputs: usize,
+    /// Backend-specific sample-rate slot offset.
     pub sr_index: Option<u32>,
 }
 
+/// FIR-to-JSON reconstruction error.
+///
+/// This stays intentionally narrow: unsupported node shapes are surfaced with
+/// the offending FIR context so parity gaps remain visible instead of being
+/// silently dropped from the emitted JSON.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JsonBuildError {
     UnsupportedFirNode(String),
@@ -147,6 +217,15 @@ impl std::fmt::Display for JsonBuildError {
 
 impl std::error::Error for JsonBuildError {}
 
+/// Rebuild a Faust JSON description from FIR function bodies.
+///
+/// The expected inputs are the top-level FIR items for one lowered module.
+/// This function looks for the canonical `metadata` and `buildUserInterface`
+/// functions, decodes their instruction bodies, merges compiler-supplied
+/// metadata, and asks `resolve_index` for any backend-specific widget index.
+///
+/// The callback receives each widget `var` name and may return a runtime index.
+/// Callers that want strict backend-agnostic JSON can simply return `None`.
 pub fn build_json_description_from_fir<F>(
     store: &FirStore,
     function_items: &[FirId],
@@ -188,6 +267,10 @@ where
     })
 }
 
+/// Escape one string for inclusion in the hand-written JSON renderer.
+///
+/// This intentionally only covers the characters needed by the Faust JSON
+/// payloads generated here; it is not exposed as a general-purpose serializer.
 pub fn escape_json_string(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -204,6 +287,11 @@ pub fn escape_json_string(input: &str) -> String {
     out
 }
 
+/// Merge compiler-supplied top-level metadata with metadata reconstructed from
+/// the FIR `metadata` body.
+///
+/// Ordering is preserved so the caller can inject provenance entries first,
+/// while later FIR entries still remain visible in the final `meta` array.
 fn merge_top_level_and_fir_meta(
     top_level_meta: Vec<JsonMetaEntry>,
     fir_meta: Vec<JsonMetaEntry>,
@@ -258,6 +346,7 @@ fn push_json_field_meta_array(out: &mut String, key: &str, values: &[JsonMetaEnt
     out.push(']');
 }
 
+/// Serialize the JSON `ui` array.
 fn push_json_field_ui_array(out: &mut String, key: &str, values: &[JsonUiItem]) {
     let _ = write!(out, "\"{}\":[", escape_json_string(key));
     for (index, item) in values.iter().enumerate() {
@@ -269,6 +358,12 @@ fn push_json_field_ui_array(out: &mut String, key: &str, values: &[JsonUiItem]) 
     out.push(']');
 }
 
+/// Serialize one UI item, omitting backend-specific optional fields when they
+/// are absent.
+///
+/// Notably, widget `index` is only emitted when the caller provided one through
+/// [`build_json_description_from_fir`]. This keeps strict `-json` output free
+/// from WASM-only ABI fields while still reusing the same builder.
 fn push_json_ui_item(out: &mut String, item: &JsonUiItem) {
     match item {
         JsonUiItem::Group {
@@ -337,6 +432,12 @@ struct ParsedMetadata {
     declared_filename: Option<String>,
 }
 
+/// Parse the canonical FIR `metadata` function body.
+///
+/// The body is expected to be a `Block` containing `AddMetaDeclare` nodes and
+/// optional labels. `declare name` and `declare filename` are additionally
+/// lifted into dedicated return fields because they may override root JSON
+/// fields in the same way as the C++ JSON pipeline.
 fn parse_metadata(store: &FirStore, body: Option<FirId>) -> Result<ParsedMetadata, JsonBuildError> {
     let Some(body) = body else {
         return Ok(ParsedMetadata {
@@ -379,6 +480,12 @@ fn parse_metadata(store: &FirStore, body: Option<FirId>) -> Result<ParsedMetadat
     })
 }
 
+/// Parse the canonical FIR `buildUserInterface` function body into a JSON UI
+/// tree.
+///
+/// `resolve_index` is threaded through to leaf widget construction so callers
+/// can inject backend runtime offsets without baking ABI policy into this
+/// generic parser.
 fn parse_ui<F>(
     store: &FirStore,
     body: Option<FirId>,
@@ -408,6 +515,12 @@ where
     )
 }
 
+/// Recursive descent parser for the flattened FIR UI instruction stream.
+///
+/// FIR stores UI instructions in one linear `Block`; groups are delimited by
+/// `OpenBox` / `CloseBox`. `pending_meta` accumulates `AddMetaDeclare`
+/// instructions until they are attached to the next group or widget, matching
+/// the Faust UI builder convention.
 #[allow(clippy::too_many_arguments)]
 fn parse_ui_items<F>(
     store: &FirStore,
@@ -556,6 +669,11 @@ where
     Ok(out)
 }
 
+/// Build one JSON widget payload from a FIR UI leaf.
+///
+/// The runtime `address` is derived from the current group stack plus the
+/// widget label, matching the public Faust JSON UI convention. `varname` keeps
+/// the lowered FIR symbol used for backend-specific index resolution.
 #[allow(clippy::too_many_arguments)]
 fn build_widget<F>(
     typ: &'static str,
@@ -591,6 +709,11 @@ where
     })
 }
 
+/// Find the body of one named helper function in the lowered FIR item list.
+///
+/// The JSON builder only depends on the canonical `metadata` and
+/// `buildUserInterface` functions; missing helpers are treated as “no metadata”
+/// or “no UI” rather than as hard errors.
 fn find_function_body(store: &FirStore, function_items: &[FirId], name: &str) -> Option<FirId> {
     function_items
         .iter()
@@ -605,6 +728,7 @@ fn find_function_body(store: &FirStore, function_items: &[FirId], name: &str) ->
         })
 }
 
+/// Map FIR UI group kinds to the JSON schema names used by Faust runtimes.
 fn ui_box_type_name(typ: fir::UiBoxType) -> &'static str {
     match typ {
         fir::UiBoxType::Vertical => "vgroup",
@@ -613,6 +737,7 @@ fn ui_box_type_name(typ: fir::UiBoxType) -> &'static str {
     }
 }
 
+/// Map FIR button kinds to Faust JSON widget type strings.
 fn button_type_name(typ: fir::ButtonType) -> &'static str {
     match typ {
         fir::ButtonType::Button => "button",
@@ -620,6 +745,7 @@ fn button_type_name(typ: fir::ButtonType) -> &'static str {
     }
 }
 
+/// Map FIR slider kinds to Faust JSON widget type strings.
 fn slider_type_name(typ: fir::SliderType) -> &'static str {
     match typ {
         fir::SliderType::Horizontal => "hslider",
@@ -628,6 +754,7 @@ fn slider_type_name(typ: fir::SliderType) -> &'static str {
     }
 }
 
+/// Map FIR bargraph kinds to Faust JSON widget type strings.
 fn bargraph_type_name(typ: fir::BargraphType) -> &'static str {
     match typ {
         fir::BargraphType::Horizontal => "hbargraph",

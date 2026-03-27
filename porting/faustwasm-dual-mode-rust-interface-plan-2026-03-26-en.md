@@ -440,6 +440,18 @@ Pass criteria:
 - validated end-to-end on at least one polyphonic DSP using the packaged mixer
   fallback instead of the historical compiler filesystem
 
+Current helper-surface status snapshot:
+
+| Surface | Status |
+| --- | --- |
+| `createDSPFactory(...)` | implemented through the Rust artifact compile service |
+| `getInfos("version")` | implemented |
+| `getInfos("help")` | implemented |
+| `getInfos("libdir"\\|"includedir"\\|"archdir"\\|"dspdir"\\|"pathslist")` | explicit `unsupported` |
+| `expandDSP(...)` | API present, still not parity-complete |
+| `generateAuxFiles(...)` | API present, still not parity-complete |
+| polyphonic internal mixer | implemented through packaged mixer fallback, not compiler `FS` |
+
 ### Phase 4: compatibility hardening
 
 Deliverables:

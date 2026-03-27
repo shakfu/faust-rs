@@ -20,7 +20,8 @@ The exported ABI is intentionally small:
 From the workspace root:
 
 ```bash
-cargo run -p xtask -- build-faustwasm-compiler-module
+$HOME/.cargo/bin/rustup target add wasm32-unknown-unknown
+$HOME/.cargo/bin/cargo run -p xtask -- build-faustwasm-compiler-module
 ```
 
 This command:
@@ -33,8 +34,54 @@ This command:
 Use `--debug` to build the non-release artifact:
 
 ```bash
-cargo run -p xtask -- build-faustwasm-compiler-module --debug
+$HOME/.cargo/bin/cargo run -p xtask -- build-faustwasm-compiler-module --debug
 ```
+
+If you want to force a specific standard-library root into the embedded bundle:
+
+```bash
+FAUST_RS_EMBEDDED_LIB_ROOT=/path/to/faust/libraries \
+  $HOME/.cargo/bin/cargo run -p xtask -- build-faustwasm-compiler-module
+```
+
+The default release artifact is:
+
+```text
+target/wasm32-unknown-unknown/release/faust_wasm_ffi.wasm
+```
+
+## Raw ABI usage
+
+The raw compiler-module ABI is explicitly handle-based:
+
+1. allocate host-written UTF-8 buffers with `faust_wasm_alloc`
+2. write `name`, `source`, and `args` bytes into those buffers
+3. call `faust_wasm_compile_dsp`
+4. inspect the returned handle with `faust_wasm_result_is_ok`
+5. read payloads through:
+   - `faust_wasm_result_wasm_ptr/len`
+   - `faust_wasm_result_json_ptr/len`
+   - `faust_wasm_result_compile_options_ptr/len`
+   - or `faust_wasm_result_error_ptr/len`
+6. copy the payloads on the host side
+7. release the compile result with `faust_wasm_result_free`
+8. release the temporary request buffers with `faust_wasm_dealloc`
+
+Pointer validity rules:
+
+- payload pointers returned by `faust_wasm_result_*_ptr` stay valid only until
+  the matching `faust_wasm_result_free(handle)`
+- request buffers returned by `faust_wasm_alloc` stay valid only until the
+  matching `faust_wasm_dealloc(ptr, len)`
+- handles are process-global within one compiler-module instance and are not
+  stable across module reinstantiation
+
+Concurrency note:
+
+- the module uses process-global mutex-protected registries for compile and
+  helper results
+- concurrent host calls are safe at the registry level, but the public contract
+  is still “copy returned bytes promptly, then free the handle”
 
 ## Embedded Faust libraries
 
@@ -48,6 +95,11 @@ order is:
 - `/usr/local/share/faust`
 - `/usr/share/faust`
 
+If none of these roots exist at build time, the compiler-module still builds,
+but without an embedded standard-library bundle. In that case, source-string
+compilation that depends on `import("stdfaust.lib")` will fail unless the host
+provides equivalent imports through another path.
+
 The embedded bundle is used for the Rust raw compiler path only. It allows:
 
 - parser-side `import("stdfaust.lib")` from an in-memory DSP source
@@ -57,23 +109,25 @@ The embedded bundle is used for the Rust raw compiler path only. It allows:
 This keeps the `faustwasm` compiler-module self-contained for the standard
 Faust libraries without recreating an Emscripten-style virtual filesystem.
 
+Import precedence:
+
+- user-supplied `-I` search paths are still parsed and forwarded into the typed
+  compile request
+- the embedded bundle provides the logical standard-library files directly to
+  the parser/evaluator for source-string compilation
+- `library_list` in the returned JSON reports the logical imported file names
+  seen during compilation, not an Emscripten-style resolved filesystem path
+
 ## Current scope
 
-- implemented:
-  - compile DSP source to `{ wasm, json }`
-  - `getInfos("version" | "help")`
-- explicit stubs:
-  - `expandDSP(...)`
-  - `generateAuxFiles(...)`
-  - path-oriented `getInfos(...)` keys not yet backed by a Rust parity source
-
-## Expected artifact
-
-The default release build emits:
-
-```text
-target/wasm32-unknown-unknown/release/faust_wasm_ffi.wasm
-```
+| Surface | Current status |
+| --- | --- |
+| `compile_dsp` | implemented |
+| `getInfos("version")` | implemented |
+| `getInfos("help")` | implemented |
+| `getInfos("libdir"\\|"includedir"\\|"archdir"\\|"dspdir"\\|"pathslist")` | explicit `unsupported` |
+| `expandDSP(...)` | API present, currently returns the Rust service result when implemented for the requested shape, otherwise `unsupported` |
+| `generateAuxFiles(...)` | API present, currently returns success only when the Rust service supports the requested generation, otherwise failure |
 
 That `.wasm` file is the compiler-module artifact that the `faustwasm`
 embedded-compiler path is expected to load.

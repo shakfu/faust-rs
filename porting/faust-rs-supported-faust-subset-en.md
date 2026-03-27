@@ -1,6 +1,6 @@
 # Current Faust Source Subset Supported by `faust-rs`
 
-Last updated: 2026-03-26
+Last updated: 2026-03-27
 
 Status: living document
 
@@ -94,8 +94,9 @@ So for **valid** corpus programs, the current backend route compiles:
 
 ### 4.3 WASM / JSON backend status
 
-The Rust backend now also has a real WebAssembly output path, but its maturity
-level differs from the C/C++ backend route described above.
+The Rust backend now also has a real WebAssembly output path, plus an initial
+embedded-compiler path for `faustwasm`, but its maturity level still differs
+from the C/C++ backend route described above.
 
 What is now true:
 
@@ -114,9 +115,21 @@ What is now true:
   - `sr_index`
 - strict `-json` is wired as a first-class CLI mode and can now also be used
   alongside `-lang <backend>`, like in the C++ compiler workflow
+- `-lang wast` is now also wired and renders textual WAT/WAST from the same
+  backend via `wasmprinter`
 - for `-lang wasm`, the companion JSON and exported ABI are now coherent enough
   to work with the standard `faustwasm` runtime on validated cases such as
   `osc.dsp`
+- the Rust `wasm-ffi` compiler-module can now be built as a standalone
+  `wasm32-unknown-unknown` artifact and loaded by `faustwasm` as an embedded
+  compiler
+- that compiler-module now embeds the standard Faust library set as read-only
+  virtual sources, so source-string compilation can resolve imports such as
+  `import("stdfaust.lib")` without an Emscripten-style filesystem
+- the embedded-compiler path is validated end-to-end in `faustwasm` on:
+  - mono DSP compilation using the standard runtime path
+  - polyphonic `faust2wasm.js` generation, including packaged internal mixer
+    fallback, on `organ.dsp`
 
 What is not yet true:
 
@@ -128,6 +141,11 @@ What is not yet true:
   the C++ backend is not yet claimed, even though the current ABI contract is
   now much closer and is already functional with `faustwasm` on the validated
   path
+- helper parity for the embedded-compiler path is still incomplete:
+  - `getInfos(...)` is only partially implemented
+  - `expandDSP(...)` and `generateAuxFiles(...)` are present in the API but
+    are not yet parity-complete replacement surfaces for the historical C++
+    binding
 
 ## 5. Synthetic Characterization of the Supported Subset
 
@@ -286,6 +304,11 @@ Relative to the tracked corpus and the current production-oriented route:
   JSON,
 - the Rust WASM backend now emits a usable companion JSON contract for web
   runtimes and writes the same `.wasm` + `.json` pair shape as the C++ CLI,
+- the Rust toolchain now also exposes two additional WASM-facing delivery
+  shapes:
+  - `-lang wast` for textual WAT output,
+  - `crates/wasm-ffi` for a raw embedded-compiler module consumed by
+    `faustwasm`,
 - many language families that were earlier missing are no longer front-end
   blockers:
   - `case` and recursive pattern-matching with computed numeric arguments,
@@ -306,6 +329,13 @@ Relative to the tracked corpus and the current production-oriented route:
 - Variable delays driven by a UI slider, numentry, **or bounded audio-rate
   expression** now compile end-to-end — that restriction has been significantly
   relaxed,
+- the embedded `faustwasm` Rust compiler path can now compile DSP source
+  strings that import the standard Faust libraries, because the compiler module
+  ships a read-only embedded library bundle instead of depending on the legacy
+  Emscripten filesystem,
+- the same embedded compiler path now passes the historical `faust2wasm.js`
+  polyphonic route on a validated case (`organ.dsp`), including packaged mixer
+  fallback when no compiler `FS` is present,
 - the full C++ interval algebra is now available in Rust through
   `crates/interval`, and the signal type lattice is fully modeled in
   `crates/sigtype` with correct parity including `FConst`/`FVar` intervals.
@@ -318,6 +348,8 @@ Most importantly, the C++ compiler still has:
 
 - fuller support for stream-wrapper lowering,
 - broader mature transform/backend coverage on long-tail signal families,
+- a fuller embedded-compiler helper surface for web tooling
+  (`expandDSP`, `generateAuxFiles`, full `getInfos`, packaged FS semantics),
 - the `simplify` constant-folding pass applied to table-size positions
   (the Rust pipeline now runs `simplify` in `signal_prepare`, but the
   table-size extractor in the FIR builder still requires a literal `Int` node;
