@@ -150,14 +150,16 @@ pub unsafe extern "C" fn createCCraneliftDSPFactoryFromFile(
             let dsp_source = std::fs::read_to_string(filename)
                 .map_err(|e| format!("cannot read DSP source '{filename}': {e}"))?;
             build_scaffold_factory_from_file(
-                filename,
-                &dsp_source,
-                args,
-                opt_level,
+                FileFactoryBuildSpec {
+                    filename,
+                    dsp_source: &dsp_source,
+                    argv: args,
+                    opt_level,
+                    semantic_fingerprint: &compiled.fir_dump,
+                    foreign_function_fingerprint: &compiled.foreign_function_fingerprint,
+                },
                 &compiled.fir,
                 Some(compiled.jit),
-                &compiled.fir_dump,
-                &compiled.foreign_function_fingerprint,
             )
         })
     }
@@ -700,22 +702,35 @@ struct FactoryBuildSpec<'a> {
     source_is_faust: bool,
 }
 
+/// Internal normalized inputs used by the file-backed factory builder.
+struct FileFactoryBuildSpec<'a> {
+    filename: &'a str,
+    dsp_source: &'a str,
+    argv: &'a [String],
+    opt_level: c_int,
+    semantic_fingerprint: &'a str,
+    foreign_function_fingerprint: &'a str,
+}
+
 /// Build one factory object from a source file path and compiled backend artifacts.
 fn build_scaffold_factory_from_file(
-    filename: &str,
-    dsp_source: &str,
-    argv: &[String],
-    opt_level: c_int,
+    spec: FileFactoryBuildSpec<'_>,
     fir: &BoxFfiFirModule,
     jit: Option<JitDspModule>,
-    semantic_fingerprint: &str,
-    foreign_function_fingerprint: &str,
 ) -> Result<CraneliftDspFactory, String> {
-    let source_name = Path::new(filename)
+    let source_name = Path::new(spec.filename)
         .file_stem()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("FaustDSP");
+    let FileFactoryBuildSpec {
+        dsp_source,
+        argv,
+        opt_level,
+        semantic_fingerprint,
+        foreign_function_fingerprint,
+        ..
+    } = spec;
     build_scaffold_factory_common(
         FactoryBuildSpec {
             name: source_name,

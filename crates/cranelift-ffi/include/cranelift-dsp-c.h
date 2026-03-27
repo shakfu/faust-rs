@@ -99,6 +99,9 @@ bool writeCCraneliftDSPFactoryToBitcodeFile(cranelift_dsp_factory* factory,
 bool startMTDSPFactories(void);
 void stopMTDSPFactories(void);
 
+/* Foreign-function registration for DSPs using `ffunction(...)`. */
+void registerCCraneliftForeignFunction(const char* name, void* fn_ptr);
+
 /* Memory allocated by this library (currently strings; array ownership still scaffold-level). */
 void freeCMemory(void* ptr);
 
@@ -124,7 +127,7 @@ void computeCCraneliftDSPInstance(cranelift_dsp* dsp,
 /* Explicitly omitted from this header in V1 (deferred without symbols):
  * - LLVM-only IR/machine/object serialization families
  * - target getter/query functions (`...FactoryTarget`, `...MachineTarget`)
- * - memory-manager and foreign-function registration families
+ * - memory-manager registration families
  */
 
 #ifdef __cplusplus

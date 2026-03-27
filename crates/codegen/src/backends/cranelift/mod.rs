@@ -2754,18 +2754,22 @@ fn binary_math_symbol_f64(math: fir::FirMathOp) -> Option<&'static str> {
 ///
 /// Any unsupported FIR node shape returns `LoweringError::Unsupported`, which
 /// the caller may convert into a controlled stub fallback.
-fn try_lower_compute_body(
-    store: &FirStore,
-    jit: &mut JITModule,
-    fb: &mut FunctionBuilder<'_>,
-    struct_layout: &StructLayoutPlan,
+struct ComputeBodyLoweringContext<'a> {
+    store: &'a FirStore,
+    jit: &'a mut JITModule,
+    struct_layout: &'a StructLayoutPlan,
     ptr_ty: Type,
+    static_data_ids: &'a HashMap<String, DataId>,
+    extern_data_ids: &'a HashMap<String, DataId>,
+    extern_function_symbols: &'a HashMap<String, *const c_void>,
+}
+
+fn try_lower_compute_body(
+    cx: ComputeBodyLoweringContext<'_>,
+    fb: &mut FunctionBuilder<'_>,
     compute_decl: FirId,
-    static_data_ids: &HashMap<String, DataId>,
-    extern_data_ids: &HashMap<String, DataId>,
-    extern_function_symbols: &HashMap<String, *const c_void>,
 ) -> Result<bool, LoweringError> {
-    let (args, body) = match match_fir(store, compute_decl) {
+    let (args, body) = match match_fir(cx.store, compute_decl) {
         FirMatch::DeclareFun {
             args,
             body: Some(body),
@@ -2806,16 +2810,16 @@ fn try_lower_compute_body(
     }
 
     let mut lowering = ComputeLowering {
-        store,
-        jit,
+        store: cx.store,
+        jit: cx.jit,
         fb,
-        struct_layout,
-        ptr_ty,
+        struct_layout: cx.struct_layout,
+        ptr_ty: cx.ptr_ty,
         vars,
         import_refs: HashMap::new(),
-        static_data_ids,
-        extern_data_ids,
-        extern_function_symbols,
+        static_data_ids: cx.static_data_ids,
+        extern_data_ids: cx.extern_data_ids,
+        extern_function_symbols: cx.extern_function_symbols,
         _marker: std::marker::PhantomData,
     };
     lowering.lower_stmt(body)?;
@@ -3373,15 +3377,17 @@ fn declare_compute_stub(
             )
         {
             match try_lower_compute_body(
-                store,
-                jit,
+                ComputeBodyLoweringContext {
+                    store,
+                    jit,
+                    struct_layout,
+                    ptr_ty,
+                    static_data_ids,
+                    extern_data_ids,
+                    extern_function_symbols,
+                },
                 &mut fb,
-                struct_layout,
-                ptr_ty,
                 compute_decl,
-                static_data_ids,
-                extern_data_ids,
-                extern_function_symbols,
             ) {
                 Ok(lowered) => compute_body_lowered = lowered,
                 Err(LoweringError::Unsupported(reason)) => {
