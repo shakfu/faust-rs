@@ -253,6 +253,7 @@ dependencies = [
  "propagate",
  "serde_json",
  "signals",
+ "sigtype",
  "tlib",
  "transform",
  "ui",

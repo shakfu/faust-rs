@@ -48,7 +48,10 @@ use codegen::backends::wasm::{
 use codegen::json::{
     JsonBuildOptions, JsonDescription, JsonMetaEntry, build_json_description_from_fir,
 };
-use errors::{Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, SourceSpan};
+use errors::codes::COMP_TYPE_FAILED;
+use errors::{
+    Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, Severity, SourceSpan, Stage,
+};
 use fir::{
     FirBuilder, FirId, FirStore, FirType, NamedType,
     checker::{FirVerifyReport, Severity as FirVerifySeverity, verify_fir_module},
@@ -57,6 +60,7 @@ use parser::VirtualSourceMap;
 use parser::{CompilationMetadataKey, CompilationMetadataSnapshot, ParseOutput, SourceReaderError};
 use propagate::{ArityCache, BoxArity, PropagateError, PropagateUiOptions};
 use signals::{SigId, dump_sig_readable};
+use sigtype::TypeAnnotator;
 use tlib::NodeKind;
 pub use transform::signal_fir::RealType;
 use transform::signal_fir::{
@@ -1474,6 +1478,12 @@ impl Compiler {
                 true,
             )
         })?;
+        validate_signal_types(
+            source,
+            &output.state.arena,
+            &propagated.signals,
+            &propagated.ui,
+        )?;
 
         Ok(SignalCompileOutput {
             compilation_metadata,
@@ -1520,6 +1530,12 @@ pub enum CompilerError {
     Propagate {
         source: Box<str>,
         error: PropagateError,
+        diagnostics: DiagnosticBundle,
+    },
+    /// Signal type validation failed after propagation.
+    Type {
+        source: Box<str>,
+        error: Box<str>,
         diagnostics: DiagnosticBundle,
     },
     /// Transform stage failed while lowering signals to FIR.
@@ -1577,6 +1593,9 @@ impl std::fmt::Display for CompilerError {
             Self::Propagate { source, error, .. } => {
                 write!(f, "propagation failed for {source}: {error}")
             }
+            Self::Type { source, error, .. } => {
+                write!(f, "type validation failed for {source}: {error}")
+            }
             Self::Transform { source, error, .. } => {
                 write!(f, "transform failed for {source}: {error}")
             }
@@ -1616,6 +1635,7 @@ impl CompilerError {
             Self::Parse { diagnostics, .. } => Some(diagnostics),
             Self::Eval { diagnostics, .. } => Some(diagnostics),
             Self::Propagate { diagnostics, .. } => Some(diagnostics),
+            Self::Type { diagnostics, .. } => Some(diagnostics),
             Self::Transform { diagnostics, .. } => Some(diagnostics),
             Self::FirVerify { diagnostics, .. } => Some(diagnostics),
             Self::Codegen { .. } => None,
@@ -1835,6 +1855,36 @@ fn fir_verify_error_to_compiler(source: &str, report: FirVerifyReport) -> Compil
         source: source.into(),
         strict,
         diagnostics: fir_verify_bundle_from_report(&report),
+    }
+}
+
+/// Runs canonical `sigtype` validation on propagated signals before later stages.
+fn validate_signal_types(
+    source: &str,
+    arena: &tlib::TreeArena,
+    signals: &[SigId],
+    ui: &UiProgram,
+) -> Result<(), CompilerError> {
+    let mut annotator = TypeAnnotator::new(arena, ui);
+    annotator
+        .annotate(signals)
+        .map(|_| ())
+        .map_err(|error| type_error_to_compiler(source, error.0))
+}
+
+/// Wraps a signal type validation error into the compiler facade error surface.
+fn type_error_to_compiler(source: &str, error: String) -> CompilerError {
+    let diagnostic = Diagnostic::new(
+        Severity::Error,
+        Stage::Compiler,
+        COMP_TYPE_FAILED,
+        error.clone(),
+    )
+    .with_note("stage=sigtype");
+    CompilerError::Type {
+        source: source.into(),
+        error: error.into_boxed_str(),
+        diagnostics: bundle_from_diagnostic(diagnostic),
     }
 }
 

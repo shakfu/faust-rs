@@ -25,7 +25,7 @@
 use std::collections::{HashMap, HashSet};
 
 use interval::Interval;
-use signals::{BinOp, SigId, SigMatch, match_sig};
+use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{NodeKind, TreeArena, match_sym_rec, match_sym_ref};
 use ui::{ControlId, ControlKind, UiProgram};
 
@@ -89,6 +89,7 @@ struct RecTypingState {
 
 const RECURSIVE_NARROWING_LIMIT: usize = 0;
 const RECURSIVE_WIDENING_LIMIT: i32 = 0;
+const MAX_SOUNDFILE_PARTS: i32 = 256;
 
 impl RecTypingState {
     /// Builds one explicit recursive typing state from already-symbolic outputs.
@@ -521,6 +522,7 @@ impl<'a> TypeAnnotator<'a> {
             SigMatch::SoundfileLength(sf, part) => {
                 self.infer(sf)?;
                 let t_part = self.infer(part)?;
+                self.check_soundfile_part_interval(sig, &t_part)?;
                 let var = Variability::Block.join(t_part.variability());
                 Ok(make_simple(
                     Nature::Int,
@@ -534,6 +536,7 @@ impl<'a> TypeAnnotator<'a> {
             SigMatch::SoundfileRate(sf, part) => {
                 self.infer(sf)?;
                 let t_part = self.infer(part)?;
+                self.check_soundfile_part_interval(sig, &t_part)?;
                 let var = Variability::Block.join(t_part.variability());
                 Ok(make_simple(
                     Nature::Int,
@@ -550,7 +553,7 @@ impl<'a> TypeAnnotator<'a> {
                 self.infer(x)?;
                 let t_part = self.infer(part)?;
                 self.infer(z)?;
-                let _ = t_part;
+                self.check_soundfile_part_interval(sig, &t_part)?;
                 Ok(make_simple(
                     Nature::Real,
                     Variability::Samp,
@@ -695,6 +698,23 @@ impl<'a> TypeAnnotator<'a> {
             // Unknown / unhandled — conservative.
             SigMatch::Unknown => Ok(make_maximal()),
         }
+    }
+
+    /// Mirrors C++ `checkPartInterval(sig, t)` for soundfile part selectors.
+    fn check_soundfile_part_interval(&self, sig: SigId, ty: &SigType) -> Result<(), TypeError> {
+        let interval = ty.interval();
+        if !interval.is_valid()
+            || interval.lo() < 0.0
+            || interval.hi() >= f64::from(MAX_SOUNDFILE_PARTS)
+        {
+            return Err(TypeError(format!(
+                "ERROR : out of range soundfile part number ({} instead of interval(0,{})) in expression : {}",
+                interval,
+                MAX_SOUNDFILE_PARTS - 1,
+                dump_sig_readable(self.arena, sig)
+            )));
+        }
+        Ok(())
     }
 
     fn solve_recursive_groups(&mut self, state: &mut RecTypingState) -> Result<(), TypeError> {
@@ -1284,6 +1304,12 @@ mod tests {
         ann.annotate(outputs).expect("annotation failed")
     }
 
+    fn annotate_err(arena: &TreeArena, outputs: &[SigId]) -> TypeError {
+        let ui = empty_ui();
+        let mut ann = TypeAnnotator::new(arena, &ui);
+        ann.annotate(outputs).expect_err("annotation should fail")
+    }
+
     #[test]
     fn discover_recursive_groups_keeps_dfs_order_and_arity() {
         let mut arena = TreeArena::new();
@@ -1577,5 +1603,32 @@ mod tests {
         let s = b.int_cast(r);
         let types = annotate(&arena, &[s]);
         assert_eq!(types[&s].nature(), Nature::Int);
+    }
+
+    #[test]
+    fn soundfile_part_interval_must_stay_within_cpp_bounds() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let soundfile = b.soundfile(0);
+        let part = b.input(0);
+        let length = b.soundfile_length(soundfile, part);
+
+        let err = annotate_err(&arena, &[length]);
+
+        assert!(
+            err.0.contains("out of range soundfile part number"),
+            "unexpected error: {}",
+            err.0
+        );
+        assert!(
+            err.0.contains("interval(0,255)"),
+            "unexpected error: {}",
+            err.0
+        );
+        assert!(
+            err.0.contains("SIGSOUNDFILELENGTH"),
+            "unexpected error: {}",
+            err.0
+        );
     }
 }

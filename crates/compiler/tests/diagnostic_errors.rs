@@ -313,6 +313,35 @@ fn propagate_error_fixture_exposes_frs_prop_code() {
 }
 
 #[test]
+fn soundfile_part_interval_error_exposes_compiler_type_diagnostic() {
+    let compiler = Compiler::new();
+    let path = corpus_path("rep_74_soundfile_basic.dsp");
+    let err = compiler
+        .compile_file_default_to_signals(&path)
+        .expect_err("soundfile part interval fixture should fail type validation");
+
+    let diagnostics = err
+        .diagnostics()
+        .expect("type validation error should expose diagnostics");
+    let first = diagnostics
+        .as_slice()
+        .first()
+        .expect("type validation bundle should not be empty");
+
+    assert_eq!(first.code.0, "FRS-COMP-0004");
+    assert!(
+        first.message.contains("out of range soundfile part number"),
+        "unexpected message: {}",
+        first.message
+    );
+    assert!(
+        first.message.contains("interval(0,255)"),
+        "unexpected message: {}",
+        first.message
+    );
+}
+
+#[test]
 fn propagate_error_operator_span_points_to_composition_token() {
     let compiler = Compiler::new();
     let source = read_corpus("err_03_propagate_split_mismatch.dsp");

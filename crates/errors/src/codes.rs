@@ -71,6 +71,8 @@ pub const COMP_PARSE_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0001");
 pub const COMP_EVAL_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0002");
 /// Propagate stage failed in top-level compiler pipeline.
 pub const COMP_PROPAGATE_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0003");
+/// Signal type validation failed in top-level compiler pipeline.
+pub const COMP_TYPE_FAILED: DiagnosticCode = DiagnosticCode("FRS-COMP-0004");
 
 /// Returns all built-in stable diagnostic codes.
 #[must_use]
@@ -105,6 +107,7 @@ pub fn all_codes() -> &'static [DiagnosticCode] {
         COMP_PARSE_FAILED,
         COMP_EVAL_FAILED,
         COMP_PROPAGATE_FAILED,
+        COMP_TYPE_FAILED,
     ]
 }
 
