@@ -549,6 +549,27 @@ fn module_with_body(store: &mut FirStore, stmts: &[FirId]) -> FirId {
     }
 }
 
+/// Build a single-function module with a custom `dsp_struct` block.
+fn module_with_struct_and_body(store: &mut FirStore, dsp_struct: FirId, stmts: &[FirId]) -> FirId {
+    let body = FirBuilder::new(store).block(stmts);
+    let mut b = FirBuilder::new(store);
+    let arg = NamedType {
+        name: "x".to_string(),
+        typ: FirType::Int32,
+    };
+    let typ = FirType::Fun {
+        args: vec![FirType::Int32],
+        ret: Box::new(FirType::Void),
+    };
+    let fun = b.declare_fun("myFun", typ, &[arg], Some(body), false);
+    let globals = make_empty_block(&mut b);
+    let functions = b.block(&[fun]);
+    {
+        let sd = b.block(&[]);
+        b.module(0, 0, "dsp", dsp_struct, globals, functions, sd)
+    }
+}
+
 /// Build a single-function module that returns an Int32 value.
 fn module_with_int_body(store: &mut FirStore, stmts: &[FirId]) -> FirId {
     let body = FirBuilder::new(store).block(stmts);
@@ -614,6 +635,71 @@ fn sc03_load_uninitialized() {
     assert!(!report.has_errors());
     assert!(
         report.diagnostics.iter().any(|d| d.code == "FIR-SC03"),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn soundfile_access_missing_struct_slot_warns_sc09() {
+    let mut store = FirStore::new();
+    let zero = FirBuilder::new(&mut store).int32(0);
+    let len = FirBuilder::new(&mut store).load_soundfile_length("fSound0", zero);
+    let drop = FirBuilder::new(&mut store).drop_(len);
+    let dsp_struct = FirBuilder::new(&mut store).block(&[]);
+    let module_id = module_with_struct_and_body(&mut store, dsp_struct, &[drop]);
+
+    let report = verify_fir_module(&store, module_id);
+    assert!(!report.has_errors(), "{report:?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "FIR-SC09" && d.message.contains("fSound0")),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn soundfile_access_wrong_struct_type_warns_sf01() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+    let sound_slot = b.declare_var("fSound0", FirType::Int32, AccessType::Struct, None);
+    let dsp_struct = b.block(&[sound_slot]);
+    let zero = b.int32(0);
+    let rate = b.load_soundfile_rate("fSound0", zero);
+    let drop = b.drop_(rate);
+    let module_id = module_with_struct_and_body(&mut store, dsp_struct, &[drop]);
+
+    let report = verify_fir_module(&store, module_id);
+    assert!(!report.has_errors(), "{report:?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "FIR-SF01" && d.message.contains("fSound0")),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn soundfile_buffer_requires_integer_indices() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+    let sound_slot = b.declare_var("fSound0", FirType::Sound, AccessType::Struct, None);
+    let dsp_struct = b.block(&[sound_slot]);
+    let zero = b.int32(0);
+    let bad_idx = b.float32(0.5);
+    let sample = b.load_soundfile_buffer("fSound0", zero, zero, bad_idx, FirType::Float32);
+    let drop = b.drop_(sample);
+    let module_id = module_with_struct_and_body(&mut store, dsp_struct, &[drop]);
+
+    let report = verify_fir_module(&store, module_id);
+    assert!(report.has_errors(), "{report:?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "FIR-T01" && d.message.contains("soundfile index")),
         "{report:?}"
     );
 }

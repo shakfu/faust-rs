@@ -80,6 +80,7 @@
 //! | FIR-T01  | E | Table index is not integer |
 //! | FIR-T02  | E | `StoreTable` value type mismatch |
 //! | FIR-T03  | W | `LoadTable` / `StoreTable` on non-table declaration |
+//! | FIR-SF01 | W | Soundfile access refers to a non-`Sound` struct field |
 //! | FIR-MA01 | W | Unary math op called with wrong arity |
 //! | FIR-MA02 | W | Binary math op called with wrong arity |
 //! | FIR-MA03 | W | Floating-point math op called with integer-like argument |
@@ -219,6 +220,8 @@ pub struct ModuleSymbols {
     pub struct_fields: Vec<FirType>,
     /// Set of names declared in the `dsp_struct` block (vars and tables).
     pub struct_field_names: HashSet<String>,
+    /// Struct field types keyed by field name.
+    pub struct_field_types: HashMap<String, FirType>,
     /// Global/static variables: name → `(AccessType, FirType)`.
     pub globals: HashMap<String, (AccessType, FirType)>,
     /// Names declared as global/static tables (for T03).
@@ -858,6 +861,7 @@ impl<'s> VerifyCtx<'s> {
         };
 
         let mut seen = HashSet::new();
+        let mut field_types_by_name = HashMap::new();
         let mut field_types = Vec::new();
         for stmt_id in stmts {
             let (field_name, field_type) = match match_fir(self.store, stmt_id) {
@@ -927,10 +931,12 @@ impl<'s> VerifyCtx<'s> {
                 }
                 _ => {}
             }
+            field_types_by_name.insert(field_name.clone(), field_type.clone());
             field_types.push(field_type);
         }
 
         self.symbols.struct_field_names = seen;
+        self.symbols.struct_field_types = field_types_by_name;
         self.symbols.struct_fields = field_types;
     }
 
@@ -1896,6 +1902,40 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Validates that one `soundfile` slot name resolves to a DSP struct field
+    /// of type [`FirType::Sound`].
+    fn check_soundfile_slot(&mut self, id: FirId, var: &str) {
+        match self.symbols.struct_field_types.get(var) {
+            Some(FirType::Sound) => {}
+            Some(found) => self.warn(
+                "FIR-SF01",
+                format!(
+                    "soundfile access '{var}' refers to struct field of type {found:?}, expected Sound"
+                ),
+                id,
+            ),
+            None => self.warn(
+                "FIR-SC09",
+                format!("kStruct variable '{var}' is not declared in dsp_struct"),
+                id,
+            ),
+        }
+    }
+
+    /// Validates one soundfile subscript-like operand (`part`, `chan`, `idx`).
+    fn check_soundfile_index_like(&mut self, id: FirId, value: FirId, what: &str) {
+        self.check_value(value);
+        if let Some(index_ty) = self.infer_value_type(value)
+            && !self.is_integer_type(&index_ty)
+        {
+            self.error(
+                "FIR-T01",
+                format!("soundfile {what} must be Int32 or Int64, got {index_ty:?}"),
+                id,
+            );
+        }
+    }
+
     /// Warns when a `Drop` discards a non-void function return value.
     fn check_fun_call_drop_use(&mut self, id: FirId, value: FirId) {
         if let FirMatch::FunCall { name, typ, .. } = match_fir(self.store, value)
@@ -2012,6 +2052,9 @@ impl<'s> VerifyCtx<'s> {
             FirMatch::Control { cond, stmt } => {
                 self.check_value(cond);
                 self.check_stmt(stmt);
+            }
+            FirMatch::AddSoundfile { var, .. } => {
+                self.check_soundfile_slot(id, &var);
             }
             // UI, meta, null — no scope-relevant content
             _ => {}
@@ -2503,6 +2546,23 @@ impl<'s> VerifyCtx<'s> {
                 for v in values {
                     self.check_value(v);
                 }
+            }
+            FirMatch::LoadSoundfileLength { var, part }
+            | FirMatch::LoadSoundfileRate { var, part } => {
+                self.check_soundfile_slot(id, &var);
+                self.check_soundfile_index_like(id, part, "part");
+            }
+            FirMatch::LoadSoundfileBuffer {
+                var,
+                chan,
+                part,
+                idx,
+                ..
+            } => {
+                self.check_soundfile_slot(id, &var);
+                self.check_soundfile_index_like(id, chan, "channel");
+                self.check_soundfile_index_like(id, part, "part");
+                self.check_soundfile_index_like(id, idx, "index");
             }
             // Leaf value nodes (literals, NullValue, NewDsp, etc.) — nothing to check
             _ => {}

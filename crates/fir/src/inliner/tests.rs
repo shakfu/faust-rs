@@ -635,6 +635,82 @@ fn inline_module_once_inlines_canonical_helper_calls() {
 }
 
 #[test]
+fn inline_module_once_preserves_soundfile_nodes_and_inlines_soundfile_helper() {
+    let mut src = FirStore::new();
+    let module = {
+        let mut b = FirBuilder::new(&mut src);
+
+        let helper_body = {
+            let zero = b.int32(0);
+            let rate = b.load_soundfile_rate("fSound0", zero);
+            let ret = b.ret(Some(rate));
+            b.block(&[ret])
+        };
+        let helper = fun(
+            &mut b,
+            "helper",
+            &[],
+            FirType::Int32,
+            Some(helper_body),
+            true,
+        );
+
+        let build_ui_body = {
+            let add_sf = b.add_soundfile_with_url("sample", "demo.wav", "fSound0");
+            b.block(&[add_sf])
+        };
+        let build_ui = fun(
+            &mut b,
+            "buildUserInterface",
+            &[NamedType {
+                name: "ui".to_string(),
+                typ: FirType::UI,
+            }],
+            FirType::Void,
+            Some(build_ui_body),
+            false,
+        );
+
+        let wrapper_body = {
+            let call = b.fun_call("helper", &[], FirType::Int32);
+            let drop_call = b.drop_(call);
+            b.block(&[drop_call])
+        };
+        let wrapper = fun(
+            &mut b,
+            "wrapper",
+            &[],
+            FirType::Void,
+            Some(wrapper_body),
+            false,
+        );
+
+        let sound_slot = b.declare_var("fSound0", FirType::Sound, AccessType::Struct, None);
+        let dsp_struct = b.block(&[sound_slot]);
+        let globals = b.block(&[]);
+        let decls = b.block(&[helper, build_ui, wrapper]);
+        {
+            let static_decls = b.block(&[]);
+            b.module(0, 0, "mydsp", dsp_struct, globals, decls, static_decls)
+        }
+    };
+
+    assert_no_checker_errors(&src, module);
+
+    let (dst, rewritten, stats) =
+        inline_fir_module_once(&src, module, &FirInlineOptions::default())
+            .expect("rewrite should succeed");
+    assert_eq!(stats.callsites_seen, 1);
+    assert_eq!(stats.callsites_inlined, 1);
+
+    let dump = dump_fir(&dst, rewritten);
+    assert!(dump.contains("AddSoundfile"), "{dump}");
+    assert!(dump.contains("LoadSoundfileRate"), "{dump}");
+    assert!(!dump.contains("FunCall { name: \"helper\""), "{dump}");
+    assert_no_checker_errors(&dst, rewritten);
+}
+
+#[test]
 fn inline_module_once_skips_non_canonical_return_shape() {
     let mut src = FirStore::new();
     let module = {
