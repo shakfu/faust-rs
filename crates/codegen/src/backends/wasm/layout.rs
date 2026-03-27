@@ -9,6 +9,7 @@
 //! they are raw byte offsets into one contiguous runtime prefix. That prefix can
 //! contain, in order:
 //! - static tables,
+//! - `Soundfile*` struct fields first among mutable DSP fields,
 //! - mutable DSP/global fields,
 //! - the I/O zone / audio heap start,
 //! - the embedded JSON data segment after the runtime area.
@@ -206,11 +207,11 @@ impl WasmMemoryLayout {
             }
         }
 
-        for item in dsp_struct_items
-            .iter()
-            .copied()
-            .chain(global_items.iter().copied())
-        {
+        let mut runtime_fields = dsp_struct_items.to_vec();
+        runtime_fields.extend(global_items.iter().copied());
+        runtime_fields.sort_by_key(|item| !is_sound_struct_field(store, *item));
+
+        for item in runtime_fields.iter().copied() {
             match match_fir(store, item) {
                 FirMatch::DeclareVar {
                     name,
@@ -372,6 +373,20 @@ impl WasmMemoryLayout {
             pages,
         })
     }
+}
+
+/// C++ parity: WASM moves `Soundfile*` fields first in the DSP struct so the
+/// host runtime can install soundfile pointers at stable low offsets before any
+/// other mutable DSP state.
+fn is_sound_struct_field(store: &FirStore, id: FirId) -> bool {
+    matches!(
+        match_fir(store, id),
+        FirMatch::DeclareVar {
+            typ: FirType::Sound,
+            access: AccessType::Struct,
+            ..
+        }
+    )
 }
 
 /// Resolves one FIR node that must be a `Block` in module-layout positions.

@@ -701,6 +701,78 @@ fn wasm_json_indices_follow_runtime_offsets_after_static_tables() {
     assert!(out.dsp_json.contains("\"index\":12"));
 }
 
+#[test]
+fn wasm_soundfile_modules_import_memory_and_expose_soundfile_offset_zero() {
+    let (store, module) = build_soundfile_access_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("WASM backend should lower soundfile modules without empty compute fallback");
+
+    assert!(out.dsp_json.contains("\"type\":\"soundfile\""));
+    assert!(out.dsp_json.contains("\"varname\":\"fSound0\""));
+    assert!(out.dsp_json.contains("\"index\":0"));
+
+    let mut imported_memory = false;
+    let mut exported_memory = false;
+    for payload in Parser::new(0).parse_all(&out.wasm_binary) {
+        let payload = payload.expect("payload should decode");
+        match payload {
+            Payload::ImportSection(section) => {
+                for import in section {
+                    let import = import.expect("import should decode");
+                    if import.module == "env"
+                        && import.name == "memory"
+                        && matches!(import.ty, wasmparser::TypeRef::Memory(_))
+                    {
+                        imported_memory = true;
+                    }
+                }
+            }
+            Payload::ExportSection(section) => {
+                for export in section {
+                    let export = export.expect("export should decode");
+                    if export.name == "memory" {
+                        exported_memory = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert!(imported_memory, "soundfile modules should import memory");
+    assert!(
+        !exported_memory,
+        "soundfile modules should not export an internal memory"
+    );
+}
+
+#[test]
+fn wasm_compute_lowers_soundfile_access_nodes() {
+    let (store, module) = build_soundfile_access_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("soundfile access should lower into a real compute body");
+
+    let body = code_body_at(&out.wasm_binary, 1);
+    let ops = decode_ops(body);
+
+    assert!(ops.iter().any(|op| matches!(op, Operator::Loop { .. })));
+    assert!(
+        ops.iter()
+            .filter(|op| matches!(op, Operator::I32Load { .. }))
+            .count()
+            >= 4,
+        "soundfile compute should chase pointer/int arrays"
+    );
+    assert!(
+        ops.iter().any(|op| matches!(op, Operator::F32Load { .. })),
+        "soundfile compute should load sample data"
+    );
+    assert!(
+        ops.iter().any(|op| matches!(op, Operator::F32Store { .. })),
+        "soundfile compute should write output samples"
+    );
+}
+
 fn build_sample_rate_state_module() -> (FirStore, FirId) {
     let mut store = FirStore::new();
     let mut b = FirBuilder::new(&mut store);
@@ -718,6 +790,176 @@ fn build_sample_rate_state_module() -> (FirStore, FirId) {
     let functions = b.block(&[compute]);
     let static_decls = b.block(&[]);
     let module = b.module(0, 1, "sr_dsp", dsp_struct, globals, functions, static_decls);
+    (store, module)
+}
+
+fn build_soundfile_access_module() -> (FirStore, FirId) {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let sample_rate_init = b.int32(48_000);
+    let sample_rate = b.declare_var(
+        "fSampleRate",
+        FirType::Int32,
+        AccessType::Struct,
+        Some(sample_rate_init),
+    );
+    let soundfile = b.declare_var("fSound0", FirType::Sound, AccessType::Struct, None);
+    let gain = b.declare_var("fGain", FirType::FaustFloat, AccessType::Struct, None);
+    let dsp_struct = b.block(&[sample_rate, soundfile, gain]);
+    let globals = b.block(&[]);
+    let static_decls = b.block(&[]);
+
+    let open = b.open_box(fir::UiBoxType::Vertical, "SoundfileTest");
+    let add_soundfile = b.add_soundfile_with_url(
+        "Drone_1",
+        "{'Alonepad_reverb_stereo_instru1.flac'; 'Dronepad_test_stereo_instru1.flac'}",
+        "fSound0",
+    );
+    let slider = b.add_slider(
+        fir::SliderType::Horizontal,
+        "gain",
+        "fGain",
+        SliderRange {
+            init: 0.5,
+            lo: 0.0,
+            hi: 1.0,
+            step: 0.01,
+        },
+    );
+    let close = b.close_box();
+    let ui_body = b.block(&[open, add_soundfile, slider, close]);
+    let ui = b.declare_fun(
+        "buildUserInterface",
+        FirType::Fun {
+            args: vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::UI],
+            ret: Box::new(FirType::Void),
+        },
+        &[
+            NamedType {
+                name: "dsp".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "ui_interface".to_owned(),
+                typ: FirType::UI,
+            },
+        ],
+        Some(ui_body),
+        false,
+    );
+
+    let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+    let args = [
+        NamedType {
+            name: "dsp".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "count".to_owned(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
+    let zero_output = b.int32(0);
+    let output0_ptr = b.load_table("outputs", AccessType::FunArgs, zero_output, ptr_ty.clone());
+    let output0 = b.declare_var(
+        "output0",
+        ptr_ty.clone(),
+        AccessType::Stack,
+        Some(output0_ptr),
+    );
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+    let zero = b.int32(0);
+    let rate_i32 = b.load_soundfile_rate("fSound0", zero);
+    let rate = b.cast(FirType::Float32, rate_i32);
+    let len_i32 = b.load_soundfile_length("fSound0", zero);
+    let len = b.cast(FirType::Float32, len_i32);
+    let sample = b.load_soundfile_buffer("fSound0", zero, zero, i0, FirType::Float32);
+    let gain_cur = b.load_var("fGain", AccessType::Struct, FirType::FaustFloat);
+    let gain_f32 = b.cast(FirType::Float32, gain_cur);
+    let sample_gain = b.binop(fir::FirBinOp::Mul, sample, gain_f32, FirType::Float32);
+    let rate_len = b.binop(fir::FirBinOp::Add, rate, len, FirType::Float32);
+    let output_sample = b.binop(fir::FirBinOp::Add, sample_gain, rate_len, FirType::Float32);
+    let store_out = b.store_table("output0", AccessType::Stack, i0, output_sample);
+    let loop_body = b.block(&[store_out]);
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let loop_stmt = b.simple_for_loop("i0", count, loop_body, false);
+    let compute_body = b.block(&[output0, loop_stmt]);
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &args,
+        Some(compute_body),
+        false,
+    );
+
+    let reset_gain = b.float32(0.5);
+    let reset_store = b.store_var("fGain", AccessType::Struct, reset_gain);
+    let reset_body = b.block(&[reset_store]);
+    let reset_ui = b.declare_fun(
+        "instanceResetUserInterface",
+        FirType::Fun {
+            args: vec![FirType::Ptr(Box::new(FirType::Obj))],
+            ret: Box::new(FirType::Void),
+        },
+        &[NamedType {
+            name: "dsp".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        }],
+        Some(reset_body),
+        false,
+    );
+
+    let sample_rate_arg = b.load_var("sample_rate", AccessType::FunArgs, FirType::Int32);
+    let sample_rate_store = b.store_var("fSampleRate", AccessType::Struct, sample_rate_arg);
+    let constants_body = b.block(&[sample_rate_store]);
+    let constants = b.declare_fun(
+        "instanceConstants",
+        FirType::Fun {
+            args: vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::Int32],
+            ret: Box::new(FirType::Void),
+        },
+        &[
+            NamedType {
+                name: "dsp".to_owned(),
+                typ: FirType::Ptr(Box::new(FirType::Obj)),
+            },
+            NamedType {
+                name: "sample_rate".to_owned(),
+                typ: FirType::Int32,
+            },
+        ],
+        Some(constants_body),
+        false,
+    );
+
+    let clear = declare_trivial_instance_clear(&mut b);
+    let functions = b.block(&[constants, reset_ui, clear, ui, compute]);
+    let module = b.module(
+        0,
+        1,
+        "soundfile_test",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
     (store, module)
 }
 
@@ -1791,6 +2033,23 @@ fn declare_trivial_compute(b: &mut FirBuilder<'_>) -> FirId {
             ret: Box::new(FirType::Void),
         },
         &args,
+        Some(body),
+        false,
+    )
+}
+
+fn declare_trivial_instance_clear(b: &mut FirBuilder<'_>) -> FirId {
+    let body = b.block(&[]);
+    b.declare_fun(
+        "instanceClear",
+        FirType::Fun {
+            args: vec![FirType::Ptr(Box::new(FirType::Obj))],
+            ret: Box::new(FirType::Void),
+        },
+        &[NamedType {
+            name: "dsp".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        }],
         Some(body),
         false,
     )

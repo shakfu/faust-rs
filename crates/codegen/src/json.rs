@@ -358,6 +358,75 @@ fn push_json_field_ui_array(out: &mut String, key: &str, values: &[JsonUiItem]) 
     out.push(']');
 }
 
+/// Normalize the public JSON `soundfile.url` payload to the historical C++
+/// `faustwasm` shape.
+///
+/// The web runtime expects multi-part soundfile names in the compact
+/// `{-file1-;-file2-}` form used by the C++ JSON emitter. The Rust UI metadata
+/// path may still carry the source-style `{'file1'; 'file2'}` representation,
+/// so this helper canonicalizes that public JSON field at serialization time.
+///
+/// This is a compatibility-sensitive contract, not just cosmetic formatting:
+/// `faustwasm` currently tokenizes `soundfile.url` by:
+///
+/// 1. removing the outer `{...}`,
+/// 2. splitting on `;`,
+/// 3. dropping the first and last character of each segment.
+///
+/// That logic works for the C++ payload `{-foo-;-bar-}`, but it breaks on the
+/// source-style Rust metadata string `{'foo'; 'bar'}` because the second item
+/// keeps a leading quote after the split. The result is a bogus fetch target
+/// such as `/'bar` at runtime, which means:
+///
+/// - compilation succeeds,
+/// - the PWA loads,
+/// - but the soundfile buffers never populate, so no sound is produced.
+///
+/// Keeping this normalization here aligns the Rust JSON builder with the
+/// observable C++ runtime contract without forcing the web runtime to learn a
+/// second `soundfile.url` dialect.
+fn canonicalize_soundfile_url(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.starts_with("{-") && trimmed.ends_with('}') {
+        return trimmed.to_owned();
+    }
+    if !(trimmed.starts_with('{') && trimmed.ends_with('}')) {
+        return trimmed.to_owned();
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    let mut parts = Vec::new();
+    for raw_part in inner.split(';') {
+        let part = raw_part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let unquoted = part
+            .strip_prefix('\'')
+            .and_then(|rest| rest.strip_suffix('\''))
+            .or_else(|| {
+                part.strip_prefix('"')
+                    .and_then(|rest| rest.strip_suffix('"'))
+            })
+            .unwrap_or(part)
+            .trim();
+        if !unquoted.is_empty() {
+            parts.push(unquoted);
+        }
+    }
+    if parts.is_empty() {
+        trimmed.to_owned()
+    } else {
+        format!(
+            "{{{}}}",
+            parts
+                .into_iter()
+                .map(|part| format!("-{part}-"))
+                .collect::<Vec<_>>()
+                .join(";")
+        )
+    }
+}
+
 /// Serialize one UI item, omitting backend-specific optional fields when they
 /// are absent.
 ///
@@ -405,7 +474,7 @@ fn push_json_ui_item(out: &mut String, item: &JsonUiItem) {
             }
             if let Some(url) = &widget.soundfile_url {
                 out.push(',');
-                push_json_field_string(out, "url", url);
+                push_json_field_string(out, "url", &canonicalize_soundfile_url(url));
             }
             if let Some(range) = widget.range {
                 if let Some(init) = range.init {

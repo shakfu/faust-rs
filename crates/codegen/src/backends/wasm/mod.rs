@@ -63,6 +63,10 @@ pub const BACKEND_NAME: &str = "wasm";
 
 /// Fallback minimum page count when auto-sizing would otherwise pick zero.
 const DEFAULT_MEMORY_PAGES: u32 = 1;
+const SOUNDFILE_BUFFERS_OFFSET: u32 = 0;
+const SOUNDFILE_LENGTH_OFFSET: u32 = 4;
+const SOUNDFILE_RATE_OFFSET: u32 = 8;
+const SOUNDFILE_FRAME_OFFSET_OFFSET: u32 = 12;
 
 /// WASM backend compilation options.
 ///
@@ -324,6 +328,9 @@ pub fn generate_wasm_module_with_context(
     let instance_reset_ui_body =
         find_function_body(store, &function_items, "instanceResetUserInterface");
 
+    let has_soundfiles = module_has_soundfiles(store, module, &function_items);
+    let effective_internal_memory = options.internal_memory && !has_soundfiles;
+
     let real_ty = if options.double_precision {
         ValType::F64
     } else {
@@ -351,6 +358,9 @@ pub fn generate_wasm_module_with_context(
 
     let mut wasm = Module::new();
     let math_imports = collect_math_imports(store, compute_body, options)?;
+    if let Some(body) = compute_body {
+        let _ = lower_compute_subset(store, body, &memory_layout, &math_imports, options)?;
+    }
     let imported_function_count = math_imports.len() as u32;
 
     let mut types = TypeSection::new();
@@ -365,9 +375,9 @@ pub fn generate_wasm_module_with_context(
     }
     wasm.section(&types);
 
-    if !options.internal_memory || !math_imports.is_empty() {
+    if !effective_internal_memory || !math_imports.is_empty() {
         let mut imports = ImportSection::new();
-        if !options.internal_memory {
+        if !effective_internal_memory {
             imports.import(
                 "env",
                 "memory",
@@ -396,7 +406,7 @@ pub fn generate_wasm_module_with_context(
     }
     wasm.section(&functions);
 
-    if options.internal_memory {
+    if effective_internal_memory {
         let mut memories = MemorySection::new();
         memories.memory(MemoryType {
             minimum: u64::from(pages),
@@ -467,7 +477,7 @@ pub fn generate_wasm_module_with_context(
         ExportKind::Func,
         function_index(imported_function_count, WasmFunc::SetParamValue),
     );
-    if options.internal_memory {
+    if effective_internal_memory {
         exports.export("memory", ExportKind::Memory, 0);
     }
     wasm.section(&exports);
@@ -510,6 +520,36 @@ pub fn generate_wasm_module_with_context(
         dsp_json,
         memory_layout,
     })
+}
+
+/// Detects whether one FIR module contains soundfile state/UI and therefore
+/// must follow the external-memory WASM contract used by `faustwasm`.
+fn module_has_soundfiles(store: &FirStore, module: FirId, _function_items: &[FirId]) -> bool {
+    if let FirMatch::Module {
+        dsp_struct,
+        globals,
+        static_decls,
+        ..
+    } = match_fir(store, module)
+    {
+        for block in [dsp_struct, globals, static_decls] {
+            if let FirMatch::Block(items) = match_fir(store, block)
+                && items.iter().copied().any(|id| {
+                    matches!(
+                        match_fir(store, id),
+                        FirMatch::DeclareVar {
+                            typ: FirType::Sound,
+                            ..
+                        }
+                    )
+                })
+            {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Maps one canonical backend function to its final module function index.
@@ -1438,6 +1478,55 @@ impl ComputeSubsetLowerer<'_> {
                 )?;
                 Ok(())
             }
+            FirMatch::LoadSoundfileLength { var, part } => {
+                self.emit_soundfile_field_ptr(&var, SOUNDFILE_LENGTH_OFFSET, function)?;
+                self.lower_index_offset(part, &FirType::Int32, function)?;
+                function.instruction(&Instruction::I32Add);
+                function.instruction(&Instruction::I32Load(memarg(0)));
+                Ok(())
+            }
+            FirMatch::LoadSoundfileRate { var, part } => {
+                self.emit_soundfile_field_ptr(&var, SOUNDFILE_RATE_OFFSET, function)?;
+                self.lower_index_offset(part, &FirType::Int32, function)?;
+                function.instruction(&Instruction::I32Add);
+                function.instruction(&Instruction::I32Load(memarg(0)));
+                Ok(())
+            }
+            FirMatch::LoadSoundfileBuffer {
+                var,
+                chan,
+                part,
+                idx,
+                typ,
+            } => {
+                self.emit_soundfile_field_ptr(&var, SOUNDFILE_BUFFERS_OFFSET, function)?;
+                self.lower_index_offset(chan, &FirType::Ptr(Box::new(typ.clone())), function)?;
+                function.instruction(&Instruction::I32Add);
+                function.instruction(&Instruction::I32Load(memarg(0)));
+
+                self.emit_soundfile_field_ptr(&var, SOUNDFILE_FRAME_OFFSET_OFFSET, function)?;
+                self.lower_index_offset(part, &FirType::Int32, function)?;
+                function.instruction(&Instruction::I32Add);
+                function.instruction(&Instruction::I32Load(memarg(0)));
+
+                self.lower_expr(idx, function)?;
+                self.emit_cast_if_needed(
+                    &self.store.value_type(idx).ok_or_else(|| {
+                        WasmBackendError::new(
+                            WasmBackendErrorCode::UnsupportedFirNode,
+                            format!("missing idx value type for soundfile buffer load `{var}`"),
+                        )
+                    })?,
+                    ValType::I32,
+                    function,
+                )?;
+                function.instruction(&Instruction::I32Add);
+                function.instruction(&Instruction::I32Const(elem_size_bytes(&typ, self.options)?));
+                function.instruction(&Instruction::I32Mul);
+                function.instruction(&Instruction::I32Add);
+                function.instruction(&load_instruction_for_type(&typ, self.options)?);
+                Ok(())
+            }
             FirMatch::Cast { typ, value } => {
                 let src_ty = self.store.value_type(value).ok_or_else(|| {
                     WasmBackendError::new(
@@ -1606,6 +1695,25 @@ impl ComputeSubsetLowerer<'_> {
                 format!("compute subset struct field `{name}` not found in WASM layout"),
             )
         })
+    }
+
+    /// Pushes the pointer stored in one DSP `Soundfile*` field, then follows one
+    /// field pointer inside the flattened runtime `Soundfile` struct.
+    fn emit_soundfile_field_ptr(
+        &mut self,
+        var: &str,
+        soundfile_field_offset: u32,
+        function: &mut Function,
+    ) -> Result<(), WasmBackendError> {
+        let field = self.struct_field(var)?;
+        function.instruction(&Instruction::LocalGet(0));
+        function.instruction(&Instruction::I32Const(field.offset as i32));
+        function.instruction(&Instruction::I32Add);
+        function.instruction(&Instruction::I32Load(memarg(0)));
+        function.instruction(&Instruction::I32Const(soundfile_field_offset as i32));
+        function.instruction(&Instruction::I32Add);
+        function.instruction(&Instruction::I32Load(memarg(0)));
+        Ok(())
     }
 
     /// Emits an explicit numeric conversion when FIR and storage types differ.

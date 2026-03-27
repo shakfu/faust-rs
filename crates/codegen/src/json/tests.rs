@@ -180,3 +180,40 @@ fn json_builder_omits_widget_index_when_no_offset_resolver_is_available() {
     assert!(rendered.contains("\"address\":\"/GainBias/gain\""));
     assert!(!rendered.contains("\"index\":"));
 }
+
+#[test]
+fn json_description_canonicalizes_soundfile_urls_for_faustwasm() {
+    let json = JsonDescription {
+        name: "soundfile".to_owned(),
+        filename: None,
+        version: None,
+        compile_options: None,
+        library_list: Vec::new(),
+        include_pathnames: Vec::new(),
+        size: None,
+        inputs: 0,
+        outputs: 1,
+        sr_index: None,
+        meta: Vec::new(),
+        ui: vec![super::JsonUiItem::Widget(super::JsonWidget {
+            typ: "soundfile",
+            label: "Drone_1".to_owned(),
+            varname: "fSound0".to_owned(),
+            shortname: "Drone_1".to_owned(),
+            address: "/DroneLAN/Drone_1".to_owned(),
+            index: Some(4),
+            meta: Vec::new(),
+            range: None,
+            soundfile_url: Some(
+                "{'Alonepad_reverb_stereo_instru1.flac'; 'Dronepad_test_stereo_instru1.flac'}"
+                    .to_owned(),
+            ),
+        })],
+    }
+    .render();
+
+    assert!(json.contains(
+        "\"url\":\"{-Alonepad_reverb_stereo_instru1.flac-;-Dronepad_test_stereo_instru1.flac-}\""
+    ));
+    assert!(!json.contains("'Dronepad_test_stereo_instru1.flac"));
+}
