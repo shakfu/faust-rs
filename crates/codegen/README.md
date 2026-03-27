@@ -16,6 +16,7 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
                                                                 → .fbc bytecode
                                                                 → native C++ (AOT from .fbc)
                                                                 → Cranelift JIT
+                                                                → WASM binary + JSON
                                                                 → … (scaffolded)
 ```
 
@@ -27,6 +28,7 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
 | `backends::cpp` | `compiler/generator/cpp/` |
 | `backends::interp` | `compiler/generator/interpreter/` |
 | `backends::cranelift` | *(new — no C++ equivalent)* |
+| `backends::wasm` | `compiler/generator/wasm/` + `code_container.hh` JSON path |
 | Other backends | `compiler/generator/<backend>/` *(planned)* |
 
 ---
@@ -40,6 +42,7 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
 | `interp` | ✅ Implemented | `generate_interp_module` |
 | `interp::fbc_to_cpp` | ✅ Implemented | `generate_cpp_from_fbc` |
 | `cranelift` | 🔧 Bring-up | `generate_cranelift_module` |
+| `wasm` | 🔧 Bring-up | `generate_wasm_module` |
 | `cmajor` | 🗂 Scaffolded | — |
 | `codebox` | 🗂 Scaffolded | — |
 | `csharp` | 🗂 Scaffolded | — |
@@ -51,7 +54,6 @@ parser → boxes → eval → propagate → signals → transform → fir → [c
 | `rust` | 🗂 Scaffolded | — |
 | `sdf3` | 🗂 Scaffolded | — |
 | `vhdl` | 🗂 Scaffolded | — |
-| `wasm` | 🗂 Scaffolded | — |
 
 ---
 
@@ -268,6 +270,96 @@ let jit = generate_cranelift_module(&store, root_id, &opts)?;
 
 ---
 
+### WASM backend — `backends::wasm`
+
+Lowers a FIR module to a binary `.wasm` artifact plus the matched companion
+Faust JSON description consumed by web-facing runtimes. The backend preserves
+the canonical exported DSP entry points (`init`, `compute`, `instance*`,
+`getNumInputs`, `getNumOutputs`, `getSampleRate`, `getParamValue`,
+`setParamValue`) and threads UI metadata through the same runtime memory
+layout used by the generated module.
+
+```rust
+use codegen::backends::wasm::{WasmOptions, generate_wasm_module};
+
+let opts = WasmOptions {
+    double_precision: false,
+    ..Default::default()
+};
+let wasm = generate_wasm_module(&store, root_id, &opts)?;
+
+std::fs::write("mydsp.wasm", &wasm.wasm_binary)?;
+std::fs::write("mydsp.json", &wasm.dsp_json)?;
+```
+
+For callers that already know source-level provenance to embed in the JSON
+companion:
+
+```rust
+use codegen::backends::wasm::{
+    WasmJsonContext, WasmOptions, generate_wasm_module_with_context,
+};
+
+let wasm = generate_wasm_module_with_context(
+    &store,
+    root_id,
+    &WasmOptions::default(),
+    &WasmJsonContext {
+        filename: Some("mydsp.dsp".to_owned()),
+        compile_options: Some("-lang wasm".to_owned()),
+        ..Default::default()
+    },
+)?;
+```
+
+#### Runtime contract
+
+`WasmModule::wasm_binary`, `WasmModule::dsp_json`, and
+`WasmModule::memory_layout` describe the same module instance and must be kept
+together. In particular:
+
+- JSON widget `index` values are raw byte offsets into the runtime prefix.
+- `getParamValue(dsp, index)` / `setParamValue(dsp, index, value)` consume
+  those exact offsets.
+- JSON `size` matches the runtime prefix size before the audio I/O zone.
+- When persisting the backend output, write the `.wasm` and `.json` from the
+  same compilation result.
+
+#### Memory layout
+
+`backends::wasm::layout::WasmMemoryLayout` exposes the current linear-memory
+contract shared by code generation and companion JSON:
+
+- static tables first,
+- mutable DSP/global fields next,
+- then the I/O zone / audio heap start,
+- then the embedded JSON segment.
+
+This is the source of truth for exported UI offsets and host-side parameter
+access.
+
+| Item | Description |
+|---|---|
+| `WasmOptions` | `double_precision`, `emit_wat`, `memory_pages`, `internal_memory` |
+| `WasmJsonContext` | JSON-only provenance: `filename`, `version`, `compile_options`, include/library lists, top-level metadata |
+| `WasmModule` | `wasm_binary`, `wat_text`, `dsp_json`, `memory_layout` |
+| `generate_wasm_module` | `(&FirStore, FirId, &WasmOptions) -> Result<WasmModule, WasmBackendError>` |
+| `generate_wasm_module_with_context` | Same as above, plus `&WasmJsonContext` |
+| `WasmBackendError` | Codes `FRS-CGEN-WASM-0001..0005` |
+| `WasmMemoryLayout` | Runtime prefix / I/O zone / JSON placement descriptor |
+
+CLI entry points live in `compiler`:
+
+```sh
+# Emit binary WASM (+ companion JSON next to the output path)
+cargo run -p compiler -- --lang wasm my.dsp -o mydsp.wasm
+
+# Emit WAST text from the same backend
+cargo run -p compiler -- --lang wast my.dsp -o mydsp.wat
+```
+
+---
+
 ### Fixtures — `fixtures`
 
 Shared FIR modules for backend-agnostic parity testing. All backends are
@@ -302,4 +394,4 @@ otherwise empty. They reserve a place in the roadmap and prevent accidental
 namespace collisions as parity work proceeds.
 
 `cmajor` · `codebox` · `csharp` · `dlang` · `jax` · `jsfx` · `julia` ·
-`llvm` · `rust` · `sdf3` · `vhdl` · `wasm`
+`llvm` · `rust` · `sdf3` · `vhdl`

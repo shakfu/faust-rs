@@ -30,11 +30,18 @@ Top-level compiler facade.  Wires all pipeline stages together behind a single
 | `compile_source_to_interp[_with_lane]` | `.fbc` bytecode string |
 | `compile_file_to_interp[_with_lane]` | `.fbc` bytecode string |
 | `compile_file_default_to_interp[_with_lane]` | `.fbc` bytecode string |
+| `compile_source_to_wasm[_with_lane]` | `WasmModule` (`.wasm` + companion JSON) |
+| `compile_file_to_wasm[_with_lane]` | `WasmModule` (`.wasm` + companion JSON) |
+| `compile_file_default_to_wasm[_with_lane]` | `WasmModule` (`.wasm` + companion JSON) |
+| `compile_wasm_artifact` | Owned `WasmArtifactBundle` |
+| `compile_file_to_wasm_artifact[_with_lane]` | Owned `WasmArtifactBundle` |
+| `compile_file_default_to_wasm_artifact` | Owned `WasmArtifactBundle` |
+| `compile_source_to_json[_with_lane]` | Strict Faust JSON string |
 
 ## Pipeline
 
 ```
-parse → eval → propagate → [optional signal→FIR] → codegen (C / C++ / .fbc)
+parse → eval → propagate → [optional signal→FIR] → codegen (C / C++ / .fbc / WASM / JSON)
 ```
 
 Two lanes coexist to de-risk migration:
@@ -49,4 +56,4 @@ Two lanes coexist to de-risk migration:
 - Provide one orchestrator type (`Compiler`) for file-based compilation.
 - Aggregate typed stage errors into one top-level `CompilerError`.
 - Provide test/golden-oriented helper outputs (box dump, signal dump, FIR dump).
-- Route backend generation to C, C++, or interpreter bytecode emitters with consistent options.
+- Route backend generation to C, C++, interpreter bytecode, WASM/JSON artifacts, and strict JSON emitters with consistent options.

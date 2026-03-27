@@ -671,7 +671,7 @@ impl Compiler {
     }
 
     /// Parses + evaluates + propagates one source, then emits a WASM module
-    /// scaffold.
+    /// plus its matched companion JSON.
     ///
     /// This API defaults to [`SignalFirLane::TransformFastLane`] rather than
     /// [`SignalFirLane::LegacyBridge`], because the WASM/JSON-facing artifact
@@ -935,7 +935,7 @@ impl Compiler {
     }
 
     /// Parses + evaluates + propagates one file, then emits a WASM module
-    /// scaffold through the selected signal->FIR lane.
+    /// plus its matched companion JSON through the selected signal->FIR lane.
     pub fn compile_file_to_wasm(
         &self,
         path: &Path,
