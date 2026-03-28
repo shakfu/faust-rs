@@ -53,7 +53,7 @@ type SlotEnv = AHashMap<BoxId, SigId>;
 type ControlIds = AHashMap<BoxId, ControlId>;
 
 pub const CRATE_NAME: &str = "propagate";
-const DEBRUIJN_TAG: &str = "DEBRUIJN";
+const DEBRUIJNREC_TAG: &str = "DEBRUIJNREC";
 const DEBRUIJNREF_TAG: &str = "DEBRUIJNREF";
 
 /// Stable crate identifier used in workspace-level tooling and diagnostics.
@@ -2060,7 +2060,7 @@ fn propagate_inner(
             // Tree cons-list so `lift` walks it structurally. Here we apply `liftn(..., 1)` to
             // each value individually for the same effect. Without lifting, slot_env entries
             // that contain DEBRUIJNREF nodes from an enclosing Rec would be captured by the
-            // inner DEBRUIJN binder instead of the intended outer one.
+            // inner DEBRUIJNREC binder instead of the intended outer one.
             let lifted_slot_env: SlotEnv = ctx
                 .slot_env
                 .iter()
@@ -2127,27 +2127,31 @@ fn propagate_inner(
             let mut b = SigBuilder::new(arena);
             let mut outputs: Vec<Option<SigId>> = vec![None; output_count];
 
+            // Validate index helper
+            fn to_valid_index(channel: i64, len: usize) -> Option<usize> {
+                let index = usize::try_from(channel.checked_sub(1)?).ok()?;
+                (index < len).then_some(index)
+            }
+
+            // route propagation
             for pair in route.chunks_exact(2) {
-                let src = pair[0];
-                let dst = pair[1];
-                if dst <= 0 {
-                    continue;
-                }
-                let Ok(dst_index) = usize::try_from(dst - 1) else {
+                let src_channel = pair[0];
+                let dst_channel = pair[1];
+
+                let Some(src_index) = to_valid_index(src_channel, input_count) else {
                     continue;
                 };
-                if dst_index >= output_count || src <= 0 {
-                    continue;
-                }
-                let Ok(src_index) = usize::try_from(src - 1) else {
+                let Some(dst_index) = to_valid_index(dst_channel, output_count) else {
                     continue;
                 };
-                if src_index >= input_count {
-                    continue;
-                }
-                outputs[dst_index] = Some(match outputs[dst_index] {
-                    Some(existing) => b.add(existing, inputs[src_index]),
-                    None => inputs[src_index],
+
+                // valid source and destination
+                let src_signal = inputs[src_index];
+                let dst_signal = outputs[dst_index];
+
+                outputs[dst_index] = Some(match dst_signal {
+                    Some(existing) => b.add(existing, src_signal),
+                    None => src_signal,
                 });
             }
 
@@ -2619,9 +2623,9 @@ fn lift_signals(arena: &mut TreeArena, inputs: &[SigId], memo: &mut PropagateMem
     out
 }
 
-/// Builds one recursive signal group wrapper (`DEBRUIJN(body)`).
+/// Builds one recursive signal group wrapper (`DEBRUIJNREC(body)`).
 fn debruijn_rec(arena: &mut TreeArena, body: TreeId) -> TreeId {
-    intern_tag(arena, DEBRUIJN_TAG, &[body])
+    intern_tag(arena, DEBRUIJNREC_TAG, &[body])
 }
 
 /// Builds one De Bruijn reference node (`DEBRUIJNREF(level)`).
@@ -2723,10 +2727,10 @@ fn debruijn_ref_level(arena: &TreeArena, root: TreeId) -> Option<i64> {
     tree_to_int(arena, *level_node)
 }
 
-/// Returns recursive group body when `root` is a `DEBRUIJN` node.
+/// Returns recursive group body when `root` is a `DEBRUIJNREC` node.
 fn debruijn_body(arena: &TreeArena, root: TreeId) -> Option<TreeId> {
     let (tag, children) = tag_and_children(arena, root)?;
-    if tag != DEBRUIJN_TAG {
+    if tag != DEBRUIJNREC_TAG {
         return None;
     }
     let [body] = children else {

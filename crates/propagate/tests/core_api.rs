@@ -12,7 +12,7 @@ use propagate::{
     try_build_flat_box,
 };
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
-use tlib::{NodeKind, TreeArena, TreeId};
+use tlib::{DEBRUIJNREC_TAG, NodeKind, TreeArena, TreeId};
 use ui::{ControlKind, UiGroupKind, UiMatch, UiRootOrigin, match_ui};
 
 fn parser_definition(arena: &mut TreeArena, name: TreeId, expr: TreeId) -> TreeId {
@@ -1466,7 +1466,7 @@ fn propagate_error_converts_to_structured_diagnostic_codes() {
 }
 
 fn is_debruijn_rec(arena: &TreeArena, id: TreeId) -> bool {
-    matches!(tag_name(arena, id), Some("DEBRUIJN"))
+    matches!(tag_name(arena, id), Some(DEBRUIJNREC_TAG))
 }
 
 fn debruijn_body(arena: &TreeArena, id: TreeId) -> Option<TreeId> {

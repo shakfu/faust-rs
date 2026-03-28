@@ -1,4 +1,4 @@
-//! Recursive-tree helpers (`DEBRUIJN`/`DEBRUIJNREF` and symbolic form).
+//! Recursive-tree helpers (`DEBRUIJNREC`/`DEBRUIJNREF` and symbolic form).
 //!
 //! # Source provenance (C++)
 //! - `compiler/tlib/recursive-tree.cpp` (`deBruijn2Sym`, `substitute`, `liftn`)
@@ -10,7 +10,7 @@
 //! - symbolic recursion shape -> explicit tags [`SYMREC_TAG`]/[`SYMREF_TAG`] (`adapted`)
 //!
 //! # Parity invariants
-//! - De Bruijn binder is `DEBRUIJN(body)`, reference is `DEBRUIJNREF(level)`.
+//! - De Bruijn binder is `DEBRUIJNREC(body)`, reference is `DEBRUIJNREF(level)`.
 //! - Symbolic recursion is explicit and deterministic:
 //!   - `SYMREC(var, body)`
 //!   - `SYMREF(var)`
@@ -23,8 +23,8 @@ use ahash::AHashMap;
 
 use crate::{NodeKind, TreeArena, TreeId, tree_to_int};
 
-/// Tag for one de Bruijn recursive group binder: `DEBRUIJN(body)`.
-pub const DEBRUIJN_TAG: &str = "DEBRUIJN";
+/// Tag for one canonical de Bruijn recursive group binder: `DEBRUIJNREC(body)`.
+pub const DEBRUIJNREC_TAG: &str = "DEBRUIJNREC";
 /// Tag for one de Bruijn reference payload: `DEBRUIJNREF(level)`.
 pub const DEBRUIJNREF_TAG: &str = "DEBRUIJNREF";
 /// Tag for one symbolic recursive binder: `SYMREC(var, body)`.
@@ -72,10 +72,10 @@ impl fmt::Display for RecursionError {
 
 impl Error for RecursionError {}
 
-/// Builds `DEBRUIJN(body)`.
+/// Builds `DEBRUIJNREC(body)`.
 #[must_use]
 pub fn de_bruijn_rec(arena: &mut TreeArena, body: TreeId) -> TreeId {
-    intern_tag(arena, DEBRUIJN_TAG, &[body])
+    intern_tag(arena, DEBRUIJNREC_TAG, &[body])
 }
 
 /// Builds `DEBRUIJNREF(level)`.
@@ -97,10 +97,10 @@ pub fn sym_ref(arena: &mut TreeArena, var: TreeId) -> TreeId {
     intern_tag(arena, SYMREF_TAG, &[var])
 }
 
-/// Matches `DEBRUIJN(body)`.
+/// Matches `DEBRUIJNREC(body)`.
 #[must_use]
 pub fn match_de_bruijn_rec(arena: &TreeArena, id: TreeId) -> Option<TreeId> {
-    let children = tag_children(arena, id, DEBRUIJN_TAG)?;
+    let children = tag_children(arena, id, DEBRUIJNREC_TAG)?;
     match children {
         [body] => Some(*body),
         _ => None,
@@ -150,7 +150,7 @@ pub fn match_sym_ref(arena: &TreeArena, id: TreeId) -> Option<TreeId> {
 ///
 /// Semantics mirror C++ `calcTreeAperture`:
 /// - `DEBRUIJNREF(level)` -> `level`
-/// - `DEBRUIJN(body)` -> `aperture(body) - 1`
+/// - `DEBRUIJNREC(body)` -> `aperture(body) - 1`
 /// - any other node -> `max(aperture(children))`
 #[must_use]
 pub fn de_bruijn_aperture(arena: &TreeArena, root: TreeId) -> i64 {
@@ -195,7 +195,7 @@ pub fn de_bruijn_to_sym(arena: &mut TreeArena, root: TreeId) -> Result<TreeId, R
 /// Stateful de Bruijn-to-symbolic converter.
 ///
 /// This helper mirrors the staged C++ algorithm:
-/// 1. allocate one fresh symbolic variable per encountered `DEBRUIJN(...)`
+/// 1. allocate one fresh symbolic variable per encountered `DEBRUIJNREC(...)`
 ///    binder,
 /// 2. substitute `DEBRUIJNREF(1)` in the binder body with `SYMREF(var)`,
 /// 3. recursively rebuild the result while preserving sharing via memoization.
@@ -248,7 +248,7 @@ impl<'a> Converter<'a> {
     /// Converts one node from de Bruijn form to symbolic form.
     ///
     /// Non-recursive nodes are rebuilt recursively with converted children.
-    /// `DEBRUIJN(...)` binders trigger the fresh-variable/substitute/rebuild
+    /// `DEBRUIJNREC(...)` binders trigger the fresh-variable/substitute/rebuild
     /// sequence described on [`Converter`].
     fn convert(&mut self, id: TreeId) -> Result<TreeId, RecursionError> {
         if let Some(mapped) = self.convert_memo.get(&id) {
