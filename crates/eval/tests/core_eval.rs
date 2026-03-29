@@ -406,6 +406,41 @@ fn eval_component_load_accepts_inline_environment_import_in_loaded_file() {
 }
 
 #[test]
+fn eval_library_load_accepts_inline_environment_import_in_loaded_file() {
+    let root_dir = temp_root("library_inline_environment_import");
+    let entry = root_dir.join("main.dsp");
+    let child = root_dir.join("child_lib.dsp");
+    let voice = root_dir.join("voice.lib");
+    fs::write(
+        &entry,
+        "lib = library(\"child_lib.dsp\"); process = lib.a;\n",
+    )
+    .expect("write entry");
+    fs::write(
+        &child,
+        "A = environment { import(\"voice.lib\"); }.process;\na = A;\n",
+    )
+    .expect("write child");
+    fs::write(&voice, "process = _;\n").expect("write voice");
+
+    let mut arena = TreeArena::new();
+    let child_name = arena.string_lit("child_lib.dsp");
+    let library = BoxBuilder::new(&mut arena).library(child_name);
+    let nil = arena.nil();
+    let lib_def = make_def(&mut arena, "lib", nil, library);
+    let lib_ident = make_ident(&mut arena, "lib");
+    let a_ident = make_ident(&mut arena, "a");
+    let access = BoxBuilder::new(&mut arena).access(lib_ident, a_ident);
+    let process = make_def(&mut arena, "process", nil, access);
+    let root = make_defs(&mut arena, &[lib_def, process]);
+    let ctx = EvalSourceContext::for_file(&entry, std::slice::from_ref(&root_dir));
+
+    let out = eval_process_with_source_context(&mut arena, root, ctx)
+        .expect("library should load child with inline environment import");
+    assert!(matches!(match_box(&arena, out), BoxMatch::Wire));
+}
+
+#[test]
 fn eval_process_case_supports_incremental_partial_application() {
     let mut arena = TreeArena::new();
     let one = BoxBuilder::new(&mut arena).int(1);

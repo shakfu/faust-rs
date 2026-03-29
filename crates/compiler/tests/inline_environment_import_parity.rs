@@ -89,3 +89,41 @@ fn compiler_accepts_inline_environment_import_like_cpp() {
 
     fs::remove_dir_all(root).expect("temp root should be removable");
 }
+
+/// Guards the reduced `chain.dsp` shape that originally triggered this parity
+/// work: two local environments import separate files, then `process` fans the
+/// generator output into a duplicated effect tuple.
+#[test]
+fn compiler_accepts_reduced_chain_shape_like_cpp() {
+    let root = temp_root("reduced_chain_shape");
+    let main = root.join("chain.dsp");
+    let generator = root.join("karplus.dsp");
+    let fx = root.join("freeverb.dsp");
+
+    fs::write(
+        &main,
+        concat!(
+            "GEN = environment { import(\"karplus.dsp\"); }.process;\n",
+            "FX = environment { import(\"freeverb.dsp\"); }.process;\n",
+            "process = GEN<:(FX,FX);\n",
+        ),
+    )
+    .expect("write main");
+    fs::write(&generator, "process = _;\n").expect("write generator");
+    fs::write(&fx, "process = _;\n").expect("write effect");
+
+    if let Some(cpp) = cpp_bin() {
+        cpp_accepts_file(&cpp, &main)
+            .unwrap_or_else(|e| panic!("Faust C++ should accept reduced chain shape: {e}"));
+    }
+
+    let rendered = Compiler::new()
+        .compile_file_default_to_cpp(&main, &CppOptions::default())
+        .expect("Rust compiler should accept reduced chain shape");
+    assert!(
+        rendered.contains("class mydsp"),
+        "generated C++ should contain the DSP class declaration"
+    );
+
+    fs::remove_dir_all(root).expect("temp root should be removable");
+}
