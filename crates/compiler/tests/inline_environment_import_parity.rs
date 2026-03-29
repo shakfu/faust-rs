@@ -127,3 +127,43 @@ fn compiler_accepts_reduced_chain_shape_like_cpp() {
 
     fs::remove_dir_all(root).expect("temp root should be removable");
 }
+
+/// Guards the case where the same imported file is needed in two different
+/// structural scopes: once at the top level and once transitively inside a
+/// nested local environment. Duplicate-import suppression must stay local to
+/// each scope so the top-level alias remains visible.
+#[test]
+fn compiler_keeps_top_level_imports_visible_after_nested_transitive_imports() {
+    let root = temp_root("top_level_and_nested_imports");
+    let main = root.join("main.dsp");
+    let child = root.join("child.lib");
+    let shared = root.join("shared.lib");
+
+    fs::write(
+        &main,
+        concat!(
+            "import(\"shared.lib\");\n",
+            "child = environment { import(\"child.lib\"); }.process;\n",
+            "process = val;\n",
+        ),
+    )
+    .expect("write main");
+    fs::write(&child, "import(\"shared.lib\");\nprocess = val;\n").expect("write child");
+    fs::write(&shared, "val = 1;\n").expect("write shared");
+
+    if let Some(cpp) = cpp_bin() {
+        cpp_accepts_file(&cpp, &main).unwrap_or_else(|e| {
+            panic!("Faust C++ should accept top-level and nested shared imports: {e}")
+        });
+    }
+
+    let rendered = Compiler::new()
+        .compile_file_default_to_cpp(&main, &CppOptions::default())
+        .expect("Rust compiler should keep top-level shared import visible");
+    assert!(
+        rendered.contains("class mydsp"),
+        "generated C++ should contain the DSP class declaration"
+    );
+
+    fs::remove_dir_all(root).expect("temp root should be removable");
+}

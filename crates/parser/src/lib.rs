@@ -1449,7 +1449,6 @@ struct StructuralImportExpander {
     reader: SourceReader,
     metadata_store: CompilationMetadataStore,
     used_files: Vec<PathBuf>,
-    visited_files: HashSet<PathBuf>,
     active_stack: HashSet<PathBuf>,
 }
 
@@ -1459,7 +1458,6 @@ impl StructuralImportExpander {
             reader,
             metadata_store,
             used_files: Vec::new(),
-            visited_files: HashSet::new(),
             active_stack: HashSet::new(),
         }
     }
@@ -1477,7 +1475,8 @@ impl StructuralImportExpander {
         let source_name = resolved.to_string_lossy().into_owned();
         let mut output =
             parse_program_with_origins(&source, &source_name, None, self.metadata_store.clone());
-        self.expand_imports_in_output(&mut output, resolved)?;
+        let mut expanded_in_scope = HashSet::new();
+        self.expand_imports_in_output(&mut output, resolved, &mut expanded_in_scope)?;
         output.used_files = self.used_files;
         output.compilation_metadata = self.metadata_store.snapshot();
         self.active_stack.remove(resolved);
@@ -1488,6 +1487,7 @@ impl StructuralImportExpander {
         &mut self,
         output: &mut ParseOutput,
         current_file: &Path,
+        expanded_in_scope: &mut HashSet<PathBuf>,
     ) -> Result<(), SourceReaderError> {
         let Some(root) = output.root else {
             return Ok(());
@@ -1496,6 +1496,7 @@ impl StructuralImportExpander {
             &mut output.state.arena,
             root,
             current_file,
+            expanded_in_scope,
             &mut output.errors,
             &mut output.diagnostics,
         )?;
@@ -1509,6 +1510,7 @@ impl StructuralImportExpander {
         arena: &mut TreeArena,
         mut defs: TreeId,
         current_file: &Path,
+        expanded_in_scope: &mut HashSet<PathBuf>,
         errors: &mut Vec<String>,
         diagnostics: &mut DiagnosticBundle,
     ) -> Result<TreeId, SourceReaderError> {
@@ -1537,11 +1539,15 @@ impl StructuralImportExpander {
                             });
                         }
 
-                        if !self.visited_files.contains(&resolved_import) {
+                        if expanded_in_scope.insert(resolved_import.clone()) {
                             self.note_visit(&resolved_import);
                             self.active_stack.insert(resolved_import.clone());
                             let mut imported = self.parse_single_source_file(&resolved_import)?;
-                            self.expand_imports_in_output(&mut imported, &resolved_import)?;
+                            self.expand_imports_in_output(
+                                &mut imported,
+                                &resolved_import,
+                                expanded_in_scope,
+                            )?;
                             errors.extend(imported.errors.iter().cloned());
                             diagnostics.extend(imported.diagnostics.as_slice().iter().cloned());
                             if let Some(imported_root) = imported.root {
@@ -1599,10 +1605,16 @@ impl StructuralImportExpander {
             BoxMatch::WithLocalDef(body, defs) => {
                 let body =
                     self.rewrite_nested_imports(arena, body, current_file, errors, diagnostics)?;
+                // Nested local-definition lists need their own duplicate-import
+                // suppression scope. A library imported into one local
+                // environment must not suppress the same library when it is
+                // later imported into the surrounding top-level scope.
+                let mut local_expanded = HashSet::new();
                 let defs = self.expand_definition_list_in_arena(
                     arena,
                     defs,
                     current_file,
+                    &mut local_expanded,
                     errors,
                     diagnostics,
                 )?;
@@ -1611,10 +1623,12 @@ impl StructuralImportExpander {
             BoxMatch::ModifLocalDef(body, defs) => {
                 let body =
                     self.rewrite_nested_imports(arena, body, current_file, errors, diagnostics)?;
+                let mut local_expanded = HashSet::new();
                 let defs = self.expand_definition_list_in_arena(
                     arena,
                     defs,
                     current_file,
+                    &mut local_expanded,
                     errors,
                     diagnostics,
                 )?;
@@ -1623,17 +1637,21 @@ impl StructuralImportExpander {
             BoxMatch::WithRecDef(body, defs1, defs2) => {
                 let body =
                     self.rewrite_nested_imports(arena, body, current_file, errors, diagnostics)?;
+                let mut local_expanded_1 = HashSet::new();
                 let defs1 = self.expand_definition_list_in_arena(
                     arena,
                     defs1,
                     current_file,
+                    &mut local_expanded_1,
                     errors,
                     diagnostics,
                 )?;
+                let mut local_expanded_2 = HashSet::new();
                 let defs2 = self.expand_definition_list_in_arena(
                     arena,
                     defs2,
                     current_file,
+                    &mut local_expanded_2,
                     errors,
                     diagnostics,
                 )?;
@@ -1692,7 +1710,7 @@ impl StructuralImportExpander {
 
     fn note_visit(&mut self, path: &Path) {
         let path = path.to_path_buf();
-        if self.visited_files.insert(path.clone()) {
+        if !self.used_files.iter().any(|existing| existing == &path) {
             self.used_files.push(path);
         }
     }
