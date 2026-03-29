@@ -92,6 +92,19 @@ pub enum BoxMatch<'a> {
     Environment,
     Component(BoxId),
     Library(BoxId),
+    /// Parser/import node preserving one raw `import("...")` statement.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/boxes/boxes.cpp`
+    /// - `importFile(Tree filename)`
+    /// - `isImportFile(Tree s, Tree& filename)`
+    ///
+    /// This node is intentionally distinct from `component(...)` / `library(...)`.
+    /// It survives parsing and definition normalization so later structural
+    /// import expansion can replay the C++ `SourceReader::expandList(...)`
+    /// boundary on parsed definition trees instead of depending on raw source
+    /// preprocessing.
+    ImportFile(BoxId),
     Waveform(BoxId),
     Route(BoxId, BoxId, BoxId),
     Ffunction(BoxId, BoxId, BoxId),
@@ -236,6 +249,7 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
                         },
                         BOX_COMPONENT_TAG => BoxMatch::Component(c0),
                         BOX_LIBRARY_TAG => BoxMatch::Library(c0),
+                        IMPORT_FILE_TAG => BoxMatch::ImportFile(c0),
                         BOX_WAVEFORM_TAG => BoxMatch::Waveform(c0),
                         BOX_FFUN_TAG => BoxMatch::FFun(c0),
                         BOX_CASE_TAG => BoxMatch::Case(c0),

@@ -485,6 +485,16 @@ impl<'a> BoxBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one parser/import node for `importFile` and returns its `BoxId`.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/boxes/boxes.cpp`
+    /// - `importFile(Tree filename)`
+    pub fn import_file(&mut self, filename: BoxId) -> BoxId {
+        node_import_file(self.arena, filename)
+    }
+
+    #[must_use]
     /// Builds one box node for `waveform` and returns its `BoxId`.
     pub fn waveform(&mut self, values: &[BoxId]) -> BoxId {
         node_waveform(self.arena, values)

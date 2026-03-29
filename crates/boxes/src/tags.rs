@@ -79,6 +79,7 @@ pub(crate) const BOX_METADATA_TAG: &str = "BOXMETADATA";
 pub(crate) const BOX_ENVIRONMENT_TAG: &str = "BOXENVIRONMENT";
 pub(crate) const BOX_COMPONENT_TAG: &str = "BOXCOMPONENT";
 pub(crate) const BOX_LIBRARY_TAG: &str = "BOXLIBRARY";
+pub(crate) const IMPORT_FILE_TAG: &str = "IMPORTFILE";
 pub(crate) const BOX_WAVEFORM_TAG: &str = "BOXWAVEFORM";
 pub(crate) const BOX_ROUTE_TAG: &str = "BOXROUTE";
 pub(crate) const FFUN_TAG: &str = "FFUN";

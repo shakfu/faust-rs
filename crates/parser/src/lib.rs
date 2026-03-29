@@ -158,6 +158,11 @@ impl ParseState {
     /// - one non-standard arglist -> `case` with one rule
     /// - multiple clauses -> `case` (all clauses must have the same arity and arity > 0)
     ///
+    /// Import-file nodes are preserved structurally instead of being grouped or
+    /// erased. This matches the C++ `formatDefinitions(...)` contract where
+    /// `isImportFile(...)` entries survive normalization and are only expanded
+    /// later by `SourceReader::expandList(...)`.
+    ///
     /// The grouping key is the textual definition name, so repeated parser
     /// clauses for the same function are intentionally merged even if they were
     /// not adjacent in the raw parser list. This mirrors the C++ post-parse
@@ -166,6 +171,7 @@ impl ParseState {
     #[must_use]
     pub fn format_definitions(&mut self, defs: TreeId) -> TreeId {
         let mut grouped: BTreeMap<String, (TreeId, Vec<TreeId>)> = BTreeMap::new();
+        let mut imports = Vec::new();
         let mut cursor = defs;
 
         while !self.arena.is_nil(cursor) {
@@ -174,6 +180,11 @@ impl ParseState {
                 return self.nil();
             };
             if !self.arena.is_nil(def) {
+                if matches!(match_box(&self.arena, def), boxes::BoxMatch::ImportFile(_)) {
+                    imports.push(def);
+                    cursor = self.arena.tl(cursor).unwrap_or_else(|| self.nil());
+                    continue;
+                }
                 let Some((name, payload)) = self.definition_name_and_payload(def) else {
                     self.ctx.error("invalid definition node shape");
                     return self.nil();
@@ -191,6 +202,9 @@ impl ParseState {
         }
 
         let mut out = self.nil();
+        for import in imports.iter().rev() {
+            out = self.cons(*import, out);
+        }
         for (_key, (name, variants_rev)) in grouped {
             let formatted = self.make_definition_from_variants(name, &variants_rev);
             if self.arena.is_nil(formatted) {
@@ -767,14 +781,31 @@ impl ParseState {
         }
     }
 
-    /// Records one import statement and returns `nil` statement placeholder.
+    /// Records one import statement and returns an explicit parser/import node.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/boxes/boxes.cpp`
+    /// - `importFile(Tree filename)`
+    /// - `compiler/parser/sourcereader.cpp`
+    /// - `formatDefinitions(Tree rldef)`
+    ///
+    /// Mapping status: `1:1`.
+    ///
+    /// Rust keeps `import("...")` as a structural node so later file-backed
+    /// parsing and eval flows can expand imports from parsed definition trees
+    /// like the C++ compiler, instead of depending on raw-source flattening.
     #[must_use]
     pub fn import_statement(&mut self, path_node: TreeId) -> TreeId {
         match self.string_node_text(path_node).map(str::to_owned) {
-            Some(path) => self.ctx.note_import(&path),
-            None => self.ctx.error("invalid import path literal"),
+            Some(path) => {
+                self.ctx.note_import(&path);
+                self.node_builder().import_file(path_node)
+            }
+            None => {
+                self.ctx.error("invalid import path literal");
+                self.nil()
+            }
         }
-        self.nil()
     }
 
     /// Records one `declare key value;` statement and returns `nil`.

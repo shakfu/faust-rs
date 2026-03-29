@@ -690,6 +690,12 @@ pub(crate) fn node_library(arena: &mut TreeArena, filename: BoxId) -> BoxId {
     intern_tag(arena, BOX_LIBRARY_TAG, &[filename])
 }
 
+/// Equivalent to C++ `importFile`.
+#[must_use]
+pub(crate) fn node_import_file(arena: &mut TreeArena, filename: BoxId) -> BoxId {
+    intern_tag(arena, IMPORT_FILE_TAG, &[filename])
+}
+
 /// Equivalent to C++ `boxWaveform`.
 #[must_use]
 pub(crate) fn node_waveform(arena: &mut TreeArena, values: &[BoxId]) -> BoxId {

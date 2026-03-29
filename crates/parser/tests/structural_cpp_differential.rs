@@ -70,6 +70,22 @@ fn find_definition_expr(arena: &TreeArena, mut defs: TreeId, expected: &str) -> 
     None
 }
 
+fn collect_import_files(arena: &TreeArena, mut defs: TreeId) -> Vec<String> {
+    let mut out = Vec::new();
+    while !arena.is_nil(defs) {
+        let Some(def) = arena.hd(defs) else {
+            break;
+        };
+        if let BoxMatch::ImportFile(filename) = match_box(arena, def)
+            && let Some(text) = string_like_text(arena, filename)
+        {
+            out.push(text.to_owned());
+        }
+        defs = arena.tl(defs).unwrap_or_else(|| arena.nil());
+    }
+    out
+}
+
 fn count_definitions_named(arena: &TreeArena, mut defs: TreeId, expected: &str) -> usize {
     let mut count = 0usize;
     while !arena.is_nil(defs) {
@@ -307,6 +323,68 @@ fn production_parser_import_heavy_fixture_matches_cpp_acceptance() {
     }
 
     fs::remove_dir_all(root).expect("temp root should be removable");
+}
+
+#[test]
+fn production_parser_preserves_top_level_import_file_node_before_structural_expansion() {
+    let output = parse_program(
+        "import(\"ops.lib\");\nprocess = _;\n",
+        "top_level_import_node.dsp",
+    );
+    assert!(
+        output.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        output.errors
+    );
+
+    let imports = collect_import_files(
+        &output.state.arena,
+        output.root.expect("root should be present"),
+    );
+    assert_eq!(imports, vec!["ops.lib".to_owned()]);
+    assert!(
+        find_definition_expr(
+            &output.state.arena,
+            output.root.expect("root should be present"),
+            "process"
+        )
+        .is_some(),
+        "process definition should remain present alongside import node"
+    );
+}
+
+#[test]
+fn production_parser_preserves_inline_environment_import_file_node() {
+    let output = parse_program(
+        "GEN = environment { import(\"child.dsp\"); }.process;\nprocess = GEN;\n",
+        "inline_environment_import_node.dsp",
+    );
+    assert!(
+        output.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        output.errors
+    );
+    let root = output.root.expect("root should be present");
+    let gen_expr = find_definition_expr(&output.state.arena, root, "GEN")
+        .expect("GEN definition should be present");
+    let (body, field) = match match_box(&output.state.arena, gen_expr) {
+        BoxMatch::Access(body, field) => (body, field),
+        other => panic!("expected BOXACCESS for GEN, got {other:?}"),
+    };
+    assert!(matches!(
+        match_box(&output.state.arena, field),
+        BoxMatch::Ident("process")
+    ));
+    let (env_body, defs) = match match_box(&output.state.arena, body) {
+        BoxMatch::WithLocalDef(env_body, defs) => (env_body, defs),
+        other => panic!("expected BOXWITHLOCALDEF, got {other:?}"),
+    };
+    assert!(matches!(
+        match_box(&output.state.arena, env_body),
+        BoxMatch::Environment
+    ));
+    let imports = collect_import_files(&output.state.arena, defs);
+    assert_eq!(imports, vec!["child.dsp".to_owned()]);
 }
 
 #[test]
