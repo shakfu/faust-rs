@@ -7,10 +7,12 @@
 use std::fs;
 use std::path::PathBuf;
 
+use boxes::{BoxMatch, dump_box, match_box};
 use parser::{
-    CompilationMetadataKey, SourceReaderError, parse_file_with_imports, parse_minimal,
-    parse_program,
+    CompilationMetadataKey, CompilationMetadataStore, SourceReaderError, VirtualSourceMap,
+    parse_file_with_imports, parse_minimal, parse_program, parse_program_with_imports_and_metadata,
 };
+use tlib::{TreeArena, TreeId};
 
 fn make_temp_root(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -25,6 +27,31 @@ fn make_temp_root(name: &str) -> PathBuf {
     ));
     fs::create_dir_all(&path).expect("temp root should be created");
     path
+}
+
+fn list_head(arena: &TreeArena, list: TreeId) -> TreeId {
+    arena.hd(list).expect("list must be non-empty")
+}
+
+fn definition_name(arena: &TreeArena, def: TreeId) -> Option<&str> {
+    match match_box(arena, list_head(arena, def)) {
+        BoxMatch::Ident(text) => Some(text),
+        _ => None,
+    }
+}
+
+fn count_definitions_named(arena: &TreeArena, mut defs: TreeId, expected: &str) -> usize {
+    let mut count = 0usize;
+    while !arena.is_nil(defs) {
+        let Some(def) = arena.hd(defs) else {
+            break;
+        };
+        if definition_name(arena, def) == Some(expected) {
+            count = count.saturating_add(1);
+        }
+        defs = arena.tl(defs).unwrap_or_else(|| arena.nil());
+    }
+    count
 }
 
 #[test]
@@ -225,4 +252,109 @@ fn parse_file_with_imports_keeps_remote_urls_out_of_scope() {
     }
 
     fs::remove_dir_all(root).expect("temp root should be removable");
+}
+
+#[test]
+fn parse_program_with_imports_deduplicates_transitive_virtual_imports() {
+    let bundle = VirtualSourceMap::new([
+        (
+            PathBuf::from("stdfaust.lib"),
+            "import(\"maths.lib\");\nimport(\"osc.lib\");\n".to_owned(),
+        ),
+        (PathBuf::from("maths.lib"), "PI = 3.14;\n".to_owned()),
+        (
+            PathBuf::from("osc.lib"),
+            "import(\"maths.lib\");\nfreq = PI;\n".to_owned(),
+        ),
+    ]);
+
+    let out = parse_program_with_imports_and_metadata(
+        "import(\"stdfaust.lib\");\nprocess = freq;\n",
+        "main.dsp",
+        &[],
+        &bundle,
+        CompilationMetadataStore::new("main.dsp"),
+    )
+    .expect("virtual import parse should succeed");
+    assert!(
+        out.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        out.errors
+    );
+
+    let root = out.root.expect("root should be present");
+    assert_eq!(
+        count_definitions_named(&out.state.arena, root, "PI"),
+        1,
+        "transitively re-imported virtual definitions should be expanded only once"
+    );
+    assert_eq!(
+        out.used_files,
+        vec![
+            PathBuf::from("main.dsp"),
+            PathBuf::from("stdfaust.lib"),
+            PathBuf::from("maths.lib"),
+            PathBuf::from("osc.lib"),
+        ],
+        "virtual-source used_files order should follow structural import visitation"
+    );
+}
+
+#[test]
+fn parse_program_with_imports_treats_inline_and_multiline_local_imports_equivalently() {
+    let bundle = VirtualSourceMap::new([(PathBuf::from("child.lib"), "process = _;\n".to_owned())]);
+
+    let inline = parse_program_with_imports_and_metadata(
+        "GEN = environment { import(\"child.lib\"); }.process;\nprocess = GEN;\n",
+        "inline_main.dsp",
+        &[],
+        &bundle,
+        CompilationMetadataStore::new("inline_main.dsp"),
+    )
+    .expect("inline parse should succeed");
+    let multiline = parse_program_with_imports_and_metadata(
+        "GEN = environment {\nimport(\"child.lib\");\n}.process;\nprocess = GEN;\n",
+        "multiline_main.dsp",
+        &[],
+        &bundle,
+        CompilationMetadataStore::new("multiline_main.dsp"),
+    )
+    .expect("multiline parse should succeed");
+
+    assert!(
+        inline.errors.is_empty(),
+        "unexpected inline parse errors: {:?}",
+        inline.errors
+    );
+    assert!(
+        multiline.errors.is_empty(),
+        "unexpected multiline parse errors: {:?}",
+        multiline.errors
+    );
+
+    let inline_dump = dump_box(
+        &inline.state.arena,
+        inline.root.expect("inline root should be present"),
+    );
+    let multiline_dump = dump_box(
+        &multiline.state.arena,
+        multiline.root.expect("multiline root should be present"),
+    );
+    assert_eq!(
+        inline_dump, multiline_dump,
+        "inline and multiline local imports should expand to the same structural tree"
+    );
+    assert_eq!(
+        inline.used_files,
+        vec![PathBuf::from("inline_main.dsp"), PathBuf::from("child.lib")],
+        "inline used_files should include entry then imported local source"
+    );
+    assert_eq!(
+        multiline.used_files,
+        vec![
+            PathBuf::from("multiline_main.dsp"),
+            PathBuf::from("child.lib")
+        ],
+        "multiline used_files should include entry then imported local source"
+    );
 }
