@@ -1423,13 +1423,11 @@ fn eval_case_pattern_var_lookup_stops_at_barrier_scope() {
 #[test]
 fn eval_process_preserves_tupled_higher_order_locals_for_case_matching() {
     let source = r#"
-        import("stdfaust.lib");
-        wd = library("wdmodels.lib");
         foo((a, b)) = 123;
         process = foo((res1, res2))
         with {
-            res1(i) = wd.resistor(i, 1000);
-            res2(i) = wd.resistor(i, 2000);
+            res1(i) = i;
+            res2(i) = i + 1;
         };
     "#;
     let parsed = parse_program(source, "<memory>");

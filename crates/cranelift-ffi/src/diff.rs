@@ -9,6 +9,7 @@ mod tests {
     use std::ffi::{CStr, CString, c_char, c_void};
     use std::io::BufReader;
     use std::path::{Path, PathBuf};
+    use std::thread;
 
     use codegen::backends::interp::{FbcDspInstance, InterpOptions, read_fbc};
     use compiler::{Compiler, SignalFirLane};
@@ -37,6 +38,19 @@ mod tests {
             .join("../..")
             .canonicalize()
             .expect("workspace root")
+    }
+
+    fn run_with_large_stack<T>(f: impl FnOnce() -> T + Send + 'static) -> T
+    where
+        T: Send + 'static,
+    {
+        thread::Builder::new()
+            .name("cranelift-runtime-diff".to_owned())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(f)
+            .expect("spawn cranelift runtime diff worker thread")
+            .join()
+            .expect("cranelift runtime diff worker thread should finish")
     }
 
     fn generate_impulse_inputs(num_inputs: usize, total_samples: usize) -> Vec<Vec<f32>> {
@@ -271,32 +285,39 @@ mod tests {
 
     #[test]
     fn cranelift_interp_runtime_diff_smoke_corpus() {
-        let _guard = crate::test_serial_guard();
-        let root = workspace_root();
-        // `rep_38_sine_phasor` remains excluded from this strict differential
-        // smoke set until Cranelift stateful-loop parity is completed.
-        let cases = [
-            root.join("tests/corpus/rep_01_passthrough.dsp"),
-            root.join("tests/corpus/rep_07_nonlinear_clip.dsp"),
-            root.join("tests/corpus/rep_60_counter_rem.dsp"),
-            root.join("tests/corpus/rep_61_fmin_sr.dsp"),
-            root.join("tests/corpus/rep_62_select2_trigger.dsp"),
-            root.join("tests/corpus/rep_63_rwtable.dsp"),
-            root.join("tests/corpus/rep_64_dynamic_rem.dsp"),
-            root.join("tests/corpus/rep_65_fabs_trigger.dsp"),
-        ];
-        for case in &cases {
-            let interp = run_interp_outputs(case).unwrap_or_else(|e| {
-                panic!("interp backend runtime failed for {}: {e}", case.display())
-            });
-            let cranelift = run_cranelift_outputs(case).unwrap_or_else(|e| {
-                panic!(
-                    "cranelift backend runtime failed for {}: {e}",
-                    case.display()
-                )
-            });
-            assert_outputs_close(case, &interp, &cranelift);
-        }
+        run_with_large_stack(|| {
+            let _guard = crate::test_serial_guard();
+            let root = workspace_root();
+            // This corpus drives deep compiler recursion during the interpreter
+            // side of the differential run, so execute it on an explicitly
+            // larger stack instead of depending on the default test-thread size.
+            //
+            // `rep_38_sine_phasor` remains excluded from this strict
+            // differential smoke set until Cranelift stateful-loop parity is
+            // completed.
+            let cases = [
+                root.join("tests/corpus/rep_01_passthrough.dsp"),
+                root.join("tests/corpus/rep_07_nonlinear_clip.dsp"),
+                root.join("tests/corpus/rep_60_counter_rem.dsp"),
+                root.join("tests/corpus/rep_61_fmin_sr.dsp"),
+                root.join("tests/corpus/rep_62_select2_trigger.dsp"),
+                root.join("tests/corpus/rep_63_rwtable.dsp"),
+                root.join("tests/corpus/rep_64_dynamic_rem.dsp"),
+                root.join("tests/corpus/rep_65_fabs_trigger.dsp"),
+            ];
+            for case in &cases {
+                let interp = run_interp_outputs(case).unwrap_or_else(|e| {
+                    panic!("interp backend runtime failed for {}: {e}", case.display())
+                });
+                let cranelift = run_cranelift_outputs(case).unwrap_or_else(|e| {
+                    panic!(
+                        "cranelift backend runtime failed for {}: {e}",
+                        case.display()
+                    )
+                });
+                assert_outputs_close(case, &interp, &cranelift);
+            }
+        });
     }
 
     #[test]

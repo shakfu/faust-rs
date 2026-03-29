@@ -1,6 +1,6 @@
 # Current Faust Source Subset Supported by `faust-rs`
 
-Last updated: 2026-03-27
+Last updated: 2026-03-29
 
 Status: living document
 
@@ -43,10 +43,16 @@ This snapshot is based on:
   - `crates/transform/src/signal_prepare.rs`
   - `crates/transform/src/signal_fir/mod.rs`
   - `crates/transform/src/signal_fir/module.rs`
-- fresh local status scans run on 2026-03-24 (re-run to reflect all corpus additions
-  through the current commit):
+- fresh local status scans run on 2026-03-24 (kept as the corpus/backend-count
+  baseline for this snapshot):
   - `cargo run -p xtask -- corpus-status-report`
   - `cargo run -p xtask -- backend-full-corpus-diff-report`
+- follow-up front-end parity fixes landed on 2026-03-29 and reviewed against:
+  - `crates/parser/src/lib.rs`
+  - `crates/eval/src/lib.rs`
+  - `crates/eval/tests/core_eval.rs`
+  - `crates/compiler/tests/inline_environment_import_parity.rs`
+  - `porting/journal/2026-03-29.md`
 
 The corresponding generated reports are:
 
@@ -160,7 +166,9 @@ prototype subset. On the tracked corpus, it includes:
 - lambda abstraction and application,
 - `case` / pattern-based evaluation paths,
 - metadata and `declare`,
-- local-file imports,
+- local-file imports, including structural expansion from parsed
+  `importFile(...)` nodes,
+- inline `environment { import(...) }` forms in the tracked parity scope,
 - UI widgets and UI groups,
 - modulation-bearing source programs,
 - waveform and table forms,
@@ -175,6 +183,11 @@ Stated differently:
 - the main residual front-end caveat is not basic language acceptance anymore,
   but long-tail parity outside the exercised corpus and some deferred tooling
   concerns such as remote-import parity.
+- parser entry points still differ intentionally:
+  - `parse_program(...)` parses one in-memory source unit and does **not**
+    perform filesystem import resolution,
+  - structural import resolution belongs to `parse_file_with_imports(...)` and
+    `parse_program_with_imports_and_metadata(...)`.
 
 ## 5.2 End-to-end backend subset currently supported
 
@@ -318,6 +331,10 @@ Relative to the tracked corpus and the current production-oriented route:
   - lambda/closure forms (first-class `boxClosure` node)
   - modulation
   - local imports
+  - structural import expansion from parsed `importFile(...)` nodes, including
+    inline `environment { import(...) }` cases in the tracked parity scope
+  - top-level imports now remain visible after nested transitive imports;
+    duplicate-import suppression is scoped per structural definition expansion
   - metadata
 - multi-output recursion groups (`SIGPROJ index > 0`) are now supported,
   enabling `freeverb`, `Birds.dsp`, and any `~ _`-based multi-output feedback,
