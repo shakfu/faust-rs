@@ -71,11 +71,17 @@ Reference C++ sources:
 
 - Scope:
   - validate import behavior on larger import graphs and stdlib-heavy fixtures.
+  - migrate the production import path toward structural C++ parity:
+    preserve import nodes through parse and expand them from the parsed
+    definition tree instead of from raw source text.
   - keep explicit status for `sourcefetcher`/`enrobage` (implemented or deferred by design with rationale).
 - Deliverables:
   - updated `phase-3-parser-adjacent-modules-status-en.md`.
+  - implementation progress tracked against
+    `porting/parser-import-structural-cpp-parity-plan-2026-03-29-en.md`.
 - Pass criteria:
   - import cycle/unresolved/import-graph tests pass deterministically.
+  - inline and multiline import placement are semantically equivalent.
   - documented lifecycle status (`1:1`, `adapted`, or `deferred`) for adjacent modules.
 
 ### Step 6: Expand Differential Validation to Full Corpus

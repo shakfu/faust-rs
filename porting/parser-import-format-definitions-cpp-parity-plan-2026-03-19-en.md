@@ -2,6 +2,14 @@
 
 Date: 2026-03-19
 
+Superseded in implementation detail by:
+
+- `porting/parser-import-structural-cpp-parity-plan-2026-03-29-en.md`
+
+This document remains useful as historical context for the earlier
+`formatDefinitions(...)` / loaded-source boundary diagnosis, but the newer plan
+defines the current parity target and migration sequence.
+
 ## Goal
 
 Replace the current Rust import-handling divergence with a parser/eval flow that
