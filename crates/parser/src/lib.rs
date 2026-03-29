@@ -29,6 +29,7 @@ use lrpar::lrpar_mod;
 use lrpar::{LexError, Lexeme, Lexer, NonStreamingLexer};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
 use tlib::{NodeKind, TreeArena, TreeId};
 
 pub mod context;
@@ -202,7 +203,7 @@ impl ParseState {
         }
 
         let mut out = self.nil();
-        for import in imports.iter().rev() {
+        for import in &imports {
             out = self.cons(*import, out);
         }
         for (_key, (name, variants_rev)) in grouped {
@@ -1304,8 +1305,9 @@ pub fn parse_program_with_metadata(
     parse_program_with_origins(input, source_file, None, metadata_store)
 }
 
-/// Parses one in-memory source after recursively expanding `import("...")`
-/// against explicit search paths plus an optional in-memory source bundle.
+/// Parses one in-memory source and expands imports structurally from the parsed
+/// definition tree against explicit search paths plus an optional in-memory
+/// source bundle.
 ///
 /// This is the source-string counterpart of
 /// [`parse_file_with_imports_and_metadata`]. It is primarily used by embedded
@@ -1319,20 +1321,50 @@ pub fn parse_program_with_imports_and_metadata(
     virtual_sources: &VirtualSourceMap,
     metadata_store: CompilationMetadataStore,
 ) -> Result<ParseOutput, SourceReaderError> {
-    let mut reader =
-        SourceReader::with_virtual_sources(search_paths.to_vec(), virtual_sources.clone());
-    let expanded = reader.read_memory_with_origins(source_file, input)?;
-    let used_files = reader.used_files().to_vec();
-    let mut output = parse_program_with_origins(
-        &expanded.text,
-        source_file,
-        Some(expanded.line_origins),
-        metadata_store,
-    );
-    output.used_files = used_files;
-    Ok(output)
+    let bundle = virtual_sources.with_source(PathBuf::from(source_file), input.to_owned());
+    let reader = SourceReader::with_virtual_sources(search_paths.to_vec(), bundle);
+    StructuralImportExpander::new(reader, metadata_store).parse_entry(Path::new(source_file))
 }
 
+/// Reads a source file, parses each imported file as its own unit, then expands
+/// import-file nodes structurally like the C++ compiler.
+///
+/// This convenience entry point creates a fresh top-level metadata store whose
+/// master source is the canonicalized entry path. Imported files encountered
+/// during structural expansion will therefore contribute scoped metadata
+/// entries relative to that master.
+pub fn parse_file_with_imports(
+    path: &std::path::Path,
+    search_paths: &[std::path::PathBuf],
+) -> Result<ParseOutput, SourceReaderError> {
+    parse_file_with_imports_and_metadata(
+        path,
+        search_paths,
+        CompilationMetadataStore::new(
+            &path
+                .canonicalize()
+                .unwrap_or_else(|_| path.to_path_buf())
+                .to_string_lossy(),
+        ),
+    )
+}
+
+/// Reads a source file, parses imported files as separate parse units, then
+/// expands import-file nodes structurally using the provided shared top-level
+/// metadata store.
+///
+/// This is the file-backed parser entry point used by later compilation stages
+/// that need top-level metadata continuity across parse/eval boundaries. The
+/// returned [`ParseOutput::used_files`] preserves the deterministic recursive
+/// structural import visitation order.
+pub fn parse_file_with_imports_and_metadata(
+    path: &std::path::Path,
+    search_paths: &[std::path::PathBuf],
+    metadata_store: CompilationMetadataStore,
+) -> Result<ParseOutput, SourceReaderError> {
+    let reader = SourceReader::new(search_paths.to_vec());
+    StructuralImportExpander::new(reader, metadata_store).parse_entry(path)
+}
 /// Parses one in-memory source while preserving external line origins.
 fn parse_program_with_origins(
     input: &str,
@@ -1397,65 +1429,289 @@ fn parse_program_with_origins(
     }
 }
 
+/// Production structural import expander matching the C++ parser boundary.
+///
+/// Source provenance (C++):
+/// - `compiler/parser/sourcereader.cpp`
+/// - `SourceReader::getList(...)`
+/// - `SourceReader::expandList(...)`
+/// - `SourceReader::expandRec(...)`
+///
+/// Mapping status: `adapted`.
+///
+/// C++ parses each file into a definition list containing explicit
+/// `importFile(...)` nodes, then expands those nodes structurally. Rust uses
+/// the same semantic boundary here while keeping a Rust-native `ParseOutput`
+/// transport and `TreeArena::clone_subtree_from(...)` to move imported
+/// definitions across per-file arenas.
+#[derive(Debug)]
+struct StructuralImportExpander {
+    reader: SourceReader,
+    metadata_store: CompilationMetadataStore,
+    used_files: Vec<PathBuf>,
+    visited_files: HashSet<PathBuf>,
+    active_stack: HashSet<PathBuf>,
+}
+
+impl StructuralImportExpander {
+    fn new(reader: SourceReader, metadata_store: CompilationMetadataStore) -> Self {
+        Self {
+            reader,
+            metadata_store,
+            used_files: Vec::new(),
+            visited_files: HashSet::new(),
+            active_stack: HashSet::new(),
+        }
+    }
+
+    fn parse_entry(self, entry: &Path) -> Result<ParseOutput, SourceReaderError> {
+        let resolved = self.reader.resolve_entry_source_path(entry)?;
+        self.parse_resolved_entry(&resolved)
+    }
+
+    fn parse_resolved_entry(mut self, resolved: &Path) -> Result<ParseOutput, SourceReaderError> {
+        self.note_visit(resolved);
+        self.active_stack.insert(resolved.to_path_buf());
+
+        let source = self.reader.read_source_unit(resolved)?;
+        let source_name = resolved.to_string_lossy().into_owned();
+        let mut output =
+            parse_program_with_origins(&source, &source_name, None, self.metadata_store.clone());
+        self.expand_imports_in_output(&mut output, resolved)?;
+        output.used_files = self.used_files;
+        output.compilation_metadata = self.metadata_store.snapshot();
+        self.active_stack.remove(resolved);
+        Ok(output)
+    }
+
+    fn expand_imports_in_output(
+        &mut self,
+        output: &mut ParseOutput,
+        current_file: &Path,
+    ) -> Result<(), SourceReaderError> {
+        let Some(root) = output.root else {
+            return Ok(());
+        };
+        let expanded = self.expand_definition_list_in_arena(
+            &mut output.state.arena,
+            root,
+            current_file,
+            &mut output.errors,
+            &mut output.diagnostics,
+        )?;
+        output.root = Some(expanded);
+        output.state.ctx.set_parse_result(expanded);
+        Ok(())
+    }
+
+    fn expand_definition_list_in_arena(
+        &mut self,
+        arena: &mut TreeArena,
+        mut defs: TreeId,
+        current_file: &Path,
+        errors: &mut Vec<String>,
+        diagnostics: &mut DiagnosticBundle,
+    ) -> Result<TreeId, SourceReaderError> {
+        let mut items = Vec::new();
+
+        while !arena.is_nil(defs) {
+            let Some(def) = arena.hd(defs) else {
+                break;
+            };
+            match match_box(arena, def) {
+                BoxMatch::ImportFile(filename) => {
+                    if let Some(import_name) = string_node_text_from_arena(arena, filename) {
+                        let Some(resolved_import) = self
+                            .reader
+                            .resolve_import_source_path(import_name, current_file.parent())
+                        else {
+                            return Err(SourceReaderError::UnresolvedImport {
+                                name: import_name.into(),
+                                from: current_file.to_path_buf(),
+                            });
+                        };
+
+                        if self.active_stack.contains(&resolved_import) {
+                            return Err(SourceReaderError::ImportCycle {
+                                path: resolved_import,
+                            });
+                        }
+
+                        if !self.visited_files.contains(&resolved_import) {
+                            self.note_visit(&resolved_import);
+                            self.active_stack.insert(resolved_import.clone());
+                            let mut imported = self.parse_single_source_file(&resolved_import)?;
+                            self.expand_imports_in_output(&mut imported, &resolved_import)?;
+                            errors.extend(imported.errors.iter().cloned());
+                            diagnostics.extend(imported.diagnostics.as_slice().iter().cloned());
+                            if let Some(imported_root) = imported.root {
+                                let mut imported_defs = imported_root;
+                                while !imported.state.arena.is_nil(imported_defs) {
+                                    let Some(imported_def) = imported.state.arena.hd(imported_defs)
+                                    else {
+                                        break;
+                                    };
+                                    items.push(
+                                        arena.clone_subtree_from(
+                                            &imported.state.arena,
+                                            imported_def,
+                                        ),
+                                    );
+                                    imported_defs = imported
+                                        .state
+                                        .arena
+                                        .tl(imported_defs)
+                                        .unwrap_or_else(|| imported.state.arena.nil());
+                                }
+                            }
+                            self.active_stack.remove(&resolved_import);
+                        }
+                    }
+                }
+                _ => items.push(self.rewrite_nested_imports(
+                    arena,
+                    def,
+                    current_file,
+                    errors,
+                    diagnostics,
+                )?),
+            }
+
+            defs = arena.tl(defs).unwrap_or_else(|| arena.nil());
+        }
+
+        let mut out = arena.nil();
+        for item in items.iter().rev() {
+            out = arena.cons(*item, out);
+        }
+        Ok(out)
+    }
+
+    fn rewrite_nested_imports(
+        &mut self,
+        arena: &mut TreeArena,
+        id: TreeId,
+        current_file: &Path,
+        errors: &mut Vec<String>,
+        diagnostics: &mut DiagnosticBundle,
+    ) -> Result<TreeId, SourceReaderError> {
+        match match_box(arena, id) {
+            BoxMatch::WithLocalDef(body, defs) => {
+                let body =
+                    self.rewrite_nested_imports(arena, body, current_file, errors, diagnostics)?;
+                let defs = self.expand_definition_list_in_arena(
+                    arena,
+                    defs,
+                    current_file,
+                    errors,
+                    diagnostics,
+                )?;
+                Ok(boxes::BoxBuilder::new(arena).with_local_def(body, defs))
+            }
+            BoxMatch::ModifLocalDef(body, defs) => {
+                let body =
+                    self.rewrite_nested_imports(arena, body, current_file, errors, diagnostics)?;
+                let defs = self.expand_definition_list_in_arena(
+                    arena,
+                    defs,
+                    current_file,
+                    errors,
+                    diagnostics,
+                )?;
+                Ok(boxes::BoxBuilder::new(arena).modif_local_def(body, defs))
+            }
+            BoxMatch::WithRecDef(body, defs1, defs2) => {
+                let body =
+                    self.rewrite_nested_imports(arena, body, current_file, errors, diagnostics)?;
+                let defs1 = self.expand_definition_list_in_arena(
+                    arena,
+                    defs1,
+                    current_file,
+                    errors,
+                    diagnostics,
+                )?;
+                let defs2 = self.expand_definition_list_in_arena(
+                    arena,
+                    defs2,
+                    current_file,
+                    errors,
+                    diagnostics,
+                )?;
+                Ok(boxes::BoxBuilder::new(arena).with_rec_def(body, defs1, defs2))
+            }
+            _ => {
+                let Some(node) = arena.node(id).cloned() else {
+                    return Ok(id);
+                };
+                if node.children.is_empty() {
+                    return Ok(id);
+                }
+
+                let mut rewritten = Vec::with_capacity(node.children.len());
+                let mut changed = false;
+                for child in node.children.as_slice() {
+                    let rewritten_child = self.rewrite_nested_imports(
+                        arena,
+                        *child,
+                        current_file,
+                        errors,
+                        diagnostics,
+                    )?;
+                    changed |= rewritten_child != *child;
+                    rewritten.push(rewritten_child);
+                }
+                if !changed {
+                    return Ok(id);
+                }
+
+                let new_kind = match node.kind {
+                    NodeKind::Tag(tag_id) => {
+                        let tag_name = arena
+                            .tag_name(tag_id)
+                            .expect("rewritten tag id should resolve")
+                            .to_owned();
+                        NodeKind::Tag(arena.intern_tag(&tag_name))
+                    }
+                    other => other,
+                };
+                Ok(arena.intern(new_kind, &rewritten))
+            }
+        }
+    }
+
+    fn parse_single_source_file(&self, resolved: &Path) -> Result<ParseOutput, SourceReaderError> {
+        let source = self.reader.read_source_unit(resolved)?;
+        let source_name = resolved.to_string_lossy().into_owned();
+        Ok(parse_program_with_origins(
+            &source,
+            &source_name,
+            None,
+            self.metadata_store.clone(),
+        ))
+    }
+
+    fn note_visit(&mut self, path: &Path) {
+        let path = path.to_path_buf();
+        if self.visited_files.insert(path.clone()) {
+            self.used_files.push(path);
+        }
+    }
+}
+
+fn string_node_text_from_arena(arena: &TreeArena, node: TreeId) -> Option<&str> {
+    match arena.kind(node) {
+        Some(NodeKind::StringLiteral(value)) => Some(value.as_ref()),
+        Some(NodeKind::Symbol(value)) => Some(value.as_ref()),
+        _ => None,
+    }
+}
+
 /// Parses the minimal prototype sentence `process = _;`.
 #[must_use]
 /// Minimal parser smoke-check used by tests and tooling.
 pub fn parse_minimal(input: &str) -> bool {
     let output = parse_program(input, "<memory>");
     output.root.is_some() && output.errors.is_empty()
-}
-
-/// Reads a source file through [`SourceReader`] import expansion, then parses it.
-///
-/// This convenience entry point creates a fresh top-level metadata store whose
-/// master source is the canonicalized entry path. Imported files encountered
-/// during expansion will therefore contribute scoped metadata entries relative
-/// to that master.
-pub fn parse_file_with_imports(
-    path: &std::path::Path,
-    search_paths: &[std::path::PathBuf],
-) -> Result<ParseOutput, SourceReaderError> {
-    parse_file_with_imports_and_metadata(
-        path,
-        search_paths,
-        CompilationMetadataStore::new(
-            &path
-                .canonicalize()
-                .unwrap_or_else(|_| path.to_path_buf())
-                .to_string_lossy(),
-        ),
-    )
-}
-
-/// Reads a source file through [`SourceReader`] import expansion, then parses it
-/// using the provided shared top-level metadata store.
-///
-/// This is the file-backed parser entry point used by later compilation stages
-/// that need top-level metadata continuity across parse/eval boundaries. The
-/// returned [`ParseOutput::used_files`] preserves the deterministic recursive
-/// import expansion order reported by [`SourceReader`].
-pub fn parse_file_with_imports_and_metadata(
-    path: &std::path::Path,
-    search_paths: &[std::path::PathBuf],
-    metadata_store: CompilationMetadataStore,
-) -> Result<ParseOutput, SourceReaderError> {
-    let mut reader = SourceReader::new(search_paths.to_vec());
-    let expanded = reader.read_file_with_origins(path)?;
-    let used_files = reader.used_files().to_vec();
-    let source_name = used_files
-        .first()
-        .cloned()
-        .unwrap_or_else(|| path.to_path_buf())
-        .to_string_lossy()
-        .into_owned();
-    let mut output = parse_program_with_origins(
-        &expanded.text,
-        &source_name,
-        Some(expanded.line_origins),
-        metadata_store,
-    );
-    output.used_files = used_files;
-    Ok(output)
 }
 
 /// Updates parser cursor from one lexed token, then tags `sym` as use-site at that location.

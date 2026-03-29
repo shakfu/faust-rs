@@ -326,6 +326,67 @@ fn production_parser_import_heavy_fixture_matches_cpp_acceptance() {
 }
 
 #[test]
+fn production_file_parser_expands_inline_environment_import_structurally() {
+    let root = {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "faust_rs_parser_inline_env_import_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should move forward")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).expect("temp root should be created");
+        path
+    };
+
+    let main = root.join("main.dsp");
+    let child = root.join("child.dsp");
+    fs::write(
+        &main,
+        "GEN = environment { import(\"child.dsp\"); }.process;\nprocess = GEN;\n",
+    )
+    .expect("main should be written");
+    fs::write(&child, "process = _;\n").expect("child should be written");
+
+    let output =
+        parse_file_with_imports(&main, std::slice::from_ref(&root)).expect("parse should succeed");
+    assert!(
+        output.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        output.errors
+    );
+
+    let root_defs = output.root.expect("root should be present");
+    let gen_expr = find_definition_expr(&output.state.arena, root_defs, "GEN")
+        .expect("GEN definition should be present");
+    let (body, field) = match match_box(&output.state.arena, gen_expr) {
+        BoxMatch::Access(body, field) => (body, field),
+        other => panic!("expected BOXACCESS for GEN, got {other:?}"),
+    };
+    assert!(matches!(
+        match_box(&output.state.arena, field),
+        BoxMatch::Ident("process")
+    ));
+    let (_env_body, defs) = match match_box(&output.state.arena, body) {
+        BoxMatch::WithLocalDef(env_body, defs) => (env_body, defs),
+        other => panic!("expected BOXWITHLOCALDEF, got {other:?}"),
+    };
+    assert!(
+        collect_import_files(&output.state.arena, defs).is_empty(),
+        "structural file-backed expansion should remove import-file nodes from local defs"
+    );
+    assert_eq!(
+        count_definitions_named(&output.state.arena, defs, "process"),
+        1,
+        "expanded local environment should contain imported process definition"
+    );
+
+    fs::remove_dir_all(root).expect("temp root should be removable");
+}
+
+#[test]
 fn production_parser_preserves_top_level_import_file_node_before_structural_expansion() {
     let output = parse_program(
         "import(\"ops.lib\");\nprocess = _;\n",

@@ -414,6 +414,10 @@ fn flat_node_kind(arena: &TreeArena, node: FlatBoxId) -> Result<FlatNodeKind, Fl
         BoxMatch::WithRecDef(_, _, _) => Err(flat_box_unexpected(node_id, "withrecdef")),
         BoxMatch::Component(_) => Err(flat_box_unexpected(node_id, "component")),
         BoxMatch::Library(_) => Err(flat_box_unexpected(node_id, "library")),
+        // C++ import-file nodes must be expanded away by the parser before
+        // propagation. Reaching this arm means the structural import parity
+        // contract was violated upstream.
+        BoxMatch::ImportFile(_) => Err(flat_box_unexpected(node_id, "importfile")),
         BoxMatch::Case(_) => Err(flat_box_unexpected(node_id, "case")),
         BoxMatch::PatternMatcher(_) => Err(flat_box_unexpected(node_id, "patternmatcher")),
         BoxMatch::Closure(_) => Err(flat_box_unexpected(node_id, "closure")),

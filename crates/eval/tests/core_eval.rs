@@ -379,6 +379,33 @@ fn eval_source_context_collects_top_level_metadata_from_loaded_component() {
 }
 
 #[test]
+fn eval_component_load_accepts_inline_environment_import_in_loaded_file() {
+    let root_dir = temp_root("component_inline_environment_import");
+    let entry = root_dir.join("main.dsp");
+    let child = root_dir.join("child.dsp");
+    let voice = root_dir.join("voice.lib");
+    fs::write(&entry, "process = component(\"child.dsp\");\n").expect("write entry");
+    fs::write(
+        &child,
+        "GEN = environment { import(\"voice.lib\"); }.process;\nprocess = GEN;\n",
+    )
+    .expect("write child");
+    fs::write(&voice, "process = _;\n").expect("write voice");
+
+    let mut arena = TreeArena::new();
+    let child_name = arena.string_lit("child.dsp");
+    let component = BoxBuilder::new(&mut arena).component(child_name);
+    let nil = arena.nil();
+    let process = make_def(&mut arena, "process", nil, component);
+    let root = make_defs(&mut arena, &[process]);
+    let ctx = EvalSourceContext::for_file(&entry, std::slice::from_ref(&root_dir));
+
+    let out = eval_process_with_source_context(&mut arena, root, ctx)
+        .expect("component should load child with inline environment import");
+    assert!(matches!(match_box(&arena, out), BoxMatch::Wire));
+}
+
+#[test]
 fn eval_process_case_supports_incremental_partial_application() {
     let mut arena = TreeArena::new();
     let one = BoxBuilder::new(&mut arena).int(1);

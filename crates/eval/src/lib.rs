@@ -1170,6 +1170,9 @@ fn eval_access_value(
 /// Rust reproduces the same semantic contract by:
 /// - resolving the target against the captured [`EvalSourceContext`],
 /// - parsing the loaded file through `parser::parse_file_with_imports(...)`,
+///   which now preserves `importFile(...)` nodes through parse and expands them
+///   structurally from the parsed definition tree like C++
+///   `gReader.expandList(gReader.getList(fname))`,
 /// - cloning the resulting definition subtree into the current evaluation arena,
 /// - caching the parsed source in the context for later loads in the same session,
 /// - binding the loaded definitions in a fresh environment whose source context

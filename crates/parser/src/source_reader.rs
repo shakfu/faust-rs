@@ -191,6 +191,38 @@ impl SourceReader {
         self.resolve_import_from(name, None)
     }
 
+    /// Resolves one entry path without performing recursive import expansion.
+    ///
+    /// This helper exists for the structural C++ parity path where parsing now
+    /// loads each file as its own unit and expands `importFile` nodes from the
+    /// parsed definition tree instead of from rewritten source text.
+    pub(crate) fn resolve_entry_source_path(
+        &self,
+        path: &Path,
+    ) -> Result<PathBuf, SourceReaderError> {
+        self.resolve_entry_path(path)
+    }
+
+    /// Resolves one import relative to the current importing file directory.
+    ///
+    /// The search order matches the existing C++-style `-I`-before-local-dir`
+    /// behavior used by the reader's text-expansion path.
+    pub(crate) fn resolve_import_source_path(
+        &self,
+        name: &str,
+        local_dir: Option<&Path>,
+    ) -> Option<PathBuf> {
+        self.resolve_import_from(name, local_dir)
+    }
+
+    /// Reads one source unit without recursively expanding imports.
+    ///
+    /// This is the raw file/string loading counterpart used by the parser's
+    /// structural import expansion path.
+    pub(crate) fn read_source_unit(&self, path: &Path) -> Result<String, SourceReaderError> {
+        self.read_source_text(path)
+    }
+
     /// Reads one logical in-memory source and recursively expands imports.
     pub fn read_memory_with_origins(
         &mut self,
