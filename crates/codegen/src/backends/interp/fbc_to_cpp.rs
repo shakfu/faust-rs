@@ -496,6 +496,13 @@ impl BlockComp {
         match instr.opcode {
             // ── Nop ──────────────────────────────────────────────────────
             Nop => {}
+            ForeignCallReal | ForeignCallInt | ForeignCallVoid => {
+                return Err(FbcCppError::Unsupported {
+                    opcode: instr.opcode,
+                    block_id,
+                    pc,
+                });
+            }
 
             // ── Constants ────────────────────────────────────────────────
             RealValue => {

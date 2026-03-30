@@ -15,6 +15,7 @@ members = [
   "crates/sigtype",
   "crates/transform",
   "crates/fir",
+  "crates/foreign-call",
   "crates/codegen",
   "crates/draw",
   "crates/doc",

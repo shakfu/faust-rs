@@ -103,7 +103,7 @@ fn test_write_normal_header() {
     let output = String::from_utf8(buf).unwrap();
 
     assert!(output.starts_with("interpreter_dsp_factory float\n"));
-    assert!(output.contains("file_version 8\n"));
+    assert!(output.contains("file_version 9\n"));
     assert!(output.contains("name test_dsp\n"));
     assert!(output.contains("sha_key abc123\n"));
     assert!(output.contains("opt_level 4\n"));
@@ -131,7 +131,7 @@ fn test_write_small_header() {
     let output = String::from_utf8(buf).unwrap();
 
     assert!(output.starts_with("i float\n"));
-    assert!(output.contains("f 8\n"));
+    assert!(output.contains("f 9\n"));
     assert!(output.contains("n test_dsp\n"));
 }
 

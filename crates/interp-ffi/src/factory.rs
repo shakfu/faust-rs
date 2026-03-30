@@ -16,7 +16,10 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use codegen::backends::interp::{FAUST_VERSION, read_fbc};
+use codegen::backends::interp::{
+    FAUST_VERSION, clear_foreign_functions, read_fbc, register_foreign_function,
+    unregister_foreign_function,
+};
 use compiler::{Compiler as FaustCompiler, RealType, SignalFirLane, default_import_search_paths};
 use utils::{
     FfiCompileArgs, decode_c_argv as decode_c_argv_shared, free_c_memory_c_string_only,
@@ -48,6 +51,50 @@ pub extern "C" fn getCLibFaustVersion() -> *const c_char {
     VERSION_C
         .get_or_init(|| CString::new(FAUST_VERSION).unwrap())
         .as_ptr()
+}
+
+/// Register one host foreign function for interpreter `ffunction(...)` calls.
+///
+/// This is a Rust extension over the historical interpreter C API.
+///
+/// # Safety
+/// - `name` must be a valid null-terminated C string.
+/// - `fn_ptr` must be a valid callable function address for the symbol.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn registerCInterpreterForeignFunction(
+    name: *const c_char,
+    fn_ptr: *mut c_void,
+) {
+    if name.is_null() || fn_ptr.is_null() {
+        return;
+    }
+    // SAFETY: caller provides a valid C string per the function contract.
+    let Ok(name) = unsafe { CStr::from_ptr(name) }.to_str() else {
+        return;
+    };
+    register_foreign_function(name, fn_ptr);
+}
+
+/// Unregister one previously registered host foreign function.
+///
+/// # Safety
+/// - `name` must be a valid null-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unregisterCInterpreterForeignFunction(name: *const c_char) {
+    if name.is_null() {
+        return;
+    }
+    // SAFETY: caller provides a valid C string per the function contract.
+    let Ok(name) = unsafe { CStr::from_ptr(name) }.to_str() else {
+        return;
+    };
+    unregister_foreign_function(name);
+}
+
+/// Clear all previously registered host foreign functions.
+#[unsafe(no_mangle)]
+pub extern "C" fn clearCInterpreterForeignFunctions() {
+    clear_foreign_functions();
 }
 
 // ── Bitcode serialization ─────────────────────────────────────────────────────
@@ -635,7 +682,15 @@ fn parse_ffi_compile_args(argv: &[String]) -> Result<FfiCompileArgs, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{compile_factory_from_string_fastlane, parse_ffi_compile_args};
+    use super::{
+        clearCInterpreterForeignFunctions, compile_factory_from_string_fastlane,
+        parse_ffi_compile_args, registerCInterpreterForeignFunction,
+        unregisterCInterpreterForeignFunction,
+    };
+
+    extern "C" fn ffi_interp_test_gain(x: f32) -> f32 {
+        x * 2.0
+    }
 
     #[test]
     fn parse_ffi_compile_args_accepts_i_cn_and_double() {
@@ -805,6 +860,65 @@ mod tests {
         );
 
         // Cleanup.
+        unsafe { deleteCInterpreterDSPInstance(dsp) };
+        unsafe { crate::types::free_factory(factory_ptr) };
+    }
+
+    #[test]
+    fn registered_foreign_function_executes_in_interp_ffi() {
+        use crate::instance::{
+            computeCInterpreterDSPInstance, createCInterpreterDSPInstance,
+            deleteCInterpreterDSPInstance, initCInterpreterDSPInstance,
+        };
+        use crate::types::alloc_factory;
+
+        clearCInterpreterForeignFunctions();
+        unsafe {
+            registerCInterpreterForeignFunction(
+                c"ffi_interp_test_gain".as_ptr(),
+                (ffi_interp_test_gain as *const ()).cast_mut().cast(),
+            );
+        }
+
+        let factory_any = compile_factory_from_string_fastlane(
+            "ExecForeign",
+            "process = ffunction(float ffi_interp_test_gain(float), <math.h>, \"\");",
+            &["-cn".to_owned(), "ExecForeign".to_owned()],
+        )
+        .expect("interp ffunction compilation should succeed once registered");
+
+        let factory_ptr = alloc_factory(factory_any);
+        let dsp = unsafe { createCInterpreterDSPInstance(factory_ptr) };
+        assert!(!dsp.is_null(), "instance creation must succeed");
+
+        unsafe { initCInterpreterDSPInstance(dsp, 44100) };
+
+        const FRAMES: usize = 16;
+        let input_data = [0.5_f32; FRAMES];
+        let mut output_data = vec![0.0_f32; FRAMES];
+
+        let mut input_ptr: *mut f32 = input_data.as_ptr() as *mut f32;
+        let mut output_ptr: *mut f32 = output_data.as_mut_ptr();
+
+        unsafe {
+            computeCInterpreterDSPInstance(
+                dsp,
+                FRAMES as i32,
+                &mut input_ptr as *mut *mut f32,
+                &mut output_ptr as *mut *mut f32,
+            );
+        }
+
+        assert!(
+            output_data
+                .iter()
+                .all(|&sample| (sample - 1.0).abs() < 1e-6)
+        );
+
+        unsafe {
+            unregisterCInterpreterForeignFunction(c"ffi_interp_test_gain".as_ptr());
+        }
+        clearCInterpreterForeignFunctions();
         unsafe { deleteCInterpreterDSPInstance(dsp) };
         unsafe { crate::types::free_factory(factory_ptr) };
     }

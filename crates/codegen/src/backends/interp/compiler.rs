@@ -29,6 +29,9 @@ use fir::{
 use super::bytecode::{
     BlockId, BlockStoreData, FbcBlock, FbcBlockArena, FbcInstruction, FbcUiInstruction,
 };
+use super::foreign::{
+    ForeignScalarType, ForeignSignature, is_registered_foreign_function, is_supported_signature,
+};
 use super::opcode::FbcOpcode;
 use super::real::FbcReal;
 
@@ -100,6 +103,8 @@ pub enum CompileError {
     UndeclaredVariable { name: String },
     /// A math function call references an unknown function.
     UnknownMathFunction { name: String },
+    /// A foreign function signature cannot be represented by the interpreter.
+    UnsupportedForeignFunctionSignature { name: String, description: String },
     /// A FIR node kind is not supported by the interpreter backend.
     UnsupportedNode { description: String },
     /// `LoadVarAddress` is not supported (mirrors `faustassert(false)` in C++).
@@ -114,6 +119,12 @@ impl fmt::Display for CompileError {
             }
             Self::UnknownMathFunction { name } => {
                 write!(f, "unknown math function: {name}")
+            }
+            Self::UnsupportedForeignFunctionSignature { name, description } => {
+                write!(
+                    f,
+                    "unsupported foreign function signature for {name}: {description}"
+                )
             }
             Self::UnsupportedNode { description } => {
                 write!(f, "unsupported FIR node: {description}")
@@ -230,6 +241,15 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         self.int_heap_offset
     }
 
+    /// Returns whether the last emitted instruction leaves a real-valued
+    /// result on the evaluation stack.
+    fn current_block_top_is_real(&self) -> bool {
+        self.current_block
+            .instructions
+            .last()
+            .is_some_and(|instr| instr.opcode.is_real_type())
+    }
+
     /// Returns a reference to the field table.
     #[must_use]
     pub fn field_table(&self) -> &HashMap<String, MemoryDesc> {
@@ -342,11 +362,14 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
 
             // --- Function calls ---
             FirMatch::FunCall {
-                ref name, ref args, ..
+                ref name,
+                ref args,
+                ref typ,
             } => {
                 let name = name.clone();
                 let args = args.clone();
-                self.compile_fun_call(store, &name, &args)
+                let typ = typ.clone();
+                self.compile_fun_call(store, &name, &args, &typ)
             }
 
             // --- UI ---
@@ -1192,9 +1215,9 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         // C++ compiles inst2 (rhs) first, then inst1 (lhs).
         // lhs ends up on TOS for the operator.
         self.compile_node(store, rhs)?;
-        let real_t2 = self.current_block.is_real_inst();
+        let real_t2 = self.current_block_top_is_real();
         self.compile_node(store, lhs)?;
-        let real_t1 = self.current_block.is_real_inst();
+        let real_t1 = self.current_block_top_is_real();
 
         let (int_op, real_op) = binop_to_fbc(op);
         let opcode = if real_t1 || real_t2 { real_op } else { int_op };
@@ -1247,7 +1270,7 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         value: FirId,
     ) -> Result<(), CompileError> {
         self.compile_node(store, value)?;
-        let real_operand = self.current_block.is_real_inst();
+        let real_operand = self.current_block_top_is_real();
 
         if is_int_type(typ) {
             // Cast to int — only emit if operand is real.
@@ -1302,7 +1325,7 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         // Compile 'then' in a new sub-block.
         self.begin_sub_block();
         self.compile_node(store, then_value)?;
-        let is_real = self.current_block.is_real_inst();
+        let is_real = self.current_block_top_is_real();
         let then_block_id = self.end_sub_block();
 
         // Compile 'else' in a new sub-block.
@@ -1612,16 +1635,73 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         store: &FirStore,
         name: &str,
         args: &[FirId],
+        typ: &FirType,
     ) -> Result<(), CompileError> {
         // Compile args in reverse order (stack discipline).
         for &arg in args.iter().rev() {
             self.compile_node(store, arg)?;
         }
 
-        let opcode = math_lib_lookup(name).ok_or_else(|| CompileError::UnknownMathFunction {
-            name: name.to_string(),
+        if let Some(opcode) = math_lib_lookup(name) {
+            self.current_block.push(FbcInstruction::new(opcode));
+            return Ok(());
+        }
+
+        if !is_registered_foreign_function(name) {
+            return Err(CompileError::UnknownMathFunction {
+                name: name.to_string(),
+            });
+        }
+
+        let ret = ForeignScalarType::from_fir_type(typ).ok_or_else(|| {
+            CompileError::UnsupportedForeignFunctionSignature {
+                name: name.to_string(),
+                description: format!("unsupported return type {typ:?}"),
+            }
         })?;
-        self.current_block.push(FbcInstruction::new(opcode));
+        let mut sig_args = Vec::with_capacity(args.len());
+        for &arg in args {
+            let arg_typ = store.value_type(arg).ok_or_else(|| {
+                CompileError::UnsupportedForeignFunctionSignature {
+                    name: name.to_string(),
+                    description: format!(
+                        "unsupported non-value argument node {:?}",
+                        match_fir(store, arg)
+                    ),
+                }
+            })?;
+            let scalar = ForeignScalarType::from_fir_type(&arg_typ).ok_or_else(|| {
+                CompileError::UnsupportedForeignFunctionSignature {
+                    name: name.to_string(),
+                    description: format!("unsupported argument type {arg_typ:?}"),
+                }
+            })?;
+            sig_args.push(scalar);
+        }
+
+        if !is_supported_signature(ret, &sig_args) {
+            return Err(CompileError::UnsupportedForeignFunctionSignature {
+                name: name.to_string(),
+                description: format!(
+                    "ret={ret:?}, args={sig_args:?} are outside the interpreter foreign-call ABI"
+                ),
+            });
+        }
+
+        let signature = ForeignSignature {
+            name: name.to_string(),
+            ret,
+            args: sig_args,
+        };
+        let opcode = match signature.ret {
+            ForeignScalarType::Float32
+            | ForeignScalarType::Float64
+            | ForeignScalarType::FaustFloat => FbcOpcode::ForeignCallReal,
+            ForeignScalarType::Int32 | ForeignScalarType::Bool => FbcOpcode::ForeignCallInt,
+            ForeignScalarType::Void => FbcOpcode::ForeignCallVoid,
+        };
+        self.current_block
+            .push(FbcInstruction::with_name(opcode, signature.encode()));
         Ok(())
     }
 

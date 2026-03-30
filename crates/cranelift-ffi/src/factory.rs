@@ -1186,15 +1186,15 @@ mod tests {
     use std::ffi::CStr;
 
     use super::{
-        createCCraneliftDSPFactoryFromBoxes, createCCraneliftDSPFactoryFromFile,
-        createCCraneliftDSPFactoryFromSignals, createCCraneliftDSPFactoryFromString,
-        deleteAllCCraneliftDSPFactories, deleteCCraneliftDSPFactory, factory_status, freeCMemory,
-        getAllCCraneliftDSPFactories, getCCraneliftDSPFactoryCompileOptions,
-        getCCraneliftDSPFactoryFromSHAKey, getCCraneliftDSPFactoryJSON,
-        getCCraneliftDSPFactoryName, getCCraneliftDSPFactorySHAKey, getCLibFaustVersion,
-        readCCraneliftDSPFactoryFromBitcode, readCCraneliftDSPFactoryFromBitcodeFile,
-        registerCCraneliftForeignFunction, unregisterCCraneliftForeignFunction,
-        clearCCraneliftForeignFunctions, writeCCraneliftDSPFactoryToBitcode,
+        clearCCraneliftForeignFunctions, createCCraneliftDSPFactoryFromBoxes,
+        createCCraneliftDSPFactoryFromFile, createCCraneliftDSPFactoryFromSignals,
+        createCCraneliftDSPFactoryFromString, deleteAllCCraneliftDSPFactories,
+        deleteCCraneliftDSPFactory, factory_status, freeCMemory, getAllCCraneliftDSPFactories,
+        getCCraneliftDSPFactoryCompileOptions, getCCraneliftDSPFactoryFromSHAKey,
+        getCCraneliftDSPFactoryJSON, getCCraneliftDSPFactoryName, getCCraneliftDSPFactorySHAKey,
+        getCLibFaustVersion, readCCraneliftDSPFactoryFromBitcode,
+        readCCraneliftDSPFactoryFromBitcodeFile, registerCCraneliftForeignFunction,
+        unregisterCCraneliftForeignFunction, writeCCraneliftDSPFactoryToBitcode,
         writeCCraneliftDSPFactoryToBitcodeFile,
     };
 

@@ -14,6 +14,7 @@ backend-wasm = ["dep:wasm-encoder", "dep:wasmparser"]
 
 [dependencies]
 fir = { path = "../fir" }
+foreign-call = { path = "../foreign-call" }
 wasm-encoder = { version = "0.225", optional = true }
 wasmparser = { version = "0.225", optional = true }
 

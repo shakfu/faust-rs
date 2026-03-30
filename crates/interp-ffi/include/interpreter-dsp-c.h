@@ -186,6 +186,13 @@ const char** getCInterpreterDSPFactoryLibraryList(interpreter_dsp_factory* facto
 bool startMTDSPFactories(void);
 void stopMTDSPFactories(void);
 
+/* Rust extension: foreign-function registry used by `ffunction(...)`
+ * when compiling/executing with the interpreter backend.
+ */
+void registerCInterpreterForeignFunction(const char* name, void* fn_ptr);
+void unregisterCInterpreterForeignFunction(const char* name);
+void clearCInterpreterForeignFunctions(void);
+
 /* ── Memory management ───────────────────────────────────────────────────── */
 
 /**

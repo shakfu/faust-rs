@@ -29,9 +29,11 @@
 //!   raw pointers → `BlockId`, C arrays → `Vec`).
 
 use super::bytecode::{BlockId, BlockStoreData, FbcBlockArena};
+use super::foreign::{ForeignScalarType, ForeignSignature, lookup_foreign_function};
 use super::opcode::FbcOpcode;
 use super::real::FbcReal;
 use super::soundfile::Soundfile;
+use foreign_call::{ScalarType as HostScalarType, Value as HostValue};
 
 /// Stack sizes matching the C++ interpreter constants.
 const REAL_STACK_CAPACITY: usize = 512;
@@ -281,6 +283,128 @@ fn classify_trapped_panic(payload: &(dyn std::any::Any + Send), site: ExecSite) 
         return FbcExecError::heap_oob(site.opcode, site.block_id, site.pc);
     }
     FbcExecError::panic_trapped(site.opcode, site.block_id, site.pc)
+}
+
+fn foreign_error(
+    kind: &'static str,
+    opcode: FbcOpcode,
+    block_id: BlockId,
+    pc: usize,
+) -> FbcExecError {
+    FbcExecError {
+        kind,
+        opcode,
+        block_id,
+        pc,
+        stack: None,
+        channel: None,
+        sample: None,
+    }
+}
+
+fn pop_foreign_arg<R: FbcReal>(
+    typ: ForeignScalarType,
+    real_stack: &mut Vec<R>,
+    int_stack: &mut Vec<i32>,
+    opcode: FbcOpcode,
+    block_id: BlockId,
+    pc: usize,
+) -> Result<ForeignArg<R>, FbcExecError> {
+    Ok(match typ {
+        ForeignScalarType::Int32 => {
+            ForeignArg::Int32(pop_int_stack(int_stack, opcode, block_id, pc)?)
+        }
+        ForeignScalarType::Float32 => {
+            ForeignArg::Float32(pop_real_stack(real_stack, opcode, block_id, pc)?.to_f64() as f32)
+        }
+        ForeignScalarType::Float64 => {
+            ForeignArg::Float64(pop_real_stack(real_stack, opcode, block_id, pc)?.to_f64())
+        }
+        ForeignScalarType::FaustFloat => {
+            ForeignArg::FaustFloat(pop_real_stack(real_stack, opcode, block_id, pc)?)
+        }
+        ForeignScalarType::Bool => {
+            ForeignArg::Bool(pop_int_stack(int_stack, opcode, block_id, pc)? != 0)
+        }
+        ForeignScalarType::Void => {
+            return Err(foreign_error(
+                "invalid_foreign_argument_type",
+                opcode,
+                block_id,
+                pc,
+            ));
+        }
+    })
+}
+
+enum ForeignArg<R: FbcReal> {
+    Int32(i32),
+    Float32(f32),
+    Float64(f64),
+    FaustFloat(R),
+    Bool(bool),
+}
+
+fn invoke_foreign_call<R: FbcReal>(
+    signature: &ForeignSignature,
+    addr: usize,
+    real_stack: &mut Vec<R>,
+    int_stack: &mut Vec<i32>,
+    opcode: FbcOpcode,
+    block_id: BlockId,
+    pc: usize,
+) -> Result<(), FbcExecError> {
+    let args: Vec<_> = signature
+        .args
+        .iter()
+        .map(|&typ| pop_foreign_arg(typ, real_stack, int_stack, opcode, block_id, pc))
+        .collect::<Result<_, _>>()?;
+    let ret = match signature.ret {
+        ForeignScalarType::Int32 => HostScalarType::Int32,
+        ForeignScalarType::Float32 => HostScalarType::Float32,
+        ForeignScalarType::Float64 => HostScalarType::Float64,
+        ForeignScalarType::FaustFloat => {
+            if R::TYPE_NAME == "f32" {
+                HostScalarType::Float32
+            } else {
+                HostScalarType::Float64
+            }
+        }
+        ForeignScalarType::Bool => HostScalarType::Bool,
+        ForeignScalarType::Void => HostScalarType::Void,
+    };
+    let host_args: Vec<_> = args
+        .into_iter()
+        .map(|arg: ForeignArg<R>| match arg {
+            ForeignArg::Int32(v) => HostValue::Int32(v),
+            ForeignArg::Float32(v) => HostValue::Float32(v),
+            ForeignArg::Float64(v) => HostValue::Float64(v),
+            ForeignArg::FaustFloat(v) => {
+                if R::TYPE_NAME == "f32" {
+                    HostValue::Float32(v.to_f64() as f32)
+                } else {
+                    HostValue::Float64(v.to_f64())
+                }
+            }
+            ForeignArg::Bool(v) => HostValue::Bool(v),
+        })
+        .collect();
+    match foreign_call::invoke(addr, ret, &host_args) {
+        Some(HostValue::Void) => {}
+        Some(HostValue::Int32(v)) => int_stack.push(v),
+        Some(HostValue::Float32(v)) => real_stack.push(R::from_f64(v as f64)),
+        Some(HostValue::Float64(v)) => real_stack.push(R::from_f64(v)),
+        Some(HostValue::Bool(v)) => int_stack.push(i32::from(v)),
+        None => {
+            return Err(foreign_error(
+                "unsupported_foreign_signature",
+                opcode,
+                block_id,
+                pc,
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1747,6 +1871,29 @@ impl<R: FbcReal> FbcExecutor<R> {
                     let v1 = pop_real_stack(&mut real_stack, instr.opcode, cur_block, pc)?;
                     let v2 = pop_real_stack(&mut real_stack, instr.opcode, cur_block, pc)?;
                     real_stack.push(v1.fbc_copysign(v2));
+                    pc += 1;
+                }
+                ForeignCallReal | ForeignCallInt | ForeignCallVoid => {
+                    let signature = ForeignSignature::decode(&instr.name).ok_or_else(|| {
+                        foreign_error("invalid_foreign_signature", instr.opcode, cur_block, pc)
+                    })?;
+                    let addr = lookup_foreign_function(&signature.name).ok_or_else(|| {
+                        foreign_error(
+                            "missing_foreign_function_binding",
+                            instr.opcode,
+                            cur_block,
+                            pc,
+                        )
+                    })?;
+                    invoke_foreign_call(
+                        &signature,
+                        addr,
+                        &mut real_stack,
+                        &mut int_stack,
+                        instr.opcode,
+                        cur_block,
+                        pc,
+                    )?;
                     pc += 1;
                 }
 

@@ -34,6 +34,7 @@ pub mod compiler;
 pub mod executor;
 pub mod factory;
 pub mod fbc_to_cpp;
+pub mod foreign;
 pub mod instance;
 pub mod opcode;
 pub mod optimizer;
@@ -50,6 +51,10 @@ pub use compiler::{CompileError, FbcCompileResult, FirToFbcCompiler, HeapType, M
 pub use executor::{FbcExecError, FbcExecutor, FbcStackKind};
 pub use factory::FbcDspFactory;
 pub use fbc_to_cpp::{FbcCppError, FbcCppOptions, generate_cpp_from_fbc};
+pub use foreign::{
+    ForeignScalarType, ForeignSignature, clear_foreign_functions, is_registered_foreign_function,
+    lookup_foreign_function, register_foreign_function, unregister_foreign_function,
+};
 pub use instance::{FbcDspInstance, FbcDspRuntimeError};
 pub use opcode::{FBC_INSTRUCTION_NAMES, FBC_OPCODE_COUNT, FbcOpcode, INTERP_FILE_VERSION};
 pub use optimizer::{MAX_OPT_LEVEL, optimize_block};

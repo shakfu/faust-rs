@@ -1,4 +1,7 @@
 use super::*;
+use crate::backends::interp::{
+    clear_foreign_functions, register_foreign_function, unregister_foreign_function,
+};
 use fir::{FirBinOp, FirBuilder};
 
 /// Helper: compile a single FIR node and finalize.
@@ -334,6 +337,121 @@ fn test_unknown_function_error() {
         }
         _ => panic!("expected UnknownMathFunction, got: {err:?}"),
     }
+}
+
+extern "C" fn interp_test_foreign_gain(x: f32) -> f32 {
+    x * 3.0
+}
+
+extern "C" fn interp_test_foreign_inc(x: i32) -> i32 {
+    x + 1
+}
+
+extern "C" fn interp_test_foreign_probe(x: f32) {
+    let _ = x;
+}
+
+#[test]
+fn test_compile_registered_foreign_function_opcodes() {
+    clear_foreign_functions();
+    register_foreign_function(
+        "interp_test_foreign_gain",
+        (interp_test_foreign_gain as *const ()).cast_mut().cast(),
+    );
+    register_foreign_function(
+        "interp_test_foreign_inc",
+        (interp_test_foreign_inc as *const ()).cast_mut().cast(),
+    );
+    register_foreign_function(
+        "interp_test_foreign_probe",
+        (interp_test_foreign_probe as *const ()).cast_mut().cast(),
+    );
+
+    let mut store = FirStore::new();
+    let gain_call = {
+        let mut b = FirBuilder::new(&mut store);
+        let gain_arg = b.float32(0.5);
+        b.fun_call("interp_test_foreign_gain", &[gain_arg], FirType::Float32)
+    };
+    let gain_result = compile_one::<f32>(&store, gain_call);
+    let gain_block = gain_result.arena.get(gain_result.entry_block);
+    assert_eq!(gain_block.instructions[0].opcode, FbcOpcode::RealValue);
+    assert_eq!(
+        gain_block.instructions[1].opcode,
+        FbcOpcode::ForeignCallReal
+    );
+    assert_eq!(
+        gain_block.instructions[1].name,
+        "interp_test_foreign_gain|f|f"
+    );
+
+    let bool_call = {
+        let mut b = FirBuilder::new(&mut store);
+        let int_arg = b.int32(41);
+        b.fun_call("interp_test_foreign_inc", &[int_arg], FirType::Int32)
+    };
+    let bool_result = compile_one::<f32>(&store, bool_call);
+    let bool_block = bool_result.arena.get(bool_result.entry_block);
+    assert_eq!(bool_block.instructions[1].opcode, FbcOpcode::ForeignCallInt);
+    assert_eq!(
+        bool_block.instructions[1].name,
+        "interp_test_foreign_inc|i|i"
+    );
+
+    let void_call = {
+        let mut b = FirBuilder::new(&mut store);
+        let void_arg = b.float32(0.5);
+        b.fun_call("interp_test_foreign_probe", &[void_arg], FirType::Void)
+    };
+    let void_result = compile_one::<f32>(&store, void_call);
+    let void_block = void_result.arena.get(void_result.entry_block);
+    assert_eq!(
+        void_block.instructions[1].opcode,
+        FbcOpcode::ForeignCallVoid
+    );
+    assert_eq!(
+        void_block.instructions[1].name,
+        "interp_test_foreign_probe|v|f"
+    );
+
+    unregister_foreign_function("interp_test_foreign_gain");
+    unregister_foreign_function("interp_test_foreign_inc");
+    unregister_foreign_function("interp_test_foreign_probe");
+    clear_foreign_functions();
+}
+
+#[test]
+fn test_roundtrip_registered_foreign_function() {
+    use super::super::executor::FbcExecutor;
+
+    clear_foreign_functions();
+    register_foreign_function(
+        "interp_test_foreign_gain",
+        (interp_test_foreign_gain as *const ()).cast_mut().cast(),
+    );
+
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+    let init_val = b.float32(0.0);
+    let decl = b.declare_var("x", FirType::Float32, AccessType::Struct, Some(init_val));
+    let arg = b.float32(0.5);
+    let call = b.fun_call("interp_test_foreign_gain", &[arg], FirType::Float32);
+    let st = b.store_var("x", AccessType::Struct, call);
+
+    let mut compiler = FirToFbcCompiler::<f32>::new();
+    compiler.compile_node(&store, decl).unwrap();
+    compiler.compile_node(&store, st).unwrap();
+    let result = compiler.finalize().unwrap();
+
+    let mut exec = FbcExecutor::<f32>::new(
+        result.int_heap_size as usize,
+        result.real_heap_size as usize,
+    );
+    exec.execute_block(&result.arena, result.entry_block);
+    assert_eq!(exec.real_heap[0], 1.5);
+
+    unregister_foreign_function("interp_test_foreign_gain");
+    clear_foreign_functions();
 }
 
 // --- Phase I: UI ---

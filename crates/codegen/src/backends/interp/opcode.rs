@@ -17,7 +17,7 @@
 /// Interpreter file format version.
 ///
 /// Must match `INTERP_FILE_VERSION` in C++ `fbc_opcode.hh`.
-pub const INTERP_FILE_VERSION: u32 = 8;
+pub const INTERP_FILE_VERSION: u32 = 9;
 
 /// FBC opcode — complete instruction set for the Faust interpreter.
 ///
@@ -366,10 +366,16 @@ pub enum FbcOpcode {
 
     // ── Misc ─────────────────────────────────────────────────────────────
     Nop = 293,
+    /// Rust extension: symbolic host foreign function call with real result.
+    ForeignCallReal = 294,
+    /// Rust extension: symbolic host foreign function call with int/bool result.
+    ForeignCallInt = 295,
+    /// Rust extension: symbolic host foreign function call with no result.
+    ForeignCallVoid = 296,
 }
 
 /// Total number of opcodes in the FBC instruction set.
-pub const FBC_OPCODE_COUNT: usize = 294;
+pub const FBC_OPCODE_COUNT: usize = 297;
 
 /// Lookup table for converting `u16` discriminants to [`FbcOpcode`] without
 /// `unsafe` transmute.
@@ -672,6 +678,9 @@ const FROM_U16_TABLE: [FbcOpcode; FBC_OPCODE_COUNT] = {
         AddVerticalBargraph,
         Declare,
         Nop,
+        ForeignCallReal,
+        ForeignCallInt,
+        ForeignCallVoid,
     ]
 };
 
@@ -739,6 +748,7 @@ impl FbcOpcode {
                 | Self::Maxf
                 | Self::Minf
                 | Self::Copysignf
+                | Self::ForeignCallReal
         )
     }
 
@@ -1246,7 +1256,10 @@ pub static FBC_INSTRUCTION_NAMES: [&str; FBC_OPCODE_COUNT] = [
     "kAddVerticalBargraph",   // 291
     "kDeclare",               // 292
     // ── Misc ──
-    "kNop", // 293
+    "kNop",             // 293
+    "kForeignCallReal", // 294
+    "kForeignCallInt",  // 295
+    "kForeignCallVoid", // 296
 ];
 
 #[cfg(test)]
