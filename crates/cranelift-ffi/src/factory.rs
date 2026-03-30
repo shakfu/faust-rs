@@ -115,6 +115,40 @@ pub unsafe extern "C" fn registerCCraneliftForeignFunction(
         .insert(name.to_owned(), fn_ptr as usize);
 }
 
+/// Unregister one previously registered host foreign function.
+///
+/// The operation is process-global and only affects future Cranelift factory
+/// builds. Existing compiled factories are unchanged.
+///
+/// # Safety
+/// - `name` must be a valid null-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn unregisterCCraneliftForeignFunction(name: *const c_char) {
+    if name.is_null() {
+        return;
+    }
+    // SAFETY: caller provides a valid C string per the function contract.
+    let Ok(name) = unsafe { std::ffi::CStr::from_ptr(name) }.to_str() else {
+        return;
+    };
+    foreign_function_registry()
+        .lock()
+        .expect("foreign function registry mutex")
+        .remove(name);
+}
+
+/// Clear all previously registered host foreign functions.
+///
+/// The operation is process-global and only affects future Cranelift factory
+/// builds. Existing compiled factories are unchanged.
+#[unsafe(no_mangle)]
+pub extern "C" fn clearCCraneliftForeignFunctions() {
+    foreign_function_registry()
+        .lock()
+        .expect("foreign function registry mutex")
+        .clear();
+}
+
 /// Create a Cranelift DSP factory from a Faust source file.
 ///
 /// # Safety
@@ -1159,7 +1193,8 @@ mod tests {
         getCCraneliftDSPFactoryFromSHAKey, getCCraneliftDSPFactoryJSON,
         getCCraneliftDSPFactoryName, getCCraneliftDSPFactorySHAKey, getCLibFaustVersion,
         readCCraneliftDSPFactoryFromBitcode, readCCraneliftDSPFactoryFromBitcodeFile,
-        registerCCraneliftForeignFunction, writeCCraneliftDSPFactoryToBitcode,
+        registerCCraneliftForeignFunction, unregisterCCraneliftForeignFunction,
+        clearCCraneliftForeignFunctions, writeCCraneliftDSPFactoryToBitcode,
         writeCCraneliftDSPFactoryToBitcodeFile,
     };
 
@@ -1745,6 +1780,90 @@ mod tests {
 
         unsafe {
             assert!((*factory).compute_body_lowered);
+            assert!(deleteCCraneliftDSPFactory(factory));
+        }
+        super::clear_registered_foreign_functions();
+    }
+
+    #[test]
+    fn unregister_foreign_function_removes_future_binding() {
+        let _guard = crate::test_serial_guard();
+        super::clear_registered_foreign_functions();
+        let name = c"foreign_fun_unreg";
+        let src = c"process = ffunction(float ffi_test_foreign_gain(float), <math.h>, \"\");";
+        let mut err = [0_i8; 4096];
+
+        unsafe {
+            registerCCraneliftForeignFunction(
+                c"ffi_test_foreign_gain".as_ptr(),
+                (ffi_test_foreign_gain as *const ()).cast_mut().cast(),
+            );
+            unregisterCCraneliftForeignFunction(c"ffi_test_foreign_gain".as_ptr());
+        }
+
+        let factory = unsafe {
+            createCCraneliftDSPFactoryFromString(
+                name.as_ptr(),
+                src.as_ptr(),
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+                1,
+            )
+        };
+        assert!(
+            !factory.is_null(),
+            "factory creation failed after unregister: {}",
+            unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy()
+        );
+
+        unsafe {
+            assert!(
+                !(*factory).compute_body_lowered,
+                "unregistered foreign function should fall back to the stub path"
+            );
+            assert!(deleteCCraneliftDSPFactory(factory));
+        }
+        super::clear_registered_foreign_functions();
+    }
+
+    #[test]
+    fn clear_foreign_functions_removes_all_future_bindings() {
+        let _guard = crate::test_serial_guard();
+        super::clear_registered_foreign_functions();
+        let name = c"foreign_fun_clear";
+        let src = c"process = ffunction(float ffi_test_foreign_gain(float), <math.h>, \"\");";
+        let mut err = [0_i8; 4096];
+
+        unsafe {
+            registerCCraneliftForeignFunction(
+                c"ffi_test_foreign_gain".as_ptr(),
+                (ffi_test_foreign_gain as *const ()).cast_mut().cast(),
+            );
+        }
+        clearCCraneliftForeignFunctions();
+
+        let factory = unsafe {
+            createCCraneliftDSPFactoryFromString(
+                name.as_ptr(),
+                src.as_ptr(),
+                0,
+                std::ptr::null(),
+                err.as_mut_ptr(),
+                1,
+            )
+        };
+        assert!(
+            !factory.is_null(),
+            "factory creation failed after clear: {}",
+            unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy()
+        );
+
+        unsafe {
+            assert!(
+                !(*factory).compute_body_lowered,
+                "cleared foreign functions should fall back to the stub path"
+            );
             assert!(deleteCCraneliftDSPFactory(factory));
         }
         super::clear_registered_foreign_functions();

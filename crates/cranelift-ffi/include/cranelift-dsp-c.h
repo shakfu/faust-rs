@@ -101,6 +101,8 @@ void stopMTDSPFactories(void);
 
 /* Foreign-function registration for DSPs using `ffunction(...)`. */
 void registerCCraneliftForeignFunction(const char* name, void* fn_ptr);
+void unregisterCCraneliftForeignFunction(const char* name);
+void clearCCraneliftForeignFunctions(void);
 
 /* Memory allocated by this library (currently strings; array ownership still scaffold-level). */
 void freeCMemory(void* ptr);
