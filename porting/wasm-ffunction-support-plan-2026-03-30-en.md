@@ -208,31 +208,17 @@ Reason:
 
 The new work should generalize from that subset, not replace it abruptly.
 
-### 4.4 Prefer function-shaped ABI surfaces, even for values
+### 4.4 Generalize to arbitrary foreign prototypes with a stable ABI
 
-Although wasm imported globals are possible, the recommended default ABI is:
+General `ffunction(...)` support should use one explicit ABI contract:
 
-- imported functions for `ffunction(...)`,
-- imported zero-argument getter functions for portable `fconst(...)`,
-- imported getter functions for portable `fvar(...)`.
+- import module: `"env"` by default
+- import field name: derived from the selected foreign symbol name
+- parameter/result types: derived from the existing FIR-level
+  `ForeignFunProto`
 
-Examples:
-
-- `ffunction(float myhost(float), ...)` -> import `env.myhost`
-- `fconst(float, "extsr", ...)` -> import `env.extsr`
-  as `() -> f32` or `() -> f64`
-- `fvar(float, "cutoff", ...)` -> import `env.cutoff`
-  as `() -> f32` or `() -> f64`
-
-Why prefer getter functions:
-
-- simpler import planning in the current backend,
-- fewer host/runtime differences than imported mutable globals,
-- easier validation and fallback diagnostics,
-- better control over update timing if hosts want dynamic values.
-
-Imported globals can remain a later optimization or alternate ABI mode, but
-they should not be the first implementation target.
+This keeps the Rust backend aligned with the current WASM import style already
+used for math helpers.
 
 ### 4.5 Deliberately narrow semantics of `incfile` / `libfile` in WASM mode
 
@@ -320,163 +306,130 @@ Important semantic note:
 - if future parity work needs writable foreign variables in wasm, that should
   be a separate design slice with explicit setter or memory-sharing policy.
 
+### 5.4 Implementation status for now
+
+Only the `ffunction(...)` track is active for now.
+
+`fconst(...)` and `fvar(...)` remain documented here as follow-up design
+directions, but they are deferred and are not part of the active
+implementation slices below.
+
+Reason:
+
+- the `ffunction(...)` path already has the necessary FIR prototype structure,
+- it is the smallest wasm foreign-import milestone,
+- it lets the backend ABI be exercised before adding value/global semantics.
+
 ---
 
 ## 6. Proposed Implementation Slices
 
-### Slice 1 — Formalize current support and rename the scope
+### Slice 1 — Formalize current support
 
 Goal:
 
-- stabilize the existing `ffunction` subset,
-- document `fconst` and `fvar` current limits under one plan.
+- document and stabilize the currently supported imported foreign helper subset
 
 Changes:
 
-- update backend docs to describe current behavior for all three symbol kinds,
-- keep the existing `ffunction` whitelist tests,
-- keep the existing foreign-variable rejection test,
-- add a regression test for the current `fconst` fast lane:
-  `fSamplingRate` remains internal.
+- add explicit backend docs for current `ffunction` support in WASM
+- add regression tests for:
+  - supported imported helper (`sinhf`, `isnan`, etc.)
+  - unsupported arbitrary host function (`myhost`)
 
 Pass criteria:
 
-- the current state is explicit, intentional, and covered by tests.
+- behavior is intentional and covered by tests
 
-### Slice 2 — Preserve foreign-symbol provenance into WASM planning
+### Slice 2 — Carry generic foreign prototypes into WASM import planning
 
 Goal:
 
-- stop treating foreign symbols as backend-anonymous nodes once they reach wasm
-  lowering,
-- give the backend enough information to distinguish:
-  - ordinary FIR helpers,
-  - `ffunction(...)`-originated calls,
-  - `fconst(...)` getter candidates,
-  - `fvar(...)` getter candidates.
+- stop treating general foreign calls as anonymous unsupported `FunCall`
+- make them available to the import planner
 
 Changes:
 
-- enrich FIR-side metadata or module-level side tables so the wasm backend can
-  recover foreign-symbol provenance,
-- keep the existing lowering for `fSamplingRate` and `count` untouched.
+- extend the WASM backend import collection pass to discover generic
+  `FunCall`s that originate from foreign prototypes
+- build one import descriptor from name + arg types + return type
+
+Notes:
+
+- this may require preserving or exposing more provenance from FIR lowering if
+  plain `FunCall(name, ...)` is currently insufficient to distinguish ordinary
+  functions from `ffunction(...)`-originated calls
 
 Pass criteria:
 
-- the backend can build a typed import plan from foreign-symbol metadata rather
-  than from name heuristics alone.
+- backend can build a typed import plan for arbitrary foreign prototypes
 
-### Slice 3 — Generalize imported function emission for `ffunction(...)`
+### Slice 3 — Emit generic imported functions in the WASM module
 
 Goal:
 
-- generate valid WASM imports for generic scalar `ffunction(...)`.
+- generate valid WASM imports for generic `ffunction(...)`
 
 Changes:
 
-- extend the import section builder in `codegen::backends::wasm`,
-- assign type indices for generic imported foreign functions,
+- extend the import section builder in `codegen::backends::wasm`
+- assign type indices for generic imported foreign functions
 - ensure function indices remain ABI-correct:
-  - imported functions first,
-  - built-in exported functions after imports,
-- keep the existing hard-coded helper remapping path working.
+  - imported functions first
+  - built-in exported functions after imports
 
 Pass criteria:
 
-- generated modules validate with `wasmparser`,
-- generic host-imported `ffunction(...)` compiles,
-- existing helper behavior remains intact.
+- generated module validates with `wasmparser`
+- function calls target the imported index, not a fallback error path
 
-### Slice 4 — Add `fconst(...)` support through getter imports
-
-Goal:
-
-- support portable non-special foreign constants in wasm without introducing
-  imported-global complexity first.
-
-Changes:
-
-- extend FIR/wasm lowering so supported foreign constants become imported
-  zero-argument calls or equivalent wasm import descriptors,
-- reserve direct imported-global support for a later optional slice,
-- keep unsupported shapes failing clearly.
-
-Pass criteria:
-
-- a DSP using one non-special scalar `fconst(...)` compiles to wasm,
-- `fSamplingRate` still uses the internal fast lane,
-- diagnostics distinguish internal runtime constants from real foreign
-  constants.
-
-### Slice 5 — Add `fvar(...)` read support through getter imports
+### Slice 4 — Define host ABI and runtime contract
 
 Goal:
 
-- support readable foreign variables in wasm.
-
-Changes:
-
-- extend wasm lowering so foreign variable reads become imported getter calls or
-  equivalent import descriptors,
-- preserve `count` as an internal compute argument,
-- keep writable-foreign-variable semantics out of scope for this slice.
-
-Pass criteria:
-
-- the existing rejection test is replaced with positive coverage for supported
-  read-only foreign variables,
-- `count` keeps its current lowering semantics,
-- missing host imports fail at instantiation, not at backend encoding time.
-
-### Slice 6 — Define host ABI and runtime contract
-
-Goal:
-
-- make the feature usable, not just encodable.
+- make the feature usable, not just encodable
 
 Changes:
 
 - document the host import contract:
-  - default module name
+  - module name
   - import field naming
   - scalar type mapping
-  - float32/float64 name selection
-  - getter-based conventions for `fconst` and `fvar`
-- update `faustwasm` integration notes if needed,
-- decide whether unsupported foreign-symbol signatures fail at:
+  - float32/float64 symbol selection
+- update `faustwasm` integration plan if needed
+- decide whether unsupported imports fail at:
   - compile time, or
-  - host instantiation time.
+  - instantiation time in the host
 
 Recommendation:
 
-- compile time should succeed if the foreign symbol shape is representable in
-  the wasm ABI,
-- host/runtime instantiation should fail if the required import is missing.
+- compile time should succeed if the import signature is representable
+- host/runtime instantiation should fail if the import is missing
 
 Pass criteria:
 
 - one small end-to-end runtime test can instantiate a generated module with
-  user-provided imports for function, constant, and variable cases.
+  user-provided imports
 
-### Slice 7 — Metadata and diagnostics polish
+### Slice 5 — Metadata and diagnostics polish
 
 Goal:
 
-- make the feature understandable to users.
+- make the feature understandable to users
 
 Changes:
 
 - add backend diagnostics clarifying that:
-  - native include/lib semantics do not apply in WASM output,
-  - `ffunction(...)` becomes a host function import,
-  - non-special `fconst(...)` becomes a host-provided value import,
-  - non-special `fvar(...)` becomes a host-provided variable read import,
+  - native include/lib semantics do not apply in WASM output
+  - `ffunction(...)` becomes a host import
+  - `fconst(...)` / `fvar(...)` stay out of the active implementation scope for
+    now
 - optionally surface foreign import requirements in companion JSON or debug
-  output.
+  output
 
 Pass criteria:
 
-- failure modes are explicit and actionable.
+- failure modes are explicit and actionable
 
 ---
 
@@ -486,39 +439,35 @@ Pass criteria:
 
 Add targeted tests in `crates/codegen/src/backends/wasm/tests.rs` for:
 
-- import emission for one generic unary float foreign function,
-- import emission for one generic binary double foreign function,
-- retained support for the hard-coded helper whitelist,
-- `fSamplingRate` staying internal,
-- one non-special foreign constant lowered to a getter-style import,
-- one readable foreign variable lowered to a getter-style import,
+- import emission for one generic unary float foreign function
+- import emission for one generic binary double foreign function
+- retained support for the hard-coded helper whitelist
+- retained deferral of `fconst(...)` / `fvar(...)` in the active wasm support
+  plan
 - function-index and type-index stability with mixed:
-  - built-in math imports,
-  - generic foreign function imports,
-  - getter-style foreign symbol imports.
+  - built-in math imports
+  - generic foreign function imports
 
 ### 7.2 Compiler integration tests
 
 Add compiler-facing tests for:
 
-- `-lang wasm` on a DSP using supported whitelist helpers,
-- `-lang wasm` on a DSP using a generic host-imported `ffunction(...)`,
-- `-lang wasm` on a DSP using a non-special `fconst(...)`,
-- `-lang wasm` on a DSP using a non-special `fvar(...)`,
-- stable artifact production in all supported cases.
+- `-lang wasm` on a DSP using supported whitelist helpers
+- `-lang wasm` on a DSP using a generic host-imported `ffunction(...)`
+- no change in current support status for `fconst(...)` / `fvar(...)`
+- stable artifact production in supported cases
 
 ### 7.3 Runtime validation
 
 At least one end-to-end runtime check should instantiate the generated module
-with a host import object supplying the expected function(s).
+with a host import object supplying the expected function(s), ideally in the
+same style used by `faustwasm`.
 
 Minimum target:
 
-- one Node/WebAssembly host harness,
-- one DSP using `ffunction(float myhost(float), ...)`,
-- one DSP using one non-special foreign constant,
-- one DSP using one readable foreign variable,
-- successful instantiation and `compute`.
+- one Node/WebAssembly host harness
+- one DSP using `ffunction(float myhost(float), ...)`
+- successful instantiation and `compute`
 
 ---
 
@@ -529,77 +478,65 @@ Minimum target:
 Risk:
 
 - by the time the backend sees a node, the distinction between:
-  - ordinary helper,
-  - `ffunction(...)`,
-  - `fconst(...)`,
+  - ordinary helper
+  - `ffunction(...)`
+  - `fconst(...)`
   - `fvar(...)`
-  may be too weak.
+  may be too weak
 
 Mitigation:
 
 - enrich FIR extern metadata or keep one side-table of foreign-symbol
-  descriptors reachable from the module.
+  descriptors reachable from the module
 
 ### 8.2 ABI drift against historical JS wrappers
 
 Risk:
 
-- generic import naming may diverge from historical C++/JS wrapper behavior.
+- generic import naming may diverge from historical C++/JS wrapper behavior
 
 Mitigation:
 
-- keep the existing hard-coded helper mappings intact,
-- use the same `"env"` import module by default,
-- validate against `faustwasm` expectations before broadening naming rules.
+- keep the existing hard-coded helper mappings intact
+- use the same `"env"` import module by default
+- validate against `faustwasm` expectations before broadening naming rules
 
-### 8.3 Overusing imported globals too early
+### 8.3 Over-scoping the first milestone
 
 Risk:
 
-- imported globals may look natural for `fconst` / `fvar`, but complicate the
-  first implementation and reduce portability.
+- folding `fconst(...)` / `fvar(...)` into the first implementation pass would
+  mix value/global semantics into what is currently a pure function-import
+  problem
 
 Mitigation:
 
-- ship getter-style imports first,
-- add direct imported-global support only if profiling or host integration
-  clearly justifies it.
+- keep the roadmap visible in this document
+- but restrict the active implementation slices to `ffunction(...)` only for
+  now
 
 ### 8.4 User confusion around `incfile` / `libfile`
 
 Risk:
 
-- users may expect C/C++ linking semantics in a WASM target.
+- users may expect C/C++ linking semantics in a WASM target
 
 Mitigation:
 
 - document explicitly that, in WASM mode, these fields do not imply native
-  linkage and are not sufficient by themselves.
+  linkage and are not sufficient by themselves
 
-### 8.5 Runtime update semantics for `fvar(...)`
-
-Risk:
-
-- hosts may expect `fvar(...)` to behave like one stable captured value, while
-  others may expect it to be refreshed on each access.
-
-Mitigation:
-
-- document the first supported semantics explicitly:
-  each lowered getter call reads the current host-provided value at the point of
-  DSP execution where the FIR node appears.
-
-### 8.6 Cross-runtime portability
+### 8.5 Cross-runtime portability
 
 Risk:
 
-- a design that works in one JS runtime may not generalize cleanly to all wasm
-  hosts.
+- a design that works in one JS runtime may not generalize cleanly to all WASM
+  hosts
 
 Mitigation:
 
-- keep the contract to plain wasm imports with scalar signatures only,
-- avoid JS-specific glue in the backend ABI itself.
+- keep the contract to plain WASM imports with scalar signatures only
+- avoid JS-specific glue in the backend ABI itself
 
 ---
 
@@ -609,18 +546,15 @@ The work is complete when the following are true:
 
 1. `ffunction(...)` with arbitrary scalar signatures can be represented as typed
    WASM imports.
-2. Non-special scalar `fconst(...)` can be represented in wasm with a stable
-   host ABI.
-3. Readable non-special scalar `fvar(...)` can be represented in wasm with a
-   stable host ABI.
-4. `fSamplingRate` and `count` remain special internal runtime/compiler paths.
-5. The generated module validates and preserves stable import/function index
+2. `fconst(...)` and `fvar(...)` remain documented, but deferred.
+3. The generated module validates and preserves stable import/function index
    ordering.
-6. Existing imported math helper behavior remains intact.
-7. At least one end-to-end host-instantiated example works for each supported
-   foreign-symbol category.
-8. Documentation clearly states the semantic difference between native foreign
-   symbols and WASM host-provided symbols.
+4. Existing imported math helper behavior remains intact.
+5. At least one end-to-end host-instantiated example works with a user-defined
+   imported function.
+6. Documentation clearly states the semantic difference between native foreign
+   functions and WASM host-provided functions, and marks the non-function
+   foreign forms as deferred for now.
 
 ---
 
@@ -628,11 +562,10 @@ The work is complete when the following are true:
 
 The best first implementation increment is:
 
-1. keep the existing hard-coded helper path unchanged,
-2. generalize import planning for `ffunction(...)` first,
-3. add getter-based `fconst(...)` support next,
-4. add getter-based `fvar(...)` read support after that,
-5. leave imported globals and writable-variable semantics for a later,
-   explicitly justified increment.
+1. keep the existing hard-coded helper path unchanged
+2. generalize import planning for `ffunction(...)` first
+3. prove the end-to-end host import model with a minimal runtime harness
+4. leave `fconst(...)` and `fvar(...)` documented but deferred for a later,
+   explicitly justified plan
 
 This keeps risk low while forcing the important ABI decisions early.

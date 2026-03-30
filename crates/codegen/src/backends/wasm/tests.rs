@@ -281,6 +281,19 @@ fn wasm_reports_clear_error_for_foreign_variable_access() {
 }
 
 #[test]
+fn wasm_reports_clear_error_for_unsupported_generic_foreign_function_call() {
+    let (store, module) = build_unsupported_foreign_function_module();
+    let err = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect_err("unsupported generic foreign functions should be rejected for now");
+    assert!(err.to_string().contains("FRS-CGEN-WASM-0003"));
+    assert!(
+        err.to_string()
+            .contains("unsupported function call in WASM subset: `myhost`"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn wasm_float_comparisons_follow_operand_type_even_when_result_type_is_int32() {
     let (store, module) = build_float_compare_result_int32_module();
     let out = generate_wasm_module(
@@ -2007,6 +2020,81 @@ fn build_foreign_float_helper_module() -> (FirStore, FirId) {
         3,
         3,
         "foreign_float_helpers",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
+    (store, module)
+}
+
+fn build_unsupported_foreign_function_module() -> (FirStore, FirId) {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let dsp_struct = b.block(&[]);
+    let globals = b.block(&[]);
+    let static_decls = b.block(&[]);
+
+    let chan0 = b.int32(0);
+    let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+
+    let in0 = b.load_table("inputs", AccessType::FunArgs, chan0, ptr_ty.clone());
+    let out0 = b.load_table("outputs", AccessType::FunArgs, chan0, ptr_ty.clone());
+
+    let in0_alias = b.declare_var("input0", ptr_ty.clone(), AccessType::Stack, Some(in0));
+    let out0_alias = b.declare_var("output0", ptr_ty, AccessType::Stack, Some(out0));
+
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+    let input0_sample = b.load_table("input0", AccessType::Stack, i0, FirType::FaustFloat);
+    let input0_f32 = b.cast(FirType::Float32, input0_sample);
+    let myhost = b.fun_call("myhost", &[input0_f32], FirType::Float32);
+    let myhost_out = b.cast(FirType::FaustFloat, myhost);
+    let out0_store = b.store_table("output0", AccessType::Stack, i0, myhost_out);
+    let loop_body = b.block(&[out0_store]);
+    let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+    let compute_body = b.block(&[in0_alias, out0_alias, sample_loop]);
+
+    let args = [
+        NamedType {
+            name: "dsp".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "count".to_owned(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_owned(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &args,
+        Some(compute_body),
+        false,
+    );
+
+    let functions = b.block(&[compute]);
+    let module = b.module(
+        1,
+        1,
+        "unsupported_foreign_function",
         dsp_struct,
         globals,
         functions,
