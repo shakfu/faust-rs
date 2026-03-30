@@ -251,19 +251,19 @@ liftn(DEBRUIJNREF(n), threshold=1) =
 
 ---
 
-## 6. Formes mutuellement récursives (récursion multi-sortie)
+## 6. Récursion multi-sortie et vraie récursion mutuelle
 
 ### 6.1 Le motif
 
-La récursion mutuelle en Faust apparaît lorsque l'opérateur `~` connecte des
-signaux multi-canaux. Exemple :
+Faust peut produire des groupes récursifs multi-sorties sans que les sorties
+soient mutuellement récursives au sens strict. Exemple :
 
 ```faust
 process = si.bus(2) ~ (*(0.5), *(0.25));
 ```
 
-Ici les deux canaux se réinjectent mutuellement via le chemin de rétroaction
-parallèle. Le noeud `Rec` a :
+Ici chaque canal se réinjecte dans son propre slot via le chemin de
+rétroaction parallèle. Le noeud `Rec` a :
 - `left` = `si.bus(2)` (2→2 : identité sur 2 canaux)
 - `right` = `(*(0.5), *(0.25))` (2→2 : gain indépendant sur chaque canal)
 
@@ -274,16 +274,44 @@ Le groupe récursif a **2 corps** (un par canal de sortie) :
 ```
 DEBRUIJNREC(
     body = list(
-        delay1(proj(0, DEBRUIJNREF(1))) * 0.5 + input(0),   ← corps₀
-        delay1(proj(1, DEBRUIJNREF(1))) * 0.25 + input(1)   ← corps₁
+        delay1(proj(0, DEBRUIJNREF(1))) * 0.5,   ← corps₀
+        delay1(proj(1, DEBRUIJNREF(1))) * 0.25   ← corps₁
     )
 )
 ```
 
-Les deux corps référencent le même `DEBRUIJNREF(1)` mais sélectionnent des
-projections différentes (`proj(0, ...)` et `proj(1, ...)`).
+Les deux corps référencent le même `DEBRUIJNREF(1)` mais sélectionnent chacun
+leur propre projection (`proj(0, ...)` et `proj(1, ...)`). C'est bien un groupe
+récursif multi-sortie, mais pas encore une vraie forme mutuellement récursive.
 
-### 6.3 Cas général à N sorties
+### 6.3 Vraie récursion mutuelle par croisement des voies de feedback
+
+Une variante réellement mutuellement récursive croise les deux voies de
+feedback :
+
+```faust
+import("stdfaust.lib");
+
+process = si.bus(2) ~ ((*(0.5), *(0.25)) : ro.cross(2));
+```
+
+Le groupe récursif correspondant devient :
+
+```
+DEBRUIJNREC(
+    body = list(
+        delay1(proj(1, DEBRUIJNREF(1))) * 0.25,   ← corps₀ dépend de la sortie 1
+        delay1(proj(0, DEBRUIJNREF(1))) * 0.5     ← corps₁ dépend de la sortie 0
+    )
+)
+```
+
+On a alors une vraie récursion mutuelle :
+
+- la sortie 0 dépend de la sortie 1 ;
+- la sortie 1 dépend de la sortie 0.
+
+### 6.4 Cas général à N sorties
 
 Pour une rétroaction à N canaux :
 
@@ -306,33 +334,193 @@ output[i] = corps_i            sinon
 
 ---
 
-## 7. Cas de récursion dégénérée
+## 7. Aperture : mesurer l'ouverture récursive
 
-### 7.1 Qu'est-ce qui rend une récursion « dégénérée » ?
+### 7.1 Concept
+
+L'**aperture** d'un sous-arbre de signaux est la profondeur maximale des
+références De Bruijn libres (non liées) qu'il contient. Elle répond à une
+question fondamentale : *cette expression dépend-elle d'un groupe récursif
+englobant, et si oui, à combien de niveaux d'imbrication ?*
+
+| Aperture | Signification |
+|----------|---------------|
+| `0` | L'expression est **fermée** — elle n'a pas de référence récursive libre. Elle peut être évaluée indépendamment de tout `DEBRUIJNREC` englobant. |
+| `1` | L'expression référence son groupe récursif **immédiatement englobant** (`DEBRUIJNREF(1)`). |
+| `2` | L'expression référence un groupe situé **deux niveaux d'imbrication au-dessus** (`DEBRUIJNREF(2)`). |
+| `n` | L'expression atteint `n` niveaux de lieurs vers l'extérieur. |
+
+C'est directement analogue au concept de **variables libres** en lambda-calcul :
+un terme sans variables libres est fermé (un combinateur) ; un terme avec des
+variables libres est ouvert et doit être évalué dans un contexte qui les lie.
+L'aperture est l'équivalent De Bruijn — au lieu de traquer les *noms* de
+variables, elle traque la *profondeur* de la référence non liée la plus
+profonde.
+
+### 7.2 Algorithme de calcul
+
+L'aperture est calculée récursivement sur la structure de l'arbre avec trois
+règles :
+
+```
+aperture(DEBRUIJNREF(level))  =  level
+aperture(DEBRUIJNREC(body))   =  aperture(body) - 1
+aperture(autre_noeud)         =  max(aperture(enfant) pour enfant dans enfants)
+aperture(feuille)             =  0
+```
+
+**Règle 1 — Noeuds de référence** : un `DEBRUIJNREF(level)` contribue
+exactement son niveau. C'est le cas de base qui introduit l'ouverture.
+
+**Règle 2 — Noeuds lieurs** : un `DEBRUIJNREC(body)` *capture* un niveau de
+référence. Si le corps a une aperture de 1 (référençant son propre lieur), le
+résultat est 0 — le lieur l'a fermé. Si le corps a une aperture de 2
+(atteignant un lieur externe), le résultat est 1 — un niveau libre subsiste.
+
+**Règle 3 — Autres noeuds** : pour tout noeud composite (arithmétique, délai,
+proj, ...), l'aperture est le maximum des apertures de ses enfants. Un seul
+enfant ouvert suffit à rendre le parent ouvert.
+
+### 7.3 Exemple détaillé
+
+Considérons cette expression issue d'une récursion imbriquée :
+
+```
+add(
+    delay1(proj(0, DEBRUIJNREF(1))),    ← aperture = 1
+    mul(
+        input(0),                        ← aperture = 0
+        delay1(proj(0, DEBRUIJNREF(2)))  ← aperture = 2
+    )                                    ← aperture = max(0, 2) = 2
+)                                        ← aperture = max(1, 2) = 2
+```
+
+Si cette expression est enveloppée dans un `DEBRUIJNREC` :
+```
+DEBRUIJNREC(ci-dessus)  →  aperture = 2 - 1 = 1   (toujours ouverte — un niveau libre)
+```
+
+Si enveloppée dans deux `DEBRUIJNREC` imbriqués :
+```
+DEBRUIJNREC(DEBRUIJNREC(ci-dessus))  →  aperture = (2-1) - 1 = 0   (fermée)
+```
+
+### 7.4 Implémentation : C++ vs Rust
+
+**C++ (`compiler/tlib/recursive-tree.cpp`)**
+
+Dans le compilateur C++, l'aperture est un **champ synthétisé** stocké sur
+chaque noeud (`CTree::fAperture`). Elle est calculée une seule fois lors de la
+construction par `calcTreeAperture()` et mise en cache de manière permanente —
+coût nul lors des lectures ultérieures :
+
+```cpp
+int CTree::calcTreeAperture(const Node& n, const tvec& br) {
+    if (n == DEBRUIJNREF)   return int_value(br[0]);
+    if (n == DEBRUIJN)      return br[0]->fAperture - 1;
+    // sinon : max des enfants
+    int rc = 0;
+    for (auto& b : br) rc = max(rc, b->aperture());
+    return rc;
+}
+```
+
+Chaque noeud porte son aperture accessible via `tree->aperture()`, donc le
+test lors de la propagation est une simple lecture de champ.
+
+**Rust (`crates/tlib/src/recursion.rs`)**
+
+Dans le compilateur Rust, les noeuds de `TreeArena` ne portent pas de champ
+d'aperture pré-calculé. À la place, l'aperture est calculée à la demande et
+mémoïsée dans un `AHashMap<TreeId, i64>`. L'implémentation unique vit dans
+`tlib` :
+
+```rust
+fn aperture(arena: &TreeArena, root: TreeId, memo: &mut AHashMap<TreeId, i64>) -> i64 {
+    if let Some(value) = memo.get(&root) { return *value; }
+    let value = if let Some(level) = match_de_bruijn_ref(arena, root) {
+        level
+    } else if let Some(body) = match_de_bruijn_rec(arena, root) {
+        aperture(arena, body, memo) - 1
+    } else {
+        arena.children(root).map_or(0, |ch|
+            ch.iter().map(|&c| aperture(arena, *c, memo)).max().unwrap_or(0))
+    };
+    memo.insert(root, value);
+    value
+}
+```
+
+Deux points d'entrée publics partagent ce worker :
+- `de_bruijn_aperture(arena, root)` — crée un cache local éphémère, adapté
+  aux requêtes ponctuelles.
+- `de_bruijn_aperture_with_memo(arena, root, memo)` — accepte un cache
+  externe, utilisé par `propagate` pour amortir les coûts d'aperture sur
+  l'ensemble du traversal de propagation (le cache est partagé avec `liftn`
+  dans `PropagateMemo`).
+
+### 7.5 Rôle dans le pipeline
+
+L'aperture intervient à plusieurs points du pipeline de compilation :
+
+1. **Lors de l'abaissement de `Rec` (étape 7)** : détermine quels corps d'un
+   groupe récursif sont véritablement récursifs (`aperture > 0`) versus
+   dégénérés (`aperture == 0`). Seuls les corps récursifs sont enveloppés dans
+   `proj(i, group)`.
+
+2. **Lors du `liftn`** : l'opération de levée utilise un seuil pour décider
+   quelles références incrémenter. Une référence avec `level < seuil` est déjà
+   liée dans la portée courante et ne doit pas être levée ; une référence avec
+   `level >= seuil` est libre et doit être incrémentée. C'est intimement lié à
+   l'aperture — `liftn` opère sur la même information structurelle.
+
+3. **Lors de `de_bruijn_to_sym`** : la conversion de la forme positionnelle à
+   la forme nommée utilise un raisonnement de type aperture pour déterminer
+   quels noeuds `DEBRUIJNREF` sont capturés par un lieur `DEBRUIJNREC` donné
+   (niveau 1) versus ceux qui atteignent un lieur externe (niveau > 1).
+
+### 7.6 Diagramme de l'aperture
+
+```
+    DEBRUIJNREC                              aperture : max(1,2)-1 = 1
+        │
+        body = add(...)                      aperture : max(1,2) = 2
+        ┌────────┴────────────┐
+        │                     │
+  delay1(proj(0,             mul(...)         aperture : max(0,2) = 2
+    DEBRUIJNREF(1)))         ┌───┴───┐
+        │                    │       │
+    aperture : 1         input(0)  delay1(proj(0,
+                         ap : 0      DEBRUIJNREF(2)))
+                                         │
+                                     aperture : 2
+```
+
+L'aperture se propage **vers le haut** depuis les feuilles (références) jusqu'à
+la racine, et chaque lieur `DEBRUIJNREC` la **décrémente** de 1. Quand elle
+atteint 0, le sous-arbre est fermé.
+
+---
+
+## 8. Cas de récursion dégénérée
+
+### 8.1 Qu'est-ce qui rend une récursion « dégénérée » ?
 
 Une récursion est dégénérée lorsque certains canaux de sortie du groupe récursif
 **n'utilisent pas réellement la rétroaction**. Cela signifie que leur
 `aperture` vaut 0 — ils ne contiennent aucune référence `DEBRUIJNREF`.
 
-### 7.2 Le test d'aperture
+### 8.2 Le test d'aperture
 
-La fonction `aperture(expr)` calcule le **niveau De Bruijn libre maximal**
-dans une expression de signal :
+La fonction d'aperture (voir [section 7](#7-aperture--mesurer-louverture-récursive)
+pour le traitement complet) détermine quels corps sont véritablement récursifs :
 
-| Noeud | Aperture |
-|-------|----------|
-| `DEBRUIJNREF(level)` | `level` |
-| `DEBRUIJNREC(body)` | `aperture(body) - 1` (le lieur capture un niveau) |
-| Tout autre noeud | `max(aperture(enfants))` |
-| Feuille (pas de refs) | `0` |
+- `aperture(corps_i) > 0` → le corps référence le groupe récursif → émettre
+  comme `proj(i, group)`.
+- `aperture(corps_i) == 0` → pas de dépendance récursive → émettre directement,
+  en court-circuitant l'enveloppe récursive.
 
-Quand `aperture(corps_i) > 0`, le corps référence véritablement le groupe
-récursif → il doit être émis comme `proj(i, group)`.
-
-Quand `aperture(corps_i) == 0`, le corps n'a aucune dépendance récursive → il
-peut être émis directement, en court-circuitant l'enveloppe récursive.
-
-### 7.3 Pourquoi c'est important : le problème `proj(7, W)`
+### 8.3 Pourquoi c'est important : le problème `proj(7, W)`
 
 Considérons une rétroaction à 8 canaux où seul le canal 7 se réinjecte
 réellement :
@@ -358,7 +546,7 @@ pour i dans 0..8 :
 Donc les canaux 0–6 sont émis directement (pas de `proj`), et seul le canal 7
 passe par `proj(7, group)`.
 
-### 7.4 L'élimination de dégénérescence en C++
+### 8.4 L'élimination de dégénérescence en C++
 
 Le compilateur C++ va plus loin avec `inlineDegenerateRecursions()` : il
 détecte que 7 des 8 corps ne sont pas récursifs, **les retire du groupe**, et
@@ -372,7 +560,7 @@ Après : SYMREC([b₇])                avec proj(7, W)  ← index 7, arité 1 !
 Cela crée une **projection hors limites** : `proj(7, W)` sur un groupe
 d'arité 1.
 
-### 7.5 Le correctif Rust : `canonicalize_unary_rec_projections`
+### 8.5 Le correctif Rust : `canonicalize_unary_rec_projections`
 
 Dans `signal_prepare.rs`, après que `de_bruijn_to_sym` convertit la forme
 De Bruijn en forme symbolique, une passe de canonicalisation réécrit :
@@ -390,7 +578,7 @@ l'arité physique est connue comme étant 1.
 réverbération algorithmique à 8 lignes de retard dont la matrice de
 rétroaction produit exactement ce motif après évaluation.
 
-### 7.6 Était-ce strictement nécessaire ?
+### 8.6 Était-ce strictement nécessaire ?
 
 Pas au sens sémantique absolu.
 
@@ -425,19 +613,247 @@ Cela donne un IR préparé plus simple pour les passes en aval.
 
 ---
 
-## 8. Pipeline complet : De Bruijn → symbolique → FIR
+## 9. Conversion : De Bruijn vers forme symbolique (`de_bruijn_to_sym`)
+
+### 9.1 Pourquoi une seconde représentation ?
+
+Les indices De Bruijn sont idéaux lors de la construction (portée correcte par
+construction, partage déterministe), mais ils sont opaques pour les passes
+ultérieures : lire `DEBRUIJNREF(2)` nécessite de compter manuellement les
+lieurs englobants. La forme symbolique remplace les niveaux positionnels par
+des **variables nommées**, rendant les groupes récursifs auto-documentés et
+plus faciles à traiter par le backend FIR.
+
+| Forme De Bruijn | Forme symbolique |
+|-----------------|------------------|
+| `DEBRUIJNREC(body)` | `SYMREC(var, body)` |
+| `DEBRUIJNREF(level)` | `SYMREF(var)` |
+
+### 9.2 Vue d'ensemble de l'algorithme
+
+La conversion est une traversée récursive en deux phases pour chaque lieur
+`DEBRUIJNREC` rencontré :
+
+```
+fonction convert(noeud):
+    si noeud est DEBRUIJNREC(body):
+        var ← fresh_var()                     // allouer W0, W1, W2, ...
+        body' ← substitute(body, level=1, remplacement=SYMREF(var))
+        body'' ← convert(body')               // récurser dans le corps converti
+        retourner SYMREC(var, body'')
+
+    si noeud est DEBRUIJNREF(level):
+        erreur("référence non liée")          // ne devrait pas arriver sur un arbre fermé
+
+    si noeud est SYMREC ou SYMREF:
+        passer inchangé
+
+    sinon:
+        retourner reconstruire(noeud, [convert(enfant) pour enfant dans enfants])
+```
+
+**Précondition** : l'arbre en entrée doit être **fermé** (`aperture ≤ 0`). Un
+arbre ouvert laisserait des noeuds `DEBRUIJNREF` non résolus après conversion.
+La fonction vérifie cela et retourne une erreur sinon.
+
+### 9.3 Le helper `substitute`
+
+L'opération clé est `substitute(arbre, level, remplacement)`, qui remplace
+chaque `DEBRUIJNREF(level)` au niveau exact donné par le noeud de
+remplacement :
+
+```
+fonction substitute(noeud, level, remplacement):
+    si aperture(noeud) < level:
+        retourner noeud                       // optimisation : aucune ref ne peut correspondre
+
+    si noeud est DEBRUIJNREF(n):
+        si n == level: retourner remplacement // c'est celle qu'on lie
+        sinon:         retourner noeud        // appartient à un autre lieur
+
+    si noeud est DEBRUIJNREC(body):
+        retourner DEBRUIJNREC(substitute(body, level + 1, remplacement))
+                                              // ↑ dans un lieur, la cible monte d'un cran
+
+    sinon:
+        retourner reconstruire(noeud, [substitute(enfant, level, remplacement)
+                                       pour enfant dans enfants])
+```
+
+Le détail critique est le `level + 1` en descendant dans un `DEBRUIJNREC`
+imbriqué : le niveau de référence cible se décale car le lieur interne
+introduit une nouvelle portée. Cela garantit que seules les références
+appartenant au lieur *courant* sont substituées.
+
+Le **raccourci d'aperture** (`aperture(noeud) < level → retourner noeud`)
+évite de traverser les sous-arbres qui ne peuvent pas contenir de référence
+correspondante. C'est la principale optimisation de performance, partagée
+entre les implémentations C++ et Rust.
+
+### 9.4 Exemple détaillé : récursion simple
+
+```
+Entrée : DEBRUIJNREC(add(delay1(proj(0, DEBRUIJNREF(1))), input(0)))
+
+Étape 1 : var = W0
+Étape 2 : substitute(body, 1, SYMREF(W0))
+           → add(delay1(proj(0, SYMREF(W0))), input(0))
+Étape 3 : convert récursivement (plus de DEBRUIJNREC à l'intérieur)
+           → pas de changement
+Étape 4 : SYMREC(W0, add(delay1(proj(0, SYMREF(W0))), input(0)))
+```
+
+### 9.5 Exemple détaillé : récursion imbriquée
+
+```
+Entrée : DEBRUIJNREC(                              ← externe
+             add(
+                 DEBRUIJNREC(                      ← interne
+                     mul(DEBRUIJNREF(1),           ← réfère à l'interne
+                         DEBRUIJNREF(2))           ← réfère à l'externe
+                 ),
+                 DEBRUIJNREF(1)                    ← réfère à l'externe
+             )
+         )
+
+Conversion externe :
+  var_externe = W0
+  substitute(body, 1, SYMREF(W0)) :
+    - DEBRUIJNREF(1) dans add → SYMREF(W0)
+    - Dans le DEBRUIJNREC interne : level passe à 2
+      - DEBRUIJNREF(1) reste (niveau 1 ≠ 2) → réfère toujours à l'interne
+      - DEBRUIJNREF(2) correspond au niveau 2 → SYMREF(W0)
+
+  Après la substitution externe :
+    add(
+        DEBRUIJNREC(mul(DEBRUIJNREF(1), SYMREF(W0))),
+        SYMREF(W0)
+    )
+
+  Récursion convert dans le DEBRUIJNREC interne :
+    var_interne = W1
+    substitute(mul(DEBRUIJNREF(1), SYMREF(W0)), 1, SYMREF(W1)) :
+      - DEBRUIJNREF(1) → SYMREF(W1)
+      - SYMREF(W0) → inchangé (pas un DEBRUIJNREF)
+
+  Résultat final :
+    SYMREC(W0, add(SYMREC(W1, mul(SYMREF(W1), SYMREF(W0))), SYMREF(W0)))
+```
+
+Chaque lieur obtient son propre nom unique. Les références sont maintenant
+explicites — `W0` désigne toujours le groupe externe, `W1` toujours le groupe
+interne, quelle que soit la profondeur d'imbrication.
+
+### 9.6 Allocation de variables fraîches
+
+C++ et Rust allouent les noms de variables à partir d'une séquence déterministe
+`W0, W1, W2, ...`. L'allocation doit produire des noms qui ne collisionnent
+pas avec les symboles pré-existants dans l'arène :
+
+- **C++** : utilise `unique("W")`, qui génère un nom frais via un compteur
+  global.
+- **Rust** : itère le compteur d'index, tente d'interner `W{n}`, et saute
+  tout nom déjà présent dans l'arène (détecté en vérifiant si `arena.len()` a
+  augmenté après l'appel d'internement).
+
+Cet évitement de collisions est nécessaire car l'arène peut déjà contenir des
+symboles nommés `W0`, `W1`, ... provenant de code Faust évalué ou de passes
+de conversion antérieures.
+
+### 9.7 Mémoïsation et partage
+
+Les deux implémentations préservent le partage structurel via la mémoïsation :
+
+- **C++** : utilise les propriétés d'arbre (`setProperty`/`getProperty`) avec
+  la clé `DEBRUIJN2SYM` pour la conversion et une clé composée
+  `(SUBSTITUTE, level, remplacement)` pour la substitution.
+- **Rust** : utilise trois caches `AHashMap` distincts dans la structure
+  `Converter` : `convert_memo`, `substitute_memo`, et `aperture_memo`.
+
+Ceci est critique pour la performance : l'arbre de signaux possède un partage
+extensif (la `TreeArena` interne les sous-arbres structurellement identiques),
+donc sans mémoïsation le même sous-arbre serait traversé un nombre
+exponentiellement élevé de fois.
+
+### 9.8 Implémentation : C++ vs Rust
+
+**C++ (`compiler/tlib/recursive-tree.cpp`)**
+
+```cpp
+static Tree calcDeBruijn2Sym(Tree t) {
+    Tree body, var;
+    if (isRec(t, body)) {
+        var = tree(unique("W"));
+        return rec(var, deBruijn2Sym(substitute(body, 1, ref(var))));
+    } else if (isRef(t, var)) {
+        return t;                       // déjà symbolique
+    } else {
+        // reconstruire avec les enfants convertis
+        tvec br(t->arity());
+        for (int i = 0; i < t->arity(); i++)
+            br[i] = deBruijn2Sym(t->branch(i));
+        return tree(t->node(), br);
+    }
+}
+```
+
+**Rust (`crates/tlib/src/recursion.rs`)**
+
+```rust
+fn convert(&mut self, id: TreeId) -> Result<TreeId, RecursionError> {
+    if let Some(mapped) = self.convert_memo.get(&id) { return Ok(*mapped); }
+
+    if let Some(body) = match_de_bruijn_rec(self.arena, id) {
+        let var = self.fresh_var();
+        let replacement = sym_ref(self.arena, var);
+        let substituted = self.substitute(body, 1, replacement)?;
+        let converted_body = self.convert(substituted)?;
+        let out = sym_rec(self.arena, var, converted_body);
+        self.convert_memo.insert(id, out);
+        return Ok(out);
+    }
+    // ... passthrough SYMREF, erreur DEBRUIJNREF, reconstruction générique
+}
+```
+
+La version Rust diffère sur deux points :
+1. Retourne `Result` avec des erreurs typées au lieu d'assertions
+   (`faustassert`).
+2. Conserve tous les caches dans une structure `Converter` unique (durée de vie
+   limitée) plutôt que dans des propriétés d'arbre (durée de vie globale).
+
+### 9.9 Diagramme : flux de conversion
+
+```
+    DEBRUIJNREC ──────────────────────────────────────► SYMREC(W0, ...)
+         │                                                  │
+         │  1. fresh_var() → W0                             │
+         │  2. substitute(body, 1, SYMREF(W0))              │
+         │  3. convert(corps_substitué)                     │
+         │                                                  │
+         ▼                                                  ▼
+    DEBRUIJNREF(1) ─── substitution ────────────────► SYMREF(W0)
+    DEBRUIJNREF(2) ─── inchangé (level ≠ 1) ───────► DEBRUIJNREF(2)
+                       (sera traité par le convert externe)
+
+    Autres noeuds ─── reconstruction avec enfants convertis ──► même structure
+```
+
+---
+
+## 10. Pipeline complet : De Bruijn → symbolique → FIR
 
 ```
 Arbre de boîtes (noeuds Rec)
          │
          ▼
-    propagate_in_slot_env           ← encodage De Bruijn (ce document)
+    propagate_in_slot_env           ← encodage De Bruijn (sections 3–6)
          │
          ▼
 Arbre de signaux avec noeuds DEBRUIJNREC / DEBRUIJNREF
          │
          ▼
-    de_bruijn_to_sym (tlib)         ← conversion en forme nommée
+    de_bruijn_to_sym (tlib)         ← conversion symbolique (section 9)
          │
          ▼
 Arbre de signaux avec noeuds SYMREC(var, body) / SYMREF(var)
@@ -449,25 +865,9 @@ Arbre de signaux avec noeuds SYMREC(var, body) / SYMREF(var)
     signal_fir                      ← génération de code FIR
 ```
 
-### Conversion : `de_bruijn_to_sym`
-
-Pour chaque lieur `DEBRUIJNREC(body)` :
-1. Allouer une variable symbolique fraîche `W0`, `W1`, ...
-2. Substituer `DEBRUIJNREF(1)` dans le corps par `SYMREF(W0)`.
-3. Envelopper sous la forme `SYMREC(W0, corps_converti)`.
-
-```
-DEBRUIJNREC(add(delay1(proj(0, DEBRUIJNREF(1))), input(0)))
-    ↓ de_bruijn_to_sym
-SYMREC(W0, add(delay1(proj(0, SYMREF(W0))), input(0)))
-```
-
-Cela produit des groupes récursifs nommés lisibles par un humain, adaptés au
-backend FIR.
-
 ---
 
-## 9. Discussion de conception : pourquoi ne pas canonicaliser dans `propagate` ?
+## 11. Discussion de conception : pourquoi ne pas canonicaliser dans `propagate` ?
 
 Une question naturelle se pose : puisque `propagate` sait déjà quels canaux
 sont dégénérés (via le test d'aperture à l'étape 7), pourrait-on effectuer la
@@ -610,25 +1010,28 @@ uniquement sur des slots physiques denses.
 
 ---
 
-## 10. Résumé des fonctions clés
+## 12. Résumé des fonctions clés
 
 | Fonction | Fichier | Rôle |
 |----------|---------|------|
 | `make_mem_sig_proj_list` | `propagate/lib.rs` | Initialise les `Ri` placeholders de rétroaction : `delay1(proj(i, DEBRUIJNREF(1)))` |
 | `lift_signals` / `liftn` | `propagate/lib.rs` | Incrémente les niveaux De Bruijn pour éviter la capture par de nouveaux lieurs |
-| `aperture` | `propagate/lib.rs` | Calcule le niveau De Bruijn libre maximal (0 = pas récursif) |
+| `de_bruijn_aperture` / `de_bruijn_aperture_with_memo` | `tlib/recursion.rs` | Calcule le niveau De Bruijn libre maximal (0 = fermé, >0 = récursif). La variante `_with_memo` accepte un cache externe pour usage amorti par `propagate`. Voir [section 7](#7-aperture--mesurer-louverture-récursive) |
 | `debruijn_rec` / `debruijn_ref` | `propagate/lib.rs` | Constructeurs pour les noeuds `DEBRUIJNREC` / `DEBRUIJNREF` |
-| `de_bruijn_to_sym` | `tlib/recursion.rs` | Convertit le De Bruijn positionnel en `SYMREC`/`SYMREF` nommés |
+| `de_bruijn_to_sym` | `tlib/recursion.rs` | Convertit le De Bruijn positionnel en `SYMREC`/`SYMREF` nommés. Voir [section 9](#9-conversion--de-bruijn-vers-forme-symbolique-de_bruijn_to_sym) |
+| `Converter::substitute` | `tlib/recursion.rs` | Remplace `DEBRUIJNREF(level)` par un remplacement symbolique, avec raccourci d'aperture |
+| `Converter::fresh_var` | `tlib/recursion.rs` | Alloue des noms de variables symboliques sans collision (`W0`, `W1`, ...) |
 | `canonicalize_unary_rec_projections` | `transform/signal_prepare.rs` | Normalise les groupes récursifs à corps unique vers le slot physique dense `0` pour le typage, la promotion et le lowering FIR |
 
 ---
 
-## 11. Glossaire
+## 13. Glossaire
 
-- **Aperture** : le niveau De Bruijn libre maximal dans un sous-arbre. Si > 0, le sous-arbre contient des références récursives non liées.
+- **Aperture** : le niveau De Bruijn libre maximal dans un sous-arbre. Si > 0, le sous-arbre est ouvert (contient des références récursives non liées) ; si 0, il est fermé. Analogue au comptage des variables libres en lambda-calcul. Calculée par trois règles : `DEBRUIJNREF(n)` → `n` ; `DEBRUIJNREC(body)` → `aperture(body) - 1` ; autres noeuds → `max(enfants)`. Voir [section 7](#7-aperture--mesurer-louverture-récursive).
 - **Lieur** (`DEBRUIJNREC`) : introduit une portée récursive. Chaque lieur capture les références de niveau 1.
 - **Récursion dégénérée** : un groupe récursif où certaines sorties ne dépendent pas réellement de la rétroaction. Leur aperture vaut 0.
 - **Indice/niveau De Bruijn** : schéma de référence sans nom où l'entier compte les lieurs englobants entre la référence et son site de liaison.
 - **Levée** (`liftn`) : incrémentation des niveaux De Bruijn des références libres pour préserver la liaison correcte lors de l'introduction d'un nouveau lieur.
 - **Projection** (`proj(i, group)`) : sélectionne la i-ème sortie d'un groupe récursif multi-sortie.
-- **SYMREC/SYMREF** : forme symbolique nommée de la récursion, produite par `de_bruijn_to_sym` à partir de la forme positionnelle De Bruijn.
+- **Substitution** (`substitute`) : remplace tous les noeuds `DEBRUIJNREF` à un niveau donné par un noeud de remplacement. Descendre dans un `DEBRUIJNREC` imbriqué incrémente le niveau cible. Utilise le raccourci d'aperture pour ignorer les sous-arbres fermés.
+- **SYMREC/SYMREF** : forme symbolique nommée de la récursion, produite par `de_bruijn_to_sym` à partir de la forme positionnelle De Bruijn. `SYMREC(var, body)` lie `var` dans `body` ; `SYMREF(var)` la référence. Voir [section 9](#9-conversion--de-bruijn-vers-forme-symbolique-de_bruijn_to_sym).

@@ -185,6 +185,32 @@ forcément du groupe récursif.
 Le helper `aperture(...)` calcule le niveau libre maximal de Bruijn visible dans
 un sous-arbre.
 
+### 6.1 Ce que signifie ce concept
+
+On peut lire `aperture` comme le degré d’ouverture résiduel d’un sous-arbre vis
+à vis des portées récursives.
+
+Plus concrètement :
+
+- un sous-arbre d’aperture positive contient encore au moins une référence de
+  Bruijn libre ;
+- un sous-arbre d’aperture `0` est fermé par rapport au binder récursif
+  courant ;
+- un sous-arbre d’aperture négative est lui aussi fermé, et cela signifie en
+  pratique qu’il se trouve sous davantage de binders récursifs que nécessaire
+  pour lier les références qu’il contient.
+
+Autrement dit, `aperture` ne répond pas à la question “y a-t-il de la récursion
+quelque part dessous ?”, mais plutôt à la question : “vu depuis ici, jusqu’à
+quelle portée récursive extérieure monte encore la référence libre la plus
+profonde ?”.
+
+C’est pour cela que c’est le bon test à la frontière du `Rec` :
+
+- `aperture > 0` signifie que la branche est encore ouverte sur le groupe en
+  cours de construction ;
+- `aperture <= 0` signifie qu’elle est déjà fermée à cette frontière.
+
 Règles utiles :
 
 - `aperture(DEBRUIJNREF(k)) = k`
@@ -198,6 +224,22 @@ Interprétation :
   elle doit être réémise comme `proj(i, group)`
 - `aperture == 0` : la branche est fermée et peut rester hors de l’interface du
   groupe récursif
+
+### 6.2 Petites intuitions par exemple
+
+```text
+DEBRUIJNREF(1)              -> aperture = 1
+DEBRUIJNREC(DEBRUIJNREF(1)) -> aperture = 0
+DEBRUIJNREC(DEBRUIJNREF(2)) -> aperture = 1
+```
+
+Interprétation :
+
+- un `DEBRUIJNREF(1)` nu est ouvert, car il lui manque encore un binder
+  récursif englobant ;
+- entourer `DEBRUIJNREF(1)` par un `DEBRUIJNREC` le ferme exactement ;
+- un `DEBRUIJNREF(2)` placé sous un binder garde encore une référence vers un
+  binder plus extérieur, donc il reste un niveau libre.
 
 C’est pour cela que la liste de sorties de `A ~ B` peut mélanger :
 
@@ -238,9 +280,9 @@ flowchart LR
     G --> O["proj(0, group)"]
 ```
 
-## 8. Comment la récursion mutuelle est représentée
+## 8. Comment les récursions multi-sorties et mutuelles sont représentées
 
-La récursion mutuelle est gérée en plaçant toutes les sorties de `left` dans la
+La récursion multi-sortie est gérée en plaçant toutes les sorties de `left` dans la
 même liste de corps du groupe récursif.
 
 Si `left` a deux sorties, le corps du groupe est conceptuellement :
@@ -260,17 +302,41 @@ body0 = f(proj(1, DEBRUIJNREF(1)), ...)
 body1 = g(proj(0, DEBRUIJNREF(1)), ...)
 ```
 
-On obtient alors une paire mutuellement récursive :
+On obtient alors une vraie paire mutuellement récursive :
 
 - la sortie 0 dépend de la sortie 1 ;
 - la sortie 1 dépend de la sortie 0.
 
+En revanche :
+
+```faust
+process = si.bus(2) ~ (*(0.5), *(0.25));
+```
+
+ne donne qu'un groupe récursif multi-sortie. Chaque corps dépend de son propre
+slot.
+
+Un vrai exemple Faust de récursion mutuelle est :
+
+```faust
+import("stdfaust.lib");
+
+process = si.bus(2) ~ ((*(0.5), *(0.25)) : ro.cross(2));
+```
+
+ce qui donne schématiquement :
+
+```text
+body0 = delay1(proj(1, DEBRUIJNREF(1))) * 0.25
+body1 = delay1(proj(0, DEBRUIJNREF(1))) * 0.5
+```
+
 Le point crucial est qu’il n’y a pas un binder par sortie. Il y a un seul
 binder partagé par tout le vecteur de sorties.
 
-Autrement dit, les formes mutuellement récursives ne sont pas un cas spécial :
-ce sont simplement les formes multi-sorties normales d’un groupe récursif avec
-projections indexées.
+Autrement dit, les formes mutuellement récursives n'utilisent pas un mécanisme
+distinct : ce sont un cas particulier des formes multi-sorties d’un groupe
+récursif avec projections indexées.
 
 ## 9. Ce qui se passe après `propagate`
 
@@ -307,6 +373,86 @@ proj(1, SYMREF(W0))
 
 La forme symbolique est plus pratique pour certaines passes aval, mais la forme
 de Bruijn reste plus simple à produire dans `propagate`.
+
+### 9.1 Pourquoi cette conversion existe
+
+La forme de Bruijn est pratique pendant la construction de la récursion, car le
+binding y est purement positionnel :
+
+- `DEBRUIJNREF(1)` signifie “le binder récursif englobant le plus proche” ;
+- `DEBRUIJNREF(2)` signifie “le binder récursif extérieur suivant” ;
+- aucune génération de nom frais n’est nécessaire pendant `propagate`.
+
+Mais les passes aval ont en général intérêt à manipuler une forme nommée,
+explicite, plus simple à reconnaître et à transporter. Le pipeline convertit
+donc :
+
+- `DEBRUIJNREC(body)` en `SYMREC(var, body')`
+- `DEBRUIJNREF(k)` en la référence symbolique correspondante une fois le bon
+  binder identifié
+
+L’entrée de `de_bruijn_to_sym(...)` doit déjà être fermée à la racine de la
+conversion. Autrement dit, la racine doit avoir `aperture <= 0`. S’il reste des
+références de Bruijn libres, la conversion échoue, car aucun binder symbolique
+englobant ne permet de leur donner un sens.
+
+### 9.2 La règle exacte de conversion
+
+Pour chaque binder `DEBRUIJNREC(body)` rencontré, le convertisseur fait ceci :
+
+1. Allouer une variable symbolique fraîche, par exemple `W0`, `W1`, ...
+2. Dans le corps de ce binder, remplacer `DEBRUIJNREF(1)` par `SYMREF(Wn)`.
+3. Parcourir récursivement ce corps réécrit pour convertir les binders
+   récursifs imbriqués.
+4. Reconstruire le binder sous la forme `SYMREC(Wn, converted_body)`.
+
+Le point clé est que la substitution dépend du niveau :
+
+- le binder courant remplace exactement le niveau `1` dans son propre corps ;
+- quand le convertisseur descend sous un autre `DEBRUIJNREC`, le niveau cible
+  est décalé d’une unité ;
+- ainsi, une référence extérieure vue comme `DEBRUIJNREF(2)` sous un binder
+  interne devient une référence vers la variable symbolique extérieure.
+
+Conceptuellement :
+
+```text
+DEBRUIJNREC(
+  DEBRUIJNREC(
+    pair(DEBRUIJNREF(1), DEBRUIJNREF(2))
+  )
+)
+```
+
+devient :
+
+```text
+SYMREC(W0,
+  SYMREC(W1,
+    pair(SYMREF(W1), SYMREF(W0))
+  )
+)
+```
+
+La conversion ne change donc pas la structure de la récursion. Elle change
+seulement la manière de représenter binders et références :
+
+- la forme de Bruijn les encode par profondeur relative ;
+- la forme symbolique les encode par variables explicites.
+
+### 9.3 Pourquoi cela reste fidèle à l’arbre de Bruijn
+
+La conversion est un changement de représentation, pas une normalisation
+structurelle :
+
+- l’imbrication des binders reste la même ;
+- la liste des corps récursifs reste la même ;
+- les indices de projection comme `proj(i, ...)` restent les mêmes ;
+- seul le support de récursion passe de références positionnelles à des
+  références nommées.
+
+C’est pour cela que les passes aval peuvent raisonner sur `SYMREC` et `SYMREF`
+sans perdre le graphe récursif exact construit par `propagate`.
 
 ## 10. Pourquoi il existe des cas “dégénérés”
 

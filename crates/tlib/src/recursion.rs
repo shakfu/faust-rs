@@ -155,7 +155,20 @@ pub fn match_sym_ref(arena: &TreeArena, id: TreeId) -> Option<TreeId> {
 #[must_use]
 pub fn de_bruijn_aperture(arena: &TreeArena, root: TreeId) -> i64 {
     let mut memo = AHashMap::new();
-    aperture(arena, root, &mut memo)
+    de_bruijn_aperture_with_memo(arena, root, &mut memo)
+}
+
+/// Like [`de_bruijn_aperture`], but accepts an external memo cache.
+///
+/// This allows callers that compute aperture many times across a traversal
+/// (e.g. `propagate`) to amortize the cost by sharing a single cache.
+#[must_use]
+pub fn de_bruijn_aperture_with_memo(
+    arena: &TreeArena,
+    root: TreeId,
+    memo: &mut AHashMap<TreeId, i64>,
+) -> i64 {
+    aperture(arena, root, memo)
 }
 
 /// Returns `true` when `root` has no free de Bruijn references.

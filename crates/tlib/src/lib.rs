@@ -39,9 +39,9 @@ pub use arena::{ChildList, NodeKind, TreeArena, TreeId, TreeNode};
 pub use property::{PropertyKey, PropertyStore};
 pub use recursion::{
     DEBRUIJNREC_TAG, DEBRUIJNREF_TAG, RecursionError, SYMREC_TAG, SYMREF_TAG, de_bruijn_aperture,
-    de_bruijn_rec, de_bruijn_ref, de_bruijn_to_sym, is_de_bruijn_closed, lift_de_bruijn,
-    lift_de_bruijn_n, match_de_bruijn_rec, match_de_bruijn_ref, match_sym_rec, match_sym_ref,
-    sym_rec, sym_ref,
+    de_bruijn_aperture_with_memo, de_bruijn_rec, de_bruijn_ref, de_bruijn_to_sym,
+    is_de_bruijn_closed, lift_de_bruijn, lift_de_bruijn_n, match_de_bruijn_rec,
+    match_de_bruijn_ref, match_sym_rec, match_sym_ref, sym_rec, sym_ref,
 };
 
 /// Stable crate identifier used by workspace tooling and diagnostics.

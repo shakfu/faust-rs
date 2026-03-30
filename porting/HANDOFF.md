@@ -1,83 +1,93 @@
 # Session Handoff
 
-Date: 2026-02-26
+Date: 2026-03-30
 
 ## Repo State
 
-- Branch: `signals-after-deBruijn2Sym`
-- HEAD: `30fa74c2bcfa86a24bb0afd95d97f627a54b3bf8`
+- Branch: `main-dev`
+- HEAD: `6cafd60b16d9f3689850b1eb2735af308a52ef65`
 
 Recent commits (most recent first):
 
-- `30fa74c` Fix cargo test by adding rlib to cranelift-ffi
-- `5eb476f` Document daily journal workflow in AGENTS
-- `3c45774` Split JOURNAL into daily files ordered by Git history
-- `4eebb49` Add experimental Cranelift compiler CLI mode
-- `8d1e296` Fix Cranelift verifier failures on corpus subset
+- `6cafd60` Document unary symbolic-recursion canonicalization placement
+- `a42fc73` Prepare recursive groups as symbolic forests before FIR typing
+- `726485e` Normalize unary symbolic recursion projections before FIR typing
+- `fcdef45` Explain de Bruijn recursion lowering and degenerate unary projections
+- `637ed15` Propagate recursive slot environments with lifted de Bruijn references
 
 ## Working Tree
 
 - Tracked changes:
-  - none
+  - recursion/de-Bruijn code and docs are modified
+  - journal/index updates for the 2026-03-30 entry are pending commit
 - Untracked local files/directories (user scratch/local tooling):
-  - `.vscode/`
-  - `crates/cranelift-ffi/examples/`
-  - various local `*.dsp`, `*.c`, `*.cpp`
-  - `tests/runtime_traces/cppfbc/`
+  - `.claude/settings.local.json`
+  - local patch snapshots (`0001-*.patch`)
+  - local notes/docs (`CODEGUIDELINES.md`, `PROMPTS.md`, planning notes)
+  - various local `*.dsp`, `*.c`, `*.cpp`, `*.json`, `*.wat`, `*.wasm`
+  - corpus/support assets under `tests/corpus/`
 
 ## Current Goal(s)
 
-- Cranelift backend bring-up continuation (backend first, C/C++ wrappers secondary)
-- Keep journaling workflow stable after daily split migration
+- keep the recursion/signal lowering notes aligned with the Rust code
+- preserve the current aperture-memoization cleanup in `tlib`/`propagate`
+- keep the current workbench assets available for signal/FIR follow-up
 
 ## What Changed This Session
 
-- Added experimental compiler CLI path for Cranelift:
-  - `--dump-cranelift`
-  - `-lang cranelift` (alias `clif`)
-- Split monolithic `JOURNAL.md` into daily files under `porting/journal/`
-- Documented journaling workflow in `AGENTS.md`
-- Fixed `cargo test` failure caused by local Rust example linking `cranelift-ffi`
-  without an `rlib` crate artifact
+- `tlib` now exposes `de_bruijn_aperture_with_memo(...)`, and `propagate`
+  reuses the shared aperture cache instead of duplicating the helper locally
+- recursion-lowering docs were expanded in both English and French, including:
+  - explicit `aperture` explanation
+  - de Bruijn to symbolic conversion rules
+  - nested-scope examples
+- additional local workbench assets, scratch examples, and planning notes were
+  collected in the repo working tree
 
 ## Decisions / Constraints (important for resume)
 
 - `JOURNAL.md` must remain an index/redirect, not a large monolithic body
 - `porting/journal/YYYY-MM-DD.md` preserves semantic day buckets
 - Entries inside each day file are sorted by Git commit recency (newest first)
-- Cranelift compiler CLI path is explicitly experimental and reports
-  `compute_body_lowered` to distinguish real lowering vs stub fallback
+- keep `.claude/settings.local.json` out of commits unless the user explicitly
+  wants local Claude permission presets versioned
+- the new aperture helper is meant to preserve memo sharing across one
+  traversal, not to change the de Bruijn semantics
 
 ## Validation Run
 
-- `cargo test` -> ✅ workspace pass (after adding `rlib` to `cranelift-ffi`)
-- `cargo run -p compiler -- -lang cranelift tests/corpus/rep_01_passthrough.dsp` -> ✅ backend report emitted
+- `cargo fmt --all` -> ✅
+- `cargo test -p tlib --test recursive_trees` -> ✅
+- `cargo test -p propagate` -> ✅
 
 ## Open Issues / Blockers
 
-- Cranelift backend still partial on corpus (not all FIR shapes lowered)
-- `cranelift_dsp` C/C++ runtime/export layer remains scaffold-heavy beyond core wiring
+- many root-level workbench files are still ad hoc and not yet organized under a
+  dedicated scratch/ or docs/ hierarchy
+- `docs/recursion-debruijn-lowering-*` and `docs/flatnode-rec-to-signals-*`
+  now overlap intentionally; if both continue to grow, they may need clearer
+  role separation
 
 ## Next Steps (ordered)
 
-1. Continue Cranelift FIR lowering coverage based on `corpus_scan_cranelift` gaps
-2. Add optional strict experimental CLI mode (fail when Cranelift uses stub fallback)
-3. Progress `cranelift_dsp` runtime/FFI behavior beyond scaffold placeholders
-4. Add CI smoke coverage for experimental Cranelift compiler path (opt-in)
+1. Commit the current recursion/doc/workbench snapshot on `main-dev`
+2. If desired, separate repo-local scratch assets from durable corpus/docs files
+3. Continue the signal/FIR recursion work from the now-expanded documentation set
 
 ## Useful Commands to Resume
 
-- `cargo test`
-- `cargo run -p compiler -- --dump-cranelift tests/corpus/rep_01_passthrough.dsp`
-- `cargo run -p compiler -- -lang cranelift tests/corpus/rep_01_passthrough.dsp`
-- `cargo run -p compiler --example corpus_scan_cranelift`
-- `cargo run -p compiler --example corpus_scan_cranelift rep_05 rep_07 rep_09 rep_10`
+- `cargo fmt --all`
+- `cargo test -p tlib --test recursive_trees`
+- `cargo test -p propagate`
+- `git status --short`
+- `git diff --stat`
 
 ## Notes
 
-- If working on Cranelift backend, start in:
-  - `crates/codegen/src/backends/cranelift/mod.rs`
-  - `crates/compiler/examples/corpus_scan_cranelift.rs`
-  - `crates/compiler/src/main.rs`
-- If regenerating/reordering journal files, use Git history of `JOURNAL.md` as
-  source of truth and preserve semantic day buckets.
+- If updating the journaling indexes again, keep `JOURNAL.md` as the top-level
+  index and `porting/journal/README.md` as the per-day list.
+- If revisiting recursion lowering, start in:
+  - `crates/tlib/src/recursion.rs`
+  - `crates/propagate/src/lib.rs`
+  - `docs/flatnode-rec-to-signals-en.md`
+  - `docs/recursion-debruijn-lowering-en.md`

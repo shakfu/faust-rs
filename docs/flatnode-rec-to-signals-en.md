@@ -181,6 +181,30 @@ the recursive group.
 The helper `aperture(...)` computes the maximum free de Bruijn level visible
 from a subtree.
 
+### 6.1 What the concept means
+
+“Aperture” can be read as the amount of recursive scope that a subtree is still
+open to.
+
+More concretely:
+
+- a subtree with positive aperture still contains at least one free de Bruijn
+  reference;
+- a subtree with aperture `0` is closed with respect to the current recursive
+  binder;
+- a subtree with negative aperture is also closed, and in practice means that
+  the subtree sits under more recursive binders than the free references it
+  contains require.
+
+So `aperture` is not “is there recursion somewhere below?”. It is “if I look at
+this subtree from here, how far outward does its strongest still-free recursive
+reference reach?”.
+
+That is why it is the right test at the `Rec` boundary:
+
+- `aperture > 0` means the branch is still open over the group being built;
+- `aperture <= 0` means the branch is already closed at that boundary.
+
 Useful rules:
 
 - `aperture(DEBRUIJNREF(k)) = k`
@@ -194,6 +218,22 @@ Interpretation:
   it must be re-emitted as `proj(i, group)`
 - `aperture == 0`: the branch is closed and can stay outside the recursive
   group interface
+
+### 6.2 Small intuition examples
+
+```text
+DEBRUIJNREF(1)              -> aperture = 1
+DEBRUIJNREC(DEBRUIJNREF(1)) -> aperture = 0
+DEBRUIJNREC(DEBRUIJNREF(2)) -> aperture = 1
+```
+
+Interpretation:
+
+- bare `DEBRUIJNREF(1)` is open because it still needs one enclosing recursive
+  binder;
+- wrapping `DEBRUIJNREF(1)` in one `DEBRUIJNREC` closes it exactly;
+- `DEBRUIJNREF(2)` under one binder still refers to something outside that
+  binder, so one free level remains.
 
 This is why the output list of `A ~ B` may contain a mix of:
 
@@ -234,9 +274,9 @@ flowchart LR
     G --> O["proj(0, group)"]
 ```
 
-## 8. How mutual recursion is represented
+## 8. How Multi-Output and Mutual Recursion Are Represented
 
-Mutual recursion is handled by putting all outputs of `left` into the same
+Multi-output recursion is handled by putting all outputs of `left` into the same
 recursive group body list.
 
 If `left` has two outputs, the group body is conceptually:
@@ -255,16 +295,40 @@ body0 = f(proj(1, DEBRUIJNREF(1)), ...)
 body1 = g(proj(0, DEBRUIJNREF(1)), ...)
 ```
 
-This is a mutually recursive pair:
+That shape is a genuinely mutually recursive pair:
 
 - output 0 depends on output 1
 - output 1 depends on output 0
 
+By contrast:
+
+```faust
+process = si.bus(2) ~ (*(0.5), *(0.25));
+```
+
+is only a multi-output recursive group. Each body depends on its own slot.
+
+A genuinely mutually recursive Faust example is:
+
+```faust
+import("stdfaust.lib");
+
+process = si.bus(2) ~ ((*(0.5), *(0.25)) : ro.cross(2));
+```
+
+which yields the schematic bodies:
+
+```text
+body0 = delay1(proj(1, DEBRUIJNREF(1))) * 0.25
+body1 = delay1(proj(0, DEBRUIJNREF(1))) * 0.5
+```
+
 The crucial point is that the binder is shared by the entire output vector, not
 one binder per output.
 
-So “mutually recursive outputs” are not a special case. They are just the normal
-multi-output case of one recursive group with indexed projections.
+So mutually recursive outputs are not represented by a different mechanism.
+They are one particular multi-output case of a single recursive group with
+indexed projections.
 
 ## 9. What happens after propagation
 
@@ -301,6 +365,82 @@ proj(1, SYMREF(W0))
 
 That symbolic form is easier for later passes to consume, but the propagation
 logic itself is simpler to write in de Bruijn form.
+
+### 9.1 Why the conversion exists
+
+De Bruijn form is convenient while building recursion because binding is purely
+positional:
+
+- `DEBRUIJNREF(1)` means “the nearest enclosing recursive binder”;
+- `DEBRUIJNREF(2)` means “the next outer recursive binder”;
+- no fresh variable names are needed during propagation.
+
+But later passes usually want an explicit named recursion node they can match
+and carry around more easily. So the pipeline converts:
+
+- `DEBRUIJNREC(body)` to `SYMREC(var, body')`
+- `DEBRUIJNREF(k)` to the corresponding symbolic reference once the right binder
+  has been identified
+
+The input to `de_bruijn_to_sym(...)` must already be closed at the conversion
+root. In other words, the root must have `aperture <= 0`. If free de Bruijn
+references remain, conversion fails because there is no enclosing symbolic
+binder to map them to.
+
+### 9.2 The exact conversion rule
+
+For each encountered `DEBRUIJNREC(body)` binder, the converter does this:
+
+1. Allocate one fresh symbolic variable, such as `W0`, `W1`, ...
+2. Inside that binder body, replace `DEBRUIJNREF(1)` with `SYMREF(Wn)`.
+3. Recurse through the rewritten body to convert nested recursive binders.
+4. Rebuild the binder as `SYMREC(Wn, converted_body)`.
+
+The key point is that substitution is level-sensitive:
+
+- the current binder replaces exactly level `1` in its own body;
+- when the converter descends under another `DEBRUIJNREC`, the target level
+  shifts by one;
+- so an outer reference seen as `DEBRUIJNREF(2)` under an inner binder becomes
+  a reference to the outer symbolic variable.
+
+Conceptually:
+
+```text
+DEBRUIJNREC(
+  DEBRUIJNREC(
+    pair(DEBRUIJNREF(1), DEBRUIJNREF(2))
+  )
+)
+```
+
+becomes:
+
+```text
+SYMREC(W0,
+  SYMREC(W1,
+    pair(SYMREF(W1), SYMREF(W0))
+  )
+)
+```
+
+So the conversion does not change the recursion structure. It only changes the
+way binders and references are represented:
+
+- de Bruijn form encodes them by relative depth;
+- symbolic form encodes them by explicit variables.
+
+### 9.3 Why this is still faithful to the de Bruijn tree
+
+The conversion is a representation change, not a structural normalization:
+
+- binder nesting stays the same;
+- the recursive body list stays the same;
+- projection indices such as `proj(i, ...)` stay the same;
+- only the recursion carrier changes from positional references to named ones.
+
+That is why later passes can reason about `SYMREC` and `SYMREF` without losing
+the exact recursive graph built by `propagate`.
 
 ## 10. Why “degenerate” recursion cases exist
 

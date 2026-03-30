@@ -37,7 +37,10 @@ use boxes::{BoxId, BoxMatch, match_box};
 use errors::codes;
 use errors::{Diagnostic, IntoDiagnostic, Severity, Stage};
 use signals::{SigBuilder, SigId, SigMatch, match_sig};
-use tlib::{NodeKind, TreeArena, TreeId, list_to_vec, tree_to_int, vec_to_list};
+use tlib::{
+    NodeKind, TreeArena, TreeId, de_bruijn_aperture_with_memo, list_to_vec, tree_to_int,
+    vec_to_list,
+};
 use ui::{
     ControlId, ControlKind, ControlRange, ControlSpec, UiGroupKind, UiGroupPathSegment,
     UiGroupSpec, UiMatch, UiMetadata, UiProgram, UiProgramBuilder, UiRootOrigin,
@@ -2081,7 +2084,7 @@ fn propagate_inner(
 
             let mut outputs = Vec::with_capacity(l2.len());
             for (index, expr) in l2.iter().copied().enumerate() {
-                let ap = aperture(arena, expr, ctx.memo);
+                let ap = de_bruijn_aperture_with_memo(arena, expr, &mut ctx.memo.aperture);
                 if ap > 0 {
                     let idx = i32_from_usize(index, "rec projection index")?;
                     let mut b = SigBuilder::new(arena);
@@ -2690,34 +2693,9 @@ fn liftn(arena: &mut TreeArena, root: TreeId, threshold: i64, memo: &mut Propaga
     lifted
 }
 
-/// Computes free-recursion aperture used to decide `sigProj` re-emission.
-fn aperture(arena: &TreeArena, root: TreeId, memo: &mut PropagateMemo) -> i64 {
-    if let Some(value) = memo.aperture.get(&root).copied() {
-        return value;
-    }
-
-    if let Some(level) = debruijn_ref_level(arena, root) {
-        memo.aperture.insert(root, level);
-        return level;
-    }
-
-    if let Some(body) = debruijn_body(arena, root) {
-        let value = aperture(arena, body, memo) - 1;
-        memo.aperture.insert(root, value);
-        return value;
-    }
-
-    let Some(children) = arena.children(root) else {
-        memo.aperture.insert(root, 0);
-        return 0;
-    };
-    let mut max_aperture = 0;
-    for child in children.iter().copied() {
-        max_aperture = max_aperture.max(aperture(arena, child, memo));
-    }
-    memo.aperture.insert(root, max_aperture);
-    max_aperture
-}
+// Aperture computation is delegated to `tlib::de_bruijn_aperture_with_memo`.
+// The `PropagateMemo::aperture` cache is passed through so that aperture
+// results are amortized across the full propagation traversal.
 
 /// Returns De Bruijn level for a reference node, if `root` is `DEBRUIJNREF`.
 fn debruijn_ref_level(arena: &TreeArena, root: TreeId) -> Option<i64> {
@@ -2791,14 +2769,14 @@ mod tests {
             "repeating liftn on the same subtree should hit the memo table"
         );
 
-        let aperture_once = aperture(&arena, lifted_once, &mut memo);
+        let aperture_once = de_bruijn_aperture_with_memo(&arena, lifted_once, &mut memo.aperture);
         let aperture_cache_len = memo.aperture.len();
         assert!(
             aperture_cache_len > 0,
             "aperture should populate its memo table"
         );
 
-        let aperture_twice = aperture(&arena, lifted_once, &mut memo);
+        let aperture_twice = de_bruijn_aperture_with_memo(&arena, lifted_once, &mut memo.aperture);
         assert_eq!(aperture_once, aperture_twice);
         assert_eq!(
             memo.aperture.len(),
