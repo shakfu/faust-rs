@@ -281,15 +281,29 @@ fn wasm_reports_clear_error_for_foreign_variable_access() {
 }
 
 #[test]
-fn wasm_reports_clear_error_for_unsupported_generic_foreign_function_call() {
-    let (store, module) = build_unsupported_foreign_function_module();
-    let err = generate_wasm_module(&store, module, &WasmOptions::default())
-        .expect_err("unsupported generic foreign functions should be rejected for now");
-    assert!(err.to_string().contains("FRS-CGEN-WASM-0003"));
+fn wasm_module_imports_generic_foreign_function() {
+    let (store, module) = build_generic_foreign_function_module();
+    let out = generate_wasm_module(&store, module, &WasmOptions::default())
+        .expect("generic foreign functions should lower to host imports in WASM");
+
+    let mut imports = Vec::new();
+    for payload in Parser::new(0).parse_all(&out.wasm_binary) {
+        let payload = payload.expect("payload should decode");
+        if let Payload::ImportSection(section) = payload {
+            for import in section {
+                let import = import.expect("import should decode");
+                imports.push(import.name.to_owned());
+            }
+        }
+    }
+
+    assert_eq!(imports, vec!["myhost"]);
+
+    let body = code_body_at(&out.wasm_binary, 1);
+    let ops = decode_ops(body);
     assert!(
-        err.to_string()
-            .contains("unsupported function call in WASM subset: `myhost`"),
-        "unexpected error: {err}"
+        ops.iter()
+            .any(|op| matches!(op, Operator::Call { function_index } if *function_index == 0))
     );
 }
 
@@ -2028,13 +2042,28 @@ fn build_foreign_float_helper_module() -> (FirStore, FirId) {
     (store, module)
 }
 
-fn build_unsupported_foreign_function_module() -> (FirStore, FirId) {
+fn build_generic_foreign_function_module() -> (FirStore, FirId) {
     let mut store = FirStore::new();
     let mut b = FirBuilder::new(&mut store);
 
     let dsp_struct = b.block(&[]);
-    let globals = b.block(&[]);
     let static_decls = b.block(&[]);
+
+    let proto_args = [NamedType {
+        name: "arg0".to_owned(),
+        typ: FirType::Float32,
+    }];
+    let myhost_proto = b.declare_fun(
+        "myhost",
+        FirType::Fun {
+            args: vec![FirType::Float32],
+            ret: Box::new(FirType::Float32),
+        },
+        &proto_args,
+        None,
+        false,
+    );
+    let globals = b.block(&[myhost_proto]);
 
     let chan0 = b.int32(0);
     let ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
@@ -2094,7 +2123,7 @@ fn build_unsupported_foreign_function_module() -> (FirStore, FirId) {
     let module = b.module(
         1,
         1,
-        "unsupported_foreign_function",
+        "generic_foreign_function",
         dsp_struct,
         globals,
         functions,

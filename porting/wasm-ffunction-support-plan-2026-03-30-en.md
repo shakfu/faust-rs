@@ -1,7 +1,7 @@
 # WebAssembly Foreign Symbol Support Plan
 
 **Date:** 2026-03-30
-**Status:** Planning
+**Status:** `ffunction(...)` implemented in wasm backend; `fconst(...)` / `fvar(...)` deferred
 **Target crates:** `transform`, `codegen`, `compiler`, `wasm-ffi`
 **Primary backend module:** `codegen::backends::wasm`
 **C++ provenance:** `compiler/global.cpp`, `compiler/generator/wasm/`, `compiler/generator/instructions_compiler.cpp`
@@ -54,8 +54,9 @@ Relevant implementation:
   - `lower_fconst(...)`
   - `lower_fvar(...)`
 
-So the missing work is not basic parsing. It is backend-side realization and
-ABI policy.
+So the front-end path is already in place. The active backend work has now been
+completed for generic `ffunction(...)`, while the broader foreign-symbol ABI
+questions remain for `fconst(...)` and `fvar(...)`.
 
 ### 2.2 Current behavior by foreign symbol kind
 
@@ -72,22 +73,13 @@ Relevant implementation:
   - `FirMatch::FunCall { ... }` lowering
   - `imported_foreign_signature(...)`
 
-If a function call is neither:
-
-- a recognized `FirMathOp`, nor
-- one of the hard-coded imported foreign helpers,
-
-code generation fails with:
-
-```text
-unsupported function call in WASM subset: `<name>`
-```
-
 Observed behavior:
 
 - `ffunction(float sinhf(float), <math.h>, "")` compiles with `-lang wasm`
-- `ffunction(float myhost(float), <dummy.h>, "")` currently fails in the WASM
-  backend
+- `ffunction(float myhost(float), <dummy.h>, "")` now compiles in the WASM
+  backend when the FIR module carries the corresponding extern prototype
+- the wasm backend still preserves the historical helper remapping path for
+  names such as `sinhf`, `acoshf`, `isnanf`, and `copysignf`
 
 #### `fconst(...)`
 
@@ -253,10 +245,11 @@ Required information already exists at FIR level:
 - argument types
 - result type
 
-Main missing work:
+Implemented backend work:
 
-- carry generic foreign prototypes into WASM import planning,
-- emit import descriptors beyond the current hard-coded whitelist,
+- carry generic foreign prototypes from FIR extern declarations into WASM
+  import planning,
+- emit generic import descriptors beyond the hard-coded helper whitelist,
 - preserve compatibility mappings for historical helper names.
 
 ### 5.2 `fconst(...)`
@@ -308,7 +301,7 @@ Important semantic note:
 
 ### 5.4 Implementation status for now
 
-Only the `ffunction(...)` track is active for now.
+Only the `ffunction(...)` track is active and implemented for now.
 
 `fconst(...)` and `fvar(...)` remain documented here as follow-up design
 directions, but they are deferred and are not part of the active
@@ -335,7 +328,7 @@ Changes:
 - add explicit backend docs for current `ffunction` support in WASM
 - add regression tests for:
   - supported imported helper (`sinhf`, `isnan`, etc.)
-  - unsupported arbitrary host function (`myhost`)
+  - supported generic host function (`myhost`)
 
 Pass criteria:
 
@@ -364,6 +357,10 @@ Pass criteria:
 
 - backend can build a typed import plan for arbitrary foreign prototypes
 
+Status:
+
+- implemented
+
 ### Slice 3 — Emit generic imported functions in the WASM module
 
 Goal:
@@ -382,6 +379,10 @@ Pass criteria:
 
 - generated module validates with `wasmparser`
 - function calls target the imported index, not a fallback error path
+
+Status:
+
+- implemented
 
 ### Slice 4 — Define host ABI and runtime contract
 

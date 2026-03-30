@@ -1,7 +1,9 @@
 // True multi-output recursion group regression.
 //
-// This is distinct from the degenerate unary-projection case: both outputs
-// remain live in the recursive group.
+// This is distinct from both:
+// - the degenerate unary-projection case, because both outputs remain live;
+// - genuine mutual recursion, because each lane feeds back into itself rather
+//   than into the other lane.
 
 import("stdfaust.lib");
 
