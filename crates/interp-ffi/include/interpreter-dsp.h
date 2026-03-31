@@ -79,6 +79,9 @@ void buildUserInterfaceCInterpreterDSPInstance(cinterpreter_dsp* dsp, UIGlue* gl
 void metadataCInterpreterDSPInstance(cinterpreter_dsp* dsp, MetaGlue* meta);
 void computeCInterpreterDSPInstance(cinterpreter_dsp* dsp, int count,
                                     FAUSTFLOAT** inputs, FAUSTFLOAT** outputs);
+void registerCInterpreterForeignFunction(const char* name, void* fn_ptr);
+void unregisterCInterpreterForeignFunction(const char* name);
+void clearCInterpreterForeignFunctions(void);
 
 #ifdef __cplusplus
 }
@@ -456,6 +459,35 @@ inline std::vector<std::string> getAllInterpreterDSPFactories() {
     }
     freeCMemory(raw);
     return result;
+}
+
+/**
+ * Register a host foreign function for interpreter `ffunction(...)` calls.
+ *
+ * The pointer must remain valid for the duration of any compiled factory or
+ * DSP instance using the symbol.
+ */
+inline void registerInterpreterForeignFunction(
+    const std::string& name,
+    void* fn_ptr)
+{
+    registerCInterpreterForeignFunction(name.c_str(), fn_ptr);
+}
+
+/**
+ * Remove one registered interpreter foreign function by symbol name.
+ */
+inline void unregisterInterpreterForeignFunction(const std::string& name)
+{
+    unregisterCInterpreterForeignFunction(name.c_str());
+}
+
+/**
+ * Clear the entire interpreter foreign-function registry.
+ */
+inline void clearInterpreterForeignFunctions()
+{
+    clearCInterpreterForeignFunctions();
 }
 
 // ── Top-level using declarations (optional — matches original Faust API) ──────

@@ -922,4 +922,28 @@ mod tests {
         unsafe { deleteCInterpreterDSPInstance(dsp) };
         unsafe { crate::types::free_factory(factory_ptr) };
     }
+
+    #[test]
+    fn cpp_header_exposes_interpreter_foreign_function_api() {
+        let header = std::fs::read_to_string(format!(
+            "{}/include/interpreter-dsp.h",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("interpreter C++ header should be readable");
+
+        assert!(
+            header.contains(
+                "void registerCInterpreterForeignFunction(const char* name, void* fn_ptr);"
+            )
+        );
+        assert!(header.contains("void unregisterCInterpreterForeignFunction(const char* name);"));
+        assert!(header.contains("void clearCInterpreterForeignFunctions(void);"));
+        assert!(header.contains("inline void registerInterpreterForeignFunction("));
+        assert!(
+            header.contains(
+                "inline void unregisterInterpreterForeignFunction(const std::string& name)"
+            )
+        );
+        assert!(header.contains("inline void clearInterpreterForeignFunctions()"));
+    }
 }

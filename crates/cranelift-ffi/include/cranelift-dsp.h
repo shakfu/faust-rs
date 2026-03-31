@@ -408,6 +408,23 @@ inline bool writeCraneliftDSPFactoryToBitcodeFile(
         : false;
 }
 
+inline void registerCraneliftForeignFunction(
+    const std::string& name,
+    void* fn_ptr)
+{
+    registerCCraneliftForeignFunction(name.c_str(), fn_ptr);
+}
+
+inline void unregisterCraneliftForeignFunction(const std::string& name)
+{
+    unregisterCCraneliftForeignFunction(name.c_str());
+}
+
+inline void clearCraneliftForeignFunctions()
+{
+    clearCCraneliftForeignFunctions();
+}
+
 /*!
  @}
  */

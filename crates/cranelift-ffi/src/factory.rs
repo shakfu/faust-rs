@@ -1868,4 +1868,21 @@ mod tests {
         }
         super::clear_registered_foreign_functions();
     }
+
+    #[test]
+    fn cpp_header_exposes_cranelift_foreign_function_api() {
+        let header = std::fs::read_to_string(format!(
+            "{}/include/cranelift-dsp.h",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("cranelift C++ header should be readable");
+
+        assert!(header.contains("inline void registerCraneliftForeignFunction("));
+        assert!(
+            header.contains(
+                "inline void unregisterCraneliftForeignFunction(const std::string& name)"
+            )
+        );
+        assert!(header.contains("inline void clearCraneliftForeignFunctions()"));
+    }
 }
