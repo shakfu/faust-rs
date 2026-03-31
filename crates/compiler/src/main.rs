@@ -182,7 +182,7 @@ struct CliArgs {
     /// Compile to C++ and print generated code.
     #[arg(long = "dump-cpp", action = ArgAction::SetTrue)]
     dump_cpp: bool,
-    /// Read interpreter `.fbc` text and emit a C++ wrapper that delegates to interpreter-dsp runtime.
+    /// Read interpreter `.fbc` text and emit self-contained native C++.
     #[arg(long = "dump-cpp-from-fbc", action = ArgAction::SetTrue)]
     dump_cpp_from_fbc: bool,
     /// Compile to C and print generated code.
@@ -237,9 +237,9 @@ struct CliArgs {
     /// (`-scn <name>`, `--super-class-name <name>`).
     #[arg(long = "super-class-name")]
     super_class_name: Option<String>,
-    /// Override generated C++ class base name for `--dump-cpp-from-fbc`.
+    /// Override generated C++ class name for `--dump-cpp-from-fbc`.
     ///
-    /// This is an FBC-wrapper option, distinct from DSP generation
+    /// This applies only to `.fbc` -> native C++ emission, distinct from DSP generation
     /// `-cn/--class-name`.
     #[arg(long = "cpp-class-name")]
     cpp_class_name: Option<String>,
