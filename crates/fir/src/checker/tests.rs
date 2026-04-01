@@ -1333,6 +1333,116 @@ fn t02_storetable_value_type_mismatch() {
 }
 
 #[test]
+fn v01_storevar_rejects_void_expression_value() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let callee_ty = FirType::Fun {
+        args: vec![],
+        ret: Box::new(FirType::Void),
+    };
+    let callee_body = b.block(&[]);
+    let callee = b.declare_fun("tick", callee_ty, &[], Some(callee_body), false);
+
+    let local = b.declare_var("acc", FirType::Int32, AccessType::Stack, None);
+    let call = b.fun_call("tick", &[], FirType::Void);
+    let store_stmt = b.store_var("acc", AccessType::Stack, call);
+    let caller_body = b.block(&[local, store_stmt]);
+    let caller_ty = FirType::Fun {
+        args: vec![],
+        ret: Box::new(FirType::Void),
+    };
+    let caller = b.declare_fun("caller", caller_ty, &[], Some(caller_body), false);
+
+    let dsp_struct = make_dsp_struct(&mut b);
+    let globals = make_empty_block(&mut b);
+    let functions = b.block(&[callee, caller]);
+    let module_id = {
+        let sd = b.block(&[]);
+        b.module(0, 0, "dsp", dsp_struct, globals, functions, sd)
+    };
+
+    let report = verify_fir_module(&store, module_id);
+    assert!(
+        report.diagnostics.iter().any(|d| d.code == "FIR-V01"),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn v01_return_rejects_void_expression_value() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let callee_ty = FirType::Fun {
+        args: vec![],
+        ret: Box::new(FirType::Void),
+    };
+    let callee_body = b.block(&[]);
+    let callee = b.declare_fun("tick", callee_ty, &[], Some(callee_body), false);
+
+    let call = b.fun_call("tick", &[], FirType::Void);
+    let ret = b.ret(Some(call));
+    let caller_body = b.block(&[ret]);
+    let caller_ty = FirType::Fun {
+        args: vec![],
+        ret: Box::new(FirType::Void),
+    };
+    let caller = b.declare_fun("caller", caller_ty, &[], Some(caller_body), false);
+
+    let dsp_struct = make_dsp_struct(&mut b);
+    let globals = make_empty_block(&mut b);
+    let functions = b.block(&[callee, caller]);
+    let module_id = {
+        let sd = b.block(&[]);
+        b.module(0, 0, "dsp", dsp_struct, globals, functions, sd)
+    };
+
+    let report = verify_fir_module(&store, module_id);
+    assert!(
+        report.diagnostics.iter().any(|d| d.code == "FIR-V01"),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn v01_value_array_rejects_void_elements() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let callee_ty = FirType::Fun {
+        args: vec![],
+        ret: Box::new(FirType::Void),
+    };
+    let callee_body = b.block(&[]);
+    let callee = b.declare_fun("tick", callee_ty, &[], Some(callee_body), false);
+
+    let call = b.fun_call("tick", &[], FirType::Void);
+    let array = b.value_array(&[call], FirType::Array(Box::new(FirType::Int32), 1));
+    let drop = b.drop_(array);
+    let caller_body = b.block(&[drop]);
+    let caller_ty = FirType::Fun {
+        args: vec![],
+        ret: Box::new(FirType::Void),
+    };
+    let caller = b.declare_fun("caller", caller_ty, &[], Some(caller_body), false);
+
+    let dsp_struct = make_dsp_struct(&mut b);
+    let globals = make_empty_block(&mut b);
+    let functions = b.block(&[callee, caller]);
+    let module_id = {
+        let sd = b.block(&[]);
+        b.module(0, 0, "dsp", dsp_struct, globals, functions, sd)
+    };
+
+    let report = verify_fir_module(&store, module_id);
+    assert!(
+        report.diagnostics.iter().any(|d| d.code == "FIR-V01"),
+        "{report:?}"
+    );
+}
+
+#[test]
 fn ma03_and_ma04_math_call_warnings() {
     let mut store = FirStore::new();
     let mut b = FirBuilder::new(&mut store);

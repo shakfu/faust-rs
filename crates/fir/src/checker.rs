@@ -85,6 +85,7 @@
 //! | FIR-MA02 | W | Binary math op called with wrong arity |
 //! | FIR-MA03 | W | Floating-point math op called with integer-like argument |
 //! | FIR-MA04 | W | `abs` / `fabs` int-vs-float distinction warning |
+//! | FIR-V01  | E | `Void`-typed expression used where a material value is required |
 //!
 //! ## Deferred / partial
 //! - **SC06/SC08** — naturally enforced by scope-stack pop; SC01 fires for any
@@ -1545,6 +1546,17 @@ impl<'s> VerifyCtx<'s> {
         }
     }
 
+    /// Rejects `Void`-typed expressions in positions that require a real value.
+    fn check_required_value(&mut self, id: FirId, value: FirId, what: &str) {
+        if matches!(self.infer_value_type(value), Some(FirType::Void)) {
+            self.error(
+                "FIR-V01",
+                format!("{what} must produce a non-Void value"),
+                id,
+            );
+        }
+    }
+
     /// Validates operand/result typing for one `BinOp` node.
     fn check_binop_types(
         &mut self,
@@ -1982,6 +1994,7 @@ impl<'s> VerifyCtx<'s> {
                 value,
             } => {
                 self.check_value(value);
+                self.check_required_value(id, value, "StoreVar value");
                 self.check_store_var(id, &name, access);
             }
             FirMatch::StoreTable {
@@ -2119,6 +2132,7 @@ impl<'s> VerifyCtx<'s> {
 
         if let Some(init_id) = init {
             self.check_value(init_id);
+            self.check_required_value(id, init_id, "DeclareVar initializer");
         }
 
         let init_status = if init.is_some() {
@@ -2412,6 +2426,7 @@ impl<'s> VerifyCtx<'s> {
     fn check_return(&mut self, id: FirId, value: Option<FirId>) {
         if let Some(val_id) = value {
             self.check_value(val_id);
+            self.check_required_value(id, val_id, "Return expression");
             if let Some(ret_ty) = &self.current_return_type
                 && let Some(val_ty) = self.infer_value_type(val_id)
                 && val_ty != *ret_ty
@@ -2496,6 +2511,7 @@ impl<'s> VerifyCtx<'s> {
             } => {
                 // TeeVar = store + load: check that the target is declared
                 self.check_value(value);
+                self.check_required_value(id, value, "TeeVar value");
                 self.check_store_var(id, &name, access);
             }
             FirMatch::LoadTable {
@@ -2543,8 +2559,9 @@ impl<'s> VerifyCtx<'s> {
                 self.check_fun_call_types(id, &name, &args, &typ);
             }
             FirMatch::ValueArray { values, .. } => {
-                for v in values {
+                for (index, v) in values.into_iter().enumerate() {
                     self.check_value(v);
+                    self.check_required_value(id, v, &format!("ValueArray element #{index}"));
                 }
             }
             FirMatch::LoadSoundfileLength { var, part }

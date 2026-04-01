@@ -16,3 +16,12 @@ the compiler/codegen pipeline.
   - `UI` maps to `UI*` (C++) / `UIGlue*` (C backend glue layer).
   - `Ptr(UI)` maps to `UI**` / `UIGlue**`.
   - `Ptr(Ptr(FaustFloat))` maps to `FAUSTFLOAT**` (used by `compute` I/O).
+
+## Verifier notes
+
+- `fir::checker` is diagnostic-first: it returns a full report instead of
+  stopping on the first error.
+- Phase 3 now explicitly rejects `Void`-typed expressions in material-value
+  positions such as local initializers, `StoreVar`, `TeeVar`, `Return(Some(_))`,
+  and `ValueArray` elements. This matches backend expectations without changing
+  FIR construction APIs.
