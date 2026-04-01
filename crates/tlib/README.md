@@ -28,6 +28,9 @@ deduplication.
 | `sym_rec` / `sym_ref` | Symbolic recursive-tree builders |
 | `de_bruijn_to_sym` | Convert de Bruijn form to symbolic form |
 | `lift_de_bruijn` / `lift_de_bruijn_n` | Lift free de Bruijn references |
+| `validate_faust_list` | Check canonical `cons`/`nil` list shape |
+| `validate_closed_de_bruijn_tree` | Check de Bruijn trees are closed and convertible |
+| `validate_symbolic_recursion_tree` | Check symbolic recursion binders/refs are well formed |
 
 ## Parity invariants
 

@@ -72,6 +72,45 @@ impl fmt::Display for RecursionError {
 
 impl Error for RecursionError {}
 
+/// Structural validation errors for symbolic recursion trees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SymbolicRecursionValidationError {
+    /// The provided root or one traversed child does not exist in the arena.
+    InvalidNode { node: TreeId },
+    /// A list-shaped payload in a symbolic recursion group is malformed.
+    MalformedList { node: TreeId },
+    /// One `SYMREC(var, body_list)` group has an empty body list.
+    EmptyGroup { node: TreeId },
+    /// One symbolic reference is not bound by any enclosing symbolic group.
+    UnboundReference { node: TreeId, var: TreeId },
+}
+
+impl fmt::Display for SymbolicRecursionValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidNode { node } => write!(f, "invalid node id {}", node.as_u32()),
+            Self::MalformedList { node } => write!(
+                f,
+                "malformed symbolic recursion body list at node {}",
+                node.as_u32()
+            ),
+            Self::EmptyGroup { node } => write!(
+                f,
+                "symbolic recursion group {} has empty body list",
+                node.as_u32()
+            ),
+            Self::UnboundReference { node, var } => write!(
+                f,
+                "symbolic recursion reference {} targets unbound variable {}",
+                node.as_u32(),
+                var.as_u32()
+            ),
+        }
+    }
+}
+
+impl Error for SymbolicRecursionValidationError {}
+
 /// Builds `DEBRUIJNREC(body)`.
 #[must_use]
 pub fn de_bruijn_rec(arena: &mut TreeArena, body: TreeId) -> TreeId {
@@ -203,6 +242,104 @@ pub fn de_bruijn_to_sym(arena: &mut TreeArena, root: TreeId) -> Result<TreeId, R
     }
     let mut converter = Converter::new(arena);
     converter.convert(root)
+}
+
+/// Validates that the reachable de Bruijn recursion tree rooted at `root` is
+/// closed and structurally acceptable for conversion.
+///
+/// The validation is side-effect free for the caller: the subtree is cloned into
+/// a private arena and passed through [`de_bruijn_to_sym`], so malformed
+/// references and open terms report the same typed errors as the actual
+/// conversion boundary without mutating the source arena.
+pub fn validate_closed_de_bruijn_tree(
+    arena: &TreeArena,
+    root: TreeId,
+) -> Result<(), RecursionError> {
+    if arena.node(root).is_none() {
+        return Err(RecursionError::InvalidNode { node: root });
+    }
+    let mut staging = TreeArena::new();
+    let cloned = staging.clone_subtree_from(arena, root);
+    de_bruijn_to_sym(&mut staging, cloned).map(|_| ())
+}
+
+/// Validates that the reachable symbolic recursion tree rooted at `root` is
+/// structurally well formed.
+///
+/// This checks only the symbolic recursion contract:
+/// - body payloads are canonical `cons`/`nil` lists,
+/// - symbolic groups are non-empty,
+/// - `SYMREF(var)` targets a currently bound symbolic variable.
+pub fn validate_symbolic_recursion_tree(
+    arena: &TreeArena,
+    root: TreeId,
+) -> Result<(), SymbolicRecursionValidationError> {
+    let mut bound = AHashMap::<TreeId, usize>::new();
+    validate_symbolic_subtree(arena, root, &mut bound)
+}
+
+fn validate_symbolic_subtree(
+    arena: &TreeArena,
+    node: TreeId,
+    bound: &mut AHashMap<TreeId, usize>,
+) -> Result<(), SymbolicRecursionValidationError> {
+    if arena.node(node).is_none() {
+        return Err(SymbolicRecursionValidationError::InvalidNode { node });
+    }
+    if arena.is_nil(node) {
+        return Ok(());
+    }
+    if arena.is_list(node) {
+        let Some(head) = arena.hd(node) else {
+            return Err(SymbolicRecursionValidationError::MalformedList { node });
+        };
+        let Some(tail) = arena.tl(node) else {
+            return Err(SymbolicRecursionValidationError::MalformedList { node });
+        };
+        validate_symbolic_subtree(arena, head, bound)?;
+        validate_symbolic_subtree(arena, tail, bound)?;
+        return Ok(());
+    }
+    if let Some((var, body_list)) = match_sym_rec(arena, node) {
+        let mut cursor = body_list;
+        let mut arity = 0usize;
+        while !arena.is_nil(cursor) {
+            let Some(body) = arena.hd(cursor) else {
+                return Err(SymbolicRecursionValidationError::MalformedList { node: cursor });
+            };
+            let Some(tail) = arena.tl(cursor) else {
+                return Err(SymbolicRecursionValidationError::MalformedList { node: cursor });
+            };
+            arity += 1;
+            *bound.entry(var).or_insert(0) += 1;
+            validate_symbolic_subtree(arena, body, bound)?;
+            let count = bound
+                .get_mut(&var)
+                .expect("symbolic recursion binder count exists while descending body");
+            *count -= 1;
+            if *count == 0 {
+                bound.remove(&var);
+            }
+            cursor = tail;
+        }
+        if arity == 0 {
+            return Err(SymbolicRecursionValidationError::EmptyGroup { node });
+        }
+        return Ok(());
+    }
+    if let Some(var) = match_sym_ref(arena, node) {
+        if bound.get(&var).copied().unwrap_or(0) == 0 {
+            return Err(SymbolicRecursionValidationError::UnboundReference { node, var });
+        }
+        return Ok(());
+    }
+    let current = arena
+        .node(node)
+        .expect("validated node id should remain present during traversal");
+    for child in current.children.as_slice() {
+        validate_symbolic_subtree(arena, *child, bound)?;
+    }
+    Ok(())
 }
 
 /// Stateful de Bruijn-to-symbolic converter.

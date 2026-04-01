@@ -215,6 +215,10 @@ pub struct SigBuilder<'a> {
 }
 
 impl<'a> SigBuilder<'a> {
+    fn debug_assert_non_negative_index(kind: &str, index: i32) {
+        debug_assert!(index >= 0, "{kind} index must be non-negative, got {index}");
+    }
+
     #[must_use]
     /// Creates a `SigBuilder` bound to one mutable `TreeArena`.
     pub fn new(arena: &'a mut TreeArena) -> Self {
@@ -236,6 +240,7 @@ impl<'a> SigBuilder<'a> {
     #[must_use]
     /// Builds one signal node for `input` and returns its `SigId`.
     pub fn input(&mut self, index: i32) -> SigId {
+        Self::debug_assert_non_negative_index("SIGINPUT", index);
         let idx = self.arena.int(i64::from(index));
         intern_tag(self.arena, SIG_INPUT_TAG, &[idx])
     }
@@ -243,6 +248,7 @@ impl<'a> SigBuilder<'a> {
     #[must_use]
     /// Builds one signal node for `output` and returns its `SigId`.
     pub fn output(&mut self, index: i32, sig: SigId) -> SigId {
+        Self::debug_assert_non_negative_index("SIGOUTPUT", index);
         let idx = self.arena.int(i64::from(index));
         intern_tag(self.arena, SIG_OUTPUT_TAG, &[idx, sig])
     }
@@ -630,6 +636,7 @@ impl<'a> SigBuilder<'a> {
     #[must_use]
     /// Builds one signal node for `proj` and returns its `SigId`.
     pub fn proj(&mut self, index: i32, group: SigId) -> SigId {
+        Self::debug_assert_non_negative_index("SIGPROJ", index);
         let idx = self.arena.int(i64::from(index));
         intern_tag(self.arena, SIG_PROJ_TAG, &[idx, group])
     }

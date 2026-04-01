@@ -20,6 +20,8 @@
 //! - Symbolic builders/matchers: [`sym_rec`], [`sym_ref`], [`match_sym_rec`], [`match_sym_ref`]
 //! - Conversion and analysis helpers: [`de_bruijn_to_sym`], [`de_bruijn_aperture`],
 //!   [`is_de_bruijn_closed`], [`lift_de_bruijn`], [`lift_de_bruijn_n`]
+//! - Validation helpers: [`validate_faust_list`], [`validate_closed_de_bruijn_tree`],
+//!   [`validate_symbolic_recursion_tree`]
 //!
 //! Mapping note:
 //! - `deBruijn2Sym(Tree)` from C++ is ported as [`de_bruijn_to_sym`] with explicit
@@ -38,10 +40,11 @@ mod recursion;
 pub use arena::{ChildList, NodeKind, TreeArena, TreeId, TreeNode};
 pub use property::{PropertyKey, PropertyStore};
 pub use recursion::{
-    DEBRUIJNREC_TAG, DEBRUIJNREF_TAG, RecursionError, SYMREC_TAG, SYMREF_TAG, de_bruijn_aperture,
-    de_bruijn_aperture_with_memo, de_bruijn_rec, de_bruijn_ref, de_bruijn_to_sym,
-    is_de_bruijn_closed, lift_de_bruijn, lift_de_bruijn_n, match_de_bruijn_rec,
-    match_de_bruijn_ref, match_sym_rec, match_sym_ref, sym_rec, sym_ref,
+    DEBRUIJNREC_TAG, DEBRUIJNREF_TAG, RecursionError, SYMREC_TAG, SYMREF_TAG,
+    SymbolicRecursionValidationError, de_bruijn_aperture, de_bruijn_aperture_with_memo,
+    de_bruijn_rec, de_bruijn_ref, de_bruijn_to_sym, is_de_bruijn_closed, lift_de_bruijn,
+    lift_de_bruijn_n, match_de_bruijn_rec, match_de_bruijn_ref, match_sym_rec, match_sym_ref,
+    sym_rec, sym_ref, validate_closed_de_bruijn_tree, validate_symbolic_recursion_tree,
 };
 
 /// Stable crate identifier used by workspace tooling and diagnostics.
@@ -87,6 +90,28 @@ pub fn tree_to_double(arena: &TreeArena, id: TreeId) -> Option<f64> {
     }
 }
 
+/// Typed error returned by [`validate_faust_list`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListValidationError {
+    /// The provided `TreeId` does not exist in the arena.
+    InvalidNode { node: TreeId },
+    /// The tree is not a canonical `cons`/`nil` Faust list.
+    MalformedList { node: TreeId },
+}
+
+impl std::fmt::Display for ListValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidNode { node } => write!(f, "invalid node id {}", node.as_u32()),
+            Self::MalformedList { node } => {
+                write!(f, "malformed Faust list at node {}", node.as_u32())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ListValidationError {}
+
 /// Builds a `cons`/`nil` list from one slice while preserving iteration order.
 ///
 /// This mirrors the repeated list-construction helpers used throughout the C++
@@ -116,4 +141,34 @@ pub fn list_to_vec(arena: &TreeArena, mut list: TreeId) -> Option<Vec<TreeId>> {
         list = arena.tl(list)?;
     }
     Some(out)
+}
+
+/// Validates that `root` is a canonical `cons`/`nil` Faust list and returns its
+/// length.
+///
+/// This is the executable counterpart of the list-shape contract already
+/// relied upon by `vec_to_list`, `list_to_vec`, recursive-tree helpers, and
+/// later compiler phases that store payload sequences in `TreeArena`.
+pub fn validate_faust_list(
+    arena: &TreeArena,
+    mut root: TreeId,
+) -> Result<usize, ListValidationError> {
+    if arena.node(root).is_none() {
+        return Err(ListValidationError::InvalidNode { node: root });
+    }
+    let mut len = 0usize;
+    while !arena.is_nil(root) {
+        if !arena.is_list(root) {
+            return Err(ListValidationError::MalformedList { node: root });
+        }
+        let Some(_head) = arena.hd(root) else {
+            return Err(ListValidationError::MalformedList { node: root });
+        };
+        let Some(tail) = arena.tl(root) else {
+            return Err(ListValidationError::MalformedList { node: root });
+        };
+        len += 1;
+        root = tail;
+    }
+    Ok(len)
 }

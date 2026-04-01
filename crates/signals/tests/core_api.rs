@@ -224,3 +224,42 @@ fn dump_readable_handles_deep_left_spines_without_recursing() {
     assert!(got.starts_with("SIGBINOP(op=add (+),"));
     assert!(got.contains("SIGINPUT(int(0))"));
 }
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "SIGINPUT index must be non-negative")]
+fn builder_rejects_negative_input_index_in_debug() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let _ = b.input(-1);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "SIGOUTPUT index must be non-negative")]
+fn builder_rejects_negative_output_index_in_debug() {
+    let mut arena = TreeArena::new();
+    let input = {
+        let mut b = SigBuilder::new(&mut arena);
+        b.input(0)
+    };
+    let mut b = SigBuilder::new(&mut arena);
+    let _ = b.output(-1, input);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "SIGPROJ index must be non-negative")]
+fn builder_rejects_negative_proj_index_in_debug() {
+    let mut arena = TreeArena::new();
+    let input = {
+        let mut b = SigBuilder::new(&mut arena);
+        b.input(0)
+    };
+    let rec = {
+        let mut b = SigBuilder::new(&mut arena);
+        b.rec(input)
+    };
+    let mut b = SigBuilder::new(&mut arena);
+    let _ = b.proj(-1, rec);
+}

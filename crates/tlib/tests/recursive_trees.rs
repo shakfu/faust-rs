@@ -1,9 +1,10 @@
 //! Integration tests for recursive-tree conversion parity helpers.
 
 use tlib::{
-    NodeKind, RecursionError, TreeArena, de_bruijn_aperture, de_bruijn_rec, de_bruijn_ref,
-    de_bruijn_to_sym, lift_de_bruijn, lift_de_bruijn_n, match_de_bruijn_rec, match_de_bruijn_ref,
-    match_sym_rec, match_sym_ref, sym_rec, sym_ref,
+    NodeKind, RecursionError, SymbolicRecursionValidationError, TreeArena, de_bruijn_aperture,
+    de_bruijn_rec, de_bruijn_ref, de_bruijn_to_sym, lift_de_bruijn, lift_de_bruijn_n,
+    match_de_bruijn_rec, match_de_bruijn_ref, match_sym_rec, match_sym_ref, sym_rec, sym_ref,
+    validate_closed_de_bruijn_tree, validate_symbolic_recursion_tree,
 };
 
 #[test]
@@ -114,6 +115,50 @@ fn explicit_symbolic_helpers_roundtrip() {
 
     assert_eq!(match_sym_rec(&arena, rec), Some((var, body)));
     assert_eq!(match_sym_ref(&arena, rf), Some(var));
+}
+
+#[test]
+fn validate_closed_de_bruijn_tree_accepts_closed_group() {
+    let mut arena = TreeArena::new();
+    let r1 = de_bruijn_ref(&mut arena, 1);
+    let root = de_bruijn_rec(&mut arena, r1);
+
+    assert_eq!(validate_closed_de_bruijn_tree(&arena, root), Ok(()));
+}
+
+#[test]
+fn validate_closed_de_bruijn_tree_rejects_open_group() {
+    let mut arena = TreeArena::new();
+    let root = de_bruijn_ref(&mut arena, 1);
+
+    assert_eq!(
+        validate_closed_de_bruijn_tree(&arena, root),
+        Err(RecursionError::OpenDeBruijnTree { aperture: 1 })
+    );
+}
+
+#[test]
+fn validate_symbolic_recursion_tree_accepts_bound_refs() {
+    let mut arena = TreeArena::new();
+    let var = arena.symbol("v");
+    let rf = sym_ref(&mut arena, var);
+    let nil = arena.nil();
+    let body = arena.cons(rf, nil);
+    let root = sym_rec(&mut arena, var, body);
+
+    assert_eq!(validate_symbolic_recursion_tree(&arena, root), Ok(()));
+}
+
+#[test]
+fn validate_symbolic_recursion_tree_rejects_unbound_refs() {
+    let mut arena = TreeArena::new();
+    let var = arena.symbol("v");
+    let root = sym_ref(&mut arena, var);
+
+    assert_eq!(
+        validate_symbolic_recursion_tree(&arena, root),
+        Err(SymbolicRecursionValidationError::UnboundReference { node: root, var })
+    );
 }
 
 fn pair(arena: &mut TreeArena, lhs: tlib::TreeId, rhs: tlib::TreeId) -> tlib::TreeId {

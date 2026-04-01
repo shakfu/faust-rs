@@ -13,6 +13,14 @@ pub struct BoxBuilder<'a> {
 }
 
 impl<'a> BoxBuilder<'a> {
+    fn debug_assert_node_exists(&self, kind: &str, id: BoxId) {
+        debug_assert!(
+            self.arena.node(id).is_some(),
+            "{kind} expects child node {} to exist in the bound TreeArena",
+            id.as_u32()
+        );
+    }
+
     #[must_use]
     /// Creates a `BoxBuilder` bound to one mutable `TreeArena`.
     pub fn new(arena: &'a mut TreeArena) -> Self {
@@ -52,42 +60,56 @@ impl<'a> BoxBuilder<'a> {
     #[must_use]
     /// Builds one box node for `seq` and returns its `BoxId`.
     pub fn seq(&mut self, left: BoxId, right: BoxId) -> BoxId {
+        self.debug_assert_node_exists("boxSeq", left);
+        self.debug_assert_node_exists("boxSeq", right);
         node_seq(self.arena, left, right)
     }
 
     #[must_use]
     /// Builds one box node for `par` and returns its `BoxId`.
     pub fn par(&mut self, left: BoxId, right: BoxId) -> BoxId {
+        self.debug_assert_node_exists("boxPar", left);
+        self.debug_assert_node_exists("boxPar", right);
         node_par(self.arena, left, right)
     }
 
     #[must_use]
     /// Builds one box node for `rec` and returns its `BoxId`.
     pub fn rec(&mut self, left: BoxId, right: BoxId) -> BoxId {
+        self.debug_assert_node_exists("boxRec", left);
+        self.debug_assert_node_exists("boxRec", right);
         node_rec(self.arena, left, right)
     }
 
     #[must_use]
     /// Builds one box node for `split` and returns its `BoxId`.
     pub fn split(&mut self, left: BoxId, right: BoxId) -> BoxId {
+        self.debug_assert_node_exists("boxSplit", left);
+        self.debug_assert_node_exists("boxSplit", right);
         node_split(self.arena, left, right)
     }
 
     #[must_use]
     /// Builds one box node for `merge` and returns its `BoxId`.
     pub fn merge(&mut self, left: BoxId, right: BoxId) -> BoxId {
+        self.debug_assert_node_exists("boxMerge", left);
+        self.debug_assert_node_exists("boxMerge", right);
         node_merge(self.arena, left, right)
     }
 
     #[must_use]
     /// Builds one box node for `appl` and returns its `BoxId`.
     pub fn appl(&mut self, fun: BoxId, arglist: BoxId) -> BoxId {
+        self.debug_assert_node_exists("boxAppl", fun);
+        self.debug_assert_node_exists("boxAppl", arglist);
         node_appl(self.arena, fun, arglist)
     }
 
     #[must_use]
     /// Builds one box node for `access` and returns its `BoxId`.
     pub fn access(&mut self, expr: BoxId, ident: BoxId) -> BoxId {
+        self.debug_assert_node_exists("boxAccess", expr);
+        self.debug_assert_node_exists("boxAccess", ident);
         node_access(self.arena, expr, ident)
     }
 
@@ -418,24 +440,36 @@ impl<'a> BoxBuilder<'a> {
     #[must_use]
     /// Builds one box node for `ipar` and returns its `BoxId`.
     pub fn ipar(&mut self, index: BoxId, count: BoxId, body: BoxId) -> BoxId {
+        self.debug_assert_node_exists("boxIPar", index);
+        self.debug_assert_node_exists("boxIPar", count);
+        self.debug_assert_node_exists("boxIPar", body);
         node_ipar(self.arena, index, count, body)
     }
 
     #[must_use]
     /// Builds one box node for `iseq` and returns its `BoxId`.
     pub fn iseq(&mut self, index: BoxId, count: BoxId, body: BoxId) -> BoxId {
+        self.debug_assert_node_exists("boxISeq", index);
+        self.debug_assert_node_exists("boxISeq", count);
+        self.debug_assert_node_exists("boxISeq", body);
         node_iseq(self.arena, index, count, body)
     }
 
     #[must_use]
     /// Builds one box node for `isum` and returns its `BoxId`.
     pub fn isum(&mut self, index: BoxId, count: BoxId, body: BoxId) -> BoxId {
+        self.debug_assert_node_exists("boxISum", index);
+        self.debug_assert_node_exists("boxISum", count);
+        self.debug_assert_node_exists("boxISum", body);
         node_isum(self.arena, index, count, body)
     }
 
     #[must_use]
     /// Builds one box node for `iprod` and returns its `BoxId`.
     pub fn iprod(&mut self, index: BoxId, count: BoxId, body: BoxId) -> BoxId {
+        self.debug_assert_node_exists("boxIProd", index);
+        self.debug_assert_node_exists("boxIProd", count);
+        self.debug_assert_node_exists("boxIProd", body);
         node_iprod(self.arena, index, count, body)
     }
 
@@ -497,12 +531,18 @@ impl<'a> BoxBuilder<'a> {
     #[must_use]
     /// Builds one box node for `waveform` and returns its `BoxId`.
     pub fn waveform(&mut self, values: &[BoxId]) -> BoxId {
+        for &value in values {
+            self.debug_assert_node_exists("boxWaveform", value);
+        }
         node_waveform(self.arena, values)
     }
 
     #[must_use]
     /// Builds one box node for `route` and returns its `BoxId`.
     pub fn route(&mut self, n: BoxId, m: BoxId, route_spec: BoxId) -> BoxId {
+        self.debug_assert_node_exists("boxRoute", n);
+        self.debug_assert_node_exists("boxRoute", m);
+        self.debug_assert_node_exists("boxRoute", route_spec);
         node_route(self.arena, n, m, route_spec)
     }
 

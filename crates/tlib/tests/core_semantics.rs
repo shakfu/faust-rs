@@ -4,7 +4,10 @@
 //! - Exercises public APIs and structural invariants for the targeted module.
 //! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
-use tlib::{NodeKind, PropertyStore, TreeArena, list_to_vec, vec_to_list};
+use tlib::{
+    ListValidationError, NodeKind, PropertyStore, TreeArena, list_to_vec, validate_faust_list,
+    vec_to_list,
+};
 
 #[test]
 fn interning_reuses_structurally_identical_nodes() {
@@ -57,6 +60,30 @@ fn list_to_vec_rejects_malformed_cons_chain() {
     let malformed = arena.cons(head, tail);
 
     assert_eq!(list_to_vec(&arena, malformed), None);
+}
+
+#[test]
+fn validate_faust_list_accepts_nil_and_cons_lists() {
+    let mut arena = TreeArena::new();
+    let empty = arena.nil();
+    let values = [arena.int(1), arena.int(2), arena.int(3)];
+    let list = vec_to_list(&mut arena, &values);
+
+    assert_eq!(validate_faust_list(&arena, empty), Ok(0));
+    assert_eq!(validate_faust_list(&arena, list), Ok(3));
+}
+
+#[test]
+fn validate_faust_list_rejects_non_list_tail() {
+    let mut arena = TreeArena::new();
+    let head = arena.int(1);
+    let tail = arena.int(2);
+    let malformed = arena.cons(head, tail);
+
+    assert_eq!(
+        validate_faust_list(&arena, malformed),
+        Err(ListValidationError::MalformedList { node: tail })
+    );
 }
 
 #[test]
