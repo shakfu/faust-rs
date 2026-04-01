@@ -1,7 +1,10 @@
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
 use tlib::{de_bruijn_rec, de_bruijn_ref, match_sym_rec, match_sym_ref};
+use ui::{ControlKind, ControlSpec};
 
-use super::{SimpleSigType, prepare_signals_for_fir};
+use super::{
+    SignalPrepareError, SimpleSigType, prepare_signals_for_fir, prepare_signals_for_fir_verified,
+};
 
 #[test]
 fn prepare_signals_for_fir_converts_shared_debruijn_group_once_per_forest() {
@@ -655,4 +658,116 @@ fn prepare_signals_for_fir_handles_shared_unary_recursion_dag_linearly() {
         prepared.outputs[0].as_u32() != 0,
         "preparation should produce a staged output"
     );
+}
+
+#[test]
+fn prepare_signals_for_fir_verified_exposes_checked_staging_boundary() {
+    let mut arena = tlib::TreeArena::new();
+    let output = {
+        let mut b = SigBuilder::new(&mut arena);
+        b.input(0)
+    };
+
+    let prepared = prepare_signals_for_fir_verified(&arena, &[output], &ui::UiProgram::empty())
+        .expect("verified preparation should succeed");
+
+    assert_eq!(prepared.outputs().len(), 1);
+    assert_eq!(
+        prepared.ty(prepared.outputs()[0]),
+        Some(SimpleSigType::Real)
+    );
+    assert!(prepared.sig_ty(prepared.outputs()[0]).is_some());
+}
+
+#[test]
+fn prepared_signals_verify_rejects_missing_reduced_type_entry() {
+    let mut arena = tlib::TreeArena::new();
+    let output = {
+        let mut b = SigBuilder::new(&mut arena);
+        b.input(0)
+    };
+
+    let mut prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
+        .expect("baseline preparation should succeed");
+    prepared.types.remove(&prepared.outputs[0]);
+
+    let err = prepared
+        .verify(&ui::UiProgram::empty())
+        .expect_err("missing reduced type should fail verification");
+    let SignalPrepareError::Validation(message) = err else {
+        panic!("expected validation error");
+    };
+    assert!(message.contains("missing reduced type annotation"));
+}
+
+#[test]
+fn prepared_signals_verify_rejects_out_of_range_recursive_projection() {
+    let mut arena = tlib::TreeArena::new();
+    let self_ref = de_bruijn_ref(&mut arena, 1);
+    let body = {
+        let mut b = SigBuilder::new(&mut arena);
+        let feedback = b.proj(0, self_ref);
+        b.delay1(feedback)
+    };
+    let body_list = arena.cons(body, arena.nil());
+    let group = de_bruijn_rec(&mut arena, body_list);
+    let output = {
+        let mut b = SigBuilder::new(&mut arena);
+        b.proj(0, group)
+    };
+
+    let mut prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
+        .expect("baseline preparation should succeed");
+    let SigMatch::Proj(_, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0]) else {
+        panic!("prepared output should stay a projection");
+    };
+    let old_output = prepared.outputs[0];
+    let old_reduced = prepared.ty(old_output).expect("baseline reduced type");
+    let old_full = prepared
+        .sig_ty(old_output)
+        .cloned()
+        .expect("baseline full type");
+    let bad_output = {
+        let mut b = SigBuilder::new(&mut prepared.arena);
+        b.proj(3, prepared_group)
+    };
+    prepared.outputs[0] = bad_output;
+    prepared.types.insert(bad_output, old_reduced);
+    prepared.sig_types.insert(bad_output, old_full);
+
+    let err = prepared
+        .verify(&ui::UiProgram::empty())
+        .expect_err("out-of-range recursive projection should fail verification");
+    let SignalPrepareError::Validation(message) = err else {
+        panic!("expected validation error");
+    };
+    assert!(message.contains("out of range"));
+}
+
+#[test]
+fn prepared_signals_verify_rejects_missing_ui_control_reference() {
+    let mut signal_arena = tlib::TreeArena::new();
+    let output = {
+        let mut b = SigBuilder::new(&mut signal_arena);
+        b.button(0)
+    };
+
+    let mut ui = ui::UiProgram::empty();
+    ui.controls.push(ControlSpec {
+        id: 0,
+        kind: ControlKind::Button,
+        label: "button".to_owned(),
+        metadata: Vec::new(),
+        range: None,
+    });
+
+    let prepared = prepare_signals_for_fir(&signal_arena, &[output], &ui)
+        .expect("baseline preparation with matching UI should succeed");
+    let err = prepared
+        .verify(&ui::UiProgram::empty())
+        .expect_err("missing UI control registry entry should fail verification");
+    let SignalPrepareError::Validation(message) = err else {
+        panic!("expected validation error");
+    };
+    assert!(message.contains("missing UI control id 0"));
 }

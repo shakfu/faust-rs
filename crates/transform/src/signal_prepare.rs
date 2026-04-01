@@ -30,6 +30,12 @@
 //! - casts needed by the current FIR lowerer have already been inserted,
 //! - the original source arena is left untouched.
 //!
+//! The module now also exposes an explicit verification boundary:
+//! - [`PreparedSignals::verify`] checks those postconditions on an already built
+//!   staging forest,
+//! - [`prepare_signals_for_fir_verified`] returns a wrapper that certifies the
+//!   prepared forest passed the boundary checks before reaching FIR lowering.
+//!
 //! # Adaptation status
 //! This is an adapted Rust staging phase rather than a 1:1 copy of one single
 //! C++ class:
@@ -100,6 +106,17 @@ pub struct PreparedSignals {
     pub(crate) sig_types: HashMap<SigId, SigType>,
 }
 
+/// Prepared-signal forest that passed the explicit postcondition verifier.
+///
+/// This wrapper exists so downstream code can request a stronger boundary than
+/// "the constructor should have produced something valid": the checked state is
+/// represented in the type system and can be threaded through lowering code
+/// without re-introducing ad hoc assumptions.
+#[derive(Debug)]
+pub struct VerifiedPreparedSignals {
+    inner: PreparedSignals,
+}
+
 impl PreparedSignals {
     /// Returns the reduced prepared type for one signal node, when available.
     #[must_use]
@@ -130,6 +147,114 @@ impl PreparedSignals {
     pub fn sig_types_map(&self) -> &HashMap<SigId, SigType> {
         &self.sig_types
     }
+
+    /// Verifies the documented postconditions of the prepared staging forest.
+    ///
+    /// This is intentionally a structural boundary verifier:
+    /// - it checks only properties already guaranteed or already assumed by the
+    ///   fast-lane,
+    /// - it does not change the forest,
+    /// - it fails close to the stage boundary when an invariant regresses.
+    pub fn verify(&self, ui: &UiProgram) -> Result<(), SignalPrepareError> {
+        let derived_types = derive_simple_types(&self.arena, &self.sig_types);
+        let mut visited = HashSet::new();
+        let mut reachable_typed_nodes = Vec::new();
+        let mut sym_group_arities = HashMap::new();
+
+        for &out in &self.outputs {
+            verify_prepared_signal(
+                &self.arena,
+                ui,
+                out,
+                &mut visited,
+                &mut sym_group_arities,
+                &mut reachable_typed_nodes,
+            )?;
+        }
+
+        for sig in reachable_typed_nodes {
+            let Some(actual_reduced) = self.types.get(&sig).copied() else {
+                return Err(SignalPrepareError::Validation(format!(
+                    "prepared signal {} is reachable but missing reduced type annotation",
+                    sig.as_u32()
+                )));
+            };
+            let Some(actual_full) = self.sig_types.get(&sig) else {
+                return Err(SignalPrepareError::Validation(format!(
+                    "prepared signal {} is reachable but missing full SigType annotation",
+                    sig.as_u32()
+                )));
+            };
+            let Some(expected_reduced) = derived_types.get(&sig).copied() else {
+                return Err(SignalPrepareError::Validation(format!(
+                    "prepared signal {} is reachable but has no derived reduced type",
+                    sig.as_u32()
+                )));
+            };
+            if actual_reduced != expected_reduced {
+                return Err(SignalPrepareError::Validation(format!(
+                    "prepared signal {} has inconsistent reduced type: stored={actual_reduced:?}, derived={expected_reduced:?}, full={actual_full:?}",
+                    sig.as_u32()
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Consumes this prepared forest and returns a verified wrapper when the
+    /// boundary checks succeed.
+    pub fn into_verified(
+        self,
+        ui: &UiProgram,
+    ) -> Result<VerifiedPreparedSignals, SignalPrepareError> {
+        self.verify(ui)?;
+        Ok(VerifiedPreparedSignals { inner: self })
+    }
+}
+
+impl VerifiedPreparedSignals {
+    /// Returns the verified staging arena.
+    #[must_use]
+    pub fn arena(&self) -> &TreeArena {
+        &self.inner.arena
+    }
+
+    /// Returns the verified output roots.
+    #[must_use]
+    pub fn outputs(&self) -> &[SigId] {
+        &self.inner.outputs
+    }
+
+    /// Returns the reduced prepared type for one signal node, when available.
+    #[must_use]
+    pub fn ty(&self, sig: SigId) -> Option<SimpleSigType> {
+        self.inner.ty(sig)
+    }
+
+    /// Returns the full `SigType` for one signal node.
+    #[must_use]
+    pub fn sig_ty(&self, sig: SigId) -> Option<&SigType> {
+        self.inner.sig_ty(sig)
+    }
+
+    /// Read-only view of the reduced type map.
+    #[must_use]
+    pub fn types_map(&self) -> &HashMap<SigId, SimpleSigType> {
+        self.inner.types_map()
+    }
+
+    /// Read-only view of the full type map.
+    #[must_use]
+    pub fn sig_types_map(&self) -> &HashMap<SigId, SigType> {
+        self.inner.sig_types_map()
+    }
+
+    /// Releases the verified wrapper and returns the inner prepared forest.
+    #[must_use]
+    pub fn into_inner(self) -> PreparedSignals {
+        self.inner
+    }
 }
 
 /// Typed errors returned while preparing signals for FIR lowering.
@@ -139,6 +264,8 @@ pub enum SignalPrepareError {
     Recursion(RecursionError),
     /// Structural type-inference or validation error (e.g. malformed recursion body).
     Typing(String),
+    /// Explicit prepared-forest contract validation failed.
+    Validation(String),
     /// The signal promotion pass failed (type-driven cast insertion).
     Promotion(NormalFormError),
 }
@@ -151,6 +278,9 @@ impl fmt::Display for SignalPrepareError {
                 "signal preparation failed during de_bruijn_to_sym: {err}"
             ),
             Self::Typing(msg) => write!(f, "signal preparation typing failed: {msg}"),
+            Self::Validation(msg) => {
+                write!(f, "signal preparation postcondition failed: {msg}")
+            }
             Self::Promotion(err) => write!(f, "signal preparation promotion failed: {err}"),
         }
     }
@@ -161,7 +291,7 @@ impl Error for SignalPrepareError {
         match self {
             Self::Recursion(e) => Some(e),
             Self::Promotion(e) => Some(e),
-            Self::Typing(_) => None,
+            Self::Typing(_) | Self::Validation(_) => None,
         }
     }
 }
@@ -212,6 +342,29 @@ pub fn prepare_signals_for_fir(
     outputs: &[SigId],
     ui: &UiProgram,
 ) -> Result<PreparedSignals, SignalPrepareError> {
+    let prepared = prepare_signals_for_fir_unverified(src_arena, outputs, ui)?;
+    verify_prepared_output_arity(outputs.len(), prepared.outputs.len())?;
+    prepared.verify(ui)?;
+    Ok(prepared)
+}
+
+/// Like [`prepare_signals_for_fir`], but returns a wrapper certifying that the
+/// postcondition verifier has already run successfully.
+pub fn prepare_signals_for_fir_verified(
+    src_arena: &TreeArena,
+    outputs: &[SigId],
+    ui: &UiProgram,
+) -> Result<VerifiedPreparedSignals, SignalPrepareError> {
+    let prepared = prepare_signals_for_fir_unverified(src_arena, outputs, ui)?;
+    verify_prepared_output_arity(outputs.len(), prepared.outputs.len())?;
+    prepared.into_verified(ui)
+}
+
+fn prepare_signals_for_fir_unverified(
+    src_arena: &TreeArena,
+    outputs: &[SigId],
+    ui: &UiProgram,
+) -> Result<PreparedSignals, SignalPrepareError> {
     let mut arena = TreeArena::new();
     let cloned_outputs = arena.clone_forest_from(src_arena, outputs);
     let cloned_list = vec_to_list(&mut arena, &cloned_outputs);
@@ -230,6 +383,400 @@ pub fn prepare_signals_for_fir(
         types,
         sig_types,
     })
+}
+
+fn verify_prepared_output_arity(expected: usize, actual: usize) -> Result<(), SignalPrepareError> {
+    if expected == actual {
+        return Ok(());
+    }
+    Err(SignalPrepareError::Validation(format!(
+        "prepared output arity changed across staging: expected {expected}, got {actual}"
+    )))
+}
+
+fn verify_prepared_signal(
+    arena: &TreeArena,
+    ui: &UiProgram,
+    sig: SigId,
+    visited: &mut HashSet<SigId>,
+    sym_group_arities: &mut HashMap<SigId, usize>,
+    reachable_typed_nodes: &mut Vec<SigId>,
+) -> Result<(), SignalPrepareError> {
+    if !visited.insert(sig) {
+        return Ok(());
+    }
+    if arena.is_nil(sig) || arena.is_list(sig) {
+        return Err(SignalPrepareError::Validation(format!(
+            "prepared signal traversal reached unexpected list/nil node {}",
+            sig.as_u32()
+        )));
+    }
+    if tlib::match_de_bruijn_rec(arena, sig).is_some()
+        || tlib::match_de_bruijn_ref(arena, sig).is_some()
+    {
+        return Err(SignalPrepareError::Validation(format!(
+            "prepared signal {} still contains de Bruijn recursion form",
+            sig.as_u32()
+        )));
+    }
+    if match_sym_ref(arena, sig).is_some() {
+        return Err(SignalPrepareError::Validation(format!(
+            "prepared signal {} unexpectedly exposes a bare symbolic recursion reference",
+            sig.as_u32()
+        )));
+    }
+    if let Some((var, body_list)) = match_sym_rec(arena, sig) {
+        reachable_typed_nodes.push(sig);
+        let bodies = list_to_vec(arena, body_list).ok_or_else(|| {
+            SignalPrepareError::Validation(
+                "malformed symbolic recursion body list in prepared signals".to_owned(),
+            )
+        })?;
+        if bodies.is_empty() {
+            return Err(SignalPrepareError::Validation(format!(
+                "symbolic recursion group {} has empty body list",
+                sig.as_u32()
+            )));
+        }
+        match sym_group_arities.insert(var, bodies.len()) {
+            Some(previous) if previous != bodies.len() => {
+                return Err(SignalPrepareError::Validation(format!(
+                    "symbolic recursion variable {} was observed with inconsistent arities: {previous} vs {}",
+                    var.as_u32(),
+                    bodies.len()
+                )));
+            }
+            _ => {}
+        }
+        for body in bodies {
+            verify_prepared_signal(
+                arena,
+                ui,
+                body,
+                visited,
+                sym_group_arities,
+                reachable_typed_nodes,
+            )?;
+        }
+        return Ok(());
+    }
+
+    reachable_typed_nodes.push(sig);
+    match match_sig(arena, sig) {
+        SigMatch::Unknown => {
+            return Err(SignalPrepareError::Validation(format!(
+                "prepared signal {} could not be decoded by match_sig",
+                sig.as_u32()
+            )));
+        }
+        SigMatch::Int(_)
+        | SigMatch::Real(_)
+        | SigMatch::Input(_)
+        | SigMatch::Button(_)
+        | SigMatch::Checkbox(_)
+        | SigMatch::VSlider(_)
+        | SigMatch::HSlider(_)
+        | SigMatch::NumEntry(_)
+        | SigMatch::Soundfile(_)
+        | SigMatch::FConst(_, _, _)
+        | SigMatch::FVar(_, _, _) => {}
+        SigMatch::Output(_, inner)
+        | SigMatch::Delay1(inner)
+        | SigMatch::IntCast(inner)
+        | SigMatch::BitCast(inner)
+        | SigMatch::FloatCast(inner)
+        | SigMatch::Gen(inner)
+        | SigMatch::Lowest(inner)
+        | SigMatch::Highest(inner)
+        | SigMatch::Acos(inner)
+        | SigMatch::Asin(inner)
+        | SigMatch::Atan(inner)
+        | SigMatch::Cos(inner)
+        | SigMatch::Sin(inner)
+        | SigMatch::Tan(inner)
+        | SigMatch::Exp(inner)
+        | SigMatch::Log(inner)
+        | SigMatch::Log10(inner)
+        | SigMatch::Sqrt(inner)
+        | SigMatch::Abs(inner)
+        | SigMatch::Floor(inner)
+        | SigMatch::Ceil(inner)
+        | SigMatch::Rint(inner)
+        | SigMatch::Round(inner)
+        | SigMatch::TempVar(inner)
+        | SigMatch::PermVar(inner) => verify_prepared_signal(
+            arena,
+            ui,
+            inner,
+            visited,
+            sym_group_arities,
+            reachable_typed_nodes,
+        )?,
+        SigMatch::Delay(x, y)
+        | SigMatch::Prefix(x, y)
+        | SigMatch::RdTbl(x, y)
+        | SigMatch::Pow(x, y)
+        | SigMatch::Min(x, y)
+        | SigMatch::Max(x, y)
+        | SigMatch::Atan2(x, y)
+        | SigMatch::Fmod(x, y)
+        | SigMatch::Remainder(x, y)
+        | SigMatch::Attach(x, y)
+        | SigMatch::Enable(x, y)
+        | SigMatch::Control(x, y)
+        | SigMatch::Seq(x, y)
+        | SigMatch::ZeroPad(x, y)
+        | SigMatch::Clocked(x, y) => {
+            verify_prepared_signal(
+                arena,
+                ui,
+                x,
+                visited,
+                sym_group_arities,
+                reachable_typed_nodes,
+            )?;
+            verify_prepared_signal(
+                arena,
+                ui,
+                y,
+                visited,
+                sym_group_arities,
+                reachable_typed_nodes,
+            )?;
+        }
+        SigMatch::BinOp(_, x, y) => {
+            verify_prepared_signal(
+                arena,
+                ui,
+                x,
+                visited,
+                sym_group_arities,
+                reachable_typed_nodes,
+            )?;
+            verify_prepared_signal(
+                arena,
+                ui,
+                y,
+                visited,
+                sym_group_arities,
+                reachable_typed_nodes,
+            )?;
+        }
+        SigMatch::Select2(selector, then_value, else_value)
+        | SigMatch::AssertBounds(selector, then_value, else_value) => {
+            verify_prepared_signal(
+                arena,
+                ui,
+                selector,
+                visited,
+                sym_group_arities,
+                reachable_typed_nodes,
+            )?;
+            verify_prepared_signal(
+                arena,
+                ui,
+                then_value,
+                visited,
+                sym_group_arities,
+                reachable_typed_nodes,
+            )?;
+            verify_prepared_signal(
+                arena,
+                ui,
+                else_value,
+                visited,
+                sym_group_arities,
+                reachable_typed_nodes,
+            )?;
+        }
+        SigMatch::WrTbl(size, generator, write_index, write_signal) => {
+            for child in [size, generator] {
+                verify_prepared_signal(
+                    arena,
+                    ui,
+                    child,
+                    visited,
+                    sym_group_arities,
+                    reachable_typed_nodes,
+                )?;
+            }
+            let readonly = arena.is_nil(write_index) && arena.is_nil(write_signal);
+            let malformed_write_pair = arena.is_nil(write_index) ^ arena.is_nil(write_signal);
+            if malformed_write_pair {
+                return Err(SignalPrepareError::Validation(format!(
+                    "write table {} uses inconsistent readonly/write placeholders",
+                    sig.as_u32()
+                )));
+            }
+            if !readonly {
+                for child in [write_index, write_signal] {
+                    verify_prepared_signal(
+                        arena,
+                        ui,
+                        child,
+                        visited,
+                        sym_group_arities,
+                        reachable_typed_nodes,
+                    )?;
+                }
+            }
+        }
+        SigMatch::FFun(_, arg_list) => {
+            let args = list_to_vec(arena, arg_list).ok_or_else(|| {
+                SignalPrepareError::Validation(
+                    "malformed foreign-function argument list in prepared signals".to_owned(),
+                )
+            })?;
+            for arg in args {
+                verify_prepared_signal(
+                    arena,
+                    ui,
+                    arg,
+                    visited,
+                    sym_group_arities,
+                    reachable_typed_nodes,
+                )?;
+            }
+        }
+        SigMatch::Proj(index, group) => {
+            if index < 0 {
+                return Err(SignalPrepareError::Validation(format!(
+                    "projection {} uses negative index {index}",
+                    sig.as_u32()
+                )));
+            }
+            let arity = if let Some((var, _)) = match_sym_rec(arena, group) {
+                verify_prepared_signal(
+                    arena,
+                    ui,
+                    group,
+                    visited,
+                    sym_group_arities,
+                    reachable_typed_nodes,
+                )?;
+                sym_group_arities.get(&var).copied().ok_or_else(|| {
+                    SignalPrepareError::Validation(format!(
+                        "projection {} targets recursion group {} without registered arity",
+                        sig.as_u32(),
+                        group.as_u32()
+                    ))
+                })?
+            } else if let Some(var) = match_sym_ref(arena, group) {
+                sym_group_arities.get(&var).copied().ok_or_else(|| {
+                    SignalPrepareError::Validation(format!(
+                        "projection {} targets symbolic recursion ref {} before its group arity is known",
+                        sig.as_u32(),
+                        var.as_u32()
+                    ))
+                })?
+            } else {
+                return Err(SignalPrepareError::Validation(format!(
+                    "projection {} does not target symbolic recursion",
+                    sig.as_u32()
+                )));
+            };
+            let index = usize::try_from(index).expect("negative indices rejected above");
+            if index >= arity {
+                return Err(SignalPrepareError::Validation(format!(
+                    "projection {} index {index} is out of range for recursion arity {arity}",
+                    sig.as_u32()
+                )));
+            }
+            if arity == 1 && index != 0 {
+                return Err(SignalPrepareError::Validation(format!(
+                    "projection {} targets unary recursion with non-canonical index {index}",
+                    sig.as_u32()
+                )));
+            }
+        }
+        SigMatch::Rec(_) => {
+            return Err(SignalPrepareError::Validation(format!(
+                "prepared signal {} still contains legacy SIGREC form",
+                sig.as_u32()
+            )));
+        }
+        SigMatch::VBargraph(control, inner) | SigMatch::HBargraph(control, inner) => {
+            verify_control_exists(ui, control, sig)?;
+            verify_prepared_signal(
+                arena,
+                ui,
+                inner,
+                visited,
+                sym_group_arities,
+                reachable_typed_nodes,
+            )?;
+        }
+        SigMatch::Waveform(values)
+        | SigMatch::OnDemand(values)
+        | SigMatch::Upsampling(values)
+        | SigMatch::Downsampling(values) => {
+            for &child in values {
+                verify_prepared_signal(
+                    arena,
+                    ui,
+                    child,
+                    visited,
+                    sym_group_arities,
+                    reachable_typed_nodes,
+                )?;
+            }
+        }
+        SigMatch::SoundfileLength(soundfile, part) | SigMatch::SoundfileRate(soundfile, part) => {
+            verify_prepared_signal(
+                arena,
+                ui,
+                soundfile,
+                visited,
+                sym_group_arities,
+                reachable_typed_nodes,
+            )?;
+            verify_prepared_signal(
+                arena,
+                ui,
+                part,
+                visited,
+                sym_group_arities,
+                reachable_typed_nodes,
+            )?;
+        }
+        SigMatch::SoundfileBuffer(soundfile, chan, part, ridx) => {
+            for child in [soundfile, chan, part, ridx] {
+                verify_prepared_signal(
+                    arena,
+                    ui,
+                    child,
+                    visited,
+                    sym_group_arities,
+                    reachable_typed_nodes,
+                )?;
+            }
+        }
+    }
+
+    match match_sig(arena, sig) {
+        SigMatch::Button(control)
+        | SigMatch::Checkbox(control)
+        | SigMatch::VSlider(control)
+        | SigMatch::HSlider(control)
+        | SigMatch::NumEntry(control)
+        | SigMatch::Soundfile(control) => verify_control_exists(ui, control, sig),
+        _ => Ok(()),
+    }
+}
+
+fn verify_control_exists(
+    ui: &UiProgram,
+    control: ui::ControlId,
+    sig: SigId,
+) -> Result<(), SignalPrepareError> {
+    if ui.control(control).is_some() {
+        return Ok(());
+    }
+    Err(SignalPrepareError::Validation(format!(
+        "prepared signal {} references missing UI control id {}",
+        sig.as_u32(),
+        control
+    )))
 }
 
 /// Rewrites symbolic recursion projections so unary groups always use slot `0`.

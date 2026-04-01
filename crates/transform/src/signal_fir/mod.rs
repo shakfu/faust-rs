@@ -54,7 +54,7 @@ use signals::SigId;
 use tlib::TreeArena;
 use ui::UiProgram;
 
-use crate::signal_prepare::prepare_signals_for_fir;
+use crate::signal_prepare::prepare_signals_for_fir_verified;
 
 /// Internal DSP computation precision used when lowering signals to FIR.
 ///
@@ -153,7 +153,7 @@ pub struct SignalFirOutput {
 /// # Current behavior (Step 2A/2B/2C/2D/2E/2F/2G/2H)
 /// - validates options and top-level signal/arity contract,
 /// - builds a deterministic planning snapshot,
-/// - prepares the whole output forest in a private staging arena,
+/// - prepares and verifies the whole output forest in a private staging arena,
 /// - lowers one executable bootstrap signal slice to FIR using the prepared
 ///   reduced type annotations for state/table/result type selection.
 ///
@@ -177,7 +177,7 @@ pub fn compile_signals_to_fir_fastlane_with_ui(
     options: &SignalFirOptions,
 ) -> Result<SignalFirOutput, SignalFirError> {
     let plan = planner::plan_signals(signals, num_inputs, num_outputs, options)?;
-    let prepared = prepare_signals_for_fir(_arena, signals, ui).map_err(|err| {
+    let prepared = prepare_signals_for_fir_verified(_arena, signals, ui).map_err(|err| {
         SignalFirError::new(
             SignalFirErrorCode::UnsupportedSignalNode,
             format!("signal preparation failed: {err}"),
@@ -186,11 +186,11 @@ pub fn compile_signals_to_fir_fastlane_with_ui(
     module::build_module(
         &plan,
         options.module_name.as_str(),
-        &prepared.arena,
-        &prepared.outputs,
+        prepared.arena(),
+        prepared.outputs(),
         ui,
-        &prepared.types,
-        &prepared.sig_types,
+        prepared.types_map(),
+        prepared.sig_types_map(),
         options.real_type.as_fir_type(),
     )
 }

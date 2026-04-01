@@ -35,7 +35,9 @@ layer that turns a signal graph into a structured FIR module.
 | Item | Description |
 |---|---|
 | `prepare_signals_for_fir(arena, sigs)` | Prepare propagated signals for FIR lowering |
+| `prepare_signals_for_fir_verified(arena, sigs, ui)` | Prepare signals and return a verified staging wrapper |
 | `PreparedSignals` | Result: staging arena + prepared roots + type annotations |
+| `VerifiedPreparedSignals` | Checked prepared forest that passed explicit postcondition verification |
 | `SimpleSigType` | Reduced type domain (`Int` / `Real` / `Sound`) |
 | `SignalPrepareError` | Typed errors from the preparation pass |
 
