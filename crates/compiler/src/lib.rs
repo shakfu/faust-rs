@@ -3696,6 +3696,7 @@ mod tests {
     };
     use codegen::backends::wasm::WasmOptions;
     use parser::VirtualSourceMap;
+    use serde_json::Value;
 
     fn temp_root(test_name: &str) -> PathBuf {
         let stamp = SystemTime::now()
@@ -3709,6 +3710,22 @@ mod tests {
         ));
         fs::create_dir_all(&root).expect("create temp root");
         root
+    }
+
+    fn json_include_pathnames(dsp_json: &str) -> Vec<PathBuf> {
+        let parsed: Value = serde_json::from_str(dsp_json).expect("valid DSP JSON");
+        parsed["include_pathnames"]
+            .as_array()
+            .expect("include_pathnames array")
+            .iter()
+            .map(|value| {
+                PathBuf::from(
+                    value
+                        .as_str()
+                        .expect("include_pathnames entries should be strings"),
+                )
+            })
+            .collect()
     }
 
     // ── golden helpers ────────────────────────────────────────────────────────
@@ -4009,8 +4026,8 @@ mod tests {
 
         assert!(out.wasm_bytes.starts_with(b"\0asm"));
         assert!(out.dsp_json.contains("child.lib"));
-        let root_fwd = root.display().to_string().replace('\\', "/");
-        assert!(out.dsp_json.contains(&root_fwd));
+        let include_pathnames = json_include_pathnames(&out.dsp_json);
+        assert!(include_pathnames.contains(&root), "{include_pathnames:?}");
     }
 
     #[test]
@@ -4122,10 +4139,10 @@ mod tests {
             out.dsp_json.contains("\"library_list\":[") && out.dsp_json.contains("child.lib"),
             "library_list should include the imported file"
         );
-        let root_fwd = root.display().to_string().replace('\\', "/");
+        let include_pathnames = json_include_pathnames(&out.dsp_json);
         assert!(
-            out.dsp_json.contains(&root_fwd),
-            "include_pathnames should include the source directory"
+            include_pathnames.contains(&root),
+            "include_pathnames should include the source directory: {include_pathnames:?}"
         );
     }
 
