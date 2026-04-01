@@ -73,7 +73,10 @@ mod tests {
         channels
     }
 
-    fn run_interp_outputs(case: &Path, import_root: Option<&Path>) -> Result<Vec<Vec<f32>>, String> {
+    fn run_interp_outputs(
+        case: &Path,
+        import_root: Option<&Path>,
+    ) -> Result<Vec<Vec<f32>>, String> {
         let compiler = Compiler::new();
         let search_paths = import_root
             .map(|root| vec![root.to_path_buf()])
@@ -112,15 +115,17 @@ mod tests {
         Ok(output_channels)
     }
 
-    fn run_cranelift_outputs(case: &Path, import_root: Option<&Path>) -> Result<Vec<Vec<f32>>, String> {
+    fn run_cranelift_outputs(
+        case: &Path,
+        import_root: Option<&Path>,
+    ) -> Result<Vec<Vec<f32>>, String> {
         let c_path = CString::new(case.to_string_lossy().as_bytes())
             .map_err(|e| format!("case path is not valid C string: {e}"))?;
         let argv_storage = import_root
             .map(|root| {
                 vec![
                     CString::new("-I").expect("CString -I"),
-                    CString::new(root.to_string_lossy().as_bytes())
-                        .expect("CString import root"),
+                    CString::new(root.to_string_lossy().as_bytes()).expect("CString import root"),
                 ]
             })
             .unwrap_or_default();
@@ -344,16 +349,17 @@ mod tests {
                 );
             }
             for case in &cases {
-                let interp = run_interp_outputs(case, faustlib_root.as_deref()).unwrap_or_else(|e| {
-                    panic!("interp backend runtime failed for {}: {e}", case.display())
-                });
-                let cranelift =
-                    run_cranelift_outputs(case, faustlib_root.as_deref()).unwrap_or_else(|e| {
-                    panic!(
-                        "cranelift backend runtime failed for {}: {e}",
-                        case.display()
-                    )
-                });
+                let interp =
+                    run_interp_outputs(case, faustlib_root.as_deref()).unwrap_or_else(|e| {
+                        panic!("interp backend runtime failed for {}: {e}", case.display())
+                    });
+                let cranelift = run_cranelift_outputs(case, faustlib_root.as_deref())
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "cranelift backend runtime failed for {}: {e}",
+                            case.display()
+                        )
+                    });
                 assert_outputs_close(case, &interp, &cranelift);
             }
         });
