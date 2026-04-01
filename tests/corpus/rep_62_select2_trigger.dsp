@@ -1,4 +1,3 @@
-import("stdfaust.lib");
 // Minimal test: Select2 with counter trigger and noise excitation
 // Outputs noise for 100 samples after every 256-sample beat
 process = noise_out

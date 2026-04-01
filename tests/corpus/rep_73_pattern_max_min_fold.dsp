@@ -7,8 +7,6 @@
 // C++ reference: `isBoxNumeric` propagates the box to a signal then calls
 // `simplify()`, reducing `max(1, min(6, 4))` → `sigInt(4)` → `boxInt(4)`.
 
-import("stdfaust.lib");
-
 // Simple case: pattern constant folded by arithmetic
 f(1) = 10;
 f(2) = 20;

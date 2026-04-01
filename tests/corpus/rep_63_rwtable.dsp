@@ -1,4 +1,3 @@
-import("stdfaust.lib");
 // Test rwtable: counter writes ascending values, read-back at index 0
 N = 16;
 counter = (+(1)) ~ %(N);
