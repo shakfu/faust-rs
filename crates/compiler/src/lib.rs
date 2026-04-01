@@ -3728,6 +3728,27 @@ mod tests {
             .collect()
     }
 
+    fn json_library_list(dsp_json: &str) -> Vec<PathBuf> {
+        let parsed: Value = serde_json::from_str(dsp_json).expect("valid DSP JSON");
+        parsed["library_list"]
+            .as_array()
+            .expect("library_list array")
+            .iter()
+            .map(|value| {
+                PathBuf::from(
+                    value
+                        .as_str()
+                        .expect("library_list entries should be strings"),
+                )
+            })
+            .collect()
+    }
+
+    fn json_filename(dsp_json: &str) -> Option<String> {
+        let parsed: Value = serde_json::from_str(dsp_json).expect("valid DSP JSON");
+        parsed["filename"].as_str().map(str::to_owned)
+    }
+
     // ── golden helpers ────────────────────────────────────────────────────────
 
     #[test]
@@ -3993,7 +4014,7 @@ mod tests {
             .expect("artifact compile should succeed");
 
         assert!(out.wasm_bytes.starts_with(b"\0asm"));
-        assert!(out.dsp_json.contains("\"filename\":\"zero.dsp\""));
+        assert_eq!(json_filename(&out.dsp_json).as_deref(), Some("zero.dsp"));
         assert_eq!(
             out.compile_options,
             compile_options_json_string(Some("wasm"), false)
@@ -4049,9 +4070,9 @@ mod tests {
             .expect("artifact compile with virtual libraries should succeed");
 
         assert!(out.wasm_bytes.starts_with(b"\0asm"));
-        assert!(out.dsp_json.contains("\"library_list\":["));
-        assert!(out.dsp_json.contains("stdfaust.lib"));
-        assert!(out.dsp_json.contains("osc.lib"));
+        let library_list = json_library_list(&out.dsp_json);
+        assert!(library_list.contains(&PathBuf::from("stdfaust.lib")));
+        assert!(library_list.contains(&PathBuf::from("osc.lib")));
     }
 
     #[test]
@@ -4071,7 +4092,7 @@ mod tests {
         assert!(strict_json.contains("\"type\":\"hslider\""));
         assert!(strict_json.contains("\"address\":\"/gain/gain\""));
         assert!(out.wasm_bytes.starts_with(b"\0asm"));
-        assert!(out.dsp_json.contains("\"filename\":\"gain\""));
+        assert_eq!(json_filename(&out.dsp_json).as_deref(), Some("gain"));
         assert!(out.dsp_json.contains("\"label\":\"gain\""));
         assert!(out.dsp_json.contains("\"type\":\"hslider\""));
         assert!(out.dsp_json.contains("\"address\":\"/gain/gain\""));
@@ -4130,14 +4151,15 @@ mod tests {
             .expect("file-backed WASM compile should succeed");
 
         assert!(out.dsp_json.contains("\"name\":\"Main DSP\""));
-        assert!(out.dsp_json.contains("\"filename\":\"main.dsp\""));
+        assert_eq!(json_filename(&out.dsp_json).as_deref(), Some("main.dsp"));
         assert!(
             out.dsp_json
                 .contains(&format!("\"version\":\"{}\"", Compiler::version()))
         );
+        let library_list = json_library_list(&out.dsp_json);
         assert!(
-            out.dsp_json.contains("\"library_list\":[") && out.dsp_json.contains("child.lib"),
-            "library_list should include the imported file"
+            library_list.contains(&child),
+            "library_list should include the imported file: {library_list:?}"
         );
         let include_pathnames = json_include_pathnames(&out.dsp_json);
         assert!(
@@ -4168,8 +4190,9 @@ mod tests {
             out.compile_options,
             compile_options_json_string(Some("wasm"), false)
         );
-        assert!(out.dsp_json.contains("\"filename\":\"main.dsp\""));
-        assert!(out.dsp_json.contains("child.lib"));
+        assert_eq!(json_filename(&out.dsp_json).as_deref(), Some("main.dsp"));
+        let library_list = json_library_list(&out.dsp_json);
+        assert!(library_list.contains(&child), "{library_list:?}");
         assert!(
             out.dsp_json
                 .contains(&format!("\"compile_options\":\"{}\"", out.compile_options))
