@@ -14,7 +14,8 @@
 //!   - `interp-trace-diff-lanes` (Phase 3 lane differential scaffold)
 //!   - `interp-trace-dump-cppfbc` (C++ Faust `.fbc` -> Rust interp runtime)
 //!   - `interp-trace-gen-cppfbc` (batch-generate persisted traces from C++ `.fbc`)
-//!   - `backend-align-smoke` (CI-friendly smoke alignment orchestration)
+//!   - `backend-align-smoke` (CI-friendly smoke alignment orchestration,
+//!     including `opt_level=0` vs `opt_level=max` interpreter drift checks)
 //!   - `backend-align-nightly` (broader alignment orchestration)
 //!   - `fir-dump-scan` (structural scan of `dump_fir` loop body expansion)
 //!   - `build-faustwasm-compiler-module` (`wasm-ffi` -> verified `.wasm`)
@@ -409,6 +410,8 @@ fn backend_align_smoke(
     cranelift_subset_strict_check_cases(&cases)?;
     println!("backend-align-smoke: cranelift-ffi-runtime-diff-smoke");
     run_cranelift_ffi_runtime_diff_smoke()?;
+    println!("backend-align-smoke: interp-opt-level-diff");
+    interp_trace_diff_opt_levels_cases(&cases, options.strict_fir_types)?;
 
     for case in &cases {
         let mut trace_check_args = vec![
@@ -455,7 +458,7 @@ fn backend_align_smoke(
     }
 
     println!(
-        "backend-align-smoke: OK (runtime_cases={}, strict_fir_types={}, golden={}, cranelift_strict_subset=true, diff_lanes={}, fir_dump_scan={})",
+        "backend-align-smoke: OK (runtime_cases={}, strict_fir_types={}, golden={}, cranelift_strict_subset=true, interp_opt_levels=true, diff_lanes={}, fir_dump_scan={})",
         cases.len(),
         options.strict_fir_types,
         !options.skip_golden,
@@ -1537,6 +1540,66 @@ fn interp_trace_check(
     Ok(())
 }
 
+/// Compares `opt_level=0` and `opt_level=max` interpreter traces on selected cases.
+///
+/// This is a low-cost metamorphic guardrail: the bytecode optimizer may change
+/// execution strategy but must not change observable sample outputs.
+fn interp_trace_diff_opt_levels_cases(
+    cases: &[PathBuf],
+    strict_fir_types: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let tol = TraceCompareTolerances::default();
+    let default_options = InterpTraceBatchOptions::default();
+    let mut compared = 0usize;
+
+    for case in cases {
+        let scenarios = trace_scenarios_for_runtime_case(case)?;
+        if scenarios.is_empty() {
+            println!(
+                "skip {} (no snapshot-enabled scenarios yet)",
+                case.display()
+            );
+            continue;
+        }
+
+        for scenario in scenarios {
+            let base = InterpTraceDumpOptions {
+                case: case.clone(),
+                scenario,
+                lane: TraceLane::Fast,
+                sample_rate: default_options.sample_rate,
+                block_size: default_options.block_size,
+                num_blocks: default_options.num_blocks,
+                strict_fir_types,
+                out: None,
+            };
+            let unoptimized = run_interp_trace_case_with_opt_level(&base, 0)?;
+            let optimized = run_interp_trace_case_with_opt_level(
+                &base,
+                codegen::backends::interp::MAX_OPT_LEVEL.into(),
+            )?;
+            if let Err(mismatch) = compare_runtime_traces(&unoptimized, &optimized, tol) {
+                return Err(format!(
+                    "interp opt-level diff failed for {} [{}]: mismatch {:?}",
+                    case.display(),
+                    scenario.as_str(),
+                    mismatch
+                )
+                .into());
+            }
+            println!(
+                "match {} [{}] (interp opt_level=0 vs opt_level=max)",
+                case.display(),
+                scenario.as_str()
+            );
+            compared += 1;
+        }
+    }
+
+    println!("interp opt-level diff: {compared} trace(s) matched");
+    Ok(())
+}
+
 /// Compares legacy and fast interpreter lanes directly without using snapshots.
 ///
 /// This is used to detect semantic drift between the old FIR bridge and the
@@ -1780,6 +1843,14 @@ fn runtime_trace_snapshot_path(case_id: &str, scenario: TraceScenario) -> PathBu
 fn run_interp_trace_case(
     options: &InterpTraceDumpOptions,
 ) -> Result<RuntimeTrace, Box<dyn std::error::Error>> {
+    run_interp_trace_case_with_opt_level(options, 0)
+}
+
+/// Runs one DSP through the Rust interpreter backend with an explicit optimizer level.
+fn run_interp_trace_case_with_opt_level(
+    options: &InterpTraceDumpOptions,
+    opt_level: i32,
+) -> Result<RuntimeTrace, Box<dyn std::error::Error>> {
     let compiler = compiler::Compiler::new().with_fir_verify_options(compiler::FirVerifyOptions {
         enabled: true,
         strict: false,
@@ -1793,7 +1864,7 @@ fn run_interp_trace_case(
     }
 
     let interp_options = codegen::backends::interp::InterpOptions {
-        opt_level: 0,
+        opt_level,
         module_name: None,
     };
     let mut factory = codegen::backends::interp::generate_interp_module::<f32>(
@@ -4408,6 +4479,12 @@ mod tests {
         assert_eq!(mismatch.field, "outputs");
         assert_eq!(mismatch.channel, Some(0));
         assert_eq!(mismatch.sample, Some(0));
+    }
+
+    #[test]
+    fn interp_trace_opt_level_diff_matches_on_passthrough_case() {
+        let case = workspace_root().join("tests/runtime_corpus/trace_01_passthrough.dsp");
+        interp_trace_diff_opt_levels_cases(&[case], false).unwrap();
     }
 
     #[test]
