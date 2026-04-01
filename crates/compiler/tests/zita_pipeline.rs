@@ -1,11 +1,14 @@
 //! Integration tests for zita-related signal/FIR pipeline regressions.
 
-use compiler::Compiler;
+use compiler::{Compiler, CompilerError, SignalCompileOutput};
+use parser::SourceReaderError;
 use std::path::PathBuf;
 use std::thread;
 use transform::signal_fir::{RealType, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui};
 use transform::signal_prepare::prepare_signals_for_fir;
 use ui::UiProgram;
+
+const DEFAULT_FAUSTLIBRARIES_ROOT: &str = "/Users/letz/Developpements/faustlibraries";
 
 fn fixture_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -16,6 +19,41 @@ fn fixture_root() -> PathBuf {
 
 fn fixture_dsp(file: &str) -> PathBuf {
     fixture_root().join(file)
+}
+
+fn faustlibraries_root() -> Option<PathBuf> {
+    std::env::var_os("FAUST_RS_FAUSTLIBRARIES_ROOT")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let default = PathBuf::from(DEFAULT_FAUSTLIBRARIES_ROOT);
+            default.exists().then_some(default)
+        })
+}
+
+fn compile_zita_signals() -> Option<SignalCompileOutput> {
+    let compiler = Compiler::new();
+    let path = fixture_dsp("zita_min.dsp");
+
+    if let Some(root) = faustlibraries_root() {
+        return Some(
+            compiler
+                .compile_file_to_signals(&path, &[root])
+                .unwrap_or_else(|e| panic!("signal compilation should succeed: {e}")),
+        );
+    }
+
+    match compiler.compile_file_default_to_signals(&path) {
+        Ok(output) => Some(output),
+        Err(CompilerError::Import(SourceReaderError::UnresolvedImport { name, .. }))
+            if name.as_ref() == "stdfaust.lib" =>
+        {
+            eprintln!(
+                "Skipping zita pipeline: stdfaust.lib unavailable and FAUST_RS_FAUSTLIBRARIES_ROOT is unset"
+            );
+            None
+        }
+        Err(e) => panic!("signal compilation should succeed: {e}"),
+    }
 }
 
 fn run_with_large_stack<T>(f: impl FnOnce() -> T + Send + 'static) -> T
@@ -34,11 +72,9 @@ where
 #[test]
 fn zita_min_preparation_preserves_multi_output_recursion_groups() {
     run_with_large_stack(|| {
-        let compiler = Compiler::new();
-        let path = fixture_dsp("zita_min.dsp");
-        let output = compiler
-            .compile_file_default_to_signals(&path)
-            .expect("signal compilation should succeed");
+        let Some(output) = compile_zita_signals() else {
+            return;
+        };
         let prepared = prepare_signals_for_fir(
             &output.parse.state.arena,
             &output.signals,
@@ -52,11 +88,9 @@ fn zita_min_preparation_preserves_multi_output_recursion_groups() {
 #[test]
 fn zita_min_fastlane_fir_lowering_completes() {
     run_with_large_stack(|| {
-        let compiler = Compiler::new();
-        let path = fixture_dsp("zita_min.dsp");
-        let output = compiler
-            .compile_file_default_to_signals(&path)
-            .expect("signal compilation should succeed");
+        let Some(output) = compile_zita_signals() else {
+            return;
+        };
         let fir = compile_signals_to_fir_fastlane_with_ui(
             &output.parse.state.arena,
             &output.signals,

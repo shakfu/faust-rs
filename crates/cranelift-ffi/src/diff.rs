@@ -28,6 +28,7 @@ mod tests {
     const NUM_BLOCKS: usize = 8;
     const ABS_TOL: f32 = 5e-4;
     const REL_TOL: f32 = 5e-4;
+    const DEFAULT_FAUSTLIBRARIES_ROOT: &str = "/Users/letz/Developpements/faustlibraries";
 
     fn c_int_arity_to_usize(value: i32, label: &str) -> Result<usize, String> {
         usize::try_from(value).map_err(|_| format!("invalid negative {label}: {value}"))
@@ -38,6 +39,15 @@ mod tests {
             .join("../..")
             .canonicalize()
             .expect("workspace root")
+    }
+
+    fn faustlibraries_root() -> Option<PathBuf> {
+        std::env::var_os("FAUST_RS_FAUSTLIBRARIES_ROOT")
+            .map(PathBuf::from)
+            .or_else(|| {
+                let default = PathBuf::from(DEFAULT_FAUSTLIBRARIES_ROOT);
+                default.exists().then_some(default)
+            })
     }
 
     fn run_with_large_stack<T>(f: impl FnOnce() -> T + Send + 'static) -> T
@@ -63,11 +73,15 @@ mod tests {
         channels
     }
 
-    fn run_interp_outputs(case: &Path) -> Result<Vec<Vec<f32>>, String> {
+    fn run_interp_outputs(case: &Path, import_root: Option<&Path>) -> Result<Vec<Vec<f32>>, String> {
         let compiler = Compiler::new();
+        let search_paths = import_root
+            .map(|root| vec![root.to_path_buf()])
+            .unwrap_or_default();
         let fbc = compiler
-            .compile_file_default_to_interp_with_lane(
+            .compile_file_to_interp_with_lane(
                 case,
+                &search_paths,
                 &InterpOptions::default(),
                 SignalFirLane::TransformFastLane,
             )
@@ -98,15 +112,32 @@ mod tests {
         Ok(output_channels)
     }
 
-    fn run_cranelift_outputs(case: &Path) -> Result<Vec<Vec<f32>>, String> {
+    fn run_cranelift_outputs(case: &Path, import_root: Option<&Path>) -> Result<Vec<Vec<f32>>, String> {
         let c_path = CString::new(case.to_string_lossy().as_bytes())
             .map_err(|e| format!("case path is not valid C string: {e}"))?;
+        let argv_storage = import_root
+            .map(|root| {
+                vec![
+                    CString::new("-I").expect("CString -I"),
+                    CString::new(root.to_string_lossy().as_bytes())
+                        .expect("CString import root"),
+                ]
+            })
+            .unwrap_or_default();
+        let argv_ptrs = argv_storage
+            .iter()
+            .map(|arg| arg.as_ptr())
+            .collect::<Vec<_>>();
         let mut err = [0_i8; 4096];
         let factory = unsafe {
             createCCraneliftDSPFactoryFromFile(
                 c_path.as_ptr(),
-                0,
-                std::ptr::null(),
+                i32::try_from(argv_ptrs.len()).expect("argv length fits in c_int"),
+                if argv_ptrs.is_empty() {
+                    std::ptr::null()
+                } else {
+                    argv_ptrs.as_ptr()
+                },
                 err.as_mut_ptr(),
                 1,
             )
@@ -288,6 +319,7 @@ mod tests {
         run_with_large_stack(|| {
             let _guard = crate::test_serial_guard();
             let root = workspace_root();
+            let faustlib_root = faustlibraries_root();
             // This corpus drives deep compiler recursion during the interpreter
             // side of the differential run, so execute it on an explicitly
             // larger stack instead of depending on the default test-thread size.
@@ -295,21 +327,28 @@ mod tests {
             // `rep_38_sine_phasor` remains excluded from this strict
             // differential smoke set until Cranelift stateful-loop parity is
             // completed.
-            let cases = [
+            let mut cases = vec![
                 root.join("tests/corpus/rep_01_passthrough.dsp"),
                 root.join("tests/corpus/rep_07_nonlinear_clip.dsp"),
                 root.join("tests/corpus/rep_60_counter_rem.dsp"),
-                root.join("tests/corpus/rep_61_fmin_sr.dsp"),
                 root.join("tests/corpus/rep_62_select2_trigger.dsp"),
                 root.join("tests/corpus/rep_63_rwtable.dsp"),
-                root.join("tests/corpus/rep_64_dynamic_rem.dsp"),
                 root.join("tests/corpus/rep_65_fabs_trigger.dsp"),
             ];
+            if faustlib_root.is_some() {
+                cases.push(root.join("tests/corpus/rep_61_fmin_sr.dsp"));
+                cases.push(root.join("tests/corpus/rep_64_dynamic_rem.dsp"));
+            } else {
+                eprintln!(
+                    "Skipping stdlib-dependent Cranelift smoke cases: stdfaust.lib unavailable and FAUST_RS_FAUSTLIBRARIES_ROOT is unset"
+                );
+            }
             for case in &cases {
-                let interp = run_interp_outputs(case).unwrap_or_else(|e| {
+                let interp = run_interp_outputs(case, faustlib_root.as_deref()).unwrap_or_else(|e| {
                     panic!("interp backend runtime failed for {}: {e}", case.display())
                 });
-                let cranelift = run_cranelift_outputs(case).unwrap_or_else(|e| {
+                let cranelift =
+                    run_cranelift_outputs(case, faustlib_root.as_deref()).unwrap_or_else(|e| {
                     panic!(
                         "cranelift backend runtime failed for {}: {e}",
                         case.display()
