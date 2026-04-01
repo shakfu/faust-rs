@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_62_select2_trigger.dsp
+bytes=413
+lines=12
+fnv1a64=d5f8024b73e49f65

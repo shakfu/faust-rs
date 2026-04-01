@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_73_pattern_max_min_fold.dsp
+bytes=633
+lines=17
+fnv1a64=1d608b422a0fe676

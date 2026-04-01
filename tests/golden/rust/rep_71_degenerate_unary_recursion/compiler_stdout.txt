@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_71_degenerate_unary_recursion.dsp
+bytes=3571
+lines=79
+fnv1a64=4777949fe2dc6861

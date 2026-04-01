@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_61_fmin_sr.dsp
+bytes=161
+lines=3
+fnv1a64=adae1681fd084c78

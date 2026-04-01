@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_80_mutual_recursion_crossed.dsp
+bytes=457
+lines=13
+fnv1a64=84dcbe25c3867e69

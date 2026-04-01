@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_78_foreign_function.dsp
+bytes=121
+lines=3
+fnv1a64=b03ae68e35720513

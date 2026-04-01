@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_79_multi_output_recursion.dsp
+bytes=358
+lines=11
+fnv1a64=9486f980766c7bf5

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_72_float_literal_pattern.dsp
+bytes=1788
+lines=46
+fnv1a64=80d6cd37f1f09677

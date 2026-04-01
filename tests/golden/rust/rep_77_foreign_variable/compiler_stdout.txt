@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_77_foreign_variable.dsp
+bytes=96
+lines=4
+fnv1a64=428998abcb78c739
