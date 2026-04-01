@@ -4009,7 +4009,8 @@ mod tests {
 
         assert!(out.wasm_bytes.starts_with(b"\0asm"));
         assert!(out.dsp_json.contains("child.lib"));
-        assert!(out.dsp_json.contains(&root.display().to_string()));
+        let root_fwd = root.display().to_string().replace('\\', "/");
+        assert!(out.dsp_json.contains(&root_fwd));
     }
 
     #[test]
@@ -4121,8 +4122,9 @@ mod tests {
             out.dsp_json.contains("\"library_list\":[") && out.dsp_json.contains("child.lib"),
             "library_list should include the imported file"
         );
+        let root_fwd = root.display().to_string().replace('\\', "/");
         assert!(
-            out.dsp_json.contains(&root.display().to_string()),
+            out.dsp_json.contains(&root_fwd),
             "include_pathnames should include the source directory"
         );
     }
