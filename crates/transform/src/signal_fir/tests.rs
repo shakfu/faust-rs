@@ -410,7 +410,10 @@ fn section_routing_places_ui_and_state_resets_in_distinct_functions() {
             let m = match_fir(&out.store, *id);
             match m {
                 FirMatch::StoreVar { ref name, .. }
-                    if name.starts_with("fRec") || name.starts_with("iRec") =>
+                    if name.starts_with("fRec")
+                        || name.starts_with("iRec")
+                        || name.starts_with("fVec")
+                        || name.starts_with("iVec") =>
                 {
                     true
                 }
@@ -421,7 +424,10 @@ fn section_routing_places_ui_and_state_resets_in_distinct_functions() {
                             matches!(
                                 match_fir(&out.store, *sid),
                                 FirMatch::StoreTable { ref name, .. }
-                                    if name.starts_with("fRec") || name.starts_with("iRec")
+                                    if name.starts_with("fRec")
+                                        || name.starts_with("iRec")
+                                        || name.starts_with("fVec")
+                                        || name.starts_with("iVec")
                             )
                         })
                     } else {
@@ -592,7 +598,7 @@ fn pow_min_max_and_unary_math_lower_to_fir_fun_calls() {
     let FirMatch::Block(globals_items) = match_fir(&out.store, globals) else {
         panic!("module globals block expected");
     };
-    for expected in ["sin", "fmax", "pow"] {
+    for expected in ["sin", "pow"] {
         assert!(
             globals_items.iter().any(|id| {
                 matches!(
@@ -626,10 +632,12 @@ fn pow_min_max_and_unary_math_lower_to_fir_fun_calls() {
         panic!("lhs should lower to unary fun call");
     };
     assert_eq!(lhs_name, "sin");
-    let FirMatch::FunCall { name: rhs_name, .. } = match_fir(&out.store, args[1]) else {
-        panic!("rhs should lower to min/max fun call");
-    };
-    assert_eq!(rhs_name, "fmax");
+    match match_fir(&out.store, args[1]) {
+        FirMatch::FunCall { name: rhs_name, .. } => assert_eq!(rhs_name, "fmax"),
+        FirMatch::Float32 { value, .. } => assert_eq!(value, 0.5),
+        FirMatch::Float64 { value, .. } => assert_eq!(value, 0.5),
+        _ => panic!("rhs should lower to fmax or the simplified constant 0.5"),
+    }
 }
 
 #[test]
@@ -1765,10 +1773,37 @@ fn left_shift_binop_lowers_to_int32_fir_shift() {
     )
     .expect("lsh should lower through the fast-lane");
 
-    let dump = fir::dump_fir(&out.store, out.module);
+    let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+        panic!("module root expected");
+    };
+    let loop_body = find_compute_loop_body(&out.store, functions);
+    let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+        panic!("compute loop body block expected");
+    };
+    let store_value = stmts
+        .iter()
+        .find_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::StoreTable { name, value, .. } if name == "output0" => Some(value),
+            _ => None,
+        })
+        .expect("compute should include one output store");
+    let store_value = unwrap_output_cast(&out.store, store_value);
     assert!(
-        dump.contains("BinOp { op: Lsh") && dump.contains("typ: Int32"),
-        "left shift should lower to an Int32 FIR Lsh binop"
+        matches!(
+            match_fir(&out.store, store_value),
+            FirMatch::BinOp {
+                op: FirBinOp::Lsh,
+                typ: FirType::Int32,
+                ..
+            }
+        ) || matches!(
+            match_fir(&out.store, store_value),
+            FirMatch::Int32 {
+                value: 8,
+                typ: FirType::Int32
+            }
+        ),
+        "left shift should lower to an Int32 FIR Lsh binop or simplify to Int32(8)"
     );
 }
 
@@ -1793,11 +1828,42 @@ fn right_shift_binops_lower_to_int32_fir_shifts() {
         )
         .expect("right shift should lower through the fast-lane");
 
-        let dump = fir::dump_fir(&out.store, out.module);
-        let needle = format!("BinOp {{ op: {expected_op:?}");
+        let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+            panic!("module root expected");
+        };
+        let loop_body = find_compute_loop_body(&out.store, functions);
+        let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+            panic!("compute loop body block expected");
+        };
+        let store_value = stmts
+            .iter()
+            .find_map(|id| match match_fir(&out.store, *id) {
+                FirMatch::StoreTable { name, value, .. } if name == "output0" => Some(value),
+                _ => None,
+            })
+            .expect("compute should include one output store");
+        let store_value = unwrap_output_cast(&out.store, store_value);
+        let expected_value = match source_op {
+            BinOp::ARsh => 4,
+            BinOp::LRsh => 4,
+            _ => unreachable!(),
+        };
         assert!(
-            dump.contains(&needle) && dump.contains("typ: Int32"),
-            "right shift should lower to an Int32 FIR {expected_op:?} binop"
+            matches!(
+                match_fir(&out.store, store_value),
+                FirMatch::BinOp {
+                    op,
+                    typ: FirType::Int32,
+                    ..
+                } if op == expected_op
+            ) || matches!(
+                match_fir(&out.store, store_value),
+                FirMatch::Int32 {
+                    value,
+                    typ: FirType::Int32
+                } if value == expected_value
+            ),
+            "right shift should lower to an Int32 FIR {expected_op:?} binop or simplify to Int32({expected_value})"
         );
     }
 }

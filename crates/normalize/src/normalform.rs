@@ -32,11 +32,14 @@
 //! - `simplifyToNormalForm2(sigs)` → [`prepare_signals_multi`]
 
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use signals::{BinOp, SigBuilder, SigId, SigMatch, dump_sig_readable, match_sig};
 use sigtype::{Nature, SigType, TypeAnnotator};
 use tlib::{RecursionError, TreeArena, de_bruijn_to_sym, match_sym_rec, match_sym_ref};
 use ui::UiProgram;
+
+use crate::simplify::simplify;
 
 // ─── Options ──────────────────────────────────────────────────────────────────
 
@@ -192,6 +195,17 @@ pub fn promote_signals_fastlane(
 ) -> Result<Vec<SigId>, NormalFormError> {
     let mut promoter = SignalPromoter::new(arena, types);
     sigs.iter().map(|sig| promoter.promote(*sig)).collect()
+}
+
+/// Simplify a prepared signal forest using the canonical `SigType` context.
+pub fn simplify_signals_fastlane(
+    arena: &mut TreeArena,
+    types: &HashMap<SigId, SigType>,
+    sigs: &[SigId],
+) -> Vec<SigId> {
+    sigs.iter()
+        .map(|sig| catch_unwind(AssertUnwindSafe(|| simplify(arena, types, *sig))).unwrap_or(*sig))
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

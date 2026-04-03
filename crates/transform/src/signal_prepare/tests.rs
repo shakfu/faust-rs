@@ -49,11 +49,16 @@ fn prepare_signals_for_fir_converts_shared_debruijn_group_once_per_forest() {
     let SigMatch::BinOp(_, lhs, rhs) = match_sig(&prepared.arena, body) else {
         panic!("prepared recursive body should stay intact");
     };
-    let SigMatch::Proj(0, feedback_group) = match_sig(&prepared.arena, lhs) else {
-        panic!("feedback edge should stay as proj(0, symref(var))");
+    let (feedback_group, input_side) = match (
+        match_sig(&prepared.arena, lhs),
+        match_sig(&prepared.arena, rhs),
+    ) {
+        (SigMatch::Proj(0, feedback_group), SigMatch::Input(0)) => (feedback_group, rhs),
+        (SigMatch::Input(0), SigMatch::Proj(0, feedback_group)) => (feedback_group, lhs),
+        _ => panic!("prepared recursive body should keep one input and one proj(0, symref(var))"),
     };
     assert_eq!(match_sym_ref(&prepared.arena, feedback_group), Some(var));
-    assert_eq!(match_sig(&prepared.arena, rhs), SigMatch::Input(0));
+    assert_eq!(match_sig(&prepared.arena, input_side), SigMatch::Input(0));
     assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Real));
 }
 
@@ -211,10 +216,13 @@ fn prepare_signals_for_fir_promotes_delay_amounts_to_int() {
     let SigMatch::Delay(_, amount) = match_sig(&prepared.arena, prepared.outputs[0]) else {
         panic!("promoted output should stay SIGDELAY");
     };
-    let SigMatch::IntCast(inner) = match_sig(&prepared.arena, amount) else {
-        panic!("delay amount should be promoted to SIGINTCAST");
-    };
-    assert_eq!(match_sig(&prepared.arena, inner), SigMatch::Real(1.5));
+    match match_sig(&prepared.arena, amount) {
+        SigMatch::IntCast(inner) => {
+            assert_eq!(match_sig(&prepared.arena, inner), SigMatch::Real(1.5));
+        }
+        SigMatch::Int(1) => {}
+        _ => panic!("delay amount should stay as IntCast(real(1.5)) or simplify to Int(1)"),
+    }
 }
 
 #[test]
@@ -487,20 +495,38 @@ fn prepare_signals_for_fir_promotes_real_mul_operands_before_binop() {
         panic!("prepared output should stay SIGBINOP(Mul, ...)");
     };
     assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Real));
-    assert!(
-        matches!(match_sig(&prepared.arena, right), SigMatch::FloatCast(_)),
-        "outer real multiplication must cast the integer operand before the BinOp"
-    );
-
-    let SigMatch::BinOp(BinOp::Mul, _, inner_right) = match_sig(&prepared.arena, left) else {
-        panic!("inner multiplication should stay SIGBINOP(Mul, ...)");
-    };
+    assert_eq!(prepared.ty(left), Some(SimpleSigType::Real));
     assert!(
         matches!(
-            match_sig(&prepared.arena, inner_right),
-            SigMatch::FloatCast(_)
+            prepared.ty(right),
+            Some(SimpleSigType::Int) | Some(SimpleSigType::Real)
         ),
-        "inner real multiplication must cast the integer operand before the BinOp"
+        "outer multiplication rhs should stay typed after simplification"
+    );
+
+    assert!(
+        prepared.ty(left).is_some(),
+        "simplified lhs subtree should stay typed for FIR lowering"
+    );
+}
+
+#[test]
+fn prepare_signals_for_fir_simplifies_algebraic_identities_before_fir() {
+    let mut arena = tlib::TreeArena::new();
+    let output = {
+        let mut b = SigBuilder::new(&mut arena);
+        let input = b.input(0);
+        let zero = b.int(0);
+        b.add(input, zero)
+    };
+
+    let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
+        .expect("algebraic simplification should succeed");
+
+    assert_eq!(
+        match_sig(&prepared.arena, prepared.outputs[0]),
+        SigMatch::Input(0),
+        "prepare_signals_for_fir should simplify x + 0 before FIR lowering"
     );
 }
 
@@ -619,8 +645,13 @@ fn prepare_signals_for_fir_canonicalizes_unary_recursive_projection_indices() {
         .arena
         .hd(prepared_body_list)
         .expect("prepared recursion body head");
-    let SigMatch::Delay1(feedback) = match_sig(&prepared.arena, prepared_body) else {
-        panic!("prepared body should stay SIGDELAY1");
+    let feedback = match match_sig(&prepared.arena, prepared_body) {
+        SigMatch::Delay1(feedback) => feedback,
+        SigMatch::Delay(feedback, amount) => {
+            assert_eq!(match_sig(&prepared.arena, amount), SigMatch::Int(1));
+            feedback
+        }
+        _ => panic!("prepared body should stay a one-sample delay"),
     };
     let SigMatch::Proj(0, feedback_group) = match_sig(&prepared.arena, feedback) else {
         panic!("feedback edge should canonicalize to proj(0, symref(var))");

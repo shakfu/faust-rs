@@ -135,7 +135,7 @@ const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
 /// - Every `Delay(_, amount)`, `RdTbl(_, index)`, `WrTbl(…, widx, _)`,
 ///   `Select2(selector, …)`, and `Enable(_, gate)` has its integer-context
 ///   operand wrapped in `IntCast`.
-/// - `Delay1(x)` and `Prefix(init, x)` have `type(init) == type(x)`.
+/// - `Delay1(x)`, `Delay(x, 1)`, and `Prefix(init, x)` have `type(init) == type(x)`.
 ///
 /// **Consequence for the lowerer**: no implicit coercion is needed inside
 /// `lower_binop`, `lower_delay_state`, or `normalized_table_index`.  All
@@ -145,8 +145,10 @@ const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
 ///
 /// # Recursion and delay1 coupling
 ///
-/// Every `~` recursion in Faust encodes feedback as `Delay1(Proj(i, group))`.
-/// The lowerer detects this pattern in `lower_delay_state` (via
+/// Every `~` recursion in Faust encodes feedback as `Delay1(Proj(i, group))`
+/// before simplification, and may reach the fast-lane as the equivalent
+/// `Delay(Proj(i, group), 1)` form after normalization. The lowerer detects
+/// both patterns in `lower_delay_state` (via
 /// `recursion_feedback_info`) and **reuses the group's existing 2-slot
 /// recursion array** instead of allocating a separate state variable.  Reading
 /// `state[(fIOTA - 1) & 1]` from that array is sufficient — no extra write is
@@ -809,6 +811,7 @@ impl<'a> SignalToFirLower<'a> {
         if let SigMatch::Delay(value, amount) = match_sig(self.arena, sig) {
             match self.delay_size_for_amount(amount)? {
                 Some(0) => {}
+                Some(1) if self.is_constant_one_sample_delay(amount) => {}
                 Some(delay) => {
                     let entry = max_delays.entry(value).or_insert(0);
                     if delay > *entry {
@@ -939,7 +942,14 @@ impl<'a> SignalToFirLower<'a> {
                 let init = self.zero_value_for_signal(sig)?;
                 self.lower_delay_state(sig, value, init)?
             }
-            SigMatch::Delay(value, amount) => self.lower_delay(sig, value, amount)?,
+            SigMatch::Delay(value, amount) => {
+                if self.is_constant_one_sample_delay(amount) {
+                    let init = self.zero_value_for_signal(sig)?;
+                    self.lower_delay_state(sig, value, init)?
+                } else {
+                    self.lower_delay(sig, value, amount)?
+                }
+            }
             SigMatch::Prefix(init_sig, value) => {
                 let init = self.initial_state_from_signal(init_sig);
                 self.lower_delay_state(sig, value, init)?
@@ -1032,6 +1042,11 @@ impl<'a> SignalToFirLower<'a> {
 
         self.cache.insert(sig, lowered);
         Ok(lowered)
+    }
+
+    /// Returns `true` when `amount` is the literal integer constant `1`.
+    fn is_constant_one_sample_delay(&self, amount: SigId) -> bool {
+        matches!(match_sig(self.arena, amount), SigMatch::Int(1))
     }
 
     /// Lowers supported foreign constants.

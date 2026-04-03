@@ -9,9 +9,10 @@
 //! This module now implements the first two preparation slices:
 //! - clone the output forest into a private staging arena,
 //! - run forest-wide `de_bruijn_to_sym`,
-//! - infer one reduced `Int / Real / Sound` type for the prepared signals.
-//! - insert the reduced `SignalPromotion` cast subset needed by the fast-lane
-//!   and re-type the promoted forest
+//! - infer one reduced `Int / Real / Sound` type for the prepared signals,
+//! - insert the reduced `SignalPromotion` cast subset needed by the fast-lane,
+//! - simplify the promoted forest,
+//! - and re-type the final forest.
 //!
 //! Reduced typing deliberately stops short of the full C++ type lattice. The
 //! goal is only to support the upcoming promotion pass and to feed `signal_fir`
@@ -43,7 +44,9 @@
 //! - reduced typing keeps only the distinctions currently needed by the
 //!   fast-lane instead of the full C++ signal type lattice,
 //! - the promotion pass ports only the `SignalPromotion` subset required before
-//!   `signal_fir`, without additional simplification or normalization.
+//!   `signal_fir`,
+//! - algebraic simplification then runs on the promoted forest before the
+//!   final type snapshot is exposed to FIR lowering.
 //!
 //! # Explicit Limitation
 //! The unary-recursion canonicalization performed here is **not** a 1:1 port of
@@ -67,7 +70,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 
-use normalize::normalform::{NormalFormError, promote_signals_fastlane};
+use normalize::normalform::{NormalFormError, promote_signals_fastlane, simplify_signals_fastlane};
 use signals::{SigBuilder, SigId, SigMatch, match_sig};
 use sigtype::{Nature, SigType, TypeAnnotator};
 use tlib::{
@@ -311,7 +314,7 @@ impl From<NormalFormError> for SignalPrepareError {
 /// Clones one output forest into a private arena, converts de Bruijn recursion
 /// to symbolic recursion with forest-wide sharing preserved, then infers one
 /// reduced type per prepared signal node, applies the reduced promotion pass,
-/// and re-types the promoted forest.
+/// simplifies the promoted forest, and re-types the final forest.
 ///
 /// C++ parity note: both `deBruijn2Sym(...)` and the later type/promotion flow
 /// conceptually operate on the whole output list, not independently per root.
@@ -375,6 +378,8 @@ fn prepare_signals_for_fir_unverified(
     let sig_types_before = infer_full_types(&arena, &outputs, ui)?;
     let outputs = promote_signals_fastlane(&mut arena, &sig_types_before, &outputs)
         .map_err(SignalPrepareError::Promotion)?;
+    let sig_types_after_promotion = infer_full_types(&arena, &outputs, ui)?;
+    let outputs = simplify_signals_fastlane(&mut arena, &sig_types_after_promotion, &outputs);
     let sig_types = infer_full_types(&arena, &outputs, ui)?;
     let types = derive_simple_types(&arena, &sig_types);
     Ok(PreparedSignals {
@@ -947,11 +952,12 @@ fn rewrite_unary_rec_projections(
 /// Runs the full `TypeAnnotator` (sigtype crate) on the prepared output forest.
 ///
 /// This produces interval bounds, variability, and all lattice qualifiers for
-/// each node.  Called **twice** in [`prepare_signals_for_fir`]: once before
-/// `promote_signals_fastlane` (to guide cast-insertion decisions) and once
-/// after (so the final map reflects the promoted forest, including the newly
-/// inserted `IntCast`/`FloatCast` nodes).  The second result is what ends up
-/// in [`PreparedSignals::sig_types`].
+/// each node. Called in [`prepare_signals_for_fir`] before
+/// `promote_signals_fastlane` (to guide cast-insertion decisions), again after
+/// promotion (to drive algebraic simplification on the promoted graph), and
+/// once more after simplification so the final map reflects the forest that
+/// reaches FIR lowering. That last result is what ends up in
+/// [`PreparedSignals::sig_types`].
 fn infer_full_types(
     arena: &TreeArena,
     outputs: &[SigId],
