@@ -19,6 +19,7 @@
 
 use super::{
     RealType, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui,
+    module::interpret_generator_for_test,
 };
 use fir::{AccessType, FirBinOp, FirMatch, FirType, match_fir};
 use signals::{BinOp, SigBuilder};
@@ -1008,6 +1009,24 @@ fn wrtbl_generator_expansion_preserves_integer_table_types() {
             .all(|id| matches!(match_fir(&out.store, *id), FirMatch::Int32 { .. })),
         "computed integer generator should lower to Int32 FIR literals"
     );
+}
+
+#[test]
+fn siggen_interpreter_delay1_uses_previous_step_for_non_recursive_sources() {
+    let mut arena = TreeArena::new();
+    let generator = {
+        let mut b = SigBuilder::new(&mut arena);
+        let v0 = b.real(1.0);
+        let v1 = b.real(2.0);
+        let v2 = b.real(3.0);
+        let v3 = b.real(4.0);
+        let waveform = b.waveform(&[v0, v1, v2, v3]);
+        b.delay1(waveform)
+    };
+
+    let values =
+        interpret_generator_for_test(&arena, generator, 4).expect("generator should interpret");
+    assert_eq!(values, vec![0.0, 1.0, 2.0, 3.0]);
 }
 
 #[test]

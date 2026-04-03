@@ -3216,6 +3216,15 @@ fn interpret_generator(
     Ok(results)
 }
 
+#[cfg(test)]
+pub(super) fn interpret_generator_for_test(
+    arena: &TreeArena,
+    sig: SigId,
+    size: usize,
+) -> Result<Vec<f64>, SignalFirError> {
+    interpret_generator(arena, sig, size)
+}
+
 struct GeneratorInterpreter<'a> {
     arena: &'a TreeArena,
     types: &'a HashMap<SigId, SimpleSigType>,
@@ -3225,6 +3234,11 @@ struct GeneratorInterpreter<'a> {
     evaluating: HashSet<SigId>,
     /// Current step number (0-based), used for delay1/prefix of non-recursive signals.
     step: usize,
+    /// Previous-step values for non-recursive `Delay1(x)` expressions keyed by
+    /// the delayed signal node `x`.
+    delay1_prev: HashMap<SigId, f64>,
+    /// Current-step values that will become `delay1_prev` on the next advance.
+    delay1_current: HashMap<SigId, f64>,
     /// Per-signal history buffer for multi-sample Delay(sig, amount).
     /// Maps signal SigId → ring buffer of past values (index 0 = most recent).
     delay_history: HashMap<SigId, Vec<f64>>,
@@ -3238,6 +3252,8 @@ impl<'a> GeneratorInterpreter<'a> {
             rec_state: HashMap::new(),
             evaluating: HashSet::new(),
             step: 0,
+            delay1_prev: HashMap::new(),
+            delay1_current: HashMap::new(),
             delay_history: HashMap::new(),
         }
     }
@@ -3248,6 +3264,8 @@ impl<'a> GeneratorInterpreter<'a> {
             prev.clone_from(cur);
         }
         self.evaluating.clear();
+        self.delay1_prev.clone_from(&self.delay1_current);
+        self.delay1_current.clear();
         self.step += 1;
     }
 
@@ -3515,13 +3533,16 @@ impl<'a> GeneratorInterpreter<'a> {
                 return Ok(prev_val);
             }
         }
-        // Fallback: non-recursive delay1 — returns 0 at step 0 (initial state),
-        // current value of x at subsequent steps (x evaluated at previous step).
-        if self.step == 0 {
-            Ok(0.0)
-        } else {
-            self.eval(x)
+        // Fallback: non-recursive delay1 — return the previous-step value of x,
+        // while memoizing the current-step value so the next `advance()` can
+        // expose it. This matches the single-delay state semantics used by the
+        // C++ generator path.
+        let prev = self.delay1_prev.get(&x).copied().unwrap_or(0.0);
+        if !self.delay1_current.contains_key(&x) {
+            let current = self.eval(x)?;
+            self.delay1_current.insert(x, current);
         }
+        Ok(prev)
     }
 
     /// Read the current-step value of recursion group output `idx`.
