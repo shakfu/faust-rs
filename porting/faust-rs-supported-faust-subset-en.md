@@ -1,6 +1,6 @@
 # Current Faust Source Subset Supported by `faust-rs`
 
-Last updated: 2026-03-29
+Last updated: 2026-04-03
 
 Status: living document
 
@@ -43,8 +43,7 @@ This snapshot is based on:
   - `crates/transform/src/signal_prepare.rs`
   - `crates/transform/src/signal_fir/mod.rs`
   - `crates/transform/src/signal_fir/module.rs`
-- fresh local status scans run on 2026-03-24 (kept as the corpus/backend-count
-  baseline for this snapshot):
+- corpus/backend reports currently checked into `porting/phases/`:
   - `cargo run -p xtask -- corpus-status-report`
   - `cargo run -p xtask -- backend-full-corpus-diff-report`
 - follow-up front-end parity fixes landed on 2026-03-29 and reviewed against:
@@ -53,6 +52,12 @@ This snapshot is based on:
   - `crates/eval/tests/core_eval.rs`
   - `crates/compiler/tests/inline_environment_import_parity.rs`
   - `porting/journal/2026-03-29.md`
+- fast-lane/runtime fixes landed on 2026-04-03 and reviewed against:
+  - `crates/transform/src/signal_prepare.rs`
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/codegen/src/backends/interp/serial.rs`
+  - `crates/compiler/tests/signal_fir_lane.rs`
+  - `porting/journal/2026-04-03.md`
 
 The corresponding generated reports are:
 
@@ -63,14 +68,23 @@ The corresponding generated reports are:
 
 ### 4.1 Source-language status
 
-At the front-end level, the active corpus currently shows **full status parity**
-with the C++ compiler:
+At the front-end level, the checked-in corpus-status report currently shows
+**full status parity** with the C++ compiler:
 
-- total corpus cases: `98`
-- valid cases accepted by both Rust and C++: `83`
-- invalid cases rejected by both Rust and C++: `15`
+- total corpus cases in the latest checked-in report: `104`
+- valid cases accepted by both Rust and C++: `88`
+- invalid cases rejected by both Rust and C++: `16`
 - `OK/ERR` mismatches: `0`
 - `ERR/OK` mismatches: `0`
+
+Important note:
+
+- the repository now contains `107` files under `tests/corpus/`
+- the checked-in backend full-corpus report is older (`98` cases)
+- so the front-end counts above are the latest auditable numbers in-repo,
+  while the end-to-end backend counts below remain the latest checked-in
+  backend snapshot, not a claim that all `107` corpus entries have already
+  been re-benchmarked end-to-end
 
 In other words:
 
@@ -81,7 +95,7 @@ In other words:
 ### 4.2 End-to-end backend status
 
 At the current backend route (`TransformFastLane`), the supported subset is
-still narrower:
+still narrower. The latest checked-in full backend report says:
 
 - total corpus cases: `98`
 - end-to-end C backend parity: `OK=82`, `DIFF=0`, `UNSUPPORTED=16`
@@ -263,6 +277,21 @@ This is why corpus cases such as:
   `rep_65_fabs_trigger`
 
 now compile end-to-end through the Rust backends.
+
+Since that snapshot, the validated fast-lane/runtime path has also absorbed
+several important correctness fixes without changing the high-level subset
+classification:
+
+- post-`simplify` re-typing/promotion before FIR lowering,
+- canonicalization of `Delay(x, 1)` back to `Delay1(x)` at the preparation
+  boundary,
+- preservation of non-numeric `Konst` factors in normalization for
+  `fSamplingFreq`-driven delay amounts,
+- correct `instanceResetUserInterface` generation for UI-only controls in the
+  wasm path,
+- round-trip-precise FBC real literal serialization,
+- correct previous-step semantics for non-recursive `Delay1` inside the SIGGEN
+  table-generator interpreter.
 
 ## 5.3 Important current backend exclusions
 
@@ -987,6 +1016,39 @@ Ten new fixtures added since March 21:
 
 End-to-end backend corpus: `82 / 83` valid cases, same single gap
 (`rep_18_stream_wrappers.dsp`).
+
+### 7.14 April 3, 2026: simplify integration hardening and latent fast-lane fixes
+
+The 2026-04-03 fixes did not radically widen the declared subset, but they did
+make the existing fast-lane subset materially more trustworthy on real DSPs and
+web/runtime paths.
+
+The main changes were:
+
+- `simplify` is now a real part of the FIR-preparation pipeline, followed by a
+  second `type -> promote -> type` cycle so FIR lowering still sees explicit
+  coercions and reduced simple types
+- one-sample delays are canonicalized back to `Delay1` at the preparation
+  boundary instead of being special-cased only inside one consumer
+- normalization now preserves `fSamplingFreq`-bearing konst factors and no
+  longer assumes every order-0 bucket is purely numeric
+- the wasm fast-lane now resets UI-only controls correctly even when they have
+  been optimized out of the executable signal graph
+- FBC text serialization now uses round-trip float formatting, which removed a
+  latent divergence between interpreter and Cranelift runtimes
+- the SIGGEN interpreter used for compile-time table generation now handles
+  non-recursive `Delay1` with proper previous-step semantics, fixing
+  `table.dsp`
+
+Practically, this means the already-declared subset around:
+
+- oscillator/table generators,
+- SR-driven delay expressions,
+- wasm standalone wrappers,
+- interpreter/Cranelift differential tests,
+
+is now better supported in practice than the older March backend report alone
+would suggest.
 
 ## 8. Practical Reading Rule
 

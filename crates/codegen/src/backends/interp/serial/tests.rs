@@ -513,7 +513,10 @@ fn test_f32_roundtrip_preserves_small_gain_constant() {
 
     let mut cursor = io::Cursor::new(serialized.as_bytes());
     let roundtrip: FbcDspFactory<f32> = read_fbc(&mut cursor).unwrap();
-    let instr = &roundtrip.arena.get(roundtrip.static_init_block).instructions[0];
+    let instr = &roundtrip
+        .arena
+        .get(roundtrip.static_init_block)
+        .instructions[0];
     assert_eq!(instr.real_value, gain);
 }
 
