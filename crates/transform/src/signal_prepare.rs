@@ -12,6 +12,7 @@
 //! - infer one reduced `Int / Real / Sound` type for the prepared signals,
 //! - insert the reduced `SignalPromotion` cast subset needed by the fast-lane,
 //! - simplify the promoted forest,
+//! - canonicalize one-sample delays back to `Delay1`,
 //! - and re-type the final forest.
 //!
 //! Reduced typing deliberately stops short of the full C++ type lattice. The
@@ -46,7 +47,9 @@
 //! - the promotion pass ports only the `SignalPromotion` subset required before
 //!   `signal_fir`,
 //! - algebraic simplification then runs on the promoted forest before the
-//!   final type snapshot is exposed to FIR lowering.
+//!   final type snapshot is exposed to FIR lowering,
+//! - `Delay(x, 1)` is then canonicalized back to `Delay1(x)` so downstream
+//!   FIR consumers see one stable unary-delay form.
 //!
 //! # Explicit Limitation
 //! The unary-recursion canonicalization performed here is **not** a 1:1 port of
@@ -381,8 +384,9 @@ fn prepare_signals_for_fir_unverified(
         .map_err(SignalPrepareError::Promotion)?;
     let sig_types_after_promotion = infer_full_types(&arena, &outputs, ui)?;
     let outputs = simplify_signals_fastlane(&mut arena, &sig_types_after_promotion, &outputs);
-    let sig_types_after_simplify = infer_full_types(&arena, &outputs, ui)?;
-    let outputs = promote_signals_fastlane(&mut arena, &sig_types_after_simplify, &outputs)
+    let outputs = canonicalize_one_sample_delays(&mut arena, &outputs)?;
+    let sig_types_after_canonicalize = infer_full_types(&arena, &outputs, ui)?;
+    let outputs = promote_signals_fastlane(&mut arena, &sig_types_after_canonicalize, &outputs)
         .map_err(SignalPrepareError::Promotion)?;
     let sig_types = infer_full_types(&arena, &outputs, ui)?;
     let types = derive_simple_types(&arena, &sig_types);
@@ -816,6 +820,23 @@ fn canonicalize_unary_rec_projections(
     rewrite_unary_rec_projections(arena, root, &unary_groups, &mut memo)
 }
 
+/// Rebuilds the staged forest so literal one-sample delays use `Delay1`.
+///
+/// `normalize` may legally expose unary feedback as `Delay(x, 1)`. The
+/// fast-lane keeps a narrower canonical form for one-sample delays so all
+/// downstream consumers (notably SIGGEN interpretation and recursion lowering)
+/// can reason on a single representation.
+fn canonicalize_one_sample_delays(
+    arena: &mut TreeArena,
+    outputs: &[SigId],
+) -> Result<Vec<SigId>, SignalPrepareError> {
+    let mut memo = HashMap::new();
+    outputs
+        .iter()
+        .map(|&sig| rewrite_one_sample_delays(arena, sig, &mut memo))
+        .collect()
+}
+
 /// Collects symbolic recursion variables whose body list has exactly one slot.
 ///
 /// The collected set drives [`rewrite_unary_rec_projections`].  The traversal
@@ -945,6 +966,62 @@ fn rewrite_unary_rec_projections(
                 unary_groups,
                 memo,
             )?);
+        }
+        arena.intern(node.kind, &children)
+    };
+
+    memo.insert(sig, rewritten);
+    Ok(rewritten)
+}
+
+fn rewrite_one_sample_delays(
+    arena: &mut TreeArena,
+    sig: SigId,
+    memo: &mut HashMap<SigId, SigId>,
+) -> Result<SigId, SignalPrepareError> {
+    if let Some(mapped) = memo.get(&sig) {
+        return Ok(*mapped);
+    }
+
+    let rewritten = if arena.is_nil(sig) {
+        sig
+    } else if arena.is_list(sig) {
+        let head = arena.hd(sig).ok_or_else(|| {
+            SignalPrepareError::Typing(
+                "malformed list during one-sample delay canonicalization".to_owned(),
+            )
+        })?;
+        let tail = arena.tl(sig).ok_or_else(|| {
+            SignalPrepareError::Typing(
+                "malformed list during one-sample delay canonicalization".to_owned(),
+            )
+        })?;
+        let head = rewrite_one_sample_delays(arena, head, memo)?;
+        let tail = rewrite_one_sample_delays(arena, tail, memo)?;
+        arena.cons(head, tail)
+    } else if let Some((var, body_list)) = match_sym_rec(arena, sig) {
+        let body_list = rewrite_one_sample_delays(arena, body_list, memo)?;
+        sym_rec(arena, var, body_list)
+    } else if let SigMatch::Delay(value, amount) = match_sig(arena, sig) {
+        let value = rewrite_one_sample_delays(arena, value, memo)?;
+        let amount = rewrite_one_sample_delays(arena, amount, memo)?;
+        if matches!(match_sig(arena, amount), SigMatch::Int(1)) {
+            let mut b = SigBuilder::new(arena);
+            b.delay1(value)
+        } else {
+            let mut b = SigBuilder::new(arena);
+            b.delay(value, amount)
+        }
+    } else {
+        let node = arena.node(sig).cloned().ok_or_else(|| {
+            SignalPrepareError::Typing(format!(
+                "missing node {} during one-sample delay canonicalization",
+                sig.as_u32()
+            ))
+        })?;
+        let mut children = Vec::with_capacity(node.children.len());
+        for child in node.children.as_slice() {
+            children.push(rewrite_one_sample_delays(arena, *child, memo)?);
         }
         arena.intern(node.kind, &children)
     };

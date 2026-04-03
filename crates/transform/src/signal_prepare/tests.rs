@@ -259,15 +259,18 @@ fn prepare_signals_for_fir_promotes_delay_amounts_to_int() {
     let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
         .expect("delay promotion should succeed");
 
-    let SigMatch::Delay(_, amount) = match_sig(&prepared.arena, prepared.outputs[0]) else {
-        panic!("promoted output should stay SIGDELAY");
-    };
-    match match_sig(&prepared.arena, amount) {
-        SigMatch::IntCast(inner) => {
-            assert_eq!(match_sig(&prepared.arena, inner), SigMatch::Real(1.5));
+    match match_sig(&prepared.arena, prepared.outputs[0]) {
+        SigMatch::Delay1(inner) => {
+            assert_eq!(match_sig(&prepared.arena, inner), SigMatch::Input(0));
         }
-        SigMatch::Int(1) => {}
-        _ => panic!("delay amount should stay as IntCast(real(1.5)) or simplify to Int(1)"),
+        SigMatch::Delay(_, amount) => match match_sig(&prepared.arena, amount) {
+            SigMatch::IntCast(inner) => {
+                assert_eq!(match_sig(&prepared.arena, inner), SigMatch::Real(1.5));
+            }
+            SigMatch::Int(1) => {}
+            _ => panic!("delay amount should stay as IntCast(real(1.5)) or simplify to Int(1)"),
+        },
+        _ => panic!("promoted output should stay a delay-family node"),
     }
 }
 
@@ -691,13 +694,8 @@ fn prepare_signals_for_fir_canonicalizes_unary_recursive_projection_indices() {
         .arena
         .hd(prepared_body_list)
         .expect("prepared recursion body head");
-    let feedback = match match_sig(&prepared.arena, prepared_body) {
-        SigMatch::Delay1(feedback) => feedback,
-        SigMatch::Delay(feedback, amount) => {
-            assert_eq!(match_sig(&prepared.arena, amount), SigMatch::Int(1));
-            feedback
-        }
-        _ => panic!("prepared body should stay a one-sample delay"),
+    let SigMatch::Delay1(feedback) = match_sig(&prepared.arena, prepared_body) else {
+        panic!("prepared body should canonicalize to Delay1");
     };
     let SigMatch::Proj(0, feedback_group) = match_sig(&prepared.arena, feedback) else {
         panic!("feedback edge should canonicalize to proj(0, symref(var))");
@@ -705,6 +703,25 @@ fn prepare_signals_for_fir_canonicalizes_unary_recursive_projection_indices() {
     let (var, _) =
         match_sym_rec(&prepared.arena, prepared_group).expect("symbolic recursion expected");
     assert_eq!(match_sym_ref(&prepared.arena, feedback_group), Some(var));
+}
+
+#[test]
+fn prepare_signals_for_fir_canonicalizes_literal_delay_one_to_delay1() {
+    let mut arena = tlib::TreeArena::new();
+    let output = {
+        let mut b = SigBuilder::new(&mut arena);
+        let input = b.input(0);
+        let one = b.int(1);
+        b.delay(input, one)
+    };
+
+    let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
+        .expect("literal one-sample delay should prepare");
+
+    let SigMatch::Delay1(inner) = match_sig(&prepared.arena, prepared.outputs[0]) else {
+        panic!("prepared output should canonicalize to Delay1");
+    };
+    assert_eq!(match_sig(&prepared.arena, inner), SigMatch::Input(0));
 }
 
 #[test]
