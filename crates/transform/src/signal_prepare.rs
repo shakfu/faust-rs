@@ -314,7 +314,8 @@ impl From<NormalFormError> for SignalPrepareError {
 /// Clones one output forest into a private arena, converts de Bruijn recursion
 /// to symbolic recursion with forest-wide sharing preserved, then infers one
 /// reduced type per prepared signal node, applies the reduced promotion pass,
-/// simplifies the promoted forest, and re-types the final forest.
+/// simplifies the promoted forest, then re-runs typing and promotion so the
+/// final forest still satisfies the FIR lowerer's explicit cast invariants.
 ///
 /// C++ parity note: both `deBruijn2Sym(...)` and the later type/promotion flow
 /// conceptually operate on the whole output list, not independently per root.
@@ -380,6 +381,9 @@ fn prepare_signals_for_fir_unverified(
         .map_err(SignalPrepareError::Promotion)?;
     let sig_types_after_promotion = infer_full_types(&arena, &outputs, ui)?;
     let outputs = simplify_signals_fastlane(&mut arena, &sig_types_after_promotion, &outputs);
+    let sig_types_after_simplify = infer_full_types(&arena, &outputs, ui)?;
+    let outputs = promote_signals_fastlane(&mut arena, &sig_types_after_simplify, &outputs)
+        .map_err(SignalPrepareError::Promotion)?;
     let sig_types = infer_full_types(&arena, &outputs, ui)?;
     let types = derive_simple_types(&arena, &sig_types);
     Ok(PreparedSignals {
@@ -952,12 +956,13 @@ fn rewrite_unary_rec_projections(
 /// Runs the full `TypeAnnotator` (sigtype crate) on the prepared output forest.
 ///
 /// This produces interval bounds, variability, and all lattice qualifiers for
-/// each node. Called in [`prepare_signals_for_fir`] before
+/// each node. Called in [`prepare_signals_for_fir`] before the first
 /// `promote_signals_fastlane` (to guide cast-insertion decisions), again after
-/// promotion (to drive algebraic simplification on the promoted graph), and
-/// once more after simplification so the final map reflects the forest that
-/// reaches FIR lowering. That last result is what ends up in
-/// [`PreparedSignals::sig_types`].
+/// that promotion (to drive algebraic simplification on the promoted graph),
+/// again after simplification (to re-establish canonical types before the
+/// second promotion pass), and once more after the second promotion so the
+/// final map reflects the forest that reaches FIR lowering. That last result
+/// is what ends up in [`PreparedSignals::sig_types`].
 fn infer_full_types(
     arena: &TreeArena,
     outputs: &[SigId],
