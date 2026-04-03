@@ -1,4 +1,4 @@
-use signals::{BinOp, SigBuilder, SigMatch, match_sig};
+use signals::{BinOp, SigBuilder, SigMatch, dump_sig_readable, match_sig};
 use tlib::{de_bruijn_rec, de_bruijn_ref, match_sym_rec, match_sym_ref};
 use ui::{ControlKind, ControlSpec};
 
@@ -106,6 +106,52 @@ fn prepare_signals_for_fir_closes_unresolved_recursive_types_to_real() {
         .expect("recursive typing should converge");
 
     assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Real));
+}
+
+fn subtree_contains_fconst(arena: &tlib::TreeArena, sig: signals::SigId) -> bool {
+    if matches!(match_sig(arena, sig), SigMatch::FConst(_, _, _)) {
+        return true;
+    }
+    let Some(node) = arena.node(sig) else {
+        return false;
+    };
+    node.children
+        .as_slice()
+        .iter()
+        .copied()
+        .any(|child| subtree_contains_fconst(arena, child))
+}
+
+#[test]
+fn prepare_signals_for_fir_keeps_sampling_frequency_in_delay_amounts_after_simplify() {
+    let mut arena = tlib::TreeArena::new();
+    let output = {
+        let ty = arena.int(0);
+        let name = arena.symbol("fSamplingFreq");
+        let file = arena.symbol("<math.h>");
+        let mut b = SigBuilder::new(&mut arena);
+        let input = b.input(0);
+        let sr = b.fconst(ty, name, file);
+        let half = b.real(0.5);
+        let sr_real = b.float_cast(sr);
+        let scaled = b.mul(half, sr_real);
+        let divisor = b.real(440.0);
+        let ratio = b.div(scaled, divisor);
+        let amount = b.int_cast(ratio);
+        b.delay(input, amount)
+    };
+
+    let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
+        .expect("delay amount using fSamplingFreq should prepare");
+
+    let SigMatch::Delay(_, amount) = match_sig(&prepared.arena, prepared.outputs[0]) else {
+        panic!("prepared output should stay a delay");
+    };
+    assert!(
+        subtree_contains_fconst(&prepared.arena, amount),
+        "delay amount should keep its fSamplingFreq dependency after fast-lane simplify, got {}",
+        dump_sig_readable(&prepared.arena, amount)
+    );
 }
 
 #[test]

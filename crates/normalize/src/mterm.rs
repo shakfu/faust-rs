@@ -591,11 +591,12 @@ impl Mterm {
             combine_mul_div(arena, &mut a[order], &mut b[order], f, q);
         }
 
-        // In principle order 0 (constant) factors should not appear as non-numeric
-        // signals, but the C++ asserts this. We skip order 0 if empty.
-
-        // Determine coefficient slot (a[0])
-        a[0] = if signature_mode {
+        // C++ assumes order-0 factors are numeric and stores them in `fCoef`.
+        // Rust can still carry non-numeric Konst factors here (for example
+        // `float(fSamplingFreq)` after fast-lane simplify), so we must merge
+        // the coefficient into the existing order-0 numerator instead of
+        // overwriting it.
+        let coef_term = if signature_mode {
             None
         } else if negative_mode {
             if is_minus_one(arena, self.coef) {
@@ -608,6 +609,9 @@ impl Mterm {
         } else {
             Some(self.coef)
         };
+        if let Some(coef) = coef_term {
+            combine_mul_left(arena, &mut a[0], coef);
+        }
 
         // Combine each order: R[order] = A[order] / B[order]
         let mut rr: Option<SigId> = None;
@@ -699,6 +703,8 @@ fn common_exp(a: i32, b: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use interval::Interval;
+    use sigtype::{Boolean, Computability, Nature, Variability, Vectorability, make_simple};
     use tlib::TreeArena;
 
     fn arena() -> TreeArena {
@@ -741,6 +747,37 @@ mod tests {
         let m = Mterm::from_int(&mut a, 3);
         let t = m.normalized_tree(&mut a, &HashMap::new(), false, true);
         assert_eq!(match_sig(&a, t), SigMatch::Int(-3));
+    }
+
+    #[test]
+    fn mterm_normalized_tree_keeps_konst_non_numeric_factors_in_order_zero_bucket() {
+        let mut a = arena();
+        let ty = a.int(0);
+        let name = a.symbol("fSamplingFreq");
+        let file = a.symbol("<math.h>");
+        let sr = SigBuilder::new(&mut a).fconst(ty, name, file);
+        let sr_real = SigBuilder::new(&mut a).float_cast(sr);
+        let half = SigBuilder::new(&mut a).real(0.5);
+        let expr = SigBuilder::new(&mut a).mul(half, sr_real);
+        let m = Mterm::from_sig(&mut a, expr);
+
+        let mut types = HashMap::new();
+        let konst_real = make_simple(
+            Nature::Real,
+            Variability::Konst,
+            Computability::Init,
+            Vectorability::Vect,
+            Boolean::Num,
+            Interval::new_default(),
+        );
+        types.insert(sr_real, konst_real);
+
+        let rebuilt = m.normalized_tree(&mut a, &types, false, false);
+        let dumped = signals::dump_sig_readable(&a, rebuilt);
+        assert!(
+            dumped.contains("fSamplingFreq"),
+            "order-0 non-numeric factors must survive normalized_tree, got {dumped}"
+        );
     }
 
     #[test]
