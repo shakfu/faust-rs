@@ -15,8 +15,8 @@
 //! - Sub-blocks (for If/Select/Loop instructions) are written/read recursively.
 //! - String quoting: labels, keys, and values are wrapped in double quotes
 //!   (`quote1`/`unquote1`).
-//! - Real values use max precision via `{:.digits$}` formatting where `digits`
-//!   is `std::mem::size_of::<R>() * 3 + 1` (matching C++ `digits10 + 1`).
+//! - Real values use round-trip precision so text `.fbc` dumps preserve the
+//!   original scalar payload when read back.
 //!
 //! # Compatibility notes
 //! - The Rust reader/writer targets the historical interpreter text format so
@@ -120,19 +120,6 @@ fn unquote1(s: &str) -> String {
 
 // ── Real precision ─────────────────────────────────────────────────────────
 
-/// Returns the number of significant digits for REAL output.
-///
-/// Matches C++ `std::numeric_limits<REAL>::digits10 + 1`:
-/// - `f32`: 6 + 1 = 7
-/// - `f64`: 15 + 1 = 16
-fn real_precision<R: FbcReal>() -> usize {
-    if std::mem::size_of::<R>() == 4 {
-        7 // f32: digits10 = 6, +1
-    } else {
-        16 // f64: digits10 = 15, +1
-    }
-}
-
 /// Returns "float" or "double" for the REAL type.
 fn real_type_name<R: FbcReal>() -> &'static str {
     if std::mem::size_of::<R>() == 4 {
@@ -142,10 +129,9 @@ fn real_type_name<R: FbcReal>() -> &'static str {
     }
 }
 
-/// Formats a REAL value with full precision.
+/// Formats a REAL value with round-trip precision.
 fn fmt_real<R: FbcReal>(v: R) -> String {
-    let prec = real_precision::<R>();
-    format!("{:.prec$}", v)
+    format!("{v}")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

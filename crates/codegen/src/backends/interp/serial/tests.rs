@@ -469,6 +469,54 @@ fn test_roundtrip_double() {
     );
 }
 
+#[test]
+fn test_f32_roundtrip_preserves_small_gain_constant() {
+    let gain = 1.0f32 / 48_000.0f32;
+    let mut arena = FbcBlockArena::<f32>::new();
+
+    let mut block = FbcBlock::new();
+    block.push(FbcInstruction::with_values(FbcOpcode::RealValue, 0, gain));
+    block.push(FbcInstruction::new(FbcOpcode::Return));
+    let block_id = arena.alloc(block);
+
+    let factory = FbcDspFactory::new(
+        "test_dsp",
+        "",
+        "",
+        INTERP_FILE_VERSION,
+        0,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        arena,
+        vec![],
+        vec![],
+        block_id,
+        block_id,
+        block_id,
+        block_id,
+        block_id,
+        block_id,
+    );
+
+    let mut buf = Vec::new();
+    write_fbc(&factory, &mut buf, false).unwrap();
+    let serialized = String::from_utf8(buf).unwrap();
+    assert!(
+        serialized.contains("real 0.000020833"),
+        "serialized FBC should keep round-trip precision: {serialized}"
+    );
+
+    let mut cursor = io::Cursor::new(serialized.as_bytes());
+    let roundtrip: FbcDspFactory<f32> = read_fbc(&mut cursor).unwrap();
+    let instr = &roundtrip.arena.get(roundtrip.static_init_block).instructions[0];
+    assert_eq!(instr.real_value, gain);
+}
+
 /// A label that contains a literal embedded newline must parse correctly.
 ///
 /// Reproduces the failure seen with `elecGuitarMIDI.fbc` where

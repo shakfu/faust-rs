@@ -299,6 +299,33 @@ pub fn build_module(
         )
     };
 
+    lower.emit_ui_program()?;
+    let ui_statements = lower.ui_statements.clone();
+    let ui_body = {
+        let mut b = FirBuilder::new(&mut lower.store);
+        b.block(&ui_statements)
+    };
+    let build_ui_args = [
+        dsp_arg.clone(),
+        NamedType {
+            name: "ui_interface".to_string(),
+            typ: FirType::UI,
+        },
+    ];
+    let build_ui = {
+        let mut b = FirBuilder::new(&mut lower.store);
+        b.declare_fun(
+            "buildUserInterface",
+            FirType::Fun {
+                args: vec![dsp_arg_type.clone(), FirType::UI],
+                ret: Box::new(FirType::Void),
+            },
+            &build_ui_args,
+            Some(ui_body),
+            false,
+        )
+    };
+
     let reset_body = {
         let mut b = FirBuilder::new(&mut lower.store);
         b.block(&lower.reset_statements)
@@ -331,33 +358,6 @@ pub fn build_module(
             },
             std::slice::from_ref(&dsp_arg),
             Some(clear_body),
-            false,
-        )
-    };
-
-    lower.emit_ui_program()?;
-    let ui_statements = lower.ui_statements.clone();
-    let ui_body = {
-        let mut b = FirBuilder::new(&mut lower.store);
-        b.block(&ui_statements)
-    };
-    let build_ui_args = [
-        dsp_arg.clone(),
-        NamedType {
-            name: "ui_interface".to_string(),
-            typ: FirType::UI,
-        },
-    ];
-    let build_ui = {
-        let mut b = FirBuilder::new(&mut lower.store);
-        b.declare_fun(
-            "buildUserInterface",
-            FirType::Fun {
-                args: vec![dsp_arg_type.clone(), FirType::UI],
-                ret: Box::new(FirType::Void),
-            },
-            &build_ui_args,
-            Some(ui_body),
             false,
         )
     };

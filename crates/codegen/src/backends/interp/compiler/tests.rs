@@ -3,6 +3,15 @@ use crate::backends::interp::{
     clear_foreign_functions, register_foreign_function, unregister_foreign_function,
 };
 use fir::{FirBinOp, FirBuilder};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+fn foreign_registry_test_guard() -> MutexGuard<'static, ()> {
+    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    GUARD
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("interp foreign-registry test mutex")
+}
 
 /// Helper: compile a single FIR node and finalize.
 fn compile_one<R: FbcReal>(store: &FirStore, id: FirId) -> FbcCompileResult<R> {
@@ -353,6 +362,7 @@ extern "C" fn interp_test_foreign_probe(x: f32) {
 
 #[test]
 fn test_compile_registered_foreign_function_opcodes() {
+    let _guard = foreign_registry_test_guard();
     clear_foreign_functions();
     register_foreign_function(
         "interp_test_foreign_gain",
@@ -424,6 +434,7 @@ fn test_compile_registered_foreign_function_opcodes() {
 fn test_roundtrip_registered_foreign_function() {
     use super::super::executor::FbcExecutor;
 
+    let _guard = foreign_registry_test_guard();
     clear_foreign_functions();
     register_foreign_function(
         "interp_test_foreign_gain",
