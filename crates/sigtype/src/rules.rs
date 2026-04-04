@@ -479,10 +479,28 @@ impl<'a> TypeAnnotator<'a> {
 
             // ── Waveform ─────────────────────────────────────────────────────
             SigMatch::Waveform(elems) => {
+                // `SIGWAVEFORM` in the propagated signal tree represents the
+                // **cycling output**: each sample yields the next element of the
+                // table (advancing an implicit counter modulo the table length).
+                //
+                // The TABLE DATA is compile-time constant (`kKonst` in C++ Faust,
+                // and `make_table_type` hardcodes `Variability::Konst` to match
+                // that).  The OUTPUT, however, changes every sample — so the
+                // signal's variability must be `Samp`.
+                //
+                // If we leave it as `Konst`, the variability-driven placement pass
+                // in `signal_fir` hoists every expression that depends on the
+                // waveform — including `clk = reset > 0` — into `instanceConstants`.
+                // Those expressions then capture `LoadTable(fTblN, iWaveN)` at
+                // initialisation time, before `instanceClear` has zeroed `iWaveN`,
+                // producing wrong output.
+                //
+                // Promoting to `Samp` propagates through all dependents and keeps
+                // them in the sample loop where they belong.
                 if elems.is_empty() {
                     return Ok(make_simple(
                         Nature::Real,
-                        Variability::Konst,
+                        Variability::Samp,
                         Computability::Comp,
                         Vectorability::Vect,
                         Boolean::Num,
@@ -496,7 +514,7 @@ impl<'a> TypeAnnotator<'a> {
                     itv = interval::reunion(itv, te.interval());
                     t = union_types(t, te);
                 }
-                Ok(make_table_type(t.promote_interval(itv)))
+                Ok(make_table_type(t.promote_interval(itv)).promote_variability(Variability::Samp))
             }
 
             // ── UI controls ──────────────────────────────────────────────────
