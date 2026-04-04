@@ -39,6 +39,7 @@
 //! ## Phase 2 — per-function scope analysis
 //! | Code | Sev | Check |
 //! |---|---|---|
+//! | FIR-LC01 | E | `LoadVar(kStruct)` in `instanceConstants` reads a field only initialized in `instanceClear` |
 //! | FIR-SC01 | E | `LoadVar` of undeclared variable |
 //! | FIR-SC02 | E | `LoadVar` access type does not match declaration |
 //! | FIR-SC03 | W | `LoadVar` of uninitialized stack variable |
@@ -102,7 +103,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    AccessType, FirBinOp, FirId, FirMatch, FirMathOp, FirStore, FirType, NamedType, match_fir,
+    AccessType, FirBinOp, FirId, FirMatch, FirMathOp, FirStore, FirType, NamedType, child_ids,
+    match_fir,
 };
 
 // ─── Diagnostic types ─────────────────────────────────────────────────────────
@@ -1203,6 +1205,107 @@ impl<'s> VerifyCtx<'s> {
                 self.leave_function();
             }
         }
+
+        self.check_lifecycle_order();
+    }
+
+    /// **FIR-LC01** — detect struct fields read in `instanceConstants` that are
+    /// only initialized in `instanceClear`.
+    ///
+    /// The standard DSP lifecycle is:
+    /// 1. `instanceConstants(sample_rate)` — compute derived constants from SR
+    /// 2. `instanceResetUserInterface()` — reset UI zones to defaults
+    /// 3. `instanceClear()` — zero-initialize state arrays and counters
+    /// 4. `compute(count, inputs, outputs)` — per-block DSP loop
+    ///
+    /// Any struct field that is **not** stored anywhere inside `instanceConstants`
+    /// but **is** stored inside `instanceClear` will still hold its default
+    /// zero-initialized value from C++ allocation when `instanceConstants` reads
+    /// it.  In practice this means waveform index counters (e.g. `iWave48`)
+    /// appear explicitly initialized only in `instanceClear`, yet a misplaced
+    /// hoisting decision may cause `instanceConstants` to read them as if they
+    /// had already been set — producing wrong constant values.
+    ///
+    /// The check emits FIR-LC01 for every `LoadVar(kStruct, name)` in
+    /// `instanceConstants` where `name` ∈ (written-only-in-clear) set.
+    fn check_lifecycle_order(&mut self) {
+        // Locate instanceConstants and instanceClear function bodies.
+        let FirMatch::Module { functions, .. } = match_fir(self.store, self.module_id) else {
+            return;
+        };
+        let FirMatch::Block(stmts) = match_fir(self.store, functions) else {
+            return;
+        };
+
+        let mut constants_body: Option<FirId> = None;
+        let mut constants_fun_id: Option<FirId> = None;
+        let mut clear_body: Option<FirId> = None;
+
+        for stmt_id in &stmts {
+            if let FirMatch::DeclareFun {
+                name,
+                body: Some(body_id),
+                ..
+            } = match_fir(self.store, *stmt_id)
+            {
+                match name.as_str() {
+                    "instanceConstants" => {
+                        constants_body = Some(body_id);
+                        constants_fun_id = Some(*stmt_id);
+                    }
+                    "instanceClear" => {
+                        clear_body = Some(body_id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let (Some(constants_body), Some(constants_fun_id), Some(clear_body)) =
+            (constants_body, constants_fun_id, clear_body)
+        else {
+            // One or both functions missing — other checks cover that.
+            return;
+        };
+
+        // Fields written in instanceConstants (safely computed before any read).
+        let constants_stores = collect_struct_stores(self.store, constants_body);
+        // Fields written in instanceClear.
+        let clear_stores = collect_struct_stores(self.store, clear_body);
+
+        // Fields that instanceClear initializes but instanceConstants never writes
+        // — reading them in instanceConstants yields an uninitialized value.
+        let cleared_only: HashSet<&String> = clear_stores
+            .iter()
+            .filter(|n| !constants_stores.contains(*n))
+            .collect();
+
+        if cleared_only.is_empty() {
+            return;
+        }
+
+        // Walk instanceConstants body for loads of those fields.
+        let loads = collect_struct_loads(self.store, constants_body);
+        for (field_name, load_id) in loads {
+            if cleared_only.contains(&field_name) {
+                self.error(
+                    "FIR-LC01",
+                    format!(
+                        "struct field '{field_name}' is read in `instanceConstants` but is only \
+                         initialized in `instanceClear` (which runs later); value is \
+                         zero-initialized at this point"
+                    ),
+                    load_id,
+                );
+                // Also tag the diagnostic with the enclosing function name.
+                if let Some(d) = self.diags.last_mut() {
+                    d.context.function_name = Some("instanceConstants".to_owned());
+                    d.context.variable_name = Some(field_name);
+                }
+            }
+        }
+
+        let _ = constants_fun_id; // available for future use
     }
 
     /// Initializes per-function verification state and seeds `kFunArgs`.
@@ -2595,6 +2698,62 @@ fn input_alias_index(name: &str) -> Option<usize> {
 /// Parses `outputN` aliases used in `compute` into a zero-based index.
 fn output_alias_index(name: &str) -> Option<usize> {
     name.strip_prefix("output")?.parse::<usize>().ok()
+}
+
+// ─── Lifecycle helpers (FIR-LC01) ─────────────────────────────────────────────
+
+/// Iteratively collects all struct field names that appear as **store targets**
+/// anywhere in the FIR subtree rooted at `root`.
+///
+/// This covers `StoreVar(kStruct)` and `TeeVar(kStruct)` (which both write a
+/// struct field).  `StoreTable(kStruct)` is excluded because table elements are
+/// always zero-initialized by `DeclareTable` and are not in scope for the
+/// lifecycle uninitialized-read check.
+fn collect_struct_stores(store: &FirStore, root: FirId) -> HashSet<String> {
+    let mut names: HashSet<String> = HashSet::new();
+    let mut worklist = vec![root];
+    while let Some(id) = worklist.pop() {
+        let node = match_fir(store, id);
+        match &node {
+            FirMatch::StoreVar {
+                access: AccessType::Struct,
+                name,
+                ..
+            } => {
+                names.insert(name.clone());
+            }
+            FirMatch::TeeVar {
+                access: AccessType::Struct,
+                name,
+                ..
+            } => {
+                names.insert(name.clone());
+            }
+            _ => {}
+        }
+        worklist.extend(child_ids(&node));
+    }
+    names
+}
+
+/// Iteratively collects all `(field_name, load_node_id)` pairs for
+/// `LoadVar(kStruct)` reads found anywhere in the FIR subtree rooted at `root`.
+fn collect_struct_loads(store: &FirStore, root: FirId) -> Vec<(String, FirId)> {
+    let mut result: Vec<(String, FirId)> = Vec::new();
+    let mut worklist = vec![root];
+    while let Some(id) = worklist.pop() {
+        let node = match_fir(store, id);
+        if let FirMatch::LoadVar {
+            access: AccessType::Struct,
+            name,
+            ..
+        } = &node
+        {
+            result.push((name.clone(), id));
+        }
+        worklist.extend(child_ids(&node));
+    }
+    result
 }
 
 /// Returns a non-negative constant index from a `kFunArgs` table access node.

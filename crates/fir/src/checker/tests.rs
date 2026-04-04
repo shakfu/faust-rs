@@ -1547,3 +1547,123 @@ fn m09_compute_output_index_out_of_module_arity() {
         "{report:?}"
     );
 }
+
+// ══ FIR-LC01 — lifecycle order (instanceConstants reads clear-only field) ═══
+
+/// Build a minimal module that reproduces the `phasor.cpp` pattern:
+///
+/// ```cpp
+/// // dsp_struct: int iWave48; float fConst0;
+/// instanceConstants(sr) { fConst0 = fTbl48[iWave48]; }   // LC01: iWave48 not yet set
+/// instanceClear()        { iWave48 = 0; }
+/// ```
+///
+/// Expected: FIR-LC01 warning on the `LoadVar(kStruct, "iWave48")` inside
+/// `instanceConstants`.
+#[test]
+fn lc01_instance_constants_reads_clear_only_field() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    // dsp_struct: int iWave48; float fConst0;
+    let wave_field = b.declare_var("iWave48", FirType::Int32, AccessType::Struct, None);
+    let const_field = b.declare_var("fConst0", FirType::Float32, AccessType::Struct, None);
+    let dsp_struct = b.block(&[wave_field, const_field]);
+
+    let fun_ty = || FirType::Fun {
+        args: vec![],
+        ret: Box::new(FirType::Void),
+    };
+
+    // instanceConstants body: load iWave48 then store into fConst0
+    //   float tmp = (float) iWave48;   // LC01 load
+    //   fConst0 = tmp;
+    let iwave_load = b.load_var("iWave48", AccessType::Struct, FirType::Int32);
+    let tmp_cast = b.cast(FirType::Float32, iwave_load);
+    let store_const = b.store_var("fConst0", AccessType::Struct, tmp_cast);
+    let constants_body = b.block(&[store_const]);
+    let instance_constants =
+        b.declare_fun("instanceConstants", fun_ty(), &[], Some(constants_body), false);
+
+    // instanceClear body: iWave48 = 0;
+    let zero = b.int32(0);
+    let store_wave = b.store_var("iWave48", AccessType::Struct, zero);
+    let clear_body = b.block(&[store_wave]);
+    let instance_clear =
+        b.declare_fun("instanceClear", fun_ty(), &[], Some(clear_body), false);
+
+    let globals = b.block(&[]);
+    let functions = b.block(&[instance_constants, instance_clear]);
+    let module_id = {
+        let sd = b.block(&[]);
+        b.module(0, 0, "dsp", dsp_struct, globals, functions, sd)
+    };
+
+    let report = verify_fir_module(&store, module_id);
+    let lc01: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "FIR-LC01")
+        .collect();
+    assert!(
+        !lc01.is_empty(),
+        "expected FIR-LC01 but got none; diagnostics: {report:?}"
+    );
+    let d = &lc01[0];
+    assert_eq!(d.context.variable_name.as_deref(), Some("iWave48"));
+    assert_eq!(d.context.function_name.as_deref(), Some("instanceConstants"));
+    assert_eq!(d.severity, Severity::Error);
+}
+
+/// When the field IS initialized inside `instanceConstants` before being read,
+/// no FIR-LC01 should fire even if `instanceClear` also writes the same field.
+#[test]
+fn lc01_no_warn_when_field_initialized_in_instance_constants() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    // dsp_struct: int iWave48; float fConst0;
+    let wave_field = b.declare_var("iWave48", FirType::Int32, AccessType::Struct, None);
+    let const_field = b.declare_var("fConst0", FirType::Float32, AccessType::Struct, None);
+    let dsp_struct = b.block(&[wave_field, const_field]);
+
+    let fun_ty = || FirType::Fun {
+        args: vec![],
+        ret: Box::new(FirType::Void),
+    };
+
+    // instanceConstants: first write iWave48, then read it — no LC01
+    let zero = b.int32(0);
+    let store_wave_first = b.store_var("iWave48", AccessType::Struct, zero);
+    let iwave_load = b.load_var("iWave48", AccessType::Struct, FirType::Int32);
+    let tmp_cast = b.cast(FirType::Float32, iwave_load);
+    let store_const = b.store_var("fConst0", AccessType::Struct, tmp_cast);
+    let constants_body = b.block(&[store_wave_first, store_const]);
+    let instance_constants =
+        b.declare_fun("instanceConstants", fun_ty(), &[], Some(constants_body), false);
+
+    // instanceClear: also resets iWave48
+    let zero2 = b.int32(0);
+    let store_wave_clear = b.store_var("iWave48", AccessType::Struct, zero2);
+    let clear_body = b.block(&[store_wave_clear]);
+    let instance_clear =
+        b.declare_fun("instanceClear", fun_ty(), &[], Some(clear_body), false);
+
+    let globals = b.block(&[]);
+    let functions = b.block(&[instance_constants, instance_clear]);
+    let module_id = {
+        let sd = b.block(&[]);
+        b.module(0, 0, "dsp", dsp_struct, globals, functions, sd)
+    };
+
+    let report = verify_fir_module(&store, module_id);
+    let lc01: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "FIR-LC01")
+        .collect();
+    assert!(
+        lc01.is_empty(),
+        "unexpected FIR-LC01 when field is pre-initialized; diagnostics: {report:?}"
+    );
+}

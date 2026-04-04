@@ -272,7 +272,6 @@ fn apply_sample_rate(
     }
 }
 
-
 /// Reset UI state by executing sidecar reset-ui instructions when available.
 ///
 /// # Safety
@@ -792,7 +791,6 @@ fn write_field_init(
         }
     }
 }
-
 
 /// Writes one `i32` at byte offset `offset` inside the `dsp*` state buffer.
 fn write_i32(dsp_state: &mut DspStateBuffer, offset: usize, value: i32) {

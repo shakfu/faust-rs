@@ -541,9 +541,7 @@ fn fir_type_to_clif_type(ptr_ty: Type, typ: &FirType) -> Result<Type, String> {
         FirType::Float64 => Ok(types::F64),
         FirType::FaustFloat => Ok(types::F32),
         FirType::Bool => Ok(types::I8),
-        FirType::Ptr(_) | FirType::Obj | FirType::UI | FirType::Meta | FirType::Sound => {
-            Ok(ptr_ty)
-        }
+        FirType::Ptr(_) | FirType::Obj | FirType::UI | FirType::Meta | FirType::Sound => Ok(ptr_ty),
         other => Err(format!(
             "unsupported FIR type in Cranelift subset lowering: {other:?}"
         )),
@@ -3615,29 +3613,29 @@ fn try_generate_cranelift_module(
     let mut generated_functions_clif = vec![(compute_symbol_name.clone(), compute_clif_text)];
     let instance_constants_entry_addr =
         match find_module_and_function(store, module, "instanceConstants") {
-        Ok((_module_name, instance_constants_decl)) => {
-            let (_symbol_name, entry_addr, _lowered, instance_constants_clif) =
-                declare_jit_function(
-                    &format!("{module_name}::instanceConstants"),
-                    instance_constants_decl,
-                    store,
-                    &struct_layout,
-                    true,
-                    &options.extern_data_symbols,
-                    &options.extern_function_symbols,
-                    false,
-                    &mut jit,
-                    &static_data_ids,
-                    &extern_data_ids,
-                )?;
-            generated_functions_clif.push((
-                format!("{module_name}::instanceConstants"),
-                instance_constants_clif,
-            ));
-            entry_addr
-        }
-        Err(_) => 0,
-    };
+            Ok((_module_name, instance_constants_decl)) => {
+                let (_symbol_name, entry_addr, _lowered, instance_constants_clif) =
+                    declare_jit_function(
+                        &format!("{module_name}::instanceConstants"),
+                        instance_constants_decl,
+                        store,
+                        &struct_layout,
+                        true,
+                        &options.extern_data_symbols,
+                        &options.extern_function_symbols,
+                        false,
+                        &mut jit,
+                        &static_data_ids,
+                        &extern_data_ids,
+                    )?;
+                generated_functions_clif.push((
+                    format!("{module_name}::instanceConstants"),
+                    instance_constants_clif,
+                ));
+                entry_addr
+            }
+            Err(_) => 0,
+        };
     if compute_entry_addr == 0 {
         return Err(CraneliftBackendError::jit_failure(
             "finalized compute symbol address is null",

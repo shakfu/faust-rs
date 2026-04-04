@@ -2091,7 +2091,7 @@ fn dump_node(
 /// This is the canonical edge list used by [`dump_fir`] and similar internal
 /// walkers. It follows semantic children only; encoded type/access atoms remain
 /// implicit because they are reconstructed by [`match_fir`].
-fn child_ids(node: &FirMatch) -> Vec<FirId> {
+pub(crate) fn child_ids(node: &FirMatch) -> Vec<FirId> {
     match node {
         FirMatch::Unknown
         | FirMatch::Int32 { .. }

@@ -428,7 +428,6 @@ fn decode_init_value(store: &FirStore, id: FirId, typ: &FirType) -> Option<Runti
     }
 }
 
-
 /// Decodes FIR table initializers into one array-style runtime payload.
 fn decode_table_values(
     store: &FirStore,
