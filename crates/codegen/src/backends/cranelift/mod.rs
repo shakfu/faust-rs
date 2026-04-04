@@ -201,6 +201,7 @@ pub struct JitDspModule {
     module_name: String,
     compute_symbol_name: String,
     compute_entry_addr: usize,
+    instance_constants_entry_addr: usize,
     compute_body_lowered: bool,
     generated_functions_clif: Vec<(String, String)>,
     struct_layout: StructLayoutPlan,
@@ -214,6 +215,10 @@ impl std::fmt::Debug for JitDspModule {
             .field("module_name", &self.module_name)
             .field("compute_symbol_name", &self.compute_symbol_name)
             .field("compute_entry_addr", &self.compute_entry_addr)
+            .field(
+                "instance_constants_entry_addr",
+                &self.instance_constants_entry_addr,
+            )
             .field(
                 "generated_functions_clif_count",
                 &self.generated_functions_clif.len(),
@@ -248,6 +253,12 @@ impl JitDspModule {
     #[must_use]
     pub fn compute_entry_addr(&self) -> usize {
         self.compute_entry_addr
+    }
+
+    /// Returns the finalized `instanceConstants` entry address when emitted.
+    #[must_use]
+    pub fn instance_constants_entry_addr(&self) -> usize {
+        self.instance_constants_entry_addr
     }
 
     /// Returns `true` when a finalized non-null `compute` symbol address exists.
@@ -432,9 +443,10 @@ fn align_up(value: u32, align: u32) -> u32 {
 ///
 /// Prototype-only `compute` declarations (`body: None`) are ignored because the
 /// Cranelift backend currently requires an executable body.
-fn find_module_and_compute(
+fn find_module_and_function(
     store: &FirStore,
     module: FirId,
+    function_name: &str,
 ) -> Result<(String, FirId), CraneliftBackendError> {
     let (module_name, _globals, functions) = match match_fir(store, module) {
         FirMatch::Module {
@@ -470,16 +482,23 @@ fn find_module_and_compute(
                     ref name,
                     body: Some(_),
                     ..
-                } if name == "compute"
+                } if name == function_name
             )
         })
         .ok_or_else(|| {
             CraneliftBackendError::missing_compute(format!(
-                "FIR module `{module_name}` has no supported `compute` definition"
+                "FIR module `{module_name}` has no supported `{function_name}` definition"
             ))
         })?;
 
     Ok((module_name, compute_id))
+}
+
+fn find_module_and_compute(
+    store: &FirStore,
+    module: FirId,
+) -> Result<(String, FirId), CraneliftBackendError> {
+    find_module_and_function(store, module, "compute")
 }
 
 /// Maps a FIR scalar/storage type to the backend `dsp*` layout scalar size/alignment.
@@ -512,6 +531,23 @@ fn fir_type_layout_scalar(
         }
     };
     Ok(s)
+}
+
+fn fir_type_to_clif_type(ptr_ty: Type, typ: &FirType) -> Result<Type, String> {
+    match typ {
+        FirType::Int32 => Ok(types::I32),
+        FirType::Int64 => Ok(types::I64),
+        FirType::Float32 => Ok(types::F32),
+        FirType::Float64 => Ok(types::F64),
+        FirType::FaustFloat => Ok(types::F32),
+        FirType::Bool => Ok(types::I8),
+        FirType::Ptr(_) | FirType::Obj | FirType::UI | FirType::Meta | FirType::Sound => {
+            Ok(ptr_ty)
+        }
+        other => Err(format!(
+            "unsupported FIR type in Cranelift subset lowering: {other:?}"
+        )),
+    }
 }
 
 /// Builds the deterministic backend `dsp*` state layout from FIR module globals.
@@ -1279,20 +1315,7 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
     ///
     /// This reflects current bring-up decisions, especially `FAUSTFLOAT -> F32`.
     fn fir_type_to_clif(&self, typ: &FirType) -> Result<Type, LoweringError> {
-        match typ {
-            FirType::Int32 => Ok(types::I32),
-            FirType::Int64 => Ok(types::I64),
-            FirType::Float32 => Ok(types::F32),
-            FirType::Float64 => Ok(types::F64),
-            FirType::FaustFloat => Ok(types::F32),
-            FirType::Bool => Ok(types::I8),
-            FirType::Ptr(_) | FirType::Obj | FirType::UI | FirType::Meta | FirType::Sound => {
-                Ok(self.ptr_ty)
-            }
-            other => Err(LoweringError::Unsupported(format!(
-                "unsupported FIR type in Cranelift subset lowering: {other:?}"
-            ))),
-        }
+        fir_type_to_clif_type(self.ptr_ty, typ).map_err(LoweringError::Unsupported)
     }
 
     /// Returns the CLIF `dsp*` base pointer argument from the local environment.
@@ -2754,7 +2777,7 @@ fn binary_math_symbol_f64(math: fir::FirMathOp) -> Option<&'static str> {
 ///
 /// Any unsupported FIR node shape returns `LoweringError::Unsupported`, which
 /// the caller may convert into a controlled stub fallback.
-struct ComputeBodyLoweringContext<'a> {
+struct FunctionBodyLoweringContext<'a> {
     store: &'a FirStore,
     jit: &'a mut JITModule,
     struct_layout: &'a StructLayoutPlan,
@@ -2764,12 +2787,12 @@ struct ComputeBodyLoweringContext<'a> {
     extern_function_symbols: &'a HashMap<String, *const c_void>,
 }
 
-fn try_lower_compute_body(
-    cx: ComputeBodyLoweringContext<'_>,
+fn try_lower_function_body(
+    cx: FunctionBodyLoweringContext<'_>,
     fb: &mut FunctionBuilder<'_>,
-    compute_decl: FirId,
+    function_decl: FirId,
 ) -> Result<bool, LoweringError> {
-    let (args, body) = match match_fir(cx.store, compute_decl) {
+    let (args, body) = match match_fir(cx.store, function_decl) {
         FirMatch::DeclareFun {
             args,
             body: Some(body),
@@ -2777,7 +2800,7 @@ fn try_lower_compute_body(
         } => (args, body),
         other => {
             return Err(LoweringError::Unsupported(format!(
-                "`compute` declaration shape unsupported: {other:?}"
+                "function declaration shape unsupported: {other:?}"
             )));
         }
     };
@@ -2788,7 +2811,7 @@ fn try_lower_compute_body(
     let params = fb.block_params(entry).to_vec();
     if params.len() != args.len() {
         return Err(LoweringError::Unsupported(format!(
-            "compute arg count mismatch: clif={} fir={}",
+            "function arg count mismatch: clif={} fir={}",
             params.len(),
             args.len()
         )));
@@ -2835,15 +2858,15 @@ fn try_lower_compute_body(
 /// This is implemented as a thin wrapper over
 /// [`compute_body_subset_gap_reason_from_compute_decl`] so the backend can keep
 /// a cheap boolean decision while diagnostics tooling can request the reason.
-fn compute_body_matches_current_subset(
+fn function_body_matches_current_subset(
     store: &FirStore,
-    compute_decl: FirId,
+    function_decl: FirId,
     extern_data_symbols: &HashMap<String, *const c_void>,
     extern_function_symbols: &HashMap<String, *const c_void>,
 ) -> bool {
-    compute_body_subset_gap_reason_from_compute_decl(
+    function_body_subset_gap_reason_from_decl(
         store,
-        compute_decl,
+        function_decl,
         extern_data_symbols,
         extern_function_symbols,
     )
@@ -2864,11 +2887,25 @@ fn compute_body_subset_gap_reason_from_compute_decl(
     extern_data_symbols: &HashMap<String, *const c_void>,
     extern_function_symbols: &HashMap<String, *const c_void>,
 ) -> Option<String> {
-    let body = match match_fir(store, compute_decl) {
+    function_body_subset_gap_reason_from_decl(
+        store,
+        compute_decl,
+        extern_data_symbols,
+        extern_function_symbols,
+    )
+}
+
+fn function_body_subset_gap_reason_from_decl(
+    store: &FirStore,
+    function_decl: FirId,
+    extern_data_symbols: &HashMap<String, *const c_void>,
+    extern_function_symbols: &HashMap<String, *const c_void>,
+) -> Option<String> {
+    let body = match match_fir(store, function_decl) {
         FirMatch::DeclareFun {
             body: Some(body), ..
         } => body,
-        other => return Some(format!("unsupported compute declaration shape: {other:?}")),
+        other => return Some(format!("unsupported function declaration shape: {other:?}")),
     };
     subset_stmt_gap_reason(store, body, extern_data_symbols, extern_function_symbols)
 }
@@ -3325,9 +3362,9 @@ fn declare_extern_data_symbols_in_jit(
 /// now owns both real subset lowering and stub fallback while keeping the same
 /// outer responsibility (emit/finalize `compute`).
 #[allow(clippy::too_many_arguments)]
-fn declare_compute_stub(
-    module_name: &str,
-    compute_decl: FirId,
+fn declare_jit_function(
+    symbol_name: &str,
+    function_decl: FirId,
     store: &FirStore,
     struct_layout: &StructLayoutPlan,
     fail_on_subset_gap: bool,
@@ -3341,22 +3378,48 @@ fn declare_compute_stub(
     extern_data_ids: &HashMap<String, DataId>,
 ) -> Result<(String, usize, bool, String), CraneliftBackendError> {
     let ptr_ty = jit.target_config().pointer_type();
-    let compute_symbol_name = format!("{module_name}::compute");
+    let function_symbol_name = symbol_name.to_owned();
+
+    let (arg_types, function_name) = match match_fir(store, function_decl) {
+        FirMatch::DeclareFun { name, typ, .. } => {
+            let FirType::Fun { args, ret } = typ else {
+                return Err(CraneliftBackendError::unsupported_module_shape(format!(
+                    "function `{name}` does not have FIR function type"
+                )));
+            };
+            if !matches!(*ret, FirType::Void) {
+                return Err(CraneliftBackendError::unsupported_module_shape(format!(
+                    "Cranelift JIT helper lowering currently expects `{name}` to return Void"
+                )));
+            }
+            (args, name)
+        }
+        other => {
+            return Err(CraneliftBackendError::unsupported_module_shape(format!(
+                "expected FIR DeclareFun for JIT function lowering, got {other:?}"
+            )));
+        }
+    };
 
     let mut ctx = jit.make_context();
-    ctx.func.signature.params = vec![
-        AbiParam::new(ptr_ty),     // dsp*
-        AbiParam::new(types::I32), // count
-        AbiParam::new(ptr_ty),     // inputs**
-        AbiParam::new(ptr_ty),     // outputs**
-    ];
+    ctx.func.signature.params = arg_types
+        .iter()
+        .map(|typ| {
+            let clif_ty = fir_type_to_clif_type(ptr_ty, typ).map_err(|e| {
+                CraneliftBackendError::unsupported_module_shape(format!(
+                    "unsupported JIT helper arg type for `{function_name}`: {e}"
+                ))
+            })?;
+            Ok(AbiParam::new(clif_ty))
+        })
+        .collect::<Result<Vec<_>, CraneliftBackendError>>()?;
     // void return
 
     let func_id = jit
-        .declare_function(&compute_symbol_name, Linkage::Export, &ctx.func.signature)
+        .declare_function(&function_symbol_name, Linkage::Export, &ctx.func.signature)
         .map_err(|e| {
             CraneliftBackendError::jit_failure(format!(
-                "declare_function `{compute_symbol_name}` failed: {e}"
+                "declare_function `{function_symbol_name}` failed: {e}"
             ))
         })?;
 
@@ -3369,15 +3432,15 @@ fn declare_compute_stub(
         fb.switch_to_block(entry);
         fb.seal_block(entry);
         if !force_stub
-            && compute_body_matches_current_subset(
+            && function_body_matches_current_subset(
                 store,
-                compute_decl,
+                function_decl,
                 extern_data_symbols,
                 extern_function_symbols,
             )
         {
-            match try_lower_compute_body(
-                ComputeBodyLoweringContext {
+            match try_lower_function_body(
+                FunctionBodyLoweringContext {
                     store,
                     jit,
                     struct_layout,
@@ -3387,7 +3450,7 @@ fn declare_compute_stub(
                     extern_function_symbols,
                 },
                 &mut fb,
-                compute_decl,
+                function_decl,
             ) {
                 Ok(lowered) => compute_body_lowered = lowered,
                 Err(LoweringError::Unsupported(reason)) => {
@@ -3404,15 +3467,15 @@ fn declare_compute_stub(
             // - the FIR body exceeds the currently supported lowering subset, or
             // - `force_stub` was set by the JIT-panic fallback path.
             if fail_on_subset_gap && !force_stub {
-                let reason = compute_body_subset_gap_reason_from_compute_decl(
+                let reason = function_body_subset_gap_reason_from_decl(
                     store,
-                    compute_decl,
+                    function_decl,
                     extern_data_symbols,
                     extern_function_symbols,
                 )
                 .unwrap_or_else(|| "unknown subset-gap reason".to_owned());
                 return Err(CraneliftBackendError::unsupported_module_shape(format!(
-                    "Cranelift strict mode rejected fallback to compute stub: {reason}"
+                    "Cranelift strict mode rejected fallback to `{function_name}` stub: {reason}"
                 )));
             }
             emit_return_stub(&mut fb);
@@ -3426,7 +3489,7 @@ fn declare_compute_stub(
 
     jit.define_function(func_id, &mut ctx).map_err(|e| {
         CraneliftBackendError::jit_failure(format!(
-            "define_function `{compute_symbol_name}` failed: {e}\nCLIF:\n{}",
+            "define_function `{function_symbol_name}` failed: {e}\nCLIF:\n{}",
             ctx.func.display()
         ))
     })?;
@@ -3436,7 +3499,7 @@ fn declare_compute_stub(
     })?;
     let addr = jit.get_finalized_function(func_id) as usize;
     Ok((
-        compute_symbol_name,
+        function_symbol_name,
         addr,
         compute_body_lowered,
         compute_clif_text,
@@ -3536,8 +3599,8 @@ fn try_generate_cranelift_module(
     let extern_data_ids =
         declare_extern_data_symbols_in_jit(&mut jit, &options.extern_data_symbols)?;
     let (compute_symbol_name, compute_entry_addr, compute_body_lowered, compute_clif_text) =
-        declare_compute_stub(
-            module_name,
+        declare_jit_function(
+            &format!("{module_name}::compute"),
             compute_decl,
             store,
             &struct_layout,
@@ -3549,17 +3612,43 @@ fn try_generate_cranelift_module(
             &static_data_ids,
             &extern_data_ids,
         )?;
+    let mut generated_functions_clif = vec![(compute_symbol_name.clone(), compute_clif_text)];
+    let instance_constants_entry_addr =
+        match find_module_and_function(store, module, "instanceConstants") {
+        Ok((_module_name, instance_constants_decl)) => {
+            let (_symbol_name, entry_addr, _lowered, instance_constants_clif) =
+                declare_jit_function(
+                    &format!("{module_name}::instanceConstants"),
+                    instance_constants_decl,
+                    store,
+                    &struct_layout,
+                    true,
+                    &options.extern_data_symbols,
+                    &options.extern_function_symbols,
+                    false,
+                    &mut jit,
+                    &static_data_ids,
+                    &extern_data_ids,
+                )?;
+            generated_functions_clif.push((
+                format!("{module_name}::instanceConstants"),
+                instance_constants_clif,
+            ));
+            entry_addr
+        }
+        Err(_) => 0,
+    };
     if compute_entry_addr == 0 {
         return Err(CraneliftBackendError::jit_failure(
             "finalized compute symbol address is null",
         ));
     }
 
-    let generated_functions_clif = vec![(compute_symbol_name.clone(), compute_clif_text)];
     Ok(JitDspModule {
         module_name: module_name.to_owned(),
         compute_symbol_name,
         compute_entry_addr,
+        instance_constants_entry_addr,
         compute_body_lowered,
         generated_functions_clif,
         struct_layout,

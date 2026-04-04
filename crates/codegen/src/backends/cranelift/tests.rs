@@ -51,6 +51,109 @@ fn compile_module_emits_real_cranelift_compute_stub() {
     assert!(compiled.jit_module_is_alive());
 }
 
+#[test]
+fn compile_module_emits_instance_constants_entry_when_present() {
+    let (store, module) = build_instance_constants_test_module();
+    let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
+        .expect("instanceConstants fixture should compile to a Cranelift module");
+    assert_ne!(compiled.instance_constants_entry_addr(), 0);
+    assert!(
+        compiled
+            .generated_functions_clif()
+            .iter()
+            .any(|(name, _)| name == "mydsp::instanceConstants")
+    );
+}
+
+fn build_instance_constants_test_module() -> (fir::FirStore, FirId) {
+    let mut store = fir::FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let sample_rate = b.declare_var("fSampleRate", FirType::Int32, AccessType::Struct, None);
+    let konst = b.declare_var("fConst0", FirType::Float32, AccessType::Struct, None);
+    let dsp_struct = b.block(&[sample_rate, konst]);
+    let globals = b.block(&[]);
+    let static_decls = b.block(&[]);
+
+    let dsp_arg = NamedType {
+        name: "dsp".to_string(),
+        typ: FirType::Ptr(Box::new(FirType::Obj)),
+    };
+    let sample_rate_arg = NamedType {
+        name: "sample_rate".to_string(),
+        typ: FirType::Int32,
+    };
+    let sr_value = b.load_var("sample_rate", AccessType::FunArgs, FirType::Int32);
+    let sr_store = b.store_var("fSampleRate", AccessType::Struct, sr_value);
+    let sr_load = b.load_var("fSampleRate", AccessType::Struct, FirType::Int32);
+    let sr_as_float = b.cast(FirType::Float32, sr_load);
+    let const_store = b.store_var("fConst0", AccessType::Struct, sr_as_float);
+    let instance_constants_body = b.block(&[sr_store, const_store]);
+    let instance_constants = b.declare_fun(
+        "instanceConstants",
+        FirType::Fun {
+            args: vec![dsp_arg.typ.clone(), FirType::Int32],
+            ret: Box::new(FirType::Void),
+        },
+        &[dsp_arg.clone(), sample_rate_arg],
+        Some(instance_constants_body),
+        false,
+    );
+
+    let count_arg = NamedType {
+        name: "count".to_string(),
+        typ: FirType::Int32,
+    };
+    let inputs_arg = NamedType {
+        name: "inputs".to_string(),
+        typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+    };
+    let outputs_arg = NamedType {
+        name: "outputs".to_string(),
+        typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+    };
+    let out0_index = b.int32(0);
+    let out0_ptr = b.load_table(
+        "outputs",
+        AccessType::FunArgs,
+        out0_index,
+        FirType::Ptr(Box::new(FirType::FaustFloat)),
+    );
+    let out0_alias = b.declare_var(
+        "output0",
+        FirType::Ptr(Box::new(FirType::FaustFloat)),
+        AccessType::Stack,
+        Some(out0_ptr),
+    );
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let loop_index = b.load_var("i0", AccessType::Loop, FirType::Int32);
+    let value = b.load_var("fConst0", AccessType::Struct, FirType::Float32);
+    let out_value = b.cast(FirType::FaustFloat, value);
+    let out_store = b.store_table("output0", AccessType::Stack, loop_index, out_value);
+    let loop_body = b.block(&[out_store]);
+    let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+    let compute_body = b.block(&[out0_alias, sample_loop]);
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                dsp_arg.typ.clone(),
+                FirType::Int32,
+                inputs_arg.typ.clone(),
+                outputs_arg.typ.clone(),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &[dsp_arg, count_arg, inputs_arg, outputs_arg],
+        Some(compute_body),
+        false,
+    );
+
+    let functions = b.block(&[instance_constants, compute]);
+    let module = b.module(0, 1, "mydsp", dsp_struct, globals, functions, static_decls);
+    (store, module)
+}
+
 /// Builds a module whose `compute` body intentionally exceeds the current lowering subset.
 fn build_subset_gap_fun_call_module() -> (fir::FirStore, FirId) {
     let mut store = fir::FirStore::new();

@@ -27,6 +27,9 @@ use crate::types::{
 type ComputeFn =
     unsafe extern "C" fn(*mut c_void, c_int, *mut *mut FaustFloat, *mut *mut FaustFloat);
 
+/// Typed JIT `instanceConstants` signature used by the standalone runtime.
+type InstanceConstantsFn = unsafe extern "C" fn(*mut c_void, c_int);
+
 /// Converts a Rust channel count to the C ABI integer type with saturation.
 fn arity_to_c_int(value: usize) -> c_int {
     i32::try_from(value).unwrap_or(i32::MAX)
@@ -214,6 +217,14 @@ pub unsafe extern "C" fn instanceConstantsCCraneliftDSPInstance(
             &factory.runtime,
             sample_rate,
         );
+        if let Some(instance_constants) =
+            instance_constants_fn_from_addr(jit.instance_constants_entry_addr())
+        {
+            let dsp_ptr = (*dsp).dsp_state.as_mut_ptr().cast::<c_void>();
+            if !dsp_ptr.is_null() {
+                instance_constants(dsp_ptr, sample_rate);
+            }
+        }
     }
 }
 
@@ -260,6 +271,7 @@ fn apply_sample_rate(
         }
     }
 }
+
 
 /// Reset UI state by executing sidecar reset-ui instructions when available.
 ///
@@ -781,6 +793,7 @@ fn write_field_init(
     }
 }
 
+
 /// Writes one `i32` at byte offset `offset` inside the `dsp*` state buffer.
 fn write_i32(dsp_state: &mut DspStateBuffer, offset: usize, value: i32) {
     unsafe { std::ptr::write_unaligned(dsp_state.ptr_at(offset).cast::<i32>(), value) };
@@ -818,6 +831,14 @@ fn compute_fn_from_addr(addr: usize) -> Option<ComputeFn> {
         // SAFETY: address comes from finalized Cranelift symbol for `compute` with
         // known ABI/signature in this backend module.
         Some(unsafe { std::mem::transmute::<usize, ComputeFn>(addr) })
+    }
+}
+
+fn instance_constants_fn_from_addr(addr: usize) -> Option<InstanceConstantsFn> {
+    if addr == 0 {
+        None
+    } else {
+        Some(unsafe { std::mem::transmute::<usize, InstanceConstantsFn>(addr) })
     }
 }
 

@@ -428,6 +428,7 @@ fn decode_init_value(store: &FirStore, id: FirId, typ: &FirType) -> Option<Runti
     }
 }
 
+
 /// Decodes FIR table initializers into one array-style runtime payload.
 fn decode_table_values(
     store: &FirStore,
@@ -475,5 +476,36 @@ fn decode_array_values(
             .collect::<Option<Vec<_>>>()
             .map(RuntimeFieldInit::F64Array),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use compiler::{Compiler, SignalFirLane};
+
+    use super::build_runtime_descriptor;
+
+    #[test]
+    fn runtime_descriptor_tracks_sample_rate_fields() {
+        std::thread::Builder::new()
+            .name("runtime-descriptor-test".to_owned())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let compiler = Compiler::new();
+                let case = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../tests/corpus/rep_61_fmin_sr.dsp")
+                    .canonicalize()
+                    .expect("rep_61_fmin_sr path");
+                let fir = compiler
+                    .compile_file_default_to_fir_with_lane(&case, SignalFirLane::TransformFastLane)
+                    .expect("rep_61_fmin_sr should lower to FIR");
+                let runtime = build_runtime_descriptor(&fir.store, fir.module)
+                    .expect("runtime descriptor builds");
+
+                assert_eq!(runtime.sample_rate_fields, vec!["fSampleRate"]);
+            })
+            .expect("spawn runtime descriptor test")
+            .join()
+            .expect("runtime descriptor test should finish");
     }
 }
