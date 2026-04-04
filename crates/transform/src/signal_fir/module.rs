@@ -939,13 +939,12 @@ impl<'a> SignalToFirLower<'a> {
         self.sig_types.get(&sig).map(|t| t.variability())
     }
 
-    /// Returns `true` when the signal should **not** be hoisted by
-    /// variability placement even if its variability is `Konst` or `Block`.
+    /// Returns `true` when the signal is a direct `Proj(i, SYMREC)` read.
     ///
-    /// Recursive projections (`Proj(i, SYMREC)`) carry feedback state that
-    /// must be re-read every sample.  They may appear `Konst` in the type
-    /// system (e.g. when the recursion body is constant-folded), but
-    /// hoisting them would break the sample-by-sample feedback contract.
+    /// The type system (after the `update_rec_types` variability-join fix)
+    /// guarantees that such nodes always carry at least `Samp` variability, so
+    /// they would not be hoisted by the placement logic anyway.  This guard is
+    /// kept as a defensive check against future regressions.
     fn is_recursive_projection(&self, sig: SigId) -> bool {
         if let SigMatch::Proj(_, group) = match_sig(self.arena, sig) {
             match_sym_rec(self.arena, group).is_some()
@@ -1176,9 +1175,9 @@ impl<'a> SignalToFirLower<'a> {
         // Guards:
         // - Trivial nodes (literals, loads) are never hoisted — they are
         //   free to duplicate and hoisting them wastes a variable name.
-        // - Recursive projections must stay in the sample loop even when
-        //   the type system reports Konst variability, because they carry
-        //   sample-by-sample feedback state.
+        // - Recursive projections must stay in the sample loop; the type
+        //   system ensures they are always Samp, but the guard is kept as
+        //   a defensive check.
         let lowered = if !is_trivial_fir(&self.store, lowered)
             && !self.is_recursive_projection(sig)
         {

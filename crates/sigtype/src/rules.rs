@@ -766,13 +766,21 @@ impl<'a> TypeAnnotator<'a> {
             let new_tuplet = as_tuplet_type(&inferred)?;
             let mut items = Vec::with_capacity(group.arity);
             for j in 0..group.arity {
+                let old_comp = &old_tuplet.components[j];
                 let mut component = new_tuplet.components[j].clone();
-                let old_i = old_tuplet.components[j].interval();
-                let new_i = component.interval();
+                // Join variability and computability with the old approximation
+                // so the kSamp/kInit floor from the initial TREC seed is
+                // preserved across iterations — matching C++ joinType semantics
+                // in updateRecTypes.  Without this, a body that ignores its
+                // recursive input could lower a component to kKonst/kComp,
+                // allowing Proj nodes to be hoisted out of the sample loop.
+                component = component
+                    .promote_variability(old_comp.variability())
+                    .promote_computability(old_comp.computability());
                 let merged_i = if inter {
-                    interval::intersection(new_i, old_i)
+                    interval::intersection(component.interval(), old_comp.interval())
                 } else {
-                    interval::reunion(new_i, old_i)
+                    interval::reunion(component.interval(), old_comp.interval())
                 };
                 component = component.promote_interval(merged_i);
                 items.push(component);
