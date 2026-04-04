@@ -15,9 +15,13 @@
 //!   `instanceResetUserInterface`, `instanceClear`, `buildUserInterface`, `compute`).
 //!
 //! Section placement policy (Step 3B):
-//! - `instanceConstants`: table initialization and compile-time constants.
+//! - `instanceConstants`: table initialization and compile-time constants
+//!   (`fConst*` variables — [`Variability::Konst`](sigtype::Variability::Konst)).
 //! - `instanceResetUserInterface`: UI zone reset values.
 //! - `instanceClear`: runtime signal state reset values (delay/rec state).
+//! - `compute` preamble (before sample loop): block-rate control expressions
+//!   (`fSlow*` variables — [`Variability::Block`](sigtype::Variability::Block)).
+//! - `compute` sample loop: sample-rate expressions (inline, no hoisting).
 //!
 //! Integer policy:
 //! - `SIGINT`/`SIGINTCAST` and integer bitwise operations lower to FIR `Int32`
@@ -47,8 +51,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use fir::{
-    AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirMathOp, FirStore,
-    FirType, NamedType, SliderRange, SliderType, UiBoxType,
+    AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirMatch, FirMathOp,
+    FirStore, FirType, NamedType, SliderRange, SliderType, UiBoxType, match_fir,
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{
@@ -56,7 +60,7 @@ use tlib::{
 };
 use ui::{ControlId, ControlKind, UiGroupKind, UiMatch, UiProgram, match_ui};
 
-use sigtype::{SigType, check_delay_interval};
+use sigtype::{SigType, Variability, check_delay_interval};
 
 use crate::signal_prepare::SimpleSigType;
 
@@ -547,6 +551,41 @@ pub fn build_module(
     })
 }
 
+/// Execution-tier bucket for variability-driven statement placement.
+///
+/// Maps directly to the C++ Faust compiler's three execution tiers: init-time
+/// constants (`instanceConstants`), block-rate control expressions (before
+/// the sample loop in `compute`), and sample-rate expressions (inside the loop).
+///
+/// See [Phase 1 of the FIR runtime optimization plan](../../porting/fir-cse-runtime-optimizations-plan-2026-04-03-en.md#2-phase-1--variability-driven-statement-placement).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bucket {
+    /// Init-time constants — written once in `instanceConstants`.
+    Constants,
+    /// Block-rate controls — written once per `compute()` call, before the loop.
+    Control,
+}
+
+/// Returns `true` when a FIR value node is *trivial* — meaning it should
+/// never be materialized into a named variable because it is already free
+/// to duplicate (literals, variable loads, null values).
+///
+/// This prevents variability placement from hoisting bare constants or
+/// variable references into unnecessary temporary variables.
+fn is_trivial_fir(store: &FirStore, node: FirId) -> bool {
+    matches!(
+        match_fir(store, node),
+        FirMatch::Int32 { .. }
+            | FirMatch::Int64 { .. }
+            | FirMatch::Float32 { .. }
+            | FirMatch::Float64 { .. }
+            | FirMatch::Bool { .. }
+            | FirMatch::LoadVar { .. }
+            | FirMatch::LoadVarAddress { .. }
+            | FirMatch::NullValue { .. }
+    )
+}
+
 /// Stateful lowering engine that converts a propagated signal forest into FIR.
 ///
 /// Stateful rather than purely recursive because the FIR output has multiple
@@ -661,6 +700,16 @@ struct SignalToFirLower<'a> {
     used_foreign_vars: BTreeMap<String, FirType>,
     /// Monotonic counter for generating unique loop-variable names.
     next_loop_var_id: usize,
+    /// Monotonic counter for `fConst*` init-time constant variable names.
+    ///
+    /// Incremented each time [`materialize_in_bucket`] hoists a
+    /// [`Variability::Konst`] expression into [`Self::constants_statements`].
+    const_counter: u32,
+    /// Monotonic counter for `fSlow*` block-rate variable names.
+    ///
+    /// Incremented each time [`materialize_in_bucket`] hoists a
+    /// [`Variability::Block`] expression into [`Self::control_statements`].
+    slow_counter: u32,
 }
 
 /// Two-slot carrier for one output of a recursive group (`SIGPROJ(i, SYMREC(…))`).
@@ -757,6 +806,8 @@ impl<'a> SignalToFirLower<'a> {
             used_foreign_fun_protos: BTreeMap::new(),
             used_foreign_vars: BTreeMap::new(),
             next_loop_var_id: 0,
+            const_counter: 0,
+            slow_counter: 0,
         }
     }
 
@@ -873,6 +924,90 @@ impl<'a> SignalToFirLower<'a> {
     /// use `FirType::FaustFloat` directly instead.
     fn real_ty(&self) -> FirType {
         self.real_ty.clone()
+    }
+
+    // ── Variability-driven statement placement (Phase 1) ──────────────────
+
+    /// Returns the signal-level variability for a node, if type info exists.
+    ///
+    /// Variability drives the execution-tier placement of the resulting FIR
+    /// expression:
+    /// - [`Variability::Konst`] → `constants_statements` (once at init)
+    /// - [`Variability::Block`] → `control_statements` (once per `compute()`)
+    /// - [`Variability::Samp`]  → `sample_statements`  (every sample)
+    fn variability_of(&self, sig: SigId) -> Option<Variability> {
+        self.sig_types.get(&sig).map(|t| t.variability())
+    }
+
+    /// Returns `true` when the signal should **not** be hoisted by
+    /// variability placement even if its variability is `Konst` or `Block`.
+    ///
+    /// Recursive projections (`Proj(i, SYMREC)`) carry feedback state that
+    /// must be re-read every sample.  They may appear `Konst` in the type
+    /// system (e.g. when the recursion body is constant-folded), but
+    /// hoisting them would break the sample-by-sample feedback contract.
+    fn is_recursive_projection(&self, sig: SigId) -> bool {
+        if let SigMatch::Proj(_, group) = match_sig(self.arena, sig) {
+            match_sym_rec(self.arena, group).is_some()
+        } else {
+            false
+        }
+    }
+
+    /// Materializes a FIR value expression into a named variable in the
+    /// given execution-tier bucket.
+    ///
+    /// Returns a [`FirId`] for the `LoadVar` that reads the materialized
+    /// variable.  The corresponding `DeclareVar` (with initializer) is
+    /// appended to the appropriate lifecycle accumulator:
+    ///
+    /// | Bucket | Prefix | Access | Lifecycle section |
+    /// |--------|--------|--------|-------------------|
+    /// | `Constants` | `fConst` | [`AccessType::Struct`] | `instanceConstants` |
+    /// | `Control` | `fSlow` | [`AccessType::Stack`] | `compute` preamble |
+    ///
+    /// `fConst` variables use struct storage because they are written in
+    /// `instanceConstants()` and read in `compute()`.  `fSlow` variables
+    /// use stack storage because they live within the `compute()` body.
+    fn materialize_in_bucket(&mut self, value: FirId, bucket: Bucket) -> FirId {
+        let (name, access) = match bucket {
+            Bucket::Constants => {
+                let n = self.const_counter;
+                self.const_counter += 1;
+                (format!("fConst{n}"), AccessType::Struct)
+            }
+            Bucket::Control => {
+                let n = self.slow_counter;
+                self.slow_counter += 1;
+                (format!("fSlow{n}"), AccessType::Stack)
+            }
+        };
+
+        let typ = self
+            .store
+            .value_type(value)
+            .unwrap_or_else(|| self.real_ty());
+
+        match bucket {
+            Bucket::Constants => {
+                // Struct-backed: declare the field, then assign in instanceConstants.
+                self.ensure_named_struct_var(&name, typ.clone(), None);
+                let mut b = FirBuilder::new(&mut self.store);
+                let store_stmt = b.store_var(&name, access, value);
+                self.constants_statements.push(store_stmt);
+            }
+            Bucket::Control => {
+                // Stack-backed: use DeclareVar(Stack, init) so that backends
+                // (WASM, Cranelift) discover the local during their pre-scan.
+                let mut b = FirBuilder::new(&mut self.store);
+                let decl = b.declare_var(&name, typ.clone(), access, Some(value));
+                self.control_statements.push(decl);
+            }
+        }
+
+        // Return a load reference that callers embed in downstream expressions.
+        let mut b = FirBuilder::new(&mut self.store);
+        b.load_var(name, access, typ)
     }
 
     /// Returns the reduced prepared signal type attached to one signal node.
@@ -1028,6 +1163,32 @@ impl<'a> SignalToFirLower<'a> {
                     ),
                 ));
             }
+        };
+
+        // ── Variability-driven placement (Phase 1) ──────────────────────
+        //
+        // Non-trivial expressions whose variability is slower than sample
+        // rate are hoisted into the appropriate execution-tier bucket:
+        //   Konst → constants_statements (instanceConstants, once at init)
+        //   Block → control_statements   (compute preamble, once per call)
+        //   Samp  → stays inline in the sample loop (no action needed)
+        //
+        // Guards:
+        // - Trivial nodes (literals, loads) are never hoisted — they are
+        //   free to duplicate and hoisting them wastes a variable name.
+        // - Recursive projections must stay in the sample loop even when
+        //   the type system reports Konst variability, because they carry
+        //   sample-by-sample feedback state.
+        let lowered = if !is_trivial_fir(&self.store, lowered)
+            && !self.is_recursive_projection(sig)
+        {
+            match self.variability_of(sig) {
+                Some(Variability::Konst) => self.materialize_in_bucket(lowered, Bucket::Constants),
+                Some(Variability::Block) => self.materialize_in_bucket(lowered, Bucket::Control),
+                _ => lowered,
+            }
+        } else {
+            lowered
         };
 
         self.cache.insert(sig, lowered);
