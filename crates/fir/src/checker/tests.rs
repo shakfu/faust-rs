@@ -1582,15 +1582,19 @@ fn lc01_instance_constants_reads_clear_only_field() {
     let tmp_cast = b.cast(FirType::Float32, iwave_load);
     let store_const = b.store_var("fConst0", AccessType::Struct, tmp_cast);
     let constants_body = b.block(&[store_const]);
-    let instance_constants =
-        b.declare_fun("instanceConstants", fun_ty(), &[], Some(constants_body), false);
+    let instance_constants = b.declare_fun(
+        "instanceConstants",
+        fun_ty(),
+        &[],
+        Some(constants_body),
+        false,
+    );
 
     // instanceClear body: iWave48 = 0;
     let zero = b.int32(0);
     let store_wave = b.store_var("iWave48", AccessType::Struct, zero);
     let clear_body = b.block(&[store_wave]);
-    let instance_clear =
-        b.declare_fun("instanceClear", fun_ty(), &[], Some(clear_body), false);
+    let instance_clear = b.declare_fun("instanceClear", fun_ty(), &[], Some(clear_body), false);
 
     let globals = b.block(&[]);
     let functions = b.block(&[instance_constants, instance_clear]);
@@ -1611,7 +1615,10 @@ fn lc01_instance_constants_reads_clear_only_field() {
     );
     let d = &lc01[0];
     assert_eq!(d.context.variable_name.as_deref(), Some("iWave48"));
-    assert_eq!(d.context.function_name.as_deref(), Some("instanceConstants"));
+    assert_eq!(
+        d.context.function_name.as_deref(),
+        Some("instanceConstants")
+    );
     assert_eq!(d.severity, Severity::Error);
 }
 
@@ -1639,15 +1646,19 @@ fn lc01_no_warn_when_field_initialized_in_instance_constants() {
     let tmp_cast = b.cast(FirType::Float32, iwave_load);
     let store_const = b.store_var("fConst0", AccessType::Struct, tmp_cast);
     let constants_body = b.block(&[store_wave_first, store_const]);
-    let instance_constants =
-        b.declare_fun("instanceConstants", fun_ty(), &[], Some(constants_body), false);
+    let instance_constants = b.declare_fun(
+        "instanceConstants",
+        fun_ty(),
+        &[],
+        Some(constants_body),
+        false,
+    );
 
     // instanceClear: also resets iWave48
     let zero2 = b.int32(0);
     let store_wave_clear = b.store_var("iWave48", AccessType::Struct, zero2);
     let clear_body = b.block(&[store_wave_clear]);
-    let instance_clear =
-        b.declare_fun("instanceClear", fun_ty(), &[], Some(clear_body), false);
+    let instance_clear = b.declare_fun("instanceClear", fun_ty(), &[], Some(clear_body), false);
 
     let globals = b.block(&[]);
     let functions = b.block(&[instance_constants, instance_clear]);

@@ -433,11 +433,10 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
     // `((fIOTA - 1) & 1)` into `fTemp*` variables when they are referenced
     // more than once (e.g. for two phasor recursions).  Accept both inline
     // and CSE-materialized forms.
-    let has_inline_circ = fast.contains("[(fIOTA & 1)] = (fRec")
-        && fast.contains("[((fIOTA - 1) & 1)] +");
-    let has_cse_circ = fast.contains("fIOTA & 1")
-        && fast.contains("(fIOTA - 1) & 1")
-        && fast.contains("fTemp");
+    let has_inline_circ =
+        fast.contains("[(fIOTA & 1)] = (fRec") && fast.contains("[((fIOTA - 1) & 1)] +");
+    let has_cse_circ =
+        fast.contains("fIOTA & 1") && fast.contains("(fIOTA - 1) & 1") && fast.contains("fTemp");
     assert!(
         has_inline_circ || has_cse_circ,
         "fast lane should use circular buffer indexing for recursion write and read"

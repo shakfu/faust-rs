@@ -248,8 +248,8 @@ pub fn build_module(
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // ── Phase 2: CSE Materialization per Bucket ───────────────────���────────
-    // ═════════════════════════════════��═════════════════════════════════════
+    // ── Phase 2: CSE Materialization per Bucket ────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════
     // Deduplicate multi-referenced value sub-expressions within each
     // execution tier.  Runs after variability placement (Phase 1) has
     // finalized bucket contents, so reference counts are stable.
@@ -1215,8 +1215,15 @@ impl<'a> SignalToFirLower<'a> {
         // - Recursive projections must stay in the sample loop; the type
         //   system ensures they are always Samp, but the guard is kept as
         //   a defensive check.
+        // - SIGWRTBL nodes: the type system assigns Konst variability
+        //   (from `make_table_type`) reflecting the static table content,
+        //   but `lower_wrtbl` returns the write signal's value which may
+        //   reference Samp-rate state (e.g. `iWave*` cycling counters).
+        //   Hoisting would place `LoadVar("iWave*")` inside
+        //   `instanceConstants`, before `instanceClear` has initialized it.
         let lowered = if !is_trivial_fir(&self.store, lowered)
             && !self.is_recursive_projection(sig)
+            && !matches!(match_sig(self.arena, sig), SigMatch::WrTbl(..))
         {
             match self.variability_of(sig) {
                 Some(Variability::Konst) => self.materialize_in_bucket(lowered, Bucket::Constants),

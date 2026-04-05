@@ -1955,10 +1955,7 @@ fn find_compute_body_stmts(store: &fir::FirStore, functions: fir::FirId) -> Vec<
 }
 
 /// Helper: returns the `instanceConstants` body block as a `Vec<FirId>`.
-fn find_instance_constants_stmts(
-    store: &fir::FirStore,
-    functions: fir::FirId,
-) -> Vec<fir::FirId> {
+fn find_instance_constants_stmts(store: &fir::FirStore, functions: fir::FirId) -> Vec<fir::FirId> {
     let body = find_decl_fun_body(store, functions, "instanceConstants");
     let FirMatch::Block(stmts) = match_fir(store, body) else {
         panic!("instanceConstants body block expected");

@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fir::{match_fir, AccessType, FirBuilder, FirId, FirMatch, FirStore, FirType};
+use fir::{AccessType, FirBuilder, FirId, FirMatch, FirStore, FirType, match_fir};
 
 // ─── Reference counting ─────────────────────────────────────────────────────
 
@@ -22,10 +22,7 @@ use fir::{match_fir, AccessType, FirBuilder, FirId, FirMatch, FirStore, FirType}
 /// `ref_counts[id]` = number of distinct parent references to `id`.  Children
 /// are descended only once per unique `FirId` (the `descended` set), so the
 /// count reflects fan-out, not tree depth.
-pub(super) fn count_fir_value_uses(
-    store: &FirStore,
-    roots: &[FirId],
-) -> HashMap<FirId, usize> {
+pub(super) fn count_fir_value_uses(store: &FirStore, roots: &[FirId]) -> HashMap<FirId, usize> {
     let mut ref_counts: HashMap<FirId, usize> = HashMap::new();
     let mut descended: HashSet<FirId> = HashSet::new();
 
@@ -93,8 +90,9 @@ fn value_children_of(store: &FirStore, node: FirId) -> Vec<FirId> {
         FirMatch::LoadSoundfileBuffer {
             chan, part, idx, ..
         } => vec![chan, part, idx],
-        FirMatch::LoadSoundfileLength { part, .. }
-        | FirMatch::LoadSoundfileRate { part, .. } => vec![part],
+        FirMatch::LoadSoundfileLength { part, .. } | FirMatch::LoadSoundfileRate { part, .. } => {
+            vec![part]
+        }
 
         // ── Statement nodes — only embedded value children ──
         FirMatch::StoreVar { value, .. } => vec![value],
@@ -200,7 +198,15 @@ fn rewrite_stmt(
             access,
             value,
         } => {
-            let nv = rewrite_value(store, value, ref_counts, materialized, temp_decls, prefix, counter);
+            let nv = rewrite_value(
+                store,
+                value,
+                ref_counts,
+                materialized,
+                temp_decls,
+                prefix,
+                counter,
+            );
             if nv == value {
                 return stmt;
             }
@@ -212,8 +218,24 @@ fn rewrite_stmt(
             index,
             value,
         } => {
-            let ni = rewrite_value(store, index, ref_counts, materialized, temp_decls, prefix, counter);
-            let nv = rewrite_value(store, value, ref_counts, materialized, temp_decls, prefix, counter);
+            let ni = rewrite_value(
+                store,
+                index,
+                ref_counts,
+                materialized,
+                temp_decls,
+                prefix,
+                counter,
+            );
+            let nv = rewrite_value(
+                store,
+                value,
+                ref_counts,
+                materialized,
+                temp_decls,
+                prefix,
+                counter,
+            );
             if ni == index && nv == value {
                 return stmt;
             }
@@ -225,14 +247,30 @@ fn rewrite_stmt(
             access,
             init: Some(init),
         } => {
-            let ni = rewrite_value(store, init, ref_counts, materialized, temp_decls, prefix, counter);
+            let ni = rewrite_value(
+                store,
+                init,
+                ref_counts,
+                materialized,
+                temp_decls,
+                prefix,
+                counter,
+            );
             if ni == init {
                 return stmt;
             }
             FirBuilder::new(store).declare_var(name, typ, access, Some(ni))
         }
         FirMatch::Drop(value) => {
-            let nv = rewrite_value(store, value, ref_counts, materialized, temp_decls, prefix, counter);
+            let nv = rewrite_value(
+                store,
+                value,
+                ref_counts,
+                materialized,
+                temp_decls,
+                prefix,
+                counter,
+            );
             if nv == value {
                 return stmt;
             }
@@ -264,7 +302,15 @@ fn rewrite_value(
     }
 
     // Rewrite children first (bottom-up).
-    let rewritten = rewrite_value_children(store, node, ref_counts, materialized, temp_decls, prefix, counter);
+    let rewritten = rewrite_value_children(
+        store,
+        node,
+        ref_counts,
+        materialized,
+        temp_decls,
+        prefix,
+        counter,
+    );
 
     // Candidate for materialization?
     if ref_counts.get(&node).copied().unwrap_or(0) >= 2 && !is_trivial_value(store, node) {
@@ -272,8 +318,12 @@ fn rewrite_value(
         *counter += 1;
 
         let typ = store.value_type(rewritten).unwrap_or(FirType::Void);
-        let decl =
-            FirBuilder::new(store).declare_var(&name, typ.clone(), AccessType::Stack, Some(rewritten));
+        let decl = FirBuilder::new(store).declare_var(
+            &name,
+            typ.clone(),
+            AccessType::Stack,
+            Some(rewritten),
+        );
         temp_decls.push(decl);
 
         materialized.insert(node, (name.clone(), typ.clone()));
@@ -298,29 +348,69 @@ fn rewrite_value_children(
         FirMatch::BinOp {
             op, lhs, rhs, typ, ..
         } => {
-            let nl = rewrite_value(store, lhs, ref_counts, materialized, temp_decls, prefix, counter);
-            let nr = rewrite_value(store, rhs, ref_counts, materialized, temp_decls, prefix, counter);
+            let nl = rewrite_value(
+                store,
+                lhs,
+                ref_counts,
+                materialized,
+                temp_decls,
+                prefix,
+                counter,
+            );
+            let nr = rewrite_value(
+                store,
+                rhs,
+                ref_counts,
+                materialized,
+                temp_decls,
+                prefix,
+                counter,
+            );
             if nl == lhs && nr == rhs {
                 return node;
             }
             FirBuilder::new(store).binop(op, nl, nr, typ)
         }
         FirMatch::Neg { value, typ } => {
-            let nv = rewrite_value(store, value, ref_counts, materialized, temp_decls, prefix, counter);
+            let nv = rewrite_value(
+                store,
+                value,
+                ref_counts,
+                materialized,
+                temp_decls,
+                prefix,
+                counter,
+            );
             if nv == value {
                 return node;
             }
             FirBuilder::new(store).neg(nv, typ)
         }
         FirMatch::Cast { typ, value } => {
-            let nv = rewrite_value(store, value, ref_counts, materialized, temp_decls, prefix, counter);
+            let nv = rewrite_value(
+                store,
+                value,
+                ref_counts,
+                materialized,
+                temp_decls,
+                prefix,
+                counter,
+            );
             if nv == value {
                 return node;
             }
             FirBuilder::new(store).cast(typ, nv)
         }
         FirMatch::Bitcast { typ, value } => {
-            let nv = rewrite_value(store, value, ref_counts, materialized, temp_decls, prefix, counter);
+            let nv = rewrite_value(
+                store,
+                value,
+                ref_counts,
+                materialized,
+                temp_decls,
+                prefix,
+                counter,
+            );
             if nv == value {
                 return node;
             }
@@ -332,11 +422,33 @@ fn rewrite_value_children(
             else_value,
             typ,
         } => {
-            let nc = rewrite_value(store, cond, ref_counts, materialized, temp_decls, prefix, counter);
-            let nt =
-                rewrite_value(store, then_value, ref_counts, materialized, temp_decls, prefix, counter);
-            let ne =
-                rewrite_value(store, else_value, ref_counts, materialized, temp_decls, prefix, counter);
+            let nc = rewrite_value(
+                store,
+                cond,
+                ref_counts,
+                materialized,
+                temp_decls,
+                prefix,
+                counter,
+            );
+            let nt = rewrite_value(
+                store,
+                then_value,
+                ref_counts,
+                materialized,
+                temp_decls,
+                prefix,
+                counter,
+            );
+            let ne = rewrite_value(
+                store,
+                else_value,
+                ref_counts,
+                materialized,
+                temp_decls,
+                prefix,
+                counter,
+            );
             if nc == cond && nt == then_value && ne == else_value {
                 return node;
             }
@@ -347,8 +459,15 @@ fn rewrite_value_children(
             let new_args: Vec<FirId> = args
                 .iter()
                 .map(|&a| {
-                    let na =
-                        rewrite_value(store, a, ref_counts, materialized, temp_decls, prefix, counter);
+                    let na = rewrite_value(
+                        store,
+                        a,
+                        ref_counts,
+                        materialized,
+                        temp_decls,
+                        prefix,
+                        counter,
+                    );
                     if na != a {
                         changed = true;
                     }
@@ -366,7 +485,15 @@ fn rewrite_value_children(
             index,
             typ,
         } => {
-            let ni = rewrite_value(store, index, ref_counts, materialized, temp_decls, prefix, counter);
+            let ni = rewrite_value(
+                store,
+                index,
+                ref_counts,
+                materialized,
+                temp_decls,
+                prefix,
+                counter,
+            );
             if ni == index {
                 return node;
             }
@@ -378,7 +505,15 @@ fn rewrite_value_children(
             value,
             typ,
         } => {
-            let nv = rewrite_value(store, value, ref_counts, materialized, temp_decls, prefix, counter);
+            let nv = rewrite_value(
+                store,
+                value,
+                ref_counts,
+                materialized,
+                temp_decls,
+                prefix,
+                counter,
+            );
             if nv == value {
                 return node;
             }
