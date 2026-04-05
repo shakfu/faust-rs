@@ -426,7 +426,8 @@ impl<'a> TypeAnnotator<'a> {
                 let ty = self.infer(y)?;
                 let tx = self.infer(x)?;
                 let itv = interval::ops::trig::atan2(ty.interval(), tx.interval());
-                let t = samp_cast(union_types(ty, tx));
+                // Pure math — variability follows arguments, not forced to Samp.
+                let t = union_types(ty, tx);
                 Ok(float_cast(t).promote_interval(itv))
             }
 
@@ -434,14 +435,14 @@ impl<'a> TypeAnnotator<'a> {
                 let tx = self.infer(x)?;
                 let ty = self.infer(y)?;
                 let itv = interval::ops::arithmetic::mod_interval(tx.interval(), ty.interval());
-                let t = samp_cast(union_types(tx, ty));
+                let t = union_types(tx, ty);
                 Ok(float_cast(t).promote_interval(itv))
             }
 
             SigMatch::Remainder(x, y) => {
                 let tx = self.infer(x)?;
                 let ty = self.infer(y)?;
-                let t = samp_cast(union_types(tx, ty));
+                let t = union_types(tx, ty);
                 Ok(float_cast(t))
             }
 
@@ -874,8 +875,13 @@ impl<'a> TypeAnnotator<'a> {
     ) -> Result<SigType, TypeError> {
         let tx = self.infer(x)?;
         let itv = f(tx.interval());
-        let t = samp_cast(tx);
-        Ok(float_cast(t).promote_interval(itv))
+        // Pure math functions preserve the variability of their argument:
+        // sin(Konst) → Konst, sin(Block) → Block, sin(Samp) → Samp.
+        // Only the nature changes to Real (via float_cast).
+        // The previous samp_cast was overly conservative — it forced all
+        // transcendental results to Samp, preventing constant-folding of
+        // expressions like sin(SR) into instanceConstants.
+        Ok(float_cast(tx).promote_interval(itv))
     }
 
     fn infer_binop(&self, op: BinOp, tl: SigType, tr: SigType) -> SigType {
