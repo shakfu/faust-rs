@@ -43,6 +43,7 @@
 //! - `codegen` consumes resulting FIR modules.
 //! - `compiler` chooses whether to route requests to this fast-lane.
 
+mod cse;
 mod error;
 mod module;
 mod planner;

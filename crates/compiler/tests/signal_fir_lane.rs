@@ -429,8 +429,17 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
         fast.contains("float fRec") && fast.contains("[2];"),
         "fast lane should lower phasor recursion to a 2-slot float array"
     );
+    // CSE may materialize the shared index expressions `(fIOTA & 1)` and
+    // `((fIOTA - 1) & 1)` into `fTemp*` variables when they are referenced
+    // more than once (e.g. for two phasor recursions).  Accept both inline
+    // and CSE-materialized forms.
+    let has_inline_circ = fast.contains("[(fIOTA & 1)] = (fRec")
+        && fast.contains("[((fIOTA - 1) & 1)] +");
+    let has_cse_circ = fast.contains("fIOTA & 1")
+        && fast.contains("(fIOTA - 1) & 1")
+        && fast.contains("fTemp");
     assert!(
-        fast.contains("[(fIOTA & 1)] = (fRec") && fast.contains("[((fIOTA - 1) & 1)] +"),
+        has_inline_circ || has_cse_circ,
         "fast lane should use circular buffer indexing for recursion write and read"
     );
     assert!(

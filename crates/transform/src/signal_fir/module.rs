@@ -247,6 +247,43 @@ pub fn build_module(
         lower.sample_statements.push(bump_iota);
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // ── Phase 2: CSE Materialization per Bucket ───────────────────���────────
+    // ═════════════════════════════════��═════════════════════════════════════
+    // Deduplicate multi-referenced value sub-expressions within each
+    // execution tier.  Runs after variability placement (Phase 1) has
+    // finalized bucket contents, so reference counts are stable.
+    {
+        use super::cse;
+
+        let rc = cse::count_fir_value_uses(&lower.store, &lower.constants_statements);
+        cse::materialize_shared_values(
+            &mut lower.store,
+            &mut lower.constants_statements,
+            &rc,
+            "fConst",
+            lower.const_counter,
+        );
+
+        let rc = cse::count_fir_value_uses(&lower.store, &lower.control_statements);
+        cse::materialize_shared_values(
+            &mut lower.store,
+            &mut lower.control_statements,
+            &rc,
+            "fSlow",
+            lower.slow_counter,
+        );
+
+        let rc = cse::count_fir_value_uses(&lower.store, &lower.sample_statements);
+        cse::materialize_shared_values(
+            &mut lower.store,
+            &mut lower.sample_statements,
+            &rc,
+            "fTemp",
+            0,
+        );
+    }
+
     let metadata_body = {
         let mut b = FirBuilder::new(&mut lower.store);
         b.block(&[])
