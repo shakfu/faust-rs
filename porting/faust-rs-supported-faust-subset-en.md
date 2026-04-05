@@ -1,6 +1,8 @@
 # Current Faust Source Subset Supported by `faust-rs`
 
-Last updated: 2026-04-03
+Last updated: 2026-04-05
+
+Version: 0.4.0
 
 Status: living document
 
@@ -58,6 +60,15 @@ This snapshot is based on:
   - `crates/codegen/src/backends/interp/serial.rs`
   - `crates/compiler/tests/signal_fir_lane.rs`
   - `porting/journal/2026-04-03.md`
+- FIR runtime optimization and signal-type correctness fixes landed on 2026-04-04–05 and reviewed against:
+  - `crates/sigtype/src/rules.rs`
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/cse.rs`
+  - `crates/fir/src/checker.rs`
+  - `crates/codegen/src/backends/cranelift/mod.rs`
+  - `crates/cranelift-ffi/src/instance.rs`
+  - `porting/journal/2026-04-04.md`
+  - `porting/journal/2026-04-05.md`
 
 The corresponding generated reports are:
 
@@ -384,7 +395,19 @@ Relative to the tracked corpus and the current production-oriented route:
   fallback when no compiler `FS` is present,
 - the full C++ interval algebra is now available in Rust through
   `crates/interval`, and the signal type lattice is fully modeled in
-  `crates/sigtype` with correct parity including `FConst`/`FVar` intervals.
+  `crates/sigtype` with correct parity including `FConst`/`FVar` intervals,
+- signal-type purity is now enforced: `SIGWAVEFORM` correctly carries `Samp`
+  variability (not `Konst`), and pure math functions (`sin`, `cos`, `sqrt`,
+  etc.) preserve argument variability without spurious `samp_cast` promotion,
+- the `instanceConstants` lifecycle contract is now enforced at FIR level
+  (FIR-LC01 diagnostic) and the Cranelift backend compiles `instanceConstants`
+  as a real JIT function, matching the C/C++ backend lifecycle model,
+- the variability-driven FIR placement pass (Phase 1) is now signal-sharing
+  aware, materializing only shared or boundary-crossing nodes into named
+  variables and leaving single-use within-tier intermediates inline — matching
+  the C++ code shape for Block-rate control chains,
+- intra-bucket CSE (Phase 2) further deduplicates shared sub-expressions
+  within each execution tier, reducing redundant evaluation in the sample loop.
 
 ## 6.2 Where C++ is still broader
 
@@ -1049,6 +1072,120 @@ Practically, this means the already-declared subset around:
 
 is now better supported in practice than the older March backend report alone
 would suggest.
+
+### 7.15 April 4–5, 2026: FIR runtime optimizations, signal-type correctness, and CSE
+
+#### Cranelift: JIT-compile `instanceConstants` (2026-04-04)
+
+The Cranelift backend previously replayed `instanceConstants` through a
+Rust-side subset interpreter.  The backend now compiles `instanceConstants`
+as a real JIT function; the `cranelift_dsp` runtime invokes that entry
+directly during instance initialization, aligning the lifecycle model with
+the C/C++ backends and covering the full FIR subset that Cranelift already
+knows how to lower.
+
+#### sigtype: preserve kSamp floor through recursive fixed-point (2026-04-04)
+
+`update_rec_types` in `crates/sigtype/src/rules.rs` was replacing the full
+approximation type for each recursive-group component with the freshly
+inferred body type on every fixed-point iteration, merging only the
+interval.  Variability, computability, and other lattice dimensions were
+discarded.  As a result, a recursion body that ignores its feedback input
+(e.g. `! : 1`) could converge to `Konst`, allowing the variability
+placement pass to hoist projections into `instanceConstants` and break the
+sample-by-sample feedback contract.
+
+Fix: after inferring the fresh body component, promote its variability and
+computability by the old approximation's values before merging the interval,
+matching C++ `joinType` semantics.  The `depends_on_recursive_projection`
+workaround in `signal_fir/module.rs` was removed; `is_recursive_projection`
+is retained as a belt-and-suspenders guard.
+
+#### FIR-LC01 lifecycle-order checker (2026-04-04)
+
+`phasor.dsp` produced wrong output (waveform index counters hoisted into
+`instanceConstants` before `instanceClear` could initialize them).  The FIR
+verifier had no check for this ordering violation.
+
+Three additions to `crates/fir/`:
+
+- `FIR-LC01 | E` diagnostic: detects `LoadVar(kStruct, name)` inside
+  `instanceConstants` for fields that are only stored by `instanceClear`.
+- `check_lifecycle_order` method: locates both bodies, computes the
+  `cleared_only` field set, and emits an `Error`-severity diagnostic per
+  violation.
+- Two regression tests cover the failing and passing patterns.
+
+The diagnostic is `Severity::Error` (not Warning) so it fails compilation
+without `--fir-verify-strict`.
+
+#### fix(sigtype): SIGWAVEFORM must carry Samp variability (2026-04-05)
+
+`SIGWAVEFORM` was typed with `Variability::Konst` via `make_table_type`,
+which correctly describes the static table content.  However, in the Rust
+signal graph after propagation, `SIGWAVEFORM` represents the cycling output
+— each sample yields the next element.  With `Konst` variability, FIR-LC01
+detected lifecycle-order violations for waveform-driven DSPs (`phasor.dsp`,
+`table1.dsp`).
+
+Fix in `crates/sigtype/src/rules.rs`: promote the `SigMatch::Waveform`
+result to `Variability::Samp` in both the empty and non-empty cases, so all
+dependent expressions inherit the correct floor via `max(Samp, ·) = Samp`.
+
+#### fix(transform): skip Phase 1 hoisting for SIGWRTBL (2026-04-05)
+
+`SIGWRTBL` inherits `Konst` variability from `make_table_type`, but
+`lower_wrtbl` returns the write signal's value, which may reference `iWave*`
+cycling counters.  A targeted guard added to the Phase 1 placement check
+ensures `SIGWRTBL` nodes always remain inline (in the sample loop), bypassing
+the variability-based hoist.  A principled sigtype fix (propagating the write
+signal's variability into the result type) is deferred.
+
+#### fix(sigtype): remove spurious samp_cast from pure math type inference (2026-04-05)
+
+`infer_unary_math` applied `samp_cast(tx)` unconditionally, promoting the
+result variability to `Samp` for all transcendental/math operations
+(`sin`, `cos`, `tan`, `sqrt`, `exp`, `log`, `floor`, `ceil`, `rint`, etc.)
+regardless of the argument's variability.  The same bug was present in binary
+math ops (`atan2`, `fmod`, `remainder`).
+
+The C++ Faust source uses `floatCast(t)` — **without** `sampCast` — for all
+pure math primitives: variability is inherited from the argument intact; only
+the nature is promoted to Real.
+
+Fix: replace `samp_cast(tx)` with plain `tx` in `infer_unary_math` and remove
+`samp_cast` from the binary math arms.  This enables constant-at-rate
+expressions such as `sin(ma.SR)` to be correctly hoisted into
+`instanceConstants`.
+
+#### feat(transform): CSE materialization pass — Phase 2 (2026-04-05)
+
+Phase 1 variability-driven placement materialized **every** non-trivial
+Block/Konst signal node into a named variable, regardless of sharing.  For
+`STunedBar.dsp` this created 285 `fSlow` variables where C++ Faust only
+needed 43.
+
+Two complementary improvements landed:
+
+1. **Signal-sharing-aware Phase 1 placement** (`analyze_signal_sharing`):
+   a pre-lowering DAG pass computes per-signal reference counts and
+   variability-boundary flags.  Phase 1 now only materializes a node into a
+   named variable when it is shared (`ref_count ≥ 2`) **or** sits at a
+   variability-transition boundary.  Single-use within-tier intermediate
+   nodes stay inline, producing compact compound expressions matching C++.
+   `STunedBar.dsp`: `float fSlow` reduced from 285 to 43 (exact C++ match).
+
+2. **Intra-bucket CSE materialization pass** (`crates/transform/src/signal_fir/cse.rs`):
+   after variability-driven placement, a bottom-up rewrite detects
+   multi-referenced non-trivial `FirId` value nodes within each execution
+   bucket and materializes them into named temporaries (`DeclareVar` +
+   `LoadVar`).  Declarations are inserted at the point of first use to
+   preserve sequential data dependencies.  Trivial nodes (literals, variable
+   loads) are never materialized.  Naming conventions:
+   `fConst*` / `fSlow*` / `fTemp*` for constants, control, and sample
+   buckets respectively.
+
+All corpus tests continue to pass after both optimizations.
 
 ## 8. Practical Reading Rule
 
