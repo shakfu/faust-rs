@@ -778,6 +778,15 @@ struct SignalToFirLower<'a> {
     scheduled_state_updates: HashSet<SigId>,
     /// Allocated delay lines keyed by carried-signal id.
     delay_lines: HashMap<SigId, DelayLineInfo>,
+    /// Maximum total delay for each recursion output, keyed by
+    /// `(recursion_var_id, projection_index)`.
+    ///
+    /// Populated by `scan_delay_lines` when it detects
+    /// `SIGDELAY(Delay1(Proj(i, SYMREF(var))), N)`.  Consumed by
+    /// `ensure_recursion_array_for_group` to size the recursion array
+    /// large enough to serve the delay directly, eliminating a separate
+    /// `fVec` buffer.
+    rec_group_max_delay: HashMap<(u32, usize), i32>,
     /// Guards against emitting duplicate delay-write stores for shared carried signals.
     scheduled_delay_writes: HashSet<SigId>,
     /// `true` once `fIOTA` has been declared; prevents duplicate declarations.
@@ -856,6 +865,13 @@ struct RecArrayInfo {
     name: String,
     /// Element type (`Int32` for integer recursion, `Float32`/`Float64` otherwise).
     typ: FirType,
+    /// Allocated circular-buffer size in elements (always a power of two).
+    ///
+    /// Defaults to 2 (current + previous sample).  When the recursion output
+    /// is consumed by an explicit `SIGDELAY(Delay1(Proj), N)`, the buffer is
+    /// sized to `pow2limit(N + 1 + 1)` so the delay can be served directly
+    /// from this array instead of a separate `fVec`.
+    size: usize,
 }
 
 /// One extern prototype recovered from a Faust `FFUN(...)` descriptor.
@@ -919,6 +935,7 @@ impl<'a> SignalToFirLower<'a> {
             rec_array_by_group_index: HashMap::new(),
             scheduled_state_updates: HashSet::new(),
             delay_lines: HashMap::new(),
+            rec_group_max_delay: HashMap::new(),
             scheduled_delay_writes: HashSet::new(),
             uses_iota: false,
             recursion_stack: Vec::new(),
@@ -995,9 +1012,17 @@ impl<'a> SignalToFirLower<'a> {
             match self.delay_size_for_amount(amount)? {
                 Some(0) => {}
                 Some(delay) => {
-                    let entry = max_delays.entry(value).or_insert(0);
-                    if delay > *entry {
-                        *entry = delay;
+                    // Check for the recursion-feedback-through-delay1 pattern:
+                    //   SIGDELAY(Delay1(Proj(i, SYMREF(var))), N)
+                    // When matched, record the total delay (N + 1) on the
+                    // recursion group so the recursion array can be sized to
+                    // serve this delay directly, and skip the fVec allocation.
+                    let merged = self.try_record_rec_delay(value, delay);
+                    if !merged {
+                        let entry = max_delays.entry(value).or_insert(0);
+                        if delay > *entry {
+                            *entry = delay;
+                        }
                     }
                 }
                 None => {
@@ -1048,6 +1073,34 @@ impl<'a> SignalToFirLower<'a> {
         } else {
             self.scan_delay_lines(child, seen, max_delays)
         }
+    }
+
+    /// Detects the recursion-feedback-through-delay1 pattern and records the
+    /// total delay on `rec_group_max_delay` so the recursion array can be sized
+    /// to serve the delay directly.
+    ///
+    /// Pattern: `SIGDELAY(value = Delay1(Proj(i, SYMREF(var))), N)`
+    /// Total delay on the Proj = N + 1 (the explicit delay plus the Delay1).
+    ///
+    /// Returns `true` if the pattern was matched and the delay was recorded
+    /// (the caller should skip fVec allocation for this carried signal).
+    fn try_record_rec_delay(&mut self, value: SigId, delay: i32) -> bool {
+        let SigMatch::Delay1(inner) = match_sig(self.arena, value) else {
+            return false;
+        };
+        let SigMatch::Proj(proj_index, group) = match_sig(self.arena, inner) else {
+            return false;
+        };
+        let Some(var) = match_sym_ref(self.arena, group) else {
+            return false;
+        };
+        let total = delay + 1; // N (explicit) + 1 (Delay1)
+        let key = (var.as_u32(), proj_index as usize);
+        let entry = self.rec_group_max_delay.entry(key).or_insert(0);
+        if total > *entry {
+            *entry = total;
+        }
+        true
     }
 
     /// Returns a clone of the internal real computation type.
@@ -1604,6 +1657,40 @@ impl<'a> SignalToFirLower<'a> {
         amount: SigId,
         delay: i32,
     ) -> Result<FirId, SignalFirError> {
+        // ── Merged recursion delay ──
+        //
+        // When `value` is `Delay1(Proj(i, active_group))`, the scan pass has
+        // already sized the recursion array to hold the full delay chain.
+        // Read directly from the recursion array at offset `delay + 1`
+        // (N for the explicit delay, +1 for the Delay1), eliminating the
+        // separate fVec buffer and per-sample copy.
+        if let SigMatch::Delay1(inner) = match_sig(self.arena, value) {
+            if let Some(rec_info) = self.recursion_feedback_info(inner)? {
+                if rec_info.size > 2 {
+                    // The recursion array was upsized — the merge is active.
+                    // Use the runtime amount expression (which may be variable,
+                    // e.g. slider-driven), not the constant sizing bound.
+                    // Total offset = amount + 1 (the +1 accounts for Delay1).
+                    self.ensure_iota_state();
+                    let amount_value = self.lower_signal(amount)?;
+                    let one = self.lower_int32_const(1);
+                    let total_offset = {
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.binop(FirBinOp::Add, amount_value, one, FirType::Int32)
+                    };
+                    let read_index = self.delayed_iota_index(total_offset, rec_info.size);
+                    let read_ty = self.signal_fir_type(node)?;
+                    let mut b = FirBuilder::new(&mut self.store);
+                    return Ok(b.load_table(
+                        rec_info.name,
+                        AccessType::Struct,
+                        read_index,
+                        read_ty,
+                    ));
+                }
+            }
+        }
+
         let line = self.ensure_delay_line_decl(value, delay)?;
         let current = self.lower_signal(value)?;
         if self.scheduled_delay_writes.insert(value) {
@@ -1654,10 +1741,10 @@ impl<'a> SignalToFirLower<'a> {
                 rec_info.typ, out_ty,
                 "prepared recursion feedback type should match delay1 output type"
             );
-            // Read previous value from recursion array: state[(fIOTA - 1) & 1]
+            // Read previous value from recursion array: state[(fIOTA - 1) & (size-1)]
             self.ensure_iota_state();
             let one = self.lower_int32_const(1);
-            let prev_index = self.delayed_iota_index(one, 2);
+            let prev_index = self.delayed_iota_index(one, rec_info.size);
             let mut b = FirBuilder::new(&mut self.store);
             return Ok(b.load_table(
                 rec_info.name,
@@ -1769,7 +1856,7 @@ impl<'a> SignalToFirLower<'a> {
         let mut b = FirBuilder::new(&mut self.store);
         let dec = b.declare_var(name.clone(), array_ty, AccessType::Struct, None);
         self.struct_declarations.push(dec);
-        self.register_clear_recursion_array(name.clone(), init);
+        self.register_clear_recursion_array(name.clone(), init, 2);
         self.state_name_by_node.insert(node, name.clone());
         name
     }
@@ -1937,14 +2024,14 @@ impl<'a> SignalToFirLower<'a> {
     /// Emits an `instanceClear` zeroing loop for a two-slot recursion array.
     ///
     /// Idempotent: subsequent calls for the same `name` are silently ignored.
-    fn register_clear_recursion_array(&mut self, name: String, init: FirId) {
+    fn register_clear_recursion_array(&mut self, name: String, init: FirId, size: usize) {
         if !self.clear_init_seen.insert(name.clone()) {
             return;
         }
         let loop_var = self.fresh_loop_var("lRec");
         let upper = {
             let mut b = FirBuilder::new(&mut self.store);
-            b.int32(2)
+            b.int32(i32::try_from(size).unwrap_or(i32::MAX))
         };
         let body = {
             let index = {
@@ -3296,7 +3383,7 @@ impl<'a> SignalToFirLower<'a> {
             self.ensure_iota_state();
             let current_index = {
                 let iota = self.current_iota_index();
-                self.masked_delay_index(iota, 2)
+                self.masked_delay_index(iota, info.size)
             };
             let mut b = FirBuilder::new(&mut self.store);
             return Ok(b.load_table(info.name, AccessType::Struct, current_index, real_ty));
@@ -3366,11 +3453,11 @@ impl<'a> SignalToFirLower<'a> {
                 // (keyed by the delay node), so there is no aliasing and no risk of a
                 // double-write to the same slot.
                 let info = &group_arrays[i];
-                // Write body value to circular buffer: state[fIOTA & 1] = rhs
+                // Write body value to circular buffer: state[fIOTA & mask] = rhs
                 self.ensure_iota_state();
                 let write_index = {
                     let iota = self.current_iota_index();
-                    self.masked_delay_index(iota, 2)
+                    self.masked_delay_index(iota, info.size)
                 };
                 let current_store = {
                     let mut b = FirBuilder::new(&mut self.store);
@@ -3390,7 +3477,7 @@ impl<'a> SignalToFirLower<'a> {
         self.ensure_iota_state();
         let current_index = {
             let iota = self.current_iota_index();
-            self.masked_delay_index(iota, 2)
+            self.masked_delay_index(iota, info.size)
         };
         let out = {
             let mut b = FirBuilder::new(&mut self.store);
@@ -3412,8 +3499,12 @@ impl<'a> SignalToFirLower<'a> {
         Ok(out)
     }
 
-    /// Declares a two-slot `[typ; 2]` recursion array for output slot `index` of
+    /// Declares a circular-buffer recursion array for output slot `index` of
     /// recursion `group`, idempotent.
+    ///
+    /// The buffer is sized to `pow2limit(max_delay + 1)` when the scan pass
+    /// recorded a merged delay for this group output in `rec_group_max_delay`,
+    /// or to 2 (current + previous sample) otherwise.
     ///
     /// Uses a `(group_id, index)` key — separate from the `state_name_by_node`
     /// map used by `ensure_state_slot` — so that delay-state slots created
@@ -3440,12 +3531,25 @@ impl<'a> SignalToFirLower<'a> {
         } else {
             format!("{prefix}{}_{}", group.as_u32(), index)
         };
-        let array_ty = FirType::Array(Box::new(typ.clone()), 2);
+        // Look up whether the scan pass recorded a merged delay for this
+        // recursion output.  The map is keyed by (var_id, proj_index) where
+        // var is the symbolic variable bound by SYMREC.
+        let size = match match_sym_rec(self.arena, group) {
+            Some((var, _body)) => {
+                let delay_key = (var.as_u32(), index);
+                match self.rec_group_max_delay.get(&delay_key) {
+                    Some(&total_delay) => self.pow2limit_for_delay(total_delay)?,
+                    None => 2,
+                }
+            }
+            None => 2,
+        };
+        let array_ty = FirType::Array(Box::new(typ.clone()), size);
         let mut b = FirBuilder::new(&mut self.store);
         let decl = b.declare_var(name.clone(), array_ty, AccessType::Struct, None);
         self.struct_declarations.push(decl);
-        self.register_clear_recursion_array(name.clone(), init);
-        let info = RecArrayInfo { name, typ };
+        self.register_clear_recursion_array(name.clone(), init, size);
+        let info = RecArrayInfo { name, typ, size };
         self.rec_array_by_group_index.insert(key, info.clone());
         Ok(info)
     }
