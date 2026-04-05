@@ -68,6 +68,78 @@ use super::SignalFirOutput;
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::planner::SignalFirPlan;
 
+// ─── Signal-level reference counting ────────────────────────────────────────
+
+/// Pre-analysis of the signal DAG for Phase 1 placement decisions.
+///
+/// Returns:
+/// - `ref_counts`: how many times each `SigId` appears as a child. Nodes
+///   with count ≥ 2 are shared and benefit from named variable materialization.
+/// - `has_higher_parent`: set of `SigId`s that have at least one parent with
+///   strictly higher variability. These nodes sit at a variability boundary
+///   and must be materialized even if single-use, to ensure they execute in
+///   the correct bucket.
+fn analyze_signal_sharing(
+    arena: &TreeArena,
+    roots: &[SigId],
+    sig_types: &HashMap<SigId, SigType>,
+) -> (HashMap<SigId, usize>, HashSet<SigId>) {
+    let mut ref_counts: HashMap<SigId, usize> = HashMap::new();
+    let mut has_higher_parent: HashSet<SigId> = HashSet::new();
+    let mut visited: HashSet<SigId> = HashSet::new();
+    // Roots are consumed by the output store (Samp context).
+    let root_var = Some(Variability::Samp);
+    for &root in roots {
+        analyze_sig_rec(
+            arena,
+            root,
+            root_var,
+            sig_types,
+            &mut ref_counts,
+            &mut has_higher_parent,
+            &mut visited,
+        );
+    }
+    (ref_counts, has_higher_parent)
+}
+
+fn analyze_sig_rec(
+    arena: &TreeArena,
+    sig: SigId,
+    parent_var: Option<Variability>,
+    sig_types: &HashMap<SigId, SigType>,
+    ref_counts: &mut HashMap<SigId, usize>,
+    has_higher_parent: &mut HashSet<SigId>,
+    visited: &mut HashSet<SigId>,
+) {
+    *ref_counts.entry(sig).or_insert(0) += 1;
+
+    // Check variability boundary: parent variability > this node's variability.
+    let my_var = sig_types.get(&sig).map(|t| t.variability());
+    if let (Some(pv), Some(mv)) = (parent_var, my_var)
+        && pv > mv
+    {
+        has_higher_parent.insert(sig);
+    }
+
+    if !visited.insert(sig) {
+        return; // already descended into children
+    }
+    if let Some(node) = arena.node(sig) {
+        for &child_tid in node.children.as_slice() {
+            analyze_sig_rec(
+                arena,
+                child_tid,
+                my_var,
+                sig_types,
+                ref_counts,
+                has_higher_parent,
+                visited,
+            );
+        }
+    }
+}
+
 /// Fixed-size circular delay line resource used by fast-lane `SIGDELAY`.
 ///
 /// Source provenance (C++):
@@ -180,7 +252,17 @@ pub fn build_module(
     sig_types: &HashMap<SigId, SigType>,
     real_ty: FirType,
 ) -> Result<SignalFirOutput, SignalFirError> {
-    let mut lower = SignalToFirLower::new(arena, ui, types, sig_types, plan.num_inputs, real_ty);
+    let (sig_ref_counts, sig_at_boundary) = analyze_signal_sharing(arena, signals, sig_types);
+    let mut lower = SignalToFirLower::new(
+        arena,
+        ui,
+        types,
+        sig_types,
+        plan.num_inputs,
+        real_ty,
+        sig_ref_counts,
+        sig_at_boundary,
+    );
     lower.ensure_sample_rate_var();
     lower.prepare_delay_lines(signals)?;
     let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
@@ -747,6 +829,16 @@ struct SignalToFirLower<'a> {
     /// Incremented each time [`materialize_in_bucket`] hoists a
     /// [`Variability::Block`] expression into [`Self::control_statements`].
     slow_counter: u32,
+    /// Signal-level reference counts: how many parent nodes reference each `SigId`.
+    ///
+    /// Used by Phase 1 variability-driven placement to gate materialization:
+    /// only nodes with `ref_count >= 2` are hoisted into a named variable.
+    /// Single-use nodes stay inline, avoiding unnecessary temporaries.
+    sig_ref_counts: HashMap<SigId, usize>,
+    /// Signal nodes that sit at a variability boundary (at least one parent has
+    /// strictly higher variability).  These must be materialized even if
+    /// single-use, to ensure they execute in the correct bucket.
+    sig_at_boundary: HashSet<SigId>,
 }
 
 /// Two-slot carrier for one output of a recursive group (`SIGPROJ(i, SYMREC(…))`).
@@ -794,6 +886,7 @@ fn match_ffunction_node(arena: &TreeArena, id: SigId) -> Option<(SigId, SigId, S
 
 impl<'a> SignalToFirLower<'a> {
     /// Creates a fresh lowering state for one [`build_module`] call.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         arena: &'a TreeArena,
         ui_program: &'a UiProgram,
@@ -801,6 +894,8 @@ impl<'a> SignalToFirLower<'a> {
         sig_types: &'a HashMap<SigId, SigType>,
         num_inputs: usize,
         real_ty: FirType,
+        sig_ref_counts: HashMap<SigId, usize>,
+        sig_at_boundary: HashSet<SigId>,
     ) -> Self {
         Self {
             arena,
@@ -845,6 +940,8 @@ impl<'a> SignalToFirLower<'a> {
             next_loop_var_id: 0,
             const_counter: 0,
             slow_counter: 0,
+            sig_ref_counts,
+            sig_at_boundary,
         }
     }
 
@@ -1209,6 +1306,21 @@ impl<'a> SignalToFirLower<'a> {
         //   Block → control_statements   (compute preamble, once per call)
         //   Samp  → stays inline in the sample loop (no action needed)
         //
+        // To avoid creating unnecessary temporaries for intermediate
+        // sub-expressions, only nodes referenced ≥ 2 times in the signal
+        // DAG are materialized into named variables (`fConst*`/`fSlow*`).
+        // Single-use nodes at the same variability tier stay inline inside
+        // their parent's expression.  This matches C++ Faust behavior
+        // where compound expressions like `fConst6 * cos(fConst7 * fSlow2)`
+        // are emitted as one variable instead of three.
+        //
+        // However, at a **variability boundary** (Block→Samp or
+        // Konst→Block/Samp), even single-use nodes must be materialized
+        // to ensure they execute in the correct bucket.  Without this,
+        // a single-use Block-rate sub-expression of a Samp parent would
+        // be inlined into the per-sample loop body, re-evaluated every
+        // sample.
+        //
         // Guards:
         // - Trivial nodes (literals, loads) are never hoisted — they are
         //   free to duplicate and hoisting them wastes a variable name.
@@ -1221,9 +1333,12 @@ impl<'a> SignalToFirLower<'a> {
         //   reference Samp-rate state (e.g. `iWave*` cycling counters).
         //   Hoisting would place `LoadVar("iWave*")` inside
         //   `instanceConstants`, before `instanceClear` has initialized it.
+        let sig_shared = self.sig_ref_counts.get(&sig).copied().unwrap_or(0) >= 2;
+        let at_boundary = self.sig_at_boundary.contains(&sig);
         let lowered = if !is_trivial_fir(&self.store, lowered)
             && !self.is_recursive_projection(sig)
             && !matches!(match_sig(self.arena, sig), SigMatch::WrTbl(..))
+            && (sig_shared || at_boundary)
         {
             match self.variability_of(sig) {
                 Some(Variability::Konst) => self.materialize_in_bucket(lowered, Bucket::Constants),
