@@ -1165,7 +1165,9 @@ impl ComputeSubsetLowerer<'_> {
         function: &mut Function,
     ) -> Result<(), WasmBackendError> {
         let local = self.local(&var)?.clone();
-        self.lower_expr(init, function)?;
+        // init is a DeclareVar(kLoop) per FIR contract; extract its value.
+        let init_val = if let FirMatch::DeclareVar { init: Some(v), .. } = match_fir(self.store, init) { v } else { init };
+        self.lower_expr(init_val, function)?;
         function.instruction(&Instruction::LocalSet(local.index));
         function.instruction(&Instruction::Block(BlockType::Empty));
         function.instruction(&Instruction::Loop(BlockType::Empty));

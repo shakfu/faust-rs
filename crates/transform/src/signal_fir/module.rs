@@ -1761,7 +1761,12 @@ impl<'a> SignalToFirLower<'a> {
     ) -> FirId {
         let loop_var = self.fresh_loop_var("lShift");
         // Loop runs from 0 to size-2 (exclusive end = size-1).
-        let init = self.lower_int32_const(0);
+        // ForLoop init must be DeclareVar(kLoop) per FIR-L01.
+        let init = {
+            let zero = self.lower_int32_const(0);
+            let mut b = FirBuilder::new(&mut self.store);
+            b.declare_var(loop_var.clone(), FirType::Int32, AccessType::Loop, Some(zero))
+        };
         let end = {
             let mut b = FirBuilder::new(&mut self.store);
             b.int32(i32::try_from(size.saturating_sub(1)).unwrap_or(i32::MAX))
