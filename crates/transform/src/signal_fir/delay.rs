@@ -1,9 +1,17 @@
-//! Circular delay-line sizing and geometry for the FIR fast-lane.
+//! Circular delay-line sizing, geometry, and state management for the FIR fast-lane.
 //!
 //! Faust's `@(n)` operator maps to a **circular ring buffer** of power-of-two
-//! size in the generated C++/FIR output.  This module provides the pure
-//! *analysis layer* for that model: deciding how large a buffer needs to be
-//! and resolving the delay amount from the signal tree.
+//! size in the generated C++/FIR output.  This module provides:
+//!
+//! 1. The pure *sizing/analysis layer*: deciding how large a buffer needs to be
+//!    and resolving the delay amount from the signal tree.
+//! 2. The [`DelayManager`] component: owns all delay-exclusive state (allocated
+//!    lines, recursion-merged delays, write-scheduling dedup) and provides the
+//!    scan and allocation entry points.
+//! 3. [`DelayFirCtx`]: a borrow bundle assembled from disjoint fields of
+//!    `SignalToFirLower` and passed to `DelayManager` methods that emit FIR nodes.
+//! 4. [`DelayLineModel`] + [`CircularPow2Model`]: buffer-geometry abstraction
+//!    enabling future non-power-of-two implementations.
 //!
 //! # Circular buffer model
 //!
@@ -26,38 +34,45 @@
 //! When the pattern `SIGDELAY(Delay1(Proj(i, SYMREF(v))), N)` appears, the
 //! recursion array for output `i` of variable `v` is sized to hold the full
 //! chain (`N + 1` samples) so no separate `fVec` is needed.  The scan pass
-//! in `module.rs` calls [`delay_size_for_amount`] and records the merged size
-//! on `rec_group_max_delay`; [`ensure_recursion_array_for_group`] consumes it.
+//! ([`DelayManager::scan_signals`]) calls [`delay_size_for_amount`] and records
+//! the merged size on `rec_group_max_delay`; `ensure_recursion_array_for_group`
+//! in `module.rs` consumes it via [`DelayManager::rec_max_delay`].
 //!
 //! # Scope of this module
 //!
-//! This module covers **sizing decisions** — pure functions with no FIR
-//! side-effects:
+//! | Item | Kind | Purpose |
+//! |------|------|---------|
+//! | [`pow2limit_for_delay`] | free fn | `next_power_of_two(N + 1)` with overflow checks |
+//! | [`constant_delay_amount`] | free fn | Extract a literal `SIGINT` delay amount |
+//! | [`variable_delay_max_bound`] | free fn | Derive a bound from interval analysis |
+//! | [`min_const_upper_bound`] | free fn | Structural fallback: `SIGMIN(SigInt(n), _)` |
+//! | [`delay_size_for_amount`] | free fn | Unified resolver (tries all three above) |
+//! | [`DelayLineInfo`] | struct | Metadata for one allocated ring buffer |
+//! | [`DelayManager`] | struct | Owns delay-exclusive state; scan + alloc methods |
+//! | [`DelayFirCtx`] | struct | Borrow bundle for FIR-emitting methods |
+//! | [`DelayLineModel`] | trait | Buffer geometry abstraction |
+//! | [`CircularPow2Model`] | struct | Current power-of-two implementation |
 //!
-//! | Function | Purpose |
-//! |----------|---------|
-//! | [`pow2limit_for_delay`] | `next_power_of_two(N + 1)` with overflow checks |
-//! | [`constant_delay_amount`] | Extract a literal `SIGINT` delay amount |
-//! | [`variable_delay_max_bound`] | Derive a bound from interval analysis |
-//! | [`min_const_upper_bound`] | Structural fallback: `SIGMIN(SigInt(n), _)` |
-//! | [`delay_size_for_amount`] | Unified resolver (tries all three above) |
-//!
-//! The complementary **FIR materialization** layer — allocating struct arrays,
-//! emitting `fIOTA` loads/stores, building read/write index expressions —
-//! lives in `module.rs` as `impl SignalToFirLower` methods, because those
-//! methods need mutable access to the lowering engine's statement lists and
-//! FIR node store.
+//! The complementary **FIR materialization** layer for index expressions
+//! (`current_iota_index`, `delayed_iota_index`, `masked_delay_index`,
+//! `bump_iota`) and state-coupled methods (`lower_fixed_delay`,
+//! `lower_delay_state`) lives in `module.rs` as `impl SignalToFirLower`
+//! methods, because those methods need mutable access to the lowering engine's
+//! full state including the recursive `lower_signal` dispatcher.
 //!
 //! Source provenance (C++):
 //! - `compiler/transform/signalFIRCompiler.hh` — `DelayLine`, `allocateDelayLineAux`
 //! - `compiler/transform/signalFIRCompiler.cpp` — `compileSigDelay`, `writeReadDelay`,
 //!   `checkDelayInterval`
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirStore, FirType};
 use signals::{SigId, SigMatch, match_sig};
 use sigtype::{SigType, check_delay_interval};
-use tlib::TreeArena;
+use tlib::{TreeArena, match_sym_ref};
+
+use crate::signal_prepare::SimpleSigType;
 
 use super::error::{SignalFirError, SignalFirErrorCode};
 
@@ -67,8 +82,8 @@ use super::error::{SignalFirError, SignalFirErrorCode};
 ///
 /// Stores the metadata for one allocated DSP-struct array that implements a
 /// ring buffer.  The array is named `fVec<id>` (real) or `iVec<id>` (integer),
-/// declared once during [`prepare_delay_lines`](super::module) pre-scan, and
-/// zeroed in `instanceClear`.
+/// declared once during [`DelayManager::scan_signals`] / `prepare_delay_lines`
+/// pre-scan, and zeroed in `instanceClear`.
 ///
 /// Source provenance (C++):
 /// - `compiler/transform/signalFIRCompiler.hh` (`DelayLine`, `allocateDelayLineAux`)
@@ -229,4 +244,492 @@ pub(super) fn delay_size_for_amount(
         return Ok(Some(b));
     }
     Ok(min_const_upper_bound(arena, amount))
+}
+
+// ─── DelayLineModel ───────────────────────────────────────────────────────────
+
+/// Abstraction over the buffer-geometry strategy used for circular delay lines.
+///
+/// The default implementation is [`CircularPow2Model`] (power-of-two size,
+/// bitwise-AND masking), matching C++ Faust's `signalFIRCompiler`.  Alternative
+/// models (exact-size modulo, segmented for very long delays) can be added by
+/// implementing this trait.
+///
+/// All `FirId` arguments and return values are nodes in the shared [`FirStore`];
+/// callers must ensure they pass the same store that was used when building those
+/// nodes.
+#[allow(dead_code)]
+pub(super) trait DelayLineModel {
+    /// Minimum buffer size in elements for a maximum delay of `max_delay` samples.
+    fn buffer_size(&self, max_delay: i32) -> Result<usize, SignalFirError>;
+
+    /// FIR expression: index of the current write slot.
+    ///
+    /// `iota` is a loaded `FirId` for `fIOTA`.
+    fn write_index(&self, store: &mut FirStore, iota: FirId, size: usize) -> FirId;
+
+    /// FIR expression: index of the slot that is `amount` samples behind the
+    /// write pointer.
+    fn read_index(
+        &self,
+        store: &mut FirStore,
+        iota: FirId,
+        amount: FirId,
+        size: usize,
+    ) -> FirId;
+
+    /// FIR expression: `fIOTA + 1` (advance write pointer by one step).
+    fn bump(&self, store: &mut FirStore, iota: FirId) -> FirId;
+}
+
+// ─── CircularPow2Model ────────────────────────────────────────────────────────
+
+/// Power-of-two circular buffer geometry.
+///
+/// Buffer size = `next_power_of_two(max_delay + 1)`.
+/// Write index = `fIOTA & (size - 1)`.
+/// Read index  = `(fIOTA - amount) & (size - 1)`.
+/// Bump        = `fIOTA + 1`.
+///
+/// This is the only model currently implemented; it matches C++ Faust's
+/// `signalFIRCompiler::writeReadDelay` exactly.
+pub(super) struct CircularPow2Model;
+
+impl DelayLineModel for CircularPow2Model {
+    fn buffer_size(&self, max_delay: i32) -> Result<usize, SignalFirError> {
+        pow2limit_for_delay(max_delay)
+    }
+
+    fn write_index(&self, store: &mut FirStore, iota: FirId, size: usize) -> FirId {
+        let mask =
+            FirBuilder::new(store).int32(i32::try_from(size.saturating_sub(1)).unwrap_or(i32::MAX));
+        FirBuilder::new(store).binop(FirBinOp::And, iota, mask, FirType::Int32)
+    }
+
+    fn read_index(
+        &self,
+        store: &mut FirStore,
+        iota: FirId,
+        amount: FirId,
+        size: usize,
+    ) -> FirId {
+        let raw = FirBuilder::new(store).binop(FirBinOp::Sub, iota, amount, FirType::Int32);
+        let mask =
+            FirBuilder::new(store).int32(i32::try_from(size.saturating_sub(1)).unwrap_or(i32::MAX));
+        FirBuilder::new(store).binop(FirBinOp::And, raw, mask, FirType::Int32)
+    }
+
+    fn bump(&self, store: &mut FirStore, iota: FirId) -> FirId {
+        let one = FirBuilder::new(store).int32(1);
+        FirBuilder::new(store).binop(FirBinOp::Add, iota, one, FirType::Int32)
+    }
+}
+
+// ─── DelayFirCtx ─────────────────────────────────────────────────────────────
+
+/// Borrowed context bundle for delay-line FIR emission.
+///
+/// Assembled from disjoint fields of `SignalToFirLower` using Rust's field-level
+/// split-borrow facility.  Because the `delay: DelayManager` field of
+/// `SignalToFirLower` is NOT included here, callers can hold both a
+/// `&mut DelayManager` and a `&mut DelayFirCtx` simultaneously.
+///
+/// # Construction
+///
+/// Construct via an explicit struct literal at each call site in `module.rs`:
+///
+/// ```rust,ignore
+/// let mut ctx = DelayFirCtx {
+///     store: &mut self.store,
+///     real_ty: self.real_ty.clone(),
+///     types: self.types,
+///     struct_declarations: &mut self.struct_declarations,
+///     clear_statements: &mut self.clear_statements,
+///     clear_init_seen: &mut self.clear_init_seen,
+///     next_loop_var_id: &mut self.next_loop_var_id,
+///     uses_iota: &mut self.uses_iota,
+/// };
+/// self.delay.ensure_delay_line(carried, delay, &mut ctx)?;
+/// ```
+///
+/// **Do not** construct via a `&mut self` method call — that would borrow all of
+/// `self` and prevent the simultaneous borrow of `self.delay`.
+pub(super) struct DelayFirCtx<'a> {
+    pub(super) store: &'a mut FirStore,
+    pub(super) real_ty: FirType,
+    pub(super) types: &'a HashMap<SigId, SimpleSigType>,
+    pub(super) struct_declarations: &'a mut Vec<FirId>,
+    pub(super) clear_statements: &'a mut Vec<FirId>,
+    pub(super) clear_init_seen: &'a mut HashSet<String>,
+    pub(super) next_loop_var_id: &'a mut usize,
+    pub(super) uses_iota: &'a mut bool,
+}
+
+impl<'a> DelayFirCtx<'a> {
+    /// Returns the FIR element type for a delay-line carrier signal.
+    pub(super) fn signal_elem_type(&self, carried: SigId) -> Result<FirType, SignalFirError> {
+        match self.types.get(&carried) {
+            Some(SimpleSigType::Int) => Ok(FirType::Int32),
+            Some(SimpleSigType::Real) => Ok(self.real_ty.clone()),
+            Some(SimpleSigType::Sound) => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "signal {} cannot use a soundfile handle as delay-line element type",
+                    carried.as_u32()
+                ),
+            )),
+            None => Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("missing prepared type for signal {}", carried.as_u32()),
+            )),
+        }
+    }
+
+    /// Declares the `fIOTA` circular-buffer position counter, idempotent.
+    ///
+    /// Sets `*uses_iota = true`, emits the struct declaration, and registers a
+    /// `instanceClear` assignment `fIOTA = 0`.
+    pub(super) fn ensure_iota(&mut self) {
+        if *self.uses_iota {
+            return;
+        }
+        *self.uses_iota = true;
+        let zero = {
+            let mut b = FirBuilder::new(self.store);
+            b.int32(0)
+        };
+        let decl = {
+            let mut b = FirBuilder::new(self.store);
+            b.declare_var("fIOTA", FirType::Int32, AccessType::Struct, None)
+        };
+        self.struct_declarations.push(decl);
+        if self.clear_init_seen.insert("fIOTA".to_owned()) {
+            let mut b = FirBuilder::new(self.store);
+            self.clear_statements
+                .push(b.store_var("fIOTA", AccessType::Struct, zero));
+        }
+    }
+
+    /// Generates a fresh loop-variable name using the shared monotonic counter.
+    fn fresh_loop_var(&mut self, prefix: &str) -> String {
+        let name = format!("{prefix}{}", *self.next_loop_var_id);
+        *self.next_loop_var_id += 1;
+        name
+    }
+
+    /// Emits an `instanceClear` zeroing loop for a delay-line array, idempotent.
+    ///
+    /// Uses `clear_init_seen` for deduplication.  The element zero value is
+    /// derived from `sig`'s `SimpleSigType`: `Int32` → `0i32`, `Real` → `0.0`.
+    pub(super) fn register_delay_clear(
+        &mut self,
+        name: String,
+        size: usize,
+        sig: SigId,
+    ) -> Result<(), SignalFirError> {
+        if !self.clear_init_seen.insert(name.clone()) {
+            return Ok(());
+        }
+        let loop_var = self.fresh_loop_var("lDelay");
+        let upper = {
+            let mut b = FirBuilder::new(self.store);
+            b.int32(i32::try_from(size).map_err(|_| {
+                SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!("delay line size conversion overflow: {size}"),
+                )
+            })?)
+        };
+        let zero = match self.types.get(&sig) {
+            Some(SimpleSigType::Int) => {
+                let mut b = FirBuilder::new(self.store);
+                b.int32(0)
+            }
+            Some(SimpleSigType::Real) => {
+                let mut b = FirBuilder::new(self.store);
+                match self.real_ty {
+                    FirType::Float64 => b.float64(0.0),
+                    _ => b.float32(0.0),
+                }
+            }
+            _ => {
+                return Err(SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!(
+                        "cannot zero-init delay-line for signal {}",
+                        sig.as_u32()
+                    ),
+                ));
+            }
+        };
+        let body = {
+            let index = {
+                let mut b = FirBuilder::new(self.store);
+                b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+            };
+            let store_node = {
+                let mut b = FirBuilder::new(self.store);
+                b.store_table(name, AccessType::Struct, index, zero)
+            };
+            let mut b = FirBuilder::new(self.store);
+            b.block(&[store_node])
+        };
+        let mut b = FirBuilder::new(self.store);
+        self.clear_statements
+            .push(b.simple_for_loop(loop_var, upper, body, false));
+        Ok(())
+    }
+}
+
+// ─── DelayManager ─────────────────────────────────────────────────────────────
+
+/// Owns all delay-line exclusive state and provides scan + allocation entry points.
+///
+/// Three fields that were previously scattered across `SignalToFirLower` are
+/// collected here:
+///
+/// | Field | Type | Role |
+/// |-------|------|------|
+/// | `delay_lines` | `HashMap<SigId, DelayLineInfo>` | Allocated ring buffers, keyed by carried signal |
+/// | `rec_group_max_delay` | `HashMap<(u32, usize), i32>` | Max merged delay per recursion output |
+/// | `scheduled_delay_writes` | `HashSet<SigId>` | Dedup guard for per-sample delay writes |
+///
+/// # Scan / allocation flow
+///
+/// 1. `SignalToFirLower::prepare_delay_lines` calls [`Self::scan_signals`], which
+///    returns a `max_delays` map of carried signals → their maximum observed delay.
+/// 2. `prepare_delay_lines` then calls `ensure_delay_line_decl` for each entry,
+///    which in turn calls [`Self::ensure_delay_line`] with a [`DelayFirCtx`].
+/// 3. During lowering, `lower_fixed_delay` calls [`Self::schedule_delay_write`]
+///    to gate per-sample write emission (exactly once per carried signal).
+/// 4. `ensure_recursion_array_for_group` calls [`Self::rec_max_delay`] to size
+///    recursion arrays that serve as delay buffers.
+pub(super) struct DelayManager {
+    /// Allocated ring buffers, keyed by carried-signal id.
+    delay_lines: HashMap<SigId, DelayLineInfo>,
+    /// Maximum total delay for each recursion output that uses the merged pattern
+    /// `SIGDELAY(Delay1(Proj(i, SYMREF(var))), N)`.
+    rec_group_max_delay: HashMap<(u32, usize), i32>,
+    /// Dedup guard: ensures the delay-write store for a given carried signal is
+    /// emitted at most once per sample, even when the same signal is used by
+    /// multiple `SIGDELAY` reads.
+    scheduled_delay_writes: HashSet<SigId>,
+}
+
+impl DelayManager {
+    /// Creates a fresh `DelayManager` for one module compilation.
+    pub(super) fn new() -> Self {
+        Self {
+            delay_lines: HashMap::new(),
+            rec_group_max_delay: HashMap::new(),
+            scheduled_delay_writes: HashSet::new(),
+        }
+    }
+
+    // ── Scan pass ────────────────────────────────────────────────────────────
+
+    /// Pre-scans `signals` to collect the maximum delay per carried signal and
+    /// record recursion-feedback-through-delay1 merge patterns.
+    ///
+    /// Returns a map `carried_signal → max_delay` for all `SIGDELAY` nodes found
+    /// in the forest.  Entries where the pattern was merged into a recursion array
+    /// are NOT included (the recursion array handles them via [`Self::rec_max_delay`]).
+    ///
+    /// This method has no FIR side-effects — it only reads `arena` and `sig_types`
+    /// and writes to `self.rec_group_max_delay`.
+    pub(super) fn scan_signals(
+        &mut self,
+        arena: &TreeArena,
+        sig_types: &HashMap<SigId, SigType>,
+        signals: &[SigId],
+    ) -> Result<HashMap<SigId, i32>, SignalFirError> {
+        let mut max_delays: HashMap<SigId, i32> = HashMap::new();
+        let mut seen: HashSet<SigId> = HashSet::new();
+        for sig in signals {
+            self.scan_node(*sig, arena, sig_types, &mut seen, &mut max_delays)?;
+        }
+        Ok(max_delays)
+    }
+
+    fn scan_node(
+        &mut self,
+        sig: SigId,
+        arena: &TreeArena,
+        sig_types: &HashMap<SigId, SigType>,
+        seen: &mut HashSet<SigId>,
+        max_delays: &mut HashMap<SigId, i32>,
+    ) -> Result<(), SignalFirError> {
+        if !seen.insert(sig) {
+            return Ok(());
+        }
+        if let SigMatch::Delay(value, amount) = match_sig(arena, sig) {
+            match delay_size_for_amount(arena, sig_types, amount)? {
+                Some(0) => {}
+                Some(delay) => {
+                    let merged = self.try_record_rec_delay(arena, value, delay);
+                    if !merged {
+                        let entry = max_delays.entry(value).or_insert(0);
+                        if delay > *entry {
+                            *entry = delay;
+                        }
+                    }
+                }
+                None => {
+                    return Err(SignalFirError::new(
+                        SignalFirErrorCode::UnsupportedSignalNode,
+                        "SIGDELAY requires a constant integer amount or a signal with a bounded non-negative interval",
+                    ));
+                }
+            }
+        }
+        let node = arena.node(sig).ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("missing prepared signal node {}", sig.as_u32()),
+            )
+        })?;
+        for child in node.children.as_slice() {
+            self.scan_child(*child, arena, sig_types, seen, max_delays)?;
+        }
+        Ok(())
+    }
+
+    fn scan_child(
+        &mut self,
+        child: SigId,
+        arena: &TreeArena,
+        sig_types: &HashMap<SigId, SigType>,
+        seen: &mut HashSet<SigId>,
+        max_delays: &mut HashMap<SigId, i32>,
+    ) -> Result<(), SignalFirError> {
+        if arena.is_list(child) {
+            let mut list = child;
+            while !arena.is_nil(list) {
+                let head = arena.hd(list).ok_or_else(|| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::UnsupportedSignalNode,
+                        "malformed prepared signal list while scanning delay lines",
+                    )
+                })?;
+                self.scan_node(head, arena, sig_types, seen, max_delays)?;
+                list = arena.tl(list).ok_or_else(|| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::UnsupportedSignalNode,
+                        "malformed prepared signal list while scanning delay lines",
+                    )
+                })?;
+            }
+            Ok(())
+        } else {
+            self.scan_node(child, arena, sig_types, seen, max_delays)
+        }
+    }
+
+    /// Detects `SIGDELAY(Delay1(Proj(i, SYMREF(var))), N)` and records the
+    /// total delay `N + 1` on `rec_group_max_delay`.
+    ///
+    /// Returns `true` if the pattern matched (caller should skip `fVec` allocation
+    /// for this carried signal); `false` otherwise.
+    fn try_record_rec_delay(&mut self, arena: &TreeArena, value: SigId, delay: i32) -> bool {
+        let SigMatch::Delay1(inner) = match_sig(arena, value) else {
+            return false;
+        };
+        let SigMatch::Proj(proj_index, group) = match_sig(arena, inner) else {
+            return false;
+        };
+        let Some(var) = match_sym_ref(arena, group) else {
+            return false;
+        };
+        let total = delay + 1; // N (explicit) + 1 (Delay1)
+        let key = (var.as_u32(), proj_index as usize);
+        let entry = self.rec_group_max_delay.entry(key).or_insert(0);
+        if total > *entry {
+            *entry = total;
+        }
+        true
+    }
+
+    // ── Allocation ───────────────────────────────────────────────────────────
+
+    /// Declares the struct array for one circular delay line, idempotent.
+    ///
+    /// On first call for `carried`, allocates `CircularPow2Model::buffer_size(delay)`
+    /// elements, emits the struct declaration, and registers an `instanceClear`
+    /// zeroing loop via `ctx`.  Subsequent calls for the same `carried` return the
+    /// cached info; an error is returned if the cached size is smaller than required.
+    pub(super) fn ensure_delay_line(
+        &mut self,
+        carried: SigId,
+        delay: i32,
+        ctx: &mut DelayFirCtx<'_>,
+    ) -> Result<DelayLineInfo, SignalFirError> {
+        if delay < 0 {
+            return Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("SIGDELAY amount must be >= 0, got {delay}"),
+            ));
+        }
+        let elem_type = ctx.signal_elem_type(carried)?;
+        let required_size = CircularPow2Model.buffer_size(delay)?;
+        if let Some(existing) = self.delay_lines.get(&carried) {
+            if existing.size < required_size {
+                return Err(SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!(
+                        "internal fast-lane delay-line sizing mismatch for signal {}: \
+                         existing size {} < required {}",
+                        carried.as_u32(),
+                        existing.size,
+                        required_size
+                    ),
+                ));
+            }
+            return Ok(existing.clone());
+        }
+        ctx.ensure_iota();
+        let prefix = if elem_type == FirType::Int32 {
+            "iVec"
+        } else {
+            "fVec"
+        };
+        let name = format!("{prefix}{}", carried.as_u32());
+        let array_ty = FirType::Array(Box::new(elem_type), required_size);
+        let decl = {
+            let mut b = FirBuilder::new(ctx.store);
+            b.declare_var(name.clone(), array_ty, AccessType::Struct, None)
+        };
+        ctx.struct_declarations.push(decl);
+        ctx.register_delay_clear(name.clone(), required_size, carried)?;
+        let info = DelayLineInfo {
+            name,
+            size: required_size,
+        };
+        self.delay_lines.insert(carried, info.clone());
+        Ok(info)
+    }
+
+    // ── Query / dedup accessors ───────────────────────────────────────────────
+
+    /// Schedules the delay write for `carried` if not yet scheduled.
+    ///
+    /// Returns `true` on the first call for a given `carried` (the write store
+    /// should be emitted); `false` on subsequent calls (dedup — write already
+    /// scheduled earlier in this sample).
+    pub(super) fn schedule_delay_write(&mut self, carried: SigId) -> bool {
+        self.scheduled_delay_writes.insert(carried)
+    }
+
+    /// Returns the allocated delay line for `carried`, if any.
+    #[allow(dead_code)]
+    pub(super) fn get_delay_line(&self, carried: SigId) -> Option<&DelayLineInfo> {
+        self.delay_lines.get(&carried)
+    }
+
+    /// Returns the maximum merged delay recorded for a recursion output.
+    ///
+    /// Called by `ensure_recursion_array_for_group` in `module.rs` to size the
+    /// recursion array large enough to serve the delay chain.
+    pub(super) fn rec_max_delay(&self, var_id: u32, index: usize) -> Option<i32> {
+        self.rec_group_max_delay.get(&(var_id, index)).copied()
+    }
 }

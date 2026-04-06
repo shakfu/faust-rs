@@ -65,7 +65,9 @@ use sigtype::{SigType, Variability};
 use crate::signal_prepare::SimpleSigType;
 
 use super::SignalFirOutput;
-use super::delay::{DelayLineInfo, delay_size_for_amount, pow2limit_for_delay};
+use super::delay::{
+    DelayFirCtx, DelayLineInfo, DelayManager, delay_size_for_amount, pow2limit_for_delay,
+};
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
 use super::planner::SignalFirPlan;
@@ -651,20 +653,11 @@ struct SignalToFirLower<'a> {
     /// scheduled exactly once per sample regardless of how many `SIGPROJ` nodes
     /// reference the same group.
     scheduled_state_updates: HashSet<SigId>,
-    /// Allocated delay lines keyed by carried-signal id.
-    delay_lines: HashMap<SigId, DelayLineInfo>,
-    /// Maximum total delay for each recursion output, keyed by
-    /// `(recursion_var_id, projection_index)`.
-    ///
-    /// Populated by `scan_delay_lines` when it detects
-    /// `SIGDELAY(Delay1(Proj(i, SYMREF(var))), N)`.  Consumed by
-    /// `ensure_recursion_array_for_group` to size the recursion array
-    /// large enough to serve the delay directly, eliminating a separate
-    /// `fVec` buffer.
-    rec_group_max_delay: HashMap<(u32, usize), i32>,
-    /// Guards against emitting duplicate delay-write stores for shared carried signals.
-    scheduled_delay_writes: HashSet<SigId>,
+    /// Delay-line exclusive state: allocated ring buffers, recursion-merge
+    /// table, and write-scheduling dedup guard.  See [`DelayManager`].
+    delay: DelayManager,
     /// `true` once `fIOTA` has been declared; prevents duplicate declarations.
+    /// Shared between delay and recursion lowering paths.
     uses_iota: bool,
     /// Stack of active recursion carrier groups, innermost last; used by `SIGPROJ` resolution.
     ///
@@ -809,9 +802,7 @@ impl<'a> SignalToFirLower<'a> {
             state_name_by_node: HashMap::new(),
             rec_array_by_group_index: HashMap::new(),
             scheduled_state_updates: HashSet::new(),
-            delay_lines: HashMap::new(),
-            rec_group_max_delay: HashMap::new(),
-            scheduled_delay_writes: HashSet::new(),
+            delay: DelayManager::new(),
             uses_iota: false,
             recursion_stack: Vec::new(),
             recursion_vars: Vec::new(),
@@ -851,131 +842,15 @@ impl<'a> SignalToFirLower<'a> {
     /// Multiple `SIGDELAY(x, n)` nodes sharing the same carried signal `x`
     /// reuse one delay line sized to the largest delay seen.  This pre-pass
     /// ensures all writes are registered before any reads are emitted.
+    ///
+    /// Delegates the signal-tree traversal to [`DelayManager::scan_signals`]
+    /// and the FIR allocation to [`Self::ensure_delay_line_decl`].
     fn prepare_delay_lines(&mut self, outputs: &[SigId]) -> Result<(), SignalFirError> {
-        // Two-pass approach: first collect the maximum delay per carried signal,
-        // then allocate once with the correct (max) size.  This avoids the
-        // sizing-mismatch error when the same carried signal appears in multiple
-        // SIGDELAY nodes with different delay amounts.
-        let mut max_delays: HashMap<SigId, i32> = HashMap::new();
-        let mut seen = HashSet::new();
-        for output in outputs {
-            self.scan_delay_lines(*output, &mut seen, &mut max_delays)?;
-        }
+        let max_delays = self.delay.scan_signals(self.arena, self.sig_types, outputs)?;
         for (carried, delay) in max_delays {
             self.ensure_delay_line_decl(carried, delay)?;
         }
         Ok(())
-    }
-
-    /// Visits one signal node, recording the maximum delay per carried signal.
-    ///
-    /// Skips already-visited nodes (DAG sharing) via `seen`.  The maximum is
-    /// tracked because several `SIGDELAY` nodes can share the same carried
-    /// signal `x` with different delay amounts; a single delay line is
-    /// allocated at the largest observed size so every read offset remains
-    /// in-bounds.
-    fn scan_delay_lines(
-        &mut self,
-        sig: SigId,
-        seen: &mut HashSet<SigId>,
-        max_delays: &mut HashMap<SigId, i32>,
-    ) -> Result<(), SignalFirError> {
-        if !seen.insert(sig) {
-            return Ok(());
-        }
-        if let SigMatch::Delay(value, amount) = match_sig(self.arena, sig) {
-            match delay_size_for_amount(self.arena, self.sig_types, amount)? {
-                Some(0) => {}
-                Some(delay) => {
-                    // Check for the recursion-feedback-through-delay1 pattern:
-                    //   SIGDELAY(Delay1(Proj(i, SYMREF(var))), N)
-                    // When matched, record the total delay (N + 1) on the
-                    // recursion group so the recursion array can be sized to
-                    // serve this delay directly, and skip the fVec allocation.
-                    let merged = self.try_record_rec_delay(value, delay);
-                    if !merged {
-                        let entry = max_delays.entry(value).or_insert(0);
-                        if delay > *entry {
-                            *entry = delay;
-                        }
-                    }
-                }
-                None => {
-                    return self.unsupported_node(
-                        sig,
-                        "SIGDELAY requires a constant integer amount or a signal with a bounded non-negative interval",
-                    );
-                }
-            }
-        }
-        let node = self.arena.node(sig).ok_or_else(|| {
-            SignalFirError::new(
-                SignalFirErrorCode::UnsupportedSignalNode,
-                format!("missing prepared signal node {}", sig.as_u32()),
-            )
-        })?;
-        for child in node.children.as_slice() {
-            self.scan_delay_child(*child, seen, max_delays)?;
-        }
-        Ok(())
-    }
-
-    /// Recurses into one child node, transparently unwrapping list spines.
-    fn scan_delay_child(
-        &mut self,
-        child: SigId,
-        seen: &mut HashSet<SigId>,
-        max_delays: &mut HashMap<SigId, i32>,
-    ) -> Result<(), SignalFirError> {
-        if self.arena.is_list(child) {
-            let mut list = child;
-            while !self.arena.is_nil(list) {
-                let head = self.arena.hd(list).ok_or_else(|| {
-                    SignalFirError::new(
-                        SignalFirErrorCode::UnsupportedSignalNode,
-                        "malformed prepared signal list while scanning delay lines",
-                    )
-                })?;
-                self.scan_delay_lines(head, seen, max_delays)?;
-                list = self.arena.tl(list).ok_or_else(|| {
-                    SignalFirError::new(
-                        SignalFirErrorCode::UnsupportedSignalNode,
-                        "malformed prepared signal list while scanning delay lines",
-                    )
-                })?;
-            }
-            Ok(())
-        } else {
-            self.scan_delay_lines(child, seen, max_delays)
-        }
-    }
-
-    /// Detects the recursion-feedback-through-delay1 pattern and records the
-    /// total delay on `rec_group_max_delay` so the recursion array can be sized
-    /// to serve the delay directly.
-    ///
-    /// Pattern: `SIGDELAY(value = Delay1(Proj(i, SYMREF(var))), N)`
-    /// Total delay on the Proj = N + 1 (the explicit delay plus the Delay1).
-    ///
-    /// Returns `true` if the pattern was matched and the delay was recorded
-    /// (the caller should skip fVec allocation for this carried signal).
-    fn try_record_rec_delay(&mut self, value: SigId, delay: i32) -> bool {
-        let SigMatch::Delay1(inner) = match_sig(self.arena, value) else {
-            return false;
-        };
-        let SigMatch::Proj(proj_index, group) = match_sig(self.arena, inner) else {
-            return false;
-        };
-        let Some(var) = match_sym_ref(self.arena, group) else {
-            return false;
-        };
-        let total = delay + 1; // N (explicit) + 1 (Delay1)
-        let key = (var.as_u32(), proj_index as usize);
-        let entry = self.rec_group_max_delay.entry(key).or_insert(0);
-        if total > *entry {
-            *entry = total;
-        }
-        true
     }
 
     /// Returns a clone of the internal real computation type.
@@ -1568,7 +1443,7 @@ impl<'a> SignalToFirLower<'a> {
 
         let line = self.ensure_delay_line_decl(value, delay)?;
         let current = self.lower_signal(value)?;
-        if self.scheduled_delay_writes.insert(value) {
+        if self.delay.schedule_delay_write(value) {
             let write_index = {
                 let raw = self.current_iota_index();
                 self.masked_delay_index(raw, line.size)
@@ -1738,56 +1613,27 @@ impl<'a> SignalToFirLower<'a> {
 
     /// Declares the struct array for one circular delay line, idempotent.
     ///
-    /// On first call for `carried`, allocates `next_power_of_two(delay + 1)`
-    /// elements, emits the struct declaration, and registers an `instanceClear`
-    /// zeroing loop.  Subsequent calls for the same `carried` return the cached
-    /// info; an error is returned if the cached size is smaller than required.
+    /// Thin delegate to [`DelayManager::ensure_delay_line`]; constructs a
+    /// [`DelayFirCtx`] from disjoint fields via split-borrow struct literal so
+    /// that `self.delay` can be borrowed simultaneously.
     fn ensure_delay_line_decl(
         &mut self,
         carried: SigId,
         delay: i32,
     ) -> Result<DelayLineInfo, SignalFirError> {
-        if delay < 0 {
-            return Err(SignalFirError::new(
-                SignalFirErrorCode::UnsupportedSignalNode,
-                format!("SIGDELAY amount must be >= 0, got {delay}"),
-            ));
-        }
-        let elem_type = self.signal_fir_type(carried)?;
-        let required_size = pow2limit_for_delay(delay)?;
-        if let Some(existing) = self.delay_lines.get(&carried) {
-            if existing.size < required_size {
-                return Err(SignalFirError::new(
-                    SignalFirErrorCode::UnsupportedSignalNode,
-                    format!(
-                        "internal fast-lane delay-line sizing mismatch for signal {}: existing size {} < required {}",
-                        carried.as_u32(),
-                        existing.size,
-                        required_size
-                    ),
-                ));
-            }
-            return Ok(existing.clone());
-        }
-
-        self.ensure_iota_state();
-        let prefix = if elem_type == FirType::Int32 {
-            "iVec"
-        } else {
-            "fVec"
+        // Explicit field-level split borrows: `self.delay` is NOT included here,
+        // so it can be mutably borrowed below without conflict.
+        let mut ctx = DelayFirCtx {
+            store: &mut self.store,
+            real_ty: self.real_ty.clone(),
+            types: self.types,
+            struct_declarations: &mut self.struct_declarations,
+            clear_statements: &mut self.clear_statements,
+            clear_init_seen: &mut self.clear_init_seen,
+            next_loop_var_id: &mut self.next_loop_var_id,
+            uses_iota: &mut self.uses_iota,
         };
-        let name = format!("{prefix}{}", carried.as_u32());
-        let array_ty = FirType::Array(Box::new(elem_type.clone()), required_size);
-        let mut b = FirBuilder::new(&mut self.store);
-        let decl = b.declare_var(name.clone(), array_ty, AccessType::Struct, None);
-        self.struct_declarations.push(decl);
-        self.register_clear_table(name.clone(), elem_type.clone(), required_size, carried)?;
-        let info = DelayLineInfo {
-            name,
-            size: required_size,
-        };
-        self.delay_lines.insert(carried, info.clone());
-        Ok(info)
+        self.delay.ensure_delay_line(carried, delay, &mut ctx)
     }
 
     /// Declares the `fIOTA` circular-buffer position counter, idempotent.
@@ -1839,61 +1685,6 @@ impl<'a> SignalToFirLower<'a> {
         };
         let mut b = FirBuilder::new(&mut self.store);
         b.store_var("fIOTA", AccessType::Struct, next)
-    }
-
-    /// Emits an `instanceClear` zeroing loop for a delay-line or table array.
-    ///
-    /// Idempotent: subsequent calls for the same `name` are silently ignored.
-    fn register_clear_table(
-        &mut self,
-        name: String,
-        elem_type: FirType,
-        size: usize,
-        sig: SigId,
-    ) -> Result<(), SignalFirError> {
-        if !self.clear_init_seen.insert(name.clone()) {
-            return Ok(());
-        }
-        let loop_var = self.fresh_loop_var("lDelay");
-        let upper = {
-            let mut b = FirBuilder::new(&mut self.store);
-            b.int32(i32::try_from(size).map_err(|_| {
-                SignalFirError::new(
-                    SignalFirErrorCode::UnsupportedSignalNode,
-                    format!("delay line size conversion overflow: {size}"),
-                )
-            })?)
-        };
-        let zero = match self.simple_type(sig)? {
-            SimpleSigType::Int => self.lower_int32_const(0),
-            SimpleSigType::Real => self.float_const(0.0),
-            SimpleSigType::Sound => {
-                return Err(SignalFirError::new(
-                    SignalFirErrorCode::UnsupportedSignalNode,
-                    format!(
-                        "signal {} cannot use a soundfile handle as delay-line element type",
-                        sig.as_u32()
-                    ),
-                ));
-            }
-        };
-        let body = {
-            let index = {
-                let mut b = FirBuilder::new(&mut self.store);
-                b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
-            };
-            let store = {
-                let mut b = FirBuilder::new(&mut self.store);
-                b.store_table(name, AccessType::Struct, index, zero)
-            };
-            let mut b = FirBuilder::new(&mut self.store);
-            b.block(&[store])
-        };
-        let mut b = FirBuilder::new(&mut self.store);
-        self.clear_statements
-            .push(b.simple_for_loop(loop_var, upper, body, false));
-        let _ = elem_type;
-        Ok(())
     }
 
     /// Emits an `instanceClear` zeroing loop for a two-slot recursion array.
@@ -3285,7 +3076,7 @@ impl<'a> SignalToFirLower<'a> {
     /// recursion `group`, idempotent.
     ///
     /// The buffer is sized to `pow2limit(max_delay + 1)` when the scan pass
-    /// recorded a merged delay for this group output in `rec_group_max_delay`,
+    /// recorded a merged delay for this group output via [`DelayManager::rec_max_delay`],
     /// or to 2 (current + previous sample) otherwise.
     ///
     /// Uses a `(group_id, index)` key — separate from the `state_name_by_node`
@@ -3318,9 +3109,8 @@ impl<'a> SignalToFirLower<'a> {
         // var is the symbolic variable bound by SYMREC.
         let size = match match_sym_rec(self.arena, group) {
             Some((var, _body)) => {
-                let delay_key = (var.as_u32(), index);
-                match self.rec_group_max_delay.get(&delay_key) {
-                    Some(&total_delay) => pow2limit_for_delay(total_delay)?,
+                match self.delay.rec_max_delay(var.as_u32(), index) {
+                    Some(total_delay) => pow2limit_for_delay(total_delay)?,
                     None => 2,
                 }
             }
