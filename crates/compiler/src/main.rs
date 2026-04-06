@@ -288,6 +288,19 @@ struct CliArgs {
     /// compiler.  Only effective with `--signal-fir-lane fast`.
     #[arg(long = "double", action = ArgAction::SetTrue)]
     double: bool,
+    /// Maximum delay (in samples) below which the shift/copy strategy is used
+    /// instead of a circular ring buffer (`-mcd N`).
+    ///
+    /// Delays ≤ `mcd` use a statically-shifted array (no `fIOTA`). Default: 16.
+    #[arg(long = "mcd", default_value_t = 16)]
+    mcd: u32,
+    /// Delay-line threshold above which the if-based wrapping strategy is used
+    /// instead of the default power-of-two circular buffer (`-dlt N`).
+    ///
+    /// Delays > `dlt` use an exact-size buffer with a per-line counter variable.
+    /// Default: disabled (all delays above `mcd` use circular-pow2).
+    #[arg(long = "dlt", default_value_t = u32::MAX)]
+    dlt: u32,
     /// Display compilation phases timing information (`-time`).
     #[arg(long = "compilation-time", action = ArgAction::SetTrue)]
     compilation_time: bool,
@@ -346,6 +359,20 @@ fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> 
         }
         if arg == "-version" {
             normalized.push("--version".to_owned());
+            continue;
+        }
+        if arg == "-mcd" {
+            normalized.push("--mcd".to_owned());
+            if let Some(value) = it.next() {
+                normalized.push(value);
+            }
+            continue;
+        }
+        if arg == "-dlt" {
+            normalized.push("--dlt".to_owned());
+            if let Some(value) = it.next() {
+                normalized.push(value);
+            }
             continue;
         }
         if arg == "-time" {
@@ -944,7 +971,9 @@ fn compiler_from_cli(
     let mut compiler = Compiler::new()
         .with_fir_verify_options(selected_fir_verify_options(cli))
         .with_process_name(cli.process_name.clone())
-        .with_real_type(selected_real_type(cli));
+        .with_real_type(selected_real_type(cli))
+        .with_mcd(cli.mcd)
+        .with_dlt(cli.dlt);
     if let Some(flag) = cancel {
         compiler = compiler.with_cancel(flag);
     }

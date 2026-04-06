@@ -341,6 +341,7 @@ fn invalid_options_return_typed_error_code() {
             module_name: "".to_owned(),
             strict_mode: true,
             real_type: RealType::Float32,
+            ..SignalFirOptions::default()
         },
     )
     .expect_err("empty module name should fail option validation");
@@ -1402,8 +1403,19 @@ fn fixed_delay_lowers_to_struct_array_and_iota_updates() {
         let n3 = b.int(3);
         b.delay(in0, n3)
     };
-    let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
-        .expect("constant fixed delay should lower");
+    // Force CircularPow2 strategy by setting max_copy_delay=0 so that even a
+    // tiny delay uses the ring-buffer + fIOTA path that this test verifies.
+    let out = compile_fastlane_without_ui(
+        &arena,
+        &[sig0],
+        1,
+        1,
+        &SignalFirOptions {
+            max_copy_delay: 0,
+            ..SignalFirOptions::default()
+        },
+    )
+    .expect("constant fixed delay should lower");
 
     let FirMatch::Module {
         dsp_struct,

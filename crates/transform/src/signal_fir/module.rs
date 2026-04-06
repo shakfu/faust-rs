@@ -66,7 +66,8 @@ use crate::signal_prepare::SimpleSigType;
 
 use super::SignalFirOutput;
 use super::delay::{
-    DelayFirCtx, DelayLineInfo, DelayManager, delay_size_for_amount, pow2limit_for_delay,
+    DelayFirCtx, DelayLineInfo, DelayManager, DelayOptions, DelayStrategy,
+    delay_size_for_amount, pow2limit_for_delay,
 };
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
@@ -163,7 +164,13 @@ pub fn build_module(
     types: &HashMap<SigId, SimpleSigType>,
     sig_types: &HashMap<SigId, SigType>,
     real_ty: FirType,
+    max_copy_delay: u32,
+    delay_line_threshold: u32,
 ) -> Result<SignalFirOutput, SignalFirError> {
+    let delay_opts = DelayOptions {
+        max_copy_delay,
+        delay_line_threshold,
+    };
     let (sig_ref_counts, sig_at_boundary) = analyze_signal_sharing(arena, signals, sig_types);
     let mut lower = SignalToFirLower::new(
         arena,
@@ -174,6 +181,7 @@ pub fn build_module(
         real_ty,
         sig_ref_counts,
         sig_at_boundary,
+        delay_opts,
     );
     lower.ensure_sample_rate_var();
     lower.prepare_delay_lines(signals)?;
@@ -239,6 +247,17 @@ pub fn build_module(
     if lower.uses_iota {
         let bump_iota = lower.bump_iota();
         lower.sample_statements.push(bump_iota);
+    }
+    // Advance per-line IfWrapping counters at the end of the sample loop.
+    // Collect first to release the borrow on `lower.delay` before borrowing `lower.store`.
+    let if_wrapping: Vec<(String, usize)> = lower
+        .delay
+        .if_wrapping_lines()
+        .map(|(n, s)| (n.to_owned(), s))
+        .collect();
+    for (counter_name, size) in &if_wrapping {
+        let advance = lower.bump_if_wrapping_counter(counter_name, *size);
+        lower.sample_statements.push(advance);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -780,6 +799,7 @@ impl<'a> SignalToFirLower<'a> {
         real_ty: FirType,
         sig_ref_counts: HashMap<SigId, usize>,
         sig_at_boundary: HashSet<SigId>,
+        delay_opts: DelayOptions,
     ) -> Self {
         Self {
             arena,
@@ -802,7 +822,7 @@ impl<'a> SignalToFirLower<'a> {
             state_name_by_node: HashMap::new(),
             rec_array_by_group_index: HashMap::new(),
             scheduled_state_updates: HashSet::new(),
-            delay: DelayManager::new(),
+            delay: DelayManager::new(delay_opts),
             uses_iota: false,
             recursion_stack: Vec::new(),
             recursion_vars: Vec::new(),
@@ -1443,24 +1463,57 @@ impl<'a> SignalToFirLower<'a> {
 
         let line = self.ensure_delay_line_decl(value, delay)?;
         let current = self.lower_signal(value)?;
-        if self.delay.schedule_delay_write(value) {
-            let write_index = {
-                let raw = self.current_iota_index();
-                self.masked_delay_index(raw, line.size)
-            };
-            let mut b = FirBuilder::new(&mut self.store);
-            self.sample_statements.push(b.store_table(
-                line.name.clone(),
-                AccessType::Struct,
-                write_index,
-                current,
-            ));
-        }
-        let amount_value = self.lower_signal(amount)?;
-        let read_index = self.delayed_iota_index(amount_value, line.size);
         let read_ty = self.signal_fir_type(node)?;
-        let mut b = FirBuilder::new(&mut self.store);
-        Ok(b.load_table(line.name.clone(), AccessType::Struct, read_index, read_ty))
+
+        match line.strategy.clone() {
+            DelayStrategy::Shift => {
+                if self.delay.schedule_delay_write(value) {
+                    let shift_write = self.emit_shift_write(&line.name, line.size, current, read_ty.clone());
+                    self.sample_statements.push(shift_write);
+                }
+                let amount_value = self.lower_signal(amount)?;
+                let mut b = FirBuilder::new(&mut self.store);
+                Ok(b.load_table(line.name.clone(), AccessType::Struct, amount_value, read_ty))
+            }
+            DelayStrategy::CircularPow2 => {
+                if self.delay.schedule_delay_write(value) {
+                    let write_index = {
+                        let raw = self.current_iota_index();
+                        self.masked_delay_index(raw, line.size)
+                    };
+                    let mut b = FirBuilder::new(&mut self.store);
+                    self.sample_statements.push(b.store_table(
+                        line.name.clone(),
+                        AccessType::Struct,
+                        write_index,
+                        current,
+                    ));
+                }
+                let amount_value = self.lower_signal(amount)?;
+                let read_index = self.delayed_iota_index(amount_value, line.size);
+                let mut b = FirBuilder::new(&mut self.store);
+                Ok(b.load_table(line.name.clone(), AccessType::Struct, read_index, read_ty))
+            }
+            DelayStrategy::IfWrapping { counter_name } => {
+                if self.delay.schedule_delay_write(value) {
+                    let idx = {
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.load_var(counter_name.clone(), AccessType::Struct, FirType::Int32)
+                    };
+                    let mut b = FirBuilder::new(&mut self.store);
+                    self.sample_statements.push(b.store_table(
+                        line.name.clone(),
+                        AccessType::Struct,
+                        idx,
+                        current,
+                    ));
+                }
+                let amount_value = self.lower_signal(amount)?;
+                let read_index = self.if_wrapping_read_index(&counter_name, amount_value, line.size);
+                let mut b = FirBuilder::new(&mut self.store);
+                Ok(b.load_table(line.name.clone(), AccessType::Struct, read_index, read_ty))
+            }
+        }
     }
 
     /// Lowers one single-sample state edge (`delay1`/`prefix`) using a
@@ -1685,6 +1738,180 @@ impl<'a> SignalToFirLower<'a> {
         };
         let mut b = FirBuilder::new(&mut self.store);
         b.store_var("fIOTA", AccessType::Struct, next)
+    }
+
+    /// Emits the combined shift loop + store-at-0 for a `ShiftModel` delay write.
+    ///
+    /// Generates:
+    /// ```text
+    /// for (int lShiftN = 0; lShiftN < size-1; lShiftN += 1)
+    ///     buf[(size-1) - lShiftN] = buf[(size-2) - lShiftN];
+    /// buf[0] = new_value;
+    /// ```
+    ///
+    /// The forward-indexed rewrite (`j = 0..size-2`, store at `size-1-j`, read
+    /// from `size-2-j`) is equivalent to a reverse loop but works with the
+    /// forward-only `for_loop` FIR instruction.
+    fn emit_shift_write(
+        &mut self,
+        name: &str,
+        size: usize,
+        new_value: FirId,
+        elem_ty: FirType,
+    ) -> FirId {
+        let loop_var = self.fresh_loop_var("lShift");
+        // Loop runs from 0 to size-2 (exclusive end = size-1).
+        let init = self.lower_int32_const(0);
+        let end = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.int32(i32::try_from(size.saturating_sub(1)).unwrap_or(i32::MAX))
+        };
+        let step = self.lower_int32_const(1);
+        let body = {
+            let lv = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+            };
+            // store_at  = (size-1) - lv
+            let store_idx = {
+                let sm1 = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.int32(i32::try_from(size.saturating_sub(1)).unwrap_or(i32::MAX))
+                };
+                let lv2 = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+                };
+                let mut b = FirBuilder::new(&mut self.store);
+                b.binop(FirBinOp::Sub, sm1, lv2, FirType::Int32)
+            };
+            // read_from = (size-2) - lv
+            let read_idx = {
+                let sm2 = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.int32(i32::try_from(size.saturating_sub(2)).unwrap_or(i32::MAX))
+                };
+                let mut b = FirBuilder::new(&mut self.store);
+                b.binop(FirBinOp::Sub, sm2, lv, FirType::Int32)
+            };
+            let loaded = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.load_table(name, AccessType::Struct, read_idx, elem_ty.clone())
+            };
+            let stored = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.store_table(name, AccessType::Struct, store_idx, loaded)
+            };
+            let mut b = FirBuilder::new(&mut self.store);
+            b.block(&[stored])
+        };
+        let shift_loop = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.for_loop(loop_var, init, end, step, body, false)
+        };
+        // buf[0] = new_value
+        let zero = self.lower_int32_const(0);
+        let store_0 = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.store_table(name, AccessType::Struct, zero, new_value)
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        b.block(&[shift_loop, store_0])
+    }
+
+    /// Computes the read index for an `IfWrapping` delay line:
+    /// `(counter + size - amount)` with if-based wrap when `≥ size`.
+    ///
+    /// ```text
+    /// raw = counter + size - amount        // in [1, 2*size - 2]
+    /// read_idx = (raw >= size) ? raw - size : raw
+    /// ```
+    /// Computes the read index for an `IfWrapping` delay line.
+    ///
+    /// ```text
+    /// raw      = counter + size - amount    // always in [1, 2*size - 2]
+    /// read_idx = (raw >= size) ? raw - size : raw
+    /// ```
+    ///
+    /// `FirId` is `Copy` so `raw` and `size_fir` can be reused across binop calls.
+    fn if_wrapping_read_index(
+        &mut self,
+        counter_name: &str,
+        amount: FirId,
+        size: usize,
+    ) -> FirId {
+        let size_i32 = i32::try_from(size).unwrap_or(i32::MAX);
+        let counter = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.load_var(counter_name, AccessType::Struct, FirType::Int32)
+        };
+        let size_fir = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.int32(size_i32)
+        };
+        // raw = (counter + size) - amount
+        let plus_size = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.binop(FirBinOp::Add, counter, size_fir, FirType::Int32)
+        };
+        let raw = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.binop(FirBinOp::Sub, plus_size, amount, FirType::Int32)
+        };
+        // cond: raw >= size  (raw is Copy)
+        let cond = {
+            let sf = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.int32(size_i32)
+            };
+            let mut b = FirBuilder::new(&mut self.store);
+            b.binop(FirBinOp::Ge, raw, sf, FirType::Int32)
+        };
+        // adjusted = raw - size
+        let adjusted = {
+            let sf = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.int32(size_i32)
+            };
+            let mut b = FirBuilder::new(&mut self.store);
+            b.binop(FirBinOp::Sub, raw, sf, FirType::Int32)
+        };
+        // select2(cond, adjusted, raw)  →  cond ? adjusted : raw
+        let mut b = FirBuilder::new(&mut self.store);
+        b.select2(cond, adjusted, raw, FirType::Int32)
+    }
+
+    /// Emits `counter = (counter + 1 >= size) ? 0 : counter + 1` for an
+    /// `IfWrapping` delay line counter advance at end-of-sample.
+    ///
+    /// `FirId` is `Copy` so `next` can be reused across binop calls.
+    fn bump_if_wrapping_counter(&mut self, counter_name: &str, size: usize) -> FirId {
+        let size_i32 = i32::try_from(size).unwrap_or(i32::MAX);
+        let counter = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.load_var(counter_name, AccessType::Struct, FirType::Int32)
+        };
+        let one = self.lower_int32_const(1);
+        let next = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.binop(FirBinOp::Add, counter, one, FirType::Int32)
+        };
+        // cond: next >= size  (next is Copy)
+        let cond = {
+            let sf = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.int32(size_i32)
+            };
+            let mut b = FirBuilder::new(&mut self.store);
+            b.binop(FirBinOp::Ge, next, sf, FirType::Int32)
+        };
+        let zero = self.lower_int32_const(0);
+        let wrapped = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.select2(cond, zero, next, FirType::Int32)
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        b.store_var(counter_name, AccessType::Struct, wrapped)
     }
 
     /// Emits an `instanceClear` zeroing loop for a two-slot recursion array.

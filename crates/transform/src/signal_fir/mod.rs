@@ -119,6 +119,19 @@ pub struct SignalFirOptions {
     /// emitted automatically at the DSP boundary (input sample load and output
     /// sample store) and at UI zone reads/writes.
     pub real_type: RealType,
+    /// Maximum delay (inclusive) for which the shift/copy strategy is used
+    /// instead of a circular ring buffer.
+    ///
+    /// Mirrors Faust's `-mcd N` option.  Delays ≤ `max_copy_delay` use a
+    /// statically-shifted array (no `fIOTA`).  Default: 16.
+    pub max_copy_delay: u32,
+    /// Delay above which the if-based wrapping strategy is used instead of the
+    /// default power-of-two circular buffer.
+    ///
+    /// Mirrors Faust's `-dlt N` option.  Delays > `delay_line_threshold` use an
+    /// exact-size buffer with a per-line counter variable.  Default: `u32::MAX`
+    /// (disabled; all delays above `max_copy_delay` use circular-pow2).
+    pub delay_line_threshold: u32,
 }
 
 impl Default for SignalFirOptions {
@@ -127,6 +140,8 @@ impl Default for SignalFirOptions {
             module_name: "mydsp".to_owned(),
             strict_mode: true,
             real_type: RealType::Float32,
+            max_copy_delay: 16,
+            delay_line_threshold: u32::MAX,
         }
     }
 }
@@ -195,6 +210,8 @@ pub fn compile_signals_to_fir_fastlane_with_ui(
         prepared.types_map(),
         prepared.sig_types_map(),
         options.real_type.as_fir_type(),
+        options.max_copy_delay,
+        options.delay_line_threshold,
     )
 }
 

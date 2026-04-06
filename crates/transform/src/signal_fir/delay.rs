@@ -1,7 +1,15 @@
 //! Circular delay-line sizing, geometry, and state management for the FIR fast-lane.
 //!
-//! Faust's `@(n)` operator maps to a **circular ring buffer** of power-of-two
-//! size in the generated C++/FIR output.  This module provides:
+//! Faust's `@(n)` operator maps to one of three delay-line strategies, selected
+//! by the delay amount relative to two thresholds (`-mcd` / `-dlt`):
+//!
+//! ```text
+//! [0, max_copy_delay]               → ShiftModel   (shift/copy; no fIOTA)
+//! (max_copy_delay, delay_line_threshold] → CircularPow2Model (default fIOTA + mask)
+//! (delay_line_threshold, ∞)             → IfWrappingModel   (per-line counter)
+//! ```
+//!
+//! This module provides:
 //!
 //! 1. The pure *sizing/analysis layer*: deciding how large a buffer needs to be
 //!    and resolving the delay amount from the signal tree.
@@ -11,9 +19,23 @@
 //! 3. [`DelayFirCtx`]: a borrow bundle assembled from disjoint fields of
 //!    `SignalToFirLower` and passed to `DelayManager` methods that emit FIR nodes.
 //! 4. [`DelayLineModel`] + [`CircularPow2Model`]: buffer-geometry abstraction
-//!    enabling future non-power-of-two implementations.
+//!    (retained for completeness; selection is via [`DelayStrategy`]).
 //!
-//! # Circular buffer model
+//! # Strategy descriptions
+//!
+//! ## Shift/copy (`ShiftModel`, delays ≤ `-mcd`, default 16)
+//!
+//! Each sample, all buffer elements are shifted one slot toward the high end,
+//! and the new value is placed at index 0.  Read is a direct load at index
+//! equal to the delay amount.  No `fIOTA` is used.
+//!
+//! ```text
+//! buf[size-1] = buf[size-2]; ... buf[1] = buf[0];  (shift loop)
+//! buf[0] = current_value;
+//! read:  buf[N]
+//! ```
+//!
+//! ## Power-of-two circular (`CircularPow2Model`, default middle range)
 //!
 //! Every active delay line is backed by one DSP-struct array (`fVec*` or
 //! `iVec*`) of size `S = next_power_of_two(max_delay + 1)`.  A shared
@@ -26,8 +48,18 @@
 //! end-of-sample: fIOTA = fIOTA + 1;
 //! ```
 //!
-//! The power-of-two constraint means the mask `(S - 1)` is always a single
-//! bitwise AND, matching C++ Faust's `signalFIRCompiler::writeReadDelay`.
+//! ## If-based wrapping (`IfWrappingModel`, delays > `-dlt`)
+//!
+//! Uses an exact-size buffer (size = `max_delay + 1`) with a dedicated
+//! per-line integer counter.  The counter wraps to zero via an `if` comparison
+//! instead of a bitmask, saving memory for non-power-of-two delay sizes at the
+//! cost of a branch per write.
+//!
+//! ```text
+//! buf[idx] = current_value;
+//! read:  buf[(idx + size - N) select2-wrapped]   (see IfWrappingModel)
+//! end-of-sample: idx = (idx + 1 >= size) ? 0 : idx + 1;
+//! ```
 //!
 //! # Recursion + delay merging
 //!
@@ -47,11 +79,13 @@
 //! | [`variable_delay_max_bound`] | free fn | Derive a bound from interval analysis |
 //! | [`min_const_upper_bound`] | free fn | Structural fallback: `SIGMIN(SigInt(n), _)` |
 //! | [`delay_size_for_amount`] | free fn | Unified resolver (tries all three above) |
-//! | [`DelayLineInfo`] | struct | Metadata for one allocated ring buffer |
+//! | [`DelayOptions`] | struct | `-mcd` / `-dlt` threshold options |
+//! | [`DelayStrategy`] | enum | Which buffer geometry is used for a line |
+//! | [`DelayLineInfo`] | struct | Metadata for one allocated delay buffer |
 //! | [`DelayManager`] | struct | Owns delay-exclusive state; scan + alloc methods |
 //! | [`DelayFirCtx`] | struct | Borrow bundle for FIR-emitting methods |
 //! | [`DelayLineModel`] | trait | Buffer geometry abstraction |
-//! | [`CircularPow2Model`] | struct | Current power-of-two implementation |
+//! | [`CircularPow2Model`] | struct | Power-of-two implementation |
 //!
 //! The complementary **FIR materialization** layer for index expressions
 //! (`current_iota_index`, `delayed_iota_index`, `masked_delay_index`,
@@ -76,14 +110,64 @@ use crate::signal_prepare::SimpleSigType;
 
 use super::error::{SignalFirError, SignalFirErrorCode};
 
+// ─── DelayOptions ─────────────────────────────────────────────────────────────
+
+/// Delay-line strategy selection thresholds.
+///
+/// Mirror of the Faust `-mcd` / `-dlt` compiler options:
+///
+/// - `-mcd N` (max-copy-delay, default 16): delays ≤ N use the shift/copy
+///   strategy (no `fIOTA`).
+/// - `-dlt N` (delay-line threshold, default `u32::MAX`): delays > N use the
+///   if-based wrapping strategy; delays in `(mcd, dlt]` use the default
+///   power-of-two circular strategy.
+#[derive(Clone, Debug)]
+pub(super) struct DelayOptions {
+    /// Shift/copy model upper bound (inclusive).  Default: 16.
+    pub(super) max_copy_delay: u32,
+    /// If-based wrapping model lower bound (exclusive).  Default: `u32::MAX`
+    /// (disabled; all non-copy delays use the circular-pow2 model).
+    pub(super) delay_line_threshold: u32,
+}
+
+impl Default for DelayOptions {
+    fn default() -> Self {
+        Self {
+            max_copy_delay: 16,
+            delay_line_threshold: u32::MAX,
+        }
+    }
+}
+
+// ─── DelayStrategy ────────────────────────────────────────────────────────────
+
+/// Buffer-geometry strategy for a single allocated delay line.
+///
+/// Selected once per carried signal by [`DelayManager::ensure_delay_line`]
+/// based on the maximum observed delay amount and [`DelayOptions`].
+#[derive(Clone, Debug)]
+pub(super) enum DelayStrategy {
+    /// Shift/copy: contents shifted by one each sample; new value stored at
+    /// index 0; read at index = delay.  No `fIOTA`.  Buffer size = `delay + 1`.
+    Shift,
+    /// Power-of-two circular buffer shared with the global `fIOTA` counter.
+    /// Buffer size = `next_power_of_two(delay + 1)`.
+    CircularPow2,
+    /// Per-line if-based wrapping counter; exact buffer size (`delay + 1`).
+    /// Each line has its own `fIdx<sig_id>` struct variable.
+    IfWrapping {
+        /// Name of the per-line counter variable, e.g. `fIdx42`.
+        counter_name: String,
+    },
+}
+
 // ─── DelayLineInfo ────────────────────────────────────────────────────────────
 
-/// Fixed-size circular delay-line resource used by fast-lane `SIGDELAY`.
+/// Metadata for one allocated delay-line DSP-struct array.
 ///
-/// Stores the metadata for one allocated DSP-struct array that implements a
-/// ring buffer.  The array is named `fVec<id>` (real) or `iVec<id>` (integer),
-/// declared once during [`DelayManager::scan_signals`] / `prepare_delay_lines`
-/// pre-scan, and zeroed in `instanceClear`.
+/// The array is named `fVec<id>` (real) or `iVec<id>` (integer), declared
+/// during the [`DelayManager::scan_signals`] / `prepare_delay_lines` pre-scan
+/// and zeroed in `instanceClear`.
 ///
 /// Source provenance (C++):
 /// - `compiler/transform/signalFIRCompiler.hh` (`DelayLine`, `allocateDelayLineAux`)
@@ -92,8 +176,13 @@ use super::error::{SignalFirError, SignalFirErrorCode};
 pub(super) struct DelayLineInfo {
     /// Generated DSP-struct array variable name (e.g. `fVec42`).
     pub(super) name: String,
-    /// Allocated size in elements (always a power of two ≥ 1).
+    /// Allocated buffer size in elements.
+    ///
+    /// For `CircularPow2` this is always a power of two ≥ 1.
+    /// For `Shift` and `IfWrapping` this is `max_delay + 1` (exact).
     pub(super) size: usize,
+    /// Buffer-geometry strategy selected for this line.
+    pub(super) strategy: DelayStrategy,
 }
 
 // ─── pow2limit_for_delay ─────────────────────────────────────────────────────
@@ -411,10 +500,32 @@ impl<'a> DelayFirCtx<'a> {
     }
 
     /// Generates a fresh loop-variable name using the shared monotonic counter.
-    fn fresh_loop_var(&mut self, prefix: &str) -> String {
+    pub(super) fn fresh_loop_var(&mut self, prefix: &str) -> String {
         let name = format!("{prefix}{}", *self.next_loop_var_id);
         *self.next_loop_var_id += 1;
         name
+    }
+
+    /// Declares the per-line `fIdx<id>` counter for an `IfWrapping` delay line,
+    /// idempotent.
+    ///
+    /// Emits the struct declaration and an `instanceClear` assignment `counter = 0`.
+    pub(super) fn ensure_if_wrapping_counter(&mut self, counter_name: String) {
+        if !self.clear_init_seen.insert(counter_name.clone()) {
+            return;
+        }
+        let zero = {
+            let mut b = FirBuilder::new(self.store);
+            b.int32(0)
+        };
+        let decl = {
+            let mut b = FirBuilder::new(self.store);
+            b.declare_var(counter_name.clone(), FirType::Int32, AccessType::Struct, None)
+        };
+        self.struct_declarations.push(decl);
+        let mut b = FirBuilder::new(self.store);
+        self.clear_statements
+            .push(b.store_var(counter_name, AccessType::Struct, zero));
     }
 
     /// Emits an `instanceClear` zeroing loop for a delay-line array, idempotent.
@@ -485,12 +596,12 @@ impl<'a> DelayFirCtx<'a> {
 
 /// Owns all delay-line exclusive state and provides scan + allocation entry points.
 ///
-/// Three fields that were previously scattered across `SignalToFirLower` are
-/// collected here:
+/// Five fields form the delay manager's state:
 ///
 /// | Field | Type | Role |
 /// |-------|------|------|
-/// | `delay_lines` | `HashMap<SigId, DelayLineInfo>` | Allocated ring buffers, keyed by carried signal |
+/// | `options` | [`DelayOptions`] | `-mcd` / `-dlt` strategy thresholds |
+/// | `delay_lines` | `HashMap<SigId, DelayLineInfo>` | Allocated buffers, keyed by carried signal |
 /// | `rec_group_max_delay` | `HashMap<(u32, usize), i32>` | Max merged delay per recursion output |
 /// | `scheduled_delay_writes` | `HashSet<SigId>` | Dedup guard for per-sample delay writes |
 ///
@@ -500,12 +611,14 @@ impl<'a> DelayFirCtx<'a> {
 ///    returns a `max_delays` map of carried signals → their maximum observed delay.
 /// 2. `prepare_delay_lines` then calls `ensure_delay_line_decl` for each entry,
 ///    which in turn calls [`Self::ensure_delay_line`] with a [`DelayFirCtx`].
-/// 3. During lowering, `lower_fixed_delay` calls [`Self::schedule_delay_write`]
-///    to gate per-sample write emission (exactly once per carried signal).
+/// 3. During lowering, `lower_fixed_delay` dispatches on the [`DelayStrategy`]
+///    stored in the returned [`DelayLineInfo`] to emit the correct write/read FIR.
 /// 4. `ensure_recursion_array_for_group` calls [`Self::rec_max_delay`] to size
 ///    recursion arrays that serve as delay buffers.
 pub(super) struct DelayManager {
-    /// Allocated ring buffers, keyed by carried-signal id.
+    /// Strategy selection thresholds (`-mcd` / `-dlt` options).
+    options: DelayOptions,
+    /// Allocated delay buffers, keyed by carried-signal id.
     delay_lines: HashMap<SigId, DelayLineInfo>,
     /// Maximum total delay for each recursion output that uses the merged pattern
     /// `SIGDELAY(Delay1(Proj(i, SYMREF(var))), N)`.
@@ -518,8 +631,9 @@ pub(super) struct DelayManager {
 
 impl DelayManager {
     /// Creates a fresh `DelayManager` for one module compilation.
-    pub(super) fn new() -> Self {
+    pub(super) fn new(options: DelayOptions) -> Self {
         Self {
+            options,
             delay_lines: HashMap::new(),
             rec_group_max_delay: HashMap::new(),
             scheduled_delay_writes: HashSet::new(),
@@ -651,12 +765,20 @@ impl DelayManager {
 
     // ── Allocation ───────────────────────────────────────────────────────────
 
-    /// Declares the struct array for one circular delay line, idempotent.
+    /// Declares the struct array for one delay line, idempotent.
     ///
-    /// On first call for `carried`, allocates `CircularPow2Model::buffer_size(delay)`
-    /// elements, emits the struct declaration, and registers an `instanceClear`
-    /// zeroing loop via `ctx`.  Subsequent calls for the same `carried` return the
-    /// cached info; an error is returned if the cached size is smaller than required.
+    /// Selects a [`DelayStrategy`] based on `delay` and [`DelayOptions`]:
+    ///
+    /// - `delay ≤ max_copy_delay` → [`DelayStrategy::Shift`] (exact size, no fIOTA)
+    /// - `max_copy_delay < delay ≤ delay_line_threshold` → [`DelayStrategy::CircularPow2`]
+    ///   (power-of-two size, fIOTA declared via `ctx`)
+    /// - `delay > delay_line_threshold` → [`DelayStrategy::IfWrapping`] (exact size,
+    ///   per-line `fIdx<id>` counter declared via `ctx`)
+    ///
+    /// On first call for `carried`, emits the struct declaration and registers an
+    /// `instanceClear` zeroing loop via `ctx`.  Subsequent calls for the same
+    /// `carried` return the cached info; an error is returned if the cached size is
+    /// smaller than what the current delay requires.
     pub(super) fn ensure_delay_line(
         &mut self,
         carried: SigId,
@@ -669,8 +791,33 @@ impl DelayManager {
                 format!("SIGDELAY amount must be >= 0, got {delay}"),
             ));
         }
+        // Select strategy based on delay amount and options.
+        let delay_u = delay as u32;
+        let strategy = if delay_u <= self.options.max_copy_delay {
+            DelayStrategy::Shift
+        } else if delay_u <= self.options.delay_line_threshold {
+            DelayStrategy::CircularPow2
+        } else {
+            DelayStrategy::IfWrapping {
+                counter_name: format!("fIdx{}", carried.as_u32()),
+            }
+        };
+
+        // Compute required buffer size.
+        let required_size = match &strategy {
+            DelayStrategy::Shift | DelayStrategy::IfWrapping { .. } => {
+                usize::try_from(delay).map_err(|_| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::UnsupportedSignalNode,
+                        format!("SIGDELAY amount overflow: {delay}"),
+                    )
+                })? + 1
+            }
+            DelayStrategy::CircularPow2 => CircularPow2Model.buffer_size(delay)?,
+        };
+
         let elem_type = ctx.signal_elem_type(carried)?;
-        let required_size = CircularPow2Model.buffer_size(delay)?;
+
         if let Some(existing) = self.delay_lines.get(&carried) {
             if existing.size < required_size {
                 return Err(SignalFirError::new(
@@ -686,7 +833,16 @@ impl DelayManager {
             }
             return Ok(existing.clone());
         }
-        ctx.ensure_iota();
+
+        // Strategy-specific ancillary declarations.
+        match &strategy {
+            DelayStrategy::CircularPow2 => ctx.ensure_iota(),
+            DelayStrategy::IfWrapping { counter_name } => {
+                ctx.ensure_if_wrapping_counter(counter_name.clone());
+            }
+            DelayStrategy::Shift => {}
+        }
+
         let prefix = if elem_type == FirType::Int32 {
             "iVec"
         } else {
@@ -703,9 +859,24 @@ impl DelayManager {
         let info = DelayLineInfo {
             name,
             size: required_size,
+            strategy,
         };
         self.delay_lines.insert(carried, info.clone());
         Ok(info)
+    }
+
+    /// Returns `(counter_name, buffer_size)` pairs for all `IfWrapping` delay lines.
+    ///
+    /// Called by `build_module` after signal lowering to emit per-line counter
+    /// advance statements at the end of the sample loop.
+    pub(super) fn if_wrapping_lines(&self) -> impl Iterator<Item = (&str, usize)> {
+        self.delay_lines.values().filter_map(|info| {
+            if let DelayStrategy::IfWrapping { counter_name } = &info.strategy {
+                Some((counter_name.as_str(), info.size))
+            } else {
+                None
+            }
+        })
     }
 
     // ── Query / dedup accessors ───────────────────────────────────────────────
