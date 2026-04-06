@@ -50,7 +50,7 @@ For each day file, entries are ordered from most recent commit to oldest using G
 - [`porting/journal/2026-03-31.md`](porting/journal/2026-03-31.md)
 - [`porting/journal/2026-04-01.md`](porting/journal/2026-04-01.md)
 - [`porting/journal/2026-04-04.md`](porting/journal/2026-04-04.md)
-- [`porting/journal/2026-04-06.md`](porting/journal/2026-04-06.md)
+- [`porting/journal/2026-04-06.md`](porting/journal/2026-04-06.md)  ← placement.rs + delay.rs extractions
 
 See [`porting/journal/README.md`](porting/journal/README.md).
 

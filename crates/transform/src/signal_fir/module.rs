@@ -60,34 +60,15 @@ use tlib::{
 };
 use ui::{ControlId, ControlKind, UiGroupKind, UiMatch, UiProgram, match_ui};
 
-use sigtype::{SigType, Variability, check_delay_interval};
+use sigtype::{SigType, Variability};
 
 use crate::signal_prepare::SimpleSigType;
 
 use super::SignalFirOutput;
+use super::delay::{DelayLineInfo, delay_size_for_amount, pow2limit_for_delay};
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
 use super::planner::SignalFirPlan;
-
-/// Fixed-size circular delay line resource used by fast-lane `SIGDELAY`.
-///
-/// Source provenance (C++):
-/// - `compiler/transform/signalFIRCompiler.hh` (`DelayLine`, `allocateDelayLineAux`)
-/// - `compiler/transform/signalFIRCompiler.cpp` (`compileSigDelay`, `writeReadDelay`)
-///
-/// Rust adapts the representation to the current FIR builder by storing the
-/// delay line as one DSP-struct array field plus an explicit `instanceClear`
-/// zeroing loop. The semantic contract stays the same for the active subset:
-/// constant integer delay amount, power-of-two size, and masked circular
-/// indexing driven by `fIOTA`.
-/// Planned storage for one lowered fixed-size circular delay line.
-#[derive(Clone, Debug)]
-struct DelayLineInfo {
-    /// Generated DSP-struct array variable name (e.g. `fVec42`).
-    name: String,
-    /// Allocated size in elements (always a power of two ≥ 1).
-    size: usize,
-}
 
 /// Deterministic prototype emission order for math helper functions.
 ///
@@ -903,7 +884,7 @@ impl<'a> SignalToFirLower<'a> {
             return Ok(());
         }
         if let SigMatch::Delay(value, amount) = match_sig(self.arena, sig) {
-            match self.delay_size_for_amount(amount)? {
+            match delay_size_for_amount(self.arena, self.sig_types, amount)? {
                 Some(0) => {}
                 Some(delay) => {
                     // Check for the recursion-feedback-through-delay1 pattern:
@@ -1525,7 +1506,7 @@ impl<'a> SignalToFirLower<'a> {
         value: SigId,
         amount: SigId,
     ) -> Result<FirId, SignalFirError> {
-        match self.delay_size_for_amount(amount)? {
+        match delay_size_for_amount(self.arena, self.sig_types, amount)? {
             Some(0) => self.lower_signal(value),
             Some(delay) => self.lower_fixed_delay(node, value, amount, delay),
             None => Err(SignalFirError::new(
@@ -1773,7 +1754,7 @@ impl<'a> SignalToFirLower<'a> {
             ));
         }
         let elem_type = self.signal_fir_type(carried)?;
-        let required_size = self.pow2limit_for_delay(delay)?;
+        let required_size = pow2limit_for_delay(delay)?;
         if let Some(existing) = self.delay_lines.get(&carried) {
             if existing.size < required_size {
                 return Err(SignalFirError::new(
@@ -1949,99 +1930,6 @@ impl<'a> SignalToFirLower<'a> {
         let name = format!("{prefix}{}", self.next_loop_var_id);
         self.next_loop_var_id += 1;
         name
-    }
-
-    /// Returns the constant integer value of `sig` if it is `SIGINT`, otherwise `None`.
-    fn constant_delay_amount(&self, sig: SigId) -> Result<Option<i32>, SignalFirError> {
-        match match_sig(self.arena, sig) {
-            SigMatch::Int(value) => Ok(Some(value)),
-            _ => Ok(None),
-        }
-    }
-
-    /// Returns the interval upper-bound used to size the delay line for a
-    /// variable delay amount, mirroring C++ `checkDelayInterval`.
-    ///
-    /// Accepts any signal whose interval is non-empty, bounded (finite `hi`),
-    /// and has `hi >= 0`.  `hi == 0` is the zero-delay passthrough case.
-    /// Returns `None` for signals with no type entry, unbounded or empty
-    /// intervals, or strictly-negative `hi`.
-    fn variable_delay_max_bound(&self, sig: SigId) -> Option<i32> {
-        let ty = self.sig_types.get(&sig)?;
-        if ty.interval().hi() < 0.0 {
-            return None;
-        }
-        check_delay_interval(ty).ok()
-    }
-
-    /// Returns a structural upper bound for a delay expression when interval
-    /// analysis cannot determine a finite bound.
-    ///
-    /// If `sig` is `SIGMIN(SigInt(n), _)` or `SIGMIN(_, SigInt(n))` with
-    /// `n >= 0`, returns `n` as a conservative upper bound.  This covers the
-    /// standard `de.delay(n, d, x) = x @ min(n, max(0, d))` pattern, where
-    /// the first argument to `min` is an explicit compile-time ceiling.
-    ///
-    /// Note: with correct `FConst` typing (`Interval::new_default()` rather
-    /// than `empty()`), `fSamplingFreq`-based expressions like `ma.SR`
-    /// produce a finite bounded interval through standard interval algebra
-    /// and do not reach this fallback.  This method acts as defence-in-depth
-    /// for any remaining case where interval analysis yields an empty or
-    /// unbounded result.
-    fn min_const_upper_bound(&self, sig: SigId) -> Option<i32> {
-        let SigMatch::Min(lhs, rhs) = match_sig(self.arena, sig) else {
-            return None;
-        };
-        let as_nonneg_int = |id: SigId| -> Option<i32> {
-            if let SigMatch::Int(n) = match_sig(self.arena, id)
-                && n >= 0
-            {
-                return Some(n);
-            }
-            None
-        };
-        as_nonneg_int(lhs).or_else(|| as_nonneg_int(rhs))
-    }
-
-    /// Resolve the delay line allocation size for `amount`:
-    ///
-    /// 1. Literal `Int` → exact constant.
-    /// 2. Bounded interval → interval upper bound.
-    /// 3. `SIGMIN(SigInt(n), _)` or `SIGMIN(_, SigInt(n))` → `n` (structural
-    ///    fallback for cases where interval analysis yields empty, such as
-    ///    expressions involving `fSamplingFreq`).
-    /// 4. Otherwise → `None` (caller emits an error).
-    fn delay_size_for_amount(&self, amount: SigId) -> Result<Option<i32>, SignalFirError> {
-        if let Some(c) = self.constant_delay_amount(amount)? {
-            return Ok(Some(c));
-        }
-        if let Some(b) = self.variable_delay_max_bound(amount) {
-            return Ok(Some(b));
-        }
-        Ok(self.min_const_upper_bound(amount))
-    }
-
-    /// Computes `next_power_of_two(delay + 1)` — the circular buffer size for
-    /// a given maximum delay in samples.  Errors on negative or overflowing input.
-    fn pow2limit_for_delay(&self, delay: i32) -> Result<usize, SignalFirError> {
-        let delay = usize::try_from(delay).map_err(|_| {
-            SignalFirError::new(
-                SignalFirErrorCode::UnsupportedSignalNode,
-                format!("SIGDELAY amount must be >= 0, got {delay}"),
-            )
-        })?;
-        let requested = delay.checked_add(1).ok_or_else(|| {
-            SignalFirError::new(
-                SignalFirErrorCode::UnsupportedSignalNode,
-                "SIGDELAY amount overflow while sizing delay line",
-            )
-        })?;
-        requested.checked_next_power_of_two().ok_or_else(|| {
-            SignalFirError::new(
-                SignalFirErrorCode::UnsupportedSignalNode,
-                format!("SIGDELAY amount too large to size delay line: {delay}"),
-            )
-        })
     }
 
     /// Emits one floating-point constant at the internal real precision.
@@ -3432,7 +3320,7 @@ impl<'a> SignalToFirLower<'a> {
             Some((var, _body)) => {
                 let delay_key = (var.as_u32(), index);
                 match self.rec_group_max_delay.get(&delay_key) {
-                    Some(&total_delay) => self.pow2limit_for_delay(total_delay)?,
+                    Some(&total_delay) => pow2limit_for_delay(total_delay)?,
                     None => 2,
                 }
             }

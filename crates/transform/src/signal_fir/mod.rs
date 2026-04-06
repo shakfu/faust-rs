@@ -44,6 +44,7 @@
 //! - `compiler` chooses whether to route requests to this fast-lane.
 
 mod cse;
+mod delay;
 mod error;
 mod module;
 mod placement;
