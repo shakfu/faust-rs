@@ -46,6 +46,7 @@
 mod cse;
 mod error;
 mod module;
+mod placement;
 mod planner;
 
 pub use error::{SignalFirError, SignalFirErrorCode};

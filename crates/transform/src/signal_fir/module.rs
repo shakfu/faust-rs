@@ -51,8 +51,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use fir::{
-    AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirMatch, FirMathOp,
-    FirStore, FirType, NamedType, SliderRange, SliderType, UiBoxType, match_fir,
+    AccessType, BargraphType, ButtonType, FirBinOp, FirBuilder, FirId, FirMathOp, FirStore,
+    FirType, NamedType, SliderRange, SliderType, UiBoxType,
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{
@@ -66,79 +66,8 @@ use crate::signal_prepare::SimpleSigType;
 
 use super::SignalFirOutput;
 use super::error::{SignalFirError, SignalFirErrorCode};
+use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
 use super::planner::SignalFirPlan;
-
-// ─── Signal-level reference counting ────────────────────────────────────────
-
-/// Pre-analysis of the signal DAG for Phase 1 placement decisions.
-///
-/// Returns:
-/// - `ref_counts`: how many times each `SigId` appears as a child. Nodes
-///   with count ≥ 2 are shared and benefit from named variable materialization.
-/// - `has_higher_parent`: set of `SigId`s that have at least one parent with
-///   strictly higher variability. These nodes sit at a variability boundary
-///   and must be materialized even if single-use, to ensure they execute in
-///   the correct bucket.
-fn analyze_signal_sharing(
-    arena: &TreeArena,
-    roots: &[SigId],
-    sig_types: &HashMap<SigId, SigType>,
-) -> (HashMap<SigId, usize>, HashSet<SigId>) {
-    let mut ref_counts: HashMap<SigId, usize> = HashMap::new();
-    let mut has_higher_parent: HashSet<SigId> = HashSet::new();
-    let mut visited: HashSet<SigId> = HashSet::new();
-    // Roots are consumed by the output store (Samp context).
-    let root_var = Some(Variability::Samp);
-    for &root in roots {
-        analyze_sig_rec(
-            arena,
-            root,
-            root_var,
-            sig_types,
-            &mut ref_counts,
-            &mut has_higher_parent,
-            &mut visited,
-        );
-    }
-    (ref_counts, has_higher_parent)
-}
-
-fn analyze_sig_rec(
-    arena: &TreeArena,
-    sig: SigId,
-    parent_var: Option<Variability>,
-    sig_types: &HashMap<SigId, SigType>,
-    ref_counts: &mut HashMap<SigId, usize>,
-    has_higher_parent: &mut HashSet<SigId>,
-    visited: &mut HashSet<SigId>,
-) {
-    *ref_counts.entry(sig).or_insert(0) += 1;
-
-    // Check variability boundary: parent variability > this node's variability.
-    let my_var = sig_types.get(&sig).map(|t| t.variability());
-    if let (Some(pv), Some(mv)) = (parent_var, my_var)
-        && pv > mv
-    {
-        has_higher_parent.insert(sig);
-    }
-
-    if !visited.insert(sig) {
-        return; // already descended into children
-    }
-    if let Some(node) = arena.node(sig) {
-        for &child_tid in node.children.as_slice() {
-            analyze_sig_rec(
-                arena,
-                child_tid,
-                my_var,
-                sig_types,
-                ref_counts,
-                has_higher_parent,
-                visited,
-            );
-        }
-    }
-}
 
 /// Fixed-size circular delay line resource used by fast-lane `SIGDELAY`.
 ///
@@ -668,41 +597,6 @@ pub fn build_module(
         store: lower.store,
         module,
     })
-}
-
-/// Execution-tier bucket for variability-driven statement placement.
-///
-/// Maps directly to the C++ Faust compiler's three execution tiers: init-time
-/// constants (`instanceConstants`), block-rate control expressions (before
-/// the sample loop in `compute`), and sample-rate expressions (inside the loop).
-///
-/// See [Phase 1 of the FIR runtime optimization plan](../../porting/fir-cse-runtime-optimizations-plan-2026-04-03-en.md#2-phase-1--variability-driven-statement-placement).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Bucket {
-    /// Init-time constants — written once in `instanceConstants`.
-    Constants,
-    /// Block-rate controls — written once per `compute()` call, before the loop.
-    Control,
-}
-
-/// Returns `true` when a FIR value node is *trivial* — meaning it should
-/// never be materialized into a named variable because it is already free
-/// to duplicate (literals, variable loads, null values).
-///
-/// This prevents variability placement from hoisting bare constants or
-/// variable references into unnecessary temporary variables.
-fn is_trivial_fir(store: &FirStore, node: FirId) -> bool {
-    matches!(
-        match_fir(store, node),
-        FirMatch::Int32 { .. }
-            | FirMatch::Int64 { .. }
-            | FirMatch::Float32 { .. }
-            | FirMatch::Float64 { .. }
-            | FirMatch::Bool { .. }
-            | FirMatch::LoadVar { .. }
-            | FirMatch::LoadVarAddress { .. }
-            | FirMatch::NullValue { .. }
-    )
 }
 
 /// Stateful lowering engine that converts a propagated signal forest into FIR.
