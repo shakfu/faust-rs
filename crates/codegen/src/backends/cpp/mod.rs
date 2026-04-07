@@ -671,20 +671,28 @@ fn emit_stmt_with_mode(
             end,
             step,
             body,
-            is_reverse: _,
+            is_reverse,
         } => {
             // init is a DeclareVar(kLoop) per FIR contract; extract its value.
-            let init_val = if let FirMatch::DeclareVar { init: Some(v), .. } = match_fir(store, init) {
-                emit_value(store, options, v)?
-            } else {
-                emit_value(store, options, init)?
-            };
+            let init_val =
+                if let FirMatch::DeclareVar { init: Some(v), .. } = match_fir(store, init) {
+                    emit_value(store, options, v)?
+                } else {
+                    emit_value(store, options, init)?
+                };
             let end = emit_value(store, options, end)?;
             let step = emit_value(store, options, step)?;
-            let _ = writeln!(
-                out,
-                "{tab}for (int {var} = {init_val}; {var} < {end}; {var} += {step}) {{"
-            );
+            if is_reverse {
+                let _ = writeln!(
+                    out,
+                    "{tab}for (int {var} = {init_val}; {var} > {end}; {var} = {var} + {step}) {{"
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "{tab}for (int {var} = {init_val}; {var} < {end}; {var} += {step}) {{"
+                );
+            }
             emit_block_with_mode(store, out, options, module_name, body, indent + 1, mode)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
@@ -693,10 +701,17 @@ fn emit_stmt_with_mode(
             var,
             upper,
             body,
-            is_reverse: _,
+            is_reverse,
         } => {
             let upper = emit_value(store, options, upper)?;
-            let _ = writeln!(out, "{tab}for (int {var} = 0; {var} < {upper}; ++{var}) {{");
+            if is_reverse {
+                let _ = writeln!(
+                    out,
+                    "{tab}for (int {var} = ({upper}) - 1; {var} >= 0; {var} = {var} - 1) {{"
+                );
+            } else {
+                let _ = writeln!(out, "{tab}for (int {var} = 0; {var} < {upper}; ++{var}) {{");
+            }
             emit_block_with_mode(store, out, options, module_name, body, indent + 1, mode)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())

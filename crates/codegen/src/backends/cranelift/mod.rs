@@ -1876,7 +1876,12 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         is_reverse: bool,
     ) -> Result<(), LoweringError> {
         // init is a DeclareVar(kLoop) per FIR contract; extract its value.
-        let init_inner = if let FirMatch::DeclareVar { init: Some(v), .. } = match_fir(self.store, init) { v } else { init };
+        let init_inner =
+            if let FirMatch::DeclareVar { init: Some(v), .. } = match_fir(self.store, init) {
+                v
+            } else {
+                init
+            };
         let init_v = self.lower_expr(init_inner, Some(&FirType::Int32))?.value();
         let header = self.fb.create_block();
         let body_block = self.fb.create_block();

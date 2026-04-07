@@ -203,9 +203,11 @@ fn fastlane_delay_echo_uses_circular_delay_line_and_iota_in_c_and_cpp() {
         fast_cpp.contains("[(fIOTA & 4095)]"),
         "C++ fast-lane should mask the delay-line write index"
     );
+    // `mem` (Delay1) now uses the Shift strategy (2-element buffer, no fIOTA masking)
+    // when max_copy_delay >= 1 (default 16). The large @(2205) line still uses fIOTA.
     assert!(
-        fast_cpp.contains("[(fIOTA & 1)]"),
-        "C++ fast-lane should use circular buffer for delay1 state"
+        !fast_cpp.contains("[(fIOTA & 1)]"),
+        "C++ fast-lane should use 2-element shift buffer for delay1, not fIOTA & 1"
     );
     assert!(
         fast_cpp.contains("[((fIOTA - 2205) & 4095)]"),
@@ -227,9 +229,10 @@ fn fastlane_delay_echo_uses_circular_delay_line_and_iota_in_c_and_cpp() {
         fast_c.contains("[(dsp->fIOTA & 4095)]"),
         "C fast-lane should mask the delay-line write index"
     );
+    // `mem` (Delay1) now uses the Shift strategy (2-element buffer, no fIOTA masking).
     assert!(
-        fast_c.contains("[(dsp->fIOTA & 1)]"),
-        "C fast-lane should use circular buffer for delay1 state"
+        !fast_c.contains("[(dsp->fIOTA & 1)]"),
+        "C fast-lane should use 2-element shift buffer for delay1, not fIOTA & 1"
     );
     assert!(
         fast_c.contains("[((dsp->fIOTA - 2205) & 4095)]"),

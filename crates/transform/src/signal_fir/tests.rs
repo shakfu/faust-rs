@@ -1253,11 +1253,13 @@ fn delay1_lowers_to_struct_state_declaration_and_update() {
     let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
         panic!("compute loop body block expected");
     };
+    // With max_copy_delay >= 1 (default), Delay1 uses the Shift strategy which
+    // writes to an array slot (StoreTable), not a named variable (StoreVar).
     assert!(
         stmts
             .iter()
-            .any(|id| matches!(match_fir(&out.store, *id), FirMatch::StoreVar { .. })),
-        "delay state should create compute update store"
+            .any(|id| matches!(match_fir(&out.store, *id), FirMatch::StoreTable { .. })),
+        "delay state should create compute update store into array slot"
     );
 }
 

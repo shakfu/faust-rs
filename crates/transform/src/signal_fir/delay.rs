@@ -359,13 +359,7 @@ pub(super) trait DelayLineModel {
 
     /// FIR expression: index of the slot that is `amount` samples behind the
     /// write pointer.
-    fn read_index(
-        &self,
-        store: &mut FirStore,
-        iota: FirId,
-        amount: FirId,
-        size: usize,
-    ) -> FirId;
+    fn read_index(&self, store: &mut FirStore, iota: FirId, amount: FirId, size: usize) -> FirId;
 
     /// FIR expression: `fIOTA + 1` (advance write pointer by one step).
     fn bump(&self, store: &mut FirStore, iota: FirId) -> FirId;
@@ -395,13 +389,7 @@ impl DelayLineModel for CircularPow2Model {
         FirBuilder::new(store).binop(FirBinOp::And, iota, mask, FirType::Int32)
     }
 
-    fn read_index(
-        &self,
-        store: &mut FirStore,
-        iota: FirId,
-        amount: FirId,
-        size: usize,
-    ) -> FirId {
+    fn read_index(&self, store: &mut FirStore, iota: FirId, amount: FirId, size: usize) -> FirId {
         let raw = FirBuilder::new(store).binop(FirBinOp::Sub, iota, amount, FirType::Int32);
         let mask =
             FirBuilder::new(store).int32(i32::try_from(size.saturating_sub(1)).unwrap_or(i32::MAX));
@@ -520,7 +508,12 @@ impl<'a> DelayFirCtx<'a> {
         };
         let decl = {
             let mut b = FirBuilder::new(self.store);
-            b.declare_var(counter_name.clone(), FirType::Int32, AccessType::Struct, None)
+            b.declare_var(
+                counter_name.clone(),
+                FirType::Int32,
+                AccessType::Struct,
+                None,
+            )
         };
         self.struct_declarations.push(decl);
         let mut b = FirBuilder::new(self.store);
@@ -566,10 +559,7 @@ impl<'a> DelayFirCtx<'a> {
             _ => {
                 return Err(SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
-                    format!(
-                        "cannot zero-init delay-line for signal {}",
-                        sig.as_u32()
-                    ),
+                    format!("cannot zero-init delay-line for signal {}", sig.as_u32()),
                 ));
             }
         };
@@ -638,6 +628,11 @@ impl DelayManager {
             rec_group_max_delay: HashMap::new(),
             scheduled_delay_writes: HashSet::new(),
         }
+    }
+
+    /// Returns the configured maximum copy-shift delay threshold.
+    pub(super) fn max_copy_delay(&self) -> u32 {
+        self.options.max_copy_delay
     }
 
     // ── Scan pass ────────────────────────────────────────────────────────────

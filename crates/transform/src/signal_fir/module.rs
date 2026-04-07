@@ -66,8 +66,8 @@ use crate::signal_prepare::SimpleSigType;
 
 use super::SignalFirOutput;
 use super::delay::{
-    DelayFirCtx, DelayLineInfo, DelayManager, DelayOptions, DelayStrategy,
-    delay_size_for_amount, pow2limit_for_delay,
+    DelayFirCtx, DelayLineInfo, DelayManager, DelayOptions, DelayStrategy, delay_size_for_amount,
+    pow2limit_for_delay,
 };
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
@@ -241,6 +241,11 @@ pub fn build_module(
             Some(load_chan_ptr),
         ));
     }
+    // Deferred shift-copy blocks run after all signal outputs are stored.
+    // This matches reference Faust's write→read→shift ordering for the Shift strategy.
+    lower
+        .sample_statements
+        .extend(lower.deferred_shift_writes.iter().copied());
     lower
         .sample_statements
         .extend(lower.compute_updates.iter().copied());
@@ -654,6 +659,12 @@ struct SignalToFirLower<'a> {
     control_statements: Vec<FirId>,
     /// Per-sample loop body: reads, arithmetic, output stores, deferred updates.
     sample_statements: Vec<FirId>,
+    /// Shift-copy loop blocks deferred until after output stores.
+    ///
+    /// For the `Shift` delay strategy, the shift loop must run after the
+    /// output is read (write-at-0 is immediate; shift happens last, matching
+    /// reference Faust's `write → read → shift` ordering).
+    deferred_shift_writes: Vec<FirId>,
     /// State-update stores appended after the per-sample body (delay writes, rec shifts).
     compute_updates: Vec<FirId>,
     /// Maps each signal node to its generated state-variable name.
@@ -818,6 +829,7 @@ impl<'a> SignalToFirLower<'a> {
             clear_statements: Vec::new(),
             control_statements: Vec::new(),
             sample_statements: Vec::new(),
+            deferred_shift_writes: Vec::new(),
             compute_updates: Vec::new(),
             state_name_by_node: HashMap::new(),
             rec_array_by_group_index: HashMap::new(),
@@ -866,7 +878,9 @@ impl<'a> SignalToFirLower<'a> {
     /// Delegates the signal-tree traversal to [`DelayManager::scan_signals`]
     /// and the FIR allocation to [`Self::ensure_delay_line_decl`].
     fn prepare_delay_lines(&mut self, outputs: &[SigId]) -> Result<(), SignalFirError> {
-        let max_delays = self.delay.scan_signals(self.arena, self.sig_types, outputs)?;
+        let max_delays = self
+            .delay
+            .scan_signals(self.arena, self.sig_types, outputs)?;
         for (carried, delay) in max_delays {
             self.ensure_delay_line_decl(carried, delay)?;
         }
@@ -1027,8 +1041,16 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Input(index) => self.lower_input(index)?,
             SigMatch::Output(_, inner) => self.lower_signal(inner)?,
             SigMatch::Delay1(value) => {
-                let init = self.zero_value_for_signal(sig)?;
-                self.lower_delay_state(sig, value, init)?
+                // Recursion feedback must always use the fIOTA circular-buffer path.
+                // For standalone Delay1 nodes, use the Shift strategy when enabled.
+                if self.recursion_feedback_info(value)?.is_none()
+                    && self.delay.max_copy_delay() >= 1
+                {
+                    self.lower_shift_delay1(sig, value)?
+                } else {
+                    let init = self.zero_value_for_signal(sig)?;
+                    self.lower_delay_state(sig, value, init)?
+                }
             }
             SigMatch::Delay(value, amount) => self.lower_delay(sig, value, amount)?,
             SigMatch::Prefix(init_sig, value) => {
@@ -1468,8 +1490,19 @@ impl<'a> SignalToFirLower<'a> {
         match line.strategy.clone() {
             DelayStrategy::Shift => {
                 if self.delay.schedule_delay_write(value) {
-                    let shift_write = self.emit_shift_write(&line.name, line.size, current, read_ty.clone());
-                    self.sample_statements.push(shift_write);
+                    // Write buf[0] = current immediately (before the read).
+                    let store_0 = self.emit_store_at_zero(&line.name, current);
+                    self.sample_statements.push(store_0);
+                    // Defer shift copies until after all output stores.
+                    let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
+                    if delay_n <= 2 {
+                        let copies =
+                            self.emit_unrolled_shift_copies(&line.name, delay_n, read_ty.clone());
+                        self.deferred_shift_writes.extend(copies);
+                    } else {
+                        let shift = self.emit_shift_loop(&line.name, delay_n, read_ty.clone());
+                        self.deferred_shift_writes.push(shift);
+                    }
                 }
                 let amount_value = self.lower_signal(amount)?;
                 let mut b = FirBuilder::new(&mut self.store);
@@ -1509,7 +1542,8 @@ impl<'a> SignalToFirLower<'a> {
                     ));
                 }
                 let amount_value = self.lower_signal(amount)?;
-                let read_index = self.if_wrapping_read_index(&counter_name, amount_value, line.size);
+                let read_index =
+                    self.if_wrapping_read_index(&counter_name, amount_value, line.size);
                 let mut b = FirBuilder::new(&mut self.store);
                 Ok(b.load_table(line.name.clone(), AccessType::Struct, read_index, read_ty))
             }
@@ -1578,6 +1612,48 @@ impl<'a> SignalToFirLower<'a> {
                 .push(b.store_table(name, AccessType::Struct, write_index, next));
         }
         Ok(out)
+    }
+
+    /// Lowers a standalone `Delay1(value)` node using the `Shift` strategy.
+    ///
+    /// Allocates a shift buffer (`buf[0]` = current, `buf[1]` = previous),
+    /// matching the reference C++ Faust pattern:
+    /// ```text
+    /// buf[0] = value;       // immediate write
+    /// output = buf[1];      // read previous sample
+    /// buf[1] = buf[0];      // deferred shift (after output stores)
+    /// ```
+    ///
+    /// The buffer may be LARGER than 2 if the same carried signal is also used
+    /// in a `SIGDELAY(value, N)` for N > 1 (e.g. `(3*x)@1` and `(3*x)@2` share
+    /// one buffer sized to `N+1`).  In that case the shift extent is based on
+    /// `line.size - 1` so all slots are kept in sync.
+    ///
+    /// Only called when `max_copy_delay >= 1` and `value` is not a recursion
+    /// feedback projection.
+    fn lower_shift_delay1(&mut self, node: SigId, value: SigId) -> Result<FirId, SignalFirError> {
+        let line = self.ensure_delay_line_decl(value, 1)?;
+        let read_ty = self.signal_fir_type(node)?;
+        let current = self.lower_signal(value)?;
+        if self.delay.schedule_delay_write(value) {
+            // Write buf[0] = current immediately.
+            let store_0 = self.emit_store_at_zero(&line.name, current);
+            self.sample_statements.push(store_0);
+            // Defer shift over the FULL buffer (not just 1 slot): the pre-scan
+            // may have sized this buffer for a larger SIGDELAY on the same signal.
+            let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
+            if delay_n <= 2 {
+                let copies = self.emit_unrolled_shift_copies(&line.name, delay_n, read_ty.clone());
+                self.deferred_shift_writes.extend(copies);
+            } else {
+                let shift = self.emit_shift_loop(&line.name, delay_n, read_ty.clone());
+                self.deferred_shift_writes.push(shift);
+            }
+        }
+        // Return buf[1] (1 sample old).
+        let one = self.lower_int32_const(1);
+        let mut b = FirBuilder::new(&mut self.store);
+        Ok(b.load_table(line.name, AccessType::Struct, one, read_ty))
     }
 
     /// Returns the active recursion carrier if `value` is `SIGPROJ(i, group)`
@@ -1740,88 +1816,110 @@ impl<'a> SignalToFirLower<'a> {
         b.store_var("fIOTA", AccessType::Struct, next)
     }
 
-    /// Emits the combined shift loop + store-at-0 for a `ShiftModel` delay write.
+    /// Emits `buf[0] = new_value` — the immediate write for the Shift strategy.
+    fn emit_store_at_zero(&mut self, name: &str, new_value: FirId) -> FirId {
+        let zero = self.lower_int32_const(0);
+        let mut b = FirBuilder::new(&mut self.store);
+        b.store_table(name, AccessType::Struct, zero, new_value)
+    }
+
+    /// Emits unrolled shift copies for a Shift delay line with `delay ≤ 2`.
     ///
-    /// Generates:
-    /// ```text
-    /// for (int lShiftN = 0; lShiftN < size-1; lShiftN += 1)
-    ///     buf[(size-1) - lShiftN] = buf[(size-2) - lShiftN];
-    /// buf[0] = new_value;
-    /// ```
-    ///
-    /// The forward-indexed rewrite (`j = 0..size-2`, store at `size-1-j`, read
-    /// from `size-2-j`) is equivalent to a reverse loop but works with the
-    /// forward-only `for_loop` FIR instruction.
-    fn emit_shift_write(
+    /// Returns individual store instructions in high-to-low order:
+    /// - delay=1: `[buf[1] = buf[0]]`
+    /// - delay=2: `[buf[2] = buf[1], buf[1] = buf[0]]`
+    fn emit_unrolled_shift_copies(
         &mut self,
         name: &str,
-        size: usize,
-        new_value: FirId,
+        delay: i32,
         elem_ty: FirType,
-    ) -> FirId {
-        let loop_var = self.fresh_loop_var("lShift");
-        // Loop runs from 0 to size-2 (exclusive end = size-1).
-        // ForLoop init must be DeclareVar(kLoop) per FIR-L01.
-        let init = {
-            let zero = self.lower_int32_const(0);
-            let mut b = FirBuilder::new(&mut self.store);
-            b.declare_var(loop_var.clone(), FirType::Int32, AccessType::Loop, Some(zero))
-        };
-        let end = {
-            let mut b = FirBuilder::new(&mut self.store);
-            b.int32(i32::try_from(size.saturating_sub(1)).unwrap_or(i32::MAX))
-        };
-        let step = self.lower_int32_const(1);
-        let body = {
-            let lv = {
+    ) -> Vec<FirId> {
+        let delay_usize = usize::try_from(delay).unwrap_or(0);
+        let mut copies = Vec::with_capacity(delay_usize);
+        // Iterate from high to low: j = delay, delay-1, ..., 1
+        for j in (1..=delay_usize).rev() {
+            let j_idx = {
                 let mut b = FirBuilder::new(&mut self.store);
-                b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+                b.int32(i32::try_from(j).unwrap_or(i32::MAX))
             };
-            // store_at  = (size-1) - lv
-            let store_idx = {
-                let sm1 = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.int32(i32::try_from(size.saturating_sub(1)).unwrap_or(i32::MAX))
-                };
-                let lv2 = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
-                };
+            let j_minus_1_idx = {
                 let mut b = FirBuilder::new(&mut self.store);
-                b.binop(FirBinOp::Sub, sm1, lv2, FirType::Int32)
-            };
-            // read_from = (size-2) - lv
-            let read_idx = {
-                let sm2 = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.int32(i32::try_from(size.saturating_sub(2)).unwrap_or(i32::MAX))
-                };
-                let mut b = FirBuilder::new(&mut self.store);
-                b.binop(FirBinOp::Sub, sm2, lv, FirType::Int32)
+                b.int32(i32::try_from(j - 1).unwrap_or(i32::MAX))
             };
             let loaded = {
                 let mut b = FirBuilder::new(&mut self.store);
-                b.load_table(name, AccessType::Struct, read_idx, elem_ty.clone())
+                b.load_table(name, AccessType::Struct, j_minus_1_idx, elem_ty.clone())
             };
             let stored = {
                 let mut b = FirBuilder::new(&mut self.store);
-                b.store_table(name, AccessType::Struct, store_idx, loaded)
+                b.store_table(name, AccessType::Struct, j_idx, loaded)
+            };
+            copies.push(stored);
+        }
+        copies
+    }
+
+    /// Emits a reverse `ForLoop` shift for a Shift delay line with `delay ≥ 3`.
+    ///
+    /// Generates (matching reference C++ Faust):
+    /// ```text
+    /// for (int j = delay; j > 0; j = j + -1)
+    ///     buf[j] = buf[j - 1];
+    /// ```
+    fn emit_shift_loop(&mut self, name: &str, delay: i32, elem_ty: FirType) -> FirId {
+        let loop_var = self.fresh_loop_var("j");
+        // init: j = delay (DeclareVar(kLoop) per FIR-L01)
+        let init = {
+            let delay_val = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.int32(delay)
+            };
+            let mut b = FirBuilder::new(&mut self.store);
+            b.declare_var(
+                loop_var.clone(),
+                FirType::Int32,
+                AccessType::Loop,
+                Some(delay_val),
+            )
+        };
+        // end: 0  (condition: j > 0, i.e. is_reverse=true)
+        let end = self.lower_int32_const(0);
+        // step: -1
+        let step = {
+            let mut b = FirBuilder::new(&mut self.store);
+            b.int32(-1)
+        };
+        // body: buf[j] = buf[j-1]
+        let body = {
+            let j_for_store = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+            };
+            let j_minus_1 = {
+                let j = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+                };
+                let one = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.int32(1)
+                };
+                let mut b = FirBuilder::new(&mut self.store);
+                b.binop(FirBinOp::Sub, j, one, FirType::Int32)
+            };
+            let loaded = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.load_table(name, AccessType::Struct, j_minus_1, elem_ty.clone())
+            };
+            let stored = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.store_table(name, AccessType::Struct, j_for_store, loaded)
             };
             let mut b = FirBuilder::new(&mut self.store);
             b.block(&[stored])
         };
-        let shift_loop = {
-            let mut b = FirBuilder::new(&mut self.store);
-            b.for_loop(loop_var, init, end, step, body, false)
-        };
-        // buf[0] = new_value
-        let zero = self.lower_int32_const(0);
-        let store_0 = {
-            let mut b = FirBuilder::new(&mut self.store);
-            b.store_table(name, AccessType::Struct, zero, new_value)
-        };
         let mut b = FirBuilder::new(&mut self.store);
-        b.block(&[shift_loop, store_0])
+        b.for_loop(loop_var, init, end, step, body, true /* is_reverse */)
     }
 
     /// Computes the read index for an `IfWrapping` delay line:
@@ -1839,12 +1937,7 @@ impl<'a> SignalToFirLower<'a> {
     /// ```
     ///
     /// `FirId` is `Copy` so `raw` and `size_fir` can be reused across binop calls.
-    fn if_wrapping_read_index(
-        &mut self,
-        counter_name: &str,
-        amount: FirId,
-        size: usize,
-    ) -> FirId {
+    fn if_wrapping_read_index(&mut self, counter_name: &str, amount: FirId, size: usize) -> FirId {
         let size_i32 = i32::try_from(size).unwrap_or(i32::MAX);
         let counter = {
             let mut b = FirBuilder::new(&mut self.store);
@@ -3340,12 +3433,10 @@ impl<'a> SignalToFirLower<'a> {
         // recursion output.  The map is keyed by (var_id, proj_index) where
         // var is the symbolic variable bound by SYMREC.
         let size = match match_sym_rec(self.arena, group) {
-            Some((var, _body)) => {
-                match self.delay.rec_max_delay(var.as_u32(), index) {
-                    Some(total_delay) => pow2limit_for_delay(total_delay)?,
-                    None => 2,
-                }
-            }
+            Some((var, _body)) => match self.delay.rec_max_delay(var.as_u32(), index) {
+                Some(total_delay) => pow2limit_for_delay(total_delay)?,
+                None => 2,
+            },
             None => 2,
         };
         let array_ty = FirType::Array(Box::new(typ.clone()), size);

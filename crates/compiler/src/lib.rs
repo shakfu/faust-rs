@@ -701,8 +701,16 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<FirCompileOutput, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_fir(source_name, &signals, lane, self.fir_verify, self.real_type, self.max_copy_delay, self.delay_line_threshold)
-            .map_err(|e| lower_fir_error_to_compiler(source_name, e))
+        lower_signals_to_fir(
+            source_name,
+            &signals,
+            lane,
+            self.fir_verify,
+            self.real_type,
+            self.max_copy_delay,
+            self.delay_line_threshold,
+        )
+        .map_err(|e| lower_fir_error_to_compiler(source_name, e))
     }
 
     /// Parses + evaluates + propagates one source, then emits a WASM module
@@ -739,9 +747,16 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<WasmModule, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        let lowered =
-            lower_signals_to_fir(source_name, &signals, lane, self.fir_verify, self.real_type, self.max_copy_delay, self.delay_line_threshold)
-                .map_err(|error| lower_fir_error_to_compiler(source_name, error))?;
+        let lowered = lower_signals_to_fir(
+            source_name,
+            &signals,
+            lane,
+            self.fir_verify,
+            self.real_type,
+            self.max_copy_delay,
+            self.delay_line_threshold,
+        )
+        .map_err(|error| lower_fir_error_to_compiler(source_name, error))?;
         let json_context = wasm_json_context_for_memory_source(
             source_name,
             &signals,
@@ -869,9 +884,16 @@ impl Compiler {
         compile_options: String,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        let lowered =
-            lower_signals_to_fir(source_name, &signals, lane, self.fir_verify, self.real_type, self.max_copy_delay, self.delay_line_threshold)
-                .map_err(|error| lower_fir_error_to_compiler(source_name, error))?;
+        let lowered = lower_signals_to_fir(
+            source_name,
+            &signals,
+            lane,
+            self.fir_verify,
+            self.real_type,
+            self.max_copy_delay,
+            self.delay_line_threshold,
+        )
+        .map_err(|error| lower_fir_error_to_compiler(source_name, error))?;
         let json = build_strict_json_description(
             &lowered.store,
             lowered.module,
@@ -971,8 +993,16 @@ impl Compiler {
     ) -> Result<FirCompileOutput, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_fir(&source, &signals, lane, self.fir_verify, self.real_type, self.max_copy_delay, self.delay_line_threshold)
-            .map_err(|e| lower_fir_error_to_compiler(&source, e))
+        lower_signals_to_fir(
+            &source,
+            &signals,
+            lane,
+            self.fir_verify,
+            self.real_type,
+            self.max_copy_delay,
+            self.delay_line_threshold,
+        )
+        .map_err(|e| lower_fir_error_to_compiler(&source, e))
     }
 
     /// Parses + evaluates + propagates one file, then emits a WASM module
@@ -1002,9 +1032,16 @@ impl Compiler {
     ) -> Result<WasmModule, CompilerError> {
         let source = path.display().to_string();
         let signals = self.compile_file_to_signals(path, search_paths)?;
-        let lowered =
-            lower_signals_to_fir(&source, &signals, lane, self.fir_verify, self.real_type, self.max_copy_delay, self.delay_line_threshold)
-                .map_err(|error| lower_fir_error_to_compiler(&source, error))?;
+        let lowered = lower_signals_to_fir(
+            &source,
+            &signals,
+            lane,
+            self.fir_verify,
+            self.real_type,
+            self.max_copy_delay,
+            self.delay_line_threshold,
+        )
+        .map_err(|error| lower_fir_error_to_compiler(&source, error))?;
         let json_context = wasm_json_context_for_file(
             path,
             search_paths,
@@ -1081,9 +1118,16 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let source = path.display().to_string();
         let signals = self.compile_file_to_signals(path, search_paths)?;
-        let lowered =
-            lower_signals_to_fir(&source, &signals, lane, self.fir_verify, self.real_type, self.max_copy_delay, self.delay_line_threshold)
-                .map_err(|error| lower_fir_error_to_compiler(&source, error))?;
+        let lowered = lower_signals_to_fir(
+            &source,
+            &signals,
+            lane,
+            self.fir_verify,
+            self.real_type,
+            self.max_copy_delay,
+            self.delay_line_threshold,
+        )
+        .map_err(|error| lower_fir_error_to_compiler(&source, error))?;
         let mut library_list: Vec<String> = signals
             .parse
             .used_files
@@ -2177,8 +2221,14 @@ fn lower_signals_to_interp_transform_fastlane(
     delay_line_threshold: u32,
 ) -> Result<String, LowerToInterpError> {
     let module_name = resolve_module_name(options.module_name.as_deref(), source_name);
-    let lowered = lower_signals_to_fir_transform_fastlane(output, module_name, real_type, max_copy_delay, delay_line_threshold)
-        .map_err(LowerToInterpError::Transform)?;
+    let lowered = lower_signals_to_fir_transform_fastlane(
+        output,
+        module_name,
+        real_type,
+        max_copy_delay,
+        delay_line_threshold,
+    )
+    .map_err(LowerToInterpError::Transform)?;
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToInterpError::Verify)?;
     match real_type {
         RealType::Float32 => {
@@ -2223,9 +2273,13 @@ fn lower_signals_to_fir(
             output,
             module_name,
         )),
-        SignalFirLane::TransformFastLane => {
-            lower_signals_to_fir_transform_fastlane(output, module_name, real_type, max_copy_delay, delay_line_threshold)
-        }
+        SignalFirLane::TransformFastLane => lower_signals_to_fir_transform_fastlane(
+            output,
+            module_name,
+            real_type,
+            max_copy_delay,
+            delay_line_threshold,
+        ),
     }
     .map_err(LowerToFirError::Transform)?;
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToFirError::Verify)?;
@@ -2401,8 +2455,14 @@ fn lower_signals_to_cpp_transform_fastlane(
     delay_line_threshold: u32,
 ) -> Result<String, LowerToCppError> {
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
-    let lowered = lower_signals_to_fir_transform_fastlane(output, module_name, real_type, max_copy_delay, delay_line_threshold)
-        .map_err(LowerError::Transform)?;
+    let lowered = lower_signals_to_fir_transform_fastlane(
+        output,
+        module_name,
+        real_type,
+        max_copy_delay,
+        delay_line_threshold,
+    )
+    .map_err(LowerError::Transform)?;
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerError::Verify)?;
     generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerError::Codegen)
 }
@@ -2479,8 +2539,14 @@ fn lower_signals_to_c_transform_fastlane(
     delay_line_threshold: u32,
 ) -> Result<String, LowerToCError> {
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
-    let lowered = lower_signals_to_fir_transform_fastlane(output, module_name, real_type, max_copy_delay, delay_line_threshold)
-        .map_err(LowerError::Transform)?;
+    let lowered = lower_signals_to_fir_transform_fastlane(
+        output,
+        module_name,
+        real_type,
+        max_copy_delay,
+        delay_line_threshold,
+    )
+    .map_err(LowerError::Transform)?;
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerError::Verify)?;
     generate_c_module(&lowered.store, lowered.module, options).map_err(LowerError::Codegen)
 }

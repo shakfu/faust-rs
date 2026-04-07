@@ -1019,20 +1019,28 @@ fn emit_stmt(
             end,
             step,
             body,
-            ..
+            is_reverse,
         } => {
             // init is a DeclareVar(kLoop) per FIR contract; extract its value.
-            let init_val = if let FirMatch::DeclareVar { init: Some(v), .. } = match_fir(store, init) {
-                emit_value(store, options, v)?
-            } else {
-                emit_value(store, options, init)?
-            };
+            let init_val =
+                if let FirMatch::DeclareVar { init: Some(v), .. } = match_fir(store, init) {
+                    emit_value(store, options, v)?
+                } else {
+                    emit_value(store, options, init)?
+                };
             let end = emit_value(store, options, end)?;
             let step = emit_value(store, options, step)?;
-            let _ = writeln!(
-                out,
-                "{tab}for (int {var} = {init_val}; {var} < {end}; {var} = {var} + {step}) {{"
-            );
+            if is_reverse {
+                let _ = writeln!(
+                    out,
+                    "{tab}for (int {var} = {init_val}; {var} > {end}; {var} = {var} + {step}) {{"
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "{tab}for (int {var} = {init_val}; {var} < {end}; {var} = {var} + {step}) {{"
+                );
+            }
             emit_block_with_mode(store, out, options, body, indent + 1, mode)?;
             let _ = writeln!(out, "{tab}}}");
             Ok(())
