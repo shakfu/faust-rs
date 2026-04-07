@@ -1633,6 +1633,14 @@ impl<'a> SignalToFirLower<'a> {
     /// feedback projection.
     fn lower_shift_delay1(&mut self, node: SigId, value: SigId) -> Result<FirId, SignalFirError> {
         let line = self.ensure_delay_line_decl(value, 1)?;
+        // If the pre-scan allocated a non-Shift buffer for this signal (because
+        // the same signal is also used with a delay > max_copy_delay elsewhere),
+        // fall back to the fIOTA circular-buffer path so both accesses share
+        // the same consistent buffer geometry.
+        if !matches!(line.strategy, DelayStrategy::Shift) {
+            let init = self.zero_value_for_signal(node)?;
+            return self.lower_delay_state(node, value, init);
+        }
         let read_ty = self.signal_fir_type(node)?;
         let current = self.lower_signal(value)?;
         if self.delay.schedule_delay_write(value) {
