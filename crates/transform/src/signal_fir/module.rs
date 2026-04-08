@@ -758,12 +758,26 @@ struct SignalToFirLower<'a> {
     sig_at_boundary: HashSet<SigId>,
 }
 
-/// Two-slot carrier for one output of a recursive group (`SIGPROJ(i, SYMREC(…))`).
+/// Storage strategy used by one recursion carrier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecursionStorageStrategy {
+    /// Two-slot carrier:
+    /// - current sample in slot `0`
+    /// - previous sample in slot `1`
+    /// - post-output finalization copy `slot1 = slot0`
+    TwoSlotShift,
+    /// Circular carrier larger than 2 slots, indexed by `fIOTA`.
+    Circular,
+}
+
+/// Carrier metadata for one output of a recursive group (`SIGPROJ(i, SYMREC(…))`).
 ///
 /// Each output body in a multi-output recursion group gets its own array.
-/// Slot `[1]` holds the previous-sample value; slot `[0]` holds the
-/// current-sample value.  After outputs are stored, the lowering emits
-/// `state[1] = state[0]` to shift the window forward.
+/// The carrier uses one of two storage strategies:
+///
+/// - [`RecursionStorageStrategy::TwoSlotShift`] for the default 2-slot case
+/// - [`RecursionStorageStrategy::Circular`] when accumulated delay analysis
+///   upsizes the carrier to serve delayed reads directly
 ///
 /// Source provenance (C++): `signalFIRCompiler.cpp` (`generateRecProj`,
 /// `generateRec`), emitted as `fRecN[2]` / `iRecN[2]`.
@@ -780,6 +794,16 @@ struct RecArrayInfo {
     /// sized to `pow2limit(N + 1 + 1)` so the delay can be served directly
     /// from this array instead of a separate `fVec`.
     size: usize,
+}
+
+impl RecArrayInfo {
+    fn storage_strategy(&self) -> RecursionStorageStrategy {
+        if self.size == 2 {
+            RecursionStorageStrategy::TwoSlotShift
+        } else {
+            RecursionStorageStrategy::Circular
+        }
+    }
 }
 
 /// One extern prototype recovered from a Faust `FFUN(...)` descriptor.
@@ -1553,7 +1577,10 @@ impl<'a> SignalToFirLower<'a> {
                 "prepared recursion feedback type should match delay1 output type"
             );
             let total_offset = carried_delay.saturating_add(1);
-            let prev_index = if rec_info.size == 2 && total_offset == 1 {
+            let prev_index = if rec_info.storage_strategy()
+                == RecursionStorageStrategy::TwoSlotShift
+                && total_offset == 1
+            {
                 self.lower_int32_const(1)
             } else {
                 // Merged recursion-delay buffers larger than 2 still use the
@@ -3102,7 +3129,8 @@ impl<'a> SignalToFirLower<'a> {
         // ── Fast path: active reference inside a body being lowered ──
         if let Some(info) = self.active_recursion_info(group, index_usize)? {
             let real_ty = self.signal_fir_type(node)?;
-            let current_index = if info.size == 2 {
+            let current_index = if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift
+            {
                 self.lower_int32_const(0)
             } else {
                 self.ensure_iota_state();
@@ -3177,19 +3205,20 @@ impl<'a> SignalToFirLower<'a> {
                 // (keyed by the delay node), so there is no aliasing and no risk of a
                 // double-write to the same slot.
                 let info = &group_arrays[i];
-                let write_index = if info.size == 2 {
-                    self.lower_int32_const(0)
-                } else {
-                    self.ensure_iota_state();
-                    let iota = current_iota_index(&mut self.store);
-                    masked_delay_index(&mut self.store, iota, info.size)
-                };
+                let write_index =
+                    if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
+                        self.lower_int32_const(0)
+                    } else {
+                        self.ensure_iota_state();
+                        let iota = current_iota_index(&mut self.store);
+                        masked_delay_index(&mut self.store, iota, info.size)
+                    };
                 let current_store = {
                     let mut b = FirBuilder::new(&mut self.store);
                     b.store_table(info.name.clone(), AccessType::Struct, write_index, rhs)
                 };
                 self.sample_phases.immediate.push(current_store);
-                if info.size == 2 {
+                if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
                     let one = self.lower_int32_const(1);
                     let slot0 = {
                         let zero = self.lower_int32_const(0);
@@ -3216,7 +3245,7 @@ impl<'a> SignalToFirLower<'a> {
         // ── Return the result for the requested index ──
         let info = &group_arrays[canonical_index];
         let out_ty = self.signal_fir_type(node)?;
-        let current_index = if info.size == 2 {
+        let current_index = if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
             self.lower_int32_const(0)
         } else {
             self.ensure_iota_state();

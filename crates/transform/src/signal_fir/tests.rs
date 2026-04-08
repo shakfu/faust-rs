@@ -1349,6 +1349,13 @@ fn nested_feedback_delay1_chain_reuses_one_recursion_carrier() {
         "nested feedback delay chain should upsize the recursion carrier to hold two delayed reads"
     );
     assert!(
+        struct_items.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar { ref name, .. } if name == "fIOTA"
+        )),
+        "upsized recursion carrier should use the circular recursion strategy"
+    );
+    assert!(
         delay_arrays.is_empty(),
         "nested feedback delay chain should not allocate auxiliary delay vectors"
     );
