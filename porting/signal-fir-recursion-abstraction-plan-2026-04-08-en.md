@@ -2,7 +2,7 @@
 
 **Date**: 2026-04-08
 **Scope**: `crates/transform/src/signal_fir/module.rs`
-**Status**: Design
+**Status**: Partially implemented
 **Goal**: make recursion lowering easier to reason about by introducing
 explicit abstractions for:
 
@@ -12,6 +12,24 @@ explicit abstractions for:
 
 without changing the current semantic parity with the Faust C++ compiler.
 
+## Implementation Status Snapshot
+
+Implemented on 2026-04-08:
+
+- `RecursionStorageStrategy`
+- `RecursionCarrierRef`
+- `RecursionDelayRef`
+- `resolve_recursion_carrier(...)`
+- `resolve_active_recursion_carrier(...)`
+- `resolve_recursion_delay_ref(...)`
+- migration of key call sites away from ad hoc `size == 2` checks
+
+Still open:
+
+- factor recursion read/write/finalize helpers into explicit local APIs
+- decide whether that factoring should remain in `module.rs` or move into a
+  dedicated recursion-focused module later
+
 ---
 
 ## 1. Problem
@@ -20,7 +38,7 @@ The recent delay work made the `delay.rs` / `module.rs` boundary much cleaner,
 but the recursion side of `signal_fir` is still organized mostly as a set of
 correct local mechanisms rather than a clearly named design.
 
-The current logic is spread across:
+The pre-refactor logic was spread across:
 
 - `recursion_delay_chain_info`
 - `recursion_carrier_info`
@@ -67,7 +85,7 @@ Today, a `Proj(i, group)` may resolve to:
 - a materialized top-level recursion group carrier (`SYMREC` path)
 - no carrier at all (not a recursion projection)
 
-This is currently encoded procedurally across:
+This was previously encoded procedurally across:
 
 - `active_recursion_info`
 - `recursion_carrier_info`
@@ -86,21 +104,21 @@ Today there are really two recursion storage strategies:
   - indexed by `fIOTA`
   - used when recursion-delay analysis upsizes the carrier
 
-That distinction is semantically important, but it is not currently modeled as
-an explicit enum or trait.
+That distinction is semantically important, and is now modeled explicitly by
+`RecursionStorageStrategy`.
 
 ### 3.3 Delay-chain reuse over recursion carriers
 
 `Delay1^k(Proj(...))` chains are now supported through accumulated delay
 analysis and carrier reuse.
 
-But the abstraction is still procedural:
+Before the refactor, this abstraction was still procedural:
 
-- `recursion_delay_chain_info` strips nested `Delay1`
-- `lower_delay_state` special-cases reads
-- `lower_fixed_delay` special-cases reads
+- `recursion_delay_chain_info` stripped nested `Delay1`
+- `lower_delay_state` special-cased reads
+- `lower_fixed_delay` special-cased reads
 
-There is no explicit “recursive carrier plus implicit delay offset” object.
+This is now represented explicitly by `RecursionDelayRef`.
 
 ---
 
@@ -108,7 +126,7 @@ There is no explicit “recursive carrier plus implicit delay offset” object.
 
 ### 4.1 `RecursionCarrierRef`
 
-Introduce an explicit resolved carrier descriptor:
+Implemented:
 
 ```rust
 struct RecursionCarrierRef {
@@ -117,17 +135,17 @@ struct RecursionCarrierRef {
 }
 ```
 
-This object would represent:
+This object represents:
 
 - the storage name/type/size
 - whether the carrier is two-slot or circular
 
-It should be returned by a canonical carrier lookup path rather than forcing
-callers to inspect `size == 2` themselves.
+It is returned by the canonical carrier lookup path so callers no longer need
+to inspect `size == 2` themselves.
 
 ### 4.2 `RecursionStorageStrategy`
 
-Introduce an explicit enum:
+Implemented:
 
 ```rust
 enum RecursionStorageStrategy {
@@ -145,7 +163,7 @@ This keeps the current implementation model but makes it explicit.
 
 ### 4.3 `RecursionDelayRef`
 
-Introduce a resolved delayed-recursion read descriptor:
+Implemented:
 
 ```rust
 struct RecursionDelayRef {
@@ -154,16 +172,16 @@ struct RecursionDelayRef {
 }
 ```
 
-This would be the recursion analogue of the accumulated delay-chain information
-currently returned by `recursion_delay_chain_info`.
+This is the recursion analogue of the older tuple-based accumulated delay-chain
+information that used to come from `recursion_delay_chain_info`.
 
 It should represent:
 
 - “which recursion carrier am I reading from?”
 - “how many implicit `Delay1` steps were wrapped around it?”
 
-Then `lower_delay_state` and `lower_fixed_delay` could consume one object
-instead of recomputing carrier + offset logic separately.
+`lower_delay_state` and `lower_fixed_delay` now consume one object instead of
+recomputing carrier + offset logic separately.
 
 ---
 
@@ -171,7 +189,7 @@ instead of recomputing carrier + offset logic separately.
 
 ### 5.1 Carrier resolution API
 
-Replace the current resolution ladder with a more explicit flow:
+Implemented:
 
 ```rust
 fn resolve_recursion_carrier(
@@ -182,16 +200,16 @@ fn resolve_recursion_carrier(
 ) -> Result<Option<RecursionCarrierRef>, SignalFirError>;
 ```
 
-This would subsume the current procedural split between:
+This subsumes the earlier procedural split between:
 
 - `active_recursion_info`
 - `recursion_carrier_info`
 
-while still reusing their logic internally during the transition.
+The old helpers have now been replaced at call sites by the canonical resolver.
 
 ### 5.2 Delay-chain resolution API
 
-Add:
+Implemented:
 
 ```rust
 fn resolve_recursion_delay_ref(
@@ -200,7 +218,7 @@ fn resolve_recursion_delay_ref(
 ) -> Result<Option<RecursionDelayRef>, SignalFirError>;
 ```
 
-This would replace `recursion_delay_chain_info`.
+This replaces `recursion_delay_chain_info`.
 
 ### 5.3 Strategy-local read/write helpers
 
@@ -241,6 +259,8 @@ on `RecursionCarrierRef` are enough as a first step.
 
 ### Step 1: make recursion strategy explicit
 
+Status: implemented
+
 - add `RecursionStorageStrategy`
 - add `RecursionCarrierRef`
 - replace direct `size == 2` tests at key call sites with explicit strategy
@@ -252,6 +272,8 @@ Pass criterion:
 - code becomes easier to scan
 
 ### Step 2: unify carrier resolution
+
+Status: implemented
 
 - introduce `resolve_recursion_carrier`
 - keep old helpers temporarily as thin adapters if needed
@@ -265,6 +287,8 @@ Pass criterion:
 
 ### Step 3: unify delay-chain resolution over recursion
 
+Status: implemented
+
 - introduce `RecursionDelayRef`
 - replace `recursion_delay_chain_info`
 - update `lower_delay_state` and `lower_fixed_delay`
@@ -274,6 +298,8 @@ Pass criterion:
 - one explicit object carries both carrier identity and implicit delay
 
 ### Step 4: factor recursion read/write/finalize helpers
+
+Status: open
 
 - introduce helpers per strategy:
   - current read
@@ -287,6 +313,8 @@ Pass criterion:
 - `lower_proj` no longer spells out raw slot math directly in multiple places
 
 ### Step 5: align recursion with sample phases
+
+Status: partially implemented
 
 - ensure two-slot recursion finalization is clearly classified as `PostOutput`
 - ensure circular recursion reads/writes are clearly classified as `Immediate`
