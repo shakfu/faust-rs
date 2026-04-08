@@ -921,11 +921,7 @@ pub(super) fn emit_delay1_for_line(
 }
 
 /// Emits the end-of-sample counter advance for one `IfWrapping` delay line.
-pub(super) fn emit_if_wrapping_advance(
-    store: &mut FirStore,
-    counter_name: &str,
-    size: usize,
-) -> FirId {
+fn emit_if_wrapping_advance(store: &mut FirStore, counter_name: &str, size: usize) -> FirId {
     IfWrappingModel.emit_advance(store, DelayRuntimeState::Counter(counter_name), size)
 }
 
@@ -958,7 +954,7 @@ pub(super) fn delayed_iota_index(store: &mut FirStore, amount: FirId, size: usiz
 }
 
 /// Emits `fIOTA = fIOTA + 1` to advance the delay-line write pointer.
-pub(super) fn bump_iota(store: &mut FirStore) -> FirId {
+fn bump_iota(store: &mut FirStore) -> FirId {
     let next = {
         let iota = current_iota_index(store);
         let one = {
@@ -973,7 +969,7 @@ pub(super) fn bump_iota(store: &mut FirStore) -> FirId {
 }
 
 /// Emits `buf[0] = new_value` — the immediate write for the Shift strategy.
-pub(super) fn emit_store_at_zero(store: &mut FirStore, name: &str, new_value: FirId) -> FirId {
+fn emit_store_at_zero(store: &mut FirStore, name: &str, new_value: FirId) -> FirId {
     let zero = {
         let mut b = FirBuilder::new(store);
         b.int32(0)
@@ -987,7 +983,7 @@ pub(super) fn emit_store_at_zero(store: &mut FirStore, name: &str, new_value: Fi
 /// Returns individual store instructions in high-to-low order:
 /// - delay=1: `[buf[1] = buf[0]]`
 /// - delay=2: `[buf[2] = buf[1], buf[1] = buf[0]]`
-pub(super) fn emit_unrolled_shift_copies(
+fn emit_unrolled_shift_copies(
     store: &mut FirStore,
     name: &str,
     delay: i32,
@@ -1024,7 +1020,7 @@ pub(super) fn emit_unrolled_shift_copies(
 /// for (int j = delay; j > 0; j = j + -1)
 ///     buf[j] = buf[j - 1];
 /// ```
-pub(super) fn emit_shift_loop(
+fn emit_shift_loop(
     ctx: &mut DelayLoweringCtx<'_>,
     name: &str,
     delay: i32,
@@ -1086,7 +1082,7 @@ pub(super) fn emit_shift_loop(
 
 /// Computes the read index for an `IfWrapping` delay line:
 /// `(counter + size - amount)` with if-based wrap when `≥ size`.
-pub(super) fn if_wrapping_read_index(
+fn if_wrapping_read_index(
     store: &mut FirStore,
     counter_name: &str,
     amount: FirId,
@@ -1131,11 +1127,7 @@ pub(super) fn if_wrapping_read_index(
 
 /// Emits `counter = (counter + 1 >= size) ? 0 : counter + 1` for an
 /// `IfWrapping` delay line counter advance.
-pub(super) fn bump_if_wrapping_counter(
-    store: &mut FirStore,
-    counter_name: &str,
-    size: usize,
-) -> FirId {
+fn bump_if_wrapping_counter(store: &mut FirStore, counter_name: &str, size: usize) -> FirId {
     let size_i32 = i32::try_from(size).unwrap_or(i32::MAX);
     let counter = {
         let mut b = FirBuilder::new(store);
@@ -1687,18 +1679,29 @@ impl DelayManager {
         Ok(info)
     }
 
-    /// Returns `(counter_name, buffer_size)` pairs for all `IfWrapping` delay lines.
+    /// Emits all generic delay-subsystem end-of-sample updates.
     ///
-    /// Called by `build_module` after signal lowering to emit per-line counter
-    /// advance statements at the end of the sample loop.
-    pub(super) fn if_wrapping_lines(&self) -> impl Iterator<Item = (&str, usize)> {
-        self.delay_lines.values().filter_map(|info| {
+    /// This centralizes the runtime maintenance required by delay strategies:
+    ///
+    /// - advance the shared `fIOTA` counter when any circular-pow2 line exists
+    /// - advance every per-line `IfWrapping` counter
+    pub(super) fn emit_sample_end_updates(
+        &self,
+        store: &mut FirStore,
+        uses_iota: bool,
+    ) -> Vec<FirId> {
+        let mut updates = Vec::new();
+        if uses_iota {
+            updates.push(bump_iota(store));
+        }
+        updates.extend(self.delay_lines.values().filter_map(|info| {
             if let DelayStrategy::IfWrapping { counter_name } = &info.strategy {
-                Some((counter_name.as_str(), info.size))
+                Some(emit_if_wrapping_advance(store, counter_name, info.size))
             } else {
                 None
             }
-        })
+        }));
+        updates
     }
 
     // ── Query / dedup accessors ───────────────────────────────────────────────

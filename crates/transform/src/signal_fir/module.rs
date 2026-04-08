@@ -66,9 +66,9 @@ use crate::signal_prepare::SimpleSigType;
 
 use super::SignalFirOutput;
 use super::delay::{
-    DelayFirCtx, DelayLineInfo, DelayLoweringCtx, DelayManager, DelayOptions, bump_iota,
-    current_iota_index, delay_size_for_amount, delayed_iota_index, emit_delay1_for_line,
-    emit_fixed_delay_for_line, emit_if_wrapping_advance, masked_delay_index, pow2limit_for_delay,
+    DelayFirCtx, DelayLineInfo, DelayLoweringCtx, DelayManager, DelayOptions, current_iota_index,
+    delay_size_for_amount, delayed_iota_index, emit_delay1_for_line, emit_fixed_delay_for_line,
+    masked_delay_index, pow2limit_for_delay,
 };
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
@@ -254,21 +254,10 @@ pub fn build_module(
     lower
         .sample_statements
         .extend(lower.compute_updates.iter().copied());
-    if lower.uses_iota {
-        let bump_iota = bump_iota(&mut lower.store);
-        lower.sample_statements.push(bump_iota);
-    }
-    // Advance per-line IfWrapping counters at the end of the sample loop.
-    // Collect first to release the borrow on `lower.delay` before borrowing `lower.store`.
-    let if_wrapping: Vec<(String, usize)> = lower
+    let delay_sample_end = lower
         .delay
-        .if_wrapping_lines()
-        .map(|(n, s)| (n.to_owned(), s))
-        .collect();
-    for (counter_name, size) in &if_wrapping {
-        let advance = emit_if_wrapping_advance(&mut lower.store, counter_name, *size);
-        lower.sample_statements.push(advance);
-    }
+        .emit_sample_end_updates(&mut lower.store, lower.uses_iota);
+    lower.sample_statements.extend(delay_sample_end);
 
     // ═══════════════════════════════════════════════════════════════════════
     // ── Phase 2: CSE Materialization per Bucket ────────────────────────────
