@@ -18,8 +18,11 @@
 //!    scan and allocation entry points.
 //! 3. [`DelayFirCtx`]: a borrow bundle assembled from disjoint fields of
 //!    `SignalToFirLower` and passed to `DelayManager` methods that emit FIR nodes.
-//! 4. [`DelayLineModel`] + [`CircularPow2Model`]: buffer-geometry abstraction
-//!    (retained for completeness; selection is via [`DelayStrategy`]).
+//! 4. [`RingDelayModel`] + concrete ring-buffer implementations
+//!    ([`CircularPow2Model`], [`IfWrappingModel`]): normalized buffer-geometry
+//!    abstraction for pointer-driven delay lines.
+//! 5. [`DelayLoweringCtx`] + [`DelayStrategyEmitter`]: strategy-local FIR
+//!    emission layer used by `module.rs` to delegate concrete delay reads/writes.
 //!
 //! # Strategy descriptions
 //!
@@ -95,15 +98,15 @@
 //! | [`DelayLineInfo`] | struct | Metadata for one allocated delay buffer |
 //! | [`DelayManager`] | struct | Owns delay-exclusive state; scan + alloc methods |
 //! | [`DelayFirCtx`] | struct | Borrow bundle for FIR-emitting methods |
-//! | [`DelayLineModel`] | trait | Buffer geometry abstraction |
+//! | [`RingDelayModel`] | trait | Ring-buffer geometry abstraction |
 //! | [`CircularPow2Model`] | struct | Power-of-two implementation |
+//! | [`IfWrappingModel`] | struct | Exact-size if-wrapping implementation |
+//! | [`DelayStrategyEmitter`] | trait | Strategy-local lowering interface |
 //!
-//! The complementary **FIR materialization** layer for index expressions
-//! (`current_iota_index`, `delayed_iota_index`, `masked_delay_index`,
-//! `bump_iota`) and state-coupled methods (`lower_fixed_delay`,
-//! `lower_delay_state`) lives in `module.rs` as `impl SignalToFirLower`
-//! methods, because those methods need mutable access to the lowering engine's
-//! full state including the recursive `lower_signal` dispatcher.
+//! The complementary **stateful orchestration** layer (`lower_fixed_delay`,
+//! `lower_delay_state`, recursion-carrier resolution, and `lower_signal`
+//! dispatch) remains in `module.rs`, while the strategy-specific FIR emission
+//! primitives now live here behind [`DelayStrategyEmitter`].
 //!
 //! Source provenance (C++):
 //! - `compiler/transform/signalFIRCompiler.hh` — `DelayLine`, `allocateDelayLineAux`
@@ -362,34 +365,63 @@ pub(super) fn delay_size_for_amount(
     Ok(min_const_upper_bound(arena, amount))
 }
 
-// ─── DelayLineModel ───────────────────────────────────────────────────────────
+// ─── RingDelayModel ───────────────────────────────────────────────────────────
 
-/// Abstraction over the buffer-geometry strategy used for circular delay lines.
+/// Runtime write-pointer source used by ring-buffer delay strategies.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum DelayRuntimeState<'a> {
+    /// Shared global `fIOTA` counter.
+    GlobalIota,
+    /// Per-line `fIdx*` counter.
+    Counter(&'a str),
+}
+
+impl DelayRuntimeState<'_> {
+    fn load_current_index(self, store: &mut FirStore) -> FirId {
+        match self {
+            Self::GlobalIota => current_iota_index(store),
+            Self::Counter(name) => {
+                let mut b = FirBuilder::new(store);
+                b.load_var(name, AccessType::Struct, FirType::Int32)
+            }
+        }
+    }
+}
+
+/// Abstraction over pointer-driven ring-buffer geometries used by delay lines.
 ///
-/// The default implementation is [`CircularPow2Model`] (power-of-two size,
-/// bitwise-AND masking), matching C++ Faust's `signalFIRCompiler`.  Alternative
-/// models (exact-size modulo, segmented for very long delays) can be added by
-/// implementing this trait.
+/// Both [`CircularPow2Model`] and [`IfWrappingModel`] share the same conceptual
+/// contract:
 ///
-/// All `FirId` arguments and return values are nodes in the shared [`FirStore`];
-/// callers must ensure they pass the same store that was used when building those
-/// nodes.
-#[allow(dead_code)]
-pub(super) trait DelayLineModel {
+/// - choose a backing buffer size,
+/// - compute a current write slot,
+/// - compute a delayed read slot,
+/// - advance the runtime pointer state by one sample.
+pub(super) trait RingDelayModel {
     /// Minimum buffer size in elements for a maximum delay of `max_delay` samples.
     fn buffer_size(&self, max_delay: i32) -> Result<usize, SignalFirError>;
 
     /// FIR expression: index of the current write slot.
-    ///
-    /// `iota` is a loaded `FirId` for `fIOTA`.
-    fn write_index(&self, store: &mut FirStore, iota: FirId, size: usize) -> FirId;
+    fn write_index(&self, store: &mut FirStore, state: DelayRuntimeState<'_>, size: usize)
+    -> FirId;
 
     /// FIR expression: index of the slot that is `amount` samples behind the
     /// write pointer.
-    fn read_index(&self, store: &mut FirStore, iota: FirId, amount: FirId, size: usize) -> FirId;
+    fn read_index(
+        &self,
+        store: &mut FirStore,
+        state: DelayRuntimeState<'_>,
+        amount: FirId,
+        size: usize,
+    ) -> FirId;
 
-    /// FIR expression: `fIOTA + 1` (advance write pointer by one step).
-    fn bump(&self, store: &mut FirStore, iota: FirId) -> FirId;
+    /// FIR statement that advances the pointer state by one sample.
+    fn emit_advance(
+        &self,
+        store: &mut FirStore,
+        state: DelayRuntimeState<'_>,
+        size: usize,
+    ) -> FirId;
 }
 
 // ─── CircularPow2Model ────────────────────────────────────────────────────────
@@ -405,27 +437,95 @@ pub(super) trait DelayLineModel {
 /// `signalFIRCompiler::writeReadDelay` exactly.
 pub(super) struct CircularPow2Model;
 
-impl DelayLineModel for CircularPow2Model {
+impl RingDelayModel for CircularPow2Model {
     fn buffer_size(&self, max_delay: i32) -> Result<usize, SignalFirError> {
         pow2limit_for_delay(max_delay)
     }
 
-    fn write_index(&self, store: &mut FirStore, iota: FirId, size: usize) -> FirId {
-        let mask =
-            FirBuilder::new(store).int32(i32::try_from(size.saturating_sub(1)).unwrap_or(i32::MAX));
-        FirBuilder::new(store).binop(FirBinOp::And, iota, mask, FirType::Int32)
+    fn write_index(
+        &self,
+        store: &mut FirStore,
+        state: DelayRuntimeState<'_>,
+        size: usize,
+    ) -> FirId {
+        let iota = state.load_current_index(store);
+        masked_delay_index(store, iota, size)
     }
 
-    fn read_index(&self, store: &mut FirStore, iota: FirId, amount: FirId, size: usize) -> FirId {
+    fn read_index(
+        &self,
+        store: &mut FirStore,
+        state: DelayRuntimeState<'_>,
+        amount: FirId,
+        size: usize,
+    ) -> FirId {
+        let iota = state.load_current_index(store);
         let raw = FirBuilder::new(store).binop(FirBinOp::Sub, iota, amount, FirType::Int32);
-        let mask =
-            FirBuilder::new(store).int32(i32::try_from(size.saturating_sub(1)).unwrap_or(i32::MAX));
-        FirBuilder::new(store).binop(FirBinOp::And, raw, mask, FirType::Int32)
+        masked_delay_index(store, raw, size)
     }
 
-    fn bump(&self, store: &mut FirStore, iota: FirId) -> FirId {
-        let one = FirBuilder::new(store).int32(1);
-        FirBuilder::new(store).binop(FirBinOp::Add, iota, one, FirType::Int32)
+    fn emit_advance(
+        &self,
+        store: &mut FirStore,
+        state: DelayRuntimeState<'_>,
+        _size: usize,
+    ) -> FirId {
+        debug_assert!(matches!(state, DelayRuntimeState::GlobalIota));
+        bump_iota(store)
+    }
+}
+
+// ─── IfWrappingModel ─────────────────────────────────────────────────────────
+
+/// Exact-size circular buffer with an if-wrapping per-line counter.
+pub(super) struct IfWrappingModel;
+
+impl RingDelayModel for IfWrappingModel {
+    fn buffer_size(&self, max_delay: i32) -> Result<usize, SignalFirError> {
+        usize::try_from(max_delay)
+            .map(|delay| delay + 1)
+            .map_err(|_| {
+                SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!("SIGDELAY amount overflow: {max_delay}"),
+                )
+            })
+    }
+
+    fn write_index(
+        &self,
+        store: &mut FirStore,
+        state: DelayRuntimeState<'_>,
+        _size: usize,
+    ) -> FirId {
+        state.load_current_index(store)
+    }
+
+    fn read_index(
+        &self,
+        store: &mut FirStore,
+        state: DelayRuntimeState<'_>,
+        amount: FirId,
+        size: usize,
+    ) -> FirId {
+        let DelayRuntimeState::Counter(counter_name) = state else {
+            debug_assert!(false, "IfWrappingModel requires a per-line counter");
+            return current_iota_index(store);
+        };
+        if_wrapping_read_index(store, counter_name, amount, size)
+    }
+
+    fn emit_advance(
+        &self,
+        store: &mut FirStore,
+        state: DelayRuntimeState<'_>,
+        size: usize,
+    ) -> FirId {
+        let DelayRuntimeState::Counter(counter_name) = state else {
+            debug_assert!(false, "IfWrappingModel requires a per-line counter");
+            return bump_iota(store);
+        };
+        bump_if_wrapping_counter(store, counter_name, size)
     }
 }
 
@@ -609,7 +709,227 @@ impl<'a> DelayFirCtx<'a> {
     }
 }
 
-// ─── FIR emission helpers shared with module.rs ─────────────────────────────
+// ─── Delay lowering context + strategy emitters ─────────────────────────────
+
+/// Borrow bundle for strategy-local FIR emission during lowering.
+pub(super) struct DelayLoweringCtx<'a> {
+    pub(super) store: &'a mut FirStore,
+    pub(super) sample_statements: &'a mut Vec<FirId>,
+    pub(super) deferred_shift_writes: &'a mut Vec<FirId>,
+    pub(super) next_loop_var_id: &'a mut usize,
+}
+
+impl DelayLoweringCtx<'_> {
+    /// Generates a fresh loop-variable name using the shared monotonic counter.
+    pub(super) fn fresh_loop_var(&mut self, prefix: &str) -> String {
+        let name = format!("{prefix}{}", *self.next_loop_var_id);
+        *self.next_loop_var_id += 1;
+        name
+    }
+}
+
+/// Strategy-local FIR emission API used by `module.rs`.
+pub(super) trait DelayStrategyEmitter {
+    /// Emits one `SIGDELAY(value, amount)` read/write sequence.
+    fn emit_fixed_delay(
+        &self,
+        ctx: &mut DelayLoweringCtx<'_>,
+        line: &DelayLineInfo,
+        current: FirId,
+        amount: FirId,
+        read_ty: FirType,
+        schedule_write: bool,
+    ) -> FirId;
+
+    /// Emits one `Delay1(value)` read/write sequence.
+    fn emit_delay1(
+        &self,
+        ctx: &mut DelayLoweringCtx<'_>,
+        line: &DelayLineInfo,
+        current: FirId,
+        read_ty: FirType,
+        schedule_write: bool,
+    ) -> FirId;
+}
+
+/// Shift/copy delay lowering strategy.
+pub(super) struct ShiftDelayStrategyEmitter;
+
+impl DelayStrategyEmitter for ShiftDelayStrategyEmitter {
+    fn emit_fixed_delay(
+        &self,
+        ctx: &mut DelayLoweringCtx<'_>,
+        line: &DelayLineInfo,
+        current: FirId,
+        amount: FirId,
+        read_ty: FirType,
+        schedule_write: bool,
+    ) -> FirId {
+        if schedule_write {
+            let store_0 = emit_store_at_zero(ctx.store, &line.name, current);
+            ctx.sample_statements.push(store_0);
+            let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
+            if delay_n <= 2 {
+                let copies =
+                    emit_unrolled_shift_copies(ctx.store, &line.name, delay_n, read_ty.clone());
+                ctx.deferred_shift_writes.extend(copies);
+            } else {
+                let shift = emit_shift_loop(ctx, &line.name, delay_n, read_ty.clone());
+                ctx.deferred_shift_writes.push(shift);
+            }
+        }
+        let mut b = FirBuilder::new(ctx.store);
+        b.load_table(line.name.clone(), AccessType::Struct, amount, read_ty)
+    }
+
+    fn emit_delay1(
+        &self,
+        ctx: &mut DelayLoweringCtx<'_>,
+        line: &DelayLineInfo,
+        current: FirId,
+        read_ty: FirType,
+        schedule_write: bool,
+    ) -> FirId {
+        if schedule_write {
+            let store_0 = emit_store_at_zero(ctx.store, &line.name, current);
+            ctx.sample_statements.push(store_0);
+            let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
+            if delay_n <= 2 {
+                let copies =
+                    emit_unrolled_shift_copies(ctx.store, &line.name, delay_n, read_ty.clone());
+                ctx.deferred_shift_writes.extend(copies);
+            } else {
+                let shift = emit_shift_loop(ctx, &line.name, delay_n, read_ty.clone());
+                ctx.deferred_shift_writes.push(shift);
+            }
+        }
+        let one = {
+            let mut b = FirBuilder::new(ctx.store);
+            b.int32(1)
+        };
+        let mut b = FirBuilder::new(ctx.store);
+        b.load_table(line.name.clone(), AccessType::Struct, one, read_ty)
+    }
+}
+
+/// Ring-buffer-based delay lowering strategy backed by a [`RingDelayModel`].
+pub(super) struct RingDelayStrategyEmitter<M> {
+    model: M,
+}
+
+impl<M> RingDelayStrategyEmitter<M> {
+    pub(super) fn new(model: M) -> Self {
+        Self { model }
+    }
+}
+
+impl<M: RingDelayModel> DelayStrategyEmitter for RingDelayStrategyEmitter<M> {
+    fn emit_fixed_delay(
+        &self,
+        ctx: &mut DelayLoweringCtx<'_>,
+        line: &DelayLineInfo,
+        current: FirId,
+        amount: FirId,
+        read_ty: FirType,
+        schedule_write: bool,
+    ) -> FirId {
+        let state = runtime_state_for_line(line);
+        if schedule_write {
+            let write_index = self.model.write_index(ctx.store, state, line.size);
+            let mut b = FirBuilder::new(ctx.store);
+            ctx.sample_statements.push(b.store_table(
+                line.name.clone(),
+                AccessType::Struct,
+                write_index,
+                current,
+            ));
+        }
+        let read_index = self.model.read_index(ctx.store, state, amount, line.size);
+        let mut b = FirBuilder::new(ctx.store);
+        b.load_table(line.name.clone(), AccessType::Struct, read_index, read_ty)
+    }
+
+    fn emit_delay1(
+        &self,
+        ctx: &mut DelayLoweringCtx<'_>,
+        line: &DelayLineInfo,
+        current: FirId,
+        read_ty: FirType,
+        schedule_write: bool,
+    ) -> FirId {
+        let one = {
+            let mut b = FirBuilder::new(ctx.store);
+            b.int32(1)
+        };
+        self.emit_fixed_delay(ctx, line, current, one, read_ty, schedule_write)
+    }
+}
+
+fn runtime_state_for_line(line: &DelayLineInfo) -> DelayRuntimeState<'_> {
+    match &line.strategy {
+        DelayStrategy::CircularPow2 => DelayRuntimeState::GlobalIota,
+        DelayStrategy::IfWrapping { counter_name } => DelayRuntimeState::Counter(counter_name),
+        DelayStrategy::Shift => {
+            debug_assert!(false, "shift delay lines do not have ring runtime state");
+            DelayRuntimeState::GlobalIota
+        }
+    }
+}
+
+/// Dispatches `SIGDELAY` lowering to the strategy-specific emitter.
+pub(super) fn emit_fixed_delay_for_line(
+    ctx: &mut DelayLoweringCtx<'_>,
+    line: &DelayLineInfo,
+    current: FirId,
+    amount: FirId,
+    read_ty: FirType,
+    schedule_write: bool,
+) -> FirId {
+    match line.strategy {
+        DelayStrategy::Shift => ShiftDelayStrategyEmitter.emit_fixed_delay(
+            ctx,
+            line,
+            current,
+            amount,
+            read_ty,
+            schedule_write,
+        ),
+        DelayStrategy::CircularPow2 => RingDelayStrategyEmitter::new(CircularPow2Model)
+            .emit_fixed_delay(ctx, line, current, amount, read_ty, schedule_write),
+        DelayStrategy::IfWrapping { .. } => RingDelayStrategyEmitter::new(IfWrappingModel)
+            .emit_fixed_delay(ctx, line, current, amount, read_ty, schedule_write),
+    }
+}
+
+/// Dispatches `Delay1` lowering to the strategy-specific emitter.
+pub(super) fn emit_delay1_for_line(
+    ctx: &mut DelayLoweringCtx<'_>,
+    line: &DelayLineInfo,
+    current: FirId,
+    read_ty: FirType,
+    schedule_write: bool,
+) -> FirId {
+    match line.strategy {
+        DelayStrategy::Shift => {
+            ShiftDelayStrategyEmitter.emit_delay1(ctx, line, current, read_ty, schedule_write)
+        }
+        DelayStrategy::CircularPow2 => RingDelayStrategyEmitter::new(CircularPow2Model)
+            .emit_delay1(ctx, line, current, read_ty, schedule_write),
+        DelayStrategy::IfWrapping { .. } => RingDelayStrategyEmitter::new(IfWrappingModel)
+            .emit_delay1(ctx, line, current, read_ty, schedule_write),
+    }
+}
+
+/// Emits the end-of-sample counter advance for one `IfWrapping` delay line.
+pub(super) fn emit_if_wrapping_advance(
+    store: &mut FirStore,
+    counter_name: &str,
+    size: usize,
+) -> FirId {
+    IfWrappingModel.emit_advance(store, DelayRuntimeState::Counter(counter_name), size)
+}
+
+// ─── FIR emission helpers shared with strategy emitters ─────────────────────
 
 /// Emits a struct load of `fIOTA` (current write position in delay lines).
 pub(super) fn current_iota_index(store: &mut FirStore) -> FirId {
@@ -705,7 +1025,7 @@ pub(super) fn emit_unrolled_shift_copies(
 ///     buf[j] = buf[j - 1];
 /// ```
 pub(super) fn emit_shift_loop(
-    ctx: &mut DelayFirCtx<'_>,
+    ctx: &mut DelayLoweringCtx<'_>,
     name: &str,
     delay: i32,
     elem_ty: FirType,
@@ -866,15 +1186,19 @@ pub(super) fn bump_if_wrapping_counter(
 ///
 /// # Scan / allocation flow
 ///
-/// 1. `SignalToFirLower::prepare_delay_lines` calls [`Self::scan_signals`], which
-///    returns a `max_delays` map of carried signals → their maximum observed delay.
-/// 2. `prepare_delay_lines` then calls `ensure_delay_line_decl` for each entry,
-///    which in turn calls [`Self::ensure_delay_line`] with a [`DelayFirCtx`].
-/// 3. During lowering, `lower_fixed_delay` dispatches on the [`DelayStrategy`]
-///    stored in the returned [`DelayLineInfo`] to emit the correct write/read FIR.
-/// 4. `ensure_recursion_array_for_group` consumes the read-only accumulated
-///    recursion-output analysis to size recursion arrays that serve as delay
-///    buffers.
+/// 1. `SignalToFirLower::prepare_delay_lines` first calls
+///    [`Self::analyze_signals`] to collect read-only accumulated delay metadata
+///    for ordinary carriers and recursion outputs.
+/// 2. `prepare_delay_lines` then calls [`Self::scan_signals`], which returns a
+///    `max_delays` map of carried signals → their maximum observed owned delay.
+/// 3. `prepare_delay_lines` allocates each owned delay line through
+///    [`Self::ensure_delay_line`] using a [`DelayFirCtx`].
+/// 4. During lowering, `module.rs` keeps orchestration and recursion-specific
+///    cases, but delegates strategy-local FIR emission to
+///    [`emit_fixed_delay_for_line`] / [`emit_delay1_for_line`].
+/// 5. `ensure_recursion_array_for_group` consumes the read-only accumulated
+///    recursion-output analysis to size recursion arrays that also serve as
+///    merged delay buffers.
 pub(super) struct DelayManager {
     /// Strategy selection thresholds (`-mcd` / `-dlt` options).
     options: DelayOptions,
@@ -1302,7 +1626,7 @@ impl DelayManager {
 
         // Compute required buffer size.
         let required_size = match &strategy {
-            DelayStrategy::Shift | DelayStrategy::IfWrapping { .. } => {
+            DelayStrategy::Shift => {
                 usize::try_from(delay).map_err(|_| {
                     SignalFirError::new(
                         SignalFirErrorCode::UnsupportedSignalNode,
@@ -1311,6 +1635,7 @@ impl DelayManager {
                 })? + 1
             }
             DelayStrategy::CircularPow2 => CircularPow2Model.buffer_size(delay)?,
+            DelayStrategy::IfWrapping { .. } => IfWrappingModel.buffer_size(delay)?,
         };
 
         let elem_type = ctx.signal_elem_type(carried)?;

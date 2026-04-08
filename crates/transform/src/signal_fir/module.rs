@@ -66,10 +66,9 @@ use crate::signal_prepare::SimpleSigType;
 
 use super::SignalFirOutput;
 use super::delay::{
-    DelayFirCtx, DelayLineInfo, DelayManager, DelayOptions, DelayStrategy,
-    bump_if_wrapping_counter, bump_iota, current_iota_index, delay_size_for_amount,
-    delayed_iota_index, emit_shift_loop, emit_store_at_zero, emit_unrolled_shift_copies,
-    if_wrapping_read_index, masked_delay_index, pow2limit_for_delay,
+    DelayFirCtx, DelayLineInfo, DelayLoweringCtx, DelayManager, DelayOptions, bump_iota,
+    current_iota_index, delay_size_for_amount, delayed_iota_index, emit_delay1_for_line,
+    emit_fixed_delay_for_line, emit_if_wrapping_advance, masked_delay_index, pow2limit_for_delay,
 };
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
@@ -267,7 +266,7 @@ pub fn build_module(
         .map(|(n, s)| (n.to_owned(), s))
         .collect();
     for (counter_name, size) in &if_wrapping {
-        let advance = bump_if_wrapping_counter(&mut lower.store, counter_name, *size);
+        let advance = emit_if_wrapping_advance(&mut lower.store, counter_name, *size);
         lower.sample_statements.push(advance);
     }
 
@@ -1459,11 +1458,15 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
-    /// Emits the circular-buffer read for a delay whose line was pre-allocated
-    /// by [`Self::prepare_delay_lines`].
+    /// Lowers a fixed-size `SIGDELAY(value, amount)` using the canonical delay
+    /// line pre-allocated by [`Self::prepare_delay_lines`].
     ///
-    /// Schedules a write of the current sample into the ring buffer (once per
-    /// carried signal) and returns a masked-index load at `fIOTA - amount`.
+    /// Strategy-specific FIR emission is delegated to `delay.rs` through
+    /// `emit_fixed_delay_for_line`, while this method keeps:
+    ///
+    /// - recursion-carrier reuse for merged `Delay1^k(Proj(...))` chains
+    /// - evaluation of the runtime `amount` expression
+    /// - per-carrier write scheduling
     fn lower_fixed_delay(
         &mut self,
         node: SigId,
@@ -1501,82 +1504,22 @@ impl<'a> SignalToFirLower<'a> {
         let line = self.delay_line_info(value)?;
         let current = self.lower_signal(value)?;
         let read_ty = self.signal_fir_type(node)?;
-
-        match line.strategy.clone() {
-            DelayStrategy::Shift => {
-                if self.delay.schedule_delay_write(value) {
-                    // Write buf[0] = current immediately (before the read).
-                    let store_0 = emit_store_at_zero(&mut self.store, &line.name, current);
-                    self.sample_statements.push(store_0);
-                    // Defer shift copies until after all output stores.
-                    let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
-                    if delay_n <= 2 {
-                        let copies = emit_unrolled_shift_copies(
-                            &mut self.store,
-                            &line.name,
-                            delay_n,
-                            read_ty.clone(),
-                        );
-                        self.deferred_shift_writes.extend(copies);
-                    } else {
-                        let mut ctx = DelayFirCtx {
-                            store: &mut self.store,
-                            real_ty: self.real_ty.clone(),
-                            types: self.types,
-                            struct_declarations: &mut self.struct_declarations,
-                            clear_statements: &mut self.clear_statements,
-                            clear_init_seen: &mut self.clear_init_seen,
-                            next_loop_var_id: &mut self.next_loop_var_id,
-                            uses_iota: &mut self.uses_iota,
-                        };
-                        let shift = emit_shift_loop(&mut ctx, &line.name, delay_n, read_ty.clone());
-                        self.deferred_shift_writes.push(shift);
-                    }
-                }
-                let amount_value = self.lower_signal(amount)?;
-                let mut b = FirBuilder::new(&mut self.store);
-                Ok(b.load_table(line.name.clone(), AccessType::Struct, amount_value, read_ty))
-            }
-            DelayStrategy::CircularPow2 => {
-                if self.delay.schedule_delay_write(value) {
-                    let write_index = {
-                        let raw = current_iota_index(&mut self.store);
-                        masked_delay_index(&mut self.store, raw, line.size)
-                    };
-                    let mut b = FirBuilder::new(&mut self.store);
-                    self.sample_statements.push(b.store_table(
-                        line.name.clone(),
-                        AccessType::Struct,
-                        write_index,
-                        current,
-                    ));
-                }
-                let amount_value = self.lower_signal(amount)?;
-                let read_index = delayed_iota_index(&mut self.store, amount_value, line.size);
-                let mut b = FirBuilder::new(&mut self.store);
-                Ok(b.load_table(line.name.clone(), AccessType::Struct, read_index, read_ty))
-            }
-            DelayStrategy::IfWrapping { counter_name } => {
-                if self.delay.schedule_delay_write(value) {
-                    let idx = {
-                        let mut b = FirBuilder::new(&mut self.store);
-                        b.load_var(counter_name.clone(), AccessType::Struct, FirType::Int32)
-                    };
-                    let mut b = FirBuilder::new(&mut self.store);
-                    self.sample_statements.push(b.store_table(
-                        line.name.clone(),
-                        AccessType::Struct,
-                        idx,
-                        current,
-                    ));
-                }
-                let amount_value = self.lower_signal(amount)?;
-                let read_index =
-                    if_wrapping_read_index(&mut self.store, &counter_name, amount_value, line.size);
-                let mut b = FirBuilder::new(&mut self.store);
-                Ok(b.load_table(line.name.clone(), AccessType::Struct, read_index, read_ty))
-            }
-        }
+        let amount_value = self.lower_signal(amount)?;
+        let schedule_write = self.delay.schedule_delay_write(value);
+        let mut delay_ctx = DelayLoweringCtx {
+            store: &mut self.store,
+            sample_statements: &mut self.sample_statements,
+            deferred_shift_writes: &mut self.deferred_shift_writes,
+            next_loop_var_id: &mut self.next_loop_var_id,
+        };
+        Ok(emit_fixed_delay_for_line(
+            &mut delay_ctx,
+            &line,
+            current,
+            amount_value,
+            read_ty,
+            schedule_write,
+        ))
     }
 
     /// Lowers one single-sample state edge (`delay1`/`prefix`).
@@ -1649,20 +1592,21 @@ impl<'a> SignalToFirLower<'a> {
         Ok(out)
     }
 
-    /// Lowers a standalone `Delay1(value)` node using the `Shift` strategy.
+    /// Lowers a standalone `Delay1(value)` node using the canonical
+    /// preplanned strategy for its carried signal.
     ///
-    /// Allocates a shift buffer (`buf[0]` = current, `buf[1]` = previous),
-    /// matching the reference C++ Faust pattern:
+    /// When the carried signal owns a `Shift` delay line, this matches the
+    /// reference C++ Faust pattern:
     /// ```text
     /// buf[0] = value;       // immediate write
     /// output = buf[1];      // read previous sample
     /// buf[1] = buf[0];      // deferred shift (after output stores)
     /// ```
     ///
-    /// The buffer may be LARGER than 2 if the same carried signal is also used
-    /// in a `SIGDELAY(value, N)` for N > 1 (e.g. `(3*x)@1` and `(3*x)@2` share
-    /// one buffer sized to `N+1`).  In that case the shift extent is based on
-    /// `line.size - 1` so all slots are kept in sync.
+    /// The same `Delay1(value)` may also reuse a preplanned `CircularPow2` or
+    /// `IfWrapping` line when the carried signal shares storage with a larger
+    /// `SIGDELAY(value, N)`. In all cases the concrete write/read sequence is
+    /// delegated to `emit_delay1_for_line`.
     ///
     /// Only called when `max_copy_delay >= 1` and `value` is not a recursion
     /// feedback projection.
@@ -1670,83 +1614,20 @@ impl<'a> SignalToFirLower<'a> {
         let line = self.delay_line_info(value)?;
         let read_ty = self.signal_fir_type(node)?;
         let current = self.lower_signal(value)?;
-        match line.strategy.clone() {
-            DelayStrategy::Shift => {
-                if self.delay.schedule_delay_write(value) {
-                    // Write buf[0] = current immediately.
-                    let store_0 = emit_store_at_zero(&mut self.store, &line.name, current);
-                    self.sample_statements.push(store_0);
-                    // Defer shift over the FULL buffer (not just 1 slot): the pre-scan
-                    // may have sized this buffer for a larger SIGDELAY on the same signal.
-                    let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
-                    if delay_n <= 2 {
-                        let copies = emit_unrolled_shift_copies(
-                            &mut self.store,
-                            &line.name,
-                            delay_n,
-                            read_ty.clone(),
-                        );
-                        self.deferred_shift_writes.extend(copies);
-                    } else {
-                        let mut ctx = DelayFirCtx {
-                            store: &mut self.store,
-                            real_ty: self.real_ty.clone(),
-                            types: self.types,
-                            struct_declarations: &mut self.struct_declarations,
-                            clear_statements: &mut self.clear_statements,
-                            clear_init_seen: &mut self.clear_init_seen,
-                            next_loop_var_id: &mut self.next_loop_var_id,
-                            uses_iota: &mut self.uses_iota,
-                        };
-                        let shift = emit_shift_loop(&mut ctx, &line.name, delay_n, read_ty.clone());
-                        self.deferred_shift_writes.push(shift);
-                    }
-                }
-                // Return buf[1] (1 sample old).
-                let one = self.lower_int32_const(1);
-                let mut b = FirBuilder::new(&mut self.store);
-                Ok(b.load_table(line.name, AccessType::Struct, one, read_ty))
-            }
-            DelayStrategy::CircularPow2 => {
-                if self.delay.schedule_delay_write(value) {
-                    let write_index = {
-                        let raw = current_iota_index(&mut self.store);
-                        masked_delay_index(&mut self.store, raw, line.size)
-                    };
-                    let mut b = FirBuilder::new(&mut self.store);
-                    self.sample_statements.push(b.store_table(
-                        line.name.clone(),
-                        AccessType::Struct,
-                        write_index,
-                        current,
-                    ));
-                }
-                let one = self.lower_int32_const(1);
-                let read_index = delayed_iota_index(&mut self.store, one, line.size);
-                let mut b = FirBuilder::new(&mut self.store);
-                Ok(b.load_table(line.name, AccessType::Struct, read_index, read_ty))
-            }
-            DelayStrategy::IfWrapping { counter_name } => {
-                if self.delay.schedule_delay_write(value) {
-                    let idx = {
-                        let mut b = FirBuilder::new(&mut self.store);
-                        b.load_var(counter_name.clone(), AccessType::Struct, FirType::Int32)
-                    };
-                    let mut b = FirBuilder::new(&mut self.store);
-                    self.sample_statements.push(b.store_table(
-                        line.name.clone(),
-                        AccessType::Struct,
-                        idx,
-                        current,
-                    ));
-                }
-                let one = self.lower_int32_const(1);
-                let read_index =
-                    if_wrapping_read_index(&mut self.store, &counter_name, one, line.size);
-                let mut b = FirBuilder::new(&mut self.store);
-                Ok(b.load_table(line.name, AccessType::Struct, read_index, read_ty))
-            }
-        }
+        let schedule_write = self.delay.schedule_delay_write(value);
+        let mut delay_ctx = DelayLoweringCtx {
+            store: &mut self.store,
+            sample_statements: &mut self.sample_statements,
+            deferred_shift_writes: &mut self.deferred_shift_writes,
+            next_loop_var_id: &mut self.next_loop_var_id,
+        };
+        Ok(emit_delay1_for_line(
+            &mut delay_ctx,
+            &line,
+            current,
+            read_ty,
+            schedule_write,
+        ))
     }
 
     /// Returns the active recursion carrier plus the number of implicit
