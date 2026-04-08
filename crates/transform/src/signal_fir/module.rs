@@ -74,6 +74,34 @@ use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
 use super::planner::SignalFirPlan;
 
+/// Explicit execution phases inside one sample-loop iteration.
+///
+/// The sample body is assembled in this fixed order:
+///
+/// 1. `immediate`: ordinary per-sample work and writes that must happen before
+///    outputs are finalized
+/// 2. `post_output`: updates that must observe the current sample's outputs
+///    before shifting/finalizing state
+/// 3. `sample_end`: generic subsystem maintenance such as delay counter bumps
+#[derive(Default)]
+struct SamplePhases {
+    immediate: Vec<FirId>,
+    post_output: Vec<FirId>,
+    sample_end: Vec<FirId>,
+}
+
+impl SamplePhases {
+    fn flattened(&self) -> Vec<FirId> {
+        let mut all = Vec::with_capacity(
+            self.immediate.len() + self.post_output.len() + self.sample_end.len(),
+        );
+        all.extend(self.immediate.iter().copied());
+        all.extend(self.post_output.iter().copied());
+        all.extend(self.sample_end.iter().copied());
+        all
+    }
+}
+
 /// Deterministic prototype emission order for math helper functions.
 ///
 /// Keeping this order stable avoids noisy golden diffs in generated FIR/C/C++.
@@ -223,7 +251,7 @@ pub fn build_module(
                 value = b.cast(FirType::FaustFloat, value);
             }
             let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
-            lower.sample_statements.push(b.store_table(
+            lower.sample_phases.immediate.push(b.store_table(
                 format!("output{signal_index}"),
                 AccessType::Stack,
                 i0,
@@ -231,7 +259,7 @@ pub fn build_module(
             ));
         } else {
             let mut b = FirBuilder::new(&mut lower.store);
-            lower.sample_statements.push(b.drop_(value));
+            lower.sample_phases.immediate.push(b.drop_(value));
         }
     }
     for index in 0..plan.num_outputs {
@@ -248,16 +276,12 @@ pub fn build_module(
     }
     // Deferred shift-copy blocks run after all signal outputs are stored.
     // This matches reference Faust's write→read→shift ordering for the Shift strategy.
-    lower
-        .sample_statements
-        .extend(lower.deferred_shift_writes.iter().copied());
-    lower
-        .sample_statements
-        .extend(lower.compute_updates.iter().copied());
     let delay_sample_end = lower
         .delay
         .emit_sample_end_updates(&mut lower.store, lower.uses_iota);
-    lower.sample_statements.extend(delay_sample_end);
+    lower.sample_phases.sample_end.extend(delay_sample_end);
+
+    let mut sample_loop_statements = lower.sample_phases.flattened();
 
     // ═══════════════════════════════════════════════════════════════════════
     // ── Phase 2: CSE Materialization per Bucket ────────────────────────────
@@ -286,10 +310,10 @@ pub fn build_module(
             lower.slow_counter,
         );
 
-        let rc = cse::count_fir_value_uses(&lower.store, &lower.sample_statements);
+        let rc = cse::count_fir_value_uses(&lower.store, &sample_loop_statements);
         cse::materialize_shared_values(
             &mut lower.store,
-            &mut lower.sample_statements,
+            &mut sample_loop_statements,
             &rc,
             "fTemp",
             0,
@@ -418,11 +442,11 @@ pub fn build_module(
     let compute_statements = {
         let mut all = Vec::new();
         all.extend(lower.control_statements.iter().copied());
-        if !lower.sample_statements.is_empty() {
+        if !sample_loop_statements.is_empty() {
             let sample_loop = {
                 let mut b = FirBuilder::new(&mut lower.store);
                 let upper = b.load_var("count", AccessType::FunArgs, FirType::Int32);
-                let body = b.block(&lower.sample_statements);
+                let body = b.block(&sample_loop_statements);
                 b.simple_for_loop("i0", upper, body, false)
             };
             all.push(sample_loop);
@@ -651,16 +675,8 @@ struct SignalToFirLower<'a> {
     clear_statements: Vec<FirId>,
     /// `compute` preamble: channel-pointer aliases and diagnostic labels.
     control_statements: Vec<FirId>,
-    /// Per-sample loop body: reads, arithmetic, output stores, deferred updates.
-    sample_statements: Vec<FirId>,
-    /// Shift-copy loop blocks deferred until after output stores.
-    ///
-    /// For the `Shift` delay strategy, the shift loop must run after the
-    /// output is read (write-at-0 is immediate; shift happens last, matching
-    /// reference Faust's `write → read → shift` ordering).
-    deferred_shift_writes: Vec<FirId>,
-    /// State-update stores appended after the per-sample body (delay writes, rec shifts).
-    compute_updates: Vec<FirId>,
+    /// Explicit per-sample execution phases for the `compute` sample loop.
+    sample_phases: SamplePhases,
     /// Maps each signal node to its generated state-variable name.
     state_name_by_node: HashMap<SigId, String>,
     /// Maps `(group_id, body_index)` to the recursion array allocated for that
@@ -822,9 +838,7 @@ impl<'a> SignalToFirLower<'a> {
             reset_statements: Vec::new(),
             clear_statements: Vec::new(),
             control_statements: Vec::new(),
-            sample_statements: Vec::new(),
-            deferred_shift_writes: Vec::new(),
-            compute_updates: Vec::new(),
+            sample_phases: SamplePhases::default(),
             state_name_by_node: HashMap::new(),
             rec_array_by_group_index: HashMap::new(),
             scheduled_state_updates: HashSet::new(),
@@ -913,7 +927,7 @@ impl<'a> SignalToFirLower<'a> {
     /// expression:
     /// - [`Variability::Konst`] → `constants_statements` (once at init)
     /// - [`Variability::Block`] → `control_statements` (once per `compute()`)
-    /// - [`Variability::Samp`]  → `sample_statements`  (every sample)
+    /// - [`Variability::Samp`]  → sample-loop immediate phase
     fn variability_of(&self, sig: SigId) -> Option<Variability> {
         self.sig_types.get(&sig).map(|t| t.variability())
     }
@@ -1032,8 +1046,8 @@ impl<'a> SignalToFirLower<'a> {
     ///
     /// Results are memoized in [`Self::cache`] for DAG sharing.  As a side
     /// effect, successful lowering may append declarations and assignments to
-    /// lifecycle section accumulators (e.g. delay writes to
-    /// [`Self::compute_updates`], state declarations to
+    /// lifecycle section accumulators (e.g. sample-loop phase statements,
+    /// state declarations to
     /// [`Self::struct_declarations`]).
     ///
     /// Returns a typed `FRS-SFIR-*` error for unsupported signal families.
@@ -1497,8 +1511,8 @@ impl<'a> SignalToFirLower<'a> {
         let schedule_write = self.delay.schedule_delay_write(value);
         let mut delay_ctx = DelayLoweringCtx {
             store: &mut self.store,
-            sample_statements: &mut self.sample_statements,
-            deferred_shift_writes: &mut self.deferred_shift_writes,
+            immediate_statements: &mut self.sample_phases.immediate,
+            post_output_statements: &mut self.sample_phases.post_output,
             next_loop_var_id: &mut self.next_loop_var_id,
         };
         Ok(emit_fixed_delay_for_line(
@@ -1575,8 +1589,12 @@ impl<'a> SignalToFirLower<'a> {
                 masked_delay_index(&mut self.store, iota, 2)
             };
             let mut b = FirBuilder::new(&mut self.store);
-            self.sample_statements
-                .push(b.store_table(name, AccessType::Struct, write_index, next));
+            self.sample_phases.immediate.push(b.store_table(
+                name,
+                AccessType::Struct,
+                write_index,
+                next,
+            ));
         }
         Ok(out)
     }
@@ -1606,8 +1624,8 @@ impl<'a> SignalToFirLower<'a> {
         let schedule_write = self.delay.schedule_delay_write(value);
         let mut delay_ctx = DelayLoweringCtx {
             store: &mut self.store,
-            sample_statements: &mut self.sample_statements,
-            deferred_shift_writes: &mut self.deferred_shift_writes,
+            immediate_statements: &mut self.sample_phases.immediate,
+            post_output_statements: &mut self.sample_phases.post_output,
             next_loop_var_id: &mut self.next_loop_var_id,
         };
         Ok(emit_delay1_for_line(
@@ -1969,7 +1987,8 @@ impl<'a> SignalToFirLower<'a> {
             .expect("bargraph variable should exist after declaration");
         let mut b = FirBuilder::new(&mut self.store);
         let faust_value = b.cast(FirType::FaustFloat, value);
-        self.sample_statements
+        self.sample_phases
+            .immediate
             .push(b.store_var(var, AccessType::Struct, faust_value));
         Ok(value)
     }
@@ -2072,7 +2091,7 @@ impl<'a> SignalToFirLower<'a> {
                 let mut b = FirBuilder::new(&mut self.store);
                 b.store_var(idx_name.clone(), AccessType::Struct, next)
             };
-            self.compute_updates.push(update);
+            self.sample_phases.post_output.push(update);
         }
         let index = {
             let mut b = FirBuilder::new(&mut self.store);
@@ -2135,7 +2154,8 @@ impl<'a> SignalToFirLower<'a> {
         let widx = self.lower_signal(widx)?;
         let index = self.normalized_table_index(widx, table_len);
         let mut b = FirBuilder::new(&mut self.store);
-        self.sample_statements
+        self.sample_phases
+            .immediate
             .push(b.store_table(table_name, access, index, wsig_value));
         Ok(wsig_value)
     }
@@ -2243,7 +2263,7 @@ impl<'a> SignalToFirLower<'a> {
     /// The table lives in the DSP struct (`AccessType::Struct`) so it can be
     /// written at runtime.  The generator is expanded at compile-time and
     /// registered in `instanceConstants` to seed initial values; per-sample
-    /// writes are emitted by `lower_wrtbl` into `sample_statements`.
+    /// writes are emitted by `lower_wrtbl` into the sample loop immediate phase.
     fn ensure_wrtbl_table(
         &mut self,
         sig: SigId,
@@ -3057,7 +3077,7 @@ impl<'a> SignalToFirLower<'a> {
     /// **Deferred body evaluation**: on the first `SIGPROJ` encountered for a
     /// group, this method allocates 2-slot arrays for all output bodies, pushes
     /// the group onto `recursion_stack`, lowers every body signal (emitting
-    /// stores into `sample_statements`), then pops the stack.  Subsequent
+    /// stores into the sample loop immediate phase), then pops the stack.  Subsequent
     /// `SIGPROJ` nodes for the same group skip body evaluation entirely (the
     /// `scheduled_state_updates` dedup guard keyed by `group` SigId ensures
     /// exactly one body-lowering pass per sample).
@@ -3168,7 +3188,7 @@ impl<'a> SignalToFirLower<'a> {
                     let mut b = FirBuilder::new(&mut self.store);
                     b.store_table(info.name.clone(), AccessType::Struct, write_index, rhs)
                 };
-                self.sample_statements.push(current_store);
+                self.sample_phases.immediate.push(current_store);
                 if info.size == 2 {
                     let one = self.lower_int32_const(1);
                     let slot0 = {
@@ -3185,7 +3205,7 @@ impl<'a> SignalToFirLower<'a> {
                         let mut b = FirBuilder::new(&mut self.store);
                         b.store_table(info.name.clone(), AccessType::Struct, one, slot0)
                     };
-                    self.compute_updates.push(prev_store);
+                    self.sample_phases.post_output.push(prev_store);
                 }
             }
 

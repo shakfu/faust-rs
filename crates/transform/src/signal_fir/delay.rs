@@ -714,8 +714,8 @@ impl<'a> DelayFirCtx<'a> {
 /// Borrow bundle for strategy-local FIR emission during lowering.
 pub(super) struct DelayLoweringCtx<'a> {
     pub(super) store: &'a mut FirStore,
-    pub(super) sample_statements: &'a mut Vec<FirId>,
-    pub(super) deferred_shift_writes: &'a mut Vec<FirId>,
+    pub(super) immediate_statements: &'a mut Vec<FirId>,
+    pub(super) post_output_statements: &'a mut Vec<FirId>,
     pub(super) next_loop_var_id: &'a mut usize,
 }
 
@@ -767,15 +767,15 @@ impl DelayStrategyEmitter for ShiftDelayStrategyEmitter {
     ) -> FirId {
         if schedule_write {
             let store_0 = emit_store_at_zero(ctx.store, &line.name, current);
-            ctx.sample_statements.push(store_0);
+            ctx.immediate_statements.push(store_0);
             let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
             if delay_n <= 2 {
                 let copies =
                     emit_unrolled_shift_copies(ctx.store, &line.name, delay_n, read_ty.clone());
-                ctx.deferred_shift_writes.extend(copies);
+                ctx.post_output_statements.extend(copies);
             } else {
                 let shift = emit_shift_loop(ctx, &line.name, delay_n, read_ty.clone());
-                ctx.deferred_shift_writes.push(shift);
+                ctx.post_output_statements.push(shift);
             }
         }
         let mut b = FirBuilder::new(ctx.store);
@@ -792,15 +792,15 @@ impl DelayStrategyEmitter for ShiftDelayStrategyEmitter {
     ) -> FirId {
         if schedule_write {
             let store_0 = emit_store_at_zero(ctx.store, &line.name, current);
-            ctx.sample_statements.push(store_0);
+            ctx.immediate_statements.push(store_0);
             let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
             if delay_n <= 2 {
                 let copies =
                     emit_unrolled_shift_copies(ctx.store, &line.name, delay_n, read_ty.clone());
-                ctx.deferred_shift_writes.extend(copies);
+                ctx.post_output_statements.extend(copies);
             } else {
                 let shift = emit_shift_loop(ctx, &line.name, delay_n, read_ty.clone());
-                ctx.deferred_shift_writes.push(shift);
+                ctx.post_output_statements.push(shift);
             }
         }
         let one = {
@@ -837,7 +837,7 @@ impl<M: RingDelayModel> DelayStrategyEmitter for RingDelayStrategyEmitter<M> {
         if schedule_write {
             let write_index = self.model.write_index(ctx.store, state, line.size);
             let mut b = FirBuilder::new(ctx.store);
-            ctx.sample_statements.push(b.store_table(
+            ctx.immediate_statements.push(b.store_table(
                 line.name.clone(),
                 AccessType::Struct,
                 write_index,

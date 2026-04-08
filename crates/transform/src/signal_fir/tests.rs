@@ -1684,6 +1684,85 @@ fn fixed_delay_two_uses_unrolled_shift_copies() {
 }
 
 #[test]
+fn fixed_delay_two_runs_shift_copies_after_output_store() {
+    let mut arena = TreeArena::new();
+    let sig0 = {
+        let mut b = SigBuilder::new(&mut arena);
+        let in0 = b.input(0);
+        let two = b.int(2);
+        b.delay(in0, two)
+    };
+    let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+        .expect("delay 2 should lower");
+
+    let FirMatch::Module {
+        dsp_struct,
+        functions,
+        ..
+    } = match_fir(&out.store, out.module)
+    else {
+        panic!("module expected");
+    };
+    let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+        panic!("dsp_struct block expected");
+    };
+    let delay_name = struct_items
+        .iter()
+        .find_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::DeclareVar {
+                name,
+                typ: FirType::Array(_, 3),
+                ..
+            } if name.starts_with("fVec") || name.starts_with("iVec") => Some(name),
+            _ => None,
+        })
+        .expect("delay 2 should allocate one size-3 shift buffer");
+
+    let loop_body = find_compute_loop_body(&out.store, functions);
+    let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+        panic!("compute loop body block expected");
+    };
+
+    let output_pos = stmts
+        .iter()
+        .position(|id| {
+            matches!(
+                match_fir(&out.store, *id),
+                FirMatch::StoreTable { ref name, .. } if name == "output0"
+            )
+        })
+        .expect("compute loop should include one output store");
+    let delay_positions: Vec<usize> = stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, id)| {
+            if matches!(
+                match_fir(&out.store, *id),
+                FirMatch::StoreTable { ref name, .. } if name == &delay_name
+            ) {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        delay_positions.len(),
+        3,
+        "delay 2 should emit three delay stores"
+    );
+    assert!(
+        delay_positions[0] < output_pos,
+        "shift delay immediate write should occur before the output store"
+    );
+    assert!(
+        delay_positions[1] > output_pos && delay_positions[2] > output_pos,
+        "shift delay copy updates should occur after the output store"
+    );
+}
+
+#[test]
 fn fixed_delay_three_uses_shift_loop() {
     let mut arena = TreeArena::new();
     let sig0 = {
@@ -2047,6 +2126,60 @@ fn fixed_delay_lowers_to_struct_array_and_iota_updates() {
             ..
         }
     ));
+}
+
+#[test]
+fn circular_delay_runs_iota_bump_after_output_store() {
+    let mut arena = TreeArena::new();
+    let sig0 = {
+        let mut b = SigBuilder::new(&mut arena);
+        let in0 = b.input(0);
+        let three = b.int(3);
+        b.delay(in0, three)
+    };
+    let out = compile_fastlane_without_ui(
+        &arena,
+        &[sig0],
+        1,
+        1,
+        &SignalFirOptions {
+            max_copy_delay: 0,
+            ..SignalFirOptions::default()
+        },
+    )
+    .expect("circular delay should lower");
+
+    let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+        panic!("module expected");
+    };
+    let loop_body = find_compute_loop_body(&out.store, functions);
+    let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+        panic!("compute loop body block expected");
+    };
+
+    let output_pos = stmts
+        .iter()
+        .position(|id| {
+            matches!(
+                match_fir(&out.store, *id),
+                FirMatch::StoreTable { ref name, .. } if name == "output0"
+            )
+        })
+        .expect("compute loop should include one output store");
+    let iota_bump_pos = stmts
+        .iter()
+        .position(|id| {
+            matches!(
+                match_fir(&out.store, *id),
+                FirMatch::StoreVar { ref name, .. } if name == "fIOTA"
+            )
+        })
+        .expect("compute loop should include one fIOTA bump");
+
+    assert!(
+        iota_bump_pos > output_pos,
+        "circular delay sample-end update should run after the output store"
+    );
 }
 
 #[test]

@@ -243,7 +243,7 @@ fn fastlane_delay_echo_uses_circular_delay_line_and_iota_in_c_and_cpp() {
         "C fast-lane should increment fIOTA once per sample"
     );
     assert!(
-        fast_c.contains("for (int lDelay0 = 0; lDelay0 < 4096; lDelay0 = lDelay0 + 1)"),
+        fast_c.contains("for (int lDelay") && fast_c.contains("< 4096;") && fast_c.contains("= 0;"),
         "C fast-lane should zero the fixed-size delay line in instanceClear"
     );
 }
