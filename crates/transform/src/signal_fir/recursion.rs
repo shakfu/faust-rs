@@ -99,6 +99,14 @@ pub(super) struct RecursionDelayKey {
     pub(super) implicit_delay: usize,
 }
 
+/// Decoded and validated recursive-group projection shape.
+#[derive(Clone, Debug)]
+pub(super) struct RecursionGroupProjection {
+    pub(super) var: SigId,
+    pub(super) bodies: Vec<SigId>,
+    pub(super) canonical_index: usize,
+}
+
 /// Owned recursion-group state for the fast-lane lowerer.
 #[derive(Default)]
 pub(super) struct RecursionState {
@@ -126,6 +134,119 @@ impl RecursionState {
     pub(super) fn pop_active_group(&mut self) {
         self.recursion_stack.pop();
         self.recursion_vars.pop();
+    }
+
+    pub(super) fn resolve_materialized_carrier(
+        &self,
+        arena: &TreeArena,
+        group: SigId,
+        index: usize,
+    ) -> Option<RecursionCarrierRef> {
+        let canonical_index = canonical_group_index(arena, group, index)?;
+        self.carrier_info(group, canonical_index)
+            .map(RecursionCarrierRef::new)
+    }
+
+    pub(super) fn resolve_carrier(
+        &self,
+        arena: &TreeArena,
+        group: SigId,
+        index: usize,
+    ) -> Result<Option<RecursionCarrierRef>, SignalFirError> {
+        if let Some(carrier) = resolve_active_recursion_carrier(arena, self, group, index)? {
+            return Ok(Some(carrier));
+        }
+        Ok(self.resolve_materialized_carrier(arena, group, index))
+    }
+
+    pub(super) fn resolve_delay_ref(
+        &self,
+        arena: &TreeArena,
+        value: SigId,
+    ) -> Result<Option<RecursionDelayRef>, SignalFirError> {
+        let Some(key) = match_recursion_delay_key(arena, value) else {
+            return Ok(None);
+        };
+        let proj_index = usize::try_from(key.proj_index).map_err(|_| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "negative SIGPROJ index {} in recursion delay lookup",
+                    key.proj_index
+                ),
+            )
+        })?;
+        Ok(self
+            .resolve_carrier(arena, key.group, proj_index)?
+            .map(|carrier| RecursionDelayRef {
+                carrier,
+                implicit_delay: key.implicit_delay,
+            }))
+    }
+}
+
+/// Borrow bundle for recursion-specific FIR emission used by `module.rs`.
+pub(super) struct RecursionLoweringCtx<'a> {
+    pub(super) store: &'a mut FirStore,
+    pub(super) immediate_statements: &'a mut Vec<FirId>,
+    pub(super) post_output_statements: &'a mut Vec<FirId>,
+}
+
+impl RecursionLoweringCtx<'_> {
+    pub(super) fn load_current_carrier(
+        &mut self,
+        info: &RecArrayInfo,
+        current_index: FirId,
+        read_ty: FirType,
+    ) -> FirId {
+        let mut b = FirBuilder::new(self.store);
+        b.load_table(
+            info.name.clone(),
+            AccessType::Struct,
+            current_index,
+            read_ty,
+        )
+    }
+
+    pub(super) fn emit_current_carrier_store(
+        &mut self,
+        info: &RecArrayInfo,
+        current_index: FirId,
+        value: FirId,
+    ) {
+        let mut b = FirBuilder::new(self.store);
+        self.immediate_statements.push(b.store_table(
+            info.name.clone(),
+            AccessType::Struct,
+            current_index,
+            value,
+        ));
+    }
+
+    pub(super) fn emit_two_slot_finalize_copy(
+        &mut self,
+        info: &RecArrayInfo,
+        zero_index: FirId,
+        one_index: FirId,
+    ) {
+        debug_assert_eq!(
+            info.storage_strategy(),
+            RecursionStorageStrategy::TwoSlotShift
+        );
+        let slot0 = {
+            let mut b = FirBuilder::new(self.store);
+            b.load_table(
+                info.name.clone(),
+                AccessType::Struct,
+                zero_index,
+                info.typ.clone(),
+            )
+        };
+        let prev_store = {
+            let mut b = FirBuilder::new(self.store);
+            b.store_table(info.name.clone(), AccessType::Struct, one_index, slot0)
+        };
+        self.post_output_statements.push(prev_store);
     }
 }
 
@@ -240,6 +361,46 @@ pub(super) fn canonical_group_index(
 ) -> Option<usize> {
     let (_var, bodies) = decode_symbolic_group_bodies(arena, group)?;
     Some(if bodies.len() == 1 { 0 } else { index })
+}
+
+/// Decodes one `SIGPROJ(index, group)` target into its recursion-group payload
+/// and validates that the requested projection index is in bounds.
+pub(super) fn decode_group_projection(
+    arena: &TreeArena,
+    node: SigId,
+    index: i32,
+    group: SigId,
+) -> Result<RecursionGroupProjection, SignalFirError> {
+    let index_usize = usize::try_from(index).map_err(|_| {
+        SignalFirError::new(
+            SignalFirErrorCode::UnsupportedSignalNode,
+            format!("negative SIGPROJ index {index} in Step 2C.2"),
+        )
+    })?;
+    let (var, bodies) = decode_symbolic_group_bodies(arena, group).ok_or_else(|| {
+        SignalFirError::new(
+            SignalFirErrorCode::UnsupportedSignalNode,
+            format!(
+                "SIGPROJ group must be SYMREC/SYMREF after de_bruijn_to_sym in Step 2C.2 (expr={})",
+                signals::dump_sig_readable(arena, node)
+            ),
+        )
+    })?;
+    let canonical_index = if bodies.len() == 1 { 0 } else { index_usize };
+    if canonical_index >= bodies.len() {
+        return Err(SignalFirError::new(
+            SignalFirErrorCode::UnsupportedSignalNode,
+            format!(
+                "SIGPROJ index {index} out of bounds for recursion group with {} bodies",
+                bodies.len()
+            ),
+        ));
+    }
+    Ok(RecursionGroupProjection {
+        var,
+        bodies,
+        canonical_index,
+    })
 }
 
 /// Resolves a symbolic recursion group reference to its active carrier at a

@@ -73,9 +73,9 @@ use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
 use super::planner::SignalFirPlan;
 use super::recursion::{
-    RecArrayInfo, RecursionAllocCtx, RecursionCarrierRef, RecursionDelayRef, RecursionState,
-    RecursionStorageStrategy, canonical_group_index, decode_symbolic_group_bodies,
-    match_recursion_delay_key, resolve_active_recursion_carrier,
+    RecArrayInfo, RecursionAllocCtx, RecursionCarrierRef, RecursionDelayRef,
+    RecursionGroupProjection, RecursionLoweringCtx, RecursionState, RecursionStorageStrategy,
+    decode_group_projection, match_recursion_delay_key,
 };
 
 /// Explicit execution phases inside one sample-loop iteration.
@@ -1617,10 +1617,17 @@ impl<'a> SignalToFirLower<'a> {
     /// - `Proj(i, group)` → delay chain `0`
     /// - `Delay1(Proj(i, group))` → delay chain `1`
     /// - `Delay1(Delay1(Proj(i, group)))` → delay chain `2`
+    ///
+    /// Pure state-based resolution lives in `recursion.rs`; this wrapper only
+    /// falls back to `lower_proj(...)` when a top-level `SYMREC` group still
+    /// needs to be materialized in the current lowering pass.
     fn resolve_recursion_delay_ref(
         &mut self,
         value: SigId,
     ) -> Result<Option<RecursionDelayRef>, SignalFirError> {
+        if let Some(delay_ref) = self.recursion.resolve_delay_ref(self.arena, value)? {
+            return Ok(Some(delay_ref));
+        }
         let Some(key) = match_recursion_delay_key(self.arena, value) else {
             return Ok(None);
         };
@@ -1635,9 +1642,12 @@ impl<'a> SignalToFirLower<'a> {
         }))
     }
 
-    /// Returns the canonical recursion carrier for `Proj(index, group)` whether the
-    /// projection points to the active feedback reference (`SYMREF`) or to the
-    /// materialized top-level recursion group (`SYMREC`).
+    /// Returns the canonical recursion carrier for `Proj(index, group)` whether
+    /// the projection points to the active feedback reference (`SYMREF`) or to
+    /// the materialized top-level recursion group (`SYMREC`).
+    ///
+    /// Pure active/materialized lookup lives in `recursion.rs`; this wrapper
+    /// only performs top-level materialization when needed.
     fn resolve_recursion_carrier(
         &mut self,
         proj_node: SigId,
@@ -1650,7 +1660,10 @@ impl<'a> SignalToFirLower<'a> {
                 format!("negative SIGPROJ index {index} in recursion carrier lookup"),
             )
         })?;
-        if let Some(info) = self.resolve_active_recursion_carrier(group, index_usize)? {
+        if let Some(info) = self
+            .recursion
+            .resolve_carrier(self.arena, group, index_usize)?
+        {
             return Ok(Some(info));
         }
         if match_sym_rec(self.arena, group).is_none() {
@@ -1660,31 +1673,8 @@ impl<'a> SignalToFirLower<'a> {
         // Ensure the group's recursion arrays and body stores are scheduled,
         // then read back the canonical carrier metadata allocated by `lower_proj`.
         let _ = self.lower_proj(proj_node, index, group)?;
-        let canonical_index =
-            canonical_group_index(self.arena, group, index_usize).ok_or_else(|| {
-                SignalFirError::new(
-                    SignalFirErrorCode::UnsupportedSignalNode,
-                    format!(
-                        "failed to resolve canonical recursion index {index} for group {}",
-                        group.as_u32()
-                    ),
-                )
-            })?;
-        Ok(self.recursion.carrier_info(group, canonical_index))
-            .map(|opt| opt.map(RecursionCarrierRef::new))
-    }
-
-    /// Resolves a symbolic recursion group reference to its active carrier
-    /// at a given projection index.
-    ///
-    /// Walks the active recursion stack from innermost outward; returns `None`
-    /// if `group` is not a `SYMREF` bound in the current lowering context.
-    fn resolve_active_recursion_carrier(
-        &self,
-        group: SigId,
-        proj_index: usize,
-    ) -> Result<Option<RecursionCarrierRef>, SignalFirError> {
-        resolve_active_recursion_carrier(self.arena, &self.recursion, group, proj_index)
+        self.recursion
+            .resolve_carrier(self.arena, group, index_usize)
     }
 
     /// Ensures a 2-element circular buffer state slot exists for `node`,
@@ -3064,46 +3054,31 @@ impl<'a> SignalToFirLower<'a> {
                 format!("negative SIGPROJ index {index} in Step 2C.2"),
             )
         })?;
-
         // ── Fast path: active reference inside a body being lowered ──
-        if let Some(rec_ref) = self.resolve_active_recursion_carrier(group, index_usize)? {
+        if let Some(rec_ref) = self
+            .recursion
+            .resolve_carrier(self.arena, group, index_usize)?
+        {
             let real_ty = self.signal_fir_type(node)?;
             let current_index = if rec_ref.strategy == RecursionStorageStrategy::TwoSlotShift {
                 self.lower_int32_const(0)
             } else {
                 self.global_circular_current_index(rec_ref.info.size)
             };
-            let mut b = FirBuilder::new(&mut self.store);
-            return Ok(b.load_table(
-                rec_ref.info.name,
-                AccessType::Struct,
-                current_index,
-                real_ty,
-            ));
+            let mut recursion_ctx = RecursionLoweringCtx {
+                store: &mut self.store,
+                immediate_statements: &mut self.sample_phases.immediate,
+                post_output_statements: &mut self.sample_phases.post_output,
+            };
+            return Ok(recursion_ctx.load_current_carrier(&rec_ref.info, current_index, real_ty));
         }
 
         // ── Decode all body signals from the group ──
-        let (var, bodies) = decode_symbolic_group_bodies(self.arena, group).ok_or_else(|| {
-            SignalFirError::new(
-                SignalFirErrorCode::UnsupportedSignalNode,
-                format!(
-                    "SIGPROJ group must be SYMREC/SYMREF after de_bruijn_to_sym in Step 2C.2 (expr={})",
-                    dump_sig_readable(self.arena, node)
-                ),
-            )
-        })?;
-
-        let canonical_index = if bodies.len() == 1 { 0 } else { index_usize };
-
-        if canonical_index >= bodies.len() {
-            return Err(SignalFirError::new(
-                SignalFirErrorCode::UnsupportedSignalNode,
-                format!(
-                    "SIGPROJ index {index} out of bounds for recursion group with {} bodies",
-                    bodies.len()
-                ),
-            ));
-        }
+        let RecursionGroupProjection {
+            var,
+            bodies,
+            canonical_index,
+        } = decode_group_projection(self.arena, node, index, group)?;
 
         // ── Allocate recursion arrays for ALL bodies ──
         //
@@ -3150,28 +3125,21 @@ impl<'a> SignalToFirLower<'a> {
                         } else {
                             this.global_circular_current_index(info.size)
                         };
-                    let current_store = {
-                        let mut b = FirBuilder::new(&mut this.store);
-                        b.store_table(info.name.clone(), AccessType::Struct, write_index, rhs)
+                    let mut recursion_ctx = RecursionLoweringCtx {
+                        store: &mut this.store,
+                        immediate_statements: &mut this.sample_phases.immediate,
+                        post_output_statements: &mut this.sample_phases.post_output,
                     };
-                    this.sample_phases.immediate.push(current_store);
+                    recursion_ctx.emit_current_carrier_store(info, write_index, rhs);
                     if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
+                        let zero = this.lower_int32_const(0);
                         let one = this.lower_int32_const(1);
-                        let slot0 = {
-                            let zero = this.lower_int32_const(0);
-                            let mut b = FirBuilder::new(&mut this.store);
-                            b.load_table(
-                                info.name.clone(),
-                                AccessType::Struct,
-                                zero,
-                                info.typ.clone(),
-                            )
+                        let mut recursion_ctx = RecursionLoweringCtx {
+                            store: &mut this.store,
+                            immediate_statements: &mut this.sample_phases.immediate,
+                            post_output_statements: &mut this.sample_phases.post_output,
                         };
-                        let prev_store = {
-                            let mut b = FirBuilder::new(&mut this.store);
-                            b.store_table(info.name.clone(), AccessType::Struct, one, slot0)
-                        };
-                        this.sample_phases.post_output.push(prev_store);
+                        recursion_ctx.emit_two_slot_finalize_copy(info, zero, one);
                     }
                 }
                 Ok(())
@@ -3186,23 +3154,17 @@ impl<'a> SignalToFirLower<'a> {
         } else {
             self.global_circular_current_index(info.size)
         };
-        let out = {
-            let mut b = FirBuilder::new(&mut self.store);
-            let load = b.load_table(
-                info.name.clone(),
-                AccessType::Struct,
-                current_index,
-                info.typ.clone(),
-            );
-            // SIGPROJ inherits the type of its body: the array type and the
-            // node type must always agree after signal_prepare/typeAnnotation.
-            debug_assert_eq!(
-                info.typ, out_ty,
-                "SIGPROJ type mismatch: array={:?}, node={:?}",
-                info.typ, out_ty
-            );
-            load
+        let mut recursion_ctx = RecursionLoweringCtx {
+            store: &mut self.store,
+            immediate_statements: &mut self.sample_phases.immediate,
+            post_output_statements: &mut self.sample_phases.post_output,
         };
+        let out = recursion_ctx.load_current_carrier(info, current_index, info.typ.clone());
+        debug_assert_eq!(
+            info.typ, out_ty,
+            "SIGPROJ type mismatch: array={:?}, node={:?}",
+            info.typ, out_ty
+        );
         Ok(out)
     }
 
