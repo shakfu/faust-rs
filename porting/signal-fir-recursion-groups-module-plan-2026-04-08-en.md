@@ -17,17 +17,19 @@ Implemented on 2026-04-08:
 - recursion carrier data types moved out of `module.rs`
 - canonical pure lookup helpers moved to `recursion.rs`
 - `RecursionAllocCtx` introduced for carrier allocation / clear-loop registration
+- recursion-group scheduling moved under `RecursionState`
+- group projection decoding/validation moved to `recursion.rs`
+- recursion carrier FIR helpers moved behind `RecursionLoweringCtx`
+- group allocation/update loops largely factored out of `lower_proj(...)`
 - active recursion stack push/pop centralized through
   `with_active_recursion_group(...)`
 
 Still open:
 
-- decide whether the remaining recursion-group state fields should move behind
-  a dedicated `RecursionState` bundle
 - decide whether `lower_proj(...)` should stay in `module.rs` long-term or be
   further split into orchestration + helper subroutines
-- decide whether `scheduled_state_updates` recursion-group ownership should be
-  made more explicit on the recursion side
+- decide whether `with_active_recursion_group(...)` itself should eventually
+  move behind a recursion-owned guard/context abstraction
 
 ---
 
@@ -414,7 +416,15 @@ Pass criteria:
 
 ### Step 5: thin `lower_proj(...)`
 
-Status: partially implemented
+Status: implemented (pragmatic)
+
+Implementation note:
+
+- `lower_proj(...)` still remains in `module.rs`
+- but projection decoding, carrier allocation helpers, recursion FIR helpers,
+  and group scheduling now live mostly in `recursion.rs`
+- the remaining logic in `lower_proj(...)` is primarily orchestration plus
+  recursive body evaluation
 
 - keep `lower_proj(...)` in `module.rs`
 - make it mostly orchestration that delegates to the recursion module

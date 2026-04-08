@@ -165,6 +165,24 @@ const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
 /// `lower_cast` when the lowerer dispatches on `SigMatch::IntCast /
 /// FloatCast`.
 ///
+/// # Recursion Boundary
+///
+/// Most recursion-specific mechanics now live in `recursion.rs`:
+///
+/// - recursion carrier/state data types
+/// - active/materialized carrier resolution
+/// - delayed recursion reference resolution
+/// - recursive-group projection decoding/validation
+/// - recursion carrier allocation helpers
+/// - recursion-specific FIR helper emission
+///
+/// `module.rs` remains responsible for orchestration:
+///
+/// - `lower_signal(...)` dispatch
+/// - deciding when a top-level recursion group must be materialized
+/// - evaluating recursive body expressions
+/// - integrating recursion writes/finalization into the sample phases
+///
 /// # Recursion and delay1 coupling
 ///
 /// Recursion outputs can be consumed through delay chains rooted at
@@ -178,10 +196,15 @@ const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
 /// reads use the preplanned circular recursion array sized from accumulated
 /// delay analysis.
 ///
-/// This is why two separate maps exist: `state_name_by_node` (keyed by delay
-/// node) and `rec_array_by_group_index` (keyed by group + body index).  They
-/// must never alias, even when the body signal of a recursion group happens to
-/// be the same `SigId` as a `Delay1` node (the tf22 regression pattern).
+/// This is why two separate state spaces exist:
+///
+/// - `state_name_by_node`: standalone non-recursive delay-state slots keyed by
+///   delay node
+/// - `self.recursion`: recursion carriers keyed by `(group, body index)`
+///
+/// They must never alias, even when the body signal of a recursion group
+/// happens to be the same `SigId` as a `Delay1` node (the tf22 regression
+/// pattern).
 ///
 /// # Parameters
 ///
@@ -690,10 +713,6 @@ struct SignalToFirLower<'a> {
     /// same signal (tf22 pattern).
     recursion: RecursionState,
     /// Guards against emitting duplicate state-update stores for shared nodes.
-    /// Also used as the dedup key for recursion groups (keyed by `group` SigId)
-    /// to ensure that body evaluation and the resulting state writes are
-    /// scheduled exactly once per sample regardless of how many `SIGPROJ` nodes
-    /// reference the same group.
     scheduled_state_updates: HashSet<SigId>,
     /// Delay-line exclusive state: allocated ring buffers, recursion-merge
     /// table, and write-scheduling dedup guard.  See [`DelayManager`].
@@ -3082,14 +3101,12 @@ impl<'a> SignalToFirLower<'a> {
 
         // ── Allocate recursion arrays for ALL bodies ──
         //
-        // Each output slot gets its own array keyed by `(group, index)` in
-        // `rec_array_by_group_index`.  This is intentionally separate from the
-        // `state_name_by_node` map used by `ensure_state_slot`, so that a
-        // `lower_delay_state` call inside the body expression never aliases the
-        // group's output carrier — even when the body signal node is the same
-        // Faust node as a delay1 input (the root cause of the tf22 bug).
-        let mut group_arrays = Vec::with_capacity(bodies.len());
-        for (i, body) in bodies.iter().enumerate() {
+        // Each output slot gets its own array keyed by `(group, index)` in the
+        // recursion state, intentionally separate from `state_name_by_node` so
+        // that a `lower_delay_state` call inside the body expression never
+        // aliases the group's output carrier.
+        let mut body_infos = Vec::with_capacity(bodies.len());
+        for body in &bodies {
             let state_ty = self.signal_fir_type(*body)?;
             let init = match state_ty {
                 FirType::Int32 => self.lower_int32_const(0),
@@ -3101,47 +3118,53 @@ impl<'a> SignalToFirLower<'a> {
                     ));
                 }
             };
-            let info = self.ensure_recursion_array_for_group(group, i, state_ty, init)?;
-            group_arrays.push(info);
+            body_infos.push((state_ty, init));
         }
+        let group_arrays = {
+            let mut ctx = RecursionAllocCtx {
+                arena: self.arena,
+                delay: &self.delay,
+                store: &mut self.store,
+                struct_declarations: &mut self.struct_declarations,
+                clear_statements: &mut self.clear_statements,
+                clear_init_seen: &mut self.clear_init_seen,
+                next_loop_var_id: &mut self.next_loop_var_id,
+                recursion: &mut self.recursion,
+            };
+            ctx.allocate_group_arrays(group, &body_infos)?
+        };
 
         // ── Push group context, lower ALL bodies, emit stores ──
-        // Use `group` as the dedup key: if we've already scheduled this group,
-        // skip the body-lowering pass (another proj of the same group triggered it).
-        if self.scheduled_state_updates.insert(group) {
+        // Use recursion-owned scheduling so each group's body pass runs only once.
+        if self.recursion.mark_group_scheduled(group) {
             self.with_active_recursion_group(var, group_arrays.clone(), |this, active_arrays| {
+                let zero = this.lower_int32_const(0);
+                let one = this.lower_int32_const(1);
+                let mut body_values = Vec::with_capacity(bodies.len());
+                let mut current_indexes = Vec::with_capacity(active_arrays.len());
                 for (i, body) in bodies.iter().enumerate() {
-                    let rhs = this.lower_signal(*body)?;
-                    // Always emit the store for the group's output carrier array.
-                    //
-                    // With `rec_array_by_group_index` separate from `state_name_by_node`,
-                    // any `lower_delay_state` call inside the body uses a *different* array
-                    // (keyed by the delay node), so there is no aliasing and no risk of a
-                    // double-write to the same slot.
-                    let info = &active_arrays[i];
-                    let write_index =
-                        if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
-                            this.lower_int32_const(0)
-                        } else {
-                            this.global_circular_current_index(info.size)
-                        };
-                    let mut recursion_ctx = RecursionLoweringCtx {
-                        store: &mut this.store,
-                        immediate_statements: &mut this.sample_phases.immediate,
-                        post_output_statements: &mut this.sample_phases.post_output,
+                    body_values.push(this.lower_signal(*body)?);
+                    let current_index = if active_arrays[i].storage_strategy()
+                        == RecursionStorageStrategy::TwoSlotShift
+                    {
+                        zero
+                    } else {
+                        this.global_circular_current_index(active_arrays[i].size)
                     };
-                    recursion_ctx.emit_current_carrier_store(info, write_index, rhs);
-                    if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
-                        let zero = this.lower_int32_const(0);
-                        let one = this.lower_int32_const(1);
-                        let mut recursion_ctx = RecursionLoweringCtx {
-                            store: &mut this.store,
-                            immediate_statements: &mut this.sample_phases.immediate,
-                            post_output_statements: &mut this.sample_phases.post_output,
-                        };
-                        recursion_ctx.emit_two_slot_finalize_copy(info, zero, one);
-                    }
+                    current_indexes.push(current_index);
                 }
+                let mut recursion_ctx = RecursionLoweringCtx {
+                    store: &mut this.store,
+                    immediate_statements: &mut this.sample_phases.immediate,
+                    post_output_statements: &mut this.sample_phases.post_output,
+                };
+                recursion_ctx.emit_group_body_updates(
+                    active_arrays,
+                    &body_values,
+                    &current_indexes,
+                    zero,
+                    one,
+                );
                 Ok(())
             })?;
         }
@@ -3149,8 +3172,9 @@ impl<'a> SignalToFirLower<'a> {
         // ── Return the result for the requested index ──
         let info = &group_arrays[canonical_index];
         let out_ty = self.signal_fir_type(node)?;
-        let current_index = if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
-            self.lower_int32_const(0)
+        let zero = self.lower_int32_const(0);
+        let circular_index = if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
+            zero
         } else {
             self.global_circular_current_index(info.size)
         };
@@ -3159,6 +3183,7 @@ impl<'a> SignalToFirLower<'a> {
             immediate_statements: &mut self.sample_phases.immediate,
             post_output_statements: &mut self.sample_phases.post_output,
         };
+        let current_index = recursion_ctx.current_index_for_carrier(info, zero, circular_index);
         let out = recursion_ctx.load_current_carrier(info, current_index, info.typ.clone());
         debug_assert_eq!(
             info.typ, out_ty,
@@ -3166,36 +3191,6 @@ impl<'a> SignalToFirLower<'a> {
             info.typ, out_ty
         );
         Ok(out)
-    }
-
-    /// Declares a circular-buffer recursion array for output slot `index` of
-    /// recursion `group`, idempotent.
-    ///
-    /// The buffer is sized to `pow2limit(max_delay + 1)` when the accumulated
-    /// delay analysis recorded delayed reads on this group output, or to 2
-    /// (current + previous sample) otherwise.
-    ///
-    /// Uses a `(group_id, index)` key — separate from the `state_name_by_node`
-    /// map used by `ensure_state_slot` — so that delay-state slots created
-    /// inside a body expression never alias the group's output carrier array.
-    fn ensure_recursion_array_for_group(
-        &mut self,
-        group: SigId,
-        index: usize,
-        typ: FirType,
-        init: FirId,
-    ) -> Result<RecArrayInfo, SignalFirError> {
-        let mut ctx = RecursionAllocCtx {
-            arena: self.arena,
-            delay: &self.delay,
-            store: &mut self.store,
-            struct_declarations: &mut self.struct_declarations,
-            clear_statements: &mut self.clear_statements,
-            clear_init_seen: &mut self.clear_init_seen,
-            next_loop_var_id: &mut self.next_loop_var_id,
-            recursion: &mut self.recursion,
-        };
-        ctx.ensure_recursion_array_for_group(group, index, typ, init)
     }
 }
 

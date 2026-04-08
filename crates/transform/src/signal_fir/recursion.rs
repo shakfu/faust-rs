@@ -117,6 +117,8 @@ pub(super) struct RecursionState {
     pub(super) recursion_stack: Vec<Vec<RecArrayInfo>>,
     /// Stack of active symbolic recursion variables matching `recursion_stack`.
     pub(super) recursion_vars: Vec<SigId>,
+    /// Groups whose recursive body pass has already been scheduled this sample.
+    pub(super) scheduled_groups: HashSet<SigId>,
 }
 
 impl RecursionState {
@@ -134,6 +136,10 @@ impl RecursionState {
     pub(super) fn pop_active_group(&mut self) {
         self.recursion_stack.pop();
         self.recursion_vars.pop();
+    }
+
+    pub(super) fn mark_group_scheduled(&mut self, group: SigId) -> bool {
+        self.scheduled_groups.insert(group)
     }
 
     pub(super) fn resolve_materialized_carrier(
@@ -193,6 +199,19 @@ pub(super) struct RecursionLoweringCtx<'a> {
 }
 
 impl RecursionLoweringCtx<'_> {
+    pub(super) fn current_index_for_carrier(
+        &mut self,
+        info: &RecArrayInfo,
+        zero_index: FirId,
+        circular_index: FirId,
+    ) -> FirId {
+        if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
+            zero_index
+        } else {
+            circular_index
+        }
+    }
+
     pub(super) fn load_current_carrier(
         &mut self,
         info: &RecArrayInfo,
@@ -247,6 +266,25 @@ impl RecursionLoweringCtx<'_> {
             b.store_table(info.name.clone(), AccessType::Struct, one_index, slot0)
         };
         self.post_output_statements.push(prev_store);
+    }
+
+    pub(super) fn emit_group_body_updates(
+        &mut self,
+        group_arrays: &[RecArrayInfo],
+        body_values: &[FirId],
+        current_indexes: &[FirId],
+        zero_index: FirId,
+        one_index: FirId,
+    ) {
+        debug_assert_eq!(group_arrays.len(), body_values.len());
+        debug_assert_eq!(group_arrays.len(), current_indexes.len());
+        for i in 0..group_arrays.len() {
+            let info = &group_arrays[i];
+            self.emit_current_carrier_store(info, current_indexes[i], body_values[i]);
+            if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
+                self.emit_two_slot_finalize_copy(info, zero_index, one_index);
+            }
+        }
     }
 }
 
@@ -340,6 +378,23 @@ impl RecursionAllocCtx<'_> {
             .rec_array_by_group_index
             .insert(key, info.clone());
         Ok(info)
+    }
+
+    pub(super) fn allocate_group_arrays(
+        &mut self,
+        group: SigId,
+        body_infos: &[(FirType, FirId)],
+    ) -> Result<Vec<RecArrayInfo>, SignalFirError> {
+        let mut group_arrays = Vec::with_capacity(body_infos.len());
+        for (index, (typ, init)) in body_infos.iter().enumerate() {
+            group_arrays.push(self.ensure_recursion_array_for_group(
+                group,
+                index,
+                typ.clone(),
+                *init,
+            )?);
+        }
+        Ok(group_arrays)
     }
 }
 
