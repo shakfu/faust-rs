@@ -134,12 +134,16 @@ const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
 ///
 /// # Recursion and delay1 coupling
 ///
-/// Every `~` recursion in Faust reaches the fast-lane preparation boundary as
-/// `Delay1(Proj(i, group))`. The lowerer detects that pattern in
-/// `lower_delay_state` (via `recursion_feedback_info`) and **reuses the
-/// group's existing 2-slot recursion array** instead of allocating a separate
-/// state variable. Reading `state[(fIOTA - 1) & 1]` from that array is
-/// sufficient — no extra write is needed.
+/// Recursion outputs can be consumed through delay chains rooted at
+/// `Proj(i, group)`, not only through the immediate feedback form
+/// `Delay1(Proj(i, group))`.
+///
+/// The lowering path now resolves `Delay1^k(Proj(...))` through
+/// `recursion_delay_chain_info` and reuses the group's existing recursion
+/// carrier instead of allocating a separate delay-state slot. For size-2
+/// carriers, this preserves the direct two-slot fast path; for larger carriers,
+/// reads use the preplanned circular recursion array sized from accumulated
+/// delay analysis.
 ///
 /// This is why two separate maps exist: `state_name_by_node` (keyed by delay
 /// node) and `rec_array_by_group_index` (keyed by group + body index).  They
@@ -871,15 +875,24 @@ impl<'a> SignalToFirLower<'a> {
     /// Pre-scans the output signal forest and allocates all delay lines before
     /// lowering begins.
     ///
+    /// This preparation step now has two phases:
+    ///
+    /// - [`DelayManager::analyze_signals`] computes read-only accumulated delay
+    ///   metadata for reachable signals and recursion outputs
+    /// - [`DelayManager::scan_signals`] collects the concrete non-recursive
+    ///   carried signals that still need standalone delay-line allocation
+    ///
     /// Multiple `SIGDELAY(x, n)` nodes sharing the same carried signal `x`
     /// reuse one delay line sized to the largest delay seen. Standalone
     /// `Delay1(x)` nodes that use the shift strategy are included in the same
     /// pre-pass so delay-line geometry is decided exactly once up front.
-    /// This pre-pass ensures all writes are registered before any reads are
-    /// emitted.
     ///
-    /// Delegates the signal-tree traversal to [`DelayManager::scan_signals`]
-    /// and the FIR allocation to [`Self::ensure_delay_line_decl`].
+    /// Recursion carriers are not allocated here directly; their size is
+    /// planned by the accumulated delay analysis and consumed later by
+    /// `ensure_recursion_array_for_group`.
+    ///
+    /// This pre-pass ensures all resource-sizing decisions are registered
+    /// before reads are emitted during lowering.
     fn prepare_delay_lines(&mut self, outputs: &[SigId]) -> Result<(), SignalFirError> {
         self.delay
             .analyze_signals(self.arena, self.sig_types, outputs)?;

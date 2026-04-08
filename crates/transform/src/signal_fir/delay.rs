@@ -63,14 +63,19 @@
 //!
 //! # Recursion + delay merging
 //!
-//! When the pattern `SIGDELAY(Delay1(Proj(i, SYMREF(v))), N)` appears, the
-//! recursion array for output `i` of variable `v` is sized to hold the full
-//! chain (`N + 1` samples) so no separate `fVec` is needed.  The scan pass
-//! ([`DelayManager::scan_signals`]) records merged recursion-delay ownership for
-//! direct planning purposes, while the new accumulated delay analysis
-//! ([`DelayManager::analyze_signals`]) records the canonical maximum delayed
-//! access per recursion output; `ensure_recursion_array_for_group` in
-//! `module.rs` consumes that analysis to size recursion carriers.
+//! When a recursion output is consumed through a delay chain
+//! `Delay1^k(Proj(i, group))` — either from an active `SYMREF` feedback edge or
+//! from a top-level `SYMREC` projection — the recursion array for output `i`
+//! is sized to hold the full delayed history so no separate `fVec` is needed.
+//!
+//! The planning split is now:
+//!
+//! - [`DelayManager::analyze_signals`] records the canonical maximum delayed
+//!   access per recursion output
+//! - [`DelayManager::scan_signals`] records direct delay-line ownership for
+//!   non-recursive carried signals and legacy direct merge bookkeeping
+//! - `ensure_recursion_array_for_group` in `module.rs` consumes the accumulated
+//!   recursion-output analysis to size recursion carriers
 //!
 //! Standalone `Delay1(x)` nodes that use the shift strategy are also recorded
 //! during the same scan so their buffer geometry is chosen once up front and
