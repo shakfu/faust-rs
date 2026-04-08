@@ -1780,6 +1780,71 @@ fn fixed_delay_at_mcd_boundary_uses_circular_pow2() {
 }
 
 #[test]
+fn delay1_and_mcd_boundary_delay_share_circular_line() {
+    let mut arena = TreeArena::new();
+    let (sig0, sig1) = {
+        let mut b = SigBuilder::new(&mut arena);
+        let in0 = b.input(0);
+        let delay1 = b.delay1(in0);
+        let four = b.int(4);
+        let delay4 = b.delay(in0, four);
+        (delay1, delay4)
+    };
+    let out = compile_fastlane_without_ui(
+        &arena,
+        &[sig0, sig1],
+        1,
+        2,
+        &SignalFirOptions {
+            max_copy_delay: 4,
+            ..SignalFirOptions::default()
+        },
+    )
+    .expect("Delay1 and Delay(x, mcd) should share a circular line");
+
+    let FirMatch::Module {
+        dsp_struct,
+        functions,
+        ..
+    } = match_fir(&out.store, out.module)
+    else {
+        panic!("module expected");
+    };
+    let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+        panic!("dsp_struct block expected");
+    };
+    assert!(
+        struct_items.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar {
+                ref name,
+                typ: FirType::Array(_, 8),
+                ..
+            } if name.starts_with("fVec") || name.starts_with("iVec")
+        )),
+        "shared line should use an 8-slot power-of-two buffer"
+    );
+    assert!(
+        struct_items.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar { ref name, .. } if name == "fIOTA"
+        )),
+        "shared mcd-boundary line should allocate fIOTA"
+    );
+
+    let loop_body = find_compute_loop_body(&out.store, functions);
+    let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+        panic!("compute loop body block expected");
+    };
+    assert!(
+        !stmts
+            .iter()
+            .any(|id| matches!(match_fir(&out.store, *id), FirMatch::ForLoop { .. })),
+        "shared circular line should not emit a shift loop for Delay1"
+    );
+}
+
+#[test]
 fn fixed_delay_at_dlt_boundary_uses_if_wrapping() {
     let mut arena = TreeArena::new();
     let sig0 = {

@@ -1634,31 +1634,70 @@ impl<'a> SignalToFirLower<'a> {
     /// feedback projection.
     fn lower_shift_delay1(&mut self, node: SigId, value: SigId) -> Result<FirId, SignalFirError> {
         let line = self.delay_line_info(value)?;
-        debug_assert!(
-            matches!(line.strategy, DelayStrategy::Shift),
-            "standalone Delay1 pre-scan should choose Shift when max_copy_delay >= 1"
-        );
         let read_ty = self.signal_fir_type(node)?;
         let current = self.lower_signal(value)?;
-        if self.delay.schedule_delay_write(value) {
-            // Write buf[0] = current immediately.
-            let store_0 = self.emit_store_at_zero(&line.name, current);
-            self.sample_statements.push(store_0);
-            // Defer shift over the FULL buffer (not just 1 slot): the pre-scan
-            // may have sized this buffer for a larger SIGDELAY on the same signal.
-            let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
-            if delay_n <= 2 {
-                let copies = self.emit_unrolled_shift_copies(&line.name, delay_n, read_ty.clone());
-                self.deferred_shift_writes.extend(copies);
-            } else {
-                let shift = self.emit_shift_loop(&line.name, delay_n, read_ty.clone());
-                self.deferred_shift_writes.push(shift);
+        match line.strategy.clone() {
+            DelayStrategy::Shift => {
+                if self.delay.schedule_delay_write(value) {
+                    // Write buf[0] = current immediately.
+                    let store_0 = self.emit_store_at_zero(&line.name, current);
+                    self.sample_statements.push(store_0);
+                    // Defer shift over the FULL buffer (not just 1 slot): the pre-scan
+                    // may have sized this buffer for a larger SIGDELAY on the same signal.
+                    let delay_n = i32::try_from(line.size).unwrap_or(i32::MAX) - 1;
+                    if delay_n <= 2 {
+                        let copies =
+                            self.emit_unrolled_shift_copies(&line.name, delay_n, read_ty.clone());
+                        self.deferred_shift_writes.extend(copies);
+                    } else {
+                        let shift = self.emit_shift_loop(&line.name, delay_n, read_ty.clone());
+                        self.deferred_shift_writes.push(shift);
+                    }
+                }
+                // Return buf[1] (1 sample old).
+                let one = self.lower_int32_const(1);
+                let mut b = FirBuilder::new(&mut self.store);
+                Ok(b.load_table(line.name, AccessType::Struct, one, read_ty))
+            }
+            DelayStrategy::CircularPow2 => {
+                if self.delay.schedule_delay_write(value) {
+                    let write_index = {
+                        let raw = self.current_iota_index();
+                        self.masked_delay_index(raw, line.size)
+                    };
+                    let mut b = FirBuilder::new(&mut self.store);
+                    self.sample_statements.push(b.store_table(
+                        line.name.clone(),
+                        AccessType::Struct,
+                        write_index,
+                        current,
+                    ));
+                }
+                let one = self.lower_int32_const(1);
+                let read_index = self.delayed_iota_index(one, line.size);
+                let mut b = FirBuilder::new(&mut self.store);
+                Ok(b.load_table(line.name, AccessType::Struct, read_index, read_ty))
+            }
+            DelayStrategy::IfWrapping { counter_name } => {
+                if self.delay.schedule_delay_write(value) {
+                    let idx = {
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.load_var(counter_name.clone(), AccessType::Struct, FirType::Int32)
+                    };
+                    let mut b = FirBuilder::new(&mut self.store);
+                    self.sample_statements.push(b.store_table(
+                        line.name.clone(),
+                        AccessType::Struct,
+                        idx,
+                        current,
+                    ));
+                }
+                let one = self.lower_int32_const(1);
+                let read_index = self.if_wrapping_read_index(&counter_name, one, line.size);
+                let mut b = FirBuilder::new(&mut self.store);
+                Ok(b.load_table(line.name, AccessType::Struct, read_index, read_ty))
             }
         }
-        // Return buf[1] (1 sample old).
-        let one = self.lower_int32_const(1);
-        let mut b = FirBuilder::new(&mut self.store);
-        Ok(b.load_table(line.name, AccessType::Struct, one, read_ty))
     }
 
     /// Returns the active recursion carrier if `value` is `SIGPROJ(i, group)`
