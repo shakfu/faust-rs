@@ -13,6 +13,7 @@ lowerer.
 Implemented on 2026-04-08:
 
 - dedicated `recursion.rs` module
+- owned `RecursionState`
 - recursion carrier data types moved out of `module.rs`
 - canonical pure lookup helpers moved to `recursion.rs`
 - `RecursionAllocCtx` introduced for carrier allocation / clear-loop registration

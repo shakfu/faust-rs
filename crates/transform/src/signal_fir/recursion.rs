@@ -99,11 +99,34 @@ pub(super) struct RecursionDelayKey {
     pub(super) implicit_delay: usize,
 }
 
-/// Lightweight active recursion-stack view used by canonical lookup helpers.
-#[derive(Clone, Copy)]
-pub(super) struct ActiveRecursionView<'a> {
-    pub(super) recursion_stack: &'a [Vec<RecArrayInfo>],
-    pub(super) recursion_vars: &'a [SigId],
+/// Owned recursion-group state for the fast-lane lowerer.
+#[derive(Default)]
+pub(super) struct RecursionState {
+    /// Maps `(group_id, body_index)` to the recursion array allocated for that
+    /// output slot of a recursion group.
+    pub(super) rec_array_by_group_index: HashMap<(u32, usize), RecArrayInfo>,
+    /// Stack of active recursion carrier groups, innermost last.
+    pub(super) recursion_stack: Vec<Vec<RecArrayInfo>>,
+    /// Stack of active symbolic recursion variables matching `recursion_stack`.
+    pub(super) recursion_vars: Vec<SigId>,
+}
+
+impl RecursionState {
+    pub(super) fn carrier_info(&self, group: SigId, index: usize) -> Option<RecArrayInfo> {
+        self.rec_array_by_group_index
+            .get(&(group.as_u32(), index))
+            .cloned()
+    }
+
+    pub(super) fn push_active_group(&mut self, var: SigId, arrays: Vec<RecArrayInfo>) {
+        self.recursion_vars.push(var);
+        self.recursion_stack.push(arrays);
+    }
+
+    pub(super) fn pop_active_group(&mut self) {
+        self.recursion_stack.pop();
+        self.recursion_vars.pop();
+    }
 }
 
 /// Borrow bundle for recursive-group carrier allocation and zero-init
@@ -116,7 +139,7 @@ pub(super) struct RecursionAllocCtx<'a> {
     pub(super) clear_statements: &'a mut Vec<FirId>,
     pub(super) clear_init_seen: &'a mut HashSet<String>,
     pub(super) next_loop_var_id: &'a mut usize,
-    pub(super) rec_array_by_group_index: &'a mut HashMap<(u32, usize), RecArrayInfo>,
+    pub(super) recursion: &'a mut RecursionState,
 }
 
 impl RecursionAllocCtx<'_> {
@@ -166,7 +189,7 @@ impl RecursionAllocCtx<'_> {
         init: FirId,
     ) -> Result<RecArrayInfo, SignalFirError> {
         let key = (group.as_u32(), index);
-        if let Some(info) = self.rec_array_by_group_index.get(&key) {
+        if let Some(info) = self.recursion.rec_array_by_group_index.get(&key) {
             return Ok(info.clone());
         }
         let prefix = if typ == FirType::Int32 {
@@ -192,7 +215,9 @@ impl RecursionAllocCtx<'_> {
         self.struct_declarations.push(decl);
         self.register_clear_recursion_array(name.clone(), init, size);
         let info = RecArrayInfo { name, typ, size };
-        self.rec_array_by_group_index.insert(key, info.clone());
+        self.recursion
+            .rec_array_by_group_index
+            .insert(key, info.clone());
         Ok(info)
     }
 }
@@ -221,25 +246,25 @@ pub(super) fn canonical_group_index(
 /// given projection index.
 pub(super) fn resolve_active_recursion_carrier(
     arena: &TreeArena,
-    view: ActiveRecursionView<'_>,
+    state: &RecursionState,
     group: SigId,
     proj_index: usize,
 ) -> Result<Option<RecursionCarrierRef>, SignalFirError> {
     let Some(var) = match_sym_ref(arena, group) else {
         return Ok(None);
     };
-    let depth = view
+    let depth = state
         .recursion_vars
         .iter()
         .rposition(|bound| *bound == var)
-        .map(|slot| view.recursion_vars.len() - slot)
+        .map(|slot| state.recursion_vars.len() - slot)
         .ok_or_else(|| {
             SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
                 format!("unbound symbolic recursion variable {}", var.as_u32()),
             )
         })?;
-    let group_arrays = &view.recursion_stack[view.recursion_stack.len() - depth];
+    let group_arrays = &state.recursion_stack[state.recursion_stack.len() - depth];
     let canonical_index = if group_arrays.len() == 1 {
         0
     } else {

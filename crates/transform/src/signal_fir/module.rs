@@ -73,7 +73,7 @@ use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
 use super::planner::SignalFirPlan;
 use super::recursion::{
-    ActiveRecursionView, RecArrayInfo, RecursionAllocCtx, RecursionCarrierRef, RecursionDelayRef,
+    RecArrayInfo, RecursionAllocCtx, RecursionCarrierRef, RecursionDelayRef, RecursionState,
     RecursionStorageStrategy, canonical_group_index, decode_symbolic_group_bodies,
     match_recursion_delay_key, resolve_active_recursion_carrier,
 };
@@ -683,14 +683,12 @@ struct SignalToFirLower<'a> {
     sample_phases: SamplePhases,
     /// Maps each signal node to its generated state-variable name.
     state_name_by_node: HashMap<SigId, String>,
-    /// Maps `(group_id, body_index)` to the recursion array allocated for that
-    /// output slot of a recursion group.  **Intentionally separate from
-    /// `state_name_by_node`** to prevent aliasing when `lower_delay_state`
-    /// detects a `Delay1(Proj(i, group))` feedback and reuses the group's
-    /// array slot instead of allocating a fresh variable.  The two maps use
-    /// disjoint keys so a delay-node `SigId` and a `(group, index)` pair can
-    /// coexist safely even when they refer to the same signal (tf22 pattern).
-    rec_array_by_group_index: HashMap<(u32, usize), RecArrayInfo>,
+    /// Owned recursion-group state: canonical carriers plus active-group stack.
+    ///
+    /// Kept separate from `state_name_by_node` so a delay-node `SigId` and a
+    /// `(group, index)` pair can coexist safely even when they refer to the
+    /// same signal (tf22 pattern).
+    recursion: RecursionState,
     /// Guards against emitting duplicate state-update stores for shared nodes.
     /// Also used as the dedup key for recursion groups (keyed by `group` SigId)
     /// to ensure that body evaluation and the resulting state writes are
@@ -704,13 +702,6 @@ struct SignalToFirLower<'a> {
     /// declared; prevents duplicate declarations across delay and recursion
     /// lowering paths.
     uses_iota: bool,
-    /// Stack of active recursion carrier groups, innermost last; used by `SIGPROJ` resolution.
-    ///
-    /// Each entry is a group of `RecArrayInfo`s — one per output body in a
-    /// multi-output recursion group.  Single-output groups store `vec![info]`.
-    recursion_stack: Vec<Vec<RecArrayInfo>>,
-    /// Stack of active symbolic recursion variables matching `recursion_stack`.
-    recursion_vars: Vec<SigId>,
     /// Maps each `ControlId` to its generated `FaustFloat` zone variable name.
     ui_controls: HashMap<ControlId, String>,
     /// Maps each soundfile `ControlId` to its generated opaque zone variable name.
@@ -821,12 +812,10 @@ impl<'a> SignalToFirLower<'a> {
             control_statements: Vec::new(),
             sample_phases: SamplePhases::default(),
             state_name_by_node: HashMap::new(),
-            rec_array_by_group_index: HashMap::new(),
+            recursion: RecursionState::default(),
             scheduled_state_updates: HashSet::new(),
             delay: DelayManager::new(delay_opts),
             uses_iota: false,
-            recursion_stack: Vec::new(),
-            recursion_vars: Vec::new(),
             ui_controls: HashMap::new(),
             soundfiles: HashMap::new(),
             waveform_tables: HashMap::new(),
@@ -1681,32 +1670,21 @@ impl<'a> SignalToFirLower<'a> {
                     ),
                 )
             })?;
-        Ok(self
-            .rec_array_by_group_index
-            .get(&(group.as_u32(), canonical_index))
-            .cloned())
-        .map(|opt| opt.map(RecursionCarrierRef::new))
+        Ok(self.recursion.carrier_info(group, canonical_index))
+            .map(|opt| opt.map(RecursionCarrierRef::new))
     }
 
     /// Resolves a symbolic recursion group reference to its active carrier
     /// at a given projection index.
     ///
-    /// Walks [`Self::recursion_stack`] from innermost outward; returns `None`
+    /// Walks the active recursion stack from innermost outward; returns `None`
     /// if `group` is not a `SYMREF` bound in the current lowering context.
     fn resolve_active_recursion_carrier(
         &self,
         group: SigId,
         proj_index: usize,
     ) -> Result<Option<RecursionCarrierRef>, SignalFirError> {
-        resolve_active_recursion_carrier(
-            self.arena,
-            ActiveRecursionView {
-                recursion_stack: &self.recursion_stack,
-                recursion_vars: &self.recursion_vars,
-            },
-            group,
-            proj_index,
-        )
+        resolve_active_recursion_carrier(self.arena, &self.recursion, group, proj_index)
     }
 
     /// Ensures a 2-element circular buffer state slot exists for `node`,
@@ -1807,8 +1785,8 @@ impl<'a> SignalToFirLower<'a> {
 
     /// Runs `f` with one recursion group pushed onto the active recursion stack.
     ///
-    /// This centralizes the push/pop discipline for `recursion_vars` and
-    /// `recursion_stack`, which must stay perfectly balanced even when lowering
+    /// This centralizes the push/pop discipline for the active recursion-group
+    /// stack, which must stay perfectly balanced even when lowering
     /// fails partway through a recursive body.
     fn with_active_recursion_group<R>(
         &mut self,
@@ -1816,11 +1794,9 @@ impl<'a> SignalToFirLower<'a> {
         arrays: Vec<RecArrayInfo>,
         f: impl FnOnce(&mut Self, &[RecArrayInfo]) -> Result<R, SignalFirError>,
     ) -> Result<R, SignalFirError> {
-        self.recursion_vars.push(var);
-        self.recursion_stack.push(arrays.clone());
+        self.recursion.push_active_group(var, arrays.clone());
         let result = f(self, &arrays);
-        self.recursion_stack.pop();
-        self.recursion_vars.pop();
+        self.recursion.pop_active_group();
         result
     }
 
@@ -3255,7 +3231,7 @@ impl<'a> SignalToFirLower<'a> {
             clear_statements: &mut self.clear_statements,
             clear_init_seen: &mut self.clear_init_seen,
             next_loop_var_id: &mut self.next_loop_var_id,
-            rec_array_by_group_index: &mut self.rec_array_by_group_index,
+            recursion: &mut self.recursion,
         };
         ctx.ensure_recursion_array_for_group(group, index, typ, init)
     }
