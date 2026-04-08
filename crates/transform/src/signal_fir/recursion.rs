@@ -8,7 +8,20 @@
 //! - canonical resolved carrier references
 //! - canonical resolved delayed recursion reads
 //!
-//! Group scheduling and final FIR orchestration still live in `module.rs`.
+//! It also owns most of the recursion-specific helper logic needed by
+//! `module.rs`:
+//!
+//! - active-vs-materialized carrier resolution
+//! - delayed recursion-chain matching (`Delay1^k(Proj(...))`)
+//! - recursive-group projection decoding/validation
+//! - carrier allocation and clear-loop registration
+//! - recursion-specific FIR helper emission for current writes/finalization
+//!
+//! `module.rs` still owns the final orchestration decisions:
+//!
+//! - when a top-level recursion group must be materialized,
+//! - recursive body evaluation order,
+//! - integration of recursion updates into sample phases.
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,6 +33,12 @@ use super::delay::{DelayManager, pow2limit_for_delay};
 use super::error::{SignalFirError, SignalFirErrorCode};
 
 /// Storage strategy used by one recursion carrier.
+///
+/// This names the two concrete runtime representations used by the fast-lane:
+///
+/// - a strict 2-slot shift-style carrier for ordinary one-sample feedback,
+/// - a larger circular carrier when delay analysis found deeper delayed reads
+///   that can be merged into the recursion storage itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RecursionStorageStrategy {
     /// Two-slot carrier:
@@ -59,6 +78,10 @@ pub(super) struct RecArrayInfo {
 }
 
 impl RecArrayInfo {
+    /// Infers the runtime storage strategy from the allocated carrier size.
+    ///
+    /// Size `2` is treated as the dedicated two-slot fast path; larger sizes
+    /// imply a circular carrier indexed through the shared global cursor.
     pub(super) fn storage_strategy(&self) -> RecursionStorageStrategy {
         if self.size == 2 {
             RecursionStorageStrategy::TwoSlotShift
@@ -69,6 +92,10 @@ impl RecArrayInfo {
 }
 
 /// Canonically resolved recursion carrier.
+///
+/// This is the state-independent “answer object” returned by recursion lookup:
+/// callers get both the concrete carrier metadata and its resolved storage
+/// strategy without having to recompute that split themselves.
 #[derive(Clone, Debug)]
 pub(super) struct RecursionCarrierRef {
     pub(super) info: RecArrayInfo,
@@ -76,6 +103,7 @@ pub(super) struct RecursionCarrierRef {
 }
 
 impl RecursionCarrierRef {
+    /// Builds a canonical resolved carrier from already allocated array info.
     pub(super) fn new(info: RecArrayInfo) -> Self {
         let strategy = info.storage_strategy();
         Self { info, strategy }
@@ -83,6 +111,10 @@ impl RecursionCarrierRef {
 }
 
 /// Canonically resolved delayed recursion read.
+///
+/// Represents a successful match of a recursion-rooted delay chain such as
+/// `Proj(i, group)`, `Delay1(Proj(...))`, or `Delay1^k(Proj(...))`, together
+/// with the recursion carrier that should serve the read.
 #[derive(Clone, Debug)]
 pub(super) struct RecursionDelayRef {
     pub(super) carrier: RecursionCarrierRef,
@@ -100,6 +132,13 @@ pub(super) struct RecursionDelayKey {
 }
 
 /// Decoded and validated recursive-group projection shape.
+///
+/// `module.rs` uses this as the structural payload of `SIGPROJ(index, group)`
+/// after validation:
+///
+/// - the symbolic recursion binder id,
+/// - the full body list for the group,
+/// - the canonical output index after unary-group normalization.
 #[derive(Clone, Debug)]
 pub(super) struct RecursionGroupProjection {
     pub(super) var: SigId,
@@ -108,6 +147,14 @@ pub(super) struct RecursionGroupProjection {
 }
 
 /// Owned recursion-group state for the fast-lane lowerer.
+///
+/// This bundles all runtime-independent recursion bookkeeping that used to be
+/// spread across `module.rs`:
+///
+/// - allocated carriers keyed by `(group, body index)`,
+/// - the stack of currently active recursive groups while lowering bodies,
+/// - the matching symbolic recursion variables for that stack,
+/// - per-sample scheduling dedup for recursive body materialization.
 #[derive(Default)]
 pub(super) struct RecursionState {
     /// Maps `(group_id, body_index)` to the recursion array allocated for that
@@ -122,26 +169,39 @@ pub(super) struct RecursionState {
 }
 
 impl RecursionState {
+    /// Returns the already materialized carrier metadata for one recursion
+    /// output slot, if that slot has been allocated.
     pub(super) fn carrier_info(&self, group: SigId, index: usize) -> Option<RecArrayInfo> {
         self.rec_array_by_group_index
             .get(&(group.as_u32(), index))
             .cloned()
     }
 
+    /// Pushes one recursion group onto the active lowering stack.
     pub(super) fn push_active_group(&mut self, var: SigId, arrays: Vec<RecArrayInfo>) {
         self.recursion_vars.push(var);
         self.recursion_stack.push(arrays);
     }
 
+    /// Pops the innermost recursion group from the active lowering stack.
     pub(super) fn pop_active_group(&mut self) {
         self.recursion_stack.pop();
         self.recursion_vars.pop();
     }
 
+    /// Marks a recursion group as already scheduled for body lowering in the
+    /// current sample and returns `true` only on the first mark.
     pub(super) fn mark_group_scheduled(&mut self, group: SigId) -> bool {
         self.scheduled_groups.insert(group)
     }
 
+    /// Resolves a carrier from already materialized recursion-group storage.
+    ///
+    /// This path is used for top-level `SYMREC` groups after `lower_proj(...)`
+    /// has allocated their carriers.
+    ///
+    /// The projection index is first canonicalized so unary groups always map
+    /// to slot `0` even if a structurally odd `Proj(k, group)` reaches here.
     pub(super) fn resolve_materialized_carrier(
         &self,
         arena: &TreeArena,
@@ -153,6 +213,11 @@ impl RecursionState {
             .map(RecursionCarrierRef::new)
     }
 
+    /// Resolves a recursion carrier from either the active lowering stack or
+    /// the materialized carrier map.
+    ///
+    /// Active `SYMREF` recursion has priority so recursive bodies can break
+    /// cycles by reading the carrier currently being constructed.
     pub(super) fn resolve_carrier(
         &self,
         arena: &TreeArena,
@@ -165,6 +230,8 @@ impl RecursionState {
         Ok(self.resolve_materialized_carrier(arena, group, index))
     }
 
+    /// Resolves a delay chain rooted at a recursion projection against the
+    /// current recursion state, without triggering new materialization.
     pub(super) fn resolve_delay_ref(
         &self,
         arena: &TreeArena,
@@ -192,6 +259,10 @@ impl RecursionState {
 }
 
 /// Borrow bundle for recursion-specific FIR emission used by `module.rs`.
+///
+/// This keeps the recursion-specific load/store/finalize details out of
+/// `module.rs` while still letting the module-level orchestrator decide when
+/// those statements belong to the immediate or post-output sample phases.
 pub(super) struct RecursionLoweringCtx<'a> {
     pub(super) store: &'a mut FirStore,
     pub(super) immediate_statements: &'a mut Vec<FirId>,
@@ -199,6 +270,10 @@ pub(super) struct RecursionLoweringCtx<'a> {
 }
 
 impl RecursionLoweringCtx<'_> {
+    /// Chooses the runtime current-slot index for one carrier.
+    ///
+    /// Two-slot carriers always write/read slot `0` for the current sample.
+    /// Circular carriers use the caller-provided current circular index.
     pub(super) fn current_index_for_carrier(
         &mut self,
         info: &RecArrayInfo,
@@ -212,6 +287,10 @@ impl RecursionLoweringCtx<'_> {
         }
     }
 
+    /// Emits a load of the current carrier value.
+    ///
+    /// The caller supplies the already chosen runtime index so this helper does
+    /// not need to know whether the carrier is two-slot or circular.
     pub(super) fn load_current_carrier(
         &mut self,
         info: &RecArrayInfo,
@@ -227,6 +306,7 @@ impl RecursionLoweringCtx<'_> {
         )
     }
 
+    /// Schedules the current-sample write into a recursion carrier.
     pub(super) fn emit_current_carrier_store(
         &mut self,
         info: &RecArrayInfo,
@@ -242,6 +322,10 @@ impl RecursionLoweringCtx<'_> {
         ));
     }
 
+    /// Schedules the post-output finalize copy for a 2-slot recursion carrier.
+    ///
+    /// This is the exact `slot1 = slot0` step that preserves C++-style
+    /// previous-sample semantics for simple recursion.
     pub(super) fn emit_two_slot_finalize_copy(
         &mut self,
         info: &RecArrayInfo,
@@ -268,6 +352,8 @@ impl RecursionLoweringCtx<'_> {
         self.post_output_statements.push(prev_store);
     }
 
+    /// Emits all current writes and two-slot finalize copies for one recursive
+    /// group body pass.
     pub(super) fn emit_group_body_updates(
         &mut self,
         group_arrays: &[RecArrayInfo],
@@ -290,6 +376,10 @@ impl RecursionLoweringCtx<'_> {
 
 /// Borrow bundle for recursive-group carrier allocation and zero-init
 /// registration.
+///
+/// This isolates the mutable pieces required to declare recursion arrays and
+/// their `instanceClear` loops, so `module.rs` can request carrier allocation
+/// without owning the low-level declaration details.
 pub(super) struct RecursionAllocCtx<'a> {
     pub(super) arena: &'a TreeArena,
     pub(super) delay: &'a DelayManager,
@@ -302,12 +392,17 @@ pub(super) struct RecursionAllocCtx<'a> {
 }
 
 impl RecursionAllocCtx<'_> {
+    /// Generates a unique loop variable name for `instanceClear` helper loops.
     fn fresh_loop_var(&mut self, prefix: &str) -> String {
         let name = format!("{prefix}{}", *self.next_loop_var_id);
         *self.next_loop_var_id += 1;
         name
     }
 
+    /// Registers the `instanceClear` zero-fill loop for one recursion array.
+    ///
+    /// The registration is idempotent so repeated allocation lookups cannot
+    /// duplicate clear-time initialization.
     fn register_clear_recursion_array(&mut self, name: String, init: FirId, size: usize) {
         if !self.clear_init_seen.insert(name.clone()) {
             return;
@@ -340,6 +435,14 @@ impl RecursionAllocCtx<'_> {
     /// The buffer is sized to `pow2limit(max_delay + 1)` when the accumulated
     /// delay analysis recorded delayed reads on this group output, or to 2
     /// otherwise.
+    ///
+    /// This is where recursion carriers pick up delay-analysis-driven upsizing
+    /// from `delay.rs`.
+    ///
+    /// Naming follows the existing fast-lane convention:
+    ///
+    /// - first output slot: `fRec<group>` / `iRec<group>`
+    /// - later slots: `fRec<group>_<index>` / `iRec<group>_<index>`
     pub(super) fn ensure_recursion_array_for_group(
         &mut self,
         group: SigId,
@@ -380,6 +483,7 @@ impl RecursionAllocCtx<'_> {
         Ok(info)
     }
 
+    /// Allocates or reuses all carriers for one recursive group body list.
     pub(super) fn allocate_group_arrays(
         &mut self,
         group: SigId,
@@ -399,6 +503,9 @@ impl RecursionAllocCtx<'_> {
 }
 
 /// Decodes a `SYMREC(var, body_list)` group to all its payload body signals.
+///
+/// Returns `None` when `group` is not a symbolic recursion binder or when the
+/// body payload is not a proper list.
 pub(super) fn decode_symbolic_group_bodies(
     arena: &TreeArena,
     group: SigId,
@@ -409,6 +516,9 @@ pub(super) fn decode_symbolic_group_bodies(
 }
 
 /// Returns the canonical output index for one recursion projection.
+///
+/// Unary recursion groups normalize every `Proj(i, group)` to slot `0`, which
+/// matches the rest of the fast-lane recursion handling.
 pub(super) fn canonical_group_index(
     arena: &TreeArena,
     group: SigId,
@@ -420,6 +530,10 @@ pub(super) fn canonical_group_index(
 
 /// Decodes one `SIGPROJ(index, group)` target into its recursion-group payload
 /// and validates that the requested projection index is in bounds.
+///
+/// This is the structural front door used by `lower_proj(...)`: after this
+/// function returns, the caller can allocate carriers and lower bodies without
+/// re-checking symbolic-group shape or unary-group canonicalization.
 pub(super) fn decode_group_projection(
     arena: &TreeArena,
     node: SigId,
@@ -460,6 +574,10 @@ pub(super) fn decode_group_projection(
 
 /// Resolves a symbolic recursion group reference to its active carrier at a
 /// given projection index.
+///
+/// This only handles the active-stack case (`SYMREF` bound by the current
+/// recursive lowering context). Materialized top-level carriers are handled by
+/// `RecursionState::resolve_materialized_carrier`.
 pub(super) fn resolve_active_recursion_carrier(
     arena: &TreeArena,
     state: &RecursionState,
@@ -503,6 +621,10 @@ pub(super) fn resolve_active_recursion_carrier(
 }
 
 /// Matches `Proj(i, group)` optionally wrapped in `Delay1^k(...)`.
+///
+/// This is the pure structural recognizer used before any materialization
+/// fallback. It does not validate that the referenced group has already been
+/// allocated.
 pub(super) fn match_recursion_delay_key(
     arena: &TreeArena,
     value: SigId,

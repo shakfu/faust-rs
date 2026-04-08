@@ -72,6 +72,7 @@ This snapshot is based on:
 - delay-strategy / recursion-delay parity and sample-loop ordering work landed on 2026-04-08 and reviewed against:
   - `crates/transform/src/signal_fir/delay.rs`
   - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/siggen.rs`
   - `crates/transform/src/signal_fir/tests.rs`
   - `crates/compiler/tests/signal_fir_lane.rs`
   - `porting/journal/2026-04-08.md`

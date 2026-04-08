@@ -1029,7 +1029,11 @@ impl<'a> SignalToFirLower<'a> {
             )),
         }
     }
+}
 
+// ── Core signal lowering: dispatch, foreign/runtime leaves, and delays ─────
+
+impl<'a> SignalToFirLower<'a> {
     /// Central dispatcher: lowers one signal node to a FIR value expression.
     ///
     /// Results are memoized in [`Self::cache`] for DAG sharing.  As a side
@@ -1627,7 +1631,11 @@ impl<'a> SignalToFirLower<'a> {
             schedule_write,
         ))
     }
+}
 
+// ── Shared delay/recursion/state helpers used by lowering ──────────────────
+
+impl<'a> SignalToFirLower<'a> {
     /// Returns the resolved recursion-delay reference for `value`.
     ///
     /// Examples:
@@ -1864,7 +1872,11 @@ impl<'a> SignalToFirLower<'a> {
             _ => self.float_const(0.0),
         }
     }
+}
 
+// ── Constant, UI, soundfile, and table lowering ────────────────────────────
+
+impl<'a> SignalToFirLower<'a> {
     /// Emits one `Int32` FIR constant.
     fn lower_int32_const(&mut self, value: i32) -> FirId {
         let mut b = FirBuilder::new(&mut self.store);
@@ -2858,7 +2870,11 @@ impl<'a> SignalToFirLower<'a> {
             )),
         }
     }
+}
 
+// ── Arithmetic, selection, and recursion projection lowering ───────────────
+
+impl<'a> SignalToFirLower<'a> {
     /// Lowers one binary signal operator to FIR binop.
     ///
     /// Relies on the promoter invariant: every `BinOp` operand already has the
