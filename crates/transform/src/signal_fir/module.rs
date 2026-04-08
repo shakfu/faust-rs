@@ -73,7 +73,9 @@ use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
 use super::planner::SignalFirPlan;
 use super::recursion::{
-    RecArrayInfo, RecursionCarrierRef, RecursionDelayRef, RecursionStorageStrategy,
+    ActiveRecursionView, RecArrayInfo, RecursionCarrierRef, RecursionDelayRef,
+    RecursionStorageStrategy, canonical_group_index, decode_symbolic_group_bodies,
+    match_recursion_delay_key, resolve_active_recursion_carrier,
 };
 
 /// Explicit execution phases inside one sample-loop iteration.
@@ -1630,21 +1632,17 @@ impl<'a> SignalToFirLower<'a> {
         &mut self,
         value: SigId,
     ) -> Result<Option<RecursionDelayRef>, SignalFirError> {
-        let mut current = value;
-        let mut carried_delay = 0usize;
-        while let SigMatch::Delay1(inner) = match_sig(self.arena, current) {
-            carried_delay = carried_delay.saturating_add(1);
-            current = inner;
-        }
-        let SigMatch::Proj(index, group) = match_sig(self.arena, current) else {
+        let Some(key) = match_recursion_delay_key(self.arena, value) else {
             return Ok(None);
         };
-        let Some(rec_info) = self.resolve_recursion_carrier(current, index, group)? else {
+        let Some(rec_info) =
+            self.resolve_recursion_carrier(key.proj_node, key.proj_index, key.group)?
+        else {
             return Ok(None);
         };
         Ok(Some(RecursionDelayRef {
             carrier: rec_info,
-            implicit_delay: carried_delay,
+            implicit_delay: key.implicit_delay,
         }))
     }
 
@@ -1673,9 +1671,8 @@ impl<'a> SignalToFirLower<'a> {
         // Ensure the group's recursion arrays and body stores are scheduled,
         // then read back the canonical carrier metadata allocated by `lower_proj`.
         let _ = self.lower_proj(proj_node, index, group)?;
-        let canonical_index = self
-            .canonical_group_index(group, index_usize)
-            .ok_or_else(|| {
+        let canonical_index =
+            canonical_group_index(self.arena, group, index_usize).ok_or_else(|| {
                 SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
                     format!(
@@ -1691,11 +1688,6 @@ impl<'a> SignalToFirLower<'a> {
         .map(|opt| opt.map(RecursionCarrierRef::new))
     }
 
-    fn canonical_group_index(&self, group: SigId, index: usize) -> Option<usize> {
-        let (_var, bodies) = self.decode_symbolic_group_bodies(group)?;
-        Some(if bodies.len() == 1 { 0 } else { index })
-    }
-
     /// Resolves a symbolic recursion group reference to its active carrier
     /// at a given projection index.
     ///
@@ -1706,36 +1698,15 @@ impl<'a> SignalToFirLower<'a> {
         group: SigId,
         proj_index: usize,
     ) -> Result<Option<RecursionCarrierRef>, SignalFirError> {
-        let Some(var) = match_sym_ref(self.arena, group) else {
-            return Ok(None);
-        };
-        let depth = self
-            .recursion_vars
-            .iter()
-            .rposition(|bound| *bound == var)
-            .map(|slot| self.recursion_vars.len() - slot)
-            .ok_or_else(|| {
-                SignalFirError::new(
-                    SignalFirErrorCode::UnsupportedSignalNode,
-                    format!("unbound symbolic recursion variable {}", var.as_u32()),
-                )
-            })?;
-        let group_arrays = &self.recursion_stack[self.recursion_stack.len() - depth];
-        let canonical_index = if group_arrays.len() == 1 {
-            0
-        } else {
-            proj_index
-        };
-        group_arrays.get(canonical_index).cloned().ok_or_else(|| {
-            SignalFirError::new(
-                SignalFirErrorCode::UnsupportedSignalNode,
-                format!(
-                    "projection index {proj_index} out of bounds for recursion group with {} outputs",
-                    group_arrays.len()
-                ),
-            )
-        }).map(RecursionCarrierRef::new)
-            .map(Some)
+        resolve_active_recursion_carrier(
+            self.arena,
+            ActiveRecursionView {
+                recursion_stack: &self.recursion_stack,
+                recursion_vars: &self.recursion_vars,
+            },
+            group,
+            proj_index,
+        )
     }
 
     /// Ensures a 2-element circular buffer state slot exists for `node`,
@@ -3117,7 +3088,7 @@ impl<'a> SignalToFirLower<'a> {
         }
 
         // ── Decode all body signals from the group ──
-        let (var, bodies) = self.decode_symbolic_group_bodies(group).ok_or_else(|| {
+        let (var, bodies) = decode_symbolic_group_bodies(self.arena, group).ok_or_else(|| {
             SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
                 format!(
@@ -3293,17 +3264,6 @@ impl<'a> SignalToFirLower<'a> {
         let info = RecArrayInfo { name, typ, size };
         self.rec_array_by_group_index.insert(key, info.clone());
         Ok(info)
-    }
-
-    /// Decodes a `SYMREC(var, body_list)` group to all its payload body signals.
-    ///
-    /// `de_bruijn_to_sym` preserves the list-shaped recursive payload used by
-    /// propagated signal groups.  Returns the variable node and a `Vec` of
-    /// body signals extracted via `list_to_vec`.
-    fn decode_symbolic_group_bodies(&self, group: SigId) -> Option<(SigId, Vec<SigId>)> {
-        let (var, body_list) = match_sym_rec(self.arena, group)?;
-        let bodies = list_to_vec(self.arena, body_list)?;
-        Some((var, bodies))
     }
 }
 
