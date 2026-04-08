@@ -72,6 +72,9 @@ use super::delay::{
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
 use super::planner::SignalFirPlan;
+use super::recursion::{
+    RecArrayInfo, RecursionCarrierRef, RecursionDelayRef, RecursionStorageStrategy,
+};
 
 /// Explicit execution phases inside one sample-loop iteration.
 ///
@@ -756,75 +759,6 @@ struct SignalToFirLower<'a> {
     /// strictly higher variability).  These must be materialized even if
     /// single-use, to ensure they execute in the correct bucket.
     sig_at_boundary: HashSet<SigId>,
-}
-
-/// Storage strategy used by one recursion carrier.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RecursionStorageStrategy {
-    /// Two-slot carrier:
-    /// - current sample in slot `0`
-    /// - previous sample in slot `1`
-    /// - post-output finalization copy `slot1 = slot0`
-    TwoSlotShift,
-    /// Circular carrier larger than 2 slots, indexed by `fIOTA`.
-    Circular,
-}
-
-/// Carrier metadata for one output of a recursive group (`SIGPROJ(i, SYMREC(…))`).
-///
-/// Each output body in a multi-output recursion group gets its own array.
-/// The carrier uses one of two storage strategies:
-///
-/// - [`RecursionStorageStrategy::TwoSlotShift`] for the default 2-slot case
-/// - [`RecursionStorageStrategy::Circular`] when accumulated delay analysis
-///   upsizes the carrier to serve delayed reads directly
-///
-/// Source provenance (C++): `signalFIRCompiler.cpp` (`generateRecProj`,
-/// `generateRec`), emitted as `fRecN[2]` / `iRecN[2]`.
-#[derive(Clone, Debug)]
-struct RecArrayInfo {
-    /// Generated DSP-struct array variable name (e.g. `fRec7`).
-    name: String,
-    /// Element type (`Int32` for integer recursion, `Float32`/`Float64` otherwise).
-    typ: FirType,
-    /// Allocated circular-buffer size in elements (always a power of two).
-    ///
-    /// Defaults to 2 (current + previous sample).  When the recursion output
-    /// is consumed by an explicit `SIGDELAY(Delay1(Proj), N)`, the buffer is
-    /// sized to `pow2limit(N + 1 + 1)` so the delay can be served directly
-    /// from this array instead of a separate `fVec`.
-    size: usize,
-}
-
-impl RecArrayInfo {
-    fn storage_strategy(&self) -> RecursionStorageStrategy {
-        if self.size == 2 {
-            RecursionStorageStrategy::TwoSlotShift
-        } else {
-            RecursionStorageStrategy::Circular
-        }
-    }
-}
-
-/// Canonically resolved recursion carrier.
-#[derive(Clone, Debug)]
-struct RecursionCarrierRef {
-    info: RecArrayInfo,
-    strategy: RecursionStorageStrategy,
-}
-
-impl RecursionCarrierRef {
-    fn new(info: RecArrayInfo) -> Self {
-        let strategy = info.storage_strategy();
-        Self { info, strategy }
-    }
-}
-
-/// Canonically resolved delayed recursion read.
-#[derive(Clone, Debug)]
-struct RecursionDelayRef {
-    carrier: RecursionCarrierRef,
-    implicit_delay: usize,
 }
 
 /// One extern prototype recovered from a Faust `FFUN(...)` descriptor.
