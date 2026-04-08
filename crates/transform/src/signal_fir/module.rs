@@ -67,13 +67,13 @@ use crate::signal_prepare::SimpleSigType;
 use super::SignalFirOutput;
 use super::delay::{
     DelayFirCtx, DelayLineInfo, DelayLoweringCtx, DelayManager, DelayOptions, GlobalCircularCursor,
-    delay_size_for_amount, emit_delay1_for_line, emit_fixed_delay_for_line, pow2limit_for_delay,
+    delay_size_for_amount, emit_delay1_for_line, emit_fixed_delay_for_line,
 };
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
 use super::planner::SignalFirPlan;
 use super::recursion::{
-    ActiveRecursionView, RecArrayInfo, RecursionCarrierRef, RecursionDelayRef,
+    ActiveRecursionView, RecArrayInfo, RecursionAllocCtx, RecursionCarrierRef, RecursionDelayRef,
     RecursionStorageStrategy, canonical_group_index, decode_symbolic_group_bodies,
     match_recursion_delay_key, resolve_active_recursion_carrier,
 };
@@ -3231,39 +3231,17 @@ impl<'a> SignalToFirLower<'a> {
         typ: FirType,
         init: FirId,
     ) -> Result<RecArrayInfo, SignalFirError> {
-        let key = (group.as_u32(), index);
-        if let Some(info) = self.rec_array_by_group_index.get(&key) {
-            return Ok(info.clone());
-        }
-        let prefix = if typ == FirType::Int32 {
-            "iRec"
-        } else {
-            "fRec"
+        let mut ctx = RecursionAllocCtx {
+            arena: self.arena,
+            delay: &self.delay,
+            store: &mut self.store,
+            struct_declarations: &mut self.struct_declarations,
+            clear_statements: &mut self.clear_statements,
+            clear_init_seen: &mut self.clear_init_seen,
+            next_loop_var_id: &mut self.next_loop_var_id,
+            rec_array_by_group_index: &mut self.rec_array_by_group_index,
         };
-        // Use group id (+ index suffix for multi-output groups) to form a unique name.
-        let name = if index == 0 {
-            format!("{prefix}{}", group.as_u32())
-        } else {
-            format!("{prefix}{}_{}", group.as_u32(), index)
-        };
-        // Look up whether the read-only delay analysis recorded delayed uses
-        // on this recursion output.  The map is keyed by `(var_id, proj_index)`
-        // where `var` is the symbolic variable bound by `SYMREC`.
-        let size = match match_sym_rec(self.arena, group) {
-            Some((var, _body)) => match self.delay.rec_output_analysis(var.as_u32(), index) {
-                Some(analysis) => pow2limit_for_delay(analysis.max_delay)?,
-                None => 2,
-            },
-            None => 2,
-        };
-        let array_ty = FirType::Array(Box::new(typ.clone()), size);
-        let mut b = FirBuilder::new(&mut self.store);
-        let decl = b.declare_var(name.clone(), array_ty, AccessType::Struct, None);
-        self.struct_declarations.push(decl);
-        self.register_clear_recursion_array(name.clone(), init, size);
-        let info = RecArrayInfo { name, typ, size };
-        self.rec_array_by_group_index.insert(key, info.clone());
-        Ok(info)
+        ctx.ensure_recursion_array_for_group(group, index, typ, init)
     }
 }
 

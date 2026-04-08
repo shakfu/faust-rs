@@ -10,10 +10,13 @@
 //!
 //! Group scheduling and final FIR orchestration still live in `module.rs`.
 
-use fir::FirType;
+use std::collections::{HashMap, HashSet};
+
+use fir::{AccessType, FirBuilder, FirId, FirStore, FirType};
 use signals::{SigId, SigMatch, match_sig};
 use tlib::{TreeArena, list_to_vec, match_sym_rec, match_sym_ref};
 
+use super::delay::{DelayManager, pow2limit_for_delay};
 use super::error::{SignalFirError, SignalFirErrorCode};
 
 /// Storage strategy used by one recursion carrier.
@@ -101,6 +104,97 @@ pub(super) struct RecursionDelayKey {
 pub(super) struct ActiveRecursionView<'a> {
     pub(super) recursion_stack: &'a [Vec<RecArrayInfo>],
     pub(super) recursion_vars: &'a [SigId],
+}
+
+/// Borrow bundle for recursive-group carrier allocation and zero-init
+/// registration.
+pub(super) struct RecursionAllocCtx<'a> {
+    pub(super) arena: &'a TreeArena,
+    pub(super) delay: &'a DelayManager,
+    pub(super) store: &'a mut FirStore,
+    pub(super) struct_declarations: &'a mut Vec<FirId>,
+    pub(super) clear_statements: &'a mut Vec<FirId>,
+    pub(super) clear_init_seen: &'a mut HashSet<String>,
+    pub(super) next_loop_var_id: &'a mut usize,
+    pub(super) rec_array_by_group_index: &'a mut HashMap<(u32, usize), RecArrayInfo>,
+}
+
+impl RecursionAllocCtx<'_> {
+    fn fresh_loop_var(&mut self, prefix: &str) -> String {
+        let name = format!("{prefix}{}", *self.next_loop_var_id);
+        *self.next_loop_var_id += 1;
+        name
+    }
+
+    fn register_clear_recursion_array(&mut self, name: String, init: FirId, size: usize) {
+        if !self.clear_init_seen.insert(name.clone()) {
+            return;
+        }
+        let loop_var = self.fresh_loop_var("lRec");
+        let upper = {
+            let mut b = FirBuilder::new(self.store);
+            b.int32(i32::try_from(size).unwrap_or(i32::MAX))
+        };
+        let body = {
+            let index = {
+                let mut b = FirBuilder::new(self.store);
+                b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+            };
+            let store_node = {
+                let mut b = FirBuilder::new(self.store);
+                b.store_table(name, AccessType::Struct, index, init)
+            };
+            let mut b = FirBuilder::new(self.store);
+            b.block(&[store_node])
+        };
+        let mut b = FirBuilder::new(self.store);
+        self.clear_statements
+            .push(b.simple_for_loop(loop_var, upper, body, false));
+    }
+
+    /// Declares a circular-buffer recursion array for output slot `index` of
+    /// recursion `group`, idempotent.
+    ///
+    /// The buffer is sized to `pow2limit(max_delay + 1)` when the accumulated
+    /// delay analysis recorded delayed reads on this group output, or to 2
+    /// otherwise.
+    pub(super) fn ensure_recursion_array_for_group(
+        &mut self,
+        group: SigId,
+        index: usize,
+        typ: FirType,
+        init: FirId,
+    ) -> Result<RecArrayInfo, SignalFirError> {
+        let key = (group.as_u32(), index);
+        if let Some(info) = self.rec_array_by_group_index.get(&key) {
+            return Ok(info.clone());
+        }
+        let prefix = if typ == FirType::Int32 {
+            "iRec"
+        } else {
+            "fRec"
+        };
+        let name = if index == 0 {
+            format!("{prefix}{}", group.as_u32())
+        } else {
+            format!("{prefix}{}_{}", group.as_u32(), index)
+        };
+        let size = match match_sym_rec(self.arena, group) {
+            Some((var, _body)) => match self.delay.rec_output_analysis(var.as_u32(), index) {
+                Some(analysis) => pow2limit_for_delay(analysis.max_delay)?,
+                None => 2,
+            },
+            None => 2,
+        };
+        let array_ty = FirType::Array(Box::new(typ.clone()), size);
+        let mut b = FirBuilder::new(self.store);
+        let decl = b.declare_var(name.clone(), array_ty, AccessType::Struct, None);
+        self.struct_declarations.push(decl);
+        self.register_clear_recursion_array(name.clone(), init, size);
+        let info = RecArrayInfo { name, typ, size };
+        self.rec_array_by_group_index.insert(key, info.clone());
+        Ok(info)
+    }
 }
 
 /// Decodes a `SYMREC(var, body_list)` group to all its payload body signals.
