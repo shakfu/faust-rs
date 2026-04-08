@@ -218,7 +218,7 @@ fn fastlane_delay_echo_uses_circular_delay_line_and_iota_in_c_and_cpp() {
         "C++ fast-lane should increment fIOTA once per sample"
     );
     assert!(
-        fast_cpp.contains("for (int lDelay0 = 0; lDelay0 < 4096; ++lDelay0)"),
+        fast_cpp.contains("for (int lDelay") && fast_cpp.contains("< 4096; ++lDelay"),
         "C++ fast-lane should zero the fixed-size delay line in instanceClear"
     );
 
@@ -432,21 +432,21 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
         fast.contains("float fRec") && fast.contains("[2];"),
         "fast lane should lower phasor recursion to a 2-slot float array"
     );
-    // CSE may materialize the shared index expressions `(fIOTA & 1)` and
-    // `((fIOTA - 1) & 1)` into `fTemp*` variables when they are referenced
-    // more than once (e.g. for two phasor recursions).  Accept both inline
-    // and CSE-materialized forms.
+    // Simple 2-slot recursion is now aligned with Faust C++:
+    // `fRec[0] = ... + fRec[1]; out = fRec[0]; fRec[1] = fRec[0];`
+    // Keep accepting the older circular-buffer form as well for robustness in
+    // case future merged-delay recursion paths appear in this fixture.
+    let has_direct_two_slot = fast.contains("[0] = (fRec")
+        && fast.contains("[1] +")
+        && fast.contains("float fTemp")
+        && fast.contains("[1] = fTemp");
     let has_inline_circ =
         fast.contains("[(fIOTA & 1)] = (fRec") && fast.contains("[((fIOTA - 1) & 1)] +");
     let has_cse_circ =
         fast.contains("fIOTA & 1") && fast.contains("(fIOTA - 1) & 1") && fast.contains("fTemp");
     assert!(
-        has_inline_circ || has_cse_circ,
-        "fast lane should use circular buffer indexing for recursion write and read"
-    );
-    assert!(
-        fast.contains("int fIOTA;"),
-        "fast lane should declare fIOTA for circular buffer indexing"
+        has_direct_two_slot || has_inline_circ || has_cse_circ,
+        "fast lane should lower phasor recursion to either direct 2-slot or circular-buffer form"
     );
 
     let legacy_c = compile_c_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::LegacyBridge);

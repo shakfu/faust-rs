@@ -1143,8 +1143,8 @@ fn recursive_feedback_delay1_reuses_two_slot_recursion_array() {
         panic!("dsp_struct block expected");
     };
     let mut array_rec_fields = 0usize;
-    for item in struct_items {
-        if let FirMatch::DeclareVar { name, typ, .. } = match_fir(&out.store, item)
+    for item in &struct_items {
+        if let FirMatch::DeclareVar { name, typ, .. } = match_fir(&out.store, *item)
             && name.starts_with("fRec")
             && matches!(typ, FirType::Array(_, 2))
         {
@@ -1154,6 +1154,13 @@ fn recursive_feedback_delay1_reuses_two_slot_recursion_array() {
     assert_eq!(
         array_rec_fields, 1,
         "feedback recurrence should use one 2-slot recursion array without shadow scalar state"
+    );
+    assert!(
+        !struct_items.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar { ref name, .. } if name == "fIOTA"
+        )),
+        "simple feedback recurrence should not allocate fIOTA"
     );
 
     let loop_body = find_compute_loop_body(&out.store, functions);
@@ -1169,8 +1176,8 @@ fn recursive_feedback_delay1_reuses_two_slot_recursion_array() {
         }
     }
     assert_eq!(
-        rec_store_count, 1,
-        "circular-buffer recurrence should write one store per sample (at fIOTA & 1)"
+        rec_store_count, 2,
+        "simple feedback recurrence should write current slot and shift it to previous slot"
     );
     assert!(
         stmts
