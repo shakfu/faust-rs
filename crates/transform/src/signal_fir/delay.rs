@@ -609,6 +609,246 @@ impl<'a> DelayFirCtx<'a> {
     }
 }
 
+// ─── FIR emission helpers shared with module.rs ─────────────────────────────
+
+/// Emits a struct load of `fIOTA` (current write position in delay lines).
+pub(super) fn current_iota_index(store: &mut FirStore) -> FirId {
+    let mut b = FirBuilder::new(store);
+    b.load_var("fIOTA", AccessType::Struct, FirType::Int32)
+}
+
+/// Applies the power-of-two ring-buffer mask: `index & (size - 1)`.
+pub(super) fn masked_delay_index(store: &mut FirStore, index: FirId, size: usize) -> FirId {
+    let mask = {
+        let mut b = FirBuilder::new(store);
+        b.int32(i32::try_from(size.saturating_sub(1)).unwrap_or(i32::MAX))
+    };
+    let mut b = FirBuilder::new(store);
+    b.binop(FirBinOp::And, index, mask, FirType::Int32)
+}
+
+/// Computes the masked read index `(fIOTA - amount) & (size - 1)`.
+pub(super) fn delayed_iota_index(store: &mut FirStore, amount: FirId, size: usize) -> FirId {
+    let iota = current_iota_index(store);
+    let raw = {
+        let mut b = FirBuilder::new(store);
+        b.binop(FirBinOp::Sub, iota, amount, FirType::Int32)
+    };
+    masked_delay_index(store, raw, size)
+}
+
+/// Emits `fIOTA = fIOTA + 1` to advance the delay-line write pointer.
+pub(super) fn bump_iota(store: &mut FirStore) -> FirId {
+    let next = {
+        let iota = current_iota_index(store);
+        let one = {
+            let mut b = FirBuilder::new(store);
+            b.int32(1)
+        };
+        let mut b = FirBuilder::new(store);
+        b.binop(FirBinOp::Add, iota, one, FirType::Int32)
+    };
+    let mut b = FirBuilder::new(store);
+    b.store_var("fIOTA", AccessType::Struct, next)
+}
+
+/// Emits `buf[0] = new_value` — the immediate write for the Shift strategy.
+pub(super) fn emit_store_at_zero(store: &mut FirStore, name: &str, new_value: FirId) -> FirId {
+    let zero = {
+        let mut b = FirBuilder::new(store);
+        b.int32(0)
+    };
+    let mut b = FirBuilder::new(store);
+    b.store_table(name, AccessType::Struct, zero, new_value)
+}
+
+/// Emits unrolled shift copies for a Shift delay line with `delay ≤ 2`.
+///
+/// Returns individual store instructions in high-to-low order:
+/// - delay=1: `[buf[1] = buf[0]]`
+/// - delay=2: `[buf[2] = buf[1], buf[1] = buf[0]]`
+pub(super) fn emit_unrolled_shift_copies(
+    store: &mut FirStore,
+    name: &str,
+    delay: i32,
+    elem_ty: FirType,
+) -> Vec<FirId> {
+    let delay_usize = usize::try_from(delay).unwrap_or(0);
+    let mut copies = Vec::with_capacity(delay_usize);
+    for j in (1..=delay_usize).rev() {
+        let j_idx = {
+            let mut b = FirBuilder::new(store);
+            b.int32(i32::try_from(j).unwrap_or(i32::MAX))
+        };
+        let j_minus_1_idx = {
+            let mut b = FirBuilder::new(store);
+            b.int32(i32::try_from(j - 1).unwrap_or(i32::MAX))
+        };
+        let loaded = {
+            let mut b = FirBuilder::new(store);
+            b.load_table(name, AccessType::Struct, j_minus_1_idx, elem_ty.clone())
+        };
+        let stored = {
+            let mut b = FirBuilder::new(store);
+            b.store_table(name, AccessType::Struct, j_idx, loaded)
+        };
+        copies.push(stored);
+    }
+    copies
+}
+
+/// Emits a reverse `ForLoop` shift for a Shift delay line with `delay ≥ 3`.
+///
+/// Generates:
+/// ```text
+/// for (int j = delay; j > 0; j = j + -1)
+///     buf[j] = buf[j - 1];
+/// ```
+pub(super) fn emit_shift_loop(
+    ctx: &mut DelayFirCtx<'_>,
+    name: &str,
+    delay: i32,
+    elem_ty: FirType,
+) -> FirId {
+    let loop_var = ctx.fresh_loop_var("j");
+    let init = {
+        let delay_val = {
+            let mut b = FirBuilder::new(ctx.store);
+            b.int32(delay)
+        };
+        let mut b = FirBuilder::new(ctx.store);
+        b.declare_var(
+            loop_var.clone(),
+            FirType::Int32,
+            AccessType::Loop,
+            Some(delay_val),
+        )
+    };
+    let end = {
+        let mut b = FirBuilder::new(ctx.store);
+        b.int32(0)
+    };
+    let step = {
+        let mut b = FirBuilder::new(ctx.store);
+        b.int32(-1)
+    };
+    let body = {
+        let j_for_store = {
+            let mut b = FirBuilder::new(ctx.store);
+            b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+        };
+        let j_minus_1 = {
+            let j = {
+                let mut b = FirBuilder::new(ctx.store);
+                b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+            };
+            let one = {
+                let mut b = FirBuilder::new(ctx.store);
+                b.int32(1)
+            };
+            let mut b = FirBuilder::new(ctx.store);
+            b.binop(FirBinOp::Sub, j, one, FirType::Int32)
+        };
+        let loaded = {
+            let mut b = FirBuilder::new(ctx.store);
+            b.load_table(name, AccessType::Struct, j_minus_1, elem_ty.clone())
+        };
+        let stored = {
+            let mut b = FirBuilder::new(ctx.store);
+            b.store_table(name, AccessType::Struct, j_for_store, loaded)
+        };
+        let mut b = FirBuilder::new(ctx.store);
+        b.block(&[stored])
+    };
+    let mut b = FirBuilder::new(ctx.store);
+    b.for_loop(loop_var, init, end, step, body, true)
+}
+
+/// Computes the read index for an `IfWrapping` delay line:
+/// `(counter + size - amount)` with if-based wrap when `≥ size`.
+pub(super) fn if_wrapping_read_index(
+    store: &mut FirStore,
+    counter_name: &str,
+    amount: FirId,
+    size: usize,
+) -> FirId {
+    let size_i32 = i32::try_from(size).unwrap_or(i32::MAX);
+    let counter = {
+        let mut b = FirBuilder::new(store);
+        b.load_var(counter_name, AccessType::Struct, FirType::Int32)
+    };
+    let size_fir = {
+        let mut b = FirBuilder::new(store);
+        b.int32(size_i32)
+    };
+    let plus_size = {
+        let mut b = FirBuilder::new(store);
+        b.binop(FirBinOp::Add, counter, size_fir, FirType::Int32)
+    };
+    let raw = {
+        let mut b = FirBuilder::new(store);
+        b.binop(FirBinOp::Sub, plus_size, amount, FirType::Int32)
+    };
+    let cond = {
+        let sf = {
+            let mut b = FirBuilder::new(store);
+            b.int32(size_i32)
+        };
+        let mut b = FirBuilder::new(store);
+        b.binop(FirBinOp::Ge, raw, sf, FirType::Int32)
+    };
+    let adjusted = {
+        let sf = {
+            let mut b = FirBuilder::new(store);
+            b.int32(size_i32)
+        };
+        let mut b = FirBuilder::new(store);
+        b.binop(FirBinOp::Sub, raw, sf, FirType::Int32)
+    };
+    let mut b = FirBuilder::new(store);
+    b.select2(cond, adjusted, raw, FirType::Int32)
+}
+
+/// Emits `counter = (counter + 1 >= size) ? 0 : counter + 1` for an
+/// `IfWrapping` delay line counter advance.
+pub(super) fn bump_if_wrapping_counter(
+    store: &mut FirStore,
+    counter_name: &str,
+    size: usize,
+) -> FirId {
+    let size_i32 = i32::try_from(size).unwrap_or(i32::MAX);
+    let counter = {
+        let mut b = FirBuilder::new(store);
+        b.load_var(counter_name, AccessType::Struct, FirType::Int32)
+    };
+    let one = {
+        let mut b = FirBuilder::new(store);
+        b.int32(1)
+    };
+    let next = {
+        let mut b = FirBuilder::new(store);
+        b.binop(FirBinOp::Add, counter, one, FirType::Int32)
+    };
+    let cond = {
+        let sf = {
+            let mut b = FirBuilder::new(store);
+            b.int32(size_i32)
+        };
+        let mut b = FirBuilder::new(store);
+        b.binop(FirBinOp::Ge, next, sf, FirType::Int32)
+    };
+    let zero = {
+        let mut b = FirBuilder::new(store);
+        b.int32(0)
+    };
+    let wrapped = {
+        let mut b = FirBuilder::new(store);
+        b.select2(cond, zero, next, FirType::Int32)
+    };
+    let mut b = FirBuilder::new(store);
+    b.store_var(counter_name, AccessType::Struct, wrapped)
+}
+
 // ─── DelayManager ─────────────────────────────────────────────────────────────
 
 /// Owns all delay-line exclusive state and provides scan + allocation entry points.
