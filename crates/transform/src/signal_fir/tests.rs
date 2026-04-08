@@ -1282,6 +1282,229 @@ fn delay_analysis_attributes_fixed_delay_over_feedback_delay1_to_recursion_outpu
 }
 
 #[test]
+fn nested_feedback_delay1_chain_reuses_one_recursion_carrier() {
+    let mut arena = TreeArena::new();
+    let self_ref = de_bruijn_ref(&mut arena, 1);
+    let body = {
+        let mut b = SigBuilder::new(&mut arena);
+        let feedback = b.proj(0, self_ref);
+        let prev1 = b.delay1(feedback);
+        let prev2 = b.delay1(prev1);
+        let inc = b.real(0.25);
+        b.add(prev2, inc)
+    };
+    let body_list = arena.cons(body, arena.nil());
+    let group = de_bruijn_rec(&mut arena, body_list);
+    let sig0 = {
+        let mut b = SigBuilder::new(&mut arena);
+        b.proj(0, group)
+    };
+
+    let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
+        .expect("nested feedback group should prepare");
+    let out = compile_fastlane_without_ui(
+        &prepared.arena,
+        &prepared.outputs,
+        0,
+        1,
+        &SignalFirOptions::default(),
+    )
+    .expect("nested feedback delay chain should lower through one recursion carrier");
+
+    let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+        panic!("module expected");
+    };
+    let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+        panic!("dsp_struct block expected");
+    };
+    let rec_arrays: Vec<_> = struct_items
+        .iter()
+        .filter_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::DeclareVar {
+                name,
+                typ: FirType::Array(_, size),
+                ..
+            } if name.starts_with("fRec") => Some((name, size)),
+            _ => None,
+        })
+        .collect();
+    let delay_arrays: Vec<_> = struct_items
+        .iter()
+        .filter_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::DeclareVar {
+                name,
+                typ: FirType::Array(_, size),
+                ..
+            } if name.starts_with("fVec") || name.starts_with("iVec") => Some((name, size)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rec_arrays.len(),
+        1,
+        "nested feedback delay chain should use exactly one recursion carrier"
+    );
+    assert!(
+        rec_arrays[0].1 >= 3,
+        "nested feedback delay chain should upsize the recursion carrier to hold two delayed reads"
+    );
+    assert!(
+        delay_arrays.is_empty(),
+        "nested feedback delay chain should not allocate auxiliary delay vectors"
+    );
+}
+
+#[test]
+fn fixed_delay_over_feedback_chain_reuses_one_recursion_carrier() {
+    let mut arena = TreeArena::new();
+    let self_ref = de_bruijn_ref(&mut arena, 1);
+    let body = {
+        let mut b = SigBuilder::new(&mut arena);
+        let feedback = b.proj(0, self_ref);
+        let prev = b.delay1(feedback);
+        let ten = b.int(10);
+        let delayed = b.delay(prev, ten);
+        let input = b.input(0);
+        b.add(delayed, input)
+    };
+    let body_list = arena.cons(body, arena.nil());
+    let group = de_bruijn_rec(&mut arena, body_list);
+    let sig0 = {
+        let mut b = SigBuilder::new(&mut arena);
+        b.proj(0, group)
+    };
+
+    let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
+        .expect("delayed feedback group should prepare");
+    let out = compile_fastlane_without_ui(
+        &prepared.arena,
+        &prepared.outputs,
+        1,
+        1,
+        &SignalFirOptions::default(),
+    )
+    .expect("Delay(Delay1(Proj), 10) should lower through one recursion carrier");
+
+    let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+        panic!("module expected");
+    };
+    let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+        panic!("dsp_struct block expected");
+    };
+    let rec_arrays: Vec<_> = struct_items
+        .iter()
+        .filter_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::DeclareVar {
+                name,
+                typ: FirType::Array(_, size),
+                ..
+            } if name.starts_with("fRec") => Some((name, size)),
+            _ => None,
+        })
+        .collect();
+    let delay_arrays: Vec<_> = struct_items
+        .iter()
+        .filter_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::DeclareVar {
+                name,
+                typ: FirType::Array(_, size),
+                ..
+            } if name.starts_with("fVec") || name.starts_with("iVec") => Some((name, size)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rec_arrays.len(),
+        1,
+        "fixed delay over recursion feedback should use exactly one recursion carrier"
+    );
+    assert!(
+        rec_arrays[0].1 >= 12,
+        "fixed delay over recursion feedback should upsize the recursion carrier for delay 11"
+    );
+    assert!(
+        delay_arrays.is_empty(),
+        "fixed delay over recursion feedback should not allocate auxiliary delay vectors"
+    );
+}
+
+#[test]
+fn top_level_recursion_projection_delay_chain_reuses_one_recursion_carrier() {
+    let mut arena = TreeArena::new();
+    let self_ref = de_bruijn_ref(&mut arena, 1);
+    let body = {
+        let mut b = SigBuilder::new(&mut arena);
+        let feedback = b.proj(0, self_ref);
+        let prev = b.delay1(feedback);
+        let input = b.input(0);
+        b.add(prev, input)
+    };
+    let body_list = arena.cons(body, arena.nil());
+    let group = de_bruijn_rec(&mut arena, body_list);
+    let sig0 = {
+        let mut b = SigBuilder::new(&mut arena);
+        let current = b.proj(0, group);
+        let prev1 = b.delay1(current);
+        let prev2 = b.delay1(prev1);
+        let sum1 = b.add(current, prev1);
+        b.add(sum1, prev2)
+    };
+
+    let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
+        .expect("top-level delayed recursion projection should prepare");
+    let out = compile_fastlane_without_ui(
+        &prepared.arena,
+        &prepared.outputs,
+        1,
+        1,
+        &SignalFirOptions::default(),
+    )
+    .expect("top-level delayed recursion projection should lower through one recursion carrier");
+
+    let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+        panic!("module expected");
+    };
+    let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+        panic!("dsp_struct block expected");
+    };
+    let rec_arrays: Vec<_> = struct_items
+        .iter()
+        .filter_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::DeclareVar {
+                name,
+                typ: FirType::Array(_, size),
+                ..
+            } if name.starts_with("fRec") => Some((name, size)),
+            _ => None,
+        })
+        .collect();
+    let delay_arrays: Vec<_> = struct_items
+        .iter()
+        .filter_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::DeclareVar {
+                name,
+                typ: FirType::Array(_, size),
+                ..
+            } if name.starts_with("fVec") || name.starts_with("iVec") => Some((name, size)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rec_arrays.len(),
+        1,
+        "top-level delayed recursion projection should use exactly one recursion carrier"
+    );
+    assert!(
+        rec_arrays[0].1 >= 3,
+        "top-level delayed recursion projection should upsize the recursion carrier for two delayed reads"
+    );
+    assert!(
+        delay_arrays.is_empty(),
+        "top-level delayed recursion projection should not allocate auxiliary delay vectors"
+    );
+}
+
+#[test]
 fn foreign_var_count_lowers_to_compute_funarg() {
     let mut arena = TreeArena::new();
     let sig0 = {

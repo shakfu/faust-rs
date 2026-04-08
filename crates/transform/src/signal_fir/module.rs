@@ -881,6 +881,8 @@ impl<'a> SignalToFirLower<'a> {
     /// Delegates the signal-tree traversal to [`DelayManager::scan_signals`]
     /// and the FIR allocation to [`Self::ensure_delay_line_decl`].
     fn prepare_delay_lines(&mut self, outputs: &[SigId]) -> Result<(), SignalFirError> {
+        self.delay
+            .analyze_signals(self.arena, self.sig_types, outputs)?;
         let max_delays = self
             .delay
             .scan_signals(self.arena, self.sig_types, outputs)?;
@@ -1044,9 +1046,11 @@ impl<'a> SignalToFirLower<'a> {
             SigMatch::Input(index) => self.lower_input(index)?,
             SigMatch::Output(_, inner) => self.lower_signal(inner)?,
             SigMatch::Delay1(value) => {
-                // Recursion feedback must always use the fIOTA circular-buffer path.
-                // For standalone Delay1 nodes, use the Shift strategy when enabled.
-                if self.recursion_feedback_info(value)?.is_none()
+                // Recursion delay chains that ultimately read from an active
+                // recursion carrier are lowered through that carrier directly.
+                // Standalone Delay1 nodes keep using the dedicated fast path
+                // when the shift strategy is enabled.
+                if self.recursion_delay_chain_info(value)?.is_none()
                     && self.delay.max_copy_delay() >= 1
                 {
                     self.lower_shift_delay1(sig, value)?
@@ -1454,25 +1458,24 @@ impl<'a> SignalToFirLower<'a> {
     ) -> Result<FirId, SignalFirError> {
         // ── Merged recursion delay ──
         //
-        // When `value` is `Delay1(Proj(i, active_group))`, the scan pass has
+        // When `value` is a `Delay1^k(Proj(i, active_group))` chain, the scan pass has
         // already sized the recursion array to hold the full delay chain.
-        // Read directly from the recursion array at offset `delay + 1`
-        // (N for the explicit delay, +1 for the Delay1), eliminating the
-        // separate fVec buffer and per-sample copy.
-        if let SigMatch::Delay1(inner) = match_sig(self.arena, value)
-            && let Some(rec_info) = self.recursion_feedback_info(inner)?
+        // Read directly from the recursion array at offset `amount + k`,
+        // eliminating the separate fVec buffer and per-sample copy.
+        if let Some((rec_info, carried_delay)) = self.recursion_delay_chain_info(value)?
             && rec_info.size > 2
         {
             // The recursion array was upsized — the merge is active.
             // Use the runtime amount expression (which may be variable,
             // e.g. slider-driven), not the constant sizing bound.
-            // Total offset = amount + 1 (the +1 accounts for Delay1).
+            // Total offset = explicit amount + the carried implicit delay chain.
             self.ensure_iota_state();
             let amount_value = self.lower_signal(amount)?;
-            let one = self.lower_int32_const(1);
+            let carried_delay =
+                self.lower_int32_const(i32::try_from(carried_delay).unwrap_or(i32::MAX));
             let total_offset = {
                 let mut b = FirBuilder::new(&mut self.store);
-                b.binop(FirBinOp::Add, amount_value, one, FirType::Int32)
+                b.binop(FirBinOp::Add, amount_value, carried_delay, FirType::Int32)
             };
             let read_index = self.delayed_iota_index(total_offset, rec_info.size);
             let read_ty = self.signal_fir_type(node)?;
@@ -1568,20 +1571,22 @@ impl<'a> SignalToFirLower<'a> {
         value: SigId,
         init: FirId,
     ) -> Result<FirId, SignalFirError> {
-        if let Some(rec_info) = self.recursion_feedback_info(value)? {
+        if let Some((rec_info, carried_delay)) = self.recursion_delay_chain_info(value)? {
             let out_ty = self.signal_fir_type(node)?;
             debug_assert_eq!(
                 rec_info.typ, out_ty,
                 "prepared recursion feedback type should match delay1 output type"
             );
-            let prev_index = if rec_info.size == 2 {
+            let total_offset = carried_delay.saturating_add(1);
+            let prev_index = if rec_info.size == 2 && total_offset == 1 {
                 self.lower_int32_const(1)
             } else {
                 // Merged recursion-delay buffers larger than 2 still use the
                 // circular-buffer path indexed by fIOTA.
                 self.ensure_iota_state();
-                let one = self.lower_int32_const(1);
-                self.delayed_iota_index(one, rec_info.size)
+                let total_offset =
+                    self.lower_int32_const(i32::try_from(total_offset).unwrap_or(i32::MAX));
+                self.delayed_iota_index(total_offset, rec_info.size)
             };
             let mut b = FirBuilder::new(&mut self.store);
             return Ok(b.load_table(
@@ -1700,20 +1705,78 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
-    /// Returns the active recursion carrier if `value` is `SIGPROJ(i, group)`
-    /// pointing into the current recursion context, otherwise `None`.
+    /// Returns the active recursion carrier plus the number of implicit
+    /// one-sample delays already wrapped around it in `value`.
     ///
-    /// Used by `lower_delay_state` to detect the canonical feedback pattern
-    /// and reuse the existing recursion array slot instead of creating a
-    /// separate state variable.
-    fn recursion_feedback_info(
+    /// Examples:
+    ///
+    /// - `Proj(i, group)` → delay chain `0`
+    /// - `Delay1(Proj(i, group))` → delay chain `1`
+    /// - `Delay1(Delay1(Proj(i, group)))` → delay chain `2`
+    fn recursion_delay_chain_info(
         &mut self,
         value: SigId,
-    ) -> Result<Option<RecArrayInfo>, SignalFirError> {
-        let SigMatch::Proj(index, group) = match_sig(self.arena, value) else {
+    ) -> Result<Option<(RecArrayInfo, usize)>, SignalFirError> {
+        let mut current = value;
+        let mut carried_delay = 0usize;
+        while let SigMatch::Delay1(inner) = match_sig(self.arena, current) {
+            carried_delay = carried_delay.saturating_add(1);
+            current = inner;
+        }
+        let SigMatch::Proj(index, group) = match_sig(self.arena, current) else {
             return Ok(None);
         };
-        self.active_recursion_info(group, index as usize)
+        let Some(rec_info) = self.recursion_carrier_info(current, index, group)? else {
+            return Ok(None);
+        };
+        Ok(Some((rec_info, carried_delay)))
+    }
+
+    /// Returns the recursion carrier for `Proj(index, group)` whether the
+    /// projection points to the active feedback reference (`SYMREF`) or to the
+    /// materialized top-level recursion group (`SYMREC`).
+    fn recursion_carrier_info(
+        &mut self,
+        proj_node: SigId,
+        index: i32,
+        group: SigId,
+    ) -> Result<Option<RecArrayInfo>, SignalFirError> {
+        let index_usize = usize::try_from(index).map_err(|_| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("negative SIGPROJ index {index} in recursion carrier lookup"),
+            )
+        })?;
+        if let Some(info) = self.active_recursion_info(group, index_usize)? {
+            return Ok(Some(info));
+        }
+        if match_sym_rec(self.arena, group).is_none() {
+            return Ok(None);
+        }
+
+        // Ensure the group's recursion arrays and body stores are scheduled,
+        // then read back the canonical carrier metadata allocated by `lower_proj`.
+        let _ = self.lower_proj(proj_node, index, group)?;
+        let canonical_index = self
+            .canonical_group_index(group, index_usize)
+            .ok_or_else(|| {
+                SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!(
+                        "failed to resolve canonical recursion index {index} for group {}",
+                        group.as_u32()
+                    ),
+                )
+            })?;
+        Ok(self
+            .rec_array_by_group_index
+            .get(&(group.as_u32(), canonical_index))
+            .cloned())
+    }
+
+    fn canonical_group_index(&self, group: SigId, index: usize) -> Option<usize> {
+        let (_var, bodies) = self.decode_symbolic_group_bodies(group)?;
+        Some(if bodies.len() == 1 { 0 } else { index })
     }
 
     /// Resolves a symbolic recursion group reference to its active carrier
@@ -3483,9 +3546,9 @@ impl<'a> SignalToFirLower<'a> {
     /// Declares a circular-buffer recursion array for output slot `index` of
     /// recursion `group`, idempotent.
     ///
-    /// The buffer is sized to `pow2limit(max_delay + 1)` when the scan pass
-    /// recorded a merged delay for this group output via [`DelayManager::rec_max_delay`],
-    /// or to 2 (current + previous sample) otherwise.
+    /// The buffer is sized to `pow2limit(max_delay + 1)` when the accumulated
+    /// delay analysis recorded delayed reads on this group output, or to 2
+    /// (current + previous sample) otherwise.
     ///
     /// Uses a `(group_id, index)` key — separate from the `state_name_by_node`
     /// map used by `ensure_state_slot` — so that delay-state slots created
@@ -3512,12 +3575,12 @@ impl<'a> SignalToFirLower<'a> {
         } else {
             format!("{prefix}{}_{}", group.as_u32(), index)
         };
-        // Look up whether the scan pass recorded a merged delay for this
-        // recursion output.  The map is keyed by (var_id, proj_index) where
-        // var is the symbolic variable bound by SYMREC.
+        // Look up whether the read-only delay analysis recorded delayed uses
+        // on this recursion output.  The map is keyed by `(var_id, proj_index)`
+        // where `var` is the symbolic variable bound by `SYMREC`.
         let size = match match_sym_rec(self.arena, group) {
-            Some((var, _body)) => match self.delay.rec_max_delay(var.as_u32(), index) {
-                Some(total_delay) => pow2limit_for_delay(total_delay)?,
+            Some((var, _body)) => match self.delay.rec_output_analysis(var.as_u32(), index) {
+                Some(analysis) => pow2limit_for_delay(analysis.max_delay)?,
                 None => 2,
             },
             None => 2,
