@@ -1805,6 +1805,25 @@ impl<'a> SignalToFirLower<'a> {
         GlobalCircularCursor.delayed_index(&mut self.store, amount, size)
     }
 
+    /// Runs `f` with one recursion group pushed onto the active recursion stack.
+    ///
+    /// This centralizes the push/pop discipline for `recursion_vars` and
+    /// `recursion_stack`, which must stay perfectly balanced even when lowering
+    /// fails partway through a recursive body.
+    fn with_active_recursion_group<R>(
+        &mut self,
+        var: SigId,
+        arrays: Vec<RecArrayInfo>,
+        f: impl FnOnce(&mut Self, &[RecArrayInfo]) -> Result<R, SignalFirError>,
+    ) -> Result<R, SignalFirError> {
+        self.recursion_vars.push(var);
+        self.recursion_stack.push(arrays.clone());
+        let result = f(self, &arrays);
+        self.recursion_stack.pop();
+        self.recursion_vars.pop();
+        result
+    }
+
     /// Emits an `instanceClear` zeroing loop for a two-slot recursion array.
     ///
     /// Idempotent: subsequent calls for the same `name` are silently ignored.
@@ -3139,51 +3158,48 @@ impl<'a> SignalToFirLower<'a> {
         // Use `group` as the dedup key: if we've already scheduled this group,
         // skip the body-lowering pass (another proj of the same group triggered it).
         if self.scheduled_state_updates.insert(group) {
-            self.recursion_vars.push(var);
-            self.recursion_stack.push(group_arrays.clone());
-
-            for (i, body) in bodies.iter().enumerate() {
-                let rhs = self.lower_signal(*body)?;
-                // Always emit the store for the group's output carrier array.
-                //
-                // With `rec_array_by_group_index` separate from `state_name_by_node`,
-                // any `lower_delay_state` call inside the body uses a *different* array
-                // (keyed by the delay node), so there is no aliasing and no risk of a
-                // double-write to the same slot.
-                let info = &group_arrays[i];
-                let write_index =
+            self.with_active_recursion_group(var, group_arrays.clone(), |this, active_arrays| {
+                for (i, body) in bodies.iter().enumerate() {
+                    let rhs = this.lower_signal(*body)?;
+                    // Always emit the store for the group's output carrier array.
+                    //
+                    // With `rec_array_by_group_index` separate from `state_name_by_node`,
+                    // any `lower_delay_state` call inside the body uses a *different* array
+                    // (keyed by the delay node), so there is no aliasing and no risk of a
+                    // double-write to the same slot.
+                    let info = &active_arrays[i];
+                    let write_index =
+                        if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
+                            this.lower_int32_const(0)
+                        } else {
+                            this.global_circular_current_index(info.size)
+                        };
+                    let current_store = {
+                        let mut b = FirBuilder::new(&mut this.store);
+                        b.store_table(info.name.clone(), AccessType::Struct, write_index, rhs)
+                    };
+                    this.sample_phases.immediate.push(current_store);
                     if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
-                        self.lower_int32_const(0)
-                    } else {
-                        self.global_circular_current_index(info.size)
-                    };
-                let current_store = {
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.store_table(info.name.clone(), AccessType::Struct, write_index, rhs)
-                };
-                self.sample_phases.immediate.push(current_store);
-                if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
-                    let one = self.lower_int32_const(1);
-                    let slot0 = {
-                        let zero = self.lower_int32_const(0);
-                        let mut b = FirBuilder::new(&mut self.store);
-                        b.load_table(
-                            info.name.clone(),
-                            AccessType::Struct,
-                            zero,
-                            info.typ.clone(),
-                        )
-                    };
-                    let prev_store = {
-                        let mut b = FirBuilder::new(&mut self.store);
-                        b.store_table(info.name.clone(), AccessType::Struct, one, slot0)
-                    };
-                    self.sample_phases.post_output.push(prev_store);
+                        let one = this.lower_int32_const(1);
+                        let slot0 = {
+                            let zero = this.lower_int32_const(0);
+                            let mut b = FirBuilder::new(&mut this.store);
+                            b.load_table(
+                                info.name.clone(),
+                                AccessType::Struct,
+                                zero,
+                                info.typ.clone(),
+                            )
+                        };
+                        let prev_store = {
+                            let mut b = FirBuilder::new(&mut this.store);
+                            b.store_table(info.name.clone(), AccessType::Struct, one, slot0)
+                        };
+                        this.sample_phases.post_output.push(prev_store);
+                    }
                 }
-            }
-
-            self.recursion_stack.pop();
-            self.recursion_vars.pop();
+                Ok(())
+            })?;
         }
 
         // ── Return the result for the requested index ──

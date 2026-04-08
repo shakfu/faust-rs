@@ -2,11 +2,31 @@
 
 **Date**: 2026-04-08
 **Scope**: `crates/transform/src/signal_fir/module.rs`, new recursion-focused helper module
-**Status**: Design
+**Status**: Partially implemented
 **Goal**: decide whether recursive-group handling should move out of
 `module.rs`, and if so, define a clean API boundary that improves locality
 without breaking parity or over-coupling recursion logic to the rest of the
 lowerer.
+
+## Implementation Status Snapshot
+
+Implemented on 2026-04-08:
+
+- dedicated `recursion.rs` module
+- recursion carrier data types moved out of `module.rs`
+- canonical pure lookup helpers moved to `recursion.rs`
+- `RecursionAllocCtx` introduced for carrier allocation / clear-loop registration
+- active recursion stack push/pop centralized through
+  `with_active_recursion_group(...)`
+
+Still open:
+
+- decide whether the remaining recursion-group state fields should move behind
+  a dedicated `RecursionState` bundle
+- decide whether `lower_proj(...)` should stay in `module.rs` long-term or be
+  further split into orchestration + helper subroutines
+- decide whether `scheduled_state_updates` recursion-group ownership should be
+  made more explicit on the recursion side
 
 ---
 
@@ -331,6 +351,8 @@ thin”.
 
 ### Step 1: extract recursion state/context types
 
+Status: implemented
+
 - add `recursion.rs`
 - move `RecArrayInfo`, `RecursionStorageStrategy`, `RecursionCarrierRef`,
   `RecursionDelayRef`, and any recursion-local context bundles there
@@ -342,6 +364,8 @@ Pass criteria:
 - `module.rs` imports recursion data types from the new module
 
 ### Step 2: extract pure/canonical recursion lookup helpers
+
+Status: implemented
 
 - move:
   - `canonical_group_index(...)`
@@ -357,6 +381,16 @@ Pass criteria:
 
 ### Step 3: extract active-group stack discipline
 
+Status: implemented (adapted)
+
+Implementation note:
+
+- the push/pop discipline is now centralized through
+  `with_active_recursion_group(...)`
+- this helper remains in `module.rs` for now because a fully externalized
+  guard/context abstraction would fight the current borrow structure of
+  `SignalToFirLower`
+
 - replace raw `recursion_vars.push/pop` and `recursion_stack.push/pop`
   sequences with one helper / guard abstraction
 
@@ -367,6 +401,8 @@ Pass criteria:
 
 ### Step 4: extract recursive-group carrier allocation helpers
 
+Status: implemented
+
 - move `ensure_recursion_array_for_group(...)`
 - keep FIR declaration emission via an explicit context bundle passed from
   `module.rs`
@@ -376,6 +412,8 @@ Pass criteria:
 - allocation bookkeeping no longer lives directly in `module.rs`
 
 ### Step 5: thin `lower_proj(...)`
+
+Status: partially implemented
 
 - keep `lower_proj(...)` in `module.rs`
 - make it mostly orchestration that delegates to the recursion module
