@@ -66,9 +66,8 @@ use crate::signal_prepare::SimpleSigType;
 
 use super::SignalFirOutput;
 use super::delay::{
-    DelayFirCtx, DelayLineInfo, DelayLoweringCtx, DelayManager, DelayOptions, current_iota_index,
-    delay_size_for_amount, delayed_iota_index, emit_delay1_for_line, emit_fixed_delay_for_line,
-    masked_delay_index, pow2limit_for_delay,
+    DelayFirCtx, DelayLineInfo, DelayLoweringCtx, DelayManager, DelayOptions, GlobalCircularCursor,
+    delay_size_for_amount, emit_delay1_for_line, emit_fixed_delay_for_line, pow2limit_for_delay,
 };
 use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
@@ -1543,7 +1542,7 @@ impl<'a> SignalToFirLower<'a> {
                 let mut b = FirBuilder::new(&mut self.store);
                 b.binop(FirBinOp::Add, amount_value, carried_delay, FirType::Int32)
             };
-            let read_index = delayed_iota_index(
+            let read_index = GlobalCircularCursor.delayed_index(
                 &mut self.store,
                 total_offset,
                 rec_delay_ref.carrier.info.size,
@@ -1618,7 +1617,7 @@ impl<'a> SignalToFirLower<'a> {
                 self.ensure_iota_state();
                 let total_offset =
                     self.lower_int32_const(i32::try_from(total_offset).unwrap_or(i32::MAX));
-                delayed_iota_index(
+                GlobalCircularCursor.delayed_index(
                     &mut self.store,
                     total_offset,
                     rec_delay_ref.carrier.info.size,
@@ -1637,7 +1636,7 @@ impl<'a> SignalToFirLower<'a> {
         let name = self.ensure_state_slot(node, state_ty.clone(), init);
         // Read previous value: state[(fIOTA - 1) & 1]
         let one = self.lower_int32_const(1);
-        let read_index = delayed_iota_index(&mut self.store, one, 2);
+        let read_index = GlobalCircularCursor.delayed_index(&mut self.store, one, 2);
         let out = {
             let mut b = FirBuilder::new(&mut self.store);
             b.load_table(name.clone(), AccessType::Struct, read_index, state_ty)
@@ -1645,10 +1644,7 @@ impl<'a> SignalToFirLower<'a> {
         // Write current value: state[fIOTA & 1] = next (immediate)
         if self.scheduled_state_updates.insert(node) {
             let next = self.lower_signal(value)?;
-            let write_index = {
-                let iota = current_iota_index(&mut self.store);
-                masked_delay_index(&mut self.store, iota, 2)
-            };
+            let write_index = GlobalCircularCursor.current_index(&mut self.store, 2);
             let mut b = FirBuilder::new(&mut self.store);
             self.sample_phases.immediate.push(b.store_table(
                 name,
@@ -1888,15 +1884,17 @@ impl<'a> SignalToFirLower<'a> {
 
     /// Declares the `fIOTA` circular-buffer position counter, idempotent.
     fn ensure_iota_state(&mut self) {
-        if self.uses_iota {
-            return;
-        }
-        self.uses_iota = true;
-        let zero = self.lower_int32_const(0);
-        let mut b = FirBuilder::new(&mut self.store);
-        let decl = b.declare_var("fIOTA", FirType::Int32, AccessType::Struct, None);
-        self.struct_declarations.push(decl);
-        self.register_clear_init("fIOTA".to_owned(), zero);
+        let mut ctx = DelayFirCtx {
+            store: &mut self.store,
+            real_ty: self.real_ty.clone(),
+            types: self.types,
+            struct_declarations: &mut self.struct_declarations,
+            clear_statements: &mut self.clear_statements,
+            clear_init_seen: &mut self.clear_init_seen,
+            next_loop_var_id: &mut self.next_loop_var_id,
+            uses_iota: &mut self.uses_iota,
+        };
+        GlobalCircularCursor.ensure_state(&mut ctx);
     }
 
     /// Emits an `instanceClear` zeroing loop for a two-slot recursion array.
@@ -3171,8 +3169,7 @@ impl<'a> SignalToFirLower<'a> {
                 self.lower_int32_const(0)
             } else {
                 self.ensure_iota_state();
-                let iota = current_iota_index(&mut self.store);
-                masked_delay_index(&mut self.store, iota, rec_ref.info.size)
+                GlobalCircularCursor.current_index(&mut self.store, rec_ref.info.size)
             };
             let mut b = FirBuilder::new(&mut self.store);
             return Ok(b.load_table(
@@ -3252,8 +3249,7 @@ impl<'a> SignalToFirLower<'a> {
                         self.lower_int32_const(0)
                     } else {
                         self.ensure_iota_state();
-                        let iota = current_iota_index(&mut self.store);
-                        masked_delay_index(&mut self.store, iota, info.size)
+                        GlobalCircularCursor.current_index(&mut self.store, info.size)
                     };
                 let current_store = {
                     let mut b = FirBuilder::new(&mut self.store);
@@ -3291,8 +3287,7 @@ impl<'a> SignalToFirLower<'a> {
             self.lower_int32_const(0)
         } else {
             self.ensure_iota_state();
-            let iota = current_iota_index(&mut self.store);
-            masked_delay_index(&mut self.store, iota, info.size)
+            GlobalCircularCursor.current_index(&mut self.store, info.size)
         };
         let out = {
             let mut b = FirBuilder::new(&mut self.store);

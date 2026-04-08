@@ -98,6 +98,7 @@
 //! | [`DelayLineInfo`] | struct | Metadata for one allocated delay buffer |
 //! | [`DelayManager`] | struct | Owns delay-exclusive state; scan + alloc methods |
 //! | [`DelayFirCtx`] | struct | Borrow bundle for FIR-emitting methods |
+//! | [`GlobalCircularCursor`] | struct | Shared `fIOTA` cursor service for circular storage |
 //! | [`RingDelayModel`] | trait | Ring-buffer geometry abstraction |
 //! | [`CircularPow2Model`] | struct | Power-of-two implementation |
 //! | [`IfWrappingModel`] | struct | Exact-size if-wrapping implementation |
@@ -365,6 +366,77 @@ pub(super) fn delay_size_for_amount(
     Ok(min_const_upper_bound(arena, amount))
 }
 
+// ─── GlobalCircularCursor ────────────────────────────────────────────────────
+
+/// Shared runtime cursor used by all global masked circular-storage paths.
+///
+/// Today this is materialized as the persistent struct field `fIOTA`. It is
+/// shared by `CircularPow2` delay lines and by circular recursion carriers
+/// lowered from `module.rs`.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct GlobalCircularCursor;
+
+impl GlobalCircularCursor {
+    /// Declares and clears the shared `fIOTA` state, idempotent.
+    pub(super) fn ensure_state(self, ctx: &mut DelayFirCtx<'_>) {
+        if *ctx.uses_iota {
+            return;
+        }
+        *ctx.uses_iota = true;
+        let zero = {
+            let mut b = FirBuilder::new(ctx.store);
+            b.int32(0)
+        };
+        let decl = {
+            let mut b = FirBuilder::new(ctx.store);
+            b.declare_var("fIOTA", FirType::Int32, AccessType::Struct, None)
+        };
+        ctx.struct_declarations.push(decl);
+        if ctx.clear_init_seen.insert("fIOTA".to_owned()) {
+            let mut b = FirBuilder::new(ctx.store);
+            ctx.clear_statements
+                .push(b.store_var("fIOTA", AccessType::Struct, zero));
+        }
+    }
+
+    /// Loads the current cursor value from the DSP struct.
+    pub(super) fn load(self, store: &mut FirStore) -> FirId {
+        let mut b = FirBuilder::new(store);
+        b.load_var("fIOTA", AccessType::Struct, FirType::Int32)
+    }
+
+    /// Computes the masked current write index `fIOTA & (size - 1)`.
+    pub(super) fn current_index(self, store: &mut FirStore, size: usize) -> FirId {
+        let iota = self.load(store);
+        masked_delay_index(store, iota, size)
+    }
+
+    /// Computes the masked delayed read index `(fIOTA - amount) & (size - 1)`.
+    pub(super) fn delayed_index(self, store: &mut FirStore, amount: FirId, size: usize) -> FirId {
+        let iota = self.load(store);
+        let raw = {
+            let mut b = FirBuilder::new(store);
+            b.binop(FirBinOp::Sub, iota, amount, FirType::Int32)
+        };
+        masked_delay_index(store, raw, size)
+    }
+
+    /// Emits `fIOTA = fIOTA + 1` to advance the cursor by one sample.
+    pub(super) fn emit_advance(self, store: &mut FirStore) -> FirId {
+        let next = {
+            let iota = self.load(store);
+            let one = {
+                let mut b = FirBuilder::new(store);
+                b.int32(1)
+            };
+            let mut b = FirBuilder::new(store);
+            b.binop(FirBinOp::Add, iota, one, FirType::Int32)
+        };
+        let mut b = FirBuilder::new(store);
+        b.store_var("fIOTA", AccessType::Struct, next)
+    }
+}
+
 // ─── RingDelayModel ───────────────────────────────────────────────────────────
 
 /// Runtime write-pointer source used by ring-buffer delay strategies.
@@ -379,7 +451,7 @@ pub(super) enum DelayRuntimeState<'a> {
 impl DelayRuntimeState<'_> {
     fn load_current_index(self, store: &mut FirStore) -> FirId {
         match self {
-            Self::GlobalIota => current_iota_index(store),
+            Self::GlobalIota => GlobalCircularCursor.load(store),
             Self::Counter(name) => {
                 let mut b = FirBuilder::new(store);
                 b.load_var(name, AccessType::Struct, FirType::Int32)
@@ -448,8 +520,13 @@ impl RingDelayModel for CircularPow2Model {
         state: DelayRuntimeState<'_>,
         size: usize,
     ) -> FirId {
-        let iota = state.load_current_index(store);
-        masked_delay_index(store, iota, size)
+        match state {
+            DelayRuntimeState::GlobalIota => GlobalCircularCursor.current_index(store, size),
+            DelayRuntimeState::Counter(_) => {
+                let iota = state.load_current_index(store);
+                masked_delay_index(store, iota, size)
+            }
+        }
     }
 
     fn read_index(
@@ -459,9 +536,16 @@ impl RingDelayModel for CircularPow2Model {
         amount: FirId,
         size: usize,
     ) -> FirId {
-        let iota = state.load_current_index(store);
-        let raw = FirBuilder::new(store).binop(FirBinOp::Sub, iota, amount, FirType::Int32);
-        masked_delay_index(store, raw, size)
+        match state {
+            DelayRuntimeState::GlobalIota => {
+                GlobalCircularCursor.delayed_index(store, amount, size)
+            }
+            DelayRuntimeState::Counter(_) => {
+                let iota = state.load_current_index(store);
+                let raw = FirBuilder::new(store).binop(FirBinOp::Sub, iota, amount, FirType::Int32);
+                masked_delay_index(store, raw, size)
+            }
+        }
     }
 
     fn emit_advance(
@@ -471,7 +555,7 @@ impl RingDelayModel for CircularPow2Model {
         _size: usize,
     ) -> FirId {
         debug_assert!(matches!(state, DelayRuntimeState::GlobalIota));
-        bump_iota(store)
+        GlobalCircularCursor.emit_advance(store)
     }
 }
 
@@ -510,7 +594,7 @@ impl RingDelayModel for IfWrappingModel {
     ) -> FirId {
         let DelayRuntimeState::Counter(counter_name) = state else {
             debug_assert!(false, "IfWrappingModel requires a per-line counter");
-            return current_iota_index(store);
+            return GlobalCircularCursor.load(store);
         };
         if_wrapping_read_index(store, counter_name, amount, size)
     }
@@ -523,7 +607,7 @@ impl RingDelayModel for IfWrappingModel {
     ) -> FirId {
         let DelayRuntimeState::Counter(counter_name) = state else {
             debug_assert!(false, "IfWrappingModel requires a per-line counter");
-            return bump_iota(store);
+            return GlobalCircularCursor.emit_advance(store);
         };
         bump_if_wrapping_counter(store, counter_name, size)
     }
@@ -594,24 +678,7 @@ impl<'a> DelayFirCtx<'a> {
     /// Sets `*uses_iota = true`, emits the struct declaration, and registers a
     /// `instanceClear` assignment `fIOTA = 0`.
     pub(super) fn ensure_iota(&mut self) {
-        if *self.uses_iota {
-            return;
-        }
-        *self.uses_iota = true;
-        let zero = {
-            let mut b = FirBuilder::new(self.store);
-            b.int32(0)
-        };
-        let decl = {
-            let mut b = FirBuilder::new(self.store);
-            b.declare_var("fIOTA", FirType::Int32, AccessType::Struct, None)
-        };
-        self.struct_declarations.push(decl);
-        if self.clear_init_seen.insert("fIOTA".to_owned()) {
-            let mut b = FirBuilder::new(self.store);
-            self.clear_statements
-                .push(b.store_var("fIOTA", AccessType::Struct, zero));
-        }
+        GlobalCircularCursor.ensure_state(self);
     }
 
     /// Generates a fresh loop-variable name using the shared monotonic counter.
@@ -927,12 +994,6 @@ fn emit_if_wrapping_advance(store: &mut FirStore, counter_name: &str, size: usiz
 
 // ─── FIR emission helpers shared with strategy emitters ─────────────────────
 
-/// Emits a struct load of `fIOTA` (current write position in delay lines).
-pub(super) fn current_iota_index(store: &mut FirStore) -> FirId {
-    let mut b = FirBuilder::new(store);
-    b.load_var("fIOTA", AccessType::Struct, FirType::Int32)
-}
-
 /// Applies the power-of-two ring-buffer mask: `index & (size - 1)`.
 pub(super) fn masked_delay_index(store: &mut FirStore, index: FirId, size: usize) -> FirId {
     let mask = {
@@ -941,31 +1002,6 @@ pub(super) fn masked_delay_index(store: &mut FirStore, index: FirId, size: usize
     };
     let mut b = FirBuilder::new(store);
     b.binop(FirBinOp::And, index, mask, FirType::Int32)
-}
-
-/// Computes the masked read index `(fIOTA - amount) & (size - 1)`.
-pub(super) fn delayed_iota_index(store: &mut FirStore, amount: FirId, size: usize) -> FirId {
-    let iota = current_iota_index(store);
-    let raw = {
-        let mut b = FirBuilder::new(store);
-        b.binop(FirBinOp::Sub, iota, amount, FirType::Int32)
-    };
-    masked_delay_index(store, raw, size)
-}
-
-/// Emits `fIOTA = fIOTA + 1` to advance the delay-line write pointer.
-fn bump_iota(store: &mut FirStore) -> FirId {
-    let next = {
-        let iota = current_iota_index(store);
-        let one = {
-            let mut b = FirBuilder::new(store);
-            b.int32(1)
-        };
-        let mut b = FirBuilder::new(store);
-        b.binop(FirBinOp::Add, iota, one, FirType::Int32)
-    };
-    let mut b = FirBuilder::new(store);
-    b.store_var("fIOTA", AccessType::Struct, next)
 }
 
 /// Emits `buf[0] = new_value` — the immediate write for the Shift strategy.
@@ -1692,7 +1728,7 @@ impl DelayManager {
     ) -> Vec<FirId> {
         let mut updates = Vec::new();
         if uses_iota {
-            updates.push(bump_iota(store));
+            updates.push(GlobalCircularCursor.emit_advance(store));
         }
         updates.extend(self.delay_lines.values().filter_map(|info| {
             if let DelayStrategy::IfWrapping { counter_name } = &info.strategy {
