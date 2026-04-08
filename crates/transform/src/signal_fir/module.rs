@@ -806,6 +806,20 @@ impl RecArrayInfo {
     }
 }
 
+/// Canonically resolved recursion carrier.
+#[derive(Clone, Debug)]
+struct RecursionCarrierRef {
+    info: RecArrayInfo,
+    strategy: RecursionStorageStrategy,
+}
+
+impl RecursionCarrierRef {
+    fn new(info: RecArrayInfo) -> Self {
+        let strategy = info.storage_strategy();
+        Self { info, strategy }
+    }
+}
+
 /// One extern prototype recovered from a Faust `FFUN(...)` descriptor.
 ///
 /// Source provenance (C++):
@@ -1507,8 +1521,8 @@ impl<'a> SignalToFirLower<'a> {
         // already sized the recursion array to hold the full delay chain.
         // Read directly from the recursion array at offset `amount + k`,
         // eliminating the separate fVec buffer and per-sample copy.
-        if let Some((rec_info, carried_delay)) = self.recursion_delay_chain_info(value)?
-            && rec_info.size > 2
+        if let Some((rec_ref, carried_delay)) = self.recursion_delay_chain_info(value)?
+            && rec_ref.strategy == RecursionStorageStrategy::Circular
         {
             // The recursion array was upsized — the merge is active.
             // Use the runtime amount expression (which may be variable,
@@ -1522,10 +1536,10 @@ impl<'a> SignalToFirLower<'a> {
                 let mut b = FirBuilder::new(&mut self.store);
                 b.binop(FirBinOp::Add, amount_value, carried_delay, FirType::Int32)
             };
-            let read_index = delayed_iota_index(&mut self.store, total_offset, rec_info.size);
+            let read_index = delayed_iota_index(&mut self.store, total_offset, rec_ref.info.size);
             let read_ty = self.signal_fir_type(node)?;
             let mut b = FirBuilder::new(&mut self.store);
-            return Ok(b.load_table(rec_info.name, AccessType::Struct, read_index, read_ty));
+            return Ok(b.load_table(rec_ref.info.name, AccessType::Struct, read_index, read_ty));
         }
 
         let line = self.delay_line_info(value)?;
@@ -1570,15 +1584,14 @@ impl<'a> SignalToFirLower<'a> {
         value: SigId,
         init: FirId,
     ) -> Result<FirId, SignalFirError> {
-        if let Some((rec_info, carried_delay)) = self.recursion_delay_chain_info(value)? {
+        if let Some((rec_ref, carried_delay)) = self.recursion_delay_chain_info(value)? {
             let out_ty = self.signal_fir_type(node)?;
             debug_assert_eq!(
-                rec_info.typ, out_ty,
+                rec_ref.info.typ, out_ty,
                 "prepared recursion feedback type should match delay1 output type"
             );
             let total_offset = carried_delay.saturating_add(1);
-            let prev_index = if rec_info.storage_strategy()
-                == RecursionStorageStrategy::TwoSlotShift
+            let prev_index = if rec_ref.strategy == RecursionStorageStrategy::TwoSlotShift
                 && total_offset == 1
             {
                 self.lower_int32_const(1)
@@ -1588,14 +1601,14 @@ impl<'a> SignalToFirLower<'a> {
                 self.ensure_iota_state();
                 let total_offset =
                     self.lower_int32_const(i32::try_from(total_offset).unwrap_or(i32::MAX));
-                delayed_iota_index(&mut self.store, total_offset, rec_info.size)
+                delayed_iota_index(&mut self.store, total_offset, rec_ref.info.size)
             };
             let mut b = FirBuilder::new(&mut self.store);
             return Ok(b.load_table(
-                rec_info.name,
+                rec_ref.info.name,
                 AccessType::Struct,
                 prev_index,
-                rec_info.typ.clone(),
+                rec_ref.info.typ.clone(),
             ));
         }
         self.ensure_iota_state();
@@ -1664,7 +1677,7 @@ impl<'a> SignalToFirLower<'a> {
         ))
     }
 
-    /// Returns the active recursion carrier plus the number of implicit
+    /// Returns the resolved recursion carrier plus the number of implicit
     /// one-sample delays already wrapped around it in `value`.
     ///
     /// Examples:
@@ -1675,7 +1688,7 @@ impl<'a> SignalToFirLower<'a> {
     fn recursion_delay_chain_info(
         &mut self,
         value: SigId,
-    ) -> Result<Option<(RecArrayInfo, usize)>, SignalFirError> {
+    ) -> Result<Option<(RecursionCarrierRef, usize)>, SignalFirError> {
         let mut current = value;
         let mut carried_delay = 0usize;
         while let SigMatch::Delay1(inner) = match_sig(self.arena, current) {
@@ -1685,28 +1698,28 @@ impl<'a> SignalToFirLower<'a> {
         let SigMatch::Proj(index, group) = match_sig(self.arena, current) else {
             return Ok(None);
         };
-        let Some(rec_info) = self.recursion_carrier_info(current, index, group)? else {
+        let Some(rec_info) = self.resolve_recursion_carrier(current, index, group)? else {
             return Ok(None);
         };
         Ok(Some((rec_info, carried_delay)))
     }
 
-    /// Returns the recursion carrier for `Proj(index, group)` whether the
+    /// Returns the canonical recursion carrier for `Proj(index, group)` whether the
     /// projection points to the active feedback reference (`SYMREF`) or to the
     /// materialized top-level recursion group (`SYMREC`).
-    fn recursion_carrier_info(
+    fn resolve_recursion_carrier(
         &mut self,
         proj_node: SigId,
         index: i32,
         group: SigId,
-    ) -> Result<Option<RecArrayInfo>, SignalFirError> {
+    ) -> Result<Option<RecursionCarrierRef>, SignalFirError> {
         let index_usize = usize::try_from(index).map_err(|_| {
             SignalFirError::new(
                 SignalFirErrorCode::UnsupportedSignalNode,
                 format!("negative SIGPROJ index {index} in recursion carrier lookup"),
             )
         })?;
-        if let Some(info) = self.active_recursion_info(group, index_usize)? {
+        if let Some(info) = self.resolve_active_recursion_carrier(group, index_usize)? {
             return Ok(Some(info));
         }
         if match_sym_rec(self.arena, group).is_none() {
@@ -1731,6 +1744,7 @@ impl<'a> SignalToFirLower<'a> {
             .rec_array_by_group_index
             .get(&(group.as_u32(), canonical_index))
             .cloned())
+        .map(|opt| opt.map(RecursionCarrierRef::new))
     }
 
     fn canonical_group_index(&self, group: SigId, index: usize) -> Option<usize> {
@@ -1743,11 +1757,11 @@ impl<'a> SignalToFirLower<'a> {
     ///
     /// Walks [`Self::recursion_stack`] from innermost outward; returns `None`
     /// if `group` is not a `SYMREF` bound in the current lowering context.
-    fn active_recursion_info(
+    fn resolve_active_recursion_carrier(
         &self,
         group: SigId,
         proj_index: usize,
-    ) -> Result<Option<RecArrayInfo>, SignalFirError> {
+    ) -> Result<Option<RecursionCarrierRef>, SignalFirError> {
         let Some(var) = match_sym_ref(self.arena, group) else {
             return Ok(None);
         };
@@ -1776,7 +1790,8 @@ impl<'a> SignalToFirLower<'a> {
                     group_arrays.len()
                 ),
             )
-        }).map(Some)
+        }).map(RecursionCarrierRef::new)
+            .map(Some)
     }
 
     /// Ensures a 2-element circular buffer state slot exists for `node`,
@@ -3109,10 +3124,10 @@ impl<'a> SignalToFirLower<'a> {
     /// `scheduled_state_updates` dedup guard keyed by `group` SigId ensures
     /// exactly one body-lowering pass per sample).
     ///
-    /// **Fast path** (active reference inside a body being lowered): when
-    /// `active_recursion_info` finds the group on the stack, the current-slot
-    /// value is read directly — no recursion into `lower_signal` occurs, which
-    /// breaks the cycle.
+    /// **Fast path** (active reference inside a body being lowered): when the
+    /// canonical recursion-carrier resolver finds the group on the stack, the
+    /// current-slot value is read directly — no recursion into `lower_signal`
+    /// occurs, which breaks the cycle.
     fn lower_proj(
         &mut self,
         node: SigId,
@@ -3127,18 +3142,22 @@ impl<'a> SignalToFirLower<'a> {
         })?;
 
         // ── Fast path: active reference inside a body being lowered ──
-        if let Some(info) = self.active_recursion_info(group, index_usize)? {
+        if let Some(rec_ref) = self.resolve_active_recursion_carrier(group, index_usize)? {
             let real_ty = self.signal_fir_type(node)?;
-            let current_index = if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift
-            {
+            let current_index = if rec_ref.strategy == RecursionStorageStrategy::TwoSlotShift {
                 self.lower_int32_const(0)
             } else {
                 self.ensure_iota_state();
                 let iota = current_iota_index(&mut self.store);
-                masked_delay_index(&mut self.store, iota, info.size)
+                masked_delay_index(&mut self.store, iota, rec_ref.info.size)
             };
             let mut b = FirBuilder::new(&mut self.store);
-            return Ok(b.load_table(info.name, AccessType::Struct, current_index, real_ty));
+            return Ok(b.load_table(
+                rec_ref.info.name,
+                AccessType::Struct,
+                current_index,
+                real_ty,
+            ));
         }
 
         // ── Decode all body signals from the group ──
