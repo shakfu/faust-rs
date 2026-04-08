@@ -872,8 +872,11 @@ impl<'a> SignalToFirLower<'a> {
     /// lowering begins.
     ///
     /// Multiple `SIGDELAY(x, n)` nodes sharing the same carried signal `x`
-    /// reuse one delay line sized to the largest delay seen.  This pre-pass
-    /// ensures all writes are registered before any reads are emitted.
+    /// reuse one delay line sized to the largest delay seen. Standalone
+    /// `Delay1(x)` nodes that use the shift strategy are included in the same
+    /// pre-pass so delay-line geometry is decided exactly once up front.
+    /// This pre-pass ensures all writes are registered before any reads are
+    /// emitted.
     ///
     /// Delegates the signal-tree traversal to [`DelayManager::scan_signals`]
     /// and the FIR allocation to [`Self::ensure_delay_line_decl`].
@@ -1447,7 +1450,7 @@ impl<'a> SignalToFirLower<'a> {
         node: SigId,
         value: SigId,
         amount: SigId,
-        delay: i32,
+        _delay: i32,
     ) -> Result<FirId, SignalFirError> {
         // ── Merged recursion delay ──
         //
@@ -1456,34 +1459,28 @@ impl<'a> SignalToFirLower<'a> {
         // Read directly from the recursion array at offset `delay + 1`
         // (N for the explicit delay, +1 for the Delay1), eliminating the
         // separate fVec buffer and per-sample copy.
-        if let SigMatch::Delay1(inner) = match_sig(self.arena, value) {
-            if let Some(rec_info) = self.recursion_feedback_info(inner)? {
-                if rec_info.size > 2 {
-                    // The recursion array was upsized — the merge is active.
-                    // Use the runtime amount expression (which may be variable,
-                    // e.g. slider-driven), not the constant sizing bound.
-                    // Total offset = amount + 1 (the +1 accounts for Delay1).
-                    self.ensure_iota_state();
-                    let amount_value = self.lower_signal(amount)?;
-                    let one = self.lower_int32_const(1);
-                    let total_offset = {
-                        let mut b = FirBuilder::new(&mut self.store);
-                        b.binop(FirBinOp::Add, amount_value, one, FirType::Int32)
-                    };
-                    let read_index = self.delayed_iota_index(total_offset, rec_info.size);
-                    let read_ty = self.signal_fir_type(node)?;
-                    let mut b = FirBuilder::new(&mut self.store);
-                    return Ok(b.load_table(
-                        rec_info.name,
-                        AccessType::Struct,
-                        read_index,
-                        read_ty,
-                    ));
-                }
-            }
+        if let SigMatch::Delay1(inner) = match_sig(self.arena, value)
+            && let Some(rec_info) = self.recursion_feedback_info(inner)?
+            && rec_info.size > 2
+        {
+            // The recursion array was upsized — the merge is active.
+            // Use the runtime amount expression (which may be variable,
+            // e.g. slider-driven), not the constant sizing bound.
+            // Total offset = amount + 1 (the +1 accounts for Delay1).
+            self.ensure_iota_state();
+            let amount_value = self.lower_signal(amount)?;
+            let one = self.lower_int32_const(1);
+            let total_offset = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.binop(FirBinOp::Add, amount_value, one, FirType::Int32)
+            };
+            let read_index = self.delayed_iota_index(total_offset, rec_info.size);
+            let read_ty = self.signal_fir_type(node)?;
+            let mut b = FirBuilder::new(&mut self.store);
+            return Ok(b.load_table(rec_info.name, AccessType::Struct, read_index, read_ty));
         }
 
-        let line = self.ensure_delay_line_decl(value, delay)?;
+        let line = self.delay_line_info(value)?;
         let current = self.lower_signal(value)?;
         let read_ty = self.signal_fir_type(node)?;
 
@@ -1632,15 +1629,11 @@ impl<'a> SignalToFirLower<'a> {
     /// Only called when `max_copy_delay >= 1` and `value` is not a recursion
     /// feedback projection.
     fn lower_shift_delay1(&mut self, node: SigId, value: SigId) -> Result<FirId, SignalFirError> {
-        let line = self.ensure_delay_line_decl(value, 1)?;
-        // If the pre-scan allocated a non-Shift buffer for this signal (because
-        // the same signal is also used with a delay > max_copy_delay elsewhere),
-        // fall back to the fIOTA circular-buffer path so both accesses share
-        // the same consistent buffer geometry.
-        if !matches!(line.strategy, DelayStrategy::Shift) {
-            let init = self.zero_value_for_signal(node)?;
-            return self.lower_delay_state(node, value, init);
-        }
+        let line = self.delay_line_info(value)?;
+        debug_assert!(
+            matches!(line.strategy, DelayStrategy::Shift),
+            "standalone Delay1 pre-scan should choose Shift when max_copy_delay >= 1"
+        );
         let read_ty = self.signal_fir_type(node)?;
         let current = self.lower_signal(value)?;
         if self.delay.schedule_delay_write(value) {
@@ -1771,6 +1764,23 @@ impl<'a> SignalToFirLower<'a> {
             uses_iota: &mut self.uses_iota,
         };
         self.delay.ensure_delay_line(carried, delay, &mut ctx)
+    }
+
+    /// Returns the canonical pre-allocated delay line for `carried`.
+    ///
+    /// Delay-line strategy and geometry are chosen during
+    /// [`Self::prepare_delay_lines`]. Lowering paths should only query that
+    /// decision, not allocate new delay lines opportunistically.
+    fn delay_line_info(&self, carried: SigId) -> Result<DelayLineInfo, SignalFirError> {
+        self.delay.get_delay_line(carried).cloned().ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "internal fast-lane missing pre-allocated delay line for signal {}",
+                    carried.as_u32()
+                ),
+            )
+        })
     }
 
     /// Declares the `fIOTA` circular-buffer position counter, idempotent.

@@ -70,6 +70,10 @@
 //! the merged size on `rec_group_max_delay`; `ensure_recursion_array_for_group`
 //! in `module.rs` consumes it via [`DelayManager::rec_max_delay`].
 //!
+//! Standalone `Delay1(x)` nodes that use the shift strategy are also recorded
+//! during the same scan so their buffer geometry is chosen once up front and
+//! later reused by the lowering phase without allocation side effects.
+//!
 //! # Scope of this module
 //!
 //! | Item | Kind | Purpose |
@@ -640,9 +644,15 @@ impl DelayManager {
     /// Pre-scans `signals` to collect the maximum delay per carried signal and
     /// record recursion-feedback-through-delay1 merge patterns.
     ///
-    /// Returns a map `carried_signal → max_delay` for all `SIGDELAY` nodes found
-    /// in the forest.  Entries where the pattern was merged into a recursion array
-    /// are NOT included (the recursion array handles them via [`Self::rec_max_delay`]).
+    /// Returns a map `carried_signal → max_delay` for all delay buffers that must
+    /// be pre-allocated before lowering:
+    ///
+    /// - general `SIGDELAY(value, amount)` lines keyed by `value`,
+    /// - standalone `Delay1(value)` lines keyed by `value` when the shift
+    ///   strategy is enabled (`max_copy_delay >= 1`).
+    ///
+    /// Entries where the pattern was merged into a recursion array are NOT
+    /// included (the recursion array handles them via [`Self::rec_max_delay`]).
     ///
     /// This method has no FIR side-effects — it only reads `arena` and `sig_types`
     /// and writes to `self.rec_group_max_delay`.
@@ -689,6 +699,15 @@ impl DelayManager {
                         "SIGDELAY requires a constant integer amount or a signal with a bounded non-negative interval",
                     ));
                 }
+            }
+        }
+        if let SigMatch::Delay1(value) = match_sig(arena, sig)
+            && self.options.max_copy_delay >= 1
+            && !self.is_recursion_feedback(arena, value)
+        {
+            let entry = max_delays.entry(value).or_insert(0);
+            if 1 > *entry {
+                *entry = 1;
             }
         }
         let node = arena.node(sig).ok_or_else(|| {
@@ -756,6 +775,13 @@ impl DelayManager {
             *entry = total;
         }
         true
+    }
+
+    fn is_recursion_feedback(&self, arena: &TreeArena, value: SigId) -> bool {
+        let SigMatch::Proj(_, group) = match_sig(arena, value) else {
+            return false;
+        };
+        match_sym_ref(arena, group).is_some()
     }
 
     // ── Allocation ───────────────────────────────────────────────────────────

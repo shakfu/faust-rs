@@ -1293,6 +1293,46 @@ fn int_delay1_uses_int32_state_slot() {
 }
 
 #[test]
+fn delay1_and_fixed_delay_share_one_prescanned_delay_line() {
+    let mut arena = TreeArena::new();
+    let (sig0, sig1) = {
+        let mut b = SigBuilder::new(&mut arena);
+        let in0 = b.input(0);
+        let delay1 = b.delay1(in0);
+        let two = b.int(2);
+        let delay2 = b.delay(in0, two);
+        (delay1, delay2)
+    };
+    let out =
+        compile_fastlane_without_ui(&arena, &[sig0, sig1], 1, 2, &SignalFirOptions::default())
+            .expect("Delay1 and fixed delay should lower with one shared prescanned line");
+
+    let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+        panic!("module expected");
+    };
+    let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+        panic!("dsp_struct block expected");
+    };
+
+    let delay_sizes: Vec<usize> = struct_items
+        .iter()
+        .filter_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::DeclareVar {
+                ref name,
+                typ: FirType::Array(_, size),
+                ..
+            } if name.starts_with("fVec") || name.starts_with("iVec") => Some(size),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        delay_sizes,
+        [3],
+        "Delay1 and Delay(x, 2) should share one size-3 shift buffer"
+    );
+}
+
+#[test]
 fn integer_recursive_min_lowers_to_int_recursion_and_min_i_call() {
     let mut arena = TreeArena::new();
     let self_ref = de_bruijn_ref(&mut arena, 1);
