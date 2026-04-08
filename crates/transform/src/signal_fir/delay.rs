@@ -4,9 +4,9 @@
 //! by the delay amount relative to two thresholds (`-mcd` / `-dlt`):
 //!
 //! ```text
-//! [0, max_copy_delay]               → ShiftModel   (shift/copy; no fIOTA)
-//! (max_copy_delay, delay_line_threshold] → CircularPow2Model (default fIOTA + mask)
-//! (delay_line_threshold, ∞)             → IfWrappingModel   (per-line counter)
+//! [1, max_copy_delay)              → ShiftModel   (shift/copy; no fIOTA)
+//! [max_copy_delay, delay_line_threshold) → CircularPow2Model (default fIOTA + mask)
+//! [delay_line_threshold, ∞)             → IfWrappingModel   (per-line counter)
 //! ```
 //!
 //! This module provides:
@@ -790,10 +790,10 @@ impl DelayManager {
     ///
     /// Selects a [`DelayStrategy`] based on `delay` and [`DelayOptions`]:
     ///
-    /// - `delay ≤ max_copy_delay` → [`DelayStrategy::Shift`] (exact size, no fIOTA)
-    /// - `max_copy_delay < delay ≤ delay_line_threshold` → [`DelayStrategy::CircularPow2`]
+    /// - `delay < max_copy_delay` → [`DelayStrategy::Shift`] (exact size, no fIOTA)
+    /// - `max_copy_delay ≤ delay < delay_line_threshold` → [`DelayStrategy::CircularPow2`]
     ///   (power-of-two size, fIOTA declared via `ctx`)
-    /// - `delay > delay_line_threshold` → [`DelayStrategy::IfWrapping`] (exact size,
+    /// - `delay ≥ delay_line_threshold` → [`DelayStrategy::IfWrapping`] (exact size,
     ///   per-line `fIdx<id>` counter declared via `ctx`)
     ///
     /// On first call for `carried`, emits the struct declaration and registers an
@@ -814,9 +814,9 @@ impl DelayManager {
         }
         // Select strategy based on delay amount and options.
         let delay_u = delay as u32;
-        let strategy = if delay_u <= self.options.max_copy_delay {
+        let strategy = if delay_u < self.options.max_copy_delay {
             DelayStrategy::Shift
-        } else if delay_u <= self.options.delay_line_threshold {
+        } else if delay_u < self.options.delay_line_threshold {
             DelayStrategy::CircularPow2
         } else {
             DelayStrategy::IfWrapping {

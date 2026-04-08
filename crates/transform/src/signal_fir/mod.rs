@@ -119,18 +119,22 @@ pub struct SignalFirOptions {
     /// emitted automatically at the DSP boundary (input sample load and output
     /// sample store) and at UI zone reads/writes.
     pub real_type: RealType,
-    /// Maximum delay (inclusive) for which the shift/copy strategy is used
-    /// instead of a circular ring buffer.
+    /// Maximum delay threshold before switching from shift/copy to a circular
+    /// ring buffer.
     ///
-    /// Mirrors Faust's `-mcd N` option.  Delays ≤ `max_copy_delay` use a
-    /// statically-shifted array (no `fIOTA`).  Default: 16.
+    /// Mirrors Faust's `-mcd N` option as observed in the C++ backend:
+    /// standalone `Delay1` stays special-cased, and general shifted delay
+    /// lines are used for delays `< max_copy_delay`. Delays at or above the
+    /// threshold switch to ring-buffer strategies. Default: 16.
     pub max_copy_delay: u32,
-    /// Delay above which the if-based wrapping strategy is used instead of the
+    /// Delay threshold at which the if-based wrapping strategy replaces the
     /// default power-of-two circular buffer.
     ///
-    /// Mirrors Faust's `-dlt N` option.  Delays > `delay_line_threshold` use an
-    /// exact-size buffer with a per-line counter variable.  Default: `u32::MAX`
-    /// (disabled; all delays above `max_copy_delay` use circular-pow2).
+    /// Mirrors Faust's `-dlt N` option as observed in the C++ backend:
+    /// delays `< delay_line_threshold` use the circular-pow2 strategy, while
+    /// delays at or above the threshold use an exact-size buffer with a
+    /// per-line counter variable. Default: `u32::MAX` (disabled; all delays at
+    /// or above `max_copy_delay` use circular-pow2).
     pub delay_line_threshold: u32,
 }
 

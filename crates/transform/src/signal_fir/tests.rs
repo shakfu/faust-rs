@@ -1293,6 +1293,127 @@ fn int_delay1_uses_int32_state_slot() {
 }
 
 #[test]
+fn fixed_delay_two_uses_unrolled_shift_copies() {
+    let mut arena = TreeArena::new();
+    let sig0 = {
+        let mut b = SigBuilder::new(&mut arena);
+        let in0 = b.input(0);
+        let two = b.int(2);
+        b.delay(in0, two)
+    };
+    let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+        .expect("delay 2 should lower");
+
+    let FirMatch::Module {
+        dsp_struct,
+        functions,
+        ..
+    } = match_fir(&out.store, out.module)
+    else {
+        panic!("module expected");
+    };
+    let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+        panic!("dsp_struct block expected");
+    };
+    let delay_name = struct_items
+        .iter()
+        .find_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::DeclareVar {
+                name,
+                typ: FirType::Array(_, 3),
+                ..
+            } if name.starts_with("fVec") || name.starts_with("iVec") => Some(name),
+            _ => None,
+        })
+        .expect("delay 2 should allocate one size-3 shift buffer");
+    assert!(
+        !struct_items.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar { ref name, .. } if name == "fIOTA"
+        )),
+        "delay 2 should not allocate fIOTA"
+    );
+
+    let loop_body = find_compute_loop_body(&out.store, functions);
+    let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+        panic!("compute loop body block expected");
+    };
+    let delay_stores = stmts
+        .iter()
+        .filter(|id| {
+            matches!(
+                match_fir(&out.store, **id),
+                FirMatch::StoreTable { ref name, .. } if name == &delay_name
+            )
+        })
+        .count();
+    assert_eq!(
+        delay_stores, 3,
+        "delay 2 should emit one immediate write and two unrolled shift copies"
+    );
+    assert!(
+        !stmts
+            .iter()
+            .any(|id| matches!(match_fir(&out.store, *id), FirMatch::ForLoop { .. })),
+        "delay 2 should not emit a shift loop"
+    );
+}
+
+#[test]
+fn fixed_delay_three_uses_shift_loop() {
+    let mut arena = TreeArena::new();
+    let sig0 = {
+        let mut b = SigBuilder::new(&mut arena);
+        let in0 = b.input(0);
+        let three = b.int(3);
+        b.delay(in0, three)
+    };
+    let out = compile_fastlane_without_ui(&arena, &[sig0], 1, 1, &SignalFirOptions::default())
+        .expect("delay 3 should lower");
+
+    let FirMatch::Module {
+        dsp_struct,
+        functions,
+        ..
+    } = match_fir(&out.store, out.module)
+    else {
+        panic!("module expected");
+    };
+    let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+        panic!("dsp_struct block expected");
+    };
+    assert!(
+        struct_items.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar {
+                ref name,
+                typ: FirType::Array(_, 4),
+                ..
+            } if name.starts_with("fVec") || name.starts_with("iVec")
+        )),
+        "delay 3 should allocate one size-4 shift buffer"
+    );
+    assert!(
+        !struct_items.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar { ref name, .. } if name == "fIOTA"
+        )),
+        "delay 3 should not allocate fIOTA"
+    );
+
+    let loop_body = find_compute_loop_body(&out.store, functions);
+    let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+        panic!("compute loop body block expected");
+    };
+    assert!(
+        stmts
+            .iter()
+            .any(|id| matches!(match_fir(&out.store, *id), FirMatch::ForLoop { .. })),
+        "delay 3 should emit a reverse shift loop"
+    );
+}
+
+#[test]
 fn delay1_and_fixed_delay_share_one_prescanned_delay_line() {
     let mut arena = TreeArena::new();
     let (sig0, sig1) = {
@@ -1602,6 +1723,145 @@ fn fixed_delay_lowers_to_struct_array_and_iota_updates() {
             ..
         }
     ));
+}
+
+#[test]
+fn fixed_delay_at_mcd_boundary_uses_circular_pow2() {
+    let mut arena = TreeArena::new();
+    let sig0 = {
+        let mut b = SigBuilder::new(&mut arena);
+        let in0 = b.input(0);
+        let four = b.int(4);
+        b.delay(in0, four)
+    };
+    let out = compile_fastlane_without_ui(
+        &arena,
+        &[sig0],
+        1,
+        1,
+        &SignalFirOptions {
+            max_copy_delay: 4,
+            ..SignalFirOptions::default()
+        },
+    )
+    .expect("delay equal to mcd should lower");
+
+    let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+        panic!("module expected");
+    };
+    let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+        panic!("dsp_struct block expected");
+    };
+    assert!(
+        struct_items.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar {
+                ref name,
+                typ: FirType::Array(_, 8),
+                ..
+            } if name.starts_with("fVec") || name.starts_with("iVec")
+        )),
+        "delay equal to mcd should use a power-of-two ring buffer"
+    );
+    assert!(
+        struct_items.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar { ref name, .. } if name == "fIOTA"
+        )),
+        "delay equal to mcd should allocate fIOTA"
+    );
+}
+
+#[test]
+fn fixed_delay_at_dlt_boundary_uses_if_wrapping() {
+    let mut arena = TreeArena::new();
+    let sig0 = {
+        let mut b = SigBuilder::new(&mut arena);
+        let in0 = b.input(0);
+        let eight = b.int(8);
+        b.delay(in0, eight)
+    };
+    let out = compile_fastlane_without_ui(
+        &arena,
+        &[sig0],
+        1,
+        1,
+        &SignalFirOptions {
+            max_copy_delay: 4,
+            delay_line_threshold: 8,
+            ..SignalFirOptions::default()
+        },
+    )
+    .expect("delay equal to dlt should lower");
+
+    let FirMatch::Module {
+        dsp_struct,
+        functions,
+        ..
+    } = match_fir(&out.store, out.module)
+    else {
+        panic!("module expected");
+    };
+    let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+        panic!("dsp_struct block expected");
+    };
+    let counter_name = struct_items
+        .iter()
+        .find_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::DeclareVar {
+                name,
+                typ: FirType::Int32,
+                ..
+            } if name.starts_with("fIdx") => Some(name),
+            _ => None,
+        })
+        .expect("delay equal to dlt should declare an if-wrapping counter");
+    assert!(
+        struct_items.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar {
+                ref name,
+                typ: FirType::Array(_, 9),
+                ..
+            } if name.starts_with("fVec") || name.starts_with("iVec")
+        )),
+        "delay equal to dlt should use an exact-size buffer"
+    );
+    assert!(
+        !struct_items.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar { ref name, .. } if name == "fIOTA"
+        )),
+        "if-wrapping delay should not allocate fIOTA"
+    );
+
+    let loop_body = find_compute_loop_body(&out.store, functions);
+    let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
+        panic!("compute loop body block expected");
+    };
+    assert!(
+        stmts.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::StoreVar { ref name, .. } if name == &counter_name
+        )),
+        "if-wrapping delay should update the per-line counter at end of sample"
+    );
+
+    let stored_value = stmts
+        .iter()
+        .find_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::StoreTable { name, value, .. } if name == "output0" => Some(value),
+            _ => None,
+        })
+        .expect("compute should include one output store");
+    let inner = unwrap_output_cast(&out.store, stored_value);
+    let FirMatch::LoadTable { index, .. } = match_fir(&out.store, inner) else {
+        panic!("if-wrapping output should lower to a delay-line read");
+    };
+    assert!(
+        matches!(match_fir(&out.store, index), FirMatch::Select2 { .. }),
+        "if-wrapping delay read should use a wrapped select2 index"
+    );
 }
 
 #[test]
