@@ -1,6 +1,6 @@
 # Current Faust Source Subset Supported by `faust-rs`
 
-Last updated: 2026-04-05
+Last updated: 2026-04-08
 
 Version: 0.4.0
 
@@ -69,6 +69,12 @@ This snapshot is based on:
   - `crates/cranelift-ffi/src/instance.rs`
   - `porting/journal/2026-04-04.md`
   - `porting/journal/2026-04-05.md`
+- delay-strategy / recursion-delay parity and sample-loop ordering work landed on 2026-04-08 and reviewed against:
+  - `crates/transform/src/signal_fir/delay.rs`
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/tests.rs`
+  - `crates/compiler/tests/signal_fir_lane.rs`
+  - `porting/journal/2026-04-08.md`
 
 The corresponding generated reports are:
 
@@ -234,7 +240,11 @@ That slice currently includes, in broad terms:
 - `delay1`, `prefix`, and recursive feedback forms — including
   **multi-output recursion groups** (`SIGPROJ index > 0`),
 - `SIGDELAY` with:
-  - constant integer amounts (fixed-size circular buffer),
+  - constant integer amounts lowered through the same three strategy families
+    as Faust C++:
+    - very small delays: direct `Shift` copies,
+    - middle-range delays: power-of-two circular buffers with `fIOTA`,
+    - large delays / `-dlt`: exact-size if-wrapping buffers,
   - **variable amounts with a bounded non-negative interval** — the buffer is
     allocated to `next_power_of_two(max + 1)` using the interval upper bound
     from `crates/sigtype`.  This covers:
@@ -302,7 +312,17 @@ classification:
   wasm path,
 - round-trip-precise FBC real literal serialization,
 - correct previous-step semantics for non-recursive `Delay1` inside the SIGGEN
-  table-generator interpreter.
+  table-generator interpreter,
+- C++-parity delay strategy thresholds at the `-mcd` / `-dlt` boundaries,
+- pre-scan coverage for standalone `Delay1(x)` so delay strategy/geometry is
+  chosen once up front,
+- accumulated delay analysis for recursion carriers, so
+  `Delay1^k(Proj(...))` chains can reuse one upsized recursion array instead of
+  separate `fVec` buffers,
+- simple-recursion lowering aligned with Faust C++ for 2-slot feedback arrays,
+- explicit sample-loop emission phases (`Immediate`, `PostOutput`,
+  `SampleEnd`) so `Shift` copies and delay counter updates now have a clearer
+  documented ordering model.
 
 ## 5.3 Important current backend exclusions
 
@@ -842,17 +862,23 @@ This is documented in `porting/missing.md`.
 - **Interval-aware bounds**: `SIGRDTBL` reads with a provably in-bounds index
   no longer emit redundant clamping — direct array access, matching C++.
 
-### 7.11 March 17, 2026: circular buffers for delay1/recursion, select2 fix, CLI parity
+### 7.11 March 17, 2026: delay-state robustness, select2 fix, CLI parity
 
-#### Circular buffers with `fIOTA` for delay1 and recursion
+#### Circular carriers for delay1/recursion (later refined)
 
-The fast-lane previously used a scalar state + deferred `compute_updates` shift
-for delay1 and recursion.  This caused ordering bugs when depth-first lowering
-pushed inner updates before outer ones (e.g. `APF.dsp` gave wrong output).
-All delays — SIGDELAY, delay1, and recursion — now uniformly use 2-element
-circular buffers indexed by `fIOTA`, matching the C++ `writeReadDelay`
-pattern.  The topological sort (`sort_compute_updates`) was removed as no
-longer needed.
+The fast-lane moved away from scalar state + ad hoc deferred update ordering
+for `delay1` and recursion, which had caused ordering bugs when depth-first
+lowering pushed inner updates before outer ones.
+
+That March change established the circular/state-array direction, but the final
+model was refined later:
+
+- small standalone `Delay1` now uses the Faust C++-style `Shift` strategy when
+  appropriate,
+- recursion carriers can be upsized from accumulated delay analysis and reused
+  by `Delay1^k(Proj(...))` chains,
+- simple 2-slot recursions were later realigned with the exact C++ write/read
+  pattern instead of always going through `fIOTA`.
 
 #### `select2` branch inversion fixed
 
@@ -871,6 +897,57 @@ multiple different delay amounts (e.g. `frenchBell.dsp` modal synthesis).
 - default generated class/struct name is now `mydsp` (matching C++),
 - integer literals that overflow 32 bits now use wrapping arithmetic (matching
   C++ `str2int` behavior).
+
+### 7.15 April 8, 2026: delay-strategy parity, recursion-delay analysis, explicit emission phases
+
+The fast-lane delay subsystem was substantially tightened to match the C++
+compiler more closely.
+
+#### Delay strategy parity with Faust C++
+
+`SIGDELAY` now follows the same practical three-way strategy split as the C++
+compiler:
+
+- `Shift` for very small delays,
+- circular power-of-two buffers with `fIOTA` for the middle range,
+- exact-size if-wrapping buffers for the `-dlt` range.
+
+The threshold behavior at the exact `-mcd` and `-dlt` boundaries was also
+aligned with the C++ compiler's strict comparisons.
+
+#### Recursion-delay carrier reuse
+
+The delay pre-pass now performs accumulated delay analysis for recursion
+outputs, allowing chains of the form:
+
+- `Delay1(Proj(...))`
+- `Delay1(Delay1(Proj(...)))`
+- `Delay(Delay1^k(Proj(...)), N)`
+
+to reuse one canonical recursion carrier when possible instead of allocating
+separate standalone delay vectors. This materially improves parity on APF /
+biquad-like structures.
+
+#### Simple recursion parity restored
+
+The special case `process = + ~ _;` is now lowered with the same 2-slot update
+shape as Faust C++:
+
+- current value written to slot 0,
+- previous value read from slot 1,
+- deferred copy from slot 0 to slot 1 after output observation.
+
+#### Explicit sample-loop phases
+
+The sample-loop assembly now uses an explicit phase model:
+
+- `Immediate`
+- `PostOutput`
+- `SampleEnd`
+
+This does not change the supported source subset by itself, but it makes the
+ordering guarantees around `Shift` copies, recursion updates, and delay counter
+maintenance clearer and easier to maintain.
 
 ### 7.12 March 18–21, 2026: eval correctness, signal-prepare canonicalization, physical models
 
