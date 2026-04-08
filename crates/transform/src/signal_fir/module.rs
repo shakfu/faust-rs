@@ -695,8 +695,9 @@ struct SignalToFirLower<'a> {
     /// Delay-line exclusive state: allocated ring buffers, recursion-merge
     /// table, and write-scheduling dedup guard.  See [`DelayManager`].
     delay: DelayManager,
-    /// `true` once `fIOTA` has been declared; prevents duplicate declarations.
-    /// Shared between delay and recursion lowering paths.
+    /// `true` once the shared global circular cursor (`fIOTA`) has been
+    /// declared; prevents duplicate declarations across delay and recursion
+    /// lowering paths.
     uses_iota: bool,
     /// Stack of active recursion carrier groups, innermost last; used by `SIGPROJ` resolution.
     ///

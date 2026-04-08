@@ -2,10 +2,32 @@
 
 **Date**: 2026-04-08
 **Scope**: `crates/transform/src/signal_fir/module.rs`, `delay.rs`
-**Status**: Design
+**Status**: Partially implemented
 **Goal**: replace ad hoc `fIOTA` ownership with an explicit shared abstraction
 for the global circular sample cursor used by both delay lines and upsized
 recursion carriers.
+
+## Implementation Status Snapshot
+
+Implemented on 2026-04-08:
+
+- `GlobalCircularCursor` in `delay.rs`
+- cursor-owned `fIOTA` declaration / reset / load / current-index /
+  delayed-index / sample-end advance
+- `DelayFirCtx::ensure_iota(...)` routed through `GlobalCircularCursor`
+- circular delay emission routed through the shared cursor API
+- module-local recursion helpers:
+  - `ensure_global_circular_cursor(...)`
+  - `global_circular_current_index(...)`
+  - `global_circular_delayed_index(...)`
+- circular recursion call sites migrated to the shared cursor contract
+
+Still open:
+
+- decide whether the cursor should remain a `delay.rs` service or later move to
+  a neutral shared helper layer
+- decide whether `uses_iota` should also be hidden behind a more explicit
+  runtime-state abstraction if more shared cursor state appears later
 
 ---
 
@@ -21,7 +43,7 @@ much cleaner:
 However, one important runtime concept still leaks awkwardly across that
 boundary: the global circular cursor currently materialized as `fIOTA`.
 
-Today, `fIOTA` is:
+Historically, `fIOTA` was:
 
 - declared/reset through `ensure_iota_state` in `module.rs`
 - used by `delay.rs` for `CircularPow2` delay lines
@@ -252,6 +274,8 @@ helper abstraction then.
 
 ### Step 1: introduce the explicit cursor API
 
+Status: implemented
+
 - add a `GlobalCircularCursor` abstraction in `delay.rs`
 - move existing raw helpers behind it:
   - `ensure_iota_state` equivalent
@@ -267,6 +291,8 @@ Pass criteria:
 
 ### Step 2: route delay code through the new API
 
+Status: implemented
+
 - migrate `CircularPow2Model` / ring emitters to use the cursor abstraction
 - keep `IfWrapping` untouched
 
@@ -275,6 +301,8 @@ Pass criteria:
 - no direct raw `fIOTA` manipulation remains in circular delay emission paths
 
 ### Step 3: route circular recursion through the same API
+
+Status: implemented
 
 - migrate circular recursion carrier reads/writes in `module.rs`
 - keep two-slot recursion on its dedicated non-circular path
@@ -285,6 +313,8 @@ Pass criteria:
 - cursor reads/writes for delay and recursion share one contract
 
 ### Step 4: centralize sample-end cursor maintenance naming
+
+Status: partially implemented
 
 - rename/update any remaining delay-specific wording so that sample-end
   `fIOTA` advance is documented as global cursor maintenance, not only delay

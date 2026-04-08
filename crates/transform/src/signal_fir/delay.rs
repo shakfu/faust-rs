@@ -1717,7 +1717,8 @@ impl DelayManager {
 
     /// Emits all generic delay-subsystem end-of-sample updates.
     ///
-    /// This centralizes the runtime maintenance required by delay strategies:
+    /// This centralizes the runtime maintenance required by delay strategies
+    /// and by the shared global circular cursor:
     ///
     /// - advance the shared `fIOTA` counter when any circular-pow2 line exists
     /// - advance every per-line `IfWrapping` counter
