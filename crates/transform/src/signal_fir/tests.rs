@@ -20,7 +20,7 @@
 use super::{
     RealType, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui,
     delay::{DelayManager, DelayOptions},
-    module::interpret_generator_for_test,
+    siggen::interpret_generator_for_test,
 };
 use fir::{AccessType, FirBinOp, FirMatch, FirType, match_fir};
 use signals::{BinOp, SigBuilder};

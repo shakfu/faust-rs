@@ -50,6 +50,7 @@ mod module;
 mod placement;
 mod planner;
 mod recursion;
+mod siggen;
 
 pub use error::{SignalFirError, SignalFirErrorCode};
 
