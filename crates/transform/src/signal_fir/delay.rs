@@ -108,7 +108,7 @@ use std::collections::{HashMap, HashSet};
 use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirStore, FirType};
 use signals::{SigId, SigMatch, match_sig};
 use sigtype::{SigType, check_delay_interval};
-use tlib::{TreeArena, match_sym_ref};
+use tlib::{TreeArena, list_to_vec, match_sym_rec, match_sym_ref};
 
 use crate::signal_prepare::SimpleSigType;
 
@@ -187,6 +187,22 @@ pub(super) struct DelayLineInfo {
     pub(super) size: usize,
     /// Buffer-geometry strategy selected for this line.
     pub(super) strategy: DelayStrategy,
+}
+
+/// Read-only delay-analysis metadata for one signal carrier.
+///
+/// This is the first Rust-side equivalent of the C++ occurrence/delay analysis:
+/// it records the maximum accumulated delay observed on a signal and how many
+/// delayed accesses reached that carrier during the scan.
+///
+/// The data is intentionally kept separate from FIR resource allocation so
+/// future planning steps can consume it without side effects.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct DelayAnalysisEntry {
+    /// Largest accumulated delayed access observed on this carrier.
+    pub(super) max_delay: i32,
+    /// Number of delayed accesses observed on this carrier.
+    pub(super) delay_count: u32,
 }
 
 // ─── pow2limit_for_delay ─────────────────────────────────────────────────────
@@ -596,6 +612,8 @@ impl<'a> DelayFirCtx<'a> {
 /// |-------|------|------|
 /// | `options` | [`DelayOptions`] | `-mcd` / `-dlt` strategy thresholds |
 /// | `delay_lines` | `HashMap<SigId, DelayLineInfo>` | Allocated buffers, keyed by carried signal |
+/// | `delay_analysis` | `HashMap<SigId, DelayAnalysisEntry>` | Read-only accumulated delay metadata per reachable signal |
+/// | `rec_output_analysis` | `HashMap<(u32, usize), DelayAnalysisEntry>` | Read-only accumulated delay metadata per recursion output |
 /// | `rec_group_max_delay` | `HashMap<(u32, usize), i32>` | Max merged delay per recursion output |
 /// | `scheduled_delay_writes` | `HashSet<SigId>` | Dedup guard for per-sample delay writes |
 ///
@@ -614,6 +632,10 @@ pub(super) struct DelayManager {
     options: DelayOptions,
     /// Allocated delay buffers, keyed by carried-signal id.
     delay_lines: HashMap<SigId, DelayLineInfo>,
+    /// Read-only accumulated delay metadata keyed by reachable signal node.
+    delay_analysis: HashMap<SigId, DelayAnalysisEntry>,
+    /// Read-only accumulated delay metadata keyed by `(rec_var_id, proj_index)`.
+    rec_output_analysis: HashMap<(u32, usize), DelayAnalysisEntry>,
     /// Maximum total delay for each recursion output that uses the merged pattern
     /// `SIGDELAY(Delay1(Proj(i, SYMREF(var))), N)`.
     rec_group_max_delay: HashMap<(u32, usize), i32>,
@@ -629,6 +651,8 @@ impl DelayManager {
         Self {
             options,
             delay_lines: HashMap::new(),
+            delay_analysis: HashMap::new(),
+            rec_output_analysis: HashMap::new(),
             rec_group_max_delay: HashMap::new(),
             scheduled_delay_writes: HashSet::new(),
         }
@@ -640,6 +664,38 @@ impl DelayManager {
     }
 
     // ── Scan pass ────────────────────────────────────────────────────────────
+
+    /// Computes read-only accumulated delay metadata for the reachable signal forest.
+    ///
+    /// This is the first Rust-side equivalent of the C++ delay-analysis pass:
+    /// it walks the prepared signal DAG with an accumulated delay counter and
+    /// records the maximum delayed access observed on each reachable carrier.
+    ///
+    /// The traversal rules are intentionally narrow:
+    ///
+    /// - `SIGDELAY(value, amount)` adds the proven upper bound of `amount`
+    /// - `SIGDELAY1(value)` adds `1`
+    /// - `SIGPREFIX(init, value)` adds `1` on the carried state edge only
+    /// - non-delay computation nodes reset the accumulator to `0`
+    ///
+    /// Recursion outputs are tracked both by raw `SigId` and by their canonical
+    /// `(var_id, proj_index)` identity so later planning steps can size the
+    /// owning recursion carrier directly.
+    #[allow(dead_code)]
+    pub(super) fn analyze_signals(
+        &mut self,
+        arena: &TreeArena,
+        sig_types: &HashMap<SigId, SigType>,
+        signals: &[SigId],
+    ) -> Result<(), SignalFirError> {
+        self.delay_analysis.clear();
+        self.rec_output_analysis.clear();
+        let mut best_seen_delay = HashMap::new();
+        for &sig in signals {
+            self.analyze_node(sig, 0, arena, sig_types, &mut best_seen_delay)?;
+        }
+        Ok(())
+    }
 
     /// Pre-scans `signals` to collect the maximum delay per carried signal and
     /// record recursion-feedback-through-delay1 merge patterns.
@@ -668,6 +724,161 @@ impl DelayManager {
             self.scan_node(*sig, arena, sig_types, &mut seen, &mut max_delays)?;
         }
         Ok(max_delays)
+    }
+
+    #[allow(dead_code)]
+    fn analyze_node(
+        &mut self,
+        sig: SigId,
+        accumulated_delay: i32,
+        arena: &TreeArena,
+        sig_types: &HashMap<SigId, SigType>,
+        best_seen_delay: &mut HashMap<SigId, i32>,
+    ) -> Result<(), SignalFirError> {
+        if let Some(prev) = best_seen_delay.get(&sig)
+            && *prev >= accumulated_delay
+        {
+            return Ok(());
+        }
+        best_seen_delay.insert(sig, accumulated_delay);
+
+        if accumulated_delay > 0 {
+            self.record_delay_analysis(sig, accumulated_delay);
+            self.record_rec_output_delay_analysis(arena, sig, accumulated_delay);
+        }
+
+        match match_sig(arena, sig) {
+            SigMatch::Delay(value, amount) => {
+                let Some(delay) = delay_size_for_amount(arena, sig_types, amount)? else {
+                    return Err(SignalFirError::new(
+                        SignalFirErrorCode::UnsupportedSignalNode,
+                        "SIGDELAY requires a constant integer amount or a signal with a bounded non-negative interval",
+                    ));
+                };
+                self.analyze_node(
+                    value,
+                    accumulated_delay.saturating_add(delay),
+                    arena,
+                    sig_types,
+                    best_seen_delay,
+                )?;
+                self.analyze_node(amount, 0, arena, sig_types, best_seen_delay)?;
+                return Ok(());
+            }
+            SigMatch::Delay1(value) => {
+                self.analyze_node(
+                    value,
+                    accumulated_delay.saturating_add(1),
+                    arena,
+                    sig_types,
+                    best_seen_delay,
+                )?;
+                return Ok(());
+            }
+            SigMatch::Prefix(init, value) => {
+                self.analyze_node(
+                    value,
+                    accumulated_delay.saturating_add(1),
+                    arena,
+                    sig_types,
+                    best_seen_delay,
+                )?;
+                self.analyze_node(init, 0, arena, sig_types, best_seen_delay)?;
+                return Ok(());
+            }
+            SigMatch::Proj(_, group) => {
+                if let Some((_var, body_list)) = match_sym_rec(arena, group) {
+                    let bodies = list_to_vec(arena, body_list).ok_or_else(|| {
+                        SignalFirError::new(
+                            SignalFirErrorCode::UnsupportedSignalNode,
+                            "malformed symbolic recursion body list during delay analysis",
+                        )
+                    })?;
+                    for body in bodies {
+                        self.analyze_node(body, 0, arena, sig_types, best_seen_delay)?;
+                    }
+                    return Ok(());
+                }
+            }
+            _ => {}
+        }
+
+        let node = arena.node(sig).ok_or_else(|| {
+            SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!("missing prepared signal node {}", sig.as_u32()),
+            )
+        })?;
+        for child in node.children.as_slice() {
+            self.analyze_child(*child, arena, sig_types, best_seen_delay)?;
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn analyze_child(
+        &mut self,
+        child: SigId,
+        arena: &TreeArena,
+        sig_types: &HashMap<SigId, SigType>,
+        best_seen_delay: &mut HashMap<SigId, i32>,
+    ) -> Result<(), SignalFirError> {
+        if arena.is_list(child) {
+            let mut list = child;
+            while !arena.is_nil(list) {
+                let head = arena.hd(list).ok_or_else(|| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::UnsupportedSignalNode,
+                        "malformed prepared signal list during delay analysis",
+                    )
+                })?;
+                self.analyze_node(head, 0, arena, sig_types, best_seen_delay)?;
+                list = arena.tl(list).ok_or_else(|| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::UnsupportedSignalNode,
+                        "malformed prepared signal list during delay analysis",
+                    )
+                })?;
+            }
+            Ok(())
+        } else {
+            self.analyze_node(child, 0, arena, sig_types, best_seen_delay)
+        }
+    }
+
+    #[allow(dead_code)]
+    fn record_delay_analysis(&mut self, sig: SigId, accumulated_delay: i32) {
+        let entry = self.delay_analysis.entry(sig).or_default();
+        entry.max_delay = entry.max_delay.max(accumulated_delay);
+        entry.delay_count = entry.delay_count.saturating_add(1);
+    }
+
+    #[allow(dead_code)]
+    fn record_rec_output_delay_analysis(
+        &mut self,
+        arena: &TreeArena,
+        sig: SigId,
+        accumulated_delay: i32,
+    ) {
+        let SigMatch::Proj(index, group) = match_sig(arena, sig) else {
+            return;
+        };
+        let rec_var = match match_sym_ref(arena, group) {
+            Some(var) => Some(var),
+            None => match_sym_rec(arena, group).map(|(var, _)| var),
+        };
+        let Some(var) = rec_var else {
+            return;
+        };
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        let entry = self
+            .rec_output_analysis
+            .entry((var.as_u32(), index))
+            .or_default();
+        entry.max_delay = entry.max_delay.max(accumulated_delay);
+        entry.delay_count = entry.delay_count.saturating_add(1);
     }
 
     fn scan_node(
@@ -923,5 +1134,21 @@ impl DelayManager {
     /// recursion array large enough to serve the delay chain.
     pub(super) fn rec_max_delay(&self, var_id: u32, index: usize) -> Option<i32> {
         self.rec_group_max_delay.get(&(var_id, index)).copied()
+    }
+
+    /// Returns read-only delay-analysis metadata for one reachable signal node.
+    #[allow(dead_code)]
+    pub(super) fn delay_analysis(&self, sig: SigId) -> Option<&DelayAnalysisEntry> {
+        self.delay_analysis.get(&sig)
+    }
+
+    /// Returns read-only delay-analysis metadata for one recursion output.
+    #[allow(dead_code)]
+    pub(super) fn rec_output_analysis(
+        &self,
+        var_id: u32,
+        index: usize,
+    ) -> Option<&DelayAnalysisEntry> {
+        self.rec_output_analysis.get(&(var_id, index))
     }
 }

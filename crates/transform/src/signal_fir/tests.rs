@@ -19,12 +19,13 @@
 
 use super::{
     RealType, SignalFirErrorCode, SignalFirOptions, compile_signals_to_fir_fastlane_with_ui,
+    delay::{DelayManager, DelayOptions},
     module::interpret_generator_for_test,
 };
 use fir::{AccessType, FirBinOp, FirMatch, FirType, match_fir};
 use signals::{BinOp, SigBuilder};
 
-use tlib::{TreeArena, de_bruijn_rec, de_bruijn_ref};
+use tlib::{TreeArena, de_bruijn_rec, de_bruijn_ref, match_sym_rec};
 use ui::{ControlKind, ControlRange, ControlSpec, UiBuilder, UiProgram, UiRootOrigin};
 
 use crate::signal_prepare::{SimpleSigType, prepare_signals_for_fir};
@@ -133,6 +134,14 @@ fn compile_fastlane_without_ui(
         &empty_ui,
         options,
     )
+}
+
+fn analyze_delays_for_prepared(prepared: &crate::signal_prepare::PreparedSignals) -> DelayManager {
+    let mut delay = DelayManager::new(DelayOptions::default());
+    delay
+        .analyze_signals(&prepared.arena, prepared.sig_types_map(), &prepared.outputs)
+        .expect("delay analysis should succeed on prepared signals");
+    delay
 }
 
 // ── UI fixture builders ───────────────────────────────────────────────────────
@@ -1184,6 +1193,91 @@ fn recursive_feedback_delay1_reuses_two_slot_recursion_array() {
             .iter()
             .all(|id| !matches!(match_fir(&out.store, *id), FirMatch::Cast { .. })),
         "feedback delay1 recursion reuse should not insert cast wrappers"
+    );
+}
+
+#[test]
+fn delay_analysis_attributes_nested_delay1_chain_to_recursion_output() {
+    let mut arena = TreeArena::new();
+    let self_ref = de_bruijn_ref(&mut arena, 1);
+    let body = {
+        let mut b = SigBuilder::new(&mut arena);
+        let feedback = b.proj(0, self_ref);
+        let prev1 = b.delay1(feedback);
+        let prev2 = b.delay1(prev1);
+        let inc = b.real(0.25);
+        b.add(prev2, inc)
+    };
+    let body_list = arena.cons(body, arena.nil());
+    let group = de_bruijn_rec(&mut arena, body_list);
+    let sig0 = {
+        let mut b = SigBuilder::new(&mut arena);
+        b.proj(0, group)
+    };
+
+    let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
+        .expect("nested feedback group should prepare");
+    let delay = analyze_delays_for_prepared(&prepared);
+    let signals::SigMatch::Proj(index, prepared_group) =
+        signals::match_sig(&prepared.arena, prepared.outputs[0])
+    else {
+        panic!("prepared output should stay a recursion projection");
+    };
+    let (var, _bodies) = match_sym_rec(&prepared.arena, prepared_group)
+        .expect("prepared projection should target a symbolic recursion group");
+    let analysis = delay
+        .rec_output_analysis(var.as_u32(), index as usize)
+        .expect("nested delay1 chain should be attributed to the recursion output");
+    assert_eq!(
+        analysis.max_delay, 2,
+        "Delay1(Delay1(Proj)) should attribute total delay 2 to the recursion carrier"
+    );
+    assert_eq!(
+        analysis.delay_count, 1,
+        "the recursion output should observe one delayed access chain in this fixture"
+    );
+}
+
+#[test]
+fn delay_analysis_attributes_fixed_delay_over_feedback_delay1_to_recursion_output() {
+    let mut arena = TreeArena::new();
+    let self_ref = de_bruijn_ref(&mut arena, 1);
+    let body = {
+        let mut b = SigBuilder::new(&mut arena);
+        let feedback = b.proj(0, self_ref);
+        let prev = b.delay1(feedback);
+        let ten = b.int(10);
+        let delayed = b.delay(prev, ten);
+        let input = b.input(0);
+        b.add(delayed, input)
+    };
+    let body_list = arena.cons(body, arena.nil());
+    let group = de_bruijn_rec(&mut arena, body_list);
+    let sig0 = {
+        let mut b = SigBuilder::new(&mut arena);
+        b.proj(0, group)
+    };
+
+    let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
+        .expect("delayed feedback group should prepare");
+    let delay = analyze_delays_for_prepared(&prepared);
+    let signals::SigMatch::Proj(index, prepared_group) =
+        signals::match_sig(&prepared.arena, prepared.outputs[0])
+    else {
+        panic!("prepared output should stay a recursion projection");
+    };
+    let (var, _bodies) = match_sym_rec(&prepared.arena, prepared_group)
+        .expect("prepared projection should target a symbolic recursion group");
+    let analysis = delay
+        .rec_output_analysis(var.as_u32(), index as usize)
+        .expect("Delay(Delay1(Proj), 10) should be attributed to the recursion output");
+    assert_eq!(
+        analysis.max_delay, 11,
+        "Delay(Delay1(Proj), 10) should attribute total delay 11 to the recursion carrier"
+    );
+    assert_eq!(
+        analysis.delay_count, 1,
+        "the recursion output should observe one delayed access chain in this fixture"
     );
 }
 
