@@ -1,11 +1,14 @@
-/* cranelift-dsp.h — C++ wrapper for the Cranelift backend
+/************************** BEGIN cranelift-dsp.h **************************
+ * C++ wrapper for the Faust Cranelift backend — Rust port
+ * (modeled after faust/architecture/faust/dsp/interpreter-dsp.h)
  *
- * This header now mirrors the interpreter wrapper strategy: the C++ classes are
- * thin inline adapters built directly on top of `cranelift-dsp-c.h`.
- */
+ * This header provides C++ classes that wrap the Cranelift C API and is
+ * self-contained (it does not include `cranelift-dsp-c.h`).
+ * C projects should include `cranelift-dsp-c.h` directly.
+ ************************************************************************/
 
-#ifndef FAUST_CRANELIFT_DSP_H
-#define FAUST_CRANELIFT_DSP_H
+#ifndef CRANELIFT_DSP_H
+#define CRANELIFT_DSP_H
 
 #ifdef _WIN32
 #define DEPRECATED(fun) __declspec(deprecated) fun
@@ -15,24 +18,96 @@
 
 #include <string>
 #include <vector>
-
-#include "faust/dsp/dsp.h"
-#include "faust/dsp/libfaust-box.h"
-#include "faust/dsp/libfaust-signal.h"
+#include <cstring>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include "faust/gui/CInterface.h"
 #include "faust/gui/CGlue.h"
-#include "faust/gui/meta.h"
 
-// Avoid C typedef/class name collisions. The C API uses `cranelift_dsp` and
-// `cranelift_dsp_factory` for opaque handles, while the C++ API uses the same
-// identifiers for wrapper classes.
-#define cranelift_dsp cranelift_dsp_c_api
-#define cranelift_dsp_factory cranelift_dsp_factory_c_api
-#include "cranelift-dsp-c.h"
-#undef cranelift_dsp
-#undef cranelift_dsp_factory
+// Self-contained C API declarations (mirrors crates/cranelift-ffi/include/cranelift-dsp-c.h)
+// This header intentionally does not include cranelift-dsp-c.h so it can be
+// used standalone from C++ codebases expecting a single include.
 
-using ccranelift_dsp = cranelift_dsp_c_api;
-using ccranelift_dsp_factory = cranelift_dsp_factory_c_api;
+#ifndef FAUSTFLOAT
+#define FAUSTFLOAT float
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Opaque C API types
+#ifdef _MSC_VER
+typedef void ccranelift_dsp_factory;
+typedef void ccranelift_dsp;
+#else
+typedef struct CraneliftDspFactory ccranelift_dsp_factory;
+typedef struct CraneliftDspInstance ccranelift_dsp;
+#endif
+
+// C API functions used by this C++ wrapper
+const char* getCLibFaustVersion(void);
+
+ccranelift_dsp_factory* getCCraneliftDSPFactoryFromSHAKey(const char* sha_key);
+ccranelift_dsp_factory* readCCraneliftDSPFactoryFromBitcode(
+    const char* bit_code, char* error_msg);
+ccranelift_dsp_factory* readCCraneliftDSPFactoryFromBitcodeFile(
+    const char* bit_code_path, char* error_msg);
+ccranelift_dsp_factory* createCCraneliftDSPFactoryFromFile(
+    const char* filename, int argc, const char* argv[], char* error_msg, int opt_level);
+ccranelift_dsp_factory* createCCraneliftDSPFactoryFromString(
+    const char* name_app, const char* dsp_content,
+    int argc, const char* argv[], char* error_msg, int opt_level);
+char* writeCCraneliftDSPFactoryToBitcode(ccranelift_dsp_factory* factory);
+bool writeCCraneliftDSPFactoryToBitcodeFile(
+    ccranelift_dsp_factory* factory, const char* bit_code_path);
+bool deleteCCraneliftDSPFactory(ccranelift_dsp_factory* factory);
+void deleteAllCCraneliftDSPFactories(void);
+char** getAllCCraneliftDSPFactories(void);
+char* getCCraneliftDSPFactoryName(ccranelift_dsp_factory* factory);
+char* getCCraneliftDSPFactorySHAKey(ccranelift_dsp_factory* factory);
+char* getCCraneliftDSPFactoryDSPCode(ccranelift_dsp_factory* factory);
+char* getCCraneliftDSPFactoryJSON(ccranelift_dsp_factory* factory);
+char* getCCraneliftDSPFactoryCompileOptions(ccranelift_dsp_factory* factory);
+const char** getCCraneliftDSPFactoryLibraryList(ccranelift_dsp_factory* factory);
+const char** getCCraneliftDSPFactoryIncludePathnames(ccranelift_dsp_factory* factory);
+const char** getCCraneliftDSPFactoryWarningMessages(ccranelift_dsp_factory* factory);
+bool startMTDSPFactories(void);
+void stopMTDSPFactories(void);
+void freeCMemory(void* ptr);
+
+ccranelift_dsp* createCCraneliftDSPInstance(ccranelift_dsp_factory* factory);
+void deleteCCraneliftDSPInstance(ccranelift_dsp* dsp);
+ccranelift_dsp* cloneCCraneliftDSPInstance(ccranelift_dsp* dsp);
+
+int getNumInputsCCraneliftDSPInstance(ccranelift_dsp* dsp);
+int getNumOutputsCCraneliftDSPInstance(ccranelift_dsp* dsp);
+int getSampleRateCCraneliftDSPInstance(ccranelift_dsp* dsp);
+void initCCraneliftDSPInstance(ccranelift_dsp* dsp, int sample_rate);
+void instanceInitCCraneliftDSPInstance(ccranelift_dsp* dsp, int sample_rate);
+void instanceConstantsCCraneliftDSPInstance(ccranelift_dsp* dsp, int sample_rate);
+void instanceResetUserInterfaceCCraneliftDSPInstance(ccranelift_dsp* dsp);
+void instanceClearCCraneliftDSPInstance(ccranelift_dsp* dsp);
+void buildUserInterfaceCCraneliftDSPInstance(ccranelift_dsp* dsp, UIGlue* glue);
+void metadataCCraneliftDSPInstance(ccranelift_dsp* dsp, MetaGlue* meta);
+void computeCCraneliftDSPInstance(ccranelift_dsp* dsp, int count,
+                                  FAUSTFLOAT** inputs, FAUSTFLOAT** outputs);
+void registerCCraneliftForeignFunction(const char* name, void* fn_ptr);
+void unregisterCCraneliftForeignFunction(const char* name);
+void clearCCraneliftForeignFunctions(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+// ── Compatibility note ─────────────────────────────────────────────────────
+// This self-contained header reuses `faust/gui/CInterface.h` for UIGlue/MetaGlue
+// definitions to remain source-compatible with `CGlue.h`, `GTKUI`, JACK helpers,
+// etc., while still embedding the Cranelift C API declarations directly.
+// ───────────────────────────────────────────────────────────────────────────
+
+#ifdef __cplusplus
 
 namespace cranelift_dsp_detail {
 
@@ -68,6 +143,7 @@ inline std::vector<std::string> from_owned_c_string_array(char** items)
         result.emplace_back(*it);
         freeCMemory(*it);
     }
+    freeCMemory(items);
     return result;
 }
 
@@ -78,17 +154,16 @@ inline void copy_error_message(std::string& error_msg, const char* buffer)
 
 } // namespace cranelift_dsp_detail
 
-/*!
- \addtogroup craneliftcpp C++ interface for compiling Faust code with the Cranelift backend.
- Note that the API is not thread safe: use `startMTDSPFactories/stopMTDSPFactories`
- to coordinate global factory-cache access.
- @{
- */
-
-extern "C" LIBFAUST_API const char* getCLibFaustVersion();
-
 class cranelift_dsp;
 
+// ── cranelift_dsp_factory ──────────────────────────────────────────────────
+
+/**
+ * C++ wrapper for the Cranelift DSP factory.
+ *
+ * Instances are obtained via the free functions below.
+ * The factory owns its memory; call deleteCraneliftDSPFactory() to free it.
+ */
 class LIBFAUST_API cranelift_dsp_factory : public dsp_factory {
 public:
     explicit cranelift_dsp_factory(ccranelift_dsp_factory* impl)
@@ -160,6 +235,14 @@ private:
     ccranelift_dsp_factory* impl_;
 };
 
+// ── cranelift_dsp ──────────────────────────────────────────────────────────
+
+/**
+ * C++ wrapper for a Cranelift DSP instance.
+ *
+ * Instances are created via `cranelift_dsp_factory::createDSPInstance()`.
+ * The caller owns the instance; call `delete` to release it.
+ */
 class LIBFAUST_API cranelift_dsp : public dsp {
 public:
     explicit cranelift_dsp(ccranelift_dsp* impl)
@@ -264,11 +347,15 @@ private:
     ccranelift_dsp* impl_;
 };
 
+// ── cranelift_dsp_factory::createDSPInstance ──────────────────────────────
+
 inline ::dsp* cranelift_dsp_factory::createDSPInstance()
 {
     ccranelift_dsp* impl = createCCraneliftDSPInstance(impl_);
     return impl ? new cranelift_dsp(impl) : nullptr;
 }
+
+// ── Free functions ────────────────────────────────────────────────────────
 
 inline cranelift_dsp_factory* getCraneliftDSPFactoryFromSHAKey(
     const std::string& sha_key)
@@ -315,30 +402,6 @@ inline cranelift_dsp_factory* createCraneliftDSPFactoryFromString(
     return new cranelift_dsp_factory(impl);
 }
 
-inline cranelift_dsp_factory* createCraneliftDSPFactoryFromSignals(
-    const std::string&,
-    tvec,
-    int,
-    const char*[],
-    std::string& error_msg,
-    int = 0)
-{
-    error_msg = "Cranelift C++ wrapper does not expose signal-vector bridging yet";
-    return nullptr;
-}
-
-inline cranelift_dsp_factory* createCraneliftDSPFactoryFromBoxes(
-    const std::string&,
-    Box,
-    int,
-    const char*[],
-    std::string& error_msg,
-    int = 0)
-{
-    error_msg = "Cranelift C++ wrapper does not expose box-expression bridging yet";
-    return nullptr;
-}
-
 inline bool deleteCraneliftDSPFactory(cranelift_dsp_factory* factory)
 {
     if (!factory) {
@@ -352,6 +415,22 @@ inline bool deleteCraneliftDSPFactory(cranelift_dsp_factory* factory)
 inline void deleteAllCraneliftDSPFactories()
 {
     deleteAllCCraneliftDSPFactories();
+}
+
+/**
+ * Enable multi-thread-safe access to the global Cranelift factory cache.
+ */
+inline bool startCraneliftMTDSPFactories()
+{
+    return startMTDSPFactories();
+}
+
+/**
+ * Disable multi-thread-safe access to the global Cranelift factory cache.
+ */
+inline void stopCraneliftMTDSPFactories()
+{
+    stopMTDSPFactories();
 }
 
 inline std::vector<std::string> getAllCraneliftDSPFactories()
@@ -425,8 +504,7 @@ inline void clearCraneliftForeignFunctions()
     clearCCraneliftForeignFunctions();
 }
 
-/*!
- @}
- */
+#endif // __cplusplus
+#endif // CRANELIFT_DSP_H
 
-#endif /* FAUST_CRANELIFT_DSP_H */
+/************************** END cranelift-dsp.h ****************************/

@@ -132,13 +132,25 @@ interpreter_dsp_factory* readCInterpreterDSPFactoryFromBitcodeFile(
 bool writeCInterpreterDSPFactoryToBitcodeFile(
     interpreter_dsp_factory* factory, const char* bit_code_path);
 
-/* ── Factory — unimplemented constructors ────────────────────────────────── */
-/* These require the full Faust compiler pipeline (not yet available).        */
-/* They always return NULL and write an error into error_msg.                 */
+/* ── Factory — source constructors ────────────────────────────────── */
 
+/**
+ * Create a factory from a DSP source file.
+ *
+ * In the current Rust port, this entry point may return NULL with an error
+ * message if the full Faust compiler pipeline is not available in the linked
+ * C API build.
+ */
 interpreter_dsp_factory* createCInterpreterDSPFactoryFromFile(
     const char* filename, int argc, const char* argv[], char* error_msg);
 
+/**
+ * Create a factory from DSP source code provided as a string.
+ *
+ * In the current Rust port, this entry point may return NULL with an error
+ * message if the full Faust compiler pipeline is not available in the linked
+ * C API build.
+ */
 interpreter_dsp_factory* createCInterpreterDSPFactoryFromString(
     const char* name_app, const char* dsp_content,
     int argc, const char* argv[], char* error_msg);

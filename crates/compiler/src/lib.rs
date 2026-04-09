@@ -656,17 +656,15 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_c(
-            source_name,
-            &signals,
-            options,
+        let ctx = SignalLoweringContext {
             lane,
-            self.fir_verify,
-            self.real_type,
-            self.max_copy_delay,
-            self.delay_line_threshold,
-        )
-        .map_err(|e| lower_c_error_to_compiler(source_name, e))
+            fir_verify: self.fir_verify,
+            real_type: self.real_type,
+            max_copy_delay: self.max_copy_delay,
+            delay_line_threshold: self.delay_line_threshold,
+        };
+        lower_signals_to_c(source_name, &signals, options, ctx)
+            .map_err(|e| lower_c_error_to_compiler(source_name, e))
     }
 
     /// Parses + evaluates + propagates one source, then emits C++ text using
@@ -679,17 +677,15 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_cpp(
-            source_name,
-            &signals,
-            options,
+        let ctx = SignalLoweringContext {
             lane,
-            self.fir_verify,
-            self.real_type,
-            self.max_copy_delay,
-            self.delay_line_threshold,
-        )
-        .map_err(|e| lower_cpp_error_to_compiler(source_name, e))
+            fir_verify: self.fir_verify,
+            real_type: self.real_type,
+            max_copy_delay: self.max_copy_delay,
+            delay_line_threshold: self.delay_line_threshold,
+        };
+        lower_signals_to_cpp(source_name, &signals, options, ctx)
+            .map_err(|e| lower_cpp_error_to_compiler(source_name, e))
     }
 
     /// Parses + evaluates + propagates one source, then lowers to FIR using
@@ -946,17 +942,15 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_c(
-            &source,
-            &signals,
-            options,
+        let ctx = SignalLoweringContext {
             lane,
-            self.fir_verify,
-            self.real_type,
-            self.max_copy_delay,
-            self.delay_line_threshold,
-        )
-        .map_err(|e| lower_c_error_to_compiler(&source, e))
+            fir_verify: self.fir_verify,
+            real_type: self.real_type,
+            max_copy_delay: self.max_copy_delay,
+            delay_line_threshold: self.delay_line_threshold,
+        };
+        lower_signals_to_c(&source, &signals, options, ctx)
+            .map_err(|e| lower_c_error_to_compiler(&source, e))
     }
 
     /// Parses + evaluates + propagates one file, then emits C++ text using
@@ -970,17 +964,15 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_cpp(
-            &source,
-            &signals,
-            options,
+        let ctx = SignalLoweringContext {
             lane,
-            self.fir_verify,
-            self.real_type,
-            self.max_copy_delay,
-            self.delay_line_threshold,
-        )
-        .map_err(|e| lower_cpp_error_to_compiler(&source, e))
+            fir_verify: self.fir_verify,
+            real_type: self.real_type,
+            max_copy_delay: self.max_copy_delay,
+            delay_line_threshold: self.delay_line_threshold,
+        };
+        lower_signals_to_cpp(&source, &signals, options, ctx)
+            .map_err(|e| lower_cpp_error_to_compiler(&source, e))
     }
 
     /// Parses + evaluates + propagates one file, then lowers to FIR using
@@ -1360,17 +1352,15 @@ impl Compiler {
         lane: SignalFirLane,
     ) -> Result<String, CompilerError> {
         let signals = self.compile_source_to_signals(source_name, source)?;
-        lower_signals_to_interp(
-            source_name,
-            &signals,
-            options,
+        let ctx = SignalLoweringContext {
             lane,
-            self.fir_verify,
-            self.real_type,
-            self.max_copy_delay,
-            self.delay_line_threshold,
-        )
-        .map_err(|e| lower_interp_error_to_compiler(source_name, e))
+            fir_verify: self.fir_verify,
+            real_type: self.real_type,
+            max_copy_delay: self.max_copy_delay,
+            delay_line_threshold: self.delay_line_threshold,
+        };
+        lower_signals_to_interp(source_name, &signals, options, ctx)
+            .map_err(|e| lower_interp_error_to_compiler(source_name, e))
     }
 
     /// Parses + evaluates + propagates one file, then emits `.fbc` bytecode
@@ -1400,17 +1390,15 @@ impl Compiler {
     ) -> Result<String, CompilerError> {
         let signals = self.compile_file_to_signals(path, search_paths)?;
         let source = path.display().to_string();
-        lower_signals_to_interp(
-            &source,
-            &signals,
-            options,
+        let ctx = SignalLoweringContext {
             lane,
-            self.fir_verify,
-            self.real_type,
-            self.max_copy_delay,
-            self.delay_line_threshold,
-        )
-        .map_err(|e| lower_interp_error_to_compiler(&source, e))
+            fir_verify: self.fir_verify,
+            real_type: self.real_type,
+            max_copy_delay: self.max_copy_delay,
+            delay_line_threshold: self.delay_line_threshold,
+        };
+        lower_signals_to_interp(&source, &signals, options, ctx)
+            .map_err(|e| lower_interp_error_to_compiler(&source, e))
     }
 
     /// Parses + evaluates + propagates one file with default import search
@@ -2092,6 +2080,15 @@ enum LowerToFirError {
 
 // ─── Signal-to-FIR lower functions ───────────────────────────────────────────
 
+#[derive(Clone, Copy, Debug)]
+struct SignalLoweringContext {
+    lane: SignalFirLane,
+    fir_verify: FirVerifyOptions,
+    real_type: RealType,
+    max_copy_delay: u32,
+    delay_line_threshold: u32,
+}
+
 /// Dispatches C++ lowering through the selected signal->FIR lane.
 ///
 /// The backend itself always consumes FIR; the lane choice controls only how
@@ -2100,24 +2097,20 @@ fn lower_signals_to_cpp(
     source_name: &str,
     output: &SignalCompileOutput,
     options: &CppOptions,
-    lane: SignalFirLane,
-    fir_verify: FirVerifyOptions,
-    real_type: RealType,
-    max_copy_delay: u32,
-    delay_line_threshold: u32,
+    ctx: SignalLoweringContext,
 ) -> Result<String, LowerToCppError> {
-    match lane {
+    match ctx.lane {
         SignalFirLane::LegacyBridge => {
-            lower_signals_to_cpp_legacy_bridge(source_name, output, options, fir_verify)
+            lower_signals_to_cpp_legacy_bridge(source_name, output, options, ctx.fir_verify)
         }
         SignalFirLane::TransformFastLane => lower_signals_to_cpp_transform_fastlane(
             source_name,
             output,
             options,
-            fir_verify,
-            real_type,
-            max_copy_delay,
-            delay_line_threshold,
+            ctx.fir_verify,
+            ctx.real_type,
+            ctx.max_copy_delay,
+            ctx.delay_line_threshold,
         ),
     }
 }
@@ -2127,24 +2120,20 @@ fn lower_signals_to_c(
     source_name: &str,
     output: &SignalCompileOutput,
     options: &COptions,
-    lane: SignalFirLane,
-    fir_verify: FirVerifyOptions,
-    real_type: RealType,
-    max_copy_delay: u32,
-    delay_line_threshold: u32,
+    ctx: SignalLoweringContext,
 ) -> Result<String, LowerToCError> {
-    match lane {
+    match ctx.lane {
         SignalFirLane::LegacyBridge => {
-            lower_signals_to_c_legacy_bridge(source_name, output, options, fir_verify)
+            lower_signals_to_c_legacy_bridge(source_name, output, options, ctx.fir_verify)
         }
         SignalFirLane::TransformFastLane => lower_signals_to_c_transform_fastlane(
             source_name,
             output,
             options,
-            fir_verify,
-            real_type,
-            max_copy_delay,
-            delay_line_threshold,
+            ctx.fir_verify,
+            ctx.real_type,
+            ctx.max_copy_delay,
+            ctx.delay_line_threshold,
         ),
     }
 }
@@ -2154,28 +2143,24 @@ fn lower_signals_to_interp(
     source_name: &str,
     output: &SignalCompileOutput,
     options: &InterpOptions,
-    lane: SignalFirLane,
-    fir_verify: FirVerifyOptions,
-    real_type: RealType,
-    max_copy_delay: u32,
-    delay_line_threshold: u32,
+    ctx: SignalLoweringContext,
 ) -> Result<String, LowerToInterpError> {
-    match lane {
+    match ctx.lane {
         SignalFirLane::LegacyBridge => lower_signals_to_interp_legacy_bridge(
             source_name,
             output,
             options,
-            fir_verify,
-            real_type,
+            ctx.fir_verify,
+            ctx.real_type,
         ),
         SignalFirLane::TransformFastLane => lower_signals_to_interp_transform_fastlane(
             source_name,
             output,
             options,
-            fir_verify,
-            real_type,
-            max_copy_delay,
-            delay_line_threshold,
+            ctx.fir_verify,
+            ctx.real_type,
+            ctx.max_copy_delay,
+            ctx.delay_line_threshold,
         ),
     }
 }

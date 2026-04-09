@@ -61,6 +61,8 @@ void deleteAllCInterpreterDSPFactories(void);
 char** getAllCInterpreterDSPFactories(void);
 char* getCInterpreterDSPFactoryJSON(cinterpreter_dsp_factory* factory);
 const char** getCInterpreterDSPFactoryLibraryList(cinterpreter_dsp_factory* factory);
+bool startMTDSPFactories(void);
+void stopMTDSPFactories(void);
 void freeCMemory(void* ptr);
 
 cinterpreter_dsp* createCInterpreterDSPInstance(cinterpreter_dsp_factory* factory);
@@ -196,7 +198,7 @@ private:
  * C++ wrapper for a FBC DSP instance.
  *
  * Instances are created via `interpreter_dsp_factory::createDSPInstance()`.
- * The caller owns the instance; call `delete` or `deleteCInterpreterDSPInstance`.
+ * The caller owns the instance; call `delete` to release it.
  */
 class interpreter_dsp : public dsp {
 public:
@@ -462,6 +464,22 @@ inline std::vector<std::string> getAllInterpreterDSPFactories() {
 }
 
 /**
+ * Enable multi-thread-safe access to the global interpreter factory cache.
+ */
+inline bool startInterpreterMTDSPFactories()
+{
+    return startMTDSPFactories();
+}
+
+/**
+ * Disable multi-thread-safe access to the global interpreter factory cache.
+ */
+inline void stopInterpreterMTDSPFactories()
+{
+    stopMTDSPFactories();
+}
+
+/**
  * Register a host foreign function for interpreter `ffunction(...)` calls.
  *
  * The pointer must remain valid for the duration of any compiled factory or
@@ -489,15 +507,6 @@ inline void clearInterpreterForeignFunctions()
 {
     clearCInterpreterForeignFunctions();
 }
-
-// ── Top-level using declarations (optional — matches original Faust API) ──────
-// Uncomment if you want to use interpreter_dsp / interpreter_dsp_factory
-// without the faust_interp:: prefix.
-//
-// using faust_interp::interpreter_dsp;
-// using faust_interp::interpreter_dsp_factory;
-// using faust_interp::readInterpreterDSPFactoryFromBitcode;
-// etc.
 
 #endif // __cplusplus
 #endif // INTERPRETER_DSP_H
