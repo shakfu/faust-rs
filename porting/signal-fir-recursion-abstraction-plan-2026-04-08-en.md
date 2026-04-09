@@ -71,7 +71,9 @@ abstractions so that:
 
 - code paths stop recomputing the same logic in multiple places,
 - delay/recursion interaction is easier to explain,
-- future parity work on APF/biquad-like structures has a cleaner home.
+- future parity work on APF/biquad-like structures has a cleaner home,
+- simple one-sample feedback loops can later gain a scalar fast path without
+  weakening the general recursion model.
 
 ---
 
@@ -149,6 +151,7 @@ Implemented:
 
 ```rust
 enum RecursionStorageStrategy {
+    SingleScalar,
     TwoSlotShift,
     Circular,
 }
@@ -156,10 +159,13 @@ enum RecursionStorageStrategy {
 
 Mapping rule:
 
+- size `1` scalar state -> `SingleScalar`
 - `size == 2` -> `TwoSlotShift`
 - `size > 2` -> `Circular`
 
-This keeps the current implementation model but makes it explicit.
+Only `TwoSlotShift` and `Circular` are implemented today. `SingleScalar` is a
+planned optimization-specific extension for simple one-sample recursions such
+as `process = + ~ _;`.
 
 ### 4.3 `RecursionDelayRef`
 
@@ -324,6 +330,64 @@ Pass criterion:
 
 - recursion ordering is described in the same vocabulary as delay ordering
 
+### Step 6: add a scalar fast path for simple one-sample recursion carriers
+
+Status: planned
+
+Introduce an optional `SingleScalar` storage strategy for recursive groups that
+semantically only need one previous-sample state cell.
+
+The motivating case is:
+
+```faust
+process = + ~ _;
+```
+
+which lowers to the recurrence:
+
+```text
+y[n] = x[n] + y[n - 1]
+```
+
+For this shape, one state variable is enough:
+
+- read previous state,
+- compute current sample,
+- publish output,
+- overwrite the state with the current sample.
+
+This optimization should remain a lowering optimization. The canonical signal
+representation stays `sigRec/sigProj`, and the general recursion path keeps the
+existing array-backed strategies.
+
+Eligibility conditions should be conservative:
+
+- exactly one recursive carrier value for the group output under analysis
+- effective recursion depth of one sample
+- no delayed read beyond the immediate previous sample
+- no need to serve multiple independently indexed reads from the same carrier
+- no recursion-delay analysis request that upsizes the carrier
+- no lowering order that would require observing both old and new carrier
+  contents after the state update
+
+Initial implementation strategy:
+
+- keep recursion-group detection unchanged
+- classify eligible carriers as `SingleScalar` during recursion-carrier
+  strategy resolution
+- lower reads as direct scalar loads instead of `slot[1]`
+- lower the finalize step as a direct scalar store of the just-emitted current
+  sample
+- keep `TwoSlotShift` as the fallback for any ambiguous or non-trivial case
+
+Pass criterion:
+
+- simple feedback fixtures such as `process = + ~ _;` no longer allocate a
+  two-slot recursion array
+- generated FIR still preserves previous-sample semantics
+- existing two-slot and circular recursion tests remain unchanged for the
+  general cases
+
 ---
 
 ## 8. Risks
@@ -347,6 +411,7 @@ That is not the goal.
 
 The goal is first to expose the current two real strategies explicitly:
 
+- `SingleScalar` for eligible one-sample feedback loops
 - `TwoSlotShift`
 - `Circular`
 
@@ -359,12 +424,22 @@ Only after that should we evaluate whether a trait or a dedicated
 
 At minimum, validate:
 
+- `process = + ~ _;` lowers to one scalar recursion state instead of
+  `fRec*[2]`
 - `recursive_feedback_delay1_reuses_two_slot_recursion_array`
 - `nested_feedback_delay1_chain_reuses_one_recursion_carrier`
 - `fixed_delay_over_feedback_chain_reuses_one_recursion_carrier`
 - `top_level_recursion_projection_delay_chain_reuses_one_recursion_carrier`
 - `rec_proj_lowers_without_placeholder_nodes`
 - `recursive_feedback_stays_in_sample_loop`
+
+Add targeted non-regression tests for:
+
+- single-scalar feedback with integer state
+- a simple feedback form that must stay `TwoSlotShift` because it reads both
+  current/previous slots implicitly
+- a feedback form that must stay `Circular` because delayed recursion analysis
+  widened the carrier
 
 And selected compiler integration tests that exercise:
 
@@ -385,7 +460,9 @@ This plan is complete when:
 
 - recursion carrier resolution has one canonical API
 - recursion storage strategy is explicit instead of inferred ad hoc from
-  `size == 2`
+  carrier size tests
 - recursion-delay reuse is represented as an explicit resolved object
 - recursion read/write/finalize rules are easier to explain than the current
   procedural spread across multiple functions
+- simple one-sample feedback loops can use one scalar state cell when safe,
+  while general recursive shapes still use the existing array-backed paths
