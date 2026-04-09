@@ -287,7 +287,11 @@ fn rewrite_value(store: &mut FirStore, node: FirId, state: &mut RewriteState<'_>
 }
 
 /// Rewrites the value children of a value node and rebuilds it if any changed.
-fn rewrite_value_children(store: &mut FirStore, node: FirId, state: &mut RewriteState<'_>) -> FirId {
+fn rewrite_value_children(
+    store: &mut FirStore,
+    node: FirId,
+    state: &mut RewriteState<'_>,
+) -> FirId {
     let matched = match_fir(store, node);
     match matched {
         FirMatch::BinOp {
@@ -340,11 +344,7 @@ fn rewrite_value_children(store: &mut FirStore, node: FirId, state: &mut Rewrite
             let new_args: Vec<FirId> = args
                 .iter()
                 .map(|&a| {
-                    let na = rewrite_value(
-                        store,
-                        a,
-                        state,
-                    );
+                    let na = rewrite_value(store, a, state);
                     if na != a {
                         changed = true;
                     }
@@ -386,7 +386,10 @@ fn rewrite_value_children(store: &mut FirStore, node: FirId, state: &mut Rewrite
 }
 
 /// Returns the typed prefix and counter slot for one materialized value.
-fn typed_prefix_for<'a>(typ: &FirType, counters: &'a mut TypedCounters<'_>) -> (&'a str, &'a mut u32) {
+fn typed_prefix_for<'a>(
+    typ: &FirType,
+    counters: &'a mut TypedCounters<'_>,
+) -> (&'a str, &'a mut u32) {
     if matches!(typ, FirType::Int32 | FirType::Int64 | FirType::Bool) {
         (counters.int_prefix, &mut counters.int_counter)
     } else {

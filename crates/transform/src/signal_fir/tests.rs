@@ -1085,23 +1085,51 @@ fn rec_proj_lowers_without_placeholder_nodes() {
         struct_items.iter().any(|id| matches!(
             match_fir(&out.store, *id),
             FirMatch::DeclareVar {
-                typ: FirType::Array(_, 2),
+                ref name,
+                typ: FirType::Float32 | FirType::Float64,
+                access: AccessType::Struct,
+                ..
+            } if name.starts_with("fRec")
+        )),
+        "simple unary rec/proj should allocate one scalar recursion state field"
+    );
+    assert!(
+        !struct_items.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar {
+                ref name,
+                typ: FirType::Array(_, _),
                 ..
             }
+                if name.starts_with("fRec") || name.starts_with("iRec")
         )),
-        "rec/proj should allocate a 2-slot recursion array"
+        "simple unary rec/proj should not allocate an array-backed recursion carrier"
     );
     let loop_body = find_compute_loop_body(&out.store, functions);
     let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
         panic!("compute loop body block expected");
     };
     assert!(
-        stmts
-            .iter()
-            .filter(|id| matches!(match_fir(&out.store, **id), FirMatch::StoreTable { .. }))
-            .count()
-            >= 2,
-        "rec/proj should write the current recursion slot and shift it to the previous slot"
+        stmts.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar {
+                ref name,
+                access: AccessType::Stack,
+                ..
+            } if name.starts_with("fRecCur")
+        )),
+        "simple unary rec/proj should materialize the current sample as a stack-local binding"
+    );
+    assert!(
+        stmts.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::StoreVar {
+                ref name,
+                access: AccessType::Struct,
+                ..
+            } if name.starts_with("fRec")
+        )),
+        "simple unary rec/proj should finalize the scalar recursion state after output"
     );
     assert!(
         stmts
@@ -1112,7 +1140,7 @@ fn rec_proj_lowers_without_placeholder_nodes() {
 }
 
 #[test]
-fn recursive_feedback_delay1_reuses_two_slot_recursion_array() {
+fn recursive_feedback_delay1_reuses_single_scalar_recursion_state() {
     let mut arena = TreeArena::new();
     let self_ref = de_bruijn_ref(&mut arena, 1);
     let body = {
@@ -1151,18 +1179,32 @@ fn recursive_feedback_delay1_reuses_two_slot_recursion_array() {
     let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
         panic!("dsp_struct block expected");
     };
-    let mut array_rec_fields = 0usize;
-    for item in &struct_items {
-        if let FirMatch::DeclareVar { name, typ, .. } = match_fir(&out.store, *item)
-            && name.starts_with("fRec")
-            && matches!(typ, FirType::Array(_, 2))
-        {
-            array_rec_fields += 1;
-        }
-    }
     assert_eq!(
-        array_rec_fields, 1,
-        "feedback recurrence should use one 2-slot recursion array without shadow scalar state"
+        struct_items
+            .iter()
+            .filter(|id| matches!(
+                match_fir(&out.store, **id),
+                FirMatch::DeclareVar {
+                    ref name,
+                    typ: FirType::Float32 | FirType::Float64,
+                    access: AccessType::Struct,
+                    ..
+                } if name.starts_with("fRec")
+            ))
+            .count(),
+        1,
+        "simple feedback recurrence should use one scalar recursion state field"
+    );
+    assert!(
+        !struct_items.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar {
+                ref name,
+                typ: FirType::Array(_, _),
+                ..
+            } if name.starts_with("fRec") || name.starts_with("iRec")
+        )),
+        "simple feedback recurrence should not allocate array-backed recursion storage"
     );
     assert!(
         !struct_items.iter().any(|id| matches!(
@@ -1176,23 +1218,92 @@ fn recursive_feedback_delay1_reuses_two_slot_recursion_array() {
     let FirMatch::Block(stmts) = match_fir(&out.store, loop_body) else {
         panic!("compute loop body block expected");
     };
-    let mut rec_store_count = 0usize;
-    for stmt in &stmts {
-        if let FirMatch::StoreTable { name, .. } = match_fir(&out.store, *stmt)
-            && name.starts_with("fRec")
-        {
-            rec_store_count += 1;
-        }
-    }
     assert_eq!(
-        rec_store_count, 2,
-        "simple feedback recurrence should write current slot and shift it to previous slot"
+        stmts
+            .iter()
+            .filter(|id| matches!(
+                match_fir(&out.store, **id),
+                FirMatch::StoreVar {
+                    ref name,
+                    access: AccessType::Struct,
+                    ..
+                } if name.starts_with("fRec")
+            ))
+            .count(),
+        1,
+        "simple feedback recurrence should commit one scalar state update"
+    );
+    assert!(
+        stmts.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar {
+                ref name,
+                access: AccessType::Stack,
+                ..
+            } if name.starts_with("fRecCur")
+        )),
+        "simple feedback recurrence should expose the current sample through a stack-local binding"
     );
     assert!(
         stmts
             .iter()
             .all(|id| !matches!(match_fir(&out.store, *id), FirMatch::Cast { .. })),
         "feedback delay1 recursion reuse should not insert cast wrappers"
+    );
+}
+
+#[test]
+fn multi_output_recursive_group_stays_two_slot_array_backed() {
+    let mut arena = TreeArena::new();
+    let self_ref = de_bruijn_ref(&mut arena, 1);
+    let body0 = {
+        let mut b = SigBuilder::new(&mut arena);
+        let in0 = b.input(0);
+        let feedback0 = b.proj(0, self_ref);
+        b.binop(BinOp::Add, in0, feedback0)
+    };
+    let body1 = {
+        let mut b = SigBuilder::new(&mut arena);
+        let in1 = b.input(1);
+        let feedback1 = b.proj(1, self_ref);
+        b.binop(BinOp::Add, in1, feedback1)
+    };
+    let tail = arena.cons(body1, arena.nil());
+    let body_list = arena.cons(body0, tail);
+    let group = de_bruijn_rec(&mut arena, body_list);
+    let sig0 = SigBuilder::new(&mut arena).proj(0, group);
+
+    let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
+        .expect("multi-output feedback group should prepare");
+    let out = compile_fastlane_without_ui(
+        &prepared.arena,
+        &prepared.outputs,
+        2,
+        1,
+        &SignalFirOptions::default(),
+    )
+    .expect("multi-output feedback group should lower");
+
+    let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+        panic!("module expected");
+    };
+    let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+        panic!("dsp_struct block expected");
+    };
+    assert!(
+        struct_items
+            .iter()
+            .filter(|id| matches!(
+                match_fir(&out.store, **id),
+                FirMatch::DeclareVar {
+                    ref name,
+                    typ: FirType::Array(_, 2),
+                    ..
+                } if name.starts_with("fRec")
+            ))
+            .count()
+            >= 2,
+        "multi-output recursion should stay on the two-slot array-backed path"
     );
 }
 
@@ -1906,11 +2017,13 @@ fn integer_recursive_min_lowers_to_int_recursion_and_min_i_call() {
         struct_items.iter().any(|id| matches!(
             match_fir(&out.store, *id),
             FirMatch::DeclareVar {
-                typ: FirType::Array(inner, 2),
+                ref name,
+                typ: FirType::Int32,
+                access: AccessType::Struct,
                 ..
-            } if *inner == FirType::Int32
+            } if name.starts_with("iRec")
         )),
-        "integer recursive min should allocate a 2-slot Int32 recursion array"
+        "simple integer recursion should allocate one scalar Int32 recursion state field"
     );
 
     let dump = fir::dump_fir(&out.store, out.module);
@@ -2974,6 +3087,10 @@ fn recursive_feedback_stays_in_sample_loop() {
         matches!(
             match_fir(&out.store, *id),
             FirMatch::StoreTable { ref name, .. }
+                if name.starts_with("fRec") || name.starts_with("iRec")
+        ) || matches!(
+            match_fir(&out.store, *id),
+            FirMatch::StoreVar { ref name, .. }
                 if name.starts_with("fRec") || name.starts_with("iRec")
         )
     });

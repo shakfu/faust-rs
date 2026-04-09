@@ -36,11 +36,18 @@ use super::error::{SignalFirError, SignalFirErrorCode};
 ///
 /// This names the two concrete runtime representations used by the fast-lane:
 ///
+/// - a single scalar state cell for the simplest one-sample feedback loops,
 /// - a strict 2-slot shift-style carrier for ordinary one-sample feedback,
 /// - a larger circular carrier when delay analysis found deeper delayed reads
 ///   that can be merged into the recursion storage itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RecursionStorageStrategy {
+    /// One scalar state cell holding the previous sample.
+    ///
+    /// The current sample value is materialized separately as a stack-local
+    /// binding during the sample iteration, then committed back to the struct
+    /// field in `PostOutput`.
+    SingleScalar,
     /// Two-slot carrier:
     /// - current sample in slot `0`
     /// - previous sample in slot `1`
@@ -53,9 +60,11 @@ pub(super) enum RecursionStorageStrategy {
 
 /// Carrier metadata for one output of a recursive group (`SIGPROJ(i, SYMREC(…))`).
 ///
-/// Each output body in a multi-output recursion group gets its own array.
-/// The carrier uses one of two storage strategies:
+/// Each output body in a recursion group gets its own carrier declaration.
+/// The carrier uses one of three storage strategies:
 ///
+/// - [`RecursionStorageStrategy::SingleScalar`] for eligible simple unary
+///   feedback loops
 /// - [`RecursionStorageStrategy::TwoSlotShift`] for the default 2-slot case
 /// - [`RecursionStorageStrategy::Circular`] when accumulated delay analysis
 ///   upsizes the carrier to serve delayed reads directly
@@ -68,27 +77,36 @@ pub(super) struct RecArrayInfo {
     pub(super) name: String,
     /// Element type (`Int32` for integer recursion, `Float32`/`Float64` otherwise).
     pub(super) typ: FirType,
-    /// Allocated circular-buffer size in elements (always a power of two).
+    /// Allocated carrier size in elements.
     ///
-    /// Defaults to 2 (current + previous sample). When the recursion output
-    /// is consumed by delayed reads, the carrier may be upsized so those reads
-    /// can be served directly from the recursion array instead of a separate
-    /// delay line.
+    /// - `1` for the scalar fast path,
+    /// - `2` for the default current/previous two-slot carrier,
+    /// - `>2` for circular carriers serving delayed reads directly.
     pub(super) size: usize,
 }
 
 impl RecArrayInfo {
     /// Infers the runtime storage strategy from the allocated carrier size.
     ///
-    /// Size `2` is treated as the dedicated two-slot fast path; larger sizes
-    /// imply a circular carrier indexed through the shared global cursor.
+    /// Size `1` is the scalar fast path, size `2` is the dedicated two-slot
+    /// path, and larger sizes imply a circular carrier indexed through the
+    /// shared global cursor.
     pub(super) fn storage_strategy(&self) -> RecursionStorageStrategy {
-        if self.size == 2 {
+        if self.size == 1 {
+            RecursionStorageStrategy::SingleScalar
+        } else if self.size == 2 {
             RecursionStorageStrategy::TwoSlotShift
         } else {
             RecursionStorageStrategy::Circular
         }
     }
+}
+
+/// Stack-local current-sample binding used by scalar recursion carriers.
+#[derive(Clone, Debug)]
+pub(super) struct RecursionCurrentValueBinding {
+    pub(super) name: String,
+    pub(super) typ: FirType,
 }
 
 /// Canonically resolved recursion carrier.
@@ -164,6 +182,9 @@ pub(super) struct RecursionState {
     pub(super) recursion_stack: Vec<Vec<RecArrayInfo>>,
     /// Stack of active symbolic recursion variables matching `recursion_stack`.
     pub(super) recursion_vars: Vec<SigId>,
+    /// Current-sample bindings for scalar recursion carriers keyed by
+    /// `(group_id, body_index)`.
+    pub(super) current_value_by_group_index: HashMap<(u32, usize), RecursionCurrentValueBinding>,
     /// Groups whose recursive body pass has already been scheduled this sample.
     pub(super) scheduled_groups: HashSet<SigId>,
 }
@@ -193,6 +214,30 @@ impl RecursionState {
     /// current sample and returns `true` only on the first mark.
     pub(super) fn mark_group_scheduled(&mut self, group: SigId) -> bool {
         self.scheduled_groups.insert(group)
+    }
+
+    /// Records the stack-local current-sample binding for one scalar carrier.
+    pub(super) fn set_current_value_binding(
+        &mut self,
+        group: SigId,
+        index: usize,
+        binding: RecursionCurrentValueBinding,
+    ) {
+        self.current_value_by_group_index
+            .insert((group.as_u32(), index), binding);
+    }
+
+    /// Returns the current-sample binding for one scalar carrier, if any.
+    pub(super) fn current_value_binding(
+        &self,
+        arena: &TreeArena,
+        group: SigId,
+        index: usize,
+    ) -> Option<RecursionCurrentValueBinding> {
+        let canonical_index = canonical_group_index(arena, group, index)?;
+        self.current_value_by_group_index
+            .get(&(group.as_u32(), canonical_index))
+            .cloned()
     }
 
     /// Resolves a carrier from already materialized recursion-group storage.
@@ -270,7 +315,7 @@ pub(super) struct RecursionLoweringCtx<'a> {
 }
 
 impl RecursionLoweringCtx<'_> {
-    /// Chooses the runtime current-slot index for one carrier.
+    /// Chooses the runtime current-slot index for one array-backed carrier.
     ///
     /// Two-slot carriers always write/read slot `0` for the current sample.
     /// Circular carriers use the caller-provided current circular index.
@@ -280,39 +325,50 @@ impl RecursionLoweringCtx<'_> {
         zero_index: FirId,
         circular_index: FirId,
     ) -> FirId {
-        if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
-            zero_index
-        } else {
-            circular_index
+        match info.storage_strategy() {
+            RecursionStorageStrategy::SingleScalar => zero_index,
+            RecursionStorageStrategy::TwoSlotShift => zero_index,
+            RecursionStorageStrategy::Circular => circular_index,
         }
     }
 
-    /// Emits a load of the current carrier value.
+    /// Emits a load of the feedback-visible carrier value.
     ///
-    /// The caller supplies the already chosen runtime index so this helper does
-    /// not need to know whether the carrier is two-slot or circular.
-    pub(super) fn load_current_carrier(
+    /// For scalar carriers this reads the struct field directly. For array
+    /// carriers the caller supplies the already chosen runtime index.
+    pub(super) fn load_feedback_carrier(
         &mut self,
         info: &RecArrayInfo,
         current_index: FirId,
         read_ty: FirType,
     ) -> FirId {
         let mut b = FirBuilder::new(self.store);
-        b.load_table(
-            info.name.clone(),
-            AccessType::Struct,
-            current_index,
-            read_ty,
-        )
+        match info.storage_strategy() {
+            RecursionStorageStrategy::SingleScalar => {
+                b.load_var(info.name.clone(), AccessType::Struct, read_ty)
+            }
+            RecursionStorageStrategy::TwoSlotShift | RecursionStorageStrategy::Circular => b
+                .load_table(
+                    info.name.clone(),
+                    AccessType::Struct,
+                    current_index,
+                    read_ty,
+                ),
+        }
     }
 
-    /// Schedules the current-sample write into a recursion carrier.
+    /// Schedules the current-sample write into an array-backed recursion
+    /// carrier.
     pub(super) fn emit_current_carrier_store(
         &mut self,
         info: &RecArrayInfo,
         current_index: FirId,
         value: FirId,
     ) {
+        debug_assert_ne!(
+            info.storage_strategy(),
+            RecursionStorageStrategy::SingleScalar
+        );
         let mut b = FirBuilder::new(self.store);
         self.immediate_statements.push(b.store_table(
             info.name.clone(),
@@ -366,9 +422,15 @@ impl RecursionLoweringCtx<'_> {
         debug_assert_eq!(group_arrays.len(), current_indexes.len());
         for i in 0..group_arrays.len() {
             let info = &group_arrays[i];
-            self.emit_current_carrier_store(info, current_indexes[i], body_values[i]);
-            if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
-                self.emit_two_slot_finalize_copy(info, zero_index, one_index);
+            match info.storage_strategy() {
+                RecursionStorageStrategy::SingleScalar => {}
+                RecursionStorageStrategy::TwoSlotShift => {
+                    self.emit_current_carrier_store(info, current_indexes[i], body_values[i]);
+                    self.emit_two_slot_finalize_copy(info, zero_index, one_index);
+                }
+                RecursionStorageStrategy::Circular => {
+                    self.emit_current_carrier_store(info, current_indexes[i], body_values[i]);
+                }
             }
         }
     }
@@ -429,12 +491,27 @@ impl RecursionAllocCtx<'_> {
             .push(b.simple_for_loop(loop_var, upper, body, false));
     }
 
-    /// Declares a circular-buffer recursion array for output slot `index` of
-    /// recursion `group`, idempotent.
+    /// Registers the `instanceClear` zero-init store for one scalar recursion
+    /// carrier.
+    fn register_clear_recursion_scalar(&mut self, name: String, init: FirId) {
+        if !self.clear_init_seen.insert(name.clone()) {
+            return;
+        }
+        let mut b = FirBuilder::new(self.store);
+        self.clear_statements
+            .push(b.store_var(name, AccessType::Struct, init));
+    }
+
+    /// Declares a recursion carrier for output slot `index` of recursion
+    /// `group`, idempotent.
     ///
-    /// The buffer is sized to `pow2limit(max_delay + 1)` when the accumulated
-    /// delay analysis recorded delayed reads on this group output, or to 2
-    /// otherwise.
+    /// The carrier is:
+    ///
+    /// - scalar (`size = 1`) for eligible unary feedback outputs whose maximum
+    ///   observed delayed read does not exceed one sample,
+    /// - two-slot (`size = 2`) for the default array-backed one-sample path,
+    /// - circular (`size > 2`) when accumulated delay analysis recorded deeper
+    ///   delayed reads.
     ///
     /// This is where recursion carriers pick up delay-analysis-driven upsizing
     /// from `delay.rs`.
@@ -465,17 +542,35 @@ impl RecursionAllocCtx<'_> {
             format!("{prefix}{}_{}", group.as_u32(), index)
         };
         let size = match match_sym_rec(self.arena, group) {
-            Some((var, _body)) => match self.delay.rec_output_analysis(var.as_u32(), index) {
-                Some(analysis) => pow2limit_for_delay(analysis.max_delay)?,
-                None => 2,
-            },
+            Some((var, body_list)) => {
+                let bodies = list_to_vec(self.arena, body_list).ok_or_else(|| {
+                    SignalFirError::new(
+                        SignalFirErrorCode::UnsupportedSignalNode,
+                        "malformed symbolic recursion body list during carrier allocation",
+                    )
+                })?;
+                match self.delay.rec_output_analysis(var.as_u32(), index) {
+                    Some(analysis) if bodies.len() == 1 && analysis.max_delay <= 1 => 1,
+                    Some(analysis) => pow2limit_for_delay(analysis.max_delay)?,
+                    None if bodies.len() == 1 => 1,
+                    None => 2,
+                }
+            }
             None => 2,
         };
-        let array_ty = FirType::Array(Box::new(typ.clone()), size);
         let mut b = FirBuilder::new(self.store);
-        let decl = b.declare_var(name.clone(), array_ty, AccessType::Struct, None);
+        let decl = if size == 1 {
+            b.declare_var(name.clone(), typ.clone(), AccessType::Struct, None)
+        } else {
+            let array_ty = FirType::Array(Box::new(typ.clone()), size);
+            b.declare_var(name.clone(), array_ty, AccessType::Struct, None)
+        };
         self.struct_declarations.push(decl);
-        self.register_clear_recursion_array(name.clone(), init, size);
+        if size == 1 {
+            self.register_clear_recursion_scalar(name.clone(), init);
+        } else {
+            self.register_clear_recursion_array(name.clone(), init, size);
+        }
         let info = RecArrayInfo { name, typ, size };
         self.recursion
             .rec_array_by_group_index

@@ -2,7 +2,7 @@
 
 **Date**: 2026-04-08
 **Scope**: `crates/transform/src/signal_fir/module.rs`
-**Status**: Partially implemented
+**Status**: Implemented with follow-up refactors still open
 **Goal**: make recursion lowering easier to reason about by introducing
 explicit abstractions for:
 
@@ -23,6 +23,15 @@ Implemented on 2026-04-08:
 - `resolve_active_recursion_carrier(...)`
 - `resolve_recursion_delay_ref(...)`
 - migration of key call sites away from ad hoc `size == 2` checks
+
+Implemented on 2026-04-10:
+
+- `SingleScalar` recursion carrier strategy for eligible unary feedback loops
+- scalar current-value bindings (`fRecCur*` / `iRecCur*`) inside the sample loop
+- post-output scalar state finalization instead of mandatory `slot1 = slot0`
+- fallback retention of two-slot/circular carriers for non-eligible groups
+- regression coverage for scalar simple recursion, integer scalar recursion,
+  and multi-output fallback to array-backed carriers
 
 Still open:
 
@@ -95,7 +104,12 @@ This was previously encoded procedurally across:
 
 ### 3.2 Carrier storage strategy
 
-Today there are really two recursion storage strategies:
+Today there are three recursion storage strategies:
+
+- **single scalar carrier**
+  - struct field holds previous sample state
+  - stack-local `*RecCur*` binding holds current sample value
+  - post-output finalize writes the current binding back to the struct field
 
 - **two-slot shift carrier**
   - current sample in slot `0`
@@ -163,9 +177,9 @@ Mapping rule:
 - `size == 2` -> `TwoSlotShift`
 - `size > 2` -> `Circular`
 
-Only `TwoSlotShift` and `Circular` are implemented today. `SingleScalar` is a
-planned optimization-specific extension for simple one-sample recursions such
-as `process = + ~ _;`.
+`SingleScalar` is now implemented for conservative unary-feedback cases such as
+`process = + ~ _;`, while the array-backed strategies remain the fallback for
+multi-output groups and deeper delayed recursion chains.
 
 ### 4.3 `RecursionDelayRef`
 
@@ -332,7 +346,7 @@ Pass criterion:
 
 ### Step 6: add a scalar fast path for simple one-sample recursion carriers
 
-Status: planned
+Status: implemented
 
 Introduce an optional `SingleScalar` storage strategy for recursive groups that
 semantically only need one previous-sample state cell.
@@ -380,7 +394,7 @@ Initial implementation strategy:
   sample
 - keep `TwoSlotShift` as the fallback for any ambiguous or non-trivial case
 
-Pass criterion:
+Implemented result:
 
 - simple feedback fixtures such as `process = + ~ _;` no longer allocate a
   two-slot recursion array

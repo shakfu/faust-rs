@@ -429,24 +429,18 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
         "instanceClear should be emitted once"
     );
     assert!(
-        fast.contains("float fRec") && fast.contains("[2];"),
-        "fast lane should lower phasor recursion to a 2-slot float array"
+        fast.contains("float fRec") && fast.contains("float fRecCur"),
+        "fast lane should lower simple phasor recursion to scalar state plus current-sample binding"
     );
-    // Simple 2-slot recursion is now aligned with Faust C++:
-    // `fRec[0] = ... + fRec[1]; out = fRec[0]; fRec[1] = fRec[0];`
-    // Keep accepting the older circular-buffer form as well for robustness in
-    // case future merged-delay recursion paths appear in this fixture.
-    let has_direct_two_slot = fast.contains("[0] = (fRec")
-        && fast.contains("[1] +")
-        && fast.contains("float fTemp")
-        && fast.contains("[1] = fTemp");
+    let has_scalar_path =
+        fast.contains("float fRecCur") && fast.contains(" = fRecCur") && !fast.contains("[2];");
     let has_inline_circ =
         fast.contains("[(fIOTA & 1)] = (fRec") && fast.contains("[((fIOTA - 1) & 1)] +");
     let has_cse_circ =
         fast.contains("fIOTA & 1") && fast.contains("(fIOTA - 1) & 1") && fast.contains("fTemp");
     assert!(
-        has_direct_two_slot || has_inline_circ || has_cse_circ,
-        "fast lane should lower phasor recursion to either direct 2-slot or circular-buffer form"
+        has_scalar_path || has_inline_circ || has_cse_circ,
+        "fast lane should lower phasor recursion to either scalar or circular-buffer form"
     );
 
     let legacy_c = compile_c_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::LegacyBridge);
@@ -457,8 +451,8 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
     assert!(fast_c.contains("fHslider"));
     assert!(!fast_c.contains("fUiCtl"));
     assert!(
-        fast_c.contains("float fRec") && fast_c.contains("[2];"),
-        "fast lane C backend should keep recursion as a 2-slot array"
+        fast_c.contains("float fRec") && fast_c.contains("float fRecCur"),
+        "fast lane C backend should lower simple recursion to scalar state plus current-sample binding"
     );
     assert!(fast_c.contains(
         "ui_interface->openVerticalBox(ui_interface->uiInterface, \"rep_38_sine_phasor\");"
@@ -610,7 +604,7 @@ fn fastlane_cpp_compiles_noise_smoo_slider_fixture() {
     );
     assert!(cpp.contains("class mydsp : public dsp"));
     assert!(cpp.contains("void compute("));
-    assert!(cpp.contains("int iRec") && cpp.contains("[2];"));
+    assert!(cpp.contains("int iRec") && cpp.contains("int iRecCur"));
     assert!(cpp.contains("fSampleRate"));
     assert!(
         !cpp.contains("float fRec"),
@@ -626,10 +620,10 @@ fn fastlane_cpp_keeps_integer_recursive_min_feedback_in_int_state() {
         SignalFirLane::TransformFastLane,
     );
     assert!(cpp.contains("class mydsp : public dsp"));
-    assert!(cpp.contains("int iRec") && cpp.contains("[2];"));
+    assert!(cpp.contains("int iRec") && cpp.contains("int iRecCur"));
     assert!(
-        !cpp.contains("float[2] fRec") && !cpp.contains("double[2] fRec"),
-        "integer recursive min should keep recursion state in integer arrays"
+        !cpp.contains("float fRec") && !cpp.contains("double fRec"),
+        "integer recursive min should keep recursion state in integer storage"
     );
     assert!(
         cpp.contains("std::min<int>("),
@@ -645,10 +639,10 @@ fn fastlane_cpp_keeps_integer_recursive_abs_feedback_in_int_state() {
         SignalFirLane::TransformFastLane,
     );
     assert!(cpp.contains("class mydsp : public dsp"));
-    assert!(cpp.contains("int iRec") && cpp.contains("[2];"));
+    assert!(cpp.contains("int iRec") && cpp.contains("int iRecCur"));
     assert!(
-        !cpp.contains("float[2] fRec") && !cpp.contains("double[2] fRec"),
-        "integer recursive abs should keep recursion state in integer arrays"
+        !cpp.contains("float fRec") && !cpp.contains("double fRec"),
+        "integer recursive abs should keep recursion state in integer storage"
     );
     assert!(
         cpp.contains("std::abs("),

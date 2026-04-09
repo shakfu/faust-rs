@@ -71,9 +71,10 @@ use super::error::{SignalFirError, SignalFirErrorCode};
 use super::placement::{Bucket, analyze_signal_sharing, is_trivial_fir};
 use super::planner::SignalFirPlan;
 use super::recursion::{
-    RecArrayInfo, RecursionAllocCtx, RecursionCarrierRef, RecursionDelayRef,
-    RecursionGroupProjection, RecursionLoweringCtx, RecursionState, RecursionStorageStrategy,
-    decode_group_projection, match_recursion_delay_key,
+    RecArrayInfo, RecursionAllocCtx, RecursionCarrierRef, RecursionCurrentValueBinding,
+    RecursionDelayRef, RecursionGroupProjection, RecursionLoweringCtx, RecursionState,
+    RecursionStorageStrategy, decode_group_projection, match_recursion_delay_key,
+    resolve_active_recursion_carrier,
 };
 use super::siggen::interpret_generator;
 
@@ -190,7 +191,8 @@ const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
 ///
 /// The lowering path now resolves `Delay1^k(Proj(...))` through
 /// `resolve_recursion_delay_ref` and reuses the group's existing recursion
-/// carrier instead of allocating a separate delay-state slot. For size-2
+/// carrier instead of allocating a separate delay-state slot. For scalar
+/// carriers this reads the previous-sample struct field directly. For size-2
 /// carriers, this preserves the direct two-slot fast path; for larger carriers,
 /// reads use the preplanned circular recursion array sized from accumulated
 /// delay analysis.
@@ -1534,7 +1536,7 @@ impl<'a> SignalToFirLower<'a> {
         node: SigId,
         value: SigId,
         amount: SigId,
-        _delay: i32,
+        delay: i32,
     ) -> Result<FirId, SignalFirError> {
         // ── Merged recursion delay ──
         //
@@ -1542,30 +1544,59 @@ impl<'a> SignalToFirLower<'a> {
         // already sized the recursion array to hold the full delay chain.
         // Read directly from the recursion array at offset `amount + k`,
         // eliminating the separate fVec buffer and per-sample copy.
-        if let Some(rec_delay_ref) = self.resolve_recursion_delay_ref(value)?
-            && rec_delay_ref.carrier.strategy == RecursionStorageStrategy::Circular
-        {
-            // The recursion array was upsized — the merge is active.
-            // Use the runtime amount expression (which may be variable,
-            // e.g. slider-driven), not the constant sizing bound.
-            // Total offset = explicit amount + the carried implicit delay chain.
-            let amount_value = self.lower_signal(amount)?;
-            let carried_delay = self
-                .lower_int32_const(i32::try_from(rec_delay_ref.implicit_delay).unwrap_or(i32::MAX));
-            let total_offset = {
-                let mut b = FirBuilder::new(&mut self.store);
-                b.binop(FirBinOp::Add, amount_value, carried_delay, FirType::Int32)
-            };
-            let read_index =
-                self.global_circular_delayed_index(total_offset, rec_delay_ref.carrier.info.size);
-            let read_ty = self.signal_fir_type(node)?;
-            let mut b = FirBuilder::new(&mut self.store);
-            return Ok(b.load_table(
-                rec_delay_ref.carrier.info.name,
-                AccessType::Struct,
-                read_index,
-                read_ty,
-            ));
+        if let Some(rec_delay_ref) = self.resolve_recursion_delay_ref(value)? {
+            let total_delay =
+                usize::try_from(delay).unwrap_or(usize::MAX) + rec_delay_ref.implicit_delay;
+            match rec_delay_ref.carrier.strategy {
+                RecursionStorageStrategy::Circular => {
+                    // The recursion array was upsized — the merge is active.
+                    // Use the runtime amount expression (which may be variable,
+                    // e.g. slider-driven), not the constant sizing bound.
+                    // Total offset = explicit amount + the carried implicit delay chain.
+                    let amount_value = self.lower_signal(amount)?;
+                    let carried_delay = self.lower_int32_const(
+                        i32::try_from(rec_delay_ref.implicit_delay).unwrap_or(i32::MAX),
+                    );
+                    let total_offset = {
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.binop(FirBinOp::Add, amount_value, carried_delay, FirType::Int32)
+                    };
+                    let read_index = self.global_circular_delayed_index(
+                        total_offset,
+                        rec_delay_ref.carrier.info.size,
+                    );
+                    let read_ty = self.signal_fir_type(node)?;
+                    let mut b = FirBuilder::new(&mut self.store);
+                    return Ok(b.load_table(
+                        rec_delay_ref.carrier.info.name,
+                        AccessType::Struct,
+                        read_index,
+                        read_ty,
+                    ));
+                }
+                RecursionStorageStrategy::SingleScalar if total_delay == 1 => {
+                    let read_ty = self.signal_fir_type(node)?;
+                    let mut b = FirBuilder::new(&mut self.store);
+                    return Ok(b.load_var(
+                        rec_delay_ref.carrier.info.name,
+                        AccessType::Struct,
+                        read_ty,
+                    ));
+                }
+                RecursionStorageStrategy::TwoSlotShift if total_delay == 1 => {
+                    let read_ty = self.signal_fir_type(node)?;
+                    let prev_index = self.lower_int32_const(1);
+                    let mut b = FirBuilder::new(&mut self.store);
+                    return Ok(b.load_table(
+                        rec_delay_ref.carrier.info.name,
+                        AccessType::Struct,
+                        prev_index,
+                        read_ty,
+                    ));
+                }
+                RecursionStorageStrategy::SingleScalar | RecursionStorageStrategy::TwoSlotShift => {
+                }
+            }
         }
 
         let line = self.delay_line_info(value)?;
@@ -1617,25 +1648,54 @@ impl<'a> SignalToFirLower<'a> {
                 "prepared recursion feedback type should match delay1 output type"
             );
             let total_offset = rec_delay_ref.implicit_delay.saturating_add(1);
-            let prev_index = if rec_delay_ref.carrier.strategy
-                == RecursionStorageStrategy::TwoSlotShift
-                && total_offset == 1
-            {
-                self.lower_int32_const(1)
-            } else {
-                // Merged recursion-delay buffers larger than 2 still use the
-                // circular-buffer path indexed by fIOTA.
-                let total_offset =
-                    self.lower_int32_const(i32::try_from(total_offset).unwrap_or(i32::MAX));
-                self.global_circular_delayed_index(total_offset, rec_delay_ref.carrier.info.size)
-            };
-            let mut b = FirBuilder::new(&mut self.store);
-            return Ok(b.load_table(
-                rec_delay_ref.carrier.info.name,
-                AccessType::Struct,
-                prev_index,
-                rec_delay_ref.carrier.info.typ.clone(),
-            ));
+            match rec_delay_ref.carrier.strategy {
+                RecursionStorageStrategy::SingleScalar => {
+                    debug_assert_eq!(
+                        total_offset, 1,
+                        "scalar recursion carriers must not serve delays beyond one sample"
+                    );
+                    let mut b = FirBuilder::new(&mut self.store);
+                    return Ok(b.load_var(
+                        rec_delay_ref.carrier.info.name,
+                        AccessType::Struct,
+                        rec_delay_ref.carrier.info.typ.clone(),
+                    ));
+                }
+                RecursionStorageStrategy::TwoSlotShift => {
+                    let prev_index = if total_offset == 1 {
+                        self.lower_int32_const(1)
+                    } else {
+                        let total_offset =
+                            self.lower_int32_const(i32::try_from(total_offset).unwrap_or(i32::MAX));
+                        self.global_circular_delayed_index(
+                            total_offset,
+                            rec_delay_ref.carrier.info.size,
+                        )
+                    };
+                    let mut b = FirBuilder::new(&mut self.store);
+                    return Ok(b.load_table(
+                        rec_delay_ref.carrier.info.name,
+                        AccessType::Struct,
+                        prev_index,
+                        rec_delay_ref.carrier.info.typ.clone(),
+                    ));
+                }
+                RecursionStorageStrategy::Circular => {
+                    let total_offset =
+                        self.lower_int32_const(i32::try_from(total_offset).unwrap_or(i32::MAX));
+                    let prev_index = self.global_circular_delayed_index(
+                        total_offset,
+                        rec_delay_ref.carrier.info.size,
+                    );
+                    let mut b = FirBuilder::new(&mut self.store);
+                    return Ok(b.load_table(
+                        rec_delay_ref.carrier.info.name,
+                        AccessType::Struct,
+                        prev_index,
+                        rec_delay_ref.carrier.info.typ.clone(),
+                    ));
+                }
+            }
         }
         let state_ty = self.signal_fir_type(value)?;
         let name = self.ensure_state_slot(node, state_ty.clone(), init);
@@ -1768,6 +1828,64 @@ impl<'a> SignalToFirLower<'a> {
         let _ = self.lower_proj(proj_node, index, group)?;
         self.recursion
             .resolve_carrier(self.arena, group, index_usize)
+    }
+
+    /// Declares a stack-local current-sample binding for one scalar recursion
+    /// carrier and records it under the canonical `(group, index)` key.
+    fn bind_scalar_recursion_current_value(
+        &mut self,
+        group: SigId,
+        index: usize,
+        info: &RecArrayInfo,
+        value: FirId,
+    ) -> String {
+        let prefix = if info.typ == FirType::Int32 {
+            "iRecCur"
+        } else {
+            "fRecCur"
+        };
+        let name = if index == 0 {
+            format!("{prefix}{}", group.as_u32())
+        } else {
+            format!("{prefix}{}_{}", group.as_u32(), index)
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        self.sample_phases.immediate.push(b.declare_var(
+            name.clone(),
+            info.typ.clone(),
+            AccessType::Stack,
+            Some(value),
+        ));
+        self.recursion.set_current_value_binding(
+            group,
+            index,
+            RecursionCurrentValueBinding {
+                name: name.clone(),
+                typ: info.typ.clone(),
+            },
+        );
+        name
+    }
+
+    /// Loads the current-sample value of a scalar recursion carrier through its
+    /// stack-local binding.
+    fn load_scalar_recursion_current_value(
+        &mut self,
+        group: SigId,
+        index: usize,
+    ) -> Result<Option<FirId>, SignalFirError> {
+        let Some(binding) = self
+            .recursion
+            .current_value_binding(self.arena, group, index)
+        else {
+            return Ok(None);
+        };
+        let mut b = FirBuilder::new(&mut self.store);
+        Ok(Some(b.load_var(
+            binding.name,
+            AccessType::Stack,
+            binding.typ.clone(),
+        )))
     }
 
     /// Ensures a 2-element circular buffer state slot exists for `node`,
@@ -3156,9 +3274,34 @@ impl<'a> SignalToFirLower<'a> {
             )
         })?;
         // ── Fast path: active reference inside a body being lowered ──
-        if let Some(rec_ref) = self
-            .recursion
-            .resolve_carrier(self.arena, group, index_usize)?
+        if let Some(rec_ref) =
+            resolve_active_recursion_carrier(self.arena, &self.recursion, group, index_usize)?
+        {
+            let real_ty = self.signal_fir_type(node)?;
+            let current_index = if rec_ref.strategy == RecursionStorageStrategy::TwoSlotShift {
+                self.lower_int32_const(0)
+            } else if rec_ref.strategy == RecursionStorageStrategy::Circular {
+                self.global_circular_current_index(rec_ref.info.size)
+            } else {
+                self.lower_int32_const(0)
+            };
+            let mut recursion_ctx = RecursionLoweringCtx {
+                store: &mut self.store,
+                immediate_statements: &mut self.sample_phases.immediate,
+                post_output_statements: &mut self.sample_phases.post_output,
+            };
+            return Ok(recursion_ctx.load_feedback_carrier(&rec_ref.info, current_index, real_ty));
+        }
+
+        // ── Fast path: already materialized scalar carrier current value ──
+        if let Some(current_value) = self.load_scalar_recursion_current_value(group, index_usize)? {
+            return Ok(current_value);
+        }
+
+        // ── Fast path: already materialized array-backed carrier ──
+        if let Some(rec_ref) =
+            self.recursion
+                .resolve_materialized_carrier(self.arena, group, index_usize)
         {
             let real_ty = self.signal_fir_type(node)?;
             let current_index = if rec_ref.strategy == RecursionStorageStrategy::TwoSlotShift {
@@ -3171,7 +3314,7 @@ impl<'a> SignalToFirLower<'a> {
                 immediate_statements: &mut self.sample_phases.immediate,
                 post_output_statements: &mut self.sample_phases.post_output,
             };
-            return Ok(recursion_ctx.load_current_carrier(&rec_ref.info, current_index, real_ty));
+            return Ok(recursion_ctx.load_feedback_carrier(&rec_ref.info, current_index, real_ty));
         }
 
         // ── Decode all body signals from the group ──
@@ -3226,12 +3369,20 @@ impl<'a> SignalToFirLower<'a> {
                 let mut current_indexes = Vec::with_capacity(active_arrays.len());
                 for (i, body) in bodies.iter().enumerate() {
                     body_values.push(this.lower_signal(*body)?);
-                    let current_index = if active_arrays[i].storage_strategy()
-                        == RecursionStorageStrategy::TwoSlotShift
-                    {
-                        zero
-                    } else {
-                        this.global_circular_current_index(active_arrays[i].size)
+                    let current_index = match active_arrays[i].storage_strategy() {
+                        RecursionStorageStrategy::SingleScalar => {
+                            this.bind_scalar_recursion_current_value(
+                                group,
+                                i,
+                                &active_arrays[i],
+                                body_values[i],
+                            );
+                            zero
+                        }
+                        RecursionStorageStrategy::TwoSlotShift => zero,
+                        RecursionStorageStrategy::Circular => {
+                            this.global_circular_current_index(active_arrays[i].size)
+                        }
                     };
                     current_indexes.push(current_index);
                 }
@@ -3247,6 +3398,23 @@ impl<'a> SignalToFirLower<'a> {
                     zero,
                     one,
                 );
+                for (i, info) in active_arrays.iter().enumerate() {
+                    if info.storage_strategy() == RecursionStorageStrategy::SingleScalar {
+                        let binding = this
+                            .recursion
+                            .current_value_binding(this.arena, group, i)
+                            .expect("scalar recursion binding should be recorded before finalize");
+                        let current_value = {
+                            let mut b = FirBuilder::new(&mut this.store);
+                            b.load_var(binding.name, AccessType::Stack, binding.typ.clone())
+                        };
+                        let store_state = {
+                            let mut b = FirBuilder::new(&mut this.store);
+                            b.store_var(info.name.clone(), AccessType::Struct, current_value)
+                        };
+                        this.sample_phases.post_output.push(store_state);
+                    }
+                }
                 Ok(())
             })?;
         }
@@ -3254,6 +3422,17 @@ impl<'a> SignalToFirLower<'a> {
         // ── Return the result for the requested index ──
         let info = &group_arrays[canonical_index];
         let out_ty = self.signal_fir_type(node)?;
+        if info.storage_strategy() == RecursionStorageStrategy::SingleScalar {
+            let current_value = self
+                .load_scalar_recursion_current_value(group, canonical_index)?
+                .expect("scalar recursion current value should be available after scheduling");
+            debug_assert_eq!(
+                info.typ, out_ty,
+                "SIGPROJ type mismatch: carrier={:?}, node={:?}",
+                info.typ, out_ty
+            );
+            return Ok(current_value);
+        }
         let zero = self.lower_int32_const(0);
         let circular_index = if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
             zero
@@ -3266,7 +3445,7 @@ impl<'a> SignalToFirLower<'a> {
             post_output_statements: &mut self.sample_phases.post_output,
         };
         let current_index = recursion_ctx.current_index_for_carrier(info, zero, circular_index);
-        let out = recursion_ctx.load_current_carrier(info, current_index, info.typ.clone());
+        let out = recursion_ctx.load_feedback_carrier(info, current_index, info.typ.clone());
         debug_assert_eq!(
             info.typ, out_ty,
             "SIGPROJ type mismatch: array={:?}, node={:?}",
