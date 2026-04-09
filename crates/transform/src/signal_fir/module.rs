@@ -16,11 +16,11 @@
 //!
 //! Section placement policy (Step 3B):
 //! - `instanceConstants`: table initialization and compile-time constants
-//!   (`fConst*` variables — [`Variability::Konst`](sigtype::Variability::Konst)).
+//!   (`iConst*` / `fConst*` variables — [`Variability::Konst`](sigtype::Variability::Konst)).
 //! - `instanceResetUserInterface`: UI zone reset values.
 //! - `instanceClear`: runtime signal state reset values (delay/rec state).
 //! - `compute` preamble (before sample loop): block-rate control expressions
-//!   (`fSlow*` variables — [`Variability::Block`](sigtype::Variability::Block)).
+//!   (`iSlow*` / `fSlow*` variables — [`Variability::Block`](sigtype::Variability::Block)).
 //! - `compute` sample loop: sample-rate expressions (inline, no hoisting).
 //!
 //! Integer policy:
@@ -230,7 +230,8 @@ pub fn build_module(
         max_copy_delay,
         delay_line_threshold,
     };
-    let (sig_ref_counts, sig_at_boundary) = analyze_signal_sharing(arena, signals, sig_types);
+    let (sig_ref_counts, sig_at_boundary, konst_escapes) =
+        analyze_signal_sharing(arena, signals, sig_types);
     let mut lower = SignalToFirLower::new(
         arena,
         ui,
@@ -240,6 +241,7 @@ pub fn build_module(
         real_ty,
         sig_ref_counts,
         sig_at_boundary,
+        konst_escapes,
         delay_opts,
     );
     lower.ensure_sample_rate_var();
@@ -324,7 +326,9 @@ pub fn build_module(
             &mut lower.constants_statements,
             &rc,
             "fConst",
-            lower.const_counter,
+            lower.fconst_counter,
+            "iConst",
+            lower.iconst_counter,
         );
 
         let rc = cse::count_fir_value_uses(&lower.store, &lower.control_statements);
@@ -333,7 +337,9 @@ pub fn build_module(
             &mut lower.control_statements,
             &rc,
             "fSlow",
-            lower.slow_counter,
+            lower.fslow_counter,
+            "iSlow",
+            lower.islow_counter,
         );
 
         let rc = cse::count_fir_value_uses(&lower.store, &sample_loop_statements);
@@ -342,6 +348,8 @@ pub fn build_module(
             &mut sample_loop_statements,
             &rc,
             "fTemp",
+            0,
+            "iTemp",
             0,
         );
     }
@@ -750,16 +758,14 @@ struct SignalToFirLower<'a> {
     used_foreign_vars: BTreeMap<String, FirType>,
     /// Monotonic counter for generating unique loop-variable names.
     next_loop_var_id: usize,
-    /// Monotonic counter for `fConst*` init-time constant variable names.
-    ///
-    /// Incremented each time [`materialize_in_bucket`] hoists a
-    /// [`Variability::Konst`] expression into [`Self::constants_statements`].
-    const_counter: u32,
-    /// Monotonic counter for `fSlow*` block-rate variable names.
-    ///
-    /// Incremented each time [`materialize_in_bucket`] hoists a
-    /// [`Variability::Block`] expression into [`Self::control_statements`].
-    slow_counter: u32,
+    /// Monotonic counter for `fConst*` init-time float constant variable names.
+    fconst_counter: u32,
+    /// Monotonic counter for `iConst*` init-time integer constant variable names.
+    iconst_counter: u32,
+    /// Monotonic counter for `fSlow*` block-rate float variable names.
+    fslow_counter: u32,
+    /// Monotonic counter for `iSlow*` block-rate integer variable names.
+    islow_counter: u32,
     /// Signal-level reference counts: how many parent nodes reference each `SigId`.
     ///
     /// Used by Phase 1 variability-driven placement to gate materialization:
@@ -770,6 +776,11 @@ struct SignalToFirLower<'a> {
     /// strictly higher variability).  These must be materialized even if
     /// single-use, to ensure they execute in the correct bucket.
     sig_at_boundary: HashSet<SigId>,
+    /// `Konst` signal nodes whose value is consumed outside `instanceConstants`.
+    ///
+    /// These hoists need persistent `Struct` storage; init-only `Konst` hoists
+    /// can stay stack-local inside `instanceConstants()`.
+    konst_escapes: HashSet<SigId>,
 }
 
 /// One extern prototype recovered from a Faust `FFUN(...)` descriptor.
@@ -810,6 +821,7 @@ impl<'a> SignalToFirLower<'a> {
         real_ty: FirType,
         sig_ref_counts: HashMap<SigId, usize>,
         sig_at_boundary: HashSet<SigId>,
+        konst_escapes: HashSet<SigId>,
         delay_opts: DelayOptions,
     ) -> Self {
         Self {
@@ -849,10 +861,13 @@ impl<'a> SignalToFirLower<'a> {
             used_foreign_fun_protos: BTreeMap::new(),
             used_foreign_vars: BTreeMap::new(),
             next_loop_var_id: 0,
-            const_counter: 0,
-            slow_counter: 0,
+            fconst_counter: 0,
+            iconst_counter: 0,
+            fslow_counter: 0,
+            islow_counter: 0,
             sig_ref_counts,
             sig_at_boundary,
+            konst_escapes,
         }
     }
 
@@ -920,6 +935,50 @@ impl<'a> SignalToFirLower<'a> {
         self.sig_types.get(&sig).map(|t| t.variability())
     }
 
+    /// Returns `true` when a hoisted `Konst` value must remain persistent
+    /// beyond `instanceConstants()`.
+    fn konst_escapes(&self, sig: SigId) -> bool {
+        self.konst_escapes.contains(&sig)
+    }
+
+    /// Returns the typed prefix used for one materialized scalar value.
+    fn typed_prefix_for(bucket: Bucket, typ: &FirType) -> &'static str {
+        let is_int_like = matches!(typ, FirType::Int32 | FirType::Int64 | FirType::Bool);
+        match (bucket, is_int_like) {
+            (Bucket::Constants, true) => "iConst",
+            (Bucket::Constants, false) => "fConst",
+            (Bucket::Control, true) => "iSlow",
+            (Bucket::Control, false) => "fSlow",
+        }
+    }
+
+    /// Returns the next numeric suffix for one typed materialization prefix.
+    fn next_materialized_counter(&mut self, prefix: &str) -> u32 {
+        match prefix {
+            "fConst" => {
+                let n = self.fconst_counter;
+                self.fconst_counter += 1;
+                n
+            }
+            "iConst" => {
+                let n = self.iconst_counter;
+                self.iconst_counter += 1;
+                n
+            }
+            "fSlow" => {
+                let n = self.fslow_counter;
+                self.fslow_counter += 1;
+                n
+            }
+            "iSlow" => {
+                let n = self.islow_counter;
+                self.islow_counter += 1;
+                n
+            }
+            other => panic!("unsupported materialized prefix `{other}`"),
+        }
+    }
+
     /// Returns `true` when the signal is a direct `Proj(i, SYMREC)` read.
     ///
     /// The type system (after the `update_rec_types` variability-join fix)
@@ -943,49 +1002,52 @@ impl<'a> SignalToFirLower<'a> {
     ///
     /// | Bucket | Prefix | Access | Lifecycle section |
     /// |--------|--------|--------|-------------------|
-    /// | `Constants` | `fConst` | [`AccessType::Struct`] | `instanceConstants` |
-    /// | `Control` | `fSlow` | [`AccessType::Stack`] | `compute` preamble |
+    /// | `Constants` | `iConst` / `fConst` | [`AccessType::Stack`] for init-local, [`AccessType::Struct`] for escaping values | `instanceConstants` |
+    /// | `Control` | `iSlow` / `fSlow` | [`AccessType::Stack`] | `compute` preamble |
     ///
-    /// `fConst` variables use struct storage because they are written in
-    /// `instanceConstants()` and read in `compute()`.  `fSlow` variables
-    /// use stack storage because they live within the `compute()` body.
-    fn materialize_in_bucket(&mut self, value: FirId, bucket: Bucket) -> FirId {
-        let (name, access) = match bucket {
-            Bucket::Constants => {
-                let n = self.const_counter;
-                self.const_counter += 1;
-                (format!("fConst{n}"), AccessType::Struct)
-            }
-            Bucket::Control => {
-                let n = self.slow_counter;
-                self.slow_counter += 1;
-                (format!("fSlow{n}"), AccessType::Stack)
-            }
-        };
-
+    /// `Konst` variables that feed `compute()` use struct storage because they
+    /// are written in `instanceConstants()` and read later; init-only `Konst`
+    /// temporaries and all `Block` variables stay stack-local.
+    fn materialize_in_bucket(&mut self, sig: SigId, value: FirId, bucket: Bucket) -> FirId {
         let typ = self
             .store
             .value_type(value)
             .unwrap_or_else(|| self.real_ty());
+        let prefix = Self::typed_prefix_for(bucket, &typ);
+        let n = self.next_materialized_counter(prefix);
+        let access = match bucket {
+            Bucket::Constants if self.konst_escapes(sig) => AccessType::Struct,
+            Bucket::Constants | Bucket::Control => AccessType::Stack,
+        };
+        let name = format!("{prefix}{n}");
 
         match bucket {
-            Bucket::Constants => {
-                // Struct-backed: declare the field, then assign in instanceConstants.
+            Bucket::Constants if access == AccessType::Struct => {
                 self.ensure_named_struct_var(&name, typ.clone(), None);
                 let mut b = FirBuilder::new(&mut self.store);
-                let store_stmt = b.store_var(&name, access, value);
-                self.constants_statements.push(store_stmt);
+                self.constants_statements
+                    .push(b.store_var(&name, AccessType::Struct, value));
+            }
+            Bucket::Constants => {
+                let mut b = FirBuilder::new(&mut self.store);
+                self.constants_statements.push(b.declare_var(
+                    &name,
+                    typ.clone(),
+                    AccessType::Stack,
+                    Some(value),
+                ));
             }
             Bucket::Control => {
-                // Stack-backed: use DeclareVar(Stack, init) so that backends
-                // (WASM, Cranelift) discover the local during their pre-scan.
                 let mut b = FirBuilder::new(&mut self.store);
-                let decl = b.declare_var(&name, typ.clone(), access, Some(value));
-                self.control_statements.push(decl);
+                self.control_statements.push(b.declare_var(
+                    &name,
+                    typ.clone(),
+                    AccessType::Stack,
+                    Some(value),
+                ));
             }
         }
 
-        // Return a load reference that callers embed in downstream expressions.
         let mut b = FirBuilder::new(&mut self.store);
         b.load_var(name, access, typ)
     }
@@ -1169,7 +1231,8 @@ impl<'a> SignalToFirLower<'a> {
         //
         // To avoid creating unnecessary temporaries for intermediate
         // sub-expressions, only nodes referenced ≥ 2 times in the signal
-        // DAG are materialized into named variables (`fConst*`/`fSlow*`).
+        // DAG are materialized into named variables (`iConst*`/`fConst*`,
+        // `iSlow*`/`fSlow*`).
         // Single-use nodes at the same variability tier stay inline inside
         // their parent's expression.  This matches C++ Faust behavior
         // where compound expressions like `fConst6 * cos(fConst7 * fSlow2)`
@@ -1202,8 +1265,12 @@ impl<'a> SignalToFirLower<'a> {
             && (sig_shared || at_boundary)
         {
             match self.variability_of(sig) {
-                Some(Variability::Konst) => self.materialize_in_bucket(lowered, Bucket::Constants),
-                Some(Variability::Block) => self.materialize_in_bucket(lowered, Bucket::Control),
+                Some(Variability::Konst) => {
+                    self.materialize_in_bucket(sig, lowered, Bucket::Constants)
+                }
+                Some(Variability::Block) => {
+                    self.materialize_in_bucket(sig, lowered, Bucket::Control)
+                }
                 _ => lowered,
             }
         } else {

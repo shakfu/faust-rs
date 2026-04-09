@@ -7,6 +7,11 @@ expressions in the correct execution tier based on their rate of change,
 (2) avoiding unnecessary persistent storage for init-only hoists, and
 (3) eliminating redundant computations within each tier.
 
+**Status**: Implemented for the active fast-lane on 2026-04-09:
+- `Konst` escape analysis now keeps init-only hoists stack-local.
+- typed `iConst/fConst`, `iSlow/fSlow`, and `iTemp/fTemp` prefixes are used by
+  Phase 1 placement and Phase 2 FIR CSE.
+
 ---
 
 ## 1. Current Architecture Analysis

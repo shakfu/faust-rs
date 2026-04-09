@@ -21,7 +21,7 @@
 //! # What this module provides
 //!
 //! [`analyze_signal_sharing`] performs a single DFS pre-pass over the signal
-//! DAG before any lowering takes place.  It produces two maps that the lowering
+//! DAG before any lowering takes place.  It produces three maps that the lowering
 //! engine ([`super::module::SignalToFirLower`]) stores and consults during
 //! [`lower_sig`](super::module) dispatch:
 //!
@@ -33,6 +33,9 @@
 //!   at least one parent has strictly higher variability.  Even a single-use
 //!   node at a boundary must be materialized, otherwise it would be inlined into
 //!   its parent's (faster) execution tier and re-evaluated too frequently.
+//! - **`konst_escapes`**: `Konst` nodes that feed a faster-tier parent
+//!   (`Block`/`Samp`).  These cannot remain stack-local to `instanceConstants()`
+//!   because their value is consumed later from `compute()`.
 //!
 //! [`Bucket`] is the runtime tag that identifies which section a hoisted
 //! variable belongs to.
@@ -55,7 +58,7 @@
 //!    && (sig_shared || at_boundary)          // ref_counts / has_higher_parent
 //! {
 //!     match variability_of(sig) {            // impl on SignalToFirLower
-//!         Konst => materialize_in_bucket(Constants)
+//!         Konst => materialize_in_bucket(Constants, konst_escapes.contains(sig))
 //!         Block => materialize_in_bucket(Control)
 //!         _     => inline
 //!     }
@@ -71,6 +74,13 @@ use fir::{FirId, FirMatch, FirStore, match_fir};
 use signals::SigId;
 use sigtype::{SigType, Variability};
 use tlib::TreeArena;
+
+struct PlacementAnalysis {
+    ref_counts: HashMap<SigId, usize>,
+    has_higher_parent: HashSet<SigId>,
+    konst_escapes: HashSet<SigId>,
+    visited: HashSet<SigId>,
+}
 
 // ─── Bucket ──────────────────────────────────────────────────────────────────
 
@@ -116,7 +126,7 @@ pub(super) fn is_trivial_fir(store: &FirStore, node: FirId) -> bool {
 /// Pre-analysis of the signal DAG for Phase 1 placement decisions.
 ///
 /// Performs a single depth-first traversal of the signal DAG rooted at
-/// `roots` and returns two maps:
+/// `roots` and returns three maps:
 ///
 /// - **`ref_counts`**: how many times each [`SigId`] appears as a child across
 ///   the entire DAG.  Nodes with `ref_count >= 2` are *shared*: materializing
@@ -126,6 +136,9 @@ pub(super) fn is_trivial_fir(store: &FirStore, node: FirId) -> bool {
 ///   parent whose variability is strictly higher (faster).  These nodes sit at
 ///   a *variability boundary* and must be materialized even if they are
 ///   single-use, to guarantee they execute in their own (slower) bucket.
+/// - **`konst_escapes`**: the set of [`SigId`]s whose own variability is
+///   [`Variability::Konst`] but that are consumed by a faster-tier parent.
+///   These hoists need persistent storage instead of an init-local stack slot.
 ///
 /// All roots are assumed to be consumed by the `compute` output store, which
 /// runs at sample rate ([`Variability::Samp`]).
@@ -133,24 +146,23 @@ pub(super) fn analyze_signal_sharing(
     arena: &TreeArena,
     roots: &[SigId],
     sig_types: &HashMap<SigId, SigType>,
-) -> (HashMap<SigId, usize>, HashSet<SigId>) {
-    let mut ref_counts: HashMap<SigId, usize> = HashMap::new();
-    let mut has_higher_parent: HashSet<SigId> = HashSet::new();
-    let mut visited: HashSet<SigId> = HashSet::new();
+) -> (HashMap<SigId, usize>, HashSet<SigId>, HashSet<SigId>) {
+    let mut analysis = PlacementAnalysis {
+        ref_counts: HashMap::new(),
+        has_higher_parent: HashSet::new(),
+        konst_escapes: HashSet::new(),
+        visited: HashSet::new(),
+    };
     // Roots are consumed by the output store (Samp context).
     let root_var = Some(Variability::Samp);
     for &root in roots {
-        analyze_sig_rec(
-            arena,
-            root,
-            root_var,
-            sig_types,
-            &mut ref_counts,
-            &mut has_higher_parent,
-            &mut visited,
-        );
+        analyze_sig_rec(arena, root, root_var, sig_types, &mut analysis);
     }
-    (ref_counts, has_higher_parent)
+    (
+        analysis.ref_counts,
+        analysis.has_higher_parent,
+        analysis.konst_escapes,
+    )
 }
 
 /// Recursive DFS helper for [`analyze_signal_sharing`].
@@ -162,40 +174,35 @@ pub(super) fn analyze_signal_sharing(
 ///
 /// `parent_var` is the variability of the calling node (`None` at the root).
 /// If `parent_var > my_var` the node is added to `has_higher_parent`,
-/// flagging it as sitting at a variability boundary.
+/// flagging it as sitting at a variability boundary.  When `my_var` is
+/// [`Variability::Konst`], the same condition means the node escapes the
+/// constants bucket and therefore needs persistent storage if hoisted.
 fn analyze_sig_rec(
     arena: &TreeArena,
     sig: SigId,
     parent_var: Option<Variability>,
     sig_types: &HashMap<SigId, SigType>,
-    ref_counts: &mut HashMap<SigId, usize>,
-    has_higher_parent: &mut HashSet<SigId>,
-    visited: &mut HashSet<SigId>,
+    analysis: &mut PlacementAnalysis,
 ) {
-    *ref_counts.entry(sig).or_insert(0) += 1;
+    *analysis.ref_counts.entry(sig).or_insert(0) += 1;
 
     // Check variability boundary: parent variability > this node's variability.
     let my_var = sig_types.get(&sig).map(|t| t.variability());
     if let (Some(pv), Some(mv)) = (parent_var, my_var)
         && pv > mv
     {
-        has_higher_parent.insert(sig);
+        analysis.has_higher_parent.insert(sig);
+        if mv == Variability::Konst {
+            analysis.konst_escapes.insert(sig);
+        }
     }
 
-    if !visited.insert(sig) {
+    if !analysis.visited.insert(sig) {
         return; // already descended into children
     }
     if let Some(node) = arena.node(sig) {
         for &child_tid in node.children.as_slice() {
-            analyze_sig_rec(
-                arena,
-                child_tid,
-                my_var,
-                sig_types,
-                ref_counts,
-                has_higher_parent,
-                visited,
-            );
+            analyze_sig_rec(arena, child_tid, my_var, sig_types, analysis);
         }
     }
 }

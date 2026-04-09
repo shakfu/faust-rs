@@ -2894,7 +2894,7 @@ fn slider_cast_hoisted_to_control_as_fslow() {
 }
 
 #[test]
-fn sample_rate_const_hoisted_to_instance_constants_as_fconst() {
+fn sample_rate_const_hoisted_to_instance_constants_as_fconst_struct() {
     // Faust: process = 2.0 * float(SR);
     // The `FloatCast(fSamplingFreq)` sub-expression should be hoisted to
     // instanceConstants as a fConst*.
@@ -2984,6 +2984,94 @@ fn recursive_feedback_stays_in_sample_loop() {
 }
 
 #[test]
+fn shared_konst_subexpr_stays_stack_local_inside_instance_constants() {
+    // Faust-like shape: let s = 2.0 * float(SR); process = s + sin(s);
+    // The shared `s` subtree is Konst and referenced twice, but only within
+    // `instanceConstants()`, so it should materialize as a stack-local fConst*.
+    let mut arena = TreeArena::new();
+    let sig0 = {
+        let ty = arena.int(0);
+        let name = arena.symbol("fSamplingFreq");
+        let file = arena.symbol("<math.h>");
+        let mut b = SigBuilder::new(&mut arena);
+        let sr = b.fconst(ty, name, file);
+        let s = {
+            let sr_float = b.float_cast(sr);
+            let two = b.real(2.0);
+            b.binop(BinOp::Mul, two, sr_float)
+        };
+        let sin_s = b.sin(s);
+        b.binop(BinOp::Add, s, sin_s)
+    };
+    let out = compile_fastlane_without_ui(&arena, &[sig0], 0, 1, &SignalFirOptions::default())
+        .expect("shared Konst subtree should compile");
+
+    let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+        panic!("module root expected");
+    };
+    let ic_stmts = find_instance_constants_stmts(&out.store, functions);
+
+    assert!(
+        ic_stmts.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar {
+                ref name,
+                access: AccessType::Stack,
+                ..
+            } if name.starts_with("fConst")
+        )),
+        "shared Konst subtree used only during init should hoist to a stack-local fConst*"
+    );
+    assert!(
+        ic_stmts.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::StoreVar {
+                ref name,
+                access: AccessType::Struct,
+                ..
+            } if name.starts_with("fConst")
+        )),
+        "the escaping outer Konst result should still materialize as a persistent fConst*"
+    );
+}
+
+#[test]
+fn integer_konst_uses_iconst_prefix() {
+    // Faust-like shape: process = SR + 1;
+    // The root integer Konst expression escapes to compute via the output path,
+    // so it should materialize as an iConst* struct field.
+    let mut arena = TreeArena::new();
+    let sig0 = {
+        let ty = arena.int(0);
+        let name = arena.symbol("fSamplingFreq");
+        let file = arena.symbol("<math.h>");
+        let mut b = SigBuilder::new(&mut arena);
+        let sr = b.fconst(ty, name, file);
+        let one = b.int(1);
+        b.binop(BinOp::Add, sr, one)
+    };
+    let out = compile_fastlane_without_ui(&arena, &[sig0], 0, 1, &SignalFirOptions::default())
+        .expect("integer Konst expression should compile");
+
+    let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+        panic!("module root expected");
+    };
+    let ic_stmts = find_instance_constants_stmts(&out.store, functions);
+
+    assert!(
+        ic_stmts.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::StoreVar {
+                ref name,
+                access: AccessType::Struct,
+                ..
+            } if name.starts_with("iConst")
+        )),
+        "escaping integer Konst expression should hoist as an iConst* struct field"
+    );
+}
+
+#[test]
 fn trivial_constant_not_hoisted() {
     // Bare literal constants (e.g. `process = 0.5;`) are trivial and
     // should NOT be materialized into fConst* variables.
@@ -3012,6 +3100,59 @@ fn trivial_constant_not_hoisted() {
     assert!(
         !has_fconst,
         "trivial literal constant should NOT be hoisted to a fConst* variable"
+    );
+}
+
+#[test]
+fn integer_block_subexpr_uses_islow_prefix() {
+    // Faust-like shape: process = int(slider) + 1;
+    // The root integer block-rate expression sits at the Block->Samp boundary,
+    // so it should hoist as iSlow*.
+    let mut arena = TreeArena::new();
+    let ui = one_control_ui(
+        ControlKind::HSlider,
+        "gain",
+        Some(ControlRange {
+            init: 0.5,
+            min: 0.0,
+            max: 1.0,
+            step: 0.01,
+        }),
+        false,
+        false,
+    );
+    let sig0 = {
+        let mut b = SigBuilder::new(&mut arena);
+        let slider = b.hslider(0);
+        let int_slider = b.int_cast(slider);
+        let one = b.int(1);
+        b.binop(BinOp::Add, int_slider, one)
+    };
+    let out = compile_signals_to_fir_fastlane_with_ui(
+        &arena,
+        &[sig0],
+        1,
+        1,
+        &ui,
+        &SignalFirOptions::default(),
+    )
+    .expect("integer block-rate subtree should compile");
+
+    let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+        panic!("module root expected");
+    };
+    let compute_stmts = find_compute_body_stmts(&out.store, functions);
+
+    assert!(
+        compute_stmts.iter().any(|id| matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar {
+                ref name,
+                access: AccessType::Stack,
+                ..
+            } if name.starts_with("iSlow")
+        )),
+        "shared integer block-rate subtree should hoist to an iSlow* local"
     );
 }
 
