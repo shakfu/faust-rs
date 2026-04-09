@@ -11,6 +11,8 @@ This document centralizes technical/developer-oriented usage that was previously
 - `porting/faust-rust-bilan-global-en.md`: overall status summary
 - `porting/faust-rust-error-flow-en.md`: concise parser -> eval -> propagate error flow
 - `porting/phases/`: detailed phase-by-phase execution notes (`phase-0` to `phase-9`)
+- `docs/signal-to-fir-recent-progress-en.md`: compact summary of recent
+  Signal -> FIR fast-lane work (placement, CSE, delays, recursion extraction)
 
 ## 2. Suggested reading order
 
