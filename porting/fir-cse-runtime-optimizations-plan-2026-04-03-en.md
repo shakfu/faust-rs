@@ -1,10 +1,11 @@
-# FIR Runtime Optimization Plan: Variability Placement & CSE
+# FIR Runtime Optimization Plan: Variability Placement, Lifetime-Aware Hoisting & CSE
 
 **Date**: 2026-04-03
 **Scope**: `crates/transform/src/signal_fir/`, `crates/fir/`, `crates/codegen/`
 **Goal**: Improve runtime performance of generated audio code by (1) placing
-expressions in the correct execution tier based on their rate of change, and
-(2) eliminating redundant computations within each tier.
+expressions in the correct execution tier based on their rate of change,
+(2) avoiding unnecessary persistent storage for init-only hoists, and
+(3) eliminating redundant computations within each tier.
 
 ---
 
@@ -148,11 +149,45 @@ compute(count, inputs, outputs):
 | `Block` | `control_statements` | Once per `compute()` call (before the loop) |
 | `Samp` | `sample_statements` | Every sample (inside the loop) |
 
-### 2.3 Design: Variability-Aware Lowering
+Within a tier, storage duration is a second axis:
+
+- `Konst` used only by `instanceConstants()` should stay stack-local to that
+  function.
+- `Konst` used later by `compute()` must stay persistent in the DSP struct.
+- `Block` and `Samp` materializations stay stack-local by construction.
+
+### 2.3 Design: Variability-Aware Lowering with Lifetime Analysis
 
 Modify `lower_signal()` to check each node's variability and, for `Konst` and
 `Block` nodes, materialize the result into a named variable in the appropriate
 bucket instead of returning an inline value expression.
+
+Important boundary: this should not be pushed into core `SigType`.
+`SigType::variability()` remains a semantic property of the signal. Whether a
+`Konst` node becomes an init-local temporary or a persistent instance field is
+an FIR placement / storage-lifetime decision derived from where the lowered
+value is consumed.
+
+Add one pre-placement analysis alongside signal-sharing:
+
+- `sig_ref_counts`: existing signal-DAG sharing metric
+- `sig_at_boundary`: existing cross-variability boundary set
+- `konst_escape`: new set/map identifying `Konst` signals whose lowered value
+  is consumed outside `instanceConstants`
+
+`konst_escape` should be computed from parent-child relationships and bucket
+transitions:
+
+- `Konst -> Konst` use: does not escape
+- `Konst -> Block` or `Konst -> Samp` use: escapes
+- root consumed directly by sample output: escapes unless trivial/inlined away
+
+This yields two storage classes for hoisted constants:
+
+- `InitLocal`: `DeclareVar(..., AccessType::Stack, ...)` emitted inside
+  `instanceConstants()`
+- `InstanceField`: struct field + `StoreVar(..., AccessType::Struct, ...)`
+  emitted in `instanceConstants()` and read later from `compute()`
 
 ```rust
 fn lower_signal(&mut self, sig: SigId) -> Result<FirId, SignalFirError> {
@@ -165,10 +200,10 @@ fn lower_signal(&mut self, sig: SigId) -> Result<FirId, SignalFirError> {
     // --- NEW: variability-driven placement ---
     let result = match self.variability_of(sig) {
         Some(Variability::Konst) if !is_trivial_fir(&self.store, lowered) => {
-            self.materialize_in_bucket(lowered, Bucket::Constants)
+            self.materialize_in_bucket(sig, lowered, Bucket::Constants)
         }
         Some(Variability::Block) if !is_trivial_fir(&self.store, lowered) => {
-            self.materialize_in_bucket(lowered, Bucket::Control)
+            self.materialize_in_bucket(sig, lowered, Bucket::Control)
         }
         _ => lowered,  // Samp or trivial -> stays inline in sample loop
     };
@@ -181,26 +216,39 @@ fn variability_of(&self, sig: SigId) -> Option<Variability> {
     self.sig_types.get(&sig).map(|t| t.variability())
 }
 
-fn materialize_in_bucket(&mut self, value: FirId, bucket: Bucket) -> FirId {
+fn materialize_in_bucket(&mut self, sig: SigId, value: FirId, bucket: Bucket) -> FirId {
+    let typed_prefix = typed_prefix_for(bucket, self.store.value_type(value));
     let (name, access) = match bucket {
+        Bucket::Constants if self.konst_escapes(sig) => {
+            let n = self.next_counter(typed_prefix);
+            (format!("{typed_prefix}{n}"), AccessType::Struct)
+        }
         Bucket::Constants => {
-            let n = self.const_counter;
-            self.const_counter += 1;
-            (format!("fConst{n}"), AccessType::Struct)
+            let n = self.next_counter(typed_prefix);
+            (format!("{typed_prefix}{n}"), AccessType::Stack)
         }
         Bucket::Control => {
-            let n = self.slow_counter;
-            self.slow_counter += 1;
-            (format!("fSlow{n}"), AccessType::Stack)
+            let n = self.next_counter(typed_prefix);
+            (format!("{typed_prefix}{n}"), AccessType::Stack)
         }
     };
     let typ = /* infer from value */;
 
     let mut b = FirBuilder::new(&mut self.store);
-    let decl = b.declare_var(&name, typ.clone(), access, Some(value));
     match bucket {
-        Bucket::Constants => self.constants_statements.push(decl),
-        Bucket::Control   => self.control_statements.push(decl),
+        Bucket::Constants if access == AccessType::Struct => {
+            self.ensure_named_struct_var(&name, typ.clone(), None);
+            let store = b.store_var(&name, AccessType::Struct, value);
+            self.constants_statements.push(store);
+        }
+        Bucket::Constants => {
+            let decl = b.declare_var(&name, typ.clone(), AccessType::Stack, Some(value));
+            self.constants_statements.push(decl);
+        }
+        Bucket::Control => {
+            let decl = b.declare_var(&name, typ.clone(), AccessType::Stack, Some(value));
+            self.control_statements.push(decl);
+        }
     };
 
     let mut b = FirBuilder::new(&mut self.store);
@@ -208,17 +256,23 @@ fn materialize_in_bucket(&mut self, value: FirId, bucket: Bucket) -> FirId {
 }
 ```
 
-### 2.4 Naming Convention (C++ Parity)
+### 2.4 Naming Convention (C++ Parity + Type-Reflecting Prefixes)
 
-| Bucket | Prefix | Storage | Example |
-|--------|--------|---------|---------|
-| `constants_statements` | `fConst` | `AccessType::Struct` (persistent across calls) | `fConst0 = 2.0f * float(fSampleRate)` |
-| `control_statements` | `fSlow` | `AccessType::Stack` (local to `compute()`) | `fSlow0 = float(fHslider0)` |
-| `sample_statements` | `fTemp` | `AccessType::Stack` (local to loop body) | `fTemp0 = fInput * fSlow0` |
+Prefixes should reflect both execution tier and scalar type:
 
-`fConst` variables need `AccessType::Struct` because they are initialized in
-`instanceConstants()` and read in `compute()`. `fSlow` variables can be
-`AccessType::Stack` since they live within the `compute()` function body.
+| Bucket | Float prefix | Int prefix | Storage | Example |
+|--------|--------------|------------|---------|---------|
+| `constants_statements` | `fConst` | `iConst` | `AccessType::Stack` for init-local, `AccessType::Struct` for escaping constants | `float fConst0 = 2.0f * float(fSampleRate)` / `int iConst0 = min_i(count, 8)` |
+| `control_statements` | `fSlow` | `iSlow` | `AccessType::Stack` | `float fSlow0 = float(fHslider0)` |
+| `sample_statements` | `fTemp` | `iTemp` | `AccessType::Stack` | `int iTemp0 = (fIOTA & 15)` |
+
+Prefix selection is based on the FIR value type after lowering:
+
+- float-like FIR types (`Float32`, `Float64`, `FaustFloat`) -> `f*`
+- integer-like FIR types (`Int32`, `Int64`, `Bool` if materialized) -> `i*`
+
+This naming decision belongs to FIR materialization, not to semantic signal
+typing.
 
 ### 2.5 Edge Cases
 
@@ -237,10 +291,12 @@ fn materialize_in_bucket(&mut self, value: FirId, bucket: Bucket) -> FirId {
 
 | Step | File | Work |
 |------|------|------|
-| **V1** | `signal_fir/module.rs` | Add `const_counter: u32`, `slow_counter: u32` fields. Add `materialize_in_bucket()` helper. |
-| **V2** | `signal_fir/module.rs` | Add variability check in `lower_signal()` after `lower_signal_inner()`. Skip trivial and recursive-projection nodes. |
-| **V3** | `signal_fir/module.rs` | Handle edge cases: recursion, delays, bargraphs, soundfiles. |
-| **V4** | tests | Slider-only -> `fSlow` in control. `2.0*SR` -> `fConst` in constants. Recursive feedback stays in sample loop. Compare against C++ reference. |
+| **V1** | `signal_fir/placement.rs` | Extend pre-analysis with `konst_escape` or equivalent lifetime/escape classification for `Konst` nodes. Keep this out of `SigType`. |
+| **V2** | `signal_fir/module.rs` | Replace the single `const_counter` / `slow_counter` naming scheme with typed counters for `iConst/fConst`, `iSlow/fSlow`; add typed-prefix selection from FIR type. |
+| **V3** | `signal_fir/module.rs` | Update `materialize_in_bucket()` so `Konst` hoists choose `AccessType::Stack` for init-local values and `AccessType::Struct` only for escaping constants. |
+| **V4** | `signal_fir/module.rs` | Keep `Block` hoists stack-local, but rename integer block temporaries to `iSlow*`. Preserve existing recursion / `SIGWRTBL` guards. |
+| **V5** | tests | Add structural tests for init-local `Konst` hoists (`DeclareVar(Stack, ...)` in `instanceConstants()`), escaping `Konst` hoists (`StoreVar(Struct, ...)`), and typed prefixes in all three buckets. |
+| **V6** | differential validation | Compare generated C++ against reference on representative DSPs, paying special attention to `STunedBar`, `t10`, delay-heavy integer masks, and integer-only control expressions. |
 
 ---
 
@@ -337,7 +393,7 @@ fn materialize_shared_values(
     store: &mut FirStore,
     statements: &mut Vec<FirId>,
     ref_counts: &HashMap<FirId, usize>,
-    prefix: &str,                        // "fConst", "fSlow", or "fTemp"
+    prefix: &str,                        // "fConst"/"iConst", "fSlow"/"iSlow", or "fTemp"/"iTemp"
 ) {
     let mut materialized: HashMap<FirId, String> = HashMap::new();
     let mut temp_decls: Vec<FirId> = Vec::new();
@@ -394,7 +450,20 @@ fn rewrite_node(
 }
 ```
 
-### 3.6 Backend Impact
+### 3.6 Typed-Name Selection for Phase 2
+
+Phase 2 currently accepts one caller-provided prefix per bucket. With typed
+names, it should instead derive the prefix from the FIR value type of the node
+being materialized:
+
+- constants bucket -> `fConst` or `iConst`
+- control bucket -> `fSlow` or `iSlow`
+- sample bucket -> `fTemp` or `iTemp`
+
+This decision belongs in FIR/CSE, not in `sigtype`, because the relevant type
+is the post-lowering FIR scalar type.
+
+### 3.7 Backend Impact
 
 | Backend | Benefit |
 |---------|---------|
@@ -403,7 +472,7 @@ fn rewrite_node(
 | **Cranelift** | JIT sees `load` from stack slot; Cranelift's register allocator may further optimize |
 | **Interpreter (FBC)** | Single heap load instead of re-evaluating bytecode sequence; especially valuable since FBC has no CSE pass |
 
-### 3.7 Ordering and Side-Effect Safety
+### 3.8 Ordering and Side-Effect Safety
 
 - **Only value nodes** are candidates. Statement nodes (`StoreVar`, `StoreTable`,
   `If`, `ForLoop`, etc.) are never considered.
@@ -413,7 +482,7 @@ fn rewrite_node(
 - **Per-bucket isolation**: each bucket is processed independently with its own
   counter namespace.
 
-### 3.8 Implementation Steps
+### 3.9 Implementation Steps
 
 | Step | File | Work |
 |------|------|------|
@@ -421,8 +490,9 @@ fn rewrite_node(
 | **C2** | `crates/fir/src/lib.rs` | Add `infer_fir_type(store, node) -> FirType` reading the encoded type child. |
 | **C3** | `signal_fir/cse.rs` (new) | Implement `count_fir_value_uses()`. |
 | **C4** | `signal_fir/cse.rs` | Implement `materialize_shared_values()`, `rewrite_node()`, `is_trivial_value()`. |
-| **C5** | `signal_fir/module.rs` | Call `materialize_shared_values()` on each bucket after lowering. |
-| **C6** | tests | Shared subtree -> `DeclareVar` + `LoadVar`. Trivial nodes untouched. Single-use stays inline. Differential validation on test corpus. |
+| **C5** | `signal_fir/cse.rs` | Replace static bucket prefix selection with typed prefix selection derived from FIR type plus bucket class. |
+| **C6** | `signal_fir/module.rs` | Call `materialize_shared_values()` on each bucket after lowering. |
+| **C7** | tests | Shared subtree -> `DeclareVar` + `LoadVar`. Trivial nodes untouched. Single-use stays inline. Typed prefix assertions and differential validation on test corpus. |
 
 ---
 
@@ -453,11 +523,12 @@ The two passes are complementary and orthogonal:
 
 | Scenario | Phase 1 handles | Phase 2 handles |
 |----------|----------------|----------------|
-| Same `SigId` used 5x, `Block` rate | Hoists once to `fSlow*`; cache returns `LoadVar` to all 5 sites | Nothing (`LoadVar` is trivial) |
-| Same `SigId` used 3x, `Samp` rate | Nothing (stays in sample loop) | Materializes to `fTemp*`; 3 sites become `LoadVar` |
-| Two different `SigId`s, same `Block` expr | Hoists each to `fSlow0`, `fSlow1` (same init `FirId`) | Deduplicates in control bucket: merges `fSlow1` into `fSlow0` |
-| `Block` subexpr inside `Samp` expr | Hoists subexpr to `fSlow*`; parent stays in sample loop with `LoadVar` | May still materialize the `Samp` parent if multi-ref |
-| `Konst` subexpr inside `Block` expr | Hoists subexpr to `fConst*`; `Block` expr in control tier uses `LoadVar` | May deduplicate in control bucket if same `Block` expr duplicated |
+| Same `SigId` used 5x, `Block` rate | Hoists once to `fSlow*` or `iSlow*`; cache returns `LoadVar` to all 5 sites | Nothing (`LoadVar` is trivial) |
+| Same `SigId` used 3x, `Samp` rate | Nothing (stays in sample loop) | Materializes to `fTemp*` or `iTemp*`; 3 sites become `LoadVar` |
+| Two different `SigId`s, same `Block` expr | Hoists each to typed `*Slow` names (same init `FirId`) | Deduplicates in control bucket |
+| `Block` subexpr inside `Samp` expr | Hoists subexpr to `fSlow*` or `iSlow*`; parent stays in sample loop with `LoadVar` | May still materialize the `Samp` parent if multi-ref |
+| `Konst` subexpr inside `Block` expr | Hoists subexpr to `fConst*` / `iConst*`; if init-local it may remain stack-local in `instanceConstants()` | May deduplicate in control bucket if same `Block` expr duplicated |
+| `Konst` used only by `instanceConstants` | Hoists to typed `*Const` init-local stack variable | May further deduplicate repeated init-only FIR subtrees |
 
 ---
 
@@ -477,22 +548,25 @@ Rationale:
    eliminates O(fan_out) redundant evaluations (typically 2-5x).
 
 3. **Testing isolation**: each phase can be validated independently. Phase 1
-   produces `fConst`/`fSlow` variables comparable against C++ Faust reference
-   output. Phase 2 then adds `fTemp` variables within each tier.
+   produces typed `iConst/fConst` and `iSlow/fSlow` variables comparable
+   against C++ Faust reference output. Phase 2 then adds typed `iTemp/fTemp`
+   variables within each tier.
 
 ```
 Phase 1 — Variability (§2)           Phase 2 — CSE (§3)
 ─────────────────────────────         ──────────────────────────
-V1: counters + helper method          C1: fir_value_children()
-V2: variability check in              C2: infer_fir_type()
-    lower_signal()                    C3: count_fir_value_uses()
-V3: edge cases (recursion,            C4: materialize_shared_values()
-    delays, bargraphs)                C5: integrate in build_module()
-V4: tests + diff validation           C6: tests + diff validation
+V1: konst escape analysis             C1: fir_value_children()
+V2: typed counters/prefixes           C2: infer_fir_type()
+V3: init-local vs persistent          C3: count_fir_value_uses()
+    Konst hoists                      C4: materialize_shared_values()
+V4: typed Block hoists + guards       C5: typed prefix selection
+V5: tests + diff validation           C6: integrate in build_module()
+                                      C7: tests + diff validation
          │                                      │
          ▼                                      ▼
     Checkpoint: verify                 Checkpoint: verify
-    fConst/fSlow placement             fTemp deduplication
+    iConst/fConst and                  iTemp/fTemp deduplication
+    iSlow/fSlow placement
     matches C++ reference              within each bucket
 ```
 
@@ -509,14 +583,14 @@ signal_prepare.rs
 
 signal_fir/module.rs::build_module()
   ├── lower_signal() with variability placement       ← Phase 1 (§2)
-  │     Konst nodes → constants_statements (fConst*)
-  │     Block nodes → control_statements   (fSlow*)
+  │     Konst nodes → constants_statements (iConst*/fConst*)
+  │     Block nodes → control_statements   (iSlow*/fSlow*)
   │     Samp nodes  → sample_statements    (inline)
   ├── materialize_shared_expressions() per bucket     ← Phase 2 (§3)
   │     multi-ref non-trivial → DeclareVar + LoadVar
-  │     constants_statements: prefix fConst
-  │     control_statements:   prefix fSlow
-  │     sample_statements:    prefix fTemp
+  │     constants_statements: prefix iConst/fConst
+  │     control_statements:   prefix iSlow/fSlow
+  │     sample_statements:    prefix iTemp/fTemp
   └── assemble FIR Module
         instanceConstants = block(constants_statements)
         compute           = block(control_statements + for_loop(sample_statements))
