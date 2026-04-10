@@ -25,7 +25,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fir::{AccessType, FirBuilder, FirId, FirStore, FirType};
+use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirStore, FirType};
 use signals::{SigId, SigMatch, match_sig};
 use tlib::{TreeArena, list_to_vec, match_sym_rec, match_sym_ref};
 
@@ -37,9 +37,9 @@ use super::error::{SignalFirError, SignalFirErrorCode};
 /// This names the two concrete runtime representations used by the fast-lane:
 ///
 /// - a single scalar state cell for the simplest one-sample feedback loops,
-/// - a strict 2-slot shift-style carrier for ordinary one-sample feedback,
+/// - an exact-size shift-style carrier for small delayed-feedback cases,
 /// - a larger circular carrier when delay analysis found deeper delayed reads
-///   that can be merged into the recursion storage itself.
+///   beyond the copy-delay threshold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RecursionStorageStrategy {
     /// One scalar state cell holding the previous sample.
@@ -48,13 +48,13 @@ pub(super) enum RecursionStorageStrategy {
     /// binding during the sample iteration, then committed back to the struct
     /// field in `PostOutput`.
     SingleScalar,
-    /// Two-slot carrier:
+    /// Exact-size shift carrier:
     /// - current sample in slot `0`
-    /// - previous sample in slot `1`
-    /// - post-output finalization copy `slot1 = slot0`
-    TwoSlotShift,
-    /// Circular carrier larger than 2 slots, indexed by the shared global
-    /// circular cursor (`fIOTA`).
+    /// - delayed reads at slot `N`
+    /// - post-output finalization shifts `slot[k + 1] = slot[k]`
+    ExactShift,
+    /// Circular carrier larger than the copy-delay threshold, indexed by the
+    /// shared global circular cursor (`fIOTA`).
     Circular,
 }
 
@@ -65,9 +65,10 @@ pub(super) enum RecursionStorageStrategy {
 ///
 /// - [`RecursionStorageStrategy::SingleScalar`] for eligible simple unary
 ///   feedback loops
-/// - [`RecursionStorageStrategy::TwoSlotShift`] for the default 2-slot case
+/// - [`RecursionStorageStrategy::ExactShift`] for the default small shifted
+///   case
 /// - [`RecursionStorageStrategy::Circular`] when accumulated delay analysis
-///   upsizes the carrier to serve delayed reads directly
+///   upsizes the carrier beyond the copy-delay threshold
 ///
 /// Source provenance (C++): `signalFIRCompiler.cpp` (`generateRecProj`,
 /// `generateRec`), emitted as `fRecN[2]` / `iRecN[2]`.
@@ -80,24 +81,20 @@ pub(super) struct RecArrayInfo {
     /// Allocated carrier size in elements.
     ///
     /// - `1` for the scalar fast path,
-    /// - `2` for the default current/previous two-slot carrier,
-    /// - `>2` for circular carriers serving delayed reads directly.
+    /// - `>1` for exact-shift or circular carriers serving delayed reads
+    ///   directly.
     pub(super) size: usize,
+    /// Selected runtime storage strategy for this carrier.
+    pub(super) strategy: RecursionStorageStrategy,
 }
 
 impl RecArrayInfo {
-    /// Infers the runtime storage strategy from the allocated carrier size.
-    ///
-    /// Size `1` is the scalar fast path, size `2` is the dedicated two-slot
-    /// path, and larger sizes imply a circular carrier indexed through the
-    /// shared global cursor.
+    /// Returns the already selected runtime storage strategy.
     pub(super) fn storage_strategy(&self) -> RecursionStorageStrategy {
         if self.size == 1 {
             RecursionStorageStrategy::SingleScalar
-        } else if self.size == 2 {
-            RecursionStorageStrategy::TwoSlotShift
         } else {
-            RecursionStorageStrategy::Circular
+            self.strategy
         }
     }
 }
@@ -312,12 +309,19 @@ pub(super) struct RecursionLoweringCtx<'a> {
     pub(super) store: &'a mut FirStore,
     pub(super) immediate_statements: &'a mut Vec<FirId>,
     pub(super) post_output_statements: &'a mut Vec<FirId>,
+    pub(super) next_loop_var_id: &'a mut usize,
 }
 
 impl RecursionLoweringCtx<'_> {
+    fn fresh_loop_var(&mut self, prefix: &str) -> String {
+        let name = format!("{prefix}{}", *self.next_loop_var_id);
+        *self.next_loop_var_id += 1;
+        name
+    }
+
     /// Chooses the runtime current-slot index for one array-backed carrier.
     ///
-    /// Two-slot carriers always write/read slot `0` for the current sample.
+    /// Exact-shift carriers always write/read slot `0` for the current sample.
     /// Circular carriers use the caller-provided current circular index.
     pub(super) fn current_index_for_carrier(
         &mut self,
@@ -327,7 +331,7 @@ impl RecursionLoweringCtx<'_> {
     ) -> FirId {
         match info.storage_strategy() {
             RecursionStorageStrategy::SingleScalar => zero_index,
-            RecursionStorageStrategy::TwoSlotShift => zero_index,
+            RecursionStorageStrategy::ExactShift => zero_index,
             RecursionStorageStrategy::Circular => circular_index,
         }
     }
@@ -347,7 +351,7 @@ impl RecursionLoweringCtx<'_> {
             RecursionStorageStrategy::SingleScalar => {
                 b.load_var(info.name.clone(), AccessType::Struct, read_ty)
             }
-            RecursionStorageStrategy::TwoSlotShift | RecursionStorageStrategy::Circular => b
+            RecursionStorageStrategy::ExactShift | RecursionStorageStrategy::Circular => b
                 .load_table(
                     info.name.clone(),
                     AccessType::Struct,
@@ -378,45 +382,111 @@ impl RecursionLoweringCtx<'_> {
         ));
     }
 
-    /// Schedules the post-output finalize copy for a 2-slot recursion carrier.
-    ///
-    /// This is the exact `slot1 = slot0` step that preserves C++-style
-    /// previous-sample semantics for simple recursion.
-    pub(super) fn emit_two_slot_finalize_copy(
-        &mut self,
-        info: &RecArrayInfo,
-        zero_index: FirId,
-        one_index: FirId,
-    ) {
+    /// Schedules the post-output finalize shifts for one exact-shift recursion
+    /// carrier.
+    pub(super) fn emit_exact_shift_finalize_copies(&mut self, info: &RecArrayInfo) {
         debug_assert_eq!(
             info.storage_strategy(),
-            RecursionStorageStrategy::TwoSlotShift
+            RecursionStorageStrategy::ExactShift
         );
-        let slot0 = {
-            let mut b = FirBuilder::new(self.store);
-            b.load_table(
-                info.name.clone(),
-                AccessType::Struct,
-                zero_index,
-                info.typ.clone(),
-            )
-        };
-        let prev_store = {
-            let mut b = FirBuilder::new(self.store);
-            b.store_table(info.name.clone(), AccessType::Struct, one_index, slot0)
-        };
-        self.post_output_statements.push(prev_store);
+        let delay = info.size.saturating_sub(1);
+        if delay <= 2 {
+            for dst in (1..info.size).rev() {
+                let src = dst - 1;
+                let src_index = {
+                    let mut b = FirBuilder::new(self.store);
+                    b.int32(i32::try_from(src).unwrap_or(i32::MAX))
+                };
+                let src_value = {
+                    let mut b = FirBuilder::new(self.store);
+                    b.load_table(
+                        info.name.clone(),
+                        AccessType::Struct,
+                        src_index,
+                        info.typ.clone(),
+                    )
+                };
+                let dst_index = {
+                    let mut b = FirBuilder::new(self.store);
+                    b.int32(i32::try_from(dst).unwrap_or(i32::MAX))
+                };
+                let shift_store = {
+                    let mut b = FirBuilder::new(self.store);
+                    b.store_table(info.name.clone(), AccessType::Struct, dst_index, src_value)
+                };
+                self.post_output_statements.push(shift_store);
+            }
+        } else {
+            let loop_var = self.fresh_loop_var("jRec");
+            let init = {
+                let delay_val = {
+                    let mut b = FirBuilder::new(self.store);
+                    b.int32(i32::try_from(delay).unwrap_or(i32::MAX))
+                };
+                let mut b = FirBuilder::new(self.store);
+                b.declare_var(
+                    loop_var.clone(),
+                    FirType::Int32,
+                    AccessType::Loop,
+                    Some(delay_val),
+                )
+            };
+            let end = {
+                let mut b = FirBuilder::new(self.store);
+                b.int32(0)
+            };
+            let step = {
+                let mut b = FirBuilder::new(self.store);
+                b.int32(-1)
+            };
+            let body = {
+                let dst_index = {
+                    let mut b = FirBuilder::new(self.store);
+                    b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+                };
+                let src_index = {
+                    let j = {
+                        let mut b = FirBuilder::new(self.store);
+                        b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+                    };
+                    let one = {
+                        let mut b = FirBuilder::new(self.store);
+                        b.int32(1)
+                    };
+                    let mut b = FirBuilder::new(self.store);
+                    b.binop(FirBinOp::Sub, j, one, FirType::Int32)
+                };
+                let src_value = {
+                    let mut b = FirBuilder::new(self.store);
+                    b.load_table(
+                        info.name.clone(),
+                        AccessType::Struct,
+                        src_index,
+                        info.typ.clone(),
+                    )
+                };
+                let shift_store = {
+                    let mut b = FirBuilder::new(self.store);
+                    b.store_table(info.name.clone(), AccessType::Struct, dst_index, src_value)
+                };
+                let mut b = FirBuilder::new(self.store);
+                b.block(&[shift_store])
+            };
+            let loop_node = {
+                let mut b = FirBuilder::new(self.store);
+                b.for_loop(loop_var, init, end, step, body, true)
+            };
+            self.post_output_statements.push(loop_node);
+        }
     }
 
-    /// Emits all current writes and two-slot finalize copies for one recursive
+    /// Emits all current writes and exact-shift finalize copies for one recursive
     /// group body pass.
     pub(super) fn emit_group_body_updates(
         &mut self,
         group_arrays: &[RecArrayInfo],
         body_values: &[FirId],
         current_indexes: &[FirId],
-        zero_index: FirId,
-        one_index: FirId,
     ) {
         debug_assert_eq!(group_arrays.len(), body_values.len());
         debug_assert_eq!(group_arrays.len(), current_indexes.len());
@@ -424,9 +494,9 @@ impl RecursionLoweringCtx<'_> {
             let info = &group_arrays[i];
             match info.storage_strategy() {
                 RecursionStorageStrategy::SingleScalar => {}
-                RecursionStorageStrategy::TwoSlotShift => {
+                RecursionStorageStrategy::ExactShift => {
                     self.emit_current_carrier_store(info, current_indexes[i], body_values[i]);
-                    self.emit_two_slot_finalize_copy(info, zero_index, one_index);
+                    self.emit_exact_shift_finalize_copies(info);
                 }
                 RecursionStorageStrategy::Circular => {
                     self.emit_current_carrier_store(info, current_indexes[i], body_values[i]);
@@ -509,9 +579,9 @@ impl RecursionAllocCtx<'_> {
     ///
     /// - scalar (`size = 1`) for eligible unary feedback outputs whose maximum
     ///   observed delayed read does not exceed one sample,
-    /// - two-slot (`size = 2`) for the default array-backed one-sample path,
-    /// - circular (`size > 2`) when accumulated delay analysis recorded deeper
-    ///   delayed reads.
+    /// - exact-shift for small array-backed delayed-feedback paths,
+    /// - circular when accumulated delay analysis recorded deeper delayed reads
+    ///   beyond the configured copy-delay threshold.
     ///
     /// This is where recursion carriers pick up delay-analysis-driven upsizing
     /// from `delay.rs`.
@@ -541,7 +611,7 @@ impl RecursionAllocCtx<'_> {
         } else {
             format!("{prefix}{}_{}", group.as_u32(), index)
         };
-        let size = match match_sym_rec(self.arena, group) {
+        let (size, strategy) = match match_sym_rec(self.arena, group) {
             Some((var, body_list)) => {
                 let bodies = list_to_vec(self.arena, body_list).ok_or_else(|| {
                     SignalFirError::new(
@@ -550,13 +620,37 @@ impl RecursionAllocCtx<'_> {
                     )
                 })?;
                 match self.delay.rec_output_analysis(var.as_u32(), index) {
-                    Some(analysis) if bodies.len() == 1 && analysis.max_delay <= 1 => 1,
-                    Some(analysis) => pow2limit_for_delay(analysis.max_delay)?,
-                    None if bodies.len() == 1 => 1,
-                    None => 2,
+                    Some(analysis) if bodies.len() == 1 && analysis.max_delay <= 1 => {
+                        (1, RecursionStorageStrategy::SingleScalar)
+                    }
+                    Some(analysis) => {
+                        let exact_size = usize::try_from(analysis.max_delay).map_err(|_| {
+                            SignalFirError::new(
+                                SignalFirErrorCode::UnsupportedSignalNode,
+                                format!(
+                                    "negative recursion delay analysis result {}",
+                                    analysis.max_delay
+                                ),
+                            )
+                        })? + 1;
+                        let copy_threshold =
+                            usize::try_from(self.delay.max_copy_delay()).unwrap_or(usize::MAX);
+                        if usize::try_from(analysis.max_delay).unwrap_or(usize::MAX)
+                            < copy_threshold
+                        {
+                            (exact_size, RecursionStorageStrategy::ExactShift)
+                        } else {
+                            (
+                                pow2limit_for_delay(analysis.max_delay)?,
+                                RecursionStorageStrategy::Circular,
+                            )
+                        }
+                    }
+                    None if bodies.len() == 1 => (1, RecursionStorageStrategy::SingleScalar),
+                    None => (2, RecursionStorageStrategy::ExactShift),
                 }
             }
-            None => 2,
+            None => (2, RecursionStorageStrategy::ExactShift),
         };
         let mut b = FirBuilder::new(self.store);
         let decl = if size == 1 {
@@ -571,7 +665,12 @@ impl RecursionAllocCtx<'_> {
         } else {
             self.register_clear_recursion_array(name.clone(), init, size);
         }
-        let info = RecArrayInfo { name, typ, size };
+        let info = RecArrayInfo {
+            name,
+            typ,
+            size,
+            strategy,
+        };
         self.recursion
             .rec_array_by_group_index
             .insert(key, info.clone());

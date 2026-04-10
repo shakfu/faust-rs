@@ -1583,9 +1583,10 @@ impl<'a> SignalToFirLower<'a> {
                         read_ty,
                     ));
                 }
-                RecursionStorageStrategy::TwoSlotShift if total_delay == 1 => {
+                RecursionStorageStrategy::ExactShift => {
                     let read_ty = self.signal_fir_type(node)?;
-                    let prev_index = self.lower_int32_const(1);
+                    let prev_index =
+                        self.lower_int32_const(i32::try_from(total_delay).unwrap_or(i32::MAX));
                     let mut b = FirBuilder::new(&mut self.store);
                     return Ok(b.load_table(
                         rec_delay_ref.carrier.info.name,
@@ -1594,8 +1595,7 @@ impl<'a> SignalToFirLower<'a> {
                         read_ty,
                     ));
                 }
-                RecursionStorageStrategy::SingleScalar | RecursionStorageStrategy::TwoSlotShift => {
-                }
+                RecursionStorageStrategy::SingleScalar => {}
             }
         }
 
@@ -1661,17 +1661,9 @@ impl<'a> SignalToFirLower<'a> {
                         rec_delay_ref.carrier.info.typ.clone(),
                     ));
                 }
-                RecursionStorageStrategy::TwoSlotShift => {
-                    let prev_index = if total_offset == 1 {
-                        self.lower_int32_const(1)
-                    } else {
-                        let total_offset =
-                            self.lower_int32_const(i32::try_from(total_offset).unwrap_or(i32::MAX));
-                        self.global_circular_delayed_index(
-                            total_offset,
-                            rec_delay_ref.carrier.info.size,
-                        )
-                    };
+                RecursionStorageStrategy::ExactShift => {
+                    let prev_index =
+                        self.lower_int32_const(i32::try_from(total_offset).unwrap_or(i32::MAX));
                     let mut b = FirBuilder::new(&mut self.store);
                     return Ok(b.load_table(
                         rec_delay_ref.carrier.info.name,
@@ -3278,7 +3270,7 @@ impl<'a> SignalToFirLower<'a> {
             resolve_active_recursion_carrier(self.arena, &self.recursion, group, index_usize)?
         {
             let real_ty = self.signal_fir_type(node)?;
-            let current_index = if rec_ref.strategy == RecursionStorageStrategy::TwoSlotShift {
+            let current_index = if rec_ref.strategy == RecursionStorageStrategy::ExactShift {
                 self.lower_int32_const(0)
             } else if rec_ref.strategy == RecursionStorageStrategy::Circular {
                 self.global_circular_current_index(rec_ref.info.size)
@@ -3289,6 +3281,7 @@ impl<'a> SignalToFirLower<'a> {
                 store: &mut self.store,
                 immediate_statements: &mut self.sample_phases.immediate,
                 post_output_statements: &mut self.sample_phases.post_output,
+                next_loop_var_id: &mut self.next_loop_var_id,
             };
             return Ok(recursion_ctx.load_feedback_carrier(&rec_ref.info, current_index, real_ty));
         }
@@ -3304,7 +3297,7 @@ impl<'a> SignalToFirLower<'a> {
                 .resolve_materialized_carrier(self.arena, group, index_usize)
         {
             let real_ty = self.signal_fir_type(node)?;
-            let current_index = if rec_ref.strategy == RecursionStorageStrategy::TwoSlotShift {
+            let current_index = if rec_ref.strategy == RecursionStorageStrategy::ExactShift {
                 self.lower_int32_const(0)
             } else {
                 self.global_circular_current_index(rec_ref.info.size)
@@ -3313,6 +3306,7 @@ impl<'a> SignalToFirLower<'a> {
                 store: &mut self.store,
                 immediate_statements: &mut self.sample_phases.immediate,
                 post_output_statements: &mut self.sample_phases.post_output,
+                next_loop_var_id: &mut self.next_loop_var_id,
             };
             return Ok(recursion_ctx.load_feedback_carrier(&rec_ref.info, current_index, real_ty));
         }
@@ -3364,7 +3358,6 @@ impl<'a> SignalToFirLower<'a> {
         if self.recursion.mark_group_scheduled(group) {
             self.with_active_recursion_group(var, group_arrays.clone(), |this, active_arrays| {
                 let zero = this.lower_int32_const(0);
-                let one = this.lower_int32_const(1);
                 let mut body_values = Vec::with_capacity(bodies.len());
                 let mut current_indexes = Vec::with_capacity(active_arrays.len());
                 for (i, body) in bodies.iter().enumerate() {
@@ -3379,7 +3372,7 @@ impl<'a> SignalToFirLower<'a> {
                             );
                             zero
                         }
-                        RecursionStorageStrategy::TwoSlotShift => zero,
+                        RecursionStorageStrategy::ExactShift => zero,
                         RecursionStorageStrategy::Circular => {
                             this.global_circular_current_index(active_arrays[i].size)
                         }
@@ -3390,13 +3383,12 @@ impl<'a> SignalToFirLower<'a> {
                     store: &mut this.store,
                     immediate_statements: &mut this.sample_phases.immediate,
                     post_output_statements: &mut this.sample_phases.post_output,
+                    next_loop_var_id: &mut this.next_loop_var_id,
                 };
                 recursion_ctx.emit_group_body_updates(
                     active_arrays,
                     &body_values,
                     &current_indexes,
-                    zero,
-                    one,
                 );
                 for (i, info) in active_arrays.iter().enumerate() {
                     if info.storage_strategy() == RecursionStorageStrategy::SingleScalar {
@@ -3434,7 +3426,7 @@ impl<'a> SignalToFirLower<'a> {
             return Ok(current_value);
         }
         let zero = self.lower_int32_const(0);
-        let circular_index = if info.storage_strategy() == RecursionStorageStrategy::TwoSlotShift {
+        let circular_index = if info.storage_strategy() == RecursionStorageStrategy::ExactShift {
             zero
         } else {
             self.global_circular_current_index(info.size)
@@ -3443,6 +3435,7 @@ impl<'a> SignalToFirLower<'a> {
             store: &mut self.store,
             immediate_statements: &mut self.sample_phases.immediate,
             post_output_statements: &mut self.sample_phases.post_output,
+            next_loop_var_id: &mut self.next_loop_var_id,
         };
         let current_index = recursion_ctx.current_index_for_carrier(info, zero, circular_index);
         let out = recursion_ctx.load_feedback_carrier(info, current_index, info.typ.clone());
