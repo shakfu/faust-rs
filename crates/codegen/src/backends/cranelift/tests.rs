@@ -290,6 +290,74 @@ fn build_subset_supported_foreign_fun_module() -> (fir::FirStore, FirId) {
     (store, module)
 }
 
+/// Builds a `compute` body that declares a loop-local temporary inside a loop body.
+fn build_loop_local_declare_var_module() -> (fir::FirStore, FirId) {
+    let mut store = fir::FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let globals = b.block(&[]);
+    let dsp_struct = b.block(&[]);
+
+    let out_chan = b.int32(0);
+    let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+    let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+    let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+    let jrec1_decl = b.declare_var("jRec1", FirType::Int32, AccessType::Loop, Some(i0));
+    let jrec1 = b.load_var("jRec1", AccessType::Loop, FirType::Int32);
+    let sample = b.cast(FirType::FaustFloat, jrec1);
+    let store_out = b.store_table("output0", AccessType::Stack, i0, sample);
+    let loop_body = b.block(&[jrec1_decl, store_out]);
+    let sample_loop = b.simple_for_loop("i0", count, loop_body, false);
+    let compute_body = b.block(&[out_alias, sample_loop]);
+    let compute_args = [
+        NamedType {
+            name: "dsp".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "count".to_string(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &compute_args,
+        Some(compute_body),
+        false,
+    );
+    let functions = b.block(&[compute]);
+    let static_decls = b.block(&[]);
+    let module = b.module(
+        0,
+        0,
+        "loop_local_declare_var",
+        dsp_struct,
+        globals,
+        functions,
+        static_decls,
+    );
+    (store, module)
+}
+
 #[test]
 /// Verifies non-strict mode falls back to the no-op compute stub on subset gaps.
 fn compile_module_falls_back_to_stub_without_strict_subset_mode() {
@@ -318,6 +386,14 @@ fn compile_module_lowers_supported_foreign_fun_subset_call() {
     let (store, module) = build_subset_supported_foreign_fun_module();
     let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
         .expect("supported foreign subset call should lower");
+    assert!(compiled.compute_body_lowered());
+}
+
+#[test]
+fn compile_module_lowers_loop_local_declare_var() {
+    let (store, module) = build_loop_local_declare_var_module();
+    let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
+        .expect("loop-local DeclareVar should lower");
     assert!(compiled.compute_body_lowered());
 }
 
@@ -1091,6 +1167,83 @@ fn compile_module_lowers_for_while_and_local_store_subset_body() {
     let (store, module) = build_for_while_local_store_subset_module();
     let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
         .expect("for/while/local-store subset fixture should compile with body lowering");
+    assert!(compiled.has_compute_entry());
+    assert!(compiled.compute_body_lowered());
+}
+
+fn build_for_loop_declared_init_subset_module() -> (fir::FirStore, FirId) {
+    let mut store = fir::FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let globals = b.block(&[]);
+    let dsp_struct = b.block(&[]);
+
+    let out_chan = b.int32(0);
+    let out_ptr_ty = FirType::Ptr(Box::new(FirType::FaustFloat));
+    let out_ptr = b.load_table("outputs", AccessType::FunArgs, out_chan, out_ptr_ty.clone());
+    let out_alias = b.declare_var("output0", out_ptr_ty, AccessType::Stack, Some(out_ptr));
+    let count = b.load_var("count", AccessType::FunArgs, FirType::Int32);
+    let zero = b.int32(0);
+    let init = b.declare_var("i", FirType::Int32, AccessType::Loop, Some(zero));
+    let step = b.int32(1);
+    let i = b.load_var("i", AccessType::Loop, FirType::Int32);
+    let sample = b.cast(FirType::FaustFloat, i);
+    let store_out = b.store_table("output0", AccessType::Stack, i, sample);
+    let for_body = b.block(&[store_out]);
+    let loop_ = b.for_loop("i", init, count, step, for_body, false);
+    let compute_body = b.block(&[out_alias, loop_]);
+    let compute_args = [
+        NamedType {
+            name: "dsp".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Obj)),
+        },
+        NamedType {
+            name: "count".to_string(),
+            typ: FirType::Int32,
+        },
+        NamedType {
+            name: "inputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+        NamedType {
+            name: "outputs".to_string(),
+            typ: FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+        },
+    ];
+    let compute = b.declare_fun(
+        "compute",
+        FirType::Fun {
+            args: vec![
+                FirType::Ptr(Box::new(FirType::Obj)),
+                FirType::Int32,
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+                FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat)))),
+            ],
+            ret: Box::new(FirType::Void),
+        },
+        &compute_args,
+        Some(compute_body),
+        false,
+    );
+    let functions = b.block(&[compute]);
+    let sd = b.block(&[]);
+    let module = b.module(
+        0,
+        0,
+        "for_loop_declared_init_subset",
+        dsp_struct,
+        globals,
+        functions,
+        sd,
+    );
+    (store, module)
+}
+
+#[test]
+fn compile_module_lowers_for_loop_with_declared_loop_init() {
+    let (store, module) = build_for_loop_declared_init_subset_module();
+    let compiled = generate_cranelift_module(&store, module, &CraneliftOptions::default())
+        .expect("for-loop init DeclareVar(kLoop) should stay inside the supported subset");
     assert!(compiled.has_compute_entry());
     assert!(compiled.compute_body_lowered());
 }

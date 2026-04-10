@@ -1385,13 +1385,13 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         }
     }
 
-    /// Produces a conservative default value for uninitialized stack locals.
+    /// Produces a conservative default value for uninitialized local variables.
     ///
     /// Current policy:
     /// - scalars => zero
     /// - pointers/object-like refs => null
     ///
-    /// This supports FIR patterns where `DeclareVar { access: Stack, init: None }`
+    /// This supports FIR patterns where `DeclareVar { access: Stack|Loop, init: None }`
     /// appears in `compute` and is assigned before use.
     fn default_lowered_value_for_type(
         &mut self,
@@ -1437,6 +1437,12 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 typ,
                 access: AccessType::Stack,
                 init: Some(init),
+            }
+            | FirMatch::DeclareVar {
+                name,
+                typ,
+                access: AccessType::Loop,
+                init: Some(init),
             } => {
                 let init_v = self.lower_expr(init, Some(&typ))?;
                 let stored = match (&typ, init_v) {
@@ -1453,6 +1459,12 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 name,
                 typ,
                 access: AccessType::Stack,
+                init: None,
+            }
+            | FirMatch::DeclareVar {
+                name,
+                typ,
+                access: AccessType::Loop,
                 init: None,
             } => {
                 let init_v = self.default_lowered_value_for_type(&typ)?;
@@ -2931,12 +2943,12 @@ fn subset_stmt_gap_reason(
             subset_stmt_gap_reason(store, x, extern_data_symbols, extern_function_symbols)
         }),
         FirMatch::DeclareVar {
-            access: AccessType::Stack,
+            access: AccessType::Stack | AccessType::Loop,
             init: Some(init),
             ..
         } => subset_expr_gap_reason(store, init, extern_data_symbols, extern_function_symbols),
         FirMatch::DeclareVar {
-            access: AccessType::Stack,
+            access: AccessType::Stack | AccessType::Loop,
             init: None,
             ..
         } => None,
@@ -3088,6 +3100,16 @@ fn subset_expr_gap_reason(
         | FirMatch::Bool { .. }
         | FirMatch::Float32 { .. }
         | FirMatch::Float64 { .. } => None,
+        FirMatch::DeclareVar {
+            access: AccessType::Stack | AccessType::Loop,
+            init: Some(init),
+            ..
+        } => subset_expr_gap_reason(store, init, extern_data_symbols, extern_function_symbols),
+        FirMatch::DeclareVar {
+            access: AccessType::Stack | AccessType::Loop,
+            init: None,
+            ..
+        } => None,
         FirMatch::LoadVar {
             name,
             access: AccessType::Global,
