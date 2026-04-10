@@ -123,6 +123,65 @@ fn dump_fir_expands_for_loop_body() {
 }
 
 #[test]
+fn reverse_array_shift_helper_emits_expected_loop_shape() {
+    let mut store = FirStore::new();
+    let mut next_loop_var_id = 0;
+    let loop_ = helpers::emit_reverse_array_shift_loop(
+        &mut store,
+        &mut next_loop_var_id,
+        "lRec",
+        "fRec0",
+        3,
+        FirType::Float32,
+        AccessType::Struct,
+    );
+
+    assert_eq!(next_loop_var_id, 1);
+
+    let FirMatch::ForLoop {
+        var,
+        init,
+        end,
+        step,
+        body,
+        is_reverse,
+    } = match_fir(&store, loop_)
+    else {
+        panic!("expected helper to emit a ForLoop");
+    };
+
+    assert_eq!(var, "lRec0");
+    assert!(is_reverse);
+    assert_eq!(
+        match_fir(&store, init),
+        FirMatch::DeclareVar {
+            name: "lRec0".to_string(),
+            typ: FirType::Int32,
+            access: AccessType::Loop,
+            init: Some({
+                let mut b = FirBuilder::new(&mut store);
+                b.int32(3)
+            }),
+        }
+    );
+    assert_eq!(
+        match_fir(&store, end),
+        FirMatch::Int32 {
+            value: 0,
+            typ: FirType::Int32
+        }
+    );
+    assert_eq!(
+        match_fir(&store, step),
+        FirMatch::Int32 {
+            value: -1,
+            typ: FirType::Int32
+        }
+    );
+    assert!(matches!(match_fir(&store, body), FirMatch::Block(_)));
+}
+
+#[test]
 fn dump_fir_expands_iterator_for_loop_body() {
     let mut store = FirStore::new();
     let mut b = FirBuilder::new(&mut store);

@@ -25,7 +25,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirStore, FirType};
+use fir::helpers::{emit_reverse_array_shift_loop, fresh_loop_var};
+use fir::{AccessType, FirBuilder, FirId, FirStore, FirType};
 use signals::{SigId, SigMatch, match_sig};
 use tlib::{TreeArena, list_to_vec, match_sym_rec, match_sym_ref};
 
@@ -313,12 +314,6 @@ pub(super) struct RecursionLoweringCtx<'a> {
 }
 
 impl RecursionLoweringCtx<'_> {
-    fn fresh_loop_var(&mut self, prefix: &str) -> String {
-        let name = format!("{prefix}{}", *self.next_loop_var_id);
-        *self.next_loop_var_id += 1;
-        name
-    }
-
     /// Chooses the runtime current-slot index for one array-backed carrier.
     ///
     /// Exact-shift carriers always write/read slot `0` for the current sample.
@@ -417,66 +412,16 @@ impl RecursionLoweringCtx<'_> {
                 self.post_output_statements.push(shift_store);
             }
         } else {
-            let loop_var = self.fresh_loop_var("jRec");
-            let init = {
-                let delay_val = {
-                    let mut b = FirBuilder::new(self.store);
-                    b.int32(i32::try_from(delay).unwrap_or(i32::MAX))
-                };
-                let mut b = FirBuilder::new(self.store);
-                b.declare_var(
-                    loop_var.clone(),
-                    FirType::Int32,
-                    AccessType::Loop,
-                    Some(delay_val),
-                )
-            };
-            let end = {
-                let mut b = FirBuilder::new(self.store);
-                b.int32(0)
-            };
-            let step = {
-                let mut b = FirBuilder::new(self.store);
-                b.int32(-1)
-            };
-            let body = {
-                let dst_index = {
-                    let mut b = FirBuilder::new(self.store);
-                    b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
-                };
-                let src_index = {
-                    let j = {
-                        let mut b = FirBuilder::new(self.store);
-                        b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
-                    };
-                    let one = {
-                        let mut b = FirBuilder::new(self.store);
-                        b.int32(1)
-                    };
-                    let mut b = FirBuilder::new(self.store);
-                    b.binop(FirBinOp::Sub, j, one, FirType::Int32)
-                };
-                let src_value = {
-                    let mut b = FirBuilder::new(self.store);
-                    b.load_table(
-                        info.name.clone(),
-                        AccessType::Struct,
-                        src_index,
-                        info.typ.clone(),
-                    )
-                };
-                let shift_store = {
-                    let mut b = FirBuilder::new(self.store);
-                    b.store_table(info.name.clone(), AccessType::Struct, dst_index, src_value)
-                };
-                let mut b = FirBuilder::new(self.store);
-                b.block(&[shift_store])
-            };
-            let loop_node = {
-                let mut b = FirBuilder::new(self.store);
-                b.for_loop(loop_var, init, end, step, body, true)
-            };
-            self.post_output_statements.push(loop_node);
+            self.post_output_statements
+                .push(emit_reverse_array_shift_loop(
+                    self.store,
+                    self.next_loop_var_id,
+                    "jRec",
+                    &info.name,
+                    i32::try_from(delay).unwrap_or(i32::MAX),
+                    info.typ.clone(),
+                    AccessType::Struct,
+                ));
         }
     }
 
@@ -526,9 +471,7 @@ pub(super) struct RecursionAllocCtx<'a> {
 impl RecursionAllocCtx<'_> {
     /// Generates a unique loop variable name for `instanceClear` helper loops.
     fn fresh_loop_var(&mut self, prefix: &str) -> String {
-        let name = format!("{prefix}{}", *self.next_loop_var_id);
-        *self.next_loop_var_id += 1;
-        name
+        fresh_loop_var(self.next_loop_var_id, prefix)
     }
 
     /// Registers the `instanceClear` zero-fill loop for one recursion array.

@@ -31,6 +31,8 @@
 //! - Dispatch is explicit and exhaustive via `match_fir`, no RTTI/dynamic-cast.
 
 pub mod checker;
+#[path = "../helpers.rs"]
+pub mod helpers;
 pub mod inliner;
 
 use std::collections::HashSet;

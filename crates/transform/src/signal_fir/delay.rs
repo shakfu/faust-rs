@@ -116,6 +116,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use fir::helpers::{emit_reverse_array_shift_loop, fresh_loop_var};
 use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirStore, FirType};
 use signals::{SigId, SigMatch, match_sig};
 use sigtype::{SigType, check_delay_interval};
@@ -683,9 +684,7 @@ impl<'a> DelayFirCtx<'a> {
 
     /// Generates a fresh loop-variable name using the shared monotonic counter.
     pub(super) fn fresh_loop_var(&mut self, prefix: &str) -> String {
-        let name = format!("{prefix}{}", *self.next_loop_var_id);
-        *self.next_loop_var_id += 1;
-        name
+        fresh_loop_var(self.next_loop_var_id, prefix)
     }
 
     /// Declares the per-line `fIdx<id>` counter for an `IfWrapping` delay line,
@@ -784,15 +783,6 @@ pub(super) struct DelayLoweringCtx<'a> {
     pub(super) immediate_statements: &'a mut Vec<FirId>,
     pub(super) post_output_statements: &'a mut Vec<FirId>,
     pub(super) next_loop_var_id: &'a mut usize,
-}
-
-impl DelayLoweringCtx<'_> {
-    /// Generates a fresh loop-variable name using the shared monotonic counter.
-    pub(super) fn fresh_loop_var(&mut self, prefix: &str) -> String {
-        let name = format!("{prefix}{}", *self.next_loop_var_id);
-        *self.next_loop_var_id += 1;
-        name
-    }
 }
 
 /// Strategy-local FIR emission API used by `module.rs`.
@@ -1062,58 +1052,15 @@ fn emit_shift_loop(
     delay: i32,
     elem_ty: FirType,
 ) -> FirId {
-    let loop_var = ctx.fresh_loop_var("j");
-    let init = {
-        let delay_val = {
-            let mut b = FirBuilder::new(ctx.store);
-            b.int32(delay)
-        };
-        let mut b = FirBuilder::new(ctx.store);
-        b.declare_var(
-            loop_var.clone(),
-            FirType::Int32,
-            AccessType::Loop,
-            Some(delay_val),
-        )
-    };
-    let end = {
-        let mut b = FirBuilder::new(ctx.store);
-        b.int32(0)
-    };
-    let step = {
-        let mut b = FirBuilder::new(ctx.store);
-        b.int32(-1)
-    };
-    let body = {
-        let j_for_store = {
-            let mut b = FirBuilder::new(ctx.store);
-            b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
-        };
-        let j_minus_1 = {
-            let j = {
-                let mut b = FirBuilder::new(ctx.store);
-                b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
-            };
-            let one = {
-                let mut b = FirBuilder::new(ctx.store);
-                b.int32(1)
-            };
-            let mut b = FirBuilder::new(ctx.store);
-            b.binop(FirBinOp::Sub, j, one, FirType::Int32)
-        };
-        let loaded = {
-            let mut b = FirBuilder::new(ctx.store);
-            b.load_table(name, AccessType::Struct, j_minus_1, elem_ty.clone())
-        };
-        let stored = {
-            let mut b = FirBuilder::new(ctx.store);
-            b.store_table(name, AccessType::Struct, j_for_store, loaded)
-        };
-        let mut b = FirBuilder::new(ctx.store);
-        b.block(&[stored])
-    };
-    let mut b = FirBuilder::new(ctx.store);
-    b.for_loop(loop_var, init, end, step, body, true)
+    emit_reverse_array_shift_loop(
+        ctx.store,
+        ctx.next_loop_var_id,
+        "j",
+        name,
+        delay,
+        elem_ty,
+        AccessType::Struct,
+    )
 }
 
 /// Computes the read index for an `IfWrapping` delay line:
