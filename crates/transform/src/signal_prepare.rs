@@ -97,19 +97,20 @@ pub enum SimpleSigType {
 
 /// Result of preparing a propagated signal list for FIR lowering.
 ///
-/// Owns a private staging arena so preparation passes can rewrite the signal
-/// forest without mutating the original parse/eval arena.
+/// Owns a private staging arena and prepared output roots. Callers observe that
+/// staged forest through read-only accessors so the preparation boundary stays
+/// encapsulated and can be explicitly re-verified when needed.
 #[derive(Debug)]
 pub struct PreparedSignals {
     /// Private staging arena containing the prepared signal forest.
-    pub arena: TreeArena,
+    arena: TreeArena,
     /// Prepared output roots interned in [`Self::arena`].
-    pub outputs: Vec<SigId>,
+    outputs: Vec<SigId>,
     /// Reduced type annotation for prepared signal nodes (for promoter + FIR lowerer).
-    pub(crate) types: HashMap<SigId, SimpleSigType>,
+    types: HashMap<SigId, SimpleSigType>,
     /// Full signal type annotation from the `sigtype` type system.
     /// Carries interval bounds, variability, and all other lattice qualifiers.
-    pub(crate) sig_types: HashMap<SigId, SigType>,
+    sig_types: HashMap<SigId, SigType>,
 }
 
 /// Prepared-signal forest that passed the explicit postcondition verifier.
@@ -124,6 +125,18 @@ pub struct VerifiedPreparedSignals {
 }
 
 impl PreparedSignals {
+    /// Returns the prepared staging arena.
+    #[must_use]
+    pub fn arena(&self) -> &TreeArena {
+        &self.arena
+    }
+
+    /// Returns the prepared output roots.
+    #[must_use]
+    pub fn outputs(&self) -> &[SigId] {
+        &self.outputs
+    }
+
     /// Returns the reduced prepared type for one signal node, when available.
     #[must_use]
     pub fn ty(&self, sig: SigId) -> Option<SimpleSigType> {

@@ -31,8 +31,8 @@
 //! General `SIGDELAY` parity remains intentionally partial: the fast-lane now
 //! supports constant integer delay amounts through fixed-size circular buffers,
 //! and variable delays where the amount comes from a UI control with a bounded
-//! interval (slider/numentry). Delays with unbounded intervals are
-//! available.
+//! interval (slider/numentry). Delays with unbounded intervals are currently
+//! rejected as unsupported.
 //!
 //! Other signal families still return typed `FRS-SFIR-*` errors until the
 //! remaining lowering slices are implemented.

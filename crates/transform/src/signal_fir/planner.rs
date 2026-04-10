@@ -13,7 +13,7 @@ use signals::SigId;
 /// lowering strategies.  Later planning slices can extend this struct without
 /// changing the basic contract consumed by `module.rs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SignalFirPlan {
+pub(super) struct SignalFirPlan {
     /// Number of output signals requested for compilation.
     pub signal_count: usize,
     /// Number of DSP input channels.
@@ -35,7 +35,7 @@ pub struct SignalFirPlan {
 /// In other words, this planner is the contract gate for the fast-lane, not an
 /// optimizer: it rejects malformed entry conditions early and leaves all
 /// lowering choices to subsequent stages.
-pub fn plan_signals(
+pub(super) fn plan_signals(
     signals: &[SigId],
     num_inputs: usize,
     num_outputs: usize,

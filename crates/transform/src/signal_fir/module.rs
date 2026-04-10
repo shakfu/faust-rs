@@ -216,7 +216,7 @@ const INT_FUN_PROTO_ORDER: &[&str] = &["abs", "min_i", "max_i"];
 ///   variable delay sizing via [`sigtype::check_delay_interval`].
 /// - `real_ty` – internal computation type (`Float32` or `Float64`).
 #[allow(clippy::too_many_arguments)]
-pub fn build_module(
+pub(super) fn build_module(
     plan: &SignalFirPlan,
     module_name: &str,
     arena: &TreeArena,

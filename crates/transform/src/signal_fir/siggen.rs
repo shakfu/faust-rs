@@ -61,13 +61,13 @@ pub(super) fn interpret_generator(
                     format!("SIGGEN interpreter preparation failed: {err}"),
                 )
             })?;
-    let prepared_sig = prepared.outputs.first().copied().ok_or_else(|| {
+    let prepared_sig = prepared.outputs().first().copied().ok_or_else(|| {
         SignalFirError::new(
             SignalFirErrorCode::UnsupportedSignalNode,
             "SIGGEN interpreter received empty prepared output list",
         )
     })?;
-    let mut interp = GeneratorInterpreter::new(&prepared.arena, &prepared.types);
+    let mut interp = GeneratorInterpreter::new(prepared.arena(), prepared.types_map());
     let mut results = Vec::with_capacity(size);
     for _ in 0..size {
         let val = interp.eval(prepared_sig)?;

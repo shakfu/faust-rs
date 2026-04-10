@@ -139,7 +139,11 @@ fn compile_fastlane_without_ui(
 fn analyze_delays_for_prepared(prepared: &crate::signal_prepare::PreparedSignals) -> DelayManager {
     let mut delay = DelayManager::new(DelayOptions::default());
     delay
-        .analyze_signals(&prepared.arena, prepared.sig_types_map(), &prepared.outputs)
+        .analyze_signals(
+            prepared.arena(),
+            prepared.sig_types_map(),
+            prepared.outputs(),
+        )
         .expect("delay analysis should succeed on prepared signals");
     delay
 }
@@ -1062,8 +1066,8 @@ fn rec_proj_lowers_without_placeholder_nodes() {
     let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
         .expect("rec/proj signal should prepare");
     let out = compile_fastlane_without_ui(
-        &prepared.arena,
-        &prepared.outputs,
+        prepared.arena(),
+        prepared.outputs(),
         1,
         1,
         &SignalFirOptions::default(),
@@ -1160,8 +1164,8 @@ fn recursive_feedback_delay1_reuses_single_scalar_recursion_state() {
     let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
         .expect("feedback group should prepare");
     let out = compile_fastlane_without_ui(
-        &prepared.arena,
-        &prepared.outputs,
+        prepared.arena(),
+        prepared.outputs(),
         0,
         1,
         &SignalFirOptions::default(),
@@ -1276,8 +1280,8 @@ fn multi_output_recursive_group_stays_two_slot_array_backed() {
     let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
         .expect("multi-output feedback group should prepare");
     let out = compile_fastlane_without_ui(
-        &prepared.arena,
-        &prepared.outputs,
+        prepared.arena(),
+        prepared.outputs(),
         2,
         1,
         &SignalFirOptions::default(),
@@ -1330,11 +1334,11 @@ fn delay_analysis_attributes_nested_delay1_chain_to_recursion_output() {
         .expect("nested feedback group should prepare");
     let delay = analyze_delays_for_prepared(&prepared);
     let signals::SigMatch::Proj(index, prepared_group) =
-        signals::match_sig(&prepared.arena, prepared.outputs[0])
+        signals::match_sig(prepared.arena(), prepared.outputs()[0])
     else {
         panic!("prepared output should stay a recursion projection");
     };
-    let (var, _bodies) = match_sym_rec(&prepared.arena, prepared_group)
+    let (var, _bodies) = match_sym_rec(prepared.arena(), prepared_group)
         .expect("prepared projection should target a symbolic recursion group");
     let analysis = delay
         .rec_output_analysis(var.as_u32(), index as usize)
@@ -1373,11 +1377,11 @@ fn delay_analysis_attributes_fixed_delay_over_feedback_delay1_to_recursion_outpu
         .expect("delayed feedback group should prepare");
     let delay = analyze_delays_for_prepared(&prepared);
     let signals::SigMatch::Proj(index, prepared_group) =
-        signals::match_sig(&prepared.arena, prepared.outputs[0])
+        signals::match_sig(prepared.arena(), prepared.outputs()[0])
     else {
         panic!("prepared output should stay a recursion projection");
     };
-    let (var, _bodies) = match_sym_rec(&prepared.arena, prepared_group)
+    let (var, _bodies) = match_sym_rec(prepared.arena(), prepared_group)
         .expect("prepared projection should target a symbolic recursion group");
     let analysis = delay
         .rec_output_analysis(var.as_u32(), index as usize)
@@ -1414,8 +1418,8 @@ fn nested_feedback_delay1_chain_reuses_one_recursion_carrier() {
     let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
         .expect("nested feedback group should prepare");
     let out = compile_fastlane_without_ui(
-        &prepared.arena,
-        &prepared.outputs,
+        prepared.arena(),
+        prepared.outputs(),
         0,
         1,
         &SignalFirOptions::default(),
@@ -1495,8 +1499,8 @@ fn fixed_delay_over_feedback_chain_reuses_one_recursion_carrier() {
     let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
         .expect("delayed feedback group should prepare");
     let out = compile_fastlane_without_ui(
-        &prepared.arena,
-        &prepared.outputs,
+        prepared.arena(),
+        prepared.outputs(),
         1,
         1,
         &SignalFirOptions::default(),
@@ -1578,8 +1582,8 @@ fn top_level_recursion_projection_delay_chain_reuses_one_recursion_carrier() {
     let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
         .expect("top-level delayed recursion projection should prepare");
     let out = compile_fastlane_without_ui(
-        &prepared.arena,
-        &prepared.outputs,
+        prepared.arena(),
+        prepared.outputs(),
         1,
         1,
         &SignalFirOptions::default(),
@@ -1659,8 +1663,8 @@ fn nested_feedback_delay_chain_of_three_uses_shift_loop_before_mcd_boundary() {
     let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
         .expect("nested feedback group should prepare");
     let out = compile_fastlane_without_ui(
-        &prepared.arena,
-        &prepared.outputs,
+        prepared.arena(),
+        prepared.outputs(),
         0,
         1,
         &SignalFirOptions::default(),
@@ -1737,8 +1741,8 @@ fn large_feedback_delay_chain_uses_circular_recursion_carrier_past_copy_threshol
     let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
         .expect("delayed feedback group should prepare");
     let out = compile_fastlane_without_ui(
-        &prepared.arena,
-        &prepared.outputs,
+        prepared.arena(),
+        prepared.outputs(),
         1,
         1,
         &SignalFirOptions {
@@ -2137,11 +2141,11 @@ fn integer_recursive_min_lowers_to_int_recursion_and_min_i_call() {
 
     let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
         .expect("integer recursion should prepare");
-    assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
+    assert_eq!(prepared.ty(prepared.outputs()[0]), Some(SimpleSigType::Int));
 
     let out = compile_fastlane_without_ui(
-        &prepared.arena,
-        &prepared.outputs,
+        prepared.arena(),
+        prepared.outputs(),
         0,
         1,
         &SignalFirOptions::default(),
@@ -2199,11 +2203,11 @@ fn integer_recursive_abs_lowers_to_int_recursion_and_abs_call() {
 
     let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
         .expect("integer abs recursion should prepare");
-    assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Int));
+    assert_eq!(prepared.ty(prepared.outputs()[0]), Some(SimpleSigType::Int));
 
     let out = compile_fastlane_without_ui(
-        &prepared.arena,
-        &prepared.outputs,
+        prepared.arena(),
+        prepared.outputs(),
         0,
         1,
         &SignalFirOptions::default(),

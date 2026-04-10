@@ -81,7 +81,7 @@ fn zita_min_preparation_preserves_multi_output_recursion_groups() {
             &UiProgram::empty(),
         )
         .expect("signal preparation should succeed for zita_min");
-        assert_eq!(prepared.outputs.len(), 2);
+        assert_eq!(prepared.outputs().len(), 2);
     });
 }
 
