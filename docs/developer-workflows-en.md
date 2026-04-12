@@ -82,7 +82,7 @@ Useful current CLI extras for developer workflows:
 - `--dump-fir-verify` for FIR verifier reports without backend emission
 - `--dump-cranelift` for the experimental backend status report
 - `--fir-fixture <name>` / `--list-fir-fixtures` for backend-only debugging
-- `--signal-fir-lane legacy|fast` to force the lowering lane in FIR-backed modes
+- `--signal-fir-lane fast` for the transform-owned lowering route in FIR-backed modes
 
 ## 6. Golden workflow
 
@@ -121,7 +121,6 @@ Key `xtask` commands beyond golden snapshots:
 ```bash
 cargo run -p xtask -- interp-trace-gen
 cargo run -p xtask -- interp-trace-check
-cargo run -p xtask -- interp-trace-diff-lanes
 cargo run -p xtask -- fir-dump-scan --lane fast
 cargo run -p xtask -- backend-align-smoke
 ```
@@ -130,8 +129,6 @@ Notes:
 
 - `interp-trace-gen` / `interp-trace-check` operate on `tests/runtime_corpus/`
   and persist/validate traces under `tests/runtime_traces/rust/`.
-- `interp-trace-diff-lanes` compares `legacy` vs `fast` signal->FIR lowering on
-  the runtime-trace subset.
 - `fir-dump-scan` is a structural regression guard on textual FIR dumps.
 - `backend-align-smoke` and `backend-align-nightly` orchestrate broader
-  alignment checks, including runtime/lane/FIR-dump coverage.
+  alignment checks, including runtime/FIR-dump coverage.

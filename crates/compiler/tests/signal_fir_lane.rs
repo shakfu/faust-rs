@@ -182,13 +182,11 @@ fn compile_c_with_lane_and_real_type(
 }
 
 #[test]
-fn legacy_and_fastlane_both_compile_lowpass_feedback_fixture() {
-    let legacy = compile_cpp_with_lane("rep_05_one_pole_lowpass.dsp", SignalFirLane::LegacyBridge);
+fn fastlane_compiles_lowpass_feedback_fixture() {
     let fast = compile_cpp_with_lane(
         "rep_05_one_pole_lowpass.dsp",
         SignalFirLane::TransformFastLane,
     );
-    assert!(legacy.contains("class mydsp : public dsp"));
     assert!(fast.contains("class mydsp : public dsp"));
     assert!(fast.contains("void compute("));
 }
@@ -286,13 +284,11 @@ fn fastlane_interp_delay_lines_do_not_overrun_after_ring_wrap() {
 }
 
 #[test]
-fn legacy_and_fastlane_both_compile_feedback_projection_fixture() {
-    let legacy = compile_cpp_with_lane("rep_23_feedback_simple.dsp", SignalFirLane::LegacyBridge);
+fn fastlane_compiles_feedback_projection_fixture() {
     let fast = compile_cpp_with_lane(
         "rep_23_feedback_simple.dsp",
         SignalFirLane::TransformFastLane,
     );
-    assert!(legacy.contains("class mydsp : public dsp"));
     assert!(fast.contains("class mydsp : public dsp"));
     assert!(fast.contains("void compute("));
     assert!(
@@ -306,16 +302,11 @@ fn legacy_and_fastlane_both_compile_feedback_projection_fixture() {
 }
 
 #[test]
-fn legacy_and_fastlane_both_compile_environment_waveform_fixture() {
-    let legacy = compile_cpp_with_lane(
-        "rep_20_environment_waveform.dsp",
-        SignalFirLane::LegacyBridge,
-    );
+fn fastlane_compiles_environment_waveform_fixture() {
     let fast = compile_cpp_with_lane(
         "rep_20_environment_waveform.dsp",
         SignalFirLane::TransformFastLane,
     );
-    assert!(legacy.contains("class mydsp : public dsp"));
     assert!(fast.contains("class mydsp : public dsp"));
     assert!(fast.contains("void compute("));
     assert!(
@@ -325,16 +316,11 @@ fn legacy_and_fastlane_both_compile_environment_waveform_fixture() {
 }
 
 #[test]
-fn legacy_and_fastlane_both_compile_extended_primitives_fixture() {
-    let legacy = compile_cpp_with_lane(
-        "rep_31_extended_primitives.dsp",
-        SignalFirLane::LegacyBridge,
-    );
+fn fastlane_compiles_extended_primitives_fixture() {
     let fast = compile_cpp_with_lane(
         "rep_31_extended_primitives.dsp",
         SignalFirLane::TransformFastLane,
     );
-    assert!(legacy.contains("class mydsp : public dsp"));
     assert!(fast.contains("class mydsp : public dsp"));
     assert!(fast.contains("void compute("));
     assert!(
@@ -344,13 +330,11 @@ fn legacy_and_fastlane_both_compile_extended_primitives_fixture() {
 }
 
 #[test]
-fn legacy_and_fastlane_both_compile_nonlinear_clip_fixture() {
-    let legacy = compile_cpp_with_lane("rep_07_nonlinear_clip.dsp", SignalFirLane::LegacyBridge);
+fn fastlane_compiles_nonlinear_clip_fixture() {
     let fast = compile_cpp_with_lane(
         "rep_07_nonlinear_clip.dsp",
         SignalFirLane::TransformFastLane,
     );
-    assert!(legacy.contains("class mydsp : public dsp"));
     assert!(fast.contains("class mydsp : public dsp"));
     assert!(fast.contains("void compute("));
     assert!(
@@ -382,19 +366,14 @@ fn fastlane_ui_fixture_uses_native_ui_path_without_slider_shims() {
 }
 
 #[test]
-fn legacy_and_fastlane_both_compile_table_fixtures() {
+fn fastlane_compiles_table_fixtures() {
     for file in [
         "rep_34_table_rdtable_readonly_const.dsp",
         "rep_35_table_rwtable_runtime_write.dsp",
         "rep_36_table_rdtable_negative_index.dsp",
         "rep_37_table_rwtable_negative_indices.dsp",
     ] {
-        let legacy = compile_cpp_with_lane(file, SignalFirLane::LegacyBridge);
         let fast = compile_cpp_with_lane(file, SignalFirLane::TransformFastLane);
-        assert!(
-            legacy.contains("class "),
-            "legacy lane should compile table fixture {file}"
-        );
         assert!(
             fast.contains("class "),
             "fast lane should compile table fixture {file}"
@@ -407,10 +386,8 @@ fn legacy_and_fastlane_both_compile_table_fixtures() {
 }
 
 #[test]
-fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
-    let legacy = compile_cpp_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::LegacyBridge);
+fn fastlane_compiles_sine_phasor_fixture() {
     let fast = compile_cpp_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::TransformFastLane);
-    assert!(legacy.contains("class mydsp : public dsp"));
     assert!(fast.contains("class mydsp : public dsp"));
     assert!(fast.contains("void compute("));
     assert!(!fast.contains("frs_"));
@@ -443,9 +420,7 @@ fn legacy_and_fastlane_both_compile_sine_phasor_fixture() {
         "fast lane should lower phasor recursion to either scalar or circular-buffer form"
     );
 
-    let legacy_c = compile_c_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::LegacyBridge);
     let fast_c = compile_c_with_lane("rep_38_sine_phasor.dsp", SignalFirLane::TransformFastLane);
-    assert!(legacy_c.contains("void computemydsp("));
     assert!(fast_c.contains("void computemydsp("));
     assert!(!fast_c.contains("frs_"));
     assert!(fast_c.contains("fHslider"));
@@ -572,19 +547,14 @@ fn fastlane_c_double_keeps_faustfloat_interface_and_uses_double_internal_ops() {
 }
 
 #[test]
-fn legacy_and_fastlane_both_compile_c_table_fixtures_without_shims() {
+fn fastlane_compiles_c_table_fixtures_without_shims() {
     for file in [
         "rep_34_table_rdtable_readonly_const.dsp",
         "rep_35_table_rwtable_runtime_write.dsp",
         "rep_36_table_rdtable_negative_index.dsp",
         "rep_37_table_rwtable_negative_indices.dsp",
     ] {
-        let legacy = compile_c_with_lane(file, SignalFirLane::LegacyBridge);
         let fast = compile_c_with_lane(file, SignalFirLane::TransformFastLane);
-        assert!(
-            legacy.contains("void compute"),
-            "legacy lane should compile C fixture {file}"
-        );
         assert!(
             fast.contains("void compute"),
             "fast lane should compile C fixture {file}"

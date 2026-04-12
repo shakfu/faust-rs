@@ -43,13 +43,12 @@ Top-level compiler facade.  Wires all pipeline stages together behind a single
 
 ### Lane defaults to know
 
-- C / C++ file/source helpers still default to `SignalFirLane::LegacyBridge`.
+- C / C++ file/source helpers now default to `SignalFirLane::TransformFastLane`.
 - WASM / strict JSON source helpers default to `SignalFirLane::TransformFastLane`.
 - Interpreter helpers now default to `SignalFirLane::TransformFastLane`.
 - `WasmArtifactRequest::new(...)` defaults to `SignalFirLane::TransformFastLane`.
-- `compile_file_default_to_wasm_artifact(...)` currently remains on the legacy
-  default path for file-backed convenience calls; use the explicit `_with_lane`
-  form when the lane choice matters.
+- `compile_file_default_to_wasm_artifact(...)` also defaults to
+  `SignalFirLane::TransformFastLane`.
 
 ## Pipeline
 
@@ -57,12 +56,11 @@ Top-level compiler facade.  Wires all pipeline stages together behind a single
 parse → eval → propagate → [optional signal→FIR] → codegen (C / C++ / .fbc / WASM / JSON)
 ```
 
-Two lanes coexist to de-risk migration:
+The public signal->FIR route is:
 
 | Lane | Description |
 |---|---|
-| `SignalFirLane::LegacyBridge` | Original signal→FIR path |
-| `SignalFirLane::TransformFastLane` | New `transform::signal_fir` path |
+| `SignalFirLane::TransformFastLane` | `transform::signal_prepare` + `transform::signal_fir` |
 
 ## Facade responsibilities
 

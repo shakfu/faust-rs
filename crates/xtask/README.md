@@ -25,7 +25,6 @@ cargo run -p xtask -- <command>
 | `interp-trace-gen-cppfbc` | Batch-generate persisted runtime traces from C++ Faust `.fbc` files and execute them with the Rust `interp` runtime |
 | `interp-trace-gen` | Phase 2 scaffold: generate runtime trace snapshots for `tests/runtime_corpus/` |
 | `interp-trace-check` | Phase 2 scaffold: compare runtime traces against generated snapshots (tolerant float compare) |
-| `interp-trace-diff-lanes` | Phase 3 scaffold: compare `legacy` vs `fast-lane` runtime traces |
 | `fir-dump-scan` | Structural scan of `dump_fir` output for loop-body expansion regressions |
 | `build-faustwasm-compiler-module` | Build `wasm-ffi` for `wasm32-unknown-unknown` and verify the raw export ABI |
 | `backend-align-smoke` | CI-friendly orchestration of golden/runtime/lane/FIR smoke alignment checks |
@@ -179,18 +178,6 @@ Current Phase 2 scaffold behavior:
 - supports `--strict-fir-types` to enforce a clean FIR typing subset during
   generation/check runs
 
-## `interp-trace-diff-lanes` (Phase 3 scaffold)
-
-Compares runtime traces produced by the `legacy` and `fast-lane` signal->FIR
-lowerings on the snapshot-enabled runtime corpus subset.
-
-Current scaffold behavior:
-- reuses the same fixture/scenario mapping as Phase 2
-- compares traces with the same tolerance-based float comparator
-- skips cases when one lane currently panics/errors (prints a skip reason)
-- supports `--strict-fir-types` to reject lanes that only verify with
-  type-related warnings/errors
-
 ## `fir-dump-scan`
 
 Scans `dump_fir` output on selected corpus cases to catch structural regressions
@@ -213,7 +200,6 @@ checks into one alignment workflow.
 These commands can combine:
 
 - golden checks,
-- lane-diff runtime traces,
 - FIR dump scans,
 - interpreter alignment checks, including `opt_level=0` vs `opt_level=max`
   drift detection on the covered subset.

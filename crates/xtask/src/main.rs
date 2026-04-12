@@ -11,7 +11,6 @@
 //! - Runtime trace validation (interp backend):
 //!   - `interp-trace-dump` (Phase 1 harness prototype)
 //!   - `interp-trace-gen`, `interp-trace-check` (Phase 2 snapshot scaffold)
-//!   - `interp-trace-diff-lanes` (Phase 3 lane differential scaffold)
 //!   - `interp-trace-dump-cppfbc` (C++ Faust `.fbc` -> Rust interp runtime)
 //!   - `interp-trace-gen-cppfbc` (batch-generate persisted traces from C++ `.fbc`)
 //!   - `backend-align-smoke` (CI-friendly smoke alignment orchestration,
@@ -29,14 +28,13 @@
 //! - Normalized output text before snapshot comparison.
 //! - Fail-fast behavior when one case diverges to preserve CI signal quality.
 
-use fir::{FirMatch, dump_fir, match_fir};
+use fir::dump_fir;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
@@ -48,16 +46,15 @@ Usage:
   cargo run -p xtask -- golden-check-cpp
   cargo run -p xtask -- golden-gen-rust
   cargo run -p xtask -- golden-gen-cpp [-- <extra args passed to FAUST_CPP_BIN>]
-  cargo run -p xtask -- interp-trace-dump --case <tests/corpus/foo.dsp> [--scenario zeros|impulse|ramp|sine] [--lane legacy|fast] [--strict-fir-types]
+  cargo run -p xtask -- interp-trace-dump --case <tests/corpus/foo.dsp> [--scenario zeros|impulse|ramp|sine] [--lane fast] [--strict-fir-types]
   cargo run -p xtask -- interp-trace-dump-cppfbc --case <tests/corpus/foo.dsp> [--scenario zeros|impulse|ramp|sine] [--faust-bin /path/to/faust]
   cargo run -p xtask -- interp-trace-gen-cppfbc [--case <tests/corpus/foo.dsp>] [--scenario zeros|impulse|ramp|sine] [--out-dir <dir>] [--faust-bin /path/to/faust]
-  cargo run -p xtask -- interp-trace-gen [--case <tests/runtime_corpus/foo.dsp>] [--lane legacy|fast] [--strict-fir-types]
-  cargo run -p xtask -- interp-trace-check [--case <tests/runtime_corpus/foo.dsp>] [--lane legacy|fast] [--strict-fir-types]
-  cargo run -p xtask -- interp-trace-diff-lanes [--case <tests/runtime_corpus/foo.dsp>] [--strict-fir-types]
-  cargo run -p xtask -- fir-dump-scan [--case <tests/corpus/foo.dsp> ...] [--lane legacy|fast]
+  cargo run -p xtask -- interp-trace-gen [--case <tests/runtime_corpus/foo.dsp>] [--lane fast] [--strict-fir-types]
+  cargo run -p xtask -- interp-trace-check [--case <tests/runtime_corpus/foo.dsp>] [--lane fast] [--strict-fir-types]
+  cargo run -p xtask -- fir-dump-scan [--case <tests/corpus/foo.dsp> ...] [--lane fast]
   cargo run -p xtask -- build-faustwasm-compiler-module [--debug]
-  cargo run -p xtask -- backend-align-smoke [--case <tests/runtime_corpus/foo.dsp> ...] [--strict-fir-types] [--skip-golden] [--skip-diff-lanes] [--skip-fir-dump-scan]
-  cargo run -p xtask -- backend-align-nightly [--strict-fir-types] [--skip-golden] [--skip-diff-lanes] [--skip-fir-dump-scan]
+  cargo run -p xtask -- backend-align-smoke [--case <tests/runtime_corpus/foo.dsp> ...] [--strict-fir-types] [--skip-golden] [--skip-fir-dump-scan]
+  cargo run -p xtask -- backend-align-nightly [--strict-fir-types] [--skip-golden] [--skip-fir-dump-scan]
   cargo run -p xtask -- parser-parity-report
   cargo run -p xtask -- corpus-status-report
   cargo run -p xtask -- cpp-backend-diff-report
@@ -119,7 +116,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "interp-trace-gen-cppfbc" => interp_trace_gen_cppfbc(args)?,
         "interp-trace-gen" => interp_trace_gen(args)?,
         "interp-trace-check" => interp_trace_check(args)?,
-        "interp-trace-diff-lanes" => interp_trace_diff_lanes(args)?,
         "fir-dump-scan" => fir_dump_scan(args)?,
         "build-faustwasm-compiler-module" => build_faustwasm_compiler_module(args)?,
         "backend-align-smoke" => backend_align_smoke(args)?,
@@ -383,7 +379,6 @@ struct BackendAlignSmokeOptions {
     cases: Vec<PathBuf>,
     strict_fir_types: bool,
     skip_golden: bool,
-    skip_diff_lanes: bool,
     skip_fir_dump_scan: bool,
 }
 
@@ -427,22 +422,6 @@ fn backend_align_smoke(
         interp_trace_check(trace_check_args.into_iter())?;
     }
 
-    if !options.skip_diff_lanes {
-        for case in &cases {
-            let mut diff_args = vec!["--case".to_owned(), case.display().to_string()];
-            if options.strict_fir_types {
-                diff_args.push("--strict-fir-types".to_owned());
-            }
-            println!(
-                "backend-align-smoke: interp-trace-diff-lanes {}",
-                case.display()
-            );
-            interp_trace_diff_lanes(diff_args.into_iter())?;
-        }
-    } else {
-        println!("backend-align-smoke: skip interp-trace-diff-lanes");
-    }
-
     if !options.skip_fir_dump_scan {
         let mut scan_args: Vec<String> = Vec::new();
         for case in backend_align_smoke_fir_cases()? {
@@ -458,11 +437,10 @@ fn backend_align_smoke(
     }
 
     println!(
-        "backend-align-smoke: OK (runtime_cases={}, strict_fir_types={}, golden={}, cranelift_strict_subset=true, interp_opt_levels=true, diff_lanes={}, fir_dump_scan={})",
+        "backend-align-smoke: OK (runtime_cases={}, strict_fir_types={}, golden={}, cranelift_strict_subset=true, interp_opt_levels=true, fir_dump_scan={})",
         cases.len(),
         options.strict_fir_types,
         !options.skip_golden,
-        !options.skip_diff_lanes,
         !options.skip_fir_dump_scan
     );
     Ok(())
@@ -484,10 +462,9 @@ fn parse_backend_align_smoke_options(
             }
             "--strict-fir-types" => options.strict_fir_types = true,
             "--skip-golden" => options.skip_golden = true,
-            "--skip-diff-lanes" => options.skip_diff_lanes = true,
             "--skip-fir-dump-scan" => options.skip_fir_dump_scan = true,
             "--help" | "-h" => {
-                return Err("usage: cargo run -p xtask -- backend-align-smoke [--case <tests/runtime_corpus/foo.dsp> ...] [--strict-fir-types] [--skip-golden] [--skip-diff-lanes] [--skip-fir-dump-scan]".into());
+                return Err("usage: cargo run -p xtask -- backend-align-smoke [--case <tests/runtime_corpus/foo.dsp> ...] [--strict-fir-types] [--skip-golden] [--skip-fir-dump-scan]".into());
             }
             other => return Err(format!("unknown backend-align-smoke option: {other}").into()),
         }
@@ -605,7 +582,6 @@ fn run_cranelift_ffi_runtime_diff_smoke() -> Result<(), Box<dyn std::error::Erro
 struct BackendAlignNightlyOptions {
     strict_fir_types: bool,
     skip_golden: bool,
-    skip_diff_lanes: bool,
     skip_fir_dump_scan: bool,
 }
 
@@ -636,17 +612,6 @@ fn backend_align_nightly(
     println!("backend-align-nightly: interp-trace-check (all runtime cases, fast lane)");
     interp_trace_check(trace_check_args.into_iter())?;
 
-    if !options.skip_diff_lanes {
-        let mut diff_args: Vec<String> = Vec::new();
-        if options.strict_fir_types {
-            diff_args.push("--strict-fir-types".to_owned());
-        }
-        println!("backend-align-nightly: interp-trace-diff-lanes (all runtime cases)");
-        interp_trace_diff_lanes(diff_args.into_iter())?;
-    } else {
-        println!("backend-align-nightly: skip interp-trace-diff-lanes");
-    }
-
     if !options.skip_fir_dump_scan {
         println!("backend-align-nightly: fir-dump-scan (all corpus cases, fast lane)");
         fir_dump_scan(["--lane".to_owned(), "fast".to_owned()].into_iter())?;
@@ -655,11 +620,8 @@ fn backend_align_nightly(
     }
 
     println!(
-        "backend-align-nightly: OK (strict_fir_types={}, golden={}, cranelift_strict_subset=true, diff_lanes={}, fir_dump_scan={})",
-        options.strict_fir_types,
-        !options.skip_golden,
-        !options.skip_diff_lanes,
-        !options.skip_fir_dump_scan
+        "backend-align-nightly: OK (strict_fir_types={}, golden={}, cranelift_strict_subset=true, fir_dump_scan={})",
+        options.strict_fir_types, !options.skip_golden, !options.skip_fir_dump_scan
     );
     Ok(())
 }
@@ -673,10 +635,9 @@ fn parse_backend_align_nightly_options(
         match arg.as_str() {
             "--strict-fir-types" => options.strict_fir_types = true,
             "--skip-golden" => options.skip_golden = true,
-            "--skip-diff-lanes" => options.skip_diff_lanes = true,
             "--skip-fir-dump-scan" => options.skip_fir_dump_scan = true,
             "--help" | "-h" => {
-                return Err("usage: cargo run -p xtask -- backend-align-nightly [--strict-fir-types] [--skip-golden] [--skip-diff-lanes] [--skip-fir-dump-scan]".into());
+                return Err("usage: cargo run -p xtask -- backend-align-nightly [--strict-fir-types] [--skip-golden] [--skip-fir-dump-scan]".into());
             }
             other => return Err(format!("unknown backend-align-nightly option: {other}").into()),
         }
@@ -787,13 +748,13 @@ fn parse_fir_dump_scan_options(
             }
             "--lane" => {
                 let Some(value) = args.next() else {
-                    return Err("--lane requires legacy|fast".into());
+                    return Err("--lane requires fast".into());
                 };
                 options.lane = TraceLane::parse(&value)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
             }
             "--help" | "-h" => {
-                return Err("usage: cargo run -p xtask -- fir-dump-scan [--case <tests/corpus/foo.dsp> ...] [--lane legacy|fast]".into());
+                return Err("usage: cargo run -p xtask -- fir-dump-scan [--case <tests/corpus/foo.dsp> ...] [--lane fast]".into());
             }
             other => return Err(format!("unknown fir-dump-scan option: {other}").into()),
         }
@@ -980,7 +941,6 @@ impl TraceScenario {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Interpreter lane used by runtime-trace workflows.
 enum TraceLane {
-    Legacy,
     Fast,
 }
 
@@ -988,7 +948,6 @@ impl TraceLane {
     /// Returns the stable textual label used in logs and snapshots.
     fn as_str(self) -> &'static str {
         match self {
-            Self::Legacy => "legacy",
             Self::Fast => "fast-lane",
         }
     }
@@ -996,16 +955,14 @@ impl TraceLane {
     /// Parses the accepted CLI aliases for one interpreter lane.
     fn parse(s: &str) -> Result<Self, String> {
         match s {
-            "legacy" => Ok(Self::Legacy),
             "fast" | "fast-lane" | "transform" => Ok(Self::Fast),
-            _ => Err(format!("unknown lane '{s}' (expected: legacy|fast)")),
+            _ => Err(format!("unknown lane '{s}' (expected: fast)")),
         }
     }
 
     /// Maps the CLI/runtime-trace lane to the compiler's signal-to-FIR lane.
     fn to_signal_fir_lane(self) -> compiler::SignalFirLane {
         match self {
-            Self::Legacy => compiler::SignalFirLane::LegacyBridge,
             Self::Fast => compiler::SignalFirLane::TransformFastLane,
         }
     }
@@ -1277,7 +1234,7 @@ fn parse_interp_trace_dump_options(
                 options.out = Some(PathBuf::from(path));
             }
             "--help" | "-h" => {
-                return Err("usage: cargo run -p xtask -- interp-trace-dump --case <path> [--scenario zeros|impulse|ramp|sine] [--lane legacy|fast] [--sample-rate N] [--block-size N] [--num-blocks N] [--strict-fir-types] [--out path]".into());
+                return Err("usage: cargo run -p xtask -- interp-trace-dump --case <path> [--scenario zeros|impulse|ramp|sine] [--lane fast] [--sample-rate N] [--block-size N] [--num-blocks N] [--strict-fir-types] [--out path]".into());
             }
             other => {
                 return Err(format!("unknown interp-trace-dump option: {other}").into());
@@ -1600,145 +1557,7 @@ fn interp_trace_diff_opt_levels_cases(
     Ok(())
 }
 
-/// Compares legacy and fast interpreter lanes directly without using snapshots.
-///
-/// This is used to detect semantic drift between the old FIR bridge and the
-/// transform fast lane while normalizing non-semantic lane labels.
-fn interp_trace_diff_lanes(
-    mut args: impl Iterator<Item = String>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let options = parse_interp_trace_batch_options(&mut args)?;
-    let tol = TraceCompareTolerances::default();
-    let cases = runtime_trace_cases(&options)?;
-    let mut compared = 0usize;
-    for case in cases {
-        let scenarios = trace_scenarios_for_runtime_case(&case)?;
-        if scenarios.is_empty() {
-            println!(
-                "skip {} (no snapshot-enabled scenarios yet)",
-                case.display()
-            );
-            continue;
-        }
-        let legacy_is_stub = legacy_interp_bridge_is_nonsemantic_stub(&case)?;
-        for scenario in scenarios {
-            if legacy_is_stub {
-                println!(
-                    "skip {} [{}] (legacy lane FIR bridge is non-semantic label-only stub)",
-                    case.display(),
-                    scenario.as_str()
-                );
-                continue;
-            }
-            let legacy = match run_interp_trace_case_catching_panic(&InterpTraceDumpOptions {
-                case: case.clone(),
-                scenario,
-                lane: TraceLane::Legacy,
-                sample_rate: options.sample_rate,
-                block_size: options.block_size,
-                num_blocks: options.num_blocks,
-                strict_fir_types: options.strict_fir_types,
-                out: None,
-            }) {
-                Ok(trace) => trace,
-                Err(reason) => {
-                    println!(
-                        "skip {} [{}] (legacy lane panic/error: {reason})",
-                        case.display(),
-                        scenario.as_str()
-                    );
-                    continue;
-                }
-            };
-            let fast = match run_interp_trace_case_catching_panic(&InterpTraceDumpOptions {
-                case: case.clone(),
-                scenario,
-                lane: TraceLane::Fast,
-                sample_rate: options.sample_rate,
-                block_size: options.block_size,
-                num_blocks: options.num_blocks,
-                strict_fir_types: options.strict_fir_types,
-                out: None,
-            }) {
-                Ok(trace) => trace,
-                Err(reason) => {
-                    println!(
-                        "skip {} [{}] (fast lane panic/error: {reason})",
-                        case.display(),
-                        scenario.as_str()
-                    );
-                    continue;
-                }
-            };
-            // Compare semantics while ignoring lane labels.
-            let mut fast_norm = fast.clone();
-            let mut legacy_norm = legacy.clone();
-            fast_norm.lane = "normalized".into();
-            legacy_norm.lane = "normalized".into();
-            if let Err(mismatch) = compare_runtime_traces(&legacy_norm, &fast_norm, tol) {
-                return Err(format!(
-                    "interp-trace-diff-lanes failed for {} [{}]: mismatch {:?}",
-                    case.display(),
-                    scenario.as_str(),
-                    mismatch
-                )
-                .into());
-            }
-            println!(
-                "match {} [{}] (legacy vs fast)",
-                case.display(),
-                scenario.as_str()
-            );
-            compared += 1;
-        }
-    }
-    println!("interp-trace-diff-lanes: {compared} trace(s) matched");
-    Ok(())
-}
-
-/// Detects legacy bridge outputs that are still label-only non-semantic stubs.
-///
-/// Such cases are skipped by lane-diff workflows because comparing them against
-/// the fast lane would only produce false mismatches.
-fn legacy_interp_bridge_is_nonsemantic_stub(
-    case: &Path,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    let compiler = compiler::Compiler::new().with_fir_verify_options(compiler::FirVerifyOptions {
-        enabled: false,
-        strict: false,
-    });
-    let fir_out = compiler
-        .compile_file_default_to_fir_with_lane(case, compiler::SignalFirLane::LegacyBridge)?;
-    let FirMatch::Module { functions, .. } = match_fir(&fir_out.store, fir_out.module) else {
-        return Ok(false);
-    };
-    let FirMatch::Block(decls) = match_fir(&fir_out.store, functions) else {
-        return Ok(false);
-    };
-    let Some(compute_id) = decls.iter().copied().find(|id| {
-        matches!(
-            match_fir(&fir_out.store, *id),
-            FirMatch::DeclareFun { ref name, .. } if name == "compute"
-        )
-    }) else {
-        return Ok(false);
-    };
-    let FirMatch::DeclareFun {
-        body: Some(body), ..
-    } = match_fir(&fir_out.store, compute_id)
-    else {
-        return Ok(false);
-    };
-    let FirMatch::Block(stmts) = match_fir(&fir_out.store, body) else {
-        return Ok(false);
-    };
-    Ok(!stmts.is_empty()
-        && stmts
-            .iter()
-            .all(|id| matches!(match_fir(&fir_out.store, *id), FirMatch::Label(_))))
-}
-
-/// Parses shared batch options for `interp-trace-gen`, `check`, and lane diff.
+/// Parses shared batch options for `interp-trace-gen` and `interp-trace-check`.
 fn parse_interp_trace_batch_options(
     args: &mut impl Iterator<Item = String>,
 ) -> Result<InterpTraceBatchOptions, Box<dyn std::error::Error>> {
@@ -1780,7 +1599,7 @@ fn parse_interp_trace_batch_options(
                 options.strict_fir_types = true;
             }
             "--help" | "-h" => {
-                return Err("usage: cargo run -p xtask -- interp-trace-gen [--case <path>] [--lane legacy|fast] [--sample-rate N] [--block-size N] [--num-blocks N] [--strict-fir-types]".into());
+                return Err("usage: cargo run -p xtask -- interp-trace-gen [--case <path>] [--lane fast] [--sample-rate N] [--block-size N] [--num-blocks N] [--strict-fir-types]".into());
             }
             other => return Err(format!("unknown interp-trace batch option: {other}").into()),
         }
@@ -2049,17 +1868,6 @@ fn run_interp_trace_case_from_cpp_fbc(
     trace_result
 }
 
-/// Runs one Rust interpreter trace while converting panics into skip-friendly text.
-fn run_interp_trace_case_catching_panic(
-    options: &InterpTraceDumpOptions,
-) -> Result<RuntimeTrace, String> {
-    match catch_unwind(AssertUnwindSafe(|| run_interp_trace_case(options))) {
-        Ok(Ok(trace)) => Ok(trace),
-        Ok(Err(err)) => Err(err.to_string()),
-        Err(payload) => Err(format!("panic: {}", panic_payload_to_string(payload))),
-    }
-}
-
 /// Rejects traces when FIR verification reported type-focused diagnostics.
 ///
 /// The filter intentionally keeps only typing/layout families so runtime-trace
@@ -2113,17 +1921,6 @@ fn is_fir_type_diagnostic_code(code: &str) -> bool {
         || code.starts_with("FIR-T")
         || code.starts_with("FIR-MA")
         || matches!(code, "FIR-R01" | "FIR-L03" | "FIR-SW01")
-}
-
-/// Best-effort stringification for panic payloads captured by `catch_unwind`.
-fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "non-string panic payload".to_string()
-    }
 }
 
 /// Generates deterministic numeric input channels for one trace scenario.
@@ -4311,7 +4108,6 @@ mod tests {
 
     #[test]
     fn trace_lane_parse_accepts_fast_aliases() {
-        assert_eq!(TraceLane::parse("legacy").unwrap(), TraceLane::Legacy);
         assert_eq!(TraceLane::parse("fast").unwrap(), TraceLane::Fast);
         assert_eq!(TraceLane::parse("fast-lane").unwrap(), TraceLane::Fast);
         assert_eq!(TraceLane::parse("transform").unwrap(), TraceLane::Fast);

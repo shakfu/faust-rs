@@ -82,7 +82,6 @@ enum ErrorVerbosity {
 /// Signal->FIR lane selected from the CLI.
 enum CliSignalFirLane {
     #[default]
-    Legacy,
     Fast,
 }
 
@@ -91,7 +90,6 @@ impl CliSignalFirLane {
     /// by the compiler library.
     fn into_compiler_lane(self) -> SignalFirLane {
         match self {
-            Self::Legacy => SignalFirLane::LegacyBridge,
             Self::Fast => SignalFirLane::TransformFastLane,
         }
     }
@@ -269,7 +267,7 @@ struct CliArgs {
         default_value_t = ErrorVerbosity::Standard
     )]
     error_verbosity: ErrorVerbosity,
-    /// Signal->FIR compilation lane (only valid with `--dump-cpp`/`--dump-c`/`--dump-fir`).
+    /// Signal->FIR compilation lane.
     #[arg(long = "signal-fir-lane", value_enum)]
     signal_fir_lane: Option<CliSignalFirLane>,
     /// Disable FIR verification before codegen / FIR dump.
@@ -285,7 +283,7 @@ struct CliArgs {
     /// buffers and UI zones) always stays at the type declared by the
     /// architecture file.  Passing `--double` switches internal arithmetic
     /// to `double`, matching the `-double` option of the reference Faust
-    /// compiler.  Only effective with `--signal-fir-lane fast`.
+    /// compiler.
     #[arg(long = "double", action = ArgAction::SetTrue)]
     double: bool,
     /// Maximum delay (in samples) below which the shift/copy strategy is used
@@ -756,7 +754,7 @@ fn diagnostic_debug_from_notes(notes: &[Box<str>]) -> serde_json::Value {
 fn print_global_usage_and_exit() -> ! {
     eprintln!("Usage:");
     eprintln!(
-        "  cargo run -p compiler -- -lang c|cpp|fir|wast <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--super-class-name <name>] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- -lang c|cpp|fir|wast <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--super-class-name <name>] [--signal-fir-lane fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!("                           [--no-fir-verify] [--fir-verify-strict]");
     eprintln!("  cargo run -p compiler -- --golden <input.dsp>");
@@ -770,22 +768,22 @@ fn print_global_usage_and_exit() -> ! {
         "  cargo run -p compiler -- --dump-sig <input.dsp> [-o <file>] [-I <dir> ...] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!(
-        "  cargo run -p compiler -- --dump-fir <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- --dump-fir <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!(
-        "  cargo run -p compiler -- --json <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast]"
+        "  cargo run -p compiler -- --json <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane fast]"
     );
     eprintln!(
-        "  cargo run -p compiler -- --dump-fir-verify <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane legacy|fast] [--fir-verify-strict]"
+        "  cargo run -p compiler -- --dump-fir-verify <input.dsp> [-o <file>] [-I <dir> ...] [--signal-fir-lane fast] [--fir-verify-strict]"
     );
     eprintln!(
-        "  cargo run -p compiler -- --dump-cpp <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--super-class-name <name>] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- --dump-cpp <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--super-class-name <name>] [--signal-fir-lane fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     eprintln!(
         "  cargo run -p compiler -- --dump-cpp-from-fbc <input.fbc> [-o <file>] [--cpp-class-name <name>]"
     );
     eprintln!(
-        "  cargo run -p compiler -- --dump-c <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--signal-fir-lane legacy|fast] [--error-format human|json] [--error-verbosity standard|debug]"
+        "  cargo run -p compiler -- --dump-c <input.dsp> [-o <file>] [-I <dir> ...] [--class-name <name>] [--signal-fir-lane fast] [--error-format human|json] [--error-verbosity standard|debug]"
     );
     std::process::exit(2);
 }

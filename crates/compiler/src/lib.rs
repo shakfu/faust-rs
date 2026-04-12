@@ -25,8 +25,8 @@
 //!   C++ compile flows while using Rust structs/results and explicit lane options.
 //!
 //! # Current lane note
-//! - [`SignalFirLane::LegacyBridge`] and [`SignalFirLane::TransformFastLane`]
-//!   coexist to de-risk migration of signal->FIR lowering ownership.
+//! - The active signal->FIR lowering route is [`SignalFirLane::TransformFastLane`],
+//!   owned by `crates/transform`.
 
 pub mod enrobage;
 
@@ -53,13 +53,13 @@ use errors::{
     Diagnostic, DiagnosticBundle, IntoDiagnostic, Label, LabelStyle, Severity, SourceSpan, Stage,
 };
 use fir::{
-    FirBuilder, FirId, FirStore, FirType, NamedType,
+    FirId, FirStore,
     checker::{FirVerifyReport, Severity as FirVerifySeverity, verify_fir_module},
 };
 use parser::VirtualSourceMap;
 use parser::{CompilationMetadataKey, CompilationMetadataSnapshot, ParseOutput, SourceReaderError};
 use propagate::{ArityCache, BoxArity, PropagateError, PropagateUiOptions};
-use signals::{SigId, dump_sig_readable};
+use signals::SigId;
 use sigtype::TypeAnnotator;
 use tlib::NodeKind;
 pub use transform::signal_fir::RealType;
@@ -323,18 +323,13 @@ pub struct Compiler {
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
-/// Selects which signal->FIR lowering lane is used before C++ emission.
+/// Selects which signal->FIR lowering route is used before backend emission.
 ///
-/// # Rustdoc note
-/// - [`SignalFirLane::LegacyBridge`] keeps the current temporary FIR summary bridge.
-/// - [`SignalFirLane::TransformFastLane`] routes lowering through
-///   `transform::signal_fir` (Step 1B wiring; Step 2+ semantics still pending).
+/// The only remaining public route is the transform-owned fast lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SignalFirLane {
-    /// Existing temporary bridge local to `compiler`.
+    /// Lowering lane owned by `crates/transform`.
     #[default]
-    LegacyBridge,
-    /// Experimental lowering lane owned by `crates/transform`.
     TransformFastLane,
 }
 
@@ -605,12 +600,7 @@ impl Compiler {
         self.pipeline_to_signals(source_name, output, None)
     }
 
-    /// Parses + evaluates + propagates one source, then lowers to a temporary
-    /// FIR module and emits C++ text through the module-first backend.
-    ///
-    /// # Rustdoc note
-    /// This is a bridge API for Phase 6 Step 7. The produced C++ currently uses
-    /// a temporary signal-summary module, not the final production FIR lowering.
+    /// Parses + evaluates + propagates one source, then emits C++ text.
     pub fn compile_source_to_cpp(
         &self,
         source_name: &str,
@@ -621,17 +611,11 @@ impl Compiler {
             source_name,
             source,
             options,
-            SignalFirLane::LegacyBridge,
+            SignalFirLane::TransformFastLane,
         )
     }
 
-    /// Parses + evaluates + propagates one source, then lowers to a temporary
-    /// FIR module and emits C text through the module-first backend.
-    ///
-    /// # Rustdoc note
-    /// This is a bridge API for Phase 6 Step 7A. The produced C currently uses
-    /// the same lane selection model as C++ (`legacy` bridge or `transform`
-    /// fast-lane) while parity is being finalized.
+    /// Parses + evaluates + propagates one source, then emits C text.
     pub fn compile_source_to_c(
         &self,
         source_name: &str,
@@ -642,7 +626,7 @@ impl Compiler {
             source_name,
             source,
             options,
-            SignalFirLane::LegacyBridge,
+            SignalFirLane::TransformFastLane,
         )
     }
 
@@ -712,13 +696,9 @@ impl Compiler {
     /// Parses + evaluates + propagates one source, then emits a WASM module
     /// plus its matched companion JSON.
     ///
-    /// This API defaults to [`SignalFirLane::TransformFastLane`] rather than
-    /// [`SignalFirLane::LegacyBridge`], because the WASM/JSON-facing artifact
-    /// surfaces need the canonical lowered FIR module with working
-    /// `metadata`/`buildUserInterface` bodies. The older legacy bridge is still
-    /// available through [`Compiler::compile_source_to_wasm_with_lane`] for
-    /// explicit experimentation, but it is no longer the default for public
-    /// artifact-oriented WASM entry points.
+    /// This API defaults to [`SignalFirLane::TransformFastLane`] because the
+    /// WASM/JSON-facing artifact surfaces need the canonical lowered FIR module
+    /// with working `metadata`/`buildUserInterface` bodies.
     pub fn compile_source_to_wasm(
         &self,
         source_name: &str,
@@ -775,8 +755,7 @@ impl Compiler {
     ///
     /// Requests default to [`SignalFirLane::TransformFastLane`] for the same
     /// reason as [`Compiler::compile_source_to_wasm`]: JSON/WASM artifact
-    /// consumers need preserved UI and metadata fidelity, which the temporary
-    /// legacy bridge does not provide.
+    /// consumers need preserved UI and metadata fidelity.
     pub fn compile_wasm_artifact(
         &self,
         request: &WasmArtifactRequest,
@@ -844,8 +823,7 @@ impl Compiler {
     ///
     /// Like the WASM artifact entry points, this API defaults to
     /// [`SignalFirLane::TransformFastLane`] so the reconstructed JSON sees the
-    /// canonical FIR `metadata` and `buildUserInterface` bodies instead of the
-    /// temporary legacy summary bridge.
+    /// canonical FIR `metadata` and `buildUserInterface` bodies.
     pub fn compile_source_to_json(
         &self,
         source_name: &str,
@@ -909,26 +887,34 @@ impl Compiler {
         Ok(json.render())
     }
 
-    /// Parses + evaluates + propagates one file, then emits C++ text from
-    /// the temporary module-first FIR bridge.
+    /// Parses + evaluates + propagates one file, then emits C++ text.
     pub fn compile_file_to_cpp(
         &self,
         path: &Path,
         search_paths: &[PathBuf],
         options: &CppOptions,
     ) -> Result<String, CompilerError> {
-        self.compile_file_to_cpp_with_lane(path, search_paths, options, SignalFirLane::LegacyBridge)
+        self.compile_file_to_cpp_with_lane(
+            path,
+            search_paths,
+            options,
+            SignalFirLane::TransformFastLane,
+        )
     }
 
-    /// Parses + evaluates + propagates one file, then emits C text from
-    /// the temporary module-first FIR bridge.
+    /// Parses + evaluates + propagates one file, then emits C text.
     pub fn compile_file_to_c(
         &self,
         path: &Path,
         search_paths: &[PathBuf],
         options: &COptions,
     ) -> Result<String, CompilerError> {
-        self.compile_file_to_c_with_lane(path, search_paths, options, SignalFirLane::LegacyBridge)
+        self.compile_file_to_c_with_lane(
+            path,
+            search_paths,
+            options,
+            SignalFirLane::TransformFastLane,
+        )
     }
 
     /// Parses + evaluates + propagates one file, then emits C text using
@@ -1080,7 +1066,7 @@ impl Compiler {
             path,
             search_paths,
             options,
-            SignalFirLane::LegacyBridge,
+            SignalFirLane::TransformFastLane,
         )
     }
 
@@ -1160,23 +1146,23 @@ impl Compiler {
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits C++ text from the temporary module-first FIR bridge.
+    /// then emits C++ text.
     pub fn compile_file_default_to_cpp(
         &self,
         path: &Path,
         options: &CppOptions,
     ) -> Result<String, CompilerError> {
-        self.compile_file_default_to_cpp_with_lane(path, options, SignalFirLane::LegacyBridge)
+        self.compile_file_default_to_cpp_with_lane(path, options, SignalFirLane::TransformFastLane)
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
-    /// then emits C text from the temporary module-first FIR bridge.
+    /// then emits C text.
     pub fn compile_file_default_to_c(
         &self,
         path: &Path,
         options: &COptions,
     ) -> Result<String, CompilerError> {
-        self.compile_file_default_to_c_with_lane(path, options, SignalFirLane::LegacyBridge)
+        self.compile_file_default_to_c_with_lane(path, options, SignalFirLane::TransformFastLane)
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -2099,20 +2085,16 @@ fn lower_signals_to_cpp(
     options: &CppOptions,
     ctx: SignalLoweringContext,
 ) -> Result<String, LowerToCppError> {
-    match ctx.lane {
-        SignalFirLane::LegacyBridge => {
-            lower_signals_to_cpp_legacy_bridge(source_name, output, options, ctx.fir_verify)
-        }
-        SignalFirLane::TransformFastLane => lower_signals_to_cpp_transform_fastlane(
-            source_name,
-            output,
-            options,
-            ctx.fir_verify,
-            ctx.real_type,
-            ctx.max_copy_delay,
-            ctx.delay_line_threshold,
-        ),
-    }
+    let _ = ctx.lane;
+    lower_signals_to_cpp_transform_fastlane(
+        source_name,
+        output,
+        options,
+        ctx.fir_verify,
+        ctx.real_type,
+        ctx.max_copy_delay,
+        ctx.delay_line_threshold,
+    )
 }
 
 /// Dispatches C lowering through the selected signal->FIR lane.
@@ -2122,20 +2104,16 @@ fn lower_signals_to_c(
     options: &COptions,
     ctx: SignalLoweringContext,
 ) -> Result<String, LowerToCError> {
-    match ctx.lane {
-        SignalFirLane::LegacyBridge => {
-            lower_signals_to_c_legacy_bridge(source_name, output, options, ctx.fir_verify)
-        }
-        SignalFirLane::TransformFastLane => lower_signals_to_c_transform_fastlane(
-            source_name,
-            output,
-            options,
-            ctx.fir_verify,
-            ctx.real_type,
-            ctx.max_copy_delay,
-            ctx.delay_line_threshold,
-        ),
-    }
+    let _ = ctx.lane;
+    lower_signals_to_c_transform_fastlane(
+        source_name,
+        output,
+        options,
+        ctx.fir_verify,
+        ctx.real_type,
+        ctx.max_copy_delay,
+        ctx.delay_line_threshold,
+    )
 }
 
 /// Dispatches interpreter lowering through the selected signal->FIR lane.
@@ -2145,51 +2123,16 @@ fn lower_signals_to_interp(
     options: &InterpOptions,
     ctx: SignalLoweringContext,
 ) -> Result<String, LowerToInterpError> {
-    match ctx.lane {
-        SignalFirLane::LegacyBridge => lower_signals_to_interp_legacy_bridge(
-            source_name,
-            output,
-            options,
-            ctx.fir_verify,
-            ctx.real_type,
-        ),
-        SignalFirLane::TransformFastLane => lower_signals_to_interp_transform_fastlane(
-            source_name,
-            output,
-            options,
-            ctx.fir_verify,
-            ctx.real_type,
-            ctx.max_copy_delay,
-            ctx.delay_line_threshold,
-        ),
-    }
-}
-
-/// Lowers signals through the legacy bridge then serializes an interpreter `.fbc`.
-fn lower_signals_to_interp_legacy_bridge(
-    source_name: &str,
-    output: &SignalCompileOutput,
-    options: &InterpOptions,
-    fir_verify: FirVerifyOptions,
-    real_type: RealType,
-) -> Result<String, LowerToInterpError> {
-    let module_name = resolve_module_name(options.module_name.as_deref(), source_name);
-    let lowered = lower_signals_to_fir_legacy_bridge(source_name, output, module_name);
-    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToInterpError::Verify)?;
-    match real_type {
-        RealType::Float32 => {
-            let factory: FbcDspFactory<f32> =
-                generate_interp_module(&lowered.store, lowered.module, options)
-                    .map_err(LowerToInterpError::Codegen)?;
-            serialize_factory(&factory).map_err(LowerToInterpError::Serialize)
-        }
-        RealType::Float64 => {
-            let factory: FbcDspFactory<f64> =
-                generate_interp_module(&lowered.store, lowered.module, options)
-                    .map_err(LowerToInterpError::Codegen)?;
-            serialize_factory(&factory).map_err(LowerToInterpError::Serialize)
-        }
-    }
+    let _ = ctx.lane;
+    lower_signals_to_interp_transform_fastlane(
+        source_name,
+        output,
+        options,
+        ctx.fir_verify,
+        ctx.real_type,
+        ctx.max_copy_delay,
+        ctx.delay_line_threshold,
+    )
 }
 
 /// Lowers signals through the transform fast lane then serializes an interpreter `.fbc`.
@@ -2245,66 +2188,23 @@ fn serialize_factory<R: FbcReal>(factory: &FbcDspFactory<R>) -> Result<String, S
 fn lower_signals_to_fir(
     source_name: &str,
     output: &SignalCompileOutput,
-    lane: SignalFirLane,
+    _lane: SignalFirLane,
     fir_verify: FirVerifyOptions,
     real_type: RealType,
     max_copy_delay: u32,
     delay_line_threshold: u32,
 ) -> Result<FirCompileOutput, LowerToFirError> {
     let module_name = sanitize_cpp_ident(source_name_to_class(source_name).as_str());
-    let lowered = match lane {
-        SignalFirLane::LegacyBridge => Ok(lower_signals_to_fir_legacy_bridge(
-            source_name,
-            output,
-            module_name,
-        )),
-        SignalFirLane::TransformFastLane => lower_signals_to_fir_transform_fastlane(
-            output,
-            module_name,
-            real_type,
-            max_copy_delay,
-            delay_line_threshold,
-        ),
-    }
+    let lowered = lower_signals_to_fir_transform_fastlane(
+        output,
+        module_name,
+        real_type,
+        max_copy_delay,
+        delay_line_threshold,
+    )
     .map_err(LowerToFirError::Transform)?;
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToFirError::Verify)?;
     Ok(lowered)
-}
-
-// ─── FIR type helpers ─────────────────────────────────────────────────────────
-
-/// Builds the canonical `compute(dsp, int, FAUSTFLOAT**, FAUSTFLOAT**) -> void` FIR type
-/// and its named argument list, used by both C and C++ legacy bridges.
-fn make_compute_fir_signature() -> (FirType, [NamedType; 4]) {
-    let ff_ptr_ptr = FirType::Ptr(Box::new(FirType::Ptr(Box::new(FirType::FaustFloat))));
-    let args = [
-        NamedType {
-            name: "dsp".to_string(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "count".to_string(),
-            typ: FirType::Int32,
-        },
-        NamedType {
-            name: "inputs".to_string(),
-            typ: ff_ptr_ptr.clone(),
-        },
-        NamedType {
-            name: "outputs".to_string(),
-            typ: ff_ptr_ptr.clone(),
-        },
-    ];
-    let typ = FirType::Fun {
-        args: vec![
-            FirType::Ptr(Box::new(FirType::Obj)),
-            FirType::Int32,
-            ff_ptr_ptr.clone(),
-            ff_ptr_ptr,
-        ],
-        ret: Box::new(FirType::Void),
-    };
-    (typ, args)
 }
 
 /// Resolves a module name from explicit class_name option or from the source name.
@@ -2312,79 +2212,6 @@ fn resolve_module_name(class_name: Option<&str>, _source_name: &str) -> String {
     class_name
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| "mydsp".to_owned())
-}
-
-// ─── Legacy bridge implementations ───────────────────────────────────────────
-
-/// Legacy bridge FIR lowering for the current C++ emitter path.
-///
-/// This bridge intentionally emits a label-heavy placeholder `compute` body so
-/// compiler/front-end integration can be exercised before production lowering
-/// is fully routed through `transform::signal_fir`.
-fn lower_signals_to_fir_legacy_bridge(
-    source_name: &str,
-    output: &SignalCompileOutput,
-    module_name: String,
-) -> FirCompileOutput {
-    let mut store = FirStore::new();
-    let mut b = FirBuilder::new(&mut store);
-    let mut body = Vec::new();
-
-    body.push(b.label(format!("source: {source_name}")));
-    body.push(b.label(format!(
-        "io: inputs={} outputs={}",
-        output.process_arity.inputs, output.process_arity.outputs
-    )));
-    for (index, sig) in output.signals.iter().enumerate() {
-        body.push(b.label(format!(
-            "sig[{index}]: {}",
-            dump_sig_readable(&output.parse.state.arena, *sig)
-        )));
-    }
-
-    let body = b.block(&body);
-    let f_sample_rate = b.declare_var("fSampleRate", FirType::Int32, fir::AccessType::Struct, None);
-    let dsp_struct = b.block(&[f_sample_rate]);
-    let instance_constants_type = FirType::Fun {
-        args: vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::Int32],
-        ret: Box::new(FirType::Void),
-    };
-    let instance_constants_args = [
-        NamedType {
-            name: "dsp".to_string(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "sample_rate".to_string(),
-            typ: FirType::Int32,
-        },
-    ];
-    let sample_rate = b.load_var("sample_rate", fir::AccessType::FunArgs, FirType::Int32);
-    let sample_rate_store = b.store_var("fSampleRate", fir::AccessType::Struct, sample_rate);
-    let instance_constants_body = b.block(&[sample_rate_store]);
-    let instance_constants = b.declare_fun(
-        "instanceConstants",
-        instance_constants_type,
-        &instance_constants_args,
-        Some(instance_constants_body),
-        false,
-    );
-    let (compute_type, compute_args) = make_compute_fir_signature();
-    let compute = b.declare_fun("compute", compute_type, &compute_args, Some(body), false);
-    let functions = b.block(&[instance_constants, compute]);
-    let globals = b.block(&[]);
-    let static_decls = b.block(&[]);
-    let module = b.module(
-        output.process_arity.inputs,
-        output.process_arity.outputs,
-        module_name,
-        dsp_struct,
-        globals,
-        functions,
-        static_decls,
-    );
-
-    FirCompileOutput { store, module }
 }
 
 /// Transform fast-lane FIR lowering used by native backends and FIR dumps.
@@ -2416,19 +2243,6 @@ fn lower_signals_to_fir_transform_fastlane(
     })
 }
 
-/// Lowers signals through the legacy bridge, verifies FIR, then emits C++.
-fn lower_signals_to_cpp_legacy_bridge(
-    source_name: &str,
-    output: &SignalCompileOutput,
-    options: &CppOptions,
-    fir_verify: FirVerifyOptions,
-) -> Result<String, LowerToCppError> {
-    let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
-    let lowered = lower_signals_to_fir_legacy_bridge(source_name, output, module_name);
-    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerError::Verify)?;
-    generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerError::Codegen)
-}
-
 /// Lowers signals through the transform fast lane, verifies FIR, then emits C++.
 fn lower_signals_to_cpp_transform_fastlane(
     source_name: &str,
@@ -2450,67 +2264,6 @@ fn lower_signals_to_cpp_transform_fastlane(
     .map_err(LowerError::Transform)?;
     maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerError::Verify)?;
     generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerError::Codegen)
-}
-
-/// Emits the intentionally minimal legacy-bridge C placeholder module.
-///
-/// Unlike the C++ legacy bridge, this path avoids label statements because the
-/// C backend slice does not render FIR `Label` nodes.
-fn lower_signals_to_c_legacy_bridge(
-    source_name: &str,
-    _output: &SignalCompileOutput,
-    options: &COptions,
-    fir_verify: FirVerifyOptions,
-) -> Result<String, LowerToCError> {
-    let mut store = FirStore::new();
-    let mut b = FirBuilder::new(&mut store);
-    // Keep legacy C bridge intentionally minimal: C backend currently does not
-    // emit FIR label statements, so we avoid `Label` nodes here.
-    let body = b.block(&[]);
-    let f_sample_rate = b.declare_var("fSampleRate", FirType::Int32, fir::AccessType::Struct, None);
-    let dsp_struct = b.block(&[f_sample_rate]);
-    let instance_constants_type = FirType::Fun {
-        args: vec![FirType::Ptr(Box::new(FirType::Obj)), FirType::Int32],
-        ret: Box::new(FirType::Void),
-    };
-    let instance_constants_args = [
-        NamedType {
-            name: "dsp".to_string(),
-            typ: FirType::Ptr(Box::new(FirType::Obj)),
-        },
-        NamedType {
-            name: "sample_rate".to_string(),
-            typ: FirType::Int32,
-        },
-    ];
-    let sample_rate = b.load_var("sample_rate", fir::AccessType::FunArgs, FirType::Int32);
-    let sample_rate_store = b.store_var("fSampleRate", fir::AccessType::Struct, sample_rate);
-    let instance_constants_body = b.block(&[sample_rate_store]);
-    let instance_constants = b.declare_fun(
-        "instanceConstants",
-        instance_constants_type,
-        &instance_constants_args,
-        Some(instance_constants_body),
-        false,
-    );
-    let (compute_type, compute_args) = make_compute_fir_signature();
-    let compute = b.declare_fun("compute", compute_type, &compute_args, Some(body), false);
-    let functions = b.block(&[instance_constants, compute]);
-    let globals = b.block(&[]);
-    let static_decls = b.block(&[]);
-    let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
-    let module = b.module(
-        0,
-        0,
-        module_name,
-        dsp_struct,
-        globals,
-        functions,
-        static_decls,
-    );
-    let lowered = FirCompileOutput { store, module };
-    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerError::Verify)?;
-    generate_c_module(&lowered.store, lowered.module, options).map_err(LowerError::Codegen)
 }
 
 /// Lowers signals through the transform fast lane, verifies FIR, then emits C.
@@ -3807,8 +3560,7 @@ mod tests {
     use super::{
         Compiler, CompilerError, ExpandDspRequest, GenerateAuxFilesRequest, SignalFirLane,
         WasmArtifactRequest, build_import_search_paths, compile_options_json_string,
-        default_import_search_paths, golden_snapshot, make_compute_fir_signature,
-        resolve_module_name, resolve_ui_root_label,
+        default_import_search_paths, golden_snapshot, resolve_module_name, resolve_ui_root_label,
     };
     use codegen::backends::wasm::WasmOptions;
     use parser::VirtualSourceMap;
@@ -3983,35 +3735,6 @@ mod tests {
             &parser::CompilationMetadataSnapshot::default(),
         );
         assert_eq!(name, "sine_phasor");
-    }
-
-    // ── make_compute_fir_signature ────────────────────────────────────────────
-
-    #[test]
-    fn make_compute_fir_signature_produces_four_named_args() {
-        let (_typ, args) = make_compute_fir_signature();
-        assert_eq!(args.len(), 4);
-        assert_eq!(args[0].name, "dsp");
-        assert_eq!(args[1].name, "count");
-        assert_eq!(args[2].name, "inputs");
-        assert_eq!(args[3].name, "outputs");
-    }
-
-    #[test]
-    fn make_compute_fir_signature_fun_type_matches_args() {
-        use fir::FirType;
-        let (typ, _args) = make_compute_fir_signature();
-        match typ {
-            FirType::Fun { args, ret } => {
-                assert_eq!(args.len(), 4, "fun type should have 4 args");
-                assert!(
-                    matches!(args.first(), Some(FirType::Ptr(inner)) if matches!(inner.as_ref(), FirType::Obj)),
-                    "first arg should be dsp pointer"
-                );
-                assert!(matches!(*ret, FirType::Void), "return type should be void");
-            }
-            other => panic!("expected FirType::Fun, got {other:?}"),
-        }
     }
 
     // ── Compiler::compile_source ──────────────────────────────────────────────

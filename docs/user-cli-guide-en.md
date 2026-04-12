@@ -237,11 +237,10 @@ For interpretation details, see `docs/user-diagnostics-guide-en.md`.
 
 ## 6. Signal->FIR lane selection
 
-### `--signal-fir-lane legacy|fast`
+### `--signal-fir-lane fast`
 
 Select the lowering lane used before FIR-backed outputs.
 
-- `legacy`: temporary legacy bridge.
 - `fast`: transform fast-lane.
 
 Default in the CLI: `fast` when option is omitted.
@@ -263,7 +262,6 @@ Invalid with:
 Examples:
 
 ```bash
-cargo run -p compiler -- --dump-fir tests/corpus/rep_01_passthrough.dsp --signal-fir-lane legacy
 cargo run -p compiler -- --dump-cpp tests/corpus/rep_01_passthrough.dsp --signal-fir-lane fast
 ```
 
