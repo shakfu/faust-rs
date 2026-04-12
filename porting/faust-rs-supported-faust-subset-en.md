@@ -1,6 +1,6 @@
 # Current Faust Source Subset Supported by `faust-rs`
 
-Last updated: 2026-04-08
+Last updated: 2026-04-12
 
 Version: 0.5.0
 
@@ -76,6 +76,13 @@ This snapshot is based on:
   - `crates/transform/src/signal_fir/tests.rs`
   - `crates/compiler/tests/signal_fir_lane.rs`
   - `porting/journal/2026-04-08.md`
+- transform preparation boundary/encapsulation fixes landed on 2026-04-10 and reviewed against:
+  - `crates/transform/src/signal_prepare.rs`
+  - `crates/transform/src/signal_fir/mod.rs`
+  - `crates/transform/src/signal_fir/module.rs`
+  - `crates/transform/src/signal_fir/planner.rs`
+  - `crates/transform/src/signal_fir/siggen.rs`
+  - `porting/journal/2026-04-10.md`
 
 The corresponding generated reports are:
 
@@ -229,6 +236,14 @@ For the production C/C++ route, a Faust program currently compiles end-to-end
 when its post-eval/post-propagate signal forest stays within the active
 `signal_prepare + signal_fir` lowering slice.
 
+More precisely, `signal_prepare` now acts as an explicit verified staging
+boundary before FIR emission:
+
+- it clones the output forest into a private staging arena,
+- runs the current normalization/type/promotion/canonicalization subset there,
+- and verifies the resulting postconditions before `signal_fir` consumes the
+  prepared outputs and type maps.
+
 For the Rust WASM route, the same FIR preparation pipeline is reused, but the
 backend lowering itself is currently a separate, narrower bring-up slice with
 its own documented subset in `crates/codegen/src/backends/wasm/`.
@@ -337,10 +352,10 @@ The most important current exclusions are:
   - This is narrower than the previous `Variability::Samp` blanket rejection:
     audio-rate amounts are now accepted when their interval is provably bounded
     and non-negative.
-  - The one remaining case that cannot be sized: a pure audio input used
-    directly as a delay amount (interval `[-1, 1]`, hi = 1) — accepted and
-    allocated to 2 samples.  An audio signal with no structural bound and no
-    type constraint still cannot be sized statically.
+  - A pure audio input used directly as a delay amount is no longer the blocker
+    it used to be if type/interval inference yields a finite non-negative upper
+    bound; the remaining exclusion is the genuinely unbounded case, where no
+    finite static capacity can be proven.
 
 - **Non-trivial stream wrappers**
   - the current valid backend corpus gap is
@@ -457,7 +472,7 @@ The variable-delay gap is now **substantially closed**:
     `typeAnnotation(L2, true)`): invalid delay intervals are already caught
     during type annotation
 
-- **Rust (as of 2026-03-14)**:
+- **Rust (current fast-lane status, 2026-04-12)**:
   - accepts constant integer delays (unchanged),
   - accepts variable delays whenever `check_delay_interval` succeeds:
     bounded non-negative interval, regardless of variability,

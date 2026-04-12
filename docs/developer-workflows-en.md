@@ -57,13 +57,32 @@ See:
 
 ## 5. CLI language model
 
-The compiler supports `-lang c|cpp|fir`:
+The compiler currently supports:
+
+- `-lang c`
+- `-lang cpp`
+- `-lang fir`
+- `-lang interp`
+- `-lang cranelift`
+- `-lang wasm`
+- `-lang wast`
 
 ```bash
 cargo run -p compiler -- -lang c tests/corpus/rep_01_passthrough.dsp
 cargo run -p compiler -- -lang cpp tests/corpus/rep_01_passthrough.dsp
 cargo run -p compiler -- -lang fir tests/corpus/rep_01_passthrough.dsp
+cargo run -p compiler -- -lang interp tests/corpus/rep_01_passthrough.dsp
+cargo run -p compiler -- -lang wasm tests/corpus/rep_01_passthrough.dsp -o /tmp/out.wasm
+cargo run -p compiler -- -lang wast tests/corpus/rep_01_passthrough.dsp
 ```
+
+Useful current CLI extras for developer workflows:
+
+- `--json` for strict Faust JSON output, optionally alongside `-lang <backend>`
+- `--dump-fir-verify` for FIR verifier reports without backend emission
+- `--dump-cranelift` for the experimental backend status report
+- `--fir-fixture <name>` / `--list-fir-fixtures` for backend-only debugging
+- `--signal-fir-lane legacy|fast` to force the lowering lane in FIR-backed modes
 
 ## 6. Golden workflow
 
@@ -94,3 +113,25 @@ FAUST_CPP_BIN=/path/to/faust cargo run -p xtask -- golden-gen-cpp -- <extra-args
 ```
 
 Note: CI runs `cargo run -p xtask -- golden-check` (Rust reference mode) on every platform.
+
+## 7. Runtime and alignment workflows
+
+Key `xtask` commands beyond golden snapshots:
+
+```bash
+cargo run -p xtask -- interp-trace-gen
+cargo run -p xtask -- interp-trace-check
+cargo run -p xtask -- interp-trace-diff-lanes
+cargo run -p xtask -- fir-dump-scan --lane fast
+cargo run -p xtask -- backend-align-smoke
+```
+
+Notes:
+
+- `interp-trace-gen` / `interp-trace-check` operate on `tests/runtime_corpus/`
+  and persist/validate traces under `tests/runtime_traces/rust/`.
+- `interp-trace-diff-lanes` compares `legacy` vs `fast` signal->FIR lowering on
+  the runtime-trace subset.
+- `fir-dump-scan` is a structural regression guard on textual FIR dumps.
+- `backend-align-smoke` and `backend-align-nightly` orchestrate broader
+  alignment checks, including runtime/lane/FIR-dump coverage.

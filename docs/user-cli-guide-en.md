@@ -94,22 +94,62 @@ Generate C backend output text.
 cargo run -p compiler -- --dump-c tests/corpus/rep_01_passthrough.dsp
 ```
 
-### `--lang c|cpp|fir`
+### `--dump-fir-verify`
 
-Faust-style backend language selector (equivalent to `--dump-c`, `--dump-cpp`, or `--dump-fir`).
+Run the FIR verifier and print the verification report without backend codegen.
+
+```bash
+cargo run -p compiler -- --dump-fir-verify tests/corpus/rep_01_passthrough.dsp
+```
+
+### `--dump-cpp-from-fbc`
+
+Read interpreter `.fbc` text and emit self-contained native C++.
+
+```bash
+cargo run -p compiler -- --dump-cpp-from-fbc foo.fbc --cpp-class-name MyInterpDsp
+```
+
+### `--dump-cranelift`
+
+Compile through the experimental Cranelift backend and print the backend report.
+
+```bash
+cargo run -p compiler -- --dump-cranelift tests/corpus/rep_01_passthrough.dsp
+```
+
+### `--json`
+
+Emit the strict Faust JSON description.
+
+```bash
+cargo run -p compiler -- --json tests/corpus/rep_01_passthrough.dsp
+```
+
+This can also be combined with `--lang <backend>` to emit a backend artifact
+plus a companion `.json` file next to `-o <file>`.
+
+### `--lang c|cpp|fir|interp|cranelift|wasm|wast`
+
+Faust-style backend language selector.
 
 ```bash
 cargo run -p compiler -- --lang c tests/corpus/rep_01_passthrough.dsp
 cargo run -p compiler -- --lang cpp tests/corpus/rep_01_passthrough.dsp
 cargo run -p compiler -- --lang fir tests/corpus/rep_01_passthrough.dsp
+cargo run -p compiler -- --lang interp tests/corpus/rep_01_passthrough.dsp
+cargo run -p compiler -- --lang cranelift tests/corpus/rep_01_passthrough.dsp
+cargo run -p compiler -- --lang wasm tests/corpus/rep_01_passthrough.dsp -o /tmp/out.wasm
+cargo run -p compiler -- --lang wast tests/corpus/rep_01_passthrough.dsp
 ```
 
 Legacy compatibility:
 
-- `-lang c`, `-lang cpp`, and `-lang fir` are accepted.
+- `-lang c`, `-lang cpp`, `-lang fir`, `-lang interp`, `-lang wasm`, and `-lang wast` are accepted.
 - `-lang -c` maps to `--lang c`.
 - `-lang -cpp` maps to `--lang cpp`.
 - `-lang -fir` maps to `--lang fir`.
+- `-lang -interp` maps to `--lang interp`.
 
 Installed binary examples:
 
@@ -117,6 +157,9 @@ Installed binary examples:
 faust-rs -lang c foo.dsp
 faust-rs -lang cpp foo.dsp
 faust-rs -lang fir foo.dsp
+faust-rs -lang interp foo.dsp
+faust-rs -lang wasm foo.dsp -o foo.wasm
+faust-rs -lang wast foo.dsp
 ```
 
 If your command is named `faust` (symlink/wrapper), the same commands work:
@@ -125,6 +168,7 @@ If your command is named `faust` (symlink/wrapper), the same commands work:
 faust -lang c foo.dsp
 faust -lang cpp foo.dsp
 faust -lang fir foo.dsp
+faust -lang interp foo.dsp
 ```
 
 ## 4. Common options
@@ -137,6 +181,9 @@ Write text output to a file instead of stdout.
 cargo run -p compiler -- --dump-cpp tests/corpus/rep_01_passthrough.dsp -o /tmp/out.cpp
 ```
 
+For `--lang wasm`, `-o` writes the `.wasm` file and also writes the companion
+JSON file next to it with the same stem.
+
 ### `-I, --import-dir <dir>`
 
 Add import search directories. Can be repeated.
@@ -144,6 +191,27 @@ Add import search directories. Can be repeated.
 ```bash
 cargo run -p compiler -- --dump-sig main.dsp -I ./lib -I ./third_party/faust
 ```
+
+### `--double`
+
+Use double-precision internal DSP arithmetic (`-double` compatibility).
+
+### `--mcd <n>` and `--dlt <n>`
+
+Tune fast-lane delay lowering thresholds (`-mcd` / `-dlt` compatibility).
+
+### `--no-fir-verify` and `--fir-verify-strict`
+
+Control FIR verification before FIR dump / codegen.
+
+### `--compilation-time` and `--timeout <secs>`
+
+Print phase timings and set a global compilation timeout.
+
+### `--fir-fixture <name>` and `--list-fir-fixtures`
+
+Bypass DSP parsing and feed a built-in FIR fixture directly into FIR/backend
+dump modes.
 
 ## 5. Diagnostics options
 
@@ -176,13 +244,17 @@ Select the lowering lane used before FIR-backed outputs.
 - `legacy`: temporary legacy bridge.
 - `fast`: transform fast-lane.
 
-Default: `fast` when option is omitted.
+Default in the CLI: `fast` when option is omitted.
 
 Valid with:
 
 - `--dump-cpp`
 - `--dump-c`
 - `--dump-fir`
+- `--dump-fir-verify`
+- `--dump-cranelift`
+- `--json`
+- `--lang c|cpp|fir|interp|cranelift|wasm|wast`
 
 Invalid with:
 

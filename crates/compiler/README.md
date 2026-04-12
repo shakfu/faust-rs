@@ -37,6 +37,19 @@ Top-level compiler facade.  Wires all pipeline stages together behind a single
 | `compile_file_to_wasm_artifact[_with_lane]` | Owned `WasmArtifactBundle` |
 | `compile_file_default_to_wasm_artifact` | Owned `WasmArtifactBundle` |
 | `compile_source_to_json[_with_lane]` | Strict Faust JSON string |
+| `compile_file_to_json` / `compile_file_default_to_json[_with_lane]` | Strict Faust JSON string |
+| `compile_source_to_json_with_lane_and_compile_options` / `compile_file_to_json_with_compile_options` | JSON string + explicit `compile_options` provenance |
+| `compile_file_default_to_c[_with_lane]` / `compile_file_default_to_cpp[_with_lane]` | File-backed convenience wrappers without explicit search paths |
+
+### Lane defaults to know
+
+- C / C++ file/source helpers still default to `SignalFirLane::LegacyBridge`.
+- WASM / strict JSON source helpers default to `SignalFirLane::TransformFastLane`.
+- Interpreter helpers now default to `SignalFirLane::TransformFastLane`.
+- `WasmArtifactRequest::new(...)` defaults to `SignalFirLane::TransformFastLane`.
+- `compile_file_default_to_wasm_artifact(...)` currently remains on the legacy
+  default path for file-backed convenience calls; use the explicit `_with_lane`
+  form when the lane choice matters.
 
 ## Pipeline
 
