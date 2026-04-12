@@ -491,13 +491,20 @@ mod tests {
             .stack_size(64 * 1024 * 1024)
             .spawn(|| {
                 let compiler = Compiler::new();
-                let case = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../tests/corpus/rep_61_fmin_sr.dsp")
-                    .canonicalize()
-                    .expect("rep_61_fmin_sr path");
+                // Keep this test self-contained instead of depending on
+                // `stdfaust.lib` being installed on the CI runner.
+                let source_name = "runtime_descriptor_sample_rate.dsp";
+                let source = r#"
+SR = fconstant(int fSamplingFreq, <math.h>);
+process = min(SR, 192000.0) / 48000.0 : float;
+"#;
                 let fir = compiler
-                    .compile_file_default_to_fir_with_lane(&case, SignalFirLane::TransformFastLane)
-                    .expect("rep_61_fmin_sr should lower to FIR");
+                    .compile_source_to_fir_with_lane(
+                        source_name,
+                        source,
+                        SignalFirLane::TransformFastLane,
+                    )
+                    .expect("sample-rate source should lower to FIR");
                 let runtime = build_runtime_descriptor(&fir.store, fir.module)
                     .expect("runtime descriptor builds");
 
