@@ -91,7 +91,14 @@ pub struct SignalCompileOutput {
     pub process_box: BoxId,
     /// Inferred process arity (`inputs`/`outputs`) from `propagate::box_arity_typed`.
     pub process_arity: BoxArity,
-    /// Final propagated output signal list (`process_arity.outputs` items).
+    /// Final propagated output signal list.
+    ///
+    /// Parity note:
+    /// - for ordinary Faust programs, this usually matches
+    ///   `process_arity.outputs`,
+    /// - for `fad(expr)`, propagation expands the signal list to
+    ///   `primal outputs + tangent outputs`, so `signals.len()` may be greater
+    ///   than `process_arity.outputs`.
     pub signals: Vec<SigId>,
     /// Canonical grouped UI artifact owned after the propagation boundary.
     ///
@@ -99,6 +106,18 @@ pub struct SignalCompileOutput {
     /// for `buildUserInterface`, rather than reconstructing groups from signal
     /// leaf widgets.
     pub ui: UiProgram,
+}
+
+impl SignalCompileOutput {
+    /// Returns the effective propagated output arity seen by FIR/backends.
+    ///
+    /// This differs from [`Self::process_arity`] for forward-mode AD:
+    /// `box_arity_typed(...)` intentionally keeps `fad(expr)` transparent at the
+    /// box level, while propagation expands the concrete signal forest.
+    #[must_use]
+    pub fn propagated_output_count(&self) -> usize {
+        self.signals.len()
+    }
 }
 
 /// Parse + eval + propagate + FIR lowering output package.
@@ -2233,7 +2252,7 @@ fn lower_signals_to_fir_transform_fastlane(
         &output.parse.state.arena,
         &output.signals,
         output.process_arity.inputs,
-        output.process_arity.outputs,
+        output.propagated_output_count(),
         &output.ui,
         &signal_fir_options,
     )?;

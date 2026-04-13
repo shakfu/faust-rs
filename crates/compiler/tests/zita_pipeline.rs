@@ -95,7 +95,7 @@ fn zita_min_fastlane_fir_lowering_completes() {
             &output.parse.state.arena,
             &output.signals,
             output.process_arity.inputs,
-            output.process_arity.outputs,
+            output.propagated_output_count(),
             &UiProgram::empty(),
             &SignalFirOptions {
                 module_name: "mydsp".to_owned(),

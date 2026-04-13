@@ -192,6 +192,33 @@ fn fastlane_compiles_lowpass_feedback_fixture() {
 }
 
 #[test]
+fn fastlane_cpp_and_interp_accept_forward_ad_delay_fixture() {
+    let path = corpus_path("fad_delay.dsp");
+    let compiler = Compiler::new();
+
+    let cpp = compiler
+        .compile_file_default_to_cpp_with_lane(
+            &path,
+            &codegen::backends::cpp::CppOptions::default(),
+            SignalFirLane::TransformFastLane,
+        )
+        .unwrap_or_else(|e| panic!("fad_delay.dsp fast-lane C++ compilation failed: {e}"));
+    assert!(cpp.contains("class mydsp : public dsp"));
+
+    let fbc = compiler
+        .compile_file_default_to_interp_with_lane(
+            &path,
+            &InterpOptions::default(),
+            SignalFirLane::TransformFastLane,
+        )
+        .unwrap_or_else(|e| panic!("fad_delay.dsp fast-lane interp compilation failed: {e}"));
+    assert!(
+        !fbc.is_empty(),
+        "fad_delay.dsp fast-lane interp compilation should produce bytecode"
+    );
+}
+
+#[test]
 fn fastlane_delay_echo_uses_circular_delay_line_and_iota_in_c_and_cpp() {
     let fast_cpp = compile_cpp_with_lane("rep_04_delay_echo.dsp", SignalFirLane::TransformFastLane);
     assert!(fast_cpp.contains("class mydsp : public dsp"));
