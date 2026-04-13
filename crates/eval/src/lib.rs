@@ -787,6 +787,34 @@ fn eval_value_uncached(
             // transparent for the wrapped expression.
             eval_value(arena, body, env, loop_detector)
         }
+        BoxMatch::ForwardAD(inner) => {
+            // Source provenance (C++):
+            // - `/Users/letz/faust/compiler/evaluate/eval.cpp`
+            // - `isBoxForwardAD(exp, x) -> boxForwardAD(eval(x, ...))`
+            //
+            // Mapping status: `1:1`.
+            // The wrapped expression must first be evaluated under the current
+            // lexical environment, then rewrapped so the AD primitive remains
+            // explicit at the post-eval propagation boundary.
+            let evaluated = eval_value(arena, inner, env, loop_detector)?;
+            let inner_box = force_value_to_box(arena, evaluated, loop_detector)?;
+            let mut bld = BoxBuilder::new(arena);
+            Ok(EvalValue::Box(bld.forward_ad(inner_box)))
+        }
+        BoxMatch::ReverseAD(inner) => {
+            // Source provenance (C++):
+            // - `/Users/letz/faust/compiler/evaluate/eval.cpp`
+            // - `isBoxReverseAD(exp, x) -> boxReverseAD(eval(x, ...))`
+            //
+            // Mapping status: `1:1`.
+            // Reverse-mode remains phase-gated later in propagation, but eval
+            // still preserves the wrapper after recursively normalizing the
+            // wrapped body.
+            let evaluated = eval_value(arena, inner, env, loop_detector)?;
+            let inner_box = force_value_to_box(arena, evaluated, loop_detector)?;
+            let mut bld = BoxBuilder::new(arena);
+            Ok(EvalValue::Box(bld.reverse_ad(inner_box)))
+        }
         BoxMatch::Button(label) => Ok(EvalValue::Box(eval_button(
             arena,
             label,
@@ -3676,6 +3704,7 @@ fn infer_box_arity(arena: &TreeArena, id: TreeId) -> Option<(usize, usize)> {
             Some((ins_n, outs_n))
         }
         BoxMatch::Inputs(_) | BoxMatch::Outputs(_) => Some((0, 1)),
+        BoxMatch::ForwardAD(inner) | BoxMatch::ReverseAD(inner) => infer_box_arity(arena, inner),
         BoxMatch::Ondemand(inner) | BoxMatch::Upsampling(inner) | BoxMatch::Downsampling(inner) => {
             let (ins, outs) = infer_box_arity(arena, inner)?;
             Some((ins.checked_add(1)?, outs))

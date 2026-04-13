@@ -169,6 +169,54 @@ fn eval_process_treats_metadata_wrapper_as_evaluation_transparent() {
 }
 
 #[test]
+fn eval_process_preserves_forward_ad_wrapper_around_evaluated_body() {
+    let parsed = parse_program(
+        "process = fad(hslider(\"f\", 440, 50, 2000, 1) : sin);",
+        "eval_fad_wrapper.dsp",
+    );
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept fad fixture: {:?}",
+        parsed.errors
+    );
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+
+    let out = eval_process(&mut arena, root).expect("fad process should evaluate");
+    let BoxMatch::ForwardAD(inner) = match_box(&arena, out) else {
+        panic!("expected eval to preserve BOXFAUTODIFF");
+    };
+    assert!(
+        matches!(match_box(&arena, inner), BoxMatch::Seq(_, _)),
+        "inner fad expression should be evaluated to a flat first-order box"
+    );
+}
+
+#[test]
+fn eval_process_preserves_reverse_ad_wrapper_around_evaluated_body() {
+    let parsed = parse_program(
+        "process = rad(hslider(\"f\", 1, 0, 10, 0.1) : sin);",
+        "eval_rad_wrapper.dsp",
+    );
+    assert!(
+        parsed.errors.is_empty(),
+        "parser should accept rad fixture: {:?}",
+        parsed.errors
+    );
+    let mut arena = parsed.state.arena;
+    let root = parsed.root.expect("parse should return a root");
+
+    let out = eval_process(&mut arena, root).expect("rad process should evaluate");
+    let BoxMatch::ReverseAD(inner) = match_box(&arena, out) else {
+        panic!("expected eval to preserve BOXRAUTODIFF");
+    };
+    assert!(
+        matches!(match_box(&arena, inner), BoxMatch::Seq(_, _)),
+        "inner rad expression should be evaluated to a flat first-order box"
+    );
+}
+
+#[test]
 fn eval_process_accepts_parser_lowered_letrec_without_eval_fallback() {
     let source = r#"
         process = y letrec {
