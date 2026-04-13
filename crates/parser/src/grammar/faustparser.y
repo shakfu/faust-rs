@@ -35,7 +35,7 @@
 %token FMOD REMAINDER
 %token FLOOR CEIL RINT ROUND
 %token IPAR ISEQ ISUM IPROD
-%token INPUTS OUTPUTS ONDEMAND UPSAMPLING DOWNSAMPLING
+%token INPUTS OUTPUTS FAUTODIFF RAUTODIFF ONDEMAND UPSAMPLING DOWNSAMPLING
 %token IMPORT COMPONENT LIBRARY ENVIRONMENT WAVEFORM ROUTE ENABLE CONTROL
 %token DECLARE CASE ARROW LAPPLY
 %token ASSERTBOUNDS LOWEST HIGHEST
@@ -683,6 +683,12 @@ Primitive -> tlib::TreeId:
       }
     | OUTPUTS LPAR Expression RPAR {
           crate::with_state(state, |state| state.node_builder().outputs($3))
+      }
+    | FAUTODIFF LPAR Expression RPAR {
+          crate::with_state(state, |state| state.node_builder().forward_ad($3))
+      }
+    | RAUTODIFF LPAR Expression RPAR {
+          crate::with_state(state, |state| state.node_builder().reverse_ad($3))
       }
     | ONDEMAND LPAR Expression RPAR {
           crate::with_state(state, |state| state.node_builder().ondemand($3))

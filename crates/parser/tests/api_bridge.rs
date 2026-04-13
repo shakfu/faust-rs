@@ -71,6 +71,77 @@ fn bridge_exposes_parse_program() {
 }
 
 #[test]
+fn parse_program_recognizes_ad_wrappers_like_cpp() {
+    let out = parse_program(
+        "process = fad(hslider(\"freq\", 440, 50, 2000, 0.01) : sin);",
+        "bridge_fad_program.dsp",
+    );
+    assert!(
+        out.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        out.errors
+    );
+    let root = out.root.expect("root should be present");
+    let def = list_head(&out.state.arena, root);
+    let payload = out.state.arena.tl(def).expect("definition payload");
+    let expr = out.state.arena.tl(payload).expect("definition expression");
+
+    let BoxMatch::ForwardAD(inner) = match_box(&out.state.arena, expr) else {
+        panic!("expected fad wrapper at process root");
+    };
+    assert!(
+        matches!(match_box(&out.state.arena, inner), BoxMatch::Seq(_, _)),
+        "fad body should preserve wrapped expression structure"
+    );
+}
+
+#[test]
+fn parse_program_recognizes_rad_wrapper_and_missing_body_is_an_error() {
+    let ok = parse_program("process = rad(process);", "bridge_rad_program.dsp");
+    assert!(
+        ok.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        ok.errors
+    );
+    let root = ok.root.expect("root should be present");
+    let def = list_head(&ok.state.arena, root);
+    let payload = ok.state.arena.tl(def).expect("definition payload");
+    let expr = ok.state.arena.tl(payload).expect("definition expression");
+    assert!(matches!(
+        match_box(&ok.state.arena, expr),
+        BoxMatch::ReverseAD(_)
+    ));
+
+    let err = parse_program("process = fad();", "bridge_fad_missing_body.dsp");
+    assert!(
+        err.root.is_none() || !err.errors.is_empty() || err.state.ctx.parse_error_count() > 0,
+        "missing fad body should be rejected"
+    );
+}
+
+#[test]
+fn parse_program_keeps_cpp_parity_for_tupled_fad_argument() {
+    let out = parse_program("process = fad(1, 2);", "bridge_fad_tuple_arg.dsp");
+    assert!(
+        out.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        out.errors
+    );
+    let root = out.root.expect("root should be present");
+    let def = list_head(&out.state.arena, root);
+    let payload = out.state.arena.tl(def).expect("definition payload");
+    let expr = out.state.arena.tl(payload).expect("definition expression");
+
+    let BoxMatch::ForwardAD(inner) = match_box(&out.state.arena, expr) else {
+        panic!("expected fad wrapper at process root");
+    };
+    assert!(
+        matches!(match_box(&out.state.arena, inner), BoxMatch::Par(_, _)),
+        "C++ parity: fad(1,2) parses as fad((1,2))"
+    );
+}
+
+#[test]
 fn parse_program_exposes_master_document_metadata_snapshot() {
     let out = parse_program(
         "declare name \"main\";\nprocess = _;\n",
