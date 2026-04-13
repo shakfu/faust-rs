@@ -137,6 +137,22 @@ pub enum BoxMatch<'a> {
     Modulation(BoxId, BoxId),
     Inputs(BoxId),
     Outputs(BoxId),
+    /// Automatic differentiation wrapper preserving the wrapped block diagram
+    /// until the post-eval propagation boundary.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/boxes/boxes.cpp`
+    /// - `boxForwardAD(Tree x)`
+    /// - `isBoxForwardAD(Tree t, Tree& x)`
+    ForwardAD(BoxId),
+    /// Reverse-mode automatic differentiation wrapper preserved structurally at
+    /// the box layer. Propagation support remains phase-gated separately.
+    ///
+    /// Source provenance (C++):
+    /// - `compiler/boxes/boxes.cpp`
+    /// - `boxReverseAD(Tree x)`
+    /// - `isBoxReverseAD(Tree t, Tree& x)`
+    ReverseAD(BoxId),
     Ondemand(BoxId),
     Upsampling(BoxId),
     Downsampling(BoxId),
@@ -258,6 +274,8 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
                         BOX_PATTERN_VAR_TAG => BoxMatch::PatternVar(c0),
                         BOX_INPUTS_TAG => BoxMatch::Inputs(c0),
                         BOX_OUTPUTS_TAG => BoxMatch::Outputs(c0),
+                        BOX_FORWARD_AD_TAG => BoxMatch::ForwardAD(c0),
+                        BOX_REVERSE_AD_TAG => BoxMatch::ReverseAD(c0),
                         BOX_ONDEMAND_TAG => BoxMatch::Ondemand(c0),
                         BOX_UPSAMPLING_TAG => BoxMatch::Upsampling(c0),
                         BOX_DOWNSAMPLING_TAG => BoxMatch::Downsampling(c0),

@@ -236,6 +236,8 @@ fn builder_matches_foreign_case_and_stream_wrappers() {
         let wrappers = [
             b.inputs(wire),
             b.outputs(wire),
+            b.forward_ad(wire),
+            b.reverse_ad(wire),
             b.ondemand(wire),
             b.upsampling(wire),
             b.downsampling(wire),
@@ -261,6 +263,8 @@ fn builder_matches_foreign_case_and_stream_wrappers() {
                 match_box(&arena, w),
                 BoxMatch::Inputs(_)
                     | BoxMatch::Outputs(_)
+                    | BoxMatch::ForwardAD(_)
+                    | BoxMatch::ReverseAD(_)
                     | BoxMatch::Ondemand(_)
                     | BoxMatch::Upsampling(_)
                     | BoxMatch::Downsampling(_)

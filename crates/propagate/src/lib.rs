@@ -403,6 +403,8 @@ fn flat_node_kind(arena: &TreeArena, node: FlatBoxId) -> Result<FlatNodeKind, Fl
         BoxMatch::Downsampling(body) => {
             Ok(FlatNodeKind::Downsampling(FlatBoxId::from_tree_id(body)))
         }
+        BoxMatch::ForwardAD(_) => Err(flat_box_unexpected(node_id, "forwardad")),
+        BoxMatch::ReverseAD(_) => Err(flat_box_unexpected(node_id, "reversead")),
         BoxMatch::Ffunction(_, _, _) => Err(flat_box_unexpected(node_id, "ffunction")),
         BoxMatch::Unknown => Err(flat_box_unexpected(node_id, "unknown")),
         BoxMatch::Ident(_) => Err(flat_box_unexpected(node_id, "ident")),
