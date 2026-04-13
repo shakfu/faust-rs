@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_autodiff_false.dsp
+bytes=91
+lines=1
+fnv1a64=40c8801e1e55059c

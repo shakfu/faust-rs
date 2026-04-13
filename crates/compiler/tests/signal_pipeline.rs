@@ -115,6 +115,61 @@ fn corpus_feedback_simple_exposes_recursive_projection() {
 }
 
 #[test]
+fn corpus_fad_basic_expands_pipeline_outputs() {
+    let out = compile_corpus("fad_basic.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].label, "f");
+
+    let SigMatch::Sin(primal_input) = match_sig(&out.parse.state.arena, out.signals[0]) else {
+        panic!("fad_basic primal output should be sin(f)");
+    };
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, primal_input),
+        SigMatch::HSlider(_)
+    ));
+}
+
+#[test]
+fn corpus_fad_product_emits_one_tangent_per_control() {
+    let out = compile_corpus("fad_product.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 3);
+    assert_eq!(out.ui.controls.len(), 2);
+    assert_eq!(out.ui.controls[0].label, "f");
+    assert_eq!(out.ui.controls[1].label, "g");
+}
+
+#[test]
+fn corpus_fad_autodiff_false_excludes_disabled_control_from_tangents() {
+    let out = compile_corpus("fad_autodiff_false.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 2);
+    assert_eq!(
+        out.ui.controls[0].metadata,
+        vec![("autodiff".to_owned(), "false".to_owned())]
+    );
+}
+
+#[test]
+fn corpus_fad_recursive_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 3);
+    assert_eq!(out.ui.controls.len(), 2);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+}
+
+#[test]
 fn inline_partial_mul_with_trigger_argument_compiles_to_signal_mul() {
     let source = r#"
 upfront(x) = (x-x') > 0.0;

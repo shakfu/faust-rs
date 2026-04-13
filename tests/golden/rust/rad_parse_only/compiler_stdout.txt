@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_parse_only.dsp
+bytes=50
+lines=1
+fnv1a64=2c1a896c00b7c495

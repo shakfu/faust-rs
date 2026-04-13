@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_delay.dsp
+bytes=53
+lines=1
+fnv1a64=6abde32ec2f7cb51

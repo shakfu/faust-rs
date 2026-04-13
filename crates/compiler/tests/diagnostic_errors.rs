@@ -313,6 +313,33 @@ fn propagate_error_fixture_exposes_frs_prop_code() {
 }
 
 #[test]
+fn reverse_ad_fixture_fails_at_propagate_stage_with_unsupported_box_code() {
+    let compiler = Compiler::new();
+    let source = read_corpus("rad_parse_only.dsp");
+    let err = compiler
+        .compile_source_to_signals("rad_parse_only.dsp", &source)
+        .expect_err("rad fixture should fail during propagate stage in this phase");
+
+    let diagnostics = err
+        .diagnostics()
+        .expect("reverse-ad propagate error should expose diagnostics");
+    assert!(
+        diagnostics
+            .as_slice()
+            .iter()
+            .any(|d| d.code.0 == "FRS-PROP-0001"),
+        "reverse-ad should currently surface unsupported-box propagation diagnostics"
+    );
+    assert!(
+        diagnostics
+            .as_slice()
+            .iter()
+            .any(|d| d.message.contains("reversead")),
+        "reverse-ad diagnostics should name the unsupported box family"
+    );
+}
+
+#[test]
 fn soundfile_part_interval_error_exposes_compiler_type_diagnostic() {
     let compiler = Compiler::new();
     let path = corpus_path("rep_74_soundfile_basic.dsp");
