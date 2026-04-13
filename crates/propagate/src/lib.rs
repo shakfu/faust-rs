@@ -442,6 +442,32 @@ fn flat_node_kind(arena: &TreeArena, node: FlatBoxId) -> Result<FlatNodeKind, Fl
     }
 }
 
+/// Returns `true` when `box_tree` is or contains a `ForwardAD` node anywhere
+/// in its composition tree.  Used by `propagate_in_slot_env` to allow
+/// FAD-expanded outputs through arity checks.
+fn contains_forward_ad(arena: &TreeArena, box_tree: FlatBoxId) -> Result<bool, FlatBoxBuildError> {
+    match flat_node_kind(arena, box_tree)? {
+        FlatNodeKind::ForwardAD { .. } => Ok(true),
+        FlatNodeKind::Rec(left, right)
+        | FlatNodeKind::Seq(left, right)
+        | FlatNodeKind::Par(left, right)
+        | FlatNodeKind::Split(left, right)
+        | FlatNodeKind::Merge(left, right) => {
+            Ok(contains_forward_ad(arena, left)? || contains_forward_ad(arena, right)?)
+        }
+        FlatNodeKind::Symbolic { body }
+        | FlatNodeKind::Metadata { body }
+        | FlatNodeKind::VGroup { body }
+        | FlatNodeKind::HGroup { body }
+        | FlatNodeKind::TGroup { body }
+        | FlatNodeKind::ReverseAD { body }
+        | FlatNodeKind::Ondemand(body)
+        | FlatNodeKind::Upsampling(body)
+        | FlatNodeKind::Downsampling(body) => contains_forward_ad(arena, body),
+        _ => Ok(false),
+    }
+}
+
 fn flat_box_unexpected(node: TreeId, kind: &'static str) -> FlatBoxBuildError {
     FlatBoxBuildError::UnexpectedPostEvalBox { node, kind }
 }
@@ -1636,10 +1662,7 @@ fn propagate_in_slot_env(
     ctx: &mut PropagateContext<'_>,
 ) -> Result<Vec<SigId>, PropagateError> {
     let arity = box_arity_typed(arena, box_tree, ctx.cache)?;
-    let allows_expanded_outputs = matches!(
-        flat_node_kind(arena, box_tree)?,
-        FlatNodeKind::ForwardAD { .. }
-    );
+    let allows_expanded_outputs = contains_forward_ad(arena, box_tree)?;
     if inputs.len() != arity.inputs {
         return Err(PropagateError::InputArityMismatch {
             node: box_tree.as_tree_id(),
@@ -2079,8 +2102,19 @@ fn propagate_inner(
             propagate_in_slot_env(arena, right, &merge_in, ctx)
         }
         FlatNodeKind::Rec(left, right) => {
+            // When the right branch is fad(body), peel off the ForwardAD wrapper:
+            // build the Rec normally with just `body`, then apply FAD on the Rec
+            // outputs.  This avoids injecting FAD-expanded tangent signals into
+            // the de Bruijn recursive group where they would hold dangling refs.
+            let (actual_right, apply_fad_after) =
+                if let Ok(FlatNodeKind::ForwardAD { body }) = flat_node_kind(arena, right) {
+                    (body, true)
+                } else {
+                    (right, false)
+                };
+
             let left_arity = box_arity_typed(arena, left, ctx.cache)?;
-            let right_arity = box_arity_typed(arena, right, ctx.cache)?;
+            let right_arity = box_arity_typed(arena, actual_right, ctx.cache)?;
             if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
                 return Err(PropagateError::RecArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -2092,7 +2126,7 @@ fn propagate_inner(
             }
 
             let l0 = make_mem_sig_proj_list(arena, right_arity.inputs)?;
-            let l1 = propagate_in_slot_env(arena, right, &l0, ctx)?;
+            let l1 = propagate_in_slot_env(arena, actual_right, &l0, ctx)?;
 
             let mut rec_inputs = l1;
             rec_inputs.extend(lift_signals(arena, inputs, ctx.memo));
@@ -2128,7 +2162,12 @@ fn propagate_inner(
                     outputs.push(expr);
                 }
             }
-            Ok(outputs)
+
+            if apply_fad_after {
+                forward_ad::generate_fad_signals(arena, &outputs, ctx)
+            } else {
+                Ok(outputs)
+            }
         }
         FlatNodeKind::Inputs => {
             let BoxMatch::Inputs(expr) = match_box(arena, box_tree.as_tree_id()) else {

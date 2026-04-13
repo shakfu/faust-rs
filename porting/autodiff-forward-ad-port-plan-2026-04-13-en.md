@@ -427,17 +427,38 @@ Ensure `FaustCompiler::compile_source_to_signals` correctly handles `fad(expr)` 
 
 The expanded signal list from `generate_fad_signals` feeds into the existing `prepare_signals_for_fir` pipeline. The derivative signals are standard signal trees (add, mul, sin, cos, delay1, etc.) and require no special handling in FIR compilation.
 
-### 7.3 Corpus tests
+### 7.3 FAD inside a recursive branch (`fad` inside `~`)
+
+When `fad(expr)` appears as the feedback branch of a `~` combinator (e.g. `+~(fad(*(g)))`),
+the right branch produces FAD-expanded outputs (primal + tangents) during propagation. The
+`Rec` combinator must handle this:
+
+1. After propagating the right branch, split the output into:
+   - **primal feedback** = first `right_arity.outputs` signals
+   - **tangent extras** = remaining signals (FAD tangents)
+2. Only feed the primal signals back to the left branch (preserving the recursion contract).
+3. Include the tangent signals in the de Bruijn recursive group body, so they properly
+   reference the recursive projections.
+4. Expose the tangent signals as additional outputs of the `Rec`.
+
+This ensures the recursion arity contract is preserved while FAD tangent information
+propagates through the recursive structure.
+
+**Implementation:** `crates/propagate/src/lib.rs` — `FlatNodeKind::Rec(left, right)` arm
+in `propagate_inner`.
+
+### 7.4 Corpus tests
 
 Add test DSP files to `tests/corpus/`:
 
 ```
-tests/corpus/fad_basic.dsp        — fad(hslider("f",440,50,2000,1) : sin)
-tests/corpus/fad_product.dsp      — fad(hslider("f",1,0,10,0.1) * hslider("g",1,0,10,0.1))
-tests/corpus/fad_delay.dsp        — fad(hslider("f",1,0,10,0.1) : @(128))
-tests/corpus/fad_recursive.dsp    — fad(hslider("fb",0.5,0,1,0.01) : +~*(hslider("g",0.5,0,1,0.01)))
-tests/corpus/fad_autodiff_false.dsp — fad(hslider("f [autodiff:false]",1,0,10,0.1) * hslider("g",1,0,10,0.1))
-tests/corpus/rad_parse_only.dsp   — rad(hslider("f",1,0,10,0.1) : sin) — parse OK, propagate error
+tests/corpus/fad_basic.dsp             — fad(hslider("f",440,50,2000,1) : sin)
+tests/corpus/fad_product.dsp           — fad(hslider("f",1,0,10,0.1) * hslider("g",1,0,10,0.1))
+tests/corpus/fad_delay.dsp             — fad(hslider("f",1,0,10,0.1) : @(128))
+tests/corpus/fad_recursive.dsp         — fad(hslider("fb",0.5,0,1,0.01) : +~*(hslider("g",0.5,0,1,0.01)))
+tests/corpus/fad_recursive_branch.dsp  — +~(fad(*(hslider("g",0.5,0,1,0.01)))) — fad inside feedback branch
+tests/corpus/fad_autodiff_false.dsp    — fad(hslider("f [autodiff:false]",1,0,10,0.1) * hslider("g",1,0,10,0.1))
+tests/corpus/rad_parse_only.dsp        — rad(hslider("f",1,0,10,0.1) : sin) — parse OK, propagate error
 ```
 
 ---

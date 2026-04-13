@@ -170,6 +170,27 @@ fn corpus_fad_recursive_compiles_through_full_signal_pipeline() {
 }
 
 #[test]
+fn corpus_fad_recursive_branch_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_branch.dsp");
+    // +~(fad(*(g))): 1 audio input, 1 box-level output
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 1);
+    // Rec exposes primal + FAD tangent from feedback branch: 1 primal + 1 tangent for "g"
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+    // Primal output is a recursive projection
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+    // Tangent output is also a recursive projection (tangent propagates through recursion)
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[1]),
+        SigMatch::Proj(_, _)
+    ));
+}
+
+#[test]
 fn inline_partial_mul_with_trigger_argument_compiles_to_signal_mul() {
     let source = r#"
 upfront(x) = (x-x') > 0.0;
