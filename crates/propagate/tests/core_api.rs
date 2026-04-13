@@ -1376,6 +1376,180 @@ fn propagate_extended_math_primitives_map_to_signal_nodes() {
 }
 
 #[test]
+fn flat_box_builder_accepts_autodiff_wrappers() {
+    let mut arena = TreeArena::new();
+    let (forward, reverse) = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let sin = bb.sin();
+        (bb.forward_ad(sin), bb.reverse_ad(sin))
+    };
+
+    assert!(try_build_flat_box(&arena, forward).is_ok());
+    assert!(try_build_flat_box(&arena, reverse).is_ok());
+}
+
+#[test]
+fn box_arity_typed_treats_forward_ad_as_transparent_wrapper() {
+    let mut arena = TreeArena::new();
+    let (process, wrapped) = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let label = bb.ident("freq");
+        let init = bb.real(440.0);
+        let min = bb.real(50.0);
+        let max = bb.real(2_000.0);
+        let step = bb.real(1.0);
+        let slider = bb.hslider(label, init, min, max, step);
+        let sin = bb.sin();
+        let process = bb.seq(slider, sin);
+        (process, bb.forward_ad(process))
+    };
+
+    let inner_arity = box_arity_typed(
+        &arena,
+        try_build_flat_box(&arena, process).unwrap(),
+        &mut ArityCache::new(),
+    )
+    .expect("inner process arity should infer");
+    let wrapped_arity = box_arity_typed(
+        &arena,
+        try_build_flat_box(&arena, wrapped).unwrap(),
+        &mut ArityCache::new(),
+    )
+    .expect("forward-ad wrapper arity should infer");
+
+    assert_eq!(inner_arity, wrapped_arity);
+    assert_eq!(wrapped_arity.inputs, 0);
+    assert_eq!(wrapped_arity.outputs, 1);
+}
+
+#[test]
+fn propagate_forward_ad_expands_outputs_for_single_control() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let label = bb.ident("freq");
+        let init = bb.real(440.0);
+        let min = bb.real(50.0);
+        let max = bb.real(2_000.0);
+        let step = bb.real(1.0);
+        let slider = bb.hslider(label, init, min, max, step);
+        let sin = bb.sin();
+        let body = bb.seq(slider, sin);
+        bb.forward_ad(body)
+    };
+
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
+        .expect("forward-ad process should propagate");
+
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].label, "freq");
+    let SigMatch::Sin(primal_input) = match_sig(&arena, out.signals[0]) else {
+        panic!("first output should be the primal sin signal");
+    };
+    assert!(matches!(
+        match_sig(&arena, primal_input),
+        SigMatch::HSlider(0)
+    ));
+
+    let SigMatch::BinOp(BinOp::Mul, lhs, rhs) = match_sig(&arena, out.signals[1]) else {
+        panic!("second output should be the tangent mul(cos(x), 1)");
+    };
+    assert!(matches!(match_sig(&arena, lhs), SigMatch::Cos(_)));
+    assert_eq!(match_sig(&arena, rhs), SigMatch::Real(1.0));
+}
+
+#[test]
+fn propagate_forward_ad_emits_one_tangent_per_enabled_control() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let f_label = bb.ident("f");
+        let g_label = bb.ident("g");
+        let init = bb.real(1.0);
+        let min = bb.real(0.0);
+        let max = bb.real(10.0);
+        let step = bb.real(0.1);
+        let f = bb.hslider(f_label, init, min, max, step);
+        let g = bb.hslider(g_label, init, min, max, step);
+        let pair = bb.par(f, g);
+        let mul = bb.mul();
+        let body = bb.seq(pair, mul);
+        bb.forward_ad(body)
+    };
+
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
+        .expect("forward-ad product should propagate");
+
+    assert_eq!(out.signals.len(), 3);
+    assert_eq!(out.ui.controls.len(), 2);
+    assert_eq!(out.ui.controls[0].label, "f");
+    assert_eq!(out.ui.controls[1].label, "g");
+}
+
+#[test]
+fn propagate_forward_ad_skips_controls_marked_autodiff_false() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let f_label = bb.ident("f [autodiff:false]");
+        let g_label = bb.ident("g");
+        let init = bb.real(1.0);
+        let min = bb.real(0.0);
+        let max = bb.real(10.0);
+        let step = bb.real(0.1);
+        let f = bb.hslider(f_label, init, min, max, step);
+        let g = bb.hslider(g_label, init, min, max, step);
+        let pair = bb.par(f, g);
+        let mul = bb.mul();
+        let body = bb.seq(pair, mul);
+        bb.forward_ad(body)
+    };
+
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
+        .expect("forward-ad product should propagate with autodiff metadata");
+
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 2);
+    assert_eq!(
+        out.ui.controls[0].metadata,
+        vec![("autodiff".to_owned(), "false".to_owned())]
+    );
+}
+
+#[test]
+fn propagate_reverse_ad_returns_clear_unsupported_error() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let label = bb.ident("freq");
+        let init = bb.real(440.0);
+        let min = bb.real(50.0);
+        let max = bb.real(2_000.0);
+        let step = bb.real(1.0);
+        let slider = bb.hslider(label, init, min, max, step);
+        let sin = bb.sin();
+        let body = bb.seq(slider, sin);
+        bb.reverse_ad(body)
+    };
+
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let err = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
+        .expect_err("reverse-ad should remain unsupported during propagation");
+
+    assert!(matches!(
+        err,
+        PropagateError::UnsupportedBox {
+            kind: "reversead",
+            ..
+        }
+    ));
+}
+
+#[test]
 fn propagate_error_converts_to_structured_diagnostic_codes() {
     let mut arena = TreeArena::new();
     let node = BoxBuilder::new(&mut arena).wire();

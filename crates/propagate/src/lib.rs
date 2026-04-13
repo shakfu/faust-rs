@@ -48,6 +48,8 @@ use ui::{
     normalize_widget_label_path, split_label_metadata,
 };
 
+mod forward_ad;
+
 /// Memoization cache for [`box_arity_typed`] results, keyed by validated flat boxes.
 pub type ArityCache = AHashMap<FlatBoxId, Result<BoxArity, PropagateError>>;
 /// Environment mapping route/slot placeholders to propagated signals.
@@ -233,6 +235,8 @@ enum FlatNodeKind {
     Route,
     Inputs,
     Outputs,
+    ForwardAD { body: FlatBoxId },
+    ReverseAD { body: FlatBoxId },
     Ondemand(FlatBoxId),
     Upsampling(FlatBoxId),
     Downsampling(FlatBoxId),
@@ -270,6 +274,8 @@ fn validate_flat_box_recursive(
         | FlatNodeKind::VGroup { body }
         | FlatNodeKind::HGroup { body }
         | FlatNodeKind::TGroup { body }
+        | FlatNodeKind::ForwardAD { body }
+        | FlatNodeKind::ReverseAD { body }
         | FlatNodeKind::Ondemand(body)
         | FlatNodeKind::Upsampling(body)
         | FlatNodeKind::Downsampling(body) => validate_flat_box_recursive(arena, body, visited)?,
@@ -398,13 +404,17 @@ fn flat_node_kind(arena: &TreeArena, node: FlatBoxId) -> Result<FlatNodeKind, Fl
         BoxMatch::Route(_, _, _) => Ok(FlatNodeKind::Route),
         BoxMatch::Inputs(_) => Ok(FlatNodeKind::Inputs),
         BoxMatch::Outputs(_) => Ok(FlatNodeKind::Outputs),
+        BoxMatch::ForwardAD(body) => Ok(FlatNodeKind::ForwardAD {
+            body: FlatBoxId::from_tree_id(body),
+        }),
+        BoxMatch::ReverseAD(body) => Ok(FlatNodeKind::ReverseAD {
+            body: FlatBoxId::from_tree_id(body),
+        }),
         BoxMatch::Ondemand(body) => Ok(FlatNodeKind::Ondemand(FlatBoxId::from_tree_id(body))),
         BoxMatch::Upsampling(body) => Ok(FlatNodeKind::Upsampling(FlatBoxId::from_tree_id(body))),
         BoxMatch::Downsampling(body) => {
             Ok(FlatNodeKind::Downsampling(FlatBoxId::from_tree_id(body)))
         }
-        BoxMatch::ForwardAD(_) => Err(flat_box_unexpected(node_id, "forwardad")),
-        BoxMatch::ReverseAD(_) => Err(flat_box_unexpected(node_id, "reversead")),
         BoxMatch::Ffunction(_, _, _) => Err(flat_box_unexpected(node_id, "ffunction")),
         BoxMatch::Unknown => Err(flat_box_unexpected(node_id, "unknown")),
         BoxMatch::Ident(_) => Err(flat_box_unexpected(node_id, "ident")),
@@ -774,6 +784,12 @@ pub fn make_sig_input_list(arena: &mut TreeArena, n: usize) -> Vec<SigId> {
 ///
 /// This is the typed entry point for post-`eval/a2sb` callers that already
 /// hold a validated [`FlatBoxId`].
+///
+/// AD parity note:
+/// - `fad(expr)` and `rad(expr)` stay arity-transparent here and report the
+///   same box arity as `expr`,
+/// - forward-mode output expansion happens later during signal propagation,
+/// - reverse-mode propagation remains intentionally unsupported in this phase.
 pub fn box_arity_typed(
     arena: &TreeArena,
     box_tree: FlatBoxId,
@@ -881,7 +897,9 @@ fn box_arity_flat_inner(
         }
         FlatNodeKind::VGroup { body }
         | FlatNodeKind::HGroup { body }
-        | FlatNodeKind::TGroup { body } => box_arity_typed(arena, body, cache),
+        | FlatNodeKind::TGroup { body }
+        | FlatNodeKind::ForwardAD { body }
+        | FlatNodeKind::ReverseAD { body } => box_arity_typed(arena, body, cache),
         FlatNodeKind::Symbolic { body } => {
             let inner = box_arity_typed(arena, body, cache)?;
             Ok(BoxArity {
@@ -993,6 +1011,14 @@ fn box_arity_flat_inner(
 /// This is the typed entry point for callers that already crossed the
 /// `eval/a2sb` flat-box boundary and want the full propagation products:
 /// propagated DSP signals plus canonical grouped UI ownership.
+///
+/// AD parity note:
+/// - when `box_tree` is `fad(expr)`, the returned `signals` list is expanded to
+///   `primal outputs + one tangent bundle per enabled control`,
+/// - enabled controls come from the canonical UI registry and honor
+///   `[autodiff:false]`,
+/// - `rad(expr)` still returns [`PropagateError::UnsupportedBox`] in this
+///   phase.
 pub fn propagate_typed_with_ui(
     arena: &mut TreeArena,
     box_tree: FlatBoxId,
@@ -1023,6 +1049,7 @@ pub fn propagate_typed_with_ui_options(
     let mut ctx = PropagateContext {
         cache,
         control_ids: &ui.control_ids,
+        ui_controls: &ui.program.controls,
         slot_env: &mut slot_env,
         memo: &mut memo,
         clock_env: arena.nil(),
@@ -1478,7 +1505,9 @@ fn collect_ui_nodes(
         | FlatNodeKind::Metadata { body }
         | FlatNodeKind::Ondemand(body)
         | FlatNodeKind::Upsampling(body)
-        | FlatNodeKind::Downsampling(body) => {
+        | FlatNodeKind::Downsampling(body)
+        | FlatNodeKind::ForwardAD { body }
+        | FlatNodeKind::ReverseAD { body } => {
             collect_ui_nodes(source_arena, body, current_groups, collector)
         }
         FlatNodeKind::Seq(left, right)
@@ -1607,6 +1636,10 @@ fn propagate_in_slot_env(
     ctx: &mut PropagateContext<'_>,
 ) -> Result<Vec<SigId>, PropagateError> {
     let arity = box_arity_typed(arena, box_tree, ctx.cache)?;
+    let allows_expanded_outputs = matches!(
+        flat_node_kind(arena, box_tree)?,
+        FlatNodeKind::ForwardAD { .. }
+    );
     if inputs.len() != arity.inputs {
         return Err(PropagateError::InputArityMismatch {
             node: box_tree.as_tree_id(),
@@ -1615,7 +1648,7 @@ fn propagate_in_slot_env(
         });
     }
     let outputs = propagate_inner(arena, box_tree, inputs, ctx)?;
-    if outputs.len() != arity.outputs {
+    if !allows_expanded_outputs && outputs.len() != arity.outputs {
         return Err(PropagateError::OutputArityMismatch {
             node: box_tree.as_tree_id(),
             expected: arity.outputs,
@@ -2119,6 +2152,14 @@ fn propagate_inner(
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.int(value)])
         }
+        FlatNodeKind::ForwardAD { body } => {
+            let inner = propagate_in_slot_env(arena, body, inputs, ctx)?;
+            forward_ad::generate_fad_signals(arena, &inner, ctx)
+        }
+        FlatNodeKind::ReverseAD { .. } => Err(PropagateError::UnsupportedBox {
+            node: box_tree.as_tree_id(),
+            kind: "reversead",
+        }),
         FlatNodeKind::Environment => {
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             Ok(Vec::new())
@@ -2618,6 +2659,7 @@ impl Default for PropagateMemo {
 struct PropagateContext<'a> {
     cache: &'a mut ArityCache,
     control_ids: &'a ControlIds,
+    ui_controls: &'a [ControlSpec],
     slot_env: &'a mut SlotEnv,
     memo: &'a mut PropagateMemo,
     clock_env: TreeId,
