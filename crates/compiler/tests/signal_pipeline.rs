@@ -191,6 +191,28 @@ fn corpus_fad_recursive_branch_compiles_through_full_signal_pipeline() {
 }
 
 #[test]
+fn corpus_fad_recursive_left_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_left.dsp");
+    // fad(+)~*(g): 1 audio input, 1 box-level output
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 1);
+    // 1 primal + 1 tangent for "g"
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+}
+
+#[test]
+fn corpus_fad_recursive_both_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_both.dsp");
+    // fad(+)~fad(*(g)): 1 audio input, 1 box-level output
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 1);
+    // 1 primal + 1 tangent for "g"
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+}
+
+#[test]
 fn inline_partial_mul_with_trigger_argument_compiles_to_signal_mul() {
     let source = r#"
 upfront(x) = (x-x') > 0.0;

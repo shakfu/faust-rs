@@ -2102,18 +2102,26 @@ fn propagate_inner(
             propagate_in_slot_env(arena, right, &merge_in, ctx)
         }
         FlatNodeKind::Rec(left, right) => {
-            // When the right branch is fad(body), peel off the ForwardAD wrapper:
-            // build the Rec normally with just `body`, then apply FAD on the Rec
-            // outputs.  This avoids injecting FAD-expanded tangent signals into
-            // the de Bruijn recursive group where they would hold dangling refs.
-            let (actual_right, apply_fad_after) =
+            // When either branch is fad(body), peel off the ForwardAD wrapper:
+            // build the Rec normally with just the inner body, then apply FAD on
+            // the Rec outputs.  This avoids injecting FAD-expanded tangent
+            // signals into the de Bruijn recursive group where they would hold
+            // dangling refs.
+            let (actual_left, fad_left) =
+                if let Ok(FlatNodeKind::ForwardAD { body }) = flat_node_kind(arena, left) {
+                    (body, true)
+                } else {
+                    (left, false)
+                };
+            let (actual_right, fad_right) =
                 if let Ok(FlatNodeKind::ForwardAD { body }) = flat_node_kind(arena, right) {
                     (body, true)
                 } else {
                     (right, false)
                 };
+            let apply_fad_after = fad_left || fad_right;
 
-            let left_arity = box_arity_typed(arena, left, ctx.cache)?;
+            let left_arity = box_arity_typed(arena, actual_left, ctx.cache)?;
             let right_arity = box_arity_typed(arena, actual_right, ctx.cache)?;
             if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
                 return Err(PropagateError::RecArityMismatch {
@@ -2144,7 +2152,7 @@ fn propagate_inner(
                 .collect();
             let saved_slot_env = std::mem::replace(ctx.slot_env, lifted_slot_env);
 
-            let l2 = propagate_in_slot_env(arena, left, &rec_inputs, ctx)?;
+            let l2 = propagate_in_slot_env(arena, actual_left, &rec_inputs, ctx)?;
 
             *ctx.slot_env = saved_slot_env;
 
