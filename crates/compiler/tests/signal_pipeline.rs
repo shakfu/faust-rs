@@ -118,7 +118,7 @@ fn corpus_feedback_simple_exposes_recursive_projection() {
 fn corpus_fad_basic_expands_pipeline_outputs() {
     let out = compile_corpus("fad_basic.dsp");
     assert_eq!(out.process_arity.inputs, 0);
-    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.process_arity.outputs, 2);
     assert_eq!(out.signals.len(), 2);
     assert_eq!(out.ui.controls.len(), 1);
     assert_eq!(out.ui.controls[0].label, "f");
@@ -136,7 +136,7 @@ fn corpus_fad_basic_expands_pipeline_outputs() {
 fn corpus_fad_product_emits_one_tangent_per_control() {
     let out = compile_corpus("fad_product.dsp");
     assert_eq!(out.process_arity.inputs, 0);
-    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.process_arity.outputs, 3);
     assert_eq!(out.signals.len(), 3);
     assert_eq!(out.ui.controls.len(), 2);
     assert_eq!(out.ui.controls[0].label, "f");
@@ -147,7 +147,9 @@ fn corpus_fad_product_emits_one_tangent_per_control() {
 fn corpus_fad_autodiff_false_excludes_disabled_control_from_tangents() {
     let out = compile_corpus("fad_autodiff_false.dsp");
     assert_eq!(out.process_arity.inputs, 0);
-    assert_eq!(out.process_arity.outputs, 1);
+    // Box-level arity counts all 2 controls → 3 outputs, but signal-level
+    // excludes [autodiff:false] → only 2 signals actually produced.
+    assert_eq!(out.process_arity.outputs, 3);
     assert_eq!(out.signals.len(), 2);
     assert_eq!(out.ui.controls.len(), 2);
     assert_eq!(
@@ -160,7 +162,7 @@ fn corpus_fad_autodiff_false_excludes_disabled_control_from_tangents() {
 fn corpus_fad_recursive_compiles_through_full_signal_pipeline() {
     let out = compile_corpus("fad_recursive.dsp");
     assert_eq!(out.process_arity.inputs, 0);
-    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.process_arity.outputs, 3);
     assert_eq!(out.signals.len(), 3);
     assert_eq!(out.ui.controls.len(), 2);
     assert!(matches!(
@@ -172,9 +174,9 @@ fn corpus_fad_recursive_compiles_through_full_signal_pipeline() {
 #[test]
 fn corpus_fad_recursive_branch_compiles_through_full_signal_pipeline() {
     let out = compile_corpus("fad_recursive_branch.dsp");
-    // +~(fad(*(g))): 1 audio input, 1 box-level output
+    // +~(fad(*(g))): 1 audio input, expanded outputs
     assert_eq!(out.process_arity.inputs, 1);
-    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.process_arity.outputs, 2);
     // Rec exposes primal + FAD tangent from feedback branch: 1 primal + 1 tangent for "g"
     assert_eq!(out.signals.len(), 2);
     assert_eq!(out.ui.controls.len(), 1);
@@ -193,9 +195,9 @@ fn corpus_fad_recursive_branch_compiles_through_full_signal_pipeline() {
 #[test]
 fn corpus_fad_recursive_left_compiles_through_full_signal_pipeline() {
     let out = compile_corpus("fad_recursive_left.dsp");
-    // fad(+)~*(g): 1 audio input, 1 box-level output
+    // fad(+)~*(g): 1 audio input, expanded outputs
     assert_eq!(out.process_arity.inputs, 1);
-    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.process_arity.outputs, 2);
     // 1 primal + 1 tangent for "g"
     assert_eq!(out.signals.len(), 2);
     assert_eq!(out.ui.controls.len(), 1);
@@ -204,9 +206,9 @@ fn corpus_fad_recursive_left_compiles_through_full_signal_pipeline() {
 #[test]
 fn corpus_fad_recursive_both_compiles_through_full_signal_pipeline() {
     let out = compile_corpus("fad_recursive_both.dsp");
-    // fad(+)~fad(*(g)): 1 audio input, 1 box-level output
+    // fad(+)~fad(*(g)): 1 audio input, expanded outputs
     assert_eq!(out.process_arity.inputs, 1);
-    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.process_arity.outputs, 2);
     // 1 primal + 1 tangent for "g"
     assert_eq!(out.signals.len(), 2);
     assert_eq!(out.ui.controls.len(), 1);
@@ -217,7 +219,7 @@ fn corpus_fad_recursive_deep_right_compiles_through_full_signal_pipeline() {
     let out = compile_corpus("fad_recursive_deep_right.dsp");
     // +~vgroup("fb", fad(*(g))): FAD nested inside vgroup inside feedback
     assert_eq!(out.process_arity.inputs, 1);
-    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.process_arity.outputs, 2);
     assert_eq!(out.signals.len(), 2);
     assert_eq!(out.ui.controls.len(), 1);
 }
@@ -227,7 +229,7 @@ fn corpus_fad_recursive_deep_left_compiles_through_full_signal_pipeline() {
     let out = compile_corpus("fad_recursive_deep_left.dsp");
     // vgroup("sum", fad(+))~*(g): FAD nested inside vgroup in left branch
     assert_eq!(out.process_arity.inputs, 1);
-    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.process_arity.outputs, 2);
     assert_eq!(out.signals.len(), 2);
     assert_eq!(out.ui.controls.len(), 1);
 }
@@ -237,7 +239,129 @@ fn corpus_fad_recursive_deep_both_compiles_through_full_signal_pipeline() {
     let out = compile_corpus("fad_recursive_deep_both.dsp");
     // vgroup("sum", fad(+))~vgroup("fb", fad(*(g))): FAD nested in both branches
     assert_eq!(out.process_arity.inputs, 1);
-    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+}
+
+#[test]
+fn corpus_fad_gradient_host_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_gradient_host.dsp");
+    // fad(error): error = (input*g - input*target)^2, 1 control → 2 signals
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+}
+
+#[test]
+fn corpus_fad_triple_chain_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_triple_chain.dsp");
+    // fad(a * b * c): 0 inputs, 3 controls → 4 signals (primal + 3 tangents)
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 4);
+    assert_eq!(out.signals.len(), 4);
+    assert_eq!(out.ui.controls.len(), 3);
+}
+
+#[test]
+fn corpus_fad_trig_composition_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_trig_composition.dsp");
+    // fad(f : sin : cos): 0 inputs, 1 control → 2 signals
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+}
+
+#[test]
+fn corpus_fad_division_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_division.dsp");
+    // fad(num / den): 0 inputs, 2 controls → 3 signals
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 3);
+    assert_eq!(out.signals.len(), 3);
+    assert_eq!(out.ui.controls.len(), 2);
+}
+
+#[test]
+fn corpus_fad_power_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_power.dsp");
+    // fad(base ^ exp): 0 inputs, 2 controls → 3 signals
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 3);
+    assert_eq!(out.signals.len(), 3);
+    assert_eq!(out.ui.controls.len(), 2);
+}
+
+#[test]
+fn corpus_fad_delay_variable_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_delay_variable.dsp");
+    // fad(_ * g : @(d)): 1 input, 2 controls → 3 signals
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 3);
+    assert_eq!(out.signals.len(), 3);
+    assert_eq!(out.ui.controls.len(), 2);
+}
+
+#[test]
+fn corpus_fad_recursive_multi_control_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_multi_control.dsp");
+    // fad(+ ~ *(fb) : *(vol)): 1 input, 2 controls → 3 signals
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 3);
+    assert_eq!(out.signals.len(), 3);
+    assert_eq!(out.ui.controls.len(), 2);
+}
+
+#[test]
+fn corpus_fad_recursive_delay_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_delay.dsp");
+    // fad(+ ~ (@(128) : *(fb))): 1 input, 1 control → 2 signals
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+}
+
+#[test]
+fn corpus_fad_minmax_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_minmax.dsp");
+    // fad(min(a, b)): 0 inputs, 2 controls → 3 signals
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 3);
+    assert_eq!(out.signals.len(), 3);
+    assert_eq!(out.ui.controls.len(), 2);
+}
+
+#[test]
+fn corpus_fad_select2_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_select2.dsp");
+    // fad(select2(sel, a, b)): 0 inputs, 3 controls → 4 signals
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 4);
+    assert_eq!(out.signals.len(), 4);
+    assert_eq!(out.ui.controls.len(), 3);
+}
+
+#[test]
+fn corpus_fad_math_chain_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_math_chain.dsp");
+    // fad(x : exp : log : sqrt : abs): 0 inputs, 1 control → 2 signals
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+}
+
+#[test]
+fn inline_fad_seq_with_identity_pair_compiles() {
+    // The original bug: fad(*(g)) : (_,_) must compile.
+    // fad(*(g)) has 1 output * (1 + 1 control) = 2 outputs → matches (_,_) inputs.
+    let source = r#"process = fad(*(hslider("g", 0.5, 0, 1, 0.01))) : (_,_);"#;
+    let out = compile_inline("fad_seq_identity.dsp", source);
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 2);
     assert_eq!(out.signals.len(), 2);
     assert_eq!(out.ui.controls.len(), 1);
 }

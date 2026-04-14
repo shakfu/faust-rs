@@ -1389,7 +1389,7 @@ fn flat_box_builder_accepts_autodiff_wrappers() {
 }
 
 #[test]
-fn box_arity_typed_treats_forward_ad_as_transparent_wrapper() {
+fn box_arity_typed_expands_forward_ad_outputs() {
     let mut arena = TreeArena::new();
     let (process, wrapped) = {
         let mut bb = BoxBuilder::new(&mut arena);
@@ -1417,9 +1417,12 @@ fn box_arity_typed_treats_forward_ad_as_transparent_wrapper() {
     )
     .expect("forward-ad wrapper arity should infer");
 
-    assert_eq!(inner_arity, wrapped_arity);
+    // Inner: hslider : sin → (0, 1)
+    assert_eq!(inner_arity.inputs, 0);
+    assert_eq!(inner_arity.outputs, 1);
+    // fad(inner) expands outputs: 1 * (1 + 1 control) = 2
     assert_eq!(wrapped_arity.inputs, 0);
-    assert_eq!(wrapped_arity.outputs, 1);
+    assert_eq!(wrapped_arity.outputs, 2);
 }
 
 #[test]

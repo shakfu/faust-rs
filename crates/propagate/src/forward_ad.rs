@@ -13,7 +13,7 @@
 //!
 //! # Integration contract
 //! This module is intentionally internal to `propagate`:
-//! - `box_arity_typed(...)` stays transparent for `fad(expr)` wrappers,
+//! - `box_arity_typed(...)` reports expanded output arity for `fad(expr)`,
 //! - output expansion happens only after the wrapped box has already lowered to
 //!   signal IR,
 //! - controls are sourced from the already-built [`ui::UiProgram`] registry so

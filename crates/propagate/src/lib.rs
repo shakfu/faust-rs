@@ -443,8 +443,9 @@ fn flat_node_kind(arena: &TreeArena, node: FlatBoxId) -> Result<FlatNodeKind, Fl
 }
 
 /// Returns `true` when `box_tree` is or contains a `ForwardAD` node anywhere
-/// in its composition tree.  Used by `propagate_in_slot_env` to allow
-/// FAD-expanded outputs through arity checks.
+/// in its composition tree.  Used by the Rec propagation handler to decide
+/// whether to suppress FAD expansion during branch propagation and defer it
+/// to after the recursive group is fully built.
 fn contains_forward_ad(arena: &TreeArena, box_tree: FlatBoxId) -> Result<bool, FlatBoxBuildError> {
     match flat_node_kind(arena, box_tree)? {
         FlatNodeKind::ForwardAD { .. } => Ok(true),
@@ -465,6 +466,44 @@ fn contains_forward_ad(arena: &TreeArena, box_tree: FlatBoxId) -> Result<bool, F
         | FlatNodeKind::Upsampling(body)
         | FlatNodeKind::Downsampling(body) => contains_forward_ad(arena, body),
         _ => Ok(false),
+    }
+}
+
+/// Counts differentiable UI controls (hslider, vslider, numentry) reachable in
+/// a flat box tree.  Used by `box_arity_typed` to compute the expanded output
+/// arity of `fad(expr)`: `outputs * (1 + count_ad_controls(expr))`.
+///
+/// This mirrors the C++ `BoxADControlsCounter` in `boxVisitor.hh`.
+fn count_ad_controls(
+    arena: &TreeArena,
+    box_tree: FlatBoxId,
+    visited: &mut AHashSet<FlatBoxId>,
+) -> Result<usize, PropagateError> {
+    if !visited.insert(box_tree) {
+        return Ok(0);
+    }
+    match flat_node_kind(arena, box_tree)? {
+        FlatNodeKind::VSlider | FlatNodeKind::HSlider | FlatNodeKind::NumEntry => Ok(1),
+        FlatNodeKind::Rec(left, right)
+        | FlatNodeKind::Seq(left, right)
+        | FlatNodeKind::Par(left, right)
+        | FlatNodeKind::Split(left, right)
+        | FlatNodeKind::Merge(left, right) => {
+            let l = count_ad_controls(arena, left, visited)?;
+            let r = count_ad_controls(arena, right, visited)?;
+            Ok(l + r)
+        }
+        FlatNodeKind::Symbolic { body }
+        | FlatNodeKind::Metadata { body }
+        | FlatNodeKind::VGroup { body }
+        | FlatNodeKind::HGroup { body }
+        | FlatNodeKind::TGroup { body }
+        | FlatNodeKind::ForwardAD { body }
+        | FlatNodeKind::ReverseAD { body }
+        | FlatNodeKind::Ondemand(body)
+        | FlatNodeKind::Upsampling(body)
+        | FlatNodeKind::Downsampling(body) => count_ad_controls(arena, body, visited),
+        _ => Ok(0),
     }
 }
 
@@ -811,11 +850,12 @@ pub fn make_sig_input_list(arena: &mut TreeArena, n: usize) -> Vec<SigId> {
 /// This is the typed entry point for post-`eval/a2sb` callers that already
 /// hold a validated [`FlatBoxId`].
 ///
-/// AD parity note:
-/// - `fad(expr)` and `rad(expr)` stay arity-transparent here and report the
-///   same box arity as `expr`,
-/// - forward-mode output expansion happens later during signal propagation,
-/// - reverse-mode propagation remains intentionally unsupported in this phase.
+/// AD arity note:
+/// - `fad(expr)` reports **expanded** output arity:
+///   `outputs = body_outputs * (1 + num_differentiable_controls)`.
+///   This matches the C++ `getBoxType` behavior (`boxtype.cpp:371`).
+/// - `rad(expr)` stays arity-transparent (unsupported in this phase).
+/// - Reverse-mode propagation remains intentionally unsupported.
 pub fn box_arity_typed(
     arena: &TreeArena,
     box_tree: FlatBoxId,
@@ -827,6 +867,110 @@ pub fn box_arity_typed(
     let result = box_arity_flat_inner(arena, box_tree, cache);
     cache.insert(box_tree, result.clone());
     result
+}
+
+/// Like [`box_arity_typed`] but treats `ForwardAD` as transparent (no output
+/// expansion).  Used by the Rec combinator to compute the core wiring arity
+/// of its branches — the actual FAD expansion is handled separately after
+/// the recursive group is built (via `suppress_fad` + `generate_fad_signals`).
+fn box_arity_wiring(
+    arena: &TreeArena,
+    box_tree: FlatBoxId,
+    cache: &mut ArityCache,
+) -> Result<BoxArity, PropagateError> {
+    // Unwrap ForwardAD layers, then delegate to box_arity_typed for the body.
+    // Since ForwardAD is the only node that differs between wiring and typed,
+    // once we strip it, the cached typed arity of the inner body is correct.
+    match flat_node_kind(arena, box_tree)? {
+        FlatNodeKind::ForwardAD { body } => box_arity_wiring(arena, body, cache),
+        FlatNodeKind::VGroup { body }
+        | FlatNodeKind::HGroup { body }
+        | FlatNodeKind::TGroup { body }
+        | FlatNodeKind::Metadata { body } => {
+            let inner = box_arity_wiring(arena, body, cache)?;
+            Ok(inner)
+        }
+        FlatNodeKind::Symbolic { body } => {
+            let inner = box_arity_wiring(arena, body, cache)?;
+            Ok(BoxArity {
+                inputs: inner.inputs + 1,
+                outputs: inner.outputs,
+            })
+        }
+        FlatNodeKind::Seq(left, right) => {
+            let la = box_arity_wiring(arena, left, cache)?;
+            let ra = box_arity_wiring(arena, right, cache)?;
+            if la.outputs != ra.inputs {
+                return Err(PropagateError::SeqArityMismatch {
+                    node: box_tree.as_tree_id(),
+                    left_outputs: la.outputs,
+                    right_inputs: ra.inputs,
+                });
+            }
+            Ok(BoxArity {
+                inputs: la.inputs,
+                outputs: ra.outputs,
+            })
+        }
+        FlatNodeKind::Par(left, right) => {
+            let la = box_arity_wiring(arena, left, cache)?;
+            let ra = box_arity_wiring(arena, right, cache)?;
+            Ok(BoxArity {
+                inputs: la.inputs + ra.inputs,
+                outputs: la.outputs + ra.outputs,
+            })
+        }
+        FlatNodeKind::Rec(left, right) => {
+            let la = box_arity_wiring(arena, left, cache)?;
+            let ra = box_arity_wiring(arena, right, cache)?;
+            if ra.inputs > la.outputs || ra.outputs > la.inputs {
+                return Err(PropagateError::RecArityMismatch {
+                    node: box_tree.as_tree_id(),
+                    left_inputs: la.inputs,
+                    left_outputs: la.outputs,
+                    right_inputs: ra.inputs,
+                    right_outputs: ra.outputs,
+                });
+            }
+            Ok(BoxArity {
+                inputs: la.inputs.saturating_sub(ra.outputs),
+                outputs: la.outputs,
+            })
+        }
+        FlatNodeKind::Split(left, right) => {
+            let la = box_arity_wiring(arena, left, cache)?;
+            let ra = box_arity_wiring(arena, right, cache)?;
+            if !split_compatible(la.outputs, ra.inputs) {
+                return Err(PropagateError::SplitArityMismatch {
+                    node: box_tree.as_tree_id(),
+                    left_outputs: la.outputs,
+                    right_inputs: ra.inputs,
+                });
+            }
+            Ok(BoxArity {
+                inputs: la.inputs,
+                outputs: ra.outputs,
+            })
+        }
+        FlatNodeKind::Merge(left, right) => {
+            let la = box_arity_wiring(arena, left, cache)?;
+            let ra = box_arity_wiring(arena, right, cache)?;
+            if !merge_compatible(la.outputs, ra.inputs) {
+                return Err(PropagateError::MergeArityMismatch {
+                    node: box_tree.as_tree_id(),
+                    left_outputs: la.outputs,
+                    right_inputs: ra.inputs,
+                });
+            }
+            Ok(BoxArity {
+                inputs: la.inputs,
+                outputs: ra.outputs,
+            })
+        }
+        // For all other node kinds, ForwardAD doesn't appear in the subtree
+        // and the typed arity is identical to the wiring arity.
+        _ => box_arity_typed(arena, box_tree, cache),
+    }
 }
 
 /// Core arity inference logic, called only on cache miss.
@@ -924,8 +1068,16 @@ fn box_arity_flat_inner(
         FlatNodeKind::VGroup { body }
         | FlatNodeKind::HGroup { body }
         | FlatNodeKind::TGroup { body }
-        | FlatNodeKind::ForwardAD { body }
         | FlatNodeKind::ReverseAD { body } => box_arity_typed(arena, body, cache),
+        FlatNodeKind::ForwardAD { body } => {
+            let inner = box_arity_typed(arena, body, cache)?;
+            let mut visited = AHashSet::new();
+            let n_controls = count_ad_controls(arena, body, &mut visited)?;
+            Ok(BoxArity {
+                inputs: inner.inputs,
+                outputs: inner.outputs * (1 + n_controls),
+            })
+        }
         FlatNodeKind::Symbolic { body } => {
             let inner = box_arity_typed(arena, body, cache)?;
             Ok(BoxArity {
@@ -987,8 +1139,11 @@ fn box_arity_flat_inner(
             })
         }
         FlatNodeKind::Rec(left, right) => {
-            let left_arity = box_arity_typed(arena, left, cache)?;
-            let right_arity = box_arity_typed(arena, right, cache)?;
+            // Use wiring arity (ForwardAD-transparent) for Rec validation.
+            // FAD expansion is deferred to after the recursive group is built
+            // via the suppress_fad mechanism in propagate_inner.
+            let left_arity = box_arity_wiring(arena, left, cache)?;
+            let right_arity = box_arity_wiring(arena, right, cache)?;
             if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
                 return Err(PropagateError::RecArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -998,9 +1153,25 @@ fn box_arity_flat_inner(
                     right_outputs: right_arity.outputs,
                 });
             }
+            let core_outputs = left_arity.outputs;
+            let core_inputs = left_arity.inputs.saturating_sub(right_arity.outputs);
+            // If the Rec contains fad(), expand output arity by the number of
+            // controls reachable from both branches — this matches what
+            // generate_fad_signals will produce at propagation time.
+            let has_fad = contains_forward_ad(arena, left)?
+                || contains_forward_ad(arena, right)?;
+            let outputs = if has_fad {
+                let mut visited = AHashSet::new();
+                let n_left = count_ad_controls(arena, left, &mut visited)?;
+                let n_right = count_ad_controls(arena, right, &mut visited)?;
+                let n_controls = n_left + n_right;
+                core_outputs * (1 + n_controls)
+            } else {
+                core_outputs
+            };
             Ok(BoxArity {
-                inputs: left_arity.inputs - right_arity.outputs,
-                outputs: left_arity.outputs,
+                inputs: core_inputs,
+                outputs,
             })
         }
         FlatNodeKind::Environment => Ok(BoxArity {
@@ -1663,7 +1834,6 @@ fn propagate_in_slot_env(
     ctx: &mut PropagateContext<'_>,
 ) -> Result<Vec<SigId>, PropagateError> {
     let arity = box_arity_typed(arena, box_tree, ctx.cache)?;
-    let allows_expanded_outputs = contains_forward_ad(arena, box_tree)?;
     if inputs.len() != arity.inputs {
         return Err(PropagateError::InputArityMismatch {
             node: box_tree.as_tree_id(),
@@ -1672,7 +1842,27 @@ fn propagate_in_slot_env(
         });
     }
     let outputs = propagate_inner(arena, box_tree, inputs, ctx)?;
-    if !allows_expanded_outputs && outputs.len() != arity.outputs {
+    // Output arity validation: signal count may be less than box arity in two
+    // cases:
+    // 1. `suppress_fad` is active (Rec branch propagation): FAD expansion is
+    //    deferred, so only primal outputs are produced.
+    // 2. `[autodiff:false]` metadata: box-level control counting cannot see
+    //    per-control metadata, so the box arity is an upper bound. The actual
+    //    signal count may be lower when some controls are excluded.
+    //
+    // Outputs must never *exceed* the box arity prediction.
+    if outputs.len() > arity.outputs {
+        return Err(PropagateError::OutputArityMismatch {
+            node: box_tree.as_tree_id(),
+            expected: arity.outputs,
+            got: outputs.len(),
+        });
+    }
+    // When no FAD is involved, outputs must match exactly.
+    if outputs.len() != arity.outputs
+        && !ctx.suppress_fad
+        && !contains_forward_ad(arena, box_tree)?
+    {
         return Err(PropagateError::OutputArityMismatch {
             node: box_tree.as_tree_id(),
             expected: arity.outputs,
@@ -2111,8 +2301,9 @@ fn propagate_inner(
             let has_fad = contains_forward_ad(arena, left)?
                 || contains_forward_ad(arena, right)?;
 
-            let left_arity = box_arity_typed(arena, left, ctx.cache)?;
-            let right_arity = box_arity_typed(arena, right, ctx.cache)?;
+            // Use wiring arity (ForwardAD-transparent) for Rec internal wiring.
+            let left_arity = box_arity_wiring(arena, left, ctx.cache)?;
+            let right_arity = box_arity_wiring(arena, right, ctx.cache)?;
             if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
                 return Err(PropagateError::RecArityMismatch {
                     node: box_tree.as_tree_id(),
