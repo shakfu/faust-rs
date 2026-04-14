@@ -213,6 +213,36 @@ fn corpus_fad_recursive_both_compiles_through_full_signal_pipeline() {
 }
 
 #[test]
+fn corpus_fad_recursive_deep_right_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_deep_right.dsp");
+    // +~vgroup("fb", fad(*(g))): FAD nested inside vgroup inside feedback
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+}
+
+#[test]
+fn corpus_fad_recursive_deep_left_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_deep_left.dsp");
+    // vgroup("sum", fad(+))~*(g): FAD nested inside vgroup in left branch
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+}
+
+#[test]
+fn corpus_fad_recursive_deep_both_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_deep_both.dsp");
+    // vgroup("sum", fad(+))~vgroup("fb", fad(*(g))): FAD nested in both branches
+    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+}
+
+#[test]
 fn inline_partial_mul_with_trigger_argument_compiles_to_signal_mul() {
     let source = r#"
 upfront(x) = (x-x') > 0.0;

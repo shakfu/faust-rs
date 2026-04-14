@@ -1079,6 +1079,7 @@ pub fn propagate_typed_with_ui_options(
         slot_env: &mut slot_env,
         memo: &mut memo,
         clock_env: arena.nil(),
+        suppress_fad: false,
     };
     let signals = propagate_in_slot_env(arena, box_tree, inputs, &mut ctx)?;
     Ok(PropagateOutput {
@@ -2102,27 +2103,16 @@ fn propagate_inner(
             propagate_in_slot_env(arena, right, &merge_in, ctx)
         }
         FlatNodeKind::Rec(left, right) => {
-            // When either branch is fad(body), peel off the ForwardAD wrapper:
-            // build the Rec normally with just the inner body, then apply FAD on
-            // the Rec outputs.  This avoids injecting FAD-expanded tangent
-            // signals into the de Bruijn recursive group where they would hold
-            // dangling refs.
-            let (actual_left, fad_left) =
-                if let Ok(FlatNodeKind::ForwardAD { body }) = flat_node_kind(arena, left) {
-                    (body, true)
-                } else {
-                    (left, false)
-                };
-            let (actual_right, fad_right) =
-                if let Ok(FlatNodeKind::ForwardAD { body }) = flat_node_kind(arena, right) {
-                    (body, true)
-                } else {
-                    (right, false)
-                };
-            let apply_fad_after = fad_left || fad_right;
+            // When either Rec branch contains fad(), suppress FAD expansion
+            // during branch propagation.  The Rec is built normally, then
+            // generate_fad_signals runs on the outputs.  This avoids injecting
+            // FAD-expanded tangent signals into the de Bruijn recursive group
+            // where they would hold dangling refs.
+            let has_fad = contains_forward_ad(arena, left)?
+                || contains_forward_ad(arena, right)?;
 
-            let left_arity = box_arity_typed(arena, actual_left, ctx.cache)?;
-            let right_arity = box_arity_typed(arena, actual_right, ctx.cache)?;
+            let left_arity = box_arity_typed(arena, left, ctx.cache)?;
+            let right_arity = box_arity_typed(arena, right, ctx.cache)?;
             if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
                 return Err(PropagateError::RecArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -2133,8 +2123,13 @@ fn propagate_inner(
                 });
             }
 
+            let saved_suppress = ctx.suppress_fad;
+            if has_fad {
+                ctx.suppress_fad = true;
+            }
+
             let l0 = make_mem_sig_proj_list(arena, right_arity.inputs)?;
-            let l1 = propagate_in_slot_env(arena, actual_right, &l0, ctx)?;
+            let l1 = propagate_in_slot_env(arena, right, &l0, ctx)?;
 
             let mut rec_inputs = l1;
             rec_inputs.extend(lift_signals(arena, inputs, ctx.memo));
@@ -2152,9 +2147,10 @@ fn propagate_inner(
                 .collect();
             let saved_slot_env = std::mem::replace(ctx.slot_env, lifted_slot_env);
 
-            let l2 = propagate_in_slot_env(arena, actual_left, &rec_inputs, ctx)?;
+            let l2 = propagate_in_slot_env(arena, left, &rec_inputs, ctx)?;
 
             *ctx.slot_env = saved_slot_env;
+            ctx.suppress_fad = saved_suppress;
 
             let group_body = vec_to_list(arena, &l2);
             let group = debruijn_rec(arena, group_body);
@@ -2171,7 +2167,7 @@ fn propagate_inner(
                 }
             }
 
-            if apply_fad_after {
+            if has_fad {
                 forward_ad::generate_fad_signals(arena, &outputs, ctx)
             } else {
                 Ok(outputs)
@@ -2201,7 +2197,13 @@ fn propagate_inner(
         }
         FlatNodeKind::ForwardAD { body } => {
             let inner = propagate_in_slot_env(arena, body, inputs, ctx)?;
-            forward_ad::generate_fad_signals(arena, &inner, ctx)
+            if ctx.suppress_fad {
+                // Inside a Rec branch: defer FAD expansion to after the
+                // recursive group is built.
+                Ok(inner)
+            } else {
+                forward_ad::generate_fad_signals(arena, &inner, ctx)
+            }
         }
         FlatNodeKind::ReverseAD { .. } => Err(PropagateError::UnsupportedBox {
             node: box_tree.as_tree_id(),
@@ -2710,6 +2712,10 @@ struct PropagateContext<'a> {
     slot_env: &'a mut SlotEnv,
     memo: &'a mut PropagateMemo,
     clock_env: TreeId,
+    /// When `true`, `ForwardAD` nodes act as transparent wrappers (no signal
+    /// expansion).  Set while propagating Rec branches so that FAD expansion
+    /// is deferred until after the recursive group is fully built.
+    suppress_fad: bool,
 }
 
 /// Lifts De Bruijn references of input signals by one recursion level.
