@@ -1,1 +1,2 @@
-process = fad(+)~*(hslider("g", 0.5, 0, 1, 0.01));
+g = hslider("g", 0.5, 0, 1, 0.01);
+process = fad(+, g)~*(g);
