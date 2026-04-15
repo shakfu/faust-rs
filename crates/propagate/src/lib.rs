@@ -29,6 +29,65 @@
 //! - Integer signals emitted by this pass are `i32`-semantic.
 //! - Conversions from container sizes/indices (`usize`) are explicit and
 //!   fallible to preserve deterministic diagnostics on overflow.
+//!
+//! # Forward-mode automatic differentiation (FAD)
+//!
+//! When `box_tree` contains a `fad(expr)` node, propagation expands the
+//! primal output bundle into:
+//! ```text
+//! [primal₀, ∂primal₀/∂p₀, ∂primal₀/∂p₁, …,
+//!  primal₁, ∂primal₁/∂p₀, ∂primal₁/∂p₁, …]
+//! ```
+//! where `p₀, p₁, …` are all differentiable UI controls reachable from that
+//! primal output, in deterministic label order.
+//!
+//! ## Output arity
+//!
+//! [`box_arity_typed`] computes expanded arity:
+//! ```text
+//! outputs = body_outputs × (1 + count_differentiable_controls(body))
+//! ```
+//! This matches the C++ `getBoxType` / `BoxADControlsCounter` logic
+//! (`compiler/boxes/boxtype.cpp:371`).
+//!
+//! Controls annotated `[autodiff:false]` are excluded from the count and from
+//! tangent generation.  Because the metadata is only visible after
+//! [`build_ui_program`] runs, the box-level count is an *upper bound*; the
+//! actual signal list may be shorter when some controls opt out.
+//!
+//! ## Differentiation algorithm
+//!
+//! Implemented in [`forward_ad`].  Each primal output is differentiated
+//! independently for every reachable control; the full rule table
+//! (constants, BinOp, transcendentals, delays, recursion, …) lives in the
+//! `forward_ad` module doc.
+//!
+//! Key algorithmic points:
+//! - De Bruijn indices are converted to symbolic form via `de_bruijn_to_sym`
+//!   before differentiation so that recursive variable names are explicit.
+//! - One [`ForwardADTransform`](forward_ad) instance per control; a memoization
+//!   cache prevents exponential blow-up on reused DAG subgraphs.
+//! - Tangent recursion variables are named `FAD_<original_var>`.
+//!
+//! ## Interaction with the `Rec` combinator
+//!
+//! Recursive boxes (`sigRec`) require special treatment because injecting
+//! expanded tangent signals into the De Bruijn group during branch propagation
+//! would create dangling references.  The two-phase protocol is:
+//!
+//! 1. **Suppress** — when either Rec branch contains `fad()`, the
+//!    `suppress_fad` flag is set in [`PropagateContext`].  `ForwardAD` nodes
+//!    inside a Rec branch act as transparent wrappers: they return only primal
+//!    outputs.  [`box_arity_wiring`] is used for internal wiring so that the
+//!    Rec's port algebra is unaffected by the tangent expansion.
+//! 2. **Expand** — once the full recursive group (`sigRec(var, body)`) is
+//!    built, `forward_ad::generate_fad_signals` is called on the primal
+//!    outputs to emit the tangent bundle.
+//!
+//! ## Reverse-mode AD (`rad`)
+//!
+//! `rad(expr)` returns [`PropagateError::UnsupportedBox`] in this phase.
+//! Reverse-mode is explicitly out of scope for the current propagation pass.
 
 use std::fmt::{Display, Formatter};
 
@@ -1158,8 +1217,7 @@ fn box_arity_flat_inner(
             // If the Rec contains fad(), expand output arity by the number of
             // controls reachable from both branches — this matches what
             // generate_fad_signals will produce at propagation time.
-            let has_fad = contains_forward_ad(arena, left)?
-                || contains_forward_ad(arena, right)?;
+            let has_fad = contains_forward_ad(arena, left)? || contains_forward_ad(arena, right)?;
             let outputs = if has_fad {
                 let mut visited = AHashSet::new();
                 let n_left = count_ad_controls(arena, left, &mut visited)?;
@@ -1859,9 +1917,7 @@ fn propagate_in_slot_env(
         });
     }
     // When no FAD is involved, outputs must match exactly.
-    if outputs.len() != arity.outputs
-        && !ctx.suppress_fad
-        && !contains_forward_ad(arena, box_tree)?
+    if outputs.len() != arity.outputs && !ctx.suppress_fad && !contains_forward_ad(arena, box_tree)?
     {
         return Err(PropagateError::OutputArityMismatch {
             node: box_tree.as_tree_id(),
@@ -2298,8 +2354,7 @@ fn propagate_inner(
             // generate_fad_signals runs on the outputs.  This avoids injecting
             // FAD-expanded tangent signals into the de Bruijn recursive group
             // where they would hold dangling refs.
-            let has_fad = contains_forward_ad(arena, left)?
-                || contains_forward_ad(arena, right)?;
+            let has_fad = contains_forward_ad(arena, left)? || contains_forward_ad(arena, right)?;
 
             // Use wiring arity (ForwardAD-transparent) for Rec internal wiring.
             let left_arity = box_arity_wiring(arena, left, ctx.cache)?;

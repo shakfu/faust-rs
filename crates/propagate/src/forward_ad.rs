@@ -11,6 +11,161 @@
 //! - Preserve shared signal DAG structure through memoized transformation.
 //! - Keep reverse-mode (`rad`) explicitly out of scope for this phase.
 //!
+//! # Dual-number algebra
+//! Forward-mode AD (FAD) propagates derivatives alongside values by carrying a
+//! *tangent* component next to each signal.  A **dual signal** is written
+//! `u + ε·u'` where `ε² = 0`.  The differentiation variable is one selected
+//! UI control `p`; its seed is `dp/dp = 1`, and every other independent
+//! variable has seed `0`.
+//!
+//! One [`ForwardADTransform`] instance differentiates the entire signal DAG
+//! with respect to a single control; [`generate_fad_signals`] drives one
+//! transformer per reachable control and assembles the output bundle.
+//!
+//! # Differentiation rules by node kind
+//!
+//! ## Constants and audio inputs
+//!
+//! | Node | Tangent |
+//! |------|---------|
+//! | `int(c)` | `0` |
+//! | `real(c)` | `0.0` |
+//! | `sigInput(_)` | `0.0` |
+//!
+//! Audio inputs are treated as independent of all UI controls.
+//!
+//! ## UI controls
+//!
+//! | Node | Tangent |
+//! |------|---------|
+//! | `hslider(p)` / `vslider(p)` / `numentry(p)` — selected control | `1.0` |
+//! | any other continuous control | `0.0` |
+//! | `button`, `checkbox` | `0.0` (discrete, not differentiable) |
+//!
+//! Controls annotated with `[autodiff:false]` metadata are excluded from the
+//! reachable set and therefore never become the selected control.
+//!
+//! ## Arithmetic binary operators (`BinOp`)
+//!
+//! | Operator | Tangent rule |
+//! |----------|-------------|
+//! | `x + y` | `x' + y'` |
+//! | `x - y` | `x' - y'` |
+//! | `x * y` | `x'·y + x·y'` (product rule) |
+//! | `x / y` | `(x'·y − x·y') / y²` (quotient rule) |
+//! | `x % y` | `x' − y'·⌊x/y⌋` |
+//! | shifts, bitwise ops, comparisons | `0` (non-differentiable integer ops) |
+//!
+//! ## Unary transcendentals (chain rule: `d f(x)/dp = f'(x) · x'`)
+//!
+//! | Function | Derivative `f'(x)` | Tangent emitted |
+//! |----------|--------------------|-----------------|
+//! | `sin(x)` | `cos(x)` | `cos(x) * x'` |
+//! | `cos(x)` | `−sin(x)` | `(0 - sin(x)) * x'` |
+//! | `tan(x)` | `1 / cos²(x)` | `(1 / cos(x)²) * x'` |
+//! | `exp(x)` | `exp(x)` | `exp(x) * x'` |
+//! | `log(x)` | `1 / x` | `(1 / x) * x'` |
+//! | `log10(x)` | `1 / (x · ln 10)` | `(1 / (x * log(10))) * x'` |
+//! | `sqrt(x)` | `1 / (2 · √x)` | `(1 / (2 * sqrt(x))) * x'` |
+//! | `abs(x)` | `x / |x|` (sign) | `(x / abs(x)) * x'` |
+//! | `acos(x)` | `−1 / √(1 − x²)` | `(-1 / sqrt(1 - x²)) * x'` |
+//! | `asin(x)` | `1 / √(1 − x²)` | `(1 / sqrt(1 - x²)) * x'` |
+//! | `atan(x)` | `1 / (1 + x²)` | `(1 / (1 + x²)) * x'` |
+//!
+//! Note: `abs` is not differentiable at `x = 0`; the expression `x/|x|` has
+//! undefined behaviour there and produces `NaN` or `±inf` at runtime.
+//!
+//! ## Binary math (`pow`, `min`, `max`)
+//!
+//! ### `pow(x, y)`
+//! General power rule:
+//! ```text
+//! d/dp x^y = x^y · (y' · ln(x) + y · x' / x)
+//! ```
+//! Both `x` and `y` may depend on the control; both tangents are combined.
+//!
+//! ### `min(x, y)` / `max(x, y)`
+//! ```text
+//! d/dp min(x,y) = select2(x < y, x', y')
+//! d/dp max(x,y) = select2(x > y, x', y')
+//! ```
+//! The selector is the primal comparison; the tangent is piecewise-constant
+//! with a sub-gradient of `0` on the boundary.
+//!
+//! ### `atan2`, `fmod`, `remainder`
+//! Currently fall through to zero tangent (unimplemented).
+//!
+//! ## Cast operators
+//!
+//! | Node | Tangent |
+//! |------|---------|
+//! | `float_cast(x)` | `float_cast(x')` |
+//! | `int_cast(x)` | `0` (piecewise-constant step function) |
+//! | `bit_cast(x)` | `0` (reinterpret-cast, semantically opaque) |
+//!
+//! ## Delay operators
+//!
+//! ### Unit delay `delay1(x)`
+//! ```text
+//! d/dp delay1(x) = delay1(x')
+//! ```
+//! A fixed one-sample shift is linear, so the derivative is simply delayed.
+//!
+//! ### Variable delay `delay(x, d)`
+//! The discrete-time derivative decomposes into a *content* term and a *time*
+//! term via the Leibniz rule:
+//! ```text
+//! d/dp x[n − d(n)] = x'[n − d(n)]              (content derivative)
+//!                  − d'(n) · ∇x[n − d(n)]       (time derivative)
+//! ```
+//! where `∇x[n−d]` is the backward finite difference `x[n−d] − x[n−d−1]`,
+//! approximated as `delay(x, d) − delay(delay1(x), d)`.
+//!
+//! Emitted as:
+//! ```text
+//! tangent = delay(x', d) − d' · delay(x − delay1(x), d)
+//! ```
+//!
+//! ## Control-flow nodes
+//!
+//! | Node | Tangent |
+//! |------|---------|
+//! | `select2(cond, x, y)` | `select2(cond, x', y')` — cond is not differentiated |
+//! | `prefix(init, x)` | `prefix(init', x')` |
+//!
+//! ## Projection and recursive groups (`sigRec` / `sigProj`)
+//!
+//! Recursive signal groups are differentiated in parallel: for each recursive
+//! variable `x`, a tangent variable `FAD_x` is introduced.
+//!
+//! ```text
+//! d/dp sigRec(x, body) = sigRec(FAD_x, d(body)/dp)
+//! d/dp sigRef(x)       = sigRef(FAD_x)
+//! d/dp sigProj(i, g)   = sigProj(i, d(g)/dp)
+//! ```
+//!
+//! De Bruijn indices are converted to symbolic form via `de_bruijn_to_sym`
+//! before differentiation so that variable names are explicit and `FAD_`
+//! pairing is unambiguous.  The tangent group is seeded with a placeholder
+//! `sigRec(FAD_x, nil)` before the body is traversed, which breaks cycles.
+//!
+//! ## Pass-through helper nodes (`attach`, `enable`, `control`)
+//!
+//! These carry a left (signal) and right (side-effect/control) operand.  Only
+//! the left operand's tangent is forwarded; the right operand is structurally
+//! preserved with its tangent dropped.
+//!
+//! ## Bargraph outputs (`vbargraph`, `hbargraph`)
+//!
+//! Zero tangent.  Bargraphs are metering outputs, not DSP signal paths.
+//!
+//! ## Unhandled / non-differentiable nodes
+//!
+//! Table reads/writes (`rdtbl`, `wrtbl`), FFun calls, soundfile accessors,
+//! waveforms, on-demand/up/downsampling, `Gen`, `PermVar`, `TempVar`, and all
+//! other unmatched variants fall through to zero tangent with the primal
+//! unchanged.
+//!
 //! # Integration contract
 //! This module is intentionally internal to `propagate`:
 //! - `box_arity_typed(...)` reports expanded output arity for `fad(expr)`,
@@ -261,9 +416,19 @@ impl<'a> ForwardADTransform<'a> {
 
     /// Computes the dual form for one signal node.
     ///
-    /// Unsupported or intentionally non-differentiable nodes fall back to a
-    /// zero tangent while preserving the original primal signal.
+    /// Handles the two symbolic node shapes first (before the `SigMatch`
+    /// dispatch) because they are represented differently in the arena:
+    ///
+    /// - `sigRef(x)` → tangent is `sigRef(FAD_x)`.
+    /// - `sigRec(x, body)` → tangent is `sigRec(FAD_x, d(body)/dp)`.
+    ///   A placeholder entry is inserted into the cache before recursing into
+    ///   `body` so that self-referential cycles resolve correctly.
+    ///
+    /// All other nodes are dispatched through the `SigMatch` arm; unsupported
+    /// or intentionally non-differentiable nodes fall back to a zero tangent
+    /// while preserving the original primal signal.
     fn transform_uncached(&mut self, sig: SigId) -> Dual {
+        // Rule: d/dp sigRef(x) = sigRef(FAD_x)
         if let Some(var) = match_sym_ref(self.arena, sig) {
             let fad_var = self.fad_var(var);
             return Dual {
@@ -271,6 +436,8 @@ impl<'a> ForwardADTransform<'a> {
                 tangent: sym_ref(self.arena, fad_var),
             };
         }
+        // Rule: d/dp sigRec(x, body) = sigRec(FAD_x, d(body)/dp)
+        // Seed the cache with a placeholder first to handle back-edges.
         if let Some((var, body)) = match_sym_rec(self.arena, sig) {
             let fad_var = self.fad_var(var);
             let tangent_placeholder = sym_rec(self.arena, fad_var, self.arena.nil());
@@ -291,6 +458,7 @@ impl<'a> ForwardADTransform<'a> {
         }
 
         match match_sig(self.arena, sig) {
+            // Constants: d/dp c = 0
             SigMatch::Int(_) => Dual {
                 primal: sig,
                 tangent: SigBuilder::new(self.arena).int(0),
@@ -299,10 +467,12 @@ impl<'a> ForwardADTransform<'a> {
                 primal: sig,
                 tangent: SigBuilder::new(self.arena).real(0.0),
             },
+            // Audio inputs are independent of all UI controls: d/dp input = 0
             SigMatch::Input(_) => Dual {
                 primal: sig,
                 tangent: SigBuilder::new(self.arena).real(0.0),
             },
+            // Continuous UI controls: seed = 1 for the selected control, 0 otherwise.
             SigMatch::HSlider(control)
             | SigMatch::VSlider(control)
             | SigMatch::NumEntry(control) => {
@@ -316,6 +486,7 @@ impl<'a> ForwardADTransform<'a> {
                     tangent,
                 }
             }
+            // Discrete UI controls are not differentiable: d/dp button = 0
             SigMatch::Button(_) | SigMatch::Checkbox(_) => Dual {
                 primal: sig,
                 tangent: SigBuilder::new(self.arena).real(0.0),
@@ -350,6 +521,7 @@ impl<'a> ForwardADTransform<'a> {
                     b.mul(inv, tangent_x)
                 },
             ),
+            // Rule: d/dp exp(x) = exp(x) · x'
             SigMatch::Exp(x) => self.unary_chain(
                 x,
                 |b, primal_x| b.exp(primal_x),
@@ -358,6 +530,7 @@ impl<'a> ForwardADTransform<'a> {
                     b.mul(exp_x, tangent_x)
                 },
             ),
+            // Rule: d/dp log(x) = (1/x) · x'
             SigMatch::Log(x) => self.unary_chain(
                 x,
                 |b, primal_x| b.log(primal_x),
@@ -367,6 +540,7 @@ impl<'a> ForwardADTransform<'a> {
                     b.mul(inv, tangent_x)
                 },
             ),
+            // Rule: d/dp log10(x) = (1 / (x · ln 10)) · x'
             SigMatch::Log10(x) => self.unary_chain(
                 x,
                 |b, primal_x| b.log10(primal_x),
@@ -379,6 +553,7 @@ impl<'a> ForwardADTransform<'a> {
                     b.mul(inv, tangent_x)
                 },
             ),
+            // Rule: d/dp sqrt(x) = (1 / (2·√x)) · x'
             SigMatch::Sqrt(x) => self.unary_chain(
                 x,
                 |b, primal_x| b.sqrt(primal_x),
@@ -391,6 +566,7 @@ impl<'a> ForwardADTransform<'a> {
                     b.mul(inv, tangent_x)
                 },
             ),
+            // Rule: d/dp |x| = (x/|x|) · x'  — undefined at x=0 (NaN/±inf at runtime)
             SigMatch::Abs(x) => self.unary_chain(
                 x,
                 |b, primal_x| b.abs(primal_x),
@@ -400,6 +576,7 @@ impl<'a> ForwardADTransform<'a> {
                     b.mul(sign, tangent_x)
                 },
             ),
+            // Rule: d/dp acos(x) = (-1 / √(1-x²)) · x'
             SigMatch::Acos(x) => self.unary_chain(
                 x,
                 |b, primal_x| b.acos(primal_x),
@@ -413,6 +590,7 @@ impl<'a> ForwardADTransform<'a> {
                     b.mul(inv, tangent_x)
                 },
             ),
+            // Rule: d/dp asin(x) = (1 / √(1-x²)) · x'
             SigMatch::Asin(x) => self.unary_chain(
                 x,
                 |b, primal_x| b.asin(primal_x),
@@ -425,6 +603,7 @@ impl<'a> ForwardADTransform<'a> {
                     b.mul(inv, tangent_x)
                 },
             ),
+            // Rule: d/dp atan(x) = (1 / (1+x²)) · x'
             SigMatch::Atan(x) => self.unary_chain(
                 x,
                 |b, primal_x| b.atan(primal_x),
@@ -436,19 +615,22 @@ impl<'a> ForwardADTransform<'a> {
                     b.mul(inv, tangent_x)
                 },
             ),
+            // General power rule: d/dp x^y = x^y · (y'·ln(x) + y·x'/x)
+            // Handles the case where both base and exponent depend on the control.
             SigMatch::Pow(x, y) => {
                 let dual_x = self.transform(x);
                 let dual_y = self.transform(y);
                 let mut b = SigBuilder::new(self.arena);
                 let primal = b.pow(dual_x.primal, dual_y.primal);
                 let log_x = b.log(dual_x.primal);
-                let term1 = b.mul(dual_y.tangent, log_x);
+                let term1 = b.mul(dual_y.tangent, log_x); // y'·ln(x)
                 let scaled_dx = b.mul(dual_y.primal, dual_x.tangent);
-                let term2 = b.div(scaled_dx, dual_x.primal);
+                let term2 = b.div(scaled_dx, dual_x.primal); // y·x'/x
                 let sum = b.add(term1, term2);
                 let tangent = b.mul(primal, sum);
                 Dual { primal, tangent }
             }
+            // Rule: d/dp min(x,y) = select2(x < y, x', y')
             SigMatch::Min(x, y) => {
                 let dual_x = self.transform(x);
                 let dual_y = self.transform(y);
@@ -458,6 +640,7 @@ impl<'a> ForwardADTransform<'a> {
                 let tangent = b.select2(cond, dual_x.tangent, dual_y.tangent);
                 Dual { primal, tangent }
             }
+            // Rule: d/dp max(x,y) = select2(x > y, x', y')
             SigMatch::Max(x, y) => {
                 let dual_x = self.transform(x);
                 let dual_y = self.transform(y);
@@ -467,6 +650,7 @@ impl<'a> ForwardADTransform<'a> {
                 let tangent = b.select2(cond, dual_x.tangent, dual_y.tangent);
                 Dual { primal, tangent }
             }
+            // Rule: d/dp delay1(x) = delay1(x')  — unit delay is linear
             SigMatch::Delay1(x) => {
                 let dual_x = self.transform(x);
                 let mut b = SigBuilder::new(self.arena);
@@ -475,23 +659,29 @@ impl<'a> ForwardADTransform<'a> {
                     tangent: b.delay1(dual_x.tangent),
                 }
             }
+            // Variable-delay Leibniz rule (discrete time):
+            //   d/dp x[n−d(n)] = x'[n−d]               (content derivative)
+            //                  − d'(n) · ∇x[n−d]        (time derivative)
+            // where ∇x[n−d] ≈ x[n−d] − x[n−d−1]
+            //               = delay(x, d) − delay(delay1(x), d)
+            //               = delay(x − delay1(x), d)
             SigMatch::Delay(x, d) => {
                 let dual_x = self.transform(x);
                 let dual_d = self.transform(d);
                 let mut b = SigBuilder::new(self.arena);
                 let primal = b.delay(dual_x.primal, dual_d.primal);
-                let term1 = b.delay(dual_x.tangent, dual_d.primal);
+                let term1 = b.delay(dual_x.tangent, dual_d.primal); // x'[n-d]
                 let delayed_primal = b.delay1(dual_x.primal);
-                let time_gradient = b.sub(dual_x.primal, delayed_primal);
-                let delayed_time_gradient = b.delay(time_gradient, dual_d.primal);
-                let zero = b.real(0.0);
-                let scaled_delay = b.mul(dual_d.tangent, delayed_time_gradient);
-                let term2 = b.sub(zero, scaled_delay);
+                let time_gradient = b.sub(dual_x.primal, delayed_primal); // x - delay1(x)
+                let delayed_time_gradient = b.delay(time_gradient, dual_d.primal); // ∇x[n-d]
+                let scaled_delay = b.mul(dual_d.tangent, delayed_time_gradient); // d' · ∇x[n-d]
                 Dual {
                     primal,
-                    tangent: b.add(term1, term2),
+                    tangent: b.sub(term1, scaled_delay),
                 }
             }
+            // Rule: d/dp select2(cond, x, y) = select2(cond, x', y')
+            // The condition is not differentiated (treated as a discrete selector).
             SigMatch::Select2(cond, x, y) => {
                 let dual_cond = self.transform(cond);
                 let dual_x = self.transform(x);
@@ -502,6 +692,8 @@ impl<'a> ForwardADTransform<'a> {
                     tangent: b.select2(dual_cond.primal, dual_x.tangent, dual_y.tangent),
                 }
             }
+            // Rule: d/dp prefix(init, x) = prefix(init', x')
+            // prefix(a, b)[n] = a when n=0, b[n-1] otherwise — linear in both args.
             SigMatch::Prefix(x, y) => {
                 let dual_x = self.transform(x);
                 let dual_y = self.transform(y);
@@ -511,6 +703,7 @@ impl<'a> ForwardADTransform<'a> {
                     tangent: b.prefix(dual_x.tangent, dual_y.tangent),
                 }
             }
+            // Rule: d/dp float_cast(x) = float_cast(x')  — linear promotion
             SigMatch::FloatCast(x) => {
                 let dual_x = self.transform(x);
                 let mut b = SigBuilder::new(self.arena);
@@ -519,6 +712,7 @@ impl<'a> ForwardADTransform<'a> {
                     tangent: b.float_cast(dual_x.tangent),
                 }
             }
+            // Rule: d/dp int_cast(x) = 0  — floor/truncate is piecewise-constant
             SigMatch::IntCast(x) => {
                 let dual_x = self.transform(x);
                 let mut b = SigBuilder::new(self.arena);
@@ -527,6 +721,7 @@ impl<'a> ForwardADTransform<'a> {
                     tangent: b.int(0),
                 }
             }
+            // Rule: d/dp proj(i, g) = proj(i, d(g)/dp)  — projection is linear
             SigMatch::Proj(index, group) => {
                 let dual_group = self.transform(group);
                 let mut b = SigBuilder::new(self.arena);
@@ -535,12 +730,17 @@ impl<'a> ForwardADTransform<'a> {
                     tangent: b.proj(index, dual_group.tangent),
                 }
             }
+            // Output wrappers are transparent: differentiate the wrapped signal.
             SigMatch::Output(_, inner) => self.transform(inner),
+            // Helper nodes: forward left-operand tangent, drop right-operand tangent.
+            // attach(x, y), enable(x, y), control(x, y) are structurally preserved
+            // but only x's derivative is emitted.
             SigMatch::Attach(x, y) => self.pass_through_binary(x, y, |b, px, py| b.attach(px, py)),
             SigMatch::Enable(x, y) => self.pass_through_binary(x, y, |b, px, py| b.enable(px, py)),
             SigMatch::Control(x, y) => {
                 self.pass_through_binary(x, y, |b, px, py| b.control(px, py))
             }
+            // Bargraphs are metering outputs only; their tangent is always zero.
             SigMatch::VBargraph(_, inner) => {
                 let _ = self.transform(inner);
                 let mut b = SigBuilder::new(self.arena);
@@ -549,6 +749,8 @@ impl<'a> ForwardADTransform<'a> {
                     tangent: b.real(0.0),
                 }
             }
+            // Fallback: all unhandled nodes (table ops, FFun, soundfile, waveform,
+            // Gen, PermVar, TempVar, …) are treated as non-differentiable constants.
             _ => Dual {
                 primal: sig,
                 tangent: SigBuilder::new(self.arena).real(0.0),
@@ -556,7 +758,10 @@ impl<'a> ForwardADTransform<'a> {
         }
     }
 
-    /// Applies the chain rule for unary signal nodes.
+    /// Applies the chain rule for a unary signal node `f(x)`.
+    ///
+    /// Calls `primal_fn` to build `f(x)` and `tangent_fn` to build `f'(x) · x'`,
+    /// both receiving the primal value of `x` and (for `tangent_fn`) its tangent.
     fn unary_chain<FPrimal, FTangent>(
         &mut self,
         x: SigId,
@@ -594,10 +799,14 @@ impl<'a> ForwardADTransform<'a> {
 
     /// Differentiates one binary arithmetic/logical node.
     ///
-    /// Arithmetic operators use the expected forward-mode rules. Bitwise,
-    /// comparison, and shift operators intentionally collapse to zero tangent
-    /// because they are treated as non-differentiable integer operations in
-    /// this phase.
+    /// | Operator | Tangent rule |
+    /// |----------|-------------|
+    /// | `Add` | `x' + y'` |
+    /// | `Sub` | `x' − y'` |
+    /// | `Mul` | `x'·y + x·y'` (product rule) |
+    /// | `Div` | `(x'·y − x·y') / y²` (quotient rule) |
+    /// | `Rem` | `x' − y'·⌊x/y⌋` |
+    /// | shifts, bitwise, comparisons | `0` (non-differentiable integer ops) |
     fn transform_binop(&mut self, op: BinOp, x: SigId, y: SigId) -> Dual {
         let dual_x = self.transform(x);
         let dual_y = self.transform(y);
@@ -622,13 +831,17 @@ impl<'a> ForwardADTransform<'a> {
             BinOp::Xor => b.xor(dual_x.primal, dual_y.primal),
         };
         let tangent = match op {
+            // x' + y'
             BinOp::Add => b.add(dual_x.tangent, dual_y.tangent),
+            // x' − y'
             BinOp::Sub => b.sub(dual_x.tangent, dual_y.tangent),
+            // x'·y + x·y'
             BinOp::Mul => {
                 let t1 = b.mul(dual_x.tangent, dual_y.primal);
                 let t2 = b.mul(dual_x.primal, dual_y.tangent);
                 b.add(t1, t2)
             }
+            // (x'·y − x·y') / y²
             BinOp::Div => {
                 let t1 = b.mul(dual_x.tangent, dual_y.primal);
                 let t2 = b.mul(dual_x.primal, dual_y.tangent);
@@ -636,12 +849,14 @@ impl<'a> ForwardADTransform<'a> {
                 let den = b.mul(dual_y.primal, dual_y.primal);
                 b.div(num, den)
             }
+            // x' − y'·⌊x/y⌋   (derivative of floating-point remainder)
             BinOp::Rem => {
                 let x_div_y = b.div(dual_x.primal, dual_y.primal);
                 let floor = b.floor(x_div_y);
                 let term2 = b.mul(dual_y.tangent, floor);
                 b.sub(dual_x.tangent, term2)
             }
+            // Shifts, bitwise ops, comparisons: integer / discrete — tangent is 0.
             BinOp::Lsh
             | BinOp::ARsh
             | BinOp::LRsh
