@@ -294,7 +294,7 @@ enum FlatNodeKind {
     Route,
     Inputs,
     Outputs,
-    ForwardAD { body: FlatBoxId },
+    ForwardAD { body: FlatBoxId, seed: FlatBoxId },
     ReverseAD { body: FlatBoxId },
     Ondemand(FlatBoxId),
     Upsampling(FlatBoxId),
@@ -328,12 +328,15 @@ fn validate_flat_box_recursive(
     }
 
     match flat_node_kind(arena, node)? {
+        FlatNodeKind::ForwardAD { body, seed } => {
+            validate_flat_box_recursive(arena, body, visited)?;
+            validate_flat_box_recursive(arena, seed, visited)?;
+        }
         FlatNodeKind::Symbolic { body }
         | FlatNodeKind::Metadata { body }
         | FlatNodeKind::VGroup { body }
         | FlatNodeKind::HGroup { body }
         | FlatNodeKind::TGroup { body }
-        | FlatNodeKind::ForwardAD { body }
         | FlatNodeKind::ReverseAD { body }
         | FlatNodeKind::Ondemand(body)
         | FlatNodeKind::Upsampling(body)
@@ -463,8 +466,9 @@ fn flat_node_kind(arena: &TreeArena, node: FlatBoxId) -> Result<FlatNodeKind, Fl
         BoxMatch::Route(_, _, _) => Ok(FlatNodeKind::Route),
         BoxMatch::Inputs(_) => Ok(FlatNodeKind::Inputs),
         BoxMatch::Outputs(_) => Ok(FlatNodeKind::Outputs),
-        BoxMatch::ForwardAD(body) => Ok(FlatNodeKind::ForwardAD {
+        BoxMatch::ForwardAD(body, seed) => Ok(FlatNodeKind::ForwardAD {
             body: FlatBoxId::from_tree_id(body),
+            seed: FlatBoxId::from_tree_id(seed),
         }),
         BoxMatch::ReverseAD(body) => Ok(FlatNodeKind::ReverseAD {
             body: FlatBoxId::from_tree_id(body),
@@ -528,12 +532,10 @@ fn contains_forward_ad(arena: &TreeArena, box_tree: FlatBoxId) -> Result<bool, F
     }
 }
 
-/// Counts differentiable UI controls (hslider, vslider, numentry) reachable in
-/// a flat box tree.  Used by `box_arity_typed` to compute the expanded output
-/// arity of `fad(expr)`: `outputs * (1 + count_ad_controls(expr))`.
-///
-/// This mirrors the C++ `BoxADControlsCounter` in `boxVisitor.hh`.
-fn count_ad_controls(
+/// Counts the number of [`FlatNodeKind::ForwardAD`] nodes reachable in a flat
+/// box tree. Used by `box_arity_typed` to predict the tangent expansion in
+/// recursive compositions.
+fn count_fad_nodes(
     arena: &TreeArena,
     box_tree: FlatBoxId,
     visited: &mut AHashSet<FlatBoxId>,
@@ -542,14 +544,14 @@ fn count_ad_controls(
         return Ok(0);
     }
     match flat_node_kind(arena, box_tree)? {
-        FlatNodeKind::VSlider | FlatNodeKind::HSlider | FlatNodeKind::NumEntry => Ok(1),
+        FlatNodeKind::ForwardAD { .. } => Ok(1),
         FlatNodeKind::Rec(left, right)
         | FlatNodeKind::Seq(left, right)
         | FlatNodeKind::Par(left, right)
         | FlatNodeKind::Split(left, right)
         | FlatNodeKind::Merge(left, right) => {
-            let l = count_ad_controls(arena, left, visited)?;
-            let r = count_ad_controls(arena, right, visited)?;
+            let l = count_fad_nodes(arena, left, visited)?;
+            let r = count_fad_nodes(arena, right, visited)?;
             Ok(l + r)
         }
         FlatNodeKind::Symbolic { body }
@@ -557,11 +559,10 @@ fn count_ad_controls(
         | FlatNodeKind::VGroup { body }
         | FlatNodeKind::HGroup { body }
         | FlatNodeKind::TGroup { body }
-        | FlatNodeKind::ForwardAD { body }
         | FlatNodeKind::ReverseAD { body }
         | FlatNodeKind::Ondemand(body)
         | FlatNodeKind::Upsampling(body)
-        | FlatNodeKind::Downsampling(body) => count_ad_controls(arena, body, visited),
+        | FlatNodeKind::Downsampling(body) => count_fad_nodes(arena, body, visited),
         _ => Ok(0),
     }
 }
@@ -620,6 +621,10 @@ pub enum PropagateError {
         left_outputs: usize,
         right_inputs: usize,
         right_outputs: usize,
+    },
+    FadSeedArity {
+        node: TreeId,
+        outputs: usize,
     },
 }
 
@@ -696,6 +701,11 @@ impl Display for PropagateError {
             } => write!(
                 f,
                 "recursive composition mismatch at node {}: right inputs ({right_inputs}) <= left outputs ({left_outputs}) and right outputs ({right_outputs}) <= left inputs ({left_inputs}) are required",
+                node.as_u32()
+            ),
+            Self::FadSeedArity { node, outputs } => write!(
+                f,
+                "fad seed at node {} must have exactly 1 output, got {outputs}",
                 node.as_u32()
             ),
         }
@@ -886,6 +896,14 @@ impl IntoDiagnostic for PropagateError {
             )
             .with_note("cause: integer field exceeds propagation-supported bounds")
             .with_note(format!("field `{field}` exceeds target range: {value}")),
+            Self::FadSeedArity { outputs, .. } => Diagnostic::new(
+                Severity::Error,
+                Stage::Propagate,
+                codes::PROP_ARITY_MISMATCH,
+                message,
+            )
+            .with_note("cause: fad seed expression must produce exactly 1 output signal")
+            .with_note(format!("seed produced {outputs} output(s)")),
         }
     }
 }
@@ -941,7 +959,7 @@ fn box_arity_wiring(
     // Since ForwardAD is the only node that differs between wiring and typed,
     // once we strip it, the cached typed arity of the inner body is correct.
     match flat_node_kind(arena, box_tree)? {
-        FlatNodeKind::ForwardAD { body } => box_arity_wiring(arena, body, cache),
+        FlatNodeKind::ForwardAD { body, .. } => box_arity_wiring(arena, body, cache),
         FlatNodeKind::VGroup { body }
         | FlatNodeKind::HGroup { body }
         | FlatNodeKind::TGroup { body }
@@ -1128,13 +1146,18 @@ fn box_arity_flat_inner(
         | FlatNodeKind::HGroup { body }
         | FlatNodeKind::TGroup { body }
         | FlatNodeKind::ReverseAD { body } => box_arity_typed(arena, body, cache),
-        FlatNodeKind::ForwardAD { body } => {
+        FlatNodeKind::ForwardAD { body, seed } => {
+            let seed_arity = box_arity_typed(arena, seed, cache)?;
+            if seed_arity.outputs != 1 {
+                return Err(PropagateError::FadSeedArity {
+                    node: box_tree.as_tree_id(),
+                    outputs: seed_arity.outputs,
+                });
+            }
             let inner = box_arity_typed(arena, body, cache)?;
-            let mut visited = AHashSet::new();
-            let n_controls = count_ad_controls(arena, body, &mut visited)?;
             Ok(BoxArity {
-                inputs: inner.inputs,
-                outputs: inner.outputs * (1 + n_controls),
+                inputs: inner.inputs.max(seed_arity.inputs),
+                outputs: inner.outputs * 2,
             })
         }
         FlatNodeKind::Symbolic { body } => {
@@ -1220,10 +1243,9 @@ fn box_arity_flat_inner(
             let has_fad = contains_forward_ad(arena, left)? || contains_forward_ad(arena, right)?;
             let outputs = if has_fad {
                 let mut visited = AHashSet::new();
-                let n_left = count_ad_controls(arena, left, &mut visited)?;
-                let n_right = count_ad_controls(arena, right, &mut visited)?;
-                let n_controls = n_left + n_right;
-                core_outputs * (1 + n_controls)
+                let n_left = count_fad_nodes(arena, left, &mut visited)?;
+                let n_right = count_fad_nodes(arena, right, &mut visited)?;
+                core_outputs * (1 + n_left + n_right)
             } else {
                 core_outputs
             };
@@ -1304,11 +1326,11 @@ pub fn propagate_typed_with_ui_options(
     let mut ctx = PropagateContext {
         cache,
         control_ids: &ui.control_ids,
-        ui_controls: &ui.program.controls,
         slot_env: &mut slot_env,
         memo: &mut memo,
         clock_env: arena.nil(),
         suppress_fad: false,
+        pending_fad_seeds: Vec::new(),
     };
     let signals = propagate_in_slot_env(arena, box_tree, inputs, &mut ctx)?;
     Ok(PropagateOutput {
@@ -1757,12 +1779,20 @@ fn collect_ui_nodes(
             UiGroupKind::Tab,
             box_tree.as_tree_id(),
         ),
+        FlatNodeKind::ForwardAD { body, seed } => {
+            let body_s = collect_ui_nodes(source_arena, body, current_groups, collector);
+            let seed_s = collect_ui_nodes(source_arena, seed, current_groups, collector);
+            UiCollectSummary {
+                has_ui: body_s.has_ui || seed_s.has_ui,
+                preserve_ancestor_chain: body_s.preserve_ancestor_chain
+                    || seed_s.preserve_ancestor_chain,
+            }
+        }
         FlatNodeKind::Symbolic { body }
         | FlatNodeKind::Metadata { body }
         | FlatNodeKind::Ondemand(body)
         | FlatNodeKind::Upsampling(body)
         | FlatNodeKind::Downsampling(body)
-        | FlatNodeKind::ForwardAD { body }
         | FlatNodeKind::ReverseAD { body } => {
             collect_ui_nodes(source_arena, body, current_groups, collector)
         }
@@ -2370,6 +2400,7 @@ fn propagate_inner(
             }
 
             let saved_suppress = ctx.suppress_fad;
+            let saved_pending = std::mem::take(&mut ctx.pending_fad_seeds);
             if has_fad {
                 ctx.suppress_fad = true;
             }
@@ -2397,6 +2428,7 @@ fn propagate_inner(
 
             *ctx.slot_env = saved_slot_env;
             ctx.suppress_fad = saved_suppress;
+            let seeds = std::mem::replace(&mut ctx.pending_fad_seeds, saved_pending);
 
             let group_body = vec_to_list(arena, &l2);
             let group = debruijn_rec(arena, group_body);
@@ -2414,7 +2446,7 @@ fn propagate_inner(
             }
 
             if has_fad {
-                forward_ad::generate_fad_signals(arena, &outputs, ctx)
+                forward_ad::generate_fad_signals_multi(arena, &outputs, &seeds)
             } else {
                 Ok(outputs)
             }
@@ -2441,14 +2473,25 @@ fn propagate_inner(
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.int(value)])
         }
-        FlatNodeKind::ForwardAD { body } => {
-            let inner = propagate_in_slot_env(arena, body, inputs, ctx)?;
+        FlatNodeKind::ForwardAD { body, seed } => {
+            let seed_arity = box_arity_typed(arena, seed, ctx.cache)?;
+            let seed_inputs: Vec<SigId> = inputs.iter().copied().take(seed_arity.inputs).collect();
+            let seed_sigs = propagate_in_slot_env(arena, seed, &seed_inputs, ctx)?;
+            let seed_sig = match seed_sigs.as_slice() {
+                [s] => *s,
+                got => {
+                    return Err(PropagateError::FadSeedArity {
+                        node: box_tree.as_tree_id(),
+                        outputs: got.len(),
+                    })
+                }
+            };
+            let body_sigs = propagate_in_slot_env(arena, body, inputs, ctx)?;
             if ctx.suppress_fad {
-                // Inside a Rec branch: defer FAD expansion to after the
-                // recursive group is built.
-                Ok(inner)
+                ctx.pending_fad_seeds.push(seed_sig);
+                Ok(body_sigs)
             } else {
-                forward_ad::generate_fad_signals(arena, &inner, ctx)
+                forward_ad::generate_fad_signals(arena, &body_sigs, seed_sig)
             }
         }
         FlatNodeKind::ReverseAD { .. } => Err(PropagateError::UnsupportedBox {
@@ -2954,7 +2997,6 @@ impl Default for PropagateMemo {
 struct PropagateContext<'a> {
     cache: &'a mut ArityCache,
     control_ids: &'a ControlIds,
-    ui_controls: &'a [ControlSpec],
     slot_env: &'a mut SlotEnv,
     memo: &'a mut PropagateMemo,
     clock_env: TreeId,
@@ -2962,6 +3004,9 @@ struct PropagateContext<'a> {
     /// expansion).  Set while propagating Rec branches so that FAD expansion
     /// is deferred until after the recursive group is fully built.
     suppress_fad: bool,
+    /// Seeds collected from `ForwardAD` nodes suppressed during Rec branch
+    /// propagation. Drained by the Rec arm after the recursive group is built.
+    pending_fad_seeds: Vec<SigId>,
 }
 
 /// Lifts De Bruijn references of input signals by one recursion level.

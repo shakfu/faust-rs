@@ -1381,7 +1381,8 @@ fn flat_box_builder_accepts_autodiff_wrappers() {
     let (forward, reverse) = {
         let mut bb = BoxBuilder::new(&mut arena);
         let sin = bb.sin();
-        (bb.forward_ad(sin), bb.reverse_ad(sin))
+        let wire = bb.wire();
+        (bb.forward_ad(sin, wire), bb.reverse_ad(sin))
     };
 
     assert!(try_build_flat_box(&arena, forward).is_ok());
@@ -1401,7 +1402,8 @@ fn box_arity_typed_expands_forward_ad_outputs() {
         let slider = bb.hslider(label, init, min, max, step);
         let sin = bb.sin();
         let process = bb.seq(slider, sin);
-        (process, bb.forward_ad(process))
+        let seed = bb.hslider(label, init, min, max, step);
+        (process, bb.forward_ad(process, seed))
     };
 
     let inner_arity = box_arity_typed(
@@ -1420,7 +1422,7 @@ fn box_arity_typed_expands_forward_ad_outputs() {
     // Inner: hslider : sin → (0, 1)
     assert_eq!(inner_arity.inputs, 0);
     assert_eq!(inner_arity.outputs, 1);
-    // fad(inner) expands outputs: 1 * (1 + 1 control) = 2
+    // fad(inner, seed) expands outputs: 1 * 2 = 2
     assert_eq!(wrapped_arity.inputs, 0);
     assert_eq!(wrapped_arity.outputs, 2);
 }
@@ -1436,9 +1438,10 @@ fn propagate_forward_ad_expands_outputs_for_single_control() {
         let max = bb.real(2_000.0);
         let step = bb.real(1.0);
         let slider = bb.hslider(label, init, min, max, step);
+        let seed = bb.hslider(label, init, min, max, step);
         let sin = bb.sin();
         let body = bb.seq(slider, sin);
-        bb.forward_ad(body)
+        bb.forward_ad(body, seed)
     };
 
     let flat_process = try_build_flat_box(&arena, process).unwrap();
@@ -1464,7 +1467,41 @@ fn propagate_forward_ad_expands_outputs_for_single_control() {
 }
 
 #[test]
-fn propagate_forward_ad_emits_one_tangent_per_enabled_control() {
+fn propagate_forward_ad_emits_one_tangent_per_seed() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let f_label = bb.ident("f");
+        let g_label = bb.ident("g");
+        let init = bb.real(1.0);
+        let min = bb.real(0.0);
+        let max = bb.real(10.0);
+        let step = bb.real(0.1);
+        let f = bb.hslider(f_label, init, min, max, step);
+        let f_seed = bb.hslider(f_label, init, min, max, step);
+        let g = bb.hslider(g_label, init, min, max, step);
+        let pair = bb.par(f, g);
+        let mul = bb.mul();
+        let body = bb.seq(pair, mul);
+        // Differentiate the product wrt f only (explicit seed).
+        bb.forward_ad(body, f_seed)
+    };
+
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
+        .expect("forward-ad product should propagate");
+
+    // fad(exp, f) always produces (primal, tangent_wrt_f) — 2 outputs.
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 2);
+    assert_eq!(out.ui.controls[0].label, "f");
+    assert_eq!(out.ui.controls[1].label, "g");
+}
+
+#[test]
+fn propagate_forward_ad_differentiates_wrt_explicit_seed_only() {
+    // With explicit seed, differentiation is always w.r.t. the provided seed signal.
+    // The [autodiff:false] metadata no longer gates which controls are differentiated.
     let mut arena = TreeArena::new();
     let process = {
         let mut bb = BoxBuilder::new(&mut arena);
@@ -1476,51 +1513,21 @@ fn propagate_forward_ad_emits_one_tangent_per_enabled_control() {
         let step = bb.real(0.1);
         let f = bb.hslider(f_label, init, min, max, step);
         let g = bb.hslider(g_label, init, min, max, step);
+        let g_seed = bb.hslider(g_label, init, min, max, step);
         let pair = bb.par(f, g);
         let mul = bb.mul();
         let body = bb.seq(pair, mul);
-        bb.forward_ad(body)
+        // Differentiate wrt g only.
+        bb.forward_ad(body, g_seed)
     };
 
     let flat_process = try_build_flat_box(&arena, process).unwrap();
     let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
         .expect("forward-ad product should propagate");
 
-    assert_eq!(out.signals.len(), 3);
-    assert_eq!(out.ui.controls.len(), 2);
-    assert_eq!(out.ui.controls[0].label, "f");
-    assert_eq!(out.ui.controls[1].label, "g");
-}
-
-#[test]
-fn propagate_forward_ad_skips_controls_marked_autodiff_false() {
-    let mut arena = TreeArena::new();
-    let process = {
-        let mut bb = BoxBuilder::new(&mut arena);
-        let f_label = bb.ident("f [autodiff:false]");
-        let g_label = bb.ident("g");
-        let init = bb.real(1.0);
-        let min = bb.real(0.0);
-        let max = bb.real(10.0);
-        let step = bb.real(0.1);
-        let f = bb.hslider(f_label, init, min, max, step);
-        let g = bb.hslider(g_label, init, min, max, step);
-        let pair = bb.par(f, g);
-        let mul = bb.mul();
-        let body = bb.seq(pair, mul);
-        bb.forward_ad(body)
-    };
-
-    let flat_process = try_build_flat_box(&arena, process).unwrap();
-    let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
-        .expect("forward-ad product should propagate with autodiff metadata");
-
+    // fad(exp, g) always produces (primal, tangent_wrt_g) — 2 outputs.
     assert_eq!(out.signals.len(), 2);
     assert_eq!(out.ui.controls.len(), 2);
-    assert_eq!(
-        out.ui.controls[0].metadata,
-        vec![("autodiff".to_owned(), "false".to_owned())]
-    );
 }
 
 #[test]
