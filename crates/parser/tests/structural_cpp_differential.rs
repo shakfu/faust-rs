@@ -213,10 +213,10 @@ fn production_parser_structural_shapes_align_with_cpp_acceptance() {
 #[test]
 fn production_parser_recognizes_fad_and_rad_like_cpp() {
     let (arena_fad, fad_expr) = parse_process_expr(
-        "process = fad(hslider(\"freq\", 440, 50, 2000, 0.01) : sin);",
+        "process = fad(hslider(\"freq\", 440, 50, 2000, 0.01) : sin, hslider(\"freq\", 440, 50, 2000, 0.01));",
         "fad_structural.dsp",
     );
-    let BoxMatch::ForwardAD(fad_inner) = match_box(&arena_fad, fad_expr) else {
+    let BoxMatch::ForwardAD(fad_inner, _fad_seed) = match_box(&arena_fad, fad_expr) else {
         panic!("expected BOXFAUTODIFF shape");
     };
     assert!(matches!(
