@@ -1,5 +1,9 @@
 # Automatic Differentiation — Forward-Mode Port Plan
 
+> **SUPERSEDED (2026-04-15)**: The `fad(exp)` single-argument form documented
+> here has been replaced by `fad(exp, x)`. See
+> `fad-explicit-diff-variable-plan-2026-04-15-en.md`.
+
 **Date:** 2026-04-13
 **Scope:** Port `fad(expr)` and `rad(expr)` primitives from C++ Faust compiler to faust-rs. Implement forward-mode AD signal transformation. Reverse-mode (`rad`) is parsed and evaluated but **not** propagated in this phase.
 
