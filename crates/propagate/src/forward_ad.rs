@@ -180,15 +180,14 @@
 //! 2. for each primal, collect reachable controls once,
 //! 3. sort controls by canonical UI label, then by `ControlId`.
 
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashMap;
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use tlib::{
     NodeKind, TreeArena, TreeId, de_bruijn_to_sym, list_to_vec, match_sym_rec, match_sym_ref,
     sym_rec, sym_ref, vec_to_list,
 };
-use ui::{ControlId, ControlSpec};
 
-use crate::{PropagateContext, PropagateError};
+use crate::PropagateError;
 
 /// Internal dual-number carrier used while differentiating one signal graph.
 ///
@@ -200,196 +199,23 @@ struct Dual {
     tangent: SigId,
 }
 
-/// Walks one propagated signal DAG and records the differentiable UI controls
-/// it depends on.
+/// Memoized forward-mode transformer for one selected differentiation seed signal.
 ///
-/// The collector relies on the grouped-UI control registry rather than raw
-/// slider labels inside the signal graph. This keeps metadata ownership
-/// centralized and makes `[autodiff:false]` filtering match the canonical UI
-/// extraction pass.
-struct ADControlCollector<'a> {
-    arena: &'a TreeArena,
-    controls: Vec<ControlId>,
-    visited: AHashSet<SigId>,
-    seen_controls: AHashSet<ControlId>,
-    ui_controls: &'a [ControlSpec],
-}
-
-impl<'a> ADControlCollector<'a> {
-    /// Creates one collector bound to the propagated signal arena and the
-    /// canonical UI control registry for the current program.
-    fn new(arena: &'a TreeArena, ui_controls: &'a [ControlSpec]) -> Self {
-        Self {
-            arena,
-            controls: Vec::new(),
-            visited: AHashSet::new(),
-            seen_controls: AHashSet::new(),
-            ui_controls,
-        }
-    }
-
-    /// Recursively visits one signal and records each reachable differentiable
-    /// control at most once.
-    ///
-    /// Traversal is memoized on `SigId` to preserve DAG complexity when the
-    /// same shared subtree appears through several parents.
-    fn collect(&mut self, sig: SigId) {
-        if !self.visited.insert(sig) {
-            return;
-        }
-
-        match match_sig(self.arena, sig) {
-            SigMatch::HSlider(control)
-            | SigMatch::VSlider(control)
-            | SigMatch::NumEntry(control) => {
-                if self.is_autodiff_enabled(control) && self.seen_controls.insert(control) {
-                    self.controls.push(control);
-                }
-            }
-            SigMatch::Output(_, sig)
-            | SigMatch::Delay1(sig)
-            | SigMatch::IntCast(sig)
-            | SigMatch::BitCast(sig)
-            | SigMatch::FloatCast(sig)
-            | SigMatch::Gen(sig)
-            | SigMatch::Lowest(sig)
-            | SigMatch::Highest(sig)
-            | SigMatch::Acos(sig)
-            | SigMatch::Asin(sig)
-            | SigMatch::Atan(sig)
-            | SigMatch::Cos(sig)
-            | SigMatch::Sin(sig)
-            | SigMatch::Tan(sig)
-            | SigMatch::Exp(sig)
-            | SigMatch::Log(sig)
-            | SigMatch::Log10(sig)
-            | SigMatch::Sqrt(sig)
-            | SigMatch::Abs(sig)
-            | SigMatch::Floor(sig)
-            | SigMatch::Ceil(sig)
-            | SigMatch::Rint(sig)
-            | SigMatch::Round(sig)
-            | SigMatch::TempVar(sig)
-            | SigMatch::PermVar(sig) => self.collect(sig),
-            SigMatch::Delay(a, b)
-            | SigMatch::Prefix(a, b)
-            | SigMatch::RdTbl(a, b)
-            | SigMatch::BinOp(_, a, b)
-            | SigMatch::Pow(a, b)
-            | SigMatch::Min(a, b)
-            | SigMatch::Max(a, b)
-            | SigMatch::Atan2(a, b)
-            | SigMatch::Fmod(a, b)
-            | SigMatch::Remainder(a, b)
-            | SigMatch::Attach(a, b)
-            | SigMatch::Enable(a, b)
-            | SigMatch::Control(a, b)
-            | SigMatch::Seq(a, b)
-            | SigMatch::ZeroPad(a, b)
-            | SigMatch::Clocked(a, b)
-            | SigMatch::SoundfileLength(a, b)
-            | SigMatch::SoundfileRate(a, b) => {
-                self.collect(a);
-                self.collect(b);
-            }
-            SigMatch::AssertBounds(a, b, c) | SigMatch::Select2(a, b, c) => {
-                self.collect(a);
-                self.collect(b);
-                self.collect(c);
-            }
-            SigMatch::WrTbl(a, b, c, d) | SigMatch::SoundfileBuffer(a, b, c, d) => {
-                self.collect(a);
-                self.collect(b);
-                self.collect(c);
-                self.collect(d);
-            }
-            SigMatch::FFun(fun, args) => {
-                self.collect(fun);
-                self.collect_list(args);
-            }
-            SigMatch::Proj(_, group) => self.collect(group),
-            SigMatch::Rec(body) => self.collect_list(body),
-            SigMatch::Waveform(values)
-            | SigMatch::OnDemand(values)
-            | SigMatch::Upsampling(values)
-            | SigMatch::Downsampling(values) => {
-                for child in values {
-                    self.collect(*child);
-                }
-            }
-            _ => {
-                if let Some((_var, body)) = match_sym_rec(self.arena, sig) {
-                    self.collect_list(body);
-                }
-            }
-        }
-    }
-
-    /// Traverses one cons-list of signal children when present.
-    fn collect_list(&mut self, list: TreeId) {
-        if let Some(values) = list_to_vec(self.arena, list) {
-            for value in values {
-                self.collect(value);
-            }
-        }
-    }
-
-    /// Returns whether a control is differentiable for this phase.
-    ///
-    /// Current rule:
-    /// - default to enabled,
-    /// - disable only when the canonical UI metadata contains
-    ///   `autodiff = "false"` (case-insensitive on the value).
-    fn is_autodiff_enabled(&self, control: ControlId) -> bool {
-        self.ui_controls
-            .get(usize::try_from(control).ok().unwrap_or(usize::MAX))
-            .is_none_or(|spec| {
-                !spec
-                    .metadata
-                    .iter()
-                    .any(|(key, value)| key == "autodiff" && value.eq_ignore_ascii_case("false"))
-            })
-    }
-
-    /// Sorts the collected controls into deterministic emission order.
-    ///
-    /// The primary key is the canonical UI label because that is the most
-    /// user-visible ordering contract carried by the current plan. `ControlId`
-    /// remains a stable tie-breaker.
-    fn sort_controls_by_label(&mut self) {
-        self.controls.sort_by(|left, right| {
-            let left_label = self
-                .ui_controls
-                .get(usize::try_from(*left).ok().unwrap_or(usize::MAX))
-                .map(|spec| spec.label.as_str())
-                .unwrap_or("");
-            let right_label = self
-                .ui_controls
-                .get(usize::try_from(*right).ok().unwrap_or(usize::MAX))
-                .map(|spec| spec.label.as_str())
-                .unwrap_or("");
-            left_label.cmp(right_label).then(left.cmp(right))
-        });
-    }
-}
-
-/// Memoized forward-mode transformer for one selected differentiation control.
-///
-/// One transformer instance computes `d(signal) / d(control)` across a shared
+/// One transformer instance computes `d(signal) / d(seed)` across a shared
 /// signal DAG. The cache prevents exponential blow-up on reused subgraphs and
 /// also breaks recursion cycles while rebuilding `sigRec/sigProj`-style groups.
 struct ForwardADTransform<'a> {
     arena: &'a mut TreeArena,
-    diff_control: ControlId,
+    diff_seed: SigId,
     cache: AHashMap<SigId, Dual>,
 }
 
 impl<'a> ForwardADTransform<'a> {
-    /// Creates one transformer for the selected differentiable control.
-    fn new(arena: &'a mut TreeArena, diff_control: ControlId) -> Self {
+    /// Creates one transformer for the selected differentiation seed signal.
+    fn new(arena: &'a mut TreeArena, diff_seed: SigId) -> Self {
         Self {
             arena,
-            diff_control,
+            diff_seed,
             cache: AHashMap::new(),
         }
     }
@@ -428,6 +254,13 @@ impl<'a> ForwardADTransform<'a> {
     /// or intentionally non-differentiable nodes fall back to a zero tangent
     /// while preserving the original primal signal.
     fn transform_uncached(&mut self, sig: SigId) -> Dual {
+        // Seed signal: d(seed)/d(seed) = 1
+        if sig == self.diff_seed {
+            return Dual {
+                primal: sig,
+                tangent: SigBuilder::new(self.arena).real(1.0),
+            };
+        }
         // Rule: d/dp sigRef(x) = sigRef(FAD_x)
         if let Some(var) = match_sym_ref(self.arena, sig) {
             let fad_var = self.fad_var(var);
@@ -472,20 +305,11 @@ impl<'a> ForwardADTransform<'a> {
                 primal: sig,
                 tangent: SigBuilder::new(self.arena).real(0.0),
             },
-            // Continuous UI controls: seed = 1 for the selected control, 0 otherwise.
-            SigMatch::HSlider(control)
-            | SigMatch::VSlider(control)
-            | SigMatch::NumEntry(control) => {
-                let tangent = if control == self.diff_control {
-                    SigBuilder::new(self.arena).real(1.0)
-                } else {
-                    SigBuilder::new(self.arena).real(0.0)
-                };
-                Dual {
-                    primal: sig,
-                    tangent,
-                }
-            }
+            // Continuous UI controls: tangent = 0 (seed equality handled above).
+            SigMatch::HSlider(_) | SigMatch::VSlider(_) | SigMatch::NumEntry(_) => Dual {
+                primal: sig,
+                tangent: SigBuilder::new(self.arena).real(0.0),
+            },
             // Discrete UI controls are not differentiable: d/dp button = 0
             SigMatch::Button(_) | SigMatch::Checkbox(_) => Dual {
                 primal: sig,
@@ -891,10 +715,7 @@ impl<'a> ForwardADTransform<'a> {
 
 /// Expands propagated primal outputs into the forward-mode AD output bundle.
 ///
-/// For each input primal output:
-/// - first emit the primal itself,
-/// - then emit one tangent per reachable differentiable control, in
-///   deterministic control order.
+/// For each primal output, emits `[primal, tangent_wrt_seed]`.
 ///
 /// Before differentiation, each output passes through `de_bruijn_to_sym(...)`
 /// so the transform works on the canonical symbolic recursion representation
@@ -902,24 +723,59 @@ impl<'a> ForwardADTransform<'a> {
 pub(super) fn generate_fad_signals(
     arena: &mut TreeArena,
     outputs: &[SigId],
-    ctx: &PropagateContext<'_>,
+    diff_seed: SigId,
 ) -> Result<Vec<SigId>, PropagateError> {
     let converted_outputs: Vec<SigId> = outputs
         .iter()
         .copied()
         .map(|sig| de_bruijn_to_sym(arena, sig).unwrap_or(sig))
         .collect();
-
-    let mut result = Vec::new();
+    let converted_seed = de_bruijn_to_sym(arena, diff_seed).unwrap_or(diff_seed);
+    let mut fad = ForwardADTransform::new(arena, converted_seed);
+    let mut result = Vec::with_capacity(converted_outputs.len() * 2);
     for out_sig in converted_outputs {
-        result.push(out_sig);
-        let mut collector = ADControlCollector::new(arena, ctx.ui_controls);
-        collector.collect(out_sig);
-        collector.sort_controls_by_label();
-        for control in collector.controls {
-            let mut fad = ForwardADTransform::new(arena, control);
-            let dual = fad.transform(out_sig);
-            result.push(dual.tangent);
+        let dual = fad.transform(out_sig);
+        result.push(dual.primal);
+        result.push(dual.tangent);
+    }
+    Ok(result)
+}
+
+/// Multi-seed variant used by the Rec arm when multiple `fad(…, x)` nodes
+/// were suppressed during branch propagation.
+///
+/// Output layout: `[p1, t1_s1, t1_s2, …, p2, t2_s1, t2_s2, …]` where
+/// `sK` ranges over `seeds` in order.  One tangent per seed per primal.
+pub(super) fn generate_fad_signals_multi(
+    arena: &mut TreeArena,
+    outputs: &[SigId],
+    seeds: &[SigId],
+) -> Result<Vec<SigId>, PropagateError> {
+    if seeds.is_empty() {
+        return Ok(outputs.to_vec());
+    }
+    let converted_outputs: Vec<SigId> = outputs
+        .iter()
+        .copied()
+        .map(|sig| de_bruijn_to_sym(arena, sig).unwrap_or(sig))
+        .collect();
+    // Compute one tangent row per seed.
+    // tangent_rows[j][i] = tangent of output i with respect to seed j.
+    let mut tangent_rows: Vec<Vec<SigId>> = Vec::with_capacity(seeds.len());
+    for &seed in seeds {
+        let converted_seed = de_bruijn_to_sym(arena, seed).unwrap_or(seed);
+        let mut fad = ForwardADTransform::new(arena, converted_seed);
+        let row: Vec<SigId> = converted_outputs
+            .iter()
+            .map(|&s| fad.transform(s).tangent)
+            .collect();
+        tangent_rows.push(row);
+    }
+    let mut result = Vec::with_capacity(converted_outputs.len() * (1 + seeds.len()));
+    for (i, &p) in converted_outputs.iter().enumerate() {
+        result.push(p);
+        for row in &tangent_rows {
+            result.push(row[i]);
         }
     }
     Ok(result)
