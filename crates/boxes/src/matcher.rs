@@ -142,9 +142,8 @@ pub enum BoxMatch<'a> {
     ///
     /// Source provenance (C++):
     /// - `compiler/boxes/boxes.cpp`
-    /// - `boxForwardAD(Tree x)`
-    /// - `isBoxForwardAD(Tree t, Tree& x)`
-    ForwardAD(BoxId),
+    /// - `boxForwardAD(Tree exp, Tree seed)` — `isBoxForwardAD(Tree t, Tree& exp, Tree& seed)`
+    ForwardAD(BoxId, BoxId),
     /// Reverse-mode automatic differentiation wrapper preserved structurally at
     /// the box layer. Propagation support remains phase-gated separately.
     ///
@@ -274,7 +273,7 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
                         BOX_PATTERN_VAR_TAG => BoxMatch::PatternVar(c0),
                         BOX_INPUTS_TAG => BoxMatch::Inputs(c0),
                         BOX_OUTPUTS_TAG => BoxMatch::Outputs(c0),
-                        BOX_FORWARD_AD_TAG => BoxMatch::ForwardAD(c0),
+                        // ForwardAD is now a 2-child node (exp, seed)
                         BOX_REVERSE_AD_TAG => BoxMatch::ReverseAD(c0),
                         BOX_ONDEMAND_TAG => BoxMatch::Ondemand(c0),
                         BOX_UPSAMPLING_TAG => BoxMatch::Upsampling(c0),
@@ -305,6 +304,7 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
                         BOX_HGROUP_TAG => BoxMatch::HGroup(c0, c1),
                         BOX_TGROUP_TAG => BoxMatch::TGroup(c0, c1),
                         BOX_SOUNDFILE_TAG => BoxMatch::Soundfile(c0, c1),
+                        BOX_FORWARD_AD_TAG => BoxMatch::ForwardAD(c0, c1),
                         BOX_VSLIDER_TAG => {
                             let Some((cur, min, max, step)) = slider_params4(arena, c1) else {
                                 return BoxMatch::Unknown;
