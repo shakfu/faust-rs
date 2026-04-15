@@ -171,7 +171,7 @@ fn eval_process_treats_metadata_wrapper_as_evaluation_transparent() {
 #[test]
 fn eval_process_preserves_forward_ad_wrapper_around_evaluated_body() {
     let parsed = parse_program(
-        "process = fad(hslider(\"f\", 440, 50, 2000, 1) : sin);",
+        "process = fad(hslider(\"f\", 440, 50, 2000, 1) : sin, hslider(\"f\", 440, 50, 2000, 1));",
         "eval_fad_wrapper.dsp",
     );
     assert!(
@@ -183,7 +183,7 @@ fn eval_process_preserves_forward_ad_wrapper_around_evaluated_body() {
     let root = parsed.root.expect("parse should return a root");
 
     let out = eval_process(&mut arena, root).expect("fad process should evaluate");
-    let BoxMatch::ForwardAD(inner) = match_box(&arena, out) else {
+    let BoxMatch::ForwardAD(inner, _seed) = match_box(&arena, out) else {
         panic!("expected eval to preserve BOXFAUTODIFF");
     };
     assert!(
