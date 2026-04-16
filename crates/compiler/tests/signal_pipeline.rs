@@ -58,7 +58,7 @@ fn expect_ui_group(
 #[test]
 fn corpus_passthrough_maps_to_input_signal() {
     let out = compile_corpus("rep_01_passthrough.dsp");
-    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.inputs, 0);
     assert_eq!(out.process_arity.outputs, 1);
     assert_eq!(out.signals.len(), 1);
     assert_eq!(
@@ -70,7 +70,7 @@ fn corpus_passthrough_maps_to_input_signal() {
 #[test]
 fn corpus_gain_bias_lowers_to_add_mul_and_constant() {
     let out = compile_corpus("rep_02_gain_bias.dsp");
-    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.inputs, 0);
     assert_eq!(out.process_arity.outputs, 1);
     assert_eq!(out.signals.len(), 1);
 
@@ -105,7 +105,7 @@ fn corpus_operator_precedence_structure_is_stable() {
 #[test]
 fn corpus_feedback_simple_exposes_recursive_projection() {
     let out = compile_corpus("rep_23_feedback_simple.dsp");
-    assert_eq!(out.process_arity.inputs, 1);
+    assert_eq!(out.process_arity.inputs, 0);
     assert_eq!(out.process_arity.outputs, 1);
     assert_eq!(out.signals.len(), 1);
     assert!(matches!(
@@ -309,6 +309,33 @@ fn corpus_fad_recursive_delay_compiles_through_full_signal_pipeline() {
     assert_eq!(out.process_arity.outputs, 2);
     assert_eq!(out.signals.len(), 2);
     assert_eq!(out.ui.controls.len(), 1);
+}
+
+#[test]
+fn inline_recursive_fad_tangent_projection_compiles_through_full_signal_pipeline() {
+    let out = compile_inline(
+        "inline_recursive_fad_tangent_projection.dsp",
+        r#"
+        process = step ~ _
+        with {
+            target = hslider("Target", 0, -1, 1, 0.01);
+            lr = hslider("LR", 0.05, 0.0001, 0.5, 0.0001);
+            step(prev) = prev - lr * grad
+            with {
+                loss = (prev - target) ^ 2;
+                grad = fad(loss, prev) : !, _;
+            };
+        };
+        "#,
+    );
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+    assert_eq!(out.ui.controls.len(), 2);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
 }
 
 #[test]

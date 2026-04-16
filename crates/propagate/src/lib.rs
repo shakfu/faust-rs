@@ -2465,16 +2465,17 @@ fn propagate_inner(
             propagate_in_slot_env(arena, right, &merge_in, ctx)
         }
         FlatNodeKind::Rec(left, right) => {
-            // When either Rec branch contains fad(), suppress FAD expansion
-            // during branch propagation.  The Rec is built normally, then
-            // generate_fad_signals runs on the outputs.  This avoids injecting
-            // FAD-expanded tangent signals into the de Bruijn recursive group
-            // where they would hold dangling refs.
-            let has_fad = contains_forward_ad(arena, left)? || contains_forward_ad(arena, right)?;
-
-            // Use wiring arity (ForwardAD-transparent) for Rec internal wiring.
-            let left_arity = box_arity_wiring(arena, left, ctx.cache)?;
-            let right_arity = box_arity_wiring(arena, right, ctx.cache)?;
+            let fad_mode = rec_fad_mode(arena, left, right)?;
+            let (left_arity, right_arity) = match fad_mode {
+                RecFadMode::None | RecFadMode::ExpandAfterRec => (
+                    box_arity_wiring(arena, left, ctx.cache)?,
+                    box_arity_wiring(arena, right, ctx.cache)?,
+                ),
+                RecFadMode::AugmentedState => (
+                    box_arity_typed(arena, left, ctx.cache)?,
+                    box_arity_typed(arena, right, ctx.cache)?,
+                ),
+            };
             if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
                 return Err(PropagateError::RecArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -2487,7 +2488,7 @@ fn propagate_inner(
 
             let saved_suppress = ctx.suppress_fad;
             let saved_pending = std::mem::take(&mut ctx.pending_fad_seeds);
-            if has_fad {
+            if matches!(fad_mode, RecFadMode::ExpandAfterRec) {
                 ctx.suppress_fad = true;
             }
 
@@ -2531,7 +2532,7 @@ fn propagate_inner(
                 }
             }
 
-            if has_fad {
+            if matches!(fad_mode, RecFadMode::ExpandAfterRec) {
                 forward_ad::generate_fad_signals_multi(arena, &outputs, &seeds)
             } else {
                 Ok(outputs)
