@@ -71,18 +71,20 @@
 //!
 //! ## Interaction with the `Rec` combinator
 //!
-//! Recursive boxes (`sigRec`) require special treatment because injecting
-//! expanded tangent signals into the De Bruijn group during branch propagation
-//! would create dangling references.  The two-phase protocol is:
+//! Recursive boxes (`sigRec`) require special treatment because there are now
+//! two distinct valid FAD modes in recursion:
 //!
-//! 1. **Suppress** — when either Rec branch contains `fad()`, the
-//!    `suppress_fad` flag is set in [`PropagateContext`].  `ForwardAD` nodes
-//!    inside a Rec branch act as transparent wrappers: they return only primal
-//!    outputs.  [`box_arity_wiring`] is used for internal wiring so that the
-//!    Rec's port algebra is unaffected by the tangent expansion.
-//! 2. **Expand** — once the full recursive group (`sigRec(var, body)`) is
-//!    built, `forward_ad::generate_fad_signals` is called on the primal
-//!    outputs to emit the tangent bundle.
+//! 1. **Expand-after-Rec** — when a `ForwardAD` node is structurally present in
+//!    a recursive branch but none of its expanded outputs are consumed locally
+//!    before the `Rec` boundary, branch propagation keeps it arity-transparent.
+//!    [`box_arity_wiring`] is used for the internal port algebra, and
+//!    `forward_ad::generate_fad_signals_multi(...)` runs after the recursive
+//!    group has been built.
+//! 2. **Augmented-state Rec** — when a recursive branch locally consumes
+//!    `[primal, tangent]` outputs (for example `fad(loss, prev) : !, _` inside
+//!    the feedback function), the `Rec` must propagate on the real expanded AD
+//!    arity. In that mode the recursive group itself carries augmented
+//!    primal+tangent lanes and no post-`Rec` expansion step is performed.
 //!
 //! ## Reverse-mode AD (`rad`)
 //!
@@ -567,6 +569,84 @@ fn count_fad_nodes(
     }
 }
 
+/// Recursion-specific forward-AD handling strategy selected for one `boxRec(...)`.
+///
+/// `ExpandAfterRec` preserves the historical Rust behavior where `ForwardAD`
+/// stays arity-transparent during internal recursive wiring and the tangent
+/// bundle is emitted only after the recursive group has been built.
+///
+/// `AugmentedState` is selected when a recursive branch needs to consume the
+/// expanded `[primal, tangent]` outputs locally before the `Rec` boundary. In
+/// that mode the recursive group itself is built on the real expanded AD arity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecFadMode {
+    None,
+    ExpandAfterRec,
+    AugmentedState,
+}
+
+/// Returns the recursive FAD handling mode required for one `boxRec(...)`.
+///
+/// The current heuristic is intentionally structural:
+/// - no reachable `ForwardAD` → [`RecFadMode::None`],
+/// - reachable `ForwardAD` only through transparent wrappers
+///   (`vgroup`/`hgroup`/`tgroup`/`metadata`/`symbolic`) until the `Rec` branch
+///   root → [`RecFadMode::ExpandAfterRec`],
+/// - any composition/algebra node consuming a `ForwardAD` subtree locally
+///   before the `Rec` boundary → [`RecFadMode::AugmentedState`].
+fn rec_fad_mode(
+    arena: &TreeArena,
+    left: FlatBoxId,
+    right: FlatBoxId,
+) -> Result<RecFadMode, PropagateError> {
+    let left_has = contains_forward_ad(arena, left)?;
+    let right_has = contains_forward_ad(arena, right)?;
+    if !left_has && !right_has {
+        return Ok(RecFadMode::None);
+    }
+    let left_local = subtree_consumes_fad_outputs_locally(arena, left, false)?;
+    let right_local = subtree_consumes_fad_outputs_locally(arena, right, false)?;
+    if left_local || right_local {
+        Ok(RecFadMode::AugmentedState)
+    } else {
+        Ok(RecFadMode::ExpandAfterRec)
+    }
+}
+
+/// Returns `true` when a `ForwardAD` subtree is consumed by a non-transparent
+/// operator before reaching the recursive branch root.
+fn subtree_consumes_fad_outputs_locally(
+    arena: &TreeArena,
+    box_tree: FlatBoxId,
+    consumed_by_parent: bool,
+) -> Result<bool, PropagateError> {
+    match flat_node_kind(arena, box_tree)? {
+        FlatNodeKind::ForwardAD { .. } => Ok(consumed_by_parent),
+        FlatNodeKind::Symbolic { body }
+        | FlatNodeKind::Metadata { body }
+        | FlatNodeKind::VGroup { body }
+        | FlatNodeKind::HGroup { body }
+        | FlatNodeKind::TGroup { body } => {
+            subtree_consumes_fad_outputs_locally(arena, body, consumed_by_parent)
+        }
+        FlatNodeKind::Rec(left, right)
+        | FlatNodeKind::Seq(left, right)
+        | FlatNodeKind::Par(left, right)
+        | FlatNodeKind::Split(left, right)
+        | FlatNodeKind::Merge(left, right) => {
+            Ok(subtree_consumes_fad_outputs_locally(arena, left, true)?
+                || subtree_consumes_fad_outputs_locally(arena, right, true)?)
+        }
+        FlatNodeKind::ReverseAD { body }
+        | FlatNodeKind::Ondemand(body)
+        | FlatNodeKind::Upsampling(body)
+        | FlatNodeKind::Downsampling(body) => {
+            subtree_consumes_fad_outputs_locally(arena, body, true)
+        }
+        _ => Ok(false),
+    }
+}
+
 fn flat_box_unexpected(node: TreeId, kind: &'static str) -> FlatBoxBuildError {
     FlatBoxBuildError::UnexpectedPostEvalBox { node, kind }
 }
@@ -947,9 +1027,11 @@ pub fn box_arity_typed(
 }
 
 /// Like [`box_arity_typed`] but treats `ForwardAD` as transparent (no output
-/// expansion).  Used by the Rec combinator to compute the core wiring arity
-/// of its branches — the actual FAD expansion is handled separately after
-/// the recursive group is built (via `suppress_fad` + `generate_fad_signals`).
+/// expansion).
+///
+/// This is used only for the `RecFadMode::ExpandAfterRec` path, where the
+/// recursive port algebra is computed on the primal lanes and the tangent
+/// bundle is emitted after the recursive group has been finalized.
 fn box_arity_wiring(
     arena: &TreeArena,
     box_tree: FlatBoxId,
@@ -1221,11 +1303,17 @@ fn box_arity_flat_inner(
             })
         }
         FlatNodeKind::Rec(left, right) => {
-            // Use wiring arity (ForwardAD-transparent) for Rec validation.
-            // FAD expansion is deferred to after the recursive group is built
-            // via the suppress_fad mechanism in propagate_inner.
-            let left_arity = box_arity_wiring(arena, left, cache)?;
-            let right_arity = box_arity_wiring(arena, right, cache)?;
+            let fad_mode = rec_fad_mode(arena, left, right)?;
+            let (left_arity, right_arity) = match fad_mode {
+                RecFadMode::None | RecFadMode::ExpandAfterRec => (
+                    box_arity_wiring(arena, left, cache)?,
+                    box_arity_wiring(arena, right, cache)?,
+                ),
+                RecFadMode::AugmentedState => (
+                    box_arity_typed(arena, left, cache)?,
+                    box_arity_typed(arena, right, cache)?,
+                ),
+            };
             if right_arity.inputs > left_arity.outputs || right_arity.outputs > left_arity.inputs {
                 return Err(PropagateError::RecArityMismatch {
                     node: box_tree.as_tree_id(),
@@ -1237,17 +1325,15 @@ fn box_arity_flat_inner(
             }
             let core_outputs = left_arity.outputs;
             let core_inputs = left_arity.inputs.saturating_sub(right_arity.outputs);
-            // If the Rec contains fad(), expand output arity by the number of
-            // controls reachable from both branches — this matches what
-            // generate_fad_signals will produce at propagation time.
-            let has_fad = contains_forward_ad(arena, left)? || contains_forward_ad(arena, right)?;
-            let outputs = if has_fad {
-                let mut visited = AHashSet::new();
-                let n_left = count_fad_nodes(arena, left, &mut visited)?;
-                let n_right = count_fad_nodes(arena, right, &mut visited)?;
-                core_outputs * (1 + n_left + n_right)
-            } else {
-                core_outputs
+            let outputs = match fad_mode {
+                RecFadMode::None => core_outputs,
+                RecFadMode::ExpandAfterRec => {
+                    let mut visited = AHashSet::new();
+                    let n_left = count_fad_nodes(arena, left, &mut visited)?;
+                    let n_right = count_fad_nodes(arena, right, &mut visited)?;
+                    core_outputs * (1 + n_left + n_right)
+                }
+                RecFadMode::AugmentedState => core_outputs,
             };
             Ok(BoxArity {
                 inputs: core_inputs,
@@ -2483,7 +2569,7 @@ fn propagate_inner(
                     return Err(PropagateError::FadSeedArity {
                         node: box_tree.as_tree_id(),
                         outputs: got.len(),
-                    })
+                    });
                 }
             };
             let body_sigs = propagate_in_slot_env(arena, body, inputs, ctx)?;
