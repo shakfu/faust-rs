@@ -61,3 +61,4 @@ Files are listed chronologically (oldest day first). Inside each file, entries a
 - [2026-04-13](./2026-04-13.md) (2 entries)
 - [2026-04-15](./2026-04-15.md)
 - [2026-04-16](./2026-04-16.md) (2 entries)
+- [2026-04-17](./2026-04-17.md) (1 entry)
