@@ -796,9 +796,9 @@ fn eval_value_uncached(
             // Both children must be evaluated under the current lexical environment,
             // then rewrapped so the AD primitive remains explicit at the post-eval
             // propagation boundary.
-            let exp_val  = eval_value(arena, exp,  env, loop_detector)?;
+            let exp_val = eval_value(arena, exp, env, loop_detector)?;
             let seed_val = eval_value(arena, seed, env, loop_detector)?;
-            let exp_box  = force_value_to_box(arena, exp_val,  loop_detector)?;
+            let exp_box = force_value_to_box(arena, exp_val, loop_detector)?;
             let seed_box = force_value_to_box(arena, seed_val, loop_detector)?;
             let mut bld = BoxBuilder::new(arena);
             Ok(EvalValue::Box(bld.forward_ad(exp_box, seed_box)))

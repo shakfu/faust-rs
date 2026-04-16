@@ -125,7 +125,11 @@ fn parse_program_recognizes_fad_with_explicit_seed() {
         "process = fad(hslider(\"x\", 0, 0, 1, 0.01) : sin, hslider(\"x\", 0, 0, 1, 0.01));",
         "bridge_fad_seed.dsp",
     );
-    assert!(out.errors.is_empty(), "unexpected parse errors: {:?}", out.errors);
+    assert!(
+        out.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        out.errors
+    );
     let root = out.root.expect("root should be present");
     let def = list_head(&out.state.arena, root);
     let payload = out.state.arena.tl(def).expect("definition payload");
@@ -138,7 +142,10 @@ fn parse_program_recognizes_fad_with_explicit_seed() {
         "fad body should be a seq"
     );
     assert!(
-        matches!(match_box(&out.state.arena, seed), BoxMatch::HSlider(_, _, _, _, _)),
+        matches!(
+            match_box(&out.state.arena, seed),
+            BoxMatch::HSlider(_, _, _, _, _)
+        ),
         "fad seed should be an hslider"
     );
 }
