@@ -312,6 +312,62 @@ fn corpus_fad_recursive_delay_compiles_through_full_signal_pipeline() {
 }
 
 #[test]
+fn corpus_fad_recursive_local_projection_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_local_projection.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+    assert_eq!(out.ui.controls.len(), 2);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+}
+
+#[test]
+fn corpus_fad_recursive_pair_reduction_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_pair_reduction.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+}
+
+#[test]
+fn corpus_fad_recursive_multi_local_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_multi_local.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+    assert_eq!(out.ui.controls.len(), 2);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+}
+
+#[test]
+fn corpus_fad_recursive_multilane_local_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_multilane_local.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[1]),
+        SigMatch::Proj(_, _)
+    ));
+}
+
+#[test]
 fn inline_recursive_fad_tangent_projection_compiles_through_full_signal_pipeline() {
     let out = compile_inline(
         "inline_recursive_fad_tangent_projection.dsp",
@@ -334,6 +390,154 @@ fn inline_recursive_fad_tangent_projection_compiles_through_full_signal_pipeline
     assert_eq!(out.ui.controls.len(), 2);
     assert!(matches!(
         match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+}
+
+#[test]
+fn inline_recursive_fad_alternate_local_projection_compiles_through_full_signal_pipeline() {
+    let out = compile_inline(
+        "inline_recursive_fad_alternate_local_projection.dsp",
+        r#"
+        process = step ~ _
+        with {
+            target = hslider("Target", 0, -1, 1, 0.01);
+            step(prev) = fad((prev - target) ^ 2, prev) : _, !;
+        };
+        "#,
+    );
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+}
+
+#[test]
+fn inline_recursive_fad_pair_reduction_compiles_through_full_signal_pipeline() {
+    let out = compile_inline(
+        "inline_recursive_fad_pair_reduction.dsp",
+        r#"
+        process = step ~ _
+        with {
+            target = hslider("Target", 0, -1, 1, 0.01);
+            step(prev) = fad((prev - target) ^ 2, prev) : (_, _) : +;
+        };
+        "#,
+    );
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+}
+
+#[test]
+fn inline_recursive_multiple_local_fads_compiles_through_full_signal_pipeline() {
+    let out = compile_inline(
+        "inline_recursive_multiple_local_fads.dsp",
+        r#"
+        process = step ~ _
+        with {
+            target = hslider("Target", 0, -1, 1, 0.01);
+            lr = hslider("LR", 0.05, 0.0001, 0.5, 0.0001);
+            step(prev) = prev - lr * (g1 + g2)
+            with {
+                g1 = fad((prev - target) ^ 2, prev) : !, _;
+                g2 = fad((prev + target) ^ 2, prev) : !, _;
+            };
+        };
+        "#,
+    );
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+    assert_eq!(out.ui.controls.len(), 2);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+}
+
+#[test]
+fn inline_recursive_fad_under_vgroup_compiles_through_full_signal_pipeline() {
+    let out = compile_inline(
+        "inline_recursive_fad_under_vgroup.dsp",
+        r#"
+        process = step ~ _
+        with {
+            target = hslider("Target", 0, -1, 1, 0.01);
+            lr = hslider("LR", 0.05, 0.0001, 0.5, 0.0001);
+            step(prev) = prev - lr * grad
+            with {
+                grad = vgroup("g", fad((prev - target) ^ 2, prev)) : !, _;
+            };
+        };
+        "#,
+    );
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+    assert_eq!(out.ui.controls.len(), 2);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+}
+
+#[test]
+fn inline_recursive_fad_with_derived_seed_compiles_through_full_signal_pipeline() {
+    let out = compile_inline(
+        "inline_recursive_fad_with_derived_seed.dsp",
+        r#"
+        process = step ~ _
+        with {
+            step(prev) = grad
+            with {
+                seed = abs(prev);
+                grad = fad(seed * seed, seed) : !, _;
+            };
+        };
+        "#,
+    );
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+    assert_eq!(out.ui.controls.len(), 0);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+}
+
+#[test]
+fn inline_multilane_recursive_fad_local_projection_compiles_through_full_signal_pipeline() {
+    let out = compile_inline(
+        "inline_multilane_recursive_fad_local_projection.dsp",
+        r#"
+        process = step ~ (_, _)
+        with {
+            target = hslider("Target", 0, -1, 1, 0.01);
+            step(a, b) = (fad((a - target) ^ 2, a) : !, _, b);
+        };
+        "#,
+    );
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[1]),
         SigMatch::Proj(_, _)
     ));
 }
