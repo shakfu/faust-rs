@@ -119,6 +119,32 @@ the seed automatically at the point where the two subgraphs meet.
 - Inside `~`, the existing `suppress_fad` mechanism is still needed (one tangent is
   enough to blow up a recursive group if expansion happens mid-wiring). See §6.
 
+### 2.4 Current support boundary for optimization-style code
+
+The current implementation is already sufficient for a useful subset of
+gradient-style DSP programs:
+
+- **Feed-forward directional derivatives** are supported for ordinary controls,
+  audio inputs, and derived single-output seeds.
+- **Structured recursive uses** are supported when `fad(exp, x)` appears inside a
+  recursive branch but `x` itself does not require the evaluator to expand a
+  recursive alias while the recursive box is still being formed.
+- The existing `fad_recursive*.dsp` fixtures are representative of this
+  supported subset.
+
+The main unsupported family is narrower than "optimization in recursion" in
+general:
+
+- **Recursive seed aliases are not yet supported.** A pattern such as
+  `state = next ~ _; prev = state; grad = fad(loss(prev), prev);`
+  still loops during evaluation in `faust-rs`.
+- This is **not** currently a Rust-only gap: the upstream C++ compiler also
+  rejects the same recursive-alias motif with an endless evaluation cycle, even
+  when `fad` is removed and only the aliasing recursion remains.
+- As a consequence, examples such as `auto_pan3.dsp` should be treated as
+  motivation for a future compiler extension, not as programs already covered by
+  the present parity target.
+
 ---
 
 ## 3. Box layer
@@ -648,3 +674,7 @@ intermediate state (the `ADControlCollector` deletion must coincide with the
 - **UI metadata `[autodiff:false]`.** No longer consulted. If a library wants to
   re-introduce it as a *policy* (e.g. forbid passing a `[autodiff:false]`-tagged
   slider as the seed), that is a separate, lint-style plan.
+- **General recursive-state optimizers.** `fad(exp, x)` is already usable for
+  many optimization building blocks, but a generic workflow where the seed is a
+  recursive state alias currently being formed is still outside the implemented
+  scope.

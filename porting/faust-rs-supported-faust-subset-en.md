@@ -1315,7 +1315,7 @@ Two complementary improvements landed:
 
 All corpus tests continue to pass after both optimizations.
 
-### 7.16 April 15, 2026: forward-mode AD (`fad`) — full propagation and corpus coverage
+### 7.16 April 15-16, 2026: forward-mode AD (`fad(exp, x)`) — explicit-seed propagation and current support boundary
 
 #### `forward_ad.rs` — complete FAD rule table implemented
 
@@ -1323,7 +1323,7 @@ The full forward-mode automatic differentiation pass was implemented and
 documented in `crates/propagate/src/forward_ad.rs`.
 
 The implementation differentiates each propagated signal with respect to one
-selected UI control at a time, producing a *dual signal* `(primal, tangent)`.
+explicit seed signal at a time, producing a *dual signal* `(primal, tangent)`.
 A [`ForwardADTransform`](forward_ad) instance memoizes results across the shared
 signal DAG to prevent exponential blow-up.
 
@@ -1331,8 +1331,8 @@ Differentiation rules implemented:
 
 | Category | Covered nodes |
 |----------|--------------|
-| Constants / audio inputs | `int`, `real`, `sigInput` → tangent 0 |
-| UI controls | `hslider`, `vslider`, `numentry` — seed 1 for selected, 0 otherwise |
+| Constants / audio inputs | `int`, `real`, `sigInput` → tangent 0 unless the node is the selected seed |
+| UI controls | `hslider`, `vslider`, `numentry` — tangent 0 unless the propagated signal equals the selected seed |
 | Discrete UI | `button`, `checkbox` → tangent 0 |
 | Arithmetic | `Add`, `Sub`, `Mul` (product rule), `Div` (quotient rule), `Rem` |
 | Integer/bitwise | shifts, comparisons, bitwise ops → tangent 0 |
@@ -1352,63 +1352,57 @@ symbolic recursion variable names are explicit and `FAD_` pairing is unambiguous
 
 #### Output expansion and the `Rec` suppress/expand protocol
 
-`generate_fad_signals` drives one transformer per reachable differentiable
-control and assembles the output bundle:
+`generate_fad_signals` differentiates against one explicit seed and assembles
+the output bundle:
 ```
-[primal₀, ∂primal₀/∂p₀, ∂primal₀/∂p₁, …, primal₁, ∂primal₁/∂p₀, …]
+[primal₀, tangent₀, primal₁, tangent₁, …]
 ```
 
-For programs containing `fad()` inside a recursive group (`~`), a two-phase
-protocol prevents dangling references inside the De Bruijn group:
+For programs containing `fad(exp, x)` inside a recursive group (`~`), a
+two-phase protocol prevents dangling references inside the De Bruijn group:
 
 1. **Suppress** — the `suppress_fad` flag makes `ForwardAD` transparent during
    branch propagation; `box_arity_wiring` is used for internal port arithmetic.
 2. **Expand** — `generate_fad_signals` is called once on the completed primal
    `sigRec` output, producing the tangent bundle from the fully-formed group.
 
-#### `[autodiff:false]` metadata opt-out
+#### Explicit-seed semantics and current limit
 
-Controls annotated with `[autodiff:false]` are excluded from the reachable
-set at the `ADControlCollector` stage.  Because the metadata is only visible
-after UI construction, the box-level output arity is an upper bound; the
-actual signal list may be shorter.  The output-arity validator accounts for
-this gap.
+- `fad(exp, x)` computes one directional derivative with respect to the single
+  propagated seed signal produced by `x`.
+- The seed can be a control, an audio input, or a derived one-output signal.
+- The transform does **not** enumerate all reachable controls anymore, and
+  `[autodiff:false]` is no longer consulted by the compiler.
+- A narrower unsupported case remains: if the seed is reached only through a
+  recursive alias that the evaluator must expand while the recursive box is
+  still being formed, evaluation still loops. This is the family illustrated by
+  `state = next ~ _; prev = state; grad = fad(loss(prev), prev);`.
+- This limit is not currently a Rust-only regression: upstream C++ Faust also
+  rejects the same recursive-alias motif with an endless evaluation cycle.
 
-#### 22 corpus entries validated
+#### Corpus coverage validated
 
 | fixture | description |
 |---------|-------------|
-| `fad_basic` | `fad(f : sin)` — single control, single trig function |
-| `fad_product` | two controls, product rule |
-| `fad_division` | quotient rule |
-| `fad_minmax` | `min`/`max` sub-gradient |
-| `fad_power` | general power rule |
-| `fad_trig_composition` | nested trig chain |
-| `fad_triple_chain` | three-control expansion |
-| `fad_math_chain` | multi-function chain |
-| `fad_select2` | `select2` with tangent selector pass-through |
-| `fad_delay` | fixed unit delay |
-| `fad_delay_variable` | variable delay Leibniz rule |
-| `fad_autodiff_false` | `[autodiff:false]` opt-out — arity upper-bound gap |
-| `fad_recursive` | simple feedback loop with two controls |
-| `fad_recursive_left` | `fad(+)~*(g)` — FAD on left Rec branch |
-| `fad_recursive_right` | FAD on right (feedback) branch |
-| `fad_recursive_branch` | `+~(fad(*(g)))` — FAD inside Rec right branch |
-| `fad_recursive_both` | FAD on both branches |
-| `fad_recursive_deep_left` | deeply nested recursive left |
-| `fad_recursive_deep_right` | deeply nested recursive right |
-| `fad_recursive_deep_both` | deeply nested both branches |
-| `fad_recursive_multi_control` | multiple controls in a recursive program |
-| `fad_recursive_delay` | `delay1` inside recursive group with FAD |
-| `fad_gradient_host` | host-side gradient extraction pattern |
+| `fad_basic` | `fad(f : sin, f)` — one control, one explicit seed |
+| `fad_product` | `fad(f * g, f)` — product rule with one selected seed |
+| `fad_trig_composition` | nested trig chain with explicit seed |
+| `fad_triple_chain` | long chain differentiated against one chosen factor |
+| `fad_delay` | fixed delay with explicit seed |
+| `fad_recursive` | feedback loop differentiated with respect to one control |
+| `fad_recursive_branch` | `fad` inside one recursive branch |
+| `fad_recursive_deep_right` | deeply nested recursive branch with explicit seed |
+| `fad_recursive_delay` | recursive delay with explicit seed |
+| `fad_gradient_host` | host-side extraction of primal/tangent pair |
+| `rad_parse_only` | parse/eval preserved, propagate intentionally unsupported |
 
-All 22 entries pass through `crates/compiler/tests/signal_pipeline.rs`.
+These fixtures pass through `crates/compiler/tests/signal_pipeline.rs`.
 `fad_delay` is additionally validated end-to-end through the `signal_fir_lane`
 fast-lane test (C++ and interpreter bytecode output checked).
 
 #### `rad(expr)` remains out of scope
 
-Reverse-mode AD is not implemented.  `rad(expr)` returns
+Reverse-mode AD is not implemented. `rad(expr)` returns
 `PropagateError::UnsupportedBox`.
 
 ## 8. Practical Reading Rule
@@ -1426,10 +1420,14 @@ Today, the simplest accurate rule is:
   `ma.SR` (sampling rate).
 - The only variable-delay case still blocked is one where the delay amount
   has no statically determinable finite upper bound.
-- `fad(expr)` programs propagate correctly and produce the expanded tangent
-  output bundle.  End-to-end backend compilation succeeds whenever the
-  underlying tangent signal content stays within the supported fast-lane subset
-  (same as for primal-only programs).  `rad(expr)` is not supported.
+- `fad(exp, x)` programs propagate correctly and produce the expected
+  primal/tangent bundle when the seed is an ordinary explicit signal or a
+  structured recursive use already covered by the corpus. End-to-end backend
+  compilation succeeds whenever the underlying tangent signal content stays
+  within the supported fast-lane subset (same as for primal-only programs).
+- The main currently unsupported `fad(exp, x)` family is "differentiate with
+  respect to a recursive state alias currently being formed". `rad(expr)` is
+  not supported.
 
 The most common mistake is to assume:
 
