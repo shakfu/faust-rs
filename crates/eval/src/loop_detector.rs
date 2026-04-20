@@ -116,6 +116,16 @@ pub struct LoopDetector {
     /// keeps it inside the per-pass [`LoopDetector`] so one evaluation session
     /// preserves sharing without requiring mutable properties on tree nodes.
     pub(crate) eval_cache: ahash::HashMap<EvalCacheKey, EvalValue>,
+    /// Structural recursion depth for `a2sb` / `a2sb_value` lowering.
+    ///
+    /// These paths create fresh slot nodes on every iteration, so the identity
+    /// cache on `call_stack` never triggers. Without a separate counter, a
+    /// legitimately diverging user program (mutual recursion that is not broken
+    /// by `~`) overflows the OS stack and aborts the process. Incrementing this
+    /// counter at each structural lowering entry lets us return
+    /// `RecursionDepthExceeded` gracefully, matching the reference C++
+    /// compiler's `"stack overflow in eval"` error.
+    pub(crate) structural_depth: usize,
 }
 
 impl LoopDetector {
@@ -135,6 +145,7 @@ impl LoopDetector {
             next_slot_id: 0,
             symbolic_box_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
             eval_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
+            structural_depth: 0,
         }
     }
 
@@ -159,6 +170,7 @@ impl LoopDetector {
             next_slot_id: 0,
             symbolic_box_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
             eval_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
+            structural_depth: 0,
         }
     }
 
@@ -178,6 +190,7 @@ impl LoopDetector {
             next_slot_id: 0,
             symbolic_box_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
             eval_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
+            structural_depth: 0,
         }
     }
 
@@ -252,6 +265,33 @@ impl LoopDetector {
 
     pub(crate) fn leave(&mut self) {
         let _ = self.call_stack.pop();
+    }
+
+    /// Enters a structural lowering frame (`a2sb` / `a2sb_value`).
+    ///
+    /// Unlike [`enter`], this path does not record an identity key because
+    /// every iteration creates a fresh `boxSlot`, making cycle detection
+    /// impossible. The counter only enforces the `max_depth` budget so a
+    /// diverging user program fails with `RecursionDepthExceeded` instead of
+    /// aborting the process on OS stack overflow.
+    pub(crate) fn enter_structural(&mut self) -> Result<(), EvalError> {
+        // Capped tighter than the general `max_depth` (1024) because every
+        // structural hop also drags `eval_value` / `apply_value_list_value`
+        // frames onto the real OS stack, consuming an order of magnitude more
+        // bytes per iteration than a symbol-lookup loop. 256 leaves ample room
+        // for legitimate deeply-nested lambdas while firing well before the
+        // default 8 MiB thread stack runs out.
+        const STRUCTURAL_MAX: usize = 256;
+        let limit = self.max_depth.min(STRUCTURAL_MAX);
+        if self.structural_depth >= limit {
+            return Err(EvalError::RecursionDepthExceeded { max_depth: limit });
+        }
+        self.structural_depth += 1;
+        Ok(())
+    }
+
+    pub(crate) fn leave_structural(&mut self) {
+        self.structural_depth = self.structural_depth.saturating_sub(1);
     }
 }
 

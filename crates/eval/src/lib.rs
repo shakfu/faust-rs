@@ -416,6 +416,17 @@ fn a2sb_value(
     value: EvalValue,
     loop_detector: &mut LoopDetector,
 ) -> Result<TreeId, EvalError> {
+    loop_detector.enter_structural()?;
+    let result = a2sb_value_inner(arena, value, loop_detector);
+    loop_detector.leave_structural();
+    result
+}
+
+fn a2sb_value_inner(
+    arena: &mut TreeArena,
+    value: EvalValue,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
     match value {
         EvalValue::Box(expr) => a2sb(arena, expr, loop_detector),
         EvalValue::Closure(closure) => match match_box(arena, closure.expr) {
@@ -462,7 +473,20 @@ fn a2sb(
         return Ok(cached);
     }
 
-    let result = match match_box(arena, expr) {
+    loop_detector.enter_structural()?;
+    let outcome = a2sb_match(arena, expr, loop_detector);
+    loop_detector.leave_structural();
+    let result = outcome?;
+    loop_detector.symbolic_box_cache.insert(expr, result);
+    Ok(result)
+}
+
+fn a2sb_match(
+    arena: &mut TreeArena,
+    expr: TreeId,
+    loop_detector: &mut LoopDetector,
+) -> Result<TreeId, EvalError> {
+    match match_box(arena, expr) {
         BoxMatch::Abstr(_, _) => a2sb_value(
             arena,
             EvalValue::Closure(ClosureValue {
@@ -543,10 +567,7 @@ fn a2sb(
                 Ok(expr)
             }
         }
-    }?;
-
-    loop_detector.symbolic_box_cache.insert(expr, result);
-    Ok(result)
+    }
 }
 
 fn lower_abstraction_to_symbolic_value(
