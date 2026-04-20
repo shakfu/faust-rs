@@ -19,8 +19,8 @@
 //! variable has seed `0`.
 //!
 //! One [`ForwardADTransform`] instance differentiates the entire signal DAG
-//! with respect to a single control; [`generate_fad_signals`] drives one
-//! transformer per reachable control and assembles the output bundle.
+//! with respect to a single seed; [`generate_fad_signals_multi`] drives one
+//! transformer per seed and assembles the output bundle.
 //!
 //! # Differentiation rules by node kind
 //!
@@ -715,37 +715,15 @@ impl<'a> ForwardADTransform<'a> {
 
 /// Expands propagated primal outputs into the forward-mode AD output bundle.
 ///
-/// For each primal output, emits `[primal, tangent_wrt_seed]`.
+/// Output layout: `[p1, t1_s1, t1_s2, …, p2, t2_s1, t2_s2, …]` where
+/// `sK` ranges over `seeds` in order. One tangent per seed per primal.
+/// A single-output seed degenerates to the canonical `[primal, tangent]`
+/// pair; multi-output seeds bundle several independent differentiation
+/// variables through a single `fad` node.
 ///
 /// Before differentiation, each output passes through `de_bruijn_to_sym(...)`
 /// so the transform works on the canonical symbolic recursion representation
 /// expected by the current porting model.
-pub(super) fn generate_fad_signals(
-    arena: &mut TreeArena,
-    outputs: &[SigId],
-    diff_seed: SigId,
-) -> Result<Vec<SigId>, PropagateError> {
-    let converted_outputs: Vec<SigId> = outputs
-        .iter()
-        .copied()
-        .map(|sig| de_bruijn_to_sym(arena, sig).unwrap_or(sig))
-        .collect();
-    let converted_seed = de_bruijn_to_sym(arena, diff_seed).unwrap_or(diff_seed);
-    let mut fad = ForwardADTransform::new(arena, converted_seed);
-    let mut result = Vec::with_capacity(converted_outputs.len() * 2);
-    for out_sig in converted_outputs {
-        let dual = fad.transform(out_sig);
-        result.push(dual.primal);
-        result.push(dual.tangent);
-    }
-    Ok(result)
-}
-
-/// Multi-seed variant used by the Rec arm when multiple `fad(…, x)` nodes
-/// were suppressed during branch propagation.
-///
-/// Output layout: `[p1, t1_s1, t1_s2, …, p2, t2_s1, t2_s2, …]` where
-/// `sK` ranges over `seeds` in order.  One tangent per seed per primal.
 pub(super) fn generate_fad_signals_multi(
     arena: &mut TreeArena,
     outputs: &[SigId],

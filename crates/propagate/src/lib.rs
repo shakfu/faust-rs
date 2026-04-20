@@ -785,7 +785,7 @@ impl Display for PropagateError {
             ),
             Self::FadSeedArity { node, outputs } => write!(
                 f,
-                "fad seed at node {} must have exactly 1 output, got {outputs}",
+                "fad seed at node {} must produce at least 1 output, got {outputs}",
                 node.as_u32()
             ),
         }
@@ -982,7 +982,7 @@ impl IntoDiagnostic for PropagateError {
                 codes::PROP_ARITY_MISMATCH,
                 message,
             )
-            .with_note("cause: fad seed expression must produce exactly 1 output signal")
+            .with_note("cause: fad seed expression must produce at least 1 output signal")
             .with_note(format!("seed produced {outputs} output(s)")),
         }
     }
@@ -1008,9 +1008,12 @@ pub fn make_sig_input_list(arena: &mut TreeArena, n: usize) -> Vec<SigId> {
 /// hold a validated [`FlatBoxId`].
 ///
 /// AD arity note:
-/// - `fad(expr)` reports **expanded** output arity:
-///   `outputs = body_outputs * (1 + num_differentiable_controls)`.
-///   This matches the C++ `getBoxType` behavior (`boxtype.cpp:371`).
+/// - `fad(expr, seed)` reports **expanded** output arity:
+///   `outputs = body_outputs * (1 + seed_outputs)` — one primal plus one
+///   tangent per seed output. Single-output seed (`seed_outputs = 1`) is the
+///   common case and matches the C++ `getBoxType` behavior
+///   (`boxtype.cpp:371`). Multi-output seeds bundle several independent
+///   differentiation variables through a single `fad` node.
 /// - `rad(expr)` stays arity-transparent (unsupported in this phase).
 /// - Reverse-mode propagation remains intentionally unsupported.
 pub fn box_arity_typed(
@@ -1230,7 +1233,7 @@ fn box_arity_flat_inner(
         | FlatNodeKind::ReverseAD { body } => box_arity_typed(arena, body, cache),
         FlatNodeKind::ForwardAD { body, seed } => {
             let seed_arity = box_arity_typed(arena, seed, cache)?;
-            if seed_arity.outputs != 1 {
+            if seed_arity.outputs == 0 {
                 return Err(PropagateError::FadSeedArity {
                     node: box_tree.as_tree_id(),
                     outputs: seed_arity.outputs,
@@ -1239,7 +1242,7 @@ fn box_arity_flat_inner(
             let inner = box_arity_typed(arena, body, cache)?;
             Ok(BoxArity {
                 inputs: inner.inputs.max(seed_arity.inputs),
-                outputs: inner.outputs * 2,
+                outputs: inner.outputs * (1 + seed_arity.outputs),
             })
         }
         FlatNodeKind::Symbolic { body } => {
@@ -2562,23 +2565,26 @@ fn propagate_inner(
         }
         FlatNodeKind::ForwardAD { body, seed } => {
             let seed_arity = box_arity_typed(arena, seed, ctx.cache)?;
+            if seed_arity.outputs == 0 {
+                return Err(PropagateError::FadSeedArity {
+                    node: box_tree.as_tree_id(),
+                    outputs: 0,
+                });
+            }
             let seed_inputs: Vec<SigId> = inputs.iter().copied().take(seed_arity.inputs).collect();
             let seed_sigs = propagate_in_slot_env(arena, seed, &seed_inputs, ctx)?;
-            let seed_sig = match seed_sigs.as_slice() {
-                [s] => *s,
-                got => {
-                    return Err(PropagateError::FadSeedArity {
-                        node: box_tree.as_tree_id(),
-                        outputs: got.len(),
-                    });
-                }
-            };
+            if seed_sigs.len() != seed_arity.outputs {
+                return Err(PropagateError::FadSeedArity {
+                    node: box_tree.as_tree_id(),
+                    outputs: seed_sigs.len(),
+                });
+            }
             let body_sigs = propagate_in_slot_env(arena, body, inputs, ctx)?;
             if ctx.suppress_fad {
-                ctx.pending_fad_seeds.push(seed_sig);
+                ctx.pending_fad_seeds.extend(seed_sigs.iter().copied());
                 Ok(body_sigs)
             } else {
-                forward_ad::generate_fad_signals(arena, &body_sigs, seed_sig)
+                forward_ad::generate_fad_signals_multi(arena, &body_sigs, &seed_sigs)
             }
         }
         FlatNodeKind::ReverseAD { .. } => Err(PropagateError::UnsupportedBox {

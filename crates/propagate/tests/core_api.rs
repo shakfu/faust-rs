@@ -1531,6 +1531,84 @@ fn propagate_forward_ad_differentiates_wrt_explicit_seed_only() {
 }
 
 #[test]
+fn propagate_forward_ad_emits_one_tangent_per_seed_output_when_seed_has_multiple_outputs() {
+    // A multi-output seed bundles M independent differentiation variables
+    // through a single `fad` node. Output layout:
+    //   [primal, tangent_wrt_seed_0, tangent_wrt_seed_1, …, tangent_wrt_seed_{M-1}]
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let f_label = bb.ident("f");
+        let g_label = bb.ident("g");
+        let init = bb.real(1.0);
+        let min = bb.real(0.0);
+        let max = bb.real(10.0);
+        let step = bb.real(0.1);
+        let f = bb.hslider(f_label, init, min, max, step);
+        let g = bb.hslider(g_label, init, min, max, step);
+        let f_seed = bb.hslider(f_label, init, min, max, step);
+        let g_seed = bb.hslider(g_label, init, min, max, step);
+        let body_pair = bb.par(f, g);
+        let mul = bb.mul();
+        let body = bb.seq(body_pair, mul);
+        // Seed bundles two sliders — one fad node, two seed outputs.
+        let seed = bb.par(f_seed, g_seed);
+        bb.forward_ad(body, seed)
+    };
+
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+
+    let arity = box_arity_typed(&arena, flat_process, &mut ArityCache::new())
+        .expect("multi-seed forward-ad arity should infer");
+    // body_outputs = 1, seed_outputs = 2 → 1 * (1 + 2) = 3
+    assert_eq!(arity.outputs, 3);
+
+    let out = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
+        .expect("multi-seed forward-ad should propagate");
+
+    assert_eq!(out.signals.len(), 3);
+
+    // Primal: f * g
+    assert!(matches!(
+        match_sig(&arena, out.signals[0]),
+        SigMatch::BinOp(BinOp::Mul, _, _)
+    ));
+    // d/df (f*g) collapses to g (hslider index 1)
+    // d/dg (f*g) collapses to f (hslider index 0)
+    // Either tangent is a Mul/Add expression prior to folding; verify both
+    // tangents are present and structurally differ.
+    assert_ne!(out.signals[1], out.signals[2]);
+}
+
+#[test]
+fn propagate_forward_ad_rejects_zero_output_seed() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let label = bb.ident("f");
+        let init = bb.real(1.0);
+        let min = bb.real(0.0);
+        let max = bb.real(10.0);
+        let step = bb.real(0.1);
+        let slider = bb.hslider(label, init, min, max, step);
+        let sin = bb.sin();
+        let body = bb.seq(slider, sin);
+        // Empty seed: environment box has zero outputs.
+        let seed = bb.environment();
+        bb.forward_ad(body, seed)
+    };
+
+    let flat_process = try_build_flat_box(&arena, process).unwrap();
+    let err = box_arity_typed(&arena, flat_process, &mut ArityCache::new())
+        .expect_err("zero-output seed must be rejected");
+
+    assert!(matches!(
+        err,
+        PropagateError::FadSeedArity { outputs: 0, .. }
+    ));
+}
+
+#[test]
 fn propagate_reverse_ad_returns_clear_unsupported_error() {
     let mut arena = TreeArena::new();
     let process = {

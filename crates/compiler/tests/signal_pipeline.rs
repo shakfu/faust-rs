@@ -133,6 +133,24 @@ fn corpus_fad_basic_expands_pipeline_outputs() {
 }
 
 #[test]
+fn corpus_fad_multi_seed_emits_one_tangent_per_seed_output() {
+    // fad(f*g : sin, (f, g)): the seed box `(f, g)` has 2 outputs, so the
+    // fad node bundles two independent differentiation variables.
+    // Expected layout: [sin(f*g), cos(f*g)*g, cos(f*g)*f] → 3 outputs.
+    let out = compile_corpus("fad_multi_seed.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 3);
+    assert_eq!(out.signals.len(), 3);
+    assert_eq!(out.ui.controls.len(), 2);
+    assert_eq!(out.ui.controls[0].label, "f");
+    assert_eq!(out.ui.controls[1].label, "g");
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Sin(_)
+    ));
+}
+
+#[test]
 fn corpus_fad_product_emits_one_tangent_per_seed() {
     // fad(f * g, f): differentiates wrt f only → primal + 1 tangent = 2 signals
     let out = compile_corpus("fad_product.dsp");

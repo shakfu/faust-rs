@@ -221,10 +221,15 @@ prototype subset. On the tracked corpus, it includes:
 - representative feedback and delay programs,
 - label interpolation cases used by modulation/UI paths,
 - representative noise/additive-synthesis fixtures,
-- **forward-mode AD**: `fad(expr)` is supported at the source and propagation
-  level; 22 corpus entries cover the full rule spectrum (arithmetic, trig,
-  `pow`, `min`/`max`, delays, recursion, `select2`, multi-control, and the
-  `[autodiff:false]` opt-out).
+- **forward-mode AD**: `fad(expr, seed)` is supported at the source and
+  propagation level; 22 corpus entries cover the full rule spectrum
+  (arithmetic, trig, `pow`, `min`/`max`, delays, recursion, `select2`,
+  multi-control, and the `[autodiff:false]` opt-out). The `seed`
+  sub-expression may itself produce **M ≥ 1 outputs** — a single `fad` node
+  then bundles M independent differentiation variables and emits
+  `body_outputs × (1 + M)` signals laid out as
+  `[primal, ∂/∂seed₀, …, ∂/∂seed_{M−1}]` per primal output. Seeds with 0
+  outputs are rejected with a dedicated arity diagnostic.
 
 Stated differently:
 
