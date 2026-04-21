@@ -346,7 +346,7 @@ impl<'a> ForwardADTransform<'a> {
                         let new_tag_id = self.arena.intern_tag(super::DEBRUIJNREC_TAG);
                         let fad_rec = self.arena.intern(NodeKind::Tag(new_tag_id), &[list_node]);
                         return Dual {
-                            primal: sig,
+                            primal: fad_rec,
                             tangent: fad_rec,
                         };
                     }
