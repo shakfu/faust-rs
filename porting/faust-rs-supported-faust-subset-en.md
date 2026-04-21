@@ -1,6 +1,6 @@
 # Current Faust Source Subset Supported by `faust-rs`
 
-Last updated: 2026-04-15
+Last updated: 2026-04-21
 
 Version: 0.5.0
 
@@ -90,6 +90,12 @@ This snapshot is based on:
   - `crates/propagate/tests/core_api.rs`
   - `crates/compiler/tests/signal_pipeline.rs`
   - `crates/compiler/tests/signal_fir_lane.rs`
+- FAD overhaul on 2026-04-21 (De Bruijn differentiation, new rules, depth fixes) reviewed against:
+  - `crates/propagate/src/forward_ad.rs`
+  - `crates/propagate/tests/core_api.rs`
+  - `crates/eval/src/loop_detector.rs`
+  - `crates/compiler/src/main.rs`
+  - `porting/journal/2026-04-21.md`
 
 The corresponding generated reports are:
 
@@ -222,14 +228,18 @@ prototype subset. On the tracked corpus, it includes:
 - label interpolation cases used by modulation/UI paths,
 - representative noise/additive-synthesis fixtures,
 - **forward-mode AD**: `fad(expr, seed)` is supported at the source and
-  propagation level; 22 corpus entries cover the full rule spectrum
-  (arithmetic, trig, `pow`, `min`/`max`, delays, recursion, `select2`,
-  multi-control, and the `[autodiff:false]` opt-out). The `seed`
-  sub-expression may itself produce **M ≥ 1 outputs** — a single `fad` node
-  then bundles M independent differentiation variables and emits
-  `body_outputs × (1 + M)` signals laid out as
-  `[primal, ∂/∂seed₀, …, ∂/∂seed_{M−1}]` per primal output. Seeds with 0
-  outputs are rejected with a dedicated arity diagnostic.
+  propagation level; 35 corpus entries cover the full rule spectrum
+  (arithmetic, trig, `pow`, `min`/`max`, `atan2`, `fmod`, `remainder`,
+  delays, recursion, `select2`, bargraphs, multi-control, and the
+  `[autodiff:false]` opt-out). The `seed` sub-expression may itself produce
+  **M ≥ 1 outputs** — a single `fad` node then bundles M independent
+  differentiation variables and emits `body_outputs × (1 + M)` signals laid
+  out as `[primal, ∂/∂seed₀, …, ∂/∂seed_{M−1}]` per primal output. Seeds
+  with 0 outputs are rejected with a dedicated arity diagnostic.
+  Differentiation is performed directly on De Bruijn recursive form
+  (`DEBRUIJNREC`/`DEBRUIJNREF`) by interleaving primal and tangent slots in
+  the expanded body; symbolic conversion (`de_bruijn_to_sym`) runs
+  afterwards in `signal_prepare`.
 
 Stated differently:
 
@@ -480,8 +490,11 @@ Relative to the tracked corpus and the current production-oriented route:
   within each execution tier, reducing redundant evaluation in the sample loop,
 - **forward-mode AD** (`fad(expr)`) now propagates correctly through the
   full signal graph including recursive groups, variable delays, transcendentals,
-  arithmetic, casts, and control-flow — with 22 corpus entries validated
-  through the `signal_pipeline` test suite and the fast-lane.
+  arithmetic (`atan2`, `fmod`, `remainder`), casts, bargraphs, and control-flow —
+  with 35 corpus entries validated through the `signal_pipeline` test suite and
+  the fast-lane. The transform operates directly on De Bruijn recursive form,
+  interleaving primal and tangent slots inside `DEBRUIJNREC` bodies before
+  symbolic conversion in `signal_prepare`.
 
 ## 6.2 Where C++ is still broader
 
@@ -1347,13 +1360,17 @@ Differentiation rules implemented:
 | Unit delay | `delay1(x)` → `delay1(x')` |
 | Variable delay | discrete Leibniz rule: `delay(x', d) − d' · delay(x − delay1(x), d)` |
 | Control-flow | `select2`, `prefix` — transparent |
-| Recursion | `sigRec`/`sigRef`/`sigProj` with tangent group `FAD_<var>` and cycle-breaking placeholder |
+| Recursion | `DEBRUIJNREC`/`DEBRUIJNREF` — interleaved primal/tangent slot expansion (see §7.17) |
 | Helper nodes | `attach`, `enable`, `control` — left-operand tangent forwarded |
 | Bargraphs | tangent 0 |
 | Fallback | all other nodes → tangent 0, primal unchanged |
 
-Before differentiation, all outputs pass through `de_bruijn_to_sym` so that
-symbolic recursion variable names are explicit and `FAD_` pairing is unambiguous.
+Differentiation is performed **before** `de_bruijn_to_sym`: FAD operates
+directly on De Bruijn recursive form (`DEBRUIJNREC`/`DEBRUIJNREF`), and
+`de_bruijn_to_sym` runs afterwards inside `signal_prepare`.  Keeping FAD on the
+De Bruijn representation avoids the "phantom recursion slot" bug that arises when
+the same `DEBRUIJNREC` node is given different symbolic names in the primal and
+tangent lanes.
 
 #### Output expansion and the `Rec` suppress/expand protocol
 
@@ -1369,7 +1386,8 @@ two-phase protocol prevents dangling references inside the De Bruijn group:
 1. **Suppress** — the `suppress_fad` flag makes `ForwardAD` transparent during
    branch propagation; `box_arity_wiring` is used for internal port arithmetic.
 2. **Expand** — `generate_fad_signals` is called once on the completed primal
-   `sigRec` output, producing the tangent bundle from the fully-formed group.
+   `DEBRUIJNREC` output, producing the interleaved dual group from the
+   fully-formed body.
 
 #### Explicit-seed semantics and current limit
 
@@ -1409,6 +1427,127 @@ fast-lane test (C++ and interpreter bytecode output checked).
 
 Reverse-mode AD is not implemented. `rad(expr)` returns
 `PropagateError::UnsupportedBox`.
+
+### 7.17 April 21, 2026: recursion depth limits, 64 MiB compiler stack, FAD De Bruijn overhaul
+
+#### Recursion depth limits raised
+
+Two separate depth caps were raised to prevent `RecursionDepthExceeded` on
+complex programs such as `auto_spat.dsp`:
+
+- **General `max_depth`** in `LoopDetector::new()` / `with_cancel()`:
+  raised from `1024` to `4096`.  This guards symbol-lookup loops.
+- **`STRUCTURAL_MAX`** inside `LoopDetector::enter_structural()`:
+  raised from `256` to `4096`.  This guards `a2sb`/`a2sb_value` structural
+  lowering paths that create fresh `boxSlot` nodes on every iteration and
+  therefore cannot use identity-based cycle detection.
+
+#### Compiler thread spawned with 64 MiB stack
+
+Raising `STRUCTURAL_MAX` from 256 to 4096 exposes a secondary problem: each
+structural lowering hop also places several Rust frames on the OS stack
+(`eval_value`, `apply_value_list_value`, etc.), consuming roughly an order of
+magnitude more bytes per iteration than a symbol-lookup iteration.  The default
+OS thread stack (usually 8 MiB on macOS/Linux) overflows before the 4096 cap is
+reached on programs with long combinator chains.
+
+Fix in `crates/compiler/src/main.rs`: the `main()` function now spawns the
+actual compiler work (`run_main`) on a dedicated thread with an explicit 64 MiB
+stack:
+
+```rust
+fn main() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(run_main)
+        .expect("failed to spawn compiler thread")
+        .join()
+        .expect("compiler thread panicked");
+}
+```
+
+This is a standard pattern for CLI tools with deep recursive computation; it
+does not affect library users (they can set stack size on their own threads).
+
+#### FAD: differentiation on De Bruijn form — `DEBRUIJNREC`/`DEBRUIJNREF`
+
+The FAD implementation was redesigned to operate directly on De Bruijn
+recursive form rather than converting to symbolic form first.
+
+**Why De Bruijn form?**
+
+`propagate_in_slot_env` emits signal trees that use raw De Bruijn nodes
+(`DEBRUIJNREC`/`DEBRUIJNREF`) for recursive groups.  `de_bruijn_to_sym`
+converts these to symbolic form (`SYMREC`/`SYMREF`) as part of
+`signal_prepare`.  If FAD were applied *after* `de_bruijn_to_sym`, the same
+physical `DEBRUIJNREC` node could acquire two different symbolic names in the
+primal and tangent lanes — a "phantom recursion slot" bug.  Performing FAD on
+the raw De Bruijn form avoids the ambiguity; each recursive group is a single
+physical node whose identity is unambiguous.
+
+**Interleaving scheme for `DEBRUIJNREC`**
+
+When the transformer encounters `DEBRUIJNREC([e₀, e₁, …])`, it:
+
+1. Increments an internal `debruijn_depth` counter.
+2. Transforms each body expression `eᵢ` into a dual `(primalᵢ, tangentᵢ)`.
+3. Builds an expanded body `[primal₀, tangent₀, primal₁, tangent₁, …]`.
+4. Wraps the expanded body in a new `DEBRUIJNREC` node.
+5. Decrements `debruijn_depth`.
+
+The result has twice as many slots: primal at even indices `2i`, tangent at
+odd indices `2i+1`.
+
+**`DEBRUIJNREF` classification — `GroupKind` enum**
+
+When a `SigProj(index, group)` node is encountered, the group expression may be:
+
+- **`BoundRec`** — the group is a `DEBRUIJNREC` (a newly transformed recursive
+  group), or a `DEBRUIJNREF` whose De Bruijn level is ≤ `debruijn_depth`
+  (a reference to an FAD-scoped recursive group).  In this case the index is
+  doubled: primal at `proj(2i, dual_group.primal)`, tangent at
+  `proj(2i+1, dual_group.tangent)`.
+- **`UnboundRef`** — a `DEBRUIJNREF` with level > `debruijn_depth` (a reference
+  to a recursive group that is outside the FAD scope).  The primal index is kept
+  unchanged and the tangent is zero.
+- **`Other`** — any other node.  Both primal and tangent use the original index.
+
+This three-way classification is implemented via a local `enum GroupKind` inside
+the `Proj` arm of `transform_uncached`, keeping the match arm self-contained.
+
+#### Removal of dead SYMREC/SYMREF code
+
+The previous FAD implementation contained defensive guard blocks for
+`SYMREC`/`SYMREF` symbolic nodes and a `fad_var()` helper function.  These
+paths were never exercised in practice (FAD always sees De Bruijn form before
+symbolic conversion) and were removed:
+
+- `match_sym_rec`, `match_sym_ref`, `sym_rec`, `sym_ref` imports removed.
+- The `SYMREC`/`SYMREF` guard blocks removed from `transform_uncached`.
+- The `fad_var()` helper removed.
+
+Two new tests in `crates/propagate/tests/core_api.rs` cover the De Bruijn path:
+
+- `propagate_forward_ad_on_recursive_circuit_expands_outputs`: asserts that
+  a `(k * _) ~ _` circuit differentiated with respect to `k` produces 2 output
+  signals (one primal, one tangent).
+- `propagate_forward_ad_on_recursive_circuit_has_interleaved_debruijn_structure`:
+  asserts that the tangent output is `proj(1, fad_rec)` where `fad_rec` is a
+  `DEBRUIJNREC` with an expanded body of 2 slots.
+
+#### New FAD rules: `atan2`, `fmod`, `remainder`, `HBargraph`
+
+Four previously uncovered signal families now have explicit differentiation rules:
+
+| Rule | Formula |
+|------|---------|
+| `atan2(y, x)` | `d/dp = (x·y' − y·x') / (x² + y²)` |
+| `fmod(x, y)` | `d/dp = x' − y'·⌊x/y⌋` |
+| `remainder(x, y)` | `d/dp = x' − y'·round(x/y)` |
+| `HBargraph(label, inner)` | merged into the `VBargraph` arm — tangent 0, primal unchanged |
+
+These rules complete the coverage of all binary math primitives for which
+Faust C++ defines a signal node.
 
 ## 8. Practical Reading Rule
 
