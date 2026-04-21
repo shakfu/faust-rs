@@ -129,7 +129,7 @@ pub struct LoopDetector {
 }
 
 impl LoopDetector {
-    /// Creates a detector with the default maximum recursion depth (1024).
+    /// Creates a detector with the default maximum recursion depth (4096).
     ///
     /// This matches the practical depth limit of the C++ evaluator, which uses a similar guard
     /// to prevent stack overflows on pathological inputs.
@@ -137,7 +137,7 @@ impl LoopDetector {
     pub fn new() -> Self {
         Self {
             call_stack: Vec::new(),
-            max_depth: 1024,
+            max_depth: 4096,
             cancel: Arc::new(AtomicBool::new(false)),
             automaton_cache: crate::pattern_matcher::AutomatonCache::new(),
             pm_store: Vec::new(),
@@ -162,7 +162,7 @@ impl LoopDetector {
     pub fn with_cancel(cancel: Arc<AtomicBool>) -> Self {
         Self {
             call_stack: Vec::new(),
-            max_depth: 1024,
+            max_depth: 4096,
             cancel,
             automaton_cache: crate::pattern_matcher::AutomatonCache::new(),
             pm_store: Vec::new(),
@@ -275,13 +275,14 @@ impl LoopDetector {
     /// diverging user program fails with `RecursionDepthExceeded` instead of
     /// aborting the process on OS stack overflow.
     pub(crate) fn enter_structural(&mut self) -> Result<(), EvalError> {
-        // Capped tighter than the general `max_depth` (1024) because every
+        // Capped tighter than the general `max_depth` (4096) because every
         // structural hop also drags `eval_value` / `apply_value_list_value`
         // frames onto the real OS stack, consuming an order of magnitude more
-        // bytes per iteration than a symbol-lookup loop. 256 leaves ample room
-        // for legitimate deeply-nested lambdas while firing well before the
-        // default 8 MiB thread stack runs out.
-        const STRUCTURAL_MAX: usize = 256;
+        // bytes per iteration than a symbol-lookup loop. Programs with long
+        // sequential combinator chains (e.g. auto_spat.dsp) can exceed 256
+        // legitimately, so we cap at the same 4096 used by the symbol-lookup
+        // path and rely on the thread stack being large enough (see main.rs).
+        const STRUCTURAL_MAX: usize = 4096;
         let limit = self.max_depth.min(STRUCTURAL_MAX);
         if self.structural_depth >= limit {
             return Err(EvalError::RecursionDepthExceeded { max_depth: limit });

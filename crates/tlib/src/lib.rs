@@ -43,9 +43,9 @@ pub use recursion::{
     DEBRUIJNREC_TAG, DEBRUIJNREF_TAG, RecursionError, SYMREC_TAG, SYMREF_TAG,
     SymbolicRecursionValidationError, de_bruijn_aperture, de_bruijn_aperture_with_memo,
     de_bruijn_rec, de_bruijn_ref, de_bruijn_to_sym, de_bruijn_to_sym_many, is_de_bruijn_closed,
-    lift_de_bruijn,
-    lift_de_bruijn_n, match_de_bruijn_rec, match_de_bruijn_ref, match_sym_rec, match_sym_ref,
-    sym_rec, sym_ref, validate_closed_de_bruijn_tree, validate_symbolic_recursion_tree,
+    lift_de_bruijn, lift_de_bruijn_n, match_de_bruijn_rec, match_de_bruijn_ref, match_sym_rec,
+    match_sym_ref, sym_rec, sym_ref, validate_closed_de_bruijn_tree,
+    validate_symbolic_recursion_tree,
 };
 
 /// Stable crate identifier used by workspace tooling and diagnostics.

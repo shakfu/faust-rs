@@ -197,7 +197,7 @@ use ahash::AHashMap;
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use tlib::{
     NodeKind, TreeArena, TreeId, list_to_vec, match_sym_rec, match_sym_ref, sym_rec, sym_ref,
-    vec_to_list,
+    tree_to_int, vec_to_list,
 };
 
 use crate::PropagateError;
@@ -221,6 +221,7 @@ struct ForwardADTransform<'a> {
     arena: &'a mut TreeArena,
     diff_seed: SigId,
     cache: AHashMap<SigId, Dual>,
+    debruijn_depth: i64,
 }
 
 impl<'a> ForwardADTransform<'a> {
@@ -230,6 +231,7 @@ impl<'a> ForwardADTransform<'a> {
             arena,
             diff_seed,
             cache: AHashMap::new(),
+            debruijn_depth: 0,
         }
     }
 
@@ -274,6 +276,49 @@ impl<'a> ForwardADTransform<'a> {
                 tangent: SigBuilder::new(self.arena).real(1.0),
             };
         }
+
+        // Rule: d/dp DEBRUIJNREF = DEBRUIJNREF (index shift happens at projection site)
+        // Rule: d/dp DEBRUIJNREC(body) — interleave primals and tangents so that
+        //       proj(i, rec) picks primal from slot 2i and tangent from slot 2i+1.
+        if let Some(node) = self.arena.node(sig).cloned() {
+            if let NodeKind::Tag(tag_id) = node.kind {
+                if let Some(tag) = self.arena.tag_name(tag_id) {
+                    if tag == super::DEBRUIJNREF_TAG {
+                        return Dual {
+                            primal: sig,
+                            tangent: sig,
+                        };
+                    }
+                    if tag == super::DEBRUIJNREC_TAG {
+                        let body = node.children.as_slice()[0];
+                        // Seed cache before recursing to handle back-edges.
+                        self.cache.insert(
+                            sig,
+                            Dual {
+                                primal: sig,
+                                tangent: sig,
+                            },
+                        );
+                        self.debruijn_depth += 1;
+                        let duals = self.transform_list(body);
+                        self.debruijn_depth -= 1;
+                        let mut expanded_body = Vec::with_capacity(duals.len() * 2);
+                        for dual in duals {
+                            expanded_body.push(dual.primal);
+                            expanded_body.push(dual.tangent);
+                        }
+                        let list_node = vec_to_list(self.arena, &expanded_body);
+                        let new_tag_id = self.arena.intern_tag(super::DEBRUIJNREC_TAG);
+                        let fad_rec = self.arena.intern(NodeKind::Tag(new_tag_id), &[list_node]);
+                        return Dual {
+                            primal: sig,
+                            tangent: fad_rec,
+                        };
+                    }
+                }
+            }
+        }
+
         // Rule: d/dp sigRef(x) = sigRef(FAD_x)
         if let Some(var) = match_sym_ref(self.arena, sig) {
             let fad_var = self.fad_var(var);
@@ -558,15 +603,75 @@ impl<'a> ForwardADTransform<'a> {
                     tangent: b.int(0),
                 }
             }
-            // Rule: d/dp proj(i, g) = proj(i, d(g)/dp)  — projection is linear
+            // Rule: d/dp proj(i, g) = proj(i, d(g)/dp)  — projection is linear.
+            // De Bruijn recursion bodies are interleaved [p0, t0, p1, t1, ...], so
+            // index i maps to primal slot 2i and tangent slot 2i+1.  A DEBRUIJNREF
+            // that escapes the current FAD depth refers to an outer loop not being
+            // differentiated: its tangent is zero.
             SigMatch::Proj(index, group) => {
                 let dual_group = self.transform(group);
+                // Classifies the group node to decide how to compute the projected index.
+                //
+                // `BoundRec`  — group is a DEBRUIJNREC whose body was interleaved by
+                //               the transform above, or a DEBRUIJNREF whose de Bruijn
+                //               level is ≤ debruijn_depth (i.e. bound inside a FAD
+                //               scope we opened).  Primal lives at slot 2i, tangent at
+                //               slot 2i+1.
+                //
+                // `UnboundRef` — group is a DEBRUIJNREF with level > debruijn_depth:
+                //               it refers to a recursive loop that is outside the FAD
+                //               scope (e.g. the 64-tap outer loop in an FxLMS bank).
+                //               That loop was never interleaved, so the index is
+                //               unchanged and the tangent is zero.
+                //
+                // `Other`     — group is a SYMREC or any non-tag node (normal
+                //               symbolic recursion, already fully separated into
+                //               primal and tangent groups by the SYMREC arm above).
+                //               Standard index, standard tangent projection.
+                enum GroupKind {
+                    BoundRec,
+                    UnboundRef,
+                    Other,
+                }
+                let kind = if let Some(node) = self.arena.node(group) {
+                    if let NodeKind::Tag(tag_id) = node.kind {
+                        let tag = self.arena.tag_name(tag_id).unwrap_or("");
+                        if tag == super::DEBRUIJNREC_TAG {
+                            GroupKind::BoundRec
+                        } else if tag == super::DEBRUIJNREF_TAG {
+                            let level =
+                                tree_to_int(self.arena, node.children.as_slice()[0]).unwrap_or(1);
+                            if level <= self.debruijn_depth {
+                                GroupKind::BoundRec
+                            } else {
+                                GroupKind::UnboundRef
+                            }
+                        } else {
+                            GroupKind::Other
+                        }
+                    } else {
+                        GroupKind::Other
+                    }
+                } else {
+                    GroupKind::Other
+                };
                 let mut b = SigBuilder::new(self.arena);
-                Dual {
-                    primal: b.proj(index, dual_group.primal),
-                    tangent: b.proj(index, dual_group.tangent),
+                match kind {
+                    GroupKind::BoundRec => Dual {
+                        primal: b.proj(index * 2, dual_group.primal),
+                        tangent: b.proj(index * 2 + 1, dual_group.tangent),
+                    },
+                    GroupKind::UnboundRef => Dual {
+                        primal: b.proj(index, dual_group.primal),
+                        tangent: b.real(0.0),
+                    },
+                    GroupKind::Other => Dual {
+                        primal: b.proj(index, dual_group.primal),
+                        tangent: b.proj(index, dual_group.tangent),
+                    },
                 }
             }
+
             // Output wrappers are transparent: differentiate the wrapped signal.
             SigMatch::Output(_, inner) => self.transform(inner),
             // Helper nodes: forward left-operand tangent, drop right-operand tangent.

@@ -1138,6 +1138,19 @@ fn render_fir_verify_report(store: &fir::FirStore, module: fir::FirId, strict: b
 }
 
 fn main() {
+    // The evaluator's structural-lowering pass (`a2sb`) can recurse deeply for
+    // large programs (e.g. auto-panning with many channels). 64 MiB is enough
+    // headroom for the 1024-frame structural depth limit while leaving the
+    // default 8 MiB thread stack free for the OS and Rust runtime.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(run_main)
+        .expect("failed to spawn compiler thread")
+        .join()
+        .expect("compiler thread panicked");
+}
+
+fn run_main() {
     let args = normalize_legacy_args(std::env::args());
     let cli = CliArgs::parse_from(args);
     if cli.version {
