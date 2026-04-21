@@ -244,6 +244,36 @@ pub fn de_bruijn_to_sym(arena: &mut TreeArena, root: TreeId) -> Result<TreeId, R
     converter.convert(root)
 }
 
+/// Converts several closed de Bruijn recursion trees through one shared
+/// converter, guaranteeing that shared sub-terms across the roots map to the
+/// same symbolic recursion node (and therefore the same `TreeId`).
+///
+/// Calling [`de_bruijn_to_sym`] once per root produces independent fresh
+/// variable sequences: the first call consumes `W0`, the second observes `W0`
+/// as already interned and picks `W1`, and so on. When two roots share a
+/// de Bruijn recursion sub-term, that drift forks them into two distinct
+/// symbolic recursions. Downstream consumers that compare by `TreeId`
+/// (e.g. seed matching in forward-mode AD) then silently miss the shared
+/// sub-term. This helper routes every root through one [`Converter`] so the
+/// memo and `next_var_index` are shared.
+pub fn de_bruijn_to_sym_many(
+    arena: &mut TreeArena,
+    roots: &[TreeId],
+) -> Result<Vec<TreeId>, RecursionError> {
+    for &root in roots {
+        let aperture = de_bruijn_aperture(arena, root);
+        if aperture > 0 {
+            return Err(RecursionError::OpenDeBruijnTree { aperture });
+        }
+    }
+    let mut converter = Converter::new(arena);
+    let mut out = Vec::with_capacity(roots.len());
+    for &root in roots {
+        out.push(converter.convert(root)?);
+    }
+    Ok(out)
+}
+
 /// Validates that the reachable de Bruijn recursion tree rooted at `root` is
 /// closed and structurally acceptable for conversion.
 ///

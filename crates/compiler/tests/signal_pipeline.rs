@@ -151,6 +151,32 @@ fn corpus_fad_multi_seed_emits_one_tangent_per_seed_output() {
 }
 
 #[test]
+fn corpus_fad_lambda_recursive_seed_shares_recursion_across_primal_and_tangent() {
+    // Regression: seed and body reach the same recursive phi_gen sub-term
+    // through a lambda parameter. A buggy `de_bruijn_to_sym` pair allocated
+    // two fresh recursion names, forking the shared sub-term and emitting a
+    // phantom second recursion in the generated code. This test only asserts
+    // that the pipeline accepts the DSP end-to-end with the expected lane
+    // count; the structural sharing is exercised by the downstream codegen
+    // regression (one `fRec` shared between primal and tangent).
+    //
+    // Runs on a dedicated thread with a larger stack because the DSP drags
+    // `stdfaust.lib` and produces a deep evaluation tree that overflows the
+    // default debug-build thread stack.
+    let out = std::thread::Builder::new()
+        .name("fad-lambda-recursive-seed".to_owned())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| compile_corpus("fad_lambda_recursive_seed.dsp"))
+        .expect("spawn worker")
+        .join()
+        .expect("worker thread should finish");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert!(out.ui.controls.is_empty());
+}
+
+#[test]
 fn corpus_fad_product_emits_one_tangent_per_seed() {
     // fad(f * g, f): differentiates wrt f only → primal + 1 tangent = 2 signals
     let out = compile_corpus("fad_product.dsp");

@@ -183,7 +183,7 @@
 use ahash::AHashMap;
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use tlib::{
-    NodeKind, TreeArena, TreeId, de_bruijn_to_sym, list_to_vec, match_sym_rec, match_sym_ref,
+    NodeKind, TreeArena, TreeId, de_bruijn_to_sym_many, list_to_vec, match_sym_rec, match_sym_ref,
     sym_rec, sym_ref, vec_to_list,
 };
 
@@ -732,16 +732,21 @@ pub(super) fn generate_fad_signals_multi(
     if seeds.is_empty() {
         return Ok(outputs.to_vec());
     }
-    let converted_outputs: Vec<SigId> = outputs
-        .iter()
-        .copied()
-        .map(|sig| de_bruijn_to_sym(arena, sig).unwrap_or(sig))
-        .collect();
+    // One shared conversion pass so that de Bruijn sub-terms reachable from
+    // both an output and a seed map to the *same* symbolic recursion node.
+    // Using one `de_bruijn_to_sym` call per root (as before) allocates fresh
+    // `W0`/`W1`/... names independently and silently forks shared
+    // recursions into distinct SYMRECs; the FAD transform then fails to
+    // recognise the seed inside the output signal graph.
+    let combined: Vec<SigId> = outputs.iter().copied().chain(seeds.iter().copied()).collect();
+    let converted_all = de_bruijn_to_sym_many(arena, &combined).unwrap_or_else(|_| combined.clone());
+    let (converted_outputs_slice, converted_seeds_slice) = converted_all.split_at(outputs.len());
+    let converted_outputs: Vec<SigId> = converted_outputs_slice.to_vec();
+    let converted_seeds: Vec<SigId> = converted_seeds_slice.to_vec();
     // Compute one tangent row per seed.
     // tangent_rows[j][i] = tangent of output i with respect to seed j.
     let mut tangent_rows: Vec<Vec<SigId>> = Vec::with_capacity(seeds.len());
-    for &seed in seeds {
-        let converted_seed = de_bruijn_to_sym(arena, seed).unwrap_or(seed);
+    for &converted_seed in &converted_seeds {
         let mut fad = ForwardADTransform::new(arena, converted_seed);
         let row: Vec<SigId> = converted_outputs
             .iter()
