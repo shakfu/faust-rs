@@ -6,17 +6,25 @@
 //! - `compiler/signals/signals.cpp`
 //!
 //! # Scope
-//! - Collect differentiable UI controls reachable from one propagated signal.
-//! - Expand each primal output into `primal + one tangent per enabled control`.
+//! - Differentiate a list of primal outputs with respect to a list of seed
+//!   signals supplied by the caller.
+//! - Expand each primal output into `primal + one tangent per seed`.
 //! - Preserve shared signal DAG structure through memoized transformation.
 //! - Keep reverse-mode (`rad`) explicitly out of scope for this phase.
 //!
 //! # Dual-number algebra
 //! Forward-mode AD (FAD) propagates derivatives alongside values by carrying a
 //! *tangent* component next to each signal.  A **dual signal** is written
-//! `u + ε·u'` where `ε² = 0`.  The differentiation variable is one selected
-//! UI control `p`; its seed is `dp/dp = 1`, and every other independent
-//! variable has seed `0`.
+//! `u + ε·u'` where `ε² = 0`.  A **seed** is any signal `s` chosen by the
+//! caller; `ds/ds = 1` and every other independent input has seed `0`.
+//!
+//! A seed is not restricted to a UI control: it can be any `SigId` in the
+//! signal DAG (a slider, a lambda-bound recursive input, an expression).
+//! Seed recognition is pure `SigId` equality — the arena hash-conses every
+//! node, so every external reference to the seed inside the primal body
+//! shares the same `TreeId` as the seed argument and the equality check
+//! fires at each occurrence.  The transform short-circuits at that leaf and
+//! never descends into the seed's own recursive body.
 //!
 //! One [`ForwardADTransform`] instance differentiates the entire signal DAG
 //! with respect to a single seed; [`generate_fad_signals_multi`] drives one
@@ -34,16 +42,21 @@
 //!
 //! Audio inputs are treated as independent of all UI controls.
 //!
-//! ## UI controls
+//! ## Seeds and UI controls
+//!
+//! Seed equality is checked *before* node-kind dispatch, so any node whose
+//! `SigId` equals the seed returns tangent `1.0` regardless of its kind.
 //!
 //! | Node | Tangent |
 //! |------|---------|
-//! | `hslider(p)` / `vslider(p)` / `numentry(p)` — selected control | `1.0` |
-//! | any other continuous control | `0.0` |
+//! | any signal `s` such that `s == seed` | `1.0` |
+//! | `hslider` / `vslider` / `numentry` (not the seed) | `0.0` |
 //! | `button`, `checkbox` | `0.0` (discrete, not differentiable) |
 //!
-//! Controls annotated with `[autodiff:false]` metadata are excluded from the
-//! reachable set and therefore never become the selected control.
+//! Under the explicit-seed model, `[autodiff:false]` metadata is ignored:
+//! whether a signal is differentiated is decided by the caller's seed list,
+//! not by per-control annotations. The metadata still parses without error
+//! so legacy sources remain accepted.
 //!
 //! ## Arithmetic binary operators (`BinOp`)
 //!
@@ -221,17 +234,17 @@
 //!
 //! # Integration contract
 //! This module is intentionally internal to `propagate`:
-//! - `box_arity_typed(...)` reports expanded output arity for `fad(expr)`,
+//! - `box_arity_typed(...)` reports expanded output arity for `fad(expr, seeds…)`,
 //! - output expansion happens only after the wrapped box has already lowered to
 //!   signal IR,
-//! - controls are sourced from the already-built [`ui::UiProgram`] registry so
-//!   metadata filtering such as `[autodiff:false]` is stable and centralized.
+//! - seeds are user-supplied through `fad(expr, seed)`; the seed
+//!   sub-expression is lowered to signals like any other box and its outputs
+//!   become the seed list. `[autodiff:false]` metadata is not consulted.
 //!
 //! # Ordering invariant
 //! Tangent outputs are emitted deterministically:
 //! 1. preserve primal output order,
-//! 2. for each primal, collect reachable controls once,
-//! 3. sort controls by canonical UI label, then by `ControlId`.
+//! 2. for each primal, emit one tangent per seed in the seed list's order.
 
 use ahash::AHashMap;
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};

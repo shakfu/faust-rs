@@ -10,7 +10,7 @@
 //! - Primitive lowering from `boxes::BoxMatch` to `signals::SigBuilder`.
 //! - Composition algebra: `seq`, `par`, `split`, `merge`.
 //! - Explicit typed errors for unsupported nodes and arity mismatches.
-//! - Recursive composition lowering with De Bruijn-style placeholders (`sigRec/sigProj` shape).
+//! - Recursive composition lowering with De Bruijn-style placeholders (`DEBRUIJNREC`/`DEBRUIJNREF` tag nodes, converted to `sigRec`/`sigProj` by `signal_prepare`).
 //! - Typed `FlatBoxId` boundary that validates the post-`eval/a2sb` flat box subset.
 //!
 //! # Public API mapping status
@@ -32,42 +32,50 @@
 //!
 //! # Forward-mode automatic differentiation (FAD)
 //!
-//! When `box_tree` contains a `fad(expr)` node, propagation expands the
+//! When `box_tree` contains a `fad(expr, seed)` node, propagation expands the
 //! primal output bundle into:
 //! ```text
-//! [primal₀, ∂primal₀/∂p₀, ∂primal₀/∂p₁, …,
-//!  primal₁, ∂primal₁/∂p₀, ∂primal₁/∂p₁, …]
+//! [primal₀, ∂primal₀/∂s₀, ∂primal₀/∂s₁, …,
+//!  primal₁, ∂primal₁/∂s₀, ∂primal₁/∂s₁, …]
 //! ```
-//! where `p₀, p₁, …` are all differentiable UI controls reachable from that
-//! primal output, in deterministic label order.
+//! where `s₀, s₁, …` are the outputs of the `seed` box (one independent
+//! differentiation variable per lane), in the order the seed produces them.
+//! A single-output seed degenerates to the canonical `[primal, tangent]`
+//! pair; multi-output seeds bundle several independent variables through a
+//! single `fad` node.
 //!
 //! ## Output arity
 //!
 //! [`box_arity_typed`] computes expanded arity:
 //! ```text
-//! outputs = body_outputs × (1 + count_differentiable_controls(body))
+//! outputs = body_outputs × (1 + seed_outputs)
 //! ```
-//! This matches the C++ `getBoxType` / `BoxADControlsCounter` logic
-//! (`compiler/boxes/boxtype.cpp:371`).
+//! This matches the C++ `getBoxType` logic (`compiler/boxes/boxtype.cpp:371`)
+//! for the single-seed case.
 //!
-//! Controls annotated `[autodiff:false]` are excluded from the count and from
-//! tangent generation.  Because the metadata is only visible after
-//! [`build_ui_program`] runs, the box-level count is an *upper bound*; the
-//! actual signal list may be shorter when some controls opt out.
+//! Under the explicit-seed model, `[autodiff:false]` metadata is parsed but
+//! does not gate differentiation; the seed list alone decides which signals
+//! are differentiated.
 //!
 //! ## Differentiation algorithm
 //!
 //! Implemented in [`forward_ad`].  Each primal output is differentiated
-//! independently for every reachable control; the full rule table
-//! (constants, BinOp, transcendentals, delays, recursion, …) lives in the
-//! `forward_ad` module doc.
+//! independently for every seed; the full rule table (constants, BinOp,
+//! transcendentals, delays, recursion, …) lives in the `forward_ad` module
+//! doc.
 //!
 //! Key algorithmic points:
-//! - De Bruijn indices are converted to symbolic form via `de_bruijn_to_sym`
-//!   before differentiation so that recursive variable names are explicit.
-//! - One [`ForwardADTransform`](forward_ad) instance per control; a memoization
-//!   cache prevents exponential blow-up on reused DAG subgraphs.
-//! - Tangent recursion variables are named `FAD_<original_var>`.
+//! - FAD runs directly on de Bruijn-form recursion nodes (`DEBRUIJNREC` /
+//!   `DEBRUIJNREF`); the `de_bruijn_to_sym` conversion is deferred to
+//!   `signal_prepare`, where it runs once over all process outputs so
+//!   shared sub-terms keep a single symbolic name across primal and tangent
+//!   lanes.
+//! - One [`ForwardADTransform`](forward_ad) instance per seed; a memoization
+//!   cache prevents exponential blow-up on reused DAG subgraphs and breaks
+//!   recursion cycles.
+//! - Seed recognition is `SigId` equality: the transform short-circuits at
+//!   any node whose `SigId` matches the seed and never descends into the
+//!   seed's own recursive body.
 //!
 //! ## Interaction with the `Rec` combinator
 //!

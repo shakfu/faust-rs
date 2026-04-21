@@ -228,10 +228,13 @@ prototype subset. On the tracked corpus, it includes:
 - label interpolation cases used by modulation/UI paths,
 - representative noise/additive-synthesis fixtures,
 - **forward-mode AD**: `fad(expr, seed)` is supported at the source and
-  propagation level; 35 corpus entries cover the full rule spectrum
+  propagation level; 34 `fad_*` corpus entries cover the full rule spectrum
   (arithmetic, trig, `pow`, `min`/`max`, `atan2`, `fmod`, `remainder`,
-  delays, recursion, `select2`, bargraphs, multi-control, and the
-  `[autodiff:false]` opt-out). The `seed` sub-expression may itself produce
+  delays, recursion, `select2`, bargraphs, multi-seed, lambda-bound
+  recursive seeds, and nested `fad` on recursive seeds). `[autodiff:false]`
+  metadata is parsed but no longer gates differentiation; seed selection is
+  entirely driven by the explicit `seed` argument. The `seed` sub-expression
+  may itself produce
   **M ≥ 1 outputs** — a single `fad` node then bundles M independent
   differentiation variables and emits `body_outputs × (1 + M)` signals laid
   out as `[primal, ∂/∂seed₀, …, ∂/∂seed_{M−1}]` per primal output. Seeds
@@ -1566,12 +1569,12 @@ Today, the simplest accurate rule is:
   has no statically determinable finite upper bound.
 - `fad(exp, x)` programs propagate correctly and produce the expected
   primal/tangent bundle when the seed is an ordinary explicit signal or a
-  structured recursive use already covered by the corpus. End-to-end backend
+  structured recursive use already covered by the corpus, including
+  lambda-bound recursive seeds (`kin(phi) = … fad(eq, phi) …`) and nested
+  `fad(fad(eq, phi), phi)` on recursive accumulators. End-to-end backend
   compilation succeeds whenever the underlying tangent signal content stays
   within the supported fast-lane subset (same as for primal-only programs).
-- The main currently unsupported `fad(exp, x)` family is "differentiate with
-  respect to a recursive state alias currently being formed". `rad(expr)` is
-  not supported.
+- `rad(expr)` is not supported.
 
 The most common mistake is to assume:
 
