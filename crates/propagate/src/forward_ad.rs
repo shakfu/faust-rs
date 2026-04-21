@@ -133,34 +133,40 @@
 //! | `select2(cond, x, y)` | `select2(cond, x', y')` — cond is not differentiated |
 //! | `prefix(init, x)` | `prefix(init', x')` |
 //!
-//! ## Projection and recursive groups (`sigRec` / `sigProj`)
+//! ## Projection and recursive groups (de Bruijn form)
 //!
-//! Recursive signal groups are differentiated in parallel: for each recursive
-//! variable `x`, a tangent variable `FAD_x` is introduced.
+//! `propagate` always emits recursive groups in de Bruijn form
+//! (`DEBRUIJNREC` / `DEBRUIJNREF` tag nodes). The transform never sees
+//! symbolic form (`SYMREC` / `SYMREF`); `de_bruijn_to_sym` runs once in
+//! `signal_prepare` *after* FAD, over all process outputs together.
 //!
+//! ### `DEBRUIJNREF`
 //! ```text
-//! d/dp sigRec(x, body) = sigRec(FAD_x, d(body)/dp)
-//! d/dp sigRef(x)       = sigRef(FAD_x)
-//! d/dp sigProj(i, g)   = sigProj(i, d(g)/dp)
+//! d/dp DEBRUIJNREF = DEBRUIJNREF
 //! ```
+//! The index shift is resolved at the projection site (see `Proj` arm).
 //!
-//! No pre-conversion is applied before differentiation. `propagate` emits
-//! signals in de Bruijn form, and the transform receives them as-is. Seed
-//! recognition (`sig == self.diff_seed`) works by `SigId` equality, which is
-//! stable because the arena hash-conses every node: the seed sub-term and
-//! every external reference to it share the same `TreeId`. The transform
-//! short-circuits at the seed leaf and never descends into the seed's own
-//! recursive body. The single `de_bruijn_to_sym` conversion is deferred to
-//! `signal_prepare`, where it runs once over all process outputs through one
-//! `Converter` instance, giving every occurrence of the same `DEBRUIJNREC`
-//! the same symbolic name across primal and tangent lanes.
+//! ### `DEBRUIJNREC(body)`
+//! The body list is differentiated and the primal/tangent pairs are
+//! **interleaved**: `[p0, t0, p1, t1, …]`.  This lets a single new
+//! `DEBRUIJNREC` node carry both the primal and tangent recurrence; the
+//! `Proj` arm then doubles the index to read the right slot:
+//! ```text
+//! d/dp DEBRUIJNREC([e0, e1, …]) =
+//!     DEBRUIJNREC([primal(e0), tangent(e0), primal(e1), tangent(e1), …])
+//! d/dp proj(i, DEBRUIJNREC) = proj(2i+1, fad_rec)   (tangent slot)
+//!      primal proj(i, _)    = proj(2i,   fad_rec)    (primal slot)
+//! ```
+//! A `DEBRUIJNREF` inside the body whose de Bruijn level is ≤ the current
+//! FAD nesting depth is treated as a bound reference and its index is
+//! doubled accordingly.  A reference whose level exceeds the depth refers
+//! to an outer recursive loop that is not being differentiated; its tangent
+//! is zero and its primal index is unchanged.
 //!
-//! The `SYMREC`/`SYMREF` arms in `transform_uncached` handle the case where
-//! a body is already in fully-symbolic form (e.g. produced by a caller that
-//! ran its own `de_bruijn_to_sym` pass). They are unreachable in the normal
-//! pipeline. They do **not** correctly handle mixed-form trees where a
-//! DeBruijn seed appears inside a symbolically-converted body — in that
-//! scenario the seed check would never fire and the tangent would be zero.
+//! The `de_bruijn_to_sym` conversion is deferred to `signal_prepare`, where
+//! it runs once over all process outputs through one `Converter` instance.
+//! This guarantees that the same `DEBRUIJNREC` physical node maps to the
+//! same `SYMREC` name in every primal and tangent lane.
 //!
 //! ## Pass-through helper nodes (`attach`, `enable`, `control`)
 //!
@@ -195,10 +201,7 @@
 
 use ahash::AHashMap;
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
-use tlib::{
-    NodeKind, TreeArena, TreeId, list_to_vec, match_sym_rec, match_sym_ref, sym_rec, sym_ref,
-    tree_to_int, vec_to_list,
-};
+use tlib::{NodeKind, TreeArena, TreeId, list_to_vec, tree_to_int, vec_to_list};
 
 use crate::PropagateError;
 
@@ -257,17 +260,15 @@ impl<'a> ForwardADTransform<'a> {
 
     /// Computes the dual form for one signal node.
     ///
-    /// Handles the two symbolic node shapes first (before the `SigMatch`
-    /// dispatch) because they are represented differently in the arena:
+    /// Handles de Bruijn tag nodes before the `SigMatch` dispatch:
     ///
-    /// - `sigRef(x)` → tangent is `sigRef(FAD_x)`.
-    /// - `sigRec(x, body)` → tangent is `sigRec(FAD_x, d(body)/dp)`.
-    ///   A placeholder entry is inserted into the cache before recursing into
-    ///   `body` so that self-referential cycles resolve correctly.
+    /// - `DEBRUIJNREF` → tangent is the same node (index shift at projection site).
+    /// - `DEBRUIJNREC(body)` → tangent is a new `DEBRUIJNREC` with interleaved
+    ///   `[primal, tangent]` pairs; a placeholder is inserted into the cache
+    ///   before recursing to handle back-edges correctly.
     ///
-    /// All other nodes are dispatched through the `SigMatch` arm; unsupported
-    /// or intentionally non-differentiable nodes fall back to a zero tangent
-    /// while preserving the original primal signal.
+    /// All other nodes are dispatched through `SigMatch`; unsupported or
+    /// non-differentiable nodes fall back to a zero tangent.
     fn transform_uncached(&mut self, sig: SigId) -> Dual {
         // Seed signal: d(seed)/d(seed) = 1
         if sig == self.diff_seed {
@@ -317,35 +318,6 @@ impl<'a> ForwardADTransform<'a> {
                     }
                 }
             }
-        }
-
-        // Rule: d/dp sigRef(x) = sigRef(FAD_x)
-        if let Some(var) = match_sym_ref(self.arena, sig) {
-            let fad_var = self.fad_var(var);
-            return Dual {
-                primal: sig,
-                tangent: sym_ref(self.arena, fad_var),
-            };
-        }
-        // Rule: d/dp sigRec(x, body) = sigRec(FAD_x, d(body)/dp)
-        // Seed the cache with a placeholder first to handle back-edges.
-        if let Some((var, body)) = match_sym_rec(self.arena, sig) {
-            let fad_var = self.fad_var(var);
-            let tangent_placeholder = sym_rec(self.arena, fad_var, self.arena.nil());
-            let placeholder = Dual {
-                primal: sig,
-                tangent: tangent_placeholder,
-            };
-            self.cache.insert(sig, placeholder);
-            let duals = self.transform_list(body);
-            let primals: Vec<_> = duals.iter().map(|dual| dual.primal).collect();
-            let tangents: Vec<_> = duals.iter().map(|dual| dual.tangent).collect();
-            let primal_body = vec_to_list(self.arena, &primals);
-            let tangent_body = vec_to_list(self.arena, &tangents);
-            return Dual {
-                primal: sym_rec(self.arena, var, primal_body),
-                tangent: sym_rec(self.arena, fad_var, tangent_body),
-            };
         }
 
         match match_sig(self.arena, sig) {
@@ -813,21 +785,6 @@ impl<'a> ForwardADTransform<'a> {
             | BinOp::Xor => b.int(0),
         };
         Dual { primal, tangent }
-    }
-
-    /// Returns the symbolic recursion variable used for tangent groups.
-    ///
-    /// The generated name follows the current C++-style `FAD_*` convention.
-    /// When the source recursion identifier is not a symbol/string literal, a
-    /// deterministic fallback name based on the node id is used instead.
-    fn fad_var(&mut self, var: TreeId) -> TreeId {
-        let name = match self.arena.kind(var) {
-            Some(NodeKind::Symbol(text)) | Some(NodeKind::StringLiteral(text)) => {
-                format!("FAD_{}", text.as_ref())
-            }
-            _ => format!("FAD_node_{}", var.as_u32()),
-        };
-        self.arena.symbol(&name)
     }
 }
 

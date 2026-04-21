@@ -7,12 +7,12 @@
 use boxes::{BoxBuilder, BoxMatch, match_box};
 use errors::{IntoDiagnostic, Severity, Stage, codes};
 use propagate::{
-    ArityCache, FlatBoxBuildError, PropagateError, PropagateUiOptions, box_arity_typed,
+    ArityCache, FlatBoxBuildError, FlatBoxId, PropagateError, PropagateUiOptions, box_arity_typed,
     make_sig_input_list, propagate_typed, propagate_typed_with_ui, propagate_typed_with_ui_options,
     try_build_flat_box,
 };
 use signals::{BinOp, SigBuilder, SigMatch, match_sig};
-use tlib::{DEBRUIJNREC_TAG, NodeKind, TreeArena, TreeId};
+use tlib::{DEBRUIJNREC_TAG, NodeKind, TreeArena, TreeId, list_to_vec};
 use ui::{ControlKind, UiGroupKind, UiMatch, UiRootOrigin, match_ui};
 
 fn parser_definition(arena: &mut TreeArena, name: TreeId, expr: TreeId) -> TreeId {
@@ -1725,6 +1725,76 @@ fn propagate_error_converts_to_structured_diagnostic_codes() {
             .iter()
             .any(|h| h.contains("for `A ~ B`, enforce inputs(B) <= outputs(A)"))
     );
+}
+
+// Build `(k * _) ~ _` wrapped in `fad(..., k_seed)`.
+//
+// The circuit has 0 external inputs and 1 output before FAD expansion.
+// After FAD: 2 outputs — primal proj(0, rec) and tangent proj(1, fad_rec).
+fn make_fad_one_pole(arena: &mut TreeArena) -> (FlatBoxId, TreeId) {
+    let mut bb = BoxBuilder::new(arena);
+    let label = bb.ident("k");
+    let init = bb.real(0.9);
+    let min = bb.real(0.0);
+    let max = bb.real(1.0);
+    let step = bb.real(0.01);
+    let k = bb.hslider(label, init, min, max, step);
+    let k_seed = bb.hslider(label, init, min, max, step);
+    let wire = bb.wire();
+    let mul = bb.mul();
+    let par = bb.par(k, wire);
+    let body = bb.seq(par, mul);
+    let wire2 = bb.wire();
+    let rec = bb.rec(body, wire2);
+    let fad = bb.forward_ad(rec, k_seed);
+    let flat = try_build_flat_box(arena, fad).unwrap();
+    (flat, k_seed)
+}
+
+#[test]
+fn propagate_forward_ad_on_recursive_circuit_expands_outputs() {
+    // `(k * _) ~ _` with seed = k produces 2 outputs: primal and tangent.
+    let mut arena = TreeArena::new();
+    let (flat, _) = make_fad_one_pole(&mut arena);
+    let out = propagate_typed_with_ui(&mut arena, flat, &[], &mut ArityCache::new())
+        .expect("fad on recursive circuit should propagate");
+    assert_eq!(out.signals.len(), 2, "expected primal + tangent");
+}
+
+#[test]
+fn propagate_forward_ad_on_recursive_circuit_has_interleaved_debruijn_structure() {
+    // Primal = proj(0, original_rec).
+    // Tangent = proj(1, fad_rec) where fad_rec has 2 body slots (interleaved).
+    let mut arena = TreeArena::new();
+    let (flat, _) = make_fad_one_pole(&mut arena);
+    let out = propagate_typed_with_ui(&mut arena, flat, &[], &mut ArityCache::new())
+        .expect("fad on recursive circuit should propagate");
+
+    let SigMatch::Proj(primal_idx, primal_group) = match_sig(&arena, out.signals[0]) else {
+        panic!("primal should be a projection");
+    };
+    assert_eq!(primal_idx, 0);
+    assert!(
+        is_debruijn_rec(&arena, primal_group),
+        "primal group should be DEBRUIJNREC"
+    );
+
+    let SigMatch::Proj(tangent_idx, tangent_group) = match_sig(&arena, out.signals[1]) else {
+        panic!("tangent should be a projection");
+    };
+    assert_eq!(tangent_idx, 1, "tangent picks odd slot 2i+1");
+    assert!(
+        is_debruijn_rec(&arena, tangent_group),
+        "tangent group should be DEBRUIJNREC"
+    );
+
+    // The fad DEBRUIJNREC body is interleaved: 2 slots for 1 original body element.
+    let fad_body = debruijn_body(&arena, tangent_group).expect("tangent group has body");
+    let slots = list_to_vec(&arena, fad_body).expect("body is a list");
+    assert_eq!(slots.len(), 2, "interleaved body: [primal_e0, tangent_e0]");
+
+    // The primal and tangent groups are distinct nodes.
+    assert_ne!(primal_group, tangent_group);
 }
 
 fn is_debruijn_rec(arena: &TreeArena, id: TreeId) -> bool {
