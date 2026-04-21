@@ -192,6 +192,95 @@ fn corpus_fad_nested_on_recursive_seed_emits_three_lanes_one_recursion() {
 }
 
 #[test]
+fn corpus_fad_tanh_ffun_produces_non_zero_tangent() {
+    // fad(ma.tanh(p), p): tanh is an external ffunction (SigMatch::FFun).
+    // The FAD pass must recognise the "tanhf"/"tanh"/"tanhl" name family and
+    // apply d/dp tanh(x) = (1 - tanh²(x)) · x'.
+    // Expected: 2 outputs (primal + tangent); tangent must not be constant 0.
+    //
+    // Runs on a 64 MiB thread because stdfaust.lib produces a deep evaluation
+    // tree that overflows the default debug-build thread stack.
+    let out = std::thread::Builder::new()
+        .name("fad-tanh".to_owned())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| compile_corpus("fad_tanh.dsp"))
+        .expect("spawn worker")
+        .join()
+        .expect("worker thread should finish");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].label, "p");
+
+    // Primal must be an FFun node (tanh applied to the slider).
+    assert!(
+        matches!(
+            signals::match_sig(&out.parse.state.arena, out.signals[0]),
+            signals::SigMatch::FFun(_, _)
+        ),
+        "primal of fad(tanh(p), p) should be SIGFFUN"
+    );
+    // Tangent must not be the constant 0 — it encodes (1 − tanh²(p)).
+    assert!(
+        !matches!(
+            signals::match_sig(&out.parse.state.arena, out.signals[1]),
+            signals::SigMatch::Real(v) if v == 0.0
+        ),
+        "tangent of tanh(p) w.r.t. p must not be constant zero"
+    );
+}
+
+/// Asserts that `fad(<hyperbolic>(p), p)` emits 2 signals where the tangent is
+/// a non-zero `SIGFFUN` expression (the primal is also `SIGFFUN`).
+/// Runs on a 64 MiB thread because stdfaust.lib causes a deep evaluation tree.
+fn assert_fad_hyperbolic(dsp: &'static str) {
+    let out = std::thread::Builder::new()
+        .name(format!("fad-{dsp}"))
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || compile_corpus(dsp))
+        .expect("spawn worker")
+        .join()
+        .expect("worker thread should finish");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 2, "{dsp}: must emit [primal, tangent]");
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert!(
+        !matches!(
+            signals::match_sig(&out.parse.state.arena, out.signals[1]),
+            signals::SigMatch::Real(v) if v == 0.0
+        ),
+        "{dsp}: tangent must not be constant zero"
+    );
+}
+
+#[test]
+fn corpus_fad_sinh_ffun_produces_non_zero_tangent() {
+    assert_fad_hyperbolic("fad_sinh.dsp");
+}
+
+#[test]
+fn corpus_fad_cosh_ffun_produces_non_zero_tangent() {
+    assert_fad_hyperbolic("fad_cosh.dsp");
+}
+
+#[test]
+fn corpus_fad_atanh_ffun_produces_non_zero_tangent() {
+    assert_fad_hyperbolic("fad_atanh.dsp");
+}
+
+#[test]
+fn corpus_fad_asinh_ffun_produces_non_zero_tangent() {
+    assert_fad_hyperbolic("fad_asinh.dsp");
+}
+
+#[test]
+fn corpus_fad_acosh_ffun_produces_non_zero_tangent() {
+    assert_fad_hyperbolic("fad_acosh.dsp");
+}
+
+#[test]
 fn corpus_fad_product_emits_one_tangent_per_seed() {
     // fad(f * g, f): differentiates wrt f only → primal + 1 tangent = 2 signals
     let out = compile_corpus("fad_product.dsp");

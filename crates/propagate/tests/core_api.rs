@@ -1727,6 +1727,68 @@ fn propagate_error_converts_to_structured_diagnostic_codes() {
     );
 }
 
+/// Constructs a `FFUN` descriptor node for tanh (all three precision names).
+///
+/// Signature layout: `[ret_type, [name_f32, name_f64, name_ldbl], arg_type]`
+/// matching Faust's `ffunction(float tanhf|tanh|tanhl (float), <math.h>, "")`.
+fn make_tanh_ffun(arena: &mut TreeArena) -> (boxes::BoxId, boxes::BoxId) {
+    let float_ty = arena.int(1); // 1 = float type code
+    let incfile = arena.symbol("<math.h>");
+    let libfile = arena.symbol("\"\"");
+    let nil = arena.nil();
+    let name_f32 = arena.symbol("tanhf");
+    let name_f64 = arena.symbol("tanh");
+    let name_ldbl = arena.symbol("tanhl");
+    // names list: [name_f32, name_f64, name_ldbl]
+    let names_inner = arena.cons(name_ldbl, nil);
+    let names_mid = arena.cons(name_f64, names_inner);
+    let names = arena.cons(name_f32, names_mid);
+    // signature: [ret_type, names, arg_type]
+    let arg_types = arena.cons(float_ty, nil);
+    let payload = arena.cons(names, arg_types);
+    let signature = arena.cons(float_ty, payload);
+    let mut bb = BoxBuilder::new(arena);
+    let ffunction = bb.ffunction(signature, incfile, libfile);
+    let ffun = bb.ffun(ffunction);
+    (ffun, ffunction)
+}
+
+#[test]
+fn fad_on_tanh_ffun_produces_sech_squared_tangent() {
+    // Build: fad(tanh(p), p)  where p = hslider("p", 0, -3, 3, 0.01)
+    // Expected tangent: (1 - tanh²(p)) · 1  = 1 - tanh²(p)   (sech²)
+    let mut arena = TreeArena::new();
+    let (tanh_ffun, _ffunction) = make_tanh_ffun(&mut arena);
+    let mut bb = BoxBuilder::new(&mut arena);
+    let label = bb.ident("p");
+    let init = bb.real(0.0);
+    let min = bb.real(-3.0);
+    let max = bb.real(3.0);
+    let step = bb.real(0.01);
+    let slider = bb.hslider(label, init, min, max, step);
+    let slider_seed = bb.hslider(label, init, min, max, step);
+    let tanh_of_slider = bb.seq(slider, tanh_ffun);
+    let fad_box = bb.forward_ad(tanh_of_slider, slider_seed);
+    let flat = try_build_flat_box(&arena, fad_box).expect("fad(tanh(p), p) should build");
+    let result = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
+        .expect("fad(tanh(p), p) should propagate");
+
+    // 2 outputs: primal and tangent.
+    assert_eq!(result.len(), 2, "fad(tanh(p), p) must emit [primal, tangent]");
+
+    // Tangent should not be the constant 0.0 — it is (1 - tanh²(p)) · sech².
+    let tangent = result[1];
+    assert!(
+        match_sig(&arena, tangent) != SigMatch::Real(0.0),
+        "tangent of tanh(p) w.r.t. p must be non-zero"
+    );
+    // Primal should be an FFun node (tanh applied to the propagated slider).
+    assert!(
+        matches!(match_sig(&arena, result[0]), SigMatch::FFun(_, _)),
+        "primal of fad(tanh(p), p) should be SIGFFUN"
+    );
+}
+
 // Build `(k * _) ~ _` wrapped in `fad(..., k_seed)`.
 //
 // The circuit has 0 external inputs and 1 output before FAD expansion.
