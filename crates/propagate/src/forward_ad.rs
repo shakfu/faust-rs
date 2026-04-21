@@ -144,10 +144,18 @@
 //! d/dp sigProj(i, g)   = sigProj(i, d(g)/dp)
 //! ```
 //!
-//! De Bruijn indices are converted to symbolic form via `de_bruijn_to_sym`
-//! before differentiation so that variable names are explicit and `FAD_`
-//! pairing is unambiguous.  The tangent group is seeded with a placeholder
-//! `sigRec(FAD_x, nil)` before the body is traversed, which breaks cycles.
+//! The transform operates directly on de Bruijn signals. Seed recognition is
+//! by `SigId` equality, which is stable because the arena hash-conses every
+//! node: the seed sub-term and every occurrence of it inside the body share
+//! the same `TreeId`. The single `de_bruijn_to_sym` conversion is deferred to
+//! `signal_prepare`, where it runs once over all process outputs with a shared
+//! `Converter` memo, ensuring consistent symbolic names across primal and
+//! tangent lanes.
+//!
+//! For any `SYMREC`/`SYMREF` node that might appear in the body (e.g. if the
+//! body was produced by an earlier stage that already converted), the
+//! corresponding arms below differentiate symbolically as before, so the
+//! transform is defensive against mixed-form trees.
 //!
 //! ## Pass-through helper nodes (`attach`, `enable`, `control`)
 //!
@@ -183,8 +191,8 @@
 use ahash::AHashMap;
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use tlib::{
-    NodeKind, TreeArena, TreeId, de_bruijn_to_sym_many, list_to_vec, match_sym_rec, match_sym_ref,
-    sym_rec, sym_ref, vec_to_list,
+    NodeKind, TreeArena, TreeId, list_to_vec, match_sym_rec, match_sym_ref, sym_rec, sym_ref,
+    vec_to_list,
 };
 
 use crate::PropagateError;
@@ -721,9 +729,14 @@ impl<'a> ForwardADTransform<'a> {
 /// pair; multi-output seeds bundle several independent differentiation
 /// variables through a single `fad` node.
 ///
-/// Before differentiation, each output passes through `de_bruijn_to_sym(...)`
-/// so the transform works on the canonical symbolic recursion representation
-/// expected by the current porting model.
+/// The transform operates on signals in their original de Bruijn form.
+/// Seed recognition is by `SigId` equality, which is preserved because the
+/// arena hash-conses every node: the seed and every reference to it inside
+/// the body share one `TreeId` regardless of recursion depth. The
+/// `de_bruijn_to_sym` conversion is deferred to `signal_prepare`, where it
+/// runs once over all process outputs with a shared `Converter` memo,
+/// preventing the fresh-name drift that plagued the earlier per-call
+/// approach.
 pub(super) fn generate_fad_signals_multi(
     arena: &mut TreeArena,
     outputs: &[SigId],
@@ -732,30 +745,16 @@ pub(super) fn generate_fad_signals_multi(
     if seeds.is_empty() {
         return Ok(outputs.to_vec());
     }
-    // One shared conversion pass so that de Bruijn sub-terms reachable from
-    // both an output and a seed map to the *same* symbolic recursion node.
-    // Using one `de_bruijn_to_sym` call per root (as before) allocates fresh
-    // `W0`/`W1`/... names independently and silently forks shared
-    // recursions into distinct SYMRECs; the FAD transform then fails to
-    // recognise the seed inside the output signal graph.
-    let combined: Vec<SigId> = outputs.iter().copied().chain(seeds.iter().copied()).collect();
-    let converted_all = de_bruijn_to_sym_many(arena, &combined).unwrap_or_else(|_| combined.clone());
-    let (converted_outputs_slice, converted_seeds_slice) = converted_all.split_at(outputs.len());
-    let converted_outputs: Vec<SigId> = converted_outputs_slice.to_vec();
-    let converted_seeds: Vec<SigId> = converted_seeds_slice.to_vec();
-    // Compute one tangent row per seed.
+    // Compute one tangent row per seed directly on the de Bruijn signals.
     // tangent_rows[j][i] = tangent of output i with respect to seed j.
     let mut tangent_rows: Vec<Vec<SigId>> = Vec::with_capacity(seeds.len());
-    for &converted_seed in &converted_seeds {
-        let mut fad = ForwardADTransform::new(arena, converted_seed);
-        let row: Vec<SigId> = converted_outputs
-            .iter()
-            .map(|&s| fad.transform(s).tangent)
-            .collect();
+    for &seed in seeds {
+        let mut fad = ForwardADTransform::new(arena, seed);
+        let row: Vec<SigId> = outputs.iter().map(|&s| fad.transform(s).tangent).collect();
         tangent_rows.push(row);
     }
-    let mut result = Vec::with_capacity(converted_outputs.len() * (1 + seeds.len()));
-    for (i, &p) in converted_outputs.iter().enumerate() {
+    let mut result = Vec::with_capacity(outputs.len() * (1 + seeds.len()));
+    for (i, &p) in outputs.iter().enumerate() {
         result.push(p);
         for row in &tangent_rows {
             result.push(row[i]);

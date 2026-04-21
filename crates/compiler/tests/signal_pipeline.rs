@@ -177,6 +177,21 @@ fn corpus_fad_lambda_recursive_seed_shares_recursion_across_primal_and_tangent()
 }
 
 #[test]
+fn corpus_fad_nested_on_recursive_seed_emits_three_lanes_one_recursion() {
+    // Regression: nested fad(fad(eq,phi),phi) where phi is a recursive
+    // accumulator. A prior bug forked phi into two or three SYMREC nodes via
+    // fresh-name drift in de_bruijn_to_sym, emitting phantom recursion slots
+    // and a stuck-at-zero iRec that silenced audio. The fix defers the single
+    // de_bruijn_to_sym conversion to signal_prepare so all outputs share one
+    // Converter memo and one recursion name.
+    let out = compile_corpus("fad_nested_on_recursive_seed.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 3); // pos, vel, acc
+    assert_eq!(out.signals.len(), 3);
+    assert!(out.ui.controls.is_empty());
+}
+
+#[test]
 fn corpus_fad_product_emits_one_tangent_per_seed() {
     // fad(f * g, f): differentiates wrt f only → primal + 1 tangent = 2 signals
     let out = compile_corpus("fad_product.dsp");
