@@ -144,18 +144,23 @@
 //! d/dp sigProj(i, g)   = sigProj(i, d(g)/dp)
 //! ```
 //!
-//! The transform operates directly on de Bruijn signals. Seed recognition is
-//! by `SigId` equality, which is stable because the arena hash-conses every
-//! node: the seed sub-term and every occurrence of it inside the body share
-//! the same `TreeId`. The single `de_bruijn_to_sym` conversion is deferred to
-//! `signal_prepare`, where it runs once over all process outputs with a shared
-//! `Converter` memo, ensuring consistent symbolic names across primal and
-//! tangent lanes.
+//! No pre-conversion is applied before differentiation. `propagate` emits
+//! signals in de Bruijn form, and the transform receives them as-is. Seed
+//! recognition (`sig == self.diff_seed`) works by `SigId` equality, which is
+//! stable because the arena hash-conses every node: the seed sub-term and
+//! every external reference to it share the same `TreeId`. The transform
+//! short-circuits at the seed leaf and never descends into the seed's own
+//! recursive body. The single `de_bruijn_to_sym` conversion is deferred to
+//! `signal_prepare`, where it runs once over all process outputs through one
+//! `Converter` instance, giving every occurrence of the same `DEBRUIJNREC`
+//! the same symbolic name across primal and tangent lanes.
 //!
-//! For any `SYMREC`/`SYMREF` node that might appear in the body (e.g. if the
-//! body was produced by an earlier stage that already converted), the
-//! corresponding arms below differentiate symbolically as before, so the
-//! transform is defensive against mixed-form trees.
+//! The `SYMREC`/`SYMREF` arms in `transform_uncached` handle the case where
+//! a body is already in fully-symbolic form (e.g. produced by a caller that
+//! ran its own `de_bruijn_to_sym` pass). They are unreachable in the normal
+//! pipeline. They do **not** correctly handle mixed-form trees where a
+//! DeBruijn seed appears inside a symbolically-converted body — in that
+//! scenario the seed check would never fire and the tangent would be zero.
 //!
 //! ## Pass-through helper nodes (`attach`, `enable`, `control`)
 //!
@@ -729,14 +734,16 @@ impl<'a> ForwardADTransform<'a> {
 /// pair; multi-output seeds bundle several independent differentiation
 /// variables through a single `fad` node.
 ///
-/// The transform operates on signals in their original de Bruijn form.
-/// Seed recognition is by `SigId` equality, which is preserved because the
-/// arena hash-conses every node: the seed and every reference to it inside
-/// the body share one `TreeId` regardless of recursion depth. The
-/// `de_bruijn_to_sym` conversion is deferred to `signal_prepare`, where it
-/// runs once over all process outputs with a shared `Converter` memo,
-/// preventing the fresh-name drift that plagued the earlier per-call
-/// approach.
+/// No pre-conversion is applied. Seed recognition is by `SigId` equality:
+/// every external reference to the seed in the body shares one `TreeId`
+/// because the arena hash-conses every node. The transform short-circuits at
+/// the seed leaf and never enters the seed's own recursive body.
+///
+/// The `de_bruijn_to_sym` conversion is deferred to `signal_prepare`, where
+/// it runs once over all process outputs through one `Converter` instance.
+/// This guarantees that the same `DEBRUIJNREC` sub-term maps to the same
+/// `SYMREC` name in every primal and tangent lane, preventing the
+/// fresh-name drift that triggered the nested-FAD bug.
 pub(super) fn generate_fad_signals_multi(
     arena: &mut TreeArena,
     outputs: &[SigId],
