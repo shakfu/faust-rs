@@ -92,8 +92,22 @@
 //! The selector is the primal comparison; the tangent is piecewise-constant
 //! with a sub-gradient of `0` on the boundary.
 //!
-//! ### `atan2`, `fmod`, `remainder`
-//! Currently fall through to zero tangent (unimplemented).
+//! ### `atan2(y, x)`
+//! ```text
+//! d/dp atan2(y, x) = (x·y' − y·x') / (x² + y²)
+//! ```
+//!
+//! ### `fmod(x, y)`
+//! ```text
+//! d/dp fmod(x, y) = x' − y'·floor(x/y)
+//! ```
+//! Derivation: `fmod(x,y) = x − y·floor(x/y)`, differentiate both sides.
+//!
+//! ### `remainder(x, y)`
+//! ```text
+//! d/dp remainder(x, y) = x' − y'·round(x/y)
+//! ```
+//! Derivation: `remainder(x,y) = x − y·round(x/y)`, differentiate both sides.
 //!
 //! ## Cast operators
 //!
@@ -176,7 +190,7 @@
 //!
 //! ## Bargraph outputs (`vbargraph`, `hbargraph`)
 //!
-//! Zero tangent.  Bargraphs are metering outputs, not DSP signal paths.
+//! Zero tangent for both.  Bargraphs are metering outputs, not DSP signal paths.
 //!
 //! ## Unhandled / non-differentiable nodes
 //!
@@ -504,6 +518,44 @@ impl<'a> ForwardADTransform<'a> {
                 let tangent = b.select2(cond, dual_x.tangent, dual_y.tangent);
                 Dual { primal, tangent }
             }
+            // Rule: d/dp atan2(y, x) = (x·y' - y·x') / (x² + y²)
+            SigMatch::Atan2(y, x) => {
+                let dual_y = self.transform(y);
+                let dual_x = self.transform(x);
+                let mut b = SigBuilder::new(self.arena);
+                let primal = b.atan2(dual_y.primal, dual_x.primal);
+                let x_dy = b.mul(dual_x.primal, dual_y.tangent);
+                let y_dx = b.mul(dual_y.primal, dual_x.tangent);
+                let num = b.sub(x_dy, y_dx);
+                let x2 = b.mul(dual_x.primal, dual_x.primal);
+                let y2 = b.mul(dual_y.primal, dual_y.primal);
+                let denom = b.add(x2, y2);
+                Dual { primal, tangent: b.div(num, denom) }
+            }
+            // Rule: d/dp fmod(x, y) = x' - y'·floor(x/y)
+            // Derivation: fmod(x,y) = x - y·floor(x/y), differentiate both sides.
+            SigMatch::Fmod(x, y) => {
+                let dual_x = self.transform(x);
+                let dual_y = self.transform(y);
+                let mut b = SigBuilder::new(self.arena);
+                let primal = b.fmod(dual_x.primal, dual_y.primal);
+                let raw_q = b.div(dual_x.primal, dual_y.primal);
+                let quotient = b.floor(raw_q);
+                let scaled = b.mul(dual_y.tangent, quotient);
+                Dual { primal, tangent: b.sub(dual_x.tangent, scaled) }
+            }
+            // Rule: d/dp remainder(x, y) = x' - y'·round(x/y)
+            // Derivation: remainder(x,y) = x - y·round(x/y), differentiate both sides.
+            SigMatch::Remainder(x, y) => {
+                let dual_x = self.transform(x);
+                let dual_y = self.transform(y);
+                let mut b = SigBuilder::new(self.arena);
+                let primal = b.remainder(dual_x.primal, dual_y.primal);
+                let raw_q = b.div(dual_x.primal, dual_y.primal);
+                let quotient = b.round(raw_q);
+                let scaled = b.mul(dual_y.tangent, quotient);
+                Dual { primal, tangent: b.sub(dual_x.tangent, scaled) }
+            }
             // Rule: d/dp delay1(x) = delay1(x')  — unit delay is linear
             SigMatch::Delay1(x) => {
                 let dual_x = self.transform(x);
@@ -655,7 +707,7 @@ impl<'a> ForwardADTransform<'a> {
                 self.pass_through_binary(x, y, |b, px, py| b.control(px, py))
             }
             // Bargraphs are metering outputs only; their tangent is always zero.
-            SigMatch::VBargraph(_, inner) => {
+            SigMatch::VBargraph(_, inner) | SigMatch::HBargraph(_, inner) => {
                 let _ = self.transform(inner);
                 let mut b = SigBuilder::new(self.arena);
                 Dual {
