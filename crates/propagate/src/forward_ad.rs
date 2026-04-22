@@ -26,6 +26,14 @@
 //! fires at each occurrence.  The transform short-circuits at that leaf and
 //! never descends into the seed's own recursive body.
 //!
+//! When the seed expression carries free `DEBRUIJNREF` nodes, crossing a
+//! `DEBRUIJNREC` scope shifts those references by one level. The transform
+//! therefore lifts the seed on entry into each REC body (and restores it on
+//! exit) so `SigId` equality keeps matching under the new scope — without
+//! this shift, occurrences of the seed inside a recursive body would be
+//! silently missed and their tangent would collapse to zero. See
+//! [`ForwardADTransform::transform_uncached`] for the mechanics.
+//!
 //! One [`ForwardADTransform`] instance differentiates the entire signal DAG
 //! with respect to a single seed; [`generate_fad_signals_multi`] drives one
 //! transformer per seed and assembles the output bundle.
@@ -281,7 +289,7 @@
 use ahash::AHashMap;
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use tlib::{
-    NodeKind, TreeArena, TreeId, de_bruijn_rec, list_to_vec, match_de_bruijn_rec,
+    NodeKind, TreeArena, TreeId, de_bruijn_rec, lift_de_bruijn, list_to_vec, match_de_bruijn_rec,
     match_de_bruijn_ref, tree_to_str, vec_to_list,
 };
 
@@ -378,9 +386,32 @@ impl<'a> ForwardADTransform<'a> {
                     tangent: sig,
                 },
             );
+
             self.debruijn_depth += 1;
+
+            // Seed lifting across DEBRUIJNREC scopes.
+            //
+            // Seed recognition is by `SigId` equality. When the seed expression
+            // itself contains free `DEBRUIJNREF(k)` nodes pointing at some
+            // enclosing REC, the *same* logical reference, viewed from inside
+            // the body we're about to enter, has level `k+1` — one more REC
+            // stands between the reference and its binder. Hash-consing means
+            // those two de Bruijn references are distinct `SigId`s, so without
+            // adjustment the seed-equality check inside the body would miss
+            // every occurrence and the tangent would be silently zero.
+            //
+            // `lift_de_bruijn` shifts every free de Bruijn reference in the
+            // seed up by one level. After the recursion into the body we
+            // restore the previous seed so siblings and enclosing scopes keep
+            // matching against the unshifted form.
+            let old_seed = self.diff_seed;
+            self.diff_seed = lift_de_bruijn(self.arena, self.diff_seed);
+
             let duals = self.transform_list(body);
+
+            self.diff_seed = old_seed;
             self.debruijn_depth -= 1;
+
             let mut expanded_body = Vec::with_capacity(duals.len() * 2);
             for dual in duals {
                 expanded_body.push(dual.primal);
@@ -400,25 +431,15 @@ impl<'a> ForwardADTransform<'a> {
                 primal: sig,
                 tangent: SigBuilder::new(self.arena).int(0),
             },
-            SigMatch::Real(_) => Dual {
-                primal: sig,
-                tangent: SigBuilder::new(self.arena).real(0.0),
-            },
+            SigMatch::Real(_) => self.zero_tangent(sig),
             // Audio inputs are independent of all UI controls: d/dp input = 0
-            SigMatch::Input(_) => Dual {
-                primal: sig,
-                tangent: SigBuilder::new(self.arena).real(0.0),
-            },
+            SigMatch::Input(_) => self.zero_tangent(sig),
             // Continuous UI controls: tangent = 0 (seed equality handled above).
-            SigMatch::HSlider(_) | SigMatch::VSlider(_) | SigMatch::NumEntry(_) => Dual {
-                primal: sig,
-                tangent: SigBuilder::new(self.arena).real(0.0),
-            },
+            SigMatch::HSlider(_) | SigMatch::VSlider(_) | SigMatch::NumEntry(_) => {
+                self.zero_tangent(sig)
+            }
             // Discrete UI controls are not differentiable: d/dp button = 0
-            SigMatch::Button(_) | SigMatch::Checkbox(_) => Dual {
-                primal: sig,
-                tangent: SigBuilder::new(self.arena).real(0.0),
-            },
+            SigMatch::Button(_) | SigMatch::Checkbox(_) => self.zero_tangent(sig),
             SigMatch::BinOp(op, x, y) => self.transform_binop(op, x, y),
             SigMatch::Sin(x) => self.unary_chain(
                 x,
@@ -771,128 +792,19 @@ impl<'a> ForwardADTransform<'a> {
                 self.pass_through_binary(x, y, |b, px, py| b.control(px, py))
             }
             // Bargraphs are metering outputs only; their tangent is always zero.
+            // We still transform `inner` so the cache is populated for any
+            // subgraphs it shares with differentiated signals.
             SigMatch::VBargraph(_, inner) | SigMatch::HBargraph(_, inner) => {
                 let _ = self.transform(inner);
-                let mut b = SigBuilder::new(self.arena);
-                Dual {
-                    primal: sig,
-                    tangent: b.real(0.0),
-                }
+                self.zero_tangent(sig)
             }
             // Foreign functions: dispatch on name for known differentiable functions.
             // The FFUN descriptor carries a names list [f32_name, f64_name, …]; we
             // check every slot against the target set so the match is precision-agnostic.
-            SigMatch::FFun(ff, largs) => {
-                let args = list_to_vec(self.arena, largs).unwrap_or_default();
-                if args.len() == 1 {
-                    if Self::ffun_is(self.arena, ff, &["tanhf", "tanh", "tanhl"]) {
-                        // d/dp tanh(x) = x' · (1 − tanh²(x))   [= x' · sech²(x)]
-                        let dual_x = self.transform(args[0]);
-                        let new_largs = vec_to_list(self.arena, &[dual_x.primal]);
-                        let mut b = SigBuilder::new(self.arena);
-                        let primal = b.ffun(ff, new_largs);
-                        let tanh_sq = b.mul(primal, primal);
-                        let one = b.real(1.0);
-                        let sech_sq = b.sub(one, tanh_sq);
-                        Dual {
-                            primal,
-                            tangent: b.mul(sech_sq, dual_x.tangent),
-                        }
-                    } else if Self::ffun_is(self.arena, ff, &["sinhf", "sinh", "sinhl"]) {
-                        // d/dp sinh(x) = x' · cosh(x)
-                        // cosh is also an external ffunction, so we derive it from the
-                        // identity cosh(x) = sqrt(1 + sinh²(x)), reusing primal = sinh(x).
-                        let dual_x = self.transform(args[0]);
-                        let largs_p = vec_to_list(self.arena, &[dual_x.primal]);
-                        let mut b = SigBuilder::new(self.arena);
-                        let primal = b.ffun(ff, largs_p); // sinh(primal_x)
-                        let sinh_sq = b.mul(primal, primal);
-                        let one = b.real(1.0);
-                        let one_plus_sq = b.add(one, sinh_sq);
-                        let cosh_x = b.sqrt(one_plus_sq); // sqrt(1 + sinh²) = cosh, cosh ≥ 0
-                        Dual {
-                            primal,
-                            tangent: b.mul(cosh_x, dual_x.tangent),
-                        }
-                    } else if Self::ffun_is(self.arena, ff, &["coshf", "cosh", "coshl"]) {
-                        // d/dp cosh(x) = x' · sinh(x)
-                        // sinh is also an external ffunction; compute via exp identity:
-                        // sinh(x) = (exp(x) − exp(−x)) / 2
-                        let dual_x = self.transform(args[0]);
-                        let largs_p = vec_to_list(self.arena, &[dual_x.primal]);
-                        let mut b = SigBuilder::new(self.arena);
-                        let primal = b.ffun(ff, largs_p); // cosh(primal_x)
-                        let exp_x = b.exp(dual_x.primal);
-                        let minus_one = b.real(-1.0);
-                        let neg_x = b.mul(minus_one, dual_x.primal);
-                        let exp_neg_x = b.exp(neg_x);
-                        let diff = b.sub(exp_x, exp_neg_x);
-                        let half = b.real(0.5);
-                        let sinh_x = b.mul(half, diff);
-                        Dual {
-                            primal,
-                            tangent: b.mul(sinh_x, dual_x.tangent),
-                        }
-                    } else if Self::ffun_is(self.arena, ff, &["atanhf", "atanh", "atanhl"]) {
-                        // d/dp atanh(x) = x' / (1 − x²)
-                        let dual_x = self.transform(args[0]);
-                        let largs_p = vec_to_list(self.arena, &[dual_x.primal]);
-                        let mut b = SigBuilder::new(self.arena);
-                        let primal = b.ffun(ff, largs_p);
-                        let x_sq = b.mul(dual_x.primal, dual_x.primal);
-                        let one = b.real(1.0);
-                        let denom = b.sub(one, x_sq);
-                        Dual {
-                            primal,
-                            tangent: b.div(dual_x.tangent, denom),
-                        }
-                    } else if Self::ffun_is(self.arena, ff, &["asinhf", "asinh", "asinhl"]) {
-                        // d/dp asinh(x) = x' / sqrt(1 + x²)
-                        let dual_x = self.transform(args[0]);
-                        let largs_p = vec_to_list(self.arena, &[dual_x.primal]);
-                        let mut b = SigBuilder::new(self.arena);
-                        let primal = b.ffun(ff, largs_p);
-                        let x_sq = b.mul(dual_x.primal, dual_x.primal);
-                        let one = b.real(1.0);
-                        let sum = b.add(one, x_sq);
-                        let denom = b.sqrt(sum);
-                        Dual {
-                            primal,
-                            tangent: b.div(dual_x.tangent, denom),
-                        }
-                    } else if Self::ffun_is(self.arena, ff, &["acoshf", "acosh", "acoshl"]) {
-                        // d/dp acosh(x) = x' / sqrt(x² − 1)
-                        let dual_x = self.transform(args[0]);
-                        let largs_p = vec_to_list(self.arena, &[dual_x.primal]);
-                        let mut b = SigBuilder::new(self.arena);
-                        let primal = b.ffun(ff, largs_p);
-                        let x_sq = b.mul(dual_x.primal, dual_x.primal);
-                        let one = b.real(1.0);
-                        let diff = b.sub(x_sq, one);
-                        let denom = b.sqrt(diff);
-                        Dual {
-                            primal,
-                            tangent: b.div(dual_x.tangent, denom),
-                        }
-                    } else {
-                        Dual {
-                            primal: sig,
-                            tangent: SigBuilder::new(self.arena).real(0.0),
-                        }
-                    }
-                } else {
-                    Dual {
-                        primal: sig,
-                        tangent: SigBuilder::new(self.arena).real(0.0),
-                    }
-                }
-            }
+            SigMatch::FFun(ff, largs) => self.transform_ffun(sig, ff, largs),
             // Fallback: all unhandled nodes (table ops, unrecognized FFun, soundfile,
             // waveform, Gen, PermVar, TempVar, …) are non-differentiable constants.
-            _ => Dual {
-                primal: sig,
-                tangent: SigBuilder::new(self.arena).real(0.0),
-            },
+            _ => self.zero_tangent(sig),
         }
     }
 
@@ -928,6 +840,112 @@ impl<'a> ForwardADTransform<'a> {
         name_ids
             .iter()
             .any(|id| tree_to_str(arena, *id).is_some_and(|n| targets.contains(&n)))
+    }
+
+    /// Returns a `Dual` that carries `sig` as primal with a zero tangent.
+    ///
+    /// Used for every node kind whose derivative is identically zero
+    /// (constants, audio inputs, non-seed UI controls, bargraphs, unmatched
+    /// foreign functions, and the generic fallback).
+    fn zero_tangent(&mut self, sig: SigId) -> Dual {
+        Dual {
+            primal: sig,
+            tangent: SigBuilder::new(self.arena).real(0.0),
+        }
+    }
+
+    /// Chain rule for a unary foreign function `f(x)` of known derivative.
+    ///
+    /// Rebuilds `primal = ff(x_primal)` with a fresh args list and delegates
+    /// the tangent computation to `tangent_fn`, which receives `(builder,
+    /// primal, x_primal, x_tangent)`. Passing `primal` lets rules like
+    /// `tanh` reuse `tanh(x)` itself (`x' · (1 − tanh²(x))`) without a second
+    /// `ffun` call.
+    fn ffun_unary_chain<FTangent>(&mut self, ff: SigId, arg: SigId, tangent_fn: FTangent) -> Dual
+    where
+        FTangent: FnOnce(&mut SigBuilder<'_>, SigId, SigId, SigId) -> SigId,
+    {
+        let dual_x = self.transform(arg);
+        let largs = vec_to_list(self.arena, &[dual_x.primal]);
+        let mut b = SigBuilder::new(self.arena);
+        let primal = b.ffun(ff, largs);
+        let tangent = tangent_fn(&mut b, primal, dual_x.primal, dual_x.tangent);
+        Dual { primal, tangent }
+    }
+
+    /// Dispatches a foreign-function node on its name for the known
+    /// differentiable set. Unary FFUNs with an unrecognized name and
+    /// every FFUN of different arity fall through to a zero tangent.
+    ///
+    /// The FFUN descriptor carries a names list `[f32_name, f64_name, …]`;
+    /// [`Self::ffun_is`] checks every slot so the match is precision-agnostic.
+    fn transform_ffun(&mut self, sig: SigId, ff: SigId, largs: SigId) -> Dual {
+        let args = list_to_vec(self.arena, largs).unwrap_or_default();
+        if args.len() != 1 {
+            return self.zero_tangent(sig);
+        }
+        let arg = args[0];
+        if Self::ffun_is(self.arena, ff, &["tanhf", "tanh", "tanhl"]) {
+            // d/dp tanh(x) = x' · (1 − tanh²(x))   [= x' · sech²(x)]
+            self.ffun_unary_chain(ff, arg, |b, primal, _x, tx| {
+                let tanh_sq = b.mul(primal, primal);
+                let one = b.real(1.0);
+                let sech_sq = b.sub(one, tanh_sq);
+                b.mul(sech_sq, tx)
+            })
+        } else if Self::ffun_is(self.arena, ff, &["sinhf", "sinh", "sinhl"]) {
+            // d/dp sinh(x) = x' · cosh(x).  cosh is also an external ffunction,
+            // so we derive it from cosh(x) = sqrt(1 + sinh²(x)), reusing
+            // primal = sinh(x).  Exact since cosh ≥ 0.
+            self.ffun_unary_chain(ff, arg, |b, primal, _x, tx| {
+                let sinh_sq = b.mul(primal, primal);
+                let one = b.real(1.0);
+                let one_plus_sq = b.add(one, sinh_sq);
+                let cosh_x = b.sqrt(one_plus_sq);
+                b.mul(cosh_x, tx)
+            })
+        } else if Self::ffun_is(self.arena, ff, &["coshf", "cosh", "coshl"]) {
+            // d/dp cosh(x) = x' · sinh(x).  sinh is also an external ffunction;
+            // compute via the exp identity sinh(x) = (exp(x) − exp(−x)) / 2.
+            self.ffun_unary_chain(ff, arg, |b, _primal, x, tx| {
+                let exp_x = b.exp(x);
+                let minus_one = b.real(-1.0);
+                let neg_x = b.mul(minus_one, x);
+                let exp_neg_x = b.exp(neg_x);
+                let diff = b.sub(exp_x, exp_neg_x);
+                let half = b.real(0.5);
+                let sinh_x = b.mul(half, diff);
+                b.mul(sinh_x, tx)
+            })
+        } else if Self::ffun_is(self.arena, ff, &["atanhf", "atanh", "atanhl"]) {
+            // d/dp atanh(x) = x' / (1 − x²)
+            self.ffun_unary_chain(ff, arg, |b, _primal, x, tx| {
+                let x_sq = b.mul(x, x);
+                let one = b.real(1.0);
+                let denom = b.sub(one, x_sq);
+                b.div(tx, denom)
+            })
+        } else if Self::ffun_is(self.arena, ff, &["asinhf", "asinh", "asinhl"]) {
+            // d/dp asinh(x) = x' / sqrt(1 + x²)
+            self.ffun_unary_chain(ff, arg, |b, _primal, x, tx| {
+                let x_sq = b.mul(x, x);
+                let one = b.real(1.0);
+                let sum = b.add(one, x_sq);
+                let denom = b.sqrt(sum);
+                b.div(tx, denom)
+            })
+        } else if Self::ffun_is(self.arena, ff, &["acoshf", "acosh", "acoshl"]) {
+            // d/dp acosh(x) = x' / sqrt(x² − 1)
+            self.ffun_unary_chain(ff, arg, |b, _primal, x, tx| {
+                let x_sq = b.mul(x, x);
+                let one = b.real(1.0);
+                let diff = b.sub(x_sq, one);
+                let denom = b.sqrt(diff);
+                b.div(tx, denom)
+            })
+        } else {
+            self.zero_tangent(sig)
+        }
     }
 
     /// Applies the chain rule for a unary signal node `f(x)`.
