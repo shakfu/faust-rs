@@ -1431,6 +1431,19 @@ fn candidate_loaded_source_paths(source_context: &EvalSourceContext, target: &st
         candidates.push(target_path);
         return candidates;
     }
+    // Global search paths (DSP file directory first) take priority over the
+    // current file's directory, matching C++ faust compiler semantics where a
+    // local platform.lib override in the DSP directory wins over the system
+    // library found next to stdfaust.lib.
+    for base in source_context.search_paths() {
+        let candidate = base.join(target);
+        if !candidates.iter().any(|existing| existing == &candidate) {
+            candidates.push(candidate);
+        }
+    }
+    // Current file's directory as fallback for relative-to-library imports not
+    // covered by the search paths (e.g. a library importing a sibling file
+    // from a directory that is not in the explicit search list).
     if let Some(current_file) = source_context.current_file() {
         let base = current_file.parent().unwrap_or_else(|| Path::new("."));
         let candidate = base.join(target);
@@ -1440,12 +1453,6 @@ fn candidate_loaded_source_paths(source_context: &EvalSourceContext, target: &st
     }
     if !candidates.iter().any(|existing| existing == &target_path) {
         candidates.push(target_path);
-    }
-    for base in source_context.search_paths() {
-        let candidate = base.join(target);
-        if !candidates.iter().any(|existing| existing == &candidate) {
-            candidates.push(candidate);
-        }
     }
     candidates
 }

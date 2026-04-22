@@ -183,18 +183,32 @@ impl EvalSourceContext {
     /// The [`SamplePrecision`] of the parent context is propagated to the child
     /// so that sub-files loaded via `component`/`library` share the same
     /// precision setting as the root evaluation session.
+    ///
+    /// Unlike [`Self::for_file_with_metadata`], this method preserves the
+    /// parent's search_paths order (DSP file directory stays at the front) and
+    /// only appends the loaded file's parent directory at the end if it is not
+    /// already present. This matches C++ faust compiler semantics: local library
+    /// overrides placed next to the DSP file win over system libraries, even for
+    /// imports made transitively from within system libraries (e.g. stdfaust.lib
+    /// importing platform.lib).
     #[must_use]
     pub fn for_loaded_file(&self, path: &Path) -> Self {
-        let mut child = match &self.metadata_store {
-            Some(metadata_store) => {
-                Self::for_file_with_metadata(path, &self.search_paths, metadata_store.clone())
+        let mut search_paths = self.search_paths.clone();
+        if let Some(parent) = path.parent() {
+            let parent = parent.to_path_buf();
+            if !search_paths.iter().any(|p| p == &parent) {
+                search_paths.push(parent);
             }
-            None => Self::for_file(path, &self.search_paths),
-        };
-        child.loaded_files = self.loaded_files.clone();
-        child.sample_precision = self.sample_precision;
-        child.virtual_sources = self.virtual_sources.clone();
-        child
+        }
+        Self {
+            current_file: Some(path.to_path_buf()),
+            search_paths,
+            virtual_sources: self.virtual_sources.clone(),
+            cache: Arc::default(),
+            loaded_files: self.loaded_files.clone(),
+            metadata_store: self.metadata_store.clone(),
+            sample_precision: self.sample_precision,
+        }
     }
 
     /// Returns the current file used as the primary relative-resolution anchor.
