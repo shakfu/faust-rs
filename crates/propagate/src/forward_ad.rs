@@ -586,7 +586,7 @@ impl<'a> ForwardADTransform<'a> {
                 let mut b = SigBuilder::new(self.arena);
                 let primal = b.min(dual_x.primal, dual_y.primal);
                 let cond = b.lt(dual_x.primal, dual_y.primal);
-                let tangent = b.select2(cond, dual_x.tangent, dual_y.tangent);
+                let tangent = b.select2(cond, dual_y.tangent, dual_x.tangent);
                 Dual { primal, tangent }
             }
             // Rule: d/dp max(x,y) = select2(x > y, x', y')
@@ -596,7 +596,7 @@ impl<'a> ForwardADTransform<'a> {
                 let mut b = SigBuilder::new(self.arena);
                 let primal = b.max(dual_x.primal, dual_y.primal);
                 let cond = b.gt(dual_x.primal, dual_y.primal);
-                let tangent = b.select2(cond, dual_x.tangent, dual_y.tangent);
+                let tangent = b.select2(cond, dual_y.tangent, dual_x.tangent);
                 Dual { primal, tangent }
             }
             // Rule: d/dp atan2(y, x) = (x·y' - y·x') / (x² + y²)
