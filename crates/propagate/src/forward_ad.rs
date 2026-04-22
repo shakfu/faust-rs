@@ -280,7 +280,10 @@
 
 use ahash::AHashMap;
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
-use tlib::{NodeKind, TreeArena, TreeId, list_to_vec, tree_to_int, tree_to_str, vec_to_list};
+use tlib::{
+    NodeKind, TreeArena, TreeId, de_bruijn_rec, list_to_vec, match_de_bruijn_rec,
+    match_de_bruijn_ref, tree_to_str, vec_to_list,
+};
 
 use crate::PropagateError;
 
@@ -358,45 +361,37 @@ impl<'a> ForwardADTransform<'a> {
         }
 
         // Rule: d/dp DEBRUIJNREF = DEBRUIJNREF (index shift happens at projection site)
+        if match_de_bruijn_ref(self.arena, sig).is_some() {
+            return Dual {
+                primal: sig,
+                tangent: sig,
+            };
+        }
         // Rule: d/dp DEBRUIJNREC(body) — interleave primals and tangents so that
         //       proj(i, rec) picks primal from slot 2i and tangent from slot 2i+1.
-        if let Some(node) = self.arena.node(sig).cloned() {
-            if let NodeKind::Tag(tag_id) = node.kind {
-                if let Some(tag) = self.arena.tag_name(tag_id) {
-                    if tag == super::DEBRUIJNREF_TAG {
-                        return Dual {
-                            primal: sig,
-                            tangent: sig,
-                        };
-                    }
-                    if tag == super::DEBRUIJNREC_TAG {
-                        let body = node.children.as_slice()[0];
-                        // Seed cache before recursing to handle back-edges.
-                        self.cache.insert(
-                            sig,
-                            Dual {
-                                primal: sig,
-                                tangent: sig,
-                            },
-                        );
-                        self.debruijn_depth += 1;
-                        let duals = self.transform_list(body);
-                        self.debruijn_depth -= 1;
-                        let mut expanded_body = Vec::with_capacity(duals.len() * 2);
-                        for dual in duals {
-                            expanded_body.push(dual.primal);
-                            expanded_body.push(dual.tangent);
-                        }
-                        let list_node = vec_to_list(self.arena, &expanded_body);
-                        let new_tag_id = self.arena.intern_tag(super::DEBRUIJNREC_TAG);
-                        let fad_rec = self.arena.intern(NodeKind::Tag(new_tag_id), &[list_node]);
-                        return Dual {
-                            primal: fad_rec,
-                            tangent: fad_rec,
-                        };
-                    }
-                }
+        if let Some(body) = match_de_bruijn_rec(self.arena, sig) {
+            // Seed cache before recursing to handle back-edges.
+            self.cache.insert(
+                sig,
+                Dual {
+                    primal: sig,
+                    tangent: sig,
+                },
+            );
+            self.debruijn_depth += 1;
+            let duals = self.transform_list(body);
+            self.debruijn_depth -= 1;
+            let mut expanded_body = Vec::with_capacity(duals.len() * 2);
+            for dual in duals {
+                expanded_body.push(dual.primal);
+                expanded_body.push(dual.tangent);
             }
+            let list_node = vec_to_list(self.arena, &expanded_body);
+            let fad_rec = de_bruijn_rec(self.arena, list_node);
+            return Dual {
+                primal: fad_rec,
+                tangent: fad_rec,
+            };
         }
 
         match match_sig(self.arena, sig) {
@@ -595,7 +590,10 @@ impl<'a> ForwardADTransform<'a> {
                 let x2 = b.mul(dual_x.primal, dual_x.primal);
                 let y2 = b.mul(dual_y.primal, dual_y.primal);
                 let denom = b.add(x2, y2);
-                Dual { primal, tangent: b.div(num, denom) }
+                Dual {
+                    primal,
+                    tangent: b.div(num, denom),
+                }
             }
             // Rule: d/dp fmod(x, y) = x' - y'·floor(x/y)
             // Derivation: fmod(x,y) = x - y·floor(x/y), differentiate both sides.
@@ -607,7 +605,10 @@ impl<'a> ForwardADTransform<'a> {
                 let raw_q = b.div(dual_x.primal, dual_y.primal);
                 let quotient = b.floor(raw_q);
                 let scaled = b.mul(dual_y.tangent, quotient);
-                Dual { primal, tangent: b.sub(dual_x.tangent, scaled) }
+                Dual {
+                    primal,
+                    tangent: b.sub(dual_x.tangent, scaled),
+                }
             }
             // Rule: d/dp remainder(x, y) = x' - y'·round(x/y)
             // Derivation: remainder(x,y) = x - y·round(x/y), differentiate both sides.
@@ -619,7 +620,10 @@ impl<'a> ForwardADTransform<'a> {
                 let raw_q = b.div(dual_x.primal, dual_y.primal);
                 let quotient = b.round(raw_q);
                 let scaled = b.mul(dual_y.tangent, quotient);
-                Dual { primal, tangent: b.sub(dual_x.tangent, scaled) }
+                Dual {
+                    primal,
+                    tangent: b.sub(dual_x.tangent, scaled),
+                }
             }
             // Rule: d/dp delay1(x) = delay1(x')  — unit delay is linear
             SigMatch::Delay1(x) => {
@@ -728,24 +732,13 @@ impl<'a> ForwardADTransform<'a> {
                     UnboundRef,
                     Other,
                 }
-                let kind = if let Some(node) = self.arena.node(group) {
-                    if let NodeKind::Tag(tag_id) = node.kind {
-                        let tag = self.arena.tag_name(tag_id).unwrap_or("");
-                        if tag == super::DEBRUIJNREC_TAG {
-                            GroupKind::BoundRec
-                        } else if tag == super::DEBRUIJNREF_TAG {
-                            let level =
-                                tree_to_int(self.arena, node.children.as_slice()[0]).unwrap_or(1);
-                            if level <= self.debruijn_depth {
-                                GroupKind::BoundRec
-                            } else {
-                                GroupKind::UnboundRef
-                            }
-                        } else {
-                            GroupKind::Other
-                        }
+                let kind = if match_de_bruijn_rec(self.arena, group).is_some() {
+                    GroupKind::BoundRec
+                } else if let Some(level) = match_de_bruijn_ref(self.arena, group) {
+                    if level <= self.debruijn_depth {
+                        GroupKind::BoundRec
                     } else {
-                        GroupKind::Other
+                        GroupKind::UnboundRef
                     }
                 } else {
                     GroupKind::Other
@@ -801,7 +794,10 @@ impl<'a> ForwardADTransform<'a> {
                         let tanh_sq = b.mul(primal, primal);
                         let one = b.real(1.0);
                         let sech_sq = b.sub(one, tanh_sq);
-                        Dual { primal, tangent: b.mul(sech_sq, dual_x.tangent) }
+                        Dual {
+                            primal,
+                            tangent: b.mul(sech_sq, dual_x.tangent),
+                        }
                     } else if Self::ffun_is(self.arena, ff, &["sinhf", "sinh", "sinhl"]) {
                         // d/dp sinh(x) = x' · cosh(x)
                         // cosh is also an external ffunction, so we derive it from the
@@ -814,7 +810,10 @@ impl<'a> ForwardADTransform<'a> {
                         let one = b.real(1.0);
                         let one_plus_sq = b.add(one, sinh_sq);
                         let cosh_x = b.sqrt(one_plus_sq); // sqrt(1 + sinh²) = cosh, cosh ≥ 0
-                        Dual { primal, tangent: b.mul(cosh_x, dual_x.tangent) }
+                        Dual {
+                            primal,
+                            tangent: b.mul(cosh_x, dual_x.tangent),
+                        }
                     } else if Self::ffun_is(self.arena, ff, &["coshf", "cosh", "coshl"]) {
                         // d/dp cosh(x) = x' · sinh(x)
                         // sinh is also an external ffunction; compute via exp identity:
@@ -830,7 +829,10 @@ impl<'a> ForwardADTransform<'a> {
                         let diff = b.sub(exp_x, exp_neg_x);
                         let half = b.real(0.5);
                         let sinh_x = b.mul(half, diff);
-                        Dual { primal, tangent: b.mul(sinh_x, dual_x.tangent) }
+                        Dual {
+                            primal,
+                            tangent: b.mul(sinh_x, dual_x.tangent),
+                        }
                     } else if Self::ffun_is(self.arena, ff, &["atanhf", "atanh", "atanhl"]) {
                         // d/dp atanh(x) = x' / (1 − x²)
                         let dual_x = self.transform(args[0]);
@@ -840,7 +842,10 @@ impl<'a> ForwardADTransform<'a> {
                         let x_sq = b.mul(dual_x.primal, dual_x.primal);
                         let one = b.real(1.0);
                         let denom = b.sub(one, x_sq);
-                        Dual { primal, tangent: b.div(dual_x.tangent, denom) }
+                        Dual {
+                            primal,
+                            tangent: b.div(dual_x.tangent, denom),
+                        }
                     } else if Self::ffun_is(self.arena, ff, &["asinhf", "asinh", "asinhl"]) {
                         // d/dp asinh(x) = x' / sqrt(1 + x²)
                         let dual_x = self.transform(args[0]);
@@ -851,7 +856,10 @@ impl<'a> ForwardADTransform<'a> {
                         let one = b.real(1.0);
                         let sum = b.add(one, x_sq);
                         let denom = b.sqrt(sum);
-                        Dual { primal, tangent: b.div(dual_x.tangent, denom) }
+                        Dual {
+                            primal,
+                            tangent: b.div(dual_x.tangent, denom),
+                        }
                     } else if Self::ffun_is(self.arena, ff, &["acoshf", "acosh", "acoshl"]) {
                         // d/dp acosh(x) = x' / sqrt(x² − 1)
                         let dual_x = self.transform(args[0]);
@@ -862,7 +870,10 @@ impl<'a> ForwardADTransform<'a> {
                         let one = b.real(1.0);
                         let diff = b.sub(x_sq, one);
                         let denom = b.sqrt(diff);
-                        Dual { primal, tangent: b.div(dual_x.tangent, denom) }
+                        Dual {
+                            primal,
+                            tangent: b.div(dual_x.tangent, denom),
+                        }
                     } else {
                         Dual {
                             primal: sig,
@@ -893,14 +904,30 @@ impl<'a> ForwardADTransform<'a> {
     /// symbol per precision variant (f32 index 0, f64 index 1, long-double index 2).
     /// Checking all slots makes the match precision-agnostic.
     fn ffun_is(arena: &TreeArena, ff: SigId, targets: &[&str]) -> bool {
-        let Some(node) = arena.node(ff) else { return false };
-        let NodeKind::Tag(tag_id) = node.kind else { return false };
-        if arena.tag_name(tag_id) != Some("FFUN") { return false }
-        let [signature, _, _] = node.children.as_slice() else { return false };
-        let Some(sig_items) = list_to_vec(arena, *signature) else { return false };
-        let Some(names_node) = sig_items.get(1) else { return false };
-        let Some(name_ids) = list_to_vec(arena, *names_node) else { return false };
-        name_ids.iter().any(|id| tree_to_str(arena, *id).is_some_and(|n| targets.contains(&n)))
+        let Some(node) = arena.node(ff) else {
+            return false;
+        };
+        let NodeKind::Tag(tag_id) = node.kind else {
+            return false;
+        };
+        if arena.tag_name(tag_id) != Some("FFUN") {
+            return false;
+        }
+        let [signature, _, _] = node.children.as_slice() else {
+            return false;
+        };
+        let Some(sig_items) = list_to_vec(arena, *signature) else {
+            return false;
+        };
+        let Some(names_node) = sig_items.get(1) else {
+            return false;
+        };
+        let Some(name_ids) = list_to_vec(arena, *names_node) else {
+            return false;
+        };
+        name_ids
+            .iter()
+            .any(|id| tree_to_str(arena, *id).is_some_and(|n| targets.contains(&n)))
     }
 
     /// Applies the chain rule for a unary signal node `f(x)`.

@@ -243,7 +243,10 @@ fn assert_fad_hyperbolic(dsp: &'static str) {
         .join()
         .expect("worker thread should finish");
     assert_eq!(out.process_arity.inputs, 0);
-    assert_eq!(out.process_arity.outputs, 2, "{dsp}: must emit [primal, tangent]");
+    assert_eq!(
+        out.process_arity.outputs, 2,
+        "{dsp}: must emit [primal, tangent]"
+    );
     assert_eq!(out.signals.len(), 2);
     assert_eq!(out.ui.controls.len(), 1);
     assert!(

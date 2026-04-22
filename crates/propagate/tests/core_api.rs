@@ -1774,7 +1774,11 @@ fn fad_on_tanh_ffun_produces_sech_squared_tangent() {
         .expect("fad(tanh(p), p) should propagate");
 
     // 2 outputs: primal and tangent.
-    assert_eq!(result.len(), 2, "fad(tanh(p), p) must emit [primal, tangent]");
+    assert_eq!(
+        result.len(),
+        2,
+        "fad(tanh(p), p) must emit [primal, tangent]"
+    );
 
     // Tangent should not be the constant 0.0 — it is (1 - tanh²(p)) · sech².
     let tangent = result[1];
