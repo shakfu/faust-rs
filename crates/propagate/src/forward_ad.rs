@@ -167,28 +167,60 @@
 //! symbolic form (`SYMREC` / `SYMREF`); `de_bruijn_to_sym` runs once in
 //! `signal_prepare` *after* FAD, over all process outputs together.
 //!
+//! ### Three interacting quantities
+//!
+//! FAD's index bookkeeping rests on three distinct notions:
+//!
+//! - **Level** (payload on `DEBRUIJNREF`): a static integer `k` meaning
+//!   "the `k`-th enclosing `DEBRUIJNREC`, innermost = 1". FAD never
+//!   rewrites this value — it is a property of the node.
+//! - **`debruijn_depth`** (traversal counter on [`ForwardADTransform`]):
+//!   incremented only when FAD *enters* a `DEBRUIJNREC` body and
+//!   interleaves it (see [`ForwardADTransform::transform_uncached`]).
+//!   It counts the RECs that FAD itself has rewritten on the current path
+//!   from the top-level output signal being differentiated — not all
+//!   RECs in the program.
+//! - **Slot index** (integer on a `Proj` node): selects one element from
+//!   a REC body. After interleaving `[p0, t0, p1, t1, …]`, the original
+//!   index `i` maps to primal slot `2i` and tangent slot `2i+1`.
+//!
+//! ### `DEBRUIJNREC(body)`
+//!
+//! The body list is differentiated and the primal/tangent pairs are
+//! **interleaved**: `[p0, t0, p1, t1, …]`.  One new `DEBRUIJNREC` node
+//! thus carries both the primal and tangent recurrence:
+//! ```text
+//! d/dp DEBRUIJNREC([e0, e1, …]) =
+//!     DEBRUIJNREC([primal(e0), tangent(e0), primal(e1), tangent(e1), …])
+//! ```
+//! A placeholder is inserted into the cache before recursing so that
+//! back-edges inside the body resolve without loop.
+//!
 //! ### `DEBRUIJNREF`
 //! ```text
 //! d/dp DEBRUIJNREF = DEBRUIJNREF
 //! ```
-//! The index shift is resolved at the projection site (see `Proj` arm).
+//! The node itself is unchanged; the index adjustment (if any) is
+//! resolved at the **projection site** based on whether the referenced
+//! REC was interleaved by FAD or not.
 //!
-//! ### `DEBRUIJNREC(body)`
-//! The body list is differentiated and the primal/tangent pairs are
-//! **interleaved**: `[p0, t0, p1, t1, …]`.  This lets a single new
-//! `DEBRUIJNREC` node carry both the primal and tangent recurrence; the
-//! `Proj` arm then doubles the index to read the right slot:
-//! ```text
-//! d/dp DEBRUIJNREC([e0, e1, …]) =
-//!     DEBRUIJNREC([primal(e0), tangent(e0), primal(e1), tangent(e1), …])
-//! d/dp proj(i, DEBRUIJNREC) = proj(2i+1, fad_rec)   (tangent slot)
-//!      primal proj(i, _)    = proj(2i,   fad_rec)    (primal slot)
-//! ```
-//! A `DEBRUIJNREF` inside the body whose de Bruijn level is ≤ the current
-//! FAD nesting depth is treated as a bound reference and its index is
-//! doubled accordingly.  A reference whose level exceeds the depth refers
-//! to an outer recursive loop that is not being differentiated; its tangent
-//! is zero and its primal index is unchanged.
+//! ### `Proj(i, group)` — index classification
+//!
+//! The projection arm inspects `group` and applies one of four rules:
+//!
+//! | Group | Meaning | Primal index | Tangent |
+//! |-------|---------|--------------|---------|
+//! | `DEBRUIJNREC` (directly) | FAD just rewrote this REC; body is interleaved | `2i` | `proj(2i+1, …)` |
+//! | `DEBRUIJNREF` with `level ≤ debruijn_depth` | Points into a REC that FAD entered and interleaved on this path | `2i` | `proj(2i+1, …)` |
+//! | `DEBRUIJNREF` with `level > debruijn_depth` | Points to a REC *enclosing* FAD's entry point (e.g. an outer FxLMS-bank loop): that REC was never interleaved | `i` (unchanged) | `0` |
+//! | Other | Unreachable in the de-Bruijn-only pipeline; defensive identity | `i` | `proj(i, …)` |
+//!
+//! The `level > debruijn_depth` case can only arise when `fad(...)` is
+//! applied to an inner sub-expression that contains a `DEBRUIJNREF`
+//! whose target REC encloses the call site. FAD never entered that
+//! outer REC, so its body was not doubled; the reference keeps its
+//! original slot number and its tangent is zero (the outer loop is not
+//! being differentiated).
 //!
 //! The `de_bruijn_to_sym` conversion is deferred to `signal_prepare`, where
 //! it runs once over all process outputs through one `Converter` instance.
@@ -660,31 +692,37 @@ impl<'a> ForwardADTransform<'a> {
                     tangent: b.int(0),
                 }
             }
-            // Rule: d/dp proj(i, g) = proj(i, d(g)/dp)  — projection is linear.
-            // De Bruijn recursion bodies are interleaved [p0, t0, p1, t1, ...], so
-            // index i maps to primal slot 2i and tangent slot 2i+1.  A DEBRUIJNREF
-            // that escapes the current FAD depth refers to an outer loop not being
-            // differentiated: its tangent is zero.
+            // Rule: d/dp proj(i, g) = proj(i, d(g)/dp)  — projection is linear,
+            // but the slot index must be adjusted to account for FAD's interleaving
+            // of DEBRUIJNREC bodies into [p0, t0, p1, t1, ...].
+            //
+            // See the "Projection and recursive groups" section of the module
+            // docstring for the full scheme (level vs debruijn_depth vs slot index).
             SigMatch::Proj(index, group) => {
                 let dual_group = self.transform(group);
-                // Classifies the group node to decide how to compute the projected index.
+                // Classify the group node to pick the index/tangent rule.
                 //
-                // `BoundRec`  — group is a DEBRUIJNREC whose body was interleaved by
-                //               the transform above, or a DEBRUIJNREF whose de Bruijn
-                //               level is ≤ debruijn_depth (i.e. bound inside a FAD
-                //               scope we opened).  Primal lives at slot 2i, tangent at
-                //               slot 2i+1.
+                // `BoundRec`   — group is a DEBRUIJNREC whose body was interleaved
+                //                by the DEBRUIJNREC arm above, or a DEBRUIJNREF
+                //                whose level ≤ debruijn_depth (i.e. it resolves to
+                //                a REC that FAD entered and doubled on this path).
+                //                Primal slot = 2i, tangent slot = 2i+1.
                 //
                 // `UnboundRef` — group is a DEBRUIJNREF with level > debruijn_depth:
-                //               it refers to a recursive loop that is outside the FAD
-                //               scope (e.g. the 64-tap outer loop in an FxLMS bank).
-                //               That loop was never interleaved, so the index is
-                //               unchanged and the tangent is zero.
+                //                it refers to a REC enclosing FAD's entry point
+                //                (e.g. the 64-tap outer loop in an FxLMS bank when
+                //                fad() is applied to the inner expression). That
+                //                REC was never interleaved, so the slot index stays
+                //                unchanged and the tangent is zero — the outer
+                //                loop is not being differentiated.
                 //
-                // `Other`     — group is a SYMREC or any non-tag node (normal
-                //               symbolic recursion, already fully separated into
-                //               primal and tangent groups by the SYMREC arm above).
-                //               Standard index, standard tangent projection.
+                // `Other`      — defensive fallback: any group that is neither a
+                //                DEBRUIJNREC nor a DEBRUIJNREF tag node. The
+                //                propagate→FAD pipeline only emits de Bruijn form
+                //                (SYMREC/SYMREF appear only after de_bruijn_to_sym,
+                //                which runs *after* FAD), so this branch is
+                //                unreachable on well-formed input. Kept as an
+                //                identity projection to keep the transform total.
                 enum GroupKind {
                     BoundRec,
                     UnboundRef,
