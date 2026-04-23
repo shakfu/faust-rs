@@ -2503,24 +2503,26 @@ fn propagate_inner(
                 ctx.suppress_fad = true;
             }
 
-            let l0 = make_mem_sig_proj_list(arena, right_arity.inputs)?;
-            let l1 = propagate_in_slot_env(arena, right, &l0, ctx)?;
-
-            let mut rec_inputs = l1;
-            rec_inputs.extend(lift_signals(arena, inputs, ctx.memo));
-
             // Lift all slot_env values by 1 de Bruijn level before entering this Rec scope.
-            // This mirrors C++ `lift(slotenv)` (propagate.cpp line 495): the C++ slotenv is a
-            // Tree cons-list so `lift` walks it structurally. Here we apply `liftn(..., 1)` to
-            // each value individually for the same effect. Without lifting, slot_env entries
-            // that contain DEBRUIJNREF nodes from an enclosing Rec would be captured by the
-            // inner DEBRUIJNREC binder instead of the intended outer one.
+            // Both `right` (feedback branch) and `left` (main body) are semantically evaluated
+            // inside the new Rec binder — their result signals live under a fresh `DEBRUIJNREC`
+            // where `DEBRUIJNREF(1)` is the inner group. Any slot lookup that reaches a signal
+            // built in the enclosing scope must therefore be shifted by one level so its
+            // references still point to the intended outer binder after the new `DEBRUIJNREC`
+            // is inserted. This must happen BEFORE propagating `right`, because `right` produces
+            // `l1`, which is spliced into the inner body as part of `rec_inputs`.
             let lifted_slot_env: SlotEnv = ctx
                 .slot_env
                 .iter()
                 .map(|(k, v)| (*k, liftn(arena, *v, 1, ctx.memo)))
                 .collect();
             let saved_slot_env = std::mem::replace(ctx.slot_env, lifted_slot_env);
+
+            let l0 = make_mem_sig_proj_list(arena, right_arity.inputs)?;
+            let l1 = propagate_in_slot_env(arena, right, &l0, ctx)?;
+
+            let mut rec_inputs = l1;
+            rec_inputs.extend(lift_signals(arena, inputs, ctx.memo));
 
             let l2 = propagate_in_slot_env(arena, left, &rec_inputs, ctx)?;
 
