@@ -1829,8 +1829,8 @@ fn propagate_forward_ad_on_recursive_circuit_expands_outputs() {
 
 #[test]
 fn propagate_forward_ad_on_recursive_circuit_has_interleaved_debruijn_structure() {
-    // Primal = proj(0, original_rec).
-    // Tangent = proj(1, fad_rec) where fad_rec has 2 body slots (interleaved).
+    // The unified transform now projects both primal and tangent from the same
+    // interleaved recursive group.
     let mut arena = TreeArena::new();
     let (flat, _) = make_fad_one_pole(&mut arena);
     let out = propagate_typed_with_ui(&mut arena, flat, &[], &mut ArityCache::new())
@@ -1859,8 +1859,9 @@ fn propagate_forward_ad_on_recursive_circuit_has_interleaved_debruijn_structure(
     let slots = list_to_vec(&arena, fad_body).expect("body is a list");
     assert_eq!(slots.len(), 2, "interleaved body: [primal_e0, tangent_e0]");
 
-    // The primal and tangent groups are distinct nodes.
-    assert_ne!(primal_group, tangent_group);
+    // The primal and tangent lanes now share one differentiated recursive
+    // group; only the projected slot differs.
+    assert_eq!(primal_group, tangent_group);
 }
 
 fn is_debruijn_rec(arena: &TreeArena, id: TreeId) -> bool {

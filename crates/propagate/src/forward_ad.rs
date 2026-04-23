@@ -13,15 +13,12 @@
 //! - Keep reverse-mode (`rad`) explicitly out of scope for this phase.
 //!
 //! # Current architecture
-//! [`ForwardADTransform`] now carries one tangent lane per selected seed inside
-//! one internal dual-number carrier. This keeps the differentiation rules,
-//! recursion bookkeeping, and seed lifting expressed once in the transformer
-//! rather than duplicated across several one-seed carrier types.
-//!
-//! The public entry point [`generate_fad_signals_multi`] still drives one
-//! transformer per seed at this stage of the refactor, so externally observed
-//! output ordering is unchanged while the internal lane arithmetic is already
-//! generalized.
+//! [`ForwardADTransform`] carries one tangent lane per selected seed inside
+//! one internal dual-number carrier, and [`generate_fad_signals_multi`]
+//! drives one transformer for the whole seed set. This keeps the
+//! differentiation rules, recursion bookkeeping, and seed lifting expressed
+//! once in the transformer and lets recursive groups share one interleaved
+//! `DEBRUIJNREC` instead of rebuilding one private primal shadow per seed.
 //!
 //! # Dual-number algebra
 //! Forward-mode AD (FAD) propagates derivatives alongside values by carrying a
@@ -228,11 +225,10 @@
 //! 2. for each primal, emit one tangent per seed in the seed list's order.
 //!
 //! # Recursive code generation note
-//! During this refactor stage, the public multi-seed expansion still drives one
-//! transformer per seed, so downstream codegen may continue to materialize
-//! duplicated AD-local primal shadow recursions. Those shadows are semantically
-//! valid and feed the tangent recurrences; the later refactor step collapses
-//! them into one shared recursion group.
+//! The unified multi-seed transform reuses the primal slot already present in
+//! the differentiated recursive group. For recursive programs this removes the
+//! previous "one AD-local primal shadow recursion per seed" pattern and makes
+//! primal/tangent outputs project into the same interleaved `DEBRUIJNREC`.
 
 use ahash::AHashMap;
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
@@ -1028,22 +1024,16 @@ pub(super) fn generate_fad_signals_multi(
         return Ok(outputs.to_vec());
     }
 
-    let mut tangent_rows: Vec<Vec<SigId>> = Vec::with_capacity(seeds.len());
-    for &seed in seeds {
-        let mut fad = ForwardADTransform::new(arena, &[seed]);
-        let row = outputs
-            .iter()
-            .map(|&sig| fad.transform(sig).tangents[0])
-            .collect::<Vec<_>>();
-        tangent_rows.push(row);
-    }
+    let mut fad = ForwardADTransform::new(arena, seeds);
+    let duals = outputs
+        .iter()
+        .map(|&sig| fad.transform(sig))
+        .collect::<Vec<_>>();
 
     let mut result = Vec::with_capacity(outputs.len() * (1 + seeds.len()));
-    for (i, &p) in outputs.iter().enumerate() {
-        result.push(p);
-        for row in &tangent_rows {
-            result.push(row[i]);
-        }
+    for dual in duals {
+        result.push(dual.primal);
+        result.extend(dual.tangents);
     }
     Ok(result)
 }

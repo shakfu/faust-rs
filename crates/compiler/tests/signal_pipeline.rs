@@ -469,14 +469,16 @@ fn corpus_fad_recursive_parametric_self_compiles_through_full_signal_pipeline() 
     assert_eq!(out.process_arity.outputs, 2);
     assert_eq!(out.signals.len(), 2);
     assert_eq!(out.ui.controls.len(), 1);
-    assert!(matches!(
-        match_sig(&out.parse.state.arena, out.signals[0]),
-        SigMatch::Proj(_, _)
-    ));
-    assert!(matches!(
-        match_sig(&out.parse.state.arena, out.signals[1]),
-        SigMatch::Proj(_, _)
-    ));
+    let SigMatch::Proj(_, primal_group) = match_sig(&out.parse.state.arena, out.signals[0]) else {
+        panic!("fad_recursive_parametric_self primal output should be a recursive projection");
+    };
+    let SigMatch::Proj(_, tangent_group) = match_sig(&out.parse.state.arena, out.signals[1]) else {
+        panic!("fad_recursive_parametric_self tangent output should be a recursive projection");
+    };
+    assert_eq!(
+        primal_group, tangent_group,
+        "unified FAD recursion should project primal and tangent from the same recursive group"
+    );
 }
 
 #[test]
@@ -509,6 +511,28 @@ fn corpus_fad_recursive_multi_output_parametric_compiles_through_full_signal_pip
             SigMatch::Proj(_, _)
         ));
     }
+}
+
+#[test]
+fn corpus_fad_recursive_multi_seed_shared_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_multi_seed_shared.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 3);
+    assert_eq!(out.signals.len(), 3);
+    assert_eq!(out.ui.controls.len(), 2);
+
+    let mut groups = Vec::new();
+    for sig in &out.signals {
+        let SigMatch::Proj(_, group) = match_sig(&out.parse.state.arena, *sig) else {
+            panic!("fad_recursive_multi_seed_shared outputs should all be recursive projections");
+        };
+        groups.push(group);
+    }
+
+    assert!(
+        groups.windows(2).all(|window| window[0] == window[1]),
+        "unified multi-seed FAD recursion should project every output from the same recursive group"
+    );
 }
 
 #[test]

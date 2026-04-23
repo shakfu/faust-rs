@@ -276,3 +276,90 @@ process = si.bus(2) ~ ((*(p), *(0.25)) : ro.cross(2));
         build_primal_source: primal_source,
     });
 }
+
+#[test]
+fn fastlane_interp_multi_seed_recursive_fad_matches_central_difference_per_seed() {
+    fn fad_source(a: f32, b: f32) -> String {
+        format!(
+            r#"
+a = hslider("a", {a}, -0.9, 0.9, 0.001);
+b = hslider("b", {b}, -2.0, 2.0, 0.001);
+process = fad((b : + ~ *(a)), (a, b));
+"#
+        )
+    }
+
+    fn primal_source(a: f32, b: f32) -> String {
+        format!(
+            r#"
+a = hslider("a", {a}, -0.9, 0.9, 0.001);
+b = hslider("b", {b}, -2.0, 2.0, 0.001);
+process = (b : + ~ *(a));
+"#
+        )
+    }
+
+    let base_a = 0.2_f32;
+    let base_b = 1.0_f32;
+    let epsilon = 1.0e-3_f32;
+    let frame_count = 8;
+
+    let fad_outputs = run_interp_temp_source(
+        "fad-multi-seed-recursive-fad",
+        &fad_source(base_a, base_b),
+        frame_count,
+    );
+    let primal_outputs = run_interp_temp_source(
+        "fad-multi-seed-recursive-primal",
+        &primal_source(base_a, base_b),
+        frame_count,
+    );
+    let primal_plus_a = run_interp_temp_source(
+        "fad-multi-seed-recursive-plus-a",
+        &primal_source(base_a + epsilon, base_b),
+        frame_count,
+    );
+    let primal_minus_a = run_interp_temp_source(
+        "fad-multi-seed-recursive-minus-a",
+        &primal_source(base_a - epsilon, base_b),
+        frame_count,
+    );
+    let primal_plus_b = run_interp_temp_source(
+        "fad-multi-seed-recursive-plus-b",
+        &primal_source(base_a, base_b + epsilon),
+        frame_count,
+    );
+    let primal_minus_b = run_interp_temp_source(
+        "fad-multi-seed-recursive-minus-b",
+        &primal_source(base_a, base_b - epsilon),
+        frame_count,
+    );
+
+    assert_eq!(fad_outputs.len(), 3);
+    assert_eq!(primal_outputs.len(), 1);
+
+    for frame in 0..frame_count {
+        assert_close(
+            fad_outputs[0][frame],
+            primal_outputs[0][frame],
+            2.0e-3,
+            &format!("fad-multi-seed-recursive primal frame {frame}"),
+        );
+
+        let expected_da = (primal_plus_a[0][frame] - primal_minus_a[0][frame]) / (2.0 * epsilon);
+        assert_close(
+            fad_outputs[1][frame],
+            expected_da,
+            2.0e-3,
+            &format!("fad-multi-seed-recursive da frame {frame}"),
+        );
+
+        let expected_db = (primal_plus_b[0][frame] - primal_minus_b[0][frame]) / (2.0 * epsilon);
+        assert_close(
+            fad_outputs[2][frame],
+            expected_db,
+            2.0e-3,
+            &format!("fad-multi-seed-recursive db frame {frame}"),
+        );
+    }
+}
