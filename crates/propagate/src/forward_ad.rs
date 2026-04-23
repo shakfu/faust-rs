@@ -186,10 +186,10 @@
 //! | `asinh(x)` | `asinhf` / `asinh` / `asinhl` | `x' / sqrt(1 + x²)` | |
 //! | `acosh(x)` | `acoshf` / `acosh` / `acoshl` | `x' / sqrt(x² − 1)` | |
 //!
-//! Unrecognized FFUN calls, non-unary FFUNs, table reads/writes, soundfile
-//! accessors, waveforms, on-demand up/downsampling, `Gen`, `PermVar`,
-//! `TempVar`, and every other unmatched signal variant fall through to a zero
-//! tangent with the primal unchanged.
+//! Unrecognized FFUN calls, non-unary FFUNs, table writes, soundfile
+//! accessors, standalone waveforms, on-demand up/downsampling, `Gen`,
+//! `PermVar`, `TempVar`, and every other unmatched signal variant fall
+//! through to a zero tangent with the primal unchanged.
 //!
 //! ## Cast operators
 //!
@@ -222,6 +222,34 @@
 //!                  − d'(n) · ∇x[n − d(n)]
 //! ```
 //! where `∇x[n−d]` is approximated as `delay(x − delay1(x), d)`.
+//!
+//! ## Read-only table reads
+//!
+//! `SIGRDTBL(table, idx)` is differentiable when `table` is a read-only table
+//! source:
+//!
+//! - `SIGWAVEFORM(...)`
+//! - `SIGWRTBL(size, generator, nil, nil)` produced by read-only table forms
+//!
+//! The table payload is treated as constant data. FAD differentiates only
+//! through the read address:
+//!
+//! ```text
+//! y = rdtbl(T, i)
+//! y' = dT/di(i) · i'
+//! dT/di(i) ≈ (rdtbl(T, i + 1) - rdtbl(T, i - 1)) / 2
+//! ```
+//!
+//! This is a deliberate Rust-side approximation model, not a claim of exact
+//! source-level parity with the Faust C++ compiler.
+//!
+//! Important boundaries:
+//!
+//! - the read uses the existing runtime table semantics for bounds handling;
+//!   FAD does not invent extra wrap/clamp rules around `i ± 1`
+//! - table contents are not differentiated
+//! - writable tables stay outside the differentiable subset and emit zero
+//!   tangents even when wrapped in `SIGRDTBL`
 //!
 //! ## Control-flow nodes
 //!
@@ -324,7 +352,7 @@
 //! | `button`, `checkbox` | zero tangent | event-like / piecewise-constant control |
 //! | `int_cast`, `bit_cast` | zero tangent | discontinuous or representation-level operation |
 //! | unknown `FFun` / non-unary `FFun` | zero tangent | no trusted derivative rule in this pass |
-//! | tables, soundfiles, waveforms, `Gen`, `PermVar`, `TempVar` | zero tangent | not yet modeled as differentiable primitives |
+//! | writable-table reads/writes, soundfiles, standalone waveforms, `Gen`, `PermVar`, `TempVar` | zero tangent | mutable or not yet modeled as differentiable primitives |
 //! | unmatched / defensive fallback variants | zero tangent | preserve compilation robustness while keeping the primal |
 //!
 //! This is a support boundary, not a claim that the mathematical derivative is

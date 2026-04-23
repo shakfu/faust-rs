@@ -104,6 +104,15 @@ This snapshot is based on:
   - `crates/compiler/tests/fad_recursive_runtime.rs`
   - `porting/fad-n-lanes-unified-rec-plan-2026-04-23-en.md`
   - `porting/journal/2026-04-23.md`
+- read-only table/waveform FAD extension on 2026-04-23 reviewed against:
+  - `crates/propagate/src/forward_ad.rs`
+  - `crates/compiler/tests/signal_pipeline.rs`
+  - `crates/compiler/tests/fad_recursive_runtime.rs`
+  - `tests/corpus/fad_waveform_index_basic.dsp`
+  - `tests/corpus/fad_rdtbl_index_basic.dsp`
+  - `tests/corpus/fad_recursive_waveform_index.dsp`
+  - `tests/corpus/fad_rwtable_index_zero_tangent.dsp`
+  - `porting/journal/2026-04-23.md`
 
 The corresponding generated reports are:
 
@@ -254,12 +263,19 @@ prototype subset. On the tracked corpus, it includes:
   afterwards in `signal_prepare`. The current Rust implementation also
   differs intentionally from Faust C++ in one optimization-sensitive area:
   a single transform now carries all seed lanes through one unified recursive
-  group instead of rebuilding one recursive primal shadow per seed.
+  group instead of rebuilding one recursive primal shadow per seed. As of
+  2026-04-23, read-only lookup forms are also in scope: `fad` now
+  differentiates `SIGRDTBL` when the table source is a waveform literal or a
+  read-only generated table, using a documented symmetric finite-difference
+  approximation over the read index
+  `((rdtbl(T, i + 1) - rdtbl(T, i - 1)) / 2) * i'`. This is an `adapted`
+  Rust extension rather than a claim of exact Faust C++ parity.
   The supported differentiable subset remains explicit-rule-driven: unknown
-  `FFun`s, tables/soundfiles/waveforms, integer-only/bitwise operators,
-  `int_cast`/`bit_cast`, discrete controls (`button`, `checkbox`) and other
-  unmatched signal families currently preserve the primal and emit zero
-  tangents rather than claiming a derivative model that has not been ported.
+  `FFun`s, writable table reads/writes, soundfiles, standalone waveforms,
+  integer-only/bitwise operators, `int_cast`/`bit_cast`, discrete controls
+  (`button`, `checkbox`) and other unmatched signal families currently
+  preserve the primal and emit zero tangents rather than claiming a
+  derivative model that has not been ported.
 
 Stated differently:
 
