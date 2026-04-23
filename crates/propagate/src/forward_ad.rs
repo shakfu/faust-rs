@@ -20,6 +20,18 @@
 //! once in the transformer and lets recursive groups share one interleaved
 //! `DEBRUIJNREC` instead of rebuilding one private primal shadow per seed.
 //!
+//! Internally, one differentiated signal is represented as:
+//!
+//! ```text
+//! Dual {
+//!   primal,
+//!   tangents = [d/ds0, d/ds1, …, d/ds{N-1}]
+//! }
+//! ```
+//!
+//! where the seed order is exactly the order of the lowered seed outputs passed
+//! by `fad(expr, seed_box)`.
+//!
 //! # Dual-number algebra
 //! Forward-mode AD (FAD) propagates derivatives alongside values by carrying a
 //! *tangent* component next to each signal. A **dual signal** is written
@@ -34,11 +46,24 @@
 //! fires at each occurrence. The transform short-circuits at that leaf and
 //! never descends into the seed's own recursive body.
 //!
+//! Repeated seeds are preserved by lane index, not deduplicated semantically:
+//! if the seed box lowers to `[s, s]`, the differentiated output bundle still
+//! exposes two tangent lanes in that same order.
+//!
 //! When the seed expression carries free `DEBRUIJNREF` nodes, crossing a
 //! `DEBRUIJNREC` scope shifts those references by one level. The transform
 //! therefore lifts every active seed on entry into each REC body (and
 //! restores the previous seed vector on exit) so `SigId` equality keeps
 //! matching under the new scope.
+//!
+//! The transform maintains two internal seed views:
+//!
+//! - `diff_seeds: Vec<SigId>` preserves deterministic lane order,
+//! - `diff_seed_index: AHashMap<SigId, SmallVec<[usize; 2]>>` provides the
+//!   reverse lookup from one `SigId` to one or more tangent lanes.
+//!
+//! This keeps seed recognition explicit while avoiding a linear scan over the
+//! seed list at every visited node.
 //!
 //! # Differentiation rules by node kind
 //!
@@ -105,12 +130,17 @@
 //! ```text
 //! d/dp x^y = x^y · (y' · ln(x) + y · x' / x)
 //! ```
+//! Both `x` and `y` may depend on the active seeds. The primal term `x^y` and
+//! the common scalar factors are hoisted once, then one tangent lane is emitted
+//! per seed.
 //!
 //! ### `min(x, y)` / `max(x, y)`
 //! ```text
 //! d/dp min(x,y) = select2(x < y, x', y')
 //! d/dp max(x,y) = select2(x > y, x', y')
 //! ```
+//! The selector comes from the primal comparison. The tangent is piecewise
+//! constant and uses the chosen branch's tangent lane.
 //!
 //! ### `atan2(y, x)`
 //! ```text
@@ -126,6 +156,29 @@
 //! ```text
 //! d/dp remainder(x, y) = x' − y'·round(x/y)
 //! ```
+//!
+//! ## Foreign functions (`FFun`)
+//!
+//! Foreign functions are matched by name against a known-differentiable set.
+//! The FFUN descriptor carries one name per precision variant; all slots are
+//! checked so the match is precision-agnostic (`tanhf` / `tanh` / `tanhl`
+//! all identify the same mathematical operation).
+//!
+//! Recognized unary rules:
+//!
+//! | Function | Names (`f32` \| `f64` \| `ldbl`) | Tangent rule | Notes |
+//! |----------|----------------------------------|--------------|-------|
+//! | `tanh(x)` | `tanhf` / `tanh` / `tanhl` | `x' · (1 − tanh²(x))` | computed from primal |
+//! | `sinh(x)` | `sinhf` / `sinh` / `sinhl` | `x' · cosh(x)` | `cosh(x)` rebuilt as `sqrt(1 + sinh²(x))` |
+//! | `cosh(x)` | `coshf` / `cosh` / `coshl` | `x' · sinh(x)` | `sinh(x)` rebuilt from exponentials |
+//! | `atanh(x)` | `atanhf` / `atanh` / `atanhl` | `x' / (1 − x²)` | |
+//! | `asinh(x)` | `asinhf` / `asinh` / `asinhl` | `x' / sqrt(1 + x²)` | |
+//! | `acosh(x)` | `acoshf` / `acosh` / `acoshl` | `x' / sqrt(x² − 1)` | |
+//!
+//! Unrecognized FFUN calls, non-unary FFUNs, table reads/writes, soundfile
+//! accessors, waveforms, on-demand up/downsampling, `Gen`, `PermVar`,
+//! `TempVar`, and every other unmatched signal variant fall through to a zero
+//! tangent with the primal unchanged.
 //!
 //! ## Cast operators
 //!
@@ -184,31 +237,41 @@
 //! - primal slot `i * (1 + N)`
 //! - tangent slot `i * (1 + N) + 1 + seed_index`
 //!
+//! The projection arm classifies the group into three semantic cases:
+//!
+//! | Group | Meaning | Primal projection | Tangent projection |
+//! |-------|---------|-------------------|--------------------|
+//! | `DEBRUIJNREC` directly | the current transform just rebuilt this recursion | `proj(i * (1 + N), …)` | `proj(i * (1 + N) + 1 + lane, …)` |
+//! | `DEBRUIJNREF(level <= debruijn_depth)` | points into a recursion already rewritten on this path | same as above | same as above |
+//! | `DEBRUIJNREF(level > debruijn_depth)` | points to an enclosing recursion that this transform never entered | `proj(i, …)` | `0` on every lane |
+//! | Other | defensive fallback outside the expected de Bruijn-only flow | `proj(i, …)` | `proj(i, …)` lane-wise |
+//!
 //! A placeholder is inserted into the cache before descending into the REC body
 //! so back-edges can resolve while the final interleaved node is still being
 //! rebuilt. The placeholder is strictly internal to that recursive descent.
+//! It is never an externally visible semantic result:
+//!
+//! - it breaks the cycle while recursive slots are being interned,
+//! - it is replaced by the finished interleaved `DEBRUIJNREC` before the
+//!   recursive descent returns,
+//! - every public output projects from the rebuilt recursion, not the
+//!   placeholder shape.
 //!
 //! The `de_bruijn_to_sym` conversion is deferred to `signal_prepare`, where it
 //! runs once over all process outputs through one `Converter` instance. This
 //! guarantees that the same `DEBRUIJNREC` physical node maps to the same
 //! `SYMREC` name in every primal and tangent lane.
 //!
-//! ## Pass-through helper nodes (`attach`, `enable`, `control`)
+//! ## Pass-through helper nodes (`attach`, `enable`, `control`, `Output`)
 //!
 //! These carry a left (signal) and right (side-effect/control) operand. Only
 //! the left operand's tangent is forwarded; the right operand is structurally
-//! preserved with its tangent dropped.
+//! preserved with its tangent dropped. `Output` is similarly transparent and
+//! differentiates only the wrapped signal.
 //!
 //! ## Bargraph outputs (`vbargraph`, `hbargraph`)
 //!
 //! Zero tangent for both. Bargraphs are metering outputs, not DSP signal paths.
-//!
-//! ## Foreign functions (`FFun`)
-//!
-//! Foreign functions are matched by name against a known-differentiable set.
-//! The FFUN descriptor carries one name per precision variant; all slots are
-//! checked so the match is precision-agnostic (`tanhf` / `tanh` / `tanhl`
-//! all identify the same mathematical operation).
 //!
 //! # Integration contract
 //! This module is intentionally internal to `propagate`:
@@ -229,6 +292,28 @@
 //! the differentiated recursive group. For recursive programs this removes the
 //! previous "one AD-local primal shadow recursion per seed" pattern and makes
 //! primal/tangent outputs project into the same interleaved `DEBRUIJNREC`.
+//!
+//! For example, the single-seed program
+//!
+//! ```text
+//! process = fad((2 : + ~ *(p)), p);
+//! ```
+//!
+//! now lowers conceptually to one recursive group:
+//!
+//! ```text
+//! [ y[n] = p * y[n-1] + 2,
+//!   dy/dp[n] = y[n-1] + p * dy/dp[n-1] ]
+//! ```
+//!
+//! instead of:
+//!
+//! ```text
+//! [ original primal recursion ] + [ duplicated AD-local primal recursion + tangent ]
+//! ```
+//!
+//! The result is the same DSP semantics with less duplicated recursive state in
+//! the emitted code.
 
 use ahash::AHashMap;
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
