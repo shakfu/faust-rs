@@ -499,6 +499,23 @@ fn corpus_fad_recursive_nested_parametric_compiles_through_full_signal_pipeline(
 }
 
 #[test]
+fn corpus_fad_recursive_triple_nested_parametric_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_triple_nested_parametric.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[1]),
+        SigMatch::Proj(_, _)
+    ));
+}
+
+#[test]
 fn corpus_fad_recursive_multi_output_parametric_compiles_through_full_signal_pipeline() {
     let out = compile_corpus("fad_recursive_multi_output_parametric.dsp");
     assert_eq!(out.process_arity.inputs, 0);
@@ -536,6 +553,21 @@ fn corpus_fad_recursive_multi_seed_shared_compiles_through_full_signal_pipeline(
 }
 
 #[test]
+fn corpus_fad_recursive_mutual_multi_seed_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_mutual_multi_seed.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 6);
+    assert_eq!(out.signals.len(), 6);
+    assert_eq!(out.ui.controls.len(), 2);
+    for sig in &out.signals {
+        assert!(matches!(
+            match_sig(&out.parse.state.arena, *sig),
+            SigMatch::Proj(_, _)
+        ));
+    }
+}
+
+#[test]
 fn corpus_fad_recursive_mutual_crossed_parametric_compiles_through_full_signal_pipeline() {
     let out = compile_corpus("fad_recursive_mutual_crossed_parametric.dsp");
     assert_eq!(out.process_arity.inputs, 0);
@@ -548,6 +580,23 @@ fn corpus_fad_recursive_mutual_crossed_parametric_compiles_through_full_signal_p
             SigMatch::Proj(_, _)
         ));
     }
+}
+
+#[test]
+fn corpus_fad_recursive_nested_mutual_parametric_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_nested_mutual_parametric.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[1]),
+        SigMatch::Proj(_, _)
+    ));
 }
 
 #[test]

@@ -210,6 +210,44 @@ process = outer;
 }
 
 #[test]
+fn fastlane_interp_triple_nested_recursive_fad_matches_central_difference() {
+    fn fad_source(p: f32) -> String {
+        format!(
+            r#"
+p = hslider("p", {p}, -0.9, 0.9, 0.001);
+inner = 2 : + ~ *(p);
+middle = 1 : + ~ *(inner);
+outer = 0.5 : + ~ *(middle);
+process = fad(outer, p);
+"#
+        )
+    }
+
+    fn primal_source(p: f32) -> String {
+        format!(
+            r#"
+p = hslider("p", {p}, -0.9, 0.9, 0.001);
+inner = 2 : + ~ *(p);
+middle = 1 : + ~ *(inner);
+outer = 0.5 : + ~ *(middle);
+process = outer;
+"#
+        )
+    }
+
+    assert_single_seed_fad_matches_central_difference(CentralDifferenceCase {
+        stem: "fad-triple-nested-recursive",
+        primal_outputs: 1,
+        frame_count: 5,
+        base_param: 0.2,
+        epsilon: 1.0e-3,
+        abs_tol: 1.0e1,
+        build_fad_source: fad_source,
+        build_primal_source: primal_source,
+    });
+}
+
+#[test]
 fn fastlane_interp_multi_output_recursive_fad_matches_central_difference() {
     fn fad_source(p: f32) -> String {
         format!(
@@ -362,4 +400,137 @@ process = (b : + ~ *(a));
             &format!("fad-multi-seed-recursive db frame {frame}"),
         );
     }
+}
+
+#[test]
+fn fastlane_interp_mutual_multi_seed_recursive_fad_matches_central_difference_per_seed() {
+    fn fad_source(p: f32, q: f32) -> String {
+        format!(
+            r#"
+import("stdfaust.lib");
+p = hslider("p", {p}, -0.9, 0.9, 0.001);
+q = hslider("q", {q}, -0.9, 0.9, 0.001);
+process = fad(si.bus(2) ~ ((*(p), *(q)) : ro.cross(2)), (p, q));
+"#
+        )
+    }
+
+    fn primal_source(p: f32, q: f32) -> String {
+        format!(
+            r#"
+import("stdfaust.lib");
+p = hslider("p", {p}, -0.9, 0.9, 0.001);
+q = hslider("q", {q}, -0.9, 0.9, 0.001);
+process = si.bus(2) ~ ((*(p), *(q)) : ro.cross(2));
+"#
+        )
+    }
+
+    let base_p = 0.2_f32;
+    let base_q = 0.35_f32;
+    let epsilon = 1.0e-3_f32;
+    let frame_count = 8;
+
+    let fad_outputs = run_interp_temp_source(
+        "fad-mutual-multi-seed-recursive-fad",
+        &fad_source(base_p, base_q),
+        frame_count,
+    );
+    let primal_outputs = run_interp_temp_source(
+        "fad-mutual-multi-seed-recursive-primal",
+        &primal_source(base_p, base_q),
+        frame_count,
+    );
+    let primal_plus_p = run_interp_temp_source(
+        "fad-mutual-multi-seed-recursive-plus-p",
+        &primal_source(base_p + epsilon, base_q),
+        frame_count,
+    );
+    let primal_minus_p = run_interp_temp_source(
+        "fad-mutual-multi-seed-recursive-minus-p",
+        &primal_source(base_p - epsilon, base_q),
+        frame_count,
+    );
+    let primal_plus_q = run_interp_temp_source(
+        "fad-mutual-multi-seed-recursive-plus-q",
+        &primal_source(base_p, base_q + epsilon),
+        frame_count,
+    );
+    let primal_minus_q = run_interp_temp_source(
+        "fad-mutual-multi-seed-recursive-minus-q",
+        &primal_source(base_p, base_q - epsilon),
+        frame_count,
+    );
+
+    assert_eq!(fad_outputs.len(), 6);
+    assert_eq!(primal_outputs.len(), 2);
+
+    for primal_index in 0..2 {
+        for frame in 0..frame_count {
+            assert_close(
+                fad_outputs[primal_index * 3][frame],
+                primal_outputs[primal_index][frame],
+                3.0e-3,
+                &format!("fad-mutual-multi-seed-recursive primal[{primal_index}] frame {frame}"),
+            );
+
+            let expected_dp = (primal_plus_p[primal_index][frame]
+                - primal_minus_p[primal_index][frame])
+                / (2.0 * epsilon);
+            assert_close(
+                fad_outputs[primal_index * 3 + 1][frame],
+                expected_dp,
+                3.0e-3,
+                &format!("fad-mutual-multi-seed-recursive dp[{primal_index}] frame {frame}"),
+            );
+
+            let expected_dq = (primal_plus_q[primal_index][frame]
+                - primal_minus_q[primal_index][frame])
+                / (2.0 * epsilon);
+            assert_close(
+                fad_outputs[primal_index * 3 + 2][frame],
+                expected_dq,
+                3.0e-3,
+                &format!("fad-mutual-multi-seed-recursive dq[{primal_index}] frame {frame}"),
+            );
+        }
+    }
+}
+
+#[test]
+fn fastlane_interp_nested_mutual_recursive_fad_matches_central_difference() {
+    fn fad_source(p: f32) -> String {
+        format!(
+            r#"
+import("stdfaust.lib");
+p = hslider("p", {p}, -0.9, 0.9, 0.001);
+core = si.bus(2) ~ ((*(p), *(0.25)) : ro.cross(2));
+mix = 1 : + ~ *(core : +);
+process = fad(mix, p);
+"#
+        )
+    }
+
+    fn primal_source(p: f32) -> String {
+        format!(
+            r#"
+import("stdfaust.lib");
+p = hslider("p", {p}, -0.9, 0.9, 0.001);
+core = si.bus(2) ~ ((*(p), *(0.25)) : ro.cross(2));
+mix = 1 : + ~ *(core : +);
+process = mix;
+"#
+        )
+    }
+
+    assert_single_seed_fad_matches_central_difference(CentralDifferenceCase {
+        stem: "fad-nested-mutual-recursive",
+        primal_outputs: 1,
+        frame_count: 8,
+        base_param: 0.2,
+        epsilon: 1.0e-3,
+        abs_tol: 2.0e-2,
+        build_fad_source: fad_source,
+        build_primal_source: primal_source,
+    });
 }
