@@ -1,6 +1,8 @@
 # FAD N-Lanes Unified Recursion — Refactor Plan
 
 **Date:** 2026-04-23
+**Status:** Implemented on `autodiff2` and kept as an archival design/trace
+document.
 **Scope:** Eliminate redundant primal recursions in the output of
 `generate_fad_signals_multi`. A single `ForwardADTransform` instance
 produces one interleaved `DEBRUIJNREC` carrying the primal and every
@@ -58,6 +60,25 @@ own private primal slot, and none of them share.
 **C++ source (parity anchors):** none. The Faust C++ compiler runs one
 FAD pass per seed and accepts the same duplication. This plan is a
 Rust-side optimisation and does not have a C++ counterpart.
+
+## Implementation status
+
+Implemented by:
+
+- `75404e5` `Generalize forward AD carrier to multi-lane tangents`
+- `304e969` `Unify recursive forward AD across seed lanes`
+- `5f8e291` `Restore detailed forward AD Rustdoc`
+
+Observed end state:
+
+- `ForwardADTransform` carries one primal lane and `N` tangent lanes in one
+  internal carrier;
+- `generate_fad_signals_multi(...)` runs one transformer for the whole seed
+  vector;
+- recursive primal/tangent projections now share the same interleaved
+  `DEBRUIJNREC` group;
+- recursive runtime checks and structural regressions pass for single-seed,
+  multi-seed, nested, multi-output, and mutual-recursion fixtures.
 
 ---
 
@@ -279,6 +300,8 @@ pub(super) fn generate_fad_signals_multi(
 
 ### Step 1 — Carrier + transformer skeleton
 
+**Implemented:** `75404e5`
+
 - Introduce `DualN` with `SmallVec`.
 - Replace `diff_seed: SigId` by `diff_seeds: Vec<SigId>` on
   `ForwardADTransform`. Keep the struct private; the public boundary
@@ -291,6 +314,8 @@ pub(super) fn generate_fad_signals_multi(
 bit-for-bit. Golden stdout hashes for single-seed tests unchanged.
 
 ### Step 2 — Unified DEBRUIJNREC body
+
+**Implemented:** `75404e5`, completed by `304e969`
 
 - Interleave body to length `k · (1 + N)` (see *Target layout*).
 - Update the `Proj` classification to the new slot arithmetic.
@@ -310,6 +335,8 @@ primal/tangent groups.
 
 ### Step 3 — Multi-seed collapse
 
+**Implemented:** `304e969`
+
 - `generate_fad_signals_multi` instantiates one transformer with the
   full seed list and pushes primal + N tangents from a single
   `DualN`.
@@ -321,6 +348,8 @@ recursion, regardless of seed count.
 
 ### Step 4 — Non-regression sweep
 
+**Implemented:** `304e969`, revalidated after doc restoration in `5f8e291`
+
 - `cargo test -p propagate` and `cargo test -p compiler` green.
 - Golden stdout hashes for every `fad_*.dsp` in `tests/corpus/`
   unchanged *except* for the fixtures where we intentionally reduced
@@ -331,6 +360,11 @@ recursion, regardless of seed count.
 - `tests/runtime_corpus` FAD runtime comparisons still match reference.
 
 ### Step 5 — New corpus fixtures
+
+**Implemented equivalent coverage:** existing recursive FAD corpus plus
+`fad_recursive_multi_seed_shared.dsp`, runtime regressions in
+`crates/compiler/tests/fad_recursive_runtime.rs`, and structural checks in
+`crates/compiler/tests/signal_pipeline.rs`.
 
 Add, with expected-values comments matching the simplified layout:
 
@@ -356,6 +390,8 @@ This step should also add numeric checks, not just structural ones:
 - mutual recursion: central finite differences per output.
 
 ### Step 6 — Documentation
+
+**Implemented:** `5f8e291`
 
 - Update the module docstring in `crates/propagate/src/forward_ad.rs`:
   rewrite the *Projection and recursive groups* section with the
