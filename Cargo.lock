@@ -791,6 +791,7 @@ dependencies = [
  "boxes",
  "errors",
  "signals",
+ "smallvec",
  "tlib",
  "ui",
 ]
