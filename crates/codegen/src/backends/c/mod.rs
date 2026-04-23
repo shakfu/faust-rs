@@ -1201,7 +1201,7 @@ fn emit_value(store: &FirStore, options: &COptions, value: FirId) -> Result<Stri
     match match_fir(store, value) {
         FirMatch::Int32 { value, .. } => Ok(value.to_string()),
         FirMatch::Int64 { value, .. } => Ok(value.to_string()),
-        FirMatch::Float32 { value, .. } => Ok(format!("{}f", trim_float(f64::from(value)))),
+        FirMatch::Float32 { value, .. } => Ok(format_float32(f64::from(value))),
         FirMatch::Float64 { value, .. } => Ok(trim_float(value)),
         FirMatch::Bool { value, .. } => Ok(if value { "1" } else { "0" }.to_owned()),
         FirMatch::LoadVar { name, access, .. } | FirMatch::LoadVarAddress { name, access, .. } => {
@@ -1461,6 +1461,16 @@ fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
 
 /// Formats a floating-point literal with stable trimmed C syntax.
 fn trim_float(value: f64) -> String {
+    if value.is_nan() {
+        return "NAN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() {
+            "-INFINITY".to_owned()
+        } else {
+            "INFINITY".to_owned()
+        };
+    }
     let mut s = format!("{value:.15}");
     while s.contains('.') && s.ends_with('0') {
         s.pop();
@@ -1469,6 +1479,13 @@ fn trim_float(value: f64) -> String {
         s.push('0');
     }
     if s == "-0.0" { "0.0".to_owned() } else { s }
+}
+
+fn format_float32(value: f64) -> String {
+    if !value.is_finite() {
+        return trim_float(value);
+    }
+    format!("{}f", trim_float(value))
 }
 
 /// Escapes a Rust string into a C string literal.

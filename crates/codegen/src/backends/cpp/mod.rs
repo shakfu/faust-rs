@@ -1097,7 +1097,7 @@ fn emit_value(
     match match_fir(store, value) {
         FirMatch::Int32 { value, .. } => Ok(value.to_string()),
         FirMatch::Int64 { value, .. } => Ok(value.to_string()),
-        FirMatch::Float32 { value, .. } => Ok(format!("{}f", trim_float(f64::from(value)))),
+        FirMatch::Float32 { value, .. } => Ok(format_float32(f64::from(value))),
         FirMatch::Float64 { value, .. } => Ok(trim_float(value)),
         FirMatch::Bool { value, .. } => Ok(if value { "true" } else { "false" }.to_owned()),
         FirMatch::Quad { value, .. } => Ok(trim_float(value)),
@@ -1117,9 +1117,7 @@ fn emit_value(
             Ok(format_array(values.iter().map(ToString::to_string)))
         }
         FirMatch::Float32Array { values, .. } => Ok(format_array(
-            values
-                .iter()
-                .map(|v| format!("{}f", trim_float(f64::from(*v)))),
+            values.iter().map(|v| format_float32(f64::from(*v))),
         )),
         FirMatch::Float64Array { values, .. }
         | FirMatch::QuadArray { values, .. }
@@ -1324,11 +1322,28 @@ fn unsupported_node(kind: &str, node: FirId, store: &FirStore) -> CodegenError {
 
 /// Formats a floating-point literal with stable C++ syntax.
 fn trim_float(value: f64) -> String {
+    if value.is_nan() {
+        return "NAN".to_owned();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() {
+            "-INFINITY".to_owned()
+        } else {
+            "INFINITY".to_owned()
+        };
+    }
     let mut text = format!("{value}");
     if !text.contains(['.', 'e', 'E']) {
         text.push_str(".0");
     }
     text
+}
+
+fn format_float32(value: f64) -> String {
+    if !value.is_finite() {
+        return trim_float(value);
+    }
+    format!("{}f", trim_float(value))
 }
 
 /// Renders an initializer-list literal from already-rendered elements.

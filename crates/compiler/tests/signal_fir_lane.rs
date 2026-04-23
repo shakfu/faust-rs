@@ -103,6 +103,18 @@ fn compile_c_with_lane(file: &str, lane: SignalFirLane) -> String {
         .unwrap_or_else(|e| panic!("{file} C compilation failed for lane {lane:?}: {e}"))
 }
 
+fn compile_c_source_with_lane(source_name: &str, source: &str, lane: SignalFirLane) -> String {
+    let compiler = Compiler::new();
+    compiler
+        .compile_source_to_c_with_lane(
+            source_name,
+            source,
+            &codegen::backends::c::COptions::default(),
+            lane,
+        )
+        .unwrap_or_else(|e| panic!("{source_name} C compilation failed for lane {lane:?}: {e}"))
+}
+
 fn compile_cpp_with_class_name(file: &str, lane: SignalFirLane, class_name: &str) -> String {
     compile_cpp_with_names(file, lane, class_name, "dsp")
 }
@@ -644,6 +656,40 @@ fn fastlane_cpp_keeps_integer_recursive_abs_feedback_in_int_state() {
     assert!(
         cpp.contains("std::abs("),
         "integer recursive abs should stay an explicit integer abs function call"
+    );
+}
+
+#[test]
+fn fastlane_cpp_emits_valid_infinity_literal_for_overflowed_float_constant() {
+    let cpp = compile_cpp_source_with_lane(
+        "min_overflow_inf.dsp",
+        "process = 1.175494351e-38 * 1e307;",
+        SignalFirLane::TransformFastLane,
+    );
+    assert!(
+        cpp.contains("INFINITY"),
+        "overflowed float constants should lower to a valid C++ infinity literal"
+    );
+    assert!(
+        !cpp.contains("inf.0f"),
+        "backend must not emit invalid `inf.0f` C++ literals"
+    );
+}
+
+#[test]
+fn fastlane_c_emits_valid_infinity_literal_for_overflowed_float_constant() {
+    let c = compile_c_source_with_lane(
+        "min_overflow_inf.dsp",
+        "process = 1.175494351e-38 * 1e307;",
+        SignalFirLane::TransformFastLane,
+    );
+    assert!(
+        c.contains("INFINITY"),
+        "overflowed float constants should lower to a valid C infinity literal"
+    );
+    assert!(
+        !c.contains("inf.0f"),
+        "backend must not emit invalid `inf.0f` C literals"
     );
 }
 
