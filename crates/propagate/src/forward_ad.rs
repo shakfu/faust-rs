@@ -800,6 +800,7 @@ impl<'a> ForwardADTransform<'a> {
                     .collect::<SmallVec<[SigId; 2]>>();
                 Dual { primal, tangents }
             }
+            SigMatch::RdTbl(table, ridx) => self.transform_rdtbl(table, ridx),
             SigMatch::Select2(cond, x, y) => {
                 let dual_cond = self.transform(cond);
                 let dual_x = self.transform(x);
@@ -944,6 +945,42 @@ impl<'a> ForwardADTransform<'a> {
             primal: sig,
             tangents: self.zero_tangent_lanes_real(),
         }
+    }
+
+    fn is_readonly_table_source(&self, sig: SigId) -> bool {
+        match match_sig(self.arena, sig) {
+            SigMatch::Waveform(_) => true,
+            SigMatch::WrTbl(_, _, widx, wsig) => self.arena.is_nil(widx) && self.arena.is_nil(wsig),
+            _ => false,
+        }
+    }
+
+    fn transform_rdtbl(&mut self, table: SigId, ridx: SigId) -> Dual {
+        let dual_index = self.transform(ridx);
+        let readonly = self.is_readonly_table_source(table);
+        let mut b = SigBuilder::new(self.arena);
+        let primal = b.rdtbl(table, dual_index.primal);
+        if !readonly {
+            return Dual {
+                primal,
+                tangents: self.zero_tangent_lanes_real(),
+            };
+        }
+
+        let one = b.int(1);
+        let two = b.real(2.0);
+        let idx_plus = b.add(dual_index.primal, one);
+        let idx_minus = b.sub(dual_index.primal, one);
+        let plus = b.rdtbl(table, idx_plus);
+        let minus = b.rdtbl(table, idx_minus);
+        let diff = b.sub(plus, minus);
+        let slope = b.div(diff, two);
+        let tangents = dual_index
+            .tangents
+            .into_iter()
+            .map(|tidx| b.mul(slope, tidx))
+            .collect::<SmallVec<[SigId; 2]>>();
+        Dual { primal, tangents }
     }
 
     fn ffun_unary_chain<FTangent>(

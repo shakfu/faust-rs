@@ -174,6 +174,104 @@ fn fastlane_interp_self_recursive_fad_matches_closed_form_recurrence() {
 }
 
 #[test]
+fn fastlane_interp_waveform_lookup_fad_matches_central_difference() {
+    fn fad_source(k: f32) -> String {
+        format!(
+            r#"
+k = hslider("k", {k}, 1, 6, 1);
+process = fad(rdtable(waveform{{0, 1, 4, 9, 16, 25, 36, 49}}, k), k);
+"#
+        )
+    }
+
+    fn primal_source(k: f32) -> String {
+        format!(
+            r#"
+k = hslider("k", {k}, 1, 6, 1);
+process = rdtable(waveform{{0, 1, 4, 9, 16, 25, 36, 49}}, k);
+"#
+        )
+    }
+
+    assert_single_seed_fad_matches_central_difference(CentralDifferenceCase {
+        stem: "fad-waveform-lookup",
+        primal_outputs: 1,
+        frame_count: 4,
+        base_param: 3.0,
+        epsilon: 1.0,
+        abs_tol: 1.0e-6,
+        build_fad_source: fad_source,
+        build_primal_source: primal_source,
+    });
+}
+
+#[test]
+fn fastlane_interp_readonly_generator_lookup_fad_matches_central_difference() {
+    fn fad_source(k: f32) -> String {
+        format!(
+            r#"
+k = hslider("k", {k}, 1, 6, 1);
+process = fad(rdtable(8, 1 : + ~ _, k), k);
+"#
+        )
+    }
+
+    fn primal_source(k: f32) -> String {
+        format!(
+            r#"
+k = hslider("k", {k}, 1, 6, 1);
+process = rdtable(8, 1 : + ~ _, k);
+"#
+        )
+    }
+
+    assert_single_seed_fad_matches_central_difference(CentralDifferenceCase {
+        stem: "fad-readonly-generator-lookup",
+        primal_outputs: 1,
+        frame_count: 4,
+        base_param: 3.0,
+        epsilon: 1.0,
+        abs_tol: 1.0e-6,
+        build_fad_source: fad_source,
+        build_primal_source: primal_source,
+    });
+}
+
+#[test]
+fn fastlane_interp_recursive_table_index_fad_matches_central_difference() {
+    fn fad_source(step: f32) -> String {
+        format!(
+            r#"
+step = hslider("step", {step}, 0, 2, 1);
+phase = step : + ~ _;
+process = fad(rdtable(32, 1 : + ~ _, phase), step);
+"#
+        )
+    }
+
+    fn primal_source(step: f32) -> String {
+        format!(
+            r#"
+step = hslider("step", {step}, 0, 2, 1);
+phase = step : + ~ _;
+process = rdtable(32, 1 : + ~ _, phase);
+"#
+        )
+    }
+
+    assert_single_seed_fad_matches_central_difference(CentralDifferenceCase {
+        stem: "fad-recursive-table-index",
+        primal_outputs: 1,
+        frame_count: 4,
+        base_param: 1.0,
+        epsilon: 1.0,
+        abs_tol: 1.0e-6,
+        build_fad_source: fad_source,
+        build_primal_source: primal_source,
+    });
+}
+
+#[test]
 fn fastlane_interp_nested_recursive_fad_matches_central_difference() {
     fn fad_source(p: f32) -> String {
         format!(

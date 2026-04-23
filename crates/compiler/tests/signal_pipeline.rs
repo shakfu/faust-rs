@@ -296,6 +296,89 @@ fn corpus_fad_product_emits_one_tangent_per_seed() {
 }
 
 #[test]
+fn corpus_fad_waveform_index_basic_emits_symmetric_lookup_slope_tangent() {
+    let out = compile_corpus("fad_waveform_index_basic.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].label, "k");
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::RdTbl(_, _)
+    ));
+    assert!(
+        !matches!(
+            match_sig(&out.parse.state.arena, out.signals[1]),
+            SigMatch::Real(v) if v == 0.0
+        ),
+        "read-only waveform lookup tangent must not be constant zero"
+    );
+}
+
+#[test]
+fn corpus_fad_rdtbl_index_basic_emits_symmetric_lookup_slope_tangent() {
+    let out = compile_corpus("fad_rdtbl_index_basic.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].label, "k");
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::RdTbl(_, _)
+    ));
+    assert!(
+        !matches!(
+            match_sig(&out.parse.state.arena, out.signals[1]),
+            SigMatch::Real(v) if v == 0.0
+        ),
+        "read-only generator table tangent must not be constant zero"
+    );
+}
+
+#[test]
+fn corpus_fad_rwtable_index_keeps_zero_tangent() {
+    let out = compile_corpus("fad_rwtable_index_zero_tangent.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::RdTbl(_, _)
+    ));
+    assert!(
+        matches!(
+            match_sig(&out.parse.state.arena, out.signals[1]),
+            SigMatch::Real(v) if v == 0.0
+        ),
+        "writable-table lookup tangent should remain zero in phase 1"
+    );
+}
+
+#[test]
+fn corpus_fad_recursive_waveform_index_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_waveform_index.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert_eq!(out.ui.controls[0].label, "step");
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::RdTbl(_, _)
+    ));
+    assert!(
+        !matches!(
+            match_sig(&out.parse.state.arena, out.signals[1]),
+            SigMatch::Real(v) if v == 0.0
+        ),
+        "recursive read-index tangent must not be constant zero"
+    );
+}
+
+#[test]
 fn corpus_fad_recursive_compiles_through_full_signal_pipeline() {
     // fad(fb : +~*(g), fb): differentiates wrt fb → primal + 1 tangent = 2 signals
     let out = compile_corpus("fad_recursive.dsp");
