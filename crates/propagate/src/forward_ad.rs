@@ -94,6 +94,17 @@
 //! not by per-control annotations. The metadata still parses without error
 //! so legacy sources remain accepted.
 //!
+//! The zero-tangent treatment for controls is intentional and not just a
+//! parser limitation:
+//!
+//! - `hslider` / `vslider` / `numentry` are ordinary continuous signals when
+//!   they are selected as explicit seeds; otherwise they are treated as
+//!   independent of the active differentiation variables;
+//! - `button` / `checkbox` are discrete state/control sources, so the current
+//!   FAD pass models them as piecewise-constant and returns zero tangents;
+//! - `vbargraph` / `hbargraph` are metering sinks, not differentiated signal
+//!   paths.
+//!
 //! ## Arithmetic binary operators (`BinOp`)
 //!
 //! | Operator | Tangent rule |
@@ -188,6 +199,16 @@
 //! | `int_cast(x)` | `0` (piecewise-constant step function) |
 //! | `bit_cast(x)` | `0` (reinterpret-cast, semantically opaque) |
 //!
+//! These choices are deliberate approximation boundaries:
+//!
+//! - `float_cast` preserves the underlying numeric value and therefore forwards
+//!   the tangent through the cast;
+//! - `int_cast` introduces discontinuous truncation/rounding semantics, so the
+//!   derivative is treated as zero rather than trying to model impulses at
+//!   integer boundaries;
+//! - `bit_cast` changes representation rather than mathematical value and is
+//!   therefore outside the differentiable subset.
+//!
 //! ## Delay operators
 //!
 //! ### Unit delay `delay1(x)`
@@ -246,6 +267,25 @@
 //! | `DEBRUIJNREF(level > debruijn_depth)` | points to an enclosing recursion that this transform never entered | `proj(i, …)` | `0` on every lane |
 //! | Other | defensive fallback outside the expected de Bruijn-only flow | `proj(i, …)` | `proj(i, …)` lane-wise |
 //!
+//! The `level > debruijn_depth` case is the subtle one. It means the current
+//! transform is differentiating inside an inner recursion, but the projection
+//! points to an outer recursion group whose body has not been rewritten by this
+//! transformer instance on the current descent path. In that situation the
+//! outer group keeps its original slot numbering, so the primal projection is
+//! forwarded unchanged and the tangent lanes are forced to zero.
+//!
+//! Conceptually:
+//!
+//! ```text
+//! outer = rec([...])
+//! inner = rec([ ..., proj(slot_i, ref(level = 2)), ... ])
+//! ```
+//!
+//! While differentiating `inner`, `proj(slot_i, ref(level = 2))` still means
+//! "read the already-existing primal slot `slot_i` from `outer`". No
+//! differentiated `(1 + N)` expansion is available there unless the transform
+//! has also entered and rebuilt `outer` on this path.
+//!
 //! A placeholder is inserted into the cache before descending into the REC body
 //! so back-edges can resolve while the final interleaved node is still being
 //! rebuilt. The placeholder is strictly internal to that recursive descent.
@@ -272,6 +312,25 @@
 //! ## Bargraph outputs (`vbargraph`, `hbargraph`)
 //!
 //! Zero tangent for both. Bargraphs are metering outputs, not DSP signal paths.
+//!
+//! # Zero-tangent fallback boundary
+//! Several signal families are intentionally outside the current
+//! differentiable subset and therefore preserve the primal while emitting zero
+//! tangents on every lane.
+//!
+//! | Family | Current treatment | Rationale |
+//! |--------|-------------------|-----------|
+//! | integer comparisons / bitwise / shifts | zero tangent | discrete integer semantics |
+//! | `button`, `checkbox` | zero tangent | event-like / piecewise-constant control |
+//! | `int_cast`, `bit_cast` | zero tangent | discontinuous or representation-level operation |
+//! | unknown `FFun` / non-unary `FFun` | zero tangent | no trusted derivative rule in this pass |
+//! | tables, soundfiles, waveforms, `Gen`, `PermVar`, `TempVar` | zero tangent | not yet modeled as differentiable primitives |
+//! | unmatched / defensive fallback variants | zero tangent | preserve compilation robustness while keeping the primal |
+//!
+//! This is a support boundary, not a claim that the mathematical derivative is
+//! literally zero in all cases. The invariant of the pass is narrower: when a
+//! signal family has no explicit forward rule, compilation stays defined and
+//! the primal is preserved instead of fabricating an unverified tangent.
 //!
 //! # Integration contract
 //! This module is intentionally internal to `propagate`:

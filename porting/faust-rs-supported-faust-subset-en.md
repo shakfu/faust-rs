@@ -1,6 +1,6 @@
 # Current Faust Source Subset Supported by `faust-rs`
 
-Last updated: 2026-04-21
+Last updated: 2026-04-23
 
 Version: 0.5.0
 
@@ -96,6 +96,14 @@ This snapshot is based on:
   - `crates/eval/src/loop_detector.rs`
   - `crates/compiler/src/main.rs`
   - `porting/journal/2026-04-21.md`
+- unified recursive multi-seed FAD refactor and documentation hardening on
+  2026-04-23 reviewed against:
+  - `crates/propagate/src/forward_ad.rs`
+  - `crates/propagate/tests/core_api.rs`
+  - `crates/compiler/tests/signal_pipeline.rs`
+  - `crates/compiler/tests/fad_recursive_runtime.rs`
+  - `porting/fad-n-lanes-unified-rec-plan-2026-04-23-en.md`
+  - `porting/journal/2026-04-23.md`
 
 The corresponding generated reports are:
 
@@ -228,10 +236,11 @@ prototype subset. On the tracked corpus, it includes:
 - label interpolation cases used by modulation/UI paths,
 - representative noise/additive-synthesis fixtures,
 - **forward-mode AD**: `fad(expr, seed)` is supported at the source and
-  propagation level; 34 `fad_*` corpus entries cover the full rule spectrum
+  propagation level; 39 `fad*` corpus entries cover the full rule spectrum
   (arithmetic, trig, `pow`, `min`/`max`, `atan2`, `fmod`, `remainder`,
   delays, recursion, `select2`, bargraphs, multi-seed, lambda-bound
-  recursive seeds, and nested `fad` on recursive seeds). `[autodiff:false]`
+  recursive seeds, nested `fad` on recursive seeds, nested recursion,
+  multi-output recursion, and mutual/crossed recursion). `[autodiff:false]`
   metadata is parsed but no longer gates differentiation; seed selection is
   entirely driven by the explicit `seed` argument. The `seed` sub-expression
   may itself produce
@@ -242,7 +251,15 @@ prototype subset. On the tracked corpus, it includes:
   Differentiation is performed directly on De Bruijn recursive form
   (`DEBRUIJNREC`/`DEBRUIJNREF`) by interleaving primal and tangent slots in
   the expanded body; symbolic conversion (`de_bruijn_to_sym`) runs
-  afterwards in `signal_prepare`.
+  afterwards in `signal_prepare`. The current Rust implementation also
+  differs intentionally from Faust C++ in one optimization-sensitive area:
+  a single transform now carries all seed lanes through one unified recursive
+  group instead of rebuilding one recursive primal shadow per seed.
+  The supported differentiable subset remains explicit-rule-driven: unknown
+  `FFun`s, tables/soundfiles/waveforms, integer-only/bitwise operators,
+  `int_cast`/`bit_cast`, discrete controls (`button`, `checkbox`) and other
+  unmatched signal families currently preserve the primal and emit zero
+  tangents rather than claiming a derivative model that has not been ported.
 
 Stated differently:
 
