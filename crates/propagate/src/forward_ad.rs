@@ -285,6 +285,20 @@
 //! Tangent outputs are emitted deterministically:
 //! 1. preserve primal output order,
 //! 2. for each primal, emit one tangent per seed in the seed list's order.
+//!
+//! # Recursive code generation note
+//! The transform rebuilds one tangent row per seed and preserves the primal
+//! signal in every emitted dual bundle. On recursive programs, downstream
+//! codegen may therefore materialize:
+//! - the original process recursion used by the exposed primal outputs, and
+//! - an AD-local shadow recursion feeding the tangent lanes.
+//!
+//! This is semantically expected under the current forward-mode lowering: the
+//! shadow recursion carries the primal values needed by the tangent recurrence.
+//! The generated code may look redundant (`fRec` + duplicated `fRec_*` state),
+//! but the runtime equations remain correct. The compiler tests exercise this
+//! explicitly on self-recursive, nested-recursive, multi-output, and mutual
+//! recursion fixtures.
 
 use ahash::AHashMap;
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};

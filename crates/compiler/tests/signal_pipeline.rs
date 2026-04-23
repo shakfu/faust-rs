@@ -463,6 +463,70 @@ fn corpus_fad_recursive_delay_compiles_through_full_signal_pipeline() {
 }
 
 #[test]
+fn corpus_fad_recursive_parametric_self_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_parametric_self.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[1]),
+        SigMatch::Proj(_, _)
+    ));
+}
+
+#[test]
+fn corpus_fad_recursive_nested_parametric_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_nested_parametric.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 2);
+    assert_eq!(out.signals.len(), 2);
+    assert_eq!(out.ui.controls.len(), 1);
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[0]),
+        SigMatch::Proj(_, _)
+    ));
+    assert!(matches!(
+        match_sig(&out.parse.state.arena, out.signals[1]),
+        SigMatch::Proj(_, _)
+    ));
+}
+
+#[test]
+fn corpus_fad_recursive_multi_output_parametric_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_multi_output_parametric.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 4);
+    assert_eq!(out.signals.len(), 4);
+    assert_eq!(out.ui.controls.len(), 1);
+    for sig in &out.signals {
+        assert!(matches!(
+            match_sig(&out.parse.state.arena, *sig),
+            SigMatch::Proj(_, _)
+        ));
+    }
+}
+
+#[test]
+fn corpus_fad_recursive_mutual_crossed_parametric_compiles_through_full_signal_pipeline() {
+    let out = compile_corpus("fad_recursive_mutual_crossed_parametric.dsp");
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 4);
+    assert_eq!(out.signals.len(), 4);
+    assert_eq!(out.ui.controls.len(), 1);
+    for sig in &out.signals {
+        assert!(matches!(
+            match_sig(&out.parse.state.arena, *sig),
+            SigMatch::Proj(_, _)
+        ));
+    }
+}
+
+#[test]
 fn corpus_fad_recursive_local_projection_compiles_through_full_signal_pipeline() {
     let out = compile_corpus("fad_recursive_local_projection.dsp");
     assert_eq!(out.process_arity.inputs, 0);
