@@ -414,19 +414,37 @@ use crate::PropagateError;
 
 /// Internal dual-number carrier used while differentiating one signal graph.
 ///
-/// `primal` is the original signal expression. `tangents[j]` is the derivative
-/// of that expression with respect to the `j`-th selected seed.
+/// Carries the primal signal together with one tangent `SigId` per active seed
+/// lane. Tangent order matches the enclosing transformer's `diff_seeds` vector.
+/// The `SmallVec` inline capacity of 2 covers the common one- or two-seed
+/// `fad` calls without spilling to the heap.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Dual {
+    /// Original (undifferentiated) signal expression.
     primal: SigId,
+    /// `tangents[j]` = derivative of `primal` with respect to `diff_seeds[j]`.
     tangents: SmallVec<[SigId; 2]>,
 }
 
 /// Memoized forward-mode transformer for one selected differentiation seed set.
 ///
-/// One transformer instance computes all tangent lanes for one shared signal
-/// DAG. The cache prevents exponential blow-up on reused subgraphs and also
-/// breaks recursion cycles while rebuilding `sigRec/sigProj`-style groups.
+/// A single instance is created per `fad(expr, seeds)` call and reused for
+/// every primal output in `expr`. The cache prevents exponential blow-up on
+/// reused subgraphs (DAG sharing) and breaks recursion cycles while rebuilding
+/// interleaved `DEBRUIJNREC` groups (see module docs on the placeholder
+/// insertion pattern).
+///
+/// Seed state is split into two complementary views:
+///
+/// - `diff_seeds` preserves caller-provided lane order (the order in which
+///   tangents appear in the output bundle),
+/// - `diff_seed_index` is the `SigId -> lane` reverse lookup used on every
+///   visited node to short-circuit when the visited signal *is* a seed.
+///
+/// `debruijn_depth` counts only the `DEBRUIJNREC` scopes this transformer has
+/// itself entered and rewritten on the current descent path. It drives the
+/// `Proj` arm's classification of an enclosing group as already-rewritten
+/// (interleaved `1+N` layout) versus unreachable-from-here (zero tangents).
 struct ForwardADTransform<'a> {
     arena: &'a mut TreeArena,
     diff_seeds: Vec<SigId>,
@@ -446,6 +464,12 @@ impl<'a> ForwardADTransform<'a> {
         }
     }
 
+    /// Builds the reverse `SigId -> lane_indices` map used by seed recognition.
+    ///
+    /// A single `SigId` can appear on several lanes when the seed box lowers to
+    /// a list containing repeated references (e.g. `fad(expr, (a, a))`); those
+    /// lanes are intentionally preserved independently rather than being
+    /// collapsed.
     fn build_seed_index(seeds: &[SigId]) -> AHashMap<SigId, SmallVec<[usize; 2]>> {
         let mut index = AHashMap::new();
         for (slot, &seed) in seeds.iter().enumerate() {
@@ -454,10 +478,14 @@ impl<'a> ForwardADTransform<'a> {
         index
     }
 
+    /// Number of active tangent lanes (one per seed).
     fn seed_count(&self) -> usize {
         self.diff_seeds.len()
     }
 
+    /// Interleaved lane count per original recursion slot: `1` primal +
+    /// `seed_count` tangents. Used as the multiplier for slot-index arithmetic
+    /// in the `Proj` arm (`i * (1 + N) + 1 + lane`).
     fn bundle_lane_count(&self) -> i32 {
         1 + self.seed_count() as i32
     }
@@ -482,6 +510,13 @@ impl<'a> ForwardADTransform<'a> {
         Self::repeat_lane_value(zero, self.seed_count())
     }
 
+    /// Differentiates one signal, using the shared DAG cache.
+    ///
+    /// Every visited `SigId` is cached so that multi-referenced subtrees are
+    /// rewritten once. The cache doubles as a recursion-cycle breaker: the
+    /// `DEBRUIJNREC` arm stores a self-referential placeholder before
+    /// descending into the body, so back-edges resolve to a valid `Dual` while
+    /// the final interleaved node is still being built (see module docs).
     fn transform(&mut self, sig: SigId) -> Dual {
         if let Some(dual) = self.cache.get(&sig).cloned() {
             return dual;
@@ -491,6 +526,9 @@ impl<'a> ForwardADTransform<'a> {
         dual
     }
 
+    /// Differentiates each element of a signal cons-list and returns them as a
+    /// `Vec<Dual>` preserving list order. Used to rebuild recursion-body
+    /// element lists before re-interning them as a new cons-list.
     fn transform_list(&mut self, list: TreeId) -> Vec<Dual> {
         list_to_vec(self.arena, list)
             .unwrap_or_default()
@@ -520,6 +558,13 @@ impl<'a> ForwardADTransform<'a> {
         }
 
         if let Some(body) = match_de_bruijn_rec(self.arena, sig) {
+            // Pre-seed the cache with a self-referential placeholder so any
+            // `DEBRUIJNREF(1)` back-edge discovered while differentiating the
+            // body resolves to something shaped like a `Dual` instead of
+            // triggering infinite recursion. This placeholder's tangents
+            // point back at the original (un-rewritten) group; they are never
+            // observed externally because the entry below is overwritten once
+            // the rebuilt interleaved group is available.
             self.cache.insert(
                 sig,
                 Dual {
@@ -530,6 +575,12 @@ impl<'a> ForwardADTransform<'a> {
 
             self.debruijn_depth += 1;
 
+            // Crossing a new `DEBRUIJNREC` binder shifts every free
+            // `DEBRUIJNREF` in the seed expressions by one level so that
+            // `SigId` equality keeps firing when the same seed appears inside
+            // the lifted body. The old seed state is stashed and restored on
+            // exit so sibling subtrees (and nested RECs deeper still) start
+            // from the correct snapshot.
             let old_seeds = std::mem::take(&mut self.diff_seeds);
             let old_seed_index = std::mem::replace(&mut self.diff_seed_index, AHashMap::new());
             self.diff_seeds = old_seeds
@@ -544,6 +595,9 @@ impl<'a> ForwardADTransform<'a> {
             self.diff_seed_index = old_seed_index;
             self.debruijn_depth -= 1;
 
+            // Interleave `[primal, tangent_s0, …, tangent_s{N-1}]` for every
+            // original slot in source order. Downstream `Proj` nodes rely on
+            // this exact `i * (1 + N) + (0 or 1 + lane)` layout.
             let mut expanded_body =
                 Vec::with_capacity(duals.len() * self.bundle_lane_count() as usize);
             for dual in duals {
@@ -552,6 +606,9 @@ impl<'a> ForwardADTransform<'a> {
             }
             let list_node = vec_to_list(self.arena, &expanded_body);
             let fad_rec = de_bruijn_rec(self.arena, list_node);
+            // The whole rebuilt group IS both the primal and every tangent
+            // "lane" at the group level; tangent selection only makes sense
+            // once a `Proj` picks a specific slot out of the interleaved body.
             return Dual {
                 primal: fad_rec,
                 tangents: self.repeated_lane_sig(fad_rec),
@@ -878,6 +935,18 @@ impl<'a> ForwardADTransform<'a> {
             }
             SigMatch::Proj(index, group) => {
                 let dual_group = self.transform(group);
+                // Classify the group this projection targets:
+                // - `BoundRec`: the enclosing recursion has been rewritten by
+                //   this transformer (either directly, or reached through a
+                //   `DEBRUIJNREF` whose level stays within the stack of RECs
+                //   we have already entered). Slot arithmetic uses the
+                //   interleaved `1 + N` layout.
+                // - `UnboundRef`: a `DEBRUIJNREF` pointing at an outer RE
+                //   this transformer never entered on the current path, so
+                //   its body keeps the original slot numbering. Primal
+                //   forwards unchanged; tangents are forced to zero.
+                // - `Other`: defensive fallback for non-de-Bruijn shapes;
+                //   propagate the projection lane-wise.
                 enum GroupKind {
                     BoundRec,
                     UnboundRef,
@@ -941,6 +1010,10 @@ impl<'a> ForwardADTransform<'a> {
         }
     }
 
+    /// Returns `true` when the `FFUN` descriptor's function name (in any of
+    /// its precision variants `f32` / `f64` / `long double`) matches one of
+    /// the provided targets. This is how `tanhf` / `tanh` / `tanhl` are
+    /// recognized as the same mathematical operation.
     fn ffun_is(arena: &TreeArena, ff: SigId, targets: &[&str]) -> bool {
         let Some(node) = arena.node(ff) else {
             return false;
@@ -968,6 +1041,10 @@ impl<'a> ForwardADTransform<'a> {
             .any(|id| tree_to_str(arena, *id).is_some_and(|n| targets.contains(&n)))
     }
 
+    /// Zero-tangent fallback: preserve the primal and emit a zero (real)
+    /// tangent on every lane. See the module docstring's "Zero-tangent
+    /// fallback boundary" table for the signal families that currently land
+    /// here.
     fn zero_tangent(&mut self, sig: SigId) -> Dual {
         Dual {
             primal: sig,
@@ -975,6 +1052,14 @@ impl<'a> ForwardADTransform<'a> {
         }
     }
 
+    /// Classifies a table source as read-only (differentiable through the
+    /// read index) when it is either:
+    /// - `SIGWAVEFORM(...)`, or
+    /// - `SIGWRTBL(size, generator, nil, nil)` — a write-once table used as a
+    ///   read-only backing store (nil write index and nil write signal).
+    ///
+    /// Mutable tables (non-nil write ports) stay outside the differentiable
+    /// subset and fall back to a zero tangent.
     fn is_readonly_table_source(&self, sig: SigId) -> bool {
         match match_sig(self.arena, sig) {
             SigMatch::Waveform(_) => true,
@@ -983,6 +1068,22 @@ impl<'a> ForwardADTransform<'a> {
         }
     }
 
+    /// Differentiates `rdtbl(T, i)` for a read-only table `T`:
+    ///
+    /// ```text
+    /// y  = rdtbl(T, i)
+    /// y' = slope(i) · i'
+    /// slope(i) ≈ (rdtbl(T, i + 1) - rdtbl(T, i - 1)) / 2
+    /// ```
+    ///
+    /// The slope is a symmetric finite difference around `i`. Bounds
+    /// behaviour for `i ± 1` is inherited from the existing runtime table
+    /// read semantics — FAD deliberately does not invent extra wrap / clamp
+    /// rules here.
+    ///
+    /// When `T` is not a read-only source, the primal is rebuilt but every
+    /// tangent lane is forced to zero. Table *contents* are never
+    /// differentiated.
     fn transform_rdtbl(&mut self, table: SigId, ridx: SigId) -> Dual {
         let dual_index = self.transform(ridx);
         let readonly = self.is_readonly_table_source(table);
@@ -1011,6 +1112,12 @@ impl<'a> ForwardADTransform<'a> {
         Dual { primal, tangents }
     }
 
+    /// Chain-rule helper for unary foreign functions.
+    ///
+    /// Builds `primal = ffun(arg.primal)` and then, for every tangent lane,
+    /// calls `tangent_fn(builder, primal, arg.primal, arg.tangent_lane)` so
+    /// the rule can reuse the primal output where it is cheaper (e.g. `tanh'
+    /// = 1 − tanh²`, expressed directly from the primal).
     fn ffun_unary_chain<FTangent>(
         &mut self,
         ff: SigId,
@@ -1032,6 +1139,11 @@ impl<'a> ForwardADTransform<'a> {
         Dual { primal, tangents }
     }
 
+    /// Dispatches differentiation of a foreign function (`FFUN`) call by
+    /// matching the descriptor's name against the set of hand-rolled unary
+    /// rules (hyperbolic and inverse-hyperbolic trig). Non-unary calls and
+    /// unrecognized names fall back to a zero tangent with the primal
+    /// unchanged, matching the module-level zero-tangent boundary.
     fn transform_ffun(&mut self, sig: SigId, ff: SigId, largs: SigId) -> Dual {
         let args = list_to_vec(self.arena, largs).unwrap_or_default();
         if args.len() != 1 {
@@ -1092,6 +1204,12 @@ impl<'a> ForwardADTransform<'a> {
         }
     }
 
+    /// Chain-rule helper for native unary operators (`sin`, `log`, `sqrt`, …).
+    ///
+    /// `primal_fn(builder, primal_x) -> primal` rebuilds the outer operation.
+    /// `tangent_fn(builder, primal_x, tangent_x_lane) -> tangent_lane` produces
+    /// one tangent lane given the primal sub-expression and the tangent lane
+    /// of the input; it is invoked once per active seed lane.
     fn unary_chain<FPrimal, FTangent>(
         &mut self,
         x: SigId,
@@ -1113,6 +1231,11 @@ impl<'a> ForwardADTransform<'a> {
         Dual { primal, tangents }
     }
 
+    /// Transparent helper for `attach` / `enable` / `control`: the left
+    /// operand carries the signal lane, the right operand is a
+    /// side-effect/control reference that is structurally preserved but whose
+    /// tangent is dropped. Both operands are still visited so seed
+    /// recognition and caching stay consistent across the DAG.
     fn pass_through_binary<F>(&mut self, x: SigId, y: SigId, primal_fn: F) -> Dual
     where
         F: FnOnce(&mut SigBuilder<'_>, SigId, SigId) -> SigId,
@@ -1126,6 +1249,12 @@ impl<'a> ForwardADTransform<'a> {
         }
     }
 
+    /// Differentiates a binary operator.
+    ///
+    /// The primal is always rebuilt from the operands' primals. The tangent
+    /// follows the rule table in the module docstring: arithmetic ops use the
+    /// standard sum / difference / product / quotient / `rem` rules; shifts,
+    /// bitwise ops, and comparisons contribute zero (integer / discrete).
     fn transform_binop(&mut self, op: BinOp, x: SigId, y: SigId) -> Dual {
         let dual_x = self.transform(x);
         let dual_y = self.transform(y);
@@ -1222,8 +1351,21 @@ impl<'a> ForwardADTransform<'a> {
 
 /// Expands propagated primal outputs into the forward-mode AD output bundle.
 ///
-/// Output layout: `[p1, t1_s1, t1_s2, …, p2, t2_s1, t2_s2, …]` where
-/// `sK` ranges over `seeds` in order.
+/// Called by the `FlatNodeKind::ForwardAD` arm of `propagate` once the
+/// wrapped primal and the seed sub-expression have both been lowered to
+/// signals. One [`ForwardADTransform`] instance is allocated per call and
+/// reused for every primal output so shared DAG subtrees are differentiated
+/// at most once.
+///
+/// Output layout (per primal `p_i`, for `N = seeds.len()`):
+///
+/// ```text
+/// [p_1, ∂p_1/∂s_0, …, ∂p_1/∂s_{N-1},
+///  p_2, ∂p_2/∂s_0, …, ∂p_2/∂s_{N-1}, …]
+/// ```
+///
+/// When `seeds` is empty the transform is a no-op and the primal outputs
+/// pass through unchanged (keeps `fad(expr, ())` a legal identity).
 pub(super) fn generate_fad_signals_multi(
     arena: &mut TreeArena,
     outputs: &[SigId],
