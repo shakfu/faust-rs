@@ -113,6 +113,9 @@ This snapshot is based on:
   - `tests/corpus/fad_recursive_waveform_index.dsp`
   - `tests/corpus/fad_rwtable_index_zero_tangent.dsp`
   - `porting/journal/2026-04-23.md`
+- nested-recursion slot_env capture fix on 2026-04-23 reviewed against:
+  - `crates/propagate/src/lib.rs` (Rec arm, slot_env lift ordering)
+  - `porting/journal/2026-04-23.md`
 
 The corresponding generated reports are:
 
@@ -400,7 +403,12 @@ classification:
 - simple-recursion lowering aligned with Faust C++ for 2-slot feedback arrays,
 - explicit sample-loop emission phases (`Immediate`, `PostOutput`,
   `SampleEnd`) so `Shift` copies and delay counter updates now have a clearer
-  documented ordering model.
+  documented ordering model,
+- nested-recursion DeBruijn scope correctness: `slot_env` is now lifted
+  before propagating both the feedback and main branches of a `Rec` node,
+  so outer-scope captures reached through the feedback path (e.g.
+  `fi.lowpass(f_curr, x)` called from inside a `~` loop) stay bound to the
+  intended outer `DEBRUIJNREC` instead of being captured by the inner one.
 
 ## 5.3 Important current backend exclusions
 
