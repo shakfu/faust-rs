@@ -111,6 +111,38 @@ cargo run -p compiler -- -lang fir foo.dsp
 - Technical/developer workflows: `docs/developer-workflows-en.md`
 - Raw `faustwasm` compiler-module build notes: `crates/wasm-ffi/README.md`
 
+## Workspace crates
+
+| Crate | Role |
+|---|---|
+| `tlib` | Hash-consed tree arena, symbols, lists, recursive tree helpers |
+| `errors` | Structured diagnostics model |
+| `interval` | Interval arithmetic |
+| `algebra` | Shared algebra/rewrite scaffold |
+| `graph` | Shared graph algorithms scaffold |
+| `boxes` | Faust box IR builders and matchers |
+| `parser` | Faust source parser and import handling |
+| `signals` | Faust signal IR builders, matchers, and extended math nodes |
+| `ui` | Grouped UI IR |
+| `eval` | Box-level evaluator and pattern matcher |
+| `propagate` | Box-to-signal propagation |
+| `normalize` | Signal normalization and preparation helpers |
+| `sigtype` | Signal type lattice and inference |
+| `transform` | Signal preparation and signal-to-FIR lowering |
+| `fir` | Faust Intermediate Representation |
+| `foreign-call` | Raw C ABI foreign-function invocation bridge |
+| `codegen` | C, C++, interpreter, Cranelift, and WASM backend generation |
+| `draw` | Diagram rendering scaffold |
+| `doc` | Documentation/reporting scaffold |
+| `utils` | Shared FFI utilities |
+| `compiler` | Top-level compiler facade and CLI |
+| `xtask` | Developer and CI automation |
+| `interp-ffi` | Interpreter backend C/C++ API |
+| `cranelift-ffi` | Experimental Cranelift backend C/C++ API |
+| `box-ffi` | Box manipulation C/C++ API |
+| `faust-ffi` | Unified `libfaust` distribution crate |
+| `wasm-ffi` | Raw WASM ABI for `faustwasm` embedded compiler mode |
+
 ## Generate API docs
 
 Generate Rustdoc for workspace crates only (recommended):
@@ -140,3 +172,5 @@ Crate-specific entry point example:
 - Porting plan: `porting/faust-rust-porting-plan-en.md`
 - Critical points: `porting/faust-rust-points-critiques-en.md`
 - Phases: `porting/phases/`
+- Supported Faust subset: `porting/faust-rs-supported-faust-subset-en.md`
+- Porting journal index: `JOURNAL.md`
