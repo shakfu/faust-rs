@@ -141,6 +141,55 @@ fn eval_error_fixtures_expose_source_labels_and_readable_context() {
 }
 
 #[test]
+fn diverging_recursive_case_reports_eval_error_instead_of_aborting() {
+    let source = r#"
+fact(1) = 1;
+fact(n) = n * fact(n-1);
+
+process = par(i, 3, fact(i));
+"#;
+
+    std::thread::Builder::new()
+        .name("recursive-case-stack-overflow".to_owned())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let compiler = Compiler::new();
+            let err = compiler
+                .compile_source_to_signals("fact_stack_overflow.dsp", source)
+                .expect_err("missing factorial base case for fact(0) should fail in eval stage");
+
+            let diagnostics = err
+                .diagnostics()
+                .expect("recursive eval failure should expose diagnostics");
+            let first = diagnostics
+                .as_slice()
+                .first()
+                .expect("recursive eval failure should produce one diagnostic");
+            assert!(
+                first.code.0.starts_with("FRS-EVAL-"),
+                "recursive eval failure should stay in eval stage"
+            );
+            assert!(
+                first.message.contains("stack overflow in eval"),
+                "diagnostic should mirror C++ stack-overflow wording, got: {}",
+                first.message
+            );
+            assert!(
+                first.notes.iter().any(|n| n.contains("missing base case"))
+                    || first
+                        .help
+                        .iter()
+                        .any(|h| h.contains("non-decreasing recursive call"))
+                    || first.help.iter().any(|h| h.contains("missing base case")),
+                "diagnostic should explain likely recursive-definition cause"
+            );
+        })
+        .expect("spawn worker")
+        .join()
+        .expect("worker thread should finish");
+}
+
+#[test]
 fn eval_undefined_symbol_exposes_binding_trace() {
     let compiler = Compiler::new();
     let source = read_corpus("err_09_eval_undefined_symbol.dsp");

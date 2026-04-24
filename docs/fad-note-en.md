@@ -126,7 +126,7 @@ Typical examples are:
 
 - gradient monitoring for adaptive algorithms,
 - parameter estimation,
-- host-driven optimization,
+- in-graph optimization and adaptive updates,
 - differentiable control analysis,
 - recursive adaptive updates where the gradient of a loss depends on the
   previous state.
@@ -175,8 +175,15 @@ prev  = state;
 next  = saturate(prev + input);
 ```
 
-semantically usable inside the Rust compiler. That matters because many useful
-AD examples refer to the previous recursive state by name.
+semantically usable inside `faust-rs`. In this document, the safe claim is:
+
+- this pattern has a clear causal DSP meaning,
+- `faust-rs` supports it through targeted recursive-alias preservation,
+- it should not be presented as a blanket claim about every Faust compiler or
+  every equivalent source form.
+
+That matters because many useful AD examples refer to the previous recursive
+state by name.
 
 ### 4.3 Propagation and signal differentiation
 
@@ -312,6 +319,17 @@ The main intentional "zero tangent" boundaries remain:
 
 ## 7. Demonstration DSP Examples
 
+The white-paper perspective on `fad` is easiest to understand if the use cases
+are split into three tiers:
+
+1. **Directly supported analysis patches**: feed-forward or recursion-local
+   examples that compile today in the current `faust-rs` subset.
+2. **Host-driven adaptive DSP**: the DSP computes losses and gradients, while an
+   external host updates parameters.
+3. **More ambitious differentiable systems**: neural or strongly adaptive
+   patches that are architecturally enabled by `fad`, but still depend on a
+   library layer or extra compiler work to become turnkey workflows.
+
 ### 7.1 Single-parameter gain sensitivity
 
 This is the smallest useful example: measure how the output changes with
@@ -334,7 +352,36 @@ Outputs:
 This is a direct sanity check: the derivative of `gain * x` with respect to
 `gain` is exactly `x`.
 
-### 7.2 Two-parameter filter sensitivity
+### 7.2 Exact local slopes for nonlinear DSP
+
+One of the most valuable practical uses of forward AD in DSP is extracting the
+exact local slope of a nonlinear transfer function. That slope can be reused for
+analysis, dynamic control, or antialiasing techniques that require derivative
+information.
+
+```faust
+ma = library("maths.lib");
+
+clipper(drive, x) = ma.tanh(drive * x);
+slope(drive, x)   = fad(clipper(drive, x), x) : !, _;
+
+drive = hslider("drive", 2.0, 0.1, 20.0, 0.01);
+input = _;
+
+process = clipper(drive, input), slope(drive, input);
+```
+
+Outputs:
+
+1. the nonlinear waveshaper output,
+2. the exact derivative of the waveshaper with respect to the input.
+
+This is the kind of primitive needed by ADAA-style or local-linearization
+techniques. Even when the final antialiasing strategy is more elaborate, `fad`
+provides a compiler-native way to expose the slope without manually deriving and
+maintaining the formula.
+
+### 7.3 Two-parameter filter sensitivity
 
 This example exposes both the primal filter output and the sensitivities of the
 filter with respect to frequency and resonance:
@@ -358,7 +405,47 @@ Outputs:
 
 This is a good analysis patch when tuning a filter interactively.
 
-### 7.3 Recursive local gradient update
+This pattern is also the core of a **grey-box identification** workflow:
+
+- define a parametric DSP block that is still interpretable as a filter,
+- compare it to a target behavior,
+- expose one gradient lane per parameter,
+- update parameters in the host or in a supported recursive optimizer loop.
+
+For example, a host can run a learning loop around the patch above and minimize
+the distance between a target filtered signal and the current model output.
+
+### 7.4 Newton-style root finding and implicit DSP equations
+
+Another important class of use cases is solving implicit equations. In analog
+modeling and zero-delay-feedback style formulations, one often needs both a
+function value and its derivative with respect to the unknown.
+
+```faust
+ma = library("maths.lib");
+
+error_eq(x, y) = y - ma.tanh(x - y);
+newton_step(x, y) = y - (fad(error_eq(x, y), y) : /);
+
+process = _, 0.0 : newton_step;
+```
+
+Conceptually, `fad(error_eq(x, y), y)` returns:
+
+1. `F(y)`
+2. `F'(y)`
+
+and `:/` computes `F(y) / F'(y)`, so the full step becomes:
+
+```text
+y_next = y - F(y) / F'(y)
+```
+
+This is a compact and expressive way to build Newton-Raphson style solvers in
+Faust source. In more elaborate patches, several such steps can be chained
+together inside a loop or a recursive structure.
+
+### 7.5 Recursive local gradient update
 
 The next example uses `fad` inside a recursive state update:
 
@@ -380,9 +467,13 @@ This is not just a toy. It demonstrates that `faust-rs` can differentiate a
 loss with respect to the previous recursive state and immediately use that
 gradient in the same recursive branch.
 
-### 7.4 Host-driven optimization
+Architecturally, this is the bridge toward **real-time recurrent learning style
+behavior**: the derivative is propagated alongside the recursive state instead of
+being recovered later by backpropagating through stored history.
 
-For larger adaptive examples, a practical pattern is to keep the gradient
+### 7.6 Host-driven optimization
+
+For larger adaptive examples, one practical pattern is to keep the gradient
 inside the DSP but close the optimization loop in the host. The repository
 contains examples of this style:
 
@@ -395,8 +486,176 @@ The DSP computes:
 - loss,
 - one or more gradients,
 
-and the host updates the control parameters externally. This is currently the
-cleanest strategy for complex adaptive effects.
+and the host updates the control parameters externally. This remains a useful
+deployment pattern for integration with plugin hosts, experiments, and offline
+training workflows, but it is **not** the main conceptual point of `fad`.
+
+This is one recommended deployment pattern today for:
+
+- auto-tuning filters,
+- self-calibrating modulated effects,
+- adaptive wah/chorus style processors,
+- target-matching or system-identification experiments.
+
+It keeps the DSP side simple and real time safe, while the host handles:
+
+- parameter constraints,
+- optimization schedules,
+- batching or smoothing of gradients,
+- persistence and UI integration.
+
+### 7.7 Faust-expressed optimizers and learning loops
+
+The more interesting long-term point is that `fad` is not only useful for
+exporting gradients to a host. It also makes it possible to express the
+**optimizer itself in Faust code**.
+
+That is exactly the direction illustrated by local repository examples such as:
+
+- `fad_filter3.dsp`
+- `fad_pendulum_cello4.dsp`
+
+In those patches, Faust code computes:
+
+- the model output,
+- the error signal,
+- one or more derivatives via `fad`,
+- and the update rule for the trainable state.
+
+So the learning loop can stay inside the DSP graph rather than being split
+between DSP code and host code.
+
+#### Faust-expressed adaptive optimizers
+
+`fad_filter3.dsp` is a better illustration of this idea than a simple
+sign-descent patch. It keeps two trainable filter parameters, frequency and
+resonance, in recursive state and updates them directly in Faust.
+
+It already contains the main ingredients of a practical optimizer:
+
+- multi-parameter `fad(..., (f_curr, q_curr))`,
+- explicit gradient extraction,
+- gradient clipping,
+- smoothed first and second moments,
+- epsilon-stabilized normalization,
+- bounded parameter projection.
+
+The relevant update law looks like this:
+
+```faust
+raw_grad_f = -err * df;
+raw_grad_q = -err * dq;
+
+grad_f = max(-1.0, min(1.0, raw_grad_f));
+grad_q = max(-0.1, min(0.1, raw_grad_q));
+
+m_f = grad_f : si.smooth(0.9);
+v_f = (grad_f * grad_f) : si.smooth(0.999);
+
+m_q = grad_q : si.smooth(0.9);
+v_q = (grad_q * grad_q) : si.smooth(0.999);
+
+f_n = max(20.0, min(20000.0, f_curr - lr_f * (m_f / (sqrt(v_f) + eps))));
+q_n = max(0.1, min(10.0, q_curr - lr_q * (m_q / (sqrt(v_q) + eps))));
+```
+
+This is close to a compact Faust-native Adam-style optimizer. The important
+point is not the exact schedule, but the fact that the entire update path is
+still Faust DSP code:
+
+- `fad` computes the local sensitivity,
+- Faust computes the gradient signal,
+- Faust computes moment estimates,
+- Faust computes the normalized step,
+- Faust clamps the updated parameters,
+- recursion stores the updated parameter for the next sample.
+
+In other words, the optimization law is itself a DSP program, not an external
+host-side training loop.
+
+#### More elaborate in-graph learning architectures
+
+`fad_pendulum_cello4.dsp` shows a more ambitious direction. It combines:
+
+- a physical or kinetic generator,
+- a small neural-style controller,
+- differentiable control prediction,
+- and an optimizer written in Faust through `ad.fit_adam(...)`.
+
+The important architectural message is that `fad` can serve as the derivative
+source inside a broader Faust-defined adaptive system. Once the gradient exists
+as an ordinary signal, nothing prevents Faust code from:
+
+- smoothing it,
+- clipping it,
+- applying sign descent,
+- feeding it into SGD,
+- feeding it into Adam-like stateful updates,
+- storing optimizer state in recursion.
+
+That is closer to the true differentiable-DSP vision than a purely host-driven
+story.
+
+### 7.8 Higher-level differentiable DSP patterns
+
+The whitepapers also point toward more ambitious use cases, such as:
+
+- grey-box system identification,
+- differentiable zero-delay analog models,
+- neural or recurrent black-box audio models,
+- optimizer libraries built on top of `fad`.
+
+Those directions are technically aligned with the current architecture, but they
+should be described carefully in terms of present support.
+
+#### Grey-box system identification
+
+This is already realistic with the current compiler. A representative pattern
+is:
+
+```faust
+fi = library("filters.lib");
+os = library("oscillators.lib");
+
+target_f = 1200;
+f_guess  = hslider("freq", 300, 50, 5000, 1);
+q_guess  = hslider("q", 1.0, 0.1, 10.0, 0.01);
+input    = os.osc(500);
+
+target = input : fi.resonlp(target_f, 1.0, 1.0);
+model  = input : fi.resonlp(f_guess, q_guess, 1.0);
+loss   = (target - model) ^ 2;
+
+process = target, model, fad(loss, (f_guess, q_guess));
+```
+
+This emits the target, the current model, the scalar loss, and one gradient per
+parameter. That gradient can then be consumed either:
+
+- by a host-side optimizer,
+- or by a Faust-defined update stage stored in recursive state.
+
+#### Black-box or neural-style modeling
+
+The compiler-side differentiation engine is also compatible with the idea of
+larger differentiable blocks, including recurrent ones. What is still missing is
+not the core `fad` transform itself, but the higher-level library layer that
+would package:
+
+- trainable parameter buses,
+- optimizer state,
+- reusable dense/RNN/LSTM building blocks,
+- convenient parameter-update combinators.
+
+So the correct statement today is:
+
+- **the compiler infrastructure is in place for such systems**, especially for
+  forward-mode, recursive local sensitivities, and Faust-defined adaptive
+  updates,
+- **the out-of-the-box library ergonomics are still an area for future work**.
+
+That distinction is important because it keeps the white-paper vision aligned
+with the current repository reality.
 
 ## 8. Current Limits and Practical Guidance
 
@@ -408,8 +667,9 @@ For day-to-day use, the following guidelines are accurate:
 - use `: !, _` to extract the tangent for a single-seed `fad`,
 - expect robust behavior on feed-forward graphs and on the recursive families
   already covered by the corpus,
-- use host-driven optimization for larger adaptive systems when the full update
-  loop would otherwise become compiler-sensitive.
+- use host-driven optimization when integration simplicity matters,
+- but keep in mind that Faust-defined update laws are also a core intended use
+  of `fad`, not an edge case.
 
 The most important non-goal to keep in mind is that `fad` is not yet "differentiate all Faust code automatically". It is a strong, well-tested forward AD
 primitive over an explicitly supported differentiable subset of Faust.
@@ -433,6 +693,180 @@ That makes `fad` useful in two complementary ways:
 2. as a building block for adaptive or optimization-driven audio systems.
 
 The implementation is already broad enough to support serious experimentation,
-especially on feed-forward graphs, recursive local gradient patterns, and
-host-driven adaptive effects. The remaining work is mostly about extending the
-supported differentiable subset further, rather than proving the core model.
+especially on feed-forward graphs, recursive local gradient patterns, Faust
+expressed optimizers, and host-driven adaptive effects. The remaining work is
+mostly about extending the supported differentiable subset further, rather than
+proving the core model.
+
+## Appendix A. Full Listing: `fad_filter3.dsp`
+
+```faust
+import("stdfaust.lib");
+
+// The model loops over TWO variables: (f_prev, q_prev)
+process = no.noise : train ~ (_, _) : (!, !, _);
+
+train(f_p, q_p, input) = f_n, q_n, model_out
+with {
+    // 1. Initialization: 1000 Hz and Q = 1.0 on the first sample
+    f_curr = select2(f_p == 0.0, f_p, 1000.0);
+    q_curr = select2(q_p == 0.0, q_p, 1.0);
+
+    // 2. Target controls (the sound to imitate)
+    t_f = hslider("Target Freq", 1200, 20, 20000, 1);
+    t_q = hslider("Target Q", 2.0, 0.1, 10.0, 0.01);
+    target = input : fi.resonlp(t_f, t_q, 1.0);
+
+    // 3. The model and the error computation
+    model_out = input : fi.resonlp(f_curr, q_curr, 1.0);
+    err = target - model_out;
+
+    // 4. Multi-dimensional FAD (derivative extraction)
+    fad_outs = fad(input : fi.resonlp(f_curr, q_curr, 1.0), (f_curr, q_curr)) : !, _, _;
+
+    df = fad_outs : _, !;
+    dq = fad_outs : !, _;
+
+    // --- 5. SAFE ADAM OPTIMIZER ---
+
+    // Raw gradients (MSE)
+    raw_grad_f = -err * df;
+    raw_grad_q = -err * dq;
+
+    // CLIPPING: mathematically limit gradient magnitude
+    grad_f = max(-1.0, min(1.0, raw_grad_f));
+    grad_q = max(-0.1, min(0.1, raw_grad_q));
+
+    // Moment estimates (M = inertia, V = variance)
+    m_f = grad_f : si.smooth(0.9);
+    v_f = (grad_f * grad_f) : si.smooth(0.999);
+
+    m_q = grad_q : si.smooth(0.9);
+    v_q = (grad_q * grad_q) : si.smooth(0.999);
+
+    // Learning rates
+    lr_f = 2.0;
+    lr_q = 0.01;
+
+    // Larger epsilon to avoid division by zero
+    eps = 1e-3;
+
+    // 6. Parameter updates with the ADAM algorithm
+    f_n = max(20.0, min(20000.0, f_curr - lr_f * (m_f / (sqrt(v_f) + eps))))
+        : hbargraph("Learned Freq", 20, 20000);
+
+    q_n = max(0.1, min(10.0, q_curr - lr_q * (m_q / (sqrt(v_q) + eps))))
+        : hbargraph("Learned Q", 0.1, 10.0);
+};
+```
+
+## Appendix B. Full Listing: `fad_pendulum_cello4.dsp`
+
+```faust
+import("stdfaust.lib");
+ad = library("ad.lib");
+
+// ==========================================================
+// 1. KINETIC ENGINE
+// ==========================================================
+kinematics(phi) = pos, vel, acc
+with {
+    eq = sin(phi) + 0.3 * cos(2.5 * phi);
+    pos = eq;
+    vel = fad(eq, phi) : !, _;
+    acc = fad(vel, phi) : !, _;
+};
+
+// ==========================================================
+// 2. NEURAL NETWORK
+// ==========================================================
+nn_controller(v, w, b) = cutoff
+with {
+    ctrl = ad.dense(v, w, b, 0.5);
+    cutoff = 200 + (abs(ctrl) * 8000) : min(15000);
+};
+
+// ==========================================================
+// 3. STRING MODEL
+// ==========================================================
+cello_string(freq, acc, trigger, cutoff) = noise_burst : resonance
+with {
+    delay_len = ma.SR / freq;
+    noise_burst = no.noise * trigger : fi.lowpass(1, 2000);
+
+    gain = 0.990 + (ad.sigmoid(acc) * 0.009);
+    damping(sig) = sig : fi.lowpass(1, cutoff) * gain;
+
+    resonance = (+ : de.fdelay(4096, delay_len)) ~ damping;
+};
+
+body_resonator = fi.highpass(2, 60) : _ <: (f1, f2, f3) :> /(2.5)
+with {
+    f1 = fi.resonbp(235, 4.0, 1.0);
+    f2 = fi.resonbp(430, 3.0, 0.8);
+    f3 = fi.resonbp(850, 5.0, 0.5);
+};
+
+// ==========================================================
+// 4. TRAINING LOOP
+// ==========================================================
+process = train ~ si.bus(2) : !, !, _ <: _, _;
+
+train(w_p, b_p) = w_n, b_n, audio_out
+with {
+    // --- USER INTERFACE ---
+    lfo_speed = hslider("h:[1] Automate/[1] Vitesse", 0.5, 0.1, 5, 0.01);
+    base_freq = hslider("h:[2] Instrument/[1] Fondamentale", 110, 55, 880, 0.1);
+    pressure = hslider("h:[2] Instrument/[2] Pression", 0.5, 0.0, 3.0, 0.01);
+    lr = hslider("h:[3] Reseau/[1] Apprentissage (LR)", 0.001, 0.0001, 0.05, 0.0001);
+    bypass_ia = checkbox("h:[5] Comparaison/[1] Bypass IA (Cible Physique)");
+
+    // --- KINETIC ENGINE ---
+    phi_gen = (+(lfo_speed / ma.SR) : ma.frac) ~ _ : *(2 * ma.PI);
+    kin_bus = kinematics(phi_gen);
+    p = kin_bus : ba.selectn(3, 0);
+    v = kin_bus : ba.selectn(3, 1);
+    a = kin_bus : ba.selectn(3, 2);
+
+    freq = base_freq * pow(2, p);
+    trig = max(0.0, a) * pressure;
+
+    // --- CONTINUOUS DEFIBRILLATOR (DITHERING) ---
+    // Add inaudible micro-noise so the ADAM gradient never fully dies.
+    w_curr = w_p + (no.noise * 0.000001);
+    b_curr = b_p + (no.noise * 0.000001);
+
+    // --- DDSP SPLIT ---
+
+    // A. The model predicts the parameter
+    curr_cutoff = nn_controller(v, w_curr, b_curr);
+
+    // B. Complex physical target to imitate (with strict min restored)
+    target_cutoff = 200 + (abs(a) * 6000) + (abs(v) * 2000) : min(15000);
+
+    // C. Error computation
+    err = target_cutoff - curr_cutoff;
+
+    // D. FAD computed on the fully differentiable model
+    dw = ad.grad(nn_controller(v, w_curr, b_curr), w_curr);
+    db = ad.grad(nn_controller(v, w_curr, b_curr), b_curr);
+
+    // E. A/B test: choose which signal drives the DSP
+    active_cutoff = select2(bypass_ia, curr_cutoff, target_cutoff);
+
+    // F. Audio synthesis
+    raw_audio = cello_string(freq, a, trig, active_cutoff);
+    final_audio = body_resonator(raw_audio);
+
+    // --- VISUALIZATION & ANTI-OPTIMIZATION TRICK ---
+    visu_target = target_cutoff : si.smoo : hbargraph("h:[4] Visu/[1] TARGET Physique", 200, 15000);
+    visu_nn = curr_cutoff : si.smoo : hbargraph("h:[4] Visu/[2] NN IA", 200, 15000);
+
+    // The inaudible addition forces the C++ compiler to keep the UI visualization path
+    audio_out = final_audio + ((visu_target + visu_nn) * 0.0000000001);
+
+    // --- MODEL UPDATE ---
+    w_n = ad.fit_adam(w_p, 0.5, err, dw, lr, -1.0, 1.0);
+    b_n = ad.fit_adam(b_p, 0.0, err, db, lr, -1.0, 1.0);
+};
+```

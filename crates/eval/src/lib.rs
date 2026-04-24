@@ -3253,7 +3253,8 @@ fn apply_value_list_value(
         return Ok(fun);
     }
 
-    match fun {
+    loop_detector.enter_structural()?;
+    let result = (|| match fun {
         EvalValue::Box(fun) => Ok(EvalValue::Box(apply_list(
             arena,
             fun,
@@ -3302,7 +3303,9 @@ fn apply_value_list_value(
         EvalValue::PatternMatcher(pm) => {
             apply_pattern_matcher_value(arena, pm, larg, env, loop_detector, call_site)
         }
-    }
+    })();
+    loop_detector.leave_structural();
+    result
 }
 
 /// Advances a partially-applied pattern matcher with one or more arguments.
@@ -3322,52 +3325,62 @@ fn apply_pattern_matcher_value(
         return Ok(EvalValue::PatternMatcher(pm));
     }
 
-    let raw_arg = arena
-        .hd(larg)
-        .ok_or(EvalError::MalformedListNode { node: larg })?;
-    // C++ parity: case dispatch sees numeric arguments after the same
-    // compile-time simplification pass used by pattern preparation. Without
-    // this, selector expressions like `((l != 0) & ...) * 2` remain residual
-    // box trees and only catch-all rules match.
-    let arg = {
-        let mut cache = ahash::HashMap::with_hasher(ahash::RandomState::new());
-        box_simplification(arena, &mut cache, raw_arg)
-    };
-    let (new_state, _) =
-        pattern_matcher::apply_pattern_matcher(arena, &pm.automaton, pm.state, arg, &mut pm.envs);
-    let Some(new_state) = new_state else {
-        return Err(EvalError::PatternMatchFailed {
-            node: pm.original_rules,
-        });
-    };
-    pm.state = new_state;
-    pm.rev_param_list.push(arg);
-    let tl = arena
-        .tl(larg)
-        .ok_or(EvalError::MalformedListNode { node: larg })?;
-
-    if !pm.automaton.final_state(pm.state) {
-        return apply_value_list_value(
+    loop_detector.enter_structural()?;
+    let result = (|| {
+        let raw_arg = arena
+            .hd(larg)
+            .ok_or(EvalError::MalformedListNode { node: larg })?;
+        // C++ parity: case dispatch sees numeric arguments after the same
+        // compile-time simplification pass used by pattern preparation. Without
+        // this, selector expressions like `((l != 0) & ...) * 2` remain residual
+        // box trees and only catch-all rules match.
+        let arg = {
+            let mut cache = ahash::HashMap::with_hasher(ahash::RandomState::new());
+            box_simplification(arena, &mut cache, raw_arg)
+        };
+        let (new_state, _) = pattern_matcher::apply_pattern_matcher(
             arena,
-            EvalValue::PatternMatcher(pm),
-            tl,
-            env,
-            loop_detector,
-            call_site,
+            &pm.automaton,
+            pm.state,
+            arg,
+            &mut pm.envs,
         );
-    }
+        let Some(new_state) = new_state else {
+            return Err(EvalError::PatternMatchFailed {
+                node: pm.original_rules,
+            });
+        };
+        pm.state = new_state;
+        pm.rev_param_list.push(arg);
+        let tl = arena
+            .tl(larg)
+            .ok_or(EvalError::MalformedListNode { node: larg })?;
 
-    for rule_marker in &pm.automaton.states[pm.state].rules {
-        if let Some(rule_env) = pm.envs[rule_marker.r].take() {
-            let rhs = pm.automaton.rhs[rule_marker.r];
-            let result = eval_value(arena, rhs, &rule_env, loop_detector)?;
-            return apply_value_list_value(arena, result, tl, env, loop_detector, call_site);
+        if !pm.automaton.final_state(pm.state) {
+            return apply_value_list_value(
+                arena,
+                EvalValue::PatternMatcher(pm),
+                tl,
+                env,
+                loop_detector,
+                call_site,
+            );
         }
-    }
 
-    Err(EvalError::PatternMatchFailed {
-        node: pm.original_rules,
-    })
+        for rule_marker in &pm.automaton.states[pm.state].rules {
+            if let Some(rule_env) = pm.envs[rule_marker.r].take() {
+                let rhs = pm.automaton.rhs[rule_marker.r];
+                let result = eval_value(arena, rhs, &rule_env, loop_detector)?;
+                return apply_value_list_value(arena, result, tl, env, loop_detector, call_site);
+            }
+        }
+
+        Err(EvalError::PatternMatchFailed {
+            node: pm.original_rules,
+        })
+    })();
+    loop_detector.leave_structural();
+    result
 }
 
 /// Applies a first-order box expression to an argument list.

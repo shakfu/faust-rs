@@ -74,7 +74,7 @@ pub struct EvalStats {
 /// | `UndefinedSymbol` | `evalerror("... unknown id")` in `eval.cpp` |
 /// | `RedefinedSymbol` | `throw faustexception("redefinition of symbols …")` in `environment.cpp` |
 /// | `LoopDetected` | `faustassert` in C++ loop detector (aborts rather than throws) |
-/// | `RecursionDepthExceeded` | Implicit stack overflow in C++ (no explicit guard) |
+/// | `RecursionDepthExceeded` | `stackOverflowDetector::detect()` in C++ loop detector |
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Typed evaluator failure surface.
 pub enum EvalError {
@@ -325,7 +325,7 @@ impl Display for EvalError {
                 write!(f, "recursive evaluation loop on node {}", node.as_u32())
             }
             Self::RecursionDepthExceeded { max_depth } => {
-                write!(f, "evaluation recursion depth exceeded ({max_depth})")
+                write!(f, "stack overflow in eval (depth budget {max_depth})")
             }
             Self::NotAConstantExpression { node } => {
                 write!(
@@ -622,6 +622,17 @@ impl IntoDiagnostic for EvalError {
                 "rule: iterator count must be integer, non-negative, and within supported range",
             )
             .with_help("iteration count must be a non-negative integer in target range"),
+            Self::RecursionDepthExceeded { max_depth } => Diagnostic::new(
+                Severity::Error,
+                Stage::Eval,
+                codes::EVAL_GENERIC_FAILURE,
+                message,
+            )
+            .with_note("cause: evaluator recursion exhausted the guarded stack budget")
+            .with_note(format!(
+                "computed: the evaluator crossed its recursion budget before finishing ({max_depth} frames)"
+            ))
+            .with_help("check recursive definitions for a missing base case or non-decreasing recursive call"),
             _ => Diagnostic::new(
                 Severity::Error,
                 Stage::Eval,

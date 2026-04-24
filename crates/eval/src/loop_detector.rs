@@ -128,16 +128,28 @@ pub struct LoopDetector {
     pub(crate) structural_depth: usize,
 }
 
+/// Default evaluator recursion budget.
+///
+/// C++ detects evaluator stack overflow by watching the current stack address
+/// and throws once it gets too close to the configured stack ceiling. Rust does
+/// not have a portable thread-stack introspection API here, so the evaluator
+/// uses a conservative logical-depth budget instead. Keep this low enough that
+/// runaway recursive `case` evaluation fails with `RecursionDepthExceeded`
+/// before the host thread aborts with an OS stack overflow.
+const DEFAULT_MAX_DEPTH: usize = 1024;
+
 impl LoopDetector {
-    /// Creates a detector with the default maximum recursion depth (4096).
+    /// Creates a detector with the default maximum recursion depth.
     ///
-    /// This matches the practical depth limit of the C++ evaluator, which uses a similar guard
-    /// to prevent stack overflows on pathological inputs.
+    /// This is intentionally lower than the old Rust-only `4096` budget: debug
+    /// builds of recursive `case` evaluation can exhaust the real thread stack
+    /// before reaching that logical depth, which aborts the whole process
+    /// instead of surfacing a normal evaluator error.
     #[must_use]
     pub fn new() -> Self {
         Self {
             call_stack: Vec::new(),
-            max_depth: 4096,
+            max_depth: DEFAULT_MAX_DEPTH,
             cancel: Arc::new(AtomicBool::new(false)),
             automaton_cache: crate::pattern_matcher::AutomatonCache::new(),
             pm_store: Vec::new(),
@@ -162,7 +174,7 @@ impl LoopDetector {
     pub fn with_cancel(cancel: Arc<AtomicBool>) -> Self {
         Self {
             call_stack: Vec::new(),
-            max_depth: 4096,
+            max_depth: DEFAULT_MAX_DEPTH,
             cancel,
             automaton_cache: crate::pattern_matcher::AutomatonCache::new(),
             pm_store: Vec::new(),
