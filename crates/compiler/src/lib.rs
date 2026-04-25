@@ -33,6 +33,8 @@ pub mod enrobage;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use boxes::{BoxId, BoxMatch, dump_box, match_box};
 use codegen::backends::c::{COptions, CodegenError as CCodegenError, generate_c_module};
@@ -340,7 +342,12 @@ pub struct Compiler {
     /// uses this with a watchdog thread for `--timeout`; libfaust hosts can
     /// set it from any thread to abort compilation without killing the process.
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Optional sink for phase timings, used by the CLI `-time` flag and by
+    /// embedding layers that want Faust-style internal compilation timings.
+    timing_sink: Option<TimingSink>,
 }
+
+type TimingSink = Arc<dyn Fn(&str, Duration) + Send + Sync + 'static>;
 
 /// Selects which signal->FIR lowering route is used before backend emission.
 ///
@@ -373,6 +380,7 @@ impl Compiler {
             max_copy_delay: 16,
             delay_line_threshold: u32::MAX,
             cancel: None,
+            timing_sink: None,
         }
     }
 
@@ -437,6 +445,20 @@ impl Compiler {
         self
     }
 
+    /// Returns a compiler facade that reports internal phase timings.
+    #[must_use]
+    pub fn with_timing_sink<F>(mut self, sink: F) -> Self
+    where
+        F: Fn(&str, Duration) + Send + Sync + 'static,
+    {
+        self.timing_sink = Some(Arc::new(sink));
+        self
+    }
+
+    fn time_phase<T>(&self, name: &'static str, f: impl FnOnce() -> T) -> T {
+        time_phase_with_sink(self.timing_sink.as_ref(), name, f)
+    }
+
     #[must_use]
     /// Returns the crate package version used by this binary/library build.
     pub fn version() -> &'static str {
@@ -451,7 +473,7 @@ impl Compiler {
         source_name: &str,
         source: &str,
     ) -> Result<ParseOutput, CompilerError> {
-        let output = parser::parse_program(source, source_name);
+        let output = self.time_phase("parser", || parser::parse_program(source, source_name));
         ensure_parse_success(source_name, output)
     }
 
@@ -469,7 +491,10 @@ impl Compiler {
         search_paths: &[PathBuf],
     ) -> Result<ParseOutput, CompilerError> {
         let import_search_paths = merge_import_search_paths(path, search_paths);
-        let output = parser::parse_file_with_imports(path, &import_search_paths)
+        let output = self
+            .time_phase("parser", || {
+                parser::parse_file_with_imports(path, &import_search_paths)
+            })
             .map_err(CompilerError::Import)?;
         ensure_parse_success(&path.display().to_string(), output)
     }
@@ -526,18 +551,22 @@ impl Compiler {
         let output = if search_paths.is_empty() && virtual_sources.is_empty() {
             ensure_parse_success(
                 source_name,
-                parser::parse_program_with_metadata(source, source_name, metadata_store.clone()),
+                self.time_phase("parser", || {
+                    parser::parse_program_with_metadata(source, source_name, metadata_store.clone())
+                }),
             )?
         } else {
             ensure_parse_success(
                 source_name,
-                parser::parse_program_with_imports_and_metadata(
-                    source,
-                    source_name,
-                    search_paths,
-                    virtual_sources,
-                    metadata_store.clone(),
-                )
+                self.time_phase("parser", || {
+                    parser::parse_program_with_imports_and_metadata(
+                        source,
+                        source_name,
+                        search_paths,
+                        virtual_sources,
+                        metadata_store.clone(),
+                    )
+                })
                 .map_err(CompilerError::Import)?,
             )?
         };
@@ -573,11 +602,13 @@ impl Compiler {
         );
         let output = ensure_parse_success(
             &path.display().to_string(),
-            parser::parse_file_with_imports_and_metadata(
-                path,
-                &import_search_paths,
-                metadata_store.clone(),
-            )
+            self.time_phase("parser", || {
+                parser::parse_file_with_imports_and_metadata(
+                    path,
+                    &import_search_paths,
+                    metadata_store.clone(),
+                )
+            })
             .map_err(CompilerError::Import)?,
         )?;
         let eval_source_context = eval::EvalSourceContext::for_file_with_metadata(
@@ -665,6 +696,7 @@ impl Compiler {
             real_type: self.real_type,
             max_copy_delay: self.max_copy_delay,
             delay_line_threshold: self.delay_line_threshold,
+            timing_sink: self.timing_sink.clone(),
         };
         lower_signals_to_c(source_name, &signals, options, ctx)
             .map_err(|e| lower_c_error_to_compiler(source_name, e))
@@ -686,6 +718,7 @@ impl Compiler {
             real_type: self.real_type,
             max_copy_delay: self.max_copy_delay,
             delay_line_threshold: self.delay_line_threshold,
+            timing_sink: self.timing_sink.clone(),
         };
         lower_signals_to_cpp(source_name, &signals, options, ctx)
             .map_err(|e| lower_cpp_error_to_compiler(source_name, e))
@@ -953,6 +986,7 @@ impl Compiler {
             real_type: self.real_type,
             max_copy_delay: self.max_copy_delay,
             delay_line_threshold: self.delay_line_threshold,
+            timing_sink: self.timing_sink.clone(),
         };
         lower_signals_to_c(&source, &signals, options, ctx)
             .map_err(|e| lower_c_error_to_compiler(&source, e))
@@ -975,6 +1009,7 @@ impl Compiler {
             real_type: self.real_type,
             max_copy_delay: self.max_copy_delay,
             delay_line_threshold: self.delay_line_threshold,
+            timing_sink: self.timing_sink.clone(),
         };
         lower_signals_to_cpp(&source, &signals, options, ctx)
             .map_err(|e| lower_cpp_error_to_compiler(&source, e))
@@ -1363,6 +1398,7 @@ impl Compiler {
             real_type: self.real_type,
             max_copy_delay: self.max_copy_delay,
             delay_line_threshold: self.delay_line_threshold,
+            timing_sink: self.timing_sink.clone(),
         };
         lower_signals_to_interp(source_name, &signals, options, ctx)
             .map_err(|e| lower_interp_error_to_compiler(source_name, e))
@@ -1401,6 +1437,7 @@ impl Compiler {
             real_type: self.real_type,
             max_copy_delay: self.max_copy_delay,
             delay_line_threshold: self.delay_line_threshold,
+            timing_sink: self.timing_sink.clone(),
         };
         lower_signals_to_interp(&source, &signals, options, ctx)
             .map_err(|e| lower_interp_error_to_compiler(&source, e))
@@ -1450,27 +1487,31 @@ impl Compiler {
             source: source.into(),
         })?;
 
-        let process_result = match (&eval_source_context, &self.cancel) {
-            (Some(source_context), Some(cancel)) => {
-                eval::eval_entrypoint_with_source_context_and_cancel(
+        let process_result = self.time_phase("evaluation", || {
+            match (&eval_source_context, &self.cancel) {
+                (Some(source_context), Some(cancel)) => {
+                    eval::eval_entrypoint_with_source_context_and_cancel(
+                        &mut output.state.arena,
+                        root,
+                        self.entrypoint_name.as_ref(),
+                        source_context.clone(),
+                        std::sync::Arc::clone(cancel),
+                    )
+                    .map(|(tree, _stats)| tree)
+                }
+                (Some(source_context), None) => eval::eval_entrypoint_with_source_context(
                     &mut output.state.arena,
                     root,
                     self.entrypoint_name.as_ref(),
                     source_context.clone(),
-                    std::sync::Arc::clone(cancel),
-                )
-                .map(|(tree, _stats)| tree)
+                ),
+                (None, _) => eval::eval_entrypoint(
+                    &mut output.state.arena,
+                    root,
+                    self.entrypoint_name.as_ref(),
+                ),
             }
-            (Some(source_context), None) => eval::eval_entrypoint_with_source_context(
-                &mut output.state.arena,
-                root,
-                self.entrypoint_name.as_ref(),
-                source_context.clone(),
-            ),
-            (None, _) => {
-                eval::eval_entrypoint(&mut output.state.arena, root, self.entrypoint_name.as_ref())
-            }
-        };
+        });
         let process_box = process_result.map_err(|error| {
             let node = eval_error_node(&error);
             let owner =
@@ -1503,7 +1544,10 @@ impl Compiler {
         })?;
 
         let ep = self.entrypoint_name.as_ref();
-        let process_flat = propagate::try_build_flat_box(&output.state.arena, process_box)
+        let process_flat = self
+            .time_phase("box-flatten", || {
+                propagate::try_build_flat_box(&output.state.arena, process_box)
+            })
             .map_err(|e| {
                 make_propagate_compiler_error(
                     source,
@@ -1517,19 +1561,21 @@ impl Compiler {
             })?;
 
         let mut arity_cache = ArityCache::new();
-        let process_arity =
-            propagate::box_arity_typed(&output.state.arena, process_flat, &mut arity_cache)
-                .map_err(|e| {
-                    make_propagate_compiler_error(
-                        source,
-                        e,
-                        &output.state.arena,
-                        &output.state.ctx,
-                        root,
-                        ep,
-                        true,
-                    )
-                })?;
+        let process_arity = self
+            .time_phase("arity", || {
+                propagate::box_arity_typed(&output.state.arena, process_flat, &mut arity_cache)
+            })
+            .map_err(|e| {
+                make_propagate_compiler_error(
+                    source,
+                    e,
+                    &output.state.arena,
+                    &output.state.ctx,
+                    root,
+                    ep,
+                    true,
+                )
+            })?;
 
         let compilation_metadata = eval_source_context.as_ref().map_or_else(
             || output.compilation_metadata.clone(),
@@ -1538,30 +1584,35 @@ impl Compiler {
         let ui_options =
             PropagateUiOptions::new(resolve_ui_root_label(source, &compilation_metadata));
         let inputs = propagate::make_sig_input_list(&mut output.state.arena, process_arity.inputs);
-        let propagated = propagate::propagate_typed_with_ui_options(
-            &mut output.state.arena,
-            process_flat,
-            &inputs,
-            &mut arity_cache,
-            &ui_options,
-        )
-        .map_err(|e| {
-            make_propagate_compiler_error(
+        let propagated = self
+            .time_phase("propagation", || {
+                propagate::propagate_typed_with_ui_options(
+                    &mut output.state.arena,
+                    process_flat,
+                    &inputs,
+                    &mut arity_cache,
+                    &ui_options,
+                )
+            })
+            .map_err(|e| {
+                make_propagate_compiler_error(
+                    source,
+                    e,
+                    &output.state.arena,
+                    &output.state.ctx,
+                    root,
+                    ep,
+                    true,
+                )
+            })?;
+        self.time_phase("signal-type-validation", || {
+            validate_signal_types(
                 source,
-                e,
                 &output.state.arena,
-                &output.state.ctx,
-                root,
-                ep,
-                true,
+                &propagated.signals,
+                &propagated.ui,
             )
         })?;
-        validate_signal_types(
-            source,
-            &output.state.arena,
-            &propagated.signals,
-            &propagated.ui,
-        )?;
 
         Ok(SignalCompileOutput {
             compilation_metadata,
@@ -2083,15 +2134,29 @@ enum LowerToFirError {
     Verify(FirVerifyReport),
 }
 
+fn time_phase_with_sink<T>(
+    timing_sink: Option<&TimingSink>,
+    name: &'static str,
+    f: impl FnOnce() -> T,
+) -> T {
+    let start = Instant::now();
+    let result = f();
+    if let Some(sink) = timing_sink {
+        sink(name, start.elapsed());
+    }
+    result
+}
+
 // ─── Signal-to-FIR lower functions ───────────────────────────────────────────
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 struct SignalLoweringContext {
     lane: SignalFirLane,
     fir_verify: FirVerifyOptions,
     real_type: RealType,
     max_copy_delay: u32,
     delay_line_threshold: u32,
+    timing_sink: Option<TimingSink>,
 }
 
 /// Dispatches C++ lowering through the selected signal->FIR lane.
@@ -2105,15 +2170,7 @@ fn lower_signals_to_cpp(
     ctx: SignalLoweringContext,
 ) -> Result<String, LowerToCppError> {
     let _ = ctx.lane;
-    lower_signals_to_cpp_transform_fastlane(
-        source_name,
-        output,
-        options,
-        ctx.fir_verify,
-        ctx.real_type,
-        ctx.max_copy_delay,
-        ctx.delay_line_threshold,
-    )
+    lower_signals_to_cpp_transform_fastlane(source_name, output, options, &ctx)
 }
 
 /// Dispatches C lowering through the selected signal->FIR lane.
@@ -2124,15 +2181,7 @@ fn lower_signals_to_c(
     ctx: SignalLoweringContext,
 ) -> Result<String, LowerToCError> {
     let _ = ctx.lane;
-    lower_signals_to_c_transform_fastlane(
-        source_name,
-        output,
-        options,
-        ctx.fir_verify,
-        ctx.real_type,
-        ctx.max_copy_delay,
-        ctx.delay_line_threshold,
-    )
+    lower_signals_to_c_transform_fastlane(source_name, output, options, &ctx)
 }
 
 /// Dispatches interpreter lowering through the selected signal->FIR lane.
@@ -2143,15 +2192,7 @@ fn lower_signals_to_interp(
     ctx: SignalLoweringContext,
 ) -> Result<String, LowerToInterpError> {
     let _ = ctx.lane;
-    lower_signals_to_interp_transform_fastlane(
-        source_name,
-        output,
-        options,
-        ctx.fir_verify,
-        ctx.real_type,
-        ctx.max_copy_delay,
-        ctx.delay_line_threshold,
-    )
+    lower_signals_to_interp_transform_fastlane(source_name, output, options, &ctx)
 }
 
 /// Lowers signals through the transform fast lane then serializes an interpreter `.fbc`.
@@ -2162,33 +2203,46 @@ fn lower_signals_to_interp_transform_fastlane(
     source_name: &str,
     output: &SignalCompileOutput,
     options: &InterpOptions,
-    fir_verify: FirVerifyOptions,
-    real_type: RealType,
-    max_copy_delay: u32,
-    delay_line_threshold: u32,
+    ctx: &SignalLoweringContext,
 ) -> Result<String, LowerToInterpError> {
     let module_name = resolve_module_name(options.module_name.as_deref(), source_name);
-    let lowered = lower_signals_to_fir_transform_fastlane(
-        output,
-        module_name,
-        real_type,
-        max_copy_delay,
-        delay_line_threshold,
-    )
+    let timing_sink = ctx.timing_sink.as_ref();
+    let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
+        lower_signals_to_fir_transform_fastlane(
+            output,
+            module_name,
+            ctx.real_type,
+            ctx.max_copy_delay,
+            ctx.delay_line_threshold,
+        )
+    })
     .map_err(LowerToInterpError::Transform)?;
-    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerToInterpError::Verify)?;
-    match real_type {
+    time_phase_with_sink(timing_sink, "fir-verify", || {
+        maybe_verify_fir_module(&lowered, ctx.fir_verify)
+    })
+    .map_err(LowerToInterpError::Verify)?;
+    match ctx.real_type {
         RealType::Float32 => {
             let factory: FbcDspFactory<f32> =
-                generate_interp_module(&lowered.store, lowered.module, options)
-                    .map_err(LowerToInterpError::Codegen)?;
-            serialize_factory(&factory).map_err(LowerToInterpError::Serialize)
+                time_phase_with_sink(timing_sink, "interp-codegen", || {
+                    generate_interp_module(&lowered.store, lowered.module, options)
+                })
+                .map_err(LowerToInterpError::Codegen)?;
+            time_phase_with_sink(timing_sink, "interp-serialize", || {
+                serialize_factory(&factory)
+            })
+            .map_err(LowerToInterpError::Serialize)
         }
         RealType::Float64 => {
             let factory: FbcDspFactory<f64> =
-                generate_interp_module(&lowered.store, lowered.module, options)
-                    .map_err(LowerToInterpError::Codegen)?;
-            serialize_factory(&factory).map_err(LowerToInterpError::Serialize)
+                time_phase_with_sink(timing_sink, "interp-codegen", || {
+                    generate_interp_module(&lowered.store, lowered.module, options)
+                })
+                .map_err(LowerToInterpError::Codegen)?;
+            time_phase_with_sink(timing_sink, "interp-serialize", || {
+                serialize_factory(&factory)
+            })
+            .map_err(LowerToInterpError::Serialize)
         }
     }
 }
@@ -2267,22 +2321,28 @@ fn lower_signals_to_cpp_transform_fastlane(
     source_name: &str,
     output: &SignalCompileOutput,
     options: &CppOptions,
-    fir_verify: FirVerifyOptions,
-    real_type: RealType,
-    max_copy_delay: u32,
-    delay_line_threshold: u32,
+    ctx: &SignalLoweringContext,
 ) -> Result<String, LowerToCppError> {
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
-    let lowered = lower_signals_to_fir_transform_fastlane(
-        output,
-        module_name,
-        real_type,
-        max_copy_delay,
-        delay_line_threshold,
-    )
+    let timing_sink = ctx.timing_sink.as_ref();
+    let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
+        lower_signals_to_fir_transform_fastlane(
+            output,
+            module_name,
+            ctx.real_type,
+            ctx.max_copy_delay,
+            ctx.delay_line_threshold,
+        )
+    })
     .map_err(LowerError::Transform)?;
-    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerError::Verify)?;
-    generate_cpp_module(&lowered.store, lowered.module, options).map_err(LowerError::Codegen)
+    time_phase_with_sink(timing_sink, "fir-verify", || {
+        maybe_verify_fir_module(&lowered, ctx.fir_verify)
+    })
+    .map_err(LowerError::Verify)?;
+    time_phase_with_sink(timing_sink, "cpp-codegen", || {
+        generate_cpp_module(&lowered.store, lowered.module, options)
+    })
+    .map_err(LowerError::Codegen)
 }
 
 /// Lowers signals through the transform fast lane, verifies FIR, then emits C.
@@ -2290,22 +2350,28 @@ fn lower_signals_to_c_transform_fastlane(
     source_name: &str,
     output: &SignalCompileOutput,
     options: &COptions,
-    fir_verify: FirVerifyOptions,
-    real_type: RealType,
-    max_copy_delay: u32,
-    delay_line_threshold: u32,
+    ctx: &SignalLoweringContext,
 ) -> Result<String, LowerToCError> {
     let module_name = resolve_module_name(options.class_name.as_deref(), source_name);
-    let lowered = lower_signals_to_fir_transform_fastlane(
-        output,
-        module_name,
-        real_type,
-        max_copy_delay,
-        delay_line_threshold,
-    )
+    let timing_sink = ctx.timing_sink.as_ref();
+    let lowered = time_phase_with_sink(timing_sink, "signal-fir", || {
+        lower_signals_to_fir_transform_fastlane(
+            output,
+            module_name,
+            ctx.real_type,
+            ctx.max_copy_delay,
+            ctx.delay_line_threshold,
+        )
+    })
     .map_err(LowerError::Transform)?;
-    maybe_verify_fir_module(&lowered, fir_verify).map_err(LowerError::Verify)?;
-    generate_c_module(&lowered.store, lowered.module, options).map_err(LowerError::Codegen)
+    time_phase_with_sink(timing_sink, "fir-verify", || {
+        maybe_verify_fir_module(&lowered, ctx.fir_verify)
+    })
+    .map_err(LowerError::Verify)?;
+    time_phase_with_sink(timing_sink, "c-codegen", || {
+        generate_c_module(&lowered.store, lowered.module, options)
+    })
+    .map_err(LowerError::Codegen)
 }
 
 /// Runs optional FIR verification according to the compiler facade policy.

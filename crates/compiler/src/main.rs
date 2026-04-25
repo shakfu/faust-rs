@@ -99,44 +99,30 @@ impl CliSignalFirLane {
 struct CompilationTimer {
     /// Absolute start time of the compilation run.
     start: Instant,
-    /// Time at which the most recent phase started, used to compute per-phase
-    /// elapsed time in [`Self::phase`].
-    last_phase: Instant,
     /// Maximum total compilation duration.  Exceeded → `process::exit(1)`.
     timeout: Duration,
-    /// When `true`, phase and total timings are printed to stderr.
-    /// Controlled by the `--compilation-time` CLI flag.
+    /// When `true`, the total timing is printed to stderr. Internal compiler
+    /// phase timings are reported through [`Compiler::with_timing_sink`].
     display: bool,
 }
 
 impl CompilationTimer {
-    /// Creates a new timer.  `timeout_secs` sets the hard limit; `display`
-    /// controls whether timings are printed to stderr after each phase.
+    /// Creates a new timer. `timeout_secs` sets the hard limit; `display`
+    /// controls whether the total timing is printed to stderr.
     fn new(timeout_secs: u64, display: bool) -> Self {
         let now = Instant::now();
         Self {
             start: now,
-            last_phase: now,
             timeout: Duration::from_secs(timeout_secs),
             display,
         }
     }
 
-    /// Mark the end of a compilation phase.  Prints elapsed time if
-    /// `--compilation-time` was requested and aborts if the global timeout
-    /// has been exceeded.
+    /// Mark the end of a compilation phase and abort if the global timeout has
+    /// been exceeded.
     fn phase(&mut self, name: &str) {
         let now = Instant::now();
-        let phase_elapsed = now.duration_since(self.last_phase);
         let total_elapsed = now.duration_since(self.start);
-        if self.display {
-            eprintln!(
-                "[{name}] {:.1}ms (total {:.1}ms)",
-                phase_elapsed.as_secs_f64() * 1000.0,
-                total_elapsed.as_secs_f64() * 1000.0,
-            );
-        }
-        self.last_phase = now;
         if total_elapsed > self.timeout {
             eprintln!(
                 "ERROR: compilation timeout ({:.1}s > {}s limit) after phase '{name}'",
@@ -974,6 +960,11 @@ fn compiler_from_cli(
         .with_dlt(cli.dlt);
     if let Some(flag) = cancel {
         compiler = compiler.with_cancel(flag);
+    }
+    if cli.compilation_time {
+        compiler = compiler.with_timing_sink(|name, duration| {
+            eprintln!("end {name} (duration : {:.6})", duration.as_secs_f64());
+        });
     }
     compiler
 }
