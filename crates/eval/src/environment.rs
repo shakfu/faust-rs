@@ -1,6 +1,8 @@
 //! Lexical environment and evaluator value domain.
 
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use tlib::{TreeArena, TreeId};
 
@@ -104,12 +106,24 @@ pub(crate) struct EvalCacheKey {
     pub(crate) env_key: EnvFrameKey,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 /// One lexical environment layer.
 pub(crate) struct EnvLayer {
     bindings: Vec<(SymId, EvalValue)>,
+    binding_index: ahash::HashMap<SymId, usize>,
     parent: Option<EnvId>,
     barrier: bool,
+}
+
+impl Default for EnvLayer {
+    fn default() -> Self {
+        Self {
+            bindings: Vec::new(),
+            binding_index: ahash::HashMap::with_hasher(ahash::RandomState::new()),
+            parent: None,
+            barrier: false,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -144,7 +158,7 @@ pub(crate) struct EnvStore {
 /// |---|---|---|
 /// | Storage | Hash-consed tree nodes with property tables | `Vec<(u32, TreeId)>` — interned `SymId` |
 /// | Values stored | **Closures**: `closure(expr, genv, visited, lenv)` capturing the scope at definition time | `EvalValue::{Box, Closure}` in the current adapted model |
-/// | Lookup | `searchIdDef`: walks layers calling `getProperty` (hash probe per layer) | `lookup`: reverse linear scan of `Vec`, then recurse to `parent` |
+/// | Lookup | `searchIdDef`: walks layers calling `getProperty` (hash probe per layer) | `lookup`: per-layer symbol index lookup, then recurse to `parent` |
 /// | Scope push | `pushNewLayer(lenv)` — allocates a unique tree node | `push_scope()` — allocate one arena layer and return its `EnvId` handle |
 /// | Redefinition | `addLayerDef` throws `faustexception` on conflicting rebind | `bind_definitions` returns `EvalError::RedefinedSymbol` |
 /// | Barrier | `pushEnvBarrier` / `isEnvBarrier` — stops pattern-matcher lookup | `push_barrier_scope()` / `lookup_until_barrier()` |
@@ -154,9 +168,9 @@ pub(crate) struct EnvStore {
 /// # Performance
 ///
 /// For typical Faust programs (scope depth ≤ 5, ≤ 30 bindings/scope):
-/// - **Lookup**: O(d × n) where d = depth, n = bindings/scope. Each compare is O(1) — `u32`
-///   integer equality. In practice the common hit/miss patterns stay in the low tens to low
-///   hundreds of comparisons and therefore in one tiny hot working set.
+/// - **Lookup**: O(d) hash probes where d = scope depth. Bindings remain stored
+///   in insertion order for diagnostics/snapshots, while `binding_index` tracks
+///   the latest binding for each symbol in one layer.
 /// - **Bind**: `Vec::push` — amortized O(1), no hashing, no pointer chasing.
 /// - **Push scope**: O(1) one-layer allocation in the shared environment arena.
 /// - **Memory per binding**: one inline `(SymId, EvalValue)` pair in the current layer vector.
@@ -166,7 +180,7 @@ pub(crate) struct EnvStore {
 ///   payload shape and should not be read as the size of every binding variant.
 #[derive(Clone, Debug)]
 pub struct Environment {
-    pub(crate) store: Arc<Mutex<EnvStore>>,
+    pub(crate) store: Rc<RefCell<EnvStore>>,
     pub(crate) current: EnvId,
     pub(crate) source_context: Arc<EvalSourceContext>,
 }
@@ -196,7 +210,7 @@ impl Environment {
         let mut store = EnvStore::default();
         store.layers.push(EnvLayer::default());
         Self {
-            store: Arc::new(Mutex::new(store)),
+            store: Rc::new(RefCell::new(store)),
             current: 0,
             source_context: Arc::new(source_context),
         }
@@ -217,7 +231,7 @@ impl Environment {
 
     pub(crate) fn same_identity(&self, other: &Self) -> bool {
         self.current == other.current
-            && Arc::ptr_eq(&self.store, &other.store)
+            && Rc::ptr_eq(&self.store, &other.store)
             && Arc::ptr_eq(&self.source_context, &other.source_context)
     }
 
@@ -227,7 +241,7 @@ impl Environment {
 
     pub(crate) fn frame_key_for(&self, env_id: EnvId) -> EnvFrameKey {
         EnvFrameKey {
-            store_ptr: Arc::as_ptr(&self.store) as usize,
+            store_ptr: Rc::as_ptr(&self.store) as usize,
             env_id,
             source_context_ptr: Arc::as_ptr(&self.source_context) as usize,
         }
@@ -260,7 +274,10 @@ impl Environment {
 
     pub(crate) fn bind_value(&mut self, sym: SymId, value: EvalValue) {
         self.with_store_mut(|store| {
-            store.layers[self.current].bindings.push((sym, value));
+            let layer = &mut store.layers[self.current];
+            let index = layer.bindings.len();
+            layer.bindings.push((sym, value));
+            layer.binding_index.insert(sym, index);
         });
     }
 
@@ -298,10 +315,8 @@ impl Environment {
             let mut env_id = Some(self.current);
             while let Some(id) = env_id {
                 let layer = &store.layers[id];
-                for (s, value) in layer.bindings.iter().rev() {
-                    if *s == sym {
-                        return Some((id, value.clone()));
-                    }
+                if let Some(&index) = layer.binding_index.get(&sym) {
+                    return Some((id, layer.bindings[index].1.clone()));
                 }
                 env_id = layer.parent;
             }
@@ -335,10 +350,8 @@ impl Environment {
             let mut env_id = Some(self.current);
             while let Some(id) = env_id {
                 let layer = &store.layers[id];
-                for (s, value) in layer.bindings.iter().rev() {
-                    if *s == sym {
-                        return Some(value.clone());
-                    }
+                if let Some(&index) = layer.binding_index.get(&sym) {
+                    return Some(layer.bindings[index].1.clone());
                 }
                 if layer.barrier {
                     return None;
@@ -379,12 +392,11 @@ impl Environment {
 
     pub(crate) fn lookup_local_value(&self, sym: SymId) -> Option<EvalValue> {
         self.with_store(|store| {
-            for (s, value) in store.layers[self.current].bindings.iter().rev() {
-                if *s == sym {
-                    return Some(value.clone());
-                }
-            }
-            None
+            let layer = &store.layers[self.current];
+            layer
+                .binding_index
+                .get(&sym)
+                .map(|&index| layer.bindings[index].1.clone())
         })
     }
 
@@ -430,13 +442,14 @@ impl Environment {
             let next_id = store.layers.len();
             store.layers.push(EnvLayer {
                 bindings: Vec::new(),
+                binding_index: ahash::HashMap::with_hasher(ahash::RandomState::new()),
                 parent,
                 barrier,
             });
             next_id
         });
         Self {
-            store: Arc::clone(&self.store),
+            store: Rc::clone(&self.store),
             current,
             source_context: Arc::clone(&self.source_context),
         }
@@ -519,12 +532,12 @@ impl Environment {
     }
 
     pub(crate) fn with_store<R>(&self, f: impl FnOnce(&EnvStore) -> R) -> R {
-        let guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self.store.borrow();
         f(&guard)
     }
 
     pub(crate) fn with_store_mut<R>(&self, f: impl FnOnce(&mut EnvStore) -> R) -> R {
-        let mut guard = self.store.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.store.borrow_mut();
         f(&mut guard)
     }
 }
