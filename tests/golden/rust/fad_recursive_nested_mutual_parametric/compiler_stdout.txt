@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_recursive_nested_mutual_parametric.dsp
+bytes=327
+lines=12
+fnv1a64=1d80d59bbdf6e3ca

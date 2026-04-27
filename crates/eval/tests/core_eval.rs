@@ -195,7 +195,7 @@ fn eval_process_preserves_forward_ad_wrapper_around_evaluated_body() {
 #[test]
 fn eval_process_preserves_reverse_ad_wrapper_around_evaluated_body() {
     let parsed = parse_program(
-        "process = rad(hslider(\"f\", 1, 0, 10, 0.1) : sin);",
+        "p = hslider(\"p\", 0, -1, 1, 0.01); process = rad(hslider(\"f\", 1, 0, 10, 0.1) : sin, p);",
         "eval_rad_wrapper.dsp",
     );
     assert!(
@@ -207,12 +207,16 @@ fn eval_process_preserves_reverse_ad_wrapper_around_evaluated_body() {
     let root = parsed.root.expect("parse should return a root");
 
     let out = eval_process(&mut arena, root).expect("rad process should evaluate");
-    let BoxMatch::ReverseAD(inner) = match_box(&arena, out) else {
-        panic!("expected eval to preserve BOXRAUTODIFF");
+    let BoxMatch::ReverseAD(body, seeds) = match_box(&arena, out) else {
+        panic!("expected eval to preserve BOXRAUTODIFF as a two-child node");
     };
     assert!(
-        matches!(match_box(&arena, inner), BoxMatch::Seq(_, _)),
-        "inner rad expression should be evaluated to a flat first-order box"
+        matches!(match_box(&arena, body), BoxMatch::Seq(_, _)),
+        "rad body should be evaluated to a flat first-order box"
+    );
+    assert!(
+        matches!(match_box(&arena, seeds), BoxMatch::HSlider(_, _, _, _, _)),
+        "rad seeds child should be evaluated to its UI shape"
     );
 }
 

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_atanh.dsp
+bytes=128
+lines=4
+fnv1a64=304b74d4ebcef4cb

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_minmax.dsp
+bytes=113
+lines=1
+fnv1a64=681572332b43be76

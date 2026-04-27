@@ -97,7 +97,10 @@ fn parse_program_recognizes_ad_wrappers_like_cpp() {
 
 #[test]
 fn parse_program_recognizes_rad_wrapper_and_missing_body_is_an_error() {
-    let ok = parse_program("process = rad(process);", "bridge_rad_program.dsp");
+    let ok = parse_program(
+        "process = rad(hslider(\"f\", 1, 0, 10, 0.1) : sin, hslider(\"p\", 0, -1, 1, 0.01));",
+        "bridge_rad_program.dsp",
+    );
     assert!(
         ok.errors.is_empty(),
         "unexpected parse errors: {:?}",
@@ -109,8 +112,14 @@ fn parse_program_recognizes_rad_wrapper_and_missing_body_is_an_error() {
     let expr = ok.state.arena.tl(payload).expect("definition expression");
     assert!(matches!(
         match_box(&ok.state.arena, expr),
-        BoxMatch::ReverseAD(_)
+        BoxMatch::ReverseAD(_, _)
     ));
+
+    let err = parse_program("process = rad(process);", "bridge_rad_legacy_one_arg.dsp");
+    assert!(
+        err.root.is_none() || !err.errors.is_empty() || err.state.ctx.parse_error_count() > 0,
+        "single-argument rad must be rejected after the surface migration"
+    );
 
     let err = parse_program("process = fad();", "bridge_fad_missing_body.dsp");
     assert!(

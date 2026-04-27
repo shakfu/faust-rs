@@ -1382,7 +1382,7 @@ fn flat_box_builder_accepts_autodiff_wrappers() {
         let mut bb = BoxBuilder::new(&mut arena);
         let sin = bb.sin();
         let wire = bb.wire();
-        (bb.forward_ad(sin, wire), bb.reverse_ad(sin))
+        (bb.forward_ad(sin, wire), bb.reverse_ad(sin, wire))
     };
 
     assert!(try_build_flat_box(&arena, forward).is_ok());
@@ -1621,7 +1621,13 @@ fn propagate_reverse_ad_returns_clear_unsupported_error() {
         let slider = bb.hslider(label, init, min, max, step);
         let sin = bb.sin();
         let body = bb.seq(slider, sin);
-        bb.reverse_ad(body)
+        let seed_label = bb.ident("p");
+        let seed_init = bb.real(0.0);
+        let seed_min = bb.real(-1.0);
+        let seed_max = bb.real(1.0);
+        let seed_step = bb.real(0.01);
+        let seed = bb.hslider(seed_label, seed_init, seed_min, seed_max, seed_step);
+        bb.reverse_ad(body, seed)
     };
 
     let flat_process = try_build_flat_box(&arena, process).unwrap();
@@ -1635,6 +1641,76 @@ fn propagate_reverse_ad_returns_clear_unsupported_error() {
             ..
         }
     ));
+}
+
+#[test]
+fn propagate_reverse_ad_arity_combines_body_and_seed_outputs() {
+    // `rad(expr, seeds)` arity contract: outputs = body.outputs + seeds.outputs.
+    // We confirm it via `box_arity_typed` independently of propagation, which
+    // is still phase-gated.
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let f_label = bb.ident("f");
+        let f_init = bb.real(1.0);
+        let f_min = bb.real(0.0);
+        let f_max = bb.real(10.0);
+        let f_step = bb.real(0.1);
+        let f_slider = bb.hslider(f_label, f_init, f_min, f_max, f_step);
+        let sin_op = bb.sin();
+        let body = bb.seq(f_slider, sin_op);
+        let p_label = bb.ident("p");
+        let p_init = bb.real(0.0);
+        let p_min = bb.real(-1.0);
+        let p_max = bb.real(1.0);
+        let p_step = bb.real(0.01);
+        let p_slider = bb.hslider(p_label, p_init, p_min, p_max, p_step);
+        let q_label = bb.ident("q");
+        let q_init = bb.real(0.0);
+        let q_min = bb.real(-1.0);
+        let q_max = bb.real(1.0);
+        let q_step = bb.real(0.01);
+        let q_slider = bb.hslider(q_label, q_init, q_min, q_max, q_step);
+        let seeds = bb.par(p_slider, q_slider);
+        bb.reverse_ad(body, seeds)
+    };
+
+    let flat = try_build_flat_box(&arena, process).unwrap();
+    let arity = box_arity_typed(&arena, flat, &mut ArityCache::new()).unwrap();
+    // body has 1 output (sin), seeds has 2 outputs (par of two sliders).
+    assert_eq!(arity.outputs, 3, "rad outputs = body.outputs + seeds.outputs");
+}
+
+#[test]
+fn propagate_reverse_ad_zero_output_seeds_raises_rad_seed_arity() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let body = bb.wire();
+        let seeds = bb.environment();
+        bb.reverse_ad(body, seeds)
+    };
+
+    let flat = try_build_flat_box(&arena, process).unwrap();
+    let err = box_arity_typed(&arena, flat, &mut ArityCache::new())
+        .expect_err("rad with zero-output seeds must fail at arity time");
+    assert!(matches!(err, PropagateError::RadSeedArity { outputs: 0, .. }));
+}
+
+#[test]
+fn propagate_reverse_ad_zero_output_body_raises_rad_body_arity() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let body = bb.environment();
+        let seeds = bb.wire();
+        bb.reverse_ad(body, seeds)
+    };
+
+    let flat = try_build_flat_box(&arena, process).unwrap();
+    let err = box_arity_typed(&arena, flat, &mut ArityCache::new())
+        .expect_err("rad with zero-output body must fail at arity time");
+    assert!(matches!(err, PropagateError::RadBodyArity { outputs: 0, .. }));
 }
 
 #[test]

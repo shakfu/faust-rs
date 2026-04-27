@@ -824,19 +824,16 @@ fn eval_value_uncached(
             let mut bld = BoxBuilder::new(arena);
             Ok(EvalValue::Box(bld.forward_ad(exp_box, seed_box)))
         }
-        BoxMatch::ReverseAD(inner) => {
-            // Source provenance (C++):
-            // - `/Users/letz/faust/compiler/evaluate/eval.cpp`
-            // - `isBoxReverseAD(exp, x) -> boxReverseAD(eval(x, ...))`
-            //
-            // Mapping status: `1:1`.
-            // Reverse-mode remains phase-gated later in propagation, but eval
-            // still preserves the wrapper after recursively normalizing the
-            // wrapped body.
-            let evaluated = eval_value(arena, inner, env, loop_detector)?;
-            let inner_box = force_value_to_box(arena, evaluated, loop_detector)?;
+        BoxMatch::ReverseAD(exp, seeds) => {
+            // Mirrors `BoxMatch::ForwardAD` arm: both children are evaluated in
+            // the same lexical environment, then re-wrapped so RAD remains an
+            // explicit two-child node at the post-eval propagation boundary.
+            let exp_val = eval_value(arena, exp, env, loop_detector)?;
+            let seeds_val = eval_value(arena, seeds, env, loop_detector)?;
+            let exp_box = force_value_to_box(arena, exp_val, loop_detector)?;
+            let seeds_box = force_value_to_box(arena, seeds_val, loop_detector)?;
             let mut bld = BoxBuilder::new(arena);
-            Ok(EvalValue::Box(bld.reverse_ad(inner_box)))
+            Ok(EvalValue::Box(bld.reverse_ad(exp_box, seeds_box)))
         }
         BoxMatch::Button(label) => Ok(EvalValue::Box(eval_button(
             arena,
@@ -3756,7 +3753,14 @@ fn infer_box_arity(arena: &TreeArena, id: TreeId) -> Option<(usize, usize)> {
             let (seed_ins, _) = infer_box_arity(arena, seed)?;
             Some((exp_ins.max(seed_ins), exp_outs * 2))
         }
-        BoxMatch::ReverseAD(inner) => infer_box_arity(arena, inner),
+        BoxMatch::ReverseAD(exp, seeds) => {
+            let (exp_ins, exp_outs) = infer_box_arity(arena, exp)?;
+            let (seeds_ins, seeds_outs) = infer_box_arity(arena, seeds)?;
+            if exp_outs == 0 || seeds_outs == 0 {
+                return None;
+            }
+            Some((exp_ins.max(seeds_ins), exp_outs + seeds_outs))
+        }
         BoxMatch::Ondemand(inner) | BoxMatch::Upsampling(inner) | BoxMatch::Downsampling(inner) => {
             let (ins, outs) = infer_box_arity(arena, inner)?;
             Some((ins.checked_add(1)?, outs))

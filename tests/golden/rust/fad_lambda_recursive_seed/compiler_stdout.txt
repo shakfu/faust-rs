@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_lambda_recursive_seed.dsp
+bytes=866
+lines=16
+fnv1a64=3eceabf753409772

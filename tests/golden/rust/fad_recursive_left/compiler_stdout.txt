@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_recursive_left.dsp
+bytes=61
+lines=2
+fnv1a64=4085d5f933af8c85

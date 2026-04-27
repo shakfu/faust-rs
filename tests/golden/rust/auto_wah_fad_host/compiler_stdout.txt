@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=auto_wah_fad_host.dsp
+bytes=2099
+lines=70
+fnv1a64=b5e9a7ff9d53e73d

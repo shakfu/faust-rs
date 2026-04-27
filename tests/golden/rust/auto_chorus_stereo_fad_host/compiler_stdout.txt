@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=auto_chorus_stereo_fad_host.dsp
+bytes=2408
+lines=62
+fnv1a64=73d95e5c1b531bdf

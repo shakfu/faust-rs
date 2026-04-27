@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_recursive_local_projection.dsp
+bytes=255
+lines=10
+fnv1a64=4949de4482438f7c

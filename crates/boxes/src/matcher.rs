@@ -144,14 +144,14 @@ pub enum BoxMatch<'a> {
     /// - `compiler/boxes/boxes.cpp`
     /// - `boxForwardAD(Tree exp, Tree seed)` — `isBoxForwardAD(Tree t, Tree& exp, Tree& seed)`
     ForwardAD(BoxId, BoxId),
-    /// Reverse-mode automatic differentiation wrapper preserved structurally at
-    /// the box layer. Propagation support remains phase-gated separately.
+    /// Reverse-mode automatic differentiation wrapper.
     ///
-    /// Source provenance (C++):
-    /// - `compiler/boxes/boxes.cpp`
-    /// - `boxReverseAD(Tree x)`
-    /// - `isBoxReverseAD(Tree t, Tree& x)`
-    ReverseAD(BoxId),
+    /// Two-child shape mirroring [`BoxMatch::ForwardAD`]: `(expr, seeds)`.
+    /// Both children are normalized through eval and re-validated by
+    /// `propagate`, which expands the wrapper into a primal-plus-gradient
+    /// signal bundle when reverse-mode support reaches the visited node
+    /// family.
+    ReverseAD(BoxId, BoxId),
     Ondemand(BoxId),
     Upsampling(BoxId),
     Downsampling(BoxId),
@@ -273,8 +273,6 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
                         BOX_PATTERN_VAR_TAG => BoxMatch::PatternVar(c0),
                         BOX_INPUTS_TAG => BoxMatch::Inputs(c0),
                         BOX_OUTPUTS_TAG => BoxMatch::Outputs(c0),
-                        // ForwardAD is now a 2-child node (exp, seed)
-                        BOX_REVERSE_AD_TAG => BoxMatch::ReverseAD(c0),
                         BOX_ONDEMAND_TAG => BoxMatch::Ondemand(c0),
                         BOX_UPSAMPLING_TAG => BoxMatch::Upsampling(c0),
                         BOX_DOWNSAMPLING_TAG => BoxMatch::Downsampling(c0),
@@ -305,6 +303,7 @@ pub fn match_box<'a>(arena: &'a TreeArena, b: BoxId) -> BoxMatch<'a> {
                         BOX_TGROUP_TAG => BoxMatch::TGroup(c0, c1),
                         BOX_SOUNDFILE_TAG => BoxMatch::Soundfile(c0, c1),
                         BOX_FORWARD_AD_TAG => BoxMatch::ForwardAD(c0, c1),
+                        BOX_REVERSE_AD_TAG => BoxMatch::ReverseAD(c0, c1),
                         BOX_VSLIDER_TAG => {
                             let Some((cur, min, max, step)) = slider_params4(arena, c1) else {
                                 return BoxMatch::Unknown;

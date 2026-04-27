@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_recursive_multilane_local.dsp
+bytes=137
+lines=5
+fnv1a64=154fc98e4f0f5477

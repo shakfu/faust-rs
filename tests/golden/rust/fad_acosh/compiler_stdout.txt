@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_acosh.dsp
+bytes=148
+lines=4
+fnv1a64=57fe619e80f96add

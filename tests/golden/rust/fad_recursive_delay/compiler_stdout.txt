@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_recursive_delay.dsp
+bytes=103
+lines=1
+fnv1a64=5a5c48600f4d2c8d

@@ -645,14 +645,16 @@ impl<'a> BoxBuilder<'a> {
     }
 
     #[must_use]
-    /// Builds one box node for `rad(expr)` and returns its `BoxId`.
+    /// Builds one box node for `rad(expr, seeds)` and returns its `BoxId`.
     ///
-    /// Source provenance (C++):
-    /// - `compiler/boxes/boxes.cpp`
-    /// - `boxReverseAD(Tree x)`
-    pub fn reverse_ad(&mut self, expr: BoxId) -> BoxId {
-        self.debug_assert_node_exists("boxReverseAD", expr);
-        intern_tag(self.arena, BOX_REVERSE_AD_TAG, &[expr])
+    /// Mirrors the explicit-seed shape of [`Self::forward_ad`]: `expr` is the
+    /// expression bundle to differentiate, `seeds` is the block whose outputs
+    /// are the independent variables. The two-child shape is preserved
+    /// through eval and validated again in `propagate`.
+    pub fn reverse_ad(&mut self, expr: BoxId, seeds: BoxId) -> BoxId {
+        self.debug_assert_node_exists("boxReverseAD expr", expr);
+        self.debug_assert_node_exists("boxReverseAD seeds", seeds);
+        intern_tag(self.arena, BOX_REVERSE_AD_TAG, &[expr, seeds])
     }
 
     #[must_use]

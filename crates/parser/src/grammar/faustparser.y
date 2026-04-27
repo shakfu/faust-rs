@@ -687,8 +687,8 @@ Primitive -> tlib::TreeId:
     | FAUTODIFF LPAR Argument PAR Argument RPAR {
           crate::with_state(state, |state| state.node_builder().forward_ad($3, $5))
       }
-    | RAUTODIFF LPAR Expression RPAR {
-          crate::with_state(state, |state| state.node_builder().reverse_ad($3))
+    | RAUTODIFF LPAR Argument PAR Argument RPAR {
+          crate::with_state(state, |state| state.node_builder().reverse_ad($3, $5))
       }
     | ONDEMAND LPAR Expression RPAR {
           crate::with_state(state, |state| state.node_builder().ondemand($3))

@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_rwtable_index_zero_tangent.dsp
+bytes=80
+lines=3
+fnv1a64=bc39aaa2e22ab07f

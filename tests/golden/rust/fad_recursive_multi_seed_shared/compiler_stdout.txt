@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_recursive_multi_seed_shared.dsp
+bytes=259
+lines=8
+fnv1a64=3b74cb604304ebd1

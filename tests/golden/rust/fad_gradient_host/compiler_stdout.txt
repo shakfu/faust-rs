@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_gradient_host.dsp
+bytes=125
+lines=4
+fnv1a64=26a6b7f96d556afc

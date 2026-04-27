@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_nested_on_recursive_seed.dsp
+bytes=1257
+lines=31
+fnv1a64=c076082bdaeb3c2b

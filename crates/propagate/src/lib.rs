@@ -305,7 +305,7 @@ enum FlatNodeKind {
     Inputs,
     Outputs,
     ForwardAD { body: FlatBoxId, seed: FlatBoxId },
-    ReverseAD { body: FlatBoxId },
+    ReverseAD { body: FlatBoxId, seeds: FlatBoxId },
     Ondemand(FlatBoxId),
     Upsampling(FlatBoxId),
     Downsampling(FlatBoxId),
@@ -342,12 +342,15 @@ fn validate_flat_box_recursive(
             validate_flat_box_recursive(arena, body, visited)?;
             validate_flat_box_recursive(arena, seed, visited)?;
         }
+        FlatNodeKind::ReverseAD { body, seeds } => {
+            validate_flat_box_recursive(arena, body, visited)?;
+            validate_flat_box_recursive(arena, seeds, visited)?;
+        }
         FlatNodeKind::Symbolic { body }
         | FlatNodeKind::Metadata { body }
         | FlatNodeKind::VGroup { body }
         | FlatNodeKind::HGroup { body }
         | FlatNodeKind::TGroup { body }
-        | FlatNodeKind::ReverseAD { body }
         | FlatNodeKind::Ondemand(body)
         | FlatNodeKind::Upsampling(body)
         | FlatNodeKind::Downsampling(body) => validate_flat_box_recursive(arena, body, visited)?,
@@ -480,8 +483,9 @@ fn flat_node_kind(arena: &TreeArena, node: FlatBoxId) -> Result<FlatNodeKind, Fl
             body: FlatBoxId::from_tree_id(body),
             seed: FlatBoxId::from_tree_id(seed),
         }),
-        BoxMatch::ReverseAD(body) => Ok(FlatNodeKind::ReverseAD {
+        BoxMatch::ReverseAD(body, seeds) => Ok(FlatNodeKind::ReverseAD {
             body: FlatBoxId::from_tree_id(body),
+            seeds: FlatBoxId::from_tree_id(seeds),
         }),
         BoxMatch::Ondemand(body) => Ok(FlatNodeKind::Ondemand(FlatBoxId::from_tree_id(body))),
         BoxMatch::Upsampling(body) => Ok(FlatNodeKind::Upsampling(FlatBoxId::from_tree_id(body))),
@@ -529,12 +533,14 @@ fn contains_forward_ad(arena: &TreeArena, box_tree: FlatBoxId) -> Result<bool, F
         | FlatNodeKind::Merge(left, right) => {
             Ok(contains_forward_ad(arena, left)? || contains_forward_ad(arena, right)?)
         }
+        FlatNodeKind::ReverseAD { body, seeds } => {
+            Ok(contains_forward_ad(arena, body)? || contains_forward_ad(arena, seeds)?)
+        }
         FlatNodeKind::Symbolic { body }
         | FlatNodeKind::Metadata { body }
         | FlatNodeKind::VGroup { body }
         | FlatNodeKind::HGroup { body }
         | FlatNodeKind::TGroup { body }
-        | FlatNodeKind::ReverseAD { body }
         | FlatNodeKind::Ondemand(body)
         | FlatNodeKind::Upsampling(body)
         | FlatNodeKind::Downsampling(body) => contains_forward_ad(arena, body),
@@ -564,12 +570,16 @@ fn count_fad_nodes(
             let r = count_fad_nodes(arena, right, visited)?;
             Ok(l + r)
         }
+        FlatNodeKind::ReverseAD { body, seeds } => {
+            let b = count_fad_nodes(arena, body, visited)?;
+            let s = count_fad_nodes(arena, seeds, visited)?;
+            Ok(b + s)
+        }
         FlatNodeKind::Symbolic { body }
         | FlatNodeKind::Metadata { body }
         | FlatNodeKind::VGroup { body }
         | FlatNodeKind::HGroup { body }
         | FlatNodeKind::TGroup { body }
-        | FlatNodeKind::ReverseAD { body }
         | FlatNodeKind::Ondemand(body)
         | FlatNodeKind::Upsampling(body)
         | FlatNodeKind::Downsampling(body) => count_fad_nodes(arena, body, visited),
@@ -645,8 +655,11 @@ fn subtree_consumes_fad_outputs_locally(
             Ok(subtree_consumes_fad_outputs_locally(arena, left, true)?
                 || subtree_consumes_fad_outputs_locally(arena, right, true)?)
         }
-        FlatNodeKind::ReverseAD { body }
-        | FlatNodeKind::Ondemand(body)
+        FlatNodeKind::ReverseAD { body, seeds } => {
+            Ok(subtree_consumes_fad_outputs_locally(arena, body, true)?
+                || subtree_consumes_fad_outputs_locally(arena, seeds, true)?)
+        }
+        FlatNodeKind::Ondemand(body)
         | FlatNodeKind::Upsampling(body)
         | FlatNodeKind::Downsampling(body) => {
             subtree_consumes_fad_outputs_locally(arena, body, true)
@@ -711,6 +724,14 @@ pub enum PropagateError {
         right_outputs: usize,
     },
     FadSeedArity {
+        node: TreeId,
+        outputs: usize,
+    },
+    RadBodyArity {
+        node: TreeId,
+        outputs: usize,
+    },
+    RadSeedArity {
         node: TreeId,
         outputs: usize,
     },
@@ -794,6 +815,16 @@ impl Display for PropagateError {
             Self::FadSeedArity { node, outputs } => write!(
                 f,
                 "fad seed at node {} must produce at least 1 output, got {outputs}",
+                node.as_u32()
+            ),
+            Self::RadBodyArity { node, outputs } => write!(
+                f,
+                "rad body at node {} must produce at least 1 output, got {outputs}",
+                node.as_u32()
+            ),
+            Self::RadSeedArity { node, outputs } => write!(
+                f,
+                "rad seeds at node {} must produce at least 1 output, got {outputs}",
                 node.as_u32()
             ),
         }
@@ -992,6 +1023,22 @@ impl IntoDiagnostic for PropagateError {
             )
             .with_note("cause: fad seed expression must produce at least 1 output signal")
             .with_note(format!("seed produced {outputs} output(s)")),
+            Self::RadBodyArity { outputs, .. } => Diagnostic::new(
+                Severity::Error,
+                Stage::Propagate,
+                codes::PROP_ARITY_MISMATCH,
+                message,
+            )
+            .with_note("cause: rad body expression must produce at least 1 output signal")
+            .with_note(format!("body produced {outputs} output(s)")),
+            Self::RadSeedArity { outputs, .. } => Diagnostic::new(
+                Severity::Error,
+                Stage::Propagate,
+                codes::PROP_ARITY_MISMATCH,
+                message,
+            )
+            .with_note("cause: rad seeds expression must produce at least 1 output signal")
+            .with_note(format!("seeds produced {outputs} output(s)")),
         }
     }
 }
@@ -1237,8 +1284,27 @@ fn box_arity_flat_inner(
         }
         FlatNodeKind::VGroup { body }
         | FlatNodeKind::HGroup { body }
-        | FlatNodeKind::TGroup { body }
-        | FlatNodeKind::ReverseAD { body } => box_arity_typed(arena, body, cache),
+        | FlatNodeKind::TGroup { body } => box_arity_typed(arena, body, cache),
+        FlatNodeKind::ReverseAD { body, seeds } => {
+            let body_arity = box_arity_typed(arena, body, cache)?;
+            if body_arity.outputs == 0 {
+                return Err(PropagateError::RadBodyArity {
+                    node: box_tree.as_tree_id(),
+                    outputs: body_arity.outputs,
+                });
+            }
+            let seeds_arity = box_arity_typed(arena, seeds, cache)?;
+            if seeds_arity.outputs == 0 {
+                return Err(PropagateError::RadSeedArity {
+                    node: box_tree.as_tree_id(),
+                    outputs: seeds_arity.outputs,
+                });
+            }
+            Ok(BoxArity {
+                inputs: body_arity.inputs.max(seeds_arity.inputs),
+                outputs: body_arity.outputs + seeds_arity.outputs,
+            })
+        }
         FlatNodeKind::ForwardAD { body, seed } => {
             let seed_arity = box_arity_typed(arena, seed, cache)?;
             if seed_arity.outputs == 0 {
@@ -1885,12 +1951,20 @@ fn collect_ui_nodes(
                     || seed_s.preserve_ancestor_chain,
             }
         }
+        FlatNodeKind::ReverseAD { body, seeds } => {
+            let body_s = collect_ui_nodes(source_arena, body, current_groups, collector);
+            let seeds_s = collect_ui_nodes(source_arena, seeds, current_groups, collector);
+            UiCollectSummary {
+                has_ui: body_s.has_ui || seeds_s.has_ui,
+                preserve_ancestor_chain: body_s.preserve_ancestor_chain
+                    || seeds_s.preserve_ancestor_chain,
+            }
+        }
         FlatNodeKind::Symbolic { body }
         | FlatNodeKind::Metadata { body }
         | FlatNodeKind::Ondemand(body)
         | FlatNodeKind::Upsampling(body)
-        | FlatNodeKind::Downsampling(body)
-        | FlatNodeKind::ReverseAD { body } => {
+        | FlatNodeKind::Downsampling(body) => {
             collect_ui_nodes(source_arena, body, current_groups, collector)
         }
         FlatNodeKind::Seq(left, right)
@@ -2597,10 +2671,31 @@ fn propagate_inner(
                 forward_ad::generate_fad_signals_multi(arena, &body_sigs, &seed_sigs)
             }
         }
-        FlatNodeKind::ReverseAD { .. } => Err(PropagateError::UnsupportedBox {
-            node: box_tree.as_tree_id(),
-            kind: "reversead",
-        }),
+        FlatNodeKind::ReverseAD { body, seeds } => {
+            // Phase A: arity-only validation. The actual reverse-mode
+            // expansion is wired in subsequent phases. Until then we still
+            // walk both children so error reporting and UI collection see
+            // them, then return an `UnsupportedBox` once the structural
+            // contract has been confirmed.
+            let body_arity = box_arity_typed(arena, body, ctx.cache)?;
+            if body_arity.outputs == 0 {
+                return Err(PropagateError::RadBodyArity {
+                    node: box_tree.as_tree_id(),
+                    outputs: 0,
+                });
+            }
+            let seeds_arity = box_arity_typed(arena, seeds, ctx.cache)?;
+            if seeds_arity.outputs == 0 {
+                return Err(PropagateError::RadSeedArity {
+                    node: box_tree.as_tree_id(),
+                    outputs: 0,
+                });
+            }
+            Err(PropagateError::UnsupportedBox {
+                node: box_tree.as_tree_id(),
+                kind: "reversead",
+            })
+        }
         FlatNodeKind::Environment => {
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
             Ok(Vec::new())

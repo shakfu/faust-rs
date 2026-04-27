@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_waveform_index_basic.dsp
+bytes=99
+lines=3
+fnv1a64=dc24a5535c3ff9a5

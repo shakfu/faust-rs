@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_math_chain.dsp
+bytes=104
+lines=1
+fnv1a64=8b37cc69ae6b2dbf

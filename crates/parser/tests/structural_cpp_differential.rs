@@ -224,10 +224,16 @@ fn production_parser_recognizes_fad_and_rad_like_cpp() {
         BoxMatch::Seq(_, _)
     ));
 
-    let (arena_rad, rad_expr) = parse_process_expr("process = rad(process);", "rad_structural.dsp");
+    let (arena_rad, rad_expr) = parse_process_expr(
+        "process = rad(hslider(\"freq\", 440, 50, 2000, 0.01) : sin, hslider(\"p\", 0, -1, 1, 0.01));",
+        "rad_structural.dsp",
+    );
+    let BoxMatch::ReverseAD(rad_body, _rad_seeds) = match_box(&arena_rad, rad_expr) else {
+        panic!("expected BOXRAUTODIFF shape");
+    };
     assert!(matches!(
-        match_box(&arena_rad, rad_expr),
-        BoxMatch::ReverseAD(_)
+        match_box(&arena_rad, rad_body),
+        BoxMatch::Seq(_, _)
     ));
 }
 

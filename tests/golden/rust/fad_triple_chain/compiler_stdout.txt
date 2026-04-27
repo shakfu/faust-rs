@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_triple_chain.dsp
+bytes=133
+lines=1
+fnv1a64=847dc929441f834c

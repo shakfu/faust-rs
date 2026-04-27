@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_division.dsp
+bytes=113
+lines=1
+fnv1a64=2f0022c3561ef1cb
