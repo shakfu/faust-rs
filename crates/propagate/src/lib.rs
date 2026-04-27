@@ -1049,18 +1049,71 @@ impl IntoDiagnostic for PropagateError {
             )
             .with_note("cause: rad seeds expression must produce at least 1 output signal")
             .with_note(format!("seeds produced {outputs} output(s)")),
-            Self::RadUnsupportedNode { kind, .. } => Diagnostic::new(
-                Severity::Error,
-                Stage::Propagate,
-                codes::PROP_UNSUPPORTED_BOX,
-                message,
-            )
-            .with_note(format!(
-                "cause: rad has no differentiation rule for the `{kind}` signal family in this phase"
-            ))
-            .with_help(
-                "rewrite the differentiated expression to avoid this signal family, or use fad(...) when the case is a feed-forward derivative",
-            ),
+            Self::RadUnsupportedNode { kind, .. } => {
+                // Tailor the diagnostic by family so users get an actionable
+                // explanation instead of a generic "unsupported" wall.
+                let mut diag = Diagnostic::new(
+                    Severity::Error,
+                    Stage::Propagate,
+                    codes::PROP_UNSUPPORTED_BOX,
+                    message,
+                );
+                match kind {
+                    "delay-or-prefix" => {
+                        diag = diag
+                            .with_note(
+                                "cause: reverse-mode AD of a delay or prefix would require a non-causal transpose `adj_x[n] += adj_y[n+1]`",
+                            )
+                            .with_note(
+                                "rule: phase 1 RAD does not implement reverse-through-time. A future BPTT mode would need a runtime tape for primal intermediates",
+                            )
+                            .with_help(
+                                "remove the delay/prefix from the differentiated expression, or use fad(...) which handles delays via a causal forward rule",
+                            );
+                    }
+                    "recursive-projection" => {
+                        diag = diag
+                            .with_note(
+                                "cause: reverse-mode AD of a recursive feedback would require a non-causal transpose over an infinite stream",
+                            )
+                            .with_note(
+                                "rule: phase 1 RAD rejects recursion / projection nodes rather than producing a misleading gradient",
+                            )
+                            .with_help(
+                                "rewrite the differentiated expression as feed-forward, or use fad(...) for recursive seeds",
+                            );
+                    }
+                    "writable-table" | "writable-table-or-waveform-direct" => {
+                        diag = diag
+                            .with_note("cause: rad does not differentiate through mutable table state")
+                            .with_help("read the table contents via rdtable(...) instead of writing/reading in the same expression");
+                    }
+                    "ffun" => {
+                        diag = diag
+                            .with_note(
+                                "cause: rad recognizes only the unary chain-rule rules (tanh/sinh/cosh and inverses)",
+                            )
+                            .with_help(
+                                "ensure the foreign function is unary and listed in the rad rule set, or use fad(...) which has the same coverage",
+                            );
+                    }
+                    "soundfile" => {
+                        diag = diag
+                            .with_note("cause: rad does not differentiate through soundfile content or accessors")
+                            .with_help("treat soundfile reads as constants in the differentiated expression");
+                    }
+                    _ => {
+                        diag = diag
+                            .with_note(format!(
+                                "cause: rad has no differentiation rule for the `{kind}` signal family in this phase"
+                            ))
+                            .with_help(
+                                "rewrite the differentiated expression to avoid this signal family, or use fad(...) when the case is a feed-forward derivative",
+                            );
+                    }
+                }
+                diag
+            }
         }
     }
 }

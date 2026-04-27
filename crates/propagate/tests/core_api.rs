@@ -1741,7 +1741,94 @@ fn propagate_reverse_ad_temporal_node_emits_unsupported_diagnostic() {
     let flat = try_build_flat_box(&arena, process).unwrap();
     let err = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
         .expect_err("rad through delay1 must error");
-    assert!(matches!(err, PropagateError::RadUnsupportedNode { .. }));
+    let PropagateError::RadUnsupportedNode { kind, .. } = err else {
+        panic!("expected RadUnsupportedNode for delay1, got: {err:?}");
+    };
+    assert_eq!(
+        kind, "delay-or-prefix",
+        "delay1 must be classified under the temporal family"
+    );
+    let diag = PropagateError::RadUnsupportedNode {
+        node: arena.nil(),
+        kind: "delay-or-prefix",
+    }
+    .into_diagnostic();
+    assert!(
+        diag.notes
+            .iter()
+            .any(|n| n.contains("non-causal transpose")),
+        "temporal RAD diagnostic must mention non-causal transpose"
+    );
+    assert!(
+        diag.notes.iter().any(|n| n.contains("BPTT")),
+        "temporal RAD diagnostic must mention BPTT as the future-mode escape hatch"
+    );
+}
+
+#[test]
+fn propagate_reverse_ad_variable_delay_emits_temporal_diagnostic() {
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let x_slider = build_hslider(&mut bb, "x", 0.0, -1.0, 1.0, 0.01);
+        let d_const = bb.real(2.0);
+        // Build `(x_slider, d_const) : @` ⇒ `delay(x, 2)` after propagate.
+        let xd = bb.par(x_slider, d_const);
+        let delay = bb.delay();
+        let body = bb.seq(xd, delay);
+        let seed = build_hslider(&mut bb, "x", 0.0, -1.0, 1.0, 0.01);
+        bb.reverse_ad(body, seed)
+    };
+    let flat = try_build_flat_box(&arena, process).unwrap();
+    let err = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
+        .expect_err("rad through variable delay must error");
+    assert!(matches!(
+        err,
+        PropagateError::RadUnsupportedNode {
+            kind: "delay-or-prefix",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn propagate_reverse_ad_recursive_body_emits_temporal_diagnostic() {
+    // process = rad((+ ~ *(0.5)), x): the recursive feedback in the
+    // differentiated body would require a non-causal transpose, so RAD
+    // must reject it with the recursive-projection diagnostic.
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        // Build a closed recursive primal `2 : + ~ *(0.5)`:
+        //   rec_left  = +
+        //   rec_right = (_ , 0.5) : *
+        //   rec       = + ~ *(0.5)            inputs = 1, outputs = 1
+        //   process   = 2 : rec               inputs = 0, outputs = 1
+        let plus = bb.add();
+        let wire = bb.wire();
+        let half = bb.real(0.5);
+        let half_pair = bb.par(wire, half);
+        let mul = bb.mul();
+        let half_apply = bb.seq(half_pair, mul);
+        let rec = bb.rec(plus, half_apply);
+        let two = bb.real(2.0);
+        let body = bb.seq(two, rec);
+        let seed = build_hslider(&mut bb, "x", 0.0, -1.0, 1.0, 0.01);
+        bb.reverse_ad(body, seed)
+    };
+    let flat = try_build_flat_box(&arena, process).unwrap();
+    let err = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
+        .expect_err("rad through a Rec body must error");
+    assert!(
+        matches!(
+            err,
+            PropagateError::RadUnsupportedNode {
+                kind: "recursive-projection",
+                ..
+            }
+        ),
+        "expected recursive-projection, got: {err:?}"
+    );
 }
 
 #[test]

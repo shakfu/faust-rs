@@ -71,6 +71,32 @@
 //! - representation casts and other opaque families.
 //!
 //! Phase D refines the strict diagnostics around temporal nodes.
+//!
+//! # Why temporal nodes refuse adjoint
+//!
+//! Forward-mode AD applies a *causal* rule for delays:
+//!
+//! ```text
+//! d/dp delay1(x) = delay1(x')   // tangent at frame n only depends on frame n-1
+//! ```
+//!
+//! Reverse-mode AD requires the transpose, which is *anti-causal*:
+//!
+//! ```text
+//! adj_x[n] += adj_y[n + 1]      // adjoint at frame n depends on a future frame
+//! ```
+//!
+//! A correct reverse pass therefore needs either
+//!
+//! - a finite block tape that buffers primal intermediates and a backward
+//!   scan over that block (BPTT — out of scope for phase 1), or
+//! - a causal approximation that is explicitly not exact reverse mode.
+//!
+//! Phase 1 RAD takes the strict route: any signal family whose transpose
+//! would be non-causal raises [`PropagateError::RadUnsupportedNode`] with
+//! a tailored diagnostic. The plan reserves `rad(expr, seeds, horizon)`
+//! and `-rad-horizon N` for a future BPTT mode (plan §10.3); phase 1 must
+//! never silently emit a misleading gradient.
 
 use ahash::{AHashMap, AHashSet};
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
