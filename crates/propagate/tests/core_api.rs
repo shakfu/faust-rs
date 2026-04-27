@@ -1609,38 +1609,24 @@ fn propagate_forward_ad_rejects_zero_output_seed() {
 }
 
 #[test]
-fn propagate_reverse_ad_returns_clear_unsupported_error() {
+fn propagate_reverse_ad_succeeds_on_feed_forward_unary_call() {
+    // Feed-forward `rad(slider : sin, p)` is now supported (Phase B). The
+    // output bundle layout `[primal, gradient]` must be observable through
+    // the public propagation entry point.
     let mut arena = TreeArena::new();
     let process = {
         let mut bb = BoxBuilder::new(&mut arena);
-        let label = bb.ident("freq");
-        let init = bb.real(440.0);
-        let min = bb.real(50.0);
-        let max = bb.real(2_000.0);
-        let step = bb.real(1.0);
-        let slider = bb.hslider(label, init, min, max, step);
+        let slider = build_hslider(&mut bb, "freq", 440.0, 50.0, 2000.0, 1.0);
         let sin = bb.sin();
         let body = bb.seq(slider, sin);
-        let seed_label = bb.ident("p");
-        let seed_init = bb.real(0.0);
-        let seed_min = bb.real(-1.0);
-        let seed_max = bb.real(1.0);
-        let seed_step = bb.real(0.01);
-        let seed = bb.hslider(seed_label, seed_init, seed_min, seed_max, seed_step);
+        let seed = build_hslider(&mut bb, "p", 0.0, -1.0, 1.0, 0.01);
         bb.reverse_ad(body, seed)
     };
 
     let flat_process = try_build_flat_box(&arena, process).unwrap();
-    let err = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
-        .expect_err("reverse-ad should remain unsupported during propagation");
-
-    assert!(matches!(
-        err,
-        PropagateError::UnsupportedBox {
-            kind: "reversead",
-            ..
-        }
-    ));
+    let outs = propagate_typed_with_ui(&mut arena, flat_process, &[], &mut ArityCache::new())
+        .expect("rad(sin(slider), seed) must propagate cleanly");
+    assert_eq!(outs.signals.len(), 2, "rad bundle = [primal, gradient]");
 }
 
 #[test]
@@ -1695,6 +1681,67 @@ fn propagate_reverse_ad_zero_output_seeds_raises_rad_seed_arity() {
     let err = box_arity_typed(&arena, flat, &mut ArityCache::new())
         .expect_err("rad with zero-output seeds must fail at arity time");
     assert!(matches!(err, PropagateError::RadSeedArity { outputs: 0, .. }));
+}
+
+/// Helper: build `hslider("name", init, min, max, step)` without nested
+/// `&mut bb` borrows in the call site.
+fn build_hslider(
+    bb: &mut BoxBuilder<'_>,
+    name: &str,
+    init: f32,
+    min: f32,
+    max: f32,
+    step: f32,
+) -> boxes::BoxId {
+    let label = bb.ident(name);
+    let init = bb.real(f64::from(init));
+    let min = bb.real(f64::from(min));
+    let max = bb.real(f64::from(max));
+    let step = bb.real(f64::from(step));
+    bb.hslider(label, init, min, max, step)
+}
+
+#[test]
+fn propagate_reverse_ad_feed_forward_returns_primal_then_gradients() {
+    // process = rad(x*y, (x, y)); arity must be 3 (one primal + two seeds)
+    // and propagation must succeed in Phase B (feed-forward subset).
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let x_slider = build_hslider(&mut bb, "x", 1.0, -1.0, 1.0, 0.01);
+        let y_slider = build_hslider(&mut bb, "y", 2.0, -1.0, 1.0, 0.01);
+        let xy = bb.par(x_slider, y_slider);
+        let mul = bb.mul();
+        let body = bb.seq(xy, mul);
+        let seeds_x = build_hslider(&mut bb, "x", 1.0, -1.0, 1.0, 0.01);
+        let seeds_y = build_hslider(&mut bb, "y", 2.0, -1.0, 1.0, 0.01);
+        let seeds = bb.par(seeds_x, seeds_y);
+        bb.reverse_ad(body, seeds)
+    };
+    let flat = try_build_flat_box(&arena, process).unwrap();
+    let outs = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
+        .expect("rad over a feed-forward product must propagate in phase B");
+    assert_eq!(outs.len(), 3, "rad output bundle = [primal, da, db]");
+}
+
+#[test]
+fn propagate_reverse_ad_temporal_node_emits_unsupported_diagnostic() {
+    // process = rad(x', x): differentiating a delay1 must be rejected with
+    // a structured `RadUnsupportedNode` rather than silently producing a
+    // wrong gradient.
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let x_slider = build_hslider(&mut bb, "x", 0.0, -1.0, 1.0, 0.01);
+        let delay1 = bb.delay1();
+        let body = bb.seq(x_slider, delay1);
+        let seed = build_hslider(&mut bb, "x", 0.0, -1.0, 1.0, 0.01);
+        bb.reverse_ad(body, seed)
+    };
+    let flat = try_build_flat_box(&arena, process).unwrap();
+    let err = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
+        .expect_err("rad through delay1 must error");
+    assert!(matches!(err, PropagateError::RadUnsupportedNode { .. }));
 }
 
 #[test]

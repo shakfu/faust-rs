@@ -362,12 +362,12 @@ fn propagate_error_fixture_exposes_frs_prop_code() {
 }
 
 #[test]
-fn reverse_ad_fixture_fails_at_propagate_stage_with_unsupported_box_code() {
+fn reverse_ad_temporal_fixture_fails_with_rad_unsupported_node_diagnostic() {
     let compiler = Compiler::new();
-    let source = read_corpus("rad_parse_only.dsp");
+    let source = read_corpus("err_rad_delay_temporal_unsupported.dsp");
     let err = compiler
-        .compile_source_to_signals("rad_parse_only.dsp", &source)
-        .expect_err("rad fixture should fail during propagate stage in this phase");
+        .compile_source_to_signals("err_rad_delay_temporal_unsupported.dsp", &source)
+        .expect_err("rad over a delay must fail at propagate stage");
 
     let diagnostics = err
         .diagnostics()
@@ -377,14 +377,14 @@ fn reverse_ad_fixture_fails_at_propagate_stage_with_unsupported_box_code() {
             .as_slice()
             .iter()
             .any(|d| d.code.0 == "FRS-PROP-0001"),
-        "reverse-ad should currently surface unsupported-box propagation diagnostics"
+        "rad temporal-unsupported should surface unsupported-box-family diagnostics"
     );
     assert!(
         diagnostics
             .as_slice()
             .iter()
-            .any(|d| d.message.contains("reversead")),
-        "reverse-ad diagnostics should name the unsupported box family"
+            .any(|d| d.message.contains("rad")),
+        "rad temporal-unsupported diagnostic must mention `rad`"
     );
 }
 

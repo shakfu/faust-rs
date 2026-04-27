@@ -118,6 +118,7 @@ use ui::{
 };
 
 mod forward_ad;
+mod reverse_ad;
 
 /// Memoization cache for [`box_arity_typed`] results, keyed by validated flat boxes.
 pub type ArityCache = AHashMap<FlatBoxId, Result<BoxArity, PropagateError>>;
@@ -735,6 +736,10 @@ pub enum PropagateError {
         node: TreeId,
         outputs: usize,
     },
+    RadUnsupportedNode {
+        node: TreeId,
+        kind: &'static str,
+    },
 }
 
 impl Display for PropagateError {
@@ -825,6 +830,11 @@ impl Display for PropagateError {
             Self::RadSeedArity { node, outputs } => write!(
                 f,
                 "rad seeds at node {} must produce at least 1 output, got {outputs}",
+                node.as_u32()
+            ),
+            Self::RadUnsupportedNode { node, kind } => write!(
+                f,
+                "rad cannot differentiate signal node {} ({kind})",
                 node.as_u32()
             ),
         }
@@ -1039,6 +1049,18 @@ impl IntoDiagnostic for PropagateError {
             )
             .with_note("cause: rad seeds expression must produce at least 1 output signal")
             .with_note(format!("seeds produced {outputs} output(s)")),
+            Self::RadUnsupportedNode { kind, .. } => Diagnostic::new(
+                Severity::Error,
+                Stage::Propagate,
+                codes::PROP_UNSUPPORTED_BOX,
+                message,
+            )
+            .with_note(format!(
+                "cause: rad has no differentiation rule for the `{kind}` signal family in this phase"
+            ))
+            .with_help(
+                "rewrite the differentiated expression to avoid this signal family, or use fad(...) when the case is a feed-forward derivative",
+            ),
         }
     }
 }
@@ -2672,11 +2694,6 @@ fn propagate_inner(
             }
         }
         FlatNodeKind::ReverseAD { body, seeds } => {
-            // Phase A: arity-only validation. The actual reverse-mode
-            // expansion is wired in subsequent phases. Until then we still
-            // walk both children so error reporting and UI collection see
-            // them, then return an `UnsupportedBox` once the structural
-            // contract has been confirmed.
             let body_arity = box_arity_typed(arena, body, ctx.cache)?;
             if body_arity.outputs == 0 {
                 return Err(PropagateError::RadBodyArity {
@@ -2691,10 +2708,25 @@ fn propagate_inner(
                     outputs: 0,
                 });
             }
-            Err(PropagateError::UnsupportedBox {
-                node: box_tree.as_tree_id(),
-                kind: "reversead",
-            })
+            // Both children observe the same upstream input bus (mirrors the
+            // FAD wiring contract).
+            let seed_inputs: Vec<SigId> =
+                inputs.iter().copied().take(seeds_arity.inputs).collect();
+            let seed_sigs = propagate_in_slot_env(arena, seeds, &seed_inputs, ctx)?;
+            if seed_sigs.len() != seeds_arity.outputs {
+                return Err(PropagateError::RadSeedArity {
+                    node: box_tree.as_tree_id(),
+                    outputs: seed_sigs.len(),
+                });
+            }
+            let body_sigs = propagate_in_slot_env(arena, body, inputs, ctx)?;
+            if body_sigs.len() != body_arity.outputs {
+                return Err(PropagateError::RadBodyArity {
+                    node: box_tree.as_tree_id(),
+                    outputs: body_sigs.len(),
+                });
+            }
+            reverse_ad::generate_rad_signals(arena, &body_sigs, &seed_sigs)
         }
         FlatNodeKind::Environment => {
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
