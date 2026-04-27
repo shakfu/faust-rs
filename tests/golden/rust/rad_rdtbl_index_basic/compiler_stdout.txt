@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_rdtbl_index_basic.dsp
+bytes=402
+lines=7
+fnv1a64=9f9393e0bf95330a

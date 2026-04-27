@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_multi_output_sum_cotangent.dsp
+bytes=416
+lines=10
+fnv1a64=57dbc22d36d8b052

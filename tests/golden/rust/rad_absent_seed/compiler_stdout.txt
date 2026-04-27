@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_absent_seed.dsp
+bytes=354
+lines=7
+fnv1a64=0f31a3b2864b5159

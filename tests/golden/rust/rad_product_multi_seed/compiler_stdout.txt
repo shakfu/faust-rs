@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_product_multi_seed.dsp
+bytes=249
+lines=7
+fnv1a64=7adb3b0c46f38078

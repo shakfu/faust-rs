@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_trig_composition.dsp
+bytes=300
+lines=6
+fnv1a64=3bf2f1ae49ecee08

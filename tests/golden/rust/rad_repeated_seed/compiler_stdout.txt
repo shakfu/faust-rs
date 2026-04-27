@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_repeated_seed.dsp
+bytes=341
+lines=7
+fnv1a64=fb375862e60741e2

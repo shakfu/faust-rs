@@ -18,10 +18,57 @@
 
 use std::fs;
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use codegen::backends::interp::{FbcDspInstance, InterpOptions, read_fbc};
 use compiler::{Compiler, SignalFirLane};
+
+fn corpus_path(file: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("tests")
+        .join("corpus")
+        .join(file)
+}
+
+fn run_interp_corpus_inner(stem: &str, frame_count: usize) -> Vec<Vec<f32>> {
+    let path = corpus_path(&format!("{stem}.dsp"));
+    let compiler = Compiler::new();
+    let fbc = compiler
+        .compile_file_default_to_interp_with_lane(
+            &path,
+            &InterpOptions::default(),
+            SignalFirLane::TransformFastLane,
+        )
+        .unwrap_or_else(|e| panic!("{} interp compilation failed: {e}", path.display()));
+    let mut reader = Cursor::new(fbc);
+    let mut factory = read_fbc::<f32>(&mut reader)
+        .unwrap_or_else(|e| panic!("{} interp bytecode parse failed: {e}", path.display()));
+    let mut instance = FbcDspInstance::new(&mut factory);
+    instance.init(48_000);
+    let num_outputs = usize::try_from(instance.get_num_outputs()).expect("non-negative outputs");
+    let mut outputs = vec![vec![0.0_f32; frame_count]; num_outputs];
+    let mut output_slices: Vec<&mut [f32]> = outputs.iter_mut().map(Vec::as_mut_slice).collect();
+    instance
+        .try_compute(frame_count as i32, &[], &mut output_slices)
+        .unwrap_or_else(|e| panic!("{} interp execution failed: {e}", path.display()));
+    outputs
+}
+
+/// Same 64 MB-stack worker pattern as `run_interp_temp_source`, but reads
+/// fixtures from `tests/corpus/` so they can be inspected directly and
+/// reused across the broader corpus tooling.
+fn run_interp_corpus(stem: &'static str, frame_count: usize) -> Vec<Vec<f32>> {
+    std::thread::Builder::new()
+        .name(format!("rad-runtime-corpus-{stem}"))
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || run_interp_corpus_inner(stem, frame_count))
+        .expect("spawn rad-runtime-corpus worker")
+        .join()
+        .expect("rad-runtime-corpus worker thread should finish")
+}
 
 static NEXT_TEMP_DSP_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -503,4 +550,127 @@ process = fad(select2(a > 0.0, pow(a, b), b), (a, b));
         .to_string()
     };
     assert_rad_matches_fad("rad-vs-fad-pow-select2", 1, 2, 4, 1.0e-5, rad, fad);
+}
+
+// -----------------------------------------------------------------------
+// Corpus-driven smoke tests
+// -----------------------------------------------------------------------
+//
+// Each fixture lives in `tests/corpus/`. Validating them through the
+// compiler+interp pipeline guarantees parser/eval/propagate/transform/FIR
+// all stay aligned with the documented RAD contract. Where the gradient
+// has a closed form we also assert the numeric value on frame 0.
+
+#[test]
+fn corpus_rad_basic_compiles_and_emits_two_lanes() {
+    let outs = run_interp_corpus("rad_basic", 2);
+    assert_eq!(outs.len(), 2, "rad_basic = [primal, gradient]");
+}
+
+#[test]
+fn corpus_rad_product_multi_seed_emits_expected_gradients() {
+    // process = rad(a*b, (a, b)) at a=1, b=2 → [a*b, b, a] = [2, 2, 1]
+    let outs = run_interp_corpus("rad_product_multi_seed", 1);
+    assert_eq!(outs.len(), 3);
+    assert_close(outs[0][0], 2.0, 1.0e-5, "primal a*b");
+    assert_close(outs[1][0], 2.0, 1.0e-5, "d/da (a*b) = b");
+    assert_close(outs[2][0], 1.0, 1.0e-5, "d/db (a*b) = a");
+}
+
+#[test]
+fn corpus_rad_trig_composition_compiles_with_three_outputs() {
+    // process = rad(sin(a*b), (a, b)) → 3 outputs.
+    let outs = run_interp_corpus("rad_trig_composition", 1);
+    assert_eq!(outs.len(), 3);
+}
+
+#[test]
+fn corpus_rad_absent_seed_produces_zero_gradient_for_unreachable_seed() {
+    // process = rad(sin(x), y) → [sin(x), 0.0]
+    let outs = run_interp_corpus("rad_absent_seed", 2);
+    assert_eq!(outs.len(), 2);
+    for frame in 0..2 {
+        assert_close(
+            outs[1][frame],
+            0.0,
+            1.0e-6,
+            &format!("absent seed gradient frame {frame}"),
+        );
+    }
+}
+
+#[test]
+fn corpus_rad_repeated_seed_duplicates_gradient_lane_verbatim() {
+    // process = rad(a*b, (a, a)) → both gradient lanes equal d/da (a*b) = b.
+    let outs = run_interp_corpus("rad_repeated_seed", 1);
+    assert_eq!(outs.len(), 3);
+    assert_close(
+        outs[1][0],
+        outs[2][0],
+        1.0e-6,
+        "repeated-seed lanes must alias",
+    );
+    assert_close(outs[1][0], 0.7, 1.0e-5, "d/da (a*b) at b=0.7");
+}
+
+#[test]
+fn corpus_rad_multi_output_sum_cotangent_emits_expected_gradients() {
+    // process = rad((a*b, sin(a)), (a, b)) at a=0.4, b=0.3
+    // primals  = [a*b, sin(a)]                  ≈ [0.12, 0.3894]
+    // grad/da  = b + cos(a)                     ≈ 0.3 + cos(0.4) ≈ 1.2211
+    // grad/db  = a                              = 0.4
+    let outs = run_interp_corpus("rad_multi_output_sum_cotangent", 1);
+    assert_eq!(outs.len(), 4);
+    assert_close(outs[0][0], 0.4 * 0.3, 5.0e-5, "primal a*b");
+    let sin_a = (0.4_f32).sin();
+    assert_close(outs[1][0], sin_a, 5.0e-5, "primal sin(a)");
+    let cos_a = (0.4_f32).cos();
+    assert_close(outs[2][0], 0.3 + cos_a, 5.0e-5, "d/da sum = b + cos(a)");
+    assert_close(outs[3][0], 0.4, 5.0e-5, "d/db sum = a");
+}
+
+#[test]
+fn corpus_rad_rdtbl_index_basic_emits_two_outputs() {
+    // process = rad(rdtable(waveform{0,1,4,9,16,25,36,49}, k), k)
+    // The slope is the symmetric finite difference. We just confirm the
+    // arity here; numeric parity vs FAD is exercised in
+    // `rad_vs_fad_parity_on_readonly_table_index`.
+    let outs = run_interp_corpus("rad_rdtbl_index_basic", 2);
+    assert_eq!(outs.len(), 2);
+}
+
+#[test]
+fn corpus_err_rad_zero_body_surfaces_rad_body_arity_diagnostic() {
+    let path = corpus_path("err_rad_zero_body.dsp");
+    let source = std::fs::read_to_string(&path).expect("read err_rad_zero_body fixture");
+    let compiler = Compiler::new();
+    let err = compiler
+        .compile_source_to_signals("err_rad_zero_body.dsp", &source)
+        .expect_err("zero-output body must fail at propagate stage");
+    let diagnostics = err.diagnostics().expect("diagnostics on rad body arity");
+    assert!(
+        diagnostics
+            .as_slice()
+            .iter()
+            .any(|d| d.message.contains("rad body")),
+        "diagnostic must name rad body arity: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn corpus_err_rad_zero_seed_surfaces_rad_seed_arity_diagnostic() {
+    let path = corpus_path("err_rad_zero_seed.dsp");
+    let source = std::fs::read_to_string(&path).expect("read err_rad_zero_seed fixture");
+    let compiler = Compiler::new();
+    let err = compiler
+        .compile_source_to_signals("err_rad_zero_seed.dsp", &source)
+        .expect_err("zero-output seeds must fail at propagate stage");
+    let diagnostics = err.diagnostics().expect("diagnostics on rad seed arity");
+    assert!(
+        diagnostics
+            .as_slice()
+            .iter()
+            .any(|d| d.message.contains("rad seeds")),
+        "diagnostic must name rad seeds arity: {diagnostics:?}"
+    );
 }

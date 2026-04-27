@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=err_rad_zero_seed.dsp
+bytes=260
+lines=5
+fnv1a64=e079dec2932d68f7
