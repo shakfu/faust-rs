@@ -141,6 +141,98 @@ fn assert_single_seed_fad_matches_central_difference(
     }
 }
 
+/// Generic harness for multi-seed FAD: compares each tangent lane against its
+/// own central finite difference, by perturbing one seed at a time.
+///
+/// `build_fad_source(seeds)` must yield a `fad(expr, (s_0, …, s_{N-1}))`
+/// program with exactly `primal_outputs · (1 + N)` outputs in the standard
+/// interleaved order. `build_primal_source(seeds)` builds the same `expr`
+/// without `fad(...)` for ground-truth evaluation. `base_seeds`,
+/// `epsilons`, and `abs_tol` parameterise the finite-difference comparison.
+fn assert_multi_seed_fad_matches_central_difference<BuildFad, BuildPrimal>(
+    stem: &str,
+    primal_outputs: usize,
+    frame_count: usize,
+    base_seeds: &[f32],
+    epsilons: &[f32],
+    abs_tol: f32,
+    build_fad_source: BuildFad,
+    build_primal_source: BuildPrimal,
+) where
+    BuildFad: Fn(&[f32]) -> String,
+    BuildPrimal: Fn(&[f32]) -> String,
+{
+    assert_eq!(
+        base_seeds.len(),
+        epsilons.len(),
+        "{stem}: base_seeds and epsilons must agree on N"
+    );
+    let n = base_seeds.len();
+
+    let fad_outputs = run_interp_temp_source(
+        &format!("{stem}-fad"),
+        &build_fad_source(base_seeds),
+        frame_count,
+    );
+    let primal_outputs_base = run_interp_temp_source(
+        &format!("{stem}-primal"),
+        &build_primal_source(base_seeds),
+        frame_count,
+    );
+
+    assert_eq!(
+        fad_outputs.len(),
+        primal_outputs * (1 + n),
+        "{stem}: multi-seed FAD layout must be [p_i, t_i_s0, …, t_i_s{{N-1}}]*"
+    );
+    assert_eq!(primal_outputs_base.len(), primal_outputs);
+
+    let mut primal_plus = Vec::with_capacity(n);
+    let mut primal_minus = Vec::with_capacity(n);
+    for j in 0..n {
+        let mut up = base_seeds.to_vec();
+        up[j] += epsilons[j];
+        let mut dn = base_seeds.to_vec();
+        dn[j] -= epsilons[j];
+        primal_plus.push(run_interp_temp_source(
+            &format!("{stem}-plus-{j}"),
+            &build_primal_source(&up),
+            frame_count,
+        ));
+        primal_minus.push(run_interp_temp_source(
+            &format!("{stem}-minus-{j}"),
+            &build_primal_source(&dn),
+            frame_count,
+        ));
+    }
+
+    for primal_index in 0..primal_outputs {
+        for frame in 0..frame_count {
+            let actual_primal = fad_outputs[primal_index * (1 + n)][frame];
+            let expected_primal = primal_outputs_base[primal_index][frame];
+            assert_close(
+                actual_primal,
+                expected_primal,
+                abs_tol,
+                &format!("{stem} primal[{primal_index}] frame {frame}"),
+            );
+
+            for j in 0..n {
+                let expected_tangent = (primal_plus[j][primal_index][frame]
+                    - primal_minus[j][primal_index][frame])
+                    / (2.0 * epsilons[j]);
+                let actual_tangent = fad_outputs[primal_index * (1 + n) + 1 + j][frame];
+                assert_close(
+                    actual_tangent,
+                    expected_tangent,
+                    abs_tol,
+                    &format!("{stem} tangent[{primal_index}/seed {j}] frame {frame}"),
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn fastlane_interp_self_recursive_fad_matches_closed_form_recurrence() {
     let outputs = run_interp_file(&corpus_path("fad_recursive_parametric_self.dsp"), 6);
@@ -631,4 +723,86 @@ process = mix;
         build_fad_source: fad_source,
         build_primal_source: primal_source,
     });
+}
+
+#[test]
+fn fastlane_interp_multi_seed_nested_recursive_fad_matches_central_difference_per_seed() {
+    fn fad_source(seeds: &[f32]) -> String {
+        let (a, b) = (seeds[0], seeds[1]);
+        format!(
+            r#"
+a = hslider("a", {a}, -0.9, 0.9, 0.001);
+b = hslider("b", {b}, -0.9, 0.9, 0.001);
+inner = 2 : + ~ *(a);
+outer = 1 : + ~ *(b * inner);
+process = fad(outer, (a, b));
+"#
+        )
+    }
+
+    fn primal_source(seeds: &[f32]) -> String {
+        let (a, b) = (seeds[0], seeds[1]);
+        format!(
+            r#"
+a = hslider("a", {a}, -0.9, 0.9, 0.001);
+b = hslider("b", {b}, -0.9, 0.9, 0.001);
+inner = 2 : + ~ *(a);
+outer = 1 : + ~ *(b * inner);
+process = outer;
+"#
+        )
+    }
+
+    assert_multi_seed_fad_matches_central_difference(
+        "fad-multi-seed-nested-recursive",
+        1,
+        6,
+        &[0.2, 0.15],
+        &[1.0e-3, 1.0e-3],
+        5.0e-2,
+        fad_source,
+        primal_source,
+    );
+}
+
+#[test]
+fn fastlane_interp_multi_seed_nested_mutual_recursive_fad_matches_central_difference_per_seed() {
+    fn fad_source(seeds: &[f32]) -> String {
+        let (p, q) = (seeds[0], seeds[1]);
+        format!(
+            r#"
+import("stdfaust.lib");
+p = hslider("p", {p}, -0.9, 0.9, 0.001);
+q = hslider("q", {q}, -0.9, 0.9, 0.001);
+core = si.bus(2) ~ ((*(p), *(q)) : ro.cross(2));
+mix = 1 : + ~ *(core : +);
+process = fad(mix, (p, q));
+"#
+        )
+    }
+
+    fn primal_source(seeds: &[f32]) -> String {
+        let (p, q) = (seeds[0], seeds[1]);
+        format!(
+            r#"
+import("stdfaust.lib");
+p = hslider("p", {p}, -0.9, 0.9, 0.001);
+q = hslider("q", {q}, -0.9, 0.9, 0.001);
+core = si.bus(2) ~ ((*(p), *(q)) : ro.cross(2));
+mix = 1 : + ~ *(core : +);
+process = mix;
+"#
+        )
+    }
+
+    assert_multi_seed_fad_matches_central_difference(
+        "fad-multi-seed-nested-mutual-recursive",
+        1,
+        6,
+        &[0.2, 0.35],
+        &[1.0e-3, 1.0e-3],
+        5.0e-2,
+        fad_source,
+        primal_source,
+    );
 }

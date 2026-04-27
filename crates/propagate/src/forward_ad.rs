@@ -519,9 +519,24 @@ impl<'a> ForwardADTransform<'a> {
     /// the final interleaved node is still being built (see module docs).
     fn transform(&mut self, sig: SigId) -> Dual {
         if let Some(dual) = self.cache.get(&sig).cloned() {
+            debug_assert_eq!(
+                dual.tangents.len(),
+                self.seed_count(),
+                "cached Dual has wrong tangent lane count"
+            );
             return dual;
         }
+        let depth_on_entry = self.debruijn_depth;
         let dual = self.transform_uncached(sig);
+        debug_assert_eq!(
+            self.debruijn_depth, depth_on_entry,
+            "debruijn_depth not balanced across transform_uncached"
+        );
+        debug_assert_eq!(
+            dual.tangents.len(),
+            self.seed_count(),
+            "transform_uncached produced wrong tangent lane count"
+        );
         self.cache.insert(sig, dual.clone());
         dual
     }
@@ -590,6 +605,7 @@ impl<'a> ForwardADTransform<'a> {
             self.diff_seed_index = Self::build_seed_index(&self.diff_seeds);
 
             let duals = self.transform_list(body);
+            let original_arity = duals.len();
 
             self.diff_seeds = old_seeds;
             self.diff_seed_index = old_seed_index;
@@ -598,12 +614,22 @@ impl<'a> ForwardADTransform<'a> {
             // Interleave `[primal, tangent_s0, …, tangent_s{N-1}]` for every
             // original slot in source order. Downstream `Proj` nodes rely on
             // this exact `i * (1 + N) + (0 or 1 + lane)` layout.
-            let mut expanded_body =
-                Vec::with_capacity(duals.len() * self.bundle_lane_count() as usize);
+            let lane_count = self.bundle_lane_count() as usize;
+            let mut expanded_body = Vec::with_capacity(original_arity * lane_count);
             for dual in duals {
+                debug_assert_eq!(
+                    dual.tangents.len(),
+                    self.seed_count(),
+                    "REC body element has wrong tangent lane count"
+                );
                 expanded_body.push(dual.primal);
                 expanded_body.extend(dual.tangents);
             }
+            debug_assert_eq!(
+                expanded_body.len(),
+                original_arity * lane_count,
+                "interleaved REC body length must equal k * (1 + N)"
+            );
             let list_node = vec_to_list(self.arena, &expanded_body);
             let fad_rec = de_bruijn_rec(self.arena, list_node);
             // The whole rebuilt group IS both the primal and every tangent
@@ -1387,4 +1413,228 @@ pub(super) fn generate_fad_signals_multi(
         result.extend(dual.tangents);
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Randomized structural invariants on the FAD rewriter.
+    //!
+    //! These tests build small random signal expressions — including nested
+    //! `DEBRUIJNREC` groups with valid `DEBRUIJNREF` levels — and run
+    //! [`ForwardADTransform`] over them. They do not check numeric
+    //! correctness (that is handled by
+    //! `crates/compiler/tests/fad_recursive_runtime.rs` through the
+    //! interpreter); they validate the de Bruijn index bookkeeping. The
+    //! `debug_assert!`s inside `transform` and the `(Rec)` arm fire on any
+    //! layout violation, so a passing run on a wide variety of randomly
+    //! generated expressions is a strong invariant check.
+    //!
+    //! No external proptest dependency: a small seeded LCG drives the
+    //! generator deterministically.
+    use super::*;
+    use signals::SigBuilder;
+    use tlib::{TreeArena, de_bruijn_rec, de_bruijn_ref, vec_to_list};
+
+    /// Tiny linear-congruential PRNG for deterministic generation.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1))
+        }
+        fn next_u32(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 32) as u32
+        }
+        fn gen_range(&mut self, lo: u32, hi_exclusive: u32) -> u32 {
+            lo + (self.next_u32() % (hi_exclusive - lo))
+        }
+    }
+
+    /// Builds a random closed signal expression of bounded depth.
+    ///
+    /// `depth_budget` caps recursion in the generator (not in the resulting
+    /// tree). `rec_stack_arities[k]` is the arity of the `k+1`-th enclosing
+    /// `DEBRUIJNREC` (innermost = index 0); used to emit *valid*
+    /// `DEBRUIJNREF` levels and ensure every Proj on a free reference has a
+    /// slot index within that group's body.
+    fn gen_expr(
+        rng: &mut Lcg,
+        arena: &mut TreeArena,
+        constants: &[SigId],
+        depth_budget: u32,
+        rec_stack_arities: &[usize],
+    ) -> SigId {
+        // Leaf weight rises as the budget shrinks.
+        let force_leaf = depth_budget == 0 || rng.gen_range(0, 4) == 0;
+        if force_leaf {
+            // 50/50 between a constant and (when available) a Proj on an
+            // enclosing recursion — that's how the (Proj-Bound /
+            // Proj-Unbound) classification is exercised.
+            if !rec_stack_arities.is_empty() && rng.gen_range(0, 2) == 0 {
+                let level_idx = rng.gen_range(0, rec_stack_arities.len() as u32) as usize;
+                let arity = rec_stack_arities[level_idx];
+                let slot = rng.gen_range(0, arity as u32) as i32;
+                let level = (level_idx + 1) as i64;
+                let group = de_bruijn_ref(arena, level);
+                let mut b = SigBuilder::new(arena);
+                return b.proj(slot, group);
+            }
+            return constants[rng.gen_range(0, constants.len() as u32) as usize];
+        }
+
+        match rng.gen_range(0, 5) {
+            // Binary +
+            0 => {
+                let x = gen_expr(rng, arena, constants, depth_budget - 1, rec_stack_arities);
+                let y = gen_expr(rng, arena, constants, depth_budget - 1, rec_stack_arities);
+                let mut b = SigBuilder::new(arena);
+                b.add(x, y)
+            }
+            // Binary *
+            1 => {
+                let x = gen_expr(rng, arena, constants, depth_budget - 1, rec_stack_arities);
+                let y = gen_expr(rng, arena, constants, depth_budget - 1, rec_stack_arities);
+                let mut b = SigBuilder::new(arena);
+                b.mul(x, y)
+            }
+            // sin
+            2 => {
+                let x = gen_expr(rng, arena, constants, depth_budget - 1, rec_stack_arities);
+                let mut b = SigBuilder::new(arena);
+                b.sin(x)
+            }
+            // delay1
+            3 => {
+                let x = gen_expr(rng, arena, constants, depth_budget - 1, rec_stack_arities);
+                let mut b = SigBuilder::new(arena);
+                b.delay1(x)
+            }
+            // DEBRUIJNREC of arity 1..=3, then Proj(0, …) on it
+            _ => {
+                let arity = rng.gen_range(1, 4) as usize;
+                let mut new_stack = Vec::with_capacity(rec_stack_arities.len() + 1);
+                new_stack.push(arity);
+                new_stack.extend_from_slice(rec_stack_arities);
+                let mut elements = Vec::with_capacity(arity);
+                for _ in 0..arity {
+                    elements.push(gen_expr(
+                        rng,
+                        arena,
+                        constants,
+                        depth_budget - 1,
+                        &new_stack,
+                    ));
+                }
+                let body = vec_to_list(arena, &elements);
+                let rec = de_bruijn_rec(arena, body);
+                let slot = rng.gen_range(0, arity as u32) as i32;
+                let mut b = SigBuilder::new(arena);
+                b.proj(slot, rec)
+            }
+        }
+    }
+
+    /// Smoke test: random expressions of varying depth and seed counts.
+    /// The invariants checked here are the `debug_assert!`s embedded in
+    /// `transform` and the `(Rec)` arm; this driver merely ensures they
+    /// hold across a broad range of shapes.
+    #[test]
+    fn fad_invariants_hold_on_random_expressions() {
+        const ITERS: u32 = 64;
+        for run in 0..ITERS {
+            let mut rng = Lcg::new(0xC0DE_FACE_u64 ^ u64::from(run));
+            let mut arena = TreeArena::new();
+
+            let c0 = SigBuilder::new(&mut arena).real(2.0);
+            let c1 = SigBuilder::new(&mut arena).real(0.5);
+            let s0 = SigBuilder::new(&mut arena).real(7.0);
+            let s1 = SigBuilder::new(&mut arena).real(11.0);
+            let constants = [c0, c1, s0, s1];
+
+            let depth = rng.gen_range(2, 6);
+            let expr = gen_expr(&mut rng, &mut arena, &constants, depth, &[]);
+
+            // Vary seed configuration: 1 or 2 seeds, possibly with repeats.
+            let seeds: Vec<SigId> = match rng.gen_range(0, 3) {
+                0 => vec![s0],
+                1 => vec![s0, s1],
+                _ => vec![s0, s0],
+            };
+            let n = seeds.len();
+
+            let result = generate_fad_signals_multi(&mut arena, &[expr], &seeds)
+                .expect("FAD must succeed on closed random expressions");
+            assert_eq!(
+                result.len(),
+                1 + n,
+                "run {run}: output bundle must be [primal, t_s0, …, t_s{{N-1}}]"
+            );
+        }
+    }
+
+    /// Direct check: applying FAD to a seed itself yields primal == seed
+    /// and a one-hot tangent on the matching lane.
+    #[test]
+    fn fad_of_seed_is_one_hot() {
+        let mut arena = TreeArena::new();
+        let s0 = SigBuilder::new(&mut arena).real(7.0);
+        let s1 = SigBuilder::new(&mut arena).real(11.0);
+
+        let result = generate_fad_signals_multi(&mut arena, &[s0, s1], &[s0, s1])
+            .expect("FAD on seed list must succeed");
+        // Layout: [s0, ds0/ds0, ds0/ds1, s1, ds1/ds0, ds1/ds1]
+        assert_eq!(result.len(), 6);
+        assert_eq!(result[0], s0);
+        assert_eq!(result[3], s1);
+
+        let one = SigBuilder::new(&mut arena).real(1.0);
+        let zero = SigBuilder::new(&mut arena).real(0.0);
+        assert_eq!(result[1], one, "ds0/ds0 must be 1.0");
+        assert_eq!(result[2], zero, "ds0/ds1 must be 0.0");
+        assert_eq!(result[4], zero, "ds1/ds0 must be 0.0");
+        assert_eq!(result[5], one, "ds1/ds1 must be 1.0");
+    }
+
+    /// `Proj(0, REC([s, c]))` with seed `s` must rewrite to:
+    ///   primal  = Proj(0 * (1+N), REC([…interleaved…]))
+    ///   tangent = Proj(0 * (1+N) + 1, …)
+    /// and the rebuilt REC body must have arity 2 * (1+N).
+    #[test]
+    fn fad_rec_proj_uses_interleaved_layout() {
+        let mut arena = TreeArena::new();
+        let s = SigBuilder::new(&mut arena).real(7.0);
+        let c = SigBuilder::new(&mut arena).real(2.0);
+        let body = vec_to_list(&mut arena, &[s, c]);
+        let rec = de_bruijn_rec(&mut arena, body);
+        let proj0 = SigBuilder::new(&mut arena).proj(0, rec);
+
+        let result = generate_fad_signals_multi(&mut arena, &[proj0], &[s])
+            .expect("FAD on Proj(REC) must succeed");
+        assert_eq!(result.len(), 2);
+
+        let primal = result[0];
+        let tangent = result[1];
+
+        let SigMatch::Proj(p_idx, p_group) = match_sig(&arena, primal) else {
+            panic!("primal must be a Proj");
+        };
+        let SigMatch::Proj(t_idx, t_group) = match_sig(&arena, tangent) else {
+            panic!("tangent must be a Proj");
+        };
+
+        // N = 1, so L = 2. Slot 0 -> primal index 0, tangent index 1.
+        assert_eq!(p_idx, 0, "primal Proj index must be slot * L = 0");
+        assert_eq!(t_idx, 1, "tangent Proj index must be slot * L + 1 = 1");
+        assert_eq!(p_group, t_group, "both Projs must target the same REC");
+
+        // Rebuilt REC body must have arity k * L = 2 * 2 = 4.
+        let rebuilt_body = match_de_bruijn_rec(&arena, p_group)
+            .expect("primal Proj target must be a DEBRUIJNREC");
+        let elems = list_to_vec(&arena, rebuilt_body).expect("REC body must be a list");
+        assert_eq!(elems.len(), 4, "interleaved body length must be k * (1 + N)");
+    }
 }
