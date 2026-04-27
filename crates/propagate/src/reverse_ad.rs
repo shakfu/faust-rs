@@ -48,20 +48,34 @@
 //! - `IntCast` (zero) and `FloatCast` (forward),
 //! - bargraphs (zero contribution).
 //!
-//! Out of scope for phase B (raise [`PropagateError::RadUnsupportedNode`]):
+//! Phase C extension (this revision):
+//!
+//! - read-only `RdTbl(T, idx)` propagates adjoint through the read index
+//!   only, using the same symmetric finite-difference slope as the FAD pass
+//!   `(rdtbl(T, idx + 1) - rdtbl(T, idx - 1)) / 2`.
+//! - unary foreign functions (`tanhf`/`tanh`/`tanhl`,
+//!   `sinhf`/`sinh`/`sinhl`, `coshf`/`cosh`/`coshl` and the inverse-trig
+//!   counterparts) propagate adjoint through the same chain-rule formulas
+//!   used by FAD.
+//! - pass-through wrappers (`Attach`, `Enable`, `Control`) and `Output`
+//!   forward adjoint through the signal-carrying operand only, matching
+//!   FAD's transparency contract.
+//!
+//! Out of scope for phase C (raise [`PropagateError::RadUnsupportedNode`]):
 //!
 //! - delay, prefix, recursion, projection,
-//! - read/write tables and waveform tables,
-//! - foreign functions,
-//! - soundfile accessors and other mutable / opaque families.
+//! - mutable tables (`WrTbl` with non-nil write ports) and waveform
+//!   sources used outside `rdtbl`,
+//! - non-unary or unrecognized foreign functions,
+//! - soundfile accessors,
+//! - representation casts and other opaque families.
 //!
-//! Phase C extends the supported set; phase D refines the strict
-//! diagnostics.
+//! Phase D refines the strict diagnostics around temporal nodes.
 
 use ahash::{AHashMap, AHashSet};
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use smallvec::SmallVec;
-use tlib::TreeArena;
+use tlib::{NodeKind, TreeArena, list_to_vec, tree_to_str};
 
 use crate::PropagateError;
 
@@ -148,8 +162,43 @@ impl<'a> ReverseADTransform<'a> {
                 // recorded as unreachable (gradient zero).
                 let _ = inner;
             }
-            // Phase-B unsupported families: temporal, recursive, table,
-            // foreign function, soundfile, opaque.
+            SigMatch::RdTbl(table, ridx) => {
+                // Phase C: read-only tables are differentiable through the
+                // read index. Mutable tables fall through to the strict
+                // failure path below.
+                if !is_readonly_table_source(self.arena, table) {
+                    return Err(PropagateError::RadUnsupportedNode {
+                        node: sig,
+                        kind: "writable-table",
+                    });
+                }
+                out.push(ridx);
+            }
+            SigMatch::FFun(ff, largs) => {
+                // Phase C: only the unary chain-rule rules from FAD are
+                // recognized. Non-unary or unknown FFuns refuse adjoint.
+                let args = list_to_vec(self.arena, largs).unwrap_or_default();
+                if args.len() != 1 || !ffun_unary_supported(self.arena, ff) {
+                    return Err(PropagateError::RadUnsupportedNode {
+                        node: sig,
+                        kind: "ffun",
+                    });
+                }
+                out.push(args[0]);
+            }
+            SigMatch::Attach(x, _) | SigMatch::Enable(x, _) | SigMatch::Control(x, _) => {
+                // Pass-through nodes: only the signal-carrying operand
+                // contributes to the adjoint flow; the side-effect /
+                // control operand is ignored, mirroring FAD.
+                out.push(x);
+            }
+            SigMatch::Output(_, inner) => {
+                // `Output` is transparent to differentiation; forward the
+                // adjoint to the wrapped signal.
+                out.push(inner);
+            }
+            // Phase-B/C unsupported families: temporal, recursive,
+            // mutable table, soundfile, opaque.
             SigMatch::Delay1(_)
             | SigMatch::Delay(_, _)
             | SigMatch::Prefix(_, _) => {
@@ -164,16 +213,10 @@ impl<'a> ReverseADTransform<'a> {
                     kind: "recursive-projection",
                 });
             }
-            SigMatch::RdTbl(_, _) | SigMatch::WrTbl(_, _, _, _) | SigMatch::Waveform(_) => {
+            SigMatch::WrTbl(_, _, _, _) | SigMatch::Waveform(_) => {
                 return Err(PropagateError::RadUnsupportedNode {
                     node: sig,
-                    kind: "table-or-waveform",
-                });
-            }
-            SigMatch::FFun(_, _) => {
-                return Err(PropagateError::RadUnsupportedNode {
-                    node: sig,
-                    kind: "ffun",
+                    kind: "writable-table-or-waveform-direct",
                 });
             }
             SigMatch::Soundfile(_)
@@ -183,12 +226,6 @@ impl<'a> ReverseADTransform<'a> {
                 return Err(PropagateError::RadUnsupportedNode {
                     node: sig,
                     kind: "soundfile",
-                });
-            }
-            SigMatch::Attach(_, _) | SigMatch::Enable(_, _) | SigMatch::Control(_, _) => {
-                return Err(PropagateError::RadUnsupportedNode {
-                    node: sig,
-                    kind: "pass-through",
                 });
             }
             // Catch-all: every other signal family is opaque to RAD in
@@ -444,6 +481,96 @@ impl<'a> ReverseADTransform<'a> {
             SigMatch::VBargraph(_, _) | SigMatch::HBargraph(_, _) => {
                 // Sinks: no adjoint passes through.
             }
+            SigMatch::RdTbl(table, ridx) => {
+                // Phase C: read-only table read.
+                //   y = rdtbl(T, i)
+                //   slope(i) ≈ (rdtbl(T, i+1) - rdtbl(T, i-1)) / 2
+                //   i_bar += y_bar * slope(i)
+                let mut b = SigBuilder::new(self.arena);
+                let one = b.int(1);
+                let two = b.real(2.0);
+                let idx_plus = b.add(ridx, one);
+                let idx_minus = b.sub(ridx, one);
+                let plus = b.rdtbl(table, idx_plus);
+                let minus = b.rdtbl(table, idx_minus);
+                let diff = b.sub(plus, minus);
+                let slope = b.div(diff, two);
+                let contrib = b.mul(y_bar, slope);
+                self.add_adjoint(ridx, contrib);
+            }
+            SigMatch::FFun(ff, largs) => {
+                // Resolve the FFUN family name first so the ffun_is /
+                // arena-immutable lookups don't fight the SigBuilder's
+                // exclusive borrow during contribution construction.
+                let args = list_to_vec(self.arena, largs).unwrap_or_default();
+                let arg = args[0];
+                let kind = ffun_unary_kind(self.arena, ff);
+                let mut b = SigBuilder::new(self.arena);
+                let primal = b.ffun(ff, largs);
+                let contrib = match kind {
+                    Some(FFunUnaryKind::Tanh) => {
+                        let tanh_sq = b.mul(primal, primal);
+                        let one = b.real(1.0);
+                        let sech_sq = b.sub(one, tanh_sq);
+                        b.mul(y_bar, sech_sq)
+                    }
+                    Some(FFunUnaryKind::Sinh) => {
+                        let sinh_sq = b.mul(primal, primal);
+                        let one = b.real(1.0);
+                        let one_plus_sq = b.add(one, sinh_sq);
+                        let cosh_x = b.sqrt(one_plus_sq);
+                        b.mul(y_bar, cosh_x)
+                    }
+                    Some(FFunUnaryKind::Cosh) => {
+                        let exp_x = b.exp(arg);
+                        let minus_one = b.real(-1.0);
+                        let neg_x = b.mul(minus_one, arg);
+                        let exp_neg_x = b.exp(neg_x);
+                        let diff = b.sub(exp_x, exp_neg_x);
+                        let half = b.real(0.5);
+                        let sinh_x = b.mul(half, diff);
+                        b.mul(y_bar, sinh_x)
+                    }
+                    Some(FFunUnaryKind::Atanh) => {
+                        let x_sq = b.mul(arg, arg);
+                        let one = b.real(1.0);
+                        let denom = b.sub(one, x_sq);
+                        b.div(y_bar, denom)
+                    }
+                    Some(FFunUnaryKind::Asinh) => {
+                        let x_sq = b.mul(arg, arg);
+                        let one = b.real(1.0);
+                        let sum = b.add(one, x_sq);
+                        let denom = b.sqrt(sum);
+                        b.div(y_bar, denom)
+                    }
+                    Some(FFunUnaryKind::Acosh) => {
+                        let x_sq = b.mul(arg, arg);
+                        let one = b.real(1.0);
+                        let diff = b.sub(x_sq, one);
+                        let denom = b.sqrt(diff);
+                        b.div(y_bar, denom)
+                    }
+                    None => {
+                        // Defensive: should be unreachable because
+                        // `active_children` already gated on the
+                        // recognized names.
+                        return Err(PropagateError::RadUnsupportedNode {
+                            node: y,
+                            kind: "ffun-unrecognized",
+                        });
+                    }
+                };
+                self.add_adjoint(arg, contrib);
+            }
+            SigMatch::Attach(x, _) | SigMatch::Enable(x, _) | SigMatch::Control(x, _) => {
+                // Pass-through wrappers: forward the full adjoint to the
+                // signal-carrying operand only.
+                self.add_adjoint(x, y_bar);
+            }
+            SigMatch::Output(_, inner) => {
+                self.add_adjoint(inner, y_bar);
+            }
             // The unsupported families were rejected in `active_children`
             // before they reached postorder. Reaching them here means a
             // direct primal output of an unsupported family — we still
@@ -546,6 +673,88 @@ impl<'a> ReverseADTransform<'a> {
             out.push(self.adjoints.get(&s).copied().unwrap_or(zero));
         }
         Ok(out)
+    }
+}
+
+/// One of the recognized unary FFUN families; used by the FFUN arm of
+/// `propagate_adjoint` to pick the correct chain rule without re-running
+/// the name-matching logic per branch.
+enum FFunUnaryKind {
+    Tanh,
+    Sinh,
+    Cosh,
+    Atanh,
+    Asinh,
+    Acosh,
+}
+
+fn ffun_unary_kind(arena: &TreeArena, ff: SigId) -> Option<FFunUnaryKind> {
+    if ffun_is(arena, ff, &["tanhf", "tanh", "tanhl"]) {
+        Some(FFunUnaryKind::Tanh)
+    } else if ffun_is(arena, ff, &["sinhf", "sinh", "sinhl"]) {
+        Some(FFunUnaryKind::Sinh)
+    } else if ffun_is(arena, ff, &["coshf", "cosh", "coshl"]) {
+        Some(FFunUnaryKind::Cosh)
+    } else if ffun_is(arena, ff, &["atanhf", "atanh", "atanhl"]) {
+        Some(FFunUnaryKind::Atanh)
+    } else if ffun_is(arena, ff, &["asinhf", "asinh", "asinhl"]) {
+        Some(FFunUnaryKind::Asinh)
+    } else if ffun_is(arena, ff, &["acoshf", "acosh", "acoshl"]) {
+        Some(FFunUnaryKind::Acosh)
+    } else {
+        None
+    }
+}
+
+/// Returns `true` when the FFUN descriptor's name (in any precision
+/// variant) matches one of the provided targets. Mirrors
+/// `forward_ad::ForwardADTransform::ffun_is`.
+fn ffun_is(arena: &TreeArena, ff: SigId, targets: &[&str]) -> bool {
+    let Some(node) = arena.node(ff) else {
+        return false;
+    };
+    let NodeKind::Tag(tag_id) = node.kind else {
+        return false;
+    };
+    if arena.tag_name(tag_id) != Some("FFUN") {
+        return false;
+    }
+    let [signature, _, _] = node.children.as_slice() else {
+        return false;
+    };
+    let Some(sig_items) = list_to_vec(arena, *signature) else {
+        return false;
+    };
+    let Some(names_node) = sig_items.get(1) else {
+        return false;
+    };
+    let Some(name_ids) = list_to_vec(arena, *names_node) else {
+        return false;
+    };
+    name_ids
+        .iter()
+        .any(|id| tree_to_str(arena, *id).is_some_and(|n| targets.contains(&n)))
+}
+
+/// Set of unary FFUN names whose chain-rule rule is implemented by RAD.
+/// Kept aligned with the FAD pass.
+const RAD_FFUN_UNARY_NAMES: &[&str] = &[
+    "tanhf", "tanh", "tanhl", "sinhf", "sinh", "sinhl", "coshf", "cosh", "coshl", "atanhf",
+    "atanh", "atanhl", "asinhf", "asinh", "asinhl", "acoshf", "acosh", "acoshl",
+];
+
+fn ffun_unary_supported(arena: &TreeArena, ff: SigId) -> bool {
+    ffun_is(arena, ff, RAD_FFUN_UNARY_NAMES)
+}
+
+/// Same read-only-table classifier as the FAD pass: a `Waveform` is
+/// always read-only, and a `WrTbl(_, _, nil, nil)` is a write-once table
+/// with no live writer port and therefore safe to read-differentiate.
+fn is_readonly_table_source(arena: &TreeArena, sig: SigId) -> bool {
+    match match_sig(arena, sig) {
+        SigMatch::Waveform(_) => true,
+        SigMatch::WrTbl(_, _, widx, wsig) => arena.is_nil(widx) && arena.is_nil(wsig),
+        _ => false,
     }
 }
 

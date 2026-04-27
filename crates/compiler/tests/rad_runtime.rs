@@ -26,6 +26,21 @@ use compiler::{Compiler, SignalFirLane};
 static NEXT_TEMP_DSP_ID: AtomicUsize = AtomicUsize::new(0);
 
 fn run_interp_temp_source(stem: &str, source: &str, frame_count: usize) -> Vec<Vec<f32>> {
+    let stem = stem.to_owned();
+    let source = source.to_owned();
+    // Spawn on a 64 MB stack: pipelines that drag `stdfaust.lib` produce
+    // deep evaluation trees (same pattern used by `signal_pipeline.rs` and
+    // `zita_pipeline.rs`) and overflow the default 2 MB test-thread stack.
+    std::thread::Builder::new()
+        .name(format!("rad-runtime-{stem}"))
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || run_interp_temp_source_inner(&stem, &source, frame_count))
+        .expect("spawn rad-runtime worker")
+        .join()
+        .expect("rad-runtime worker thread should finish")
+}
+
+fn run_interp_temp_source_inner(stem: &str, source: &str, frame_count: usize) -> Vec<Vec<f32>> {
     let unique_id = NEXT_TEMP_DSP_ID.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
         "faust-rs-rad-{stem}-{}-{unique_id}.dsp",
@@ -423,6 +438,50 @@ process = fad(min(sin(a*b), max(a, b)), (a, b));
         .to_string()
     };
     assert_rad_matches_fad("rad-vs-fad-min-max", 1, 2, 4, 1.0e-5, rad, fad);
+}
+
+#[test]
+fn rad_vs_fad_parity_on_tanh_ffun() {
+    // tanh is a unary foreign function in Faust; phase C wires the same
+    // chain rule used by FAD.
+    let rad = || {
+        r#"
+import("stdfaust.lib");
+a = hslider("a", 0.5, -2.0, 2.0, 0.001);
+process = rad(ma.tanh(a*a), a);
+"#
+        .to_string()
+    };
+    let fad = || {
+        r#"
+import("stdfaust.lib");
+a = hslider("a", 0.5, -2.0, 2.0, 0.001);
+process = fad(ma.tanh(a*a), a);
+"#
+        .to_string()
+    };
+    assert_rad_matches_fad("rad-vs-fad-tanh-ffun", 1, 1, 4, 5.0e-5, rad, fad);
+}
+
+#[test]
+fn rad_vs_fad_parity_on_readonly_table_index() {
+    // Read-only `rdtable(waveform{...}, idx)` is differentiable through
+    // the read index via the symmetric finite-difference slope.
+    let rad = || {
+        r#"
+k = hslider("k", 3.0, 1, 6, 1);
+process = rad(rdtable(waveform{0, 1, 4, 9, 16, 25, 36, 49}, k), k);
+"#
+        .to_string()
+    };
+    let fad = || {
+        r#"
+k = hslider("k", 3.0, 1, 6, 1);
+process = fad(rdtable(waveform{0, 1, 4, 9, 16, 25, 36, 49}, k), k);
+"#
+        .to_string()
+    };
+    assert_rad_matches_fad("rad-vs-fad-rdtbl", 1, 1, 4, 1.0e-5, rad, fad);
 }
 
 #[test]
