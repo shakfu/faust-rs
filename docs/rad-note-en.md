@@ -252,16 +252,20 @@ next phases:
 | `LinearTimeVarying` | `BlockLinearTimeVarying` (phase E2) |
 | `Nonlinear` | `BpttRequired` (phase F) |
 
-These modes are intentionally not wired into `reverse_ad.rs` as
-accepted lowering paths yet; they only make the implementation boundary
-explicit.
+These modes are wired into `reverse_ad.rs` only as diagnostics: RAD
+still rejects the recursive node, but the error now says whether the
+blocked path is E1 linear transposition, E2 block linear-time-varying
+transposition, or phase-F BPTT.
 
 The diagnostic kinds are:
 
 | `kind` | Family |
 |--------|--------|
 | `delay-or-prefix` | `Delay1`, `Delay`, `Prefix` |
-| `recursive-projection` | `Proj`, `Rec` |
+| `recursive-linear-transpose` | `Proj` over LTI `DEBRUIJNREC` (future E1) |
+| `recursive-block-linear-time-varying` | `Proj` over LTV `DEBRUIJNREC` (future E2) |
+| `recursive-bptt-required` | `Proj` over nonlinear `DEBRUIJNREC` (future F) |
+| `recursive-projection` | recursive fallback when no specific mode was classified |
 | `writable-table` / `writable-table-or-waveform-direct` | mutable tables |
 | `ffun` | non-unary or unrecognised foreign function |
 | `soundfile` | `Soundfile`, `SoundfileLength`, `SoundfileRate`, `SoundfileBuffer` |

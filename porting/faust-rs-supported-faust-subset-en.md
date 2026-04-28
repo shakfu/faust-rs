@@ -476,6 +476,8 @@ The most important current exclusions are:
     not make recursive `rad(...)` legal yet. The paired `RecRadMode`
     gate maps those classes to the future E1/E2/F strategies:
     `LinearTranspose`, `BlockLinearTimeVarying`, and `BpttRequired`.
+    RAD recursive rejection diagnostics now surface that mode when it
+    can be classified.
   - Coverage:
     - structural: [crates/propagate/tests/core_api.rs](../crates/propagate/tests/core_api.rs)
       (arity + temporal/recursive rejection),

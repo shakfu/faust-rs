@@ -1072,6 +1072,42 @@ impl IntoDiagnostic for PropagateError {
                                 "remove the delay/prefix from the differentiated expression, or use fad(...) which handles delays via a causal forward rule",
                             );
                     }
+                    "recursive-linear-transpose" => {
+                        diag = diag
+                            .with_note(
+                                "cause: RAD reached a linear time-invariant recursive feedback; exact reverse mode needs the phase-E1 linear-transpose path",
+                            )
+                            .with_note(
+                                "rule: phase 1 still rejects recursive projections until block/tape evaluation semantics are implemented",
+                            )
+                            .with_help(
+                                "use fad(...) for recursive differentiation today, or keep the differentiated rad(...) body feed-forward",
+                            );
+                    }
+                    "recursive-block-linear-time-varying" => {
+                        diag = diag
+                            .with_note(
+                                "cause: RAD reached a linear but time-varying recursive feedback; exact reverse mode needs block coefficient replay",
+                            )
+                            .with_note(
+                                "rule: phase E2 requires a finite block/tape convention before this can be lowered",
+                            )
+                            .with_help(
+                                "use fad(...) for recursive differentiation today, or make the differentiated rad(...) body feed-forward",
+                            );
+                    }
+                    "recursive-bptt-required" => {
+                        diag = diag
+                            .with_note(
+                                "cause: RAD reached nonlinear recursive feedback; exact reverse mode requires finite-horizon BPTT",
+                            )
+                            .with_note(
+                                "rule: phase F must define horizon, tape allocation, and backend backward-sweep semantics before this can be lowered",
+                            )
+                            .with_help(
+                                "use fad(...) for recursive differentiation today, or rewrite the differentiated expression to remove nonlinear feedback",
+                            );
+                    }
                     "recursive-projection" => {
                         diag = diag
                             .with_note(

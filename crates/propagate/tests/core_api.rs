@@ -1801,7 +1801,7 @@ fn propagate_reverse_ad_variable_delay_emits_temporal_diagnostic() {
 fn propagate_reverse_ad_recursive_body_emits_temporal_diagnostic() {
     // process = rad((+ ~ *(0.5)), x): the recursive feedback in the
     // differentiated body would require a non-causal transpose, so RAD
-    // must reject it with the recursive-projection diagnostic.
+    // must reject it with the recursive-linear-transpose diagnostic.
     let mut arena = TreeArena::new();
     let process = {
         let mut bb = BoxBuilder::new(&mut arena);
@@ -1829,11 +1829,20 @@ fn propagate_reverse_ad_recursive_body_emits_temporal_diagnostic() {
         matches!(
             err,
             PropagateError::RadUnsupportedNode {
-                kind: "recursive-projection",
+                kind: "recursive-linear-transpose",
                 ..
             }
         ),
-        "expected recursive-projection, got: {err:?}"
+        "expected recursive-linear-transpose, got: {err:?}"
+    );
+    let diag = PropagateError::RadUnsupportedNode {
+        node: arena.nil(),
+        kind: "recursive-linear-transpose",
+    }
+    .into_diagnostic();
+    assert!(
+        diag.notes.iter().any(|n| n.contains("phase-E1")),
+        "LTI recursive RAD diagnostic must point at phase E1"
     );
 }
 

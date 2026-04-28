@@ -104,6 +104,7 @@ use smallvec::SmallVec;
 use tlib::{NodeKind, TreeArena, list_to_vec, tree_to_str};
 
 use crate::PropagateError;
+use crate::stateful_rad::{RecRadMode, classify_recursive_projection_rad_mode};
 
 /// Collects the active subgraph and accumulates adjoints for one
 /// `rad(expr, seeds)` call.
@@ -234,7 +235,7 @@ impl<'a> ReverseADTransform<'a> {
             SigMatch::Proj(_, _) | SigMatch::Rec(_) => {
                 return Err(PropagateError::RadUnsupportedNode {
                     node: sig,
-                    kind: "recursive-projection",
+                    kind: recursive_rad_unsupported_kind(self.arena, sig),
                 });
             }
             SigMatch::WrTbl(_, _, _, _) | SigMatch::Waveform(_) => {
@@ -697,6 +698,15 @@ impl<'a> ReverseADTransform<'a> {
             out.push(self.adjoints.get(&s).copied().unwrap_or(zero));
         }
         Ok(out)
+    }
+}
+
+fn recursive_rad_unsupported_kind(arena: &TreeArena, sig: SigId) -> &'static str {
+    match classify_recursive_projection_rad_mode(arena, sig) {
+        Some(RecRadMode::LinearTranspose) => "recursive-linear-transpose",
+        Some(RecRadMode::BlockLinearTimeVarying) => "recursive-block-linear-time-varying",
+        Some(RecRadMode::BpttRequired) => "recursive-bptt-required",
+        None => "recursive-projection",
     }
 }
 
