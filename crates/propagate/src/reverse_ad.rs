@@ -225,9 +225,7 @@ impl<'a> ReverseADTransform<'a> {
             }
             // Phase-B/C unsupported families: temporal, recursive,
             // mutable table, soundfile, opaque.
-            SigMatch::Delay1(_)
-            | SigMatch::Delay(_, _)
-            | SigMatch::Prefix(_, _) => {
+            SigMatch::Delay1(_) | SigMatch::Delay(_, _) | SigMatch::Prefix(_, _) => {
                 return Err(PropagateError::RadUnsupportedNode {
                     node: sig,
                     kind: "delay-or-prefix",

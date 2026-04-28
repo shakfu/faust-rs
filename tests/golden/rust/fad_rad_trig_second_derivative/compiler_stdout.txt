@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=fad_rad_trig_second_derivative.dsp
+bytes=291
+lines=6
+fnv1a64=cce06aacbcc06d69

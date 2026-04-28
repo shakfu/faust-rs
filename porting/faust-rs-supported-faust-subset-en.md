@@ -1508,7 +1508,11 @@ two-phase protocol prevents dangling references inside the De Bruijn group:
 | `rad_repeated_seed` | repeated seed lanes must alias the same gradient |
 | `rad_multi_output_sum_cotangent` | implicit all-ones cotangent on multi-output bodies |
 | `rad_rdtbl_index_basic` | read-only table index slope contract |
-| `err_rad_zero_body`, `err_rad_zero_seed`, `err_rad_delay_temporal_unsupported` | structured RAD diagnostic surface |
+| `fad_rad_quadratic` | mixed AD: outer FAD over inner RAD, second derivative `f''(x) = 2` |
+| `rad_fad_quadratic` | mixed AD: outer RAD over inner FAD, sum-cotangent gradient `f' + f''` |
+| `fad_rad_trig_second_derivative` | mixed AD on `sin(x*x)`, fourth lane is the second derivative |
+| `rad_fad_multi_seed` | mixed AD with two seeds, implicit all-ones cotangent through inner FAD lanes |
+| `err_rad_zero_body`, `err_rad_zero_seed`, `err_rad_delay_temporal_unsupported`, `err_fad_rad_temporal` | structured RAD diagnostic surface (incl. RAD-in-FAD wrapping) |
 
 These fixtures pass through `crates/compiler/tests/signal_pipeline.rs`.
 `fad_delay` is additionally validated end-to-end through the

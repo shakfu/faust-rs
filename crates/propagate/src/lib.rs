@@ -2763,8 +2763,7 @@ fn propagate_inner(
             }
             // Both children observe the same upstream input bus (mirrors the
             // FAD wiring contract).
-            let seed_inputs: Vec<SigId> =
-                inputs.iter().copied().take(seeds_arity.inputs).collect();
+            let seed_inputs: Vec<SigId> = inputs.iter().copied().take(seeds_arity.inputs).collect();
             let seed_sigs = propagate_in_slot_env(arena, seeds, &seed_inputs, ctx)?;
             if seed_sigs.len() != seeds_arity.outputs {
                 return Err(PropagateError::RadSeedArity {

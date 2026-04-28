@@ -1664,7 +1664,10 @@ fn propagate_reverse_ad_arity_combines_body_and_seed_outputs() {
     let flat = try_build_flat_box(&arena, process).unwrap();
     let arity = box_arity_typed(&arena, flat, &mut ArityCache::new()).unwrap();
     // body has 1 output (sin), seeds has 2 outputs (par of two sliders).
-    assert_eq!(arity.outputs, 3, "rad outputs = body.outputs + seeds.outputs");
+    assert_eq!(
+        arity.outputs, 3,
+        "rad outputs = body.outputs + seeds.outputs"
+    );
 }
 
 #[test]
@@ -1680,7 +1683,10 @@ fn propagate_reverse_ad_zero_output_seeds_raises_rad_seed_arity() {
     let flat = try_build_flat_box(&arena, process).unwrap();
     let err = box_arity_typed(&arena, flat, &mut ArityCache::new())
         .expect_err("rad with zero-output seeds must fail at arity time");
-    assert!(matches!(err, PropagateError::RadSeedArity { outputs: 0, .. }));
+    assert!(matches!(
+        err,
+        PropagateError::RadSeedArity { outputs: 0, .. }
+    ));
 }
 
 /// Helper: build `hslider("name", init, min, max, step)` without nested
@@ -1844,7 +1850,10 @@ fn propagate_reverse_ad_zero_output_body_raises_rad_body_arity() {
     let flat = try_build_flat_box(&arena, process).unwrap();
     let err = box_arity_typed(&arena, flat, &mut ArityCache::new())
         .expect_err("rad with zero-output body must fail at arity time");
-    assert!(matches!(err, PropagateError::RadBodyArity { outputs: 0, .. }));
+    assert!(matches!(
+        err,
+        PropagateError::RadBodyArity { outputs: 0, .. }
+    ));
 }
 
 #[test]

@@ -1632,9 +1632,13 @@ mod tests {
         assert_eq!(p_group, t_group, "both Projs must target the same REC");
 
         // Rebuilt REC body must have arity k * L = 2 * 2 = 4.
-        let rebuilt_body = match_de_bruijn_rec(&arena, p_group)
-            .expect("primal Proj target must be a DEBRUIJNREC");
+        let rebuilt_body =
+            match_de_bruijn_rec(&arena, p_group).expect("primal Proj target must be a DEBRUIJNREC");
         let elems = list_to_vec(&arena, rebuilt_body).expect("REC body must be a list");
-        assert_eq!(elems.len(), 4, "interleaved body length must be k * (1 + N)");
+        assert_eq!(
+            elems.len(),
+            4,
+            "interleaved body length must be k * (1 + N)"
+        );
     }
 }

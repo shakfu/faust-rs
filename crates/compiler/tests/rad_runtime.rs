@@ -147,7 +147,11 @@ fn assert_rad_matches_central_difference<BuildRad, BuildPrimal>(
     BuildRad: Fn(&[f32]) -> String,
     BuildPrimal: Fn(&[f32]) -> String,
 {
-    assert_eq!(base_seeds.len(), epsilons.len(), "seed/epsilon arity must match");
+    assert_eq!(
+        base_seeds.len(),
+        epsilons.len(),
+        "seed/epsilon arity must match"
+    );
     let n = base_seeds.len();
 
     let rad_outputs = run_interp_temp_source(
@@ -371,10 +375,16 @@ process = a*b;
     let base = [0.5_f32, 0.5_f32];
     let eps = [1.0e-3_f32, 1.0e-3_f32];
     let outs = run_interp_temp_source("rad-repeated-seed-rad", &rad_source(&base), frame_count);
-    let primal_plus =
-        run_interp_temp_source("rad-repeated-seed-plus", &primal_source(&[base[0] + eps[0]]), frame_count);
-    let primal_minus =
-        run_interp_temp_source("rad-repeated-seed-minus", &primal_source(&[base[0] - eps[0]]), frame_count);
+    let primal_plus = run_interp_temp_source(
+        "rad-repeated-seed-plus",
+        &primal_source(&[base[0] + eps[0]]),
+        frame_count,
+    );
+    let primal_minus = run_interp_temp_source(
+        "rad-repeated-seed-minus",
+        &primal_source(&[base[0] - eps[0]]),
+        frame_count,
+    );
     assert_eq!(outs.len(), 3, "1 primal + 2 (repeated) gradient lanes");
     for frame in 0..frame_count {
         let expected = (primal_plus[0][frame] - primal_minus[0][frame]) / (2.0 * eps[0]);
@@ -405,7 +415,12 @@ process = rad(sin(x), y);
     let outs = run_interp_temp_source("rad-absent-seed", source, 4);
     assert_eq!(outs.len(), 2, "1 primal + 1 absent-seed gradient");
     for frame in 0..4 {
-        assert_close(outs[1][frame], 0.0, 1.0e-6, &format!("absent-seed frame {frame}"));
+        assert_close(
+            outs[1][frame],
+            0.0,
+            1.0e-6,
+            &format!("absent-seed frame {frame}"),
+        );
     }
 }
 
@@ -806,7 +821,11 @@ y = hslider("y", 0.4, -2.0, 2.0, 0.001);
 process = rad(fad(x*y, (x, y)), (x, y));
 "#;
     let outs = run_interp_temp_source("nested-rad-fad-multi-seed", source, 1);
-    assert_eq!(outs.len(), 5, "outer rad bundle = [primals (3), grad/dx, grad/dy]");
+    assert_eq!(
+        outs.len(),
+        5,
+        "outer rad bundle = [primals (3), grad/dx, grad/dy]"
+    );
     let x = 0.6_f32;
     let y = 0.4_f32;
     assert_close(outs[0][0], x * y, 1.0e-5, "fad primal x*y");
@@ -814,6 +833,104 @@ process = rad(fad(x*y, (x, y)), (x, y));
     assert_close(outs[2][0], x, 1.0e-5, "fad tangent w.r.t. y = x");
     assert_close(outs[3][0], y + 1.0, 1.0e-5, "rad d/dx sum = y + 1");
     assert_close(outs[4][0], x + 1.0, 1.0e-5, "rad d/dy sum = x + 1");
+}
+
+// Corpus-driven mixed AD tests. The inline tests above already cover
+// the same shapes; these reach the fixtures in tests/corpus/ so the
+// source-level surface (parser + eval + propagate + transform + interp)
+// is exercised end-to-end against committed DSP files.
+
+#[test]
+fn corpus_fad_rad_quadratic_emits_second_derivative_lane() {
+    // tests/corpus/fad_rad_quadratic.dsp
+    //   process = fad(rad(x*x, x), x);  x = 1.5
+    // Expected lanes: [x*x, 2x, 2x, 2].
+    let outs = run_interp_corpus("fad_rad_quadratic", 1);
+    assert_eq!(outs.len(), 4);
+    let x = 1.5_f32;
+    assert_close(outs[0][0], x * x, 1.0e-5, "primal x*x");
+    assert_close(outs[1][0], 2.0 * x, 1.0e-5, "fad tangent 2x");
+    assert_close(outs[2][0], 2.0 * x, 1.0e-5, "rad first-order primal");
+    assert_close(outs[3][0], 2.0, 1.0e-5, "f''(x) = 2");
+}
+
+#[test]
+fn corpus_rad_fad_quadratic_sums_first_and_second_derivative() {
+    // tests/corpus/rad_fad_quadratic.dsp
+    //   process = rad(fad(x*x, x), x);  x = 1.5
+    // Expected lanes: [x*x, 2x, 2x + 2].
+    let outs = run_interp_corpus("rad_fad_quadratic", 1);
+    assert_eq!(outs.len(), 3);
+    let x = 1.5_f32;
+    assert_close(outs[0][0], x * x, 1.0e-5, "fad primal x*x");
+    assert_close(outs[1][0], 2.0 * x, 1.0e-5, "fad tangent 2x");
+    assert_close(
+        outs[2][0],
+        2.0 * x + 2.0,
+        1.0e-5,
+        "rad sum-cotangent gradient = f'(x) + f''(x)",
+    );
+}
+
+#[test]
+fn corpus_fad_rad_trig_second_derivative_compiles_and_has_four_lanes() {
+    // tests/corpus/fad_rad_trig_second_derivative.dsp
+    //   process = fad(rad(sin(x*x), x), x);
+    // We just check arity here; numeric parity for the second-derivative
+    // lane against a central finite difference is exercised by the
+    // inline `nested_fad_rad_on_trig_...` test, which can perturb the
+    // seed without needing a separate fixture.
+    let outs = run_interp_corpus("fad_rad_trig_second_derivative", 1);
+    assert_eq!(outs.len(), 4);
+}
+
+#[test]
+fn corpus_rad_fad_multi_seed_routes_implicit_cotangent_through_inner_lanes() {
+    // tests/corpus/rad_fad_multi_seed.dsp
+    //   process = rad(fad(x*y, (x, y)), (x, y));  x = 0.6, y = 0.4
+    // Expected lanes: [x*y, y, x, y+1, x+1].
+    let outs = run_interp_corpus("rad_fad_multi_seed", 1);
+    assert_eq!(outs.len(), 5);
+    let x = 0.6_f32;
+    let y = 0.4_f32;
+    assert_close(outs[0][0], x * y, 1.0e-5, "fad primal x*y");
+    assert_close(outs[1][0], y, 1.0e-5, "fad tangent w.r.t. x = y");
+    assert_close(outs[2][0], x, 1.0e-5, "fad tangent w.r.t. y = x");
+    assert_close(outs[3][0], y + 1.0, 1.0e-5, "rad d/dx sum = y + 1");
+    assert_close(outs[4][0], x + 1.0, 1.0e-5, "rad d/dy sum = x + 1");
+}
+
+#[test]
+fn corpus_err_fad_rad_temporal_surfaces_rad_diagnostic() {
+    // tests/corpus/err_fad_rad_temporal.dsp
+    //   process = fad(rad(x', x), x);
+    // The inner RAD must reject the delay even when wrapped in FAD.
+    let path = corpus_path("err_fad_rad_temporal.dsp");
+    let source = std::fs::read_to_string(&path).expect("read err_fad_rad_temporal fixture");
+    let compiler = Compiler::new();
+    let err = compiler
+        .compile_source_to_signals("err_fad_rad_temporal.dsp", &source)
+        .expect_err("inner rad over delay1 must fail when wrapped in fad");
+    let diagnostics = err
+        .diagnostics()
+        .expect("propagate error should expose diagnostics");
+    assert!(
+        diagnostics
+            .as_slice()
+            .iter()
+            .any(|d| d.message.contains("rad")),
+        "fad-wrapped rad temporal diagnostic must mention `rad`: {diagnostics:?}"
+    );
+    // Confirm it specifically came from the temporal kind, not a
+    // generic UnsupportedBox.
+    assert!(
+        diagnostics
+            .as_slice()
+            .iter()
+            .any(|d| d.message.contains("delay-or-prefix")
+                || d.notes.iter().any(|n| n.contains("non-causal"))),
+        "fad-wrapped rad temporal diagnostic must surface the temporal kind: {diagnostics:?}"
+    );
 }
 
 #[test]

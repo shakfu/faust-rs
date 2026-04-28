@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_fad_quadratic.dsp
+bytes=314
+lines=6
+fnv1a64=f637bdd1c4e36f48
