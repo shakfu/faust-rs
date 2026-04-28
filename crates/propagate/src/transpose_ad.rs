@@ -364,4 +364,243 @@ mod tests {
             Err(TransposeAdError::TemporalTermNeedsBlockConvention)
         );
     }
+
+    /// Tiny interpreter over the small subset of `SigMatch` nodes that the E1
+    /// scaffold currently emits / accepts. Used by the numeric oracles below
+    /// to evaluate one recurrence frame given the previous-frame state and
+    /// per-frame `input(_)` lanes. Panics on any node outside the expected
+    /// LTI subset; that panic is itself part of the test contract.
+    fn eval_branch(
+        arena: &TreeArena,
+        sig: SigId,
+        inputs: &[f32],
+        prev_state: &[f32],
+    ) -> f32 {
+        match match_sig(arena, sig) {
+            SigMatch::Real(r) => r as f32,
+            SigMatch::Int(i) => i as f32,
+            SigMatch::Input(idx) => inputs[idx as usize],
+            SigMatch::Proj(slot, group)
+                if tlib::match_de_bruijn_ref(arena, group) == Some(1) =>
+            {
+                prev_state[slot as usize]
+            }
+            SigMatch::BinOp(BinOp::Add, x, y) => {
+                eval_branch(arena, x, inputs, prev_state)
+                    + eval_branch(arena, y, inputs, prev_state)
+            }
+            SigMatch::BinOp(BinOp::Sub, x, y) => {
+                eval_branch(arena, x, inputs, prev_state)
+                    - eval_branch(arena, y, inputs, prev_state)
+            }
+            SigMatch::BinOp(BinOp::Mul, x, y) => {
+                eval_branch(arena, x, inputs, prev_state)
+                    * eval_branch(arena, y, inputs, prev_state)
+            }
+            SigMatch::BinOp(BinOp::Div, x, y) => {
+                eval_branch(arena, x, inputs, prev_state)
+                    / eval_branch(arena, y, inputs, prev_state)
+            }
+            other => panic!(
+                "eval_branch: unsupported node {other:?} (test interpreter is intentionally narrow)"
+            ),
+        }
+    }
+
+    /// Evaluates one recursive group forward in time over `frames` frames.
+    /// `inputs_per_frame[n]` lists the `input(_)` lanes at frame `n`.
+    fn evaluate_recursion(
+        arena: &TreeArena,
+        group: SigId,
+        inputs_per_frame: &[Vec<f32>],
+    ) -> Vec<Vec<f32>> {
+        let body = match_de_bruijn_rec(arena, group).expect("recursive group");
+        let branches = list_to_vec(arena, body).expect("body list");
+        let arity = branches.len();
+        let mut prev_state = vec![0.0_f32; arity];
+        let mut history = Vec::with_capacity(inputs_per_frame.len());
+        for inputs in inputs_per_frame {
+            let mut next_state = Vec::with_capacity(arity);
+            for &branch in &branches {
+                next_state.push(eval_branch(arena, branch, inputs, &prev_state));
+            }
+            history.push(next_state.clone());
+            prev_state = next_state;
+        }
+        history
+    }
+
+    /// Evaluates the transposed recursive group **in reverse time** over the
+    /// same number of frames, with terminal adjoint state set to zero. The
+    /// returned history is in forward-time order (so `history[n]` is the
+    /// adjoint state at frame `n`).
+    fn evaluate_transposed_reverse(
+        arena: &TreeArena,
+        transposed: SigId,
+        cotangents_per_frame: &[Vec<f32>],
+    ) -> Vec<Vec<f32>> {
+        let body = match_de_bruijn_rec(arena, transposed).expect("transposed group");
+        let branches = list_to_vec(arena, body).expect("body list");
+        let arity = branches.len();
+        let frame_count = cotangents_per_frame.len();
+        // Terminal boundary: y_bar[N] = 0 (block-local boundary, plan §19).
+        let mut next_state = vec![0.0_f32; arity];
+        let mut adjoints = vec![vec![0.0_f32; arity]; frame_count];
+        for n in (0..frame_count).rev() {
+            // In the transposed group, "prev_state" semantically means
+            // "the adjoint at frame n+1" because evaluation runs in reverse
+            // time. The branch's `input(i)` carries the cotangent at the
+            // current frame `n`.
+            let mut current_state = Vec::with_capacity(arity);
+            for &branch in &branches {
+                current_state.push(eval_branch(
+                    arena,
+                    branch,
+                    &cotangents_per_frame[n],
+                    &next_state,
+                ));
+            }
+            adjoints[n] = current_state.clone();
+            next_state = current_state;
+        }
+        adjoints
+    }
+
+    #[test]
+    fn scaffold_first_order_lti_matches_analytic_seed_adjoint() {
+        // Canonical first-order LTI: y[n] = p · y[n-1] + x[n]
+        // Body shape after propagation: `+ ~ *(p)` ⇒
+        //   branch[0] = input(0) + p * proj(0, ref(1))
+        //
+        // For a constant input x[n] = c, the closed form is
+        //   y[n] = c · (1 - p^(n+1)) / (1 - p)        for p ≠ 1.
+        // With all-ones cotangent over an N-frame block, the implicit-sum
+        // RAD seed adjoint w.r.t. p is
+        //   p_bar = sum_{n=0}^{N-1} ∂y[n]/∂p
+        //         = sum_{n=0}^{N-1} sum_{k=0}^{n-1} (k+1) · p^k · y[n-1-k]
+        // The transposed group gives an alternative computation:
+        //   p_bar = sum_{n=1}^{N-1} y_bar[n] · y[n-1]
+        // where y_bar runs the transposed recurrence in reverse time with
+        // terminal y_bar[N] = 0.
+        //
+        // Both expressions must agree numerically. This test pins that
+        // identity for p = 0.6, x = 1.0, N = 6.
+        let mut arena = TreeArena::new();
+        let p = 0.6_f32;
+        let frames = 6;
+
+        // Build `+ ~ *(p)` body: input(0) + p · proj(0, ref(1))
+        let group = {
+            let ref1 = de_bruijn_ref(&mut arena, 1);
+            let mut b = SigBuilder::new(&mut arena);
+            let p_sig = b.real(f64::from(p));
+            let prev = b.proj(0, ref1);
+            let scaled = b.mul(p_sig, prev);
+            let input = b.input(0);
+            let branch = b.add(input, scaled);
+            rec_group(&mut arena, &[branch])
+        };
+        let transposed =
+            transpose_lti_de_bruijn_rec_scaffold(&mut arena, group).expect("LTI group");
+
+        // Forward-time primal evaluation: x[n] = 1 for every frame.
+        let primal_inputs: Vec<Vec<f32>> = (0..frames).map(|_| vec![1.0_f32]).collect();
+        let primal = evaluate_recursion(&arena, group, &primal_inputs);
+
+        // Reverse-time adjoint evaluation: cotangent input(0)=1 every frame
+        // (implicit all-ones cotangent for the single primal output).
+        let cotangents: Vec<Vec<f32>> = (0..frames).map(|_| vec![1.0_f32]).collect();
+        let adjoints = evaluate_transposed_reverse(&arena, transposed, &cotangents);
+
+        // Seed adjoint via the transposed path:
+        //   p_bar = sum_{n=1}^{N-1} y_bar[n] · y[n-1]
+        let p_bar_transposed: f32 = (1..frames).map(|n| adjoints[n][0] * primal[n - 1][0]).sum();
+
+        // Analytical reference: differentiate y[n] = (1 - p^(n+1)) / (1 - p)
+        // w.r.t. p, sum over n = 0..N-1.
+        let p_bar_analytic: f32 = (0..frames)
+            .map(|n| {
+                let n_plus_1 = (n + 1) as f32;
+                let p_n_plus_1 = p.powi(n_plus_1 as i32);
+                let p_n = p.powi(n as i32);
+                let one_minus_p = 1.0 - p;
+                // d/dp [(1 - p^(n+1)) / (1 - p)]
+                // = [-(n+1) · p^n · (1 - p) - (1 - p^(n+1)) · (-1)] / (1 - p)²
+                // = [(1 - p^(n+1)) - (n+1) · p^n · (1 - p)] / (1 - p)²
+                let num = (1.0 - p_n_plus_1) - n_plus_1 * p_n * one_minus_p;
+                num / (one_minus_p * one_minus_p)
+            })
+            .sum();
+
+        assert!(
+            (p_bar_transposed - p_bar_analytic).abs() < 1.0e-4,
+            "transposed-path p_bar = {p_bar_transposed} differs from analytic {p_bar_analytic}"
+        );
+    }
+
+    #[test]
+    fn scaffold_diagonal_two_state_lti_matches_independent_analytic_adjoints() {
+        // Two independent first-order LTI states, no cross-coupling:
+        //   y0[n] = p0 · y0[n-1] + x0[n]
+        //   y1[n] = p1 · y1[n-1] + x1[n]
+        // The transposed group must keep them independent. With cotangent
+        // c0=1, c1=0 at every frame, only y0_bar is non-zero and the
+        // computed seed adjoints w.r.t. p0 and p1 are independent.
+        let mut arena = TreeArena::new();
+        let p0 = 0.5_f32;
+        let p1 = 0.3_f32;
+        let frames = 5;
+
+        let group = {
+            let ref1 = de_bruijn_ref(&mut arena, 1);
+            let mut b = SigBuilder::new(&mut arena);
+            let p0_sig = b.real(f64::from(p0));
+            let p1_sig = b.real(f64::from(p1));
+            let prev0 = b.proj(0, ref1);
+            let prev1 = b.proj(1, ref1);
+            let scaled0 = b.mul(p0_sig, prev0);
+            let scaled1 = b.mul(p1_sig, prev1);
+            let in0 = b.input(0);
+            let in1 = b.input(1);
+            let br0 = b.add(in0, scaled0);
+            let br1 = b.add(in1, scaled1);
+            rec_group(&mut arena, &[br0, br1])
+        };
+        let transposed =
+            transpose_lti_de_bruijn_rec_scaffold(&mut arena, group).expect("LTI group");
+
+        let primal_inputs: Vec<Vec<f32>> = (0..frames).map(|_| vec![1.0_f32, 1.0_f32]).collect();
+        let primal = evaluate_recursion(&arena, group, &primal_inputs);
+
+        // Cotangent only on lane 0 — lane 1 should stay at zero through the
+        // transposed evaluation because the diagonal group has no cross-
+        // coupling.
+        let cotangents: Vec<Vec<f32>> = (0..frames).map(|_| vec![1.0_f32, 0.0_f32]).collect();
+        let adjoints = evaluate_transposed_reverse(&arena, transposed, &cotangents);
+
+        for (n, frame_adj) in adjoints.iter().enumerate() {
+            assert!(
+                frame_adj[1].abs() < 1.0e-6,
+                "diagonal LTI: lane-1 adjoint must stay at 0 (frame {n}, got {})",
+                frame_adj[1]
+            );
+        }
+
+        // Lane-0 seed adjoint via the transposed path agrees with the
+        // first-order analytic result (same closed form as above).
+        let p0_bar_transposed: f32 = (1..frames).map(|n| adjoints[n][0] * primal[n - 1][0]).sum();
+        let p0_bar_analytic: f32 = (0..frames)
+            .map(|n| {
+                let n1 = (n + 1) as f32;
+                let pn1 = p0.powi(n1 as i32);
+                let pn = p0.powi(n as i32);
+                let omp = 1.0 - p0;
+                ((1.0 - pn1) - n1 * pn * omp) / (omp * omp)
+            })
+            .sum();
+        assert!(
+            (p0_bar_transposed - p0_bar_analytic).abs() < 1.0e-4,
+            "diagonal-LTI p0_bar = {p0_bar_transposed} differs from analytic {p0_bar_analytic}"
+        );
+    }
 }
