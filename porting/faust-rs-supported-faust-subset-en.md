@@ -469,9 +469,16 @@ The most important current exclusions are:
     The reverse transpose of a delay is anti-causal
     (`adj_x[n] += adj_y[n + 1]`) and would require a runtime tape; a
     finite-horizon BPTT mode is reserved for a later phase.
+  - Stateful RAD phase E0 is present as an internal feasibility
+    classifier (`crates/propagate/src/stateful_rad.rs`) over
+    `DEBRUIJNREC` groups. It distinguishes `LinearLti`,
+    `LinearTimeVarying`, and `Nonlinear` recursive bodies, but it does
+    not make recursive `rad(...)` legal yet.
   - Coverage:
     - structural: [crates/propagate/tests/core_api.rs](../crates/propagate/tests/core_api.rs)
       (arity + temporal/recursive rejection),
+    - structural classifier unit tests:
+      [crates/propagate/src/stateful_rad.rs](../crates/propagate/src/stateful_rad.rs),
     - runtime parity (RAD ↔ FAD lane-by-lane and RAD ↔ central
       finite difference) and corpus-driven regressions:
       [crates/compiler/tests/rad_runtime.rs](../crates/compiler/tests/rad_runtime.rs),
@@ -1532,6 +1539,9 @@ earlier in this document for the full contract; in short:
   soundfile / non-unary FFun families,
 - structured `RadBodyArity` / `RadSeedArity` / `RadUnsupportedNode`
   diagnostics: phase 1 RAD never silently emits a misleading gradient.
+- stateful RAD phase E0 adds a read-only `DEBRUIJNREC` classifier for
+  future transpose/BPTT gates; it does not widen accepted `rad(...)`
+  programs.
 
 Detailed design notes: [docs/rad-note-en.md](../docs/rad-note-en.md).
 

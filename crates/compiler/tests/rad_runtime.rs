@@ -134,6 +134,7 @@ fn assert_close(actual: f32, expected: f32, abs_tol: f32, label: &str) {
 ///
 /// `build_rad_source(seeds)` must yield a `rad(expr, seeds)` program.
 /// `build_primal_source(seeds)` builds the same `expr` without `rad(...)`.
+#[allow(clippy::too_many_arguments)]
 fn assert_rad_matches_central_difference<BuildRad, BuildPrimal>(
     stem: &str,
     primal_outputs: usize,
@@ -414,13 +415,8 @@ process = rad(sin(x), y);
 "#;
     let outs = run_interp_temp_source("rad-absent-seed", source, 4);
     assert_eq!(outs.len(), 2, "1 primal + 1 absent-seed gradient");
-    for frame in 0..4 {
-        assert_close(
-            outs[1][frame],
-            0.0,
-            1.0e-6,
-            &format!("absent-seed frame {frame}"),
-        );
+    for (frame, sample) in outs[1].iter().copied().enumerate().take(4) {
+        assert_close(sample, 0.0, 1.0e-6, &format!("absent-seed frame {frame}"));
     }
 }
 
@@ -604,9 +600,9 @@ fn corpus_rad_absent_seed_produces_zero_gradient_for_unreachable_seed() {
     // process = rad(sin(x), y) → [sin(x), 0.0]
     let outs = run_interp_corpus("rad_absent_seed", 2);
     assert_eq!(outs.len(), 2);
-    for frame in 0..2 {
+    for (frame, sample) in outs[1].iter().copied().enumerate().take(2) {
         assert_close(
-            outs[1][frame],
+            sample,
             0.0,
             1.0e-6,
             &format!("absent seed gradient frame {frame}"),

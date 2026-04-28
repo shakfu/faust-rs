@@ -236,6 +236,13 @@ diagnostic. The plan reserves `rad(expr, seeds, horizon)` and
 `-rad-horizon N` for a future BPTT mode; phase 1 must never silently
 emit a misleading gradient.
 
+Phase E0 adds a read-only classifier in
+`crates/propagate/src/stateful_rad.rs` for `DEBRUIJNREC` groups. It
+classifies recursive bodies as `LinearLti`, `LinearTimeVarying`, or
+`Nonlinear`, but it deliberately does not widen the accepted `rad(...)`
+subset yet. The classifier is only the gating predicate for a later
+transposition or BPTT implementation.
+
 The diagnostic kinds are:
 
 | `kind` | Family |
@@ -302,8 +309,10 @@ Per plan §3, the following remain explicitly out of scope for phase 1:
 
 Plan phases E and F sketch the next steps:
 
-- **Phase E** — a scoped `RecRadMode` for local acyclic recursive
-  subsets where the transpose remains causal by construction.
+- **Phase E0** — implemented read-only recursive-linearity classifier;
+  no new `rad(...)` capability.
+- **Phase E1/E2** — a scoped `RecRadMode` for linear recursive subsets
+  where a transposed evaluation can be defined over a finite block.
 - **Phase F** — a finite-horizon BPTT mode (`rad(expr, seeds, horizon)`
   or `-rad-horizon N`) requiring a runtime tape and a backend backward
   sweep.
@@ -320,5 +329,7 @@ of latency and memory footprints before merge.
   for `FlatNodeKind::ReverseAD`.
 - `RadBodyArity` / `RadSeedArity` / `RadUnsupportedNode` diagnostics:
   same file, `IntoDiagnostic` impl on `PropagateError`.
+- Stateful RAD feasibility classifier:
+  [crates/propagate/src/stateful_rad.rs](crates/propagate/src/stateful_rad.rs).
 - Implementation plan:
   [porting/reverse-ad-rad-implementation-plan-2026-04-27-en.md](../porting/reverse-ad-rad-implementation-plan-2026-04-27-en.md).

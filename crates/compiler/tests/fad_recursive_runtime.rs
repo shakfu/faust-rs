@@ -149,6 +149,7 @@ fn assert_single_seed_fad_matches_central_difference(
 /// interleaved order. `build_primal_source(seeds)` builds the same `expr`
 /// without `fad(...)` for ground-truth evaluation. `base_seeds`,
 /// `epsilons`, and `abs_tol` parameterise the finite-difference comparison.
+#[allow(clippy::too_many_arguments)]
 fn assert_multi_seed_fad_matches_central_difference<BuildFad, BuildPrimal>(
     stem: &str,
     primal_outputs: usize,
