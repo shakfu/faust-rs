@@ -890,3 +890,330 @@ Initial RAD is ready when:
 5. Delay/recursion cases either work in a documented subset or fail with a
    precise unsupported-temporal diagnostic.
 6. Existing FAD tests and corpus remain green.
+
+---
+
+## 19. Feasibility analysis for stateful RAD
+
+Phase 1 RAD refuses any signal family whose reverse transpose would be
+non-causal: `delay1`, `delay`, `prefix`, recursion, projection over a
+recursion. This section evaluates two complementary routes for lifting
+that restriction, both of which are well established in the literature
+but rest on different assumptions and pay different costs.
+
+### 19.1 The two routes at a glance
+
+| Route | Idea | Causal in time? | Memory | Restrictions |
+|-------|------|-----------------|--------|--------------|
+| **System transposition** (flow-graph reversal) | Replace the recursive subgraph with its adjoint network: arrows reverse, summers and branch points swap roles. | Single forward pass over a *time-reversed* signal block | None beyond the input block | Subgraph must be LTI. Time-varying or nonlinear feedback breaks the transposition identity. |
+| **(T)BPTT** (back-propagation through time) | Materialize a finite tape of primal intermediates over a horizon `K`, run a backward sweep over the unrolled graph. | No — anti-causal sweep over the tape | `O(K · |state|)` per recursive node | Bias proportional to `K`. Truncation can be unstable on long-memory filters. |
+| **Hybrid** | Transpose the LTI part, BPTT only the nonlinear part of the feedback. | Mixed | `O(K · |nonlinear state|)` | Worth the engineering only when both parts coexist. |
+
+The two routes are not mutually exclusive. They are the two
+mathematically clean ways to define an adjoint for a stateful node, and
+the best DSP autodiff papers (Yu & Fazekas 2024 on all-pole filters,
+Frostig et al. 2021 on linearize-then-transpose) exploit one or the
+other depending on the operator type.
+
+### 19.2 Route A — system transposition
+
+#### 19.2.1 Why it works
+
+For any LTI signal flow graph `G`, **Tellegen's theorem** guarantees
+that `G` is *interreciprocal* with its transpose `G^T` ([dsprelated:
+Transposed Direct Forms](https://www.dsprelated.com/freebooks/filters/Transposed_Direct_Forms.html)).
+Concretely:
+
+- the SISO transfer function `H(z)` is preserved by the transformation,
+- the *adjoint operator* mapping output cotangent to input adjoint is
+  exactly `G^T` evaluated on a time-reversed input.
+
+The transformation rules are local and structural ([Wikipedia:
+Tellegen's theorem](https://en.wikipedia.org/wiki/Tellegen's_theorem)):
+
+| Original construct | Transposed |
+|--------------------|-----------|
+| signal arrow `a → b` | reversed arrow `b → a` |
+| branch point fanning out to `n` consumers | summing junction with `n` inputs |
+| summing junction with `n` inputs | branch point with `n` consumers |
+| `delay1(z⁻¹)` | `delay1(z⁻¹)` (the same — but "consumed" in reverse time) |
+| input port | output port |
+| output port | input port |
+| LTI primitive `f` (gain, delay) | same `f` |
+| nonlinear primitive `g` | **not preserved** — see §19.2.4 |
+
+This is exactly the operational definition of reverse-mode AD on a
+linear program. Frostig et al. ([arXiv:2105.09469](https://arxiv.org/abs/2105.09469))
+show that "reverse-mode AD = forward-mode linearization followed by
+transposition," and that the transposition rule is purely linear.
+Faust's existing FAD pass already provides the linearization; the
+remaining work is the transpose.
+
+#### 19.2.2 Mapping to Faust's `~` operator
+
+In the signal IR, `+ ~ *(p)` lowers to a `DEBRUIJNREC([+(in, *(p, ref(1)))])`
+group with one back-edge (`DEBRUIJNREF(1)` = "the previous output"). The
+LTI structure of the loop is fully exposed: the `+`, `*(p)`, and the
+back-edge are all linear in the signal lane (they are also linear in
+`p` only when `p` is a constant; see §19.2.4 below for the time-varying
+case).
+
+A transposition pass would rewrite the recursion as a new
+`DEBRUIJNREC` whose body is the adjoint network: the back-edge becomes
+a *forward* feed (read at frame n−1 from a tape of primal values), the
+output adjoint enters where the primal output exited, and the input
+adjoint emerges where the primal input entered.
+
+The good news: the existing de-Bruijn rebuilder in
+`crates/propagate/src/forward_ad.rs` already shows that a recursive
+group can be replaced by another structurally compatible one without
+breaking the rest of the pipeline. The transposed group has the same
+arity contract.
+
+The hard news: Faust does not, today, separate "primal lane" from
+"primal-difference lane" inside a recursion the way Yu & Fazekas
+([arXiv:2404.07970](https://arxiv.org/abs/2404.07970)) do for all-pole
+filters. Their analytical gradient depends on rewriting the recurrence
+as a non-recursive summation that the runtime evaluates in 30× less
+time than naive BPTT — but the rewrite is filter-shape specific
+(all-pole, biquad, …). A general transposition pass would need to
+either:
+
+- restrict to a recognized shape (`+ ~ *(linear_state_update)`), or
+- accept the cost of running the transposed graph on a *time-reversed
+  block*, which forces buffering anyway (see §19.2.5).
+
+#### 19.2.3 What is needed in the Rust codebase
+
+A transposition route would touch the following:
+
+1. **A linearity classifier on signal subgraphs.** Walk the recursive
+   body and confirm every operator is linear in the recursive variable.
+   Coefficients can depend on UI controls (constants over a block),
+   but cannot depend on the recursive output itself. This excludes
+   `+ ~ tanh(...)`, common in nonlinear filters.
+2. **A new module `transpose_ad.rs`** that mirrors the structure of
+   `reverse_ad.rs` but runs the dual rule table:
+   - branch ↔ summer,
+   - input port ↔ output port,
+   - `delay1` stays `delay1` but the lane direction is swapped,
+   - linear coefficients pass through unchanged,
+   - `LTI primitive` stays the same (`+`, `*` by constant).
+3. **A new `RecRadMode::LinearTranspose`** alongside the strict
+   refusal, classifying which recursive groups are eligible.
+4. **A block-buffering convention** for the time-reversed evaluation.
+   At audio rate 48 kHz, even a 1024-sample horizon is 21 ms of
+   latency; this is acceptable for offline gradient descent on filter
+   coefficients but unacceptable for live differentiable DSP. The
+   choice of horizon must be a documented compiler option.
+
+#### 19.2.4 Boundaries of the LTI assumption
+
+The transposition identity collapses outside three guarantees:
+
+- **Time-invariance.** A coefficient that varies sample-to-sample
+  (e.g., a slider scanned at audio rate) breaks the convolution
+  identity. The transpose only works for "frozen-coefficient" blocks.
+  Faust's `[autodiff]` annotation approach could mark such coefficients
+  as "treat as block-constant" — at the cost of a model bias.
+- **Nonlinearity.** A `tanh`, a clipper, a saturating multiplier inside
+  the feedback path is not linear in the recursive lane. Transposition
+  fails. Yu & Fazekas's all-pole approach is purely linear; the more
+  general DDSP literature ([Hayes et al. 2023, Frontiers in Signal Processing](https://www.frontiersin.org/journals/signal-processing/articles/10.3389/frsip.2023.1284100/full))
+  resorts to TBPTT precisely because the loop is nonlinear.
+- **Multi-output recursion** with non-trivial cross-coupling. The
+  transpose of a MIMO LTI block is well-defined ([dsprelated:
+  Transposed Direct Forms](https://www.dsprelated.com/freebooks/filters/Transposed_Direct_Forms.html)
+  generalizes through Mason's gain formula), but the implementation is
+  more invasive — every recursion slot becomes a new adjoint port.
+
+#### 19.2.5 What this route enables
+
+If `R = + ~ *(p)` (constant `p`):
+
+```text
+y[n]  = p · y[n-1] + x[n]                  // primal recurrence
+y_bar[n] += x_bar[n]                        // local input adjoint feeds y_bar
+x_bar[n] += y_bar[n]                        // chain rule via the adder
+... but y_bar must propagate "backwards in time" through the *(p) loop:
+y_bar[n-1] += p · y_bar[n]                  // exactly the transpose of *(p)
+```
+
+This is a causal forward pass on the *time-reversed* `y_bar` block —
+which is non-causal in real time but causal when running over a finite
+tape that is read in reverse. The cost is one extra pass over the
+block; no per-frame state explosion.
+
+For `p` time-varying, the same recurrence becomes
+`y_bar[n-1] += p[n] · y_bar[n]`, which is still linear in `y_bar` but
+no longer time-invariant. The transposition is still mathematically
+correct (it is exactly the "linearize, then transpose" rule), but the
+adjoint loop now reads `p[n]` from the same tape used for the primal
+intermediates. This recovers the analytical gradient that Yu & Fazekas
+exploit for time-varying all-pole filters.
+
+### 19.3 Route B — back-propagation through time (BPTT)
+
+#### 19.3.1 Principle
+
+BPTT unrolls the recurrence over a finite horizon `K`, builds the
+explicit DAG `[y[0], y[1], …, y[K−1]]`, and runs ordinary feed-forward
+RAD on that DAG. The horizon is the only parameter.
+
+For RNN training in machine learning ([Wikipedia: Backpropagation through time](https://en.wikipedia.org/wiki/Backpropagation_through_time)),
+this is the standard approach. Truncated BPTT (TBPTT) processes the
+sequence in windows of `k₂` steps, updating parameters every `k₁`
+steps; bias is bounded by `k₂` and decays geometrically for stable
+recurrences ([Aicher et al. 2020](https://proceedings.mlr.press/v115/aicher20a.html)).
+
+#### 19.3.2 Cost at audio rates
+
+For a Faust filter at 48 kHz:
+
+| Horizon | Time covered | Memory per state slot (`f32`) | Notes |
+|---------|--------------|-------------------------------|-------|
+| 64 | 1.3 ms | 256 B | adequate for very-fast adaptive filters |
+| 512 | 10.7 ms | 2 KiB | typical for adaptive equalisers |
+| 4096 | 85.3 ms | 16 KiB | typical for adaptive feedback cancellation |
+| 48000 | 1 s | 192 KiB | upper bound for short-form impulse response training |
+
+Memory scales with `K · |state|`. For a 4-pole filter (4 state slots)
+at K = 4096, that is 64 KiB per filter instance — affordable in batch
+training, prohibitive for real-time inference. Truncation introduces
+gradient bias but not instability if the filter itself is stable.
+
+#### 19.3.3 What is needed in the Rust codebase
+
+1. **A horizon parameter** on the RAD surface:
+
+   ```faust
+   process = rad(expr, seeds, 4096);  // explicit horizon
+   ```
+
+   or a compiler flag `-rad-horizon N` for whole-program defaults. The
+   parser already accepts a 3-argument variant pattern for FAD-like
+   wrappers; the box-layer change mirrors the existing 2-child shape.
+
+2. **A tape allocation pass** in `transform/` or `fir/`: every primal
+   intermediate that contributes to the adjoint must be retained for
+   the next `K` frames. The simplest implementation is a circular
+   buffer per intermediate; a smarter one identifies *checkpoints*
+   (a la gradient checkpointing in deep learning) to trade compute for
+   memory.
+
+3. **A backward-sweep code-generation path** in the FIR layer: for
+   every output frame, after the primal computes, run the unrolled
+   adjoint over the last `K` frames. The control flow is a
+   for-loop with index running backwards, which the FIR already
+   supports for delay-line indexing.
+
+4. **A new `RecRadMode::BPTT { horizon }`** classifier that triggers
+   the transformation when a recursion is reachable from a `rad(...)`
+   body. The classifier already exists in the FAD path
+   (`RecFadMode`); the symmetric structure for RAD is mechanical.
+
+5. **A documented stability story.** Truncation bias must be exposed
+   in the user-facing diagnostic if the gradient norm at `n − K`
+   relative to the gradient at `n` exceeds some threshold; otherwise
+   users will silently train against a bad gradient.
+
+#### 19.3.4 Backend implications
+
+Unlike the transposition route, BPTT requires backend cooperation:
+
+- the interp backend needs a tape opcode (read/write a sample at
+  index `n − k`),
+- the C/C++ backend needs to allocate the tape statically,
+- the Cranelift JIT needs to lower the backward sweep — the existing
+  `ARsh`/index-loading opcodes likely cover it.
+
+This is the heaviest engineering investment of the three routes.
+
+### 19.4 Hybrid route — linearize, transpose the linear part, BPTT the rest
+
+For mixed nonlinear feedback (`+ ~ tanh(*(p))`), neither route stands
+alone. The principled solution is the same as Frostig et al.
+(linearize-then-transpose) applied locally:
+
+1. Run the FAD linearization over the recursive body. The result is a
+   pair `(primal, tangent)` per signal lane; the tangent recurrence
+   is linear by construction.
+2. Apply system transposition to the tangent recurrence (it is now
+   guaranteed LTI in the recursive lane).
+3. The nonlinear primal evaluation must still be unrolled and
+   buffered — but only for `K` frames, and only for the *operands* of
+   the nonlinearity, not its full state.
+
+This recovers the right asymptotic memory cost for typical
+adaptive-filter training: `O(K)` for the nonlinear taps and `O(1)`
+extra for the linear part. For phase 1 we will not implement this —
+but the architecture should leave room for it: the `RecRadMode` enum
+needs a third variant beyond `LinearTranspose` and `BPTT`.
+
+### 19.5 What other AD systems do
+
+- **JAX / Dex** (Frostig et al. 2021) explicitly decompose RAD as
+  linearize-then-transpose, which is the conceptual basis for §19.4.
+- **PyTorch / TensorFlow DDSP** ([Hayes et al. 2023, review](https://www.frontiersin.org/journals/signal-processing/articles/10.3389/frsip.2023.1284100/full))
+  default to TBPTT with horizons in the 512–4096 range; performance
+  bottlenecks and instability with naive TBPTT are a recurring theme.
+- **Yu & Fazekas 2024** ([arXiv:2404.07970](https://arxiv.org/abs/2404.07970))
+  achieve up to 30× speedup over TBPTT on time-varying all-pole filters
+  by deriving an analytic gradient via "unwound" recursion — i.e., the
+  transposed system, evaluated over a finite block.
+- **Faust upstream (PR #939)** ([grame-cncm/faust#939](https://github.com/grame-cncm/faust/pull/939))
+  hit a wall on recursive AD even in forward mode: the author derived a
+  symbolic expression for the derivative of the general recursive
+  algorithm but did not land an implementation. This confirms that
+  recursion is the well-known crux of any DSP AD system.
+
+### 19.6 Recommended phasing for `faust-rs`
+
+The existing `Phase E` and `Phase F` placeholders in §14 are correct
+in spirit but underspecified. Concretely:
+
+1. **Phase E0 — linearity classifier.** Land a pure read-only pass on
+   recursive groups that classifies them as
+   {`LinearLTI`, `LinearTimeVarying`, `Nonlinear`}. No new AD
+   capability yet — this is the gating predicate for both transposition
+   and BPTT and it is independently useful for the FAD recursion mode
+   classifier.
+2. **Phase E1 — transposition for the LTI recursive subset.** Implement
+   `RecRadMode::LinearTranspose` for groups classified as `LinearLTI`.
+   The implementation lives in a new `transpose_ad.rs` module. Test
+   surface: parity with FAD on the same recursive shapes (FAD already
+   handles them via the de Bruijn rebuilder).
+3. **Phase E2 — block-mode transposition for `LinearTimeVarying`.**
+   Same structural pass as E1 but with the time-reversed read of the
+   coefficient lane. Requires a documented latency budget (block
+   horizon).
+4. **Phase F — BPTT for `Nonlinear` recursions.** Heaviest phase.
+   Requires:
+   - surface change `rad(expr, seeds, horizon)` or
+     `-rad-horizon N`,
+   - tape allocation in `transform/` and `fir/`,
+   - backend support in interp, C/C++, and Cranelift,
+   - stability diagnostic for truncation bias.
+5. **Phase G — hybrid.** Once E and F coexist, layer the
+   linearize-then-transpose decomposition: linearize the nonlinearity,
+   transpose the LTI tangent recurrence, BPTT only the nonlinear
+   taps. Documented memory advantage `O(K · |nonlinear state|)`
+   instead of `O(K · |total state|)`.
+
+Phase E1 is the cheapest and the most rentable: the LTI feedback case
+(`+ ~ *(constant)` and IIR biquads) already accounts for a large
+fraction of meaningful adaptive-filter targets. Phase F is the
+heaviest investment and the only path to differentiating nonlinear
+feedback (Moog ladder, hyperbolic-tangent saturator in a feedback
+loop, etc.).
+
+### 19.7 Sources
+
+- [Reverse-Mode Autodiff = Linearize + Transpose (Frostig et al. 2021)](https://arxiv.org/abs/2105.09469)
+- [Transposed Direct Forms — Smith, *Introduction to Digital Filters*](https://www.dsprelated.com/freebooks/filters/Transposed_Direct_Forms.html)
+- [Tellegen's theorem](https://en.wikipedia.org/wiki/Tellegen's_theorem)
+- [Differentiable All-Pole Filters for Time-varying Audio Systems — Yu & Fazekas 2024](https://arxiv.org/abs/2404.07970)
+- [A review of differentiable digital signal processing — Hayes et al. 2023](https://www.frontiersin.org/journals/signal-processing/articles/10.3389/frsip.2023.1284100/full)
+- [Backpropagation through time](https://en.wikipedia.org/wiki/Backpropagation_through_time)
+- [Adaptively Truncating Backpropagation Through Time — Aicher et al. 2020](https://proceedings.mlr.press/v115/aicher20a.html)
+- [GSoC PR #939 — Automatic Differentiation in the Faust Compiler](https://github.com/grame-cncm/faust/pull/939)
