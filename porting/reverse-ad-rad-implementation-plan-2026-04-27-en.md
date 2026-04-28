@@ -575,6 +575,22 @@ For phase 1:
   for RAD rather than silently producing a misleading gradient;
 - allow an experimental local approximation only behind a named mode later.
 
+For the first exact LTI-recursive activation (phase E1), the finite window is
+defined by Faust's current block size rather than by a new source-level
+argument:
+
+- horizon = current `compute(count, ...)` block length, i.e. the runtime value
+  exposed in Faust libraries as `ma.BS`;
+- terminal adjoint state at the end of the block = zero;
+- no persistent adjoint state crosses block boundaries;
+- the gradient is therefore exact for the block-local objective and truncated
+  at the block boundary for longer stream objectives.
+
+This keeps `rad(expr, seeds)` usable for the LTI-recursive subset without an
+implicit fixed latency such as 1024 samples. If a future user needs a longer
+or model-specific horizon, that remains a separate BPTT/block extension rather
+than the default E1 semantics.
+
 ### 10.3 Future BPTT mode
 
 A later `rad` extension may support:
@@ -1002,10 +1018,12 @@ A transposition route would touch the following:
 3. **A new `RecRadMode::LinearTranspose`** alongside the strict
    refusal, classifying which recursive groups are eligible.
 4. **A block-buffering convention** for the time-reversed evaluation.
-   At audio rate 48 kHz, even a 1024-sample horizon is 21 ms of
-   latency; this is acceptable for offline gradient descent on filter
-   coefficients but unacceptable for live differentiable DSP. The
-   choice of horizon must be a documented compiler option.
+   Phase E1 uses the current Faust compute block as that finite window:
+   horizon = `count`/`ma.BS`, terminal adjoint state = zero, and no adjoint
+   state persists across blocks. This is exact for a block-local loss and
+   explicitly truncated at block boundaries for stream-long objectives.
+   Longer horizons or persistent adjoint state are reserved for later
+   BPTT/block modes with a documented user surface.
 
 #### 19.2.4 Boundaries of the LTI assumption
 
@@ -1190,7 +1208,11 @@ in spirit but underspecified. Concretely:
    `RecRadMode::LinearTranspose` for groups classified as `LinearLTI`.
    The implementation lives in a new `transpose_ad.rs` module. Test
    surface: parity with FAD on the same recursive shapes (FAD already
-   handles them via the de Bruijn rebuilder).
+   handles them via the de Bruijn rebuilder). Runtime convention:
+   `rad(expr, seeds)` over an accepted LTI recursion uses the current Faust
+   block size (`compute` count / `ma.BS`) as its reverse window, initializes
+   the terminal adjoint state to zero at the end of that block, and does not
+   carry adjoint state between blocks.
 3. **Phase E2 — block-mode transposition for `LinearTimeVarying`.**
    Same structural pass as E1 but with the time-reversed read of the
    coefficient lane. Requires a documented latency budget (block
