@@ -1847,6 +1847,89 @@ fn propagate_reverse_ad_recursive_body_emits_temporal_diagnostic() {
 }
 
 #[test]
+fn propagate_reverse_ad_ltv_recursive_body_reports_block_replay_mode() {
+    // process = rad((2 : + ~ *(hslider("coef"))), seed): the feedback is
+    // linear in recursive state but the coefficient is signal-dependent, so
+    // the future exact RAD route is E2 block coefficient replay.
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let plus = bb.add();
+        let wire = bb.wire();
+        let coef = build_hslider(&mut bb, "coef", 0.5, -1.0, 1.0, 0.01);
+        let coef_pair = bb.par(wire, coef);
+        let mul = bb.mul();
+        let coef_apply = bb.seq(coef_pair, mul);
+        let rec = bb.rec(plus, coef_apply);
+        let two = bb.real(2.0);
+        let body = bb.seq(two, rec);
+        let seed = build_hslider(&mut bb, "seed", 0.0, -1.0, 1.0, 0.01);
+        bb.reverse_ad(body, seed)
+    };
+    let flat = try_build_flat_box(&arena, process).unwrap();
+    let err = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
+        .expect_err("rad through a time-varying recursive body must error");
+    assert!(
+        matches!(
+            err,
+            PropagateError::RadUnsupportedNode {
+                kind: "recursive-block-linear-time-varying",
+                ..
+            }
+        ),
+        "expected recursive-block-linear-time-varying, got: {err:?}"
+    );
+    let diag = PropagateError::RadUnsupportedNode {
+        node: arena.nil(),
+        kind: "recursive-block-linear-time-varying",
+    }
+    .into_diagnostic();
+    assert!(
+        diag.notes.iter().any(|n| n.contains("phase E2")),
+        "LTV recursive RAD diagnostic must point at phase E2"
+    );
+}
+
+#[test]
+fn propagate_reverse_ad_nonlinear_recursive_body_reports_bptt_mode() {
+    // process = rad((2 : + ~ sin), seed): the feedback applies a nonlinear
+    // primitive to recursive state, so exact RAD requires phase-F BPTT.
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let plus = bb.add();
+        let sin = bb.sin();
+        let rec = bb.rec(plus, sin);
+        let two = bb.real(2.0);
+        let body = bb.seq(two, rec);
+        let seed = build_hslider(&mut bb, "seed", 0.0, -1.0, 1.0, 0.01);
+        bb.reverse_ad(body, seed)
+    };
+    let flat = try_build_flat_box(&arena, process).unwrap();
+    let err = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
+        .expect_err("rad through a nonlinear recursive body must error");
+    assert!(
+        matches!(
+            err,
+            PropagateError::RadUnsupportedNode {
+                kind: "recursive-bptt-required",
+                ..
+            }
+        ),
+        "expected recursive-bptt-required, got: {err:?}"
+    );
+    let diag = PropagateError::RadUnsupportedNode {
+        node: arena.nil(),
+        kind: "recursive-bptt-required",
+    }
+    .into_diagnostic();
+    assert!(
+        diag.notes.iter().any(|n| n.contains("phase F")),
+        "nonlinear recursive RAD diagnostic must point at phase F"
+    );
+}
+
+#[test]
 fn propagate_reverse_ad_zero_output_body_raises_rad_body_arity() {
     let mut arena = TreeArena::new();
     let process = {
