@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_static_softclip_drive.dsp
+bytes=608
+lines=16
+fnv1a64=1238a541b8e7ee90

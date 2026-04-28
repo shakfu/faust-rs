@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_fir_taps_external_delays.dsp
+bytes=1176
+lines=24
+fnv1a64=2092f870b0a143d7

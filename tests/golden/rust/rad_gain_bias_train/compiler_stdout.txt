@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_gain_bias_train.dsp
+bytes=521
+lines=12
+fnv1a64=40941c497d0a120e

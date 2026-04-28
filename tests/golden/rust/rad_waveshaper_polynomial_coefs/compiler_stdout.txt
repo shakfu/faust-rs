@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_waveshaper_polynomial_coefs.dsp
+bytes=945
+lines=21
+fnv1a64=7be2d5b9e45211d3
