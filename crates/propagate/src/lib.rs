@@ -120,6 +120,7 @@ use ui::{
 mod forward_ad;
 mod reverse_ad;
 pub mod stateful_rad;
+pub mod transpose_ad;
 
 /// Memoization cache for [`box_arity_typed`] results, keyed by validated flat boxes.
 pub type ArityCache = AHashMap<FlatBoxId, Result<BoxArity, PropagateError>>;
