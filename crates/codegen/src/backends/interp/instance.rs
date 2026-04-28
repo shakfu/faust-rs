@@ -276,6 +276,43 @@ impl<'a, R: FbcReal> FbcDspInstance<'a, R> {
     pub fn cycle(&self) -> usize {
         self.cycle
     }
+
+    /// Returns the UI instruction list collected at compile time.
+    ///
+    /// Hosts use this to discover slider/numentry labels and their bound
+    /// real-heap offsets. The returned slice is the same one stored on the
+    /// factory; layout matches the C++ `buildUserInterface` traversal order.
+    #[must_use]
+    pub fn ui_instructions(&self) -> &[super::bytecode::FbcUiInstruction<R>] {
+        &self.factory.ui_block
+    }
+
+    /// Reads the current value of a real-heap slot.
+    ///
+    /// Useful for inspecting slider state after a compute cycle, or for
+    /// reading bargraph metering zones. Out-of-range offsets return `None`
+    /// instead of panicking.
+    #[must_use]
+    pub fn get_real_zone(&self, offset: i32) -> Option<R> {
+        let idx = usize::try_from(offset).ok()?;
+        self.executor.real_heap.get(idx).copied()
+    }
+
+    /// Writes a value into a real-heap slot.
+    ///
+    /// Used by host gradient-descent loops to update slider parameters
+    /// between compute cycles. Returns `true` when the offset was in range
+    /// and the write happened.
+    pub fn set_real_zone(&mut self, offset: i32, value: R) -> bool {
+        let Ok(idx) = usize::try_from(offset) else {
+            return false;
+        };
+        let Some(slot) = self.executor.real_heap.get_mut(idx) else {
+            return false;
+        };
+        *slot = value;
+        true
+    }
 }
 
 #[cfg(test)]
