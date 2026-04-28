@@ -47,6 +47,39 @@ pub enum RadRecLinearity {
     Nonlinear,
 }
 
+/// Strategy gate for a future RAD pass over one recursive signal group.
+///
+/// The enum names mirror plan §19.6:
+///
+/// - [`RecRadMode::LinearTranspose`] is the E1 target. The group is eligible
+///   for an exact linear transpose, but `rad(...)` still needs a block/tape
+///   evaluation convention before it can emit code.
+/// - [`RecRadMode::BlockLinearTimeVarying`] is the E2 target. The group stays
+///   linear in recursive state, but coefficients must be read from the primal
+///   block at the corresponding sample.
+/// - [`RecRadMode::BpttRequired`] is the phase-F target for nonlinear
+///   feedback; it requires finite-horizon unrolling and a backward sweep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecRadMode {
+    /// Phase E1 candidate: linear time-invariant recursive state transition.
+    LinearTranspose,
+    /// Phase E2 candidate: linear time-varying transition requiring block
+    /// coefficient replay.
+    BlockLinearTimeVarying,
+    /// Phase F candidate: nonlinear recurrence requiring BPTT.
+    BpttRequired,
+}
+
+impl From<RadRecLinearity> for RecRadMode {
+    fn from(value: RadRecLinearity) -> Self {
+        match value {
+            RadRecLinearity::LinearLti => Self::LinearTranspose,
+            RadRecLinearity::LinearTimeVarying => Self::BlockLinearTimeVarying,
+            RadRecLinearity::Nonlinear => Self::BpttRequired,
+        }
+    }
+}
+
 impl RadRecLinearity {
     fn max(self, other: Self) -> Self {
         use RadRecLinearity::{LinearLti, LinearTimeVarying, Nonlinear};
@@ -241,6 +274,30 @@ pub fn classify_de_bruijn_rec_group(arena: &TreeArena, group: SigId) -> Option<R
             .map(|branch| analyzer.classify(arena, branch, 1).rec_linearity)
             .fold(RadRecLinearity::LinearLti, RadRecLinearity::max),
     )
+}
+
+/// Classifies one `DEBRUIJNREC(body)` group into the RAD strategy it would
+/// need in a future stateful reverse-mode implementation.
+///
+/// Returns `None` for non-`DEBRUIJNREC` inputs. A returned mode is a gate, not
+/// an implementation hook: phase-1 `rad(...)` still rejects recursive
+/// projections until E1/E2/F add the corresponding runtime semantics.
+#[must_use]
+pub fn classify_de_bruijn_rec_rad_mode(arena: &TreeArena, group: SigId) -> Option<RecRadMode> {
+    classify_de_bruijn_rec_group(arena, group).map(RecRadMode::from)
+}
+
+/// Classifies a recursive projection such as `Proj(i, DEBRUIJNREC(...))`.
+///
+/// This is the shape reached by propagated recursive boxes and by RAD's
+/// current strict rejection path. Returning `None` means the signal is not a
+/// direct projection over a De Bruijn recursive group.
+#[must_use]
+pub fn classify_recursive_projection_rad_mode(arena: &TreeArena, sig: SigId) -> Option<RecRadMode> {
+    let SigMatch::Proj(_, group) = match_sig(arena, sig) else {
+        return None;
+    };
+    classify_de_bruijn_rec_rad_mode(arena, group)
 }
 
 struct LinearityAnalyzer {
@@ -499,7 +556,10 @@ impl LinearityAnalyzer {
 
 #[cfg(test)]
 mod tests {
-    use super::{RadRecLinearity, classify_de_bruijn_rec_group};
+    use super::{
+        RadRecLinearity, RecRadMode, classify_de_bruijn_rec_group, classify_de_bruijn_rec_rad_mode,
+        classify_recursive_projection_rad_mode,
+    };
     use signals::{SigBuilder, SigId};
     use tlib::{TreeArena, de_bruijn_rec, de_bruijn_ref, vec_to_list};
 
@@ -601,6 +661,45 @@ mod tests {
         assert_eq!(
             classify_de_bruijn_rec_group(&arena, rec),
             Some(RadRecLinearity::LinearLti)
+        );
+    }
+
+    #[test]
+    fn rec_rad_mode_maps_linearity_classes_to_phase_targets() {
+        assert_eq!(
+            RecRadMode::from(RadRecLinearity::LinearLti),
+            RecRadMode::LinearTranspose
+        );
+        assert_eq!(
+            RecRadMode::from(RadRecLinearity::LinearTimeVarying),
+            RecRadMode::BlockLinearTimeVarying
+        );
+        assert_eq!(
+            RecRadMode::from(RadRecLinearity::Nonlinear),
+            RecRadMode::BpttRequired
+        );
+    }
+
+    #[test]
+    fn classifier_reports_rad_mode_for_de_bruijn_group_and_projection() {
+        let mut arena = TreeArena::new();
+        let ref1 = de_bruijn_ref(&mut arena, 1);
+        let branch = {
+            let mut b = SigBuilder::new(&mut arena);
+            let prev = b.proj(0, ref1);
+            let coeff = b.input(0);
+            b.mul(coeff, prev)
+        };
+        let rec = one_branch_rec(&mut arena, branch);
+        let proj = SigBuilder::new(&mut arena).proj(0, rec);
+
+        assert_eq!(
+            classify_de_bruijn_rec_rad_mode(&arena, rec),
+            Some(RecRadMode::BlockLinearTimeVarying)
+        );
+        assert_eq!(
+            classify_recursive_projection_rad_mode(&arena, proj),
+            Some(RecRadMode::BlockLinearTimeVarying)
         );
     }
 }

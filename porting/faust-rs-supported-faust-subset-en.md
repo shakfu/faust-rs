@@ -473,7 +473,9 @@ The most important current exclusions are:
     classifier (`crates/propagate/src/stateful_rad.rs`) over
     `DEBRUIJNREC` groups. It distinguishes `LinearLti`,
     `LinearTimeVarying`, and `Nonlinear` recursive bodies, but it does
-    not make recursive `rad(...)` legal yet.
+    not make recursive `rad(...)` legal yet. The paired `RecRadMode`
+    gate maps those classes to the future E1/E2/F strategies:
+    `LinearTranspose`, `BlockLinearTimeVarying`, and `BpttRequired`.
   - Coverage:
     - structural: [crates/propagate/tests/core_api.rs](../crates/propagate/tests/core_api.rs)
       (arity + temporal/recursive rejection),
@@ -1540,8 +1542,8 @@ earlier in this document for the full contract; in short:
 - structured `RadBodyArity` / `RadSeedArity` / `RadUnsupportedNode`
   diagnostics: phase 1 RAD never silently emits a misleading gradient.
 - stateful RAD phase E0 adds a read-only `DEBRUIJNREC` classifier for
-  future transpose/BPTT gates; it does not widen accepted `rad(...)`
-  programs.
+  future transpose/BPTT gates, plus a `RecRadMode` strategy mapping; it
+  does not widen accepted `rad(...)` programs.
 
 Detailed design notes: [docs/rad-note-en.md](../docs/rad-note-en.md).
 

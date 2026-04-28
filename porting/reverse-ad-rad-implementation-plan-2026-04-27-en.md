@@ -1182,7 +1182,10 @@ in spirit but underspecified. Concretely:
    **Status 2026-04-28:** implemented as
    `crates/propagate/src/stateful_rad.rs` with Rustdoc and structural
    unit tests. The pass classifies `DEBRUIJNREC` groups only and keeps
-   current `rad(...)` recursion/delay rejection unchanged.
+   current `rad(...)` recursion/delay rejection unchanged. The same
+   module now exposes the `RecRadMode` strategy gate:
+   `LinearTranspose` for E1, `BlockLinearTimeVarying` for E2, and
+   `BpttRequired` for phase F.
 2. **Phase E1 — transposition for the LTI recursive subset.** Implement
    `RecRadMode::LinearTranspose` for groups classified as `LinearLTI`.
    The implementation lives in a new `transpose_ad.rs` module. Test

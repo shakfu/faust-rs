@@ -243,6 +243,19 @@ classifies recursive bodies as `LinearLti`, `LinearTimeVarying`, or
 subset yet. The classifier is only the gating predicate for a later
 transposition or BPTT implementation.
 
+The same module also exposes `RecRadMode`, a strategy gate for the
+next phases:
+
+| Recursive class | Future RAD mode |
+|-----------------|-----------------|
+| `LinearLti` | `LinearTranspose` (phase E1) |
+| `LinearTimeVarying` | `BlockLinearTimeVarying` (phase E2) |
+| `Nonlinear` | `BpttRequired` (phase F) |
+
+These modes are intentionally not wired into `reverse_ad.rs` as
+accepted lowering paths yet; they only make the implementation boundary
+explicit.
+
 The diagnostic kinds are:
 
 | `kind` | Family |
@@ -309,8 +322,8 @@ Per plan §3, the following remain explicitly out of scope for phase 1:
 
 Plan phases E and F sketch the next steps:
 
-- **Phase E0** — implemented read-only recursive-linearity classifier;
-  no new `rad(...)` capability.
+- **Phase E0** — implemented read-only recursive-linearity classifier
+  and `RecRadMode` strategy gate; no new `rad(...)` capability.
 - **Phase E1/E2** — a scoped `RecRadMode` for linear recursive subsets
   where a transposed evaluation can be defined over a finite block.
 - **Phase F** — a finite-horizon BPTT mode (`rad(expr, seeds, horizon)`
