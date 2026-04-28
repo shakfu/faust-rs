@@ -674,3 +674,171 @@ fn corpus_err_rad_zero_seed_surfaces_rad_seed_arity_diagnostic() {
         "diagnostic must name rad seeds arity: {diagnostics:?}"
     );
 }
+
+// -----------------------------------------------------------------------
+// Nested AD combinations
+// -----------------------------------------------------------------------
+//
+// FAD and RAD have the same two-child surface, so they can be nested in
+// either order. The tests here pin two contracts:
+//
+// 1. The output bundle layouts compose multiplicatively (FAD) or
+//    additively (RAD) as documented in `docs/fad-...md` and
+//    `docs/rad-note-en.md`.
+// 2. Second-order derivatives computed two different ways agree
+//    numerically. Specifically:
+//    - `fad(rad(f, s), s)` — outer FAD over RAD: the third lane is the
+//      second derivative `f''(s)`.
+//    - `rad(fad(f, s), s)` — outer RAD over FAD: the only gradient lane
+//      is `d/ds (f + f')(s) = f'(s) + f''(s)` (sum cotangent over the
+//      two-output FAD bundle).
+//
+// Both rely on the feed-forward subset only; nested temporal cases are
+// covered by the temporal-rejection tests further up.
+
+#[test]
+fn nested_fad_rad_on_quadratic_matches_second_derivative() {
+    // f(x) = x*x  ⇒  f'(x) = 2x, f''(x) = 2
+    // inner rad(x*x, x)         → [x*x,  2x]
+    // outer fad([x*x, 2x], x)   → [x*x, 2x, 2x, 2]                 (4 lanes)
+    let source = r#"
+x = hslider("x", 1.5, -2.0, 2.0, 0.001);
+process = fad(rad(x*x, x), x);
+"#;
+    let outs = run_interp_temp_source("nested-fad-rad-quadratic", source, 2);
+    assert_eq!(
+        outs.len(),
+        4,
+        "fad(rad(f, s), s) layout = primal+tangent for each of rad's 2 outputs"
+    );
+    let x = 1.5_f32;
+    assert_close(outs[0][0], x * x, 1.0e-5, "primal x*x");
+    assert_close(outs[1][0], 2.0 * x, 1.0e-5, "tangent of x*x w.r.t. x");
+    assert_close(outs[2][0], 2.0 * x, 1.0e-5, "rad first-order primal");
+    assert_close(outs[3][0], 2.0, 1.0e-5, "second derivative f''(x) = 2");
+}
+
+#[test]
+fn nested_rad_fad_on_quadratic_matches_first_plus_second_derivative() {
+    // inner fad(x*x, x)         → [x*x, 2x]
+    // outer rad([x*x, 2x], x)   → [x*x, 2x, d/dx(x*x + 2x) = 2x + 2]
+    let source = r#"
+x = hslider("x", 1.5, -2.0, 2.0, 0.001);
+process = rad(fad(x*x, x), x);
+"#;
+    let outs = run_interp_temp_source("nested-rad-fad-quadratic", source, 2);
+    assert_eq!(
+        outs.len(),
+        3,
+        "rad(fad(f, s), s) layout = [primals…, gradient(s)]"
+    );
+    let x = 1.5_f32;
+    assert_close(outs[0][0], x * x, 1.0e-5, "fad primal x*x");
+    assert_close(outs[1][0], 2.0 * x, 1.0e-5, "fad tangent 2x");
+    assert_close(
+        outs[2][0],
+        2.0 * x + 2.0,
+        1.0e-5,
+        "rad sum-cotangent gradient = f'(x) + f''(x)",
+    );
+}
+
+#[test]
+fn nested_fad_rad_on_trig_matches_second_derivative_via_finite_difference() {
+    // f(x) = sin(x*x). Inner rad gives [sin(x*x), 2x*cos(x*x)]; outer
+    // fad against x gives a 4-output bundle whose last lane is f''(x).
+    // We compare that lane against a central finite difference on f' to
+    // catch any second-order index-arithmetic regression.
+    fn outer_source(x: f32) -> String {
+        format!(
+            r#"
+x = hslider("x", {x}, -2.0, 2.0, 0.001);
+process = fad(rad(sin(x*x), x), x);
+"#
+        )
+    }
+    fn inner_grad_source(x: f32) -> String {
+        // Just rad(sin(x*x), x): first-order gradient as a primal.
+        format!(
+            r#"
+x = hslider("x", {x}, -2.0, 2.0, 0.001);
+process = rad(sin(x*x), x);
+"#
+        )
+    }
+    let base = 0.7_f32;
+    let eps = 1.0e-3_f32;
+    let outer = run_interp_temp_source("nested-fad-rad-trig-outer", &outer_source(base), 2);
+    let grad_plus = run_interp_temp_source(
+        "nested-fad-rad-trig-grad-plus",
+        &inner_grad_source(base + eps),
+        2,
+    );
+    let grad_minus = run_interp_temp_source(
+        "nested-fad-rad-trig-grad-minus",
+        &inner_grad_source(base - eps),
+        2,
+    );
+    // outer layout: [f, df/dx, g = f', dg/dx = f''] across 4 lanes.
+    assert_eq!(outer.len(), 4);
+    // Frame-0 second-derivative lane vs. central difference on the
+    // first-order gradient (lane 1 of inner rad output = the 2nd output).
+    let expected_second = (grad_plus[1][0] - grad_minus[1][0]) / (2.0 * eps);
+    assert_close(
+        outer[3][0],
+        expected_second,
+        2.0e-3,
+        "f''(x) from fad(rad(...)) vs. central diff of rad gradient",
+    );
+}
+
+#[test]
+fn nested_rad_fad_multi_seed_routes_implicit_cotangent_through_inner_lanes() {
+    // f(x, y) = x*y ; inner fad against (x, y) → [x*y, y, x] (3 outputs)
+    // Outer rad against (x, y) sums the inner lanes:
+    //   primals  = [x*y, y, x]
+    //   d/dx sum = d/dx (x*y + y + x) = y + 1
+    //   d/dy sum = d/dy (x*y + y + x) = x + 1
+    // Final bundle: [x*y, y, x, y+1, x+1] (5 outputs).
+    let source = r#"
+x = hslider("x", 0.6, -2.0, 2.0, 0.001);
+y = hslider("y", 0.4, -2.0, 2.0, 0.001);
+process = rad(fad(x*y, (x, y)), (x, y));
+"#;
+    let outs = run_interp_temp_source("nested-rad-fad-multi-seed", source, 1);
+    assert_eq!(outs.len(), 5, "outer rad bundle = [primals (3), grad/dx, grad/dy]");
+    let x = 0.6_f32;
+    let y = 0.4_f32;
+    assert_close(outs[0][0], x * y, 1.0e-5, "fad primal x*y");
+    assert_close(outs[1][0], y, 1.0e-5, "fad tangent w.r.t. x = y");
+    assert_close(outs[2][0], x, 1.0e-5, "fad tangent w.r.t. y = x");
+    assert_close(outs[3][0], y + 1.0, 1.0e-5, "rad d/dx sum = y + 1");
+    assert_close(outs[4][0], x + 1.0, 1.0e-5, "rad d/dy sum = x + 1");
+}
+
+#[test]
+fn nested_rad_in_fad_temporal_inner_still_rejects_with_diagnostic() {
+    // Sanity check: the temporal rejection is preserved when RAD is the
+    // inner pass. Compiling `fad(rad(x', x), x)` must still fail with the
+    // RAD temporal diagnostic, not silently produce a misleading double
+    // gradient.
+    use compiler::Compiler;
+    let source = r#"
+x = hslider("x", 0.0, -1.0, 1.0, 0.01);
+process = fad(rad(x', x), x);
+"#;
+    let compiler = Compiler::new();
+    let err = compiler
+        .compile_source_to_signals("nested-rad-in-fad-temporal.dsp", source)
+        .expect_err("inner rad over delay1 must fail even when wrapped in fad");
+    let diagnostics = err
+        .diagnostics()
+        .expect("propagate error should expose diagnostics");
+    assert!(
+        diagnostics
+            .as_slice()
+            .iter()
+            .any(|d| d.message.contains("rad")),
+        "nested rad-in-fad temporal diagnostic must mention `rad`: {diagnostics:?}"
+    );
+}

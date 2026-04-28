@@ -444,9 +444,44 @@ The most important current exclusions are:
     into `signal_prepare`, but the table-size extractor still requires a literal
     `Int` node.  See `porting/missing.md` entry 1.
 
-- **Reverse-mode AD (`rad`)**
-  - `rad(expr)` returns [`PropagateError::UnsupportedBox`] unconditionally.
-    Forward-mode (`fad`) is the only supported AD variant in this phase.
+- **Reverse-mode AD (`rad(expr, seeds)`) — feed-forward subset supported**
+  - `rad(expr, seeds)` is implemented at the propagation boundary in
+    `crates/propagate/src/reverse_ad.rs`. It mirrors the explicit-seed
+    surface of `fad(expr, seeds)` and produces the bundle
+    `[primals…, ∂ sum(primals) / ∂ s_0, …, ∂ sum(primals) / ∂ s_{N-1}]`
+    with an implicit all-ones cotangent on every primal output.
+  - Arity contract: `body.outputs ≥ 1`, `seeds.outputs ≥ 1`,
+    `outputs = body.outputs + seeds.outputs`. Violations surface
+    structured `RadBodyArity` / `RadSeedArity` diagnostics
+    (`FRS-PROP-0002`).
+  - Differentiable subset: feed-forward arithmetic, unary trig and
+    transcendentals (sin/cos/tan/exp/log/log10/sqrt/abs and their
+    inverses), `pow`, `atan2`, `min`/`max`, `select2`, `float_cast`
+    (`int_cast` is zero), read-only `rdtable` (slope via symmetric
+    finite difference), unary foreign functions
+    (`tanh`/`sinh`/`cosh` and inverse-hyperbolic counterparts),
+    pass-through wrappers (`attach`, `enable`, `control`, `Output`),
+    bargraphs (zero contribution).
+  - Out of scope (raise `RadUnsupportedNode` with kind-specific
+    diagnostics, never silently zero): `delay1`, variable `delay`,
+    `prefix`, recursion / projection over a recursion, mutable
+    tables, soundfiles, non-unary or unrecognised foreign functions.
+    The reverse transpose of a delay is anti-causal
+    (`adj_x[n] += adj_y[n + 1]`) and would require a runtime tape; a
+    finite-horizon BPTT mode is reserved for a later phase.
+  - Coverage:
+    - structural: [crates/propagate/tests/core_api.rs](../crates/propagate/tests/core_api.rs)
+      (arity + temporal/recursive rejection),
+    - runtime parity (RAD ↔ FAD lane-by-lane and RAD ↔ central
+      finite difference) and corpus-driven regressions:
+      [crates/compiler/tests/rad_runtime.rs](../crates/compiler/tests/rad_runtime.rs),
+    - corpus fixtures `rad_basic`, `rad_product_multi_seed`,
+      `rad_trig_composition`, `rad_absent_seed`, `rad_repeated_seed`,
+      `rad_multi_output_sum_cotangent`, `rad_rdtbl_index_basic`, plus
+      `err_rad_zero_body`, `err_rad_zero_seed`,
+      `err_rad_delay_temporal_unsupported`.
+  - Detailed design notes: [docs/rad-note-en.md](../docs/rad-note-en.md);
+    plan: [porting/reverse-ad-rad-implementation-plan-2026-04-27-en.md](reverse-ad-rad-implementation-plan-2026-04-27-en.md).
 
 - **`fad(expr)` — propagation is supported; end-to-end backend is conditional**
   - `fad(expr)` correctly expands the output bundle at the propagation level:
@@ -546,8 +581,13 @@ Faust C++ still supports a broader end-to-end language/runtime envelope.
 
 Most importantly, the C++ compiler still has:
 
-- **reverse-mode AD** (`rad(expr)`): completely unsupported in this phase
-  (`PropagateError::UnsupportedBox`),
+- **reverse-mode AD** (`rad(expr, seeds)`): the feed-forward subset is now
+  implemented (see the dedicated section earlier in this document and
+  [docs/rad-note-en.md](../docs/rad-note-en.md)). What remains gated is
+  reverse-through-time: any `delay` / `prefix` / recursion in the
+  differentiated body raises a structured `RadUnsupportedNode` diagnostic
+  rather than a misleading gradient. A finite-horizon BPTT mode is
+  reserved for a later phase.
 - fuller support for stream-wrapper lowering,
 - broader mature transform/backend coverage on long-tail signal families,
 - a fuller embedded-compiler helper surface for web tooling
@@ -1461,16 +1501,35 @@ two-phase protocol prevents dangling references inside the De Bruijn group:
 | `fad_recursive_deep_right` | deeply nested recursive branch with explicit seed |
 | `fad_recursive_delay` | recursive delay with explicit seed |
 | `fad_gradient_host` | host-side extraction of primal/tangent pair |
-| `rad_parse_only` | parse/eval preserved, propagate intentionally unsupported |
+| `rad_basic` | `rad(expr, seeds)` feed-forward unary case |
+| `rad_product_multi_seed` | binary product with two independent seeds |
+| `rad_trig_composition` | trig chain differentiated against two seeds |
+| `rad_absent_seed` | unreachable seed must yield zero gradient |
+| `rad_repeated_seed` | repeated seed lanes must alias the same gradient |
+| `rad_multi_output_sum_cotangent` | implicit all-ones cotangent on multi-output bodies |
+| `rad_rdtbl_index_basic` | read-only table index slope contract |
+| `err_rad_zero_body`, `err_rad_zero_seed`, `err_rad_delay_temporal_unsupported` | structured RAD diagnostic surface |
 
 These fixtures pass through `crates/compiler/tests/signal_pipeline.rs`.
-`fad_delay` is additionally validated end-to-end through the `signal_fir_lane`
-fast-lane test (C++ and interpreter bytecode output checked).
+`fad_delay` is additionally validated end-to-end through the
+`signal_fir_lane` fast-lane test (C++ and interpreter bytecode output
+checked). RAD-specific runtime parity (RAD vs FAD, RAD vs central finite
+difference) is exercised by `crates/compiler/tests/rad_runtime.rs`.
 
-#### `rad(expr)` remains out of scope
+#### `rad(expr, seeds)` is now supported on the feed-forward subset
 
-Reverse-mode AD is not implemented. `rad(expr)` returns
-`PropagateError::UnsupportedBox`.
+Phase 1 reverse-mode AD landed in 2026-04-27. See the dedicated section
+earlier in this document for the full contract; in short:
+
+- output bundle layout `[primals…, ∂ sum(primals) / ∂ s_j…]` with an
+  implicit all-ones cotangent on every primal output,
+- same differentiable subset as FAD outside the temporal/recursive
+  boundary (delay, prefix, recursion) and outside mutable-table /
+  soundfile / non-unary FFun families,
+- structured `RadBodyArity` / `RadSeedArity` / `RadUnsupportedNode`
+  diagnostics: phase 1 RAD never silently emits a misleading gradient.
+
+Detailed design notes: [docs/rad-note-en.md](../docs/rad-note-en.md).
 
 ### 7.17 April 21, 2026: recursion depth limits, 64 MiB compiler stack, FAD De Bruijn overhaul
 
@@ -1615,7 +1674,10 @@ Today, the simplest accurate rule is:
   `fad(fad(eq, phi), phi)` on recursive accumulators. End-to-end backend
   compilation succeeds whenever the underlying tangent signal content stays
   within the supported fast-lane subset (same as for primal-only programs).
-- `rad(expr)` is not supported.
+- `rad(expr, seeds)` is supported on the feed-forward subset (phase 1
+  reverse-mode AD). The temporal boundary (`delay`, `prefix`, recursion
+  inside the differentiated body) raises a structured `RadUnsupportedNode`
+  diagnostic. See [docs/rad-note-en.md](../docs/rad-note-en.md).
 
 The most common mistake is to assume:
 
