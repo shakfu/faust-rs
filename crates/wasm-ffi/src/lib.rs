@@ -36,14 +36,15 @@
 //! by the future `faustwasm` embedded-compiler loader.
 //!
 //! # Embedded Faust libraries
-//! The compiler-module can embed a read-only bundle of standard Faust library
-//! sources discovered at build time. The raw compile export installs that
-//! bundle into [`WasmArtifactRequest::virtual_sources`], so:
+//! The compiler-module can embed a read-only bundle of Faust library sources
+//! discovered at build time. The raw compile export installs that bundle into
+//! [`WasmArtifactRequest::virtual_sources`], so:
 //! - parser-side `import("stdfaust.lib")` works from a source string,
 //! - evaluator-side `library("maths.lib")` / `component("...")` can keep
 //!   resolving against the same in-memory bundle,
 //! - the shipped WASM compiler-module stays self-contained for the standard
-//!   library set without recreating an Emscripten-style virtual filesystem.
+//!   library set plus any explicitly embedded local `.lib` roots, without
+//!   recreating an Emscripten-style virtual filesystem.
 
 #![allow(non_snake_case)]
 #![allow(unsafe_code)]
@@ -180,6 +181,7 @@ fn parse_compile_request(
     internal_memory: bool,
 ) -> Result<WasmArtifactRequest, String> {
     let _embedded_root = embedded_standard_library_root();
+    let _embedded_roots = embedded_standard_library_roots();
     let argv = split_faustwasm_args(args);
     let parsed = utils::parse_ffi_compile_args(&argv)?;
     let mut request = WasmArtifactRequest::new(name, source);
@@ -213,6 +215,12 @@ fn embedded_standard_library_sources() -> VirtualSourceMap {
 /// done purely through [`embedded_standard_library_sources`].
 fn embedded_standard_library_root() -> Option<&'static str> {
     EMBEDDED_FAUST_LIB_ROOT
+}
+
+/// Return the filesystem roots used at build time to assemble the embedded
+/// `.lib` bundle.
+fn embedded_standard_library_roots() -> &'static [&'static str] {
+    EMBEDDED_FAUST_LIB_ROOTS
 }
 
 /// Compile one request into a stored success/error payload.

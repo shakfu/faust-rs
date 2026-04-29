@@ -44,6 +44,14 @@ FAUST_RS_EMBEDDED_LIB_ROOT=/path/to/faust/libraries \
   $HOME/.cargo/bin/cargo run -p xtask -- build-faustwasm-compiler-module
 ```
 
+If a `faustwasm` source string depends on project-local `.lib` files, embed
+both the local root and the standard-library root through `FAUST_LIB_PATH`:
+
+```bash
+FAUST_LIB_PATH=/path/to/project:/path/to/faust/libraries \
+  $HOME/.cargo/bin/cargo run -p xtask -- build-faustwasm-compiler-module
+```
+
 The default release artifact is:
 
 ```text
@@ -89,11 +97,16 @@ At build time, `wasm-ffi` can discover and embed a read-only bundle of Faust
 `.lib` sources directly into the compiler-module. The current root discovery
 order is:
 
-- `FAUST_RS_EMBEDDED_LIB_ROOT`
-- `FAUST_RS_FAUSTLIBRARIES_ROOT`
-- first valid entry from `FAUST_LIB_PATH`
+- valid roots from `FAUST_RS_EMBEDDED_LIB_ROOT`
+- valid roots from `FAUST_RS_FAUSTLIBRARIES_ROOT`
+- all valid entries from `FAUST_LIB_PATH`
 - `/usr/local/share/faust`
 - `/usr/share/faust`
+
+When several roots are embedded, logical `.lib` paths are merged in search
+order and the first root providing a given logical path wins. This lets a
+project-local root add files such as `ad.lib` while the next root still supplies
+`stdfaust.lib` and the standard Faust libraries.
 
 If none of these roots exist at build time, the compiler-module still builds,
 but without an embedded standard-library bundle. In that case, source-string

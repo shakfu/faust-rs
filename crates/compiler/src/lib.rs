@@ -2139,12 +2139,14 @@ fn time_phase_with_sink<T>(
     name: &'static str,
     f: impl FnOnce() -> T,
 ) -> T {
-    let start = Instant::now();
-    let result = f();
     if let Some(sink) = timing_sink {
+        let start = Instant::now();
+        let result = f();
         sink(name, start.elapsed());
+        result
+    } else {
+        f()
     }
-    result
 }
 
 // ─── Signal-to-FIR lower functions ───────────────────────────────────────────
@@ -3947,6 +3949,18 @@ mod tests {
             out.dsp_json
                 .contains(&format!("\"compile_options\":\"{}\"", out.compile_options))
         );
+    }
+
+    #[test]
+    fn timing_helper_without_sink_runs_without_measuring() {
+        let mut called = false;
+        let value = super::time_phase_with_sink(None, "test-phase", || {
+            called = true;
+            42
+        });
+
+        assert!(called);
+        assert_eq!(value, 42);
     }
 
     #[test]
