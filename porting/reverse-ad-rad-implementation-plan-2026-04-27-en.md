@@ -1247,3 +1247,293 @@ loop, etc.).
 - [Backpropagation through time](https://en.wikipedia.org/wiki/Backpropagation_through_time)
 - [Adaptively Truncating Backpropagation Through Time — Aicher et al. 2020](https://proceedings.mlr.press/v115/aicher20a.html)
 - [GSoC PR #939 — Automatic Differentiation in the Faust Compiler](https://github.com/grame-cncm/faust/pull/939)
+
+## 20. Engineering plan for the LTI transposition path (route B), independent of BPTT
+
+This section turns §19.2 into a concrete plan that activates LTI
+recursive RAD through exact system transposition **without** committing
+to BPTT. It is the "route B" of the user-facing recap: precise reverse
+mode for the LTI subset, decoupled from the heavier nonlinear-feedback
+work of phase F.
+
+The architectural decision that makes B independent of F is that LTI
+transposition needs only **two block-local capabilities** at runtime:
+
+1. evaluate a recursive group with the iteration order reversed across
+   one block,
+2. snapshot the primal recurrence's intermediate values for that block
+   so the host (or an aggregation pass) can build the seed adjoint
+   `Σ y_bar[n+1] · y[n]` etc.
+
+Both are strictly less than the requirements of BPTT (which additionally
+needs a tape of *every* differentiable intermediate of the nonlinear
+path). They are also strictly more than the existing forward-only
+recursive evaluation in the FIR layer. §20.1–§20.4 below detail what to
+build, in roughly increasing scope.
+
+### 20.1 Already in place
+
+- `crates/propagate/src/stateful_rad.rs`
+  classifies `DEBRUIJNREC` groups as
+  `LinearLti / LinearTimeVarying / Nonlinear` and maps them to the
+  matching `RecRadMode` (phase E0).
+- `crates/propagate/src/transpose_ad.rs`
+  builds the **structurally correct** transposed `DEBRUIJNREC` group
+  for a `LinearLti` body. The unit-test interpreter validates the
+  numeric identity `p_bar = Σ y_bar[n+1] · y[n]` against the
+  closed-form derivative on the canonical first-order recurrence.
+- The `RadUnsupportedNode { kind: "recursive-linear-transpose" }`
+  diagnostic already points users at this path explicitly, so the
+  user-visible surface only needs to flip from "rejected" to
+  "lowered".
+
+The remaining work is the wiring that turns the scaffold into running
+code.
+
+### 20.2 Block convention (the surface contract)
+
+Phase E1 must publish a fixed contract for **what is differentiated**:
+
+- The compute block of size `count` (the standard Faust compute
+  argument) is the reverse-mode horizon. The terminal adjoint at
+  frame `count` is zero — there is no carry-over of adjoint state
+  between blocks. This matches the journal entry of 2026-04-28 and the
+  numeric oracle's boundary.
+- The user-visible gradient is therefore an exact gradient of the
+  block-local objective `J = Σ_{n=0..count-1} cotangent[n] · y[n]`
+  (with `cotangent ≡ 1` for the implicit all-ones case). The
+  conventional choice in DSP training pipelines is to call
+  `compute(count, …)` in a loop where each call is its own training
+  batch.
+- A future flag `-rad-block-stride N` (or `rad(expr, seeds, stride=N)`)
+  may decouple the gradient horizon from the audio block size; that
+  extension is **not** part of E1 and is documented as a phase-E2
+  follow-up.
+
+This contract is independent of BPTT: nothing requires inter-block
+state, no horizon parameter is exposed in phase E1, and the host
+controls the effective horizon by choosing the compute block size.
+
+### 20.3 Signal-IR: a `ReverseTimeRec` node
+
+Add one new signal-IR node:
+
+```rust
+/// Recursive group whose body must be evaluated in reverse iteration
+/// order across the current compute block. Body and projection
+/// semantics are otherwise identical to `DEBRUIJNREC` /
+/// `Proj(slot, group)`. The terminal adjoint state for the last
+/// frame of the block is implicitly zero.
+ReverseTimeRec(body: SigId)
+```
+
+Properties:
+
+- **Same arity contract** as `DEBRUIJNREC`. The body lists `k` branches
+  and is projected via the existing `Proj(slot, group)` syntax.
+- **Same de-Bruijn back-edge semantics** (`DEBRUIJNREF(1)` reads the
+  *next* frame's adjoint state, not the previous one — i.e., what
+  `DEBRUIJNREF(1)` already means inside the transposed body when read
+  in reverse time).
+- **Single-block scope.** No state is preserved across `compute(count, …)`
+  calls. This is what keeps the runtime requirements minimal.
+
+The propagation arm becomes:
+
+```rust
+RecRadMode::LinearTranspose => {
+    let transposed = transpose_lti_de_bruijn_rec_scaffold(arena, group)?;
+    let reverse_rec = signals::reverse_time_rec(arena, transposed_body);
+    // … wire the projections so seed adjoints land on the right slots
+}
+```
+
+Everything downstream — `signal_prepare`, `signal_fir`, the backends —
+needs one new lowering path for `ReverseTimeRec`.
+
+### 20.4 FIR lowering
+
+The FIR layer already lowers `DEBRUIJNREC` to a forward-time loop
+backed by a recursion array. The minimal change for `ReverseTimeRec`
+is **iteration-order inversion**:
+
+1. **Block extraction.** The compute kernel is already split into a
+   per-frame loop with index `i ∈ [0, count)`. For a
+   `ReverseTimeRec`, that loop runs `i` from `count - 1` down to `0`.
+2. **Recursion-array indexing.** The existing rotating-IOTA scheme
+   (`fIOTA - 1 & mask` reads "previous frame") is replaced by the
+   symmetric `fIOTA + 1 & mask` for the reverse loop, so
+   `DEBRUIJNREF(1)` reads the *next-in-reverse-time* frame's adjoint.
+3. **Boundary.** Before the reverse loop, the recursion array slots
+   for frame `count` are zeroed. This realises the terminal adjoint
+   convention from §20.2.
+4. **Sample I/O.** A `ReverseTimeRec` group consumes its `input(i)`
+   lanes and produces its outputs at the same per-frame index as the
+   surrounding compute. The host therefore sees the adjoint at frame
+   `n` aligned with the primal sample at frame `n` — no host-side
+   reversal is required.
+
+Implementation site:
+- `crates/transform/src/signal_fir/module.rs` (top-level recursion
+  lowering and IOTA wiring),
+- `crates/transform/src/signal_fir/delay.rs` (the previous-frame
+  read for `DEBRUIJNREF`),
+- `crates/transform/src/signal_fir/planner.rs` (loop direction).
+
+The change is local: every existing `DEBRUIJNREC` lowering already
+reads through the `recursion_array_index(group, frame_index)` helper.
+The reverse loop only flips one sign and zeros the terminal slots.
+
+### 20.5 Mixed forward/reverse compute kernels
+
+A `rad(...)` over an LTI recursive primal compiles to **both** a
+forward primal computation and a reverse adjoint computation that
+share the per-frame state of the original recursion. Two viable
+schedules:
+
+- **Schedule A — interleaved.** The compute kernel runs the forward
+  loop first (filling the recursion array with primal samples), then
+  the reverse loop on the transposed group reading those primals as
+  block-local data. This requires the FIR lowering to coalesce
+  forward and reverse loops on the same compute block. Memory cost:
+  one rotating buffer of size `block_len` per state slot.
+
+- **Schedule B — split.** The compute kernel exposes two entry
+  points: `compute_primal(count, …)` and
+  `compute_adjoint(count, …)`. The host orchestrates them. Lower
+  runtime memory because the rotating buffer can be the host's,
+  but breaks the "single `compute` call" assumption of every existing
+  Faust integration.
+
+Recommendation: **Schedule A** for E1, with a documented memory
+overhead linear in the block length. Schedule B can be added later
+behind a flag if the memory cost matters for embedded targets.
+
+### 20.6 Backend coverage
+
+The interp backend is the right first target because:
+
+- it already has a structured opcode set with explicit indexed
+  reads/writes on the real heap,
+- adding a "reverse iteration" intrinsic to `compute_block` is a
+  ~50-line change in `crates/codegen/src/backends/interp/executor.rs`,
+- the existing FIR-to-interp serializer in `serial.rs` only needs
+  one new opcode emission for `ReverseTimeRec` body bodies.
+
+Cranelift and C/C++ backends follow once the interp path passes
+parity tests:
+
+- **Cranelift** (`crates/codegen/src/backends/cranelift/mod.rs`) needs
+  one extra `compute_loop` lowering branch that emits a backward
+  index counter. The existing IR already supports negative-stride
+  loops via `iadd_imm(-1)`.
+- **C/C++** (`crates/codegen/src/backends/c/`,
+  `crates/codegen/src/backends/cpp/`) emit a `for (int i = count - 1;
+  i >= 0; --i)` instead of the standard ascending loop for
+  `ReverseTimeRec` bodies. The static structure is generated from the
+  same FIR module, so the change is one new code path in the loop
+  emitter.
+
+Each backend gets a parity test against the interp E1 result.
+
+### 20.7 Test surface
+
+The existing E0/E1 unit tests
+(`crates/propagate/src/transpose_ad.rs::tests`) validate the
+numerical correctness of the structural transposition and need no
+change. New tests:
+
+- **End-to-end RAD parity for canonical LTI recursions.** A new
+  `crates/compiler/tests/rad_lti_recursive_runtime.rs` compiles
+  fixtures like `rad_lti_first_order.dsp` (`+ ~ *(p)`) and
+  `rad_lti_biquad.dsp` (cross-coupled second-order), runs both the
+  rad-compiled DSP and a hand-rolled FAD reference at matching seed
+  values, and asserts gradient parity sample-by-sample within the
+  block, modulo the boundary effect at the last frame.
+- **Block-boundary effect tests.** Fixtures parametrised by block
+  size confirm that the adjoint at frame `count - 1` is the
+  cotangent itself (no future contribution) and that the adjoint at
+  frame `0` matches the closed-form `Σ_{k=0..count-1} p^k`.
+- **RAD-vs-FAD perf bench extension.** Add LTI recursive shapes to
+  `examples/rad_vs_fad_perf.rs`. Expectation: RAD beats FAD when
+  the seed count exceeds a small threshold (the asymptotic
+  `O(M·N)` vs. `O(M+N)` advantage finally becomes visible because
+  recursion shadows are not duplicated).
+- **Backend parity goldens.** `xtask golden-gen-rust` regeneration
+  for the new fixtures, plus the existing
+  `cpp_signal_differential.rs` harness extended with a
+  `ReverseTimeRec`-aware comparison.
+
+### 20.8 Diagnostics and migration
+
+When E1 lands:
+
+- `RadUnsupportedNode { kind: "recursive-linear-transpose" }` becomes
+  a successful lowering path — no diagnostic is emitted on the LTI
+  recursive subset.
+- `recursive-block-linear-time-varying` and `recursive-bptt-required`
+  remain diagnostic-only and continue to refer to the future phase E2
+  / phase F work.
+- The supported-subset doc and the RAD usage guide must mention that
+  recursive LTI primals now compile, with the block-local horizon
+  contract called out explicitly so users do not assume cross-block
+  gradient flow.
+- A migration note in `docs/rad-note-en.md` documents the
+  block-local boundary semantics. Existing
+  `err_rad_delay_temporal_unsupported.dsp` stays — that fixture
+  exercises a *non-recursive* delay, which is still phase-F territory.
+
+### 20.9 Phase boundary with F
+
+Phase E1 in this scope **does not depend on** phase F:
+
+- E1 needs reverse iteration on a single block; F needs a tape of
+  primal intermediates whose size is independent of any signal node.
+- E1 only handles bodies whose state-transition is exactly affine in
+  the recursive variables (the `LinearLti` classification).
+- A nonlinear recursion (`+ ~ tanh(*(p))`) keeps raising
+  `recursive-bptt-required` after E1 lands. The user-visible
+  diagnostic and the codepath that produces it are unchanged.
+
+The design is forward-compatible with the §19.4 hybrid: when phase F
+adds a tape mechanism, the linearised tangent recurrence still
+benefits from the E1 transposition lowering, and the only new wiring
+is reading primal-intermediate samples from the F tape instead of the
+block-local rotating buffer that E1 uses.
+
+### 20.10 Cost estimate
+
+- **Propagation glue** (replace the strict-failure path with a
+  `transpose_lti_de_bruijn_rec_scaffold` call + `ReverseTimeRec`
+  emission): half a day.
+- **Signal-IR `ReverseTimeRec` node** (signals crate, matchers,
+  printers, validators): half a day.
+- **FIR lowering** (single backward-loop path, recursion-array
+  indexing flip, terminal-zero pre-loop): one day.
+- **Interp opcode + serializer**: one day.
+- **Cranelift backend support**: one day.
+- **C/C++ backend support**: one day.
+- **End-to-end runtime tests + parity goldens**: one day.
+
+Total: ~6 working days for an interp-only landing, ~9 working days
+to cover all three backends. Phase F is not on the critical path.
+
+### 20.11 What this delivers
+
+- `rad(LTI_recursive_primal, seeds)` compiles end-to-end in the
+  feed-forward backends. No host orchestration is required: the
+  compute kernel runs both the forward primal and the reverse
+  adjoint on the same compute block.
+- The user can train recursive linear filter coefficients (biquads,
+  cross-coupled state-space, integrators) by gradient descent with
+  the same loop pattern as `rad_gradient_descent`. The
+  `rad_adaptive_notch` example becomes redundant in its host-fed
+  delay form; a new example can show a true biquad notch with the
+  delay line *inside* `rad(...)`.
+- The phase-1 RAD efficiency claim (`O(M+N)` cost for `M` outputs
+  and `N` seeds) extends to the LTI recursive subset, recovering
+  the asymptotic advantage over FAD on shapes where it matters
+  (high-order IIR with many adjustable coefficients).
+- The plan §17 risks are unchanged: simplification of adjoint sums
+  remains the long-tail concern, and nonlinear feedback remains
+  refused with a precise diagnostic.
