@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rad_adaptive_notch_omega.dsp
+bytes=875
+lines=22
+fnv1a64=aa80f99ad18deb59

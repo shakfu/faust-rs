@@ -145,6 +145,48 @@ The host buffers `x[n-k]` and writes `[x_n, x_{n-1}, x_{n-2}, x_{n-3}]`
 to the four input channels each frame. See
 [`tests/corpus/rad_fir_taps_external_delays.dsp`](../tests/corpus/rad_fir_taps_external_delays.dsp).
 
+## Pattern: LMS adaptive filtering (host-managed delay line)
+
+A 3-tap FIR notch with a single tunable angular frequency:
+
+```faust
+omega = hslider("omega", 1.0, 0.01, 3.0, 0.0001);
+notch(xn, xn1, xn2) = xn - 2.0 * cos(omega) * xn1 + xn2;
+process = rad(notch, omega);
+```
+
+is `tests/corpus/rad_adaptive_notch_omega.dsp`. The transfer function
+is `H(z) = 1 - 2·cos(ω)·z⁻¹ + z⁻²`, which places zeros on the unit
+circle at `e^(±j·ω)`. Minimising the output power
+`J(ω) = E[y²]` drives `ω` to the strongest input frequency — the
+classical LMS adaptive notch.
+
+[`crates/compiler/examples/rad_adaptive_notch.rs`](../crates/compiler/examples/rad_adaptive_notch.rs)
+ships the full host loop:
+
+- synthesises a noisy sinusoid at `OMEGA_TARGET = 1.3 rad/sample`,
+- buffers `x[n], x[n-1], x[n-2]` over a 512-sample moving window,
+- runs the rad-compiled DSP block-by-block,
+- accumulates `loss = mean(y²)` and `grad = mean(2·y·∂y/∂ω)`,
+- updates `ω` with plain SGD, projects back into the slider's
+  declared range, and writes through `set_real_zone`.
+
+Starting from `ω = 0.4` it converges to within `2e-4` of the target
+in under 50 iterations. The remaining loss is the additive noise
+floor `σ²`, which is exactly what an LMS adaptive notch should leave
+behind.
+
+Run with:
+
+```bash
+cargo run --release -p compiler --example rad_adaptive_notch
+```
+
+This is the recognisable adaptive-filtering use case for phase-1
+RAD: any FIR or memoryless nonlinear filter parameterised by one or
+more sliders is fittable today, with the host buffering whatever
+state the differentiated body cannot carry.
+
 ## Pattern: stateless waveshapers
 
 A polynomial or `tanh`-based waveshaper without feedback fits
@@ -201,6 +243,8 @@ cargo run --release -p compiler --example rad_vs_fad_perf
   — `ui_instructions`, `get_real_zone`, `set_real_zone`.
 - [`crates/compiler/examples/rad_gradient_descent.rs`](../crates/compiler/examples/rad_gradient_descent.rs)
   — reference SGD loop.
+- [`crates/compiler/examples/rad_adaptive_notch.rs`](../crates/compiler/examples/rad_adaptive_notch.rs)
+  — adaptive 3-tap notch filter, LMS convergence on output power.
 - [`crates/compiler/examples/rad_vs_fad_perf.rs`](../crates/compiler/examples/rad_vs_fad_perf.rs)
   — RAD-vs-FAD comparison harness.
 - [`docs/rad-note-en.md`](rad-note-en.md) — RAD algorithm and rule
