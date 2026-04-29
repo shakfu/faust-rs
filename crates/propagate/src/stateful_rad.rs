@@ -8,8 +8,50 @@
 //! # Scope
 //! This module does not enable reverse-mode differentiation through
 //! recursive or delayed signals. It classifies one recursive signal group so
-//! future RAD phases can decide whether a causal transpose is structurally
-//! plausible:
+//! future RAD phases can decide whether an exact stateful adjoint is
+//! structurally plausible and which implementation family it would need.
+//!
+//! Current phase-1 `rad(...)` lowering still rejects temporal and recursive
+//! signal families in `reverse_ad`. The functions here are used only as a
+//! gate for diagnostics and as a preparatory predicate for later phases:
+//!
+//! - phase E1 can attempt a block-local transpose for groups classified as
+//!   [`RadRecLinearity::LinearLti`];
+//! - phase E2 can replay primal-block coefficients for groups classified as
+//!   [`RadRecLinearity::LinearTimeVarying`];
+//! - phase F must use finite-horizon back-propagation through time (BPTT) for
+//!   groups classified as [`RadRecLinearity::Nonlinear`].
+//!
+//! # Input representation
+//! The analysis runs on the De Bruijn recursion form produced during
+//! propagation, before `signal_prepare` converts recursive placeholders into
+//! symbolic `sigRec`/`sigProj` names:
+//!
+//! ```text
+//! DEBRUIJNREC([branch_0, branch_1, ...])
+//! DEBRUIJNREF(1)             // reference to the current recursion group
+//! Proj(i, DEBRUIJNREF(1))    // recursive state lane i
+//! ```
+//!
+//! The `current_level` value tracks nested De Bruijn scopes. A reference at
+//! the current level is treated as dependence on the state being classified;
+//! references to any other level are treated as independent time-varying
+//! signals because they are outside the current recurrence's state vector.
+//!
+//! # Classification model
+//! Each signal node is summarized by three facts:
+//!
+//! - whether it depends on a current-recursion state lane;
+//! - the worst linearity class seen along any current-state path;
+//! - whether the part independent of the current state is a literal constant
+//!   or a time-varying signal.
+//!
+//! These facts let the local rule table distinguish `0.5 * state` from
+//! `input(0) * state` and from `state * state`, without expanding the signal
+//! graph into algebraic normal form.
+//!
+//! # Result classes
+//! A successful recursive-group classification has the following meaning:
 //!
 //! - [`RadRecLinearity::LinearLti`] means every current-recursion back-edge
 //!   appears linearly and only under constant coefficients. Independent input
@@ -22,10 +64,26 @@
 //!   nonlinear primitive, a branch, a discrete cast, or another expression
 //!   that is not affine in the recursive variables.
 //!
+//! The lattice is monotonic: `Nonlinear` dominates
+//! `LinearTimeVarying`, which dominates `LinearLti`. Multi-output recursive
+//! groups are classified by taking that maximum across every branch.
+//!
+//! # Conservative boundaries
 //! The analysis is intentionally conservative and read-only. Unsupported or
 //! opaque signal families are treated as time-varying coefficients unless
 //! they contain the current recursive reference in a recognized nonlinear
 //! position.
+//!
+//! The classifier accepts temporal shifts such as `delay1(state)` as
+//! structurally linear. That does not mean phase-1 RAD can lower them: the
+//! reverse transpose of a delay is anti-causal in stream time and needs the
+//! future block/tape convention described in the RAD plan.
+//!
+//! # Complexity
+//! Classification is linear in the visited signal DAG for a fixed De Bruijn
+//! level. `LinearityAnalyzer` memoizes `(SigId, current_level)` because the
+//! same shared subgraph can be visited from several recursive branches and
+//! because nested recursive groups change the meaning of a De Bruijn level.
 
 use ahash::AHashMap;
 use signals::{BinOp, SigId, SigMatch, match_sig};
@@ -35,15 +93,44 @@ use tlib::{TreeArena, TreeId, list_to_vec, match_de_bruijn_rec, match_de_bruijn_
 ///
 /// This is a structural predicate for future stateful RAD phases, not a
 /// promise that `rad(...)` currently accepts the group.
+///
+/// # Ordering
+/// The implicit severity order is:
+///
+/// ```text
+/// LinearLti < LinearTimeVarying < Nonlinear
+/// ```
+///
+/// `RadRecLinearity::max` implements that join operation internally when
+/// combining branches or child expressions.
+///
+/// # What counts as "recursive"
+/// Only references to the De Bruijn level currently being classified are
+/// considered recursive-state dependence. Other recursion references can
+/// still vary over time, but they are coefficients or driving signals from
+/// this group's point of view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RadRecLinearity {
     /// Linear time-invariant state transition: recursive variables only appear
     /// linearly and under literal coefficients.
+    ///
+    /// A typical shape is `input + 0.5 * Proj(0, DEBRUIJNREF(1))`. The input
+    /// term is allowed because it is independent of the recursive state; the
+    /// back-edge coefficient is constant, so the state transition matrix is
+    /// fixed across the block.
     LinearLti,
     /// Linear but time-varying state transition: recursive variables only
     /// appear linearly, but at least one coefficient is signal-dependent.
+    ///
+    /// A typical shape is `input(0) * Proj(0, DEBRUIJNREF(1))`. The state lane
+    /// remains affine, but the coefficient must be replayed from the primal
+    /// block at the matching sample for an exact reverse pass.
     LinearTimeVarying,
     /// Nonlinear dependence on a recursive variable.
+    ///
+    /// This covers `state * state`, `sin(state)`, state-dependent branches,
+    /// state-dependent table indices, and discrete casts or comparisons that
+    /// consume the current recursive state.
     Nonlinear,
 }
 
@@ -52,25 +139,44 @@ pub enum RadRecLinearity {
 /// The enum names mirror plan §19.6:
 ///
 /// - [`RecRadMode::LinearTranspose`] is the E1 target. The group is eligible
-///   for an exact linear transpose, but `rad(...)` still needs a block/tape
-///   evaluation convention before it can emit code.
+///   for an exact block-local linear transpose, but `rad(...)` still needs the
+///   surrounding block/tape evaluation convention before it can emit
+///   user-visible code.
 /// - [`RecRadMode::BlockLinearTimeVarying`] is the E2 target. The group stays
 ///   linear in recursive state, but coefficients must be read from the primal
 ///   block at the corresponding sample.
 /// - [`RecRadMode::BpttRequired`] is the phase-F target for nonlinear
 ///   feedback; it requires finite-horizon unrolling and a backward sweep.
+///
+/// The conversion from [`RadRecLinearity`] is intentionally lossless at the
+/// strategy level. This enum is a scheduling/diagnostic boundary; it does not
+/// carry a horizon, tape policy, or backend allocation model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecRadMode {
     /// Phase E1 candidate: linear time-invariant recursive state transition.
+    ///
+    /// A future implementation can transpose the state matrix structurally and
+    /// run the adjoint recurrence over a finite block in reverse sample order.
     LinearTranspose,
     /// Phase E2 candidate: linear time-varying transition requiring block
     /// coefficient replay.
+    ///
+    /// The recursive-state dependence is affine, but at least one coefficient
+    /// is a signal. Exact reverse mode must read the coefficient value that the
+    /// primal pass used at the corresponding sample.
     BlockLinearTimeVarying,
     /// Phase F candidate: nonlinear recurrence requiring BPTT.
+    ///
+    /// A local graph transpose is not enough because the current-state path
+    /// crosses nonlinear or discrete control flow. A future implementation must
+    /// unroll a horizon, record required primal intermediates, and sweep the
+    /// unrolled graph backward.
     BpttRequired,
 }
 
 impl From<RadRecLinearity> for RecRadMode {
+    /// Maps the structural linearity class to the first future RAD strategy
+    /// capable of preserving exact reverse-mode semantics for that class.
     fn from(value: RadRecLinearity) -> Self {
         match value {
             RadRecLinearity::LinearLti => Self::LinearTranspose,
@@ -81,6 +187,11 @@ impl From<RadRecLinearity> for RecRadMode {
 }
 
 impl RadRecLinearity {
+    /// Returns the more conservative of two recursive-linearity classes.
+    ///
+    /// This is the join operation for the classifier lattice. It is used when
+    /// combining independent branches, summing two recursive-state paths, or
+    /// propagating a time-varying coefficient through an otherwise LTI term.
     fn max(self, other: Self) -> Self {
         use RadRecLinearity::{LinearLti, LinearTimeVarying, Nonlinear};
         match (self, other) {
@@ -90,6 +201,13 @@ impl RadRecLinearity {
         }
     }
 
+    /// Upgrades a state-dependent term when it is multiplied or divided by a
+    /// state-independent coefficient.
+    ///
+    /// Constant coefficients preserve the existing class. Time-varying
+    /// coefficients make the term at least
+    /// [`RadRecLinearity::LinearTimeVarying`], while preserving a prior
+    /// [`RadRecLinearity::Nonlinear`] result.
     fn with_coeff(self, variation: IndependentVariation) -> Self {
         match variation {
             IndependentVariation::Constant => self,
@@ -98,13 +216,25 @@ impl RadRecLinearity {
     }
 }
 
+/// Variation class for subexpressions that are independent of the current
+/// recursive state.
+///
+/// This intentionally has only two values. The classifier does not need to
+/// know the exact expression for a coefficient; it only needs to know whether
+/// that coefficient can change from sample to sample and therefore invalidates
+/// the LTI transpose shortcut.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IndependentVariation {
+    /// Literal integer/real constants and combinations proven constant by the
+    /// local rule table.
     Constant,
+    /// Inputs, UI controls, foreign variables, soundfiles, table reads, or any
+    /// opaque state-independent expression that may vary across samples.
     TimeVarying,
 }
 
 impl IndependentVariation {
+    /// Returns the more conservative variation class.
     fn max(self, other: Self) -> Self {
         match (self, other) {
             (Self::TimeVarying, _) | (_, Self::TimeVarying) => Self::TimeVarying,
@@ -113,14 +243,33 @@ impl IndependentVariation {
     }
 }
 
+/// Local abstract value used while classifying one signal expression.
+///
+/// `ExprClass` is deliberately small: it is a product of the three facts the
+/// RAD strategy decision needs. It does not preserve the shape of the signal
+/// expression and it does not attempt symbolic simplification beyond the
+/// structural matcher rules in [`LinearityAnalyzer::classify_uncached`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ExprClass {
+    /// Whether the expression reads `Proj(_, DEBRUIJNREF(current_level))` or a
+    /// nested expression that depends on it.
     depends_on_current_rec: bool,
+    /// Worst linearity class along paths that do depend on the current
+    /// recursive state. For state-independent expressions this is always
+    /// [`RadRecLinearity::LinearLti`] and should be ignored in favor of
+    /// [`ExprClass::independent_variation`].
     rec_linearity: RadRecLinearity,
+    /// Variation of the expression when it is independent of the current
+    /// recursive state. For state-dependent expressions this is reset to
+    /// [`IndependentVariation::Constant`] because coefficient variation is
+    /// folded into [`ExprClass::rec_linearity`] at multiplication/division
+    /// boundaries.
     independent_variation: IndependentVariation,
 }
 
 impl ExprClass {
+    /// Class for a literal value or a composition proven constant by local
+    /// rules.
     fn constant() -> Self {
         Self {
             depends_on_current_rec: false,
@@ -129,6 +278,11 @@ impl ExprClass {
         }
     }
 
+    /// Class for a state-independent expression that may vary across samples.
+    ///
+    /// This is the conservative fallback for inputs, controls, tables,
+    /// soundfile access, foreign variables/functions, malformed nested lists,
+    /// and unknown signal families.
     fn time_varying() -> Self {
         Self {
             depends_on_current_rec: false,
@@ -137,6 +291,9 @@ impl ExprClass {
         }
     }
 
+    /// Class for a direct current-recursion state lane.
+    ///
+    /// A bare state read is linear in itself with unit, constant coefficient.
     fn current_rec() -> Self {
         Self {
             depends_on_current_rec: true,
@@ -145,6 +302,8 @@ impl ExprClass {
         }
     }
 
+    /// Class for an expression proven nonlinear in the current recursive
+    /// state.
     fn nonlinear() -> Self {
         Self {
             depends_on_current_rec: true,
@@ -153,6 +312,13 @@ impl ExprClass {
         }
     }
 
+    /// Combines two expressions under addition or subtraction.
+    ///
+    /// Addition preserves affine dependence on the current recursive state. If
+    /// both operands are independent, only their coefficient variation matters.
+    /// If exactly one operand is state-dependent, the independent operand is a
+    /// driving term and does not affect the transition class. If both operands
+    /// are state-dependent, the result takes the worst state-path linearity.
     fn additive(self, other: Self) -> Self {
         match (self.depends_on_current_rec, other.depends_on_current_rec) {
             (false, false) => Self {
@@ -170,6 +336,13 @@ impl ExprClass {
         }
     }
 
+    /// Combines two expressions under multiplication.
+    ///
+    /// Multiplying two current-state-dependent expressions is nonlinear.
+    /// Multiplying a state-dependent expression by a state-independent
+    /// expression preserves linearity only when the latter is a coefficient; a
+    /// time-varying coefficient upgrades the result to
+    /// [`RadRecLinearity::LinearTimeVarying`].
     fn multiplicative(self, other: Self) -> Self {
         match (self.depends_on_current_rec, other.depends_on_current_rec) {
             (true, true) => Self::nonlinear(),
@@ -191,6 +364,13 @@ impl ExprClass {
         }
     }
 
+    /// Combines numerator and denominator classes under division.
+    ///
+    /// Division by an expression that depends on the current recursive state is
+    /// nonlinear (`state / state_independent` is affine, but
+    /// `state_independent / state` and `state / state` are not). Division by a
+    /// time-varying independent denominator is treated as a time-varying
+    /// coefficient.
     fn denominator(self, denom: Self) -> Self {
         if denom.depends_on_current_rec {
             return Self::nonlinear();
@@ -210,6 +390,10 @@ impl ExprClass {
         }
     }
 
+    /// Applies a smooth or otherwise nonlinear unary numeric primitive.
+    ///
+    /// These primitives preserve state-independent variation, but any current
+    /// recursive-state dependency through the operand becomes nonlinear.
     fn pure_unary(self) -> Self {
         if self.depends_on_current_rec {
             Self::nonlinear()
@@ -218,6 +402,11 @@ impl ExprClass {
         }
     }
 
+    /// Applies a discrete unary primitive such as integer cast or rounding.
+    ///
+    /// Discrete operations are not affine in a recursive state lane. On
+    /// state-independent values they are still treated as time-varying because
+    /// the local rule table does not prove constant folding through them.
     fn discrete_unary(self) -> Self {
         if self.depends_on_current_rec {
             Self::nonlinear()
@@ -226,6 +415,12 @@ impl ExprClass {
         }
     }
 
+    /// Applies a delay-like temporal shift.
+    ///
+    /// A temporal shift of the current recursive state remains structurally
+    /// linear for classification purposes. Exact RAD lowering still needs a
+    /// block/tape convention because the reverse of a delay is anti-causal in
+    /// stream time.
     fn temporal_shift(self) -> Self {
         if self.depends_on_current_rec {
             self
@@ -238,6 +433,12 @@ impl ExprClass {
         }
     }
 
+    /// Combines selector and alternatives under a conditional branch.
+    ///
+    /// Any current-state dependence in the selector or either branch is
+    /// classified as nonlinear. If all operands are state-independent, the
+    /// branch is a time-varying driving expression whose variation is the
+    /// maximum of its operands.
     fn branch(selector: Self, when_zero: Self, when_nonzero: Self) -> Self {
         if selector.depends_on_current_rec
             || when_zero.depends_on_current_rec
@@ -263,6 +464,25 @@ impl ExprClass {
 /// successful result is purely structural: current `rad(...)` lowering still
 /// rejects recursion and delay nodes until a later phase adds a concrete
 /// transpose or BPTT implementation.
+///
+/// # Semantics
+/// `body` must be a proper list of recursive branch signals. Each branch is
+/// classified with `current_level = 1`, which means `DEBRUIJNREF(1)` denotes
+/// the group being classified. The group result is the maximum
+/// [`RadRecLinearity`] across all branches.
+///
+/// A malformed recursive body list returns `None`. That keeps this helper a
+/// predicate over well-formed propagated recursion groups rather than a
+/// diagnostics-producing validator.
+///
+/// # Examples
+/// In signal notation:
+///
+/// ```text
+/// input + 0.5 * Proj(0, DEBRUIJNREF(1))       => LinearLti
+/// input(0) * Proj(0, DEBRUIJNREF(1))          => LinearTimeVarying
+/// sin(Proj(0, DEBRUIJNREF(1)))                => Nonlinear
+/// ```
 #[must_use]
 pub fn classify_de_bruijn_rec_group(arena: &TreeArena, group: SigId) -> Option<RadRecLinearity> {
     let body = match_de_bruijn_rec(arena, group)?;
@@ -282,6 +502,10 @@ pub fn classify_de_bruijn_rec_group(arena: &TreeArena, group: SigId) -> Option<R
 /// Returns `None` for non-`DEBRUIJNREC` inputs. A returned mode is a gate, not
 /// an implementation hook: phase-1 `rad(...)` still rejects recursive
 /// projections until E1/E2/F add the corresponding runtime semantics.
+///
+/// This is a convenience wrapper around [`classify_de_bruijn_rec_group`] for
+/// call sites that care about the future implementation strategy rather than
+/// the raw structural class.
 #[must_use]
 pub fn classify_de_bruijn_rec_rad_mode(arena: &TreeArena, group: SigId) -> Option<RecRadMode> {
     classify_de_bruijn_rec_group(arena, group).map(RecRadMode::from)
@@ -292,6 +516,10 @@ pub fn classify_de_bruijn_rec_rad_mode(arena: &TreeArena, group: SigId) -> Optio
 /// This is the shape reached by propagated recursive boxes and by RAD's
 /// current strict rejection path. Returning `None` means the signal is not a
 /// direct projection over a De Bruijn recursive group.
+///
+/// The projection index itself does not affect the result. A recursive group
+/// is classified as a whole because cross-coupled state updates can make one
+/// lane's future RAD mode depend on another lane's branch.
 #[must_use]
 pub fn classify_recursive_projection_rad_mode(arena: &TreeArena, sig: SigId) -> Option<RecRadMode> {
     let SigMatch::Proj(_, group) = match_sig(arena, sig) else {
@@ -300,17 +528,33 @@ pub fn classify_recursive_projection_rad_mode(arena: &TreeArena, sig: SigId) -> 
     classify_de_bruijn_rec_rad_mode(arena, group)
 }
 
+/// Stateful memoizing classifier for signal expressions under one De Bruijn
+/// context.
+///
+/// The analyzer has no side effects on the arena. It owns only a memo table so
+/// the same instance can be reused across all branches of a recursive group,
+/// preserving DAG sharing in the analysis itself.
 struct LinearityAnalyzer {
+    /// Cached abstract classes keyed by signal node and the active De Bruijn
+    /// level. The level is part of the key because the same node can be
+    /// independent in one nested recursion and current-state-dependent in
+    /// another.
     memo: AHashMap<(TreeId, i64), ExprClass>,
 }
 
 impl LinearityAnalyzer {
+    /// Creates an empty analyzer for one recursive-group classification.
     fn new() -> Self {
         Self {
             memo: AHashMap::new(),
         }
     }
 
+    /// Classifies `sig` under the given current De Bruijn recursion level.
+    ///
+    /// This memoized wrapper is the only recursive entry point used by the
+    /// rule table. Use [`LinearityAnalyzer::classify_uncached`] only to define
+    /// the per-signal transfer rules.
     fn classify(&mut self, arena: &TreeArena, sig: SigId, current_level: i64) -> ExprClass {
         if let Some(cached) = self.memo.get(&(sig, current_level)).copied() {
             return cached;
@@ -321,6 +565,24 @@ impl LinearityAnalyzer {
         class
     }
 
+    /// Applies the structural rule table for one uncached signal node.
+    ///
+    /// The table is conservative by construction:
+    ///
+    /// - literal constants are [`ExprClass::constant`];
+    /// - inputs, controls, external state, soundfiles, unknown nodes, and
+    ///   malformed nested lists are [`ExprClass::time_varying`];
+    /// - transparent wrappers forward the class of their signal operand;
+    /// - arithmetic `+`/`-` use [`ExprClass::additive`];
+    /// - arithmetic `*` and `/` preserve affine state dependence only when the
+    ///   other operand is state-independent;
+    /// - smooth nonlinear primitives, branches, tables, foreign functions, and
+    ///   discrete operations become [`ExprClass::nonlinear`] when they consume
+    ///   the current recursive state.
+    ///
+    /// Nested `DEBRUIJNREC` bodies are classified at `current_level + 1`, so
+    /// references to the outer group are no longer confused with references to
+    /// the nested group.
     fn classify_uncached(
         &mut self,
         arena: &TreeArena,

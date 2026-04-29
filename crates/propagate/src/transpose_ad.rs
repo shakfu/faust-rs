@@ -11,6 +11,65 @@
 //! given one affine LTI `DEBRUIJNREC` group, extract the linear state
 //! transition matrix and build the transposed recursive group.
 //!
+//! The exported entry point is [`transpose_lti_de_bruijn_rec_scaffold`].
+//! It accepts only groups that [`crate::stateful_rad::classify_de_bruijn_rec_group`]
+//! has already proven [`RadRecLinearity::LinearLti`]. The second pass in this
+//! file is intentionally narrower than that classifier: the classifier answers
+//! "is a future exact RAD mode possible?", while this scaffold answers "can
+//! the current E1 extractor build the concrete transposed state graph without
+//! the block/tape convention yet?".
+//!
+//! # Input representation
+//! The input is the same propagated De Bruijn recursion shape used by
+//! [`crate::stateful_rad`]:
+//!
+//! ```text
+//! DEBRUIJNREC([
+//!     branch_0(Proj(0, DEBRUIJNREF(1)), Proj(1, DEBRUIJNREF(1)), ...),
+//!     branch_1(...),
+//!     ...
+//! ])
+//! ```
+//!
+//! Each branch is one row of the primal state update. If the group has `N`
+//! branches, it has `N` state lanes. A term such as
+//! `0.5 * Proj(1, DEBRUIJNREF(1))` in `branch_0` is recorded as a matrix
+//! contribution from source output row `0` to primal state slot `1` with
+//! coefficient `0.5`.
+//!
+//! Independent driving terms such as `input(0)`, UI controls, or literals not
+//! multiplying a recursive state lane are ignored by the extractor because the
+//! state-to-state transpose does not depend on them. Those terms still matter
+//! for the primal program and for input-parameter gradients; this module only
+//! builds the recursive-state adjoint skeleton.
+//!
+//! # Output representation
+//! The returned value is another `DEBRUIJNREC` group with the same arity. Its
+//! `target_slot` branch has the shape:
+//!
+//! ```text
+//! input(target_slot)
+//!   + sum_for_each_original_term_targeting_slot(
+//!       coeff * Proj(source_output, DEBRUIJNREF(1))
+//!     )
+//! ```
+//!
+//! In matrix notation, if the primal recurrence is
+//!
+//! ```text
+//! y[n] = A * y[n-1] + d[n]
+//! ```
+//!
+//! the scaffold emits the recurrence for the block-local adjoint state:
+//!
+//! ```text
+//! y_bar[n] = cotangent[n] + A^T * y_bar[n+1]
+//! ```
+//!
+//! The emitted graph still uses ordinary `Proj(_, DEBRUIJNREF(1))` edges.
+//! Its interpretation as `y_bar[n+1]` rather than `y_bar[n-1]` belongs to the
+//! future reverse-block evaluator, not to this structural pass.
+//!
 //! The emitted group uses `input(i)` as the incoming cotangent for primal
 //! output lane `i`, plus the transposed feedback from the previous adjoint
 //! state. That is only an internal structural representation; a later phase
@@ -18,7 +77,7 @@
 //! time-reversed order before this can become user-visible `rad(...)`
 //! behavior.
 //!
-//! Current conservative limits:
+//! # Current conservative limits
 //! - accepted recursive-state terms: `Proj(slot, DEBRUIJNREF(1))`, sums,
 //!   differences, and multiplication/division by state-independent constant
 //!   expressions;
@@ -26,6 +85,22 @@
 //!   the state-to-state transpose;
 //! - temporal operators over recursive state are rejected until the block
 //!   evaluation convention fixes their adjoint placement.
+//!
+//! The first bullet is narrower than the E0 classifier. A group containing
+//! `delay1(Proj(...))` is still LTI structurally, but this scaffold returns
+//! [`TransposeAdError::TemporalTermNeedsBlockConvention`] because placing the
+//! corresponding adjoint delay requires the reverse-time block semantics.
+//!
+//! # Failure policy
+//! This module returns structured [`TransposeAdError`] values instead of
+//! silently dropping unsupported recursive-state terms. That is a correctness
+//! guard: a missing state term would emit an incomplete transpose and produce
+//! a wrong gradient once the scaffold is wired into user-visible RAD.
+//!
+//! # Relationship to phase-1 RAD
+//! Current phase-1 `rad(...)` still rejects recursive and temporal signal
+//! families in `reverse_ad`. This module is a preparatory implementation and
+//! a test target for the future phase-E1 path described in the porting plan.
 
 use std::fmt::{Display, Formatter};
 
@@ -34,25 +109,61 @@ use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use tlib::{TreeArena, de_bruijn_rec, de_bruijn_ref, list_to_vec, match_de_bruijn_rec};
 
 /// Error returned by the phase-E1 transposition scaffold.
+///
+/// These errors describe why the current structural extractor cannot build an
+/// exact transposed recursive group. They are intentionally more precise than
+/// a boolean "not supported" result so future RAD diagnostics can distinguish
+/// malformed IR, non-LTI feedback, unsupported-but-linear syntax, temporal
+/// placement gaps, and arity/index problems.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransposeAdError {
     /// The input was not a `DEBRUIJNREC(body)` group.
+    ///
+    /// The scaffold is defined only at the recursive-group boundary. Callers
+    /// that start from a projection should pass the projected group, not the
+    /// `Proj` node itself.
     NotRecursiveGroup,
     /// The recursive body list was malformed.
+    ///
+    /// Propagated recursion groups should carry a proper list of branch
+    /// signals. A malformed list means the input is outside the expected
+    /// propagation contract and no transpose can be trusted.
     MalformedBody,
     /// The classifier did not prove the group is LTI.
+    ///
+    /// This covers both [`RadRecLinearity::LinearTimeVarying`] and
+    /// [`RadRecLinearity::Nonlinear`] results. Time-varying coefficients need
+    /// phase E2 coefficient replay; nonlinear feedback needs a later BPTT or
+    /// hybrid path.
     NotLinearLti,
     /// The affine extractor found a recursive-state term outside the current
     /// narrow E1 scaffold.
+    ///
+    /// Examples include a recursive state flowing through a smooth nonlinear
+    /// primitive, a comparison, a branch, a table read, or a term where both
+    /// operands of a multiplication depend on the current recursive state.
     UnsupportedLinearTerm,
     /// A temporal operator over recursive state needs the future block/tape
     /// convention before it can be transposed safely.
+    ///
+    /// The E0 classifier can mark `delay1(state)` as LTI, but the exact adjoint
+    /// placement is anti-causal in stream time. The scaffold refuses it until
+    /// reverse-block evaluation fixes the meaning of the shifted edge.
     TemporalTermNeedsBlockConvention,
     /// A projected recursive slot did not fit the group arity.
+    ///
+    /// Slot indices come from `Proj(slot, DEBRUIJNREF(1))`. Negative indices,
+    /// indices that cannot convert to `usize`, and indices outside the branch
+    /// count all indicate malformed recursive state references for this group.
     SlotOutOfRange,
 }
 
 impl Display for TransposeAdError {
+    /// Formats the error as a compact diagnostic fragment.
+    ///
+    /// Higher-level RAD diagnostics are expected to add source context and the
+    /// affected signal node. This implementation keeps the scaffold error
+    /// suitable for `std::error::Error` and unit-test comparisons.
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotRecursiveGroup => f.write_str("not a DEBRUIJNREC group"),
@@ -71,10 +182,34 @@ impl Display for TransposeAdError {
 
 impl std::error::Error for TransposeAdError {}
 
+/// One coefficient entry of the primal state-transition matrix.
+///
+/// A term in primal branch `source_output` of the form
+/// `coeff * Proj(state_slot, DEBRUIJNREF(1))` means:
+///
+/// ```text
+/// A[source_output, state_slot] += coeff
+/// ```
+///
+/// The emitted transposed group uses the same value as:
+///
+/// ```text
+/// adjoint_branch[state_slot] += coeff * prev_adjoint[source_output]
+/// ```
+///
+/// Coefficients are kept as `SigId` values rather than folded scalars so the
+/// scaffold can preserve any constant signal expression that the classifier
+/// accepted as state-independent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LinearTerm {
+    /// Row in the primal update matrix, i.e. the branch where the term was
+    /// found and the adjoint lane that feeds the transposed term.
     source_output: usize,
+    /// Column in the primal update matrix, i.e. the recursive state lane read
+    /// by the primal term and the branch that receives the transposed term.
     state_slot: usize,
+    /// State-independent coefficient accumulated along the affine path from
+    /// the branch root to the recursive projection.
     coeff: SigId,
 }
 
@@ -85,6 +220,36 @@ struct LinearTerm {
 /// current `rad(...)` behavior. Callers must not treat the returned group as
 /// executable reverse-mode code until the surrounding block/tape evaluation
 /// convention exists.
+///
+/// # Accepted input
+/// `group` must be a well-formed `DEBRUIJNREC(body)` whose body list contains
+/// one branch per state lane. The E0 classifier must classify it as
+/// [`RadRecLinearity::LinearLti`].
+///
+/// The extractor currently accepts recursive-state occurrences built from:
+///
+/// - direct projections: `Proj(slot, DEBRUIJNREF(1))`;
+/// - addition and subtraction;
+/// - multiplication by state-independent coefficients;
+/// - division by state-independent denominators;
+/// - transparent wrappers: `FloatCast`, `Output`, `Lowest`, and `Highest`.
+///
+/// State-independent subgraphs are ignored unless they multiply or divide a
+/// recursive-state path, because they do not contribute to the recursive
+/// state-transition transpose.
+///
+/// # Returned graph
+/// On success, the result is a new `DEBRUIJNREC` group with the same arity as
+/// the input. Branch `i` starts with `input(i)`, representing the incoming
+/// cotangent for primal lane `i`, then adds one transposed feedback term for
+/// every extracted matrix entry targeting state slot `i`.
+///
+/// # Errors
+/// The function returns [`TransposeAdError::NotLinearLti`] before extraction
+/// when the classifier cannot prove an LTI transition. Extraction can still
+/// return [`TransposeAdError::UnsupportedLinearTerm`] or
+/// [`TransposeAdError::TemporalTermNeedsBlockConvention`] for LTI expressions
+/// that are outside this narrow scaffold's current syntax.
 pub fn transpose_lti_de_bruijn_rec_scaffold(
     arena: &mut TreeArena,
     group: SigId,
@@ -122,6 +287,21 @@ pub fn transpose_lti_de_bruijn_rec_scaffold(
     Ok(de_bruijn_rec(arena, body))
 }
 
+/// Extracts affine recursive-state terms from one primal branch.
+///
+/// `coeff` is the accumulated state-independent multiplier on the path from
+/// the branch root to `sig`. `source_output` identifies the primal branch
+/// being scanned. Each direct `Proj(slot, DEBRUIJNREF(current_level))` appends
+/// one [`LinearTerm`] with that accumulated coefficient.
+///
+/// The extractor is deliberately syntax-directed. It does not normalize
+/// algebraically equivalent expressions, distribute multiplication over sums,
+/// or fold constants. The E0 classifier has already guaranteed LTI structure;
+/// this pass only records the subset that can be emitted by the current E1
+/// scaffold.
+///
+/// State-independent subgraphs return `Ok(())` because they are driving terms.
+/// They affect the primal recurrence but not the state-transition matrix.
 fn extract_affine_state_terms(
     arena: &mut TreeArena,
     sig: SigId,
@@ -233,6 +413,16 @@ fn extract_affine_state_terms(
     }
 }
 
+/// Returns whether `sig` contains a reference to the current recursive group.
+///
+/// The scan is structural and conservative. It recognizes a direct
+/// `DEBRUIJNREF(current_level)` immediately, then recursively walks child
+/// nodes. Nested `DEBRUIJNREC` scopes increment `current_level` so references
+/// inside the nested body are interpreted relative to that nested recursion
+/// rather than the enclosing group.
+///
+/// This helper is used by the extractor to decide whether an operand is a
+/// coefficient/driving expression or part of the recursive state path.
 fn contains_current_rec_ref(arena: &TreeArena, sig: SigId, current_level: i64) -> bool {
     if tlib::match_de_bruijn_ref(arena, sig) == Some(current_level) {
         return true;
