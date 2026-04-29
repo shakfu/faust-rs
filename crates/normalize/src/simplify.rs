@@ -43,8 +43,47 @@ pub(crate) fn simplify(
     types: &HashMap<SigId, SigType>,
     sig: SigId,
 ) -> SigId {
-    let mut cache: HashMap<SigId, Option<SigId>> = HashMap::new();
-    sig_map(arena, &mut cache, types, sig)
+    let mut cache = SimplifyCache::new();
+    simplify_with_cache(arena, &mut cache, types, sig)
+}
+
+/// Per-pass cache for [`sig_map`].
+///
+/// C++ stores `simplify()` results on each tree node with the global
+/// `SIMPLIFIED` property.  Rust keeps the cache explicit so callers can scope
+/// it to one type context and still share it across co-dependent output roots.
+#[derive(Default)]
+pub(crate) struct SimplifyCache {
+    nodes: HashMap<SigId, Option<SigId>>,
+}
+
+impl SimplifyCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            nodes: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.nodes.clear();
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.nodes.len()
+    }
+}
+
+/// Simplify a signal tree reusing an existing per-pass cache.
+///
+/// The cache is valid only for the arena and type map used by the caller.
+pub(crate) fn simplify_with_cache(
+    arena: &mut TreeArena,
+    cache: &mut SimplifyCache,
+    types: &HashMap<SigId, SigType>,
+    sig: SigId,
+) -> SigId {
+    sig_map(arena, cache, types, sig)
 }
 
 /// Simplify a signal tree without type context.
@@ -89,12 +128,12 @@ pub fn simplify_const(arena: &mut TreeArena, sig: SigId) -> SigId {
 /// C++: `static Tree sigMap(Tree key, tfun f, Tree t)`.
 fn sig_map(
     arena: &mut TreeArena,
-    cache: &mut HashMap<SigId, Option<SigId>>,
+    cache: &mut SimplifyCache,
     types: &HashMap<SigId, SigType>,
     sig: SigId,
 ) -> SigId {
     // 1. Cache check: None → return sig unchanged; Some(r) → return r.
-    if let Some(cached) = cache.get(&sig) {
+    if let Some(cached) = cache.nodes.get(&sig) {
         return cached.unwrap_or(sig);
     }
 
@@ -104,7 +143,7 @@ fn sig_map(
         _ => None,
     };
     if let Some(body) = rec_body {
-        cache.insert(sig, None); // sentinel: if seen again, return sig
+        cache.nodes.insert(sig, None); // sentinel: if seen again, return sig
         let new_body = sig_map(arena, cache, types, body);
         return SigBuilder::new(arena).rec(new_body);
     }
@@ -129,9 +168,9 @@ fn sig_map(
 
     // Cache the result.
     if result == sig {
-        cache.insert(sig, None); // unchanged
+        cache.nodes.insert(sig, None); // unchanged
     } else {
-        cache.insert(sig, Some(result));
+        cache.nodes.insert(sig, Some(result));
     }
     result
 }
@@ -660,6 +699,25 @@ mod tests {
 
     fn types() -> HashMap<SigId, SigType> {
         HashMap::new()
+    }
+
+    #[test]
+    fn simplify_with_cache_reuses_seen_root() {
+        let mut a = arena();
+        let t = types();
+        let one = SigBuilder::new(&mut a).int(1);
+        let two = SigBuilder::new(&mut a).int(2);
+        let add = SigBuilder::new(&mut a).add(one, two);
+
+        let mut cache = SimplifyCache::new();
+        let first = simplify_with_cache(&mut a, &mut cache, &t, add);
+        let cached_nodes = cache.len();
+
+        let second = simplify_with_cache(&mut a, &mut cache, &t, add);
+
+        assert_eq!(match_sig(&a, first), SigMatch::Int(3));
+        assert_eq!(first, second);
+        assert_eq!(cache.len(), cached_nodes);
     }
 
     // ── Constant folding ──────────────────────────────────────────────────

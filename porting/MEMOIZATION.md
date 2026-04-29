@@ -259,16 +259,60 @@ Status: implemented
 Location:
 
 - `crates/normalize/src/simplify.rs`
+- `crates/normalize/src/normalform.rs`
 
 Cache:
 
-- `HashMap<SigId, Option<SigId>>`
+- `SimplifyCache { nodes: HashMap<SigId, Option<SigId>> }`
 
 Purpose:
 
 - memoizes recursive signal simplification,
 - uses `None` as a cycle-breaking sentinel for recursion groups,
-- ensures each shared signal node is simplified at most once per pass.
+- ensures each shared signal node is simplified at most once per pass,
+- keeps the cache explicit in Rust while preserving the important behavior of
+  the C++ `gGlobal->SIMPLIFIED` tree property.
+
+Scope:
+
+- `simplify(...)` still allocates a fresh `SimplifyCache` for one standalone
+  signal root,
+- `simplify_signals_fastlane(...)` now allocates one `SimplifyCache` for the
+  whole prepared output forest and threads it through every output root,
+- on a caught simplification panic, `simplify_signals_fastlane(...)` clears the
+  cache before returning the original root for that output, so no partial
+  traversal state is reused after unwinding.
+
+Why the forest scope matters:
+
+- C++ `simplify(Tree sig)` stores results directly on tree nodes via
+  `SIMPLIFIED`, so repeated calls over shared roots reuse previous
+  simplification results,
+- the initial Rust port created a fresh `HashMap` for every output in
+  `simplify_signals_fastlane(...)`; large RAD/FAD-expanded DSPs with many
+  related outputs could therefore redo the same `sig_map` and
+  `normalize_add_term` work across the forest,
+- a macOS `sample` on `rad_fxlms1.dsp` showed the active worker dominated by
+  `normalize::simplify::sig_map`, `Aterm::add_sig`,
+  `normalize_add_term`, `greatest_divisor`, and `mterm::gcd`, matching this
+  missing cross-root reuse pattern.
+
+Semantic constraints:
+
+- the cache key is the canonical `SigId` in one `TreeArena`,
+- the cached value is valid only for the same `SigType` map and simplification
+  pass,
+- typed and untyped simplification must not share one cache,
+- the cache is not stored in `TreeArena`; callers choose the pass boundary
+  explicitly.
+
+Validation:
+
+- `simplify_with_cache_reuses_seen_root` checks that a repeated root reuses the
+  same cache entries,
+- `rad_fxlms1.dsp` with `N = 512` compiled through the patched release
+  `faust-rs` in about 1.6 seconds after this cache was shared across the output
+  forest.
 
 ### 2.10 `normalize`: promotion cache in normal-form pipeline
 
@@ -438,6 +482,8 @@ Likely cache shape:
 Why:
 
 - the local simplify and promotion passes are already memoized,
+- `simplify_signals_fastlane(...)` now shares its local simplify cache across
+  one prepared output forest,
 - but the overall normal-form pipeline still has room for a more explicit
   staged cache strategy when multiple normalization sub-passes are chained.
 

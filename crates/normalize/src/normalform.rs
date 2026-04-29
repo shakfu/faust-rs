@@ -39,7 +39,7 @@ use sigtype::{Nature, SigType, TypeAnnotator};
 use tlib::{RecursionError, TreeArena, de_bruijn_to_sym, match_sym_rec, match_sym_ref};
 use ui::UiProgram;
 
-use crate::simplify::simplify;
+use crate::simplify::{SimplifyCache, simplify_with_cache};
 
 // ─── Options ──────────────────────────────────────────────────────────────────
 
@@ -203,8 +203,19 @@ pub fn simplify_signals_fastlane(
     types: &HashMap<SigId, SigType>,
     sigs: &[SigId],
 ) -> Vec<SigId> {
+    let mut cache = SimplifyCache::new();
     sigs.iter()
-        .map(|sig| catch_unwind(AssertUnwindSafe(|| simplify(arena, types, *sig))).unwrap_or(*sig))
+        .map(|sig| {
+            match catch_unwind(AssertUnwindSafe(|| {
+                simplify_with_cache(arena, &mut cache, types, *sig)
+            })) {
+                Ok(simplified) => simplified,
+                Err(_) => {
+                    cache.clear();
+                    *sig
+                }
+            }
+        })
         .collect()
 }
 
