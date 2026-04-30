@@ -128,28 +128,40 @@ pub struct LoopDetector {
     pub(crate) structural_depth: usize,
 }
 
-/// Default evaluator recursion budget.
+/// Default budget for identity-tracked evaluator recursion.
 ///
 /// C++ detects evaluator stack overflow by watching the current stack address
 /// and throws once it gets too close to the configured stack ceiling. Rust does
-/// not have a portable thread-stack introspection API here, so the evaluator
-/// uses a conservative logical-depth budget instead. Keep this low enough that
-/// runaway recursive `case` evaluation fails with `RecursionDepthExceeded`
-/// before the host thread aborts with an OS stack overflow.
-const DEFAULT_MAX_DEPTH: usize = 1024;
+/// not have a portable thread-stack introspection API here, so normal evaluator
+/// recursion is bounded by a logical frame count instead. This limit is applied
+/// to [`LoopDetector::call_stack`], where frames carry stable tree/environment
+/// identities and can therefore detect direct cycles as well as excessive
+/// acyclic depth.
+const DEFAULT_EVAL_MAX_DEPTH: usize = 16_384;
+
+/// Hard cap for structural lowering recursion.
+///
+/// Structural lowering (`a2sb` / `a2sb_value`) cannot use identity-based cycle
+/// detection because some paths allocate fresh symbolic slots while descending.
+/// It therefore keeps a separate depth counter and clamps even explicit
+/// `with_max_depth(...)` requests to this value. The cap exists to prevent a
+/// caller from raising the general evaluator budget beyond what the structural
+/// lowering stack can safely tolerate.
+const STRUCTURAL_HARD_MAX_DEPTH: usize = 16_384;
 
 impl LoopDetector {
     /// Creates a detector with the default maximum recursion depth.
     ///
-    /// This is intentionally lower than the old Rust-only `4096` budget: debug
-    /// builds of recursive `case` evaluation can exhaust the real thread stack
-    /// before reaching that logical depth, which aborts the whole process
-    /// instead of surfacing a normal evaluator error.
+    /// The default is shared with the structural hard cap so ordinary callers
+    /// get one coherent evaluator budget. The two constants remain separate
+    /// because `with_max_depth(...)` may raise the identity-tracked evaluator
+    /// budget, while structural lowering must still clamp to its own tested
+    /// stack-safety ceiling.
     #[must_use]
     pub fn new() -> Self {
         Self {
             call_stack: Vec::new(),
-            max_depth: DEFAULT_MAX_DEPTH,
+            max_depth: DEFAULT_EVAL_MAX_DEPTH,
             cancel: Arc::new(AtomicBool::new(false)),
             automaton_cache: crate::pattern_matcher::AutomatonCache::new(),
             pm_store: Vec::new(),
@@ -174,7 +186,7 @@ impl LoopDetector {
     pub fn with_cancel(cancel: Arc<AtomicBool>) -> Self {
         Self {
             call_stack: Vec::new(),
-            max_depth: DEFAULT_MAX_DEPTH,
+            max_depth: DEFAULT_EVAL_MAX_DEPTH,
             cancel,
             automaton_cache: crate::pattern_matcher::AutomatonCache::new(),
             pm_store: Vec::new(),
@@ -287,15 +299,7 @@ impl LoopDetector {
     /// diverging user program fails with `RecursionDepthExceeded` instead of
     /// aborting the process on OS stack overflow.
     pub(crate) fn enter_structural(&mut self) -> Result<(), EvalError> {
-        // Capped tighter than the general `max_depth` (4096) because every
-        // structural hop also drags `eval_value` / `apply_value_list_value`
-        // frames onto the real OS stack, consuming an order of magnitude more
-        // bytes per iteration than a symbol-lookup loop. Programs with long
-        // sequential combinator chains (e.g. auto_spat.dsp) can exceed 256
-        // legitimately, so we cap at the same 4096 used by the symbol-lookup
-        // path and rely on the thread stack being large enough (see main.rs).
-        const STRUCTURAL_MAX: usize = 4096;
-        let limit = self.max_depth.min(STRUCTURAL_MAX);
+        let limit = self.max_depth.min(STRUCTURAL_HARD_MAX_DEPTH);
         if self.structural_depth >= limit {
             return Err(EvalError::RecursionDepthExceeded { max_depth: limit });
         }
@@ -319,4 +323,39 @@ impl Default for LoopDetector {
 pub(crate) enum LoopFrame {
     TreeEnv { id: TreeId, env_key: EnvFrameKey },
     SymbolEnv { sym: SymId, env_key: EnvFrameKey },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structural_depth_uses_default_hard_cap() {
+        let mut detector = LoopDetector::new();
+        for _ in 0..STRUCTURAL_HARD_MAX_DEPTH {
+            detector.enter_structural().unwrap();
+        }
+
+        assert!(matches!(
+            detector.enter_structural(),
+            Err(EvalError::RecursionDepthExceeded {
+                max_depth: STRUCTURAL_HARD_MAX_DEPTH
+            })
+        ));
+    }
+
+    #[test]
+    fn structural_depth_clamps_explicitly_higher_eval_budget() {
+        let mut detector = LoopDetector::with_max_depth(STRUCTURAL_HARD_MAX_DEPTH + 1);
+        for _ in 0..STRUCTURAL_HARD_MAX_DEPTH {
+            detector.enter_structural().unwrap();
+        }
+
+        assert!(matches!(
+            detector.enter_structural(),
+            Err(EvalError::RecursionDepthExceeded {
+                max_depth: STRUCTURAL_HARD_MAX_DEPTH
+            })
+        ));
+    }
 }

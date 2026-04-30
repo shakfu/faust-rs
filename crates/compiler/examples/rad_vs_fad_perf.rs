@@ -67,8 +67,7 @@ fn run_once(label: &'static str, source: String, num_inputs: usize) -> Run {
     let bytecode_bytes = fbc.len();
 
     let mut reader = Cursor::new(fbc);
-    let mut factory =
-        read_fbc::<f32>(&mut reader).expect("interp bytecode must parse cleanly");
+    let mut factory = read_fbc::<f32>(&mut reader).expect("interp bytecode must parse cleanly");
     let mut instance = FbcDspInstance::new(&mut factory);
     instance.init(SAMPLE_RATE);
     let inputs = instance.get_num_inputs();
@@ -270,11 +269,7 @@ fn main() {
     );
 
     let (fad, rad) = shape_static_softclip();
-    print_pair(
-        "static softclip with tanh  (1 input, 2 seeds)",
-        &fad,
-        &rad,
-    );
+    print_pair("static softclip with tanh  (1 input, 2 seeds)", &fad, &rad);
 
     let (fad, rad) = shape_fir_4_taps();
     print_pair(
@@ -291,12 +286,8 @@ fn main() {
     );
 
     println!("\n## Notes");
-    println!(
-        "- FAD output bundle is [primal, t_seed0, …, t_seed{{N-1}}] interleaved per primal."
-    );
-    println!(
-        "- RAD output bundle is [primals…, gradient(seed_0), …, gradient(seed_{{N-1}})]."
-    );
+    println!("- FAD output bundle is [primal, t_seed0, …, t_seed{{N-1}}] interleaved per primal.");
+    println!("- RAD output bundle is [primals…, gradient(seed_0), …, gradient(seed_{{N-1}})].");
     println!(
         "- The deep multiplicative chain is the canonical adjoint-sum-growth\n  stress case (plan §17 risk #2). RAD has to accumulate one chain rule\n  contribution per seed at every fold; without simplification, the\n  emitted signal IR can grow super-linearly in the seed count."
     );

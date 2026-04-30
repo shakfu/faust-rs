@@ -96,8 +96,7 @@ fn main() {
         .expect("rad_gain_bias_train must compile through the interp fast lane");
 
     let mut reader = Cursor::new(fbc);
-    let mut factory =
-        read_fbc::<f32>(&mut reader).expect("interp bytecode must parse cleanly");
+    let mut factory = read_fbc::<f32>(&mut reader).expect("interp bytecode must parse cleanly");
     let mut instance = FbcDspInstance::new(&mut factory);
     instance.init(SAMPLE_RATE);
 
@@ -172,9 +171,7 @@ fn main() {
 
     let final_gain_err = (gain - TRUE_GAIN).abs();
     let final_bias_err = (bias - TRUE_BIAS).abs();
-    println!(
-        "\nfinal gain err = {final_gain_err:.4e}, final bias err = {final_bias_err:.4e}"
-    );
+    println!("\nfinal gain err = {final_gain_err:.4e}, final bias err = {final_bias_err:.4e}");
     assert!(
         final_gain_err < 5.0e-2,
         "expected the host loop to recover gain to within 0.05; got {final_gain_err:.4e}"

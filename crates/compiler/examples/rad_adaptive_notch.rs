@@ -117,8 +117,7 @@ fn main() {
         )
         .expect("rad_adaptive_notch_omega must compile");
     let mut reader = Cursor::new(fbc);
-    let mut factory =
-        read_fbc::<f32>(&mut reader).expect("interp bytecode must parse");
+    let mut factory = read_fbc::<f32>(&mut reader).expect("interp bytecode must parse");
     let mut instance = FbcDspInstance::new(&mut factory);
     instance.init(SAMPLE_RATE);
 
@@ -151,8 +150,7 @@ fn main() {
         let mut x_n1 = vec![0.0_f32; BLOCK_LEN];
         let mut x_n2 = vec![0.0_f32; BLOCK_LEN];
         for k in 0..BLOCK_LEN {
-            let sample =
-                TONE_AMPLITUDE * tone_phase.sin() + NOISE_STD * rng.next_gaussian();
+            let sample = TONE_AMPLITUDE * tone_phase.sin() + NOISE_STD * rng.next_gaussian();
             tone_phase += OMEGA_TARGET;
             // Wrap to keep the phase well-conditioned over long runs.
             if tone_phase > std::f32::consts::TAU {
@@ -190,10 +188,7 @@ fn main() {
         omega = omega.clamp(0.01, 3.0);
         instance.set_real_zone(omega_offset, omega);
 
-        if iter < 5
-            || iter % 50 == 0
-            || iter + 1 == ITERATIONS
-        {
+        if iter < 5 || iter % 50 == 0 || iter + 1 == ITERATIONS {
             let omega_err = (omega - OMEGA_TARGET).abs();
             println!(
                 "iter {iter:>4}  loss = {loss:.6e}  ω = {omega:.4}  |ω − ω*| = {omega_err:.4e}  ∂J/∂ω = {grad:+.4e}"
@@ -202,9 +197,7 @@ fn main() {
     }
 
     let omega_err = (omega - OMEGA_TARGET).abs();
-    println!(
-        "\nfinal  ω = {omega:.6}  target {OMEGA_TARGET:.6}  |Δω| = {omega_err:.4e}"
-    );
+    println!("\nfinal  ω = {omega:.6}  target {OMEGA_TARGET:.6}  |Δω| = {omega_err:.4e}");
     assert!(
         omega_err < 1.0e-2,
         "expected adaptive notch to converge within 0.01 of target ω; got |Δω| = {omega_err:.4e}"

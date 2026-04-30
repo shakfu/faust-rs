@@ -560,19 +560,12 @@ mod tests {
     /// to evaluate one recurrence frame given the previous-frame state and
     /// per-frame `input(_)` lanes. Panics on any node outside the expected
     /// LTI subset; that panic is itself part of the test contract.
-    fn eval_branch(
-        arena: &TreeArena,
-        sig: SigId,
-        inputs: &[f32],
-        prev_state: &[f32],
-    ) -> f32 {
+    fn eval_branch(arena: &TreeArena, sig: SigId, inputs: &[f32], prev_state: &[f32]) -> f32 {
         match match_sig(arena, sig) {
             SigMatch::Real(r) => r as f32,
             SigMatch::Int(i) => i as f32,
             SigMatch::Input(idx) => inputs[idx as usize],
-            SigMatch::Proj(slot, group)
-                if tlib::match_de_bruijn_ref(arena, group) == Some(1) =>
-            {
+            SigMatch::Proj(slot, group) if tlib::match_de_bruijn_ref(arena, group) == Some(1) => {
                 prev_state[slot as usize]
             }
             SigMatch::BinOp(BinOp::Add, x, y) => {
