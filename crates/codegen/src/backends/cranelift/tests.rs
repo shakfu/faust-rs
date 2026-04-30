@@ -1,6 +1,6 @@
 use super::{
-    BACKEND_NAME, CraneliftBackendErrorCode, CraneliftOptions, StructFieldKind, backend_id,
-    generate_cranelift_module,
+    AARCH64_MAX_SAFE_COMPUTE_CLIF_BYTES, BACKEND_NAME, CraneliftBackendErrorCode, CraneliftOptions,
+    StructFieldKind, backend_id, compute_clif_exceeds_aarch64_safe_size, generate_cranelift_module,
 };
 use crate::fixtures::build_sine_phasor_test_module;
 use fir::{AccessType, FirBinOp, FirBuilder, FirId, FirType, NamedType};
@@ -11,6 +11,16 @@ use std::ffi::c_void;
 fn backend_id_is_stable() {
     assert_eq!(BACKEND_NAME, "cranelift");
     assert_eq!(backend_id(), "cranelift");
+}
+
+#[test]
+/// Verifies the AArch64 large-body guard trips only past the configured limit.
+fn aarch64_large_compute_clif_guard_has_strict_threshold() {
+    let at_limit = "x".repeat(AARCH64_MAX_SAFE_COMPUTE_CLIF_BYTES);
+    let past_limit = "x".repeat(AARCH64_MAX_SAFE_COMPUTE_CLIF_BYTES + 1);
+
+    assert!(!compute_clif_exceeds_aarch64_safe_size(&at_limit));
+    assert!(compute_clif_exceeds_aarch64_safe_size(&past_limit));
 }
 
 #[test]

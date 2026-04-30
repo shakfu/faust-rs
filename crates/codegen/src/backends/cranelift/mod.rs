@@ -43,6 +43,16 @@ use std::ffi::c_void;
 /// Stable backend identifier used by tooling and future CLI wiring.
 pub const BACKEND_NAME: &str = "cranelift";
 
+/// Maximum textual CLIF size accepted for a lowered `compute` body on AArch64.
+///
+/// Large monolithic Faust `compute` functions can currently produce invalid
+/// AArch64 JIT code that branches into Cranelift padding/data islands and traps
+/// with `EXC_BAD_INSTRUCTION` at runtime. Until the backend splits large
+/// functions or Cranelift's island handling is proven safe for this shape, keep
+/// the existing bring-up fallback policy and emit a no-op stub for oversized
+/// AArch64 compute bodies.
+const AARCH64_MAX_SAFE_COMPUTE_CLIF_BYTES: usize = 32 * 1024;
+
 #[must_use]
 /// Returns the stable backend identifier (`"cranelift"`).
 pub fn backend_id() -> &'static str {
@@ -3533,6 +3543,21 @@ fn declare_jit_function(
     ))
 }
 
+fn compute_clif_exceeds_aarch64_safe_size(clif: &str) -> bool {
+    clif.len() > AARCH64_MAX_SAFE_COMPUTE_CLIF_BYTES
+}
+
+fn should_fallback_large_aarch64_compute(compiled: &JitDspModule) -> bool {
+    if !cfg!(target_arch = "aarch64") || !compiled.compute_body_lowered() {
+        return false;
+    }
+    compiled
+        .generated_functions_clif()
+        .iter()
+        .find(|(name, _)| name == compiled.compute_symbol_name())
+        .is_some_and(|(_, clif)| compute_clif_exceeds_aarch64_safe_size(clif))
+}
+
 /// Compiles a FIR module to a Cranelift JIT module.
 ///
 /// This is the main backend entry point used by higher-level crates (`compiler`,
@@ -3576,21 +3601,40 @@ pub fn generate_cranelift_module(
     // may panic when the generated function body is so large that conditional
     // branch offsets exceed the ±1 MiB `B.cond` displacement limit and the
     // island-emission logic fails to insert veneers in time.  We catch that
-    // panic here and retry with `force_stub=true` so the DSP can still run via
-    // the interpreter sidecar.
+    // panic here and retry with `force_stub=true` so hosts get the controlled
+    // no-op fallback instead of a process abort.
     let first_attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         try_generate_cranelift_module(store, module, options, &module_name, compute_decl, false)
     }));
 
     match first_attempt {
-        Ok(result) => result,
+        Ok(Ok(compiled)) => {
+            if should_fallback_large_aarch64_compute(&compiled) {
+                eprintln!(
+                    "warning: Cranelift AArch64 compute body for `{module_name}::compute` \
+                     is too large for the current monolithic JIT path; falling back to no-op stub"
+                );
+                drop(compiled);
+                try_generate_cranelift_module(
+                    store,
+                    module,
+                    options,
+                    &module_name,
+                    compute_decl,
+                    true,
+                )
+            } else {
+                Ok(compiled)
+            }
+        }
+        Ok(Err(err)) => Err(err),
         Err(_panic) => {
             // Cranelift JIT panicked (most likely AArch64 branch-range exceeded).
             // The partial JIT module created in `try_generate_cranelift_module`
             // was dropped during stack unwinding; create a fresh one with a stub.
             eprintln!(
                 "warning: Cranelift JIT panicked while compiling `{module_name}::compute` \
-                 (branch-offset overflow?); falling back to interpreter stub"
+                 (branch-offset overflow?); falling back to no-op stub"
             );
             try_generate_cranelift_module(store, module, options, &module_name, compute_decl, true)
         }

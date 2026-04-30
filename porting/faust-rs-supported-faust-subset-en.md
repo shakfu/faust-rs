@@ -1200,10 +1200,14 @@ regardless of the result type.  `harpeautomation.dsp` (string trigger using
 #### Cranelift: AArch64 branch-offset overflow → graceful fallback (2026-03-22)
 
 Cranelift's `MachBuffer` can panic (internal assertion) on AArch64 when a
-very large `compute` body exceeds the ±1 MiB B.cond displacement limit.  Fix:
-wrap JIT compilation in `catch_unwind`; on panic, retry with
-`force_stub = true` so the instance falls back to the interpreter sidecar.
-`minimoog-novation.dsp` now compiles without crashing the process.
+very large `compute` body exceeds the ±1 MiB B.cond displacement limit. It can
+also finalize an oversized monolithic body that later branches into
+padding/data islands and traps with `EXC_BAD_INSTRUCTION`. Fix: wrap JIT
+compilation in `catch_unwind`; on panic, retry with `force_stub = true`. On
+AArch64, also reject lowered `compute` bodies whose textual CLIF exceeds the
+current conservative size guard and regenerate the existing no-op stub.
+`minimoog-novation.dsp` and `fad_tracking3.dsp` now compile without crashing
+the process. Oversized guarded cases report `compute_body_lowered=false`.
 
 #### FBC serial: embedded newlines in quoted UI/meta labels (2026-03-22)
 
