@@ -1131,9 +1131,9 @@ fn render_fir_verify_report(store: &fir::FirStore, module: fir::FirId, strict: b
 fn main() {
     // The evaluator's structural-lowering pass (`a2sb`) can recurse deeply for
     // large programs (e.g. auto-panning with many channels). 64 MiB is the CLI
-    // stack contract for the 16_384-frame structural depth cap used by `eval`;
-    // library embedders that run the compiler on their own threads must provide
-    // comparable stack headroom or keep a lower evaluator depth budget.
+    // stack contract for the evaluator's guarded recursion budgets; library
+    // embedders that run the compiler on their own threads must provide
+    // comparable stack headroom or use a lower evaluator depth budget.
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(run_main)

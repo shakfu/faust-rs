@@ -137,7 +137,7 @@ pub struct LoopDetector {
 /// to [`LoopDetector::call_stack`], where frames carry stable tree/environment
 /// identities and can therefore detect direct cycles as well as excessive
 /// acyclic depth.
-const DEFAULT_EVAL_MAX_DEPTH: usize = 16_384;
+const DEFAULT_EVAL_MAX_DEPTH: usize = 1_024;
 
 /// Hard cap for structural lowering recursion.
 ///
@@ -147,16 +147,16 @@ const DEFAULT_EVAL_MAX_DEPTH: usize = 16_384;
 /// `with_max_depth(...)` requests to this value. The cap exists to prevent a
 /// caller from raising the general evaluator budget beyond what the structural
 /// lowering stack can safely tolerate.
-const STRUCTURAL_HARD_MAX_DEPTH: usize = 16_384;
+const STRUCTURAL_HARD_MAX_DEPTH: usize = 4_096;
 
 impl LoopDetector {
     /// Creates a detector with the default maximum recursion depth.
     ///
-    /// The default is shared with the structural hard cap so ordinary callers
-    /// get one coherent evaluator budget. The two constants remain separate
-    /// because `with_max_depth(...)` may raise the identity-tracked evaluator
-    /// budget, while structural lowering must still clamp to its own tested
-    /// stack-safety ceiling.
+    /// The default is deliberately lower than the structural hard cap: recursive
+    /// `case` evaluation can put several Rust frames on the real stack for each
+    /// logical evaluator frame, so the default must trip before debug test
+    /// threads overflow. Callers that know they are evaluating a deep acyclic
+    /// program may opt into a higher budget with [`Self::with_max_depth`].
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -330,16 +330,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn structural_depth_uses_default_hard_cap() {
+    fn structural_depth_uses_default_eval_budget() {
         let mut detector = LoopDetector::new();
-        for _ in 0..STRUCTURAL_HARD_MAX_DEPTH {
+        for _ in 0..DEFAULT_EVAL_MAX_DEPTH {
             detector.enter_structural().unwrap();
         }
 
         assert!(matches!(
             detector.enter_structural(),
             Err(EvalError::RecursionDepthExceeded {
-                max_depth: STRUCTURAL_HARD_MAX_DEPTH
+                max_depth: DEFAULT_EVAL_MAX_DEPTH
             })
         ));
     }
