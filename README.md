@@ -104,6 +104,13 @@ cargo run -p compiler -- -lang interp foo.dsp
 cargo run -p compiler -- -lang fir foo.dsp
 ```
 
+## Environment variables
+
+Use the following variables to increase the evaluation depth stack:
+
+`export FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH=XX` (default: 4096)
+`export FAUST_RS_DEFAULT_EVAL_MAX_DEPTH=XX` (default: 1014)
+
 ## Documentation
 
 - User CLI reference: `docs/user-cli-guide-en.md`

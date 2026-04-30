@@ -1,5 +1,6 @@
 //! Infinite loop detector and per-pass evaluator caches.
 
+use std::ffi::OsStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -51,6 +52,11 @@ use crate::error::EvalError;
 pub struct LoopDetector {
     pub(crate) call_stack: Vec<LoopFrame>,
     pub(crate) max_depth: usize,
+    /// Structural lowering depth cap for this evaluator pass.
+    ///
+    /// This is read when the detector is constructed so one evaluation pass has
+    /// stable recursion semantics even if the process environment changes later.
+    pub(crate) structural_max_depth: usize,
     /// Cooperative cancellation flag.
     ///
     /// When set to `true`, the next `eval_value` call returns
@@ -128,7 +134,13 @@ pub struct LoopDetector {
     pub(crate) structural_depth: usize,
 }
 
-/// Default budget for identity-tracked evaluator recursion.
+/// Environment variable overriding the default evaluator recursion budget.
+const DEFAULT_EVAL_MAX_DEPTH_ENV: &str = "FAUST_RS_DEFAULT_EVAL_MAX_DEPTH";
+
+/// Environment variable overriding the structural lowering recursion cap.
+const STRUCTURAL_HARD_MAX_DEPTH_ENV: &str = "FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH";
+
+/// Default fallback budget for identity-tracked evaluator recursion.
 ///
 /// C++ detects evaluator stack overflow by watching the current stack address
 /// and throws once it gets too close to the configured stack ceiling. Rust does
@@ -136,17 +148,20 @@ pub struct LoopDetector {
 /// recursion is bounded by a logical frame count instead. This limit is applied
 /// to [`LoopDetector::call_stack`], where frames carry stable tree/environment
 /// identities and can therefore detect direct cycles as well as excessive
-/// acyclic depth.
+/// acyclic depth. Set [`DEFAULT_EVAL_MAX_DEPTH_ENV`] to a positive integer to
+/// override this fallback for newly created detectors.
 const DEFAULT_EVAL_MAX_DEPTH: usize = 1_024;
 
-/// Hard cap for structural lowering recursion.
+/// Default fallback hard cap for structural lowering recursion.
 ///
 /// Structural lowering (`a2sb` / `a2sb_value`) cannot use identity-based cycle
 /// detection because some paths allocate fresh symbolic slots while descending.
 /// It therefore keeps a separate depth counter and clamps even explicit
-/// `with_max_depth(...)` requests to this value. The cap exists to prevent a
-/// caller from raising the general evaluator budget beyond what the structural
-/// lowering stack can safely tolerate.
+/// `with_max_depth(...)` requests to this value. Set
+/// [`STRUCTURAL_HARD_MAX_DEPTH_ENV`] to a positive integer to override this
+/// fallback for newly created detectors. Raising it opts into the risk that a
+/// deeply recursive structural lowering path may overflow the real OS stack
+/// before Rust can report `RecursionDepthExceeded`.
 const STRUCTURAL_HARD_MAX_DEPTH: usize = 4_096;
 
 impl LoopDetector {
@@ -156,21 +171,17 @@ impl LoopDetector {
     /// `case` evaluation can put several Rust frames on the real stack for each
     /// logical evaluator frame, so the default must trip before debug test
     /// threads overflow. Callers that know they are evaluating a deep acyclic
-    /// program may opt into a higher budget with [`Self::with_max_depth`].
+    /// program may opt into a higher budget with [`Self::with_max_depth`] or by
+    /// setting `FAUST_RS_DEFAULT_EVAL_MAX_DEPTH` before creating the detector.
+    ///
+    /// `FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH` controls the structural lowering cap
+    /// used by `enter_structural`. Both environment variables must be
+    /// positive decimal integers; invalid, missing, or zero values fall back to
+    /// the compiled defaults.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            call_stack: Vec::new(),
-            max_depth: DEFAULT_EVAL_MAX_DEPTH,
-            cancel: Arc::new(AtomicBool::new(false)),
-            automaton_cache: crate::pattern_matcher::AutomatonCache::new(),
-            pm_store: Vec::new(),
-            closure_store: Vec::new(),
-            next_slot_id: 0,
-            symbolic_box_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
-            eval_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
-            structural_depth: 0,
-        }
+        let max_depth = depth_limit_from_env(DEFAULT_EVAL_MAX_DEPTH_ENV, DEFAULT_EVAL_MAX_DEPTH);
+        Self::with_parts(max_depth, Arc::new(AtomicBool::new(false)))
     }
 
     /// Creates a detector with a pre-existing cooperative cancellation flag.
@@ -184,30 +195,30 @@ impl LoopDetector {
     /// hosts can set it on user abort without killing the process.
     #[must_use]
     pub fn with_cancel(cancel: Arc<AtomicBool>) -> Self {
-        Self {
-            call_stack: Vec::new(),
-            max_depth: DEFAULT_EVAL_MAX_DEPTH,
-            cancel,
-            automaton_cache: crate::pattern_matcher::AutomatonCache::new(),
-            pm_store: Vec::new(),
-            closure_store: Vec::new(),
-            next_slot_id: 0,
-            symbolic_box_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
-            eval_cache: ahash::HashMap::with_hasher(ahash::RandomState::new()),
-            structural_depth: 0,
-        }
+        let max_depth = depth_limit_from_env(DEFAULT_EVAL_MAX_DEPTH_ENV, DEFAULT_EVAL_MAX_DEPTH);
+        Self::with_parts(max_depth, cancel)
     }
 
     /// Creates a detector with an explicit maximum recursion depth.
     ///
-    /// Use a lower value (e.g. 64) for unit tests that should never recurse deeply.
-    /// Use a higher value for programs with known deep but non-cyclic definition chains.
+    /// Use a lower value (e.g. 64) for unit tests that should never recurse
+    /// deeply. Use a higher value for programs with known deep but non-cyclic
+    /// definition chains. This explicit value is not read from
+    /// `FAUST_RS_DEFAULT_EVAL_MAX_DEPTH`; structural lowering is still clamped
+    /// by `FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH` or its compiled fallback.
     #[must_use]
     pub fn with_max_depth(max_depth: usize) -> Self {
+        Self::with_parts(max_depth, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn with_parts(max_depth: usize, cancel: Arc<AtomicBool>) -> Self {
+        let structural_max_depth =
+            depth_limit_from_env(STRUCTURAL_HARD_MAX_DEPTH_ENV, STRUCTURAL_HARD_MAX_DEPTH);
         Self {
             call_stack: Vec::new(),
             max_depth,
-            cancel: Arc::new(AtomicBool::new(false)),
+            structural_max_depth,
+            cancel,
             automaton_cache: crate::pattern_matcher::AutomatonCache::new(),
             pm_store: Vec::new(),
             closure_store: Vec::new(),
@@ -299,7 +310,7 @@ impl LoopDetector {
     /// diverging user program fails with `RecursionDepthExceeded` instead of
     /// aborting the process on OS stack overflow.
     pub(crate) fn enter_structural(&mut self) -> Result<(), EvalError> {
-        let limit = self.max_depth.min(STRUCTURAL_HARD_MAX_DEPTH);
+        let limit = self.max_depth.min(self.structural_max_depth);
         if self.structural_depth >= limit {
             return Err(EvalError::RecursionDepthExceeded { max_depth: limit });
         }
@@ -310,6 +321,19 @@ impl LoopDetector {
     pub(crate) fn leave_structural(&mut self) {
         self.structural_depth = self.structural_depth.saturating_sub(1);
     }
+}
+
+fn depth_limit_from_env(var_name: &str, fallback: usize) -> usize {
+    depth_limit_from_env_value(std::env::var_os(var_name).as_deref(), fallback)
+}
+
+fn depth_limit_from_env_value(raw: Option<&OsStr>, fallback: usize) -> usize {
+    raw.and_then(parse_depth_limit).unwrap_or(fallback)
+}
+
+fn parse_depth_limit(raw: &OsStr) -> Option<usize> {
+    let parsed = raw.to_str()?.trim().parse::<usize>().ok()?;
+    (parsed > 0).then_some(parsed)
 }
 
 impl Default for LoopDetector {
@@ -357,5 +381,39 @@ mod tests {
                 max_depth: STRUCTURAL_HARD_MAX_DEPTH
             })
         ));
+    }
+
+    #[test]
+    fn structural_depth_uses_detector_structural_budget() {
+        let mut detector = LoopDetector::with_max_depth(10);
+        detector.structural_max_depth = 3;
+
+        for _ in 0..3 {
+            detector.enter_structural().unwrap();
+        }
+
+        assert!(matches!(
+            detector.enter_structural(),
+            Err(EvalError::RecursionDepthExceeded { max_depth: 3 })
+        ));
+    }
+
+    #[test]
+    fn depth_limit_env_parser_accepts_positive_values() {
+        assert_eq!(
+            depth_limit_from_env_value(Some(OsStr::new(" 2048 ")), 64),
+            2_048
+        );
+    }
+
+    #[test]
+    fn depth_limit_env_parser_rejects_missing_zero_or_invalid_values() {
+        assert_eq!(depth_limit_from_env_value(None, 64), 64);
+        assert_eq!(depth_limit_from_env_value(Some(OsStr::new("0")), 64), 64);
+        assert_eq!(depth_limit_from_env_value(Some(OsStr::new("-1")), 64), 64);
+        assert_eq!(
+            depth_limit_from_env_value(Some(OsStr::new("not-a-depth")), 64),
+            64
+        );
     }
 }
