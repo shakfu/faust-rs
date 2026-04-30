@@ -112,8 +112,8 @@ use tlib::{
 };
 use ui::{
     ControlId, ControlKind, ControlRange, ControlSpec, UiGroupKind, UiGroupPathSegment,
-    UiGroupSpec, UiMatch, UiMetadata, UiProgram, UiProgramBuilder, UiRootOrigin,
-    canonicalize_group_spec, match_ui, normalize_group_label_navigation,
+    UiGroupSpec, UiMatch, UiMetadata, UiNormalizedGroupPath, UiProgram, UiProgramBuilder,
+    UiRootOrigin, canonicalize_group_spec, match_ui, normalize_group_label_navigation,
     normalize_widget_label_path, split_label_metadata,
 };
 
@@ -126,8 +126,21 @@ pub mod transpose_ad;
 pub type ArityCache = AHashMap<FlatBoxId, Result<BoxArity, PropagateError>>;
 /// Environment mapping route/slot placeholders to propagated signals.
 type SlotEnv = AHashMap<BoxId, SigId>;
-/// Deterministic mapping from source widget/soundfile box nodes to stable control ids.
-type ControlIds = AHashMap<BoxId, ControlId>;
+/// Context-aware mapping from (source widget box node, group-path hash) to stable control ids.
+/// The group-path hash distinguishes the same structural widget appearing in different UI groups.
+type ControlIds = AHashMap<(BoxId, u64), ControlId>;
+
+/// Computes a stable hash over a stack of [`UiGroupPathSegment`] values.
+///
+/// Used to distinguish widget nodes that share the same `BoxId` due to hash-consing but live
+/// in different UI group contexts (e.g. two `hslider("X", …)` with identical parameters placed
+/// inside different `hgroup`/`vgroup` wrappers).
+fn group_path_hash(groups: &[UiGroupPathSegment]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = ahash::AHasher::default();
+    groups.hash(&mut hasher);
+    hasher.finish()
+}
 
 pub const CRATE_NAME: &str = "propagate";
 const DEBRUIJNREC_TAG: &str = "DEBRUIJNREC";
@@ -1607,6 +1620,7 @@ pub fn propagate_typed_with_ui_options(
         clock_env: arena.nil(),
         suppress_fad: false,
         pending_fad_seeds: Vec::new(),
+        current_groups: Vec::new(),
     };
     let signals = propagate_in_slot_env(arena, box_tree, inputs, &mut ctx)?;
     Ok(PropagateOutput {
@@ -1648,8 +1662,15 @@ struct UiCollector {
     builder: UiProgramBuilder,
     controls: Vec<ControlSpec>,
     control_ids: ControlIds,
-    /// Memoisation table for the DAG walk — prevents re-visiting shared nodes.
-    visited: AHashMap<FlatBoxId, UiCollectSummary>,
+    /// Secondary index mapping a bare `BoxId` to the first `ControlId` registered for it.
+    /// Used to detect that the same source node has already been registered under a
+    /// different group-path context (e.g. a slider that appears in both the body and the
+    /// seed of a `fad(…)` call) and to create a cross-context alias rather than a second
+    /// `ControlSpec` entry.
+    node_primary_id: AHashMap<BoxId, ControlId>,
+    /// Memoisation table for the DAG walk — keyed by `(FlatBoxId, group_path_hash)` to allow
+    /// the same structural widget to be registered once per distinct group context.
+    visited: AHashMap<(FlatBoxId, u64), UiCollectSummary>,
 }
 
 impl UiCollector {
@@ -1658,6 +1679,7 @@ impl UiCollector {
             builder: UiProgramBuilder::new(),
             controls: Vec::new(),
             control_ids: ControlIds::new(),
+            node_primary_id: AHashMap::new(),
             visited: AHashMap::new(),
         }
     }
@@ -1691,11 +1713,27 @@ impl UiCollector {
     fn register_control(
         &mut self,
         source_node: BoxId,
+        context_hash: u64,
         kind: ControlKind,
         label: String,
         metadata: UiMetadata,
         range: Option<ControlRange>,
     ) -> ControlId {
+        let key = (source_node, context_hash);
+        // Deduplicate: the same widget in the same group context must not be registered twice
+        // (e.g. a slider variable referenced from two branches of the signal DAG).
+        if let Some(&existing_id) = self.control_ids.get(&key) {
+            return existing_id;
+        }
+        // Cross-context deduplication: if the same source node was already registered under
+        // a different group-path context (e.g. a slider that appears in both the body and
+        // the seed of a `fad(…)` call), reuse its existing ControlId and only add an alias
+        // for the new context key. This prevents duplicate ControlSpec entries for what is
+        // semantically one widget referenced from multiple positions in the box DAG.
+        if let Some(&primary_id) = self.node_primary_id.get(&source_node) {
+            self.control_ids.insert(key, primary_id);
+            return primary_id;
+        }
         let id =
             ControlId::try_from(self.controls.len()).expect("control registry index fits in u32");
         self.controls.push(ControlSpec {
@@ -1705,7 +1743,8 @@ impl UiCollector {
             metadata,
             range,
         });
-        self.control_ids.insert(source_node, id);
+        self.control_ids.insert(key, id);
+        self.node_primary_id.insert(source_node, id);
         id
     }
 
@@ -1713,12 +1752,13 @@ impl UiCollector {
         &mut self,
         source_node: BoxId,
         path: &[UiGroupSpec],
+        context_hash: u64,
         kind: ControlKind,
         label: String,
         metadata: UiMetadata,
         range: Option<ControlRange>,
     ) {
-        let id = self.register_control(source_node, kind, label, metadata, range);
+        let id = self.register_control(source_node, context_hash, kind, label, metadata, range);
         self.builder.insert_input_control(path, id);
     }
 
@@ -1726,12 +1766,13 @@ impl UiCollector {
         &mut self,
         source_node: BoxId,
         path: &[UiGroupSpec],
+        context_hash: u64,
         kind: ControlKind,
         label: String,
         metadata: UiMetadata,
         range: Option<ControlRange>,
     ) {
-        let id = self.register_control(source_node, kind, label, metadata, range);
+        let id = self.register_control(source_node, context_hash, kind, label, metadata, range);
         self.builder.insert_output_control(path, id);
     }
 
@@ -1739,10 +1780,12 @@ impl UiCollector {
         &mut self,
         source_node: BoxId,
         path: &[UiGroupSpec],
+        context_hash: u64,
         label: String,
         metadata: UiMetadata,
     ) {
-        let id = self.register_control(source_node, ControlKind::Soundfile, label, metadata, None);
+        let id =
+            self.register_control(source_node, context_hash, ControlKind::Soundfile, label, metadata, None);
         self.builder.insert_soundfile(path, id);
     }
 }
@@ -1825,10 +1868,11 @@ fn collect_ui_nodes(
 ) -> UiCollectSummary {
     // DAG deduplication: the flat box tree after `eval` is a structural DAG —
     // the same arena node (e.g. a slider passed as a function argument) can be
-    // reached from multiple composition paths.  Return the cached summary for
-    // any node already processed; this prevents ghost ControlSpec registrations
-    // and ensures each logical widget appears exactly once in the UI program.
-    if let Some(&cached) = collector.visited.get(&box_tree) {
+    // reached from multiple composition paths.  The cache key includes the
+    // group-path hash so that the same structural widget appearing under different
+    // UI group contexts is processed once per context rather than only once total.
+    let context_hash = group_path_hash(current_groups);
+    if let Some(&cached) = collector.visited.get(&(box_tree, context_hash)) {
         return cached;
     }
 
@@ -1845,6 +1889,7 @@ fn collect_ui_nodes(
             collector.input_control(
                 box_tree.as_tree_id(),
                 &path,
+                context_hash,
                 ControlKind::Button,
                 label,
                 metadata,
@@ -1866,6 +1911,7 @@ fn collect_ui_nodes(
             collector.input_control(
                 box_tree.as_tree_id(),
                 &path,
+                context_hash,
                 ControlKind::Checkbox,
                 label,
                 metadata,
@@ -1889,6 +1935,7 @@ fn collect_ui_nodes(
             collector.input_control(
                 box_tree.as_tree_id(),
                 &path,
+                context_hash,
                 ControlKind::VSlider,
                 label,
                 metadata,
@@ -1917,6 +1964,7 @@ fn collect_ui_nodes(
             collector.input_control(
                 box_tree.as_tree_id(),
                 &path,
+                context_hash,
                 ControlKind::HSlider,
                 label,
                 metadata,
@@ -1945,6 +1993,7 @@ fn collect_ui_nodes(
             collector.input_control(
                 box_tree.as_tree_id(),
                 &path,
+                context_hash,
                 ControlKind::NumEntry,
                 label,
                 metadata,
@@ -1973,6 +2022,7 @@ fn collect_ui_nodes(
             collector.output_control(
                 box_tree.as_tree_id(),
                 &path,
+                context_hash,
                 ControlKind::VBargraph,
                 label,
                 metadata,
@@ -2001,6 +2051,7 @@ fn collect_ui_nodes(
             collector.output_control(
                 box_tree.as_tree_id(),
                 &path,
+                context_hash,
                 ControlKind::HBargraph,
                 label,
                 metadata,
@@ -2025,7 +2076,7 @@ fn collect_ui_nodes(
                 normalize_widget_label_path(&decode_box_label(source_arena, label), current_groups);
             let path = canonical_group_path(&normalized.groups);
             let (label, metadata) = split_label_metadata(&normalized.raw_label);
-            collector.soundfile(box_tree.as_tree_id(), &path, label, metadata);
+            collector.soundfile(box_tree.as_tree_id(), &path, context_hash, label, metadata);
             UiCollectSummary {
                 has_ui: true,
                 preserve_ancestor_chain: false,
@@ -2057,7 +2108,12 @@ fn collect_ui_nodes(
         ),
         FlatNodeKind::ForwardAD { body, seed } => {
             let body_s = collect_ui_nodes(source_arena, body, current_groups, collector);
-            let seed_s = collect_ui_nodes(source_arena, seed, current_groups, collector);
+            // Differentiation seeds are global parameters whose UI position is
+            // independent of any group that wraps the surrounding `fad(…)` call.
+            // Visiting with an empty context ensures that subsequent references to
+            // the same seed node (e.g. in the Rec feedback branch) hit the cache
+            // rather than being registered as duplicate controls.
+            let seed_s = collect_ui_nodes(source_arena, seed, &[], collector);
             UiCollectSummary {
                 has_ui: body_s.has_ui || seed_s.has_ui,
                 preserve_ancestor_chain: body_s.preserve_ancestor_chain
@@ -2066,7 +2122,9 @@ fn collect_ui_nodes(
         }
         FlatNodeKind::ReverseAD { body, seeds } => {
             let body_s = collect_ui_nodes(source_arena, body, current_groups, collector);
-            let seeds_s = collect_ui_nodes(source_arena, seeds, current_groups, collector);
+            // Same rationale as ForwardAD: seed parameters are registered without
+            // the surrounding group context so later references can find them.
+            let seeds_s = collect_ui_nodes(source_arena, seeds, &[], collector);
             UiCollectSummary {
                 has_ui: body_s.has_ui || seeds_s.has_ui,
                 preserve_ancestor_chain: body_s.preserve_ancestor_chain
@@ -2112,7 +2170,7 @@ fn collect_ui_nodes(
         | FlatNodeKind::Inputs
         | FlatNodeKind::Outputs => UiCollectSummary::default(),
     };
-    collector.visited.insert(box_tree, result);
+    collector.visited.insert((box_tree, context_hash), result);
     result
 }
 
@@ -2490,9 +2548,10 @@ fn propagate_inner(
                 unreachable!("flat button node must decode to BoxMatch::Button")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
+            let ctx_hash = group_path_hash(&ctx.current_groups);
             let control = *ctx
                 .control_ids
-                .get(&box_tree.as_tree_id())
+                .get(&(box_tree.as_tree_id(), ctx_hash))
                 .expect("button control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.button(control)])
@@ -2502,9 +2561,10 @@ fn propagate_inner(
                 unreachable!("flat checkbox node must decode to BoxMatch::Checkbox")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
+            let ctx_hash = group_path_hash(&ctx.current_groups);
             let control = *ctx
                 .control_ids
-                .get(&box_tree.as_tree_id())
+                .get(&(box_tree.as_tree_id(), ctx_hash))
                 .expect("checkbox control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.checkbox(control)])
@@ -2514,9 +2574,10 @@ fn propagate_inner(
                 unreachable!("flat vslider node must decode to BoxMatch::VSlider")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
+            let ctx_hash = group_path_hash(&ctx.current_groups);
             let control = *ctx
                 .control_ids
-                .get(&box_tree.as_tree_id())
+                .get(&(box_tree.as_tree_id(), ctx_hash))
                 .expect("vslider control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.vslider(control)])
@@ -2526,9 +2587,10 @@ fn propagate_inner(
                 unreachable!("flat hslider node must decode to BoxMatch::HSlider")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
+            let ctx_hash = group_path_hash(&ctx.current_groups);
             let control = *ctx
                 .control_ids
-                .get(&box_tree.as_tree_id())
+                .get(&(box_tree.as_tree_id(), ctx_hash))
                 .expect("hslider control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.hslider(control)])
@@ -2538,9 +2600,10 @@ fn propagate_inner(
                 unreachable!("flat numentry node must decode to BoxMatch::NumEntry")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 0)?;
+            let ctx_hash = group_path_hash(&ctx.current_groups);
             let control = *ctx
                 .control_ids
-                .get(&box_tree.as_tree_id())
+                .get(&(box_tree.as_tree_id(), ctx_hash))
                 .expect("numentry control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.numentry(control)])
@@ -2550,9 +2613,10 @@ fn propagate_inner(
                 unreachable!("flat vbargraph node must decode to BoxMatch::VBargraph")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 1)?;
+            let ctx_hash = group_path_hash(&ctx.current_groups);
             let control = *ctx
                 .control_ids
-                .get(&box_tree.as_tree_id())
+                .get(&(box_tree.as_tree_id(), ctx_hash))
                 .expect("vbargraph control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.vbargraph(control, inputs[0])])
@@ -2562,9 +2626,10 @@ fn propagate_inner(
                 unreachable!("flat hbargraph node must decode to BoxMatch::HBargraph")
             };
             expect_input_arity(box_tree.as_tree_id(), inputs, 1)?;
+            let ctx_hash = group_path_hash(&ctx.current_groups);
             let control = *ctx
                 .control_ids
-                .get(&box_tree.as_tree_id())
+                .get(&(box_tree.as_tree_id(), ctx_hash))
                 .expect("hbargraph control id must be registered during UI extraction");
             let mut b = SigBuilder::new(arena);
             Ok(vec![b.hbargraph(control, inputs[0])])
@@ -2584,9 +2649,45 @@ fn propagate_inner(
             let waveform = b.waveform(&values);
             Ok(vec![size, waveform])
         }
-        FlatNodeKind::VGroup { body }
-        | FlatNodeKind::HGroup { body }
-        | FlatNodeKind::TGroup { body } => propagate_in_slot_env(arena, body, inputs, ctx),
+        FlatNodeKind::VGroup { body } => {
+            let label = match match_box(arena, box_tree.as_tree_id()) {
+                BoxMatch::VGroup(label, _) => decode_box_label(arena, label),
+                _ => unreachable!("flat vgroup node must decode to BoxMatch::VGroup"),
+            };
+            let UiNormalizedGroupPath { mut parent_groups, group } =
+                normalize_group_label_navigation(&label, &ctx.current_groups, UiGroupKind::Vertical);
+            parent_groups.push(group);
+            let saved = std::mem::replace(&mut ctx.current_groups, parent_groups);
+            let result = propagate_in_slot_env(arena, body, inputs, ctx);
+            ctx.current_groups = saved;
+            result
+        }
+        FlatNodeKind::HGroup { body } => {
+            let label = match match_box(arena, box_tree.as_tree_id()) {
+                BoxMatch::HGroup(label, _) => decode_box_label(arena, label),
+                _ => unreachable!("flat hgroup node must decode to BoxMatch::HGroup"),
+            };
+            let UiNormalizedGroupPath { mut parent_groups, group } =
+                normalize_group_label_navigation(&label, &ctx.current_groups, UiGroupKind::Horizontal);
+            parent_groups.push(group);
+            let saved = std::mem::replace(&mut ctx.current_groups, parent_groups);
+            let result = propagate_in_slot_env(arena, body, inputs, ctx);
+            ctx.current_groups = saved;
+            result
+        }
+        FlatNodeKind::TGroup { body } => {
+            let label = match match_box(arena, box_tree.as_tree_id()) {
+                BoxMatch::TGroup(label, _) => decode_box_label(arena, label),
+                _ => unreachable!("flat tgroup node must decode to BoxMatch::TGroup"),
+            };
+            let UiNormalizedGroupPath { mut parent_groups, group } =
+                normalize_group_label_navigation(&label, &ctx.current_groups, UiGroupKind::Tab);
+            parent_groups.push(group);
+            let saved = std::mem::replace(&mut ctx.current_groups, parent_groups);
+            let result = propagate_in_slot_env(arena, body, inputs, ctx);
+            ctx.current_groups = saved;
+            result
+        }
         FlatNodeKind::Symbolic { body } => {
             let BoxMatch::Symbolic(slot, _) = match_box(arena, box_tree.as_tree_id()) else {
                 unreachable!("flat symbolic node must decode to BoxMatch::Symbolic")
@@ -2769,7 +2870,11 @@ fn propagate_inner(
                 });
             }
             let seed_inputs: Vec<SigId> = inputs.iter().copied().take(seed_arity.inputs).collect();
+            // Seeds are registered without group context in collect_ui_nodes; reset the
+            // group stack so that widget lookups here use the same (empty-context) key.
+            let saved_groups = std::mem::take(&mut ctx.current_groups);
             let seed_sigs = propagate_in_slot_env(arena, seed, &seed_inputs, ctx)?;
+            ctx.current_groups = saved_groups;
             if seed_sigs.len() != seed_arity.outputs {
                 return Err(PropagateError::FadSeedArity {
                     node: box_tree.as_tree_id(),
@@ -2802,7 +2907,10 @@ fn propagate_inner(
             // Both children observe the same upstream input bus (mirrors the
             // FAD wiring contract).
             let seed_inputs: Vec<SigId> = inputs.iter().copied().take(seeds_arity.inputs).collect();
+            // Same rationale as ForwardAD: seeds are registered without group context.
+            let saved_groups = std::mem::take(&mut ctx.current_groups);
             let seed_sigs = propagate_in_slot_env(arena, seeds, &seed_inputs, ctx)?;
+            ctx.current_groups = saved_groups;
             if seed_sigs.len() != seeds_arity.outputs {
                 return Err(PropagateError::RadSeedArity {
                     node: box_tree.as_tree_id(),
@@ -2883,9 +2991,10 @@ fn propagate_inner(
             expect_input_arity(box_tree.as_tree_id(), inputs, 2)?;
             let chan_count = usize_from_int_node(arena, chan, "soundfile channels")?;
             let mut b = SigBuilder::new(arena);
+            let ctx_hash = group_path_hash(&ctx.current_groups);
             let control = *ctx
                 .control_ids
-                .get(&box_tree.as_tree_id())
+                .get(&(box_tree.as_tree_id(), ctx_hash))
                 .expect("soundfile control id must be registered during UI extraction");
             let soundfile = b.soundfile(control);
             let part = inputs[0];
@@ -3327,6 +3436,10 @@ struct PropagateContext<'a> {
     /// Seeds collected from `ForwardAD` nodes suppressed during Rec branch
     /// propagation. Drained by the Rec arm after the recursive group is built.
     pending_fad_seeds: Vec<SigId>,
+    /// Accumulated UI group path at the current propagation position.
+    /// Mirrors the `current_groups` stack maintained during UI collection so
+    /// that widget control-id lookups use the same context-sensitive key.
+    current_groups: Vec<UiGroupPathSegment>,
 }
 
 /// Lifts De Bruijn references of input signals by one recursion level.
