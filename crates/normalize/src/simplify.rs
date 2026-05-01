@@ -390,6 +390,7 @@ fn match_simplification(
         // Self-operation rules: x op x
         if t1 == t2 {
             match op {
+                BinOp::Sub => return SigBuilder::new(arena).int(0),
                 BinOp::And | BinOp::Or => return t1,
                 BinOp::Ge | BinOp::Le | BinOp::Eq => return SigBuilder::new(arena).int(1),
                 BinOp::Gt | BinOp::Lt | BinOp::Ne | BinOp::Rem | BinOp::Xor => {
@@ -849,6 +850,17 @@ mod tests {
             }
             other => panic!("expected y-x, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn simplify_sub_self_is_zero() {
+        // x - x → 0  for any signal x
+        let mut a = arena();
+        let t = types();
+        let x = SigBuilder::new(&mut a).input(0);
+        let sub = SigBuilder::new(&mut a).sub(x, x);
+        let r = simplify(&mut a, &t, sub);
+        assert_eq!(match_sig(&a, r), SigMatch::Int(0));
     }
 
     // ── Casts ─────────────────────────────────────────────────────────────
