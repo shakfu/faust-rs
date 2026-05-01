@@ -1748,6 +1748,7 @@ impl UiCollector {
         id
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn input_control(
         &mut self,
         source_node: BoxId,
@@ -1762,6 +1763,7 @@ impl UiCollector {
         self.builder.insert_input_control(path, id);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn output_control(
         &mut self,
         source_node: BoxId,
@@ -1784,8 +1786,14 @@ impl UiCollector {
         label: String,
         metadata: UiMetadata,
     ) {
-        let id =
-            self.register_control(source_node, context_hash, ControlKind::Soundfile, label, metadata, None);
+        let id = self.register_control(
+            source_node,
+            context_hash,
+            ControlKind::Soundfile,
+            label,
+            metadata,
+            None,
+        );
         self.builder.insert_soundfile(path, id);
     }
 }
@@ -2654,8 +2662,14 @@ fn propagate_inner(
                 BoxMatch::VGroup(label, _) => decode_box_label(arena, label),
                 _ => unreachable!("flat vgroup node must decode to BoxMatch::VGroup"),
             };
-            let UiNormalizedGroupPath { mut parent_groups, group } =
-                normalize_group_label_navigation(&label, &ctx.current_groups, UiGroupKind::Vertical);
+            let UiNormalizedGroupPath {
+                mut parent_groups,
+                group,
+            } = normalize_group_label_navigation(
+                &label,
+                &ctx.current_groups,
+                UiGroupKind::Vertical,
+            );
             parent_groups.push(group);
             let saved = std::mem::replace(&mut ctx.current_groups, parent_groups);
             let result = propagate_in_slot_env(arena, body, inputs, ctx);
@@ -2667,8 +2681,14 @@ fn propagate_inner(
                 BoxMatch::HGroup(label, _) => decode_box_label(arena, label),
                 _ => unreachable!("flat hgroup node must decode to BoxMatch::HGroup"),
             };
-            let UiNormalizedGroupPath { mut parent_groups, group } =
-                normalize_group_label_navigation(&label, &ctx.current_groups, UiGroupKind::Horizontal);
+            let UiNormalizedGroupPath {
+                mut parent_groups,
+                group,
+            } = normalize_group_label_navigation(
+                &label,
+                &ctx.current_groups,
+                UiGroupKind::Horizontal,
+            );
             parent_groups.push(group);
             let saved = std::mem::replace(&mut ctx.current_groups, parent_groups);
             let result = propagate_in_slot_env(arena, body, inputs, ctx);
@@ -2680,8 +2700,10 @@ fn propagate_inner(
                 BoxMatch::TGroup(label, _) => decode_box_label(arena, label),
                 _ => unreachable!("flat tgroup node must decode to BoxMatch::TGroup"),
             };
-            let UiNormalizedGroupPath { mut parent_groups, group } =
-                normalize_group_label_navigation(&label, &ctx.current_groups, UiGroupKind::Tab);
+            let UiNormalizedGroupPath {
+                mut parent_groups,
+                group,
+            } = normalize_group_label_navigation(&label, &ctx.current_groups, UiGroupKind::Tab);
             parent_groups.push(group);
             let saved = std::mem::replace(&mut ctx.current_groups, parent_groups);
             let result = propagate_in_slot_env(arena, body, inputs, ctx);
