@@ -27,43 +27,49 @@ pub fn merge_isomorphic_symrec_groups(
     arena: &mut TreeArena,
     outputs: &[SigId],
 ) -> Vec<SigId> {
-    let mut visited = HashSet::new();
-    let mut symrecs = Vec::new();
-    for &out in outputs {
-        collect_symrec_nodes(arena, out, &mut visited, &mut symrecs);
-    }
+    let mut current_outputs = outputs.to_vec();
 
-    if symrecs.len() < 2 {
-        return outputs.to_vec();
-    }
-
-    let hole = gen_hole(arena);
-    let mut signatures = HashMap::new();
-    
-    for &rec in &symrecs {
-        if let Some((var, body_list)) = match_sym_rec(arena, rec) {
-            let mut cache = HashMap::new();
-            let opened = open_symrec(arena, body_list, var, hole, &mut cache);
-            signatures.insert(rec, opened);
+    loop {
+        let mut visited = HashSet::new();
+        let mut symrecs = Vec::new();
+        for &out in &current_outputs {
+            collect_symrec_nodes(arena, out, &mut visited, &mut symrecs);
         }
+
+        if symrecs.len() < 2 {
+            break;
+        }
+
+        let hole = gen_hole(arena);
+        let mut signatures = HashMap::new();
+        
+        for &rec in &symrecs {
+            if let Some((var, body_list)) = match_sym_rec(arena, rec) {
+                let mut cache = HashMap::new();
+                let opened = open_symrec(arena, body_list, var, hole, &mut cache);
+                signatures.insert(rec, opened);
+            }
+        }
+
+        let mut signature_groups: HashMap<SigId, Vec<SigId>> = HashMap::new();
+        for (rec, sig_id) in signatures {
+            signature_groups.entry(sig_id).or_default().push(rec);
+        }
+
+        let (rec_map, ref_map) = build_symrec_substitution(arena, &signature_groups);
+
+        if rec_map.is_empty() {
+            break;
+        }
+
+        let mut cache = HashMap::new();
+        current_outputs = current_outputs
+            .iter()
+            .map(|&root| apply_symrec_substitution(arena, root, &rec_map, &ref_map, &mut cache))
+            .collect();
     }
 
-    let mut signature_groups: HashMap<SigId, Vec<SigId>> = HashMap::new();
-    for (rec, sig_id) in signatures {
-        signature_groups.entry(sig_id).or_default().push(rec);
-    }
-
-    let (rec_map, ref_map) = build_symrec_substitution(arena, &signature_groups);
-
-    if rec_map.is_empty() {
-        return outputs.to_vec();
-    }
-
-    let mut cache = HashMap::new();
-    outputs
-        .iter()
-        .map(|&root| apply_symrec_substitution(arena, root, &rec_map, &ref_map, &mut cache))
-        .collect()
+    current_outputs
 }
 
 /// Recursively identify all reachable `SYMREC` nodes across the tree.
@@ -191,4 +197,146 @@ fn apply_symrec_substitution(
 
     cache.insert(sig, result);
     result
+}
+
+
+#[cfg(test)]
+mod tests {
+use super::*;
+use signals::{SigBuilder, SigMatch, match_sig};
+use tlib::{sym_rec, sym_ref, vec_to_list, list_to_vec, TreeArena};
+use std::collections::HashMap;
+
+fn arena() -> TreeArena {
+    TreeArena::new()
+}
+
+fn make_single_rec(a: &mut TreeArena, name: &str, build_body: impl Fn(&mut SigBuilder, SigId) -> SigId) -> SigId {
+    let var = a.symbol(name);
+    let r = sym_ref(a, var);
+    let mut b = SigBuilder::new(a);
+    let body = build_body(&mut b, r);
+    let list = vec_to_list(a, &[body]);
+    sym_rec(a, var, list)
+}
+
+#[test]
+fn merge_identical_single_output_symrecs() {
+    let mut a = arena();
+    let rec0 = make_single_rec(&mut a, "W0", |b, rf| { let c = b.int(1); b.sub(c, rf) });
+    let rec2 = make_single_rec(&mut a, "W2", |b, rf| { let c = b.int(1); b.sub(c, rf) });
+
+    let outputs = vec![rec0, rec2];
+    let merged = merge_isomorphic_symrec_groups(&mut a, &outputs);
+
+    assert_eq!(merged[0], merged[1], "Isomorphic SYMRECs must merge to canonical representative");
+}
+
+#[test]
+fn merge_identical_multi_output_symrecs() {
+    let mut a = arena();
+    let build = |a: &mut TreeArena, name: &str| {
+        let var = a.symbol(name);
+        let r = sym_ref(a, var);
+        let mut b = SigBuilder::new(a);
+        let b1 = { let c = b.int(1); b.add(r, c) };
+        let b2 = { let c = b.int(2); b.mul(r, c) };
+        let list = vec_to_list(a, &[b1, b2]);
+        sym_rec(a, var, list)
+    };
+
+    let rec0 = build(&mut a, "W0");
+    let rec2 = build(&mut a, "W2");
+
+    let outputs = vec![rec0, rec2];
+    let merged = merge_isomorphic_symrec_groups(&mut a, &outputs);
+
+    assert_eq!(merged[0], merged[1]);
+}
+
+#[test]
+fn merge_does_not_unify_distinct_symrecs() {
+    let mut a = arena();
+    let rec0 = make_single_rec(&mut a, "W0", |b, rf| { let c = b.int(1); b.add(rf, c) });
+    let rec2 = make_single_rec(&mut a, "W2", |b, rf| { let c = b.int(1); b.mul(rf, c) }); 
+
+    let outputs = vec![rec0, rec2];
+    let merged = merge_isomorphic_symrec_groups(&mut a, &outputs);
+
+    assert_ne!(merged[0], merged[1]);
+}
+
+#[test]
+fn merge_followed_by_simplify_gives_zero() {
+    let mut a = arena();
+    let rec0 = make_single_rec(&mut a, "W0", |b, rf| { let c = b.int(1); b.add(rf, c) });
+    let rec2 = make_single_rec(&mut a, "W2", |b, rf| { let c = b.int(1); b.add(rf, c) });
+
+    let mut b = SigBuilder::new(&mut a);
+    let proj0 = b.proj(0, rec0);
+    let proj2 = b.proj(0, rec2);
+    let sub = b.sub(proj0, proj2);
+
+    let merged_outputs = merge_isomorphic_symrec_groups(&mut a, &[sub]);
+    let merged_sub = merged_outputs[0];
+
+    // After merging, proj0 and proj2 refer to the same SYMREC group.
+    let simplified = crate::simplify::simplify_const(&mut a, merged_sub);
+    
+    match match_sig(&a, simplified) {
+        SigMatch::Int(0) => {}
+        _ => panic!("Expected subtraction of merged isomorphic groups to simplify to 0"),
+    }
+}
+
+#[test]
+fn merge_nested_symrec_groups() {
+    let mut a = arena();
+    let inner1 = make_single_rec(&mut a, "W10", |b, rf| { let c = b.int(1); b.add(rf, c) });
+    let inner2 = make_single_rec(&mut a, "W12", |b, rf| { let c = b.int(1); b.add(rf, c) });
+
+    let outer1 = make_single_rec(&mut a, "W0", |b, rf| b.mul(inner1, rf));
+    let outer2 = make_single_rec(&mut a, "W2", |b, rf| b.mul(inner2, rf));
+
+    let outputs = vec![outer1, outer2];
+    let merged = merge_isomorphic_symrec_groups(&mut a, &outputs);
+
+    assert_eq!(merged[0], merged[1]);
+}
+
+#[test]
+fn merge_is_idempotent() {
+    let mut a = arena();
+    let rec0 = make_single_rec(&mut a, "W0", |b, rf| { let c = b.int(1); b.sub(c, rf) });
+    let rec2 = make_single_rec(&mut a, "W2", |b, rf| { let c = b.int(1); b.sub(c, rf) });
+
+    let outputs = vec![rec0, rec2];
+    let merged1 = merge_isomorphic_symrec_groups(&mut a, &outputs);
+    let merged2 = merge_isomorphic_symrec_groups(&mut a, &merged1);
+
+    assert_eq!(merged1, merged2);
+}
+
+#[test]
+fn open_symrec_replaces_only_own_symref() {
+    let mut a = arena();
+    let var1 = a.symbol("W1");
+    let ref1 = sym_ref(&mut a, var1);
+    
+    let hole = a.symbol("__hole__");
+    let rec = make_single_rec(&mut a, "W0", |b, rf| b.add(rf, ref1));
+    let (var0, body_list) = tlib::match_sym_rec(&a, rec).unwrap();
+    
+    let mut cache = HashMap::new();
+    let opened = super::open_symrec(&mut a, body_list, var0, hole, &mut cache);
+    
+    let bodies = list_to_vec(&a, opened).unwrap();
+    match match_sig(&a, bodies[0]) {
+        SigMatch::BinOp(_, left, right) => {
+            assert_eq!(left, hole, "Own symref should be replaced by hole");
+            assert_eq!(right, ref1, "Other symref should be untouched");
+        }
+        _ => panic!("Expected BinOp"),
+    }
+}
 }
