@@ -43,7 +43,6 @@ use std::ffi::c_void;
 /// Stable backend identifier used by tooling and future CLI wiring.
 pub const BACKEND_NAME: &str = "cranelift";
 
-
 #[must_use]
 /// Returns the stable backend identifier (`"cranelift"`).
 pub fn backend_id() -> &'static str {
@@ -3533,7 +3532,6 @@ fn declare_jit_function(
         compute_clif_text,
     ))
 }
-
 
 /// Compiles a FIR module to a Cranelift JIT module.
 ///

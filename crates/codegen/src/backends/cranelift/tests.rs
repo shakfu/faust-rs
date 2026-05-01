@@ -13,7 +13,6 @@ fn backend_id_is_stable() {
     assert_eq!(backend_id(), "cranelift");
 }
 
-
 #[test]
 /// Verifies non-module FIR roots are rejected with the stable error code.
 fn compile_rejects_non_module_root() {
