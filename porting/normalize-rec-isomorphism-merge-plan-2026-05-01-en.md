@@ -3,172 +3,247 @@
 **Date:** 2026-05-01
 **Status:** Planned
 **Scope:** Add a pre-simplification pass in `crates/normalize/` that detects
-structurally isomorphic `SIGREC` groups and unifies them to a single canonical
+structurally isomorphic `SYMREC` groups and unifies them to a single canonical
 representative, enabling downstream algebraic simplification (e.g. `x - x → 0`)
 across signal trees produced by independent constructions.
 
 **Motivating case:** `fad_rec.dsp`
 
 ```faust
-process_fad = step ~ (_, _);           -- manual FAD: builds Rec₁
-fad(process_original, (g))             -- auto FAD:   builds Rec₂
+process_fad = step ~ (_, _);           -- manual FAD: builds SYMREC W0
+fad(process_original, (g))             -- auto FAD:   builds SYMREC W2
 
 process = _<: (process_fad : *(-1),*(-1)), fad(process_original, (g)) :> _,_;
 -- Expected: both outputs are zero.  Actual: two live recursion arrays.
 ```
 
-Both `Rec₁` and `Rec₂` implement the same first-order IIR `y[n] = x[n] + g·y[n-1]`
-and the same gradient `dy[n] = y[n-1] + g·dy[n-1]`. Because they are constructed
-by separate pipeline stages (propagation for the FAD transform, evaluation for the
-`step ~ (_, _)` literal), they receive different `SigId`s. The simplifier's
-`x - x → 0` rule (commit `215b688`) therefore cannot fire: `Proj(i, Rec₁) ≠ Proj(i, Rec₂)`
-as `SigId`s even though the two recursive systems are semantically identical.
-
-**Why here (normalize) and not in eval or propagation:**
-
-- The FAD transform runs in `propagate`, which has no knowledge of the
-  simultaneously-evaluated `step ~ (_, _)` subtree.  Merging there would require
-  cross-subtree analysis that does not belong to a single-signal transform.
-- The evaluator (`eval`) builds `Rec` nodes eagerly during beta-reduction;
-  injecting a unification step there would complicate the substitution model.
-- `normalize` already holds the complete signal forest for all output channels
-  and is the natural place for a global, graph-wide structural pass.  The
-  existing `SimplifyCache` provides the memoization infrastructure.
+Both groups implement the same first-order IIR and its gradient. Because they
+are constructed by separate pipeline stages they receive different symbolic
+variable names from `de_bruijn_to_sym` (`W0`, `W2`, …) and therefore different
+`SigId`s. The simplifier's `x - x → 0` rule (commit `215b688`) cannot fire:
+`Proj(0, W0-group) ≠ Proj(0, W2-group)` as `SigId`s.
 
 ---
 
-## Core concept: opening a recursive group
+## Representation: SYMREC / SYMREF (after de_bruijn_to_sym)
 
-A `SIGREC(body)` node is **self-referential**: `body` contains `SIGPROJ(i, R)`
-back-edges that point to `R` itself.  Because `R`'s `SigId` is determined by
-`body` (hash-consed), and `body` depends on `R`'s `SigId`, two independently
-constructed but semantically equivalent Rec nodes end up with different `SigId`s.
+Propagation (`crates/propagate`) builds recursive signals in de Bruijn form:
 
-The fix is to **open** each Rec before comparing: replace every `Proj(i, R)` in
-`body` with a canonical sentinel `Hole(i)`, yielding an acyclic DAG.  Two Rec
-nodes are **isomorphic** iff their opened DAGs are identical (same SigId after
-hash-consing in the arena, since all other sub-nodes are already structural).
+```
+DEBRUIJNREC(body)  — binder
+DEBRUIJNREF(level) — reference to enclosing binder at given De Bruijn level
+```
 
-For multi-output groups (`k` output lanes), the opened form is the k-tuple of
-opened per-lane bodies.
+`signal_prepare.rs` calls `tlib::de_bruijn_to_sym` on the entire cloned
+signal forest before any other pass.  The converter assigns a **fresh symbolic
+variable** (`W0`, `W1`, …) to each `DEBRUIJNREC` it encounters and rewrites
+every corresponding `DEBRUIJNREF` to `SYMREF(var)`:
+
+```
+SYMREC(W0, body)  — symbolic binder; body is a cons-list of output signals
+SYMREF(W0)        — leaf that refers back to the enclosing binder
+```
+
+Because the conversion uses `fresh_var()` (a per-`Converter` counter), two
+separately-constructed but structurally identical `DEBRUIJNREC` nodes produce
+two `SYMREC` nodes with different variable symbols (e.g. `W0` vs `W2`).
+`SYMREF(W0) ≠ SYMREF(W2)` as `SigId`s, so the bodies of the two `SYMREC`
+groups differ at every back-reference site.  The `SYMREC` nodes themselves
+therefore also differ.
+
+**`SIGREC`/`SIGPROJ` is a legacy representation** that must not appear in the
+prepared signal forest (`signal_prepare.rs` line 720 asserts this).  This plan
+operates exclusively on `SYMREC`/`SYMREF` nodes.
+
+---
+
+## Why AFTER de_bruijn_to_sym — and AFTER a first simplify pass
+
+### The sharing guarantee of de_bruijn_to_sym
+
+`de_bruijn_to_sym` uses one `Converter` (shared memo + `fresh_var()` counter)
+per call.  When called on the entire signal forest packed as a list (as in
+`signal_prepare.rs`), any two sub-trees that share the **same `DEBRUIJNREC`
+`SigId`** (i.e. identical hash-consed de Bruijn bodies) produce the **same
+`SYMREC`** — the memo short-circuits on the second visit.
+
+In that case the duplication is already eliminated by `de_bruijn_to_sym` and no
+additional merge pass is needed.  The merge pass is only needed when the two
+`DEBRUIJNREC` nodes have **different `SigId`s**.
+
+### Why the de Bruijn bodies differ for fad_rec.dsp
+
+The FAD transform applies the chain rule mechanically.  For `D(g·y)/Dg` it
+emits `1·y + g·Dy` (the textbook form) without simplifying.  The manually
+written `step` function writes `y_fb + g·g_fb` directly.  These are
+structurally different signal sub-trees → different hash-cons `SigId`s →
+different `DEBRUIJNREC` nodes → `de_bruijn_to_sym` produces two distinct
+`SYMREC` even through a shared converter.
+
+### Why AFTER simplify (first pass), not just after de_bruijn_to_sym
+
+After `de_bruijn_to_sym` the two `SYMREC` bodies still contain the unsimplified
+FAD expression `1·y + g·Dy`.  Opening them and comparing would yield different
+opened-body `SigId`s (`1·y + g·Dy` ≠ `y + g·Dy`).  The isomorphism would not
+be detected.
+
+The first `simplify_signals_fastlane` reduces `1·x → x`, `0 + x → x`, etc.
+After that pass both bodies become structurally identical (`y + g·Dy`).  Only
+then can opening + hash-consing detect the match.
+
+### Correct pipeline position
+
+```
+clone_forest_from(src_arena, outputs)
+    ↓
+de_bruijn_to_sym                       DEBRUIJNREC → SYMREC(var, body)
+    ↓                                  (shared SigId → same SYMREC; else two distinct)
+canonicalize_unary_rec_projections
+    ↓
+promote_signals_fastlane (1st)
+    ↓
+simplify_signals_fastlane (1st)        1·x→x, 0+x→x — FAD bodies now simplified
+    ↓
+[NEW] merge_isomorphic_rec_groups      opened bodies now equal → SYMREC(W2) → SYMREC(W0)
+    ↓
+simplify_signals_fastlane (2nd)        Proj(0,W0) − Proj(0,W0) → 0
+    ↓
+canonicalize_one_sample_delays
+    ↓
+promote_signals_fastlane (2nd)
+```
+
+This adds one extra `simplify_signals_fastlane` call after the merge.  Its cost
+is bounded by the size of the substituted forest (same O(N) as the existing
+simplification passes).
+
+---
+
+## Core concept: opening a SYMREC group
+
+A `SYMREC(var, body_list)` node is self-referential through `SYMREF(var)` leaves
+inside `body_list`.  Unlike `SIGREC`, the recursive reference is symbolic (a
+named variable), so `SYMREC` itself is NOT circularly hash-consed — its SigId is
+determined by its two children `var` and `body_list`, both of which are acyclic.
+
+To compare two groups `SYMREC(W0, body0)` and `SYMREC(W2, body2)`:
+
+1. Choose a canonical sentinel `HOLE`: a fixed `SigId` obtained by interning a
+   dedicated symbol (e.g. `arena.symbol("__rec_hole__")`) once at the start of
+   the pass.
+
+2. **Open** `SYMREC(W0, body0)`: replace every `SYMREF(W0)` leaf in `body0`
+   with `HOLE`, yielding `opened0`.  The traversal is memoized; other `SYMREF`
+   nodes (belonging to other Rec groups) are left unchanged.
+
+3. **Open** `SYMREC(W2, body2)` analogously, replacing `SYMREF(W2)` → `HOLE`,
+   yielding `opened2`.
+
+4. `opened0 == opened2` (same `SigId`) iff the two groups are isomorphic.
+
+For **multi-output groups** the body is a cons-list of `k` signals.  The opened
+form replaces all `SYMREF(var)` occurrences throughout the entire list; two
+multi-output groups are isomorphic iff their fully-opened body lists are
+identical.  No per-slot comparison is needed: hash-consing of the list structure
+makes whole-list equality `O(1)`.
 
 ---
 
 ## Algorithm
 
-### Step 1 — Collect reachable Rec nodes
+### Step 1 — Collect reachable SYMREC nodes
 
-Traverse all output signal roots with a depth-first walk (using a `visited:
-HashSet<SigId>` to avoid re-visits).  Each `SIGREC` node encountered is added
-to a `Vec<SigId>` of candidates.
+Traverse all output signal roots depth-first (memoized `HashSet<SigId>`).
+Record each `SYMREC` node encountered.  When a `SYMREF` is found as the `group`
+child of a `Proj` node, follow it to its enclosing `SYMREC` and record that too.
 
-### Step 2 — Compute the opened signature of each Rec
+### Step 2 — Compute the opened signature of each SYMREC
 
-For a Rec node `R` with body `body_R`:
+For each `SYMREC(var, body_list)` found in Step 1, traverse `body_list`
+replacing `SYMREF(var)` → `HOLE`.  Cache the traversal in a per-SYMREC
+`HashMap<SigId, SigId>`.  Other `SYMREC`/`SYMREF` nodes inside the body are
+left as opaque leaves (no recursion into foreign Rec bodies in this step).
 
-1. Choose `HOLE_BASE`: a fixed `SigId` obtained by interning a sentinel tag
-   (e.g. `SIGHOLE`) once into the arena at the start of the pass.  Individual
-   holes are represented as `SIGPROJ(i, HOLE_BASE)` — these are normal
-   hash-consed arena nodes, so two `Hole(i)` built from the same `i` are
-   always the same `SigId`.
+Result: a map `SYMREC → opened_SigId`.
 
-2. Traverse `body_R` with a recursive sig-map that replaces `Proj(i, R)` →
-   `Proj(i, HOLE_BASE)` and recurses into all other nodes.  A local
-   `HashMap<SigId, SigId>` caches the traversal.  Rec nodes *other than R*
-   encountered inside `body_R` are treated as opaque leaves (no recursion
-   into foreign Rec bodies).
+### Step 3 — Group by opened signature
 
-3. The result `opened_R: SigId` is the opened body, hash-consed in the arena.
-
-### Step 3 — Group Rec nodes by opened signature
-
-Build a `HashMap<SigId, Vec<SigId>>` mapping `opened_R → [R₁, R₂, …]`.
-Groups with exactly one member need no action.
+Build a `HashMap<SigId, Vec<SigId>>` mapping `opened_SigId → [SYMREC_1, …]`.
+Groups with a single member require no action.
 
 ### Step 4 — Build the substitution map
 
-For each group with two or more members, elect the representative with the
-smallest `SigId` (deterministic choice that depends only on graph structure,
-not construction order).  Populate a `HashMap<SigId, SigId>` mapping each
-non-canonical `Rᵢ → R_canon`.
+For each group with two or more members, elect the canonical representative by
+smallest `SigId` (deterministic).  Build a `HashMap<SigId, SigId>` mapping each
+non-canonical `SYMREC_i → SYMREC_canon` and each `SYMREF(var_i) → SYMREF(var_canon)`.
 
 ### Step 5 — Apply substitution to the signal forest
 
-Traverse all output roots with a memoized sig-map that:
-- On `Proj(i, R)` where `R` is in the substitution map: return `Proj(i, R_canon)`.
-- On `Rec(body)` where the Rec itself is non-canonical: replace with the
-  canonical Rec.  (Its body is identical by definition, so this is safe; the
-  original non-canonical `Rec` node simply becomes unreachable.)
-- On all other nodes: recurse into children, rebuild with arena.intern.
+Memoized graph walk over all output roots:
+- `SYMREC(var_i, body)` where `var_i` is non-canonical → return `SYMREC_canon`
+  (its body is equivalent by definition, so we reuse the canonical node directly
+  without rebuilding).
+- `SYMREF(var_i)` where `var_i` is non-canonical → return `SYMREF(var_canon)`.
+- All other nodes: recurse into children, rebuild with `arena.intern`.
 
-The traversal uses the same sentinel pattern as `sig_map` in `simplify.rs` to
-break Rec cycles.
+No sentinel is needed for `SYMREC` cycles: `SYMREC` is not circularly
+hash-consed (`SYMREF` leaves break the cycle at the structural level).
 
-### Step 6 — Run simplify
+### Step 6 — Run simplify_signals_fastlane
 
-After substitution, `Proj(0, Rec₁)` and `Proj(0, Rec₂)` are now both
-`Proj(0, R_canon)` — the same `SigId`.  The existing `x - x → 0` rule in
-`simplification()` fires on the subtracted pair and reduces both output channels
-to `Int(0)`.
-
----
-
-## Nested Rec groups
-
-If a Rec body itself references another Rec (mutual recursion or nested
-feedback), the opening step treats inner Rec nodes as opaque.  Two outer Rec
-nodes are isomorphic only if their opened bodies (including the opaque inner Rec
-SigIds) are identical.  This is correct: if inner Rec nodes are also isomorphic,
-Step 3 will group them independently and Step 5 will unify them first (the pass
-processes the substitution map in a single graph walk — one pass suffices because
-the substitution map is built globally before any rewriting starts).
+After substitution every reference to a formerly non-canonical group is now a
+reference to `SYMREC_canon`.  A subtraction `Proj(i, W0-group) - Proj(i, W2-group)`
+becomes `Proj(i, W0-group) - Proj(i, W0-group)` — same `SigId` on both sides.
+The `BinOp::Sub => int(0)` rule fires and both outputs reduce to zero.
 
 ---
 
 ## Implementation plan
 
-### New file: `crates/normalize/src/rec_merge.rs`
+### New function in `crates/normalize/src/`
 
 ```rust
-pub(crate) fn merge_isomorphic_rec_groups(
+// normalize/src/rec_merge.rs
+pub fn merge_isomorphic_symrec_groups(
     arena: &mut TreeArena,
-    roots: &[SigId],
+    outputs: &[SigId],
 ) -> Vec<SigId>;
 ```
 
-Performs Steps 1–5 and returns the substituted roots.  Pure signal-graph
-transformation; no type information needed.
-
 Internal helpers:
-- `collect_rec_nodes(arena, roots) -> Vec<SigId>`
-- `open_rec(arena, rec: SigId, hole_base: SigId) -> SigId`
-- `build_substitution(arena, recs: &[SigId]) -> HashMap<SigId, SigId>`
-- `apply_substitution(arena, roots: &[SigId], subst: &HashMap<SigId, SigId>) -> Vec<SigId>`
+- `collect_symrec_nodes(arena, roots) -> Vec<SigId>`
+- `open_symrec(arena, symrec: SigId, hole: SigId) -> SigId`  — replaces SYMREF(var) → hole
+- `build_symrec_substitution(arena, symrecs: &[SigId]) -> (HashMap<SigId,SigId>, HashMap<SigId,SigId>)`  — returns (rec_map, ref_map)
+- `apply_symrec_substitution(arena, roots, rec_map, ref_map) -> Vec<SigId>`
 
-### Integration point: `crates/normalize/src/lib.rs`
+### Integration point: `crates/transform/src/signal_prepare.rs`
 
-Call `merge_isomorphic_rec_groups` on the output signal roots immediately before
-the existing `simplify` (or `simplify_with_cache`) call in the normalize
-pipeline entry point.
+In `prepare_signals_for_fir_unverified`, after `promote_signals_fastlane` and
+before `simplify_signals_fastlane`:
 
 ```rust
-let roots = merge_isomorphic_rec_groups(arena, &roots);
-let simplified: Vec<SigId> = roots
-    .iter()
-    .map(|&r| simplify(arena, types, r))
-    .collect();
+let outputs = promote_signals_fastlane(&mut arena, &sig_types_before, &outputs)
+    .map_err(SignalPrepareError::Promotion)?;
+// NEW
+let outputs = normalize::rec_merge::merge_isomorphic_symrec_groups(&mut arena, &outputs);
+let sig_types_after_merge = infer_full_types(&arena, &outputs, ui)?;
+let outputs = simplify_signals_fastlane(&mut arena, &sig_types_after_merge, &outputs);
 ```
 
-### Tests: `crates/normalize/src/rec_merge.rs` (inline test module)
+The function is exposed from `normalize` via `pub use rec_merge::merge_isomorphic_symrec_groups`
+in `normalize/src/lib.rs`.
+
+### Tests: `crates/normalize/src/rec_merge.rs`
 
 | Test name | What it checks |
 |---|---|
-| `merge_identical_single_output_recs` | Two scalar `Rec(x + g*Proj(0,self))` built separately → unified to one representative |
-| `merge_identical_multi_output_recs` | Two 2-lane `Rec` (primal + gradient) → unified |
-| `merge_does_not_unify_distinct_recs` | Two Recs with different bodies → no substitution |
-| `merge_followed_by_simplify_gives_zero` | Full round-trip: build `Proj(0,R1) - Proj(0,R2)` for isomorphic R1, R2 → simplify → `Int(0)` |
-| `merge_nested_rec_groups` | Outer Recs that reference distinct but isomorphic inner Recs → all four unified |
-| `merge_is_idempotent` | Running the pass twice produces the same result |
+| `merge_identical_single_output_symrecs` | Two `SYMREC(W0,…)` and `SYMREC(W2,…)` with the same body after opening → unified to one canonical representative |
+| `merge_identical_multi_output_symrecs` | Two 2-output SYMREC groups (primal + gradient) → unified |
+| `merge_does_not_unify_distinct_symrecs` | Two Recs with different bodies → no substitution |
+| `merge_followed_by_simplify_gives_zero` | Full round-trip: build `Proj(0,R1) - Proj(0,R2)` for isomorphic R1,R2 → merge → simplify → `Int(0)` |
+| `merge_nested_symrec_groups` | Outer Recs referencing inner isomorphic Recs → all four unified |
+| `merge_is_idempotent` | Running the pass twice produces the same output `Vec<SigId>` |
+| `open_symrec_replaces_only_own_symref` | Opening `SYMREC(W0,…)` leaves `SYMREF(W2)` of a sibling group unchanged |
 
 ---
 
@@ -176,32 +251,35 @@ let simplified: Vec<SigId> = roots
 
 | Step | Cost |
 |---|---|
-| Collect Rec nodes | O(N) nodes visited |
-| Open each Rec | O(D) per Rec where D = body depth |
-| Group by signature | O(R) where R = number of Rec nodes |
+| Collect SYMREC nodes | O(N) nodes visited |
+| Open each SYMREC | O(D) per group where D = body depth |
+| Group by signature | O(R) where R = number of SYMREC nodes |
 | Apply substitution | O(N) nodes visited |
 | **Total** | **O(N + R·D)** — linear in graph size for fixed-depth bodies |
 
-For typical Faust DSPs, R ≤ 20 and D ≤ 50, so the pass is negligible relative
-to the rest of the normalize pipeline.
+For typical Faust DSPs, R ≤ 20 and D ≤ 50.
 
 ---
 
 ## Non-goals
 
-- Semantic equivalence beyond structural isomorphism (e.g. commutativity,
-  algebraic identities inside Rec bodies).  Two Recs with bodies `x + g*y` and
-  `g*y + x` are not merged.
-- Merging Rec nodes that differ only in their output arity.
-- Changes to the FAD transform or evaluator.
+- Semantic equivalence beyond structural isomorphism (e.g. commutativity of
+  sub-expressions inside Rec bodies).
+- Merging Rec groups with different output arities.
+- Any change to `de_bruijn_to_sym`, the evaluator, or the propagation / FAD
+  transform.
 - Any change to code generation or FIR lowering.
 
 ---
 
 ## Reference
 
-- `crates/normalize/src/simplify.rs` — `sig_map` cycle-breaking pattern reused
-  in Steps 2 and 5.
-- Commit `215b688` — adds `BinOp::Sub => 0` self-operation rule (Cause 2 fix),
-  which this pass activates for FAD-produced signal graphs.
+- `crates/transform/src/signal_prepare.rs` — `prepare_signals_for_fir_unverified`,
+  the integration site; also `canonicalize_unary_rec_projections` for the
+  `SYMREC` traversal pattern to reuse.
+- `crates/tlib/src/recursion.rs` — `de_bruijn_to_sym` / `Converter::convert`;
+  shows why two separate `DEBRUIJNREC` nodes always produce different `SYMREC`
+  variable names.
+- `crates/normalize/src/simplify.rs` — `sig_map` memoization pattern; commit
+  `215b688` for the `BinOp::Sub => int(0)` rule this pass activates.
 - `fad_rec.dsp` — motivating test case (manual FAD vs `fad()` macro).
