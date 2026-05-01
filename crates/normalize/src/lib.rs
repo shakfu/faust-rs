@@ -25,8 +25,10 @@ pub(crate) mod aterm;
 pub(crate) mod mterm;
 pub mod normalform;
 pub(crate) mod normalize;
+pub mod rec_merge;
 pub(crate) mod simplify;
 
+pub use rec_merge::merge_isomorphic_symrec_groups;
 pub use simplify::simplify_const;
 
 pub const CRATE_NAME: &str = "normalize";
