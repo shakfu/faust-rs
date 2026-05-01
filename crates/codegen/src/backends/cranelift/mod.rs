@@ -1374,10 +1374,13 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 Ok(self.fb.ins().fcvt_from_sint(types::F64, value))
             }
             (types::F32, types::I32) | (types::F64, types::I32) => {
-                Ok(self.fb.ins().fcvt_to_sint(types::I32, value))
+                // Use the saturating variant so that NaN → 0 and out-of-range
+                // floats saturate to INT_MIN/INT_MAX instead of trapping.
+                // This matches C/C++ cast semantics and the interpreter backend.
+                Ok(self.fb.ins().fcvt_to_sint_sat(types::I32, value))
             }
             (types::F32, types::I64) | (types::F64, types::I64) => {
-                Ok(self.fb.ins().fcvt_to_sint(types::I64, value))
+                Ok(self.fb.ins().fcvt_to_sint_sat(types::I64, value))
             }
             _ => Err(LoweringError::Unsupported(format!(
                 "unsupported Cranelift coercion {src_ty} -> {dst_ty} for FIR target {target:?}"

@@ -226,6 +226,12 @@ mod tests {
                 right.len()
             );
             for (sample_idx, (&l, &r)) in left.iter().zip(right.iter()).enumerate() {
+                // NaN-vs-NaN is a valid match (both backends agree on
+                // undefined arithmetic), skip before IEEE 754 NaN != NaN
+                // would produce a spurious failure.
+                if l.is_nan() && r.is_nan() {
+                    continue;
+                }
                 let delta = (l - r).abs();
                 let allowed = ABS_TOL.max(REL_TOL * l.abs().max(r.abs()));
                 assert!(
