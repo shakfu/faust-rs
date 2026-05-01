@@ -72,6 +72,15 @@ For each day file, entries are ordered from most recent commit to oldest using G
 
 See [`porting/journal/README.md`](porting/journal/README.md).
 
+## 2026-05-01 — test(corpus): add isomorphic recursive groups fusion examples
+
+Added new DSP tests to `tests/corpus` verifying the fusion of isomorphic recursive groups (`symrec`) under various conditions:
+- `rep_81` / `rep_82`: Direct parallel and dynamic fusion.
+- `rep_83_isomorphic_filter.dsp`: Real-world 1-pole smoother fusion mimicking identical parameters applied to single signals.
+- `rep_84` / `rep_85`: Coupled oscillator (mutual recursion) and nested inner-outer loop fusions.
+
+Generated accompanying Rust golden records to ensure CI dynamically tracks this simplification logic.
+
 ## 2026-03-25 — docs(codegen): documentation improvements in cranelift and interp backends
 
 **interp** — three targeted fixes:

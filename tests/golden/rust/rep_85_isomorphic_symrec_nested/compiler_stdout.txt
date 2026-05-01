@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_85_isomorphic_symrec_nested.dsp
+bytes=361
+lines=8
+fnv1a64=307a6901c7d6aa65

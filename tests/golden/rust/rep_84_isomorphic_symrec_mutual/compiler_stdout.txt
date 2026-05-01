@@ -1,0 +1,5 @@
+faust-rs-golden-v1
+source=rep_84_isomorphic_symrec_mutual.dsp
+bytes=497
+lines=8
+fnv1a64=658ce1b3c3127fa7
