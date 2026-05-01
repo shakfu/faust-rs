@@ -43,15 +43,6 @@ use std::ffi::c_void;
 /// Stable backend identifier used by tooling and future CLI wiring.
 pub const BACKEND_NAME: &str = "cranelift";
 
-/// Maximum textual CLIF size accepted for a lowered `compute` body on AArch64.
-///
-/// Large monolithic Faust `compute` functions can currently produce invalid
-/// AArch64 JIT code that branches into Cranelift padding/data islands and traps
-/// with `EXC_BAD_INSTRUCTION` at runtime. Until the backend splits large
-/// functions or Cranelift's island handling is proven safe for this shape, keep
-/// the existing bring-up fallback policy and emit a no-op stub for oversized
-/// AArch64 compute bodies.
-const AARCH64_MAX_SAFE_COMPUTE_CLIF_BYTES: usize = 32 * 1024;
 
 #[must_use]
 /// Returns the stable backend identifier (`"cranelift"`).
@@ -3543,20 +3534,6 @@ fn declare_jit_function(
     ))
 }
 
-fn compute_clif_exceeds_aarch64_safe_size(clif: &str) -> bool {
-    clif.len() > AARCH64_MAX_SAFE_COMPUTE_CLIF_BYTES
-}
-
-fn should_fallback_large_aarch64_compute(compiled: &JitDspModule) -> bool {
-    if !cfg!(target_arch = "aarch64") || !compiled.compute_body_lowered() {
-        return false;
-    }
-    compiled
-        .generated_functions_clif()
-        .iter()
-        .find(|(name, _)| name == compiled.compute_symbol_name())
-        .is_some_and(|(_, clif)| compute_clif_exceeds_aarch64_safe_size(clif))
-}
 
 /// Compiles a FIR module to a Cranelift JIT module.
 ///
@@ -3608,26 +3585,7 @@ pub fn generate_cranelift_module(
     }));
 
     match first_attempt {
-        Ok(Ok(compiled)) => {
-            if should_fallback_large_aarch64_compute(&compiled) {
-                eprintln!(
-                    "warning: Cranelift AArch64 compute body for `{module_name}::compute` \
-                     is too large for the current monolithic JIT path; falling back to no-op stub"
-                );
-                drop(compiled);
-                try_generate_cranelift_module(
-                    store,
-                    module,
-                    options,
-                    &module_name,
-                    compute_decl,
-                    true,
-                )
-            } else {
-                Ok(compiled)
-            }
-        }
-        Ok(Err(err)) => Err(err),
+        Ok(result) => result,
         Err(_panic) => {
             // Cranelift JIT panicked (most likely AArch64 branch-range exceeded).
             // The partial JIT module created in `try_generate_cranelift_module`
