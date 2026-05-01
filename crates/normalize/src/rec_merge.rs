@@ -137,13 +137,13 @@ fn build_symrec_substitution(
             let canon = sorted[0];
 
             let canon_var = match_sym_rec(arena, canon).unwrap().0;
-            let canon_ref = arena.intern(std::borrow::Cow::Borrowed(tlib::SYMREF_TAG), &[canon_var]);
+            let canon_ref = tlib::sym_ref(arena, canon_var);
 
             for &dup in &sorted[1..] {
                 rec_map.insert(dup, canon);
 
                 let dup_var = match_sym_rec(arena, dup).unwrap().0;
-                let dup_ref = arena.intern(std::borrow::Cow::Borrowed(tlib::SYMREF_TAG), &[dup_var]);
+                let dup_ref = tlib::sym_ref(arena, dup_var);
                 ref_map.insert(dup_ref, canon_ref);
             }
         }
