@@ -1,25 +1,25 @@
 //! Translation layer: box expression → [`Schema`] tree.
 //!
-//! [`generate_schema`] is the main entry point.  It recursively maps
-//! [`BoxMatch`] variants to `Box<dyn Schema>`, mirroring the C++
-//! `generateDiagramSchema` / `generateInsideSchema` pair in
-//! `drawschema.cpp`.
+//! Entry points:
+//! - [`generate_schema`] — non-folding path (flat single-file output).
+//! - [`generate_folded_inside`] — folding path used by `draw_schema` when
+//!   `config.fold_threshold > 0`.
 //!
-//! Folding (splitting large diagrams into multiple SVG files) is not
-//! yet implemented; every diagram is rendered in-line.
+//! Mirrors the C++ `generateDiagramSchema` / `generateInsideSchema` pair in
+//! `drawschema.cpp`.
 //!
 //! C++ reference: `compiler/draw/drawschema.cpp`.
 
-use boxes::{BoxId, BoxMatch, match_box};
+use std::collections::{HashMap, HashSet, VecDeque};
+
+use boxes::{BoxId, BoxMatch, box_complexity, match_box};
 use tlib::{NodeKind, TreeArena, tree_to_str};
 
 use crate::DrawConfig;
-use crate::schema::{
-    COLOR_LINK, COLOR_NORMAL, COLOR_NUM, COLOR_SLOT, COLOR_UI, Schema,
-};
+use crate::schema::{COLOR_LINK, COLOR_NORMAL, COLOR_NUM, COLOR_SLOT, COLOR_UI, Schema};
 use crate::schemas::{
     block::make_block,
-    cable::{CableSchema, CutSchema, ConnectorSchema},
+    cable::{CableSchema, ConnectorSchema, CutSchema},
     composed::make_decorate,
     merge::make_merge,
     multirate::{make_downsampling, make_ondemand, make_upsampling},
@@ -30,21 +30,172 @@ use crate::schemas::{
     split::make_split,
 };
 
-// ─── Top-level entry ────────────────────────────────────────────────────────────
+// ─── Folding state ────────────────────────────────────────────────────────────
 
-/// Convert a box expression rooted at `b` into a schema tree.
+/// Mutable state threaded through the folding translation pass.
 ///
-/// This is a direct port of C++ `generateDiagramSchema` (non-folding path).
-/// All sub-diagrams are rendered inline; folding is deferred to a later phase.
+/// Mirrors the C++ globals `gPendingExp`, `gDrawnExp`, `gBackLink`,
+/// `gSchemaFileName`, and `gFoldingFlag` from `drawschema.cpp`.
+pub struct FoldState<'a> {
+    /// `BoxId → definition name` populated by the evaluator.
+    pub def_names: &'a HashMap<BoxId, String>,
+    /// Queue of `(box_id, diagram_name, back_link_file)` waiting to be drawn.
+    pub pending: &'a mut VecDeque<(BoxId, String, String)>,
+    /// Set of already-scheduled/drawn box ids (prevents duplicate files).
+    pub drawn: &'a mut HashSet<BoxId>,
+    /// File name of the diagram currently being generated (for back-links).
+    pub current_file: String,
+    /// Whether folding is active for this session.
+    pub folding: bool,
+    /// Per-expression complexity threshold (`gFoldComplexity`).
+    pub fold_complexity: usize,
+}
+
+// ─── Top-level entries ─────────────────────────────────────────────────────────
+
+/// Flat (non-folding) path: convert `b` into a schema tree inline.
 ///
-/// C++ reference: `drawschema.cpp:359` — `generateDiagramSchema`.
+/// C++ reference: `drawschema.cpp:359` — `generateDiagramSchema` (non-fold path).
 pub fn generate_schema(arena: &TreeArena, b: BoxId, config: &DrawConfig) -> Box<dyn Schema> {
     generate_inside(arena, b, config)
 }
 
-// ─── Inside dispatch ────────────────────────────────────────────────────────────
+/// Folding path: generate the *inside* of diagram `b`, scheduling any
+/// sufficiently complex named sub-diagrams as separate files.
+///
+/// Called once per queued diagram in `draw_schema`'s main loop.
+/// C++ reference: `drawschema.cpp:234` — `writeSchemaFile` (calls `generateInsideSchema`).
+pub fn generate_folded_inside(
+    arena: &TreeArena,
+    b: BoxId,
+    config: &DrawConfig,
+    state: &mut FoldState<'_>,
+) -> Box<dyn Schema> {
+    generate_inside_folded(arena, b, config, state)
+}
 
-/// Map one `BoxId` to a schema, ignoring folding / naming decorations.
+/// Decide whether sub-diagram `b` should be folded (separate file) or inlined.
+///
+/// C++ reference: `drawschema.cpp:359` — `generateDiagramSchema`.
+fn generate_diagram_schema(
+    arena: &TreeArena,
+    b: BoxId,
+    config: &DrawConfig,
+    state: &mut FoldState<'_>,
+) -> Box<dyn Schema> {
+    // Folding: fold if the sub-diagram is named, complex enough, and not yet drawn.
+    if state.folding
+        && box_complexity(arena, b) >= state.fold_complexity
+        && let Some(def_name) = state.def_names.get(&b)
+        && !state.drawn.contains(&b)
+    {
+        state.drawn.insert(b);
+        let back = state.current_file.clone();
+        state.pending.push_back((b, def_name.clone(), back));
+        let link = legal_file_name(def_name, b);
+        let inner = generate_inside(arena, b, config);
+        let label = truncate_name(def_name.clone(), config.max_name_size);
+        return make_block(inner.inputs(), inner.outputs(), label, COLOR_LINK, link);
+    }
+
+    // Decoration: named sub-diagram that isn't pure routing gets a dashed border.
+    if let Some(def_name) = state.def_names.get(&b)
+        && !is_pure_routing(arena, b)
+    {
+        let label = truncate_name(def_name.clone(), config.max_name_size);
+        return make_decorate(generate_inside_folded(arena, b, config, state), 10.0, label);
+    }
+
+    generate_inside_folded(arena, b, config, state)
+}
+
+// ─── Inside dispatch ─────────────────────────────────────────────────────────
+
+/// Folding variant of [`generate_inside`]: composition children go through
+/// [`generate_diagram_schema`] so they can be folded into separate files.
+///
+/// C++ reference: `drawschema.cpp:396` — `generateInsideSchema` (folding path).
+fn generate_inside_folded(
+    arena: &TreeArena,
+    b: BoxId,
+    config: &DrawConfig,
+    state: &mut FoldState<'_>,
+) -> Box<dyn Schema> {
+    let max = config.max_name_size;
+    let tn = |s: String| truncate_name(s, max);
+
+    // Leaf nodes are identical to the non-folding path.
+    // Composition nodes recurse through generate_diagram_schema.
+    match match_box(arena, b) {
+        // ── Compositions: recurse through diagram dispatcher ──────────
+        BoxMatch::Seq(a, c) => make_seq(
+            generate_diagram_schema(arena, a, config, state),
+            generate_diagram_schema(arena, c, config, state),
+        ),
+        BoxMatch::Par(a, c) => make_par(
+            generate_diagram_schema(arena, a, config, state),
+            generate_diagram_schema(arena, c, config, state),
+        ),
+        BoxMatch::Split(a, c) => make_split(
+            generate_diagram_schema(arena, a, config, state),
+            generate_diagram_schema(arena, c, config, state),
+        ),
+        BoxMatch::Merge(a, c) => make_merge(
+            generate_diagram_schema(arena, a, config, state),
+            generate_diagram_schema(arena, c, config, state),
+        ),
+        BoxMatch::Rec(a, c) => make_rec(
+            generate_diagram_schema(arena, a, config, state),
+            generate_diagram_schema(arena, c, config, state),
+        ),
+        // ── Groups ────────────────────────────────────────────────────
+        BoxMatch::VGroup(label, body) => {
+            let name = tn(format!("vgroup({})", extract_name(arena, label)));
+            make_decorate(
+                generate_diagram_schema(arena, body, config, state),
+                10.0,
+                name,
+            )
+        }
+        BoxMatch::HGroup(label, body) => {
+            let name = tn(format!("hgroup({})", extract_name(arena, label)));
+            make_decorate(
+                generate_diagram_schema(arena, body, config, state),
+                10.0,
+                name,
+            )
+        }
+        BoxMatch::TGroup(label, body) => {
+            let name = tn(format!("tgroup({})", extract_name(arena, label)));
+            make_decorate(
+                generate_diagram_schema(arena, body, config, state),
+                10.0,
+                name,
+            )
+        }
+        // ── Metadata ─────────────────────────────────────────────────
+        BoxMatch::Metadata(a, _) => generate_inside_folded(arena, a, config, state),
+        // ── Multi-rate wrappers ───────────────────────────────────────
+        BoxMatch::Ondemand(inner) => {
+            make_ondemand(generate_inside_folded(arena, inner, config, state))
+        }
+        BoxMatch::Upsampling(inner) => {
+            make_upsampling(generate_inside_folded(arena, inner, config, state))
+        }
+        BoxMatch::Downsampling(inner) => {
+            make_downsampling(generate_inside_folded(arena, inner, config, state))
+        }
+        // ── Symbolic abstraction ──────────────────────────────────────
+        BoxMatch::Symbolic(a, body) => {
+            let slot = generate_slot_schema(arena, a);
+            generate_abstraction_folded(arena, slot, body, config, state)
+        }
+        // ── Everything else: delegate to flat generate_inside ─────────
+        _ => generate_inside(arena, b, config),
+    }
+}
+
+/// Non-folding map of one `BoxId` to a schema.
 ///
 /// C++ reference: `drawschema.cpp:396` — `generateInsideSchema`.
 fn generate_inside(arena: &TreeArena, b: BoxId, config: &DrawConfig) -> Box<dyn Schema> {
@@ -61,73 +212,88 @@ fn generate_inside(arena: &TreeArena, b: BoxId, config: &DrawConfig) -> Box<dyn 
         BoxMatch::Cut => Box::new(CutSchema::new()),
 
         // ── Binary arithmetic primitives (2 → 1) ─────────────────────
-        BoxMatch::Add  => make_block(2, 1, "+",  COLOR_NORMAL, ""),
-        BoxMatch::Sub  => make_block(2, 1, "-",  COLOR_NORMAL, ""),
-        BoxMatch::Mul  => make_block(2, 1, "*",  COLOR_NORMAL, ""),
-        BoxMatch::Div  => make_block(2, 1, "/",  COLOR_NORMAL, ""),
-        BoxMatch::Rem  => make_block(2, 1, "%",  COLOR_NORMAL, ""),
-        BoxMatch::And  => make_block(2, 1, "&",  COLOR_NORMAL, ""),
-        BoxMatch::Or   => make_block(2, 1, "|",  COLOR_NORMAL, ""),
-        BoxMatch::Xor  => make_block(2, 1, "xor", COLOR_NORMAL, ""),
-        BoxMatch::Lsh  => make_block(2, 1, "<<", COLOR_NORMAL, ""),
-        BoxMatch::Rsh  => make_block(2, 1, ">>", COLOR_NORMAL, ""),
-        BoxMatch::Lt   => make_block(2, 1, "<",  COLOR_NORMAL, ""),
-        BoxMatch::Le   => make_block(2, 1, "<=", COLOR_NORMAL, ""),
-        BoxMatch::Gt   => make_block(2, 1, ">",  COLOR_NORMAL, ""),
-        BoxMatch::Ge   => make_block(2, 1, ">=", COLOR_NORMAL, ""),
-        BoxMatch::Eq   => make_block(2, 1, "==", COLOR_NORMAL, ""),
-        BoxMatch::Ne   => make_block(2, 1, "!=", COLOR_NORMAL, ""),
-        BoxMatch::Pow  => make_block(2, 1, "pow", COLOR_NORMAL, ""),
+        BoxMatch::Add => make_block(2, 1, "+", COLOR_NORMAL, ""),
+        BoxMatch::Sub => make_block(2, 1, "-", COLOR_NORMAL, ""),
+        BoxMatch::Mul => make_block(2, 1, "*", COLOR_NORMAL, ""),
+        BoxMatch::Div => make_block(2, 1, "/", COLOR_NORMAL, ""),
+        BoxMatch::Rem => make_block(2, 1, "%", COLOR_NORMAL, ""),
+        BoxMatch::And => make_block(2, 1, "&", COLOR_NORMAL, ""),
+        BoxMatch::Or => make_block(2, 1, "|", COLOR_NORMAL, ""),
+        BoxMatch::Xor => make_block(2, 1, "xor", COLOR_NORMAL, ""),
+        BoxMatch::Lsh => make_block(2, 1, "<<", COLOR_NORMAL, ""),
+        BoxMatch::Rsh => make_block(2, 1, ">>", COLOR_NORMAL, ""),
+        BoxMatch::Lt => make_block(2, 1, "<", COLOR_NORMAL, ""),
+        BoxMatch::Le => make_block(2, 1, "<=", COLOR_NORMAL, ""),
+        BoxMatch::Gt => make_block(2, 1, ">", COLOR_NORMAL, ""),
+        BoxMatch::Ge => make_block(2, 1, ">=", COLOR_NORMAL, ""),
+        BoxMatch::Eq => make_block(2, 1, "==", COLOR_NORMAL, ""),
+        BoxMatch::Ne => make_block(2, 1, "!=", COLOR_NORMAL, ""),
+        BoxMatch::Pow => make_block(2, 1, "pow", COLOR_NORMAL, ""),
         BoxMatch::Atan2 => make_block(2, 1, "atan2", COLOR_NORMAL, ""),
-        BoxMatch::Fmod  => make_block(2, 1, "fmod",  COLOR_NORMAL, ""),
+        BoxMatch::Fmod => make_block(2, 1, "fmod", COLOR_NORMAL, ""),
         BoxMatch::Remainder => make_block(2, 1, "remainder", COLOR_NORMAL, ""),
-        BoxMatch::Min  => make_block(2, 1, "min", COLOR_NORMAL, ""),
-        BoxMatch::Max  => make_block(2, 1, "max", COLOR_NORMAL, ""),
+        BoxMatch::Min => make_block(2, 1, "min", COLOR_NORMAL, ""),
+        BoxMatch::Max => make_block(2, 1, "max", COLOR_NORMAL, ""),
         BoxMatch::Delay => make_block(2, 1, "@", COLOR_NORMAL, ""),
 
         // ── Unary math primitives (1 → 1) ────────────────────────────
-        BoxMatch::Acos  => make_block(1, 1, "acos",  COLOR_NORMAL, ""),
-        BoxMatch::Asin  => make_block(1, 1, "asin",  COLOR_NORMAL, ""),
-        BoxMatch::Atan  => make_block(1, 1, "atan",  COLOR_NORMAL, ""),
-        BoxMatch::Cos   => make_block(1, 1, "cos",   COLOR_NORMAL, ""),
-        BoxMatch::Sin   => make_block(1, 1, "sin",   COLOR_NORMAL, ""),
-        BoxMatch::Tan   => make_block(1, 1, "tan",   COLOR_NORMAL, ""),
-        BoxMatch::Exp   => make_block(1, 1, "exp",   COLOR_NORMAL, ""),
-        BoxMatch::Log   => make_block(1, 1, "log",   COLOR_NORMAL, ""),
+        BoxMatch::Acos => make_block(1, 1, "acos", COLOR_NORMAL, ""),
+        BoxMatch::Asin => make_block(1, 1, "asin", COLOR_NORMAL, ""),
+        BoxMatch::Atan => make_block(1, 1, "atan", COLOR_NORMAL, ""),
+        BoxMatch::Cos => make_block(1, 1, "cos", COLOR_NORMAL, ""),
+        BoxMatch::Sin => make_block(1, 1, "sin", COLOR_NORMAL, ""),
+        BoxMatch::Tan => make_block(1, 1, "tan", COLOR_NORMAL, ""),
+        BoxMatch::Exp => make_block(1, 1, "exp", COLOR_NORMAL, ""),
+        BoxMatch::Log => make_block(1, 1, "log", COLOR_NORMAL, ""),
         BoxMatch::Log10 => make_block(1, 1, "log10", COLOR_NORMAL, ""),
-        BoxMatch::Sqrt  => make_block(1, 1, "sqrt",  COLOR_NORMAL, ""),
-        BoxMatch::Abs   => make_block(1, 1, "abs",   COLOR_NORMAL, ""),
+        BoxMatch::Sqrt => make_block(1, 1, "sqrt", COLOR_NORMAL, ""),
+        BoxMatch::Abs => make_block(1, 1, "abs", COLOR_NORMAL, ""),
         BoxMatch::Floor => make_block(1, 1, "floor", COLOR_NORMAL, ""),
-        BoxMatch::Ceil  => make_block(1, 1, "ceil",  COLOR_NORMAL, ""),
-        BoxMatch::Rint  => make_block(1, 1, "rint",  COLOR_NORMAL, ""),
+        BoxMatch::Ceil => make_block(1, 1, "ceil", COLOR_NORMAL, ""),
+        BoxMatch::Rint => make_block(1, 1, "rint", COLOR_NORMAL, ""),
         BoxMatch::Round => make_block(1, 1, "round", COLOR_NORMAL, ""),
-        BoxMatch::IntCast   => make_block(1, 1, "int",   COLOR_NORMAL, ""),
+        BoxMatch::IntCast => make_block(1, 1, "int", COLOR_NORMAL, ""),
         BoxMatch::FloatCast => make_block(1, 1, "float", COLOR_NORMAL, ""),
-        BoxMatch::Delay1    => make_block(1, 1, "mem",   COLOR_NORMAL, ""),
-        BoxMatch::Prefix    => make_block(2, 1, "prefix", COLOR_NORMAL, ""),
+        BoxMatch::Delay1 => make_block(1, 1, "mem", COLOR_NORMAL, ""),
+        BoxMatch::Prefix => make_block(2, 1, "prefix", COLOR_NORMAL, ""),
 
         // ── Select (1-based control + n data inputs) ─────────────────
-        BoxMatch::Select2  => make_block(3, 1, "select2", COLOR_NORMAL, ""),
-        BoxMatch::Select3  => make_block(4, 1, "select3", COLOR_NORMAL, ""),
+        BoxMatch::Select2 => make_block(3, 1, "select2", COLOR_NORMAL, ""),
+        BoxMatch::Select3 => make_block(4, 1, "select3", COLOR_NORMAL, ""),
 
         // ── Tables ───────────────────────────────────────────────────
-        BoxMatch::ReadOnlyTable  => make_block(3, 1, "rdtable",  COLOR_NORMAL, ""),
-        BoxMatch::WriteReadTable => make_block(5, 1, "rwtable",  COLOR_NORMAL, ""),
+        BoxMatch::ReadOnlyTable => make_block(3, 1, "rdtable", COLOR_NORMAL, ""),
+        BoxMatch::WriteReadTable => make_block(5, 1, "rwtable", COLOR_NORMAL, ""),
 
         // ── Misc primitives ──────────────────────────────────────────
         BoxMatch::AssertBounds => make_block(3, 1, "assertbounds", COLOR_NORMAL, ""),
-        BoxMatch::Lowest       => make_block(1, 1, "lowest",       COLOR_NORMAL, ""),
-        BoxMatch::Highest      => make_block(1, 1, "highest",      COLOR_NORMAL, ""),
-        BoxMatch::Attach       => make_block(2, 2, "attach",       COLOR_NORMAL, ""),
-        BoxMatch::Enable       => make_block(2, 2, "enable",       COLOR_NORMAL, ""),
-        BoxMatch::Control      => make_block(2, 2, "control",      COLOR_NORMAL, ""),
+        BoxMatch::Lowest => make_block(1, 1, "lowest", COLOR_NORMAL, ""),
+        BoxMatch::Highest => make_block(1, 1, "highest", COLOR_NORMAL, ""),
+        BoxMatch::Attach => make_block(2, 2, "attach", COLOR_NORMAL, ""),
+        BoxMatch::Enable => make_block(2, 2, "enable", COLOR_NORMAL, ""),
+        BoxMatch::Control => make_block(2, 2, "control", COLOR_NORMAL, ""),
 
         // ── Composition operators ─────────────────────────────────────
-        BoxMatch::Seq(a, b)   => make_seq(generate_inside(arena, a, config), generate_inside(arena, b, config)),
-        BoxMatch::Par(a, b)   => make_par(generate_inside(arena, a, config), generate_inside(arena, b, config)),
-        BoxMatch::Split(a, b) => make_split(generate_inside(arena, a, config), generate_inside(arena, b, config)),
-        BoxMatch::Merge(a, b) => make_merge(generate_inside(arena, a, config), generate_inside(arena, b, config)),
-        BoxMatch::Rec(a, b)   => make_rec(generate_inside(arena, a, config), generate_inside(arena, b, config)),
+        BoxMatch::Seq(a, b) => make_seq(
+            generate_inside(arena, a, config),
+            generate_inside(arena, b, config),
+        ),
+        BoxMatch::Par(a, b) => make_par(
+            generate_inside(arena, a, config),
+            generate_inside(arena, b, config),
+        ),
+        BoxMatch::Split(a, b) => make_split(
+            generate_inside(arena, a, config),
+            generate_inside(arena, b, config),
+        ),
+        BoxMatch::Merge(a, b) => make_merge(
+            generate_inside(arena, a, config),
+            generate_inside(arena, b, config),
+        ),
+        BoxMatch::Rec(a, b) => make_rec(
+            generate_inside(arena, a, config),
+            generate_inside(arena, b, config),
+        ),
 
         // ── Metadata: transparent pass-through ───────────────────────
         BoxMatch::Metadata(a, _b) => generate_inside(arena, a, config),
@@ -214,15 +380,15 @@ fn generate_inside(arena: &TreeArena, b: BoxId, config: &DrawConfig) -> Box<dyn 
 
         // ── Route ─────────────────────────────────────────────────────
         BoxMatch::Route(a, b, c) => {
-            let ins    = extract_int(arena, a).unwrap_or(0).max(0) as usize;
-            let outs   = extract_int(arena, b).unwrap_or(0).max(0) as usize;
+            let ins = extract_int(arena, a).unwrap_or(0).max(0) as usize;
+            let outs = extract_int(arena, b).unwrap_or(0).max(0) as usize;
             let routes = flatten_int_tree(arena, c);
             make_route(ins, outs, routes, config.draw_route_frame)
         }
 
         // ── Multi-rate wrappers ───────────────────────────────────────
-        BoxMatch::Ondemand(inner)    => make_ondemand(generate_inside(arena, inner, config)),
-        BoxMatch::Upsampling(inner)  => make_upsampling(generate_inside(arena, inner, config)),
+        BoxMatch::Ondemand(inner) => make_ondemand(generate_inside(arena, inner, config)),
+        BoxMatch::Upsampling(inner) => make_upsampling(generate_inside(arena, inner, config)),
         BoxMatch::Downsampling(inner) => make_downsampling(generate_inside(arena, inner, config)),
 
         // ── Slots (lambda variable placeholders) ─────────────────────
@@ -276,19 +442,36 @@ fn generate_inside(arena: &TreeArena, b: BoxId, config: &DrawConfig) -> Box<dyn 
 /// Build an abstraction schema by placing input slots before the body.
 ///
 /// C++ reference: `drawschema.cpp:654` — `generateAbstractionSchema`.
-fn generate_abstraction(arena: &TreeArena, mut x: Box<dyn Schema>, body: BoxId, config: &DrawConfig) -> Box<dyn Schema> {
+fn generate_abstraction(
+    arena: &TreeArena,
+    mut x: Box<dyn Schema>,
+    body: BoxId,
+    config: &DrawConfig,
+) -> Box<dyn Schema> {
     let mut t = body;
-    loop {
-        match match_box(arena, t) {
-            BoxMatch::Symbolic(a, b) => {
-                let slot = generate_slot_schema(arena, a);
-                x = make_par(x, slot);
-                t = b;
-            }
-            _ => break,
-        }
+    while let BoxMatch::Symbolic(a, b) = match_box(arena, t) {
+        let slot = generate_slot_schema(arena, a);
+        x = make_par(x, slot);
+        t = b;
     }
     make_seq(x, generate_inside(arena, t, config))
+}
+
+/// Folding variant of [`generate_abstraction`].
+fn generate_abstraction_folded(
+    arena: &TreeArena,
+    mut x: Box<dyn Schema>,
+    body: BoxId,
+    config: &DrawConfig,
+    state: &mut FoldState<'_>,
+) -> Box<dyn Schema> {
+    let mut t = body;
+    while let BoxMatch::Symbolic(a, b) = match_box(arena, t) {
+        let slot = generate_slot_schema(arena, a);
+        x = make_par(x, slot);
+        t = b;
+    }
+    make_seq(x, generate_inside_folded(arena, t, config, state))
 }
 
 /// Build a 1→0 input-slot block schema.
@@ -303,6 +486,43 @@ fn generate_slot_schema(arena: &TreeArena, slot_id: BoxId) -> Box<dyn Schema> {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Return a legal SVG file name for a named sub-diagram.
+///
+/// Keeps up to 16 alphanumeric characters from `name`.  Unless the result is
+/// `"process"` (the root), appends `-<box_id_hex>` to guarantee uniqueness.
+///
+/// C++ reference: `drawschema.cpp:291` — `legalFileName`.
+pub fn legal_file_name(name: &str, box_id: BoxId) -> String {
+    let stem: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(16)
+        .collect();
+    if stem == "process" {
+        "process.svg".to_owned()
+    } else {
+        format!("{stem}-{:08x}.svg", box_id.as_u32())
+    }
+}
+
+/// Returns `true` if the diagram contains only routing (no logic/UI boxes).
+///
+/// Pure-routing sub-diagrams are not decorated with a named border even when
+/// they have a definition name, matching C++ `isPureRouting`.
+///
+/// C++ reference: `drawschema.cpp:332` — `isPureRouting`.
+fn is_pure_routing(arena: &TreeArena, b: BoxId) -> bool {
+    match match_box(arena, b) {
+        BoxMatch::Cut | BoxMatch::Wire | BoxMatch::Slot(_) => true,
+        BoxMatch::Seq(a, c)
+        | BoxMatch::Par(a, c)
+        | BoxMatch::Split(a, c)
+        | BoxMatch::Merge(a, c) => is_pure_routing(arena, a) && is_pure_routing(arena, c),
+        BoxMatch::Metadata(a, _) => is_pure_routing(arena, a),
+        _ => false,
+    }
+}
 
 /// Truncate a display name to at most `max` chars: keep first and last thirds.
 ///
@@ -347,7 +567,7 @@ fn flatten_int_tree(arena: &TreeArena, b: BoxId) -> Vec<usize> {
 
 fn flatten_int_tree_inner(arena: &TreeArena, b: BoxId, out: &mut Vec<usize>) {
     match match_box(arena, b) {
-        BoxMatch::Int(i)  => out.push(i.max(0) as usize),
+        BoxMatch::Int(i) => out.push(i.max(0) as usize),
         BoxMatch::Real(r) => out.push(r.max(0.0) as usize),
         BoxMatch::Par(x, y) => {
             flatten_int_tree_inner(arena, x, out);
@@ -369,18 +589,18 @@ fn extract_name(arena: &TreeArena, b: BoxId) -> String {
     }
     match match_box(arena, b) {
         BoxMatch::Ident(s) => s.to_owned(),
-        BoxMatch::Int(i)   => i.to_string(),
-        BoxMatch::Real(r)  => format_real(r),
-        _                  => "?".to_owned(),
+        BoxMatch::Int(i) => i.to_string(),
+        BoxMatch::Real(r) => format_real(r),
+        _ => "?".to_owned(),
     }
 }
 
 /// Format a numeric node for UI parameter display.
 fn format_node(arena: &TreeArena, b: BoxId) -> String {
     match match_box(arena, b) {
-        BoxMatch::Int(i)  => i.to_string(),
+        BoxMatch::Int(i) => i.to_string(),
         BoxMatch::Real(r) => format_real(r),
-        _                 => extract_name(arena, b),
+        _ => extract_name(arena, b),
     }
 }
 
@@ -399,9 +619,9 @@ pub fn make_top_schema(
 ) -> Box<dyn Schema> {
     use crate::schemas::composed::make_top;
 
-    let ins  = inner.inputs();
+    let ins = inner.inputs();
     let outs = inner.outputs();
-    let with_inputs  = add_schema_inputs(ins, inner);
+    let with_inputs = add_schema_inputs(ins, inner);
     let with_outputs = add_schema_outputs(outs, with_inputs);
     make_top(with_outputs, 20.0, name, link)
 }
@@ -410,12 +630,14 @@ pub fn make_top_schema(
 ///
 /// C++ reference: `drawschema.cpp:665` — `addSchemaInputs`.
 fn add_schema_inputs(n: usize, x: Box<dyn Schema>) -> Box<dyn Schema> {
-    if n == 0 { return x; }
+    if n == 0 {
+        return x;
+    }
     let mut y: Option<Box<dyn Schema>> = None;
     for _ in 0..n {
         let z: Box<dyn Schema> = Box::new(ConnectorSchema::new());
         y = Some(match y {
-            None    => z,
+            None => z,
             Some(p) => make_par(p, z),
         });
     }
@@ -426,12 +648,14 @@ fn add_schema_inputs(n: usize, x: Box<dyn Schema>) -> Box<dyn Schema> {
 ///
 /// C++ reference: `drawschema.cpp:683` — `addSchemaOutputs`.
 fn add_schema_outputs(n: usize, x: Box<dyn Schema>) -> Box<dyn Schema> {
-    if n == 0 { return x; }
+    if n == 0 {
+        return x;
+    }
     let mut y: Option<Box<dyn Schema>> = None;
     for _ in 0..n {
         let z: Box<dyn Schema> = Box::new(ConnectorSchema::new());
         y = Some(match y {
-            None    => z,
+            None => z,
             Some(p) => make_par(p, z),
         });
     }

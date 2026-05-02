@@ -108,6 +108,12 @@ pub struct SignalCompileOutput {
     /// for `buildUserInterface`, rather than reconstructing groups from signal
     /// leaf widgets.
     pub ui: UiProgram,
+    /// Evaluated `BoxId` → source definition name.
+    ///
+    /// Populated by the evaluator: when a named closure is forced to a concrete
+    /// box, the result `BoxId` is recorded with the definition's string name.
+    /// Used by the SVG draw module to label and fold named sub-diagrams.
+    pub def_names: std::collections::HashMap<boxes::BoxId, String>,
 }
 
 impl SignalCompileOutput {
@@ -1487,7 +1493,7 @@ impl Compiler {
             source: source.into(),
         })?;
 
-        let process_result = self.time_phase("evaluation", || {
+        let eval_result = self.time_phase("evaluation", || {
             match (&eval_source_context, &self.cancel) {
                 (Some(source_context), Some(cancel)) => {
                     eval::eval_entrypoint_with_source_context_and_cancel(
@@ -1497,22 +1503,23 @@ impl Compiler {
                         source_context.clone(),
                         std::sync::Arc::clone(cancel),
                     )
-                    .map(|(tree, _stats)| tree)
                 }
-                (Some(source_context), None) => eval::eval_entrypoint_with_source_context(
-                    &mut output.state.arena,
-                    root,
-                    self.entrypoint_name.as_ref(),
-                    source_context.clone(),
-                ),
-                (None, _) => eval::eval_entrypoint(
+                (Some(source_context), None) => {
+                    eval::eval_entrypoint_with_stats_and_source_context(
+                        &mut output.state.arena,
+                        root,
+                        self.entrypoint_name.as_ref(),
+                        source_context.clone(),
+                    )
+                }
+                (None, _) => eval::eval_entrypoint_with_stats(
                     &mut output.state.arena,
                     root,
                     self.entrypoint_name.as_ref(),
                 ),
             }
         });
-        let process_box = process_result.map_err(|error| {
+        let (process_box, eval_stats) = eval_result.map_err(|error| {
             let node = eval_error_node(&error);
             let owner =
                 node.and_then(|n| owner_definition_name_for_node(&output.state.arena, root, n));
@@ -1624,6 +1631,7 @@ impl Compiler {
             process_arity,
             signals: propagated.signals,
             ui: propagated.ui,
+            def_names: eval_stats.def_names,
         })
     }
 }

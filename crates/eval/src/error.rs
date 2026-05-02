@@ -55,6 +55,14 @@ pub struct EvalStats {
     pub loop_detector_max_depth: usize,
     /// Total number of box nodes visited by `eval_box`.
     pub nodes_evaluated: u64,
+    /// Definition-name map: evaluated `BoxId` → source definition name.
+    ///
+    /// Populated during eval whenever a named closure is forced to a concrete box.
+    /// Used by the SVG draw module to label / fold named sub-diagrams.
+    ///
+    /// C++ equivalent: the property set by `setDefNameProperty(result, id)` in
+    /// `compiler/evaluate/eval.cpp`.
+    pub def_names: std::collections::HashMap<tlib::TreeId, String>,
 }
 
 /// Evaluator error.

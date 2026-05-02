@@ -5,7 +5,7 @@
 use crate::device::DrawDevice;
 use crate::error::DrawError;
 use crate::schema::{
-    Orientation, Placement, Point, Schema, Trait, TraitCollector, D_HORZ, D_VERT, D_WIRE,
+    D_HORZ, D_VERT, D_WIRE, Orientation, Placement, Point, Schema, Trait, TraitCollector,
 };
 
 const ROUTE_COLOR: &str = "#EEEEAA";
@@ -108,10 +108,18 @@ impl RouteSchema {
 }
 
 impl Schema for RouteSchema {
-    fn width(&self) -> f64 { self.width }
-    fn height(&self) -> f64 { self.height }
-    fn inputs(&self) -> usize { self.inputs }
-    fn outputs(&self) -> usize { self.outputs }
+    fn width(&self) -> f64 {
+        self.width
+    }
+    fn height(&self) -> f64 {
+        self.height
+    }
+    fn inputs(&self) -> usize {
+        self.inputs
+    }
+    fn outputs(&self) -> usize {
+        self.outputs
+    }
 
     fn place(&mut self, x: f64, y: f64, orientation: Orientation) {
         self.placement = Some(Placement { x, y, orientation });
@@ -119,11 +127,19 @@ impl Schema for RouteSchema {
         self.place_output_points();
     }
 
-    fn placed(&self) -> bool { self.placement.is_some() }
-    fn placement(&self) -> Option<&Placement> { self.placement.as_ref() }
+    fn placed(&self) -> bool {
+        self.placement.is_some()
+    }
+    fn placement(&self) -> Option<&Placement> {
+        self.placement.as_ref()
+    }
 
-    fn input_point(&self, i: usize) -> Point { self.input_points[i] }
-    fn output_point(&self, i: usize) -> Point { self.output_points[i] }
+    fn input_point(&self, i: usize) -> Point {
+        self.input_points[i]
+    }
+    fn output_point(&self, i: usize) -> Point {
+        self.output_points[i]
+    }
 
     /// C++ reference: `routeSchema.cpp:159` — `routeSchema::draw`.
     ///
@@ -137,9 +153,12 @@ impl Schema for RouteSchema {
         let p = self.placement.unwrap();
         // background rectangle
         dev.rect(
-            p.x + D_HORZ, p.y + D_VERT,
-            self.width - 2.0 * D_HORZ, self.height - 2.0 * D_VERT,
-            ROUTE_COLOR, "",
+            p.x + D_HORZ,
+            p.y + D_VERT,
+            self.width - 2.0 * D_HORZ,
+            self.height - 2.0 * D_VERT,
+            ROUTE_COLOR,
+            "",
         )?;
         // orientation mark
         let (mx, my) = match p.orientation {
@@ -148,7 +167,11 @@ impl Schema for RouteSchema {
         };
         dev.mark_direction(mx, my, p.orientation.sign() as i32)?;
         // input arrows
-        let dx = if p.orientation == Orientation::LeftRight { D_HORZ } else { -D_HORZ };
+        let dx = if p.orientation == Orientation::LeftRight {
+            D_HORZ
+        } else {
+            -D_HORZ
+        };
         for pt in &self.input_points {
             dev.arrow(pt.x + dx, pt.y, 0.0, p.orientation.sign() as i32)?;
         }
@@ -159,7 +182,11 @@ impl Schema for RouteSchema {
     fn collect_traits(&self, c: &mut TraitCollector) {
         assert!(self.placed());
         let p = self.placement.unwrap();
-        let dx = if p.orientation == Orientation::LeftRight { D_HORZ } else { -D_HORZ };
+        let dx = if p.orientation == Orientation::LeftRight {
+            D_HORZ
+        } else {
+            -D_HORZ
+        };
 
         // input stubs
         for pt in &self.input_points {

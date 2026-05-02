@@ -23,12 +23,14 @@
 use tlib::TreeId;
 
 mod builder;
+mod complexity;
 mod dump;
 pub(crate) mod internals;
 mod matcher;
 pub(crate) mod tags;
 
 pub use builder::BoxBuilder;
+pub use complexity::box_complexity;
 pub use dump::dump_box;
 pub use matcher::{BoxMatch, match_box};
 

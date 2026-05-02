@@ -4,9 +4,7 @@
 
 use crate::device::DrawDevice;
 use crate::error::DrawError;
-use crate::schema::{
-    Orientation, Placement, Point, Schema, Trait, TraitCollector, D_WIRE,
-};
+use crate::schema::{D_WIRE, Orientation, Placement, Point, Schema, Trait, TraitCollector};
 use crate::schemas::composed::make_enlarged;
 
 /// Recursive composition: feedback from outputs of `s1` back to inputs of `s2`.
@@ -47,14 +45,26 @@ pub fn make_rec(s1: Box<dyn Schema>, s2: Box<dyn Schema>) -> Box<dyn Schema> {
 }
 
 impl Schema for RecSchema {
-    fn width(&self) -> f64 { self.width }
-    fn height(&self) -> f64 { self.height }
-    fn inputs(&self) -> usize { self.input_points.len() }
-    fn outputs(&self) -> usize { self.output_points.len() }
+    fn width(&self) -> f64 {
+        self.width
+    }
+    fn height(&self) -> f64 {
+        self.height
+    }
+    fn inputs(&self) -> usize {
+        self.input_points.len()
+    }
+    fn outputs(&self) -> usize {
+        self.output_points.len()
+    }
 
     /// C++ reference: `recSchema.cpp:72` — `recSchema::place`.
     fn place(&mut self, ox: f64, oy: f64, orientation: Orientation) {
-        self.placement = Some(Placement { x: ox, y: oy, orientation });
+        self.placement = Some(Placement {
+            x: ox,
+            y: oy,
+            orientation,
+        });
 
         let dx1 = (self.width - self.s1.width()) / 2.0;
         let dx2 = (self.width - self.s2.width()) / 2.0;
@@ -62,15 +72,21 @@ impl Schema for RecSchema {
         match orientation {
             Orientation::LeftRight => {
                 self.s2.place(ox + dx2, oy, Orientation::RightLeft);
-                self.s1.place(ox + dx1, oy + self.s2.height(), Orientation::LeftRight);
+                self.s1
+                    .place(ox + dx1, oy + self.s2.height(), Orientation::LeftRight);
             }
             Orientation::RightLeft => {
                 self.s1.place(ox + dx1, oy, Orientation::RightLeft);
-                self.s2.place(ox + dx2, oy + self.s1.height(), Orientation::LeftRight);
+                self.s2
+                    .place(ox + dx2, oy + self.s1.height(), Orientation::LeftRight);
             }
         }
 
-        let adx1 = if orientation == Orientation::RightLeft { -dx1 } else { dx1 };
+        let adx1 = if orientation == Orientation::RightLeft {
+            -dx1
+        } else {
+            dx1
+        };
 
         let skip = self.s2.outputs();
         for i in 0..self.input_points.len() {
@@ -83,11 +99,19 @@ impl Schema for RecSchema {
         }
     }
 
-    fn placed(&self) -> bool { self.placement.is_some() }
-    fn placement(&self) -> Option<&Placement> { self.placement.as_ref() }
+    fn placed(&self) -> bool {
+        self.placement.is_some()
+    }
+    fn placement(&self) -> Option<&Placement> {
+        self.placement.as_ref()
+    }
 
-    fn input_point(&self, i: usize) -> Point { self.input_points[i] }
-    fn output_point(&self, i: usize) -> Point { self.output_points[i] }
+    fn input_point(&self, i: usize) -> Point {
+        self.input_points[i]
+    }
+    fn output_point(&self, i: usize) -> Point {
+        self.output_points[i]
+    }
 
     /// C++ reference: `recSchema.cpp:128` — `recSchema::draw`.
     fn draw(&self, dev: &mut dyn DrawDevice) -> Result<(), DrawError> {
@@ -96,7 +120,11 @@ impl Schema for RecSchema {
         self.s2.draw(dev)?;
 
         let orientation = self.orientation();
-        let dw = if orientation == Orientation::LeftRight { D_WIRE } else { -D_WIRE };
+        let dw = if orientation == Orientation::LeftRight {
+            D_WIRE
+        } else {
+            -D_WIRE
+        };
         for i in 0..self.s2.inputs() {
             let p = self.s1.output_point(i);
             draw_delay_sign(dev, p.x + i as f64 * dw, p.y, dw / 2.0)?;
@@ -173,8 +201,17 @@ fn collect_feedback(
     out: Point,
     orientation: Orientation,
 ) {
-    let ox = src.x + if orientation == Orientation::LeftRight { dx } else { -dx };
-    let ct = if orientation == Orientation::LeftRight { D_WIRE / 2.0 } else { -D_WIRE / 2.0 };
+    let ox = src.x
+        + if orientation == Orientation::LeftRight {
+            dx
+        } else {
+            -dx
+        };
+    let ct = if orientation == Orientation::LeftRight {
+        D_WIRE / 2.0
+    } else {
+        -D_WIRE / 2.0
+    };
 
     let up = Point::new(ox, src.y - ct);
     let br = Point::new(ox + ct / 2.0, src.y);
@@ -197,7 +234,12 @@ fn collect_feedfront(
     dx: f64,
     orientation: Orientation,
 ) {
-    let ox = src.x + if orientation == Orientation::LeftRight { -dx } else { dx };
+    let ox = src.x
+        + if orientation == Orientation::LeftRight {
+            -dx
+        } else {
+            dx
+        };
     c.add_trait(Trait::new(src, Point::new(ox, src.y)));
     c.add_trait(Trait::new(Point::new(ox, src.y), Point::new(ox, dst.y)));
     c.add_trait(Trait::new(Point::new(ox, dst.y), dst));

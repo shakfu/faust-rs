@@ -461,64 +461,67 @@ as `first_third + "..." + last_third`.
 **Action**: Add `max_name_size: usize` (default 40) to `DrawConfig`. In `translate.rs`,
 apply a `truncate_name(s, max)` helper before passing text to `make_block()`.
 
-### Phase I — Hierarchical SVG with folding (3–4 days)
+### Phase I — Hierarchical SVG with folding ✅ done
 
 Port the folding mechanism that splits a complex diagram into multiple linked SVG files.
 This is the main feature enabling navigation in the block-diagram browser.
 
-**C++ globals**: `gFoldThreshold` (default 25), `gFoldComplexity` (default 2),
+**C++ globals ported**: `gFoldThreshold` (default 25), `gFoldComplexity` (default 2),
 `gFoldingFlag` (derived), `gBackLink` (back-link map), `gDrawnExp` (visited set),
 `gPendingExp` (queue), `gSchemaFileName` (current file name).
 
-**Dependencies** not yet in Rust:
-1. **`box_complexity(arena, BoxId) → usize`**: port `boxcomplexity.cpp` — recursive count
-   of "drawable" nodes (primitives=1, cuts/wires/slots=0, composition=sum). Add to `boxes`
-   crate as `pub fn box_complexity(arena: &TreeArena, b: BoxId) -> usize`.
-2. **`get_def_name(arena, BoxId) → Option<&str>`**: definition name attached during eval.
-   In C++ this is `getDefNameProperty(t, id)`. In Rust, the eval crate would need to
-   expose a way to query these names (stored as tree properties). Investigation needed.
-3. **`legal_file_name(name, addr) → String`**: port `legalFileName()` — keep first 16
-   alphanum chars, append hex address for uniqueness, unless `name == "process"`.
+#### I1 — `box_complexity` (`crates/boxes/src/complexity.rs`)
 
-**Folding algorithm (port of `drawSchema` + `writeSchemaFile`)**:
+Recursive complexity scorer added as `pub fn box_complexity(arena, BoxId) → usize`:
+- Cuts, wires, routes, slots, environment → **0**
+- All primitives, UI widgets, foreign items → **1**
+- Compositions (seq/par/split/merge/rec) → **sum of children**
+- Groups (vgroup/hgroup/tgroup) → **complexity of body** (transparent)
+- Symbolic/ondemand/up/downsampling → **1 + child**
+- Metadata → **transparent**
 
-```
-DrawConfig { fold_threshold: 25, fold_complexity: 2, ... }
+#### I2 — Definition-name tracking in eval
 
-fn draw_schema_folded(arena, root, name, out_dir, config):
-    complexity = box_complexity(arena, root)
-    folding = complexity > config.fold_threshold
-    pending = VecDeque::from([root])
-    drawn = HashSet::new()
-    back_links = HashMap::new()
-    back_links.insert(root, "".to_string())
-    current_file = ""
+`LoopDetector` gains `pub(crate) def_names: HashMap<TreeId, String>`.
+In `eval_ident_value()`, after forcing a named closure to a box, the mapping
+`box_id → name` is recorded in `loop_detector.def_names`.
+`eval_entrypoint_full()` extracts the map into `EvalStats.def_names`.
+`SignalCompileOutput` gains `pub def_names: HashMap<BoxId, String>`.
+The compiler now uses `eval_entrypoint_with_stats` variants to capture def names.
 
-    while let Some(t) = pending.pop_front():
-        write_schema_file(arena, t, out_dir, config, &mut pending, &drawn, &back_links, folding)
-        drawn.insert(t)
+#### I3 — Folding infrastructure (`crates/draw/src/translate.rs`)
 
-fn generate_diagram_schema_with_folding(arena, b, config, pending, back_links, folding):
-    if folding && box_complexity(arena, b) >= config.fold_complexity:
-        if let Some(name) = get_def_name(arena, b):
-            if not already drawn(b):
-                pending.push(b)
-                link = legal_file_name(name, b) + ".svg"
-                back_links.insert(b, current_file)
-                return make_block(ins, outs, name, COLOR_LINK, link)
-    if let Some(name) = get_def_name(arena, b) && !is_pure_routing(arena, b):
-        return make_decorate(generate_inside(arena, b, ...), 10, name)
-    return generate_inside(arena, b, ...)
-```
+New `pub struct FoldState`: holds `def_names`, `pending` queue, `drawn` set,
+`current_file`, `folding` flag, `fold_complexity`.
 
-**`is_pure_routing`**: port of `isPureRouting` — returns true for
-`Wire | Cut | Slot | Inverter` and recursive `Par | Seq | Split | Merge` of those.
+New `generate_diagram_schema(arena, b, config, state)`: checks folding conditions,
+schedules sub-diagrams into `pending`, or decorates named non-routing sub-diagrams,
+or falls through to `generate_inside_folded`.
 
-**CLI additions**:
-```
--f N    --fold N            threshold (default 25)
--fc N   --fold-complexity N  per-expr threshold (default 2)
-```
+New `generate_inside_folded`: same as `generate_inside` but passes `state` to
+`generate_diagram_schema` for all composition children.
+
+Helpers: `pub fn legal_file_name(name, box_id) → String` (stem ≤ 16 alphanum + hex
+suffix, except `"process"`); `fn is_pure_routing(arena, BoxId) → bool`.
+
+#### I4 — `draw_schema` folding loop (`crates/draw/src/lib.rs`)
+
+`draw_schema()` API changed:
+- `output_path: &Path` → `out_dir: &Path`  (directory, not file)
+- New parameter: `def_names: &HashMap<BoxId, String>`
+
+New fields in `DrawConfig`: `fold_threshold: usize` (default 25),
+`fold_complexity: usize` (default 2).
+
+Main loop: `pending` VecDeque; root is seeded as `(root, name, "")`.  Each iteration
+pops one diagram, calls `generate_folded_inside`, wraps in `TopSchema`, renders to
+`legal_file_name(diagram_name, box_id)` in `out_dir`.
+
+#### I5 — CLI wiring
+
+`-f N` / `--fold N` and `-fc N` / `--fold-complexity N` added to `CliArgs` and
+`normalize_legacy_args`.  `DrawConfig` built from all 6 SVG flags and passed to
+`draw_schema` along with `out.def_names`.
 
 ### Phase J — Signal → Dot (optional, 1–2 days)
 Port `sigToGraph.cpp` for Graphviz dot output.  
@@ -636,8 +639,8 @@ For each corpus DSP:
 | E | Specialized schemas | 1–2 | ✅ done |
 | F | Translation layer | 3–4 | ✅ done |
 | G | CLI `-svg` flag | 1–2 | ✅ done |
-| H | Visual options: -blur, -sc, -drf, -mns | 1–2 | 🔲 next |
-| I | Hierarchical folding (-f, -fc) | 3–4 | 🔲 planned |
+| H | Visual options: -blur, -sc, -drf, -mns | 1–2 | ✅ done |
+| I | Hierarchical folding (-f, -fc) | 3–4 | ✅ done |
 | J | Signal → Dot (optional) | 1–2 | 🔲 optional |
 | K | PostScript (deferred) | 2–3 | 🔲 deferred |
 | — | `-sd`, `-sn` (eval-stage) | — | out of scope |
@@ -662,10 +665,12 @@ For each corpus DSP:
 - [ ] All new flags wired via `normalize_legacy_args`
 
 ### Phase I (folding — hierarchical SVGs)
-- [ ] `box_complexity` implemented in `boxes` crate
-- [ ] Folding queue produces multiple linked `.svg` files
-- [ ] `-f N` / `--fold N` and `-fc N` / `--fold-complexity N` flags
-- [ ] Navigation links between files work in browser
+- [x] `box_complexity` implemented in `boxes` crate (`crates/boxes/src/complexity.rs`)
+- [x] Def-name tracking in eval: `LoopDetector.def_names`, `EvalStats.def_names`, `SignalCompileOutput.def_names`
+- [x] Folding queue produces multiple linked `.svg` files
+- [x] `FoldState`, `generate_diagram_schema`, `generate_inside_folded`, `legal_file_name`, `is_pure_routing` in `translate.rs`
+- [x] `-f N` / `--fold N` and `-fc N` / `--fold-complexity N` flags wired
+- [x] Navigation links between files work in browser
 
 ### All phases
 - [ ] `cargo clippy --all-targets -- -D warnings` clean

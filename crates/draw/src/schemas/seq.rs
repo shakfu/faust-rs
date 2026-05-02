@@ -4,19 +4,27 @@
 
 use crate::device::DrawDevice;
 use crate::error::DrawError;
-use crate::schema::{Orientation, Placement, Point, Schema, Trait, TraitCollector, D_WIRE};
+use crate::schema::{D_WIRE, Orientation, Placement, Point, Schema, Trait, TraitCollector};
 use crate::schemas::cable::CableSchema;
 use crate::schemas::par::make_par;
 
 // ─── Direction helpers ─────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Dir { Hor, Up, Down }
+enum Dir {
+    Hor,
+    Up,
+    Down,
+}
 
 fn direction(a: Point, b: Point) -> Dir {
-    if a.y > b.y { Dir::Up }
-    else if a.y < b.y { Dir::Down }
-    else { Dir::Hor }
+    if a.y > b.y {
+        Dir::Up
+    } else if a.y < b.y {
+        Dir::Down
+    } else {
+        Dir::Hor
+    }
 }
 
 // ─── computeHorzGap ────────────────────────────────────────────────────────────
@@ -42,14 +50,26 @@ fn compute_horz_gap(a: &mut dyn Schema, b: &mut dyn Schema) -> f64 {
         if d == gdir {
             gsize += 1;
         } else {
-            let idx = match gdir { Dir::Up => 0, Dir::Down => 1, Dir::Hor => 2 };
-            if gsize > max_group[idx] { max_group[idx] = gsize; }
+            let idx = match gdir {
+                Dir::Up => 0,
+                Dir::Down => 1,
+                Dir::Hor => 2,
+            };
+            if gsize > max_group[idx] {
+                max_group[idx] = gsize;
+            }
             gsize = 1;
             gdir = d;
         }
     }
-    let idx = match gdir { Dir::Up => 0, Dir::Down => 1, Dir::Hor => 2 };
-    if gsize > max_group[idx] { max_group[idx] = gsize; }
+    let idx = match gdir {
+        Dir::Up => 0,
+        Dir::Down => 1,
+        Dir::Hor => 2,
+    };
+    if gsize > max_group[idx] {
+        max_group[idx] = gsize;
+    }
 
     D_WIRE * max_group[0].max(max_group[1]) as f64
 }
@@ -87,36 +107,65 @@ pub fn make_seq(s1: Box<dyn Schema>, s2: Box<dyn Schema>) -> Box<dyn Schema> {
     let hgap = compute_horz_gap(a.as_mut(), b.as_mut());
     let w = a.width() + hgap + b.width();
     let h = a.height().max(b.height());
-    Box::new(SeqSchema { width: w, height: h, s1: a, s2: b, horz_gap: hgap, placement: None })
+    Box::new(SeqSchema {
+        width: w,
+        height: h,
+        s1: a,
+        s2: b,
+        horz_gap: hgap,
+        placement: None,
+    })
 }
 
 impl Schema for SeqSchema {
-    fn width(&self) -> f64 { self.width }
-    fn height(&self) -> f64 { self.height }
-    fn inputs(&self) -> usize { self.s1.inputs() }
-    fn outputs(&self) -> usize { self.s2.outputs() }
+    fn width(&self) -> f64 {
+        self.width
+    }
+    fn height(&self) -> f64 {
+        self.height
+    }
+    fn inputs(&self) -> usize {
+        self.s1.inputs()
+    }
+    fn outputs(&self) -> usize {
+        self.s2.outputs()
+    }
 
     fn place(&mut self, ox: f64, oy: f64, orientation: Orientation) {
-        self.placement = Some(Placement { x: ox, y: oy, orientation });
+        self.placement = Some(Placement {
+            x: ox,
+            y: oy,
+            orientation,
+        });
         let y1 = (self.s2.height() - self.s1.height()).max(0.0) * 0.5;
         let y2 = (self.s1.height() - self.s2.height()).max(0.0) * 0.5;
         match orientation {
             Orientation::LeftRight => {
                 self.s1.place(ox, oy + y1, orientation);
-                self.s2.place(ox + self.s1.width() + self.horz_gap, oy + y2, orientation);
+                self.s2
+                    .place(ox + self.s1.width() + self.horz_gap, oy + y2, orientation);
             }
             Orientation::RightLeft => {
                 self.s2.place(ox, oy + y2, orientation);
-                self.s1.place(ox + self.s2.width() + self.horz_gap, oy + y1, orientation);
+                self.s1
+                    .place(ox + self.s2.width() + self.horz_gap, oy + y1, orientation);
             }
         }
     }
 
-    fn placed(&self) -> bool { self.placement.is_some() }
-    fn placement(&self) -> Option<&Placement> { self.placement.as_ref() }
+    fn placed(&self) -> bool {
+        self.placement.is_some()
+    }
+    fn placement(&self) -> Option<&Placement> {
+        self.placement.as_ref()
+    }
 
-    fn input_point(&self, i: usize) -> Point { self.s1.input_point(i) }
-    fn output_point(&self, i: usize) -> Point { self.s2.output_point(i) }
+    fn input_point(&self, i: usize) -> Point {
+        self.s1.input_point(i)
+    }
+    fn output_point(&self, i: usize) -> Point {
+        self.s2.output_point(i)
+    }
 
     fn draw(&self, dev: &mut dyn DrawDevice) -> Result<(), DrawError> {
         assert!(self.placed());
@@ -137,7 +186,9 @@ impl SeqSchema {
     fn collect_internal_wires(&self, c: &mut TraitCollector) {
         let n = self.s1.outputs();
         let hgap = self.horz_gap;
-        let orientation = self.placement.map_or(Orientation::LeftRight, |p| p.orientation);
+        let orientation = self
+            .placement
+            .map_or(Orientation::LeftRight, |p| p.orientation);
 
         let mut dx = 0.0_f64;
         let mut mx = 0.0_f64;
@@ -151,9 +202,9 @@ impl SeqSchema {
 
             if first || d != dir {
                 (mx, dx) = match (orientation, d) {
-                    (Orientation::LeftRight, Dir::Up)   => (0.0, D_WIRE),
+                    (Orientation::LeftRight, Dir::Up) => (0.0, D_WIRE),
                     (Orientation::LeftRight, Dir::Down) => (hgap, -D_WIRE),
-                    (Orientation::RightLeft, Dir::Up)   => (-hgap, D_WIRE),
+                    (Orientation::RightLeft, Dir::Up) => (-hgap, D_WIRE),
                     (Orientation::RightLeft, Dir::Down) => (0.0, -D_WIRE),
                     _ => (0.0, 0.0),
                 };
@@ -167,7 +218,10 @@ impl SeqSchema {
                 c.add_trait(Trait::new(src, dst));
             } else {
                 c.add_trait(Trait::new(src, Point::new(src.x + mx, src.y)));
-                c.add_trait(Trait::new(Point::new(src.x + mx, src.y), Point::new(src.x + mx, dst.y)));
+                c.add_trait(Trait::new(
+                    Point::new(src.x + mx, src.y),
+                    Point::new(src.x + mx, dst.y),
+                ));
                 c.add_trait(Trait::new(Point::new(src.x + mx, dst.y), dst));
             }
         }

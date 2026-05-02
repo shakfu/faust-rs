@@ -397,7 +397,7 @@ fn prepare_signals_for_fir_unverified(
         .map_err(SignalPrepareError::Promotion)?;
     let sig_types_after_promotion = infer_full_types(&arena, &outputs, ui)?;
     let outputs = simplify_signals_fastlane(&mut arena, &sig_types_after_promotion, &outputs);
-    
+
     let outputs = normalize::merge_isomorphic_symrec_groups(&mut arena, &outputs);
     let sig_types_after_merge = infer_full_types(&arena, &outputs, ui)?;
     let outputs = simplify_signals_fastlane(&mut arena, &sig_types_after_merge, &outputs);

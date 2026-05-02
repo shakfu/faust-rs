@@ -408,6 +408,7 @@ fn eval_entrypoint_full(
     let result = eval_value(arena, entry, &env, &mut loop_detector)?;
     let result = a2sb_value(arena, result, &mut loop_detector)?;
     stats.loop_detector_max_depth = loop_detector.call_stack.len();
+    stats.def_names = loop_detector.def_names;
     Ok((result, stats))
 }
 
@@ -1063,6 +1064,10 @@ fn eval_ident_value(
             )?;
             let out = eval_value(arena, closure.expr, &closure.env, loop_detector);
             loop_detector.leave();
+            // Record def-name → box mapping for SVG folding (C++ setDefNameProperty).
+            if let Ok(EvalValue::Box(box_id)) = &out {
+                loop_detector.def_names.insert(*box_id, name.to_owned());
+            }
             out
         }
         EvalValue::PatternMatcher(pm) => Ok(EvalValue::PatternMatcher(pm)),

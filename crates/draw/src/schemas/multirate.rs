@@ -10,7 +10,7 @@
 
 use crate::device::DrawDevice;
 use crate::error::DrawError;
-use crate::schema::{Orientation, Placement, Point, Schema, Trait, TraitCollector, D_LETTER};
+use crate::schema::{D_LETTER, Orientation, Placement, Point, Schema, Trait, TraitCollector};
 
 const TOP_MARGIN: f64 = 30.0;
 const HOR_MARGIN: f64 = 10.0;
@@ -54,20 +54,33 @@ impl MultiRateSchema {
 }
 
 impl Schema for MultiRateSchema {
-    fn width(&self) -> f64 { self.width }
-    fn height(&self) -> f64 { self.height }
-    fn inputs(&self) -> usize { self.input_points.len() }
-    fn outputs(&self) -> usize { self.output_points.len() }
+    fn width(&self) -> f64 {
+        self.width
+    }
+    fn height(&self) -> f64 {
+        self.height
+    }
+    fn inputs(&self) -> usize {
+        self.input_points.len()
+    }
+    fn outputs(&self) -> usize {
+        self.output_points.len()
+    }
 
     /// C++ reference: `ondemandSchema.cpp:68` — `ondemandSchema::place`.
     fn place(&mut self, ox: f64, oy: f64, orientation: Orientation) {
-        self.placement = Some(Placement { x: ox, y: oy, orientation });
+        self.placement = Some(Placement {
+            x: ox,
+            y: oy,
+            orientation,
+        });
         let hmargin = (self.width - self.inner.width()) / 2.0;
 
         match orientation {
             Orientation::LeftRight => {
                 self.inner.place(ox + hmargin, oy + TOP_MARGIN, orientation);
-                self.input_points[0] = Point::new(ox + HOR_MARGIN / 2.0, oy + 2.0 * TOP_MARGIN / 3.0);
+                self.input_points[0] =
+                    Point::new(ox + HOR_MARGIN / 2.0, oy + 2.0 * TOP_MARGIN / 3.0);
                 for i in 1..self.input_points.len() {
                     let p = self.inner.input_point(i - 1);
                     self.input_points[i] = Point::new(ox + HOR_MARGIN / 2.0, p.y);
@@ -95,11 +108,19 @@ impl Schema for MultiRateSchema {
         }
     }
 
-    fn placed(&self) -> bool { self.placement.is_some() }
-    fn placement(&self) -> Option<&Placement> { self.placement.as_ref() }
+    fn placed(&self) -> bool {
+        self.placement.is_some()
+    }
+    fn placement(&self) -> Option<&Placement> {
+        self.placement.as_ref()
+    }
 
-    fn input_point(&self, i: usize) -> Point { self.input_points[i] }
-    fn output_point(&self, i: usize) -> Point { self.output_points[i] }
+    fn input_point(&self, i: usize) -> Point {
+        self.input_points[i]
+    }
+    fn output_point(&self, i: usize) -> Point {
+        self.output_points[i]
+    }
 
     /// C++ reference: `ondemandSchema.cpp:132` / `downsamplingSchema.cpp:133`.
     fn draw(&self, dev: &mut dyn DrawDevice) -> Result<(), DrawError> {

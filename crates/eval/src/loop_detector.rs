@@ -66,6 +66,14 @@ pub struct LoopDetector {
     /// (e.g. on user abort).
     pub(crate) cancel: Arc<AtomicBool>,
     /// Compiled automata keyed by the `TreeId` of the evaluated `Case` rule-list.
+    /// Definition-name map populated during eval: `box_id → definition_name`.
+    ///
+    /// When a named closure is forced to a box, the result `BoxId` is recorded
+    /// here with the definition's string name. Consumed after eval by the SVG
+    /// draw module to decorate / fold named sub-diagrams.
+    ///
+    /// C++ equivalent: `setDefNameProperty(result, id)` in `eval.cpp`.
+    pub(crate) def_names: std::collections::HashMap<tlib::TreeId, String>,
     pub(crate) automaton_cache: crate::pattern_matcher::AutomatonCache,
     /// Dense store of `PatternMatcherValue` referenced by `boxPatternMatcher` nodes.
     ///
@@ -219,6 +227,7 @@ impl LoopDetector {
             max_depth,
             structural_max_depth,
             cancel,
+            def_names: std::collections::HashMap::new(),
             automaton_cache: crate::pattern_matcher::AutomatonCache::new(),
             pm_store: Vec::new(),
             closure_store: Vec::new(),

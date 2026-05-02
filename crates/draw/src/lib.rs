@@ -44,8 +44,8 @@ pub mod translate;
 
 pub use error::DrawError;
 pub use schema::{
-    Orientation, Placement, Point, Schema, Trait, TraitCollector, COLOR_INV, COLOR_LINK,
-    COLOR_NORMAL, COLOR_NUM, COLOR_SLOT, COLOR_UI, D_HORZ, D_LETTER, D_VERT, D_WIRE,
+    COLOR_INV, COLOR_LINK, COLOR_NORMAL, COLOR_NUM, COLOR_SLOT, COLOR_UI, D_HORZ, D_LETTER, D_VERT,
+    D_WIRE, Orientation, Placement, Point, Schema, Trait, TraitCollector,
 };
 
 pub const CRATE_NAME: &str = "draw";
@@ -96,6 +96,20 @@ pub struct DrawConfig {
     ///
     /// C++ global: `gMaxNameSize` (default 40). CLI: `-mns N` / `--max-name-size N`.
     pub max_name_size: usize,
+
+    /// Fold diagrams whose total `box_complexity` exceeds this threshold into
+    /// separate SVG files with clickable back-links.
+    ///
+    /// When 0, folding is disabled (single-file output).
+    ///
+    /// C++ global: `gFoldThreshold` (default 25). CLI: `-f N` / `--fold N`.
+    pub fold_threshold: usize,
+
+    /// Minimum per-expression complexity for a named sub-diagram to be
+    /// extracted into its own file when folding is active.
+    ///
+    /// C++ global: `gFoldComplexity` (default 2). CLI: `-fc N` / `--fold-complexity N`.
+    pub fold_complexity: usize,
 }
 
 impl Default for DrawConfig {
@@ -105,47 +119,84 @@ impl Default for DrawConfig {
             scaled_svg: false,
             draw_route_frame: false,
             max_name_size: 40,
+            fold_threshold: 25,
+            fold_complexity: 2,
         }
     }
 }
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
-/// Generate one SVG block-diagram file from a box expression.
+/// Generate SVG block-diagram file(s) from a box expression.
 ///
-/// Builds the schema tree via [`translate::generate_schema`], wraps it in a
-/// [`TopSchema`](schemas::composed::TopSchema) (title + margins + output arrows),
-/// then renders to `output_path`.
+/// Writes `process.svg` (and optionally sub-diagram files) into `out_dir`.
+///
+/// When `config.fold_threshold > 0` and the root diagram complexity exceeds
+/// the threshold, named sub-diagrams are extracted into separate SVG files
+/// with clickable hyperlinks — mirroring the C++ `-f N` folding behaviour.
+///
+/// `def_names` maps evaluated `BoxId` values to their Faust definition names,
+/// as populated by the evaluator (`setDefNameProperty` equivalent).
 ///
 /// # Errors
-/// Returns [`DrawError::Io`] if the output file cannot be written.
+/// Returns [`DrawError::Io`] if any output file cannot be written.
 ///
-/// C++ reference: `drawschema.cpp:234` — `writeSchemaFile`.
+/// C++ reference: `drawschema.cpp:149` — `drawSchema` / `writeSchemaFile`.
 pub fn draw_schema(
     arena: &tlib::TreeArena,
     root: boxes::BoxId,
     name: &str,
-    output_path: &std::path::Path,
+    out_dir: &std::path::Path,
     config: &DrawConfig,
+    def_names: &std::collections::HashMap<boxes::BoxId, String>,
 ) -> Result<(), DrawError> {
+    use std::collections::{HashSet, VecDeque};
+
     use device::SvgDevice;
     use schema::TraitCollector;
-    use translate::{generate_schema, make_top_schema};
+    use translate::{FoldState, generate_folded_inside, make_top_schema};
 
-    let inner   = generate_schema(arena, root, config);
-    let mut top = make_top_schema(inner, name, "");
+    let folding =
+        config.fold_threshold > 0 && boxes::box_complexity(arena, root) > config.fold_threshold;
 
-    top.place(0.0, 0.0, Orientation::LeftRight);
+    // Queue: (box_id, diagram_name, back_link_file)
+    let mut pending: VecDeque<(boxes::BoxId, String, String)> = VecDeque::new();
+    let mut drawn: HashSet<boxes::BoxId> = HashSet::new();
 
-    let file = std::fs::File::create(output_path)
-        .map_err(DrawError::Io)?;
-    let mut dev = SvgDevice::new(file, top.width(), top.height(), config)?;
+    let root_file = "process.svg".to_owned();
+    pending.push_back((root, name.to_owned(), String::new()));
+    drawn.insert(root);
 
-    top.draw(&mut dev)?;
+    while let Some((box_id, diagram_name, back_link)) = pending.pop_front() {
+        let file_name = translate::legal_file_name(&diagram_name, box_id);
+        let file_path = out_dir.join(&file_name);
 
-    let mut collector = TraitCollector::new();
-    top.collect_traits(&mut collector);
-    collector.draw(&mut dev)?;
+        let mut state = FoldState {
+            def_names,
+            pending: &mut pending,
+            drawn: &mut drawn,
+            current_file: file_name.clone(),
+            folding,
+            fold_complexity: config.fold_complexity,
+        };
 
-    dev.finish().map(|_| ())
+        let inner = generate_folded_inside(arena, box_id, config, &mut state);
+        let mut top = make_top_schema(inner, &diagram_name, &back_link);
+        top.place(0.0, 0.0, Orientation::LeftRight);
+
+        let file = std::fs::File::create(&file_path).map_err(DrawError::Io)?;
+        let mut dev = SvgDevice::new(file, top.width(), top.height(), config)?;
+        top.draw(&mut dev)?;
+
+        let mut collector = TraitCollector::new();
+        top.collect_traits(&mut collector);
+        collector.draw(&mut dev)?;
+
+        dev.finish().map(|_| ())?;
+
+        // Only the root is initially drawn; mark sub-diagrams as drawn when popped.
+        let _ = root_file.as_str(); // suppress unused warning
+    }
+
+    Ok(())
 }

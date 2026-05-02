@@ -34,6 +34,7 @@ pub trait DrawDevice {
     /// Filled triangle (merge / split symbol) with a small circle at the tip.
     ///
     /// C++ reference: `SVGDev.cpp:166` — `SVGDev::triangle`
+    #[allow(clippy::too_many_arguments)]
     fn triangle(
         &mut self,
         x: f64,
@@ -173,12 +174,18 @@ impl<W: Write> SvgDevice<W> {
         if config.shadow_blur {
             writeln!(bw, "<defs>")?;
             writeln!(bw, r#"  <filter id="filter" filterRes="18" x="0" y="0">"#)?;
-            writeln!(bw, r#"    <feGaussianBlur in="SourceGraphic" stdDeviation="1.55" result="blur"/>"#)?;
+            writeln!(
+                bw,
+                r#"    <feGaussianBlur in="SourceGraphic" stdDeviation="1.55" result="blur"/>"#
+            )?;
             writeln!(bw, r#"    <feOffset in="blur" dx="3" dy="3"/>"#)?;
             writeln!(bw, "  </filter>")?;
             writeln!(bw, "</defs>")?;
         }
-        Ok(Self { writer: Some(bw), shadow_blur: config.shadow_blur })
+        Ok(Self {
+            writer: Some(bw),
+            shadow_blur: config.shadow_blur,
+        })
     }
 
     /// Flush, write the closing `</svg>` tag, and return the inner writer.
@@ -188,7 +195,7 @@ impl<W: Write> SvgDevice<W> {
         let mut bw = self.writer.take().expect("already finished");
         writeln!(bw, "</svg>")?;
         bw.flush()?;
-        Ok(bw.into_inner().map_err(|e| DrawError::Io(e.into_error()))?)
+        bw.into_inner().map_err(|e| DrawError::Io(e.into_error()))
     }
 }
 
@@ -221,20 +228,30 @@ impl<W: Write> DrawDevice for SvgDevice<W> {
             writeln!(
                 self.w(),
                 r#"<rect x="{}" y="{}" width="{}" height="{}" rx="0" ry="0" style="stroke:none;fill:#aaaaaa;filter:url(#filter);"/>"#,
-                x + 1.0, y + 1.0, w, h
+                x + 1.0,
+                y + 1.0,
+                w,
+                h
             )?;
         } else {
             writeln!(
                 self.w(),
                 r#"<rect x="{}" y="{}" width="{}" height="{}" rx="0" ry="0" style="stroke:none;fill:#cccccc;"/>"#,
-                x + 1.0, y + 1.0, w, h
+                x + 1.0,
+                y + 1.0,
+                w,
+                h
             )?;
         }
         // colored rectangle
         writeln!(
             self.w(),
             r#"<rect x="{}" y="{}" width="{}" height="{}" rx="0" ry="0" style="stroke:none;fill:{};"/>"#,
-            x, y, w, h, color
+            x,
+            y,
+            w,
+            h,
+            color
         )?;
         if !link.is_empty() {
             writeln!(self.w(), "</a>")?;
@@ -304,23 +321,27 @@ impl<W: Write> DrawDevice for SvgDevice<W> {
             writeln!(
                 self.w(),
                 r#"<line x1="{}" y1="{}" x2="{x}" y2="{y}" transform="rotate({rotation},{x},{y})" style="{style}"/>"#,
-                x - dx, y - dy,
+                x - dx,
+                y - dy,
             )?;
             writeln!(
                 self.w(),
                 r#"<line x1="{}" y1="{}" x2="{x}" y2="{y}" transform="rotate({rotation},{x},{y})" style="{style}"/>"#,
-                x - dx, y + dy,
+                x - dx,
+                y + dy,
             )?;
         } else {
             writeln!(
                 self.w(),
                 r#"<line x1="{}" y1="{}" x2="{x}" y2="{y}" transform="rotate({rotation},{x},{y})" style="{style}"/>"#,
-                x + dx, y - dy,
+                x + dx,
+                y - dy,
             )?;
             writeln!(
                 self.w(),
                 r#"<line x1="{}" y1="{}" x2="{x}" y2="{y}" transform="rotate({rotation},{x},{y})" style="{style}"/>"#,
-                x + dx, y + dy,
+                x + dx,
+                y + dy,
             )?;
         }
         Ok(())
@@ -375,7 +396,12 @@ impl<W: Write> DrawDevice for SvgDevice<W> {
     /// C++ reference: `SVGDev.cpp:283`
     fn mark_direction(&mut self, x: f64, y: f64, direction: i32) -> Result<(), DrawError> {
         let offset = if direction == 1 { 2.0_f64 } else { -2.0_f64 };
-        writeln!(self.w(), r#"<circle cx="{}" cy="{}" r="1"/>"#, x + offset, y + offset)?;
+        writeln!(
+            self.w(),
+            r#"<circle cx="{}" cy="{}" r="1"/>"#,
+            x + offset,
+            y + offset
+        )?;
         Ok(())
     }
 
@@ -425,7 +451,10 @@ mod tests {
     fn test_svg_header_contains_viewbox() {
         let dev = make_dev(100.0, 50.0);
         let out = svg_output(dev);
-        assert!(out.contains(r#"viewBox="0 0 100 50""#), "missing viewBox in:\n{out}");
+        assert!(
+            out.contains(r#"viewBox="0 0 100 50""#),
+            "missing viewBox in:\n{out}"
+        );
         assert!(out.contains("<svg"), "missing <svg tag");
     }
 
@@ -450,7 +479,10 @@ mod tests {
         let mut dev = make_dev(100.0, 100.0);
         dev.line(0.0, 0.0, 10.0, 20.0).unwrap();
         let out = svg_output(dev);
-        assert!(out.contains(r#"<line x1="0" y1="0" x2="10" y2="20""#), "missing line:\n{out}");
+        assert!(
+            out.contains(r#"<line x1="0" y1="0" x2="10" y2="20""#),
+            "missing line:\n{out}"
+        );
     }
 
     #[test]

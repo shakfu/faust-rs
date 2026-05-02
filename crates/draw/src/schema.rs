@@ -119,10 +119,7 @@ impl Ord for Point {
 
 impl PartialOrd for Point {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        match self.x.partial_cmp(&other.x) {
-            Some(std::cmp::Ordering::Equal) => self.y.partial_cmp(&other.y),
-            c => c,
-        }
+        Some(self.cmp(other))
     }
 }
 
@@ -141,7 +138,12 @@ pub struct Trait {
 
 impl Trait {
     pub fn new(start: Point, end: Point) -> Self {
-        Self { start, end, has_real_input: false, has_real_output: false }
+        Self {
+            start,
+            end,
+            has_real_input: false,
+            has_real_output: false,
+        }
     }
 }
 
@@ -153,10 +155,7 @@ impl Ord for Trait {
 
 impl PartialOrd for Trait {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        match self.start.partial_cmp(&other.start) {
-            Some(std::cmp::Ordering::Equal) => self.end.partial_cmp(&other.end),
-            c => c,
-        }
+        Some(self.cmp(other))
     }
 }
 
@@ -239,8 +238,12 @@ impl TraitCollector {
     /// C++ reference: `collector.cpp:56` — `collector::draw`.
     pub fn draw(&mut self, dev: &mut dyn DrawDevice) -> Result<(), DrawError> {
         self.compute_visible();
-        let visible: Vec<Trait> =
-            self.traits.iter().filter(|t| self.is_visible(t)).copied().collect();
+        let visible: Vec<Trait> = self
+            .traits
+            .iter()
+            .filter(|t| self.is_visible(t))
+            .copied()
+            .collect();
         for t in &visible {
             dev.line(t.start.x, t.start.y, t.end.x, t.end.y)?;
         }
@@ -292,7 +295,8 @@ pub trait Schema {
         self.placement().map_or(0.0, |p| p.y)
     }
     fn orientation(&self) -> Orientation {
-        self.placement().map_or(Orientation::LeftRight, |p| p.orientation)
+        self.placement()
+            .map_or(Orientation::LeftRight, |p| p.orientation)
     }
 
     // ── port coordinates (valid after place) ──

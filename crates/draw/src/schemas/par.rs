@@ -47,13 +47,25 @@ pub fn make_par(s1: Box<dyn Schema>, s2: Box<dyn Schema>) -> Box<dyn Schema> {
 }
 
 impl Schema for ParSchema {
-    fn width(&self) -> f64 { self.width }
-    fn height(&self) -> f64 { self.height }
-    fn inputs(&self) -> usize { self.s1.inputs() + self.s2.inputs() }
-    fn outputs(&self) -> usize { self.s1.outputs() + self.s2.outputs() }
+    fn width(&self) -> f64 {
+        self.width
+    }
+    fn height(&self) -> f64 {
+        self.height
+    }
+    fn inputs(&self) -> usize {
+        self.s1.inputs() + self.s2.inputs()
+    }
+    fn outputs(&self) -> usize {
+        self.s1.outputs() + self.s2.outputs()
+    }
 
     fn place(&mut self, ox: f64, oy: f64, orientation: Orientation) {
-        self.placement = Some(Placement { x: ox, y: oy, orientation });
+        self.placement = Some(Placement {
+            x: ox,
+            y: oy,
+            orientation,
+        });
         match orientation {
             Orientation::LeftRight => {
                 self.s1.place(ox, oy, orientation);
@@ -66,8 +78,12 @@ impl Schema for ParSchema {
         }
     }
 
-    fn placed(&self) -> bool { self.placement.is_some() }
-    fn placement(&self) -> Option<&Placement> { self.placement.as_ref() }
+    fn placed(&self) -> bool {
+        self.placement.is_some()
+    }
+    fn placement(&self) -> Option<&Placement> {
+        self.placement.as_ref()
+    }
 
     fn input_point(&self, i: usize) -> Point {
         if i < self.input_frontier {

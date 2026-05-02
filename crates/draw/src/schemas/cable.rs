@@ -10,7 +10,7 @@
 
 use crate::device::DrawDevice;
 use crate::error::DrawError;
-use crate::schema::{Orientation, Placement, Point, Schema, Trait, TraitCollector, D_HORZ, D_WIRE};
+use crate::schema::{D_HORZ, D_WIRE, Orientation, Placement, Point, Schema, Trait, TraitCollector};
 
 // ─── CableSchema ──────────────────────────────────────────────────────────────
 
@@ -27,15 +27,27 @@ impl CableSchema {
     /// C++ reference: `cableSchema.cpp:32` — `schema* makeCableSchema(unsigned int n)`.
     pub fn new(n: usize) -> Self {
         assert!(n > 0, "CableSchema requires n > 0");
-        Self { n, placement: None, points: vec![Point::default(); n] }
+        Self {
+            n,
+            placement: None,
+            points: vec![Point::default(); n],
+        }
     }
 }
 
 impl Schema for CableSchema {
-    fn width(&self) -> f64 { 0.0 }
-    fn height(&self) -> f64 { self.n as f64 * D_WIRE }
-    fn inputs(&self) -> usize { self.n }
-    fn outputs(&self) -> usize { self.n }
+    fn width(&self) -> f64 {
+        0.0
+    }
+    fn height(&self) -> f64 {
+        self.n as f64 * D_WIRE
+    }
+    fn inputs(&self) -> usize {
+        self.n
+    }
+    fn outputs(&self) -> usize {
+        self.n
+    }
 
     fn place(&mut self, x: f64, y: f64, orientation: Orientation) {
         self.placement = Some(Placement { x, y, orientation });
@@ -54,14 +66,24 @@ impl Schema for CableSchema {
         }
     }
 
-    fn placed(&self) -> bool { self.placement.is_some() }
-    fn placement(&self) -> Option<&Placement> { self.placement.as_ref() }
+    fn placed(&self) -> bool {
+        self.placement.is_some()
+    }
+    fn placement(&self) -> Option<&Placement> {
+        self.placement.as_ref()
+    }
 
-    fn input_point(&self, i: usize) -> Point { self.points[i] }
-    fn output_point(&self, i: usize) -> Point { self.points[i] }
+    fn input_point(&self, i: usize) -> Point {
+        self.points[i]
+    }
+    fn output_point(&self, i: usize) -> Point {
+        self.points[i]
+    }
 
     /// Nothing to draw — wires appear only when the schema is enlarged.
-    fn draw(&self, _dev: &mut dyn DrawDevice) -> Result<(), DrawError> { Ok(()) }
+    fn draw(&self, _dev: &mut dyn DrawDevice) -> Result<(), DrawError> {
+        Ok(())
+    }
     fn collect_traits(&self, _c: &mut TraitCollector) {}
 }
 
@@ -78,27 +100,44 @@ pub struct CutSchema {
 impl CutSchema {
     /// C++ reference: `cutSchema.cpp:30` — `schema* makeCutSchema()`.
     pub fn new() -> Self {
-        Self { placement: None, point: Point::default() }
+        Self {
+            placement: None,
+            point: Point::default(),
+        }
     }
 }
 
 impl Default for CutSchema {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Schema for CutSchema {
-    fn width(&self) -> f64 { 0.0 }
-    fn height(&self) -> f64 { D_WIRE / 100.0 }
-    fn inputs(&self) -> usize { 1 }
-    fn outputs(&self) -> usize { 0 }
+    fn width(&self) -> f64 {
+        0.0
+    }
+    fn height(&self) -> f64 {
+        D_WIRE / 100.0
+    }
+    fn inputs(&self) -> usize {
+        1
+    }
+    fn outputs(&self) -> usize {
+        0
+    }
 
     fn place(&mut self, x: f64, y: f64, orientation: Orientation) {
         self.placement = Some(Placement { x, y, orientation });
         self.point = Point::new(x, y + self.height() * 0.5);
     }
 
-    fn placed(&self) -> bool { self.placement.is_some() }
-    fn placement(&self) -> Option<&Placement> { self.placement.as_ref() }
+    fn placed(&self) -> bool {
+        self.placement.is_some()
+    }
+    fn placement(&self) -> Option<&Placement> {
+        self.placement.as_ref()
+    }
 
     fn input_point(&self, i: usize) -> Point {
         assert_eq!(i, 0);
@@ -110,7 +149,9 @@ impl Schema for CutSchema {
     }
 
     /// Nothing visible.
-    fn draw(&self, _dev: &mut dyn DrawDevice) -> Result<(), DrawError> { Ok(()) }
+    fn draw(&self, _dev: &mut dyn DrawDevice) -> Result<(), DrawError> {
+        Ok(())
+    }
     fn collect_traits(&self, _c: &mut TraitCollector) {}
 }
 
@@ -128,19 +169,33 @@ pub struct ConnectorSchema {
 impl ConnectorSchema {
     /// C++ reference: `connectorSchema.cpp:31` — `schema* makeConnectorSchema()`.
     pub fn new() -> Self {
-        Self { placement: None, input_pt: Point::default(), output_pt: Point::default() }
+        Self {
+            placement: None,
+            input_pt: Point::default(),
+            output_pt: Point::default(),
+        }
     }
 }
 
 impl Default for ConnectorSchema {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Schema for ConnectorSchema {
-    fn width(&self) -> f64 { D_WIRE }
-    fn height(&self) -> f64 { D_WIRE }
-    fn inputs(&self) -> usize { 1 }
-    fn outputs(&self) -> usize { 1 }
+    fn width(&self) -> f64 {
+        D_WIRE
+    }
+    fn height(&self) -> f64 {
+        D_WIRE
+    }
+    fn inputs(&self) -> usize {
+        1
+    }
+    fn outputs(&self) -> usize {
+        1
+    }
 
     fn place(&mut self, x: f64, y: f64, orientation: Orientation) {
         self.placement = Some(Placement { x, y, orientation });
@@ -159,8 +214,12 @@ impl Schema for ConnectorSchema {
         }
     }
 
-    fn placed(&self) -> bool { self.placement.is_some() }
-    fn placement(&self) -> Option<&Placement> { self.placement.as_ref() }
+    fn placed(&self) -> bool {
+        self.placement.is_some()
+    }
+    fn placement(&self) -> Option<&Placement> {
+        self.placement.as_ref()
+    }
 
     fn input_point(&self, i: usize) -> Point {
         assert_eq!(i, 0);
@@ -172,13 +231,19 @@ impl Schema for ConnectorSchema {
         self.output_pt
     }
 
-    fn draw(&self, _dev: &mut dyn DrawDevice) -> Result<(), DrawError> { Ok(()) }
+    fn draw(&self, _dev: &mut dyn DrawDevice) -> Result<(), DrawError> {
+        Ok(())
+    }
 
     /// C++ reference: `connectorSchema.cpp:147` — `connectorSchema::collectTraits`.
     fn collect_traits(&self, c: &mut TraitCollector) {
         assert!(self.placed());
         let p = self.placement.unwrap();
-        let dx = if p.orientation == Orientation::LeftRight { D_HORZ } else { -D_HORZ };
+        let dx = if p.orientation == Orientation::LeftRight {
+            D_HORZ
+        } else {
+            -D_HORZ
+        };
 
         let ip = self.input_pt;
         c.add_trait(Trait::new(ip, Point::new(ip.x + dx, ip.y)));
@@ -230,6 +295,9 @@ mod tests {
         conn.place(0.0, 0.0, Orientation::LeftRight);
         let ip = conn.input_point(0);
         let op = conn.output_point(0);
-        assert!(op.x > ip.x, "output should be to the right of input in LeftRight");
+        assert!(
+            op.x > ip.x,
+            "output should be to the right of input in LeftRight"
+        );
     }
 }

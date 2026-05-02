@@ -10,9 +10,7 @@
 
 use crate::device::DrawDevice;
 use crate::error::DrawError;
-use crate::schema::{
-    Orientation, Placement, Point, Schema, Trait, TraitCollector, D_LETTER,
-};
+use crate::schema::{D_LETTER, Orientation, Placement, Point, Schema, Trait, TraitCollector};
 
 // ─── EnlargedSchema ────────────────────────────────────────────────────────────
 
@@ -55,17 +53,31 @@ pub fn make_enlarged(s: Box<dyn Schema>, required_width: f64) -> Box<dyn Schema>
 }
 
 impl Schema for EnlargedSchema {
-    fn width(&self) -> f64 { self.width }
-    fn height(&self) -> f64 { self.height }
-    fn inputs(&self) -> usize { self.inputs }
-    fn outputs(&self) -> usize { self.outputs }
+    fn width(&self) -> f64 {
+        self.width
+    }
+    fn height(&self) -> f64 {
+        self.height
+    }
+    fn inputs(&self) -> usize {
+        self.inputs
+    }
+    fn outputs(&self) -> usize {
+        self.outputs
+    }
 
     /// C++ reference: `enlargedSchema.cpp:62` — `enlargedSchema::place`.
     fn place(&mut self, ox: f64, oy: f64, orientation: Orientation) {
-        self.placement = Some(Placement { x: ox, y: oy, orientation });
+        self.placement = Some(Placement {
+            x: ox,
+            y: oy,
+            orientation,
+        });
         let mut dx = (self.width - self.inner.width()) / 2.0;
         self.inner.place(ox + dx, oy, orientation);
-        if orientation == Orientation::RightLeft { dx = -dx; }
+        if orientation == Orientation::RightLeft {
+            dx = -dx;
+        }
 
         for i in 0..self.inputs {
             let p = self.inner.input_point(i);
@@ -77,11 +89,19 @@ impl Schema for EnlargedSchema {
         }
     }
 
-    fn placed(&self) -> bool { self.placement.is_some() }
-    fn placement(&self) -> Option<&Placement> { self.placement.as_ref() }
+    fn placed(&self) -> bool {
+        self.placement.is_some()
+    }
+    fn placement(&self) -> Option<&Placement> {
+        self.placement.as_ref()
+    }
 
-    fn input_point(&self, i: usize) -> Point { self.input_points[i] }
-    fn output_point(&self, i: usize) -> Point { self.output_points[i] }
+    fn input_point(&self, i: usize) -> Point {
+        self.input_points[i]
+    }
+    fn output_point(&self, i: usize) -> Point {
+        self.output_points[i]
+    }
 
     fn draw(&self, dev: &mut dyn DrawDevice) -> Result<(), DrawError> {
         assert!(self.placed());
@@ -150,18 +170,34 @@ pub fn make_decorate(s: Box<dyn Schema>, margin: f64, text: impl Into<String>) -
 }
 
 impl Schema for DecorateSchema {
-    fn width(&self) -> f64 { self.width }
-    fn height(&self) -> f64 { self.height }
-    fn inputs(&self) -> usize { self.inputs }
-    fn outputs(&self) -> usize { self.outputs }
+    fn width(&self) -> f64 {
+        self.width
+    }
+    fn height(&self) -> f64 {
+        self.height
+    }
+    fn inputs(&self) -> usize {
+        self.inputs
+    }
+    fn outputs(&self) -> usize {
+        self.outputs
+    }
 
     /// C++ reference: `decorateSchema.cpp:63` — `decorateSchema::place`.
     fn place(&mut self, ox: f64, oy: f64, orientation: Orientation) {
-        self.placement = Some(Placement { x: ox, y: oy, orientation });
+        self.placement = Some(Placement {
+            x: ox,
+            y: oy,
+            orientation,
+        });
         let m = self.margin;
         self.inner.place(ox + m, oy + m, orientation);
 
-        let dm = if orientation == Orientation::RightLeft { -m } else { m };
+        let dm = if orientation == Orientation::RightLeft {
+            -m
+        } else {
+            m
+        };
         for i in 0..self.inputs {
             let p = self.inner.input_point(i);
             self.input_points[i] = Point::new(p.x - dm, p.y);
@@ -172,11 +208,19 @@ impl Schema for DecorateSchema {
         }
     }
 
-    fn placed(&self) -> bool { self.placement.is_some() }
-    fn placement(&self) -> Option<&Placement> { self.placement.as_ref() }
+    fn placed(&self) -> bool {
+        self.placement.is_some()
+    }
+    fn placement(&self) -> Option<&Placement> {
+        self.placement.as_ref()
+    }
 
-    fn input_point(&self, i: usize) -> Point { self.input_points[i] }
-    fn output_point(&self, i: usize) -> Point { self.output_points[i] }
+    fn input_point(&self, i: usize) -> Point {
+        self.input_points[i]
+    }
+    fn output_point(&self, i: usize) -> Point {
+        self.output_points[i]
+    }
 
     /// C++ reference: `decorateSchema.cpp:111` — `decorateSchema::draw`.
     fn draw(&self, dev: &mut dyn DrawDevice) -> Result<(), DrawError> {
@@ -262,21 +306,42 @@ pub fn make_top(
 }
 
 impl Schema for TopSchema {
-    fn width(&self) -> f64 { self.width }
-    fn height(&self) -> f64 { self.height }
-    fn inputs(&self) -> usize { 0 }
-    fn outputs(&self) -> usize { 0 }
-
-    fn place(&mut self, ox: f64, oy: f64, orientation: Orientation) {
-        self.placement = Some(Placement { x: ox, y: oy, orientation });
-        self.inner.place(ox + self.margin, oy + self.margin, orientation);
+    fn width(&self) -> f64 {
+        self.width
+    }
+    fn height(&self) -> f64 {
+        self.height
+    }
+    fn inputs(&self) -> usize {
+        0
+    }
+    fn outputs(&self) -> usize {
+        0
     }
 
-    fn placed(&self) -> bool { self.placement.is_some() }
-    fn placement(&self) -> Option<&Placement> { self.placement.as_ref() }
+    fn place(&mut self, ox: f64, oy: f64, orientation: Orientation) {
+        self.placement = Some(Placement {
+            x: ox,
+            y: oy,
+            orientation,
+        });
+        self.inner
+            .place(ox + self.margin, oy + self.margin, orientation);
+    }
 
-    fn input_point(&self, _i: usize) -> Point { panic!("TopSchema has no inputs") }
-    fn output_point(&self, _i: usize) -> Point { panic!("TopSchema has no outputs") }
+    fn placed(&self) -> bool {
+        self.placement.is_some()
+    }
+    fn placement(&self) -> Option<&Placement> {
+        self.placement.as_ref()
+    }
+
+    fn input_point(&self, _i: usize) -> Point {
+        panic!("TopSchema has no inputs")
+    }
+    fn output_point(&self, _i: usize) -> Point {
+        panic!("TopSchema has no outputs")
+    }
 
     /// C++ reference: `topSchema.cpp:91` — `topSchema::draw`.
     fn draw(&self, dev: &mut dyn DrawDevice) -> Result<(), DrawError> {
@@ -284,7 +349,14 @@ impl Schema for TopSchema {
         let p = self.placement.unwrap();
 
         // white background
-        dev.rect(p.x, p.y, self.width - 1.0, self.height - 1.0, "#ffffff", &self.link)?;
+        dev.rect(
+            p.x,
+            p.y,
+            self.width - 1.0,
+            self.height - 1.0,
+            "#ffffff",
+            &self.link,
+        )?;
 
         // label
         dev.label(p.x + self.margin, p.y + self.margin / 2.0, &self.text)?;

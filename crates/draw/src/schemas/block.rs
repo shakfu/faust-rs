@@ -11,8 +11,7 @@
 use crate::device::DrawDevice;
 use crate::error::DrawError;
 use crate::schema::{
-    Orientation, Placement, Point, Schema, Trait, TraitCollector, D_HORZ, D_LETTER, D_VERT,
-    D_WIRE,
+    D_HORZ, D_LETTER, D_VERT, D_WIRE, Orientation, Placement, Point, Schema, Trait, TraitCollector,
 };
 
 // ─── Quantize ─────────────────────────────────────────────────────────────────
@@ -22,7 +21,7 @@ use crate::schema::{
 /// C++ reference: `blockSchema.cpp:30` — `static double quantize(int n)`.
 fn quantize(n: usize) -> f64 {
     let q = 3_usize;
-    D_LETTER * (q * ((n + q - 1) / q)) as f64
+    D_LETTER * (q * n.div_ceil(q)) as f64
 }
 
 // ─── BlockSchema ──────────────────────────────────────────────────────────────
@@ -125,10 +124,18 @@ impl BlockSchema {
 }
 
 impl Schema for BlockSchema {
-    fn width(&self) -> f64 { self.width }
-    fn height(&self) -> f64 { self.height }
-    fn inputs(&self) -> usize { self.inputs }
-    fn outputs(&self) -> usize { self.outputs }
+    fn width(&self) -> f64 {
+        self.width
+    }
+    fn height(&self) -> f64 {
+        self.height
+    }
+    fn inputs(&self) -> usize {
+        self.inputs
+    }
+    fn outputs(&self) -> usize {
+        self.outputs
+    }
 
     fn place(&mut self, x: f64, y: f64, orientation: Orientation) {
         self.placement = Some(Placement { x, y, orientation });
@@ -136,8 +143,12 @@ impl Schema for BlockSchema {
         self.place_output_points();
     }
 
-    fn placed(&self) -> bool { self.placement.is_some() }
-    fn placement(&self) -> Option<&Placement> { self.placement.as_ref() }
+    fn placed(&self) -> bool {
+        self.placement.is_some()
+    }
+    fn placement(&self) -> Option<&Placement> {
+        self.placement.as_ref()
+    }
 
     fn input_point(&self, i: usize) -> Point {
         assert!(self.placed(), "BlockSchema not yet placed");
@@ -156,15 +167,20 @@ impl Schema for BlockSchema {
 
         // rectangle
         dev.rect(
-            p.x + D_HORZ, p.y + D_VERT,
-            self.width - 2.0 * D_HORZ, self.height - 2.0 * D_VERT,
-            &self.color, &self.link,
+            p.x + D_HORZ,
+            p.y + D_VERT,
+            self.width - 2.0 * D_HORZ,
+            self.height - 2.0 * D_VERT,
+            &self.color,
+            &self.link,
         )?;
 
         // centered text
         dev.text(
-            p.x + self.width / 2.0, p.y + self.height / 2.0,
-            &self.text, &self.link,
+            p.x + self.width / 2.0,
+            p.y + self.height / 2.0,
+            &self.text,
+            &self.link,
         )?;
 
         // orientation mark
@@ -175,7 +191,11 @@ impl Schema for BlockSchema {
         dev.mark_direction(mx, my, p.orientation.sign() as i32)?;
 
         // input arrows
-        let dx = if p.orientation == Orientation::LeftRight { D_HORZ } else { -D_HORZ };
+        let dx = if p.orientation == Orientation::LeftRight {
+            D_HORZ
+        } else {
+            -D_HORZ
+        };
         for pt in &self.input_points {
             dev.arrow(pt.x + dx, pt.y, 0.0, p.orientation.sign() as i32)?;
         }
@@ -187,7 +207,11 @@ impl Schema for BlockSchema {
     fn collect_traits(&self, c: &mut TraitCollector) {
         assert!(self.placed());
         let p = self.placement.unwrap();
-        let dx = if p.orientation == Orientation::LeftRight { D_HORZ } else { -D_HORZ };
+        let dx = if p.orientation == Orientation::LeftRight {
+            D_HORZ
+        } else {
+            -D_HORZ
+        };
 
         // input wires: external end → rect border
         for pt in &self.input_points {
@@ -246,19 +270,35 @@ impl InverterSchema {
 }
 
 impl Schema for InverterSchema {
-    fn width(&self) -> f64 { self.inner.width() }
-    fn height(&self) -> f64 { self.inner.height() }
-    fn inputs(&self) -> usize { self.inner.inputs() }
-    fn outputs(&self) -> usize { self.inner.outputs() }
+    fn width(&self) -> f64 {
+        self.inner.width()
+    }
+    fn height(&self) -> f64 {
+        self.inner.height()
+    }
+    fn inputs(&self) -> usize {
+        self.inner.inputs()
+    }
+    fn outputs(&self) -> usize {
+        self.inner.outputs()
+    }
 
     fn place(&mut self, x: f64, y: f64, orientation: Orientation) {
         self.inner.place(x, y, orientation);
     }
 
-    fn placed(&self) -> bool { self.inner.placed() }
-    fn placement(&self) -> Option<&Placement> { self.inner.placement() }
-    fn input_point(&self, i: usize) -> Point { self.inner.input_point(i) }
-    fn output_point(&self, i: usize) -> Point { self.inner.output_point(i) }
+    fn placed(&self) -> bool {
+        self.inner.placed()
+    }
+    fn placement(&self) -> Option<&Placement> {
+        self.inner.placement()
+    }
+    fn input_point(&self, i: usize) -> Point {
+        self.inner.input_point(i)
+    }
+    fn output_point(&self, i: usize) -> Point {
+        self.inner.output_point(i)
+    }
 
     /// Triangle instead of rectangle.
     ///
