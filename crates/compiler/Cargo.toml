@@ -25,6 +25,7 @@ tlib = { path = "../tlib" }
 transform = { path = "../transform" }
 wasmprinter = "0.225"
 sigtype = { path = "../sigtype" }
+draw = { path = "../draw" }
 
 [dev-dependencies]
 [[bin]]

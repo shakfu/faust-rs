@@ -203,6 +203,17 @@ impl Schema for BlockSchema {
     }
 }
 
+/// Convenience constructor returning `Box<dyn Schema>`.
+pub fn make_block(
+    inputs: usize,
+    outputs: usize,
+    text: impl Into<String>,
+    color: impl Into<String>,
+    link: impl Into<String>,
+) -> Box<dyn crate::schema::Schema> {
+    Box::new(BlockSchema::new(inputs, outputs, text, color, link))
+}
+
 // ─── InverterSchema ───────────────────────────────────────────────────────────
 
 /// A `*(-1)` operator displayed as a filled triangle.

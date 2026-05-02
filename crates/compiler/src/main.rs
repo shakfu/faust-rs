@@ -17,6 +17,7 @@
 //!   script compatibility while converging on typed CLI parsing.
 
 use boxes::dump_box;
+use draw;
 use clap::{ArgAction, Parser, ValueEnum};
 use codegen::backends::c::COptions;
 use codegen::backends::c::generate_c_module;
@@ -291,6 +292,9 @@ struct CliArgs {
     /// Maximum compilation time in seconds (default: 120).
     #[arg(long = "timeout", default_value_t = 120)]
     timeout: u64,
+    /// Generate SVG block-diagram files in `<name>-svg/` (`-svg`).
+    #[arg(long = "svg", action = ArgAction::SetTrue)]
+    svg: bool,
 }
 
 /// Normalizes legacy Faust-style flags to the current `clap` surface.
@@ -361,6 +365,10 @@ fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> 
         }
         if arg == "-time" {
             normalized.push("--compilation-time".to_owned());
+            continue;
+        }
+        if arg == "-svg" {
+            normalized.push("--svg".to_owned());
             continue;
         }
         if arg == "-timeout" {
@@ -1727,6 +1735,54 @@ fn run_main() {
             }
             Err(err) => {
                 eprintln!("Parse failed: {err}");
+                print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
+                std::process::exit(1);
+            }
+        }
+        timer.total();
+        return;
+    }
+
+    if cli.svg {
+        let mut timer = CompilationTimer::new(cli.timeout, cli.compilation_time);
+        let compiler = compiler_from_cli(&cli, Some(std::sync::Arc::clone(&cancel)));
+        // Use eval+propagate to get the evaluated process box (post-eval form).
+        let result = if cli.import_dir.is_empty() {
+            compiler.compile_file_default_to_signals(input_path)
+        } else {
+            compiler.compile_file_to_signals(input_path, &cli.import_dir)
+        };
+        timer.phase("eval");
+
+        match result {
+            Ok(out) => {
+                // Derive output directory name from input stem: "<name>-svg/"
+                let stem = input_path
+                    .file_stem()
+                    .unwrap_or(std::ffi::OsStr::new("process"))
+                    .to_string_lossy();
+                let dir = std::path::PathBuf::from(format!("{stem}-svg"));
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    eprintln!("SVG: cannot create output directory {}: {e}", dir.display());
+                    std::process::exit(1);
+                }
+                let svg_path = dir.join("process.svg");
+                timer.phase("svg-setup");
+
+                if let Err(e) = draw::draw_schema(
+                    &out.parse.state.arena,
+                    out.process_box,
+                    &cli.process_name,
+                    &svg_path,
+                ) {
+                    eprintln!("SVG generation failed: {e}");
+                    std::process::exit(1);
+                }
+                timer.phase("svg-render");
+                eprintln!("SVG written to {}", svg_path.display());
+            }
+            Err(err) => {
+                eprintln!("SVG: compile failed: {err}");
                 print_structured_diagnostics(&err, cli.error_format, cli.error_verbosity);
                 std::process::exit(1);
             }

@@ -247,6 +247,7 @@ dependencies = [
  "boxes",
  "clap",
  "codegen",
+ "draw",
  "errors",
  "eval",
  "fir",
@@ -438,6 +439,10 @@ version = "0.5.0"
 [[package]]
 name = "draw"
 version = "0.5.0"
+dependencies = [
+ "boxes",
+ "tlib",
+]
 
 [[package]]
 name = "equivalent"

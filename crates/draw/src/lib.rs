@@ -40,6 +40,7 @@ pub mod device;
 pub mod error;
 pub mod schema;
 pub mod schemas;
+pub mod translate;
 
 pub use error::DrawError;
 pub use schema::{
@@ -53,4 +54,44 @@ pub const CRATE_NAME: &str = "draw";
 /// Returns the stable crate identifier.
 pub fn crate_id() -> &'static str {
     CRATE_NAME
+}
+
+// ─── Public entry point ───────────────────────────────────────────────────────
+
+/// Generate one SVG block-diagram file from a box expression.
+///
+/// Builds the schema tree via [`translate::generate_schema`], wraps it in a
+/// [`TopSchema`](schemas::composed::TopSchema) (title + margins + output arrows),
+/// then renders to `output_path`.
+///
+/// # Errors
+/// Returns [`DrawError::Io`] if the output file cannot be written.
+///
+/// C++ reference: `drawschema.cpp:234` — `writeSchemaFile`.
+pub fn draw_schema(
+    arena: &tlib::TreeArena,
+    root: boxes::BoxId,
+    name: &str,
+    output_path: &std::path::Path,
+) -> Result<(), DrawError> {
+    use device::SvgDevice;
+    use schema::TraitCollector;
+    use translate::{generate_schema, make_top_schema};
+
+    let inner   = generate_schema(arena, root);
+    let mut top = make_top_schema(inner, name, "");
+
+    top.place(0.0, 0.0, Orientation::LeftRight);
+
+    let file = std::fs::File::create(output_path)
+        .map_err(DrawError::Io)?;
+    let mut dev = SvgDevice::new(file, top.width(), top.height())?;
+
+    top.draw(&mut dev)?;
+
+    let mut collector = TraitCollector::new();
+    top.collect_traits(&mut collector);
+    collector.draw(&mut dev)?;
+
+    dev.finish().map(|_| ())
 }
