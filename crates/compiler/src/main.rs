@@ -295,6 +295,18 @@ struct CliArgs {
     /// Generate SVG block-diagram files in `<name>-svg/` (`-svg`).
     #[arg(long = "svg", action = ArgAction::SetTrue)]
     svg: bool,
+    /// SVG: add Gaussian drop-shadow to boxes (`-blur`).
+    #[arg(long = "shadow-blur", action = ArgAction::SetTrue)]
+    shadow_blur: bool,
+    /// SVG: emit a viewBox-only (responsive) header instead of fixed mm size (`-sc`).
+    #[arg(long = "scaled-svg", action = ArgAction::SetTrue)]
+    scaled_svg: bool,
+    /// SVG: draw a visible frame around route boxes (`-drf`).
+    #[arg(long = "draw-route-frame", action = ArgAction::SetTrue)]
+    draw_route_frame: bool,
+    /// SVG: maximum label length before truncation (default 40) (`-mns N`).
+    #[arg(long = "max-name-size", default_value_t = 40)]
+    max_name_size: usize,
 }
 
 /// Normalizes legacy Faust-style flags to the current `clap` surface.
@@ -369,6 +381,25 @@ fn normalize_legacy_args(args: impl IntoIterator<Item = String>) -> Vec<String> 
         }
         if arg == "-svg" {
             normalized.push("--svg".to_owned());
+            continue;
+        }
+        if arg == "-blur" {
+            normalized.push("--shadow-blur".to_owned());
+            continue;
+        }
+        if arg == "-sc" {
+            normalized.push("--scaled-svg".to_owned());
+            continue;
+        }
+        if arg == "-drf" {
+            normalized.push("--draw-route-frame".to_owned());
+            continue;
+        }
+        if arg == "-mns" {
+            normalized.push("--max-name-size".to_owned());
+            if let Some(value) = it.next() {
+                normalized.push(value);
+            }
             continue;
         }
         if arg == "-timeout" {
@@ -1769,11 +1800,18 @@ fn run_main() {
                 let svg_path = dir.join("process.svg");
                 timer.phase("svg-setup");
 
+                let draw_config = draw::DrawConfig {
+                    shadow_blur:      cli.shadow_blur,
+                    scaled_svg:       cli.scaled_svg,
+                    draw_route_frame: cli.draw_route_frame,
+                    max_name_size:    cli.max_name_size,
+                };
                 if let Err(e) = draw::draw_schema(
                     &out.parse.state.arena,
                     out.process_box,
                     &cli.process_name,
                     &svg_path,
+                    &draw_config,
                 ) {
                     eprintln!("SVG generation failed: {e}");
                     std::process::exit(1);

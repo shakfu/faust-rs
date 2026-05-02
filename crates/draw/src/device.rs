@@ -9,6 +9,7 @@
 
 use std::io::{BufWriter, Write};
 
+use crate::DrawConfig;
 use crate::error::DrawError;
 
 // ─── DrawDevice trait ──────────────────────────────────────────────────────────
@@ -126,10 +127,15 @@ fn xml_escape(s: &str) -> String {
 /// and closes `</svg>` in [`Drop`] (or explicitly via [`SvgDevice::finish`]).
 /// All draw calls emit raw XML using `write!()`.
 ///
+/// Optional features controlled by [`DrawConfig`]:
+/// - `shadow_blur`: emits a `<defs><filter>` Gaussian blur and applies it to shadow rects.
+/// - `scaled_svg`: omits the fixed `width=`/`height=` mm attributes for a responsive viewBox.
+///
 /// C++ reference: `device/SVGDev.h` / `device/SVGDev.cpp`.
 pub struct SvgDevice<W: Write> {
     // Option so that finish() can take ownership without Drop writing a second </svg>.
     writer: Option<BufWriter<W>>,
+    shadow_blur: bool,
 }
 
 impl<W: Write> SvgDevice<W> {
@@ -139,21 +145,40 @@ impl<W: Write> SvgDevice<W> {
 
     /// Create a new SVG device writing to `writer`.
     ///
-    /// Emits the `<?xml?>` declaration and `<svg>` tag with `viewBox` sized to
-    /// `(width, height)`.  Physical size is expressed in mm at scale 0.5.
+    /// Emits the `<?xml?>` declaration and `<svg>` tag.
+    /// - Without `config.scaled_svg`: includes `width=`/`height=` in mm at 0.5× scale.
+    /// - With `config.scaled_svg`: viewBox only — responsive, no fixed dimensions.
+    /// - With `config.shadow_blur`: emits a `<defs>` Gaussian blur filter.
     ///
     /// C++ reference: `SVGDev.cpp:86` — `SVGDev::SVGDev`.
-    pub fn new(writer: W, width: f64, height: f64) -> Result<Self, DrawError> {
+    pub fn new(writer: W, width: f64, height: f64, config: &DrawConfig) -> Result<Self, DrawError> {
         let scale = 0.5_f64;
         let mut bw = BufWriter::new(writer);
         writeln!(bw, r#"<?xml version="1.0"?>"#)?;
-        writeln!(
-            bw,
-            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 {width} {height}" width="{wmm}mm" height="{hmm}mm" version="1.1">"#,
-            wmm = width * scale,
-            hmm = height * scale,
-        )?;
-        Ok(Self { writer: Some(bw) })
+        if config.scaled_svg {
+            writeln!(
+                bw,
+                r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 {width} {height}" version="1.1">"#,
+            )?;
+        } else {
+            writeln!(
+                bw,
+                r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 {width} {height}" width="{wmm}mm" height="{hmm}mm" version="1.1">"#,
+                wmm = width * scale,
+                hmm = height * scale,
+            )?;
+        }
+        // Shadow-blur filter definition.
+        // C++ reference: SVGDev.cpp — `gShadowBlur` block in constructor.
+        if config.shadow_blur {
+            writeln!(bw, "<defs>")?;
+            writeln!(bw, r#"  <filter id="filter" filterRes="18" x="0" y="0">"#)?;
+            writeln!(bw, r#"    <feGaussianBlur in="SourceGraphic" stdDeviation="1.55" result="blur"/>"#)?;
+            writeln!(bw, r#"    <feOffset in="blur" dx="3" dy="3"/>"#)?;
+            writeln!(bw, "  </filter>")?;
+            writeln!(bw, "</defs>")?;
+        }
+        Ok(Self { writer: Some(bw), shadow_blur: config.shadow_blur })
     }
 
     /// Flush, write the closing `</svg>` tag, and return the inner writer.
@@ -190,12 +215,21 @@ impl<W: Write> DrawDevice for SvgDevice<W> {
         if !link.is_empty() {
             writeln!(self.w(), r#"<a xlink:href="{}">"#, xml_escape(link))?;
         }
-        // shadow rectangle
-        writeln!(
-            self.w(),
-            r#"<rect x="{}" y="{}" width="{}" height="{}" rx="0" ry="0" style="stroke:none;fill:#cccccc;"/>"#,
-            x + 1.0, y + 1.0, w, h
-        )?;
+        // shadow rectangle — blur filter when enabled, plain grey otherwise
+        // C++ reference: SVGDev.cpp — gShadowBlur branch
+        if self.shadow_blur {
+            writeln!(
+                self.w(),
+                r#"<rect x="{}" y="{}" width="{}" height="{}" rx="0" ry="0" style="stroke:none;fill:#aaaaaa;filter:url(#filter);"/>"#,
+                x + 1.0, y + 1.0, w, h
+            )?;
+        } else {
+            writeln!(
+                self.w(),
+                r#"<rect x="{}" y="{}" width="{}" height="{}" rx="0" ry="0" style="stroke:none;fill:#cccccc;"/>"#,
+                x + 1.0, y + 1.0, w, h
+            )?;
+        }
         // colored rectangle
         writeln!(
             self.w(),
@@ -379,7 +413,7 @@ mod tests {
     use super::*;
 
     fn make_dev(width: f64, height: f64) -> SvgDevice<Vec<u8>> {
-        SvgDevice::new(Vec::new(), width, height).unwrap()
+        SvgDevice::new(Vec::new(), width, height, &crate::DrawConfig::default()).unwrap()
     }
 
     fn svg_output(dev: SvgDevice<Vec<u8>>) -> String {

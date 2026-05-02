@@ -417,13 +417,128 @@ Port `generateInsideSchema` and `generateDiagramSchema` from `drawschema.cpp`.
 - [ ] End-to-end smoke test: `faust-rs -svg sine.dsp` produces `sine-svg/process.svg`
 - [ ] Parity test: compare element counts and text labels with reference Faust output
 
-### Phase H — Signal → Dot (optional, 1–2 days)
+### Phase H — SVG visual options (1–2 days) ← **next**
+
+Port the draw-layer visual options that require no eval-stage changes.
+All four are additions to `DrawConfig` + wired via CLI flags.
+
+#### H1 — `--draw-route-frame` / `-drf` (draw route frames)
+
+**C++ global**: `gDrawRouteFrame` (default false).  
+**Location**: `schema/routeSchema.cpp` — toggles `drawRectangle` + `drawOrientationMark`.  
+**Current Rust state**: `RouteSchema::draw()` always draws the rect + mark.  
+**Action**: Make rect/mark conditional on a `draw_route_frame: bool` flag in `DrawConfig`.
+Without the flag, draw simple cables (no rectangle, no mark). This requires passing
+`DrawConfig` into `draw()` or storing the flag on `RouteSchema` at construction time.
+**Preferred approach**: thread `DrawConfig` as an extra parameter through `draw()` calls.
+Alternative: store `bool` on `RouteSchema`.
+
+#### H2 — `--shadow-blur` / `-blur` (Gaussian drop-shadow on boxes)
+
+**C++ global**: `gShadowBlur` (default false).  
+**Location**: `device/SVGDev.cpp` — emits `<defs><filter>` in SVG header, uses
+`filter:url(#filter)` style on shadow rects.  
+**Action**:
+- Add `shadow_blur: bool` to `SvgDevice::new()` parameters.
+- When true: emit `<defs>` block with `<feGaussianBlur stdDeviation="1.55">` +
+  `<feOffset dx="3" dy="3">` in header.
+- Change shadow rect style from `fill:#cccccc` to `fill:#aaaaaa;filter:url(#filter)`.
+- All other draw calls unchanged.
+
+#### H3 — `--scaled-svg` / `-sc` (viewBox-only, responsive)
+
+**C++ global**: `gScaledSVG` (default false).  
+**Location**: `device/SVGDev.cpp` — when true, omits fixed `width=`/`height=` attributes
+so the SVG scales freely; uses only `viewBox`.  
+**Action**: Add `scaled: bool` to `SvgDevice::new()`. When true, emit SVG header
+without `width=` and `height=` mm attributes (viewBox-only).
+
+#### H4 — `--max-name-size` / `-mns N` (truncate long names, default 40)
+
+**C++ global**: `gMaxNameSize` (default 40).  
+**Location**: `compiler/utils/names.cpp` — `checkName()` truncates names > N chars
+as `first_third + "..." + last_third`.  
+**Action**: Add `max_name_size: usize` (default 40) to `DrawConfig`. In `translate.rs`,
+apply a `truncate_name(s, max)` helper before passing text to `make_block()`.
+
+### Phase I — Hierarchical SVG with folding (3–4 days)
+
+Port the folding mechanism that splits a complex diagram into multiple linked SVG files.
+This is the main feature enabling navigation in the block-diagram browser.
+
+**C++ globals**: `gFoldThreshold` (default 25), `gFoldComplexity` (default 2),
+`gFoldingFlag` (derived), `gBackLink` (back-link map), `gDrawnExp` (visited set),
+`gPendingExp` (queue), `gSchemaFileName` (current file name).
+
+**Dependencies** not yet in Rust:
+1. **`box_complexity(arena, BoxId) → usize`**: port `boxcomplexity.cpp` — recursive count
+   of "drawable" nodes (primitives=1, cuts/wires/slots=0, composition=sum). Add to `boxes`
+   crate as `pub fn box_complexity(arena: &TreeArena, b: BoxId) -> usize`.
+2. **`get_def_name(arena, BoxId) → Option<&str>`**: definition name attached during eval.
+   In C++ this is `getDefNameProperty(t, id)`. In Rust, the eval crate would need to
+   expose a way to query these names (stored as tree properties). Investigation needed.
+3. **`legal_file_name(name, addr) → String`**: port `legalFileName()` — keep first 16
+   alphanum chars, append hex address for uniqueness, unless `name == "process"`.
+
+**Folding algorithm (port of `drawSchema` + `writeSchemaFile`)**:
+
+```
+DrawConfig { fold_threshold: 25, fold_complexity: 2, ... }
+
+fn draw_schema_folded(arena, root, name, out_dir, config):
+    complexity = box_complexity(arena, root)
+    folding = complexity > config.fold_threshold
+    pending = VecDeque::from([root])
+    drawn = HashSet::new()
+    back_links = HashMap::new()
+    back_links.insert(root, "".to_string())
+    current_file = ""
+
+    while let Some(t) = pending.pop_front():
+        write_schema_file(arena, t, out_dir, config, &mut pending, &drawn, &back_links, folding)
+        drawn.insert(t)
+
+fn generate_diagram_schema_with_folding(arena, b, config, pending, back_links, folding):
+    if folding && box_complexity(arena, b) >= config.fold_complexity:
+        if let Some(name) = get_def_name(arena, b):
+            if not already drawn(b):
+                pending.push(b)
+                link = legal_file_name(name, b) + ".svg"
+                back_links.insert(b, current_file)
+                return make_block(ins, outs, name, COLOR_LINK, link)
+    if let Some(name) = get_def_name(arena, b) && !is_pure_routing(arena, b):
+        return make_decorate(generate_inside(arena, b, ...), 10, name)
+    return generate_inside(arena, b, ...)
+```
+
+**`is_pure_routing`**: port of `isPureRouting` — returns true for
+`Wire | Cut | Slot | Inverter` and recursive `Par | Seq | Split | Merge` of those.
+
+**CLI additions**:
+```
+-f N    --fold N            threshold (default 25)
+-fc N   --fold-complexity N  per-expr threshold (default 2)
+```
+
+### Phase J — Signal → Dot (optional, 1–2 days)
 Port `sigToGraph.cpp` for Graphviz dot output.  
 Add `--dump-sig-dot` flag writing to stdout.
 
-### Phase I — PostScript (deferred)
+### Phase K — PostScript (deferred)
 `PostScriptDevice` is stubbed with `unimplemented!("PostScript output not yet supported")`.
 Implement in a later phase once SVG parity is confirmed.
+
+### Out of scope for draw module
+
+#### `-sd` / `--simplify-diagrams`
+**C++ location**: `evaluate/eval.cpp` — calls `boxSimplification(b)` after eval.  
+**Scope**: eval stage, not draw. Implement in the `eval` crate as a post-eval pass.
+
+#### `-sn` / `--simple-names`
+**C++ location**: `evaluate/eval.cpp` — omits argument details when setting
+`DefNameProperty` during function application.  
+**Scope**: eval stage. The draw layer receives name strings opaquely; it cannot strip
+argument details without re-parsing the name. Implement as an eval-stage flag.
 
 ---
 
@@ -512,29 +627,50 @@ For each corpus DSP:
 
 ## Effort Estimate
 
-| Phase | Days |
-|-------|------|
-| A — Core infra + SvgDevice | 3–4 |
-| B — Leaf schemas | 1–2 |
-| C — Composition schemas | 3–4 |
-| D — Decorator schemas | 1–2 |
-| E — Specialized schemas | 1–2 |
-| F — Translation layer | 3–4 |
-| G — CLI + integration | 1–2 |
-| H — Signal→Dot (optional) | 1–2 |
-| **Total** | **15–20** |
+| Phase | Description | Days | Status |
+|-------|------------|------|--------|
+| A | Core infra + SvgDevice | 3–4 | ✅ done |
+| B | Leaf schemas | 1–2 | ✅ done |
+| C | Composition schemas | 3–4 | ✅ done |
+| D | Decorator schemas | 1–2 | ✅ done |
+| E | Specialized schemas | 1–2 | ✅ done |
+| F | Translation layer | 3–4 | ✅ done |
+| G | CLI `-svg` flag | 1–2 | ✅ done |
+| H | Visual options: -blur, -sc, -drf, -mns | 1–2 | 🔲 next |
+| I | Hierarchical folding (-f, -fc) | 3–4 | 🔲 planned |
+| J | Signal → Dot (optional) | 1–2 | 🔲 optional |
+| K | PostScript (deferred) | 2–3 | 🔲 deferred |
+| — | `-sd`, `-sn` (eval-stage) | — | out of scope |
+| **Total** | | **~22–28** | |
 
 ---
 
 ## Definition of Done
 
-- [ ] `cargo test -p draw` passes (unit + integration)
-- [ ] `faust-rs --svg simple.dsp` produces valid SVG readable in Chrome/Inkscape
-- [ ] Block diagram structure visually matches reference Faust on ≥10 corpus DSPs
-- [ ] `-svg` alias wired via `normalize_legacy_args`
+### Phases A–G (complete)
+- [x] `cargo test -p draw` passes (24 unit tests)
+- [x] `faust-rs -svg <file>.dsp` produces `<stem>-svg/process.svg`
+- [x] All box primitives, UI widgets, composition operators render
+- [x] `-svg` alias wired via `normalize_legacy_args`
+- [x] No `unsafe` code
+
+### Phase H (next)
+- [ ] `-blur` / `--shadow-blur`: SVG drop-shadow filter added to boxes
+- [ ] `-sc` / `--scaled-svg`: SVG header uses viewBox only (no fixed mm size)
+- [ ] `-drf` / `--draw-route-frame`: route boxes drawn as frames vs cables
+- [ ] `-mns N` / `--max-name-size`: names > N chars truncated as `first...last`
+- [ ] All new flags wired via `normalize_legacy_args`
+
+### Phase I (folding — hierarchical SVGs)
+- [ ] `box_complexity` implemented in `boxes` crate
+- [ ] Folding queue produces multiple linked `.svg` files
+- [ ] `-f N` / `--fold N` and `-fc N` / `--fold-complexity N` flags
+- [ ] Navigation links between files work in browser
+
+### All phases
 - [ ] `cargo clippy --all-targets -- -D warnings` clean
 - [ ] PostScript path returns a clear `DrawError::NotSupported` message
-- [ ] No `unsafe` code
+- [ ] Block diagram structure visually matches reference Faust on ≥10 corpus DSPs
 
 ---
 

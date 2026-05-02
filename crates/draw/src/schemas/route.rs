@@ -14,6 +14,10 @@ const ROUTE_COLOR: &str = "#EEEEAA";
 ///
 /// `routes` is a flat list of (1-based src, 1-based dst) pairs.
 ///
+/// With `draw_frame = true` (CLI `-drf`): draws a filled rectangle, an orientation
+/// mark, and input arrows — matching C++ with `gDrawRouteFrame`.
+/// With `draw_frame = false` (default): invisible; only the wire traits carry signal.
+///
 /// C++ reference: `routeSchema.cpp:34` — `schema* makeRouteSchema`.
 pub struct RouteSchema {
     width: f64,
@@ -21,6 +25,8 @@ pub struct RouteSchema {
     inputs: usize,
     outputs: usize,
     routes: Vec<usize>,
+    /// Whether to draw the visible rectangle frame + arrows (`-drf` flag).
+    draw_frame: bool,
     placement: Option<Placement>,
     input_points: Vec<Point>,
     output_points: Vec<Point>,
@@ -28,8 +34,15 @@ pub struct RouteSchema {
 
 /// Build a `RouteSchema`.
 ///
+/// `draw_frame` corresponds to the C++ `gDrawRouteFrame` option (`-drf`).
+///
 /// C++ reference: `routeSchema.cpp:34` — `schema* makeRouteSchema`.
-pub fn make_route(inputs: usize, outputs: usize, routes: Vec<usize>) -> Box<dyn Schema> {
+pub fn make_route(
+    inputs: usize,
+    outputs: usize,
+    routes: Vec<usize>,
+    draw_frame: bool,
+) -> Box<dyn Schema> {
     let minimal = 3.0 * D_WIRE;
     let h = 2.0 * D_VERT + minimal.max(inputs.max(outputs) as f64 * D_WIRE);
     let w = 2.0 * D_HORZ + minimal.max(h * 0.75);
@@ -39,6 +52,7 @@ pub fn make_route(inputs: usize, outputs: usize, routes: Vec<usize>) -> Box<dyn 
         inputs,
         outputs,
         routes,
+        draw_frame,
         placement: None,
         input_points: vec![Point::default(); inputs],
         output_points: vec![Point::default(); outputs],
@@ -112,10 +126,16 @@ impl Schema for RouteSchema {
     fn output_point(&self, i: usize) -> Point { self.output_points[i] }
 
     /// C++ reference: `routeSchema.cpp:159` — `routeSchema::draw`.
+    ///
+    /// When `draw_frame` is false (default, no `-drf`), nothing is drawn —
+    /// the route is purely structural; wire traits carry the connections.
     fn draw(&self, dev: &mut dyn DrawDevice) -> Result<(), DrawError> {
         assert!(self.placed());
+        if !self.draw_frame {
+            return Ok(());
+        }
         let p = self.placement.unwrap();
-        // draw the background rectangle
+        // background rectangle
         dev.rect(
             p.x + D_HORZ, p.y + D_VERT,
             self.width - 2.0 * D_HORZ, self.height - 2.0 * D_VERT,

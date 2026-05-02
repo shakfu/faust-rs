@@ -7,14 +7,14 @@
 //! # Architecture
 //!
 //! ```text
-//! draw_schema(arena, process_id, output_dir)
-//!   └── translate::generate_diagram_schema(arena, id)   → Box<dyn Schema>
-//!         └── schemas::{Block,Seq,Par,…}                 (recursive)
+//! draw_schema(arena, process_id, config, output_path)
+//!   └── translate::generate_schema(arena, id, config)  → Box<dyn Schema>
+//!         └── schemas::{Block,Seq,Par,…}                (recursive)
 //!   └── TopSchema wrapper (title + margin)
-//!   └── SvgDevice::new(file)
+//!   └── SvgDevice::new(file, width, height, config)
 //!   └── schema.place(0, 0, LeftRight)
 //!   └── schema.draw(dev)
-//!   └── TraitCollector::draw(dev)                        (wires on top)
+//!   └── TraitCollector::draw(dev)                       (wires on top)
 //! ```
 //!
 //! # C++ source mapping
@@ -56,6 +56,59 @@ pub fn crate_id() -> &'static str {
     CRATE_NAME
 }
 
+// ─── DrawConfig ───────────────────────────────────────────────────────────────
+
+/// Visual and layout options for SVG block-diagram generation.
+///
+/// Matches the set of C++ globals consumed by the draw module.
+/// All fields have documented defaults matching the reference compiler.
+///
+/// C++ references: `global.hh` fields `gShadowBlur`, `gScaledSVG`,
+/// `gDrawRouteFrame`, `gMaxNameSize`.
+#[derive(Clone, Debug)]
+pub struct DrawConfig {
+    /// Add a Gaussian drop-shadow filter to each box rectangle.
+    ///
+    /// Emits a `<defs><filter>` block in the SVG header and applies
+    /// `filter:url(#filter)` to shadow rects.
+    ///
+    /// C++ global: `gShadowBlur` (default false). CLI: `-blur` / `--shadow-blur`.
+    pub shadow_blur: bool,
+
+    /// Emit a viewBox-only SVG header (no fixed `width=` / `height=` mm attributes).
+    ///
+    /// Makes the SVG responsive — scales freely to container size.
+    ///
+    /// C++ global: `gScaledSVG` (default false). CLI: `-sc` / `--scaled-svg`.
+    pub scaled_svg: bool,
+
+    /// Draw a solid rectangle frame around route boxes instead of cable stubs.
+    ///
+    /// Without this flag, route boxes draw only the filled background + arrows.
+    /// With this flag, an explicit orientation mark is added.
+    ///
+    /// C++ global: `gDrawRouteFrame` (default false). CLI: `-drf` / `--draw-route-frame`.
+    pub draw_route_frame: bool,
+
+    /// Maximum character length for block labels; longer names are truncated.
+    ///
+    /// Truncation keeps the first third and last third of the name, joined by `"..."`.
+    ///
+    /// C++ global: `gMaxNameSize` (default 40). CLI: `-mns N` / `--max-name-size N`.
+    pub max_name_size: usize,
+}
+
+impl Default for DrawConfig {
+    fn default() -> Self {
+        Self {
+            shadow_blur: false,
+            scaled_svg: false,
+            draw_route_frame: false,
+            max_name_size: 40,
+        }
+    }
+}
+
 // ─── Public entry point ───────────────────────────────────────────────────────
 
 /// Generate one SVG block-diagram file from a box expression.
@@ -73,19 +126,20 @@ pub fn draw_schema(
     root: boxes::BoxId,
     name: &str,
     output_path: &std::path::Path,
+    config: &DrawConfig,
 ) -> Result<(), DrawError> {
     use device::SvgDevice;
     use schema::TraitCollector;
     use translate::{generate_schema, make_top_schema};
 
-    let inner   = generate_schema(arena, root);
+    let inner   = generate_schema(arena, root, config);
     let mut top = make_top_schema(inner, name, "");
 
     top.place(0.0, 0.0, Orientation::LeftRight);
 
     let file = std::fs::File::create(output_path)
         .map_err(DrawError::Io)?;
-    let mut dev = SvgDevice::new(file, top.width(), top.height())?;
+    let mut dev = SvgDevice::new(file, top.width(), top.height(), config)?;
 
     top.draw(&mut dev)?;
 

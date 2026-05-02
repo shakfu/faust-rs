@@ -13,6 +13,7 @@
 use boxes::{BoxId, BoxMatch, match_box};
 use tlib::{NodeKind, TreeArena, tree_to_str};
 
+use crate::DrawConfig;
 use crate::schema::{
     COLOR_LINK, COLOR_NORMAL, COLOR_NUM, COLOR_SLOT, COLOR_UI, Schema,
 };
@@ -37,8 +38,8 @@ use crate::schemas::{
 /// All sub-diagrams are rendered inline; folding is deferred to a later phase.
 ///
 /// C++ reference: `drawschema.cpp:359` — `generateDiagramSchema`.
-pub fn generate_schema(arena: &TreeArena, b: BoxId) -> Box<dyn Schema> {
-    generate_inside(arena, b)
+pub fn generate_schema(arena: &TreeArena, b: BoxId, config: &DrawConfig) -> Box<dyn Schema> {
+    generate_inside(arena, b, config)
 }
 
 // ─── Inside dispatch ────────────────────────────────────────────────────────────
@@ -46,7 +47,11 @@ pub fn generate_schema(arena: &TreeArena, b: BoxId) -> Box<dyn Schema> {
 /// Map one `BoxId` to a schema, ignoring folding / naming decorations.
 ///
 /// C++ reference: `drawschema.cpp:396` — `generateInsideSchema`.
-fn generate_inside(arena: &TreeArena, b: BoxId) -> Box<dyn Schema> {
+fn generate_inside(arena: &TreeArena, b: BoxId, config: &DrawConfig) -> Box<dyn Schema> {
+    let max = config.max_name_size;
+    // Short-circuit for purely static short labels — helper for dynamic names.
+    let tn = |s: String| truncate_name(s, max);
+
     match match_box(arena, b) {
         // ── Leaf values ──────────────────────────────────────────────
         BoxMatch::Int(i) => make_block(0, 1, i.to_string(), COLOR_NUM, ""),
@@ -118,107 +123,107 @@ fn generate_inside(arena: &TreeArena, b: BoxId) -> Box<dyn Schema> {
         BoxMatch::Control      => make_block(2, 2, "control",      COLOR_NORMAL, ""),
 
         // ── Composition operators ─────────────────────────────────────
-        BoxMatch::Seq(a, b)   => make_seq(generate_inside(arena, a), generate_inside(arena, b)),
-        BoxMatch::Par(a, b)   => make_par(generate_inside(arena, a), generate_inside(arena, b)),
-        BoxMatch::Split(a, b) => make_split(generate_inside(arena, a), generate_inside(arena, b)),
-        BoxMatch::Merge(a, b) => make_merge(generate_inside(arena, a), generate_inside(arena, b)),
-        BoxMatch::Rec(a, b)   => make_rec(generate_inside(arena, a), generate_inside(arena, b)),
+        BoxMatch::Seq(a, b)   => make_seq(generate_inside(arena, a, config), generate_inside(arena, b, config)),
+        BoxMatch::Par(a, b)   => make_par(generate_inside(arena, a, config), generate_inside(arena, b, config)),
+        BoxMatch::Split(a, b) => make_split(generate_inside(arena, a, config), generate_inside(arena, b, config)),
+        BoxMatch::Merge(a, b) => make_merge(generate_inside(arena, a, config), generate_inside(arena, b, config)),
+        BoxMatch::Rec(a, b)   => make_rec(generate_inside(arena, a, config), generate_inside(arena, b, config)),
 
         // ── Metadata: transparent pass-through ───────────────────────
-        BoxMatch::Metadata(a, _b) => generate_inside(arena, a),
+        BoxMatch::Metadata(a, _b) => generate_inside(arena, a, config),
 
         // ── Groups: decorate with a labeled dashed border ────────────
         BoxMatch::VGroup(label, body) => {
-            let name = format!("vgroup({})", extract_name(arena, label));
-            make_decorate(generate_schema(arena, body), 10.0, name)
+            let name = tn(format!("vgroup({})", extract_name(arena, label)));
+            make_decorate(generate_schema(arena, body, config), 10.0, name)
         }
         BoxMatch::HGroup(label, body) => {
-            let name = format!("hgroup({})", extract_name(arena, label));
-            make_decorate(generate_schema(arena, body), 10.0, name)
+            let name = tn(format!("hgroup({})", extract_name(arena, label)));
+            make_decorate(generate_schema(arena, body, config), 10.0, name)
         }
         BoxMatch::TGroup(label, body) => {
-            let name = format!("tgroup({})", extract_name(arena, label));
-            make_decorate(generate_schema(arena, body), 10.0, name)
+            let name = tn(format!("tgroup({})", extract_name(arena, label)));
+            make_decorate(generate_schema(arena, body, config), 10.0, name)
         }
 
         // ── UI elements ───────────────────────────────────────────────
         BoxMatch::Button(label) => {
-            let s = format!("button({})", extract_name(arena, label));
+            let s = tn(format!("button({})", extract_name(arena, label)));
             make_block(0, 1, s, COLOR_UI, "")
         }
         BoxMatch::Checkbox(label) => {
-            let s = format!("checkbox({})", extract_name(arena, label));
+            let s = tn(format!("checkbox({})", extract_name(arena, label)));
             make_block(0, 1, s, COLOR_UI, "")
         }
-        BoxMatch::VSlider(label, cur, min, max, step) => {
-            let s = format!(
+        BoxMatch::VSlider(label, cur, min, max_id, step) => {
+            let s = tn(format!(
                 "vslider({}, {}, {}, {}, {})",
                 extract_name(arena, label),
                 format_node(arena, cur),
                 format_node(arena, min),
-                format_node(arena, max),
+                format_node(arena, max_id),
                 format_node(arena, step),
-            );
+            ));
             make_block(0, 1, s, COLOR_UI, "")
         }
-        BoxMatch::HSlider(label, cur, min, max, step) => {
-            let s = format!(
+        BoxMatch::HSlider(label, cur, min, max_id, step) => {
+            let s = tn(format!(
                 "hslider({}, {}, {}, {}, {})",
                 extract_name(arena, label),
                 format_node(arena, cur),
                 format_node(arena, min),
-                format_node(arena, max),
+                format_node(arena, max_id),
                 format_node(arena, step),
-            );
+            ));
             make_block(0, 1, s, COLOR_UI, "")
         }
-        BoxMatch::NumEntry(label, cur, min, max, step) => {
-            let s = format!(
+        BoxMatch::NumEntry(label, cur, min, max_id, step) => {
+            let s = tn(format!(
                 "nentry({}, {}, {}, {}, {})",
                 extract_name(arena, label),
                 format_node(arena, cur),
                 format_node(arena, min),
-                format_node(arena, max),
+                format_node(arena, max_id),
                 format_node(arena, step),
-            );
+            ));
             make_block(0, 1, s, COLOR_UI, "")
         }
-        BoxMatch::HBargraph(label, min, max) => {
-            let s = format!(
+        BoxMatch::HBargraph(label, min, max_id) => {
+            let s = tn(format!(
                 "hbargraph({}, {}, {})",
                 extract_name(arena, label),
                 format_node(arena, min),
-                format_node(arena, max),
-            );
+                format_node(arena, max_id),
+            ));
             make_block(1, 1, s, COLOR_UI, "")
         }
-        BoxMatch::VBargraph(label, min, max) => {
-            let s = format!(
+        BoxMatch::VBargraph(label, min, max_id) => {
+            let s = tn(format!(
                 "vbargraph({}, {}, {})",
                 extract_name(arena, label),
                 format_node(arena, min),
-                format_node(arena, max),
-            );
+                format_node(arena, max_id),
+            ));
             make_block(1, 1, s, COLOR_UI, "")
         }
         BoxMatch::Soundfile(label, chan) => {
             let n = extract_int(arena, chan).unwrap_or(1) as usize;
-            let s = format!("soundfile({}, {})", extract_name(arena, label), n);
+            let s = tn(format!("soundfile({}, {})", extract_name(arena, label), n));
             make_block(2, 2 + n, s, COLOR_UI, "")
         }
 
         // ── Route ─────────────────────────────────────────────────────
         BoxMatch::Route(a, b, c) => {
-            let ins  = extract_int(arena, a).unwrap_or(0).max(0) as usize;
-            let outs = extract_int(arena, b).unwrap_or(0).max(0) as usize;
+            let ins    = extract_int(arena, a).unwrap_or(0).max(0) as usize;
+            let outs   = extract_int(arena, b).unwrap_or(0).max(0) as usize;
             let routes = flatten_int_tree(arena, c);
-            make_route(ins, outs, routes)
+            make_route(ins, outs, routes, config.draw_route_frame)
         }
 
         // ── Multi-rate wrappers ───────────────────────────────────────
-        BoxMatch::Ondemand(inner)    => make_ondemand(generate_inside(arena, inner)),
-        BoxMatch::Upsampling(inner)  => make_upsampling(generate_inside(arena, inner)),
-        BoxMatch::Downsampling(inner) => make_downsampling(generate_inside(arena, inner)),
+        BoxMatch::Ondemand(inner)    => make_ondemand(generate_inside(arena, inner, config)),
+        BoxMatch::Upsampling(inner)  => make_upsampling(generate_inside(arena, inner, config)),
+        BoxMatch::Downsampling(inner) => make_downsampling(generate_inside(arena, inner, config)),
 
         // ── Slots (lambda variable placeholders) ─────────────────────
         BoxMatch::Slot(i) => {
@@ -228,31 +233,30 @@ fn generate_inside(arena: &TreeArena, b: BoxId) -> Box<dyn Schema> {
 
         // ── Abstraction / Symbolic ────────────────────────────────────
         BoxMatch::Symbolic(a, b) => {
-            // input slot + body in sequence
             let slot = generate_slot_schema(arena, a);
-            generate_abstraction(arena, slot, b)
+            generate_abstraction(arena, slot, b, config)
         }
 
         // ── FFI / foreign items ───────────────────────────────────────
         BoxMatch::FFun(ff) => {
-            let name = extract_name(arena, ff);
+            let name = tn(extract_name(arena, ff));
             make_block(1, 1, name, COLOR_NORMAL, "")
         }
         BoxMatch::Ffunction(ff, _typ, _file) => {
-            let name = extract_name(arena, ff);
+            let name = tn(extract_name(arena, ff));
             make_block(1, 1, name, COLOR_NORMAL, "")
         }
         BoxMatch::FConst(_typ, name, _file) => {
-            let s = extract_name(arena, name);
+            let s = tn(extract_name(arena, name));
             make_block(0, 1, s, COLOR_NORMAL, "")
         }
         BoxMatch::FVar(_typ, name, _file) => {
-            let s = extract_name(arena, name);
+            let s = tn(extract_name(arena, name));
             make_block(0, 1, s, COLOR_NORMAL, "")
         }
 
         // ── Named identifier ─────────────────────────────────────────
-        BoxMatch::Ident(s) => make_block(0, 1, s.to_owned(), COLOR_LINK, ""),
+        BoxMatch::Ident(s) => make_block(0, 1, tn(s.to_owned()), COLOR_LINK, ""),
 
         // ── Environment ──────────────────────────────────────────────
         BoxMatch::Environment => make_block(0, 0, "environment{...}", COLOR_NORMAL, ""),
@@ -272,7 +276,7 @@ fn generate_inside(arena: &TreeArena, b: BoxId) -> Box<dyn Schema> {
 /// Build an abstraction schema by placing input slots before the body.
 ///
 /// C++ reference: `drawschema.cpp:654` — `generateAbstractionSchema`.
-fn generate_abstraction(arena: &TreeArena, mut x: Box<dyn Schema>, body: BoxId) -> Box<dyn Schema> {
+fn generate_abstraction(arena: &TreeArena, mut x: Box<dyn Schema>, body: BoxId, config: &DrawConfig) -> Box<dyn Schema> {
     let mut t = body;
     loop {
         match match_box(arena, t) {
@@ -284,7 +288,7 @@ fn generate_abstraction(arena: &TreeArena, mut x: Box<dyn Schema>, body: BoxId) 
             _ => break,
         }
     }
-    make_seq(x, generate_inside(arena, t))
+    make_seq(x, generate_inside(arena, t, config))
 }
 
 /// Build a 1→0 input-slot block schema.
@@ -299,6 +303,20 @@ fn generate_slot_schema(arena: &TreeArena, slot_id: BoxId) -> Box<dyn Schema> {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Truncate a display name to at most `max` chars: keep first and last thirds.
+///
+/// C++ reference: `blockSchema.cpp` — constructor truncation with `gMaxNameSize`.
+fn truncate_name(s: String, max: usize) -> String {
+    if max == 0 || s.len() <= max {
+        return s;
+    }
+    let third = (max / 3).max(1);
+    let head = s.get(..third).unwrap_or(&s[..s.len().min(third)]);
+    let tail_start = s.len().saturating_sub(third);
+    let tail = &s[tail_start..];
+    format!("{head}...{tail}")
+}
 
 /// Format a real number the same way C++ `boxpp` does: trim trailing zeros.
 fn format_real(r: f64) -> String {
