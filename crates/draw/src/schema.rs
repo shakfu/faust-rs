@@ -113,7 +113,9 @@ impl Eq for Point {}
 
 impl Ord for Point {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
+        self.x
+            .total_cmp(&other.x)
+            .then_with(|| self.y.total_cmp(&other.y))
     }
 }
 
@@ -128,7 +130,7 @@ impl PartialOrd for Point {
 /// A directed wire segment from `start` to `end`.
 ///
 /// C++ reference: `schema.h:59` — `struct trait`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Trait {
     pub start: Point,
     pub end: Point,
@@ -147,18 +149,6 @@ impl Trait {
     }
 }
 
-impl Ord for Trait {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap_or(std::cmp::Ordering::Equal)
-    }
-}
-
-impl PartialOrd for Trait {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 // ─── TraitCollector ────────────────────────────────────────────────────────────
 
 /// Collects wire segments and filters them for visibility before rendering.
@@ -167,14 +157,14 @@ impl PartialOrd for Trait {
 /// to a real input (registered via [`add_input`]).  The propagation loop in
 /// [`compute_visible`] extends the reachable endpoint sets transitively.
 ///
+/// Mirrors the C++ `collector` which mutates traits in-place in a vector.
+///
 /// C++ reference: `schema.h:85` — `struct collector`; `schema/collector.cpp`.
 #[derive(Default)]
 pub struct TraitCollector {
     outputs: BTreeSet<Point>,
     inputs: BTreeSet<Point>,
-    traits: BTreeSet<Trait>,
-    with_input: BTreeSet<Trait>,
-    with_output: BTreeSet<Trait>,
+    traits: Vec<Trait>,
 }
 
 impl TraitCollector {
@@ -194,32 +184,29 @@ impl TraitCollector {
 
     /// Add a wire segment to the collection.
     pub fn add_trait(&mut self, t: Trait) {
-        self.traits.insert(t);
+        self.traits.push(t);
     }
 
-    /// Propagate reachability and mark visible wires.
+    /// Propagate reachability and mark visible wires in-place.
     ///
-    /// A wire with `start` reachable from a real output gets marked `has_real_input`
-    /// (it has a real upstream source).  A wire with `end` reachable from a real
-    /// input gets marked `has_real_output`.  Visible = both.
+    /// Iterates until no trait changes state.  A trait is visible when both
+    /// `has_real_input` and `has_real_output` are set.
     ///
     /// C++ reference: `collector.cpp:26` — `computeVisibleTraits`.
     fn compute_visible(&mut self) {
         loop {
             let mut modified = false;
-            for t in &self.traits {
-                if !self.with_input.contains(t) && self.outputs.contains(&t.start) {
-                    let mut t2 = *t;
-                    t2.has_real_input = true;
-                    self.with_input.insert(t2);
-                    self.outputs.insert(t.end);
+            for i in 0..self.traits.len() {
+                let start = self.traits[i].start;
+                let end = self.traits[i].end;
+                if !self.traits[i].has_real_input && self.outputs.contains(&start) {
+                    self.traits[i].has_real_input = true;
+                    self.outputs.insert(end);
                     modified = true;
                 }
-                if !self.with_output.contains(t) && self.inputs.contains(&t.end) {
-                    let mut t2 = *t;
-                    t2.has_real_output = true;
-                    self.with_output.insert(t2);
-                    self.inputs.insert(t.start);
+                if !self.traits[i].has_real_output && self.inputs.contains(&end) {
+                    self.traits[i].has_real_output = true;
+                    self.inputs.insert(start);
                     modified = true;
                 }
             }
@@ -229,23 +216,15 @@ impl TraitCollector {
         }
     }
 
-    fn is_visible(&self, t: &Trait) -> bool {
-        self.with_input.contains(t) && self.with_output.contains(t)
-    }
-
     /// Draw all visible wire segments to `dev`.
     ///
     /// C++ reference: `collector.cpp:56` — `collector::draw`.
     pub fn draw(&mut self, dev: &mut dyn DrawDevice) -> Result<(), DrawError> {
         self.compute_visible();
-        let visible: Vec<Trait> = self
-            .traits
-            .iter()
-            .filter(|t| self.is_visible(t))
-            .copied()
-            .collect();
-        for t in &visible {
-            dev.line(t.start.x, t.start.y, t.end.x, t.end.y)?;
+        for t in &self.traits {
+            if t.has_real_input && t.has_real_output {
+                dev.line(t.start.x, t.start.y, t.end.x, t.end.y)?;
+            }
         }
         Ok(())
     }

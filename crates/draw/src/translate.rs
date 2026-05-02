@@ -174,7 +174,7 @@ fn generate_inside_folded(
             )
         }
         // ── Metadata ─────────────────────────────────────────────────
-        BoxMatch::Metadata(a, _) => generate_inside_folded(arena, a, config, state),
+        BoxMatch::Metadata(a, _) => generate_diagram_schema(arena, a, config, state),
         // ── Multi-rate wrappers ───────────────────────────────────────
         BoxMatch::Ondemand(inner) => {
             make_ondemand(generate_inside_folded(arena, inner, config, state))
@@ -471,7 +471,7 @@ fn generate_abstraction_folded(
         x = make_par(x, slot);
         t = b;
     }
-    make_seq(x, generate_inside_folded(arena, t, config, state))
+    make_seq(x, generate_diagram_schema(arena, t, config, state))
 }
 
 /// Build a 1→0 input-slot block schema.

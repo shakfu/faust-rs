@@ -25,7 +25,7 @@ pub fn box_complexity(arena: &TreeArena, b: BoxId) -> usize {
     match match_box(arena, b) {
         // ── Zero-complexity structural nodes ─────────────────────────
         BoxMatch::Cut | BoxMatch::Wire | BoxMatch::Route(..) | BoxMatch::Environment => 0,
-        BoxMatch::Slot(_) => 0,
+        BoxMatch::Slot(_) => 1,
 
         // ── Leaf nodes: complexity 1 ──────────────────────────────────
         BoxMatch::Int(_) | BoxMatch::Real(_) | BoxMatch::Waveform(_) => 1,

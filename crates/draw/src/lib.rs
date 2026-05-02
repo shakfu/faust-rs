@@ -187,11 +187,9 @@ pub fn draw_schema(
         let file = std::fs::File::create(&file_path).map_err(DrawError::Io)?;
         let mut dev = SvgDevice::new(file, top.width(), top.height(), config)?;
         top.draw(&mut dev)?;
-
         let mut collector = TraitCollector::new();
         top.collect_traits(&mut collector);
         collector.draw(&mut dev)?;
-
         dev.finish().map(|_| ())?;
 
         // Only the root is initially drawn; mark sub-diagrams as drawn when popped.
