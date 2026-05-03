@@ -191,6 +191,17 @@ fn generate_inside_folded(
             let slot = generate_slot_schema(arena, a);
             generate_abstraction_folded(arena, slot, body, config, state)
         }
+        // ── AD wrappers ───────────────────────────────────────────────
+        BoxMatch::ForwardAD(expr, _seed) => make_decorate(
+            generate_diagram_schema(arena, expr, config, state),
+            10.0,
+            "fad".to_owned(),
+        ),
+        BoxMatch::ReverseAD(expr, _seeds) => make_decorate(
+            generate_diagram_schema(arena, expr, config, state),
+            10.0,
+            "rad".to_owned(),
+        ),
         // ── Everything else: delegate to flat generate_inside ─────────
         _ => generate_inside(arena, b, config),
     }
@@ -432,6 +443,14 @@ fn generate_inside(arena: &TreeArena, b: BoxId, config: &DrawConfig) -> Box<dyn 
         // Note: isInverter check in C++ looks at gGlobal->gInverter table.
         // Without that table we can't detect inverters; they fall through to Mul.
         // The InverterSchema can be produced by the caller if needed.
+
+        // ── AD wrappers ───────────────────────────────────────────────
+        BoxMatch::ForwardAD(expr, _seed) => {
+            make_decorate(generate_inside(arena, expr, config), 10.0, "fad".to_owned())
+        }
+        BoxMatch::ReverseAD(expr, _seeds) => {
+            make_decorate(generate_inside(arena, expr, config), 10.0, "rad".to_owned())
+        }
 
         // ── Anything else: placeholder block ─────────────────────────
         _ => make_block(1, 1, "?", COLOR_NORMAL, ""),
