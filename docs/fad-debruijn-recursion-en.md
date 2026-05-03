@@ -257,46 +257,94 @@ Take the single-seed program:
 process = fad((2 : + ~ *(p)), p);
 ```
 
-After lowering, the recursion is:
+After lowering, the propagation phase represents the feedback loop as:
 
 ```text
-R = DEBRUIJNREC([ + ( 2 , * ( DEBRUIJNREF(1) , p ) ) ])
+R = DEBRUIJNREC([ + ( 2 , * ( Proj(0, DEBRUIJNREF(1)) , p ) ) ])
 y = Proj(0, R)
 ```
 
-With `N = 1` lane (seed `p`), the rewriter:
+`Proj(0, DEBRUIJNREF(1))` is the back-edge: it selects slot 0 from the
+single-element group of the previous iteration. With `N = 1` lane (seed
+`p`) and `L = 1 + N = 2`, the rewriter proceeds as follows.
 
-1. Enters `R` via `(Rec)`: pre-installs the placeholder, sets
-   `debruijn_depth = 1`, lifts the seed (the lifted seed is still `p`
-   because `p` carries no `DEBRUIJNREF`).
-2. Differentiates the body element `+ ( 2 , * ( DEBRUIJNREF(1) , p ) )`.
-   Inside the multiplication, `(Seed)` fires on `p`, producing tangent
-   `1.0`. `(Ref)` fires on `DEBRUIJNREF(1)`, producing the aliased
-   reference. The product rule produces:
-   ```
-   t_mul = DEBRUIJNREF(1) · 1.0  +  ref_lane · p
-   ```
-   which simplifies to `DEBRUIJNREF(1) + ref_lane · p`. Addition then
-   forwards `t_mul` (the `+ 2` constant contributes `0`).
-3. Reconstructs `body' = [ primal_body , tangent_body ]` and produces:
-   ```
-   R' = DEBRUIJNREC([ + ( 2 , * ( DEBRUIJNREF(1) , p ) ) ,
-                      ⟨body's tangent lane⟩ ])
-   ```
-4. The output projections are:
-   ```
-   y      = Proj(0, R')         ;    via (Proj-Bound) with i=0, L=2
-   dy/dp  = Proj(1, R')         ;    via (Proj-Bound) with i=0, j=0
-   ```
+**Step 1 — enter `R` via `(Rec)`.**
+Pre-install the self-referential placeholder `R ↦ ⟨R; R⟩` in the cache.
+Set `debruijn_depth = 1`. Lift the seed: `p` carries no `DEBRUIJNREF`, so
+the lifted seed is still `p`.
 
-Conceptually the emitted recursion is the joint system:
+**Step 2 — differentiate the body element.**
 
 ```text
-y[n]      = p · y[n-1] + 2
-dy/dp[n]  = y[n-1] + p · dy/dp[n-1]
++ ( 2 , * ( Proj(0, DEBRUIJNREF(1)) , p ) )
 ```
 
-with one shared recursive group instead of duplicated primal shadows.
+*Sub-term `DEBRUIJNREF(1)`:* rule `(Ref)` applies — the reference is
+preserved and every tangent lane aliases the primal:
+
+```
+T ⊢ DEBRUIJNREF(1)  ⟹  ⟨ ref ; ref ⟩
+```
+
+*Sub-term `Proj(0, DEBRUIJNREF(1))`:* rule `(Proj-Bound)` applies because
+`level = 1 ≤ debruijn_depth = 1`:
+
+```
+primal  = Proj(0 · 2,     ref) = Proj(0, ref)
+tangent = Proj(0 · 2 + 1, ref) = Proj(1, ref)
+```
+
+`Proj(0, ref)` selects the primal slot and `Proj(1, ref)` selects the
+tangent slot of the back-edge — these both resolve to `DEBRUIJNREF(1)` in
+the rebuilt group `R'`.
+
+*Product `*(Proj(0, ref), p)`:* product rule `(x·y)' = x'·y + x·y'`:
+
+```
+primal  = Proj(0, ref) · p
+tangent = Proj(1, ref) · p  +  Proj(0, ref) · 1.0
+```
+
+*Addition `+(2, ·)`:* constant `2` contributes `0` to the tangent:
+
+```
+primal  = 2 + Proj(0, ref) · p
+tangent = Proj(1, ref) · p  +  Proj(0, ref)
+```
+
+**Step 3 — restore state and interleave.**
+
+Restore the outer seed snapshot and decrement `debruijn_depth`. Interleave
+`[primal, tangent]` per slot to build the expanded body, then call
+`de_bruijn_rec`:
+
+```text
+R' = DEBRUIJNREC([
+  + ( 2 , * ( Proj(0, DEBRUIJNREF(1)) , p ) ) ,           -- slot 0 : primal
+  + ( * ( Proj(1, DEBRUIJNREF(1)) , p ) , Proj(0, DEBRUIJNREF(1)) )  -- slot 1 : tangent
+])
+```
+
+Inside `R'`, `DEBRUIJNREF(1)` now refers back to `R'` itself:
+`Proj(0, DEBRUIJNREF(1))` is `y[n-1]` and `Proj(1, DEBRUIJNREF(1))` is
+`dy/dp[n-1]`.
+
+**Step 4 — output projections** via `(Proj-Bound)` with `i=0, L=2`:
+
+```
+y      = Proj(0 · 2,     R') = Proj(0, R')
+dy/dp  = Proj(0 · 2 + 1, R') = Proj(1, R')
+```
+
+The emitted recursion is the joint system:
+
+```text
+y[n]      = 2 + p · y[n-1]
+dy/dp[n]  = p · dy/dp[n-1]  +  y[n-1]
+```
+
+Both outputs share one interleaved `DEBRUIJNREC` instead of duplicated
+primal shadows.
 
 ## 8. Invariants
 
@@ -330,8 +378,10 @@ The rules above preserve the following invariants:
 ## 9. Source locations
 
 - `transform_uncached` and the `DEBRUIJNREC` arm:
-  [crates/propagate/src/forward_ad.rs:540](crates/propagate/src/forward_ad.rs:540)
+  [crates/propagate/src/forward_ad.rs:564](crates/propagate/src/forward_ad.rs:564)
 - `SigMatch::Proj` arm and `GroupKind` classifier:
-  [crates/propagate/src/forward_ad.rs:936](crates/propagate/src/forward_ad.rs:936)
-- Module-level discussion of de Bruijn handling:
-  [crates/propagate/src/forward_ad.rs:262](crates/propagate/src/forward_ad.rs:262)
+  [crates/propagate/src/forward_ad.rs:971](crates/propagate/src/forward_ad.rs:971)
+- Module-level discussion of de Bruijn handling, including a compact
+  rewrite-rule table that summarises §6 in the format used throughout the
+  header:
+  [crates/propagate/src/forward_ad.rs:261](crates/propagate/src/forward_ad.rs:261)

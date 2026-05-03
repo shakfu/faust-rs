@@ -265,6 +265,15 @@
 //! symbolic form (`SYMREC` / `SYMREF`); `de_bruijn_to_sym` runs once in
 //! `signal_prepare` *after* FAD, over all process outputs together.
 //!
+//! ### Rewrite rules (N seed lanes)
+//!
+//! | Expression | Rewrite |
+//! |------------|---------|
+//! | `rec([e₀, …, eₖ₋₁])` | `rec([e₀, e₀'_{s₀}, …, e₀'_{sₙ₋₁}, e₁, e₁'_{s₀}, …, eₖ₋₁, eₖ₋₁'_{sₙ₋₁}])` — body interleaved as `[primal, tangent₀, …, tangentₙ₋₁]` per slot |
+//! | `proj(i, rec_rebuilt)` | primal: `proj(i·(1+N), …)` ; tangent lane j: `proj(i·(1+N)+1+j, …)` |
+//! | `proj(i, ref(k ≤ depth))` | same slot remapping as above (ref points into an already-rebuilt group on this path) |
+//! | `proj(i, ref(k > depth))` | primal: `proj(i, …)` (pass-through) ; every tangent lane: `0` (outer group not rewritten on this path) |
+//!
 //! FAD's index bookkeeping rests on three distinct notions:
 //!
 //! - **Level** (payload on `DEBRUIJNREF`): a static integer `k` meaning
