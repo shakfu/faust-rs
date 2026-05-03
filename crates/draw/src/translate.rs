@@ -84,8 +84,9 @@ fn generate_diagram_schema(
     state: &mut FoldState<'_>,
 ) -> Box<dyn Schema> {
     // Folding: fold if the sub-diagram is named, complex enough, and not yet drawn.
+    let complexity = box_complexity(arena, b);
     if state.folding
-        && box_complexity(arena, b) >= state.fold_complexity
+        && complexity >= state.fold_complexity
         && let Some(def_name) = state.def_names.get(&b)
         && !state.drawn.contains(&b)
     {

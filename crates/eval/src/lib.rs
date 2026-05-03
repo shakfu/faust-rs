@@ -408,6 +408,18 @@ fn eval_entrypoint_full(
     let result = eval_value(arena, entry, &env, &mut loop_detector)?;
     let result = a2sb_value(arena, result, &mut loop_detector)?;
     stats.loop_detector_max_depth = loop_detector.call_stack.len();
+    // Remap def_names keys through a2sb's symbolic_box_cache: pre-a2sb IDs that were
+    // rebuilt by a2sb (because their subtree contained residual Abstr nodes) get new IDs.
+    // Without this remap, the tagged boxes are unreachable from process_box in the SVG.
+    let cache = &loop_detector.symbolic_box_cache;
+    loop_detector.def_names = loop_detector
+        .def_names
+        .into_iter()
+        .map(|(old_id, name)| {
+            let new_id = cache.get(&old_id).copied().unwrap_or(old_id);
+            (new_id, name)
+        })
+        .collect();
     stats.def_names = loop_detector.def_names;
     Ok((result, stats))
 }
@@ -731,7 +743,26 @@ fn eval_value_uncached(
         BoxMatch::Appl(fun, arg) => {
             let efun = eval_value(arena, fun, env, loop_detector)?;
             let rev_args = rev_eval_list(arena, arg, env, loop_detector)?;
-            apply_value_list_value(arena, efun, rev_args, env, loop_detector, Some(fun))
+            let result =
+                apply_value_list_value(arena, efun, rev_args, env, loop_detector, Some(fun))?;
+            // Tag result box with the applied function's name (mirrors C++ setDefNameProperty
+            // after beta reduction). Extract name from: Ident("voice") or Access(os, "osc").
+            // or_insert preserves the outermost/first name when results are shared.
+            let maybe_name = match match_box(arena, fun) {
+                BoxMatch::Ident(name) => Some(name.to_owned()),
+                BoxMatch::Access(_, field) => {
+                    if let BoxMatch::Ident(name) = match_box(arena, field) {
+                        Some(name.to_owned())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let (Some(name), EvalValue::Box(result_box)) = (maybe_name, &result) {
+                loop_detector.def_names.entry(*result_box).or_insert(name);
+            }
+            Ok(result)
         }
         BoxMatch::Component(filename) => {
             eval_loaded_source_value(arena, expr, filename, "component", env)

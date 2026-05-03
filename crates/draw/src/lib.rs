@@ -163,7 +163,6 @@ pub fn draw_schema(
     let mut pending: VecDeque<(boxes::BoxId, String, String)> = VecDeque::new();
     let mut drawn: HashSet<boxes::BoxId> = HashSet::new();
 
-    let root_file = "process.svg".to_owned();
     pending.push_back((root, name.to_owned(), String::new()));
     drawn.insert(root);
 
@@ -192,8 +191,6 @@ pub fn draw_schema(
         collector.draw(&mut dev)?;
         dev.finish().map(|_| ())?;
 
-        // Only the root is initially drawn; mark sub-diagrams as drawn when popped.
-        let _ = root_file.as_str(); // suppress unused warning
     }
 
     Ok(())
