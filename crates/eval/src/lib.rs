@@ -698,6 +698,15 @@ fn eval_value(
     if should_cache_eval_value(&result) {
         loop_detector.eval_cache.insert(cache_key, result.clone());
     }
+    // When a box containing embedded closures is re-evaluated in a different
+    // environment, the new closure keys produce a structurally different TreeId.
+    // Propagate the def-name so the re-evaluated ID is also tagged for SVG folding.
+    if let EvalValue::Box(result_id) = &result
+        && *result_id != expr
+        && let Some(name) = loop_detector.def_names.get(&expr).cloned()
+    {
+        loop_detector.def_names.entry(*result_id).or_insert(name);
+    }
     Ok(result)
 }
 
@@ -759,8 +768,11 @@ fn eval_value_uncached(
                 }
                 _ => None,
             };
-            if let (Some(name), EvalValue::Box(result_box)) = (maybe_name, &result) {
-                loop_detector.def_names.entry(*result_box).or_insert(name);
+            if let (Some(ref name), EvalValue::Box(result_box)) = (maybe_name, &result) {
+                loop_detector
+                    .def_names
+                    .entry(*result_box)
+                    .or_insert_with(|| name.clone());
             }
             Ok(result)
         }

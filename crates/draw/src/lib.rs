@@ -190,7 +190,6 @@ pub fn draw_schema(
         top.collect_traits(&mut collector);
         collector.draw(&mut dev)?;
         dev.finish().map(|_| ())?;
-
     }
 
     Ok(())
