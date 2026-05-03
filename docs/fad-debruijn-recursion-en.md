@@ -110,7 +110,7 @@ enclosing `Proj`.
 
 ## 5. Projection — `SigMatch::Proj`
 
-The `Proj(index, group)` arm (forward_ad.rs, lines 936–997) is where the
+The `Proj(index, group)` arm (forward_ad.rs, lines 971–1031) is where the
 three kinds of indices are reconciled. Let `N` be the seed count and let
 `L = 1 + N` (the per-slot **lane count**, exposed by `bundle_lane_count`).
 
@@ -249,7 +249,7 @@ The transform is memoized: every `SigId` rewritten by `T` is cached in
 placeholder makes the cache act simultaneously as a cycle-breaker for the
 back-edges introduced by `DEBRUIJNREF(1)` inside the recursion body.
 
-## 7. Worked example
+## 7. Worked example — single feedback loop
 
 Take the single-seed program:
 
@@ -346,7 +346,199 @@ dy/dp[n]  = p · dy/dp[n-1]  +  y[n-1]
 Both outputs share one interleaved `DEBRUIJNREC` instead of duplicated
 primal shadows.
 
-## 8. Invariants
+## 8. Worked example — nested feedback loops
+
+The single-loop example only exercises `DEBRUIJNREF(1)`. The following DSP
+program produces a genuinely nested `DEBRUIJNREC` with a back-edge at level 2,
+covering both the `(Proj-Bound)` and `(Proj-Unbound)` rules.
+
+### 8.1 The Faust program
+
+```faust
+// Damped-feedback resonator
+//   y[n] = x[n] + z[n]
+//   z[n] = y[n−1]  +  damp · z[n−1]
+//
+// z accumulates past values of y while leaking at rate damp.
+// Together the pair forms a second-order IIR whose two state
+// variables share one feedback path.
+
+damp = hslider("damp", 0.9, 0.0, 0.99, 0.01);
+process = _ : + ~ (+ ~ *(damp));
+```
+
+The `~` nesting is the key:
+
+- **Outer `~`**: `y[n] = x[n] + <feedback>(y[n−1])` where `<feedback> = + ~ *(damp)`.
+- **Inner `~`**: `z[n] = y[n−1] + damp · z[n−1]`.
+
+`y[n−1]` is the outer loop's own back-edge value; it appears as an input
+to the inner loop, making the inner body reference it via a de Bruijn
+level-2 pointer.
+
+### 8.2 De Bruijn signal graph
+
+After propagation, the two feedback loops materialise as two nested
+`DEBRUIJNREC` nodes:
+
+```text
+OUTER = DEBRUIJNREC([
+  +( x ,  Proj(0, INNER) )                         -- y[n]
+])
+
+INNER = DEBRUIJNREC([
+  +( Proj(0, DEBRUIJNREF(2)) ,                     -- y[n−1] : level 2 → OUTER
+     *( damp ,  Proj(0, DEBRUIJNREF(1)) ) )        -- z[n−1] : level 1 → INNER itself
+])
+
+output = Proj(0, OUTER)
+```
+
+`DEBRUIJNREF(level)` counts enclosing binders inward-out, innermost = 1:
+
+| Reference | Level | Resolves to | Meaning |
+|-----------|-------|-------------|---------|
+| `DEBRUIJNREF(1)` inside INNER | 1 | INNER | `z[n−1]` — inner's own previous output |
+| `DEBRUIJNREF(2)` inside INNER | 2 | OUTER | `y[n−1]` — outer's previous output |
+
+### 8.3 FAD trace — seed `damp`, N = 1, L = 2
+
+```faust
+process = _ : fad(+ ~ (+ ~ *(damp)), damp);
+```
+
+**Enter OUTER (depth 0 → 1).** Placeholder `OUTER ↦ ⟨OUTER; OUTER⟩`. Seed
+`damp` carries no `DEBRUIJNREF`, so it lifts unchanged.
+
+**Inside OUTER body, enter INNER (depth 1 → 2).** Placeholder
+`INNER ↦ ⟨INNER; INNER⟩`. Seed lifted again (still `damp`).
+
+**Differentiate the INNER body element:**
+
+```text
++( Proj(0, DEBRUIJNREF(2)) ,  *( damp ,  Proj(0, DEBRUIJNREF(1)) ) )
+```
+
+*`Proj(0, DEBRUIJNREF(2))` — level 2, depth 2:*
+
+```
+level 2  ≤  debruijn_depth 2   →   (Proj-Bound)
+
+  primal  = Proj(0 · 2 + 0, fad_outer) = Proj(0, fad_outer)   ← y[n−1]
+  tangent = Proj(0 · 2 + 1, fad_outer) = Proj(1, fad_outer)   ← dy/d(damp)[n−1]
+```
+
+*`Proj(0, DEBRUIJNREF(1))` — level 1, depth 2:*
+
+```
+level 1  ≤  debruijn_depth 2   →   (Proj-Bound)
+
+  primal  = Proj(0, fad_inner)    ← z[n−1]
+  tangent = Proj(1, fad_inner)    ← dz/d(damp)[n−1]
+```
+
+*`damp` — seed match:* `(Seed)` → primal = `damp`, tangent = `1.0`.
+
+*Product `*(damp, Proj(0, DEBRUIJNREF(1)))`:*
+
+```
+primal  = damp · Proj(0, fad_inner)
+tangent = Proj(0, fad_inner)  +  damp · Proj(1, fad_inner)
+```
+
+*Addition:*
+
+```
+primal  = Proj(0, fad_outer)  +  damp · Proj(0, fad_inner)
+tangent = Proj(1, fad_outer)  +  Proj(0, fad_inner)  +  damp · Proj(1, fad_inner)
+```
+
+**Rebuild INNER (interleaved, 2 slots):**
+
+```text
+fad_inner = DEBRUIJNREC([
+  slot 0 :  +( Proj(0, DEBRUIJNREF(2)) ,  *( damp , Proj(0, DEBRUIJNREF(1)) ) )
+  slot 1 :  +( Proj(1, DEBRUIJNREF(2)) ,
+               +( Proj(0, DEBRUIJNREF(1)) ,  *( damp , Proj(1, DEBRUIJNREF(1)) ) ) )
+])
+```
+
+`DEBRUIJNREF(1)` → `fad_inner` (slots 0/1 = z-primal/z-tangent);
+`DEBRUIJNREF(2)` → `fad_outer` (slots 0/1 = y-primal/y-tangent).
+
+**Rebuild OUTER (interleaved, 2 slots):**
+
+```text
+fad_outer = DEBRUIJNREC([
+  slot 0 :  +( x ,  Proj(0, fad_inner) )     -- y[n]
+  slot 1 :  +( 0 ,  Proj(1, fad_inner) )     -- dy/d(damp)[n]
+])
+```
+
+**Output projections:**
+
+```
+y           = Proj(0, fad_outer)
+dy/d(damp)  = Proj(1, fad_outer)
+```
+
+**Resulting joint system:**
+
+```text
+y[n]           = x[n] + z[n]
+z[n]           = y[n−1] + damp · z[n−1]
+
+dy/d(damp)[n]  = dz/d(damp)[n]
+dz/d(damp)[n]  = dy/d(damp)[n−1]  +  z[n−1]  +  damp · dz/d(damp)[n−1]
+```
+
+Both the primal pair `(y, z)` and the tangent pair share one interleaved
+`fad_outer / fad_inner` recursion with no separate primal shadow.
+
+### 8.4 When `(Proj-Unbound)` fires
+
+Both back-edges above used `(Proj-Bound)` because FAD entered OUTER before
+INNER — `debruijn_depth` reached 2 before any `DEBRUIJNREF(2)` was inspected.
+
+`(Proj-Unbound)` fires when INNER is processed at a shallower depth than
+its `DEBRUIJNREF` levels require. Consider a signal graph where INNER —
+still carrying `DEBRUIJNREF(2)` in its body — is also reachable via a path
+that does not pass through OUTER:
+
+```text
+output_1 = Proj(0, INNER)    ← accessed directly, outside OUTER's scope
+output_2 = Proj(0, OUTER)    ← normal nested access
+```
+
+When FAD processes `output_1`:
+
+- Enters INNER with `debruijn_depth = 1`.
+- Encounters `Proj(0, DEBRUIJNREF(2))`: level 2 > depth 1 → **(Proj-Unbound)**.
+  - primal: `Proj(0, DEBRUIJNREF(2))` — slot unchanged.
+  - tangent: **0.0** on every lane — OUTER has not been rebuilt on this path,
+    so no interleaved tangent slot exists.
+- Caches `INNER ↦ ⟨fad_inner_shallow; …⟩` (zero tangent for `y[n−1]`).
+
+When FAD later processes `output_2` via OUTER:
+
+- Enters OUTER (`depth = 1`), encounters INNER in the body.
+- **Cache hit** → returns `fad_inner_shallow`, computed at depth 1.
+- The tangent contribution through `y[n−1]` is **silently zero** even
+  though OUTER is now in scope and its tangent slot exists.
+
+This is the "price paid": INNER's derivative w.r.t. `damp` through
+`y[n−1]` is dropped. The shortcut is sound only if OUTER's outputs are
+independent of the active seeds at the point where INNER is evaluated
+without OUTER's context.
+
+In a well-formed Faust program produced by the standard compiler front-end,
+a `DEBRUIJNREC` node carrying free `DEBRUIJNREF(k > 1)` cannot appear
+outside the scope of its `k−1` enclosing binders. The `(Proj-Unbound)`
+branch is therefore a defensive boundary — it applies to malformed or
+compiler-internal intermediate graphs, not to programs written directly in
+Faust.
+
+## 9. Invariants
 
 The rules above preserve the following invariants:
 
@@ -372,10 +564,11 @@ The rules above preserve the following invariants:
   only place where a tangent is forced to zero for structural rather than
   mathematical reasons. It triggers exactly when an inner recursion
   references an outer recursion whose body has not been re-interleaved on
-  the current path, and is the price paid for not eagerly rewriting
-  enclosing recursions on every descent into an inner one.
+  the current path (see §8.4 for a concrete illustration), and is the
+  price paid for not eagerly rewriting enclosing recursions on every
+  descent into an inner one.
 
-## 9. Source locations
+## 10. Source locations
 
 - `transform_uncached` and the `DEBRUIJNREC` arm:
   [crates/propagate/src/forward_ad.rs:564](crates/propagate/src/forward_ad.rs:564)
