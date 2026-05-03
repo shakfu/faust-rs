@@ -1317,28 +1317,156 @@ impl Compiler {
         }
     }
 
-    /// Stub for the future `expandDSP(...)` helper service.
+    /// Validate and expand one Faust DSP source.
     ///
-    /// The request/response contract is present so bindings can stabilize their
-    /// call flow now, while the actual expansion semantics remain deferred.
-    pub fn expand_dsp(&self, _request: &ExpandDspRequest) -> Result<String, FaustwasmServiceError> {
-        Err(FaustwasmServiceError::unsupported(
-            "expandDSP is not implemented yet in the Rust faustwasm service",
-        ))
+    /// Parses and evaluates the program using any `-I` search paths carried in
+    /// `request.args`.  If compilation succeeds the original source text is
+    /// returned verbatim; the Rust compiler currently has no box→DSP serializer
+    /// analogous to C++ `printBox`, so the expanded form equals the input.
+    ///
+    /// Mirrors: `expandDSPFromString` / `expandDSPFromFile` (C++ Faust API).
+    pub fn expand_dsp(&self, request: &ExpandDspRequest) -> Result<String, FaustwasmServiceError> {
+        let argv: Vec<String> = request.args.split_whitespace().map(str::to_owned).collect();
+        let search_paths = parse_search_paths_from_argv(&argv);
+        self.compile_source_to_signals_with_search_paths(
+            &request.source_name,
+            &request.source,
+            &search_paths,
+        )
+        .map(|_| request.source.clone())
+        .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))
     }
 
-    /// Stub for the future `generateAuxFiles(...)` helper service.
+    /// Generate auxiliary output files from a Faust DSP source.
     ///
-    /// The request/response contract is present so bindings can stabilize their
-    /// call flow now, while the actual aux-file generation semantics remain
-    /// deferred.
+    /// Inspects `request.args` for output-format flags (`-cpp`, `-c`, `-wasm`,
+    /// `-json`, `-svg`) and returns one [`AuxFileArtifact`] per generated file.
+    /// When no output flag is present an empty list is returned (no error).
+    ///
+    /// SVG generation writes to a temporary directory and collects all produced
+    /// `.svg` files into the result.  The other formats are emitted in memory.
+    ///
+    /// Mirrors: `generateAuxFilesFromString` / `generateAuxFilesFromFile`
+    /// (C++ Faust API).
     pub fn generate_aux_files(
         &self,
-        _request: &GenerateAuxFilesRequest,
+        request: &GenerateAuxFilesRequest,
     ) -> Result<Vec<AuxFileArtifact>, FaustwasmServiceError> {
-        Err(FaustwasmServiceError::unsupported(
-            "generateAuxFiles is not implemented yet in the Rust faustwasm service",
-        ))
+        let argv: Vec<String> = request.args.split_whitespace().map(str::to_owned).collect();
+        let search_paths = parse_search_paths_from_argv(&argv);
+        let double = argv.iter().any(|a| a == "-double");
+
+        let wants_cpp = argv.iter().any(|a| a == "-cpp");
+        let wants_c = argv.iter().any(|a| a == "-c");
+        let wants_wasm = argv.iter().any(|a| a == "-wasm");
+        let wants_json = argv.iter().any(|a| a == "-json");
+        let wants_svg = argv.iter().any(|a| a == "-svg");
+
+        let mut artifacts: Vec<AuxFileArtifact> = Vec::new();
+        let stem = std::path::Path::new(&request.source_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("process");
+
+        if wants_cpp {
+            let cpp = self
+                .compile_source_to_cpp(
+                    &request.source_name,
+                    &request.source,
+                    &CppOptions::default(),
+                )
+                .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
+            artifacts.push(AuxFileArtifact {
+                path: format!("{stem}.cpp"),
+                content: cpp.into_bytes(),
+                binary: false,
+            });
+        }
+
+        if wants_c {
+            let c = self
+                .compile_source_to_c(&request.source_name, &request.source, &COptions::default())
+                .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
+            artifacts.push(AuxFileArtifact {
+                path: format!("{stem}.c"),
+                content: c.into_bytes(),
+                binary: false,
+            });
+        }
+
+        if wants_wasm {
+            let opts = WasmOptions {
+                double_precision: double,
+                ..Default::default()
+            };
+            let wasm = self
+                .compile_source_to_wasm(&request.source_name, &request.source, &opts)
+                .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
+            artifacts.push(AuxFileArtifact {
+                path: format!("{stem}.wasm"),
+                content: wasm.wasm_binary,
+                binary: true,
+            });
+            artifacts.push(AuxFileArtifact {
+                path: format!("{stem}.json"),
+                content: wasm.dsp_json.into_bytes(),
+                binary: false,
+            });
+        } else if wants_json {
+            let json = self
+                .compile_source_to_json(&request.source_name, &request.source)
+                .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
+            artifacts.push(AuxFileArtifact {
+                path: format!("{stem}.json"),
+                content: json.into_bytes(),
+                binary: false,
+            });
+        }
+
+        if wants_svg {
+            let signals = self
+                .compile_source_to_signals_with_search_paths(
+                    &request.source_name,
+                    &request.source,
+                    &search_paths,
+                )
+                .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
+            let tmp = std::env::temp_dir().join(format!("faust-svg-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp)
+                .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
+            let draw_config = draw::DrawConfig::default();
+            draw::draw_schema(
+                &signals.parse.state.arena,
+                signals.process_box,
+                stem,
+                &tmp,
+                &draw_config,
+                &signals.def_names,
+            )
+            .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
+            let read_dir = std::fs::read_dir(&tmp)
+                .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
+            for entry in read_dir.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("svg") {
+                    if let Ok(content) = std::fs::read(&path) {
+                        let file_name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("process.svg")
+                            .to_owned();
+                        artifacts.push(AuxFileArtifact {
+                            path: file_name,
+                            content,
+                            binary: false,
+                        });
+                    }
+                }
+            }
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        Ok(artifacts)
     }
 
     /// Parses + evaluates + propagates one file with default import search path,
@@ -2656,6 +2784,23 @@ fn json_meta_entries_from_snapshot(snapshot: &CompilationMetadataSnapshot) -> Ve
         }
     }
     out
+}
+
+/// Extracts `-I <path>` search paths from a whitespace-tokenized argv slice.
+fn parse_search_paths_from_argv(argv: &[String]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut i = 0;
+    while i < argv.len() {
+        if argv[i] == "-I" {
+            if let Some(p) = argv.get(i + 1) {
+                paths.push(PathBuf::from(p));
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    paths
 }
 
 /// Replaces non-identifier characters so the result is safe as a C/C++ identifier.
@@ -4211,25 +4356,74 @@ mod tests {
     }
 
     #[test]
-    fn compiler_expand_dsp_and_generate_aux_files_are_explicit_stubs() {
+    fn compiler_expand_dsp_returns_source_when_valid() {
         let compiler = Compiler::new();
-
-        let expand = compiler
+        let source = "process = 0;".to_owned();
+        let expanded = compiler
             .expand_dsp(&ExpandDspRequest {
-                source_name: "osc.dsp".to_owned(),
-                source: "process = 0;".to_owned(),
+                source_name: "zero.dsp".to_owned(),
+                source: source.clone(),
                 args: String::new(),
             })
-            .expect_err("expand_dsp should stay stubbed");
-        assert!(expand.message.contains("expandDSP"));
+            .expect("expand_dsp should succeed for valid source");
+        assert_eq!(expanded, source);
+    }
 
-        let generate = compiler
+    #[test]
+    fn compiler_expand_dsp_fails_for_invalid_source() {
+        let compiler = Compiler::new();
+        let err = compiler
+            .expand_dsp(&ExpandDspRequest {
+                source_name: "bad.dsp".to_owned(),
+                source: "process = undefined_symbol;".to_owned(),
+                args: String::new(),
+            })
+            .expect_err("expand_dsp should fail for invalid source");
+        assert_eq!(err.code, crate::FaustwasmServiceErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn compiler_generate_aux_files_no_flags_returns_empty() {
+        let compiler = Compiler::new();
+        let artifacts = compiler
             .generate_aux_files(&GenerateAuxFilesRequest {
-                source_name: "osc.dsp".to_owned(),
+                source_name: "zero.dsp".to_owned(),
                 source: "process = 0;".to_owned(),
                 args: String::new(),
             })
-            .expect_err("generate_aux_files should stay stubbed");
-        assert!(generate.message.contains("generateAuxFiles"));
+            .expect("generate_aux_files should succeed with no flags");
+        assert!(artifacts.is_empty());
+    }
+
+    #[test]
+    fn compiler_generate_aux_files_json_flag_produces_json_artifact() {
+        let compiler = Compiler::new();
+        let artifacts = compiler
+            .generate_aux_files(&GenerateAuxFilesRequest {
+                source_name: "zero.dsp".to_owned(),
+                source: "process = 0;".to_owned(),
+                args: "-json".to_owned(),
+            })
+            .expect("generate_aux_files with -json should succeed");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].path, "zero.json");
+        assert!(!artifacts[0].binary);
+        let text = std::str::from_utf8(&artifacts[0].content).expect("json must be utf-8");
+        assert!(text.contains("\"name\""));
+    }
+
+    #[test]
+    fn compiler_generate_aux_files_cpp_flag_produces_cpp_artifact() {
+        let compiler = Compiler::new();
+        let artifacts = compiler
+            .generate_aux_files(&GenerateAuxFilesRequest {
+                source_name: "zero.dsp".to_owned(),
+                source: "process = 0;".to_owned(),
+                args: "-cpp".to_owned(),
+            })
+            .expect("generate_aux_files with -cpp should succeed");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].path, "zero.cpp");
+        assert!(!artifacts[0].binary);
     }
 }

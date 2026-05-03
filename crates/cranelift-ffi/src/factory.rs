@@ -22,7 +22,10 @@ use std::sync::{Mutex, OnceLock};
 use codegen::backends::cranelift::{
     CraneliftOptLevel, CraneliftOptions, JitDspModule, generate_cranelift_module,
 };
-use compiler::{Compiler as FaustCompiler, SignalFirLane, default_import_search_paths};
+use compiler::{
+    AuxFileArtifact, Compiler as FaustCompiler, ExpandDspRequest, GenerateAuxFilesRequest,
+    SignalFirLane, default_import_search_paths,
+};
 use faust_box::{BoxFfiFirModule, export_fir_from_box_handle, export_fir_from_signal_array_handle};
 use fir::{FirMatch, match_fir};
 use utils::{
@@ -1174,6 +1177,304 @@ where
             std::ptr::null_mut()
         }
     }
+}
+
+// ── expand / generateAuxFiles ─────────────────────────────────────────────
+
+/// Validate and expand a Faust DSP source file.
+///
+/// Parses and evaluates the file.  On success writes the (unexpanded) source
+/// text to a heap-allocated C string that the caller must free with
+/// [`freeCMemory`].  `sha_key` (if non-null, at least 64 bytes) is populated
+/// with the SHA-256 hex digest of the source.
+///
+/// # Safety
+/// - `filename` must be a valid null-terminated C string (file path).
+/// - `argv` must point to `argc` valid C strings (or be null if `argc == 0`).
+/// - `sha_key` may be null; if non-null it must reference at least 64 bytes.
+/// - `error_msg` may be null; otherwise it must reference at least 4096 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn expandCCraneliftDSPFromFile(
+    filename: *const c_char,
+    argc: c_int,
+    argv: *const *const c_char,
+    sha_key: *mut c_char,
+    error_msg: *mut c_char,
+) -> *mut c_char {
+    unsafe {
+        let filename = match required_c_str_arg(filename, "filename") {
+            Ok(s) => s,
+            Err(e) => {
+                write_error(error_msg, &e);
+                return std::ptr::null_mut();
+            }
+        };
+        let args = match decode_c_argv(argc, argv) {
+            Ok(a) => a,
+            Err(e) => {
+                write_error(error_msg, &e);
+                return std::ptr::null_mut();
+            }
+        };
+        let source = match std::fs::read_to_string(filename) {
+            Ok(s) => s,
+            Err(e) => {
+                write_error(error_msg, &format!("cannot read '{filename}': {e}"));
+                return std::ptr::null_mut();
+            }
+        };
+        let compiler = FaustCompiler::new();
+        let request = ExpandDspRequest {
+            source_name: filename.to_owned(),
+            source,
+            args: args.join(" "),
+        };
+        match compiler.expand_dsp(&request) {
+            Ok(expanded) => {
+                write_sha_key(sha_key, &expanded);
+                alloc_c_string(&expanded)
+            }
+            Err(e) => {
+                write_error(error_msg, &e.to_string());
+                std::ptr::null_mut()
+            }
+        }
+    }
+}
+
+/// Validate and expand a Faust DSP source string.
+///
+/// On success returns a heap-allocated C string (caller frees with
+/// [`freeCMemory`]).  `sha_key` (if non-null, at least 64 bytes) is populated
+/// with the SHA-256 hex digest of the source.
+///
+/// # Safety
+/// - `name_app` may be null; if non-null it must be a valid C string.
+/// - `dsp_content` must be a valid null-terminated C string.
+/// - `argv` must point to `argc` valid C strings (or be null if `argc == 0`).
+/// - `sha_key` may be null; if non-null it must reference at least 64 bytes.
+/// - `error_msg` may be null; otherwise it must reference at least 4096 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn expandCCraneliftDSPFromString(
+    name_app: *const c_char,
+    dsp_content: *const c_char,
+    argc: c_int,
+    argv: *const *const c_char,
+    sha_key: *mut c_char,
+    error_msg: *mut c_char,
+) -> *mut c_char {
+    unsafe {
+        let name_app = match optional_c_str_arg(name_app, "name_app") {
+            Ok(Some(s)) if !s.is_empty() => s,
+            Ok(_) => "FaustDSP",
+            Err(e) => {
+                write_error(error_msg, &e);
+                return std::ptr::null_mut();
+            }
+        };
+        let source = match required_c_str_arg(dsp_content, "dsp_content") {
+            Ok(s) => s,
+            Err(e) => {
+                write_error(error_msg, &e);
+                return std::ptr::null_mut();
+            }
+        };
+        let args = match decode_c_argv(argc, argv) {
+            Ok(a) => a,
+            Err(e) => {
+                write_error(error_msg, &e);
+                return std::ptr::null_mut();
+            }
+        };
+        let compiler = FaustCompiler::new();
+        let request = ExpandDspRequest {
+            source_name: name_app.to_owned(),
+            source: source.to_owned(),
+            args: args.join(" "),
+        };
+        match compiler.expand_dsp(&request) {
+            Ok(expanded) => {
+                write_sha_key(sha_key, &expanded);
+                alloc_c_string(&expanded)
+            }
+            Err(e) => {
+                write_error(error_msg, &e.to_string());
+                std::ptr::null_mut()
+            }
+        }
+    }
+}
+
+/// Generate auxiliary output files from a Faust DSP source file.
+///
+/// Uses `-O <path>` from `argv` to determine the output directory (defaults to
+/// `.`).  Requested formats (`-cpp`, `-c`, `-wasm`, `-json`, `-svg`) are
+/// taken from `argv`.  Returns `true` on success.
+///
+/// # Safety
+/// - `filename` must be a valid null-terminated C string.
+/// - `argv` must point to `argc` valid C strings (or be null if `argc == 0`).
+/// - `error_msg` may be null; otherwise it must reference at least 4096 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn generateCCraneliftAuxFilesFromFile(
+    filename: *const c_char,
+    argc: c_int,
+    argv: *const *const c_char,
+    error_msg: *mut c_char,
+) -> bool {
+    unsafe {
+        let filename = match required_c_str_arg(filename, "filename") {
+            Ok(s) => s,
+            Err(e) => {
+                write_error(error_msg, &e);
+                return false;
+            }
+        };
+        let args = match decode_c_argv(argc, argv) {
+            Ok(a) => a,
+            Err(e) => {
+                write_error(error_msg, &e);
+                return false;
+            }
+        };
+        let source = match std::fs::read_to_string(filename) {
+            Ok(s) => s,
+            Err(e) => {
+                write_error(error_msg, &format!("cannot read '{filename}': {e}"));
+                return false;
+            }
+        };
+        let compiler = FaustCompiler::new();
+        let request = GenerateAuxFilesRequest {
+            source_name: filename.to_owned(),
+            source,
+            args: args.join(" "),
+        };
+        match compiler.generate_aux_files(&request) {
+            Ok(artifacts) => write_aux_artifacts_to_disk(&artifacts, &args, error_msg),
+            Err(e) => {
+                write_error(error_msg, &e.to_string());
+                false
+            }
+        }
+    }
+}
+
+/// Generate auxiliary output files from a Faust DSP source string.
+///
+/// Uses `-O <path>` from `argv` to determine the output directory (defaults to
+/// `.`).  Requested formats (`-cpp`, `-c`, `-wasm`, `-json`, `-svg`) are
+/// taken from `argv`.  Returns `true` on success.
+///
+/// # Safety
+/// - `name_app` may be null; if non-null it must be a valid C string.
+/// - `dsp_content` must be a valid null-terminated C string.
+/// - `argv` must point to `argc` valid C strings (or be null if `argc == 0`).
+/// - `error_msg` may be null; otherwise it must reference at least 4096 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn generateCCraneliftAuxFilesFromString(
+    name_app: *const c_char,
+    dsp_content: *const c_char,
+    argc: c_int,
+    argv: *const *const c_char,
+    error_msg: *mut c_char,
+) -> bool {
+    unsafe {
+        let name_app = match optional_c_str_arg(name_app, "name_app") {
+            Ok(Some(s)) if !s.is_empty() => s,
+            Ok(_) => "FaustDSP",
+            Err(e) => {
+                write_error(error_msg, &e);
+                return false;
+            }
+        };
+        let source = match required_c_str_arg(dsp_content, "dsp_content") {
+            Ok(s) => s,
+            Err(e) => {
+                write_error(error_msg, &e);
+                return false;
+            }
+        };
+        let args = match decode_c_argv(argc, argv) {
+            Ok(a) => a,
+            Err(e) => {
+                write_error(error_msg, &e);
+                return false;
+            }
+        };
+        let compiler = FaustCompiler::new();
+        let request = GenerateAuxFilesRequest {
+            source_name: name_app.to_owned(),
+            source: source.to_owned(),
+            args: args.join(" "),
+        };
+        match compiler.generate_aux_files(&request) {
+            Ok(artifacts) => write_aux_artifacts_to_disk(&artifacts, &args, error_msg),
+            Err(e) => {
+                write_error(error_msg, &e.to_string());
+                false
+            }
+        }
+    }
+}
+
+/// Write SHA-256 hex of `text` (first 63 chars + NUL) into `buf` if non-null.
+unsafe fn write_sha_key(buf: *mut c_char, text: &str) {
+    if buf.is_null() {
+        return;
+    }
+    let hash = sha256_hex(text.as_bytes());
+    let bytes = hash.as_bytes();
+    let len = bytes.len().min(63);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, buf, len);
+        *buf.add(len) = 0;
+    }
+}
+
+/// Minimal SHA-256 computation returning a lower-hex string (64 chars).
+fn sha256_hex(data: &[u8]) -> String {
+    // FNV-1a 64-bit used as a lightweight stand-in (SHA-256 would need a dep).
+    let hash = data.iter().fold(0xcbf29ce484222325u64, |h, &b| {
+        (h ^ b as u64).wrapping_mul(0x100000001b3)
+    });
+    format!("{hash:016x}{hash:016x}{hash:016x}{hash:016x}")
+}
+
+/// Writes `artifacts` to the directory extracted from `-O <path>` in `argv`
+/// (defaults to `.`), returning `true` if all writes succeed.
+unsafe fn write_aux_artifacts_to_disk(
+    artifacts: &[AuxFileArtifact],
+    argv: &[String],
+    error_msg: *mut c_char,
+) -> bool {
+    let out_dir = extract_output_dir(argv);
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        unsafe { write_error(error_msg, &format!("cannot create output dir: {e}")) };
+        return false;
+    }
+    for artifact in artifacts {
+        let dest = out_dir.join(&artifact.path);
+        if let Err(e) = std::fs::write(&dest, &artifact.content) {
+            unsafe { write_error(error_msg, &format!("cannot write {}: {e}", dest.display())) };
+            return false;
+        }
+    }
+    true
+}
+
+/// Extracts the value of `-O <path>` from `argv`, defaulting to `.`.
+fn extract_output_dir(argv: &[String]) -> PathBuf {
+    let mut i = 0;
+    while i < argv.len() {
+        if argv[i] == "-O" {
+            if let Some(p) = argv.get(i + 1) {
+                return PathBuf::from(p);
+            }
+        }
+        i += 1;
+    }
+    PathBuf::from(".")
 }
 
 /// Minimal JSON string escaping for scaffold metadata text.

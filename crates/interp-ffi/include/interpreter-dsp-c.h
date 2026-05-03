@@ -263,6 +263,77 @@ void metadataCInterpreterDSPInstance(interpreter_dsp* dsp, MetaGlue* meta);
 void computeCInterpreterDSPInstance(interpreter_dsp* dsp, int count,
                                      FAUSTFLOAT** inputs, FAUSTFLOAT** outputs);
 
+/* ── DSP expansion ───────────────────────────────────────────────────────── */
+
+/**
+ * Validate and expand a Faust DSP source file.
+ *
+ * On success returns a heap-allocated C string; caller must free with
+ * freeCMemory.
+ *
+ * @param filename   path to the Faust DSP file
+ * @param argc       number of compiler arguments
+ * @param argv       compiler argument array (may be NULL when argc == 0)
+ * @param sha_key    buffer of at least 64 bytes for SHA key output (may be NULL)
+ * @param error_msg  buffer of at least 4096 bytes for error output (may be NULL)
+ * @return heap-allocated expanded source, or NULL on failure
+ */
+char* expandCInterpreterDSPFromFile(
+    const char* filename, int argc, const char* argv[],
+    char* sha_key, char* error_msg);
+
+/**
+ * Validate and expand a Faust DSP source string.
+ *
+ * On success returns a heap-allocated C string; caller must free with
+ * freeCMemory.
+ *
+ * @param name_app     logical DSP name (may be NULL)
+ * @param dsp_content  Faust source text
+ * @param argc         number of compiler arguments
+ * @param argv         compiler argument array (may be NULL when argc == 0)
+ * @param sha_key      buffer of at least 64 bytes for SHA key output (may be NULL)
+ * @param error_msg    buffer of at least 4096 bytes for error output (may be NULL)
+ * @return heap-allocated expanded source, or NULL on failure
+ */
+char* expandCInterpreterDSPFromString(
+    const char* name_app, const char* dsp_content, int argc, const char* argv[],
+    char* sha_key, char* error_msg);
+
+/* ── Auxiliary file generation ───────────────────────────────────────────── */
+
+/**
+ * Generate auxiliary output files from a Faust DSP source file.
+ *
+ * Output formats are selected by argv flags: -cpp, -c, -wasm, -json, -svg.
+ * Output directory is taken from -O <path> (defaults to ".").
+ *
+ * @param filename   path to the Faust DSP file
+ * @param argc       number of compiler arguments
+ * @param argv       compiler argument array (may be NULL when argc == 0)
+ * @param error_msg  buffer of at least 4096 bytes for error output (may be NULL)
+ * @return true on success, false on failure
+ */
+bool generateCInterpreterAuxFilesFromFile(
+    const char* filename, int argc, const char* argv[], char* error_msg);
+
+/**
+ * Generate auxiliary output files from a Faust DSP source string.
+ *
+ * Output formats are selected by argv flags: -cpp, -c, -wasm, -json, -svg.
+ * Output directory is taken from -O <path> (defaults to ".").
+ *
+ * @param name_app     logical DSP name (may be NULL)
+ * @param dsp_content  Faust source text
+ * @param argc         number of compiler arguments
+ * @param argv         compiler argument array (may be NULL when argc == 0)
+ * @param error_msg    buffer of at least 4096 bytes for error output (may be NULL)
+ * @return true on success, false on failure
+ */
+bool generateCInterpreterAuxFilesFromString(
+    const char* name_app, const char* dsp_content, int argc, const char* argv[],
+    char* error_msg);
+
 #ifdef __cplusplus
 }
 #endif

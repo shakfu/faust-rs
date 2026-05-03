@@ -85,6 +85,18 @@ void registerCInterpreterForeignFunction(const char* name, void* fn_ptr);
 void unregisterCInterpreterForeignFunction(const char* name);
 void clearCInterpreterForeignFunctions(void);
 
+char* expandCInterpreterDSPFromFile(
+    const char* filename, int argc, const char* argv[],
+    char* sha_key, char* error_msg);
+char* expandCInterpreterDSPFromString(
+    const char* name_app, const char* dsp_content, int argc, const char* argv[],
+    char* sha_key, char* error_msg);
+bool generateCInterpreterAuxFilesFromFile(
+    const char* filename, int argc, const char* argv[], char* error_msg);
+bool generateCInterpreterAuxFilesFromString(
+    const char* name_app, const char* dsp_content, int argc, const char* argv[],
+    char* error_msg);
+
 #ifdef __cplusplus
 }
 #endif
@@ -506,6 +518,134 @@ inline void unregisterInterpreterForeignFunction(const std::string& name)
 inline void clearInterpreterForeignFunctions()
 {
     clearCInterpreterForeignFunctions();
+}
+
+/**
+ * Validate and expand a Faust DSP source file.
+ *
+ * Parses and evaluates the file using the supplied compiler arguments.
+ * On success returns the source text; on failure returns an empty string
+ * and fills `error_msg`.
+ *
+ * @param filename   path to the .dsp file
+ * @param argc       number of compiler arguments
+ * @param argv       compiler argument array
+ * @param sha_key    receives a hex digest of the source (may be empty)
+ * @param error_msg  receives an error description on failure
+ * @return expanded DSP source, or empty string on failure
+ */
+inline std::string expandInterpreterDSPFromFile(
+    const std::string& filename,
+    int argc,
+    const char* argv[],
+    std::string& sha_key,
+    std::string& error_msg)
+{
+    char sha_buf[64] = {};
+    char err_buf[4096] = {};
+    char* raw = expandCInterpreterDSPFromFile(
+        filename.c_str(), argc, argv, sha_buf, err_buf);
+    if (!raw) {
+        error_msg = err_buf;
+        sha_key.clear();
+        return {};
+    }
+    sha_key = sha_buf;
+    error_msg.clear();
+    std::string result(raw);
+    freeCMemory(raw);
+    return result;
+}
+
+/**
+ * Validate and expand a Faust DSP source string.
+ *
+ * On success returns the source text; on failure returns an empty string
+ * and fills `error_msg`.
+ *
+ * @param name_app     logical DSP name
+ * @param dsp_content  Faust source text
+ * @param argc         number of compiler arguments
+ * @param argv         compiler argument array
+ * @param sha_key      receives a hex digest of the source (may be empty)
+ * @param error_msg    receives an error description on failure
+ * @return expanded DSP source, or empty string on failure
+ */
+inline std::string expandInterpreterDSPFromString(
+    const std::string& name_app,
+    const std::string& dsp_content,
+    int argc,
+    const char* argv[],
+    std::string& sha_key,
+    std::string& error_msg)
+{
+    char sha_buf[64] = {};
+    char err_buf[4096] = {};
+    char* raw = expandCInterpreterDSPFromString(
+        name_app.c_str(), dsp_content.c_str(), argc, argv, sha_buf, err_buf);
+    if (!raw) {
+        error_msg = err_buf;
+        sha_key.clear();
+        return {};
+    }
+    sha_key = sha_buf;
+    error_msg.clear();
+    std::string result(raw);
+    freeCMemory(raw);
+    return result;
+}
+
+/**
+ * Generate auxiliary output files from a Faust DSP source file.
+ *
+ * Output formats are selected by argv flags: -cpp, -c, -wasm, -json, -svg.
+ * Output directory is taken from -O <path> (defaults to ".").
+ *
+ * @param filename   path to the .dsp file
+ * @param argc       number of compiler arguments
+ * @param argv       compiler argument array
+ * @param error_msg  receives an error description on failure
+ * @return true on success
+ */
+inline bool generateInterpreterAuxFilesFromFile(
+    const std::string& filename,
+    int argc,
+    const char* argv[],
+    std::string& error_msg)
+{
+    char buf[4096] = {};
+    bool ok = generateCInterpreterAuxFilesFromFile(filename.c_str(), argc, argv, buf);
+    if (!ok) error_msg = buf;
+    else error_msg.clear();
+    return ok;
+}
+
+/**
+ * Generate auxiliary output files from a Faust DSP source string.
+ *
+ * Output formats are selected by argv flags: -cpp, -c, -wasm, -json, -svg.
+ * Output directory is taken from -O <path> (defaults to ".").
+ *
+ * @param name_app     logical DSP name
+ * @param dsp_content  Faust source text
+ * @param argc         number of compiler arguments
+ * @param argv         compiler argument array
+ * @param error_msg    receives an error description on failure
+ * @return true on success
+ */
+inline bool generateInterpreterAuxFilesFromString(
+    const std::string& name_app,
+    const std::string& dsp_content,
+    int argc,
+    const char* argv[],
+    std::string& error_msg)
+{
+    char buf[4096] = {};
+    bool ok = generateCInterpreterAuxFilesFromString(
+        name_app.c_str(), dsp_content.c_str(), argc, argv, buf);
+    if (!ok) error_msg = buf;
+    else error_msg.clear();
+    return ok;
 }
 
 #endif // __cplusplus

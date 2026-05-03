@@ -97,6 +97,18 @@ void registerCCraneliftForeignFunction(const char* name, void* fn_ptr);
 void unregisterCCraneliftForeignFunction(const char* name);
 void clearCCraneliftForeignFunctions(void);
 
+char* expandCCraneliftDSPFromFile(
+    const char* filename, int argc, const char* argv[],
+    char* sha_key, char* error_msg);
+char* expandCCraneliftDSPFromString(
+    const char* name_app, const char* dsp_content, int argc, const char* argv[],
+    char* sha_key, char* error_msg);
+bool generateCCraneliftAuxFilesFromFile(
+    const char* filename, int argc, const char* argv[], char* error_msg);
+bool generateCCraneliftAuxFilesFromString(
+    const char* name_app, const char* dsp_content, int argc, const char* argv[],
+    char* error_msg);
+
 #ifdef __cplusplus
 }
 #endif
@@ -502,6 +514,130 @@ inline void unregisterCraneliftForeignFunction(const std::string& name)
 inline void clearCraneliftForeignFunctions()
 {
     clearCCraneliftForeignFunctions();
+}
+
+/**
+ * Validate and expand a Faust DSP source file.
+ *
+ * Parses and evaluates the file using the supplied compiler arguments.
+ * On success returns the source text; on failure returns an empty string
+ * and fills `error_msg`.
+ *
+ * @param filename   path to the .dsp file
+ * @param argc       number of compiler arguments
+ * @param argv       compiler argument array
+ * @param sha_key    receives a hex digest of the source (may be empty)
+ * @param error_msg  receives an error description on failure
+ * @return expanded DSP source, or empty string on failure
+ */
+inline std::string expandCraneliftDSPFromFile(
+    const std::string& filename,
+    int argc,
+    const char* argv[],
+    std::string& sha_key,
+    std::string& error_msg)
+{
+    char sha_buf[64] = {};
+    char err_buf[4096] = {};
+    char* raw = expandCCraneliftDSPFromFile(
+        filename.c_str(), argc, argv, sha_buf, err_buf);
+    if (!raw) {
+        cranelift_dsp_detail::copy_error_message(error_msg, err_buf);
+        sha_key.clear();
+        return {};
+    }
+    sha_key = sha_buf;
+    error_msg.clear();
+    return cranelift_dsp_detail::from_owned_c_string(raw);
+}
+
+/**
+ * Validate and expand a Faust DSP source string.
+ *
+ * On success returns the source text; on failure returns an empty string
+ * and fills `error_msg`.
+ *
+ * @param name_app   logical DSP name
+ * @param dsp_content  Faust source text
+ * @param argc       number of compiler arguments
+ * @param argv       compiler argument array
+ * @param sha_key    receives a hex digest of the source (may be empty)
+ * @param error_msg  receives an error description on failure
+ * @return expanded DSP source, or empty string on failure
+ */
+inline std::string expandCraneliftDSPFromString(
+    const std::string& name_app,
+    const std::string& dsp_content,
+    int argc,
+    const char* argv[],
+    std::string& sha_key,
+    std::string& error_msg)
+{
+    char sha_buf[64] = {};
+    char err_buf[4096] = {};
+    char* raw = expandCCraneliftDSPFromString(
+        name_app.c_str(), dsp_content.c_str(), argc, argv, sha_buf, err_buf);
+    if (!raw) {
+        cranelift_dsp_detail::copy_error_message(error_msg, err_buf);
+        sha_key.clear();
+        return {};
+    }
+    sha_key = sha_buf;
+    error_msg.clear();
+    return cranelift_dsp_detail::from_owned_c_string(raw);
+}
+
+/**
+ * Generate auxiliary output files from a Faust DSP source file.
+ *
+ * Output formats are selected by argv flags: -cpp, -c, -wasm, -json, -svg.
+ * Output directory is taken from -O <path> (defaults to ".").
+ *
+ * @param filename   path to the .dsp file
+ * @param argc       number of compiler arguments
+ * @param argv       compiler argument array
+ * @param error_msg  receives an error description on failure
+ * @return true on success
+ */
+inline bool generateCraneliftAuxFilesFromFile(
+    const std::string& filename,
+    int argc,
+    const char* argv[],
+    std::string& error_msg)
+{
+    char buf[4096] = {};
+    bool ok = generateCCraneliftAuxFilesFromFile(filename.c_str(), argc, argv, buf);
+    if (!ok) cranelift_dsp_detail::copy_error_message(error_msg, buf);
+    else error_msg.clear();
+    return ok;
+}
+
+/**
+ * Generate auxiliary output files from a Faust DSP source string.
+ *
+ * Output formats are selected by argv flags: -cpp, -c, -wasm, -json, -svg.
+ * Output directory is taken from -O <path> (defaults to ".").
+ *
+ * @param name_app     logical DSP name
+ * @param dsp_content  Faust source text
+ * @param argc         number of compiler arguments
+ * @param argv         compiler argument array
+ * @param error_msg    receives an error description on failure
+ * @return true on success
+ */
+inline bool generateCraneliftAuxFilesFromString(
+    const std::string& name_app,
+    const std::string& dsp_content,
+    int argc,
+    const char* argv[],
+    std::string& error_msg)
+{
+    char buf[4096] = {};
+    bool ok = generateCCraneliftAuxFilesFromString(
+        name_app.c_str(), dsp_content.c_str(), argc, argv, buf);
+    if (!ok) cranelift_dsp_detail::copy_error_message(error_msg, buf);
+    else error_msg.clear();
+    return ok;
 }
 
 #endif // __cplusplus
