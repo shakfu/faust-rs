@@ -1,8 +1,8 @@
 # Current Faust Source Subset Supported by `faust-rs`
 
-Last updated: 2026-04-23
+Last updated: 2026-05-03
 
-Version: 0.5.0
+Version: 0.6.0
 
 Status: living document
 
@@ -116,6 +116,57 @@ This snapshot is based on:
 - nested-recursion slot_env capture fix on 2026-04-23 reviewed against:
   - `crates/propagate/src/lib.rs` (Rec arm, slot_env lift ordering)
   - `porting/journal/2026-04-23.md`
+- eval stack-overflow fix, Infinity/NaN codegen bug, FAD white paper, and eval
+  performance improvements on 2026-04-24–25 reviewed against:
+  - `crates/eval/src/lib.rs` (structural recursion budget extension)
+  - `crates/codegen/src/backends/c/mod.rs` and `cpp/mod.rs` (non-finite literals)
+  - `docs/fad-note-en.md`
+  - `porting/journal/2026-04-24.md`, `porting/journal/2026-04-25.md`
+- reverse-mode AD (`rad(expr, seeds)`) full implementation (phases A–D + E0),
+  corpus, docs, and nested AD tests on 2026-04-27 reviewed against:
+  - `crates/propagate/src/reverse_ad.rs`
+  - `crates/propagate/src/stateful_rad.rs`
+  - `crates/compiler/tests/rad_runtime.rs`
+  - `docs/rad-note-en.md`
+  - `porting/reverse-ad-rad-implementation-plan-2026-04-27-en.md`
+  - `porting/journal/2026-04-27.md`
+- RAD E1 scaffold, phase-E0 classifier integration, numeric oracle, and E2/F
+  diagnostic coverage on 2026-04-28 reviewed against:
+  - `crates/propagate/src/stateful_rad.rs`
+  - `crates/propagate/src/transpose_ad.rs`
+  - `porting/journal/2026-04-28.md`
+- normalize simplify-cache sharing, wasm-ffi unblock, RAD corpus demos and
+  gradient-descent example, and LTI transposition plan §20 on 2026-04-29
+  reviewed against:
+  - `crates/normalize/src/simplify.rs`
+  - `crates/wasm-ffi/src/lib.rs`
+  - `crates/compiler/examples/rad_gradient_descent.rs`
+  - `docs/rad-usage-en.md`
+  - `porting/journal/2026-04-29.md`
+- Cranelift AArch64 oversized-body guard and evaluator depth-budget
+  configurability on 2026-04-30 reviewed against:
+  - `crates/codegen/src/backends/cranelift/mod.rs`
+  - `crates/eval/src/lib.rs`
+  - `porting/journal/2026-04-30.md`
+- isomorphic `SYMREC` group merging pass, Cranelift saturating float-to-int
+  cast fix, `x − x → 0` simplification rule on 2026-05-01 reviewed against:
+  - `crates/normalize/src/rec_merge.rs`
+  - `crates/transform/src/signal_prepare.rs`
+  - `crates/codegen/src/backends/cranelift/mod.rs`
+  - `porting/journal/2026-05-01.md`
+- full SVG block-diagram draw module (phases A–I) and `-svg` CLI flag on
+  2026-05-02 reviewed against:
+  - `crates/draw/src/`
+  - `crates/compiler/src/main.rs`
+  - `porting/journal/2026-05-02.md`
+- def-name propagation fix for SVG folding, FAD rewrite-rule table,
+  `expandDSP`/`generateAuxFiles` implementation and C/C++ FFI exports on
+  2026-05-03 reviewed against:
+  - `crates/eval/src/lib.rs`
+  - `crates/compiler/src/lib.rs`
+  - `crates/cranelift-ffi/src/factory.rs`
+  - `crates/interp-ffi/src/factory.rs`
+  - `porting/journal/2026-05-03.md`
 
 The corresponding generated reports are:
 
@@ -221,9 +272,12 @@ What is not yet true:
   path
 - helper parity for the embedded-compiler path is still incomplete:
   - `getInfos(...)` is only partially implemented
-  - `expandDSP(...)` and `generateAuxFiles(...)` are present in the API but
-    are not yet parity-complete replacement surfaces for the historical C++
-    binding
+  - `expandDSP(...)` and `generateAuxFiles(...)` are now real implementations
+    (landed 2026-05-03): `expandDSP` validates source and returns the original
+    source string (the Rust compiler has no box→DSP serializer analogous to C++
+    `printBox`); `generateAuxFiles` compiles source and writes one or more
+    output files for `-cpp`, `-c`, `-wasm`, `-json`, and `-svg` flags; both
+    are wired into the C/C++ FFI headers for Cranelift and interpreter backends
 
 ## 5. Synthetic Characterization of the Supported Subset
 
@@ -287,6 +341,16 @@ Stated differently:
 - the main residual front-end caveat is not basic language acceptance anymore,
   but long-tail parity outside the exercised corpus and some deferred tooling
   concerns such as remote-import parity.
+- **SVG block-diagram output**: `-svg` is now a first-class CLI flag (landed
+  2026-05-02). The full schema/device infrastructure is implemented in
+  `crates/draw/`: all composition forms (`Seq`, `Par`, `Split`, `Merge`,
+  `Rec`), leaf schemas, decorator schemas, route, multirate wrappers, UI
+  widgets, and groups are rendered. Hierarchical folding (`-f N`, `-fc N`)
+  splits complex diagrams into multiple linked SVG files. Visual options
+  `-blur`, `-sc`, `-drf`, and `-mns N` are supported. The evaluated box
+  tree (post-`eval`) is used as source so all lambda applications appear as
+  resolved primitives.
+
 - parser entry points still differ intentionally:
   - `parse_program(...)` parses one in-memory source unit and does **not**
     perform filesystem import resolution,
@@ -408,7 +472,14 @@ classification:
   before propagating both the feedback and main branches of a `Rec` node,
   so outer-scope captures reached through the feedback path (e.g.
   `fi.lowpass(f_curr, x)` called from inside a `~` loop) stay bound to the
-  intended outer `DEBRUIJNREC` instead of being captured by the inner one.
+  intended outer `DEBRUIJNREC` instead of being captured by the inner one,
+- isomorphic `SYMREC` group merging (`rec_merge` pass in `crates/normalize/`,
+  landed 2026-05-01): `SYMREC` groups whose bodies are structurally equivalent
+  after opening (replacing `Proj(i, self)` with canonical `Hole(i)` sentinels)
+  are unified to a single canonical representative before simplification. This
+  enables the subsequent `x − x → 0` rule to fire across independently-built
+  recursive systems — most visibly on `fad_rec.dsp`-class programs where the
+  primal and tangent recursive groups are isomorphic.
 
 ## 5.3 Important current backend exclusions
 
@@ -584,7 +655,25 @@ Relative to the tracked corpus and the current production-oriented route:
   with 35 corpus entries validated through the `signal_pipeline` test suite and
   the fast-lane. The transform operates directly on De Bruijn recursive form,
   interleaving primal and tangent slots inside `DEBRUIJNREC` bodies before
-  symbolic conversion in `signal_prepare`.
+  symbolic conversion in `signal_prepare`,
+- **reverse-mode AD** (`rad(expr, seeds)`) feed-forward subset landed 2026-04-27:
+  `rad(...)` produces `[primals…, ∂ sum(primals) / ∂ s_j…]` with an implicit
+  all-ones cotangent. The differentiable subset matches FAD outside temporal
+  families. Phase E0 recursive-linearity classifier and E1 LTI transposition
+  scaffold are in place; recursive `rad(...)` is still gated pending block/tape
+  wiring. See [docs/rad-note-en.md](../docs/rad-note-en.md),
+- **SVG block-diagram output** is now wired via `-svg` (landed 2026-05-02):
+  the full `crates/draw/` module renders all box/composition/schema types,
+  supports hierarchical folding (`-f`, `-fc`), and matches the C++ output
+  directory convention,
+- `expandDSP(...)` and `generateAuxFiles(...)` are now real implementations
+  (landed 2026-05-03): both are wired into `crates/compiler/src/lib.rs` and
+  exported from the Cranelift and interpreter C/C++ FFI headers,
+- the Cranelift backend now uses saturating float-to-int casts (`fcvt_to_sint_sat`)
+  to match C semantics on NaN and out-of-range floats (landed 2026-05-01),
+- the normalize pipeline now runs a `rec_merge` pass that unifies isomorphic
+  `SYMREC` groups before simplification, enabling the `x − x → 0` rule to
+  fire across independently-built recursive groups.
 
 ## 6.2 Where C++ is still broader
 
@@ -592,17 +681,16 @@ Faust C++ still supports a broader end-to-end language/runtime envelope.
 
 Most importantly, the C++ compiler still has:
 
-- **reverse-mode AD** (`rad(expr, seeds)`): the feed-forward subset is now
-  implemented (see the dedicated section earlier in this document and
-  [docs/rad-note-en.md](../docs/rad-note-en.md)). What remains gated is
-  reverse-through-time: any `delay` / `prefix` / recursion in the
-  differentiated body raises a structured `RadUnsupportedNode` diagnostic
-  rather than a misleading gradient. A finite-horizon BPTT mode is
-  reserved for a later phase.
+- **reverse-mode AD through time**: the feed-forward RAD subset is implemented
+  (see [docs/rad-note-en.md](../docs/rad-note-en.md)). What remains gated is
+  reverse-through-time: any `delay` / `prefix` / recursion in the differentiated
+  body raises a structured `RadUnsupportedNode` diagnostic. Phase E1 LTI
+  transposition and phase F BPTT are reserved for future phases (plan §20).
 - fuller support for stream-wrapper lowering,
 - broader mature transform/backend coverage on long-tail signal families,
 - a fuller embedded-compiler helper surface for web tooling
-  (`expandDSP`, `generateAuxFiles`, full `getInfos`, packaged FS semantics),
+  (`expandDSP` and `generateAuxFiles` are now real in Rust, but `getInfos`
+  is only partially implemented and packaged FS semantics differ),
 - the `simplify` constant-folding pass applied to table-size positions
   (the Rust pipeline now runs `simplify` in `signal_prepare`, but the
   table-size extractor in the FIR builder still requires a literal `Int` node;
@@ -1062,57 +1150,6 @@ multiple different delay amounts (e.g. `frenchBell.dsp` modal synthesis).
 - integer literals that overflow 32 bits now use wrapping arithmetic (matching
   C++ `str2int` behavior).
 
-### 7.15 April 8, 2026: delay-strategy parity, recursion-delay analysis, explicit emission phases
-
-The fast-lane delay subsystem was substantially tightened to match the C++
-compiler more closely.
-
-#### Delay strategy parity with Faust C++
-
-`SIGDELAY` now follows the same practical three-way strategy split as the C++
-compiler:
-
-- `Shift` for very small delays,
-- circular power-of-two buffers with `fIOTA` for the middle range,
-- exact-size if-wrapping buffers for the `-dlt` range.
-
-The threshold behavior at the exact `-mcd` and `-dlt` boundaries was also
-aligned with the C++ compiler's strict comparisons.
-
-#### Recursion-delay carrier reuse
-
-The delay pre-pass now performs accumulated delay analysis for recursion
-outputs, allowing chains of the form:
-
-- `Delay1(Proj(...))`
-- `Delay1(Delay1(Proj(...)))`
-- `Delay(Delay1^k(Proj(...)), N)`
-
-to reuse one canonical recursion carrier when possible instead of allocating
-separate standalone delay vectors. This materially improves parity on APF /
-biquad-like structures.
-
-#### Simple recursion parity restored
-
-The special case `process = + ~ _;` is now lowered with the same 2-slot update
-shape as Faust C++:
-
-- current value written to slot 0,
-- previous value read from slot 1,
-- deferred copy from slot 0 to slot 1 after output observation.
-
-#### Explicit sample-loop phases
-
-The sample-loop assembly now uses an explicit phase model:
-
-- `Immediate`
-- `PostOutput`
-- `SampleEnd`
-
-This does not change the supported source subset by itself, but it makes the
-ordering guarantees around `Shift` copies, recursion updates, and delay counter
-maintenance clearer and easier to maintain.
-
 ### 7.12 March 18–21, 2026: eval correctness, signal-prepare canonicalization, physical models
 
 #### Unary recursion projection canonicalization (`signal_prepare`)
@@ -1432,7 +1469,58 @@ Two complementary improvements landed:
 
 All corpus tests continue to pass after both optimizations.
 
-### 7.16 April 15-16, 2026: forward-mode AD (`fad(exp, x)`) — explicit-seed propagation and current support boundary
+### 7.16 April 8, 2026: delay-strategy parity, recursion-delay analysis, explicit emission phases
+
+The fast-lane delay subsystem was substantially tightened to match the C++
+compiler more closely.
+
+#### Delay strategy parity with Faust C++
+
+`SIGDELAY` now follows the same practical three-way strategy split as the C++
+compiler:
+
+- `Shift` for very small delays,
+- circular power-of-two buffers with `fIOTA` for the middle range,
+- exact-size if-wrapping buffers for the `-dlt` range.
+
+The threshold behavior at the exact `-mcd` and `-dlt` boundaries was also
+aligned with the C++ compiler's strict comparisons.
+
+#### Recursion-delay carrier reuse
+
+The delay pre-pass now performs accumulated delay analysis for recursion
+outputs, allowing chains of the form:
+
+- `Delay1(Proj(...))`
+- `Delay1(Delay1(Proj(...)))`
+- `Delay(Delay1^k(Proj(...)), N)`
+
+to reuse one canonical recursion carrier when possible instead of allocating
+separate standalone delay vectors. This materially improves parity on APF /
+biquad-like structures.
+
+#### Simple recursion parity restored
+
+The special case `process = + ~ _;` is now lowered with the same 2-slot update
+shape as Faust C++:
+
+- current value written to slot 0,
+- previous value read from slot 1,
+- deferred copy from slot 0 to slot 1 after output observation.
+
+#### Explicit sample-loop phases
+
+The sample-loop assembly now uses an explicit phase model:
+
+- `Immediate`
+- `PostOutput`
+- `SampleEnd`
+
+This does not change the supported source subset by itself, but it makes the
+ordering guarantees around `Shift` copies, recursion updates, and delay counter
+maintenance clearer and easier to maintain.
+
+### 7.17 April 15-16, 2026: forward-mode AD (`fad(exp, x)`) — explicit-seed propagation and current support boundary
 
 #### `forward_ad.rs` — complete FAD rule table implemented
 
@@ -1553,7 +1641,7 @@ earlier in this document for the full contract; in short:
 
 Detailed design notes: [docs/rad-note-en.md](../docs/rad-note-en.md).
 
-### 7.17 April 21, 2026: recursion depth limits, 64 MiB compiler stack, FAD De Bruijn overhaul
+### 7.18 April 21, 2026: recursion depth limits, 64 MiB compiler stack, FAD De Bruijn overhaul
 
 #### Recursion depth limits raised
 
@@ -1674,6 +1762,248 @@ Four previously uncovered signal families now have explicit differentiation rule
 These rules complete the coverage of all binary math primitives for which
 Faust C++ defines a signal node.
 
+### 7.19 April 24–25, 2026: eval stack-overflow fix, Infinity/NaN codegen, FAD white paper, eval perf
+
+#### Eval: recursive case divergence reports clean error (2026-04-24)
+
+A recursive Faust program (e.g. `fact(0) = 1; fact(n) = n * fact(n-1);
+process = par(i, 3, fact(i));`) that diverges during evaluation previously
+aborted the host thread with a native stack overflow. The fix extends the
+evaluator's structural recursion guard to cover recursive
+application/case-dispatch paths (via `enter_structural` / `leave_structural`
+on `apply_value_list_value` and `apply_pattern_matcher_value`). The displayed
+error now mirrors C++: `stack overflow in eval (depth budget N)`.
+
+#### Codegen: valid C/C++ infinity and NaN literals (2026-04-24)
+
+`ma.MIN * 1e307` overflows to `+∞` in single precision. The Rust C and C++
+backends previously emitted invalid literals such as `inf.0f` because the
+float formatter appended `.0`/`f` unconditionally. Both backends now emit
+`INFINITY`, `-INFINITY`, or `NAN` for non-finite values, matching the
+C++ reference compiler behavior.
+
+#### FAD white paper (2026-04-24)
+
+`docs/fad-note-en.md` (plus PDF) — standalone technical note on forward AD in
+`faust-rs`, covering semantics, compiler architecture, recursion handling,
+supported boundaries, and practical DSP usage patterns including
+Newton/ZDF-style implicit solving, grey-box system identification, and
+host-driven adaptive DSP.
+
+#### Eval performance: `Rc<RefCell<EnvStore>>` + binding index (2026-04-25)
+
+- Replaced `Arc<Mutex<EnvStore>>` with `Rc<RefCell<EnvStore>>` for the
+  single-threaded evaluation session, eliminating mutex overhead on every
+  environment access.
+- Added a per-layer `binding_index` for O(1) symbol lookup instead of reverse
+  linear scans.
+
+On `clarinetMIDI.dsp`, release evaluation time moved from ~0.57 s to ~0.53 s.
+A phase-level `-time` flag was also wired to expose parser, eval, propagation,
+signal-to-FIR, and backend codegen timings individually.
+
+### 7.20 April 27, 2026: reverse-mode AD — phases A–D, corpus, documentation
+
+#### RAD phases A–D implemented
+
+Phase 1 reverse-mode AD landed in full on 2026-04-27:
+
+- **Phase A**: two-child `rad(expr, seeds)` surface wired through
+  parser/boxes/eval/propagate; arity contract `outputs = body.outputs +
+  seeds.outputs` enforced with structured `RadBodyArity` / `RadSeedArity`
+  diagnostics (`FRS-PROP-0002`).
+- **Phase B**: feed-forward reverse-mode core in
+  `crates/propagate/src/reverse_ad.rs`. Three-pass algorithm: (1) postorder
+  DFS from each primal output; (2) initialize primals' adjoints to `1.0`,
+  walk in reverse, emit local transpose contributions; (3) re-emit primals
+  and append accumulated adjoint per seed.
+- **Phase C**: extended rule table covering read-only `rdtable` (symmetric
+  finite difference), unary foreign functions (`tanh`/`sinh`/`cosh` and
+  inverse-hyperbolic), and pass-through wrappers (`attach`, `enable`,
+  `control`, `Output`).
+- **Phase D**: family-specific `RadUnsupportedNode` diagnostics with
+  `kind`-dependent help text explaining why each temporal family (delay,
+  prefix, recursion) is rejected (anti-causal transpose / BPTT reserved).
+
+Output bundle: `[primals…, ∂ sum(primals) / ∂ s_0, …]` with implicit all-ones
+cotangent on every primal output. Out-of-scope families raise
+`RadUnsupportedNode`; RAD never silently emits a misleading gradient.
+
+#### Phase E0: recursive-linearity classifier
+
+`crates/propagate/src/stateful_rad.rs` classifies `DEBRUIJNREC` groups as
+`LinearLti`, `LinearTimeVarying`, or `Nonlinear`. The paired `RecRadMode` maps
+these to future strategies (`LinearTranspose`, `BlockLinearTimeVarying`,
+`BpttRequired`). Recursive `rad(...)` is still rejected, but the diagnostic now
+names the future phase when one can be determined.
+
+#### FAD de Bruijn invariants and multi-seed tests strengthened
+
+`debug_assert!` invariants were added to `forward_ad.rs` verifying the
+interleaved layout and `debruijn_depth` balance. New multi-seed × nested
+recursion and multi-seed × mutual recursion central-difference tests were added
+to `fad_recursive_runtime.rs`.
+
+#### Corpus and documentation
+
+- 7 positive RAD fixtures + 3 error fixtures (`err_rad_zero_body`,
+  `err_rad_zero_seed`, `err_rad_delay_temporal_unsupported`).
+- 4 mixed `fad(rad(...))` / `rad(fad(...))` corpus entries including
+  `err_fad_rad_temporal`.
+- RAD runtime test suite: 29 tests (10 inline + 14 corpus-driven + 5
+  nested-AD), all green.
+- `docs/rad-note-en.md` — synthesis note covering the three-pass algorithm,
+  rule table, temporal boundary, and relationship to FAD.
+- `porting/reverse-ad-rad-implementation-plan-2026-04-27-en.md` updated with
+  §19 feasibility analysis for stateful RAD (Tellegen transposition vs. BPTT).
+
+### 7.21 April 28, 2026: RAD E1 scaffold, E0 integration, block-local semantics
+
+- Block-local boundary semantics documented for phase E1: the compute block
+  length is the finite reverse window, terminal adjoint at frame `count` is
+  zero, no adjoint state persists across blocks.
+- `crates/propagate/src/transpose_ad.rs`: scaffold that extracts affine LTI
+  state-transition terms from one `DEBRUIJNREC` group and builds a same-arity
+  transposed recurrence. Rejects LTV and nonlinear groups via the E0 classifier.
+- Numeric oracle added: a small in-module interpreter evaluates the transposed
+  recurrence backward in time and confirms the block-local seed adjoint matches
+  an analytical reference (`+ ~ *(p)` first-order LTI, within `1e-4`).
+- `RecRadMode` strategy gate wired: `recursive-linear-transpose`,
+  `recursive-block-linear-time-varying`, and `recursive-bptt-required`
+  diagnostic kinds now distinguish future phases in user-facing messages.
+- Tests cover E2 (`coef`-dependent linear) and F (`sin` nonlinear) rejection
+  with correct kind labels.
+
+### 7.22 April 29, 2026: normalize simplify-cache sharing, wasm-ffi unblock, RAD demos
+
+#### `normalize::simplify` cache shared across output forest
+
+`simplify_signals_fastlane` previously created a fresh `SimplifyCache` per
+output root. C++ shares a global property on tree nodes. A new `SimplifyCache`
+wrapper is now allocated once and passed across all roots in `signal_prepare`,
+mirroring C++ semantics. On `rad_fxlms1.dsp` this reduced compile time from
+> 1 minute (killed) to ~1.6 s.
+
+#### `wasm-ffi`: `Instant::now()` on `wasm32-unknown-unknown` fixed
+
+`std::time::Instant::now()` panics on `wasm32-unknown-unknown`. The compiler
+facade timing helper now skips `Instant` when no timing sink is installed. The
+`wasm-ffi` embedded-library build also now supports embedding multiple `.lib`
+roots from `FAUST_LIB_PATH` for project-local libraries.
+
+#### RAD practical demos
+
+- `crates/compiler/examples/rad_gradient_descent.rs` — host SGD loop fitting
+  `rad_gain_bias_train.dsp` to a synthetic target; recovers `gain`/`bias` to
+  ~1e-6 in 400 iterations.
+- `crates/compiler/examples/rad_adaptive_notch.rs` — LMS adaptive notch
+  converging to `|Δω| < 2e-4` in < 50 iterations.
+- `crates/compiler/examples/rad_vs_fad_perf.rs` — side-by-side RAD vs. FAD
+  benchmark; bytecode size and per-frame compute are within ~5 % on all five
+  shapes, including a 6-seed multiplicative chain.
+- `docs/rad-usage-en.md` — host-facing usage guide for all four demo fixtures.
+
+### 7.23 April 30, 2026: Cranelift AArch64 guard, evaluator depth budgets
+
+#### Cranelift: AArch64 oversized compute body guard
+
+`fad_tracking3.dsp` triggered a `EXC_BAD_INSTRUCTION` on AArch64 when the JIT
+`compute` body branched into padding/data islands. Added an AArch64-only guard:
+when the first JIT lowering succeeds but the CLIF `compute` function is
+oversized (`> 32 KiB` threshold), the module is discarded and replaced with the
+existing no-op stub fallback. Later corrected on 2026-05-01 to remove the over-
+aggressive post-success discard; the `catch_unwind` path for actual panics is
+retained as the sole protection.
+
+#### Evaluator depth budgets made configurable
+
+Two constants renamed for clarity:
+
+- `DEFAULT_EVAL_MAX_DEPTH` (default `1_024`) — identity-tracked evaluator
+  recursion budget; also overridable via `FAUST_RS_DEFAULT_EVAL_MAX_DEPTH`.
+- `STRUCTURAL_HARD_MAX_DEPTH` (default `4_096`) — structural lowering cap for
+  `a2sb` / `a2sb_value`; also overridable via
+  `FAUST_RS_STRUCTURAL_HARD_MAX_DEPTH`.
+
+The two are kept separate so raising the identity-tracked budget for a known
+deep acyclic program does not silently raise the structural-lowering stack risk.
+The structural hard cap is an absolute ceiling regardless of
+`with_max_depth(...)` calls.
+
+### 7.24 May 1, 2026: isomorphic rec_merge pass, Cranelift cast fix, simplify fix
+
+#### `normalize::rec_merge` — isomorphic `SYMREC` group merging
+
+`crates/normalize/src/rec_merge.rs` introduces `merge_isomorphic_symrec_groups`:
+opens each `SYMREC` body by replacing `Proj(i, self)` with canonical `Hole(i)`
+sentinels, groups bodies by their hash-consed opened signature, elects one
+canonical representative per equivalence class, and substitutes all aliases
+throughout the signal forest. Runs in `signal_prepare` after the first
+`simplify` pass and before a second `simplify`, so `Proj(i,W0) − Proj(i,W0)`
+reduces to `Int(0)` on the second pass.
+
+7 unit tests: single-output merge, multi-output, no spurious merge of distinct
+groups, full `Int(0)` round-trip, nested groups, idempotence, hole isolation.
+
+#### `normalize`: `x − x → 0` simplification rule
+
+`BinOp::Sub` was the only missing case in the self-operation rule block.
+Added `BinOp::Sub => SigBuilder::new(arena).int(0)` alongside the existing
+`Rem`, `Xor`, `Gt`, `Lt` cases.
+
+#### Cranelift: saturating float-to-int cast
+
+`fcvt_to_sint` traps on NaN and out-of-range floats on AArch64 (`EXC_BAD_INSTRUCTION`).
+C/C++ defines these as saturating. Both cast sites now use `fcvt_to_sint_sat`.
+The Cranelift differential oracle also guards against spurious NaN mismatches
+(`NaN == NaN` → skip rather than fail).
+
+### 7.25 May 2–3, 2026: SVG block-diagram draw module, expandDSP/generateAuxFiles
+
+#### Full SVG draw module (`crates/draw/`) — phases A–I
+
+A complete port of `compiler/draw/` landed across 2026-05-02:
+
+- **Core infra** (phase A): `DrawDevice` trait, `SvgDevice<W: Write>` writing
+  raw XML with entity escaping, base `Schema` trait, `Orientation`, `Point`,
+  `Trait`, `TraitCollector`, `Placement`, color palette.
+- **Leaf schemas** (phase B): `BlockSchema`, `InverterSchema`, `CableSchema`,
+  `CutSchema`, `ConnectorSchema`.
+- **Composition schemas** (phase C): `SeqSchema`, `ParSchema`, `MergeSchema`,
+  `SplitSchema`, `RecSchema` with feedback/feedfront wire routing.
+- **Decorator schemas** (phase D): `EnlargedSchema`, `DecorateSchema`,
+  `TopSchema`.
+- **Specialized schemas** (phase E): `RouteSchema`, `MultiRateSchema`
+  (`ondemand`, `upsampling`, `downsampling`).
+- **Translation layer** (phase F): `generate_schema(arena, BoxId)` maps all
+  `BoxMatch` variants to schema types; uses the evaluated box tree so lambdas
+  appear as resolved primitives.
+- **CLI wiring** (phase G): `--svg` / `-svg` flag; output dir `<stem>-svg/`.
+- **Visual options** (phase H): `-blur`, `-sc`, `-drf`, `-mns N` (shadow,
+  scaled SVG, route frame, name truncation).
+- **Hierarchical folding** (phase I): `-f N` / `-fc N`; splits complex diagrams
+  into linked SVG files. Requires def-name tracking from eval, which was also
+  fixed on 2026-05-03 (closure re-evaluation now propagates def-names through
+  `eval_value` so `karplus.dsp`-class programs fold correctly).
+
+24 draw unit tests; all pass.
+
+#### `expandDSP` / `generateAuxFiles` implemented (2026-05-03)
+
+- `Compiler::expand_dsp(request)` validates source via
+  `compile_source_to_signals_with_search_paths` and returns the original
+  source string. The Rust compiler has no box→DSP serializer, so the
+  "expanded" form equals the input — sufficient for JS tooling validation.
+- `Compiler::generate_aux_files(request)` inspects argv for `-cpp`, `-c`,
+  `-wasm`, `-json`, `-svg` flags, calls the appropriate compile method for
+  each, and returns a `Vec<AuxFileArtifact>`.
+- Four C `#[unsafe(no_mangle)]` exports added to `cranelift-ffi` and
+  `interp-ffi`: `expandC*DSPFromFile`, `expandC*DSPFromString`,
+  `generateC*AuxFilesFromFile`, `generateC*AuxFilesFromString`, each with
+  matching C++ inline wrapper functions in the respective `.h` headers.
+
+5 new compiler library tests cover both functions end-to-end.
+
 ## 8. Practical Reading Rule
 
 Today, the simplest accurate rule is:
@@ -1700,6 +2030,12 @@ Today, the simplest accurate rule is:
   reverse-mode AD). The temporal boundary (`delay`, `prefix`, recursion
   inside the differentiated body) raises a structured `RadUnsupportedNode`
   diagnostic. See [docs/rad-note-en.md](../docs/rad-note-en.md).
+- `-svg` produces block-diagram SVG output matching the C++ compiler output
+  directory convention; hierarchical folding via `-f` splits complex diagrams.
+- `rad(expr, seeds)` over `hslider` / `vslider` / `numentry` seeds and a
+  feed-forward body drives host-side training loops and adaptive filters
+  (see `crates/compiler/examples/rad_gradient_descent.rs` and
+  `examples/rad_adaptive_notch.rs`).
 
 The most common mistake is to assume:
 
