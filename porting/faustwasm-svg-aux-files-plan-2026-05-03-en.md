@@ -2,7 +2,8 @@
 
 ## Status
 
-Planned.
+Implemented (Rust side complete — 2026-05-04).
+`faustwasm` TypeScript integration steps remain.
 
 ## Scope
 

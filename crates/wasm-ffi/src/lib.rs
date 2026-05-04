@@ -617,8 +617,7 @@ struct WasmAuxFileArtifact {
 /// Pure-Rust implementation kept inline to avoid introducing a new dependency
 /// into a crate compiled for `wasm32-unknown-unknown`.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
     let mut chunks = bytes.chunks_exact(3);
     for chunk in chunks.by_ref() {
@@ -679,10 +678,13 @@ fn base64_decode(s: &str) -> Vec<u8> {
         let mut t = [255u8; 128];
         let mut i = 0u8;
         loop {
-            let ch = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"[i as usize];
+            let ch =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"[i as usize];
             t[ch as usize] = i;
             i += 1;
-            if i == 64 { break; }
+            if i == 64 {
+                break;
+            }
         }
         t
     };
@@ -1088,7 +1090,9 @@ mod tests {
         let len = super::faust_wasm_text_result_len(handle);
         let text = unsafe {
             let bytes = std::slice::from_raw_parts(ptr, len);
-            std::str::from_utf8(bytes).expect("result must be UTF-8").to_owned()
+            std::str::from_utf8(bytes)
+                .expect("result must be UTF-8")
+                .to_owned()
         };
         super::faust_wasm_text_result_free(handle);
         (is_ok, text)
@@ -1096,14 +1100,16 @@ mod tests {
 
     #[test]
     fn generate_aux_files_json_with_svg_flag_returns_svg_artifact() {
-        let (is_ok, json) =
-            call_generate_aux_files_json("osc.dsp", "process = 0;", "-svg");
+        let (is_ok, json) = call_generate_aux_files_json("osc.dsp", "process = 0;", "-svg");
         assert_eq!(is_ok, 1, "expected success, got error: {json}");
 
         // Must be a JSON array.
         assert!(json.starts_with('['), "expected JSON array, got: {json}");
         // Must contain at least one SVG entry.
-        assert!(json.contains("process.svg"), "process.svg missing from: {json}");
+        assert!(
+            json.contains("process.svg"),
+            "process.svg missing from: {json}"
+        );
         // The path field must come before the content for process.svg.
         assert!(
             json.contains(r#""path":"process.svg""#),
@@ -1119,8 +1125,7 @@ mod tests {
 
     #[test]
     fn generate_aux_files_json_svg_content_base64_decodes_to_valid_svg() {
-        let (is_ok, json) =
-            call_generate_aux_files_json("osc.dsp", "process = 0;", "-svg");
+        let (is_ok, json) = call_generate_aux_files_json("osc.dsp", "process = 0;", "-svg");
         assert_eq!(is_ok, 1, "expected success, got error: {json}");
 
         // Extract the first content_base64 value by simple string search.
@@ -1141,8 +1146,11 @@ mod tests {
 
     #[test]
     fn generate_aux_files_json_invalid_source_returns_error_handle() {
-        let (is_ok, text) =
-            call_generate_aux_files_json("bad.dsp", "this is not valid faust source !!!§§§", "-svg");
+        let (is_ok, text) = call_generate_aux_files_json(
+            "bad.dsp",
+            "this is not valid faust source !!!§§§",
+            "-svg",
+        );
         assert_eq!(is_ok, 0, "expected error handle, got success with: {text}");
         assert!(!text.is_empty(), "error message must not be empty");
     }
