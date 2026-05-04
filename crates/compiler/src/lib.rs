@@ -1446,23 +1446,33 @@ impl Compiler {
             .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
             let read_dir = std::fs::read_dir(&tmp)
                 .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
-            for entry in read_dir.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("svg") {
-                    if let Ok(content) = std::fs::read(&path) {
-                        let file_name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("process.svg")
-                            .to_owned();
-                        artifacts.push(AuxFileArtifact {
-                            path: file_name,
-                            content,
-                            binary: false,
-                        });
+            let mut svg_entries: Vec<AuxFileArtifact> = read_dir
+                .flatten()
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("svg") {
+                        return None;
                     }
-                }
-            }
+                    let file_name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("process.svg")
+                        .to_owned();
+                    let content = std::fs::read(&path).ok()?;
+                    Some(AuxFileArtifact {
+                        path: file_name,
+                        content,
+                        binary: false,
+                    })
+                })
+                .collect();
+            // process.svg is the hierarchy entry point — callers expect it first.
+            svg_entries.sort_by(|a, b| {
+                let a_is_root = a.path == "process.svg";
+                let b_is_root = b.path == "process.svg";
+                b_is_root.cmp(&a_is_root).then_with(|| a.path.cmp(&b.path))
+            });
+            artifacts.extend(svg_entries);
             let _ = std::fs::remove_dir_all(&tmp);
         }
 
