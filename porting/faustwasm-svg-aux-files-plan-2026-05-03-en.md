@@ -39,6 +39,41 @@ the produced SVGs:
 Result: `generateAuxFiles("-svg")` may report success, but the SVG payload is
 not observable from JavaScript.
 
+## SVG Diagram Hierarchy
+
+The Faust compiler produces a *tree* of SVG files, not a single flat diagram.
+For any non-trivial DSP program the output looks like:
+
+```
+<name>-svg/
+  process.svg          ← entry point, always present
+  process_0x...svg     ← sub-diagram for a named definition
+  process_0x...svg     ← sub-diagram for another definition
+  ...
+```
+
+`process.svg` is the root of the hierarchy. It contains standard SVG `<a
+xlink:href="...">` (or `href="..."`) elements that link to the child `.svg`
+files by *relative path*. Those child files may themselves link deeper, so the
+full block diagram is explored by following these links.
+
+The Emscripten backend writes every file of the hierarchy into the in-memory
+`FS`, and `FaustSvgDiagrams.from(...)` reads the entire `<name>-svg/` directory
+at once: the relative `href` links between files therefore resolve naturally when
+a browser or Node application renders them side-by-side from the same in-memory
+map.
+
+**The Rust backend must preserve this navigability.** Concretely:
+
+- `faust_wasm_generate_aux_files_json(...)` must return *all* `.svg` files in the
+  hierarchy, not only `process.svg`.
+- The relative `href` links embedded in the SVG source must remain intact (they
+  already are, since the Rust renderer writes them as relative paths).
+- The `faustwasm` adapter must reconstitute a complete `Record<string, string>`
+  map keyed by the relative path (`"process.svg"`, `"process_0x1234.svg"`, …)
+  so that client code can satisfy cross-file references however it chooses
+  (in-memory map lookup, virtual filesystem, object-URL map, etc.).
+
 ## Design Decision
 
 Expose auxiliary files as explicit in-memory artifacts on the Rust Wasm ABI.
@@ -75,9 +110,19 @@ The returned text is UTF-8 JSON:
     "path": "process.svg",
     "binary": false,
     "content_base64": "PHN2ZyB4bWxucz0i..."
+  },
+  {
+    "path": "process_0x7f3a1b.svg",
+    "binary": false,
+    "content_base64": "PHN2ZyB4bWxucz0i..."
   }
 ]
 ```
+
+The array must contain **all** files in the `<name>-svg/` hierarchy, ordered
+with the entry-point file (`process.svg`) first. The `path` values are relative
+within the hierarchy (no leading slash, no `<name>-svg/` directory prefix) so
+that the `href` links embedded in the SVG source match the map keys exactly.
 
 Use base64 content for all artifacts, including textual SVG. This avoids
 special cases for generated Wasm or other future binary auxiliary outputs and
@@ -163,12 +208,20 @@ and makes browser use deterministic.
    When the compiler is backed by the raw Rust module:
 
    - call the JSON helper with `-lang wasm -o binary -svg ...`,
-   - filter returned artifacts to `.svg`,
+   - filter returned artifacts to `.svg` entries,
    - decode base64 content to UTF-8 strings,
-   - return the current `Record<string, string>` map.
+   - build and return the `Record<string, string>` map keyed by relative path
+     (e.g. `"process.svg"`, `"process_0x7f3a1b.svg"`, …).
+
+   The map must be *complete*: it must include every file returned by the
+   compiler, not only `process.svg`. Callers that render the block diagram must
+   be able to resolve cross-file `href` references by looking up the target key
+   in this map. Navigation in the hierarchy works exactly like the legacy
+   Emscripten path — only the source of the files changes.
 
    When the compiler is backed by the historical Emscripten module, keep the
-   existing `FS` path unchanged.
+   existing `FS`-directory-scan path unchanged; it already returns the full
+   hierarchy.
 
 4. Update `scripts/faust2svg.js` validation.
 
@@ -214,3 +267,24 @@ In `faustwasm`:
 - Whether the temporary-directory implementation in `Compiler::generate_aux_files`
   should be replaced before or after the first `faustwasm` TypeScript adapter
   patch.
+- ~~How browser UI code should satisfy the cross-file SVG `href` links.~~ **Resolved: use
+  application-managed navigation (option c).** The other options fail at depth > 1:
+  `data:` URLs and `blob:` URLs cannot resolve relative `href` attributes
+  embedded in the rendered SVG. A Service Worker could emulate a virtual origin
+  but adds lifecycle complexity for no practical gain.
+
+  **Recommended navigation model** — the host application maintains a path
+  stack and renders SVGs from the in-memory map:
+
+  1. Initialise stack to `["process.svg"]`; display the SVG at the top.
+  2. Intercept `click` on `<a>` elements inside the rendered SVG: push the
+     `href` attribute value (e.g. `"process_0x7f3a1b.svg"`) onto the stack,
+     look it up in the map, render the result.
+  3. Intercept `click` on the SVG background (outside any block): pop the
+     stack; render the new top (go up one level). If the stack has only one
+     entry, the click is a no-op.
+
+  This matches the existing Emscripten-based Faust IDE browser behaviour exactly.
+  The `faustwasm` adapter does not need to implement the stack itself; it only
+  needs to guarantee that the `Record<string, string>` map is complete so that
+  step 2 never misses a key.
