@@ -174,20 +174,10 @@ impl ResultRegistryText {
 /// Besides option parsing, this is where the embedded standard-library bundle
 /// is attached so source-string compilation can resolve `import("stdfaust.lib")`
 /// without a host filesystem.
-fn parse_compile_request(
-    name: &str,
-    source: &str,
-    args: &str,
-    internal_memory: bool,
-) -> Result<WasmArtifactRequest, String> {
-    let _embedded_root = embedded_standard_library_root();
-    let _embedded_roots = embedded_standard_library_roots();
-    let argv = split_faustwasm_args(args);
-    let parsed = utils::parse_ffi_compile_args(&argv)?;
-    let mut request = WasmArtifactRequest::new(name, source);
-    request.import_dirs = parsed.search_paths;
+/// Build a `VirtualSourceMap` from the embedded stdlib bundle extended with
+/// any `--virtual-source name=base64` entries found in `argv`.
+fn virtual_sources_from_argv(argv: &[String]) -> VirtualSourceMap {
     let mut vsources = embedded_standard_library_sources();
-    // Inject user-supplied virtual sources encoded as --virtual-source name=base64.
     let mut i = 0;
     while i < argv.len() {
         if argv[i] == "--virtual-source" {
@@ -207,7 +197,22 @@ fn parse_compile_request(
         }
         i += 1;
     }
-    request.virtual_sources = vsources;
+    vsources
+}
+
+fn parse_compile_request(
+    name: &str,
+    source: &str,
+    args: &str,
+    internal_memory: bool,
+) -> Result<WasmArtifactRequest, String> {
+    let _embedded_root = embedded_standard_library_root();
+    let _embedded_roots = embedded_standard_library_roots();
+    let argv = split_faustwasm_args(args);
+    let parsed = utils::parse_ffi_compile_args(&argv)?;
+    let mut request = WasmArtifactRequest::new(name, source);
+    request.import_dirs = parsed.search_paths;
+    request.virtual_sources = virtual_sources_from_argv(&argv);
     request.wasm_options = WasmOptions {
         double_precision: parsed.double,
         internal_memory,
@@ -788,11 +793,12 @@ pub unsafe extern "C" fn faust_wasm_generate_aux_files(
         Err(_) => return 0,
     };
     let compiler = Compiler::new();
+    let argv = split_faustwasm_args(&args);
     match compiler.generate_aux_files(&compiler::GenerateAuxFilesRequest {
         source_name: name.to_owned(),
         source: source.to_owned(),
         args: args.to_owned(),
-        virtual_sources: embedded_standard_library_sources(),
+        virtual_sources: virtual_sources_from_argv(&argv),
     }) {
         Ok(_files) => 1,
         Err(_error) => 0,
@@ -848,11 +854,12 @@ pub unsafe extern "C" fn faust_wasm_generate_aux_files_json(
             Err(error) => return store_text_result(StoredTextResult::Err(error)),
         };
         let compiler = Compiler::new();
+        let argv = split_faustwasm_args(&args);
         match compiler.generate_aux_files(&compiler::GenerateAuxFilesRequest {
             source_name: name.to_owned(),
             source: source.to_owned(),
             args: args.to_owned(),
-            virtual_sources: embedded_standard_library_sources(),
+            virtual_sources: virtual_sources_from_argv(&argv),
         }) {
             Ok(files) => {
                 let wasm_artifacts: Vec<WasmAuxFileArtifact> = files
