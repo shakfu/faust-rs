@@ -186,7 +186,28 @@ fn parse_compile_request(
     let parsed = utils::parse_ffi_compile_args(&argv)?;
     let mut request = WasmArtifactRequest::new(name, source);
     request.import_dirs = parsed.search_paths;
-    request.virtual_sources = embedded_standard_library_sources();
+    let mut vsources = embedded_standard_library_sources();
+    // Inject user-supplied virtual sources encoded as --virtual-source name=base64.
+    let mut i = 0;
+    while i < argv.len() {
+        if argv[i] == "--virtual-source" {
+            if let Some(spec) = argv.get(i + 1) {
+                if let Some(eq) = spec.find('=') {
+                    let lib_name = &spec[..eq];
+                    let b64 = &spec[eq + 1..];
+                    if let Ok(bytes) = base64_decode(b64.as_bytes()) {
+                        if let Ok(content) = String::from_utf8(bytes) {
+                            vsources = vsources.with_source(lib_name, content);
+                        }
+                    }
+                }
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    request.virtual_sources = vsources;
     request.wasm_options = WasmOptions {
         double_precision: parsed.double,
         internal_memory,
@@ -669,11 +690,10 @@ fn json_escape(s: &str) -> String {
     out
 }
 
-/// Decode a standard base64 string back to bytes.
+/// Decode a standard base64 byte slice back to bytes.
 ///
-/// Used only in `#[cfg(test)]` round-trip assertions; not exported.
-#[cfg(test)]
-fn base64_decode(s: &str) -> Vec<u8> {
+/// Used for `--virtual-source` arg injection and in `#[cfg(test)]` round-trip assertions.
+fn base64_decode(s: &[u8]) -> Result<Vec<u8>, ()> {
     const DEC: [u8; 128] = {
         let mut t = [255u8; 128];
         let mut i = 0u8;
@@ -688,27 +708,30 @@ fn base64_decode(s: &str) -> Vec<u8> {
         }
         t
     };
-    let bytes: Vec<u8> = s.bytes().filter(|&b| b != b'=').collect();
+    let bytes: Vec<u8> = s.iter().copied().filter(|&b| b != b'=').collect();
     let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
     for chunk in bytes.chunks(4) {
-        let v: Vec<u8> = chunk.iter().map(|&b| DEC[b as usize]).collect();
+        let v: Vec<u8> = chunk
+            .iter()
+            .map(|&b| if (b as usize) < 128 { DEC[b as usize] } else { 255 })
+            .collect();
         match v.as_slice() {
-            [a, b, c, d] => {
+            [a, b, c, d] if *a != 255 && *b != 255 && *c != 255 && *d != 255 => {
                 out.push((a << 2) | (b >> 4));
                 out.push((b << 4) | (c >> 2));
                 out.push((c << 6) | d);
             }
-            [a, b, c] => {
+            [a, b, c] if *a != 255 && *b != 255 && *c != 255 => {
                 out.push((a << 2) | (b >> 4));
                 out.push((b << 4) | (c >> 2));
             }
-            [a, b] => {
+            [a, b] if *a != 255 && *b != 255 => {
                 out.push((a << 2) | (b >> 4));
             }
-            _ => {}
+            _ => return Err(()),
         }
     }
-    out
+    Ok(out)
 }
 
 /// Serialise a slice of [`WasmAuxFileArtifact`] as a UTF-8 JSON array.
@@ -961,6 +984,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_compile_request_injects_virtual_source_from_flag() {
+        // Encode a tiny Faust library as base64 and verify it resolves.
+        let lib_content = "myconst = 42;";
+        let b64 = super::base64_encode(lib_content.as_bytes());
+        let args = format!("--virtual-source mylib.lib={}", b64);
+        let result = compile_to_stored_result(
+            "test.dsp",
+            "import(\"mylib.lib\");\nprocess = myconst;",
+            &args,
+            true,
+        );
+        assert!(
+            matches!(result, StoredCompileResult::Ok(_)),
+            "compile with --virtual-source flag should succeed"
+        );
+    }
+
+    #[test]
     fn embedded_standard_library_bundle_exposes_stdfaust_when_available() {
         let bundle = super::embedded_standard_library_sources();
         if super::embedded_standard_library_root().is_none() {
@@ -1137,7 +1178,7 @@ mod tests {
         let b64 = &json[start..end];
 
         // Decode and verify it starts with the SVG magic bytes.
-        let decoded = super::base64_decode(b64);
+        let decoded = super::base64_decode(b64.as_bytes()).expect("base64 must decode");
         let text = std::str::from_utf8(&decoded).expect("SVG must be valid UTF-8");
         assert!(
             text.contains("<svg") || text.starts_with("<?xml"),
