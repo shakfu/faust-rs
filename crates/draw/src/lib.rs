@@ -127,6 +127,73 @@ impl Default for DrawConfig {
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
+/// Generate SVG block-diagram file(s) into memory and return them as a
+/// `(filename, bytes)` vector.
+///
+/// This is the filesystem-free counterpart of [`draw_schema`].  Every SVG is
+/// rendered into a `Vec<u8>` buffer; nothing is written to disk.  Use this
+/// variant when the host has no writable filesystem, such as when the
+/// compiler runs as a `wasm32-unknown-unknown` module.
+///
+/// `process.svg` is always the first element of the returned vector when the
+/// root diagram is named `"process"`, matching the hierarchy entry-point
+/// convention expected by the `faustwasm` SVG map.
+///
+/// # Errors
+/// Returns [`DrawError`] if rendering fails.
+pub fn draw_schema_to_memory(
+    arena: &tlib::TreeArena,
+    root: boxes::BoxId,
+    name: &str,
+    config: &DrawConfig,
+    def_names: &std::collections::HashMap<boxes::BoxId, String>,
+) -> Result<Vec<(String, Vec<u8>)>, DrawError> {
+    use std::collections::{HashSet, VecDeque};
+    use std::io::Cursor;
+
+    use device::SvgDevice;
+    use schema::TraitCollector;
+    use translate::{FoldState, generate_folded_inside, make_top_schema};
+
+    let folding =
+        config.fold_threshold > 0 && boxes::box_complexity(arena, root) > config.fold_threshold;
+
+    let mut pending: VecDeque<(boxes::BoxId, String, String)> = VecDeque::new();
+    let mut drawn: HashSet<boxes::BoxId> = HashSet::new();
+    let mut artifacts: Vec<(String, Vec<u8>)> = Vec::new();
+
+    pending.push_back((root, name.to_owned(), String::new()));
+    drawn.insert(root);
+
+    while let Some((box_id, diagram_name, back_link)) = pending.pop_front() {
+        let file_name = translate::legal_file_name(&diagram_name, box_id);
+
+        let mut state = FoldState {
+            def_names,
+            pending: &mut pending,
+            drawn: &mut drawn,
+            current_file: file_name.clone(),
+            folding,
+            fold_complexity: config.fold_complexity,
+        };
+
+        let inner = generate_folded_inside(arena, box_id, config, &mut state);
+        let mut top = make_top_schema(inner, &diagram_name, &back_link);
+        top.place(0.0, 0.0, Orientation::LeftRight);
+
+        let mut buf = Cursor::new(Vec::new());
+        let mut dev = SvgDevice::new(&mut buf, top.width(), top.height(), config)?;
+        top.draw(&mut dev)?;
+        let mut collector = TraitCollector::new();
+        top.collect_traits(&mut collector);
+        collector.draw(&mut dev)?;
+        dev.finish().map(|_| ())?;
+        artifacts.push((file_name, buf.into_inner()));
+    }
+
+    Ok(artifacts)
+}
+
 /// Generate SVG block-diagram file(s) from a box expression.
 ///
 /// Writes `process.svg` (and optionally sub-diagram files) into `out_dir`.

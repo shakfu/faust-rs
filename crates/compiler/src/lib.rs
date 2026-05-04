@@ -1431,52 +1431,23 @@ impl Compiler {
                     &search_paths,
                 )
                 .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
-            let tmp = std::env::temp_dir().join(format!("faust-svg-{}", std::process::id()));
-            std::fs::create_dir_all(&tmp)
-                .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
             let draw_config = draw::DrawConfig::default();
             // Use "process" as the diagram name so the root SVG file is
             // always process.svg, matching the C++ compiler convention and
             // the faustwasm FaustSvgDiagrams.from(...) expectation.
-            draw::draw_schema(
+            // draw_schema_to_memory avoids any filesystem access so this
+            // path is safe on wasm32-unknown-unknown targets.
+            let svg_pairs = draw::draw_schema_to_memory(
                 &signals.parse.state.arena,
                 signals.process_box,
                 "process",
-                &tmp,
                 &draw_config,
                 &signals.def_names,
             )
             .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
-            let read_dir = std::fs::read_dir(&tmp)
-                .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
-            let mut svg_entries: Vec<AuxFileArtifact> = read_dir
-                .flatten()
-                .filter_map(|entry| {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("svg") {
-                        return None;
-                    }
-                    let file_name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("process.svg")
-                        .to_owned();
-                    let content = std::fs::read(&path).ok()?;
-                    Some(AuxFileArtifact {
-                        path: file_name,
-                        content,
-                        binary: false,
-                    })
-                })
-                .collect();
-            // process.svg is the hierarchy entry point — callers expect it first.
-            svg_entries.sort_by(|a, b| {
-                let a_is_root = a.path == "process.svg";
-                let b_is_root = b.path == "process.svg";
-                b_is_root.cmp(&a_is_root).then_with(|| a.path.cmp(&b.path))
-            });
-            artifacts.extend(svg_entries);
-            let _ = std::fs::remove_dir_all(&tmp);
+            artifacts.extend(svg_pairs.into_iter().map(|(path, content)| {
+                AuxFileArtifact { path, content, binary: false }
+            }));
         }
 
         Ok(artifacts)
