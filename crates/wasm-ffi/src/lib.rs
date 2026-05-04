@@ -591,6 +591,106 @@ pub unsafe extern "C" fn faust_wasm_expand_dsp(
     store_text_result(result)
 }
 
+/// Transfer object for one auxiliary file artifact returned by
+/// [`faust_wasm_generate_aux_files_json`].
+///
+/// Serialised as a JSON object with three fields:
+///
+/// - `"path"` — relative filename within the `<name>-svg/` hierarchy
+///   (e.g. `"process.svg"`, `"process_0x1234.svg"`).  Matches the `href`
+///   attribute values embedded in sibling SVG files so cross-file links can
+///   be resolved by a simple map lookup.
+/// - `"binary"` — `true` for opaque binary payloads (e.g. `.wasm`), `false`
+///   for text-encodable files (SVG, JSON, C/C++ source).
+/// - `"content_base64"` — base64-encoded file content.  All artifacts use
+///   base64 regardless of the `binary` flag to keep the outer JSON valid for
+///   arbitrary byte sequences.
+struct WasmAuxFileArtifact {
+    path: String,
+    binary: bool,
+    content_base64: String,
+}
+
+/// Encode `bytes` as standard base64 (RFC 4648, alphabet `A-Za-z0-9+/`, `=`
+/// padding).
+///
+/// Pure-Rust implementation kept inline to avoid introducing a new dependency
+/// into a crate compiled for `wasm32-unknown-unknown`.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut chunks = bytes.chunks_exact(3);
+    for chunk in chunks.by_ref() {
+        let b0 = chunk[0] as usize;
+        let b1 = chunk[1] as usize;
+        let b2 = chunk[2] as usize;
+        out.push(ALPHABET[b0 >> 2] as char);
+        out.push(ALPHABET[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
+        out.push(ALPHABET[((b1 & 0x0f) << 2) | (b2 >> 6)] as char);
+        out.push(ALPHABET[b2 & 0x3f] as char);
+    }
+    match chunks.remainder() {
+        [b0] => {
+            let b0 = *b0 as usize;
+            out.push(ALPHABET[b0 >> 2] as char);
+            out.push(ALPHABET[(b0 & 0x03) << 4] as char);
+            out.push('=');
+            out.push('=');
+        }
+        [b0, b1] => {
+            let b0 = *b0 as usize;
+            let b1 = *b1 as usize;
+            out.push(ALPHABET[b0 >> 2] as char);
+            out.push(ALPHABET[((b0 & 0x03) << 4) | (b1 >> 4)] as char);
+            out.push(ALPHABET[(b1 & 0x0f) << 2] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Escape a string for embedding inside a JSON double-quoted value.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Serialise a slice of [`WasmAuxFileArtifact`] as a UTF-8 JSON array.
+///
+/// Each element is rendered as:
+/// ```json
+/// {"path":"...","binary":false,"content_base64":"..."}
+/// ```
+fn artifacts_to_json(artifacts: &[WasmAuxFileArtifact]) -> String {
+    let items: Vec<String> = artifacts
+        .iter()
+        .map(|a| {
+            format!(
+                r#"{{"path":"{}","binary":{},"content_base64":"{}"}}"#,
+                json_escape(&a.path),
+                a.binary,
+                a.content_base64
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
 /// Export for the `generateAuxFiles(...)` helper service.
 ///
 /// This API intentionally keeps the coarse historical success/failure shape
@@ -632,6 +732,77 @@ pub unsafe extern "C" fn faust_wasm_generate_aux_files(
         Ok(_files) => 1,
         Err(_error) => 0,
     }
+}
+
+/// Export for the `generateAuxFilesJson(...)` helper service.
+///
+/// Generates auxiliary output files for the given DSP source, encodes every
+/// artifact as base64, and returns a UTF-8 JSON array through the
+/// text-result handle system.  The array contains one object per file:
+///
+/// ```json
+/// [
+///   {"path":"process.svg","binary":false,"content_base64":"PHN2Zy4uLg=="},
+///   {"path":"process_0x1234.svg","binary":false,"content_base64":"PHN2Zy4uLg=="}
+/// ]
+/// ```
+///
+/// `process.svg` is always the first element when SVG output is requested.
+/// The `path` values match the `href` attributes embedded in the SVG source
+/// so cross-file links can be resolved by a simple map lookup.
+///
+/// On failure, the returned handle is an error text result carrying the
+/// compiler diagnostic.  Use [`faust_wasm_text_result_is_ok`] to
+/// distinguish the two cases before reading the payload.
+///
+/// The caller must release the handle with [`faust_wasm_text_result_free`].
+///
+/// # Safety
+/// - `name_ptr`, `source_ptr`, and `args_ptr` must point to readable UTF-8
+///   byte ranges of lengths `name_len`, `source_len`, and `args_len`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn faust_wasm_generate_aux_files_json(
+    name_ptr: *const u8,
+    name_len: usize,
+    source_ptr: *const u8,
+    source_len: usize,
+    args_ptr: *const u8,
+    args_len: usize,
+) -> u32 {
+    let result = unsafe {
+        let name = match decode_utf8_arg(name_ptr, name_len, "name") {
+            Ok(name) => name,
+            Err(error) => return store_text_result(StoredTextResult::Err(error)),
+        };
+        let source = match decode_utf8_arg(source_ptr, source_len, "source") {
+            Ok(source) => source,
+            Err(error) => return store_text_result(StoredTextResult::Err(error)),
+        };
+        let args = match decode_utf8_arg(args_ptr, args_len, "args") {
+            Ok(args) => args,
+            Err(error) => return store_text_result(StoredTextResult::Err(error)),
+        };
+        let compiler = Compiler::new();
+        match compiler.generate_aux_files(&compiler::GenerateAuxFilesRequest {
+            source_name: name.to_owned(),
+            source: source.to_owned(),
+            args: args.to_owned(),
+        }) {
+            Ok(files) => {
+                let wasm_artifacts: Vec<WasmAuxFileArtifact> = files
+                    .into_iter()
+                    .map(|f| WasmAuxFileArtifact {
+                        path: f.path,
+                        binary: f.binary,
+                        content_base64: base64_encode(&f.content),
+                    })
+                    .collect();
+                StoredTextResult::Ok(artifacts_to_json(&wasm_artifacts))
+            }
+            Err(error) => StoredTextResult::Err(error.to_string()),
+        }
+    };
+    store_text_result(result)
 }
 
 /// Returns `1` for a successful text result and `0` for an error result or
