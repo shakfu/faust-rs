@@ -670,6 +670,45 @@ fn json_escape(s: &str) -> String {
     out
 }
 
+/// Decode a standard base64 string back to bytes.
+///
+/// Used only in `#[cfg(test)]` round-trip assertions; not exported.
+#[cfg(test)]
+fn base64_decode(s: &str) -> Vec<u8> {
+    const DEC: [u8; 128] = {
+        let mut t = [255u8; 128];
+        let mut i = 0u8;
+        loop {
+            let ch = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"[i as usize];
+            t[ch as usize] = i;
+            i += 1;
+            if i == 64 { break; }
+        }
+        t
+    };
+    let bytes: Vec<u8> = s.bytes().filter(|&b| b != b'=').collect();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        let v: Vec<u8> = chunk.iter().map(|&b| DEC[b as usize]).collect();
+        match v.as_slice() {
+            [a, b, c, d] => {
+                out.push((a << 2) | (b >> 4));
+                out.push((b << 4) | (c >> 2));
+                out.push((c << 6) | d);
+            }
+            [a, b, c] => {
+                out.push((a << 2) | (b >> 4));
+                out.push((b << 4) | (c >> 2));
+            }
+            [a, b] => {
+                out.push((a << 2) | (b >> 4));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Serialise a slice of [`WasmAuxFileArtifact`] as a UTF-8 JSON array.
 ///
 /// Each element is rendered as:
@@ -965,5 +1004,164 @@ mod tests {
         assert!(!super::faust_wasm_text_result_ptr(handle).is_null());
         super::faust_wasm_text_result_free(handle);
         assert_eq!(super::faust_wasm_text_result_len(handle), 0);
+    }
+
+    // ── base64 helpers ──────────────────────────────────────────────────────
+
+    #[test]
+    fn base64_encode_empty_input_produces_empty_string() {
+        assert_eq!(super::base64_encode(b""), "");
+    }
+
+    #[test]
+    fn base64_encode_one_byte_produces_four_chars_with_double_padding() {
+        // 0x4d = 'M' → "TQ=="
+        assert_eq!(super::base64_encode(b"M"), "TQ==");
+    }
+
+    #[test]
+    fn base64_encode_two_bytes_produces_four_chars_with_single_padding() {
+        // "Ma" → "TWE="
+        assert_eq!(super::base64_encode(b"Ma"), "TWE=");
+    }
+
+    #[test]
+    fn base64_encode_three_bytes_produces_four_chars_no_padding() {
+        assert_eq!(super::base64_encode(b"Man"), "TWFu");
+    }
+
+    #[test]
+    fn base64_encode_known_rfc4648_vector() {
+        // RFC 4648 §10 test vector
+        assert_eq!(super::base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    // ── JSON serialisation ───────────────────────────────────────────────────
+
+    #[test]
+    fn artifacts_to_json_empty_slice_produces_empty_array() {
+        assert_eq!(super::artifacts_to_json(&[]), "[]");
+    }
+
+    #[test]
+    fn artifacts_to_json_single_text_artifact_round_trips() {
+        let artifact = super::WasmAuxFileArtifact {
+            path: "process.svg".to_owned(),
+            binary: false,
+            content_base64: "PHN2Zy8+".to_owned(),
+        };
+        let json = super::artifacts_to_json(&[artifact]);
+        assert_eq!(
+            json,
+            r#"[{"path":"process.svg","binary":false,"content_base64":"PHN2Zy8+"}]"#
+        );
+    }
+
+    #[test]
+    fn artifacts_to_json_escapes_special_chars_in_path() {
+        let artifact = super::WasmAuxFileArtifact {
+            path: r#"a"b\c"#.to_owned(),
+            binary: false,
+            content_base64: String::new(),
+        };
+        let json = super::artifacts_to_json(&[artifact]);
+        assert!(json.contains(r#""path":"a\"b\\c""#));
+    }
+
+    // ── generate_aux_files_json export ──────────────────────────────────────
+
+    /// Helper: call faust_wasm_generate_aux_files_json and return the decoded
+    /// result text (panics on UTF-8 error).
+    fn call_generate_aux_files_json(name: &str, source: &str, args: &str) -> (u32, String) {
+        let handle = unsafe {
+            super::faust_wasm_generate_aux_files_json(
+                name.as_ptr(),
+                name.len(),
+                source.as_ptr(),
+                source.len(),
+                args.as_ptr(),
+                args.len(),
+            )
+        };
+        let is_ok = super::faust_wasm_text_result_is_ok(handle);
+        let ptr = super::faust_wasm_text_result_ptr(handle);
+        let len = super::faust_wasm_text_result_len(handle);
+        let text = unsafe {
+            let bytes = std::slice::from_raw_parts(ptr, len);
+            std::str::from_utf8(bytes).expect("result must be UTF-8").to_owned()
+        };
+        super::faust_wasm_text_result_free(handle);
+        (is_ok, text)
+    }
+
+    #[test]
+    fn generate_aux_files_json_with_svg_flag_returns_svg_artifact() {
+        let (is_ok, json) =
+            call_generate_aux_files_json("osc.dsp", "process = 0;", "-svg");
+        assert_eq!(is_ok, 1, "expected success, got error: {json}");
+
+        // Must be a JSON array.
+        assert!(json.starts_with('['), "expected JSON array, got: {json}");
+        // Must contain at least one SVG entry.
+        assert!(json.contains("process.svg"), "process.svg missing from: {json}");
+        // The path field must come before the content for process.svg.
+        assert!(
+            json.contains(r#""path":"process.svg""#),
+            "process.svg not first in: {json}"
+        );
+        // content_base64 must be present and non-empty.
+        assert!(
+            json.contains(r#""content_base64":""#) == false
+                || json.contains(r#""content_base64":"P"#),
+            "content_base64 looks empty in: {json}"
+        );
+    }
+
+    #[test]
+    fn generate_aux_files_json_svg_content_base64_decodes_to_valid_svg() {
+        let (is_ok, json) =
+            call_generate_aux_files_json("osc.dsp", "process = 0;", "-svg");
+        assert_eq!(is_ok, 1, "expected success, got error: {json}");
+
+        // Extract the first content_base64 value by simple string search.
+        let key = r#""content_base64":""#;
+        let start = json.find(key).expect("content_base64 key missing") + key.len();
+        let end = json[start..].find('"').expect("closing quote missing") + start;
+        let b64 = &json[start..end];
+
+        // Decode and verify it starts with the SVG magic bytes.
+        let decoded = super::base64_decode(b64);
+        let text = std::str::from_utf8(&decoded).expect("SVG must be valid UTF-8");
+        assert!(
+            text.contains("<svg") || text.starts_with("<?xml"),
+            "decoded content is not SVG: {}",
+            &text[..text.len().min(120)]
+        );
+    }
+
+    #[test]
+    fn generate_aux_files_json_invalid_source_returns_error_handle() {
+        let (is_ok, text) =
+            call_generate_aux_files_json("bad.dsp", "this is not valid faust source !!!§§§", "-svg");
+        assert_eq!(is_ok, 0, "expected error handle, got success with: {text}");
+        assert!(!text.is_empty(), "error message must not be empty");
+    }
+
+    #[test]
+    fn generate_aux_files_boolean_wrapper_still_returns_success_for_valid_source() {
+        let name = "osc.dsp";
+        let source = "process = 0;";
+        let args = "-svg";
+        let result = unsafe {
+            super::faust_wasm_generate_aux_files(
+                name.as_ptr(),
+                name.len(),
+                source.as_ptr(),
+                source.len(),
+                args.as_ptr(),
+                args.len(),
+            )
+        };
+        assert_eq!(result, 1, "boolean wrapper must still return 1 on success");
     }
 }

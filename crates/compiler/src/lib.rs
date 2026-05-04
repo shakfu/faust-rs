@@ -1435,10 +1435,13 @@ impl Compiler {
             std::fs::create_dir_all(&tmp)
                 .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
             let draw_config = draw::DrawConfig::default();
+            // Use "process" as the diagram name so the root SVG file is
+            // always process.svg, matching the C++ compiler convention and
+            // the faustwasm FaustSvgDiagrams.from(...) expectation.
             draw::draw_schema(
                 &signals.parse.state.arena,
                 signals.process_box,
-                stem,
+                "process",
                 &tmp,
                 &draw_config,
                 &signals.def_names,
