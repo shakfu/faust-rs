@@ -2,8 +2,8 @@
 
 ## Status
 
-Implemented (Rust side complete — 2026-05-04).
-`faustwasm` TypeScript integration steps remain.
+Fully implemented — 2026-05-04.
+Rust side (`faust-rs`) and TypeScript integration (`faustwasm`) are both complete.
 
 ## Scope
 
