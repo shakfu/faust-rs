@@ -769,6 +769,7 @@ pub unsafe extern "C" fn faust_wasm_generate_aux_files(
         source_name: name.to_owned(),
         source: source.to_owned(),
         args: args.to_owned(),
+        virtual_sources: embedded_standard_library_sources(),
     }) {
         Ok(_files) => 1,
         Err(_error) => 0,
@@ -828,6 +829,7 @@ pub unsafe extern "C" fn faust_wasm_generate_aux_files_json(
             source_name: name.to_owned(),
             source: source.to_owned(),
             args: args.to_owned(),
+            virtual_sources: embedded_standard_library_sources(),
         }) {
             Ok(files) => {
                 let wasm_artifacts: Vec<WasmAuxFileArtifact> = files

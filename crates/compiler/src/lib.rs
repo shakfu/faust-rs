@@ -251,10 +251,10 @@ pub struct ExpandDspRequest {
     pub args: String,
 }
 
-/// Request payload reserved for future `generateAuxFiles(...)` parity support.
+/// Request payload for `generateAuxFiles(...)`.
 ///
-/// Mapping status: `deferred`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Mapping status: `adapted`.
+#[derive(Debug, Clone, Default)]
 pub struct GenerateAuxFilesRequest {
     /// Logical source name reported in diagnostics.
     pub source_name: String,
@@ -262,6 +262,11 @@ pub struct GenerateAuxFilesRequest {
     pub source: String,
     /// Raw argument string as passed by `faustwasm`.
     pub args: String,
+    /// Optional in-memory library sources (e.g. embedded standard library
+    /// bundle from the `wasm-ffi` build).  When non-empty these take
+    /// precedence over filesystem resolution so `import("stdfaust.lib")`
+    /// works without a writable host filesystem.
+    pub virtual_sources: VirtualSourceMap,
 }
 
 /// Structured error returned by the `faustwasm`-oriented compiler service
@@ -1425,10 +1430,11 @@ impl Compiler {
 
         if wants_svg {
             let signals = self
-                .compile_source_to_signals_with_search_paths(
+                .compile_source_to_signals_with_import_context(
                     &request.source_name,
                     &request.source,
                     &search_paths,
+                    &request.virtual_sources,
                 )
                 .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
             let draw_config = draw::DrawConfig::default();
@@ -4374,6 +4380,7 @@ mod tests {
                 source_name: "zero.dsp".to_owned(),
                 source: "process = 0;".to_owned(),
                 args: String::new(),
+                ..Default::default()
             })
             .expect("generate_aux_files should succeed with no flags");
         assert!(artifacts.is_empty());
@@ -4387,6 +4394,7 @@ mod tests {
                 source_name: "zero.dsp".to_owned(),
                 source: "process = 0;".to_owned(),
                 args: "-json".to_owned(),
+                ..Default::default()
             })
             .expect("generate_aux_files with -json should succeed");
         assert_eq!(artifacts.len(), 1);
@@ -4404,6 +4412,7 @@ mod tests {
                 source_name: "zero.dsp".to_owned(),
                 source: "process = 0;".to_owned(),
                 args: "-cpp".to_owned(),
+                ..Default::default()
             })
             .expect("generate_aux_files with -cpp should succeed");
         assert_eq!(artifacts.len(), 1);

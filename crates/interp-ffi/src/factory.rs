@@ -852,6 +852,7 @@ pub unsafe extern "C" fn generateCInterpreterAuxFilesFromFile(
             source_name: filename.to_owned(),
             source,
             args: args.join(" "),
+            ..Default::default()
         };
         match compiler.generate_aux_files(&request) {
             Ok(artifacts) => write_aux_artifacts_to_disk(&artifacts, &args, error_msg),
@@ -910,6 +911,7 @@ pub unsafe extern "C" fn generateCInterpreterAuxFilesFromString(
             source_name: name_app.to_owned(),
             source: source.to_owned(),
             args: args.join(" "),
+            ..Default::default()
         };
         match compiler.generate_aux_files(&request) {
             Ok(artifacts) => write_aux_artifacts_to_disk(&artifacts, &args, error_msg),
