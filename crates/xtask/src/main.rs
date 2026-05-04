@@ -299,6 +299,7 @@ fn required_wasm_ffi_exports() -> &'static [&'static str] {
         "faust_wasm_get_info",
         "faust_wasm_expand_dsp",
         "faust_wasm_generate_aux_files",
+        "faust_wasm_generate_aux_files_json",
         "faust_wasm_text_result_is_ok",
         "faust_wasm_text_result_ptr",
         "faust_wasm_text_result_len",
@@ -4322,6 +4323,7 @@ mod tests {
               (func (export "faust_wasm_get_info"))
               (func (export "faust_wasm_expand_dsp"))
               (func (export "faust_wasm_generate_aux_files"))
+              (func (export "faust_wasm_generate_aux_files_json"))
               (func (export "faust_wasm_text_result_is_ok"))
               (func (export "faust_wasm_text_result_ptr"))
               (func (export "faust_wasm_text_result_len"))
