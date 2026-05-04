@@ -192,19 +192,65 @@ fn generate_inside_folded(
             generate_abstraction_folded(arena, slot, body, config, state)
         }
         // ── AD wrappers ───────────────────────────────────────────────
-        BoxMatch::ForwardAD(expr, _seed) => make_decorate(
-            generate_diagram_schema(arena, expr, config, state),
-            10.0,
-            "fad".to_owned(),
-        ),
-        BoxMatch::ReverseAD(expr, _seeds) => make_decorate(
-            generate_diagram_schema(arena, expr, config, state),
-            10.0,
-            "rad".to_owned(),
-        ),
+        BoxMatch::ForwardAD(expr, seed) => {
+            let inner = generate_diagram_schema(arena, expr, config, state);
+            let seed_outs = generate_inside(arena, seed, config).outputs().max(1);
+            make_decorate(
+                fad_augment_tangents(inner, seed_outs),
+                10.0,
+                "fad".to_owned(),
+            )
+        }
+        BoxMatch::ReverseAD(expr, seeds) => {
+            let inner = generate_diagram_schema(arena, expr, config, state);
+            let seeds_outs = generate_inside(arena, seeds, config).outputs().max(1);
+            make_decorate(
+                rad_augment_gradients(inner, seeds_outs),
+                10.0,
+                "rad".to_owned(),
+            )
+        }
         // ── Everything else: delegate to flat generate_inside ─────────
         _ => generate_inside(arena, b, config),
     }
+}
+
+/// Extend an inner schema with zero-input output stubs for AD wrappers.
+///
+/// Used to reconcile the draw-level schema arity with the compiled arity:
+///
+/// - **ForwardAD** (`fad(expr, seed)`):
+///   `outputs = expr.outputs × (1 + seed.outputs)` — call with
+///   `n_extra = inner.outputs() * seed_outs`, `label = "∂"`.
+///
+/// - **ReverseAD** (`rad(expr, seeds)`):
+///   `outputs = expr.outputs + seeds.outputs` — call with
+///   `n_extra = seeds_outs`, `label = "∇"`.
+///
+/// If `n_extra == 0` the inner schema is returned unchanged.
+fn ad_augment_extra_outputs(
+    inner: Box<dyn Schema>,
+    n_extra: usize,
+    label: &str,
+) -> Box<dyn Schema> {
+    use crate::schemas::par::make_par;
+    if n_extra == 0 {
+        return inner;
+    }
+    make_par(inner, make_block(0, n_extra, label, COLOR_SLOT, ""))
+}
+
+/// Convenience wrapper for `ForwardAD`: appends `inner.outputs × seed_outs`
+/// tangent-lane stubs labelled "∂".
+fn fad_augment_tangents(inner: Box<dyn Schema>, seed_outs: usize) -> Box<dyn Schema> {
+    let n_tangent = inner.outputs() * seed_outs;
+    ad_augment_extra_outputs(inner, n_tangent, "\u{2202}")
+}
+
+/// Convenience wrapper for `ReverseAD`: appends `seeds_outs` gradient-lane
+/// stubs labelled "∇".
+fn rad_augment_gradients(inner: Box<dyn Schema>, seeds_outs: usize) -> Box<dyn Schema> {
+    ad_augment_extra_outputs(inner, seeds_outs, "\u{2207}")
 }
 
 /// Non-folding map of one `BoxId` to a schema.
@@ -445,11 +491,23 @@ fn generate_inside(arena: &TreeArena, b: BoxId, config: &DrawConfig) -> Box<dyn 
         // The InverterSchema can be produced by the caller if needed.
 
         // ── AD wrappers ───────────────────────────────────────────────
-        BoxMatch::ForwardAD(expr, _seed) => {
-            make_decorate(generate_inside(arena, expr, config), 10.0, "fad".to_owned())
+        BoxMatch::ForwardAD(expr, seed) => {
+            let inner = generate_inside(arena, expr, config);
+            let seed_outs = generate_inside(arena, seed, config).outputs().max(1);
+            make_decorate(
+                fad_augment_tangents(inner, seed_outs),
+                10.0,
+                "fad".to_owned(),
+            )
         }
-        BoxMatch::ReverseAD(expr, _seeds) => {
-            make_decorate(generate_inside(arena, expr, config), 10.0, "rad".to_owned())
+        BoxMatch::ReverseAD(expr, seeds) => {
+            let inner = generate_inside(arena, expr, config);
+            let seeds_outs = generate_inside(arena, seeds, config).outputs().max(1);
+            make_decorate(
+                rad_augment_gradients(inner, seeds_outs),
+                10.0,
+                "rad".to_owned(),
+            )
         }
 
         // ── Anything else: placeholder block ─────────────────────────

@@ -718,7 +718,13 @@ fn base64_decode(s: &[u8]) -> Result<Vec<u8>, ()> {
     for chunk in bytes.chunks(4) {
         let v: Vec<u8> = chunk
             .iter()
-            .map(|&b| if (b as usize) < 128 { DEC[b as usize] } else { 255 })
+            .map(|&b| {
+                if (b as usize) < 128 {
+                    DEC[b as usize]
+                } else {
+                    255
+                }
+            })
             .collect();
         match v.as_slice() {
             [a, b, c, d] if *a != 255 && *b != 255 && *c != 255 && *d != 255 => {

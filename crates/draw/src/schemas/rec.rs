@@ -125,7 +125,8 @@ impl Schema for RecSchema {
         } else {
             -D_WIRE
         };
-        for i in 0..self.s2.inputs() {
+        let feedback_ports = self.s1.outputs().min(self.s2.inputs());
+        for i in 0..feedback_ports {
             let p = self.s1.output_point(i);
             draw_delay_sign(dev, p.x + i as f64 * dw, p.y, dw / 2.0)?;
         }
@@ -140,8 +141,14 @@ impl Schema for RecSchema {
 
         let orientation = self.orientation();
 
-        // feedback connections: s1.output[i] → s2.input[i]
-        for i in 0..self.s2.inputs() {
+        // feedback connections: s1.output[i] -> s2.input[i].
+        //
+        // C++ recSchema asserts s1.outputs() >= s2.inputs(). Rust SVG may see
+        // evaluated FAD/RAD diagrams whose box-level schema is still arity-skewed;
+        // keep rendering the representable feedback lanes instead of panicking
+        // on a missing visual endpoint.
+        let feedback_ports = self.s1.outputs().min(self.s2.inputs()).min(self.outputs());
+        for i in 0..feedback_ports {
             collect_feedback(
                 c,
                 self.s1.output_point(i),
@@ -153,7 +160,7 @@ impl Schema for RecSchema {
         }
 
         // non-recursive outputs
-        for i in self.s2.inputs()..self.outputs() {
+        for i in feedback_ports..self.outputs() {
             let p = self.s1.output_point(i);
             let q = self.output_points[i];
             c.add_trait(Trait::new(p, q));
@@ -243,4 +250,34 @@ fn collect_feedfront(
     c.add_trait(Trait::new(src, Point::new(ox, src.y)));
     c.add_trait(Trait::new(Point::new(ox, src.y), Point::new(ox, dst.y)));
     c.add_trait(Trait::new(Point::new(ox, dst.y), dst));
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::DrawConfig;
+    use crate::device::SvgDevice;
+    use crate::schema::{Orientation, Schema, TraitCollector};
+    use crate::schemas::block::BlockSchema;
+    use crate::schemas::rec::make_rec;
+
+    #[test]
+    fn rec_schema_tolerates_more_feedback_inputs_than_left_outputs() {
+        let left: Box<dyn Schema> = Box::new(BlockSchema::new(1, 1, "left", "#000", ""));
+        let right: Box<dyn Schema> = Box::new(BlockSchema::new(2, 0, "right", "#000", ""));
+        let mut rec = make_rec(left, right);
+        rec.place(0.0, 0.0, Orientation::LeftRight);
+
+        let mut svg = SvgDevice::new(
+            Vec::new(),
+            rec.width(),
+            rec.height(),
+            &DrawConfig::default(),
+        )
+        .expect("SVG device must be created");
+        rec.draw(&mut svg)
+            .expect("arity-skewed rec draw should not panic");
+
+        let mut collector = TraitCollector::new();
+        rec.collect_traits(&mut collector);
+    }
 }

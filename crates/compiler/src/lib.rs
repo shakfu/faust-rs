@@ -1451,9 +1451,15 @@ impl Compiler {
                 &signals.def_names,
             )
             .map_err(|e| FaustwasmServiceError::unsupported(e.to_string()))?;
-            artifacts.extend(svg_pairs.into_iter().map(|(path, content)| {
-                AuxFileArtifact { path, content, binary: false }
-            }));
+            artifacts.extend(
+                svg_pairs
+                    .into_iter()
+                    .map(|(path, content)| AuxFileArtifact {
+                        path,
+                        content,
+                        binary: false,
+                    }),
+            );
         }
 
         Ok(artifacts)
