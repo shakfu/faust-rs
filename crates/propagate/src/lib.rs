@@ -1781,8 +1781,9 @@ impl UiCollector {
         metadata: UiMetadata,
         range: Option<ControlRange>,
     ) {
+        let order_key = ui::ordering_key_from_metadata(&metadata);
         let id = self.register_control(source_node, context_hash, kind, label, metadata, range);
-        self.builder.insert_input_control(path, id);
+        self.builder.insert_input_control(path, id, order_key);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1796,8 +1797,9 @@ impl UiCollector {
         metadata: UiMetadata,
         range: Option<ControlRange>,
     ) {
+        let order_key = ui::ordering_key_from_metadata(&metadata);
         let id = self.register_control(source_node, context_hash, kind, label, metadata, range);
-        self.builder.insert_output_control(path, id);
+        self.builder.insert_output_control(path, id, order_key);
     }
 
     fn soundfile(
@@ -1808,6 +1810,7 @@ impl UiCollector {
         label: String,
         metadata: UiMetadata,
     ) {
+        let order_key = ui::ordering_key_from_metadata(&metadata);
         let id = self.register_control(
             source_node,
             context_hash,
@@ -1816,7 +1819,7 @@ impl UiCollector {
             metadata,
             None,
         );
-        self.builder.insert_soundfile(path, id);
+        self.builder.insert_soundfile(path, id, order_key);
     }
 }
 

@@ -163,6 +163,18 @@ pub enum ControlKind {
 /// deterministic ordering, trimmed keys/values, and duplicate coalescing.
 pub type UiMetadata = Vec<(String, String)>;
 
+/// Extracts the numeric ordering key from widget/group metadata.
+///
+/// Faust labels encode display order as a bare integer key, e.g. `[0:]`,
+/// `[1:]`. The C++ compiler uses this to sort items within a group; faust-rs
+/// must do the same to produce matching JSON output.
+pub fn ordering_key_from_metadata(metadata: &UiMetadata) -> i64 {
+    metadata
+        .iter()
+        .find_map(|(key, _)| key.parse::<i64>().ok())
+        .unwrap_or(i64::MAX)
+}
+
 /// Numeric range metadata for slider-like controls.
 ///
 /// This is the canonical UI-side carrier for widget default/range semantics
@@ -565,7 +577,7 @@ impl<'a> UiBuilder<'a> {
 enum UiDraftNode {
     Group {
         spec: UiGroupSpec,
-        children: Vec<usize>,
+        children: Vec<(i64, usize)>, // (order_key, node_id)
     },
     InputControl(ControlId),
     OutputControl(ControlId),
@@ -634,8 +646,9 @@ impl UiProgramBuilder {
             return false;
         }
         if let Some(parent) = self.find_parent(group) {
-            self.children_mut(Some(parent))
-                .retain(|child| *child != group);
+            if let UiDraftNode::Group { children, .. } = &mut self.nodes[parent] {
+                children.retain(|(_, child)| *child != group);
+            }
             return true;
         }
         self.roots.retain(|root| *root != group);
@@ -643,18 +656,32 @@ impl UiProgramBuilder {
     }
 
     /// Inserts one input control under the provided canonical group path.
-    pub fn insert_input_control(&mut self, path: &[UiGroupSpec], control: ControlId) {
-        self.insert_leaf(path, UiDraftNode::InputControl(control));
+    ///
+    /// `order_key` is the numeric ordering index extracted from the widget's
+    /// metadata (e.g. `[0:]` → `0`). Use [`ordering_key_from_metadata`] to
+    /// derive it. Items with equal keys are kept in insertion order.
+    pub fn insert_input_control(
+        &mut self,
+        path: &[UiGroupSpec],
+        control: ControlId,
+        order_key: i64,
+    ) {
+        self.insert_leaf(path, UiDraftNode::InputControl(control), order_key);
     }
 
     /// Inserts one output control under the provided canonical group path.
-    pub fn insert_output_control(&mut self, path: &[UiGroupSpec], control: ControlId) {
-        self.insert_leaf(path, UiDraftNode::OutputControl(control));
+    pub fn insert_output_control(
+        &mut self,
+        path: &[UiGroupSpec],
+        control: ControlId,
+        order_key: i64,
+    ) {
+        self.insert_leaf(path, UiDraftNode::OutputControl(control), order_key);
     }
 
     /// Inserts one soundfile control under the provided canonical group path.
-    pub fn insert_soundfile(&mut self, path: &[UiGroupSpec], control: ControlId) {
-        self.insert_leaf(path, UiDraftNode::Soundfile(control));
+    pub fn insert_soundfile(&mut self, path: &[UiGroupSpec], control: ControlId, order_key: i64) {
+        self.insert_leaf(path, UiDraftNode::Soundfile(control), order_key);
     }
 
     #[must_use]
@@ -670,37 +697,35 @@ impl UiProgramBuilder {
         (arena, roots)
     }
 
-    fn insert_leaf(&mut self, path: &[UiGroupSpec], leaf: UiDraftNode) {
+    fn insert_leaf(&mut self, path: &[UiGroupSpec], leaf: UiDraftNode, order_key: i64) {
         let parent = self.ensure_group_path(path);
         let id = self.push_node(leaf);
-        self.children_mut(parent).push(id);
+        self.insert_child_sorted(parent, order_key, id);
     }
 
     fn find_or_create_group(&mut self, parent: Option<usize>, spec: UiGroupSpec) -> usize {
         if let Some(existing) = self.find_child_group(parent, &spec) {
             return existing;
         }
+        let order_key = ordering_key_from_metadata(&spec.metadata);
         let id = self.push_node(UiDraftNode::Group {
             spec,
             children: Vec::new(),
         });
-        self.children_mut(parent).push(id);
+        self.insert_child_sorted(parent, order_key, id);
         id
     }
 
     fn find_child_group(&self, parent: Option<usize>, spec: &UiGroupSpec) -> Option<usize> {
-        let children = self.children(parent);
-        children
-            .iter()
-            .copied()
-            .find(|child| match &self.nodes[*child] {
-                UiDraftNode::Group {
-                    spec: child_spec, ..
-                } => child_spec == spec,
-                UiDraftNode::InputControl(_)
-                | UiDraftNode::OutputControl(_)
-                | UiDraftNode::Soundfile(_) => false,
-            })
+        let ids = self.child_ids(parent);
+        ids.into_iter().find(|child| match &self.nodes[*child] {
+            UiDraftNode::Group {
+                spec: child_spec, ..
+            } => child_spec == spec,
+            UiDraftNode::InputControl(_)
+            | UiDraftNode::OutputControl(_)
+            | UiDraftNode::Soundfile(_) => false,
+        })
     }
 
     fn find_parent(&self, needle: usize) -> Option<usize> {
@@ -708,7 +733,11 @@ impl UiProgramBuilder {
             .iter()
             .enumerate()
             .find_map(|(id, node)| match node {
-                UiDraftNode::Group { children, .. } if children.contains(&needle) => Some(id),
+                UiDraftNode::Group { children, .. }
+                    if children.iter().any(|(_, child)| *child == needle) =>
+                {
+                    Some(id)
+                }
                 UiDraftNode::Group { .. }
                 | UiDraftNode::InputControl(_)
                 | UiDraftNode::OutputControl(_)
@@ -722,27 +751,35 @@ impl UiProgramBuilder {
         id
     }
 
-    fn children(&self, parent: Option<usize>) -> &[usize] {
+    /// Returns child node IDs of `parent` in sorted order (by order key).
+    fn child_ids(&self, parent: Option<usize>) -> Vec<usize> {
         match parent {
             Some(id) => match &self.nodes[id] {
-                UiDraftNode::Group { children, .. } => children,
+                UiDraftNode::Group { children, .. } => {
+                    children.iter().map(|(_, child)| *child).collect()
+                }
                 UiDraftNode::InputControl(_)
                 | UiDraftNode::OutputControl(_)
                 | UiDraftNode::Soundfile(_) => panic!("parent must be a group"),
             },
-            None => &self.roots,
+            None => self.roots.clone(),
         }
     }
 
-    fn children_mut(&mut self, parent: Option<usize>) -> &mut Vec<usize> {
+    /// Inserts `child_id` into `parent`'s children list keeping the list
+    /// sorted by `order_key`. Items with equal keys are appended after
+    /// existing items with the same key (stable / insertion-order tiebreak).
+    fn insert_child_sorted(&mut self, parent: Option<usize>, order_key: i64, child_id: usize) {
         match parent {
-            Some(id) => match &mut self.nodes[id] {
-                UiDraftNode::Group { children, .. } => children,
-                UiDraftNode::InputControl(_)
-                | UiDraftNode::OutputControl(_)
-                | UiDraftNode::Soundfile(_) => panic!("parent must be a group"),
-            },
-            None => &mut self.roots,
+            Some(id) => {
+                if let UiDraftNode::Group { children, .. } = &mut self.nodes[id] {
+                    let pos = children.partition_point(|(k, _)| *k <= order_key);
+                    children.insert(pos, (order_key, child_id));
+                } else {
+                    panic!("parent must be a group");
+                }
+            }
+            None => self.roots.push(child_id),
         }
     }
 
@@ -751,7 +788,7 @@ impl UiProgramBuilder {
             UiDraftNode::Group { spec, children } => {
                 let children = children
                     .iter()
-                    .map(|child| self.materialize_node(*child, arena))
+                    .map(|(_, child)| self.materialize_node(*child, arena))
                     .collect::<Vec<_>>();
                 UiBuilder::new(arena).group_with_metadata(
                     spec.kind,
@@ -861,7 +898,7 @@ fn decode_label(arena: &TreeArena, id: UiId) -> Option<&str> {
 }
 
 fn trim_space_tab(value: &str) -> &str {
-    value.trim_matches(|ch| matches!(ch, ' ' | '\t'))
+    value.trim_matches(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r'))
 }
 
 fn clamp_pop_groups(groups: &mut Vec<UiGroupPathSegment>, count: usize) {
