@@ -411,7 +411,7 @@
 //! The result is the same DSP semantics with less duplicated recursive state in
 //! the emitted code.
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use smallvec::SmallVec;
 use tlib::{
@@ -582,6 +582,18 @@ impl<'a> ForwardADTransform<'a> {
         }
 
         if let Some(body) = match_de_bruijn_rec(self.arena, sig) {
+            // Snapshot the set of SigIds already in the cache before entering
+            // this recursive body.  Every entry added during body traversal is
+            // computed under a *lifted-seed* context (seeds shifted by one De
+            // Bruijn level) and is therefore WRONG in the enclosing scope.
+            // Concretely: `SIGDELAY1(SIGPROJ(0, DEBRUIJNREF(1)))` appears as a
+            // back-edge inside every single-slot feedback body *and* may be the
+            // FAD seed itself (e.g. `prev_gain` in `fad(loss, prev_gain)`).
+            // Without the cache snapshot the body-traversal entry wins and the
+            // seed check never fires at the outer scope, producing a tangent of
+            // `delay1(proj(1, ref))` instead of `1.0`.
+            let outer_cache_keys: AHashSet<SigId> = self.cache.keys().copied().collect();
+
             // Pre-seed the cache with a self-referential placeholder so any
             // `DEBRUIJNREF(1)` back-edge discovered while differentiating the
             // body resolves to something shaped like a `Dual` instead of
@@ -619,6 +631,13 @@ impl<'a> ForwardADTransform<'a> {
             self.diff_seeds = old_seeds;
             self.diff_seed_index = old_seed_index;
             self.debruijn_depth -= 1;
+
+            // Discard all cache entries that were added while traversing the
+            // body.  They used the lifted-seed index and are invalid at this
+            // outer scope.  The only exception is `sig` itself (the current
+            // `DEBRUIJNREC` node): its final dual is inserted below after the
+            // expanded group is built.
+            self.cache.retain(|k, _| outer_cache_keys.contains(k));
 
             // Interleave `[primal, tangent_s0, …, tangent_s{N-1}]` for every
             // original slot in source order. Downstream `Proj` nodes rely on
@@ -1648,6 +1667,77 @@ mod tests {
             elems.len(),
             4,
             "interleaved body length must be k * (1 + N)"
+        );
+    }
+
+    /// Regression: when the FAD seed signal structurally equals a back-edge
+    /// reference inside a nested `DEBRUIJNREC` body, the transform must still
+    /// yield tangent `1.0` for the seed at the outer scope.
+    ///
+    /// Setup:
+    ///   `inner_rec = DEBRUIJNREC([k * delay1(proj(0, ref(1)))])`
+    ///   `seed      = delay1(proj(0, DEBRUIJNREF(1)))`
+    ///
+    /// Because `inner_rec` has arity 1, its back-edge
+    /// `delay1(proj(0, DEBRUIJNREF(1)))` hash-conses to the SAME `SigId` as
+    /// `seed`.  Without cache scoping, the body-traversal entry for that
+    /// SigId would shadow the outer-scope seed check, and `tangent(seed)`
+    /// would return `delay1(proj(1,ref(1)))` instead of `real(1.0)`.
+    ///
+    /// We test with `expr = inner_out + seed` so the tangent is
+    /// `tangent(inner_out) + tangent(seed)`.  Since `inner_rec` does not
+    /// depend on `seed` at the outer scope, `tangent(inner_out)` is the
+    /// tangent projection of the expanded rec and `tangent(seed)` must be
+    /// `real(1.0)`.  An `Add(_, real(1.0))` tangent proves the seed check
+    /// fired; anything else proves the bug is present.
+    ///
+    /// This corresponds to the `fad_gain1.dsp` bug where `prev_gain` (the FAD
+    /// seed) is the delay-feedback of the outer loop, and the same expression
+    /// appears as a back-edge in an inner noise `DEBRUIJNREC` body.
+    #[test]
+    fn fad_seed_not_poisoned_by_inner_rec_back_edge() {
+        let mut arena = TreeArena::new();
+        let k = SigBuilder::new(&mut arena).real(2.0);
+
+        // inner_rec = DEBRUIJNREC([k * delay1(proj(0, DEBRUIJNREF(1)))])
+        let ref1 = de_bruijn_ref(&mut arena, 1);
+        let back_proj = SigBuilder::new(&mut arena).proj(0, ref1);
+        let back_delay = SigBuilder::new(&mut arena).delay1(back_proj);
+        let inner_body_elem = SigBuilder::new(&mut arena).mul(k, back_delay);
+        let inner_body_list = vec_to_list(&mut arena, &[inner_body_elem]);
+        let inner_rec = de_bruijn_rec(&mut arena, inner_body_list);
+        let inner_out = SigBuilder::new(&mut arena).proj(0, inner_rec);
+
+        // seed = delay1(proj(0, DEBRUIJNREF(1))) — same SigId as `back_delay`
+        let seed = back_delay;
+
+        // expr = inner_out + seed
+        // d(expr)/d(seed) = tangent(inner_out) + tangent(seed)
+        //   tangent(inner_out) = proj(1, expanded_inner_rec) [zero at runtime]
+        //   tangent(seed)      = 1.0                          [seed check]
+        let expr = SigBuilder::new(&mut arena).add(inner_out, seed);
+
+        let result = generate_fad_signals_multi(&mut arena, &[expr], &[seed])
+            .expect("FAD must succeed on expr = inner_out + seed");
+        assert_eq!(result.len(), 2, "one primal + one tangent lane");
+
+        let tangent = result[1];
+
+        // tangent must be Add(proj(1, fad_rec), real(1.0)).
+        // Decompose the Add and check the second operand is real(1.0).
+        let SigMatch::BinOp(op, _lhs, rhs) = match_sig(&arena, tangent) else {
+            panic!(
+                "tangent of (inner_out + seed) must be a BinOp; \
+                 got a different node — seed check was poisoned by inner rec body cache"
+            );
+        };
+        assert_eq!(op, signals::BinOp::Add, "tangent must be an Add");
+
+        let one = SigBuilder::new(&mut arena).real(1.0);
+        assert_eq!(
+            rhs, one,
+            "rhs of tangent Add must be real(1.0) — tangent(seed) must be 1.0, \
+             not the body-scope tangent delay1(proj(1,ref(1)))"
         );
     }
 }
