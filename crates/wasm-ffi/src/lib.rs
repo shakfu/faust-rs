@@ -180,20 +180,20 @@ fn virtual_sources_from_argv(argv: &[String]) -> VirtualSourceMap {
     let mut vsources = embedded_standard_library_sources();
     let mut i = 0;
     while i < argv.len() {
-        if argv[i] == "--virtual-source" {
-            if let Some(spec) = argv.get(i + 1) {
-                if let Some(eq) = spec.find('=') {
-                    let lib_name = &spec[..eq];
-                    let b64 = &spec[eq + 1..];
-                    if let Ok(bytes) = base64_decode(b64.as_bytes()) {
-                        if let Ok(content) = String::from_utf8(bytes) {
-                            vsources = vsources.with_source(lib_name, content);
-                        }
-                    }
+        if argv[i] == "--virtual-source"
+            && let Some(spec) = argv.get(i + 1)
+        {
+            if let Some(eq) = spec.find('=') {
+                let lib_name = &spec[..eq];
+                let b64 = &spec[eq + 1..];
+                if let Ok(bytes) = base64_decode(b64.as_bytes())
+                    && let Ok(content) = String::from_utf8(bytes)
+                {
+                    vsources = vsources.with_source(lib_name, content);
                 }
-                i += 2;
-                continue;
             }
+            i += 2;
+            continue;
         }
         i += 1;
     }
@@ -644,7 +644,7 @@ struct WasmAuxFileArtifact {
 /// into a crate compiled for `wasm32-unknown-unknown`.
 fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut chunks = bytes.chunks_exact(3);
     for chunk in chunks.by_ref() {
         let b0 = chunk[0] as usize;
@@ -799,7 +799,7 @@ pub unsafe extern "C" fn faust_wasm_generate_aux_files(
         Err(_) => return 0,
     };
     let compiler = Compiler::new();
-    let argv = split_faustwasm_args(&args);
+    let argv = split_faustwasm_args(args);
     match compiler.generate_aux_files(&compiler::GenerateAuxFilesRequest {
         source_name: name.to_owned(),
         source: source.to_owned(),
@@ -860,7 +860,7 @@ pub unsafe extern "C" fn faust_wasm_generate_aux_files_json(
             Err(error) => return store_text_result(StoredTextResult::Err(error)),
         };
         let compiler = Compiler::new();
-        let argv = split_faustwasm_args(&args);
+        let argv = split_faustwasm_args(args);
         match compiler.generate_aux_files(&compiler::GenerateAuxFilesRequest {
             source_name: name.to_owned(),
             source: source.to_owned(),
@@ -1173,8 +1173,7 @@ mod tests {
         );
         // content_base64 must be present and non-empty.
         assert!(
-            json.contains(r#""content_base64":""#) == false
-                || json.contains(r#""content_base64":"P"#),
+            !json.contains(r#""content_base64":""#) || json.contains(r#""content_base64":"P"#),
             "content_base64 looks empty in: {json}"
         );
     }

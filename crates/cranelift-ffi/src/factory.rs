@@ -1469,10 +1469,10 @@ unsafe fn write_aux_artifacts_to_disk(
 fn extract_output_dir(argv: &[String]) -> PathBuf {
     let mut i = 0;
     while i < argv.len() {
-        if argv[i] == "-O" {
-            if let Some(p) = argv.get(i + 1) {
-                return PathBuf::from(p);
-            }
+        if argv[i] == "-O"
+            && let Some(p) = argv.get(i + 1)
+        {
+            return PathBuf::from(p);
         }
         i += 1;
     }

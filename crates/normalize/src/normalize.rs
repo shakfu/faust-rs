@@ -23,7 +23,9 @@ use std::collections::HashMap;
 
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use sigtype::SigType;
-use tlib::{TreeArena, check_de_bruijn_coherence};
+use tlib::TreeArena;
+#[cfg(debug_assertions)]
+use tlib::{check_de_bruijn_coherence, is_de_bruijn_closed};
 
 use crate::aterm::Aterm;
 use crate::mterm::sig_order;
@@ -46,10 +48,12 @@ pub(crate) fn normalize_add_term(
     t: SigId,
 ) -> SigId {
     #[cfg(debug_assertions)]
-    if let Err(e) = check_de_bruijn_coherence(arena, t) {
+    if is_de_bruijn_closed(arena, t)
+        && let Err(e) = check_de_bruijn_coherence(arena, t)
+    {
         panic!(
             "normalize_add_term received an incoherent De Bruijn tree: {e}\n\
-             Signal must be in symbolic form before normalization."
+             Closed De Bruijn trees must be coherent before normalization."
         );
     }
 

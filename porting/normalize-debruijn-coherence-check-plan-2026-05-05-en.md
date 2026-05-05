@@ -19,7 +19,9 @@ and flowed silently through `normalize_add_term` and the full FIR lowering pipel
 producing incorrect C++ output.
 
 A stronger invariant is needed: **every `DEBRUIJNREF(k)` encountered at De Bruijn
-nesting depth `d` must satisfy `k < d`**.  Violations indicate that a transform
+nesting depth `d` must satisfy `1 <= k <= d`**.  The Rust port follows the C++
+one-based convention where `DEBRUIJNREF(1)` targets the nearest enclosing
+`DEBRUIJNREC`.  Violations indicate that a transform
 (FAD, RAD, or a future pass) produced a tree that crosses scope boundaries.
 
 This invariant is more precise than the global aperture check:
@@ -60,7 +62,7 @@ pub enum RecursionError {
     // … existing variants …
 
     /// A `DEBRUIJNREF(k)` was found at nesting depth `depth`
-    /// where `k >= depth` — the reference escapes its binders.
+    /// where `k < 1 || k > depth` — the reference escapes its binders.
     IncoherentDeBruijnReference {
         node: TreeId,
         /// The bad De Bruijn level stored in the DEBRUIJNREF node.
@@ -81,7 +83,7 @@ De Bruijn coherence error: DEBRUIJNREF(level={level}) at depth={depth}
 
 ```rust
 /// Verify that every `DEBRUIJNREF(k)` in the tree rooted at `root`
-/// satisfies `k < depth` where `depth` is the number of enclosing
+/// satisfies `1 <= k <= depth` where `depth` is the number of enclosing
 /// `DEBRUIJNREC` binders at the reference site.
 ///
 /// Returns `Ok(())` if the tree is coherent; `Err(IncoherentDeBruijnReference)`
@@ -113,7 +115,7 @@ fn check_coherence_at_depth(
         return Ok(());   // already verified at this depth
     }
     if let Some(level) = match_de_bruijn_ref(arena, id) {
-        if level >= depth {
+        if level <= 0 || level > depth {
             return Err(RecursionError::IncoherentDeBruijnReference {
                 node: id,
                 level,
@@ -146,13 +148,13 @@ the class of bug we are guarding against).
 
 ### 1c. Unit tests in `tlib/tests/recursive_trees.rs`
 
-- `coherence_ok_for_closed_tree` — simple `DEBRUIJNREC(DEBRUIJNREF(0))` passes.
+- `coherence_ok_for_closed_tree` — simple `DEBRUIJNREC(DEBRUIJNREF(1))` passes.
 - `coherence_ok_for_nested_closed_tree` — two nested `DEBRUIJNREC` with correct
-  inner `DEBRUIJNREF(0)` and outer `DEBRUIJNREF(1)`.
-- `coherence_err_free_ref_at_root` — bare `DEBRUIJNREF(0)` at depth 0 returns
-  `IncoherentDeBruijnReference { level: 0, depth: 0 }`.
-- `coherence_err_inner_ref_escapes` — `DEBRUIJNREC(add(DEBRUIJNREF(0), DEBRUIJNREF(1)))`
-  — inner `DEBRUIJNREF(1)` escapes (depth=1, level=1 → NOT coherent).
+  inner `DEBRUIJNREF(1)` and outer `DEBRUIJNREF(2)`.
+- `coherence_err_free_ref_at_root` — bare `DEBRUIJNREF(1)` at depth 0 returns
+  `IncoherentDeBruijnReference { level: 1, depth: 0 }`.
+- `coherence_err_inner_ref_escapes` — `DEBRUIJNREC(add(DEBRUIJNREF(1), DEBRUIJNREF(2)))`
+  — inner `DEBRUIJNREF(2)` escapes (depth=1, level=2 → NOT coherent).
 - `coherence_vs_aperture_distinction` — construct a tree that is closed at the root
   (`aperture <= 0`) but incoherent in an inner scope.  Verify `is_de_bruijn_closed`
   returns `true` while `check_de_bruijn_coherence` returns `Err`.
@@ -246,15 +248,16 @@ pub(crate) fn normalize_add_term(
     types: &HashMap<SigId, SigType>,
     t: SigId,
 ) -> SigId {
-    // Sanity: after de_bruijn_to_sym, no DEBRUIJNREF should be reachable.
-    // A panic here indicates that normalize_add_term was called on De Bruijn
-    // form signals — either a pipeline ordering bug, or a test calling it
-    // directly with raw De Bruijn input.
+    // Sanity: closed De Bruijn trees must be coherent before normalization.
+    // Open subtrees can appear while recursive groups are still being built;
+    // the mandatory whole-tree gate runs in prepare_signals_multi.
     #[cfg(debug_assertions)]
-    if let Err(e) = tlib::check_de_bruijn_coherence(arena, t) {
+    if tlib::is_de_bruijn_closed(arena, t)
+        && let Err(e) = tlib::check_de_bruijn_coherence(arena, t)
+    {
         panic!(
             "normalize_add_term received an incoherent De Bruijn tree: {e}\n\
-             Signal must be in symbolic form before normalization."
+             Closed De Bruijn trees must be coherent before normalization."
         );
     }
 
@@ -305,6 +308,18 @@ just documentation.
 5. Compiler integration test.
 
 Steps 1–2 can land independently; steps 3–4 depend on step 1.
+
+## Implementation notes
+
+- The existing Rust port follows the C++ one-based De Bruijn convention:
+  `DEBRUIJNREF(1)` refers to the nearest enclosing `DEBRUIJNREC`.  The
+  implemented coherence predicate is therefore `1 <= level <= depth`, rather
+  than the zero-based `level < depth` notation used in the original sketch.
+- FAD/RAD can be invoked while a recursive group is still being assembled, so an
+  AD result may be temporarily open until the enclosing `DEBRUIJNREC` is built.
+  The AD post-transform gates check outputs that are already closed; the
+  mandatory full-tree gate remains `normalize::prepare_signals_multi`, before
+  `de_bruijn_to_sym`.
 
 ---
 

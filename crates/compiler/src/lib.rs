@@ -2787,12 +2787,12 @@ fn parse_search_paths_from_argv(argv: &[String]) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut i = 0;
     while i < argv.len() {
-        if argv[i] == "-I" {
-            if let Some(p) = argv.get(i + 1) {
-                paths.push(PathBuf::from(p));
-                i += 2;
-                continue;
-            }
+        if argv[i] == "-I"
+            && let Some(p) = argv.get(i + 1)
+        {
+            paths.push(PathBuf::from(p));
+            i += 2;
+            continue;
         }
         i += 1;
     }

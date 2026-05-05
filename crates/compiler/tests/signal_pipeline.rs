@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use compiler::Compiler;
 use parser::CompilationMetadataKey;
 use signals::{BinOp, SigMatch, match_sig};
-use tlib::{TreeArena, TreeId};
+use tlib::{TreeArena, TreeId, check_de_bruijn_coherence};
 use ui::{ControlKind, UiGroupKind, UiMatch, match_ui};
 
 fn corpus_path(file: &str) -> PathBuf {
@@ -33,6 +33,17 @@ fn compile_inline(name: &str, source: &str) -> compiler::SignalCompileOutput {
     Compiler::new()
         .compile_source_to_signals(name, source)
         .unwrap_or_else(|e| panic!("failed to compile {name} to signals: {e}"))
+}
+
+fn assert_outputs_de_bruijn_coherent(out: &compiler::SignalCompileOutput) {
+    for &sig in &out.signals {
+        check_de_bruijn_coherence(&out.parse.state.arena, sig).unwrap_or_else(|e| {
+            panic!(
+                "output signal {} is not De Bruijn coherent: {e}",
+                sig.as_u32()
+            )
+        });
+    }
 }
 
 fn expect_ui_group(
@@ -763,6 +774,29 @@ fn inline_recursive_fad_tangent_projection_compiles_through_full_signal_pipeline
         match_sig(&out.parse.state.arena, out.signals[0]),
         SigMatch::Proj(_, _)
     ));
+}
+
+#[test]
+fn inline_recursive_fad_nested_inner_rec_back_edge_is_debruijn_coherent() {
+    let out = compile_inline(
+        "inline_recursive_fad_nested_inner_rec_back_edge.dsp",
+        r#"
+        process = step ~ _
+        with {
+            target = hslider("Target", 0.25, -1, 1, 0.01);
+            step(prev) = prev + 0.01 * grad + 0.001 * inner
+            with {
+                inner = (+(prev) : *(0.5)) ~ _;
+                loss = (inner + prev - target) ^ 2;
+                grad = fad(loss, prev) : !, _;
+            };
+        };
+        "#,
+    );
+    assert_eq!(out.process_arity.inputs, 0);
+    assert_eq!(out.process_arity.outputs, 1);
+    assert_eq!(out.signals.len(), 1);
+    assert_outputs_de_bruijn_coherent(&out);
 }
 
 #[test]
