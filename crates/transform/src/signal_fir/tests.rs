@@ -111,6 +111,20 @@ fn find_compute_loop_body(store: &fir::FirStore, functions: fir::FirId) -> fir::
         .unwrap_or_else(|| panic!("compute should contain an explicit sample loop"))
 }
 
+fn find_compute_simple_loop_reverse_flag(store: &fir::FirStore, functions: fir::FirId) -> bool {
+    let compute_body = find_decl_fun_body(store, functions, "compute");
+    let FirMatch::Block(stmts) = match_fir(store, compute_body) else {
+        panic!("compute block expected");
+    };
+    stmts
+        .iter()
+        .find_map(|id| match match_fir(store, *id) {
+            FirMatch::SimpleForLoop { is_reverse, .. } => Some(is_reverse),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("compute should contain an explicit simple sample loop"))
+}
+
 // ── Compilation entry-point wrappers ─────────────────────────────────────────
 
 /// Runs the full fast-lane lowering pipeline with an empty UI program.
@@ -1140,6 +1154,46 @@ fn rec_proj_lowers_without_placeholder_nodes() {
             .iter()
             .all(|id| !matches!(match_fir(&out.store, *id), FirMatch::Cast { .. })),
         "rec/proj lowering should not need cast wrappers around recursive array accesses"
+    );
+}
+
+#[test]
+fn reverse_time_rec_projection_lowers_to_reverse_sample_loop() {
+    let mut arena = TreeArena::new();
+    let self_ref = de_bruijn_ref(&mut arena, 1);
+    let body = {
+        let mut b = SigBuilder::new(&mut arena);
+        let cotangent = b.input(0);
+        let feedback = b.proj(0, self_ref);
+        let half = b.real(0.5);
+        let transposed = b.mul(half, feedback);
+        b.add(cotangent, transposed)
+    };
+    let body_list = arena.cons(body, arena.nil());
+    let group = de_bruijn_rec(&mut arena, body_list);
+    let sig0 = {
+        let mut b = SigBuilder::new(&mut arena);
+        let reverse_group = b.reverse_time_rec(group);
+        b.proj(0, reverse_group)
+    };
+
+    let prepared = prepare_signals_for_fir(&arena, &[sig0], &UiProgram::empty())
+        .expect("reverse-time rec/proj signal should prepare");
+    let out = compile_fastlane_without_ui(
+        prepared.arena(),
+        prepared.outputs(),
+        1,
+        1,
+        &SignalFirOptions::default(),
+    )
+    .expect("ReverseTimeRec projection should lower through fast-lane");
+
+    let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+        panic!("module expected");
+    };
+    assert!(
+        find_compute_simple_loop_reverse_flag(&out.store, functions),
+        "ReverseTimeRec outputs should select a reverse sample loop"
     );
 }
 

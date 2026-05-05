@@ -248,6 +248,7 @@ pub(super) fn build_module(
     );
     lower.ensure_sample_rate_var();
     lower.prepare_delay_lines(signals)?;
+    let reverse_time_outputs = classify_reverse_time_outputs(lower.arena, signals)?;
     let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
     let dsp_arg = NamedType {
         name: "dsp".to_string(),
@@ -483,7 +484,7 @@ pub(super) fn build_module(
                 let mut b = FirBuilder::new(&mut lower.store);
                 let upper = b.load_var("count", AccessType::FunArgs, FirType::Int32);
                 let body = b.block(&sample_loop_statements);
-                b.simple_for_loop("i0", upper, body, false)
+                b.simple_for_loop("i0", upper, body, reverse_time_outputs)
             };
             all.push(sample_loop);
         }
@@ -658,6 +659,31 @@ pub(super) fn build_module(
         store: lower.store,
         module,
     })
+}
+
+fn classify_reverse_time_outputs(
+    arena: &TreeArena,
+    signals: &[SigId],
+) -> Result<bool, SignalFirError> {
+    let mut saw_forward = false;
+    let mut saw_reverse = false;
+    for &sig in signals {
+        match match_sig(arena, sig) {
+            SigMatch::Proj(_, group)
+                if matches!(match_sig(arena, group), SigMatch::ReverseTimeRec(_)) =>
+            {
+                saw_reverse = true;
+            }
+            _ => saw_forward = true,
+        }
+    }
+    if saw_forward && saw_reverse {
+        return Err(SignalFirError::new(
+            SignalFirErrorCode::UnsupportedSignalNode,
+            "mixed forward and ReverseTimeRec outputs require phase-E1 split-loop scheduling",
+        ));
+    }
+    Ok(saw_reverse)
 }
 
 /// Stateful lowering engine that converts a propagated signal forest into FIR.
