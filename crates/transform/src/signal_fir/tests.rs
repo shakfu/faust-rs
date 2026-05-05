@@ -1224,6 +1224,60 @@ fn reverse_time_rec_projection_lowers_to_reverse_sample_loop() {
 }
 
 #[test]
+fn mixed_forward_and_reverse_time_outputs_lower_to_split_sample_loops() {
+    let mut arena = TreeArena::new();
+    let self_ref = de_bruijn_ref(&mut arena, 1);
+    let body = {
+        let mut b = SigBuilder::new(&mut arena);
+        let cotangent = b.input(0);
+        let feedback = b.proj(0, self_ref);
+        let half = b.real(0.5);
+        let transposed = b.mul(half, feedback);
+        b.add(cotangent, transposed)
+    };
+    let body_list = arena.cons(body, arena.nil());
+    let group = de_bruijn_rec(&mut arena, body_list);
+    let (forward, reverse) = {
+        let mut b = SigBuilder::new(&mut arena);
+        let forward = b.input(0);
+        let reverse_group = b.reverse_time_rec(group);
+        let reverse = b.proj(0, reverse_group);
+        (forward, reverse)
+    };
+
+    let prepared = prepare_signals_for_fir(&arena, &[forward, reverse], &UiProgram::empty())
+        .expect("mixed forward/reverse output bundle should prepare");
+    let out = compile_fastlane_without_ui(
+        prepared.arena(),
+        prepared.outputs(),
+        1,
+        2,
+        &SignalFirOptions::default(),
+    )
+    .expect("mixed forward/reverse output bundle should lower through split loops");
+
+    let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+        panic!("module expected");
+    };
+    let compute_body = find_decl_fun_body(&out.store, functions, "compute");
+    let FirMatch::Block(stmts) = match_fir(&out.store, compute_body) else {
+        panic!("compute block expected");
+    };
+    let loop_directions: Vec<bool> = stmts
+        .iter()
+        .filter_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::SimpleForLoop { is_reverse, .. } => Some(is_reverse),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        loop_directions,
+        vec![false, true],
+        "mixed bundles should run forward primals before reverse adjoints"
+    );
+}
+
+#[test]
 fn recursive_feedback_delay1_reuses_single_scalar_recursion_state() {
     let mut arena = TreeArena::new();
     let self_ref = de_bruijn_ref(&mut arena, 1);

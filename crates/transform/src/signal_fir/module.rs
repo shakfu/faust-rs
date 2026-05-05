@@ -248,7 +248,7 @@ pub(super) fn build_module(
     );
     lower.ensure_sample_rate_var();
     lower.prepare_delay_lines(signals)?;
-    let reverse_time_outputs = classify_reverse_time_outputs(lower.arena, signals)?;
+    let reverse_time_outputs = classify_reverse_time_outputs(lower.arena, signals);
     let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
     let dsp_arg = NamedType {
         name: "dsp".to_string(),
@@ -269,29 +269,39 @@ pub(super) fn build_module(
             .push(b.label(format!("signals: {}", plan.signal_count)));
     }
 
-    for (signal_index, sig) in signals.iter().enumerate() {
-        let mut value = lower.lower_signal(*sig)?;
-        if signal_index < plan.num_outputs {
-            // Internal real type → external FaustFloat boundary at output store.
-            // Internal values are always Float32/Float64, never FaustFloat, so
-            // this cast is always emitted. The check guards against future cases
-            // where the value might already carry the external type.
-            let needs_output_cast = lower.store.value_type(value) != Some(FirType::FaustFloat);
-            let mut b = FirBuilder::new(&mut lower.store);
-            if needs_output_cast {
-                value = b.cast(FirType::FaustFloat, value);
+    let has_forward_outputs = reverse_time_outputs.iter().any(|is_reverse| !*is_reverse);
+    let has_reverse_outputs = reverse_time_outputs.iter().any(|is_reverse| *is_reverse);
+    let mut sample_loops = Vec::new();
+
+    if has_forward_outputs {
+        for (signal_index, sig) in signals.iter().enumerate() {
+            if !reverse_time_outputs[signal_index] {
+                lower.lower_output_signal(signal_index, *sig, plan.num_outputs)?;
             }
-            let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
-            lower.sample_phases.immediate.push(b.store_table(
-                format!("output{signal_index}"),
-                AccessType::Stack,
-                i0,
-                value,
-            ));
-        } else {
-            let mut b = FirBuilder::new(&mut lower.store);
-            lower.sample_phases.immediate.push(b.drop_(value));
         }
+        let delay_sample_end = lower
+            .delay
+            .emit_sample_end_updates(&mut lower.store, lower.uses_iota);
+        lower.sample_phases.sample_end.extend(delay_sample_end);
+        sample_loops.push((false, lower.sample_phases.flattened()));
+        lower.reset_sample_loop_state();
+    }
+
+    if has_reverse_outputs {
+        lower.cache.clear();
+        for (signal_index, sig) in signals.iter().enumerate() {
+            if reverse_time_outputs[signal_index] {
+                lower.lower_output_signal(signal_index, *sig, plan.num_outputs)?;
+            }
+        }
+        if !has_forward_outputs {
+            let delay_sample_end = lower
+                .delay
+                .emit_sample_end_updates(&mut lower.store, lower.uses_iota);
+            lower.sample_phases.sample_end.extend(delay_sample_end);
+        }
+        sample_loops.push((true, lower.sample_phases.flattened()));
+        lower.reset_sample_loop_state();
     }
     for index in 0..plan.num_outputs {
         let mut b = FirBuilder::new(&mut lower.store);
@@ -305,18 +315,9 @@ pub(super) fn build_module(
             Some(load_chan_ptr),
         ));
     }
-    if reverse_time_outputs {
+    if has_reverse_outputs {
         lower.emit_reverse_time_rec_compute_resets();
     }
-    // Deferred shift-copy blocks run after all signal outputs are stored.
-    // This matches reference Faust's write→read→shift ordering for the Shift strategy.
-    let delay_sample_end = lower
-        .delay
-        .emit_sample_end_updates(&mut lower.store, lower.uses_iota);
-    lower.sample_phases.sample_end.extend(delay_sample_end);
-
-    let mut sample_loop_statements = lower.sample_phases.flattened();
-
     // ═══════════════════════════════════════════════════════════════════════
     // ── Phase 2: CSE Materialization per Bucket ────────────────────────────
     // ═══════════════════════════════════════════════════════════════════════
@@ -348,16 +349,18 @@ pub(super) fn build_module(
             lower.islow_counter,
         );
 
-        let rc = cse::count_fir_value_uses(&lower.store, &sample_loop_statements);
-        cse::materialize_shared_values(
-            &mut lower.store,
-            &mut sample_loop_statements,
-            &rc,
-            "fTemp",
-            0,
-            "iTemp",
-            0,
-        );
+        for (_, sample_loop_statements) in &mut sample_loops {
+            let rc = cse::count_fir_value_uses(&lower.store, sample_loop_statements);
+            cse::materialize_shared_values(
+                &mut lower.store,
+                sample_loop_statements,
+                &rc,
+                "fTemp",
+                0,
+                "iTemp",
+                0,
+            );
+        }
     }
 
     let metadata_body = {
@@ -482,12 +485,15 @@ pub(super) fn build_module(
     let compute_statements = {
         let mut all = Vec::new();
         all.extend(lower.control_statements.iter().copied());
-        if !sample_loop_statements.is_empty() {
+        for (is_reverse, sample_loop_statements) in &sample_loops {
+            if sample_loop_statements.is_empty() {
+                continue;
+            }
             let sample_loop = {
                 let mut b = FirBuilder::new(&mut lower.store);
                 let upper = b.load_var("count", AccessType::FunArgs, FirType::Int32);
-                let body = b.block(&sample_loop_statements);
-                b.simple_for_loop("i0", upper, body, reverse_time_outputs)
+                let body = b.block(sample_loop_statements);
+                b.simple_for_loop("i0", upper, body, *is_reverse)
             };
             all.push(sample_loop);
         }
@@ -664,29 +670,17 @@ pub(super) fn build_module(
     })
 }
 
-fn classify_reverse_time_outputs(
-    arena: &TreeArena,
-    signals: &[SigId],
-) -> Result<bool, SignalFirError> {
-    let mut saw_forward = false;
-    let mut saw_reverse = false;
-    for &sig in signals {
-        match match_sig(arena, sig) {
-            SigMatch::Proj(_, group)
-                if matches!(match_sig(arena, group), SigMatch::ReverseTimeRec(_)) =>
-            {
-                saw_reverse = true;
-            }
-            _ => saw_forward = true,
-        }
-    }
-    if saw_forward && saw_reverse {
-        return Err(SignalFirError::new(
-            SignalFirErrorCode::UnsupportedSignalNode,
-            "mixed forward and ReverseTimeRec outputs require phase-E1 split-loop scheduling",
-        ));
-    }
-    Ok(saw_reverse)
+fn classify_reverse_time_outputs(arena: &TreeArena, signals: &[SigId]) -> Vec<bool> {
+    signals
+        .iter()
+        .map(|&sig| {
+            matches!(
+                match_sig(arena, sig),
+                SigMatch::Proj(_, group)
+                    if matches!(match_sig(arena, group), SigMatch::ReverseTimeRec(_))
+            )
+        })
+        .collect()
 }
 
 /// Stateful lowering engine that converts a propagated signal forest into FIR.
@@ -1310,6 +1304,47 @@ impl<'a> SignalToFirLower<'a> {
 
         self.cache.insert(sig, lowered);
         Ok(lowered)
+    }
+
+    /// Lowers one top-level signal into the currently active sample-loop
+    /// accumulator.
+    ///
+    /// The caller controls which sample loop is active by clearing
+    /// [`Self::sample_phases`] between forward and reverse scheduling slices.
+    /// Output signals are cast at the external FaustFloat boundary and stored
+    /// into `outputN[i0]`; non-output surplus signals are evaluated and dropped.
+    fn lower_output_signal(
+        &mut self,
+        signal_index: usize,
+        sig: SigId,
+        num_outputs: usize,
+    ) -> Result<(), SignalFirError> {
+        let mut value = self.lower_signal(sig)?;
+        if signal_index < num_outputs {
+            let needs_output_cast = self.store.value_type(value) != Some(FirType::FaustFloat);
+            let mut b = FirBuilder::new(&mut self.store);
+            if needs_output_cast {
+                value = b.cast(FirType::FaustFloat, value);
+            }
+            let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+            self.sample_phases.immediate.push(b.store_table(
+                format!("output{signal_index}"),
+                AccessType::Stack,
+                i0,
+                value,
+            ));
+        } else {
+            let mut b = FirBuilder::new(&mut self.store);
+            self.sample_phases.immediate.push(b.drop_(value));
+        }
+        Ok(())
+    }
+
+    /// Clears per-loop scheduling state before building another sample loop.
+    fn reset_sample_loop_state(&mut self) {
+        self.sample_phases = SamplePhases::default();
+        self.scheduled_state_updates.clear();
+        self.recursion.scheduled_groups.clear();
     }
 
     /// Lowers supported foreign constants.
