@@ -972,7 +972,7 @@ mod tests {
         };
 
         assert!(bundle.wasm_bytes.starts_with(b"\0asm"));
-        assert!(bundle.dsp_json.contains("\"filename\":\"osc.dsp\""));
+        assert!(bundle.dsp_json.contains("\"filename\": \"osc.dsp\""));
         assert_eq!(bundle.compile_options, "-lang wasm -single");
     }
 

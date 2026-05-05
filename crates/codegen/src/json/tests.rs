@@ -23,8 +23,9 @@ fn json_description_renders_minimal_shape() {
 
     assert_eq!(
         json,
-        "{\"name\":\"passthrough\",\"size\":4,\"inputs\":1,\"outputs\":2,\"ui\":[]}"
+        "{\n\t\"name\": \"passthrough\",\n\t\"size\": 4,\n\t\"inputs\": 1,\n\t\"outputs\": 2,\n\t\"ui\": []\n}"
     );
+    assert!(json.contains("\n\t\"ui\": []\n}"));
 }
 
 #[test]
@@ -45,7 +46,7 @@ fn json_description_escapes_strings() {
     }
     .render();
 
-    assert!(json.contains("\"name\":\"quote\\\"slash\\\\tab\\tline\\n\""));
+    assert!(json.contains("\"name\": \"quote\\\"slash\\\\tab\\tline\\n\""));
 }
 
 #[test]
@@ -91,14 +92,12 @@ fn json_builder_replays_fir_ui_and_metadata() {
     .expect("FIR JSON builder should succeed");
 
     let rendered = json.render();
-    assert!(
-        rendered.contains("\"meta\":[{\"name\":\"gain-bias-ui-meta\"},{\"author\":\"faust-rs\"}]")
-    );
-    assert!(rendered.contains("\"address\":\"/GainBias/gain\""));
-    assert!(rendered.contains("\"index\":0"));
-    assert!(rendered.contains("\"address\":\"/GainBias/level\""));
-    assert!(rendered.contains("\"index\":12"));
-    assert!(rendered.contains("\"name\":\"gain-bias-ui-meta\""));
+    assert!(rendered.contains("\t\"meta\": [ \n\t\t{ \"name\": \"gain-bias-ui-meta\" },"));
+    assert!(rendered.contains("\"address\": \"/GainBias/gain\""));
+    assert!(rendered.contains("\"index\": 0"));
+    assert!(rendered.contains("\"address\": \"/GainBias/level\""));
+    assert!(rendered.contains("\"index\": 12"));
+    assert!(rendered.contains("\"name\": \"gain-bias-ui-meta\""));
 }
 
 #[test]
@@ -177,7 +176,7 @@ fn json_builder_omits_widget_index_when_no_offset_resolver_is_available() {
     .expect("builder should allow JSON without widget offsets");
 
     let rendered = json.render();
-    assert!(rendered.contains("\"address\":\"/GainBias/gain\""));
+    assert!(rendered.contains("\"address\": \"/GainBias/gain\""));
     assert!(!rendered.contains("\"index\":"));
 }
 
@@ -213,7 +212,7 @@ fn json_description_canonicalizes_soundfile_urls_for_faustwasm() {
     .render();
 
     assert!(json.contains(
-        "\"url\":\"{-Alonepad_reverb_stereo_instru1.flac-;-Dronepad_test_stereo_instru1.flac-}\""
+        "\"url\": \"{-Alonepad_reverb_stereo_instru1.flac-;-Dronepad_test_stereo_instru1.flac-}\""
     ));
     assert!(!json.contains("'Dronepad_test_stereo_instru1.flac"));
 }

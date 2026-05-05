@@ -18,9 +18,9 @@ fn wasm_scaffold_emits_valid_module_for_passthrough_fixture() {
     Validator::new()
         .validate_all(&out.wasm_binary)
         .expect("generated scaffold should validate as WASM");
-    assert!(out.dsp_json.contains("\"inputs\":1"));
-    assert!(out.dsp_json.contains("\"outputs\":1"));
-    assert!(out.dsp_json.contains("\"ui\":[]"));
+    assert!(out.dsp_json.contains("\"inputs\": 1"));
+    assert!(out.dsp_json.contains("\"outputs\": 1"));
+    assert!(out.dsp_json.contains("\"ui\": []"));
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn wasm_json_description_renders_stable_scaffold_shape() {
 
     assert_eq!(
         json,
-        "{\"name\":\"passthrough\",\"size\":4,\"inputs\":1,\"outputs\":2,\"ui\":[]}"
+        "{\n\t\"name\": \"passthrough\",\n\t\"size\": 4,\n\t\"inputs\": 1,\n\t\"outputs\": 2,\n\t\"ui\": []\n}"
     );
 }
 
@@ -66,7 +66,7 @@ fn wasm_json_description_escapes_string_fields() {
     .render();
 
     assert!(
-        json.contains("\"name\":\"quote\\\"slash\\\\tab\\tline\\n\""),
+        json.contains("\"name\": \"quote\\\"slash\\\\tab\\tline\\n\""),
         "escaped JSON should preserve control characters and quotes: {json}"
     );
 }
@@ -77,21 +77,21 @@ fn wasm_json_description_replays_fir_ui_and_metadata() {
     let out = generate_wasm_module(&store, module, &WasmOptions::default())
         .expect("WASM backend should emit FIR-derived UI and metadata JSON");
 
-    assert!(out.dsp_json.contains("\"size\":16"));
+    assert!(out.dsp_json.contains("\"size\": 16"));
     assert!(
         out.dsp_json
-            .contains("\"meta\":[{\"name\":\"gain-bias-ui-meta\"},{\"author\":\"faust-rs\"}]")
+            .contains("\t\"meta\": [ \n\t\t{ \"name\": \"gain-bias-ui-meta\" },")
     );
-    assert!(out.dsp_json.contains("\"type\":\"vgroup\""));
-    assert!(out.dsp_json.contains("\"label\":\"GainBias\""));
-    assert!(out.dsp_json.contains("\"address\":\"/GainBias/gate\""));
-    assert!(out.dsp_json.contains("\"index\":8"));
-    assert!(out.dsp_json.contains("\"address\":\"/GainBias/gain\""));
-    assert!(out.dsp_json.contains("\"index\":0"));
-    assert!(out.dsp_json.contains("\"address\":\"/GainBias/bias\""));
-    assert!(out.dsp_json.contains("\"index\":4"));
-    assert!(out.dsp_json.contains("\"address\":\"/GainBias/level\""));
-    assert!(out.dsp_json.contains("\"index\":12"));
+    assert!(out.dsp_json.contains("\"type\": \"vgroup\""));
+    assert!(out.dsp_json.contains("\"label\": \"GainBias\""));
+    assert!(out.dsp_json.contains("\"address\": \"/GainBias/gate\""));
+    assert!(out.dsp_json.contains("\"index\": 8"));
+    assert!(out.dsp_json.contains("\"address\": \"/GainBias/gain\""));
+    assert!(out.dsp_json.contains("\"index\": 0"));
+    assert!(out.dsp_json.contains("\"address\": \"/GainBias/bias\""));
+    assert!(out.dsp_json.contains("\"index\": 4"));
+    assert!(out.dsp_json.contains("\"address\": \"/GainBias/level\""));
+    assert!(out.dsp_json.contains("\"index\": 12"));
 }
 
 #[test]
@@ -372,7 +372,7 @@ fn wasm_module_emits_static_table_data_segments() {
     let out = generate_wasm_module(&store, module, &WasmOptions::default())
         .expect("WASM scaffold should emit static table data segment");
 
-    assert!(out.dsp_json.contains("\"size\":16"));
+    assert!(out.dsp_json.contains("\"size\": 16"));
 
     let mut saw_json = false;
     let mut saw_table = false;
@@ -738,8 +738,11 @@ fn wasm_json_indices_follow_runtime_offsets_after_static_tables() {
     let out = generate_wasm_module(&store, module, &WasmOptions::default())
         .expect("WASM backend should expose UI indices as runtime byte offsets");
 
-    assert!(out.dsp_json.contains("\"address\":\"/StaticTableUI/gain\""));
-    assert!(out.dsp_json.contains("\"index\":12"));
+    assert!(
+        out.dsp_json
+            .contains("\"address\": \"/StaticTableUI/gain\"")
+    );
+    assert!(out.dsp_json.contains("\"index\": 12"));
 }
 
 #[test]
@@ -748,9 +751,9 @@ fn wasm_soundfile_modules_import_memory_and_expose_soundfile_offset_zero() {
     let out = generate_wasm_module(&store, module, &WasmOptions::default())
         .expect("WASM backend should lower soundfile modules without empty compute fallback");
 
-    assert!(out.dsp_json.contains("\"type\":\"soundfile\""));
-    assert!(out.dsp_json.contains("\"varname\":\"fSound0\""));
-    assert!(out.dsp_json.contains("\"index\":0"));
+    assert!(out.dsp_json.contains("\"type\": \"soundfile\""));
+    assert!(out.dsp_json.contains("\"varname\": \"fSound0\""));
+    assert!(out.dsp_json.contains("\"index\": 0"));
 
     let mut imported_memory = false;
     let mut exported_memory = false;

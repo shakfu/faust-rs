@@ -4067,15 +4067,15 @@ mod tests {
             .compile_source_to_wasm("zero.dsp", "process = 0;", &WasmOptions::default())
             .expect("WASM scaffold should compile from source");
         assert!(out.wasm_binary.starts_with(b"\0asm"));
-        assert!(out.dsp_json.contains("\"size\":"));
-        assert!(out.dsp_json.contains("\"ui\":["));
-        assert!(out.dsp_json.contains("\"filename\":\"zero.dsp\""));
+        assert!(out.dsp_json.contains("\"size\": "));
+        assert!(out.dsp_json.contains("\"ui\": ["));
+        assert!(out.dsp_json.contains("\"filename\": \"zero.dsp\""));
         assert!(
             out.dsp_json
-                .contains(&format!("\"version\":\"{}\"", Compiler::version()))
+                .contains(&format!("\"version\": \"{}\"", Compiler::version()))
         );
         assert!(out.dsp_json.contains(&format!(
-            "\"compile_options\":\"{}\"",
+            "\"compile_options\": \"{}\"",
             compile_options_json_string(Some("wasm"), false)
         )));
     }
@@ -4096,7 +4096,7 @@ mod tests {
         );
         assert!(
             out.dsp_json
-                .contains(&format!("\"compile_options\":\"{}\"", out.compile_options))
+                .contains(&format!("\"compile_options\": \"{}\"", out.compile_options))
         );
     }
 
@@ -4174,15 +4174,15 @@ mod tests {
             .compile_wasm_artifact(&request)
             .expect("artifact compile should preserve UI controls");
 
-        assert!(strict_json.contains("\"filename\":\"gain\""));
-        assert!(strict_json.contains("\"label\":\"gain\""));
-        assert!(strict_json.contains("\"type\":\"hslider\""));
-        assert!(strict_json.contains("\"address\":\"/gain/gain\""));
+        assert!(strict_json.contains("\"filename\": \"gain\""));
+        assert!(strict_json.contains("\"label\": \"gain\""));
+        assert!(strict_json.contains("\"type\": \"hslider\""));
+        assert!(strict_json.contains("\"address\": \"/gain/gain\""));
         assert!(out.wasm_bytes.starts_with(b"\0asm"));
         assert_eq!(json_filename(&out.dsp_json).as_deref(), Some("gain"));
-        assert!(out.dsp_json.contains("\"label\":\"gain\""));
-        assert!(out.dsp_json.contains("\"type\":\"hslider\""));
-        assert!(out.dsp_json.contains("\"address\":\"/gain/gain\""));
+        assert!(out.dsp_json.contains("\"label\": \"gain\""));
+        assert!(out.dsp_json.contains("\"type\": \"hslider\""));
+        assert!(out.dsp_json.contains("\"address\": \"/gain/gain\""));
     }
 
     #[test]
@@ -4237,11 +4237,11 @@ mod tests {
             .compile_file_default_to_wasm(&entry, &WasmOptions::default())
             .expect("file-backed WASM compile should succeed");
 
-        assert!(out.dsp_json.contains("\"name\":\"Main DSP\""));
+        assert!(out.dsp_json.contains("\"name\": \"Main DSP\""));
         assert_eq!(json_filename(&out.dsp_json).as_deref(), Some("main.dsp"));
         assert!(
             out.dsp_json
-                .contains(&format!("\"version\":\"{}\"", Compiler::version()))
+                .contains(&format!("\"version\": \"{}\"", Compiler::version()))
         );
         let library_list = json_library_list(&out.dsp_json);
         assert!(
@@ -4282,7 +4282,7 @@ mod tests {
         assert!(library_list.contains(&child), "{library_list:?}");
         assert!(
             out.dsp_json
-                .contains(&format!("\"compile_options\":\"{}\"", out.compile_options))
+                .contains(&format!("\"compile_options\": \"{}\"", out.compile_options))
         );
     }
 
@@ -4296,11 +4296,11 @@ mod tests {
             )
             .expect("strict JSON should compile from source");
 
-        assert!(json.contains("\"name\":\"Gain\""));
-        assert!(json.contains("\"filename\":\"gain.dsp\""));
-        assert!(json.contains("\"ui\":["));
+        assert!(json.contains("\"name\": \"Gain\""));
+        assert!(json.contains("\"filename\": \"gain.dsp\""));
+        assert!(json.contains("\"ui\": ["));
         assert!(json.contains(&format!(
-            "\"compile_options\":\"{}\"",
+            "\"compile_options\": \"{}\"",
             compile_options_json_string(None, false)
         )));
         assert!(!json.contains("\"index\":"));

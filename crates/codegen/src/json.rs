@@ -61,54 +61,60 @@ pub struct JsonDescription {
 }
 
 impl JsonDescription {
-    /// Render the description as a compact JSON string.
+    /// Render the description using the readable Faust JSON layout.
     ///
     /// The serializer is intentionally local and deterministic rather than
     /// delegating to `serde_json`, because parity work here cares about field
-    /// presence, ordering, and omission rules that mirror the existing Faust
-    /// JSON payloads.
+    /// presence, ordering, omission rules, and C++-style pretty printing.  The
+    /// layout uses tabs, one top-level/UI field per line, inline metadata
+    /// objects such as `{ "key": "value" }`, and compact string arrays for
+    /// `library_list`/`include_pathnames`, matching the shape emitted by the
+    /// C++ compiler's JSON backend.
     pub fn render(&self) -> String {
         let mut out = String::new();
-        out.push('{');
-        push_json_field_string(&mut out, "name", &self.name);
+        out.push_str("{\n");
+        let mut first = true;
+        push_pretty_field_string(&mut out, &mut first, 1, "name", &self.name);
         if let Some(filename) = &self.filename {
-            out.push(',');
-            push_json_field_string(&mut out, "filename", filename);
+            push_pretty_field_string(&mut out, &mut first, 1, "filename", filename);
         }
         if let Some(version) = &self.version {
-            out.push(',');
-            push_json_field_string(&mut out, "version", version);
+            push_pretty_field_string(&mut out, &mut first, 1, "version", version);
         }
         if let Some(compile_options) = &self.compile_options {
-            out.push(',');
-            push_json_field_string(&mut out, "compile_options", compile_options);
+            push_pretty_field_string(&mut out, &mut first, 1, "compile_options", compile_options);
         }
         if !self.library_list.is_empty() {
-            out.push(',');
-            push_json_field_string_array(&mut out, "library_list", &self.library_list);
+            push_pretty_field_string_array(
+                &mut out,
+                &mut first,
+                1,
+                "library_list",
+                &self.library_list,
+            );
         }
         if !self.include_pathnames.is_empty() {
-            out.push(',');
-            push_json_field_string_array(&mut out, "include_pathnames", &self.include_pathnames);
+            push_pretty_field_string_array(
+                &mut out,
+                &mut first,
+                1,
+                "include_pathnames",
+                &self.include_pathnames,
+            );
         }
         if let Some(size) = self.size {
-            out.push(',');
-            push_json_field_u32(&mut out, "size", size);
+            push_pretty_field_u32(&mut out, &mut first, 1, "size", size);
         }
-        out.push(',');
-        push_json_field_usize(&mut out, "inputs", self.inputs);
-        out.push(',');
-        push_json_field_usize(&mut out, "outputs", self.outputs);
+        push_pretty_field_usize(&mut out, &mut first, 1, "inputs", self.inputs);
+        push_pretty_field_usize(&mut out, &mut first, 1, "outputs", self.outputs);
         if let Some(sr_index) = self.sr_index {
-            out.push(',');
-            push_json_field_u32(&mut out, "sr_index", sr_index);
+            push_pretty_field_u32(&mut out, &mut first, 1, "sr_index", sr_index);
         }
         if !self.meta.is_empty() {
-            out.push(',');
-            push_json_field_meta_array(&mut out, "meta", &self.meta);
+            push_pretty_field_meta_array(&mut out, &mut first, 1, "meta", &self.meta);
         }
-        out.push(',');
-        push_json_field_ui_array(&mut out, "ui", &self.ui);
+        push_pretty_field_ui_array(&mut out, &mut first, 1, "ui", &self.ui);
+        out.push('\n');
         out.push('}');
         out
     }
@@ -301,29 +307,71 @@ fn merge_top_level_and_fir_meta(
     merged
 }
 
-fn push_json_field_string(out: &mut String, key: &str, value: &str) {
-    let _ = write!(
-        out,
-        "\"{}\":\"{}\"",
-        escape_json_string(key),
-        escape_json_string(value)
-    );
+fn push_indent(out: &mut String, depth: usize) {
+    for _ in 0..depth {
+        out.push('\t');
+    }
 }
 
-fn push_json_field_usize(out: &mut String, key: &str, value: usize) {
-    let _ = write!(out, "\"{}\":{}", escape_json_string(key), value);
+fn push_pretty_separator(out: &mut String, first: &mut bool) {
+    if *first {
+        *first = false;
+    } else {
+        out.push_str(",\n");
+    }
 }
 
-fn push_json_field_u32(out: &mut String, key: &str, value: u32) {
-    let _ = write!(out, "\"{}\":{}", escape_json_string(key), value);
+fn push_pretty_key(out: &mut String, first: &mut bool, depth: usize, key: &str) {
+    push_pretty_separator(out, first);
+    push_indent(out, depth);
+    let _ = write!(out, "\"{}\": ", escape_json_string(key));
 }
 
-fn push_json_field_f64(out: &mut String, key: &str, value: f64) {
-    let _ = write!(out, "\"{}\":{}", escape_json_string(key), value);
+fn push_pretty_field_string(
+    out: &mut String,
+    first: &mut bool,
+    depth: usize,
+    key: &str,
+    value: &str,
+) {
+    push_pretty_key(out, first, depth, key);
+    let _ = write!(out, "\"{}\"", escape_json_string(value));
 }
 
-fn push_json_field_string_array(out: &mut String, key: &str, values: &[String]) {
-    let _ = write!(out, "\"{}\":[", escape_json_string(key));
+fn push_pretty_field_usize(
+    out: &mut String,
+    first: &mut bool,
+    depth: usize,
+    key: &str,
+    value: usize,
+) {
+    push_pretty_key(out, first, depth, key);
+    let _ = write!(out, "{value}");
+}
+
+fn push_pretty_field_u32(out: &mut String, first: &mut bool, depth: usize, key: &str, value: u32) {
+    push_pretty_key(out, first, depth, key);
+    let _ = write!(out, "{value}");
+}
+
+fn push_pretty_field_f64(out: &mut String, first: &mut bool, depth: usize, key: &str, value: f64) {
+    push_pretty_key(out, first, depth, key);
+    let _ = write!(out, "{value}");
+}
+
+fn push_pretty_field_string_array(
+    out: &mut String,
+    first: &mut bool,
+    depth: usize,
+    key: &str,
+    values: &[String],
+) {
+    push_pretty_key(out, first, depth, key);
+    push_json_string_array_value(out, values);
+}
+
+fn push_json_string_array_value(out: &mut String, values: &[String]) {
+    out.push('[');
     for (index, value) in values.iter().enumerate() {
         if index > 0 {
             out.push(',');
@@ -333,28 +381,69 @@ fn push_json_field_string_array(out: &mut String, key: &str, values: &[String]) 
     out.push(']');
 }
 
-fn push_json_field_meta_array(out: &mut String, key: &str, values: &[JsonMetaEntry]) {
-    let _ = write!(out, "\"{}\":[", escape_json_string(key));
+fn push_json_meta_object(out: &mut String, entry: &JsonMetaEntry) {
+    let _ = write!(
+        out,
+        "{{ \"{}\": \"{}\" }}",
+        escape_json_string(&entry.key),
+        escape_json_string(&entry.value)
+    );
+}
+
+fn push_pretty_field_meta_array(
+    out: &mut String,
+    first: &mut bool,
+    depth: usize,
+    key: &str,
+    values: &[JsonMetaEntry],
+) {
+    push_pretty_key(out, first, depth, key);
+    push_pretty_meta_array_value(out, values, depth);
+}
+
+fn push_pretty_meta_array_value(out: &mut String, values: &[JsonMetaEntry], depth: usize) {
+    if values.is_empty() {
+        out.push_str("[]");
+        return;
+    }
+    out.push_str("[ \n");
     for (index, entry) in values.iter().enumerate() {
-        if index > 0 {
+        push_indent(out, depth + 1);
+        push_json_meta_object(out, entry);
+        if index + 1 < values.len() {
             out.push(',');
         }
-        out.push('{');
-        push_json_field_string(out, &entry.key, &entry.value);
-        out.push('}');
+        out.push('\n');
     }
+    push_indent(out, depth);
     out.push(']');
 }
 
-/// Serialize the JSON `ui` array.
-fn push_json_field_ui_array(out: &mut String, key: &str, values: &[JsonUiItem]) {
-    let _ = write!(out, "\"{}\":[", escape_json_string(key));
+fn push_pretty_field_ui_array(
+    out: &mut String,
+    first: &mut bool,
+    depth: usize,
+    key: &str,
+    values: &[JsonUiItem],
+) {
+    push_pretty_key(out, first, depth, key);
+    push_pretty_ui_array_value(out, values, depth);
+}
+
+fn push_pretty_ui_array_value(out: &mut String, values: &[JsonUiItem], depth: usize) {
+    if values.is_empty() {
+        out.push_str("[]");
+        return;
+    }
+    out.push_str("[ \n");
     for (index, item) in values.iter().enumerate() {
-        if index > 0 {
+        push_pretty_ui_item(out, item, depth + 1);
+        if index + 1 < values.len() {
             out.push(',');
         }
-        push_json_ui_item(out, item);
+        out.push('\n');
     }
+    push_indent(out, depth);
     out.push(']');
 }
 
@@ -427,13 +516,13 @@ fn canonicalize_soundfile_url(url: &str) -> String {
     }
 }
 
-/// Serialize one UI item, omitting backend-specific optional fields when they
-/// are absent.
+/// Serialize one UI item using the readable Faust JSON layout, omitting
+/// backend-specific optional fields when they are absent.
 ///
 /// Notably, widget `index` is only emitted when the caller provided one through
 /// [`build_json_description_from_fir`]. This keeps strict `-json` output free
 /// from WASM-only ABI fields while still reusing the same builder.
-fn push_json_ui_item(out: &mut String, item: &JsonUiItem) {
+fn push_pretty_ui_item(out: &mut String, item: &JsonUiItem, depth: usize) {
     match item {
         JsonUiItem::Group {
             typ,
@@ -441,55 +530,55 @@ fn push_json_ui_item(out: &mut String, item: &JsonUiItem) {
             meta,
             items,
         } => {
-            out.push('{');
-            push_json_field_string(out, "type", typ);
-            out.push(',');
-            push_json_field_string(out, "label", label);
+            push_indent(out, depth);
+            out.push_str("{\n");
+            let mut first = true;
+            push_pretty_field_string(out, &mut first, depth + 1, "type", typ);
+            push_pretty_field_string(out, &mut first, depth + 1, "label", label);
             if !meta.is_empty() {
-                out.push(',');
-                push_json_field_meta_array(out, "meta", meta);
+                push_pretty_field_meta_array(out, &mut first, depth + 1, "meta", meta);
             }
-            out.push(',');
-            push_json_field_ui_array(out, "items", items);
+            push_pretty_field_ui_array(out, &mut first, depth + 1, "items", items);
+            out.push('\n');
+            push_indent(out, depth);
             out.push('}');
         }
         JsonUiItem::Widget(widget) => {
-            out.push('{');
-            push_json_field_string(out, "type", widget.typ);
-            out.push(',');
-            push_json_field_string(out, "label", &widget.label);
-            out.push(',');
-            push_json_field_string(out, "varname", &widget.varname);
-            out.push(',');
-            push_json_field_string(out, "shortname", &widget.shortname);
-            out.push(',');
-            push_json_field_string(out, "address", &widget.address);
+            push_indent(out, depth);
+            out.push_str("{\n");
+            let mut first = true;
+            push_pretty_field_string(out, &mut first, depth + 1, "type", widget.typ);
+            push_pretty_field_string(out, &mut first, depth + 1, "label", &widget.label);
+            push_pretty_field_string(out, &mut first, depth + 1, "varname", &widget.varname);
+            push_pretty_field_string(out, &mut first, depth + 1, "shortname", &widget.shortname);
+            push_pretty_field_string(out, &mut first, depth + 1, "address", &widget.address);
             if let Some(index) = widget.index {
-                out.push(',');
-                push_json_field_u32(out, "index", index);
+                push_pretty_field_u32(out, &mut first, depth + 1, "index", index);
             }
             if !widget.meta.is_empty() {
-                out.push(',');
-                push_json_field_meta_array(out, "meta", &widget.meta);
+                push_pretty_field_meta_array(out, &mut first, depth + 1, "meta", &widget.meta);
             }
             if let Some(url) = &widget.soundfile_url {
-                out.push(',');
-                push_json_field_string(out, "url", &canonicalize_soundfile_url(url));
+                push_pretty_field_string(
+                    out,
+                    &mut first,
+                    depth + 1,
+                    "url",
+                    &canonicalize_soundfile_url(url),
+                );
             }
             if let Some(range) = widget.range {
                 if let Some(init) = range.init {
-                    out.push(',');
-                    push_json_field_f64(out, "init", init);
+                    push_pretty_field_f64(out, &mut first, depth + 1, "init", init);
                 }
-                out.push(',');
-                push_json_field_f64(out, "min", range.min);
-                out.push(',');
-                push_json_field_f64(out, "max", range.max);
+                push_pretty_field_f64(out, &mut first, depth + 1, "min", range.min);
+                push_pretty_field_f64(out, &mut first, depth + 1, "max", range.max);
                 if let Some(step) = range.step {
-                    out.push(',');
-                    push_json_field_f64(out, "step", step);
+                    push_pretty_field_f64(out, &mut first, depth + 1, "step", step);
                 }
             }
+            out.push('\n');
+            push_indent(out, depth);
             out.push('}');
         }
     }
