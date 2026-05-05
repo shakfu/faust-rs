@@ -305,6 +305,9 @@ pub(super) fn build_module(
             Some(load_chan_ptr),
         ));
     }
+    if reverse_time_outputs {
+        lower.emit_reverse_time_rec_compute_resets();
+    }
     // Deferred shift-copy blocks run after all signal outputs are stored.
     // This matches reference Faust's write→read→shift ordering for the Shift strategy.
     let delay_sample_end = lower
@@ -2053,6 +2056,58 @@ impl<'a> SignalToFirLower<'a> {
         let name = format!("{prefix}{}", self.next_loop_var_id);
         self.next_loop_var_id += 1;
         name
+    }
+
+    /// Emits `compute()`-preamble resets for reverse-time recursion carriers.
+    ///
+    /// `ReverseTimeRec` has block-local adjoint semantics: the state one frame
+    /// past `count - 1` is terminal-zero for every `compute()` call. Ordinary
+    /// recursion carriers are only cleared by `instanceClear()`, but reverse
+    /// adjoint carriers must be zeroed before each reverse sample loop so no
+    /// cotangent state leaks across host blocks.
+    fn emit_reverse_time_rec_compute_resets(&mut self) {
+        let mut carriers: Vec<_> = self
+            .recursion
+            .rec_array_by_group_index
+            .values()
+            .cloned()
+            .collect();
+        carriers.sort_by(|a, b| a.name.cmp(&b.name));
+        carriers.dedup_by(|a, b| a.name == b.name);
+
+        for info in carriers {
+            let init = match info.typ {
+                FirType::Int32 => self.lower_int32_const(0),
+                FirType::Float32 | FirType::Float64 | FirType::FaustFloat => self.float_const(0.0),
+                _ => continue,
+            };
+            if info.size == 1 {
+                let mut b = FirBuilder::new(&mut self.store);
+                self.control_statements
+                    .push(b.store_var(info.name, AccessType::Struct, init));
+            } else {
+                let loop_var = self.fresh_loop_var("lRevRec");
+                let upper = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.int32(i32::try_from(info.size).unwrap_or(i32::MAX))
+                };
+                let body = {
+                    let index = {
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.load_var(loop_var.clone(), AccessType::Loop, FirType::Int32)
+                    };
+                    let store = {
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.store_table(info.name, AccessType::Struct, index, init)
+                    };
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.block(&[store])
+                };
+                let mut b = FirBuilder::new(&mut self.store);
+                self.control_statements
+                    .push(b.simple_for_loop(loop_var, upper, body, false));
+            }
+        }
     }
 
     /// Emits one floating-point constant at the internal real precision.

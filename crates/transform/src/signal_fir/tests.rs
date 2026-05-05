@@ -1195,6 +1195,32 @@ fn reverse_time_rec_projection_lowers_to_reverse_sample_loop() {
         find_compute_simple_loop_reverse_flag(&out.store, functions),
         "ReverseTimeRec outputs should select a reverse sample loop"
     );
+
+    let compute_body = find_decl_fun_body(&out.store, functions, "compute");
+    let FirMatch::Block(stmts) = match_fir(&out.store, compute_body) else {
+        panic!("compute block expected");
+    };
+    let reset_pos = stmts
+        .iter()
+        .position(|id| {
+            matches!(
+                match_fir(&out.store, *id),
+                FirMatch::StoreVar {
+                    ref name,
+                    access: AccessType::Struct,
+                    ..
+                } if name.starts_with("fRec")
+            )
+        })
+        .expect("ReverseTimeRec scalar carrier should reset in compute preamble");
+    let loop_pos = stmts
+        .iter()
+        .position(|id| matches!(match_fir(&out.store, *id), FirMatch::SimpleForLoop { .. }))
+        .expect("compute should contain a sample loop");
+    assert!(
+        reset_pos < loop_pos,
+        "ReverseTimeRec carrier reset must run before the reverse sample loop"
+    );
 }
 
 #[test]
