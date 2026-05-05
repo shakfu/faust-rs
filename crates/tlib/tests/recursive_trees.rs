@@ -1,9 +1,10 @@
 //! Integration tests for recursive-tree conversion parity helpers.
 
 use tlib::{
-    NodeKind, RecursionError, SymbolicRecursionValidationError, TreeArena, de_bruijn_aperture,
-    de_bruijn_rec, de_bruijn_ref, de_bruijn_to_sym, lift_de_bruijn, lift_de_bruijn_n,
-    match_de_bruijn_rec, match_de_bruijn_ref, match_sym_rec, match_sym_ref, sym_rec, sym_ref,
+    NodeKind, RecursionError, SymbolicRecursionValidationError, TreeArena,
+    check_de_bruijn_coherence, de_bruijn_aperture, de_bruijn_rec, de_bruijn_ref, de_bruijn_to_sym,
+    is_de_bruijn_closed, lift_de_bruijn, lift_de_bruijn_n, match_de_bruijn_rec,
+    match_de_bruijn_ref, match_sym_rec, match_sym_ref, sym_rec, sym_ref,
     validate_closed_de_bruijn_tree, validate_symbolic_recursion_tree,
 };
 
@@ -134,6 +135,77 @@ fn validate_closed_de_bruijn_tree_rejects_open_group() {
     assert_eq!(
         validate_closed_de_bruijn_tree(&arena, root),
         Err(RecursionError::OpenDeBruijnTree { aperture: 1 })
+    );
+}
+
+#[test]
+fn coherence_ok_for_closed_tree() {
+    let mut arena = TreeArena::new();
+    let r1 = de_bruijn_ref(&mut arena, 1);
+    let root = de_bruijn_rec(&mut arena, r1);
+
+    assert_eq!(check_de_bruijn_coherence(&arena, root), Ok(()));
+}
+
+#[test]
+fn coherence_ok_for_nested_closed_tree() {
+    let mut arena = TreeArena::new();
+    let inner_ref = de_bruijn_ref(&mut arena, 1);
+    let outer_ref = de_bruijn_ref(&mut arena, 2);
+    let body = pair(&mut arena, inner_ref, outer_ref);
+    let inner = de_bruijn_rec(&mut arena, body);
+    let root = de_bruijn_rec(&mut arena, inner);
+
+    assert_eq!(check_de_bruijn_coherence(&arena, root), Ok(()));
+}
+
+#[test]
+fn coherence_err_free_ref_at_root() {
+    let mut arena = TreeArena::new();
+    let root = de_bruijn_ref(&mut arena, 1);
+
+    assert_eq!(
+        check_de_bruijn_coherence(&arena, root),
+        Err(RecursionError::IncoherentDeBruijnReference {
+            node: root,
+            level: 1,
+            depth: 0
+        })
+    );
+}
+
+#[test]
+fn coherence_err_inner_ref_escapes() {
+    let mut arena = TreeArena::new();
+    let bound = de_bruijn_ref(&mut arena, 1);
+    let escaping = de_bruijn_ref(&mut arena, 2);
+    let body = pair(&mut arena, bound, escaping);
+    let root = de_bruijn_rec(&mut arena, body);
+
+    assert_eq!(
+        check_de_bruijn_coherence(&arena, root),
+        Err(RecursionError::IncoherentDeBruijnReference {
+            node: escaping,
+            level: 2,
+            depth: 1
+        })
+    );
+}
+
+#[test]
+fn coherence_vs_aperture_distinction() {
+    let mut arena = TreeArena::new();
+    let zero_level = de_bruijn_ref(&mut arena, 0);
+    let root = de_bruijn_rec(&mut arena, zero_level);
+
+    assert!(is_de_bruijn_closed(&arena, root));
+    assert_eq!(
+        check_de_bruijn_coherence(&arena, root),
+        Err(RecursionError::IncoherentDeBruijnReference {
+            node: zero_level,
+            level: 0,
+            depth: 1
+        })
     );
 }
 

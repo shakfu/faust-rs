@@ -37,6 +37,15 @@ pub const SYMREF_TAG: &str = "SYMREF";
 pub enum RecursionError {
     /// The provided root contains free de Bruijn references (`aperture > 0`).
     OpenDeBruijnTree { aperture: i64 },
+    /// A `DEBRUIJNREF(level)` was found at a nesting depth where no enclosing
+    /// `DEBRUIJNREC` binder can own it.
+    IncoherentDeBruijnReference {
+        node: TreeId,
+        /// The bad one-based De Bruijn level stored in the `DEBRUIJNREF` node.
+        level: i64,
+        /// Number of enclosing `DEBRUIJNREC` binders at the point of discovery.
+        depth: i64,
+    },
     /// A de Bruijn reference remained during conversion, which indicates an unbound reference.
     UnboundDeBruijnReference { node: TreeId, level: i64 },
     /// One `DEBRUIJNREF` node did not have the expected `int` payload.
@@ -50,6 +59,13 @@ impl fmt::Display for RecursionError {
         match self {
             Self::OpenDeBruijnTree { aperture } => {
                 write!(f, "tree is open in de Bruijn form (aperture={aperture})")
+            }
+            Self::IncoherentDeBruijnReference { node, level, depth } => {
+                write!(
+                    f,
+                    "De Bruijn coherence error: DEBRUIJNREF(level={level}) at depth={depth} - reference escapes its enclosing binders (node {})",
+                    node.as_u32()
+                )
             }
             Self::UnboundDeBruijnReference { node, level } => {
                 write!(
@@ -214,6 +230,31 @@ pub fn de_bruijn_aperture_with_memo(
 #[must_use]
 pub fn is_de_bruijn_closed(arena: &TreeArena, root: TreeId) -> bool {
     de_bruijn_aperture(arena, root) <= 0
+}
+
+/// Verifies local De Bruijn binder coherence for the tree rooted at `root`.
+///
+/// Faust's C++ recursive-tree model, and this Rust port, use one-based De
+/// Bruijn levels: `DEBRUIJNREF(1)` references the nearest enclosing
+/// `DEBRUIJNREC`, `DEBRUIJNREF(2)` references the next outer group, and so on.
+/// At every reference site, this function verifies `1 <= level <= depth`, where
+/// `depth` is the number of enclosing `DEBRUIJNREC` binders on the current
+/// traversal path.
+///
+/// Returns `Ok(())` if every reachable reference is locally bound. Returns
+/// [`RecursionError::IncoherentDeBruijnReference`] on the first escaping or
+/// zero-level reference, [`RecursionError::MalformedDeBruijnReference`] for a
+/// malformed reference payload, and [`RecursionError::InvalidNode`] if traversal
+/// reaches a missing node.
+///
+/// This is stricter than [`is_de_bruijn_closed`], which only checks the
+/// root-level aperture. A tree can have a non-positive aperture while still
+/// containing an invalid local level such as `DEBRUIJNREC(DEBRUIJNREF(0))`.
+/// The memoization key is `(TreeId, depth)` because the same hash-consed node can
+/// appear under different numbers of enclosing binders.
+pub fn check_de_bruijn_coherence(arena: &TreeArena, root: TreeId) -> Result<(), RecursionError> {
+    let mut memo = AHashMap::new();
+    check_coherence_at_depth(arena, root, 0, &mut memo)
 }
 
 /// Lifts free de Bruijn references by one level (`liftn(..., 1)`).
@@ -647,6 +688,47 @@ fn aperture(arena: &TreeArena, root: TreeId, memo: &mut AHashMap<TreeId, i64>) -
 
     memo.insert(root, value);
     value
+}
+
+fn check_coherence_at_depth(
+    arena: &TreeArena,
+    id: TreeId,
+    depth: i64,
+    memo: &mut AHashMap<(TreeId, i64), ()>,
+) -> Result<(), RecursionError> {
+    if memo.contains_key(&(id, depth)) {
+        return Ok(());
+    }
+
+    if let Some(level) = match_de_bruijn_ref(arena, id) {
+        if level <= 0 || level > depth {
+            return Err(RecursionError::IncoherentDeBruijnReference {
+                node: id,
+                level,
+                depth,
+            });
+        }
+        memo.insert((id, depth), ());
+        return Ok(());
+    }
+    if is_de_bruijn_ref_tag(arena, id) {
+        return Err(RecursionError::MalformedDeBruijnReference { node: id });
+    }
+
+    if let Some(body) = match_de_bruijn_rec(arena, id) {
+        check_coherence_at_depth(arena, body, depth + 1, memo)?;
+        memo.insert((id, depth), ());
+        return Ok(());
+    }
+
+    let Some(children) = arena.children(id).map(|ch| ch.to_vec()) else {
+        return Err(RecursionError::InvalidNode { node: id });
+    };
+    for child in children {
+        check_coherence_at_depth(arena, child, depth, memo)?;
+    }
+    memo.insert((id, depth), ());
+    Ok(())
 }
 
 /// Returns children when `id` is a tag node with the exact expected tag name.
