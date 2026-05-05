@@ -165,6 +165,7 @@ fn stream_wrappers_and_recursion_shapes_are_stable() {
     let clocked = b.clocked(clk, x);
     let double_clocked = b.double_clocked(clk, y, x);
     let rec = b.rec(x);
+    let reverse_rec = b.reverse_time_rec(y);
     let proj = b.proj(2, rec);
     let seq = b.seq(x, y);
     let zp = b.zero_pad(x, y);
@@ -181,6 +182,10 @@ fn stream_wrappers_and_recursion_shapes_are_stable() {
     assert_eq!(inner_clk, clk);
     assert_eq!(match_sig(&arena, nested), SigMatch::Clocked(y, x));
     assert_eq!(match_sig(&arena, rec), SigMatch::Rec(x));
+    assert_eq!(
+        match_sig(&arena, reverse_rec),
+        SigMatch::ReverseTimeRec(y)
+    );
     assert_eq!(match_sig(&arena, proj), SigMatch::Proj(2, rec));
     assert_eq!(match_sig(&arena, seq), SigMatch::Seq(x, y));
     assert_eq!(match_sig(&arena, zp), SigMatch::ZeroPad(x, y));
