@@ -8,6 +8,8 @@
 //! `crates/transform/signal_prepare` currently performs before FIR lowering,
 //! now exposed as a general-purpose, backend-agnostic API:
 //!
+//! 0. **De Bruijn coherence check** (`check_de_bruijn_coherence`): reject
+//!    locally escaping recursive references before any symbolic conversion.
 //! 1. **de Bruijn → symbolic** (`de_bruijn_to_sym`): rewrite all de-Bruijn
 //!    recursion groups into symbolic `SymRec`/`SymRef` form.
 //! 2. **Type annotation** (`TypeAnnotator::annotate`): compute the full
@@ -36,7 +38,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use signals::{BinOp, SigBuilder, SigId, SigMatch, dump_sig_readable, match_sig};
 use sigtype::{Nature, SigType, TypeAnnotator};
-use tlib::{RecursionError, TreeArena, de_bruijn_to_sym, match_sym_rec, match_sym_ref};
+use tlib::{
+    RecursionError, TreeArena, check_de_bruijn_coherence, de_bruijn_to_sym, match_sym_rec,
+    match_sym_ref,
+};
 use ui::UiProgram;
 
 use crate::simplify::{SimplifyCache, simplify_with_cache};
@@ -96,10 +101,11 @@ impl From<sigtype::rules::TypeError> for NormalFormError {
 
 /// Phase 1 normal-form preparation for a single signal.
 ///
-/// Runs the three-step pipeline:
+/// Runs the normal-form preparation pipeline:
+/// 0. `check_de_bruijn_coherence(arena, sig)`
 /// 1. `de_bruijn_to_sym(arena, sig)`
-/// 2. `TypeAnnotator::annotate(&[sym_sig])` → `types`
-/// 3. `promote_signals(arena, &types, &[sym_sig])` → promoted output
+/// 2. `TypeAnnotator::annotate(&[sym_sig])` -> `types`
+/// 3. `promote_signals(arena, &types, &[sym_sig])` -> promoted output
 ///
 /// Returns the promoted signal root and the type map produced by step 2.
 ///
@@ -117,7 +123,7 @@ pub fn prepare_signals(
 
 /// Phase 1 normal-form preparation for a slice of output signals.
 ///
-/// Applies the three-step pipeline to the entire signal forest rooted at
+/// Applies the preparation pipeline to the entire signal forest rooted at
 /// `sigs`, treating them as co-dependent outputs (type annotation sees all
 /// roots).
 ///
@@ -130,6 +136,11 @@ pub fn prepare_signals_multi(
     sigs: &[SigId],
     opts: &NormalFormOpts,
 ) -> Result<(Vec<SigId>, HashMap<SigId, SigType>), NormalFormError> {
+    // ── Step 0: De Bruijn coherence pre-check ─────────────────────────────
+    for &s in sigs {
+        check_de_bruijn_coherence(arena, s)?;
+    }
+
     // ── Step 1: de Bruijn → symbolic ──────────────────────────────────────
     let mut sym_sigs: Vec<SigId> = Vec::with_capacity(sigs.len());
     for &s in sigs {
@@ -894,6 +905,24 @@ mod tests {
         };
         let (rs, _types) = prepare_signals_multi(&mut a, &u, &[x, y], &opts).unwrap();
         assert_eq!(rs.len(), 2);
+    }
+
+    #[test]
+    fn prepare_signals_multi_rejects_incoherent_de_bruijn_before_conversion() {
+        let mut a = arena();
+        let u = ui();
+        let zero_level = tlib::de_bruijn_ref(&mut a, 0);
+        let root = tlib::de_bruijn_rec(&mut a, zero_level);
+        let opts = NormalFormOpts {
+            skip_promotion: true,
+        };
+
+        let err = prepare_signals_multi(&mut a, &u, &[root], &opts)
+            .expect_err("zero-level de Bruijn ref must fail the coherence pre-check");
+        assert!(
+            err.to_string().contains("DEBRUIJNREF(level=0) at depth=1"),
+            "unexpected error: {err}"
+        );
     }
 
     // ── promote_signals ───────────────────────────────────────────────────
