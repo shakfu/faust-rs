@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use sigtype::SigType;
-use tlib::TreeArena;
+use tlib::{TreeArena, check_de_bruijn_coherence};
 
 use crate::aterm::Aterm;
 use crate::mterm::sig_order;
@@ -45,6 +45,14 @@ pub(crate) fn normalize_add_term(
     types: &HashMap<SigId, SigType>,
     t: SigId,
 ) -> SigId {
+    #[cfg(debug_assertions)]
+    if let Err(e) = check_de_bruijn_coherence(arena, t) {
+        panic!(
+            "normalize_add_term received an incoherent De Bruijn tree: {e}\n\
+             Signal must be in symbolic form before normalization."
+        );
+    }
+
     let mut a = Aterm::from_sig(arena, types, t);
     let mut d = a.greatest_divisor(arena, types);
     while d.is_not_zero(arena) && d.complexity(arena, types) > 0 {
@@ -262,6 +270,17 @@ mod tests {
             SigMatch::BinOp(BinOp::Mul, _, _) => {}
             other => panic!("expected Mul (factorized), got {other:?}"),
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "normalize_add_term received an incoherent De Bruijn tree")]
+    fn normalize_add_term_debug_rejects_incoherent_de_bruijn_input() {
+        let mut a = arena();
+        let t = types();
+        let zero_level = tlib::de_bruijn_ref(&mut a, 0);
+        let root = tlib::de_bruijn_rec(&mut a, zero_level);
+
+        let _ = normalize_add_term(&mut a, &t, root);
     }
 
     // ── normalize_delay_term ──────────────────────────────────────────────────
