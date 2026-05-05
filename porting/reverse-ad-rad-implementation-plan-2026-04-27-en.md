@@ -1518,6 +1518,28 @@ block-local rotating buffer that E1 uses.
 Total: ~6 working days for an interp-only landing, ~9 working days
 to cover all three backends. Phase F is not on the critical path.
 
+### 20.10.1 Implementation status on 2026-05-05
+
+Committed phase-E1 scaffolding now covers:
+
+- `signals::SigBuilder::reverse_time_rec` plus `SigMatch::ReverseTimeRec`,
+  with Rustdoc documenting block-local reverse iteration and terminal-zero
+  adjoint semantics;
+- signal preparation, `sigtype`, reduced promotion, and recursion carrier
+  decoding for `Proj(slot, ReverseTimeRec(SYMREC(...)))`;
+- interp `SimpleForLoop` lowering for reverse loops;
+- a conservative FIR path for pure `ReverseTimeRec` output bundles, selecting a
+  reverse compute sample loop.
+
+Still deferred:
+
+- `reverse_ad.rs` does not yet replace the `recursive-linear-transpose`
+  diagnostic with a `transpose_lti_de_bruijn_rec_scaffold` call;
+- mixed `[primals..., gradients...]` scheduling still needs split-loop support
+  before user-visible `rad(LTI_recursive_primal, seeds)` can compile;
+- reverse recursion carriers must be reset at each `compute()` call before the
+  terminal-zero boundary is valid across repeated blocks.
+
 ### 20.11 What this delivers
 
 - `rad(LTI_recursive_primal, seeds)` compiles end-to-end in the
