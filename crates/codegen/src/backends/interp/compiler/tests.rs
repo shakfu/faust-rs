@@ -316,6 +316,38 @@ fn test_compile_for_loop_structure() {
     assert_eq!(*body_ops.last().unwrap(), FbcOpcode::Return);
 }
 
+#[test]
+fn test_compile_reverse_simple_for_loop_structure() {
+    let mut store = FirStore::new();
+    let mut b = FirBuilder::new(&mut store);
+
+    let upper = b.int32(4);
+    let body = b.block(&[]);
+    let loop_node = b.simple_for_loop("i", upper, body, true);
+
+    let result = compile_one::<f32>(&store, loop_node);
+    let ops = opcodes(&result, result.entry_block);
+    assert_eq!(ops, vec![FbcOpcode::Loop, FbcOpcode::Return]);
+
+    let loop_instr = &result.arena.get(result.entry_block).instructions[0];
+    let init_id = loop_instr.branch1.unwrap();
+    let body_id = loop_instr.branch2.unwrap();
+    let init_ops = opcodes(&result, init_id);
+    assert!(
+        init_ops.contains(&FbcOpcode::SubInt),
+        "reverse simple loop init should compute upper - 1"
+    );
+    let body_ops = opcodes(&result, body_id);
+    assert!(
+        body_ops.contains(&FbcOpcode::SubInt),
+        "reverse simple loop body should decrement the loop variable"
+    );
+    assert!(
+        body_ops.contains(&FbcOpcode::GEInt),
+        "reverse simple loop condition should keep iterating while i >= 0"
+    );
+}
+
 // --- Phase G: Function calls ---
 
 #[test]

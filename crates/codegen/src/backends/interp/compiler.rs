@@ -347,14 +347,16 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 end,
                 step,
                 body,
+                is_reverse,
                 ..
-            } => self.compile_for_loop(store, init, end, step, body),
+            } => self.compile_for_loop(store, init, end, step, body, is_reverse),
             FirMatch::SimpleForLoop {
                 ref var,
                 upper,
                 body,
+                is_reverse,
                 ..
-            } => self.compile_simple_for_loop(store, var, upper, body),
+            } => self.compile_simple_for_loop(store, var, upper, body, is_reverse),
             FirMatch::Block(ref stmts) => {
                 let stmts = stmts.clone();
                 self.compile_block(store, &stmts)
@@ -1462,6 +1464,7 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         end: FirId,
         step: FirId,
         body: FirId,
+        _is_reverse: bool,
     ) -> Result<(), CompileError> {
         // Compile init in a new sub-block.
         self.begin_sub_block();
@@ -1504,14 +1507,17 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         Ok(())
     }
 
-    /// Compiles `SimpleForLoop(var, upper, body)` as a canonical counting loop:
-    /// `for (var = 0; var < upper; var = var + 1)`.
+    /// Compiles `SimpleForLoop(var, upper, body)` as a canonical counting loop.
+    ///
+    /// Forward loops implement `for (var = 0; var < upper; var = var + 1)`.
+    /// Reverse loops implement `for (var = upper - 1; var >= 0; var = var - 1)`.
     fn compile_simple_for_loop(
         &mut self,
         store: &FirStore,
         var: &str,
         upper: FirId,
         body: FirId,
+        is_reverse: bool,
     ) -> Result<(), CompileError> {
         // Allocate loop variable if missing (simple pragmatic model: function-scoped slot).
         if !self.field_table.contains_key(var) {
@@ -1534,19 +1540,37 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                     name: var.to_string(),
                 })?;
 
-        // Init block: `var = 0`.
+        // Init block.
         self.begin_sub_block();
-        self.current_block
-            .push(FbcInstruction::with_values_and_offsets(
+        if is_reverse {
+            self.compile_node(store, upper)?;
+            self.current_block.push(FbcInstruction::with_values(
+                FbcOpcode::Int32Value,
+                1,
+                R::default(),
+            ));
+            self.current_block
+                .push(FbcInstruction::new(FbcOpcode::SubInt));
+            self.current_block
+                .push(FbcInstruction::with_values_and_offsets(
+                    FbcOpcode::StoreInt,
+                    0,
+                    R::default(),
+                    desc.offset,
+                    0,
+                ));
+        } else {
+            self.current_block.push(FbcInstruction::with_values_and_offsets(
                 FbcOpcode::StoreIntValue,
                 0,
                 R::default(),
                 desc.offset,
                 0,
             ));
+        }
         let init_block_id = self.end_sub_block();
 
-        // Body block: body; `var = var + 1`; `var < upper`; cond-branch(loop back).
+        // Body block: body; step; loop condition; cond-branch(loop back).
         self.begin_sub_block();
         self.compile_node(store, body)?;
         self.current_block
@@ -1562,8 +1586,11 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
             1,
             R::default(),
         ));
-        self.current_block
-            .push(FbcInstruction::new(FbcOpcode::AddInt));
+        self.current_block.push(FbcInstruction::new(if is_reverse {
+            FbcOpcode::SubInt
+        } else {
+            FbcOpcode::AddInt
+        }));
         self.current_block
             .push(FbcInstruction::with_values_and_offsets(
                 FbcOpcode::StoreInt,
@@ -1572,10 +1599,17 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 desc.offset,
                 0,
             ));
-        // Condition: `var < upper`.
+        // Condition.
         // Stack convention: LHS on TOS → push upper (RHS) first, then var (LHS).
-        // LTInt pops v1=TOS=var, v2=upper, computes v1 < v2 = var < upper.
-        self.compile_node(store, upper)?;
+        if is_reverse {
+            self.current_block.push(FbcInstruction::with_values(
+                FbcOpcode::Int32Value,
+                0,
+                R::default(),
+            ));
+        } else {
+            self.compile_node(store, upper)?;
+        }
         self.current_block
             .push(FbcInstruction::with_values_and_offsets(
                 FbcOpcode::LoadInt,
@@ -1584,8 +1618,11 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 desc.offset,
                 0,
             ));
-        self.current_block
-            .push(FbcInstruction::new(FbcOpcode::LTInt));
+        self.current_block.push(FbcInstruction::new(if is_reverse {
+            FbcOpcode::GEInt
+        } else {
+            FbcOpcode::LTInt
+        }));
 
         let next_id = BlockId::from_raw(self.arena.len() as u32);
         self.current_block.push(FbcInstruction::full(
