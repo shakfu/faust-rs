@@ -1537,12 +1537,18 @@ Committed phase-E1 scaffolding now covers:
 - `transpose_lti_de_bruijn_rec_with_cotangents`, which replaces the transposed
   scaffold's `input(i)` cotangent placeholders with explicit caller-supplied
   cotangent signals while preserving a plain `DEBRUIJNREC` for the later
-  `ReverseTimeRec` wrapper.
+  `ReverseTimeRec` wrapper;
+- the first `reverse_ad.rs` bridge,
+  `build_lti_recursive_adjoint_projection`, which builds
+  `Proj(slot, ReverseTimeRec(transposed_body))` for one eligible LTI recursive
+  primal projection and one explicit cotangent.
 
 Still deferred:
 
 - `reverse_ad.rs` does not yet replace the `recursive-linear-transpose`
-  diagnostic with transposed recursive adjoint emission;
+  diagnostic in the public `rad(...)` traversal; the remaining work is to group
+  all projections that read the same primal recursion and emit one shared
+  reverse-time adjoint group;
 - recursive seed-gradient routing for active LTI coefficients is still needed
   before user-visible `rad(LTI_recursive_primal, seeds)` can produce useful
   parameter gradients.
