@@ -1560,13 +1560,14 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                     0,
                 ));
         } else {
-            self.current_block.push(FbcInstruction::with_values_and_offsets(
-                FbcOpcode::StoreIntValue,
-                0,
-                R::default(),
-                desc.offset,
-                0,
-            ));
+            self.current_block
+                .push(FbcInstruction::with_values_and_offsets(
+                    FbcOpcode::StoreIntValue,
+                    0,
+                    R::default(),
+                    desc.offset,
+                    0,
+                ));
         }
         let init_block_id = self.end_sub_block();
 

@@ -85,8 +85,7 @@ fn prepare_signals_for_fir_preserves_reverse_time_rec_projection_contract() {
     let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
         .expect("reverse-time recursion should prepare");
 
-    let SigMatch::Proj(0, prepared_reverse_group) =
-        match_sig(&prepared.arena, prepared.outputs[0])
+    let SigMatch::Proj(0, prepared_reverse_group) = match_sig(&prepared.arena, prepared.outputs[0])
     else {
         panic!("prepared output should remain a projection");
     };

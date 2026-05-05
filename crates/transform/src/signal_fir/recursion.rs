@@ -555,38 +555,34 @@ impl RecursionAllocCtx<'_> {
             format!("{prefix}{}_{}", group.as_u32(), index)
         };
         let (size, strategy) = match decode_symbolic_group_bodies(self.arena, group) {
-            Some((var, bodies)) => {
-                match self.delay.rec_output_analysis(var.as_u32(), index) {
-                    Some(analysis) if bodies.len() == 1 && analysis.max_delay <= 1 => {
-                        (1, RecursionStorageStrategy::SingleScalar)
-                    }
-                    Some(analysis) => {
-                        let exact_size = usize::try_from(analysis.max_delay).map_err(|_| {
-                            SignalFirError::new(
-                                SignalFirErrorCode::UnsupportedSignalNode,
-                                format!(
-                                    "negative recursion delay analysis result {}",
-                                    analysis.max_delay
-                                ),
-                            )
-                        })? + 1;
-                        let copy_threshold =
-                            usize::try_from(self.delay.max_copy_delay()).unwrap_or(usize::MAX);
-                        if usize::try_from(analysis.max_delay).unwrap_or(usize::MAX)
-                            < copy_threshold
-                        {
-                            (exact_size, RecursionStorageStrategy::ExactShift)
-                        } else {
-                            (
-                                pow2limit_for_delay(analysis.max_delay)?,
-                                RecursionStorageStrategy::Circular,
-                            )
-                        }
-                    }
-                    None if bodies.len() == 1 => (1, RecursionStorageStrategy::SingleScalar),
-                    None => (2, RecursionStorageStrategy::ExactShift),
+            Some((var, bodies)) => match self.delay.rec_output_analysis(var.as_u32(), index) {
+                Some(analysis) if bodies.len() == 1 && analysis.max_delay <= 1 => {
+                    (1, RecursionStorageStrategy::SingleScalar)
                 }
-            }
+                Some(analysis) => {
+                    let exact_size = usize::try_from(analysis.max_delay).map_err(|_| {
+                        SignalFirError::new(
+                            SignalFirErrorCode::UnsupportedSignalNode,
+                            format!(
+                                "negative recursion delay analysis result {}",
+                                analysis.max_delay
+                            ),
+                        )
+                    })? + 1;
+                    let copy_threshold =
+                        usize::try_from(self.delay.max_copy_delay()).unwrap_or(usize::MAX);
+                    if usize::try_from(analysis.max_delay).unwrap_or(usize::MAX) < copy_threshold {
+                        (exact_size, RecursionStorageStrategy::ExactShift)
+                    } else {
+                        (
+                            pow2limit_for_delay(analysis.max_delay)?,
+                            RecursionStorageStrategy::Circular,
+                        )
+                    }
+                }
+                None if bodies.len() == 1 => (1, RecursionStorageStrategy::SingleScalar),
+                None => (2, RecursionStorageStrategy::ExactShift),
+            },
             None => (2, RecursionStorageStrategy::ExactShift),
         };
         let mut b = FirBuilder::new(self.store);

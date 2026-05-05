@@ -182,10 +182,7 @@ fn stream_wrappers_and_recursion_shapes_are_stable() {
     assert_eq!(inner_clk, clk);
     assert_eq!(match_sig(&arena, nested), SigMatch::Clocked(y, x));
     assert_eq!(match_sig(&arena, rec), SigMatch::Rec(x));
-    assert_eq!(
-        match_sig(&arena, reverse_rec),
-        SigMatch::ReverseTimeRec(y)
-    );
+    assert_eq!(match_sig(&arena, reverse_rec), SigMatch::ReverseTimeRec(y));
     assert_eq!(match_sig(&arena, proj), SigMatch::Proj(2, rec));
     assert_eq!(match_sig(&arena, seq), SigMatch::Seq(x, y));
     assert_eq!(match_sig(&arena, zp), SigMatch::ZeroPad(x, y));
