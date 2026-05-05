@@ -751,6 +751,14 @@ pub enum PropagateError {
         node: TreeId,
         outputs: usize,
     },
+    /// An AD transform produced a signal tree whose de Bruijn references are
+    /// not locally bound by enclosing recursive groups.
+    DeBruijnCoherence {
+        /// Name of the transform that produced the incoherent tree.
+        pass: &'static str,
+        /// Description of the first violation reported by `tlib`.
+        detail: String,
+    },
     RadUnsupportedNode {
         node: TreeId,
         kind: &'static str,
@@ -847,6 +855,9 @@ impl Display for PropagateError {
                 "rad seeds at node {} must produce at least 1 output, got {outputs}",
                 node.as_u32()
             ),
+            Self::DeBruijnCoherence { pass, detail } => {
+                write!(f, "De Bruijn coherence error in {pass} transform: {detail}")
+            }
             Self::RadUnsupportedNode { node, kind } => write!(
                 f,
                 "rad cannot differentiate signal node {} ({kind})",
@@ -1064,6 +1075,17 @@ impl IntoDiagnostic for PropagateError {
             )
             .with_note("cause: rad seeds expression must produce at least 1 output signal")
             .with_note(format!("seeds produced {outputs} output(s)")),
+            Self::DeBruijnCoherence { pass, detail } => Diagnostic::new(
+                Severity::Error,
+                Stage::Propagate,
+                codes::PROP_GENERIC_FAILURE,
+                message,
+            )
+            .with_note(format!(
+                "cause: {pass} produced a de Bruijn reference outside its local recursive scope"
+            ))
+            .with_note(detail)
+            .with_help("this indicates an internal AD transform bug; preserve the failing DSP as a regression fixture"),
             Self::RadUnsupportedNode { kind, .. } => {
                 // Tailor the diagnostic by family so users get an actionable
                 // explanation instead of a generic "unsupported" wall.

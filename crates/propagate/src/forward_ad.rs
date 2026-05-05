@@ -415,8 +415,9 @@ use ahash::{AHashMap, AHashSet};
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use smallvec::SmallVec;
 use tlib::{
-    NodeKind, TreeArena, TreeId, de_bruijn_rec, lift_de_bruijn, list_to_vec, match_de_bruijn_rec,
-    match_de_bruijn_ref, tree_to_str, vec_to_list,
+    NodeKind, TreeArena, TreeId, check_de_bruijn_coherence, de_bruijn_rec, is_de_bruijn_closed,
+    lift_de_bruijn, list_to_vec, match_de_bruijn_rec, match_de_bruijn_ref, tree_to_str,
+    vec_to_list,
 };
 
 use crate::PropagateError;
@@ -1439,6 +1440,16 @@ pub(super) fn generate_fad_signals_multi(
     for dual in duals {
         result.push(dual.primal);
         result.extend(dual.tangents);
+    }
+    for &sig in &result {
+        if is_de_bruijn_closed(arena, sig) {
+            check_de_bruijn_coherence(arena, sig).map_err(|e| {
+                PropagateError::DeBruijnCoherence {
+                    pass: "FAD",
+                    detail: e.to_string(),
+                }
+            })?;
+        }
     }
     Ok(result)
 }

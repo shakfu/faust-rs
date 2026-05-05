@@ -101,7 +101,9 @@
 use ahash::{AHashMap, AHashSet};
 use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 use smallvec::SmallVec;
-use tlib::{NodeKind, TreeArena, list_to_vec, tree_to_str};
+use tlib::{
+    NodeKind, TreeArena, check_de_bruijn_coherence, is_de_bruijn_closed, list_to_vec, tree_to_str,
+};
 
 use crate::PropagateError;
 use crate::stateful_rad::{RecRadMode, classify_recursive_projection_rad_mode};
@@ -804,5 +806,16 @@ pub(super) fn generate_rad_signals(
         return Ok(primals.to_vec());
     }
     let mut transform = ReverseADTransform::new(arena, seeds);
-    transform.run(primals, seeds)
+    let result = transform.run(primals, seeds)?;
+    for &sig in &result {
+        if is_de_bruijn_closed(arena, sig) {
+            check_de_bruijn_coherence(arena, sig).map_err(|e| {
+                PropagateError::DeBruijnCoherence {
+                    pass: "RAD",
+                    detail: e.to_string(),
+                }
+            })?;
+        }
+    }
+    Ok(result)
 }
