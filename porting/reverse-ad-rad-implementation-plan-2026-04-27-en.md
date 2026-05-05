@@ -1533,12 +1533,16 @@ Committed phase-E1 scaffolding now covers:
 - compute-preamble resets for reverse recursion carriers, enforcing the
   terminal-zero boundary at every `compute()` call;
 - split forward/reverse sample-loop scheduling for mixed bundles such as
-  `[primals..., gradients...]`.
+  `[primals..., gradients...]`;
+- `transpose_lti_de_bruijn_rec_with_cotangents`, which replaces the transposed
+  scaffold's `input(i)` cotangent placeholders with explicit caller-supplied
+  cotangent signals while preserving a plain `DEBRUIJNREC` for the later
+  `ReverseTimeRec` wrapper.
 
 Still deferred:
 
 - `reverse_ad.rs` does not yet replace the `recursive-linear-transpose`
-  diagnostic with a `transpose_lti_de_bruijn_rec_scaffold` call;
+  diagnostic with transposed recursive adjoint emission;
 - recursive seed-gradient routing for active LTI coefficients is still needed
   before user-visible `rad(LTI_recursive_primal, seeds)` can produce useful
   parameter gradients.
