@@ -675,7 +675,12 @@ fn verify_prepared_signal(
                     sig.as_u32()
                 )));
             }
-            let arity = if let Some((var, _)) = match_sym_rec(arena, group) {
+            let reverse_group_body = match match_sig(arena, group) {
+                SigMatch::ReverseTimeRec(body) => Some(body),
+                _ => None,
+            };
+            let projection_group = reverse_group_body.unwrap_or(group);
+            let arity = if let Some((var, _)) = match_sym_rec(arena, projection_group) {
                 verify_prepared_signal(
                     arena,
                     ui,
@@ -691,7 +696,7 @@ fn verify_prepared_signal(
                         group.as_u32()
                     ))
                 })?
-            } else if let Some(var) = match_sym_ref(arena, group) {
+            } else if let Some(var) = match_sym_ref(arena, projection_group) {
                 sym_group_arities.get(&var).copied().ok_or_else(|| {
                     SignalPrepareError::Validation(format!(
                         "projection {} targets symbolic recursion ref {} before its group arity is known",
@@ -724,6 +729,16 @@ fn verify_prepared_signal(
                 "prepared signal {} still contains legacy SIGREC form",
                 sig.as_u32()
             )));
+        }
+        SigMatch::ReverseTimeRec(body) => {
+            verify_prepared_signal(
+                arena,
+                ui,
+                body,
+                visited,
+                sym_group_arities,
+                reachable_typed_nodes,
+            )?;
         }
         SigMatch::VBargraph(control, inner) | SigMatch::HBargraph(control, inner) => {
             verify_control_exists(ui, control, sig)?;

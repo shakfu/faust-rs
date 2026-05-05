@@ -454,6 +454,10 @@ impl<'a> SignalPromoter<'a> {
                 let body = self.promote(body)?;
                 SigBuilder::new(self.arena).rec(body)
             }
+            SigMatch::ReverseTimeRec(body) => {
+                let body = self.promote(body)?;
+                SigBuilder::new(self.arena).reverse_time_rec(body)
+            }
             SigMatch::VSlider(control) => SigBuilder::new(self.arena).vslider(control),
             SigMatch::HSlider(control) => SigBuilder::new(self.arena).hslider(control),
             SigMatch::NumEntry(control) => SigBuilder::new(self.arena).numentry(control),

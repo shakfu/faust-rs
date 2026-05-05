@@ -554,14 +554,8 @@ impl RecursionAllocCtx<'_> {
         } else {
             format!("{prefix}{}_{}", group.as_u32(), index)
         };
-        let (size, strategy) = match match_sym_rec(self.arena, group) {
-            Some((var, body_list)) => {
-                let bodies = list_to_vec(self.arena, body_list).ok_or_else(|| {
-                    SignalFirError::new(
-                        SignalFirErrorCode::UnsupportedSignalNode,
-                        "malformed symbolic recursion body list during carrier allocation",
-                    )
-                })?;
+        let (size, strategy) = match decode_symbolic_group_bodies(self.arena, group) {
+            Some((var, bodies)) => {
                 match self.delay.rec_output_analysis(var.as_u32(), index) {
                     Some(analysis) if bodies.len() == 1 && analysis.max_delay <= 1 => {
                         (1, RecursionStorageStrategy::SingleScalar)
@@ -641,13 +635,22 @@ impl RecursionAllocCtx<'_> {
 
 /// Decodes a `SYMREC(var, body_list)` group to all its payload body signals.
 ///
-/// Returns `None` when `group` is not a symbolic recursion binder or when the
-/// body payload is not a proper list.
+/// Phase-E1 RAD may wrap the symbolic group in `ReverseTimeRec(body)`. That
+/// wrapper keeps the same projection arity contract as a normal recursion, so
+/// this helper deliberately unwraps it before decoding. The caller remains
+/// responsible for choosing forward or reverse lowering semantics.
+///
+/// Returns `None` when the effective group is not a symbolic recursion binder
+/// or when the body payload is not a proper list.
 pub(super) fn decode_symbolic_group_bodies(
     arena: &TreeArena,
     group: SigId,
 ) -> Option<(SigId, Vec<SigId>)> {
-    let (var, body_list) = match_sym_rec(arena, group)?;
+    let effective_group = match match_sig(arena, group) {
+        SigMatch::ReverseTimeRec(body) => body,
+        _ => group,
+    };
+    let (var, body_list) = match_sym_rec(arena, effective_group)?;
     let bodies = list_to_vec(arena, body_list)?;
     Some((var, bodies))
 }

@@ -63,6 +63,67 @@ fn prepare_signals_for_fir_converts_shared_debruijn_group_once_per_forest() {
 }
 
 #[test]
+fn prepare_signals_for_fir_preserves_reverse_time_rec_projection_contract() {
+    let mut arena = tlib::TreeArena::new();
+    let self_ref = de_bruijn_ref(&mut arena, 1);
+    let body = {
+        let mut b = SigBuilder::new(&mut arena);
+        let cotangent = b.input(0);
+        let feedback = b.proj(0, self_ref);
+        let half = b.real(0.5);
+        let transposed = b.mul(half, feedback);
+        b.add(cotangent, transposed)
+    };
+    let body_list = arena.cons(body, arena.nil());
+    let group = de_bruijn_rec(&mut arena, body_list);
+    let output = {
+        let mut b = SigBuilder::new(&mut arena);
+        let reverse_group = b.reverse_time_rec(group);
+        b.proj(0, reverse_group)
+    };
+
+    let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
+        .expect("reverse-time recursion should prepare");
+
+    let SigMatch::Proj(0, prepared_reverse_group) =
+        match_sig(&prepared.arena, prepared.outputs[0])
+    else {
+        panic!("prepared output should remain a projection");
+    };
+    let SigMatch::ReverseTimeRec(prepared_group) =
+        match_sig(&prepared.arena, prepared_reverse_group)
+    else {
+        panic!("projection target should remain ReverseTimeRec");
+    };
+    let (var, prepared_body_list) =
+        match_sym_rec(&prepared.arena, prepared_group).expect("symbolic recursion expected");
+    let prepared_body = prepared
+        .arena
+        .hd(prepared_body_list)
+        .expect("prepared recursion body head");
+    assert!(
+        dump_sig_readable(&prepared.arena, prepared_body).contains("SIGPROJ"),
+        "reverse body should still carry its feedback projection"
+    );
+    assert!(
+        dump_sig_readable(&prepared.arena, prepared_body).contains("SIGINPUT"),
+        "reverse body should still carry its cotangent input"
+    );
+    assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Real));
+
+    let SigMatch::BinOp(_, _, rhs) = match_sig(&prepared.arena, prepared_body) else {
+        panic!("prepared reverse body should stay affine");
+    };
+    let SigMatch::BinOp(_, _, feedback) = match_sig(&prepared.arena, rhs) else {
+        panic!("prepared reverse feedback should stay scaled");
+    };
+    let SigMatch::Proj(0, feedback_group) = match_sig(&prepared.arena, feedback) else {
+        panic!("feedback edge should remain proj(0, symref(var))");
+    };
+    assert_eq!(match_sym_ref(&prepared.arena, feedback_group), Some(var));
+}
+
+#[test]
 fn prepare_signals_for_fir_records_reduced_numeric_types() {
     let mut arena = tlib::TreeArena::new();
     let outputs = {

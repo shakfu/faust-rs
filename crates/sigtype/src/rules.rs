@@ -602,6 +602,7 @@ impl<'a> TypeAnnotator<'a> {
                 // Conservative fallback: treat as maximal.
                 self.infer(body).map(|_| make_maximal())
             }
+            SigMatch::ReverseTimeRec(body) => self.infer(body),
 
             SigMatch::Proj(idx, group) => self.infer_proj(idx, group),
 
