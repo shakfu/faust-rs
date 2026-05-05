@@ -1299,12 +1299,25 @@ Phase E1 must publish a fixed contract for **what is differentiated**:
   frame `count` is zero — there is no carry-over of adjoint state
   between blocks. This matches the journal entry of 2026-04-28 and the
   numeric oracle's boundary.
-- The user-visible gradient is therefore an exact gradient of the
-  block-local objective `J = Σ_{n=0..count-1} cotangent[n] · y[n]`
-  (with `cotangent ≡ 1` for the implicit all-ones case). The
-  conventional choice in DSP training pipelines is to call
-  `compute(count, …)` in a loop where each call is its own training
-  batch.
+- The reverse-time recursive adjoint is exact for the block-local objective
+  `J = Σ_{n=0..count-1} cotangent[n] · y[n]` (with `cotangent ≡ 1` for the
+  implicit all-ones case). For scalar seeds/parameters, however, phase E1
+  exposes the **per-sample gradient contribution**:
+
+  ```text
+  grad_p[n] = contribution of frame n to dJ/dp
+  dJ/dp     = Σ_{n=0..count-1} grad_p[n]
+  ```
+
+  `rad(...)` therefore does not hide a block reduction convention by repeating
+  a scalar over every frame or by emitting it only on a sentinel frame. DSP code
+  that wants the accumulated block gradient can explicitly reduce over the
+  current block size; Faust libraries expose that size as `ma.BS`, which can
+  change at each processing block.
+- The conventional choice in DSP training pipelines is to call
+  `compute(count, …)` in a loop where each call is its own training batch, then
+  aggregate the emitted per-sample gradient contributions according to the
+  optimizer's update policy.
 - A future flag `-rad-block-stride N` (or `rad(expr, seeds, stride=N)`)
   may decouple the gradient horizon from the audio block size; that
   extension is **not** part of E1 and is documented as a phase-E2
@@ -1551,7 +1564,7 @@ Still deferred:
   reverse-time adjoint group;
 - recursive seed-gradient routing for active LTI coefficients is still needed
   before user-visible `rad(LTI_recursive_primal, seeds)` can produce useful
-  parameter gradients.
+  per-sample parameter-gradient contributions.
 
 ### 20.11 What this delivers
 
