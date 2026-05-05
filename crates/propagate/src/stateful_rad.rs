@@ -785,7 +785,9 @@ impl LinearityAnalyzer {
                     }
                 }
             },
-            SigMatch::Rec(body) => self.classify(arena, body, current_level),
+            SigMatch::Rec(body) | SigMatch::ReverseTimeRec(body) => {
+                self.classify(arena, body, current_level)
+            }
             SigMatch::Attach(x, y) | SigMatch::Enable(x, y) | SigMatch::Control(x, y) => {
                 let x_class = self.classify(arena, x, current_level);
                 let y_class = self.classify(arena, y, current_level);

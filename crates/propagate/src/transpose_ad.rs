@@ -156,6 +156,13 @@ pub enum TransposeAdError {
     /// indices that cannot convert to `usize`, and indices outside the branch
     /// count all indicate malformed recursive state references for this group.
     SlotOutOfRange,
+    /// The caller supplied a cotangent list whose length differs from the
+    /// recursive group arity.
+    ///
+    /// Phase-E1 RAD injects explicit cotangent signals into the transposed
+    /// group by replacing scaffold `input(i)` leaves. That substitution is
+    /// defined only when every recursive output lane has exactly one cotangent.
+    CotangentArityMismatch,
 }
 
 impl Display for TransposeAdError {
@@ -176,6 +183,9 @@ impl Display for TransposeAdError {
                 f.write_str("temporal recursive term needs a block/tape convention")
             }
             Self::SlotOutOfRange => f.write_str("recursive projection slot is out of range"),
+            Self::CotangentArityMismatch => {
+                f.write_str("cotangent arity does not match recursive group arity")
+            }
         }
     }
 }
@@ -285,6 +295,69 @@ pub fn transpose_lti_de_bruijn_rec_scaffold(
 
     let body = tlib::vec_to_list(arena, &transposed_branches);
     Ok(de_bruijn_rec(arena, body))
+}
+
+/// Builds the phase-E1 transposed group with explicit cotangent drivers.
+///
+/// [`transpose_lti_de_bruijn_rec_scaffold`] emits `input(i)` as a placeholder
+/// for the cotangent of primal recursive output lane `i`. User-visible RAD
+/// already has those cotangents as signal expressions (`y_bar` values), not as
+/// audio inputs. This helper performs the mechanical replacement:
+///
+/// ```text
+/// scaffold branch: input(i) + A^T_i * Proj(_, DEBRUIJNREF(1))
+/// result branch:   cotangents[i] + A^T_i * Proj(_, DEBRUIJNREF(1))
+/// ```
+///
+/// The returned node is still a plain `DEBRUIJNREC`; callers that want
+/// block-local reverse evaluation must wrap it in
+/// `SigBuilder::reverse_time_rec` after the usual de-Bruijn coherence checks.
+pub fn transpose_lti_de_bruijn_rec_with_cotangents(
+    arena: &mut TreeArena,
+    group: SigId,
+    cotangents: &[SigId],
+) -> Result<SigId, TransposeAdError> {
+    let transposed = transpose_lti_de_bruijn_rec_scaffold(arena, group)?;
+    let body = match_de_bruijn_rec(arena, transposed).ok_or(TransposeAdError::NotRecursiveGroup)?;
+    let branches = list_to_vec(arena, body).ok_or(TransposeAdError::MalformedBody)?;
+    if branches.len() != cotangents.len() {
+        return Err(TransposeAdError::CotangentArityMismatch);
+    }
+    let replaced: Result<Vec<_>, _> = branches
+        .into_iter()
+        .map(|branch| replace_scaffold_inputs(arena, branch, cotangents))
+        .collect();
+    let body = tlib::vec_to_list(arena, &replaced?);
+    Ok(de_bruijn_rec(arena, body))
+}
+
+fn replace_scaffold_inputs(
+    arena: &mut TreeArena,
+    sig: SigId,
+    cotangents: &[SigId],
+) -> Result<SigId, TransposeAdError> {
+    if let SigMatch::Input(index) = match_sig(arena, sig) {
+        let index = usize::try_from(index).map_err(|_| TransposeAdError::SlotOutOfRange)?;
+        return cotangents
+            .get(index)
+            .copied()
+            .ok_or(TransposeAdError::CotangentArityMismatch);
+    }
+
+    let Some(node) = arena.node(sig).cloned() else {
+        return Ok(sig);
+    };
+    if node.children.is_empty() {
+        return Ok(sig);
+    }
+    let children: Result<Vec<_>, _> = node
+        .children
+        .as_slice()
+        .iter()
+        .copied()
+        .map(|child| replace_scaffold_inputs(arena, child, cotangents))
+        .collect();
+    Ok(arena.intern(node.kind, &children?))
 }
 
 /// Extracts affine recursive-state terms from one primal branch.
@@ -442,7 +515,10 @@ fn contains_current_rec_ref(arena: &TreeArena, sig: SigId, current_level: i64) -
 
 #[cfg(test)]
 mod tests {
-    use super::{TransposeAdError, transpose_lti_de_bruijn_rec_scaffold};
+    use super::{
+        TransposeAdError, transpose_lti_de_bruijn_rec_scaffold,
+        transpose_lti_de_bruijn_rec_with_cotangents,
+    };
     use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
     use tlib::{
         TreeArena, de_bruijn_rec, de_bruijn_ref, list_to_vec, match_de_bruijn_rec, vec_to_list,
@@ -477,6 +553,32 @@ mod tests {
         }
     }
 
+    fn dump_contains_input(arena: &TreeArena, sig: SigId) -> bool {
+        match match_sig(arena, sig) {
+            SigMatch::Input(_) => true,
+            _ => arena.node(sig).is_some_and(|node| {
+                node.children
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .any(|child| dump_contains_input(arena, child))
+            }),
+        }
+    }
+
+    fn dump_contains_real(arena: &TreeArena, sig: SigId, expected: f64) -> bool {
+        match match_sig(arena, sig) {
+            SigMatch::Real(value) => (value - expected).abs() < f64::EPSILON,
+            _ => arena.node(sig).is_some_and(|node| {
+                node.children
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .any(|child| dump_contains_real(arena, child, expected))
+            }),
+        }
+    }
+
     #[test]
     fn scaffold_transposes_cross_coupled_affine_lti_group() {
         let mut arena = TreeArena::new();
@@ -507,6 +609,36 @@ mod tests {
         assert!(
             branch_contains_prev_slot(&arena, branches[1], 0),
             "target adjoint slot 1 must receive original row 0"
+        );
+    }
+
+    #[test]
+    fn cotangent_variant_replaces_scaffold_inputs() {
+        let mut arena = TreeArena::new();
+        let ref1 = de_bruijn_ref(&mut arena, 1);
+        let group = {
+            let mut b = SigBuilder::new(&mut arena);
+            let prev = b.proj(0, ref1);
+            let half = b.real(0.5);
+            let branch = b.mul(half, prev);
+            rec_group(&mut arena, &[branch])
+        };
+        let cotangent = SigBuilder::new(&mut arena).real(2.0);
+
+        let transposed =
+            transpose_lti_de_bruijn_rec_with_cotangents(&mut arena, group, &[cotangent])
+                .expect("explicit cotangent transpose");
+        let body = match_de_bruijn_rec(&arena, transposed).expect("transposed group");
+        let branches = list_to_vec(&arena, body).expect("body list");
+
+        assert_eq!(branches.len(), 1);
+        assert!(
+            !dump_contains_input(&arena, branches[0]),
+            "explicit cotangent variant should not leave scaffold input placeholders"
+        );
+        assert!(
+            dump_contains_real(&arena, branches[0], 2.0),
+            "explicit cotangent should appear in the transposed branch"
         );
     }
 
