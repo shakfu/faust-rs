@@ -1574,15 +1574,23 @@ Committed phase-E1 scaffolding now covers:
   y = drive + A * y'
   rad(y, drive) -> [y, y_bar_drive_per_sample]
   ```
+- active strict-LTI feedback coefficients are now routed structurally. Current
+  recursive-state reads in coefficient terms are rewritten as causal primal
+  state reads, so:
+
+  ```text
+  y = drive + p * y'
+  rad(y, p) -> [y, y_bar[n] * delay1(y)[n]]
+  ```
 
 Still deferred:
 
-- active LTI feedback coefficients are still deferred. Coefficient gradients
-  need products of the reverse-time state adjoint and the primal state read
-  (`adjoint[n] * state[n-1]`), which requires an explicit policy for reading the
-  primal recursive state as block-local data in the emitted gradient signal;
-- nonlinear or block-time-varying recursive feedback continues to report the
-  existing E2/F diagnostics.
+- signal-dependent feedback coefficients (`input`, UI controls classified as
+  time-varying, tables, etc.) still report the existing E2 block-replay
+  diagnostic. Treating such controls as block-frozen parameters would be a
+  separate compatibility decision;
+- nonlinear recursive feedback continues to report the existing phase-F BPTT
+  diagnostic.
 
 ### 20.11 What this delivers
 
