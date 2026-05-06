@@ -176,6 +176,16 @@ y[n]  = s0[n]
 
 and reuse the existing LTI transpose machinery.
 
+Numerical stability caveat: this direct companion-state conversion is only a
+safe first implementation target for first-order and second-order sections.
+Direct companion or direct-form state realization of higher-order IIRs is
+sensitive to coefficient quantization and roundoff. Therefore the initial RAD
+bridge must reject direct `IirFilter -> StateSpace` conversion when the scalar
+denominator order is greater than two, unless a preceding pass has factorized
+the filter into stable first-order/second-order sections. Higher-order filters
+should eventually be lowered as cascades or parallel compositions of biquads
+and first-order sections before RAD transposition.
+
 ## Why `sigFIR` / `sigIIR` Are Not Quite The Whole RAD IR
 
 `sigFIR` and `sigIIR` should be the canonical detection and algebraic source
@@ -185,8 +195,8 @@ RAD still benefits from a private lowered form, because reverse transposition
 does not execute a transfer function directly. It executes state equations:
 
 ```text
-state[n] = A * state[n-1] + B * input[n]
-output[n] = C * state[n] + D * input[n]
+x[n] = A * x[n-1] + B * u[n]
+y[n] = C * x[n] + D * u[n]
 ```
 
 The proposed layering is therefore:
@@ -195,13 +205,28 @@ The proposed layering is therefore:
 raw signal graph
   -> revealSum/revealFIR/revealIIR-style canonicalization
   -> sigFIR/sigIIR-like compact filter form
-  -> private LinearRecurrence / StateSpace view when needed
+  -> private StateSpace view when needed
   -> RAD transpose or FIR/backend lowering
 ```
 
 The private view can be a Rust struct, not a public signal node. That keeps
 external signal parity close to C++ while giving RAD and optimizers an explicit
-matrix/companion-state representation.
+matrix/state-space representation.
+
+Even while the first reconstruction target is SISO, the internal representation
+must use canonical state-space terminology from day one:
+
+- `A`: state transition;
+- `B`: input-to-state map;
+- `C`: state-to-output map;
+- `D`: direct input-to-output map.
+
+For phase L3 these matrices may be stored sparsely as row vectors of linear
+terms, but the fields and documentation should use the `A/B/C/D` names rather
+than ad hoc `equations`/`outputs` terminology. This makes the SISO
+implementation a restricted instance of the later MIMO design instead of a
+shape that must be renamed when cross-coupled filter networks, FDNs, or
+multi-output recurrences are added.
 
 ## Broader Algebraic Uses
 
@@ -217,8 +242,8 @@ support transformations that are hard to do reliably on raw syntax:
 - estimate gain or stability from numerator/denominator coefficients;
 - canonicalize equivalent direct-form library spellings to one denominator
   representation;
-- choose direct, transposed, companion, or state-space execution form from
-  filter order and backend constraints.
+- choose direct, transposed, cascaded-biquad, or general state-space execution
+  form from filter order, numerical stability, and backend constraints.
 
 These are Z-transform-guided transformations: operate on numerator and
 denominator polynomials first, then materialize a concrete runtime form only
@@ -243,21 +268,35 @@ struct IirFilter {
     feedback: Vec<SignalId>, // c1, c2, ...
 }
 
-struct LinearRecurrence {
+struct StateSpace {
     states: Vec<StateSlot>,
-    equations: Vec<LinearExpr>,
-    outputs: Vec<LinearExpr>,
+    inputs: Vec<InputSlot>,
+    outputs: Vec<OutputSlot>,
+    a_rows: Vec<Vec<LinearTerm>>, // A: previous state -> current state
+    b_rows: Vec<Vec<LinearTerm>>, // B: input -> current state
+    c_rows: Vec<Vec<LinearTerm>>, // C: current state -> output
+    d_rows: Vec<Vec<LinearTerm>>, // D: input -> output
 }
 ```
 
 The first two mirror C++ `sigFIR`/`sigIIR`; the last is the RAD/codegen view.
-The conversion `IirFilter -> LinearRecurrence` is deterministic:
+The conversion `IirFilter -> StateSpace` is deterministic for first-order and
+second-order sections:
 
 - `feedback.len()` gives the order;
 - slot 0 is the current recursive output;
 - slots 1..N-1 are delay-chain slots;
-- the first equation contains the input and feedback coefficients;
-- remaining equations shift previous slots forward.
+- the first `A` row contains the feedback coefficients;
+- the first `B` row contains the independent input gain;
+- remaining `A` rows shift previous slots forward;
+- `C` selects state slot 0 for the scalar output;
+- `D` is zero for canonical recursive IIR sections unless a feedthrough term is
+  explicitly represented.
+
+For denominator order greater than two, the conversion must return a diagnostic
+until a factorization pass can build a cascade or parallel composition of
+first-order and second-order `StateSpace` sections. This is not just an
+implementation shortcut: it is a numerical stability requirement.
 
 ## Porting Strategy
 
@@ -332,13 +371,22 @@ Pass criteria:
 
 ### Phase L3: Private State-Space View
 
-Add `IirFilter -> LinearRecurrence` conversion and reuse the existing E1
-transpose path on the generated state-space view.
+Add `IirFilter -> StateSpace` conversion and reuse the existing E1 transpose
+path on the generated state-space view.
+
+The view must expose canonical `A/B/C/D` slots even if the initial storage is
+sparse and SISO-only. Direct conversion is limited to order 1 and order 2 IIR
+sections. Higher-order IIRs must be rejected with a diagnostic that asks for
+section factorization, rather than silently building a numerically fragile
+companion matrix.
 
 Pass criteria:
 
 - first-order and second-order IIRs share the same transposition code path as
   hand-written state-space fixtures;
+- third-order and higher direct IIR conversion is rejected explicitly until
+  factorization into stable sections exists;
+- `A/B/C/D` naming appears in the Rustdoc and tests for the state-space view;
 - multi-output state-space fixtures remain unchanged;
 - tests cover coefficient derivatives and input derivatives separately.
 
@@ -401,6 +449,48 @@ This choice covers the library feedback-coefficient rewrite `a1 -> -a1`
 without requiring a general symbolic differentiation pass for parameter
 expressions.
 
+### Phase L4c: Nonlinear Parameter Provenance And Chain Rule
+
+Document and prototype the next provenance tier after L4b. Real audio
+parameters such as cutoff frequency, resonance, damping, or Q usually map to
+filter coefficients through nonlinear expressions: divisions, square roots,
+trigonometric functions, exponentials, bilinear-transform formulas, or
+normalization by `a0`.
+
+L4b deliberately rejects these cases, but the roadmap must not stop at raw
+coefficient learning. L4c should represent coefficient provenance as an
+expression graph with analytic derivatives back to the user-level parameter:
+
+```text
+coef = f(seed)
+dJ/dseed += (df/dseed) * dJ/dcoef
+```
+
+The initial L4c target should remain block-level/LTI for the current RAD block:
+the parameter expression may be nonlinear, but its value and derivative must be
+constant over the block accepted by E1. Sample-rate-varying nonlinear
+parameters belong to a later LTV/tape-based phase, not to strict LTI E1.
+
+Candidate accepted cases:
+
+- `const / seed` and `1 / seed`, with explicit nonzero-domain diagnostics;
+- `sin(seed)`, `cos(seed)`, `tan(seed)` where the math primitive already has a
+  known derivative in the compiler;
+- `exp(seed)`, `log(seed)`, and `sqrt(seed)` with domain checks;
+- coefficient normalization patterns such as `b0 / a0`, `a1 / a0`,
+  `a2 / a0`;
+- standard-library biquad coefficient formulas once their block-level
+  parameter dependencies have been made explicit.
+
+Pass criteria:
+
+- L4b affine provenance remains the default low-risk path;
+- each nonlinear primitive has an analytic derivative test;
+- coefficient-gradient accumulation is checked against finite differences on
+  representative biquad formulas;
+- domain failures are diagnostics, not silent NaNs;
+- sample-varying nonlinear provenance stays rejected by E1.
+
 ### Phase L5: Codegen Use
 
 Teach the Rust FIR/backend path to lower structured filters directly when that
@@ -410,6 +500,10 @@ Pass criteria:
 
 - large/dense FIRs lower to coefficient-table accumulation loops;
 - small/sparse FIRs remain expanded expressions;
+- first-order and biquad IIRs can lower through numerically stable direct or
+  transposed section forms;
+- higher-order IIRs lower only after factorization into stable first-order or
+  second-order sections, not as a single direct companion form;
 - IIR delay strategy can select simple delay, copy delay, dense delay, or ring
   delay based on max delay and access pattern;
 - C, C++, Cranelift, and interpreter backends agree on runtime output;
@@ -425,8 +519,9 @@ no longer be recognized as the requested seed.
 
 The chosen first policy is to preserve simple affine provenance only. That
 means `-seed`, `2 * seed`, and `1 - seed` remain connected to the requested
-seed, with the corresponding affine derivative applied to the gradient. General
-parameter-expression differentiation remains out of scope for this phase.
+seed, with the corresponding affine derivative applied to the gradient.
+Nonlinear parameter-expression differentiation is deferred to phase L4c, not
+left undefined.
 
 This decision must be implemented before promising standard-library direct-form
 biquad training support, because those forms commonly rewrite feedback
@@ -445,8 +540,20 @@ coefficients through negation.
   cases must remain distinct because RAD E1, E2, and runtime codegen have
   different tape/replay requirements.
 - Multi-lane recursive groups are already supported in hand-written state-space
-  form. The first reconstruction phase should handle single-lane higher-order
-  IIR before general multi-lane transfer matrices.
+  form. Reconstruction should handle single-lane higher-order IIR through
+  factorized first-order/biquad sections before general multi-lane transfer
+  matrices.
+- Direct companion realizations are numerically fragile for denominator order
+  greater than two. Do not make them the default bridge from reconstructed IIR
+  to RAD or backend codegen; require first-order/biquad factorization instead.
+- If state-space data structures are named around the first SISO use case,
+  later MIMO support will require an avoidable refactor. Use `A/B/C/D`
+  terminology and row-based storage immediately, even if only one input and one
+  output are populated at first.
+- L4b affine provenance is useful but insufficient for user-level audio
+  parameters such as cutoff and Q. Without L4c, RAD can learn raw coefficients
+  but not reliably train the higher-level parameters that generated those
+  coefficients.
 
 ## Recommended Next Patch
 
@@ -460,7 +567,8 @@ RAD:
    - `x@2 -> FIR[x, 0, 0, 1]`;
    - `x + c*x@1 -> FIR[x, 1, c]`;
    - `y = x - p*y@1 - q*y@2 -> IIR[y, x, -p, -q]`.
-3. Convert the extracted second-order IIR to companion state-space.
+3. Convert the extracted second-order IIR to `A/B/C/D` state-space, with an
+   explicit order-3 rejection test.
 4. Add simple affine seed-provenance tests for `-seed` and `const - seed`.
 5. Feed that state-space view into the existing E1 transpose tests before
    exposing new public `rad(...)` support.
