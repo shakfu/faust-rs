@@ -4,7 +4,10 @@
 //! - Exercises public APIs and structural invariants for the targeted module.
 //! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
-use signals::{BinOp, SigBuilder, SigMatch, dump_sig, dump_sig_readable, match_sig};
+use signals::{
+    BinOp, SigBuilder, SigMatch, add_sig_fir, convert_fir_to_sig, delay_sig_fir, dump_sig,
+    dump_sig_readable, make_sig_fir, match_sig, neg_sig_fir, simplify_fir, sub_sig_fir,
+};
 use tlib::TreeArena;
 
 #[test]
@@ -223,6 +226,98 @@ fn fir_iir_carriers_preserve_cpp_branch_layout() {
         "SIGFIR(SIGINPUT(int(0)), int(1), float_bits(0x3fe0000000000000), float_bits(0xbfd0000000000000))"
     );
     assert!(dump_sig(&arena, iir).starts_with("SIGIIR(SIGPROJ(int(0), SIGREC("));
+}
+
+#[test]
+fn fir_helpers_make_and_delay_constant_taps() {
+    let mut arena = TreeArena::new();
+    let x = SigBuilder::new(&mut arena).input(0);
+
+    let fir = make_sig_fir(&mut arena, x, 2);
+    let SigMatch::Fir(coefs) = match_sig(&arena, fir) else {
+        panic!("make_sig_fir should create a FIR carrier");
+    };
+    assert_eq!(coefs.len(), 4);
+    assert_eq!(coefs[0], x);
+    assert_eq!(match_sig(&arena, coefs[1]), SigMatch::Int(0));
+    assert_eq!(match_sig(&arena, coefs[2]), SigMatch::Int(0));
+    assert_eq!(match_sig(&arena, coefs[3]), SigMatch::Int(1));
+
+    let one = SigBuilder::new(&mut arena).int(1);
+    let delayed = delay_sig_fir(&mut arena, fir, one);
+    let SigMatch::Fir(delayed_coefs) = match_sig(&arena, delayed) else {
+        panic!("delay_sig_fir should preserve FIR carrier");
+    };
+    assert_eq!(delayed_coefs.len(), 5);
+    assert_eq!(match_sig(&arena, delayed_coefs[1]), SigMatch::Int(0));
+    assert_eq!(match_sig(&arena, delayed_coefs[4]), SigMatch::Int(1));
+}
+
+#[test]
+fn fir_helpers_add_sub_neg_and_simplify_same_base_filters() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let x = b.input(0);
+    let one = b.int(1);
+    let half = b.real(0.5);
+    let quarter = b.real(0.25);
+    let zero = b.int(0);
+    let fir_a = b.fir(&[x, one, half, zero]);
+    let fir_b = b.fir(&[x, quarter, one]);
+
+    let simplified = simplify_fir(&mut arena, fir_a);
+    let SigMatch::Fir(simplified_coefs) = match_sig(&arena, simplified) else {
+        panic!("simplify_fir should keep a real FIR");
+    };
+    assert_eq!(simplified_coefs.len(), 3);
+
+    let neg = neg_sig_fir(&mut arena, fir_b);
+    let SigMatch::Fir(neg_coefs) = match_sig(&arena, neg) else {
+        panic!("neg_sig_fir should keep FIR shape");
+    };
+    assert_eq!(neg_coefs[0], x);
+    assert!(matches!(match_sig(&arena, neg_coefs[1]), SigMatch::Real(v) if v == -0.25));
+
+    let added = add_sig_fir(&mut arena, simplified, fir_b);
+    let SigMatch::Fir(added_coefs) = match_sig(&arena, added) else {
+        panic!("add_sig_fir should combine same-base FIRs");
+    };
+    assert_eq!(added_coefs[0], x);
+    assert!(matches!(
+        match_sig(&arena, added_coefs[1]),
+        SigMatch::BinOp(BinOp::Add, _, _)
+    ));
+    assert!(matches!(
+        match_sig(&arena, added_coefs[2]),
+        SigMatch::BinOp(BinOp::Add, _, _)
+    ));
+
+    let subbed = sub_sig_fir(&mut arena, added, fir_b);
+    let SigMatch::Fir(subbed_coefs) = match_sig(&arena, subbed) else {
+        panic!("sub_sig_fir should keep same-base FIRs");
+    };
+    assert_eq!(subbed_coefs[0], x);
+}
+
+#[test]
+fn fir_helper_expands_back_to_delay_terms() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let x = b.input(0);
+    let one = b.int(1);
+    let half = b.real(0.5);
+    let fir = b.fir(&[x, one, half]);
+
+    let expanded = convert_fir_to_sig(&mut arena, fir);
+    let SigMatch::BinOp(BinOp::Add, direct, delayed_term) = match_sig(&arena, expanded) else {
+        panic!("expanded FIR should be an add tree");
+    };
+    assert_eq!(direct, x);
+    let SigMatch::BinOp(BinOp::Mul, coef, delayed) = match_sig(&arena, delayed_term) else {
+        panic!("second term should multiply coefficient and delayed input");
+    };
+    assert_eq!(coef, half);
+    assert!(matches!(match_sig(&arena, delayed), SigMatch::Delay(_, amount) if amount == one));
 }
 
 #[test]
