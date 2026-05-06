@@ -1615,6 +1615,22 @@ Committed phase-E1 scaffolding now covers:
   This validates the public output layout `[y0, y1, dp, dq]` and verifies that
   each gradient lane replays the matching primal recurrence when forming
   `lambda[n] * y[n-1]`.
+- Coupled two-state strict-LTI recursive RAD is now covered numerically with:
+
+  ```faust
+  import("stdfaust.lib");
+  p = 0.5;
+  q = 0.25;
+  core = (ro.interleave(2, 2) : (+, +)) ~ ((*(p), *(q)) : ro.cross(2));
+  process = rad((2, 3) : core, (p, q));
+  ```
+
+  The regression checks the coupled primals
+  `y0[n] = 2 + q * y1[n-1]`, `y1[n] = 3 + p * y0[n-1]` and the matching
+  block-local coefficient contributions. This also fixed two FIR hazards found
+  by the test: multi-output recursion body values are snapshotted before carrier
+  stores so updates remain simultaneous, and CSE no longer hoists `LoadTable`
+  reads across mutable carrier/output stores.
 
 Still deferred:
 
