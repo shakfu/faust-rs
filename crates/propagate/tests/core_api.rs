@@ -1707,6 +1707,23 @@ fn build_hslider(
     bb.hslider(label, init, min, max, step)
 }
 
+fn signal_tree_contains(
+    arena: &TreeArena,
+    sig: signals::SigId,
+    pred: fn(SigMatch) -> bool,
+) -> bool {
+    if pred(match_sig(arena, sig)) {
+        return true;
+    }
+    arena.node(sig).is_some_and(|node| {
+        node.children
+            .as_slice()
+            .iter()
+            .copied()
+            .any(|child| signal_tree_contains(arena, child, pred))
+    })
+}
+
 #[test]
 fn propagate_reverse_ad_feed_forward_returns_primal_then_gradients() {
     // process = rad(x*y, (x, y)); arity must be 3 (one primal + two seeds)
@@ -1827,6 +1844,44 @@ fn propagate_reverse_ad_seed_independent_lti_recursive_body_succeeds() {
     let outs = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
         .expect("seed-independent LTI recursive RAD should propagate");
     assert_eq!(outs.len(), 2, "rad output bundle = [primal, zero-gradient]");
+}
+
+#[test]
+fn propagate_reverse_ad_strict_lti_feedback_coeff_returns_sample_contribution() {
+    // process = rad((2 : + ~ *(p)), p): p is a reused constant signal, so this
+    // is the strict-LTI coefficient case. The gradient lane should be a
+    // per-sample contribution built from the reverse-time adjoint and the
+    // delayed primal state.
+    let mut arena = TreeArena::new();
+    let process = {
+        let mut bb = BoxBuilder::new(&mut arena);
+        let plus = bb.add();
+        let wire = bb.wire();
+        let p = bb.real(0.5);
+        let coeff_pair = bb.par(wire, p);
+        let mul = bb.mul();
+        let coeff_apply = bb.seq(coeff_pair, mul);
+        let rec = bb.rec(plus, coeff_apply);
+        let two = bb.real(2.0);
+        let body = bb.seq(two, rec);
+        bb.reverse_ad(body, p)
+    };
+    let flat = try_build_flat_box(&arena, process).unwrap();
+    let outs = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
+        .expect("strict-LTI feedback coefficient RAD should propagate");
+
+    assert_eq!(outs.len(), 2, "rad output bundle = [primal, dp]");
+    assert!(
+        signal_tree_contains(&arena, outs[1], |m| matches!(
+            m,
+            SigMatch::ReverseTimeRec(_)
+        )),
+        "coefficient gradient should include the reverse-time adjoint"
+    );
+    assert!(
+        signal_tree_contains(&arena, outs[1], |m| matches!(m, SigMatch::Delay1(_))),
+        "coefficient gradient should include the delayed primal state"
+    );
 }
 
 #[test]

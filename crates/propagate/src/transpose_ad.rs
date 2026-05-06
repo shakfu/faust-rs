@@ -83,13 +83,11 @@
 //!   expressions;
 //! - independent driving terms are ignored because they do not contribute to
 //!   the state-to-state transpose;
-//! - temporal operators over recursive state are rejected until the block
-//!   evaluation convention fixes their adjoint placement.
-//!
-//! The first bullet is narrower than the E0 classifier. A group containing
-//! `delay1(Proj(...))` is still LTI structurally, but this scaffold returns
-//! [`TransposeAdError::TemporalTermNeedsBlockConvention`] because placing the
-//! corresponding adjoint delay requires the reverse-time block semantics.
+//! - `delay1(Proj(slot, DEBRUIJNREF(1)))` is accepted as the canonical
+//!   propagated recursive-state read. The surrounding `ReverseTimeRec` lowering
+//!   provides the reverse-time block semantics needed for the transposed read;
+//! - variable `delay` and `prefix` over recursive state remain rejected until
+//!   their block placement has a concrete E2/F convention.
 //!
 //! # Failure policy
 //! This module returns structured [`TransposeAdError`] values instead of
@@ -468,7 +466,10 @@ fn extract_affine_state_terms(
                 Ok(())
             }
         }
-        SigMatch::Delay1(x) | SigMatch::Delay(x, _) | SigMatch::Prefix(_, x)
+        SigMatch::Delay1(x) if contains_current_rec_ref(arena, x, current_level) => {
+            extract_affine_state_terms(arena, x, current_level, coeff, source_output, arity, out)
+        }
+        SigMatch::Delay(x, _) | SigMatch::Prefix(_, x)
             if contains_current_rec_ref(arena, x, current_level) =>
         {
             Err(TransposeAdError::TemporalTermNeedsBlockConvention)
@@ -671,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_keeps_temporal_lti_terms_blocked() {
+    fn scaffold_accepts_delay1_recursive_state_read() {
         let mut arena = TreeArena::new();
         let ref1 = de_bruijn_ref(&mut arena, 1);
         let group = {
@@ -681,10 +682,12 @@ mod tests {
             rec_group(&mut arena, &[branch])
         };
 
-        assert_eq!(
-            transpose_lti_de_bruijn_rec_scaffold(&mut arena, group),
-            Err(TransposeAdError::TemporalTermNeedsBlockConvention)
-        );
+        let transposed =
+            transpose_lti_de_bruijn_rec_scaffold(&mut arena, group).expect("delay1 state read");
+        let body = match_de_bruijn_rec(&arena, transposed).expect("transposed group");
+        let branches = list_to_vec(&arena, body).expect("body list");
+        assert_eq!(branches.len(), 1);
+        assert!(dump_contains_input(&arena, branches[0]));
     }
 
     /// Tiny interpreter over the small subset of `SigMatch` nodes that the E1
