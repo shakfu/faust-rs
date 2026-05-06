@@ -13,17 +13,26 @@ Phase-1 RAD compiles `rad(expr, seeds)` into the output bundle
 [primals…, ∂ sum(primals) / ∂ s_0, …, ∂ sum(primals) / ∂ s_{N-1}]
 ```
 
-with an implicit all-ones cotangent on every primal output. The
-differentiable subset matches FAD outside the temporal/recursive
-boundary: arithmetic, trig, transcendentals, `pow`, `atan2`,
-`min`/`max`, `select2`, casts, read-only tables, unary FFun, and
-pass-through wrappers. Delays, prefix, recursion, mutable tables,
-soundfiles, non-unary or unrecognised foreign functions surface a
-structured `RadUnsupportedNode` diagnostic — never a silently wrong
-gradient.
+with an implicit all-ones cotangent on every primal output. For
+recursive LTI bodies, the gradient lanes are per-sample contribution
+signals for the current `compute(count)` block. Sum them over the
+block in the host, or inside Faust when a DSP-level reduction is
+needed and the block size is known through `ma.BS`.
+
+The differentiable subset matches FAD for feed-forward code and now
+also accepts the strict-LTI recursive E1 subset: arithmetic, trig,
+transcendentals, `pow`, `atan2`, `min`/`max`, `select2`, casts,
+read-only tables, unary FFun, pass-through wrappers, and recursive
+state-space forms whose feedback matrix is block-invariant. Non-
+recursive delay/prefix forms, LTV recursive coefficients, nonlinear
+recursive feedback, mutable tables, soundfiles, non-unary or
+unrecognised foreign functions surface a structured
+`RadUnsupportedNode` diagnostic — never a silently wrong gradient.
 
 In short: any feed-forward DSP whose parameters live in `hslider` /
-`vslider` / `numentry` controls is fittable by gradient descent today.
+`vslider` / `numentry` controls is fittable by gradient descent today,
+and strict-LTI recursive filters are fittable when the recursive
+coefficients are constant over the `compute(count)` block.
 
 ## Pattern: host-driven gradient descent
 
@@ -124,12 +133,52 @@ instance.set_real_zone(bias_offset, bias);
 The reference implementation recovers the true `gain` and `bias`
 within `~1e-6` in 400 iterations of 512-sample batches.
 
+## Pattern: block-local LTI recursion
+
+Phase E1 accepts recursive DSPs whose state transition is linear and
+time-invariant over the current `compute(count)` block. The runtime
+runs the primal recursion forward, then runs the transposed adjoint
+recursion backward over the same block with a terminal-zero adjoint
+state at the end of each `compute()` call.
+
+One-pole example:
+
+```faust
+p = 0.5;
+process = rad((_ : + ~ *(p)), p);
+```
+
+With input `x[n]`, the primal is `y[n] = x[n] + p*y[n-1]`. The output
+bundle is `[y, dp]`, where `dp[n] = lambda[n] * y[n-1]` and
+`lambda[n] = 1 + p*lambda[n+1]` for the implicit all-ones objective.
+`dp` is a contribution lane, not an already reduced scalar.
+
+A two-state coupled form can be written with standard library routing:
+
+```faust
+import("stdfaust.lib");
+p = 0.5;
+q = 0.25;
+core = (ro.interleave(2, 2) : (+, +)) ~ ((*(p), *(q)) : ro.cross(2));
+process = rad((_, _) : core, (p, q));
+```
+
+The output bundle is `[y0, y1, dp, dq]`. The host usually accumulates
+`sum(dp)` and `sum(dq)` over the block before applying an optimizer
+step. If the reduction must happen in DSP code, use `ma.BS` to make
+the block length explicit and reduce the contribution lanes with a
+block-aware construction.
+
+Current E1 keeps a strict contract: recursive coefficients that depend
+on audio inputs, UI controls, mutable tables, or other time-varying
+signals remain LTV and are refused with the phase-E2 diagnostic. A
+future E2 can define block-replay semantics for those cases.
+
 ## Pattern: host-managed delay lines (FIR taps)
 
-Phase-1 RAD refuses temporal feedback inside `rad(...)`. The work-
-around for adaptive linear filters is to lift the delay line out of
-the differentiated body and feed the delayed taps as separate audio
-channels:
+Non-recursive delay and prefix nodes are still outside the exact RAD
+subset. For FIR taps, lift the delay line out of the differentiated
+body and feed the delayed taps as separate audio channels:
 
 ```faust
 c0 = hslider("c0", 0.25, -2.0, 2.0, 0.001);
@@ -202,16 +251,20 @@ into independent inputs by Faust's wire substitution.
 
 The benchmark
 [`crates/compiler/examples/rad_vs_fad_perf.rs`](../crates/compiler/examples/rad_vs_fad_perf.rs)
-compares RAD vs FAD on five representative shapes. On the current
+compares RAD vs FAD on representative feed-forward and recursive E1
+shapes. On the current
 pipeline (release builds, signal-prepare + CSE active) the bytecode
-size and per-frame compute time are within ~5 % between the two
-modes on every shape, including the deep multiplicative chain that
-plan §17 flagged as the canonical adjoint-sum-growth stress case.
+size and per-frame compute time are close between the two modes on
+the feed-forward shapes, including the deep multiplicative chain that
+plan §17 flagged as the canonical adjoint-sum-growth stress case. The
+same harness now also includes strict-LTI recursive one-pole and
+coupled state-space cases.
 
 In other words: at the scales explored here, the simplification
 pipeline already absorbs the symbolic-growth cost of reverse-mode
-adjoint accumulation. RAD is essentially free for feed-forward
-seeds.
+adjoint accumulation. The recursive E1 cases should be read as
+implementation guardrails rather than statistically rigorous
+benchmarks.
 
 Run with:
 
@@ -221,19 +274,18 @@ cargo run --release -p compiler --example rad_vs_fad_perf
 
 ## Limits to keep in mind
 
-- **No temporal feedback in the body.** A `delay`, `prefix`, or
-  recursion inside `rad(...)` raises `RadUnsupportedNode` rather than
-  emitting a non-causal transpose. See
-  [`docs/rad-note-en.md`](rad-note-en.md) §4 and plan §19 for the
-  ongoing transposition / BPTT work.
+- **Strict temporal boundary.** Non-recursive `delay` and `prefix`
+  still raise `RadUnsupportedNode`. Strict-LTI recursive groups compile
+  through the E1 block-local transpose. LTV or nonlinear recursive
+  groups keep raising the documented E2/F diagnostics.
 - **Implicit all-ones cotangent.** Multi-output `expr` produces the
   gradient of `sum(primals)`. A future `vjp(expr, cotangent, seeds)`
   primitive will expose custom output cotangents.
 - **No automatic seed discovery.** Seeds must be listed explicitly,
   same as for FAD. UI-control annotations are not consulted.
-- **No backend-side reverse-time evaluation.** Phase-1 RAD is purely
-  feed-forward. Recursive RAD via system transposition (E1) and BPTT
-  (F) are described in the plan §19 but not yet wired.
+- **Block-local recursion horizon.** E1 uses the current `compute(count)`
+  block as its horizon and resets reverse adjoint carriers at each
+  compute call. Longer cross-block horizons remain future work.
 
 ## Source pointers
 

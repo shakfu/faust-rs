@@ -1631,6 +1631,43 @@ Committed phase-E1 scaffolding now covers:
   by the test: multi-output recursion body values are snapshotted before carrier
   stores so updates remain simultaneous, and CSE no longer hoists `LoadTable`
   reads across mutable carrier/output stores.
+- Audio-input strict-LTI recursive RAD is now covered numerically with the same
+  contribution convention:
+
+  ```faust
+  p = 0.5;
+  process = rad((_ : + ~ *(p)), p);
+  ```
+
+  The regression drives a real input lane, checks
+  `y[n] = x[n] + p * y[n-1]`, and verifies the emitted per-sample contribution
+  `lambda[n] * y[n-1]` for the seed `p`.
+- The coupled two-state strict-LTI test is also covered with real audio inputs:
+
+  ```faust
+  import("stdfaust.lib");
+  p = 0.5;
+  q = 0.25;
+  core = (ro.interleave(2, 2) : (+, +)) ~ ((*(p), *(q)) : ro.cross(2));
+  process = rad((_, _) : core, (p, q));
+  ```
+
+  This pins the user-facing output layout `[y0, y1, dp, dq]` and the
+  contribution-per-sample convention for non-constant drives.
+- Cranelift now lowers reverse `SimpleForLoop` nodes instead of treating them
+  as a subset gap. The lowering initializes the loop index to `count - 1`,
+  runs while `i >= 0`, and decrements by one.
+- Backend parity for the coupled state-space fixture is pinned in
+  `crates/compiler/tests/signal_fir_lane.rs`: C and C++ must emit the
+  reverse-time loop and both contribution output lanes, and Cranelift must
+  report `compute_body_lowered() == true` with `fail_on_subset_gap`.
+- `crates/compiler/examples/rad_vs_fad_perf.rs` now includes strict-LTI
+  recursive one-pole and coupled state-space pairs in addition to the
+  feed-forward RAD-vs-FAD shapes.
+- User documentation in `docs/rad-usage-en.md` and `docs/rad-note-en.md`
+  describes the E1 block-local transpose, terminal-zero reverse boundary,
+  per-sample contribution gradient convention, and the remaining LTV/nonlinear
+  exclusions.
 
 Still deferred:
 
@@ -1640,6 +1677,9 @@ Still deferred:
   separate compatibility decision;
 - nonlinear recursive feedback continues to report the existing phase-F BPTT
   diagnostic.
+- Standard-library forms that include separate feed-forward delays or prefix
+  nodes, such as some direct `fi.tf*` spellings, remain outside the E1 public
+  subset unless they are rewritten as a strict-LTI state-space recursion.
 
 ### 20.11 What this delivers
 

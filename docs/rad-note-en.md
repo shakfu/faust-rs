@@ -229,40 +229,48 @@ A correct reverse pass would therefore need either
   scan over that block (BPTT — out of scope for phase 1), or
 - a causal approximation that is explicitly not exact reverse mode.
 
-Phase 1 RAD takes the strict route. Any signal family whose transpose
-would be non-causal (delay, prefix, recursion, projection over a
-recursion) raises `PropagateError::RadUnsupportedNode` with a tailored
-diagnostic. The plan reserves `rad(expr, seeds, horizon)` and
-`-rad-horizon N` for a future BPTT mode; phase 1 must never silently
-emit a misleading gradient.
+Phase 1 RAD takes the strict route. Non-recursive `delay` and `prefix`
+still raise `PropagateError::RadUnsupportedNode` with a tailored
+diagnostic. Strict-LTI recursive groups are the phase-E1 exception:
+the compiler emits a block-local system transpose, evaluates the
+primal recursion forward over `compute(count)`, then evaluates the
+adjoint recursion backward over the same block with terminal-zero
+reverse state at the block end. The gradient lanes are per-sample
+contributions for the block-local objective; users can sum them over
+the block or reduce them in DSP code with a block length such as
+`ma.BS`.
 
-Phase E0 adds a read-only classifier in
+The plan reserves `rad(expr, seeds, horizon)` and `-rad-horizon N` for
+a future BPTT mode; phase 1 must never silently emit a misleading
+gradient.
+
+Phase E0 added a read-only classifier in
 `crates/propagate/src/stateful_rad.rs` for `DEBRUIJNREC` groups. It
 classifies recursive bodies as `LinearLti`, `LinearTimeVarying`, or
-`Nonlinear`, but it deliberately does not widen the accepted `rad(...)`
-subset yet. The classifier is only the gating predicate for a later
-transposition or BPTT implementation.
+`Nonlinear`. Phase E1 now uses the `LinearLti` result as the acceptance
+gate for exact block-local transposition.
 
 The same module also exposes `RecRadMode`, a strategy gate for the
 next phases:
 
 | Recursive class | Future RAD mode |
 |-----------------|-----------------|
-| `LinearLti` | `LinearTranspose` (phase E1) |
+| `LinearLti` | `LinearTranspose` (phase E1, implemented for the strict public subset) |
 | `LinearTimeVarying` | `BlockLinearTimeVarying` (phase E2) |
 | `Nonlinear` | `BpttRequired` (phase F) |
 
-These modes are wired into `reverse_ad.rs` only as diagnostics: RAD
-still rejects the recursive node, but the error now says whether the
-blocked path is E1 linear transposition, E2 block linear-time-varying
-transposition, or phase-F BPTT.
+For `LinearLti`, `reverse_ad.rs` now builds the transposed
+`ReverseTimeRec` group when the public E1 constraints are satisfied.
+For LTV and nonlinear recursion, the modes remain diagnostics: the
+error says whether the blocked path is E2 block linear-time-varying
+transposition or phase-F BPTT.
 
 The diagnostic kinds are:
 
 | `kind` | Family |
 |--------|--------|
 | `delay-or-prefix` | `Delay1`, `Delay`, `Prefix` |
-| `recursive-linear-transpose` | `Proj` over LTI `DEBRUIJNREC` (future E1) |
+| `recursive-linear-transpose` | `Proj` over an LTI `DEBRUIJNREC` that did not satisfy the current E1 public path |
 | `recursive-block-linear-time-varying` | `Proj` over LTV `DEBRUIJNREC` (future E2) |
 | `recursive-bptt-required` | `Proj` over nonlinear `DEBRUIJNREC` (future F) |
 | `recursive-projection` | recursive fallback when no specific mode was classified |
@@ -305,7 +313,10 @@ parity tests in `crates/compiler/tests/rad_runtime.rs`.
 - **Runtime parity** ([crates/compiler/tests/rad_runtime.rs](crates/compiler/tests/rad_runtime.rs))
   — RAD vs FAD parity, RAD vs central finite differences, repeated /
   absent seeds, multi-output sum cotangent, read-only table index,
-  unary FFun (tanh).
+  unary FFun (tanh), and strict-LTI recursive E1 cases.
+- **Backend parity** ([crates/compiler/tests/signal_fir_lane.rs](crates/compiler/tests/signal_fir_lane.rs))
+  — C, C++, and Cranelift lowering of the reverse-time loop for a coupled
+  strict-LTI recursive RAD state-space form.
 - **Corpus** ([tests/corpus/rad_*.dsp](tests/corpus)) — eight fixtures
   pin the source-level shape of each contract: arithmetic, trig
   composition, multi-seed, multi-output, repeated/absent seeds,
@@ -317,7 +328,8 @@ parity tests in `crates/compiler/tests/rad_runtime.rs`.
 
 Per plan §3, the following remain explicitly out of scope for phase 1:
 
-- reverse-through-time / BPTT for IIR state (delay, prefix, recursion),
+- reverse-through-time / BPTT for delay, prefix, LTV recursion, and
+  nonlinear recursion,
 - adjoints over mutable tables,
 - adjoints over soundfile content,
 - custom vector-output cotangent API (`vjp(...)`),
