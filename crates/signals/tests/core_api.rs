@@ -5,8 +5,10 @@
 //! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
 use signals::{
-    BinOp, SigBuilder, SigMatch, add_sig_fir, convert_fir_to_sig, delay_sig_fir, dump_sig,
-    dump_sig_readable, make_sig_fir, match_sig, neg_sig_fir, simplify_fir, sub_sig_fir,
+    BinOp, SigBuilder, SigMatch, add_sig_fir, add_sig_iir, concerned_iir, convert_fir_to_sig,
+    delay_sig_fir, delay_sig_iir, div_sig_iir, dump_sig, dump_sig_readable, embedded_iir,
+    make_sig_fir, match_sig, mul_sig_iir, neg_sig_fir, proj_to_sig_iir, simplify_fir, sub_sig_fir,
+    sub_sig_iir,
 };
 use tlib::TreeArena;
 
@@ -318,6 +320,119 @@ fn fir_helper_expands_back_to_delay_terms() {
     };
     assert_eq!(coef, half);
     assert!(matches!(match_sig(&arena, delayed), SigMatch::Delay(_, amount) if amount == one));
+}
+
+#[test]
+fn iir_helpers_create_identity_and_shift_constant_delays() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let x = b.input(0);
+    let other = b.input(1);
+    let rec_body = b.add(x, other);
+    let rec = b.rec(rec_body);
+    let rt = b.proj(0, rec);
+    let other_proj = b.proj(1, rec);
+
+    let identity = proj_to_sig_iir(&mut arena, rt, rt);
+    let Some(identity_coefs) = concerned_iir(&arena, rt, identity) else {
+        panic!("identity should be concerned by rt");
+    };
+    assert_eq!(identity_coefs[0], rt);
+    assert_eq!(match_sig(&arena, identity_coefs[1]), SigMatch::Int(0));
+    assert_eq!(match_sig(&arena, identity_coefs[2]), SigMatch::Int(1));
+
+    let nil = arena.nil();
+    assert_eq!(proj_to_sig_iir(&mut arena, rt, other_proj), nil);
+
+    let two = SigBuilder::new(&mut arena).int(2);
+    let delayed = delay_sig_iir(&mut arena, rt, identity, two);
+    let Some(delayed_coefs) = concerned_iir(&arena, rt, delayed) else {
+        panic!("delayed IIR should stay concerned");
+    };
+    assert_eq!(delayed_coefs[0], rt);
+    assert_eq!(match_sig(&arena, delayed_coefs[1]), SigMatch::Int(0));
+    assert_eq!(match_sig(&arena, delayed_coefs[2]), SigMatch::Int(0));
+    assert_eq!(match_sig(&arena, delayed_coefs[3]), SigMatch::Int(0));
+    assert_eq!(match_sig(&arena, delayed_coefs[4]), SigMatch::Int(1));
+}
+
+#[test]
+fn iir_helpers_add_sub_scale_and_reject_nonlinear_products() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let x = b.input(0);
+    let rec = b.rec(x);
+    let rt = b.proj(0, rec);
+    let p = b.real(0.5);
+    let q = b.real(0.25);
+    let iir_a = b.iir(&[rt, x, p]);
+    let iir_b = b.iir(&[rt, q, q]);
+    let factor = b.int(3);
+
+    let added = add_sig_iir(&mut arena, rt, iir_a, iir_b);
+    let Some(added_coefs) = concerned_iir(&arena, rt, added) else {
+        panic!("IIR addition should stay concerned");
+    };
+    assert!(matches!(
+        match_sig(&arena, added_coefs[1]),
+        SigMatch::BinOp(BinOp::Add, _, _)
+    ));
+    assert!(matches!(
+        match_sig(&arena, added_coefs[2]),
+        SigMatch::BinOp(BinOp::Add, _, _)
+    ));
+
+    let subbed = sub_sig_iir(&mut arena, rt, added, iir_b);
+    let Some(subbed_coefs) = concerned_iir(&arena, rt, subbed) else {
+        panic!("IIR subtraction should stay concerned");
+    };
+    assert_eq!(subbed_coefs[0], rt);
+
+    let scaled = mul_sig_iir(&mut arena, rt, iir_a, factor);
+    let Some(scaled_coefs) = concerned_iir(&arena, rt, scaled) else {
+        panic!("IIR scaling should stay concerned");
+    };
+    assert!(matches!(
+        match_sig(&arena, scaled_coefs[1]),
+        SigMatch::BinOp(BinOp::Mul, _, _)
+    ));
+    assert!(matches!(
+        match_sig(&arena, scaled_coefs[2]),
+        SigMatch::BinOp(BinOp::Mul, _, _)
+    ));
+
+    let divided = div_sig_iir(&mut arena, rt, scaled, factor);
+    let Some(divided_coefs) = concerned_iir(&arena, rt, divided) else {
+        panic!("IIR division by independent term should stay concerned");
+    };
+    assert!(matches!(
+        match_sig(&arena, divided_coefs[1]),
+        SigMatch::BinOp(BinOp::Div, _, _)
+    ));
+
+    let nil = arena.nil();
+    assert_eq!(mul_sig_iir(&mut arena, rt, iir_a, iir_b), nil);
+    assert_eq!(div_sig_iir(&mut arena, rt, x, iir_b), nil);
+}
+
+#[test]
+fn iir_helper_embeds_fir_applied_to_concerned_iir() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let x = b.input(0);
+    let rec = b.rec(x);
+    let rt = b.proj(0, rec);
+    let p = b.real(0.5);
+    let one = b.int(1);
+    let iir = b.iir(&[rt, x, p]);
+    let fir_on_iir = b.fir(&[iir, one, p]);
+
+    let embedded = embedded_iir(&mut arena, rt, fir_on_iir);
+    let Some(embedded_coefs) = concerned_iir(&arena, rt, embedded) else {
+        panic!("embedded IIR should stay concerned");
+    };
+    assert_eq!(embedded_coefs[0], rt);
+    assert!(embedded_coefs.len() >= 3);
 }
 
 #[test]
