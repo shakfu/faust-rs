@@ -281,6 +281,59 @@ fn assert_rad_matches_fad<BuildRad, BuildFad>(
 }
 
 #[test]
+fn fastlane_interp_lti_recursive_rad_feedback_coeff_matches_closed_form_contributions() {
+    let frame_count = 6;
+    let outputs = run_interp_temp_source(
+        "rad-lti-recursive-feedback-coeff",
+        r#"
+p = 0.5;
+process = rad((2 : + ~ *(p)), p);
+"#,
+        frame_count,
+    );
+    assert_eq!(
+        outputs.len(),
+        2,
+        "RAD recursive fixture layout must be [primal, gradient]"
+    );
+
+    let p = 0.5_f32;
+    let mut primals = Vec::with_capacity(frame_count);
+    let mut previous_primal = 0.0_f32;
+    for _ in 0..frame_count {
+        let primal = 2.0 + p * previous_primal;
+        primals.push(primal);
+        previous_primal = primal;
+    }
+
+    let mut cotangents = vec![0.0_f32; frame_count];
+    let mut next_cotangent = 0.0_f32;
+    for frame in (0..frame_count).rev() {
+        let cotangent = 1.0 + p * next_cotangent;
+        cotangents[frame] = cotangent;
+        next_cotangent = cotangent;
+    }
+
+    for frame in 0..frame_count {
+        assert_close(
+            outputs[0][frame],
+            primals[frame],
+            1.0e-6,
+            &format!("rad_lti_recursive_feedback_coeff primal frame {frame}"),
+        );
+
+        let previous_state = if frame == 0 { 0.0 } else { primals[frame - 1] };
+        let gradient_contribution = cotangents[frame] * previous_state;
+        assert_close(
+            outputs[1][frame],
+            gradient_contribution,
+            1.0e-6,
+            &format!("rad_lti_recursive_feedback_coeff gradient frame {frame}"),
+        );
+    }
+}
+
+#[test]
 fn rad_polynomial_two_seeds_matches_central_difference() {
     fn rad_source(seeds: &[f32]) -> String {
         let (a, b) = (seeds[0], seeds[1]);

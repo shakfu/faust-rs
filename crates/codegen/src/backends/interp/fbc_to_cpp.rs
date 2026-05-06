@@ -684,6 +684,14 @@ impl BlockComp {
                     &format!("({})inputs[{}][{}]", self.real_ctype, o1, idx),
                 );
             }
+            LoadOutput => {
+                let idx = self.pop_i();
+                self.push_r(
+                    out,
+                    t,
+                    &format!("({})outputs[{}][{}]", self.real_ctype, o1, idx),
+                );
+            }
             StoreOutput => {
                 let idx = self.pop_i();
                 let val = self.pop_r();

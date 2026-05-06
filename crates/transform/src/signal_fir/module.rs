@@ -249,6 +249,18 @@ pub(super) fn build_module(
     lower.ensure_sample_rate_var();
     lower.prepare_delay_lines(signals)?;
     let reverse_time_outputs = classify_reverse_time_outputs(lower.arena, signals);
+    lower.forward_output_by_sig = signals
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &sig)| (!reverse_time_outputs[index]).then_some((sig, index)))
+        .collect();
+    lower.forward_output_by_sig_key = signals
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &sig)| {
+            (!reverse_time_outputs[index]).then_some((dump_sig_readable(arena, sig), index))
+        })
+        .collect();
     let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
     let dsp_arg = NamedType {
         name: "dsp".to_string(),
@@ -289,11 +301,13 @@ pub(super) fn build_module(
 
     if has_reverse_outputs {
         lower.cache.clear();
+        lower.lowering_reverse_loop = true;
         for (signal_index, sig) in signals.iter().enumerate() {
             if reverse_time_outputs[signal_index] {
                 lower.lower_output_signal(signal_index, *sig, plan.num_outputs)?;
             }
         }
+        lower.lowering_reverse_loop = false;
         if !has_forward_outputs {
             let delay_sample_end = lower
                 .delay
@@ -671,15 +685,33 @@ pub(super) fn build_module(
 }
 
 fn classify_reverse_time_outputs(arena: &TreeArena, signals: &[SigId]) -> Vec<bool> {
+    fn contains_reverse_time_projection(
+        arena: &TreeArena,
+        sig: SigId,
+        visited: &mut HashSet<SigId>,
+    ) -> bool {
+        if !visited.insert(sig) {
+            return false;
+        }
+        if matches!(
+            match_sig(arena, sig),
+            SigMatch::Proj(_, group)
+                if matches!(match_sig(arena, group), SigMatch::ReverseTimeRec(_))
+        ) {
+            return true;
+        }
+        arena.node(sig).is_some_and(|node| {
+            node.children
+                .as_slice()
+                .iter()
+                .copied()
+                .any(|child| contains_reverse_time_projection(arena, child, visited))
+        })
+    }
+
     signals
         .iter()
-        .map(|&sig| {
-            matches!(
-                match_sig(arena, sig),
-                SigMatch::Proj(_, group)
-                    if matches!(match_sig(arena, group), SigMatch::ReverseTimeRec(_))
-            )
-        })
+        .map(|&sig| contains_reverse_time_projection(arena, sig, &mut HashSet::new()))
         .collect()
 }
 
@@ -806,6 +838,18 @@ struct SignalToFirLower<'a> {
     /// These hoists need persistent `Struct` storage; init-only `Konst` hoists
     /// can stay stack-local inside `instanceConstants()`.
     konst_escapes: HashSet<SigId>,
+    /// Forward output lanes already computed before the reverse-time loop.
+    ///
+    /// Phase-E1 RAD uses the public bundle layout `[primals..., gradients...]`.
+    /// This map lets coefficient-gradient terms in the reverse loop replay
+    /// `Delay1(primal)` from the primal output buffer instead of reading the
+    /// recursion carrier in reverse-time order.
+    forward_output_by_sig: HashMap<SigId, usize>,
+    /// Same map as [`Self::forward_output_by_sig`], keyed by the prepared
+    /// readable signal shape to survive equivalent but non-identical `SigId`s.
+    forward_output_by_sig_key: HashMap<String, usize>,
+    /// True while lowering the reverse-time sample-loop slice.
+    lowering_reverse_loop: bool,
 }
 
 /// One extern prototype recovered from a Faust `FFUN(...)` descriptor.
@@ -893,6 +937,9 @@ impl<'a> SignalToFirLower<'a> {
             sig_ref_counts,
             sig_at_boundary,
             konst_escapes,
+            forward_output_by_sig: HashMap::new(),
+            forward_output_by_sig_key: HashMap::new(),
+            lowering_reverse_loop: false,
         }
     }
 
@@ -1705,6 +1752,12 @@ impl<'a> SignalToFirLower<'a> {
         value: SigId,
         init: FirId,
     ) -> Result<FirId, SignalFirError> {
+        if self.lowering_reverse_loop
+            && let Some(replayed) =
+                self.lower_forward_output_delay1_for_reverse_loop(node, value)?
+        {
+            return Ok(replayed);
+        }
         if let Some(rec_delay_ref) = self.resolve_recursion_delay_ref(value)? {
             let out_ty = self.signal_fir_type(node)?;
             debug_assert_eq!(
@@ -1775,6 +1828,62 @@ impl<'a> SignalToFirLower<'a> {
             ));
         }
         Ok(out)
+    }
+
+    /// Replays `Delay1(primal_output)` while lowering a reverse-time RAD loop.
+    ///
+    /// In split RAD bundles, forward primals are emitted before reverse
+    /// gradients. A feedback-coefficient contribution such as
+    /// `adjoint[n] * y[n-1]` must read the primal state at the matching forward
+    /// frame, not advance a recursion carrier while iterating backward. For
+    /// primals present in the public output bundle, the forward output buffer is
+    /// the block-local tape: frame `0` returns the delay initializer `0`, and
+    /// later frames read `output_primal[i0 - 1]`.
+    fn lower_forward_output_delay1_for_reverse_loop(
+        &mut self,
+        node: SigId,
+        value: SigId,
+    ) -> Result<Option<FirId>, SignalFirError> {
+        let output_index = self.forward_output_by_sig.get(&value).copied().or_else(|| {
+            self.forward_output_by_sig_key
+                .get(&dump_sig_readable(self.arena, value))
+                .copied()
+        });
+        let Some(output_index) = output_index else {
+            return Ok(None);
+        };
+        let out_ty = self.signal_fir_type(node)?;
+        if !matches!(out_ty, FirType::Int32 | FirType::Float32 | FirType::Float64) {
+            return Err(SignalFirError::new(
+                SignalFirErrorCode::UnsupportedSignalNode,
+                format!(
+                    "unsupported reverse RAD primal replay type for {}: {out_ty:?}",
+                    dump_sig_readable(self.arena, node)
+                ),
+            ));
+        }
+        let mut b = FirBuilder::new(&mut self.store);
+        let i0 = b.load_var("i0", AccessType::Loop, FirType::Int32);
+        let zero_index = b.int32(0);
+        let has_previous = b.binop(FirBinOp::Gt, i0, zero_index, FirType::Int32);
+        let one = b.int32(1);
+        let raw_previous_index = b.binop(FirBinOp::Sub, i0, one, FirType::Int32);
+        let previous_index = b.binop(
+            FirBinOp::Mul,
+            has_previous,
+            raw_previous_index,
+            FirType::Int32,
+        );
+        let previous = b.load_table(
+            format!("output{output_index}"),
+            AccessType::Stack,
+            previous_index,
+            FirType::FaustFloat,
+        );
+        let previous = b.cast(out_ty.clone(), previous);
+        let mask = b.cast(out_ty.clone(), has_previous);
+        let masked_previous = b.binop(FirBinOp::Mul, previous, mask, out_ty);
+        Ok(Some(masked_previous))
     }
 
     /// Lowers a standalone `Delay1(value)` node using the canonical

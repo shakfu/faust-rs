@@ -730,6 +730,18 @@ impl<R: FbcReal> FbcExecutor<R> {
                     real_stack.push(*sample);
                     pc += 1;
                 }
+                LoadOutput => {
+                    let sample_idx =
+                        pop_int_stack(&mut int_stack, instr.opcode, cur_block, pc)? as usize;
+                    let channel = outputs.get(o1).ok_or_else(|| {
+                        FbcExecError::io_oob(instr.opcode, cur_block, pc, o1, sample_idx)
+                    })?;
+                    let sample = channel.get(sample_idx).ok_or_else(|| {
+                        FbcExecError::io_oob(instr.opcode, cur_block, pc, o1, sample_idx)
+                    })?;
+                    real_stack.push(*sample);
+                    pc += 1;
+                }
                 StoreOutput => {
                     let sample_idx =
                         pop_int_stack(&mut int_stack, instr.opcode, cur_block, pc)? as usize;

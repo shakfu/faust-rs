@@ -12,10 +12,7 @@ fn first_opcode_is_zero() {
 
 #[test]
 fn last_opcode_is_count_minus_one() {
-    assert_eq!(
-        FbcOpcode::ForeignCallVoid as u16,
-        (FBC_OPCODE_COUNT - 1) as u16
-    );
+    assert_eq!(FbcOpcode::LoadOutput as u16, (FBC_OPCODE_COUNT - 1) as u16);
 }
 
 #[test]
@@ -35,7 +32,7 @@ fn from_u16_rejects_out_of_range() {
 #[test]
 fn name_table_first_and_last() {
     assert_eq!(FbcOpcode::RealValue.name(), "kRealValue");
-    assert_eq!(FbcOpcode::ForeignCallVoid.name(), "kForeignCallVoid");
+    assert_eq!(FbcOpcode::LoadOutput.name(), "kLoadOutput");
 }
 
 #[test]

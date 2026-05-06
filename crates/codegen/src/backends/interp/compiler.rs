@@ -837,6 +837,17 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 ));
             return Ok(());
         }
+        if let Some(channel) = parse_io_channel(name, "output") {
+            self.current_block
+                .push(FbcInstruction::with_values_and_offsets(
+                    FbcOpcode::LoadOutput,
+                    0,
+                    R::default(),
+                    channel,
+                    0,
+                ));
+            return Ok(());
+        }
 
         let desc = self
             .field_table
@@ -1543,12 +1554,12 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         // Init block.
         self.begin_sub_block();
         if is_reverse {
-            self.compile_node(store, upper)?;
             self.current_block.push(FbcInstruction::with_values(
                 FbcOpcode::Int32Value,
                 1,
                 R::default(),
             ));
+            self.compile_node(store, upper)?;
             self.current_block
                 .push(FbcInstruction::new(FbcOpcode::SubInt));
             self.current_block
@@ -1574,6 +1585,13 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
         // Body block: body; step; loop condition; cond-branch(loop back).
         self.begin_sub_block();
         self.compile_node(store, body)?;
+        if is_reverse {
+            self.current_block.push(FbcInstruction::with_values(
+                FbcOpcode::Int32Value,
+                1,
+                R::default(),
+            ));
+        }
         self.current_block
             .push(FbcInstruction::with_values_and_offsets(
                 FbcOpcode::LoadInt,
@@ -1582,11 +1600,13 @@ impl<R: FbcReal> FirToFbcCompiler<R> {
                 desc.offset,
                 0,
             ));
-        self.current_block.push(FbcInstruction::with_values(
-            FbcOpcode::Int32Value,
-            1,
-            R::default(),
-        ));
+        if !is_reverse {
+            self.current_block.push(FbcInstruction::with_values(
+                FbcOpcode::Int32Value,
+                1,
+                R::default(),
+            ));
+        }
         self.current_block.push(FbcInstruction::new(if is_reverse {
             FbcOpcode::SubInt
         } else {

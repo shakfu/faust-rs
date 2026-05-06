@@ -18,10 +18,11 @@
 //! - `sigDoubleClocked(inside, outside, y)` keeps the C++ nested representation
 //!   `sigClocked(inside, sigClocked(outside, y))` instead of introducing a
 //!   separate Rust-only node family.
-//! - `ReverseTimeRec(body)` is a Rust-only phase-E1 RAD carrier. It keeps the
-//!   normal recursive-group body/projection contract, but downstream lowering
-//!   must evaluate the group from the end of the current compute block back to
-//!   the beginning with terminal adjoint state initialized to zero.
+//! - `ReverseTimeRec(group)` is a Rust-only phase-E1 RAD carrier. It wraps a
+//!   normal recursive group and keeps the usual body/projection contract, but
+//!   downstream lowering must evaluate the group from the end of the current
+//!   compute block back to the beginning with terminal adjoint state initialized
+//!   to zero.
 //!
 //! # Integer convention
 //! - Public signal integer surface (`SigBuilder::int`, `SigMatch::Int`, and
@@ -655,11 +656,12 @@ impl<'a> SigBuilder<'a> {
     #[must_use]
     /// Builds one signal node for `reverse_time_rec` and returns its `SigId`.
     ///
-    /// This node is the phase-E1 RAD counterpart of `rec`: its body has the
-    /// same arity and `Proj(slot, group)` projection contract as `rec`, but a
-    /// backend must evaluate the body in reverse sample order over the current
-    /// compute block. The terminal state after the last frame is implicitly
-    /// zero and no adjoint state is preserved across `compute()` calls.
+    /// This node is the phase-E1 RAD counterpart of `rec`: it wraps a normal
+    /// recursive group with the same arity and `Proj(slot, group)` projection
+    /// contract as `rec`, but a backend must evaluate the group in reverse
+    /// sample order over the current compute block. The terminal state after
+    /// the last frame is implicitly zero and no adjoint state is preserved
+    /// across `compute()` calls.
     ///
     /// Source provenance: original Rust RAD phase-E1 design in
     /// `porting/reverse-ad-rad-implementation-plan-2026-04-27-en.md`, section

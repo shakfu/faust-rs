@@ -453,6 +453,14 @@ fn detect_compute_control_dsp_split(
         return None;
     };
     let (last, prefix) = stmts.split_last()?;
+    if prefix.iter().any(|stmt| {
+        matches!(
+            fir::match_fir(store, *stmt),
+            fir::FirMatch::SimpleForLoop { .. } | fir::FirMatch::ForLoop { .. }
+        )
+    }) {
+        return None;
+    }
     match fir::match_fir(store, *last) {
         fir::FirMatch::SimpleForLoop { .. } | fir::FirMatch::ForLoop { .. } => {
             Some((prefix.to_vec(), *last))

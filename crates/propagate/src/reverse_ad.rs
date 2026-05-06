@@ -976,8 +976,7 @@ fn replace_current_rec_refs_with_primal_delay(
         SigMatch::Proj(slot, group)
             if tlib::match_de_bruijn_ref(arena, group) == Some(current_level) =>
         {
-            let primal = SigBuilder::new(arena).proj(slot, current_group);
-            return Ok(SigBuilder::new(arena).delay1(primal));
+            return Ok(SigBuilder::new(arena).proj(slot, current_group));
         }
         _ => {}
     }
@@ -1098,7 +1097,7 @@ fn is_readonly_table_source(arena: &TreeArena, sig: SigId) -> bool {
 /// Public `rad(...)` still needs to discover all primal projections that read
 /// the same `DEBRUIJNREC`; once it has them, this helper combines all incoming
 /// cotangents by output lane, replaces the transpose scaffold placeholders,
-/// and returns one shared `ReverseTimeRec(transposed_body)` group.
+/// and returns one shared `ReverseTimeRec(DEBRUIJNREC(transposed_body))` group.
 ///
 /// Duplicate entries for the same `slot` are accumulated with signal addition.
 /// Slots without incoming cotangent receive `0.0`, preserving the recursive
@@ -1140,11 +1139,7 @@ pub(super) fn build_lti_recursive_adjoint_group(
 
     let transposed =
         transpose_lti_de_bruijn_rec_with_cotangents(arena, group, cotangents.as_slice())?;
-    let transposed_body =
-        match_de_bruijn_rec(arena, transposed).ok_or(TransposeAdError::NotRecursiveGroup)?;
-    Ok(Some(
-        SigBuilder::new(arena).reverse_time_rec(transposed_body),
-    ))
+    Ok(Some(SigBuilder::new(arena).reverse_time_rec(transposed)))
 }
 
 /// Builds the phase-E1 reverse-time adjoint projection for one LTI recursive
@@ -1152,8 +1147,8 @@ pub(super) fn build_lti_recursive_adjoint_group(
 ///
 /// For one projection `Proj(slot, DEBRUIJNREC(body))`, this helper injects
 /// `cotangent` into that lane, zero cotangents into the other lanes, wraps the
-/// transposed body in `ReverseTimeRec`, and returns
-/// `Proj(slot, ReverseTimeRec(transposed_body))`.
+/// transposed recursive group in `ReverseTimeRec`, and returns
+/// `Proj(slot, ReverseTimeRec(transposed_group))`.
 ///
 /// Mapping status: `adapted`, internal phase-E1 scaffold. The public
 /// `rad(...)` traversal is intentionally not switched to it yet because full
@@ -1363,9 +1358,11 @@ mod tests {
         let SigMatch::Proj(0, reverse_group) = match_sig(&arena, adjoint) else {
             panic!("adjoint should project from a reverse-time group");
         };
-        let SigMatch::ReverseTimeRec(transposed_body) = match_sig(&arena, reverse_group) else {
+        let SigMatch::ReverseTimeRec(transposed_group) = match_sig(&arena, reverse_group) else {
             panic!("adjoint group should be ReverseTimeRec");
         };
+        let transposed_body =
+            match_de_bruijn_rec(&arena, transposed_group).expect("transposed recursive group");
         let branches = list_to_vec(&arena, transposed_body).expect("transposed body list");
         assert_eq!(branches.len(), 1);
         assert!(
@@ -1409,9 +1406,11 @@ mod tests {
         .expect("grouped LTI transpose should build")
         .expect("group should be eligible");
 
-        let SigMatch::ReverseTimeRec(transposed_body) = match_sig(&arena, reverse_group) else {
+        let SigMatch::ReverseTimeRec(transposed_group) = match_sig(&arena, reverse_group) else {
             panic!("grouped adjoint should be ReverseTimeRec");
         };
+        let transposed_body =
+            match_de_bruijn_rec(&arena, transposed_group).expect("transposed recursive group");
         let branches = list_to_vec(&arena, transposed_body).expect("transposed body list");
         assert_eq!(branches.len(), 2);
         assert!(
@@ -1465,9 +1464,11 @@ mod tests {
             reverse_group0, reverse_group1,
             "frontier projections from the same recursion must share one reverse-time group"
         );
-        let SigMatch::ReverseTimeRec(transposed_body) = match_sig(&arena, reverse_group0) else {
+        let SigMatch::ReverseTimeRec(transposed_group) = match_sig(&arena, reverse_group0) else {
             panic!("shared group should be ReverseTimeRec");
         };
+        let transposed_body =
+            match_de_bruijn_rec(&arena, transposed_group).expect("transposed recursive group");
         let branches = list_to_vec(&arena, transposed_body).expect("transposed body list");
         assert!(dump_contains_real(&arena, branches[0], 11.0));
         assert!(dump_contains_real(&arena, branches[1], 13.0));
@@ -1512,7 +1513,8 @@ mod tests {
         let coeff = SigBuilder::new(&mut arena).real(0.5);
         let group = {
             let mut b = SigBuilder::new(&mut arena);
-            let prev = b.proj(0, ref1);
+            let state = b.proj(0, ref1);
+            let prev = b.delay1(state);
             let feedback = b.mul(coeff, prev);
             let branch = b.add(drive, feedback);
             rec_group(&mut arena, &[branch])

@@ -372,10 +372,12 @@ pub enum FbcOpcode {
     ForeignCallInt = 295,
     /// Rust extension: symbolic host foreign function call with no result.
     ForeignCallVoid = 296,
+    /// Rust extension: read back a previously written output sample.
+    LoadOutput = 297,
 }
 
 /// Total number of opcodes in the FBC instruction set.
-pub const FBC_OPCODE_COUNT: usize = 297;
+pub const FBC_OPCODE_COUNT: usize = 298;
 
 /// Lookup table for converting `u16` discriminants to [`FbcOpcode`] without
 /// `unsafe` transmute.
@@ -681,6 +683,7 @@ const FROM_U16_TABLE: [FbcOpcode; FBC_OPCODE_COUNT] = {
         ForeignCallReal,
         ForeignCallInt,
         ForeignCallVoid,
+        LoadOutput,
     ]
 };
 
@@ -713,6 +716,7 @@ impl FbcOpcode {
                 | Self::LoadIndexedReal
                 | Self::LoadSoundFieldReal
                 | Self::LoadInput
+                | Self::LoadOutput
                 | Self::CastReal
                 | Self::BitcastReal
                 | Self::SelectReal
@@ -1260,6 +1264,7 @@ pub static FBC_INSTRUCTION_NAMES: [&str; FBC_OPCODE_COUNT] = [
     "kForeignCallReal", // 294
     "kForeignCallInt",  // 295
     "kForeignCallVoid", // 296
+    "kLoadOutput",      // 297
 ];
 
 #[cfg(test)]
