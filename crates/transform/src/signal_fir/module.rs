@@ -55,7 +55,9 @@ use fir::{
     FirType, NamedType, SliderRange, SliderType, UiBoxType,
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
-use tlib::{NodeKind, TreeArena, list_to_vec, match_sym_rec, tree_to_int, tree_to_str};
+use tlib::{
+    NodeKind, TreeArena, list_to_vec, match_sym_rec, match_sym_ref, tree_to_int, tree_to_str,
+};
 use ui::{ControlId, ControlKind, UiGroupKind, UiMatch, UiProgram, match_ui};
 
 use sigtype::{SigType, Variability};
@@ -1059,7 +1061,13 @@ impl<'a> SignalToFirLower<'a> {
     /// kept as a defensive check against future regressions.
     fn is_recursive_projection(&self, sig: SigId) -> bool {
         if let SigMatch::Proj(_, group) = match_sig(self.arena, sig) {
+            let group = match match_sig(self.arena, group) {
+                SigMatch::ReverseTimeRec(body) => body,
+                _ => group,
+            };
             match_sym_rec(self.arena, group).is_some()
+                || match_sym_ref(self.arena, group).is_some()
+                || tlib::match_de_bruijn_ref(self.arena, group).is_some()
         } else {
             false
         }
@@ -1349,7 +1357,9 @@ impl<'a> SignalToFirLower<'a> {
             lowered
         };
 
-        self.cache.insert(sig, lowered);
+        if !self.is_recursive_projection(sig) {
+            self.cache.insert(sig, lowered);
+        }
         Ok(lowered)
     }
 
@@ -3603,6 +3613,35 @@ impl<'a> SignalToFirLower<'a> {
                         }
                     };
                     current_indexes.push(current_index);
+                }
+                if active_arrays.len() > 1 {
+                    // Multi-output recursion is a simultaneous update. Snapshot
+                    // every body before carrier stores so one lane cannot read
+                    // another lane's already-updated current slot.
+                    for (i, body_value) in body_values.iter_mut().enumerate() {
+                        let typ = active_arrays[i].typ.clone();
+                        let prefix = if typ == FirType::Int32 {
+                            "iRecBody"
+                        } else {
+                            "fRecBody"
+                        };
+                        let name = format!("{prefix}{}", this.next_loop_var_id);
+                        this.next_loop_var_id += 1;
+                        let declare = {
+                            let mut b = FirBuilder::new(&mut this.store);
+                            b.declare_var(
+                                name.clone(),
+                                typ.clone(),
+                                AccessType::Stack,
+                                Some(*body_value),
+                            )
+                        };
+                        this.sample_phases.immediate.push(declare);
+                        *body_value = {
+                            let mut b = FirBuilder::new(&mut this.store);
+                            b.load_var(name, AccessType::Stack, typ)
+                        };
+                    }
                 }
                 let mut recursion_ctx = RecursionLoweringCtx {
                     store: &mut this.store,

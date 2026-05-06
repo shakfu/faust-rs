@@ -126,8 +126,8 @@ fn value_children_of(store: &FirStore, node: FirId) -> Vec<FirId> {
 // ─── Trivial-node filter ────────────────────────────────────────────────────
 
 /// Returns `true` for nodes that should never be materialized into a temp
-/// variable because they are already free to duplicate (literals, variable
-/// loads, null values).
+/// variable because they are already free to duplicate or because hoisting
+/// would be order-sensitive across mutable stores.
 fn is_trivial_value(store: &FirStore, node: FirId) -> bool {
     matches!(
         match_fir(store, node),
@@ -138,6 +138,7 @@ fn is_trivial_value(store: &FirStore, node: FirId) -> bool {
             | FirMatch::Bool { .. }
             | FirMatch::LoadVar { .. }
             | FirMatch::LoadVarAddress { .. }
+            | FirMatch::LoadTable { .. }
             | FirMatch::NullValue { .. }
     )
 }

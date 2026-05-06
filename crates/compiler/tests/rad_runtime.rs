@@ -393,6 +393,81 @@ process = rad(((2 : + ~ *(p)), (3 : + ~ *(q))), (p, q));
 }
 
 #[test]
+fn fastlane_interp_coupled_lti_recursive_rad_matches_closed_form_contributions() {
+    let frame_count = 6;
+    let outputs = run_interp_temp_source(
+        "rad-coupled-lti-recursive-feedback-coeff",
+        r#"
+import("stdfaust.lib");
+p = 0.5;
+q = 0.25;
+core = (ro.interleave(2, 2) : (+, +)) ~ ((*(p), *(q)) : ro.cross(2));
+process = rad((2, 3) : core, (p, q));
+"#,
+        frame_count,
+    );
+    assert_eq!(
+        outputs.len(),
+        4,
+        "RAD coupled recursive fixture layout must be [y0, y1, dp, dq]"
+    );
+
+    let p = 0.5_f32;
+    let q = 0.25_f32;
+    let mut y0 = vec![0.0_f32; frame_count];
+    let mut y1 = vec![0.0_f32; frame_count];
+    let mut prev0 = 0.0_f32;
+    let mut prev1 = 0.0_f32;
+    for frame in 0..frame_count {
+        y0[frame] = 2.0 + q * prev1;
+        y1[frame] = 3.0 + p * prev0;
+        prev0 = y0[frame];
+        prev1 = y1[frame];
+    }
+
+    let mut lambda0 = vec![0.0_f32; frame_count];
+    let mut lambda1 = vec![0.0_f32; frame_count];
+    let mut next0 = 0.0_f32;
+    let mut next1 = 0.0_f32;
+    for frame in (0..frame_count).rev() {
+        lambda0[frame] = 1.0 + p * next1;
+        lambda1[frame] = 1.0 + q * next0;
+        next0 = lambda0[frame];
+        next1 = lambda1[frame];
+    }
+
+    for frame in 0..frame_count {
+        assert_close(
+            outputs[0][frame],
+            y0[frame],
+            1.0e-6,
+            &format!("rad_coupled_lti_recursive y0 frame {frame}"),
+        );
+        assert_close(
+            outputs[1][frame],
+            y1[frame],
+            1.0e-6,
+            &format!("rad_coupled_lti_recursive y1 frame {frame}"),
+        );
+
+        let prev0 = if frame == 0 { 0.0 } else { y0[frame - 1] };
+        let prev1 = if frame == 0 { 0.0 } else { y1[frame - 1] };
+        assert_close(
+            outputs[2][frame],
+            lambda1[frame] * prev0,
+            1.0e-6,
+            &format!("rad_coupled_lti_recursive dp frame {frame}"),
+        );
+        assert_close(
+            outputs[3][frame],
+            lambda0[frame] * prev1,
+            1.0e-6,
+            &format!("rad_coupled_lti_recursive dq frame {frame}"),
+        );
+    }
+}
+
+#[test]
 fn rad_polynomial_two_seeds_matches_central_difference() {
     fn rad_source(seeds: &[f32]) -> String {
         let (a, b) = (seeds[0], seeds[1]);
