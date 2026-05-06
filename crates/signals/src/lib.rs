@@ -23,6 +23,12 @@
 //!   downstream lowering must evaluate the group from the end of the current
 //!   compute block back to the beginning with terminal adjoint state initialized
 //!   to zero.
+//! - `Fir` and `Iir` are C++-parity filter carrier nodes for the structured
+//!   LTI algebra port documented in
+//!   `porting/lti-filter-intermediate-form-plan-2026-05-06-en.md`. They mirror
+//!   C++ `sigFIR` / `sigIIR` storage exactly as vector-valued signal nodes; the
+//!   algebraic helpers that reveal and transform those nodes live above this
+//!   representation layer.
 //!
 //! # Integer convention
 //! - Public signal integer surface (`SigBuilder::int`, `SigMatch::Int`, and
@@ -106,6 +112,8 @@ const SIG_DS_TAG: &str = "SIGDS";
 const SIG_CLOCKED_TAG: &str = "SIGCLOCKED";
 const SIG_REC_TAG: &str = "SIGREC";
 const SIG_REVERSE_TIME_REC_TAG: &str = "SIGREVERSETIMEREC";
+const SIG_FIR_TAG: &str = "SIGFIR";
+const SIG_IIR_TAG: &str = "SIGIIR";
 
 /// Stable crate identifier used in workspace-level tooling and diagnostics.
 #[must_use]
@@ -671,6 +679,37 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one `sigFIR` carrier and returns its `SigId`.
+    ///
+    /// Source provenance:
+    /// - C++ `compiler/signals/signals.cpp::sigFIR`
+    /// - C++ `compiler/signals/sigFIR.hh`
+    ///
+    /// The branch layout is the C++ layout `[S, C0, C1, ...]`, denoting
+    /// `C0*S[n] + C1*S[n-1] + ...`. This method intentionally does not enforce
+    /// coefficient-count or trailing-zero invariants; those belong to the
+    /// algebraic `sigFIR` helper port, which must also preserve C++ degenerate
+    /// cases such as zero or plain-gain fallback.
+    pub fn fir(&mut self, sigcoefs: &[SigId]) -> SigId {
+        intern_tag(self.arena, SIG_FIR_TAG, sigcoefs)
+    }
+
+    #[must_use]
+    /// Builds one `sigIIR` carrier and returns its `SigId`.
+    ///
+    /// Source provenance:
+    /// - C++ `compiler/signals/signals.cpp::sigIIR`
+    /// - C++ `compiler/signals/sigIIR.hh`
+    ///
+    /// The branch layout is the C++ layout `[V, X, C1, C2, ...]`, denoting
+    /// `V[n] = X[n] + C1*V[n-1] + C2*V[n-2] + ...`. The first branch may be a
+    /// recursive projection or `nil`, matching the C++ helper convention used
+    /// by `revealIIR`.
+    pub fn iir(&mut self, sigcoefs: &[SigId]) -> SigId {
+        intern_tag(self.arena, SIG_IIR_TAG, sigcoefs)
+    }
+
+    #[must_use]
     /// Builds one signal node for `button` and returns its `SigId`.
     ///
     /// The signal node stores only a stable [`ui::ControlId`]; display label,
@@ -910,6 +949,8 @@ pub enum SigMatch<'a> {
     Proj(i32, SigId),
     Rec(SigId),
     ReverseTimeRec(SigId),
+    Fir(&'a [SigId]),
+    Iir(&'a [SigId]),
     Button(ControlId),
     Checkbox(ControlId),
     VSlider(ControlId),
@@ -1023,6 +1064,8 @@ pub fn match_sig<'a>(arena: &'a TreeArena, id: SigId) -> SigMatch<'a> {
                 },
                 (SIG_REC_TAG, [body]) => SigMatch::Rec(*body),
                 (SIG_REVERSE_TIME_REC_TAG, [body]) => SigMatch::ReverseTimeRec(*body),
+                (SIG_FIR_TAG, sigcoefs) => SigMatch::Fir(sigcoefs),
+                (SIG_IIR_TAG, sigcoefs) => SigMatch::Iir(sigcoefs),
                 (SIG_BUTTON_TAG, [control]) => {
                     decode_control_id(arena, *control).map_or(SigMatch::Unknown, SigMatch::Button)
                 }

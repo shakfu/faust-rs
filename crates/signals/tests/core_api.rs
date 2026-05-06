@@ -167,6 +167,10 @@ fn stream_wrappers_and_recursion_shapes_are_stable() {
     let rec = b.rec(x);
     let reverse_rec = b.reverse_time_rec(y);
     let proj = b.proj(2, rec);
+    let c0 = b.real(0.5);
+    let c1 = b.real(-0.25);
+    let fir = b.fir(&[x, c0, c1]);
+    let iir = b.iir(&[proj, x, c0, c1]);
     let seq = b.seq(x, y);
     let zp = b.zero_pad(x, y);
 
@@ -184,8 +188,41 @@ fn stream_wrappers_and_recursion_shapes_are_stable() {
     assert_eq!(match_sig(&arena, rec), SigMatch::Rec(x));
     assert_eq!(match_sig(&arena, reverse_rec), SigMatch::ReverseTimeRec(y));
     assert_eq!(match_sig(&arena, proj), SigMatch::Proj(2, rec));
+    assert!(matches!(match_sig(&arena, fir), SigMatch::Fir(v) if v == [x, c0, c1]));
+    assert!(matches!(match_sig(&arena, iir), SigMatch::Iir(v) if v == [proj, x, c0, c1]));
     assert_eq!(match_sig(&arena, seq), SigMatch::Seq(x, y));
     assert_eq!(match_sig(&arena, zp), SigMatch::ZeroPad(x, y));
+}
+
+#[test]
+fn fir_iir_carriers_preserve_cpp_branch_layout() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let x = b.input(0);
+    let c0 = b.int(1);
+    let c1 = b.real(0.5);
+    let c2 = b.real(-0.25);
+    let rec = b.rec(x);
+    let state = b.proj(0, rec);
+
+    let fir = b.fir(&[x, c0, c1, c2]);
+    let iir = b.iir(&[state, x, c1, c2]);
+
+    let SigMatch::Fir(fir_coefs) = match_sig(&arena, fir) else {
+        panic!("SIGFIR should decode as Fir");
+    };
+    assert_eq!(fir_coefs, [x, c0, c1, c2]);
+
+    let SigMatch::Iir(iir_coefs) = match_sig(&arena, iir) else {
+        panic!("SIGIIR should decode as Iir");
+    };
+    assert_eq!(iir_coefs, [state, x, c1, c2]);
+
+    assert_eq!(
+        dump_sig(&arena, fir),
+        "SIGFIR(SIGINPUT(int(0)), int(1), float_bits(0x3fe0000000000000), float_bits(0xbfd0000000000000))"
+    );
+    assert!(dump_sig(&arena, iir).starts_with("SIGIIR(SIGPROJ(int(0), SIGREC("));
 }
 
 #[test]
