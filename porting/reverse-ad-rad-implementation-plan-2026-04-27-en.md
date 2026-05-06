@@ -1582,6 +1582,9 @@ Committed phase-E1 scaffolding now covers:
   y = drive + p * y'
   rad(y, p) -> [y, y_bar[n] * delay1(y)[n]]
   ```
+- the transposition scaffold accepts `delay1(Proj(slot, DEBRUIJNREF(1)))` as
+  the canonical propagated recursive-state read. Public propagation of
+  `rad((2 : + ~ *(p)), p)` is covered by an integration test.
 
 Still deferred:
 
