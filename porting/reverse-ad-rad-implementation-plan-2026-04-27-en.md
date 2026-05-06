@@ -1562,14 +1562,17 @@ Committed phase-E1 scaffolding now covers:
   `(primal_projection, cotangent)` pairs, groups eligible LTI recursive
   projections by source recursion, and returns ordered
   `(primal_projection, adjoint_projection)` pairs sharing the same reverse-time
-  group per recursion.
+  group per recursion;
+- public `rad(...)` now accepts the safe seed-independent LTI recursive subset:
+  if no requested seed occurs inside the recursive group, the recursion is kept
+  as a primal leaf and seed-gradient lanes are correctly zero.
 
 Still deferred:
 
 - `reverse_ad.rs` does not yet replace the `recursive-linear-transpose`
-  diagnostic in the public `rad(...)` traversal; the remaining work is to make
-  the sweep collect the projection-cotangent frontier and merge the returned
-  adjoint projections into seed-gradient propagation;
+  diagnostic for active seeds inside an LTI recursive group; the remaining work
+  is to make the sweep collect the projection-cotangent frontier and merge the
+  returned adjoint projections into seed-gradient propagation;
 - recursive seed-gradient routing for active LTI coefficients is still needed
   before user-visible `rad(LTI_recursive_primal, seeds)` can produce useful
   per-sample parameter-gradient contributions.
