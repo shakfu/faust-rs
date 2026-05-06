@@ -346,6 +346,18 @@ impl<'a> TypeAnnotator<'a> {
                 Ok(samp_cast(tx).promote_interval(itv))
             }
 
+            // ── Structured FIR/IIR carriers ────────────────────────────────
+            // C++ provenance:
+            // - `compiler/signals/sigFIR.cpp`
+            // - `compiler/signals/sigIIR.cpp`
+            //
+            // These compact carrier nodes are algebraic views over delayed
+            // sample expressions. Typing them structurally keeps the new filter
+            // algebra usable by later passes without forcing callers to expand
+            // carriers back into raw `delay/add/mul` syntax first.
+            SigMatch::Fir(coefs) => self.infer_fir_carrier(coefs),
+            SigMatch::Iir(coefs) => self.infer_iir_carrier(coefs),
+
             SigMatch::Prefix(init, s) => {
                 let ti = self.infer(init)?;
                 let ts = self.infer(s)?;
@@ -923,6 +935,60 @@ impl<'a> TypeAnnotator<'a> {
             boolean,
             itv,
         )
+    }
+
+    /// Infer the type of a compact `sigFIR([base, tap0, tap1, ...])` carrier.
+    ///
+    /// The carrier denotes `sum_i tap_i * (base @ i)`. Delayed taps are
+    /// sample-rate values whose startup interval includes zero, just like the
+    /// ordinary `Delay` rule. This helper mirrors that expanded expression
+    /// enough for type annotation while keeping the compact carrier intact.
+    fn infer_fir_carrier(&mut self, coefs: &[SigId]) -> Result<SigType, TypeError> {
+        if coefs.len() < 2 {
+            return Ok(make_maximal());
+        }
+
+        let base_type = self.infer(coefs[0])?;
+        let delayed_base_type = samp_cast(base_type.clone()).promote_interval(interval::reunion(
+            base_type.interval(),
+            interval::singleton(0.0),
+        ));
+
+        let mut result = None;
+        for (idx, coef) in coefs.iter().copied().enumerate().skip(1) {
+            let coef_type = self.infer(coef)?;
+            let signal_type = if idx == 1 {
+                base_type.clone()
+            } else {
+                delayed_base_type.clone()
+            };
+            let term = self.infer_binop(BinOp::Mul, coef_type, signal_type);
+            result = Some(match result {
+                Some(acc) => self.infer_binop(BinOp::Add, acc, term),
+                None => term,
+            });
+        }
+
+        Ok(samp_cast(result.unwrap_or_else(make_maximal)))
+    }
+
+    /// Infer the type of a compact `sigIIR([rt, input, fb0, fb1, ...])`.
+    ///
+    /// Index `0` is metadata identifying the recursive target and is not
+    /// interpreted as a numeric coefficient. The output is necessarily a
+    /// sample-rate recursive signal. In absence of the fully expanded recursive
+    /// equation, the conservative structural type joins the independent input
+    /// and feedback coefficient types, then raises variability to `Samp`.
+    fn infer_iir_carrier(&mut self, coefs: &[SigId]) -> Result<SigType, TypeError> {
+        if coefs.len() < 2 {
+            return Ok(make_maximal());
+        }
+
+        let mut result = self.infer(coefs[1])?;
+        for coef in coefs.iter().copied().skip(2) {
+            result = union_types(result, self.infer(coef)?);
+        }
+        Ok(samp_cast(result))
     }
 
     // ── UI controls ──────────────────────────────────────────────────────────
@@ -1626,6 +1692,42 @@ mod tests {
         // singleton(-1) ∪ singleton(0) = [-1, 0]
         assert!(ty.interval().lo() <= -1.0);
         assert!(ty.interval().hi() >= 0.0);
+    }
+
+    #[test]
+    fn fir_carrier_types_as_sample_numeric_expression() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let x = b.input(0);
+        let c0 = b.real(0.5);
+        let c1 = b.hslider(0);
+        let fir = b.fir(&[x, c0, c1]);
+
+        let types = annotate(&arena, &[fir]);
+        let ty = &types[&fir];
+
+        assert_eq!(ty.nature(), Nature::Real);
+        assert_eq!(ty.variability(), Variability::Samp);
+        assert_eq!(ty.computability(), Computability::Exec);
+        assert_eq!(ty.boolean(), Boolean::Num);
+    }
+
+    #[test]
+    fn iir_carrier_types_as_sample_numeric_expression_without_typing_target_metadata() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let target = b.input(0);
+        let input = b.real(0.25);
+        let fb = b.hslider(0);
+        let iir = b.iir(&[target, input, fb]);
+
+        let types = annotate(&arena, &[iir]);
+        let ty = &types[&iir];
+
+        assert_eq!(ty.nature(), Nature::Real);
+        assert_eq!(ty.variability(), Variability::Samp);
+        assert_eq!(ty.computability(), Computability::Exec);
+        assert_eq!(ty.boolean(), Boolean::Num);
     }
 
     #[test]

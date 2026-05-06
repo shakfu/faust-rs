@@ -334,6 +334,14 @@ impl<'a> SignalPromoter<'a> {
                 let amount_promoted = self.promote_as_int(amount)?;
                 SigBuilder::new(self.arena).delay(value, amount_promoted)
             }
+            SigMatch::Fir(coefs) => {
+                let coefs = coefs.to_vec();
+                self.promote_filter_carrier(&coefs, |b, coefs| b.fir(coefs))?
+            }
+            SigMatch::Iir(coefs) => {
+                let coefs = coefs.to_vec();
+                self.promote_filter_carrier(&coefs, |b, coefs| b.iir(coefs))?
+            }
             SigMatch::Prefix(init, value) => {
                 let init_promoted = self.promote(init)?;
                 let value_promoted = self.promote(value)?;
@@ -695,6 +703,28 @@ impl<'a> SignalPromoter<'a> {
         Ok(build(&mut SigBuilder::new(self.arena), &promoted))
     }
 
+    /// Promotes children of compact `sigFIR`/`sigIIR` filter carriers while
+    /// preserving the carrier node itself.
+    ///
+    /// C++ provenance:
+    /// - `compiler/signals/sigFIR.cpp`
+    /// - `compiler/signals/sigIIR.cpp`
+    ///
+    /// Filter algebra helpers use these carriers as structured views over
+    /// delayed sample expressions. Normal form should normalize their children,
+    /// but it should not expand them back into raw delay/add/mul syntax.
+    fn promote_filter_carrier(
+        &mut self,
+        coefs: &[SigId],
+        build: impl FnOnce(&mut SigBuilder<'_>, &[SigId]) -> SigId,
+    ) -> Result<SigId, NormalFormError> {
+        let mut promoted = Vec::with_capacity(coefs.len());
+        for &coef in coefs {
+            promoted.push(self.promote(coef)?);
+        }
+        Ok(build(&mut SigBuilder::new(self.arena), &promoted))
+    }
+
     fn smart_clock_cast(
         &mut self,
         promoted: SigId,
@@ -946,6 +976,50 @@ mod tests {
         let promoted = promote_signals(&mut a, &types, &[add]);
         // With same-type operands, the promoted result should not wrap in a cast.
         assert_eq!(promoted.len(), 1);
+    }
+
+    #[test]
+    fn promote_signals_preserves_filter_carriers_and_normalizes_children() {
+        let mut a = arena();
+        let u = ui();
+        let x = SigBuilder::new(&mut a).input(0);
+        let i_coef = SigBuilder::new(&mut a).int(1);
+        let r_coef = SigBuilder::new(&mut a).real(0.5);
+        let fir = SigBuilder::new(&mut a).fir(&[x, i_coef, r_coef]);
+        let opts = NormalFormOpts {
+            skip_promotion: true,
+        };
+        let (_r, types) = prepare_signals(&mut a, &u, fir, &opts).unwrap();
+
+        let promoted = promote_signals(&mut a, &types, &[fir]);
+
+        let SigMatch::Fir(coefs) = match_sig(&a, promoted[0]) else {
+            panic!("expected promoted FIR carrier");
+        };
+        assert_eq!(coefs[0], x);
+        assert_eq!(coefs[1], i_coef);
+        assert_eq!(coefs[2], r_coef);
+    }
+
+    #[test]
+    fn promote_signals_preserves_iir_carrier_shape() {
+        let mut a = arena();
+        let u = ui();
+        let target = SigBuilder::new(&mut a).input(0);
+        let input = SigBuilder::new(&mut a).input(1);
+        let fb = SigBuilder::new(&mut a).real(-0.5);
+        let iir = SigBuilder::new(&mut a).iir(&[target, input, fb]);
+        let opts = NormalFormOpts {
+            skip_promotion: true,
+        };
+        let (_r, types) = prepare_signals(&mut a, &u, iir, &opts).unwrap();
+
+        let promoted = promote_signals(&mut a, &types, &[iir]);
+
+        let SigMatch::Iir(coefs) = match_sig(&a, promoted[0]) else {
+            panic!("expected promoted IIR carrier");
+        };
+        assert_eq!(coefs, [target, input, fb]);
     }
 
     // ── NormalFormError conversion ────────────────────────────────────────

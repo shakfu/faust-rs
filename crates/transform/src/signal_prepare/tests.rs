@@ -148,6 +148,27 @@ fn prepare_signals_for_fir_records_reduced_numeric_types() {
 }
 
 #[test]
+fn prepare_signals_for_fir_accepts_filter_carrier_children() {
+    let mut arena = tlib::TreeArena::new();
+    let output = {
+        let mut b = SigBuilder::new(&mut arena);
+        let x = b.input(0);
+        let c0 = b.real(1.0);
+        let c1 = b.real(-0.5);
+        b.fir(&[x, c0, c1])
+    };
+
+    let prepared = prepare_signals_for_fir(&arena, &[output], &ui::UiProgram::empty())
+        .expect("FIR carrier should prepare");
+
+    let SigMatch::Fir(coefs) = match_sig(&prepared.arena, prepared.outputs[0]) else {
+        panic!("prepared output should keep FIR carrier");
+    };
+    assert_eq!(coefs.len(), 3);
+    assert_eq!(prepared.ty(prepared.outputs[0]), Some(SimpleSigType::Real));
+}
+
+#[test]
 fn prepare_signals_for_fir_closes_unresolved_recursive_types_to_real() {
     let mut arena = tlib::TreeArena::new();
     let self_ref = de_bruijn_ref(&mut arena, 1);

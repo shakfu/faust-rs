@@ -648,6 +648,8 @@ impl LinearityAnalyzer {
                     x_class.temporal_shift()
                 }
             }
+            SigMatch::Fir(coefs) => self.classify_fir_carrier(arena, coefs, current_level),
+            SigMatch::Iir(coefs) => self.classify_iir_carrier(arena, coefs, current_level),
             SigMatch::Prefix(init, x) => {
                 let init_class = self.classify(arena, init, current_level);
                 let x_class = self.classify(arena, x, current_level);
@@ -816,6 +818,59 @@ impl LinearityAnalyzer {
             SigMatch::Unknown => ExprClass::time_varying(),
         }
     }
+
+    /// Classifies `sigFIR([base, tap0, tap1, ...])` as the sum of delayed base
+    /// terms multiplied by independent coefficients.
+    fn classify_fir_carrier(
+        &mut self,
+        arena: &TreeArena,
+        coefs: &[SigId],
+        current_level: i64,
+    ) -> ExprClass {
+        if coefs.len() < 2 {
+            return ExprClass::time_varying();
+        }
+
+        let base = self.classify(arena, coefs[0], current_level);
+        coefs
+            .iter()
+            .copied()
+            .enumerate()
+            .skip(1)
+            .map(|(idx, coef)| {
+                let source = if idx == 1 {
+                    base
+                } else {
+                    base.temporal_shift()
+                };
+                source.multiplicative(self.classify(arena, coef, current_level))
+            })
+            .fold(ExprClass::constant(), ExprClass::additive)
+    }
+
+    /// Classifies `sigIIR([rt, input, fb0, fb1, ...])` as an input term plus
+    /// delayed recursive-target terms scaled by feedback coefficients.
+    fn classify_iir_carrier(
+        &mut self,
+        arena: &TreeArena,
+        coefs: &[SigId],
+        current_level: i64,
+    ) -> ExprClass {
+        if coefs.len() < 2 {
+            return ExprClass::time_varying();
+        }
+
+        let target = self
+            .classify(arena, coefs[0], current_level)
+            .temporal_shift();
+        let input = self.classify(arena, coefs[1], current_level);
+        coefs
+            .iter()
+            .copied()
+            .skip(2)
+            .map(|coef| target.multiplicative(self.classify(arena, coef, current_level)))
+            .fold(input, ExprClass::additive)
+    }
 }
 
 #[cfg(test)]
@@ -925,6 +980,44 @@ mod tests {
         assert_eq!(
             classify_de_bruijn_rec_group(&arena, rec),
             Some(RadRecLinearity::LinearLti)
+        );
+    }
+
+    #[test]
+    fn classifier_treats_fir_carrier_over_recursive_state_as_lti() {
+        let mut arena = TreeArena::new();
+        let ref1 = de_bruijn_ref(&mut arena, 1);
+        let branch = {
+            let mut b = SigBuilder::new(&mut arena);
+            let prev = b.proj(0, ref1);
+            let c0 = b.real(0.5);
+            let c1 = b.real(-0.25);
+            b.fir(&[prev, c0, c1])
+        };
+        let rec = one_branch_rec(&mut arena, branch);
+
+        assert_eq!(
+            classify_de_bruijn_rec_group(&arena, rec),
+            Some(RadRecLinearity::LinearLti)
+        );
+    }
+
+    #[test]
+    fn classifier_treats_iir_carrier_with_signal_feedback_as_ltv() {
+        let mut arena = TreeArena::new();
+        let ref1 = de_bruijn_ref(&mut arena, 1);
+        let branch = {
+            let mut b = SigBuilder::new(&mut arena);
+            let prev = b.proj(0, ref1);
+            let input = b.input(0);
+            let fb = b.input(1);
+            b.iir(&[prev, input, fb])
+        };
+        let rec = one_branch_rec(&mut arena, branch);
+
+        assert_eq!(
+            classify_de_bruijn_rec_group(&arena, rec),
+            Some(RadRecLinearity::LinearTimeVarying)
         );
     }
 

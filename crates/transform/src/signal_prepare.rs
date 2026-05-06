@@ -574,6 +574,24 @@ fn verify_prepared_signal(
                 reachable_typed_nodes,
             )?;
         }
+        SigMatch::Fir(coefs) | SigMatch::Iir(coefs) => {
+            if coefs.is_empty() {
+                return Err(SignalPrepareError::Validation(format!(
+                    "prepared filter carrier {} has an empty coefficient vector",
+                    sig.as_u32()
+                )));
+            }
+            for &child in coefs {
+                verify_prepared_signal(
+                    arena,
+                    ui,
+                    child,
+                    visited,
+                    sym_group_arities,
+                    reachable_typed_nodes,
+                )?;
+            }
+        }
         SigMatch::BinOp(_, x, y) => {
             verify_prepared_signal(
                 arena,
