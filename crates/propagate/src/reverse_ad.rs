@@ -107,7 +107,9 @@ use tlib::{
 };
 
 use crate::PropagateError;
-use crate::stateful_rad::{RecRadMode, classify_recursive_projection_rad_mode};
+use crate::stateful_rad::{
+    RecRadMode, classify_de_bruijn_rec_rad_mode, classify_recursive_projection_rad_mode,
+};
 use crate::transpose_ad::{TransposeAdError, transpose_lti_de_bruijn_rec_with_cotangents};
 
 /// Collects the active subgraph and accumulates adjoints for one
@@ -796,20 +798,73 @@ fn is_readonly_table_source(arena: &TreeArena, sig: SigId) -> bool {
     }
 }
 
-/// Builds the phase-E1 reverse-time adjoint projection for one LTI recursive
-/// primal projection.
+/// Builds the phase-E1 reverse-time adjoint group for one LTI recursive group.
 ///
-/// This is the first `reverse_ad.rs` bridge to the structural transposition
-/// scaffold. The public `rad(...)` traversal is intentionally not switched to
-/// it yet because full E1 still has to group all projections of the same primal
-/// recursion and route parameter/seed gradients. For one projection
-/// `Proj(slot, DEBRUIJNREC(body))`, this helper injects `cotangent` into that
-/// lane, zero cotangents into the other lanes, wraps the transposed body in
-/// `ReverseTimeRec`, and returns `Proj(slot, ReverseTimeRec(transposed_body))`.
+/// This is the grouped counterpart of the single-projection bridge below.
+/// Public `rad(...)` still needs to discover all primal projections that read
+/// the same `DEBRUIJNREC`; once it has them, this helper combines all incoming
+/// cotangents by output lane, replaces the transpose scaffold placeholders,
+/// and returns one shared `ReverseTimeRec(transposed_body)` group.
+///
+/// Duplicate entries for the same `slot` are accumulated with signal addition.
+/// Slots without incoming cotangent receive `0.0`, preserving the recursive
+/// group's original arity.
 ///
 /// Source provenance: original Rust RAD phase-E1 design in
 /// `porting/reverse-ad-rad-implementation-plan-2026-04-27-en.md`, sections
 /// 20.2 through 20.5.
+#[allow(dead_code)]
+pub(super) fn build_lti_recursive_adjoint_group(
+    arena: &mut TreeArena,
+    group: SigId,
+    slot_cotangents: &[(i32, SigId)],
+) -> Result<Option<SigId>, TransposeAdError> {
+    if match_de_bruijn_rec(arena, group).is_none() {
+        return Ok(None);
+    };
+    if classify_de_bruijn_rec_rad_mode(arena, group) != Some(RecRadMode::LinearTranspose) {
+        return Ok(None);
+    }
+
+    let body = match_de_bruijn_rec(arena, group).ok_or(TransposeAdError::NotRecursiveGroup)?;
+    let branch_count = list_to_vec(arena, body)
+        .ok_or(TransposeAdError::MalformedBody)?
+        .len();
+    let zero = SigBuilder::new(arena).real(0.0);
+    let mut cotangents = vec![zero; branch_count];
+    for &(slot, cotangent) in slot_cotangents {
+        let slot_index = usize::try_from(slot).map_err(|_| TransposeAdError::SlotOutOfRange)?;
+        let Some(existing) = cotangents.get(slot_index).copied() else {
+            return Err(TransposeAdError::SlotOutOfRange);
+        };
+        cotangents[slot_index] = if existing == zero {
+            cotangent
+        } else {
+            SigBuilder::new(arena).add(existing, cotangent)
+        };
+    }
+
+    let transposed =
+        transpose_lti_de_bruijn_rec_with_cotangents(arena, group, cotangents.as_slice())?;
+    let transposed_body =
+        match_de_bruijn_rec(arena, transposed).ok_or(TransposeAdError::NotRecursiveGroup)?;
+    Ok(Some(
+        SigBuilder::new(arena).reverse_time_rec(transposed_body),
+    ))
+}
+
+/// Builds the phase-E1 reverse-time adjoint projection for one LTI recursive
+/// primal projection.
+///
+/// For one projection `Proj(slot, DEBRUIJNREC(body))`, this helper injects
+/// `cotangent` into that lane, zero cotangents into the other lanes, wraps the
+/// transposed body in `ReverseTimeRec`, and returns
+/// `Proj(slot, ReverseTimeRec(transposed_body))`.
+///
+/// Mapping status: `adapted`, internal phase-E1 scaffold. The public
+/// `rad(...)` traversal is intentionally not switched to it yet because full
+/// E1 still has to group all projections of the same primal recursion and route
+/// parameter/seed gradient contributions.
 #[allow(dead_code)]
 pub(super) fn build_lti_recursive_adjoint_projection(
     arena: &mut TreeArena,
@@ -825,26 +880,12 @@ pub(super) fn build_lti_recursive_adjoint_projection(
         return Ok(None);
     }
 
-    let body = match_de_bruijn_rec(arena, group).ok_or(TransposeAdError::NotRecursiveGroup)?;
-    let branch_count = list_to_vec(arena, body)
-        .ok_or(TransposeAdError::MalformedBody)?
-        .len();
-    let slot_index = usize::try_from(slot).map_err(|_| TransposeAdError::SlotOutOfRange)?;
-    if slot_index >= branch_count {
-        return Err(TransposeAdError::SlotOutOfRange);
-    }
-
-    let zero = SigBuilder::new(arena).real(0.0);
-    let mut cotangents = vec![zero; branch_count];
-    cotangents[slot_index] = cotangent;
-
-    let transposed =
-        transpose_lti_de_bruijn_rec_with_cotangents(arena, group, cotangents.as_slice())?;
-    let transposed_body =
-        match_de_bruijn_rec(arena, transposed).ok_or(TransposeAdError::NotRecursiveGroup)?;
-    let mut b = SigBuilder::new(arena);
-    let reverse_group = b.reverse_time_rec(transposed_body);
-    Ok(Some(b.proj(slot, reverse_group)))
+    let Some(reverse_group) =
+        build_lti_recursive_adjoint_group(arena, group, &[(slot, cotangent)])?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(SigBuilder::new(arena).proj(slot, reverse_group)))
 }
 
 /// Public entry point for `rad(expr, seeds)` propagation.
@@ -875,7 +916,7 @@ pub(super) fn generate_rad_signals(
 
 #[cfg(test)]
 mod tests {
-    use super::build_lti_recursive_adjoint_projection;
+    use super::{build_lti_recursive_adjoint_group, build_lti_recursive_adjoint_projection};
     use signals::{SigBuilder, SigId, SigMatch, match_sig};
     use tlib::{
         TreeArena, de_bruijn_rec, de_bruijn_ref, list_to_vec, match_de_bruijn_rec, vec_to_list,
@@ -949,5 +990,49 @@ mod tests {
             "projection cotangent should drive the transposed branch"
         );
         assert!(match_de_bruijn_rec(&arena, group).is_some());
+    }
+
+    #[test]
+    fn lti_recursive_adjoint_group_combines_slot_cotangents() {
+        let mut arena = TreeArena::new();
+        let ref1 = de_bruijn_ref(&mut arena, 1);
+        let group = {
+            let mut b = SigBuilder::new(&mut arena);
+            let input0 = b.input(0);
+            let input1 = b.input(1);
+            let prev0 = b.proj(0, ref1);
+            let prev1 = b.proj(1, ref1);
+            let half = b.real(0.5);
+            let quarter = b.real(0.25);
+            let feedback0 = b.mul(half, prev0);
+            let feedback1 = b.mul(quarter, prev1);
+            let branch0 = b.add(input0, feedback0);
+            let branch1 = b.add(input1, feedback1);
+            rec_group(&mut arena, &[branch0, branch1])
+        };
+        let c0 = SigBuilder::new(&mut arena).real(2.0);
+        let c1 = SigBuilder::new(&mut arena).real(7.0);
+        let c0_extra = SigBuilder::new(&mut arena).real(3.0);
+
+        let reverse_group = build_lti_recursive_adjoint_group(
+            &mut arena,
+            group,
+            &[(0, c0), (1, c1), (0, c0_extra)],
+        )
+        .expect("grouped LTI transpose should build")
+        .expect("group should be eligible");
+
+        let SigMatch::ReverseTimeRec(transposed_body) = match_sig(&arena, reverse_group) else {
+            panic!("grouped adjoint should be ReverseTimeRec");
+        };
+        let branches = list_to_vec(&arena, transposed_body).expect("transposed body list");
+        assert_eq!(branches.len(), 2);
+        assert!(
+            !dump_contains_input(&arena, branches[0]) && !dump_contains_input(&arena, branches[1]),
+            "grouped bridge must replace every scaffold input placeholder"
+        );
+        assert!(dump_contains_real(&arena, branches[0], 2.0));
+        assert!(dump_contains_real(&arena, branches[0], 3.0));
+        assert!(dump_contains_real(&arena, branches[1], 7.0));
     }
 }
