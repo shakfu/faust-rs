@@ -1565,17 +1565,24 @@ Committed phase-E1 scaffolding now covers:
   group per recursion;
 - public `rad(...)` now accepts the safe seed-independent LTI recursive subset:
   if no requested seed occurs inside the recursive group, the recursion is kept
-  as a primal leaf and seed-gradient lanes are correctly zero.
+  as a primal leaf and seed-gradient lanes are correctly zero;
+- the public reverse sweep now routes reverse-time recursive adjoints into
+  direct drive terms of an LTI recursive branch. The first active recursive
+  E1 case is therefore supported structurally:
+
+  ```text
+  y = drive + A * y'
+  rad(y, drive) -> [y, y_bar_drive_per_sample]
+  ```
 
 Still deferred:
 
-- `reverse_ad.rs` does not yet replace the `recursive-linear-transpose`
-  diagnostic for active seeds inside an LTI recursive group; the remaining work
-  is to make the sweep collect the projection-cotangent frontier and merge the
-  returned adjoint projections into seed-gradient propagation;
-- recursive seed-gradient routing for active LTI coefficients is still needed
-  before user-visible `rad(LTI_recursive_primal, seeds)` can produce useful
-  per-sample parameter-gradient contributions.
+- active LTI feedback coefficients are still deferred. Coefficient gradients
+  need products of the reverse-time state adjoint and the primal state read
+  (`adjoint[n] * state[n-1]`), which requires an explicit policy for reading the
+  primal recursive state as block-local data in the emitted gradient signal;
+- nonlinear or block-time-varying recursive feedback continues to report the
+  existing E2/F diagnostics.
 
 ### 20.11 What this delivers
 
