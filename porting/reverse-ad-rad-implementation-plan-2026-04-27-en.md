@@ -1332,12 +1332,11 @@ controls the effective horizon by choosing the compute block size.
 Add one new signal-IR node:
 
 ```rust
-/// Recursive group whose body must be evaluated in reverse iteration
-/// order across the current compute block. Body and projection
-/// semantics are otherwise identical to `DEBRUIJNREC` /
-/// `Proj(slot, group)`. The terminal adjoint state for the last
-/// frame of the block is implicitly zero.
-ReverseTimeRec(body: SigId)
+/// Recursive group wrapper whose group must be evaluated in reverse iteration
+/// order across the current compute block. Body and projection semantics are
+/// otherwise identical to `DEBRUIJNREC` / `Proj(slot, group)`. The terminal
+/// adjoint state for the last frame of the block is implicitly zero.
+ReverseTimeRec(group: SigId)
 ```
 
 Properties:
@@ -1356,7 +1355,7 @@ The propagation arm becomes:
 ```rust
 RecRadMode::LinearTranspose => {
     let transposed = transpose_lti_de_bruijn_rec_scaffold(arena, group)?;
-    let reverse_rec = signals::reverse_time_rec(arena, transposed_body);
+    let reverse_rec = signals::reverse_time_rec(arena, transposed);
     // … wire the projections so seed adjoints land on the right slots
 }
 ```
@@ -1553,11 +1552,11 @@ Committed phase-E1 scaffolding now covers:
   `ReverseTimeRec` wrapper;
 - the first `reverse_ad.rs` bridge,
   `build_lti_recursive_adjoint_projection`, which builds
-  `Proj(slot, ReverseTimeRec(transposed_body))` for one eligible LTI recursive
+  `Proj(slot, ReverseTimeRec(transposed_group))` for one eligible LTI recursive
   primal projection and one explicit cotangent;
 - `build_lti_recursive_adjoint_group`, which groups multiple incoming
   cotangents for the same primal recursion, accumulates duplicate slot
-  cotangents, and emits one shared `ReverseTimeRec(transposed_body)` group;
+  cotangents, and emits one shared `ReverseTimeRec(transposed_group)` group;
 - `build_lti_recursive_adjoint_projections`, which accepts a mixed frontier of
   `(primal_projection, cotangent)` pairs, groups eligible LTI recursive
   projections by source recursion, and returns ordered
@@ -1585,6 +1584,26 @@ Committed phase-E1 scaffolding now covers:
 - the transposition scaffold accepts `delay1(Proj(slot, DEBRUIJNREF(1)))` as
   the canonical propagated recursive-state read. Public propagation of
   `rad((2 : + ~ *(p)), p)` is covered by an integration test.
+- strict-LTI recursive RAD is now covered numerically through the interpreter
+  fast lane for:
+
+  ```faust
+  p = 0.5;
+  process = rad((2 : + ~ *(p)), p);
+  ```
+
+  The regression verifies both the primal recurrence
+  `y[n] = 2 + p * y[n-1]` and the per-sample coefficient contribution
+  `lambda[n] * y[n-1]` for the block-local objective with all-ones output
+  cotangents.
+- FIR lowering now treats reverse-time outputs structurally, not only when the
+  top-level output is directly `Proj(_, ReverseTimeRec(...))`. This lets
+  products such as `reverse_adjoint * delay1(primal)` run in the reverse sample
+  loop.
+- The interpreter backend gained the minimal support needed by split
+  forward/reverse RAD loops: output-buffer replay via `LoadOutput`, correct
+  reverse-loop subtraction order, and a conservative control/DSP split guard
+  that keeps multi-loop `compute()` bodies in the I/O-capable DSP block.
 
 Still deferred:
 
