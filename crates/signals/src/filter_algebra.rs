@@ -13,6 +13,20 @@
 //! [`crate::SigMatch`]. Keeping it out of `lib.rs` makes the representation
 //! layer smaller while preserving one public `signals` API surface through
 //! re-exports.
+//!
+//! # Carrier conventions
+//!
+//! `sigFIR` coefficients are stored as `[base, tap0, tap1, ...]`, where
+//! `tapN` multiplies `base@N`. The `base` is intentionally not treated as a
+//! coefficient: structural FIR operations preserve it and combine only the
+//! taps.
+//!
+//! `sigIIR` coefficients are stored as `[recursive_target, input, fb0, fb1,
+//! ...]`. The first entry identifies the recursive projection this scalar IIR
+//! is "concerned" by, the second entry is the independent input term, and the
+//! remaining entries are feedback coefficients attached to delayed recursive
+//! values. Helpers return `nil` when an expression cannot be represented in
+//! this scalar IIR carrier without changing semantics.
 
 use tlib::TreeArena;
 
@@ -405,6 +419,10 @@ pub fn embedded_iir(arena: &mut TreeArena, rt: SigId, fir: SigId) -> SigId {
     add_sig_iir(arena, rt, res, input_fir)
 }
 
+/// Extracts the literal integer value needed by delay-specialization helpers.
+///
+/// Non-integer delay expressions are deliberately not folded here: FIR/IIR
+/// carrier rewrites are only valid for statically known delay amounts.
 fn sig_int_value(arena: &TreeArena, sig: SigId) -> Option<i32> {
     match match_sig(arena, sig) {
         SigMatch::Int(value) => Some(value),
@@ -412,6 +430,11 @@ fn sig_int_value(arena: &TreeArena, sig: SigId) -> Option<i32> {
     }
 }
 
+/// Returns whether `sig` is a literal numeric zero.
+///
+/// This is a local structural predicate, not a general simplifier. It avoids
+/// crossing crate boundaries into normalization while still allowing the C++
+/// helper parity cases to drop neutral zero terms.
 fn is_zero_sig(arena: &TreeArena, sig: SigId) -> bool {
     match match_sig(arena, sig) {
         SigMatch::Int(0) => true,
@@ -420,6 +443,10 @@ fn is_zero_sig(arena: &TreeArena, sig: SigId) -> bool {
     }
 }
 
+/// Returns whether `sig` is a literal numeric one.
+///
+/// Like [`is_zero_sig`], this intentionally recognizes only direct numeric
+/// leaves so algebra helpers remain deterministic and side-effect free.
 fn is_one_sig(arena: &TreeArena, sig: SigId) -> bool {
     match match_sig(arena, sig) {
         SigMatch::Int(1) => true,
@@ -428,6 +455,11 @@ fn is_one_sig(arena: &TreeArena, sig: SigId) -> bool {
     }
 }
 
+/// Negates a signal with literal folding for numeric leaves.
+///
+/// Integer negation uses `checked_neg` so `i32::MIN` remains representable as
+/// `-1 * sig` rather than overflowing. Non-literal expressions are kept as an
+/// explicit multiplication to match the helper-level algebra used by C++.
 fn neg_sig(builder: &mut SigBuilder<'_>, sig: SigId) -> SigId {
     match match_sig(builder.arena(), sig) {
         SigMatch::Int(value) => match value.checked_neg() {
@@ -445,6 +477,10 @@ fn neg_sig(builder: &mut SigBuilder<'_>, sig: SigId) -> SigId {
     }
 }
 
+/// Adds two signals while preserving either side when the other is literal `0`.
+///
+/// This keeps generated carrier coefficient vectors compact without invoking
+/// the full normalize pass.
 fn add_or_passthrough(builder: &mut SigBuilder<'_>, lhs: SigId, rhs: SigId) -> SigId {
     if is_zero_sig(builder.arena(), lhs) {
         rhs
@@ -455,6 +491,12 @@ fn add_or_passthrough(builder: &mut SigBuilder<'_>, lhs: SigId, rhs: SigId) -> S
     }
 }
 
+/// Shifts a concerned-IIR coefficient vector by a known non-negative delay.
+///
+/// The independent input term is delayed, `delay` zero feedback slots are
+/// inserted, and existing feedback coefficients are delayed when they are not
+/// numeric constants. The caller owns validation that `delay >= 0` and that the
+/// vector uses the `[rt, input, feedback...]` layout.
 fn delay_iir_coefs(arena: &mut TreeArena, coefs: &[SigId], delay: i32) -> SigId {
     if coefs.len() < 2 {
         return arena.nil();
@@ -472,6 +514,10 @@ fn delay_iir_coefs(arena: &mut TreeArena, coefs: &[SigId], delay: i32) -> SigId 
     b.iir(&shifted)
 }
 
+/// Delays a coefficient unless it is already a numeric constant.
+///
+/// Constants are time-invariant, so delaying them would only add noise to the
+/// structural carrier representation.
 fn delay_coef(builder: &mut SigBuilder<'_>, coef: SigId, delay: i32) -> SigId {
     if matches!(
         match_sig(builder.arena(), coef),
@@ -484,6 +530,11 @@ fn delay_coef(builder: &mut SigBuilder<'_>, coef: SigId, delay: i32) -> SigId {
     }
 }
 
+/// Combines two coefficient vectors concerned by the same recursive target.
+///
+/// Vectors with different targets are not compatible scalar IIRs and produce
+/// `nil`. Missing coefficients are treated as literal zero, matching the FIR
+/// helper convention for unequal vector lengths.
 fn combine_iir_coefs(arena: &mut TreeArena, lhs: &[SigId], rhs: &[SigId], op: BinOp) -> SigId {
     if lhs.is_empty() || rhs.is_empty() || lhs[0] != rhs[0] {
         return arena.nil();
@@ -512,6 +563,11 @@ fn combine_iir_coefs(arena: &mut TreeArena, lhs: &[SigId], rhs: &[SigId], op: Bi
     b.iir(&coefs)
 }
 
+/// Scales every non-target entry of a concerned-IIR coefficient vector.
+///
+/// The recursive target at index `0` is metadata and must not be multiplied or
+/// divided. Multiplication by literal one preserves the original coefficient to
+/// keep the carrier stable for structural tests and later matcher passes.
 fn scale_iir_coefs(arena: &mut TreeArena, coefs: &[SigId], factor: SigId, op: BinOp) -> SigId {
     if coefs.is_empty() {
         return arena.nil();
