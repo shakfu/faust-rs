@@ -1798,10 +1798,11 @@ fn propagate_reverse_ad_variable_delay_emits_temporal_diagnostic() {
 }
 
 #[test]
-fn propagate_reverse_ad_recursive_body_emits_temporal_diagnostic() {
-    // process = rad((+ ~ *(0.5)), x): the recursive feedback in the
-    // differentiated body would require a non-causal transpose, so RAD
-    // must reject it with the recursive-linear-transpose diagnostic.
+fn propagate_reverse_ad_seed_independent_lti_recursive_body_succeeds() {
+    // process = rad((2 : + ~ *(0.5)), x): the requested seed is not part of
+    // the recursive group, so the gradient lane is correctly zero. Phase E1
+    // can therefore accept this safe subset while parameter/input routing for
+    // recursive groups remains deferred.
     let mut arena = TreeArena::new();
     let process = {
         let mut bb = BoxBuilder::new(&mut arena);
@@ -1823,27 +1824,9 @@ fn propagate_reverse_ad_recursive_body_emits_temporal_diagnostic() {
         bb.reverse_ad(body, seed)
     };
     let flat = try_build_flat_box(&arena, process).unwrap();
-    let err = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
-        .expect_err("rad through a Rec body must error");
-    assert!(
-        matches!(
-            err,
-            PropagateError::RadUnsupportedNode {
-                kind: "recursive-linear-transpose",
-                ..
-            }
-        ),
-        "expected recursive-linear-transpose, got: {err:?}"
-    );
-    let diag = PropagateError::RadUnsupportedNode {
-        node: arena.nil(),
-        kind: "recursive-linear-transpose",
-    }
-    .into_diagnostic();
-    assert!(
-        diag.notes.iter().any(|n| n.contains("phase-E1")),
-        "LTI recursive RAD diagnostic must point at phase E1"
-    );
+    let outs = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
+        .expect("seed-independent LTI recursive RAD should propagate");
+    assert_eq!(outs.len(), 2, "rad output bundle = [primal, zero-gradient]");
 }
 
 #[test]

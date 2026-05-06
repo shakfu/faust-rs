@@ -124,6 +124,11 @@ struct ReverseADTransform<'a> {
     visited: AHashSet<SigId>,
     /// Accumulated adjoint per visited node.
     adjoints: AHashMap<SigId, SigId>,
+    /// Phase-E1 LTI recursive projections whose cotangents were reached by
+    /// the public reverse sweep. They are recorded only when the requested
+    /// seeds are outside the recursive group, so current public behavior can
+    /// safely return zero seed gradients until parameter routing lands.
+    recursive_projection_frontier: Vec<(SigId, SigId)>,
 }
 
 impl<'a> ReverseADTransform<'a> {
@@ -138,7 +143,41 @@ impl<'a> ReverseADTransform<'a> {
             postorder: Vec::new(),
             visited: AHashSet::new(),
             adjoints: AHashMap::new(),
+            recursive_projection_frontier: Vec::new(),
         }
+    }
+
+    fn contains_seed(&self, root: SigId) -> bool {
+        fn walk(
+            arena: &TreeArena,
+            seed_set: &AHashSet<SigId>,
+            sig: SigId,
+            visited: &mut AHashSet<SigId>,
+        ) -> bool {
+            if seed_set.contains(&sig) {
+                return true;
+            }
+            if !visited.insert(sig) {
+                return false;
+            }
+            arena.node(sig).is_some_and(|node| {
+                node.children
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .any(|child| walk(arena, seed_set, child, visited))
+            })
+        }
+
+        walk(self.arena, &self.seed_set, root, &mut AHashSet::new())
+    }
+
+    fn is_seed_independent_lti_recursive_projection(&self, sig: SigId) -> bool {
+        let SigMatch::Proj(_, group) = match_sig(self.arena, sig) else {
+            return false;
+        };
+        classify_recursive_projection_rad_mode(self.arena, sig) == Some(RecRadMode::LinearTranspose)
+            && !self.contains_seed(group)
     }
 
     /// Returns the cached children that contribute adjoint signal flow for
@@ -237,6 +276,12 @@ impl<'a> ReverseADTransform<'a> {
                     node: sig,
                     kind: "delay-or-prefix",
                 });
+            }
+            SigMatch::Proj(_, _) if self.is_seed_independent_lti_recursive_projection(sig) => {
+                // Conservative E1 public bridge: the recursive primal is safe
+                // to keep as a leaf when none of the requested seeds occurs
+                // inside the recursive group. Seed gradients are therefore
+                // correctly zero until full recursive seed routing lands.
             }
             SigMatch::Proj(_, _) | SigMatch::Rec(_) => {
                 return Err(PropagateError::RadUnsupportedNode {
@@ -601,6 +646,9 @@ impl<'a> ReverseADTransform<'a> {
             }
             SigMatch::Output(_, inner) => {
                 self.add_adjoint(inner, y_bar);
+            }
+            SigMatch::Proj(_, _) if self.is_seed_independent_lti_recursive_projection(y) => {
+                self.recursive_projection_frontier.push((y, y_bar));
             }
             // The unsupported families were rejected in `active_children`
             // before they reached postorder. Reaching them here means a
@@ -982,8 +1030,9 @@ pub(super) fn generate_rad_signals(
 mod tests {
     use super::{
         build_lti_recursive_adjoint_group, build_lti_recursive_adjoint_projection,
-        build_lti_recursive_adjoint_projections,
+        build_lti_recursive_adjoint_projections, generate_rad_signals,
     };
+    use crate::PropagateError;
     use signals::{SigBuilder, SigId, SigMatch, match_sig};
     use tlib::{
         TreeArena, de_bruijn_rec, de_bruijn_ref, list_to_vec, match_de_bruijn_rec, vec_to_list,
@@ -1151,5 +1200,34 @@ mod tests {
         let branches = list_to_vec(&arena, transposed_body).expect("transposed body list");
         assert!(dump_contains_real(&arena, branches[0], 11.0));
         assert!(dump_contains_real(&arena, branches[1], 13.0));
+    }
+
+    #[test]
+    fn active_seed_inside_lti_recursion_still_reports_phase_e1() {
+        let mut arena = TreeArena::new();
+        let ref1 = de_bruijn_ref(&mut arena, 1);
+        let input = SigBuilder::new(&mut arena).input(0);
+        let group = {
+            let mut b = SigBuilder::new(&mut arena);
+            let prev = b.proj(0, ref1);
+            let half = b.real(0.5);
+            let feedback = b.mul(half, prev);
+            let branch = b.add(input, feedback);
+            rec_group(&mut arena, &[branch])
+        };
+        let primal = SigBuilder::new(&mut arena).proj(0, group);
+
+        let err = generate_rad_signals(&mut arena, &[primal], &[input])
+            .expect_err("active recursive input seed should remain gated");
+        assert!(
+            matches!(
+                err,
+                PropagateError::RadUnsupportedNode {
+                    kind: "recursive-linear-transpose",
+                    ..
+                }
+            ),
+            "expected recursive-linear-transpose, got: {err:?}"
+        );
     }
 }
