@@ -259,11 +259,33 @@ The conversion `IirFilter -> LinearRecurrence` is deterministic:
 - the first equation contains the input and feedback coefficients;
 - remaining equations shift previous slots forward.
 
+## Porting Strategy
+
+The goal is a complete Rust port of the C++ `sigFIR`/`sigIIR` algebra, not a
+RAD-only subset. The narrowness must be in how the new module is connected to
+production consumers, not in the module's ambition.
+
+This distinction matters:
+
+- the algebraic module should cover the full C++ helper surface with parity
+  tests and documented invariants;
+- RAD should initially consume only the LTI cases whose transpose semantics are
+  already specified;
+- FIR/codegen should initially consume only the shapes where emitted-code parity
+  and CPU behavior have been measured;
+- broader Z-transform-guided rewrites should be enabled only after structural
+  and runtime parity tests are in place.
+
+That gives `faust-rs` one reusable filter algebra foundation for RAD, symbolic
+rewriting, and optimized code generation, while avoiding a single large switch
+that changes every downstream pipeline at once.
+
 ## Implementation Plan
 
-### Phase L1: C++-Parity Reconstruction
+### Phase L1: Full C++-Parity Filter Algebra Port
 
-Add a Rust FIR/IIR reconstruction module that mirrors the C++ ordering:
+Add a Rust FIR/IIR algebra module that ports the C++ helper surface around
+`sigFIR` and `sigIIR`. It should include the reconstruction ordering:
 
 ```text
 reveal_sum
@@ -271,16 +293,28 @@ reveal_sum
   -> reveal_iir
 ```
 
+and the full helper behavior needed to manipulate the resulting forms:
+
+- `delaySigFIR`, `addSigFIR`, `subSigFIR`, `negSigFIR`, `mulSigFIR`,
+  `divSigFIR`, `simplifyFIR`, `combineFIRs`, and `convertFIR2Sig`;
+- `proj2SigIIR`, `delaySigIIR`, `addSigIIR`, `subSigIIR`, `mulSigIIR`,
+  `divSigIIR`, and `embeddedIIR`;
+- coefficient normalization, zero-tap removal, and degenerate fallbacks such as
+  zero or plain gain;
+- sign preservation for subtraction-based library feedback terms.
+
 Pass criteria:
 
-- reconstruct simple constant-delay FIRs;
-- combine FIR terms with the same base signal;
-- reconstruct single-projection IIRs from recursive sums containing one FIR over
-  the concerned projection;
-- preserve coefficient sign exactly;
-- keep unsupported cases as raw signals rather than guessing.
-
-Initial users should be tests and RAD, not the whole production pipeline.
+- every ported helper has focused Rust unit tests with C++ provenance in
+  Rustdoc;
+- structural tests cover FIR delay shifting, compatible FIR addition,
+  incompatible FIR fallback, IIR delay shifting, IIR addition/subtraction,
+  IIR scaling, and `embeddedIIR`;
+- differential tests compare selected reconstructed signal dumps or generated
+  FIR behavior against the C++ reference;
+- unsupported cases stay explicit and auditable, rather than silently guessing;
+- the module is available to RAD/codegen behind explicit integration points, not
+  implicitly applied to the whole production pipeline on day one.
 
 ### Phase L2: RAD E1 Input Canonicalization
 
@@ -400,8 +434,10 @@ coefficients through negation.
 
 ## Risks
 
-- C++ `sigFIR`/`sigIIR` are permissive helper nodes; copying all behavior at
-  once would add too much surface area. Start with the subset needed by RAD E1.
+- C++ `sigFIR`/`sigIIR` are permissive helper nodes whose behavior affects
+  algebra, simplification, and code-generation cost. They should be ported as a
+  complete, well-tested module, but their use in RAD and backend pipelines must
+  be enabled progressively behind explicit pass gates.
 - Sign conventions must be tested carefully. Faust library definitions often
   express feedback with subtraction while IIR coefficient vectors store the
   post-simplification signed terms.
