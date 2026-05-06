@@ -326,6 +326,47 @@ Pass criteria:
 - diagnostics explain when a filter is rejected because of coefficient
   variability, nonlinear feedback, or unsupported seed identity.
 
+### Phase L4b: Simple Affine Seed Provenance
+
+Adopt the simple affine provenance option explicitly for the first seed-identity
+extension. RAD should recognize coefficient expressions of the form:
+
+```text
+derived_seed = a * seed + b
+```
+
+where `a` and `b` are independent of the seed and are constant/LTI for the
+current E1 block. The gradient remapping is:
+
+```text
+dJ/dseed += a * dJ/dderived_seed
+```
+
+The initial accepted surface is deliberately small:
+
+- `seed`;
+- `-seed`;
+- `seed + const`;
+- `const + seed`;
+- `seed - const`;
+- `const - seed`;
+- `const * seed`;
+- `seed * const`;
+- `seed / const`.
+
+The first implementation must reject, not approximate, non-affine provenance:
+
+- `seed * seed`;
+- `sin(seed)`, `exp(seed)`, or any nonlinear primitive over the seed;
+- `1 / seed` or `const / seed`;
+- branches/selects controlled by the seed;
+- temporal forms such as `delay(seed)`;
+- sample-rate or UI-varying affine coefficients in the E1/LTI path.
+
+This choice covers the library feedback-coefficient rewrite `a1 -> -a1`
+without requiring a general symbolic differentiation pass for parameter
+expressions.
+
 ### Phase L5: Codegen Use
 
 Teach the Rust FIR/backend path to lower structured filters directly when that
@@ -348,16 +389,14 @@ Library forms such as `tf21` and `tf22t` can rewrite a coefficient `a1` as
 not source-level algebraic provenance. Therefore the transformed coefficient may
 no longer be recognized as the requested seed.
 
-This needs a separate decision:
+The chosen first policy is to preserve simple affine provenance only. That
+means `-seed`, `2 * seed`, and `1 - seed` remain connected to the requested
+seed, with the corresponding affine derivative applied to the gradient. General
+parameter-expression differentiation remains out of scope for this phase.
 
-- keep identity-only seeds and document that users must seed the exact
-  coefficient expression consumed by the filter;
-- preserve simple affine provenance such as `-seed`;
-- or add a parameter-binding layer that tracks source-level coefficient names
-  through algebraic rewrites.
-
-This decision should be made before promising full standard-library biquad
-training support.
+This decision must be implemented before promising standard-library direct-form
+biquad training support, because those forms commonly rewrite feedback
+coefficients through negation.
 
 ## Risks
 
@@ -386,6 +425,6 @@ RAD:
    - `x + c*x@1 -> FIR[x, 1, c]`;
    - `y = x - p*y@1 - q*y@2 -> IIR[y, x, -p, -q]`.
 3. Convert the extracted second-order IIR to companion state-space.
-4. Feed that state-space view into the existing E1 transpose tests before
+4. Add simple affine seed-provenance tests for `-seed` and `const - seed`.
+5. Feed that state-space view into the existing E1 transpose tests before
    exposing new public `rad(...)` support.
-
