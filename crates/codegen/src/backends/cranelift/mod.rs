@@ -1479,8 +1479,8 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
                 var,
                 upper,
                 body,
-                is_reverse: false,
-            } => self.lower_simple_for(var, upper, body),
+                is_reverse,
+            } => self.lower_simple_for(var, upper, body, is_reverse),
             FirMatch::StoreTable {
                 name,
                 access: AccessType::Stack,
@@ -1547,33 +1547,49 @@ impl<'a, 'b, 'c> ComputeLowering<'a, 'b, 'c> {
         }
     }
 
-    /// Lowers `SimpleForLoop` (`for i in 0..upper`) in forward direction.
+    /// Lowers `SimpleForLoop` (`for i in 0..upper`) in forward or reverse direction.
     fn lower_simple_for(
         &mut self,
         var: String,
         upper: FirId,
         body: FirId,
+        is_reverse: bool,
     ) -> Result<(), LoweringError> {
         let upper_v = self.lower_expr(upper, Some(&FirType::Int32))?.value();
         let zero = self.fb.ins().iconst(types::I32, 0);
         let one = self.fb.ins().iconst(types::I32, 1);
+        let init = if is_reverse {
+            self.fb.ins().isub(upper_v, one)
+        } else {
+            zero
+        };
 
         let header = self.fb.create_block();
         let body_block = self.fb.create_block();
         let exit = self.fb.create_block();
         self.fb.append_block_param(header, types::I32);
-        self.fb.ins().jump(header, &[zero]);
+        self.fb.ins().jump(header, &[init]);
 
         self.fb.switch_to_block(header);
         let i_val = self.fb.block_params(header)[0];
-        let cond = self.fb.ins().icmp(IntCC::SignedLessThan, i_val, upper_v);
+        let cond = if is_reverse {
+            self.fb
+                .ins()
+                .icmp(IntCC::SignedGreaterThanOrEqual, i_val, zero)
+        } else {
+            self.fb.ins().icmp(IntCC::SignedLessThan, i_val, upper_v)
+        };
         self.fb.ins().brif(cond, body_block, &[], exit, &[]);
 
         self.fb.switch_to_block(body_block);
         let prev = self.vars.insert(var.clone(), LoweredExpr::Scalar(i_val));
         self.lower_stmt(body)?;
         if !is_return_terminated(self.fb) {
-            let next = self.fb.ins().iadd(i_val, one);
+            let next = if is_reverse {
+                self.fb.ins().isub(i_val, one)
+            } else {
+                self.fb.ins().iadd(i_val, one)
+            };
             self.fb.ins().jump(header, &[next]);
         }
         if let Some(old) = prev {
@@ -3024,15 +3040,17 @@ fn subset_stmt_gap_reason(
                     )
                 })
             }),
-        FirMatch::SimpleForLoop {
-            upper,
-            body,
-            is_reverse: false,
-            ..
-        } => subset_expr_gap_reason(store, upper, extern_data_symbols, extern_function_symbols)
-            .or_else(|| {
-                subset_stmt_gap_reason(store, body, extern_data_symbols, extern_function_symbols)
-            }),
+        FirMatch::SimpleForLoop { upper, body, .. } => {
+            subset_expr_gap_reason(store, upper, extern_data_symbols, extern_function_symbols)
+                .or_else(|| {
+                    subset_stmt_gap_reason(
+                        store,
+                        body,
+                        extern_data_symbols,
+                        extern_function_symbols,
+                    )
+                })
+        }
         FirMatch::ForLoop {
             init,
             end,

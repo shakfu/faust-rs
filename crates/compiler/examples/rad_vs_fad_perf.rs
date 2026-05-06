@@ -249,6 +249,44 @@ chain(x) = ((((c0 + c1) * c2 + c3) * c4 + c5) * x);
     (fad, rad)
 }
 
+fn shape_lti_one_pole_recursive() -> (Run, Run) {
+    let common = r#"
+p = 0.5;
+core = _ : + ~ *(p);
+"#;
+    let fad = run_once(
+        "fad-lti-one-pole-recursive",
+        format!("{common}\nprocess = fad(core, p);\n"),
+        1,
+    );
+    let rad = run_once(
+        "rad-lti-one-pole-recursive",
+        format!("{common}\nprocess = rad(core, p);\n"),
+        1,
+    );
+    (fad, rad)
+}
+
+fn shape_lti_state_space_recursive() -> (Run, Run) {
+    let common = r#"
+import("stdfaust.lib");
+p = 0.5;
+q = 0.25;
+core = (ro.interleave(2, 2) : (+, +)) ~ ((*(p), *(q)) : ro.cross(2));
+"#;
+    let fad = run_once(
+        "fad-lti-state-space-recursive",
+        format!("{common}\nprocess = fad((_, _) : core, (p, q));\n"),
+        2,
+    );
+    let rad = run_once(
+        "rad-lti-state-space-recursive",
+        format!("{common}\nprocess = rad((_, _) : core, (p, q));\n"),
+        2,
+    );
+    (fad, rad)
+}
+
 fn main() {
     println!("# RAD vs FAD performance comparison");
     println!(
@@ -285,10 +323,27 @@ fn main() {
         &rad,
     );
 
+    let (fad, rad) = shape_lti_one_pole_recursive();
+    print_pair(
+        "strict-LTI one-pole recursion  (1 input, 1 literal seed)",
+        &fad,
+        &rad,
+    );
+
+    let (fad, rad) = shape_lti_state_space_recursive();
+    print_pair(
+        "strict-LTI coupled state-space recursion  (2 inputs, 2 literal seeds)",
+        &fad,
+        &rad,
+    );
+
     println!("\n## Notes");
     println!("- FAD output bundle is [primal, t_seed0, …, t_seed{{N-1}}] interleaved per primal.");
     println!("- RAD output bundle is [primals…, gradient(seed_0), …, gradient(seed_{{N-1}})].");
     println!(
         "- The deep multiplicative chain is the canonical adjoint-sum-growth\n  stress case (plan §17 risk #2). RAD has to accumulate one chain rule\n  contribution per seed at every fold; without simplification, the\n  emitted signal IR can grow super-linearly in the seed count."
+    );
+    println!(
+        "- The recursive cases use literal strict-LTI coefficients, which are\n  accepted by the current E1 transpose. UI/input-controlled recursive\n  coefficients are LTV and remain outside this phase."
     );
 }

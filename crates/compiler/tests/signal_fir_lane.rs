@@ -4,9 +4,19 @@
 //! - Exercises public APIs and structural invariants for the targeted module.
 //! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
+use codegen::backends::cranelift::{CraneliftOptions, generate_cranelift_module};
 use codegen::backends::interp::{FbcDspInstance, InterpOptions, read_fbc};
 use compiler::{Compiler, RealType, SignalFirLane};
+use std::fs;
 use std::path::PathBuf;
+
+const RAD_LTI_STATE_SPACE_SOURCE: &str = r#"
+import("stdfaust.lib");
+p = 0.5;
+q = 0.25;
+core = (ro.interleave(2, 2) : (+, +)) ~ ((*(p), *(q)) : ro.cross(2));
+process = rad((_, _) : core, (p, q));
+"#;
 
 fn corpus_path(file: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -15,6 +25,16 @@ fn corpus_path(file: &str) -> PathBuf {
         .join("tests")
         .join("corpus")
         .join(file)
+}
+
+fn temp_source_path(stem: &str, source: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "faust-rs-signal-fir-lane-{stem}-{}.dsp",
+        std::process::id()
+    ));
+    fs::write(&path, source)
+        .unwrap_or_else(|e| panic!("failed to write temporary DSP {}: {e}", path.display()));
+    path
 }
 
 #[test]
@@ -690,6 +710,66 @@ fn fastlane_c_emits_valid_infinity_literal_for_overflowed_float_constant() {
     assert!(
         !c.contains("inf.0f"),
         "backend must not emit invalid `inf.0f` C literals"
+    );
+}
+
+#[test]
+fn fastlane_backends_accept_lti_recursive_rad_state_space() {
+    let path = temp_source_path("rad-lti-state-space", RAD_LTI_STATE_SPACE_SOURCE);
+    let compiler = Compiler::new();
+
+    let cpp = compiler
+        .compile_file_default_to_cpp_with_lane(
+            &path,
+            &codegen::backends::cpp::CppOptions::default(),
+            SignalFirLane::TransformFastLane,
+        )
+        .unwrap_or_else(|e| panic!("rad_lti_state_space.dsp C++ lowering failed: {e}"));
+    assert!(cpp.contains("virtual int getNumInputs()"));
+    assert!(cpp.contains("virtual int getNumOutputs()"));
+    assert!(cpp.contains("return 2;"));
+    assert!(cpp.contains("return 4;"));
+    assert!(
+        cpp.contains("for (int i0 = (count) - 1; i0 >= 0; i0 = i0 - 1)"),
+        "C++ backend should emit the reverse-time adjoint loop"
+    );
+    assert!(
+        cpp.contains("output2[i0]") && cpp.contains("output3[i0]"),
+        "C++ backend should expose both per-sample seed-gradient contribution lanes"
+    );
+
+    let c = compiler
+        .compile_file_default_to_c_with_lane(
+            &path,
+            &codegen::backends::c::COptions::default(),
+            SignalFirLane::TransformFastLane,
+        )
+        .unwrap_or_else(|e| panic!("rad_lti_state_space.dsp C lowering failed: {e}"));
+    assert!(c.contains("int getNumInputsmydsp("));
+    assert!(c.contains("int getNumOutputsmydsp("));
+    assert!(c.contains("return 2;"));
+    assert!(c.contains("return 4;"));
+    assert!(
+        c.contains("for (int i0 = (count) - 1; i0 >= 0; i0 = i0 - 1)"),
+        "C backend should emit the reverse-time adjoint loop"
+    );
+    assert!(
+        c.contains("output2[i0]") && c.contains("output3[i0]"),
+        "C backend should expose both per-sample seed-gradient contribution lanes"
+    );
+
+    let fir = compiler
+        .compile_file_to_fir_with_lane(&path, &[], SignalFirLane::TransformFastLane)
+        .unwrap_or_else(|e| panic!("rad_lti_state_space.dsp FIR lowering failed: {e}"));
+    let options = CraneliftOptions {
+        fail_on_subset_gap: true,
+        ..CraneliftOptions::default()
+    };
+    let module = generate_cranelift_module(&fir.store, fir.module, &options)
+        .unwrap_or_else(|e| panic!("rad_lti_state_space.dsp Cranelift lowering failed: {e}"));
+    assert!(
+        module.compute_body_lowered(),
+        "Cranelift backend should lower the reverse-time adjoint loop"
     );
 }
 

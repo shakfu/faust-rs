@@ -88,6 +88,35 @@ fn run_interp_temp_source(stem: &str, source: &str, frame_count: usize) -> Vec<V
 }
 
 fn run_interp_temp_source_inner(stem: &str, source: &str, frame_count: usize) -> Vec<Vec<f32>> {
+    run_interp_temp_source_with_inputs_inner(stem, source, &[], frame_count)
+}
+
+fn run_interp_temp_source_with_inputs(
+    stem: &str,
+    source: &str,
+    inputs: &[Vec<f32>],
+    frame_count: usize,
+) -> Vec<Vec<f32>> {
+    let stem = stem.to_owned();
+    let source = source.to_owned();
+    let inputs = inputs.to_vec();
+    std::thread::Builder::new()
+        .name(format!("rad-runtime-{stem}"))
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            run_interp_temp_source_with_inputs_inner(&stem, &source, &inputs, frame_count)
+        })
+        .expect("spawn rad-runtime worker")
+        .join()
+        .expect("rad-runtime worker thread should finish")
+}
+
+fn run_interp_temp_source_with_inputs_inner(
+    stem: &str,
+    source: &str,
+    inputs: &[Vec<f32>],
+    frame_count: usize,
+) -> Vec<Vec<f32>> {
     let unique_id = NEXT_TEMP_DSP_ID.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
         "faust-rs-rad-{stem}-{}-{unique_id}.dsp",
@@ -109,10 +138,24 @@ fn run_interp_temp_source_inner(stem: &str, source: &str, frame_count: usize) ->
     let mut instance = FbcDspInstance::new(&mut factory);
     instance.init(48_000);
     let num_outputs = usize::try_from(instance.get_num_outputs()).expect("non-negative outputs");
+    let num_inputs = usize::try_from(instance.get_num_inputs()).expect("non-negative inputs");
+    assert_eq!(
+        inputs.len(),
+        num_inputs,
+        "{stem}: input fixture arity must match compiled DSP input count"
+    );
+    for (index, input) in inputs.iter().enumerate() {
+        assert_eq!(
+            input.len(),
+            frame_count,
+            "{stem}: input lane {index} length must match frame count"
+        );
+    }
     let mut outputs = vec![vec![0.0_f32; frame_count]; num_outputs];
+    let input_slices: Vec<&[f32]> = inputs.iter().map(Vec::as_slice).collect();
     let mut output_slices: Vec<&mut [f32]> = outputs.iter_mut().map(Vec::as_mut_slice).collect();
     instance
-        .try_compute(frame_count as i32, &[], &mut output_slices)
+        .try_compute(frame_count as i32, &input_slices, &mut output_slices)
         .unwrap_or_else(|e| panic!("{} interp execution failed: {e}", path.display()));
     let _ = fs::remove_file(&path);
     outputs
@@ -334,6 +377,60 @@ process = rad((2 : + ~ *(p)), p);
 }
 
 #[test]
+fn fastlane_interp_audio_one_pole_lti_recursive_rad_matches_closed_form_contributions() {
+    let input = vec![0.25, -0.5, 1.0, 0.75, -0.25, 0.5];
+    let frame_count = input.len();
+    let outputs = run_interp_temp_source_with_inputs(
+        "rad-audio-one-pole-lti-recursive-feedback-coeff",
+        r#"
+p = 0.5;
+process = rad((_ : + ~ *(p)), p);
+"#,
+        std::slice::from_ref(&input),
+        frame_count,
+    );
+    assert_eq!(
+        outputs.len(),
+        2,
+        "RAD audio one-pole fixture layout must be [y, dp]"
+    );
+
+    let p = 0.5_f32;
+    let mut primals = Vec::with_capacity(frame_count);
+    let mut previous_primal = 0.0_f32;
+    for x in &input {
+        let primal = x + p * previous_primal;
+        primals.push(primal);
+        previous_primal = primal;
+    }
+
+    let mut cotangents = vec![0.0_f32; frame_count];
+    let mut next_cotangent = 0.0_f32;
+    for frame in (0..frame_count).rev() {
+        let cotangent = 1.0 + p * next_cotangent;
+        cotangents[frame] = cotangent;
+        next_cotangent = cotangent;
+    }
+
+    for frame in 0..frame_count {
+        assert_close(
+            outputs[0][frame],
+            primals[frame],
+            1.0e-6,
+            &format!("rad_audio_one_pole_lti_recursive primal frame {frame}"),
+        );
+
+        let previous_state = if frame == 0 { 0.0 } else { primals[frame - 1] };
+        assert_close(
+            outputs[1][frame],
+            cotangents[frame] * previous_state,
+            1.0e-6,
+            &format!("rad_audio_one_pole_lti_recursive dp frame {frame}"),
+        );
+    }
+}
+
+#[test]
 fn fastlane_interp_multi_output_lti_recursive_rad_matches_closed_form_contributions() {
     let frame_count = 6;
     let outputs = run_interp_temp_source(
@@ -389,6 +486,84 @@ process = rad(((2 : + ~ *(p)), (3 : + ~ *(q))), (p, q));
                 &format!("rad_multi_output_lti_recursive d{label} frame {frame}"),
             );
         }
+    }
+}
+
+#[test]
+fn fastlane_interp_audio_state_space_lti_recursive_rad_matches_closed_form_contributions() {
+    let drive = vec![0.25, -0.5, 1.0, 0.75, -0.25, 0.5];
+    let zero = vec![0.0; drive.len()];
+    let frame_count = drive.len();
+    let outputs = run_interp_temp_source_with_inputs(
+        "rad-audio-state-space-lti-recursive-feedback-coeff",
+        r#"
+import("stdfaust.lib");
+p = 0.5;
+q = 0.25;
+core = (ro.interleave(2, 2) : (+, +)) ~ ((*(p), *(q)) : ro.cross(2));
+process = rad((_, _) : core, (p, q));
+"#,
+        &[drive.clone(), zero],
+        frame_count,
+    );
+    assert_eq!(
+        outputs.len(),
+        4,
+        "RAD audio state-space fixture layout must be [y0, y1, dp, dq]"
+    );
+
+    let p = 0.5_f32;
+    let q = 0.25_f32;
+    let mut y0 = vec![0.0_f32; frame_count];
+    let mut y1 = vec![0.0_f32; frame_count];
+    let mut prev0 = 0.0_f32;
+    let mut prev1 = 0.0_f32;
+    for frame in 0..frame_count {
+        y0[frame] = drive[frame] + q * prev1;
+        y1[frame] = p * prev0;
+        prev0 = y0[frame];
+        prev1 = y1[frame];
+    }
+
+    let mut lambda0 = vec![0.0_f32; frame_count];
+    let mut lambda1 = vec![0.0_f32; frame_count];
+    let mut next0 = 0.0_f32;
+    let mut next1 = 0.0_f32;
+    for frame in (0..frame_count).rev() {
+        lambda0[frame] = 1.0 + p * next1;
+        lambda1[frame] = 1.0 + q * next0;
+        next0 = lambda0[frame];
+        next1 = lambda1[frame];
+    }
+
+    for frame in 0..frame_count {
+        assert_close(
+            outputs[0][frame],
+            y0[frame],
+            1.0e-6,
+            &format!("rad_audio_state_space_lti_recursive y0 frame {frame}"),
+        );
+        assert_close(
+            outputs[1][frame],
+            y1[frame],
+            1.0e-6,
+            &format!("rad_audio_state_space_lti_recursive y1 frame {frame}"),
+        );
+
+        let prev0 = if frame == 0 { 0.0 } else { y0[frame - 1] };
+        let prev1 = if frame == 0 { 0.0 } else { y1[frame - 1] };
+        assert_close(
+            outputs[2][frame],
+            lambda1[frame] * prev0,
+            1.0e-6,
+            &format!("rad_audio_state_space_lti_recursive dp frame {frame}"),
+        );
+        assert_close(
+            outputs[3][frame],
+            lambda0[frame] * prev1,
+            1.0e-6,
+            &format!("rad_audio_state_space_lti_recursive dq frame {frame}"),
+        );
     }
 }
 
