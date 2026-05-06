@@ -334,6 +334,65 @@ process = rad((2 : + ~ *(p)), p);
 }
 
 #[test]
+fn fastlane_interp_multi_output_lti_recursive_rad_matches_closed_form_contributions() {
+    let frame_count = 6;
+    let outputs = run_interp_temp_source(
+        "rad-multi-output-lti-recursive-feedback-coeff",
+        r#"
+p = 0.5;
+q = 0.25;
+process = rad(((2 : + ~ *(p)), (3 : + ~ *(q))), (p, q));
+"#,
+        frame_count,
+    );
+    assert_eq!(
+        outputs.len(),
+        4,
+        "RAD recursive fixture layout must be [y0, y1, dp, dq]"
+    );
+
+    let cases = [
+        (0usize, 2usize, 0.5_f32, 2.0_f32, "p"),
+        (1usize, 3usize, 0.25_f32, 3.0_f32, "q"),
+    ];
+    for (primal_lane, gradient_lane, coeff, drive, label) in cases {
+        let mut primals = Vec::with_capacity(frame_count);
+        let mut previous_primal = 0.0_f32;
+        for _ in 0..frame_count {
+            let primal = drive + coeff * previous_primal;
+            primals.push(primal);
+            previous_primal = primal;
+        }
+
+        let mut cotangents = vec![0.0_f32; frame_count];
+        let mut next_cotangent = 0.0_f32;
+        for frame in (0..frame_count).rev() {
+            let cotangent = 1.0 + coeff * next_cotangent;
+            cotangents[frame] = cotangent;
+            next_cotangent = cotangent;
+        }
+
+        for frame in 0..frame_count {
+            assert_close(
+                outputs[primal_lane][frame],
+                primals[frame],
+                1.0e-6,
+                &format!("rad_multi_output_lti_recursive {label} primal frame {frame}"),
+            );
+
+            let previous_state = if frame == 0 { 0.0 } else { primals[frame - 1] };
+            let gradient_contribution = cotangents[frame] * previous_state;
+            assert_close(
+                outputs[gradient_lane][frame],
+                gradient_contribution,
+                1.0e-6,
+                &format!("rad_multi_output_lti_recursive d{label} frame {frame}"),
+            );
+        }
+    }
+}
+
+#[test]
 fn rad_polynomial_two_seeds_matches_central_difference() {
     fn rad_source(seeds: &[f32]) -> String {
         let (a, b) = (seeds[0], seeds[1]);
