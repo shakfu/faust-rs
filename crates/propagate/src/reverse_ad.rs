@@ -888,6 +888,70 @@ pub(super) fn build_lti_recursive_adjoint_projection(
     Ok(Some(SigBuilder::new(arena).proj(slot, reverse_group)))
 }
 
+/// Groups recursive projection cotangents and returns adjoint projections.
+///
+/// This is the interface the public reverse sweep needs before replacing the
+/// `recursive-linear-transpose` diagnostic: every pair is a primal recursive
+/// projection and the cotangent accumulated for that projection. Eligible
+/// projections that read the same LTI `DEBRUIJNREC` are lowered through one
+/// shared `ReverseTimeRec` group, and the result preserves the input order as
+/// `(primal_projection, adjoint_projection)` pairs. Non-projection or
+/// non-eligible entries are ignored so callers can feed a mixed frontier and
+/// keep the existing diagnostics for unsupported recursive families.
+#[allow(dead_code)]
+pub(super) fn build_lti_recursive_adjoint_projections(
+    arena: &mut TreeArena,
+    projection_cotangents: &[(SigId, SigId)],
+) -> Result<Vec<(SigId, SigId)>, TransposeAdError> {
+    struct PendingGroup {
+        group: SigId,
+        slot_cotangents: Vec<(i32, SigId)>,
+        projections: Vec<(SigId, i32)>,
+    }
+
+    let mut groups = Vec::<PendingGroup>::new();
+    let mut group_indices = AHashMap::<SigId, usize>::new();
+    for &(projection, cotangent) in projection_cotangents {
+        let SigMatch::Proj(slot, group) = match_sig(arena, projection) else {
+            continue;
+        };
+        if classify_recursive_projection_rad_mode(arena, projection)
+            != Some(RecRadMode::LinearTranspose)
+        {
+            continue;
+        }
+        let index = match group_indices.get(&group).copied() {
+            Some(index) => index,
+            None => {
+                let index = groups.len();
+                group_indices.insert(group, index);
+                groups.push(PendingGroup {
+                    group,
+                    slot_cotangents: Vec::new(),
+                    projections: Vec::new(),
+                });
+                index
+            }
+        };
+        groups[index].slot_cotangents.push((slot, cotangent));
+        groups[index].projections.push((projection, slot));
+    }
+
+    let mut out = Vec::new();
+    for pending in groups {
+        let Some(reverse_group) =
+            build_lti_recursive_adjoint_group(arena, pending.group, &pending.slot_cotangents)?
+        else {
+            continue;
+        };
+        for (projection, slot) in pending.projections {
+            let adjoint = SigBuilder::new(arena).proj(slot, reverse_group);
+            out.push((projection, adjoint));
+        }
+    }
+    Ok(out)
+}
+
 /// Public entry point for `rad(expr, seeds)` propagation.
 pub(super) fn generate_rad_signals(
     arena: &mut TreeArena,
@@ -916,7 +980,10 @@ pub(super) fn generate_rad_signals(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_lti_recursive_adjoint_group, build_lti_recursive_adjoint_projection};
+    use super::{
+        build_lti_recursive_adjoint_group, build_lti_recursive_adjoint_projection,
+        build_lti_recursive_adjoint_projections,
+    };
     use signals::{SigBuilder, SigId, SigMatch, match_sig};
     use tlib::{
         TreeArena, de_bruijn_rec, de_bruijn_ref, list_to_vec, match_de_bruijn_rec, vec_to_list,
@@ -1034,5 +1101,55 @@ mod tests {
         assert!(dump_contains_real(&arena, branches[0], 2.0));
         assert!(dump_contains_real(&arena, branches[0], 3.0));
         assert!(dump_contains_real(&arena, branches[1], 7.0));
+    }
+
+    #[test]
+    fn lti_recursive_projection_frontier_shares_reverse_group() {
+        let mut arena = TreeArena::new();
+        let ref1 = de_bruijn_ref(&mut arena, 1);
+        let group = {
+            let mut b = SigBuilder::new(&mut arena);
+            let input0 = b.input(0);
+            let input1 = b.input(1);
+            let prev0 = b.proj(0, ref1);
+            let prev1 = b.proj(1, ref1);
+            let half = b.real(0.5);
+            let quarter = b.real(0.25);
+            let feedback0 = b.mul(half, prev0);
+            let feedback1 = b.mul(quarter, prev1);
+            let branch0 = b.add(input0, feedback0);
+            let branch1 = b.add(input1, feedback1);
+            rec_group(&mut arena, &[branch0, branch1])
+        };
+        let projection0 = SigBuilder::new(&mut arena).proj(0, group);
+        let projection1 = SigBuilder::new(&mut arena).proj(1, group);
+        let c0 = SigBuilder::new(&mut arena).real(11.0);
+        let c1 = SigBuilder::new(&mut arena).real(13.0);
+
+        let adjoints = build_lti_recursive_adjoint_projections(
+            &mut arena,
+            &[(projection0, c0), (projection1, c1)],
+        )
+        .expect("frontier should lower");
+
+        assert_eq!(adjoints.len(), 2);
+        assert_eq!(adjoints[0].0, projection0);
+        assert_eq!(adjoints[1].0, projection1);
+        let SigMatch::Proj(0, reverse_group0) = match_sig(&arena, adjoints[0].1) else {
+            panic!("first adjoint should project slot 0");
+        };
+        let SigMatch::Proj(1, reverse_group1) = match_sig(&arena, adjoints[1].1) else {
+            panic!("second adjoint should project slot 1");
+        };
+        assert_eq!(
+            reverse_group0, reverse_group1,
+            "frontier projections from the same recursion must share one reverse-time group"
+        );
+        let SigMatch::ReverseTimeRec(transposed_body) = match_sig(&arena, reverse_group0) else {
+            panic!("shared group should be ReverseTimeRec");
+        };
+        let branches = list_to_vec(&arena, transposed_body).expect("transposed body list");
+        assert!(dump_contains_real(&arena, branches[0], 11.0));
+        assert!(dump_contains_real(&arena, branches[1], 13.0));
     }
 }
