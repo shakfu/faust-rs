@@ -7,16 +7,7 @@
 use codegen::backends::cranelift::{CraneliftOptions, generate_cranelift_module};
 use codegen::backends::interp::{FbcDspInstance, InterpOptions, read_fbc};
 use compiler::{Compiler, RealType, SignalFirLane};
-use std::fs;
 use std::path::PathBuf;
-
-const RAD_LTI_STATE_SPACE_SOURCE: &str = r#"
-import("stdfaust.lib");
-p = 0.5;
-q = 0.25;
-core = (ro.interleave(2, 2) : (+, +)) ~ ((*(p), *(q)) : ro.cross(2));
-process = rad((_, _) : core, (p, q));
-"#;
 
 fn corpus_path(file: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -25,16 +16,6 @@ fn corpus_path(file: &str) -> PathBuf {
         .join("tests")
         .join("corpus")
         .join(file)
-}
-
-fn temp_source_path(stem: &str, source: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "faust-rs-signal-fir-lane-{stem}-{}.dsp",
-        std::process::id()
-    ));
-    fs::write(&path, source)
-        .unwrap_or_else(|e| panic!("failed to write temporary DSP {}: {e}", path.display()));
-    path
 }
 
 #[test]
@@ -715,7 +696,7 @@ fn fastlane_c_emits_valid_infinity_literal_for_overflowed_float_constant() {
 
 #[test]
 fn fastlane_backends_accept_lti_recursive_rad_state_space() {
-    let path = temp_source_path("rad-lti-state-space", RAD_LTI_STATE_SPACE_SOURCE);
+    let path = corpus_path("rad_lti_recursive_state_space.dsp");
     let compiler = Compiler::new();
 
     let cpp = compiler

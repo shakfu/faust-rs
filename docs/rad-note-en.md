@@ -317,10 +317,11 @@ parity tests in `crates/compiler/tests/rad_runtime.rs`.
 - **Backend parity** ([crates/compiler/tests/signal_fir_lane.rs](crates/compiler/tests/signal_fir_lane.rs))
   — C, C++, and Cranelift lowering of the reverse-time loop for a coupled
   strict-LTI recursive RAD state-space form.
-- **Corpus** ([tests/corpus/rad_*.dsp](tests/corpus)) — eight fixtures
+- **Corpus** ([tests/corpus/rad_*.dsp](tests/corpus)) — fixtures
   pin the source-level shape of each contract: arithmetic, trig
   composition, multi-seed, multi-output, repeated/absent seeds,
-  read-only table indexing, plus the three error fixtures
+  read-only table indexing, accepted strict-LTI recursive E1 forms,
+  plus the three error fixtures
   (`err_rad_zero_body`, `err_rad_zero_seed`,
   `err_rad_delay_temporal_unsupported`).
 

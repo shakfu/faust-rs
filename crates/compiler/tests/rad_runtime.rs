@@ -380,12 +380,11 @@ process = rad((2 : + ~ *(p)), p);
 fn fastlane_interp_audio_one_pole_lti_recursive_rad_matches_closed_form_contributions() {
     let input = vec![0.25, -0.5, 1.0, 0.75, -0.25, 0.5];
     let frame_count = input.len();
+    let source = fs::read_to_string(corpus_path("rad_lti_recursive_one_pole.dsp"))
+        .expect("read rad_lti_recursive_one_pole fixture");
     let outputs = run_interp_temp_source_with_inputs(
         "rad-audio-one-pole-lti-recursive-feedback-coeff",
-        r#"
-p = 0.5;
-process = rad((_ : + ~ *(p)), p);
-"#,
+        &source,
         std::slice::from_ref(&input),
         frame_count,
     );
@@ -433,15 +432,7 @@ process = rad((_ : + ~ *(p)), p);
 #[test]
 fn fastlane_interp_multi_output_lti_recursive_rad_matches_closed_form_contributions() {
     let frame_count = 6;
-    let outputs = run_interp_temp_source(
-        "rad-multi-output-lti-recursive-feedback-coeff",
-        r#"
-p = 0.5;
-q = 0.25;
-process = rad(((2 : + ~ *(p)), (3 : + ~ *(q))), (p, q));
-"#,
-        frame_count,
-    );
+    let outputs = run_interp_corpus("rad_lti_recursive_multi_output", frame_count);
     assert_eq!(
         outputs.len(),
         4,
@@ -494,15 +485,11 @@ fn fastlane_interp_audio_state_space_lti_recursive_rad_matches_closed_form_contr
     let drive = vec![0.25, -0.5, 1.0, 0.75, -0.25, 0.5];
     let zero = vec![0.0; drive.len()];
     let frame_count = drive.len();
+    let source = fs::read_to_string(corpus_path("rad_lti_recursive_state_space.dsp"))
+        .expect("read rad_lti_recursive_state_space fixture");
     let outputs = run_interp_temp_source_with_inputs(
         "rad-audio-state-space-lti-recursive-feedback-coeff",
-        r#"
-import("stdfaust.lib");
-p = 0.5;
-q = 0.25;
-core = (ro.interleave(2, 2) : (+, +)) ~ ((*(p), *(q)) : ro.cross(2));
-process = rad((_, _) : core, (p, q));
-"#,
+        &source,
         &[drive.clone(), zero],
         frame_count,
     );
