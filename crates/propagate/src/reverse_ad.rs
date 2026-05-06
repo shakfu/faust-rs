@@ -125,9 +125,9 @@ struct ReverseADTransform<'a> {
     /// Accumulated adjoint per visited node.
     adjoints: AHashMap<SigId, SigId>,
     /// Phase-E1 LTI recursive projections whose cotangents were reached by
-    /// the public reverse sweep. They are recorded only when the requested
-    /// seeds are outside the recursive group, so current public behavior can
-    /// safely return zero seed gradients until parameter routing lands.
+    /// the public reverse sweep. After the ordinary reverse pass, these
+    /// cotangents are grouped into reverse-time adjoint recursions and routed
+    /// into direct drive terms.
     recursive_projection_frontier: Vec<(SigId, SigId)>,
 }
 
@@ -172,12 +172,8 @@ impl<'a> ReverseADTransform<'a> {
         walk(self.arena, &self.seed_set, root, &mut AHashSet::new())
     }
 
-    fn is_seed_independent_lti_recursive_projection(&self, sig: SigId) -> bool {
-        let SigMatch::Proj(_, group) = match_sig(self.arena, sig) else {
-            return false;
-        };
+    fn is_lti_recursive_projection(&self, sig: SigId) -> bool {
         classify_recursive_projection_rad_mode(self.arena, sig) == Some(RecRadMode::LinearTranspose)
-            && !self.contains_seed(group)
     }
 
     /// Returns the cached children that contribute adjoint signal flow for
@@ -277,11 +273,10 @@ impl<'a> ReverseADTransform<'a> {
                     kind: "delay-or-prefix",
                 });
             }
-            SigMatch::Proj(_, _) if self.is_seed_independent_lti_recursive_projection(sig) => {
-                // Conservative E1 public bridge: the recursive primal is safe
-                // to keep as a leaf when none of the requested seeds occurs
-                // inside the recursive group. Seed gradients are therefore
-                // correctly zero until full recursive seed routing lands.
+            SigMatch::Proj(_, _) if self.is_lti_recursive_projection(sig) => {
+                // Phase-E1 LTI bridge: keep the recursive projection as a
+                // leaf during the ordinary reverse sweep. Its cotangent is
+                // handled after the sweep by a grouped reverse-time recursion.
             }
             SigMatch::Proj(_, _) | SigMatch::Rec(_) => {
                 return Err(PropagateError::RadUnsupportedNode {
@@ -647,8 +642,15 @@ impl<'a> ReverseADTransform<'a> {
             SigMatch::Output(_, inner) => {
                 self.add_adjoint(inner, y_bar);
             }
-            SigMatch::Proj(_, _) if self.is_seed_independent_lti_recursive_projection(y) => {
+            SigMatch::Proj(_, group)
+                if self.is_lti_recursive_projection(y) && self.contains_seed(group) =>
+            {
                 self.recursive_projection_frontier.push((y, y_bar));
+            }
+            SigMatch::Proj(_, _) if self.is_lti_recursive_projection(y) => {
+                // Seed-independent LTI recursion: the recursive primal was a
+                // leaf in the public sweep and contributes no requested seed
+                // gradient.
             }
             // The unsupported families were rejected in `active_children`
             // before they reached postorder. Reaching them here means a
@@ -718,6 +720,104 @@ impl<'a> ReverseADTransform<'a> {
         }
     }
 
+    fn propagate_lti_drive_adjoint(
+        &mut self,
+        sig: SigId,
+        y_bar: SigId,
+        current_level: i64,
+    ) -> Result<(), PropagateError> {
+        if self.seed_set.contains(&sig) {
+            self.add_adjoint(sig, y_bar);
+            return Ok(());
+        }
+        if !self.contains_seed(sig) {
+            return Ok(());
+        }
+
+        match match_sig(self.arena, sig) {
+            SigMatch::Proj(_, group) if tlib::match_de_bruijn_ref(self.arena, group).is_some() => {
+                Ok(())
+            }
+            SigMatch::BinOp(BinOp::Add, x, z) => {
+                self.propagate_lti_drive_adjoint(x, y_bar, current_level)?;
+                self.propagate_lti_drive_adjoint(z, y_bar, current_level)
+            }
+            SigMatch::BinOp(BinOp::Sub, x, z) => {
+                self.propagate_lti_drive_adjoint(x, y_bar, current_level)?;
+                let zero = SigBuilder::new(self.arena).real(0.0);
+                let neg = SigBuilder::new(self.arena).sub(zero, y_bar);
+                self.propagate_lti_drive_adjoint(z, neg, current_level)
+            }
+            SigMatch::BinOp(BinOp::Mul, x, z) => {
+                let x_contrib = SigBuilder::new(self.arena).mul(y_bar, z);
+                let z_contrib = SigBuilder::new(self.arena).mul(y_bar, x);
+                self.propagate_lti_drive_adjoint(x, x_contrib, current_level)?;
+                self.propagate_lti_drive_adjoint(z, z_contrib, current_level)
+            }
+            SigMatch::BinOp(BinOp::Div, x, z) => {
+                let x_contrib = SigBuilder::new(self.arena).div(y_bar, z);
+                let zsq = SigBuilder::new(self.arena).mul(z, z);
+                let zero = SigBuilder::new(self.arena).real(0.0);
+                let neg_x = SigBuilder::new(self.arena).sub(zero, x);
+                let scaled = SigBuilder::new(self.arena).div(neg_x, zsq);
+                let z_contrib = SigBuilder::new(self.arena).mul(y_bar, scaled);
+                self.propagate_lti_drive_adjoint(x, x_contrib, current_level)?;
+                self.propagate_lti_drive_adjoint(z, z_contrib, current_level)
+            }
+            SigMatch::FloatCast(x)
+            | SigMatch::Output(_, x)
+            | SigMatch::Attach(x, _)
+            | SigMatch::Enable(x, _)
+            | SigMatch::Control(x, _) => self.propagate_lti_drive_adjoint(x, y_bar, current_level),
+            _ if contains_de_bruijn_ref_level(self.arena, sig, current_level) => Ok(()),
+            _ => Err(PropagateError::RadUnsupportedNode {
+                node: sig,
+                kind: "recursive-linear-transpose",
+            }),
+        }
+    }
+
+    fn propagate_recursive_projection_frontier(&mut self) -> Result<(), PropagateError> {
+        let frontier = std::mem::take(&mut self.recursive_projection_frontier);
+        if frontier.is_empty() {
+            return Ok(());
+        }
+
+        let adjoint_projections = build_lti_recursive_adjoint_projections(self.arena, &frontier)
+            .map_err(|_| PropagateError::RadUnsupportedNode {
+                node: frontier[0].0,
+                kind: "recursive-linear-transpose",
+            })?;
+        for (projection, adjoint_projection) in adjoint_projections {
+            let SigMatch::Proj(slot, group) = match_sig(self.arena, projection) else {
+                continue;
+            };
+            let slot = usize::try_from(slot).map_err(|_| PropagateError::RadUnsupportedNode {
+                node: projection,
+                kind: "recursive-linear-transpose",
+            })?;
+            let body = match_de_bruijn_rec(self.arena, group).ok_or(
+                PropagateError::RadUnsupportedNode {
+                    node: projection,
+                    kind: "recursive-linear-transpose",
+                },
+            )?;
+            let branches =
+                list_to_vec(self.arena, body).ok_or(PropagateError::RadUnsupportedNode {
+                    node: projection,
+                    kind: "recursive-linear-transpose",
+                })?;
+            let Some(branch) = branches.get(slot).copied() else {
+                return Err(PropagateError::RadUnsupportedNode {
+                    node: projection,
+                    kind: "recursive-linear-transpose",
+                });
+            };
+            self.propagate_lti_drive_adjoint(branch, adjoint_projection, 1)?;
+        }
+        Ok(())
+    }
+
     /// Drives the three passes and returns the bundled
     /// `[primals…, adjoint(seeds)…]` output list.
     fn run(&mut self, primals: &[SigId], seeds: &[SigId]) -> Result<Vec<SigId>, PropagateError> {
@@ -744,6 +844,7 @@ impl<'a> ReverseADTransform<'a> {
             };
             self.propagate_adjoint(y, y_bar)?;
         }
+        self.propagate_recursive_projection_frontier()?;
 
         let zero = SigBuilder::new(self.arena).real(0.0);
         let mut out = Vec::with_capacity(primals.len() + seeds.len());
@@ -762,6 +863,22 @@ fn recursive_rad_unsupported_kind(arena: &TreeArena, sig: SigId) -> &'static str
         Some(RecRadMode::BpttRequired) => "recursive-bptt-required",
         None => "recursive-projection",
     }
+}
+
+fn contains_de_bruijn_ref_level(arena: &TreeArena, sig: SigId, current_level: i64) -> bool {
+    if tlib::match_de_bruijn_ref(arena, sig) == Some(current_level) {
+        return true;
+    }
+    if let Some(body) = match_de_bruijn_rec(arena, sig) {
+        return contains_de_bruijn_ref_level(arena, body, current_level + 1);
+    }
+    arena.node(sig).is_some_and(|node| {
+        node.children
+            .as_slice()
+            .iter()
+            .copied()
+            .any(|child| contains_de_bruijn_ref_level(arena, child, current_level))
+    })
 }
 
 /// One of the recognized unary FFUN families; used by the FFUN arm of
@@ -1032,7 +1149,6 @@ mod tests {
         build_lti_recursive_adjoint_group, build_lti_recursive_adjoint_projection,
         build_lti_recursive_adjoint_projections, generate_rad_signals,
     };
-    use crate::PropagateError;
     use signals::{SigBuilder, SigId, SigMatch, match_sig};
     use tlib::{
         TreeArena, de_bruijn_rec, de_bruijn_ref, list_to_vec, match_de_bruijn_rec, vec_to_list,
@@ -1203,7 +1319,7 @@ mod tests {
     }
 
     #[test]
-    fn active_seed_inside_lti_recursion_still_reports_phase_e1() {
+    fn active_drive_seed_inside_lti_recursion_returns_reverse_time_adjoint() {
         let mut arena = TreeArena::new();
         let ref1 = de_bruijn_ref(&mut arena, 1);
         let input = SigBuilder::new(&mut arena).input(0);
@@ -1217,17 +1333,19 @@ mod tests {
         };
         let primal = SigBuilder::new(&mut arena).proj(0, group);
 
-        let err = generate_rad_signals(&mut arena, &[primal], &[input])
-            .expect_err("active recursive input seed should remain gated");
+        let out = generate_rad_signals(&mut arena, &[primal], &[input])
+            .expect("active recursive drive input should lower through reverse-time adjoint");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], primal);
+        let SigMatch::Proj(0, reverse_group) = match_sig(&arena, out[1]) else {
+            panic!("drive seed gradient should project the reverse-time adjoint lane");
+        };
         assert!(
             matches!(
-                err,
-                PropagateError::RadUnsupportedNode {
-                    kind: "recursive-linear-transpose",
-                    ..
-                }
+                match_sig(&arena, reverse_group),
+                SigMatch::ReverseTimeRec(_)
             ),
-            "expected recursive-linear-transpose, got: {err:?}"
+            "drive seed gradient should be produced by ReverseTimeRec"
         );
     }
 }
