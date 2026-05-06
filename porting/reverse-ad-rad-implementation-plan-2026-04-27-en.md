@@ -1604,6 +1604,17 @@ Committed phase-E1 scaffolding now covers:
   forward/reverse RAD loops: output-buffer replay via `LoadOutput`, correct
   reverse-loop subtraction order, and a conservative control/DSP split guard
   that keeps multi-loop `compute()` bodies in the I/O-capable DSP block.
+- Multi-output strict-LTI recursive RAD is now covered numerically with:
+
+  ```faust
+  p = 0.5;
+  q = 0.25;
+  process = rad(((2 : + ~ *(p)), (3 : + ~ *(q))), (p, q));
+  ```
+
+  This validates the public output layout `[y0, y1, dp, dq]` and verifies that
+  each gradient lane replays the matching primal recurrence when forming
+  `lambda[n] * y[n-1]`.
 
 Still deferred:
 
