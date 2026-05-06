@@ -1557,13 +1557,19 @@ Committed phase-E1 scaffolding now covers:
   primal projection and one explicit cotangent;
 - `build_lti_recursive_adjoint_group`, which groups multiple incoming
   cotangents for the same primal recursion, accumulates duplicate slot
-  cotangents, and emits one shared `ReverseTimeRec(transposed_body)` group.
+  cotangents, and emits one shared `ReverseTimeRec(transposed_body)` group;
+- `build_lti_recursive_adjoint_projections`, which accepts a mixed frontier of
+  `(primal_projection, cotangent)` pairs, groups eligible LTI recursive
+  projections by source recursion, and returns ordered
+  `(primal_projection, adjoint_projection)` pairs sharing the same reverse-time
+  group per recursion.
 
 Still deferred:
 
 - `reverse_ad.rs` does not yet replace the `recursive-linear-transpose`
   diagnostic in the public `rad(...)` traversal; the remaining work is to make
-  the sweep discover projection cotangents and call the grouped helper;
+  the sweep collect the projection-cotangent frontier and merge the returned
+  adjoint projections into seed-gradient propagation;
 - recursive seed-gradient routing for active LTI coefficients is still needed
   before user-visible `rad(LTI_recursive_primal, seeds)` can produce useful
   per-sample parameter-gradient contributions.
