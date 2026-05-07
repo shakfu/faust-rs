@@ -44,9 +44,10 @@ use ui::ControlId;
 mod filter_algebra;
 
 pub use filter_algebra::{
-    add_sig_fir, add_sig_iir, concerned_iir, convert_fir_to_sig, delay_sig_fir, delay_sig_iir,
-    div_sig_iir, embedded_iir, make_sig_fir, mul_sig_iir, neg_sig_fir, proj_to_sig_iir,
-    simplify_fir, sub_sig_fir, sub_sig_iir,
+    FilterStateSpaceError, FirFilter, IirFilter, LinearTerm, StateSpace, add_sig_fir, add_sig_iir,
+    concerned_iir, convert_fir_to_sig, delay_sig_fir, delay_sig_iir, div_sig_iir, embedded_iir,
+    extract_fir_filter, extract_iir_filter, iir_filter_to_state_space, make_sig_fir, mul_sig_iir,
+    neg_sig_fir, proj_to_sig_iir, simplify_fir, sub_sig_fir, sub_sig_iir,
 };
 
 pub const CRATE_NAME: &str = "signals";

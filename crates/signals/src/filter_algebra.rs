@@ -32,6 +32,176 @@ use tlib::TreeArena;
 
 use crate::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
 
+/// Typed view of one C++ `sigFIR` carrier.
+///
+/// Source provenance:
+/// - C++ `compiler/signals/sigFIR.hh`
+/// - C++ `compiler/signals/sigFIR.cpp`
+///
+/// The carrier layout remains `[base, c0, c1, ...]`; this struct only gives
+/// RAD and later FIR/codegen consumers a named, validated view without making
+/// `sigFIR` itself a public semantic commitment beyond C++ parity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirFilter {
+    /// Signal multiplied by every tap.
+    pub base: SigId,
+    /// Tap coefficients where `coeffs[n]` multiplies `base@n`.
+    pub coeffs: Vec<SigId>,
+}
+
+/// Typed view of one scalar C++ `sigIIR` carrier.
+///
+/// Source provenance:
+/// - C++ `compiler/signals/sigIIR.hh`
+/// - C++ `compiler/signals/sigIIR.cpp`
+///
+/// The carrier layout remains `[state, input, c1, c2, ...]`, denoting
+/// `state[n] = input[n] + c1*state[n-1] + c2*state[n-2] + ...`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IirFilter {
+    /// Recursive projection concerned by this scalar IIR.
+    pub state: SigId,
+    /// State-independent input expression.
+    pub input: SigId,
+    /// Feedback coefficients for delayed recursive values.
+    pub feedback: Vec<SigId>,
+}
+
+/// One sparse linear matrix term used by the private RAD state-space view.
+///
+/// `coeff * slot` is interpreted in the matrix named by the containing row
+/// (`A`, `B`, `C`, or `D`). The terminology is intentionally matrix-oriented so
+/// the first SISO implementation remains a restricted case of later MIMO work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearTerm {
+    /// Source column slot in the corresponding matrix.
+    pub slot: usize,
+    /// Multiplicative coefficient.
+    pub coeff: SigId,
+}
+
+/// Private state-space view used by RAD transpose and future filter codegen.
+///
+/// Source provenance:
+/// - planning bridge from C++ `sigIIR` carriers to RAD E1 in
+///   `porting/lti-filter-intermediate-form-plan-2026-05-06-en.md`.
+///
+/// The rows encode `x[n] = A*x[n-1] + B*u[n]` and
+/// `y[n] = C*x[n] + D*u[n]`. Phase L3 only populates a SISO first-order or
+/// second-order section, but the field names are the canonical matrix names
+/// needed for later MIMO recurrences.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateSpace {
+    /// Number of state slots.
+    pub state_count: usize,
+    /// Number of input slots.
+    pub input_count: usize,
+    /// Number of output slots.
+    pub output_count: usize,
+    /// A matrix rows: previous state to current state.
+    pub a_rows: Vec<Vec<LinearTerm>>,
+    /// B matrix rows: input to current state.
+    pub b_rows: Vec<Vec<LinearTerm>>,
+    /// C matrix rows: current state to output.
+    pub c_rows: Vec<Vec<LinearTerm>>,
+    /// D matrix rows: input to output.
+    pub d_rows: Vec<Vec<LinearTerm>>,
+}
+
+/// Diagnostic returned when a filter carrier cannot be viewed as state-space.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterStateSpaceError {
+    /// Direct companion-style conversion is intentionally limited to biquads.
+    UnsupportedOrder { order: usize, max_order: usize },
+}
+
+/// Extracts a typed [`FirFilter`] from one `sigFIR` carrier.
+#[must_use]
+pub fn extract_fir_filter(arena: &TreeArena, sig: SigId) -> Option<FirFilter> {
+    let SigMatch::Fir(coefs) = match_sig(arena, sig) else {
+        return None;
+    };
+    let (base, coeffs) = coefs.split_first()?;
+    Some(FirFilter {
+        base: *base,
+        coeffs: coeffs.to_vec(),
+    })
+}
+
+/// Extracts a typed [`IirFilter`] from one scalar `sigIIR` carrier.
+#[must_use]
+pub fn extract_iir_filter(arena: &TreeArena, sig: SigId) -> Option<IirFilter> {
+    let SigMatch::Iir(coefs) = match_sig(arena, sig) else {
+        return None;
+    };
+    if coefs.len() < 2 {
+        return None;
+    }
+    Some(IirFilter {
+        state: coefs[0],
+        input: coefs[1],
+        feedback: coefs[2..].to_vec(),
+    })
+}
+
+/// Converts a first-order or second-order scalar IIR to canonical `A/B/C/D`.
+pub fn iir_filter_to_state_space(
+    arena: &mut TreeArena,
+    filter: &IirFilter,
+) -> Result<StateSpace, FilterStateSpaceError> {
+    let order = filter.feedback.len();
+    if order > 2 {
+        return Err(FilterStateSpaceError::UnsupportedOrder {
+            order,
+            max_order: 2,
+        });
+    }
+    let mut b = SigBuilder::new(arena);
+    let one = b.int(1);
+
+    let mut a_rows = vec![Vec::new(); order];
+    let mut b_rows = vec![Vec::new(); order];
+    if order > 0 {
+        a_rows[0] = filter
+            .feedback
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(slot, coeff)| LinearTerm { slot, coeff })
+            .collect();
+        b_rows[0].push(LinearTerm {
+            slot: 0,
+            coeff: one,
+        });
+    }
+    for row in 1..order {
+        a_rows[row].push(LinearTerm {
+            slot: row - 1,
+            coeff: one,
+        });
+    }
+
+    let c_rows = if order == 0 {
+        Vec::new()
+    } else {
+        vec![vec![LinearTerm {
+            slot: 0,
+            coeff: one,
+        }]]
+    };
+    let d_rows = vec![Vec::new()];
+
+    Ok(StateSpace {
+        state_count: order,
+        input_count: 1,
+        output_count: 1,
+        a_rows,
+        b_rows,
+        c_rows,
+        d_rows,
+    })
+}
+
 /// Creates an elementary C++-parity FIR node for a fixed delay.
 ///
 /// Source provenance:
@@ -590,4 +760,108 @@ fn scale_iir_coefs(arena: &mut TreeArena, coefs: &[SigId], factor: SigId, op: Bi
         scaled.push(value);
     }
     b.iir(&scaled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_fir_delay_as_typed_filter() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let x = b.input(0);
+        let fir = make_sig_fir(&mut arena, x, 2);
+
+        let filter = extract_fir_filter(&arena, fir).expect("expected FIR carrier");
+        assert_eq!(filter.base, x);
+        assert_eq!(filter.coeffs.len(), 3);
+        assert!(is_zero_sig(&arena, filter.coeffs[0]));
+        assert!(is_zero_sig(&arena, filter.coeffs[1]));
+        assert!(is_one_sig(&arena, filter.coeffs[2]));
+    }
+
+    #[test]
+    fn adds_compatible_firs_as_typed_filter() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let x = b.input(0);
+        let c = b.real(0.5);
+        let zero = b.int(0);
+        let direct = make_sig_fir(&mut arena, x, 0);
+        let delayed = SigBuilder::new(&mut arena).fir(&[x, zero, c]);
+        let combined = add_sig_fir(&mut arena, direct, delayed);
+
+        let filter = extract_fir_filter(&arena, combined).expect("expected FIR carrier");
+        assert_eq!(filter.base, x);
+        assert_eq!(filter.coeffs.len(), 2);
+        assert!(is_one_sig(&arena, filter.coeffs[0]));
+        assert_eq!(filter.coeffs[1], c);
+    }
+
+    #[test]
+    fn extracts_iir_as_typed_filter() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let y = b.input(9);
+        let x = b.input(0);
+        let p = b.real(-0.25);
+        let q = b.real(-0.125);
+        let iir = b.iir(&[y, x, p, q]);
+
+        let filter = extract_iir_filter(&arena, iir).expect("expected IIR carrier");
+        assert_eq!(filter.state, y);
+        assert_eq!(filter.input, x);
+        assert_eq!(filter.feedback, vec![p, q]);
+    }
+
+    #[test]
+    fn second_order_iir_lowers_to_abcd_state_space() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let y = b.input(9);
+        let x = b.input(0);
+        let p = b.real(-0.25);
+        let q = b.real(-0.125);
+        let filter = IirFilter {
+            state: y,
+            input: x,
+            feedback: vec![p, q],
+        };
+
+        let ss = iir_filter_to_state_space(&mut arena, &filter).expect("order 2 accepted");
+        assert_eq!(ss.state_count, 2);
+        assert_eq!(ss.input_count, 1);
+        assert_eq!(ss.output_count, 1);
+        assert_eq!(ss.a_rows[0][0], LinearTerm { slot: 0, coeff: p });
+        assert_eq!(ss.a_rows[0][1], LinearTerm { slot: 1, coeff: q });
+        assert_eq!(ss.a_rows[1][0].slot, 0);
+        assert_eq!(ss.b_rows[0][0].slot, 0);
+        assert_eq!(ss.c_rows[0][0].slot, 0);
+        assert!(ss.d_rows[0].is_empty());
+    }
+
+    #[test]
+    fn third_order_iir_state_space_is_rejected() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let y = b.input(9);
+        let x = b.input(0);
+        let c0 = b.real(0.1);
+        let c1 = b.real(0.2);
+        let c2 = b.real(0.3);
+        let filter = IirFilter {
+            state: y,
+            input: x,
+            feedback: vec![c0, c1, c2],
+        };
+
+        assert_eq!(
+            iir_filter_to_state_space(&mut arena, &filter),
+            Err(FilterStateSpaceError::UnsupportedOrder {
+                order: 3,
+                max_order: 2
+            })
+        );
+    }
 }
