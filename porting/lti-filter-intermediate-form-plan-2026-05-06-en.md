@@ -228,6 +228,115 @@ implementation a restricted instance of the later MIMO design instead of a
 shape that must be renamed when cross-coupled filter networks, FDNs, or
 multi-output recurrences are added.
 
+## Pipeline Placement Constraint: RAD Runs In `propagate`
+
+`faust-rs` currently expands both `fad(...)` and `rad(...)` inside
+`crates/propagate`, before the later normalization, `transform::signal_prepare`,
+FIR lowering, and backend stages. The relevant `propagate` flow is:
+
+```text
+FlatNodeKind::ReverseAD
+  -> propagate seed box to seed signals
+  -> propagate body box to body signals
+  -> reverse_ad::generate_rad_signals(body_sigs, seed_sigs)
+```
+
+Therefore any LTI reconstruction needed by RAD must happen before or during
+`reverse_ad::generate_rad_signals`. A `revealIIR` pass that only runs later in
+`transform` or `signal_fir` is too late for RAD: by then `rad(...)` has already
+either produced gradients or rejected the graph.
+
+This has several architectural consequences:
+
+- `transform::signal_prepare` must not become the only owner of
+  `revealFIR/revealIIR` if RAD needs those carriers. That pass is downstream of
+  `propagate`, and it also converts recursion into prepared symbolic forms for
+  FIR lowering.
+- `propagate` should not depend on `transform` just to reuse a late FIR
+  preparation pass. That would invert the intended workspace layering and risks
+  circular dependencies.
+- The reusable C++-parity algebra belongs in `signals` or another upstream
+  crate that both `propagate` and `transform` can call. `propagate` can then
+  run a narrow RAD-LTI preparation step without importing backend/FIR staging.
+- RAD must see the same De Bruijn recursion form it already analyzes today:
+  `DEBRUIJNREC` / `DEBRUIJNREF` are still the active representation during
+  propagation. Later conversion to prepared symbolic recursion cannot be the
+  first place where LTI structure is discovered.
+
+The intended RAD-local staging is:
+
+```text
+propagated body/seed signals
+  -> RAD-LTI preparation
+       revealSum/revealFIR/revealIIR-style reconstruction
+       simple affine seed provenance
+       strict LTI/LTV/nonlinear classification
+  -> reverse_ad::generate_rad_signals
+       SigIIR/SigFIR consumers
+       StateSpace bridge
+       ReverseTimeRec output
+```
+
+The backend/codegen pipeline may run its own broader filter preparation later,
+but that preparation is a code-generation optimization. RAD correctness needs
+an earlier, explicitly scoped preparation boundary.
+
+## Consequences For FAD
+
+FAD shares the same `propagate` placement, but its needs are different. FAD
+mostly applies local chain-rule rewrites while walking the primal graph; it
+does not need to discover a transposed recursive execution strategy before it
+can make progress. RAD does: reverse transposition of recursive LTI state is
+anti-causal in stream time and must be represented as a block-local
+`ReverseTimeRec`.
+
+This means the LTI preparation is urgent for RAD even if FAD can continue to
+operate on raw delayed recursive syntax. A future shared preparation pass must
+not change FAD seed identity or recursion scoping unless equivalent
+non-regression tests exist.
+
+## Consequences For Seed Identity
+
+Because RAD receives explicit `seed_sigs` from `propagate`, seed recognition is
+currently identity-based on `SigId`. LTI canonicalization can rewrite the same
+source-level parameter into a derived coefficient:
+
+```text
+seed
+-seed
+const - seed
+seed / const
+```
+
+If RAD-LTI preparation replaces a raw expression with `SigIIR([..., -seed])`
+without preserving provenance, the requested seed may no longer match the
+coefficient node visited by `reverse_ad`. Therefore the placement constraint
+and the affine-provenance requirement are coupled: the same preparation step
+that reveals `SigIIR` must also record enough `derived = a*seed + b`
+provenance to remap coefficient gradients back to the user-supplied seeds.
+
+Without this, `revealIIR` can make the recursion structurally recognizable
+while accidentally losing the gradient target the user requested.
+
+## Runtime Consequence: `ReverseTimeRec` Still Needs Backend Semantics
+
+Running LTI preparation inside `propagate` only makes RAD produce the correct
+structural graph. It does not by itself complete execution semantics.
+`ReverseTimeRec(DEBRUIJNREC(...))` still requires backend/interpreter support
+for:
+
+- reverse evaluation over the current compute block;
+- terminal adjoint state initialized to zero;
+- no hidden state carry across blocks unless a later phase explicitly changes
+  the convention;
+- block-size agreement with the DSP side, including user-visible helpers such
+  as `ma.BS` when sample-wise gradient contributions are aggregated by the
+  program.
+
+Therefore the RAD-LTI detection work and the backend `ReverseTimeRec` lowering
+work are separate gates. A program can pass RAD-LTI structural preparation and
+still require backend work before it is fully executable.
+
 ## Broader Algebraic Uses
 
 Once FIR/IIR filters are represented as coefficient vectors, `faust-rs` can
@@ -360,6 +469,20 @@ Pass criteria:
 Before the E1 extractor gives up on an LTI recursive group, try to convert the
 group through the FIR/IIR reconstruction path.
 
+Because `rad(...)` is expanded in `propagate`, this canonicalization must be
+available to `propagate::reverse_ad` before its active-subgraph sweep rejects
+temporal or recursive shapes. It may call shared helpers from `signals`, but it
+must not depend on downstream `transform::signal_prepare` or FIR lowering.
+
+The first RAD-local preparation boundary should take propagated body/seed
+signals and return either:
+
+- a structurally equivalent graph containing `SigFIR`/`SigIIR` carriers with
+  seed provenance metadata sufficient for L4b; or
+- an explicit diagnostic explaining whether the failure is non-LTI,
+  time-varying, seed-provenance loss, unsupported temporal placement, or an
+  unimplemented reconstruction pattern.
+
 Pass criteria:
 
 - `rad(_ : fi.iir((1), (p, q)), (p, q))` compiles;
@@ -368,6 +491,9 @@ Pass criteria:
 - unsupported temporal forms continue to produce explicit diagnostics;
 - zero-multiplied delay branches are eliminated before they can trigger
   `delay-or-prefix`.
+- a regression test proves that an LTI reconstruction pass placed only in
+  `transform` is insufficient for RAD, and that the RAD-local preparation path
+  runs before `reverse_ad` rejects the raw recursive/delay form.
 
 ### Phase L3: Private State-Space View
 
@@ -557,18 +683,30 @@ coefficients through negation.
 
 ## Recommended Next Patch
 
-Implement the smallest reusable filter-reconstruction crate/module needed by
-RAD:
+The first two implementation slices now exist:
 
-1. Add internal `FirFilter` / `IirFilter` extraction helpers with Rustdoc
-   provenance pointing to C++ `revealSum`, `revealFIR`, `revealIIR`,
-   `sigFIR`, and `sigIIR`.
-2. Add unit tests for:
-   - `x@2 -> FIR[x, 0, 0, 1]`;
-   - `x + c*x@1 -> FIR[x, 1, c]`;
-   - `y = x - p*y@1 - q*y@2 -> IIR[y, x, -p, -q]`.
-3. Convert the extracted second-order IIR to `A/B/C/D` state-space, with an
-   explicit order-3 rejection test.
-4. Add simple affine seed-provenance tests for `-seed` and `const - seed`.
-5. Feed that state-space view into the existing E1 transpose tests before
-   exposing new public `rad(...)` support.
+- typed `FirFilter` / `IirFilter` extraction helpers and `IirFilter ->
+  StateSpace` conversion;
+- an internal `propagate::transpose_ad` bridge that lowers first-order and
+  second-order `IirFilter` sections through `StateSpace -> DEBRUIJNREC ->
+  ReverseTimeRec`;
+- `reverse_ad` can consume a hand-built `SigIIR` carrier and route gradients to
+  its independent input and feedback coefficients, while direct order-3 IIRs
+  remain rejected.
+
+The next patch should move from hand-built carriers to RAD-local
+canonicalization of real propagated forms:
+
+1. Add a `propagate`-visible RAD-LTI preparation function that runs before
+   `reverse_ad::generate_rad_signals` rejects raw delay/recursion forms.
+2. Reconstruct at least the strict second-order pattern
+   `y = x - p*y@1 - q*y@2` into `SigIIR([y, x, -p, -q])` while preserving
+   De Bruijn coherence.
+3. Add L4b affine provenance tests for `-seed` and `const - seed`, because
+   sign-preserving `revealIIR` rewrites commonly derive feedback coefficients
+   from user-supplied seeds.
+4. Add a higher-level RAD test where the input is a raw propagated recursive
+   form or a small DSP equivalent, not a hand-built `SigIIR` carrier.
+5. Keep public `rad(...)` support gated until the reconstructed path has
+   diagnostics for non-LTI, LTV, unsupported temporal placement, and seed
+   provenance failure.
