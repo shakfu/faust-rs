@@ -110,7 +110,10 @@ use crate::PropagateError;
 use crate::stateful_rad::{
     RecRadMode, classify_de_bruijn_rec_rad_mode, classify_recursive_projection_rad_mode,
 };
-use crate::transpose_ad::{TransposeAdError, transpose_lti_de_bruijn_rec_with_cotangents};
+use crate::transpose_ad::{
+    TransposeAdError, iir_filter_to_de_bruijn_rec_group,
+    transpose_lti_de_bruijn_rec_with_cotangents,
+};
 
 /// Collects the active subgraph and accumulates adjoints for one
 /// `rad(expr, seeds)` call.
@@ -277,6 +280,20 @@ impl<'a> ReverseADTransform<'a> {
                 // Phase-E1 LTI bridge: keep the recursive projection as a
                 // leaf during the ordinary reverse sweep. Its cotangent is
                 // handled after the sweep by a grouped reverse-time recursion.
+            }
+            SigMatch::Iir(_) if !self.contains_seed(sig) => {
+                // Seed-independent structured IIR: no requested gradient can
+                // flow out of this carrier.
+            }
+            SigMatch::Iir(coefs) => {
+                if coefs.len() < 2 || coefs.len() > 4 {
+                    return Err(PropagateError::RadUnsupportedNode {
+                        node: sig,
+                        kind: "iir-state-space",
+                    });
+                }
+                out.push(coefs[1]);
+                out.extend(coefs.iter().copied().skip(2));
             }
             SigMatch::Proj(_, _) | SigMatch::Rec(_) => {
                 return Err(PropagateError::RadUnsupportedNode {
@@ -652,6 +669,9 @@ impl<'a> ReverseADTransform<'a> {
                 // leaf in the public sweep and contributes no requested seed
                 // gradient.
             }
+            SigMatch::Iir(_) => {
+                self.propagate_iir_adjoint(y, y_bar)?;
+            }
             // The unsupported families were rejected in `active_children`
             // before they reached postorder. Reaching them here means a
             // direct primal output of an unsupported family — we still
@@ -662,6 +682,51 @@ impl<'a> ReverseADTransform<'a> {
                     kind: "other-direct-primal",
                 });
             }
+        }
+        Ok(())
+    }
+
+    fn propagate_iir_adjoint(&mut self, y: SigId, y_bar: SigId) -> Result<(), PropagateError> {
+        let filter = signals::extract_iir_filter(self.arena, y).ok_or(
+            PropagateError::RadUnsupportedNode {
+                node: y,
+                kind: "iir-state-space",
+            },
+        )?;
+        if filter.feedback.len() > 2 {
+            return Err(PropagateError::RadUnsupportedNode {
+                node: y,
+                kind: "iir-state-space",
+            });
+        }
+
+        let group = iir_filter_to_de_bruijn_rec_group(self.arena, &filter).map_err(|_| {
+            PropagateError::RadUnsupportedNode {
+                node: y,
+                kind: "iir-state-space",
+            }
+        })?;
+        let reverse_group = build_lti_recursive_adjoint_group(self.arena, group, &[(0, y_bar)])
+            .map_err(|_| PropagateError::RadUnsupportedNode {
+                node: y,
+                kind: "iir-state-space",
+            })?
+            .ok_or(PropagateError::RadUnsupportedNode {
+                node: y,
+                kind: "iir-state-space",
+            })?;
+        let adjoint_state0 = SigBuilder::new(self.arena).proj(0, reverse_group);
+        self.add_adjoint(filter.input, adjoint_state0);
+
+        for (idx, coef) in filter.feedback.iter().copied().enumerate() {
+            let delayed_state = if idx == 0 {
+                SigBuilder::new(self.arena).delay1(y)
+            } else {
+                let amount = SigBuilder::new(self.arena).int((idx + 1) as i32);
+                SigBuilder::new(self.arena).delay(y, amount)
+            };
+            let contribution = SigBuilder::new(self.arena).mul(adjoint_state0, delayed_state);
+            self.add_adjoint(coef, contribution);
         }
         Ok(())
     }
@@ -1532,5 +1597,70 @@ mod tests {
             dump_contains_delay1(&arena, out[1]),
             "coefficient contribution should multiply by the previous primal state"
         );
+    }
+
+    #[test]
+    fn iir_carrier_input_seed_uses_reverse_time_adjoint() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let state = b.input(9);
+        let drive = b.input(0);
+        let p = b.real(-0.25);
+        let q = b.real(-0.125);
+        let iir = b.iir(&[state, drive, p, q]);
+
+        let out = generate_rad_signals(&mut arena, &[iir], &[drive])
+            .expect("IIR input seed should lower through state-space RAD bridge");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], iir);
+        assert!(
+            dump_contains_reverse_time_rec(&arena, out[1]),
+            "input gradient should project the reverse-time adjoint state"
+        );
+    }
+
+    #[test]
+    fn iir_carrier_feedback_seed_uses_delayed_primal_state() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let state = b.input(9);
+        let drive = b.input(0);
+        let p = b.real(-0.25);
+        let q = b.real(-0.125);
+        let iir = b.iir(&[state, drive, p, q]);
+
+        let out = generate_rad_signals(&mut arena, &[iir], &[p])
+            .expect("IIR feedback seed should produce a sample contribution");
+        assert_eq!(out.len(), 2);
+        assert!(
+            dump_contains_reverse_time_rec(&arena, out[1]),
+            "coefficient gradient should include the reverse-time adjoint"
+        );
+        assert!(
+            dump_contains_delay1(&arena, out[1]),
+            "first feedback coefficient gradient should use y@1"
+        );
+    }
+
+    #[test]
+    fn iir_carrier_rejects_direct_third_order_in_rad() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let state = b.input(9);
+        let drive = b.input(0);
+        let c0 = b.real(0.1);
+        let c1 = b.real(0.2);
+        let c2 = b.real(0.3);
+        let iir = b.iir(&[state, drive, c0, c1, c2]);
+
+        let err = generate_rad_signals(&mut arena, &[iir], &[c0])
+            .expect_err("direct third-order IIR should stay rejected");
+        assert!(matches!(
+            err,
+            crate::PropagateError::RadUnsupportedNode {
+                kind: "iir-state-space",
+                ..
+            }
+        ));
     }
 }
