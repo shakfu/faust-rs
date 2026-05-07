@@ -256,13 +256,6 @@ pub(super) fn build_module(
         .enumerate()
         .filter_map(|(index, &sig)| (!reverse_time_outputs[index]).then_some((sig, index)))
         .collect();
-    lower.forward_output_by_sig_key = signals
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &sig)| {
-            (!reverse_time_outputs[index]).then_some((dump_sig_readable(arena, sig), index))
-        })
-        .collect();
     let dsp_arg_type = FirType::Ptr(Box::new(FirType::Obj));
     let dsp_arg = NamedType {
         name: "dsp".to_string(),
@@ -285,6 +278,17 @@ pub(super) fn build_module(
 
     let has_forward_outputs = reverse_time_outputs.iter().any(|is_reverse| !*is_reverse);
     let has_reverse_outputs = reverse_time_outputs.iter().any(|is_reverse| *is_reverse);
+    if has_reverse_outputs {
+        // Readable structural fallback keys are only needed when the RAD
+        // reverse-time loop must reconnect a delayed value to a forward output.
+        lower.forward_output_by_sig_key = signals
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &sig)| {
+                (!reverse_time_outputs[index]).then_some((dump_sig_readable(arena, sig), index))
+            })
+            .collect();
+    }
     let mut sample_loops = Vec::new();
 
     if has_forward_outputs {
