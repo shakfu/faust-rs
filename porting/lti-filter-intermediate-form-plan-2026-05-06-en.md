@@ -295,6 +295,23 @@ operate on raw delayed recursive syntax. A future shared preparation pass must
 not change FAD seed identity or recursion scoping unless equivalent
 non-regression tests exist.
 
+The affine-seed issue is therefore different for FAD and RAD:
+
+- If FAD traverses the original expression tree, it does not need extra
+  provenance for simple affine cases. For example, when the graph still
+  contains `-p`, `2*p`, or `1-p`, the existing local chain-rule traversal can
+  derive `-1`, `2`, or `-1` by visiting the ordinary `Sub`/`Mul` nodes.
+- FAD becomes exposed only if an earlier or shared LTI canonicalization replaces
+  those ordinary expression nodes with a compact carrier such as
+  `SigIIR([..., -p])` and then treats the carrier as opaque or semi-opaque.
+  In that situation the path from the user-supplied seed `p` to the derived
+  coefficient can be hidden from the FAD walker just as it is hidden from RAD.
+
+Consequently, FAD does not force affine provenance as long as it runs on raw
+syntax, but any shared `propagate`-local LTI preparation used by both FAD and
+RAD must preserve the same seed mapping. Otherwise `fad(expr, p)` can regress
+after a filter canonicalization that was introduced primarily for RAD.
+
 ## Consequences For Seed Identity
 
 Because RAD receives explicit `seed_sigs` from `propagate`, seed recognition is
@@ -317,6 +334,37 @@ provenance to remap coefficient gradients back to the user-supplied seeds.
 
 Without this, `revealIIR` can make the recursion structurally recognizable
 while accidentally losing the gradient target the user requested.
+
+The minimal invariant is:
+
+```text
+derived = a * seed + b
+d(derived)/d(seed) = a
+```
+
+where `a` and `b` are independent of the seed and valid for the current
+strict-LTI block. If a canonicalization produces a derived coefficient, both AD
+modes must be able to recover the derivative factor:
+
+```text
+c = p       -> dc/dp =  1
+c = -p      -> dc/dp = -1
+c = p + k   -> dc/dp =  1
+c = k - p   -> dc/dp = -1
+c = k * p   -> dc/dp =  k
+c = p / k   -> dc/dp =  1/k
+```
+
+For RAD, the remapping is applied when coefficient adjoints are accumulated:
+
+```text
+dJ/dseed += a * dJ/dderived
+```
+
+For FAD, the same information can either be replayed as the tangent of the
+derived coefficient or avoided entirely by keeping the original affine
+expression visible to the FAD walker. The important rule is that a
+canonicalizing carrier must not silently erase the source-level seed identity.
 
 ## Runtime Consequence: `ReverseTimeRec` Still Needs Backend Semantics
 
@@ -574,6 +622,18 @@ The first implementation must reject, not approximate, non-affine provenance:
 This choice covers the library feedback-coefficient rewrite `a1 -> -a1`
 without requiring a general symbolic differentiation pass for parameter
 expressions.
+
+FAD-specific pass criteria:
+
+- `fad(expr, seed)` remains unchanged when no LTI canonicalization runs before
+  FAD and the affine expression is still visible as ordinary signal syntax;
+- if a shared LTI preparation replaces an affine expression by a `SigFIR` or
+  `SigIIR` coefficient carrier before FAD sees it, the carrier must expose the
+  same affine derivative factor `a` to the FAD tangent path;
+- regression tests cover at least `-seed` and `const - seed` for both FAD and
+  RAD when the expression is hidden behind a filter carrier;
+- non-affine derived coefficients stay visible to normal FAD traversal or are
+  rejected by the shared LTI preparation until L4c exists.
 
 ### Phase L4c: Nonlinear Parameter Provenance And Chain Rule
 
