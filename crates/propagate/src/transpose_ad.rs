@@ -103,7 +103,9 @@
 use std::fmt::{Display, Formatter};
 
 use crate::stateful_rad::{RadRecLinearity, classify_de_bruijn_rec_group};
-use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
+use signals::{
+    BinOp, FilterStateSpaceError, IirFilter, SigBuilder, SigId, SigMatch, StateSpace, match_sig,
+};
 use tlib::{TreeArena, de_bruijn_rec, de_bruijn_ref, list_to_vec, match_de_bruijn_rec};
 
 /// Error returned by the phase-E1 transposition scaffold.
@@ -161,6 +163,12 @@ pub enum TransposeAdError {
     /// group by replacing scaffold `input(i)` leaves. That substitution is
     /// defined only when every recursive output lane has exactly one cotangent.
     CotangentArityMismatch,
+    /// The structured IIR bridge refused direct conversion to state-space.
+    ///
+    /// Phase L3 intentionally accepts only first-order and second-order
+    /// sections. Higher-order direct IIRs must be factorized into stable
+    /// sections before RAD transposition.
+    UnsupportedIirOrder,
 }
 
 impl Display for TransposeAdError {
@@ -183,6 +191,9 @@ impl Display for TransposeAdError {
             Self::SlotOutOfRange => f.write_str("recursive projection slot is out of range"),
             Self::CotangentArityMismatch => {
                 f.write_str("cotangent arity does not match recursive group arity")
+            }
+            Self::UnsupportedIirOrder => {
+                f.write_str("IIR order is unsupported for direct state-space conversion")
             }
         }
     }
@@ -326,6 +337,80 @@ pub fn transpose_lti_de_bruijn_rec_with_cotangents(
         .map(|branch| replace_scaffold_inputs(arena, branch, cotangents))
         .collect();
     let body = tlib::vec_to_list(arena, &replaced?);
+    Ok(de_bruijn_rec(arena, body))
+}
+
+/// Builds a canonical recursive group from a typed scalar IIR state-space view.
+///
+/// Mapping status: `adapted`, internal RAD bridge. C++ exposes `sigIIR` as an
+/// algebraic carrier; RAD phase L3 lowers the validated [`IirFilter`] through
+/// [`signals::iir_filter_to_state_space`] and materializes the resulting
+/// `A/B/C/D` rows as the same `DEBRUIJNREC` syntax already accepted by the E1
+/// transposition scaffold.
+///
+/// Only first-order and second-order SISO sections are accepted. The generated
+/// group has one recursive lane per state slot:
+///
+/// ```text
+/// x[n] = A*x[n-1] + B*u[n]
+/// ```
+///
+/// `C`/`D` describe the scalar output view and are validated by tests, but this
+/// helper materializes only the state update because that is the current input
+/// contract of [`transpose_lti_de_bruijn_rec_with_cotangents`].
+pub fn iir_filter_to_de_bruijn_rec_group(
+    arena: &mut TreeArena,
+    filter: &IirFilter,
+) -> Result<SigId, TransposeAdError> {
+    let state_space =
+        signals::iir_filter_to_state_space(arena, filter).map_err(|err| match err {
+            FilterStateSpaceError::UnsupportedOrder { .. } => TransposeAdError::UnsupportedIirOrder,
+        })?;
+    state_space_to_de_bruijn_rec_group(arena, &state_space, filter.input)
+}
+
+fn state_space_to_de_bruijn_rec_group(
+    arena: &mut TreeArena,
+    state_space: &StateSpace,
+    input: SigId,
+) -> Result<SigId, TransposeAdError> {
+    if state_space.input_count != 1 || state_space.output_count != 1 {
+        return Err(TransposeAdError::UnsupportedLinearTerm);
+    }
+    let rec_ref = de_bruijn_ref(arena, 1);
+    let mut branches = Vec::with_capacity(state_space.state_count);
+    for row in 0..state_space.state_count {
+        let mut expr = SigBuilder::new(arena).real(0.0);
+        for term in state_space
+            .b_rows
+            .get(row)
+            .into_iter()
+            .flat_map(|terms| terms.iter())
+        {
+            if term.slot != 0 {
+                return Err(TransposeAdError::SlotOutOfRange);
+            }
+            let driven = SigBuilder::new(arena).mul(term.coeff, input);
+            expr = SigBuilder::new(arena).add(expr, driven);
+        }
+        for term in state_space
+            .a_rows
+            .get(row)
+            .into_iter()
+            .flat_map(|terms| terms.iter())
+        {
+            let slot_i32 =
+                i32::try_from(term.slot).map_err(|_| TransposeAdError::SlotOutOfRange)?;
+            if term.slot >= state_space.state_count {
+                return Err(TransposeAdError::SlotOutOfRange);
+            }
+            let prev_state = SigBuilder::new(arena).proj(slot_i32, rec_ref);
+            let state_term = SigBuilder::new(arena).mul(term.coeff, prev_state);
+            expr = SigBuilder::new(arena).add(expr, state_term);
+        }
+        branches.push(expr);
+    }
+    let body = tlib::vec_to_list(arena, &branches);
     Ok(de_bruijn_rec(arena, body))
 }
 
@@ -517,10 +602,10 @@ fn contains_current_rec_ref(arena: &TreeArena, sig: SigId, current_level: i64) -
 #[cfg(test)]
 mod tests {
     use super::{
-        TransposeAdError, transpose_lti_de_bruijn_rec_scaffold,
+        TransposeAdError, iir_filter_to_de_bruijn_rec_group, transpose_lti_de_bruijn_rec_scaffold,
         transpose_lti_de_bruijn_rec_with_cotangents,
     };
-    use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
+    use signals::{BinOp, IirFilter, SigBuilder, SigId, SigMatch, match_sig};
     use tlib::{
         TreeArena, de_bruijn_rec, de_bruijn_ref, list_to_vec, match_de_bruijn_rec, vec_to_list,
     };
@@ -640,6 +725,73 @@ mod tests {
         assert!(
             dump_contains_real(&arena, branches[0], 2.0),
             "explicit cotangent should appear in the transposed branch"
+        );
+    }
+
+    #[test]
+    fn iir_state_space_bridge_feeds_lti_transpose() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let state = b.input(9);
+        let input = b.input(0);
+        let p = b.real(-0.25);
+        let q = b.real(-0.125);
+        let cotangent = b.input(3);
+        let zero_cotangent = b.real(0.0);
+        let filter = IirFilter {
+            state,
+            input,
+            feedback: vec![p, q],
+        };
+
+        let group = iir_filter_to_de_bruijn_rec_group(&mut arena, &filter)
+            .expect("second-order IIR bridge");
+        let transposed = transpose_lti_de_bruijn_rec_with_cotangents(
+            &mut arena,
+            group,
+            &[cotangent, zero_cotangent],
+        )
+        .expect("bridged IIR should feed E1 transpose");
+        let body = match_de_bruijn_rec(&arena, transposed).expect("transposed group");
+        let branches = list_to_vec(&arena, body).expect("body list");
+
+        assert_eq!(branches.len(), 2);
+        assert!(
+            branch_contains_prev_slot(&arena, branches[0], 0),
+            "first adjoint row should feed back from its own previous adjoint"
+        );
+        assert!(
+            branch_contains_prev_slot(&arena, branches[1], 0),
+            "second adjoint row should receive the transposed biquad coupling"
+        );
+        assert!(
+            dump_contains_real(&arena, branches[0], -0.25),
+            "first feedback coefficient should appear in transposed row 0"
+        );
+        assert!(
+            dump_contains_real(&arena, branches[1], -0.125),
+            "second feedback coefficient should appear in transposed row 1"
+        );
+    }
+
+    #[test]
+    fn iir_state_space_bridge_rejects_direct_third_order() {
+        let mut arena = TreeArena::new();
+        let mut b = SigBuilder::new(&mut arena);
+        let state = b.input(9);
+        let input = b.input(0);
+        let c0 = b.real(0.1);
+        let c1 = b.real(0.2);
+        let c2 = b.real(0.3);
+        let filter = IirFilter {
+            state,
+            input,
+            feedback: vec![c0, c1, c2],
+        };
+
+        assert_eq!(
+            iir_filter_to_de_bruijn_rec_group(&mut arena, &filter),
+            Err(TransposeAdError::UnsupportedIirOrder)
         );
     }
 
