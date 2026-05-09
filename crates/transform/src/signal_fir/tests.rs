@@ -3872,6 +3872,47 @@ fn bra_symrec_primal_carrier_absent_from_compute_preamble_resets() {
     );
 }
 
+/// A BRA body containing a `FConst` node (e.g. `fSampleRate` pulled in via
+/// `stdfaust.lib` → `ma.SR`) must compile without error.
+///
+/// Before the fix, `FConst` was not listed as a leaf in:
+/// - `is_trivially_reverse_evaluable` — causing it to be mistakenly taped,
+/// - `collect_bra_postorder` — reaching the postorder as an unknown node,
+/// - `propagate_bra_adj` — triggering `[FRS-SFIR-0004] signal FConst(…) not
+///   supported in BlockReverseAD backward pass (B6)`.
+///
+/// The BRA backward pass treats `FConst` (and `FVar`) as zero-gradient leaves:
+/// they are external scalars with no differentiable children.
+#[test]
+fn bra_body_with_fconst_leaf_compiles() {
+    let mut arena = TreeArena::new();
+
+    // Build a body: seed * FConst("fSampleRate")
+    // This represents e.g. `p * ma.SR` inside the BRA expression.
+    let p = SigBuilder::new(&mut arena).real(0.5);
+    let ty_node = SigBuilder::new(&mut arena).int(0); // type tag (int=0)
+    // Use the recognized alias "fSamplingFreq" — lower_fconst maps it to fSampleRate.
+    let name_node = arena.string_lit("fSamplingFreq");
+    let file_node = arena.string_lit("<math.h>");
+    let fc = SigBuilder::new(&mut arena).fconst(ty_node, name_node, file_node);
+    let body_expr = SigBuilder::new(&mut arena).binop(signals::BinOp::Mul, p, fc);
+
+    // BRA: differentiate body w.r.t. p
+    let cot = SigBuilder::new(&mut arena).real(1.0);
+    let carrier = SigBuilder::new(&mut arena).block_reverse_ad(
+        &[body_expr],
+        &[p],
+        &[cot],
+        BlockRevPolicy::TapeFull,
+    );
+    let primal = SigBuilder::new(&mut arena).proj(0, carrier);
+    let grad = SigBuilder::new(&mut arena).proj(1, carrier);
+
+    // Must not crash with "signal FConst(…) not supported in BlockReverseAD backward pass".
+    compile_fastlane_without_ui(&arena, &[primal, grad], 0, 2, &SignalFirOptions::default())
+        .expect("BRA body with FConst leaf must compile successfully");
+}
+
 /// A BRA carrier wrapping a recursive circuit must declare a `fBraCarry*`
 /// struct field for the TBPTT feedback carry.
 ///

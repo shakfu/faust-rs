@@ -2632,8 +2632,13 @@ impl<'a> SignalToFirLower<'a> {
             | SigMatch::VSlider(_)
             | SigMatch::NumEntry(_)
             | SigMatch::Button(_)
-            | SigMatch::Checkbox(_) => {
-                // Seeds or constants: no children to propagate into.
+            | SigMatch::Checkbox(_)
+            // Foreign constants (e.g. `ma.SR`, `ma.PI` pulled in via stdfaust.lib)
+            // and foreign variables are external scalars with no differentiable children.
+            // Gradient contribution is zero; nothing to propagate.
+            | SigMatch::FConst(..)
+            | SigMatch::FVar(..) => {
+                // Seeds, constants, or external scalars: no children to propagate into.
             }
 
             // ── Casts: identity rule ────────────────────────────────────────

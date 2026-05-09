@@ -86,6 +86,10 @@ pub(super) fn is_trivially_reverse_evaluable(arena: &TreeArena, sig: SigId) -> b
         SigMatch::Input(_) => true,
         SigMatch::HSlider(_) | SigMatch::VSlider(_) | SigMatch::NumEntry(_) => true,
         SigMatch::Button(_) | SigMatch::Checkbox(_) => true,
+        // Foreign constants (e.g. `ma.SR = fconstant(int fSampleRate, <math.h>)`) and
+        // foreign variables are compile-time or run-time external scalars that are
+        // neither stateful nor differentiable w.r.t. any Faust seed.
+        SigMatch::FConst(..) | SigMatch::FVar(..) => true,
         SigMatch::IntCast(x) | SigMatch::FloatCast(x) | SigMatch::BitCast(x) => {
             is_trivially_reverse_evaluable(arena, x)
         }
@@ -140,7 +144,11 @@ pub(super) fn collect_bra_postorder(
         | SigMatch::VSlider(_)
         | SigMatch::NumEntry(_)
         | SigMatch::Button(_)
-        | SigMatch::Checkbox(_) => {}
+        | SigMatch::Checkbox(_)
+        // Foreign constants/variables (e.g. `fSampleRate` via `ma.SR`): leaf nodes with
+        // no differentiable children.  Their gradient contribution is always zero.
+        | SigMatch::FConst(..)
+        | SigMatch::FVar(..) => {}
         // Unary casts and unary math — one child.
         SigMatch::IntCast(x)
         | SigMatch::FloatCast(x)
