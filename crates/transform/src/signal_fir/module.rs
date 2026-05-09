@@ -350,8 +350,18 @@ pub(super) fn build_module(
     }
     if has_reverse_outputs {
         lower.emit_reverse_time_rec_compute_resets();
-        lower.emit_bra_compute_resets();
     }
+    // Reset BRA carry variables at the start of every compute() call.
+    //
+    // These carries are populated by `ensure_bra_backward_sweep` regardless of
+    // whether the BRA backward sweep runs in the forward or reverse sample loop.
+    // Zeroing them here treats each `compute()` call as the start of a fresh
+    // TBPTT block, which is the correct interpretation for both BS=BS (reverse
+    // loop) and BS=1 (forward inline) TBPTT approximations.
+    //
+    // `emit_bra_compute_resets` is a no-op when no BRA carry variables were
+    // allocated (i.e. when no `BlockReverseAD` node appears in the program).
+    lower.emit_bra_compute_resets();
     // ═══════════════════════════════════════════════════════════════════════
     // ── Phase 2: CSE Materialization per Bucket ────────────────────────────
     // ═══════════════════════════════════════════════════════════════════════
@@ -736,6 +746,20 @@ fn classify_reverse_time_outputs(arena: &TreeArena, signals: &[SigId]) -> Vec<bo
                 if idx >= pc {
                     return true;
                 }
+            }
+        }
+        // Stop recursion at SYMREC boundaries.
+        //
+        // A `Proj(slot, SYMREC)` node is the top-level output of a `loop ~ _`
+        // recursive group.  Its primal value is always computed in the FORWARD
+        // sample loop (the recursion advances state in causal order).  Recursing
+        // into the SYMREC body would discover BRA gradient projections that are
+        // used *inside* the body (e.g. `p_next = clamp(p_prev - lr * grad_p)` in
+        // `rad_filter1.dsp`) and incorrectly classify the outer output as
+        // reverse-time, suppressing the forward loop entirely.
+        if let SigMatch::Proj(_, group) = match_sig(arena, sig) {
+            if match_sym_rec(arena, group).is_some() {
+                return false;
             }
         }
         arena.node(sig).is_some_and(|node| {
