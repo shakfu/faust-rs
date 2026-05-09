@@ -56,7 +56,8 @@ use fir::{
 };
 use signals::{BinOp, SigId, SigMatch, dump_sig_readable, match_sig};
 use tlib::{
-    NodeKind, TreeArena, list_to_vec, match_sym_rec, match_sym_ref, tree_to_int, tree_to_str,
+    NodeKind, TreeArena, TreeId, list_to_vec, match_sym_rec, match_sym_ref, tree_to_int,
+    tree_to_str,
 };
 use ui::{ControlId, ControlKind, UiGroupKind, UiMatch, UiProgram, match_ui};
 
@@ -921,11 +922,10 @@ struct SignalToFirLower<'a> {
     /// MAX_BRA_TAPE_BLOCK_SIZE)` used to store/load it.
     ///
     /// Populated by `ensure_bra_tape_stores` and consumed by
-    /// `load_bra_fwd_value`.
+    /// `load_bra_fwd_value`.  Acts as a per-signal idempotency guard: a
+    /// signal is never taped twice even when `ensure_bra_tape_stores` is
+    /// called once per primal body slot.
     bra_tape_store_var: HashMap<SigId, String>,
-    /// Guard preventing `ensure_bra_tape_stores` from being called more than
-    /// once per `SigBlockReverseAD` group.
-    bra_tape_stores_scheduled: HashSet<SigId>,
 }
 
 /// One extern prototype recovered from a Faust `FFUN(...)` descriptor.
@@ -1021,7 +1021,6 @@ impl<'a> SignalToFirLower<'a> {
             bra_delay1_carry_vars: HashMap::new(),
             bra_delay_array_carry_vars: HashMap::new(),
             bra_tape_store_var: HashMap::new(),
-            bra_tape_stores_scheduled: HashSet::new(),
         }
     }
 
@@ -2414,11 +2413,18 @@ impl<'a> SignalToFirLower<'a> {
         cotangent_sigs: &[SigId],
     ) -> Result<FirId, SignalFirError> {
         if index < primal_count {
-            // Primal projection: lower the body signal and schedule any tape
-            // stores needed by the backward sweep (Phase B4).  Tape scheduling
-            // is idempotent so multiple primal slots calling this are safe.
+            // Primal projection: lower the body signal and schedule tape stores
+            // for signals reachable from THIS body only (Phase B4).
+            //
+            // Each body is lowered in its own SYMREC recursion context, so
+            // `lower_signal` for body[index] works correctly under that body's
+            // recursion variable.  Passing only `body_sigs[index]` ensures that
+            // `ensure_bra_tape_stores` never tries to lower signals from a
+            // different SYMREC group whose recursion variable is not yet on the
+            // stack.  A per-signal guard inside the function prevents duplicate
+            // tape declarations when bodies share sub-expressions.
             let val = self.lower_signal(body_sigs[index])?;
-            self.ensure_bra_tape_stores(group, body_sigs, seed_sigs, cotangent_sigs)?;
+            self.ensure_bra_tape_stores(group, &[body_sigs[index]], seed_sigs, cotangent_sigs)?;
             return Ok(val);
         }
         let seed_index = index - primal_count;
@@ -2496,19 +2502,41 @@ impl<'a> SignalToFirLower<'a> {
         // The carry from step n+1 encodes `adj[y[slot][n+1]] · ∂y[n+1]/∂y[n]`
         // and is stored in a struct field written during the previous reverse-loop
         // iteration.  We load it here — before the reverse-postorder walk — and
-        // accumulate it into `adj[body_sigs[slot]]` so that when the Proj-SYMREC
+        // accumulate it into the matching `body_sig` so that when the Proj-SYMREC
         // node is processed first in the reverse postorder its `y_bar` already
         // includes the feedback contribution.
         //
         // `Delay1(Proj(slot, SYMREF(var)))` is the structural signal that
         // introduces the one-sample feedback delay; its carry variable represents
         // the anti-causal adjoint flowing from step n+1 back to step n.
+        //
+        // For circuits with multiple independent SYMREC groups (e.g., two
+        // separate recursive poles), each group has its own SYMREF variable and
+        // its own SYMREC variable.  We must match `SYMREF(var)` against the
+        // corresponding `Proj(slot, SYMREC(var, ...))` in `body_sigs` by
+        // comparing the symbolic recursion variable — NOT by using `slot` as a
+        // flat index into `body_sigs` (which would be wrong when multiple groups
+        // all have slot=0).
+        //
+        // Build: (SYMREC var TreeId, proj slot) → body_sig  from body_sigs.
+        let mut var_slot_to_body_sig: HashMap<(TreeId, usize), SigId> = HashMap::new();
+        for &body_sig in body_sigs {
+            if let SigMatch::Proj(bslot, bgroup) = match_sig(self.arena, body_sig) {
+                if let Some((bvar, _)) = match_sym_rec(self.arena, bgroup) {
+                    let bslot_usize = usize::try_from(bslot).unwrap_or(usize::MAX);
+                    var_slot_to_body_sig.insert((bvar, bslot_usize), body_sig);
+                }
+            }
+        }
+
         for &sig in &postorder {
             if let SigMatch::Delay1(x) = match_sig(self.arena, sig) {
                 if let SigMatch::Proj(slot, inner_group) = match_sig(self.arena, x) {
-                    if match_sym_ref(self.arena, inner_group).is_some() {
+                    if let Some(ref_var) = match_sym_ref(self.arena, inner_group) {
                         let slot_usize = usize::try_from(slot).unwrap_or(usize::MAX);
-                        if let Some(&proj_symrec) = body_sigs.get(slot_usize) {
+                        // Look up the body_sig whose SYMREC var matches this SYMREF var.
+                        if let Some(&proj_symrec) = var_slot_to_body_sig.get(&(ref_var, slot_usize))
+                        {
                             let carry_name = self.ensure_bra_delay1_carry(sig, group)?;
                             let carry_load = {
                                 let rt = self.real_ty();
@@ -3251,20 +3279,26 @@ impl<'a> SignalToFirLower<'a> {
         Ok(name)
     }
 
-    /// Schedules forward-tape stores for all tape-needed signals in `group`.
+    /// Schedules forward-tape stores for tape-needed signals reachable from
+    /// the given `body_sigs` roots.
     ///
-    /// Called from `lower_block_reverse_ad_proj` when lowering a **primal**
-    /// slot (i.e. during the forward sample loop) so that tape stores are
-    /// emitted before the reverse loop begins.  Idempotent: the
-    /// `bra_tape_stores_scheduled` guard prevents re-scheduling for the same
-    /// group.
+    /// Called from `lower_block_reverse_ad_proj` once per primal slot, with
+    /// only the body for that slot.  This ensures that `lower_signal` is
+    /// called exclusively within the SYMREC recursion context that is active
+    /// for the current primal slot — signals from a different SYMREC group
+    /// (with a different recursion variable on the stack) must **not** be
+    /// lowered here.
+    ///
+    /// Idempotency is maintained per-signal via `bra_tape_store_var`: if a
+    /// signal has already been taped (e.g. because it is shared across bodies),
+    /// a second call for a different body silently skips it.
     ///
     /// # Steps
     ///
-    /// 1. Build the unified postorder for all body roots.
+    /// 1. Build the postorder for the supplied `body_sigs` roots.
     /// 2. Call [`collect_tape_needed_values`] to determine which forward values
     ///    require a tape.
-    /// 3. For each tape-needed signal `v`:
+    /// 3. For each tape-needed signal `v` not yet in `bra_tape_store_var`:
     ///    a. Allocate a fresh struct-field name `fBraTapeN`.
     ///    b. Declare the field as `Array(real_ty, MAX_BRA_TAPE_BLOCK_SIZE)`.
     ///    c. Lower `v` via `lower_signal` (runs in the forward loop context).
@@ -3276,16 +3310,12 @@ impl<'a> SignalToFirLower<'a> {
     ///    e. Record the mapping `v → fBraTapeN` in `bra_tape_store_var`.
     fn ensure_bra_tape_stores(
         &mut self,
-        group: SigId,
+        _group: SigId,
         body_sigs: &[SigId],
         _seed_sigs: &[SigId],
         _cotangent_sigs: &[SigId],
     ) -> Result<(), SignalFirError> {
-        if !self.bra_tape_stores_scheduled.insert(group) {
-            return Ok(());
-        }
-
-        // 1. Build postorder over all body roots.
+        // 1. Build postorder over the supplied body roots.
         let mut visited = std::collections::HashSet::new();
         let mut postorder = Vec::new();
         for &body in body_sigs {
@@ -3303,6 +3333,11 @@ impl<'a> SignalToFirLower<'a> {
         // Sort by SigId for deterministic emission.
         tape_sigs.sort();
         for v in tape_sigs {
+            // Per-signal idempotency: skip signals already taped by a prior call
+            // (e.g. a signal shared between two SYMREC bodies).
+            if self.bra_tape_store_var.contains_key(&v) {
+                continue;
+            }
             let tape_name = format!("fBraTape{}", self.next_loop_var_id);
             self.next_loop_var_id += 1;
             let real_ty = self.real_ty.clone();

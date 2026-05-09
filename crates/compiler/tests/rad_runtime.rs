@@ -1476,3 +1476,50 @@ process = a * (2 : +~*(p));
         },
     );
 }
+
+/// Two independent recursive poles differentiated simultaneously (Phase B6+).
+///
+/// Circuit:  `y_p[n] = 2 + p * y_p[n-1]`,  `y_q[n] = 3 + q * y_q[n-1]`.
+/// Seeds: `(p, q)` — two separate SYMREC groups, each with its own
+/// SYMREF variable.
+///
+/// Before the multi-SYMREC fix the lowering crashed with
+/// "unbound symbolic recursion variable" because:
+/// (a) the pre-scan mapped both `SYMREF_p` and `SYMREF_q` to
+///     `body_sigs[0]` using the slot index, and
+/// (b) `ensure_bra_tape_stores` lowered tape signals from SYMREC_q while
+///     only SYMREC_p's recursion context was active.
+///
+/// **Verification**: per-block TBPTT gradient for each seed matches central FD
+/// (gradients are independent: perturbing p doesn't change y_q and vice-versa).
+#[test]
+fn rad_two_independent_poles_bra_total_grad_matches_fd() {
+    assert_bra_block_total_grad_matches_fd(
+        "rad-two-poles",
+        2, // 2 primal outputs [y_p, y_q]
+        6,
+        &[0.5, 0.25],  // base seeds: p=0.5, q=0.25 (both stable)
+        &[5e-4, 5e-4], // epsilons
+        5e-2,          // abs_tol
+        |s| {
+            format!(
+                r#"
+p = hslider("p", {}, 0.0, 1.0, 0.01);
+q = hslider("q", {}, 0.0, 1.0, 0.01);
+process = rad(((2 : + ~ *(p)), (3 : + ~ *(q))), (p, q));
+"#,
+                s[0], s[1]
+            )
+        },
+        |s| {
+            format!(
+                r#"
+p = hslider("p", {}, 0.0, 1.0, 0.01);
+q = hslider("q", {}, 0.0, 1.0, 0.01);
+process = (2 : + ~ *(p)), (3 : + ~ *(q));
+"#,
+                s[0], s[1]
+            )
+        },
+    );
+}
