@@ -967,3 +967,147 @@ fn block_ref_carrier_round_trip() {
     }
     assert_close_f64(result.grads_total[0], 2.0 * BS as f64, TOL, "total");
 }
+
+// ── Phase B3 FIR integration tests ───────────────────────────────────────────
+//
+// These tests exercise the full compiler pipeline (propagate → transform FIR
+// lowering → interp backend) for `SigBlockReverseAD` programs and verify
+// that the compiled gradient outputs match the B2 reference BPTT oracle.
+
+use std::io::Cursor;
+
+use codegen::backends::interp::{FbcDspInstance, InterpOptions, read_fbc};
+use compiler::{Compiler, SignalFirLane};
+
+/// Compiles `source` through the TransformFastLane and runs `frame_count`
+/// frames through the interpreter.  Returns `output[channel][frame]`.
+fn run_bra_source(stem: &str, source: &str, frame_count: usize) -> Vec<Vec<f32>> {
+    let stem = stem.to_owned();
+    let source = source.to_owned();
+    std::thread::Builder::new()
+        .name(format!("bra-fir-{stem}"))
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let path = std::env::temp_dir()
+                .join(format!("faust-rs-bra-{stem}-{}.dsp", std::process::id()));
+            std::fs::write(&path, &source)
+                .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+            let compiler = Compiler::new();
+            let fbc = compiler
+                .compile_file_default_to_interp_with_lane(
+                    &path,
+                    &InterpOptions::default(),
+                    SignalFirLane::TransformFastLane,
+                )
+                .unwrap_or_else(|e| panic!("{} compile failed: {e}", path.display()));
+            let _ = std::fs::remove_file(&path);
+            let mut reader = Cursor::new(fbc);
+            let mut factory = read_fbc::<f32>(&mut reader)
+                .unwrap_or_else(|e| panic!("{stem} bytecode parse failed: {e}"));
+            let mut instance = FbcDspInstance::new(&mut factory);
+            instance.init(48_000);
+            let num_outputs =
+                usize::try_from(instance.get_num_outputs()).expect("non-negative outputs");
+            let mut outputs = vec![vec![0.0_f32; frame_count]; num_outputs];
+            let mut output_slices: Vec<&mut [f32]> =
+                outputs.iter_mut().map(Vec::as_mut_slice).collect();
+            instance
+                .try_compute(frame_count as i32, &[], &mut output_slices)
+                .unwrap_or_else(|e| panic!("{stem} execution failed: {e}"));
+            outputs
+        })
+        .expect("spawn bra-fir worker")
+        .join()
+        .expect("bra-fir worker finished")
+}
+
+fn assert_close_f32(actual: f32, expected: f32, tol: f32, label: &str) {
+    let diff = (actual - expected).abs();
+    let allowed = tol.max(1.0e-5_f32 * expected.abs().max(actual.abs()));
+    assert!(
+        diff <= allowed,
+        "{label}: expected {expected:.6}, got {actual:.6}, diff {diff:.2e}"
+    );
+}
+
+/// `process = rad(2*x, x)` with `x = hslider("x", 0.5, …)`.
+///
+/// Layout: `[primal, grad_x]` per frame.
+/// Expected: primal = 1.0, grad = 2.0 every frame.
+///
+/// This case is feed-forward with a constant seed and goes through the
+/// symbolic path (not BlockReverseAD), serving as a regression guard.
+#[test]
+fn fir_bra_linear_const_seed_feedforward() {
+    // rad(2*x, x) is purely feed-forward → symbolic RAD path, not BRA.
+    // We include it as a baseline: proves the forward projection works.
+    let frame_count = BS;
+    let source = r#"
+x = hslider("x", 0.5, 0.0, 1.0, 0.01);
+process = rad(2.0 * x, x);
+"#;
+    let outputs = run_bra_source("fir-bra-linear", source, frame_count);
+    assert_eq!(outputs.len(), 2, "layout: [primal, grad]");
+    for n in 0..frame_count {
+        assert_close_f32(outputs[0][n], 1.0, 1.0e-5, &format!("primal[{n}]"));
+        assert_close_f32(outputs[1][n], 2.0, 1.0e-5, &format!("grad[{n}]"));
+    }
+}
+
+/// `process = rad(x', x)` with `x = hslider("x", 0.5, …)`.
+///
+/// `x'` is Faust's one-sample delay (`Delay1`).
+/// Layout: `[primal, grad_x]` per frame.
+/// - primal[0] = 0 (initial state), primal[n>0] = 0.5.
+/// - grad[n] = 1 for n < BS-1, grad[BS-1] = 0.
+///
+/// The last sample's gradient is zero because `x[BS-1]` would only affect
+/// `delay1(x)[BS]`, which is outside the current block (TBPTT truncation).
+/// This is the canonical TBPTT anti-causal carry result confirmed by the B2
+/// reference executor in [`block_ref_const_seed_delay1`].
+#[test]
+fn fir_bra_delay1_const_seed() {
+    let frame_count = BS;
+    let source = r#"
+x = hslider("x", 0.5, 0.0, 1.0, 0.01);
+process = rad(x', x);
+"#;
+    let outputs = run_bra_source("fir-bra-delay1-const", source, frame_count);
+    assert_eq!(outputs.len(), 2, "layout: [primal, grad]");
+
+    // Primal: delay1 initial state is 0; then settles to x = 0.5.
+    assert_close_f32(outputs[0][0], 0.0, 1.0e-5, "primal[0]");
+    for n in 1..frame_count {
+        assert_close_f32(outputs[0][n], 0.5, 1.0e-5, &format!("primal[{n}]"));
+    }
+
+    // Gradient: anti-causal carry — 1.0 for n < BS-1, 0.0 for n = BS-1.
+    for n in 0..frame_count - 1 {
+        assert_close_f32(outputs[1][n], 1.0, 1.0e-5, &format!("grad[{n}]"));
+    }
+    assert_close_f32(outputs[1][frame_count - 1], 0.0, 1.0e-5, "grad[BS-1]");
+}
+
+/// `process = rad(x * x, x)` with `x = hslider("x", 2.0, …)`.
+///
+/// Layout: `[primal, grad_x]` per frame.
+/// - primal[n] = 4.0 every frame.
+/// - grad[n] = 2*x = 4.0 every frame.
+///
+/// The shared `x` node exercises the adjoint accumulation path: both the `lhs`
+/// and `rhs` of `Mul` propagate to the same `HSlider` seed, so
+/// `add_to_adjoint` builds an `Add` node for the total.
+#[test]
+fn fir_bra_square_const_seed() {
+    let frame_count = BS;
+    let source = r#"
+x = hslider("x", 2.0, 0.0, 4.0, 0.01);
+process = rad(x * x, x);
+"#;
+    let outputs = run_bra_source("fir-bra-square-const", source, frame_count);
+    assert_eq!(outputs.len(), 2, "layout: [primal, grad]");
+    for n in 0..frame_count {
+        assert_close_f32(outputs[0][n], 4.0, 1.0e-5, &format!("primal[{n}]"));
+        assert_close_f32(outputs[1][n], 4.0, 1.0e-5, &format!("grad[{n}]"));
+    }
+}

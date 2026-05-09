@@ -43,6 +43,7 @@
 //! - `codegen` consumes resulting FIR modules.
 //! - `compiler` chooses whether to route requests to this fast-lane.
 
+mod block_reverse_ad;
 mod cse;
 mod delay;
 mod error;

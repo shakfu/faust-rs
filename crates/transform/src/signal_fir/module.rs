@@ -65,6 +65,7 @@ use sigtype::{SigType, Variability};
 use crate::signal_prepare::SimpleSigType;
 
 use super::SignalFirOutput;
+use super::block_reverse_ad::collect_bra_postorder;
 use super::delay::{
     DelayFirCtx, DelayLineInfo, DelayLoweringCtx, DelayManager, DelayOptions, GlobalCircularCursor,
     delay_size_for_amount, emit_delay1_for_line, emit_fixed_delay_for_line,
@@ -337,6 +338,7 @@ pub(super) fn build_module(
     }
     if has_reverse_outputs {
         lower.emit_reverse_time_rec_compute_resets();
+        lower.emit_bra_compute_resets();
     }
     // ═══════════════════════════════════════════════════════════════════════
     // ── Phase 2: CSE Materialization per Bucket ────────────────────────────
@@ -699,12 +701,30 @@ fn classify_reverse_time_outputs(arena: &TreeArena, signals: &[SigId]) -> Vec<bo
         if !visited.insert(sig) {
             return false;
         }
+        // ReverseTimeRec gradient projections run in the reverse sample loop.
         if matches!(
             match_sig(arena, sig),
             SigMatch::Proj(_, group)
                 if matches!(match_sig(arena, group), SigMatch::ReverseTimeRec(_))
         ) {
             return true;
+        }
+        // BlockReverseAD gradient projections (index ≥ primal_count) also run
+        // in the reverse sample loop so the TBPTT backward sweep executes at
+        // sample-loop indices going from BS−1 down to 0.
+        if let SigMatch::Proj(index, group) = match_sig(arena, sig) {
+            if let SigMatch::BlockReverseAD {
+                primal_count,
+                policy: _,
+                ..
+            } = match_sig(arena, group)
+            {
+                let pc = usize::try_from(primal_count).unwrap_or(0);
+                let idx = usize::try_from(index).unwrap_or(0);
+                if idx >= pc {
+                    return true;
+                }
+            }
         }
         arena.node(sig).is_some_and(|node| {
             node.children
@@ -856,6 +876,22 @@ struct SignalToFirLower<'a> {
     forward_output_by_sig_key: HashMap<String, usize>,
     /// True while lowering the reverse-time sample-loop slice.
     lowering_reverse_loop: bool,
+    /// Guards against re-emitting the backward sweep for a `SigBlockReverseAD`
+    /// group that has already been scheduled.  Keyed by the group `SigId`.
+    bra_state_scheduled: HashSet<SigId>,
+    /// Per-seed gradient `FirId` cache for emitted `SigBlockReverseAD` sweeps.
+    ///
+    /// Key: `(group_sig, seed_index)` where `seed_index` is the position of
+    /// the seed in the carrier's seed list.  Populated by
+    /// `ensure_bra_backward_sweep` and consumed by `lower_block_reverse_ad_proj`.
+    bra_grad_cache: HashMap<(SigId, usize), FirId>,
+    /// Carry variable names for `Delay1` nodes encountered inside a
+    /// `SigBlockReverseAD` backward sweep.  Keyed by the `Delay1` node `SigId`.
+    ///
+    /// Each carry variable persists in the DSP struct and is zeroed by
+    /// `emit_bra_compute_resets` before every reverse sample loop so that
+    /// no adjoint state leaks across host `compute()` calls.
+    bra_delay1_carry_vars: HashMap<SigId, String>,
 }
 
 /// One extern prototype recovered from a Faust `FFUN(...)` descriptor.
@@ -946,6 +982,9 @@ impl<'a> SignalToFirLower<'a> {
             forward_output_by_sig: HashMap::new(),
             forward_output_by_sig_key: HashMap::new(),
             lowering_reverse_loop: false,
+            bra_state_scheduled: HashSet::new(),
+            bra_grad_cache: HashMap::new(),
+            bra_delay1_carry_vars: HashMap::new(),
         }
     }
 
@@ -2268,6 +2307,410 @@ impl<'a> SignalToFirLower<'a> {
         }
     }
 
+    // ── BlockReverseAD (Phase B3) ─────────────────────────────────────────
+
+    /// Emits `compute()`-preamble resets for `SigBlockReverseAD` adjoint carry
+    /// variables.
+    ///
+    /// Each carry variable stores the anti-causal adjoint contribution for a
+    /// `Delay1` node inside the BRA body across reverse-loop samples.  Like
+    /// `ReverseTimeRec` adjoint carriers, these must be zeroed before each
+    /// reverse sample loop so no adjoint state leaks across host `compute()`
+    /// calls.
+    fn emit_bra_compute_resets(&mut self) {
+        let mut names: Vec<String> = self.bra_delay1_carry_vars.values().cloned().collect();
+        names.sort();
+        for name in names {
+            let zero = self.float_const(0.0);
+            let mut b = FirBuilder::new(&mut self.store);
+            self.control_statements
+                .push(b.store_var(name, AccessType::Struct, zero));
+        }
+    }
+
+    /// Lowers a `Proj(index, BlockReverseAD)` node.
+    ///
+    /// - Slots `0 .. primal_count - 1` are **primal** outputs: the body
+    ///   expression at that index is lowered directly in the forward sample
+    ///   loop.
+    /// - Slots `primal_count .. primal_count + seeds.len() - 1` are
+    ///   **gradient** outputs: `ensure_bra_backward_sweep` is called once to
+    ///   emit the TBPTT(BS, BS) backward adjoint sweep in the reverse sample
+    ///   loop, and the per-seed adjoint `FirId` is returned from the cache.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_block_reverse_ad_proj(
+        &mut self,
+        _node: SigId,
+        group: SigId,
+        index: usize,
+        primal_count: usize,
+        body_sigs: &[SigId],
+        seed_sigs: &[SigId],
+        cotangent_sigs: &[SigId],
+    ) -> Result<FirId, SignalFirError> {
+        if index < primal_count {
+            // Primal projection: lower the corresponding body signal directly.
+            return self.lower_signal(body_sigs[index]);
+        }
+        let seed_index = index - primal_count;
+        self.ensure_bra_backward_sweep(group, body_sigs, seed_sigs, cotangent_sigs)?;
+        self.bra_grad_cache
+            .get(&(group, seed_index))
+            .copied()
+            .ok_or_else(|| {
+                SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!(
+                        "BRA backward sweep did not produce gradient for seed index {seed_index}"
+                    ),
+                )
+            })
+    }
+
+    /// Ensures the TBPTT(BS, BS) backward adjoint sweep for `group` has been
+    /// emitted into the current (reverse) sample-loop phase.
+    ///
+    /// The sweep is emitted **at most once** per group per loop slice; the
+    /// `bra_state_scheduled` guard prevents re-emission when multiple gradient
+    /// projection slots for the same carrier are lowered.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. Build a unified postorder over all body roots (shared `visited` set
+    ///    handles DAG-shared sub-expressions).
+    /// 2. Lower each cotangent signal into a FIR value (constant `1.0` in the
+    ///    all-ones B1 convention).
+    /// 3. Seed the adjoint map: `adj[body_sigs[k]] += cotangent_firs[k]`.
+    /// 4. Walk the postorder in reverse, calling `propagate_bra_adj` for each
+    ///    node to distribute its accumulated adjoint to its children.
+    /// 5. Store per-seed gradient `FirId`s into `bra_grad_cache`.
+    fn ensure_bra_backward_sweep(
+        &mut self,
+        group: SigId,
+        body_sigs: &[SigId],
+        seed_sigs: &[SigId],
+        cotangent_sigs: &[SigId],
+    ) -> Result<(), SignalFirError> {
+        if !self.bra_state_scheduled.insert(group) {
+            return Ok(());
+        }
+
+        // 1. Collect unified postorder.
+        let mut visited = std::collections::HashSet::new();
+        let mut postorder = Vec::new();
+        for &body in body_sigs {
+            collect_bra_postorder(self.arena, body, &mut visited, &mut postorder);
+        }
+
+        // 2. Lower cotangent signals.
+        let mut cot_firs = Vec::with_capacity(cotangent_sigs.len());
+        for &c in cotangent_sigs {
+            cot_firs.push(self.lower_signal(c)?);
+        }
+
+        // 3. Seed the adjoint map.
+        let mut adj: std::collections::HashMap<SigId, FirId> = std::collections::HashMap::new();
+        for (k, &body_sig) in body_sigs.iter().enumerate() {
+            let cot = cot_firs[k];
+            Self::add_to_adjoint(
+                &mut self.store,
+                &mut adj,
+                body_sig,
+                cot,
+                self.real_ty.clone(),
+            );
+        }
+
+        // 4. Backward propagation in reverse postorder.
+        for &sig in postorder.iter().rev() {
+            let y_bar = match adj.get(&sig).copied() {
+                Some(fir) => fir,
+                None => continue,
+            };
+            self.propagate_bra_adj(sig, y_bar, &mut adj, group)?;
+        }
+
+        // 5. Cache gradient FirIds.
+        for (j, &seed) in seed_sigs.iter().enumerate() {
+            let grad = adj
+                .get(&seed)
+                .copied()
+                .unwrap_or_else(|| self.float_const(0.0));
+            self.bra_grad_cache.insert((group, j), grad);
+        }
+
+        Ok(())
+    }
+
+    /// Propagates the adjoint `y_bar` of `sig` to the signal's children,
+    /// updating `adj` according to the chain rule for each supported node kind.
+    ///
+    /// **Delay1** is anti-causal: rather than contributing directly to `adj[x]`,
+    /// it reads the carry variable (written by the *next* reverse-loop step)
+    /// as `adj[x]` and schedules a carry write to `post_output` for the
+    /// *previous* reverse-loop step.  This matches the TBPTT(BS, BS) reference
+    /// executor in `crates/compiler/tests/block_reverse_ad.rs`.
+    ///
+    /// Unsupported node kinds return a `SignalFirError::UnsupportedSignalNode`.
+    fn propagate_bra_adj(
+        &mut self,
+        sig: SigId,
+        y_bar: FirId,
+        adj: &mut std::collections::HashMap<SigId, FirId>,
+        group: SigId,
+    ) -> Result<(), SignalFirError> {
+        let real_ty = self.real_ty.clone();
+        match match_sig(self.arena, sig) {
+            // ── Leaves ─────────────────────────────────────────────────────
+            SigMatch::Real(_)
+            | SigMatch::Int(_)
+            | SigMatch::Input(_)
+            | SigMatch::HSlider(_)
+            | SigMatch::VSlider(_)
+            | SigMatch::NumEntry(_)
+            | SigMatch::Button(_)
+            | SigMatch::Checkbox(_) => {
+                // Seeds or constants: no children to propagate into.
+            }
+
+            // ── Casts: identity rule ────────────────────────────────────────
+            SigMatch::FloatCast(x) | SigMatch::IntCast(x) | SigMatch::BitCast(x) => {
+                Self::add_to_adjoint(&mut self.store, adj, x, y_bar, real_ty);
+            }
+
+            // ── BinOp ───────────────────────────────────────────────────────
+            SigMatch::BinOp(op, lhs, rhs) => match op {
+                BinOp::Add => {
+                    // adj[lhs] += y_bar; adj[rhs] += y_bar
+                    Self::add_to_adjoint(&mut self.store, adj, lhs, y_bar, real_ty.clone());
+                    Self::add_to_adjoint(&mut self.store, adj, rhs, y_bar, real_ty);
+                }
+                BinOp::Sub => {
+                    // adj[lhs] += y_bar; adj[rhs] += -y_bar
+                    Self::add_to_adjoint(&mut self.store, adj, lhs, y_bar, real_ty.clone());
+                    let zero = self.float_const(0.0);
+                    let neg_y_bar = {
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.binop(FirBinOp::Sub, zero, y_bar, real_ty.clone())
+                    };
+                    Self::add_to_adjoint(&mut self.store, adj, rhs, neg_y_bar, real_ty);
+                }
+                BinOp::Mul => {
+                    // adj[lhs] += y_bar * val[rhs]; adj[rhs] += y_bar * val[lhs]
+                    let rhs_val = self.lower_signal(rhs)?;
+                    let lhs_val = self.lower_signal(lhs)?;
+                    let lhs_adj = {
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.binop(FirBinOp::Mul, y_bar, rhs_val, real_ty.clone())
+                    };
+                    let rhs_adj = {
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.binop(FirBinOp::Mul, y_bar, lhs_val, real_ty.clone())
+                    };
+                    Self::add_to_adjoint(&mut self.store, adj, lhs, lhs_adj, real_ty.clone());
+                    Self::add_to_adjoint(&mut self.store, adj, rhs, rhs_adj, real_ty);
+                }
+                BinOp::Div => {
+                    // adj[lhs] += y_bar / val[rhs]
+                    // adj[rhs] += -y_bar * val[lhs] / (val[rhs]^2)
+                    let rhs_val = self.lower_signal(rhs)?;
+                    let lhs_val = self.lower_signal(lhs)?;
+                    let lhs_adj = {
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.binop(FirBinOp::Div, y_bar, rhs_val, real_ty.clone())
+                    };
+                    Self::add_to_adjoint(&mut self.store, adj, lhs, lhs_adj, real_ty.clone());
+                    let rhs_sq = {
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.binop(FirBinOp::Mul, rhs_val, rhs_val, real_ty.clone())
+                    };
+                    let zero = self.float_const(0.0);
+                    let neg_num = {
+                        let neg_y_bar = {
+                            let mut b = FirBuilder::new(&mut self.store);
+                            b.binop(FirBinOp::Sub, zero, y_bar, real_ty.clone())
+                        };
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.binop(FirBinOp::Mul, neg_y_bar, lhs_val, real_ty.clone())
+                    };
+                    let rhs_adj = {
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.binop(FirBinOp::Div, neg_num, rhs_sq, real_ty.clone())
+                    };
+                    Self::add_to_adjoint(&mut self.store, adj, rhs, rhs_adj, real_ty);
+                }
+                other => {
+                    return Err(SignalFirError::new(
+                        SignalFirErrorCode::UnsupportedSignalNode,
+                        format!(
+                            "BinOp {other:?} not differentiable in BlockReverseAD backward pass"
+                        ),
+                    ));
+                }
+            },
+
+            // ── Unary math ──────────────────────────────────────────────────
+            SigMatch::Sin(x) => {
+                // adj[x] += y_bar * cos(x)
+                let x_fir = self.lower_signal(x)?;
+                self.used_math_ops.insert(FirMathOp::Cos);
+                let rt = self.real_ty();
+                let cos_x = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.math_call(FirMathOp::Cos, &[x_fir], rt)
+                };
+                let x_adj = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.binop(FirBinOp::Mul, y_bar, cos_x, real_ty.clone())
+                };
+                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
+            }
+            SigMatch::Cos(x) => {
+                // adj[x] += -y_bar * sin(x)
+                let x_fir = self.lower_signal(x)?;
+                self.used_math_ops.insert(FirMathOp::Sin);
+                let rt = self.real_ty();
+                let sin_x = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.math_call(FirMathOp::Sin, &[x_fir], rt)
+                };
+                let zero = self.float_const(0.0);
+                let neg_y_bar = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.binop(FirBinOp::Sub, zero, y_bar, real_ty.clone())
+                };
+                let x_adj = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.binop(FirBinOp::Mul, neg_y_bar, sin_x, real_ty.clone())
+                };
+                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
+            }
+            SigMatch::Exp(x) => {
+                // adj[x] += y_bar * exp(x)  [= y_bar * val[sig]]
+                let exp_val = self.lower_signal(sig)?;
+                let x_adj = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.binop(FirBinOp::Mul, y_bar, exp_val, real_ty.clone())
+                };
+                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
+            }
+            SigMatch::Log(x) => {
+                // adj[x] += y_bar / x
+                let x_fir = self.lower_signal(x)?;
+                let x_adj = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.binop(FirBinOp::Div, y_bar, x_fir, real_ty.clone())
+                };
+                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
+            }
+            SigMatch::Sqrt(x) => {
+                // adj[x] += y_bar / (2 * sqrt(x))  [= y_bar / (2 * val[sig])]
+                let sqrt_val = self.lower_signal(sig)?;
+                let two = self.float_const(2.0);
+                let denom = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.binop(FirBinOp::Mul, two, sqrt_val, real_ty.clone())
+                };
+                let x_adj = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.binop(FirBinOp::Div, y_bar, denom, real_ty.clone())
+                };
+                Self::add_to_adjoint(&mut self.store, adj, x, x_adj, real_ty);
+            }
+
+            // ── Delay1: anti-causal carry ───────────────────────────────────
+            SigMatch::Delay1(x) => {
+                // y[n] = x[n-1].  Adjoint: adj[x][n-1] += adj[y][n].
+                //
+                // In the reverse sample loop at step n:
+                //   carry_load  = struct field written at step n+1  → adj[x] contribution
+                //   carry_store = y_bar → struct field for step n-1 to read
+                //
+                // Ordering: `immediate` runs before `post_output` within one
+                // iteration, so the load always reads the value stored at n+1.
+                let carry_name = self.ensure_bra_delay1_carry(sig, group)?;
+                let carry_load = {
+                    let rt = self.real_ty();
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.load_var(carry_name.clone(), AccessType::Struct, rt)
+                };
+                let carry_store = {
+                    let mut b = FirBuilder::new(&mut self.store);
+                    b.store_var(carry_name, AccessType::Struct, y_bar)
+                };
+                self.sample_phases.post_output.push(carry_store);
+                Self::add_to_adjoint(&mut self.store, adj, x, carry_load, real_ty);
+            }
+
+            other => {
+                return Err(SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!("signal {other:?} not supported in BlockReverseAD backward pass (B3)"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Declares and returns the name of the adjoint carry variable for a
+    /// `Delay1` node encountered inside a `SigBlockReverseAD` backward sweep.
+    ///
+    /// The carry is stored as a real-typed DSP struct field named
+    /// `fBraCarryN` where N comes from the monotonic loop-var counter.  It is
+    /// zeroed by `emit_bra_compute_resets` before each reverse sample loop so
+    /// no adjoint state leaks across host `compute()` calls.
+    ///
+    /// Idempotent: subsequent calls for the same `delay1_node` return the same
+    /// name without emitting a second declaration.
+    fn ensure_bra_delay1_carry(
+        &mut self,
+        delay1_node: SigId,
+        _group: SigId,
+    ) -> Result<String, SignalFirError> {
+        if let Some(name) = self.bra_delay1_carry_vars.get(&delay1_node) {
+            return Ok(name.clone());
+        }
+        let name = format!("fBraCarry{}", self.next_loop_var_id);
+        self.next_loop_var_id += 1;
+        let real_ty = self.real_ty.clone();
+        let zero = self.float_const(0.0);
+        // Declare struct field; register a reset-time zero init.
+        self.ensure_named_struct_var(&name, real_ty, Some(zero));
+        // Also register a clear-time zero init for `instanceClear`.
+        let zero2 = self.float_const(0.0);
+        self.register_clear_init(name.clone(), zero2);
+        self.bra_delay1_carry_vars.insert(delay1_node, name.clone());
+        Ok(name)
+    }
+
+    /// Accumulates `new_term` into the adjoint of `sig`, building an `Add`
+    /// node when a prior term already exists.
+    ///
+    /// This is the FIR-level equivalent of `adj[sig] += new_term` in the
+    /// scalar BPTT executor.
+    fn add_to_adjoint(
+        store: &mut FirStore,
+        adj: &mut std::collections::HashMap<SigId, FirId>,
+        sig: SigId,
+        new_term: FirId,
+        real_ty: FirType,
+    ) {
+        let entry = adj.entry(sig);
+        match entry {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                let old = *e.get();
+                let sum = {
+                    let mut b = FirBuilder::new(store);
+                    b.binop(FirBinOp::Add, old, new_term, real_ty)
+                };
+                *e.get_mut() = sum;
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(new_term);
+            }
+        }
+    }
+
     /// Emits one floating-point constant at the internal real precision.
     ///
     /// Uses `Float32` or `Float64` depending on `real_ty`.  Never emits
@@ -3548,6 +3991,50 @@ impl<'a> SignalToFirLower<'a> {
                 next_loop_var_id: &mut self.next_loop_var_id,
             };
             return Ok(recursion_ctx.load_feedback_carrier(&rec_ref.info, current_index, real_ty));
+        }
+
+        // ── Fast path: SigBlockReverseAD carrier ──
+        if let SigMatch::BlockReverseAD {
+            body,
+            primal_count,
+            seeds,
+            cotangents,
+            policy: _,
+        } = match_sig(self.arena, group)
+        {
+            let pc = usize::try_from(primal_count).map_err(|_| {
+                SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!("negative primal_count in BlockReverseAD Proj({index})"),
+                )
+            })?;
+            let body_sigs = list_to_vec(self.arena, body).ok_or_else(|| {
+                SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    "malformed body list in BlockReverseAD".to_string(),
+                )
+            })?;
+            let seed_sigs = list_to_vec(self.arena, seeds).ok_or_else(|| {
+                SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    "malformed seed list in BlockReverseAD".to_string(),
+                )
+            })?;
+            let cotangent_sigs = list_to_vec(self.arena, cotangents).ok_or_else(|| {
+                SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    "malformed cotangent list in BlockReverseAD".to_string(),
+                )
+            })?;
+            return self.lower_block_reverse_ad_proj(
+                node,
+                group,
+                index_usize,
+                pc,
+                &body_sigs,
+                &seed_sigs,
+                &cotangent_sigs,
+            );
         }
 
         // ── Decode all body signals from the group ──
