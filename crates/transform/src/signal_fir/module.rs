@@ -1495,8 +1495,25 @@ impl<'a> SignalToFirLower<'a> {
     fn lower_fconst(&mut self, sig: SigId, name: SigId) -> Result<FirId, SignalFirError> {
         let name = self.label_text(name);
         if name == "fSamplingFreq" || name == "fSamplingRate" {
+            // The Faust runtime stores the sample rate as a 32-bit integer
+            // (`fSampleRate` struct field, type `int`).  However, when the
+            // Faust signal tree uses this constant in floating-point arithmetic
+            // (e.g. `si.smoo` → `tau2pole` → `exp(-2π/ma.SR)`), the prepared
+            // type of the FConst node is `Real`.  Emitting a bare `Int32` load
+            // there causes a FIR type-mismatch error at verify time.
+            //
+            // Fix: load as `Int32` and then cast to the expected FIR type when
+            // the signal's prepared type is `Real`.
+            let int_val = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.load_var("fSampleRate", AccessType::Struct, FirType::Int32)
+            };
+            let expected_ty = self.signal_fir_type(sig)?;
+            if expected_ty == FirType::Int32 {
+                return Ok(int_val);
+            }
             let mut b = FirBuilder::new(&mut self.store);
-            return Ok(b.load_var("fSampleRate", AccessType::Struct, FirType::Int32));
+            return Ok(b.cast(expected_ty, int_val));
         }
         self.unsupported_node(
             sig,
@@ -2642,7 +2659,23 @@ impl<'a> SignalToFirLower<'a> {
             }
 
             // ── Casts: identity rule ────────────────────────────────────────
-            SigMatch::FloatCast(x) | SigMatch::IntCast(x) | SigMatch::BitCast(x) => {
+            SigMatch::FloatCast(x) => {
+                // Gradient propagates through float-to-float casts only.
+                //
+                // When `x` is integer-typed (e.g. `no.noise`'s LCG accumulator
+                // cast to float via `float`), the integer arithmetic is
+                // non-differentiable: backpropagating a Float32 adjoint into an
+                // Int32 subtree would produce invalid `BinOp(Float32, Int32)`
+                // FIR nodes in the reverse loop.  Stop gradient propagation here.
+                let x_is_int = matches!(
+                    self.signal_fir_type(x),
+                    Ok(FirType::Int32) | Ok(FirType::Int64)
+                );
+                if !x_is_int {
+                    Self::add_to_adjoint(&mut self.store, adj, x, y_bar, real_ty);
+                }
+            }
+            SigMatch::IntCast(x) | SigMatch::BitCast(x) => {
                 Self::add_to_adjoint(&mut self.store, adj, x, y_bar, real_ty);
             }
 

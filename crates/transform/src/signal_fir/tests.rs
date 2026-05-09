@@ -3974,3 +3974,60 @@ fn bra_recursive_one_pole_produces_feedback_carry_struct_field() {
          for the TBPTT feedback carry"
     );
 }
+
+/// Regression test: BRA body containing a `FloatCast(int_rec)` node (e.g.
+/// `no.noise`'s integer LCG accumulator cast to float) must compile without
+/// emitting invalid `BinOp(Float32, Int32)` FIR nodes in the backward sweep.
+///
+/// Before this fix, `propagate_bra_adj` propagated the Float32 adjoint into
+/// integer-typed subtrees via the `FloatCast(x)` identity rule, causing the
+/// FIR checker to flag `[FRS-FIR-0001] BinOp operands have incompatible types:
+/// Float32 vs Int32` in `compute`.
+///
+/// The fix: stop gradient propagation at `FloatCast(x)` when `x` is
+/// integer-typed (non-differentiable integer-to-float cast).
+///
+/// Circuit: `bra(FloatCast(int_rec) * seed, seed)` — the integer LCG
+/// recursion `Proj(0, SYMREC(v, Add(Mul(Delay1(Proj(0, SYMREF(v))), 1103515245), 12345)))`
+/// cast to float, then multiplied by a float seed.
+#[test]
+fn bra_body_with_integer_float_cast_compiles() {
+    let mut arena = TreeArena::new();
+
+    // Build an integer LCG recursion: iRec = 1103515245 * iRec + 12345
+    // Proj(0, SYMREC(v, Add(Mul(Delay1(Proj(0, SYMREF(v))), Int(1103515245)), Int(12345))))
+    let self_ref = de_bruijn_ref(&mut arena, 1);
+    let proj_ref = SigBuilder::new(&mut arena).proj(0, self_ref);
+    let delayed = SigBuilder::new(&mut arena).delay1(proj_ref);
+    let mult_const = SigBuilder::new(&mut arena).int(1103515245);
+    let add_const = SigBuilder::new(&mut arena).int(12345);
+    let lcg_mul = SigBuilder::new(&mut arena).binop(BinOp::Mul, delayed, mult_const);
+    let lcg_body = SigBuilder::new(&mut arena).binop(BinOp::Add, lcg_mul, add_const);
+    let lcg_body_list = arena.cons(lcg_body, arena.nil());
+    let lcg_rec = de_bruijn_rec(&mut arena, lcg_body_list);
+    let lcg_proj = SigBuilder::new(&mut arena).proj(0, lcg_rec); // Int32 output
+
+    // Cast the integer LCG to float (mimics `no.noise`'s `float` primitive)
+    let lcg_float = SigBuilder::new(&mut arena).float_cast(lcg_proj); // Float32
+
+    // Multiply by a float seed: body = FloatCast(int_rec) * seed
+    let seed = SigBuilder::new(&mut arena).real(0.5);
+    let body_expr = SigBuilder::new(&mut arena).binop(BinOp::Mul, lcg_float, seed);
+
+    // BRA: differentiate body w.r.t. seed
+    let cot = SigBuilder::new(&mut arena).real(1.0);
+    let carrier = SigBuilder::new(&mut arena).block_reverse_ad(
+        &[body_expr],
+        &[seed],
+        &[cot],
+        BlockRevPolicy::TapeFull,
+    );
+    let primal = SigBuilder::new(&mut arena).proj(0, carrier);
+    let grad = SigBuilder::new(&mut arena).proj(1, carrier);
+
+    // Before the fix this crashed with:
+    //   [FRS-FIR-0001] BinOp operands have incompatible types: Float32 vs Int32
+    // because the backward sweep propagated Float32 gradient into the Int32 LCG body.
+    compile_fastlane_without_ui(&arena, &[primal, grad], 0, 2, &SignalFirOptions::default())
+        .expect("BRA body with FloatCast(int_rec) must compile without BinOp type mismatch");
+}
