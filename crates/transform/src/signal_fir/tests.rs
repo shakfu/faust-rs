@@ -23,7 +23,7 @@ use super::{
     siggen::interpret_generator_for_test,
 };
 use fir::{AccessType, FirBinOp, FirMatch, FirType, match_fir};
-use signals::{BinOp, SigBuilder};
+use signals::{BinOp, BlockRevPolicy, SigBuilder};
 
 use tlib::{TreeArena, de_bruijn_rec, de_bruijn_ref, match_sym_rec};
 use ui::{ControlKind, ControlRange, ControlSpec, UiBuilder, UiProgram, UiRootOrigin};
@@ -3592,5 +3592,183 @@ fn konst_sr_based_mul_hoisted_to_instance_constants() {
     assert!(
         has_fconst,
         "non-trivial init-time SR expression should be hoisted as fConst*"
+    );
+}
+
+// ── BlockReverseAD golden FIR tests (Phase B3–B6) ────────────────────────────
+
+/// A BRA carrier lowering must produce exactly two sample loops in `compute`:
+/// one forward loop for the primal output and one **reverse** loop for the
+/// gradient output.
+///
+/// Circuit: `process = rad(2 * x, x)` where x is a constant seed (real=2.0).
+/// The primal output is `2 * 2.0 = 4.0` and the gradient w.r.t. x is `2.0`.
+///
+/// This test checks the structural FIR property: the compute function contains
+/// two `SimpleForLoop` nodes, the second of which has `is_reverse = true`.
+#[test]
+fn bra_simple_linear_produces_forward_and_reverse_loops() {
+    let mut arena = TreeArena::new();
+
+    // body = 2.0 * x  where x = Real(2.0) (constant seed)
+    let x = SigBuilder::new(&mut arena).real(2.0);
+    let two = SigBuilder::new(&mut arena).real(2.0);
+    let body = SigBuilder::new(&mut arena).binop(BinOp::Mul, two, x);
+    let cot = SigBuilder::new(&mut arena).real(1.0);
+
+    let carrier = SigBuilder::new(&mut arena).block_reverse_ad(
+        &[body],
+        &[x],
+        &[cot],
+        BlockRevPolicy::TapeFull,
+    );
+
+    // Proj(0, carrier) = primal output (forward loop)
+    // Proj(1, carrier) = gradient output (reverse loop)
+    let primal = SigBuilder::new(&mut arena).proj(0, carrier);
+    let grad = SigBuilder::new(&mut arena).proj(1, carrier);
+
+    let out =
+        compile_fastlane_without_ui(&arena, &[primal, grad], 0, 2, &SignalFirOptions::default())
+            .expect("simple BRA should compile");
+
+    let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+        panic!("module root expected");
+    };
+
+    // Collect all SimpleForLoop nodes in compute.
+    let compute_body = find_decl_fun_body(&out.store, functions, "compute");
+    let FirMatch::Block(stmts) = match_fir(&out.store, compute_body) else {
+        panic!("compute body block expected");
+    };
+    let loops: Vec<bool> = stmts
+        .iter()
+        .filter_map(|id| match match_fir(&out.store, *id) {
+            FirMatch::SimpleForLoop { is_reverse, .. } => Some(is_reverse),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        loops.len(),
+        2,
+        "BRA should produce exactly two sample loops (forward + reverse), got {loops:?}"
+    );
+    assert!(
+        !loops[0],
+        "first loop should be forward (is_reverse = false)"
+    );
+    assert!(
+        loops[1],
+        "second loop should be reverse (is_reverse = true)"
+    );
+}
+
+/// A BRA carrier with a `Delay1` in the body must declare a `fBraCarry*`
+/// struct field for the anti-causal adjoint carry.
+///
+/// Circuit: `body = delay1(x)` where x is a constant seed.
+/// The BRA backward rule for `Delay1(x)` allocates a carry variable
+/// (`fBraCarry0`) to propagate `adj[x][n-1] += adj[Delay1(x)][n]`
+/// across reverse-loop iterations.
+#[test]
+fn bra_delay1_seed_produces_carry_struct_field() {
+    let mut arena = TreeArena::new();
+
+    let x = SigBuilder::new(&mut arena).real(0.5);
+    let body = SigBuilder::new(&mut arena).delay1(x);
+    let cot = SigBuilder::new(&mut arena).real(1.0);
+
+    let carrier = SigBuilder::new(&mut arena).block_reverse_ad(
+        &[body],
+        &[x],
+        &[cot],
+        BlockRevPolicy::TapeFull,
+    );
+    let primal = SigBuilder::new(&mut arena).proj(0, carrier);
+    let grad = SigBuilder::new(&mut arena).proj(1, carrier);
+
+    let out =
+        compile_fastlane_without_ui(&arena, &[primal, grad], 0, 2, &SignalFirOptions::default())
+            .expect("Delay1 BRA should compile");
+
+    let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+        panic!("module root expected");
+    };
+    let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+        panic!("dsp_struct block expected");
+    };
+
+    let has_bra_carry = struct_items.iter().any(|id| {
+        matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar { ref name, .. } if name.starts_with("fBraCarry")
+        )
+    });
+    assert!(
+        has_bra_carry,
+        "Delay1 in BRA body should produce a fBraCarry* struct field for the anti-causal carry"
+    );
+}
+
+/// A BRA carrier wrapping a recursive circuit must declare a `fBraCarry*`
+/// struct field for the TBPTT feedback carry.
+///
+/// Circuit: `process = rad(c : +~*(c), c)` — the Faust one-pole feedback
+/// filter where `c` is both input and feedback coefficient.  In Signal IR
+/// the recursive circuit becomes `Proj(0, SYMREC(var, Add(Input, Mul(c,
+/// Delay1(Proj(0, SYMREF(var)))))))`.  The pre-scan in
+/// `ensure_bra_backward_sweep` allocates a `fBraCarry*` struct field for the
+/// `Delay1(Proj(0, SYMREF))` feedback node.
+#[test]
+fn bra_recursive_one_pole_produces_feedback_carry_struct_field() {
+    let mut arena = TreeArena::new();
+
+    // Build: Proj(0, Rec([Input(0) + c * Delay1(Proj(0, self_ref))]))
+    let c = SigBuilder::new(&mut arena).real(0.5); // feedback coefficient seed
+    let self_ref = de_bruijn_ref(&mut arena, 1);
+    let proj_ref = SigBuilder::new(&mut arena).proj(0, self_ref);
+    let delayed = SigBuilder::new(&mut arena).delay1(proj_ref);
+    let feedback = SigBuilder::new(&mut arena).binop(BinOp::Mul, c, delayed);
+    let input0 = SigBuilder::new(&mut arena).input(0);
+    let body_expr = SigBuilder::new(&mut arena).binop(BinOp::Add, input0, feedback);
+    let body_list = arena.cons(body_expr, arena.nil());
+    let rec_group = de_bruijn_rec(&mut arena, body_list);
+    let rec_out = SigBuilder::new(&mut arena).proj(0, rec_group);
+
+    // BRA: differentiate rec_out w.r.t. c
+    let cot = SigBuilder::new(&mut arena).real(1.0);
+    let carrier = SigBuilder::new(&mut arena).block_reverse_ad(
+        &[rec_out],
+        &[c],
+        &[cot],
+        BlockRevPolicy::TapeFull,
+    );
+    let primal = SigBuilder::new(&mut arena).proj(0, carrier);
+    let grad = SigBuilder::new(&mut arena).proj(1, carrier);
+
+    let out =
+        compile_fastlane_without_ui(&arena, &[primal, grad], 1, 2, &SignalFirOptions::default())
+            .expect("recursive BRA (one-pole) should compile");
+
+    let FirMatch::Module { dsp_struct, .. } = match_fir(&out.store, out.module) else {
+        panic!("module root expected");
+    };
+    let FirMatch::Block(struct_items) = match_fir(&out.store, dsp_struct) else {
+        panic!("dsp_struct block expected");
+    };
+
+    // A carry struct field for the recursive feedback (Delay1(Proj(0, SYMREF)))
+    // must be present after Phase B6 support.
+    let has_bra_carry = struct_items.iter().any(|id| {
+        matches!(
+            match_fir(&out.store, *id),
+            FirMatch::DeclareVar { ref name, .. } if name.starts_with("fBraCarry")
+        )
+    });
+    assert!(
+        has_bra_carry,
+        "recursive BRA (one-pole) should produce a fBraCarry* struct field \
+         for the TBPTT feedback carry"
     );
 }
