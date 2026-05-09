@@ -1,4 +1,4 @@
-//! Signal-level helpers for `SigBlockReverseAD` FIR lowering (Phase B3).
+//! Signal-level helpers for `SigBlockReverseAD` FIR lowering (Phase B3/B4).
 //!
 //! This module provides pure signal-tree utilities used by `module.rs` when
 //! lowering `SigBlockReverseAD` carriers into FIR reverse-mode adjoint code.
@@ -8,12 +8,22 @@
 //!
 //! # Scope
 //!
-//! Phase B3 supports the TBPTT(BS, BS) backward sweep without a tape:
-//! body signals must be **trivially reverse-evaluable** (i.e. their forward
+//! **Phase B3** supports the TBPTT(BS, BS) backward sweep without a tape:
+//! body signals must be *trivially reverse-evaluable* (i.e. their forward
 //! value can be correctly reconstructed in the reverse sample loop without
 //! storing a tape).  Non-trivially-evaluable signals (e.g. `Delay1(Delay1(x))`)
-//! cause a `SignalFirError::UnsupportedSignalNode` at lowering time.  Full
-//! tape support is planned for Phase B4.
+//! cause a `SignalFirError::UnsupportedSignalNode` at lowering time.
+//!
+//! **Phase B4** extends B3 with a per-sample forward tape.  When a body
+//! contains a node that is **not** trivially reverse-evaluable but is needed
+//! as a multiplier or divisor in a backward rule (e.g. `Delay1(x)` inside a
+//! `Mul`), [`collect_tape_needed_values`] identifies which signal values must
+//! be recorded during the forward loop.  `module.rs` then:
+//! 1. Declares a `fBraTapeN: Array(real_ty, MAX_BRA_TAPE_BLOCK_SIZE)` struct
+//!    field for each tape-needed signal.
+//! 2. Stores each value into the tape at `sample_end` of the forward loop.
+//! 3. In the reverse loop, loads from the tape via `load_bra_fwd_value`
+//!    instead of calling `lower_signal` — which would read incorrect state.
 //!
 //! # Trivial reverse-evaluability
 //!
@@ -29,7 +39,7 @@
 
 use std::collections::HashSet;
 
-use signals::{SigId, SigMatch, match_sig};
+use signals::{BinOp, SigId, SigMatch, match_sig};
 use tlib::TreeArena;
 
 /// Returns `true` if `sig` can be correctly re-evaluated in the **reverse**
@@ -138,4 +148,58 @@ pub(super) fn collect_bra_postorder(
         _ => {}
     }
     order.push(root);
+}
+
+/// Collects the set of signals whose **forward** value must be stored on a
+/// tape during the forward sample loop so that the backward sweep can load
+/// them instead of re-evaluating `lower_signal` in reverse order.
+///
+/// A signal `v` is *tape-needed* when the backward differentiation rule for
+/// some node in `postorder` must multiply or divide by `v`'s forward value
+/// *and* `v` is **not** trivially reverse-evaluable (i.e.
+/// [`is_trivially_reverse_evaluable`] returns `false` for `v`).
+///
+/// Concretely:
+///
+/// | Node kind          | Tape-needed values                         |
+/// |--------------------|---------------------------------------------|
+/// | `Mul(lhs, rhs)`    | `lhs` if not trivial; `rhs` if not trivial |
+/// | `Div(lhs, rhs)`    | `lhs` if not trivial; `rhs` if not trivial |
+/// | `Sin(x)` / `Cos(x)` / `Log(x)` | `x` if not trivial            |
+/// | `Exp(x)`           | `sig` (= `exp(x)`) if `x` not trivial      |
+/// | `Sqrt(x)`          | `sig` (= `sqrt(x)`) if `x` not trivial     |
+///
+/// For `Exp` and `Sqrt` the backward rule reuses the node value itself
+/// (`y_bar * val[sig]` and `y_bar / (2 * val[sig])` respectively), so `sig`
+/// is taped rather than `x` when `x` is not trivially re-evaluable.
+///
+/// The returned set may be empty when all backward operands are trivially
+/// re-evaluable (the common case for purely feedforward bodies).
+pub(super) fn collect_tape_needed_values(arena: &TreeArena, postorder: &[SigId]) -> HashSet<SigId> {
+    let mut needed = HashSet::new();
+    for &sig in postorder {
+        match match_sig(arena, sig) {
+            SigMatch::BinOp(BinOp::Mul | BinOp::Div, lhs, rhs) => {
+                if !is_trivially_reverse_evaluable(arena, lhs) {
+                    needed.insert(lhs);
+                }
+                if !is_trivially_reverse_evaluable(arena, rhs) {
+                    needed.insert(rhs);
+                }
+            }
+            SigMatch::Sin(x) | SigMatch::Cos(x) | SigMatch::Log(x) => {
+                if !is_trivially_reverse_evaluable(arena, x) {
+                    needed.insert(x);
+                }
+            }
+            SigMatch::Exp(x) | SigMatch::Sqrt(x) => {
+                // Backward rule uses val[sig], not x directly.
+                if !is_trivially_reverse_evaluable(arena, x) {
+                    needed.insert(sig);
+                }
+            }
+            _ => {}
+        }
+    }
+    needed
 }

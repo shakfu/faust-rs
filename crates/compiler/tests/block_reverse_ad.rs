@@ -1111,3 +1111,57 @@ process = rad(x * x, x);
         assert_close_f32(outputs[1][n], 4.0, 1.0e-5, &format!("grad[{n}]"));
     }
 }
+
+/// `process = rad(x' * x, x)` with `x = hslider("x", 2.0, …)`.
+///
+/// This is the canonical **Phase B4 tape** test: `x'` (Delay1) is not
+/// trivially reverse-evaluable, so its forward value must be stored on a
+/// tape during the forward loop and loaded during the backward sweep.
+///
+/// Layout: `[primal, grad_x]` per frame.
+///
+/// Forward values: `y[n] = x[n-1] * x[n] = delay1(x)[n] * x`.
+/// - `y[0] = 0 * 2 = 0`   (delay initial state = 0)
+/// - `y[n>0] = 2 * 2 = 4`
+///
+/// Backward (adjoint of `x` given cotangent 1.0 at output `y`):
+/// - By the product rule:  `adj[x][n] += y_bar[n] * delay1(x)[n]`
+///                                     (from the rhs position)
+///                        `+ y_bar[n+1] * x[n+1]` (from the Delay1 carry at n+1)
+///
+/// Concretely at each reverse step n:
+/// - `n = BS-1`: rhs contrib = `tape[Delay1][BS-1]` = `x[BS-2]` = 2.0;
+///               lhs contrib from carry (n+1 doesn't exist) = 0.
+///               → `grad[BS-1]` = 2.0
+/// - `n = 1..BS-2`: rhs = tape[Delay1][n] = 2.0; lhs from carry = x[n+1] = 2.0
+///               → `grad[n]` = 4.0
+/// - `n = 0`: rhs = tape[Delay1][0] = 0.0 (delay initial state);
+///               lhs from carry = x[1] = 2.0
+///               → `grad[0]` = 2.0
+///
+/// Sum of gradients = 2 + 4*(BS-2) + 2 = 4*(BS-1) = 28 for BS=8.
+/// This matches the finite-difference check of `L = sum_n y[n]` with
+/// `dL/dx = sum_n d(y[n])/dx`.
+#[test]
+fn fir_bra_delay1_mul_tape() {
+    let frame_count = BS;
+    let source = r#"
+x = hslider("x", 2.0, 0.0, 4.0, 0.01);
+process = rad(x' * x, x);
+"#;
+    let outputs = run_bra_source("fir-bra-delay1-mul-tape", source, frame_count);
+    assert_eq!(outputs.len(), 2, "layout: [primal, grad]");
+
+    // Primal: delay1(x)[n] * x.
+    assert_close_f32(outputs[0][0], 0.0, 1.0e-5, "primal[0]");
+    for n in 1..frame_count {
+        assert_close_f32(outputs[0][n], 4.0, 1.0e-5, &format!("primal[{n}]"));
+    }
+
+    // Gradient: per-sample adjoint of x.
+    assert_close_f32(outputs[1][0], 2.0, 1.0e-5, "grad[0]");
+    for n in 1..frame_count - 1 {
+        assert_close_f32(outputs[1][n], 4.0, 1.0e-5, &format!("grad[{n}]"));
+    }
+    assert_close_f32(outputs[1][frame_count - 1], 2.0, 1.0e-5, "grad[BS-1]");
+}

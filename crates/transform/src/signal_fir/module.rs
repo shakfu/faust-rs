@@ -65,7 +65,7 @@ use sigtype::{SigType, Variability};
 use crate::signal_prepare::SimpleSigType;
 
 use super::SignalFirOutput;
-use super::block_reverse_ad::collect_bra_postorder;
+use super::block_reverse_ad::{collect_bra_postorder, collect_tape_needed_values};
 use super::delay::{
     DelayFirCtx, DelayLineInfo, DelayLoweringCtx, DelayManager, DelayOptions, GlobalCircularCursor,
     delay_size_for_amount, emit_delay1_for_line, emit_fixed_delay_for_line,
@@ -108,6 +108,17 @@ impl SamplePhases {
         all
     }
 }
+
+/// Maximum number of samples that can be stored in a BRA forward tape array.
+///
+/// Tape arrays are declared as `fBraTapeN: Array(real_ty, MAX_BRA_TAPE_BLOCK_SIZE)`.
+/// The host must not call `compute()` with a frame count larger than this value
+/// when using a `SigBlockReverseAD` carrier; doing so would overflow the tape.
+///
+/// 8 192 samples is the default upper bound chosen to stay within typical L1/L2
+/// cache pressure while leaving room for the usual block sizes used in practice
+/// (64, 128, 256, 512, 1024 samples).
+const MAX_BRA_TAPE_BLOCK_SIZE: usize = 8192;
 
 /// Deterministic prototype emission order for math helper functions.
 ///
@@ -892,6 +903,18 @@ struct SignalToFirLower<'a> {
     /// `emit_bra_compute_resets` before every reverse sample loop so that
     /// no adjoint state leaks across host `compute()` calls.
     bra_delay1_carry_vars: HashMap<SigId, String>,
+    /// Tape array variable names for signals recorded during the forward loop.
+    ///
+    /// Key: signal `SigId` whose forward value must be replayed in the reverse
+    /// loop.  Value: the struct-field name of the `Array(real_ty,
+    /// MAX_BRA_TAPE_BLOCK_SIZE)` used to store/load it.
+    ///
+    /// Populated by `ensure_bra_tape_stores` and consumed by
+    /// `load_bra_fwd_value`.
+    bra_tape_store_var: HashMap<SigId, String>,
+    /// Guard preventing `ensure_bra_tape_stores` from being called more than
+    /// once per `SigBlockReverseAD` group.
+    bra_tape_stores_scheduled: HashSet<SigId>,
 }
 
 /// One extern prototype recovered from a Faust `FFUN(...)` descriptor.
@@ -985,6 +1008,8 @@ impl<'a> SignalToFirLower<'a> {
             bra_state_scheduled: HashSet::new(),
             bra_grad_cache: HashMap::new(),
             bra_delay1_carry_vars: HashMap::new(),
+            bra_tape_store_var: HashMap::new(),
+            bra_tape_stores_scheduled: HashSet::new(),
         }
     }
 
@@ -2349,8 +2374,12 @@ impl<'a> SignalToFirLower<'a> {
         cotangent_sigs: &[SigId],
     ) -> Result<FirId, SignalFirError> {
         if index < primal_count {
-            // Primal projection: lower the corresponding body signal directly.
-            return self.lower_signal(body_sigs[index]);
+            // Primal projection: lower the body signal and schedule any tape
+            // stores needed by the backward sweep (Phase B4).  Tape scheduling
+            // is idempotent so multiple primal slots calling this are safe.
+            let val = self.lower_signal(body_sigs[index])?;
+            self.ensure_bra_tape_stores(group, body_sigs, seed_sigs, cotangent_sigs)?;
+            return Ok(val);
         }
         let seed_index = index - primal_count;
         self.ensure_bra_backward_sweep(group, body_sigs, seed_sigs, cotangent_sigs)?;
@@ -2451,6 +2480,13 @@ impl<'a> SignalToFirLower<'a> {
     /// *previous* reverse-loop step.  This matches the TBPTT(BS, BS) reference
     /// executor in `crates/compiler/tests/block_reverse_ad.rs`.
     ///
+    /// **Phase B4 tape**: for `Mul`, `Div`, and unary math nodes whose operand
+    /// value must be replayed from the forward pass, this method uses
+    /// [`Self::load_bra_fwd_value`] instead of `lower_signal`.  When a tape
+    /// array was declared by `ensure_bra_tape_stores` for that signal, the
+    /// tape load is emitted; otherwise `lower_signal` is called (safe for
+    /// trivially reverse-evaluable signals).
+    ///
     /// Unsupported node kinds return a `SignalFirError::UnsupportedSignalNode`.
     fn propagate_bra_adj(
         &mut self,
@@ -2497,8 +2533,11 @@ impl<'a> SignalToFirLower<'a> {
                 }
                 BinOp::Mul => {
                     // adj[lhs] += y_bar * val[rhs]; adj[rhs] += y_bar * val[lhs]
-                    let rhs_val = self.lower_signal(rhs)?;
-                    let lhs_val = self.lower_signal(lhs)?;
+                    // Use load_bra_fwd_value so non-trivial operands (e.g.
+                    // Delay1(x)) are read from the forward tape rather than
+                    // re-evaluated in the reverse loop (Phase B4).
+                    let rhs_val = self.load_bra_fwd_value(rhs)?;
+                    let lhs_val = self.load_bra_fwd_value(lhs)?;
                     let lhs_adj = {
                         let mut b = FirBuilder::new(&mut self.store);
                         b.binop(FirBinOp::Mul, y_bar, rhs_val, real_ty.clone())
@@ -2513,8 +2552,8 @@ impl<'a> SignalToFirLower<'a> {
                 BinOp::Div => {
                     // adj[lhs] += y_bar / val[rhs]
                     // adj[rhs] += -y_bar * val[lhs] / (val[rhs]^2)
-                    let rhs_val = self.lower_signal(rhs)?;
-                    let lhs_val = self.lower_signal(lhs)?;
+                    let rhs_val = self.load_bra_fwd_value(rhs)?;
+                    let lhs_val = self.load_bra_fwd_value(lhs)?;
                     let lhs_adj = {
                         let mut b = FirBuilder::new(&mut self.store);
                         b.binop(FirBinOp::Div, y_bar, rhs_val, real_ty.clone())
@@ -2552,7 +2591,7 @@ impl<'a> SignalToFirLower<'a> {
             // ── Unary math ──────────────────────────────────────────────────
             SigMatch::Sin(x) => {
                 // adj[x] += y_bar * cos(x)
-                let x_fir = self.lower_signal(x)?;
+                let x_fir = self.load_bra_fwd_value(x)?;
                 self.used_math_ops.insert(FirMathOp::Cos);
                 let rt = self.real_ty();
                 let cos_x = {
@@ -2567,7 +2606,7 @@ impl<'a> SignalToFirLower<'a> {
             }
             SigMatch::Cos(x) => {
                 // adj[x] += -y_bar * sin(x)
-                let x_fir = self.lower_signal(x)?;
+                let x_fir = self.load_bra_fwd_value(x)?;
                 self.used_math_ops.insert(FirMathOp::Sin);
                 let rt = self.real_ty();
                 let sin_x = {
@@ -2587,7 +2626,9 @@ impl<'a> SignalToFirLower<'a> {
             }
             SigMatch::Exp(x) => {
                 // adj[x] += y_bar * exp(x)  [= y_bar * val[sig]]
-                let exp_val = self.lower_signal(sig)?;
+                // Tape-needed: val[sig] = exp(x); loaded from tape when x is
+                // not trivially re-evaluable (Phase B4).
+                let exp_val = self.load_bra_fwd_value(sig)?;
                 let x_adj = {
                     let mut b = FirBuilder::new(&mut self.store);
                     b.binop(FirBinOp::Mul, y_bar, exp_val, real_ty.clone())
@@ -2596,7 +2637,7 @@ impl<'a> SignalToFirLower<'a> {
             }
             SigMatch::Log(x) => {
                 // adj[x] += y_bar / x
-                let x_fir = self.lower_signal(x)?;
+                let x_fir = self.load_bra_fwd_value(x)?;
                 let x_adj = {
                     let mut b = FirBuilder::new(&mut self.store);
                     b.binop(FirBinOp::Div, y_bar, x_fir, real_ty.clone())
@@ -2605,7 +2646,9 @@ impl<'a> SignalToFirLower<'a> {
             }
             SigMatch::Sqrt(x) => {
                 // adj[x] += y_bar / (2 * sqrt(x))  [= y_bar / (2 * val[sig])]
-                let sqrt_val = self.lower_signal(sig)?;
+                // Tape-needed: val[sig] = sqrt(x); loaded from tape when x is
+                // not trivially re-evaluable (Phase B4).
+                let sqrt_val = self.load_bra_fwd_value(sig)?;
                 let two = self.float_const(2.0);
                 let denom = {
                     let mut b = FirBuilder::new(&mut self.store);
@@ -2645,7 +2688,7 @@ impl<'a> SignalToFirLower<'a> {
             other => {
                 return Err(SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
-                    format!("signal {other:?} not supported in BlockReverseAD backward pass (B3)"),
+                    format!("signal {other:?} not supported in BlockReverseAD backward pass (B4)"),
                 ));
             }
         }
@@ -2681,6 +2724,113 @@ impl<'a> SignalToFirLower<'a> {
         self.register_clear_init(name.clone(), zero2);
         self.bra_delay1_carry_vars.insert(delay1_node, name.clone());
         Ok(name)
+    }
+
+    /// Schedules forward-tape stores for all tape-needed signals in `group`.
+    ///
+    /// Called from `lower_block_reverse_ad_proj` when lowering a **primal**
+    /// slot (i.e. during the forward sample loop) so that tape stores are
+    /// emitted before the reverse loop begins.  Idempotent: the
+    /// `bra_tape_stores_scheduled` guard prevents re-scheduling for the same
+    /// group.
+    ///
+    /// # Steps
+    ///
+    /// 1. Build the unified postorder for all body roots.
+    /// 2. Call [`collect_tape_needed_values`] to determine which forward values
+    ///    require a tape.
+    /// 3. For each tape-needed signal `v`:
+    ///    a. Allocate a fresh struct-field name `fBraTapeN`.
+    ///    b. Declare the field as `Array(real_ty, MAX_BRA_TAPE_BLOCK_SIZE)`.
+    ///    c. Lower `v` via `lower_signal` (runs in the forward loop context).
+    ///    d. Emit `store_table(fBraTapeN, Struct, i0, v_fir)` to
+    ///       `sample_phases.immediate` so it captures the forward value
+    ///       **before** `post_output` updates delay/state variables (placing
+    ///       it in `sample_end` would read post-update state and produce the
+    ///       wrong tape entry for signals like `Delay1`).
+    ///    e. Record the mapping `v → fBraTapeN` in `bra_tape_store_var`.
+    fn ensure_bra_tape_stores(
+        &mut self,
+        group: SigId,
+        body_sigs: &[SigId],
+        _seed_sigs: &[SigId],
+        _cotangent_sigs: &[SigId],
+    ) -> Result<(), SignalFirError> {
+        if !self.bra_tape_stores_scheduled.insert(group) {
+            return Ok(());
+        }
+
+        // 1. Build postorder over all body roots.
+        let mut visited = std::collections::HashSet::new();
+        let mut postorder = Vec::new();
+        for &body in body_sigs {
+            collect_bra_postorder(self.arena, body, &mut visited, &mut postorder);
+        }
+
+        // 2. Determine which values need to be taped.
+        let tape_needed = collect_tape_needed_values(self.arena, &postorder);
+        if tape_needed.is_empty() {
+            return Ok(());
+        }
+
+        // 3. Emit tape stores in deterministic (postorder) order.
+        let mut tape_sigs: Vec<SigId> = tape_needed.into_iter().collect();
+        // Sort by SigId for deterministic emission.
+        tape_sigs.sort();
+        for v in tape_sigs {
+            let tape_name = format!("fBraTape{}", self.next_loop_var_id);
+            self.next_loop_var_id += 1;
+            let real_ty = self.real_ty.clone();
+            // Declare as a fixed-size array struct field.
+            let tape_ty = FirType::Array(Box::new(real_ty), MAX_BRA_TAPE_BLOCK_SIZE);
+            self.ensure_named_struct_var(&tape_name, tape_ty, None);
+            // Lower the value in the current (forward) loop context.
+            let v_fir = self.lower_signal(v)?;
+            // Tape stores go in `immediate` so they capture the forward value
+            // BEFORE `post_output` updates delay/state variables.  Placing them
+            // in `sample_end` would re-read post-update state (e.g. the updated
+            // Delay1 register) and produce the wrong tape entry.
+            let i0 = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.load_var("i0", AccessType::Loop, FirType::Int32)
+            };
+            let store_stmt = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.store_table(tape_name.clone(), AccessType::Struct, i0, v_fir)
+            };
+            self.sample_phases.immediate.push(store_stmt);
+            self.bra_tape_store_var.insert(v, tape_name);
+        }
+        Ok(())
+    }
+
+    /// Returns the FIR value for `sig` in the **reverse** sample loop.
+    ///
+    /// - If `sig` has a tape array (recorded by `ensure_bra_tape_stores`),
+    ///   emits `load_table(fBraTapeN, Struct, i0)` and returns that value.
+    /// - Otherwise falls back to `lower_signal(sig)`, which is correct when
+    ///   `sig` is trivially reverse-evaluable (stateless leaf or pure
+    ///   combinator of leaves).
+    ///
+    /// The loop variable `i0` used for the tape load is the same reverse-loop
+    /// counter driven by the outer `build_module` reverse iteration; loading
+    /// tape[i0] during the backward sweep at step `n` retrieves the forward
+    /// value stored at forward step `n`.
+    fn load_bra_fwd_value(&mut self, sig: SigId) -> Result<FirId, SignalFirError> {
+        if let Some(tape_name) = self.bra_tape_store_var.get(&sig).cloned() {
+            let real_ty = self.real_ty();
+            let i0 = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.load_var("i0", AccessType::Loop, FirType::Int32)
+            };
+            let load = {
+                let mut b = FirBuilder::new(&mut self.store);
+                b.load_table(tape_name, AccessType::Struct, i0, real_ty)
+            };
+            Ok(load)
+        } else {
+            self.lower_signal(sig)
+        }
     }
 
     /// Accumulates `new_term` into the adjoint of `sig`, building an `Add`

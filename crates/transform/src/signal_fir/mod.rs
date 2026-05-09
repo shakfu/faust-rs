@@ -23,6 +23,14 @@
 //! - prepared typing/promotion (`Preparation Step 2/3/4`): consume the reduced
 //!   `signal_prepare` type map so FIR lowering keeps integer delay/recursion/table
 //!   carriers instead of defaulting every internal value to `real_ty`.
+//! - **RAD Phase B3**: tape-free TBPTT(BS, BS) backward sweep for
+//!   `SigBlockReverseAD` carriers whose body signals are trivially
+//!   reverse-evaluable (no `Delay1`/stateful operands in Mul/Div/unary rules).
+//! - **RAD Phase B4**: per-sample forward tape for `SigBlockReverseAD`
+//!   carriers whose body contains non-trivially-re-evaluable operands in
+//!   Mul/Div/unary backward rules (e.g. `x' * x`).  Forward values are stored
+//!   in `fBraTapeN` struct arrays during the forward loop and loaded during the
+//!   reverse loop via `load_bra_fwd_value`.
 //!
 //! Current `Step 2H` scope still excludes complex generator forms depending on
 //! runtime context/loop variables; those are reported as typed
