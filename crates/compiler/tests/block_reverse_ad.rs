@@ -78,6 +78,18 @@ fn collect_postorder(
             collect_postorder(arena, a, visited, order);
             collect_postorder(arena, b, visited, order);
         }
+        // Proj(slot, Rec(bodies)): recurse into the corresponding body expression.
+        // The body contains Delay1(Proj(...)) which back-references the same group;
+        // the visited guard prevents infinite recursion.
+        SigMatch::Proj(slot, group_sig) => {
+            if let SigMatch::Rec(body_list) = match_sig(arena, group_sig) {
+                if let Some(bodies) = list_to_vec(arena, body_list) {
+                    if let Some(&body) = bodies.get(slot as usize) {
+                        collect_postorder(arena, body, visited, order);
+                    }
+                }
+            }
+        }
         _ => {}
     }
     order.push(root);
@@ -179,6 +191,18 @@ fn eval_sig(
             }
         }
         SigMatch::Delay1(_) => delay1_state.get(&sig).copied().unwrap_or(0.0),
+        // Proj(slot, Rec(bodies)): the primal value is the body expression's value.
+        // The body was evaluated before this node in postorder, so vals[body] is ready.
+        SigMatch::Proj(slot, group_sig) => {
+            if let SigMatch::Rec(body_list) = match_sig(arena, group_sig) {
+                if let Some(bodies) = list_to_vec(arena, body_list) {
+                    if let Some(&body) = bodies.get(slot as usize) {
+                        return vals.get(&body).copied().unwrap_or(0.0);
+                    }
+                }
+            }
+            0.0
+        }
         _ => 0.0,
     }
 }
@@ -313,6 +337,19 @@ fn propagate_adj(
         SigMatch::Delay1(x) => {
             // Anti-causal: deposit into carry for the previous sample's backward.
             *adj_carry.entry(x).or_insert(0.0) += y_bar;
+        }
+        // Proj(slot, Rec(bodies)): the adjoint flows directly to bodies[slot].
+        // This is correct because Proj(slot, group)[n] = bodies[slot][n] by definition,
+        // so d(Proj)/d(body) = 1. The rest of the backward sweep (including the
+        // Delay1 anti-causal carry inside the body) propagates the recursion adjoint.
+        SigMatch::Proj(slot, group_sig) => {
+            if let SigMatch::Rec(body_list) = match_sig(arena, group_sig) {
+                if let Some(bodies) = list_to_vec(arena, body_list) {
+                    if let Some(&body) = bodies.get(slot as usize) {
+                        acc(adj, body, y_bar);
+                    }
+                }
+            }
         }
         // Leaves and piecewise-constant nodes: no children to propagate to.
         _ => {}

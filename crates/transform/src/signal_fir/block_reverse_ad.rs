@@ -1,4 +1,4 @@
-//! Signal-level helpers for `SigBlockReverseAD` FIR lowering (Phase B3/B4/B5).
+//! Signal-level helpers for `SigBlockReverseAD` FIR lowering (Phase B3/B4/B5/B6).
 //!
 //! This module provides pure signal-tree utilities used by `module.rs` when
 //! lowering `SigBlockReverseAD` carriers into FIR reverse-mode adjoint code.
@@ -39,6 +39,20 @@
 //! - Piecewise-constant / discrete ops: `Floor`, `Ceil`, `Rint`, `Round`,
 //!   comparison `BinOp`s, bitwise `BinOp`s — all contribute zero gradient.
 //!
+//! **Phase B6** extends B5 with recursive circuits (`+~` feedback loops):
+//! - After `de_bruijn_to_sym`, a Faust recursive circuit produces
+//!   `Proj(slot, SYMREC(var, body_list))` as the top-level output and
+//!   `Proj(slot, SYMREF(var))` as the back-reference inside the body (always
+//!   wrapped in a `Delay1`).
+//! - [`collect_bra_postorder`] recurses into the SYMREC body for SYMREC nodes
+//!   and stops at SYMREF nodes (cycle guard).
+//! - `module.rs` implements the TBPTT adjoint for recursive outputs:
+//!   `adj[y[slot][n]] = cotangent[slot][n] + carry_from_step_n+1`, where the
+//!   carry is pre-loaded from the `Delay1(Proj(slot, SYMREF))` carry struct
+//!   field **before** the reverse-postorder walk (step 3a of
+//!   `ensure_bra_backward_sweep`).  The `Delay1` arm then only stores the new
+//!   carry (no redundant load), and the SYMREF Proj arm does nothing.
+//!
 //! # Trivial reverse-evaluability
 //!
 //! A signal is *trivially reverse-evaluable* if it is either:
@@ -54,7 +68,7 @@
 use std::collections::HashSet;
 
 use signals::{BinOp, SigId, SigMatch, match_sig};
-use tlib::TreeArena;
+use tlib::{TreeArena, list_to_vec, match_sym_rec, match_sym_ref};
 
 /// Returns `true` if `sig` can be correctly re-evaluated in the **reverse**
 /// sample loop without accessing a recorded tape.
@@ -170,6 +184,49 @@ pub(super) fn collect_bra_postorder(
         SigMatch::Prefix(init, sig) => {
             collect_bra_postorder(arena, init, visited, order);
             collect_bra_postorder(arena, sig, visited, order);
+        }
+        // Proj(slot, Rec(bodies)): recurse into the corresponding body expression.
+        //
+        // The body expression contains `Delay1(Proj(slot, group))` which
+        // back-references this same Proj node; the `visited` guard prevents
+        // infinite recursion — when the recursion body tries to visit the Proj
+        // again, `visited.insert` returns `false` and the traversal stops.
+        //
+        // After this arm, `order.push(root)` below places `Proj(slot, group)`
+        // *after* all its body nodes, giving the correct postorder: body
+        // sub-expressions are processed before the Proj itself in the backward
+        // reverse-postorder walk.
+        SigMatch::Proj(slot, group_sig) => {
+            // After `de_bruijn_to_sym` two Proj forms appear:
+            //
+            // • `Proj(slot, SYMREC(var, body_list))` — the top-level output of a
+            //   recursive group.  Recurse into `body_list[slot]` so that the body
+            //   sub-expressions are postorder-visited before the Proj itself.
+            //   The `visited` guard prevents infinite recursion when the body
+            //   contains back-references through `Proj(slot, SYMREF(var))`.
+            //
+            // • `Proj(slot, SYMREF(var))` — a back-reference inside the recursive
+            //   body (the "self" reference for the recurrence).  This is a cycle;
+            //   we stop traversal here.  The carry mechanism in
+            //   `ensure_bra_backward_sweep` (pre-scan step) loads the struct carry
+            //   variable for the corresponding `Delay1(Proj(slot, SYMREF))` node
+            //   and seeds it into `adj[body_sigs[slot]]` before the reverse-
+            //   postorder walk, so no further traversal is needed.
+            if let Some((_var, body_list)) = match_sym_rec(arena, group_sig) {
+                // SYMREC top-level output: recurse into the body expression.
+                if let Some(bodies) = list_to_vec(arena, body_list) {
+                    let slot_usize = usize::try_from(slot).unwrap_or(usize::MAX);
+                    if let Some(&body) = bodies.get(slot_usize) {
+                        collect_bra_postorder(arena, body, visited, order);
+                    }
+                }
+            } else if match_sym_ref(arena, group_sig).is_some() {
+                // SYMREF back-reference: cycle — stop traversal.
+                // The adjoint carry is handled via the pre-scan in the FIR lowering.
+            }
+            // For other Proj kinds (ReverseTimeRec, BlockReverseAD nested) the
+            // backward pass will return an UnsupportedSignalNode error when it
+            // encounters this node.
         }
         // Any other kind: include in postorder; the backward pass will
         // return an unsupported-node error when it encounters it.

@@ -2449,7 +2449,14 @@ impl<'a> SignalToFirLower<'a> {
     ///    handles DAG-shared sub-expressions).
     /// 2. Lower each cotangent signal into a FIR value (constant `1.0` in the
     ///    all-ones B1 convention).
-    /// 3. Seed the adjoint map: `adj[body_sigs[k]] += cotangent_firs[k]`.
+    /// 3a. Pre-seed recursive feedback carries (Phase B6).  For each
+    ///    `Delay1(Proj(slot, SYMREF(var)))` node in the postorder, load the
+    ///    corresponding carry struct field (written by the previous reverse step)
+    ///    and accumulate it into `adj[body_sigs[slot]]`.  This ensures the total
+    ///    TBPTT adjoint `cotangent[n] + carry_from_step_n+1` is available when
+    ///    the `Proj(slot, SYMREC)` node is processed first in the reverse
+    ///    postorder.
+    /// 3b. Seed the adjoint map: `adj[body_sigs[k]] += cotangent_firs[k]`.
     /// 4. Walk the postorder in reverse, calling `propagate_bra_adj` for each
     ///    node to distribute its accumulated adjoint to its children.
     /// 5. Store per-seed gradient `FirId`s into `bra_grad_cache`.
@@ -2479,6 +2486,50 @@ impl<'a> SignalToFirLower<'a> {
 
         // 3. Seed the adjoint map.
         let mut adj: std::collections::HashMap<SigId, FirId> = std::collections::HashMap::new();
+
+        // 3a. Pre-seed recursive feedback carries.
+        //
+        // In TBPTT the total adjoint of a recursive output `y[slot][n]` is:
+        //
+        //   adj[y[slot][n]] = cotangent[slot][n] + carry_from_step_n+1
+        //
+        // The carry from step n+1 encodes `adj[y[slot][n+1]] · ∂y[n+1]/∂y[n]`
+        // and is stored in a struct field written during the previous reverse-loop
+        // iteration.  We load it here — before the reverse-postorder walk — and
+        // accumulate it into `adj[body_sigs[slot]]` so that when the Proj-SYMREC
+        // node is processed first in the reverse postorder its `y_bar` already
+        // includes the feedback contribution.
+        //
+        // `Delay1(Proj(slot, SYMREF(var)))` is the structural signal that
+        // introduces the one-sample feedback delay; its carry variable represents
+        // the anti-causal adjoint flowing from step n+1 back to step n.
+        for &sig in &postorder {
+            if let SigMatch::Delay1(x) = match_sig(self.arena, sig) {
+                if let SigMatch::Proj(slot, inner_group) = match_sig(self.arena, x) {
+                    if match_sym_ref(self.arena, inner_group).is_some() {
+                        let slot_usize = usize::try_from(slot).unwrap_or(usize::MAX);
+                        if let Some(&proj_symrec) = body_sigs.get(slot_usize) {
+                            let carry_name = self.ensure_bra_delay1_carry(sig, group)?;
+                            let carry_load = {
+                                let rt = self.real_ty();
+                                let mut b = FirBuilder::new(&mut self.store);
+                                b.load_var(carry_name, AccessType::Struct, rt)
+                            };
+                            let real_ty = self.real_ty.clone();
+                            Self::add_to_adjoint(
+                                &mut self.store,
+                                &mut adj,
+                                proj_symrec,
+                                carry_load,
+                                real_ty,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3b. Seed cotangent contributions.
         for (k, &body_sig) in body_sigs.iter().enumerate() {
             let cot = cot_firs[k];
             Self::add_to_adjoint(
@@ -2717,18 +2768,35 @@ impl<'a> SignalToFirLower<'a> {
                 //
                 // Ordering: `immediate` runs before `post_output` within one
                 // iteration, so the load always reads the value stored at n+1.
+                //
+                // Special case — `Delay1(Proj(slot, SYMREF(var)))`:
+                //   This is the one-sample feedback in a recursive body.  The carry
+                //   load was already emitted during the pre-scan in
+                //   `ensure_bra_backward_sweep` (step 3a) and accumulated into
+                //   `adj[body_sigs[slot]]` so that the total TBPTT adjoint
+                //   `cotangent[n] + carry_from_n+1` is set before the Proj-SYMREC
+                //   node is processed in the reverse postorder.  Here we only need
+                //   to store the new carry for step n-1.
+                let is_recursive_feedback =
+                    if let SigMatch::Proj(_slot, inner_group) = match_sig(self.arena, x) {
+                        match_sym_ref(self.arena, inner_group).is_some()
+                    } else {
+                        false
+                    };
                 let carry_name = self.ensure_bra_delay1_carry(sig, group)?;
-                let carry_load = {
-                    let rt = self.real_ty();
-                    let mut b = FirBuilder::new(&mut self.store);
-                    b.load_var(carry_name.clone(), AccessType::Struct, rt)
-                };
                 let carry_store = {
                     let mut b = FirBuilder::new(&mut self.store);
-                    b.store_var(carry_name, AccessType::Struct, y_bar)
+                    b.store_var(carry_name.clone(), AccessType::Struct, y_bar)
                 };
                 self.sample_phases.post_output.push(carry_store);
-                Self::add_to_adjoint(&mut self.store, adj, x, carry_load, real_ty);
+                if !is_recursive_feedback {
+                    let carry_load = {
+                        let rt = self.real_ty();
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.load_var(carry_name, AccessType::Struct, rt)
+                    };
+                    Self::add_to_adjoint(&mut self.store, adj, x, carry_load, real_ty);
+                }
             }
 
             // ── Tan, Asin, Acos, Atan, Log10 ───────────────────────────────
@@ -3053,10 +3121,70 @@ impl<'a> SignalToFirLower<'a> {
                 Self::add_to_adjoint(&mut self.store, adj, init, init_contrib, real_ty);
             }
 
+            // ── Proj(slot, SYMREC/SYMREF) — recursive carrier projection ────────
+            //
+            // Two symbolic Proj forms appear after `de_bruijn_to_sym`:
+            //
+            // • `Proj(slot, SYMREC(var, body_list))` — the top-level recursive
+            //   output.  Its primal value equals `body_list[slot]`, so the adjoint
+            //   flows identically to that body (identity Jacobian = 1).
+            //   The pre-scan in `ensure_bra_backward_sweep` (step 3a) already
+            //   accumulated the feedback carry into `adj[this_node]` before the
+            //   reverse-postorder walk, so `y_bar` here is the full TBPTT adjoint
+            //   `cotangent[n] + carry_from_step_n+1`.
+            //
+            // • `Proj(slot, SYMREF(var))` — a back-reference inside the recursive
+            //   body.  This always appears as `Delay1(Proj(slot, SYMREF))`, and
+            //   its adjoint carry was pre-loaded into `adj[body_sigs[slot]]` during
+            //   the pre-scan.  The `Delay1` arm above stores the new carry to the
+            //   struct field (for step n-1).  Nothing more to propagate here.
+            SigMatch::Proj(slot, group_sig) => {
+                if let Some((_var, body_list)) = match_sym_rec(self.arena, group_sig) {
+                    // SYMREC top-level output: propagate adjoint to body[slot].
+                    let slot_usize = usize::try_from(slot).map_err(|_| {
+                        SignalFirError::new(
+                            SignalFirErrorCode::UnsupportedSignalNode,
+                            format!(
+                                "negative Proj slot {slot} in BlockReverseAD backward pass (B6)"
+                            ),
+                        )
+                    })?;
+                    let bodies = list_to_vec(self.arena, body_list).ok_or_else(|| {
+                        SignalFirError::new(
+                            SignalFirErrorCode::UnsupportedSignalNode,
+                            "malformed SYMREC body list in BlockReverseAD backward pass (B6)"
+                                .to_string(),
+                        )
+                    })?;
+                    let &body = bodies.get(slot_usize).ok_or_else(|| {
+                        SignalFirError::new(
+                            SignalFirErrorCode::UnsupportedSignalNode,
+                            format!(
+                                "Proj slot {slot_usize} out of range (SYMREC body count \
+                                 {}) in BlockReverseAD backward pass (B6)",
+                                bodies.len()
+                            ),
+                        )
+                    })?;
+                    Self::add_to_adjoint(&mut self.store, adj, body, y_bar, real_ty);
+                } else if match_sym_ref(self.arena, group_sig).is_some() {
+                    // SYMREF back-reference: carry pre-loaded in pre-scan; nothing to do.
+                } else {
+                    return Err(SignalFirError::new(
+                        SignalFirErrorCode::UnsupportedSignalNode,
+                        format!(
+                            "Proj over non-SYMREC/SYMREF group ({:?}) not supported in \
+                             BlockReverseAD backward pass (B6)",
+                            match_sig(self.arena, group_sig)
+                        ),
+                    ));
+                }
+            }
+
             other => {
                 return Err(SignalFirError::new(
                     SignalFirErrorCode::UnsupportedSignalNode,
-                    format!("signal {other:?} not supported in BlockReverseAD backward pass (B5)"),
+                    format!("signal {other:?} not supported in BlockReverseAD backward pass (B6)"),
                 ));
             }
         }

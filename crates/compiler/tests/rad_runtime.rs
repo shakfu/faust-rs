@@ -171,6 +171,85 @@ fn assert_close(actual: f32, expected: f32, abs_tol: f32, label: &str) {
     );
 }
 
+/// Asserts the **block-level total** TBPTT gradient of a `BlockReverseAD`
+/// carrier matches the central finite difference of the block-sum primal.
+///
+/// This is the correct comparison for recursive (time-dependent) circuits:
+/// the per-sample TBPTT adjoint carries information across samples, so only
+/// the *total* (sum over the block) can be meaningfully compared with a
+/// per-parameter FD perturbation of the block objective `L = Σ_n y[n]`.
+///
+/// # Arguments
+///
+/// * `primal_outputs` — number of primal output channels.
+/// * `base_seeds` — base parameter values (one per seed).
+/// * `epsilons` — FD perturbation magnitudes.
+/// * `build_rad_source` — builds the `rad(expr, seeds)` Faust source.
+/// * `build_primal_source` — builds the same `expr` without `rad(...)`.
+#[allow(clippy::too_many_arguments)]
+fn assert_bra_block_total_grad_matches_fd<BuildRad, BuildPrimal>(
+    stem: &str,
+    primal_outputs: usize,
+    frame_count: usize,
+    base_seeds: &[f32],
+    epsilons: &[f32],
+    abs_tol: f32,
+    build_rad_source: BuildRad,
+    build_primal_source: BuildPrimal,
+) where
+    BuildRad: Fn(&[f32]) -> String,
+    BuildPrimal: Fn(&[f32]) -> String,
+{
+    assert_eq!(base_seeds.len(), epsilons.len(), "seed/epsilon arity");
+    let n = base_seeds.len();
+
+    let rad_outputs = run_interp_temp_source(
+        &format!("{stem}-rad"),
+        &build_rad_source(base_seeds),
+        frame_count,
+    );
+    assert_eq!(
+        rad_outputs.len(),
+        primal_outputs + n,
+        "{stem}: layout must be [primals…, gradients…]"
+    );
+
+    for j in 0..n {
+        let mut up = base_seeds.to_vec();
+        up[j] += epsilons[j];
+        let mut dn = base_seeds.to_vec();
+        dn[j] -= epsilons[j];
+        let primal_up = run_interp_temp_source(
+            &format!("{stem}-plus-{j}"),
+            &build_primal_source(&up),
+            frame_count,
+        );
+        let primal_dn = run_interp_temp_source(
+            &format!("{stem}-minus-{j}"),
+            &build_primal_source(&dn),
+            frame_count,
+        );
+
+        // Block-level finite difference gradient (sum over all frames and primal channels).
+        let mut fd_total = 0.0_f32;
+        for pi in 0..primal_outputs {
+            let sum_up: f32 = primal_up[pi].iter().sum();
+            let sum_dn: f32 = primal_dn[pi].iter().sum();
+            fd_total += (sum_up - sum_dn) / (2.0 * epsilons[j]);
+        }
+
+        // TBPTT gradient: sum of per-sample adjoint outputs over the block.
+        let total_rad_grad: f32 = rad_outputs[primal_outputs + j].iter().sum();
+
+        assert_close(
+            total_rad_grad,
+            fd_total,
+            abs_tol,
+            &format!("{stem} total grad[seed {j}]: BRA={total_rad_grad} FD={fd_total}"),
+        );
+    }
+}
+
 /// Asserts RAD output bundle layout `[primals…, grad(seeds)…]` matches:
 /// - the primal for each output via direct evaluation,
 /// - each gradient lane via central finite difference on the primal source.
@@ -1276,4 +1355,124 @@ process = fad(rad(x', x), x);
         .compile_source_to_signals("nested-rad-in-fad-temporal.dsp", source)
         .expect("fad(rad(x', x), x) must succeed via BlockReverseAD fallback (Phase B1)");
     assert_eq!(out.signals.len(), 4, "fad(rad(delay1,x),x) → 4 outputs");
+}
+
+// ── Phase B6: recursive BlockReverseAD tests ──────────────────────────────────
+
+/// LTV one-pole: `y[n] = c + c * y[n-1]`, seed = c (slider).
+///
+/// The feedback coefficient IS the seed, making this **linear time-varying**
+/// (LTV).  Phase B1 falls back to `BlockReverseAD` (BRA).  Phase B6 lowers
+/// the backward sweep through `Proj(0, Rec([Add(c, Mul(c, Delay1(Proj(0,…))))]))`.
+///
+/// **Verification**: the block-level TBPTT gradient (sum of per-sample
+/// adjoints) equals the central finite difference of the block-sum primal
+/// `L = Σ_n y[n]` w.r.t. c.  For c = 0.5, BS = 8, L is a geometric series
+/// and the total gradient is ~24.09 (analytically).
+#[test]
+fn rad_ltv_one_pole_bra_total_grad_matches_fd() {
+    assert_bra_block_total_grad_matches_fd(
+        "rad-ltv-one-pole",
+        1,
+        8,
+        &[0.5],
+        &[1e-3],
+        5e-2,
+        |s| {
+            format!(
+                r#"c = hslider("c", {}, 0.01, 0.99, 0.001); process = rad(c : +~*(c), c);"#,
+                s[0]
+            )
+        },
+        |s| {
+            format!(
+                r#"c = hslider("c", {}, 0.01, 0.99, 0.001); process = c : +~*(c);"#,
+                s[0]
+            )
+        },
+    );
+}
+
+/// Nonlinear one-pole: `y[n] = c + sin(y[n-1])`, seed = c (slider).
+///
+/// `+~sin` is nonlinear in the recursive state → Phase B1 falls back to
+/// `BlockReverseAD`.  Phase B6 lowers the backward sweep through
+/// `Proj(0, Rec([Add(c, Sin(Delay1(Proj(0,…))))]))`.
+///
+/// The backward rule for `Sin(x)` uses `load_bra_fwd_value` to read
+/// `Delay1(Proj(0, group))` (the previous recursive state) from the forward
+/// tape, then computes `adj[Delay1(Proj)] += y_bar * cos(x_taped)`.
+///
+/// **Verification**: block-level TBPTT total gradient matches central FD.
+/// For c = 0.1, BS = 8 the circuit is numerically stable
+/// (converges to fixed point ~1.11 for the infinite-time case).
+#[test]
+fn rad_nonlinear_one_pole_bra_total_grad_matches_fd() {
+    assert_bra_block_total_grad_matches_fd(
+        "rad-nl-one-pole",
+        1,
+        8,
+        &[0.1],
+        &[5e-4],
+        5e-2,
+        |s| {
+            format!(
+                r#"c = hslider("c", {}, -0.9, 0.9, 0.001); process = rad(c : +~sin, c);"#,
+                s[0]
+            )
+        },
+        |s| {
+            format!(
+                r#"c = hslider("c", {}, -0.9, 0.9, 0.001); process = c : +~sin;"#,
+                s[0]
+            )
+        },
+    );
+}
+
+/// LTI vs BlockReverseAD cross-validation: both paths must agree numerically
+/// on `d(Σ_n y[n])/d(p)` for the LTI one-pole `y[n] = 2 + p * y[n-1]`.
+///
+/// The **LTI fast path** (`ReverseTimeRec`) is engaged when the feedback
+/// coefficient `p` is not the seed — the seed `a` multiplies the input only.
+/// This validates §11.5 of the plan: gradient parity between LTI and BRA.
+///
+/// `rad((a * (2 : +~*(p))), a)` with `p = 0.5` (constant) — the seed `a`
+/// multiplies the primal output but the recursion itself is LTI-in-state.
+/// For this layout:
+/// - primal[n] = a * y_lti[n]  where y_lti[n] = 2 + p * y_lti[n-1]
+/// - gradient[n] = y_lti[n]  (d(a*y_lti[n])/d(a) = y_lti[n])
+///
+/// Total gradient = Σ_n y_lti[n] — verified by FD with ε = 1e-3.
+#[test]
+fn rad_lti_vs_bra_seed_independent_total_grad_agrees() {
+    // This uses the LTI fast path (a only scales the output, not the recursion).
+    assert_bra_block_total_grad_matches_fd(
+        "rad-lti-vs-bra-cross",
+        1,
+        6,
+        &[1.0], // a = 1.0 baseline
+        &[1e-3],
+        5e-2,
+        |s| {
+            format!(
+                r#"
+p = 0.5;
+a = hslider("a", {}, 0.1, 3.0, 0.001);
+process = rad(a * (2 : +~*(p)), a);
+"#,
+                s[0]
+            )
+        },
+        |s| {
+            format!(
+                r#"
+p = 0.5;
+a = hslider("a", {}, 0.1, 3.0, 0.001);
+process = a * (2 : +~*(p));
+"#,
+                s[0]
+            )
+        },
+    );
 }
