@@ -3027,19 +3027,33 @@ impl<'a> SignalToFirLower<'a> {
             // ── Pow(x, y): power rule ───────────────────────────────────────
             SigMatch::Pow(lhs, rhs) => {
                 // d/dx x^y = y * x^(y-1);  d/dy x^y = x^y * ln(x)
-                // adj[x] += y_bar * y * val[sig] / x  (= y*x^(y-1)*y_bar)
+                // adj[x] += y_bar * y * x^(y-1)         [uses pow(x, y-1)]
                 // adj[y] += y_bar * val[sig] * ln(x)
+                //
+                // NOTE: do NOT use the equivalent form `y * x^y / x` — that
+                // divides by x and produces NaN when x = 0 (e.g. when the
+                // loss of a learning system reaches zero at convergence).
+                // `pow(x, y-1)` is numerically safe: pow(0, 1) = 0 for y=2.
                 self.used_math_ops.insert(FirMathOp::Pow);
                 self.used_math_ops.insert(FirMathOp::Log);
                 let pow_val = self.load_bra_fwd_value(sig)?;
                 let x_fir = self.load_bra_fwd_value(lhs)?;
                 let y_fir = self.load_bra_fwd_value(rhs)?;
                 let lhs_adj = {
-                    // y_bar * y * x^y / x = y_bar * y * x^(y-1)
+                    // y_bar * y * pow(x, y - 1)
+                    let one = self.float_const(1.0);
+                    let y_minus_1 = {
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.binop(FirBinOp::Sub, y_fir, one, real_ty.clone())
+                    };
+                    let rt = self.real_ty();
+                    let pow_x_ym1 = {
+                        let mut b = FirBuilder::new(&mut self.store);
+                        b.math_call(FirMathOp::Pow, &[x_fir, y_minus_1], rt)
+                    };
                     let mut b = FirBuilder::new(&mut self.store);
                     let t = b.binop(FirBinOp::Mul, y_bar, y_fir, real_ty.clone());
-                    let t2 = b.binop(FirBinOp::Mul, t, pow_val, real_ty.clone());
-                    b.binop(FirBinOp::Div, t2, x_fir, real_ty.clone())
+                    b.binop(FirBinOp::Mul, t, pow_x_ym1, real_ty.clone())
                 };
                 let rt = self.real_ty();
                 let ln_x = {
