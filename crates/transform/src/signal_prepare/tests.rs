@@ -1,5 +1,5 @@
-use signals::{BinOp, SigBuilder, SigMatch, dump_sig_readable, match_sig};
-use tlib::{de_bruijn_rec, de_bruijn_ref, match_sym_rec, match_sym_ref};
+use signals::{BinOp, BlockRevPolicy, SigBuilder, SigMatch, dump_sig_readable, match_sig};
+use tlib::{de_bruijn_rec, de_bruijn_ref, list_to_vec, match_sym_rec, match_sym_ref};
 use ui::{ControlKind, ControlSpec};
 
 use super::{
@@ -917,6 +917,106 @@ fn prepared_signals_verify_rejects_out_of_range_recursive_projection() {
         panic!("expected validation error");
     };
     assert!(message.contains("out of range"));
+}
+
+#[test]
+fn prepare_signals_for_fir_preserves_block_reverse_ad_carrier() {
+    // Phase B0 invariant: a `BlockReverseAD` carrier projected for its
+    // primal output must survive `prepare_signals_for_fir` end-to-end and
+    // keep its layout and policy.
+    let mut arena = tlib::TreeArena::new();
+    let (carrier, primal_proj) = {
+        let mut b = SigBuilder::new(&mut arena);
+        let x = b.input(0);
+        let y = b.input(1);
+        let primal = b.add(x, y);
+        let one = b.real(1.0);
+        let carrier = b.block_reverse_ad(&[primal], &[x, y], &[one], BlockRevPolicy::TapeFull);
+        let primal_proj = b.proj(0, carrier);
+        (carrier, primal_proj)
+    };
+
+    let prepared = prepare_signals_for_fir(&arena, &[primal_proj], &ui::UiProgram::empty())
+        .expect("BlockReverseAD primal projection should pass preparation");
+
+    let SigMatch::Proj(0, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0]) else {
+        panic!("prepared output should remain a Proj");
+    };
+    let SigMatch::BlockReverseAD {
+        body,
+        primal_count,
+        seeds,
+        cotangents,
+        policy,
+    } = match_sig(&prepared.arena, prepared_group)
+    else {
+        panic!("Proj target should still be a BlockReverseAD carrier");
+    };
+    assert_eq!(primal_count, 1);
+    assert_eq!(policy, BlockRevPolicy::TapeFull);
+    assert_eq!(
+        list_to_vec(&prepared.arena, body).expect("body list").len(),
+        1
+    );
+    assert_eq!(
+        list_to_vec(&prepared.arena, seeds)
+            .expect("seed list")
+            .len(),
+        2
+    );
+    assert_eq!(
+        list_to_vec(&prepared.arena, cotangents)
+            .expect("cotangent list")
+            .len(),
+        1
+    );
+    let _ = carrier; // silence unused-binding lint when the helper is read-only
+}
+
+#[test]
+fn prepared_signals_verify_rejects_block_reverse_ad_proj_out_of_range() {
+    // The carrier exposes M + N outputs (1 primal + 2 seeds = 3 here).
+    // A `Proj(7, _)` must be caught as out-of-range by the verifier.
+    let mut arena = tlib::TreeArena::new();
+    let primal_proj = {
+        let mut b = SigBuilder::new(&mut arena);
+        let x = b.input(0);
+        let y = b.input(1);
+        let primal = b.add(x, y);
+        let one = b.real(1.0);
+        let carrier = b.block_reverse_ad(&[primal], &[x, y], &[one], BlockRevPolicy::TapeFull);
+        b.proj(0, carrier)
+    };
+
+    let mut prepared = prepare_signals_for_fir(&arena, &[primal_proj], &ui::UiProgram::empty())
+        .expect("baseline preparation should succeed");
+    let SigMatch::Proj(_, prepared_group) = match_sig(&prepared.arena, prepared.outputs[0]) else {
+        panic!("prepared output should remain a Proj");
+    };
+    let old_output = prepared.outputs[0];
+    let old_reduced = prepared.ty(old_output).expect("baseline reduced type");
+    let old_full = prepared
+        .sig_ty(old_output)
+        .cloned()
+        .expect("baseline full type");
+    let bad_output = {
+        let mut b = SigBuilder::new(&mut prepared.arena);
+        b.proj(7, prepared_group)
+    };
+    prepared.outputs[0] = bad_output;
+    prepared.types.insert(bad_output, old_reduced);
+    prepared.sig_types.insert(bad_output, old_full);
+
+    let err = prepared
+        .verify(&ui::UiProgram::empty())
+        .expect_err("out-of-range BlockReverseAD projection should fail verification");
+    let SignalPrepareError::Validation(message) = err else {
+        panic!("expected validation error");
+    };
+    assert!(
+        message.contains("out of range for BlockReverseAD"),
+        "unexpected message: {message}"
+    );
 }
 
 #[test]

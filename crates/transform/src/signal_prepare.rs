@@ -693,6 +693,47 @@ fn verify_prepared_signal(
                     sig.as_u32()
                 )));
             }
+            // Phase B0 RAD addition: a `Proj(slot, BlockReverseAD{..})` is
+            // a legal projection over the carrier's `M + N` outputs
+            // (M primals followed by N seed gradients). Validate the slot
+            // bound here so downstream lowering can rely on it.
+            if let SigMatch::BlockReverseAD {
+                primal_count,
+                seeds,
+                ..
+            } = match_sig(arena, group)
+            {
+                let seed_vec = list_to_vec(arena, seeds).ok_or_else(|| {
+                    SignalPrepareError::Validation(format!(
+                        "projection {} targets BlockReverseAD whose seed list is malformed",
+                        sig.as_u32()
+                    ))
+                })?;
+                let arity = i32::try_from(seed_vec.len())
+                    .ok()
+                    .and_then(|n| primal_count.checked_add(n))
+                    .ok_or_else(|| {
+                        SignalPrepareError::Validation(format!(
+                            "projection {} targets BlockReverseAD whose total arity overflows i32",
+                            sig.as_u32()
+                        ))
+                    })?;
+                if index >= arity {
+                    return Err(SignalPrepareError::Validation(format!(
+                        "projection {} index {index} is out of range for BlockReverseAD arity {arity}",
+                        sig.as_u32()
+                    )));
+                }
+                verify_prepared_signal(
+                    arena,
+                    ui,
+                    group,
+                    visited,
+                    sym_group_arities,
+                    reachable_typed_nodes,
+                )?;
+                return Ok(());
+            }
             let reverse_group_body = match match_sig(arena, group) {
                 SigMatch::ReverseTimeRec(body) => Some(body),
                 _ => None,
@@ -747,6 +788,85 @@ fn verify_prepared_signal(
                 "prepared signal {} still contains legacy SIGREC form",
                 sig.as_u32()
             )));
+        }
+        SigMatch::BlockReverseAD {
+            body,
+            primal_count,
+            seeds,
+            cotangents,
+            ..
+        } => {
+            // Phase B0 validation rules — the carrier is otherwise opaque
+            // to downstream lowering, so we lock the structural invariants
+            // that future RAD lowering will rely on:
+            //
+            //   1. body is a non-empty cons list of M signals;
+            //   2. cotangents is a cons list of exactly M signals;
+            //   3. primal_count matches body.len() and is non-negative;
+            //   4. every child signal is itself well-formed.
+            //
+            // Source provenance: original Rust design in
+            // `porting/rad-block-reverse-ad-signal-ir-plan-2026-05-07-en.md`,
+            // section "11.1 Phase B0 — Signal carrier + minimal validation".
+            if primal_count < 0 {
+                return Err(SignalPrepareError::Validation(format!(
+                    "BlockReverseAD {} declares negative primal_count {primal_count}",
+                    sig.as_u32()
+                )));
+            }
+            let body_vec = list_to_vec(arena, body).ok_or_else(|| {
+                SignalPrepareError::Validation(format!(
+                    "BlockReverseAD {} body is not a well-formed cons list",
+                    sig.as_u32()
+                ))
+            })?;
+            let seed_vec = list_to_vec(arena, seeds).ok_or_else(|| {
+                SignalPrepareError::Validation(format!(
+                    "BlockReverseAD {} seed list is malformed",
+                    sig.as_u32()
+                ))
+            })?;
+            let cot_vec = list_to_vec(arena, cotangents).ok_or_else(|| {
+                SignalPrepareError::Validation(format!(
+                    "BlockReverseAD {} cotangent list is malformed",
+                    sig.as_u32()
+                ))
+            })?;
+            if body_vec.is_empty() {
+                return Err(SignalPrepareError::Validation(format!(
+                    "BlockReverseAD {} requires at least one primal output",
+                    sig.as_u32()
+                )));
+            }
+            if body_vec.len() != cot_vec.len() {
+                return Err(SignalPrepareError::Validation(format!(
+                    "BlockReverseAD {} body length {} does not match cotangent length {}",
+                    sig.as_u32(),
+                    body_vec.len(),
+                    cot_vec.len()
+                )));
+            }
+            if usize::try_from(primal_count).ok() != Some(body_vec.len()) {
+                return Err(SignalPrepareError::Validation(format!(
+                    "BlockReverseAD {} primal_count {primal_count} disagrees with body length {}",
+                    sig.as_u32(),
+                    body_vec.len()
+                )));
+            }
+            for child in body_vec
+                .into_iter()
+                .chain(seed_vec.into_iter())
+                .chain(cot_vec.into_iter())
+            {
+                verify_prepared_signal(
+                    arena,
+                    ui,
+                    child,
+                    visited,
+                    sym_group_arities,
+                    reachable_typed_nodes,
+                )?;
+            }
         }
         SigMatch::ReverseTimeRec(body) => {
             verify_prepared_signal(

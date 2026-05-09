@@ -466,6 +466,34 @@ impl<'a> SignalPromoter<'a> {
                 let body = self.promote(body)?;
                 SigBuilder::new(self.arena).reverse_time_rec(body)
             }
+            SigMatch::BlockReverseAD {
+                body,
+                seeds,
+                cotangents,
+                policy,
+                ..
+            } => {
+                // Phase B0 promotion is a structural pass-through: each
+                // child list is promoted independently (cons traversal is
+                // built into `promote`), and the carrier is rebuilt from
+                // the materialised slices so subsequent passes see a
+                // canonical layout.
+                let body = self.promote(body)?;
+                let seeds = self.promote(seeds)?;
+                let cotangents = self.promote(cotangents)?;
+                let body_vec = tlib::list_to_vec(self.arena, body).ok_or_else(|| {
+                    NormalFormError::Type("malformed body list inside BlockReverseAD".to_owned())
+                })?;
+                let seed_vec = tlib::list_to_vec(self.arena, seeds).ok_or_else(|| {
+                    NormalFormError::Type("malformed seed list inside BlockReverseAD".to_owned())
+                })?;
+                let cot_vec = tlib::list_to_vec(self.arena, cotangents).ok_or_else(|| {
+                    NormalFormError::Type(
+                        "malformed cotangent list inside BlockReverseAD".to_owned(),
+                    )
+                })?;
+                SigBuilder::new(self.arena).block_reverse_ad(&body_vec, &seed_vec, &cot_vec, policy)
+            }
             SigMatch::VSlider(control) => SigBuilder::new(self.arena).vslider(control),
             SigMatch::HSlider(control) => SigBuilder::new(self.arena).hslider(control),
             SigMatch::NumEntry(control) => SigBuilder::new(self.arena).numentry(control),

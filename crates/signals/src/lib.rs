@@ -23,6 +23,13 @@
 //!   downstream lowering must evaluate the group from the end of the current
 //!   compute block back to the beginning with terminal adjoint state initialized
 //!   to zero.
+//! - `BlockReverseAD { body, primal_count, seeds, cotangents, policy }` is a
+//!   Rust-only general RAD fallback carrier. It is the Signal-IR-level
+//!   counterpart of the block-local Truncated BPTT model described in
+//!   `porting/rad-block-reverse-ad-signal-ir-plan-2026-05-07-en.md`. The
+//!   carrier is opaque to the symbolic feed-forward and LTI fast paths; its
+//!   outputs are addressed via `Proj(slot, group)` with primal outputs first
+//!   and per-sample seed gradients after.
 //! - `Fir` and `Iir` are C++-parity filter carrier nodes for the structured
 //!   LTI algebra port documented in
 //!   `porting/lti-filter-intermediate-form-plan-2026-05-06-en.md`. They mirror
@@ -123,11 +130,59 @@ const SIG_REC_TAG: &str = "SIGREC";
 const SIG_REVERSE_TIME_REC_TAG: &str = "SIGREVERSETIMEREC";
 const SIG_FIR_TAG: &str = "SIGFIR";
 const SIG_IIR_TAG: &str = "SIGIIR";
+const SIG_BLOCK_REVERSE_AD_TAG: &str = "SIGBLOCKREVERSEAD";
 
 /// Stable crate identifier used in workspace-level tooling and diagnostics.
 #[must_use]
 pub fn crate_id() -> &'static str {
     CRATE_NAME
+}
+
+/// Tape policy hint carried by [`SigMatch::BlockReverseAD`].
+///
+/// Phase B0 of the block-reverse-AD plan only specifies and exercises
+/// [`BlockRevPolicy::TapeFull`]. The other variants are reserved so a future
+/// backend implementation can opt into checkpointing or pure recompute
+/// without changing the on-arena layout of the carrier.
+///
+/// Source provenance: original Rust design in
+/// `porting/rad-block-reverse-ad-signal-ir-plan-2026-05-07-en.md`,
+/// section "8. Tape And Checkpointing Policy".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(i64)]
+pub enum BlockRevPolicy {
+    /// Record every active value referenced by a reverse rule for the
+    /// current block. Memory cost is `block_size × active_value_count` of
+    /// the body's real precision. The only variant Phase B0 commits to.
+    TapeFull = 0,
+    /// Reserved: split the block into checkpointed segments and recompute
+    /// missing tape entries on demand. Not implemented in Phase B0.
+    Checkpointed = 1,
+    /// Reserved: discard the tape entirely and recompute the forward sweep
+    /// inside the reverse loop. Not implemented in Phase B0.
+    Recompute = 2,
+}
+
+impl BlockRevPolicy {
+    /// Decodes a raw `i64` (as stored on the arena) back into a policy.
+    /// Returns `None` for unknown tags so callers can surface a structured
+    /// validation diagnostic rather than panicking.
+    #[must_use]
+    pub fn from_raw(raw: i64) -> Option<Self> {
+        match raw {
+            0 => Some(Self::TapeFull),
+            1 => Some(Self::Checkpointed),
+            2 => Some(Self::Recompute),
+            _ => None,
+        }
+    }
+
+    /// Encodes the policy as the raw `i64` stored under the carrier's
+    /// fifth child.
+    #[must_use]
+    pub fn to_raw(self) -> i64 {
+        self as i64
+    }
 }
 
 /// Binary signal operators (aligned with C++ `SOperator` order).
@@ -693,6 +748,109 @@ impl<'a> SigBuilder<'a> {
     }
 
     #[must_use]
+    /// Builds one `block_reverse_ad` carrier and returns its `SigId`.
+    ///
+    /// `BlockReverseAD` is a Rust-only Signal-IR carrier introduced for
+    /// the general fallback path of `rad(expr, seeds)`. Its semantic
+    /// contract — independent of any specific backend — is:
+    ///
+    /// ```text
+    /// over the current compute() block:
+    ///   forward-evaluate `body` sample-by-sample under normal Faust
+    ///     execution semantics;
+    ///   record (or checkpoint, depending on `policy`) the active values
+    ///     required by the reverse rules;
+    ///   run a reverse sweep from frame BS-1 down to 0, seeding each
+    ///     primal output with `cotangents[i]`, propagating adjoints
+    ///     through every primitive in the FAD-supported surface, and
+    ///     accumulating per-sample gradient contributions for each seed.
+    /// ```
+    ///
+    /// # Output layout
+    ///
+    /// The carrier is addressed exclusively through `Proj(slot, group)`,
+    /// using the same projection contract as [`Self::rec`] /
+    /// [`Self::reverse_time_rec`]:
+    ///
+    /// - `Proj(0..M-1, group)` — the `M = body.len()` primal outputs;
+    /// - `Proj(M..M+N-1, group)` — the per-sample gradient contribution
+    ///   for `seeds[k]`, with `N = seeds.len()`.
+    ///
+    /// `cotangents.len()` must equal `body.len()`. Phase B0 always fills
+    /// the cotangent slot with `1.0` constants (one per primal), matching
+    /// the existing `rad(expr, seeds)` convention `J = sum(expr_outputs)`.
+    /// The slot is materialised on-arena so a future VJP API can populate
+    /// it with user-supplied seeds without bumping the tag.
+    ///
+    /// # Block semantics
+    ///
+    /// The reverse sweep is *block-local*: terminal adjoint state at
+    /// `BS-1` is implicit zero, no adjoint state is preserved across
+    /// `compute()` calls, and gradient outputs are per-sample
+    /// contributions (not block-summed scalars). This corresponds to
+    /// non-overlapping Truncated BPTT(BS, BS) in the sense of Williams &
+    /// Peng (1990); see
+    /// `porting/rad-block-reverse-ad-signal-ir-plan-2026-05-07-en.md`,
+    /// sections 7 and 7.1.
+    ///
+    /// # On-arena layout
+    ///
+    /// The five children, in order, are:
+    ///
+    /// | child | role |
+    /// |-------|------|
+    /// | `body_list` | cons-list of `SigId` primal outputs (M ≥ 1 elements) |
+    /// | `primal_count` | `Int(M)`, set from `body.len()` |
+    /// | `seed_list` | cons-list of `SigId` seed leaves (N elements, may be empty) |
+    /// | `cotangent_list` | cons-list of `SigId` cotangents (M elements) |
+    /// | `policy` | `Int(BlockRevPolicy::to_raw())` |
+    ///
+    /// Source provenance: original Rust design in
+    /// `porting/rad-block-reverse-ad-signal-ir-plan-2026-05-07-en.md`,
+    /// sections 4 and 11.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, panics if `body` is empty or
+    /// `cotangents.len() != body.len()`. Release builds construct a
+    /// carrier that will be rejected at the next `signal_prepare` pass
+    /// with a structured `SignalPrepareError::Validation` diagnostic, so
+    /// arena-level invariants are never violated.
+    pub fn block_reverse_ad(
+        &mut self,
+        body: &[SigId],
+        seeds: &[SigId],
+        cotangents: &[SigId],
+        policy: BlockRevPolicy,
+    ) -> SigId {
+        debug_assert!(
+            !body.is_empty(),
+            "BlockReverseAD requires at least one primal output"
+        );
+        debug_assert_eq!(
+            body.len(),
+            cotangents.len(),
+            "BlockReverseAD body and cotangent lists must have the same length"
+        );
+        let body_list = tlib::vec_to_list(self.arena, body);
+        let seed_list = tlib::vec_to_list(self.arena, seeds);
+        let cotangent_list = tlib::vec_to_list(self.arena, cotangents);
+        let primal_count = self.arena.int(body.len() as i64);
+        let policy_id = self.arena.int(policy.to_raw());
+        intern_tag(
+            self.arena,
+            SIG_BLOCK_REVERSE_AD_TAG,
+            &[
+                body_list,
+                primal_count,
+                seed_list,
+                cotangent_list,
+                policy_id,
+            ],
+        )
+    }
+
+    #[must_use]
     /// Builds one `sigFIR` carrier and returns its `SigId`.
     ///
     /// Source provenance:
@@ -963,6 +1121,21 @@ pub enum SigMatch<'a> {
     Proj(i32, SigId),
     Rec(SigId),
     ReverseTimeRec(SigId),
+    /// General block-reverse-AD carrier. See [`SigBuilder::block_reverse_ad`]
+    /// for the semantic contract and on-arena layout.
+    ///
+    /// `body`, `seeds`, and `cotangents` carry the cons-list head of the
+    /// corresponding child list (use `tlib::list_to_vec` to materialise).
+    /// `primal_count` is redundant with `body`'s list length but is read
+    /// directly during validation and lowering to avoid re-walking the
+    /// list. `policy` is decoded from the on-arena `Int` child.
+    BlockReverseAD {
+        body: SigId,
+        primal_count: i32,
+        seeds: SigId,
+        cotangents: SigId,
+        policy: BlockRevPolicy,
+    },
     Fir(&'a [SigId]),
     Iir(&'a [SigId]),
     Button(ControlId),
@@ -1078,6 +1251,23 @@ pub fn match_sig<'a>(arena: &'a TreeArena, id: SigId) -> SigMatch<'a> {
                 },
                 (SIG_REC_TAG, [body]) => SigMatch::Rec(*body),
                 (SIG_REVERSE_TIME_REC_TAG, [body]) => SigMatch::ReverseTimeRec(*body),
+                (SIG_BLOCK_REVERSE_AD_TAG, [body, primal_count, seeds, cotangents, policy]) => {
+                    match (arena.kind(*primal_count), arena.kind(*policy)) {
+                        (Some(NodeKind::Int(count)), Some(NodeKind::Int(raw_policy))) => {
+                            match (i32::try_from(*count), BlockRevPolicy::from_raw(*raw_policy)) {
+                                (Ok(primal_count), Some(policy)) => SigMatch::BlockReverseAD {
+                                    body: *body,
+                                    primal_count,
+                                    seeds: *seeds,
+                                    cotangents: *cotangents,
+                                    policy,
+                                },
+                                _ => SigMatch::Unknown,
+                            }
+                        }
+                        _ => SigMatch::Unknown,
+                    }
+                }
                 (SIG_FIR_TAG, sigcoefs) => SigMatch::Fir(sigcoefs),
                 (SIG_IIR_TAG, sigcoefs) => SigMatch::Iir(sigcoefs),
                 (SIG_BUTTON_TAG, [control]) => {

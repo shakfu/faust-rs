@@ -616,6 +616,44 @@ impl<'a> TypeAnnotator<'a> {
             }
             SigMatch::ReverseTimeRec(body) => self.infer(body),
 
+            // Block reverse-AD carrier: the projection contract addresses
+            // primal outputs first (slots `0..primal_count-1`) followed by
+            // per-sample seed gradients (slots `primal_count..M+N-1`).
+            //
+            // For type inference the carrier behaves like a tuplet of all
+            // visible outputs in declaration order: each primal slot
+            // adopts the type of the corresponding `body` element, and
+            // each gradient slot adopts the type of the corresponding
+            // `seeds` element. Variability is left as inferred — phase B0
+            // does not specialise it; downstream lowering will tighten
+            // when the carrier becomes addressable through `Proj`.
+            //
+            // Source provenance: original Rust design in
+            // `porting/rad-block-reverse-ad-signal-ir-plan-2026-05-07-en.md`,
+            // section "11.1 Phase B0 — Signal carrier + minimal validation".
+            SigMatch::BlockReverseAD {
+                body,
+                seeds,
+                cotangents,
+                ..
+            } => {
+                // Walking the cotangent list keeps each `1.0` constant
+                // typed, which matters for the explicit-VJP successor of
+                // this rule even though phase-B0 cotangents are constants.
+                let _ = self.infer(cotangents)?;
+                let body_ty = self.infer(body)?;
+                let seeds_ty = self.infer(seeds)?;
+                let mut components: Vec<SigType> = match body_ty {
+                    SigType::Tuplet(t) => t.components,
+                    other => vec![other],
+                };
+                match seeds_ty {
+                    SigType::Tuplet(t) => components.extend(t.components),
+                    other => components.push(other),
+                }
+                Ok(make_tuplet(components))
+            }
+
             SigMatch::Proj(idx, group) => self.infer_proj(idx, group),
 
             // ── Foreign ─────────────────────────────────────────────────────

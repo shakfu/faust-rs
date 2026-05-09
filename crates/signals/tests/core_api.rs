@@ -5,12 +5,12 @@
 //! - Guards regression/parity behavior on representative fixtures and corpus cases.
 
 use signals::{
-    BinOp, SigBuilder, SigMatch, add_sig_fir, add_sig_iir, concerned_iir, convert_fir_to_sig,
-    delay_sig_fir, delay_sig_iir, div_sig_iir, dump_sig, dump_sig_readable, embedded_iir,
-    make_sig_fir, match_sig, mul_sig_iir, neg_sig_fir, proj_to_sig_iir, simplify_fir, sub_sig_fir,
-    sub_sig_iir,
+    BinOp, BlockRevPolicy, SigBuilder, SigMatch, add_sig_fir, add_sig_iir, concerned_iir,
+    convert_fir_to_sig, delay_sig_fir, delay_sig_iir, div_sig_iir, dump_sig, dump_sig_readable,
+    embedded_iir, make_sig_fir, match_sig, mul_sig_iir, neg_sig_fir, proj_to_sig_iir, simplify_fir,
+    sub_sig_fir, sub_sig_iir,
 };
-use tlib::TreeArena;
+use tlib::{TreeArena, list_to_vec};
 
 #[test]
 fn builder_and_match_cover_core_signal_shapes() {
@@ -197,6 +197,84 @@ fn stream_wrappers_and_recursion_shapes_are_stable() {
     assert!(matches!(match_sig(&arena, iir), SigMatch::Iir(v) if v == [proj, x, c0, c1]));
     assert_eq!(match_sig(&arena, seq), SigMatch::Seq(x, y));
     assert_eq!(match_sig(&arena, zp), SigMatch::ZeroPad(x, y));
+}
+
+#[test]
+fn block_reverse_ad_carrier_round_trips() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+
+    let x = b.input(0);
+    let y = b.input(1);
+    let z = b.input(2);
+    let primal0 = b.add(x, y);
+    let primal1 = b.mul(x, z);
+    let one_a = b.real(1.0);
+    let one_b = b.real(1.0);
+
+    let carrier = b.block_reverse_ad(
+        &[primal0, primal1],
+        &[x, y],
+        &[one_a, one_b],
+        BlockRevPolicy::TapeFull,
+    );
+
+    let SigMatch::BlockReverseAD {
+        body,
+        primal_count,
+        seeds,
+        cotangents,
+        policy,
+    } = match_sig(&arena, carrier)
+    else {
+        panic!("BlockReverseAD carrier should decode through SigMatch");
+    };
+    assert_eq!(primal_count, 2);
+    assert_eq!(policy, BlockRevPolicy::TapeFull);
+
+    let body_vec = list_to_vec(&arena, body).expect("body must be a well-formed cons list");
+    assert_eq!(body_vec, vec![primal0, primal1]);
+    let seed_vec = list_to_vec(&arena, seeds).expect("seed list must be well-formed");
+    assert_eq!(seed_vec, vec![x, y]);
+    let cot_vec = list_to_vec(&arena, cotangents).expect("cotangent list must be well-formed");
+    assert_eq!(cot_vec, vec![one_a, one_b]);
+
+    // Same children at the SigBuilder boundary deduplicate to the same SigId.
+    let again = SigBuilder::new(&mut arena).block_reverse_ad(
+        &[primal0, primal1],
+        &[x, y],
+        &[one_a, one_b],
+        BlockRevPolicy::TapeFull,
+    );
+    assert_eq!(carrier, again);
+}
+
+#[test]
+fn block_reverse_ad_policy_round_trip() {
+    for policy in [
+        BlockRevPolicy::TapeFull,
+        BlockRevPolicy::Checkpointed,
+        BlockRevPolicy::Recompute,
+    ] {
+        assert_eq!(BlockRevPolicy::from_raw(policy.to_raw()), Some(policy));
+    }
+    assert_eq!(BlockRevPolicy::from_raw(-1), None);
+    assert_eq!(BlockRevPolicy::from_raw(99), None);
+}
+
+#[test]
+fn block_reverse_ad_distinct_policies_intern_distinct_carriers() {
+    let mut arena = TreeArena::new();
+    let mut b = SigBuilder::new(&mut arena);
+    let x = b.input(0);
+    let one = b.real(1.0);
+
+    let tape = b.block_reverse_ad(&[x], &[x], &[one], BlockRevPolicy::TapeFull);
+    let chk = b.block_reverse_ad(&[x], &[x], &[one], BlockRevPolicy::Checkpointed);
+    assert_ne!(
+        tape, chk,
+        "different policies must hash to different interned carriers"
+    );
 }
 
 #[test]

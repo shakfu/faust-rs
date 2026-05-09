@@ -815,6 +815,13 @@ impl LinearityAnalyzer {
                 }
             }
             SigMatch::TempVar(x) | SigMatch::PermVar(x) => self.classify(arena, x, current_level),
+            // The block-reverse-AD carrier is opaque to the LTI/affine
+            // classifier: by construction it is only produced as the
+            // general fallback when the symbolic and LTI paths refuse, so
+            // its body is not eligible for state-space transposition.
+            // Treat it as a nonlinear leaf — the dispatcher should never
+            // route it back into the LTI bridge.
+            SigMatch::BlockReverseAD { .. } => ExprClass::nonlinear(),
             SigMatch::Unknown => ExprClass::time_varying(),
         }
     }
