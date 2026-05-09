@@ -1246,61 +1246,34 @@ fn corpus_rad_fad_multi_seed_routes_implicit_cotangent_through_inner_lanes() {
 }
 
 #[test]
-fn corpus_err_fad_rad_temporal_surfaces_rad_diagnostic() {
+fn corpus_err_fad_rad_temporal_inner_falls_back_to_block_mode() {
     // tests/corpus/err_fad_rad_temporal.dsp
     //   process = fad(rad(x', x), x);
-    // The inner RAD must reject the delay even when wrapped in FAD.
+    // Phase B1: the inner `rad` falls back to BlockReverseAD, so the outer
+    // `fad` receives two BlockReverseAD projections and succeeds.
+    // Outputs = 4: two primal projections + two tangent projections.
     let path = corpus_path("err_fad_rad_temporal.dsp");
     let source = std::fs::read_to_string(&path).expect("read err_fad_rad_temporal fixture");
     let compiler = Compiler::new();
-    let err = compiler
+    let out = compiler
         .compile_source_to_signals("err_fad_rad_temporal.dsp", &source)
-        .expect_err("inner rad over delay1 must fail when wrapped in fad");
-    let diagnostics = err
-        .diagnostics()
-        .expect("propagate error should expose diagnostics");
-    assert!(
-        diagnostics
-            .as_slice()
-            .iter()
-            .any(|d| d.message.contains("rad")),
-        "fad-wrapped rad temporal diagnostic must mention `rad`: {diagnostics:?}"
-    );
-    // Confirm it specifically came from the temporal kind, not a
-    // generic UnsupportedBox.
-    assert!(
-        diagnostics
-            .as_slice()
-            .iter()
-            .any(|d| d.message.contains("delay-or-prefix")
-                || d.notes.iter().any(|n| n.contains("non-causal"))),
-        "fad-wrapped rad temporal diagnostic must surface the temporal kind: {diagnostics:?}"
-    );
+        .expect("fad(rad(x', x), x) must succeed via BlockReverseAD fallback (Phase B1)");
+    // fad expands 2 primal outputs × 1 seed → 4 outputs
+    assert_eq!(out.signals.len(), 4, "fad(rad(delay1,x),x) → 4 outputs");
 }
 
 #[test]
-fn nested_rad_in_fad_temporal_inner_still_rejects_with_diagnostic() {
-    // Sanity check: the temporal rejection is preserved when RAD is the
-    // inner pass. Compiling `fad(rad(x', x), x)` must still fail with the
-    // RAD temporal diagnostic, not silently produce a misleading double
-    // gradient.
+fn nested_rad_in_fad_temporal_inner_falls_back_to_block_mode() {
+    // Phase B1: `fad(rad(x', x), x)` no longer errors. The inner rad falls
+    // back to BlockReverseAD, and FAD differentiates the resulting projections.
     use compiler::Compiler;
     let source = r#"
 x = hslider("x", 0.0, -1.0, 1.0, 0.01);
 process = fad(rad(x', x), x);
 "#;
     let compiler = Compiler::new();
-    let err = compiler
+    let out = compiler
         .compile_source_to_signals("nested-rad-in-fad-temporal.dsp", source)
-        .expect_err("inner rad over delay1 must fail even when wrapped in fad");
-    let diagnostics = err
-        .diagnostics()
-        .expect("propagate error should expose diagnostics");
-    assert!(
-        diagnostics
-            .as_slice()
-            .iter()
-            .any(|d| d.message.contains("rad")),
-        "nested rad-in-fad temporal diagnostic must mention `rad`: {diagnostics:?}"
-    );
+        .expect("fad(rad(x', x), x) must succeed via BlockReverseAD fallback (Phase B1)");
+    assert_eq!(out.signals.len(), 4, "fad(rad(delay1,x),x) → 4 outputs");
 }

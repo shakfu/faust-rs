@@ -1,7 +1,6 @@
-// Mixed AD: a temporal violation in the inner RAD must still be
-// surfaced as a structured RAD diagnostic when the outer pass is FAD.
-// fad(rad(x', x), x) is rejected because the inner rad would require a
-// non-causal transpose of `x'`. Without this guarantee, wrapping `rad`
-// inside `fad` could mask the missing gradient.
+// Mixed AD: fad(rad(x', x), x) — the inner rad falls back to
+// SigBlockReverseAD (Phase B1), then fad differentiates the carrier.
+// Outputs = 4: [Proj(0,BRA), Proj(0,BRA)', Proj(1,BRA), Proj(1,BRA)'].
+// (Previously this was expected to error; updated for Phase B1.)
 x = hslider("x", 0.0, -1.0, 1.0, 0.01);
 process = fad(rad(x', x), x);

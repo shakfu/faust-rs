@@ -1748,10 +1748,10 @@ fn propagate_reverse_ad_feed_forward_returns_primal_then_gradients() {
 }
 
 #[test]
-fn propagate_reverse_ad_temporal_node_emits_unsupported_diagnostic() {
-    // process = rad(x', x): differentiating a delay1 must be rejected with
-    // a structured `RadUnsupportedNode` rather than silently producing a
-    // wrong gradient.
+fn propagate_reverse_ad_delay1_falls_back_to_block_mode() {
+    // process = rad(x', x): delay in the primal triggers the Phase-B1 block
+    // fallback.  The output must be [Proj(0, BRA), Proj(1, BRA)] rather than
+    // an error — the carrier is lowered by the backend with TBPTT(BS, BS).
     let mut arena = TreeArena::new();
     let process = {
         let mut bb = BoxBuilder::new(&mut arena);
@@ -1762,15 +1762,18 @@ fn propagate_reverse_ad_temporal_node_emits_unsupported_diagnostic() {
         bb.reverse_ad(body, seed)
     };
     let flat = try_build_flat_box(&arena, process).unwrap();
-    let err = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
-        .expect_err("rad through delay1 must error");
-    let PropagateError::RadUnsupportedNode { kind, .. } = err else {
-        panic!("expected RadUnsupportedNode for delay1, got: {err:?}");
-    };
-    assert_eq!(
-        kind, "delay-or-prefix",
-        "delay1 must be classified under the temporal family"
-    );
+    // M = 1 primal, N = 1 seed → 2 outputs
+    let outs = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
+        .expect("rad through delay1 must fall back to BlockReverseAD carrier");
+    assert_eq!(outs.len(), 2, "rad bundle = [primal_proj, adjoint_proj]");
+    assert_block_reverse_ad_projections(&arena, &outs);
+}
+
+#[test]
+fn propagate_reverse_ad_delay_or_prefix_kind_has_temporal_diagnostic() {
+    // Standalone check: the `RadUnsupportedNode { kind: "delay-or-prefix" }`
+    // diagnostic contains the notes the user needs to understand the obstacle.
+    let arena = TreeArena::new();
     let diag = PropagateError::RadUnsupportedNode {
         node: arena.nil(),
         kind: "delay-or-prefix",
@@ -1789,13 +1792,14 @@ fn propagate_reverse_ad_temporal_node_emits_unsupported_diagnostic() {
 }
 
 #[test]
-fn propagate_reverse_ad_variable_delay_emits_temporal_diagnostic() {
+fn propagate_reverse_ad_variable_delay_falls_back_to_block_mode() {
+    // process = rad((x, 2.0) : @, x): fixed-count delay triggers the block
+    // fallback just like delay1.
     let mut arena = TreeArena::new();
     let process = {
         let mut bb = BoxBuilder::new(&mut arena);
         let x_slider = build_hslider(&mut bb, "x", 0.0, -1.0, 1.0, 0.01);
         let d_const = bb.real(2.0);
-        // Build `(x_slider, d_const) : @` ⇒ `delay(x, 2)` after propagate.
         let xd = bb.par(x_slider, d_const);
         let delay = bb.delay();
         let body = bb.seq(xd, delay);
@@ -1803,15 +1807,10 @@ fn propagate_reverse_ad_variable_delay_emits_temporal_diagnostic() {
         bb.reverse_ad(body, seed)
     };
     let flat = try_build_flat_box(&arena, process).unwrap();
-    let err = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
-        .expect_err("rad through variable delay must error");
-    assert!(matches!(
-        err,
-        PropagateError::RadUnsupportedNode {
-            kind: "delay-or-prefix",
-            ..
-        }
-    ));
+    let outs = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
+        .expect("rad through constant delay must fall back to BlockReverseAD");
+    assert_eq!(outs.len(), 2, "rad bundle = [primal_proj, adjoint_proj]");
+    assert_block_reverse_ad_projections(&arena, &outs);
 }
 
 #[test]
@@ -1885,10 +1884,10 @@ fn propagate_reverse_ad_strict_lti_feedback_coeff_returns_sample_contribution() 
 }
 
 #[test]
-fn propagate_reverse_ad_ltv_recursive_body_reports_block_replay_mode() {
+fn propagate_reverse_ad_ltv_recursive_body_falls_back_to_block_mode() {
     // process = rad((2 : + ~ *(hslider("coef"))), seed): the feedback is
-    // linear in recursive state but the coefficient is signal-dependent, so
-    // the future exact RAD route is E2 block coefficient replay.
+    // linear in recursive state but the coefficient is signal-dependent
+    // (LTV).  Phase B1 falls back to the BlockReverseAD carrier.
     let mut arena = TreeArena::new();
     let process = {
         let mut bb = BoxBuilder::new(&mut arena);
@@ -1905,18 +1904,15 @@ fn propagate_reverse_ad_ltv_recursive_body_reports_block_replay_mode() {
         bb.reverse_ad(body, seed)
     };
     let flat = try_build_flat_box(&arena, process).unwrap();
-    let err = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
-        .expect_err("rad through a time-varying recursive body must error");
-    assert!(
-        matches!(
-            err,
-            PropagateError::RadUnsupportedNode {
-                kind: "recursive-block-linear-time-varying",
-                ..
-            }
-        ),
-        "expected recursive-block-linear-time-varying, got: {err:?}"
-    );
+    let outs = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
+        .expect("rad through LTV recursive body must fall back to BlockReverseAD");
+    assert_eq!(outs.len(), 2, "rad bundle = [primal_proj, adjoint_proj]");
+    assert_block_reverse_ad_projections(&arena, &outs);
+}
+
+#[test]
+fn propagate_reverse_ad_ltv_recursive_kind_has_block_replay_diagnostic() {
+    let arena = TreeArena::new();
     let diag = PropagateError::RadUnsupportedNode {
         node: arena.nil(),
         kind: "recursive-block-linear-time-varying",
@@ -1929,9 +1925,9 @@ fn propagate_reverse_ad_ltv_recursive_body_reports_block_replay_mode() {
 }
 
 #[test]
-fn propagate_reverse_ad_nonlinear_recursive_body_reports_bptt_mode() {
+fn propagate_reverse_ad_nonlinear_recursive_body_falls_back_to_block_mode() {
     // process = rad((2 : + ~ sin), seed): the feedback applies a nonlinear
-    // primitive to recursive state, so exact RAD requires phase-F BPTT.
+    // primitive to recursive state.  Phase B1 falls back to BlockReverseAD.
     let mut arena = TreeArena::new();
     let process = {
         let mut bb = BoxBuilder::new(&mut arena);
@@ -1944,18 +1940,15 @@ fn propagate_reverse_ad_nonlinear_recursive_body_reports_bptt_mode() {
         bb.reverse_ad(body, seed)
     };
     let flat = try_build_flat_box(&arena, process).unwrap();
-    let err = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
-        .expect_err("rad through a nonlinear recursive body must error");
-    assert!(
-        matches!(
-            err,
-            PropagateError::RadUnsupportedNode {
-                kind: "recursive-bptt-required",
-                ..
-            }
-        ),
-        "expected recursive-bptt-required, got: {err:?}"
-    );
+    let outs = propagate_typed(&mut arena, flat, &[], &mut ArityCache::new())
+        .expect("rad through nonlinear recursive body must fall back to BlockReverseAD");
+    assert_eq!(outs.len(), 2, "rad bundle = [primal_proj, adjoint_proj]");
+    assert_block_reverse_ad_projections(&arena, &outs);
+}
+
+#[test]
+fn propagate_reverse_ad_nonlinear_recursive_kind_has_bptt_diagnostic() {
+    let arena = TreeArena::new();
     let diag = PropagateError::RadUnsupportedNode {
         node: arena.nil(),
         kind: "recursive-bptt-required",
@@ -2243,4 +2236,33 @@ fn tag_name(arena: &TreeArena, id: TreeId) -> Option<&str> {
         return None;
     };
     arena.tag_name(*tag_id)
+}
+
+/// Asserts that every signal in `outs` is `Proj(i, carrier)` pointing at the
+/// same carrier node, and that the carrier decodes as `SigMatch::BlockReverseAD`.
+/// Returns the shared carrier `SigId`.
+fn assert_block_reverse_ad_projections(arena: &TreeArena, outs: &[TreeId]) -> TreeId {
+    assert!(!outs.is_empty(), "output list must not be empty");
+    let SigMatch::Proj(first_slot, carrier) = match_sig(arena, outs[0]) else {
+        panic!(
+            "output 0 must be Proj(_, BlockReverseAD), got {:?}",
+            match_sig(arena, outs[0])
+        );
+    };
+    assert_eq!(first_slot, 0, "first output must project slot 0");
+    assert!(
+        matches!(match_sig(arena, carrier), SigMatch::BlockReverseAD { .. }),
+        "carrier must decode as BlockReverseAD"
+    );
+    for (i, &out) in outs.iter().enumerate().skip(1) {
+        let SigMatch::Proj(slot, grp) = match_sig(arena, out) else {
+            panic!("output {i} must be Proj, got {:?}", match_sig(arena, out));
+        };
+        assert_eq!(slot, i as i32, "output {i} must project slot {i}");
+        assert_eq!(
+            grp, carrier,
+            "output {i} must project from the same carrier"
+        );
+    }
+    carrier
 }

@@ -362,29 +362,39 @@ fn propagate_error_fixture_exposes_frs_prop_code() {
 }
 
 #[test]
-fn reverse_ad_temporal_fixture_fails_with_rad_unsupported_node_diagnostic() {
+fn reverse_ad_delay1_fixture_falls_back_to_block_reverse_ad() {
+    // Phase B1: `rad(x', x)` no longer errors — it falls back to the
+    // SigBlockReverseAD carrier.  The two output signals must each be
+    // `Proj(slot, BlockReverseAD { .. })`.
     let compiler = Compiler::new();
-    let source = read_corpus("err_rad_delay_temporal_unsupported.dsp");
-    let err = compiler
-        .compile_source_to_signals("err_rad_delay_temporal_unsupported.dsp", &source)
-        .expect_err("rad over a delay must fail at propagate stage");
+    let source = read_corpus("rad_delay1_block_fallback.dsp");
+    let out = compiler
+        .compile_source_to_signals("rad_delay1_block_fallback.dsp", &source)
+        .expect("rad over a delay1 must succeed with BlockReverseAD fallback (Phase B1)");
 
-    let diagnostics = err
-        .diagnostics()
-        .expect("reverse-ad propagate error should expose diagnostics");
-    assert!(
-        diagnostics
-            .as_slice()
-            .iter()
-            .any(|d| d.code.0 == "FRS-PROP-0001"),
-        "rad temporal-unsupported should surface unsupported-box-family diagnostics"
+    assert_eq!(
+        out.signals.len(),
+        2,
+        "rad bundle = [primal_proj, adjoint_proj]"
     );
+    let SigMatch::Proj(s0, carrier) = match_sig(&out.parse.state.arena, out.signals[0]) else {
+        panic!("first output must be Proj");
+    };
+    assert_eq!(s0, 0);
     assert!(
-        diagnostics
-            .as_slice()
-            .iter()
-            .any(|d| d.message.contains("rad")),
-        "rad temporal-unsupported diagnostic must mention `rad`"
+        matches!(
+            match_sig(&out.parse.state.arena, carrier),
+            SigMatch::BlockReverseAD { .. }
+        ),
+        "carrier must be SigBlockReverseAD"
+    );
+    let SigMatch::Proj(s1, carrier2) = match_sig(&out.parse.state.arena, out.signals[1]) else {
+        panic!("second output must be Proj");
+    };
+    assert_eq!(s1, 1);
+    assert_eq!(
+        carrier, carrier2,
+        "both outputs project from the same carrier"
     );
 }
 

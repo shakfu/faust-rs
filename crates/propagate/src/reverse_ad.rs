@@ -99,7 +99,7 @@
 //! never silently emit a misleading gradient.
 
 use ahash::{AHashMap, AHashSet};
-use signals::{BinOp, SigBuilder, SigId, SigMatch, match_sig};
+use signals::{BinOp, BlockRevPolicy, SigBuilder, SigId, SigMatch, match_sig};
 use smallvec::SmallVec;
 use tlib::{
     NodeKind, TreeArena, check_de_bruijn_coherence, is_de_bruijn_closed, list_to_vec,
@@ -1306,7 +1306,63 @@ pub(super) fn build_lti_recursive_adjoint_projections(
     Ok(out)
 }
 
+/// Block-mode fallback for `rad(expr, seeds)` when the symbolic sweep
+/// encounters a temporal or recursive obstacle.
+///
+/// Builds a `SigBlockReverseAD` carrier that encodes a TBPTT(BS, BS)
+/// non-overlapping backward pass.  The implicit per-output cotangent is `1.0`,
+/// matching the symbolic sweep contract.
+///
+/// # Output layout
+///
+/// ```text
+/// [ Proj(0,   carrier), …, Proj(M-1,   carrier),   // M primal outputs
+///   Proj(M,   carrier), …, Proj(M+N-1, carrier) ]  // N seed adjoints
+/// ```
+///
+/// where `M = primals.len()` and `N = seeds.len()`.  Slots `0..M` carry the
+/// primal body values; slots `M..M+N` carry the per-seed gradients, matching
+/// the [`SigBuilder::block_reverse_ad`] slot contract.
+fn build_block_reverse_ad(arena: &mut TreeArena, primals: &[SigId], seeds: &[SigId]) -> Vec<SigId> {
+    let one = SigBuilder::new(arena).real(1.0);
+    let cotangents: Vec<SigId> = primals.iter().map(|_| one).collect();
+    let carrier = SigBuilder::new(arena).block_reverse_ad(
+        primals,
+        seeds,
+        &cotangents,
+        BlockRevPolicy::TapeFull,
+    );
+    let m = primals.len();
+    let n = seeds.len();
+    (0..m + n)
+        .map(|slot| SigBuilder::new(arena).proj(slot as i32, carrier))
+        .collect()
+}
+
 /// Public entry point for `rad(expr, seeds)` propagation.
+///
+/// # Dispatch order
+///
+/// 1. **Symbolic sweep** ([`ReverseADTransform`]) — exact feed-forward reverse
+///    mode.  Also handles the LTI fast path: linear time-invariant recursive
+///    projections are accumulated on a frontier and resolved via
+///    [`build_lti_recursive_adjoint_projections`] at the end of the sweep.
+/// 2. **Block fallback** ([`build_block_reverse_ad`]) — engaged when the
+///    symbolic sweep raises [`PropagateError::RadUnsupportedNode`] with a
+///    temporal or recursive kind (see table below).  The fallback emits a
+///    `SigBlockReverseAD` carrier lowered by the backend using TBPTT(BS, BS)
+///    semantics — no adjoint state crosses block boundaries.
+///
+/// | kind that triggers fallback | origin |
+/// |---|---|
+/// | `"delay-or-prefix"` | `Delay1`, `Delay(_, _)`, `Prefix` in the primal |
+/// | `"recursive-bptt-required"` | nonlinear recursive body |
+/// | `"recursive-block-linear-time-varying"` | LTV recursive coefficient |
+/// | `"recursive-projection"` | raw `Proj` / `Rec` with no classifier match |
+///
+/// All other errors — arity mismatches, malformed foreign functions, writable
+/// tables, soundfile accessors — propagate unchanged so the user receives a
+/// targeted diagnostic.
 pub(super) fn generate_rad_signals(
     arena: &mut TreeArena,
     primals: &[SigId],
@@ -1318,7 +1374,21 @@ pub(super) fn generate_rad_signals(
         return Ok(primals.to_vec());
     }
     let mut transform = ReverseADTransform::new(arena, seeds);
-    let result = transform.run(primals, seeds)?;
+    let result = match transform.run(primals, seeds) {
+        Ok(r) => r,
+        Err(PropagateError::RadUnsupportedNode { kind, .. })
+            if matches!(
+                kind,
+                "delay-or-prefix"
+                    | "recursive-bptt-required"
+                    | "recursive-block-linear-time-varying"
+                    | "recursive-projection"
+            ) =>
+        {
+            build_block_reverse_ad(arena, primals, seeds)
+        }
+        Err(e) => return Err(e),
+    };
     for &sig in &result {
         if is_de_bruijn_closed(arena, sig) {
             check_de_bruijn_coherence(arena, sig).map_err(|e| {
