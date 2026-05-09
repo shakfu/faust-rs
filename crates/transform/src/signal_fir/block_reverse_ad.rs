@@ -1,4 +1,4 @@
-//! Signal-level helpers for `SigBlockReverseAD` FIR lowering (Phase B3/B4).
+//! Signal-level helpers for `SigBlockReverseAD` FIR lowering (Phase B3/B4/B5).
 //!
 //! This module provides pure signal-tree utilities used by `module.rs` when
 //! lowering `SigBlockReverseAD` carriers into FIR reverse-mode adjoint code.
@@ -21,9 +21,23 @@
 //! be recorded during the forward loop.  `module.rs` then:
 //! 1. Declares a `fBraTapeN: Array(real_ty, MAX_BRA_TAPE_BLOCK_SIZE)` struct
 //!    field for each tape-needed signal.
-//! 2. Stores each value into the tape at `sample_end` of the forward loop.
+//! 2. Stores each value into the tape in the `immediate` sample phase (before
+//!    delay-register updates in `post_output`) so the pre-step delay state is
+//!    captured correctly.
 //! 3. In the reverse loop, loads from the tape via `load_bra_fwd_value`
 //!    instead of calling `lower_signal` — which would read incorrect state.
+//!
+//! **Phase B5** extends B4 with full backward rule coverage:
+//! - `Delay(c, x)`: adjoint propagated via a circular carry buffer
+//!   `fBraDelayCarryN: Array(real_ty, c)` declared as a struct field.
+//!   At reverse step `n`, slot `n % c` carries `adj[Delay(c,x)][n+c]` written
+//!   by the step `c` iterations earlier in the reverse loop.
+//! - `Prefix(init, x)`: scalar carry (same mechanism as `Delay1`) plus a
+//!   boundary term at sample 0 that propagates the cotangent to `init`.
+//! - Smooth unary ops: `Tan`, `Asin`, `Acos`, `Atan`, `Log10`, `Abs`.
+//! - Binary ops: `Pow`, `Atan2`, `Min`/`Max` (subgradient via `Select2`).
+//! - Piecewise-constant / discrete ops: `Floor`, `Ceil`, `Rint`, `Round`,
+//!   comparison `BinOp`s, bitwise `BinOp`s — all contribute zero gradient.
 //!
 //! # Trivial reverse-evaluability
 //!
@@ -135,13 +149,27 @@ pub(super) fn collect_bra_postorder(
             collect_bra_postorder(arena, x, visited, order);
         }
         // Binary operations — two children.
-        SigMatch::BinOp(_, lhs, rhs) | SigMatch::Pow(lhs, rhs) | SigMatch::Atan2(lhs, rhs) => {
+        SigMatch::BinOp(_, lhs, rhs)
+        | SigMatch::Pow(lhs, rhs)
+        | SigMatch::Atan2(lhs, rhs)
+        | SigMatch::Min(lhs, rhs)
+        | SigMatch::Max(lhs, rhs) => {
             collect_bra_postorder(arena, lhs, visited, order);
             collect_bra_postorder(arena, rhs, visited, order);
         }
         // Delay1: recurse into the value child so its adjoint can be tracked.
         SigMatch::Delay1(x) => {
             collect_bra_postorder(arena, x, visited, order);
+        }
+        // Delay(sig, amount): recurse into the delayed signal.
+        // The amount is not differentiated (delay length is discrete).
+        SigMatch::Delay(sig, _amount) => {
+            collect_bra_postorder(arena, sig, visited, order);
+        }
+        // Prefix(init, sig): both init and sig contribute to the adjoint.
+        SigMatch::Prefix(init, sig) => {
+            collect_bra_postorder(arena, init, visited, order);
+            collect_bra_postorder(arena, sig, visited, order);
         }
         // Any other kind: include in postorder; the backward pass will
         // return an unsupported-node error when it encounters it.
@@ -161,13 +189,17 @@ pub(super) fn collect_bra_postorder(
 ///
 /// Concretely:
 ///
-/// | Node kind          | Tape-needed values                         |
-/// |--------------------|---------------------------------------------|
-/// | `Mul(lhs, rhs)`    | `lhs` if not trivial; `rhs` if not trivial |
-/// | `Div(lhs, rhs)`    | `lhs` if not trivial; `rhs` if not trivial |
-/// | `Sin(x)` / `Cos(x)` / `Log(x)` | `x` if not trivial            |
-/// | `Exp(x)`           | `sig` (= `exp(x)`) if `x` not trivial      |
-/// | `Sqrt(x)`          | `sig` (= `sqrt(x)`) if `x` not trivial     |
+/// | Node kind                         | Tape-needed values                         |
+/// |-----------------------------------|--------------------------------------------|
+/// | `Mul(lhs, rhs)` / `Div(lhs, rhs)`| `lhs` if not trivial; `rhs` if not trivial |
+/// | `Min(lhs, rhs)` / `Max(lhs, rhs)`| `lhs` if not trivial; `rhs` if not trivial |
+/// | `Pow(x, y)`                       | `x`, `y`, and `sig` (= `x^y`) if either not trivial |
+/// | `Atan2(y, x)`                     | `lhs` if not trivial; `rhs` if not trivial |
+/// | `Sin(x)` / `Cos(x)` / `Tan(x)`   | `x` if not trivial                         |
+/// | `Asin(x)` / `Acos(x)` / `Atan(x)`| `x` if not trivial                         |
+/// | `Log(x)` / `Log10(x)` / `Abs(x)` | `x` if not trivial                         |
+/// | `Exp(x)`                          | `sig` (= `exp(x)`) if `x` not trivial      |
+/// | `Sqrt(x)`                         | `sig` (= `sqrt(x)`) if `x` not trivial     |
 ///
 /// For `Exp` and `Sqrt` the backward rule reuses the node value itself
 /// (`y_bar * val[sig]` and `y_bar / (2 * val[sig])` respectively), so `sig`
@@ -187,7 +219,47 @@ pub(super) fn collect_tape_needed_values(arena: &TreeArena, postorder: &[SigId])
                     needed.insert(rhs);
                 }
             }
-            SigMatch::Sin(x) | SigMatch::Cos(x) | SigMatch::Log(x) => {
+            // Min/Max subgradient needs operand values for the indicator cond.
+            SigMatch::Min(lhs, rhs) | SigMatch::Max(lhs, rhs) => {
+                if !is_trivially_reverse_evaluable(arena, lhs) {
+                    needed.insert(lhs);
+                }
+                if !is_trivially_reverse_evaluable(arena, rhs) {
+                    needed.insert(rhs);
+                }
+            }
+            // Pow(x, y): backward rule needs x, y, and val[sig] = x^y.
+            SigMatch::Pow(lhs, rhs) => {
+                if !is_trivially_reverse_evaluable(arena, lhs) {
+                    needed.insert(lhs);
+                }
+                if !is_trivially_reverse_evaluable(arena, rhs) {
+                    needed.insert(rhs);
+                }
+                if !is_trivially_reverse_evaluable(arena, lhs)
+                    || !is_trivially_reverse_evaluable(arena, rhs)
+                {
+                    needed.insert(sig); // val[sig] = x^y
+                }
+            }
+            // Atan2(y, x): backward rule needs both operand values.
+            SigMatch::Atan2(lhs, rhs) => {
+                if !is_trivially_reverse_evaluable(arena, lhs) {
+                    needed.insert(lhs);
+                }
+                if !is_trivially_reverse_evaluable(arena, rhs) {
+                    needed.insert(rhs);
+                }
+            }
+            SigMatch::Sin(x)
+            | SigMatch::Cos(x)
+            | SigMatch::Tan(x)
+            | SigMatch::Log(x)
+            | SigMatch::Log10(x)
+            | SigMatch::Asin(x)
+            | SigMatch::Acos(x)
+            | SigMatch::Atan(x)
+            | SigMatch::Abs(x) => {
                 if !is_trivially_reverse_evaluable(arena, x) {
                     needed.insert(x);
                 }

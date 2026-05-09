@@ -31,6 +31,13 @@
 //!   Mul/Div/unary backward rules (e.g. `x' * x`).  Forward values are stored
 //!   in `fBraTapeN` struct arrays during the forward loop and loaded during the
 //!   reverse loop via `load_bra_fwd_value`.
+//! - **RAD Phase B5**: extended backward rules covering all remaining
+//!   differentiable signal forms: `Delay(c, x)` (circular carry buffer of size
+//!   `c` in struct field `fBraDelayCarryN`), `Prefix(init, x)` (scalar carry
+//!   with a boundary condition at sample 0), all smooth unary ops
+//!   (`Tan`, `Asin`, `Acos`, `Atan`, `Log10`, `Abs`, `Pow`, `Atan2`), binary
+//!   `Min`/`Max` (subgradient via `Select2`), `Floor`/`Ceil`/`Rint`/`Round`
+//!   (zero gradient), and discrete `BinOp` variants (zero gradient).
 //!
 //! Current `Step 2H` scope still excludes complex generator forms depending on
 //! runtime context/loop variables; those are reported as typed

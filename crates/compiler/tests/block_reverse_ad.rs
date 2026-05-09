@@ -1165,3 +1165,51 @@ process = rad(x' * x, x);
     }
     assert_close_f32(outputs[1][frame_count - 1], 2.0, 1.0e-5, "grad[BS-1]");
 }
+
+/// `process = rad(x@2 * x, x)` with `x = hslider("x", 2.0, …)`.
+///
+/// **Phase B5 tape test**: `x@2` (Delay-by-2) is not trivially reverse-evaluable,
+/// so its forward value must be stored on a tape during the forward loop.
+/// The backward sweep loads from the tape via `load_bra_fwd_value`, and the
+/// circular carry buffer (size 2) propagates the Delay adjoint back 2 steps.
+///
+/// Layout: `[primal, grad_x]` per frame (BS = 8).
+///
+/// Forward values: `y[n] = x[n-2] * x[n]` (initial delay state = 0).
+/// - `y[0] = 0 * 2 = 0`
+/// - `y[1] = 0 * 2 = 0`
+/// - `y[n≥2] = 2 * 2 = 4`
+///
+/// Gradient `dL/dx[k]` where `L = Σ_n y[n]`:
+/// - `k = 0, 1`: only contributes via `x[n]` factor (rhs) at n=0,1 where
+///   `delay2(x)[n] = 0`; plus via `delay2(x)[n]` factor (lhs) at n=k+2
+///   where `x[k+2] = 2` → total = 0 + 2 = **2**
+/// - `k = 2..5`: contributes via rhs at n=k (`delay2(x)[k] = 2`)
+///   plus via lhs at n=k+2 (`x[k+2] = 2`) → total = 2 + 2 = **4**
+/// - `k = 6, 7`: via rhs only (`delay2(x)[k] = 2`); n=k+2 is out of block → **2**
+#[test]
+fn fir_bra_delay2_mul_tape() {
+    let frame_count = BS;
+    let source = r#"
+x = hslider("x", 2.0, 0.0, 4.0, 0.01);
+process = rad(x@2 * x, x);
+"#;
+    let outputs = run_bra_source("fir-bra-delay2-mul-tape", source, frame_count);
+    assert_eq!(outputs.len(), 2, "layout: [primal, grad]");
+
+    // Primal: delay2(x)[n] * x[n].
+    assert_close_f32(outputs[0][0], 0.0, 1.0e-5, "primal[0]");
+    assert_close_f32(outputs[0][1], 0.0, 1.0e-5, "primal[1]");
+    for n in 2..frame_count {
+        assert_close_f32(outputs[0][n], 4.0, 1.0e-5, &format!("primal[{n}]"));
+    }
+
+    // Gradient: per-sample adjoint of x.
+    assert_close_f32(outputs[1][0], 2.0, 1.0e-5, "grad[0]");
+    assert_close_f32(outputs[1][1], 2.0, 1.0e-5, "grad[1]");
+    for n in 2..frame_count - 2 {
+        assert_close_f32(outputs[1][n], 4.0, 1.0e-5, &format!("grad[{n}]"));
+    }
+    assert_close_f32(outputs[1][frame_count - 2], 2.0, 1.0e-5, "grad[BS-2]");
+    assert_close_f32(outputs[1][frame_count - 1], 2.0, 1.0e-5, "grad[BS-1]");
+}
