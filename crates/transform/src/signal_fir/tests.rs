@@ -3711,6 +3711,167 @@ fn bra_delay1_seed_produces_carry_struct_field() {
     );
 }
 
+/// BRA adjoint carry variables must appear in `instanceClear` but NOT in
+/// `instanceResetUserInterface`.
+///
+/// BRA carry variables (`fBraCarry*`) are internal DSP state, not UI-controlled
+/// parameters.  They must be zeroed during `instanceClear` but must NOT appear
+/// in `instanceResetUserInterface` (which is reserved for sliders, buttons, etc.).
+/// They are also reset by `emit_bra_compute_resets` in the compute preamble
+/// (TBPTT(BS,BS) truncation: adjoint carry = 0 at start of each block).
+///
+/// Before this fix, `ensure_bra_delay1_carry` passed `Some(zero)` to
+/// `ensure_named_struct_var`, causing the carry to be registered as a reset-time
+/// UI init.
+#[test]
+fn bra_carry_absent_from_instance_reset_user_interface() {
+    let mut arena = TreeArena::new();
+
+    // Build: Proj(0, Rec([p * Delay1(Proj(0, self_ref)) + 2]))
+    let p = SigBuilder::new(&mut arena).real(0.5);
+    let self_ref = de_bruijn_ref(&mut arena, 1);
+    let proj_ref = SigBuilder::new(&mut arena).proj(0, self_ref);
+    let delayed = SigBuilder::new(&mut arena).delay1(proj_ref);
+    let feedback = SigBuilder::new(&mut arena).binop(signals::BinOp::Mul, p, delayed);
+    let two = SigBuilder::new(&mut arena).real(2.0);
+    let body_expr = SigBuilder::new(&mut arena).binop(signals::BinOp::Add, two, feedback);
+    let body_list = arena.cons(body_expr, arena.nil());
+    let rec_group = de_bruijn_rec(&mut arena, body_list);
+    let rec_out = SigBuilder::new(&mut arena).proj(0, rec_group);
+
+    let cot = SigBuilder::new(&mut arena).real(1.0);
+    let carrier = SigBuilder::new(&mut arena).block_reverse_ad(
+        &[rec_out],
+        &[p],
+        &[cot],
+        BlockRevPolicy::TapeFull,
+    );
+    let primal = SigBuilder::new(&mut arena).proj(0, carrier);
+    let grad = SigBuilder::new(&mut arena).proj(1, carrier);
+
+    let out =
+        compile_fastlane_without_ui(&arena, &[primal, grad], 0, 2, &SignalFirOptions::default())
+            .expect("recursive BRA (one-pole, no UI) should compile");
+
+    let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+        panic!("module root expected");
+    };
+
+    // `instanceResetUserInterface` must NOT contain any `fBraCarry*` store.
+    let reset_body = find_decl_fun_body(&out.store, functions, "instanceResetUserInterface");
+    let FirMatch::Block(reset_stmts) = match_fir(&out.store, reset_body) else {
+        panic!("instanceResetUserInterface body block expected");
+    };
+    let has_bra_carry_in_reset = reset_stmts.iter().any(|id| {
+        if let FirMatch::StoreVar { name, .. } = match_fir(&out.store, *id) {
+            return name.starts_with("fBraCarry");
+        }
+        false
+    });
+    assert!(
+        !has_bra_carry_in_reset,
+        "fBraCarry* must NOT appear in instanceResetUserInterface; \
+         BRA carries are DSP state, not UI state"
+    );
+
+    // `instanceClear` MUST contain the `fBraCarry*` zero-init.
+    let clear_body = find_decl_fun_body(&out.store, functions, "instanceClear");
+    let FirMatch::Block(clear_stmts) = match_fir(&out.store, clear_body) else {
+        panic!("instanceClear body block expected");
+    };
+    let has_bra_carry_in_clear = clear_stmts.iter().any(|id| {
+        if let FirMatch::StoreVar { name, .. } = match_fir(&out.store, *id) {
+            return name.starts_with("fBraCarry");
+        }
+        false
+    });
+    assert!(
+        has_bra_carry_in_clear,
+        "fBraCarry* must appear in instanceClear for proper DSP reset"
+    );
+}
+
+/// BRA primal SYMREC carrier must NOT be reset in the `compute()` preamble.
+///
+/// The SYMREC primal state (e.g. `fRec<N>`) is persistent DSP filter memory.
+/// It must only be cleared in `instanceClear()` and must never be reset in
+/// `compute()`, which would sabotage the filter continuity across host blocks.
+///
+/// Before this fix, `emit_reverse_time_rec_compute_resets` reset ALL entries in
+/// `rec_array_by_group_index`, including SYMREC primal carriers.  The fix adds
+/// `reverse_time_rec_group_ids` to `RecursionState` so that only `ReverseTimeRec`
+/// adjoint carriers are zeroed in the compute preamble.
+#[test]
+fn bra_symrec_primal_carrier_absent_from_compute_preamble_resets() {
+    let mut arena = TreeArena::new();
+
+    // Same one-pole recursive circuit as above.
+    let p = SigBuilder::new(&mut arena).real(0.5);
+    let self_ref = de_bruijn_ref(&mut arena, 1);
+    let proj_ref = SigBuilder::new(&mut arena).proj(0, self_ref);
+    let delayed = SigBuilder::new(&mut arena).delay1(proj_ref);
+    let feedback = SigBuilder::new(&mut arena).binop(signals::BinOp::Mul, p, delayed);
+    let two = SigBuilder::new(&mut arena).real(2.0);
+    let body_expr = SigBuilder::new(&mut arena).binop(signals::BinOp::Add, two, feedback);
+    let body_list = arena.cons(body_expr, arena.nil());
+    let rec_group = de_bruijn_rec(&mut arena, body_list);
+    let rec_out = SigBuilder::new(&mut arena).proj(0, rec_group);
+
+    let cot = SigBuilder::new(&mut arena).real(1.0);
+    let carrier = SigBuilder::new(&mut arena).block_reverse_ad(
+        &[rec_out],
+        &[p],
+        &[cot],
+        BlockRevPolicy::TapeFull,
+    );
+    let primal = SigBuilder::new(&mut arena).proj(0, carrier);
+    let grad = SigBuilder::new(&mut arena).proj(1, carrier);
+
+    let out =
+        compile_fastlane_without_ui(&arena, &[primal, grad], 0, 2, &SignalFirOptions::default())
+            .expect("recursive BRA (one-pole) should compile");
+
+    let FirMatch::Module { functions, .. } = match_fir(&out.store, out.module) else {
+        panic!("module root expected");
+    };
+
+    // The compute() body starts with a preamble of StoreVar (resets) followed by
+    // the forward/reverse sample loops.  Extract all top-level StoreVar names.
+    let compute_body = find_decl_fun_body(&out.store, functions, "compute");
+    let FirMatch::Block(compute_stmts) = match_fir(&out.store, compute_body) else {
+        panic!("compute body block expected");
+    };
+    // Collect all `fRec*` variable names reset in the compute preamble
+    // (StoreVar statements before any loop).
+    let mut rec_resets_in_compute: Vec<String> = Vec::new();
+    for &id in compute_stmts.iter() {
+        match match_fir(&out.store, id) {
+            FirMatch::StoreVar { name, .. } if name.starts_with("fRec") => {
+                rec_resets_in_compute.push(name.clone());
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        rec_resets_in_compute.is_empty(),
+        "SYMREC primal carrier(s) {:?} must NOT be reset in compute() preamble; \
+         they are persistent DSP state that must survive across host compute() calls",
+        rec_resets_in_compute
+    );
+
+    // BRA adjoint carry MUST appear in the compute preamble (TBPTT(BS,BS) reset).
+    let has_bra_carry_reset_in_compute = compute_stmts.iter().any(|id| {
+        matches!(
+            match_fir(&out.store, *id),
+            FirMatch::StoreVar { ref name, .. } if name.starts_with("fBraCarry")
+        )
+    });
+    assert!(
+        has_bra_carry_reset_in_compute,
+        "fBraCarry* adjoint carry must be reset in compute() preamble for TBPTT(BS,BS)"
+    );
+}
+
 /// A BRA carrier wrapping a recursive circuit must declare a `fBraCarry*`
 /// struct field for the TBPTT feedback carry.
 ///

@@ -2291,19 +2291,27 @@ impl<'a> SignalToFirLower<'a> {
         name
     }
 
-    /// Emits `compute()`-preamble resets for reverse-time recursion carriers.
+    /// Emits `compute()`-preamble resets for `ReverseTimeRec` (LTI adjoint)
+    /// recursion carriers.
     ///
     /// `ReverseTimeRec` has block-local adjoint semantics: the state one frame
     /// past `count - 1` is terminal-zero for every `compute()` call. Ordinary
-    /// recursion carriers are only cleared by `instanceClear()`, but reverse
-    /// adjoint carriers must be zeroed before each reverse sample loop so no
-    /// cotangent state leaks across host blocks.
+    /// SYMREC primal carriers are only cleared by `instanceClear()` (they are
+    /// persistent DSP state); only the LTI adjoint carriers belonging to
+    /// `ReverseTimeRec` groups must be zeroed per-block.
+    ///
+    /// The distinction is made via `recursion.reverse_time_rec_group_ids`,
+    /// which is populated by `allocate_group_arrays` when it sees a
+    /// `SigMatch::ReverseTimeRec` group.  SYMREC carriers for BRA primal
+    /// bodies are NOT in that set and are therefore skipped here.
     fn emit_reverse_time_rec_compute_resets(&mut self) {
+        let reverse_ids = self.recursion.reverse_time_rec_group_ids.clone();
         let mut carriers: Vec<_> = self
             .recursion
             .rec_array_by_group_index
-            .values()
-            .cloned()
+            .iter()
+            .filter(|&(&(group_id, _), _)| reverse_ids.contains(&group_id))
+            .map(|(_, info)| info.clone())
             .collect();
         carriers.sort_by(|a, b| a.name.cmp(&b.name));
         carriers.dedup_by(|a, b| a.name == b.name);
@@ -3240,10 +3248,11 @@ impl<'a> SignalToFirLower<'a> {
         let name = format!("fBraCarry{}", self.next_loop_var_id);
         self.next_loop_var_id += 1;
         let real_ty = self.real_ty.clone();
-        let zero = self.float_const(0.0);
-        // Declare struct field; register a reset-time zero init.
-        self.ensure_named_struct_var(&name, real_ty, Some(zero));
-        // Also register a clear-time zero init for `instanceClear`.
+        // Declare the struct field without a reset-time init: BRA carry variables
+        // are internal DSP state, not UI-controlled parameters, and must NOT appear
+        // in `instanceResetUserInterface`.  Only `instanceClear` zeroes them (below).
+        self.ensure_named_struct_var(&name, real_ty, None);
+        // Register a clear-time zero init for `instanceClear`.
         let zero2 = self.float_const(0.0);
         self.register_clear_init(name.clone(), zero2);
         self.bra_delay1_carry_vars.insert(delay1_node, name.clone());

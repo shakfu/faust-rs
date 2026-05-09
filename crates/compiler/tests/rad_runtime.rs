@@ -161,6 +161,65 @@ fn run_interp_temp_source_with_inputs_inner(
     outputs
 }
 
+/// Compiles `source`, runs two consecutive `compute()` calls each with
+/// `block_size` frames, and returns `(block1_outputs, block2_outputs)`.
+///
+/// Used to verify that primal DSP state persists across host `compute()` calls:
+/// the second block should observe the state left by the first block rather than
+/// re-starting from zero.
+fn run_interp_two_blocks(stem: &str, source: &str, block_size: usize) -> (Vec<f32>, Vec<f32>) {
+    let stem = stem.to_owned();
+    let source = source.to_owned();
+    std::thread::Builder::new()
+        .name(format!("rad-runtime-two-blocks-{stem}"))
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || {
+            let unique_id = NEXT_TEMP_DSP_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "faust-rs-rad-{stem}-{}-{unique_id}.dsp",
+                std::process::id()
+            ));
+            fs::write(&path, source.as_str())
+                .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+            let compiler = Compiler::new();
+            let fbc = compiler
+                .compile_file_default_to_interp_with_lane(
+                    &path,
+                    &InterpOptions::default(),
+                    SignalFirLane::TransformFastLane,
+                )
+                .unwrap_or_else(|e| panic!("{} compile failed: {e}", path.display()));
+            let _ = fs::remove_file(&path);
+            let mut reader = Cursor::new(fbc);
+            let mut factory =
+                read_fbc::<f32>(&mut reader).unwrap_or_else(|e| panic!("parse bytecode: {e}"));
+            let mut instance = FbcDspInstance::new(&mut factory);
+            instance.init(48_000);
+            // First block.
+            let num_outputs = instance.get_num_outputs() as usize;
+            let mut out1 = vec![vec![0.0_f32; block_size]; num_outputs];
+            {
+                let mut slices: Vec<&mut [f32]> = out1.iter_mut().map(Vec::as_mut_slice).collect();
+                instance
+                    .try_compute(block_size as i32, &[], &mut slices)
+                    .unwrap_or_else(|e| panic!("block1 compute: {e}"));
+            }
+            // Second block — same instance, state should persist.
+            let mut out2 = vec![vec![0.0_f32; block_size]; num_outputs];
+            {
+                let mut slices: Vec<&mut [f32]> = out2.iter_mut().map(Vec::as_mut_slice).collect();
+                instance
+                    .try_compute(block_size as i32, &[], &mut slices)
+                    .unwrap_or_else(|e| panic!("block2 compute: {e}"));
+            }
+            // Return channel 0 from each block.
+            (out1.remove(0), out2.remove(0))
+        })
+        .expect("spawn two-blocks worker")
+        .join()
+        .expect("two-blocks worker thread should finish")
+}
+
 fn assert_close(actual: f32, expected: f32, abs_tol: f32, label: &str) {
     let diff = (actual - expected).abs();
     let rel_tol = 1.0e-5_f32 * actual.abs().max(expected.abs());
@@ -1474,6 +1533,71 @@ process = a * (2 : +~*(p));
                 s[0]
             )
         },
+    );
+}
+
+/// BRA primal DSP state persists across consecutive `compute()` calls.
+///
+/// Circuit: `process = rad((2 : + ~ *(p)), p)` with p = 0.5.
+/// Expected recurrence: `y[n] = 2 + 0.5 * y[n-1]`, starting from `y[-1] = 0`.
+///
+/// The bug (fixed): `fRec<N>` (the SYMREC primal state) was incorrectly
+/// reset to 0.0 in the `compute()` preamble by `emit_reverse_time_rec_compute_resets`,
+/// which was iterating over ALL carriers in `rec_array_by_group_index` instead of
+/// filtering to only `ReverseTimeRec` adjoint carriers.  As a result each
+/// `compute()` call restarted the filter from silence, producing the same
+/// primal values in every block rather than a diverging ramp.
+///
+/// **Verification**: the first value of block 2's primal channel must equal
+/// `y[block_size]` computed analytically from the recurrence, not `y[0] = 2`.
+#[test]
+fn rad_bra_primal_state_persists_across_compute_blocks() {
+    let src = r#"
+p = hslider("p", 0.5, 0.0, 1.0, 0.01);
+process = rad((2 : + ~ *(p)), p);
+"#;
+    let block_size = 4_usize;
+    let (block1, block2) = run_interp_two_blocks("rad-bra-persist", src, block_size);
+
+    // Analytically compute the expected primal recurrence y[n] = 2 + 0.5*y[n-1].
+    let p = 0.5_f32;
+    let mut y = 0.0_f32;
+    let mut expected_b1 = Vec::with_capacity(block_size);
+    for _ in 0..block_size {
+        y = 2.0 + p * y;
+        expected_b1.push(y);
+    }
+    let mut expected_b2 = Vec::with_capacity(block_size);
+    for _ in 0..block_size {
+        y = 2.0 + p * y;
+        expected_b2.push(y);
+    }
+
+    // Verify block 1 primal values match the recurrence.
+    for (i, (&actual, &expected)) in block1.iter().zip(expected_b1.iter()).enumerate() {
+        assert_close(
+            actual,
+            expected,
+            1e-5,
+            &format!("block1[{i}]: primal must follow recurrence"),
+        );
+    }
+
+    // Verify block 2 primal values are a CONTINUATION, not a restart from y[-1]=0.
+    // With the old bug, block2[0] would be y[0]=2.0; with the fix it must be
+    // y[block_size] which diverges from 2.0 for block_size ≥ 1.
+    for (i, (&actual, &expected)) in block2.iter().zip(expected_b2.iter()).enumerate() {
+        assert_close(
+            actual,
+            expected,
+            1e-5,
+            &format!("block2[{i}]: primal must continue recurrence, not restart"),
+        );
+    }
+    assert!(
+        (block2[0] - 2.0).abs() > 0.1,
+        "block2[0]={} must differ from 2.0 (a restart from zero) by >0.1",
+        block2[0]
     );
 }
 

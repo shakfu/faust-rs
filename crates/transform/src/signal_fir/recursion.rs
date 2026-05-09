@@ -176,6 +176,15 @@ pub(super) struct RecursionState {
     /// Maps `(group_id, body_index)` to the recursion array allocated for that
     /// output slot of a recursion group.
     pub(super) rec_array_by_group_index: HashMap<(u32, usize), RecArrayInfo>,
+    /// `group.as_u32()` values for groups that are `ReverseTimeRec` (LTI
+    /// adjoint) wrappers.
+    ///
+    /// Only these carriers must be zeroed in the `compute()` preamble (via
+    /// `emit_reverse_time_rec_compute_resets`).  Normal SYMREC primal carriers
+    /// — including those allocated while lowering the forward body of a
+    /// `SigBlockReverseAD` group — are persistent DSP state that must NOT be
+    /// reset per-block.
+    pub(super) reverse_time_rec_group_ids: HashSet<u32>,
     /// Stack of active recursion carrier groups, innermost last.
     pub(super) recursion_stack: Vec<Vec<RecArrayInfo>>,
     /// Stack of active symbolic recursion variables matching `recursion_stack`.
@@ -611,11 +620,24 @@ impl RecursionAllocCtx<'_> {
     }
 
     /// Allocates or reuses all carriers for one recursive group body list.
+    ///
+    /// When `group` is a `ReverseTimeRec(...)` node (the LTI adjoint wrapper),
+    /// its id is recorded in `recursion.reverse_time_rec_group_ids` so that
+    /// `emit_reverse_time_rec_compute_resets` can distinguish these adjoint
+    /// carriers — which must be zeroed before each backward sweep — from normal
+    /// SYMREC primal carriers, which are persistent DSP state.
     pub(super) fn allocate_group_arrays(
         &mut self,
         group: SigId,
         body_infos: &[(FirType, FirId)],
     ) -> Result<Vec<RecArrayInfo>, SignalFirError> {
+        // Mark ReverseTimeRec groups so that emit_reverse_time_rec_compute_resets
+        // can filter to only those carriers.
+        if matches!(match_sig(self.arena, group), SigMatch::ReverseTimeRec(_)) {
+            self.recursion
+                .reverse_time_rec_group_ids
+                .insert(group.as_u32());
+        }
         let mut group_arrays = Vec::with_capacity(body_infos.len());
         for (index, (typ, init)) in body_infos.iter().enumerate() {
             group_arrays.push(self.ensure_recursion_array_for_group(
