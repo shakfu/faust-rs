@@ -334,3 +334,36 @@ subsequent instruction.
 - New regression test `test_ui_instruction_label_with_embedded_newline`
   reproduces the exact layout from `elecGuitarMIDI.fbc` and verifies that
   the label is preserved as `"sustain\n"` and all numeric fields are correct.
+
+---
+
+## 2026-05-10 — test(rad): TBPTT convergence test suite in `rad_runtime.rs`
+
+### Context
+Seven corpus DSP files (`tests/corpus/rad_tbptt_*.dsp`) were added in a
+previous commit to exercise end-to-end RAD (reverse-mode automatic
+differentiation) pipelines with online gradient-descent loops (`loop ~ _`).
+Each file runs a BS=1 TBPTT loop: the `process` output is a stereo residual
+`(y_target - y_ia) <: _, _` that should converge toward silence as the
+learned parameters approach their hidden targets.
+
+### What was added — `crates/compiler/tests/rad_runtime.rs`
+- `rms(samples)` helper — computes RMS of a float slice.
+- `assert_tbptt_converges(stem, frames, window, factor)` — shared harness
+  that:
+  - Compiles and runs the named corpus file via `run_interp_corpus`.
+  - Asserts exactly 2 output channels (stereo residual dup).
+  - Asserts L/R channel identity (within 1e-6).
+  - Asserts `rms_end < factor × rms_start` (demonstrable convergence).
+- Seven `#[test]` functions covering:
+  | test | corpus file | fixture |
+  |---|---|---|
+  | `corpus_tbptt_gain_converges_to_silence` | `rad_tbptt_gain` | scalar feedforward gain |
+  | `corpus_tbptt_two_gains_converges_to_silence` | `rad_tbptt_two_gains` | 2-tap FIR, 2-wire SYMREC |
+  | `corpus_tbptt_lms_fir3_converges_to_silence` | `rad_tbptt_lms_fir3` | 3-tap LMS FIR |
+  | `corpus_tbptt_softclip_drive_converges_to_silence` | `rad_tbptt_softclip_drive` | nonlinear soft-clipper |
+  | `corpus_tbptt_one_pole_converges_to_silence` | `rad_tbptt_one_pole` | 1-pole IIR (Delay1 carry) |
+  | `corpus_tbptt_two_poles_converges_to_silence` | `rad_tbptt_two_poles` | 2-pole cascade, nested BRA |
+  | `corpus_tbptt_biquad1_converges_to_silence` | `rad_tbptt_biquad1` | 5-param DF-II biquad, 5-wire SYMREC |
+- A `debug_softclip_gradient_values` diagnostic test (three sub-experiments
+  printing gradient magnitudes for the softclip fixture).

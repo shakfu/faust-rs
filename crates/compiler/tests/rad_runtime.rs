@@ -1647,3 +1647,178 @@ process = (2 : + ~ *(p)), (3 : + ~ *(q));
         },
     );
 }
+
+// -----------------------------------------------------------------------
+// TBPTT corpus convergence tests
+// -----------------------------------------------------------------------
+//
+// Each of the `rad_tbptt_*.dsp` corpus files implements a BS=1 online
+// gradient-descent loop `loop ~ _` (or `loop ~ (_, _)` etc.) that learns
+// one or more parameters from a deterministic LCG noise excitation.
+//
+// The `process` output is the stereo residual `(y_target - y_ia) <: _, _`
+// which starts large and converges toward silence as the learned parameters
+// approach their hidden targets.
+//
+// We validate two things per fixture:
+//   1. The pipeline compiles and produces exactly 2 output channels.
+//   2. The RMS residual over the last N frames is strictly smaller than
+//      over the first N frames (demonstrable convergence).
+//
+// Failing assertion (1) = pipeline or routing regression.
+// Failing assertion (2) = gradient is zero, wrong sign, or BRA not running.
+
+fn rms(samples: &[f32]) -> f32 {
+    let n = samples.len() as f64;
+    let sum: f64 = samples.iter().map(|&x| (x as f64) * (x as f64)).sum();
+    ((sum / n) as f32).sqrt()
+}
+
+/// Runs a TBPTT corpus file and checks that:
+///   - exactly 2 output channels are produced (stereo residual);
+///   - both channels carry the same signal (redundant stereo dup);
+///   - the RMS residual in the last `window` frames is smaller than
+///     `convergence_factor` × the RMS in the first `window` frames.
+fn assert_tbptt_converges(stem: &'static str, frames: usize, window: usize, factor: f32) {
+    let outs = run_interp_corpus(stem, frames);
+    assert_eq!(
+        outs.len(),
+        2,
+        "{stem}: expected 2 stereo residual channels, got {}",
+        outs.len()
+    );
+    // Both channels must carry the same signal (process = residual <: _, _).
+    for frame in 0..frames {
+        assert_close(
+            outs[0][frame],
+            outs[1][frame],
+            1.0e-6,
+            &format!("{stem}: L/R mismatch at frame {frame}"),
+        );
+    }
+    let rms_start = rms(&outs[0][..window]);
+    let rms_end = rms(&outs[0][frames - window..]);
+    assert!(
+        rms_end < factor * rms_start,
+        "{stem}: residual did not converge — rms_start={rms_start:.6}, rms_end={rms_end:.6}, \
+         required rms_end < {factor} * rms_start"
+    );
+}
+
+#[test]
+fn corpus_tbptt_gain_converges_to_silence() {
+    // Feedforward scalar gain: y_target = g_star * x, g_star = 0.5.
+    // lr = 0.05 — convergence in ~50 frames.
+    assert_tbptt_converges("rad_tbptt_gain", 400, 20, 0.1);
+}
+
+#[test]
+fn corpus_tbptt_two_gains_converges_to_silence() {
+    // 2-tap FIR, 2-wire SYMREC.  lr = 0.03 — convergence in ~100 frames.
+    assert_tbptt_converges("rad_tbptt_two_gains", 600, 30, 0.1);
+}
+
+#[test]
+fn corpus_tbptt_lms_fir3_converges_to_silence() {
+    // 3-tap LMS FIR, 3-wire SYMREC.  lr = 0.02 — convergence in ~200 frames.
+    assert_tbptt_converges("rad_tbptt_lms_fir3", 1000, 50, 0.1);
+}
+
+#[test]
+fn corpus_tbptt_softclip_drive_converges_to_silence() {
+    // Nonlinear soft-clipper: d_star=3.0, starting from d=0.  lr=0.02.
+    // The drive travels 3 units before the residual vanishes — needs ~1000
+    // frames for the RMS to drop noticeably.
+    assert_tbptt_converges("rad_tbptt_softclip_drive", 2000, 100, 0.5);
+}
+
+/// Debug: inspect softclip gradient values to diagnose convergence failure.
+#[test]
+fn debug_softclip_gradient_values() {
+    // Test 1: raw gradient at fixed d=0 (no loop, purely feedforward BRA).
+    // Analytical: grad = -2*(y_target)*x at d=0, u=0.
+    let source_fixed = r#"
+d_star = 3.0;
+noise = lcg * 4.656612873077393e-10 with { lcg = +(12345) ~ *(1103515245); };
+x = noise;
+softclip(d, sig) = u / (1.0 + abs(u)) with { u = d * sig; };
+y_target = softclip(d_star, x);
+d_fixed = 0.0;
+y_pred = softclip(d_fixed, x);
+loss   = (y_target - y_pred) * (y_target - y_pred);
+// [loss, grad_d] — d_fixed is a constant so grad should be via BRA
+grad   = rad(loss, d_fixed);
+// output: [loss, grad_d]
+process = grad;
+"#;
+    let outs1 = run_interp_temp_source("softclip-grad-fixed", source_fixed, 5);
+    println!("Fixed d=0: outputs.len()={}", outs1.len());
+    for (i, ch) in outs1.iter().enumerate() {
+        println!("  ch[{i}] first 5: {:?}", &ch[..5.min(ch.len())]);
+    }
+
+    // Test 2a: simplest loop with rad — quadratic loss, no abs/div.
+    // d starts at 0 always → grad = 2*d = 0 → d_next = 0. Should be stable at 0.
+    // This checks if rad inside a loop works WITHOUT the softclip nonlinearity.
+    let source_quad = r#"
+noise = lcg * 4.656612873077393e-10 with { lcg = +(12345) ~ *(1103515245); };
+result = loop ~ _
+with {
+    loop(d) = d_next
+    with {
+        x = noise;
+        loss = (d - x) * (d - x);
+        grad = rad(loss, d) : !, _;
+        d_next = d - 0.1 * grad;
+    };
+};
+process = result;
+"#;
+    let outs_quad = run_interp_temp_source("softclip-quad-loop", source_quad, 5);
+    println!("Quad loop d first 5: {:?}", &outs_quad[0][..5]);
+
+    // Test 2b: softclip loop unclipped.
+    let source_loop = r#"
+d_star = 3.0;
+lr     = 0.02;
+noise = lcg * 4.656612873077393e-10 with { lcg = +(12345) ~ *(1103515245); };
+x = noise;
+softclip(d, sig) = u / (1.0 + abs(u)) with { u = d * sig; };
+y_target = softclip(d_star, x);
+result = loop ~ _
+with {
+    loop(d) = d_raw
+    with {
+        y_pred = softclip(d, x);
+        loss   = (y_target - y_pred) * (y_target - y_pred);
+        grad   = rad(loss, d) : !, _;
+        d_raw  = d - lr * grad;
+    };
+};
+process = result;
+"#;
+    let outs2 = run_interp_temp_source("softclip-grad-loop-raw", source_loop, 5);
+    println!("Softclip d_raw first 5: {:?}", &outs2[0][..5]);
+}
+
+#[test]
+fn corpus_tbptt_one_pole_converges_to_silence() {
+    // 1-pole IIR (BRA with Delay1 carry), lr = 0.002.
+    // IIR gradient magnitudes can be large; allow more frames.
+    assert_tbptt_converges("rad_tbptt_one_pole", 3000, 100, 0.2);
+}
+
+#[test]
+fn corpus_tbptt_two_poles_converges_to_silence() {
+    // 2-pole cascade IIR, 2-wire SYMREC, nested BRA Delay1 carry.
+    // Two poles require more iterations to untangle cross-gradients.
+    assert_tbptt_converges("rad_tbptt_two_poles", 8000, 200, 0.3);
+}
+
+#[test]
+fn corpus_tbptt_biquad1_converges_to_silence() {
+    // 5-parameter DF-II biquad, 5-wire SYMREC.
+    // Feedback coefficients (a1, a2) need small lr — allow many frames.
+    assert_tbptt_converges("rad_tbptt_biquad1", 8000, 200, 0.3);
+}
+
