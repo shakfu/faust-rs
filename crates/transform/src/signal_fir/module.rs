@@ -3513,22 +3513,32 @@ impl<'a> SignalToFirLower<'a> {
             if self.bra_tape_store_var.contains_key(&v) {
                 continue;
             }
+            let real_ty = self.real_ty.clone();
+            let v_ty = self.signal_fir_type(v)?;
+            if v_ty != real_ty {
+                let sig_text = tree_to_str(self.arena, v).unwrap_or("<unprintable>");
+                return Err(SignalFirError::new(
+                    SignalFirErrorCode::UnsupportedSignalNode,
+                    format!(
+                        "BlockReverseAD tape-needed signal {} has FIR type {v_ty:?}, expected {real_ty:?}; integer/real promotion must be resolved before FIR lowering",
+                        sig_text
+                    ),
+                ));
+            }
             let tape_name = format!("fBraTape{}", self.next_loop_var_id);
             self.next_loop_var_id += 1;
-            let real_ty = self.real_ty.clone();
             // Declare as a fixed-size array struct field.
             let tape_ty = FirType::Array(Box::new(real_ty.clone()), MAX_BRA_TAPE_BLOCK_SIZE);
             self.ensure_named_struct_var(&tape_name, tape_ty, None);
             // Lower the value in the current (forward) loop context.
-            let mut v_fir = self.lower_signal(v)?;
             // BRA tapes are homogeneous `real_ty` arrays because the reverse
             // rules consume recorded forward values in real adjoint arithmetic.
-            // In a well-promoted differentiable expression this is normally a
-            // no-op; keeping the cast here makes the FIR boundary explicit and
-            // avoids leaking a non-real FIR value into a real tape store.
-            if self.store.value_type(v_fir) != Some(real_ty.clone()) {
-                v_fir = FirBuilder::new(&mut self.store).cast(real_ty, v_fir);
-            }
+            // A tape-needed value that is still integer-typed here means the
+            // upstream Signal pipeline failed to insert the required
+            // `FloatCast`/promotion node before `BlockReverseAD` reached FIR
+            // lowering.  Do not silently repair that by casting at the tape
+            // store; it would hide a typing bug from normalform/signalPromotion.
+            let v_fir = self.lower_signal(v)?;
             // Tape stores go in `immediate` so they capture the forward value
             // BEFORE `post_output` updates delay/state variables.  Placing them
             // in `sample_end` would re-read post-update state (e.g. the updated
