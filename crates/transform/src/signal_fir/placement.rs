@@ -34,8 +34,35 @@
 //!   node at a boundary must be materialized, otherwise it would be inlined into
 //!   its parent's (faster) execution tier and re-evaluated too frequently.
 //! - **`konst_escapes`**: `Konst` nodes that feed a faster-tier parent
-//!   (`Block`/`Samp`).  These cannot remain stack-local to `instanceConstants()`
-//!   because their value is consumed later from `compute()`.
+//!   (`Block`/`Samp`), plus `Konst` descendants of `BlockReverseAD` carriers.
+//!   These cannot remain stack-local to `instanceConstants()` because their
+//!   value is consumed later from `compute()` or from generated BRA reverse
+//!   sweep code.
+//!
+//! ## Why `BlockReverseAD` constants are treated conservatively
+//!
+//! `BlockReverseAD` lowering does more than lower the original signal DAG. It
+//! first emits the primal forward loop, then synthesizes a second program: the
+//! reverse adjoint sweep in `compute()`. That synthesized sweep introduces uses
+//! of forward subexpressions (for example SR-derived biquad coefficients from
+//! `fi.resonbp`) that are not represented as ordinary parent edges in the
+//! signal DAG analyzed here.
+//!
+//! A plain parent-variability analysis can therefore conclude that a shared
+//! `Konst` subtree is used only inside `instanceConstants()` and materialize it
+//! as a stack-local `fConst*`. If the BRA reverse sweep later reuses the same
+//! lowered value in `compute()`, the FIR contains `LoadVar(Stack, "fConst*")`
+//! outside the declaring function, and FIR verification reports an undeclared
+//! variable.
+//!
+//! The local rule is intentionally conservative: every `Konst` descendant of a
+//! `BlockReverseAD` carrier is considered escaping and is materialized as a DSP
+//! struct field. This is not the minimal lifetime analysis, but it is robust for
+//! the current lowering model because any such constant may be referenced by the
+//! generated forward tape stores or reverse sweep. A more exact future design
+//! would make the FIR cache lifecycle-aware per section (`instanceConstants`,
+//! compute preamble, forward loop, reverse loop), but that would be a broader
+//! change than this targeted safety boundary.
 //!
 //! [`Bucket`] is the runtime tag that identifies which section a hoisted
 //! variable belongs to.
@@ -71,7 +98,7 @@
 use std::collections::{HashMap, HashSet};
 
 use fir::{FirId, FirMatch, FirStore, match_fir};
-use signals::SigId;
+use signals::{SigId, SigMatch, match_sig};
 use sigtype::{SigType, Variability};
 use tlib::TreeArena;
 
@@ -137,8 +164,9 @@ pub(super) fn is_trivial_fir(store: &FirStore, node: FirId) -> bool {
 ///   a *variability boundary* and must be materialized even if they are
 ///   single-use, to guarantee they execute in their own (slower) bucket.
 /// - **`konst_escapes`**: the set of [`SigId`]s whose own variability is
-///   [`Variability::Konst`] but that are consumed by a faster-tier parent.
-///   These hoists need persistent storage instead of an init-local stack slot.
+///   [`Variability::Konst`] but that are consumed by a faster-tier parent or
+///   generated `BlockReverseAD` reverse-sweep code. These hoists need
+///   persistent storage instead of an init-local stack slot.
 ///
 /// All roots are assumed to be consumed by the `compute` output store, which
 /// runs at sample rate ([`Variability::Samp`]).
@@ -156,7 +184,7 @@ pub(super) fn analyze_signal_sharing(
     // Roots are consumed by the output store (Samp context).
     let root_var = Some(Variability::Samp);
     for &root in roots {
-        analyze_sig_rec(arena, root, root_var, sig_types, &mut analysis);
+        analyze_sig_rec(arena, root, root_var, sig_types, &mut analysis, false);
     }
     (
         analysis.ref_counts,
@@ -183,11 +211,20 @@ fn analyze_sig_rec(
     parent_var: Option<Variability>,
     sig_types: &HashMap<SigId, SigType>,
     analysis: &mut PlacementAnalysis,
+    inside_block_reverse_ad: bool,
 ) {
     *analysis.ref_counts.entry(sig).or_insert(0) += 1;
 
     // Check variability boundary: parent variability > this node's variability.
     let my_var = sig_types.get(&sig).map(|t| t.variability());
+    // `BlockReverseAD` generates additional compute-time code that is not
+    // present as parent edges in the original signal DAG.  Any init-time
+    // constant below it may be needed by forward tape stores or by the
+    // synthesized reverse sweep, so keep it in struct storage rather than an
+    // `instanceConstants()` stack temporary.
+    if inside_block_reverse_ad && my_var == Some(Variability::Konst) {
+        analysis.konst_escapes.insert(sig);
+    }
     if let (Some(pv), Some(mv)) = (parent_var, my_var)
         && pv > mv
     {
@@ -200,9 +237,18 @@ fn analyze_sig_rec(
     if !analysis.visited.insert(sig) {
         return; // already descended into children
     }
+    let child_inside_block_reverse_ad =
+        inside_block_reverse_ad || matches!(match_sig(arena, sig), SigMatch::BlockReverseAD { .. });
     if let Some(node) = arena.node(sig) {
         for &child_tid in node.children.as_slice() {
-            analyze_sig_rec(arena, child_tid, my_var, sig_types, analysis);
+            analyze_sig_rec(
+                arena,
+                child_tid,
+                my_var,
+                sig_types,
+                analysis,
+                child_inside_block_reverse_ad,
+            );
         }
     }
 }

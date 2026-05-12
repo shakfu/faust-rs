@@ -1848,6 +1848,48 @@ process = (y_target - nl_filter(p_learned, noise)) <: _, _;
     assert_eq!(outs.len(), 2);
 }
 
+#[test]
+fn bra_reverse_sweep_sr_constants_compile_to_cpp() {
+    std::thread::Builder::new()
+        .name("rad-runtime-sr-constants-cpp".to_string())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let source = r#"
+import("stdfaust.lib");
+N = 2;
+nl_band(g, freq, x) = x : fi.resonbp(freq, 5, g) : max(-1.0) : min(1.0);
+massive_bank(g) = _ <: par(i, N, nl_band(g, 100 + i*15)) :> _;
+g = hslider("global_gain", 0.5, 0.1, 10, 0.01);
+process = rad(massive_bank(g), g);
+"#;
+            let unique_id = NEXT_TEMP_DSP_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "faust-rs-rad-stress3-sr-constants-{}-{unique_id}.dsp",
+                std::process::id()
+            ));
+            fs::write(&path, source).unwrap_or_else(|e| {
+                panic!("failed to write temporary DSP {}: {e}", path.display())
+            });
+            let cpp = Compiler::new()
+                .compile_file_default_to_cpp_with_lane(
+                    &path,
+                    &codegen::backends::cpp::CppOptions::default(),
+                    SignalFirLane::TransformFastLane,
+                )
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{}: BRA reverse sweep with SR-derived constants must compile to C++: {e}",
+                        path.display()
+                    )
+                });
+            let _ = fs::remove_file(&path);
+            assert!(cpp.contains("class mydsp"));
+        })
+        .expect("spawn rad-runtime-sr-constants-cpp worker")
+        .join()
+        .expect("rad-runtime-sr-constants-cpp worker should finish")
+}
+
 /// Debug: inspect softclip gradient values to diagnose convergence failure.
 #[test]
 fn debug_softclip_gradient_values() {
