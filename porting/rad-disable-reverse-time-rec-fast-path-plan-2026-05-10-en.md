@@ -279,6 +279,123 @@ Pass criteria:
 - The `ReverseTimeRec`-related public symbols carry a "dormant" note so
   future contributors do not chase a dead dispatcher arm.
 
+### 5.4 Phase D4 — BRA tape placement and type boundary
+
+This dispatcher change also fixes an important implementation-boundary
+assumption that became visible once every recursive/IIR RAD path flowed
+through `SigBlockReverseAD`: BRA forward tapes are **not** Signal-IR nodes
+created by `propagate`, and therefore they are **not** processed by
+`normalize::normalform::signalPromotion`.
+
+The Signal-IR contract intentionally stays small:
+
+```text
+SigBlockReverseAD {
+    body,          // promoted Signal-IR primal body list
+    primal_count,
+    seeds,         // promoted Signal-IR seed list
+    cotangents,    // promoted Signal-IR cotangent list
+    policy,
+}
+```
+
+`crates/normalize/src/normalform.rs` promotes the `body`, `seeds`, and
+`cotangents` children structurally.  That means ordinary Faust signal values
+inside the BRA body still go through the normal
+`deBruijn2Sym -> typeAnnotation -> signalPromotion` preparation boundary.
+For example, mixed `Int`/`Real` arithmetic in the body is still made explicit
+in Signal-IR before FIR lowering.
+
+The per-sample storage used by BRA is different.  `fBraTapeN` variables are
+allocated later by `crates/transform/src/signal_fir/module.rs` inside
+`ensure_bra_tape_stores`, after `signal_prepare`, while lowering one concrete
+FIR backend strategy.  They are backend temporaries, not source-level signal
+values:
+
+- `collect_tape_needed_values` inspects the prepared body postorder and
+  decides which Signal-IR values cannot be safely recomputed in the reverse
+  sample loop.
+- `ensure_bra_tape_stores` allocates one `fBraTapeN` FIR struct field for
+  each selected value.
+- The forward sample loop stores the value at `fBraTapeN[i0]` before delay
+  and recursion state updates.
+- The reverse sample loop reloads the value through `load_bra_fwd_value`
+  instead of calling `lower_signal` again, because recomputing would read
+  the wrong time state.
+
+This separation is deliberate.  Putting `fBraTapeN` in `propagate` would
+force Signal-IR to encode backend scheduling decisions: which values are
+"trivially reverse-evaluable", where storage must occur relative to
+`sample_phases.immediate` and `post_output`, whether storage is scalar,
+array, checkpointed, or recomputed, and which concrete internal real type
+(`Float32`/`Float64`) the backend uses.  Those choices belong to FIR lowering,
+not to the semantic RAD carrier.  `SigBlockReverseAD` says *a block-local
+reverse sweep is required*; `signal_fir` decides *how this backend materializes
+the required tape*.
+
+The current FIR policy is intentionally uniform:
+
+```text
+fBraTapeN: Array(real_ty, MAX_BRA_TAPE_BLOCK_SIZE)
+```
+
+The reason is that BRA adjoints are real-valued, and every backward rule that
+uses a taped value consumes it as a real operand in products, divisions,
+transcendental derivatives, comparisons for real subgradients, or delay
+carry formulas.  A uniform real tape also keeps `load_bra_fwd_value` simple:
+when a value is taped, the reverse loop always reloads it as `real_ty`.
+
+This creates one explicit type boundary:
+
+```text
+prepared Signal-IR value (Int or Real)
+    -> lower_signal(v)                 // FIR value keeps prepared type
+    -> cast to real_ty if needed        // tape storage contract
+    -> store_table(fBraTapeN, ...)
+    -> load_table(..., real_ty)         // backward rules consume real value
+```
+
+The 2026-05-12 follow-up fix was needed because this boundary was missing.
+Some tape-needed values can legitimately be integer-typed after
+`signalPromotion`: e.g. an integer LCG accumulator used by a noise expression
+inside a BRA body.  The Signal-IR was correctly typed as `Int`; the bug was
+that `ensure_bra_tape_stores` tried to write the resulting FIR `Int32` value
+directly into `Array(real_ty, ...)`.  The interpreter backend then emitted
+`StoreIndexedReal` for the tape array, but the runtime stack held an integer
+value, causing:
+
+```text
+FBC runtime error [stack_underflow] opcode=StoreIndexedReal
+```
+
+The fix is local to the FIR boundary: after `lower_signal(v)`,
+`ensure_bra_tape_stores` checks the FIR value type and inserts
+`FirBuilder::cast(real_ty, v_fir)` when the lowered value is not already
+`real_ty`.  This is not a replacement for `signalPromotion`; it is the
+required conversion from a correctly-promoted Signal-IR value into the
+backend's uniform real tape storage contract.
+
+Future alternatives are possible but should be treated as a separate design
+phase:
+
+- typed tapes, e.g. `Array(Int32, BS)` for integer values and
+  `Array(real_ty, BS)` for real values, with typed `load_bra_fwd_value`;
+- a separate BRA scheduling IR between Signal-IR and FIR that records typed
+  tape slots explicitly;
+- checkpoint/recompute policies that avoid materializing some tape values at
+  all.
+
+Those alternatives would increase the complexity of BRA lowering and are not
+required for the current correctness-first dispatcher change.  The important
+invariant for this plan is:
+
+```text
+Signal-IR promotion owns source signal typing.
+FIR BRA lowering owns backend tape allocation.
+Any value crossing from Signal-IR into a uniform real BRA tape is explicitly
+cast at that boundary.
+```
+
 ## 6. Diagnostics
 
 No new diagnostic kinds. Two existing kinds widen their meaning:
